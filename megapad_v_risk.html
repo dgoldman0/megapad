@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Megapad vs Modern Assembly Comparison</title>
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f4f5f7;
+      color: #222;
+      margin: 0;
+      padding: 0;
+      line-height: 1.6;
+    }
+
+    header {
+      background-color: #1e293b;
+      color: #fff;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 2rem;
+      margin: 0;
+    }
+
+    main {
+      max-width: 900px;
+      margin: 2rem auto;
+      background: #fff;
+      padding: 2rem;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    h2 {
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 0.3rem;
+      color: #0f172a;
+    }
+
+    pre {
+      background-color: #f1f5f9;
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.9rem;
+      color: #1e293b;
+    }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+
+    .comparison h3 {
+      text-align: center;
+      margin-bottom: 0.5rem;
+    }
+
+    .summary {
+      margin-top: 2rem;
+      padding: 1rem;
+      background: #e0f2fe;
+      border-left: 4px solid #0284c7;
+      border-radius: 6px;
+    }
+
+    footer {
+      text-align: center;
+      color: #64748b;
+      font-size: 0.8rem;
+      padding: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Megapad Tile ISA vs Modern RISC-V Assembly</h1>
+  </header>
+  <main>
+    <section>
+      <h2>Overview</h2>
+      <p>
+        This document compares the compact <strong>Megapad tile-based instruction set</strong> with a 
+        conventional <strong>RISC-V64 assembly implementation</strong> performing the same tile computation.
+        Both execute a miniature CNN-style pipeline: two 1-D convolutions (edge detection and smoothing), 
+        followed by ReLU-sum reductions and a decision step triggering a <code>PORE_EJECT</code> flag.
+      </p>
+    </section>
+
+    <section>
+      <h2>Program Comparison</h2>
+      <div class="comparison">
+        <div>
+          <h3>Megapad Assembly</h3>
+          <pre>LDI R0, 0
+CSRW TSRC0, R0
+LDI R1, 64
+CSRW TDST, R1
+LDI R2, 0xFF
+CSRW K0, R2
+LDI R3, 0
+CSRW K1, R3
+LDI R4, 1
+CSRW K2, R4
+TSYS_CONV3
+LDI R5, 0
+CSRW TSRC0, R5
+LDI R6, 128
+CSRW TDST, R6
+LDI R7, 1
+CSRW K0, R7
+CSRW K1, R7
+CSRW K2, R7
+TSYS_CONV3
+CSRW TSRC0, R1
+TSYS_RELU_SUM
+CSRR R8, ACC0
+CSRW TSRC0, R6
+TSYS_RELU_SUM
+CSRR R9, ACC0
+CMP R9, R8
+BEQ no_eject
+BPL do_eject
+JMP no_eject
+do_eject:
+  LDI R10, 1
+  CSRW PORE_EJECT, R10
+  JMP done
+no_eject:
+  LDI R10, 0
+done:
+  HALT</pre>
+        </div>
+        <div>
+          <h3>RISC-V Vector Assembly (RVV)</h3>
+          <pre>la   t0, RAW
+la   t1, FEAT_A
+la   t2, FEAT_B
+li   s3, 0
+li   s5, 8
+vsetvli t4, s5, e8,m1
+row_loop:
+  beq s3, s5, conv_done
+  slli t3, s3, 3
+  add  t6, t0, t3
+  vle8.v v0, (t6)
+  vslide1up.vx v1, v0, x0
+  vslide1down.vx v2, v0, x0
+  vneg.v v3, v1
+  vadd.vv v3, v3, v2
+  vse8.v v3, (t1)
+  vadd.vv v4, v1, v0
+  vadd.vv v4, v4, v2
+  vse8.v v4, (t2)
+  addi s3, s3, 1
+  j row_loop
+conv_done:
+  # ReLU + sum loops for FEAT_A, FEAT_B
+  # Compare SCORE_B >= SCORE_A and set PORE_EJECT</pre>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Structural Insights</h2>
+      <ul>
+        <li>
+          <strong>Megapad:</strong> Operates on entire 8×8 tiles at once using <code>TSYS_CONV3</code> and <code>TSYS_RELU_SUM</code>.
+          Control code is minimal—just CSR setup and branching.
+        </li>
+        <li>
+          <strong>RISC-V:</strong> Explicitly manages loops, row pointers, and vector slides to simulate the same per-tile computation.
+          Even with RVV, it requires managing edge conditions and multiple passes.
+        </li>
+        <li>
+          <strong>Instruction Density:</strong> Megapad: ~30 instructions total. RISC-V: hundreds of dynamic instructions per tile.
+        </li>
+        <li>
+          <strong>Data Model:</strong> Megapad views computation as <em>operations on tiles</em>. RISC-V views it as 
+          <em>loops over memory and registers</em>.
+        </li>
+      </ul>
+    </section>
+
+    <section class="summary">
+      <h2>Summary</h2>
+      <p>
+        The Megapad ISA compresses high-level CNN or DSP-like behavior into compact <strong>tile operations</strong> that execute in-place 
+        over local SRAM. In contrast, even with modern vector extensions, RISC-V still expresses work as a sequence of 
+        vector loads, slides, and adds. The Megapad approach trades generality for brevity and spatial coherence, making it ideal 
+        for signal processing, edge AI, and streaming sensor logic where per-tile autonomy matters more than broad programmability.
+      </p>
+    </section>
+  </main>
+  <footer>
+    &copy; 2025 Megapad-64 Documentation Project
+  </footer>
+</body>
+</html>
