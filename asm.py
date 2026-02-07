@@ -143,7 +143,16 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
     # Pre-process: strip comments and whitespace
     cleaned: list[tuple[int, str]] = []
     for i, raw in enumerate(lines, 1):
-        stripped = raw.split(";")[0].strip()
+        # Strip comments, but respect quoted strings
+        result = []
+        in_string = False
+        for ch in raw:
+            if ch == '"':
+                in_string = not in_string
+            if ch == ';' and not in_string:
+                break
+            result.append(ch)
+        stripped = ''.join(result).strip()
         if stripped:
             cleaned.append((i, stripped))
 

@@ -402,7 +402,7 @@ class TestBIOS(unittest.TestCase):
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [])
-        self.assertIn("Megapad-64 Forth BIOS v0.3", text)
+        self.assertIn("Megapad-64 Forth BIOS v0.4", text)
         self.assertIn("RAM:", text)
         self.assertIn("ok", text)
 
@@ -566,6 +566,146 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["NOSUCHWORD"])
         self.assertIn("NOSUCHWORD", text)
         self.assertIn("?", text)
+
+    # -- v0.4: Colon definitions --
+
+    def test_colon_def_simple(self):
+        """Define and call a simple word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": DOUBLE DUP + ;",
+            "21 DOUBLE .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_colon_def_nested(self):
+        """Words calling other user-defined words."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": SQ DUP * ;",
+            ": CUBE DUP SQ * ;",
+            "3 CUBE .",
+        ])
+        self.assertIn("27 ", text)
+
+    # -- v0.4: IF / ELSE / THEN --
+
+    def test_if_then_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST1 1 IF 42 . THEN ;",
+            "TEST1",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_if_then_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST2 0 IF 99 . THEN 7 . ;",
+            "TEST2",
+        ])
+        # Extract output after "TEST2\r\n" to avoid matching "99" in the echo
+        idx = text.rfind("TEST2")
+        after = text[idx:] if idx >= 0 else text
+        self.assertNotIn("99 ", after)
+        self.assertIn("7 ", after)
+
+    def test_if_else_then(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": ABS2 DUP 0 < IF 0 SWAP - ELSE THEN ;",
+            "-5 ABS2 .",
+            "3 ABS2 .",
+        ])
+        self.assertIn("5 ", text)
+        self.assertIn("3 ", text)
+
+    # -- v0.4: BEGIN / UNTIL --
+
+    def test_begin_until(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": COUNT5 0 BEGIN 1 + DUP 5 = UNTIL . ;",
+            "COUNT5",
+        ])
+        self.assertIn("5 ", text)
+
+    # -- v0.4: DO / LOOP / I --
+
+    def test_do_loop(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": SHOW3 3 0 DO I . LOOP ;",
+            "SHOW3",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+
+    # -- v0.4: VARIABLE --
+
+    def test_variable(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE X",
+            "42 X !",
+            "X @ .",
+        ])
+        self.assertIn("42 ", text)
+
+    # -- v0.4: CONSTANT --
+
+    def test_constant(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "99 CONSTANT LIMIT",
+            "LIMIT .",
+        ])
+        self.assertIn("99 ", text)
+
+    # -- v0.4: TYPE / SPACE / SPACES --
+
+    def test_space_word(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "65 EMIT SPACE 66 EMIT",
+        ])
+        self.assertIn("A B", text)
+
+    # -- v0.4: ." (dot-quote) --
+
+    def test_dotquote(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': HELLO ." Hello World" ;',
+            "HELLO",
+        ])
+        self.assertIn("Hello World", text)
+
+    # -- v0.4: NIC words --
+
+    def test_net_status(self):
+        """NET-STATUS should return NIC status byte (present|link)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["NET-STATUS ."])
+        # NIC present=bit7(0x80), link=bit2(0x04) → 0x84 = 132
+        self.assertIn("132 ", text)
+
+    def test_net_mac(self):
+        """NET-MAC@ should push a valid MMIO address."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["NET-MAC@ C@ ."])
+        # First byte of default MAC 02:00:00:00:00:01
+        self.assertIn("2 ", text)
+
+    def test_words_includes_new(self):
+        """WORDS should list the new v0.4 words."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["WORDS"])
+        for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
+                     "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
+                     "SPACE", "TYPE"]:
+            self.assertIn(word, text, f"Missing word: {word}")
 
 
 # ---------------------------------------------------------------------------
