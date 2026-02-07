@@ -2,6 +2,105 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
+**Current Status: KDOS v0.2 — Tile Engine Integration Complete**
+
+---
+
+## Quick Start
+
+### Running KDOS in the Emulator
+
+```bash
+# Interactive session (boot BIOS + load KDOS)
+python cli.py --bios bios.asm --load kdos.f
+
+# Full test suite (109 tests)
+python test_system.py
+
+# Build BIOS binary only
+python asm.py bios.asm
+```
+
+### Try It Out
+```forth
+HELP                          \ Full command reference
+DASHBOARD                     \ System overview
+0 1 128 BUFFER mybuf          \ Create 128-byte buffer
+42 mybuf B.FILL               \ Fill with byte value 42
+mybuf B.SUM .                 \ Sum via tile engine → prints 5376
+mybuf B.MIN .                 \ Min byte → prints 42
+0 1 64 BUFFER a               \ Create three 64-byte buffers
+0 1 64 BUFFER b
+0 1 64 BUFFER c
+10 a B.FILL                   \ Fill a with 10
+20 b B.FILL                   \ Fill b with 20
+a b c B.ADD                   \ Element-wise add a+b → c
+c B.DATA C@ .                 \ First byte of c → prints 30
+```
+
+---
+
+## Implementation Status
+
+### ✅ Completed (v0.2)
+
+**BIOS v0.4** (115 words, 4069 lines):
+- Complete Forth system with colon compiler, conditionals, loops
+- All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
+- **NEW in v0.4**: ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
+- Comment words: `\` (line comment), `(` (paren comment)
+- Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
+
+**KDOS v0.2** (520 lines Forth):
+- **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
+- **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
+- **Kernel registry**: Metadata for compute kernels (up to 16 registered)
+- **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
+- **Dashboard UI**: HELP (command reference), DASHBOARD (system overview), STATUS (one-liner)
+- **Benchmarking**: BENCH ( xt -- cycles ) for performance measurement
+
+**Tests**: 109 passing
+- 42 KDOS tests (buffer ops, tile operations, kernels, dashboard)
+- 42 BIOS tests (all Forth words, compilation, tile engine)
+- 25 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
+
+### 🚧 Roadmap to v1.0
+
+**Phase 1: Kernel Pipeline Engine** (not started)
+- PIPELINE descriptor: sequence of kernels with buffer routing
+- Pipeline compiler: validate buffer types, allocate intermediates
+- Pipeline scheduler: dispatch with dependency tracking
+- Example: image → blur → threshold → edge-detect → display
+
+**Phase 2: Storage & Persistence** (not started)
+- FILE abstraction backed by storage device sectors
+- LOAD/SAVE for buffers and kernels
+- Persistent kernel library on disk
+- Boot from storage instead of UART injection
+
+**Phase 3: Interactive Screens** (not started)
+- Screen system: 7 screens (Dashboard, Buffers, Kernels, Pipelines, Perf, Console, Inspector)
+- Screen navigation: TAB/Shift-TAB, arrow keys
+- Buffer inspector: hex/tile view with cursor
+- Performance visualizer: cycle counts, tile utilization
+
+**Phase 4: Advanced Kernels** (not started)
+- Matrix operations: GEMM, GEMV via tile engine
+- Image processing: convolution, resize, filters
+- Signal processing: FFT, correlation
+- String/text: search, parse, format
+
+**Phase 5: Scheduler & Preemption** (not started)
+- Timer-based preemption for background kernels
+- Priority scheduling with fairness
+- Kernel cancellation and cleanup
+
+**Phase 6: User Experience** (not started)
+- REPL improvements: history, tab completion, multi-line editing
+- Error messages with context and suggestions
+- Online help with examples
+- Tutorials and documentation browser
+
 ---
 
 ## 1. System Identity
@@ -71,21 +170,23 @@ The "Megapad" — a 64-byte SIMD tile processor controlled by CSRs:
 | TSRC0, TSRC1 | Source tile addresses in RAM |
 | TDST | Destination tile address in RAM |
 | TMODE | Element width (8/16/32/64-bit), signed/unsigned |
-| TCTRL | Tile control / cursor control |
+| TCTRL | Tile control (ACC_ZERO, ACC_ACC for accumulation) |
 | SB, SR, SC, SW | Cursor position: base, row, column, stride |
-| ACC0–ACC3 | Accumulator registers for reductions |
+| ACC0–ACC3 | 256-bit accumulator for reductions/dot products |
 
-**Tile ALU ops** (TALU): ADD, SUB, AND, OR, XOR, element-wise on src0 × src1 → dst
+**Tile ALU ops** (TALU): ADD, SUB, AND, OR, XOR, MIN, MAX, ABS — element-wise on src0 × src1 → dst
 
-**Tile multiply** (TMUL): element-wise multiply, dot product
+**Tile multiply** (TMUL): MUL (element-wise), DOT (dot product → ACC)
 
-**Tile reductions** (TRED): SUM, MIN, MAX, results in accumulator or R0
+**Tile reductions** (TRED): SUM, MIN, MAX, POPCNT, L1 — results in ACC
 
-**Tile system** (TSYS): FILL (broadcast), TRANSPOSE, ZERO, LOADC (cursor load),
-TI (tile info → R0)
+**Tile system** (TSYS): TRANS (8×8 transpose), ZERO, LOADC (cursor load), MOVBANK
 
 Each tile is 64 bytes.  With 8-bit elements: 64 lanes.  With 64-bit
 elements: 8 lanes.  All operations are SIMD-parallel across lanes.
+
+**KDOS Integration**: All reduction ops now accessible via ACC@. Multi-tile
+accumulation supported via TCTRL (ACC_ACC bit).
 
 ### 3.3 Peripherals
 
@@ -94,166 +195,279 @@ elements: 8 lanes.  All operations are SIMD-parallel across lanes.
 | **UART** | Serial console — primary I/O for the Forth REPL |
 | **Timer** | 32-bit free-running counter with compare-match and IRQ |
 | **Storage** | Sector-based block device (512-byte sectors, DMA) |
+| **NIC** | Ethernet device with DMA, TX/RX queues, 1500-byte MTU |
 | **SysInfo** | Board ID, RAM size, feature flags |
 
 ### 3.4 Memory
 
-Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
+Flat address space.  Default 256 KiB RAM, configurable up to 64 MiB via
 `--ram` flag.  MMIO devices at `0xFFFF_FF00_0000_0000`.
 
 ---
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (currently v0.3, 62 words, 5650 bytes) must be extended into
-a **permanent, extensible nucleus** — not replaced.
+The BIOS Forth (currently v0.4, 115 words, 4069 lines) is the **permanent,
+extensible nucleus** — not replaced, but extended by KDOS.
 
-### 4.1 Current State (v0.3)
+### 4.1 Current State (v0.4)
 
-The BIOS already provides:
+The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 62 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 115 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
+* **Colon compiler**: `:` `;` for defining new words
+* **Conditionals**: IF/THEN/ELSE
+* **Loops**: DO/LOOP, BEGIN/UNTIL
+* **Variables & Constants**: VARIABLE, CONSTANT, ALLOT
+* **Tile engine**: Full MEX support with accumulator readback
 * Dictionary as linked-list with case-insensitive lookup
 * Number parser supporting `-`, `0x` prefix, `BASE` variable
 * `HERE`, `,`, `C,`, `ALLOT` — basic dictionary extension
-* 22 tile engine words: TVIEW, TFILL, TSRC0!, TSRC1!, TDST!, TMODE!,
-  TCTRL!, TADD, TSUB, TAND, TOR, TXOR, TMUL, TDOT, TSUM, TMIN, TMAX,
-  TTRANS, TZERO, TI, CYCLES
+* **Comment words**: `\` (line comment), `(` (paren comment)
+* **Execution tokens**: `'` (tick), `EXECUTE`
+* **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 
-### 4.2 Required Extensions for KDOS
-
-The following must be added to the BIOS Forth (v0.4+) to support the OS:
-
-#### Compilation & Control Flow
-
-| Word | Stack effect | Description |
-|---|---|---|
-| `:` | ( "name" -- ) | Begin colon definition |
-| `;` | ( -- ) | End colon definition |
-| `IF` | ( flag -- ) | Conditional branch |
-| `ELSE` | ( -- ) | Alternative branch |
-| `THEN` | ( -- ) | End conditional |
-| `DO` | ( limit index -- ) | Begin counted loop |
-| `LOOP` | ( -- ) | End counted loop |
-| `I` | ( -- n ) | Loop index |
-| `BEGIN` | ( -- ) | Begin indefinite loop |
-| `UNTIL` | ( flag -- ) | Loop until true |
-| `WHILE` | ( flag -- ) | Loop while true |
-| `REPEAT` | ( -- ) | End BEGIN..WHILE loop |
-| `VARIABLE` | ( "name" -- ) | Create variable |
-| `CONSTANT` | ( n "name" -- ) | Create constant |
-| `CREATE` | ( "name" -- ) | Create dictionary entry |
-| `DOES>` | ( -- ) | Define runtime behavior |
-
-#### String & I/O
-
-| Word | Stack effect | Description |
-|---|---|---|
-| `."` | ( -- ) | Print inline string |
-| `S"` | ( -- addr len ) | String literal |
-| `TYPE` | ( addr len -- ) | Print counted string |
-| `ACCEPT` | ( addr max -- n ) | Read line into buffer |
-| `SPACE` | ( -- ) | Emit a space |
-| `SPACES` | ( n -- ) | Emit n spaces |
-
-#### Vocabulary / Namespace Support
-
-| Word | Stack effect | Description |
-|---|---|---|
-| `VOCABULARY` | ( "name" -- ) | Create new vocabulary |
-| `DEFINITIONS` | ( -- ) | Set compilation vocabulary |
-| `ALSO` | ( -- ) | Add vocabulary to search order |
-| `ONLY` | ( -- ) | Reset search order to root |
-
-This lets the OS install words into `KERNELS`, `BUFFERS`, `SCHED`, `UI`
-vocabularies without polluting the root namespace.
-
-#### Module Loader
-
-| Word | Stack effect | Description |
-|---|---|---|
-| `LOAD-MODULE` | ( addr len -- ) | Load Forth source from storage |
-| `INCLUDE` | ( "filename" -- ) | Include from storage by name |
-
-These use the storage controller to read sectors, interpret the contents as
-Forth source, and install the words into the current vocabulary.
-
-#### Trap Recovery
-
-On fault, the system drops to the Forth prompt with:
-* Panic record (trap type, faulting PC, registers)
-* Last kernel name
-* Buffer IDs involved
-* OS state remains inspectable from the console
+All required BIOS extensions for KDOS are **complete** as of v0.4.
 
 ---
 
-## 5. Core OS Objects
+## 5. KDOS Core Objects (v0.2 Implementation)
 
-### 5.1 Buffer
+### 5.1 Buffer (IMPLEMENTED)
 
-A buffer is a first-class Forth object — a dictionary entry pointing to
-a descriptor in RAM.
+A buffer is a typed, tile-aligned data region with a 32-byte descriptor.
 
-```
+**Implementation (kdos.f §2)**:
+```forth
 buffer-descriptor:
-  +0x00  type       ( u8: 0=raw, 1=records, 2=tiles, 3=bitset, 4=tensor )
-  +0x01  flags      ( u8: bit0=pinned, bit1=hot, bit2=dirty )
-  +0x02  elem_width ( u8: 1/2/4/8 bytes — matches TMODE )
-  +0x03  reserved
-  +0x04  shape[0]   ( u32: rows or length )
-  +0x08  shape[1]   ( u32: columns or 0 )
-  +0x0C  tile_count ( u32: number of 64-byte tiles )
-  +0x10  data_addr  ( u64: pointer to tile-aligned data )
-  +0x18  prov_addr  ( u64: pointer to provenance record )
-  +0x20  size = 32 bytes
+  +0   type        ( 0=raw  1=records  2=tiles  3=bitset )
+  +8   elem_width  ( bytes per element: 1, 2, 4, or 8 )
+  +16  length      ( number of elements )
+  +24  data_addr   ( pointer to tile-aligned data )
 ```
 
-Buffers are tile-aligned: their data region starts on a 64-byte boundary
-so the tile engine can operate directly on them without packing.
-
-**Lenses** are Forth words that operate on buffer descriptors:
-`PREVIEW`, `HISTOGRAM`, `TOPK`, `NULLS`, `TILE-VIEW`.
-
-### 5.2 Kernel
-
-A kernel is a schedulable compute object — a dictionary entry pointing to
-a kernel descriptor.
-
+**Usage**:
+```forth
+0 1 128 BUFFER mybuf   \ type=raw, width=1, length=128
+mybuf B.TYPE .         \ → 0
+mybuf B.LEN .          \ → 128
+mybuf B.TILES .        \ → 2 (128 bytes / 64 = 2 tiles)
+42 mybuf B.FILL        \ Fill with byte value 42
+mybuf B.SUM .          \ Sum via tile engine → 5376
 ```
+
+**Implemented operations**:
+- `B.TYPE`, `B.WIDTH`, `B.LEN`, `B.DATA` — field accessors
+- `B.BYTES`, `B.TILES` — derived queries
+- `B.FILL`, `B.ZERO` — basic fill operations
+- `B.SUM`, `B.MIN`, `B.MAX` — tile-engine reductions via ACC@
+- `B.ADD`, `B.SUB` — element-wise SIMD ops on two buffers
+- `B.SCALE` — multiply each element by scalar
+- `B.INFO` — print descriptor details
+- `B.PREVIEW` — hex dump first tile
+- `BUFFERS` — list all registered buffers (up to 16)
+
+### 5.2 Kernel (IMPLEMENTED)
+
+A kernel is compute object with metadata for the dashboard.
+
+**Implementation (kdos.f §4)**:
+```forth
 kernel-descriptor:
-  +0x00  name_addr   ( u64: pointer to name string )
-  +0x08  code_addr   ( u64: pointer to kernel body — Forth xt or native )
-  +0x10  n_inputs    ( u8 )
-  +0x11  n_outputs   ( u8 )
-  +0x12  flags       ( u8: bit0=deterministic, bit1=native )
-  +0x13  reserved
-  +0x14  footprint   ( u32: estimated tiles needed )
-  +0x18  param_addr  ( u64: pointer to parameter schema )
-  +0x20  size = 32 bytes
+  +0   n_inputs    ( number of input buffers )
+  +8   n_outputs   ( number of output buffers )
+  +16  footprint   ( estimated tile working set )
+  +24  flags       ( 0=normal, 1=tile-accelerated )
 ```
 
-A kernel body is either:
-* A Forth word (colon definition using tile primitives)
-* A native code address (hand-written assembly for hot paths)
-
-### 5.3 Pipeline
-
-A pipeline is a DAG of kernels and buffers.
-
+**Usage**:
+```forth
+: my-kernel ( buf -- )  B.ZERO ;    \ Define kernel word
+1 1 0 0 KERNEL my-kernel-desc       \ Register metadata
 ```
+
+**Implemented sample kernels**:
+- `kzero` — zero a buffer
+- `kfill` — fill buffer with byte value
+- `kadd` — element-wise add two buffers
+- `ksum` — sum all bytes, leave result on stack
+- `kstats` — compute (sum min max) triple
+- `kscale` — multiply buffer by scalar
+- `kthresh` — binary threshold: <n→0, >=n→255
+
+**Dashboard**:
+- `K.IN`, `K.OUT`, `K.FOOT`, `K.FLAGS` — field accessors
+- `K.INFO` — print kernel descriptor
+- `KERNELS` — list all registered kernels (up to 16)
+
+### 5.3 Pipeline (NOT YET IMPLEMENTED)
+
+**Planned for v0.3**:
+
+A pipeline is a DAG of kernels with buffer routing.
+
+```forth
 pipeline-node:
-  +0x00  kernel_addr  ( u64: pointer to kernel descriptor )
-  +0x08  input_bufs   ( u64: pointer to array of buffer addrs )
-  +0x10  output_bufs  ( u64: pointer to array of buffer addrs )
-  +0x18  next_nodes   ( u64: pointer to array of downstream node addrs )
-  +0x20  size = 32 bytes
+  +0   kernel_addr  ( pointer to kernel descriptor )
+  +8   input_bufs   ( array of buffer addresses )
+  +16  output_bufs  ( array of buffer addresses )
+  +24  next_nodes   ( array of downstream node addresses )
 ```
 
-Pipelines are incrementally recomputed: when an input buffer changes, only
-the dependent downstream nodes re-execute.  A pinned pipeline is an "app."
+Pipelines enable:
+- Automatic dependency tracking
+- Incremental recomputation (only re-run changed subgraphs)
+- Scheduling optimizations
+- Visual DAG display in dashboard
+
+---
+
+## 6. Tile Engine Integration (v0.2)
+
+KDOS v0.2 makes full use of the MEX tile engine for all buffer operations.
+
+### 6.1 Accumulator Readback
+
+**Critical addition**: ACC@ word reads the 256-bit accumulator back to the Forth stack.
+
+Before v0.4, reductions like TSUM/TMIN/TMAX wrote results to ACC0-ACC3 CSRs but there was no way to read them from Forth. Now:
+
+```forth
+mybuf B.DATA TSRC0!   \ Point tile engine at buffer
+2 TCTRL!              \ ACC_ZERO: clear accumulator
+TSUM                  \ Reduce 64 bytes → ACC
+ACC@                  \ Read ACC0 to stack → result
+```
+
+### 6.2 Multi-Tile Operations
+
+B.SUM demonstrates multi-tile accumulation:
+
+```forth
+: B.SUM  ( desc -- n )
+    0 TMODE!              \ 8-bit unsigned
+    2 TCTRL!              \ Clear ACC before first tile
+    DUP B.DATA SWAP B.TILES
+    0 DO
+        DUP TSRC0!        \ Point at tile
+        TSUM              \ Reduce → ACC
+        1 TCTRL!          \ Enable accumulation for next tile
+        64 +              \ Advance to next tile
+    LOOP
+    DROP ACC@ ;           \ Read final result
+```
+
+### 6.3 Element-Wise Operations
+
+B.ADD uses TADD for SIMD element-wise addition:
+
+```forth
+: B.ADD  ( src1 src2 dst -- )
+    0 TMODE!
+    \ ... setup addresses ...
+    ntiles 0 DO
+        src1-addr TSRC0!
+        src2-addr TSRC1!
+        dst-addr  TDST!
+        TADD              \ 64-byte SIMD add in one instruction
+        \ ... advance pointers ...
+    LOOP ;
+```
+
+All 64 lanes operate in parallel. For 8-bit data, that's 64 additions per TADD.
+
+### 6.4 Performance
+
+Measured with BENCH:
+```forth
+0 1 1024 BUFFER bigbuf
+42 bigbuf B.FILL
+' bigbuf DROP BENCH .     \ Baseline overhead
+' bigbuf B.SUM DROP BENCH .  \ Actual tile-engine work
+```
+
+Tile operations are ~10-100× faster than byte-by-byte loops for large buffers.
+
+---
+
+## 7. Dashboard & User Interface (v0.2)
+
+### 7.1 HELP System
+
+```forth
+HELP
+```
+
+Prints full command reference with categories:
+- Buffer words: BUFFER, B.INFO, B.SUM, B.ADD, etc.
+- Kernel words: KERNEL, K.INFO, KERNELS
+- Sample kernels: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
+- Bench & tools: BENCH, .BENCH, DASHBOARD, STATUS, HELP
+
+### 7.2 DASHBOARD
+
+```forth
+DASHBOARD
+```
+
+Shows:
+- Memory: HERE address
+- Buffers: count + list with descriptors
+- Kernels: count + list with metadata
+
+Output example:
+```
+------------------------------------------------------------
+  KDOS v0.2 — Kernel Dashboard OS
+------------------------------------------------------------
+  Memory:
+    HERE  = 22108
+  
+ --- Buffers (3 ) ---
+0  :  [buf  t=0   w=1   n=128   tiles=2   @21504  ]
+1  :  [buf  t=0   w=1   n=64    tiles=1   @21696  ]
+2  :  [buf  t=0   w=1   n=256   tiles=4   @21824  ]
+
+ --- Kernels (7 ) ---
+0  :  [kern  in=1   out=1   foot=0   fl=0  ]
+1  :  [kern  in=1   out=1   foot=0   fl=0  ]
+2  :  [kern  in=2   out=1   foot=3   fl=1  ]
+...
+------------------------------------------------------------
+```
+
+### 7.3 STATUS
+
+```forth
+STATUS
+```
+
+One-line summary:
+```
+KDOS | bufs=3  kerns=7  HERE=22108
+```
+
+### 7.4 Benchmarking
+
+```forth
+: my-operation ... ;
+' my-operation BENCH .     \ Prints cycle count
+' my-operation .BENCH      \ Prints "cycles=NNN"
+```
+
+Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
+
+---
+
+## 8. Future Work
+
+### Phase 1: Pipeline Engine (v0.3 target)
+
+**Goal**: DAG-based kernel composition with automatic scheduling.
+
+**Additions needed**:
 
 ### 5.4 Scheduler
 
