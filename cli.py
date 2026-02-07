@@ -32,7 +32,7 @@ from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
-    SECTOR_SIZE,
+    NIC_BASE, SECTOR_SIZE,
 )
 
 # ---------------------------------------------------------------------------
@@ -601,6 +601,58 @@ class MegapadCLI(cmd.Cmd):
         print(f"  RX buffer: {len(u.rx_buffer)} bytes")
         print(f"  Control: {u.control:#04x}")
 
+    # -- NIC --
+
+    def do_nic(self, arg):
+        """NIC commands: nic [status|inject|send|reset]
+        nic              — show NIC status
+        nic inject <hex> — inject hex bytes as received frame
+        nic send <hex>   — queue hex bytes as TX frame
+        nic reset        — reset NIC state"""
+        n = self.sys.nic
+        parts = arg.strip().split(None, 1) if arg.strip() else []
+        sub = parts[0].lower() if parts else 'status'
+
+        if sub == 'status':
+            link = 'up' if n.link_up else 'down'
+            print(f"  NIC: link={link}  mac={n.mac.hex(':')}")
+            print(f"  TX: {n.tx_count} frames sent   RX: {n.rx_count} received")
+            print(f"  RX queue: {len(n.rx_queue)} frames pending")
+            pt = n._passthrough_port
+            if pt:
+                print(f"  Passthrough: UDP port {pt} → peer {n._passthrough_peer_port}")
+            else:
+                print(f"  Passthrough: none")
+        elif sub == 'inject':
+            if len(parts) < 2:
+                print("Usage: nic inject <hex bytes>")
+                return
+            try:
+                data = bytes(int(x, 16) for x in parts[1].split())
+                n.inject_frame(data)
+                print(f"  Injected {len(data)}-byte frame into RX queue.")
+            except ValueError:
+                print("  Error: invalid hex bytes.")
+        elif sub == 'send':
+            if len(parts) < 2:
+                print("Usage: nic send <hex bytes>")
+                return
+            try:
+                data = bytes(int(x, 16) for x in parts[1].split())
+                n.frame_len = len(data)
+                # Write to data port buffer and send
+                n._data_buf = bytearray(data)
+                n._data_pos = 0
+                n._execute_cmd(0x01)
+                print(f"  Sent {len(data)}-byte frame.")
+            except ValueError:
+                print("  Error: invalid hex bytes.")
+        elif sub == 'reset':
+            n._execute_cmd(0x04)
+            print("  NIC reset.")
+        else:
+            print("Usage: nic [status|inject|send|reset]")
+
     # -- Misc --
 
     def do_cycles(self, arg):
@@ -769,6 +821,10 @@ def main():
                         help="Assemble SRC.asm to OUT.rom and exit")
     parser.add_argument("--run", action="store_true",
                         help="Auto-boot and run after loading (non-BIOS mode)")
+    parser.add_argument("--nic", type=int, default=None, metavar="PORT",
+                        help="Enable NIC with UDP passthrough on PORT")
+    parser.add_argument("--nic-peer-port", type=int, default=None, metavar="PORT",
+                        help="UDP peer port for NIC passthrough (default: NIC+1)")
     args = parser.parse_args()
 
     # ---- Assemble-only mode -------------------------------------------
@@ -790,6 +846,8 @@ def main():
     sys_emu = MegapadSystem(
         ram_size=args.ram * 1024,
         storage_image=args.storage,
+        nic_port=args.nic,
+        nic_peer_port=args.nic_peer_port,
     )
 
     # Load files

@@ -14,7 +14,8 @@ from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
-    SECTOR_SIZE, UART, Timer, Storage, SystemInfo, DeviceBus,
+    NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
+    NetworkDevice, DeviceBus,
 )
 
 
@@ -152,6 +153,137 @@ class TestDeviceBus(unittest.TestCase):
         self.assertEqual(bus.read8(SYSINFO_BASE + 1), ord("P"))
         self.assertEqual(bus.read8(SYSINFO_BASE + 2), ord("6"))
         self.assertEqual(bus.read8(SYSINFO_BASE + 3), ord("4"))
+
+
+class TestNIC(unittest.TestCase):
+    """Tests for the NetworkDevice (NIC) peripheral."""
+
+    def test_present_and_link_up(self):
+        nic = NetworkDevice()
+        status = nic.read8(0x01)
+        self.assertTrue(status & 0x80)   # present
+        self.assertTrue(status & 0x04)   # link up
+        self.assertFalse(status & 0x02)  # no RX pending
+
+    def test_mac_address(self):
+        mac = b'\x02\x4D\x50\x36\x34\x00'
+        nic = NetworkDevice(mac=mac)
+        for i, b in enumerate(mac):
+            self.assertEqual(nic.read8(0x0E + i), b)
+
+    def test_inject_and_recv_frame(self):
+        nic = NetworkDevice()
+        frame = b'Hello NIC!'
+        nic.inject_frame(frame)
+        # STATUS should show RX available
+        self.assertTrue(nic.read8(0x01) & 0x02)
+        self.assertEqual(nic.rx_count, 1)
+        # Set up data port recv
+        nic._execute_cmd(0x02)  # RECV
+        self.assertEqual(nic.frame_len, len(frame))
+        # Read via data port
+        result = bytearray()
+        for _ in range(nic.frame_len):
+            result.append(nic.read8(0x20))  # DATA port
+        self.assertEqual(result, frame)
+        # RX queue empty now
+        self.assertFalse(nic.read8(0x01) & 0x02)
+
+    def test_tx_via_data_port(self):
+        nic = NetworkDevice()
+        sent = []
+        nic.on_tx_frame = lambda f: sent.append(f)
+        # Write frame via data port
+        frame = b'TX test'
+        for b in frame:
+            nic.write8(0x20, b)
+        # Set frame length
+        nic.write8(0x0A, len(frame) & 0xFF)
+        nic.write8(0x0B, 0)
+        # Send
+        nic._execute_cmd(0x01)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0], frame)
+        self.assertEqual(nic.tx_count, 1)
+
+    def test_tx_via_dma(self):
+        """TX using DMA with mem_read callback."""
+        nic = NetworkDevice()
+        sent = []
+        nic.on_tx_frame = lambda f: sent.append(f)
+        # Simulate RAM with a simple dict
+        ram = bytearray(256)
+        msg = b'DMA frame!'
+        ram[:len(msg)] = msg
+        nic._mem_read = lambda addr: ram[addr % len(ram)]
+        # Set DMA addr = 0, frame_len = len(msg)
+        for i in range(8):
+            nic.write8(0x02 + i, 0)  # DMA addr = 0
+        nic.write8(0x0A, len(msg) & 0xFF)
+        nic.write8(0x0B, 0)
+        nic._execute_cmd(0x01)
+        self.assertEqual(sent[0], msg)
+
+    def test_rx_via_dma(self):
+        """RX using DMA with mem_write callback."""
+        nic = NetworkDevice()
+        ram = bytearray(256)
+        nic._mem_write = lambda addr, val: ram.__setitem__(addr % len(ram), val & 0xFF)
+        frame = b'incoming'
+        nic.inject_frame(frame)
+        # Set DMA addr = 0x10
+        nic.write8(0x02, 0x10)
+        for i in range(1, 8):
+            nic.write8(0x02 + i, 0)
+        nic._execute_cmd(0x02)  # RECV
+        self.assertEqual(nic.frame_len, len(frame))
+        self.assertEqual(bytes(ram[0x10:0x10 + len(frame)]), frame)
+
+    def test_reset_clears_state(self):
+        nic = NetworkDevice()
+        nic.inject_frame(b'test')
+        nic._execute_cmd(0x04)  # RESET
+        self.assertEqual(len(nic.rx_queue), 0)
+        self.assertEqual(nic.tx_count, 0)
+        self.assertEqual(nic.rx_count, 0)
+        self.assertEqual(nic.frame_len, 0)
+
+    def test_counters(self):
+        nic = NetworkDevice()
+        sent = []
+        nic.on_tx_frame = lambda f: sent.append(f)
+        for i in range(3):
+            nic.inject_frame(bytes([i]))
+        self.assertEqual(nic.rx_count, 3)
+        # Send two frames via data port
+        for i in range(2):
+            nic._data_buf = bytearray([0x41 + i])
+            nic.frame_len = 1
+            nic._execute_cmd(0x01)
+        self.assertEqual(nic.tx_count, 2)
+        # Read counters via register
+        self.assertEqual(nic.read8(0x14), 2)  # TX_COUNT_LO
+        self.assertEqual(nic.read8(0x16), 3)  # RX_COUNT_LO
+
+    def test_sysinfo_nic_present(self):
+        si = SystemInfo(has_nic=True)
+        self.assertEqual(si.read8(0x0A), 1)
+        si2 = SystemInfo(has_nic=False)
+        self.assertEqual(si2.read8(0x0A), 0)
+
+    def test_bus_routes_nic(self):
+        bus = DeviceBus()
+        nic = NetworkDevice()
+        bus.register(nic)
+        # Read STATUS via bus at NIC_BASE offset
+        status = bus.read8(NIC_BASE + 0x01)
+        self.assertTrue(status & 0x80)  # present
+
+    def test_mtu_truncation(self):
+        nic = NetworkDevice()
+        big_frame = bytes(2000)
+        nic.inject_frame(big_frame)
+        self.assertEqual(len(nic.rx_queue[0]), 1500)
 
 
 # ---------------------------------------------------------------------------
