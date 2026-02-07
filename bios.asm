@@ -2980,6 +2980,108 @@ w_net_mac:
     ret.l
 
 ; =====================================================================
+;  Storage device words
+; =====================================================================
+; Storage base = MMIO_BASE + 0x0200 = 0xFFFF_FF00_0000_0200
+;
+; Register map:
+;   +0x00  CMD       (W)   0x01=READ, 0x02=WRITE
+;   +0x01  STATUS    (R)   bit7=present, bit0=busy, bit1=error
+;   +0x02  SECTOR_0  (RW)  sector number (4 bytes LE)
+;   +0x06  DMA_ADDR  (RW)  DMA address (8 bytes LE)
+;   +0x0E  SEC_COUNT (RW)  number of sectors
+;   +0x0F  DATA      (RW)  byte-at-a-time port
+
+; DISK@ ( -- status )  read storage STATUS register
+w_disk_status:
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; DISK-SEC! ( sector -- )  set sector number (32-bit)
+w_disk_sec_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0202
+    ; Write 4 bytes LE
+    mov r7, r1
+    st.b r11, r7
+    inc r11
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    ret.l
+
+; DISK-DMA! ( addr -- )  set DMA address (64-bit)
+w_disk_dma_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0206
+    ; Write 8 bytes LE
+    mov r7, r1
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    ; Upper 4 bytes = 0 (we're in normal RAM, not MMIO)
+    ldi r7, 0
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    ret.l
+
+; DISK-N! ( count -- )  set sector count
+w_disk_n_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_020E
+    st.b r11, r1
+    ret.l
+
+; DISK-READ ( -- )  execute READ command (DMA from disk to RAM)
+w_disk_read:
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; DISK-WRITE ( -- )  execute WRITE command (DMA from RAM to disk)
+w_disk_write:
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r1, 0x02
+    st.b r11, r1
+    ret.l
+
+; =====================================================================
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
@@ -4004,9 +4106,63 @@ d_net_mac:
     call.l r11
     ret.l
 
+; === DISK@ ===
+d_disk_status:
+    .dq d_net_mac
+    .db 5
+    .ascii "DISK@"
+    ldi64 r11, w_disk_status
+    call.l r11
+    ret.l
+
+; === DISK-SEC! ===
+d_disk_sec_store:
+    .dq d_disk_status
+    .db 9
+    .ascii "DISK-SEC!"
+    ldi64 r11, w_disk_sec_store
+    call.l r11
+    ret.l
+
+; === DISK-DMA! ===
+d_disk_dma_store:
+    .dq d_disk_sec_store
+    .db 9
+    .ascii "DISK-DMA!"
+    ldi64 r11, w_disk_dma_store
+    call.l r11
+    ret.l
+
+; === DISK-N! ===
+d_disk_n_store:
+    .dq d_disk_dma_store
+    .db 7
+    .ascii "DISK-N!"
+    ldi64 r11, w_disk_n_store
+    call.l r11
+    ret.l
+
+; === DISK-READ ===
+d_disk_read:
+    .dq d_disk_n_store
+    .db 9
+    .ascii "DISK-READ"
+    ldi64 r11, w_disk_read
+    call.l r11
+    ret.l
+
+; === DISK-WRITE ===
+d_disk_write:
+    .dq d_disk_read
+    .db 10
+    .ascii "DISK-WRITE"
+    ldi64 r11, w_disk_write
+    call.l r11
+    ret.l
+
 ; === \ (backslash comment, IMMEDIATE) ===
 d_backslash:
-    .dq d_net_mac
+    .dq d_disk_write
     .db 0x81                  ; IMMEDIATE | len 1
     .ascii "\\"
     ldi64 r11, w_backslash

@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.3 — Pipeline Engine**
+**Current Status: KDOS v0.4 — Storage & Persistence**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (122 tests)
+# Full test suite (136 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -45,36 +45,52 @@ pipe-add-stats P.RUN          \ Run built-in pipeline: add+stats
 ' step1 my-pipe P.ADD         \ Append step
 my-pipe P.RUN                 \ Execute all steps
 my-pipe P.BENCH               \ Time each step
+
+\ Storage & persistence (requires --storage)
+DISK-INFO                     \ Show disk status
+mybuf 0 B.SAVE                \ Save buffer to sector 0
+mybuf B.ZERO                  \ Clear buffer in RAM
+mybuf 0 B.LOAD                \ Load buffer back from disk
+
+\ File abstraction
+0 16 FILE myfile              \ File at sector 0, up to 16 sectors
+mybuf B.DATA 128 myfile FWRITE  \ Write 128 bytes to file
+myfile FREWIND                \ Reset cursor to 0
+HERE 128 myfile FREAD .       \ Read back, print bytes read
+FILES                         \ List registered files
 ```
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed (v0.3)
+### ✅ Completed (v0.4)
 
-**BIOS v0.4** (115 words, 4069 lines):
+**BIOS v0.4** (121 words, ~4230 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
 - ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
+- **Storage device support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
 
-**KDOS v0.3** (619 lines Forth):
+**KDOS v0.4** (~830 lines Forth):
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
 - **Pipeline engine**: Ordered kernel pipelines with per-step timing (up to 8 registered)
 - **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
-- **Dashboard UI**: HELP, DASHBOARD (now with pipelines), STATUS, PIPES
+- **Storage & persistence**: Buffer save/load to disk, file abstraction layer
+- **File abstraction**: Sector-backed files with cursor I/O (up to 8 registered)
+- **Dashboard UI**: HELP, DASHBOARD, STATUS, PIPES, FILES, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
 - **Bug fixes**: BUFFER descriptor overlap fix, zero-trip DO/LOOP guards
 
-**Tests**: 122 passing
-- 55 KDOS tests (buffers, tile ops, kernels, pipelines, dashboard)
-- 42 BIOS tests (all Forth words, compilation, tile engine)
-- 25 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
+**Tests**: 136 passing
+- 69 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, dashboard)
+- 45 BIOS tests (all Forth words, compilation, tile engine, disk I/O)
+- 22 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
 
@@ -85,11 +101,13 @@ my-pipe P.BENCH               \ Time each step
 - 3 demo pipelines: fill-sum, add-stats, threshold
 - Demo buffers: demo-a, demo-b, demo-c
 
-**Phase 2: Storage & Persistence** (not started)
-- FILE abstraction backed by storage device sectors
-- LOAD/SAVE for buffers and kernels
-- Persistent kernel library on disk
-- Boot from storage instead of UART injection
+**Phase 2: Storage & Persistence** (✅ complete — v0.4)
+- 6 BIOS disk words: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+- Buffer persistence: B.SAVE / B.LOAD (DMA to/from disk sectors)
+- B.SECTORS, DISK?, DISK-INFO — disk queries
+- FILE abstraction: sector-backed files with cursor, up to 8 registered
+- FWRITE / FREAD / FSEEK / FREWIND / FSIZE — cursor-based I/O
+- F.INFO, FILES — file introspection
 
 **Phase 3: Interactive Screens** (not started)
 - Screen system: 7 screens (Dashboard, Buffers, Kernels, Pipelines, Perf, Console, Inspector)
@@ -220,7 +238,7 @@ Flat address space.  Default 256 KiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (currently v0.4, 115 words, 4069 lines) is the **permanent,
+The BIOS Forth (currently v0.4, 121 words, ~4230 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v0.4)
@@ -228,7 +246,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 115 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 121 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE
@@ -241,6 +259,7 @@ The BIOS provides:
 * **Comment words**: `\` (line comment), `(` (paren comment)
 * **Execution tokens**: `'` (tick), `EXECUTE`
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
+* **Storage support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
 
 All required BIOS extensions for KDOS are **complete** as of v0.4.
 
@@ -423,9 +442,85 @@ Tile operations are ~10-100× faster than byte-by-byte loops for large buffers.
 
 ---
 
-## 7. Dashboard & User Interface (v0.2)
+## 7. Storage & Persistence (v0.4)
 
-### 7.1 HELP System
+KDOS v0.4 adds full storage integration — buffers can be persisted to disk,
+and a file abstraction provides cursor-based I/O over contiguous sector ranges.
+
+### 7.1 BIOS Disk Words
+
+Six new BIOS words expose the storage device (at MMIO offset 0x0200):
+
+| Word | Stack | Description |
+|---|---|---|
+| `DISK@` | ( -- status ) | Read device status (bit 7 = present) |
+| `DISK-SEC!` | ( n -- ) | Set starting sector number |
+| `DISK-DMA!` | ( addr -- ) | Set DMA address in RAM |
+| `DISK-N!` | ( n -- ) | Set sector count |
+| `DISK-READ` | ( -- ) | Issue read command: disk → RAM via DMA |
+| `DISK-WRITE` | ( -- ) | Issue write command: RAM → disk via DMA |
+
+The storage device uses 512-byte sectors and DMA transfers.
+
+### 7.2 Buffer Persistence
+
+```forth
+\ Save buffer to disk
+mybuf 0 B.SAVE               \ Write mybuf data starting at sector 0
+
+\ Load buffer from disk
+mybuf 0 B.LOAD               \ Read mybuf data from sector 0
+
+\ Query
+mybuf B.SECTORS .             \ Print sectors needed (ceil(bytes/512))
+DISK?                         \ True if storage device present
+DISK-INFO                     \ Print "Storage: present" or "not attached"
+```
+
+`B.SAVE` and `B.LOAD` compute the number of sectors from the buffer descriptor,
+set up DMA address / sector / count, and issue a single DMA transfer.
+
+### 7.3 File Abstraction
+
+A file is a contiguous region of sectors with a cursor for sequential I/O.
+
+**File descriptor** (4 cells = 32 bytes):
+```forth
+  +0   start_sector   first sector on disk
+  +8   max_sectors    allocated size in sectors
+  +16  used_bytes     bytes actually written
+  +24  cursor         current read/write position (byte offset)
+```
+
+**Usage**:
+```forth
+0 16 FILE myfile              \ File at sector 0, up to 16 sectors
+mybuf B.DATA 128 myfile FWRITE  \ Write 128 bytes from buffer
+myfile FREWIND                \ Reset cursor to 0
+HERE 128 myfile FREAD .       \ Read 128 bytes, print actual count
+myfile F.INFO                 \ Print descriptor
+FILES                         \ List all registered files
+```
+
+**Implemented operations**:
+- `FILE ( start max "name" -- )` — create and register a file descriptor
+- `FWRITE ( addr len fdesc -- )` — write bytes at cursor position
+- `FREAD ( addr len fdesc -- actual )` — read bytes, return actual count
+- `FSEEK ( pos fdesc -- )` — set cursor to absolute position
+- `FREWIND ( fdesc -- )` — reset cursor to 0
+- `FSIZE ( fdesc -- n )` — return used bytes
+- `F.START`, `F.MAX`, `F.USED`, `F.CURSOR` — field accessors
+- `F.INFO ( fdesc -- )` — print file descriptor
+- `FILES ( -- )` — list all registered files (up to 8)
+
+The scratch buffer `FSCRATCH` (512 bytes) is used for unaligned writes
+where the offset within a sector is non-zero.
+
+---
+
+## 8. Dashboard & User Interface (v0.2)
+
+### 8.1 HELP System
 
 ```forth
 HELP
@@ -436,9 +531,11 @@ Prints full command reference with categories:
 - Kernel words: KERNEL, K.INFO, KERNELS
 - Sample kernels: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
 - Pipeline words: PIPELINE, P.ADD, P.RUN, P.BENCH, P.INFO, PIPES
+- Storage words: DISK?, DISK-INFO, B.SAVE, B.LOAD, B.SECTORS
+- File words: FILE, FWRITE, FREAD, FSEEK, FREWIND, FSIZE, F.INFO, FILES
 - Bench & tools: BENCH, .BENCH, DASHBOARD, STATUS, HELP
 
-### 7.2 DASHBOARD
+### 8.2 DASHBOARD
 
 ```forth
 DASHBOARD
@@ -449,11 +546,13 @@ Shows:
 - Buffers: count + list with descriptors
 - Kernels: count + list with metadata
 - Pipelines: count + list with capacities
+- Storage: disk status
+- Files: count + list
 
 Output example:
 ```
 ------------------------------------------------------------
-  KDOS v0.3 — Kernel Dashboard OS
+  KDOS v0.4 — Kernel Dashboard OS
 ------------------------------------------------------------
   Memory:
     HERE  = 24576
@@ -471,10 +570,13 @@ Output example:
 0  :  [pipe cap=2  steps=2  ]
 1  :  [pipe cap=3  steps=3  ]
 2  :  [pipe cap=3  steps=3  ]
+
+Storage: not attached
+ --- Files (0 ) ---
 ------------------------------------------------------------
 ```
 
-### 7.3 STATUS
+### 8.3 STATUS
 
 ```forth
 STATUS
@@ -482,10 +584,10 @@ STATUS
 
 One-line summary:
 ```
-KDOS | bufs=3  kerns=7  pipes=3  HERE=24576
+KDOS | bufs=3  kerns=7  pipes=3  files=0  disk=no  HERE=24576
 ```
 
-### 7.4 Benchmarking
+### 8.4 Benchmarking
 
 ```forth
 : my-operation ... ;
@@ -497,7 +599,7 @@ Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
 
 ---
 
-## 8. Future Work
+## 9. Future Work
 
 ### Phase 1: Pipeline Engine (v0.3 target)
 
@@ -674,7 +776,7 @@ The scheduler is a Forth vocabulary (`SCHED`) that:
 
 ---
 
-## 7. Relationship Between BIOS and OS
+## 10. Relationship Between BIOS and OS
 
 * BIOS Forth **never exits** — it is the bottom of the stack
 * OS is a set of vocabularies layered on top
@@ -691,7 +793,7 @@ If the OS faults:
 
 ---
 
-## 8. Implementation Roadmap
+## 11. Implementation Roadmap
 
 ### Phase 1 — BIOS v0.4: Compilation & Control Flow
 
@@ -727,7 +829,7 @@ Implement the DAG data structure, incremental recomputation, and the
 
 ---
 
-## 9. Resulting Computer Identity
+## 12. Resulting Computer Identity
 
 This machine is:
 

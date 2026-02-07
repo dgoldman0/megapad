@@ -705,8 +705,58 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["WORDS"])
         for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
-                     "SPACE", "TYPE"]:
+                     "SPACE", "TYPE", "DISK-READ", "DISK-WRITE"]:
             self.assertIn(word, text, f"Missing word: {word}")
+
+    # -- Storage words --
+
+    def test_disk_status_no_image(self):
+        """DISK@ returns 0 when no storage image is attached."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["DISK@ ."])
+        self.assertIn("0 ", text)
+
+    def test_disk_status_with_image(self):
+        """DISK@ returns non-zero (bit7=present) when image attached."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["DISK@ ."])
+            # bit 7 = 0x80 = 128
+            self.assertIn("128 ", text)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_write_read_roundtrip(self):
+        """Write data to disk sector 0, read it back via DMA."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "VARIABLE dbuf  512 ALLOT",
+                # Write 0xAA to first byte of our buffer
+                "0xAA dbuf C!",
+                # Set up DMA: sector 0, 1 sector, from dbuf address
+                "0 DISK-SEC!",
+                "dbuf DISK-DMA!",
+                "1 DISK-N!",
+                "DISK-WRITE",
+                # Zero our buffer
+                "0 dbuf C!",
+                # Read it back
+                "DISK-READ",
+                # Check first byte
+                "dbuf C@ .",
+            ])
+            self.assertIn("170 ", text)  # 0xAA = 170
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
@@ -758,17 +808,18 @@ class TestKDOS(unittest.TestCase):
                     continue
                 self.kdos_lines.append(line)
 
-    def _boot_bios(self, ram_kib=256):
-        sys = make_system(ram_kib=ram_kib)
+    def _boot_bios(self, ram_kib=256, storage_image=None):
+        sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         sys.boot()
         return sys, buf
 
     def _run_kdos(self, extra_lines: list[str],
-                  max_steps=400_000_000) -> str:
+                  max_steps=400_000_000,
+                  storage_image=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
-        sys, buf = self._boot_bios()
+        sys, buf = self._boot_bios(storage_image=storage_image)
         all_lines = self.kdos_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
@@ -802,7 +853,7 @@ class TestKDOS(unittest.TestCase):
     def test_kdos_loads(self):
         """KDOS loads without errors and prints banner."""
         text = self._run_kdos([])
-        self.assertIn("KDOS v0.3", text)
+        self.assertIn("KDOS v0.4", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -932,11 +983,13 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.3", text)
+        self.assertIn("KDOS v0.4", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
         self.assertIn("Pipelines", text)
+        self.assertIn("Storage", text)
+        self.assertIn("Files", text)
 
     # -- Pipelines --
 
@@ -1342,6 +1395,8 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("KERNEL WORDS", text)
         self.assertIn("SAMPLE KERNELS", text)
         self.assertIn("PIPELINE WORDS", text)
+        self.assertIn("STORAGE WORDS", text)
+        self.assertIn("FILE WORDS", text)
         self.assertIn("BENCH", text)
 
     def test_status(self):
@@ -1351,6 +1406,8 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("bufs=", text)
         self.assertIn("kerns=", text)
         self.assertIn("pipes=", text)
+        self.assertIn("files=", text)
+        self.assertIn("disk=", text)
 
     # -- Kernel registry with new kernels --
 
@@ -1383,6 +1440,144 @@ class TestKDOS(unittest.TestCase):
         """NIP removes second item."""
         text = self._run_kdos(["1 2 NIP ."])
         self.assertIn("2 ", text)
+
+    # -- Storage & persistence --
+
+    def test_disk_status_no_disk(self):
+        """DISK? returns false when no storage image."""
+        text = self._run_kdos(["DISK? ."])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)
+
+    def test_disk_status_with_disk(self):
+        """DISK? returns true when storage image attached."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            text = self._run_kdos(["DISK? ."], storage_image=path)
+            self.assertIn("-1 ", text)  # true = -1
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_info(self):
+        """DISK-INFO prints storage status."""
+        text = self._run_kdos(["DISK-INFO"])
+        self.assertIn("Storage:", text)
+        self.assertIn("not attached", text)
+
+    def test_disk_info_present(self):
+        """DISK-INFO shows present when image attached."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            text = self._run_kdos(["DISK-INFO"], storage_image=path)
+            self.assertIn("Storage:", text)
+            self.assertIn("present", text)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bsave_bload_roundtrip(self):
+        """B.SAVE writes buffer to disk, B.LOAD reads it back."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            text = self._run_kdos([
+                "0 1 64 BUFFER sb",
+                "42 sb B.FILL",
+                "sb 0 B.SAVE",
+                "sb B.ZERO",
+                "sb B.DATA C@ .",
+                "sb 0 B.LOAD",
+                "sb B.DATA C@ .",
+            ], storage_image=path)
+            idx = text.rfind("HELP")
+            out = text[idx:] if idx >= 0 else text
+            # After zero, first byte = 0
+            self.assertIn("0 ", out)
+            # After load, first byte = 42
+            self.assertIn("42 ", out)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bsectors(self):
+        """B.SECTORS returns correct sector count."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER s1",
+            "s1 B.SECTORS .",
+            "0 1 1024 BUFFER s2",
+            "s2 B.SECTORS .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)  # 64 bytes -> 1 sector
+        self.assertIn("2 ", out)  # 1024 bytes -> 2 sectors
+
+    def test_file_create(self):
+        """FILE creates a file descriptor."""
+        text = self._run_kdos([
+            "10 4 FILE myfile",
+            "myfile F.START .",
+            "myfile F.MAX .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("10 ", out)  # start sector
+        self.assertIn("4 ", out)   # max sectors
+
+    def test_file_info(self):
+        """F.INFO prints file descriptor."""
+        text = self._run_kdos([
+            "0 2 FILE fi",
+            "fi F.INFO",
+        ])
+        self.assertIn("[file", text)
+        self.assertIn("sec=", text)
+        self.assertIn("max=", text)
+        self.assertIn("used=", text)
+
+    def test_file_seek_rewind(self):
+        """FSEEK sets cursor, FREWIND resets it."""
+        text = self._run_kdos([
+            "0 2 FILE sf",
+            "100 sf FSEEK",
+            "sf F.CURSOR .",
+            "sf FREWIND",
+            "sf F.CURSOR .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("100 ", out)
+        # After rewind cursor should be 0
+        after_100 = out[out.find("100 ") + 4:]
+        self.assertIn("0 ", after_100)
+
+    def test_files_list(self):
+        """FILES lists registered files."""
+        text = self._run_kdos([
+            "0 2 FILE f1",
+            "10 4 FILE f2",
+            "FILES",
+        ])
+        self.assertIn("Files", text)
+        self.assertIn("[file", text)
+
+    def test_file_count(self):
+        """FILE-COUNT tracks registered files."""
+        text = self._run_kdos([
+            "0 1 FILE fc1",
+            "1 1 FILE fc2",
+            "FILE-COUNT @ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("2 ", out)
 
 
 # ---------------------------------------------------------------------------

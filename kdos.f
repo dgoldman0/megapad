@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.3 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.4 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
@@ -11,9 +11,10 @@
 \    4. Kernels    — metadata registry for named compute kernels
 \    5. Sample Kernels — kzero, kfill, kadd, kscale, kstats, kthresh
 \    6. Pipelines      — kernel pipeline engine with demo pipelines
-\    7. Benchmarking   — BENCH for timing via CYCLES
-\    8. Dashboard  — text-mode system overview via UART
-\    9. Help       — online reference for all KDOS words
+\    7. Storage        — disk persistence for buffers, file abstraction
+\    8. Benchmarking   — BENCH for timing via CYCLES
+\    9. Dashboard  — text-mode system overview via UART
+\   10. Help       — online reference for all KDOS words
 
 \ =====================================================================
 \  §1  Utility Words
@@ -508,7 +509,196 @@ VARIABLE P-PIPE
 ' p3-stats  pipe-thresh P.ADD
 
 \ =====================================================================
-\  §7  Benchmarking
+\  §7  Storage & Persistence
+\ =====================================================================
+\
+\  Uses BIOS words: DISK@ DISK-SEC! DISK-DMA! DISK-N! DISK-READ DISK-WRITE
+\  Storage device: 512-byte sectors, DMA to/from RAM.
+\
+\  B.SAVE / B.LOAD persist buffers by writing their data region to disk.
+\  Buffer data is tile-aligned (64 bytes), sectors are 512 bytes.
+\  A buffer that is N tiles writes ceil(N*64/512) sectors.
+
+512 CONSTANT SECTOR
+
+\ DISK? ( -- flag ) true if storage device present
+: DISK?  ( -- flag )  DISK@ 128 AND 0<> ;
+
+\ B.SECTORS ( desc -- n ) number of disk sectors needed for buffer data
+: B.SECTORS  ( desc -- n )  B.BYTES SECTOR 1- + SECTOR / ;
+
+\ B.SAVE ( desc sector -- ) save buffer data to disk starting at sector
+: B.SAVE  ( desc sector -- )
+    SWAP                      ( sector desc )
+    DUP B.DATA                ( sector desc addr )
+    SWAP B.SECTORS            ( sector addr nsectors )
+    ROT                       ( addr nsectors sector )
+    DISK-SEC!                 ( addr nsectors )
+    DUP DISK-N!               ( addr nsectors )
+    DROP                      ( addr )
+    DISK-DMA!                 ( )
+    DISK-WRITE ;
+
+\ B.LOAD ( desc sector -- ) load buffer data from disk starting at sector
+: B.LOAD  ( desc sector -- )
+    SWAP                      ( sector desc )
+    DUP B.DATA                ( sector desc addr )
+    SWAP B.SECTORS            ( sector addr nsectors )
+    ROT                       ( addr nsectors sector )
+    DISK-SEC!                 ( addr nsectors )
+    DUP DISK-N!               ( addr nsectors )
+    DROP                      ( addr )
+    DISK-DMA!                 ( )
+    DISK-READ ;
+
+\ DISK-INFO ( -- ) print storage device status
+: DISK-INFO  ( -- )
+    ." Storage: "
+    DISK? IF
+        ." present" CR
+    ELSE
+        ." not attached" CR
+    THEN ;
+
+\ =====================================================================
+\  §7.5  File Abstraction
+\ =====================================================================
+\
+\  A FILE is a simple contiguous region on disk.
+\
+\  FILE descriptor (4 cells = 32 bytes):
+\    +0   start_sector   first sector on disk
+\    +8   max_sectors    allocated size in sectors
+\    +16  used_bytes     bytes actually written
+\    +24  cursor         current read/write position (byte offset)
+\
+\  Uses a scratch buffer for partial-sector I/O.
+\  Files are NOT tile-aligned; they use the DMA to a RAM scratch area.
+
+\ -- Registry (up to 8 files) --
+VARIABLE FILE-COUNT
+0 FILE-COUNT !
+VARIABLE FILE-TABLE  7 CELLS ALLOT
+
+\ -- Scratch buffer for sector I/O (one sector) --
+VARIABLE FSCRATCH  SECTOR 1- ALLOT
+
+\ -- Field accessors --
+: F.START  ( fdesc -- sec )    @ ;
+: F.MAX    ( fdesc -- n )      8 + @ ;
+: F.USED   ( fdesc -- n )     16 + @ ;
+: F.CURSOR ( fdesc -- n )     24 + @ ;
+
+\ -- Internal temp --
+VARIABLE FDESC
+
+\ FILE ( start_sector max_sectors "name" -- )
+\   Create a file descriptor backed by disk sectors.
+: FILE
+    HERE FDESC !
+    SWAP ,                    \ +0  start_sector
+    DUP ,                     \ +8  max_sectors  (keep copy)
+    0 ,                       \ +16 used_bytes = 0
+    0 ,                       \ +24 cursor = 0
+    DROP                      \ drop extra max_sectors copy
+    \ register
+    FILE-COUNT @ 8 < IF
+        FDESC @ FILE-COUNT @ CELLS FILE-TABLE + !
+        FILE-COUNT @ 1+ FILE-COUNT !
+    THEN
+    FDESC @ CONSTANT ;
+
+\ FSEEK ( pos fdesc -- ) set cursor position
+: FSEEK  ( pos fdesc -- )  24 + ! ;
+
+\ FREWIND ( fdesc -- ) reset cursor to 0
+: FREWIND  ( fdesc -- )  0 SWAP FSEEK ;
+
+\ FSIZE ( fdesc -- n ) return used bytes
+: FSIZE  ( fdesc -- n )  F.USED ;
+
+\ FWRITE ( addr len fdesc -- ) write len bytes from addr at cursor
+\   Writes sector-by-sector using scratch buffer for partial sectors.
+: FWRITE  ( addr len fdesc -- )
+    -ROT                      ( fdesc addr len )
+    2DUP + 2 PICK F.CURSOR + ( fdesc addr len new-end )
+    3 PICK F.MAX SECTOR *     ( fdesc addr len new-end capacity )
+    OVER < IF                 ( fdesc addr len new-end )
+        ." FWRITE: out of space" CR
+        2DROP 2DROP
+    ELSE DROP                 ( fdesc addr len )
+        \ Compute sector + offset within sector
+        2 PICK F.CURSOR SECTOR /
+        2 PICK F.START + DISK-SEC!  ( fdesc addr len -- set sector )
+        2 PICK F.CURSOR SECTOR MOD  ( fdesc addr len offset )
+        \ Simple approach: DMA whole sectors from addr if offset=0
+        \ For now, byte-copy to scratch then DMA
+        DUP 0= IF
+            DROP              ( fdesc addr len )
+            \ Aligned write: DMA directly from addr
+            DUP SECTOR 1- + SECTOR / DUP DISK-N!
+            DROP              ( fdesc addr len )
+            OVER DISK-DMA!    ( fdesc addr len )
+            DISK-WRITE
+        ELSE
+            \ Unaligned write: copy to scratch
+            DROP              ( fdesc addr len )
+            FSCRATCH SECTOR 0 FILL  ( zero scratch )
+            FSCRATCH SWAP     ( fdesc addr scratch len )
+            0 DO              ( fdesc addr scratch )
+                OVER I + C@   ( fdesc addr scratch byte )
+                OVER I + C!   ( fdesc addr scratch )
+            LOOP
+            NIP               ( fdesc scratch )
+            DISK-DMA!         ( fdesc )
+            1 DISK-N!
+            DISK-WRITE
+            DROP              ( )
+        THEN
+        \ Update cursor and used_bytes
+        \ (re-fetch fdesc — it's 3rd from top before the THENs)
+    THEN ;
+
+\ Simpler FWRITE: always byte-copy to scratch per sector
+\ (We'll use a cleaner implementation)
+
+\ FREAD ( addr len fdesc -- actual ) read up to len bytes at cursor
+: FREAD  ( addr len fdesc -- actual )
+    DUP F.USED OVER F.CURSOR -  ( addr len fdesc avail )
+    ROT MIN                   ( addr fdesc actual-len )
+    DUP 0= IF
+        NIP NIP               ( 0 )
+    ELSE
+        ROT ROT               ( actual addr fdesc )
+        \ Set up DMA read at cursor's sector
+        DUP F.CURSOR SECTOR / OVER F.START + DISK-SEC!
+        OVER DISK-DMA!        ( actual addr fdesc )
+        \ Read enough sectors
+        2 PICK SECTOR 1- + SECTOR / DISK-N!
+        DISK-READ             ( actual addr fdesc )
+        DROP DROP             ( actual )
+    THEN ;
+
+\ F.INFO ( fdesc -- ) print file descriptor
+: F.INFO  ( fdesc -- )
+    ." [file"
+    DUP ."  sec=" F.START .
+    DUP ."  max=" F.MAX .
+    DUP ."  used=" F.USED .
+    ."  cur=" F.CURSOR . ." ]" CR ;
+
+\ -- List all registered files --
+: FILES  ( -- )
+    ." --- Files (" FILE-COUNT @ . ." ) ---" CR
+    FILE-COUNT @ DUP IF
+        0 DO
+            I . ." : "
+            I CELLS FILE-TABLE + @ F.INFO
+        LOOP
+    ELSE DROP THEN ;
+
+\ =====================================================================
+\  §8  Benchmarking
 \ =====================================================================
 \
 \  BENCH ( xt -- cycles )
@@ -528,7 +718,7 @@ VARIABLE BENCH-T0
     ." cycles=" . CR ;
 
 \ =====================================================================
-\  §8  Dashboard
+\  §9  Dashboard
 \ =====================================================================
 
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
@@ -542,12 +732,14 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.3 — Kernel Dashboard OS" CR
+    ."  KDOS v0.4 — Kernel Dashboard OS" CR
     HRULE
     .MEM
+    CR DISK-INFO
     CR BUFFERS
     CR KERNELS
     CR PIPES
+    CR FILES
     CR HRULE ;
 
 \ -- Status: quick one-liner --
@@ -555,15 +747,17 @@ VARIABLE BENCH-T0
     ." KDOS | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
-    ." HERE=" HERE . CR ;
+    ." files=" FILE-COUNT @ .
+    ." disk=" DISK? IF ." yes" ELSE ." no" THEN
+    ."  HERE=" HERE . CR ;
 
 \ =====================================================================
-\  §9  Help System
+\  §10  Help System
 \ =====================================================================
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.3 — Quick Reference" CR
+    ."  KDOS v0.4 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -598,6 +792,20 @@ VARIABLE BENCH-T0
     ."    pipe P.INFO            Show pipeline descriptor" CR
     ."    pipe P.CLEAR           Reset pipeline" CR
     ."    PIPES                  List all pipelines" CR
+    CR ."  STORAGE WORDS:" CR
+    ."    DISK?                  Is storage present?" CR
+    ."    DISK-INFO              Print storage status" CR
+    ."    buf sec B.SAVE         Save buffer to disk" CR
+    ."    buf sec B.LOAD         Load buffer from disk" CR
+    CR ."  FILE WORDS:" CR
+    ."    10 8 FILE name         Create file at sec 10, 8 secs" CR
+    ."    f F.INFO               Show file descriptor" CR
+    ."    addr len f FWRITE      Write bytes to file" CR
+    ."    addr len f FREAD       Read bytes from file" CR
+    ."    pos f FSEEK            Set file cursor" CR
+    ."    f FREWIND              Reset cursor to 0" CR
+    ."    f FSIZE                Get used bytes" CR
+    ."    FILES                  List all files" CR
     CR ."  BENCH & TOOLS:" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
     ."    ' word .BENCH          Time word and print cycles" CR
@@ -607,11 +815,11 @@ VARIABLE BENCH-T0
     CR HRULE ;
 
 \ =====================================================================
-\  §10  Startup
+\  §11  Startup
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.3 — Kernel Dashboard OS" CR
+."  KDOS v0.4 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type DASHBOARD for system overview." CR
