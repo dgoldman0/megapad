@@ -192,6 +192,9 @@ class MegapadSystem:
 
     def step(self) -> int:
         """Execute one instruction. Returns cycles consumed."""
+        # Wake CPU from idle when UART has received data
+        if self.cpu.idle and self.uart.has_rx_data:
+            self.cpu.idle = False
         cycles = self.cpu.step()
         self.bus.tick(cycles)
         return cycles
@@ -202,14 +205,11 @@ class MegapadSystem:
         for _ in range(max_steps):
             if self.cpu.halted:
                 break
-            if self.cpu.idle:
-                # Check if UART has input that could wake us
-                if self.uart.has_rx_data:
-                    self.cpu.idle = False
-                else:
-                    self.bus.tick(1)
-                    total += 1
-                    continue
+            if self.cpu.idle and not self.uart.has_rx_data:
+                # Idle with no pending input — tick bus (timers) and wait
+                self.bus.tick(1)
+                total += 1
+                continue
             try:
                 total += self.step()
             except TrapError as e:

@@ -97,6 +97,31 @@ def _split_ops(rest: str) -> list[str]:
     """Split operand string by comma, trimming whitespace."""
     return [s.strip() for s in rest.split(",") if s.strip()]
 
+
+def _parse_string(lineno: int, text: str) -> bytes:
+    """Parse a double-quoted string literal with escape sequences."""
+    text = text.strip()
+    if not (text.startswith('"') and text.endswith('"')):
+        raise AsmError(lineno, f"Expected quoted string, got: {text}")
+    s = text[1:-1]
+    result = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s):
+            c = s[i + 1]
+            if c == 'n':   result.append(0x0A)
+            elif c == 'r': result.append(0x0D)
+            elif c == 't': result.append(0x09)
+            elif c == '0': result.append(0x00)
+            elif c == '\\': result.append(0x5C)
+            elif c == '"': result.append(0x22)
+            else: result.append(ord(c) & 0xFF)
+            i += 2
+        else:
+            result.append(ord(s[i]) & 0xFF)
+            i += 1
+    return bytes(result)
+
 # ---------------------------------------------------------------------------
 #  Assembler
 # ---------------------------------------------------------------------------
@@ -163,6 +188,16 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
             pc += len(vals) * 8
             sizes.append((lineno, text, len(vals) * 8))
             continue
+        if lower.startswith(".asciiz"):
+            s = _parse_string(lineno, text[7:].strip())
+            pc += len(s) + 1
+            sizes.append((lineno, text, len(s) + 1))
+            continue
+        if lower.startswith(".ascii"):
+            s = _parse_string(lineno, text[6:].strip())
+            pc += len(s)
+            sizes.append((lineno, text, len(s)))
+            continue
 
         sz = _instruction_size(lineno, text)
         sizes.append((lineno, text, sz))
@@ -207,10 +242,25 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
             continue
         if lower.startswith(".dq"):
             for tok in _split_ops(text[3:]):
-                v = _parse_imm(tok)
+                tok_s = tok.strip()
+                if tok_s in labels:
+                    v = labels[tok_s]
+                else:
+                    v = _parse_imm(tok)
                 for b in range(8):
                     code.append((v >> (8*b)) & 0xFF)
                 pc += 8
+            continue
+        if lower.startswith(".asciiz"):
+            s = _parse_string(lineno, text[7:].strip())
+            code.extend(s)
+            code.append(0)
+            pc += len(s) + 1
+            continue
+        if lower.startswith(".ascii"):
+            s = _parse_string(lineno, text[6:].strip())
+            code.extend(s)
+            pc += len(s)
             continue
 
         emitted = _emit_instruction(lineno, text, pc, labels)
