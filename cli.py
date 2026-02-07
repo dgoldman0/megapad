@@ -238,7 +238,7 @@ class MegapadCLI(cmd.Cmd):
         super().__init__()
         self.sys = system
         self.breakpoints: set[int] = set()
-        self._console_mode = False
+        self._return_to_console = False
 
         # Wire UART TX to print in real time during run
         self.sys.uart.on_tx = self._uart_tx_handler
@@ -434,42 +434,9 @@ class MegapadCLI(cmd.Cmd):
     # -- Console mode --
 
     def do_console(self, arg):
-        """Enter UART console mode. Type Ctrl-] to return to monitor.
-        Characters you type are sent to the CPU's UART RX buffer."""
-        print("=== UART Console (Ctrl-] to exit) ===")
-        import termios, tty
-        old = termios.tcgetattr(sys.stdin)
-        try:
-            tty.setraw(sys.stdin.fileno())
-            self._console_mode = True
-            while self._console_mode:
-                # Run a batch of instructions
-                if not self.sys.cpu.halted:
-                    for _ in range(1000):
-                        if self.sys.cpu.halted:
-                            break
-                        if self.sys.cpu.idle:
-                            if self.sys.uart.has_rx_data:
-                                self.sys.cpu.idle = False
-                            else:
-                                self.sys.bus.tick(1)
-                                break
-                        try:
-                            self.sys.step()
-                        except (HaltError, TrapError):
-                            break
-
-                # Check for user input (non-blocking)
-                import select
-                if select.select([sys.stdin], [], [], 0.01)[0]:
-                    ch = sys.stdin.read(1)
-                    if ch == '\x1d':  # Ctrl-]
-                        break
-                    self.sys.uart.inject_input(ch)
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
-            self._console_mode = False
-            print("\n=== Back to monitor ===")
+        """Return to BIOS console mode (Ctrl+] to come back here)."""
+        self._return_to_console = True
+        return True
 
     # -- Breakpoints --
 
@@ -664,14 +631,131 @@ class MegapadCLI(cmd.Cmd):
 #  Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+#  Console mode — raw terminal ↔ UART
+# ---------------------------------------------------------------------------
+
+def run_console(sys_emu: MegapadSystem) -> bool:
+    """Run the system with the host terminal wired directly to the UART.
+
+    UART TX → stdout  (raw bytes, no translation)
+    stdin   → UART RX (raw bytes, one keystroke at a time)
+
+    Returns *True* if the user pressed Ctrl+] (escape to debug monitor),
+    *False* if the CPU halted or an unrecoverable error occurred.
+    """
+    import select
+
+    out_fd = sys.stdout.fileno()
+
+    # Raw UART TX handler — write bytes directly to the terminal
+    old_tx = sys_emu.uart.on_tx
+    sys_emu.uart.on_tx = lambda b: os.write(out_fd, bytes([b]))
+
+    is_tty = os.isatty(sys.stdin.fileno())
+
+    if is_tty:
+        return _console_raw(sys_emu, old_tx, out_fd)
+    else:
+        return _console_pipe(sys_emu, old_tx, out_fd)
+
+
+def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
+    """Console loop with raw terminal input (interactive TTY)."""
+    import termios, tty, select
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    try:
+        tty.setraw(fd)
+        while True:
+            # --- Run CPU in a batch until idle / halt ---------------
+            for _ in range(10_000):
+                if sys_emu.cpu.halted:
+                    return False
+                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                    break
+                try:
+                    sys_emu.step()
+                except HaltError:
+                    return False
+                except TrapError as e:
+                    if sys_emu.cpu.ivt_base != 0:
+                        sys_emu.cpu._trap(e.ivec_id)
+                    else:
+                        return False
+
+            # --- Poll stdin (non-blocking) -------------------------
+            if select.select([sys.stdin], [], [], 0.02)[0]:
+                ch = os.read(fd, 1)
+                if ch == b'\x1d':          # Ctrl+]
+                    return True
+                if ch:
+                    sys_emu.uart.inject_input(ch)
+    except KeyboardInterrupt:
+        return False
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+        sys_emu.uart.on_tx = old_tx
+
+
+def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
+    """Console loop with piped/redirected stdin (non-interactive)."""
+    import select
+
+    fd = sys.stdin.fileno()
+
+    try:
+        while True:
+            # --- Run CPU until idle / halt -------------------------
+            for _ in range(500_000):
+                if sys_emu.cpu.halted:
+                    return False
+                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                    break
+                try:
+                    sys_emu.step()
+                except HaltError:
+                    return False
+                except TrapError as e:
+                    if sys_emu.cpu.ivt_base != 0:
+                        sys_emu.cpu._trap(e.ivec_id)
+                    else:
+                        return False
+
+            if sys_emu.cpu.halted:
+                return False
+
+            # --- Read from pipe (blocking, one byte) ---------------
+            ch = os.read(fd, 1)
+            if not ch:                     # EOF
+                return False
+            if ch == b'\x1d':              # Ctrl+]
+                return True
+            sys_emu.uart.inject_input(ch)
+    except (KeyboardInterrupt, OSError):
+        return False
+    finally:
+        sys_emu.uart.on_tx = old_tx
+
+
+# ---------------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(
         description="Megapad-64 System Monitor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
+               "  python cli.py --bios bios.asm\n"
+               "  python cli.py --bios bios.asm --storage disk.img\n"
                "  python cli.py --ram 1024 --storage disk.img\n"
-               "  python cli.py --bios bios.bin --storage disk.img\n"
-               "  python cli.py --load program.bin@0x100\n"
+               "  python cli.py --load program.bin@0x100 --run\n"
     )
     parser.add_argument("--ram", type=int, default=1024,
                         help="RAM size in KiB (default: 1024)")
@@ -680,9 +764,9 @@ def main():
     parser.add_argument("--load", type=str, action="append", default=[],
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
-                        help="BIOS binary or .asm file to load at address 0")
+                        help="BIOS binary or .asm file — boots and enters console")
     parser.add_argument("--run", action="store_true",
-                        help="Auto-boot and run after loading")
+                        help="Auto-boot and run after loading (non-BIOS mode)")
     args = parser.parse_args()
 
     # Create system
@@ -712,7 +796,6 @@ def main():
             try:
                 code = assemble(source, 0)
                 sys_emu.load_binary(0, code)
-                print(f"Assembled BIOS from '{args.bios}': {len(code)} bytes")
                 bios_loaded = True
             except AsmError as e:
                 print(f"BIOS assembly error: {e}")
@@ -721,14 +804,33 @@ def main():
             with open(args.bios, "rb") as f:
                 data = f.read()
             sys_emu.load_binary(0, data)
-            print(f"Loaded BIOS from '{args.bios}': {len(data)} bytes")
             bios_loaded = True
 
-    # Auto-boot: if --run is given, or if a BIOS was loaded
-    if args.run or bios_loaded:
+    # ---- BIOS mode: boot → console (the BIOS IS the interface) --------
+    if bios_loaded:
         sys_emu.boot(0)
-        print("Booting..." if bios_loaded else "Auto-booting...")
-        # Run until CPU halts or goes idle (waiting for input)
+        while True:
+            wants_monitor = run_console(sys_emu)
+            if not wants_monitor or sys_emu.cpu.halted:
+                break
+            # Ctrl+] pressed — drop to debug monitor
+            print("\n[Ctrl+] — debug monitor.  'console' to return, 'quit' to exit]")
+            cli = MegapadCLI(sys_emu)
+            cli.intro = ""  # No banner — the BIOS owns the screen
+            try:
+                cli.cmdloop()
+            except KeyboardInterrupt:
+                print()
+            if cli._return_to_console and not sys_emu.cpu.halted:
+                continue  # back to BIOS console
+            break
+        print()  # clean newline on exit
+        return
+
+    # ---- Non-BIOS mode: optional auto-run, then debug monitor ----------
+    if args.run:
+        sys_emu.boot(0)
+        print("Auto-booting...")
         for _ in range(1_000_000):
             if sys_emu.cpu.halted or sys_emu.cpu.idle:
                 break
@@ -741,7 +843,6 @@ def main():
         if output:
             print(output)
 
-    # Start CLI
     cli = MegapadCLI(sys_emu)
     try:
         cli.cmdloop()
