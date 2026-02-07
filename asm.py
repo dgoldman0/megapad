@@ -326,6 +326,12 @@ def _resolve_imm_or_label(tok: str, labels: dict, pc: int, bits: int,
         val = labels[tok]
         if relative:
             val = val - pc
+            # Range-check for signed relative offsets
+            lo = -(1 << (bits - 1))
+            hi = (1 << (bits - 1)) - 1
+            if val < lo or val > hi:
+                raise AsmError(0, f"Branch offset {val} out of range [{lo}, {hi}] "
+                                  f"for target '{tok}' (try LBR instead of BR)")
         return val
     return _parse_imm(tok)
 
