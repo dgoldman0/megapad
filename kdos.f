@@ -1,20 +1,24 @@
 \ =====================================================================
-\  KDOS v0.6 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.7 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
 \
 \  Subsystems:
-\    1. Utilities  — common words, tile-alignment helpers
-\    2. Buffers    — typed, tile-aligned data regions with descriptors
-\    3. Tile Ops   — buffer-level tile engine operations (SUM, ADD, etc.)
-\    4. Kernels    — metadata registry for named compute kernels
-\    5. Sample Kernels — kzero, kfill, kadd, kscale, kstats, kthresh
-\    6. Pipelines      — kernel pipeline engine with demo pipelines
-\    7. Storage        — disk persistence for buffers, file abstraction
-\    8. Benchmarking   — BENCH for timing via CYCLES
-\    9. Dashboard  — text-mode system overview via UART
-\   10. Help       — online reference for all KDOS words
+\    1. Utilities       — common words, CMOVE, +!, tile-alignment
+\    2. Buffers         — typed, tile-aligned data regions
+\    3. Tile Ops        — SIMD buffer operations (SUM, ADD, etc.)
+\    4. Kernels         — metadata registry for compute kernels
+\    5. Sample Kernels  — kzero, kfill, kadd, kscale, kstats, kthresh
+\    6. Pipelines       — kernel pipeline engine
+\    7. Storage         — disk persistence, file abstraction
+\    8. Scheduler       — cooperative & preemptive multitasking
+\    9. Screens         — interactive TUI (ANSI terminal)
+\   10. Data Ports      — NIC-based external data ingestion
+\   11. Benchmarking    — BENCH for timing via CYCLES
+\   12. Dashboard       — text-mode system overview
+\   13. Help            — online reference for all KDOS words
+\   14. Startup
 
 \ =====================================================================
 \  §1  Utility Words
@@ -47,6 +51,14 @@
     DROP DROP DROP
     ( just use . for now )
     DROP . ;
+
+\ -- Memory utility words --
+: +!    ( n addr -- )  DUP @ ROT + SWAP ! ;
+: CMOVE ( src dst u -- )
+    0 DO
+        OVER I + C@
+        OVER I + C!
+    LOOP 2DROP ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -997,7 +1009,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.6 "
+    ."  KDOS v0.7 "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -1024,6 +1036,8 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     ."   Tasks   : " TASK-COUNT @ .N CR
     ."   Files   : " FILE-COUNT @ .N CR
     ."   Storage : " DISK? IF 2 FG ." present" ELSE 1 FG ." not attached" THEN RESET-COLOR CR
+    ."   Ports   : " PORT-COUNT @ .N ."  bound  rx=" PORT-RX @ .N ."  drop=" PORT-DROP @ .N CR
+    ."   Network : " NET-RX? IF 2 FG ." frame waiting" ELSE DIM ." idle" THEN RESET-COLOR CR
     CR
     ."   Scheduler: " PREEMPT-ENABLED @ IF 2 FG ." preempt ON" ELSE DIM ." cooperative" THEN RESET-COLOR CR
     ."   Tasks rdy: " TASK-COUNT-READY .N CR ;
@@ -1124,6 +1138,10 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     BOLD ."  Storage:" RESET-COLOR CR
     ."   buf sec B.SAVE/LOAD  Persist buffers" CR
     ."   0 16 FILE name       Create file" CR
+    BOLD ."  Data Ports:" RESET-COLOR CR
+    ."   buf id PORT!          Bind NIC source" CR
+    ."   POLL / n INGEST       Receive frames" CR
+    ."   PORTS                 List bindings" CR
     BOLD ."  Tools:" RESET-COLOR CR
     ."   DASHBOARD / STATUS    System views" CR
     ."   ' w BENCH / .BENCH   Benchmark" CR ;
@@ -1168,7 +1186,113 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     ." Returned to REPL." CR ;
 
 \ =====================================================================
-\  §10  Benchmarking
+\  §10  Data Ports — NIC-Based External Data Ingestion
+\ =====================================================================
+\
+\  Frame protocol (6-byte header + payload, fits NIC MTU of 1500):
+\    +0  u8   SRC_ID       source identifier (0-255)
+\    +1  u8   DTYPE        data type (0=raw 1=u8 2=u16 3=u64 4=text 5=cmd)
+\    +2  u16  SEQ          sequence number (LE)
+\    +4  u16  PAYLOAD_LEN  payload byte count (LE)
+\    +6  ...  PAYLOAD      data bytes
+\
+\  Data flows in via NIC (emulated or real UDP), gets routed to buffers.
+\  Same Forth code works on real hardware — just swap the NIC.
+\
+\  Python side: data_sources.py provides SineSource, CounterSource, etc.
+\  that inject frames via system.nic.inject_frame() or UDP.
+
+\ -- Constants --
+6 CONSTANT /FRAME-HDR
+
+\ -- Frame receive buffer (1500 bytes = NIC MTU) --
+VARIABLE FRAME-BUF  1499 ALLOT
+
+\ -- Port table: 256 slots, each holds a buffer descriptor addr (0=unbound) --
+VARIABLE PORT-TABLE  255 CELLS ALLOT
+PORT-TABLE 256 CELLS 0 FILL
+
+\ -- Port registry count --
+VARIABLE PORT-COUNT
+0 PORT-COUNT !
+
+\ -- Stats --
+VARIABLE PORT-RX       \ total frames routed
+0 PORT-RX !
+VARIABLE PORT-DROP     \ frames dropped (unbound source)
+0 PORT-DROP !
+
+\ -- Temp for routing --
+VARIABLE ROUTE-BUF
+
+\ -- Port binding --
+: PORT-SLOT  ( id -- addr )     CELLS PORT-TABLE + ;
+: PORT!      ( buf id -- )      DUP PORT-SLOT @ 0= IF 1 PORT-COUNT +! THEN
+                                PORT-SLOT ! ;
+: PORT@      ( id -- buf|0 )    PORT-SLOT @ ;
+: UNPORT     ( id -- )          DUP PORT@ 0<> IF -1 PORT-COUNT +! THEN
+                                0 SWAP PORT-SLOT ! ;
+
+\ -- NIC convenience --
+: NET-RX?  ( -- flag )   NET-STATUS 2 AND 0<> ;
+
+\ -- Frame header accessors (valid after NET-RECV into FRAME-BUF) --
+: FRAME-SRC   ( -- id )    FRAME-BUF C@ ;
+: FRAME-TYPE  ( -- type )  FRAME-BUF 1 + C@ ;
+: FRAME-SEQ   ( -- seq )   FRAME-BUF 2 + C@  FRAME-BUF 3 + C@ 256 * + ;
+: FRAME-LEN   ( -- len )   FRAME-BUF 4 + C@  FRAME-BUF 5 + C@ 256 * + ;
+: FRAME-DATA  ( -- addr )  FRAME-BUF /FRAME-HDR + ;
+
+\ -- Receive one frame into FRAME-BUF, return raw byte count --
+: RECV-FRAME  ( -- len )   FRAME-BUF NET-RECV ;
+
+\ -- Route: receive frame, copy payload to bound buffer, return src_id --
+: ROUTE-FRAME  ( -- id|-1 )
+    NET-RX? 0= IF -1 EXIT THEN
+    RECV-FRAME DUP 0= IF DROP -1 EXIT THEN
+    DROP  \ discard raw length — we parse the header
+    FRAME-SRC PORT@ DUP 0= IF
+        DROP  1 PORT-DROP +!  -1
+    ELSE
+        ROUTE-BUF !
+        FRAME-DATA  ROUTE-BUF @ B.DATA
+        FRAME-LEN  ROUTE-BUF @ B.BYTES  MIN
+        CMOVE
+        1 PORT-RX +!
+        FRAME-SRC
+    THEN ;
+
+\ -- High-level words --
+: POLL    ( -- id|-1 )       ROUTE-FRAME ;
+: INGEST  ( n -- received )
+    0 SWAP   \ ( count n )
+    0 DO POLL -1 <> IF 1 + THEN LOOP ;
+
+\ -- Debug: print last received frame header --
+: .FRAME  ( -- )
+    ." src=" FRAME-SRC .
+    ." type=" FRAME-TYPE .
+    ." seq=" FRAME-SEQ .
+    ." len=" FRAME-LEN . CR ;
+
+\ -- List bound ports --
+: PORTS  ( -- )
+    ." --- Ports (" PORT-COUNT @ . ." ) ---" CR
+    256 0 DO
+        I PORT@ DUP 0<> IF
+            ."   src=" I . ."  -> buf @" . CR
+        ELSE DROP THEN
+    LOOP
+    ."   rx=" PORT-RX @ . ." drop=" PORT-DROP @ . CR ;
+
+\ -- Port stats one-liner --
+: PORT-STATS  ( -- )
+    ." ports=" PORT-COUNT @ .
+    ." rx=" PORT-RX @ .
+    ." drop=" PORT-DROP @ . ;
+
+\ =====================================================================
+\  §11  Benchmarking
 \ =====================================================================
 \
 \  BENCH ( xt -- cycles )
@@ -1188,7 +1312,7 @@ VARIABLE BENCH-T0
     ." cycles=" . CR ;
 
 \ =====================================================================
-\  §11  Dashboard
+\  §12  Dashboard
 \ =====================================================================
 
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
@@ -1202,7 +1326,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.6 — Kernel Dashboard OS" CR
+    ."  KDOS v0.7 — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -1211,6 +1335,7 @@ VARIABLE BENCH-T0
     CR PIPES
     CR TASKS
     CR FILES
+    CR PORTS
     CR HRULE ;
 
 \ -- Status: quick one-liner --
@@ -1220,16 +1345,17 @@ VARIABLE BENCH-T0
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
     ." files=" FILE-COUNT @ .
+    ." ports=" PORT-COUNT @ .
     ." disk=" DISK? IF ." yes" ELSE ." no" THEN
     ."  HERE=" HERE . CR ;
 
 \ =====================================================================
-\  §12  Help System
+\  §13  Help System
 \ =====================================================================
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.6 — Quick Reference" CR
+    ."  KDOS v0.7 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -1289,6 +1415,14 @@ VARIABLE BENCH-T0
     ."    PREEMPT-ON             Enable timer preemption" CR
     ."    PREEMPT-OFF            Disable timer preemption" CR
     ."    TASKS                  List all tasks" CR
+    CR ."  DATA PORT WORDS:" CR
+    ."    buf id PORT!           Bind source id to buffer" CR
+    ."    id UNPORT              Unbind source" CR
+    ."    POLL                   Receive & route one frame" CR
+    ."    n INGEST               Receive & route n frames" CR
+    ."    NET-RX?                Is a NIC frame waiting?" CR
+    ."    PORTS                  List port bindings" CR
+    ."    .FRAME                 Show last frame header" CR
     CR ."  SCREENS & TOOLS:" CR
     ."    SCREENS                Interactive TUI (1-6, q, r)" CR
     ."    DASHBOARD              Full system overview" CR
@@ -1299,11 +1433,11 @@ VARIABLE BENCH-T0
     CR HRULE ;
 
 \ =====================================================================
-\  §13  Startup
+\  §14  Startup
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.6 — Kernel Dashboard OS" CR
+."  KDOS v0.7 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR

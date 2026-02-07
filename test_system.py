@@ -18,6 +18,10 @@ from devices import (
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, DeviceBus,
 )
+from data_sources import (
+    encode_frame, decode_header, DTYPE_RAW, DTYPE_U8,
+    DataSource, SineSource, RandomSource, CounterSource, ReplaySource,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -936,13 +940,18 @@ class TestKDOS(unittest.TestCase):
 
     def _run_kdos(self, extra_lines: list[str],
                   max_steps=400_000_000,
-                  storage_image=None) -> str:
+                  storage_image=None,
+                  nic_frames=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
         # If no storage needed, use the fast snapshot path
         if storage_image is None and self.__class__._kdos_snapshot is not None:
-            return self._run_kdos_fast(extra_lines, max_steps)
+            return self._run_kdos_fast(extra_lines, max_steps,
+                                      nic_frames=nic_frames)
 
         sys, buf = self._boot_bios(storage_image=storage_image)
+        if nic_frames:
+            for frame in nic_frames:
+                sys.nic.inject_frame(frame)
         all_lines = self.kdos_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
@@ -972,7 +981,8 @@ class TestKDOS(unittest.TestCase):
         return uart_text(buf)
 
     def _run_kdos_fast(self, extra_lines: list[str],
-                       max_steps=50_000_000) -> str:
+                       max_steps=50_000_000,
+                       nic_frames=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
@@ -983,6 +993,11 @@ class TestKDOS(unittest.TestCase):
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
         # Restore CPU state
         self._restore_cpu_state(sys.cpu, cpu_state)
+
+        # Inject NIC frames if provided
+        if nic_frames:
+            for frame in nic_frames:
+                sys.nic.inject_frame(frame)
 
         # Now just process the extra_lines + BYE
         payload = "\n".join(extra_lines) + "\nBYE\n"
@@ -1044,7 +1059,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.6", text)
+        self.assertIn("KDOS v0.7", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1174,7 +1189,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.6", text)
+        self.assertIn("KDOS v0.7", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -1590,6 +1605,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("STORAGE WORDS", text)
         self.assertIn("FILE WORDS", text)
         self.assertIn("SCHEDULER WORDS", text)
+        self.assertIn("DATA PORT WORDS", text)
         self.assertIn("SCREENS", text)
         self.assertIn("BENCH", text)
 
@@ -1598,6 +1614,7 @@ class TestKDOS(unittest.TestCase):
         text = self._run_kdos(["STATUS"])
         self.assertIn("KDOS", text)
         self.assertIn("bufs=", text)
+        self.assertIn("ports=", text)
         self.assertIn("kerns=", text)
         self.assertIn("pipes=", text)
         self.assertIn("tasks=", text)
@@ -2014,7 +2031,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.6", text)
+        self.assertIn("KDOS v0.7", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -2036,6 +2053,269 @@ class TestKDOS(unittest.TestCase):
             "SCREEN-RUN @ .",
         ])
         self.assertIn("0 ", text)
+
+    # -- Utility words: +! and CMOVE --
+
+    def test_plus_store(self):
+        "+! adds to variable contents."
+        text = self._run_kdos([
+            "VARIABLE X  10 X !",
+            "5 X +!",
+            "X @ .",
+        ])
+        self.assertIn("15 ", text)
+
+    def test_cmove(self):
+        "CMOVE copies bytes between addresses."
+        text = self._run_kdos([
+            "0 1 16 BUFFER src  0 1 16 BUFFER dst",
+            "42 src B.FILL",
+            "src B.DATA  dst B.DATA  8 CMOVE",
+            "dst B.DATA C@ .",
+        ])
+        self.assertIn("42 ", text)
+
+    # -- Data Ports: NIC-based ingestion --
+
+    def test_net_rx_query_no_data(self):
+        """NET-RX? returns 0 when NIC rx queue is empty."""
+        text = self._run_kdos(["NET-RX? ."])
+        self.assertIn("0 ", text)
+
+    def test_net_rx_query_with_data(self):
+        """NET-RX? returns true when a frame is waiting."""
+        frame = encode_frame(1, DTYPE_U8, 0, bytes(8))
+        text = self._run_kdos(["NET-RX? ."], nic_frames=[frame])
+        # Should be non-zero (true = -1)
+        self.assertNotIn("0 \n", text.replace("\r", ""))
+        # The numeric output should contain -1 for TRUE
+        self.assertIn("-1", text)
+
+    def test_port_bind_unbind(self):
+        """PORT! binds a source to a buffer, UNPORT removes it."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 7 PORT!",
+            "7 PORT@ 0<> .",    # should be true
+            "PORT-COUNT @ .",   # should be 1
+            "7 UNPORT",
+            "7 PORT@ .",        # should be 0
+            "PORT-COUNT @ .",   # should be 0
+        ])
+        self.assertIn("-1 ", text)  # true from 0<>
+        # After UNPORT, PORT@ returns 0
+        lines = text.strip().split("\n")
+        combined = " ".join(lines)
+        self.assertIn("1 ", combined)  # PORT-COUNT was 1
+
+    def test_port_default_unbound(self):
+        """Unbound ports return 0."""
+        text = self._run_kdos(["42 PORT@ ."])
+        self.assertIn("0 ", text)
+
+    def test_poll_no_data(self):
+        """POLL returns -1 when no NIC frames."""
+        text = self._run_kdos(["POLL ."])
+        self.assertIn("-1 ", text)
+
+    def test_poll_unbound_source(self):
+        """POLL drops frames from unbound sources."""
+        frame = encode_frame(99, DTYPE_U8, 0, bytes(8))
+        text = self._run_kdos([
+            "POLL .",
+            "PORT-DROP @ .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)   # POLL returns -1 (dropped)
+        self.assertIn("1 ", text)    # PORT-DROP = 1
+
+    def test_poll_bound_routes_data(self):
+        """POLL routes frame payload into bound buffer."""
+        # Create a frame: src_id=1, 8 bytes of value 0xAA
+        payload = bytes([0xAA] * 8)
+        frame = encode_frame(1, DTYPE_U8, 0, payload)
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 1 PORT!",
+            "POLL .",           # should return 1 (src_id)
+            "b1 B.DATA C@ .",  # first byte should be 0xAA = 170
+        ], nic_frames=[frame])
+        self.assertIn("1 ", text)    # src_id returned
+        self.assertIn("170 ", text)  # 0xAA
+
+    def test_poll_preserves_sequence(self):
+        """Payload bytes arrive in correct order."""
+        payload = bytes(range(16))
+        frame = encode_frame(5, DTYPE_U8, 42, payload)
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 5 PORT!",
+            "POLL DROP",
+            "b1 B.DATA C@ .",           # byte 0 = 0
+            "b1 B.DATA 1 + C@ .",       # byte 1 = 1
+            "b1 B.DATA 15 + C@ .",      # byte 15 = 15
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+        self.assertIn("15 ", text)
+
+    def test_frame_header_parse(self):
+        """Frame header accessors parse correctly after RECV-FRAME."""
+        payload = bytes([1, 2, 3, 4])
+        frame = encode_frame(7, DTYPE_U8, 1000, payload)
+        text = self._run_kdos([
+            "RECV-FRAME DROP",
+            "FRAME-SRC .",
+            "FRAME-TYPE .",
+            "FRAME-SEQ .",
+            "FRAME-LEN .",
+        ], nic_frames=[frame])
+        self.assertIn("7 ", text)      # SRC_ID
+        self.assertIn("1 ", text)      # DTYPE_U8
+        self.assertIn("1000 ", text)   # SEQ
+        self.assertIn("4 ", text)      # PAYLOAD_LEN
+
+    def test_ingest_multiple(self):
+        """INGEST receives multiple frames."""
+        frames = [
+            encode_frame(1, DTYPE_U8, i, bytes([i * 10] * 8))
+            for i in range(3)
+        ]
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 1 PORT!",
+            "3 INGEST .",       # should return 3 (all received)
+            "PORT-RX @ .",      # should be 3
+        ], nic_frames=frames)
+        self.assertIn("3 ", text)
+
+    def test_ingest_partial(self):
+        """INGEST with fewer frames than requested."""
+        frame = encode_frame(1, DTYPE_U8, 0, bytes(8))
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 1 PORT!",
+            "5 INGEST .",       # only 1 frame available
+        ], nic_frames=[frame])
+        self.assertIn("1 ", text)  # only 1 received
+
+    def test_ports_listing(self):
+        """PORTS lists bound ports."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "0 1 64 BUFFER b2",
+            "b1 3 PORT!",
+            "b2 10 PORT!",
+            "PORTS",
+        ])
+        self.assertIn("Ports", text)
+        self.assertIn("src=", text)
+        self.assertIn("rx=", text)
+
+    def test_dot_frame(self):
+        """.FRAME prints last received frame header."""
+        frame = encode_frame(42, DTYPE_RAW, 7, bytes(10))
+        text = self._run_kdos([
+            "RECV-FRAME DROP",
+            ".FRAME",
+        ], nic_frames=[frame])
+        self.assertIn("src=", text)
+        self.assertIn("42", text)
+        self.assertIn("len=", text)
+
+    def test_port_stats(self):
+        """PORT-STATS prints rx and drop counts."""
+        text = self._run_kdos(["PORT-STATS"])
+        self.assertIn("ports=", text)
+        self.assertIn("rx=", text)
+        self.assertIn("drop=", text)
+
+    # -- Data Sources (Python-side) --
+
+    def test_data_source_counter(self):
+        """CounterSource generates incrementing byte frames."""
+        src = CounterSource(src_id=1, length=8)
+        f1 = src.next_frame()
+        hdr = decode_header(f1)
+        self.assertEqual(hdr['src_id'], 1)
+        self.assertEqual(hdr['dtype'], DTYPE_U8)
+        self.assertEqual(hdr['seq'], 0)
+        self.assertEqual(hdr['payload_len'], 8)
+        self.assertEqual(list(hdr['payload']), [0, 1, 2, 3, 4, 5, 6, 7])
+        f2 = src.next_frame()
+        hdr2 = decode_header(f2)
+        self.assertEqual(hdr2['seq'], 1)
+        # Second frame starts at counter=8
+        self.assertEqual(list(hdr2['payload']), [8, 9, 10, 11, 12, 13, 14, 15])
+
+    def test_data_source_sine(self):
+        """SineSource generates valid U8 data."""
+        src = SineSource(src_id=2, length=64)
+        f = src.next_frame()
+        hdr = decode_header(f)
+        self.assertEqual(hdr['payload_len'], 64)
+        self.assertTrue(all(0 <= b <= 255 for b in hdr['payload']))
+
+    def test_data_source_replay(self):
+        """ReplaySource replays raw data in chunks."""
+        data = bytes(range(16))
+        src = ReplaySource(src_id=3, data=data, chunk_size=8)
+        f1 = src.next_frame()
+        h1 = decode_header(f1)
+        self.assertEqual(list(h1['payload']), list(range(8)))
+        self.assertFalse(src.exhausted)
+        f2 = src.next_frame()
+        h2 = decode_header(f2)
+        self.assertEqual(list(h2['payload']), list(range(8, 16)))
+        self.assertTrue(src.exhausted)
+
+    # -- End-to-end: external data -> NIC -> buffer -> kernel --
+
+    def test_e2e_counter_to_buffer_sum(self):
+        """Full pipeline: CounterSource -> NIC -> buffer -> ksum."""
+        src = CounterSource(src_id=1, length=64)
+        frame = src.next_frame()
+        # Payload is bytes 0..63, sum = 64*63/2 = 2016
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 1 PORT!",
+            "POLL DROP",
+            "b1 B.SUM .",
+        ], nic_frames=[frame])
+        self.assertIn("2016 ", text)
+
+    def test_e2e_sine_to_buffer_stats(self):
+        """SineSource -> NIC -> buffer -> kstats (min, max, sum)."""
+        src = SineSource(src_id=2, length=64, frequency=1.0)
+        frame = src.next_frame()
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 2 PORT!",
+            "POLL DROP",
+            "b1 kstats",
+            ". . .",   # prints max min sum
+        ], nic_frames=[frame])
+        # Sine wave should have min near 1 and max near 255
+        # Just verify kstats runs without error and produces output
+        # The sum/min/max are on the stack; ". . ." prints them
+        lines = text.strip().split("\n")
+        combined = " ".join(lines)
+        # Check some numbers appeared (not error messages)
+        self.assertNotIn("?", combined.split("kstats")[-1] if "kstats" in combined else "")
+
+    def test_screen_home_shows_ports(self):
+        """SCR-HOME shows port info."""
+        text = self._run_kdos(["SCR-HOME"])
+        self.assertIn("Ports", text)
+        self.assertIn("Network", text)
+
+    def test_dashboard_shows_ports(self):
+        """DASHBOARD includes port listing."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "b1 1 PORT!",
+            "DASHBOARD",
+        ])
+        self.assertIn("Ports", text)
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.6 — Interactive Screens**
+**Current Status: KDOS v0.7 — Data Ports (NIC-Based Ingestion)**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (168 tests)
+# Full test suite (190+ tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -71,25 +71,37 @@ my-task T.INFO                \ Show task status (DONE)
 SCREENS                       \ Enter full-screen TUI
                               \ Press 1-6 to switch screens
                               \ Press q to quit, r to refresh
+
+\ Data ports (NIC-based ingestion)
+\ Python side: inject frames via data_sources.py
+\   from data_sources import CounterSource, inject
+\   inject(system, CounterSource(src_id=1, length=64), count=5)
+\ Forth side: bind source to buffer, poll for data
+0 1 64 BUFFER sensor           \ Create receive buffer
+sensor 1 PORT!                 \ Bind source 1 to buffer
+POLL .                         \ Receive & route one frame
+sensor B.SUM .                 \ Process received data
+PORTS                          \ List all port bindings
 ```
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed (v0.6)
+### ✅ Completed (v0.7)
 
 **BIOS v0.4** (128 words, ~4400 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
 - ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
 - Comment words: `\` (line comment), `(` (paren comment)
-- Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
+- Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
 - Storage device support: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.6** (~1310 lines Forth):
+**KDOS v0.7** (~1445 lines Forth):
+- **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
@@ -104,11 +116,16 @@ SCREENS                       \ Enter full-screen TUI
 - **Interactive screens**: Full-screen ANSI TUI with 6 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
-- **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, DISK-INFO
+- **Data ports**: NIC-based external data ingestion with frame protocol
+- **Port binding**: PORT!, UNPORT, PORT@, 256-slot source→buffer mapping
+- **Frame routing**: POLL, INGEST, ROUTE-FRAME, NET-RX?, RECV-FRAME
+- **Frame protocol**: 6-byte header (src_id, dtype, seq, len) + payload
+- **Python data sources**: data_sources.py — SineSource, CounterSource, RandomSource, ReplaySource, CSVSource
+- **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, PORTS, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
 
-**Tests**: 168 passing
-- 95 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, screens, ANSI, dashboard)
+**Tests**: 190+ passing
+- 117+ KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, screens, data ports, dashboard)
 - 49 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?)
 - 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
@@ -148,13 +165,25 @@ SCREENS                       \ Enter full-screen TUI
 - SCREENS entry point with event loop (1-6 switch, q quit, r refresh)
 - Each screen uses color, bold/dim for visual hierarchy
 
-**Phase 5: Advanced Kernels** (not started)
+**Phase 5: Data Ports** (✅ complete — v0.7)
+- NIC-based external data ingestion via frame protocol
+- 6-byte header: src_id, dtype, seq (LE16), payload_len (LE16)
+- Port table: 256 source-to-buffer bindings with PORT!/UNPORT/PORT@
+- Frame routing: POLL, INGEST, ROUTE-FRAME — receive NIC frames and copy payload into bound buffers
+- NET-RX? convenience, RECV-FRAME, frame header accessors
+- Introspection: PORTS, .FRAME, PORT-STATS
+- Python data_sources.py: SineSource, CounterSource, RandomSource, ReplaySource, CSVSource
+- Injection: inject() for emulator, send_udp() for real hardware bridge
+- End-to-end: external data → NIC frame → buffer → tile-engine kernel processing
+- +! and CMOVE utility words added to §1
+
+**Phase 6: Advanced Kernels** (not started)
 - Matrix operations: GEMM, GEMV via tile engine
 - Image processing: convolution, resize, filters
 - Signal processing: FFT, correlation
 - String/text: search, parse, format
 
-**Phase 6: User Experience** (not started)
+**Phase 7: User Experience** (not started)
 - REPL improvements: history, tab completion, multi-line editing
 - Error messages with context and suggestions
 - Online help with examples
@@ -291,7 +320,7 @@ The BIOS provides:
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
 
-All required BIOS extensions for KDOS are **complete** as of v0.6.
+All required BIOS extensions for KDOS are **complete** as of v0.7.
 
 ---
 
@@ -690,15 +719,15 @@ task-descriptor:
 
 ---
 
-## 6. Screen Flow (v0.6 Implementation)
+## 6. Screen Flow (v0.7 Implementation)
 
-KDOS v0.6 provides a full-screen ANSI TUI accessed via the `SCREENS` word.
+KDOS v0.7 provides a full-screen ANSI TUI accessed via the `SCREENS` word.
 Six screens are navigable via number keys; `q` quits, `r` refreshes.
 
 All screens share a common header (tab bar) and footer (key hints):
 
 ```
- KDOS v0.6  [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help
+ KDOS v0.7  [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help
 ────────────────────────────────────────────────────────────────
   (screen content)
 
@@ -718,6 +747,10 @@ provide visual hierarchy within each screen.
    Kernels : 7
    Pipes   : 3
    Tasks   : 0
+   Files   : 0
+   Storage : present
+   Ports   : 0 bound  rx=0  drop=0
+   Network : idle
    Files   : 0
    Storage : present          (green if present, red if not)
 
@@ -805,6 +838,10 @@ DONE/FREE=dim.
   Storage:
    buf sec B.SAVE/LOAD  Persist buffers
    0 16 FILE name       Create file
+  Data Ports:
+   buf id PORT!          Bind NIC source
+   POLL / n INGEST       Receive frames
+   PORTS                 List bindings
   Tools:
    DASHBOARD / STATUS    System views
    ' w BENCH / .BENCH   Benchmark
@@ -826,6 +863,137 @@ BEGIN
     KEY? IF KEY HANDLE-KEY THEN
     SCREEN-RUN @
 0= UNTIL
+```
+
+---
+
+## 7. Data Ports — NIC-Based External Data Ingestion (v0.7)
+
+KDOS v0.7 introduces **Data Ports** — a system for ingesting external data
+through the NIC (Network Interface Controller) and routing it directly into
+buffers for kernel processing.
+
+### Design Philosophy
+
+The same Forth code works identically whether data arrives from:
+- **Test harness**: `inject_frame()` in Python tests
+- **Python data sources**: `data_sources.py` programmatic injection
+- **Real UDP network**: NIC's built-in UDP passthrough mode
+- **Real hardware**: Swap the NIC emulator for a real Ethernet controller
+
+This means kernels developed and tested in the emulator are **immediately
+portable** to real hardware — no code changes needed.
+
+### Frame Protocol
+
+All data enters as NIC frames with a 6-byte header:
+
+```
+Offset  Size  Field
+  +0    u8    SRC_ID       Source identifier (0-255)
+  +1    u8    DTYPE        Data type (0=raw, 1=u8, 2=u16, 3=u64, 4=text, 5=cmd)
+  +2    u16   SEQ          Sequence number (LE)
+  +4    u16   PAYLOAD_LEN  Payload byte count (LE)
+  +6    ...   PAYLOAD      Data bytes (up to 1494)
+```
+
+### Port Binding
+
+Each source ID (0-255) can be bound to a buffer descriptor:
+
+| Word | Stack | Description |
+|---|---|---|
+| `PORT!` | `( buf id -- )` | Bind source ID to buffer |
+| `UNPORT` | `( id -- )` | Unbind source |
+| `PORT@` | `( id -- buf\|0 )` | Query binding (0 = unbound) |
+
+### Frame Receive & Route
+
+| Word | Stack | Description |
+|---|---|---|
+| `NET-RX?` | `( -- flag )` | Is a NIC frame waiting? |
+| `RECV-FRAME` | `( -- len )` | Receive frame into FRAME-BUF |
+| `POLL` | `( -- id\|-1 )` | Receive + route one frame |
+| `INGEST` | `( n -- received )` | Receive + route up to n frames |
+
+### Frame Header Accessors
+
+After `RECV-FRAME`, the header fields are available:
+
+| Word | Stack | Description |
+|---|---|---|
+| `FRAME-SRC` | `( -- id )` | Source identifier |
+| `FRAME-TYPE` | `( -- type )` | Data type |
+| `FRAME-SEQ` | `( -- seq )` | Sequence number |
+| `FRAME-LEN` | `( -- len )` | Payload byte count |
+| `FRAME-DATA` | `( -- addr )` | Payload start address |
+
+### Introspection
+
+| Word | Stack | Description |
+|---|---|---|
+| `PORTS` | `( -- )` | List all bound ports |
+| `.FRAME` | `( -- )` | Print last received frame header |
+| `PORT-STATS` | `( -- )` | Print rx/drop counters |
+
+### Python Data Sources (`data_sources.py`)
+
+The companion Python module provides data source classes that generate
+frames matching the protocol:
+
+| Class | Description |
+|---|---|
+| `SineSource` | Sine wave as U8 vector (amplitude, frequency, offset) |
+| `CounterSource` | Incrementing byte counter (easy to verify) |
+| `RandomSource` | Pseudo-random bytes (noise injection) |
+| `ReplaySource` | Replay a fixed byte sequence in chunks |
+| `CSVSource` | Read CSV column as U8 vector frames |
+
+**Injection helpers**:
+```python
+from data_sources import CounterSource, SineSource, inject, inject_raw
+
+# Inject 10 frames of incrementing bytes
+src = CounterSource(src_id=1, length=64)
+inject(system, src, count=10)
+
+# Inject a single hand-crafted frame
+inject_raw(system, src_id=5, payload=bytes([1,2,3,4]))
+
+# Bridge to real hardware via UDP
+from data_sources import send_udp
+send_udp(SineSource(src_id=1), host='192.168.1.100', port=9000, count=100)
+```
+
+### End-to-End Example
+
+```forth
+\ 1. Create a receive buffer
+0 1 64 BUFFER sensor
+
+\ 2. Bind NIC source 1 to the buffer
+sensor 1 PORT!
+
+\ 3. Python side injects a CounterSource frame (bytes 0-63)
+\    (via inject_frame or UDP)
+
+\ 4. Receive and route
+POLL .          \ prints 1 (source ID)
+
+\ 5. Process with tile engine
+sensor B.SUM .  \ prints 2016 (sum of 0+1+...+63)
+sensor B.MIN .  \ prints 0
+sensor B.MAX .  \ prints 63
+
+\ 6. Run through a pipeline
+3 PIPELINE data-pipe
+: step-ingest  sensor 1 PORT!  POLL DROP ;
+: step-process sensor B.SUM . ;
+: step-report  ." done" CR ;
+' step-ingest data-pipe P.ADD
+' step-process data-pipe P.ADD
+' step-report data-pipe P.ADD
+data-pipe P.RUN
 ```
 
 ---
@@ -857,8 +1025,9 @@ Summary:
 - **Phase 2**: Storage & Persistence (✅ v0.4)
 - **Phase 3**: Scheduler & Preemption (✅ v0.5)
 - **Phase 4**: Interactive Screens (✅ v0.6)
-- **Phase 5**: Advanced Kernels (planned)
-- **Phase 6**: User Experience (planned)
+- **Phase 5**: Data Ports (✅ v0.7)
+- **Phase 6**: Advanced Kernels (planned)
+- **Phase 7**: User Experience (planned)
 
 ---
 
