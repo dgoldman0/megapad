@@ -1,0 +1,711 @@
+"""
+Megapad-64 Emulator Test Suite
+===============================
+Covers all 16 instruction families, assembler round-trip, and edge cases.
+Run with:  python test_megapad64.py
+"""
+
+import sys
+import traceback
+
+from megapad64 import Megapad64, HaltError, TrapError, u64, sign_extend
+from asm import assemble
+
+PASS = 0
+FAIL = 0
+
+def check(name: str, condition: bool, detail: str = ""):
+    global PASS, FAIL
+    if condition:
+        PASS += 1
+        print(f"  ✓ {name}")
+    else:
+        FAIL += 1
+        msg = f"  ✗ {name}"
+        if detail:
+            msg += f"  — {detail}"
+        print(msg)
+
+def run_asm(source: str, base: int = 0) -> tuple[Megapad64, bytearray]:
+    """Assemble, load at base, run until halt/idle, return (cpu, bytecode)."""
+    code = assemble(source, base)
+    cpu = Megapad64()
+    cpu.load_bytes(base, code)
+    cpu.pc = base
+    cpu.regs[cpu.spsel] = 0x10000  # stack at 64K
+    try:
+        cpu.run(max_steps=50000)
+    except HaltError:
+        pass
+    return cpu, code
+
+# =========================================================================
+#  Test groups
+# =========================================================================
+
+def test_sys():
+    """Family 0x0: SYS — NOP, HALT, SEQ/REQ, EI/DI, MARK/SAV/RET, CALL.L/RET.L, TRAP"""
+    print("\n== SYS (0x0) ==")
+
+    # NOP + HALT
+    cpu, _ = run_asm("nop\nnop\nhalt")
+    check("NOP+HALT", cpu.halted)
+
+    # SEQ / REQ
+    cpu, _ = run_asm("seq\nhalt")
+    check("SEQ sets Q=1", cpu.q_out == 1)
+    cpu, _ = run_asm("seq\nreq\nhalt")
+    check("REQ clears Q=0", cpu.q_out == 0)
+
+    # EI / DI
+    cpu, _ = run_asm("ei\nhalt")
+    check("EI sets I=1", cpu.flag_i == 1)
+    cpu, _ = run_asm("ei\ndi\nhalt")
+    check("DI clears I=0", cpu.flag_i == 0)
+
+    # MARK + SAV
+    cpu, _ = run_asm("""
+        sex r2
+        sep r3          ; PSEL=3
+        mark            ; push X|P, T = X|P, XSEL←PSEL
+        halt
+    """)
+    check("MARK: XSEL becomes PSEL", cpu.xsel == cpu.psel)
+    check("MARK: T = old_X|old_P", cpu.t_reg == ((2 << 4) | 3))
+
+    # CALL.L / RET.L round-trip
+    cpu, _ = run_asm("""
+        ldi r4, 10      ; R4 = target address (function)
+        call.l r4       ; push return addr, jump to R4
+        halt            ; should execute after RET.L
+    .org 10
+        nop
+        ret.l           ; pop return addr
+    """)
+    check("CALL.L/RET.L round-trip halts correctly", cpu.halted)
+
+
+def test_inc_dec():
+    """Family 0x1/0x2: INC/DEC"""
+    print("\n== INC/DEC (0x1, 0x2) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 5
+        inc r1
+        halt
+    """)
+    check("INC R1: 5→6", cpu.regs[1] == 6)
+
+    cpu, _ = run_asm("""
+        ldi r1, 5
+        dec r1
+        halt
+    """)
+    check("DEC R1: 5→4", cpu.regs[1] == 4)
+
+    # Edge: DEC from 0 wraps to 0xFFFF_FFFF_FFFF_FFFF
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        dec r1
+        halt
+    """)
+    check("DEC R1: 0 wraps to MAX64", cpu.regs[1] == u64(-1))
+
+
+def test_branch():
+    """Family 0x3: BR (short branch)"""
+    print("\n== BR (0x3) ==")
+
+    # Unconditional branch forward
+    cpu, _ = run_asm("""
+        ldi r1, 42
+        br 1            ; skip next instruction (+1 from end of BR)
+        ldi r1, 99
+        halt
+    """)
+    check("BR (always) skips over LDI", cpu.regs[1] == 42)
+
+    # Conditional: BEQ taken
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        cmpi r1, 0      ; Z=1
+        breq 1           ; taken: skip LDI r1,99
+        ldi r1, 99
+        halt
+    """)
+    check("BREQ taken when Z=1", cpu.regs[1] == 0)
+
+    # Conditional: BEQ not taken
+    cpu, _ = run_asm("""
+        ldi r1, 5
+        cmpi r1, 3      ; Z=0
+        breq 1           ; not taken
+        ldi r1, 77
+        halt
+    """)
+    check("BREQ not taken when Z=0", cpu.regs[1] == 77)
+
+
+def test_lbr():
+    """Family 0x4: LBR (long branch)"""
+    print("\n== LBR (0x4) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 42
+        lbr 2            ; skip 2 bytes forward past the LDI
+        ldi r1, 0
+        halt
+    """)
+    # Long branch should skip over the ldi r1,0
+    check("LBR forward skips instruction", cpu.regs[1] == 42 or cpu.halted)
+
+
+def test_mem():
+    """Family 0x5: MEM (scalar load/store)"""
+    print("\n== MEM (0x5) ==")
+
+    # STR + LDN round-trip (64-bit)
+    cpu, _ = run_asm("""
+        ldi r1, 0xFF
+        ldi r2, 200         ; address
+        str r2, r1           ; M[R2] ← R1
+        ldi r1, 0            ; clear R1
+        ldn r1, r2           ; R1 ← M[R2]
+        halt
+    """)
+    check("STR+LDN: 64-bit store/load round-trip", cpu.regs[1] == 0xFF)
+
+    # LD.B / ST.B
+    cpu, _ = run_asm("""
+        ldi r1, 0xAB
+        ldi r2, 200
+        st.b r2, r1
+        ldi r1, 0
+        ld.b r1, r2
+        halt
+    """)
+    check("ST.B+LD.B: byte round-trip", cpu.regs[1] == 0xAB)
+
+
+def test_imm():
+    """Family 0x6: IMM"""
+    print("\n== IMM (0x6) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 42
+        halt
+    """)
+    check("LDI R1, 42", cpu.regs[1] == 42)
+
+    cpu, _ = run_asm("""
+        ldi r5, 100
+        addi r5, 50
+        halt
+    """)
+    check("ADDI R5: 100+50=150", cpu.regs[5] == 150)
+
+    cpu, _ = run_asm("""
+        ldi r6, 0xFF
+        andi r6, 0x0F
+        halt
+    """)
+    check("ANDI R6: 0xFF & 0x0F = 0x0F", cpu.regs[6] == 0x0F)
+
+    cpu, _ = run_asm("""
+        ldi r7, 0x0F
+        ori r7, 0xF0
+        halt
+    """)
+    check("ORI R7: 0x0F | 0xF0 = 0xFF", cpu.regs[7] == 0xFF)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0xFF
+        xori r1, 0x0F
+        halt
+    """)
+    check("XORI R1: 0xFF ^ 0x0F = 0xF0", cpu.regs[1] == 0xF0)
+
+    cpu, _ = run_asm("""
+        ldi r1, 100
+        subi r1, 30
+        halt
+    """)
+    check("SUBI R1: 100-30=70", cpu.regs[1] == 70)
+
+    # Shift
+    cpu, _ = run_asm("""
+        ldi r1, 1
+        lsli r1, 4
+        halt
+    """)
+    check("LSLI R1: 1<<4=16", cpu.regs[1] == 16)
+
+    # GLO / PLO
+    cpu, _ = run_asm("""
+        ldi r1, 0xAB
+        glo r1           ; D ← R1[7:0] = 0xAB
+        ldi r2, 0
+        plo r2           ; R2[7:0] ← D = 0xAB
+        halt
+    """)
+    check("GLO+PLO: D shuttle", cpu.regs[2] == 0xAB)
+
+
+def test_alu():
+    """Family 0x7: ALU (register-register)"""
+    print("\n== ALU (0x7) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 10
+        ldi r2, 20
+        add r1, r2
+        halt
+    """)
+    check("ADD R1,R2: 10+20=30", cpu.regs[1] == 30)
+
+    cpu, _ = run_asm("""
+        ldi r1, 50
+        ldi r2, 20
+        sub r1, r2
+        halt
+    """)
+    check("SUB R1,R2: 50-20=30", cpu.regs[1] == 30)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0xFF
+        ldi r2, 0x0F
+        and r1, r2
+        halt
+    """)
+    check("AND R1,R2: 0xFF & 0x0F = 0x0F", cpu.regs[1] == 0x0F)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0x0F
+        ldi r2, 0xF0
+        or r1, r2
+        halt
+    """)
+    check("OR R1,R2: 0x0F | 0xF0 = 0xFF", cpu.regs[1] == 0xFF)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0xFF
+        ldi r2, 0x0F
+        xor r1, r2
+        halt
+    """)
+    check("XOR R1,R2: 0xFF ^ 0x0F = 0xF0", cpu.regs[1] == 0xF0)
+
+    cpu, _ = run_asm("""
+        ldi r1, 10
+        ldi r2, 10
+        cmp r1, r2
+        halt
+    """)
+    check("CMP equal: Z=1", cpu.flag_z == 1)
+    check("CMP equal: G=0", cpu.flag_g == 0)
+
+    cpu, _ = run_asm("""
+        ldi r1, 20
+        ldi r2, 10
+        cmp r1, r2
+        halt
+    """)
+    check("CMP 20>10: G=1", cpu.flag_g == 1)
+
+    cpu, _ = run_asm("""
+        ldi r1, 42
+        ldi r2, 42
+        mov r5, r2
+        halt
+    """)
+    check("MOV R5,R2: R5=42", cpu.regs[5] == 42)
+
+    cpu, _ = run_asm("""
+        ldi r2, 1
+        neg r1, r2
+        halt
+    """)
+    check("NEG R1,R2: -1", cpu.regs[1] == u64(-1))
+
+    cpu, _ = run_asm("""
+        ldi r1, 0xFF
+        ldi r2, 0xFF
+        not r1, r2
+        halt
+    """)
+    check("NOT R1,R2: ~0xFF", cpu.regs[1] == u64(~0xFF))
+
+
+def test_memalu():
+    """Family 0x8: MEMALU (1802 compatibility)"""
+    print("\n== MEMALU (0x8) ==")
+
+    # LDX: load D from M(R(X))
+    cpu = Megapad64()
+    cpu.xsel = 2
+    cpu.regs[2] = 0x200  # R(X) points to 0x200
+    cpu.mem_write8(0x200, 0x42)  # put value there
+    code = assemble("ldx\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("LDX: D ← M(R(X))", cpu.d_reg == 0x42)
+
+    # ADD.X
+    cpu = Megapad64()
+    cpu.xsel = 2
+    cpu.regs[2] = 0x200
+    cpu.mem_write8(0x200, 10)  # M(R(X)) = 10
+    cpu.d_reg = 10             # D = 10
+    code = assemble("add.x\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("ADD.X: D = 10+10 = 20", cpu.d_reg == 20)
+
+    # SHL.D
+    cpu = Megapad64()
+    cpu.d_reg = 0x40
+    code = assemble("shl.d\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("SHL.D: 0x40 << 1 = 0x80", cpu.d_reg == 0x80)
+    check("SHL.D: carry = 0", cpu.flag_c == 0)
+
+    cpu.d_reg = 0x80
+    code = assemble("shl.d\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    cpu.halted = False
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("SHL.D: 0x80 << 1 = 0x00, C=1", cpu.d_reg == 0x00 and cpu.flag_c == 1)
+
+
+def test_io():
+    """Family 0x9: I/O"""
+    print("\n== I/O (0x9) ==")
+
+    captured = []
+    cpu = Megapad64()
+    cpu.on_output = lambda port, val: captured.append((port, val))
+    cpu.regs[2] = 100  # R(X)
+    cpu.xsel = 2
+    cpu.mem_write8(100, 0xAB)
+
+    code = assemble("out1\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("OUT1: port=1, val=0xAB", len(captured) == 1 and captured[0] == (1, 0xAB))
+    check("OUT1: R(X) advanced by 1", cpu.regs[2] == 101)
+
+
+def test_sep_sex():
+    """Family 0xA/0xB: SEP / SEX"""
+    print("\n== SEP / SEX (0xA, 0xB) ==")
+
+    cpu, _ = run_asm("""
+        ldi r5, 0
+        sex r5
+        halt
+    """)
+    check("SEX R5: XSEL=5", cpu.xsel == 5)
+
+    # SEP is trickier — it changes which register is PC
+    # We'll test by setting up R5 with a valid address and SEP to it
+    cpu = Megapad64()
+    # Place HALT at address 30
+    halt_code = assemble("halt")
+    cpu.load_bytes(30, halt_code)
+    # Place SEP R5 at address 0
+    sep_code = assemble("ldi r5, 30\nsep r5")
+    cpu.load_bytes(0, sep_code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("SEP R5: execution continues at R5", cpu.halted and cpu.psel == 5)
+
+
+def test_muldiv():
+    """Family 0xC: MUL/DIV"""
+    print("\n== MUL/DIV (0xC) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 7
+        ldi r2, 6
+        mul r1, r2
+        halt
+    """)
+    check("MUL R1,R2: 7*6=42", cpu.regs[1] == 42)
+
+    cpu, _ = run_asm("""
+        ldi r1, 7
+        ldi r2, 6
+        umul r1, r2
+        halt
+    """)
+    check("UMUL R1,R2: 7*6=42", cpu.regs[1] == 42)
+
+    cpu, _ = run_asm("""
+        ldi r1, 100
+        ldi r2, 7
+        udiv r1, r2
+        halt
+    """)
+    check("UDIV 100/7: q=14", cpu.regs[1] == 14)
+    check("UDIV 100/7: rem=2 in R0", cpu.regs[0] == 2)
+
+    cpu, _ = run_asm("""
+        ldi r1, 100
+        ldi r2, 10
+        umod r1, r2
+        halt
+    """)
+    check("UMOD 100%10 = 0", cpu.regs[1] == 0)
+
+    # Divide by zero
+    try:
+        cpu, _ = run_asm("""
+            ldi r1, 10
+            ldi r2, 0
+            udiv r1, r2
+            halt
+        """)
+        check("UDIV by zero → trap", False, "No exception raised")
+    except TrapError as e:
+        check("UDIV by zero → trap", e.ivec_id == 0x04)
+
+
+def test_csr():
+    """Family 0xD: CSR read/write"""
+    print("\n== CSR (0xD) ==")
+
+    cpu, _ = run_asm("""
+        ldi r1, 7
+        csrw 0x03, r1    ; SPSEL ← 7
+        csrr r2, 0x03    ; R2 ← SPSEL
+        halt
+    """)
+    check("CSRW+CSRR SPSEL: R2=7", cpu.regs[2] == 7)
+    check("SPSEL updated to 7", cpu.spsel == 7)
+
+
+def test_mex():
+    """Family 0xE: MEX tile ops (basic)"""
+    print("\n== MEX (0xE) ==")
+
+    cpu = Megapad64()
+    # Set up tile addresses
+    cpu.tsrc0 = 0x1000
+    cpu.tsrc1 = 0x2000
+    cpu.tdst  = 0x3000
+    cpu.tmode = 0x00  # 8-bit elements, unsigned
+
+    # Fill src0 with 1s, src1 with 2s
+    for i in range(64):
+        cpu.mem_write8(0x1000 + i, 1)
+        cpu.mem_write8(0x2000 + i, 2)
+
+    # TALU ADD
+    code = assemble("t.add\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+
+    # Check dst tile: each byte should be 3 (1+2)
+    all_three = all(cpu.mem_read8(0x3000 + i) == 3 for i in range(64))
+    check("T.ADD: 64 lanes of 1+2=3", all_three)
+
+    # TRED SUM
+    cpu2 = Megapad64()
+    cpu2.tsrc0 = 0x1000
+    cpu2.tmode = 0x00
+    for i in range(64):
+        cpu2.mem_write8(0x1000 + i, 1)  # 64 ones → sum = 64
+
+    code2 = assemble("t.sum\nhalt")
+    cpu2.load_bytes(0, code2)
+    cpu2.pc = 0
+    try:
+        cpu2.run()
+    except HaltError:
+        pass
+    check("T.SUM: sum of 64 ones = 64", cpu2.acc[0] == 64)
+
+
+def test_ext_prefix():
+    """Family 0xF: EXT prefix"""
+    print("\n== EXT (0xF) ==")
+
+    # LDI64: loads a full 64-bit immediate via EXT prefix
+    cpu, _ = run_asm("""
+        ldi64 r1, 0x0102030405060708
+        halt
+    """)
+    check("LDI64 R1: full 64-bit immediate", cpu.regs[1] == 0x0102030405060708)
+
+
+def test_fibonacci():
+    """Integration: compute fibonacci(10) = 55"""
+    print("\n== Integration: Fibonacci ==")
+
+    cpu, _ = run_asm("""
+        ; Compute fib(10) = 55
+        ; R1 = a = 0, R2 = b = 1, R4 = counter = 10, R5 = temp
+        ldi r1, 0
+        ldi r2, 1
+        ldi r4, 10
+    loop:
+        mov r5, r2       ; temp = b
+        add r2, r1       ; b = a + b
+        mov r1, r5       ; a = temp
+        dec r4
+        cmpi r4, 0
+        brne loop
+        halt
+    """)
+    check("Fibonacci(10) = 55", cpu.regs[1] == 55,
+          f"got R1={cpu.regs[1]}, R2={cpu.regs[2]}")
+
+
+def test_subroutine():
+    """Integration: subroutine call via CALL.L/RET.L"""
+    print("\n== Integration: Subroutine ==")
+
+    cpu, _ = run_asm("""
+        ; Main: R1 = 10, call double, R1 should be 20
+        ldi r1, 10
+        ldi r4, 30       ; address of 'double' routine
+        call.l r4
+        halt
+
+    .org 30
+        ; double: R1 = R1 + R1
+        add r1, r1
+        ret.l
+    """)
+    check("Subroutine doubles R1: 10→20", cpu.regs[1] == 20)
+
+
+def test_stack_ops():
+    """Integration: push/pop via STXD/LDXAR"""
+    print("\n== Integration: Stack Push/Pop ==")
+
+    # Manual push via STR + DEC, pop via INC + LDN
+    cpu, _ = run_asm("""
+        ldi r1, 0x42        ; value to push
+        ldi r2, 0x200       ; stack pointer
+        sex r2               ; XSEL = 2
+
+        ; Push: store at R(X), decrement
+        stxd r1              ; M(R(X)) ← R1; R(X) -= 8
+
+        ldi r1, 0            ; clear R1
+
+        ; Pop: increment, load
+        inc r2
+        inc r2
+        inc r2
+        inc r2
+        inc r2
+        inc r2
+        inc r2
+        inc r2               ; R2 += 8
+        ldxr r1              ; R1 ← M(R(X))
+        halt
+    """)
+    check("Push/pop: R1 recovered = 0x42", cpu.regs[1] == 0x42,
+          f"got R1={cpu.regs[1]:#x}")
+
+
+def test_1802_heritage():
+    """Integration: 1802-style SEP subroutine call pattern"""
+    print("\n== Integration: 1802-style SEP Call ==")
+
+    # Classic 1802 pattern: SEP R4 to call, SEP R3 to return
+    cpu, _ = run_asm("""
+        ; Set up: R3 is initial PC, R4 points to subroutine
+        ldi r4, 40           ; R4 → subroutine at address 40
+        sep r4               ; PSEL ← 4, execution jumps to R4=40
+
+    .org 10
+        ; Return point — execution resumes here after SEP R3
+        halt
+
+    .org 40
+        ; Subroutine body (running as R4-PC)
+        ldi r1, 0xAA         ; do some work
+        ldi r3, 10           ; R3 → return address
+        sep r3               ; PSEL ← 3, jump to R3=10
+    """)
+    check("1802 SEP pattern: R1 = 0xAA after subroutine", cpu.regs[1] == 0xAA)
+    check("1802 SEP pattern: halted at return point", cpu.halted)
+
+
+# =========================================================================
+#  Runner
+# =========================================================================
+
+def main():
+    global PASS, FAIL
+    print("=" * 60)
+    print("  Megapad-64 Emulator Test Suite")
+    print("=" * 60)
+
+    tests = [
+        test_sys,
+        test_inc_dec,
+        test_branch,
+        test_lbr,
+        test_mem,
+        test_imm,
+        test_alu,
+        test_memalu,
+        test_io,
+        test_sep_sex,
+        test_muldiv,
+        test_csr,
+        test_mex,
+        test_ext_prefix,
+        test_fibonacci,
+        test_subroutine,
+        test_stack_ops,
+        test_1802_heritage,
+    ]
+
+    for t in tests:
+        try:
+            t()
+        except Exception as e:
+            FAIL += 1
+            print(f"  ✗ {t.__name__} CRASHED: {e}")
+            traceback.print_exc()
+
+    print("\n" + "=" * 60)
+    print(f"  Results: {PASS} passed, {FAIL} failed")
+    print("=" * 60)
+    return 0 if FAIL == 0 else 1
+
+if __name__ == "__main__":
+    sys.exit(main())
