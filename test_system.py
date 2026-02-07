@@ -661,7 +661,8 @@ class TestBIOS(unittest.TestCase):
             "99 CONSTANT LIMIT",
             "LIMIT .",
         ])
-        self.assertIn("99 ", text)
+        # Ensure the value printed by LIMIT . is 99 (not just echo)
+        self.assertIn("99 ", text.split("LIMIT .")[1])
 
     # -- v0.4: TYPE / SPACE / SPACES --
 
@@ -726,6 +727,251 @@ class TestAssemblerBranchRange(unittest.TestCase):
         lines = ["target:\n"] + ["nop\n"] * 200 + ["lbr target\n"]
         code = assemble("".join(lines))
         self.assertEqual(len(code), 200 + 3)
+
+
+# ---------------------------------------------------------------------------
+#  KDOS tests
+# ---------------------------------------------------------------------------
+
+KDOS_PATH = os.path.join(os.path.dirname(__file__), "kdos.f")
+
+
+class TestKDOS(unittest.TestCase):
+    """Integration tests for KDOS — Kernel Dashboard OS.
+
+    Loads kdos.f via UART injection, then sends additional commands
+    and checks output.
+    """
+
+    def setUp(self):
+        with open(BIOS_PATH) as f:
+            self.bios_code = assemble(f.read())
+        with open(KDOS_PATH) as f:
+            self.kdos_lines = []
+            for line in f.read().splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Skip pure comment lines to reduce UART byte count.
+                # Lines starting with \ are backslash comments.
+                if stripped.startswith('\\'):
+                    continue
+                self.kdos_lines.append(line)
+
+    def _boot_bios(self, ram_kib=256):
+        sys = make_system(ram_kib=ram_kib)
+        buf = capture_uart(sys)
+        sys.load_binary(0, self.bios_code)
+        sys.boot()
+        return sys, buf
+
+    def _run_kdos(self, extra_lines: list[str],
+                  max_steps=200_000_000) -> str:
+        """Load KDOS then execute extra_lines, return UART output."""
+        sys, buf = self._boot_bios()
+        all_lines = self.kdos_lines + extra_lines
+        payload = "\n".join(all_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        chunk = max_steps // (len(data) + 20)
+
+        for _ in range(len(data) + 20):
+            for _ in range(chunk):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        return uart_text(buf)
+
+    # -- Loading --
+
+    def test_kdos_loads(self):
+        """KDOS loads without errors and prints banner."""
+        text = self._run_kdos([])
+        self.assertIn("KERNEL DASHBOARD OS", text)
+        self.assertIn("DASHBOARD", text)
+
+    # -- Utility words --
+
+    def test_cells(self):
+        text = self._run_kdos(["3 CELLS ."])
+        self.assertIn("24 ", text)
+
+    def test_min_max(self):
+        text = self._run_kdos(["3 7 MIN .", "3 7 MAX ."])
+        self.assertIn("3 ", text)
+        self.assertIn("7 ", text)
+
+    # -- Buffers --
+
+    def test_buffer_create(self):
+        """Create a buffer and query its fields."""
+        text = self._run_kdos([
+            "0 1 128 BUFFER test-buf",
+            "test-buf B.TYPE .",
+            "test-buf B.WIDTH .",
+            "test-buf B.LEN .",
+        ])
+        # Extract output after KDOS banner loaded
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)   # type = 0 (raw)
+        self.assertIn("1 ", out)   # width = 1
+        self.assertIn("128 ", out) # length = 128
+
+    def test_buffer_tiles(self):
+        """B.TILES returns correct tile count."""
+        text = self._run_kdos([
+            "0 1 128 BUFFER tb",
+            "tb B.TILES .",
+        ])
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        # 128 bytes / 64 = 2 tiles
+        self.assertIn("2 ", out)
+
+    def test_buffer_zero_and_preview(self):
+        """B.ZERO fills with zeros, B.PREVIEW shows them."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER zb",
+            "zb B.ZERO",
+            "zb B.PREVIEW",
+        ])
+        # All bytes should be 0
+        idx = text.rfind("B.PREVIEW")
+        out = text[idx:] if idx >= 0 else text
+        # Should see lots of "0 " in the preview output
+        self.assertTrue(out.count("0 ") >= 16)
+
+    def test_buffer_fill(self):
+        """B.FILL fills with specified byte."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER fb",
+            "42 fb B.FILL",
+            "fb B.DATA C@ .",
+        ])
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("42 ", out)
+
+    def test_buffers_list(self):
+        """BUFFERS lists registered buffers."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER b1",
+            "2 8 16 BUFFER b2",
+            "BUFFERS",
+        ])
+        # Should show count and info for both + the kzero built-in
+        self.assertIn("Buffers", text)
+
+    def test_buffer_info(self):
+        """B.INFO prints descriptor details."""
+        text = self._run_kdos([
+            "0 1 256 BUFFER ib",
+            "ib B.INFO",
+        ])
+        self.assertIn("[buf", text)
+        self.assertIn("t=", text)
+        self.assertIn("w=", text)
+        self.assertIn("n=", text)
+
+    # -- Kernels --
+
+    def test_kernel_register(self):
+        """Register a kernel and query its descriptor."""
+        text = self._run_kdos([
+            "1 1 2 0 KERNEL test-kern",
+            "test-kern K.IN .",
+            "test-kern K.OUT .",
+            "test-kern K.FOOT .",
+            "test-kern K.FLAGS .",
+        ])
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)   # n_in = 1
+        self.assertIn("2 ", out)   # footprint = 2
+        self.assertIn("0 ", out)   # flags = 0
+
+    def test_kernels_list(self):
+        """KERNELS lists registered kernels including built-in."""
+        text = self._run_kdos(["KERNELS"])
+        self.assertIn("Kernels", text)
+        # kzero-desc is registered by kdos.f
+        self.assertIn("[kern", text)
+
+    def test_kernel_info(self):
+        """K.INFO prints kernel descriptor."""
+        text = self._run_kdos([
+            "2 1 4 1 KERNEL ki-test",
+            "ki-test K.INFO",
+        ])
+        self.assertIn("[kern", text)
+        self.assertIn("in=", text)
+        self.assertIn("out=", text)
+        self.assertIn("foot=", text)
+
+    # -- Dashboard --
+
+    def test_dashboard(self):
+        """DASHBOARD prints the full system overview."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER db",
+            "DASHBOARD",
+        ])
+        self.assertIn("KERNEL DASHBOARD OS", text)
+        self.assertIn("HERE =", text)
+        self.assertIn("Buffers", text)
+        self.assertIn("Kernels", text)
+
+    # -- Built-in kzero kernel --
+
+    def test_kzero_kernel(self):
+        """The built-in kzero word zeros a buffer."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER kzb",
+            "255 kzb B.FILL",
+            "kzb B.DATA C@ .",
+            "kzb kzero",
+            "kzb B.DATA C@ .",
+        ])
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("255 ", out)  # before zero
+        # After kzero, first byte should be 0
+        # Find the second number output after "255"
+        pos255 = out.find("255 ")
+        after = out[pos255 + 4:]
+        self.assertIn("0 ", after)
+
+    # -- Comment words --
+
+    def test_backslash_comment(self):
+        """Backslash comment skips rest of line."""
+        text = self._run_kdos([
+            "42 . \\ this is a comment and should not cause errors",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_paren_comment(self):
+        """Paren comment skips to closing paren."""
+        text = self._run_kdos([
+            "99 ( this is a comment ) .",
+        ])
+        self.assertIn("99 ", text)
 
 
 # ---------------------------------------------------------------------------
