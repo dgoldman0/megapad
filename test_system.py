@@ -230,113 +230,210 @@ class TestBIOS(unittest.TestCase):
         sys.boot()
         return sys, buf
 
-    def _run_to_prompt(self, sys, buf, max_steps=500_000):
-        run_until(sys, max_steps)
-        text = uart_text(buf)
-        buf.clear()
-        return text
+    def _run_forth(self, sys, buf, input_lines: list[str],
+                   max_steps=2_000_000) -> str:
+        """Feed newline-terminated Forth commands and collect UART output.
 
-    def _send_cmd(self, sys, buf, cmd_bytes: bytes, max_steps=500_000):
-        sys.uart.inject_input(cmd_bytes)
-        run_until(sys, max_steps)
-        text = uart_text(buf)
-        buf.clear()
-        return text
+        Sends input one byte at a time with CPU execution between bytes
+        (matching _console_pipe behaviour).  Always appends BYE to ensure
+        the CPU halts.
+        """
+        payload = "\n".join(input_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+
+        for _ in range(len(data) + 20):          # outer byte-feed loop
+            # Run CPU until idle (waiting for UART) or halt
+            for _ in range(max_steps // (len(data) + 20)):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        return uart_text(buf)
+
+    # -- Banner --
 
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
-        text = self._run_to_prompt(sys, buf)
-        self.assertIn("Megapad-64 BIOS v0.2", text)
-        self.assertIn("Storage: N", text)
-        self.assertIn("Ready.", text)
-        self.assertIn("> ", text)
+        text = self._run_forth(sys, buf, [])
+        self.assertIn("Megapad-64 Forth BIOS v0.3", text)
+        self.assertIn("RAM:", text)
+        self.assertIn("ok", text)
 
-    def test_boot_with_storage(self):
-        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
-            path = f.name
-            f.write(b"\x00" * SECTOR_SIZE * 4)
-        try:
-            sys, buf = self._boot_bios(storage_image=path)
-            text = self._run_to_prompt(sys, buf)
-            self.assertIn("Storage: Y", text)
-        finally:
-            os.unlink(path)
+    # -- Basic number printing --
 
-    def test_help_command(self):
+    def test_print_zero(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"h")
-        self.assertIn("h=help", text)
-        self.assertIn("q=quit", text)
-        self.assertIn("> ", text)
+        text = self._run_forth(sys, buf, ["0 ."])
+        self.assertIn("0 ", text)
 
-    def test_regs_command(self):
+    def test_print_positive(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"r")
-        self.assertIn("PC=", text)
-        self.assertIn("R9=00", text)
-        self.assertIn("> ", text)
+        text = self._run_forth(sys, buf, ["42 ."])
+        self.assertIn("42 ", text)
 
-    def test_dump_command(self):
+    def test_print_negative(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"d")
-        # The first byte of BIOS is 0x78 (MOV R15, R2)
-        self.assertIn("78", text)
-        self.assertIn("> ", text)
+        text = self._run_forth(sys, buf, ["-7 ."])
+        self.assertIn("-7 ", text)
 
-    def test_setaddr_then_dump(self):
+    def test_hex_literal(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        # Set address to 0x10 (4 hex digits in v0.2)
-        self._send_cmd(sys, buf, b"s0010")
-        self.assertEqual(sys.cpu.regs[9], 0x10)
-        # Dump from 0x10
-        text = self._send_cmd(sys, buf, b"d")
-        parts = text.replace("\n", " ").replace("\r", " ").split()
-        hex_count = sum(1 for p in parts if len(p) == 2
-                       and all(c in "0123456789ABCDEFabcdef" for c in p))
-        self.assertGreaterEqual(hex_count, 16)
+        text = self._run_forth(sys, buf, ["0xFF ."])
+        self.assertIn("255 ", text)
 
-    def test_quit_command(self):
+    # -- Arithmetic --
+
+    def test_add(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"q")
+        text = self._run_forth(sys, buf, ["3 4 + ."])
+        self.assertIn("7 ", text)
+
+    def test_subtract(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["10 3 - ."])
+        self.assertIn("7 ", text)
+
+    def test_multiply(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["6 7 * ."])
+        self.assertIn("42 ", text)
+
+    def test_divmod(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["100 7 /MOD . ."])
+        self.assertIn("14 2 ", text)
+
+    # -- Stack operations --
+
+    def test_dup(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 DUP . ."])
+        self.assertIn("5 5 ", text)
+
+    def test_swap(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 SWAP . ."])
+        self.assertIn("1 2 ", text)
+
+    def test_drop(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 DROP ."])
+        self.assertIn("1 ", text)
+
+    def test_dot_s(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 .S", "DROP DROP DROP"])
+        self.assertIn("<3>", text)
+        self.assertIn("1", text)
+
+    def test_depth(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["42 DEPTH ."])
+        self.assertIn("1 ", text)
+
+    # -- Comparison & logic --
+
+    def test_less_than(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 < ."])
+        self.assertIn("-1 ", text)
+
+    def test_greater_than(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 > ."])
+        self.assertIn("-1 ", text)
+
+    def test_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["7 7 = ."])
+        self.assertIn("-1 ", text)
+
+    def test_and(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0xFF 0x0F AND ."])
+        self.assertIn("15 ", text)
+
+    def test_or(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0xF0 0x0F OR ."])
+        self.assertIn("255 ", text)
+
+    # -- Memory --
+
+    def test_store_fetch(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["42 0x2000 !", "0x2000 @ ."])
+        self.assertIn("42 ", text)
+
+    def test_c_store_c_fetch(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0xAB 0x3000 C!", "0x3000 C@ ."])
+        self.assertIn("171 ", text)
+
+    def test_fill_dump(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0x2000 16 0xCC FILL", "0x2000 16 DUMP"])
+        self.assertIn("CC", text)
+
+    # -- I/O --
+
+    def test_emit(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["65 EMIT"])
+        self.assertIn("A", text)
+
+    # -- HEX / DECIMAL / BASE --
+
+    def test_hex_mode(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["HEX FF . DECIMAL"])
+        self.assertIn("FF ", text)
+
+    def test_base_change(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["HEX CAFE . DECIMAL"])
+        self.assertIn("CAFE ", text)
+
+    # -- WORDS --
+
+    def test_words(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["WORDS"])
+        self.assertIn("DUP", text)
+        self.assertIn("DROP", text)
+        self.assertIn("SWAP", text)
+        self.assertIn("WORDS", text)
+
+    # -- BYE --
+
+    def test_bye(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [])  # just BYE appended by helper
         self.assertIn("Bye!", text)
         self.assertTrue(sys.cpu.halted)
 
-    def test_unknown_command(self):
+    # -- Undefined word --
+
+    def test_undefined_word(self):
         sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"Z")
+        text = self._run_forth(sys, buf, ["NOSUCHWORD"])
+        self.assertIn("NOSUCHWORD", text)
         self.assertIn("?", text)
-        self.assertIn("> ", text)
-
-    def test_multiple_commands(self):
-        """Run several commands in sequence."""
-        sys, buf = self._boot_bios()
-        self._run_to_prompt(sys, buf)
-
-        # Help
-        text = self._send_cmd(sys, buf, b"h")
-        self.assertIn("h=help", text)
-
-        # Set address (4 hex digits in v0.2)
-        self._send_cmd(sys, buf, b"s0020")
-        self.assertEqual(sys.cpu.regs[9], 0x20)
-
-        # Dump
-        text = self._send_cmd(sys, buf, b"d")
-        self.assertIn("> ", text)
-
-        # Regs (R9 shown as hex32 in v0.2)
-        text = self._send_cmd(sys, buf, b"r")
-        self.assertIn("R9=00000020", text)
-
-        # Quit
-        text = self._send_cmd(sys, buf, b"q")
-        self.assertTrue(sys.cpu.halted)
 
 
 # ---------------------------------------------------------------------------
