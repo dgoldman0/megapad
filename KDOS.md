@@ -11,8 +11,8 @@
 ### Running KDOS in the Emulator
 
 ```bash
-# Interactive session (boot BIOS + load KDOS)
-python cli.py --bios bios.asm --load kdos.f
+# Interactive session (boot BIOS + load KDOS via UART)
+python cli.py --bios bios.asm --forth kdos.f
 
 # Full test suite (109 tests)
 python test_system.py

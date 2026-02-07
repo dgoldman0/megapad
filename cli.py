@@ -796,6 +796,59 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
 
 
 # ---------------------------------------------------------------------------
+#  Forth source injection
+# ---------------------------------------------------------------------------
+
+def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
+    """Inject Forth source files through UART, line by line.
+
+    Filters out pure comment lines (starting with \\) and blank lines
+    to reduce the byte count.  Waits for the CPU to process each line
+    before sending the next.
+    """
+    out_fd = sys.stdout.fileno()
+    old_tx = sys_emu.uart.on_tx
+    sys_emu.uart.on_tx = lambda b: os.write(out_fd, bytes([b]))
+
+    try:
+        for path in paths:
+            with open(path, "r") as f:
+                source = f.read()
+            lines = []
+            for line in source.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith('\\'):
+                    continue
+                lines.append(line)
+
+            payload = "\n".join(lines) + "\n"
+            data = payload.encode()
+
+            for i, byte in enumerate(data):
+                # Inject one byte
+                sys_emu.uart.inject_input(bytes([byte]))
+                # Run CPU until idle (processed the byte)
+                for _ in range(500_000):
+                    if sys_emu.cpu.halted:
+                        return
+                    if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                        break
+                    try:
+                        sys_emu.step()
+                    except HaltError:
+                        return
+                    except TrapError as e:
+                        if sys_emu.cpu.ivt_base != 0:
+                            sys_emu.cpu._trap(e.ivec_id)
+                        else:
+                            return
+    finally:
+        sys_emu.uart.on_tx = old_tx
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 
@@ -805,6 +858,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
                "  python cli.py --bios bios.asm\n"
+               "  python cli.py --bios bios.asm --forth kdos.f\n"
                "  python cli.py --bios bios.asm --storage disk.img\n"
                "  python cli.py --ram 1024 --storage disk.img\n"
                "  python cli.py --load program.bin@0x100 --run\n"
@@ -817,6 +871,8 @@ def main():
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
                         help="BIOS binary or .asm file — boots and enters console")
+    parser.add_argument("--forth", type=str, action="append", default=[],
+                        help="Forth source file to inject via UART after boot (can repeat)")
     parser.add_argument("--assemble", nargs=2, metavar=("SRC", "OUT"),
                         help="Assemble SRC.asm to OUT.rom and exit")
     parser.add_argument("--run", action="store_true",
@@ -884,6 +940,11 @@ def main():
     # ---- BIOS mode: boot → console (the BIOS IS the interface) --------
     if bios_loaded:
         sys_emu.boot(0)
+
+        # Inject Forth source files through UART before interactive console
+        if args.forth:
+            _inject_forth_files(sys_emu, args.forth)
+
         while True:
             wants_monitor = run_console(sys_emu)
             if not wants_monitor or sys_emu.cpu.halted:
