@@ -12,7 +12,7 @@ Provides boot(), step(), run(), and configuration entry points.
 from __future__ import annotations
 from typing import Optional
 
-from megapad64 import Megapad64, HaltError, TrapError, u64
+from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
@@ -205,11 +205,17 @@ class MegapadSystem:
 
     def step(self) -> int:
         """Execute one instruction. Returns cycles consumed."""
-        # Wake CPU from idle when UART has received data
-        if self.cpu.idle and self.uart.has_rx_data:
-            self.cpu.idle = False
+        # Wake CPU from idle when UART has received data or timer IRQ fires
+        if self.cpu.idle:
+            if self.uart.has_rx_data:
+                self.cpu.idle = False
+            elif self.timer.irq_pending and self.cpu.flag_i:
+                self.cpu.idle = False
         cycles = self.cpu.step()
         self.bus.tick(cycles)
+        # Deliver timer IRQ if pending and interrupts are enabled
+        if self.timer.irq_pending and self.cpu.flag_i:
+            self.cpu._trap(IVEC_TIMER)
         return cycles
 
     def run(self, max_steps: int = 1_000_000) -> int:
@@ -222,6 +228,9 @@ class MegapadSystem:
                 # Idle with no pending input — tick bus (timers) and wait
                 self.bus.tick(1)
                 total += 1
+                # Check if timer IRQ should wake us
+                if self.timer.irq_pending and self.cpu.flag_i:
+                    self.cpu.idle = False
                 continue
             try:
                 total += self.step()

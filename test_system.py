@@ -4,6 +4,7 @@ Integration tests for the Megapad-64 system emulator.
 
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
 """
+import copy
 import os
 import sys
 import tempfile
@@ -705,7 +706,8 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["WORDS"])
         for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
-                     "SPACE", "TYPE", "DISK-READ", "DISK-WRITE"]:
+                     "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
+                     "TIMER!", "EI!", "DI!", "ISR!"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
     # -- Storage words --
@@ -758,6 +760,43 @@ class TestBIOS(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    # -- Timer words --
+
+    def test_timer_store(self):
+        """TIMER! sets the compare-match register."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "1000 TIMER!",
+        ])
+        # Verify compare register was set
+        self.assertEqual(sys.timer.compare, 1000)
+
+    def test_timer_ctrl_store(self):
+        """TIMER-CTRL! sets the timer control register."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "7 TIMER-CTRL!",
+        ])
+        # enable + IRQ + auto-reload = 7
+        self.assertEqual(sys.timer.control, 7)
+
+    def test_ei_di(self):
+        """EI! and DI! toggle the global interrupt flag.
+
+        Note: the BIOS REPL returns via RET.L which always re-enables
+        interrupts (flag_i=1).  We therefore cannot observe DI! surviving
+        the return to the REPL.  Instead we test that EI! enables
+        interrupts and that DI! compiles/runs without error.
+        """
+        sys, buf = self._boot_bios()
+        # Initially interrupts are disabled
+        self.assertEqual(sys.cpu.flag_i, 0)
+        text = self._run_forth(sys, buf, ["EI!"])
+        self.assertEqual(sys.cpu.flag_i, 1)
+        # DI! executes without error (flag_i restored to 1 by RET.L)
+        text = self._run_forth(sys, buf, ["DI!"])
+        self.assertNotIn("???", text)
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
@@ -793,20 +832,100 @@ class TestKDOS(unittest.TestCase):
     and checks output.
     """
 
-    def setUp(self):
+    # Class-level cache: snapshot of system state after KDOS loads.
+    # Avoids re-interpreting all ~1000 Forth lines for each test.
+    _kdos_snapshot = None   # (mem_bytes, cpu_state)
+    _bios_code = None
+    _kdos_lines = None
+
+    @classmethod
+    def _save_cpu_state(cls, cpu):
+        """Capture all CPU register/flag state for snapshot."""
+        return {
+            'regs': list(cpu.regs),
+            'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
+            'flag_z': cpu.flag_z, 'flag_c': cpu.flag_c,
+            'flag_n': cpu.flag_n, 'flag_v': cpu.flag_v,
+            'flag_p': cpu.flag_p, 'flag_g': cpu.flag_g,
+            'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
+            'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
+            'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
+            'trap_addr': cpu.trap_addr,
+            'halted': cpu.halted, 'idle': cpu.idle,
+            'cycle_count': cpu.cycle_count,
+            '_ext_modifier': cpu._ext_modifier,
+        }
+
+    @classmethod
+    def _restore_cpu_state(cls, cpu, state):
+        """Restore CPU register/flag state from snapshot."""
+        cpu.regs[:] = state['regs']
+        for k in ('psel', 'xsel', 'spsel',
+                   'flag_z', 'flag_c', 'flag_n', 'flag_v',
+                   'flag_p', 'flag_g', 'flag_i', 'flag_s',
+                   'd_reg', 'q_out', 't_reg',
+                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'halted', 'idle', 'cycle_count', '_ext_modifier'):
+            setattr(cpu, k, state[k])
+
+    @classmethod
+    def _ensure_snapshot(cls):
+        """Build the KDOS snapshot once (class-level)."""
+        if cls._kdos_snapshot is not None:
+            return
+
         with open(BIOS_PATH) as f:
-            self.bios_code = assemble(f.read())
+            cls._bios_code = assemble(f.read())
         with open(KDOS_PATH) as f:
-            self.kdos_lines = []
+            cls._kdos_lines = []
             for line in f.read().splitlines():
                 stripped = line.strip()
-                if not stripped:
+                if not stripped or stripped.startswith('\\'):
                     continue
-                # Skip pure comment lines to reduce UART byte count.
-                # Lines starting with \ are backslash comments.
-                if stripped.startswith('\\'):
-                    continue
-                self.kdos_lines.append(line)
+                cls._kdos_lines.append(line)
+
+        # Boot BIOS and load KDOS fully
+        sys_obj = make_system(ram_kib=256)
+        buf = capture_uart(sys_obj)
+        sys_obj.load_binary(0, cls._bios_code)
+        sys_obj.boot()
+
+        payload = "\n".join(cls._kdos_lines) + "\n"
+        data = payload.encode()
+        pos = 0
+        max_steps = 200_000_000
+        chunk = max_steps // (len(data) + 20)
+
+        for _ in range(len(data) + 20):
+            for _ in range(chunk):
+                if sys_obj.cpu.halted:
+                    break
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    break
+                try:
+                    sys_obj.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys_obj.cpu.halted:
+                break
+            if pos < len(data):
+                sys_obj.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        # Save snapshot: raw memory + CPU state
+        cls._kdos_snapshot = (
+            bytes(sys_obj.cpu.mem),       # immutable copy of RAM
+            cls._save_cpu_state(sys_obj.cpu),
+        )
+
+    def setUp(self):
+        self.__class__._ensure_snapshot()
+        self.bios_code = self.__class__._bios_code
+        self.kdos_lines = self.__class__._kdos_lines
 
     def _boot_bios(self, ram_kib=256, storage_image=None):
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
@@ -819,6 +938,10 @@ class TestKDOS(unittest.TestCase):
                   max_steps=400_000_000,
                   storage_image=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
+        # If no storage needed, use the fast snapshot path
+        if storage_image is None and self.__class__._kdos_snapshot is not None:
+            return self._run_kdos_fast(extra_lines, max_steps)
+
         sys, buf = self._boot_bios(storage_image=storage_image)
         all_lines = self.kdos_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
@@ -848,12 +971,80 @@ class TestKDOS(unittest.TestCase):
 
         return uart_text(buf)
 
+    def _run_kdos_fast(self, extra_lines: list[str],
+                       max_steps=50_000_000) -> str:
+        """Fast path: restore KDOS from snapshot, run only extra_lines."""
+        mem_bytes, cpu_state = self.__class__._kdos_snapshot
+
+        sys = make_system(ram_kib=256)
+        buf = capture_uart(sys)
+
+        # Restore memory (BIOS + KDOS already compiled)
+        sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        # Restore CPU state
+        self._restore_cpu_state(sys.cpu, cpu_state)
+
+        # Now just process the extra_lines + BYE
+        payload = "\n".join(extra_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        chunk = max_steps // (len(data) + 20)
+
+        for _ in range(len(data) + 20):
+            for _ in range(chunk):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        return uart_text(buf)
+
     # -- Loading --
 
     def test_kdos_loads(self):
-        """KDOS loads without errors and prints banner."""
-        text = self._run_kdos([])
-        self.assertIn("KDOS v0.4", text)
+        """KDOS loads without errors and words are available."""
+        # Use the slow path so we see the banner
+        sys, buf = self._boot_bios()
+        all_lines = self.kdos_lines + []
+        payload = "\n".join(all_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        max_steps = 200_000_000
+        chunk = max_steps // (len(data) + 20)
+        for _ in range(len(data) + 20):
+            for _ in range(chunk):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+        text = uart_text(buf)
+        self.assertIn("KDOS v0.5", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -983,11 +1174,12 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.4", text)
+        self.assertIn("KDOS v0.5", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
         self.assertIn("Pipelines", text)
+        self.assertIn("Tasks", text)
         self.assertIn("Storage", text)
         self.assertIn("Files", text)
 
@@ -1397,6 +1589,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("PIPELINE WORDS", text)
         self.assertIn("STORAGE WORDS", text)
         self.assertIn("FILE WORDS", text)
+        self.assertIn("SCHEDULER WORDS", text)
         self.assertIn("BENCH", text)
 
     def test_status(self):
@@ -1406,6 +1599,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("bufs=", text)
         self.assertIn("kerns=", text)
         self.assertIn("pipes=", text)
+        self.assertIn("tasks=", text)
         self.assertIn("files=", text)
         self.assertIn("disk=", text)
 
@@ -1578,6 +1772,150 @@ class TestKDOS(unittest.TestCase):
         idx = text.rfind("HELP")
         out = text[idx:] if idx >= 0 else text
         self.assertIn("2 ", out)
+
+    # -- Scheduler & Tasks --
+
+    def test_task_create(self):
+        """TASK creates a named task and registers it."""
+        text = self._run_kdos([
+            ": my-work 42 . ;",
+            "' my-work 0 TASK my-task",
+            "TASK-COUNT @ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)
+
+    def test_task_info(self):
+        """T.INFO prints task descriptor."""
+        text = self._run_kdos([
+            ": my-work 42 . ;",
+            "' my-work 10 TASK my-task",
+            "my-task T.INFO",
+        ])
+        self.assertIn("[task", text)
+        self.assertIn("st=1", text)  # READY
+        self.assertIn("pri=10", text)
+
+    def test_tasks_list(self):
+        """TASKS lists all registered tasks."""
+        text = self._run_kdos([
+            ": work1 1 . ;",
+            "' work1 0 TASK t1",
+            ": work2 2 . ;",
+            "' work2 5 TASK t2",
+            "TASKS",
+        ])
+        self.assertIn("Tasks (2", text)
+        self.assertIn("[task", text)
+
+    def test_schedule_runs_task(self):
+        """SCHEDULE runs a READY task and marks it DONE."""
+        text = self._run_kdos([
+            ": my-work 99 . ;",
+            "' my-work 0 TASK my-task",
+            "SCHEDULE",
+            "my-task T.STATUS .",
+        ])
+        self.assertIn("99 ", text)  # task body ran
+        idx = text.rfind("99 ")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("4 ", out)  # T.DONE = 4
+
+    def test_schedule_multiple_tasks(self):
+        """SCHEDULE runs multiple READY tasks."""
+        text = self._run_kdos([
+            ": w1 11 . ;",
+            ": w2 22 . ;",
+            "' w1 0 TASK t1",
+            "' w2 0 TASK t2",
+            "SCHEDULE",
+        ])
+        self.assertIn("11 ", text)
+        self.assertIn("22 ", text)
+
+    def test_spawn(self):
+        """SPAWN creates an anonymous task."""
+        text = self._run_kdos([
+            ": my-work 77 . ;",
+            "' my-work SPAWN",
+            "TASK-COUNT @ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)
+
+    def test_bg_runs_task(self):
+        """BG spawns and immediately schedules a task."""
+        text = self._run_kdos([
+            ": my-work 55 . ;",
+            "' my-work BG",
+        ])
+        self.assertIn("55 ", text)
+
+    def test_kill_task(self):
+        """KILL marks a task as DONE."""
+        text = self._run_kdos([
+            ": my-work 1 . ;",
+            "' my-work 0 TASK my-task",
+            "my-task KILL",
+            "my-task T.STATUS .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("4 ", out)  # T.DONE = 4
+
+    def test_restart_task(self):
+        """RESTART resets a DONE task back to READY."""
+        text = self._run_kdos([
+            ": my-work 33 . ;",
+            "' my-work 0 TASK my-task",
+            "SCHEDULE",             # runs task, marks DONE
+            "my-task RESTART",      # back to READY
+            "my-task T.STATUS .",
+        ])
+        idx = text.rfind("RESTART")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)  # T.READY = 1
+
+    def test_task_count_ready(self):
+        """TASK-COUNT-READY counts tasks in READY state."""
+        text = self._run_kdos([
+            ": w1 1 . ;",
+            ": w2 2 . ;",
+            "' w1 0 TASK t1",
+            "' w2 0 TASK t2",
+            "TASK-COUNT-READY .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("2 ", out)
+
+    def test_yield_marks_done(self):
+        """YIELD inside a task body marks the task DONE."""
+        text = self._run_kdos([
+            ": my-work 44 . YIELD ;",
+            "' my-work 0 TASK my-task",
+            "SCHEDULE",
+            "my-task T.STATUS .",
+        ])
+        self.assertIn("44 ", text)  # ran up to YIELD
+        idx = text.rfind("44 ")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("4 ", out)  # T.DONE
+
+    def test_preempt_on_off(self):
+        """PREEMPT-ON/OFF toggle preemption flag."""
+        text = self._run_kdos([
+            "PREEMPT-ON",
+            "PREEMPT-ENABLED @ .",
+            "PREEMPT-OFF",
+            "PREEMPT-ENABLED @ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("1 ", out)
+        self.assertIn("0 ", out)
 
 
 # ---------------------------------------------------------------------------

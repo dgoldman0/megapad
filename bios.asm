@@ -3082,6 +3082,58 @@ w_disk_write:
     ret.l
 
 ; =====================================================================
+;  Timer Control Words
+; =====================================================================
+
+; TIMER! ( compare -- )  set the 32-bit compare-match register
+w_timer_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0104   ; COMPARE_LO
+    st.w r11, r1                        ; write 32 bits LE
+    ret.l
+
+; TIMER-CTRL! ( ctrl -- )  write timer CONTROL register
+;   bit 0: enable, bit 1: compare-match IRQ enable, bit 2: auto-reload
+w_timer_ctrl_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0108   ; CONTROL
+    st.b r11, r1
+    ret.l
+
+; TIMER-ACK ( -- )  acknowledge timer interrupt (write-1-to-clear STATUS)
+w_timer_ack:
+    ldi64 r11, 0xFFFF_FF00_0000_0109   ; STATUS
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; EI! ( -- )  enable interrupts globally
+w_ei:
+    ei
+    ret.l
+
+; DI! ( -- )  disable interrupts globally
+w_di:
+    di
+    ret.l
+
+; ISR! ( xt slot -- )  install execution token at IVT slot
+;   Writes xt to ivt_table + slot*8
+w_isr_store:
+    ldn r1, r14                         ; slot
+    addi r14, 8
+    ldn r2, r14                         ; xt
+    addi r14, 8
+    ldi r3, 3
+    shl r1, r3                          ; slot * 8
+    ldi64 r11, ivt_table
+    add r11, r1
+    str r11, r2                         ; write xt to IVT entry
+    ret.l
+
+; =====================================================================
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
@@ -4160,9 +4212,63 @@ d_disk_write:
     call.l r11
     ret.l
 
+; === TIMER! ===
+d_timer_store:
+    .dq d_disk_write
+    .db 6
+    .ascii "TIMER!"
+    ldi64 r11, w_timer_store
+    call.l r11
+    ret.l
+
+; === TIMER-CTRL! ===
+d_timer_ctrl_store:
+    .dq d_timer_store
+    .db 11
+    .ascii "TIMER-CTRL!"
+    ldi64 r11, w_timer_ctrl_store
+    call.l r11
+    ret.l
+
+; === TIMER-ACK ===
+d_timer_ack:
+    .dq d_timer_ctrl_store
+    .db 9
+    .ascii "TIMER-ACK"
+    ldi64 r11, w_timer_ack
+    call.l r11
+    ret.l
+
+; === EI! ===
+d_ei:
+    .dq d_timer_ack
+    .db 3
+    .ascii "EI!"
+    ldi64 r11, w_ei
+    call.l r11
+    ret.l
+
+; === DI! ===
+d_di:
+    .dq d_ei
+    .db 3
+    .ascii "DI!"
+    ldi64 r11, w_di
+    call.l r11
+    ret.l
+
+; === ISR! ===
+d_isr_store:
+    .dq d_di
+    .db 4
+    .ascii "ISR!"
+    ldi64 r11, w_isr_store
+    call.l r11
+    ret.l
+
 ; === \ (backslash comment, IMMEDIATE) ===
 d_backslash:
-    .dq d_disk_write
+    .dq d_isr_store
     .db 0x81                  ; IMMEDIATE | len 1
     .ascii "\\"
     ldi64 r11, w_backslash
@@ -4245,6 +4351,7 @@ ivt_table:
     .dq 0
     .dq bus_fault_handler
     .dq 0
+    .dq 0                            ; [7] TIMER — installed by KDOS via ISR!
 
 ; =====================================================================
 ;  TIB (Text Input Buffer) — 256 bytes

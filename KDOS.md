@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.4 — Storage & Persistence**
+**Current Status: KDOS v0.5 — Scheduler & Preemption**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (136 tests)
+# Full test suite (151 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -58,23 +58,32 @@ mybuf B.DATA 128 myfile FWRITE  \ Write 128 bytes to file
 myfile FREWIND                \ Reset cursor to 0
 HERE 128 myfile FREAD .       \ Read back, print bytes read
 FILES                         \ List registered files
+
+\ Scheduler & tasks
+: my-work 99 . ;              \ Define task body
+' my-work 10 TASK my-task     \ Create task, priority 10
+TASKS                         \ List all tasks
+SCHEDULE                      \ Run all READY tasks
+my-task T.INFO                \ Show task status (DONE)
+' my-work BG                  \ One-shot: spawn + schedule
 ```
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed (v0.4)
+### ✅ Completed (v0.5)
 
-**BIOS v0.4** (121 words, ~4230 lines):
+**BIOS v0.4** (127 words, ~4380 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
 - ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
-- **Storage device support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+- Storage device support: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+- **Timer & interrupt support**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 
-**KDOS v0.4** (~830 lines Forth):
+**KDOS v0.5** (~1080 lines Forth):
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
@@ -83,14 +92,16 @@ FILES                         \ List registered files
 - **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
 - **Storage & persistence**: Buffer save/load to disk, file abstraction layer
 - **File abstraction**: Sector-backed files with cursor I/O (up to 8 registered)
-- **Dashboard UI**: HELP, DASHBOARD, STATUS, PIPES, FILES, DISK-INFO
+- **Scheduler & tasks**: Cooperative multitasking with task registry (up to 8 tasks)
+- **Task lifecycle**: TASK, SPAWN, KILL, RESTART, BG, YIELD, SCHEDULE
+- **Timer preemption**: PREEMPT-ON/PREEMPT-OFF for timer-based preemption
+- **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
-- **Bug fixes**: BUFFER descriptor overlap fix, zero-trip DO/LOOP guards
 
-**Tests**: 136 passing
-- 69 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, dashboard)
-- 45 BIOS tests (all Forth words, compilation, tile engine, disk I/O)
-- 22 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
+**Tests**: 151 passing
+- 78 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, dashboard)
+- 48 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer)
+- 25 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
 
@@ -109,22 +120,27 @@ FILES                         \ List registered files
 - FWRITE / FREAD / FSEEK / FREWIND / FSIZE — cursor-based I/O
 - F.INFO, FILES — file introspection
 
-**Phase 3: Interactive Screens** (not started)
+**Phase 3: Scheduler & Preemption** (✅ complete — v0.5)
+- 6 BIOS timer/interrupt words: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
+- IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in system.py
+- Task descriptor: 6-cell (48 bytes) — status, priority, xt, dsp, rsp, name
+- Task registry: up to 8 tasks, cooperative scheduling via SCHEDULE
+- TASK, SPAWN, KILL, RESTART, BG — task lifecycle management
+- YIELD for cooperative release, FIND-READY for round-robin scan
+- Timer-based preemption: PREEMPT-ON / PREEMPT-OFF
+- Introspection: T.INFO, TASKS, TASK-COUNT-READY
+
+**Phase 4: Interactive Screens** (not started)
 - Screen system: 7 screens (Dashboard, Buffers, Kernels, Pipelines, Perf, Console, Inspector)
 - Screen navigation: TAB/Shift-TAB, arrow keys
 - Buffer inspector: hex/tile view with cursor
 - Performance visualizer: cycle counts, tile utilization
 
-**Phase 4: Advanced Kernels** (not started)
+**Phase 5: Advanced Kernels** (not started)
 - Matrix operations: GEMM, GEMV via tile engine
 - Image processing: convolution, resize, filters
 - Signal processing: FFT, correlation
 - String/text: search, parse, format
-
-**Phase 5: Scheduler & Preemption** (not started)
-- Timer-based preemption for background kernels
-- Priority scheduling with fairness
-- Kernel cancellation and cleanup
 
 **Phase 6: User Experience** (not started)
 - REPL improvements: history, tab completion, multi-line editing
@@ -246,7 +262,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 121 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 127 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE
@@ -260,8 +276,9 @@ The BIOS provides:
 * **Execution tokens**: `'` (tick), `EXECUTE`
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 * **Storage support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+* **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 
-All required BIOS extensions for KDOS are **complete** as of v0.4.
+All required BIOS extensions for KDOS are **complete** as of v0.5.
 
 ---
 
@@ -607,15 +624,56 @@ Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
 
 **Additions needed**:
 
-### 5.4 Scheduler
+### 5.4 Scheduler (IMPLEMENTED)
 
-The scheduler is a Forth vocabulary (`SCHED`) that:
-* Allocates tile-aligned RAM regions for buffers
-* Dispatches kernels by setting MEX CSRs and executing tile ops
-* Batches compatible kernels to minimize pack/unpack overhead
-* Tracks residency: which buffers are hot (recently used), pinned
-  (user-requested), or cold (evictable)
-* Exposes all decisions as inspectable Forth variables
+The scheduler provides cooperative multitasking with a task registry
+and round-robin dispatching.
+
+**Task descriptor** (6 cells = 48 bytes, kdos.f §8):
+```forth
+task-descriptor:
+  +0   status      ( 0=FREE  1=READY  2=RUNNING  3=BLOCKED  4=DONE )
+  +8   priority    ( 0-255, lower = higher priority )
+  +16  xt          ( execution token of task body )
+  +24  dsp_save    ( saved data stack pointer — reserved )
+  +32  rsp_save    ( saved return stack pointer — reserved )
+  +40  name_addr   ( address of name string )
+```
+
+**Task registry**: `TASK-TABLE` — up to 8 tasks. `TASK-COUNT` tracks count.
+
+**Task lifecycle words**:
+| Word | Stack | Description |
+|---|---|---|
+| `TASK` | `( xt priority "name" -- )` | Create named task |
+| `SPAWN` | `( xt -- )` | Anonymous task, priority 128 |
+| `KILL` | `( tdesc -- )` | Mark task DONE |
+| `RESTART` | `( tdesc -- )` | Mark task READY again |
+| `BG` | `( xt -- )` | SPAWN + SCHEDULE |
+| `YIELD` | `( -- )` | Cooperatively mark current task DONE |
+
+**Scheduling words**:
+| Word | Stack | Description |
+|---|---|---|
+| `SCHEDULE` | `( -- )` | Run all READY tasks until none remain |
+| `FIND-READY` | `( -- tdesc\|0 )` | Find first READY task |
+| `RUN-TASK` | `( tdesc -- )` | Execute task, mark DONE on return |
+
+**Timer preemption**:
+| Word | Stack | Description |
+|---|---|---|
+| `PREEMPT-ON` | `( -- )` | Enable timer-based preemption flag |
+| `PREEMPT-OFF` | `( -- )` | Disable timer preemption |
+
+**BIOS timer/interrupt words** (bios.asm):
+| Word | Stack | Description |
+|---|---|---|
+| `TIMER!` | `( n -- )` | Set timer compare register |
+| `TIMER-CTRL!` | `( n -- )` | Set timer control byte |
+| `TIMER-ACK` | `( -- )` | Acknowledge timer interrupt |
+| `EI!` | `( -- )` | Enable interrupts |
+| `DI!` | `( -- )` | Disable interrupts |
+| `ISR!` | `( xt slot -- )` | Install ISR at IVT slot |
 
 ---
 

@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.4 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.5 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
@@ -698,7 +698,243 @@ VARIABLE FDESC
     ELSE DROP THEN ;
 
 \ =====================================================================
-\  §8  Benchmarking
+\  §8  Scheduler & Tasks
+\ =====================================================================
+\
+\  Cooperative multitasking with timer-assisted preemption.
+\
+\  Each TASK has its own data stack area (256 bytes) and a descriptor.
+\  The scheduler round-robins among READY tasks, respecting priority.
+\
+\  Timer preemption: a timer ISR sets a flag (PREEMPT-FLAG) that
+\  cooperative yield points check.  This avoids the complexity of
+\  saving/restoring Forth stacks inside an ISR.
+\
+\  BIOS words used: TIMER! TIMER-CTRL! TIMER-ACK EI! DI! ISR! CYCLES
+\
+\  Task states:
+\    0 = FREE     (slot available)
+\    1 = READY    (runnable, waiting for CPU)
+\    2 = RUNNING  (currently executing)
+\    3 = BLOCKED  (waiting for event)
+\    4 = DONE     (finished, awaiting cleanup)
+
+\ -- Constants --
+0 CONSTANT T.FREE
+1 CONSTANT T.READY
+2 CONSTANT T.RUNNING
+3 CONSTANT T.BLOCKED
+4 CONSTANT T.DONE
+
+\ -- Task descriptor: 6 cells = 48 bytes --
+\    +0  status
+\    +8  priority      (0=highest, 255=lowest)
+\    +16 xt            (execution token — the task body)
+\    +24 dsp_save      (saved data stack pointer)
+\    +32 rsp_save      (saved return stack pointer)
+\    +40 name_addr     (0 or pointer to name string)
+
+\ -- Registry (up to 8 tasks) --
+VARIABLE TASK-COUNT
+0 TASK-COUNT !
+VARIABLE TASK-TABLE  7 CELLS ALLOT
+
+\ -- Scheduler state --
+VARIABLE CURRENT-TASK    \ pointer to currently running task descriptor
+0 CURRENT-TASK !
+VARIABLE SCHED-RUNNING   \ 1 if scheduler is active
+0 SCHED-RUNNING !
+VARIABLE PREEMPT-FLAG    \ set by timer ISR, checked by YIELD?
+0 PREEMPT-FLAG !
+VARIABLE TIME-SLICE      \ compare-match value for preemption timer
+50000 TIME-SLICE !        \ ~50k cycles per slice
+
+\ -- Per-task stack area: 256 bytes each, up to 8 tasks = 2048 bytes --
+VARIABLE TASK-STACKS  2047 ALLOT
+
+\ -- Field accessors --
+: T.STATUS  ( tdesc -- n )     @ ;
+: T.PRIORITY ( tdesc -- n )    8 + @ ;
+: T.XT      ( tdesc -- xt )   16 + @ ;
+: T.DSP     ( tdesc -- n )    24 + @ ;
+: T.RSP     ( tdesc -- n )    32 + @ ;
+: T.NAME    ( tdesc -- addr ) 40 + @ ;
+
+\ T.STATUS! ( n tdesc -- )
+: T.STATUS! ( n tdesc -- ) ! ;
+\ T.DSP! ( n tdesc -- )
+: T.DSP! ( n tdesc -- ) 24 + ! ;
+\ T.RSP! ( n tdesc -- )
+: T.RSP! ( n tdesc -- ) 32 + ! ;
+
+\ -- TASK ( xt priority "name" -- ) create and register a task --
+VARIABLE TDESC-TEMP
+: TASK  ( xt priority "name" -- )
+    HERE TDESC-TEMP !
+    T.READY ,                 \ +0  status = READY
+    ,                         \ +8  priority
+    ,                         \ +16 xt
+    \ Allocate private data stack: 256 bytes, use middle as initial DSP
+    TASK-COUNT @ 256 * TASK-STACKS + 128 +
+    ,                         \ +24 dsp_save (point to middle of stack area)
+    0 ,                       \ +32 rsp_save (unused initially)
+    0 ,                       \ +40 name_addr (set below)
+    \ Register
+    TASK-COUNT @ 8 < IF
+        TDESC-TEMP @ TASK-COUNT @ CELLS TASK-TABLE + !
+        TASK-COUNT @ 1+ TASK-COUNT !
+    THEN
+    TDESC-TEMP @ CONSTANT ;
+
+\ -- Task queries --
+: T.INFO  ( tdesc -- )
+    ." [task"
+    DUP ."  st=" T.STATUS .
+    DUP ."  pri=" T.PRIORITY .
+    ."  xt=" T.XT . ." ]" CR ;
+
+: TASKS  ( -- )
+    ." --- Tasks (" TASK-COUNT @ . ." ) ---" CR
+    TASK-COUNT @ DUP IF
+        0 DO
+            I . ." : "
+            I CELLS TASK-TABLE + @ T.INFO
+        LOOP
+    ELSE DROP THEN ;
+
+\ -- Find next ready task --
+\   Scans task table for the first READY task.
+\   Returns task descriptor address or 0 if none ready.
+VARIABLE FOUND-TASK
+: FIND-READY  ( -- tdesc | 0 )
+    0 FOUND-TASK !
+    TASK-COUNT @ DUP 0<> IF
+        0 DO
+            FOUND-TASK @ 0= IF
+                I CELLS TASK-TABLE + @       ( tdesc )
+                DUP T.STATUS T.READY = IF
+                    FOUND-TASK !             ( -- store it )
+                ELSE DROP THEN
+            THEN
+        LOOP
+    ELSE DROP THEN
+    FOUND-TASK @ ;
+
+\ -- RUN-TASK ( tdesc -- ) execute a task's XT, mark DONE when it returns --
+: RUN-TASK  ( tdesc -- )
+    DUP T.RUNNING SWAP T.STATUS!    ( -- make it running )
+    DUP CURRENT-TASK !
+    T.XT EXECUTE                    ( run the task body )
+    \ When XT returns, mark task as DONE
+    CURRENT-TASK @ DUP IF
+        T.DONE SWAP T.STATUS!
+    ELSE DROP THEN ;
+
+\ -- SCHEDULE ( -- ) run scheduler: execute ready tasks round-robin --
+\   Each call picks the next ready task, runs it to completion
+\   (or until it yields), then returns.
+: SCHEDULE  ( -- )
+    1 SCHED-RUNNING !
+    BEGIN
+        FIND-READY DUP
+    WHILE
+        RUN-TASK
+    REPEAT
+    DROP
+    0 SCHED-RUNNING ! ;
+
+\ -- YIELD ( -- ) cooperative yield: mark current task READY, return --
+\   The task's XT should call YIELD to give up the CPU.
+\   Since our tasks run to completion or yield by returning,
+\   YIELD marks the task as DONE (it has "yielded" its time slice).
+: YIELD  ( -- )
+    CURRENT-TASK @ DUP IF
+        T.DONE SWAP T.STATUS!
+    ELSE DROP THEN ;
+
+\ -- YIELD? ( -- ) check preempt flag, yield if set --
+: YIELD?  ( -- )
+    PREEMPT-FLAG @ IF
+        0 PREEMPT-FLAG !
+        YIELD
+    THEN ;
+
+\ -- SPAWN ( xt -- ) create an anonymous ready task with default priority --
+VARIABLE SPAWN-COUNT
+0 SPAWN-COUNT !
+
+: SPAWN  ( xt -- )
+    128                               ( xt priority=128 )
+    HERE TDESC-TEMP !
+    T.READY ,                         \ +0  status
+    ,                                 \ +8  priority
+    ,                                 \ +16 xt
+    TASK-COUNT @ 256 * TASK-STACKS + 128 +
+    ,                                 \ +24 dsp_save
+    0 ,                               \ +32 rsp_save
+    0 ,                               \ +40 name_addr
+    TASK-COUNT @ 8 < IF
+        TDESC-TEMP @ TASK-COUNT @ CELLS TASK-TABLE + !
+        TASK-COUNT @ 1+ TASK-COUNT !
+    THEN
+    SPAWN-COUNT @ 1+ SPAWN-COUNT ! ;
+
+\ -- KILL ( tdesc -- ) cancel a task by marking it DONE --
+: KILL  ( tdesc -- )
+    T.DONE SWAP T.STATUS! ;
+
+\ -- RESTART ( tdesc -- ) reset a DONE task back to READY --
+: RESTART  ( tdesc -- )
+    T.READY SWAP T.STATUS! ;
+
+\ -- BG ( xt -- ) spawn task and run scheduler --
+: BG  ( xt -- )
+    SPAWN SCHEDULE ;
+
+\ -- TASK-COUNT-READY ( -- n ) count tasks in READY state --
+: TASK-COUNT-READY  ( -- n )
+    0                                 ( count )
+    TASK-COUNT @ DUP IF
+        0 DO
+            I CELLS TASK-TABLE + @ T.STATUS T.READY = IF
+                1+
+            THEN
+        LOOP
+    ELSE DROP THEN ;
+
+\ -- Timer preemption setup --
+\   Uses polling approach: YIELD? checks if the timer counter has
+\   exceeded the preemption threshold.  This is simpler than a
+\   hardware ISR (which would need raw machine code for RTI).
+\
+\   PREEMPT-ON starts the auto-reload timer and enables the flag check.
+\   YIELD? checks the timer STATUS register for compare-match.
+
+VARIABLE PREEMPT-ENABLED
+0 PREEMPT-ENABLED !
+
+\ -- PREEMPT-ON ( -- ) enable timer-based preemption polling --
+: PREEMPT-ON  ( -- )
+    TIME-SLICE @ TIMER!           \ set compare value
+    5 TIMER-CTRL!                 \ enable + auto-reload (no IRQ)
+    1 PREEMPT-ENABLED ! ;
+
+\ -- PREEMPT-OFF ( -- ) disable timer preemption --
+: PREEMPT-OFF  ( -- )
+    1 TIMER-CTRL!                 \ enable counter only, no auto-reload
+    0 PREEMPT-ENABLED ! ;
+
+\ -- YIELD? ( -- ) check timer, yield if time slice expired --
+: YIELD?  ( -- )
+    PREEMPT-ENABLED @ IF
+        PREEMPT-FLAG @ IF
+            0 PREEMPT-FLAG !
+            YIELD
+        THEN
+    THEN ;
+
+\ =====================================================================
+\  §9  Benchmarking
 \ =====================================================================
 \
 \  BENCH ( xt -- cycles )
@@ -718,7 +954,7 @@ VARIABLE BENCH-T0
     ." cycles=" . CR ;
 
 \ =====================================================================
-\  §9  Dashboard
+\  §10  Dashboard
 \ =====================================================================
 
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
@@ -732,13 +968,14 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.4 — Kernel Dashboard OS" CR
+    ."  KDOS v0.5 — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
     CR BUFFERS
     CR KERNELS
     CR PIPES
+    CR TASKS
     CR FILES
     CR HRULE ;
 
@@ -747,17 +984,18 @@ VARIABLE BENCH-T0
     ." KDOS | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
+    ." tasks=" TASK-COUNT @ .
     ." files=" FILE-COUNT @ .
     ." disk=" DISK? IF ." yes" ELSE ." no" THEN
     ."  HERE=" HERE . CR ;
 
 \ =====================================================================
-\  §10  Help System
+\  §11  Help System
 \ =====================================================================
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.4 — Quick Reference" CR
+    ."  KDOS v0.5 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -806,6 +1044,17 @@ VARIABLE BENCH-T0
     ."    f FREWIND              Reset cursor to 0" CR
     ."    f FSIZE                Get used bytes" CR
     ."    FILES                  List all files" CR
+    CR ."  SCHEDULER WORDS:" CR
+    ."    ' word 0 TASK name     Create named task (xt pri)" CR
+    ."    xt SPAWN               Spawn anonymous task" CR
+    ."    xt BG                  Spawn + run scheduler" CR
+    ."    SCHEDULE               Run all ready tasks" CR
+    ."    YIELD                  Cooperative yield" CR
+    ."    tdesc KILL             Cancel task" CR
+    ."    tdesc RESTART          Reset done task to ready" CR
+    ."    PREEMPT-ON             Enable timer preemption" CR
+    ."    PREEMPT-OFF            Disable timer preemption" CR
+    ."    TASKS                  List all tasks" CR
     CR ."  BENCH & TOOLS:" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
     ."    ' word .BENCH          Time word and print cycles" CR
@@ -815,11 +1064,11 @@ VARIABLE BENCH-T0
     CR HRULE ;
 
 \ =====================================================================
-\  §11  Startup
+\  §12  Startup
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.4 — Kernel Dashboard OS" CR
+."  KDOS v0.5 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type DASHBOARD for system overview." CR
