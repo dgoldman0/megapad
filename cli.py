@@ -228,8 +228,8 @@ class MegapadCLI(cmd.Cmd):
     intro = (
         "\n"
         "╔══════════════════════════════════════════════════════════╗\n"
-        "║          Megapad-64 System Monitor  v1.0                ║\n"
-        "║   Type 'help' for commands.  'quit' to exit.           ║\n"
+        "║          Megapad-64 System Monitor  v1.0                 ║\n"
+        "║   Type 'help' for commands.  'quit' to exit.             ║\n"
         "╚══════════════════════════════════════════════════════════╝\n"
     )
     prompt = "MP64> "
@@ -394,7 +394,7 @@ class MegapadCLI(cmd.Cmd):
                     break
 
     def do_run(self, arg):
-        """Run until halt/breakpoint: run [max_steps]"""
+        """Run until halt/idle/breakpoint: run [max_steps]"""
         max_steps = self._parse_int(arg) if arg.strip() else 1_000_000
         total = 0
         for _ in range(max_steps):
@@ -405,9 +405,9 @@ class MegapadCLI(cmd.Cmd):
                 if self.sys.uart.has_rx_data:
                     self.sys.cpu.idle = False
                 else:
-                    self.sys.bus.tick(1)
-                    total += 1
-                    continue
+                    print(f"\nCPU idle after {total} cycles (waiting for input).")
+                    print("  Use 'send <text>' to provide input, then 'run' to continue.")
+                    break
             pc = self.sys.cpu.pc
             if pc in self.breakpoints:
                 print(f"\nBreakpoint hit at {pc:#010x}")
@@ -704,6 +704,7 @@ def main():
         print(f"Loaded {len(data)} bytes from '{path}' at {addr:#x}")
 
     # Load BIOS
+    bios_loaded = False
     if args.bios:
         if args.bios.endswith(".asm"):
             with open(args.bios, "r") as f:
@@ -712,6 +713,7 @@ def main():
                 code = assemble(source, 0)
                 sys_emu.load_binary(0, code)
                 print(f"Assembled BIOS from '{args.bios}': {len(code)} bytes")
+                bios_loaded = True
             except AsmError as e:
                 print(f"BIOS assembly error: {e}")
                 sys.exit(1)
@@ -720,15 +722,21 @@ def main():
                 data = f.read()
             sys_emu.load_binary(0, data)
             print(f"Loaded BIOS from '{args.bios}': {len(data)} bytes")
+            bios_loaded = True
 
-    # Auto-boot and run
-    if args.run:
+    # Auto-boot: if --run is given, or if a BIOS was loaded
+    if args.run or bios_loaded:
         sys_emu.boot(0)
-        print("Auto-booting...")
-        try:
-            sys_emu.run_until_halt()
-        except Exception as e:
-            print(f"Error during run: {e}")
+        print("Booting..." if bios_loaded else "Auto-booting...")
+        # Run until CPU halts or goes idle (waiting for input)
+        for _ in range(1_000_000):
+            if sys_emu.cpu.halted or sys_emu.cpu.idle:
+                break
+            try:
+                sys_emu.step()
+            except Exception as e:
+                print(f"Error during run: {e}")
+                break
         output = sys_emu.get_tx_output()
         if output:
             print(output)

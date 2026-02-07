@@ -88,8 +88,15 @@ shell_loop:
     ldi r1, 0x20            ; ' '
     st.b r8, r1
 
+shell_read:
     ; Read one character
     call.l r5               ; R1 ← char from UART
+
+    ; Skip CR/LF — silently re-read without re-prompting
+    cmpi r1, 0x0A           ; '\n'
+    breq shell_read
+    cmpi r1, 0x0D           ; '\r'
+    breq shell_read
 
     ; Echo it back
     st.b r8, r1
@@ -229,7 +236,10 @@ read_char_poll:
     ld.b r1, r13            ; R1 = status
     andi r1, 0x02           ; mask RX_AVAIL
     cmpi r1, 0
-    breq read_char_poll     ; spin until data available
+    brne read_char_ready    ; data available → go read it
+    idl                     ; no data — go idle until woken
+    br read_char_poll       ; re-check after wake
+read_char_ready:
     ; Read the byte
     ldi64 r13, 0xFFFF_FF00_0000_0001  ; UART RX_DATA register
     ld.b r1, r13            ; R1 = received byte
