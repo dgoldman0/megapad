@@ -1,78 +1,114 @@
 # Megapad-64 System Emulator
 
-A complete system-level emulator for the Megapad-64 architecture, including
-CPU, memory-mapped I/O peripherals, a BIOS, and an interactive CLI debugger.
+A complete system-level emulator for the Megapad-64 architecture: CPU,
+memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
+and an interactive CLI monitor/debugger.
 
-> **Status:** Core emulation is functional. No operating system, no graphics
-> subsystem — just bare-metal hardware emulation and a monitor shell.
+> **Branch:** `feature/mvp-repl`
+> **Status:** Fully functional.  62-word Forth interpreter running on the
+> emulated hardware, 103 tests passing (61 CPU + 42 system).
 
 ---
 
 ## Quick Start
 
 ```bash
-# Boot with the BIOS (assembles from source automatically)
+# Boot the Forth REPL directly (assembles .asm on the fly)
 python cli.py --bios bios.asm
 
-# Then inside the monitor:
-MP64> boot
-MP64> run
+# Pre-compile to a .rom, then boot from binary
+python cli.py --assemble bios.asm bios.rom
+python cli.py --bios bios.rom
 ```
 
-You'll see the BIOS banner, a storage probe, and an interactive `> ` prompt
-from the BIOS shell running *inside* the emulated machine.
+When stdin is a terminal you get an interactive serial console — type Forth
+expressions at the `> ` prompt:
 
-### Other launch examples
+```
+Megapad-64 Forth BIOS v0.3
+RAM: 00100000 bytes
+ ok
+> 3 4 + .
+7  ok
+> HEX CAFE . DECIMAL
+CAFE  ok
+> 0x2000 16 0xAB FILL  0x2000 16 DUMP
+00002000: AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB
+ ok
+> WORDS
+CYCLES TZERO TTRANS TMAX TMIN TSUM TDOT TMUL TXOR TOR TAND TSUB TADD
+TCTRL! TMODE! TDST! TSRC1! TSRC0! TFILL TVIEW TI FILL DUMP BYE WORDS
+BASE DECIMAL HEX .S U. . CR KEY EMIT C, , ALLOT HERE C! C@ ! @ 0< 0=
+> < = RSHIFT LSHIFT INVERT XOR OR AND 1- 1+ ABS NEGATE /MOD MOD / * -
++ PICK DEPTH 2DROP 2DUP TUCK NIP ROT OVER SWAP DROP DUP
+ ok
+> BYE
+Bye!
+```
+
+When stdin is a **pipe**, the CLI feeds input one byte at a time and prints
+all UART output to stdout, then exits on halt or EOF — ideal for scripting
+and tests:
 
 ```bash
-# Custom RAM size (512 KiB) + disk image
-python cli.py --ram 512 --storage disk.img --bios bios.asm
-
-# Load a raw binary at a specific address
-python cli.py --load program.bin@0x1000
-
-# Auto-boot and run immediately
-python cli.py --bios bios.asm --run
+printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 ```
+
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--bios FILE` | — | Boot from `.asm` (assembled on the fly) or binary |
+| `--assemble SRC OUT` | — | Assemble `SRC.asm` → `OUT.rom` and exit |
+| `--ram KiB` | 1024 | RAM size in KiB |
+| `--storage IMAGE` | — | Attach a block-device image file |
+| `--load FILE[@ADDR]` | — | Load raw binary into RAM (repeatable) |
+| `--run` | off | Auto-boot and run immediately |
 
 ---
 
 ## Architecture Overview
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                     cli.py                             │
-│            Interactive Monitor / Debugger               │
-└────────────────────┬───────────────────────────────────┘
-                     │
-┌────────────────────▼───────────────────────────────────┐
-│                   system.py                            │
-│        MegapadSystem  (unified memory map)             │
-│                                                        │
-│   ┌───────────┐    ┌───────────────────────────────┐   │
-│   │ megapad64  │    │         devices.py            │   │
-│   │   CPU core │    │  ┌──────┐ ┌─────┐ ┌───────┐  │   │
-│   │ 16×64-bit  │◄──►│  │ UART │ │Timer│ │Storage│  │   │
-│   │   GPRs     │    │  └──────┘ └─────┘ └───────┘  │   │
-│   │ full ISA   │    │  ┌────────┐                   │   │
-│   └───────────┘    │  │SysInfo │   DeviceBus        │   │
-│                     │  └────────┘                   │   │
-│                     └───────────────────────────────┘   │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      cli.py  (871 lines)                 │
+│       Interactive monitor / debugger / console           │
+└──────────────────────┬───────────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────────┐
+│                    system.py  (273 lines)                 │
+│          MegapadSystem — unified memory map               │
+│                                                          │
+│  ┌──────────────┐    ┌────────────────────────────────┐  │
+│  │  megapad64.py │    │       devices.py  (449 lines) │  │
+│  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
+│  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
+│  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
+│  │  full ISA     │    │ ┌─────────┐                  │  │
+│  │  tile engine  │    │ │ SysInfo │    DeviceBus      │  │
+│  │  (1304 lines) │    │ └─────────┘                  │  │
+│  └──────────────┘    └────────────────────────────────┘  │
+│                                                          │
+│          asm.py  (640 lines)  — two-pass assembler        │
+└──────────────────────────────────────────────────────────┘
+
+    bios.asm  (2338 lines)  — Forth BIOS v0.3, 62 words
+    bios.rom  (5650 bytes)  — precompiled binary
 ```
 
-### File Inventory
+### Source files
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | ~1300 | CPU core — 16×64-bit registers, all 16 instruction families, flags, CSRs, traps |
-| `asm.py` | ~590 | Two-pass assembler — all mnemonics including `ldi64` for 64-bit immediates |
-| `devices.py` | ~450 | Peripheral layer — UART, Timer, Storage, SystemInfo, DeviceBus |
-| `system.py` | ~275 | System glue — wires CPU + DeviceBus, patches memory accessors for MMIO |
-| `cli.py` | ~745 | Interactive CLI monitor with disassembler, breakpoints, UART console |
-| `bios.asm` | ~310 | Bootstrap firmware — UART I/O, storage probe, interactive shell |
-| `test_megapad64.py` | ~710 | CPU test suite (61 tests) |
-| `test_system.py` | ~400 | System integration tests (23 tests) |
+| `megapad64.py` | 1304 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine |
+| `asm.py` | 640 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq` |
+| `devices.py` | 449 | Peripherals — UART, Timer, Storage, SystemInfo, DeviceBus |
+| `system.py` | 273 | System glue — wires CPU + DeviceBus, patches memory accessors for MMIO |
+| `cli.py` | 871 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
+| `bios.asm` | 2338 | Forth BIOS v0.3 — subroutine-threaded interpreter, 62 built-in words |
+| `test_megapad64.py` | 711 | CPU test suite — 61 tests |
+| `test_system.py` | 493 | System integration tests — 42 tests (devices, MMIO, Forth BIOS) |
+| **Total** | **~7100** | |
 
 ---
 
@@ -80,23 +116,40 @@ python cli.py --bios bios.asm --run
 
 | Address Range | Size | Description |
 |---|---|---|
-| `0x0000_0000_0000_0000` – top of RAM | Configurable | RAM (default 1 MiB) |
-| `0xFFFF_FF00_0000_0000` – `+0x00FF` | 256 B | UART (serial console) |
-| `0xFFFF_FF00_0000_0100` – `+0x01FF` | 256 B | Timer |
-| `0xFFFF_FF00_0000_0200` – `+0x02FF` | 256 B | Storage controller |
-| `0xFFFF_FF00_0000_0300` – `+0x03FF` | 256 B | System info |
+| `0x0000_0000` – top of RAM | Configurable | RAM (default 1 MiB = 0x100000) |
+| `0xFFFF_FF00_0000_0000` + `0x0000` | 256 B | UART (serial console) |
+| `0xFFFF_FF00_0000_0000` + `0x0100` | 256 B | Timer |
+| `0xFFFF_FF00_0000_0000` + `0x0200` | 256 B | Storage controller |
+| `0xFFFF_FF00_0000_0000` + `0x0300` | 256 B | System info |
 
-All MMIO registers are byte-accessed. The system layer intercepts any CPU
-memory operation (8/16/32/64-bit) that falls in the MMIO range and routes
-it through the device bus; everything else hits RAM.
+The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
+falls in the MMIO aperture and routes it through the device bus; everything
+else hits RAM.
+
+### BIOS memory layout (runtime)
+
+```
+0x00000  ┌──────────────────────┐
+         │  BIOS code           │  ~5650 bytes
+         │  dictionary entries  │
+         │  strings / IVT / TIB │
+         ├──────────────────────┤ ← dict_free / HERE
+         │  user dictionary     │  grows ↑
+         │  (HERE advances)     │
+         │          ...         │
+         ├──────────────────────┤ ← ram_size / 2
+         │  data stack (R14)    │  grows ↓
+         │          ...         │
+         ├──────────────────────┤ ← ram_size
+         │  return stack (R15)  │  grows ↓
+         └──────────────────────┘
+```
 
 ---
 
 ## Peripherals
 
 ### UART (Serial Console)
-
-The primary I/O device. Connects the emulated CPU to the host terminal.
 
 | Offset | Name | R/W | Description |
 |---|---|---|---|
@@ -120,7 +173,7 @@ The primary I/O device. Connects the emulated CPU to the host terminal.
 
 ### Storage Controller
 
-Sector-based block device backed by a host file.
+Sector-based block device backed by a host file.  Sector size is 512 bytes.
 
 | Offset | Name | R/W | Description |
 |---|---|---|---|
@@ -131,160 +184,227 @@ Sector-based block device backed by a host file.
 | `+0x0E` | SEC_COUNT | RW | Number of sectors to transfer |
 | `+0x0F` | DATA | RW | Byte-at-a-time data port |
 
-Sector size is **512 bytes**. DMA transfers read/write directly to/from RAM,
-bypassing MMIO.
-
 ### System Info
 
 Read-only board identification.
 
 | Offset | Name | Description |
 |---|---|---|
-| `+0x00`–`+0x03` | BOARD_ID | "MP64" (ASCII) |
+| `+0x00`–`+0x03` | BOARD_ID | `"MP64"` (ASCII) |
 | `+0x04` | VERSION | Board revision |
-| `+0x05`–`+0x06` | MEM_SIZE | RAM size in KiB (little-endian 16-bit) |
+| `+0x05`–`+0x06` | MEM_SIZE | RAM size in KiB (LE 16-bit) |
 | `+0x07` | FEATURES | bit 0: UART, bit 1: storage present |
 | `+0x08` | STORAGE | `1` if storage attached, else `0` |
 
 ---
 
-## CLI Monitor Commands
+## BIOS — Forth REPL (v0.3)
 
-Launch the monitor with `python cli.py [options]`. All commands are
-available at the `MP64>` prompt.
+The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
+Megapad-64 assembly (2338 lines, 5650 bytes).  It boots from address 0 and
+provides an interactive REPL over UART.
+
+### Boot sequence
+
+1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
+2. Set up UART base in R8, subroutine pointers in R4/R5/R6
+3. Enable timer, install IVT for bus fault handler
+4. Initialise Forth variables: STATE=0, BASE=10, HERE=dict_free, LATEST
+5. Print banner (`Megapad-64 Forth BIOS v0.3`, RAM size)
+6. Enter the outer interpreter (`QUIT` loop)
+
+### Outer interpreter
+
+The `QUIT` loop prints `> `, reads a line into the TIB (terminal input
+buffer), then tokenises and interprets:
+
+1. **Parse** the next whitespace-delimited word
+2. **Find** it in the dictionary (case-insensitive linked-list walk)
+3. If found → compute code address, `CALL.L` the word
+4. If not found → try **parse_number** (supports `-`, `0x` prefix, BASE)
+5. If valid number → push onto data stack
+6. Otherwise → print `<word> ?` and abort the line
+
+### Register conventions
+
+| Register | Role |
+|---|---|
+| R0 | scratch / CSR operand (R0-R7 are CSR-capable) |
+| R1 | scratch / argument / return value |
+| R2 | ram_size (set at boot, preserved throughout) |
+| R3 | PC (PSEL = 3) |
+| R4 | → `emit_char` subroutine |
+| R5 | → `key_char` subroutine (blocking UART read) |
+| R6 | → `print_hex_byte` subroutine |
+| R7 | scratch |
+| R8 | UART base address (`0xFFFF_FF00_0000_0000`) |
+| R9–R13 | scratch / temp |
+| R14 | DSP — data stack pointer (grows downward) |
+| R15 | RSP — return stack pointer (grows downward) |
+
+### Built-in words (62)
+
+**Stack manipulation**
+`DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
+
+**Arithmetic**
+`+` `-` `*` `/` `MOD` `/MOD` `NEGATE` `ABS` `1+` `1-`
+
+**Logic & bitwise**
+`AND` `OR` `XOR` `INVERT` `LSHIFT` `RSHIFT`
+
+**Comparison** (true = −1, false = 0)
+`=` `<` `>` `0=` `0<`
+
+**Memory**
+`@` `!` `C@` `C!` `ALLOT` `,` `C,` `HERE`
+
+**I/O & display**
+`EMIT` `KEY` `CR` `.` `U.` `.S` `WORDS` `BYE`
+
+**Number base**
+`HEX` `DECIMAL` `BASE`
+
+**Memory utilities**
+`FILL` `DUMP`
+
+**Tile engine**
+`TVIEW` `TFILL` `TSRC0!` `TSRC1!` `TDST!` `TMODE!` `TCTRL!`
+`TADD` `TSUB` `TAND` `TOR` `TXOR` `TMUL` `TDOT` `TSUM`
+`TMIN` `TMAX` `TTRANS` `TZERO` `TI` `CYCLES`
+
+### Dictionary structure
+
+Each entry is a linked list node:
+
+```
+┌────────────┬───────┬──────────────┬─────────────────────────┐
+│ link (8 B) │ flags │ name (N B)   │ trampoline code         │
+│ → prev     │ (1 B) │ length-       │ ldi64 Rn, impl_addr    │
+│   entry    │       │ prefixed     │ call.l Rn               │
+│            │       │              │ ret.l                    │
+└────────────┘───────┘──────────────┘─────────────────────────┘
+```
+
+- **Link**: 64-bit pointer to the previous entry (0 = end)
+- **Flags**: low 5 bits = name length, bit 7 = immediate (unused in MVP)
+- **Trampoline**: `ldi64` + `call.l` + `ret.l` — jumps to the native
+  implementation. This is the subroutine-threaded call mechanism.
+
+---
+
+## CLI Monitor
+
+When launched *without* `--bios`, the CLI drops into the `MP64>` monitor
+prompt.  With `--bios`, the BIOS console is the primary interface, but the
+monitor is still available for debugging.
 
 ### Loading
 
 | Command | Description |
 |---|---|
-| `load <file> [addr]` | Load a raw binary into RAM (default address 0) |
-| `asm <file.asm> [addr]` | Assemble and load (source → machine code → RAM) |
-| `asm -e "ldi r1, 42; halt"` | Inline assembly (semicolons separate lines) |
+| `load <file> [addr]` | Load raw binary into RAM (default address 0) |
+| `asm <file.asm> [addr]` | Assemble and load into RAM |
+| `asm -e "ldi r1, 42; halt"` | Inline assembly (semicolons = newlines) |
 
 ### Execution
 
 | Command | Description |
 |---|---|
-| `boot [addr]` | Cold boot: reset CPU, set PC to addr (default 0) |
-| `reset` | Reset CPU state without clearing RAM |
-| `step [N]` | Execute N instructions (default 1), show state |
-| `run [max]` | Run up to max steps (default 1M), stop on halt/idle/breakpoint |
-| `continue` / `c` | Resume execution (alias for `run`) |
+| `boot [addr]` | Cold boot: reset CPU, PC ← addr (default 0) |
+| `reset` | Reset CPU state, keep RAM |
+| `step [N]` | Single-step N instructions (default 1) |
+| `run [max]` | Run up to max steps (default 1M) |
+| `continue` / `c` | Resume from current PC |
+| `console` | Enter raw UART console (Ctrl-] to exit) |
 
 ### Breakpoints
 
 | Command | Description |
 |---|---|
-| `bp <addr>` | Set breakpoint at address |
+| `bp <addr>` | Set breakpoint |
 | `bp` | List all breakpoints |
 | `bpd <addr>` | Delete breakpoint |
-| `bpd all` | Delete all breakpoints |
+| `bpd all` | Delete all |
 
 ### Inspection
 
 | Command | Description |
 |---|---|
-| `regs` | Dump all 16 registers + PC, SP, D, flags |
-| `flags` | Show CPU flags (Z, C, N, V, P, G, I, S) |
-| `dump <addr> [len]` | Hex dump of memory (default 256 bytes) |
-| `disasm [addr] [count]` | Disassemble instructions (default from PC) |
-| `status` | Full system status dump |
-| `devices` | List registered MMIO devices |
-| `cycles` | Show total CPU cycle count |
+| `regs` | All 16 registers + PC, SP, D, flags |
+| `flags` | CPU flags: Z, C, N, V, P, G, I, S |
+| `dump <addr> [len]` | Hex dump (default 256 bytes) |
+| `disasm [addr] [count]` | Disassemble from addr (default PC) |
+| `status` | Full system status |
+| `devices` | List MMIO devices |
+| `cycles` | Total CPU cycle count |
 
 ### Modification
 
 | Command | Description |
 |---|---|
-| `setreg <reg> <value>` | Set a register (`setreg r1 0xFF`, `setreg pc 0x100`) |
-| `setmem <addr> <hex bytes>` | Write bytes to memory (`setmem 0x100 48 65 6C`) |
-
-### UART / Console
-
-| Command | Description |
-|---|---|
-| `console` | Enter interactive console mode (Ctrl-] to exit) |
-| `send <text>` | Inject text into UART RX buffer as keyboard input |
+| `setreg <reg> <val>` | Set register (`setreg r1 0xFF`, `setreg pc 0x100`) |
+| `setmem <addr> <bytes>` | Write hex bytes (`setmem 0x100 48 65 6C`) |
+| `send <text>` | Inject text into UART RX buffer |
 | `uart` | Show UART buffer status |
 
-In **console mode**, your keystrokes go directly to the emulated UART and
-CPU output appears in real time — just like a real serial terminal.
-
-### Storage
+### Storage & config
 
 | Command | Description |
 |---|---|
-| `storage attach <file>` | Attach (or create) a disk image |
-| `storage detach` | Detach current image |
-| `storage info` | Show image path, sector count, status |
-| `storage save` | Flush image to disk |
-
-### Configuration
-
-| Command | Description |
-|---|---|
+| `storage attach/detach/info/save` | Manage disk image |
 | `ramsize [KiB]` | Show or change RAM size (recreates system) |
-| `quit` / `exit` / `q` | Exit the monitor |
+| `quit` / `exit` / `q` | Exit |
 
 ---
 
-## BIOS
+## Assembler
 
-The included `bios.asm` is a minimal bootstrap that runs from address 0.
-It is written in Megapad-64 assembly and assembled automatically by the
-CLI when you use `--bios bios.asm`.
+The assembler (`asm.py`) is a two-pass, label-resolving assembler that
+covers the complete Megapad-64 ISA.
 
-### Boot Sequence
+### Key features
 
-1. Initialize stack pointer (R15 ← top of RAM)
-2. Set up UART base address in R8
-3. Load subroutine pointers into R4 (print_str), R5 (read_char), R6 (print_hex_byte)
-4. Print banner: `Megapad-64 BIOS v0.1`
-5. Probe storage via SysInfo, print `Storage: Y` or `Storage: N`
-6. Print `Ready.` and enter the interactive shell
+- All 16 instruction families (SYS, INC, DEC, BR, LBR, MEM, IMM, ALU,
+  MEMALU, I/O, SEP, SEX, MULDIV, CSR, MEX/tile, EXT)
+- **`ldi64 Rn, value`** — full 64-bit immediate (11 bytes: EXT prefix +
+  opcode + register + 8 LE bytes).  Required for MMIO addresses and large
+  constants.
+- **Labels** resolve in both passes; forward references work.
+- **Directives**: `.db`, `.dw`, `.dd`, `.dq` (data), `.ascii`, `.asciiz`
+  (strings), `.align`
+- **Short branches** (`br`, `breq`, `brne`, `brcc`, `brcs`, `brgt`, `brle`)
+  have ±127 byte range.  **Long branches** (`lbr`, `lbreq`, etc.) support
+  ±32 KiB.  Out-of-range short branches produce an assembler error.
 
-### BIOS Shell Commands
+### Carry flag convention
 
-| Key | Action |
-|---|---|
-| `h` | Print help |
-| `r` | Print PC and R9 as hex |
-| `d` | Hex dump 16 bytes starting at R9 |
-| `s` | Set R9 from two hex digits (e.g., `s4A` sets R9 = 0x4A) |
-| `g` | Jump to address in R9 (CALL.L — returns to shell on RET.L) |
-| `q` | Halt the CPU |
+After `CMP a, b` (which computes a − b):
 
-### Register Conventions
+| Condition | Flag | Branch taken | Branch not taken |
+|---|---|---|---|
+| a ≥ b (unsigned) | C = 1 | `brcs` | `brcc` |
+| a < b (unsigned) | C = 0 | `brcc` | `brcs` |
+| a > b (unsigned) | G = 1 | `brgt` | `brle` |
+| a = b | Z = 1 | `breq` | `brne` |
+| a < b (signed) | N ⊕ V | `brlt` | `brge` |
 
-| Register | Role |
-|---|---|
-| R3 | Program counter (PSEL = 3) |
-| R2 | Data pointer (XSEL = 2) |
-| R8 | UART base address |
-| R9 | User address (for dump/go/set) |
-| R4 | → `print_str` subroutine |
-| R5 | → `read_char` subroutine |
-| R6 | → `print_hex_byte` subroutine |
-| R15 | Stack pointer (SPSEL = 15) |
+### CALL.L / RET.L
 
----
+64-bit subroutine call/return via the return stack (R15):
 
-## Assembler Notes
+```asm
+    ldi64 r11, my_function
+    call.l r11              ; push return addr, jump to r11
+    ; ...continues here after ret.l
 
-The assembler (`asm.py`) supports the full ISA. A few things to keep in
-mind when writing programs:
+my_function:
+    ; ...
+    ret.l                   ; pop return addr, jump back
+```
 
-- **`ldi64 Rn, value`** — loads a full 64-bit immediate (uses EXT prefix +
-  8-byte literal). Required for MMIO addresses.
-- **`br` vs `lbr`** — short branches (`br`) have ±127 byte range. Use `lbr`
-  (±32K) for longer jumps. The assembler will error if a short branch
-  target is out of range.
-- **R3 is the PC** — avoid using it as a general-purpose register.
-- **CALL.L / RET.L** — 64-bit call/return via the stack. Load the target
-  address into a register, then `call.l Rn`.
-- **Carry flag convention** — CMP sets C = 1 when the first operand is ≥
-  the second (unsigned, no-borrow convention). Use `brcc` to branch when
-  less-than, `brcs` when greater-or-equal.
+There are no `push64`/`pop64` instructions.  Manual stack operations use
+`subi r14, 8` / `str r14, r1` (push) and `ldn r1, r14` / `addi r14, 8` (pop).
 
 ---
 
@@ -294,62 +414,48 @@ mind when writing programs:
 # CPU-level tests (61 tests)
 python test_megapad64.py
 
-# System integration tests (23 tests)
+# System + BIOS integration tests (42 tests)
 python test_system.py
 ```
 
-Both suites should report all tests passing.
+The system tests exercise the full stack: devices, MMIO routing, and the
+Forth BIOS (arithmetic, stack ops, comparisons, logic, memory, hex parsing,
+WORDS, BYE, undefined-word handling, FILL/DUMP, EMIT, and more).
 
 ---
 
-## Example Session
+## Example: Scripted Test via Pipe
 
-```
-$ python cli.py --bios bios.asm --ram 256
+```bash
+$ printf '1 2 3 .S\nDROP DROP DROP\n100 7 /MOD . .\nBYE\n' \
+    | python cli.py --bios bios.rom
 
-╔══════════════════════════════════════════════════════════╗
-║          Megapad-64 System Monitor  v1.0                ║
-║   Type 'help' for commands.  'quit' to exit.           ║
-╚══════════════════════════════════════════════════════════╝
-Assembled BIOS from 'bios.asm': 552 bytes
-MP64> boot
-  Booted. PC=0x0  SP=0x40000
-MP64> run
-
-Megapad-64 BIOS v0.1
-Storage: N
-
-Ready.
-> 
-  CPU idle after 112490 steps (waiting for input).
-MP64> send h
-MP64> run
-h
-h=help r=regs d=dump s=setaddr g=go q=quit
-> 
-  CPU idle after ... steps (waiting for input).
-MP64> send q
-MP64> run
-q
+Megapad-64 Forth BIOS v0.3
+RAM: 00100000 bytes
+ ok
+> 1 2 3 .S
+<3> 1 2 3  ok
+> DROP DROP DROP
+ ok
+> 100 7 /MOD . .
+14 2  ok
+> BYE
 Bye!
-  CPU halted after 60 steps.
-MP64> regs
-  R0  = 0x0000000000000000   R1  = 0x0000000000000071
-  R2  = 0x0000000000040000   R3  = 0x000000000000015f  <PC
-  ...
-MP64> quit
-Goodbye.
 ```
 
 ---
 
-## What's Next
+## Project History
 
-This emulator provides the bare-metal foundation. Future work may include:
-
-- **Operating system** — kernel, process management, syscalls
-- **Graphics subsystem** — framebuffer device, display emulation
-- **GUI frontend** — graphical debugger and display window
-- **Keyboard / mouse** — additional input peripherals
-- **Network** — emulated NIC
-- **Extended storage** — filesystem support
+| Commit | Milestone |
+|---|---|
+| `3d321a9` | Instruction encoding spec (`ENCODING.html`) |
+| `32481a2` | Bytecode emulator + assembler + 61 CPU tests |
+| `c3b9001` | Peripheral layer: UART, Timer, Storage, SysInfo |
+| `8ef8f3b` | System emulator with unified memory map |
+| `67a0e14` | CLI monitor with disassembler |
+| `82043bc` | BIOS v0.1 — monitor shell |
+| `ea04090` | Integration test suite (23 tests) |
+| `220e2e2` | BIOS v0.2 — tile engine commands |
+| `a5ffeba` | `--assemble` flag for `.rom` precompilation |
+| `b879ff5` | **BIOS v0.3 — Forth MVP REPL**, 62 words, 42 system tests |
