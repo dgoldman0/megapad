@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.2 — Tile Engine Integration Complete**
+**Current Status: KDOS v0.3 — Pipeline Engine**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (109 tests)
+# Full test suite (122 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -36,41 +36,54 @@ mybuf B.MIN .                 \ Min byte → prints 42
 20 b B.FILL                   \ Fill b with 20
 a b c B.ADD                   \ Element-wise add a+b → c
 c B.DATA C@ .                 \ First byte of c → prints 30
+
+\ Pipelines
+pipe-fill-sum P.RUN           \ Run built-in pipeline: fill+sum
+pipe-add-stats P.RUN          \ Run built-in pipeline: add+stats
+3 PIPELINE my-pipe            \ Create a 3-step pipeline
+: step1 42 mybuf B.FILL ;
+' step1 my-pipe P.ADD         \ Append step
+my-pipe P.RUN                 \ Execute all steps
+my-pipe P.BENCH               \ Time each step
 ```
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed (v0.2)
+### ✅ Completed (v0.3)
 
 **BIOS v0.4** (115 words, 4069 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
-- **NEW in v0.4**: ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
+- ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 
-**KDOS v0.2** (520 lines Forth):
+**KDOS v0.3** (619 lines Forth):
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
-- **Dashboard UI**: HELP (command reference), DASHBOARD (system overview), STATUS (one-liner)
-- **Benchmarking**: BENCH ( xt -- cycles ) for performance measurement
+- **Pipeline engine**: Ordered kernel pipelines with per-step timing (up to 8 registered)
+- **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
+- **Dashboard UI**: HELP, DASHBOARD (now with pipelines), STATUS, PIPES
+- **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
+- **Bug fixes**: BUFFER descriptor overlap fix, zero-trip DO/LOOP guards
 
-**Tests**: 109 passing
-- 42 KDOS tests (buffer ops, tile operations, kernels, dashboard)
+**Tests**: 122 passing
+- 55 KDOS tests (buffers, tile ops, kernels, pipelines, dashboard)
 - 42 BIOS tests (all Forth words, compilation, tile engine)
 - 25 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
-### 🚧 Roadmap to v1.0
+### � Roadmap to v1.0
 
-**Phase 1: Kernel Pipeline Engine** (not started)
-- PIPELINE descriptor: sequence of kernels with buffer routing
-- Pipeline compiler: validate buffer types, allocate intermediates
-- Pipeline scheduler: dispatch with dependency tracking
-- Example: image → blur → threshold → edge-detect → display
+**Phase 1: Kernel Pipeline Engine** (✅ complete — v0.3)
+- PIPELINE descriptor: ordered sequence of execution tokens
+- Pipeline registry: up to 8 named pipelines
+- P.RUN (execute), P.BENCH (per-step timing), P.INFO, P.CLEAR
+- 3 demo pipelines: fill-sum, add-stats, threshold
+- Demo buffers: demo-a, demo-b, demo-c
 
 **Phase 2: Storage & Persistence** (not started)
 - FILE abstraction backed by storage device sectors
@@ -302,25 +315,43 @@ kernel-descriptor:
 - `K.INFO` — print kernel descriptor
 - `KERNELS` — list all registered kernels (up to 16)
 
-### 5.3 Pipeline (NOT YET IMPLEMENTED)
+### 5.3 Pipeline (IMPLEMENTED)
 
-**Planned for v0.3**:
+A pipeline is an ordered sequence of no-argument execution tokens.
 
-A pipeline is a DAG of kernels with buffer routing.
-
+**Implementation (kdos.f §6)**:
 ```forth
-pipeline-node:
-  +0   kernel_addr  ( pointer to kernel descriptor )
-  +8   input_bufs   ( array of buffer addresses )
-  +16  output_bufs  ( array of buffer addresses )
-  +24  next_nodes   ( array of downstream node addresses )
+pipeline-descriptor:
+  +0   capacity    ( max steps )
+  +8   count       ( current steps in use )
+  +16  steps[]     ( array of XTs, capacity cells )
 ```
 
-Pipelines enable:
-- Automatic dependency tracking
-- Incremental recomputation (only re-run changed subgraphs)
-- Scheduling optimizations
-- Visual DAG display in dashboard
+**Usage**:
+```forth
+3 PIPELINE my-pipe          \ Create 3-step pipeline
+: step1 ( -- ) 42 buf B.FILL ;   \ Define step words
+: step2 ( -- ) buf B.SUM . ;
+' step1 my-pipe P.ADD       \ Append steps
+' step2 my-pipe P.ADD
+my-pipe P.RUN               \ Execute all steps in order
+my-pipe P.BENCH             \ Time each step
+```
+
+**Implemented operations**:
+- `P.CAP`, `P.COUNT`, `P.DATA` — field accessors
+- `P.GET`, `P.SET` — step access by index
+- `P.ADD` — append step (auto-increment count)
+- `P.CLEAR` — reset pipeline to 0 steps
+- `P.RUN` — execute all steps in order
+- `P.BENCH` — execute and print cycle count per step
+- `P.INFO` — print pipeline descriptor
+- `PIPES` — list all registered pipelines (up to 8)
+
+**Built-in demo pipelines** (with demo-a, demo-b, demo-c buffers):
+- `pipe-fill-sum` — fill demo-a with 42, sum via tile engine (→ 2688)
+- `pipe-add-stats` — fill a=10, b=20, add a+b→c, print stats (→ sum=1920)
+- `pipe-thresh` — fill ramp 0..63, threshold at 32, print stats (→ sum=8160)
 
 ---
 
@@ -404,6 +435,7 @@ Prints full command reference with categories:
 - Buffer words: BUFFER, B.INFO, B.SUM, B.ADD, etc.
 - Kernel words: KERNEL, K.INFO, KERNELS
 - Sample kernels: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
+- Pipeline words: PIPELINE, P.ADD, P.RUN, P.BENCH, P.INFO, PIPES
 - Bench & tools: BENCH, .BENCH, DASHBOARD, STATUS, HELP
 
 ### 7.2 DASHBOARD
@@ -416,25 +448,29 @@ Shows:
 - Memory: HERE address
 - Buffers: count + list with descriptors
 - Kernels: count + list with metadata
+- Pipelines: count + list with capacities
 
 Output example:
 ```
 ------------------------------------------------------------
-  KDOS v0.2 — Kernel Dashboard OS
+  KDOS v0.3 — Kernel Dashboard OS
 ------------------------------------------------------------
   Memory:
-    HERE  = 22108
+    HERE  = 24576
   
  --- Buffers (3 ) ---
-0  :  [buf  t=0   w=1   n=128   tiles=2   @21504  ]
-1  :  [buf  t=0   w=1   n=64    tiles=1   @21696  ]
-2  :  [buf  t=0   w=1   n=256   tiles=4   @21824  ]
+0  :  [buf  t=0   w=1   n=64   tiles=1   @21504  ]
+1  :  [buf  t=0   w=1   n=64   tiles=1   @21632  ]
+2  :  [buf  t=0   w=1   n=64   tiles=1   @21760  ]
 
  --- Kernels (7 ) ---
 0  :  [kern  in=1   out=1   foot=0   fl=0  ]
-1  :  [kern  in=1   out=1   foot=0   fl=0  ]
-2  :  [kern  in=2   out=1   foot=3   fl=1  ]
 ...
+
+ --- Pipelines (3 ) ---
+0  :  [pipe cap=2  steps=2  ]
+1  :  [pipe cap=3  steps=3  ]
+2  :  [pipe cap=3  steps=3  ]
 ------------------------------------------------------------
 ```
 
@@ -446,7 +482,7 @@ STATUS
 
 One-line summary:
 ```
-KDOS | bufs=3  kerns=7  HERE=22108
+KDOS | bufs=3  kerns=7  pipes=3  HERE=24576
 ```
 
 ### 7.4 Benchmarking

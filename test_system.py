@@ -766,7 +766,7 @@ class TestKDOS(unittest.TestCase):
         return sys, buf
 
     def _run_kdos(self, extra_lines: list[str],
-                  max_steps=200_000_000) -> str:
+                  max_steps=400_000_000) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
         sys, buf = self._boot_bios()
         all_lines = self.kdos_lines + extra_lines
@@ -802,7 +802,7 @@ class TestKDOS(unittest.TestCase):
     def test_kdos_loads(self):
         """KDOS loads without errors and prints banner."""
         text = self._run_kdos([])
-        self.assertIn("KDOS v0.2", text)
+        self.assertIn("KDOS v0.3", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -932,10 +932,139 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.2", text)
+        self.assertIn("KDOS v0.3", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
+        self.assertIn("Pipelines", text)
+
+    # -- Pipelines --
+
+    def test_pipeline_create(self):
+        """Create a pipeline and check its capacity."""
+        text = self._run_kdos([
+            "4 PIPELINE tp",
+            "tp P.CAP .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("4 ", out)
+
+    def test_pipeline_add_count(self):
+        """P.ADD increments pipeline step count."""
+        text = self._run_kdos([
+            ": ts1 ;",
+            ": ts2 ;",
+            "3 PIPELINE tp2",
+            "' ts1 tp2 P.ADD",
+            "' ts2 tp2 P.ADD",
+            "tp2 P.COUNT .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("2 ", out)
+
+    def test_pipeline_run(self):
+        """P.RUN executes all pipeline steps in order."""
+        text = self._run_kdos([
+            ": ps1 42 . ;",
+            ": ps2 99 . ;",
+            "2 PIPELINE tp3",
+            "' ps1 tp3 P.ADD",
+            "' ps2 tp3 P.ADD",
+            "tp3 P.RUN",
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("99 ", text)
+
+    def test_pipeline_bench(self):
+        """P.BENCH times each step and prints cycles."""
+        text = self._run_kdos([
+            ": pb1 ;",
+            "1 PIPELINE tp4",
+            "' pb1 tp4 P.ADD",
+            "tp4 P.BENCH",
+        ])
+        self.assertIn("Pipeline", text)
+        self.assertIn("cycles", text)
+
+    def test_pipeline_info(self):
+        """P.INFO shows pipeline descriptor."""
+        text = self._run_kdos([
+            "3 PIPELINE tp5",
+            "tp5 P.INFO",
+        ])
+        self.assertIn("[pipe", text)
+        self.assertIn("cap=", text)
+        self.assertIn("steps=", text)
+
+    def test_pipeline_clear(self):
+        """P.CLEAR resets step count to 0."""
+        text = self._run_kdos([
+            ": pc1 ;",
+            "2 PIPELINE tp6",
+            "' pc1 tp6 P.ADD",
+            "tp6 P.CLEAR",
+            "tp6 P.COUNT .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)
+
+    def test_empty_pipeline_run(self):
+        """P.RUN on empty pipeline does nothing (no crash)."""
+        text = self._run_kdos([
+            "3 PIPELINE empty-pipe",
+            "empty-pipe P.RUN",
+            "42 .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_pipes_list(self):
+        """PIPES lists all registered pipelines."""
+        text = self._run_kdos(["PIPES"])
+        self.assertIn("Pipelines", text)
+        self.assertIn("[pipe", text)
+
+    def test_pipe_count(self):
+        """3 sample pipelines are registered at startup."""
+        text = self._run_kdos(["PIPE-COUNT @ ."])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("3 ", out)
+
+    def test_pipe_fill_sum(self):
+        """Built-in fill-sum pipeline: fill 64 bytes with 42, sum=2688."""
+        text = self._run_kdos(["pipe-fill-sum P.RUN"])
+        self.assertIn("sum=", text)
+        self.assertIn("2688 ", text)
+
+    def test_pipe_add_stats(self):
+        """Built-in add-stats pipeline: 10+20=30, 64*30=1920."""
+        text = self._run_kdos(["pipe-add-stats P.RUN"])
+        self.assertIn("sum=", text)
+        self.assertIn("1920 ", text)
+        self.assertIn("max=", text)
+
+    def test_pipe_thresh(self):
+        """Built-in threshold pipeline: ramp 0..63, thresh at 32."""
+        text = self._run_kdos(["pipe-thresh P.RUN"])
+        # bytes 0-31 -> 0, bytes 32-63 -> 255, sum = 32*255 = 8160
+        self.assertIn("sum=", text)
+        self.assertIn("8160 ", text)
+
+    def test_demo_buffers_exist(self):
+        """Demo buffers demo-a, demo-b, demo-c are registered."""
+        text = self._run_kdos([
+            "demo-a B.LEN .",
+            "demo-b B.LEN .",
+            "demo-c B.LEN .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        count = out.count("64 ")
+        self.assertTrue(count >= 3,
+                        f"Expected >=3 occurrences of '64 ', got {count}")
 
     # -- Built-in kzero kernel --
 
@@ -1212,6 +1341,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("BUFFER WORDS", text)
         self.assertIn("KERNEL WORDS", text)
         self.assertIn("SAMPLE KERNELS", text)
+        self.assertIn("PIPELINE WORDS", text)
         self.assertIn("BENCH", text)
 
     def test_status(self):
@@ -1220,6 +1350,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("KDOS", text)
         self.assertIn("bufs=", text)
         self.assertIn("kerns=", text)
+        self.assertIn("pipes=", text)
 
     # -- Kernel registry with new kernels --
 

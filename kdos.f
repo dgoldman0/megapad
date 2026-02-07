@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.2 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.3 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
@@ -10,9 +10,10 @@
 \    3. Tile Ops   — buffer-level tile engine operations (SUM, ADD, etc.)
 \    4. Kernels    — metadata registry for named compute kernels
 \    5. Sample Kernels — kzero, kfill, kadd, kscale, kstats, kthresh
-\    6. Benchmarking   — BENCH, K.BENCH for timing via CYCLES
-\    7. Dashboard  — text-mode system overview via UART
-\    8. Help       — online reference for all KDOS words
+\    6. Pipelines      — kernel pipeline engine with demo pipelines
+\    7. Benchmarking   — BENCH for timing via CYCLES
+\    8. Dashboard  — text-mode system overview via UART
+\    9. Help       — online reference for all KDOS words
 
 \ =====================================================================
 \  §1  Utility Words
@@ -30,7 +31,7 @@
 : NEGATE  ( n -- -n )        0 SWAP - ;
 : /       ( a b -- a/b )     /MOD SWAP DROP ;
 : MOD     ( a b -- rem )     /MOD DROP ;
-: SPACES  ( n -- )           0 DO SPACE LOOP ;
+: SPACES  ( n -- )           DUP IF 0 DO SPACE LOOP ELSE DROP THEN ;
 : 2DROP   ( a b -- )         DROP DROP ;
 : NIP     ( a b -- b )       SWAP DROP ;
 : TUCK    ( a b -- b a b )   SWAP OVER ;
@@ -82,6 +83,7 @@ VARIABLE BDESC
     SWAP ,                    \ +8  store width (2nd item)
     DUP ,                     \ +16 store length (keep copy)
     BDESC @ B.WIDTH *         \ total data bytes = length * width
+    0 ,                       \ +24 reserve cell for data_addr (prevent overlap)
     TALIGN                    \ align HERE for data start
     HERE BDESC @ 24 + !       \ +24 store data_addr = HERE
     ALLOT                     \ advance HERE past data region
@@ -122,10 +124,12 @@ VARIABLE BDESC
 \ -- List all registered buffers --
 : BUFFERS  ( -- )
     ." --- Buffers (" BUF-COUNT @ . ." ) ---" CR
-    BUF-COUNT @ 0 DO
-        I . ." : "
-        I CELLS BUF-TABLE + @ B.INFO
-    LOOP ;
+    BUF-COUNT @ DUP IF
+        0 DO
+            I . ." : "
+            I CELLS BUF-TABLE + @ B.INFO
+        LOOP
+    ELSE DROP THEN ;
 
 \ =====================================================================
 \  §3  Tile-Aware Buffer Operations
@@ -311,10 +315,12 @@ VARIABLE KDESC
 \ -- List all registered kernels --
 : KERNELS  ( -- )
     ." --- Kernels (" KERN-COUNT @ . ." ) ---" CR
-    KERN-COUNT @ 0 DO
-        I . ." : "
-        I CELLS KERN-TABLE + @ K.INFO
-    LOOP ;
+    KERN-COUNT @ DUP IF
+        0 DO
+            I . ." : "
+            I CELLS KERN-TABLE + @ K.INFO
+        LOOP
+    ELSE DROP THEN ;
 
 \ =====================================================================
 \  §5  Sample Kernels
@@ -367,7 +373,142 @@ VARIABLE KDESC
 1 1 1 0 KERNEL kthresh-desc
 
 \ =====================================================================
-\  §6  Benchmarking
+\  §6  Pipeline Engine
+\ =====================================================================
+\
+\  A PIPELINE is an ordered sequence of no-argument execution tokens.
+\  Each step is a Forth word that operates on pre-bound buffers.
+\
+\  PIPELINE descriptor (2 cells header + step array):
+\    +0   capacity    max steps
+\    +8   count       current steps in use
+\    +16  steps[]     array of XTs (capacity cells)
+\
+\  Usage:
+\    3 PIPELINE my-pipe
+\    : step1 ( -- ) 42 mybuf B.FILL ;
+\    ' step1 my-pipe P.ADD
+\    my-pipe P.RUN
+
+\ -- Registry (up to 8 pipelines) --
+VARIABLE PIPE-COUNT
+0 PIPE-COUNT !
+VARIABLE PIPE-TABLE  7 CELLS ALLOT
+
+\ -- Field accessors --
+: P.CAP   ( pipe -- n )     @ ;
+: P.COUNT ( pipe -- n )     8 + @ ;
+: P.DATA  ( pipe -- addr )  16 + ;
+
+\ -- Internal temp --
+VARIABLE PDESC
+VARIABLE P-XT
+VARIABLE P-PIPE
+
+\ PIPELINE ( capacity "name" -- )
+\   Allocates a pipeline descriptor and defines a CONSTANT.
+: PIPELINE
+    HERE PDESC !
+    DUP ,                     \ +0  capacity
+    0 ,                       \ +8  count = 0
+    CELLS ALLOT               \ +16 step array (capacity cells)
+    \ register
+    PIPE-COUNT @ 8 < IF
+        PDESC @ PIPE-COUNT @ CELLS PIPE-TABLE + !
+        PIPE-COUNT @ 1+ PIPE-COUNT !
+    THEN
+    PDESC @ CONSTANT ;
+
+\ P.GET ( pipe n -- xt ) get step n XT
+: P.GET  ( pipe n -- xt )
+    CELLS SWAP P.DATA + @ ;
+
+\ P.SET ( xt pipe n -- ) set step n XT
+: P.SET  ( xt pipe n -- )
+    CELLS SWAP P.DATA + ! ;
+
+\ P.ADD ( xt pipe -- ) append step, auto-increment count
+: P.ADD  ( xt pipe -- )
+    P-PIPE ! P-XT !
+    P-PIPE @ P.COUNT  P-PIPE @ P.CAP < IF
+        P-XT @  P-PIPE @  P-PIPE @ P.COUNT  P.SET
+        P-PIPE @ P.COUNT 1+  P-PIPE @ 8 + !
+    THEN ;
+
+\ P.CLEAR ( pipe -- ) reset to 0 steps
+: P.CLEAR  ( pipe -- )  8 + OFF ;
+
+\ P.RUN ( pipe -- ) execute all steps in order
+: P.RUN  ( pipe -- )
+    DUP P.COUNT DUP IF
+        0 DO
+            DUP I P.GET EXECUTE
+        LOOP
+    ELSE DROP THEN
+    DROP ;
+
+\ P.BENCH ( pipe -- ) execute and time each step
+: P.BENCH  ( pipe -- )
+    ." Pipeline (" DUP P.COUNT . ." steps):" CR
+    DUP P.COUNT DUP IF
+        0 DO
+            DUP I P.GET BENCH
+            ."   step " I . ." = " . ." cycles" CR
+        LOOP
+    ELSE DROP THEN
+    DROP ;
+
+\ P.INFO ( pipe -- ) show pipeline descriptor
+: P.INFO  ( pipe -- )
+    ." [pipe cap=" DUP P.CAP .
+    ." steps=" P.COUNT . ." ]" CR ;
+
+\ -- List all registered pipelines --
+: PIPES  ( -- )
+    ." --- Pipelines (" PIPE-COUNT @ . ." ) ---" CR
+    PIPE-COUNT @ DUP IF
+        0 DO
+            I . ." : "
+            I CELLS PIPE-TABLE + @ P.INFO
+        LOOP
+    ELSE DROP THEN ;
+
+\ -- Demo buffers for sample pipelines --
+0 1 64 BUFFER demo-a
+0 1 64 BUFFER demo-b
+0 1 64 BUFFER demo-c
+
+\ --- Pipeline 1: fill-sum ---
+\   Fill demo-a with 42, then sum and print.
+: p1-fill ( -- ) 42 demo-a B.FILL ;
+: p1-sum  ( -- ) demo-a B.SUM ." sum=" . CR ;
+2 PIPELINE pipe-fill-sum
+' p1-fill pipe-fill-sum P.ADD
+' p1-sum  pipe-fill-sum P.ADD
+
+\ --- Pipeline 2: add-stats ---
+\   Fill a with 10, b with 20, add a+b->c, print stats.
+: p2-init  ( -- ) 10 demo-a B.FILL  20 demo-b B.FILL ;
+: p2-add   ( -- ) demo-a demo-b demo-c kadd ;
+: p2-stats ( -- ) demo-c kstats ." max=" . ."  min=" . ."  sum=" . CR ;
+3 PIPELINE pipe-add-stats
+' p2-init  pipe-add-stats P.ADD
+' p2-add   pipe-add-stats P.ADD
+' p2-stats pipe-add-stats P.ADD
+
+\ --- Pipeline 3: threshold ---
+\   Fill demo-a with ramp 0..63, threshold at 32, print stats.
+: p3-fill ( -- )
+    demo-a B.DATA 64 0 DO I OVER I + C! LOOP DROP ;
+: p3-thresh ( -- ) 32 demo-a kthresh ;
+: p3-stats  ( -- ) demo-a kstats ." max=" . ."  min=" . ."  sum=" . CR ;
+3 PIPELINE pipe-thresh
+' p3-fill   pipe-thresh P.ADD
+' p3-thresh pipe-thresh P.ADD
+' p3-stats  pipe-thresh P.ADD
+
+\ =====================================================================
+\  §7  Benchmarking
 \ =====================================================================
 \
 \  BENCH ( xt -- cycles )
@@ -387,7 +528,7 @@ VARIABLE BENCH-T0
     ." cycles=" . CR ;
 
 \ =====================================================================
-\  §7  Dashboard
+\  §8  Dashboard
 \ =====================================================================
 
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
@@ -401,26 +542,28 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.2 — Kernel Dashboard OS" CR
+    ."  KDOS v0.3 — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR BUFFERS
     CR KERNELS
+    CR PIPES
     CR HRULE ;
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
     ." KDOS | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
+    ." pipes=" PIPE-COUNT @ .
     ." HERE=" HERE . CR ;
 
 \ =====================================================================
-\  §8  Help System
+\  §9  Help System
 \ =====================================================================
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.2 — Quick Reference" CR
+    ."  KDOS v0.3 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -447,6 +590,14 @@ VARIABLE BENCH-T0
     ."    buf kstats             Sum, min, max -> stack" CR
     ."    n buf kscale           Scale buffer by n" CR
     ."    n buf kthresh          Threshold: <n->0, >=n->255" CR
+    CR ."  PIPELINE WORDS:" CR
+    ."    3 PIPELINE name        Create 3-step pipeline" CR
+    ."    ' word pipe P.ADD      Append step to pipeline" CR
+    ."    pipe P.RUN             Execute all steps" CR
+    ."    pipe P.BENCH           Time each step" CR
+    ."    pipe P.INFO            Show pipeline descriptor" CR
+    ."    pipe P.CLEAR           Reset pipeline" CR
+    ."    PIPES                  List all pipelines" CR
     CR ."  BENCH & TOOLS:" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
     ."    ' word .BENCH          Time word and print cycles" CR
@@ -456,11 +607,11 @@ VARIABLE BENCH-T0
     CR HRULE ;
 
 \ =====================================================================
-\  §9  Startup
+\  §10  Startup
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.2 — Kernel Dashboard OS" CR
+."  KDOS v0.3 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type DASHBOARD for system overview." CR
