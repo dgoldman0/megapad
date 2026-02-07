@@ -1222,6 +1222,20 @@ w_key:
     str r14, r1
     ret.l
 
+; KEY? ( -- flag )  non-blocking: true if a key is available
+w_key_query:
+    ldi64 r13, 0xFFFF_FF00_0000_0002   ; UART STATUS register
+    ld.b r1, r13
+    andi r1, 0x02                       ; bit 1 = RX_AVAIL
+    cmpi r1, 0
+    ldi r0, 0                           ; assume false
+    breq kq_done
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF        ; TRUE = -1
+kq_done:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; CR ( -- )
 w_cr:
     ldi64 r11, print_crlf
@@ -3546,9 +3560,18 @@ d_key:
     call.l r11
     ret.l
 
+; === KEY? ===
+d_key_query:
+    .dq d_key
+    .db 4
+    .ascii "KEY?"
+    ldi64 r11, w_key_query
+    call.l r11
+    ret.l
+
 ; === CR ===
 d_cr:
-    .dq d_key
+    .dq d_key_query
     .db 2
     .ascii "CR"
     ldi64 r11, w_cr

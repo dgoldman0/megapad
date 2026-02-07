@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.5 — Scheduler & Preemption**
+**Current Status: KDOS v0.6 — Interactive Screens**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (151 tests)
+# Full test suite (168 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -66,24 +66,30 @@ TASKS                         \ List all tasks
 SCHEDULE                      \ Run all READY tasks
 my-task T.INFO                \ Show task status (DONE)
 ' my-work BG                  \ One-shot: spawn + schedule
+
+\ Interactive TUI
+SCREENS                       \ Enter full-screen TUI
+                              \ Press 1-6 to switch screens
+                              \ Press q to quit, r to refresh
 ```
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed (v0.5)
+### ✅ Completed (v0.6)
 
-**BIOS v0.4** (127 words, ~4380 lines):
+**BIOS v0.4** (128 words, ~4400 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
 - ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 - Storage device support: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
-- **Timer & interrupt support**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
+- Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
+- **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.5** (~1080 lines Forth):
+**KDOS v0.6** (~1310 lines Forth):
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
@@ -95,13 +101,16 @@ my-task T.INFO                \ Show task status (DONE)
 - **Scheduler & tasks**: Cooperative multitasking with task registry (up to 8 tasks)
 - **Task lifecycle**: TASK, SPAWN, KILL, RESTART, BG, YIELD, SCHEDULE
 - **Timer preemption**: PREEMPT-ON/PREEMPT-OFF for timer-based preemption
+- **Interactive screens**: Full-screen ANSI TUI with 6 screens and keyboard navigation
+- **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
+- **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
 - **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
 
-**Tests**: 151 passing
-- 78 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, dashboard)
-- 48 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer)
-- 25 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
+**Tests**: 168 passing
+- 95 KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, screens, ANSI, dashboard)
+- 49 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?)
+- 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
 
@@ -130,11 +139,14 @@ my-task T.INFO                \ Show task status (DONE)
 - Timer-based preemption: PREEMPT-ON / PREEMPT-OFF
 - Introspection: T.INFO, TASKS, TASK-COUNT-READY
 
-**Phase 4: Interactive Screens** (not started)
-- Screen system: 7 screens (Dashboard, Buffers, Kernels, Pipelines, Perf, Console, Inspector)
-- Screen navigation: TAB/Shift-TAB, arrow keys
-- Buffer inspector: hex/tile view with cursor
-- Performance visualizer: cycle counts, tile utilization
+**Phase 4: Interactive Screens** (✅ complete — v0.6)
+- 1 BIOS word added: KEY? (non-blocking key check)
+- ANSI terminal primitives: ESC, CSI, AT-XY, PAGE, SGR, colors, BOLD, DIM, REVERSE
+- .N (number output without trailing space) for formatted screen output
+- 6 screens: Home, Buffers, Kernels, Pipelines, Tasks, Help
+- Screen framework: SCREEN-HEADER, SCREEN-FOOTER, RENDER-SCREEN, HANDLE-KEY
+- SCREENS entry point with event loop (1-6 switch, q quit, r refresh)
+- Each screen uses color, bold/dim for visual hierarchy
 
 **Phase 5: Advanced Kernels** (not started)
 - Matrix operations: GEMM, GEMV via tile engine
@@ -254,7 +266,7 @@ Flat address space.  Default 256 KiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (currently v0.4, 121 words, ~4230 lines) is the **permanent,
+The BIOS Forth (currently v0.4, 128 words, ~4400 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v0.4)
@@ -262,7 +274,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 127 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 128 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE
@@ -277,8 +289,9 @@ The BIOS provides:
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 * **Storage support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
+* **Non-blocking input**: KEY? (poll UART RX without blocking)
 
-All required BIOS extensions for KDOS are **complete** as of v0.5.
+All required BIOS extensions for KDOS are **complete** as of v0.6.
 
 ---
 
@@ -677,159 +690,142 @@ task-descriptor:
 
 ---
 
-## 6. Screen Flow
+## 6. Screen Flow (v0.6 Implementation)
 
-### Screen 1 — Boot
+KDOS v0.6 provides a full-screen ANSI TUI accessed via the `SCREENS` word.
+Six screens are navigable via number keys; `q` quits, `r` refreshes.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ MEGAPAD-64 SYSTEM                                            │
-├──────────────────────────────────────────────────────────────┤
-│ Firmware: BIOS Forth v0.4                                    │
-│ RAM: 67108864 bytes (64 MiB)                                 │
-│ Tile engine: 64-byte tiles, 8/16/32/64-bit elements          │
-│ Storage: present                                             │
-│ Timer: enabled                                               │
-│                                                              │
-│ Choose environment:                                          │
-│  [1] Kernel Dashboard OS                                     │
-│  [2] Forth Console                                           │
-│  [3] Recovery                                                │
-│                                                              │
-│ Default: 1                                                   │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### Screen 2 — Home / System Overview
+All screens share a common header (tab bar) and footer (key hints):
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ KERNEL DASHBOARD                                             │
-├──────────────────────────────────────────────────────────────┤
-│ Installed Kernels                                            │
-│  • tile_fill          • transpose_tile                       │
-│  • filter_mask_apply  • bitset_intersect_popcnt              │
-│  • groupby_reduce     • matmul_tiled                         │
-│                                                              │
-│ Active Sessions                                              │
-│  (none)                                                      │
-│                                                              │
-│ Tile Memory                                                  │
-│  pinned: 96 tiles (6 KiB)                                    │
-│  hot:    288 tiles (18 KiB)                                  │
-│  free:   15936 tiles (996 KiB)                               │
-│                                                              │
-│ [Connect Data]  [Build Kernel]  [System Monitor]             │
-└──────────────────────────────────────────────────────────────┘
+ KDOS v0.6  [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help
+────────────────────────────────────────────────────────────────
+  (screen content)
+
+ [1-6] Switch screen  [r] Refresh  [q] Quit
 ```
 
-### Screen 3 — Connect Data
+The active tab is shown in reverse video.  Bold and dim SGR attributes
+provide visual hierarchy within each screen.
+
+### Screen 1 — Home (System Overview)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ CONNECT DATA                                                 │
-├──────────────────────────────────────────────────────────────┤
-│ Source:                                                      │
-│  (•) Storage sector range                                    │
-│  ( ) UART stream                                             │
-│                                                              │
-│ Start sector: 0     Count: 128                               │
-│ Format: records (u16 fields)                                 │
-│                                                              │
-│ Ingest Plan                                                  │
-│  tiles needed: 1024                                          │
-│  batch size: 128 tiles                                       │
-│  rolling window: 8 batches                                   │
-│                                                              │
-│ [Create Buffer]                                              │
-└──────────────────────────────────────────────────────────────┘
+  System Overview
+
+   Memory  : HERE = 45056
+   Buffers : 3
+   Kernels : 7
+   Pipes   : 3
+   Tasks   : 0
+   Files   : 0
+   Storage : present          (green if present, red if not)
+
+   Scheduler: cooperative     (or "preempt ON" in green)
+   Tasks rdy: 0
 ```
 
-### Screen 4 — Kernel Dashboard (Apps View)
+### Screen 2 — Buffers
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ KERNEL DASHBOARD                                             │
-├──────────────────────────────────────────────────────────────┤
-│ Kernels                                                      │
-│  [▶] column_sum         footprint: 32 tiles                  │
-│  [▶] filter_mask_apply  footprint: 64 tiles                  │
-│                                                              │
-│ Buffers                                                      │
-│  data#01   hot    1024 tiles (64 KiB)                        │
-│  mask#02   hot      16 tiles  (1 KiB)                        │
-│                                                              │
-│ Pipelines                                                    │
-│  (none)                                                      │
-│                                                              │
-│ Tile Heatmap                                                 │
-│  [████████░░░░░░░░░░░░░░░░░░░░░░░░]  6%                     │
-└──────────────────────────────────────────────────────────────┘
+  Buffers (6)
+
+   0  raw w=1  n=64   tiles=1   @21504
+   1  raw w=1  n=64   tiles=1   @21632
+   2  raw w=1  n=64   tiles=1   @21760
+   3  raw w=1  n=128  tiles=2   @21888
+   4  raw w=1  n=256  tiles=4   @22080
+   5  raw w=1  n=64   tiles=1   @22400
 ```
 
-### Screen 5 — Buffer Inspector
+Shows type abbreviation (raw/rec/til/bit), element width, element count,
+tile count, and data address for each registered buffer.
+
+### Screen 3 — Kernels
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ BUFFER: data#01                                              │
-├──────────────────────────────────────────────────────────────┤
-│ Type: records    Elem: u16    Shape: 32768 × 1               │
-│ Tiles: 1024      Residency: hot                              │
-│                                                              │
-│ Lenses                                                       │
-│  [Preview] [Histogram] [Top-K] [Nulls] [Tile View]          │
-│                                                              │
-│ Preview (first tile, u16 elements)                           │
-│  0000: 0012 0048 001F 00A3 0017 0055 002B 0090              │
-│  0010: 004C 0011 0033 0067 0019 00FF 0042 0028              │
-│  0020: 0051 0039 007A 0003 00B1 0064 001E 0044              │
-│  0030: 000A 005F 0072 0086 0029 0014 003D 006B              │
-│                                                              │
-│ Reductions (via TRED)                                        │
-│  SUM: 1284903   MIN: 3   MAX: 65521                          │
-└──────────────────────────────────────────────────────────────┘
+  Kernels (7)
+
+   0  1 in 1 out 0 foot [cpu]
+   1  1 in 1 out 0 foot [cpu]
+   2  2 in 1 out 3 foot [tile]    ← green
+   3  1 in 0 out 1 foot [tile]    ← green
+   4  1 in 0 out 3 foot [tile]    ← green
+   5  1 in 1 out 1 foot [cpu]
+   6  1 in 1 out 1 foot [cpu]
 ```
 
-### Screen 6 — Kernel Builder
+Tile-accelerated kernels show `[tile]` in green; CPU-only kernels show
+`[cpu]` in dim text.
+
+### Screen 4 — Pipelines
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ KERNEL BUILDER                                               │
-├──────────────────────────────────────────────────────────────┤
-│ Name: column_sum                                             │
-│                                                              │
-│ Definition (Forth):                                          │
-│  : column_sum ( buf -- result )                              │
-│    buf>tiles DO                                              │
-│      I TSRC0! TSUM                                           │
-│    LOOP                                                      │
-│    ACC@ ;                                                    │
-│                                                              │
-│ Footprint: 1 tile (source) + accumulator                     │
-│ Deterministic: yes                                           │
-│                                                              │
-│ [Install Kernel]  [Test]  [Show Tile Plan]                   │
-└──────────────────────────────────────────────────────────────┘
+  Pipelines (3)
+
+   0  cap=2  steps=2
+   1  cap=3  steps=3
+   2  cap=3  steps=3
 ```
 
-### Screen 7 — Run Kernel (Pinned as App)
+Shows pipeline capacity and current step count.
+
+### Screen 5 — Tasks
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ RUN: column_sum                                              │
-├──────────────────────────────────────────────────────────────┤
-│ Input:  data#01  (1024 tiles)                                │
-│ Output: result#03                                            │
-│                                                              │
-│ Runtime                                                      │
-│  total: 1024 tile ops + 1024 reductions                      │
-│  cycles: 48291                                               │
-│                                                              │
-│ Result                                                       │
-│  SUM = 1284903                                               │
-│                                                              │
-│ [Pin as App]  [Branch Pipeline]  [Compare Runs]              │
-└──────────────────────────────────────────────────────────────┘
+  Tasks (3)
+
+   0  READY pri=10 xt=12345    ← green
+   1  RUN   pri=5  xt=12400    ← yellow
+   2  DONE  pri=20 xt=12500    ← dim
+```
+
+Task status is color-coded: READY=green, RUN=yellow, BLOCK=red,
+DONE/FREE=dim.
+
+### Screen 6 — Help (Quick Reference)
+
+```
+  Quick Reference
+
+  Buffers:
+   0 1 N BUFFER name    Create buffer
+   buf B.SUM/MIN/MAX    Tile reductions
+   a b c B.ADD/SUB      Element-wise ops
+   n buf B.SCALE/FILL   Modify buffer
+  Kernels:
+   1 1 2 0 KERNEL name  Register kernel
+   buf kzero/kfill/kadd Sample kernels
+  Pipelines:
+   3 PIPELINE name      Create pipeline
+   ' w pipe P.ADD/RUN   Build & execute
+  Tasks:
+   ' w 0 TASK name      Create task
+   SCHEDULE / BG         Run tasks
+  Storage:
+   buf sec B.SAVE/LOAD  Persist buffers
+   0 16 FILE name       Create file
+  Tools:
+   DASHBOARD / STATUS    System views
+   ' w BENCH / .BENCH   Benchmark
+```
+
+Section headers are bold, content is normal text.
+
+### Implementation Notes
+
+The TUI is built entirely from ANSI escape sequences emitted via
+the BIOS `EMIT` word — no special terminal hardware is required.
+
+Key BIOS support: `KEY?` (non-blocking input check, added in v0.6)
+polls the UART STATUS register (bit 1 = RX_AVAIL) without blocking.
+
+The event loop in `SCREENS` uses `KEY?` to poll for input:
+```forth
+BEGIN
+    KEY? IF KEY HANDLE-KEY THEN
+    SCREEN-RUN @
+0= UNTIL
 ```
 
 ---
@@ -853,37 +849,16 @@ If the OS faults:
 
 ## 11. Implementation Roadmap
 
-### Phase 1 — BIOS v0.4: Compilation & Control Flow
+See the **Roadmap to v1.0** section in Implementation Status above for
+detailed phase descriptions and status.
 
-Extend the BIOS to support colon definitions, IF/ELSE/THEN, DO/LOOP,
-BEGIN/UNTIL/WHILE/REPEAT, VARIABLE, CONSTANT, string literals.
-
-This is the prerequisite for writing any OS code in Forth.
-
-### Phase 2 — Buffer & Kernel Subsystem
-
-Implement buffer descriptors, tile-aligned allocation, kernel descriptors.
-All as Forth words in a `BUFFERS` and `KERNELS` vocabulary.
-
-### Phase 3 — Storage Module Loader
-
-Implement `LOAD-MODULE` to read Forth source from storage sectors and
-interpret it.  This enables loading OS components from disk.
-
-### Phase 4 — Scheduler
-
-Implement the tile-region allocator and kernel dispatcher.  Track
-residency, batch compatible operations, expose state.
-
-### Phase 5 — Dashboard UI
-
-Build the screen-based UI as Forth words emitting UART sequences.
-Navigation, buffer inspection, kernel management, pipeline view.
-
-### Phase 6 — Pipeline Engine
-
-Implement the DAG data structure, incremental recomputation, and the
-"pin as app" mechanism.
+Summary:
+- **Phase 1**: Pipeline Engine (✅ v0.3)
+- **Phase 2**: Storage & Persistence (✅ v0.4)
+- **Phase 3**: Scheduler & Preemption (✅ v0.5)
+- **Phase 4**: Interactive Screens (✅ v0.6)
+- **Phase 5**: Advanced Kernels (planned)
+- **Phase 6**: User Experience (planned)
 
 ---
 

@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.5 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.6 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
@@ -934,7 +934,241 @@ VARIABLE PREEMPT-ENABLED
     THEN ;
 
 \ =====================================================================
-\  §9  Benchmarking
+\  §9  Interactive Screens
+\ =====================================================================
+\
+\  Full-screen TUI built on ANSI escape sequences.
+\  Screens: [1]Home [2]Buffers [3]Kernels [4]Pipes [5]Tasks [6]Help
+\  Navigation: number keys switch screens, q quits, r refreshes.
+\
+
+\ -- ANSI escape primitives --
+: ESC   ( -- )  27 EMIT ;
+: CSI   ( -- )  ESC 91 EMIT ;     \ ESC [
+
+\ .N ( n -- )  print number without trailing space
+: .N  ( n -- )
+    DUP 0< IF 45 EMIT NEGATE THEN
+    DUP 10 < IF
+        48 + EMIT
+    ELSE DUP 100 < IF
+        DUP 10 / 48 + EMIT
+        10 MOD 48 + EMIT
+    ELSE
+        \ General case: use .  and trim space
+        DUP 1000 < IF
+            DUP 100 / 48 + EMIT
+            DUP 10 / 10 MOD 48 + EMIT
+            10 MOD 48 + EMIT
+        ELSE
+            . \ fallback with trailing space for large numbers
+        THEN
+    THEN THEN ;
+
+\ -- Cursor & screen control --
+: AT-XY   ( col row -- )  CSI .N 59 EMIT .N 72 EMIT ;   \ ESC[row;colH
+: PAGE     ( -- )  CSI 50 EMIT 74 EMIT CSI 72 EMIT ;     \ ESC[2J ESC[H
+: CLS      ( -- )  PAGE ;                                  \ alias
+
+\ -- Colors (SGR) --
+: SGR      ( n -- )  CSI .N 109 EMIT ;   \ ESC[Nm
+: RESET-COLOR  ( -- )  0 SGR ;
+: BOLD     ( -- )  1 SGR ;
+: DIM      ( -- )  2 SGR ;
+: REVERSE  ( -- )  7 SGR ;
+: FG       ( n -- )  30 + SGR ;    \ 0=black 1=red 2=green 3=yellow 4=blue 5=magenta 6=cyan 7=white
+: BG-COLOR ( n -- )  40 + SGR ;
+
+\ -- Horizontal line with color --
+: HBAR   ( -- )
+    DIM
+    60 0 DO 196 EMIT LOOP
+    RESET-COLOR CR ;
+
+\ -- Padded label field --
+: .LABEL  ( -- )  BOLD ;    \ turn bold on before label
+: ./LABEL ( -- )  RESET-COLOR ;  \ turn off after
+
+\ -- Screen state --
+VARIABLE SCREEN-ID      \ current screen: 1-6
+VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
+
+\ -- Screen header --
+: SCREEN-HEADER  ( -- )
+    1 1 AT-XY
+    REVERSE
+    ."  KDOS v0.6 "
+    RESET-COLOR
+    SPACE
+    SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
+    DUP 2 = IF REVERSE THEN ." [2]Bufs " RESET-COLOR
+    DUP 3 = IF REVERSE THEN ." [3]Kern " RESET-COLOR
+    DUP 4 = IF REVERSE THEN ." [4]Pipe " RESET-COLOR
+    DUP 5 = IF REVERSE THEN ." [5]Task " RESET-COLOR
+    6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
+    CR HBAR ;
+
+\ -- Screen footer --
+: SCREEN-FOOTER  ( -- )
+    DIM
+    ."  [1-6] Switch screen  [r] Refresh  [q] Quit"
+    RESET-COLOR CR ;
+
+\ ---- Screen 1: Home ----
+: SCR-HOME  ( -- )
+    .LABEL ."  System Overview" ./LABEL CR CR
+    ."   Memory  : HERE = " HERE . CR
+    ."   Buffers : " BUF-COUNT @ .N CR
+    ."   Kernels : " KERN-COUNT @ .N CR
+    ."   Pipes   : " PIPE-COUNT @ .N CR
+    ."   Tasks   : " TASK-COUNT @ .N CR
+    ."   Files   : " FILE-COUNT @ .N CR
+    ."   Storage : " DISK? IF 2 FG ." present" ELSE 1 FG ." not attached" THEN RESET-COLOR CR
+    CR
+    ."   Scheduler: " PREEMPT-ENABLED @ IF 2 FG ." preempt ON" ELSE DIM ." cooperative" THEN RESET-COLOR CR
+    ."   Tasks rdy: " TASK-COUNT-READY .N CR ;
+
+\ ---- Screen 2: Buffers ----
+: SCR-BUFFERS  ( -- )
+    .LABEL ."  Buffers (" BUF-COUNT @ .N ." )" ./LABEL CR CR
+    BUF-COUNT @ DUP 0= IF
+        DROP ."   (none registered)" CR
+    ELSE
+        0 DO
+            ."   " I .N ."  "
+            I CELLS BUF-TABLE + @
+            DUP B.TYPE
+            DUP 0 = IF DROP ." raw " THEN
+            DUP 1 = IF DROP ." rec " THEN
+            DUP 2 = IF DROP ." til " THEN
+            DUP 3 = IF DROP ." bit " THEN
+            ." w=" DUP B.WIDTH .N
+            ."  n=" DUP B.LEN .N
+            ."  tiles=" DUP B.TILES .N
+            ."  @" B.DATA .N
+            CR
+        LOOP
+    THEN ;
+
+\ ---- Screen 3: Kernels ----
+: SCR-KERNELS  ( -- )
+    .LABEL ."  Kernels (" KERN-COUNT @ .N ." )" ./LABEL CR CR
+    KERN-COUNT @ DUP 0= IF
+        DROP ."   (none registered)" CR
+    ELSE
+        0 DO
+            ."   " I .N ."  "
+            I CELLS KERN-TABLE + @
+            DUP K.IN .N ." in "
+            DUP K.OUT .N ." out "
+            DUP K.FOOT .N ." foot "
+            K.FLAGS IF 3 FG ." [tile]" RESET-COLOR ELSE DIM ." [cpu]" RESET-COLOR THEN
+            CR
+        LOOP
+    THEN ;
+
+\ ---- Screen 4: Pipelines ----
+: SCR-PIPES  ( -- )
+    .LABEL ."  Pipelines (" PIPE-COUNT @ .N ." )" ./LABEL CR CR
+    PIPE-COUNT @ DUP 0= IF
+        DROP ."   (none registered)" CR
+    ELSE
+        0 DO
+            ."   " I .N ."  "
+            I CELLS PIPE-TABLE + @
+            ." cap=" DUP P.CAP .N
+            ."  steps=" P.COUNT .N
+            CR
+        LOOP
+    THEN ;
+
+\ ---- Screen 5: Tasks ----
+: SCR-TASKS  ( -- )
+    .LABEL ."  Tasks (" TASK-COUNT @ .N ." )" ./LABEL CR CR
+    TASK-COUNT @ DUP 0= IF
+        DROP ."   (none registered)" CR
+    ELSE
+        0 DO
+            ."   " I .N ."  "
+            I CELLS TASK-TABLE + @
+            DUP T.STATUS
+            DUP 0 = IF DIM ." FREE " RESET-COLOR THEN
+            DUP 1 = IF 2 FG ." READY" RESET-COLOR THEN
+            DUP 2 = IF 3 FG ." RUN  " RESET-COLOR THEN
+            DUP 3 = IF 1 FG ." BLOCK" RESET-COLOR THEN
+            DUP 4 = IF DIM ." DONE " RESET-COLOR THEN
+            DROP
+            ."  pri=" DUP T.PRIORITY .N
+            ."  xt=" T.XT .N
+            CR
+        LOOP
+    THEN ;
+
+\ ---- Screen 6: Help ----
+: SCR-HELP  ( -- )
+    .LABEL ."  Quick Reference" ./LABEL CR CR
+    BOLD ."  Buffers:" RESET-COLOR CR
+    ."   0 1 N BUFFER name    Create buffer" CR
+    ."   buf B.SUM/MIN/MAX    Tile reductions" CR
+    ."   a b c B.ADD/SUB      Element-wise ops" CR
+    ."   n buf B.SCALE/FILL   Modify buffer" CR
+    BOLD ."  Kernels:" RESET-COLOR CR
+    ."   1 1 2 0 KERNEL name  Register kernel" CR
+    ."   buf kzero/kfill/kadd Sample kernels" CR
+    BOLD ."  Pipelines:" RESET-COLOR CR
+    ."   3 PIPELINE name      Create pipeline" CR
+    ."   ' w pipe P.ADD/RUN   Build & execute" CR
+    BOLD ."  Tasks:" RESET-COLOR CR
+    ."   ' w 0 TASK name      Create task" CR
+    ."   SCHEDULE / BG         Run tasks" CR
+    BOLD ."  Storage:" RESET-COLOR CR
+    ."   buf sec B.SAVE/LOAD  Persist buffers" CR
+    ."   0 16 FILE name       Create file" CR
+    BOLD ."  Tools:" RESET-COLOR CR
+    ."   DASHBOARD / STATUS    System views" CR
+    ."   ' w BENCH / .BENCH   Benchmark" CR ;
+
+\ -- Screen dispatch --
+: RENDER-SCREEN  ( -- )
+    PAGE SCREEN-HEADER
+    SCREEN-ID @
+    DUP 1 = IF DROP SCR-HOME    ELSE
+    DUP 2 = IF DROP SCR-BUFFERS ELSE
+    DUP 3 = IF DROP SCR-KERNELS ELSE
+    DUP 4 = IF DROP SCR-PIPES   ELSE
+    DUP 5 = IF DROP SCR-TASKS   ELSE
+    DUP 6 = IF DROP SCR-HELP    ELSE
+        DROP SCR-HOME
+    THEN THEN THEN THEN THEN THEN
+    CR SCREEN-FOOTER ;
+
+\ -- Event loop: poll KEY?, dispatch on keypress --
+: HANDLE-KEY  ( c -- )
+    DUP 49 = IF DROP 1 SCREEN-ID ! RENDER-SCREEN ELSE  \ '1'
+    DUP 50 = IF DROP 2 SCREEN-ID ! RENDER-SCREEN ELSE  \ '2'
+    DUP 51 = IF DROP 3 SCREEN-ID ! RENDER-SCREEN ELSE  \ '3'
+    DUP 52 = IF DROP 4 SCREEN-ID ! RENDER-SCREEN ELSE  \ '4'
+    DUP 53 = IF DROP 5 SCREEN-ID ! RENDER-SCREEN ELSE  \ '5'
+    DUP 54 = IF DROP 6 SCREEN-ID ! RENDER-SCREEN ELSE  \ '6'
+    DUP 113 = IF DROP 0 SCREEN-RUN !               ELSE  \ 'q'
+    DUP 114 = IF DROP RENDER-SCREEN                ELSE  \ 'r'
+        DROP
+    THEN THEN THEN THEN THEN THEN THEN THEN ;
+
+\ -- Main TUI entry point --
+: SCREENS  ( -- )
+    1 SCREEN-ID !
+    1 SCREEN-RUN !
+    RENDER-SCREEN
+    BEGIN
+        KEY? IF KEY HANDLE-KEY THEN
+        SCREEN-RUN @
+    0= UNTIL
+    PAGE
+    ." Returned to REPL." CR ;
+
+\ =====================================================================
+\  §10  Benchmarking
 \ =====================================================================
 \
 \  BENCH ( xt -- cycles )
@@ -954,7 +1188,7 @@ VARIABLE BENCH-T0
     ." cycles=" . CR ;
 
 \ =====================================================================
-\  §10  Dashboard
+\  §11  Dashboard
 \ =====================================================================
 
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
@@ -968,7 +1202,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.5 — Kernel Dashboard OS" CR
+    ."  KDOS v0.6 — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -990,12 +1224,12 @@ VARIABLE BENCH-T0
     ."  HERE=" HERE . CR ;
 
 \ =====================================================================
-\  §11  Help System
+\  §12  Help System
 \ =====================================================================
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.5 — Quick Reference" CR
+    ."  KDOS v0.6 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -1055,21 +1289,22 @@ VARIABLE BENCH-T0
     ."    PREEMPT-ON             Enable timer preemption" CR
     ."    PREEMPT-OFF            Disable timer preemption" CR
     ."    TASKS                  List all tasks" CR
-    CR ."  BENCH & TOOLS:" CR
-    ."    ' word BENCH           Time word, leave cycles on stack" CR
-    ."    ' word .BENCH          Time word and print cycles" CR
+    CR ."  SCREENS & TOOLS:" CR
+    ."    SCREENS                Interactive TUI (1-6, q, r)" CR
     ."    DASHBOARD              Full system overview" CR
     ."    STATUS                 Quick status line" CR
+    ."    ' word BENCH           Time word, leave cycles on stack" CR
+    ."    ' word .BENCH          Time word and print cycles" CR
     ."    HELP                   This help" CR
     CR HRULE ;
 
 \ =====================================================================
-\  §12  Startup
+\  §13  Startup
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.5 — Kernel Dashboard OS" CR
+."  KDOS v0.6 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
-." Type DASHBOARD for system overview." CR
+." Type SCREENS for interactive TUI." CR
 CR

@@ -707,7 +707,7 @@ class TestBIOS(unittest.TestCase):
         for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
                      "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
-                     "TIMER!", "EI!", "DI!", "ISR!"]:
+                     "TIMER!", "EI!", "DI!", "ISR!", "KEY?"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
     # -- Storage words --
@@ -1044,7 +1044,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.5", text)
+        self.assertIn("KDOS v0.6", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1174,7 +1174,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.5", text)
+        self.assertIn("KDOS v0.6", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -1590,6 +1590,7 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("STORAGE WORDS", text)
         self.assertIn("FILE WORDS", text)
         self.assertIn("SCHEDULER WORDS", text)
+        self.assertIn("SCREENS", text)
         self.assertIn("BENCH", text)
 
     def test_status(self):
@@ -1916,6 +1917,125 @@ class TestKDOS(unittest.TestCase):
         out = text[idx:] if idx >= 0 else text
         self.assertIn("1 ", out)
         self.assertIn("0 ", out)
+
+    # -- KEY? BIOS word --
+
+    def test_key_query_no_input(self):
+        """KEY? returns 0 when no input is pending."""
+        text = self._run_kdos(["KEY? ."])
+        self.assertIn("0 ", text)
+
+    def test_key_query_exists(self):
+        """KEY? is in the BIOS dictionary."""
+        text = self._run_kdos(["WORDS"])
+        self.assertIn("KEY?", text)
+
+    # -- ANSI / terminal words --
+
+    def test_ansi_page(self):
+        """PAGE emits ANSI clear-screen sequence."""
+        text = self._run_kdos(["PAGE"])
+        # ESC[2J (clear) and ESC[H (home) — check for the bracket-2-J
+        self.assertIn("[2J", text)
+
+    def test_ansi_at_xy(self):
+        """AT-XY emits ANSI cursor positioning."""
+        text = self._run_kdos(["5 10 AT-XY"])
+        # Should produce ESC[10;5H
+        self.assertIn("[10;5H", text)
+
+    def test_dot_n(self):
+        """.N prints number without trailing space."""
+        text = self._run_kdos(["42 .N"])
+        self.assertIn("42", text)
+        # Should NOT have trailing space after 42
+        # (but there's an " ok" after it from the REPL)
+
+    def test_sgr_bold(self):
+        """BOLD emits SGR bold sequence."""
+        text = self._run_kdos(["BOLD"])
+        self.assertIn("[1m", text)
+
+    def test_sgr_reset(self):
+        """RESET-COLOR emits SGR reset."""
+        text = self._run_kdos(["RESET-COLOR"])
+        self.assertIn("[0m", text)
+
+    def test_fg_color(self):
+        """FG emits foreground color."""
+        text = self._run_kdos(["2 FG"])  # green
+        self.assertIn("[32m", text)
+
+    # -- Screen system --
+
+    def test_screen_home_content(self):
+        """SCR-HOME shows system overview."""
+        text = self._run_kdos(["SCR-HOME"])
+        self.assertIn("System Overview", text)
+        self.assertIn("Memory", text)
+        self.assertIn("Buffers", text)
+        self.assertIn("Storage", text)
+
+    def test_screen_buffers(self):
+        """SCR-BUFFERS shows buffer list."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER sb",
+            "SCR-BUFFERS",
+        ])
+        self.assertIn("Buffers", text)
+        # Should show at least the demo buffers + our sb
+
+    def test_screen_kernels(self):
+        """SCR-KERNELS shows kernel list."""
+        text = self._run_kdos(["SCR-KERNELS"])
+        self.assertIn("Kernels", text)
+
+    def test_screen_pipes(self):
+        """SCR-PIPES shows pipeline list."""
+        text = self._run_kdos(["SCR-PIPES"])
+        self.assertIn("Pipelines", text)
+
+    def test_screen_tasks(self):
+        """SCR-TASKS shows task list."""
+        text = self._run_kdos(["SCR-TASKS"])
+        self.assertIn("Tasks", text)
+
+    def test_screen_help(self):
+        """SCR-HELP shows quick reference."""
+        text = self._run_kdos(["SCR-HELP"])
+        self.assertIn("Quick Reference", text)
+        self.assertIn("Buffers", text)
+        self.assertIn("Pipelines", text)
+        self.assertIn("Tasks", text)
+
+    def test_render_screen(self):
+        """RENDER-SCREEN produces full screen output with header."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",
+            "RENDER-SCREEN",
+        ])
+        self.assertIn("KDOS v0.6", text)
+        self.assertIn("[1]Home", text)
+        self.assertIn("System Overview", text)
+
+    def test_handle_key_switch(self):
+        """HANDLE-KEY switches screens on number keys."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",
+            "1 SCREEN-RUN !",
+            "53 HANDLE-KEY",   # '5' = Tasks
+            "SCREEN-ID @ .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_handle_key_quit(self):
+        """HANDLE-KEY sets SCREEN-RUN to 0 on 'q'."""
+        text = self._run_kdos([
+            "1 SCREEN-RUN !",
+            "113 HANDLE-KEY",  # 'q'
+            "SCREEN-RUN @ .",
+        ])
+        self.assertIn("0 ", text)
 
 
 # ---------------------------------------------------------------------------
