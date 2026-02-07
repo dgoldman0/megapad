@@ -765,9 +765,26 @@ def main():
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
                         help="BIOS binary or .asm file — boots and enters console")
+    parser.add_argument("--assemble", nargs=2, metavar=("SRC", "OUT"),
+                        help="Assemble SRC.asm to OUT.rom and exit")
     parser.add_argument("--run", action="store_true",
                         help="Auto-boot and run after loading (non-BIOS mode)")
     args = parser.parse_args()
+
+    # ---- Assemble-only mode -------------------------------------------
+    if args.assemble:
+        src_path, out_path = args.assemble
+        with open(src_path, "r") as f:
+            source = f.read()
+        try:
+            code = assemble(source, 0)
+        except AsmError as e:
+            print(f"Assembly error: {e}", file=sys.stderr)
+            sys.exit(1)
+        with open(out_path, "wb") as f:
+            f.write(code)
+        print(f"Assembled {src_path} → {out_path} ({len(code)} bytes)")
+        return
 
     # Create system
     sys_emu = MegapadSystem(

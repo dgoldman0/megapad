@@ -1,2 +1,5 @@
 cdp1802_extracted.txt
 __pycache__/
+*.rom
+*.bin
+.venv/
