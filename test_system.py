@@ -246,7 +246,7 @@ class TestBIOS(unittest.TestCase):
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
         text = self._run_to_prompt(sys, buf)
-        self.assertIn("Megapad-64 BIOS v0.1", text)
+        self.assertIn("Megapad-64 BIOS v0.2", text)
         self.assertIn("Storage: N", text)
         self.assertIn("Ready.", text)
         self.assertIn("> ", text)
@@ -289,8 +289,8 @@ class TestBIOS(unittest.TestCase):
     def test_setaddr_then_dump(self):
         sys, buf = self._boot_bios()
         self._run_to_prompt(sys, buf)
-        # Set address to 0x10
-        self._send_cmd(sys, buf, b"s10")
+        # Set address to 0x10 (4 hex digits in v0.2)
+        self._send_cmd(sys, buf, b"s0010")
         self.assertEqual(sys.cpu.regs[9], 0x10)
         # Dump from 0x10
         text = self._send_cmd(sys, buf, b"d")
@@ -309,7 +309,7 @@ class TestBIOS(unittest.TestCase):
     def test_unknown_command(self):
         sys, buf = self._boot_bios()
         self._run_to_prompt(sys, buf)
-        text = self._send_cmd(sys, buf, b"x")
+        text = self._send_cmd(sys, buf, b"Z")
         self.assertIn("?", text)
         self.assertIn("> ", text)
 
@@ -322,17 +322,17 @@ class TestBIOS(unittest.TestCase):
         text = self._send_cmd(sys, buf, b"h")
         self.assertIn("h=help", text)
 
-        # Set address
-        self._send_cmd(sys, buf, b"s20")
+        # Set address (4 hex digits in v0.2)
+        self._send_cmd(sys, buf, b"s0020")
         self.assertEqual(sys.cpu.regs[9], 0x20)
 
         # Dump
         text = self._send_cmd(sys, buf, b"d")
         self.assertIn("> ", text)
 
-        # Regs (R9 should now show 20)
+        # Regs (R9 shown as hex32 in v0.2)
         text = self._send_cmd(sys, buf, b"r")
-        self.assertIn("R9=20", text)
+        self.assertIn("R9=00000020", text)
 
         # Quit
         text = self._send_cmd(sys, buf, b"q")
