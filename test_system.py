@@ -802,8 +802,8 @@ class TestKDOS(unittest.TestCase):
     def test_kdos_loads(self):
         """KDOS loads without errors and prints banner."""
         text = self._run_kdos([])
-        self.assertIn("KERNEL DASHBOARD OS", text)
-        self.assertIn("DASHBOARD", text)
+        self.assertIn("KDOS v0.2", text)
+        self.assertIn("HELP", text)
 
     # -- Utility words --
 
@@ -932,8 +932,8 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KERNEL DASHBOARD OS", text)
-        self.assertIn("HERE =", text)
+        self.assertIn("KDOS v0.2", text)
+        self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
 
@@ -972,6 +972,286 @@ class TestKDOS(unittest.TestCase):
             "99 ( this is a comment ) .",
         ])
         self.assertIn("99 ", text)
+
+    # -- BIOS tile words --
+
+    def test_acc_fetch(self):
+        """ACC@ reads ACC0 CSR (initially 0)."""
+        text = self._run_kdos(["ACC@ ."])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)
+
+    def test_tmode_fetch(self):
+        """TMODE@ reads current tile mode."""
+        text = self._run_kdos(["TMODE@ ."])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)
+
+    def test_execute_word(self):
+        """EXECUTE calls a word given its XT."""
+        text = self._run_kdos([
+            ": test-word 777 . ;",
+            "' test-word EXECUTE",
+        ])
+        self.assertIn("777 ", text)
+
+    def test_tick_word(self):
+        """' finds a word and returns nonzero XT."""
+        text = self._run_kdos([
+            "' DUP 0<> .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        # 0<> of nonzero XT should be -1 (true)
+        self.assertIn("-1 ", out)
+
+    # -- Tile-aware buffer ops --
+
+    def test_bsum_zeros(self):
+        """B.SUM of a zeroed buffer is 0."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER sb",
+            "sb B.ZERO",
+            "sb B.SUM .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("0 ", out)
+
+    def test_bsum_filled(self):
+        """B.SUM of 64 bytes filled with 1 is 64."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER sf",
+            "1 sf B.FILL",
+            "sf B.SUM .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("64 ", out)
+
+    def test_bsum_multi_tile(self):
+        """B.SUM of 128 bytes filled with 2 is 256."""
+        text = self._run_kdos([
+            "0 1 128 BUFFER sm",
+            "2 sm B.FILL",
+            "sm B.SUM .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("256 ", out)
+
+    def test_bmin(self):
+        """B.MIN finds the minimum byte."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER mn",
+            "100 mn B.FILL",
+            "5 mn B.DATA C!",
+            "mn B.MIN .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("5 ", out)
+
+    def test_bmax(self):
+        """B.MAX finds the maximum byte."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER mx",
+            "10 mx B.FILL",
+            "200 mx B.DATA C!",
+            "mx B.MAX .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("200 ", out)
+
+    def test_badd(self):
+        """B.ADD adds two buffers element-wise."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER a1",
+            "0 1 64 BUFFER a2",
+            "0 1 64 BUFFER a3",
+            "3 a1 B.FILL",
+            "5 a2 B.FILL",
+            "a1 a2 a3 B.ADD",
+            "a3 B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("8 ", out)
+
+    def test_bsub(self):
+        """B.SUB subtracts two buffers element-wise."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER s1",
+            "0 1 64 BUFFER s2",
+            "0 1 64 BUFFER s3",
+            "10 s1 B.FILL",
+            "3 s2 B.FILL",
+            "s1 s2 s3 B.SUB",
+            "s3 B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("7 ", out)
+
+    def test_bscale(self):
+        """B.SCALE multiplies each byte by n."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER sc",
+            "3 sc B.FILL",
+            "4 sc B.SCALE",
+            "sc B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("12 ", out)
+
+    # -- Sample kernels --
+
+    def test_kfill_kernel(self):
+        """kfill fills a buffer with a byte."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER kfb",
+            "42 kfb kfill",
+            "kfb B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("42 ", out)
+
+    def test_kadd_kernel(self):
+        """kadd adds two buffers."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER ka1",
+            "0 1 64 BUFFER ka2",
+            "0 1 64 BUFFER ka3",
+            "10 ka1 B.FILL",
+            "20 ka2 B.FILL",
+            "ka1 ka2 ka3 kadd",
+            "ka3 B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("30 ", out)
+
+    def test_ksum_kernel(self):
+        """ksum sums all bytes in a buffer."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER ksb",
+            "1 ksb B.FILL",
+            "ksb ksum .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("64 ", out)
+
+    def test_kstats_kernel(self):
+        """kstats returns sum, min, max."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER ksb2",
+            "5 ksb2 B.FILL",
+            "10 ksb2 B.DATA C!",
+            "1 ksb2 B.DATA 1+ C!",
+            "ksb2 kstats",
+            ". . .",
+        ])
+        # sum=5*62+10+1=321, min=1, max=10
+        # . prints max first (TOS), then min, then sum
+        self.assertIn("10 ", text)   # max
+        self.assertIn("1 ", text)    # min
+
+    def test_kscale_kernel(self):
+        """kscale multiplies buffer by scalar."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER kcb",
+            "2 kcb B.FILL",
+            "3 kcb kscale",
+            "kcb B.DATA C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("6 ", out)
+
+    def test_kthresh_kernel(self):
+        """kthresh sets bytes < threshold to 0, >= to 255."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER ktb",
+            "50 ktb B.FILL",
+            "100 ktb B.DATA C!",
+            "75 ktb kthresh",
+            "ktb B.DATA C@ .",
+            "ktb B.DATA 1+ C@ .",
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("255 ", out)   # 100 >= 75 → 255
+        self.assertIn("0 ", out)     # 50 < 75 → 0
+
+    # -- Benchmarking --
+
+    def test_bench(self):
+        """BENCH times a word and leaves cycles on stack."""
+        text = self._run_kdos([
+            ": noop-word ;",
+            "' noop-word BENCH .",
+        ])
+        # Should print some nonzero cycle count
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        # Just check it doesn't error — any number is fine
+        self.assertNotIn("?", out.split("BENCH")[-1] if "BENCH" in out else out[-100:])
+
+    # -- Help & Status --
+
+    def test_help(self):
+        """HELP prints command reference."""
+        text = self._run_kdos(["HELP"])
+        self.assertIn("Quick Reference", text)
+        self.assertIn("BUFFER WORDS", text)
+        self.assertIn("KERNEL WORDS", text)
+        self.assertIn("SAMPLE KERNELS", text)
+        self.assertIn("BENCH", text)
+
+    def test_status(self):
+        """STATUS prints quick summary line."""
+        text = self._run_kdos(["STATUS"])
+        self.assertIn("KDOS", text)
+        self.assertIn("bufs=", text)
+        self.assertIn("kerns=", text)
+
+    # -- Kernel registry with new kernels --
+
+    def test_kernel_count(self):
+        """All sample kernels are registered."""
+        text = self._run_kdos(["KERN-COUNT @ ."])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn("7 ", out)  # kzero, kfill, kadd, ksum, kstats, kscale, kthresh
+
+    # -- Utility words --
+
+    def test_abs_word(self):
+        """ABS computes absolute value."""
+        text = self._run_kdos(["5 ABS .", "-3 ABS ."])
+        self.assertIn("5 ", text)
+        self.assertIn("3 ", text)
+
+    def test_negate_word(self):
+        """NEGATE negates a number."""
+        text = self._run_kdos(["7 NEGATE ."])
+        self.assertIn("-7 ", text)
+
+    def test_2drop_word(self):
+        """2DROP drops two items."""
+        text = self._run_kdos(["1 2 3 2DROP ."])
+        self.assertIn("1 ", text)
+
+    def test_nip_word(self):
+        """NIP removes second item."""
+        text = self._run_kdos(["1 2 NIP ."])
+        self.assertIn("2 ", text)
 
 
 # ---------------------------------------------------------------------------

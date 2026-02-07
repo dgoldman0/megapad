@@ -1585,6 +1585,101 @@ w_cycles:
     str r14, r1
     ret.l
 
+; ACC@ ( -- n ) read ACC0 to stack
+w_acc_fetch:
+    csrr r0, 0x19
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC1@ ( -- n ) read ACC1 to stack
+w_acc1_fetch:
+    csrr r0, 0x1A
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC2@ ( -- n ) read ACC2 to stack
+w_acc2_fetch:
+    csrr r0, 0x1B
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC3@ ( -- n ) read ACC3 to stack
+w_acc3_fetch:
+    csrr r0, 0x1C
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TPOPCNT ( -- ) popcount reduction, result in ACC
+w_tpopcnt:
+    t.popcnt
+    ret.l
+
+; TL1 ( -- ) L1 norm reduction, result in ACC
+w_tl1:
+    t.l1
+    ret.l
+
+; TEMIN ( -- ) element-wise min, writes to DST tile
+w_temin:
+    t.min
+    ret.l
+
+; TEMAX ( -- ) element-wise max, writes to DST tile
+w_temax:
+    t.max
+    ret.l
+
+; TABS ( -- ) element-wise absolute value, writes to DST tile
+w_tabs:
+    t.abs
+    ret.l
+
+; TMODE@ ( -- n ) read current tile mode
+w_tmode_fetch:
+    csrr r0, 0x14
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TCTRL@ ( -- n ) read current tile ctrl
+w_tctrl_fetch:
+    csrr r0, 0x15
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; EXECUTE ( xt -- ) call execution token
+w_execute:
+    ldn r9, r14
+    addi r14, 8
+    call.l r9
+    ret.l
+
+; ' ( "name" -- xt ) find word, push code field address
+w_tick:
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    breq tick_fail
+    ldi64 r11, find_word
+    call.l r11
+    cmpi r9, 0
+    breq tick_fail
+    ldi64 r11, entry_to_code
+    call.l r11
+    subi r14, 8
+    str r14, r9
+    ret.l
+tick_fail:
+    ldi r0, 0
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; =====================================================================
 ;  Compilation Helpers
 ; =====================================================================
@@ -3585,9 +3680,126 @@ d_cycles:
     call.l r11
     ret.l
 
+; === ACC@ ===
+d_acc_fetch:
+    .dq d_cycles
+    .db 4
+    .ascii "ACC@"
+    ldi64 r11, w_acc_fetch
+    call.l r11
+    ret.l
+
+; === ACC1@ ===
+d_acc1_fetch:
+    .dq d_acc_fetch
+    .db 5
+    .ascii "ACC1@"
+    ldi64 r11, w_acc1_fetch
+    call.l r11
+    ret.l
+
+; === ACC2@ ===
+d_acc2_fetch:
+    .dq d_acc1_fetch
+    .db 5
+    .ascii "ACC2@"
+    ldi64 r11, w_acc2_fetch
+    call.l r11
+    ret.l
+
+; === ACC3@ ===
+d_acc3_fetch:
+    .dq d_acc2_fetch
+    .db 5
+    .ascii "ACC3@"
+    ldi64 r11, w_acc3_fetch
+    call.l r11
+    ret.l
+
+; === TPOPCNT ===
+d_tpopcnt:
+    .dq d_acc3_fetch
+    .db 7
+    .ascii "TPOPCNT"
+    ldi64 r11, w_tpopcnt
+    call.l r11
+    ret.l
+
+; === TL1 ===
+d_tl1:
+    .dq d_tpopcnt
+    .db 3
+    .ascii "TL1"
+    ldi64 r11, w_tl1
+    call.l r11
+    ret.l
+
+; === TEMIN ===
+d_temin:
+    .dq d_tl1
+    .db 5
+    .ascii "TEMIN"
+    ldi64 r11, w_temin
+    call.l r11
+    ret.l
+
+; === TEMAX ===
+d_temax:
+    .dq d_temin
+    .db 5
+    .ascii "TEMAX"
+    ldi64 r11, w_temax
+    call.l r11
+    ret.l
+
+; === TABS ===
+d_tabs:
+    .dq d_temax
+    .db 4
+    .ascii "TABS"
+    ldi64 r11, w_tabs
+    call.l r11
+    ret.l
+
+; === TMODE@ ===
+d_tmode_fetch:
+    .dq d_tabs
+    .db 6
+    .ascii "TMODE@"
+    ldi64 r11, w_tmode_fetch
+    call.l r11
+    ret.l
+
+; === TCTRL@ ===
+d_tctrl_fetch:
+    .dq d_tmode_fetch
+    .db 6
+    .ascii "TCTRL@"
+    ldi64 r11, w_tctrl_fetch
+    call.l r11
+    ret.l
+
+; === EXECUTE ===
+d_execute:
+    .dq d_tctrl_fetch
+    .db 7
+    .ascii "EXECUTE"
+    ldi64 r11, w_execute
+    call.l r11
+    ret.l
+
+; === ' (tick) ===
+d_tick:
+    .dq d_execute
+    .db 1
+    .ascii "'"
+    ldi64 r11, w_tick
+    call.l r11
+    ret.l
+
 ; === : (colon) ===
 d_colon:
-    .dq d_cycles
+    .dq d_tick
     .db 1
     .ascii ":"
     ldi64 r11, w_colon
