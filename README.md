@@ -164,7 +164,8 @@ The combination of Forth (for orchestration and control) and the tile engine (fo
 
 **Current version: KDOS v0.9d**
 
-The system is feature-complete and production-ready for experimentation, education, and research. Recent additions include:
+The system is stable and comprehensive, suitable for experimentation, education, and research. Recent additions include:
+
 
 - **v0.9d**: Dictionary search, stack safety utilities, diagnostics
 - **v0.9c**: Documentation browser with 10 topics and 5 tutorials
@@ -205,7 +206,7 @@ The architecture is flexible enough to support these extensions while maintainin
 
 ## License
 
-[Specify your license here]
+CC0 (for all components not supersceded by existing licenses)
 
 ---
 
