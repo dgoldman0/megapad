@@ -1,8 +1,8 @@
 \ =====================================================================
-\  KDOS v0.8 — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.9a — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
-\  Loaded via UART into the Megapad-64 BIOS v0.4+ Forth system.
+\  Loaded via UART into the Megapad-64 BIOS v0.5+ Forth system.
 \
 \  Subsystems:
 \    1. Utilities       — common words, CMOVE, +!, tile-alignment
@@ -23,42 +23,27 @@
 \ =====================================================================
 \  §1  Utility Words
 \ =====================================================================
+\  Note: BIOS v0.5 now provides CELLS, CELL+, 2*, <>, 0<>, MIN, MAX,
+\  -ROT, +!, CMOVE, ?DUP, ABS, NEGATE, 2DROP, NIP, TUCK, BL, TRUE,
+\  FALSE, EXIT, >R, R>, R@, J, UNLOOP, +LOOP, AGAIN, STATE, [, ],
+\  LITERAL, IMMEDIATE, CREATE, S", 0>.
 
-: CELLS   ( n -- n*8 )       8 * ;
-: CELL+   ( a -- a+8 )       8 + ;
-: 2*      ( n -- n*2 )       DUP + ;
-: <>      ( a b -- flag )    = 0= ;
-: 0<>     ( n -- flag )      0= 0= ;
-: MIN     ( a b -- min )     2DUP > IF SWAP THEN DROP ;
-: MAX     ( a b -- max )     2DUP < IF SWAP THEN DROP ;
 : OFF     ( addr -- )        0 SWAP ! ;
-: ABS     ( n -- |n| )       DUP 0< IF 0 SWAP - THEN ;
-: NEGATE  ( n -- -n )        0 SWAP - ;
-: /       ( a b -- a/b )     /MOD SWAP DROP ;
-: MOD     ( a b -- rem )     /MOD DROP ;
-: SPACES  ( n -- )           DUP IF 0 DO SPACE LOOP ELSE DROP THEN ;
-: 2DROP   ( a b -- )         DROP DROP ;
-: NIP     ( a b -- b )       SWAP DROP ;
-: TUCK    ( a b -- b a b )   SWAP OVER ;
-: -ROT    ( a b c -- c a b ) ROT ROT ;
 
 \ Tile-align HERE: pad with zero bytes to next 64-byte boundary
 : TALIGN  ( -- )  BEGIN HERE 63 AND WHILE 0 C, REPEAT ;
 
 \ .R ( n width -- ) print number right-justified in width
-: .R  SWAP DUP ABS 0 ( width n abs carry )
-    BEGIN SWAP 10 /MOD SWAP ROT 1+ DUP 0= UNTIL ( width n digits count )
-    DROP DROP DROP
-    ( just use . for now )
+: .R  ( just use . for now )
     DROP . ;
 
-\ -- Memory utility words --
-: +!    ( n addr -- )  DUP @ ROT + SWAP ! ;
-: CMOVE ( src dst u -- )
-    0 DO
-        OVER I + C@
-        OVER I + C!
-    LOOP 2DROP ;
+\ 16-bit LE fetch/store (needed for frame header parsing)
+: W@  ( addr -- u16 )  DUP C@ SWAP 1+ C@ 8 LSHIFT OR ;
+: W!  ( u16 addr -- )  2DUP C! SWAP 8 RSHIFT SWAP 1+ C! ;
+
+\ 32-bit LE fetch/store
+: L@  ( addr -- u32 )  DUP W@ SWAP 2 + W@ 16 LSHIFT OR ;
+: L!  ( u32 addr -- )  2DUP W! SWAP 16 RSHIFT SWAP 2 + W! ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -1261,7 +1246,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.8 "
+    ."  KDOS v0.9a "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -1580,7 +1565,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.8 — Kernel Dashboard OS" CR
+    ."  KDOS v0.9a — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -1609,7 +1594,7 @@ VARIABLE BENCH-T0
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.8 — Quick Reference" CR
+    ."  KDOS v0.9a — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -1705,7 +1690,7 @@ VARIABLE BENCH-T0
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.8 — Kernel Dashboard OS" CR
+."  KDOS v0.9a — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR

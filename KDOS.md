@@ -88,12 +88,14 @@ PORTS                          \ List all port bindings
 
 ## Implementation Status
 
-### ✅ Completed (v0.8)
+### ✅ Completed (v0.9a)
 
-**BIOS v0.4** (128 words, ~4400 lines):
+**BIOS v0.5** (154 words, ~5100 lines):
 - Complete Forth system with colon compiler, conditionals, loops
-- All 22 tile engine words: TSRC0!/TSRC1!/TDST!/TMODE!/TCTRL!, TADD/TSUB/TAND/TOR/TXOR, TMUL/TDOT, TSUM/TMIN/TMAX, TTRANS/TZERO, TI/TVIEW/TFILL/CYCLES
-- ACC@/ACC1@/ACC2@/ACC3@ (read accumulator), TPOPCNT/TL1/TEMIN/TEMAX/TABS, EXECUTE, ' (tick)
+- **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
+  CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
+  MIN, MAX, CELLS, CELL+, +!, 2*, CMOVE, -ROT, BL, TRUE, FALSE
+- All 22 tile engine words + ACC@/ACC1@/ACC2@/ACC3@, TPOPCNT/TL1/TEMIN/TEMAX/TABS
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
 - Storage device support: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
@@ -186,11 +188,123 @@ PORTS                          \ List all port bindings
 - MultiChannelSource: round-robin multiplexing of multiple sources onto single NIC
 - End-to-end real-world pipelines tested: temperature→normalize, stock→delta, seismic→peak-detect, image→threshold, audio→smoothing, text→histogram, embedding→correlate, multi-channel→ingest, signal processing chain (normalize→smooth→threshold→count)
 
-**Phase 7: User Experience** (not started)
-- REPL improvements: history, tab completion, multi-line editing
-- Error messages with context and suggestions
-- Online help with examples
-- Tutorials and documentation browser
+**Phase 7: User Experience** — sub-stages:
+
+**v0.9a — BIOS v0.5: Core Forth Completeness** (in progress)
+
+The BIOS v0.4 is missing critical standard Forth words (`EXIT`, `>R`/`R>`/
+`R@`, `J`, `UNLOOP`, `S"`, `CREATE`, `[`/`]`, `LITERAL`, `IMMEDIATE`,
+`STATE`), and KDOS §1 needlessly shadows 8 native BIOS words with slower
+high-level Forth versions. This stage upgrades the BIOS foundation before
+building higher-level features.
+
+*New BIOS words (~29 additions, 125→~154 words):*
+
+| Category | Words |
+|---|---|
+| **Return stack** | `>R` `R>` `R@` (IMMEDIATE — compile inline) |
+| **Loop** | `J` (outer index), `UNLOOP` (IMMEDIATE), `+LOOP` (IMMEDIATE) |
+| **Control** | `EXIT` (IMMEDIATE — compile ret.l), `AGAIN` (IMMEDIATE) |
+| **Metaprogramming** | `STATE` `[` `]` `LITERAL` `IMMEDIATE` `CREATE` `S"` |
+| **Comparison** | `0>` `<>` `0<>` `?DUP` |
+| **Arithmetic** | `MIN` `MAX` `CELLS` `CELL+` `+!` `2*` |
+| **Memory** | `CMOVE` `-ROT` |
+| **Constants** | `BL` `TRUE` `FALSE` |
+
+*KDOS §1 cleanup:*
+- Remove 8 shadow words (ABS, NEGATE, /, MOD, SPACES, 2DROP, NIP, TUCK)
+- Remove words now in BIOS (CELLS, CELL+, MIN, MAX, +!, CMOVE, ?DUP, <>, 0<>, -ROT, 2*)
+- Fix SAMESTR? (now that EXIT, 0> exist natively)
+- Fix PARSE-NAME (now that BL exists natively)
+
+**v0.9b — MP64FS: On-Disk File System** (planned)
+
+Replace the manual sector-range FILE abstraction with a proper named file
+system on disk, providing the storage foundation for docs, tutorials, and
+persistent user data.
+
+*Disk layout (MP64FS, 1 MiB = 2048 × 512-byte sectors):*
+```
+Sector 0:      Superblock (magic "MP64", version, geometry)
+Sector 1:      Allocation bitmap (256 bytes = 2048 bits)
+Sectors 2-5:   Directory (64 entries × 32 bytes each)
+Sectors 6+:    Data area (2042 sectors ≈ 1 MB usable)
+```
+
+*Directory entry (32 bytes):*
+```
++0   name[16]       null-terminated (max 15 chars)
++16  start_sec[2]   starting sector (u16 LE)
++18  sec_count[2]   allocated sectors (u16 LE)
++20  used_bytes[4]  bytes written (u32 LE)
++24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
++25  flags[1]       bit0=readonly, bit1=system
++26  reserved[6]
+```
+
+New Python tool — diskutil.py:
+- `format_image()`: create formatted 1 MiB image
+- `inject_file()`: allocate sectors, write named file into image
+- `read_file()`: read file from image by name
+- `list_files()`: list directory
+- `delete_file()`: free sectors and remove entry
+
+KDOS rewrite — new Forth words:
+- RAM caches: FS-SUPER, FS-BMAP, FS-DIR
+- FS-LOAD / FS-SYNC: disk ↔ RAM
+- FORMAT, DIR / CATALOG, MKFILE, RMFILE, OPEN
+- FWRITE / FREAD with proper cursor advancement
+- FFLUSH: persist descriptor metadata
+
+**v0.9c — Documentation & Tutorial Browser** (planned)
+
+Built-in documentation and interactive tutorials stored as MP64FS files.
+
+Documentation format (lightweight markup):
+```
+#TITLE Buffer Operations
+#SECTION Creating Buffers
+  0 1 256 BUFFER mydata
+#EXAMPLE
+  42 mydata B.FILL
+  mydata B.PREVIEW
+#END
+```
+
+New Forth words:
+- `DOC` ( "topic" -- ): page through documentation file
+- `DESCRIBE` ( "word" -- ): detailed help for one word + example
+- `TUTORIAL` ( "name" -- ): interactive step-by-step lesson
+- `TOPICS` / `LESSONS`: list available docs and tutorials
+- SCR-DOCS: new screen 7 (documentation browser)
+
+Python-side doc builder (diskutil.py extensions):
+- `build_docs()`: generate .doc files from structured source
+- `build_tutorials()`: generate .tut files
+- `build_image()`: format + inject all docs + tutorials
+
+Pre-built content:
+- ~10 documentation files (buffers, kernels, pipelines, storage,
+  scheduler, screens, data-ports, tile-engine, getting-started, reference)
+- ~5 tutorials (hello-world, first-kernel, build-pipeline,
+  data-ingest, custom-kernel)
+
+**v0.9d — REPL Improvements & Error Handling** (planned)
+
+Command history:
+- HISTORY ring buffer (last 16 commands)
+- `HIST`: print history, `!!` re-execute last, `!n` re-execute nth
+
+Error handling:
+- Replace bare "?" with descriptive messages
+- "Unknown word. Did you mean: ..." (fuzzy dictionary match)
+- Stack underflow detection with context
+
+New Forth words:
+- `HIST`, `!!` — command history
+- `WORDS-LIKE` ( "pattern" -- ): list words containing substring
+- `APROPOS` ( "topic" -- ): search word names and help text
+- Custom INTERPRET loop with richer error reporting
 
 ---
 

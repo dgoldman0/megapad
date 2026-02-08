@@ -410,7 +410,7 @@ class TestBIOS(unittest.TestCase):
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [])
-        self.assertIn("Megapad-64 Forth BIOS v0.4", text)
+        self.assertIn("Megapad-64 Forth BIOS v0.5", text)
         self.assertIn("RAM:", text)
         self.assertIn("ok", text)
 
@@ -804,6 +804,274 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["DI!"])
         self.assertNotIn("???", text)
 
+    # ------------------------------------------------------------------
+    #  BIOS v0.5 — new words
+    # ------------------------------------------------------------------
+
+    def test_exit_early_return(self):
+        """EXIT returns from a colon definition early."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TE 1 IF 42 EXIT THEN 77 ;",
+            "TE .",
+        ])
+        self.assertIn("42 ", text)
+        # 77 must not appear as execution output (only in echoed definition)
+        after_run = text.split("TE .")[-1] if "TE ." in text else text
+        self.assertNotIn("77", after_run)
+
+    def test_to_r_r_from(self):
+        """>R and R> move values via the return stack."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TR 10 >R 20 R> + . ;",
+            "TR",
+        ])
+        self.assertIn("30 ", text)
+
+    def test_r_fetch(self):
+        """R@ peeks the return stack without popping."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TRF 7 >R R@ R> + . ;",
+            "TRF",
+        ])
+        self.assertIn("14 ", text)
+
+    def test_j_nested_loop(self):
+        """J accesses the outer loop index from a nested loop."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TJ 3 0 DO 2 0 DO J . LOOP LOOP ;",
+            "TJ",
+        ])
+        # Outer loop: 0,1,2 — each printed twice (inner loop runs 2x)
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertEqual(nums[-6:], ["0", "0", "1", "1", "2", "2"])
+
+    def test_unloop_exit(self):
+        """UNLOOP + EXIT breaks out of a loop cleanly."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TU 10 0 DO I DUP 5 = IF . UNLOOP EXIT THEN DROP LOOP 77 . ;",
+            "TU",
+        ])
+        self.assertIn("5 ", text)
+        # 77 must not appear in execution output (only in echoed definition)
+        after_run = text.split("TU\r\n")[-1] if "TU\r\n" in text else text.split("TU")[-1]
+        self.assertNotIn("77", after_run)
+
+    def test_plus_loop(self):
+        """+LOOP increments by a custom step."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TPL 20 0 DO I . 5 +LOOP ;",
+            "TPL",
+        ])
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertEqual(nums[-4:], ["0", "5", "10", "15"])
+
+    def test_again_loop(self):
+        """BEGIN...AGAIN creates an infinite loop (exit via UNLOOP/EXIT or test)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE CNT 0 CNT !",
+            ": TAG BEGIN CNT @ 1+ DUP CNT ! 5 = IF EXIT THEN AGAIN ;",
+            "TAG CNT @ .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_state_bracket(self):
+        """STATE, [, and ] control compile/interpret mode."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TSB [ 3 4 + ] LITERAL . ;",
+            "TSB",
+        ])
+        self.assertIn("7 ", text)
+
+    def test_literal(self):
+        """LITERAL compiles a computed value."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TL [ 100 ] LITERAL . ;",
+            "TL",
+        ])
+        self.assertIn("100 ", text)
+
+    def test_immediate_word(self):
+        """IMMEDIATE marks a user word as execute-during-compilation."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEN 10 ; IMMEDIATE",
+            ": TI [ TEN ] LITERAL . ;",
+            "TI",
+        ])
+        self.assertIn("10 ", text)
+
+    def test_create(self):
+        """CREATE makes a word that pushes its data-field address."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "CREATE MYDAT 42 ,",
+            "MYDAT @ .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_squote(self):
+        """S\" pushes string address and length."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TS S" HELLO" TYPE ;',
+            "TS",
+        ])
+        self.assertIn("HELLO", text)
+
+    def test_zero_gt(self):
+        """0> returns true for positive, false for zero/negative."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": T0G 0> . ;",
+            "5 T0G",
+            "0 T0G",
+            "-3 T0G",
+        ])
+        # Extract just the results after each T0G call
+        results = []
+        for part in text.split("T0G"):
+            for tok in part.split():
+                if tok.lstrip('-').isdigit():
+                    results.append(tok)
+                    break
+        # 5 0> = -1 (true), 0 0> = 0, -3 0> = 0
+        self.assertEqual(results[-3:], ["-1", "0", "0"])
+
+    def test_not_equal(self):
+        """<> returns true when values differ."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TNE <> . ;",
+            "3 4 TNE",
+            "5 5 TNE",
+        ])
+        results = []
+        for part in text.split("TNE"):
+            for tok in part.split():
+                if tok.lstrip('-').isdigit():
+                    results.append(tok)
+                    break
+        self.assertEqual(results[-2:], ["-1", "0"])
+
+    def test_zero_ne(self):
+        """0<> returns true for nonzero."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TZN 0<> . ;",
+            "7 TZN",
+            "0 TZN",
+        ])
+        results = []
+        for part in text.split("TZN"):
+            for tok in part.split():
+                if tok.lstrip('-').isdigit():
+                    results.append(tok)
+                    break
+        self.assertEqual(results[-2:], ["-1", "0"])
+
+    def test_qdup(self):
+        """?DUP duplicates only nonzero values."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "3 ?DUP DEPTH .",
+            "DROP DROP",
+            "0 ?DUP DEPTH .",
+        ])
+        # After 3 ?DUP: stack has 3 3 → depth 2
+        # After 0 ?DUP: stack has 0 → depth 1
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertIn("2", nums)
+        self.assertIn("1", nums)
+
+    def test_min_max_bios(self):
+        """MIN and MAX work at the BIOS level."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "3 7 MIN .",
+            "3 7 MAX .",
+        ])
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertIn("3", nums)
+        self.assertIn("7", nums)
+
+    def test_cells_cell_plus(self):
+        """CELLS and CELL+ work at the BIOS level."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "5 CELLS .",
+            "100 CELL+ .",
+        ])
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertIn("40", nums)
+        self.assertIn("108", nums)
+
+    def test_plus_store_bios(self):
+        """+! adds to a variable."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE X 10 X !",
+            "5 X +!",
+            "X @ .",
+        ])
+        self.assertIn("15 ", text)
+
+    def test_two_star(self):
+        """2* doubles a value."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["21 2* ."])
+        self.assertIn("42 ", text)
+
+    def test_cmove_bios(self):
+        """CMOVE copies bytes at the BIOS level."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 65 OVER C! 1+ 66 OVER C! 1+ 67 SWAP C!",
+            "HERE DUP 100 + 3 CMOVE",
+            "HERE 100 + C@ .",
+        ])
+        self.assertIn("65 ", text)
+
+    def test_neg_rot(self):
+        """-ROT reverses ROT."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "1 2 3 -ROT .S",
+        ])
+        # After -ROT: stack is 3 1 2 (TOS=2)
+        self.assertIn("3", text)
+        self.assertIn("1", text)
+        self.assertIn("2", text)
+
+    def test_bl(self):
+        """BL pushes 32."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["BL ."])
+        self.assertIn("32 ", text)
+
+    def test_true_false(self):
+        """TRUE and FALSE push -1 and 0."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["TRUE .", "FALSE ."])
+        self.assertIn("-1 ", text)
+        self.assertIn("0 ", text)
+
+    def test_words_includes_v05(self):
+        """WORDS output includes the new BIOS v0.5 words."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["WORDS"])
+        for w in ["EXIT", ">R", "R>", "R@", "MIN", "MAX",
+                   "CELLS", "CREATE", "BL", "TRUE", "FALSE"]:
+            self.assertIn(w, text, f"WORDS missing {w}")
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
@@ -1060,7 +1328,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.8", text)
+        self.assertIn("KDOS v0.9a", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1190,7 +1458,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.8", text)
+        self.assertIn("KDOS v0.9a", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -2032,7 +2300,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.8", text)
+        self.assertIn("KDOS v0.9a", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
