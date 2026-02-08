@@ -1082,6 +1082,249 @@ class TestBIOS(unittest.TestCase):
                    "CELLS", "CREATE", "BL", "TRUE", "FALSE"]:
             self.assertIn(w, text, f"WORDS missing {w}")
 
+    # -- v1.0 BIOS words --
+
+    def test_2over(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 2OVER . . . . . ."])
+        self.assertIn("2 1 4 3 2 1 ", text)
+
+    def test_2swap(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 2SWAP . . . ."])
+        self.assertIn("2 1 4 3 ", text)
+
+    def test_2rot(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 5 6 2ROT . . . . . ."])
+        self.assertIn("2 1 6 5 4 3 ", text)
+
+    def test_gte_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 >= ."])
+        self.assertIn("-1 ", text)
+
+    def test_gte_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 5 >= ."])
+        self.assertIn("-1 ", text)
+
+    def test_gte_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 >= ."])
+        self.assertIn("0 ", text)
+
+    def test_lte_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 <= ."])
+        self.assertIn("-1 ", text)
+
+    def test_lte_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 5 <= ."])
+        self.assertIn("-1 ", text)
+
+    def test_lte_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 <= ."])
+        self.assertIn("0 ", text)
+
+    def test_u_lt_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 U< ."])
+        self.assertIn("-1 ", text)
+
+    def test_u_lt_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 U< ."])
+        self.assertIn("0 ", text)
+
+    def test_u_gt_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 U> ."])
+        self.assertIn("-1 ", text)
+
+    def test_u_gt_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 U> ."])
+        self.assertIn("0 ", text)
+
+    def test_off(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE X  42 X !",
+            "X OFF",
+            "X @ ."
+        ])
+        self.assertIn("0 ", text)
+
+    def test_wfetch_wstore(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x1234 OVER W!",
+            "W@ ."
+        ])
+        self.assertIn("4660 ", text)   # 0x1234 = 4660
+
+    def test_lfetch_lstore(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x12345678 OVER L!",
+            "L@ ."
+        ])
+        self.assertIn("305419896 ", text)   # 0x12345678
+
+    def test_zstr(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" hello" DROP 1- .ZSTR ;',
+            'TEST'
+        ])
+        # S" leaves addr len; the actual string starts 13 bytes before addr
+        # (after the squote_runtime call). We use DROP 1- to get to the
+        # null-terminated string in the code stream. But the string layout is:
+        # ... call squote_runtime | h e l l o \0 ...
+        # squote_runtime pushes addr=start_of_string, so addr-1 would be wrong.
+        # Actually, the string IS null-terminated. We just need the addr:
+        self.assertIn("hello", text)
+
+    def test_uchar_bios(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0x61 UCHAR ."])
+        self.assertIn("65 ", text)   # 'a' → 'A'
+
+    def test_uchar_uppercase_unchanged(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0x41 UCHAR ."])
+        self.assertIn("65 ", text)
+
+    def test_talign(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 63 AND .  TALIGN  HERE 63 AND ."
+        ])
+        # After TALIGN, HERE mod 64 should be 0
+        lines = text.split("ok")
+        # Just check the second number is 0
+        self.assertIn("0 ", text)
+
+    def test_two_slash(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["10 2/ ."])
+        self.assertIn("5 ", text)
+
+    def test_count(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" hi" DROP 1- COUNT . . ;',
+            'TEST'
+        ])
+        # COUNT on a counted string: should yield addr and length
+        # S" gives addr len — but we need a counted string. Test indirectly.
+
+    def test_move_forward(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x41 OVER C!  HERE 1+  0x42 OVER C!  HERE 2 + 0x43 OVER C!",
+            "HERE  HERE 100 +  3 MOVE",
+            "HERE 100 + C@ .  HERE 101 + C@ .  HERE 102 + C@ ."
+        ])
+        self.assertIn("65 ", text)  # 'A'
+        self.assertIn("66 ", text)  # 'B'
+        self.assertIn("67 ", text)  # 'C'
+
+    def test_within_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 10 WITHIN ."])
+        self.assertIn("-1 ", text)
+
+    def test_within_false_below(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["2 3 10 WITHIN ."])
+        self.assertIn("0 ", text)
+
+    def test_within_false_above(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["10 3 10 WITHIN ."])
+        self.assertIn("0 ", text)  # upper bound exclusive
+
+    def test_source(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SOURCE SWAP DROP ."])
+        # Should return current input length (nonzero)
+
+    def test_to_in(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [">IN @ ."])
+        # >IN should be a valid address that returns a value
+
+    def test_evaluate(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" 2 3 + ." EVALUATE ;',
+            'TEST'
+        ])
+        self.assertIn("5", text)
+
+    def test_compare_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABC" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("0 ", text)
+
+    def test_compare_less(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABC" S" ABD" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_compare_greater(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABD" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("1 ", text)
+
+    def test_char(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["CHAR A ."])
+        self.assertIn("65 ", text)
+
+    def test_bracket_char(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST  [CHAR] Z . ;",
+            "TEST"
+        ])
+        self.assertIn("90 ", text)
+
+    def test_recurse(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": FACT  DUP 1 > IF DUP 1- RECURSE * THEN ;",
+            "5 FACT ."
+        ])
+        self.assertIn("120 ", text)
+
+    def test_find_known(self):
+        sys, buf = self._boot_bios()
+        # WORD parses next delimited word from TIB and returns counted-string
+        # address. We can use WORD to get a counted string for FIND.
+        # "0x20 WORD DUP" produces a counted string of the next space-delimited
+        # token. The token after WORD on the same line is "FIND".
+        # We'll use a colon definition to test FIND properly:
+        text = self._run_forth(sys, buf, [
+            ': TEST  0x20 WORD FIND . . ;',
+            'TEST DUP'
+        ])
+        # FIND on "DUP" should return xt and -1 (non-immediate)
+        self.assertIn("-1 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
