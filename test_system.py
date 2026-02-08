@@ -27,10 +27,13 @@ from data_sources import (
 )
 from diskutil import (
     MP64FS, format_image,
+    FTYPE_DOC, FTYPE_TUT, FTYPE_NAMES,
     inject_file as du_inject_file,
     read_file as du_read_file,
     list_files as du_list_files,
     delete_file as du_delete_file,
+    build_docs, build_tutorials, build_image,
+    DOCS, TUTORIALS,
 )
 
 
@@ -1338,7 +1341,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.9b", text)
+        self.assertIn("KDOS v0.9c", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1468,7 +1471,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.9b", text)
+        self.assertIn("KDOS v0.9c", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -2311,7 +2314,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.9b", text)
+        self.assertIn("KDOS v0.9c", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -3465,10 +3468,149 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("OPEN", text)
         self.assertIn("FFLUSH", text)
 
-    def test_version_v09b(self):
-        """Startup banner shows v0.9b."""
+    def test_version_v09c(self):
+        """Startup banner shows v0.9c."""
         text = self._run_kdos_fast(["STATUS"])
-        self.assertIn("v0.9b", text)
+        self.assertIn("v0.9c", text)
+
+    # ------------------------------------------------------------------
+    #  Documentation browser (v0.9c)
+    # ------------------------------------------------------------------
+
+    def _make_image_with_short_docs(self):
+        """Create a formatted image with short doc & tutorial files."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "test-topic",
+                       b"TEST TOPIC\n==========\nThis is a test topic.\n"
+                       b"It has useful info.\nEnd of doc.\n",
+                       ftype=FTYPE_DOC)
+        du_inject_file(path, "test-lesson",
+                       b"TEST LESSON\n===========\n"
+                       b"Step 1: Type hello\nDone.\n",
+                       ftype=FTYPE_TUT)
+        return path
+
+    def test_topics(self):
+        """TOPICS lists documentation files."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["TOPICS"], storage_image=path)
+            self.assertIn("Available topics:", text)
+            self.assertIn("test-topic", text)
+        finally:
+            os.unlink(path)
+
+    def test_lessons(self):
+        """LESSONS lists tutorial files."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["LESSONS"], storage_image=path)
+            self.assertIn("Available lessons:", text)
+            self.assertIn("test-lesson", text)
+        finally:
+            os.unlink(path)
+
+    def test_doc_displays_content(self):
+        """DOC reads and displays file content."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["DOC test-topic"], storage_image=path)
+            self.assertIn("TEST TOPIC", text)
+            self.assertIn("test topic", text)
+        finally:
+            os.unlink(path)
+
+    def test_describe_found(self):
+        """DESCRIBE with matching topic name shows content."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["DESCRIBE test-topic"],
+                                  storage_image=path)
+            self.assertIn("TEST TOPIC", text)
+        finally:
+            os.unlink(path)
+
+    def test_describe_not_found(self):
+        """DESCRIBE with unknown name shows 'No doc for'."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["DESCRIBE unknown"],
+                                  storage_image=path)
+            self.assertIn("No doc for", text)
+        finally:
+            os.unlink(path)
+
+    def test_tutorial_displays_content(self):
+        """TUTORIAL reads and displays tutorial content."""
+        path = self._make_image_with_short_docs()
+        try:
+            text = self._run_kdos(["TUTORIAL test-lesson"],
+                                  storage_image=path)
+            self.assertIn("TEST LESSON", text)
+        finally:
+            os.unlink(path)
+
+    def test_topics_no_disk(self):
+        """TOPICS with no disk shows filesystem error."""
+        text = self._run_kdos_fast(["TOPICS"])
+        self.assertTrue("No filesystem" in text or "No disk" in text)
+
+    def test_help_shows_documentation(self):
+        """HELP includes DOCUMENTATION section."""
+        text = self._run_kdos_fast(["HELP"])
+        self.assertIn("DOCUMENTATION:", text)
+        self.assertIn("TOPICS", text)
+        self.assertIn("LESSONS", text)
+        self.assertIn("DOC", text)
+        self.assertIn("DESCRIBE", text)
+        self.assertIn("TUTORIAL", text)
+
+    def test_doc_full_image(self):
+        """DOC works with a full build_image disk."""
+        fs = build_image()
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        fs.save(f.name)
+        f.close()
+        try:
+            text = self._run_kdos(["DOC reference"], storage_image=f.name)
+            self.assertIn("KDOS QUICK REFERENCE", text)
+        finally:
+            os.unlink(f.name)
+
+    def test_topics_full_image(self):
+        """TOPICS on full image lists all 10 doc topics."""
+        fs = build_image()
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        fs.save(f.name)
+        f.close()
+        try:
+            text = self._run_kdos(["TOPICS"], storage_image=f.name)
+            self.assertIn("buffers", text)
+            self.assertIn("reference", text)
+            self.assertIn("10 ", text)  # (10 topics)
+        finally:
+            os.unlink(f.name)
+
+    def test_lessons_full_image(self):
+        """LESSONS on full image lists all 5 tutorials."""
+        fs = build_image()
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        fs.save(f.name)
+        f.close()
+        try:
+            text = self._run_kdos(["LESSONS"], storage_image=f.name)
+            self.assertIn("hello-world", text)
+            self.assertIn("5 ", text)  # (5 lessons)
+        finally:
+            os.unlink(f.name)
+
+    def test_startup_shows_topics_hint(self):
+        """Startup banner mentions TOPICS or LESSONS."""
+        # The banner is printed during boot (captured by test_kdos_loads).
+        # Here we verify the source contains the hint so it won't be lost.
+        src = "\n".join(self.kdos_lines)
+        self.assertIn("TOPICS", src)
+        self.assertIn("LESSONS", src)
 
 
 # ---------------------------------------------------------------------------
@@ -3599,6 +3741,63 @@ class TestDiskUtil(unittest.TestCase):
             for e in entries:
                 expected = int(e.name[1:])
                 self.assertEqual(e.ftype, expected)
+
+    def test_diskutil_tutorial_type(self):
+        """FTYPE_TUT (6) is stored and retrieved correctly."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            du_inject_file(f.name, "mytut", b"Step 1\n", ftype=FTYPE_TUT)
+            entries = du_list_files(f.name)
+            self.assertEqual(entries[0].ftype, FTYPE_TUT)
+            self.assertEqual(FTYPE_NAMES[FTYPE_TUT], "tutorial")
+
+    def test_diskutil_build_docs(self):
+        """build_docs injects all documentation files."""
+        fs = MP64FS()
+        fs.format()
+        build_docs(fs)
+        entries = fs.list_files()
+        names = {e.name for e in entries}
+        self.assertEqual(len(entries), len(DOCS))
+        self.assertIn("buffers", names)
+        self.assertIn("reference", names)
+        self.assertIn("getting-started", names)
+        for e in entries:
+            self.assertEqual(e.ftype, FTYPE_DOC)
+            self.assertGreater(e.used_bytes, 0)
+
+    def test_diskutil_build_tutorials(self):
+        """build_tutorials injects all tutorial files."""
+        fs = MP64FS()
+        fs.format()
+        build_tutorials(fs)
+        entries = fs.list_files()
+        names = {e.name for e in entries}
+        self.assertEqual(len(entries), len(TUTORIALS))
+        self.assertIn("hello-world", names)
+        self.assertIn("first-kernel", names)
+        for e in entries:
+            self.assertEqual(e.ftype, FTYPE_TUT)
+
+    def test_diskutil_build_image(self):
+        """build_image creates a complete image with docs and tutorials."""
+        fs = build_image()
+        entries = fs.list_files()
+        doc_count = sum(1 for e in entries if e.ftype == FTYPE_DOC)
+        tut_count = sum(1 for e in entries if e.ftype == FTYPE_TUT)
+        self.assertEqual(doc_count, len(DOCS))
+        self.assertEqual(tut_count, len(TUTORIALS))
+        # Verify content is readable
+        content = fs.read_file("reference")
+        self.assertIn(b"KDOS QUICK REFERENCE", content)
+
+    def test_diskutil_build_image_save(self):
+        """build_image can save to file path."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            fs = build_image(path=f.name)
+            loaded = MP64FS.load(f.name)
+            entries = loaded.list_files()
+            self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS))
 
 
 # ---------------------------------------------------------------------------

@@ -68,9 +68,12 @@ FTYPE_FORTH = 3
 FTYPE_DOC   = 4
 FTYPE_DATA  = 5
 
+FTYPE_TUT   = 6
+
 FTYPE_NAMES = {
     FTYPE_FREE: "free", FTYPE_RAW: "raw", FTYPE_TEXT: "text",
     FTYPE_FORTH: "forth", FTYPE_DOC: "doc", FTYPE_DATA: "data",
+    FTYPE_TUT: "tutorial",
 }
 
 
@@ -419,3 +422,493 @@ def delete_file(path: str | Path, name: str):
     fs = MP64FS.load(path)
     fs.delete_file(name)
     fs.save(path)
+
+
+# ── Documentation content ──────────────────────────────────────────────
+
+DOCS = {
+    "getting-started": """\
+GETTING STARTED WITH KDOS
+=========================
+
+KDOS is the Kernel Dashboard OS for Megapad-64.
+It boots from ROM and provides an interactive Forth
+environment with buffers, kernels, pipelines, and
+a tile-engine accelerated SIMD compute surface.
+
+FIRST STEPS
+  Type HELP for a command reference.
+  Type STATUS for a quick system overview.
+  Type DASHBOARD for a full system report.
+  Type SCREENS for the interactive TUI.
+
+CREATING A BUFFER
+  0 1 256 BUFFER mydata
+  42 mydata B.FILL
+  mydata B.PREVIEW
+
+RUNNING A KERNEL
+  mydata kzero           Zero the buffer
+  99 mydata kfill        Fill with 99
+  mydata ksum .          Sum all bytes
+
+STORAGE
+  If a disk is attached, KDOS loads MP64FS
+  automatically. Use DIR to list files,
+  MKFILE to create, and OPEN to access them.
+""",
+
+    "buffers": """\
+BUFFERS
+=======
+
+Buffers are typed, tile-aligned data regions.
+Each buffer has a type, element width, and length.
+
+CREATING BUFFERS
+  0 1 256 BUFFER mydata    raw, 1-byte, 256 elts
+  1 2 128 BUFFER rec       record, 2-byte, 128
+  2 4  64 BUFFER tiles     tile, 4-byte, 64
+
+BUFFER OPERATIONS
+  byte buf B.FILL          Fill with byte value
+  buf B.ZERO               Zero entire buffer
+  buf B.PREVIEW            Hex dump first tile
+  buf B.INFO               Show descriptor
+
+TILE-ENGINE REDUCTIONS (SIMD)
+  buf B.SUM                Sum all elements
+  buf B.MIN                Minimum element
+  buf B.MAX                Maximum element
+
+ELEMENT-WISE OPS
+  a b c B.ADD              c = a + b
+  a b c B.SUB              c = a - b
+  n buf B.SCALE            Multiply each by n
+
+DISK PERSISTENCE
+  buf sec B.SAVE           Save buffer to sector
+  buf sec B.LOAD           Load buffer from sector
+""",
+
+    "kernels": """\
+KERNELS
+=======
+
+Kernels are registered compute operations with
+metadata describing inputs, outputs, and footprint.
+
+REGISTRATION
+  1 1 2 0 KERNEL myk    1 in, 1 out, 2 foot, CPU
+  desc K.INFO            Show kernel descriptor
+  KERNELS                List all registered
+
+SAMPLE KERNELS
+  buf kzero              Zero a buffer
+  byte buf kfill         Fill with byte
+  a b c kadd             Add two buffers -> c
+  buf ksum               Sum -> stack
+  buf kstats             Sum, min, max -> stack
+  n buf kscale           Scale by n
+  n buf kthresh          Threshold filter
+
+ADVANCED KERNELS
+  lo hi buf kclamp       Clamp to [lo,hi]
+  w buf kavg             Moving average
+  buf khistogram         256-bin histogram
+  buf knorm              Normalize to 0-255
+  th src dst kpeak       Peak detection
+  buf krms-buf           RMS value
+  a b kcorrelate         Dot product
+""",
+
+    "pipelines": """\
+PIPELINES
+=========
+
+Pipelines chain multiple kernel steps into a
+single executable sequence.
+
+CREATING A PIPELINE
+  3 PIPELINE mypipe      3-step capacity
+
+BUILDING
+  ' kzero mypipe P.ADD   Append step
+  ' kfill mypipe P.ADD   Append another
+  mypipe P.INFO          Show pipeline info
+
+RUNNING
+  mypipe P.RUN           Execute all steps
+  mypipe P.BENCH         Time each step
+
+MANAGEMENT
+  mypipe P.CLEAR         Reset pipeline
+  PIPES                  List all pipelines
+""",
+
+    "storage": """\
+STORAGE & MP64FS
+================
+
+KDOS supports persistent storage via the MP64FS
+file system on a 1 MiB virtual disk.
+
+DISK BASICS
+  DISK?                  Check if disk is attached
+  DISK-INFO              Print storage status
+
+MP64FS FILE SYSTEM
+  FORMAT                 Format disk with MP64FS
+  FS-LOAD                Load FS from disk
+  FS-SYNC                Write changes back
+  DIR                    List all files
+  CATALOG                Detailed listing
+
+FILE OPERATIONS
+  8 2 MKFILE readme      Create: 8 secs, type text
+  RMFILE readme           Delete file
+  OPEN readme             Open -> file descriptor
+
+FILE I/O
+  addr len fd FWRITE     Write bytes
+  addr len fd FREAD      Read bytes -> actual
+  pos fd FSEEK           Set cursor position
+  fd FREWIND             Reset cursor to 0
+  fd FFLUSH              Flush metadata to disk
+
+DISK LAYOUT
+  Sector 0     Superblock (magic MP64)
+  Sector 1     Allocation bitmap
+  Sectors 2-5  Directory (64 entries)
+  Sectors 6+   Data area (~1 MB usable)
+""",
+
+    "scheduler": """\
+SCHEDULER & TASKS
+=================
+
+KDOS provides cooperative multitasking with
+optional timer-assisted preemption.
+
+CREATING TASKS
+  ' myword 0 TASK mytask   Create (xt, priority)
+  xt SPAWN                  Spawn anonymous task
+  xt BG                     Spawn + schedule
+
+RUNNING
+  SCHEDULE                  Run all ready tasks
+  YIELD                     Cooperative yield point
+
+MANAGEMENT
+  tdesc KILL                Cancel a task
+  tdesc RESTART             Reset done -> ready
+  TASKS                     List all tasks
+
+PREEMPTION
+  PREEMPT-ON                Enable timer preemption
+  PREEMPT-OFF               Disable preemption
+
+The scheduler round-robins among READY tasks,
+respecting priority levels.
+""",
+
+    "screens": """\
+INTERACTIVE TUI (SCREENS)
+=========================
+
+Type SCREENS to enter the interactive terminal UI.
+
+SCREEN LIST
+  [1] Home     System overview
+  [2] Bufs     Buffer listing
+  [3] Kern     Kernel listing
+  [4] Pipe     Pipeline listing
+  [5] Task     Task listing
+  [6] Help     Quick reference card
+  [7] Docs     Documentation browser
+
+CONTROLS
+  1-7            Switch to screen
+  r              Refresh current screen
+  q              Quit back to REPL
+
+Each screen shows live system state and updates
+when you press 'r' to refresh.
+""",
+
+    "data-ports": """\
+DATA PORTS
+==========
+
+Data ports bind NIC network sources to buffers
+for external data ingestion.
+
+BINDING
+  buf id PORT!             Bind source id to buffer
+  id UNPORT                Unbind source
+
+RECEIVING DATA
+  POLL                     Receive & route one frame
+  n INGEST                 Receive n frames
+  NET-RX?                  Is a frame waiting?
+
+MONITORING
+  PORTS                    List port bindings
+  .FRAME                   Show last frame header
+
+FRAME PROTOCOL (6-byte header + payload)
+  +0  u8  SRC_ID           Source identifier
+  +1  u8  DTYPE            Data type
+  +2  u16 SEQ              Sequence number
+  +4  u16 LEN              Payload length
+""",
+
+    "tile-engine": """\
+TILE ENGINE
+===========
+
+The Megapad-64 tile engine is a SIMD compute
+surface with 64-byte tiles.
+
+TILE PROPERTIES
+  64 bytes per tile
+  1/2/4/8 byte element widths
+  Hardware ALU, multiply, reduction
+
+TILE OPERATIONS (via buffers)
+  buf B.SUM     Sum reduction (tile engine)
+  buf B.MIN     Min reduction
+  buf B.MAX     Max reduction
+  a b c B.ADD   Element-wise addition
+  a b c B.SUB   Element-wise subtraction
+  n buf B.SCALE Scalar multiply
+
+The tile engine operates on tile-aligned data
+and provides hardware-accelerated SIMD operations
+for buffer processing.
+
+MEX CSR INTERFACE
+  Residency: hot / pinned / evictable
+  Operations via memory-mapped control registers
+""",
+
+    "reference": """\
+KDOS QUICK REFERENCE
+====================
+
+STACK NOTATION
+  ( before -- after )    Stack effect
+  n, u, addr, flag      Common types
+
+ARITHMETIC
+  + - * / MOD            Basic math
+  ABS NEGATE MIN MAX     Utilities
+  2* CELLS CELL+         Scaling
+
+LOGIC
+  AND OR XOR INVERT      Bitwise ops
+  = <> < > 0= 0> >= <=  Comparisons
+
+MEMORY
+  @ ! C@ C! W@ W! L@ L!  Fetch/store
+  +! CMOVE FILL           Modify
+
+CONTROL
+  IF ELSE THEN            Conditional
+  DO LOOP +LOOP I J       Counted loop
+  BEGIN UNTIL WHILE REPEAT Indefinite loop
+  EXIT                     Return from word
+
+DEFINING
+  : name ... ;            Define word
+  VARIABLE name           Create variable
+  CONSTANT name           Create constant
+  CREATE name             Create entry
+
+SEE ALSO
+  HELP                    Full command listing
+  TOPICS                  List documentation
+  LESSONS                 List tutorials
+  DESCRIBE word           Detailed word help
+""",
+}
+
+TUTORIALS = {
+    "hello-world": """\
+TUTORIAL: HELLO WORLD
+=====================
+
+Welcome to your first KDOS tutorial!
+
+STEP 1: Print a message
+  Type: ." Hello, Megapad!" CR
+
+STEP 2: Define a word
+  Type: : greet ." Hello from KDOS!" CR ;
+  Then: greet
+
+STEP 3: Use the stack
+  Type: 10 20 + .
+  Result: 30
+
+STEP 4: Create a variable
+  Type: VARIABLE myvar
+  Type: 42 myvar !
+  Type: myvar @ .
+  Result: 42
+
+STEP 5: Create a buffer
+  Type: 0 1 64 BUFFER mybuf
+  Type: 65 mybuf B.FILL
+  Type: mybuf B.PREVIEW
+
+Congratulations! You've learned the basics.
+Type TOPICS to explore more documentation.
+""",
+
+    "first-kernel": """\
+TUTORIAL: YOUR FIRST KERNEL
+============================
+
+Kernels are registered compute operations.
+
+STEP 1: Create input and output buffers
+  0 1 64 BUFFER inbuf
+  0 1 64 BUFFER outbuf
+
+STEP 2: Fill input with test data
+  42 inbuf B.FILL
+  inbuf B.PREVIEW
+
+STEP 3: Register a kernel
+  1 1 2 0 KERNEL mykern
+
+STEP 4: Use built-in kernels
+  inbuf kzero              Zero the buffer
+  99 inbuf kfill           Fill with 99
+  inbuf ksum .             Sum all bytes
+
+STEP 5: Check system state
+  KERNELS                  List all kernels
+  BUFFERS                  List all buffers
+
+Kernels track metadata about their inputs,
+outputs, and resource footprint.
+""",
+
+    "build-pipeline": """\
+TUTORIAL: BUILD A PIPELINE
+==========================
+
+Pipelines chain kernel steps together.
+
+STEP 1: Create buffers
+  0 1 64 BUFFER src
+  0 1 64 BUFFER dst
+
+STEP 2: Fill source data
+  42 src B.FILL
+
+STEP 3: Create a pipeline
+  3 PIPELINE mypipe
+
+STEP 4: Add steps
+  ' kzero mypipe P.ADD
+  ' kfill mypipe P.ADD
+
+STEP 5: Run the pipeline
+  mypipe P.RUN
+  mypipe P.INFO
+
+STEP 6: Benchmark it
+  mypipe P.BENCH
+
+Pipelines make complex workflows repeatable
+and benchmarkable.
+""",
+
+    "data-ingest": """\
+TUTORIAL: DATA INGESTION
+========================
+
+Data ports connect NIC sources to buffers.
+
+STEP 1: Create a receive buffer
+  0 1 256 BUFFER rxbuf
+
+STEP 2: Bind a port
+  rxbuf 1 PORT!
+
+STEP 3: Check for data
+  NET-RX?
+  If frames are available:
+  POLL
+  Or receive multiple:
+  10 INGEST
+
+STEP 4: Inspect received data
+  rxbuf B.PREVIEW
+  PORTS
+
+Data flows from the network interface through
+the port binding system into your buffers.
+""",
+
+    "custom-kernel": """\
+TUTORIAL: CUSTOM KERNEL
+=======================
+
+Create your own compute kernel.
+
+STEP 1: Define the operation
+  : my-double ( buf -- )
+    DUP B.DATA SWAP B.LEN
+    OVER + SWAP DO
+      I C@ 2* I C!
+    LOOP ;
+
+STEP 2: Create test data
+  0 1 64 BUFFER testbuf
+  3 testbuf B.FILL
+  testbuf B.PREVIEW
+
+STEP 3: Run your kernel
+  testbuf my-double
+  testbuf B.PREVIEW
+
+STEP 4: Register as a kernel
+  1 1 1 0 KERNEL my-double-k
+
+STEP 5: Benchmark it
+  ' my-double .BENCH
+
+Custom kernels let you extend KDOS with
+your own tile-engine operations.
+""",
+}
+
+
+# ── Doc / Tutorial builder ─────────────────────────────────────────────
+
+def build_docs(fs: MP64FS):
+    """Inject all documentation files into *fs*."""
+    for name, content in DOCS.items():
+        fs.inject_file(name, content.encode("ascii"), ftype=FTYPE_DOC)
+
+
+def build_tutorials(fs: MP64FS):
+    """Inject all tutorial files into *fs*."""
+    for name, content in TUTORIALS.items():
+        fs.inject_file(name, content.encode("ascii"), ftype=FTYPE_TUT)
+
+
+def build_image(path: str | Path | None = None,
+                total_sectors: int = DEFAULT_TOTAL_SECTORS) -> MP64FS:
+    """Create a fully-populated image with docs and tutorials."""
+    fs = MP64FS(total_sectors=total_sectors)
+    fs.format()
+    build_docs(fs)
+    build_tutorials(fs)
+    if path is not None:
+        fs.save(path)
+    return fs

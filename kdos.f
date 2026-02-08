@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.9b — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.9c — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.5+ Forth system.
@@ -12,8 +12,10 @@
 \    5. Sample Kernels  — kzero, kfill, kadd, kscale, kstats, kthresh
 \    6. Pipelines       — kernel pipeline engine
 \    7. Storage         — disk persistence, file abstraction, MP64FS
+\       7.6 MP64FS     — on-disk named file system
+\       7.7 Doc Browser — DOC, DESCRIBE, TUTORIAL, TOPICS, LESSONS
 \    8. Scheduler       — cooperative & preemptive multitasking
-\    9. Screens         — interactive TUI (ANSI terminal)
+\    9. Screens         — interactive TUI (ANSI terminal, 7 screens)
 \   10. Data Ports      — NIC-based external data ingestion
 \   11. Benchmarking    — BENCH for timing via CYCLES
 \   12. Dashboard       — text-mode system overview
@@ -1323,6 +1325,141 @@ VARIABLE OP-SLOT
     FS-SYNC ;
 
 \ =====================================================================
+\  §7.7  Documentation Browser
+\ =====================================================================
+\
+\  Built-in documentation and interactive tutorials stored as MP64FS
+\  files.  DOC pages through a documentation file; TUTORIAL walks
+\  through a lesson; DESCRIBE shows a topic by name.
+\  TOPICS / LESSONS list available content.
+\
+\  File types:
+\    type 4 (doc)      — documentation files
+\    type 6 (tutorial) — interactive tutorials
+
+\ -- Constants --
+4 CONSTANT FTYPE-DOC
+6 CONSTANT FTYPE-TUT
+
+\ -- Read buffer for paging (one sector at a time) --
+CREATE DOC-BUF SECTOR ALLOT
+VARIABLE DOC-LINES              \ newline counter for pagination
+20 CONSTANT PAGE-LINES          \ lines per page before pause
+
+\ .DOC-CHUNK ( addr len -- )  print bytes, pausing every PAGE-LINES
+: .DOC-CHUNK  ( addr len -- )
+    OVER + SWAP DO
+        I C@ DUP 10 = IF
+            DROP CR
+            1 DOC-LINES +!
+            DOC-LINES @ PAGE-LINES >= IF
+                DIM ." --- more ---" RESET-COLOR
+                KEY DROP CR
+                DOC-LINES OFF
+            THEN
+        ELSE
+            EMIT
+        THEN
+    LOOP ;
+
+\ SHOW-FILE ( fdesc -- )  read and display entire file page by page
+: SHOW-FILE  ( fdesc -- )
+    DOC-LINES OFF
+    BEGIN
+        DOC-BUF SECTOR ROT        ( buf len fd )
+        DUP >R FREAD              ( actual  R: fd )
+        DUP 0> WHILE
+        DOC-BUF SWAP .DOC-CHUNK
+        R>
+    REPEAT
+    DROP R> DROP ;
+
+\ TOPICS ( -- )  list available documentation files (type=4)
+: TOPICS  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    ." Available topics:" CR
+    0                                        \ count
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            I DIRENT DE.TYPE FTYPE-DOC = IF
+                1+
+                ."   " I DIRENT .ZSTR CR
+            THEN
+        THEN
+    LOOP
+    DUP 0= IF ."   (none)" CR THEN
+    ." (" . ." topics)" CR ;
+
+\ LESSONS ( -- )  list available tutorials (type=6)
+: LESSONS  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    ." Available lessons:" CR
+    0
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            I DIRENT DE.TYPE FTYPE-TUT = IF
+                1+
+                ."   " I DIRENT .ZSTR CR
+            THEN
+        THEN
+    LOOP
+    DUP 0= IF ."   (none)" CR THEN
+    ." (" . ." lessons)" CR ;
+
+\ DOC ( "name" -- )  page through a documentation file
+: DOC  ( "name" -- )
+    OPEN DUP 0= IF EXIT THEN
+    CR SHOW-FILE CR ;
+
+\ TUTORIAL ( "name" -- )  walk through a tutorial file
+: TUTORIAL  ( "name" -- )
+    OPEN DUP 0= IF EXIT THEN
+    CR SHOW-FILE CR ;
+
+\ OPEN-BY-SLOT ( slot -- fdesc | 0 )  open a file by directory slot
+\   Like OPEN but takes a slot index instead of parsing a name.
+: OPEN-BY-SLOT  ( slot -- fdesc | 0 )
+    DUP DIRENT C@ 0= IF DROP 0 EXIT THEN
+    HERE SWAP                             ( here slot )
+    DUP DIRENT DE.SEC   ,                 \ +0  start_sector
+    DUP DIRENT DE.COUNT ,                 \ +8  max_sectors
+    DUP DIRENT DE.USED  ,                 \ +16 used_bytes
+    0 ,                                    \ +24 cursor = 0
+    ,                                      \ +32 dir_slot (consumes slot)
+    ;
+
+\ DESCRIBE ( "word" -- )  look up a word in the documentation
+\   Tries to open a doc file matching the name.  If no exact match,
+\   suggests using TOPICS.
+VARIABLE DS-SLOT
+: DESCRIBE  ( "word" -- )
+    PARSE-NAME PN-LEN @ 0= IF ." Usage: DESCRIBE <word>" CR EXIT THEN
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    \ Search for a doc file whose name matches NAMEBUF
+    -1 DS-SLOT !
+    FS-MAX-FILES 0 DO
+        DS-SLOT @ -1 = IF
+            I DIRENT C@ 0<> IF
+                I DIRENT DE.TYPE FTYPE-DOC = IF
+                    I DIRENT NAMEBUF 16 SAMESTR? IF
+                        I DS-SLOT !
+                    THEN
+                THEN
+            THEN
+        THEN
+    LOOP
+    DS-SLOT @ -1 = IF
+        ." No doc for: " NAMEBUF .ZSTR CR
+        ." Use TOPICS to list available documentation." CR
+        EXIT
+    THEN
+    DS-SLOT @ OPEN-BY-SLOT DUP 0= IF EXIT THEN
+    CR SHOW-FILE CR ;
+
+\ =====================================================================
 \  §8  Scheduler & Tasks
 \ =====================================================================
 \
@@ -1622,7 +1759,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.9b "
+    ."  KDOS v0.9c "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -1630,13 +1767,14 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     DUP 3 = IF REVERSE THEN ." [3]Kern " RESET-COLOR
     DUP 4 = IF REVERSE THEN ." [4]Pipe " RESET-COLOR
     DUP 5 = IF REVERSE THEN ." [5]Task " RESET-COLOR
-    6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
+    DUP 6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
+    7 = IF REVERSE THEN ." [7]Docs " RESET-COLOR
     CR HBAR ;
 
 \ -- Screen footer --
 : SCREEN-FOOTER  ( -- )
     DIM
-    ."  [1-6] Switch screen  [r] Refresh  [q] Quit"
+    ."  [1-7] Switch screen  [r] Refresh  [q] Quit"
     RESET-COLOR CR ;
 
 \ ---- Screen 1: Home ----
@@ -1761,6 +1899,48 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     ."   DASHBOARD / STATUS    System views" CR
     ."   ' w BENCH / .BENCH   Benchmark" CR ;
 
+\ ---- Screen 7: Documentation ----
+: SCR-DOCS  ( -- )
+    .LABEL ."  Documentation" ./LABEL CR CR
+    BOLD ."  Topics:" RESET-COLOR CR
+    FS-OK @ IF
+        0
+        FS-MAX-FILES 0 DO
+            I DIRENT C@ 0<> IF
+                I DIRENT DE.TYPE FTYPE-DOC = IF
+                    1+
+                    ."    " I DIRENT .ZSTR CR
+                THEN
+            THEN
+        LOOP
+        DUP 0= IF ."    (none)" CR THEN DROP
+    ELSE
+        ."    (no filesystem loaded)" CR
+    THEN
+    CR
+    BOLD ."  Tutorials:" RESET-COLOR CR
+    FS-OK @ IF
+        0
+        FS-MAX-FILES 0 DO
+            I DIRENT C@ 0<> IF
+                I DIRENT DE.TYPE FTYPE-TUT = IF
+                    1+
+                    ."    " I DIRENT .ZSTR CR
+                THEN
+            THEN
+        LOOP
+        DUP 0= IF ."    (none)" CR THEN DROP
+    ELSE
+        ."    (no filesystem loaded)" CR
+    THEN
+    CR
+    BOLD ."  Commands:" RESET-COLOR CR
+    ."    DOC <topic>        Read documentation" CR
+    ."    DESCRIBE <topic>   Show topic by name" CR
+    ."    TUTORIAL <name>    Interactive lesson" CR
+    ."    TOPICS             List all topics" CR
+    ."    LESSONS            List all lessons" CR ;
+
 \ -- Screen dispatch --
 : RENDER-SCREEN  ( -- )
     PAGE SCREEN-HEADER
@@ -1771,8 +1951,9 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     DUP 4 = IF DROP SCR-PIPES   ELSE
     DUP 5 = IF DROP SCR-TASKS   ELSE
     DUP 6 = IF DROP SCR-HELP    ELSE
+    DUP 7 = IF DROP SCR-DOCS    ELSE
         DROP SCR-HOME
-    THEN THEN THEN THEN THEN THEN
+    THEN THEN THEN THEN THEN THEN THEN
     CR SCREEN-FOOTER ;
 
 \ -- Event loop: poll KEY?, dispatch on keypress --
@@ -1783,10 +1964,11 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     DUP 52 = IF DROP 4 SCREEN-ID ! RENDER-SCREEN ELSE  \ '4'
     DUP 53 = IF DROP 5 SCREEN-ID ! RENDER-SCREEN ELSE  \ '5'
     DUP 54 = IF DROP 6 SCREEN-ID ! RENDER-SCREEN ELSE  \ '6'
+    DUP 55 = IF DROP 7 SCREEN-ID ! RENDER-SCREEN ELSE  \ '7'
     DUP 113 = IF DROP 0 SCREEN-RUN !               ELSE  \ 'q'
     DUP 114 = IF DROP RENDER-SCREEN                ELSE  \ 'r'
         DROP
-    THEN THEN THEN THEN THEN THEN THEN THEN ;
+    THEN THEN THEN THEN THEN THEN THEN THEN THEN ;
 
 \ -- Main TUI entry point --
 : SCREENS  ( -- )
@@ -1941,7 +2123,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.9b — Kernel Dashboard OS" CR
+    ."  KDOS v0.9c — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -1955,7 +2137,7 @@ VARIABLE BENCH-T0
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS v0.9b | bufs=" BUF-COUNT @ .
+    ." KDOS v0.9c | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
@@ -1970,7 +2152,7 @@ VARIABLE BENCH-T0
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.9b — Quick Reference" CR
+    ."  KDOS v0.9c — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -2062,12 +2244,18 @@ VARIABLE BENCH-T0
     ."    PORTS                  List port bindings" CR
     ."    .FRAME                 Show last frame header" CR
     CR ."  SCREENS & TOOLS:" CR
-    ."    SCREENS                Interactive TUI (1-6, q, r)" CR
+    ."    SCREENS                Interactive TUI (1-7, q, r)" CR
     ."    DASHBOARD              Full system overview" CR
     ."    STATUS                 Quick status line" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
     ."    ' word .BENCH          Time word and print cycles" CR
     ."    HELP                   This help" CR
+    CR ."  DOCUMENTATION:" CR
+    ."    TOPICS                 List available doc topics" CR
+    ."    LESSONS                List available tutorials" CR
+    ."    DOC <topic>            Page through documentation" CR
+    ."    DESCRIBE <topic>       Show topic by name" CR
+    ."    TUTORIAL <name>        Interactive lesson" CR
     CR HRULE ;
 
 \ =====================================================================
@@ -2075,9 +2263,10 @@ VARIABLE BENCH-T0
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.9b — Kernel Dashboard OS" CR
+."  KDOS v0.9c — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR
+." Type TOPICS or LESSONS for documentation." CR
 DISK? IF FS-LOAD THEN
 CR

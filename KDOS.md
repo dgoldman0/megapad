@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (292 tests)
+# Full test suite (309 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -88,7 +88,7 @@ PORTS                          \ List all port bindings
 
 ## Implementation Status
 
-### ✅ Completed (v0.9b)
+### ✅ Completed (v0.9c)
 
 **BIOS v0.5** (155 words, ~5200 lines):
 - Complete Forth system with colon compiler, conditionals, loops
@@ -102,7 +102,7 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.9b** (~2080 lines Forth):
+**KDOS v0.9c** (~2273 lines Forth):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -134,11 +134,17 @@ PORTS                          \ List all port bindings
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
 - **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
 - **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
+- **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, DESCRIBE (word lookup)
+- **Doc file display**: .DOC-CHUNK with 20-line pagination and "--- more ---" prompt
+- **OPEN-BY-SLOT**: Open file by directory slot index for DESCRIBE lookup
+- **SCR-DOCS**: Screen 7 — documentation browser listing topics and tutorials
+- **Doc builder**: diskutil.py build_docs(), build_tutorials(), build_image()
+- **Pre-built content**: 10 documentation topics + 5 interactive tutorials
 
-**Tests**: 292 passing
-- 195+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard)
+**Tests**: 309 passing
+- 208 KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser)
 - 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
-- 12 diskutil tests (pure Python MP64FS image manipulation)
+- 17 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial building)
 - 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
@@ -264,37 +270,33 @@ KDOS rewrite — new Forth words:
 - FWRITE / FREAD with proper cursor advancement
 - FFLUSH: persist descriptor metadata
 
-**v0.9c — Documentation & Tutorial Browser** (planned)
+**v0.9c — Documentation & Tutorial Browser** (✅ complete)
 
 Built-in documentation and interactive tutorials stored as MP64FS files.
 
-Documentation format (lightweight markup):
-```
-#TITLE Buffer Operations
-#SECTION Creating Buffers
-  0 1 256 BUFFER mydata
-#EXAMPLE
-  42 mydata B.FILL
-  mydata B.PREVIEW
-#END
-```
-
-New Forth words:
-- `DOC` ( "topic" -- ): page through documentation file
-- `DESCRIBE` ( "word" -- ): detailed help for one word + example
-- `TUTORIAL` ( "name" -- ): interactive step-by-step lesson
-- `TOPICS` / `LESSONS`: list available docs and tutorials
-- SCR-DOCS: new screen 7 (documentation browser)
+New Forth words (§7.7, ~120 lines):
+- `FTYPE-DOC` / `FTYPE-TUT`: file type constants (4, 6)
+- `DOC` ( "topic" -- ): open and display documentation file with pagination
+- `TUTORIAL` ( "name" -- ): open and display tutorial file
+- `DESCRIBE` ( "word" -- ): search directory for matching doc, display or suggest TOPICS
+- `TOPICS` / `LESSONS`: list all doc/tutorial files from FS directory
+- `OPEN-BY-SLOT` ( slot -- fdesc | 0 ): open file by directory slot index
+- `SHOW-FILE` ( fdesc -- ): read and display entire file via FREAD
+- `.DOC-CHUNK` ( addr len -- ): paginated display (20-line pages, KEY to continue)
+- SCR-DOCS: screen 7 — documentation browser listing topics and tutorials
 
 Python-side doc builder (diskutil.py extensions):
-- `build_docs()`: generate .doc files from structured source
-- `build_tutorials()`: generate .tut files
-- `build_image()`: format + inject all docs + tutorials
+- `FTYPE_TUT = 6`: new tutorial file type
+- `DOCS` dict: 10 documentation topics with structured content
+- `TUTORIALS` dict: 5 interactive tutorials with step-by-step content
+- `build_docs(fs)`: generate .doc files from DOCS dict
+- `build_tutorials(fs)`: generate .tut files from TUTORIALS dict
+- `build_image(path, total_sectors)`: format + inject all docs + tutorials
 
 Pre-built content:
-- ~10 documentation files (buffers, kernels, pipelines, storage,
-  scheduler, screens, data-ports, tile-engine, getting-started, reference)
-- ~5 tutorials (hello-world, first-kernel, build-pipeline,
+- 10 documentation files (getting-started, buffers, kernels, pipelines, storage,
+  scheduler, screens, data-ports, tile-engine, reference)
+- 5 tutorials (hello-world, first-kernel, build-pipeline,
   data-ingest, custom-kernel)
 
 **v0.9d — REPL Improvements & Error Handling** (planned)
