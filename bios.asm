@@ -103,6 +103,22 @@ boot:
     ldi64 r11, do_print_ok
     call.l r11
 
+    ; ---- Auto-boot from disk if present ----
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r1, r11
+    andi r1, 0x80
+    breq no_autoboot
+    ; EVALUATE "FSLOAD autoexec.f"
+    ldi64 r9, str_autoboot_cmd
+    ldi r12, 17               ; strlen("FSLOAD autoexec.f")
+    subi r14, 8
+    str r14, r9                ; push addr
+    subi r14, 8
+    str r14, r12               ; push len
+    ldi64 r11, w_evaluate
+    call.l r11
+no_autoboot:
+
     ; Fall into the outer interpreter
     ldi64 r11, forth_quit
     call.l r11
@@ -3670,19 +3686,41 @@ w_paren_done:
     str r11, r13              ; update >IN past the )
     ret.l
 
-; ." (IMMEDIATE) — compile inline string and print call
-;   At compile time, reads chars until " and embeds them.
-;   Compiles: ldi64 r10, <string>; ldi64 r11, print_str; call.l r11; lbr <past>
-;   <string data> <null>
-;   <past:> ...
+; ." (IMMEDIATE) — print or compile inline string
+;   Interpret mode: reads chars until " and prints them immediately.
+;   Compile mode:   embeds the string and compiles a call to print it.
+;   Compiles: ldi64 r11, dotquote_runtime; call.l r11; <bytes> <null>
 w_dotquote:
-    ; We compile a call to an inline string printer.
-    ; Strategy: compile a forward branch over the string data,
-    ; then compile a call to print_str that references the string.
-    ; Actually simpler: compile a call to our helper dotquote_runtime
-    ; which pops the return address (= string addr), prints until null,
-    ; then jumps past the string.
-    ;
+    ; Check STATE — interpret vs compile
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_dotquote_compile
+
+    ; ---- Interpret mode: print chars immediately ----
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; >IN
+    ldi64 r9, tib_buffer
+dq_interp_loop:
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    cmp r13, r7
+    breq dq_interp_done       ; hit EOL without closing quote
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    inc r13
+    cmpi r1, 0x22             ; '"'
+    breq dq_interp_done
+    call.l r4                 ; emit_char
+    br dq_interp_loop
+dq_interp_done:
+    ldi64 r11, var_to_in
+    str r11, r13
+    ret.l
+
+w_dotquote_compile:
+    ; ---- Compile mode (original behaviour) ----
     ; Emits: ldi64 r11, dotquote_runtime; call.l r11; <string bytes> <null>
     ldi64 r1, dotquote_runtime
     ldi64 r11, compile_call
@@ -4001,6 +4039,365 @@ w_disk_write:
     ldi64 r11, 0xFFFF_FF00_0000_0200
     ldi r1, 0x02
     st.b r11, r1
+    ret.l
+
+; =====================================================================
+;  FSLOAD — load and evaluate a file from MP64FS disk
+; =====================================================================
+
+; disk_read_sectors: internal helper — DMA read from disk.
+;   R1 = start sector (32-bit), R9 = DMA dest addr, R12 = sector count
+;   Clobbers: R7, R11
+disk_read_sectors:
+    ; --- Set sector number (4 bytes LE) ---
+    ldi64 r11, 0xFFFF_FF00_0000_0202
+    mov r7, r1
+    st.b r11, r7
+    inc r11
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    ; --- Set DMA address (8 bytes LE, upper 4 = 0) ---
+    ldi64 r11, 0xFFFF_FF00_0000_0206
+    mov r7, r9
+    st.b r11, r7
+    inc r11
+    mov r7, r9
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r9
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r9
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    ldi r7, 0
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    ; --- Set sector count (1 byte) ---
+    ldi64 r11, 0xFFFF_FF00_0000_020E
+    st.b r11, r12
+    ; --- Issue READ command ---
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r7, 0x01
+    st.b r11, r7
+    ret.l
+
+; FSLOAD ( "name" -- )  Load a file from MP64FS and EVALUATE its contents.
+;
+; Parses the next word as a filename, reads the MP64FS directory from
+; the attached storage device, locates the file, reads its data sectors
+; into a RAM buffer at R2/2, then walks through the content line-by-line
+; calling EVALUATE on each line.
+;
+; Buffer location: R2/2 (initial DSP position).  The data stack grows
+; downward from R2/2 and the buffer extends upward, so they do not
+; conflict during normal operation.
+;
+; RSP frame during evaluate loop:
+;   [RSP+0]  cur_ptr     — pointer to next unprocessed byte
+;   [RSP+8]  remaining   — bytes left to process
+;   [RSP+16] caller return address (from trampoline call.l)
+
+w_fsload:
+    ; ---- Parse filename from input stream ----
+    ldi64 r11, parse_word
+    call.l r11
+    ; R9 = word address (in TIB), R12 = length
+    cmpi r12, 0
+    lbreq w_fsload_no_name
+
+    ; Save parsed name on RSP  [RSP+0]=name_len, [RSP+8]=name_addr
+    subi r15, 8
+    str r15, r9               ; name_addr
+    subi r15, 8
+    str r15, r12              ; name_len
+
+    ; ---- Check disk present ----
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r1, r11
+    andi r1, 0x80
+    lbreq w_fsload_no_disk
+
+    ; ---- Read directory sectors 2-5 (2048 bytes) into buffer ----
+    mov r9, r2
+    lsri r9, 1                ; buffer = R2 / 2
+    subi r15, 8
+    str r15, r9               ; [RSP+0]=buf_addr
+    ldi r1, 2                 ; start sector = 2
+    ldi r12, 4                ; 4 sectors
+    ldi64 r11, disk_read_sectors
+    call.l r11
+
+    ; ---- Scan 64 directory entries for name match ----
+    ldn r9, r15               ; buf_addr
+    ldi r0, 0                 ; entry index
+
+w_fsload_scan:
+    cmpi r0, 64
+    lbreq w_fsload_not_found
+
+    ; entry_addr = buf + index * 32
+    mov r13, r0
+    lsli r13, 5               ; * 32
+    add r13, r9               ; R13 = entry address
+
+    ; Skip empty entries (first byte = 0)
+    ld.b r7, r13
+    cmpi r7, 0
+    breq w_fsload_next
+
+    ; Compare parsed name with directory entry name (up to 16 bytes)
+    ; R13 = entry name, name_addr at [RSP+16], name_len at [RSP+8]
+    mov r11, r15
+    addi r11, 8
+    ldn r12, r11              ; name_len
+    addi r11, 8
+    ldn r7, r11               ; name_addr
+    ldi r1, 0                 ; byte index
+w_fsload_cmp:
+    cmp r1, r12
+    breq w_fsload_cmp_tail
+    ; Compare entry_name[i] with parsed_name[i]
+    mov r11, r13
+    add r11, r1
+    ld.b r11, r11             ; entry char
+    mov r10, r7
+    add r10, r1
+    ld.b r10, r10             ; name char
+    cmp r11, r10
+    brne w_fsload_next
+    inc r1
+    br w_fsload_cmp
+
+w_fsload_cmp_tail:
+    ; Matched all name_len bytes — verify remaining entry name bytes are 0
+    cmpi r1, 15
+    brgt w_fsload_found
+    mov r11, r13
+    add r11, r1
+    ld.b r11, r11
+    cmpi r11, 0
+    brne w_fsload_next
+    inc r1
+    br w_fsload_cmp_tail
+
+w_fsload_next:
+    ldn r9, r15               ; reload buf_addr
+    inc r0
+    lbr w_fsload_scan
+
+w_fsload_found:
+    ; R13 = matching directory entry address
+    ; Extract start_sector (u16 LE at +16)
+    mov r11, r13
+    addi r11, 16
+    ld.b r1, r11              ; lo
+    inc r11
+    ld.b r7, r11              ; hi
+    lsli r7, 8
+    or r1, r7                 ; R1 = start_sector
+
+    ; Extract sector_count (u16 LE at +18)
+    inc r11
+    ld.b r12, r11             ; lo
+    inc r11
+    ld.b r7, r11              ; hi
+    lsli r7, 8
+    or r12, r7                ; R12 = sector_count
+
+    ; Extract used_bytes (u32 LE at +20)
+    inc r11
+    ld.b r13, r11             ; byte 0
+    inc r11
+    ld.b r7, r11              ; byte 1
+    lsli r7, 8
+    or r13, r7
+    inc r11
+    ld.b r7, r11              ; byte 2
+    lsli r7, 8
+    lsli r7, 8
+    or r13, r7
+    inc r11
+    ld.b r7, r11              ; byte 3
+    lsli r7, 8
+    lsli r7, 8
+    lsli r7, 8
+    or r13, r7                ; R13 = used_bytes
+
+    ; Clean up name/buf RSP frame (3 slots)
+    addi r15, 24
+
+    ; ---- Read file data into buffer at R2/2 ----
+    ; R1 = start_sector, R12 = sector_count, R13 = used_bytes
+    mov r9, r2
+    lsri r9, 1                ; buffer = R2 / 2
+    ; Save loop state on RSP
+    subi r15, 8
+    str r15, r13              ; [RSP+0] = remaining (used_bytes)
+    subi r15, 8
+    str r15, r9               ; [RSP+0] = cur_ptr (buffer start)
+    ; Do the disk read
+    ldi64 r11, disk_read_sectors
+    call.l r11
+
+    ; ---- Evaluate line by line ----
+w_fsload_line_loop:
+    ; Load state from RSP
+    ldn r9, r15               ; cur_ptr
+    mov r11, r15
+    addi r11, 8
+    ldn r13, r11              ; remaining
+
+    ; Done?
+    cmpi r13, 0
+    lbreq w_fsload_done
+
+    ; Scan for LF (0x0A)
+    ldi r12, 0                ; line length
+w_fsload_find_lf:
+    cmp r12, r13
+    breq w_fsload_last_chunk
+    mov r11, r9
+    add r11, r12
+    ld.b r7, r11
+    cmpi r7, 0x0A
+    breq w_fsload_got_line
+    inc r12
+    br w_fsload_find_lf
+
+w_fsload_last_chunk:
+    ; End of data without trailing LF — treat remainder as last line
+    br w_fsload_eval_line
+
+w_fsload_got_line:
+    ; R12 = line length (not including LF)
+    ; Strip trailing CR if present
+    cmpi r12, 0
+    breq w_fsload_empty_line
+    mov r11, r9
+    add r11, r12
+    dec r11
+    ld.b r7, r11
+    cmpi r7, 0x0D
+    brne w_fsload_eval_line
+    dec r12
+    br w_fsload_eval_line
+
+w_fsload_empty_line:
+    ; Advance past LF, continue
+    inc r9
+    dec r13
+    str r15, r9
+    mov r11, r15
+    addi r11, 8
+    str r11, r13
+    lbr w_fsload_line_loop
+
+w_fsload_eval_line:
+    ; R9 = line start, R12 = line length, R13 = total remaining
+    ; Skip blank lines (length 0)
+    cmpi r12, 0
+    breq w_fsload_advance
+
+    ; Compute updated state BEFORE calling evaluate
+    ; new_cur_ptr = r9 + r12
+    mov r0, r9
+    add r0, r12               ; points to LF (or end)
+    ; new_remaining = r13 - r12
+    mov r7, r13
+    sub r7, r12
+
+    ; Skip past LF if present
+    cmpi r7, 0
+    breq w_fsload_update_state
+    ; There are more bytes — skip the LF
+    inc r0
+    dec r7
+
+w_fsload_update_state:
+    ; Write updated state to RSP
+    str r15, r0               ; new cur_ptr
+    mov r11, r15
+    addi r11, 8
+    str r11, r7               ; new remaining
+
+    ; Push ( addr len ) for EVALUATE
+    subi r14, 8
+    str r14, r9               ; line address
+    subi r14, 8
+    str r14, r12              ; line length
+
+    ; Call EVALUATE
+    ldi64 r11, w_evaluate
+    call.l r11
+
+    lbr w_fsload_line_loop
+
+w_fsload_advance:
+    ; Blank line after CR/LF stripping — advance past LF
+    mov r0, r9
+    add r0, r12
+    mov r7, r13
+    sub r7, r12
+    cmpi r7, 0
+    breq w_fsload_advance_done
+    inc r0
+    dec r7
+w_fsload_advance_done:
+    str r15, r0
+    mov r11, r15
+    addi r11, 8
+    str r11, r7
+    lbr w_fsload_line_loop
+
+w_fsload_done:
+    ; Clean up RSP (cur_ptr + remaining)
+    addi r15, 16
+    ret.l
+
+w_fsload_no_name:
+    ldi64 r10, str_no_name
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_fsload_no_disk:
+    ; Clean up name frame
+    addi r15, 16
+    ldi64 r10, str_fsload_no_disk
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_fsload_not_found:
+    ; Clean up name + buf frame
+    addi r15, 24
+    ; Print the filename
+    ldi64 r10, str_fsload_err
+    ldi64 r11, print_str
+    call.l r11
     ret.l
 
 ; =====================================================================
@@ -7667,12 +8064,21 @@ d_to_number:
     ret.l
 
 ; === QUIT ===
-latest_entry:
 d_quit:
     .dq d_to_number
     .db 4
     .ascii "QUIT"
     ldi64 r11, w_quit
+    call.l r11
+    ret.l
+
+; === FSLOAD ===
+latest_entry:
+d_fsload:
+    .dq d_quit
+    .db 6
+    .ascii "FSLOAD"
+    ldi64 r11, w_fsload
     call.l r11
     ret.l
 
@@ -7733,6 +8139,13 @@ str_ti_acc:
 
 str_no_name:
     .asciiz " name expected\n"
+
+str_fsload_no_disk:
+    .asciiz "FSLOAD: no disk\n"
+str_fsload_err:
+    .asciiz "FSLOAD: not found\n"
+str_autoboot_cmd:
+    .asciiz "FSLOAD autoexec.f"
 
 str_busfault:
     .asciiz "\n*** BUS FAULT @ "
