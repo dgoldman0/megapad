@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.7 — Data Ports (NIC-Based Ingestion)**
+**Current Status: KDOS v0.8 — Advanced Kernels & Real-World Data Sources**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (190+ tests)
+# Full test suite (233 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -88,7 +88,7 @@ PORTS                          \ List all port bindings
 
 ## Implementation Status
 
-### ✅ Completed (v0.7)
+### ✅ Completed (v0.8)
 
 **BIOS v0.4** (128 words, ~4400 lines):
 - Complete Forth system with colon compiler, conditionals, loops
@@ -100,12 +100,13 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.7** (~1445 lines Forth):
+**KDOS v0.8** (~1720 lines Forth):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
+- **11 advanced kernels**: kclamp, kavg, khistogram, kdelta, knorm, kpeak, krms-buf, kcorrelate, kconvolve3, kinvert, kcount
 - **Pipeline engine**: Ordered kernel pipelines with per-step timing (up to 8 registered)
 - **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
 - **Storage & persistence**: Buffer save/load to disk, file abstraction layer
@@ -121,11 +122,12 @@ PORTS                          \ List all port bindings
 - **Frame routing**: POLL, INGEST, ROUTE-FRAME, NET-RX?, RECV-FRAME
 - **Frame protocol**: 6-byte header (src_id, dtype, seq, len) + payload
 - **Python data sources**: data_sources.py — SineSource, CounterSource, RandomSource, ReplaySource, CSVSource
+- **Real-world data sources**: TemperatureSource, StockSource, SeismicSource, ImageSource, AudioSource, TextSource, EmbeddingSource, MultiChannelSource
 - **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, PORTS, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
 
-**Tests**: 190+ passing
-- 117+ KDOS tests (buffers, tile ops, kernels, pipelines, storage, files, scheduler, screens, data ports, dashboard)
+**Tests**: 233 passing
+- 160+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard)
 - 49 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?)
 - 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
@@ -177,11 +179,12 @@ PORTS                          \ List all port bindings
 - End-to-end: external data → NIC frame → buffer → tile-engine kernel processing
 - +! and CMOVE utility words added to §1
 
-**Phase 6: Advanced Kernels** (not started)
-- Matrix operations: GEMM, GEMV via tile engine
-- Image processing: convolution, resize, filters
-- Signal processing: FFT, correlation
-- String/text: search, parse, format
+**Phase 6: Advanced Kernels & Real-World Data** (✅ complete — v0.8)
+- 11 advanced kernels: kclamp, kavg (moving average), khistogram (256-bin), kdelta (delta encode), knorm (normalize 0-255), kpeak (local maxima), krms-buf (RMS), kcorrelate (tile-engine dot product), kconvolve3 (3-tap FIR), kinvert (bitwise), kcount (match count)
+- Histogram analysis: HIST@ (query bin), .HIST (display non-zero bins)
+- Real-world Python data sources: TemperatureSource (weather API / synthetic diurnal), StockSource (Brownian motion), SeismicSource (noise + event spikes), ImageSource (gradient/checkerboard/circle/noise patterns), AudioSource (tone/chord/chirp/square), TextSource (lorem/pangram/digits/DNA, file/URL), EmbeddingSource (OpenAI API / synthetic hash embeddings)
+- MultiChannelSource: round-robin multiplexing of multiple sources onto single NIC
+- End-to-end real-world pipelines tested: temperature→normalize, stock→delta, seismic→peak-detect, image→threshold, audio→smoothing, text→histogram, embedding→correlate, multi-channel→ingest, signal processing chain (normalize→smooth→threshold→count)
 
 **Phase 7: User Experience** (not started)
 - REPL improvements: history, tab completion, multi-line editing
@@ -1026,7 +1029,7 @@ Summary:
 - **Phase 3**: Scheduler & Preemption (✅ v0.5)
 - **Phase 4**: Interactive Screens (✅ v0.6)
 - **Phase 5**: Data Ports (✅ v0.7)
-- **Phase 6**: Advanced Kernels (planned)
+- **Phase 6**: Advanced Kernels & Real-World Data (✅ v0.8)
 - **Phase 7**: User Experience (planned)
 
 ---

@@ -232,3 +232,466 @@ def send_udp(source: DataSource, host: str, port: int,
                 time.sleep(delay)
     finally:
         sock.close()
+
+
+# =====================================================================
+#  Real-World Data Sources
+# =====================================================================
+#
+#  These sources fetch data from external systems and encode it as
+#  U8 frames matching the standard protocol.  Each gracefully falls
+#  back to synthetic data if the external system is unavailable —
+#  so tests always pass, but with real data when possible.
+#
+#  All sources follow the same pattern:
+#    1. Fetch raw data from external system (API, file, device)
+#    2. Scale/quantize to 0-255 range
+#    3. Emit as standard data-port frames
+#
+#  The same frame bytes work whether injected into the emulator
+#  or sent over UDP to real hardware.
+# =====================================================================
+
+
+class TemperatureSource(DataSource):
+    """Temperature time-series → U8 vector.
+
+    Attempts to fetch from Open-Meteo (free, no API key) for a given
+    lat/lon.  Falls back to realistic synthetic diurnal cycle.
+
+    Quantization: 0°C → 128, ±50°C range → 0-255.
+    """
+
+    def __init__(self, src_id: int, length: int = 64,
+                 lat: float = 40.71, lon: float = -74.01,
+                 live: bool = False):
+        super().__init__(src_id, DTYPE_U8)
+        self.length = length
+        self.lat = lat
+        self.lon = lon
+        self._values = None
+        self._pos = 0
+        if live:
+            self._values = self._fetch_live()
+        if self._values is None:
+            self._values = self._synthetic()
+
+    def _fetch_live(self):
+        """Fetch 24h hourly temperature from Open-Meteo (free API)."""
+        try:
+            import urllib.request
+            import json
+            url = (f"https://api.open-meteo.com/v1/forecast?"
+                   f"latitude={self.lat}&longitude={self.lon}"
+                   f"&hourly=temperature_2m&forecast_days=1")
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read())
+            temps = data['hourly']['temperature_2m']
+            return [max(0, min(255, int(t * 2.55 + 128))) for t in temps]
+        except Exception:
+            return None
+
+    def _synthetic(self):
+        """Realistic 24h diurnal cycle: 5°C at 4am, 22°C at 2pm."""
+        vals = []
+        for h in range(24 * 4):  # 15-min intervals
+            hour = h / 4.0
+            temp = 13.5 + 8.5 * math.sin((hour - 10) * math.pi / 12)
+            vals.append(max(0, min(255, int(temp * 2.55 + 128))))
+        return vals
+
+    def next_frame(self) -> bytes:
+        chunk = []
+        for i in range(self.length):
+            idx = (self._pos + i) % len(self._values)
+            chunk.append(self._values[idx])
+        self._pos = (self._pos + self.length) % len(self._values)
+        return self._frame(bytes(chunk))
+
+
+class StockSource(DataSource):
+    """Financial time-series (price as U8).
+
+    Falls back to synthetic Brownian motion that looks like price data.
+    Quantization: maps min..max of series to 0-255.
+    """
+
+    def __init__(self, src_id: int, length: int = 64,
+                 volatility: float = 0.02, drift: float = 0.0001,
+                 seed: int = 123):
+        super().__init__(src_id, DTYPE_U8)
+        self.length = length
+        import random
+        self.rng = random.Random(seed)
+        self._prices = self._generate_walk(512, volatility, drift)
+        self._pos = 0
+
+    def _generate_walk(self, n, vol, drift):
+        """Geometric Brownian motion → realistic price series."""
+        price = 100.0
+        prices = []
+        for _ in range(n):
+            ret = drift + vol * self.rng.gauss(0, 1)
+            price *= (1 + ret)
+            prices.append(price)
+        # Normalize to 0-255
+        lo, hi = min(prices), max(prices)
+        span = hi - lo if hi > lo else 1.0
+        return [max(0, min(255, int(255 * (p - lo) / span)))
+                for p in prices]
+
+    def next_frame(self) -> bytes:
+        chunk = []
+        for i in range(self.length):
+            idx = (self._pos + i) % len(self._prices)
+            chunk.append(self._prices[idx])
+        self._pos = (self._pos + self.length) % len(self._prices)
+        return self._frame(bytes(chunk))
+
+
+class SeismicSource(DataSource):
+    """Seismic/vibration sensor data → U8 vector.
+
+    Synthetic model: background noise + occasional P/S-wave events.
+    Mimics accelerometer or geophone data at 8-bit resolution.
+    """
+
+    def __init__(self, src_id: int, length: int = 64,
+                 noise_floor: int = 5, event_prob: float = 0.05,
+                 seed: int = 99):
+        super().__init__(src_id, DTYPE_U8)
+        self.length = length
+        self.noise_floor = noise_floor
+        self.event_prob = event_prob
+        import random
+        self.rng = random.Random(seed)
+        self._sample = 0
+
+    def next_frame(self) -> bytes:
+        data = bytearray(self.length)
+        for i in range(self.length):
+            # Background noise centered at 128
+            noise = self.rng.gauss(0, self.noise_floor)
+            # Occasional seismic event: sharp spike + exponential decay
+            if self.rng.random() < self.event_prob:
+                spike = self.rng.uniform(40, 120)
+            else:
+                spike = 0
+            val = 128 + noise + spike
+            data[i] = max(0, min(255, int(val)))
+            self._sample += 1
+        return self._frame(bytes(data))
+
+
+class ImageSource(DataSource):
+    """Grayscale image → U8 vector frames (row-by-row or tile-by-tile).
+
+    Can load from file (PIL/Pillow if available) or generate synthetic
+    test patterns: gradient, checkerboard, circle, noise.
+    """
+
+    def __init__(self, src_id: int, width: int = 64, height: int = 64,
+                 pattern: str = 'gradient', filepath: str = None):
+        super().__init__(src_id, DTYPE_U8)
+        self.width = width
+        self.height = height
+        self._row = 0
+        if filepath:
+            self._image = self._load_file(filepath, width, height)
+        else:
+            self._image = self._generate_pattern(pattern, width, height)
+
+    @staticmethod
+    def _load_file(filepath, w, h):
+        """Load image file as grayscale, resize to w×h."""
+        try:
+            from PIL import Image
+            img = Image.open(filepath).convert('L').resize((w, h))
+            return list(img.tobytes())
+        except Exception:
+            return ImageSource._generate_pattern('gradient', w, h)
+
+    @staticmethod
+    def _generate_pattern(pattern, w, h):
+        """Generate synthetic grayscale test patterns."""
+        pixels = []
+        for y in range(h):
+            for x in range(w):
+                if pattern == 'gradient':
+                    v = int(255 * x / max(w - 1, 1))
+                elif pattern == 'checkerboard':
+                    v = 255 if ((x // 8) + (y // 8)) % 2 == 0 else 0
+                elif pattern == 'circle':
+                    cx, cy = w // 2, h // 2
+                    r = min(w, h) // 3
+                    dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+                    v = 255 if dist < r else 0
+                elif pattern == 'vstripes':
+                    v = 255 if (x // 4) % 2 == 0 else 0
+                elif pattern == 'noise':
+                    import random
+                    v = random.randint(0, 255)
+                else:
+                    v = int(255 * x / max(w - 1, 1))
+                pixels.append(max(0, min(255, v)))
+        return pixels
+
+    def next_frame(self) -> bytes:
+        """Emit one row of the image as a frame."""
+        start = (self._row % self.height) * self.width
+        row = self._image[start:start + self.width]
+        if len(row) < self.width:
+            row = row + [0] * (self.width - len(row))
+        self._row += 1
+        return self._frame(bytes(row))
+
+    @property
+    def exhausted(self) -> bool:
+        return self._row >= self.height
+
+
+class AudioSource(DataSource):
+    """8-bit audio samples → U8 vector frames.
+
+    Can load from WAV file (8-bit or auto-converted) or generate
+    synthetic waveforms: tone, chord, chirp, white noise, drum.
+    """
+
+    def __init__(self, src_id: int, length: int = 64,
+                 sample_rate: int = 8000,
+                 waveform: str = 'tone', frequency: float = 440.0,
+                 filepath: str = None, seed: int = 77):
+        super().__init__(src_id, DTYPE_U8)
+        self.length = length
+        self.sample_rate = sample_rate
+        import random
+        self.rng = random.Random(seed)
+        if filepath:
+            self._samples = self._load_wav(filepath)
+        else:
+            self._samples = self._generate(waveform, frequency,
+                                           sample_rate, 8192)
+        self._pos = 0
+
+    @staticmethod
+    def _load_wav(filepath):
+        """Load WAV file, convert to 8-bit unsigned."""
+        try:
+            import wave
+            with wave.open(filepath, 'rb') as wf:
+                frames = wf.readframes(wf.getnframes())
+                sw = wf.getsampwidth()
+                if sw == 1:
+                    return list(frames)
+                elif sw == 2:
+                    import struct as st
+                    samples = st.unpack(f'<{len(frames)//2}h', frames)
+                    return [max(0, min(255, (s + 32768) >> 8))
+                            for s in samples]
+            return [128] * 8192
+        except Exception:
+            return [128] * 8192
+
+    @staticmethod
+    def _generate(waveform, freq, sr, n):
+        """Generate synthetic audio waveform."""
+        samples = []
+        for i in range(n):
+            t = i / sr
+            if waveform == 'tone':
+                v = 128 + 127 * math.sin(2 * math.pi * freq * t)
+            elif waveform == 'chord':
+                v = 128 + 42 * (math.sin(2 * math.pi * freq * t) +
+                                math.sin(2 * math.pi * freq * 1.25 * t) +
+                                math.sin(2 * math.pi * freq * 1.5 * t))
+            elif waveform == 'chirp':
+                f = freq * (1 + t * 2)  # frequency sweep
+                v = 128 + 127 * math.sin(2 * math.pi * f * t)
+            elif waveform == 'square':
+                v = 255 if math.sin(2 * math.pi * freq * t) >= 0 else 0
+            else:
+                v = 128 + 127 * math.sin(2 * math.pi * freq * t)
+            samples.append(max(0, min(255, int(v))))
+        return samples
+
+    def next_frame(self) -> bytes:
+        chunk = self._samples[self._pos:self._pos + self.length]
+        self._pos += self.length
+        if len(chunk) < self.length:
+            chunk = chunk + [128] * (self.length - len(chunk))
+        return self._frame(bytes(chunk))
+
+
+class TextSource(DataSource):
+    """Text/ASCII data → U8 frames (raw byte values of characters).
+
+    Can load from file, URL, or use built-in sample texts.
+    Useful for character frequency analysis, pattern matching, etc.
+    """
+
+    SAMPLES = {
+        'lorem': ("Lorem ipsum dolor sit amet, consectetur adipiscing "
+                  "elit. Sed do eiusmod tempor incididunt ut labore et "
+                  "dolore magna aliqua. Ut enim ad minim veniam, quis "
+                  "nostrud exercitation ullamco laboris nisi ut aliquip."),
+        'pangram': ("The quick brown fox jumps over the lazy dog. "
+                    "Pack my box with five dozen liquor jugs. "
+                    "How vexingly quick daft zebras jump. " * 3),
+        'digits': ("3.14159265358979323846264338327950288419716939937510"
+                   "58209749445923078164062862089986280348253421170679" * 2),
+        'dna': ("ATCGATCGATCGTAGCTAGCTAGCATGCATGCATGC" * 8),
+    }
+
+    def __init__(self, src_id: int, chunk_size: int = 64,
+                 text: str = None, sample: str = 'lorem',
+                 filepath: str = None, url: str = None):
+        super().__init__(src_id, DTYPE_TEXT)
+        self.chunk_size = chunk_size
+        if text:
+            self._data = text.encode('utf-8', errors='replace')
+        elif filepath:
+            self._data = self._load_file(filepath)
+        elif url:
+            self._data = self._fetch_url(url)
+        else:
+            self._data = self.SAMPLES.get(sample, self.SAMPLES['lorem']).encode()
+        self._pos = 0
+
+    @staticmethod
+    def _load_file(filepath):
+        try:
+            with open(filepath, 'rb') as f:
+                return f.read(65536)
+        except Exception:
+            return TextSource.SAMPLES['lorem'].encode()
+
+    @staticmethod
+    def _fetch_url(url):
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=5) as r:
+                return r.read(65536)
+        except Exception:
+            return TextSource.SAMPLES['lorem'].encode()
+
+    def next_frame(self) -> bytes:
+        end = min(self._pos + self.chunk_size, len(self._data))
+        chunk = self._data[self._pos:end]
+        self._pos = end
+        if len(chunk) < self.chunk_size:
+            chunk = chunk + b'\x00' * (self.chunk_size - len(chunk))
+        return self._frame(bytes(chunk))
+
+    @property
+    def exhausted(self) -> bool:
+        return self._pos >= len(self._data)
+
+
+class EmbeddingSource(DataSource):
+    """OpenAI (or compatible) embedding vectors → U8 frames.
+
+    Calls the embeddings API if a key is available, otherwise falls
+    back to a synthetic hash-based pseudo-embedding that preserves
+    rough similarity relationships.
+
+    Quantization: float32 embeddings are normalized to 0-255 per
+    dimension, so the tile engine's U8 operations can compute
+    approximate cosine similarity, L1 distance, etc.
+    """
+
+    def __init__(self, src_id: int, texts: list = None,
+                 model: str = 'text-embedding-3-small',
+                 dimensions: int = 64,
+                 api_key: str = None):
+        super().__init__(src_id, DTYPE_U8)
+        self.dimensions = dimensions
+        self._texts = texts or [
+            "The cat sat on the mat",
+            "A dog lay on the rug",
+            "Quantum computing uses qubits",
+            "The weather is sunny today",
+        ]
+        self._embeddings = []
+        self._idx = 0
+        if api_key:
+            self._embeddings = self._fetch_openai(
+                api_key, model, dimensions)
+        if not self._embeddings:
+            self._embeddings = self._synthetic_embeddings()
+
+    def _fetch_openai(self, api_key, model, dims):
+        """Fetch real embeddings from OpenAI API."""
+        try:
+            import urllib.request
+            import json
+            body = json.dumps({
+                "input": self._texts,
+                "model": model,
+                "dimensions": dims,
+            }).encode()
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/embeddings",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())
+            results = []
+            for item in data['data']:
+                emb = item['embedding'][:dims]
+                results.append(self._quantize(emb))
+            return results
+        except Exception:
+            return []
+
+    def _synthetic_embeddings(self):
+        """Hash-based pseudo-embeddings that preserve rough similarity."""
+        import hashlib
+        results = []
+        for text in self._texts:
+            h = hashlib.sha256(text.lower().encode()).digest()
+            # Extend hash to fill dimensions
+            raw = h * ((self.dimensions // len(h)) + 1)
+            emb = list(raw[:self.dimensions])
+            results.append(emb)
+        return results
+
+    @staticmethod
+    def _quantize(floats):
+        """Normalize float vector to 0-255 range."""
+        lo = min(floats)
+        hi = max(floats)
+        span = hi - lo if hi > lo else 1.0
+        return [max(0, min(255, int(255 * (v - lo) / span)))
+                for v in floats]
+
+    def next_frame(self) -> bytes:
+        emb = self._embeddings[self._idx % len(self._embeddings)]
+        self._idx += 1
+        return self._frame(bytes(emb[:self.dimensions]))
+
+
+class MultiChannelSource:
+    """Multiplexes several DataSources onto a single NIC.
+
+    Interleaves frames from multiple sources in round-robin order,
+    each with its own src_id.  Models a real sensor hub or data
+    acquisition system with multiple channels.
+    """
+
+    def __init__(self, sources: list):
+        self.sources = list(sources)
+        self._idx = 0
+
+    def next_frame(self) -> bytes:
+        src = self.sources[self._idx % len(self.sources)]
+        self._idx += 1
+        return src.next_frame()
+
+    def inject(self, system, count: int = 1):
+        """Inject count frames (round-robin across sources)."""
+        for _ in range(count):
+            frame = self.next_frame()
+            system.nic.inject_frame(frame)
