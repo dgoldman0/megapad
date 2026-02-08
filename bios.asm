@@ -7,7 +7,8 @@
 ;  string words, NIC words, and compilation infrastructure.
 ;  v0.5 adds EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
 ;  CREATE, IMMEDIATE, STATE, [, ], LITERAL, MIN, MAX, CELLS,
-;  CELL+, +!, 2*, CMOVE, -ROT, <>, 0<>, 0>, ?DUP, BL, TRUE, FALSE.
+;  CELL+, +!, 2*, CMOVE, -ROT, <>, 0<>, 0>, ?DUP, BL, TRUE, FALSE,
+;  WORD, LATEST.
 ;
 ;  Register conventions
 ;  --------------------
@@ -5370,13 +5371,24 @@ d_false:
     ret.l
 
 ; === WORD ===
-latest_entry:
 d_word:
     .dq d_false
     .db 4
     .ascii "WORD"
     ldi64 r11, w_word_forth
     call.l r11
+    ret.l
+
+; === LATEST ===
+latest_entry:
+d_latest:
+    .dq d_word
+    .db 6
+    .ascii "LATEST"
+    ldi64 r1, var_latest
+    ldn r1, r1
+    subi r14, 8
+    str r14, r1
     ret.l
 
 ; =====================================================================

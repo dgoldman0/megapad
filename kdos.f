@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.9c — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.9d — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.5+ Forth system.
@@ -14,6 +14,7 @@
 \    7. Storage         — disk persistence, file abstraction, MP64FS
 \       7.6 MP64FS     — on-disk named file system
 \       7.7 Doc Browser — DOC, DESCRIBE, TUTORIAL, TOPICS, LESSONS
+\       7.8 Dict Search — WORDS-LIKE, APROPOS, .RECENT
 \    8. Scheduler       — cooperative & preemptive multitasking
 \    9. Screens         — interactive TUI (ANSI terminal, 7 screens)
 \   10. Data Ports      — NIC-based external data ingestion
@@ -94,6 +95,29 @@ VARIABLE PN-LEN
     1+                                 ( src )
     NAMEBUF PN-LEN @                   ( src dst len )
     CMOVE ;
+
+\ -- Stack safety utilities --
+
+\ NEEDS ( n -- )  print warning if stack has fewer than n items
+: NEEDS  ( n -- )
+    DEPTH 2 - >  IF  ." Stack underflow" CR  THEN ;
+
+\ ASSERT ( flag -- )  print warning if flag is false
+: ASSERT  ( flag -- )
+    0= IF  ." Assertion failed" CR  THEN ;
+
+\ .DEPTH ( -- )  show current stack depth
+: .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
+
+\ -- Character utilities --
+
+\ UCHAR ( c -- C )  convert lowercase ASCII letter to uppercase
+: UCHAR  ( c -- C )
+    DUP 97 >= OVER 123 < AND IF 32 - THEN ;
+
+\ 2OVER ( a b c d -- a b c d a b )  copy second pair over top pair
+: 2OVER  ( a b c d -- a b c d a b )
+    3 PICK 3 PICK ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -1460,6 +1484,92 @@ VARIABLE DS-SLOT
     CR SHOW-FILE CR ;
 
 \ =====================================================================
+\  §7.8  Dictionary Search — WORDS-LIKE, APROPOS
+\ =====================================================================
+\
+\  Walk the dictionary linked list using LATEST to find words whose
+\  names contain a given substring (case-insensitive).
+\
+\  Dictionary entry layout (set by BIOS):
+\    [link:8][flags+len:1][name:N]...code
+\  LATEST pushes address of most-recent entry; @ follows links.
+
+\ ENTRY>LINK ( entry -- next )  follow dictionary link field
+: ENTRY>LINK  ( entry -- next )  @ ;
+
+\ ENTRY>NAME ( entry -- addr len )  extract name from dictionary entry
+: ENTRY>NAME  ( entry -- addr len )
+    DUP 8 + C@  127 AND     ( entry namelen )
+    SWAP 9 +  SWAP ;        ( nameaddr namelen )
+
+\ ICONTAINS? ( pa pl sa sl -- flag )
+\   Case-insensitive substring search.
+\   Returns true if the pattern (pa,pl) appears anywhere in string (sa,sl).
+VARIABLE IC-PA
+VARIABLE IC-PL
+VARIABLE IC-SA
+VARIABLE IC-SL
+VARIABLE IC-OK
+
+: ICONTAINS?  ( pa pl sa sl -- flag )
+    IC-SL !  IC-SA !  IC-PL !  IC-PA !
+    IC-PL @ 0= IF  -1 EXIT  THEN            \ empty pattern matches all
+    IC-SL @ IC-PL @ < IF  0 EXIT  THEN      \ pattern longer than string
+    IC-SL @ IC-PL @ - 1+  0 DO              \ I = start position in string
+        -1 IC-OK !                            \ assume match
+        IC-PL @ 0 DO                          \ I = pat offset, J = start pos
+            IC-OK @ IF
+                IC-SA @ J + I + C@ UCHAR
+                IC-PA @ I + C@ UCHAR
+                <> IF  0 IC-OK !  THEN
+            THEN
+        LOOP
+        IC-OK @ IF  UNLOOP -1 EXIT  THEN     \ found match
+    LOOP
+    0 ;
+
+\ -- WORDS-LIKE --
+VARIABLE WL-CNT
+VARIABLE WL-ENT
+VARIABLE WL-PA
+VARIABLE WL-PL
+
+: WORDS-LIKE  ( "pattern" -- )
+    BL WORD DUP C@ DUP 0= IF
+        2DROP ." Usage: WORDS-LIKE <pattern>" CR EXIT
+    THEN                              ( waddr len )
+    SWAP 1+ SWAP                      ( pataddr patlen )
+    WL-PL !  WL-PA !
+    0 WL-CNT !
+    LATEST WL-ENT !
+    BEGIN  WL-ENT @ WHILE
+        WL-ENT @ ENTRY>NAME          ( na nl )
+        WL-PA @ WL-PL @ 2OVER        ( na nl pa pl na nl )
+        ICONTAINS? IF
+            TYPE SPACE
+            1 WL-CNT +!
+        ELSE
+            2DROP
+        THEN
+        WL-ENT @ ENTRY>LINK WL-ENT !
+    REPEAT
+    CR ." (" WL-CNT @ . ." found)" CR ;
+
+\ APROPOS ( "pattern" -- )  alias for WORDS-LIKE
+: APROPOS  ( "pattern" -- )  WORDS-LIKE ;
+
+\ .RECENT ( n -- )  show the last n words defined in the dictionary
+: .RECENT  ( n -- )
+    CR ." Recent words:" CR
+    LATEST
+    BEGIN  OVER 0> OVER AND WHILE
+        DUP ENTRY>NAME TYPE SPACE
+        ENTRY>LINK
+        SWAP 1- SWAP
+    REPEAT
+    DROP DROP CR ;
+
+\ =====================================================================
 \  §8  Scheduler & Tasks
 \ =====================================================================
 \
@@ -1759,7 +1869,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.9c "
+    ."  KDOS v0.9d "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -2123,7 +2233,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.9c — Kernel Dashboard OS" CR
+    ."  KDOS v0.9d — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -2137,7 +2247,7 @@ VARIABLE BENCH-T0
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS v0.9c | bufs=" BUF-COUNT @ .
+    ." KDOS v0.9d | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
@@ -2152,7 +2262,7 @@ VARIABLE BENCH-T0
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.9c — Quick Reference" CR
+    ."  KDOS v0.9d — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -2256,6 +2366,17 @@ VARIABLE BENCH-T0
     ."    DOC <topic>            Page through documentation" CR
     ."    DESCRIBE <topic>       Show topic by name" CR
     ."    TUTORIAL <name>        Interactive lesson" CR
+    CR ."  DICTIONARY SEARCH:" CR
+    ."    WORDS-LIKE <pat>       Find words containing pattern" CR
+    ."    APROPOS <pat>          Alias for WORDS-LIKE" CR
+    ."    n .RECENT              Show last n defined words" CR
+    ."    LATEST                 Push most-recent dict entry addr" CR
+    ."    entry ENTRY>NAME       Get name (addr len) from entry" CR
+    ."    entry ENTRY>LINK       Follow dict link to next entry" CR
+    CR ."  STACK & DIAGNOSTICS:" CR
+    ."    n NEEDS                Abort if stack has < n items" CR
+    ."    flag ASSERT            Abort if flag is false" CR
+    ."    .DEPTH                 Show current stack depth" CR
     CR HRULE ;
 
 \ =====================================================================
@@ -2263,7 +2384,7 @@ VARIABLE BENCH-T0
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.9c — Kernel Dashboard OS" CR
+."  KDOS v0.9d — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR

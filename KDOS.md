@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.8 — Advanced Kernels & Real-World Data Sources**
+**Current Status: KDOS v0.9d — Dictionary Search, Stack Safety & Diagnostics**
 
 ---
 
@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (309 tests)
+# Full test suite (327 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -299,22 +299,31 @@ Pre-built content:
 - 5 tutorials (hello-world, first-kernel, build-pipeline,
   data-ingest, custom-kernel)
 
-**v0.9d — REPL Improvements & Error Handling** (planned)
+**v0.9d — Dictionary Search, Stack Safety & Diagnostics** (done)
 
-Command history:
-- HISTORY ring buffer (last 16 commands)
-- `HIST`: print history, `!!` re-execute last, `!n` re-execute nth
+Dictionary search (§7.8):
+- `WORDS-LIKE` ( "pattern" -- ): case-insensitive substring search across dictionary
+- `APROPOS` ( "pattern" -- ): alias for WORDS-LIKE
+- `.RECENT` ( n -- ): show last n defined words
+- `ENTRY>NAME` ( entry -- addr len ): extract name from dictionary entry
+- `ENTRY>LINK` ( entry -- next ): follow dictionary link to previous entry
+- `ICONTAINS?` ( pa pl sa sl -- flag ): case-insensitive substring match
 
-Error handling:
-- Replace bare "?" with descriptive messages
-- "Unknown word. Did you mean: ..." (fuzzy dictionary match)
-- Stack underflow detection with context
+Stack safety & diagnostics (§1):
+- `NEEDS` ( n -- ): warn if stack has fewer than n items
+- `ASSERT` ( flag -- ): warn if flag is false
+- `.DEPTH` ( -- ): print current stack depth as `[N deep]`
 
-New Forth words:
-- `HIST`, `!!` — command history
-- `WORDS-LIKE` ( "pattern" -- ): list words containing substring
-- `APROPOS` ( "topic" -- ): search word names and help text
-- Custom INTERPRET loop with richer error reporting
+Character & utility words (§1):
+- `UCHAR` ( c -- C ): convert lowercase ASCII to uppercase
+- `2OVER` ( a b c d -- a b c d a b ): copy second pair over top
+
+BIOS additions:
+- `LATEST` ( -- addr ): push address of most recent dictionary entry
+
+Deferred to future version:
+- Command history (`HIST`, `!!`, `!n`): requires EVALUATE (not in BIOS)
+- Custom INTERPRET loop with fuzzy match: requires deeper BIOS integration
 
 ---
 

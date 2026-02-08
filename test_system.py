@@ -1341,7 +1341,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.9c", text)
+        self.assertIn("KDOS v0.9d", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1471,7 +1471,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.9c", text)
+        self.assertIn("KDOS v0.9d", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -2314,7 +2314,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.9c", text)
+        self.assertIn("KDOS v0.9d", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -3468,13 +3468,8 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("OPEN", text)
         self.assertIn("FFLUSH", text)
 
-    def test_version_v09c(self):
-        """Startup banner shows v0.9c."""
-        text = self._run_kdos_fast(["STATUS"])
-        self.assertIn("v0.9c", text)
-
     # ------------------------------------------------------------------
-    #  Documentation browser (v0.9c)
+    #  Documentation browser (v0.9c / v0.9d)
     # ------------------------------------------------------------------
 
     def _make_image_with_short_docs(self):
@@ -3611,6 +3606,130 @@ class TestKDOS(unittest.TestCase):
         src = "\n".join(self.kdos_lines)
         self.assertIn("TOPICS", src)
         self.assertIn("LESSONS", src)
+
+    # -- v0.9d: Dictionary Search & REPL --
+
+    def test_latest_returns_nonzero(self):
+        """LATEST pushes a non-zero dictionary entry address."""
+        text = self._run_kdos_fast(["LATEST ."])
+        # LATEST should print a number > 0 (the entry address)
+        nums = [int(w) for w in text.split() if w.isdigit()]
+        self.assertTrue(any(n > 0 for n in nums), f"LATEST should be >0: {text!r}")
+
+    def test_entry_name_of_latest(self):
+        """ENTRY>NAME on a user-defined word returns its name."""
+        text = self._run_kdos_fast([": XYZZY 42 ;", "LATEST ENTRY>NAME TYPE"])
+        self.assertIn("XYZZY", text)
+
+    def test_entry_link_walks_dict(self):
+        """ENTRY>LINK on LATEST follows to the previous dictionary entry."""
+        text = self._run_kdos_fast([
+            ": AAA 1 ;",
+            ": BBB 2 ;",
+            "LATEST ENTRY>NAME TYPE",           # should print BBB
+            "LATEST ENTRY>LINK ENTRY>NAME TYPE"  # should print AAA
+        ])
+        self.assertIn("BBB", text)
+        self.assertIn("AAA", text)
+
+    def test_uchar_lowercase(self):
+        """UCHAR converts lowercase to uppercase."""
+        text = self._run_kdos_fast(["97 UCHAR ."])
+        # 97 = 'a', should become 65 = 'A'
+        self.assertIn("65", text)
+
+    def test_uchar_uppercase_unchanged(self):
+        """UCHAR leaves uppercase unchanged."""
+        text = self._run_kdos_fast(["65 UCHAR ."])
+        self.assertIn("65", text)
+
+    def test_uchar_nonletter_unchanged(self):
+        """UCHAR leaves non-letter characters unchanged."""
+        text = self._run_kdos_fast(["48 UCHAR ."])
+        # 48 = '0', should stay 48
+        self.assertIn("48", text)
+
+    def test_words_like_finds_buffer(self):
+        """WORDS-LIKE BUF finds buffer-related words."""
+        text = self._run_kdos_fast(["WORDS-LIKE BUF"])
+        # Should find BUF-COUNT, BUFFERS, etc.
+        self.assertIn("found)", text)
+        upper = text.upper()
+        self.assertTrue("BUF" in upper, f"Should find BUF words: {text!r}")
+
+    def test_words_like_case_insensitive(self):
+        """WORDS-LIKE is case-insensitive."""
+        text = self._run_kdos_fast(["WORDS-LIKE buf"])
+        upper = text.upper()
+        self.assertTrue("BUF" in upper, f"Case-insensitive search: {text!r}")
+
+    def test_words_like_no_match(self):
+        """WORDS-LIKE with nonsense pattern finds 0 words."""
+        text = self._run_kdos_fast(["WORDS-LIKE XQZWJ"])
+        self.assertIn("0 ", text)  # (0 found)
+
+    def test_apropos_alias(self):
+        """APROPOS works identically to WORDS-LIKE."""
+        text = self._run_kdos_fast(["APROPOS EMIT"])
+        self.assertIn("EMIT", text)
+        self.assertIn("found)", text)
+
+    def test_recent_shows_words(self):
+        """n .RECENT shows the last n defined words."""
+        text = self._run_kdos_fast(["5 .RECENT"])
+        self.assertIn("Recent words:", text)
+        # Should contain at least some KDOS words
+        self.assertTrue(len(text) > 30, f".RECENT output too short: {text!r}")
+
+    def test_needs_passes(self):
+        """NEEDS does not abort when stack has enough items."""
+        text = self._run_kdos_fast(["1 2 3  3 NEEDS .S"])
+        # Should not abort — .S should run
+        self.assertNotIn("underflow", text.lower())
+
+    def test_needs_fails(self):
+        """NEEDS aborts with message when stack too shallow."""
+        text = self._run_kdos_fast(["1  5 NEEDS"])
+        self.assertIn("underflow", text.lower())
+
+    def test_assert_true_passes(self):
+        """ASSERT with true flag does nothing."""
+        text = self._run_kdos_fast(["-1 ASSERT 42 ."])
+        self.assertIn("42", text)
+        self.assertNotIn("failed", text.lower())
+
+    def test_assert_false_fails(self):
+        """ASSERT with false flag aborts with message."""
+        text = self._run_kdos_fast(["0 ASSERT"])
+        self.assertIn("failed", text.lower())
+
+    def test_depth_display(self):
+        """.DEPTH shows current stack depth."""
+        text = self._run_kdos_fast(["1 2 3 .DEPTH"])
+        self.assertIn("3", text)
+        self.assertIn("deep", text)
+
+    def test_help_shows_dict_search(self):
+        """HELP includes DICTIONARY SEARCH section."""
+        text = self._run_kdos_fast(["HELP"])
+        self.assertIn("DICTIONARY SEARCH:", text)
+        self.assertIn("WORDS-LIKE", text)
+        self.assertIn("APROPOS", text)
+        self.assertIn(".RECENT", text)
+
+    def test_help_shows_stack_diagnostics(self):
+        """HELP includes STACK & DIAGNOSTICS section."""
+        text = self._run_kdos_fast(["HELP"])
+        self.assertIn("STACK", text)
+        self.assertIn("NEEDS", text)
+        self.assertIn("ASSERT", text)
+        self.assertIn(".DEPTH", text)
+
+    def test_version_v09d(self):
+        """Version strings show v0.9d."""
+        src = "\n".join(self.kdos_lines)
+        self.assertIn("v0.9d", src)
+        self.assertNotIn("v0.9c", src)
 
 
 # ---------------------------------------------------------------------------
