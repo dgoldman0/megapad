@@ -588,8 +588,15 @@ class Megapad64:
         self.regs[n] = u64(self.regs[n] - 1)
         return 0
 
-    # -- 0x3: BR (short branch) --
+    # -- 0x3: BR (short branch) / SKIP --
     def _exec_br(self, cc: int) -> int:
+        # SKIP mode: EXT modifier 6 means skip next instruction
+        if self._ext_modifier == 6:
+            if self.eval_cond(cc):
+                skip_bytes = self._next_instruction_size()
+                self.pc = u64(self.pc + skip_bytes)
+                return 1
+            return 0
         offset_byte = self.fetch8()
         offset = sign_extend(offset_byte, 8)   # signed offset
         offset = s64(offset)
@@ -1261,6 +1268,52 @@ class Megapad64:
         self.halted = False
         self.idle = False
         self._ext_modifier = -1
+
+    # -- Instruction size helper (for SKIP) --
+
+    def _next_instruction_size(self) -> int:
+        """Peek at the instruction at PC and return its byte size."""
+        b0 = self.mem_read8(self.pc)
+        f = (b0 >> 4) & 0xF
+        n = b0 & 0xF
+        # EXT prefix: 1 byte + size of following instruction
+        if f == 0xF:
+            b1 = self.mem_read8(u64(self.pc + 1))
+            f2 = (b1 >> 4) & 0xF
+            n2 = b1 & 0xF
+            return 1 + self._family_size(f2, n2, u64(self.pc + 1))
+        return self._family_size(f, n, self.pc)
+
+    def _family_size(self, f: int, n: int, addr: int) -> int:
+        """Return byte size of an instruction given its family and nibble."""
+        if f == 0x0:  # SYS
+            if n == 0xD:  return 2  # CALL.L
+            return 1
+        if f == 0x1:  return 1  # INC
+        if f == 0x2:  return 1  # DEC
+        if f == 0x3:  return 2  # BR
+        if f == 0x4:  return 3  # LBR
+        if f == 0x5:  # MEM
+            if n == 0xF: return 3  # LD.D with offset
+            return 2
+        if f == 0x6:  # IMM
+            if n == 0x0: return 3  # LDI
+            if n == 0x1: return 4  # LHI
+            if n in (0x2,0x3,0x4,0x5,0x6,0x7): return 3  # ADDI..SUBI
+            if n in (0x8,0x9,0xA,0xB): return 2  # shifts
+            if n in (0xC,0xD,0xE,0xF): return 2  # GLO/GHI/PLO/PHI
+            return 2
+        if f == 0x7:  return 2  # ALU
+        if f == 0x8:  return 1  # MEMALU
+        if f == 0x9:  return 1  # I/O
+        if f == 0xA:  return 1  # SEP
+        if f == 0xB:  return 1  # SEX
+        if f == 0xC:  return 2  # MUL/DIV
+        if f == 0xD:  return 2  # CSR
+        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg
+            ss = (n >> 2) & 0x3
+            return 3 if ss == 1 else 2
+        return 1  # fallback
 
     # -- Run loop --
 

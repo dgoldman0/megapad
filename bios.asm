@@ -1,5 +1,5 @@
 ; =====================================================================
-;  Megapad-64 BIOS  v0.5 — Core Forth Completeness
+;  Megapad-64 BIOS  v1.0 — ANS Forth Core + Tile Engine
 ; =====================================================================
 ;
 ;  A subroutine-threaded Forth interpreter on the Megapad-64.
@@ -2486,7 +2486,7 @@ w_i:
     ret.l
 
 ; =====================================================================
-;  BIOS v0.5 — New Words
+;  BIOS v0.5 / v1.0 — New Words
 ; =====================================================================
 
 ; EXIT (IMMEDIATE) — compile ret.l inline (same as what ; does)
@@ -2998,6 +2998,11 @@ w_squote:
     ldn r13, r11              ; >IN
     ldi64 r9, tib_buffer
     add r9, r13               ; current input position
+    ; Skip the leading space delimiter (ANS Forth: S" skips one space)
+    ld.b r1, r9
+    cmpi r1, 0x20
+    brne sq_scan
+    inc r9
 sq_scan:
     ld.b r1, r9
     cmpi r1, 0                ; end of input?
@@ -5627,6 +5632,106 @@ does_runtime:
 
 
 ; =====================================================================
+;  Phase 1D — >NUMBER, QUIT
+; =====================================================================
+
+; >NUMBER ( ud addr len -- ud' addr' len' )
+;   ANS Forth >NUMBER. Converts characters to digits using BASE.
+;   ud is a double-cell accumulator (low cell deeper, high cell on top).
+;   Processes from addr for len characters, stopping at first non-digit.
+;   Returns updated accumulator, advanced addr, and remaining length.
+;
+;   Stack: ( ud_lo ud_hi addr len -- ud_lo' ud_hi' addr' len' )
+;   We simplify: treat ud as a single 64-bit value (ignore the double-cell
+;   distinction since our cells are 64-bit).
+;
+;   Algorithm per char c at addr:
+;     digit = char_to_digit(c, BASE)
+;     if digit >= BASE → stop
+;     ud = ud * BASE + digit
+;     addr++, len--
+w_to_number:
+    ; Stack: DSP+24=ud_lo, DSP+16=ud_hi, DSP+8=addr, DSP+0=len
+    ldn r12, r14              ; len
+    mov r11, r14
+    addi r11, 8
+    ldn r9, r11               ; addr
+    mov r11, r14
+    addi r11, 16
+    ldn r1, r11               ; ud_hi (we'll use as accumulator)
+    ; We treat (ud_lo, ud_hi) as single value, using ud_hi only.
+    ; For ANS compat with 64-bit cells, this is fine.
+
+    ; Load BASE
+    ldi64 r11, var_base
+    ldn r10, r11              ; R10 = BASE
+
+w_tnum_loop:
+    cmpi r12, 0
+    lbreq w_tnum_done
+
+    ; Read char at addr
+    ld.b r0, r9               ; R0 = char
+
+    ; char_to_digit: '0'-'9' → 0-9, 'A'-'Z' → 10-35, 'a'-'z' → 10-35
+    subi r0, 0x30
+    cmpi r0, 10
+    brcc w_tnum_digit          ; < 10 → it's a digit 0-9
+    ; Try uppercase: restore, subtract 'A', add 10
+    addi r0, 0x30
+    subi r0, 0x41
+    cmpi r0, 26
+    brcs w_tnum_try_lc         ; >= 26 → try lowercase
+    addi r0, 10
+    br w_tnum_check
+w_tnum_try_lc:
+    addi r0, 0x41
+    subi r0, 0x61
+    cmpi r0, 26
+    lbrcs w_tnum_done          ; >= 26 → not a letter → stop
+    addi r0, 10
+w_tnum_check:
+    ; R0 = digit value. Check digit < BASE
+    cmp r0, r10
+    lbreq w_tnum_done          ; digit == BASE → stop
+    lbrgt w_tnum_done          ; digit > BASE → stop
+w_tnum_digit:
+    ; Also check digit < BASE for the 0-9 path
+    cmp r0, r10
+    lbreq w_tnum_done
+    lbrgt w_tnum_done
+    ; ud = ud * BASE + digit
+    mul r1, r10
+    add r1, r0
+    inc r9
+    dec r12
+    lbr w_tnum_loop
+
+w_tnum_done:
+    ; Write back: len, addr, ud_hi, ud_lo
+    str r14, r12              ; len
+    mov r11, r14
+    addi r11, 8
+    str r11, r9               ; addr
+    mov r11, r14
+    addi r11, 16
+    str r11, r1               ; ud_hi
+    ; ud_lo = 0 (we folded everything into ud_hi)
+    mov r11, r14
+    addi r11, 24
+    ldi r0, 0
+    str r11, r0
+    ret.l
+
+; QUIT ( -- )
+;   Reset return stack, enter outer interpreter loop. Does not return.
+w_quit:
+    ldi64 r11, forth_quit
+    call.l r11
+    halt
+
+
+; =====================================================================
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
@@ -6787,7 +6892,7 @@ d_paren:
     ret.l
 
 ; =====================================================================
-;  BIOS v0.5 Dictionary Entries
+;  BIOS v0.5 / v1.0 Dictionary Entries
 ; =====================================================================
 
 ; === EXIT (IMMEDIATE) ===
@@ -7405,12 +7510,30 @@ d_2r_fetch:
     ret.l
 
 ; === DOES> === (IMMEDIATE)
-latest_entry:
 d_does:
     .dq d_2r_fetch
     .db 0x85
     .ascii "DOES>"
     ldi64 r11, w_does
+    call.l r11
+    ret.l
+
+; === >NUMBER ===
+d_to_number:
+    .dq d_does
+    .db 7
+    .ascii ">NUMBER"
+    ldi64 r11, w_to_number
+    call.l r11
+    ret.l
+
+; === QUIT ===
+latest_entry:
+d_quit:
+    .dq d_to_number
+    .db 4
+    .ascii "QUIT"
+    ldi64 r11, w_quit
     call.l r11
     ret.l
 
@@ -7438,7 +7561,7 @@ var_word_len:
 ;  String Constants
 ; =====================================================================
 str_banner:
-    .asciiz "\nMegapad-64 Forth BIOS v0.5\nRAM: "
+    .asciiz "\nMegapad-64 Forth BIOS v1.0\nRAM: "
 str_bytes_ram:
     .asciiz " bytes\n"
 str_ok:

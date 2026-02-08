@@ -420,7 +420,7 @@ class TestBIOS(unittest.TestCase):
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [])
-        self.assertIn("Megapad-64 Forth BIOS v0.5", text)
+        self.assertIn("Megapad-64 Forth BIOS v1.0", text)
         self.assertIn("RAM:", text)
         self.assertIn("ok", text)
 
@@ -1418,6 +1418,53 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("20 ", text)
         self.assertIn("30 ", text)
 
+    # --- Phase 1D tests: >NUMBER, QUIT ---
+
+    def test_to_number_decimal(self):
+        """>NUMBER converts decimal digit string."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  0 0 S" 123" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        # len should be 0 (all consumed), result should be 123
+        self.assertIn("0 ", text)   # remaining length = 0
+        self.assertIn("123 ", text) # converted value
+
+    def test_to_number_hex(self):
+        """>NUMBER respects BASE (hex)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'HEX',
+            ': TEST  0 0 S" FF" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        self.assertIn("0 ", text)    # remaining length = 0
+        self.assertIn("FF ", text)   # 255 in hex
+
+    def test_to_number_partial(self):
+        """>NUMBER stops at non-digit character."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  0 0 S" 12X4" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        # Should parse "12" then stop at "X", leaving 2 chars unconsumed
+        self.assertIn("2 ", text)   # remaining length = 2 ("X4")
+        self.assertIn("12 ", text)  # converted value
+
+    def test_quit_in_words(self):
+        """QUIT is findable in dictionary."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['WORDS'])
+        self.assertIn("QUIT", text)
+
+    def test_to_number_in_words(self):
+        """>NUMBER is findable in dictionary."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['WORDS'])
+        self.assertIn(">NUMBER", text)
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
@@ -1437,6 +1484,94 @@ class TestAssemblerBranchRange(unittest.TestCase):
         lines = ["target:\n"] + ["nop\n"] * 200 + ["lbr target\n"]
         code = assemble("".join(lines))
         self.assertEqual(len(code), 200 + 3)
+
+    # -- SKIP instruction tests --
+
+    def test_skip_always_size(self):
+        """SKIP assembles to 2 bytes (EXT prefix + BR opcode)."""
+        code = assemble("skip\nnop")
+        # skip = 2 bytes (F6 30), nop = 1 byte
+        self.assertEqual(len(code), 3)
+        self.assertEqual(code[0], 0xF6)  # EXT prefix modifier=6
+        self.assertEqual(code[1], 0x30)  # BR family, cc=0 (always)
+
+    def test_skip_dot_condition(self):
+        """skip.eq assembles with correct condition code."""
+        code = assemble("skip.eq\nnop")
+        self.assertEqual(len(code), 3)
+        self.assertEqual(code[0], 0xF6)
+        self.assertEqual(code[1], 0x31)  # 0x30 | eq=1
+
+    def test_skip_ne_condition(self):
+        """skip.ne assembles with correct condition code."""
+        code = assemble("skip.ne\nnop")
+        self.assertEqual(code[0], 0xF6)
+        self.assertEqual(code[1], 0x32)  # 0x30 | ne=2
+
+    def test_skip_bad_condition(self):
+        """skip.xx with unknown condition raises AsmError."""
+        with self.assertRaises(AsmError):
+            assemble("skip.xx\nnop")
+
+    def test_skip_execution_taken(self):
+        """SKIP skips the next instruction when condition is true."""
+        # Set Z flag (cmpi r0, 0 when r0=0), then skip.eq over inc r1
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # sets Z flag
+            "skip.eq\n"          # Z is set → skip
+            "inc r1\n"           # should be skipped
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 0)  # inc was skipped
+
+    def test_skip_execution_not_taken(self):
+        """SKIP does not skip when condition is false."""
+        # Z not set, so skip.eq should NOT skip
+        code = assemble(
+            "ldi r0, 5\n"
+            "cmpi r0, 0\n"       # Z not set (5 != 0)
+            "skip.eq\n"          # Z not set → don't skip
+            "inc r1\n"           # should execute
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 1)  # inc executed
+
+    def test_skip_over_2byte_instruction(self):
+        """SKIP correctly skips a 2-byte instruction (BR)."""
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # Z set
+            "skip.eq\n"          # skip over the BR
+            "br end\n"           # 2 bytes — should be skipped
+            "inc r1\n"           # should execute
+            "end:\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 1)  # inc r1 executed (BR was skipped)
+
+    def test_skip_over_3byte_instruction(self):
+        """SKIP correctly skips a 3-byte instruction (LDI)."""
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # Z set
+            "skip.eq\n"          # skip over the LDI
+            "ldi r1, 99\n"       # 3 bytes — should be skipped
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 0)  # ldi was skipped
 
 
 # ---------------------------------------------------------------------------
