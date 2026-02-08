@@ -2852,10 +2852,11 @@ w_create_copy:
     cmpi r12, 0
     brne w_create_copy
 
-    ; Emit code: ldi64 r1, <data_addr>; subi r14, 8; str r14, r1; ret.l
-    ; data_addr = R0 + 17 (ldi64=11 + subi=3 + str=2 + ret.l=1 = 17)
+    ; Emit code: ldi64 r1, <data_addr>; subi r14, 8; str r14, r1; ret.l + DOES> slot
+    ; 30-byte trampoline: ldi64(11) + subi(3) + str(2) + ret.l(1) + 13 bytes DOES> slot
+    ; data_addr = R0 + 30
     mov r9, r0
-    addi r9, 17               ; data_addr (where data field will start)
+    addi r9, 30               ; data_addr (where data field will start)
 
     ; ldi64 r1, <data_addr>: F0 60 10 + 8 bytes LE
     ldi r12, 0xF0
@@ -2938,6 +2939,35 @@ w_create_copy:
     inc r0
     ; ret.l: 0E
     ldi r12, 0x0E
+    st.b r0, r12
+    inc r0
+
+    ; DOES> slot: 13 bytes of zero padding (will be patched by DOES>)
+    ldi r12, 0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
+    st.b r0, r12
+    inc r0
     st.b r0, r12
     inc r0
 
@@ -4814,6 +4844,789 @@ w_recurse:
 
 
 ; =====================================================================
+;  Phase 1C — VALUE/TO, POSTPONE, 2>R/2R>/2R@, DOES>
+; =====================================================================
+
+; VALUE ( x "name" -- )
+;   Like VARIABLE but at runtime pushes the *contents* of the data cell.
+;   Trampoline (19 bytes):
+;     ldi64 r1, <data_addr>   F0 60 10 + 8 bytes = 11
+;     ldn r1, r1              50 11                = 2
+;     subi r14, 8             67 E0 08             = 3
+;     str r14, r1             54 E1                = 2
+;     ret.l                   0E                   = 1
+;   data_addr = code_start + 19
+w_value:
+    ; Get initial value from stack
+    ldn r10, r14              ; x → R10 (safe across parse_word)
+    addi r14, 8
+    ; Parse name
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_colon_err
+
+    ; Build dictionary entry header at HERE
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE
+    mov r13, r0               ; save entry start
+
+    ; Link
+    ldi64 r11, var_latest
+    ldn r1, r11
+    str r0, r1
+    addi r0, 8
+
+    ; Flags+len
+    st.b r0, r12
+    inc r0
+
+    ; Copy name
+    ldi r1, 0
+w_val_copy:
+    cmp r1, r12
+    breq w_val_name_done
+    mov r7, r9
+    add r7, r1
+    ld.b r7, r7
+    st.b r0, r7
+    inc r0
+    inc r1
+    br w_val_copy
+w_val_name_done:
+    ; data_addr = R0 + 19
+    mov r1, r0
+    addi r1, 19
+
+    ; ldi64 r1, <data_addr>: F0 60 10 + 8 bytes LE
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ; 8 bytes of data_addr (R1) LE
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ; ldn r1, r1: 50 11
+    ldi r7, 0x50
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x11
+    st.b r0, r7
+    inc r0
+    ; subi r14, 8: 67 E0 08
+    ldi r7, 0x67
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x08
+    st.b r0, r7
+    inc r0
+    ; str r14, r1: 54 E1
+    ldi r7, 0x54
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE1
+    st.b r0, r7
+    inc r0
+    ; ret.l: 0E
+    ldi r7, 0x0E
+    st.b r0, r7
+    inc r0
+    ; Now R0 = data cell address. Initialize to x (R10).
+    str r0, r10
+    addi r0, 8
+    ; Update HERE and LATEST
+    ldi64 r11, var_here
+    str r11, r0
+    ldi64 r11, var_latest
+    str r11, r13
+    ret.l
+
+; TO ( x "name" -- )  [IMMEDIATE]
+;   Stores x into the data field of a VALUE word.
+;   Extracts data_addr from the ldi64 immediate at code+3.
+;   State-smart: interpret → store directly; compile → emit inline store.
+w_to:
+    ; Parse next word
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_colon_err
+
+    ; Find in dictionary
+    ldi64 r11, find_word
+    call.l r11
+    cmpi r9, 0
+    lbreq interp_undefined
+
+    ; entry_to_code → R9 = code addr
+    ldi64 r11, entry_to_code
+    call.l r11
+
+    ; Extract data_addr from ldi64 immediate at code+3
+    ; The trampoline starts with: F0 60 10 <8-byte LE addr>
+    ; So data_addr = 8-byte LE at R9+3
+    mov r11, r9
+    addi r11, 3
+    ; Read 8 bytes LE into R10
+    ld.b r10, r11
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    inc r11
+    ld.b r0, r11
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    lsli r0, 8
+    or r10, r0
+    ; R10 = data_addr
+
+    ; Check STATE
+    ldi64 r11, var_state
+    ldn r0, r11
+    cmpi r0, 0
+    brne w_to_compile
+
+    ; --- Interpret mode: store TOS at data_addr ---
+    ldn r1, r14
+    addi r14, 8
+    str r10, r1
+    ret.l
+
+w_to_compile:
+    ; --- Compile mode: emit inline code ---
+    ; Emit: ldn r1, r14      (50 1E)     = 2 bytes (pop TOS)
+    ;       addi r14, 8      (62 E0 08)  = 3 bytes
+    ;       ldi64 r11, <da>  (F0 60 B0 + 8 bytes) = 11 bytes
+    ;       str r11, r1      (54 B1)     = 2 bytes
+    ; Total = 18 bytes
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldi64 r11, <data_addr>  — R10 holds data_addr
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x60
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xB0
+    ldi64 r11, compile_byte
+    call.l r11
+    ; 8 bytes of R10 LE
+    mov r1, r10
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    mov r1, r10
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    andi r1, 0xFF
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r11, r1: 54 B1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xB1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; POSTPONE ( "name" -- )  [IMMEDIATE]
+;   If name is IMMEDIATE: compile a call to it (normal compile).
+;   If name is NOT IMMEDIATE: compile code that at runtime compiles a call.
+;   For non-immediate: compile_literal(code_addr) then compile_call(postpone_helper)
+;   postpone_helper pops code_addr from stack into R1 and calls compile_call.
+w_postpone:
+    ; Parse next word
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_colon_err
+
+    ; Find in dictionary
+    ldi64 r11, find_word
+    call.l r11
+    ; R9 = entry (0 = not found), R1 = flags byte
+    cmpi r9, 0
+    lbreq interp_undefined
+
+    mov r10, r1               ; save flags in R10
+    ; entry_to_code → R9 = code addr
+    ldi64 r11, entry_to_code
+    call.l r11
+    ; R9 = code addr
+
+    ; Check IMMEDIATE flag
+    mov r0, r10
+    andi r0, 0x80
+    brne w_postpone_imm
+
+    ; Non-IMMEDIATE: compile code to compile a call at runtime
+    ; Step 1: compile_literal(code_addr) — pushes code_addr onto stack at runtime
+    mov r1, r9
+    ldi64 r11, compile_literal
+    call.l r11
+    ; Step 2: compile_call(postpone_helper) — calls helper that does the compile
+    ldi64 r1, postpone_helper
+    ldi64 r11, compile_call
+    call.l r11
+    ret.l
+
+w_postpone_imm:
+    ; IMMEDIATE word: just compile a call to it
+    mov r1, r9
+    ldi64 r11, compile_call
+    call.l r11
+    ret.l
+
+; postpone_helper: runtime helper for POSTPONE of non-immediate words.
+;   Pops code_addr from data stack, compiles a call to it.
+postpone_helper:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, compile_call
+    call.l r11
+    ret.l
+
+; 2>R (IMMEDIATE) — compile inline: pop two from data stack, push to return stack
+;   Emits:  ldn r1, r14      (50 1E)     — x2 (top)
+;           addi r14, 8      (62 E0 08)
+;           ldn r0, r14      (50 0E)     — x1
+;           addi r14, 8      (62 E0 08)
+;           subi r15, 8      (67 F0 08)  — push x1 first (deeper)
+;           str r15, r0      (54 F0)
+;           subi r15, 8      (67 F0 08)  — push x2 on top
+;           str r15, r1      (54 F1)
+;   Total = 20 bytes
+w_2to_r:
+    ; ldn r1, r14: 50 1E
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8: 62 E0 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r0, r14: 50 0E
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x0E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8: 62 E0 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r15, 8: 67 F0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r15, r0: 54 F0
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r15, 8: 67 F0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r15, r1: 54 F1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; 2R> (IMMEDIATE) — compile inline: pop two from return stack, push to data stack
+;   Emits:  ldn r1, r15      (50 1F)     — x2 (top of RSP)
+;           addi r15, 8      (62 F0 08)
+;           ldn r0, r15      (50 0F)     — x1
+;           addi r15, 8      (62 F0 08)
+;           subi r14, 8      (67 E0 08)  — push x1 first (deeper)
+;           str r14, r0      (54 E0)
+;           subi r14, 8      (67 E0 08)  — push x2 on top
+;           str r14, r1      (54 E1)
+;   Total = 20 bytes
+w_2r_from:
+    ; ldn r1, r15: 50 1F
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r15, 8: 62 F0 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r0, r15: 50 0F
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x0F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r15, 8: 62 F0 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r14, 8: 67 E0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r14, r0: 54 E0
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r14, 8: 67 E0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r14, r1: 54 E1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; 2R@ (IMMEDIATE) — compile inline: copy two from return stack, push to data stack
+;   Emits:  ldn r0, r15      (50 0F)     — x2 (top of RSP)
+;           mov r1, r15      (42 1F)
+;           addi r1, 8       (62 10 08)
+;           ldn r1, r1       (50 11)     — x1
+;           subi r14, 8      (67 E0 08)  — push x1 first (deeper)
+;           str r14, r1      (54 E1)
+;           subi r14, 8      (67 E0 08)  — push x2 on top
+;           str r14, r0      (54 E0)
+;   Total = 19 bytes
+w_2r_fetch:
+    ; ldn r0, r15: 50 0F
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x0F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; mov r1, r15: 42 1F
+    ldi r1, 0x42
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r1, 8: 62 10 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r1, r1: 50 11
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x11
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r14, 8: 67 E0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r14, r1: 54 E1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE1
+    ldi64 r11, compile_byte
+    call.l r11
+    ; subi r14, 8: 67 E0 08
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r14, r0: 54 E0
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; DOES> (IMMEDIATE) — CREATE…DOES> defining pattern
+;   At compile time: emits call to does_runtime, then ret.l.
+;   The code after the ret.l is the DOES> body.
+;   At runtime (when the defining word executes): does_runtime patches
+;   the most recently CREATEd word's trampoline.
+;
+;   CREATE emits a 30-byte trampoline (with 14-byte DOES> slot):
+;     offset 0-10:  ldi64 r1, <data_addr>   (11 bytes)
+;     offset 11-13: subi r14, 8             (3 bytes)
+;     offset 14-15: str r14, r1             (2 bytes)
+;     offset 16:    ret.l                   (1 byte) ← DOES> overwrites here
+;     offset 17-29: padding                 (13 bytes)
+;     data field starts at offset 30
+;
+;   DOES> patches offset 16-29 with:
+;     ldi64 r11, <does_body>  (11 bytes)
+;     call.l r11              (2 bytes)
+;     ret.l                   (1 byte)
+w_does:
+    ; Compile call to does_runtime
+    ldi64 r1, does_runtime
+    ldi64 r11, compile_call
+    call.l r11
+    ; Compile ret.l — ends the defining word's runtime
+    ldi64 r11, compile_ret
+    call.l r11
+    ; The code compiled AFTER this point (by ; and friends) becomes the DOES> body.
+    ; Actually we need to NOT compile ret.l here for the DOES> body to follow...
+    ; Wait — the DOES> body is compiled by the outer interpreter after we return.
+    ; But we just compiled ret.l, so the defining word ends here.
+    ; The DOES> body code address = HERE (right after the ret.l we just compiled).
+    ; When the defining word runs, does_runtime reads the return address
+    ; (which points past the call to does_runtime, i.e. to the ret.l),
+    ; then does_body = ret.l_addr + 1 = the DOES> body code.
+    ret.l
+
+; does_runtime: runtime helper for DOES>
+;   Called when the defining word executes. The return address on RSP points
+;   to the byte after "call does_runtime", which is a ret.l. So:
+;     does_body = return_addr + 1
+;   Patches LATEST (the most recently CREATEd word) trampoline at offset 16.
+does_runtime:
+    ; Get return address from RSP (the call.l pushed it)
+    ldn r10, r15              ; R10 = return address (points to ret.l)
+    ; does_body = R10 + 1 (skip the ret.l)
+    mov r13, r10
+    addi r13, 1               ; R13 = does_body address
+
+    ; Get LATEST entry → code addr
+    ldi64 r11, var_latest
+    ldn r9, r11
+    ldi64 r11, entry_to_code
+    call.l r11
+    ; R9 = code_start of the CREATEd word
+
+    ; Patch offset 16-29 of the trampoline
+    ; offset 16: ldi64 r11, <does_body> = F0 60 B0 + 8 bytes LE
+    mov r0, r9
+    addi r0, 16
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xB0
+    st.b r0, r7
+    inc r0
+    ; 8 bytes of does_body addr (R13) LE
+    st.b r0, r13
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r13
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ; call.l r11: 0D 0B
+    ldi r7, 0x0D
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x0B
+    st.b r0, r7
+    inc r0
+    ; ret.l: 0E
+    ldi r7, 0x0E
+    st.b r0, r7
+
+    ; Return from the defining word (does_runtime was called, so just ret.l)
+    ; The ret.l we return to is the one we're pointing at (R10), which exits
+    ; the defining word.
+    ret.l
+
+
+; =====================================================================
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
@@ -6529,12 +7342,75 @@ d_bracket_char:
     ret.l
 
 ; === RECURSE === (IMMEDIATE)
-latest_entry:
 d_recurse:
     .dq d_bracket_char
     .db 0x87
     .ascii "RECURSE"
     ldi64 r11, w_recurse
+    call.l r11
+    ret.l
+
+; === VALUE ===
+d_value:
+    .dq d_recurse
+    .db 5
+    .ascii "VALUE"
+    ldi64 r11, w_value
+    call.l r11
+    ret.l
+
+; === TO === (IMMEDIATE)
+d_to:
+    .dq d_value
+    .db 0x82
+    .ascii "TO"
+    ldi64 r11, w_to
+    call.l r11
+    ret.l
+
+; === POSTPONE === (IMMEDIATE)
+d_postpone:
+    .dq d_to
+    .db 0x88
+    .ascii "POSTPONE"
+    ldi64 r11, w_postpone
+    call.l r11
+    ret.l
+
+; === 2>R === (IMMEDIATE)
+d_2to_r:
+    .dq d_postpone
+    .db 0x83
+    .ascii "2>R"
+    ldi64 r11, w_2to_r
+    call.l r11
+    ret.l
+
+; === 2R> === (IMMEDIATE)
+d_2r_from:
+    .dq d_2to_r
+    .db 0x83
+    .ascii "2R>"
+    ldi64 r11, w_2r_from
+    call.l r11
+    ret.l
+
+; === 2R@ === (IMMEDIATE)
+d_2r_fetch:
+    .dq d_2r_from
+    .db 0x83
+    .ascii "2R@"
+    ldi64 r11, w_2r_fetch
+    call.l r11
+    ret.l
+
+; === DOES> === (IMMEDIATE)
+latest_entry:
+d_does:
+    .dq d_2r_fetch
+    .db 0x85
+    .ascii "DOES>"
+    ldi64 r11, w_does
     call.l r11
     ret.l
 

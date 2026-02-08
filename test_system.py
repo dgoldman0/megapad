@@ -1325,6 +1325,99 @@ class TestBIOS(unittest.TestCase):
         # FIND on "DUP" should return xt and -1 (non-immediate)
         self.assertIn("-1 ", text)
 
+    # --- Phase 1C tests ---
+
+    def test_value_basic(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['42 VALUE myval', 'myval .'])
+        self.assertIn("42 ", text)
+
+    def test_value_to_interpret(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '10 VALUE x',
+            'x .',
+            '99 TO x',
+            'x .'
+        ])
+        self.assertIn("10 ", text)
+        self.assertIn("99 ", text)
+
+    def test_value_to_compile(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '5 VALUE cnt',
+            ': INC-CNT  cnt 1+ TO cnt ;',
+            'INC-CNT INC-CNT INC-CNT',
+            'cnt .'
+        ])
+        self.assertIn("8 ", text)
+
+    def test_postpone_immediate(self):
+        """POSTPONE of an IMMEDIATE word compiles it instead of executing."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': MY-IF  POSTPONE IF ; IMMEDIATE',
+            ': TEST  1 MY-IF 42 . THEN ;',
+            'TEST'
+        ])
+        self.assertIn("42 ", text)
+
+    def test_postpone_non_immediate(self):
+        """POSTPONE of non-IMMEDIATE compiles deferred compilation."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': MY-DUP  POSTPONE DUP ; IMMEDIATE',
+            ': TEST  5 MY-DUP + . ;',
+            'TEST'
+        ])
+        self.assertIn("10 ", text)
+
+    def test_2to_r_2r_from(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  1 2 2>R 2R> . . ;',
+            'TEST'
+        ])
+        self.assertIn("2 ", text)
+        self.assertIn("1 ", text)
+
+    def test_2r_fetch(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  10 20 2>R 2R@ . . 2R> 2DROP ;',
+            'TEST'
+        ])
+        self.assertIn("20 ", text)
+        self.assertIn("10 ", text)
+
+    def test_does_basic(self):
+        """CREATE...DOES> basic defining word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': CONST  CREATE , DOES> @ ;',
+            '42 CONST answer',
+            'answer .'
+        ])
+        self.assertIn("42 ", text)
+
+    def test_does_array(self):
+        """CREATE...DOES> for array access."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': ARRAY  CREATE CELLS ALLOT DOES> SWAP CELLS + ;',
+            '3 ARRAY myarr',
+            '10 0 myarr !',
+            '20 1 myarr !',
+            '30 2 myarr !',
+            '0 myarr @ .',
+            '1 myarr @ .',
+            '2 myarr @ .'
+        ])
+        self.assertIn("10 ", text)
+        self.assertIn("20 ", text)
+        self.assertIn("30 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
