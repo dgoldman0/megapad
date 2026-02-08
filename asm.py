@@ -115,6 +115,16 @@ def _parse_string(lineno: int, text: str) -> bytes:
             elif c == '0': result.append(0x00)
             elif c == '\\': result.append(0x5C)
             elif c == '"': result.append(0x22)
+            elif c == 'x' and i + 3 < len(s):
+                hex_str = s[i + 2 : i + 4]
+                try:
+                    result.append(int(hex_str, 16))
+                except ValueError:
+                    result.append(ord(c) & 0xFF)
+                    i += 2
+                    continue
+                i += 4
+                continue
             else: result.append(ord(c) & 0xFF)
             i += 2
         else:

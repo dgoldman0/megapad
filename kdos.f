@@ -1,8 +1,8 @@
 \ =====================================================================
-\  KDOS v0.9d — Kernel Dashboard OS for Megapad-64
+\  KDOS v1.0 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
-\  Loaded via UART into the Megapad-64 BIOS v0.5+ Forth system.
+\  Loaded via UART into the Megapad-64 BIOS v1.0 Forth system.
 \
 \  Subsystems:
 \    1. Utilities       — common words, CMOVE, +!, tile-alignment
@@ -26,61 +26,23 @@
 \ =====================================================================
 \  §1  Utility Words
 \ =====================================================================
-\  Note: BIOS v0.5 now provides CELLS, CELL+, 2*, <>, 0<>, MIN, MAX,
-\  -ROT, +!, CMOVE, ?DUP, ABS, NEGATE, 2DROP, NIP, TUCK, BL, TRUE,
-\  FALSE, EXIT, >R, R>, R@, J, UNLOOP, +LOOP, AGAIN, STATE, [, ],
-\  LITERAL, IMMEDIATE, CREATE, S", 0>.
-
-: OFF     ( addr -- )        0 SWAP ! ;
-
-\ Comparison words not in BIOS
-: >=  ( a b -- flag )  < 0= ;
-: <=  ( a b -- flag )  > 0= ;
-
-\ Tile-align HERE: pad with zero bytes to next 64-byte boundary
-: TALIGN  ( -- )  BEGIN HERE 63 AND WHILE 0 C, REPEAT ;
+\  Note: BIOS v1.0 provides all ANS core words including OFF, >=, <=,
+\  W@, W!, L@, L!, .ZSTR, UCHAR, 2OVER, 2SWAP, 2ROT, TALIGN, MOVE,
+\  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, FIND, SOURCE, >IN, >NUMBER,
+\  VALUE, TO, DOES>, POSTPONE, RECURSE, COUNT, WITHIN, U<, U>, 2/,
+\  CHAR, [CHAR], 2>R, 2R>, 2R@, QUIT, plus the v0.5 set.
 
 \ .R ( n width -- ) print number right-justified in width
 : .R  ( just use . for now )
     DROP . ;
 
-\ 16-bit LE fetch/store (needed for frame header parsing)
-: W@  ( addr -- u16 )  DUP C@ SWAP 1+ C@ 8 LSHIFT OR ;
-: W!  ( u16 addr -- )  2DUP C! SWAP 8 RSHIFT SWAP 1+ C! ;
-
-\ 32-bit LE fetch/store
-: L@  ( addr -- u32 )  DUP W@ SWAP 2 + W@ 16 LSHIFT OR ;
-: L!  ( u32 addr -- )  2DUP W! SWAP 16 RSHIFT SWAP 2 + W! ;
-
 \ -- String utilities (needed by MP64FS file system) --
 
-\ Print a null-terminated string
-: .ZSTR  ( addr -- )
-    BEGIN DUP C@ ?DUP WHILE EMIT 1+ REPEAT DROP ;
-
 \ SAMESTR? ( addr1 addr2 maxlen -- flag )
-\   Compare two null-terminated byte strings up to maxlen characters.
+\   Compare two byte strings up to maxlen bytes (zero-padded).
 \   Returns -1 if equal, 0 if different.
-VARIABLE STR-A
-VARIABLE STR-B
-VARIABLE STR-N
-
 : SAMESTR?  ( a1 a2 maxlen -- flag )
-    STR-N !  STR-B !  STR-A !
-    BEGIN
-        STR-N @ 0>
-    WHILE
-        STR-A @ C@  STR-B @ C@    ( c1 c2 )
-        2DUP <> IF
-            2DROP 0 EXIT           \ different
-        THEN
-        OR 0= IF
-            -1 EXIT                \ both null -> match
-        THEN
-        1 STR-A +!  1 STR-B +!
-        -1 STR-N +!
-    REPEAT
-    -1 ;
+    DUP >R SWAP R> COMPARE 0= IF -1 ELSE 0 THEN ;
 
 \ NAMEBUF -- 16-byte scratch for file name parsing
 VARIABLE NAMEBUF  15 ALLOT
@@ -98,26 +60,16 @@ VARIABLE PN-LEN
 
 \ -- Stack safety utilities --
 
-\ NEEDS ( n -- )  print warning if stack has fewer than n items
+\ NEEDS ( n -- )  abort if stack has fewer than n items
 : NEEDS  ( n -- )
-    DEPTH 2 - >  IF  ." Stack underflow" CR  THEN ;
+    DEPTH 1 - >  ABORT" Stack underflow" ;
 
-\ ASSERT ( flag -- )  print warning if flag is false
+\ ASSERT ( flag -- )  abort if flag is false
 : ASSERT  ( flag -- )
-    0= IF  ." Assertion failed" CR  THEN ;
+    0= ABORT" Assertion failed" ;
 
 \ .DEPTH ( -- )  show current stack depth
 : .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
-
-\ -- Character utilities --
-
-\ UCHAR ( c -- C )  convert lowercase ASCII letter to uppercase
-: UCHAR  ( c -- C )
-    DUP 97 >= OVER 123 < AND IF 32 - THEN ;
-
-\ 2OVER ( a b c d -- a b c d a b )  copy second pair over top pair
-: 2OVER  ( a b c d -- a b c d a b )
-    3 PICK 3 PICK ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -771,6 +723,18 @@ VARIABLE P-PIPE
     ELSE DROP THEN
     DROP ;
 
+\ -- Benchmarking primitives (moved before P.BENCH) --
+VARIABLE BENCH-T0
+
+: BENCH  ( xt -- cycles )
+    CYCLES BENCH-T0 !
+    EXECUTE
+    CYCLES BENCH-T0 @ - ;
+
+: .BENCH  ( xt -- )
+    BENCH
+    ." cycles=" . CR ;
+
 \ P.BENCH ( pipe -- ) execute and time each step
 : P.BENCH  ( pipe -- )
     ." Pipeline (" DUP P.COUNT . ." steps):" CR
@@ -1076,27 +1040,24 @@ VARIABLE FS-OK     0 FS-OK !
 VARIABLE FF-NEED
 VARIABLE FF-START
 VARIABLE FF-LEN
-VARIABLE FF-RESULT
 
 : FIND-FREE  ( count -- sector | -1 )
     FF-NEED !
     FS-DATA-START FF-START !
     0 FF-LEN !
-    -1 FF-RESULT !
+    -1                                 \ result on stack
     2048 FS-DATA-START DO
-        FF-RESULT @ -1 = IF
-            I BIT-FREE? IF
-                FF-LEN @ 0= IF I FF-START ! THEN
-                1 FF-LEN +!
-                FF-LEN @ FF-NEED @ >= IF
-                    FF-START @ FF-RESULT !
-                THEN
-            ELSE
-                0 FF-LEN !
+        I BIT-FREE? IF
+            FF-LEN @ 0= IF I FF-START ! THEN
+            1 FF-LEN +!
+            FF-LEN @ FF-NEED @ >= IF
+                DROP FF-START @        \ replace -1 with start
+                LEAVE
             THEN
+        ELSE
+            0 FF-LEN !
         THEN
-    LOOP
-    FF-RESULT @ ;
+    LOOP ;
 
 \ ── Directory helpers ────────────────────────────────────────────────
 
@@ -1111,16 +1072,12 @@ VARIABLE FF-RESULT
 : DE.FLAGS  ( de -- u8 )    25 + C@ ;
 
 \ FIND-FREE-SLOT ( -- slot | -1 ) first empty directory slot
-VARIABLE FFS-RESULT
 
 : FIND-FREE-SLOT  ( -- slot | -1 )
-    -1 FFS-RESULT !
+    -1
     FS-MAX-FILES 0 DO
-        FFS-RESULT @ -1 = IF
-            I DIRENT C@ 0= IF I FFS-RESULT ! THEN
-        THEN
-    LOOP
-    FFS-RESULT @ ;
+        I DIRENT C@ 0= IF DROP I LEAVE THEN
+    LOOP ;
 
 \ ── Loading and syncing ──────────────────────────────────────────────
 
@@ -1226,13 +1183,26 @@ VARIABLE FFS-RESULT
     LOOP
     . ." free sectors)" CR ;
 
+\ ── FIND-BY-NAME — shared directory lookup ───────────────────────────
+\ Searches directory for an entry whose first 16 bytes match NAMEBUF.
+\ Returns slot index or -1 if not found.  Caller must call PARSE-NAME first.
+
+: FIND-BY-NAME  ( -- slot | -1 )
+    -1
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            I DIRENT NAMEBUF 16 SAMESTR? IF
+                DROP I LEAVE
+            THEN
+        THEN
+    LOOP ;
+
 \ ── MKFILE — create a new file ───────────────────────────────────────
 
 VARIABLE MK-NSEC
 VARIABLE MK-TYPE
 VARIABLE MK-SLOT
 VARIABLE MK-START
-VARIABLE MK-DUP
 
 : MKFILE  ( nsectors type "name" -- )
     FS-ENSURE
@@ -1240,17 +1210,7 @@ VARIABLE MK-DUP
     MK-TYPE !  MK-NSEC !
     PARSE-NAME
     \ Check for duplicate name
-    0 MK-DUP !
-    FS-MAX-FILES 0 DO
-        MK-DUP @ 0= IF
-            I DIRENT C@ 0<> IF
-                I DIRENT NAMEBUF 16 SAMESTR? IF
-                    -1 MK-DUP !
-                THEN
-            THEN
-        THEN
-    LOOP
-    MK-DUP @ IF
+    FIND-BY-NAME -1 <> IF
         ." File exists: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Find empty directory slot
@@ -1265,12 +1225,12 @@ VARIABLE MK-DUP
     LOOP
     \ Build directory entry
     MK-SLOT @ DIRENT                 ( de )
-    DUP FS-ENTRY-SIZE 0 FILL        ( de )  zero slot
-    DUP NAMEBUF SWAP 16 CMOVE       ( de )  copy name
-    DUP MK-START @ SWAP 16 + W!     ( de )  start sector
-    DUP MK-NSEC  @ SWAP 18 + W!     ( de )  sector count
-    DUP 0          SWAP 20 + L!     ( de )  used_bytes = 0
-    MK-TYPE  @ SWAP 24 + C!         ( )    type
+    DUP FS-ENTRY-SIZE 0 FILL        \ zero slot
+    DUP NAMEBUF SWAP 16 CMOVE       \ copy name
+    DUP MK-START @ SWAP 16 + W!     \ start sector
+    DUP MK-NSEC  @ SWAP 18 + W!     \ sector count
+    DUP 0          SWAP 20 + L!     \ used_bytes = 0
+    MK-TYPE  @ SWAP 24 + C!         \ type
     FS-SYNC
     ." Created: " NAMEBUF .ZSTR
     ." (" MK-NSEC @ . ." sectors at " MK-START @ . ." )" CR ;
@@ -1283,16 +1243,7 @@ VARIABLE RM-SLOT
     FS-ENSURE
     FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
     PARSE-NAME
-    -1 RM-SLOT !
-    FS-MAX-FILES 0 DO
-        RM-SLOT @ -1 = IF
-            I DIRENT C@ 0<> IF
-                I DIRENT NAMEBUF 16 SAMESTR? IF
-                    I RM-SLOT !
-                THEN
-            THEN
-        THEN
-    LOOP
+    FIND-BY-NAME RM-SLOT !
     RM-SLOT @ -1 = IF
         ." Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
@@ -1315,16 +1266,7 @@ VARIABLE OP-SLOT
     FS-ENSURE
     FS-OK @ 0= IF ." No filesystem" CR 0 EXIT THEN
     PARSE-NAME
-    -1 OP-SLOT !
-    FS-MAX-FILES 0 DO
-        OP-SLOT @ -1 = IF
-            I DIRENT C@ 0<> IF
-                I DIRENT NAMEBUF 16 SAMESTR? IF
-                    I OP-SLOT !
-                THEN
-            THEN
-        THEN
-    LOOP
+    FIND-BY-NAME OP-SLOT !
     OP-SLOT @ -1 = IF
         ." Not found: " NAMEBUF .ZSTR CR 0 EXIT
     THEN
@@ -1347,6 +1289,89 @@ VARIABLE OP-SLOT
     OVER F.SLOT DIRENT 20 + L!      \ update used_bytes in dir cache
     DROP
     FS-SYNC ;
+
+\ ── LOAD — load and execute a Forth source file ─────────────────────
+\ LOAD ( "filename" -- ) open a file by name, read it, EVALUATE it
+\   Reads the entire file into a temporary buffer at HERE, then
+\   walks through it line by line, EVALUATEing each line.
+
+VARIABLE LD-FD
+VARIABLE LD-BUF
+VARIABLE LD-SZ
+
+: LOAD  ( "filename" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME DUP -1 = IF
+        DROP ." Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DIRENT                               ( de )
+    \ Open by slot
+    DUP DE.USED DUP 0= IF
+        2DROP ." Empty file" CR EXIT
+    THEN LD-SZ !                         ( de )
+    DUP 16 + W@ SWAP DE.COUNT           ( start count )
+    \ Build file descriptor on stack
+    HERE LD-BUF !
+    HERE LD-SZ @ +                       ( start count buf-end )
+    DROP                                 ( start count )
+    \ Read sectors directly into buffer
+    OVER DISK-SEC!
+    LD-BUF @ DISK-DMA!
+    DUP DISK-N!
+    DISK-READ
+    \ Now walk buffer line by line and EVALUATE each line
+    LD-BUF @                             ( addr )
+    LD-SZ @                              ( addr remaining )
+    BEGIN DUP 0> WHILE
+        \ Find next newline or end
+        OVER                             ( addr rem linestart )
+        2 PICK                           ( addr rem linestart rem )
+        0                                ( addr rem linestart rem i )
+        BEGIN
+            DUP 2 PICK < IF
+                OVER OVER + C@ 10 = IF
+                    TRUE                 \ found newline
+                ELSE
+                    1+ FALSE
+                THEN
+            ELSE TRUE THEN              \ end of buffer
+        UNTIL                            ( addr rem linestart rem linelen )
+        NIP                              ( addr rem linestart linelen )
+        DUP 0> IF
+            2DUP EVALUATE
+        THEN
+        \ Advance past line + newline
+        1+                               ( addr rem linestart skip )
+        ROT OVER - >R                    ( addr linestart skip  R: rem' )
+        + SWAP DROP                      ( addr' )
+        R>                               ( addr' rem' )
+    REPEAT
+    2DROP ;
+
+\ -- ANSI helpers (needed by .DOC-CHUNK; full set defined in §9) --
+: ESC   ( -- )  27 EMIT ;
+: CSI   ( -- )  ESC 91 EMIT ;
+: .N  ( n -- )
+    DUP 0< IF 45 EMIT NEGATE THEN
+    DUP 10 < IF
+        48 + EMIT
+    ELSE DUP 100 < IF
+        DUP 10 / 48 + EMIT
+        10 MOD 48 + EMIT
+    ELSE
+        DUP 1000 < IF
+            DUP 100 / 48 + EMIT
+            DUP 10 / 10 MOD 48 + EMIT
+            10 MOD 48 + EMIT
+        ELSE
+            .
+        THEN
+    THEN THEN ;
+: SGR      ( n -- )  CSI .N 109 EMIT ;
+: RESET-COLOR  ( -- )  0 SGR ;
+: DIM      ( -- )  2 SGR ;
 
 \ =====================================================================
 \  §7.7  Documentation Browser
@@ -1457,30 +1482,28 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 \ DESCRIBE ( "word" -- )  look up a word in the documentation
 \   Tries to open a doc file matching the name.  If no exact match,
 \   suggests using TOPICS.
-VARIABLE DS-SLOT
 : DESCRIBE  ( "word" -- )
     PARSE-NAME PN-LEN @ 0= IF ." Usage: DESCRIBE <word>" CR EXIT THEN
     FS-ENSURE
     FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
     \ Search for a doc file whose name matches NAMEBUF
-    -1 DS-SLOT !
+    -1
     FS-MAX-FILES 0 DO
-        DS-SLOT @ -1 = IF
-            I DIRENT C@ 0<> IF
-                I DIRENT DE.TYPE FTYPE-DOC = IF
-                    I DIRENT NAMEBUF 16 SAMESTR? IF
-                        I DS-SLOT !
-                    THEN
+        I DIRENT C@ 0<> IF
+            I DIRENT DE.TYPE FTYPE-DOC = IF
+                I DIRENT NAMEBUF 16 SAMESTR? IF
+                    DROP I LEAVE
                 THEN
             THEN
         THEN
     LOOP
-    DS-SLOT @ -1 = IF
+    DUP -1 = IF
+        DROP
         ." No doc for: " NAMEBUF .ZSTR CR
         ." Use TOPICS to list available documentation." CR
         EXIT
     THEN
-    DS-SLOT @ OPEN-BY-SLOT DUP 0= IF EXIT THEN
+    OPEN-BY-SLOT DUP 0= IF EXIT THEN
     CR SHOW-FILE CR ;
 
 \ =====================================================================
@@ -1509,22 +1532,19 @@ VARIABLE IC-PA
 VARIABLE IC-PL
 VARIABLE IC-SA
 VARIABLE IC-SL
-VARIABLE IC-OK
 
 : ICONTAINS?  ( pa pl sa sl -- flag )
     IC-SL !  IC-SA !  IC-PL !  IC-PA !
     IC-PL @ 0= IF  -1 EXIT  THEN            \ empty pattern matches all
     IC-SL @ IC-PL @ < IF  0 EXIT  THEN      \ pattern longer than string
     IC-SL @ IC-PL @ - 1+  0 DO              \ I = start position in string
-        -1 IC-OK !                            \ assume match
+        TRUE                                  \ assume match
         IC-PL @ 0 DO                          \ I = pat offset, J = start pos
-            IC-OK @ IF
-                IC-SA @ J + I + C@ UCHAR
-                IC-PA @ I + C@ UCHAR
-                <> IF  0 IC-OK !  THEN
-            THEN
+            IC-SA @ J + I + C@ UCHAR
+            IC-PA @ I + C@ UCHAR
+            <> IF  DROP FALSE LEAVE  THEN
         LOOP
-        IC-OK @ IF  UNLOOP -1 EXIT  THEN     \ found match
+        IF  UNLOOP -1 EXIT  THEN             \ found match
     LOOP
     0 ;
 
@@ -1677,20 +1697,16 @@ VARIABLE TDESC-TEMP
 \ -- Find next ready task --
 \   Scans task table for the first READY task.
 \   Returns task descriptor address or 0 if none ready.
-VARIABLE FOUND-TASK
 : FIND-READY  ( -- tdesc | 0 )
-    0 FOUND-TASK !
+    0                                  \ default: not found
     TASK-COUNT @ DUP 0<> IF
         0 DO
-            FOUND-TASK @ 0= IF
-                I CELLS TASK-TABLE + @       ( tdesc )
-                DUP T.STATUS T.READY = IF
-                    FOUND-TASK !             ( -- store it )
-                ELSE DROP THEN
-            THEN
+            I CELLS TASK-TABLE + @     ( tdesc )
+            DUP T.STATUS T.READY = IF
+                NIP LEAVE              \ replace 0 with tdesc
+            ELSE DROP THEN
         LOOP
-    ELSE DROP THEN
-    FOUND-TASK @ ;
+    ELSE DROP THEN ;
 
 \ -- RUN-TASK ( tdesc -- ) execute a task's XT, mark DONE when it returns --
 : RUN-TASK  ( tdesc -- )
@@ -1805,6 +1821,12 @@ VARIABLE PREEMPT-ENABLED
         THEN
     THEN ;
 
+\ -- Forward declarations for §10 words needed by §9 TUI --
+VARIABLE PORT-COUNT     0 PORT-COUNT !
+VARIABLE PORT-RX        0 PORT-RX !
+VARIABLE PORT-DROP      0 PORT-DROP !
+: NET-RX?  ( -- flag )   NET-STATUS 2 AND 0<> ;
+
 \ =====================================================================
 \  §9  Interactive Screens
 \ =====================================================================
@@ -1869,7 +1891,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.9d "
+    ."  KDOS v1.0 "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -2119,15 +2141,10 @@ VARIABLE FRAME-BUF  1499 ALLOT
 VARIABLE PORT-TABLE  255 CELLS ALLOT
 PORT-TABLE 256 CELLS 0 FILL
 
-\ -- Port registry count --
-VARIABLE PORT-COUNT
-0 PORT-COUNT !
+\ -- Port registry count (defined early, before §9 TUI) --
+\ -- PORT-COUNT, PORT-RX, PORT-DROP already defined before §9 --
 
-\ -- Stats --
-VARIABLE PORT-RX       \ total frames routed
-0 PORT-RX !
-VARIABLE PORT-DROP     \ frames dropped (unbound source)
-0 PORT-DROP !
+\ -- Stats (already defined before §9) --
 
 \ -- Temp for routing --
 VARIABLE ROUTE-BUF
@@ -2140,8 +2157,7 @@ VARIABLE ROUTE-BUF
 : UNPORT     ( id -- )          DUP PORT@ 0<> IF -1 PORT-COUNT +! THEN
                                 0 SWAP PORT-SLOT ! ;
 
-\ -- NIC convenience --
-: NET-RX?  ( -- flag )   NET-STATUS 2 AND 0<> ;
+\ -- NIC convenience (defined early, before §9 TUI) --
 
 \ -- Frame header accessors (valid after NET-RECV into FRAME-BUF) --
 : FRAME-SRC   ( -- id )    FRAME-BUF C@ ;
@@ -2202,21 +2218,8 @@ VARIABLE ROUTE-BUF
 \  §11  Benchmarking
 \ =====================================================================
 \
-\  BENCH ( xt -- cycles )
-\    Time the execution of a word (given as XT from ' or ['] ).
-\    Returns the cycle count difference.
-
-VARIABLE BENCH-T0
-
-: BENCH  ( xt -- cycles )
-    CYCLES BENCH-T0 !
-    EXECUTE
-    CYCLES BENCH-T0 @ - ;
-
-\ .BENCH ( xt -- ) time and print result
-: .BENCH  ( xt -- )
-    BENCH
-    ." cycles=" . CR ;
+\  BENCH and .BENCH are defined in §6 (before P.BENCH needs them).
+\  This section is kept as a placeholder for additional benchmark words.
 
 \ =====================================================================
 \  §12  Dashboard
@@ -2233,7 +2236,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.9d — Kernel Dashboard OS" CR
+    ."  KDOS v1.0 — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -2247,7 +2250,7 @@ VARIABLE BENCH-T0
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS v0.9d | bufs=" BUF-COUNT @ .
+    ." KDOS v1.0 | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
@@ -2262,7 +2265,7 @@ VARIABLE BENCH-T0
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.9d — Quick Reference" CR
+    ."  KDOS v1.0 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -2384,10 +2387,21 @@ VARIABLE BENCH-T0
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.9d — Kernel Dashboard OS" CR
+."  KDOS v1.0 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR
 ." Type TOPICS or LESSONS for documentation." CR
 DISK? IF FS-LOAD THEN
+
+\ AUTOEXEC: if autoexec.f exists on disk, load and execute it
+: AUTOEXEC  ( -- )
+    FS-OK @ 0= IF EXIT THEN
+    \ Check if autoexec.f exists
+    NAMEBUF 16 0 FILL
+    S" autoexec.f" DROP NAMEBUF 10 CMOVE
+    FIND-BY-NAME -1 = IF EXIT THEN
+    ." Loading autoexec.f..." CR
+    S" LOAD autoexec.f" EVALUATE ;
+AUTOEXEC
 CR

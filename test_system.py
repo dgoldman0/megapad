@@ -1812,7 +1812,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.9d", text)
+        self.assertIn("KDOS v1.0", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1942,7 +1942,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.9d", text)
+        self.assertIn("KDOS v1.0", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -2785,7 +2785,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.9d", text)
+        self.assertIn("KDOS v1.0", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -4197,10 +4197,10 @@ class TestKDOS(unittest.TestCase):
         self.assertIn(".DEPTH", text)
 
     def test_version_v09d(self):
-        """Version strings show v0.9d."""
+        """Version strings show v1.0."""
         src = "\n".join(self.kdos_lines)
-        self.assertIn("v0.9d", src)
-        self.assertNotIn("v0.9c", src)
+        self.assertIn("v1.0", src)
+        self.assertNotIn("v0.9d", src)
 
 
 # ---------------------------------------------------------------------------

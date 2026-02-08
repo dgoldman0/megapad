@@ -221,6 +221,10 @@ interp_undefined:
     ldi64 r10, str_undefined
     ldi64 r11, print_str
     call.l r11
+    ; Reset STATE to interpret mode (recover from compile-mode errors)
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
     ; Abort rest of line
     lbr quit_loop
 
@@ -2362,6 +2366,13 @@ w_do:
     ldn r1, r11
     subi r14, 8
     str r14, r1
+    ; Save current leave_count on data stack (for nesting) then reset to 0
+    ldi64 r11, var_leave_count
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1               ; push saved leave_count
+    ldi r1, 0
+    str r11, r1               ; leave_count = 0
     ret.l
 
 ; LOOP (IMMEDIATE) — end counted loop
@@ -2439,6 +2450,10 @@ w_loop:
     ldi64 r11, compile_byte
     call.l r11
     ; lbrne <loop-top>
+    ; Pop saved_leave_count first (pushed by DO after loop-target)
+    ldn r12, r14              ; saved leave_count
+    addi r14, 8
+    ; Pop loop-target
     ldn r9, r14               ; loop target addr
     addi r14, 8
     ldi64 r11, var_here
@@ -2470,6 +2485,42 @@ w_loop:
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
+    ; --- Resolve LEAVE fixups ---
+    ; R0 = HERE (target for LEAVE branches = just past LOOP cleanup)
+    ; R12 = saved leave_count (from DO)
+    ; Walk var_leave_fixups[0 .. var_leave_count-1], patch each to branch to HERE
+    ldi64 r11, var_leave_count
+    ldn r1, r11               ; current leave_count
+    cmpi r1, 0
+    breq w_loop_leave_done
+    ldi64 r9, var_leave_fixups
+    ldi r7, 0                 ; index
+w_loop_leave_resolve:
+    cmp r7, r1
+    breq w_loop_leave_done
+    ; fixup_addr = var_leave_fixups[r7]
+    mov r11, r7
+    lsli r11, 3               ; index * 8
+    add r11, r9               ; &var_leave_fixups[index]
+    ldn r11, r11              ; fixup_addr
+    ; offset = HERE - (fixup_addr + 2)
+    mov r13, r0
+    sub r13, r11
+    subi r13, 2
+    ; Patch big-endian: high byte then low byte
+    mov r1, r13               ; preserve full offset for low byte
+    lsri r1, 8
+    st.b r11, r1              ; high byte at fixup_addr
+    inc r11
+    st.b r11, r13             ; low byte at fixup_addr+1
+    inc r7
+    ldi64 r11, var_leave_count
+    ldn r1, r11               ; reload count (R1 was clobbered)
+    br w_loop_leave_resolve
+w_loop_leave_done:
+    ; Restore leave_count from saved value (R12)
+    ldi64 r11, var_leave_count
+    str r11, r12
     ret.l
 
 ; I (IMMEDIATE at compile time but not actually — it's a runtime word)
@@ -2718,6 +2769,10 @@ w_plus_loop:
     ldi64 r11, compile_byte
     call.l r11
     ; lbrne <loop-top>: 42 XX XX
+    ; Pop saved_leave_count first (pushed by DO after loop-target)
+    ldn r12, r14              ; saved leave_count
+    addi r14, 8
+    ; Pop loop-target
     ldn r9, r14               ; loop target addr from data stack
     addi r14, 8
     ldi64 r11, var_here
@@ -2746,6 +2801,35 @@ w_plus_loop:
     inc r0
     ldi64 r11, var_here
     str r11, r0
+    ; --- Resolve LEAVE fixups (same as w_loop) ---
+    ldi64 r11, var_leave_count
+    ldn r1, r11
+    cmpi r1, 0
+    breq w_ploop_leave_done
+    ldi64 r9, var_leave_fixups
+    ldi r7, 0
+w_ploop_leave_resolve:
+    cmp r7, r1
+    breq w_ploop_leave_done
+    mov r11, r7
+    lsli r11, 3
+    add r11, r9
+    ldn r11, r11              ; fixup_addr
+    mov r13, r0
+    sub r13, r11
+    subi r13, 2
+    mov r1, r13
+    lsri r1, 8
+    st.b r11, r1
+    inc r11
+    st.b r11, r13
+    inc r7
+    ldi64 r11, var_leave_count
+    ldn r1, r11
+    br w_ploop_leave_resolve
+w_ploop_leave_done:
+    ldi64 r11, var_leave_count
+    str r11, r12
     ret.l
 
 ; AGAIN (IMMEDIATE) — unconditional backward branch
@@ -4308,6 +4392,22 @@ w_abort_quote:
     ldi r1, 0x00
     ldi64 r11, compile_byte
     call.l r11
+    ; Compile LBR <over_string> to jump over inline string data
+    ldi r1, 0x40              ; LBR opcode
+    ldi64 r11, compile_byte
+    call.l r11
+    ; Save LBR fixup address on data stack
+    ldi64 r11, var_here
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0               ; push LBR fixup addr
+    ; Placeholder offset bytes
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
     ; Parse the string from input (up to closing '"')
     ldi64 r11, var_to_in
     ldn r0, r11               ; >IN
@@ -4375,6 +4475,19 @@ w_abq_copy_done:
     inc r0
     ldi64 r11, var_here
     str r11, r0
+    ; Resolve LBR <over_string> fixup
+    ldn r9, r14               ; pop LBR fixup addr from data stack
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11               ; current HERE (after string)
+    mov r1, r0
+    sub r1, r9
+    subi r1, 2                ; offset = HERE - (fixup_addr + 2)
+    mov r11, r1
+    lsri r11, 8
+    st.b r9, r11              ; high byte
+    inc r9
+    st.b r9, r1               ; low byte
     ; Now compile: ldi64 r10, <string_addr>; call print_str; call w_abort
     ; Use compile_byte for ldi64 r10 opcode bytes, then compile_call
     ; ldi64 r10: F0 60 A0 <8-byte LE addr>
@@ -4456,7 +4569,23 @@ w_abq_copy_done:
     ldi64 r1, w_abort
     ldi64 r11, compile_call
     call.l r11
+    ; Normal path: LBR already resolved, skip to LBREQ resolution
+    lbr w_abq_resolve_skip
 w_abq_empty:
+    ; Empty string case: resolve LBR <over_string> fixup first
+    ldn r9, r14               ; pop LBR fixup addr
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11               ; current HERE
+    mov r1, r0
+    sub r1, r9
+    subi r1, 2
+    mov r11, r1
+    lsri r11, 8
+    st.b r9, r11              ; high byte
+    inc r9
+    st.b r9, r1               ; low byte
+w_abq_resolve_skip:
     ; Resolve the forward branch (LBREQ <skip>)
     ldn r9, r14               ; pop fixup addr
     addi r14, 8
@@ -4473,8 +4602,8 @@ w_abq_empty:
     ret.l
 
 ; LEAVE (IMMEDIATE) -- compile inline UNLOOP + forward branch
-;   Convention: LEAVE pushes fixup_addr then sentinel 0xDEAD on data stack.
-;   LOOP/+LOOP resolves these after its own branch.
+;   Stores fixup address in var_leave_fixups[leave_count].
+;   LOOP/+LOOP resolves all fixups after their own code.
 w_leave:
     ; Compile: addi r15, 16  -- unloop (drop limit+index from RSP)
     ; Encoding: 0x62 0xF0 0x10
@@ -4491,11 +4620,9 @@ w_leave:
     ldi r1, 0x40              ; LBR unconditional
     ldi64 r11, compile_byte
     call.l r11
-    ; Push fixup address (points to first offset byte)
+    ; Record fixup address (HERE points to first offset byte)
     ldi64 r11, var_here
-    ldn r0, r11
-    subi r14, 8
-    str r14, r0               ; fixup addr
+    ldn r13, r11              ; R13 = fixup addr (preserved across compile_byte)
     ; Placeholder offset bytes
     ldi r1, 0x00
     ldi64 r11, compile_byte
@@ -4503,10 +4630,22 @@ w_leave:
     ldi r1, 0x00
     ldi64 r11, compile_byte
     call.l r11
-    ; Push sentinel
-    ldi64 r1, 0xDEAD
-    subi r14, 8
-    str r14, r1
+    ; Store fixup in var_leave_fixups[leave_count]
+    ldi64 r11, var_leave_count
+    ldn r1, r11               ; count
+    ; count < 8 check
+    cmpi r1, 8
+    brcs w_leave_done          ; C=1 means count >= 8, skip
+    ; fixups[count] = fixup_addr (R13)
+    mov r9, r1
+    lsli r9, 3                ; count * 8
+    ldi64 r7, var_leave_fixups
+    add r7, r9
+    str r7, r13               ; store fixup addr
+    ; leave_count++
+    inc r1
+    str r11, r1               ; update var_leave_count
+w_leave_done:
     ret.l
 
 ; 2/ ( n -- n/2 ) arithmetic shift right by 1
@@ -7333,7 +7472,7 @@ d_abort:
 d_abort_quote:
     .dq d_abort
     .db 0x86
-    .ascii "ABORT\x22"
+    .ascii "ABORT\""
     ldi64 r11, w_abort_quote
     call.l r11
     ret.l
@@ -7556,6 +7695,12 @@ var_word_addr:
     .dq 0
 var_word_len:
     .dq 0
+
+; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
+var_leave_count:
+    .dq 0
+var_leave_fixups:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0   ; up to 8 LEAVEs per loop level
 
 ; =====================================================================
 ;  String Constants
