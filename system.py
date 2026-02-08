@@ -12,10 +12,11 @@ Provides boot(), step(), run(), and configuration entry points.
 from __future__ import annotations
 from typing import Optional
 
-from megapad64 import Megapad64, HaltError, TrapError, u64
+from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER
 from devices import (
-    MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo,
-    SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
+    MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
+    SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
+    NIC_MTU,
 )
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,9 @@ class MegapadSystem:
     """
 
     def __init__(self, ram_size: int = 1 << 20,
-                 storage_image: Optional[str] = None):
+                 storage_image: Optional[str] = None,
+                 nic_port: Optional[int] = None,
+                 nic_peer_port: Optional[int] = None):
         self.ram_size = ram_size
         self.cpu = Megapad64(mem_size=ram_size)
 
@@ -54,19 +57,29 @@ class MegapadSystem:
         self.uart = UART()
         self.timer = Timer()
         self.storage = Storage(storage_image)
+        self.nic = NetworkDevice(
+            passthrough_port=nic_port,
+            passthrough_peer_port=nic_peer_port,
+        )
         self.sysinfo = SystemInfo(
             mem_size_kib=ram_size // 1024,
             has_storage=storage_image is not None,
+            has_nic=True,
         )
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)
         self.bus.register(self.storage)
         self.bus.register(self.sysinfo)
+        self.bus.register(self.nic)
 
         # Wire storage DMA to CPU memory
         self.storage._mem_read = self._raw_mem_read
         self.storage._mem_write = self._raw_mem_write
+
+        # Wire NIC DMA to CPU memory
+        self.nic._mem_read = self._raw_mem_read
+        self.nic._mem_write = self._raw_mem_write
 
         # Patch CPU memory access functions to intercept MMIO
         self._patch_cpu_mem()
@@ -192,11 +205,17 @@ class MegapadSystem:
 
     def step(self) -> int:
         """Execute one instruction. Returns cycles consumed."""
-        # Wake CPU from idle when UART has received data
-        if self.cpu.idle and self.uart.has_rx_data:
-            self.cpu.idle = False
+        # Wake CPU from idle when UART has received data or timer IRQ fires
+        if self.cpu.idle:
+            if self.uart.has_rx_data:
+                self.cpu.idle = False
+            elif self.timer.irq_pending and self.cpu.flag_i:
+                self.cpu.idle = False
         cycles = self.cpu.step()
         self.bus.tick(cycles)
+        # Deliver timer IRQ if pending and interrupts are enabled
+        if self.timer.irq_pending and self.cpu.flag_i:
+            self.cpu._trap(IVEC_TIMER)
         return cycles
 
     def run(self, max_steps: int = 1_000_000) -> int:
@@ -209,6 +228,9 @@ class MegapadSystem:
                 # Idle with no pending input — tick bus (timers) and wait
                 self.bus.tick(1)
                 total += 1
+                # Check if timer IRQ should wake us
+                if self.timer.irq_pending and self.cpu.flag_i:
+                    self.cpu.idle = False
                 continue
             try:
                 total += self.step()
@@ -270,4 +292,9 @@ class MegapadSystem:
         lines.append(f"  Storage: {'present' if self.storage.status & 0x80 else 'none'} "
                       f"sectors={self.storage.total_sectors} "
                       f"image={self.storage.image_path or 'N/A'}")
+        lines.append(f"  NIC: {'link up' if self.nic.link_up else 'link down'} "
+                      f"mac={self.nic.mac.hex(':')} "
+                      f"tx={self.nic.tx_count} rx={self.nic.rx_count} "
+                      f"rxq={len(self.nic.rx_queue)} "
+                      f"passthrough={'port ' + str(self.nic._passthrough_port) if self.nic._passthrough_port else 'none'}")
         return "\n".join(lines)

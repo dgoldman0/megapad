@@ -32,7 +32,7 @@ from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
-    SECTOR_SIZE,
+    NIC_BASE, SECTOR_SIZE,
 )
 
 # ---------------------------------------------------------------------------
@@ -601,6 +601,58 @@ class MegapadCLI(cmd.Cmd):
         print(f"  RX buffer: {len(u.rx_buffer)} bytes")
         print(f"  Control: {u.control:#04x}")
 
+    # -- NIC --
+
+    def do_nic(self, arg):
+        """NIC commands: nic [status|inject|send|reset]
+        nic              — show NIC status
+        nic inject <hex> — inject hex bytes as received frame
+        nic send <hex>   — queue hex bytes as TX frame
+        nic reset        — reset NIC state"""
+        n = self.sys.nic
+        parts = arg.strip().split(None, 1) if arg.strip() else []
+        sub = parts[0].lower() if parts else 'status'
+
+        if sub == 'status':
+            link = 'up' if n.link_up else 'down'
+            print(f"  NIC: link={link}  mac={n.mac.hex(':')}")
+            print(f"  TX: {n.tx_count} frames sent   RX: {n.rx_count} received")
+            print(f"  RX queue: {len(n.rx_queue)} frames pending")
+            pt = n._passthrough_port
+            if pt:
+                print(f"  Passthrough: UDP port {pt} → peer {n._passthrough_peer_port}")
+            else:
+                print(f"  Passthrough: none")
+        elif sub == 'inject':
+            if len(parts) < 2:
+                print("Usage: nic inject <hex bytes>")
+                return
+            try:
+                data = bytes(int(x, 16) for x in parts[1].split())
+                n.inject_frame(data)
+                print(f"  Injected {len(data)}-byte frame into RX queue.")
+            except ValueError:
+                print("  Error: invalid hex bytes.")
+        elif sub == 'send':
+            if len(parts) < 2:
+                print("Usage: nic send <hex bytes>")
+                return
+            try:
+                data = bytes(int(x, 16) for x in parts[1].split())
+                n.frame_len = len(data)
+                # Write to data port buffer and send
+                n._data_buf = bytearray(data)
+                n._data_pos = 0
+                n._execute_cmd(0x01)
+                print(f"  Sent {len(data)}-byte frame.")
+            except ValueError:
+                print("  Error: invalid hex bytes.")
+        elif sub == 'reset':
+            n._execute_cmd(0x04)
+            print("  NIC reset.")
+        else:
+            print("Usage: nic [status|inject|send|reset]")
+
     # -- Misc --
 
     def do_cycles(self, arg):
@@ -744,6 +796,59 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
 
 
 # ---------------------------------------------------------------------------
+#  Forth source injection
+# ---------------------------------------------------------------------------
+
+def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
+    """Inject Forth source files through UART, line by line.
+
+    Filters out pure comment lines (starting with \\) and blank lines
+    to reduce the byte count.  Waits for the CPU to process each line
+    before sending the next.
+    """
+    out_fd = sys.stdout.fileno()
+    old_tx = sys_emu.uart.on_tx
+    sys_emu.uart.on_tx = lambda b: os.write(out_fd, bytes([b]))
+
+    try:
+        for path in paths:
+            with open(path, "r") as f:
+                source = f.read()
+            lines = []
+            for line in source.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith('\\'):
+                    continue
+                lines.append(line)
+
+            payload = "\n".join(lines) + "\n"
+            data = payload.encode()
+
+            for i, byte in enumerate(data):
+                # Inject one byte
+                sys_emu.uart.inject_input(bytes([byte]))
+                # Run CPU until idle (processed the byte)
+                for _ in range(500_000):
+                    if sys_emu.cpu.halted:
+                        return
+                    if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                        break
+                    try:
+                        sys_emu.step()
+                    except HaltError:
+                        return
+                    except TrapError as e:
+                        if sys_emu.cpu.ivt_base != 0:
+                            sys_emu.cpu._trap(e.ivec_id)
+                        else:
+                            return
+    finally:
+        sys_emu.uart.on_tx = old_tx
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 
@@ -753,6 +858,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
                "  python cli.py --bios bios.asm\n"
+               "  python cli.py --bios bios.asm --forth kdos.f\n"
                "  python cli.py --bios bios.asm --storage disk.img\n"
                "  python cli.py --ram 1024 --storage disk.img\n"
                "  python cli.py --load program.bin@0x100 --run\n"
@@ -765,10 +871,16 @@ def main():
                         help="Load binary: FILE[@ADDR] (can repeat)")
     parser.add_argument("--bios", type=str, default=None,
                         help="BIOS binary or .asm file — boots and enters console")
+    parser.add_argument("--forth", type=str, action="append", default=[],
+                        help="Forth source file to inject via UART after boot (can repeat)")
     parser.add_argument("--assemble", nargs=2, metavar=("SRC", "OUT"),
                         help="Assemble SRC.asm to OUT.rom and exit")
     parser.add_argument("--run", action="store_true",
                         help="Auto-boot and run after loading (non-BIOS mode)")
+    parser.add_argument("--nic", type=int, default=None, metavar="PORT",
+                        help="Enable NIC with UDP passthrough on PORT")
+    parser.add_argument("--nic-peer-port", type=int, default=None, metavar="PORT",
+                        help="UDP peer port for NIC passthrough (default: NIC+1)")
     args = parser.parse_args()
 
     # ---- Assemble-only mode -------------------------------------------
@@ -790,6 +902,8 @@ def main():
     sys_emu = MegapadSystem(
         ram_size=args.ram * 1024,
         storage_image=args.storage,
+        nic_port=args.nic,
+        nic_peer_port=args.nic_peer_port,
     )
 
     # Load files
@@ -826,6 +940,11 @@ def main():
     # ---- BIOS mode: boot → console (the BIOS IS the interface) --------
     if bios_loaded:
         sys_emu.boot(0)
+
+        # Inject Forth source files through UART before interactive console
+        if args.forth:
+            _inject_forth_files(sys_emu, args.forth)
+
         while True:
             wants_monitor = run_console(sys_emu)
             if not wants_monitor or sys_emu.cpu.halted:

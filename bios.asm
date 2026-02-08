@@ -1,10 +1,14 @@
 ; =====================================================================
-;  Megapad-64 BIOS  v0.3 — Forth MVP REPL
+;  Megapad-64 BIOS  v0.5 — Core Forth Completeness
 ; =====================================================================
 ;
 ;  A subroutine-threaded Forth interpreter on the Megapad-64.
-;  Provides an interactive REPL with ~60 built-in words for testing
-;  the CPU, memory, and tile engine.
+;  v0.4 added colon definitions, control flow, VARIABLE, CONSTANT,
+;  string words, NIC words, and compilation infrastructure.
+;  v0.5 adds EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
+;  CREATE, IMMEDIATE, STATE, [, ], LITERAL, MIN, MAX, CELLS,
+;  CELL+, +!, 2*, CMOVE, -ROT, <>, 0<>, 0>, ?DUP, BL, TRUE, FALSE,
+;  WORD, LATEST.
 ;
 ;  Register conventions
 ;  --------------------
@@ -36,6 +40,7 @@
 ;  ----
 ;    UART   0xFFFF_FF00_0000_0000   TX=+0 RX=+1 STATUS=+2
 ;    Timer  0xFFFF_FF00_0000_0100   COUNT=+0..+3 CTRL=+8
+;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ; =====================================================================
 
 ; === Entry point (address 0x0000) ===
@@ -146,7 +151,28 @@ interp_loop:
     cmpi r9, 0
     breq interp_try_number
 
-    ; Found — compute code field address and execute
+    ; Found — check STATE
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq interp_execute       ; STATE=0 → interpret
+
+    ; STATE=1 → compiling.  Check IMMEDIATE flag (bit 7)
+    mov r0, r1
+    andi r0, 0x80
+    brne interp_execute       ; IMMEDIATE → execute even in compile mode
+
+    ; Not IMMEDIATE — compile a call to this word
+    ldi64 r11, entry_to_code
+    call.l r11
+    ; R9 = code pointer — compile ldi64 r11,<addr>; call.l r11
+    mov r1, r9
+    ldi64 r11, compile_call
+    call.l r11
+    lbr interp_loop
+
+interp_execute:
+    ; Compute code field address and execute
     ldi64 r11, entry_to_code
     call.l r11
     ; R9 = code pointer
@@ -166,7 +192,20 @@ interp_try_number:
     cmpi r0, 0
     breq interp_undefined
 
-    ; Push number
+    ; Check STATE
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq interp_push_number
+
+    ; Compiling — emit literal push: ldi64 r1,<val>; subi r14,8; str r14,r1
+    ; compile_literal handles this
+    ldi64 r11, compile_literal
+    call.l r11
+    lbr interp_loop
+
+interp_push_number:
+    ; Push number (interpret mode)
     subi r14, 8
     str r14, r1
     lbr interp_loop
@@ -866,12 +905,15 @@ w_star:
     ret.l
 
 ; / ( a b -- quot )  signed
+;   Note: div Rd,Rs puts quotient in Rd and remainder in R0.
+;   When Rd=R0, the remainder overwrites the quotient.  So we use R7
+;   as the dividend register to avoid the conflict.
 w_slash:
     ldn r1, r14
     addi r14, 8
-    ldn r0, r14
-    div r0, r1
-    str r14, r0
+    ldn r7, r14
+    div r7, r1
+    str r14, r7
     ret.l
 
 ; MOD ( a b -- rem )  signed
@@ -1182,6 +1224,20 @@ w_key:
     call.l r5
     subi r14, 8
     str r14, r1
+    ret.l
+
+; KEY? ( -- flag )  non-blocking: true if a key is available
+w_key_query:
+    ldi64 r13, 0xFFFF_FF00_0000_0002   ; UART STATUS register
+    ld.b r1, r13
+    andi r1, 0x02                       ; bit 1 = RX_AVAIL
+    cmpi r1, 0
+    ldi r0, 0                           ; assume false
+    breq kq_done
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF        ; TRUE = -1
+kq_done:
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; CR ( -- )
@@ -1545,6 +1601,2339 @@ w_cycles:
     ld.w r1, r11
     subi r14, 8
     str r14, r1
+    ret.l
+
+; ACC@ ( -- n ) read ACC0 to stack
+w_acc_fetch:
+    csrr r0, 0x19
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC1@ ( -- n ) read ACC1 to stack
+w_acc1_fetch:
+    csrr r0, 0x1A
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC2@ ( -- n ) read ACC2 to stack
+w_acc2_fetch:
+    csrr r0, 0x1B
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ACC3@ ( -- n ) read ACC3 to stack
+w_acc3_fetch:
+    csrr r0, 0x1C
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TPOPCNT ( -- ) popcount reduction, result in ACC
+w_tpopcnt:
+    t.popcnt
+    ret.l
+
+; TL1 ( -- ) L1 norm reduction, result in ACC
+w_tl1:
+    t.l1
+    ret.l
+
+; TEMIN ( -- ) element-wise min, writes to DST tile
+w_temin:
+    t.min
+    ret.l
+
+; TEMAX ( -- ) element-wise max, writes to DST tile
+w_temax:
+    t.max
+    ret.l
+
+; TABS ( -- ) element-wise absolute value, writes to DST tile
+w_tabs:
+    t.abs
+    ret.l
+
+; TMODE@ ( -- n ) read current tile mode
+w_tmode_fetch:
+    csrr r0, 0x14
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TCTRL@ ( -- n ) read current tile ctrl
+w_tctrl_fetch:
+    csrr r0, 0x15
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; EXECUTE ( xt -- ) call execution token
+w_execute:
+    ldn r9, r14
+    addi r14, 8
+    call.l r9
+    ret.l
+
+; ' ( "name" -- xt ) find word, push code field address
+w_tick:
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    breq tick_fail
+    ldi64 r11, find_word
+    call.l r11
+    cmpi r9, 0
+    breq tick_fail
+    ldi64 r11, entry_to_code
+    call.l r11
+    subi r14, 8
+    str r14, r9
+    ret.l
+tick_fail:
+    ldi r0, 0
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
+;  Compilation Helpers
+; =====================================================================
+
+; compile_call: emit "ldi64 r11, <addr>; call.l r11" at HERE.
+;   R1 = target address.  Advances HERE by 13 bytes.
+;   ldi64 r11,val = 0xF0 0x60 0xB0 <8 bytes LE>  = 11 bytes
+;   call.l r11    = 0x0D 0x0B                      = 2 bytes
+compile_call:
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE
+    ; EXT prefix: 0xF0
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ; LDI opcode: 0x60
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ; Register byte: 0xB0 (r11 << 4)
+    ldi r7, 0xB0
+    st.b r0, r7
+    inc r0
+    ; 8 bytes of address (little-endian)
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ; CALL.L r11: 0x0D 0x0B
+    ldi r7, 0x0D
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x0B
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; compile_literal: emit code to push R1 value onto data stack at HERE.
+;   Emits: ldi64 r1, <val>; subi r14, 8; str r14, r1
+;   ldi64 r1,val = 0xF0 0x60 0x10 <8 bytes LE> = 11 bytes
+;   subi r14, 8  = 0x67 0xE0 0x08               = 3 bytes
+;   str r14, r1  = 0x54 0xE1                     = 2 bytes
+;   Total = 16 bytes
+compile_literal:
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE
+    ; ldi64 r1: 0xF0 0x60 0x10
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ; 8 bytes of value (LE)
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ; subi r14, 8: 0x67 0xE0 0x08
+    ldi r7, 0x67
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x08
+    st.b r0, r7
+    inc r0
+    ; str r14, r1: 0x54 0xE1
+    ldi r7, 0x54
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE1
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; compile_byte: emit one byte from R1 at HERE, advance HERE.
+compile_byte:
+    ldi64 r11, var_here
+    ldn r0, r11
+    st.b r0, r1
+    inc r0
+    str r11, r0
+    ret.l
+
+; compile_ret: emit ret.l (0x0E) at HERE.
+compile_ret:
+    ldi r1, 0x0E
+    ldi64 r11, var_here
+    ldn r0, r11
+    st.b r0, r1
+    inc r0
+    str r11, r0
+    ret.l
+
+; =====================================================================
+;  : (colon) — begin a new word definition
+; =====================================================================
+;  Creates dict entry: [link:8][flags+len:1][name:N]
+;  Then sets STATE=1 (compiling).  Code starts at HERE after the header.
+
+w_colon:
+    ; Parse the name
+    ldi64 r11, parse_word
+    call.l r11
+    ; R9=word addr, R12=word length
+    cmpi r12, 0
+    lbreq w_colon_err          ; no name given
+
+    ; Save name addr/len on data stack temporarily
+    subi r14, 8
+    str r14, r9               ; name addr
+    subi r14, 8
+    str r14, r12              ; name len
+
+    ; Write link field: current LATEST at HERE
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE (start of new entry)
+
+    ; Save entry start for later (to set LATEST)
+    subi r14, 8
+    str r14, r0               ; entry addr on stack
+
+    ldi64 r11, var_latest
+    ldn r1, r11               ; R1 = current LATEST
+    str r0, r1                ; store link
+    addi r0, 8                ; skip link
+
+    ; Write flags+len byte
+    ldn r12, r14              ; peek entry addr (ignore — we need name len)
+    ; Actually name len is at DSP+8
+    mov r11, r14
+    addi r11, 8
+    ldn r12, r11              ; name len
+    st.b r0, r12
+    inc r0
+
+    ; Copy name bytes
+    mov r11, r14
+    addi r11, 16
+    ldn r9, r11               ; name addr
+    ldi r1, 0
+w_colon_copy:
+    cmp r1, r12
+    breq w_colon_name_done
+    mov r7, r9
+    add r7, r1
+    ld.b r7, r7
+    st.b r0, r7
+    inc r0
+    inc r1
+    br w_colon_copy
+
+w_colon_name_done:
+    ; Update HERE to after the header (code starts here)
+    ldi64 r11, var_here
+    str r11, r0
+
+    ; Set LATEST to entry start
+    ldn r0, r14               ; entry addr
+    ldi64 r11, var_latest
+    str r11, r0
+
+    ; Drop temps from data stack (entry addr, name len, name addr)
+    addi r14, 24
+
+    ; Save code-start address for ; to use if needed
+    ; (not strictly needed for subroutine threading — code just follows)
+
+    ; STATE = 1 (compiling)
+    ldi r1, 1
+    ldi64 r11, var_state
+    str r11, r1
+    ret.l
+
+w_colon_err:
+    ldi64 r10, str_no_name
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+; =====================================================================
+;  ; (semicolon, IMMEDIATE) — end definition
+; =====================================================================
+w_semicolon:
+    ; Compile ret.l
+    ldi64 r11, compile_ret
+    call.l r11
+    ; STATE = 0 (interpreting)
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
+    ret.l
+
+; =====================================================================
+;  Control Flow (all IMMEDIATE)
+; =====================================================================
+
+; IF ( flag -- )  compile: pop, test, forward branch if zero
+;   Emits: ldn r1, r14; addi r14, 8; cmpi r1, 0; lbreq <placeholder>
+;   Pushes fixup address onto data stack
+w_if:
+    ; Compile: ldn r1, r14   → 0x50 0xE1  (LDN Rx,Ry = 0x50, xE|y1 → 0xE1? no...)
+    ; LDN is MEM F=5,N=0, regbyte = dst<<4|src → r1,r14 = 0x1E
+    ; Wait — let me re-check the encoding.
+    ; MEM family: byte0 = 0x50 | subop.  LDN = subop 0 → 0x50
+    ; byte1 = (dst << 4) | src → (1 << 4) | 14 = 0x1E
+    ; So LDN r1, r14 = 0x50, 0x1E
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8 = 0x62 0xE0 0x08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; cmpi r1, 0 = 0x66 0x10 0x00
+    ldi r1, 0x66
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbreq <placeholder> → 0x41 0xXX 0xXX (LBREQ = LBR family, cond=EQ=1)
+    ; LBR family: F=4, N=cond. EQ=1 → byte0 = 0x41
+    ; Then 16-bit signed offset (LE)
+    ; Push current HERE (= address of the offset bytes) for fixup
+    ldi64 r11, var_here
+    ldn r1, r11
+    ; Compile the branch opcode
+    mov r0, r1
+    ldi r7, 0x41
+    st.b r0, r7
+    inc r0
+    ; Push fixup address (where offset bytes go)
+    subi r14, 8
+    str r14, r0
+    ; Write placeholder offset (0x0000)
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; ELSE (IMMEDIATE) — resolve IF forward branch, start new forward branch
+w_else:
+    ; First compile an unconditional forward branch (lbr <placeholder>)
+    ; LBR unconditional: F=4, N=0 → 0x40
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x40
+    st.b r0, r7
+    inc r0
+    ; Save new fixup address
+    mov r13, r0               ; save else-fixup addr
+    ; Placeholder
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+
+    ; Now resolve the IF fixup: pop IF's fixup addr, patch it
+    ; fixup_addr = opcode+1 (where offset bytes start)
+    ; offset = target - (fixup_addr + 2) = target - (opcode + 3)
+    ldn r9, r14               ; IF's fixup address
+    addi r14, 8               ; pop
+    ldi64 r11, var_here
+    ldn r0, r11               ; current HERE = target
+    mov r1, r0
+    sub r1, r9                ; r1 = target - fixup_addr
+    subi r1, 2                ; r1 = target - (fixup_addr + 2)
+    ; Patch the 16-bit offset (big-endian: high byte first)
+    mov r7, r1
+    lsri r7, 8
+    st.b r9, r7               ; high byte at fixup_addr
+    inc r9
+    st.b r9, r1               ; low byte at fixup_addr+1
+
+    ; Push the ELSE fixup address
+    subi r14, 8
+    str r14, r13
+    ret.l
+
+; THEN (IMMEDIATE) — resolve forward branch from IF or ELSE
+w_then:
+    ; Pop fixup address (= opcode+1, where offset bytes start)
+    ldn r9, r14
+    addi r14, 8
+    ; offset = target - (fixup_addr + 2)
+    ldi64 r11, var_here
+    ldn r0, r11               ; target = HERE
+    mov r1, r0
+    sub r1, r9                ; r1 = target - fixup_addr
+    subi r1, 2                ; r1 = target - (fixup_addr + 2)
+    ; Patch 16-bit big-endian offset
+    mov r7, r1
+    lsri r7, 8
+    st.b r9, r7               ; high byte at fixup_addr
+    inc r9
+    st.b r9, r1               ; low byte at fixup_addr+1
+    ret.l
+
+; BEGIN (IMMEDIATE) — push current HERE as loop target
+w_begin:
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; UNTIL (IMMEDIATE) — compile: pop, test, branch back if zero
+;   Emits: ldn r1, r14; addi r14, 8; cmpi r1, 0; lbreq <back>
+w_until:
+    ; Compile: ldn r1, r14 (0x50, 0x1E)
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8 = 0x62 0xE0 0x08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; cmpi r1, 0 = 0x66 0x10 0x00
+    ldi r1, 0x66
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbreq <back> — offset = target - (opcode_addr + 3)
+    ldn r9, r14               ; BEGIN target addr
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11               ; current HERE = position of lbreq opcode
+    ; offset = target - (HERE + 3)   (PC is at HERE+3 after consuming 3-byte LBR)
+    mov r1, r9
+    sub r1, r0
+    subi r1, 3                ; offset = target - (HERE + 3)
+    ; Compile lbreq (0x41) + 16-bit big-endian offset
+    ldi r7, 0x41
+    st.b r0, r7
+    inc r0
+    ; Write big-endian: high byte first, then low byte
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7               ; high byte
+    inc r0
+    st.b r0, r1               ; low byte
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; WHILE (IMMEDIATE) — like IF but inside BEGIN..WHILE..REPEAT
+;   Compiles conditional forward branch, pushes fixup addr
+;   Stack: ( begin-addr -- begin-addr fixup-addr )
+w_while:
+    ; Same as IF — compile test and forward branch
+    ; Save begin-addr temporarily
+    ldn r9, r14               ; begin-addr (keep on stack)
+    ; Compile: ldn r1, r14
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8 = 0x62 0xE0 0x08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; cmpi r1, 0 = 0x66 0x10 0x00
+    ldi r1, 0x66
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbreq <placeholder>
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x41
+    st.b r0, r7
+    inc r0
+    ; Push fixup addr (ON TOP of begin-addr which is already on stack)
+    subi r14, 8
+    str r14, r0
+    ; Placeholder
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; REPEAT (IMMEDIATE) — compile backward branch to BEGIN, resolve WHILE
+;   Stack: ( begin-addr fixup-addr -- )
+w_repeat:
+    ; Pop WHILE fixup addr
+    ldn r13, r14              ; while-fixup
+    addi r14, 8
+    ; Pop BEGIN addr
+    ldn r9, r14               ; begin-addr
+    addi r14, 8
+    ; Compile unconditional backward branch: lbr <begin>
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x40              ; LBR unconditional
+    st.b r0, r7
+    inc r0
+    ; offset = begin-addr - (opcode_addr+3); R0 is at opcode+1
+    mov r1, r9
+    sub r1, r0
+    subi r1, 2                ; offset = begin-addr - (R0 + 2) = begin-addr - (opcode+3)
+    ; store 16-bit big-endian offset
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7               ; high byte
+    inc r0
+    st.b r0, r1               ; low byte
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; Now resolve WHILE forward branch
+    ; fixup at r13, target = HERE; offset = HERE - (fixup + 2)
+    ldi64 r11, var_here
+    ldn r0, r11
+    mov r1, r0
+    sub r1, r13
+    subi r1, 2                ; offset = target - (fixup_addr + 2)
+    ; Patch big-endian: high byte first
+    mov r7, r1
+    lsri r7, 8
+    st.b r13, r7              ; high byte at fixup_addr
+    inc r13
+    st.b r13, r1              ; low byte at fixup_addr+1
+    ret.l
+
+; DO (IMMEDIATE) — start a counted loop
+;   ( limit index -- ) at runtime
+;   Compiles: move limit and index to return stack
+;   Pushes HERE as loop target
+w_do:
+    ; Compile at runtime:
+    ;   ldn r1, r14       ; index (TOS)          = 50 1E
+    ;   addi r14, 8                               = 62 E0 08
+    ;   ldn r7, r14       ; limit (NOS)           = 50 7E
+    ;   addi r14, 8                               = 62 E0 08
+    ;   subi r15, 8       ; push limit to RSP     = 67 F0 08
+    ;   str r15, r7                               = 54 F7
+    ;   subi r15, 8       ; push index to RSP     = 67 F0 08
+    ;   str r15, r1                               = 54 F1
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x7E
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF7
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ; Push loop-target = HERE
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; LOOP (IMMEDIATE) — end counted loop
+;   Compiles: increment index on RSP, compare to limit, branch back if not done
+;   Then: clean up RSP (drop limit & index)
+w_loop:
+    ; Compile at runtime:
+    ;   ldn r1, r15       ; index from RSP
+    ;   addi r1, 1        ; increment (INC would also work but let's use ADDI for clarity)
+    ;   str r15, r1       ; store back
+    ;   mov r7, r15       ; copy RSP
+    ;   addi r7, 8        ; point to limit
+    ;   ldn r7, r7        ; load limit
+    ;   cmp r1, r7        ; index vs limit
+    ;   lbrne <loop-top>  ; branch if not equal
+    ;   addi r15, 16      ; drop both from RSP
+    ; Encoded:
+    ;   ldn r1, r15  = 50 1F
+    ;   inc r1       = 11
+    ;   str r15, r1  = 54 F1
+    ;   mov r7, r15  = 78 7F    (ALU MOV = sub 8)
+    ;   addi r7, 8   = 62 70 08
+    ;   ldn r7, r7   = 50 77
+    ;   cmp r1, r7   = 77 17    (ALU CMP = sub 7)
+    ;   lbrne <off>  = 42 XX XX
+    ;   addi r15, 16 = 62 F0 10
+
+    ; ldn r1, r15
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; inc r1 = 0x11
+    ldi r1, 0x11
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r15, r1 = 54 F1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ; mov r7, r15 = 78 7F
+    ldi r1, 0x78
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x7F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r7, 8 = 62 70 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x70
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r7, r7 = 50 77
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x77
+    ldi64 r11, compile_byte
+    call.l r11
+    ; cmp r1, r7 = 77 17
+    ldi r1, 0x77
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x17
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbrne <loop-top>
+    ldn r9, r14               ; loop target addr
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x42              ; LBRNE
+    st.b r0, r7
+    inc r0
+    ; offset = target - (opcode_addr+3); R0 is at opcode+1
+    mov r1, r9
+    sub r1, r0
+    subi r1, 2                ; offset = target - (R0 + 2) = target - (opcode+3)
+    ; Write big-endian: high byte first, then low byte
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7               ; high byte
+    inc r0
+    st.b r0, r1               ; low byte
+    inc r0
+    ; addi r15, 16 = 62 F0 10
+    ldi r7, 0x62
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; I (IMMEDIATE at compile time but not actually — it's a runtime word)
+; I ( -- index ) push loop index from RSP
+;   When called via compiled trampoline, RSP has:
+;   [ret_from_trampoline, ret_from_compiled_call, index, limit, ...]
+;   So index is at RSP+16
+w_i:
+    mov r11, r15
+    addi r11, 16              ; skip two return addresses
+    ldn r1, r11               ; index
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; =====================================================================
+;  BIOS v0.5 — New Words
+; =====================================================================
+
+; EXIT (IMMEDIATE) — compile ret.l inline (same as what ; does)
+w_exit:
+    ldi64 r11, compile_ret
+    call.l r11
+    ret.l
+
+; >R (IMMEDIATE) — compile inline: pop data stack, push return stack
+;   Emits:  ldn r1, r14  (50 1E)
+;           addi r14, 8  (62 E0 08)
+;           subi r15, 8  (67 F0 08)
+;           str r15, r1  (54 F1)
+;   Total = 10 bytes
+w_to_r:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; R> (IMMEDIATE) — compile inline: pop return stack, push data stack
+;   Emits:  ldn r1, r15  (50 1F)
+;           addi r15, 8  (62 F0 08)
+;           subi r14, 8  (67 E0 08)
+;           str r14, r1  (54 E1)
+;   Total = 10 bytes
+w_r_from:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; R@ (IMMEDIATE) — compile inline: peek return stack, push data stack
+;   Emits:  ldn r1, r15  (50 1F)
+;           subi r14, 8  (67 E0 08)
+;           str r14, r1  (54 E1)
+;   Total = 7 bytes
+w_r_fetch:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE1
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; J ( -- outer-index ) outer loop index via trampoline
+;   RSP layout when called from nested DO..LOOP via trampoline:
+;   RSP+0   return to trampoline ret.l
+;   RSP+8   return to compiled code
+;   RSP+16  inner loop index
+;   RSP+24  inner loop limit
+;   RSP+32  outer loop index ← this
+w_j:
+    mov r11, r15
+    addi r11, 16              ; skip two return addresses
+    addi r11, 16              ; skip inner loop index + limit
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; UNLOOP (IMMEDIATE) — compile: drop loop index+limit from RSP
+;   Emits: addi r15, 16  (62 F0 10)
+;   Total = 3 bytes
+w_unloop:
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; +LOOP (IMMEDIATE) — end counted loop with custom increment
+;   Like LOOP but adds TOS to index instead of 1
+;   Compiles:
+;     ldn r7, r14       ; increment from data stack     50 7E
+;     addi r14, 8       ;                               62 E0 08
+;     ldn r1, r15       ; index from RSP                50 1F
+;     add r1, r7        ; add increment                 70 17
+;     str r15, r1       ; store back                    54 F1
+;     mov r7, r15       ; copy RSP                      78 7F
+;     addi r7, 8        ; point to limit                62 70 08
+;     ldn r7, r7        ; load limit                    50 77
+;     cmp r1, r7        ; index vs limit                77 17
+;     lbrne <loop-top>  ; branch if not equal           42 XX XX
+;     addi r15, 16      ; drop both from RSP            62 F0 10
+w_plus_loop:
+    ; ldn r7, r14 = 50 7E
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x7E
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r14, 8 = 62 E0 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r1, r15 = 50 1F
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; add r1, r7 = 70 17
+    ldi r1, 0x70
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x17
+    ldi64 r11, compile_byte
+    call.l r11
+    ; str r15, r1 = 54 F1
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ; mov r7, r15 = 78 7F
+    ldi r1, 0x78
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x7F
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r7, 8 = 62 70 08
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x70
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ; ldn r7, r7 = 50 77
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x77
+    ldi64 r11, compile_byte
+    call.l r11
+    ; cmp r1, r7 = 77 17
+    ldi r1, 0x77
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x17
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbrne <loop-top>: 42 XX XX
+    ldn r9, r14               ; loop target addr from data stack
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x42              ; LBRNE
+    st.b r0, r7
+    inc r0
+    mov r1, r9
+    sub r1, r0
+    subi r1, 2                ; offset = target - (opcode_addr+3)
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7               ; high byte
+    inc r0
+    st.b r0, r1               ; low byte
+    inc r0
+    ; addi r15, 16 = 62 F0 10
+    ldi r7, 0x62
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; AGAIN (IMMEDIATE) — unconditional backward branch
+;   Pops loop target from stack, compiles lbr <offset>
+w_again:
+    ldn r9, r14               ; target from stack
+    addi r14, 8
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x40              ; LBR (unconditional)
+    st.b r0, r7
+    inc r0
+    mov r1, r9
+    sub r1, r0
+    subi r1, 2                ; offset = target - (lbr_addr + 3)
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7               ; high byte
+    inc r0
+    st.b r0, r1               ; low byte
+    inc r0
+    ldi64 r11, var_here
+    str r11, r0
+    ret.l
+
+; STATE ( -- addr ) push address of var_state
+w_state:
+    ldi64 r1, var_state
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; [ (IMMEDIATE) — switch to interpret mode
+w_left_bracket:
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
+    ret.l
+
+; ] — switch to compile mode
+w_right_bracket:
+    ldi r1, 1
+    ldi64 r11, var_state
+    str r11, r1
+    ret.l
+
+; LITERAL (IMMEDIATE) — compile literal from TOS
+;   Takes value from data stack, emits compile_literal code
+w_literal:
+    ldn r1, r14               ; pop value
+    addi r14, 8
+    ldi64 r11, compile_literal
+    call.l r11
+    ret.l
+
+; IMMEDIATE — set IMMEDIATE flag on most recent word
+w_immediate:
+    ldi64 r11, var_latest
+    ldn r9, r11               ; R9 = latest entry address
+    mov r11, r9
+    addi r11, 8               ; point to flags+len byte
+    ld.b r0, r11              ; read it
+    ori r0, 0x80              ; set IMMEDIATE bit
+    st.b r11, r0              ; write back
+    ret.l
+
+; CREATE ( "name" -- ) — create dictionary entry, runtime pushes data-field addr
+;   Like VARIABLE but doesn't allot a cell; leaves HERE at the data field.
+w_create:
+    ; Parse name
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_create_err
+
+    ; Save name info
+    mov r13, r9               ; R13 = name addr
+    mov r7, r12               ; R7 = name len
+
+    ; Build dictionary entry header at HERE
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE
+    mov r1, r0                ; save entry start in R1
+
+    ; Link field = current LATEST
+    ldi64 r11, var_latest
+    ldn r11, r11
+    str r0, r11               ; write link
+    addi r0, 8
+
+    ; Flags+len byte (just length, no IMMEDIATE)
+    st.b r0, r7
+    inc r0
+
+    ; Copy name
+    mov r11, r13              ; R11 = source name
+    mov r12, r7               ; R12 = count
+w_create_copy:
+    ld.b r9, r11
+    st.b r0, r9
+    inc r11
+    inc r0
+    dec r12
+    cmpi r12, 0
+    brne w_create_copy
+
+    ; Emit code: ldi64 r1, <data_addr>; subi r14, 8; str r14, r1; ret.l
+    ; data_addr = R0 + 17 (ldi64=11 + subi=3 + str=2 + ret.l=1 = 17)
+    mov r9, r0
+    addi r9, 17               ; data_addr (where data field will start)
+
+    ; ldi64 r1, <data_addr>: F0 60 10 + 8 bytes LE
+    ldi r12, 0xF0
+    st.b r0, r12
+    inc r0
+    ldi r12, 0x60
+    st.b r0, r12
+    inc r0
+    ldi r12, 0x10
+    st.b r0, r12
+    inc r0
+    ; 8 bytes of data_addr (R9)
+    st.b r0, r9
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    mov r12, r9
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    lsri r12, 8
+    st.b r0, r12
+    inc r0
+    ; subi r14, 8: 67 E0 08
+    ldi r12, 0x67
+    st.b r0, r12
+    inc r0
+    ldi r12, 0xE0
+    st.b r0, r12
+    inc r0
+    ldi r12, 0x08
+    st.b r0, r12
+    inc r0
+    ; str r14, r1: 54 E1
+    ldi r12, 0x54
+    st.b r0, r12
+    inc r0
+    ldi r12, 0xE1
+    st.b r0, r12
+    inc r0
+    ; ret.l: 0E
+    ldi r12, 0x0E
+    st.b r0, r12
+    inc r0
+
+    ; Update HERE (points to data field)
+    ldi64 r11, var_here
+    str r11, r0
+
+    ; Update LATEST
+    ldi64 r11, var_latest
+    str r11, r1
+    ret.l
+w_create_err:
+    ldi64 r10, str_no_name
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+; S" (IMMEDIATE) — compile string literal, at runtime pushes (addr len)
+;   Compiles: ldi64 r11, squote_runtime; call.l r11; <string bytes> <null>
+;   Runtime: push addr+len of string to data stack
+w_squote:
+    ; Compile call to runtime helper
+    ldi64 r1, squote_runtime
+    ldi64 r11, compile_call
+    call.l r11
+    ; Now scan input for closing " and compile each byte
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; >IN
+    ldi64 r9, tib_buffer
+    add r9, r13               ; current input position
+sq_scan:
+    ld.b r1, r9
+    cmpi r1, 0                ; end of input?
+    breq sq_done
+    cmpi r1, 0x22             ; '"' ?
+    breq sq_done_skip
+    ; compile this byte
+    ldi64 r11, compile_byte
+    call.l r11
+    inc r9
+    br sq_scan
+sq_done_skip:
+    inc r9                    ; skip past closing "
+sq_done:
+    ; compile null terminator
+    ldi r1, 0
+    ldi64 r11, compile_byte
+    call.l r11
+    ; update >IN
+    ldi64 r11, tib_buffer
+    sub r9, r11
+    ldi64 r11, var_to_in
+    str r11, r9
+    ret.l
+
+; squote_runtime: called at runtime.  Return address on RSP = string address.
+;   Scan to null, compute length, push (addr len), patch return past string.
+squote_runtime:
+    ldn r10, r15              ; R10 = string start
+    mov r9, r10               ; R9 = scan pointer
+sqr_scan:
+    ld.b r1, r9
+    cmpi r1, 0
+    breq sqr_found
+    inc r9
+    br sqr_scan
+sqr_found:
+    ; R10 = string start, R9 = null position
+    mov r1, r9
+    sub r1, r10               ; R1 = length
+    ; Push addr
+    subi r14, 8
+    str r14, r10
+    ; Push len
+    subi r14, 8
+    str r14, r1
+    ; Patch return address past null
+    inc r9                    ; skip null
+    str r15, r9
+    ret.l
+
+; 0> ( n -- flag ) true if n > 0
+w_zero_gt:
+    ldn r1, r14               ; TOS
+    ; zero? → false
+    cmpi r1, 0
+    breq w_zero_gt_false
+    ; negative? check sign bit
+    mov r0, r1
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    lsri r0, 8
+    andi r0, 0x80
+    cmpi r0, 0
+    brne w_zero_gt_false      ; sign bit set → negative → false
+    ; positive nonzero → true
+    ldi r1, 0
+    dec r1                    ; -1 (true)
+    str r14, r1
+    ret.l
+w_zero_gt_false:
+    ldi r1, 0
+    str r14, r1
+    ret.l
+
+; <> ( a b -- flag ) not equal
+w_not_equal:
+    ldn r1, r14               ; b
+    addi r14, 8
+    ldn r7, r14               ; a
+    cmp r7, r1
+    breq w_ne_false
+    ldi r1, 0
+    dec r1                    ; -1 (true)
+    str r14, r1
+    ret.l
+w_ne_false:
+    ldi r1, 0
+    str r14, r1
+    ret.l
+
+; 0<> ( n -- flag ) true if n ≠ 0
+w_zero_ne:
+    ldn r1, r14
+    cmpi r1, 0
+    brne w_zne_true
+    ldi r1, 0
+    str r14, r1
+    ret.l
+w_zne_true:
+    ldi r1, 0
+    dec r1
+    str r14, r1
+    ret.l
+
+; ?DUP ( x -- x x | 0 ) duplicate if nonzero
+w_qdup:
+    ldn r1, r14
+    cmpi r1, 0
+    breq w_qdup_done
+    subi r14, 8
+    str r14, r1
+w_qdup_done:
+    ret.l
+
+; MIN ( a b -- min )
+w_min:
+    ldn r1, r14               ; b
+    addi r14, 8
+    ldn r7, r14               ; a
+    cmp r7, r1
+    brle w_min_done            ; a <= b, keep a
+    mov r7, r1                ; a > b, use b
+w_min_done:
+    str r14, r7
+    ret.l
+
+; MAX ( a b -- max )
+w_max:
+    ldn r1, r14               ; b
+    addi r14, 8
+    ldn r7, r14               ; a
+    cmp r7, r1
+    brgt w_max_a              ; a > b, keep a
+    brle w_max_b              ; a <= b, use b
+w_max_a:
+    str r14, r7
+    ret.l
+w_max_b:
+    str r14, r1
+    ret.l
+
+; CELLS ( n -- n*8 )
+w_cells:
+    ldn r1, r14
+    lsli r1, 3                ; * 8
+    str r14, r1
+    ret.l
+
+; CELL+ ( a -- a+8 )
+w_cell_plus:
+    ldn r1, r14
+    addi r1, 8
+    str r14, r1
+    ret.l
+
+; +! ( n addr -- ) add n to contents of addr
+w_plus_store:
+    ldn r1, r14               ; addr
+    addi r14, 8
+    ldn r7, r14               ; n
+    addi r14, 8
+    ldn r9, r1                ; fetch current value
+    add r9, r7                ; add
+    str r1, r9                ; store back
+    ret.l
+
+; 2* ( n -- n*2 )
+w_two_star:
+    ldn r1, r14
+    lsli r1, 1
+    str r14, r1
+    ret.l
+
+; CMOVE ( src dst u -- ) copy u bytes from src to dst
+w_cmove:
+    ldn r12, r14              ; u (count)
+    addi r14, 8
+    ldn r7, r14               ; dst
+    addi r14, 8
+    ldn r9, r14               ; src
+    addi r14, 8
+    cmpi r12, 0
+    breq w_cmove_done
+w_cmove_loop:
+    ld.b r1, r9
+    st.b r7, r1
+    inc r9
+    inc r7
+    dec r12
+    cmpi r12, 0
+    brne w_cmove_loop
+w_cmove_done:
+    ret.l
+
+; -ROT ( a b c -- c a b )
+w_neg_rot:
+    ldn r1, r14               ; c
+    mov r11, r14
+    addi r11, 8
+    ldn r7, r11               ; b
+    mov r9, r14
+    addi r9, 16
+    ldn r13, r9               ; a
+    str r14, r7               ; TOS = b
+    str r11, r13              ; NOS = a
+    str r9, r1                ; 3OS = c
+    ret.l
+
+; BL ( -- 32 ) blank constant
+w_bl:
+    ldi r1, 32
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; TRUE ( -- -1 )
+w_true:
+    ldi r1, 0
+    dec r1
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; FALSE ( -- 0 )
+w_false:
+    ldi r1, 0
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; WORD ( char "ccc<char>" -- c-addr )
+;   Parse input delimited by char, store counted string at HERE.
+;   Does NOT advance HERE — the string is transient.
+;   Reserved GPRs: R2(XSEL), R3(PC/PSEL), R4(emit), R5(key),
+;                  R6(hexprint), R8(UART), R14(DSP), R15(RSP).
+w_word_forth:
+    ; Pop delimiter into R13
+    ldn r13, r14
+    addi r14, 8
+    ; Get >IN → R0
+    ldi64 r11, var_to_in
+    ldn r0, r11
+    ; Get TIB base → R9
+    ldi64 r9, tib_buffer
+    ; Get #TIB → R7
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    ; R10 = HERE (destination for counted string)
+    ldi64 r11, var_here
+    ldn r10, r11
+    ; Save HERE start in R1 (will be c-addr to return)
+    mov r1, r10
+    inc r10                   ; skip past count byte
+    ldi r12, 0                ; R12 = char count
+    ; Skip leading delimiters
+wd_skip:
+    cmp r0, r7
+    breq wd_done
+    brgt wd_done
+    mov r11, r9
+    add r11, r0
+    ld.b r11, r11
+    cmp r11, r13
+    brne wd_copy
+    inc r0
+    br wd_skip
+    ; Copy non-delimiter chars
+wd_copy:
+    cmp r0, r7
+    breq wd_done
+    brgt wd_done
+    mov r11, r9
+    add r11, r0
+    ld.b r11, r11
+    cmp r11, r13
+    breq wd_trail
+    st.b r10, r11
+    inc r10
+    inc r12
+    inc r0
+    br wd_copy
+wd_trail:
+    inc r0                    ; skip past trailing delimiter
+wd_done:
+    ; Store count byte at c-addr (saved in R1)
+    st.b r1, r12
+    ; Null-terminate after the string
+    ldi r11, 0
+    st.b r10, r11
+    ; Update >IN
+    ldi64 r11, var_to_in
+    str r11, r0
+    ; Push c-addr (R1 = HERE at entry)
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; =====================================================================
+;  VARIABLE, CONSTANT
+; =====================================================================
+
+; VARIABLE ( "name" -- )
+;   Creates a word that pushes address of an 8-byte cell.
+;   : VARIABLE CREATE 8 ALLOT ;
+;   But implemented natively for simplicity.
+w_variable:
+    ; Parse name
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_colon_err
+
+    ; Build dictionary entry header (same as : does)
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE = entry start
+    mov r13, r0               ; save entry start
+
+    ; Link
+    ldi64 r11, var_latest
+    ldn r1, r11
+    str r0, r1
+    addi r0, 8
+
+    ; Flags+len
+    st.b r0, r12
+    inc r0
+
+    ; Copy name
+    ldi r1, 0
+w_var_copy:
+    cmp r1, r12
+    breq w_var_name_done
+    mov r7, r9
+    add r7, r1
+    ld.b r7, r7
+    st.b r0, r7
+    inc r0
+    inc r1
+    br w_var_copy
+w_var_name_done:
+    ; Code: push address of the data cell that follows the ret.l
+    ; We'll emit: ldi64 r1, <data_addr>; subi r14, 8; str r14, r1; ret.l
+    ; But we don't know data_addr yet. So we emit the code, then the data.
+    ; data_addr = current pos + 16 + 1  (16 for ldi64+subi+str, 1 for ret.l)
+    ; Actually: ldi64(11) + subi(3) + str(2) + ret.l(1) = 17 bytes
+    ; data_addr = R0 + 17
+    mov r1, r0
+    addi r1, 17
+
+    ; Save R0 (code start), emit ldi64 r1 for data addr
+    ; ldi64 r1: 0xF0 0x60 0x10
+    ldi r7, 0xF0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ; 8 bytes of data_addr (R1) LE
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ; subi r14, 8: 0x67 0xE0 0x08
+    ldi r7, 0x67
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x08
+    st.b r0, r7
+    inc r0
+    ; str r14, r1: 0x54 0xE1
+    ldi r7, 0x54
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE1
+    st.b r0, r7
+    inc r0
+    ; ret.l: 0x0E
+    ldi r7, 0x0E
+    st.b r0, r7
+    inc r0
+    ; Now R0 = data cell address. Initialize to 0.
+    ldi r1, 0
+    str r0, r1
+    addi r0, 8
+    ; Update HERE and LATEST
+    ldi64 r11, var_here
+    str r11, r0
+    ldi64 r11, var_latest
+    str r11, r13
+    ret.l
+
+; CONSTANT ( n "name" -- )
+;   Creates a word that pushes n.
+;   Note: value is saved in R10 because parse_word clobbers R13,
+;   and R8 is the global UART TX address.
+w_constant:
+    ; Get value from stack
+    ldn r10, r14              ; n → R10 (safe across parse_word)
+    addi r14, 8
+    ; Parse name
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_colon_err
+
+    ; Build dictionary entry header
+    ldi64 r11, var_here
+    ldn r0, r11
+    mov r1, r0                ; save entry start
+
+    ; push entry start
+    subi r14, 8
+    str r14, r1
+
+    ; Link
+    ldi64 r11, var_latest
+    ldn r1, r11
+    str r0, r1
+    addi r0, 8
+
+    ; Flags+len
+    st.b r0, r12
+    inc r0
+
+    ; Copy name
+    ldi r1, 0
+w_const_copy:
+    cmp r1, r12
+    breq w_const_name_done
+    mov r7, r9
+    add r7, r1
+    ld.b r7, r7
+    st.b r0, r7
+    inc r0
+    inc r1
+    br w_const_copy
+w_const_name_done:
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; Code: compile literal push of R10 (the saved value) then ret.l
+    mov r1, r10
+    ldi64 r11, compile_literal
+    call.l r11
+    ldi64 r11, compile_ret
+    call.l r11
+    ; Set LATEST
+    ldn r1, r14               ; entry start
+    addi r14, 8
+    ldi64 r11, var_latest
+    str r11, r1
+    ret.l
+
+; =====================================================================
+;  String Words
+; =====================================================================
+
+; TYPE ( addr len -- ) print counted string
+w_type:
+    ldn r12, r14              ; len
+    addi r14, 8
+    ldn r9, r14               ; addr
+    addi r14, 8
+w_type_loop:
+    cmpi r12, 0
+    breq w_type_done
+    ld.b r1, r9
+    call.l r4
+    inc r9
+    dec r12
+    br w_type_loop
+w_type_done:
+    ret.l
+
+; SPACE ( -- ) emit a space
+w_space:
+    ldi r1, 0x20
+    call.l r4
+    ret.l
+
+; SPACES ( n -- ) emit n spaces
+w_spaces:
+    ldn r12, r14
+    addi r14, 8
+w_spaces_loop:
+    cmpi r12, 0
+    breq w_spaces_done
+    ldi r1, 0x20
+    call.l r4
+    dec r12
+    br w_spaces_loop
+w_spaces_done:
+    ret.l
+
+; \ (backslash comment, IMMEDIATE) — skip rest of input line
+;   Works in both interpret and compile modes.
+w_backslash:
+    ldi64 r11, var_tib_len
+    ldn r0, r11               ; R0 = TIB-LEN
+    ldi64 r11, var_to_in
+    str r11, r0               ; >IN = TIB-LEN (skip rest of line)
+    ret.l
+
+; ( (paren comment, IMMEDIATE) — skip until matching )
+;   Works in both interpret and compile modes.
+w_paren:
+    ldi64 r9, tib_buffer
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; R13 = >IN
+    ldi64 r11, var_tib_len
+    ldn r12, r11              ; R12 = TIB-LEN
+w_paren_scan:
+    cmp r13, r12
+    breq w_paren_done         ; hit end of line without )
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    inc r13
+    cmpi r1, 0x29             ; ')'
+    brne w_paren_scan
+w_paren_done:
+    ldi64 r11, var_to_in
+    str r11, r13              ; update >IN past the )
+    ret.l
+
+; ." (IMMEDIATE) — compile inline string and print call
+;   At compile time, reads chars until " and embeds them.
+;   Compiles: ldi64 r10, <string>; ldi64 r11, print_str; call.l r11; lbr <past>
+;   <string data> <null>
+;   <past:> ...
+w_dotquote:
+    ; We compile a call to an inline string printer.
+    ; Strategy: compile a forward branch over the string data,
+    ; then compile a call to print_str that references the string.
+    ; Actually simpler: compile a call to our helper dotquote_runtime
+    ; which pops the return address (= string addr), prints until null,
+    ; then jumps past the string.
+    ;
+    ; Emits: ldi64 r11, dotquote_runtime; call.l r11; <string bytes> <null>
+    ldi64 r1, dotquote_runtime
+    ldi64 r11, compile_call
+    call.l r11
+    ; Now read chars from input and compile them as bytes until "
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; >IN
+    ldi64 r9, tib_buffer
+dq_scan:
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    cmp r13, r7
+    breq dq_end               ; hit EOL without closing quote
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    inc r13
+    cmpi r1, 0x22             ; '"'
+    breq dq_end
+    ; Compile this byte
+    ldi64 r11, compile_byte
+    call.l r11
+    br dq_scan
+dq_end:
+    ; Compile null terminator
+    ldi r1, 0
+    ldi64 r11, compile_byte
+    call.l r11
+    ; Update >IN
+    ldi64 r11, var_to_in
+    str r11, r13
+    ret.l
+
+; dotquote_runtime: called by compiled ." code.
+;   The return address on RSP points to the start of the string.
+;   We print it, then adjust the return address past the null.
+dotquote_runtime:
+    ; The call.l pushed the return address onto RSP (R15).
+    ; Return addr = address right after the call.l instruction = string start
+    ldn r10, r15              ; R10 = string address
+    ; Print the string
+    ldi64 r11, print_str
+    call.l r11
+    ; R10 was advanced by print_str? No, print_str doesn't modify R10 in a useful way.
+    ; We need to scan past the null to find the new return address.
+    ldn r10, r15              ; reload string start
+dqrt_scan:
+    ld.b r1, r10
+    inc r10
+    cmpi r1, 0
+    brne dqrt_scan
+    ; R10 now points past the null — this is the real return address
+    str r15, r10
+    ret.l
+
+; ACCEPT ( addr max -- n ) read up to max chars into addr, return count
+w_accept:
+    ldn r12, r14              ; max
+    addi r14, 8
+    ldn r9, r14               ; addr
+    addi r14, 8
+    ldi r13, 0                ; count
+w_accept_loop:
+    cmp r13, r12
+    breq w_accept_done
+    call.l r5                 ; key -> R1
+    cmpi r1, 0x0D
+    breq w_accept_done
+    cmpi r1, 0x0A
+    breq w_accept_done
+    mov r7, r9
+    add r7, r13
+    st.b r7, r1
+    inc r13
+    call.l r4                 ; echo
+    br w_accept_loop
+w_accept_done:
+    ldi64 r11, print_crlf
+    call.l r11
+    subi r14, 8
+    str r14, r13              ; push count
+    ret.l
+
+; =====================================================================
+;  NIC Words
+; =====================================================================
+
+; NIC base = MMIO_BASE + 0x0400 = 0xFFFF_FF00_0000_0400
+
+; NET-STATUS ( -- status )  read NIC STATUS register
+w_net_status:
+    ldi64 r11, 0xFFFF_FF00_0000_0401
+    ld.b r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; NET-SEND ( addr len -- )  send a frame via NIC DMA
+w_net_send:
+    ldn r12, r14              ; len
+    addi r14, 8
+    ldn r9, r14               ; addr
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0400
+    ; Write DMA addr (8 bytes at offset 0x02)
+    mov r0, r11
+    addi r0, 2
+    mov r1, r9
+    ; Write 8 bytes of addr LE
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    ; Write frame length (16-bit at offset 0x0A)
+    mov r0, r11
+    addi r0, 0x0A
+    mov r1, r12
+    st.b r0, r1
+    inc r0
+    mov r7, r12
+    lsri r7, 8
+    st.b r0, r7
+    ; Send command (0x01 at offset 0x00)
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; NET-RECV ( addr -- len )  receive a frame via NIC DMA
+;   Returns 0 if no frame available.
+w_net_recv:
+    ldn r9, r14               ; addr
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0400
+    ; Check STATUS for RX available (bit 1)
+    mov r0, r11
+    inc r0
+    ld.b r1, r0
+    mov r7, r1
+    andi r7, 0x02
+    cmpi r7, 0
+    breq w_net_recv_none
+    ; Write DMA addr
+    mov r0, r11
+    addi r0, 2
+    mov r1, r9
+    st.b r0, r1
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r0, r7
+    inc r0
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    ; RECV command
+    ldi r1, 0x02
+    st.b r11, r1
+    ; Read frame length
+    mov r0, r11
+    addi r0, 0x0A
+    ld.b r1, r0
+    inc r0
+    ld.b r7, r0
+    lsli r7, 8
+    or r1, r7
+    subi r14, 8
+    str r14, r1
+    ret.l
+w_net_recv_none:
+    ldi r1, 0
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; NET-MAC@ ( -- addr )  push address of MAC (in MMIO space, 6 bytes at NIC+0x0E)
+w_net_mac:
+    ldi64 r1, 0xFFFF_FF00_0000_040E
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; =====================================================================
+;  Storage device words
+; =====================================================================
+; Storage base = MMIO_BASE + 0x0200 = 0xFFFF_FF00_0000_0200
+;
+; Register map:
+;   +0x00  CMD       (W)   0x01=READ, 0x02=WRITE
+;   +0x01  STATUS    (R)   bit7=present, bit0=busy, bit1=error
+;   +0x02  SECTOR_0  (RW)  sector number (4 bytes LE)
+;   +0x06  DMA_ADDR  (RW)  DMA address (8 bytes LE)
+;   +0x0E  SEC_COUNT (RW)  number of sectors
+;   +0x0F  DATA      (RW)  byte-at-a-time port
+
+; DISK@ ( -- status )  read storage STATUS register
+w_disk_status:
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; DISK-SEC! ( sector -- )  set sector number (32-bit)
+w_disk_sec_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0202
+    ; Write 4 bytes LE
+    mov r7, r1
+    st.b r11, r7
+    inc r11
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    ret.l
+
+; DISK-DMA! ( addr -- )  set DMA address (64-bit)
+w_disk_dma_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0206
+    ; Write 8 bytes LE
+    mov r7, r1
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    mov r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    st.b r11, r7
+    inc r11
+    ; Upper 4 bytes = 0 (we're in normal RAM, not MMIO)
+    ldi r7, 0
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    inc r11
+    st.b r11, r7
+    ret.l
+
+; DISK-N! ( count -- )  set sector count
+w_disk_n_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_020E
+    st.b r11, r1
+    ret.l
+
+; DISK-READ ( -- )  execute READ command (DMA from disk to RAM)
+w_disk_read:
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; DISK-WRITE ( -- )  execute WRITE command (DMA from RAM to disk)
+w_disk_write:
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r1, 0x02
+    st.b r11, r1
+    ret.l
+
+; =====================================================================
+;  Timer Control Words
+; =====================================================================
+
+; TIMER! ( compare -- )  set the 32-bit compare-match register
+w_timer_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0104   ; COMPARE_LO
+    st.w r11, r1                        ; write 32 bits LE
+    ret.l
+
+; TIMER-CTRL! ( ctrl -- )  write timer CONTROL register
+;   bit 0: enable, bit 1: compare-match IRQ enable, bit 2: auto-reload
+w_timer_ctrl_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0108   ; CONTROL
+    st.b r11, r1
+    ret.l
+
+; TIMER-ACK ( -- )  acknowledge timer interrupt (write-1-to-clear STATUS)
+w_timer_ack:
+    ldi64 r11, 0xFFFF_FF00_0000_0109   ; STATUS
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; EI! ( -- )  enable interrupts globally
+w_ei:
+    ei
+    ret.l
+
+; DI! ( -- )  disable interrupts globally
+w_di:
+    di
+    ret.l
+
+; ISR! ( xt slot -- )  install execution token at IVT slot
+;   Writes xt to ivt_table + slot*8
+w_isr_store:
+    ldn r1, r14                         ; slot
+    addi r14, 8
+    ldn r2, r14                         ; xt
+    addi r14, 8
+    ldi r3, 3
+    shl r1, r3                          ; slot * 8
+    ldi64 r11, ivt_table
+    add r11, r1
+    str r11, r2                         ; write xt to IVT entry
     ret.l
 
 ; =====================================================================
@@ -1960,9 +4349,18 @@ d_key:
     call.l r11
     ret.l
 
+; === KEY? ===
+d_key_query:
+    .dq d_key
+    .db 4
+    .ascii "KEY?"
+    ldi64 r11, w_key_query
+    call.l r11
+    ret.l
+
 ; === CR ===
 d_cr:
-    .dq d_key
+    .dq d_key_query
     .db 2
     .ascii "CR"
     ldi64 r11, w_cr
@@ -2239,14 +4637,758 @@ d_tzero:
     call.l r11
     ret.l
 
-; === CYCLES (last built-in) ===
-latest_entry:
+; === CYCLES ===
 d_cycles:
     .dq d_tzero
     .db 6
     .ascii "CYCLES"
     ldi64 r11, w_cycles
     call.l r11
+    ret.l
+
+; === ACC@ ===
+d_acc_fetch:
+    .dq d_cycles
+    .db 4
+    .ascii "ACC@"
+    ldi64 r11, w_acc_fetch
+    call.l r11
+    ret.l
+
+; === ACC1@ ===
+d_acc1_fetch:
+    .dq d_acc_fetch
+    .db 5
+    .ascii "ACC1@"
+    ldi64 r11, w_acc1_fetch
+    call.l r11
+    ret.l
+
+; === ACC2@ ===
+d_acc2_fetch:
+    .dq d_acc1_fetch
+    .db 5
+    .ascii "ACC2@"
+    ldi64 r11, w_acc2_fetch
+    call.l r11
+    ret.l
+
+; === ACC3@ ===
+d_acc3_fetch:
+    .dq d_acc2_fetch
+    .db 5
+    .ascii "ACC3@"
+    ldi64 r11, w_acc3_fetch
+    call.l r11
+    ret.l
+
+; === TPOPCNT ===
+d_tpopcnt:
+    .dq d_acc3_fetch
+    .db 7
+    .ascii "TPOPCNT"
+    ldi64 r11, w_tpopcnt
+    call.l r11
+    ret.l
+
+; === TL1 ===
+d_tl1:
+    .dq d_tpopcnt
+    .db 3
+    .ascii "TL1"
+    ldi64 r11, w_tl1
+    call.l r11
+    ret.l
+
+; === TEMIN ===
+d_temin:
+    .dq d_tl1
+    .db 5
+    .ascii "TEMIN"
+    ldi64 r11, w_temin
+    call.l r11
+    ret.l
+
+; === TEMAX ===
+d_temax:
+    .dq d_temin
+    .db 5
+    .ascii "TEMAX"
+    ldi64 r11, w_temax
+    call.l r11
+    ret.l
+
+; === TABS ===
+d_tabs:
+    .dq d_temax
+    .db 4
+    .ascii "TABS"
+    ldi64 r11, w_tabs
+    call.l r11
+    ret.l
+
+; === TMODE@ ===
+d_tmode_fetch:
+    .dq d_tabs
+    .db 6
+    .ascii "TMODE@"
+    ldi64 r11, w_tmode_fetch
+    call.l r11
+    ret.l
+
+; === TCTRL@ ===
+d_tctrl_fetch:
+    .dq d_tmode_fetch
+    .db 6
+    .ascii "TCTRL@"
+    ldi64 r11, w_tctrl_fetch
+    call.l r11
+    ret.l
+
+; === EXECUTE ===
+d_execute:
+    .dq d_tctrl_fetch
+    .db 7
+    .ascii "EXECUTE"
+    ldi64 r11, w_execute
+    call.l r11
+    ret.l
+
+; === ' (tick) ===
+d_tick:
+    .dq d_execute
+    .db 1
+    .ascii "'"
+    ldi64 r11, w_tick
+    call.l r11
+    ret.l
+
+; === : (colon) ===
+d_colon:
+    .dq d_tick
+    .db 1
+    .ascii ":"
+    ldi64 r11, w_colon
+    call.l r11
+    ret.l
+
+; === ; (semicolon, IMMEDIATE) ===
+d_semicolon:
+    .dq d_colon
+    .db 0x81
+    .ascii ";"
+    ldi64 r11, w_semicolon
+    call.l r11
+    ret.l
+
+; === IF (IMMEDIATE) ===
+d_if:
+    .dq d_semicolon
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "IF"
+    ldi64 r11, w_if
+    call.l r11
+    ret.l
+
+; === ELSE (IMMEDIATE) ===
+d_else:
+    .dq d_if
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "ELSE"
+    ldi64 r11, w_else
+    call.l r11
+    ret.l
+
+; === THEN (IMMEDIATE) ===
+d_then:
+    .dq d_else
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "THEN"
+    ldi64 r11, w_then
+    call.l r11
+    ret.l
+
+; === BEGIN (IMMEDIATE) ===
+d_begin:
+    .dq d_then
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "BEGIN"
+    ldi64 r11, w_begin
+    call.l r11
+    ret.l
+
+; === UNTIL (IMMEDIATE) ===
+d_until:
+    .dq d_begin
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "UNTIL"
+    ldi64 r11, w_until
+    call.l r11
+    ret.l
+
+; === WHILE (IMMEDIATE) ===
+d_while:
+    .dq d_until
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "WHILE"
+    ldi64 r11, w_while
+    call.l r11
+    ret.l
+
+; === REPEAT (IMMEDIATE) ===
+d_repeat:
+    .dq d_while
+    .db 0x86                  ; IMMEDIATE | len 6
+    .ascii "REPEAT"
+    ldi64 r11, w_repeat
+    call.l r11
+    ret.l
+
+; === DO (IMMEDIATE) ===
+d_do:
+    .dq d_repeat
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "DO"
+    ldi64 r11, w_do
+    call.l r11
+    ret.l
+
+; === LOOP (IMMEDIATE) ===
+d_loop:
+    .dq d_do
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "LOOP"
+    ldi64 r11, w_loop
+    call.l r11
+    ret.l
+
+; === I ===
+d_i:
+    .dq d_loop
+    .db 1
+    .ascii "I"
+    ldi64 r11, w_i
+    call.l r11
+    ret.l
+
+; === VARIABLE ===
+d_variable:
+    .dq d_i
+    .db 8
+    .ascii "VARIABLE"
+    ldi64 r11, w_variable
+    call.l r11
+    ret.l
+
+; === CONSTANT ===
+d_constant:
+    .dq d_variable
+    .db 8
+    .ascii "CONSTANT"
+    ldi64 r11, w_constant
+    call.l r11
+    ret.l
+
+; === TYPE ===
+d_type:
+    .dq d_constant
+    .db 4
+    .ascii "TYPE"
+    ldi64 r11, w_type
+    call.l r11
+    ret.l
+
+; === SPACE ===
+d_space:
+    .dq d_type
+    .db 5
+    .ascii "SPACE"
+    ldi64 r11, w_space
+    call.l r11
+    ret.l
+
+; === SPACES ===
+d_spaces:
+    .dq d_space
+    .db 6
+    .ascii "SPACES"
+    ldi64 r11, w_spaces
+    call.l r11
+    ret.l
+
+; === ." (IMMEDIATE) ===
+d_dotquote:
+    .dq d_spaces
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii ".\""
+    ldi64 r11, w_dotquote
+    call.l r11
+    ret.l
+
+; === ACCEPT ===
+d_accept:
+    .dq d_dotquote
+    .db 6
+    .ascii "ACCEPT"
+    ldi64 r11, w_accept
+    call.l r11
+    ret.l
+
+; === NET-STATUS ===
+d_net_status:
+    .dq d_accept
+    .db 10
+    .ascii "NET-STATUS"
+    ldi64 r11, w_net_status
+    call.l r11
+    ret.l
+
+; === NET-SEND ===
+d_net_send:
+    .dq d_net_status
+    .db 8
+    .ascii "NET-SEND"
+    ldi64 r11, w_net_send
+    call.l r11
+    ret.l
+
+; === NET-RECV ===
+d_net_recv:
+    .dq d_net_send
+    .db 8
+    .ascii "NET-RECV"
+    ldi64 r11, w_net_recv
+    call.l r11
+    ret.l
+
+; === NET-MAC@ ===
+d_net_mac:
+    .dq d_net_recv
+    .db 8
+    .ascii "NET-MAC@"
+    ldi64 r11, w_net_mac
+    call.l r11
+    ret.l
+
+; === DISK@ ===
+d_disk_status:
+    .dq d_net_mac
+    .db 5
+    .ascii "DISK@"
+    ldi64 r11, w_disk_status
+    call.l r11
+    ret.l
+
+; === DISK-SEC! ===
+d_disk_sec_store:
+    .dq d_disk_status
+    .db 9
+    .ascii "DISK-SEC!"
+    ldi64 r11, w_disk_sec_store
+    call.l r11
+    ret.l
+
+; === DISK-DMA! ===
+d_disk_dma_store:
+    .dq d_disk_sec_store
+    .db 9
+    .ascii "DISK-DMA!"
+    ldi64 r11, w_disk_dma_store
+    call.l r11
+    ret.l
+
+; === DISK-N! ===
+d_disk_n_store:
+    .dq d_disk_dma_store
+    .db 7
+    .ascii "DISK-N!"
+    ldi64 r11, w_disk_n_store
+    call.l r11
+    ret.l
+
+; === DISK-READ ===
+d_disk_read:
+    .dq d_disk_n_store
+    .db 9
+    .ascii "DISK-READ"
+    ldi64 r11, w_disk_read
+    call.l r11
+    ret.l
+
+; === DISK-WRITE ===
+d_disk_write:
+    .dq d_disk_read
+    .db 10
+    .ascii "DISK-WRITE"
+    ldi64 r11, w_disk_write
+    call.l r11
+    ret.l
+
+; === TIMER! ===
+d_timer_store:
+    .dq d_disk_write
+    .db 6
+    .ascii "TIMER!"
+    ldi64 r11, w_timer_store
+    call.l r11
+    ret.l
+
+; === TIMER-CTRL! ===
+d_timer_ctrl_store:
+    .dq d_timer_store
+    .db 11
+    .ascii "TIMER-CTRL!"
+    ldi64 r11, w_timer_ctrl_store
+    call.l r11
+    ret.l
+
+; === TIMER-ACK ===
+d_timer_ack:
+    .dq d_timer_ctrl_store
+    .db 9
+    .ascii "TIMER-ACK"
+    ldi64 r11, w_timer_ack
+    call.l r11
+    ret.l
+
+; === EI! ===
+d_ei:
+    .dq d_timer_ack
+    .db 3
+    .ascii "EI!"
+    ldi64 r11, w_ei
+    call.l r11
+    ret.l
+
+; === DI! ===
+d_di:
+    .dq d_ei
+    .db 3
+    .ascii "DI!"
+    ldi64 r11, w_di
+    call.l r11
+    ret.l
+
+; === ISR! ===
+d_isr_store:
+    .dq d_di
+    .db 4
+    .ascii "ISR!"
+    ldi64 r11, w_isr_store
+    call.l r11
+    ret.l
+
+; === \ (backslash comment, IMMEDIATE) ===
+d_backslash:
+    .dq d_isr_store
+    .db 0x81                  ; IMMEDIATE | len 1
+    .ascii "\\"
+    ldi64 r11, w_backslash
+    call.l r11
+    ret.l
+
+; === ( (paren comment, IMMEDIATE) ===
+d_paren:
+    .dq d_backslash
+    .db 0x81                  ; IMMEDIATE | len 1
+    .ascii "("
+    ldi64 r11, w_paren
+    call.l r11
+    ret.l
+
+; =====================================================================
+;  BIOS v0.5 Dictionary Entries
+; =====================================================================
+
+; === EXIT (IMMEDIATE) ===
+d_exit:
+    .dq d_paren
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "EXIT"
+    ldi64 r11, w_exit
+    call.l r11
+    ret.l
+
+; === >R (IMMEDIATE) ===
+d_to_r:
+    .dq d_exit
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii ">R"
+    ldi64 r11, w_to_r
+    call.l r11
+    ret.l
+
+; === R> (IMMEDIATE) ===
+d_r_from:
+    .dq d_to_r
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "R>"
+    ldi64 r11, w_r_from
+    call.l r11
+    ret.l
+
+; === R@ (IMMEDIATE) ===
+d_r_fetch:
+    .dq d_r_from
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "R@"
+    ldi64 r11, w_r_fetch
+    call.l r11
+    ret.l
+
+; === J ===
+d_j:
+    .dq d_r_fetch
+    .db 1
+    .ascii "J"
+    ldi64 r11, w_j
+    call.l r11
+    ret.l
+
+; === UNLOOP (IMMEDIATE) ===
+d_unloop:
+    .dq d_j
+    .db 0x86                  ; IMMEDIATE | len 6
+    .ascii "UNLOOP"
+    ldi64 r11, w_unloop
+    call.l r11
+    ret.l
+
+; === +LOOP (IMMEDIATE) ===
+d_plus_loop:
+    .dq d_unloop
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "+LOOP"
+    ldi64 r11, w_plus_loop
+    call.l r11
+    ret.l
+
+; === AGAIN (IMMEDIATE) ===
+d_again:
+    .dq d_plus_loop
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "AGAIN"
+    ldi64 r11, w_again
+    call.l r11
+    ret.l
+
+; === STATE ===
+d_state:
+    .dq d_again
+    .db 5
+    .ascii "STATE"
+    ldi64 r11, w_state
+    call.l r11
+    ret.l
+
+; === [ (IMMEDIATE) ===
+d_left_bracket:
+    .dq d_state
+    .db 0x81                  ; IMMEDIATE | len 1
+    .ascii "["
+    ldi64 r11, w_left_bracket
+    call.l r11
+    ret.l
+
+; === ] ===
+d_right_bracket:
+    .dq d_left_bracket
+    .db 1
+    .ascii "]"
+    ldi64 r11, w_right_bracket
+    call.l r11
+    ret.l
+
+; === LITERAL (IMMEDIATE) ===
+d_literal:
+    .dq d_right_bracket
+    .db 0x87                  ; IMMEDIATE | len 7
+    .ascii "LITERAL"
+    ldi64 r11, w_literal
+    call.l r11
+    ret.l
+
+; === IMMEDIATE ===
+d_immediate:
+    .dq d_literal
+    .db 9
+    .ascii "IMMEDIATE"
+    ldi64 r11, w_immediate
+    call.l r11
+    ret.l
+
+; === CREATE ===
+d_create:
+    .dq d_immediate
+    .db 6
+    .ascii "CREATE"
+    ldi64 r11, w_create
+    call.l r11
+    ret.l
+
+; === S" (IMMEDIATE) ===
+d_squote:
+    .dq d_create
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "S\""
+    ldi64 r11, w_squote
+    call.l r11
+    ret.l
+
+; === 0> ===
+d_zero_gt:
+    .dq d_squote
+    .db 2
+    .ascii "0>"
+    ldi64 r11, w_zero_gt
+    call.l r11
+    ret.l
+
+; === <> ===
+d_not_equal:
+    .dq d_zero_gt
+    .db 2
+    .ascii "<>"
+    ldi64 r11, w_not_equal
+    call.l r11
+    ret.l
+
+; === 0<> ===
+d_zero_ne:
+    .dq d_not_equal
+    .db 3
+    .ascii "0<>"
+    ldi64 r11, w_zero_ne
+    call.l r11
+    ret.l
+
+; === ?DUP ===
+d_qdup:
+    .dq d_zero_ne
+    .db 4
+    .ascii "?DUP"
+    ldi64 r11, w_qdup
+    call.l r11
+    ret.l
+
+; === MIN ===
+d_min:
+    .dq d_qdup
+    .db 3
+    .ascii "MIN"
+    ldi64 r11, w_min
+    call.l r11
+    ret.l
+
+; === MAX ===
+d_max:
+    .dq d_min
+    .db 3
+    .ascii "MAX"
+    ldi64 r11, w_max
+    call.l r11
+    ret.l
+
+; === CELLS ===
+d_cells:
+    .dq d_max
+    .db 5
+    .ascii "CELLS"
+    ldi64 r11, w_cells
+    call.l r11
+    ret.l
+
+; === CELL+ ===
+d_cell_plus:
+    .dq d_cells
+    .db 5
+    .ascii "CELL+"
+    ldi64 r11, w_cell_plus
+    call.l r11
+    ret.l
+
+; === +! ===
+d_plus_store:
+    .dq d_cell_plus
+    .db 2
+    .ascii "+!"
+    ldi64 r11, w_plus_store
+    call.l r11
+    ret.l
+
+; === 2* ===
+d_two_star:
+    .dq d_plus_store
+    .db 2
+    .ascii "2*"
+    ldi64 r11, w_two_star
+    call.l r11
+    ret.l
+
+; === CMOVE ===
+d_cmove:
+    .dq d_two_star
+    .db 5
+    .ascii "CMOVE"
+    ldi64 r11, w_cmove
+    call.l r11
+    ret.l
+
+; === -ROT ===
+d_neg_rot:
+    .dq d_cmove
+    .db 4
+    .ascii "-ROT"
+    ldi64 r11, w_neg_rot
+    call.l r11
+    ret.l
+
+; === BL ===
+d_bl:
+    .dq d_neg_rot
+    .db 2
+    .ascii "BL"
+    ldi64 r11, w_bl
+    call.l r11
+    ret.l
+
+; === TRUE ===
+d_true:
+    .dq d_bl
+    .db 4
+    .ascii "TRUE"
+    ldi64 r11, w_true
+    call.l r11
+    ret.l
+
+; === FALSE ===
+d_false:
+    .dq d_true
+    .db 5
+    .ascii "FALSE"
+    ldi64 r11, w_false
+    call.l r11
+    ret.l
+
+; === WORD ===
+d_word:
+    .dq d_false
+    .db 4
+    .ascii "WORD"
+    ldi64 r11, w_word_forth
+    call.l r11
+    ret.l
+
+; === LATEST ===
+latest_entry:
+d_latest:
+    .dq d_word
+    .db 6
+    .ascii "LATEST"
+    ldi64 r1, var_latest
+    ldn r1, r1
+    subi r14, 8
+    str r14, r1
     ret.l
 
 ; =====================================================================
@@ -2273,7 +5415,7 @@ var_word_len:
 ;  String Constants
 ; =====================================================================
 str_banner:
-    .asciiz "\nMegapad-64 Forth BIOS v0.3\nRAM: "
+    .asciiz "\nMegapad-64 Forth BIOS v0.5\nRAM: "
 str_bytes_ram:
     .asciiz " bytes\n"
 str_ok:
@@ -2298,6 +5440,9 @@ str_ti_dst:
 str_ti_acc:
     .asciiz "ACC: "
 
+str_no_name:
+    .asciiz " name expected\n"
+
 str_busfault:
     .asciiz "\n*** BUS FAULT @ "
 
@@ -2312,6 +5457,7 @@ ivt_table:
     .dq 0
     .dq bus_fault_handler
     .dq 0
+    .dq 0                            ; [7] TIMER — installed by KDOS via ISR!
 
 ; =====================================================================
 ;  TIB (Text Input Buffer) — 256 bytes

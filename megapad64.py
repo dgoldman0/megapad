@@ -75,6 +75,7 @@ IVEC_ALIGN_FAULT    = 0x03
 IVEC_DIV_ZERO       = 0x04
 IVEC_BUS_FAULT      = 0x05
 IVEC_SW_TRAP        = 0x06
+IVEC_TIMER          = 0x07
 
 # ---------------------------------------------------------------------------
 #  Helpers

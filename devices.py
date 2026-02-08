@@ -18,7 +18,9 @@ these through the MMIO dispatch layer in system.py.
 """
 
 from __future__ import annotations
+import socket
 import time
+import threading
 from typing import Optional
 from collections import deque
 
@@ -32,6 +34,7 @@ UART_BASE    = 0x0000
 TIMER_BASE   = 0x0100
 STORAGE_BASE = 0x0200
 SYSINFO_BASE = 0x0300
+NIC_BASE     = 0x0400
 
 
 # ---------------------------------------------------------------------------
@@ -384,14 +387,17 @@ class Storage(Device):
 #   0x07  MEM_SIZE_HI — high byte
 #   0x08  STORAGE_PRESENT — 0 or 1
 #   0x09  UART_PRESENT    — 0 or 1
+#   0x0A  NIC_PRESENT     — 0 or 1
 
 class SystemInfo(Device):
     """Read-only board identification and capability reporting."""
 
-    def __init__(self, mem_size_kib: int = 1024, has_storage: bool = False):
+    def __init__(self, mem_size_kib: int = 1024, has_storage: bool = False,
+                 has_nic: bool = False):
         super().__init__("SysInfo", SYSINFO_BASE, 0x10)
         self.mem_size_kib = mem_size_kib
         self.has_storage = has_storage
+        self.has_nic = has_nic
 
     def read8(self, offset: int) -> int:
         board_id = b"MP64"
@@ -409,7 +415,270 @@ class SystemInfo(Device):
             return 1 if self.has_storage else 0
         if offset == 0x09:
             return 1  # UART always present
+        if offset == 0x0A:
+            return 1 if self.has_nic else 0
         return 0
+
+
+# ---------------------------------------------------------------------------
+#  Network Interface Controller (NIC)
+# ---------------------------------------------------------------------------
+# A simple frame-oriented NIC with DMA support and optional host
+# passthrough via UDP.  Frames up to 1500 bytes.
+#
+# Register map (offsets from NIC_BASE):
+#   0x00  CMD        (W)  — 0x01=SEND, 0x02=RECV, 0x03=STATUS, 0x04=RESET
+#   0x01  STATUS     (R)  — bit 0: TX busy
+#                           bit 1: RX frame available
+#                           bit 2: link up
+#                           bit 3: error
+#                           bit 7: present
+#   0x02..0x09  DMA_ADDR (RW)  — 64-bit DMA address in RAM
+#   0x0A..0x0B  FRAME_LEN (RW) — 16-bit frame length (for TX, set before SEND;
+#                                 for RX, read after RECV)
+#   0x0C  IRQ_CTRL   (RW) — bit 0: RX IRQ enable, bit 1: TX IRQ enable
+#   0x0D  IRQ_STATUS (R)  — bit 0: RX IRQ pending, bit 1: TX IRQ pending
+#   0x0E..0x13  MAC_ADDR (R) — 6-byte MAC address (bytes 0x0E-0x13)
+#   0x14  TX_COUNT_LO (R) — frames sent (low byte)
+#   0x15  TX_COUNT_HI (R) — frames sent (high byte)
+#   0x16  RX_COUNT_LO (R) — frames received (low byte)
+#   0x17  RX_COUNT_HI (R) — frames received (high byte)
+#   0x18..0x1F  reserved
+#   0x20..0x7F  DATA port (RW) — byte-at-a-time alternative to DMA
+
+NIC_MTU = 1500
+
+class NetworkDevice(Device):
+    """Emulated NIC with optional UDP passthrough to a real host port."""
+
+    def __init__(self, mac: bytes = b'\x02\x4D\x50\x36\x34\x00',
+                 passthrough_port: Optional[int] = None,
+                 passthrough_host: str = '127.0.0.1',
+                 passthrough_peer_port: Optional[int] = None):
+        super().__init__("NIC", NIC_BASE, 0x80)
+        self.mac = bytearray(mac[:6].ljust(6, b'\x00'))
+        self.dma_addr: int = 0
+        self.frame_len: int = 0
+        self.irq_ctrl: int = 0
+        self.irq_status: int = 0
+        self.error: bool = False
+        self.link_up: bool = True
+        self.tx_count: int = 0
+        self.rx_count: int = 0
+
+        # Frame buffers
+        self.tx_queue: deque[bytes] = deque(maxlen=64)
+        self.rx_queue: deque[bytes] = deque(maxlen=64)
+
+        # Data port (byte-at-a-time alternative to DMA)
+        self._data_buf: bytearray = bytearray()
+        self._data_pos: int = 0
+
+        # DMA callbacks — system.py sets these
+        self._mem_read: Optional[callable] = None
+        self._mem_write: Optional[callable] = None
+
+        # TX callback — for test inspection
+        self.on_tx_frame: Optional[callable] = None
+
+        # UDP passthrough
+        self._passthrough_port = passthrough_port
+        self._passthrough_host = passthrough_host
+        self._passthrough_peer_port = passthrough_peer_port or (
+            (passthrough_port + 1) if passthrough_port else None
+        )
+        self._sock: Optional[socket.socket] = None
+        self._rx_thread: Optional[threading.Thread] = None
+        self._running = False
+
+        if passthrough_port is not None:
+            self._start_passthrough()
+
+    def _start_passthrough(self):
+        """Bind a UDP socket and start a background RX listener thread."""
+        try:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.bind((self._passthrough_host, self._passthrough_port))
+            self._sock.settimeout(0.1)
+            self._running = True
+            self._rx_thread = threading.Thread(
+                target=self._rx_listener, daemon=True, name="NIC-RX"
+            )
+            self._rx_thread.start()
+        except OSError:
+            self.error = True
+            self.link_up = False
+
+    def _rx_listener(self):
+        """Background thread: receive UDP datagrams → RX queue."""
+        while self._running and self._sock:
+            try:
+                data, addr = self._sock.recvfrom(NIC_MTU + 64)
+                if data and len(self.rx_queue) < self.rx_queue.maxlen:
+                    self.rx_queue.append(bytes(data[:NIC_MTU]))
+                    self.rx_count = (self.rx_count + 1) & 0xFFFF
+                    if self.irq_ctrl & 1:  # RX IRQ enable
+                        self.irq_status |= 1
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def stop(self):
+        """Shut down the passthrough listener."""
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def inject_frame(self, data: bytes):
+        """Push a frame into the RX queue (for testing or local injection)."""
+        if len(data) > NIC_MTU:
+            data = data[:NIC_MTU]
+        self.rx_queue.append(bytes(data))
+        self.rx_count = (self.rx_count + 1) & 0xFFFF
+        if self.irq_ctrl & 1:
+            self.irq_status |= 1
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:      # CMD (write-only)
+            return 0
+        elif offset == 0x01:    # STATUS
+            s = 0x80            # present
+            if self.rx_queue:
+                s |= 0x02       # RX available
+            if self.link_up:
+                s |= 0x04       # link up
+            if self.error:
+                s |= 0x08
+            return s
+        elif 0x02 <= offset <= 0x09:  # DMA_ADDR
+            return (self.dma_addr >> (8 * (offset - 0x02))) & 0xFF
+        elif offset == 0x0A:    # FRAME_LEN low
+            return self.frame_len & 0xFF
+        elif offset == 0x0B:    # FRAME_LEN high
+            return (self.frame_len >> 8) & 0xFF
+        elif offset == 0x0C:    # IRQ_CTRL
+            return self.irq_ctrl
+        elif offset == 0x0D:    # IRQ_STATUS
+            return self.irq_status
+        elif 0x0E <= offset <= 0x13:  # MAC address
+            idx = offset - 0x0E
+            if idx < 6:
+                return self.mac[idx]
+            return 0
+        elif offset == 0x14:    # TX_COUNT low
+            return self.tx_count & 0xFF
+        elif offset == 0x15:    # TX_COUNT high
+            return (self.tx_count >> 8) & 0xFF
+        elif offset == 0x16:    # RX_COUNT low
+            return self.rx_count & 0xFF
+        elif offset == 0x17:    # RX_COUNT high
+            return (self.rx_count >> 8) & 0xFF
+        elif 0x20 <= offset <= 0x7F:  # DATA port
+            if self._data_pos < len(self._data_buf):
+                b = self._data_buf[self._data_pos]
+                self._data_pos += 1
+                return b
+            return 0
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x00:      # CMD
+            self._execute_cmd(value)
+        elif 0x02 <= offset <= 0x09:  # DMA_ADDR
+            shift = 8 * (offset - 0x02)
+            mask = 0xFF << shift
+            self.dma_addr = (self.dma_addr & ~mask) | (value << shift)
+        elif offset == 0x0A:    # FRAME_LEN low
+            self.frame_len = (self.frame_len & 0xFF00) | value
+        elif offset == 0x0B:    # FRAME_LEN high
+            self.frame_len = (self.frame_len & 0x00FF) | (value << 8)
+        elif offset == 0x0C:    # IRQ_CTRL
+            self.irq_ctrl = value
+        elif offset == 0x0D:    # IRQ_STATUS (write-1-to-clear)
+            self.irq_status &= ~value
+        elif 0x20 <= offset <= 0x7F:  # DATA port write
+            self._data_buf.append(value)
+
+    def _execute_cmd(self, cmd: int):
+        self.error = False
+        if cmd == 0x01:         # SEND — transmit frame
+            frame = self._read_tx_frame()
+            if frame:
+                self.tx_queue.append(frame)
+                self.tx_count = (self.tx_count + 1) & 0xFFFF
+                if self.on_tx_frame:
+                    self.on_tx_frame(frame)
+                # UDP passthrough
+                if self._sock and self._passthrough_peer_port:
+                    try:
+                        self._sock.sendto(
+                            frame,
+                            (self._passthrough_host, self._passthrough_peer_port)
+                        )
+                    except OSError:
+                        self.error = True
+                if self.irq_ctrl & 2:  # TX IRQ enable
+                    self.irq_status |= 2
+        elif cmd == 0x02:       # RECV — receive next frame
+            if self.rx_queue:
+                frame = self.rx_queue.popleft()
+                self.frame_len = len(frame)
+                self._write_rx_frame(frame)
+            else:
+                self.frame_len = 0
+        elif cmd == 0x03:       # STATUS (no-op, just read STATUS reg)
+            pass
+        elif cmd == 0x04:       # RESET
+            self.tx_queue.clear()
+            self.rx_queue.clear()
+            self._data_buf = bytearray()
+            self._data_pos = 0
+            self.frame_len = 0
+            self.irq_status = 0
+            self.error = False
+            self.tx_count = 0
+            self.rx_count = 0
+
+    def _read_tx_frame(self) -> Optional[bytes]:
+        """Read frame_len bytes from DMA address (or data port fallback)."""
+        nbytes = self.frame_len
+        if nbytes <= 0 or nbytes > NIC_MTU:
+            self.error = True
+            return None
+        if self._mem_read:
+            data = bytearray()
+            for i in range(nbytes):
+                data.append(self._mem_read(self.dma_addr + i))
+            return bytes(data)
+        elif self._data_buf:
+            frame = bytes(self._data_buf[:nbytes])
+            self._data_buf = bytearray()
+            self._data_pos = 0
+            return frame
+        self.error = True
+        return None
+
+    def _write_rx_frame(self, frame: bytes):
+        """Write received frame to DMA address (and data port buffer)."""
+        if self._mem_write:
+            for i, b in enumerate(frame):
+                self._mem_write(self.dma_addr + i, b)
+        # Also make available via data port
+        self._data_buf = bytearray(frame)
+        self._data_pos = 0
+
+    def drain_tx(self) -> list[bytes]:
+        """Return and clear all pending TX frames."""
+        frames = list(self.tx_queue)
+        self.tx_queue.clear()
+        return frames
 
 
 # ---------------------------------------------------------------------------
