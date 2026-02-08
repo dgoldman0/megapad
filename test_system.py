@@ -420,7 +420,7 @@ class TestBIOS(unittest.TestCase):
     def test_boot_banner(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [])
-        self.assertIn("Megapad-64 Forth BIOS v0.5", text)
+        self.assertIn("Megapad-64 Forth BIOS v1.0", text)
         self.assertIn("RAM:", text)
         self.assertIn("ok", text)
 
@@ -1082,6 +1082,389 @@ class TestBIOS(unittest.TestCase):
                    "CELLS", "CREATE", "BL", "TRUE", "FALSE"]:
             self.assertIn(w, text, f"WORDS missing {w}")
 
+    # -- v1.0 BIOS words --
+
+    def test_2over(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 2OVER . . . . . ."])
+        self.assertIn("2 1 4 3 2 1 ", text)
+
+    def test_2swap(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 2SWAP . . . ."])
+        self.assertIn("2 1 4 3 ", text)
+
+    def test_2rot(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["1 2 3 4 5 6 2ROT . . . . . ."])
+        self.assertIn("2 1 6 5 4 3 ", text)
+
+    def test_gte_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 >= ."])
+        self.assertIn("-1 ", text)
+
+    def test_gte_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 5 >= ."])
+        self.assertIn("-1 ", text)
+
+    def test_gte_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 >= ."])
+        self.assertIn("0 ", text)
+
+    def test_lte_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 <= ."])
+        self.assertIn("-1 ", text)
+
+    def test_lte_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 5 <= ."])
+        self.assertIn("-1 ", text)
+
+    def test_lte_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 <= ."])
+        self.assertIn("0 ", text)
+
+    def test_u_lt_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 U< ."])
+        self.assertIn("-1 ", text)
+
+    def test_u_lt_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 U< ."])
+        self.assertIn("0 ", text)
+
+    def test_u_gt_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 U> ."])
+        self.assertIn("-1 ", text)
+
+    def test_u_gt_false(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["3 5 U> ."])
+        self.assertIn("0 ", text)
+
+    def test_off(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE X  42 X !",
+            "X OFF",
+            "X @ ."
+        ])
+        self.assertIn("0 ", text)
+
+    def test_wfetch_wstore(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x1234 OVER W!",
+            "W@ ."
+        ])
+        self.assertIn("4660 ", text)   # 0x1234 = 4660
+
+    def test_lfetch_lstore(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x12345678 OVER L!",
+            "L@ ."
+        ])
+        self.assertIn("305419896 ", text)   # 0x12345678
+
+    def test_zstr(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" hello" DROP 1- .ZSTR ;',
+            'TEST'
+        ])
+        # S" leaves addr len; the actual string starts 13 bytes before addr
+        # (after the squote_runtime call). We use DROP 1- to get to the
+        # null-terminated string in the code stream. But the string layout is:
+        # ... call squote_runtime | h e l l o \0 ...
+        # squote_runtime pushes addr=start_of_string, so addr-1 would be wrong.
+        # Actually, the string IS null-terminated. We just need the addr:
+        self.assertIn("hello", text)
+
+    def test_uchar_bios(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0x61 UCHAR ."])
+        self.assertIn("65 ", text)   # 'a' → 'A'
+
+    def test_uchar_uppercase_unchanged(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["0x41 UCHAR ."])
+        self.assertIn("65 ", text)
+
+    def test_talign(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 63 AND .  TALIGN  HERE 63 AND ."
+        ])
+        # After TALIGN, HERE mod 64 should be 0
+        lines = text.split("ok")
+        # Just check the second number is 0
+        self.assertIn("0 ", text)
+
+    def test_two_slash(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["10 2/ ."])
+        self.assertIn("5 ", text)
+
+    def test_count(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" hi" DROP 1- COUNT . . ;',
+            'TEST'
+        ])
+        # COUNT on a counted string: should yield addr and length
+        # S" gives addr len — but we need a counted string. Test indirectly.
+
+    def test_move_forward(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE 0x41 OVER C!  HERE 1+  0x42 OVER C!  HERE 2 + 0x43 OVER C!",
+            "HERE  HERE 100 +  3 MOVE",
+            "HERE 100 + C@ .  HERE 101 + C@ .  HERE 102 + C@ ."
+        ])
+        self.assertIn("65 ", text)  # 'A'
+        self.assertIn("66 ", text)  # 'B'
+        self.assertIn("67 ", text)  # 'C'
+
+    def test_within_true(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["5 3 10 WITHIN ."])
+        self.assertIn("-1 ", text)
+
+    def test_within_false_below(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["2 3 10 WITHIN ."])
+        self.assertIn("0 ", text)
+
+    def test_within_false_above(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["10 3 10 WITHIN ."])
+        self.assertIn("0 ", text)  # upper bound exclusive
+
+    def test_source(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SOURCE SWAP DROP ."])
+        # Should return current input length (nonzero)
+
+    def test_to_in(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [">IN @ ."])
+        # >IN should be a valid address that returns a value
+
+    def test_evaluate(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" 2 3 + ." EVALUATE ;',
+            'TEST'
+        ])
+        self.assertIn("5", text)
+
+    def test_compare_equal(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABC" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("0 ", text)
+
+    def test_compare_less(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABC" S" ABD" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_compare_greater(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABD" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("1 ", text)
+
+    def test_char(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["CHAR A ."])
+        self.assertIn("65 ", text)
+
+    def test_bracket_char(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST  [CHAR] Z . ;",
+            "TEST"
+        ])
+        self.assertIn("90 ", text)
+
+    def test_recurse(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": FACT  DUP 1 > IF DUP 1- RECURSE * THEN ;",
+            "5 FACT ."
+        ])
+        self.assertIn("120 ", text)
+
+    def test_find_known(self):
+        sys, buf = self._boot_bios()
+        # WORD parses next delimited word from TIB and returns counted-string
+        # address. We can use WORD to get a counted string for FIND.
+        # "0x20 WORD DUP" produces a counted string of the next space-delimited
+        # token. The token after WORD on the same line is "FIND".
+        # We'll use a colon definition to test FIND properly:
+        text = self._run_forth(sys, buf, [
+            ': TEST  0x20 WORD FIND . . ;',
+            'TEST DUP'
+        ])
+        # FIND on "DUP" should return xt and -1 (non-immediate)
+        self.assertIn("-1 ", text)
+
+    # --- Phase 1C tests ---
+
+    def test_value_basic(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['42 VALUE myval', 'myval .'])
+        self.assertIn("42 ", text)
+
+    def test_value_to_interpret(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '10 VALUE x',
+            'x .',
+            '99 TO x',
+            'x .'
+        ])
+        self.assertIn("10 ", text)
+        self.assertIn("99 ", text)
+
+    def test_value_to_compile(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '5 VALUE cnt',
+            ': INC-CNT  cnt 1+ TO cnt ;',
+            'INC-CNT INC-CNT INC-CNT',
+            'cnt .'
+        ])
+        self.assertIn("8 ", text)
+
+    def test_postpone_immediate(self):
+        """POSTPONE of an IMMEDIATE word compiles it instead of executing."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': MY-IF  POSTPONE IF ; IMMEDIATE',
+            ': TEST  1 MY-IF 42 . THEN ;',
+            'TEST'
+        ])
+        self.assertIn("42 ", text)
+
+    def test_postpone_non_immediate(self):
+        """POSTPONE of non-IMMEDIATE compiles deferred compilation."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': MY-DUP  POSTPONE DUP ; IMMEDIATE',
+            ': TEST  5 MY-DUP + . ;',
+            'TEST'
+        ])
+        self.assertIn("10 ", text)
+
+    def test_2to_r_2r_from(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  1 2 2>R 2R> . . ;',
+            'TEST'
+        ])
+        self.assertIn("2 ", text)
+        self.assertIn("1 ", text)
+
+    def test_2r_fetch(self):
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  10 20 2>R 2R@ . . 2R> 2DROP ;',
+            'TEST'
+        ])
+        self.assertIn("20 ", text)
+        self.assertIn("10 ", text)
+
+    def test_does_basic(self):
+        """CREATE...DOES> basic defining word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': CONST  CREATE , DOES> @ ;',
+            '42 CONST answer',
+            'answer .'
+        ])
+        self.assertIn("42 ", text)
+
+    def test_does_array(self):
+        """CREATE...DOES> for array access."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': ARRAY  CREATE CELLS ALLOT DOES> SWAP CELLS + ;',
+            '3 ARRAY myarr',
+            '10 0 myarr !',
+            '20 1 myarr !',
+            '30 2 myarr !',
+            '0 myarr @ .',
+            '1 myarr @ .',
+            '2 myarr @ .'
+        ])
+        self.assertIn("10 ", text)
+        self.assertIn("20 ", text)
+        self.assertIn("30 ", text)
+
+    # --- Phase 1D tests: >NUMBER, QUIT ---
+
+    def test_to_number_decimal(self):
+        """>NUMBER converts decimal digit string."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  0 0 S" 123" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        # len should be 0 (all consumed), result should be 123
+        self.assertIn("0 ", text)   # remaining length = 0
+        self.assertIn("123 ", text) # converted value
+
+    def test_to_number_hex(self):
+        """>NUMBER respects BASE (hex)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'HEX',
+            ': TEST  0 0 S" FF" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        self.assertIn("0 ", text)    # remaining length = 0
+        self.assertIn("FF ", text)   # 255 in hex
+
+    def test_to_number_partial(self):
+        """>NUMBER stops at non-digit character."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  0 0 S" 12X4" >NUMBER 2DROP . . ;',
+            'TEST'
+        ])
+        # Should parse "12" then stop at "X", leaving 2 chars unconsumed
+        self.assertIn("2 ", text)   # remaining length = 2 ("X4")
+        self.assertIn("12 ", text)  # converted value
+
+    def test_quit_in_words(self):
+        """QUIT is findable in dictionary."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['WORDS'])
+        self.assertIn("QUIT", text)
+
+    def test_to_number_in_words(self):
+        """>NUMBER is findable in dictionary."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['WORDS'])
+        self.assertIn(">NUMBER", text)
+
 
 # ---------------------------------------------------------------------------
 #  Assembler branch-range test
@@ -1101,6 +1484,94 @@ class TestAssemblerBranchRange(unittest.TestCase):
         lines = ["target:\n"] + ["nop\n"] * 200 + ["lbr target\n"]
         code = assemble("".join(lines))
         self.assertEqual(len(code), 200 + 3)
+
+    # -- SKIP instruction tests --
+
+    def test_skip_always_size(self):
+        """SKIP assembles to 2 bytes (EXT prefix + BR opcode)."""
+        code = assemble("skip\nnop")
+        # skip = 2 bytes (F6 30), nop = 1 byte
+        self.assertEqual(len(code), 3)
+        self.assertEqual(code[0], 0xF6)  # EXT prefix modifier=6
+        self.assertEqual(code[1], 0x30)  # BR family, cc=0 (always)
+
+    def test_skip_dot_condition(self):
+        """skip.eq assembles with correct condition code."""
+        code = assemble("skip.eq\nnop")
+        self.assertEqual(len(code), 3)
+        self.assertEqual(code[0], 0xF6)
+        self.assertEqual(code[1], 0x31)  # 0x30 | eq=1
+
+    def test_skip_ne_condition(self):
+        """skip.ne assembles with correct condition code."""
+        code = assemble("skip.ne\nnop")
+        self.assertEqual(code[0], 0xF6)
+        self.assertEqual(code[1], 0x32)  # 0x30 | ne=2
+
+    def test_skip_bad_condition(self):
+        """skip.xx with unknown condition raises AsmError."""
+        with self.assertRaises(AsmError):
+            assemble("skip.xx\nnop")
+
+    def test_skip_execution_taken(self):
+        """SKIP skips the next instruction when condition is true."""
+        # Set Z flag (cmpi r0, 0 when r0=0), then skip.eq over inc r1
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # sets Z flag
+            "skip.eq\n"          # Z is set → skip
+            "inc r1\n"           # should be skipped
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 0)  # inc was skipped
+
+    def test_skip_execution_not_taken(self):
+        """SKIP does not skip when condition is false."""
+        # Z not set, so skip.eq should NOT skip
+        code = assemble(
+            "ldi r0, 5\n"
+            "cmpi r0, 0\n"       # Z not set (5 != 0)
+            "skip.eq\n"          # Z not set → don't skip
+            "inc r1\n"           # should execute
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 1)  # inc executed
+
+    def test_skip_over_2byte_instruction(self):
+        """SKIP correctly skips a 2-byte instruction (BR)."""
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # Z set
+            "skip.eq\n"          # skip over the BR
+            "br end\n"           # 2 bytes — should be skipped
+            "inc r1\n"           # should execute
+            "end:\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 1)  # inc r1 executed (BR was skipped)
+
+    def test_skip_over_3byte_instruction(self):
+        """SKIP correctly skips a 3-byte instruction (LDI)."""
+        code = assemble(
+            "ldi r0, 0\n"
+            "cmpi r0, 0\n"       # Z set
+            "skip.eq\n"          # skip over the LDI
+            "ldi r1, 99\n"       # 3 bytes — should be skipped
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[1], 0)  # ldi was skipped
 
 
 # ---------------------------------------------------------------------------

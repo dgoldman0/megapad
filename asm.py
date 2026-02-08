@@ -300,6 +300,10 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower == "inc": return 1
     if mnem_lower == "dec": return 1
 
+    # -- SKIP (conditional skip next instruction) --
+    if mnem_lower.startswith("skip"):
+        return 2  # EXT prefix + BR opcode (no offset byte)
+
     # -- BR --
     if mnem_lower.startswith("br"):
         return 2  # opcode + offset
@@ -428,6 +432,20 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     if mnem_lower == "dec":
         rn = _parse_reg(ops[0])
         out.append(0x20 | (rn & 0xF))
+        return out
+
+    # ---- SKIP (conditional skip next instruction) ----
+    if mnem_lower.startswith("skip"):
+        cc_name = mnem_lower[4:]  # e.g., "skipeq" → "eq", "skip" → ""
+        if cc_name.startswith("."):
+            cc_name = cc_name[1:]  # "skip.eq" → "eq"
+        if not cc_name:
+            cc_name = "al"
+        if cc_name not in COND_MAP:
+            raise AsmError(lineno, f"Unknown skip condition: {cc_name!r}")
+        cc = COND_MAP[cc_name]
+        out.append(0xF6)        # EXT prefix, modifier=6
+        out.append(0x30 | cc)   # BR family with condition code
         return out
 
     # ---- BR (short branch) ----
