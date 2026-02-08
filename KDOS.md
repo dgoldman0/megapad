@@ -14,7 +14,7 @@
 # Interactive session (boot BIOS + load KDOS via UART)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (233 tests)
+# Full test suite (292 tests)
 python test_system.py
 
 # Build BIOS binary only
@@ -88,13 +88,13 @@ PORTS                          \ List all port bindings
 
 ## Implementation Status
 
-### ✅ Completed (v0.9a)
+### ✅ Completed (v0.9b)
 
-**BIOS v0.5** (154 words, ~5100 lines):
+**BIOS v0.5** (155 words, ~5200 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
-  MIN, MAX, CELLS, CELL+, +!, 2*, CMOVE, -ROT, BL, TRUE, FALSE
+  MIN, MAX, CELLS, CELL+, +!, 2*, CMOVE, -ROT, BL, TRUE, FALSE, WORD
 - All 22 tile engine words + ACC@/ACC1@/ACC2@/ACC3@, TPOPCNT/TL1/TEMIN/TEMAX/TABS
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
@@ -102,7 +102,7 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.8** (~1720 lines Forth):
+**KDOS v0.9b** (~2080 lines Forth):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -127,10 +127,18 @@ PORTS                          \ List all port bindings
 - **Real-world data sources**: TemperatureSource, StockSource, SeismicSource, ImageSource, AudioSource, TextSource, EmbeddingSource, MultiChannelSource
 - **Dashboard UI**: HELP, DASHBOARD, STATUS, TASKS, PIPES, FILES, PORTS, DISK-INFO
 - **Benchmarking**: BENCH ( xt -- cycles ), P.BENCH for per-step timing
+- **String utilities**: .ZSTR, SAMESTR?, NAMEBUF, PARSE-NAME (from input stream via WORD)
+- **Comparison operators**: >=, <= (defined atop BIOS < and >)
+- **MP64FS file system**: Named on-disk files with bitmap allocation and directory
+- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE, RMFILE, OPEN, FFLUSH
+- **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
+- **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
+- **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
 
-**Tests**: 233 passing
-- 160+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard)
-- 49 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?)
+**Tests**: 292 passing
+- 195+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard)
+- 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
+- 12 diskutil tests (pure Python MP64FS image manipulation)
 - 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
@@ -190,7 +198,7 @@ PORTS                          \ List all port bindings
 
 **Phase 7: User Experience** — sub-stages:
 
-**v0.9a — BIOS v0.5: Core Forth Completeness** (in progress)
+**v0.9a — BIOS v0.5: Core Forth Completeness** (✅ complete)
 
 The BIOS v0.4 is missing critical standard Forth words (`EXIT`, `>R`/`R>`/
 `R@`, `J`, `UNLOOP`, `S"`, `CREATE`, `[`/`]`, `LITERAL`, `IMMEDIATE`,
@@ -217,7 +225,7 @@ building higher-level features.
 - Fix SAMESTR? (now that EXIT, 0> exist natively)
 - Fix PARSE-NAME (now that BL exists natively)
 
-**v0.9b — MP64FS: On-Disk File System** (planned)
+**v0.9b — MP64FS: On-Disk File System** (✅ complete)
 
 Replace the manual sector-range FILE abstraction with a proper named file
 system on disk, providing the storage foundation for docs, tutorials, and

@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v0.9a — Kernel Dashboard OS for Megapad-64
+\  KDOS v0.9b — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v0.5+ Forth system.
@@ -11,7 +11,7 @@
 \    4. Kernels         — metadata registry for compute kernels
 \    5. Sample Kernels  — kzero, kfill, kadd, kscale, kstats, kthresh
 \    6. Pipelines       — kernel pipeline engine
-\    7. Storage         — disk persistence, file abstraction
+\    7. Storage         — disk persistence, file abstraction, MP64FS
 \    8. Scheduler       — cooperative & preemptive multitasking
 \    9. Screens         — interactive TUI (ANSI terminal)
 \   10. Data Ports      — NIC-based external data ingestion
@@ -30,6 +30,10 @@
 
 : OFF     ( addr -- )        0 SWAP ! ;
 
+\ Comparison words not in BIOS
+: >=  ( a b -- flag )  < 0= ;
+: <=  ( a b -- flag )  > 0= ;
+
 \ Tile-align HERE: pad with zero bytes to next 64-byte boundary
 : TALIGN  ( -- )  BEGIN HERE 63 AND WHILE 0 C, REPEAT ;
 
@@ -44,6 +48,50 @@
 \ 32-bit LE fetch/store
 : L@  ( addr -- u32 )  DUP W@ SWAP 2 + W@ 16 LSHIFT OR ;
 : L!  ( u32 addr -- )  2DUP W! SWAP 16 RSHIFT SWAP 2 + W! ;
+
+\ -- String utilities (needed by MP64FS file system) --
+
+\ Print a null-terminated string
+: .ZSTR  ( addr -- )
+    BEGIN DUP C@ ?DUP WHILE EMIT 1+ REPEAT DROP ;
+
+\ SAMESTR? ( addr1 addr2 maxlen -- flag )
+\   Compare two null-terminated byte strings up to maxlen characters.
+\   Returns -1 if equal, 0 if different.
+VARIABLE STR-A
+VARIABLE STR-B
+VARIABLE STR-N
+
+: SAMESTR?  ( a1 a2 maxlen -- flag )
+    STR-N !  STR-B !  STR-A !
+    BEGIN
+        STR-N @ 0>
+    WHILE
+        STR-A @ C@  STR-B @ C@    ( c1 c2 )
+        2DUP <> IF
+            2DROP 0 EXIT           \ different
+        THEN
+        OR 0= IF
+            -1 EXIT                \ both null -> match
+        THEN
+        1 STR-A +!  1 STR-B +!
+        -1 STR-N +!
+    REPEAT
+    -1 ;
+
+\ NAMEBUF -- 16-byte scratch for file name parsing
+VARIABLE NAMEBUF  15 ALLOT
+
+\ PARSE-NAME ( "name" -- )
+\   Parse next whitespace-delimited word, copy into NAMEBUF, null-terminate.
+VARIABLE PN-LEN
+
+: PARSE-NAME  ( "name" -- )
+    NAMEBUF 16 0 FILL
+    BL WORD DUP C@ 15 MIN PN-LEN !   ( waddr )
+    1+                                 ( src )
+    NAMEBUF PN-LEN @                   ( src dst len )
+    CMOVE ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -867,66 +915,53 @@ VARIABLE FDESC
 : FSIZE  ( fdesc -- n )  F.USED ;
 
 \ FWRITE ( addr len fdesc -- ) write len bytes from addr at cursor
-\   Writes sector-by-sector using scratch buffer for partial sectors.
-: FWRITE  ( addr len fdesc -- )
-    -ROT                      ( fdesc addr len )
-    2DUP + 2 PICK F.CURSOR + ( fdesc addr len new-end )
-    3 PICK F.MAX SECTOR *     ( fdesc addr len new-end capacity )
-    OVER < IF                 ( fdesc addr len new-end )
-        ." FWRITE: out of space" CR
-        2DROP 2DROP
-    ELSE DROP                 ( fdesc addr len )
-        \ Compute sector + offset within sector
-        2 PICK F.CURSOR SECTOR /
-        2 PICK F.START + DISK-SEC!  ( fdesc addr len -- set sector )
-        2 PICK F.CURSOR SECTOR MOD  ( fdesc addr len offset )
-        \ Simple approach: DMA whole sectors from addr if offset=0
-        \ For now, byte-copy to scratch then DMA
-        DUP 0= IF
-            DROP              ( fdesc addr len )
-            \ Aligned write: DMA directly from addr
-            DUP SECTOR 1- + SECTOR / DUP DISK-N!
-            DROP              ( fdesc addr len )
-            OVER DISK-DMA!    ( fdesc addr len )
-            DISK-WRITE
-        ELSE
-            \ Unaligned write: copy to scratch
-            DROP              ( fdesc addr len )
-            FSCRATCH SECTOR 0 FILL  ( zero scratch )
-            FSCRATCH SWAP     ( fdesc addr scratch len )
-            0 DO              ( fdesc addr scratch )
-                OVER I + C@   ( fdesc addr scratch byte )
-                OVER I + C!   ( fdesc addr scratch )
-            LOOP
-            NIP               ( fdesc scratch )
-            DISK-DMA!         ( fdesc )
-            1 DISK-N!
-            DISK-WRITE
-            DROP              ( )
-        THEN
-        \ Update cursor and used_bytes
-        \ (re-fetch fdesc — it's 3rd from top before the THENs)
-    THEN ;
+\   Uses variables for clean stack management.  Advances cursor.
+VARIABLE FW-FD
+VARIABLE FW-ADDR
+VARIABLE FW-LEN
 
-\ Simpler FWRITE: always byte-copy to scratch per sector
-\ (We'll use a cleaner implementation)
+: FWRITE  ( addr len fdesc -- )
+    FW-FD !  FW-LEN !  FW-ADDR !
+    \ Bounds check: cursor + len <= max_sectors * 512
+    FW-FD @ F.CURSOR FW-LEN @ +
+    FW-FD @ F.MAX SECTOR * > IF
+        ." FWRITE: out of space" CR EXIT
+    THEN
+    \ Set up DMA: sector = cursor/512 + start_sector
+    FW-FD @ F.CURSOR SECTOR /
+    FW-FD @ F.START + DISK-SEC!
+    FW-ADDR @ DISK-DMA!
+    FW-LEN @ SECTOR 1- + SECTOR / DISK-N!
+    DISK-WRITE
+    \ Advance cursor
+    FW-FD @ F.CURSOR FW-LEN @ +
+    FW-FD @ 24 + !
+    \ Update used_bytes = max(used, cursor)
+    FW-FD @ F.CURSOR FW-FD @ F.USED MAX
+    FW-FD @ 16 + ! ;
 
 \ FREAD ( addr len fdesc -- actual ) read up to len bytes at cursor
+\   Returns actual bytes read.  Advances cursor.
+VARIABLE FR-FD
+VARIABLE FR-ADDR
+VARIABLE FR-LEN
+
 : FREAD  ( addr len fdesc -- actual )
-    DUP F.USED OVER F.CURSOR -  ( addr len fdesc avail )
-    ROT MIN                   ( addr fdesc actual-len )
-    DUP 0= IF
-        NIP NIP               ( 0 )
-    ELSE
-        ROT ROT               ( actual addr fdesc )
-        \ Set up DMA read at cursor's sector
-        DUP F.CURSOR SECTOR / OVER F.START + DISK-SEC!
-        OVER DISK-DMA!        ( actual addr fdesc )
-        \ Read enough sectors
-        2 PICK SECTOR 1- + SECTOR / DISK-N!
-        DISK-READ             ( actual addr fdesc )
-        DROP DROP             ( actual )
-    THEN ;
+    FR-FD !  FR-LEN !  FR-ADDR !
+    \ Clamp len to available bytes
+    FR-FD @ F.USED FR-FD @ F.CURSOR -
+    FR-LEN @ MIN FR-LEN !
+    FR-LEN @ 0= IF 0 EXIT THEN
+    \ Set up DMA read
+    FR-FD @ F.CURSOR SECTOR /
+    FR-FD @ F.START + DISK-SEC!
+    FR-ADDR @ DISK-DMA!
+    FR-LEN @ SECTOR 1- + SECTOR / DISK-N!
+    DISK-READ
+    \ Advance cursor
+    FR-FD @ F.CURSOR FR-LEN @ +
+    FR-FD @ 24 + !
+    FR-LEN @ ;
 
 \ F.INFO ( fdesc -- ) print file descriptor
 : F.INFO  ( fdesc -- )
@@ -936,7 +971,7 @@ VARIABLE FDESC
     DUP ."  used=" F.USED .
     ."  cur=" F.CURSOR . ." ]" CR ;
 
-\ -- List all registered files --
+\ -- List all registered (legacy) files --
 : FILES  ( -- )
     ." --- Files (" FILE-COUNT @ . ." ) ---" CR
     FILE-COUNT @ DUP IF
@@ -945,6 +980,347 @@ VARIABLE FDESC
             I CELLS FILE-TABLE + @ F.INFO
         LOOP
     ELSE DROP THEN ;
+
+\ =====================================================================
+\  §7.6  MP64FS — On-Disk Named File System
+\ =====================================================================
+\
+\  Disk layout (1 MiB = 2048 x 512-byte sectors):
+\    Sector 0       Superblock (magic "MP64", version, geometry)
+\    Sector 1       Allocation bitmap (2048 bits = 256 bytes)
+\    Sectors 2-5    Directory (64 entries x 32 bytes)
+\    Sectors 6+     Data area (2042 sectors ~ 1 MB usable)
+\
+\  Directory entry (32 bytes):
+\    +0   name[16]       null-terminated (max 15 chars)
+\    +16  start_sec[2]   u16 LE
+\    +18  sec_count[2]   u16 LE
+\    +20  used_bytes[4]  u32 LE
+\    +24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
+\    +25  flags[1]       bit0=readonly bit1=system
+\    +26  reserved[6]
+\
+\  File descriptor layout (created by OPEN):
+\    +0   start_sector   (cell)
+\    +8   max_sectors     (cell)
+\    +16  used_bytes      (cell)
+\    +24  cursor          (cell)
+\    +32  dir_slot        (cell) — index into directory cache
+
+\ -- Constants --
+6   CONSTANT FS-DATA-START
+64  CONSTANT FS-MAX-FILES
+32  CONSTANT FS-ENTRY-SIZE
+
+\ -- RAM caches (loaded from disk by FS-LOAD) --
+VARIABLE FS-SUPER  SECTOR 1- ALLOT            \ 512 bytes — superblock
+VARIABLE FS-BMAP   SECTOR 1- ALLOT            \ 512 bytes — bitmap
+VARIABLE FS-DIR    SECTOR 4 * 1- ALLOT        \ 2048 bytes — directory
+
+VARIABLE FS-OK     0 FS-OK !
+
+\ ── Bitmap operations ────────────────────────────────────────────────
+
+\ BIT-MASK ( bitpos -- mask ) compute 1 << bitpos
+: BIT-MASK  ( bitpos -- mask )
+    DUP 0= IF DROP 1 EXIT THEN
+    1 SWAP 0 DO 2* LOOP ;
+
+\ BIT-FREE? ( sector -- flag ) true if sector is unallocated
+: BIT-FREE?  ( sector -- flag )
+    DUP 8 / FS-BMAP + C@
+    SWAP 8 MOD BIT-MASK
+    AND 0= ;
+
+\ BIT-SET ( sector -- ) mark sector as allocated
+: BIT-SET  ( sector -- )
+    DUP 8 / FS-BMAP +
+    DUP C@
+    ROT 8 MOD BIT-MASK
+    OR SWAP C! ;
+
+\ BIT-CLR ( sector -- ) mark sector as free
+: BIT-CLR  ( sector -- )
+    DUP 8 / FS-BMAP +
+    DUP C@
+    ROT 8 MOD BIT-MASK
+    INVERT AND SWAP C! ;
+
+\ FIND-FREE ( count -- sector | -1 ) find contiguous free run
+VARIABLE FF-NEED
+VARIABLE FF-START
+VARIABLE FF-LEN
+VARIABLE FF-RESULT
+
+: FIND-FREE  ( count -- sector | -1 )
+    FF-NEED !
+    FS-DATA-START FF-START !
+    0 FF-LEN !
+    -1 FF-RESULT !
+    2048 FS-DATA-START DO
+        FF-RESULT @ -1 = IF
+            I BIT-FREE? IF
+                FF-LEN @ 0= IF I FF-START ! THEN
+                1 FF-LEN +!
+                FF-LEN @ FF-NEED @ >= IF
+                    FF-START @ FF-RESULT !
+                THEN
+            ELSE
+                0 FF-LEN !
+            THEN
+        THEN
+    LOOP
+    FF-RESULT @ ;
+
+\ ── Directory helpers ────────────────────────────────────────────────
+
+\ DIRENT ( n -- addr ) address of directory entry N in RAM cache
+: DIRENT  ( n -- addr )  FS-ENTRY-SIZE * FS-DIR + ;
+
+\ Directory entry field readers
+: DE.SEC    ( de -- u16 )   16 + W@ ;
+: DE.COUNT  ( de -- u16 )   18 + W@ ;
+: DE.USED   ( de -- u32 )   20 + L@ ;
+: DE.TYPE   ( de -- u8 )    24 + C@ ;
+: DE.FLAGS  ( de -- u8 )    25 + C@ ;
+
+\ FIND-FREE-SLOT ( -- slot | -1 ) first empty directory slot
+VARIABLE FFS-RESULT
+
+: FIND-FREE-SLOT  ( -- slot | -1 )
+    -1 FFS-RESULT !
+    FS-MAX-FILES 0 DO
+        FFS-RESULT @ -1 = IF
+            I DIRENT C@ 0= IF I FFS-RESULT ! THEN
+        THEN
+    LOOP
+    FFS-RESULT @ ;
+
+\ ── Loading and syncing ──────────────────────────────────────────────
+
+\ FS-LOAD ( -- ) read superblock + bitmap + directory from disk
+: FS-LOAD  ( -- )
+    DISK? 0= IF
+        ." No disk attached" CR EXIT
+    THEN
+    \ Read superblock (sector 0)
+    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-READ
+    \ Check magic "MP64" (M=77 P=80 6=54 4=52)
+    FS-SUPER     C@ 77 <>
+    FS-SUPER 1+  C@ 80 <> OR
+    FS-SUPER 2 + C@ 54 <> OR
+    FS-SUPER 3 + C@ 52 <> OR
+    IF
+        ." Not an MP64FS disk" CR EXIT
+    THEN
+    \ Read bitmap (sector 1)
+    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-READ
+    \ Read directory (sectors 2-5)
+    2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-READ
+    -1 FS-OK !
+    ." MP64FS loaded" CR ;
+
+\ FS-SYNC ( -- ) write bitmap + directory back to disk
+: FS-SYNC  ( -- )
+    FS-OK @ 0= IF ." FS not loaded" CR EXIT THEN
+    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
+    2 DISK-SEC!  FS-DIR  DISK-DMA!  4 DISK-N!  DISK-WRITE ;
+
+\ FS-ENSURE ( -- ) auto-load if not yet loaded
+: FS-ENSURE  ( -- )
+    FS-OK @ 0= IF
+        DISK? IF FS-LOAD THEN
+    THEN ;
+
+\ ── FORMAT ───────────────────────────────────────────────────────────
+
+\ FORMAT ( -- ) initialise a fresh MP64FS on the attached disk
+: FORMAT  ( -- )
+    DISK? 0= IF ." No disk" CR EXIT THEN
+    \ Build superblock in RAM
+    FS-SUPER SECTOR 0 FILL
+    77 FS-SUPER     C!              \ 'M'
+    80 FS-SUPER 1+  C!              \ 'P'
+    54 FS-SUPER 2 + C!              \ '6'
+    52 FS-SUPER 3 + C!              \ '4'
+    1    FS-SUPER 4  + W!           \ version
+    2048 FS-SUPER 6  + W!           \ total sectors
+    1    FS-SUPER 8  + W!           \ bitmap start
+    1    FS-SUPER 10 + W!           \ bitmap sectors
+    2    FS-SUPER 12 + W!           \ dir start
+    4    FS-SUPER 14 + W!           \ dir sectors
+    6    FS-SUPER 16 + W!           \ data start
+    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-WRITE
+    \ Initialise bitmap — mark sectors 0-5 (metadata) as allocated
+    FS-BMAP SECTOR 0 FILL
+    FS-DATA-START 0 DO I BIT-SET LOOP
+    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
+    \ Zero directory
+    FS-DIR SECTOR 4 * 0 FILL
+    2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-WRITE
+    -1 FS-OK !
+    ." MP64FS formatted" CR ;
+
+\ ── DIR — list files ─────────────────────────────────────────────────
+
+: DIR  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    ." --- Directory ---" CR
+    0
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            1+
+            ."  " I DIRENT .ZSTR
+            ."   " I DIRENT DE.USED . ." B"
+            ."   type=" I DIRENT DE.TYPE . CR
+        THEN
+    LOOP
+    ." (" . ." files)" CR ;
+
+\ CATALOG ( -- ) detailed directory listing
+: CATALOG  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    ." Name             Bytes     Secs  Type" CR
+    0
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            1+
+            ."  " I DIRENT .ZSTR
+            ."  " I DIRENT DE.USED .
+            ."  " I DIRENT DE.COUNT .
+            ."  " I DIRENT DE.TYPE .
+            CR
+        THEN
+    LOOP
+    ." (" . ." files, "
+    0 2048 FS-DATA-START DO
+        I BIT-FREE? IF 1+ THEN
+    LOOP
+    . ." free sectors)" CR ;
+
+\ ── MKFILE — create a new file ───────────────────────────────────────
+
+VARIABLE MK-NSEC
+VARIABLE MK-TYPE
+VARIABLE MK-SLOT
+VARIABLE MK-START
+VARIABLE MK-DUP
+
+: MKFILE  ( nsectors type "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR 2DROP EXIT THEN
+    MK-TYPE !  MK-NSEC !
+    PARSE-NAME
+    \ Check for duplicate name
+    0 MK-DUP !
+    FS-MAX-FILES 0 DO
+        MK-DUP @ 0= IF
+            I DIRENT C@ 0<> IF
+                I DIRENT NAMEBUF 16 SAMESTR? IF
+                    -1 MK-DUP !
+                THEN
+            THEN
+        THEN
+    LOOP
+    MK-DUP @ IF
+        ." File exists: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    \ Find empty directory slot
+    FIND-FREE-SLOT MK-SLOT !
+    MK-SLOT @ -1 = IF ." Directory full" CR EXIT THEN
+    \ Find contiguous free sectors
+    MK-NSEC @ FIND-FREE MK-START !
+    MK-START @ -1 = IF ." No space on disk" CR EXIT THEN
+    \ Allocate sectors in bitmap
+    MK-NSEC @ 0 DO
+        MK-START @ I + BIT-SET
+    LOOP
+    \ Build directory entry
+    MK-SLOT @ DIRENT                 ( de )
+    DUP FS-ENTRY-SIZE 0 FILL        ( de )  zero slot
+    DUP NAMEBUF SWAP 16 CMOVE       ( de )  copy name
+    DUP MK-START @ SWAP 16 + W!     ( de )  start sector
+    DUP MK-NSEC  @ SWAP 18 + W!     ( de )  sector count
+    DUP 0          SWAP 20 + L!     ( de )  used_bytes = 0
+    MK-TYPE  @ SWAP 24 + C!         ( )    type
+    FS-SYNC
+    ." Created: " NAMEBUF .ZSTR
+    ." (" MK-NSEC @ . ." sectors at " MK-START @ . ." )" CR ;
+
+\ ── RMFILE — delete a file ───────────────────────────────────────────
+
+VARIABLE RM-SLOT
+
+: RMFILE  ( "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    PARSE-NAME
+    -1 RM-SLOT !
+    FS-MAX-FILES 0 DO
+        RM-SLOT @ -1 = IF
+            I DIRENT C@ 0<> IF
+                I DIRENT NAMEBUF 16 SAMESTR? IF
+                    I RM-SLOT !
+                THEN
+            THEN
+        THEN
+    LOOP
+    RM-SLOT @ -1 = IF
+        ." Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    \ Free bitmap sectors
+    RM-SLOT @ DIRENT DE.COUNT
+    RM-SLOT @ DIRENT DE.SEC
+    SWAP 0 DO                        ( start )
+        DUP I + BIT-CLR
+    LOOP DROP
+    \ Clear directory entry
+    RM-SLOT @ DIRENT FS-ENTRY-SIZE 0 FILL
+    FS-SYNC
+    ." Deleted: " NAMEBUF .ZSTR CR ;
+
+\ ── OPEN — open a file by name ───────────────────────────────────────
+
+VARIABLE OP-SLOT
+
+: OPEN  ( "name" -- fdesc | 0 )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR 0 EXIT THEN
+    PARSE-NAME
+    -1 OP-SLOT !
+    FS-MAX-FILES 0 DO
+        OP-SLOT @ -1 = IF
+            I DIRENT C@ 0<> IF
+                I DIRENT NAMEBUF 16 SAMESTR? IF
+                    I OP-SLOT !
+                THEN
+            THEN
+        THEN
+    LOOP
+    OP-SLOT @ -1 = IF
+        ." Not found: " NAMEBUF .ZSTR CR 0 EXIT
+    THEN
+    \ Create file descriptor in dictionary (5 cells = 40 bytes)
+    HERE
+    OP-SLOT @ DIRENT DE.SEC   ,      \ +0  start_sector
+    OP-SLOT @ DIRENT DE.COUNT ,      \ +8  max_sectors
+    OP-SLOT @ DIRENT DE.USED  ,      \ +16 used_bytes
+    0 ,                               \ +24 cursor = 0
+    OP-SLOT @ ,                       \ +32 dir_slot
+    ;
+
+\ F.SLOT ( fdesc -- n ) directory slot index (for OPEN'd files)
+: F.SLOT  ( fdesc -- n )  32 + @ ;
+
+\ FFLUSH ( fdesc -- ) write metadata back to directory on disk
+: FFLUSH  ( fdesc -- )
+    FS-OK @ 0= IF DROP ." FS not loaded" CR EXIT THEN
+    DUP F.USED
+    OVER F.SLOT DIRENT 20 + L!      \ update used_bytes in dir cache
+    DROP
+    FS-SYNC ;
 
 \ =====================================================================
 \  §8  Scheduler & Tasks
@@ -1246,7 +1622,7 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v0.9a "
+    ."  KDOS v0.9b "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -1565,7 +1941,7 @@ VARIABLE BENCH-T0
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v0.9a — Kernel Dashboard OS" CR
+    ."  KDOS v0.9b — Kernel Dashboard OS" CR
     HRULE
     .MEM
     CR DISK-INFO
@@ -1579,7 +1955,7 @@ VARIABLE BENCH-T0
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS | bufs=" BUF-COUNT @ .
+    ." KDOS v0.9b | bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
@@ -1594,7 +1970,7 @@ VARIABLE BENCH-T0
 
 : HELP  ( -- )
     CR HRULE
-    ."  KDOS v0.9a — Quick Reference" CR
+    ."  KDOS v0.9b — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -1648,15 +2024,24 @@ VARIABLE BENCH-T0
     ."    DISK-INFO              Print storage status" CR
     ."    buf sec B.SAVE         Save buffer to disk" CR
     ."    buf sec B.LOAD         Load buffer from disk" CR
-    CR ."  FILE WORDS:" CR
-    ."    10 8 FILE name         Create file at sec 10, 8 secs" CR
-    ."    f F.INFO               Show file descriptor" CR
-    ."    addr len f FWRITE      Write bytes to file" CR
-    ."    addr len f FREAD       Read bytes from file" CR
+    CR ."  MP64FS FILE SYSTEM:" CR
+    ."    FORMAT                 Format disk with MP64FS" CR
+    ."    FS-LOAD                Load FS from disk into RAM" CR
+    ."    FS-SYNC                Write FS changes to disk" CR
+    ."    DIR                    List files on disk" CR
+    ."    CATALOG                Detailed file listing" CR
+    ."    8 2 MKFILE name        Create file (8 secs, type 2)" CR
+    ."    RMFILE name            Delete file from disk" CR
+    ."    OPEN name              Open file -> fdesc" CR
+    ."    f FFLUSH               Write metadata to disk" CR
+    CR ."  FILE I/O:" CR
+    ."    10 8 FILE name         Create manual file (legacy)" CR
+    ."    addr len f FWRITE      Write bytes (advances cursor)" CR
+    ."    addr len f FREAD       Read bytes (advances cursor)" CR
     ."    pos f FSEEK            Set file cursor" CR
     ."    f FREWIND              Reset cursor to 0" CR
-    ."    f FSIZE                Get used bytes" CR
-    ."    FILES                  List all files" CR
+    ."    f FSIZE / f F.INFO     File size / info" CR
+    ."    FILES                  List legacy files" CR
     CR ."  SCHEDULER WORDS:" CR
     ."    ' word 0 TASK name     Create named task (xt pri)" CR
     ."    xt SPAWN               Spawn anonymous task" CR
@@ -1690,8 +2075,9 @@ VARIABLE BENCH-T0
 \ =====================================================================
 
 CR HRULE
-."  KDOS v0.9a — Kernel Dashboard OS" CR
+."  KDOS v0.9b — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for command reference." CR
 ." Type SCREENS for interactive TUI." CR
+DISK? IF FS-LOAD THEN
 CR

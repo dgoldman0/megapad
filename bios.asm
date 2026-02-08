@@ -3202,6 +3202,73 @@ w_false:
     str r14, r1
     ret.l
 
+; WORD ( char "ccc<char>" -- c-addr )
+;   Parse input delimited by char, store counted string at HERE.
+;   Does NOT advance HERE — the string is transient.
+;   Reserved GPRs: R2(XSEL), R3(PC/PSEL), R4(emit), R5(key),
+;                  R6(hexprint), R8(UART), R14(DSP), R15(RSP).
+w_word_forth:
+    ; Pop delimiter into R13
+    ldn r13, r14
+    addi r14, 8
+    ; Get >IN → R0
+    ldi64 r11, var_to_in
+    ldn r0, r11
+    ; Get TIB base → R9
+    ldi64 r9, tib_buffer
+    ; Get #TIB → R7
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    ; R10 = HERE (destination for counted string)
+    ldi64 r11, var_here
+    ldn r10, r11
+    ; Save HERE start in R1 (will be c-addr to return)
+    mov r1, r10
+    inc r10                   ; skip past count byte
+    ldi r12, 0                ; R12 = char count
+    ; Skip leading delimiters
+wd_skip:
+    cmp r0, r7
+    breq wd_done
+    brgt wd_done
+    mov r11, r9
+    add r11, r0
+    ld.b r11, r11
+    cmp r11, r13
+    brne wd_copy
+    inc r0
+    br wd_skip
+    ; Copy non-delimiter chars
+wd_copy:
+    cmp r0, r7
+    breq wd_done
+    brgt wd_done
+    mov r11, r9
+    add r11, r0
+    ld.b r11, r11
+    cmp r11, r13
+    breq wd_trail
+    st.b r10, r11
+    inc r10
+    inc r12
+    inc r0
+    br wd_copy
+wd_trail:
+    inc r0                    ; skip past trailing delimiter
+wd_done:
+    ; Store count byte at c-addr (saved in R1)
+    st.b r1, r12
+    ; Null-terminate after the string
+    ldi r11, 0
+    st.b r10, r11
+    ; Update >IN
+    ldi64 r11, var_to_in
+    str r11, r0
+    ; Push c-addr (R1 = HERE at entry)
+    subi r14, 8
+    str r14, r1
+    ret.l
+
 ; =====================================================================
 ;  VARIABLE, CONSTANT
 ; =====================================================================
@@ -5294,12 +5361,21 @@ d_true:
     ret.l
 
 ; === FALSE ===
-latest_entry:
 d_false:
     .dq d_true
     .db 5
     .ascii "FALSE"
     ldi64 r11, w_false
+    call.l r11
+    ret.l
+
+; === WORD ===
+latest_entry:
+d_word:
+    .dq d_false
+    .db 4
+    .ascii "WORD"
+    ldi64 r11, w_word_forth
     call.l r11
     ret.l
 

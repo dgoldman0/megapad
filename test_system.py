@@ -25,6 +25,13 @@ from data_sources import (
     TemperatureSource, StockSource, SeismicSource, ImageSource,
     AudioSource, TextSource, EmbeddingSource, MultiChannelSource,
 )
+from diskutil import (
+    MP64FS, format_image,
+    inject_file as du_inject_file,
+    read_file as du_read_file,
+    list_files as du_list_files,
+    delete_file as du_delete_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1214,10 +1221,12 @@ class TestKDOS(unittest.TestCase):
                   storage_image=None,
                   nic_frames=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
-        # If no storage needed, use the fast snapshot path
-        if storage_image is None and self.__class__._kdos_snapshot is not None:
+        # Use the fast snapshot path whenever the snapshot exists.
+        # The fast path now supports storage_image and nic_frames.
+        if self.__class__._kdos_snapshot is not None:
             return self._run_kdos_fast(extra_lines,
-                                      nic_frames=nic_frames)
+                                      nic_frames=nic_frames,
+                                      storage_image=storage_image)
 
         sys, buf = self._boot_bios(storage_image=storage_image)
         if nic_frames:
@@ -1253,11 +1262,12 @@ class TestKDOS(unittest.TestCase):
 
     def _run_kdos_fast(self, extra_lines: list[str],
                        max_steps=50_000_000,
-                       nic_frames=None) -> str:
+                       nic_frames=None,
+                       storage_image=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
-        sys = make_system(ram_kib=256)
+        sys = make_system(ram_kib=256, storage_image=storage_image)
         buf = capture_uart(sys)
 
         # Restore memory (BIOS + KDOS already compiled)
@@ -1328,7 +1338,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v0.9a", text)
+        self.assertIn("KDOS v0.9b", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -1458,7 +1468,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v0.9a", text)
+        self.assertIn("KDOS v0.9b", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -1872,7 +1882,8 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("SAMPLE KERNELS", text)
         self.assertIn("PIPELINE WORDS", text)
         self.assertIn("STORAGE WORDS", text)
-        self.assertIn("FILE WORDS", text)
+        self.assertIn("FILE I/O", text)
+        self.assertIn("MP64FS FILE SYSTEM", text)
         self.assertIn("SCHEDULER WORDS", text)
         self.assertIn("DATA PORT WORDS", text)
         self.assertIn("SCREENS", text)
@@ -2300,7 +2311,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v0.9a", text)
+        self.assertIn("KDOS v0.9b", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -3188,6 +3199,406 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("kcorrelate", text)
         self.assertIn("kinvert", text)
         self.assertIn("kcount", text)
+
+    # ------------------------------------------------------------------
+    #  §1 utility additions: W@, W!, L@, L!, SAMESTR?, PARSE-NAME
+    # ------------------------------------------------------------------
+
+    def test_w_fetch_store(self):
+        """W@ and W! read/write 16-bit little-endian values."""
+        text = self._run_kdos_fast([
+            "VARIABLE wbuf 8 ALLOT",
+            "12345 wbuf W!",
+            "wbuf W@ .",
+        ])
+        self.assertIn("12345 ", text)
+
+    def test_l_fetch_store(self):
+        """L@ and L! read/write 32-bit little-endian values."""
+        text = self._run_kdos_fast([
+            "VARIABLE lbuf 8 ALLOT",
+            "100000 lbuf L!",
+            "lbuf L@ .",
+        ])
+        self.assertIn("100000 ", text)
+
+    def test_samestr_equal(self):
+        """SAMESTR? returns -1 for equal strings."""
+        text = self._run_kdos_fast([
+            "VARIABLE s1 8 ALLOT  VARIABLE s2 8 ALLOT",
+            ": fill-s1 65 s1 C! 66 s1 1+ C! 0 s1 2 + C! ; fill-s1",
+            ": fill-s2 65 s2 C! 66 s2 1+ C! 0 s2 2 + C! ; fill-s2",
+            "s1 s2 16 SAMESTR? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_samestr_different(self):
+        """SAMESTR? returns 0 for different strings."""
+        text = self._run_kdos_fast([
+            "VARIABLE s1 8 ALLOT  VARIABLE s2 8 ALLOT",
+            ": fill-s1 65 s1 C! 66 s1 1+ C! 0 s1 2 + C! ; fill-s1",
+            ": fill-s2 65 s2 C! 67 s2 1+ C! 0 s2 2 + C! ; fill-s2",
+            "s1 s2 16 SAMESTR? .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_parse_name(self):
+        """PARSE-NAME copies word into NAMEBUF."""
+        text = self._run_kdos_fast([
+            "PARSE-NAME hello",
+            "NAMEBUF C@ .",        # first char 'h' = 104
+        ])
+        self.assertIn("104 ", text)
+
+    # ------------------------------------------------------------------
+    #  MP64FS: Forth-side integration (KDOS + formatted disk image)
+    # ------------------------------------------------------------------
+
+    def _make_formatted_image(self):
+        """Create a temp formatted MP64FS image, return path."""
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        format_image(f.name)
+        f.close()
+        return f.name
+
+    def _make_image_with_file(self, name="readme", data=b"Hello MP64!",
+                               ftype=2):
+        """Create a formatted image with one pre-injected file."""
+        path = self._make_formatted_image()
+        du_inject_file(path, name, data, ftype=ftype)
+        return path
+
+    def test_fs_load(self):
+        """FS-LOAD reads MP64FS superblock and prints confirmation."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["FS-LOAD"], storage_image=path)
+            self.assertIn("MP64FS loaded", text)
+        finally:
+            os.unlink(path)
+
+    def test_fs_load_no_disk(self):
+        """FS-LOAD with no disk prints error."""
+        text = self._run_kdos_fast(["FS-LOAD"])
+        self.assertIn("No disk", text)
+
+    def test_format(self):
+        """FORMAT initializes MP64FS on an attached disk."""
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        f.write(b'\x00' * (2048 * 512))
+        f.close()
+        try:
+            text = self._run_kdos(["FORMAT"], storage_image=f.name)
+            self.assertIn("MP64FS formatted", text)
+        finally:
+            os.unlink(f.name)
+
+    def test_dir_empty(self):
+        """DIR on an empty formatted disk shows 0 files."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["DIR"], storage_image=path)
+            self.assertIn("Directory", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_dir_with_files(self):
+        """DIR lists pre-injected files."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "hello", b"world", ftype=2)
+        du_inject_file(path, "data", b"\x00" * 64, ftype=1)
+        try:
+            text = self._run_kdos(["DIR"], storage_image=path)
+            self.assertIn("hello", text)
+            self.assertIn("data", text)
+            self.assertIn("2 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_mkfile(self):
+        """MKFILE creates a file on disk."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "4 2 MKFILE notes",
+                "DIR",
+            ], storage_image=path)
+            self.assertIn("Created: notes", text)
+            self.assertIn("notes", text)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_mkfile_duplicate(self):
+        """MKFILE rejects duplicate file names."""
+        path = self._make_image_with_file("readme")
+        try:
+            text = self._run_kdos([
+                "4 2 MKFILE readme",
+            ], storage_image=path)
+            self.assertIn("File exists", text)
+        finally:
+            os.unlink(path)
+
+    def test_rmfile(self):
+        """RMFILE deletes a file."""
+        path = self._make_image_with_file("temp", b"x" * 100)
+        try:
+            text = self._run_kdos([
+                "RMFILE temp",
+                "DIR",
+            ], storage_image=path)
+            self.assertIn("Deleted: temp", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_rmfile_not_found(self):
+        """RMFILE on missing file prints error."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "RMFILE ghost",
+            ], storage_image=path)
+            self.assertIn("Not found", text)
+        finally:
+            os.unlink(path)
+
+    def test_open_file(self):
+        """OPEN returns a file descriptor with correct fields."""
+        path = self._make_image_with_file("readme", b"Hello MP64!")
+        try:
+            text = self._run_kdos([
+                "OPEN readme",
+                "F.INFO",
+            ], storage_image=path)
+            self.assertIn("[file", text)
+            self.assertIn("sec=", text)
+            self.assertIn("used=", text)
+        finally:
+            os.unlink(path)
+
+    def test_open_not_found(self):
+        """OPEN on missing file prints error and pushes 0."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "OPEN missing .",
+            ], storage_image=path)
+            self.assertIn("Not found", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fwrite_fread_roundtrip(self):
+        """FWRITE + FREAD round-trips data through disk."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "4 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                ": fill-wbuf 170 wbuf C! 170 wbuf 1+ C! ; fill-wbuf",
+                "wbuf 2 OVER FWRITE",
+                "DROP",
+                "OPEN testfile",
+                "VARIABLE rbuf 512 ALLOT",
+                "rbuf 2 OVER FREAD .",
+                "rbuf C@ .",
+            ], storage_image=path)
+            self.assertIn("2 ", text)
+            self.assertIn("170 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fwrite_advances_cursor(self):
+        """FWRITE advances the file cursor."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "4 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                ": fill-wbuf 99 wbuf C! ; fill-wbuf",
+                "DUP wbuf 10 ROT FWRITE",
+                "F.CURSOR .",
+            ], storage_image=path)
+            self.assertIn("10 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_catalog(self):
+        """CATALOG shows detailed directory listing."""
+        path = self._make_image_with_file("readme", b"Hello MP64!", ftype=2)
+        try:
+            text = self._run_kdos(["CATALOG"], storage_image=path)
+            self.assertIn("readme", text)
+            self.assertIn("free sectors", text)
+        finally:
+            os.unlink(path)
+
+    def test_fflush(self):
+        """FFLUSH writes metadata back to disk directory."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "4 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                ": fill-wbuf 42 wbuf C! ; fill-wbuf",
+                "DUP wbuf 100 ROT FWRITE",
+                "FFLUSH",
+            ], storage_image=path)
+            self.assertNotIn("not loaded", text)
+        finally:
+            os.unlink(path)
+
+    def test_help_shows_mp64fs(self):
+        """HELP text includes MP64FS documentation."""
+        text = self._run_kdos_fast(["HELP"])
+        self.assertIn("MP64FS", text)
+        self.assertIn("FORMAT", text)
+        self.assertIn("DIR", text)
+        self.assertIn("MKFILE", text)
+        self.assertIn("RMFILE", text)
+        self.assertIn("OPEN", text)
+        self.assertIn("FFLUSH", text)
+
+    def test_version_v09b(self):
+        """Startup banner shows v0.9b."""
+        text = self._run_kdos_fast(["STATUS"])
+        self.assertIn("v0.9b", text)
+
+
+# ---------------------------------------------------------------------------
+#  diskutil.py — pure Python tests
+# ---------------------------------------------------------------------------
+
+class TestDiskUtil(unittest.TestCase):
+    """Tests for the MP64FS Python disk utility."""
+
+    def test_diskutil_format(self):
+        """format_image creates a valid MP64FS image."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            fs = format_image(f.name)
+            info = fs.info()
+            self.assertTrue(info["formatted"])
+            self.assertEqual(info["version"], 1)
+            self.assertEqual(info["total_sectors"], 2048)
+            self.assertEqual(info["data_start"], 6)
+            self.assertEqual(info["files"], 0)
+            self.assertEqual(info["free_sectors"], 2042)
+
+    def test_diskutil_inject_read(self):
+        """inject_file + read_file round-trips data."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            data = b"Hello, MP64FS!"
+            du_inject_file(f.name, "readme", data, ftype=2)
+            got = du_read_file(f.name, "readme")
+            self.assertEqual(got, data)
+
+    def test_diskutil_list_files(self):
+        """list_files returns injected files."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            du_inject_file(f.name, "alpha", b"aaa", ftype=1)
+            du_inject_file(f.name, "beta", b"bbb", ftype=2)
+            entries = du_list_files(f.name)
+            names = [e.name for e in entries]
+            self.assertIn("alpha", names)
+            self.assertIn("beta", names)
+            self.assertEqual(len(entries), 2)
+
+    def test_diskutil_delete_file(self):
+        """delete_file removes a file and frees sectors."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            fs = format_image(f.name)
+            du_inject_file(f.name, "temp", b"x" * 1024, ftype=1)
+            self.assertEqual(len(du_list_files(f.name)), 1)
+            du_delete_file(f.name, "temp")
+            self.assertEqual(len(du_list_files(f.name)), 0)
+            fs2 = MP64FS.load(f.name)
+            self.assertEqual(fs2._count_free(), 2042)
+
+    def test_diskutil_duplicate_name(self):
+        """inject_file raises on duplicate name."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            du_inject_file(f.name, "dup", b"first")
+            with self.assertRaises(FileExistsError):
+                du_inject_file(f.name, "dup", b"second")
+
+    def test_diskutil_not_found(self):
+        """read_file raises FileNotFoundError for missing file."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            with self.assertRaises(FileNotFoundError):
+                du_read_file(f.name, "nope")
+
+    def test_diskutil_large_file(self):
+        """inject_file handles multi-sector files."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            data = bytes(range(256)) * 8  # 2048 bytes = 4 sectors
+            du_inject_file(f.name, "big", data, ftype=5)
+            got = du_read_file(f.name, "big")
+            self.assertEqual(got, data)
+            entries = du_list_files(f.name)
+            self.assertEqual(entries[0].sector_count, 4)
+
+    def test_diskutil_many_files(self):
+        """Can create up to 64 files."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            for i in range(64):
+                du_inject_file(f.name, f"f{i:02d}", bytes([i]), ftype=1)
+            self.assertEqual(len(du_list_files(f.name)), 64)
+            with self.assertRaises(RuntimeError):
+                du_inject_file(f.name, "overflow", b"x", ftype=1)
+
+    def test_bitmap_alloc_multiple(self):
+        """Allocating multiple files uses contiguous sectors correctly."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            fs = format_image(f.name)
+            du_inject_file(f.name, "a", b"x" * 1024, ftype=1)
+            du_inject_file(f.name, "b", b"y" * 1024, ftype=1)
+            fs2 = MP64FS.load(f.name)
+            entries = fs2.list_files()
+            self.assertEqual(entries[0].start_sector + entries[0].sector_count,
+                             entries[1].start_sector)
+
+    def test_delete_and_reuse(self):
+        """After deleting a file, its sectors can be reused."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            du_inject_file(f.name, "first", b"A" * 512, ftype=1)
+            old_start = du_list_files(f.name)[0].start_sector
+            du_delete_file(f.name, "first")
+            du_inject_file(f.name, "second", b"B" * 512, ftype=1)
+            new_start = du_list_files(f.name)[0].start_sector
+            self.assertEqual(old_start, new_start)
+
+    def test_empty_file(self):
+        """Can inject a zero-length file (1 sector allocated)."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            du_inject_file(f.name, "empty", b"", ftype=1)
+            entries = du_list_files(f.name)
+            self.assertEqual(entries[0].used_bytes, 0)
+            self.assertEqual(entries[0].sector_count, 1)
+
+    def test_file_types(self):
+        """File type field is stored and retrieved correctly."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            for ftype in range(6):
+                du_inject_file(f.name, f"t{ftype}", b"x", ftype=ftype)
+            entries = du_list_files(f.name)
+            for e in entries:
+                expected = int(e.name[1:])
+                self.assertEqual(e.ftype, expected)
 
 
 # ---------------------------------------------------------------------------
