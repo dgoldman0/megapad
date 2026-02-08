@@ -912,3 +912,30 @@ def build_image(path: str | Path | None = None,
     if path is not None:
         fs.save(path)
     return fs
+
+
+def build_sample_image(path: str | Path | None = None,
+                       kdos_path: str | Path = "kdos.f",
+                       total_sectors: int = DEFAULT_TOTAL_SECTORS) -> MP64FS:
+    """Create a complete sample image with KDOS, autoexec, docs & tutorials.
+
+    This is the "ship it" image: booting with this disk + BIOS will
+    auto-load KDOS from disk via autoexec.f.
+    """
+    fs = build_image(total_sectors=total_sectors)
+
+    # Inject KDOS source
+    kdos_src = Path(kdos_path).read_bytes()
+    fs.inject_file("kdos.f", kdos_src, ftype=FTYPE_FORTH, flags=0x02)  # system
+
+    # Inject autoexec.f — bootstrap script
+    autoexec = b'LOAD kdos.f\n'
+    fs.inject_file("autoexec.f", autoexec, ftype=FTYPE_FORTH, flags=0x02)
+
+    # Inject sample data for tutorials
+    demo = bytes(range(256))
+    fs.inject_file("demo-data", demo, ftype=FTYPE_DATA)
+
+    if path is not None:
+        fs.save(path)
+    return fs

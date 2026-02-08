@@ -27,12 +27,12 @@ from data_sources import (
 )
 from diskutil import (
     MP64FS, format_image,
-    FTYPE_DOC, FTYPE_TUT, FTYPE_NAMES,
+    FTYPE_DOC, FTYPE_TUT, FTYPE_FORTH, FTYPE_DATA, FTYPE_NAMES,
     inject_file as du_inject_file,
     read_file as du_read_file,
     list_files as du_list_files,
     delete_file as du_delete_file,
-    build_docs, build_tutorials, build_image,
+    build_docs, build_tutorials, build_image, build_sample_image,
     DOCS, TUTORIALS,
 )
 
@@ -4388,6 +4388,210 @@ class TestDiskUtil(unittest.TestCase):
             loaded = MP64FS.load(f.name)
             entries = loaded.list_files()
             self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS))
+
+    def test_diskutil_build_sample_image(self):
+        """build_sample_image creates image with KDOS, autoexec, docs, tutorials, demo-data."""
+        fs = build_sample_image()
+        entries = fs.list_files()
+        names = [e.name for e in entries]
+        self.assertIn("kdos.f", names)
+        self.assertIn("autoexec.f", names)
+        self.assertIn("demo-data", names)
+        # Check file types
+        kdos_entry = next(e for e in entries if e.name == "kdos.f")
+        self.assertEqual(kdos_entry.ftype, FTYPE_FORTH)
+        auto_entry = next(e for e in entries if e.name == "autoexec.f")
+        self.assertEqual(auto_entry.ftype, FTYPE_FORTH)
+        demo_entry = next(e for e in entries if e.name == "demo-data")
+        self.assertEqual(demo_entry.ftype, FTYPE_DATA)
+        # KDOS source should be substantial
+        self.assertGreater(kdos_entry.used_bytes, 50000)
+        # Total files: 10 docs + 5 tutorials + kdos.f + autoexec.f + demo-data = 18
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 3)
+
+    def test_diskutil_build_sample_image_save(self):
+        """build_sample_image can save to file path."""
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            fs = build_sample_image(path=f.name)
+            loaded = MP64FS.load(f.name)
+            names = [e.name for e in loaded.list_files()]
+            self.assertIn("kdos.f", names)
+            self.assertIn("autoexec.f", names)
+
+
+class TestKDOSFilesystem(TestKDOS):
+    """Tests for the new KDOS filesystem utility words."""
+
+    def test_cat_prints_file(self):
+        """CAT prints a text file's contents."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "greet", b"Hello World!", ftype=2)
+        try:
+            text = self._run_kdos(["CAT greet"], storage_image=path)
+            self.assertIn("Hello World!", text)
+        finally:
+            os.unlink(path)
+
+    def test_cat_not_found(self):
+        """CAT prints error for missing file."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["CAT nope"], storage_image=path)
+            self.assertIn("Not found", text)
+        finally:
+            os.unlink(path)
+
+    def test_cat_empty_file(self):
+        """CAT handles an empty file gracefully."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "empty", b"", ftype=2)
+        try:
+            text = self._run_kdos(["CAT empty"], storage_image=path)
+            self.assertIn("empty", text)
+        finally:
+            os.unlink(path)
+
+    def test_cat_multiline(self):
+        """CAT prints multi-line file with newlines."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "lines", b"line1\nline2\nline3", ftype=2)
+        try:
+            text = self._run_kdos(["CAT lines"], storage_image=path)
+            self.assertIn("line1", text)
+            self.assertIn("line2", text)
+            self.assertIn("line3", text)
+        finally:
+            os.unlink(path)
+
+    def test_fs_free(self):
+        """FS-FREE reports free sectors and file count."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "data1", b"x" * 100, ftype=1)
+        try:
+            text = self._run_kdos(["FS-FREE"], storage_image=path)
+            self.assertIn("free sectors", text)
+            self.assertIn("bytes", text)
+            self.assertIn("1 ", text)  # 1 file
+            self.assertIn("64 ", text)  # 64 max
+        finally:
+            os.unlink(path)
+
+    def test_fs_free_empty(self):
+        """FS-FREE on empty disk shows 0 files."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["FS-FREE"], storage_image=path)
+            self.assertIn("free sectors", text)
+            self.assertIn("0 ", text)  # 0 files
+        finally:
+            os.unlink(path)
+
+    def test_rename_file(self):
+        """RENAME changes a file's name."""
+        path = self._make_image_with_file("oldname", b"test data")
+        try:
+            text = self._run_kdos([
+                "RENAME oldname newname",
+                "DIR",
+            ], storage_image=path)
+            self.assertIn("Renamed to: newname", text)
+            # DIR should show newname
+            self.assertIn("newname", text)
+        finally:
+            os.unlink(path)
+
+    def test_rename_not_found(self):
+        """RENAME with missing source prints error."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["RENAME ghost other"], storage_image=path)
+            self.assertIn("Not found", text)
+        finally:
+            os.unlink(path)
+
+    def test_rename_duplicate(self):
+        """RENAME rejects if target name already exists."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "file1", b"aaa", ftype=1)
+        du_inject_file(path, "file2", b"bbb", ftype=1)
+        try:
+            text = self._run_kdos(["RENAME file1 file2"], storage_image=path)
+            self.assertIn("Name taken", text)
+        finally:
+            os.unlink(path)
+
+    def test_dir_shows_type_names(self):
+        """DIR shows file type names (doc, forth, etc.) instead of numbers."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "readme", b"hi", ftype=2)
+        du_inject_file(path, "code", b": test ;", ftype=3)
+        try:
+            text = self._run_kdos(["DIR"], storage_image=path)
+            self.assertIn("text", text)
+            self.assertIn("forth", text)
+            self.assertIn("free sectors", text)
+        finally:
+            os.unlink(path)
+
+    def test_dir_free_sector_count(self):
+        """DIR reports free sectors at the end."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["DIR"], storage_image=path)
+            self.assertIn("free sectors", text)
+            self.assertIn("bytes free", text)
+        finally:
+            os.unlink(path)
+
+    def test_save_buffer(self):
+        """SAVE-BUFFER writes buffer data to a named file."""
+        path = self._make_formatted_image()
+        # Create a file with 1 sector
+        du_inject_file(path, "output", b"\x00" * 512, ftype=5)
+        try:
+            text = self._run_kdos([
+                "0 1 64 BUFFER testbuf",
+                "42 testbuf B.FILL",
+                "testbuf SAVE-BUFFER output",
+            ], storage_image=path)
+            self.assertIn("Saved", text)
+            self.assertIn("output", text)
+        finally:
+            os.unlink(path)
+
+    def test_save_buffer_not_found(self):
+        """SAVE-BUFFER prints error when file doesn't exist."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "0 1 64 BUFFER testbuf",
+                "testbuf SAVE-BUFFER missing",
+            ], storage_image=path)
+            self.assertIn("Not found", text)
+            self.assertIn("MKFILE", text)
+        finally:
+            os.unlink(path)
+
+    def test_ftype_word(self):
+        """.FTYPE prints human-readable type names."""
+        text = self._run_kdos_fast([
+            "0 .FTYPE",
+            "3 .FTYPE",
+            "4 .FTYPE",
+            "6 .FTYPE",
+        ])
+        self.assertIn("free", text)
+        self.assertIn("forth", text)
+        self.assertIn("doc", text)
+        self.assertIn("tut", text)
+
+    def test_help_includes_new_words(self):
+        """HELP text includes CAT, RENAME, FS-FREE, SAVE-BUFFER."""
+        text = self._run_kdos_fast(["HELP"])
+        self.assertIn("CAT", text)
+        self.assertIn("RENAME", text)
+        self.assertIn("FS-FREE", text)
+        self.assertIn("SAVE-BUFFER", text)
 
 
 # ---------------------------------------------------------------------------

@@ -1144,6 +1144,18 @@ VARIABLE FF-LEN
     -1 FS-OK !
     ." MP64FS formatted" CR ;
 
+\ ── .FTYPE — print file type name ───────────────────────────────────
+
+: .FTYPE  ( type -- )
+    DUP 0 = IF DROP ." free"  EXIT THEN
+    DUP 1 = IF DROP ." raw"   EXIT THEN
+    DUP 2 = IF DROP ." text"  EXIT THEN
+    DUP 3 = IF DROP ." forth" EXIT THEN
+    DUP 4 = IF DROP ." doc"   EXIT THEN
+    DUP 5 = IF DROP ." data"  EXIT THEN
+    DUP 6 = IF DROP ." tut"   EXIT THEN
+    ." ?" . ;
+
 \ ── DIR — list files ─────────────────────────────────────────────────
 
 : DIR  ( -- )
@@ -1156,10 +1168,17 @@ VARIABLE FF-LEN
             1+
             ."  " I DIRENT .ZSTR
             ."   " I DIRENT DE.USED . ." B"
-            ."   type=" I DIRENT DE.TYPE . CR
+            ."   " I DIRENT DE.TYPE .FTYPE
+            CR
         THEN
     LOOP
-    ." (" . ." files)" CR ;
+    DUP . ." file(s), "
+    0  2048 FS-DATA-START DO
+        I BIT-FREE? IF 1+ THEN
+    LOOP
+    DUP . ." free sectors ("
+    SECTOR * . ." bytes free)" CR
+    DROP ;
 
 \ CATALOG ( -- ) detailed directory listing
 : CATALOG  ( -- )
@@ -1257,6 +1276,104 @@ VARIABLE RM-SLOT
     RM-SLOT @ DIRENT FS-ENTRY-SIZE 0 FILL
     FS-SYNC
     ." Deleted: " NAMEBUF .ZSTR CR ;
+
+\ ── RENAME — rename a file ───────────────────────────────────────────
+
+VARIABLE RN-SLOT
+
+: RENAME  ( "oldname" "newname" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    \ Look up old name
+    PARSE-NAME
+    FIND-BY-NAME RN-SLOT !
+    RN-SLOT @ -1 = IF
+        ." Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    \ Parse new name
+    PARSE-NAME
+    \ Check new name doesn't already exist
+    FIND-BY-NAME -1 <> IF
+        ." Name taken: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    \ Overwrite name in directory entry
+    RN-SLOT @ DIRENT 16 0 FILL       \ zero old name
+    NAMEBUF RN-SLOT @ DIRENT 16 CMOVE
+    FS-SYNC
+    ." Renamed to: " NAMEBUF .ZSTR CR ;
+
+\ ── CAT — print file contents to terminal ────────────────────────────
+
+VARIABLE CAT-SLOT
+
+: CAT  ( "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME CAT-SLOT !
+    CAT-SLOT @ -1 = IF
+        ." Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    CAT-SLOT @ DIRENT DE.USED DUP 0= IF
+        DROP ." (empty file)" CR EXIT
+    THEN                                 ( used_bytes )
+    \ Read file sectors into HERE (temporary)
+    CAT-SLOT @ DIRENT DE.SEC DISK-SEC!
+    HERE DISK-DMA!
+    CAT-SLOT @ DIRENT DE.COUNT DISK-N!
+    DISK-READ
+    \ Print used_bytes characters from HERE
+    HERE SWAP                            ( addr count )
+    0 DO
+        DUP I + C@ DUP 10 = IF
+            DROP CR
+        ELSE
+            EMIT
+        THEN
+    LOOP DROP ;
+
+\ ── FS-FREE — report free disk space ────────────────────────────────
+
+: FS-FREE  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    0   \ free sector count
+    2048 FS-DATA-START DO
+        I BIT-FREE? IF 1+ THEN
+    LOOP
+    DUP . ." free sectors ("
+    SECTOR * . ." bytes)" CR
+    \ Count used files
+    0  FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF 1+ THEN
+    LOOP
+    . ." files, " FS-MAX-FILES . ." max" CR ;
+
+\ ── SAVE-BUFFER — save buffer data to a named file ──────────────────
+
+VARIABLE SB-SLOT
+VARIABLE SB-DESC
+
+: SAVE-BUFFER  ( buf "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF DROP ." No filesystem" CR EXIT THEN
+    SB-DESC !
+    PARSE-NAME
+    FIND-BY-NAME SB-SLOT !
+    SB-SLOT @ -1 = IF
+        ." Not found: " NAMEBUF .ZSTR
+        ."  (create with MKFILE first)" CR EXIT
+    THEN
+    \ Write buffer data into file's sectors
+    SB-SLOT @ DIRENT DE.SEC DISK-SEC!
+    SB-DESC @ B.DATA DISK-DMA!
+    SB-SLOT @ DIRENT DE.COUNT DISK-N!
+    DISK-WRITE
+    \ Update used_bytes in directory
+    SB-DESC @ B.LEN
+    SB-SLOT @ DIRENT 20 + L!
+    FS-SYNC
+    ." Saved " SB-DESC @ B.LEN . ." bytes to " NAMEBUF .ZSTR CR ;
 
 \ ── OPEN — open a file by name ───────────────────────────────────────
 
@@ -2022,7 +2139,9 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     ."   SCHEDULE / BG         Run tasks" CR
     BOLD ."  Storage:" RESET-COLOR CR
     ."   buf sec B.SAVE/LOAD  Persist buffers" CR
-    ."   0 16 FILE name       Create file" CR
+    ."   DIR / CATALOG        List disk files" CR
+    ."   CAT name             Print file" CR
+    ."   buf SAVE-BUFFER name Save buf to file" CR
     BOLD ."  Data Ports:" RESET-COLOR CR
     ."   buf id PORT!          Bind NIC source" CR
     ."   POLL / n INGEST       Receive frames" CR
@@ -2323,12 +2442,16 @@ VARIABLE ROUTE-BUF
     ."    FORMAT                 Format disk with MP64FS" CR
     ."    FS-LOAD                Load FS from disk into RAM" CR
     ."    FS-SYNC                Write FS changes to disk" CR
+    ."    FS-FREE                Show free disk space" CR
     ."    DIR                    List files on disk" CR
     ."    CATALOG                Detailed file listing" CR
     ."    8 2 MKFILE name        Create file (8 secs, type 2)" CR
     ."    RMFILE name            Delete file from disk" CR
+    ."    RENAME old new         Rename a file" CR
+    ."    CAT name               Print file to terminal" CR
     ."    OPEN name              Open file -> fdesc" CR
     ."    f FFLUSH               Write metadata to disk" CR
+    ."    buf SAVE-BUFFER name   Save buffer to file" CR
     CR ."  FILE I/O:" CR
     ."    10 8 FILE name         Create manual file (legacy)" CR
     ."    addr len f FWRITE      Write bytes (advances cursor)" CR
