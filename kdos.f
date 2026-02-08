@@ -2516,15 +2516,4 @@ HRULE
 ." Type SCREENS for interactive TUI." CR
 ." Type TOPICS or LESSONS for documentation." CR
 DISK? IF FS-LOAD THEN
-
-\ AUTOEXEC: if autoexec.f exists on disk, load and execute it
-: AUTOEXEC  ( -- )
-    FS-OK @ 0= IF EXIT THEN
-    \ Check if autoexec.f exists
-    NAMEBUF 16 0 FILL
-    S" autoexec.f" DROP NAMEBUF 10 CMOVE
-    FIND-BY-NAME -1 = IF EXIT THEN
-    ." Loading autoexec.f..." CR
-    S" LOAD autoexec.f" EVALUATE ;
-AUTOEXEC
 CR

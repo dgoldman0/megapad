@@ -777,6 +777,68 @@ class TestBIOS(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    # -- FSLOAD (BIOS filesystem boot) --
+
+    def test_fsload_no_disk(self):
+        """FSLOAD with no disk prints error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["FSLOAD test.f"])
+        self.assertIn("no disk", text)
+
+    def test_fsload_file_not_found(self):
+        """FSLOAD with empty formatted disk prints not-found error."""
+        fs = build_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD nosuch.f"])
+            self.assertIn("not found", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_evaluates_file(self):
+        """FSLOAD reads a file from MP64FS and EVALUATEs it."""
+        fs = build_image()
+        # Create a tiny Forth file that defines a variable
+        src = b': HELLO 42 ;\n'
+        fs.inject_file("hello.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "FSLOAD hello.f",
+                "HELLO .",
+            ])
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_no_name(self):
+        """FSLOAD without a filename prints an error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["FSLOAD"])
+        self.assertIn("name expected", text)
+
+    def test_autoboot_with_sample_image(self):
+        """BIOS auto-boots from sample image, loading KDOS from disk."""
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            # The auto-boot should have loaded autoexec.f → FSLOAD kdos.f
+            # which loads KDOS.  Verify KDOS banner appeared.
+            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=200_000_000)
+            self.assertIn("KDOS", text)
+            self.assertIn("3 ", text)
+        finally:
+            os.unlink(path)
+
     # -- Timer words --
 
     def test_timer_store(self):

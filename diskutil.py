@@ -928,8 +928,8 @@ def build_sample_image(path: str | Path | None = None,
     kdos_src = Path(kdos_path).read_bytes()
     fs.inject_file("kdos.f", kdos_src, ftype=FTYPE_FORTH, flags=0x02)  # system
 
-    # Inject autoexec.f — bootstrap script
-    autoexec = b'LOAD kdos.f\n'
+    # Inject autoexec.f — bootstrap script (uses BIOS FSLOAD word)
+    autoexec = b'FSLOAD kdos.f\n'
     fs.inject_file("autoexec.f", autoexec, ftype=FTYPE_FORTH, flags=0x02)
 
     # Inject sample data for tutorials
