@@ -1949,8 +1949,8 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 \ =====================================================================
 \
 \  Full-screen TUI built on ANSI escape sequences.
-\  Screens: [1]Home [2]Buffers [3]Kernels [4]Pipes [5]Tasks [6]Help
-\  Navigation: number keys switch screens, q quits, r refreshes.
+\  Screens: [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help [7]Docs [8]Stor
+\  Keys: 1-8 switch, n/p navigate, Enter select, a auto-refresh, r/q.
 \
 
 \ -- ANSI escape primitives --
@@ -2001,8 +2001,59 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 : ./LABEL ( -- )  RESET-COLOR ;  \ turn off after
 
 \ -- Screen state --
-VARIABLE SCREEN-ID      \ current screen: 1-6
+VARIABLE SCREEN-ID      \ current screen: 1-8
 VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
+
+\ -- Extended screen state --
+VARIABLE SCR-SEL      -1 SCR-SEL !     \ selected item on current screen
+VARIABLE SCR-MAX       0 SCR-MAX !     \ max selectable items on screen
+VARIABLE AUTO-REFRESH  0 AUTO-REFRESH !
+VARIABLE REFRESH-LAST
+
+\ -- Find Nth active directory entry (for Storage screen) --
+VARIABLE FNA-WANT
+VARIABLE FNA-FOUND
+
+: FIND-NTH-ACTIVE  ( n -- slot | -1 )
+    FNA-WANT !  -1 FNA-FOUND !
+    0
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            DUP FNA-WANT @ = IF
+                DROP I FNA-FOUND !  LEAVE
+            THEN
+            1+
+        THEN
+    LOOP
+    DROP FNA-FOUND @ ;
+
+\ -- Show Nth doc/tutorial file (full-screen pager) --
+VARIABLE DOC-SEL-N
+VARIABLE DOC-SEL-FOUND
+
+: SHOW-NTH-DOC  ( n -- )
+    DOC-SEL-N !  0 DOC-SEL-FOUND !
+    FS-OK @ 0= IF EXIT THEN
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            I DIRENT DE.TYPE DUP FTYPE-DOC = SWAP FTYPE-TUT = OR IF
+                DOC-SEL-FOUND @ DOC-SEL-N @ = IF
+                    I OPEN-BY-SLOT DUP 0<> IF
+                        PAGE SHOW-FILE
+                        CR DIM ."  Press any key to return..." RESET-COLOR
+                        KEY DROP
+                    ELSE DROP THEN
+                    LEAVE
+                THEN
+                1 DOC-SEL-FOUND +!
+            THEN
+        THEN
+    LOOP ;
+
+\ -- Screen-local counters --
+VARIABLE STOR-N
+VARIABLE DOC-N
+VARIABLE DOC-TUT-COUNT
 
 \ -- Screen header --
 : SCREEN-HEADER  ( -- )
@@ -2017,13 +2068,16 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     DUP 4 = IF REVERSE THEN ." [4]Pipe " RESET-COLOR
     DUP 5 = IF REVERSE THEN ." [5]Task " RESET-COLOR
     DUP 6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
-    7 = IF REVERSE THEN ." [7]Docs " RESET-COLOR
+    DUP 7 = IF REVERSE THEN ." [7]Docs " RESET-COLOR
+    8 = IF REVERSE THEN ." [8]Stor " RESET-COLOR
     CR HBAR ;
 
 \ -- Screen footer --
 : SCREEN-FOOTER  ( -- )
     DIM
-    ."  [1-7] Switch screen  [r] Refresh  [q] Quit"
+    ."  [1-8] Switch  [n/p] Select  [r] Refresh"
+    AUTO-REFRESH @ IF 2 FG ."  Auto:ON" RESET-COLOR DIM ELSE ."  [a]Auto" THEN
+    ."   [q] Quit"
     RESET-COLOR CR ;
 
 \ ---- Screen 1: Home ----
@@ -2047,9 +2101,12 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     .LABEL ."  Buffers (" BUF-COUNT @ .N ." )" ./LABEL CR CR
     BUF-COUNT @ DUP 0= IF
         DROP ."   (none registered)" CR
+        0 SCR-MAX !
     ELSE
+        DUP SCR-MAX !
         0 DO
-            ."   " I .N ."  "
+            SCR-SEL @ I = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
+            I .N ."  "
             I CELLS BUF-TABLE + @
             DUP B.TYPE
             DUP 0 = IF DROP ." raw " THEN
@@ -2062,6 +2119,13 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
             ."  @" B.DATA .N
             CR
         LOOP
+    THEN
+    \ -- Inline detail for selected buffer --
+    SCR-SEL @ -1 <> SCR-SEL @ BUF-COUNT @ < AND IF
+        CR HBAR
+        SCR-SEL @ CELLS BUF-TABLE + @
+        DUP B.INFO
+        B.PREVIEW
     THEN ;
 
 \ ---- Screen 3: Kernels ----
@@ -2101,9 +2165,12 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     .LABEL ."  Tasks (" TASK-COUNT @ .N ." )" ./LABEL CR CR
     TASK-COUNT @ DUP 0= IF
         DROP ."   (none registered)" CR
+        0 SCR-MAX !
     ELSE
+        DUP SCR-MAX !
         0 DO
-            ."   " I .N ."  "
+            SCR-SEL @ I = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
+            I .N ."  "
             I CELLS TASK-TABLE + @
             DUP T.STATUS
             DUP 0 = IF DIM ." FREE " RESET-COLOR THEN
@@ -2116,6 +2183,20 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
             ."  xt=" T.XT .N
             CR
         LOOP
+    THEN
+    \ -- Inline detail for selected task --
+    SCR-SEL @ -1 <> SCR-SEL @ TASK-COUNT @ < AND IF
+        CR HBAR
+        SCR-SEL @ CELLS TASK-TABLE + @
+        ."  Status: " DUP T.STATUS
+        DUP 0 = IF ." FREE" THEN
+        DUP 1 = IF 2 FG ." READY" RESET-COLOR THEN
+        DUP 2 = IF 3 FG ." RUNNING" RESET-COLOR THEN
+        DUP 3 = IF 1 FG ." BLOCKED" RESET-COLOR THEN
+        DUP 4 = IF DIM ." DONE" RESET-COLOR THEN
+        DROP CR
+        ."  XT: " DUP T.XT .N ."   Priority: " T.PRIORITY .N CR
+        CR DIM ."  [k] Kill  [s] Restart" RESET-COLOR CR
     THEN ;
 
 \ ---- Screen 6: Help ----
@@ -2153,44 +2234,85 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 \ ---- Screen 7: Documentation ----
 : SCR-DOCS  ( -- )
     .LABEL ."  Documentation" ./LABEL CR CR
+    0 DOC-N !
     BOLD ."  Topics:" RESET-COLOR CR
     FS-OK @ IF
-        0
+        0 DOC-TUT-COUNT !
         FS-MAX-FILES 0 DO
             I DIRENT C@ 0<> IF
                 I DIRENT DE.TYPE FTYPE-DOC = IF
-                    1+
-                    ."    " I DIRENT .ZSTR CR
+                    SCR-SEL @ DOC-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."    " THEN
+                    DOC-N @ .N ."  " I DIRENT .ZSTR CR
+                    1 DOC-N +!  1 DOC-TUT-COUNT +!
                 THEN
             THEN
         LOOP
-        DUP 0= IF ."    (none)" CR THEN DROP
+        DOC-TUT-COUNT @ 0= IF ."    (none)" CR THEN
     ELSE
         ."    (no filesystem loaded)" CR
     THEN
     CR
     BOLD ."  Tutorials:" RESET-COLOR CR
     FS-OK @ IF
-        0
+        0 DOC-TUT-COUNT !
         FS-MAX-FILES 0 DO
             I DIRENT C@ 0<> IF
                 I DIRENT DE.TYPE FTYPE-TUT = IF
-                    1+
-                    ."    " I DIRENT .ZSTR CR
+                    SCR-SEL @ DOC-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."    " THEN
+                    DOC-N @ .N ."  " I DIRENT .ZSTR CR
+                    1 DOC-N +!  1 DOC-TUT-COUNT +!
                 THEN
             THEN
         LOOP
-        DUP 0= IF ."    (none)" CR THEN DROP
+        DOC-TUT-COUNT @ 0= IF ."    (none)" CR THEN
     ELSE
         ."    (no filesystem loaded)" CR
     THEN
+    DOC-N @ SCR-MAX !
     CR
-    BOLD ."  Commands:" RESET-COLOR CR
-    ."    DOC <topic>        Read documentation" CR
-    ."    DESCRIBE <topic>   Show topic by name" CR
-    ."    TUTORIAL <name>    Interactive lesson" CR
-    ."    TOPICS             List all topics" CR
-    ."    LESSONS            List all lessons" CR ;
+    DIM ."  [Enter] Read selected document" RESET-COLOR CR ;
+
+\ ---- Screen 8: Storage ----
+: SCR-STORAGE  ( -- )
+    .LABEL ."  Storage" ./LABEL CR CR
+    DISK? 0= IF
+        ."   (no storage attached)" CR
+        0 SCR-MAX ! EXIT
+    THEN
+    FS-OK @ 0= IF
+        ."   (filesystem not loaded)" CR
+        0 SCR-MAX ! EXIT
+    THEN
+    0 STOR-N !
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            SCR-SEL @ STOR-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
+            STOR-N @ .N ."  "
+            I DIRENT .ZSTR
+            ."  " I DIRENT DE.USED .N ." B"
+            ."  " I DIRENT DE.TYPE .FTYPE
+            CR
+            1 STOR-N +!
+        THEN
+    LOOP
+    STOR-N @ SCR-MAX !
+    STOR-N @ 0= IF ."   (empty)" CR THEN
+    CR
+    0  2048 FS-DATA-START DO
+        I BIT-FREE? IF 1+ THEN
+    LOOP
+    DIM ."  " .N ."  free sectors" RESET-COLOR CR
+    \ -- Inline detail for selected file --
+    SCR-SEL @ -1 <> SCR-SEL @ STOR-N @ < AND IF
+        CR HBAR
+        SCR-SEL @ FIND-NTH-ACTIVE DUP -1 <> IF
+            ."  Name  : " DUP DIRENT .ZSTR CR
+            ."  Type  : " DUP DIRENT DE.TYPE .FTYPE CR
+            ."  Size  : " DUP DIRENT DE.USED .N ."  bytes" CR
+            ."  Start : sector " DUP DIRENT DE.SEC .N CR
+            ."  Count : " DIRENT DE.COUNT .N ."  sectors" CR
+        ELSE DROP THEN
+    THEN ;
 
 \ -- Screen dispatch --
 : RENDER-SCREEN  ( -- )
@@ -2203,31 +2325,97 @@ VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
     DUP 5 = IF DROP SCR-TASKS   ELSE
     DUP 6 = IF DROP SCR-HELP    ELSE
     DUP 7 = IF DROP SCR-DOCS    ELSE
+    DUP 8 = IF DROP SCR-STORAGE ELSE
         DROP SCR-HOME
-    THEN THEN THEN THEN THEN THEN THEN
+    THEN THEN THEN THEN THEN THEN THEN THEN
     CR SCREEN-FOOTER ;
+
+\ -- Screen switch helper --
+: SWITCH-SCREEN  ( n -- )
+    DUP SCREEN-ID !
+    DUP 2 = OVER 5 = OR OVER 7 = OR SWAP 8 = OR
+    IF 0 ELSE -1 THEN SCR-SEL !
+    0 SCR-MAX !
+    RENDER-SCREEN ;
+
+\ -- Navigation predicates --
+: SCREEN-SELECTABLE?  ( -- flag )
+    SCREEN-ID @ 2 = SCREEN-ID @ 5 = OR
+    SCREEN-ID @ 7 = OR SCREEN-ID @ 8 = OR ;
+
+\ -- Activate selected item --
+: DO-SELECT  ( -- )
+    SCREEN-ID @ 7 = IF SCR-SEL @ SHOW-NTH-DOC THEN ;
 
 \ -- Event loop: poll KEY?, dispatch on keypress --
 : HANDLE-KEY  ( c -- )
-    DUP 49 = IF DROP 1 SCREEN-ID ! RENDER-SCREEN ELSE  \ '1'
-    DUP 50 = IF DROP 2 SCREEN-ID ! RENDER-SCREEN ELSE  \ '2'
-    DUP 51 = IF DROP 3 SCREEN-ID ! RENDER-SCREEN ELSE  \ '3'
-    DUP 52 = IF DROP 4 SCREEN-ID ! RENDER-SCREEN ELSE  \ '4'
-    DUP 53 = IF DROP 5 SCREEN-ID ! RENDER-SCREEN ELSE  \ '5'
-    DUP 54 = IF DROP 6 SCREEN-ID ! RENDER-SCREEN ELSE  \ '6'
-    DUP 55 = IF DROP 7 SCREEN-ID ! RENDER-SCREEN ELSE  \ '7'
-    DUP 113 = IF DROP 0 SCREEN-RUN !               ELSE  \ 'q'
-    DUP 114 = IF DROP RENDER-SCREEN                ELSE  \ 'r'
-        DROP
-    THEN THEN THEN THEN THEN THEN THEN THEN THEN ;
+    DUP 49 = IF DROP 1 SWITCH-SCREEN EXIT THEN  \ '1'
+    DUP 50 = IF DROP 2 SWITCH-SCREEN EXIT THEN  \ '2'
+    DUP 51 = IF DROP 3 SWITCH-SCREEN EXIT THEN  \ '3'
+    DUP 52 = IF DROP 4 SWITCH-SCREEN EXIT THEN  \ '4'
+    DUP 53 = IF DROP 5 SWITCH-SCREEN EXIT THEN  \ '5'
+    DUP 54 = IF DROP 6 SWITCH-SCREEN EXIT THEN  \ '6'
+    DUP 55 = IF DROP 7 SWITCH-SCREEN EXIT THEN  \ '7'
+    DUP 56 = IF DROP 8 SWITCH-SCREEN EXIT THEN  \ '8'
+    DUP 113 = IF DROP 0 SCREEN-RUN ! EXIT THEN  \ 'q'
+    DUP 114 = IF DROP RENDER-SCREEN EXIT THEN    \ 'r'
+    DUP 97 = IF DROP                              \ 'a' = toggle auto-refresh
+        AUTO-REFRESH @ IF 0 ELSE -1 THEN AUTO-REFRESH !
+        RENDER-SCREEN EXIT
+    THEN
+    DUP 110 = IF DROP                             \ 'n' = next item
+        SCREEN-SELECTABLE? IF
+            SCR-SEL @ 1+ DUP SCR-MAX @ >= IF DROP 0 THEN
+            SCR-SEL !  RENDER-SCREEN
+        THEN EXIT
+    THEN
+    DUP 112 = IF DROP                             \ 'p' = prev item
+        SCREEN-SELECTABLE? IF
+            SCR-SEL @ 1- DUP 0< IF
+                DROP SCR-MAX @ 1- DUP 0< IF DROP 0 THEN
+            THEN
+            SCR-SEL !  RENDER-SCREEN
+        THEN EXIT
+    THEN
+    DUP 13 = OVER 32 = OR IF DROP                 \ ENTER / SPACE = activate
+        SCREEN-SELECTABLE? IF
+            SCR-SEL @ -1 <> IF
+                DO-SELECT RENDER-SCREEN
+            THEN
+        THEN EXIT
+    THEN
+    \ -- Task-specific actions --
+    SCREEN-ID @ 5 = IF
+        DUP 107 = IF DROP                         \ 'k' = kill task
+            SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
+                CELLS TASK-TABLE + @ KILL
+                RENDER-SCREEN
+            ELSE DROP THEN EXIT
+        THEN
+        DUP 115 = IF DROP                         \ 's' = restart task
+            SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
+                CELLS TASK-TABLE + @ RESTART
+                RENDER-SCREEN
+            ELSE DROP THEN EXIT
+        THEN
+    THEN
+    DROP ;
 
 \ -- Main TUI entry point --
 : SCREENS  ( -- )
     1 SCREEN-ID !
     1 SCREEN-RUN !
+    -1 SCR-SEL !  0 SCR-MAX !
+    CYCLES REFRESH-LAST !
     RENDER-SCREEN
     BEGIN
         KEY? IF KEY HANDLE-KEY THEN
+        AUTO-REFRESH @ IF
+            CYCLES REFRESH-LAST @ - 5000000 > IF
+                CYCLES REFRESH-LAST !
+                RENDER-SCREEN
+            THEN
+        THEN
         SCREEN-RUN @
     0= UNTIL
     PAGE
@@ -2480,7 +2668,7 @@ VARIABLE ROUTE-BUF
     ."    PORTS                  List port bindings" CR
     ."    .FRAME                 Show last frame header" CR
     CR ."  SCREENS & TOOLS:" CR
-    ."    SCREENS                Interactive TUI (1-7, q, r)" CR
+    ."    SCREENS                Interactive TUI (1-8, n/p, a, q, r)" CR
     ."    DASHBOARD              Full system overview" CR
     ."    STATUS                 Quick status line" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR

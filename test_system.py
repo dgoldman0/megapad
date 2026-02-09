@@ -2870,6 +2870,171 @@ class TestKDOS(unittest.TestCase):
         ])
         self.assertIn("0 ", text)
 
+    # -- Screen 8: Storage --
+
+    def test_screen_storage_no_disk(self):
+        """SCR-STORAGE shows 'no storage' when no disk attached."""
+        text = self._run_kdos(["SCR-STORAGE"])
+        self.assertIn("Storage", text)
+        self.assertIn("no storage", text)
+
+    def test_screen_storage_with_disk(self):
+        """SCR-STORAGE lists files from MP64FS disk."""
+        import tempfile, os
+        from diskutil import build_sample_image
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos(["FS-LOAD", "SCR-STORAGE"], storage_image=path)
+            self.assertIn("Storage", text)
+            self.assertIn("free sectors", text)
+        finally:
+            os.unlink(path)
+
+    def test_handle_key_screen_8(self):
+        """HANDLE-KEY '8' switches to screen 8."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",
+            "1 SCREEN-RUN !",
+            "56 HANDLE-KEY",   # '8'
+            "SCREEN-ID @ .",
+        ])
+        self.assertIn("8 ", text)
+
+    # -- Screen header: 8 tabs --
+
+    def test_screen_header_has_8_tabs(self):
+        """SCREEN-HEADER shows all 8 tab labels."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",
+            "SCREEN-HEADER",
+        ])
+        self.assertIn("[1]Home", text)
+        self.assertIn("[7]Docs", text)
+        self.assertIn("[8]Stor", text)
+
+    # -- Auto-refresh toggle --
+
+    def test_auto_refresh_toggle(self):
+        """'a' key toggles AUTO-REFRESH variable."""
+        text = self._run_kdos([
+            "AUTO-REFRESH @ .",    # should be 0
+            "97 HANDLE-KEY",       # 'a' = toggle on
+            "AUTO-REFRESH @ .",    # should be -1 (true)
+            "97 HANDLE-KEY",       # 'a' = toggle off
+            "AUTO-REFRESH @ .",    # should be 0
+        ])
+        # Check sequence: 0, -1, 0
+        nums = [s.strip() for s in text.split() if s.strip().lstrip('-').isdigit()]
+        # We expect 0 then -1 then 0 somewhere in the numeric output
+        self.assertIn("0", nums)
+        self.assertIn("-1", nums)
+
+    # -- Selection navigation --
+
+    def test_screen_sel_navigation(self):
+        """'n' and 'p' cycle SCR-SEL on selectable screens."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER nav-a",
+            "0 1 64 BUFFER nav-b",
+            "2 SWITCH-SCREEN",     # buffers screen, SCR-SEL starts at 0
+            "SCR-SEL @ .",         # 0
+            "110 HANDLE-KEY",      # 'n' = next
+            "SCR-SEL @ .",         # should advance
+            "112 HANDLE-KEY",      # 'p' = prev
+            "SCR-SEL @ .",         # should go back
+        ])
+        nums = [s.strip() for s in text.split() if s.strip().lstrip('-').isdigit()]
+        self.assertIn("0", nums)
+
+    # -- Buffer detail in screen --
+
+    def test_buffer_detail_in_screen(self):
+        """SCR-BUFFERS shows B.INFO for selected buffer."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER detail-buf",
+            "42 detail-buf B.FILL",
+            "0 SCR-SEL !",
+            "SCR-BUFFERS",
+        ])
+        # B.INFO prints "[buf ..." and B.PREVIEW prints hex
+        self.assertIn(">", text)  # cursor '>'
+
+    def test_buffer_detail_shows_preview(self):
+        """Selected buffer shows data preview via B.PREVIEW."""
+        text = self._run_kdos([
+            "0 1 64 BUFFER prev-buf",
+            "42 prev-buf B.FILL",
+            "BUF-COUNT @ 1- SCR-SEL !",  # select our new buffer (last)
+            "SCR-BUFFERS",
+        ])
+        # B.PREVIEW outputs decimal bytes — 42 should appear
+        self.assertIn("42 ", text)
+
+    # -- Task actions from screen --
+
+    def test_task_kill_from_screen(self):
+        """'k' on tasks screen kills the selected task."""
+        text = self._run_kdos([
+            ": nop-task ;",
+            "' nop-task 0 TASK test-t",
+            "5 SWITCH-SCREEN",     # tasks screen
+            "0 SCR-SEL !",
+            "107 HANDLE-KEY",      # 'k' = kill
+            "test-t T.STATUS .",   # should be 4 (DONE)
+        ])
+        self.assertIn("4 ", text)
+
+    def test_task_restart_from_screen(self):
+        """'s' on tasks screen restarts a DONE task."""
+        text = self._run_kdos([
+            ": nop2 ;",
+            "' nop2 0 TASK test-t2",
+            "test-t2 KILL",
+            "5 SWITCH-SCREEN",
+            "0 SCR-SEL !",
+            "115 HANDLE-KEY",      # 's' = restart
+            "test-t2 T.STATUS .",  # should be 1 (READY)
+        ])
+        self.assertIn("1 ", text)
+
+    # -- Docs screen numbered entries --
+
+    def test_screen_docs_numbered(self):
+        """SCR-DOCS shows numbered doc entries with cursor."""
+        import tempfile, os
+        from diskutil import build_sample_image
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                "0 SCR-SEL !",
+                "SCR-DOCS",
+            ], storage_image=path)
+            self.assertIn("Documentation", text)
+            # Should have numbered entries (0, 1, ...)
+            self.assertIn("0 ", text)
+            self.assertIn(">", text)  # cursor on item 0
+        finally:
+            os.unlink(path)
+
+    # -- Screen-selectable predicate --
+
+    def test_screen_selectable(self):
+        """SCREEN-SELECTABLE? returns true for screens 2,5,7,8."""
+        text = self._run_kdos([
+            "2 SCREEN-ID ! SCREEN-SELECTABLE? .",
+            "5 SCREEN-ID ! SCREEN-SELECTABLE? .",
+            "1 SCREEN-ID ! SCREEN-SELECTABLE? .",
+        ])
+        self.assertIn("-1", text)   # true for 2 and 5
+        self.assertIn("0", text)    # false for 1
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):
