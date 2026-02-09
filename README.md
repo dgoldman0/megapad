@@ -1,212 +1,290 @@
 # Megapad-64
 
-### A Tile-Oriented Computer Architecture & Operating System
+### A Tile-Oriented Fantasy Computer with a Forth BIOS and Operating System
 
-Megapad-64 is a complete computer system built around a simple premise: put a large, fast scratchpad memory directly on the processor die, and give the CPU a dedicated engine that can run SIMD operations across that memory one 64-byte tile at a time. Instead of shuttling data through a traditional cache hierarchy, the "megapad" — between 8 and 64 megabytes of on-chip SRAM depending on the build configuration — sits right next to the execution unit, delivering GPU-class throughput from a single core.
+Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
+operating system, filesystem, SIMD tile engine, and interactive dashboard
+— all running inside a Python emulator and verified by 619+ tests.
 
-This project explores that idea end-to-end: a Python-based emulator for the chip, an assembler and instruction set, a Forth BIOS, and a complete operating system called KDOS (Kernel Dashboard OS). Everything from the instruction encoding to the file system runs in the emulator and is verified by a comprehensive test suite.
+The core idea: put a large, fast scratchpad memory directly on the
+processor die and give the CPU a dedicated engine that runs SIMD
+operations across that memory one **64-byte tile** at a time.  Instead of
+shuttling data through a cache hierarchy, software works on tiles
+directly.  A single MEX instruction can add, multiply, dot-product, or
+reduce an entire tile's worth of data in one shot.
 
----
-
-## What Makes Megapad-64 Different?
-
-Conventional processors keep a small set of registers close to the ALU and rely on caches to bridge the gap to main memory. The Megapad-64 replaces most of that hierarchy with a single, large on-chip SRAM — the "megapad." Software sees this as a flat array of 64-byte tiles organized into 16 logical banks, and the chip's tile engine can read from two tiles and write to a third every clock cycle through dedicated multi-port access.
-
-Because the megapad is on-die SRAM rather than external DRAM, there are no cache misses and no unpredictable latencies. A single MEX (Memory Execute) instruction tells the tile engine to run an arithmetic, logical, or reduction operation across every lane of a tile simultaneously — much like a GPU shader, but orchestrated by a conventional scalar CPU sitting right alongside it.
-
-The scalar side is a 16-register, 64-bit core with a 4-stage in-order pipeline and compact variable-length instruction encoding inherited from the RCA 1802. It handles control flow, I/O, and orchestration while the tile engine does the heavy lifting on data. The two halves share the same address space: the CPU can read and write individual bytes in the megapad, and the tile engine can be pointed at any 64-byte-aligned address. This means there's no awkward "upload to GPU" step — data is just *there*, ready for either side to work on.
-
-Think of it as a hybrid between a classic microcomputer and a modern GPU shader core, designed so that one person sitting at a Forth prompt can interactively build, test, and compose data-parallel programs without any of the ceremony that GPU programming normally demands.
-
----
-
-## Architecture Highlights
-
-**Megapad SRAM**: The defining feature. The chip carries 8 to 64 MiB of on-chip SRAM (selected at fabrication time) organized into 16 logical banks of 64-byte tiles. Four read ports and two write ports let the tile engine sustain one tile operation per clock cycle — at 1 GHz that's 64 GB/s of internal throughput, comparable to a small GPU, without any caches.
-
-**Tile Engine**: A dedicated SIMD execution unit controlled by CSR registers and triggered by a single MEX instruction. Each MEX operation reads up to two source tiles, performs a lane-parallel arithmetic, logic, multiply, or reduction operation, and writes the result to a destination tile. Element widths of 8, 16, 32, or 64 bits are selected per-operation via the TMODE register, so the same 64-byte tile can be treated as 64 bytes, 32 halfwords, 16 words, or 8 doublewords depending on what the program needs.
-
-**Scalar CPU**: A 16-register core with 64-bit registers and addresses, a 4-stage in-order pipeline (IF, ID, EX, WB), and compact variable-length instruction encoding — instructions range from one to several bytes depending on the operation, in the tradition of the RCA 1802 rather than fixed-width RISC designs. Branches are PC-relative with a single-cycle bubble on taken branches. The design inherits register-designator concepts from the 1802 — any GPR can serve as the program counter, data pointer, or stack pointer, selected at runtime — giving the instruction set an unusual flexibility.
-
-**Fully Static Design**: The core retains state down to DC. An IDLE instruction puts the chip into deep sleep; an HALT stops the clock entirely. This makes the architecture well-suited to embedded and battery-powered applications where the megapad can hold working data while the CPU sleeps.
-
-**Emulator Note**: The Python emulator in this repository is a *functional* simulation — it implements the full instruction set and produces correct results, but it models the megapad, banks, and pipeline as a flat memory array with simplified cycle counting. Software written for the emulator will run identically on any future hardware implementation; the simplification only affects timing accuracy, not behavior.
-
-**Forth-Based System Software**: The BIOS is written in assembly but presents a Forth interpreter. Forth is a stack-based language that's remarkably compact, interactive, and well-suited to systems programming. The entire BIOS fits in about 5,500 lines of assembly and provides 157 Forth words.
-
-**KDOS Operating System**: Built on top of the BIOS, KDOS is a complete interactive environment written in Forth. It provides buffers (typed memory regions), kernels (computational building blocks), pipelines (kernel composition), tasks (cooperative multitasking), and a full-screen dashboard interface. KDOS also includes MP64FS, an on-disk file system for persistent storage, and a built-in documentation browser.
-
-**Devices & I/O**: The system includes a UART for serial I/O, a network interface card with DMA support, a storage controller for disk I/O, a timer, and system information registers. All devices are memory-mapped and accessible from both Forth and assembly.
+Everything from the instruction encoding to the filesystem runs in the
+emulator.  You can boot the system, type Forth at the REPL, create
+buffers, chain compute kernels into pipelines, ingest network data, browse
+on-disk documentation, and explore a 7-screen TUI dashboard — all
+interactively.
 
 ---
 
-## What Can You Do With It?
+## Current Status: v1.0
 
-Megapad-64 is a complete, working computer. You can:
+| Component | Stats |
+|-----------|-------|
+| **BIOS** | 197 Forth dictionary words, 8,187 lines ASM, 19.7 KB binary |
+| **KDOS** | 217 colon definitions + 86 variables/constants, 2,519 lines Forth |
+| **Emulator** | Full CPU + tile engine, 1,358 lines Python |
+| **Tests** | 619+ passing (CPU, BIOS, KDOS, FS, devices, assembler, diskutil) |
+| **Filesystem** | MP64FS — 1 MiB images, 64 files, 6 file types |
+| **Tooling** | CLI/debugger, two-pass assembler, disk utility |
 
-- **Write interactive programs** in Forth at the BIOS prompt
-- **Create buffers** to hold data and run kernels across them
-- **Compose pipelines** that chain multiple processing steps together
-- **Ingest data** from simulated network sources (sensor streams, audio, images, text)
-- **Store and retrieve files** using the MP64FS file system
-- **Build custom kernels** in assembly or high-level Forth definitions
-- **Explore the system** using the DASHBOARD, HELP, and built-in documentation browser
-- **Run 327 comprehensive tests** that verify every aspect of the system
-
-The project includes real-world examples: audio processing, image filtering, text analysis, embedding similarity, sensor data pipelines, and more. These aren't toy demos—they're complete, working programs that demonstrate the architecture's strengths.
-
----
-
-## Project Structure
-
-The repository contains a complete implementation:
-
-- **`megapad64.py`** — The Megapad-64 CPU and tile engine emulator (1,305 lines)
-- **`bios.asm`** — Forth BIOS in Megapad-64 assembly (5,483 lines, 157 words)
-- **`kdos.f`** — Kernel Dashboard OS in Forth (2,393 lines)
-- **`asm.py`** — Assembler for Megapad-64 machine code (649 lines)
-- **`cli.py`** — Interactive REPL with storage and debugging commands (990 lines)
-- **`devices.py`** — Device emulators: UART, NIC, storage, timer, system info (718 lines)
-- **`data_sources.py`** — Simulated data sources: sensors, audio, images, text (697 lines)
-- **`system.py`** — System integration layer connecting CPU to devices (300 lines)
-- **`diskutil.py`** — MP64FS file system and disk image builder (914 lines)
-- **`test_megapad64.py`** — CPU-level unit tests (711 lines)
-- **`test_system.py`** — Full integration test suite (3,956 lines, 327 tests)
-- **`KDOS.md`** — Complete KDOS technical documentation (1,184 lines)
-- **`EMULATOR.md`** — Emulator and instruction set documentation (461 lines)
+All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
+dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
+I/O, auto-boot from disk, interactive TUI, built-in documentation browser.
 
 ---
 
-## Getting Started
+## Architecture Overview
 
-### Installation
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Megapad-64 CPU                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
+│  │ Scalar Core   │  │ Tile Engine  │  │ CSR Registers │  │
+│  │ 16×64-bit GPR │  │ 64-byte SIMD │  │ FLAGS, TMODE  │  │
+│  │ 8-bit D acc   │  │ 256-bit ACC  │  │ TCTRL, IVT    │  │
+│  │ 8 flags       │  │ 8–64 lanes   │  │ cursor regs   │  │
+│  └──────┬───────┘  └──────┬───────┘  └───────────────┘  │
+│         │                  │                              │
+│         └──────┬───────────┘                              │
+│                │                                          │
+│     ┌──────────▼──────────┐                               │
+│     │ Unified Address Bus │                               │
+│     └──────────┬──────────┘                               │
+└────────────────┼────────────────────────────────────────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+┌───▼───┐  ┌────▼────┐  ┌────▼──────┐
+│  RAM  │  │  MMIO   │  │ Storage   │
+│1 MiB  │  │ Devices │  │Controller │
+└───────┘  └────┬────┘  └───────────┘
+                │
+      ┌────┬────┼────┬──────┐
+      │    │    │    │      │
+    UART Timer SysInfo NIC  │
+                           Disk
+```
+
+**Scalar CPU** — 16 general-purpose 64-bit registers, variable-length
+instructions (1–10 bytes), 16 instruction families, heritage from the RCA
+CDP1802 with modern 64-bit extensions.  Any GPR can serve as PC, data
+pointer, or stack pointer via runtime selectors.
+
+**Tile Engine** — A SIMD execution unit controlled through CSR registers
+and triggered by MEX instructions.  Each operation processes a 64-byte
+tile (8 to 64 lanes depending on element width) with element-wise ALU,
+multiply, dot product, or reduction functions.  A 256-bit accumulator
+supports multi-tile accumulation without overflow.
+
+**Megapad Memory** — The full design calls for 8–64 MiB of on-chip
+multi-ported SRAM organized into 16 banks, delivering GPU-class bandwidth
+from a single core.  The emulator models this as flat memory with
+simplified timing — behavior is correct, only cycle-level timing differs
+from the hardware target.
+
+**Devices** — UART (serial I/O), Timer (cycle-accurate with interrupts),
+Storage Controller (sector-based disk I/O), NIC (Ethernet frames with
+DMA), SystemInfo (CPUID, memory size).  All are memory-mapped at
+`0xFFFF_FF00+`.
+
+---
+
+## Software Stack
+
+```
+┌─────────────────────────────────┐
+│          User Programs          │  ← Forth words at the REPL
+├─────────────────────────────────┤
+│     KDOS v1.0 (2,519 lines)    │  ← Buffers, kernels, pipelines,
+│  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
+│  Scheduler · Filesystem · TUI   │    data ports, documentation
+├─────────────────────────────────┤
+│     BIOS v1.0 (8,187 lines)    │  ← Subroutine-threaded Forth,
+│  197 words · EVALUATE · FSLOAD  │    compiler, I/O, tile CSR words
+├─────────────────────────────────┤
+│         Hardware / Emulator     │  ← megapad64.py + devices.py
+└─────────────────────────────────┘
+```
+
+**BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
+197 dictionary words covering arithmetic, logic, stack manipulation,
+memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
+strings, compilation, I/O, disk, timer, tile engine, and NIC.  Includes
+`FSLOAD` for booting KDOS directly from a disk image.
+
+**KDOS** — The Kernel Dashboard OS, written entirely in Forth.  14 sections
+covering: utility words, described buffers with tile-aligned storage,
+tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel registry
+with 18 built-in compute kernels, a pipeline engine, raw and named file
+I/O, the MP64FS filesystem, a documentation browser, dictionary search
+tools, a cooperative scheduler with timer-assisted preemption, a 7-screen
+interactive TUI, data ports for NIC ingestion, benchmarking, a full
+dashboard, a categorized help system, and auto-boot.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+Python 3.8+ (3.10 recommended).  **No external dependencies** — the
+entire project is pure Python standard library.
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd megapad-64
-
-# Create a virtual environment and install (no external dependencies needed)
-python3 -m venv .venv
-source .venv/bin/activate
 ```
 
-### Running the System
-
-Start an interactive session:
+### Boot the System
 
 ```bash
+# Without disk (KDOS injected via UART)
 python cli.py --bios bios.asm --forth kdos.f
+
+# With a disk image (full filesystem access)
+python diskutil.py sample              # build sample.img first
+python cli.py --bios bios.asm --forth kdos.f --storage sample.img
 ```
 
-You'll see the KDOS boot sequence, then a Forth prompt. Try these commands:
+You'll see the KDOS banner and land at the Forth REPL:
+
+```
+------------------------------------------------------------
+  KDOS v1.0 — Kernel Dashboard OS
+------------------------------------------------------------
+Type HELP for command reference.
+Type SCREENS for interactive TUI.
+Type TOPICS or LESSONS for documentation.
+```
+
+### Try It Out
 
 ```forth
-HELP                          \ Show all available commands
-DASHBOARD                     \ System overview
-0 1 128 BUFFER mybuf          \ Create a 128-byte buffer
-42 mybuf B.FILL               \ Fill with value 42
-mybuf B.SUM .                 \ Sum all bytes → prints 5376
+HELP                              \ Full command reference
+DASHBOARD                         \ System overview
+
+256 0 1 BUFFER: demo              \ Create a 256-byte buffer
+42 demo B.FILL                    \ Fill every byte with 42
+demo B.SUM .                      \ Sum → 10752
+demo kstats                       \ Prints sum, min, max
+
+256 0 1 BUFFER: a                 \ Two more buffers
+256 0 1 BUFFER: b
+10 a B.FILL  20 b B.FILL
+a b demo kadd                     \ Tile-accelerated add: demo = a + b
+demo B.PREVIEW                    \ Hex dump first 64 bytes
+
+SCREENS                           \ Launch 7-screen TUI dashboard
 ```
 
-### Running Tests
-
-The full test suite validates the entire system:
+### Run the Tests
 
 ```bash
-python test_system.py
+python -m pytest test_system.py test_megapad64.py -v --timeout=30
 ```
 
-All 327 tests should pass, covering the CPU emulator, BIOS words, KDOS features, file system, networking, and end-to-end application scenarios.
+All 619+ tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+assembler, disk utility, devices, and networking.
 
-### Building a Disk Image
+---
 
-Create a disk image with pre-loaded documentation and tutorials:
+## Project Files
 
-```bash
-python -c "from diskutil import build_image; build_image('disk.img')"
-```
+| File | Lines | Purpose |
+|------|-------|---------|
+| `megapad64.py` | 1,358 | CPU + tile engine emulator |
+| `system.py` | 300 | System integration (CPU + devices + memory map) |
+| `bios.asm` | 8,187 | Forth BIOS in assembly (197 words) |
+| `bios.rom` | 20,216 B | Pre-assembled BIOS binary |
+| `kdos.f` | 2,519 | KDOS operating system in Forth (300+ definitions) |
+| `cli.py` | 990 | CLI, boot modes, interactive debug monitor |
+| `asm.py` | 678 | Two-pass assembler with SKIP pseudo-instruction |
+| `devices.py` | 718 | MMIO devices: UART, Timer, Storage, SystemInfo, NIC |
+| `datasources.py` | 697 | Simulated network data sources |
+| `diskutil.py` | 941 | MP64FS filesystem utility and disk image builder |
+| `test_megapad64.py` | 712 | CPU instruction set unit tests |
+| `test_system.py` | 4,694 | Full integration test suite |
 
-Then boot with storage attached:
+---
 
-```bash
-python cli.py --bios bios.asm --forth kdos.f --storage disk.img
-```
+## Documentation
 
-Inside KDOS, you can now use:
+The `docs/` directory contains comprehensive reference material:
 
-```forth
-TOPICS                        \ List documentation topics
-LESSONS                       \ List tutorials
-DOC getting-started           \ Read a documentation file
-TUTORIAL hello-world          \ Follow an interactive tutorial
-```
+| Document | Contents |
+|----------|----------|
+| [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 197 entries by category) |
+| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS word reference (all 300+ definitions by section) |
+| [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
+| [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
+| [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |
+| [docs/tile-engine.md](docs/tile-engine.md) | Tile engine programming guide — CSRs, MEX encoding, KDOS integration |
+| [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite |
+
+> **Note:** These docs are a first draft and will be polished in a
+> subsequent pass.  Some details (e.g., the full multi-bank megapad
+> architecture) reflect the simplified emulator model rather than the
+> complete hardware design.
 
 ---
 
 ## Why Forth?
 
-Forth might seem like an unusual choice for a modern system, but it's remarkably well-suited to this architecture:
+Forth might seem like an unusual choice for a modern system, but it's
+remarkably well-suited to this architecture:
 
-**Compactness**: The entire BIOS interpreter, compiler, and 157 built-in words fit in about 13KB of assembled code. Forth is one of the most space-efficient programming environments ever created.
+**Compactness** — The entire BIOS interpreter, compiler, and 197 built-in
+words fit in under 20 KB of machine code.  Forth is one of the most
+space-efficient programming environments ever created.
 
-**Interactivity**: Forth is designed for live interaction. You type a word, it executes immediately. This makes development fast and exploratory—perfect for a system where you're building kernels and pipelines on the fly.
+**Interactivity** — Type a word, it executes immediately.  Development is
+fast and exploratory — perfect for building kernels and pipelines on the
+fly.
 
-**Extensibility**: New words are defined in terms of existing ones. There's no distinction between "system" words and "user" words—everything is in one dictionary, and you can inspect, modify, or extend anything.
+**Extensibility** — New words are defined in terms of existing ones.
+There's no distinction between "system" words and "user" words.  The
+dictionary is open and everything is inspectable.
 
-**Control**: Forth gives you complete control over memory, I/O, and execution flow. You can write high-level abstractions or drop down to raw machine operations as needed.
+**Control** — Forth gives complete control over memory, I/O, and execution
+flow.  You can write high-level abstractions or drop to raw machine
+operations as needed.
 
-The combination of Forth (for orchestration and control) and the tile engine (for data-parallel computation) creates a unique programming model that's both powerful and surprisingly elegant.
-
----
-
-## Development Status
-
-**Current version: KDOS v0.9d**
-
-The system is stable and comprehensive, suitable for experimentation, education, and research. Recent additions include:
-
-
-- **v0.9d**: Dictionary search, stack safety utilities, diagnostics
-- **v0.9c**: Documentation browser with 10 topics and 5 tutorials
-- **v0.9b**: MP64FS file system with create, read, write, delete operations
-- **v0.9a**: BIOS v0.5 with 157 core Forth words
-- **v0.8**: Advanced kernels and real-world data sources
-
-The test suite has grown from 233 tests (v0.8) to 327 tests (v0.9d), with comprehensive coverage of all subsystems.
+The combination of Forth (for orchestration) and the tile engine (for
+data-parallel computation) creates a programming model that's both
+powerful and surprisingly elegant.
 
 ---
 
-## Philosophy
+## Emulator vs. Hardware Design
 
-Megapad-64 is an exploration of alternative computing architectures. Modern computers are incredibly powerful, but their architecture hasn't fundamentally changed in decades. This project asks: what if we rethought the basics?
+The Python emulator is a **functional simulation** — it implements the
+full instruction set and produces correct results, but models the megapad
+and tile engine as flat memory with simplified cycle counting.
 
-What if memory and computation were tightly integrated? What if data-parallel operations were a first-class primitive, not an afterthought? What if the programming environment was built for live interaction and incremental exploration rather than batch compilation?
+The full hardware design envisions:
 
-The result is a system that feels different from conventional computers. It's not trying to be a faster x86 or a better ARM—it's exploring a different point in the design space.
+- **8–64 MiB on-chip SRAM** organized into 16 banks with multi-port access
+- **4 read ports + 2 write ports** for sustained tile throughput
+- **Bank-local operations** for rapid intra-bank calculation
+- **4-stage in-order pipeline** (IF, ID, EX, WB) with single-cycle
+  bubble on taken branches
+- **Fully static design** — retains state down to DC for ultra-low power
 
-Megapad-64 is also a demonstration that you can build a complete, working computer system from scratch without massive complexity. The entire emulator, BIOS, OS, devices, and test suite fit in about 20,000 lines of readable code. This is a system you can understand completely, modify freely, and learn from deeply.
-
----
-
-## Future Directions
-
-Possible areas for expansion:
-
-- **Floating-point tile operations**: Add FP32/FP64 SIMD kernels
-- **Multithreading**: Run multiple CPU threads with shared tile memory
-- **JIT compilation**: Compile Forth words to native Megapad-64 machine code
-- **Graphics output**: Add a framebuffer device and display driver
-- **Network protocols**: Implement TCP/IP stack over the NIC
-- **Self-hosting development**: Write an assembler and compiler in Forth
-
-The architecture is flexible enough to support these extensions while maintaining its core identity.
+Software written for the emulator will run identically on any future
+hardware implementation.  The simplification affects only timing accuracy,
+not behavior.
 
 ---
 
 ## License
 
-CC0 (for all components not supersceded by existing licenses)
+CC0 (for all components not superseded by existing licenses)
 
 ---
 
@@ -214,9 +292,13 @@ CC0 (for all components not supersceded by existing licenses)
 
 This project draws inspiration from:
 
-- The Forth programming language and its interactive, stack-based computing model
-- Modern GPU architectures and their data-parallel execution models
-- Classic microcomputers like the Commodore 64, where hardware and software formed a unified, exploratory environment
-- The RISC-V instruction set for its clean, orthogonal design principles
+- The **Forth** programming language and its interactive, stack-based model
+- Modern **GPU architectures** and their data-parallel execution models
+- Classic microcomputers like the **Commodore 64**, where hardware and
+  software formed a unified, exploratory environment
+- The **RCA CDP1802** for its register-designator concepts and compact
+  instruction encoding
+- The **RISC-V** ISA for its clean, orthogonal design principles
 
-Megapad-64 is a synthesis of these ideas, reimagined for a hypothetical architecture that never was—but perhaps could be.
+Megapad-64 is a synthesis of these ideas, reimagined for a hypothetical
+architecture that never was — but perhaps could be.

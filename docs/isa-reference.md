@@ -1,0 +1,561 @@
+# Megapad-64 Instruction Set Reference
+
+The Megapad-64 is a **64-bit, little-endian** processor with 16
+general-purpose registers, a rich flag set, and a built-in SIMD tile
+engine.  Its heritage traces to the RCA CDP1802, but it extends that
+architecture enormously with 64-bit registers, hardware multiply/divide,
+a full condition-code set, a 256-bit accumulator, and 64-byte tile
+operations.
+
+This document is the **authoritative ISA reference** — every instruction,
+every register, every encoding.
+
+---
+
+## CPU Overview
+
+| Property | Value |
+|----------|-------|
+| Registers | 16 × 64-bit GPRs (R0–R15) |
+| Word size | 64-bit |
+| Endianness | Little-endian |
+| PC | `R[PSEL]` — default PSEL=3, so PC = R3 |
+| Data pointer | `R[XSEL]` — default XSEL=2, so R(X) = R2 |
+| Stack pointer | `R[SPSEL]` — default SPSEL=15, so SP = R15 |
+| D accumulator | 8-bit legacy accumulator (1802 heritage) |
+| Q flip-flop | 1-bit output latch |
+| T register | 8-bit saved `XSEL‖PSEL` (for MARK/RET) |
+| Flags | 8-bit packed `[S I G P V N C Z]` |
+| Tile engine | 64-byte tiles, 256-bit accumulator, SIMD lanes |
+
+The indirection through `PSEL`, `XSEL`, and `SPSEL` means any GPR can
+serve as the program counter, data pointer, or stack pointer.  In practice,
+the BIOS sets PSEL=3, XSEL=2, SPSEL=15 and never changes them.
+
+---
+
+## Flags Register
+
+The flags register is 8 bits, packed from bit 7 (MSB) to bit 0 (LSB):
+
+```
+Bit:   7    6    5    4    3    2    1    0
+     ┌────┬────┬────┬────┬────┬────┬────┬────┐
+     │ S  │ I  │ G  │ P  │ V  │ N  │ C  │ Z  │
+     └────┴────┴────┴────┴────┴────┴────┴────┘
+```
+
+| Bit | Flag | Meaning | Set By |
+|-----|------|---------|--------|
+| 0 | **Z** (Zero) | Result is zero | Most ALU/IMM ops |
+| 1 | **C** (Carry) | Carry out / borrow / DF | ADD, SUB, shift, 1802 ops |
+| 2 | **N** (Negative) | Bit 63 of result is set | Most ALU/IMM ops |
+| 3 | **V** (oVerflow) | Signed overflow occurred | ADD, SUB |
+| 4 | **P** (Parity) | Even parity of low 8 bits | Most ALU/IMM ops |
+| 5 | **G** (Greater) | Unsigned greater (set by CMP) | CMP, CMPI |
+| 6 | **I** (Interrupt) | Interrupts enabled globally | EI, DI, RTI |
+| 7 | **S** (Saturation) | Sticky saturation indicator | Tile ops |
+
+---
+
+## Instruction Encoding
+
+Instructions are **variable-length** (1 to 10 bytes).  The first byte
+encodes the **family** in the upper nibble and the **sub-opcode or register
+selector** in the lower nibble:
+
+```
+Byte 0:  [F:4][N:4]
+         F = instruction family (0x0–0xF)
+         N = sub-opcode, register, or condition code
+```
+
+Many two-register instructions pack both register indices into byte 1:
+
+```
+Byte 1:  [Rd:4][Rs:4]
+         Rd = destination register (upper nibble)
+         Rs = source register (lower nibble)
+```
+
+### Instruction Size Summary
+
+| Family | Name | Typical Size | Notes |
+|--------|------|-------------|-------|
+| `0x0` | SYS | 1 byte | CALL.L = 2 bytes |
+| `0x1` | INC | 1 byte | Register in low nibble |
+| `0x2` | DEC | 1 byte | Register in low nibble |
+| `0x3` | BR | 2 bytes | + 1 signed offset byte |
+| `0x4` | LBR | 3 bytes | + 2 signed offset bytes |
+| `0x5` | MEM | 2 bytes | LD.D = 3 bytes (has offset) |
+| `0x6` | IMM | 2–4 bytes | LDI w/ EXT.IMM64 = 10 bytes |
+| `0x7` | ALU | 2 bytes | |
+| `0x8` | MEMALU | 1 byte | 1802-compatible D ops |
+| `0x9` | I/O | 1 byte | 1802-style port I/O |
+| `0xA` | SEP | 1 byte | Set PC register |
+| `0xB` | SEX | 1 byte | Set data pointer register |
+| `0xC` | MULDIV | 2 bytes | +3 extra cycles |
+| `0xD` | CSR | 2 bytes | CSR read/write |
+| `0xE` | MEX | 2–3 bytes | Tile engine ops |
+| `0xF` | EXT | 1 byte | Prefix modifier for next insn |
+
+---
+
+## Family 0x0 — SYS (System)
+
+Single-byte system operations (except CALL.L which is 2 bytes).
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `00` | **IDL** | 1 | Enter idle state — halt until interrupt or DMA. |
+| `01` | **NOP** | 1 | No operation. |
+| `02` | **HALT** | 1 | Stop the CPU permanently. |
+| `03` | **RESET** | 1 | Full CPU state reset (all registers zeroed, PSEL=3, etc.). |
+| `04` | **RTI** | 2 | Return from interrupt: pop PC, pop FLAGS (restores IE). |
+| `05` | **RET** | 2 | 1802-style return: pop T byte, restore XSEL and PSEL, enable interrupts. |
+| `06` | **DIS** | 2 | Same as RET but disables interrupts (IE ← 0). |
+| `07` | **MARK** | 2 | Save XSEL‖PSEL into T; push T; set XSEL ← PSEL.  Used for 1802-style subroutine calls. |
+| `08` | **SAV** | 1 | Store T register to memory at R(X): `M(R(X)) ← T`. |
+| `09` | **SEQ** | 1 | Set Q flip-flop to 1. |
+| `0A` | **REQ** | 1 | Reset Q flip-flop to 0. |
+| `0B` | **EI** | 1 | Enable interrupts (I flag ← 1). |
+| `0C` | **DI** | 1 | Disable interrupts (I flag ← 0). |
+| `0D nn` | **CALL.L Rn** | 2 | Long call: push PC; PC ← R[n].  2 bytes: opcode + register byte. |
+| `0E` | **RET.L** | 2 | Long return: PC ← pop from stack. |
+| `0F` | **TRAP** | 3 | Software trap — enters the `IVEC_SW_TRAP` handler. |
+
+---
+
+## Family 0x1 — INC (Increment Register)
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `1n` | **INC Rn** | 1 | `R[n] ← R[n] + 1` — increment any register by 1. |
+
+The register index is encoded in the low nibble.  `INC R5` = `0x15`.
+
+---
+
+## Family 0x2 — DEC (Decrement Register)
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `2n` | **DEC Rn** | 1 | `R[n] ← R[n] − 1` — decrement any register by 1. |
+
+---
+
+## Family 0x3 — BR (Short Branch)
+
+Two-byte instructions: opcode + 8-bit **signed** relative offset.
+Branch range is −128 to +127 bytes from the instruction following the
+offset byte.
+
+| Encoding | Mnemonic | Condition |
+|----------|----------|-----------|
+| `30 off` | **BR off** | Always (unconditional) |
+| `31 off` | **BR.EQ off** | Z = 1 (equal / zero) |
+| `32 off` | **BR.NE off** | Z = 0 (not equal) |
+| `33 off` | **BR.CS off** | C = 1 (carry set) |
+| `34 off` | **BR.CC off** | C = 0 (carry clear) |
+| `35 off` | **BR.MI off** | N = 1 (negative) |
+| `36 off` | **BR.PL off** | N = 0 (positive or zero) |
+| `37 off` | **BR.VS off** | V = 1 (overflow) |
+| `38 off` | **BR.VC off** | V = 0 (no overflow) |
+| `39 off` | **BR.GT off** | G = 1 (unsigned greater) |
+| `3A off` | **BR.LE off** | G = 0 (not unsigned greater) |
+| `3B off` | **BR.BQ off** | Q = 1 |
+| `3C off` | **BR.BNQ off** | Q = 0 |
+| `3D off` | **BR.SAT off** | S = 1 (saturation) |
+| `3E off` | **BR.EF off** | Any external flag ≠ 0 |
+| `3F off` | **BR.NV off** | Never (useful as 2-byte NOP) |
+
+---
+
+## Family 0x4 — LBR (Long Branch)
+
+Three-byte instructions: opcode + 16-bit **signed** relative offset
+(little-endian).  Range: −32,768 to +32,767 bytes.
+
+Same condition codes as BR, just with a larger range:
+
+| Encoding | Mnemonic | Condition |
+|----------|----------|-----------|
+| `40 lo hi` | **LBR off16** | Always |
+| `41 lo hi` | **LBR.EQ off16** | Z = 1 |
+| `42 lo hi` | **LBR.NE off16** | Z = 0 |
+| ... | ... | (same pattern as BR) |
+
+---
+
+## Family 0x5 — MEM (Scalar Load/Store)
+
+Two-byte instructions (except LD.D which is 3 bytes).  Byte 1 encodes
+`[Rd:4][Rs:4]`.
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `50 DR` | **LDN Rd, Rs** | 1 | Load 64-bit: `Rd ← mem64(R[s])` |
+| `51 DR` | **LDA Rd, Rs** | 1 | Load with auto-increment: `Rd ← mem64(R[s]); R[s] += 8` |
+| `52 Dx` | **LDXR Rd** | 1 | Load from data pointer: `Rd ← mem64(R(X))` |
+| `53 Dx` | **LDXAR Rd** | 1 | Load + auto-inc: `Rd ← mem64(R(X)); R(X) += 8` |
+| `54 NR` | **STR Rn, Rs** | 1 | Store 64-bit: `mem64(R[n]) ← R[s]` |
+| `55 Sx` | **STXD Rs** | 1 | Store + auto-dec: `mem64(R(X)) ← R[s]; R(X) -= 8` |
+| `56 DR` | **LD.B Rd, Rs** | 1 | Load byte (zero-extended): `Rd ← zext(mem8(R[s]))` |
+| `57 NR` | **ST.B Rn, Rs** | 1 | Store byte: `mem8(R[n]) ← R[s][7:0]` |
+| `58 DR` | **LD.H Rd, Rs** | 1 | Load 16-bit halfword (zero-extended) |
+| `59 NR` | **ST.H Rn, Rs** | 1 | Store 16-bit halfword |
+| `5A DR` | **LD.W Rd, Rs** | 1 | Load 32-bit word (zero-extended) |
+| `5B NR` | **ST.W Rn, Rs** | 1 | Store 32-bit word |
+| `5C DR` | **LD.SB Rd, Rs** | 1 | Load byte (sign-extended to 64 bits) |
+| `5D DR` | **LD.SH Rd, Rs** | 1 | Load 16-bit (sign-extended) |
+| `5E DR` | **LD.SW Rd, Rs** | 1 | Load 32-bit (sign-extended) |
+| `5F DR off` | **LD.D Rd, [Rs+off8]** | 2 | Displacement load: `Rd ← mem64(R[s] + sext(off8) × 8)`.  3 bytes. |
+
+---
+
+## Family 0x6 — IMM (Immediate Operations)
+
+Variable-length instructions with embedded constants.  Byte 1 is
+`[Rn:4][x:4]` where the lower nibble varies by sub-opcode.
+
+| Opcode | Mnemonic | Size | Cycles | Description |
+|--------|----------|------|--------|-------------|
+| `60 Rx imm8` | **LDI Rn, imm8** | 3 | 1 | `Rn ← zext(imm8)` |
+| `F0 60 Rx 8B` | **LDI Rn, imm64** | 10 | 2 | `Rn ← imm64` (with EXT.IMM64 prefix; 8 LE bytes) |
+| `61 Rx hi lo` | **LHI Rn, imm16** | 4 | 1 | Load upper: `Rn[63:48] ← imm16`, lower 48 preserved |
+| `62 Rx simm8` | **ADDI Rn, simm8** | 3 | 1 | `Rn ← Rn + sext(simm8)`.  Updates ZCNVP. |
+| `63 Rx imm8` | **ANDI Rn, imm8** | 3 | 1 | `Rn ← Rn & imm8`.  Updates ZNP, clears CV. |
+| `64 Rx imm8` | **ORI Rn, imm8** | 3 | 1 | `Rn ← Rn \| imm8` |
+| `65 Rx imm8` | **XORI Rn, imm8** | 3 | 1 | `Rn ← Rn ^ imm8` |
+| `66 Rx simm8` | **CMPI Rn, simm8** | 3 | 1 | Compare: flags ← `Rn − sext(simm8)`.  Updates ZCNVPG.  Result discarded. |
+| `67 Rx simm8` | **SUBI Rn, simm8** | 3 | 1 | `Rn ← Rn − sext(simm8)`.  Updates ZCNVP. |
+| `68 Ri` | **LSLI Rn, imm4** | 2 | 1 | `Rn ← Rn << imm4` (shift amount in low nibble of byte 1) |
+| `69 Ri` | **LSRI Rn, imm4** | 2 | 1 | `Rn ← Rn >>> imm4` (logical right shift) |
+| `6A Ri` | **ASRI Rn, imm4** | 2 | 1 | `Rn ← Rn >> imm4` (arithmetic right shift) |
+| `6B Ri` | **ROLI Rn, imm4** | 2 | 1 | `Rn ← rotate_left(Rn, imm4)` |
+| `6C Rx` | **GLO Rn** | 2 | 1 | `D ← R[n][7:0]` — get low byte into D accumulator |
+| `6D Rx` | **GHI Rn** | 2 | 1 | `D ← R[n][15:8]` — get high byte into D |
+| `6E Rx` | **PLO Rn** | 2 | 1 | `R[n][7:0] ← D` — put D into low byte |
+| `6F Rx` | **PHI Rn** | 2 | 1 | `R[n][15:8] ← D` — put D into high byte |
+
+---
+
+## Family 0x7 — ALU (Register-Register)
+
+Two-byte instructions: opcode + `[Rd:4][Rs:4]`.  Result always goes
+into Rd.
+
+| Opcode | Mnemonic | Cycles | Flags | Description |
+|--------|----------|--------|-------|-------------|
+| `70 DR` | **ADD Rd, Rs** | 1 | ZCNVP | `Rd ← Rd + Rs` |
+| `71 DR` | **ADC Rd, Rs** | 1 | ZCNVP | `Rd ← Rd + Rs + C` (add with carry) |
+| `72 DR` | **SUB Rd, Rs** | 1 | ZCNVP | `Rd ← Rd − Rs` |
+| `73 DR` | **SBB Rd, Rs** | 1 | ZCNVP | `Rd ← Rd − Rs − !C` (subtract with borrow) |
+| `74 DR` | **AND Rd, Rs** | 1 | ZNP | `Rd ← Rd & Rs` (clears C, V) |
+| `75 DR` | **OR Rd, Rs** | 1 | ZNP | `Rd ← Rd \| Rs` |
+| `76 DR` | **XOR Rd, Rs** | 1 | ZNP | `Rd ← Rd ^ Rs` |
+| `77 DR` | **CMP Rd, Rs** | 1 | ZCNVPG | Compare: flags ← Rd − Rs.  Result discarded.  Also sets G flag. |
+| `78 DR` | **MOV Rd, Rs** | 1 | — | `Rd ← Rs` (no flag changes) |
+| `79 DR` | **NOT Rd, Rs** | 1 | ZNP | `Rd ← ~Rs` (bitwise complement) |
+| `7A DR` | **NEG Rd, Rs** | 1 | ZCNVP | `Rd ← 0 − Rs` (two's complement negate) |
+| `7B DR` | **SHL Rd, Rs** | 1 | ZCNP | `Rd ← Rd << (Rs & 63)`.  C = last bit shifted out. |
+| `7C DR` | **SHR Rd, Rs** | 1 | ZCNP | `Rd ← Rd >>> (Rs & 63)` (logical shift right) |
+| `7D DR` | **SAR Rd, Rs** | 1 | ZCNP | `Rd ← Rd >> (Rs & 63)` (arithmetic shift right, sign-extends) |
+| `7E DR` | **ROL Rd, Rs** | 1 | ZNP | `Rd ← rotate_left(Rd, Rs & 63)` |
+| `7F DR` | **ROR Rd, Rs** | 1 | ZNP | `Rd ← rotate_right(Rd, Rs & 63)` |
+
+---
+
+## Family 0x8 — MEMALU (1802-Compatible D-Register Operations)
+
+Single-byte instructions that operate on the **8-bit D accumulator** and
+memory at `M(R(X))`.  These provide backward compatibility with the
+CDP1802 instruction set.
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `80` | **LDX** | 1 | `D ← M(R(X))` |
+| `81` | **OR.X** | 1 | `D ← M(R(X)) \| D` |
+| `82` | **AND.X** | 1 | `D ← M(R(X)) & D` |
+| `83` | **XOR.X** | 1 | `D ← M(R(X)) ^ D` |
+| `84` | **ADD.X** | 1 | `D ← M(R(X)) + D; C ← carry` |
+| `85` | **SD.X** | 1 | `D ← M(R(X)) − D; C ← 1 if no borrow` |
+| `86` | **SHR.D** | 1 | `C ← D[0]; D ← D >> 1` |
+| `87` | **SM.X** | 1 | `D ← D − M(R(X)); C ← 1 if no borrow` |
+| `88` | **ADC.X** | 1 | `D ← M(R(X)) + D + C; C ← carry` |
+| `89` | **SDB.X** | 1 | `D ← M(R(X)) − D − !C; C ← 1 if no borrow` |
+| `8A` | **SHRC.D** | 1 | Shift right through carry: `old_C → D[7]; D[0] → C` |
+| `8B` | **SMB.X** | 1 | `D ← D − M(R(X)) − !C; C ← 1 if no borrow` |
+| `8C` | **SHL.D** | 1 | `C ← D[7]; D ← D << 1` |
+| `8D` | **SHLC.D** | 1 | Shift left through carry: `old_C → D[0]; D[7] → C` |
+| `8E` | **IRX** | 1 | `R(X) ← R(X) + 1` (increment data pointer) |
+| `8F` | **LDXA** | 1 | `D ← M(R(X)); R(X) ← R(X) + 1` (load and advance) |
+
+---
+
+## Family 0x9 — I/O (Port Input/Output)
+
+Single-byte 1802-style port I/O.  7 output ports and 7 input ports,
+each 4 bits wide.
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `91`–`97` | **OUT 1–7** | 1 | `port_out[n] ← M(R(X)); R(X) += 1` |
+| `99`–`9F` | **INP 1–7** | 1 | `D ← port_in[n−8]; M(R(X)) ← D` |
+
+---
+
+## Family 0xA — SEP (Set Program Counter)
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `An` | **SEP Rn** | 1 | `PSEL ← n` — PC is now R[n].  Used for 1802-style subroutine dispatch. |
+
+---
+
+## Family 0xB — SEX (Set Data Pointer)
+
+| Opcode | Mnemonic | Cycles | Description |
+|--------|----------|--------|-------------|
+| `Bn` | **SEX Rn** | 1 | `XSEL ← n` — R(X) is now R[n]. |
+
+---
+
+## Family 0xC — MULDIV (Multiply / Divide)
+
+Two-byte instructions: opcode + `[Rd:4][Rs:4]`.  All take **4 cycles**.
+Division stores the remainder in **R0**.  Division by zero triggers
+`IVEC_DIV_ZERO`.
+
+| Opcode | Mnemonic | Description |
+|--------|----------|-------------|
+| `C0 DR` | **MUL Rd, Rs** | Signed multiply: `Rd ← low64(signed(Rd) × signed(Rs))` |
+| `C1 DR` | **MULH Rd, Rs** | Signed multiply high: `Rd ← high64(signed(Rd) × signed(Rs))` |
+| `C2 DR` | **UMUL Rd, Rs** | Unsigned multiply: `Rd ← low64(Rd × Rs)` |
+| `C3 DR` | **UMULH Rd, Rs** | Unsigned multiply high: `Rd ← high64(Rd × Rs)` |
+| `C4 DR` | **DIV Rd, Rs** | Signed divide: `Rd ← Rd / Rs; R0 ← remainder` |
+| `C5 DR` | **UDIV Rd, Rs** | Unsigned divide: `Rd ← Rd / Rs; R0 ← Rd % Rs` |
+| `C6 DR` | **MOD Rd, Rs** | Signed modulo: `Rd ← Rd mod Rs` |
+| `C7 DR` | **UMOD Rd, Rs** | Unsigned modulo: `Rd ← Rd mod Rs` |
+
+---
+
+## Family 0xD — CSR (Control/Status Register Access)
+
+Two-byte instructions: opcode + CSR address byte.  The opcode nibble
+encodes `[W:1][reg:3]`: W=0 for read, W=1 for write; reg is the GPR
+index (0–7).
+
+| Pattern | Mnemonic | Description |
+|---------|----------|-------------|
+| `D0`–`D7 addr` | **CSRR Rn, CSR[addr]** | Read: `Rn ← CSR[addr]` |
+| `D8`–`DF addr` | **CSRW CSR[addr], Rn** | Write: `CSR[addr] ← Rn` |
+
+See the **CSR Register Map** section below for all CSR addresses.
+
+---
+
+## Family 0xE — MEX (Matrix/Element Extension)
+
+The tile engine instruction family.  See the dedicated document
+`docs/tile-engine.md` for a full programming guide.
+
+Encoding: `En funct` (2 bytes), or `En funct reg` (3 bytes for broadcast
+mode).
+
+The low nibble `n` decodes as `[SS:2][OP:2]`:
+
+- **SS** (bits 3:2) — source selector:
+  - 0 = tile × tile (TSRC0 × TSRC1 → TDST)
+  - 1 = tile × broadcast register (+1 byte selects Rn)
+  - 2 = immediate splat (funct byte IS the immediate, forced to ADD)
+  - 3 = in-place (TDST × TSRC0 → TDST)
+
+- **OP** (bits 1:0) — major operation:
+  - 0 = TALU (lane-parallel arithmetic)
+  - 1 = TMUL (lane-parallel multiply / dot product)
+  - 2 = TRED (reduction → accumulator)
+  - 3 = TSYS (tile system operations)
+
+### TALU Sub-Functions (OP=0)
+
+| Funct | Name | Semantics |
+|-------|------|-----------|
+| 0 | **ADD** | `dst[i] = srcA[i] + srcB[i]` |
+| 1 | **SUB** | `dst[i] = srcA[i] − srcB[i]` |
+| 2 | **AND** | `dst[i] = srcA[i] & srcB[i]` |
+| 3 | **OR** | `dst[i] = srcA[i] \| srcB[i]` |
+| 4 | **XOR** | `dst[i] = srcA[i] ^ srcB[i]` |
+| 5 | **MIN** | `dst[i] = min(srcA[i], srcB[i])` |
+| 6 | **MAX** | `dst[i] = max(srcA[i], srcB[i])` |
+| 7 | **ABS** | `dst[i] = abs(srcA[i])` (signed mode) |
+
+### TMUL Sub-Functions (OP=1)
+
+| Funct | Name | Cycles | Semantics |
+|-------|------|--------|-----------|
+| 0 | **MUL** | 2 | `dst[i] = srcA[i] × srcB[i]` |
+| 1 | **DOT** | 4 | `ACC += Σ(srcA[i] × srcB[i])` (dot product across all lanes) |
+
+### TRED Sub-Functions (OP=2, result → ACC)
+
+| Funct | Name | Semantics |
+|-------|------|-----------|
+| 0 | **SUM** | `ACC = Σ src0[i]` |
+| 1 | **MIN** | `ACC = min(src0[i])` |
+| 2 | **MAX** | `ACC = max(src0[i])` |
+| 3 | **POPCNT** | `ACC = Σ popcount(src0[i])` |
+| 4 | **L1** | `ACC = Σ |src0[i]|` (L1 norm) |
+
+### TSYS Sub-Functions (OP=3)
+
+| Funct | Name | Cycles | Semantics |
+|-------|------|--------|-----------|
+| 0 | **TRANS** | 1 | In-place 8×8 byte transpose at TDST |
+| 2 | **MOVBANK** | 3 | Copy tile: `mem[TDST] ← mem[TSRC0]` |
+| 3 | **LOADC** | 1 | Load tile from cursor address |
+| 4 | **ZERO** | 1 | Zero 64 bytes at TDST |
+
+---
+
+## Family 0xF — EXT (Prefix Modifier)
+
+Single-byte prefix that modifies the **next** instruction.  The modifier
+value is stored and consumed by the following instruction.
+
+| Opcode | Name | Effect |
+|--------|------|--------|
+| `F0` | **EXT.IMM64** | Next LDI loads a full 64-bit immediate (8 LE bytes) instead of 8-bit. |
+| `F6` | **EXT.SKIP** | Next BR becomes a SKIP: if condition is true, skip the following instruction entirely (advance PC past it). |
+| `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
+
+**Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
+
+### SKIP Pseudo-Instruction
+
+The assembler provides `SKIP.cc` as a convenient mnemonic for
+`EXT.SKIP + BR.cc`.  Instead of branching to a target, SKIP conditionally
+skips the next instruction:
+
+```asm
+CMPI R4, 0         ; compare R4 to 0
+SKIP.EQ            ; if equal, skip the next instruction
+ADDI R4, 1         ; this runs only if R4 ≠ 0
+```
+
+SKIP is 2 bytes: `F6` prefix + `3c` (BR family with condition code).
+
+---
+
+## Condition Codes
+
+Used by BR, LBR, and SKIP families.  The condition code is encoded in the
+low nibble of the opcode byte.
+
+| Code | Value | Mnemonic | Condition |
+|------|-------|----------|-----------|
+| 0x0 | AL | **Always** | Unconditional |
+| 0x1 | EQ | **Equal** | Z = 1 |
+| 0x2 | NE | **Not Equal** | Z = 0 |
+| 0x3 | CS | **Carry Set** | C = 1 |
+| 0x4 | CC | **Carry Clear** | C = 0 |
+| 0x5 | MI | **Minus** | N = 1 (negative) |
+| 0x6 | PL | **Plus** | N = 0 (positive/zero) |
+| 0x7 | VS | **Overflow Set** | V = 1 |
+| 0x8 | VC | **Overflow Clear** | V = 0 |
+| 0x9 | GT | **Greater Than** | G = 1 (unsigned, set by CMP) |
+| 0xA | LE | **Less/Equal** | G = 0 |
+| 0xB | BQ | **Branch if Q** | Q = 1 |
+| 0xC | BNQ | **Branch if Not Q** | Q = 0 |
+| 0xD | SAT | **Saturation** | S = 1 |
+| 0xE | EF | **External Flags** | Any EF ≠ 0 |
+| 0xF | NV | **Never** | Always false (useful as NOP) |
+
+---
+
+## CSR Register Map
+
+| Addr | Name | Width | R/W | Description |
+|------|------|-------|-----|-------------|
+| `0x00` | **FLAGS** | 8 | RW | Packed flags register (see Flags section) |
+| `0x01` | **PSEL** | 4 | RW | Program counter register selector |
+| `0x02` | **XSEL** | 4 | RW | Data pointer register selector |
+| `0x03` | **SPSEL** | 4 | RW | Stack pointer register selector |
+| `0x04` | **D** | 8 | RW | 1802 D accumulator |
+| `0x05` | **DF** | 1 | RW | DF flag (alias for Carry) |
+| `0x06` | **Q** | 1 | RW | Q flip-flop |
+| `0x07` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
+| `0x08` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
+| | | | | |
+| `0x10` | **SB** | 4 | RW | Tile bank selector |
+| `0x11` | **SR** | 20 | RW | Tile row cursor |
+| `0x12` | **SC** | 20 | RW | Tile column cursor |
+| `0x13` | **SW** | 20 | RW | Tile stride width (default 1) |
+| `0x14` | **TMODE** | 8 | RW | Tile element mode (see Tile Engine doc) |
+| `0x15` | **TCTRL** | 8 | RW | Tile control register |
+| `0x16` | **TSRC0** | 64 | RW | Tile source 0 address |
+| `0x17` | **TSRC1** | 64 | RW | Tile source 1 address |
+| `0x18` | **TDST** | 64 | RW | Tile destination address |
+| `0x19` | **ACC0** | 64 | RW | Accumulator bits 63:0 |
+| `0x1A` | **ACC1** | 64 | RW | Accumulator bits 127:64 |
+| `0x1B` | **ACC2** | 64 | RW | Accumulator bits 191:128 |
+| `0x1C` | **ACC3** | 64 | RW | Accumulator bits 255:192 |
+| | | | | |
+| `0x20` | **IVT_BASE** | 64 | RW | Interrupt vector table base address |
+| `0x21` | **IVEC_ID** | 8 | RW | Last interrupt/trap vector ID |
+| `0x22` | **TRAP_ADDR** | 64 | R | Faulting address (bus fault) |
+| | | | | |
+| `0x30` | **MEGAPAD_SZ** | 64 | R | Memory size (returns 0) |
+| `0x31` | **CPUID** | 64 | R | CPU ID: `0x4D503634_00010000` ("MP64" v1.0) |
+
+---
+
+## Interrupt Vector Table
+
+The IVT is an array of 64-bit handler addresses in memory, starting at
+`IVT_BASE`.  Each entry is 8 bytes.
+
+| Vector | ID | Name | Trigger |
+|--------|----|------|---------|
+| 0 | `IVEC_RESET` | Reset | Hardware/software reset |
+| 1 | `IVEC_NMI` | NMI | Non-maskable interrupt |
+| 2 | `IVEC_ILLEGAL_OP` | Illegal Opcode | Undefined instruction, double EXT |
+| 3 | `IVEC_ALIGN_FAULT` | Alignment Fault | Misaligned memory access |
+| 4 | `IVEC_DIV_ZERO` | Division by Zero | DIV/UDIV/MOD/UMOD with Rs=0 |
+| 5 | `IVEC_BUS_FAULT` | Bus Fault | Access beyond RAM/MMIO bounds |
+| 6 | `IVEC_SW_TRAP` | Software Trap | TRAP instruction |
+| 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1) |
+
+### Trap Entry Sequence
+
+When an interrupt or trap fires:
+
+1. `push64(FLAGS)` — save flags on stack
+2. `push64(PC)` — save program counter
+3. `IVEC_ID ← vector_number`
+4. `PC ← mem64(IVT_BASE + 8 × vector_number)` — jump to handler
+5. `IE ← 0` — disable further interrupts
+
+### Return from Interrupt
+
+`RTI` reverses the process:
+1. `PC ← pop64()` — restore program counter
+2. `FLAGS ← pop64()` — restore flags (including IE, so interrupts re-enable)
+
+---
+
+## Boot Sequence
+
+On CPU reset:
+
+1. All 16 GPRs set to 0
+2. `PSEL ← 3` (PC = R3), `XSEL ← 2`, `SPSEL ← 15`
+3. All flags cleared
+4. D = 0, Q = 0, T = 0
+5. Tile CSRs reset (SB=SR=SC=0, SW=1, TMODE=TCTRL=0)
+6. ACC[0–3] = 0
+7. IVT_BASE = 0
+8. `PC ← entry_address` (default 0x0000_0000_0000_0000)
+9. `R15 ← RAM_size` (stack pointer at top of RAM)
+10. `R2 ← RAM_size` (secondary data pointer)
+11. Fetch begins at PC
