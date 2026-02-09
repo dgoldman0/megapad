@@ -106,7 +106,7 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 | Bit | Meaning | Description |
 |-----|---------|-------------|
 | 0 | `readonly` | File should not be modified |
-| 1 | `system` | System file (e.g., `kdos.f`, `autoexec.f`) |
+| 1 | `system` | System file (e.g., `kdos.f`) |
 
 ---
 
@@ -222,7 +222,7 @@ fs = MP64FS.load("myimage.img")
 `build_sample_image()` creates a fully-populated disk image with:
 
 - **KDOS** (`kdos.f`) — the full operating system as a Forth source file
-- **autoexec.f** — bootstrap script: `FSLOAD kdos.f`
+  (auto-booted by the BIOS as the first Forth-type file on disk)
 - **10 documentation topics** — getting-started, buffers, kernels,
   pipelines, data-ports, scheduler, screens, filesystem, tile-engine,
   reference

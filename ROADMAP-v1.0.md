@@ -28,8 +28,8 @@ and release hardening**.
   DISK-READ, DISK-WRITE)
 - ✅ **FSLOAD** — reads MP64FS directory, loads a named file from disk,
   EVALUATEs it line by line (solves the boot chicken-and-egg problem)
-- ✅ **Auto-boot** — on startup, if disk is present, runs
-  `FSLOAD autoexec.f` which bootstraps KDOS from disk
+- ✅ **Auto-boot** — on startup, if disk is present, scans the directory
+  for the first Forth-type file and loads it via FSLOAD
 - ✅ `."` works in both interpret and compile modes
 - ✅ Timer, NIC, tile-engine CSR access words
 - ✅ EVALUATE, COMPARE, VALUE/TO, POSTPONE, DOES>, RECURSE, 2>R/2R>/2R@
@@ -53,8 +53,7 @@ and release hardening**.
 
 - ✅ MP64FS: superblock, bitmap, 64-entry directory, data sectors
 - ✅ diskutil.py: build_image, build_sample_image, inject/read/delete/list
-- ✅ sample.img: KDOS + autoexec.f + 10 docs + 5 tutorials + demo-data
-  (18 files)
+- ✅ sample.img: KDOS + 10 docs + 5 tutorials + demo-data (17 files)
 - ✅ KDOS words: DIR, CATALOG, CAT, RENAME, FS-FREE, SAVE-BUFFER, LOAD,
   MKFILE, RMFILE, FORMAT, FIND-BY-NAME, FS-LOAD
 - ✅ BIOS FSLOAD for disk-only boot

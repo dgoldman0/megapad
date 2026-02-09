@@ -28,7 +28,7 @@ Each entry is a linked list node:
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
 3. **Forth variables**: `STATE` = 0 (interpreting), `BASE` = 10, `HERE` = `dict_free`, `LATEST` = `latest_entry` (FSLOAD).
 4. **Banner**: Prints `"Megapad-64 Forth BIOS v1.0"`, RAM size in hex, `" ok"`.
-5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, executes `EVALUATE "FSLOAD autoexec.f"`.
+5. **Auto-boot**: Checks disk present bit (MMIO STATUS bit 7). If set, reads directory, finds first Forth-type file (type=3), and loads it via FSLOAD.
 6. **QUIT**: Falls into the outer interpreter loop.
 
 ---

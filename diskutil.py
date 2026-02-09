@@ -432,9 +432,9 @@ GETTING STARTED WITH KDOS
 =========================
 
 KDOS is the Kernel Dashboard OS for Megapad-64.
-It boots from ROM and provides an interactive Forth
-environment with buffers, kernels, pipelines, and
-a tile-engine accelerated SIMD compute surface.
+It boots automatically from disk -- the BIOS finds
+the first Forth-type file and loads it via FSLOAD.
+No configuration needed.
 
 FIRST STEPS
   Type HELP for a command reference.
@@ -982,20 +982,16 @@ def build_image(path: str | Path | None = None,
 def build_sample_image(path: str | Path | None = None,
                        kdos_path: str | Path = "kdos.f",
                        total_sectors: int = DEFAULT_TOTAL_SECTORS) -> MP64FS:
-    """Create a complete sample image with KDOS, autoexec, docs & tutorials.
+    """Create a complete sample image with KDOS, docs & tutorials.
 
     This is the "ship it" image: booting with this disk + BIOS will
-    auto-load KDOS from disk via autoexec.f.
+    auto-load KDOS directly via ``FSLOAD kdos.f`` (hardcoded in BIOS).
     """
     fs = build_image(total_sectors=total_sectors)
 
-    # Inject KDOS source
+    # Inject KDOS source — the BIOS auto-boots this via FSLOAD kdos.f
     kdos_src = Path(kdos_path).read_bytes()
     fs.inject_file("kdos.f", kdos_src, ftype=FTYPE_FORTH, flags=0x02)  # system
-
-    # Inject autoexec.f — bootstrap script (uses BIOS FSLOAD word)
-    autoexec = b'FSLOAD kdos.f\n'
-    fs.inject_file("autoexec.f", autoexec, ftype=FTYPE_FORTH, flags=0x02)
 
     # Inject sample data for tutorials
     demo = bytes(range(256))

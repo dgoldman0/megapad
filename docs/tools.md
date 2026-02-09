@@ -39,15 +39,29 @@ python cli.py [flags]
 
 ### Boot Modes
 
-**BIOS mode** (most common) — use `--bios`:
+**BIOS + disk mode** (recommended) — use `--bios` + `--storage`:
 
 ```bash
-python cli.py --bios bios.asm --forth kdos.f --storage sample.img
+python cli.py --bios bios.asm --storage sample.img
 ```
 
-The assembler builds the BIOS, the CPU boots from address 0, the `--forth`
-files are injected line-by-line through the UART, and you land in the
-KDOS REPL.  Press **Ctrl+]** to escape to the debug monitor.
+The assembler builds the BIOS, the CPU boots from address 0, detects the
+disk, reads the MP64FS directory, and auto-loads the first Forth-type
+file (typically `kdos.f`).  You land in the KDOS REPL with full
+filesystem access.  Press **Ctrl+]** to escape to the debug monitor.
+
+**BIOS + UART injection** (development) — use `--bios` + `--forth`:
+
+```bash
+python cli.py --bios bios.asm --forth kdos.f
+```
+
+The `--forth` files are injected line-by-line through the UART after
+BIOS boot.  Useful for testing Forth source changes without rebuilding
+the disk image.  No filesystem access in this mode.
+
+> **Don't combine `--forth kdos.f` with `--storage`** — the BIOS will
+> auto-load KDOS from the disk, and `--forth` would load it again.
 
 **Non-BIOS mode** — use `--load` and optionally `--run`:
 
@@ -318,12 +332,8 @@ Use `--type` with the `inject` subcommand:
 # Create an empty formatted image
 python diskutil.py create myimage.img
 
-# Add the KDOS source
+# Add the KDOS source (BIOS auto-boots the first Forth-type file)
 python diskutil.py inject myimage.img kdos.f --type forth
-
-# Add an autoexec script
-echo "FSLOAD kdos.f" > autoexec.f
-python diskutil.py inject myimage.img autoexec.f --type forth
 
 # Add a documentation file
 python diskutil.py inject myimage.img mydoc.txt --type doc
@@ -337,7 +347,7 @@ python diskutil.py list myimage.img
 ```bash
 python diskutil.py sample
 # Creates sample.img with:
-#   kdos.f, autoexec.f,
+#   kdos.f,
 #   10 documentation topics,
 #   5 tutorials,
 #   demo-data file
@@ -368,8 +378,7 @@ fs.save("myimage.img")
 
 | File | Type | Description |
 |------|------|-------------|
-| `kdos.f` | Forth | Complete KDOS operating system source |
-| `autoexec.f` | Forth | Bootstrap: `FSLOAD kdos.f` |
+| `kdos.f` | Forth | Complete KDOS operating system source (auto-booted by BIOS) |
 | `getting-started` | Doc | Introduction and first steps |
 | `buffers` | Doc | Buffer subsystem guide |
 | `kernels` | Doc | Kernel registry guide |

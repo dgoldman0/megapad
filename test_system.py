@@ -831,7 +831,7 @@ class TestBIOS(unittest.TestCase):
             fs.save(path)
         try:
             sys, buf = self._boot_bios(storage_image=path)
-            # The auto-boot should have loaded autoexec.f → FSLOAD kdos.f
+            # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
             text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=200_000_000)
             self.assertIn("KDOS", text)
@@ -4646,24 +4646,22 @@ class TestDiskUtil(unittest.TestCase):
             self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS))
 
     def test_diskutil_build_sample_image(self):
-        """build_sample_image creates image with KDOS, autoexec, docs, tutorials, demo-data."""
+        """build_sample_image creates image with KDOS, docs, tutorials, demo-data."""
         fs = build_sample_image()
         entries = fs.list_files()
         names = [e.name for e in entries]
         self.assertIn("kdos.f", names)
-        self.assertIn("autoexec.f", names)
+        self.assertNotIn("autoexec.f", names)
         self.assertIn("demo-data", names)
         # Check file types
         kdos_entry = next(e for e in entries if e.name == "kdos.f")
         self.assertEqual(kdos_entry.ftype, FTYPE_FORTH)
-        auto_entry = next(e for e in entries if e.name == "autoexec.f")
-        self.assertEqual(auto_entry.ftype, FTYPE_FORTH)
         demo_entry = next(e for e in entries if e.name == "demo-data")
         self.assertEqual(demo_entry.ftype, FTYPE_DATA)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + autoexec.f + demo-data = 18
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 3)
+        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data = 17
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 2)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -4672,7 +4670,7 @@ class TestDiskUtil(unittest.TestCase):
             loaded = MP64FS.load(f.name)
             names = [e.name for e in loaded.list_files()]
             self.assertIn("kdos.f", names)
-            self.assertIn("autoexec.f", names)
+            self.assertNotIn("autoexec.f", names)
 
 
 # ---------------------------------------------------------------------------

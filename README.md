@@ -146,12 +146,14 @@ cd megapad-64
 ### Boot the System
 
 ```bash
-# Without disk (KDOS injected via UART)
-python cli.py --bios bios.asm --forth kdos.f
+# Build the sample disk image (includes KDOS + docs + tutorials)
+python diskutil.py sample
 
-# With a disk image (full filesystem access)
-python diskutil.py sample              # build sample.img first
-python cli.py --bios bios.asm --forth kdos.f --storage sample.img
+# Boot from disk (recommended) — BIOS auto-loads KDOS from disk
+python cli.py --bios bios.asm --storage sample.img
+
+# Without disk (development mode — KDOS injected via UART, no FS access)
+python cli.py --bios bios.asm --forth kdos.f
 ```
 
 You'll see the KDOS banner and land at the Forth REPL:

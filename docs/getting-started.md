@@ -23,21 +23,22 @@ utility, and test suite — is a self-contained Python file.
 
 ## Your First Boot
 
-### Without a Disk Image
+### With a Disk Image (recommended)
 
-The simplest way to start is to boot the BIOS directly and inject the
-KDOS operating system via the `--forth` flag:
+The normal way to run KDOS is from a disk image.  The BIOS automatically
+finds and loads the first Forth file on the disk:
 
 ```bash
-python cli.py --bios bios.asm --forth kdos.f
+python diskutil.py sample              # build the sample disk image
+python cli.py --bios bios.asm --storage sample.img
 ```
 
 What happens:
 
 1. The assembler translates `bios.asm` into machine code (~20 KB)
 2. The emulator loads the binary at address 0 and starts the CPU
-3. The BIOS boots — you see its banner and a brief `ok` prompt
-4. The CLI injects `kdos.f` line-by-line through the UART
+3. The BIOS boots, detects the disk, reads the MP64FS directory
+4. It finds `kdos.f` (the first Forth-type file) and loads it via FSLOAD
 5. KDOS loads all 14 sections and prints its banner:
 
 ```
@@ -49,21 +50,26 @@ Type SCREENS for interactive TUI.
 Type TOPICS or LESSONS for documentation.
 ```
 
-You're now at the Forth REPL.  Everything you type is interpreted by the
-BIOS's EVALUATE loop, with all of KDOS's ~300 words available.
+You're now at the Forth REPL with the full KDOS environment, including
+filesystem access (`DIR`, `CAT`, `DOC`, `TUTORIAL`, etc.).
 
-### With a Disk Image
+### Without a Disk Image (development mode)
 
-If you have a disk image (see the Filesystem docs), attach it with
-`--storage`:
+For development, you can inject Forth source directly through the UART
+without a disk:
 
 ```bash
-python cli.py --bios bios.asm --forth kdos.f --storage sample.img
+python cli.py --bios bios.asm --forth kdos.f
 ```
 
-With a disk, KDOS automatically loads the filesystem at boot.  You get
-access to the `DIR`, `CAT`, `DOC`, `TUTORIAL`, and all other file
-commands.
+The CLI sends `kdos.f` line-by-line through the serial port.  This is
+slower than disk boot and doesn't give you filesystem access (no `DIR`,
+`CAT`, `DOC`, etc.), but it's useful for testing KDOS changes without
+rebuilding the disk image.
+
+> **Don't mix the two.**  If you have a disk image with KDOS, you don't
+> need `--forth kdos.f` — the BIOS loads it from disk automatically.
+> Using `--forth` with `--storage` would load KDOS twice.
 
 ### Building the Sample Disk Image
 
@@ -74,8 +80,8 @@ image:
 python diskutil.py sample
 ```
 
-This creates `sample.img` containing KDOS itself, an autoexec script, ten
-documentation topics, five tutorials, and demo data.
+This creates `sample.img` containing KDOS itself, ten documentation
+topics, five tutorials, and demo data (17 files total).
 
 ---
 

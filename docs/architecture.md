@@ -239,20 +239,19 @@ The full boot process from power-on to the KDOS REPL:
    UART, initializes the Forth dictionary (HERE, LATEST, base number,
    compilation state)
 3. **Disk detection** — BIOS checks `DISK@` status register bit 7
-4. **If disk present:** BIOS executes `FSLOAD autoexec.f`
-   - Reads the MP64FS directory from sectors 2–5
-   - Finds `autoexec.f` in the directory
-   - Reads its sectors into a buffer
-   - EVALUATEs each line (which typically says `FSLOAD kdos.f`)
-5. **KDOS loads** — the `FSLOAD kdos.f` in autoexec.f causes:
-   - All 2,519 lines of KDOS to be read from disk
+4. **If disk present:** BIOS reads the MP64FS directory and scans for
+   the first file with type=3 (Forth)
+   - Reads its data sectors into a RAM buffer
+   - EVALUATEs each line via FSLOAD
+5. **KDOS loads** — the Forth file (typically `kdos.f`) causes:
+   - All 2,778 lines of KDOS to be read from disk
    - Each line is EVALUATE'd, compiling definitions into the dictionary
    - §14 startup code runs: prints banner, loads filesystem (`FS-LOAD`)
 6. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
 
 **If no disk:** BIOS skips step 4, drops directly into the bare Forth
 REPL.  KDOS can still be loaded via `--forth kdos.f` on the CLI (UART
-injection).
+injection), but without filesystem access.
 
 ### Memory Usage (Typical)
 

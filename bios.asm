@@ -104,19 +104,105 @@ boot:
     call.l r11
 
     ; ---- Auto-boot from disk if present ----
+    ; Check disk status register bit 7 (disk present)
     ldi64 r11, 0xFFFF_FF00_0000_0201
     ld.b r1, r11
     andi r1, 0x80
-    breq no_autoboot
-    ; EVALUATE "FSLOAD autoexec.f"
-    ldi64 r9, str_autoboot_cmd
-    ldi r12, 17               ; strlen("FSLOAD autoexec.f")
+    lbreq no_autoboot
+
+    ; Read directory sectors 2-5 into buffer at R2/2
+    mov r9, r2
+    lsri r9, 1
+    ldi r1, 2                 ; start sector
+    ldi r12, 4                ; 4 sectors = 2048 bytes = 64 entries
+    subi r15, 8
+    str r15, r9               ; save buf_addr on RSP
+    ldi64 r11, disk_read_sectors
+    call.l r11
+
+    ; Scan directory for first Forth-type file (type == 3 at offset +24)
+    ldn r9, r15               ; buf_addr
+    ldi r0, 0                 ; entry index
+autoboot_scan:
+    cmpi r0, 64
+    lbreq autoboot_not_found
+
+    mov r13, r0
+    lsli r13, 5               ; entry_addr = buf + index * 32
+    add r13, r9
+
+    ; Check type byte at offset +24
+    mov r11, r13
+    addi r11, 24
+    ld.b r7, r11
+    cmpi r7, 3                ; FTYPE_FORTH
+    breq autoboot_found
+
+    inc r0
+    lbr autoboot_scan
+
+autoboot_found:
+    ; R13 = directory entry with type=3
+    ; Build "FSLOAD <name>" in a scratch area (RSP-64 is safe)
+    addi r15, 8               ; pop buf_addr
+    mov r9, r15
+    subi r9, 64               ; scratch area below RSP
+
+    ; Write "FSLOAD " prefix (7 bytes)
+    ldi r7, 0x46              ; 'F'
+    st.b r9, r7
+    mov r11, r9
+    inc r11
+    ldi r7, 0x53              ; 'S'
+    st.b r11, r7
+    inc r11
+    ldi r7, 0x4C              ; 'L'
+    st.b r11, r7
+    inc r11
+    ldi r7, 0x4F              ; 'O'
+    st.b r11, r7
+    inc r11
+    ldi r7, 0x41              ; 'A'
+    st.b r11, r7
+    inc r11
+    ldi r7, 0x44              ; 'D'
+    st.b r11, r7
+    inc r11
+    ldi r7, 0x20              ; ' '
+    st.b r11, r7
+    inc r11
+
+    ; Copy entry name (up to 15 chars, stop at null)
+    ldi r1, 0                 ; name index
+autoboot_copy_name:
+    cmpi r1, 15
+    breq autoboot_name_done
+    mov r10, r13
+    add r10, r1
+    ld.b r7, r10
+    cmpi r7, 0
+    breq autoboot_name_done
+    st.b r11, r7
+    inc r11
+    inc r1
+    br autoboot_copy_name
+
+autoboot_name_done:
+    ; R12 = total string length = 7 (prefix) + R1 (name length)
+    mov r12, r1
+    addi r12, 7
+
+    ; Push ( addr len ) and EVALUATE
     subi r14, 8
-    str r14, r9                ; push addr
+    str r14, r9                ; push string addr
     subi r14, 8
-    str r14, r12               ; push len
+    str r14, r12               ; push string len
     ldi64 r11, w_evaluate
     call.l r11
+    br no_autoboot
+
+autoboot_not_found:
+    addi r15, 8               ; pop buf_addr
 no_autoboot:
 
     ; Fall into the outer interpreter
@@ -8244,8 +8330,6 @@ str_fsload_no_disk:
     .asciiz "FSLOAD: no disk\n"
 str_fsload_err:
     .asciiz "FSLOAD: not found\n"
-str_autoboot_cmd:
-    .asciiz "FSLOAD autoexec.f"
 
 str_busfault:
     .asciiz "\n*** BUS FAULT @ "
