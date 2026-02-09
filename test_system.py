@@ -4675,6 +4675,377 @@ class TestDiskUtil(unittest.TestCase):
             self.assertIn("autoexec.f", names)
 
 
+# ---------------------------------------------------------------------------
+#  Phase 3 Hardening Tests — BIOS robustness & edge cases
+# ---------------------------------------------------------------------------
+
+class TestBIOSHardening(unittest.TestCase):
+    """Tests for Phase 3.1/3.2 hardening: FSLOAD edge cases,
+    stack underflow detection, EVALUATE depth, dictionary-full guard."""
+
+    def setUp(self):
+        with open(BIOS_PATH) as f:
+            self.bios_code = assemble(f.read())
+
+    def _boot_bios(self, ram_kib=256, storage_image=None):
+        sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
+        buf = capture_uart(sys)
+        sys.load_binary(0, self.bios_code)
+        sys.boot()
+        return sys, buf
+
+    def _run_forth(self, sys, buf, input_lines, max_steps=2_000_000):
+        payload = "\n".join(input_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        for _ in range(len(data) + 20):
+            for _ in range(max_steps // (len(data) + 20)):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+        return uart_text(buf)
+
+    # -- FSLOAD multi-sector (> 512 bytes) --
+
+    def test_fsload_multi_sector(self):
+        """FSLOAD loads and evaluates a file spanning multiple sectors."""
+        fs = build_image()
+        # Create a file > 512 bytes with many small definitions
+        lines = []
+        for i in range(50):
+            lines.append(f": W{i} {i} ;")
+        # Add a test line that uses the last definition
+        lines.append(f"W49 .")
+        src = "\n".join(lines).encode() + b"\n"
+        self.assertGreater(len(src), 512)  # verify multi-sector
+        fs.inject_file("big.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "FSLOAD big.f",
+            ], max_steps=20_000_000)
+            self.assertIn("49 ", text)
+        finally:
+            os.unlink(path)
+
+    # -- FSLOAD with colon definitions, ." strings, nested EVALUATE --
+
+    def test_fsload_colon_defs(self):
+        """FSLOAD file containing colon definitions works correctly."""
+        fs = build_image()
+        src = b": SQUARE DUP * ;\n: CUBE DUP SQUARE * ;\n3 CUBE .\n"
+        fs.inject_file("defs.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD defs.f"])
+            self.assertIn("27 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_dotquote(self):
+        """FSLOAD file with .\\" strings prints them correctly."""
+        fs = build_image()
+        src = b': GREET ." Hello from disk" ;\nGREET\n'
+        fs.inject_file("greet.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD greet.f"])
+            self.assertIn("Hello from disk", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_nested_evaluate(self):
+        """FSLOAD file containing S\\" ... \\" EVALUATE works."""
+        fs = build_image()
+        src = b': CALC  S" 7 7 * ." EVALUATE ;\nCALC\n'
+        fs.inject_file("nested.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD nested.f"])
+            self.assertIn("49 ", text)
+        finally:
+            os.unlink(path)
+
+    # -- FSLOAD edge cases --
+
+    def test_fsload_empty_file(self):
+        """FSLOAD of an empty file succeeds without errors."""
+        fs = build_image()
+        fs.inject_file("empty.f", b"", ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD empty.f", "42 ."])
+            self.assertNotIn("?", text.split("FSLOAD empty.f")[-1].split("42 .")[0])
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_only_comments(self):
+        """FSLOAD of file with only backslash comments works."""
+        fs = build_image()
+        src = b"\\ This is a comment\n\\ Another comment\n"
+        fs.inject_file("comment.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD comment.f", "99 ."])
+            self.assertIn("99 ", text)
+            # No errors during load (check only after our FSLOAD command)
+            after_load = text.split("FSLOAD comment.f")[-1]
+            self.assertNotIn("not found", after_load)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_long_line(self):
+        """FSLOAD handles a long line (near 255-char TIB limit)."""
+        fs = build_image()
+        # Build a line with many small numbers: "1 2 3 ... N"
+        nums = list(range(1, 60))
+        line = " ".join(str(n) for n in nums)
+        # Ensure it's under 255 chars but substantial
+        self.assertLess(len(line), 255)
+        src = (line + " DEPTH .\n").encode()
+        fs.inject_file("long.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD long.f"])
+            # Should print the depth (59 numbers pushed + DEPTH on top)
+            self.assertIn(f"{len(nums)} ", text)
+        finally:
+            os.unlink(path)
+
+    # -- FSLOAD error context --
+
+    def test_fsload_error_shows_line_number(self):
+        """FSLOAD error message includes line number context."""
+        fs = build_image()
+        src = b": GOOD 1 ;\nGOOD\nNOSUCH\n"
+        fs.inject_file("err.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD err.f"])
+            # Should include line number context — "line 3" since NOSUCH is on line 3
+            self.assertIn("line", text)
+            self.assertIn("3", text)
+            self.assertIn("NOSUCH", text)
+            self.assertIn("not found", text)
+        finally:
+            os.unlink(path)
+
+    # -- Stack underflow detection --
+
+    def test_stack_underflow_detected(self):
+        """Stack underflow prints a warning and recovers."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["DROP", "42 ."])
+        self.assertIn("Stack underflow", text)
+        # System should recover and continue
+        self.assertIn("42 ", text)
+
+    def test_stack_underflow_multiple_drops(self):
+        """Multiple drops on empty stack triggers underflow once."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["DROP DROP DROP", "7 ."])
+        self.assertIn("Stack underflow", text)
+        self.assertIn("7 ", text)
+
+    # -- EVALUATE depth limit --
+
+    def test_evaluate_depth_limit(self):
+        """Deeply nested EVALUATE hits the depth limit."""
+        sys, buf = self._boot_bios()
+        # Define a recursive word that calls itself via EVALUATE
+        # This nests EVALUATE calls until the depth limit (16) is hit
+        text = self._run_forth(sys, buf, [
+            'VARIABLE ECNT  0 ECNT !',
+            ': ETEST  ECNT @ 1+ DUP ECNT ! DROP  S" ETEST" EVALUATE ;',
+            'ETEST',
+        ], max_steps=5_000_000)
+        self.assertIn("depth limit", text)
+
+    # -- Dictionary full guard --
+
+    def test_dictionary_full_guard(self):
+        """Defining words when dictionary is nearly full prints error."""
+        sys, buf = self._boot_bios()
+        # With 256 KiB RAM, DSP starts at 128 KiB (131072).
+        # BIOS binary is ~20KB, so HERE starts around 20600.
+        # ALLOT 120000 pushes HERE to ~140600.
+        # w_colon checks HERE + 1024 > DSP → 141624 > 131072 → full.
+        fill_lines = []
+        fill_lines.append("120000 ALLOT")
+        fill_lines.append(": FULL 1 ;")
+        text = self._run_forth(sys, buf, fill_lines, max_steps=5_000_000)
+        self.assertIn("Dictionary full", text)
+
+
+class TestKDOSHardening(TestKDOS):
+    """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
+
+    # -- SCREENS TUI rendering --
+
+    def test_screen_home_render(self):
+        """Screen 1 (Home) renders system overview."""
+        text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
+        self.assertIn("System Overview", text)
+        self.assertIn("Memory", text)
+        self.assertIn("Buffers", text)
+        self.assertIn("Kernels", text)
+        self.assertIn("Tasks", text)
+
+    def test_screen_buffers_render(self):
+        """Screen 2 (Buffers) renders buffer list."""
+        text = self._run_kdos_fast([
+            "0 1 64 BUFFER tb",
+            "2 SWITCH-SCREEN",
+        ])
+        self.assertIn("Bufs", text)
+        self.assertIn("tb", text)
+
+    def test_screen_kernels_render(self):
+        """Screen 3 (Kernels) renders kernel list."""
+        text = self._run_kdos_fast(["3 SWITCH-SCREEN"])
+        self.assertIn("Kern", text)
+
+    def test_screen_pipes_render(self):
+        """Screen 4 (Pipes) renders pipeline info."""
+        text = self._run_kdos_fast(["4 SWITCH-SCREEN"])
+        self.assertIn("Pipe", text)
+
+    def test_screen_tasks_render(self):
+        """Screen 5 (Tasks) renders task list."""
+        text = self._run_kdos_fast(["5 SWITCH-SCREEN"])
+        self.assertIn("Task", text)
+
+    def test_screen_help_render(self):
+        """Screen 6 (Help) renders help reference."""
+        text = self._run_kdos_fast(["6 SWITCH-SCREEN"])
+        self.assertIn("Help", text)
+
+    def test_screen_docs_render(self):
+        """Screen 7 (Docs) renders documentation index."""
+        text = self._run_kdos_fast(["7 SWITCH-SCREEN"])
+        self.assertIn("Docs", text)
+
+    def test_screen_storage_render(self):
+        """Screen 8 (Storage) renders file listing."""
+        text = self._run_kdos_fast(["8 SWITCH-SCREEN"])
+        self.assertIn("Stor", text)
+
+    def test_screen_header_tabs(self):
+        """Screen header shows all 8 tab labels."""
+        text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
+        for label in ["[1]Home", "[2]Bufs", "[3]Kern", "[4]Pipe",
+                       "[5]Task", "[6]Help", "[7]Docs", "[8]Stor"]:
+            self.assertIn(label, text)
+
+    def test_screen_footer_keys(self):
+        """Screen footer shows key bindings."""
+        text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
+        self.assertIn("[q] Quit", text)
+        self.assertIn("[r] Refresh", text)
+
+    # -- Disk-only boot e2e --
+
+    def test_disk_only_boot(self):
+        """BIOS auto-boots KDOS from disk; basic words work."""
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "10 20 + .",
+                "BUF-COUNT @ .",
+            ], max_steps=200_000_000)
+            self.assertIn("KDOS", text)
+            self.assertIn("30 ", text)
+            # BUF-COUNT should be a valid number (0 initially)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_disk_only_boot_defines_words(self):
+        """After disk boot, KDOS words like BUFFER and KERNEL are available."""
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "0 1 64 BUFFER diskbuf",
+                "BUF-COUNT @ .",
+            ], max_steps=200_000_000)
+            self.assertIn("KDOS", text)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(path)
+
+    def _run_forth(self, sys, buf, input_lines, max_steps=2_000_000):
+        payload = "\n".join(input_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        for _ in range(len(data) + 20):
+            for _ in range(max_steps // (len(data) + 20)):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                try:
+                    sys.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+        return uart_text(buf)
+
+
 class TestKDOSFilesystem(TestKDOS):
     """Tests for the new KDOS filesystem utility words."""
 

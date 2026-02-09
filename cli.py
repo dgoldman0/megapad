@@ -875,6 +875,8 @@ def main():
                         help="Forth source file to inject via UART after boot (can repeat)")
     parser.add_argument("--assemble", nargs=2, metavar=("SRC", "OUT"),
                         help="Assemble SRC.asm to OUT.rom and exit")
+    parser.add_argument("--listing", "-l", action="store_true",
+                        help="Print assembly listing (with --assemble)")
     parser.add_argument("--run", action="store_true",
                         help="Auto-boot and run after loading (non-BIOS mode)")
     parser.add_argument("--nic", type=int, default=None, metavar="PORT",
@@ -889,7 +891,7 @@ def main():
         with open(src_path, "r") as f:
             source = f.read()
         try:
-            code = assemble(source, 0)
+            code = assemble(source, 0, listing=args.listing)
         except AsmError as e:
             print(f"Assembly error: {e}", file=sys.stderr)
             sys.exit(1)

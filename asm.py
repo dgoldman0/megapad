@@ -142,11 +142,12 @@ class AsmError(Exception):
         super().__init__(f"Line {line}: {msg}")
 
 
-def assemble(source: str, base_addr: int = 0) -> bytearray:
+def assemble(source: str, base_addr: int = 0, listing: bool = False) -> bytearray:
     """
     Two-pass assembler.
     Pass 1: collect labels, compute instruction sizes.
     Pass 2: emit bytecode with resolved addresses.
+    If listing=True, print an address/hex/source listing to stdout.
     """
 
     lines = source.split("\n")
@@ -227,8 +228,10 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
     # ---- Pass 2: emit bytes ----
     code = bytearray()
     pc = base_addr
+    listing_lines = []  # (addr, hex_bytes, source_text)
 
     for lineno, text, sz in sizes:
+        start_pc = pc
         lower = text.lower()
 
         # Directives
@@ -238,28 +241,52 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
             while pc < target:
                 code.append(0)
                 pc += 1
+            if listing:
+                listing_lines.append((start_pc, "", f".org {target:#x}"))
             continue
 
         if lower.startswith(".db"):
+            before = len(code)
             for tok in _split_ops(text[3:]):
                 code.append(_parse_imm(tok) & 0xFF)
                 pc += 1
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
         if lower.startswith(".dw"):
+            before = len(code)
             for tok in _split_ops(text[3:]):
                 v = _parse_imm(tok) & 0xFFFF
                 code.append(v & 0xFF)
                 code.append((v >> 8) & 0xFF)
                 pc += 2
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
         if lower.startswith(".dd"):
+            before = len(code)
             for tok in _split_ops(text[3:]):
                 v = _parse_imm(tok) & 0xFFFFFFFF
                 for b in range(4):
                     code.append((v >> (8*b)) & 0xFF)
                 pc += 4
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
         if lower.startswith(".dq"):
+            before = len(code)
             for tok in _split_ops(text[3:]):
                 tok_s = tok.strip()
                 if tok_s in labels:
@@ -269,23 +296,67 @@ def assemble(source: str, base_addr: int = 0) -> bytearray:
                 for b in range(8):
                     code.append((v >> (8*b)) & 0xFF)
                 pc += 8
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
         if lower.startswith(".asciiz"):
+            before = len(code)
             s = _parse_string(lineno, text[7:].strip())
             code.extend(s)
             code.append(0)
             pc += len(s) + 1
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
         if lower.startswith(".ascii"):
+            before = len(code)
             s = _parse_string(lineno, text[6:].strip())
             code.extend(s)
             pc += len(s)
+            if listing:
+                emb = code[before:before+8]
+                hexstr = " ".join(f"{b:02X}" for b in emb)
+                if len(code) - before > 8:
+                    hexstr += " ..."
+                listing_lines.append((start_pc, hexstr, text))
             continue
 
         emitted = _emit_instruction(lineno, text, pc, labels)
         assert len(emitted) == sz, f"Size mismatch line {lineno}: expected {sz}, got {len(emitted)}"
+        if listing:
+            hexstr = " ".join(f"{b:02X}" for b in emitted[:8])
+            if len(emitted) > 8:
+                hexstr += " ..."
+            listing_lines.append((start_pc, hexstr, text))
         code.extend(emitted)
         pc += sz
+
+    if listing:
+        # Also capture labels from pass 1 for interleaving
+        # Build reverse map: addr → label name
+        addr_labels = {}
+        for lbl, addr in labels.items():
+            addr_labels.setdefault(addr, []).append(lbl)
+        # Print listing with labels
+        for addr, hexstr, src in listing_lines:
+            for lbl in addr_labels.pop(addr, []):
+                print(f"                    {lbl}:")
+            if hexstr:
+                print(f"  {addr:06X}  {hexstr:<24s}  {src}")
+            else:
+                print(f"  {addr:06X}  {'':24s}  {src}")
+        # Print any remaining labels at end
+        for addr in sorted(addr_labels):
+            for lbl in addr_labels[addr]:
+                print(f"                    {lbl}:")
 
     return code
 

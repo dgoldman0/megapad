@@ -245,6 +245,18 @@ interp_undefined:
     lbr quit_loop
 
 interp_line_done:
+    ; Check for stack underflow: R14 should be <= R2/2 (initial DSP)
+    mov r11, r2
+    lsri r11, 1               ; dsp_init = R2/2
+    cmp r14, r11
+    brle interp_no_underflow
+    ; Stack underflow detected — reset DSP and warn
+    mov r14, r11
+    ldi64 r10, str_stack_underflow
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+interp_no_underflow:
     ldi64 r11, do_print_ok
     call.l r11
     lbr quit_loop
@@ -1924,6 +1936,18 @@ compile_ret:
 ;  Then sets STATE=1 (compiling).  Code starts at HERE after the header.
 
 w_colon:
+    ; Check dictionary space: HERE + 1024 < R14 (data stack pointer)
+    ldi64 r11, var_here
+    ldn r11, r11
+    addi r11, 1024             ; HERE + safety margin
+    cmp r11, r14
+    brle w_colon_space_ok
+    ; Dictionary full!
+    ldi64 r10, str_dict_full
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+w_colon_space_ok:
     ; Parse the name
     ldi64 r11, parse_word
     call.l r11
@@ -4262,8 +4286,19 @@ w_fsload_found:
     ldi64 r11, disk_read_sectors
     call.l r11
 
+    ; Initialize FSLOAD line counter
+    ldi r1, 0
+    ldi64 r11, var_fsload_line
+    str r11, r1
+
     ; ---- Evaluate line by line ----
 w_fsload_line_loop:
+    ; Increment line counter
+    ldi64 r11, var_fsload_line
+    ldn r1, r11
+    inc r1
+    str r11, r1
+
     ; Load state from RSP
     ldn r9, r15               ; cur_ptr
     mov r11, r15
@@ -4373,6 +4408,10 @@ w_fsload_advance_done:
     lbr w_fsload_line_loop
 
 w_fsload_done:
+    ; Clear FSLOAD line counter
+    ldi r1, 0
+    ldi64 r11, var_fsload_line
+    str r11, r1
     ; Clean up RSP (cur_ptr + remaining)
     addi r15, 16
     ret.l
@@ -5185,6 +5224,14 @@ w_to_in:
 
 ; EVALUATE ( addr len -- ) interpret a string as Forth source
 w_evaluate:
+    ; Check nesting depth limit (max 16)
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 15
+    lbrgt w_eval_depth_err
+    ; Increment depth
+    inc r1
+    str r11, r1
     ldn r12, r14              ; len
     addi r14, 8
     ldn r9, r14               ; addr
@@ -5278,6 +5325,27 @@ w_eval_push_num:
     str r14, r1
     lbr w_eval_loop
 w_eval_undef:
+    ; Check if inside FSLOAD (var_fsload_line > 0)
+    ldi64 r11, var_fsload_line
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_eval_undef_no_ctx
+    ; Print "  line "
+    subi r15, 8
+    str r15, r11              ; save line number
+    ldi64 r10, str_line_prefix
+    ldi64 r11, print_str
+    call.l r11
+    ; Print line number
+    ldn r1, r15
+    addi r15, 8
+    ldi64 r11, print_number
+    call.l r11
+    ; Print ": "
+    ldi64 r10, str_colon_space
+    ldi64 r11, print_str
+    call.l r11
+w_eval_undef_no_ctx:
     ldi64 r11, var_word_addr
     ldn r9, r11
     ldi64 r11, var_word_len
@@ -5297,6 +5365,19 @@ w_eval_done:
     addi r15, 8
     ldi64 r11, var_to_in
     str r11, r1
+    ; Decrement EVALUATE depth
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    dec r1
+    str r11, r1
+    ret.l
+
+w_eval_depth_err:
+    ; Depth limit exceeded — drop args and print error
+    addi r14, 16              ; drop addr len
+    ldi64 r10, str_eval_depth
+    ldi64 r11, print_str
+    call.l r11
     ret.l
 
 ; COMPARE ( addr1 u1 addr2 u2 -- n ) compare two strings
@@ -8102,6 +8183,14 @@ var_word_addr:
 var_word_len:
     .dq 0
 
+; FSLOAD line tracking — used for error context
+var_fsload_line:
+    .dq 0
+
+; EVALUATE nesting depth — prevents unbounded RSP growth
+var_eval_depth:
+    .dq 0
+
 ; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
 var_leave_count:
     .dq 0
@@ -8139,6 +8228,17 @@ str_ti_acc:
 
 str_no_name:
     .asciiz " name expected\n"
+
+str_line_prefix:
+    .asciiz "  line "
+str_colon_space:
+    .asciiz ": "
+str_stack_underflow:
+    .asciiz "Stack underflow\n"
+str_eval_depth:
+    .asciiz "EVALUATE depth limit exceeded\n"
+str_dict_full:
+    .asciiz "Dictionary full\n"
 
 str_fsload_no_disk:
     .asciiz "FSLOAD: no disk\n"

@@ -4,9 +4,9 @@
 OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
-**Current state (Feb 2025):** BIOS (197 dict entries, 8,187 lines ASM,
-19.7 KB binary), KDOS (217 `: ` definitions + 86 variables/constants,
-2,519 lines), Emulator (1,358 lines), 619 tests passing.
+**Current state (Feb 2025):** BIOS (197 dict entries, 8,288 lines ASM,
+20.1 KB binary), KDOS (225 `: ` definitions + 92 variables/constants,
+2,779 lines), Emulator (1,358 lines), 678+ tests passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -170,29 +170,29 @@ demonstrable.
 
 **3.1  Robustness**
 
-- [ ] FSLOAD error recovery — if a line in a loaded file has an undefined
+- [x] FSLOAD error recovery — if a line in a loaded file has an undefined
   word, print error with file/line context instead of silently continuing
-- [ ] Stack underflow protection in BIOS (currently silently corrupts)
-- [ ] EVALUATE nested depth limit (prevent unbounded RSP growth)
-- [ ] Graceful handling of full dictionary (HERE approaching stack)
+- [x] Stack underflow protection in BIOS (currently silently corrupts)
+- [x] EVALUATE nested depth limit (prevent unbounded RSP growth)
+- [x] Graceful handling of full dictionary (HERE approaching stack)
 
 **3.2  Missing Tests**
 
-- [ ] BIOS FSLOAD with multi-sector files (> 512 bytes)
-- [ ] BIOS FSLOAD with files containing `: ` definitions, `."` strings,
+- [x] BIOS FSLOAD with multi-sector files (> 512 bytes)
+- [x] BIOS FSLOAD with files containing `: ` definitions, `."` strings,
   nested `EVALUATE`
-- [ ] End-to-end disk-only boot test (no `--forth`, just `--storage`)
+- [x] End-to-end disk-only boot test (no `--forth`, just `--storage`)
   that verifies KDOS words work after loading
-- [ ] SCREENS TUI test (render each screen, verify output contains
+- [x] SCREENS TUI test (render each screen, verify output contains
   expected sections)
-- [ ] Edge cases: empty file FSLOAD, file with only comments, 255-char
+- [x] Edge cases: empty file FSLOAD, file with only comments, 255-char
   line
 
 **3.3  Emulator Polish (nice-to-have)**
 
-- [ ] Configurable RAM size (`--ram` flag, CSR reports actual size)
-- [ ] Assembler listing output (`-l` flag)
-- [ ] Assembler size report after assembly
+- [x] Configurable RAM size (`--ram` flag, CSR reports actual size)
+- [x] Assembler listing output (`-l` flag)
+- [x] Assembler size report after assembly
 
 ---
 
@@ -231,16 +231,14 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 8,187 | ✅ Done (197 words, 19.7 KB) |
-| `kdos.f` | 2,519 | ✅ Done (217 defs + 86 vars) |
+| `bios.asm` | 8,288 | ✅ Done (197 words, 20.1 KB) |
+| `kdos.f` | 2,779 | ✅ Done (225 defs + 92 vars) |
 | `megapad64.py` | 1,358 | ✅ Done |
 | `system.py` | 300 | ✅ Done |
-| `cli.py` | 990 | ✅ Done |
-| `asm.py` | 677 | ✅ Done |
+| `cli.py` | 993 | ✅ Done |
+| `asm.py` | 728 | ✅ Done (listing support) |
 | `diskutil.py` | 941 | ✅ Done |
-| `test_system.py` | 4,693 | 619 tests ✅ |
+| `test_system.py` | 5,200+ | 678+ tests ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `docs/` | — | **Needs full write-up** |
-| `README.md` | 389 | **Needs rewrite** (outdated) |
-| `EMULATOR.md` | 465 | **Needs rewrite** (says v0.9, 62 words) |
-| `KDOS.md` | 1,191 | **Needs rewrite** (says v0.9d) |
+| `docs/` | 8 files | ✅ Written |
+| `README.md` | 389 | ✅ Rewritten |
