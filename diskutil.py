@@ -438,9 +438,10 @@ a tile-engine accelerated SIMD compute surface.
 
 FIRST STEPS
   Type HELP for a command reference.
+  Type DESCRIBE <word> for detailed word help.
   Type STATUS for a quick system overview.
   Type DASHBOARD for a full system report.
-  Type SCREENS for the interactive TUI.
+  Type SCREENS for the 8-screen interactive TUI.
 
 CREATING A BUFFER
   0 1 256 BUFFER mydata
@@ -456,6 +457,12 @@ STORAGE
   If a disk is attached, KDOS loads MP64FS
   automatically. Use DIR to list files,
   MKFILE to create, and OPEN to access them.
+
+ERROR HANDLING
+  The BIOS detects stack underflow and prints
+  a warning. Undefined words show the word name
+  and context. During FSLOAD, errors include the
+  file line number for easy debugging.
 """,
 
     "buffers": """\
@@ -489,6 +496,9 @@ ELEMENT-WISE OPS
 DISK PERSISTENCE
   buf sec B.SAVE           Save buffer to sector
   buf sec B.LOAD           Load buffer from sector
+
+Press 2 in SCREENS to see all buffers listed
+with type, width, length, and data address.
 """,
 
     "kernels": """\
@@ -520,6 +530,7 @@ ADVANCED KERNELS
   th src dst kpeak       Peak detection
   buf krms-buf           RMS value
   a b kcorrelate         Dot product
+  k src dst kconvolve    Convolution
 """,
 
     "pipelines": """\
@@ -544,6 +555,9 @@ RUNNING
 MANAGEMENT
   mypipe P.CLEAR         Reset pipeline
   PIPES                  List all pipelines
+
+Press 4 in SCREENS to see all pipelines listed
+with their step count and execution status.
 """,
 
     "storage": """\
@@ -568,6 +582,7 @@ FILE OPERATIONS
   8 2 MKFILE readme      Create: 8 secs, type text
   RMFILE readme           Delete file
   OPEN readme             Open -> file descriptor
+  RENAME old new          Rename a file
 
 FILE I/O
   addr len fd FWRITE     Write bytes
@@ -575,6 +590,10 @@ FILE I/O
   pos fd FSEEK           Set cursor position
   fd FREWIND             Reset cursor to 0
   fd FFLUSH              Flush metadata to disk
+
+STORAGE SCREEN
+  Press 8 in SCREENS to open the Storage screen.
+  It shows a DIR listing and disk usage info.
 
 DISK LAYOUT
   Sector 0     Superblock (magic MP64)
@@ -610,6 +629,9 @@ PREEMPTION
 
 The scheduler round-robins among READY tasks,
 respecting priority levels.
+
+Press 5 in SCREENS to see the Task screen where
+you can view, resume, or kill tasks interactively.
 """,
 
     "screens": """\
@@ -619,21 +641,26 @@ INTERACTIVE TUI (SCREENS)
 Type SCREENS to enter the interactive terminal UI.
 
 SCREEN LIST
-  [1] Home     System overview
-  [2] Bufs     Buffer listing
-  [3] Kern     Kernel listing
-  [4] Pipe     Pipeline listing
-  [5] Task     Task listing
-  [6] Help     Quick reference card
+  [1] Home     System overview & status
+  [2] Bufs     Buffer listing with details
+  [3] Kern     Kernel registry & metadata
+  [4] Pipe     Pipeline listing & steps
+  [5] Task     Task listing (resume/kill)
+  [6] Help     Full command reference card
   [7] Docs     Documentation browser
+  [8] Store    File browser & disk info
 
 CONTROLS
-  1-7            Switch to screen
+  1-8            Switch to screen
   r              Refresh current screen
   q              Quit back to REPL
 
-Each screen shows live system state and updates
-when you press 'r' to refresh.
+AUTO-REFRESH
+  Screens auto-refresh periodically so you see
+  live system state without pressing 'r'.
+
+Each screen shows formatted columns, color-coded
+headers, and a footer with available key bindings.
 """,
 
     "data-ports": """\
@@ -661,6 +688,9 @@ FRAME PROTOCOL (6-byte header + payload)
   +1  u8  DTYPE            Data type
   +2  u16 SEQ              Sequence number
   +4  u16 LEN              Payload length
+
+See also: the NIC device words in the BIOS
+  NET-STATUS NET-SEND NET-RECV NET-MAC@
 """,
 
     "tile-engine": """\
@@ -674,6 +704,7 @@ TILE PROPERTIES
   64 bytes per tile
   1/2/4/8 byte element widths
   Hardware ALU, multiply, reduction
+  256-bit accumulator for multi-tile ops
 
 TILE OPERATIONS (via buffers)
   buf B.SUM     Sum reduction (tile engine)
@@ -683,13 +714,20 @@ TILE OPERATIONS (via buffers)
   a b c B.SUB   Element-wise subtraction
   n buf B.SCALE Scalar multiply
 
+BIOS TILE WORDS
+  TADD TSUB TAND TOR TXOR TMIN TMAX TABS
+  TMUL TDOT
+  TSUM TEMIN TEMAX TPOPCNT TL1
+  TTRANS TZERO TLOADC TMOVBANK
+
 The tile engine operates on tile-aligned data
 and provides hardware-accelerated SIMD operations
 for buffer processing.
 
 MEX CSR INTERFACE
-  Residency: hot / pinned / evictable
   Operations via memory-mapped control registers
+  Source selection: register, immediate, memory
+  See docs/tile-engine.md for full MEX encoding
 """,
 
     "reference": """\
@@ -725,11 +763,19 @@ DEFINING
   CONSTANT name           Create constant
   CREATE name             Create entry
 
-SEE ALSO
+HELP & DISCOVERY
   HELP                    Full command listing
+  HELP <word>             Help for a specific word
+  DESCRIBE <word>         Detailed word help
+  WORDS-LIKE <text>       Find matching words
+  APROPOS <text>          Search by topic
   TOPICS                  List documentation
   LESSONS                 List tutorials
-  DESCRIBE word           Detailed word help
+
+ERROR HANDLING
+  Stack underflow is detected and reported.
+  Undefined words show name + context.
+  FSLOAD errors include file line numbers.
 """,
 }
 
@@ -761,6 +807,12 @@ STEP 5: Create a buffer
   Type: 0 1 64 BUFFER mybuf
   Type: 65 mybuf B.FILL
   Type: mybuf B.PREVIEW
+
+STEP 6: Get help
+  Type: DESCRIBE DUP
+  Shows the stack effect and description.
+  Type: HELP
+  Shows the full command reference.
 
 Congratulations! You've learned the basics.
 Type TOPICS to explore more documentation.
@@ -794,6 +846,10 @@ STEP 5: Check system state
 
 Kernels track metadata about their inputs,
 outputs, and resource footprint.
+
+TIP: Use DESCRIBE ksum to see help for any
+kernel word. Press 3 in SCREENS to browse
+all registered kernels.
 """,
 
     "build-pipeline": """\
@@ -825,6 +881,9 @@ STEP 6: Benchmark it
 
 Pipelines make complex workflows repeatable
 and benchmarkable.
+
+TIP: Press 4 in SCREENS to see your pipeline.
+Use DESCRIBE P.RUN for detailed word help.
 """,
 
     "data-ingest": """\
@@ -852,6 +911,9 @@ STEP 4: Inspect received data
 
 Data flows from the network interface through
 the port binding system into your buffers.
+
+TIP: Use DESCRIBE PORT! for detailed help.
+The Home screen (1 in SCREENS) shows port count.
 """,
 
     "custom-kernel": """\
@@ -884,6 +946,9 @@ STEP 5: Benchmark it
 
 Custom kernels let you extend KDOS with
 your own tile-engine operations.
+
+TIP: Use DESCRIBE KERNEL to learn about the
+KERNEL registration word's stack effect.
 """,
 }
 

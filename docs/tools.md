@@ -33,6 +33,7 @@ python cli.py [flags]
 | `--assemble` | SRC OUT | — | Assemble SRC to OUT.rom and exit. No emulator started. |
 | `--run` | — | off | Auto-boot and run after loading (non-BIOS mode). |
 | `--ram` | KiB | 1024 | RAM size in kibibytes. |
+| `--listing` / `-l` | — | off | Print assembler listing to stdout (assemble-only mode). |
 | `--nic` | PORT | — | Enable NIC device with UDP passthrough on PORT. |
 | `--nic-peer` | PORT | NIC+1 | UDP peer port for NIC communication. |
 
@@ -65,6 +66,12 @@ python cli.py --assemble myprogram.asm myprogram.rom
 
 Assembles the source file, writes the binary, prints the byte count, and
 exits.  No emulator is started.
+
+Add `-l` for a listing that interleaves addresses, hex bytes, and source:
+
+```bash
+python cli.py --assemble myprogram.asm myprogram.rom -l
+```
 
 ### Debug Monitor
 
@@ -369,10 +376,10 @@ fs.save("myimage.img")
 | `pipelines` | Doc | Pipeline guide |
 | `data-ports` | Doc | Data ingestion guide |
 | `scheduler` | Doc | Task scheduler guide |
-| `screens` | Doc | Interactive TUI guide |
-| `filesystem` | Doc | MP64FS overview |
+| `screens` | Doc | Interactive TUI guide (8 screens) |
+| `storage` | Doc | MP64FS & storage guide |
 | `tile-engine` | Doc | Tile engine overview |
-| `reference` | Doc | Quick reference card |
+| `reference` | Doc | Quick reference card (with DESCRIBE) |
 | `hello-world` | Tutorial | First Forth program |
 | `first-kernel` | Tutorial | Creating a kernel |
 | `build-pipeline` | Tutorial | Building a pipeline |
@@ -384,7 +391,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **619+ passing tests**
+The project has a comprehensive test suite with **678+ passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -392,7 +399,7 @@ that cover every layer of the system.
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_megapad64.py` | ~65 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | ~555 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem |
+| `test_system.py` | ~615 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, hardening |
 
 ### Test Classes in `test_system.py`
 
@@ -405,8 +412,10 @@ that cover every layer of the system.
 | `TestNIC` | NIC: MAC, frame inject/recv, DMA, reset, counters, MTU |
 | `TestMMIOCPU` | CPU-level MMIO: UART TX, SystemInfo read, RAM passthrough |
 | `TestBios` | All BIOS Forth words — arithmetic, stack, comparisons, memory, control flow, strings, variables, constants, colon definitions, I/O, timer, return stack, loops, CREATE/DOES>, EVALUATE, and more |
+| `TestBIOSHardening` | FSLOAD edge cases (multi-sector, colon defs, dot-quote, nested evaluate, empty, comments-only, long line), error line context, stack underflow detection, EVALUATE depth limit, dictionary-full guard |
 | `TestBranchRange` | Assembler branch range validation, SKIP instruction |
 | `TestKDOS` | KDOS: buffers, kernels, pipelines, tasks, data ports, NIC ingestion, documentation browser, scheduler, tile engine, advanced kernels, TUI screens, filesystem commands, benchmarking |
+| `TestKDOSHardening` | SCREENS TUI renders (all 8 screens), header/footer verification, disk-only boot end-to-end tests |
 | `TestDiskUtil` | `diskutil.py`: format, inject, read, list, delete, sample image builder |
 | `TestKDOSFilesystem` | End-to-end KDOS FS: FORMAT, MKFILE, DIR, CATALOG, CAT, RMFILE, RENAME, FWRITE/FREAD, FS-FREE, SAVE-BUFFER, DOC/DESCRIBE/TOPICS/LESSONS |
 
@@ -454,15 +463,15 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | ~1,300 | CPU + tile engine emulator |
+| `megapad64.py` | ~1,358 | CPU + tile engine emulator |
 | `system.py` | ~300 | System integration (CPU + devices + memory map) |
-| `cli.py` | ~990 | CLI, boot modes, debug monitor |
-| `asm.py` | ~680 | Two-pass assembler |
+| `cli.py` | ~992 | CLI, boot modes, debug monitor |
+| `asm.py` | ~748 | Two-pass assembler (with listing output) |
 | `devices.py` | ~720 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC) |
 | `datasources.py` | ~700 | Simulated data sources for NIC |
-| `diskutil.py` | ~940 | MP64FS disk utility and image builder |
-| `bios.asm` | ~8,200 | Forth BIOS (197 dictionary words) |
-| `bios.rom` | 20,216B | Pre-assembled BIOS binary |
-| `kdos.f` | ~2,520 | KDOS operating system (300+ definitions) |
-| `test_megapad64.py` | ~710 | CPU unit tests |
-| `test_system.py` | ~4,700 | Integration test suite |
+| `diskutil.py` | ~941 | MP64FS disk utility and image builder |
+| `bios.asm` | ~8,287 | Forth BIOS (197 dictionary words, hardened) |
+| `bios.rom` | 20,605B | Pre-assembled BIOS binary |
+| `kdos.f` | ~2,778 | KDOS operating system (344 definitions) |
+| `test_megapad64.py` | ~712 | CPU unit tests |
+| `test_system.py` | ~5,258 | Integration test suite |

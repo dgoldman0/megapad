@@ -118,6 +118,7 @@ DUP .S             \ <3> 1 3 3
 
 ```forth
 HELP               \ Full command reference — every KDOS word, grouped by category
+DESCRIBE BUF       \ Detailed help for a specific word (stack effect, description)
 WORDS              \ List all ~500 defined words
 WORDS-LIKE BUF     \ Find words containing "BUF"
 APROPOS TILE       \ Find words related to tiles
@@ -262,7 +263,7 @@ DASHBOARD                \ Multi-section view:
 ### Interactive TUI
 
 ```forth
-SCREENS                  \ Launch the 7-screen interactive text UI:
+SCREENS                  \ Launch the 8-screen interactive text UI:
                          \   [1] Home    — system overview
                          \   [2] Buffers — buffer details
                          \   [3] Kernels — kernel registry
@@ -270,6 +271,7 @@ SCREENS                  \ Launch the 7-screen interactive text UI:
                          \   [5] Tasks   — scheduler view
                          \   [6] Help    — full command reference
                          \   [7] Docs    — browse documentation
+                         \   [8] Storage — file browser & disk info
 ```
 
 Navigate with number keys and `q` to quit.
@@ -327,7 +329,7 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (619+ tests):
+The project has a comprehensive test suite (678+ tests):
 
 ```bash
 # Full test suite

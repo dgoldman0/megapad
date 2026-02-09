@@ -4,9 +4,9 @@
 OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
-**Current state (Feb 2025):** BIOS (197 dict entries, 8,288 lines ASM,
-20.1 KB binary), KDOS (225 `: ` definitions + 92 variables/constants,
-2,779 lines), Emulator (1,358 lines), 678+ tests passing.
+**Current state (Feb 2025):** BIOS (197 dict entries, 8,287 lines ASM,
+20.1 KB binary), KDOS (225 `: ` definitions + 119 variables/constants,
+2,778 lines), Emulator (1,358 lines), 678+ tests passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -118,12 +118,12 @@ These prevent having to re-read the source every time:
   run KDOS, use SCREENS, create buffers, run a pipeline.
 - [x] **`docs/tools.md`** — CLI monitor, assembler usage, diskutil
   commands, test suite.
-- [ ] **`README.md`** — Full rewrite with current stats, architecture
+- [x] **`README.md`** — Full rewrite with current stats, architecture
   summary, quick-start, links to docs/.
 
 **1.4  In-Disk Documentation**
 
-- [ ] Review and update the 10 doc topics and 5 tutorials already in
+- [x] Review and update the 10 doc topics and 5 tutorials already in
   sample.img — ensure they reflect current KDOS word names, stack effects,
   and BIOS FSLOAD boot flow.
 
@@ -231,14 +231,14 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 8,288 | ✅ Done (197 words, 20.1 KB) |
-| `kdos.f` | 2,779 | ✅ Done (225 defs + 92 vars) |
+| `bios.asm` | 8,287 | ✅ Done (197 words, 20.1 KB) |
+| `kdos.f` | 2,778 | ✅ Done (225 defs + 119 vars) |
 | `megapad64.py` | 1,358 | ✅ Done |
 | `system.py` | 300 | ✅ Done |
-| `cli.py` | 993 | ✅ Done |
-| `asm.py` | 728 | ✅ Done (listing support) |
+| `cli.py` | 992 | ✅ Done |
+| `asm.py` | 748 | ✅ Done (listing support) |
 | `diskutil.py` | 941 | ✅ Done |
-| `test_system.py` | 5,200+ | 678+ tests ✅ |
+| `test_system.py` | 5,258 | 678+ tests ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `docs/` | 8 files | ✅ Written |
 | `README.md` | 389 | ✅ Rewritten |
