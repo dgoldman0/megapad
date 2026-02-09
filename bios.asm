@@ -8118,7 +8118,7 @@ str_bytes_ram:
 str_ok:
     .asciiz " ok\n"
 str_undefined:
-    .asciiz " ?\n"
+    .asciiz " ? (not found)\n"
 str_bye:
     .asciiz "Bye!\n"
 str_stk_hdr:

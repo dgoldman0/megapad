@@ -137,14 +137,14 @@ demonstrable.
 
 **2.1  SCREENS Improvements**
 
-- [ ] **Interactive actions** in screens — e.g. on Buffers screen: select
+- [x] **Interactive actions** in screens — e.g. on Buffers screen: select
   a buffer to inspect, see its data preview; on Tasks screen: resume/kill
   a task; on Docs screen: select a topic to read inline
-- [ ] **Auto-refresh** — optional timer-driven redraw (currently
+- [x] **Auto-refresh** — optional timer-driven redraw (currently
   manual 'r')
-- [ ] **Screen 8: Storage** — dedicated file browser: DIR listing,
+- [x] **Screen 8: Storage** — dedicated file browser: DIR listing,
   select file → CAT/LOAD/info
-- [ ] **Better formatting** — column alignment, proper truncation of long
+- [x] **Better formatting** — column alignment, proper truncation of long
   names, color consistency
 
 **2.2  REPL UX**
@@ -152,16 +152,16 @@ demonstrable.
 - [ ] **Command history** — store last N lines, recall with up-arrow
   (requires escape sequence parsing in read_line)
 - [ ] **Tab completion** — WORDS-LIKE prefix match on partial input
-- [ ] **Error messages** — show the word that failed + context, not
+- [x] **Error messages** — show the word that failed + context, not
   just "?"
 - [ ] **`.S` stack display** — consider always showing depth in prompt
 
 **2.3  Help & Discoverability**
 
-- [ ] **HELP \<word\>** — look up a specific word's stack effect and
+- [x] **HELP \<word\>** — look up a specific word's stack effect and
   one-line description (requires a built-in word database or doc lookup)
 - [ ] **Contextual hints** — when a word errors, suggest related words
-- [ ] Ensure TOPICS, LESSONS, DESCRIBE all work correctly with
+- [x] Ensure TOPICS, LESSONS, DESCRIBE all work correctly with
   disk-booted KDOS
 
 ---

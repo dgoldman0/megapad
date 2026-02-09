@@ -2570,7 +2570,66 @@ VARIABLE ROUTE-BUF
 \  §13  Help System
 \ =====================================================================
 
-: HELP  ( -- )
+\ -- Word-specific help lookup --
+\ HELP-WORD ( -- )  look up the word already in NAMEBUF
+\   1. Check if it exists in the dictionary
+\   2. Check for matching doc file on disk
+\   3. Suggest WORDS-LIKE for related words
+
+VARIABLE HW-FOUND
+VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
+
+: HELP-WORD  ( -- )
+    CR
+    \ Build counted string for FIND from NAMEBUF
+    PN-LEN @ HW-CSTR C!
+    NAMEBUF HW-CSTR 1+ PN-LEN @ CMOVE
+    \ Try to find the word in the dictionary
+    HW-CSTR FIND SWAP DROP    ( flag: 0=miss, 1/-1=found )
+    DUP HW-FOUND !
+    0<> IF
+        2 FG ." Found: " RESET-COLOR
+        NAMEBUF .ZSTR ."  — defined in dictionary" CR
+    ELSE
+        1 FG ." Not found: " RESET-COLOR
+        NAMEBUF .ZSTR ."  — not in dictionary" CR
+    THEN
+    \ Check for matching doc on disk
+    FS-OK @ IF
+        FIND-BY-NAME DUP -1 <> IF
+            CR ."  Documentation available:" CR
+            DUP DIRENT DE.TYPE .FTYPE ."  file: "
+            DIRENT .ZSTR CR
+            ."  Use: DOC " NAMEBUF .ZSTR ."  or  DESCRIBE " NAMEBUF .ZSTR CR
+        ELSE
+            DROP
+        THEN
+    THEN
+    \ Show related words
+    CR ."  Related words:" CR ."  "
+    0                                    \ match count
+    LATEST
+    BEGIN DUP WHILE
+        DUP ENTRY>NAME                   ( count entry na nl )
+        NAMEBUF PN-LEN @                 ( count entry na nl pa pl )
+        2OVER ICONTAINS? IF
+            2 PICK 10 < IF               \ limit output to 10 matches
+                TYPE SPACE
+                ROT 1+ -ROT
+            ELSE
+                2DROP
+            THEN
+        ELSE
+            2DROP
+        THEN
+        ENTRY>LINK
+    REPEAT
+    DROP
+    DUP 0= IF ." (none)" THEN
+    CR ." (" . ." related)" CR ;
+
+\ -- Full reference --
+: .HELP-ALL  ( -- )
     CR HRULE
     ."  KDOS v1.0 — Quick Reference" CR
     HRULE
@@ -2673,7 +2732,8 @@ VARIABLE ROUTE-BUF
     ."    STATUS                 Quick status line" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
     ."    ' word .BENCH          Time word and print cycles" CR
-    ."    HELP                   This help" CR
+    ."    HELP                   Full quick reference" CR
+    ."    HELP <word>            Look up a specific word" CR
     CR ."  DOCUMENTATION:" CR
     ."    TOPICS                 List available doc topics" CR
     ."    LESSONS                List available tutorials" CR
@@ -2693,6 +2753,17 @@ VARIABLE ROUTE-BUF
     ."    .DEPTH                 Show current stack depth" CR
     CR HRULE ;
 
+\ -- Dispatching HELP --
+\ HELP ( "name" | -- )
+\   With no argument: show full reference
+\   With a word name: look up word-specific info
+: HELP  ( -- )
+    PARSE-NAME PN-LEN @ 0= IF
+        .HELP-ALL
+    ELSE
+        HELP-WORD
+    THEN ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
@@ -2700,7 +2771,7 @@ VARIABLE ROUTE-BUF
 CR HRULE
 ."  KDOS v1.0 — Kernel Dashboard OS" CR
 HRULE
-." Type HELP for command reference." CR
+." Type HELP for commands, HELP <word> for details." CR
 ." Type SCREENS for interactive TUI." CR
 ." Type TOPICS or LESSONS for documentation." CR
 DISK? IF FS-LOAD THEN

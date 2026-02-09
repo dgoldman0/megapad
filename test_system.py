@@ -4423,6 +4423,35 @@ class TestKDOS(unittest.TestCase):
         self.assertIn("ASSERT", text)
         self.assertIn(".DEPTH", text)
 
+    def test_help_word_found(self):
+        """HELP <word> reports 'Found' for known dictionary words."""
+        text = self._run_kdos(["HELP DUP"])
+        self.assertIn("Found", text)
+        self.assertIn("DUP", text)
+        self.assertIn("dictionary", text)
+
+    def test_help_word_not_found(self):
+        """HELP <word> reports 'Not found' for unknown words."""
+        text = self._run_kdos(["HELP xyzzy123"])
+        self.assertIn("Not found", text)
+        self.assertIn("xyzzy123", text)
+
+    def test_help_word_shows_related(self):
+        """HELP <word> shows related words section."""
+        text = self._run_kdos(["HELP BUF"])
+        self.assertIn("Related", text)
+
+    def test_help_word_kdos_word(self):
+        """HELP <word> finds KDOS-defined words too."""
+        text = self._run_kdos(["HELP BUFFERS"])
+        self.assertIn("Found", text)
+        self.assertIn("BUFFERS", text)
+
+    def test_error_message_improved(self):
+        """Undefined word error shows 'not found' message."""
+        text = self._run_kdos(["nosuchword"])
+        self.assertIn("not found", text)
+
     def test_version_v09d(self):
         """Version strings show v1.0."""
         src = "\n".join(self.kdos_lines)
