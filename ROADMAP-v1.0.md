@@ -5,8 +5,8 @@ OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
 **Current state (Feb 2025):** BIOS (197 dict entries, 8,287 lines ASM,
-20.1 KB binary), KDOS (225 `: ` definitions + 119 variables/constants,
-2,778 lines), Emulator (1,358 lines), 678+ tests passing.
+20.1 KB binary), KDOS (237 `: ` definitions + 127 variables/constants,
+2,972 lines), Emulator (1,358 lines), 678+ tests passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -37,23 +37,24 @@ and release hardening**.
 
 ### KDOS v1.0 — ✅ DONE (core)
 
-217 word definitions + 86 variables/constants/creates, 2,519 lines.
+237 word definitions + 127 variables/constants/creates, 2,972 lines.
 
-14 sections:
+15 sections:
 - §1 Utility words, §2 Buffer subsystem, §3 Tile-aware buffer ops
 - §4 Kernel registry, §5 Sample kernels (12 kernels including kadd,
   knorm, khistogram, kpeak, kconvolve, etc.)
 - §6 Pipeline engine, §7 Storage & persistence
 - §7.5–7.8 Filesystem (MP64FS), documentation browser, dictionary search
-- §8 Scheduler & tasks, §9 Interactive screens (7-tab TUI)
+- §8 Scheduler & tasks, §9 Interactive screens (8-tab TUI)
 - §10 Data ports (NIC ingestion), §11 Benchmarking
 - §12 Dashboard, §13 Help system, §14 Startup
+- §15 Pipeline bundles (versioned, declarative config format)
 
 ### Filesystem — ✅ DONE
 
 - ✅ MP64FS: superblock, bitmap, 64-entry directory, data sectors
 - ✅ diskutil.py: build_image, build_sample_image, inject/read/delete/list
-- ✅ sample.img: KDOS + 10 docs + 5 tutorials + demo-data (17 files)
+- ✅ sample.img: KDOS + 10 docs + 5 tutorials + demo-data + demo-bundle (18 files)
 - ✅ KDOS words: DIR, CATALOG, CAT, RENAME, FS-FREE, SAVE-BUFFER, LOAD,
   MKFILE, RMFILE, FORMAT, FIND-BY-NAME, FS-LOAD
 - ✅ BIOS FSLOAD for disk-only boot
@@ -231,7 +232,7 @@ without docs, every subsequent change requires re-reading source.
 | File | Lines | Status |
 |------|-------|--------|
 | `bios.asm` | 8,287 | ✅ Done (197 words, 20.1 KB) |
-| `kdos.f` | 2,778 | ✅ Done (225 defs + 119 vars) |
+| `kdos.f` | 2,972 | ✅ Done (237 defs + 127 vars) |
 | `megapad64.py` | 1,358 | ✅ Done |
 | `system.py` | 300 | ✅ Done |
 | `cli.py` | 992 | ✅ Done |

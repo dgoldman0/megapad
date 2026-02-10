@@ -100,6 +100,7 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 | 4 | `FTYPE_DOC` | Documentation | Browsable with `DOC` and `DESCRIBE` |
 | 5 | `FTYPE_DATA` | Structured data | Application data, saved buffers |
 | 6 | `FTYPE_TUT` | Tutorial | Step-by-step lessons, browsable with `TUTORIAL` |
+| 7 | `FTYPE_BUNDLE` | Pipeline bundle | Declarative config, loadable with `BUNDLE-LOAD` |
 
 ### Flag Bits
 
@@ -181,6 +182,7 @@ When injecting a file, use `--type` to set the file type:
 | `doc` | 4 | Documentation topic |
 | `data` | 5 | Structured data |
 | `tutorial` | 6 | Tutorial/lesson |
+| `bundle` | 7 | Pipeline bundle (declarative config) |
 
 ### Python API
 
@@ -229,6 +231,7 @@ fs = MP64FS.load("myimage.img")
 - **5 tutorials** — hello-world, first-kernel, build-pipeline,
   data-ingest, custom-kernel
 - **demo-data** — 256-byte test data file
+- **demo-bundle** — sample pipeline bundle (type 7)
 
 This is the standard "ship it" disk image that boots KDOS automatically.
 

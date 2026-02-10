@@ -39,7 +39,7 @@ What happens:
 2. The emulator loads the binary at address 0 and starts the CPU
 3. The BIOS boots, detects the disk, reads the MP64FS directory
 4. It finds `kdos.f` (the first Forth-type file) and loads it via FSLOAD
-5. KDOS loads all 14 sections and prints its banner:
+5. KDOS loads all 15 sections and prints its banner:
 
 ```
 ------------------------------------------------------------
@@ -81,7 +81,7 @@ python diskutil.py sample
 ```
 
 This creates `sample.img` containing KDOS itself, ten documentation
-topics, five tutorials, and demo data (17 files total).
+topics, five tutorials, demo data, and a demo pipeline bundle (18 files total).
 
 ---
 

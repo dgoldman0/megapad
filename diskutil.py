@@ -69,11 +69,12 @@ FTYPE_DOC   = 4
 FTYPE_DATA  = 5
 
 FTYPE_TUT   = 6
+FTYPE_BUNDLE = 7
 
 FTYPE_NAMES = {
     FTYPE_FREE: "free", FTYPE_RAW: "raw", FTYPE_TEXT: "text",
     FTYPE_FORTH: "forth", FTYPE_DOC: "doc", FTYPE_DATA: "data",
-    FTYPE_TUT: "tutorial",
+    FTYPE_TUT: "tutorial", FTYPE_BUNDLE: "bundle",
 }
 
 
@@ -982,20 +983,55 @@ def build_image(path: str | Path | None = None,
 def build_sample_image(path: str | Path | None = None,
                        kdos_path: str | Path = "kdos.f",
                        total_sectors: int = DEFAULT_TOTAL_SECTORS) -> MP64FS:
-    """Create a complete sample image with KDOS, docs & tutorials.
+    """Create a complete sample image with KDOS, docs, tutorials & demo bundle.
 
     This is the "ship it" image: booting with this disk + BIOS will
-    auto-load KDOS directly via ``FSLOAD kdos.f`` (hardcoded in BIOS).
+    auto-load KDOS -- the BIOS finds the first Forth-type file and
+    loads it via FSLOAD.
     """
     fs = build_image(total_sectors=total_sectors)
 
-    # Inject KDOS source — the BIOS auto-boots this via FSLOAD kdos.f
+    # Inject KDOS source -- the BIOS auto-boots this via FSLOAD kdos.f
     kdos_src = Path(kdos_path).read_bytes()
     fs.inject_file("kdos.f", kdos_src, ftype=FTYPE_FORTH, flags=0x02)  # system
 
     # Inject sample data for tutorials
     demo = bytes(range(256))
     fs.inject_file("demo-data", demo, ftype=FTYPE_DATA)
+
+    # Inject demo pipeline bundle (type 7)
+    demo_bundle = (
+        "\\ PBDL v1 -- Demo Pipeline Bundle\n"
+        "\\ Demonstrates the declarative pipeline bundle format.\n"
+        "\\ Load with:  BUNDLE-LOAD demo-bundle\n"
+        "\\ Inspect:    BUNDLE-INFO demo-bundle\n"
+        "\n"
+        "1 BDL-BEGIN\n"
+        "\n"
+        "\\ --- Buffer Schemas ---\n"
+        "0 1 128 BDL-BUF bdl-sensor\n"
+        "0 1 128 BDL-BUF bdl-result\n"
+        "0 8 256 BDL-BUF bdl-hist\n"
+        "\n"
+        "\\ --- Kernel Registrations ---\n"
+        "1 1 2 1 BDL-KERN bdl-knorm\n"
+        "1 1 4 0 BDL-KERN bdl-khist\n"
+        "\n"
+        "\\ --- Pipeline ---\n"
+        "3 BDL-PIPE bdl-main\n"
+        "\n"
+        "\\ --- Schedule ---\n"
+        "0 50000 3 BDL-SCHED\n"
+        "\n"
+        "\\ --- Policy ---\n"
+        "0 0 3 BDL-POLICY\n"
+        "\n"
+        "\\ --- Dashboard ---\n"
+        "1 255 BDL-SCREEN\n"
+        "\n"
+        "BDL-END\n"
+    ).encode("ascii")
+    fs.inject_file("demo-bundle", demo_bundle, ftype=FTYPE_BUNDLE)
 
     if path is not None:
         fs.save(path)

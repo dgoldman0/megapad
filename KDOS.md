@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v0.9d — Dictionary Search, Stack Safety & Diagnostics**
+**Current Status: KDOS v1.0 — Pipeline Bundles, Full Help, 8-Screen TUI**
 
 ---
 
@@ -145,10 +145,10 @@ PORTS                          \ List all port bindings
 - **Doc builder**: diskutil.py build_docs(), build_tutorials(), build_image()
 - **Pre-built content**: 10 documentation topics + 5 interactive tutorials
 
-**Tests**: 309 passing
-- 208 KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser)
+**Tests**: 678+ passing
+- 208+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser, pipeline bundles)
 - 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
-- 17 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial building)
+- 18 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial/bundle building)
 - 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
 
 ### � Roadmap to v1.0
@@ -255,7 +255,7 @@ Sectors 6+:    Data area (2042 sectors ≈ 1 MB usable)
 +16  start_sec[2]   starting sector (u16 LE)
 +18  sec_count[2]   allocated sectors (u16 LE)
 +20  used_bytes[4]  bytes written (u32 LE)
-+24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
++24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data 6=tut 7=bundle
 +25  flags[1]       bit0=readonly, bit1=system
 +26  reserved[6]
 ```
@@ -279,7 +279,7 @@ KDOS rewrite — new Forth words:
 Built-in documentation and interactive tutorials stored as MP64FS files.
 
 New Forth words (§7.7, ~120 lines):
-- `FTYPE-DOC` / `FTYPE-TUT`: file type constants (4, 6)
+- `FTYPE-DOC` / `FTYPE-TUT` / `FTYPE-BUNDLE`: file type constants (4, 6, 7)
 - `DOC` ( "topic" -- ): open and display documentation file with pagination
 - `TUTORIAL` ( "name" -- ): open and display tutorial file
 - `DESCRIBE` ( "word" -- ): search directory for matching doc, display or suggest TOPICS
@@ -302,6 +302,26 @@ Pre-built content:
   scheduler, screens, data-ports, tile-engine, reference)
 - 5 tutorials (hello-world, first-kernel, build-pipeline,
   data-ingest, custom-kernel)
+
+**v0.9e — Pipeline Bundles** (done)
+
+Versioned, declarative pipeline bundle format (§15):
+- `BDL-BEGIN` ( version -- ): start a new bundle definition
+- `BDL-BUF` ( type width length "name" -- ): add buffer to bundle
+- `BDL-KERN` ( n_in n_out foot flags "name" -- ): add kernel to bundle
+- `BDL-PIPE` ( capacity "name" -- ): add pipeline to bundle
+- `BDL-SCHED` ( pipe-idx interval flags -- ): set scheduling config
+- `BDL-POLICY` ( permissions retention export -- ): set policy config
+- `BDL-SCREEN` ( default-screen screen-mask -- ): set dashboard config
+- `BDL-END` ( -- ): finalize bundle (apply config, print summary)
+- `BDL-RESET` ( -- ): clear bundle state
+- `BUNDLE-LOAD` ( "name" -- ): load bundle from disk (live mode)
+- `BUNDLE-INFO` ( "name" -- ): dry-run inspect bundle without creating objects
+- `.BUNDLE` ( -- ): show current bundle state
+
+diskutil.py:
+- `FTYPE_BUNDLE = 7`: new file type for pipeline bundles
+- Demo bundle added to sample image (demo-bundle, 531 bytes)
 
 **v0.9d — Dictionary Search, Stack Safety & Diagnostics** (done)
 

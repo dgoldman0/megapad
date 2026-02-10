@@ -323,6 +323,7 @@ Use `--type` with the `inject` subcommand:
 | `doc` | 4 | Documentation topic (browsable with `DOC`) |
 | `data` | 5 | Structured application data |
 | `tutorial` | 6 | Tutorial/lesson (walkable with `TUTORIAL`) |
+| `bundle` | 7 | Pipeline bundle (loadable with `BUNDLE-LOAD`) |
 
 ### Example Workflows
 
@@ -350,7 +351,8 @@ python diskutil.py sample
 #   kdos.f,
 #   10 documentation topics,
 #   5 tutorials,
-#   demo-data file
+#   demo-data file,
+#   demo-bundle (pipeline bundle)
 ```
 
 ### Python API
@@ -395,6 +397,7 @@ fs.save("myimage.img")
 | `data-ingest` | Tutorial | Setting up data ports |
 | `custom-kernel` | Tutorial | Writing custom kernels |
 | `demo-data` | Data | 256-byte test data file |
+| `demo-bundle` | Bundle | Demo pipeline bundle (load with `BUNDLE-LOAD`) |
 
 ---
 

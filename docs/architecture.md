@@ -207,7 +207,7 @@ based on source ID.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.0  (kdos.f, 2,519 lines)              │
+│  KDOS v1.0  (kdos.f, 2,972 lines)              │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -218,7 +218,7 @@ based on source ID.
 │  │ Scheduler │ Screens   │  Data Ports (NIC)  │ │
 │  │  (§8)     │ (§9)      │  (§10)             │ │
 │  ├───────────┴───────────┴────────────────────┤ │
-│  │ Dashboard, Help, Startup (§12–§14)         │ │
+│  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │  BIOS v1.0  (bios.asm, 8,187 lines)            │
@@ -244,7 +244,7 @@ The full boot process from power-on to the KDOS REPL:
    - Reads its data sectors into a RAM buffer
    - EVALUATEs each line via FSLOAD
 5. **KDOS loads** — the Forth file (typically `kdos.f`) causes:
-   - All 2,778 lines of KDOS to be read from disk
+   - All 2,972 lines of KDOS to be read from disk
    - Each line is EVALUATE'd, compiling definitions into the dictionary
    - §14 startup code runs: prints banner, loads filesystem (`FS-LOAD`)
 6. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
@@ -313,7 +313,7 @@ See `docs/tile-engine.md` for a complete programming guide.
 | CPU emulator | `megapad64.py` | 1,358 | Full ISA implementation |
 | System glue | `system.py` | 300 | MMIO devices, memory map |
 | BIOS | `bios.asm` | 8,187 | Forth interpreter, boot |
-| OS | `kdos.f` | 2,519 | Buffers, kernels, TUI, FS |
+| OS | `kdos.f` | 2,972 | Buffers, kernels, TUI, FS, bundles |
 | Assembler | `asm.py` | 677 | Two-pass macro assembler |
 | CLI/Monitor | `cli.py` | 990 | Debug, inspect, boot |
 | Disk tools | `diskutil.py` | 941 | Build/manage disk images |

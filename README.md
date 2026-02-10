@@ -26,10 +26,10 @@ interactively.
 | Component | Stats |
 |-----------|-------|
 | **BIOS** | 197 Forth dictionary words, 8,287 lines ASM, 20.1 KB binary |
-| **KDOS** | 225 colon definitions + 119 variables/constants, 2,778 lines Forth |
+| **KDOS** | 237 colon definitions + 127 variables/constants, 2,972 lines Forth |
 | **Emulator** | Full CPU + tile engine, 1,358 lines Python |
 | **Tests** | 678+ passing (CPU, BIOS, KDOS, FS, devices, assembler, diskutil) |
-| **Filesystem** | MP64FS — 1 MiB images, 64 files, 6 file types |
+| **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
@@ -119,7 +119,7 @@ strings, compilation, I/O, disk, timer, tile engine, and NIC.  Includes
 stack underflow detection, EVALUATE depth limiting, dictionary-full
 guards, and FSLOAD error recovery with file/line context.
 
-**KDOS** — The Kernel Dashboard OS, written entirely in Forth.  14 sections
+**KDOS** — The Kernel Dashboard OS, written entirely in Forth.  15 sections
 covering: utility words, described buffers with tile-aligned storage,
 tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel registry
 with 18 built-in compute kernels, a pipeline engine, raw and named file
@@ -127,7 +127,7 @@ I/O, the MP64FS filesystem, a documentation browser, dictionary search
 tools, a cooperative scheduler with timer-assisted preemption, an 8-screen
 interactive TUI (with auto-refresh), data ports for NIC ingestion,
 benchmarking, a full dashboard, a categorized help system with
-per-word `DESCRIBE`, and auto-boot.
+per-word `DESCRIBE`, versioned pipeline bundles, and auto-boot.
 
 ---
 

@@ -27,7 +27,7 @@ from data_sources import (
 )
 from diskutil import (
     MP64FS, format_image,
-    FTYPE_DOC, FTYPE_TUT, FTYPE_FORTH, FTYPE_DATA, FTYPE_NAMES,
+    FTYPE_DOC, FTYPE_TUT, FTYPE_FORTH, FTYPE_DATA, FTYPE_BUNDLE, FTYPE_NAMES,
     inject_file as du_inject_file,
     read_file as du_read_file,
     list_files as du_list_files,
@@ -4646,22 +4646,25 @@ class TestDiskUtil(unittest.TestCase):
             self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS))
 
     def test_diskutil_build_sample_image(self):
-        """build_sample_image creates image with KDOS, docs, tutorials, demo-data."""
+        """build_sample_image creates image with KDOS, docs, tutorials, demo-data, demo-bundle."""
         fs = build_sample_image()
         entries = fs.list_files()
         names = [e.name for e in entries]
         self.assertIn("kdos.f", names)
         self.assertNotIn("autoexec.f", names)
         self.assertIn("demo-data", names)
+        self.assertIn("demo-bundle", names)
         # Check file types
         kdos_entry = next(e for e in entries if e.name == "kdos.f")
         self.assertEqual(kdos_entry.ftype, FTYPE_FORTH)
         demo_entry = next(e for e in entries if e.name == "demo-data")
         self.assertEqual(demo_entry.ftype, FTYPE_DATA)
+        bdl_entry = next(e for e in entries if e.name == "demo-bundle")
+        self.assertEqual(bdl_entry.ftype, FTYPE_BUNDLE)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data = 17
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 2)
+        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle = 18
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 3)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -5204,19 +5207,218 @@ class TestKDOSFilesystem(TestKDOS):
             "3 .FTYPE",
             "4 .FTYPE",
             "6 .FTYPE",
+            "7 .FTYPE",
         ])
         self.assertIn("free", text)
         self.assertIn("forth", text)
         self.assertIn("doc", text)
         self.assertIn("tut", text)
+        self.assertIn("bdl", text)
 
     def test_help_includes_new_words(self):
-        """HELP text includes CAT, RENAME, FS-FREE, SAVE-BUFFER."""
+        """HELP text includes CAT, RENAME, FS-FREE, SAVE-BUFFER, BDL-BEGIN."""
         text = self._run_kdos_fast(["HELP"])
         self.assertIn("CAT", text)
         self.assertIn("RENAME", text)
         self.assertIn("FS-FREE", text)
         self.assertIn("SAVE-BUFFER", text)
+        self.assertIn("BDL-BEGIN", text)
+        self.assertIn("BUNDLE-LOAD", text)
+
+
+# ---------------------------------------------------------------------------
+#  Pipeline Bundle Tests
+# ---------------------------------------------------------------------------
+
+class TestPipelineBundles(TestKDOS):
+    """Tests for §15 Pipeline Bundles — declarative config format."""
+
+    def test_bdl_begin_end(self):
+        """BDL-BEGIN / BDL-END round trip prints summary."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "BDL-END",
+        ])
+        self.assertIn("Bundle v", text)
+        self.assertIn("loaded", text)
+
+    def test_bdl_buf_creates_buffer(self):
+        """BDL-BUF declares a buffer and increments BDL-NBUFS."""
+        text = self._run_kdos_fast([
+            "BUF-COUNT @",
+            "1 BDL-BEGIN",
+            "0 1 64 BDL-BUF test-bdl-buf",
+            "BDL-END",
+            "BUF-COUNT @",
+            "SWAP - .",
+        ])
+        self.assertIn("1 ", text)  # buf count increased by 1
+
+    def test_bdl_kern_creates_kernel(self):
+        """BDL-KERN declares a kernel and increments BDL-NKERNS."""
+        text = self._run_kdos_fast([
+            "KERN-COUNT @",
+            "1 BDL-BEGIN",
+            "1 1 2 1 BDL-KERN test-bdl-kern",
+            "BDL-END",
+            "KERN-COUNT @",
+            "SWAP - .",
+        ])
+        self.assertIn("1 ", text)  # kern count increased by 1
+
+    def test_bdl_pipe_creates_pipeline(self):
+        """BDL-PIPE declares a pipeline and increments BDL-NPIPES."""
+        text = self._run_kdos_fast([
+            "PIPE-COUNT @",
+            "1 BDL-BEGIN",
+            "4 BDL-PIPE test-bdl-pipe",
+            "BDL-END",
+            "PIPE-COUNT @",
+            "SWAP - .",
+        ])
+        self.assertIn("1 ", text)  # pipe count increased by 1
+
+    def test_bdl_end_reports_counts(self):
+        """BDL-END summary includes buffer, kernel, pipeline counts."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "0 1 64 BDL-BUF b1",
+            "0 1 64 BDL-BUF b2",
+            "1 1 0 0 BDL-KERN k1",
+            "2 BDL-PIPE p1",
+            "BDL-END",
+        ])
+        self.assertIn("2", text)
+        self.assertIn("bufs", text)
+        self.assertIn("1", text)
+        self.assertIn("kerns", text)
+        self.assertIn("pipes", text)
+
+    def test_bdl_sched_sets_state(self):
+        """BDL-SCHED sets schedule parameters."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "0 100000 3 BDL-SCHED",
+            "BDL-END",
+            "BDL-SCHED-P @ .",
+            "BDL-SCHED-I @ .",
+            "BDL-SCHED-F @ .",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("100000 ", text)
+        self.assertIn("3 ", text)
+
+    def test_bdl_policy_sets_state(self):
+        """BDL-POLICY sets permission/retention/export flags."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "1 5 2 BDL-POLICY",
+            "BDL-END",
+            "BDL-POL-PERM @ .",
+            "BDL-POL-RET @ .",
+            "BDL-POL-EXP @ .",
+        ])
+        self.assertIn("1 ", text)   # perms=1 (readonly)
+        self.assertIn("5 ", text)   # retention=5
+        self.assertIn("2 ", text)   # export=2 (disk-ok only)
+
+    def test_bdl_screen_sets_default(self):
+        """BDL-SCREEN sets default screen and mask."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "3 127 BDL-SCREEN",
+            "BDL-END",
+            "BDL-SCR-DEF @ .",
+            "BDL-SCR-MASK @ .",
+        ])
+        self.assertIn("3 ", text)
+        self.assertIn("127 ", text)
+
+    def test_bundle_info_dry_run(self):
+        """BUNDLE-INFO loads a bundle file without creating objects."""
+        path = self._make_formatted_image()
+        bundle = (
+            "1 BDL-BEGIN\n"
+            "0 1 64 BDL-BUF info-buf\n"
+            "1 1 0 0 BDL-KERN info-kern\n"
+            "2 BDL-PIPE info-pipe\n"
+            "0 50000 3 BDL-SCHED\n"
+            "0 0 3 BDL-POLICY\n"
+            "1 255 BDL-SCREEN\n"
+            "BDL-END\n"
+        ).encode("ascii")
+        du_inject_file(path, "test-bdl", bundle, ftype=7)
+        try:
+            text = self._run_kdos([
+                "BUF-COUNT @",
+                "BUNDLE-INFO test-bdl",
+                "BUF-COUNT @ SWAP - .",
+            ], storage_image=path)
+            # Dry run: should print summary
+            self.assertIn("Bundle v", text)
+            self.assertIn("Buffers", text)
+            # Dry run: should NOT have created the buffer
+            self.assertIn("0 ", text)  # buf count delta = 0
+        finally:
+            os.unlink(path)
+
+    def test_bundle_load_from_disk(self):
+        """BUNDLE-LOAD loads a bundle file and creates real objects."""
+        path = self._make_formatted_image()
+        bundle = (
+            "1 BDL-BEGIN\n"
+            "0 1 32 BDL-BUF disk-buf\n"
+            "1 0 1 0 BDL-KERN disk-kern\n"
+            "3 BDL-PIPE disk-pipe\n"
+            "BDL-END\n"
+        ).encode("ascii")
+        du_inject_file(path, "my-bdl", bundle, ftype=7)
+        try:
+            text = self._run_kdos([
+                "BUNDLE-LOAD my-bdl",
+                "disk-buf B.INFO",
+            ], storage_image=path)
+            self.assertIn("Bundle v", text)
+            self.assertIn("loaded", text)
+            self.assertIn("[buf", text)  # B.INFO output
+        finally:
+            os.unlink(path)
+
+    def test_dot_bundle_shows_state(self):
+        """.BUNDLE shows current bundle state."""
+        text = self._run_kdos_fast([
+            "1 BDL-BEGIN",
+            "0 1 64 BDL-BUF st-buf",
+            "0 50000 3 BDL-SCHED",
+            "1 0 3 BDL-POLICY",
+            "BDL-END",
+            ".BUNDLE",
+        ])
+        self.assertIn("Current Bundle", text)
+        self.assertIn("Version", text)
+        self.assertIn("Buffers", text)
+        self.assertIn("Schedule", text)
+        self.assertIn("Policy", text)
+
+    def test_dot_bundle_no_bundle(self):
+        """.BUNDLE with no bundle loaded says so."""
+        text = self._run_kdos_fast([
+            "BDL-RESET",
+            ".BUNDLE",
+        ])
+        self.assertIn("no bundle loaded", text)
+
+    def test_ftype_bundle_constant(self):
+        """FTYPE-BUNDLE equals 7."""
+        text = self._run_kdos_fast(["FTYPE-BUNDLE ."])
+        self.assertIn("7 ", text)
+
+    def _make_formatted_image(self):
+        """Create a temp formatted MP64FS image, return path."""
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        format_image(f.name)
+        f.close()
+        return f.name
 
 
 # ---------------------------------------------------------------------------
