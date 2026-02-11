@@ -369,15 +369,88 @@ class TestSystemMMIO(unittest.TestCase):
 
 class TestBIOS(unittest.TestCase):
 
-    def setUp(self):
+    # Class-level cache: snapshot of system state after BIOS boots to idle.
+    # Avoids re-assembling and re-booting for each of the 128+ tests.
+    _bios_snapshot = None   # (mem_bytes, cpu_state)
+    _bios_code_cache = None
+
+    @classmethod
+    def _save_cpu_state(cls, cpu):
+        """Capture all CPU register/flag state for snapshot."""
+        return {
+            'regs': list(cpu.regs),
+            'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
+            'flag_z': cpu.flag_z, 'flag_c': cpu.flag_c,
+            'flag_n': cpu.flag_n, 'flag_v': cpu.flag_v,
+            'flag_p': cpu.flag_p, 'flag_g': cpu.flag_g,
+            'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
+            'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
+            'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
+            'trap_addr': cpu.trap_addr,
+            'halted': cpu.halted, 'idle': cpu.idle,
+            'cycle_count': cpu.cycle_count,
+            '_ext_modifier': cpu._ext_modifier,
+        }
+
+    @classmethod
+    def _restore_cpu_state(cls, cpu, state):
+        """Restore CPU register/flag state from snapshot."""
+        cpu.regs[:] = state['regs']
+        for k in ('psel', 'xsel', 'spsel',
+                   'flag_z', 'flag_c', 'flag_n', 'flag_v',
+                   'flag_p', 'flag_g', 'flag_i', 'flag_s',
+                   'd_reg', 'q_out', 't_reg',
+                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'halted', 'idle', 'cycle_count', '_ext_modifier'):
+            setattr(cpu, k, state[k])
+
+    @classmethod
+    def _ensure_bios_snapshot(cls):
+        """Build the BIOS-booted snapshot once (class-level)."""
+        if cls._bios_snapshot is not None:
+            return
         with open(BIOS_PATH) as f:
-            self.bios_code = assemble(f.read())
+            cls._bios_code_cache = assemble(f.read())
+
+        sys_obj = make_system(ram_kib=256)
+        sys_obj.load_binary(0, cls._bios_code_cache)
+        sys_obj.boot()
+        # Run until BIOS reaches idle (waiting for UART input)
+        for _ in range(2_000_000):
+            if sys_obj.cpu.halted or sys_obj.cpu.idle:
+                break
+            try:
+                sys_obj.step()
+            except HaltError:
+                break
+        cls._bios_snapshot = (
+            bytes(sys_obj.cpu.mem),
+            cls._save_cpu_state(sys_obj.cpu),
+        )
+
+    def setUp(self):
+        self.__class__._ensure_bios_snapshot()
+        self.bios_code = self.__class__._bios_code_cache
 
     def _boot_bios(self, ram_kib=256, storage_image=None):
+        # Fast path: restore from snapshot (default 256K, no storage)
+        if (ram_kib == 256 and storage_image is None
+                and self.__class__._bios_snapshot is not None):
+            return self._boot_bios_fast()
+        # Slow path: fresh boot (non-default RAM size or storage)
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         sys.boot()
+        return sys, buf
+
+    def _boot_bios_fast(self):
+        """Restore BIOS from snapshot — instant boot."""
+        mem_bytes, cpu_state = self.__class__._bios_snapshot
+        sys = make_system(ram_kib=256)
+        buf = capture_uart(sys)
+        sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        self._restore_cpu_state(sys.cpu, cpu_state)
         return sys, buf
 
     def _run_forth(self, sys, buf, input_lines: list[str],
@@ -418,7 +491,11 @@ class TestBIOS(unittest.TestCase):
     # -- Banner --
 
     def test_boot_banner(self):
-        sys, buf = self._boot_bios()
+        # Force slow path — we need to see the banner printed during boot
+        sys = make_system(ram_kib=256)
+        buf = capture_uart(sys)
+        sys.load_binary(0, self.bios_code)
+        sys.boot()
         text = self._run_forth(sys, buf, [])
         self.assertIn("Megapad-64 Forth BIOS v1.0", text)
         self.assertIn("RAM:", text)
@@ -4684,15 +4761,65 @@ class TestBIOSHardening(unittest.TestCase):
     """Tests for Phase 3.1/3.2 hardening: FSLOAD edge cases,
     stack underflow detection, EVALUATE depth, dictionary-full guard."""
 
-    def setUp(self):
+    # Share BIOS snapshot with TestBIOS for fast boot
+    _bios_snapshot = None
+    _bios_code_cache = None
+
+    @classmethod
+    def _save_cpu_state(cls, cpu):
+        return TestBIOS._save_cpu_state(cpu)
+
+    @classmethod
+    def _restore_cpu_state(cls, cpu, state):
+        TestBIOS._restore_cpu_state(cpu, state)
+
+    @classmethod
+    def _ensure_bios_snapshot(cls):
+        if cls._bios_snapshot is not None:
+            return
+        # Borrow from TestBIOS if already built
+        if TestBIOS._bios_snapshot is not None:
+            cls._bios_snapshot = TestBIOS._bios_snapshot
+            cls._bios_code_cache = TestBIOS._bios_code_cache
+            return
+        # Build our own
         with open(BIOS_PATH) as f:
-            self.bios_code = assemble(f.read())
+            cls._bios_code_cache = assemble(f.read())
+        sys_obj = make_system(ram_kib=256)
+        sys_obj.load_binary(0, cls._bios_code_cache)
+        sys_obj.boot()
+        for _ in range(2_000_000):
+            if sys_obj.cpu.halted or sys_obj.cpu.idle:
+                break
+            try:
+                sys_obj.step()
+            except HaltError:
+                break
+        cls._bios_snapshot = (
+            bytes(sys_obj.cpu.mem),
+            cls._save_cpu_state(sys_obj.cpu),
+        )
+
+    def setUp(self):
+        self.__class__._ensure_bios_snapshot()
+        self.bios_code = self.__class__._bios_code_cache
 
     def _boot_bios(self, ram_kib=256, storage_image=None):
+        if (ram_kib == 256 and storage_image is None
+                and self.__class__._bios_snapshot is not None):
+            return self._boot_bios_fast()
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         sys.boot()
+        return sys, buf
+
+    def _boot_bios_fast(self):
+        mem_bytes, cpu_state = self.__class__._bios_snapshot
+        sys = make_system(ram_kib=256)
+        buf = capture_uart(sys)
+        sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        self._restore_cpu_state(sys.cpu, cpu_state)
         return sys, buf
 
     def _run_forth(self, sys, buf, input_lines, max_steps=2_000_000):

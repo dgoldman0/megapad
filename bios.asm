@@ -67,7 +67,7 @@ boot:
 
     ; Install IVT for bus-fault
     ldi64 r0, ivt_table
-    csrw 0x20, r0
+    csrw 0x04, r0
 
     ; --- Initialise Forth variables ---
     ldi r1, 0
@@ -6442,7 +6442,7 @@ bus_fault_handler:
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
-    csrr r0, 0x22
+    csrr r0, 0x25
     ldi64 r10, str_busfault
     ldi64 r11, print_str
     call.l r11
