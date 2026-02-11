@@ -1,7 +1,8 @@
 [tool.pytest.ini_options]
 testpaths = ["."]
 python_files = ["test_*.py"]
-# Default: sequential.  Use `pytest -n auto` for parallel execution.
-# With -n auto, pytest-xdist spawns one worker per CPU core.
-# Each worker builds its own BIOS/KDOS snapshot independently.
+# Fast test runs: use PyPy + xdist (see Makefile targets).
+#   make test          # PyPy + 8 workers  (~4 min)
+#   make test-seq      # PyPy sequential   (~8 min)
+#   make test-cpython  # CPython fallback  (~40 min)
 addopts = "--tb=short -q"

@@ -1,10 +1,14 @@
 """
 Pytest configuration for Megapad-64 test suite.
 
-Supports parallel execution via pytest-xdist:
-    pytest -n auto          # auto-detect CPU count
-    pytest -n 4             # use 4 workers
-    pytest -n auto --dist loadgroup  # group by @pytest.mark.xdist_group
+Recommended: run tests with PyPy for ~5× speedup on CPU emulation.
+    make test               # PyPy + 8 xdist workers (~4 min)
+    make test-seq           # PyPy sequential (~8 min)
+    make test-cpython       # CPython fallback (~40 min)
 
-Without -n, tests run sequentially as before.
+For parallel execution with xdist:
+    pypy3 -m pytest -n 8            # 8 workers
+    pypy3 -m pytest -n auto         # auto-detect CPU count
+
+Without -n, tests run sequentially.
 """
