@@ -181,13 +181,16 @@ Variable-length, 1–11 bytes:
 
 ### 6.3  Execution Model
 
-Single-issue, multi-cycle (no pipeline).  Simple instructions (INC,
-SEP, ALU) complete in 3–4 cycles (fetch + decode + execute).  Memory
-operations add bus latency.  MEX operations stall CPU until tile
-engine completes.
+**Current (FSM-based prototype)**: Single-issue, multi-cycle (no
+pipeline).  Simple instructions (INC, SEP, ALU) complete in **4 cycles**
+(FETCH → FETCH_MORE → DECODE → EXECUTE).  Memory operations add bus
+latency.  MEX operations stall CPU until tile engine completes.
 
-A pipelined version (3-stage: IF → DE → EX) would be a Phase-2
-optimisation once functional correctness is established.
+**Phase-2 (pipelined)**: A 2- or 3-stage pipeline (IF → DE → EX) with
+instruction prefetch buffer would achieve **3-cycle latency, 1
+instruction/cycle throughput** for simple instructions.  This is the
+planned optimization once functional correctness is established on
+hardware.
 
 ---
 
