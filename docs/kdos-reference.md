@@ -3,12 +3,12 @@
 **KDOS v1.0** — the Kernel Dashboard Operating System — is a Forth-based
 OS that runs on top of the Megapad-64 BIOS.  It provides buffers, compute
 kernels, pipelines, a cooperative scheduler, a named filesystem, networking,
-and an interactive 7-screen TUI dashboard.
+versioned pipeline bundles, and an interactive 8-screen TUI dashboard.
 
-This reference documents every word defined in KDOS, organized by the 14
-sections of `kdos.f`.  There are **217 colon definitions** and **86
-variables/constants/creates** — roughly 303 named entities in total across
-2,519 lines of Forth.
+This reference documents every word defined in KDOS, organized by the 15
+sections of `kdos.f`.  There are **237 colon definitions** and **127
+variables/constants/creates** — roughly 364 named entities in total across
+2,972 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -35,6 +35,7 @@ variables/constants/creates** — roughly 303 named entities in total across
 15. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
 16. [§13 Help System](#13-help-system)
 17. [§14 Startup](#14-startup)
+18. [§15 Pipeline Bundles](#15-pipeline-bundles)
 
 ---
 
@@ -368,6 +369,7 @@ names.  See `docs/filesystem.md` for the full on-disk format specification.
 | 4 | doc | Documentation topic |
 | 5 | data | Structured data |
 | 6 | tutorial | Step-by-step lesson |
+| 7 | bundle | Pipeline bundle (declarative config) |
 
 ### Words
 
@@ -532,7 +534,7 @@ preventing runaway tasks.
 ## §9 Interactive Screens (TUI)
 
 The SCREENS system is a full-screen terminal UI built on **ANSI escape
-sequences**.  It provides a tabbed dashboard with 7 screens showing system
+sequences**.  It provides a tabbed dashboard with 8 screens showing system
 status in real time.
 
 ### Starting the TUI
@@ -545,11 +547,11 @@ SCREENS     \ enters the interactive dashboard
 
 | Key | Action |
 |-----|--------|
-| `1` – `7` | Switch to screen 1–7 |
+| `1` – `8` | Switch to screen 1–8 |
 | `r` | Refresh the current screen |
 | `q` | Quit back to the Forth REPL |
 
-### The 7 Screens
+### The 8 Screens
 
 | # | Name | What It Shows |
 |---|------|---------------|
@@ -560,6 +562,7 @@ SCREENS     \ enters the interactive dashboard
 | 5 | **Tasks** | All tasks with **color-coded** state (dim=FREE, green=READY, yellow=RUNNING, red=BLOCKED, dim=DONE), priority, and XT. |
 | 6 | **Help** | Quick-reference card listing key commands for all subsystems. |
 | 7 | **Docs** | Documentation browser — lists available topics and tutorials from the filesystem, plus doc commands. |
+| 8 | **Bundles** | Pipeline bundle inspector — shows current bundle state (version, buffer/kernel/pipeline counts, scheduling config, policies, dashboard settings). |
 
 ### ANSI Terminal Helpers
 
@@ -683,6 +686,170 @@ The startup section runs automatically when KDOS loads.  It:
    (`FS-LOAD`) so DIR, CAT, LOAD, etc. work immediately
 
 No user-callable words are defined here — it's purely the boot sequence.
+
+---
+
+## §15 Pipeline Bundles
+
+Pipeline bundles are **versioned, declarative configuration files** that
+define complete data processing pipelines in a single loadable artifact.
+They combine buffer schemas, kernel registrations, pipeline definitions,
+scheduling config, access policies, and dashboard screen settings into one
+atomic unit.
+
+Bundles are stored as type-7 files on disk and can be loaded in **live mode**
+(creating real objects) or **dry-run mode** (inspection without side effects).
+
+### Why Bundles?
+
+Instead of writing imperative Forth scripts like:
+```forth
+0 1 256 BUFFER temp
+0 1 256 BUFFER output
+1 1 0 1 KERNEL my-kern
+4 PIPELINE my-pipe
+' step1 my-pipe P.ADD
+```
+
+You write a **declarative bundle**:
+```forth
+1 BDL-BEGIN               \ version 1
+0 1 256 BDL-BUF temp
+0 1 256 BDL-BUF output
+1 1 0 1 BDL-KERN my-kern
+4 BDL-PIPE my-pipe
+0 10000 3 BDL-SCHED       \ pipe 0, 10k cycle interval, auto+repeat
+7 30 0 BDL-POLICY         \ read-only, 30-day retention, no export
+1 255 BDL-SCREEN          \ default screen 1, all screens visible
+BDL-END
+```
+
+Then load it: `BUNDLE-LOAD my-config` or inspect it: `BUNDLE-INFO my-config`.
+
+### Bundle Lifecycle
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BDL-BEGIN` | `( version -- )` | **Start a new bundle definition.**  Resets tracking state (but preserves dry-run flag), sets the bundle version, and marks the bundle as active.  All subsequent `BDL-*` calls belong to this bundle. |
+| `BDL-END` | `( -- )` | **Finalize the bundle.**  In dry-run mode, prints a detailed summary (version, object counts, scheduling, policies, dashboard config).  In live mode, applies `TIME-SLICE` and `SCREEN-ID` settings, then prints `"Bundle vN loaded: X bufs Y kerns Z pipes"`. |
+| `BDL-RESET` | `( -- )` | **Clear bundle state.**  Resets version, counts, and config to zero but *preserves* the `BDL-DRY` flag so `BUNDLE-INFO` dry-runs work correctly.  Called automatically by `BDL-BEGIN`. |
+
+### Bundle Object Creation
+
+These words create KDOS objects (buffers, kernels, pipelines) or skip creation
+if in dry-run mode.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BDL-BUF` | `( type width length "name" -- )` | **Add a buffer to the bundle.**  In live mode, calls `BUFFER` to create the buffer.  In dry-run mode, skips creation but increments the buffer count.  All modes track the count for `BDL-END` reporting. |
+| `BDL-KERN` | `( n_in n_out footprint flags "name" -- )` | **Add a kernel to the bundle.**  In live mode, calls `KERNEL` to register it.  In dry-run mode, skips registration but increments the kernel count. |
+| `BDL-PIPE` | `( capacity "name" -- )` | **Add a pipeline to the bundle.**  In live mode, calls `PIPELINE` to create it.  In dry-run mode, skips creation but increments the pipeline count. |
+
+### Bundle Configuration
+
+These words set global system config for scheduling, policies, and dashboard.
+They store values in bundle state variables; `BDL-END` applies them in live mode.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BDL-SCHED` | `( pipe-idx interval flags -- )` | **Set scheduling config.**  *pipe-idx* is which pipeline to schedule (0-based), *interval* is the timer cycle interval, *flags* is a bitmask: bit 0 = auto-start on load, bit 1 = repeat indefinitely.  Stores values in `BDL-SCHED-P/I/F`. |
+| `BDL-POLICY` | `( permissions retention export -- )` | **Set access policy.**  *permissions*: 0=read-write, 7=read-only.  *retention*: days to keep data (0=forever).  *export*: 0=no external export, 1=allow.  Stores in `BDL-POL-PERM/RET/EXP`. |
+| `BDL-SCREEN` | `( default-screen screen-mask -- )` | **Set dashboard config.**  *default-screen* (1–8) is the initial screen on `SCREENS`.  *screen-mask* is a bitmask of visible screens (255 = all 8 visible).  Stores in `BDL-SCR-DEF/MASK`. |
+
+### Loading & Inspection
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BUNDLE-LOAD` | `( "name" -- )` | **Load a bundle from disk in live mode.**  Sets `BDL-DRY=0`, then calls `LOAD` to read and evaluate the file.  The bundle file should contain `BDL-BEGIN ... BDL-END`.  All objects are created and config is applied. |
+| `BUNDLE-INFO` | `( "name" -- )` | **Dry-run inspect a bundle without creating objects.**  Sets `BDL-DRY=1`, calls `LOAD` to evaluate the file (which skips object creation but tracks counts), then resets `BDL-DRY=0`.  `BDL-END` prints a detailed summary.  Use this to preview a bundle before loading it. |
+| `.BUNDLE` | `( -- )` | **Show current bundle state.**  If a bundle is active (`BDL-ACTIVE=1`), prints version, buffer/kernel/pipeline counts, scheduling config, policies, and dashboard settings.  If no bundle is loaded, prints `"(no bundle loaded)"`. |
+
+### State Variables
+
+These are internal tracking variables — you don't normally call them directly.
+
+| Variable | Meaning |
+|----------|--------|
+| `BDL-ACTIVE` | 1 if a bundle is currently being defined, 0 otherwise. |
+| `BDL-DRY` | 1 = dry-run mode (skip object creation), 0 = live mode. |
+| `BDL-VER` | Bundle version number. |
+| `BDL-NBUFS` | Count of buffers added via `BDL-BUF`. |
+| `BDL-NKERNS` | Count of kernels added via `BDL-KERN`. |
+| `BDL-NPIPES` | Count of pipelines added via `BDL-PIPE`. |
+| `BDL-SCHED-P` | Scheduled pipeline index (0-based). |
+| `BDL-SCHED-I` | Scheduling interval in cycles. |
+| `BDL-SCHED-F` | Scheduling flags (bit 0=auto-start, bit 1=repeat). |
+| `BDL-POL-PERM` | Policy: permissions (0=RW, 7=RO). |
+| `BDL-POL-RET` | Policy: retention in days. |
+| `BDL-POL-EXP` | Policy: export allowed (0=no, 1=yes). |
+| `BDL-SCR-DEF` | Dashboard: default screen (1–8). |
+| `BDL-SCR-MASK` | Dashboard: screen visibility bitmask. |
+
+### File Type Constant
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `FTYPE-BUNDLE` | 7 | File type code for pipeline bundles.  Used when creating bundle files with `MKFILE`. |
+
+### Example — Complete Bundle Workflow
+
+**1. Create a bundle file:**
+```forth
+\ In a text editor or via CAT, create demo-bundle:
+1 BDL-BEGIN
+0 1 256 BDL-BUF sensor-in
+0 1 256 BDL-BUF sensor-out
+1 1 0 1 BDL-KERN ksmooth
+4 BDL-PIPE data-flow
+0 10000 3 BDL-SCHED     \ pipe 0, 10k cycles, auto+repeat
+7 30 0 BDL-POLICY       \ read-only, 30 days, no export
+2 255 BDL-SCREEN        \ start on screen 2, all visible
+BDL-END
+```
+
+**2. Inject it into the filesystem:**
+```forth
+4 7 MKFILE demo-bundle   \ 4 sectors, type=bundle
+\ (then manually write the content, or use diskutil.py)
+```
+
+**3. Inspect before loading:**
+```forth
+BUNDLE-INFO demo-bundle
+\ Output:
+\   Bundle v1 (dry-run)
+\   - 2 buffers
+\   - 1 kernel
+\   - 1 pipeline
+\   - Schedule: pipe 0 @ 10000 cycles, flags=3
+\   - Policy: perm=7 ret=30 export=0
+\   - Screen: default=2 mask=255
+```
+
+**4. Load for real:**
+```forth
+BUNDLE-LOAD demo-bundle
+\ Output: Bundle v1 loaded: 2 bufs 1 kerns 1 pipes
+
+BUFFERS         \ see sensor-in, sensor-out
+KERNELS         \ see ksmooth
+PIPES           \ see data-flow
+.BUNDLE         \ show active bundle state
+```
+
+**5. Use the loaded objects:**
+```forth
+sensor-in B.INFO
+data-flow P.RUN
+```
+
+### Design Notes
+
+- **Idempotency**: `BDL-BEGIN` resets state, so you can re-load a bundle.
+- **Dry-run safety**: `BUNDLE-INFO` uses `BDL-DRY=1` to prevent side effects — perfect for CI/CD validation or pre-flight checks.
+- **Versioning**: The version number is for human tracking; KDOS doesn't enforce compatibility yet, but future versions could add migration logic.
+- **File format**: Bundles are plain Forth source files (type=7) that call `BDL-*` words.  They're human-readable and can be edited with any text editor.
+- **Config application**: `BDL-SCHED/POLICY/SCREEN` set global state; if you load multiple bundles, the last one wins.  For production, load one bundle per environment.
 
 ---
 
