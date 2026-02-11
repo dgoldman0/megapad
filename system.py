@@ -112,6 +112,7 @@ class MegapadSystem:
 
         # Wire mailbox IPI delivery
         self.mailbox.on_ipi = self._deliver_ipi
+        self.mailbox.on_ack = self._handle_ipi_ack
 
         # Patch CPU memory access functions to intercept MMIO (per core)
         for cpu in self.cores:
@@ -136,6 +137,12 @@ class MegapadSystem:
         """Called by MailboxDevice when an IPI is sent to a core."""
         if 0 <= target_core < self.num_cores:
             self.cores[target_core].irq_ipi = True
+
+    def _handle_ipi_ack(self, acking_core: int):
+        """Called by MailboxDevice after an MMIO ACK clears a pending bit."""
+        if 0 <= acking_core < self.num_cores:
+            if self.mailbox.pending[acking_core] == 0:
+                self.cores[acking_core].irq_ipi = False
 
     def _wire_ipi_csrs(self, cpu: Megapad64):
         """Wire the CPU's CSR IPI stubs to the real mailbox device."""

@@ -711,6 +711,8 @@ class MailboxDevice(Device):
         self.pending: list[int] = [0] * num_cores
         # Callback: called with (target_core_id,) when IPI is sent
         self.on_ipi: Optional[callable] = None
+        # Callback: called with (acking_core_id,) after ACK clears a pending bit
+        self.on_ack: Optional[callable] = None
         # Requester context — set by DeviceBus before each access
         self._requester_id: int = 0
 
@@ -744,6 +746,8 @@ class MailboxDevice(Device):
             source = value & 0xFF
             if source < self.num_cores:
                 self.pending[rid] &= ~(1 << source)
+                if self.on_ack:
+                    self.on_ack(rid)
 
 
 # ---------------------------------------------------------------------------

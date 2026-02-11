@@ -41,10 +41,32 @@
 ;    UART   0xFFFF_FF00_0000_0000   TX=+0 RX=+1 STATUS=+2
 ;    Timer  0xFFFF_FF00_0000_0100   COUNT=+0..+3 CTRL=+8
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
+;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
+;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
+;
+;  Multicore CSRs
+;  ----
+;    0x20  COREID    read-only, hardware core ID (0-3)
+;    0x21  NCORES    read-only, number of cores
+;    0x22  MBOX      read = pending IPI mask; write = send IPI to target
+;    0x23  IPIACK    write = ACK IPI from source core
+;
+;  Per-core stacks (1 MiB RAM)
+;  ----
+;    Core 0:  RSP=0x100000  DSP=0x80000
+;    Core 1:  RSP=0xF0000   DSP=0xE8000  (64 KiB zone, split 32K/32K)
+;    Core 2:  RSP=0xE0000   DSP=0xD8000
+;    Core 3:  RSP=0xD0000   DSP=0xC8000
 ; =====================================================================
 
 ; === Entry point (address 0x0000) ===
 boot:
+    ; ---- Multicore gate: route secondary cores away ----
+    csrr r0, 0x20                       ; R0 = COREID (CSR 0x20)
+    cmpi r0, 0
+    lbrne secondary_core_entry          ; cores 1-3 jump away
+
+    ; ---- Core 0 continues normal BIOS boot ----
     ; R15 = RSP = ram top
     mov r15, r2
 
@@ -6458,6 +6480,365 @@ bus_fault_handler:
     halt
 
 ; =====================================================================
+;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
+; =====================================================================
+;
+;  All cores boot at 0x0000.  Core 0 runs the normal BIOS.  Cores 1-3
+;  jump here, set up their per-core stacks, install the IVT, enable
+;  interrupts, and enter IDL waiting for an IPI.
+;
+;  The IPI handler reads the 64-bit message from the mailbox (an XT to
+;  execute).  If the XT is non-zero the worker loop calls it.  When it
+;  returns the core re-enters IDL.
+;
+;  Per-core stack layout (within each core's 64 KiB zone):
+;    RSP = zone top (R15, grows down)
+;    DSP = zone top - 0x8000 (R14, grows down)
+;
+;  MMIO addresses:
+;    MBOX_BASE   = 0xFFFF_FF00_0000_0500
+;    MBOX_DATA   = MBOX_BASE + 0x00 .. 0x07  (8 bytes, 64-bit message)
+;    MBOX_SEND   = MBOX_BASE + 0x08  (write target core ID)
+;    MBOX_STATUS = MBOX_BASE + 0x09  (read pending bitmask)
+;    MBOX_ACK    = MBOX_BASE + 0x0A  (write source core ID to clear)
+;
+;    SPIN_BASE   = 0xFFFF_FF00_0000_0600
+;    SPIN_ACQ(n) = SPIN_BASE + n*4      (read: 0=acquired, 1=busy)
+;    SPIN_REL(n) = SPIN_BASE + n*4 + 1  (write: release)
+; =====================================================================
+
+secondary_core_entry:
+    ; ---- Set per-core stacks ----
+    ; R2 is already set to per-core stack top by the system
+    ; RSP = R2 (return stack at top of zone)
+    mov r15, r2
+    ; DSP = R2 - 0x8000 (data stack in lower half of zone)
+    mov r14, r2
+    ldi64 r11, 0x8000
+    sub r14, r11
+
+    ; ---- Set up UART base and subroutine pointers (for any I/O) ----
+    ldi64 r8, 0xFFFF_FF00_0000_0000
+    ldi64 r4, emit_char
+    ldi64 r5, key_char
+    ldi64 r6, print_hex_byte
+
+    ; ---- Install IVT (same table as core 0 — shared) ----
+    ldi64 r0, ivt_table
+    csrw 0x04, r0
+
+    ; ---- Clear the per-core worker XT slot ----
+    csrr r0, 0x20                       ; core ID
+    ldi r1, 3                           ; shift = log2(8)
+    shl r0, r1                          ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r0
+    ldi r1, 0
+    str r11, r1                         ; worker_xt[core_id] = 0
+
+    ; ---- Enable interrupts and enter idle ----
+    ei
+
+secondary_idle_loop:
+    idl                                 ; sleep until IPI
+
+    ; ---- Woken by IPI — check if we have an XT to execute ----
+    csrr r0, 0x20                       ; core ID
+    ldi r1, 3
+    shl r0, r1
+    ldi64 r11, worker_xt_table
+    add r11, r0
+    ldn r0, r11                         ; R0 = worker_xt[core_id]
+    cmpi r0, 0
+    lbreq secondary_idle_loop           ; spurious wake, re-idle
+
+    ; ---- Execute the XT ----
+    ; Clear the slot first (so we don't re-execute on next wake)
+    ldi r1, 0
+    str r11, r1                         ; worker_xt[core_id] = 0
+
+    ; Reset stacks before executing worker XT
+    mov r15, r2                         ; RSP = zone top
+    mov r14, r2
+    ldi64 r11, 0x8000
+    sub r14, r11                        ; DSP = zone top - 0x8000
+
+    ; Call the XT (it's a Forth execution token = code address)
+    call.l r0
+
+    ; Worker returned — go back to idle
+    lbr secondary_idle_loop
+
+; =====================================================================
+;  IPI Interrupt Handler (IVT slot 8)
+; =====================================================================
+;  Called when this core receives an inter-processor interrupt.
+;  Reads the mailbox to find who sent the IPI, extracts the 64-bit
+;  message (an XT), stores it in worker_xt_table, ACKs the IPI,
+;  and returns.  The secondary_idle_loop picks up the XT.
+;
+;  For core 0 (which runs the Forth REPL), the handler just stores
+;  the XT and returns — the user can poll with IPI-STATUS.
+; =====================================================================
+ipi_handler:
+    ; ---- Save registers we'll use ----
+    subi r15, 8
+    str r15, r0
+    subi r15, 8
+    str r15, r1
+    subi r15, 8
+    str r15, r7
+    subi r15, 8
+    str r15, r9
+    subi r15, 8
+    str r15, r11
+    subi r15, 8
+    str r15, r12
+
+    ; ---- Read MBOX_STATUS to find which core(s) sent us an IPI ----
+    ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
+    ld.b r7, r11                        ; R7 = pending bitmask
+
+    ; ---- Find the lowest set bit (sender core ID) ----
+    ; Simple scan: check bits 0-3
+    ldi r9, 0                           ; sender = 0
+ipi_find_sender:
+    mov r0, r7
+    ldi r1, 1
+    and r0, r1                          ; test bit 0
+    cmpi r0, 0
+    lbrne ipi_found_sender
+    lsri r7, 1
+    addi r9, 1
+    cmpi r9, 4
+    lbrne ipi_find_sender
+    ; No sender found (shouldn't happen) — bail
+    lbr ipi_handler_done
+
+ipi_found_sender:
+    ; R9 = sender core ID
+    ; ---- Read 64-bit message (XT) from MBOX_DATA ----
+    ldi64 r11, 0xFFFF_FF00_0000_0500    ; MBOX_DATA base
+    ; Read 8 bytes (little-endian 64-bit value)
+    ldi r0, 0                           ; accumulator
+    ldi r12, 0                          ; byte index
+ipi_read_data:
+    mov r1, r11
+    add r1, r12
+    ld.b r1, r1                         ; byte[i]
+    ; shift byte into position: r1 << (r12 * 8)
+    mov r7, r12
+    ldi r9, 3                           ; shift by 3 to multiply by 8
+    shl r7, r9                          ; r7 = byte_index * 8
+    shl r1, r7                          ; r1 = byte << (i*8)
+    or r0, r1                           ; accumulate
+    addi r12, 1
+    cmpi r12, 8
+    lbrne ipi_read_data
+
+    ; R0 = 64-bit XT from mailbox
+
+    ; ---- Store XT in worker_xt_table[my_core_id] ----
+    csrr r1, 0x20                       ; my core ID
+    ldi r7, 3
+    shl r1, r7                          ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r1
+    str r11, r0                         ; worker_xt[core_id] = XT
+
+    ; ---- ACK the IPI from the sender ----
+    ; Re-read STATUS to get sender (we clobbered r9)
+    ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
+    ld.b r7, r11                        ; pending mask
+    ldi r9, 0
+ipi_ack_find:
+    mov r0, r7
+    ldi r1, 1
+    and r0, r1
+    cmpi r0, 0
+    lbrne ipi_ack_found
+    lsri r7, 1
+    addi r9, 1
+    cmpi r9, 4
+    lbrne ipi_ack_find
+    lbr ipi_handler_done
+ipi_ack_found:
+    ; R9 = sender core ID — ACK it
+    ldi64 r11, 0xFFFF_FF00_0000_050A    ; MBOX_ACK
+    st.b r11, r9                        ; ACK sender
+
+ipi_handler_done:
+    ; ---- Restore registers ----
+    ldn r12, r15
+    addi r15, 8
+    ldn r11, r15
+    addi r15, 8
+    ldn r9, r15
+    addi r15, 8
+    ldn r7, r15
+    addi r15, 8
+    ldn r1, r15
+    addi r15, 8
+    ldn r0, r15
+    addi r15, 8
+    ; Return from interrupt
+    rti
+
+; Per-core worker XT slots (one 64-bit entry per core)
+worker_xt_table:
+    .dq 0                               ; core 0
+    .dq 0                               ; core 1
+    .dq 0                               ; core 2
+    .dq 0                               ; core 3
+
+; =====================================================================
+;  Multicore Forth Words
+; =====================================================================
+
+; COREID ( -- n )  push this core's hardware ID (0-3)
+w_coreid:
+    csrr r0, 0x20
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; NCORES ( -- n )  push number of hardware cores
+w_ncores:
+    csrr r0, 0x21
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; IPI-SEND ( xt core -- )  send XT to target core via IPI
+;   Writes the 64-bit XT to mailbox DATA, then writes target core
+;   to MBOX_SEND to trigger the IPI.
+w_ipi_send:
+    ldn r1, r14                         ; R1 = target core ID
+    addi r14, 8
+    ldn r0, r14                         ; R0 = XT (64-bit value)
+    addi r14, 8
+    ; Write XT to MBOX_DATA (8 bytes, little-endian)
+    ldi64 r11, 0xFFFF_FF00_0000_0500    ; MBOX_DATA
+    ldi r12, 0                          ; byte index
+ipi_send_loop:
+    mov r7, r0
+    ldi r9, 0xFF
+    and r7, r9                          ; low byte
+    mov r9, r11
+    add r9, r12
+    st.b r9, r7                         ; write byte
+    lsri r0, 8                          ; shift right 8
+    addi r12, 1
+    cmpi r12, 8
+    lbrne ipi_send_loop
+    ; Send IPI to target
+    ldi64 r11, 0xFFFF_FF00_0000_0508    ; MBOX_SEND
+    st.b r11, r1
+    ret.l
+
+; IPI-STATUS ( -- mask )  read pending IPI bitmask for this core
+w_ipi_status:
+    ldi64 r11, 0xFFFF_FF00_0000_0509    ; MBOX_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; IPI-ACK ( core -- )  acknowledge IPI from given core
+w_ipi_ack:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_050A    ; MBOX_ACK
+    st.b r11, r0
+    ret.l
+
+; MBOX! ( d -- )  write 64-bit value to mailbox outgoing data
+w_mbox_store:
+    ldn r0, r14                         ; R0 = 64-bit value
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0500    ; MBOX_DATA
+    ldi r12, 0
+mbox_store_loop:
+    mov r7, r0
+    ldi r9, 0xFF
+    and r7, r9
+    mov r9, r11
+    add r9, r12
+    st.b r9, r7
+    lsri r0, 8
+    addi r12, 1
+    cmpi r12, 8
+    lbrne mbox_store_loop
+    ret.l
+
+; MBOX@ ( -- d )  read 64-bit value from mailbox incoming data
+w_mbox_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0500    ; MBOX_DATA
+    ldi r0, 0                           ; accumulator
+    ldi r12, 0
+mbox_fetch_loop:
+    mov r1, r11
+    add r1, r12
+    ld.b r1, r1
+    mov r7, r12
+    ldi r9, 3
+    shl r7, r9                          ; byte_index * 8
+    shl r1, r7
+    or r0, r1
+    addi r12, 1
+    cmpi r12, 8
+    lbrne mbox_fetch_loop
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SPIN@ ( n -- flag )  try to acquire spinlock n; flag = 0 if acquired
+w_spin_fetch:
+    ldn r0, r14                         ; R0 = lock number
+    ; Address = SPIN_BASE + n * 4
+    ldi r1, 2
+    shl r0, r1                          ; n * 4
+    ldi64 r11, 0xFFFF_FF00_0000_0600    ; SPIN_BASE
+    add r11, r0
+    ld.b r0, r11                        ; read ACQUIRE: 0=got it, 1=busy
+    str r14, r0                         ; replace TOS with result
+    ret.l
+
+; SPIN! ( n -- )  release spinlock n
+w_spin_release:
+    ldn r0, r14                         ; R0 = lock number
+    addi r14, 8                         ; drop
+    ; Address = SPIN_BASE + n * 4 + 1
+    ldi r1, 2
+    shl r0, r1                          ; n * 4
+    ldi64 r11, 0xFFFF_FF00_0000_0600    ; SPIN_BASE
+    add r11, r0
+    addi r11, 1                         ; +1 for RELEASE register
+    ldi r0, 1
+    st.b r11, r0                        ; write anything to release
+    ret.l
+
+; WAKE-CORE ( xt core -- )  convenience: send XT via IPI to wake a core
+;   Equivalent to IPI-SEND but clearer intent.
+;   The target core's IPI handler stores the XT, the worker loop calls it.
+w_wake_core:
+    ; Just delegate to IPI-SEND
+    ldi64 r11, w_ipi_send
+    call.l r11
+    ret.l
+
+; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
+w_core_status:
+    ldn r0, r14                         ; core ID
+    ldi r1, 3
+    shl r0, r1                          ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r0
+    ldn r0, r11                         ; worker_xt[core_id]
+    str r14, r0                         ; replace TOS
+    ret.l
+
+; =====================================================================
 ;  Dictionary
 ; =====================================================================
 ;  Each entry:
@@ -8240,12 +8621,111 @@ d_quit:
     ret.l
 
 ; === FSLOAD ===
-latest_entry:
 d_fsload:
     .dq d_quit
     .db 6
     .ascii "FSLOAD"
     ldi64 r11, w_fsload
+    call.l r11
+    ret.l
+
+; === COREID ===
+d_coreid:
+    .dq d_fsload
+    .db 6
+    .ascii "COREID"
+    ldi64 r11, w_coreid
+    call.l r11
+    ret.l
+
+; === NCORES ===
+d_ncores:
+    .dq d_coreid
+    .db 6
+    .ascii "NCORES"
+    ldi64 r11, w_ncores
+    call.l r11
+    ret.l
+
+; === IPI-SEND ===
+d_ipi_send:
+    .dq d_ncores
+    .db 8
+    .ascii "IPI-SEND"
+    ldi64 r11, w_ipi_send
+    call.l r11
+    ret.l
+
+; === IPI-STATUS ===
+d_ipi_status:
+    .dq d_ipi_send
+    .db 10
+    .ascii "IPI-STATUS"
+    ldi64 r11, w_ipi_status
+    call.l r11
+    ret.l
+
+; === IPI-ACK ===
+d_ipi_ack:
+    .dq d_ipi_status
+    .db 7
+    .ascii "IPI-ACK"
+    ldi64 r11, w_ipi_ack
+    call.l r11
+    ret.l
+
+; === MBOX! ===
+d_mbox_store:
+    .dq d_ipi_ack
+    .db 5
+    .ascii "MBOX!"
+    ldi64 r11, w_mbox_store
+    call.l r11
+    ret.l
+
+; === MBOX@ ===
+d_mbox_fetch:
+    .dq d_mbox_store
+    .db 5
+    .ascii "MBOX@"
+    ldi64 r11, w_mbox_fetch
+    call.l r11
+    ret.l
+
+; === SPIN@ ===
+d_spin_fetch:
+    .dq d_mbox_fetch
+    .db 5
+    .ascii "SPIN@"
+    ldi64 r11, w_spin_fetch
+    call.l r11
+    ret.l
+
+; === SPIN! ===
+d_spin_release:
+    .dq d_spin_fetch
+    .db 5
+    .ascii "SPIN!"
+    ldi64 r11, w_spin_release
+    call.l r11
+    ret.l
+
+; === WAKE-CORE ===
+d_wake_core:
+    .dq d_spin_release
+    .db 9
+    .ascii "WAKE-CORE"
+    ldi64 r11, w_wake_core
+    call.l r11
+    ret.l
+
+; === CORE-STATUS ===
+latest_entry:
+d_core_status:
+    .dq d_wake_core
+    .db 11
+    .ascii "CORE-STATUS"
+    ldi64 r11, w_core_status
     call.l r11
     ret.l
 
@@ -8338,14 +8818,15 @@ str_busfault:
 ;  IVT (Interrupt Vector Table)
 ; =====================================================================
 ivt_table:
-    .dq 0
-    .dq 0
-    .dq 0
-    .dq 0
-    .dq 0
-    .dq bus_fault_handler
-    .dq 0
+    .dq 0                            ; [0] RESET
+    .dq 0                            ; [1] NMI
+    .dq 0                            ; [2] ILLEGAL OP
+    .dq 0                            ; [3] ALIGN FAULT
+    .dq 0                            ; [4] DIV ZERO
+    .dq bus_fault_handler            ; [5] BUS FAULT
+    .dq 0                            ; [6] SW TRAP
     .dq 0                            ; [7] TIMER — installed by KDOS via ISR!
+    .dq ipi_handler                  ; [8] IPI — inter-processor interrupt
 
 ; =====================================================================
 ;  TIB (Text Input Buffer) — 256 bytes

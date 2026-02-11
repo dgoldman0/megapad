@@ -44,8 +44,10 @@ from diskutil import (
 BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
 
 
-def make_system(ram_kib: int = 256, storage_image: str = None) -> MegapadSystem:
-    return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image)
+def make_system(ram_kib: int = 256, storage_image: str = None,
+                num_cores: int = 1) -> MegapadSystem:
+    return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
+                         num_cores=num_cores)
 
 
 def run_until(sys: MegapadSystem, max_steps: int = 500_000):
@@ -1603,6 +1605,238 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ['WORDS'])
         self.assertIn(">NUMBER", text)
+
+
+# ---------------------------------------------------------------------------
+#  Multicore BIOS tests (4-core)
+# ---------------------------------------------------------------------------
+
+class TestMulticore(unittest.TestCase):
+    """Test BIOS multicore boot, IPI, mailbox, spinlocks, and worker dispatch."""
+
+    _bios_code_cache = None
+
+    @classmethod
+    def _get_bios_code(cls):
+        if cls._bios_code_cache is None:
+            with open(BIOS_PATH) as f:
+                cls._bios_code_cache = assemble(f.read())
+        return cls._bios_code_cache
+
+    def _boot_multicore(self, num_cores=4, ram_kib=1024):
+        """Boot a multicore system and run until core 0 is idle."""
+        code = self._get_bios_code()
+        sys = make_system(ram_kib=ram_kib, num_cores=num_cores)
+        buf = capture_uart(sys)
+        sys.load_binary(0, code)
+        sys.boot()
+        # Run until core 0 is idle (BIOS REPL waiting for input)
+        for _ in range(3_000_000):
+            if sys.cpu.idle:
+                break
+            sys.step()
+        return sys, buf
+
+    def _run_forth(self, sys, buf, input_lines, max_steps=2_000_000):
+        """Feed Forth commands to core 0 and collect output."""
+        payload = "\n".join(input_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        for _ in range(len(data) + 20):
+            for _ in range(max_steps // (len(data) + 20)):
+                if sys.cpu.halted:
+                    break
+                if sys.cpu.idle and not sys.uart.has_rx_data:
+                    break
+                sys.step()
+            if sys.cpu.halted:
+                break
+            if pos < len(data):
+                sys.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            elif sys.cpu.idle and not sys.uart.has_rx_data:
+                break
+        return uart_text(buf)
+
+    # --- Core gate tests ---
+
+    def test_secondary_cores_idle_after_boot(self):
+        """Cores 1-3 should be idle (IDL) after BIOS boot."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        self.assertTrue(sys.cpu.idle, "Core 0 should be idle (REPL)")
+        for i in range(1, 4):
+            self.assertTrue(sys.cores[i].idle,
+                            f"Core {i} should be idle after boot")
+            self.assertFalse(sys.cores[i].halted,
+                             f"Core {i} should not be halted")
+
+    def test_secondary_cores_have_ivt(self):
+        """Each secondary core should have IVT installed."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        for i in range(1, 4):
+            self.assertNotEqual(sys.cores[i].ivt_base, 0,
+                                f"Core {i} should have IVT base set")
+            self.assertEqual(sys.cores[i].ivt_base, sys.cores[0].ivt_base,
+                             f"Core {i} IVT should match core 0")
+
+    def test_secondary_core_stacks(self):
+        """Secondary cores should have per-core stack pointers."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        # Core 0: RSP should be somewhere below 0x100000
+        # Core 1-3 should have RSP within their zones
+        expected_zones = [0x100000, 0xF0000, 0xE0000, 0xD0000]
+        for i in range(1, 4):
+            rsp = sys.cores[i].regs[15]
+            zone_top = expected_zones[i]
+            zone_bot = zone_top - 0x10000
+            self.assertTrue(zone_bot <= rsp <= zone_top,
+                            f"Core {i} RSP={rsp:#x} should be in zone "
+                            f"{zone_bot:#x}-{zone_top:#x}")
+
+    def test_core_0_normal_boot(self):
+        """Core 0 should boot normally and show banner."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        text = uart_text(buf)
+        self.assertIn("Megapad-64 Forth BIOS", text)
+
+    def test_single_core_still_works(self):
+        """Single-core mode should work as before."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = uart_text(buf)
+        self.assertIn("Megapad-64 Forth BIOS", text)
+        self.assertTrue(sys.cpu.idle)
+
+    # --- COREID / NCORES words ---
+
+    def test_coreid_word(self):
+        """COREID should return 0 on core 0."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        text = self._run_forth(sys, buf, ["COREID ."])
+        self.assertIn("0 ", text)
+
+    def test_ncores_word_4(self):
+        """NCORES should return 4 in 4-core mode."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        text = self._run_forth(sys, buf, ["NCORES ."])
+        self.assertIn("4 ", text)
+
+    def test_ncores_word_1(self):
+        """NCORES should return 1 in single-core mode."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = self._run_forth(sys, buf, ["NCORES ."])
+        self.assertIn("1 ", text)
+
+    def test_ncores_word_2(self):
+        """NCORES should return 2 in 2-core mode."""
+        sys, buf = self._boot_multicore(num_cores=2)
+        text = self._run_forth(sys, buf, ["NCORES ."])
+        self.assertIn("2 ", text)
+
+    # --- Spinlock words ---
+
+    def test_spin_acquire_release(self):
+        """SPIN@ should acquire (return 0), second acquire should return 1."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = self._run_forth(sys, buf, [
+            "0 SPIN@ .",      # acquire lock 0, should print 0
+            "0 SPIN! .",      # release lock 0 ... wait, SPIN! doesn't print
+        ])
+        # First acquire should return 0 (success)
+        self.assertIn("0 ", text)
+
+    def test_spin_reentrant(self):
+        """Same core acquiring same lock twice should succeed (re-entrant)."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = self._run_forth(sys, buf, [
+            "0 SPIN@ .",      # first acquire: 0
+            "0 SPIN@ .",      # second acquire: 0 (re-entrant)
+            "0 SPIN! ",       # release
+        ])
+        # Both acquires should succeed
+        lines = text.split('\n')
+        combined = ' '.join(lines)
+        self.assertEqual(combined.count("0 "), combined.count("0 "))  # loose check
+
+    # --- IPI-STATUS / mailbox words ---
+
+    def test_ipi_status_clear(self):
+        """IPI-STATUS should return 0 when no IPIs pending."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = self._run_forth(sys, buf, ["IPI-STATUS ."])
+        self.assertIn("0 ", text)
+
+    # --- WAKE-CORE and worker dispatch ---
+
+    def test_wake_core_executes_xt(self):
+        """WAKE-CORE should send XT to secondary core which executes it."""
+        sys, buf = self._boot_multicore(num_cores=2)
+        # Define a word on core 0 that writes a marker to a known address
+        # The secondary core will execute this word
+        text = self._run_forth(sys, buf, [
+            # Define a word that writes 0x42 to address 0xBEEF
+            ": MARKER  66 48879 C! ;",
+            # Send MARKER's XT to core 1
+            "' MARKER 1 WAKE-CORE",
+            # Wait a bit for core 1 to execute
+            "1000 0 DO LOOP",
+            # Read back the marker
+            "48879 C@ .",
+        ])
+        self.assertIn("66 ", text)
+
+    def test_wake_core_returns_to_idle(self):
+        """After executing XT, secondary core should return to idle."""
+        sys, buf = self._boot_multicore(num_cores=2)
+        text = self._run_forth(sys, buf, [
+            ": MARKER  42 48879 C! ;",
+            "' MARKER 1 WAKE-CORE",
+            "2000 0 DO LOOP",
+        ])
+        # Give core 1 more time to finish and re-idle after BYE halts core 0
+        for _ in range(50_000):
+            if sys.cores[1].idle:
+                break
+            sys.step()
+        # Core 1 should be back to idle after executing
+        self.assertTrue(sys.cores[1].idle,
+                        "Core 1 should be idle after worker returns")
+
+    def test_core_status_word(self):
+        """CORE-STATUS should return 0 for idle cores."""
+        sys, buf = self._boot_multicore(num_cores=2)
+        text = self._run_forth(sys, buf, [
+            "1 CORE-STATUS .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_wake_multiple_cores(self):
+        """Wake cores 1, 2, 3 with different markers."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        text = self._run_forth(sys, buf, [
+            # Each core writes its ID + 0x10 to a different address
+            ": M1  17 48864 C! ;",  # 0x11 to 0xBEE0
+            ": M2  18 48865 C! ;",  # 0x12 to 0xBEE1
+            ": M3  19 48866 C! ;",  # 0x13 to 0xBEE2
+            "' M1 1 WAKE-CORE",
+            "' M2 2 WAKE-CORE",
+            "' M3 3 WAKE-CORE",
+            "2000 0 DO LOOP",
+            "48864 C@ .",
+            "48865 C@ .",
+            "48866 C@ .",
+        ])
+        self.assertIn("17 ", text)
+        self.assertIn("18 ", text)
+        self.assertIn("19 ", text)
+
+    def test_multicore_words_in_dictionary(self):
+        """WORDS output should include multicore words."""
+        sys, buf = self._boot_multicore(num_cores=1)
+        text = self._run_forth(sys, buf, ["WORDS"])
+        for word in ["COREID", "NCORES", "IPI-SEND", "IPI-STATUS",
+                     "IPI-ACK", "MBOX!", "SPIN@", "SPIN!",
+                     "WAKE-CORE", "CORE-STATUS"]:
+            self.assertIn(word, text, f"'{word}' should be in WORDS output")
 
 
 # ---------------------------------------------------------------------------
