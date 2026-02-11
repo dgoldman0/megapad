@@ -39,7 +39,7 @@ module tb_mp64_soc;
     reg [63:0] ext_mem [0:32767];  // 256 KiB external
 
     wire        phy_req;
-    wire [23:0] phy_addr;
+    wire [31:0] phy_addr;
     wire        phy_wen;
     wire [63:0] phy_wdata;
     wire [3:0]  phy_burst_len;
@@ -50,7 +50,7 @@ module tb_mp64_soc;
     // Simple 2-cycle latency PHY model
     reg [3:0]  phy_state;
     reg [3:0]  phy_cnt;
-    reg [23:0] phy_cur_addr;
+    reg [31:0] phy_cur_addr;
     reg [3:0]  phy_burst_rem;
 
     localparam PHY_IDLE   = 4'd0;
@@ -89,7 +89,7 @@ module tb_mp64_soc;
                         phy_rdata  <= ext_mem[phy_cur_addr[17:3]];
                         phy_rvalid <= 1'b1;
                         if (phy_burst_rem > 0) begin
-                            phy_cur_addr  <= phy_cur_addr + 24'd8;
+                            phy_cur_addr  <= phy_cur_addr + 32'd8;
                             phy_burst_rem <= phy_burst_rem - 1;
                         end else begin
                             phy_ready <= 1'b1;
@@ -104,7 +104,7 @@ module tb_mp64_soc;
                     end else begin
                         ext_mem[phy_cur_addr[17:3]] <= phy_wdata;
                         if (phy_burst_rem > 0) begin
-                            phy_cur_addr  <= phy_cur_addr + 24'd8;
+                            phy_cur_addr  <= phy_cur_addr + 32'd8;
                             phy_burst_rem <= phy_burst_rem - 1;
                         end else begin
                             phy_ready <= 1'b1;
@@ -167,11 +167,9 @@ module tb_mp64_soc;
     // ========================================================================
     wire sd_sck, sd_mosi, sd_cs_n;
     reg  sd_miso;
-    reg  sd_present;
 
     initial begin
-        sd_miso    = 1'b1;
-        sd_present = 1'b1;
+        sd_miso = 1'b1;
     end
 
     // ========================================================================
@@ -183,11 +181,13 @@ module tb_mp64_soc;
     wire [7:0] nic_tx_data;
     wire nic_rx_ready;
     reg  nic_tx_ready;
+    reg  nic_link_up;
 
     initial begin
         nic_rx_valid = 1'b0;
         nic_rx_data  = 8'd0;
         nic_tx_ready = 1'b1;
+        nic_link_up  = 1'b0;
     end
 
     // ========================================================================
@@ -212,13 +212,13 @@ module tb_mp64_soc;
         .sd_mosi      (sd_mosi),
         .sd_miso      (sd_miso),
         .sd_cs_n      (sd_cs_n),
-        .sd_present   (sd_present),
         .nic_tx_valid (nic_tx_valid),
         .nic_tx_data  (nic_tx_data),
         .nic_tx_ready (nic_tx_ready),
         .nic_rx_valid (nic_rx_valid),
         .nic_rx_data  (nic_rx_data),
         .nic_rx_ready (nic_rx_ready),
+        .nic_link_up  (nic_link_up),
         .debug_leds   (debug_leds)
     );
 

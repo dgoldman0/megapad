@@ -45,7 +45,6 @@ set_property -dict {PACKAGE_PIN B1 IOSTANDARD LVCMOS33} [get_ports sd_sck]
 set_property -dict {PACKAGE_PIN A1 IOSTANDARD LVCMOS33} [get_ports sd_mosi]
 set_property -dict {PACKAGE_PIN C1 IOSTANDARD LVCMOS33} [get_ports sd_miso]
 set_property -dict {PACKAGE_PIN D2 IOSTANDARD LVCMOS33} [get_ports sd_cs_n]
-set_property -dict {PACKAGE_PIN A2 IOSTANDARD LVCMOS33} [get_ports sd_present]
 
 ## ============================================================================
 ## External Memory — Pmod JB (directly HyperRAM PMOD or similar)
@@ -77,7 +76,6 @@ set_property -dict {PACKAGE_PIN A2 IOSTANDARD LVCMOS33} [get_ports sd_present]
 ## False paths for async inputs
 set_false_path -from [get_ports uart_rxd]
 set_false_path -from [get_ports sd_miso]
-set_false_path -from [get_ports sd_present]
 
 ## ============================================================================
 ## Bitstream Configuration

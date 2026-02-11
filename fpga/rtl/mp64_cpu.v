@@ -93,6 +93,9 @@ module mp64_cpu (
     reg [3:0]  ext_mod;
     reg        ext_active;
 
+    // Fetch handshake — prevents bus_valid re-assertion while ibuf_len is stale
+    reg        fetch_pending;
+
     // ========================================================================
     // Instruction fetch buffer
     // ========================================================================
@@ -299,6 +302,7 @@ module mp64_cpu (
             mex_valid  <= 1'b0;
             ext_active <= 1'b0;
             ext_mod    <= 4'd0;
+            fetch_pending <= 1'b0;
             ibuf_len   <= 4'd0;
             ibuf_need  <= 4'd1;  // fetch at least 1 byte
 
@@ -336,17 +340,24 @@ module mp64_cpu (
                         bus_addr  <= R[psel] + {60'd0, ibuf_len};
                         bus_wen   <= 1'b0;
                         bus_size  <= BUS_BYTE;
+                        fetch_pending <= 1'b1;
                         cpu_state <= CPU_FETCH_MORE;
                     end
                 end
 
                 CPU_FETCH_MORE: begin
-                    bus_valid <= 1'b1;
-                    bus_addr  <= R[psel] + {60'd0, ibuf_len};
-                    bus_wen   <= 1'b0;
-                    bus_size  <= BUS_BYTE;
+                    // Only drive bus_valid when fetch_pending is clear
+                    // (ibuf_len has been updated since last consume)
+                    if (!fetch_pending) begin
+                        bus_valid <= 1'b1;
+                        bus_addr  <= R[psel] + {60'd0, ibuf_len};
+                        bus_wen   <= 1'b0;
+                        bus_size  <= BUS_BYTE;
+                        fetch_pending <= 1'b1;
+                    end
 
-                    if (bus_ready) begin
+                    if (bus_ready && fetch_pending) begin
+                        fetch_pending <= 1'b0;
                         ibuf[ibuf_len] <= bus_rdata[7:0];
                         ibuf_len <= ibuf_len + 1;
 
@@ -356,8 +367,13 @@ module mp64_cpu (
                         end
 
                         // Have we fetched enough?
-                        if (ibuf_len + 1 >= ibuf_need ||
-                            (ibuf_len == 0 && instr_len(bus_rdata[7:0], ext_active) == 1)) begin
+                        // NOTE: for the first byte (ibuf_len==0), ibuf_need is
+                        // stale (still holds the reset/previous value), so we
+                        // use instr_len() directly instead.
+                        if (ibuf_len == 0) begin
+                            if (instr_len(bus_rdata[7:0], ext_active) == 1)
+                                cpu_state <= CPU_DECODE;
+                        end else if (ibuf_len + 1 >= ibuf_need) begin
                             cpu_state <= CPU_DECODE;
                         end
                     end
@@ -637,8 +653,7 @@ module mp64_cpu (
                             4'h0: begin  // MUL (signed lower 64 bits)
                                 mul_result <= $signed(R[ibuf[1][7:4]]) *
                                               $signed(R[ibuf[1][3:0]]);
-                                R[ibuf[1][7:4]] <= ($signed(R[ibuf[1][7:4]]) *
-                                                    $signed(R[ibuf[1][3:0]]))[63:0];
+                                R[ibuf[1][7:4]] <= mul_result[63:0];
                             end
                             4'h4: begin  // DIV (signed)
                                 if (R[ibuf[1][3:0]] != 64'd0) begin
