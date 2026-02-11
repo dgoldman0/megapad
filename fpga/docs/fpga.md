@@ -10,52 +10,49 @@ system-on-chip.  The design targets the **Digilent Nexys A7-200T**
 
 | Goal | Target |
 |------|--------|
-| **Internal RAM** | 1 MiB (block RAM, single-cycle for CPU) |
-| **Tile fast path** | 512-bit single-cycle read/write to BRAM |
+| **CPU cores** | 4 × Megapad-64 CPU, single-issue multi-cycle |
+| **Tile engines** | 4 × 64-lane SIMD (one per core, private state) |
+| **Internal RAM** | 1 MiB shared BRAM (dual-port, arbitrated) |
+| **Tile fast path** | 512-bit single-cycle read/write to BRAM (arbitrated) |
 | **External memory** | HyperRAM / SDRAM via PMOD, ≥ 4 MiB |
 | **Clock** | 100 MHz system clock |
 | **UART** | 115 200 baud, USB bridge on-board |
 | **Storage** | SPI-SD on-board micro-SD slot |
 | **NIC** | Ethernet PMOD (optional) |
-| **CPU** | Full Megapad-64 ISA, single-issue multi-cycle |
+| **IPC** | Hardware mailbox (4 × 64-bit) + 8 hardware spinlocks |
 
 ---
 
 ## 2  Block Diagram
 
 ```
-                        ┌──────────────────────────────────────────────────┐
-                        │                 mp64_soc                         │
-                        │                                                  │
-  UART_RXD ────────────►│  ┌──────────┐        ┌───────────┐              │
-  UART_TXD ◄────────────│  │ mp64_cpu │◄──────►│ mp64_bus  │              │
-                        │  │          │  bus    │ arbiter & │              │
-                        │  │ 16×64b   │        │ decoder   │              │
-                        │  │ regs     │        └─────┬─────┘              │
-                        │  │ flags    │              │                     │
-                        │  │ CSR ──────────┐    ┌────┴────┐               │
-                        │  └──────────┘    │    │         │               │
-                        │                  ▼    ▼         ▼               │
-                        │            ┌──────────┐   ┌──────────┐          │
-                        │            │mp64_tile │   │ MMIO mux │          │
-                        │            │ engine   │   │          │          │
-                        │            │ 64×8 ALU │   │┌────────┐│          │
-                        │            └────┬─────┘   ││ UART   ││──► TXD  │
-                        │     512b   ┌────┘         ││ Timer  ││         │
-                        │     Port A │    Port B    ││ Disk   ││──► SPI  │
-                        │            ▼    (64b)     ││ NIC    ││──► PHY  │
-                        │      ┌──────────────┐     │└────────┘│          │
-                        │      │  mp64_memory │     └──────────┘          │
-                        │      │  1 MiB BRAM  │                           │
-                        │      │  dual-port   │                           │
-                        │      └──────┬───────┘                           │
-                        │             │ ext_fwd                           │
-                        │             ▼                                   │
-                        │      ┌──────────────┐     ┌──────────┐          │
-                        │      │ mp64_extmem  │◄───►│ PHY pins │          │
-                        │      │ controller   │     └──────────┘          │
-                        │      └──────────────┘                           │
-                        └──────────────────────────────────────────────────┘
+               ┌────────────────────────────────────────────────────────────────┐
+               │              mp64_soc (quad-core)                    │
+               │                                                      │
+               │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+               │  │ CPU 0    │  │ CPU 1    │  │ CPU 2    │  │ CPU 3    │  │
+               │  │ + Tile 0 │  │ + Tile 1 │  │ + Tile 2 │  │ + Tile 3 │  │
+               │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  │
+UART_RXD ──►│       └───┬─────┴────┬─────┴────┬─────┴────┘            │
+UART_TXD ◄──│       bus  │         │         │  tile              │
+               │       ┌───┴─────────┴───┐     ┌──┴───────────┐   │
+               │       │ mp64_bus         │     │ Tile Port A  │   │
+               │       │ 4→1 RR arbiter │     │ arbiter (RR)  │   │
+               │       └──┬───────┬─────┘     └──────┬──────┘   │
+               │         │       │               │             │
+               │    ┌────┴───┐ ┌─┴────────────┴───────┐  │
+               │    │ MMIO    │ │ mp64_memory  Port B  Port A│  │
+               │    │ mux     │ │ 1 MiB BRAM  (64-bit)(512b) │  │
+               │    │┌───────┐│ └───────────┬───────────┘  │
+               │    ││ UART  ││             │               │
+               │    ││ Timer ││       ┌─────┴──────┐        │
+               │    ││ Disk  ││       │ mp64_extmem  │        │
+               │    ││ NIC   ││       │ controller   │        │
+               │    ││ Mbox  ││       └──────┬──────┘        │
+               │    ││ Slock ││              │ PHY           │
+               │    │└───────┘│              │               │
+               │    └─────────┘              │               │
+               └────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -196,11 +193,19 @@ hardware.
 
 ## 7  Resource Estimates (Artix-7 200T)
 
-| Resource | Used | Available | % |
-|----------|-----:|----------:|---:|
-| Block RAM (36 Kb) | 286 | 365 | 78% |
-| Slice LUTs | ~8 000 | 134 600 | 6% |
-| Slice Registers | ~4 000 | 269 200 | 1.5% |
+| Resource | Used (quad-core) | Available | % |
+|----------|------------------:|----------:|---:|
+| Block RAM (36 Kb) | ~290 | 365 | 79% |
+| Slice LUTs | ~24 000 | 134 600 | 18% |
+| Slice Registers | ~12 000 | 269 200 | 4.5% |
+
+Per-core cost: ~5,000 LUTs (CPU ~2,000 + Tile ~3,000).  Four cores = ~20,000 LUTs
+for compute, plus ~4,000 for bus arbiter, mailbox, spinlocks, and tile
+Port A arbiter.  BRAM is shared (not replicated), so BRAM usage is nearly
+unchanged from single-core.
+
+**Headroom:** 82% LUT free, 95% registers free.  Could support up to
+8 cores before LUT usage reaches 40%.
 | DSP48E1 | 2 | 740 | 0.3% |
 | BUFG | 1 | 32 | 3% |
 
@@ -401,7 +406,62 @@ Target: **Digilent Nexys A7-100T** ($299) or **Nexys A7-200T** ($499)
 8. **Boot ROM** — small ROM with SPI bootstrap to load BIOS from SD
 9. **Audio** — I²S DAC output for beeps/music
 
-### 12.4  Multi-Core (Speculative)
+### 12.4  Multi-Core Architecture (Implemented)
 
-10. **Dual CPU** + shared tile engine — enough LUT headroom at ~6% utilization
-11. **Cache coherence** — simple MESI protocol or software-managed barriers
+The SoC is now quad-core.  Architecture details:
+
+**Hardware:**
+- 4 × CPU cores with `core_id` CSR (read-only, 0–3)
+- 4 × private tile engines (no sharing/contention on MEX)
+- Round-robin bus arbiter (4 CPU masters → 1 memory port)
+- Round-robin tile arbiter (4 tile engines → 1 BRAM Port A)
+- Hardware mailbox: 4 × 64-bit message slots + IPI doorbell interrupts
+- 8 hardware spinlocks (atomic test-and-set via MMIO read)
+- IRQ routing: timer → all cores, UART/NIC → core 0, IPI → per-core
+
+**Boot protocol:**
+1. All 4 cores start executing from address 0x0000 on reset
+2. Each core reads `CSR_COREID` early in boot
+3. Core 0 (`COREID == 0`): runs BIOS, loads KDOS, initialises hardware
+4. Cores 1–3 (`COREID != 0`): enter HALT (WFI), wait for IPI
+5. Core 0 writes per-core entry point + stack top to mailbox, sends IPI
+6. Secondary cores wake, read mailbox, set up stacks, jump to entry point
+
+**Memory layout (per-core stacks):**
+
+| Region | Address range | Owner |
+|--------|---------------|-------|
+| Code + dictionary | 0x00000–0xBFFFF | Shared (768 KiB) |
+| Core 3 stack | 0xC0000–0xCFFFF | Core 3 (64 KiB) |
+| Core 2 stack | 0xD0000–0xDFFFF | Core 2 (64 KiB) |
+| Core 1 stack | 0xE0000–0xEFFFF | Core 1 (64 KiB) |
+| Core 0 stack | 0xF0000–0xFFFFF | Core 0 (64 KiB) |
+
+### 12.5  Software Changes Required
+
+The following software components need updates (not yet implemented):
+
+**BIOS (`bios.asm`):**
+- Add `CSR_COREID` read at boot entry point
+- Core 0: proceed with normal BIOS boot
+- Cores 1–3: set per-core SP from stack-top table, enter `HALT` (WFI)
+- Add `WAKE-CORE` routine: write entry addr to mailbox, send IPI
+- Partition stack memory: R14/R15 per-core from stack-top constants
+
+**KDOS (`kdos.f`):**
+- New words: `COREID` (read CSR_COREID), `NCORES` (read CSR_NCORES)
+- `LOCK` / `UNLOCK` (hardware spinlock acquire/release via MMIO)
+- `SEND-IPI` (write to mailbox SEND register)
+- `RECV-IPI` (poll/wait for IPI, read mailbox data)
+- `SPAWN` ( addr core -- ) wake secondary core with Forth entry point
+- Mutex-protect shared resources: dictionary (`HERE`, `ALLOT`), UART
+- Per-core `STATE`, `BASE`, data/return stack pointers
+
+**Emulator (`cpu.py` / `system.py`):**
+- `MegapadSystem.__init__`: create `NUM_CORES` CPU instances, shared memory
+- Round-robin or interleaved stepping: `step()` calls each CPU in turn
+- Per-CPU `core_id` field, `CSR_COREID` returns it
+- IPI mechanism: write to mailbox MMIO → set pending flag on target CPU
+- Shared memory (single `bytearray`) accessed by all CPU instances
+- `SysInfo` MMIO: return core count at offset 0x10
+- Timer IRQ: delivered to all CPUs (or configurable routing)
