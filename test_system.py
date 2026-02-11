@@ -909,7 +909,7 @@ class TestBIOS(unittest.TestCase):
             path = f.name
             fs.save(path)
         try:
-            sys, buf = self._boot_bios(storage_image=path)
+            sys, buf = self._boot_bios(ram_kib=512, storage_image=path)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
             text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=200_000_000)
@@ -2014,7 +2014,7 @@ class TestKDOS(unittest.TestCase):
                 cls._kdos_lines.append(line)
 
         # Boot BIOS and load KDOS fully
-        sys_obj = make_system(ram_kib=256)
+        sys_obj = make_system(ram_kib=512)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
@@ -2056,7 +2056,7 @@ class TestKDOS(unittest.TestCase):
         self.bios_code = self.__class__._bios_code
         self.kdos_lines = self.__class__._kdos_lines
 
-    def _boot_bios(self, ram_kib=256, storage_image=None):
+    def _boot_bios(self, ram_kib=512, storage_image=None):
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
@@ -2114,7 +2114,7 @@ class TestKDOS(unittest.TestCase):
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
-        sys = make_system(ram_kib=256, storage_image=storage_image)
+        sys = make_system(ram_kib=512, storage_image=storage_image)
         buf = capture_uart(sys)
 
         # Restore memory (BIOS + KDOS already compiled)
@@ -2185,7 +2185,7 @@ class TestKDOS(unittest.TestCase):
             else:
                 break
         text = uart_text(buf)
-        self.assertIn("KDOS v1.0", text)
+        self.assertIn("KDOS v1.1", text)
         self.assertIn("HELP", text)
 
     # -- Utility words --
@@ -2315,7 +2315,7 @@ class TestKDOS(unittest.TestCase):
             "0 1 64 BUFFER db",
             "DASHBOARD",
         ])
-        self.assertIn("KDOS v1.0", text)
+        self.assertIn("KDOS v1.1", text)
         self.assertIn("HERE", text)
         self.assertIn("Buffers", text)
         self.assertIn("Kernels", text)
@@ -3158,7 +3158,7 @@ class TestKDOS(unittest.TestCase):
             "1 SCREEN-ID !",
             "RENDER-SCREEN",
         ])
-        self.assertIn("KDOS v1.0", text)
+        self.assertIn("KDOS v1.1", text)
         self.assertIn("[1]Home", text)
         self.assertIn("System Overview", text)
 
@@ -4763,10 +4763,10 @@ class TestKDOS(unittest.TestCase):
         text = self._run_kdos(["nosuchword"])
         self.assertIn("not found", text)
 
-    def test_version_v09d(self):
-        """Version strings show v1.0."""
+    def test_version_v11(self):
+        """Version strings show v1.1."""
         src = "\n".join(self.kdos_lines)
-        self.assertIn("v1.0", src)
+        self.assertIn("v1.1", src)
         self.assertNotIn("v0.9d", src)
 
 
@@ -5780,6 +5780,414 @@ class TestPipelineBundles(TestKDOS):
         format_image(f.name)
         f.close()
         return f.name
+
+
+# ---------------------------------------------------------------------------
+#  KDOS multicore tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSMulticore(unittest.TestCase):
+    """Tests for KDOS multicore dispatch on a 4-core system.
+
+    Loads KDOS on a 4-core Megapad-64, then tests CORE-RUN, CORE-WAIT,
+    BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES display, and the v1.1 banner.
+    """
+
+    _mc_snapshot = None
+    _bios_code = None
+    _kdos_lines = None
+
+    @classmethod
+    def _save_cpu_state(cls, cpu):
+        return {
+            'pc': cpu.pc,
+            'regs': list(cpu.regs),
+            'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
+            'flag_z': cpu.flag_z, 'flag_c': cpu.flag_c,
+            'flag_n': cpu.flag_n, 'flag_v': cpu.flag_v,
+            'flag_p': cpu.flag_p, 'flag_g': cpu.flag_g,
+            'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
+            'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
+            'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
+            'trap_addr': cpu.trap_addr,
+            'halted': cpu.halted, 'idle': cpu.idle,
+            'cycle_count': cpu.cycle_count,
+            '_ext_modifier': cpu._ext_modifier,
+        }
+
+    @classmethod
+    def _restore_cpu_state(cls, cpu, state):
+        cpu.pc = state['pc']
+        cpu.regs[:] = state['regs']
+        for k in ('psel', 'xsel', 'spsel',
+                   'flag_z', 'flag_c', 'flag_n', 'flag_v',
+                   'flag_p', 'flag_g', 'flag_i', 'flag_s',
+                   'd_reg', 'q_out', 't_reg',
+                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'halted', 'idle', 'cycle_count', '_ext_modifier'):
+            setattr(cpu, k, state[k])
+
+    @classmethod
+    def _ensure_mc_snapshot(cls):
+        """Build the 4-core KDOS snapshot once (class-level)."""
+        if cls._mc_snapshot is not None:
+            return
+
+        with open(BIOS_PATH) as f:
+            cls._bios_code = assemble(f.read())
+        with open(KDOS_PATH) as f:
+            cls._kdos_lines = []
+            for line in f.read().splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith('\\'):
+                    continue
+                cls._kdos_lines.append(line)
+
+        # Boot 4-core BIOS and load KDOS on core 0
+        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        buf = capture_uart(sys_obj)
+        sys_obj.load_binary(0, cls._bios_code)
+        sys_obj.boot()
+
+        payload = "\n".join(cls._kdos_lines) + "\n"
+        data = payload.encode()
+        pos = 0
+        max_steps = 200_000_000
+        chunk = max_steps // (len(data) + 20)
+
+        for _ in range(len(data) + 20):
+            for _ in range(chunk):
+                if sys_obj.cpu.halted:
+                    break
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    break
+                try:
+                    sys_obj.step()
+                except HaltError:
+                    break
+                except Exception:
+                    break
+            if sys_obj.cpu.halted:
+                break
+            if pos < len(data):
+                sys_obj.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            elif sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                break  # all sent AND core 0 idle → done
+
+        # Save snapshot: raw memory + core 0 CPU state + per-core states
+        cls._mc_snapshot = (
+            bytes(sys_obj.cpu.mem),
+            cls._save_cpu_state(sys_obj.cpu),
+            [cls._save_cpu_state(c) for c in sys_obj.cores],
+        )
+
+    def setUp(self):
+        self.__class__._ensure_mc_snapshot()
+
+    def _run_mc(self, extra_lines: list[str],
+                max_steps=50_000_000) -> str:
+        """Restore 4-core KDOS from snapshot, run extra_lines, return output."""
+        mem_bytes, cpu0_state, core_states = self.__class__._mc_snapshot
+
+        sys = make_system(ram_kib=1024, num_cores=4)
+        buf = capture_uart(sys)
+
+        # Restore shared memory
+        sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        # Restore all core states
+        for i, cpu in enumerate(sys.cores):
+            self._restore_cpu_state(cpu, core_states[i])
+
+        # Feed extra commands to core 0
+        payload = "\n".join(extra_lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        steps = 0
+
+        while steps < max_steps:
+            if sys.cpu.halted:
+                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    sys.uart.inject_input(bytes([data[pos]]))
+                    pos += 1
+                else:
+                    break
+            try:
+                sys.step()
+                steps += 1
+            except HaltError:
+                break
+            except Exception:
+                break
+
+        return uart_text(buf)
+
+    # --- Banner & version ---
+
+    def test_kdos_v11_banner(self):
+        """KDOS startup banner should say v1.1."""
+        # Build fresh (no snapshot) to see the banner
+        with open(BIOS_PATH) as f:
+            code = assemble(f.read())
+        with open(KDOS_PATH) as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.strip() and not l.strip().startswith('\\')]
+
+        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        buf = capture_uart(sys_obj)
+        sys_obj.load_binary(0, code)
+        sys_obj.boot()
+
+        payload = "\n".join(lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        for _ in range(len(data) + 20):
+            for _ in range(200_000_000 // (len(data) + 20)):
+                if sys_obj.cpu.halted:
+                    break
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    break
+                try:
+                    sys_obj.step()
+                except (HaltError, Exception):
+                    break
+            if sys_obj.cpu.halted:
+                break
+            if pos < len(data):
+                sys_obj.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        text = uart_text(buf)
+        self.assertIn("KDOS v1.1", text)
+
+    def test_multicore_banner(self):
+        """With 4 cores, startup should announce multicore."""
+        with open(BIOS_PATH) as f:
+            code = assemble(f.read())
+        with open(KDOS_PATH) as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.strip() and not l.strip().startswith('\\')]
+
+        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        buf = capture_uart(sys_obj)
+        sys_obj.load_binary(0, code)
+        sys_obj.boot()
+
+        payload = "\n".join(lines) + "\nBYE\n"
+        data = payload.encode()
+        pos = 0
+        for _ in range(len(data) + 20):
+            for _ in range(200_000_000 // (len(data) + 20)):
+                if sys_obj.cpu.halted:
+                    break
+                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                    break
+                try:
+                    sys_obj.step()
+                except (HaltError, Exception):
+                    break
+            if sys_obj.cpu.halted:
+                break
+            if pos < len(data):
+                sys_obj.uart.inject_input(bytes([data[pos]]))
+                pos += 1
+            else:
+                break
+
+        text = uart_text(buf)
+        self.assertIn("4", text)
+        self.assertIn("cores available", text)
+
+    # --- CORE-RUN & CORE-WAIT ---
+
+    def test_core_run_dispatches(self):
+        """CORE-RUN dispatches work to a secondary core."""
+        text = self._run_mc([
+            ": MARKER  66 77839 C! ;",
+            "' MARKER 1 CORE-RUN",
+            "1 CORE-WAIT",
+            "77839 C@ .",
+        ])
+        self.assertIn("66 ", text)
+
+    def test_core_run_multiple_cores(self):
+        """CORE-RUN dispatches to cores 1, 2, 3 independently."""
+        text = self._run_mc([
+            ": M1  17 77824 C! ;",
+            ": M2  18 77825 C! ;",
+            ": M3  19 77826 C! ;",
+            "' M1 1 CORE-RUN",
+            "' M2 2 CORE-RUN",
+            "' M3 3 CORE-RUN",
+            "BARRIER",
+            "77824 C@ .",
+            "77825 C@ .",
+            "77826 C@ .",
+        ])
+        self.assertIn("17 ", text)
+        self.assertIn("18 ", text)
+        self.assertIn("19 ", text)
+
+    def test_core_wait_returns(self):
+        """CORE-WAIT returns after dispatched work completes."""
+        text = self._run_mc([
+            ": WORK  99 77830 C! ;",
+            "' WORK 1 CORE-RUN",
+            "1 CORE-WAIT",
+            "77830 C@ .",
+        ])
+        self.assertIn("99 ", text)
+
+    def test_all_cores_wait(self):
+        """ALL-CORES-WAIT waits for all secondary cores."""
+        text = self._run_mc([
+            "0 77824 C!",
+            "0 77825 C!",
+            "0 77826 C!",
+            ": AW1  10 77824 C! ;",
+            ": AW2  20 77825 C! ;",
+            ": AW3  30 77826 C! ;",
+            "' AW1 1 CORE-RUN",
+            "' AW2 2 CORE-RUN",
+            "' AW3 3 CORE-RUN",
+            "ALL-CORES-WAIT",
+            "77824 C@ 77825 C@ + 77826 C@ + .",
+        ])
+        self.assertIn("60 ", text)
+
+    def test_barrier(self):
+        """BARRIER waits for all secondary cores to finish."""
+        text = self._run_mc([
+            ": B1  42 77850 C! ;",
+            ": B2  43 77851 C! ;",
+            "' B1 1 CORE-RUN",
+            "' B2 2 CORE-RUN",
+            "BARRIER",
+            "77850 C@ .",
+            "77851 C@ .",
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("43 ", text)
+
+    # --- LOCK / UNLOCK ---
+
+    def test_lock_unlock_basic(self):
+        """LOCK acquires and UNLOCK releases a spinlock."""
+        text = self._run_mc([
+            "0 LOCK",
+            "0 UNLOCK",
+            "42 .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_lock_unlock_protects_shared(self):
+        """LOCK/UNLOCK around shared memory from two cores."""
+        text = self._run_mc([
+            # Core 1 acquires lock 0, writes value, releases
+            ": LOCKED-WRITE  0 LOCK  77 77860 C!  0 UNLOCK ;",
+            "' LOCKED-WRITE 1 CORE-RUN",
+            "1 CORE-WAIT",
+            "77860 C@ .",
+        ])
+        self.assertIn("77 ", text)
+
+    # --- CORES display ---
+
+    def test_cores_display_4(self):
+        """CORES shows 4 cores with status."""
+        text = self._run_mc(["CORES"])
+        self.assertIn("Cores", text)
+        self.assertIn("4", text)
+        self.assertIn("Core 0", text)
+        self.assertIn("RUNNING", text)
+
+    def test_cores_display_shows_idle(self):
+        """CORES shows idle cores when no work dispatched."""
+        text = self._run_mc(["CORES"])
+        self.assertIn("IDLE", text)
+
+    # --- P.RUN-PAR ---
+
+    def test_p_run_par_basic(self):
+        """P.RUN-PAR runs pipeline steps across cores."""
+        text = self._run_mc([
+            "0 1 64 BUFFER par-a",
+            "0 1 64 BUFFER par-b",
+            ": ps1 42 par-a B.FILL ;",
+            ": ps2 99 par-b B.FILL ;",
+            "2 PIPELINE par-pipe",
+            "' ps1 par-pipe P.ADD",
+            "' ps2 par-pipe P.ADD",
+            "par-pipe P.RUN-PAR",
+            "par-a B.SUM .",
+            "par-b B.SUM .",
+        ])
+        # 42 * 64 = 2688, 99 * 64 = 6336
+        self.assertIn("2688 ", text)
+        self.assertIn("6336 ", text)
+
+    def test_p_run_par_single_step(self):
+        """P.RUN-PAR with a single step dispatches to core 1."""
+        text = self._run_mc([
+            "0 1 64 BUFFER par-c",
+            ": psc 55 par-c B.FILL ;",
+            "1 PIPELINE par-pipe2",
+            "' psc par-pipe2 P.ADD",
+            "par-pipe2 P.RUN-PAR",
+            "par-c B.SUM .",
+        ])
+        # 55 * 64 = 3520
+        self.assertIn("3520 ", text)
+
+    def test_p_bench_par(self):
+        """P.BENCH-PAR prints timing info."""
+        text = self._run_mc([
+            "0 1 64 BUFFER bp-a",
+            ": bps1 1 bp-a B.FILL ;",
+            "1 PIPELINE bp-pipe",
+            "' bps1 bp-pipe P.ADD",
+            "bp-pipe P.BENCH-PAR",
+        ])
+        self.assertIn("Parallel pipeline", text)
+        self.assertIn("cycles", text)
+
+    # --- NCORES / COREID in KDOS context ---
+
+    def test_ncores_in_kdos(self):
+        """NCORES should return 4 in KDOS context."""
+        text = self._run_mc(["NCORES ."])
+        self.assertIn("4 ", text)
+
+    def test_coreid_in_kdos(self):
+        """COREID should return 0 in KDOS REPL (core 0)."""
+        text = self._run_mc(["COREID ."])
+        self.assertIn("0 ", text)
+
+    # --- STATUS / DASHBOARD multicore info ---
+
+    def test_status_shows_cores(self):
+        """STATUS should include cores= field."""
+        text = self._run_mc(["STATUS"])
+        self.assertIn("cores=", text)
+        self.assertIn("4", text)
+
+    def test_dashboard_shows_cores(self):
+        """DASHBOARD should show core count."""
+        text = self._run_mc(["DASHBOARD"])
+        self.assertIn("KDOS v1.1", text)
+        self.assertIn("multicore", text)
+
+    # --- Home screen multicore display ---
+
+    def test_home_screen_cores(self):
+        """SCR-HOME should show Cores: 4 multicore."""
+        text = self._run_mc(["SCR-HOME"])
+        self.assertIn("Cores", text)
+        self.assertIn("multicore", text)
 
 
 # ---------------------------------------------------------------------------

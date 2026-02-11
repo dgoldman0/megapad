@@ -6553,9 +6553,8 @@ secondary_idle_loop:
     lbreq secondary_idle_loop           ; spurious wake, re-idle
 
     ; ---- Execute the XT ----
-    ; Clear the slot first (so we don't re-execute on next wake)
-    ldi r1, 0
-    str r11, r1                         ; worker_xt[core_id] = 0
+    ; R11 points to our worker_xt slot — save it on return stack
+    ; (push BEFORE reset so we can place it at the very bottom of RSP)
 
     ; Reset stacks before executing worker XT
     mov r15, r2                         ; RSP = zone top
@@ -6563,8 +6562,25 @@ secondary_idle_loop:
     ldi64 r11, 0x8000
     sub r14, r11                        ; DSP = zone top - 0x8000
 
+    ; Re-compute our worker_xt slot address (R11 was clobbered above)
+    csrr r1, 0x20                       ; core ID
+    ldi r7, 3
+    shl r1, r7                          ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r1                         ; R11 → worker_xt[core_id]
+
+    ; Push slot pointer on return stack (so call.l's ret can't clobber it)
+    subi r15, 8
+    str r15, r11                        ; save on stack
+
     ; Call the XT (it's a Forth execution token = code address)
     call.l r0
+
+    ; Worker returned — retrieve slot pointer and clear it
+    ldn r11, r15
+    addi r15, 8
+    ldi r1, 0
+    str r11, r1                         ; worker_xt[core_id] = 0
 
     ; Worker returned — go back to idle
     lbr secondary_idle_loop
@@ -6819,10 +6835,22 @@ w_spin_release:
     ret.l
 
 ; WAKE-CORE ( xt core -- )  convenience: send XT via IPI to wake a core
-;   Equivalent to IPI-SEND but clearer intent.
-;   The target core's IPI handler stores the XT, the worker loop calls it.
+;   Pre-writes the XT into worker_xt_table[core] so CORE-STATUS sees
+;   non-zero immediately, then sends the IPI.  The handler will
+;   overwrite the slot with the same value — harmless.
 w_wake_core:
-    ; Just delegate to IPI-SEND
+    ; Pre-write XT into worker_xt_table[core] (shared memory)
+    ; Stack: ( xt core -- )  → TOS = core, NOS = xt
+    ldn r0, r14                         ; R0 = core ID (TOS)
+    ldi r1, 3
+    shl r0, r1                          ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r0                         ; R11 → worker_xt[core]
+    addi r14, 8                         ; peek at NOS (xt)
+    ldn r0, r14                         ; R0 = xt
+    str r11, r0                         ; worker_xt[core] = xt
+    subi r14, 8                         ; restore stack pointer
+    ; Now delegate to IPI-SEND (stack still: xt core)
     ldi64 r11, w_ipi_send
     call.l r11
     ret.l

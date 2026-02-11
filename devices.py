@@ -739,6 +739,8 @@ class MailboxDevice(Device):
         elif offset == 0x08:  # SEND — value is target core ID
             target = value & 0xFF
             if target < self.num_cores and target != rid:
+                # Copy sender's outgoing data to target's inbox
+                self.data[target] = self.data[rid]
                 self.pending[target] |= (1 << rid)
                 if self.on_ipi:
                     self.on_ipi(target)
