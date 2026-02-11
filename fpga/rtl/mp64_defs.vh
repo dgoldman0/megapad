@@ -1,0 +1,194 @@
+// ============================================================================
+// mp64_defs.vh — Megapad-64 shared constants & parameters
+// ============================================================================
+//
+// Included by all RTL modules.  Defines the ISA encoding, memory map,
+// MMIO offsets, tile engine parameters, and bus protocol constants.
+//
+
+`ifndef MP64_DEFS_VH
+`define MP64_DEFS_VH
+
+// ----------------------------------------------------------------------------
+// System parameters
+// ----------------------------------------------------------------------------
+parameter CLOCK_HZ       = 100_000_000;   // 100 MHz system clock
+parameter CELL            = 8;             // 8 bytes per Forth cell (64-bit)
+parameter TILE_BYTES      = 64;            // 64-byte tile
+parameter TILE_BITS       = 512;           // 64 × 8
+parameter MAX_REGS        = 16;            // 16 GPRs
+
+// ----------------------------------------------------------------------------
+// Internal memory — 1 MiB BRAM, dual-port
+// ----------------------------------------------------------------------------
+parameter INT_MEM_BYTES   = 1048576;       // 1 MiB
+parameter INT_MEM_DEPTH   = INT_MEM_BYTES / CELL;  // 131072 × 64-bit words
+parameter INT_ADDR_BITS   = 20;            // log2(1 MiB)
+
+// Tile port (Port A): 512-bit wide → 8192 rows × 512 bits
+parameter TILE_PORT_WIDTH = 512;
+parameter TILE_PORT_DEPTH = INT_MEM_BYTES / (TILE_PORT_WIDTH / 8);  // 16384
+parameter TILE_ADDR_BITS  = 14;            // log2(16384)
+
+// CPU port (Port B): 64-bit wide → 131072 rows × 64 bits
+parameter CPU_PORT_WIDTH  = 64;
+parameter CPU_PORT_DEPTH  = INT_MEM_BYTES / (CPU_PORT_WIDTH / 8);   // 131072
+parameter CPU_ADDR_BITS   = 17;            // log2(131072)
+
+// ----------------------------------------------------------------------------
+// External memory
+// ----------------------------------------------------------------------------
+parameter EXT_MEM_MAX     = 32'h0100_0000; // Up to 16 MiB addressable
+parameter EXT_BURST_LEN   = 8;             // 8-beat burst (64 bytes = 1 tile)
+
+// ----------------------------------------------------------------------------
+// Address map
+// ----------------------------------------------------------------------------
+// Internal RAM: 0x0000_0000 – 0x000F_FFFF  (1 MiB)
+// External RAM: 0x0010_0000 – 0x00FF_FFFF  (up to 15 MiB)
+// MMIO:         0xFFFF_FF00_0000_0000 – 0xFFFF_FF00_0000_04FF
+//
+// For FPGA, we decode the top 32 bits to distinguish MMIO:
+//   if addr[63:32] == 0xFFFF_FF00 → MMIO
+//   else → memory (internal if addr < INT_MEM_BYTES, else external)
+
+parameter [63:0] MMIO_BASE = 64'hFFFF_FF00_0000_0000;
+parameter [31:0] MMIO_HI   = 32'hFFFF_FF00;  // upper 32 bits for MMIO detect
+
+// MMIO peripheral offsets (from MMIO_BASE, low 12 bits)
+parameter [11:0] UART_BASE   = 12'h000;
+parameter [11:0] TIMER_BASE  = 12'h100;
+parameter [11:0] DISK_BASE   = 12'h200;
+parameter [11:0] SYSINFO_BASE= 12'h300;
+parameter [11:0] NIC_BASE    = 12'h400;
+
+// UART registers (byte offsets from UART_BASE)
+parameter [3:0] UART_TX      = 4'h0;
+parameter [3:0] UART_RX      = 4'h1;
+parameter [3:0] UART_STATUS  = 4'h2;
+parameter [3:0] UART_CONTROL = 4'h3;
+
+// Timer registers
+parameter [3:0] TIMER_COUNT  = 4'h0;  // +0..+3 (32-bit)
+parameter [3:0] TIMER_CMP    = 4'h4;  // +4..+7 (32-bit)
+parameter [3:0] TIMER_CTRL   = 4'h8;
+parameter [3:0] TIMER_STATUS = 4'h9;
+
+// Storage registers
+parameter [3:0] DISK_CMD     = 4'h0;
+parameter [3:0] DISK_STATUS  = 4'h1;
+parameter [3:0] DISK_SECTOR  = 4'h2;  // +2..+5 (32-bit)
+parameter [3:0] DISK_DMA     = 4'h6;  // +6..+D (64-bit)
+parameter [3:0] DISK_SECN    = 4'hE;
+parameter [3:0] DISK_DATA    = 4'hF;
+
+// NIC registers
+parameter [3:0] NIC_CMD      = 4'h0;
+parameter [3:0] NIC_STATUS   = 4'h1;
+parameter [3:0] NIC_DMA      = 4'h2;  // +2..+9 (64-bit)
+parameter [3:0] NIC_FRAMELEN = 4'hA;  // +A..+B (16-bit)
+parameter [3:0] NIC_IRQCTRL  = 4'hC;
+parameter [3:0] NIC_IRQSTAT  = 4'hD;
+
+// ----------------------------------------------------------------------------
+// ISA — Instruction families (upper nibble of opcode byte)
+// ----------------------------------------------------------------------------
+parameter [3:0] FAM_SYS   = 4'h0;
+parameter [3:0] FAM_INC   = 4'h1;
+parameter [3:0] FAM_DEC   = 4'h2;
+parameter [3:0] FAM_BR    = 4'h3;
+parameter [3:0] FAM_LBR   = 4'h4;
+parameter [3:0] FAM_MEM   = 4'h5;
+parameter [3:0] FAM_IMM   = 4'h6;
+parameter [3:0] FAM_ALU   = 4'h7;
+parameter [3:0] FAM_MEMALU= 4'h8;
+parameter [3:0] FAM_IO    = 4'h9;
+parameter [3:0] FAM_SEP   = 4'hA;
+parameter [3:0] FAM_SEX   = 4'hB;
+parameter [3:0] FAM_MULDIV= 4'hC;
+parameter [3:0] FAM_CSR   = 4'hD;
+parameter [3:0] FAM_MEX   = 4'hE;
+parameter [3:0] FAM_EXT   = 4'hF;
+
+// MEX tile engine sub-operations
+parameter [1:0] MEX_TALU  = 2'b00;
+parameter [1:0] MEX_TMUL  = 2'b01;
+parameter [1:0] MEX_TRED  = 2'b10;
+parameter [1:0] MEX_TSYS  = 2'b11;
+
+// TALU functions
+parameter [2:0] TALU_ADD  = 3'd0;
+parameter [2:0] TALU_SUB  = 3'd1;
+parameter [2:0] TALU_AND  = 3'd2;
+parameter [2:0] TALU_OR   = 3'd3;
+parameter [2:0] TALU_XOR  = 3'd4;
+parameter [2:0] TALU_MIN  = 3'd5;
+parameter [2:0] TALU_MAX  = 3'd6;
+parameter [2:0] TALU_ABS  = 3'd7;
+
+// TRED functions
+parameter [2:0] TRED_SUM  = 3'd0;
+parameter [2:0] TRED_MIN  = 3'd1;
+parameter [2:0] TRED_MAX  = 3'd2;
+parameter [2:0] TRED_POPC = 3'd3;
+parameter [2:0] TRED_L1   = 3'd4;
+
+// Tile modes (TMODE CSR bits 1:0)
+parameter [1:0] TMODE_8   = 2'b00;   // 64 × 8-bit lanes
+parameter [1:0] TMODE_16  = 2'b01;   // 32 × 16-bit lanes
+parameter [1:0] TMODE_32  = 2'b10;   // 16 × 32-bit lanes
+parameter [1:0] TMODE_64  = 2'b11;   //  8 × 64-bit lanes
+
+// ----------------------------------------------------------------------------
+// CSR addresses
+// ----------------------------------------------------------------------------
+parameter [7:0] CSR_PSEL  = 8'h00;   // PC selector
+parameter [7:0] CSR_XSEL  = 8'h01;   // X register selector
+parameter [7:0] CSR_SPSEL = 8'h02;   // SP selector
+parameter [7:0] CSR_FLAGS = 8'h03;
+parameter [7:0] CSR_IVTBASE=8'h04;   // Interrupt vector table base
+parameter [7:0] CSR_SB    = 8'h10;   // Tile bank
+parameter [7:0] CSR_SR    = 8'h11;   // Tile cursor row
+parameter [7:0] CSR_SC    = 8'h12;   // Tile cursor col
+parameter [7:0] CSR_SW    = 8'h13;   // Tile cursor stride
+parameter [7:0] CSR_TMODE = 8'h14;
+parameter [7:0] CSR_TCTRL = 8'h15;
+parameter [7:0] CSR_TSRC0 = 8'h16;
+parameter [7:0] CSR_TSRC1 = 8'h17;
+parameter [7:0] CSR_TDST  = 8'h18;
+parameter [7:0] CSR_ACC0  = 8'h19;
+parameter [7:0] CSR_ACC1  = 8'h1A;
+parameter [7:0] CSR_ACC2  = 8'h1B;
+parameter [7:0] CSR_ACC3  = 8'h1C;
+
+// ----------------------------------------------------------------------------
+// Bus protocol
+// ----------------------------------------------------------------------------
+// Internal bus: simple valid/ready handshake
+//   master asserts bus_valid, bus_addr, bus_wdata, bus_wen, bus_size
+//   slave  asserts bus_ready + bus_rdata when transaction completes
+//
+// bus_size: 0=byte, 1=halfword, 2=word, 3=doubleword
+
+parameter [1:0] BUS_BYTE  = 2'd0;
+parameter [1:0] BUS_HALF  = 2'd1;
+parameter [1:0] BUS_WORD  = 2'd2;
+parameter [1:0] BUS_DWORD = 2'd3;
+
+// Tile bus: 512-bit dedicated path
+//   tile_req, tile_addr (aligned to 64B), tile_wen
+//   tile_rdata (512 bits), tile_wdata (512 bits), tile_ack
+
+// ----------------------------------------------------------------------------
+// Interrupt vectors
+// ----------------------------------------------------------------------------
+parameter [2:0] IRQ_RESET  = 3'd0;
+parameter [2:0] IRQ_NMI    = 3'd1;
+parameter [2:0] IRQ_ILLOP  = 3'd2;
+parameter [2:0] IRQ_ALIGN  = 3'd3;
+parameter [2:0] IRQ_DIVZ   = 3'd4;
+parameter [2:0] IRQ_BUS    = 3'd5;
+parameter [2:0] IRQ_SWTRAP = 3'd6;
+parameter [2:0] IRQ_TIMER  = 3'd7;
+
+`endif // MP64_DEFS_VH
