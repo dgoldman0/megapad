@@ -7,10 +7,19 @@
 //   - MMIO peripherals (UART, Timer, Disk, NIC, Mailbox, Spinlocks)
 //
 // Arbitration: round-robin among requesting cores with fairness.
-// One core owns the bus per cycle.  Other cores stall (bus_ready low).
+// One core owns the bus at a time.  Other cores stall (bus_ready low).
 //
-// MMIO accesses are single-cycle (combinational ack).
-// Memory accesses take 1+ cycles (registered ack from BRAM/ext).
+// Protocol (3-state FSM):
+//   1. IDLE      — pick next requesting core (round-robin), register request
+//                  to target bus, advance to MMIO_RESP or MEM_WAIT.
+//   2. MMIO_RESP — mmio_addr now stable; capture combinational mmio_rdata,
+//                  assert cpu_ready, return to IDLE.
+//   3. MEM_WAIT  — hold mem_req; wait for mem_ack, capture mem_rdata,
+//                  assert cpu_ready, return to IDLE.
+//
+// Latency:
+//   MMIO:   2 arbiter cycles (register → capture).
+//   Memory: 3+ arbiter cycles (register → BRAM latency → capture).
 //
 
 `include "mp64_defs.vh"
@@ -48,11 +57,16 @@ module mp64_bus (
 );
 
     // ========================================================================
-    // Arbiter state
+    // Arbiter FSM states
     // ========================================================================
+    localparam [1:0] ARB_IDLE      = 2'd0;
+    localparam [1:0] ARB_MEM_WAIT  = 2'd1;
+    localparam [1:0] ARB_MMIO_RESP = 2'd2;
+
+    reg [1:0]              arb_state;
     reg [CORE_ID_BITS-1:0] grant;       // currently granted core
-    reg [CORE_ID_BITS-1:0] last_grant;  // last core granted (round-robin seed)
-    reg                     bus_busy;    // memory transaction in flight
+    reg [CORE_ID_BITS-1:0] last_grant;  // round-robin seed
+    reg                    served_last; // prevents stale re-serve of same core
 
     // ========================================================================
     // Unpack per-core signals for readability
@@ -99,76 +113,92 @@ module mp64_bus (
     // ========================================================================
     // Main arbiter FSM
     // ========================================================================
-    integer i;
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            arb_state  <= ARB_IDLE;
             grant      <= {CORE_ID_BITS{1'b0}};
             last_grant <= {CORE_ID_BITS{1'b0}};
-            bus_busy   <= 1'b0;
+            served_last<= 1'b0;
             mem_req    <= 1'b0;
             mmio_req   <= 1'b0;
             cpu_ready  <= {NUM_CORES{1'b0}};
             cpu_rdata  <= {(NUM_CORES*64){1'b0}};
+            mem_addr   <= 64'd0;
+            mem_wdata  <= 64'd0;
+            mem_wen    <= 1'b0;
+            mem_size   <= 2'd0;
+            mmio_addr  <= 12'd0;
+            mmio_wdata <= 64'd0;
+            mmio_wen   <= 1'b0;
+            mmio_size  <= 2'd0;
         end else begin
-            // Default: deassert all handshake signals each cycle
+            // Default: deassert ready pulse each cycle
             cpu_ready <= {NUM_CORES{1'b0}};
-            mem_req   <= 1'b0;
-            mmio_req  <= 1'b0;
 
-            if (bus_busy) begin
+            case (arb_state)
                 // --------------------------------------------------------
-                // Memory transaction in progress — wait for ack
+                // IDLE — pick next requesting core, register request
                 // --------------------------------------------------------
-                if (mem_ack) begin
-                    cpu_rdata[grant*64 +: 64] <= mem_rdata;
-                    cpu_ready[grant]          <= 1'b1;
-                    bus_busy                  <= 1'b0;
-                    last_grant                <= grant;
-                end else begin
-                    // Hold the request for the granted core
-                    mem_req   <= 1'b1;
-                    mem_addr  <= core_addr[grant];
-                    mem_wdata <= core_wdata[grant];
-                    mem_wen   <= cpu_wen[grant];
-                    mem_size  <= core_size[grant];
-                end
-            end else begin
-                // --------------------------------------------------------
-                // Bus idle — pick next requesting core (round-robin)
-                // --------------------------------------------------------
-                if (any_request) begin
-                    grant <= next_grant;
+                ARB_IDLE: begin
+                    mem_req  <= 1'b0;
+                    mmio_req <= 1'b0;
 
-                    if (core_addr[next_grant][63:32] == MMIO_HI) begin
-                        // MMIO access — single-cycle response
-                        mmio_req   <= 1'b1;
-                        mmio_addr  <= core_addr[next_grant][11:0];
-                        mmio_wdata <= core_wdata[next_grant];
-                        mmio_wen   <= cpu_wen[next_grant];
-                        mmio_size  <= core_size[next_grant];
-                        // Combinational ack — complete same cycle
-                        cpu_rdata[next_grant*64 +: 64] <= mmio_rdata;
-                        cpu_ready[next_grant]          <= mmio_ack;
-                        last_grant                     <= next_grant;
-                    end else begin
-                        // Memory access — may take 1+ cycles
-                        mem_req   <= 1'b1;
-                        mem_addr  <= core_addr[next_grant];
-                        mem_wdata <= core_wdata[next_grant];
-                        mem_wen   <= cpu_wen[next_grant];
-                        mem_size  <= core_size[next_grant];
-                        if (mem_ack) begin
-                            // BRAM can respond same cycle
-                            cpu_rdata[next_grant*64 +: 64] <= mem_rdata;
-                            cpu_ready[next_grant]          <= 1'b1;
-                            last_grant                     <= next_grant;
+                    if (any_request &&
+                        !(served_last && next_grant == last_grant)) begin
+                        grant      <= next_grant;
+                        served_last<= 1'b0;
+
+                        if (core_addr[next_grant][63:32] == MMIO_HI) begin
+                            // MMIO: register request, respond next cycle
+                            mmio_req   <= 1'b1;
+                            mmio_addr  <= core_addr[next_grant][11:0];
+                            mmio_wdata <= core_wdata[next_grant];
+                            mmio_wen   <= cpu_wen[next_grant];
+                            mmio_size  <= core_size[next_grant];
+                            arb_state  <= ARB_MMIO_RESP;
                         end else begin
-                            bus_busy <= 1'b1;
+                            // Memory: register request, wait for ack
+                            mem_req   <= 1'b1;
+                            mem_addr  <= core_addr[next_grant];
+                            mem_wdata <= core_wdata[next_grant];
+                            mem_wen   <= cpu_wen[next_grant];
+                            mem_size  <= core_size[next_grant];
+                            arb_state <= ARB_MEM_WAIT;
                         end
+                    end else begin
+                        served_last <= 1'b0;
                     end
                 end
-            end
+
+                // --------------------------------------------------------
+                // MMIO_RESP — mmio_addr stable → mmio_rdata valid
+                // --------------------------------------------------------
+                ARB_MMIO_RESP: begin
+                    cpu_rdata[grant*64 +: 64] <= mmio_rdata;
+                    cpu_ready[grant]          <= 1'b1;
+                    last_grant                <= grant;
+                    mmio_req                  <= 1'b0;
+                    served_last               <= 1'b1;
+                    arb_state                 <= ARB_IDLE;
+                end
+
+                // --------------------------------------------------------
+                // MEM_WAIT — hold mem_req until memory acks
+                // --------------------------------------------------------
+                ARB_MEM_WAIT: begin
+                    if (mem_ack) begin
+                        cpu_rdata[grant*64 +: 64] <= mem_rdata;
+                        cpu_ready[grant]          <= 1'b1;
+                        last_grant                <= grant;
+                        mem_req                   <= 1'b0;
+                        served_last               <= 1'b1;
+                        arb_state                 <= ARB_IDLE;
+                    end
+                    // else: mem_req, mem_addr, etc. held stable from IDLE
+                end
+
+                default: arb_state <= ARB_IDLE;
+            endcase
         end
     end
 

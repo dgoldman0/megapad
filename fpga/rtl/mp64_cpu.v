@@ -354,15 +354,22 @@ module mp64_cpu (
                 end
 
                 CPU_FETCH_MORE: begin
-                    // Only drive bus_valid when fetch_pending is clear
-                    // (ibuf_len has been updated since last consume)
+                    // Drive bus_valid:
+                    //  - New fetch:  assert with updated address
+                    //  - Waiting:    keep asserted (multi-core visibility)
+                    //  - On response: deassert (let arbiter serve others)
                     if (!fetch_pending) begin
                         bus_valid <= 1'b1;
                         bus_addr  <= R[psel] + {60'd0, ibuf_len};
                         bus_wen   <= 1'b0;
                         bus_size  <= BUS_BYTE;
                         fetch_pending <= 1'b1;
+                    end else if (!bus_ready) begin
+                        // Keep request visible to arbiter while waiting
+                        bus_valid <= 1'b1;
                     end
+                    // else: bus_ready && fetch_pending → bus_valid stays 0
+                    // (default), giving the arbiter 1 cycle to move on
 
                     if (bus_ready && fetch_pending) begin
                         fetch_pending <= 1'b0;
