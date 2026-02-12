@@ -16,9 +16,9 @@ from typing import Optional
 from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
-    MailboxDevice, SpinlockDevice,
+    MailboxDevice, SpinlockDevice, CRCDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
-    MBOX_BASE, SPINLOCK_BASE, NIC_MTU,
+    MBOX_BASE, SPINLOCK_BASE, CRC_BASE, NIC_MTU,
 )
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,7 @@ class MegapadSystem:
         )
         self.mailbox = MailboxDevice(num_cores=num_cores)
         self.spinlock = SpinlockDevice()
+        self.crc = CRCDevice()
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)
@@ -101,6 +102,7 @@ class MegapadSystem:
         self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
+        self.bus.register(self.crc)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

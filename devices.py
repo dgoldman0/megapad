@@ -37,6 +37,7 @@ SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
+CRC_BASE     = 0x0700
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +809,114 @@ class SpinlockDevice(Device):
             if self.locked[lock_idx] and self.owner[lock_idx] == rid:
                 self.locked[lock_idx] = False
                 self.owner[lock_idx] = -1
+
+
+# ---------------------------------------------------------------------------
+#  CRC Accelerator — Hardware CRC32 / CRC32C / CRC64
+# ---------------------------------------------------------------------------
+# Register map (offsets from CRC_BASE):
+#   0x00  CRC_POLY    (W)   — polynomial select: 0=CRC32, 1=CRC32C, 2=CRC64
+#   0x08  CRC_INIT    (W)   — initial CRC value (64-bit LE)
+#   0x10  CRC_DIN     (W)   — data input (8 bytes LE, processes on write to 0x17)
+#   0x18  CRC_RESULT  (R)   — current CRC value (64-bit LE)
+#   0x20  CRC_CTRL    (W)   — 0=reset to init, 1=finalize (XOR-out)
+
+_CRC32_POLY     = 0x04C11DB7
+_CRC32C_POLY    = 0x1EDC6F41
+_CRC64_ECMA_POLY = 0x42F0E1EBA9EA3693
+
+def _crc_table(poly: int, bits: int) -> list[int]:
+    """Build a 256-entry CRC lookup table."""
+    mask = (1 << bits) - 1
+    top = 1 << (bits - 1)
+    tbl = []
+    for i in range(256):
+        r = i << (bits - 8)
+        for _ in range(8):
+            if r & top:
+                r = ((r << 1) ^ poly) & mask
+            else:
+                r = (r << 1) & mask
+        tbl.append(r)
+    return tbl
+
+_TBL_CRC32  = _crc_table(_CRC32_POLY, 32)
+_TBL_CRC32C = _crc_table(_CRC32C_POLY, 32)
+_TBL_CRC64  = _crc_table(_CRC64_ECMA_POLY, 64)
+
+class CRCDevice(Device):
+    """Hardware CRC accelerator supporting CRC32, CRC32C, and CRC64-ECMA."""
+
+    def __init__(self):
+        super().__init__("CRC", CRC_BASE, 0x28)
+        self.poly_sel = 0       # 0=CRC32, 1=CRC32C, 2=CRC64
+        self.init_val = 0xFFFFFFFF
+        self.crc = 0xFFFFFFFF
+        self.din_buf = bytearray(8)
+        self.din_idx = 0
+
+    def _bits(self) -> int:
+        return 64 if self.poly_sel == 2 else 32
+
+    def _mask(self) -> int:
+        return (1 << self._bits()) - 1
+
+    def _table(self) -> list[int]:
+        if self.poly_sel == 0:
+            return _TBL_CRC32
+        elif self.poly_sel == 1:
+            return _TBL_CRC32C
+        else:
+            return _TBL_CRC64
+
+    def _feed_byte(self, b: int):
+        bits = self._bits()
+        tbl = self._table()
+        mask = self._mask()
+        idx = ((self.crc >> (bits - 8)) ^ b) & 0xFF
+        self.crc = ((self.crc << 8) ^ tbl[idx]) & mask
+
+    def _feed_data(self):
+        """Process the 8-byte DIN buffer."""
+        for i in range(8):
+            self._feed_byte(self.din_buf[i])
+
+    def read8(self, offset: int) -> int:
+        # CRC_RESULT at offset 0x18..0x1F (8 bytes LE)
+        if 0x18 <= offset < 0x20:
+            byte_idx = offset - 0x18
+            return (self.crc >> (8 * byte_idx)) & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int):
+        if 0x00 <= offset < 0x08:
+            # CRC_POLY — only care about byte 0
+            if offset == 0x00:
+                self.poly_sel = value & 0x03
+        elif 0x08 <= offset < 0x10:
+            # CRC_INIT — 8-byte LE write buffer
+            byte_idx = offset - 0x08
+            if byte_idx == 0:
+                self.init_val = value
+            else:
+                self.init_val = (self.init_val & ~(0xFF << (8 * byte_idx))) | (value << (8 * byte_idx))
+            if byte_idx == 7:
+                self.init_val &= self._mask()
+                self.crc = self.init_val
+        elif 0x10 <= offset < 0x18:
+            # CRC_DIN — buffer 8 bytes, process on last byte write
+            byte_idx = offset - 0x10
+            self.din_buf[byte_idx] = value & 0xFF
+            if byte_idx == 7:
+                self._feed_data()
+        elif 0x20 <= offset < 0x28:
+            # CRC_CTRL
+            if offset == 0x20:
+                if value == 0:
+                    self.crc = self.init_val
+                elif value == 1:
+                    # Finalize: XOR with all-ones mask
+                    self.crc ^= self._mask()
 
 
 # ---------------------------------------------------------------------------

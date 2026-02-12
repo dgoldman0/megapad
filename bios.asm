@@ -43,6 +43,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
+;    CRC    0xFFFF_FF00_0000_0700   POLY=+0 INIT=+8 DIN=+10 RESULT=+18 CTRL=+20
 ;
 ;  Multicore CSRs
 ;  ----
@@ -6928,6 +6929,62 @@ w_perf_reset:
     csrw 0x6C, r0
     ret.l
 
+; =====================================================================
+;  CRC Engine — MMIO at 0xFFFF_FF00_0000_0700
+; =====================================================================
+; CRC base   = 0xFFFF_FF00_0000_0700
+;   POLY  +0x00 (W)  polynomial select: 0=CRC32, 1=CRC32C, 2=CRC64
+;   INIT  +0x08 (W)  initial CRC value (64-bit LE)
+;   DIN   +0x10 (W)  data input (8 bytes, processes on full write)
+;   RESULT+0x18 (R)  current CRC value (64-bit LE)
+;   CTRL  +0x20 (W)  0=reset to init, 1=finalize (XOR-out)
+
+; CRC-POLY! ( n -- )  set polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
+w_crc_poly_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0700    ; CRC_POLY
+    str r11, r0
+    ret.l
+
+; CRC-INIT! ( n -- )  set initial CRC value
+w_crc_init_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0708    ; CRC_INIT
+    str r11, r0
+    ret.l
+
+; CRC-FEED ( n -- )  feed 8 bytes of data
+w_crc_feed:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0710    ; CRC_DIN
+    str r11, r0
+    ret.l
+
+; CRC@ ( -- n )  read current CRC result
+w_crc_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0718    ; CRC_RESULT
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; CRC-RESET ( -- )  reset CRC to init value
+w_crc_reset:
+    ldi r0, 0
+    ldi64 r11, 0xFFFF_FF00_0000_0720    ; CRC_CTRL = 0 (reset)
+    str r11, r0
+    ret.l
+
+; CRC-FINAL ( -- )  finalize CRC (XOR-out)
+w_crc_final:
+    ldi r0, 1
+    ldi64 r11, 0xFFFF_FF00_0000_0720    ; CRC_CTRL = 1 (finalize)
+    str r11, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -8929,12 +8986,66 @@ d_perf_extmem:
     ret.l
 
 ; === PERF-RESET ===
-latest_entry:
 d_perf_reset:
     .dq d_perf_extmem
     .db 10
     .ascii "PERF-RESET"
     ldi64 r11, w_perf_reset
+    call.l r11
+    ret.l
+
+; === CRC-POLY! ===
+d_crc_poly_store:
+    .dq d_perf_reset
+    .db 9
+    .ascii "CRC-POLY!"
+    ldi64 r11, w_crc_poly_store
+    call.l r11
+    ret.l
+
+; === CRC-INIT! ===
+d_crc_init_store:
+    .dq d_crc_poly_store
+    .db 9
+    .ascii "CRC-INIT!"
+    ldi64 r11, w_crc_init_store
+    call.l r11
+    ret.l
+
+; === CRC-FEED ===
+d_crc_feed:
+    .dq d_crc_init_store
+    .db 8
+    .ascii "CRC-FEED"
+    ldi64 r11, w_crc_feed
+    call.l r11
+    ret.l
+
+; === CRC@ ===
+d_crc_fetch:
+    .dq d_crc_feed
+    .db 4
+    .ascii "CRC@"
+    ldi64 r11, w_crc_fetch
+    call.l r11
+    ret.l
+
+; === CRC-RESET ===
+d_crc_reset:
+    .dq d_crc_fetch
+    .db 9
+    .ascii "CRC-RESET"
+    ldi64 r11, w_crc_reset
+    call.l r11
+    ret.l
+
+; === CRC-FINAL ===
+latest_entry:
+d_crc_final:
+    .dq d_crc_reset
+    .db 9
+    .ascii "CRC-FINAL"
+    ldi64 r11, w_crc_final
     call.l r11
     ret.l
 
