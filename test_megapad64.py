@@ -1632,6 +1632,405 @@ def test_tile_fp():
           all(cpu20.mem_read8(0x3000 + i) == 3 for i in range(64)))
 
 
+def test_tile_kernels():
+    """Integration kernels — multi-op chained pipelines on simulated data streams."""
+    print("\n== Tile Integration Kernels ==")
+
+    # ---- Data-stream generators ----
+    def fill_fp16(cpu, base, values):
+        """Write floats as fp16 to memory. Zero-pads to 32 lanes."""
+        for i, v in enumerate(values):
+            cpu.mem_write16(base + i*2, _float_to_fp16(v))
+        for i in range(len(values), 32):
+            cpu.mem_write16(base + i*2, 0)
+
+    def read_fp16(cpu, base, n=32):
+        return [_fp16_to_float(cpu.mem_read16(base + i*2)) for i in range(n)]
+
+    def fill_bf16(cpu, base, values):
+        for i, v in enumerate(values):
+            cpu.mem_write16(base + i*2, _float_to_bf16(v))
+        for i in range(len(values), 32):
+            cpu.mem_write16(base + i*2, 0)
+
+    def read_bf16(cpu, base, n=32):
+        return [_bf16_to_float(cpu.mem_read16(base + i*2)) for i in range(n)]
+
+    def ramp(n, start=1.0, step=1.0):
+        return [start + i * step for i in range(n)]
+
+    def const(n, val):
+        return [val] * n
+
+    def alternating(n, a, b):
+        return [a if i % 2 == 0 else b for i in range(n)]
+
+    def run_tile(cpu, asm_src):
+        """Assemble, load at address 0, run to halt."""
+        code = assemble(asm_src)
+        cpu.load_bytes(0, code)
+        cpu.pc = 0
+        cpu.halted = False
+        try:
+            cpu.run()
+        except HaltError:
+            pass
+
+    # ================================================================
+    # Kernel 1: FP16 4-row GEMV via assembly loop
+    # Tests: DOT, CSR read/write, branch loop, pointer arithmetic
+    # ================================================================
+    cpu = Megapad64()
+    M = [[1,2,3,4], [5,6,7,8], [9,10,11,12], [13,14,15,16]]
+    V = [1.0, 2.0, 3.0, 4.0]
+    for i, row in enumerate(M):
+        fill_fp16(cpu, 0x2000 + i*64, [float(x) for x in row])
+    fill_fp16(cpu, 0x3000, V)
+    run_tile(cpu, """
+        ldi r0, 4
+        ldi64 r1, 0x2000
+        ldi64 r4, 0x3000
+        ldi64 r5, 0x4000
+        ldi r6, 4
+        csrw 0x14, r6
+    gemv_loop:
+        csrw 0x16, r1
+        csrw 0x17, r4
+        t.dot
+        csrr r6, 0x19
+        str r5, r6
+        addi r1, 64
+        addi r5, 8
+        dec r0
+        brne gemv_loop
+        halt
+    """)
+    for i in range(4):
+        expected = sum(M[i][j] * V[j] for j in range(4))
+        result = _bits_to_fp32(cpu.mem_read64(0x4000 + i*8) & 0xFFFFFFFF)
+        check(f"GEMV row[{i}]: {int(expected)}", result == expected, f"got {result}")
+
+    # ================================================================
+    # Kernel 2: Multi-tile DOT accumulation (ACC_ACC flag)
+    # Tests: TCTRL accumulator flag across two passes
+    # ================================================================
+    cpu2 = Megapad64()
+    cpu2.tmode = EW_FP16
+    fill_fp16(cpu2, 0x1000, const(32, 1.0))
+    fill_fp16(cpu2, 0x2000, const(32, 2.0))
+    fill_fp16(cpu2, 0x3000, const(32, 3.0))
+    fill_fp16(cpu2, 0x4000, const(32, 1.0))
+    cpu2.tsrc0 = 0x1000; cpu2.tsrc1 = 0x2000; cpu2.tctrl = 0
+    run_tile(cpu2, "t.dot\nhalt")
+    r1 = _bits_to_fp32(cpu2.acc[0])
+    check("Multi-DOT pass1: 32×(1×2)=64", r1 == 64.0, f"got {r1}")
+    cpu2.tsrc0 = 0x3000; cpu2.tsrc1 = 0x4000; cpu2.tctrl = 0x1  # ACC_ACC
+    run_tile(cpu2, "t.dot\nhalt")
+    r2 = _bits_to_fp32(cpu2.acc[0])
+    check("Multi-DOT acc: 64+96=160", r2 == 160.0, f"got {r2}")
+
+    # ================================================================
+    # Kernel 3: Argmax on classifier output (MAXIDX)
+    # Tests: MAXIDX reduction, index accuracy
+    # ================================================================
+    logits = [float(i) for i in range(32)]
+    logits[17] = 100.0  # plant max at lane 17
+    cpu3 = Megapad64()
+    cpu3.tmode = EW_FP16; cpu3.tctrl = 0; cpu3.tsrc0 = 0x1000
+    fill_fp16(cpu3, 0x1000, logits)
+    run_tile(cpu3, "t.maxidx\nhalt")
+    check("Argmax idx=17", cpu3.acc[0] == 17, f"got {cpu3.acc[0]}")
+    check("Argmax val=100", _bits_to_fp32(cpu3.acc[1]) == 100.0,
+          f"got {_bits_to_fp32(cpu3.acc[1])}")
+
+    # ================================================================
+    # Kernel 4: FP32 accumulation precision — products exceed FP16 range
+    # 256×256=65536 per lane (>FP16 max 65504), 32 lanes → 2097152
+    # Tests: FP32 accumulation preserves results FP16 cannot represent
+    # ================================================================
+    cpu4 = Megapad64()
+    cpu4.tmode = EW_FP16; cpu4.tctrl = 0
+    cpu4.tsrc0 = 0x1000; cpu4.tsrc1 = 0x2000
+    fill_fp16(cpu4, 0x1000, const(32, 256.0))
+    fill_fp16(cpu4, 0x2000, const(32, 256.0))
+    run_tile(cpu4, "t.dot\nhalt")
+    p = _bits_to_fp32(cpu4.acc[0])
+    check("Precision: 32×256²=2097152 (FP32)", p == 2097152.0, f"got {p}")
+
+    # ================================================================
+    # Kernel 5: Format roundtrip fp16 → bf16 → fp16 via PACK
+    # Tests: PACK format conversion chaining, lossless for shared values
+    # ================================================================
+    rt_vals = [1.0, -2.0, 0.5, 4.0, 0.0, 8.0, 16.0, 64.0]
+    cpu5 = Megapad64()
+    cpu5.tmode = EW_FP16; cpu5.tsrc0 = 0x1000; cpu5.tdst = 0x2000
+    fill_fp16(cpu5, 0x1000, rt_vals)
+    run_tile(cpu5, "t.pack\nhalt")              # fp16 → bf16
+    cpu5.tmode = EW_BF16; cpu5.tsrc0 = 0x2000; cpu5.tdst = 0x3000
+    run_tile(cpu5, "t.pack\nhalt")              # bf16 → fp16
+    for i, exp in enumerate(rt_vals):
+        got = _fp16_to_float(cpu5.mem_read16(0x3000 + i*2))
+        ok = got == exp or (exp == 0.0 and got == 0.0)
+        check(f"PACK roundtrip [{i}]={exp}", ok, f"got {got}")
+
+    # ================================================================
+    # Kernel 6: Chained pipeline MUL → ADD → SUM
+    # data=[1..8,0..24], ×2, +10, sum
+    # Tests: multi-op sequencing, intermediate verification
+    # ================================================================
+    data6 = ramp(8, 1.0, 1.0) + const(24, 0.0)
+    cpu6 = Megapad64()
+    cpu6.tmode = EW_FP16; cpu6.tctrl = 0
+    fill_fp16(cpu6, 0x1000, data6)
+    fill_fp16(cpu6, 0x2000, const(32, 2.0))
+    fill_fp16(cpu6, 0x3000, const(32, 10.0))
+    # MUL
+    cpu6.tsrc0 = 0x1000; cpu6.tsrc1 = 0x2000; cpu6.tdst = 0x4000
+    run_tile(cpu6, "t.mul\nhalt")
+    # ADD
+    cpu6.tsrc0 = 0x4000; cpu6.tsrc1 = 0x3000; cpu6.tdst = 0x5000
+    run_tile(cpu6, "t.add\nhalt")
+    # SUM
+    cpu6.tsrc0 = 0x5000
+    run_tile(cpu6, "t.sum\nhalt")
+    ref6 = [d * 2.0 + 10.0 for d in data6]
+    ref_sum6 = sum(ref6)
+    got6 = _bits_to_fp32(cpu6.acc[0])
+    check(f"Pipeline MUL→ADD→SUM: {ref_sum6}", got6 == ref_sum6, f"got {got6}")
+    mid = read_fp16(cpu6, 0x5000, 8)
+    check("Pipeline mid[0]: 1×2+10=12", mid[0] == 12.0, f"got {mid[0]}")
+    check("Pipeline mid[7]: 8×2+10=26", mid[7] == 26.0, f"got {mid[7]}")
+
+    # ================================================================
+    # Kernel 7: Broadcast affine transform y = 3x + 5
+    # Tests: FP16 broadcast MUL and ADD with register operand
+    # ================================================================
+    cpu7 = Megapad64()
+    cpu7.tmode = EW_FP16
+    fill_fp16(cpu7, 0x1000, ramp(4, 1.0, 1.0))
+    cpu7.tsrc0 = 0x1000; cpu7.tdst = 0x2000
+    cpu7.regs[7] = _float_to_fp16(3.0)
+    run_tile(cpu7, "t.mul r7\nhalt")
+    cpu7.tsrc0 = 0x2000; cpu7.tdst = 0x3000
+    cpu7.regs[7] = _float_to_fp16(5.0)
+    run_tile(cpu7, "t.add r7\nhalt")
+    for i in range(4):
+        exp = (i + 1) * 3.0 + 5.0
+        got = read_fp16(cpu7, 0x3000, 4)[i]
+        check(f"Broadcast y=3x+5 [{i}]={int(exp)}", got == exp, f"got {got}")
+
+    # ================================================================
+    # Kernel 8: SUMSQ for L2 norm²  (3² + 4² + 5² = 50)
+    # Tests: SUMSQ with FP32 accumulation
+    # ================================================================
+    cpu8 = Megapad64()
+    cpu8.tmode = EW_FP16; cpu8.tctrl = 0; cpu8.tsrc0 = 0x1000
+    l2_data = [3.0, 4.0, 0.0, 0.0, 5.0] + const(27, 0.0)
+    fill_fp16(cpu8, 0x1000, l2_data)
+    run_tile(cpu8, "t.sumsq\nhalt")
+    ref_l2 = sum(x*x for x in l2_data)
+    got8 = _bits_to_fp32(cpu8.acc[0])
+    check(f"L2 norm²: {int(ref_l2)}", got8 == ref_l2, f"got {got8}")
+
+    # ================================================================
+    # Kernel 9: BF16 double-MAC accumulation
+    # Tests: MAC in-place accumulation, BF16 arithmetic
+    # ================================================================
+    cpu9 = Megapad64()
+    cpu9.tmode = EW_BF16
+    w = [0.5, 0.25, 0.125, 1.0]; a = [2.0, 4.0, 8.0, 1.0]
+    fill_bf16(cpu9, 0x1000, w)
+    fill_bf16(cpu9, 0x2000, a)
+    fill_bf16(cpu9, 0x3000, const(32, 0.0))
+    cpu9.tsrc0 = 0x1000; cpu9.tsrc1 = 0x2000; cpu9.tdst = 0x3000
+    run_tile(cpu9, "t.mac\nhalt")
+    run_tile(cpu9, "t.mac\nhalt")  # accumulate again
+    for i in range(4):
+        exp = 2.0 * w[i] * a[i]
+        got = read_bf16(cpu9, 0x3000, 4)[i]
+        check(f"BF16 2×MAC [{i}]={exp}", got == exp, f"got {got}")
+
+    # ================================================================
+    # Kernel 10: Strided 2D LOAD2D + FP16 compute
+    # Tests: LOAD2D stride gathering, then tile ADD
+    # ================================================================
+    cpu10 = Megapad64()
+    cpu10.tmode = EW_FP16
+    fill_fp16(cpu10, 0x5000, [1.0, 2.0, 3.0, 4.0])
+    fill_fp16(cpu10, 0x5080, [5.0, 6.0, 7.0, 8.0])  # 128 bytes apart
+    cpu10.tstride_r = 128; cpu10.ttile_w = 8; cpu10.ttile_h = 2
+    # LOAD2D uses tile cursor, not TSRC0
+    # cursor addr = sb*(4MiB) + (sr*sw + sc)*64
+    # 0x5000 = 20480, (sr*sw+sc)*64=20480 → sr*sw+sc=320, sw=1 → sr=320
+    cpu10.sb = 0; cpu10.sr = 320; cpu10.sc = 0; cpu10.sw = 1
+    cpu10.tdst = 0x2000
+    run_tile(cpu10, "t.load2d\nhalt")
+    got_r0 = [_fp16_to_float(cpu10.mem_read16(0x2000 + i*2)) for i in range(4)]
+    got_r1 = [_fp16_to_float(cpu10.mem_read16(0x2008 + i*2)) for i in range(4)]
+    check("LOAD2D+FP row0: [1,2,3,4]", got_r0 == [1,2,3,4], f"got {got_r0}")
+    check("LOAD2D+FP row1: [5,6,7,8]", got_r1 == [5,6,7,8], f"got {got_r1}")
+    cpu10.tstride_r = 0; cpu10.ttile_w = 8; cpu10.ttile_h = 8
+    fill_fp16(cpu10, 0x3000, const(32, 10.0))
+    cpu10.tsrc0 = 0x2000; cpu10.tsrc1 = 0x3000; cpu10.tdst = 0x4000
+    run_tile(cpu10, "t.add\nhalt")
+    check("LOAD2D+ADD: 1+10=11", _fp16_to_float(cpu10.mem_read16(0x4000)) == 11.0)
+
+    # ================================================================
+    # Kernel 11: 8-row GEMV (larger assembly loop, ramp vector)
+    # row[i] = all (i+1), vec = [1..32], expected = (i+1) × 528
+    # Tests: sustained CSR loop, 8 iterations
+    # ================================================================
+    cpu11 = Megapad64()
+    for i in range(8):
+        fill_fp16(cpu11, 0x2000 + i*64, const(32, float(i+1)))
+    fill_fp16(cpu11, 0x4000, ramp(32, 1.0, 1.0))
+    run_tile(cpu11, """
+        ldi r0, 8
+        ldi64 r1, 0x2000
+        ldi64 r4, 0x4000
+        ldi64 r5, 0x5000
+        ldi r6, 4
+        csrw 0x14, r6
+    loop8:
+        csrw 0x16, r1
+        csrw 0x17, r4
+        t.dot
+        csrr r6, 0x19
+        str r5, r6
+        addi r1, 64
+        addi r5, 8
+        dec r0
+        brne loop8
+        halt
+    """)
+    S = sum(range(1, 33))  # 528
+    for i in range(8):
+        exp = float(i + 1) * S
+        got = _bits_to_fp32(cpu11.mem_read64(0x5000 + i*8) & 0xFFFFFFFF)
+        check(f"GEMV-8 [{i}]: {i+1}×528={int(exp)}", got == exp, f"got {got}")
+
+    # ================================================================
+    # Kernel 12: MINIDX on alternating data with planted minimum
+    # Tests: MINIDX, index + value correctness
+    # ================================================================
+    alt = alternating(32, 5.0, -3.0)
+    alt[23] = -100.0
+    cpu12 = Megapad64()
+    cpu12.tmode = EW_FP16; cpu12.tctrl = 0; cpu12.tsrc0 = 0x1000
+    fill_fp16(cpu12, 0x1000, alt)
+    run_tile(cpu12, "t.minidx\nhalt")
+    check("MINIDX idx=23", cpu12.acc[0] == 23, f"got {cpu12.acc[0]}")
+    check("MINIDX val=-100", _bits_to_fp32(cpu12.acc[1]) == -100.0,
+          f"got {_bits_to_fp32(cpu12.acc[1])}")
+
+    # ================================================================
+    # Kernel 13: Ramp SUM reduction  1+2+...+32 = 528
+    # Tests: SUM on monotonic data stream
+    # ================================================================
+    cpu13 = Megapad64()
+    cpu13.tmode = EW_FP16; cpu13.tctrl = 0; cpu13.tsrc0 = 0x1000
+    fill_fp16(cpu13, 0x1000, ramp(32, 1.0, 1.0))
+    run_tile(cpu13, "t.sum\nhalt")
+    got13 = _bits_to_fp32(cpu13.acc[0])
+    check("Ramp SUM: 1+...+32=528", got13 == 528.0, f"got {got13}")
+
+    # ================================================================
+    # Kernel 14: ACC_ZERO flag
+    # Tests: TCTRL bit 1 zeroes ACC before DOT
+    # ================================================================
+    cpu14 = Megapad64()
+    cpu14.tmode = EW_FP16; cpu14.tctrl = 0
+    fill_fp16(cpu14, 0x1000, const(32, 5.0))
+    fill_fp16(cpu14, 0x2000, const(32, 3.0))
+    cpu14.tsrc0 = 0x1000; cpu14.tsrc1 = 0x2000
+    run_tile(cpu14, "t.dot\nhalt")
+    check("ACC pre-zero: 480", _bits_to_fp32(cpu14.acc[0]) == 480.0)
+    fill_fp16(cpu14, 0x1000, const(32, 1.0))
+    fill_fp16(cpu14, 0x2000, const(32, 1.0))
+    cpu14.tctrl = 0x3  # ACC_ZERO | ACC_ACC
+    run_tile(cpu14, "t.dot\nhalt")
+    got14 = _bits_to_fp32(cpu14.acc[0])
+    check("ACC_ZERO+ACC: 32 (not 480+32)", got14 == 32.0, f"got {got14}")
+
+    # ================================================================
+    # Kernel 15: Softmax prep — RMAX → broadcast SUB → max-center
+    # Tests: RMAX reduction, broadcast SUB chaining
+    # ================================================================
+    soft_in = [2.0, 5.0, 1.0, 8.0, 3.0] + const(27, 0.0)
+    max_val = max(soft_in)  # 8.0
+    cpu15 = Megapad64()
+    cpu15.tmode = EW_FP16; cpu15.tctrl = 0; cpu15.tsrc0 = 0x1000
+    fill_fp16(cpu15, 0x1000, soft_in)
+    run_tile(cpu15, "t.rmax\nhalt")
+    rmax_got = _bits_to_fp32(cpu15.acc[0])
+    check(f"Softmax RMAX: {max_val}", rmax_got == max_val, f"got {rmax_got}")
+    cpu15.regs[7] = _float_to_fp16(max_val)
+    cpu15.tsrc0 = 0x1000; cpu15.tdst = 0x2000
+    run_tile(cpu15, "t.sub r7\nhalt")
+    shifted = read_fp16(cpu15, 0x2000, 5)
+    ref_shifted = [v - max_val for v in soft_in[:5]]
+    for i in range(5):
+        check(f"Softmax shift[{i}]={ref_shifted[i]}", shifted[i] == ref_shifted[i],
+              f"got {shifted[i]}")
+    check("Softmax: max-lane → 0.0", shifted[3] == 0.0, f"got {shifted[3]}")
+
+    # ================================================================
+    # Kernel 16: FP16 FMA chain — iterative accumulation
+    # dst starts as [0..0], repeated FMA: dst = src0*src1 + dst
+    # After k iterations: dst[i] = k * src0[i] * src1[i]
+    # Tests: FMA correctness over multiple passes
+    # ================================================================
+    cpu16 = Megapad64()
+    cpu16.tmode = EW_FP16
+    fill_fp16(cpu16, 0x1000, const(32, 2.0))
+    fill_fp16(cpu16, 0x2000, const(32, 3.0))
+    fill_fp16(cpu16, 0x3000, const(32, 0.0))  # accumulator
+    cpu16.tsrc0 = 0x1000; cpu16.tsrc1 = 0x2000; cpu16.tdst = 0x3000
+    for k in range(1, 5):  # 4 iterations
+        run_tile(cpu16, "t.fma\nhalt")
+    result_fma = read_fp16(cpu16, 0x3000, 1)
+    check("FMA 4× chain: 4×(2×3)=24.0", result_fma[0] == 24.0,
+          f"got {result_fma[0]}")
+
+    # ================================================================
+    # Kernel 17: WMUL widening → SUM of FP32 products
+    # fp16 inputs → fp32 products → manual FP32 SUM verification
+    # Tests: WMUL output layout, FP32 product correctness
+    # ================================================================
+    cpu17 = Megapad64()
+    cpu17.tmode = EW_FP16
+    cpu17.tsrc0 = 0x1000; cpu17.tsrc1 = 0x2000; cpu17.tdst = 0x3000
+    fill_fp16(cpu17, 0x1000, ramp(4, 1.0, 1.0) + const(28, 0.0))
+    fill_fp16(cpu17, 0x2000, ramp(4, 2.0, 2.0) + const(28, 0.0))
+    run_tile(cpu17, "t.wmul\nhalt")
+    # WMUL output: 16 fp32 values in tile at TDST (first 16 lanes)
+    # products: 1*2=2, 2*4=8, 3*6=18, 4*8=32, rest=0
+    wmul_prods = [_bits_to_fp32(cpu17.mem_read32(0x3000 + i*4)) for i in range(4)]
+    expected_prods = [1*2, 2*4, 3*6, 4*8]
+    for i in range(4):
+        check(f"WMUL [{i}]: {expected_prods[i]}", wmul_prods[i] == expected_prods[i],
+              f"got {wmul_prods[i]}")
+
+    # ================================================================
+    # Kernel 18: DOTACC 4-way chunked dot with ramp data
+    # Tests: all 4 ACC chunks filled correctly
+    # chunk k: lanes k*8..k*8+7
+    # ================================================================
+    cpu18 = Megapad64()
+    cpu18.tmode = EW_FP16; cpu18.tctrl = 0
+    cpu18.tsrc0 = 0x1000; cpu18.tsrc1 = 0x2000
+    # src0: all 1.0; src1: chunk k has value (k+1)
+    fill_fp16(cpu18, 0x1000, const(32, 1.0))
+    s1_vals = ([1.0]*8 + [2.0]*8 + [3.0]*8 + [4.0]*8)
+    fill_fp16(cpu18, 0x2000, s1_vals)
+    run_tile(cpu18, "t.dotacc\nhalt")
+    for k in range(4):
+        exp_chunk = 8.0 * (k + 1)  # 8, 16, 24, 32
+        got_chunk = _bits_to_fp32(cpu18.acc[k])
+        check(f"DOTACC chunk[{k}]: {int(exp_chunk)}", got_chunk == exp_chunk,
+              f"got {got_chunk}")
+
+
 def test_ext_prefix():
     """Family 0xF: EXT prefix"""
     print("\n== EXT (0xF) ==")
@@ -1769,6 +2168,7 @@ def main():
         test_tile_views,
         test_strided_2d,
         test_tile_fp,
+        test_tile_kernels,
         test_ext_prefix,
         test_fibonacci,
         test_subroutine,
