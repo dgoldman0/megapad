@@ -496,6 +496,7 @@ New per-core CSRs:
 | **0x40–0x43** | **Strided/2D tile addressing** |
 | **0x50–0x59** | **DMA + QoS** |
 | **0x60–0x6C** | **BIST + perf counters** |
+| **0x70–0x72** | **Instruction cache (ctrl, hits, misses)** |
 
 ---
 
