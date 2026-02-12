@@ -1175,14 +1175,35 @@ class Megapad64:
         dst = bytearray(64)
 
         if op == 0x0:  # TALU
+            saturate = (self.tmode >> 5) & 1
             for lane in range(num_lanes):
                 ea = tile_get_elem(src_a, lane, elem_bytes)
                 eb_val = tile_get_elem(src_b, lane, elem_bytes)
                 mask = (1 << (elem_bytes * 8)) - 1
                 if funct == 0:    # ADD
-                    r = (ea + eb_val) & mask
+                    if saturate:
+                        if signed:
+                            r = to_signed(ea, elem_bytes) + to_signed(eb_val, elem_bytes)
+                            hi = (1 << (elem_bytes * 8 - 1)) - 1
+                            lo = -(1 << (elem_bytes * 8 - 1))
+                            r = max(lo, min(hi, r)) & mask
+                        else:
+                            r = ea + eb_val
+                            r = min(r, mask)
+                    else:
+                        r = (ea + eb_val) & mask
                 elif funct == 1:  # SUB
-                    r = (ea - eb_val) & mask
+                    if saturate:
+                        if signed:
+                            r = to_signed(ea, elem_bytes) - to_signed(eb_val, elem_bytes)
+                            hi = (1 << (elem_bytes * 8 - 1)) - 1
+                            lo = -(1 << (elem_bytes * 8 - 1))
+                            r = max(lo, min(hi, r)) & mask
+                        else:
+                            r = ea - eb_val
+                            r = max(0, r)
+                    else:
+                        r = (ea - eb_val) & mask
                 elif funct == 2:  # AND
                     r = ea & eb_val
                 elif funct == 3:  # OR

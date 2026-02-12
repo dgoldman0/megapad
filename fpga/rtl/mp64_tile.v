@@ -229,6 +229,7 @@ module mp64_tile (
 
     wire [1:0] mode_width = tmode[1:0];
     wire       mode_signed = tmode[4];
+    wire       mode_saturate = tmode[5];
 
     // --- 8-bit lane ALU (64 lanes) ---
     reg [511:0] alu_result_8;
@@ -246,10 +247,30 @@ module mp64_tile (
         // ALU operations
         for (lane8 = 0; lane8 < 64; lane8 = lane8 + 1) begin
             case (funct_reg)
-                TALU_ADD: alu_result_8[lane8*8 +: 8] =
-                    tile_a[lane8*8 +: 8] + src_b_selected[lane8*8 +: 8];
-                TALU_SUB: alu_result_8[lane8*8 +: 8] =
-                    tile_a[lane8*8 +: 8] - src_b_selected[lane8*8 +: 8];
+                TALU_ADD: begin
+                    if (mode_saturate) begin
+                        // Unsigned saturating add: clamp at 255
+                        if (({1'b0, tile_a[lane8*8 +: 8]} + {1'b0, src_b_selected[lane8*8 +: 8]}) > 9'd255)
+                            alu_result_8[lane8*8 +: 8] = 8'hFF;
+                        else
+                            alu_result_8[lane8*8 +: 8] =
+                                tile_a[lane8*8 +: 8] + src_b_selected[lane8*8 +: 8];
+                    end else
+                        alu_result_8[lane8*8 +: 8] =
+                            tile_a[lane8*8 +: 8] + src_b_selected[lane8*8 +: 8];
+                end
+                TALU_SUB: begin
+                    if (mode_saturate) begin
+                        // Unsigned saturating sub: clamp at 0
+                        if (tile_a[lane8*8 +: 8] < src_b_selected[lane8*8 +: 8])
+                            alu_result_8[lane8*8 +: 8] = 8'h00;
+                        else
+                            alu_result_8[lane8*8 +: 8] =
+                                tile_a[lane8*8 +: 8] - src_b_selected[lane8*8 +: 8];
+                    end else
+                        alu_result_8[lane8*8 +: 8] =
+                            tile_a[lane8*8 +: 8] - src_b_selected[lane8*8 +: 8];
+                end
                 TALU_AND: alu_result_8[lane8*8 +: 8] =
                     tile_a[lane8*8 +: 8] & src_b_selected[lane8*8 +: 8];
                 TALU_OR:  alu_result_8[lane8*8 +: 8] =
