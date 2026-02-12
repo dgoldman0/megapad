@@ -176,32 +176,41 @@ parameter [1:0] TMODE_32  = 2'b10;   // 16 × 32-bit lanes
 parameter [1:0] TMODE_64  = 2'b11;   //  8 × 64-bit lanes
 
 // ----------------------------------------------------------------------------
-// CSR addresses
+// CSR addresses  (matches emulator megapad64.py numbering)
 // ----------------------------------------------------------------------------
-parameter [7:0] CSR_PSEL  = 8'h00;   // PC selector
-parameter [7:0] CSR_XSEL  = 8'h01;   // X register selector
-parameter [7:0] CSR_SPSEL = 8'h02;   // SP selector
-parameter [7:0] CSR_FLAGS = 8'h03;
-parameter [7:0] CSR_IVTBASE=8'h04;   // Interrupt vector table base
-parameter [7:0] CSR_SB    = 8'h10;   // Tile bank
-parameter [7:0] CSR_SR    = 8'h11;   // Tile cursor row
-parameter [7:0] CSR_SC    = 8'h12;   // Tile cursor col
-parameter [7:0] CSR_SW    = 8'h13;   // Tile cursor stride
-parameter [7:0] CSR_TMODE = 8'h14;
-parameter [7:0] CSR_TCTRL = 8'h15;
-parameter [7:0] CSR_TSRC0 = 8'h16;
-parameter [7:0] CSR_TSRC1 = 8'h17;
-parameter [7:0] CSR_TDST  = 8'h18;
-parameter [7:0] CSR_ACC0  = 8'h19;
-parameter [7:0] CSR_ACC1  = 8'h1A;
-parameter [7:0] CSR_ACC2  = 8'h1B;
-parameter [7:0] CSR_ACC3  = 8'h1C;
+parameter [7:0] CSR_FLAGS    = 8'h00;   // Packed flags byte [S I G P V N C Z]
+parameter [7:0] CSR_PSEL     = 8'h01;   // PC selector
+parameter [7:0] CSR_XSEL     = 8'h02;   // X register selector
+parameter [7:0] CSR_SPSEL    = 8'h03;   // SP selector
+parameter [7:0] CSR_IVTBASE  = 8'h04;   // Interrupt vector table base
+parameter [7:0] CSR_D        = 8'h05;   // Legacy 1802 D register (8-bit)
+parameter [7:0] CSR_DF       = 8'h06;   // Legacy 1802 DF (carry alias)
+parameter [7:0] CSR_QREG     = 8'h07;   // Legacy 1802 Q output flip-flop
+parameter [7:0] CSR_TREG     = 8'h08;   // Legacy 1802 T register (saved X|P)
+parameter [7:0] CSR_IE       = 8'h09;   // Interrupt enable (alias of flag_i)
+parameter [7:0] CSR_SB       = 8'h10;   // Tile bank
+parameter [7:0] CSR_SR       = 8'h11;   // Tile cursor row
+parameter [7:0] CSR_SC       = 8'h12;   // Tile cursor col
+parameter [7:0] CSR_SW       = 8'h13;   // Tile cursor stride
+parameter [7:0] CSR_TMODE    = 8'h14;
+parameter [7:0] CSR_TCTRL    = 8'h15;
+parameter [7:0] CSR_TSRC0    = 8'h16;
+parameter [7:0] CSR_TSRC1    = 8'h17;
+parameter [7:0] CSR_TDST     = 8'h18;
+parameter [7:0] CSR_ACC0     = 8'h19;
+parameter [7:0] CSR_ACC1     = 8'h1A;
+parameter [7:0] CSR_ACC2     = 8'h1B;
+parameter [7:0] CSR_ACC3     = 8'h1C;
 
 // Multi-core CSR addresses
-parameter [7:0] CSR_COREID = 8'h20;      // Read-only: core ID (0–3)
-parameter [7:0] CSR_NCORES = 8'h21;      // Read-only: number of cores
-parameter [7:0] CSR_MBOX   = 8'h22;      // Read: pending IPI mask, Write: send IPI
-parameter [7:0] CSR_IPIACK = 8'h23;      // Write: acknowledge IPI from core N
+parameter [7:0] CSR_COREID   = 8'h20;   // Read-only: core ID (0–3)
+parameter [7:0] CSR_NCORES   = 8'h21;   // Read-only: number of cores
+parameter [7:0] CSR_MBOX     = 8'h22;   // Read: pending IPI mask, Write: send IPI
+parameter [7:0] CSR_IPIACK   = 8'h23;   // Write: acknowledge IPI from core N
+parameter [7:0] CSR_IVEC_ID  = 8'h24;   // Current interrupt vector ID
+parameter [7:0] CSR_TRAP_ADDR= 8'h25;   // Faulting address
+parameter [7:0] CSR_MEGAPAD_SZ=8'h30;   // Memory size config (read-only)
+parameter [7:0] CSR_CPUID    = 8'h31;   // CPU identification (read-only)
 
 // ----------------------------------------------------------------------------
 // Bus protocol
