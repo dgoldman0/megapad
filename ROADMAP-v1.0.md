@@ -4,10 +4,10 @@
 OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
-**Current state (Feb 2025):** BIOS (208 dict entries, 8,880 lines ASM,
-20.7 KB binary), KDOS v1.1 (247 `:` definitions + 138 variables/constants,
-3,158 lines), Emulator (1,393 lines + 472-line quad-core SoC), 515+ tests
-passing.
+**Current state (Feb 2025):** BIOS (242 dict entries, 9,379 lines ASM,
+~22 KB binary), KDOS v1.1 (247 `:` definitions + 138 variables/constants,
+3,158 lines), Emulator (2,516 lines + 474-line quad-core SoC), FPGA RTL
+(13 Verilog modules + 8 testbenches), 1,207 tests passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -20,7 +20,7 @@ and release hardening**.
 
 ### BIOS v1.0 — ✅ DONE
 
-208 dictionary entries, 8,880 lines ASM, 20.7 KB binary.
+242 dictionary entries, 9,379 lines ASM, ~22 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -37,6 +37,18 @@ and release hardening**.
 - ✅ Bus-fault handler, ABORT/ABORT"
 - ✅ **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!,
   MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS (11 words)
+- ✅ **Extended tile**: TSUMSQ, TMINIDX, TMAXIDX, TWMUL, TMAC, TFMA,
+  TDOTACC (7 words)
+- ✅ **Performance counters**: PERF-CYCLES, PERF-STALLS, PERF-TILEOPS,
+  PERF-EXTMEM, PERF-RESET (5 words)
+- ✅ **CRC engine**: CRC-POLY!, CRC-INIT!, CRC-FEED, CRC@, CRC-RESET,
+  CRC-FINAL (6 words)
+- ✅ **Memory BIST**: BIST-FULL, BIST-QUICK, BIST-STATUS, BIST-FAIL-ADDR,
+  BIST-FAIL-DATA (5 words)
+- ✅ **Tile self-test**: TILE-TEST, TILE-TEST@, TILE-DETAIL@ (3 words)
+- ✅ **Stride/2D**: TSTRIDE-R!, TSTRIDE-R@, TTILE-H!, TTILE-W!, TLOAD2D,
+  TSTORE2D (6 words)
+- ✅ **FP16/BF16**: FP16-MODE, BF16-MODE (2 words)
 
 ### KDOS v1.1 — ✅ DONE (core + multicore)
 
@@ -65,13 +77,14 @@ and release hardening**.
 
 ### Emulator & Tools — ✅ DONE
 
-- ✅ megapad64.py: Full CPU emulation (1,393 lines)
-- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks (472 lines)
-- ✅ asm.py: Two-pass assembler (748 lines), SKIP instruction
+- ✅ megapad64.py: Full CPU emulation (2,516 lines, incl. extended tile, FP16/BF16)
+- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks (474 lines)
+- ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,038 lines)
+- ✅ devices.py: MMIO peripherals including CRC engine (964 lines)
 
-### Test Suite — ✅ 515 tests
+### Test Suite — ✅ 1,207 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSHardening: 12, TestKDOSFilesystem: 15
@@ -79,29 +92,39 @@ and release hardening**.
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
-- test_megapad64.py: 18 CPU tests
+- TestExtendedTile: ~670+ (saturating, rounding, FP16/BF16, strided/2D,
+  SHUFFLE, PACK, UNPACK, RROT, CRC, BIST, tile self-test, perf counters)
+- test_megapad64.py: 23 CPU + tile tests
 
-### FPGA RTL — ✅ DONE (base ISA + multicore)
+### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore)
 
-12 Verilog modules in `fpga/rtl/`, 7 testbenches, 96 hardware tests passing.
+13 Verilog modules in `fpga/rtl/`, 8 testbenches, 72 hardware tests passing.
 
-- ✅ mp64_cpu.v — Full ISA implementation (all 16 instruction families, 1506 lines)
+- ✅ mp64_cpu.v — Full ISA implementation (all 16 instruction families)
 - ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring)
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
-- ✅ mp64_tile.v — Base tile engine (TALU, TMUL, TRED, TSYS)
+- ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
+  saturating, rounding, SHUFFLE, PACK, UNPACK, RROT, VSHR, VSHL, VCLZ,
+  LOAD2D, STORE2D)
+- ✅ mp64_fp16_alu.v — FP16/BF16 half-precision tile operations
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
+- ✅ Nexys A7-200T target — estimated ~21k LUT, ~19k FF, ~37 BRAM36
 
-### Extended TPU Spec — ✅ DESIGNED (in `docs/extended-tpu-spec.md`)
+### Extended TPU — ✅ IMPLEMENTED
 
-Part of the base design — these features make the Megapad-64 a real-world
-useful chip, not a toy. 5 feature families:
+Fully implemented in both emulator and RTL with comprehensive test coverage.
+5 feature families:
 
-- Enhanced tile engine: TMUL/MAC, tile views, richer reductions, FP16/bf16
-- Crypto accelerators: AES-256-GCM, SHA-3/SHAKE, CRC32/CRC64
-- Data movement: HW tile DMA, prefetch/write-combine, per-core QoS
-- Reliability: memory BIST, tile self-test, performance counters
-- Optional scalar FP32 unit
+- ✅ Enhanced tile engine: TMUL/MAC/FMA/DOTACC, tile views (SHUFFLE/PACK/
+  UNPACK/RROT), richer reductions (SUMSQ/MINIDX/MAXIDX), extended TALU
+  (VSHR/VSHL/VCLZ), saturating, rounding, strided/2D (LOAD2D/STORE2D),
+  FP16/bfloat16 with FP32 accumulation
+- ✅ Crypto accelerators: AES-256-GCM, SHA-3/SHAKE, CRC32/CRC32C/CRC64
+- ✅ Data movement: HW tile DMA, prefetch/write-combine, per-core QoS
+- ✅ Reliability: memory BIST (March C−, checkerboard, addr-as-data),
+  tile self-test, 5 performance counters
+- ☐ Optional scalar FP32 unit (not yet implemented)
 
 ---
 
@@ -119,9 +142,9 @@ development aid.
 These prevent having to re-read the source every time:
 
 - [x] **`docs/bios-forth.md`** — Complete BIOS Forth word reference.
-  All 208 entries grouped by category (stack, arithmetic, logic, memory,
+  All 242 entries grouped by category (stack, arithmetic, logic, memory,
   control flow, string, I/O, compilation, disk, timer, tile engine,
-  NIC, system).  Stack effects, brief description, any quirks.
+  NIC, system, extended tile, CRC, BIST, perf counters, FP16/BF16).
 - [x] **`docs/kdos-reference.md`** — Complete KDOS word/definition
   reference.  All 247 `: ` definitions + key variables/constants.
   Grouped by section (§1–§15).  Stack effects, usage examples,
@@ -230,7 +253,7 @@ demonstrable.
 - [ ] Final `README.md` with correct stats, architecture diagram,
   quick-start, links to all docs
 - [ ] All docs written and proofread
-- [ ] Full test run — target ~650+ tests, all green
+- [ ] Full test run — target 1,207+ tests, all green
 - [ ] `sample.img` rebuilt with updated in-disk docs
 - [ ] Git tag `v1.0`
 
@@ -260,15 +283,18 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 8,880 | ✅ Done (208 words, 20.7 KB) |
+| `bios.asm` | 9,379 | ✅ Done (242 words, ~22 KB) |
 | `kdos.f` | 3,158 | ✅ Done (247 defs + 138 vars, multicore) |
-| `megapad64.py` | 1,393 | ✅ Done |
-| `system.py` | 472 | ✅ Done (quad-core SoC) |
+| `megapad64.py` | 2,516 | ✅ Done (incl. extended tile, FP16/BF16) |
+| `system.py` | 474 | ✅ Done (quad-core SoC) |
 | `cli.py` | 995 | ✅ Done |
-| `asm.py` | 748 | ✅ Done (listing support) |
-| `devices.py` | 855 | ✅ Done (+ Mailbox, Spinlock) |
+| `asm.py` | 788 | ✅ Done (listing support) |
+| `devices.py` | 964 | ✅ Done (+ Mailbox, Spinlock, CRC) |
 | `diskutil.py` | 1,038 | ✅ Done |
-| `test_system.py` | 6,227 | 515+ tests ✅ |
+| `test_megapad64.py` | 2,193 | 23 tests ✅ |
+| `test_system.py` | 6,234 | 1,184 tests ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `docs/` | 8 files | ✅ Written |
-| `README.md` | 310 | ✅ Rewritten |
+| `fpga/rtl/` | 7,242 | ✅ 13 Verilog modules |
+| `fpga/sim/` | 3,930 | ✅ 8 testbenches (72 HW tests) |
+| `docs/` | 9 files | ✅ Written |
+| `README.md` | 340 | ✅ Rewritten |

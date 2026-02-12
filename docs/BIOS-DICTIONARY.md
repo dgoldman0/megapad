@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **208** dictionary words defined in `bios.asm`.
+Complete catalog of all **242** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -314,7 +314,7 @@ Each entry is a linked list node:
 | 148 | `TALIGN` | `( -- )` | | Align HERE to next 64-byte boundary (for tile data) |
 | 149 | `FSLOAD` | `( "name" -- )` | | Load named file from MP64FS disk and EVALUATE its contents line-by-line |
 
-### Tile Engine (32 words)
+### Tile Engine (39 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -345,58 +345,122 @@ Each entry is a linked list node:
 | 174 | `TEMIN` | `( -- )` | | Tile element-wise min, writes to DST (t.min) |
 | 175 | `TEMAX` | `( -- )` | | Tile element-wise max, writes to DST (t.max) |
 | 176 | `TABS` | `( -- )` | | Tile element-wise absolute value, writes to DST (t.abs) |
-| 177 | `ACC@` | `( -- n )` | | Read tile accumulator ACC0 (CSR 0x19) |
-| 178 | `ACC1@` | `( -- n )` | | Read tile accumulator ACC1 (CSR 0x1A) |
-| 179 | `ACC2@` | `( -- n )` | | Read tile accumulator ACC2 (CSR 0x1B) |
-| 180 | `ACC3@` | `( -- n )` | | Read tile accumulator ACC3 (CSR 0x1C) |
-| 181 | `CYCLES` | `( -- n )` | | Read 32-bit hardware timer counter (MMIO +0x0100) |
+| 177 | `TSUMSQ` | `( -- )` | | Tile sum-of-squares reduction, result in ACC (t.sumsq) |
+| 178 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=min, ACC1=index (t.minidx) |
+| 179 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=max, ACC1=index (t.maxidx) |
+| 180 | `TWMUL` | `( -- )` | | Tile widening multiply: 8b×8b→16b, 16b×16b→32b (t.wmul) |
+| 181 | `TMAC` | `( -- )` | | Tile multiply-accumulate: DST += SRC0 × SRC1 (t.mac) |
+| 182 | `TFMA` | `( -- )` | | Tile fused multiply-add: DST = SRC0 × SRC1 + DST (t.fma) |
+| 183 | `TDOTACC` | `( -- )` | | Tile 4-way dot product accumulate, results in ACC0–ACC3 (t.dotacc) |
+| 184 | `ACC@` | `( -- n )` | | Read tile accumulator ACC0 (CSR 0x19) |
+| 185 | `ACC1@` | `( -- n )` | | Read tile accumulator ACC1 (CSR 0x1A) |
+| 186 | `ACC2@` | `( -- n )` | | Read tile accumulator ACC2 (CSR 0x1B) |
+| 187 | `ACC3@` | `( -- n )` | | Read tile accumulator ACC3 (CSR 0x1C) |
+| 188 | `CYCLES` | `( -- n )` | | Read 32-bit hardware timer counter (MMIO +0x0100) |
 
 ### NIC — Network Interface (4 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 182 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS register (MMIO +0x0401) |
-| 183 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
-| 184 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
-| 185 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
+| 189 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS register (MMIO +0x0401) |
+| 190 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
+| 191 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
+| 192 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
 
 ### Disk / Storage (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 186 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
-| 187 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
-| 188 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
-| 189 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
-| 190 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
-| 191 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
+| 193 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
+| 194 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
+| 195 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
+| 196 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
+| 197 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
+| 198 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
 
 ### Timer & Interrupts (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 192 | `TIMER!` | `( compare -- )` | | Set 32-bit compare-match register (MMIO +0x0104, written via st.w) |
-| 193 | `TIMER-CTRL!` | `( ctrl -- )` | | Write timer CONTROL byte (bit0=enable, bit1=compare-match IRQ, bit2=auto-reload) |
-| 194 | `TIMER-ACK` | `( -- )` | | Acknowledge timer IRQ (write 0x01 to STATUS at MMIO +0x0109) |
-| 195 | `EI!` | `( -- )` | | Enable interrupts globally (EI instruction) |
-| 196 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
-| 197 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
+| 199 | `TIMER!` | `( compare -- )` | | Set 32-bit compare-match register (MMIO +0x0104, written via st.w) |
+| 200 | `TIMER-CTRL!` | `( ctrl -- )` | | Write timer CONTROL byte (bit0=enable, bit1=compare-match IRQ, bit2=auto-reload) |
+| 201 | `TIMER-ACK` | `( -- )` | | Acknowledge timer IRQ (write 0x01 to STATUS at MMIO +0x0109) |
+| 202 | `EI!` | `( -- )` | | Enable interrupts globally (EI instruction) |
+| 203 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
+| 204 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
 
 ### Multicore (11 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 198 | `COREID` | `( -- n )` | | Push this core's hardware ID (0–3). Reads CSR 0x20. |
-| 199 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
-| 200 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
-| 201 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
-| 202 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
-| 203 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
-| 204 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
-| 205 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
-| 206 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
-| 207 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
-| 208 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
+| 205 | `COREID` | `( -- n )` | | Push this core's hardware ID (0–3). Reads CSR 0x20. |
+| 206 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
+| 207 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
+| 208 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
+| 209 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
+| 210 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
+| 211 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
+| 212 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
+| 213 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
+| 214 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
+| 215 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
+
+### Performance Counters (5 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 216 | `PERF-CYCLES` | `( -- n )` | | Read cycle counter (CSR 0x68) |
+| 217 | `PERF-STALLS` | `( -- n )` | | Read stall counter (CSR 0x69) |
+| 218 | `PERF-TILEOPS` | `( -- n )` | | Read tile operation counter (CSR 0x6A) |
+| 219 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
+| 220 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
+
+### CRC Engine (6 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 221 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (MMIO 0x7C0) |
+| 222 | `CRC-INIT!` | `( n -- )` | | Set initial CRC value (MMIO 0x7C8) |
+| 223 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (MMIO 0x7D0) |
+| 224 | `CRC@` | `( -- n )` | | Read current CRC result (MMIO 0x7D8) |
+| 225 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (CTRL ← 0) |
+| 226 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (CTRL ← 1) |
+
+### Memory BIST (5 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 227 | `BIST-FULL` | `( -- )` | | Start full memory BIST (March C− + checkerboard + addr-as-data) |
+| 228 | `BIST-QUICK` | `( -- )` | | Start quick memory BIST (March C− only) |
+| 229 | `BIST-STATUS` | `( -- n )` | | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail |
+| 230 | `BIST-FAIL-ADDR` | `( -- n )` | | Read first failing address |
+| 231 | `BIST-FAIL-DATA` | `( -- n )` | | Read expected/actual data (packed) |
+
+### Tile Self-Test (3 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 232 | `TILE-TEST` | `( -- )` | | Start tile datapath self-test (~200 cycles) |
+| 233 | `TILE-TEST@` | `( -- n )` | | Read self-test status: 0=idle, 2=pass, 3=fail |
+| 234 | `TILE-DETAIL@` | `( -- n )` | | Read failed sub-test bitmask |
+
+### Stride / 2D Addressing (6 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 235 | `TSTRIDE-R!` | `( n -- )` | | Set row stride in bytes (CSR 0x40) |
+| 236 | `TSTRIDE-R@` | `( -- n )` | | Read row stride (CSR 0x40) |
+| 237 | `TTILE-H!` | `( n -- )` | | Set tile height for 2D ops (CSR 0x42) |
+| 238 | `TTILE-W!` | `( n -- )` | | Set tile width for 2D ops (CSR 0x43) |
+| 239 | `TLOAD2D` | `( -- )` | | 2D strided load into tile register (t.load2d) |
+| 240 | `TSTORE2D` | `( -- )` | | 2D strided store from tile register (t.store2d) |
+
+### FP16 / BF16 Modes (2 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 241 | `FP16-MODE` | `( -- )` | | Set TMODE to FP16 half-precision (EW=4) |
+| 242 | `BF16-MODE` | `( -- )` | | Set TMODE to bfloat16 (EW=5) |
 
 ---
 
@@ -417,12 +481,18 @@ Each entry is a linked list node:
 | Input Source & Interpreter | 5 |
 | Comments | 2 |
 | Miscellaneous / System | 9 |
-| Tile Engine | 32 |
+| Tile Engine | 39 |
 | NIC | 4 |
 | Disk / Storage | 6 |
 | Timer & Interrupts | 6 |
 | Multicore | 11 |
-| **Total** | **208** |
+| Performance Counters | 5 |
+| CRC Engine | 6 |
+| Memory BIST | 5 |
+| Tile Self-Test | 3 |
+| Stride / 2D Addressing | 6 |
+| FP16 / BF16 Modes | 2 |
+| **Total** | **242** |
 
 ### All Immediate Words (33)
 
@@ -431,6 +501,11 @@ Each entry is a linked list node:
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
+BF16-MODE → FP16-MODE → TSTORE2D → TLOAD2D → TTILE-W! → TTILE-H! →
+TSTRIDE-R@ → TSTRIDE-R! → TILE-DETAIL@ → TILE-TEST@ → TILE-TEST →
+BIST-FAIL-DATA → BIST-FAIL-ADDR → BIST-STATUS → BIST-QUICK → BIST-FULL →
+CRC-FINAL → CRC-RESET → CRC@ → CRC-FEED → CRC-INIT! → CRC-POLY! →
+PERF-RESET → PERF-EXTMEM → PERF-TILEOPS → PERF-STALLS → PERF-CYCLES →
 CORE-STATUS → WAKE-CORE → SPIN! → SPIN@ → MBOX@ → MBOX! → IPI-ACK →
 IPI-STATUS → IPI-SEND → NCORES → COREID →
 FSLOAD → QUIT → >NUMBER → DOES> → 2R@ → 2R> → 2>R → POSTPONE → TO →
@@ -445,7 +520,8 @@ TIMER-CTRL! → TIMER! → DISK-WRITE → DISK-READ → DISK-N! → DISK-DMA! �
 DISK-SEC! → DISK@ → NET-MAC@ → NET-RECV → NET-SEND → NET-STATUS →
 ACCEPT → ." → SPACES → SPACE → TYPE → CONSTANT → VARIABLE → I → LOOP →
 DO → REPEAT → WHILE → UNTIL → BEGIN → THEN → ELSE → IF → ; → : → ' →
-EXECUTE → TCTRL@ → TMODE@ → TABS → TEMAX → TEMIN → TL1 → TPOPCNT →
+EXECUTE → TCTRL@ → TMODE@ → TABS → TDOTACC → TFMA → TMAC → TWMUL →
+TMAXIDX → TMINIDX → TSUMSQ → TEMAX → TEMIN → TL1 → TPOPCNT →
 ACC3@ → ACC2@ → ACC1@ → ACC@ → CYCLES → TZERO → TTRANS → TMAX → TMIN →
 TSUM → TDOT → TMUL → TXOR → TOR → TAND → TSUB → TADD → TCTRL! →
 TMODE! → TDST! → TSRC1! → TSRC0! → TFILL → TVIEW → TI → FILL → DUMP →
@@ -466,6 +542,9 @@ TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |
+| `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
+| `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE | Rate/state/control |
+| `0xFFFF_FF00_0000_07C0` | CRC Engine | POLY=+0, INIT=+8, DIN=+10, RESULT=+18, CTRL=+20 |
 
 ### Memory Layout
 

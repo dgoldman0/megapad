@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 515+ tests.
+— all running inside a Python emulator and verified by 1,200+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -25,12 +25,13 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 208 Forth dictionary words, 8,880 lines ASM, 20.7 KB binary |
+| **BIOS** | 242 Forth dictionary words, 9,379 lines ASM, ~22 KB binary |
 | **KDOS** | v1.1 — 247 colon definitions + 138 variables/constants, 3,158 lines Forth |
-| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 1,393 lines Python |
-| **Tests** | 515+ passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore) |
+| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,516 lines Python |
+| **Tests** | 1,207 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
+| **FPGA RTL** | 13 Verilog modules + 8 testbenches, Nexys A7-200T target (~21 k LUT) |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
@@ -105,18 +106,20 @@ DMA), SystemInfo (CPUID, memory size).  All are memory-mapped at
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
-│    BIOS v1.0 (8,880 lines)     │  ← Subroutine-threaded Forth,
-│  208 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (9,379 lines)     │  ← Subroutine-threaded Forth,
+│  242 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-208 dictionary words covering arithmetic, logic, stack manipulation,
+242 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
-strings, compilation, I/O, disk, timer, tile engine, NIC, and **multicore**
-(COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS).
+strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
+(COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
+**performance counters**, **CRC engine**, **memory BIST**, **tile self-test**,
+**strided/2D addressing**, and **FP16/BF16 modes**.
 Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
 with stack underflow detection, EVALUATE depth limiting, dictionary-full
 guards, and FSLOAD error recovery with file/line context.
@@ -204,8 +207,8 @@ make setup-pypy   # one-time
 make test          # ~4 min vs ~40 min under CPython
 ```
 
-All 515+ tests should pass, covering the CPU, BIOS, KDOS, filesystem,
-assembler, disk utility, devices, multicore, and networking.
+All 1,207 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+assembler, disk utility, devices, multicore, networking, and extended tile engine.
 
 > **Tip:** PyPy's JIT dramatically speeds up the CPU emulator loop.  You
 > can also use it interactively: `.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img`
@@ -216,21 +219,23 @@ assembler, disk utility, devices, multicore, and networking.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | 1,393 | CPU + tile engine emulator |
-| `system.py` | 472 | System integration (quad-core SoC, mailbox IPI, spinlocks) |
-| `bios.asm` | 8,880 | Forth BIOS in assembly (208 words, multicore, hardened) |
-| `bios.rom` | 20,722 B | Pre-assembled BIOS binary |
+| `megapad64.py` | 2,516 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
+| `system.py` | 474 | System integration (quad-core SoC, mailbox IPI, spinlocks) |
+| `bios.asm` | 9,379 | Forth BIOS in assembly (242 words, multicore, hardened) |
+| `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
 | `kdos.f` | 3,158 | KDOS v1.1 operating system in Forth (247 definitions) |
 | `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
-| `asm.py` | 748 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 855 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock |
+| `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
+| `devices.py` | 964 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,038 | MP64FS filesystem utility and disk image builder |
-| `test_megapad64.py` | 711 | CPU instruction set unit tests |
-| `test_system.py` | 6,227 | Full integration test suite (incl. multicore) |
+| `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
+| `test_system.py` | 6,234 | 1,184 integration tests (incl. multicore & extended tile) |
 | `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
 | `pyproject.toml` | 8 | Pytest configuration |
 | `conftest.py` | 14 | Test fixtures and snapshot caching |
+| `fpga/rtl/` | 7,242 | 13 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
+| `fpga/sim/` | 3,930 | 8 Verilog testbenches (72 hardware tests) |
 
 ---
 
@@ -241,12 +246,13 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 208 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 242 entries by category) |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 400+ definitions by section, incl. multicore) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |
-| [docs/tile-engine.md](docs/tile-engine.md) | Tile engine programming guide — CSRs, MEX encoding, KDOS integration |
+| [docs/tile-engine.md](docs/tile-engine.md) | Tile engine programming guide — CSRs, MEX encoding, extended ops, FP16/BF16 |
+| [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
 | [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)
@@ -260,8 +266,8 @@ The `docs/` directory contains comprehensive reference material:
 Forth might seem like an unusual choice for a modern system, but it's
 remarkably well-suited to this architecture:
 
-**Compactness** — The entire BIOS interpreter, compiler, and 208 built-in
-words fit in under 21 KB of machine code.  Forth is one of the most
+**Compactness** — The entire BIOS interpreter, compiler, and 242 built-in
+words fit in roughly 22 KB of machine code.  Forth is one of the most
 space-efficient programming environments ever created.
 
 **Interactivity** — Type a word, it executes immediately.  Development is

@@ -226,15 +226,20 @@ The tile engine extends beyond the base TALU/TMUL/TRED/TSYS with:
 - **TMUL/MAC family** — widening multiply (WMUL), fused multiply-add
   (FMA), lane-wise accumulate (MAC), 4-way dot product (DOTACC)
 - **Saturating arithmetic** — TMODE bit 5 enables clamping on overflow
-- **Rounding shifts** — TMODE bit 6 enables round-to-nearest on SHR
+- **Rounding shifts** — TMODE bit 6 enables round-to-nearest on VSHR
 - **Tile views** — SHUFFLE (arbitrary permutation), PACK/UNPACK (width
   conversion), row/col rotate/mirror (RROT)
+- **Extended TALU** — per-lane VSHR, VSHL, VCLZ (via EXT.8 prefix)
 - **Enhanced reductions** — sum-of-squares (SUMSQ), min/max with index
   (MINIDX/MAXIDX)
-- **Strided/2D addressing** — TSTRIDE_R/C, TTILE_H/W CSRs for non-
-  contiguous tile loads (e.g., 8×8 patches from a 640-wide framebuffer)
+- **Strided/2D addressing** — TSTRIDE_R/C, TTILE_H/W CSRs + LOAD2D/STORE2D
+  for non-contiguous tile loads (e.g., 8×8 patches from a 640-wide framebuffer)
 - **FP16 / bfloat16** — 32-lane half-precision tile operations with
-  FP32 accumulation for DOT/SUM
+  FP32 accumulation for DOT/SUM/SUMSQ
+
+All extended tile operations are implemented in both the emulator
+(`megapad64.py`) and RTL (`fpga/rtl/mp64_tile.v`, `mp64_fp16_alu.v`),
+with 53 tile testbench tests passing.
 
 ### Crypto Accelerators (MMIO)
 
@@ -371,12 +376,15 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 1,393 | Full ISA implementation |
-| System glue | `system.py` | 472 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 855 | UART, Timer, Storage, NIC, Mailbox, Spinlock |
-| BIOS | `bios.asm` | 8,880 | Forth interpreter, boot, multicore |
+| CPU emulator | `megapad64.py` | 2,516 | Full ISA + extended tile engine implementation |
+| System glue | `system.py` | 474 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 964 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC |
+| BIOS | `bios.asm` | 9,379 | Forth interpreter, boot, multicore, 242 dictionary words |
 | OS | `kdos.f` | 3,158 | Buffers, kernels, TUI, FS, multicore dispatch |
-| Assembler | `asm.py` | 748 | Two-pass macro assembler |
+| Assembler | `asm.py` | 788 | Two-pass macro assembler |
 | CLI/Monitor | `cli.py` | 995 | Debug, inspect, boot |
 | Disk tools | `diskutil.py` | 1,038 | Build/manage disk images |
-| Tests | `test_system.py` | 6,227 | 515 tests |
+| Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
+| Tests | `test_system.py` | 6,234 | 1,184 integration tests |
+| FPGA RTL | `fpga/rtl/` | 7,242 | 13 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
+| FPGA tests | `fpga/sim/` | 3,930 | 8 testbenches (72 hardware tests) |

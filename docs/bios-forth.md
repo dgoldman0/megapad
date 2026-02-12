@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **208 entries** —
+This document catalogs every word in the BIOS dictionary — **242 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -420,17 +420,17 @@ capability, plus an interrupt enable/disable mechanism.
 
 ---
 
-## Tile Engine (32 words)
+## Tile Engine (39 words)
 
 The tile engine (MEX extension) performs **SIMD operations** on 64-byte
 memory tiles.  Tiles are divided into lanes based on element width
-(64×8-bit, 32×16-bit, 16×32-bit, or 8×64-bit).
+(64×8-bit, 32×16-bit, 16×32-bit, 8×64-bit, or 32×FP16/BF16).
 
 ### CSR Access
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TMODE!` | `( mode -- )` | Set the element width and signedness.  Low 2 bits = width (0=8b, 1=16b, 2=32b, 3=64b).  Bit 4 = signed. |
+| `TMODE!` | `( mode -- )` | Set the element width, saturation, and rounding.  Bits 2:0 = EW (0=8b, 1=16b, 2=32b, 3=64b, 4=FP16, 5=BF16).  Bit 4 = signed.  Bit 5 = saturating.  Bit 6 = rounding shifts. |
 | `TMODE@` | `( -- mode )` | Read current tile mode. |
 | `TCTRL!` | `( ctrl -- )` | Set tile control (bit 0: accumulate, bit 1: zero-ACC-first). |
 | `TCTRL@` | `( -- ctrl )` | Read tile control. |
@@ -460,6 +460,10 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 |------|-------------|-------------|
 | `TMUL` | `( -- )` | `dst[lane] = src0[lane] × src1[lane]`. |
 | `TDOT` | `( -- )` | Dot product: `ACC += Σ(src0[lane] × src1[lane])`.  Result in ACC. |
+| `TWMUL` | `( -- )` | Widening multiply: 8b×8b→16b, 16b×16b→32b.  Output is double-width. |
+| `TMAC` | `( -- )` | Multiply-accumulate: `dst[lane] += src0[lane] × src1[lane]`. |
+| `TFMA` | `( -- )` | Fused multiply-add: `dst[lane] = src0[lane] × src1[lane] + dst[lane]`. |
+| `TDOTACC` | `( -- )` | 4-way dot product accumulate: `ACC[k] += dot(chunk_k)` for k=0..3. |
 
 ### Tile Reductions (result → ACC)
 
@@ -470,6 +474,9 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 | `TEMAX` | `( -- )` | `ACC = max(src0[lane])` — maximum across all lanes. |
 | `TPOPCNT` | `( -- )` | `ACC = Σ popcount(src0[lane])` — total bit count. |
 | `TL1` | `( -- )` | `ACC = Σ |src0[lane]|` — L1 norm. |
+| `TSUMSQ` | `( -- )` | `ACC = Σ src0[lane]²` — sum of squares. |
+| `TMINIDX` | `( -- )` | Minimum with index: ACC0 = min value, ACC1 = lane index. |
+| `TMAXIDX` | `( -- )` | Maximum with index: ACC0 = max value, ACC1 = lane index. |
 
 ### Tile System
 
@@ -556,6 +563,87 @@ device.
 ' my-work 1 WAKE-CORE      \ send XT to core 1 via IPI
 BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 ```
+
+---
+
+## Performance Counters (5 words)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PERF-CYCLES` | `( -- n )` | Read the cycle counter (CSR 0x68). |
+| `PERF-STALLS` | `( -- n )` | Read the stall counter (CSR 0x69). |
+| `PERF-TILEOPS` | `( -- n )` | Read the tile operation counter (CSR 0x6A). |
+| `PERF-EXTMEM` | `( -- n )` | Read the external memory beat counter (CSR 0x6B). |
+| `PERF-RESET` | `( -- )` | Reset and re-enable all performance counters (CSR 0x6C ← 3). |
+
+---
+
+## CRC Engine (6 words)
+
+MMIO-based CRC computation supporting CRC32, CRC32C, and CRC64 polynomials.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CRC-POLY!` | `( n -- )` | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64. |
+| `CRC-INIT!` | `( n -- )` | Set the initial CRC value. |
+| `CRC-FEED` | `( n -- )` | Feed 8 bytes of data into the CRC engine. |
+| `CRC@` | `( -- n )` | Read the current CRC result. |
+| `CRC-RESET` | `( -- )` | Reset CRC to its initial value. |
+| `CRC-FINAL` | `( -- )` | Finalize the CRC (apply XOR-out). |
+
+---
+
+## Memory BIST (5 words)
+
+Built-in self-test for RAM (March C−, checkerboard, address-as-data patterns).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BIST-FULL` | `( -- )` | Start full memory BIST (all three test patterns). |
+| `BIST-QUICK` | `( -- )` | Start quick BIST (March C− only). |
+| `BIST-STATUS` | `( -- n )` | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail. |
+| `BIST-FAIL-ADDR` | `( -- n )` | Read first failing address (valid after fail). |
+| `BIST-FAIL-DATA` | `( -- n )` | Read expected/actual data (packed, valid after fail). |
+
+---
+
+## Tile Self-Test (3 words)
+
+Functional check of the tile engine datapath (~200 cycles).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TILE-TEST` | `( -- )` | Start tile datapath self-test. |
+| `TILE-TEST@` | `( -- n )` | Read self-test status: 0=idle, 2=pass, 3=fail. |
+| `TILE-DETAIL@` | `( -- n )` | Read failed sub-test bitmask (for diagnostics). |
+
+---
+
+## Stride / 2D Addressing (6 words)
+
+Strided and two-dimensional tile loads/stores for accessing non-contiguous
+memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TSTRIDE-R!` | `( n -- )` | Set row stride in bytes (CSR 0x40). |
+| `TSTRIDE-R@` | `( -- n )` | Read current row stride. |
+| `TTILE-H!` | `( n -- )` | Set tile height for 2D ops (CSR 0x42). |
+| `TTILE-W!` | `( n -- )` | Set tile width for 2D ops (CSR 0x43). |
+| `TLOAD2D` | `( -- )` | 2D strided load: read H rows of W bytes from `[TSRC0]`. |
+| `TSTORE2D` | `( -- )` | 2D strided store: write H rows of W bytes to `[TDST]`. |
+
+---
+
+## FP16 / BF16 Modes (2 words)
+
+Half-precision floating-point tile operations.  Reductions (SUM, DOT,
+SUMSQ) use FP32 accumulation for numerical stability.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FP16-MODE` | `( -- )` | Set TMODE to FP16 half-precision (EW=4, 32 lanes). |
+| `BF16-MODE` | `( -- )` | Set TMODE to bfloat16 (EW=5, 32 lanes). |
 
 ---
 
