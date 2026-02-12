@@ -37,7 +37,7 @@ SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
-CRC_BASE     = 0x0700
+CRC_BASE     = 0x07C0
 
 
 # ---------------------------------------------------------------------------
