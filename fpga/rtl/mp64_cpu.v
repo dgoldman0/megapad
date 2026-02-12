@@ -53,6 +53,8 @@ module mp64_cpu (
     output reg  [2:0]  mex_funct,
     output reg  [63:0] mex_gpr_val,
     output reg  [7:0]  mex_imm8,
+    output reg  [3:0]  mex_ext_mod,
+    output reg         mex_ext_active,
     input  wire        mex_done,
     input  wire        mex_busy,
 
@@ -157,6 +159,7 @@ module mp64_cpu (
     localparam CPU_IRQ_LOAD   = 4'd12;   // load IVT vector from memory
     localparam CPU_MEMALU_RD  = 4'd13;   // MEMALU: reading M(R(X))
     localparam CPU_MEMALU_WB  = 4'd14;   // MEMALU: write-back (IO OUT read)
+    localparam CPU_SKIP       = 4'd15;   // SKIP: fetch next instr byte for length
 
     reg [3:0]  cpu_state;
 
@@ -708,14 +711,16 @@ module mp64_cpu (
                         ext_active <= 1'b0;
                         if (ext_active && ext_mod == 4'd6) begin
                             // SKIP mode: if condition met, skip next instr
-                            // ibuf[0] is the BR opcode (1 byte, no offset)
-                            // We need to peek at next instruction size.
-                            // For now, we set a flag and let FETCH handle it.
-                            // Simplified: skip 1 byte (single-byte instrs)
-                            // TODO: full instruction-size peek
-                            if (cond_eval(nib, flags, Q, ef_flags))
-                                R[psel] <= R[psel] + 64'd1;
-                            cpu_state <= CPU_FETCH;
+                            if (cond_eval(nib, flags, Q, ef_flags)) begin
+                                // Fetch next instruction's byte0 to determine its length
+                                bus_valid <= 1'b1;
+                                bus_addr  <= R[psel] + {60'd0, ibuf_len};
+                                bus_wen   <= 1'b0;
+                                bus_size  <= 2'b00;
+                                cpu_state <= CPU_SKIP;
+                            end else begin
+                                cpu_state <= CPU_FETCH;
+                            end
                         end else begin
                             if (cond_eval(nib, flags, Q, ef_flags)) begin
                                 R[psel] <= R[psel]
@@ -1258,14 +1263,16 @@ module mp64_cpu (
                     // MEX — tile engine (0xE)
                     // --------------------------------------------------------
                     else if (fam == FAM_MEX) begin
-                        ext_active <= 1'b0;
-                        mex_valid   <= 1'b1;
-                        mex_ss      <= ibuf[0][3:2];
-                        mex_op      <= ibuf[0][1:0];
-                        mex_funct   <= ibuf[1][2:0];
-                        mex_gpr_val <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
-                        mex_imm8    <= ibuf[2];
-                        cpu_state   <= CPU_MEX_WAIT;
+                        mex_valid      <= 1'b1;
+                        mex_ss         <= ibuf[0][3:2];
+                        mex_op         <= ibuf[0][1:0];
+                        mex_funct      <= ibuf[1][2:0];
+                        mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
+                        mex_imm8       <= ibuf[2];
+                        mex_ext_mod    <= ext_mod;
+                        mex_ext_active <= ext_active;
+                        ext_active     <= 1'b0;
+                        cpu_state      <= CPU_MEX_WAIT;
                     end
 
                     // --------------------------------------------------------
@@ -1577,6 +1584,21 @@ module mp64_cpu (
                 CPU_HALT: begin
                     if (irq_pending)
                         cpu_state <= CPU_IRQ;
+                end
+
+                // ============================================================
+                // SKIP: fetch next instruction's byte0 to determine length
+                // ============================================================
+                CPU_SKIP: begin
+                    bus_valid <= 1'b1;
+                    bus_addr  <= R[psel];
+                    bus_wen   <= 1'b0;
+                    bus_size  <= 2'b00;
+                    if (bus_ready) begin
+                        // Skip the next instruction by advancing PC past it
+                        R[psel] <= R[psel] + {60'd0, instr_len(bus_rdata[7:0], 1'b0)};
+                        cpu_state <= CPU_FETCH;
+                    end
                 end
 
             endcase

@@ -168,6 +168,14 @@ parameter [2:0] ETALU_VSHL = 3'd1;
 parameter [2:0] ETALU_VSEL = 3'd2;
 parameter [2:0] ETALU_VCLZ = 3'd3;
 
+// TMUL functions
+parameter [2:0] TMUL_MUL    = 3'd0;
+parameter [2:0] TMUL_DOT    = 3'd1;
+parameter [2:0] TMUL_WMUL   = 3'd2;
+parameter [2:0] TMUL_MAC    = 3'd3;
+parameter [2:0] TMUL_FMA    = 3'd4;
+parameter [2:0] TMUL_DOTACC = 3'd5;
+
 // EXT prefix modifier values
 parameter [3:0] EXT_IMM64  = 4'd0;   // 64-bit immediate
 parameter [3:0] EXT_SKIP   = 4'd6;   // Conditional skip

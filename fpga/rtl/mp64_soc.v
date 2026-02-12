@@ -102,6 +102,8 @@ module mp64_soc (
     wire [NUM_CORES*3-1:0]      core_mex_funct;
     wire [NUM_CORES*64-1:0]     core_mex_gpr_val;
     wire [NUM_CORES*8-1:0]      core_mex_imm8;
+    wire [NUM_CORES*4-1:0]      core_mex_ext_mod;
+    wire [NUM_CORES-1:0]        core_mex_ext_active;
     wire [NUM_CORES-1:0]        core_mex_done;
     wire [NUM_CORES-1:0]        core_mex_busy;
 
@@ -260,6 +262,8 @@ module mp64_soc (
                 .mex_funct  (core_mex_funct  [c*3  +: 3]),
                 .mex_gpr_val(core_mex_gpr_val[c*64 +: 64]),
                 .mex_imm8   (core_mex_imm8   [c*8  +: 8]),
+                .mex_ext_mod   (core_mex_ext_mod   [c*4  +: 4]),
+                .mex_ext_active(core_mex_ext_active [c]),
                 .mex_done   (core_mex_done   [c]),
                 .mex_busy   (core_mex_busy   [c]),
 
@@ -307,6 +311,8 @@ module mp64_soc (
                 .mex_funct      (core_mex_funct  [c*3  +: 3]),
                 .mex_gpr_val    (core_mex_gpr_val[c*64 +: 64]),
                 .mex_imm8       (core_mex_imm8   [c*8  +: 8]),
+                .mex_ext_mod    (core_mex_ext_mod   [c*4  +: 4]),
+                .mex_ext_active (core_mex_ext_active [c]),
                 .mex_done       (core_mex_done   [c]),
                 .mex_busy       (core_mex_busy   [c]),
 
@@ -395,21 +401,63 @@ module mp64_soc (
     end
 
     // ========================================================================
-    // Tile External Memory Arbiter (same pattern for ext tile port)
+    // Tile External Memory Arbiter (round-robin, mirrors internal arbiter)
     // ========================================================================
-    // Simplified: for prototype, only core 0's ext tile requests are routed.
-    // Full arbiter would mirror the internal tile arbiter above.
-    assign tile_ext_arb_req   = tile_ext_req[0];
-    assign tile_ext_arb_addr  = tile_ext_addr[63:0];
-    assign tile_ext_arb_wen   = tile_ext_wen[0];
-    assign tile_ext_arb_wdata = tile_ext_wdata[511:0];
+    reg [CORE_ID_BITS-1:0] ext_tile_grant;
+    reg [CORE_ID_BITS-1:0] ext_tile_last_grant;
+    reg                     ext_tile_busy;
+
+    reg [CORE_ID_BITS-1:0] ext_tile_next;
+    reg                     ext_tile_any;
+
+    always @(*) begin
+        ext_tile_next = ext_tile_last_grant;
+        ext_tile_any  = 1'b0;
+        if (tile_ext_req[(ext_tile_last_grant + 2'd1) & 2'd3]) begin
+            ext_tile_next = (ext_tile_last_grant + 2'd1) & 2'd3;
+            ext_tile_any  = 1'b1;
+        end else if (tile_ext_req[(ext_tile_last_grant + 2'd2) & 2'd3]) begin
+            ext_tile_next = (ext_tile_last_grant + 2'd2) & 2'd3;
+            ext_tile_any  = 1'b1;
+        end else if (tile_ext_req[(ext_tile_last_grant + 2'd3) & 2'd3]) begin
+            ext_tile_next = (ext_tile_last_grant + 2'd3) & 2'd3;
+            ext_tile_any  = 1'b1;
+        end else if (tile_ext_req[ext_tile_last_grant]) begin
+            ext_tile_next = ext_tile_last_grant;
+            ext_tile_any  = 1'b1;
+        end
+    end
+
+    assign tile_ext_arb_req   = ext_tile_any && !ext_tile_busy ? 1'b1 :
+                                ext_tile_busy                 ? 1'b1 : 1'b0;
+    assign tile_ext_arb_addr  = tile_ext_addr [ext_tile_grant*64 +: 64];
+    assign tile_ext_arb_wen   = tile_ext_wen  [ext_tile_grant];
+    assign tile_ext_arb_wdata = tile_ext_wdata[ext_tile_grant*512 +: 512];
 
     generate
         for (ti = 0; ti < NUM_CORES; ti = ti + 1) begin : ext_tile_ack_mux
             assign tile_ext_rdata[ti*512 +: 512] = tile_ext_arb_rdata;
-            assign tile_ext_ack[ti] = (ti == 0) ? tile_ext_arb_ack : 1'b0;
+            assign tile_ext_ack[ti] = tile_ext_arb_ack && (ext_tile_grant == ti[CORE_ID_BITS-1:0]);
         end
     endgenerate
+
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            ext_tile_grant      <= {CORE_ID_BITS{1'b0}};
+            ext_tile_last_grant <= {CORE_ID_BITS{1'b0}};
+            ext_tile_busy       <= 1'b0;
+        end else begin
+            if (ext_tile_busy) begin
+                if (tile_ext_arb_ack) begin
+                    ext_tile_busy       <= 1'b0;
+                    ext_tile_last_grant <= ext_tile_grant;
+                end
+            end else if (ext_tile_any) begin
+                ext_tile_grant <= ext_tile_next;
+                ext_tile_busy  <= 1'b1;
+            end
+        end
+    end
 
     // ========================================================================
     // Multi-Master Bus Arbiter (4 CPUs → Memory + MMIO)
