@@ -227,11 +227,8 @@ module tb_mp64_soc;
     // ========================================================================
     initial begin
         // Load BIOS binary into BRAM via hierarchical reference
-        // Use: $readmemh("bios.hex", u_soc.u_memory.bram_512, 0, ...);
-        // Or load byte-by-byte for flexibility:
         $display("[TB] Loading BIOS...");
-        // In real sim, uncomment:
-        // $readmemh("../bios.hex", u_soc.u_memory.bram_512);
+        $readmemh("bios.hex", u_soc.u_memory.mem);
         $display("[TB] BIOS loaded.");
     end
 
@@ -242,16 +239,17 @@ module tb_mp64_soc;
         $dumpfile("mp64_soc.vcd");
         $dumpvars(0, tb_mp64_soc);
 
-        #10_000_000;  // 10 ms
+        #50_000_000;  // 50 ms = 5M cycles at 100 MHz
         $display("\n[TB] Simulation timeout at %0t ns", $time);
         $finish;
     end
 
-    // Watchdog: detect HALT
+    // Watchdog: detect core 0 HALT (secondary cores halt normally)
     always @(posedge sys_clk) begin
-        if (u_soc.core[0].u_cpu.cpu_state == 4'd7) begin  // CPU_HALT
+        if (sys_rst_n &&
+            u_soc.core[0].u_cpu.cpu_state == 4'd7) begin  // CPU_HALT
             #1000;
-            $display("[TB] CPU halted at t=%0t ns, PC=0x%016h",
+            $display("[TB] Core 0 halted at t=%0t ns, PC=0x%016h",
                      $time, u_soc.core[0].u_cpu.R[u_soc.core[0].u_cpu.psel]);
             $finish;
         end

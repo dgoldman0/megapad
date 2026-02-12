@@ -2,10 +2,10 @@
 """Generate hex files for FPGA simulation from binary images."""
 import sys, os
 
-def bin_to_hex(inpath, outpath, width=8):
+def bin_to_hex(inpath, outpath, width=64):
     """Convert binary file to $readmemh-compatible hex.
     
-    width: bytes per line (8 = 64-bit words for CPU port view)
+    width: bytes per line (64 = 512-bit rows for mem[0:16383])
     """
     with open(inpath, 'rb') as f:
         data = f.read()
@@ -89,7 +89,9 @@ if __name__ == '__main__':
     projdir = os.path.abspath(os.path.join(simdir, '..', '..'))
     
     # BIOS hex
-    bios = os.path.join(projdir, 'bios.bin')
+    bios = os.path.join(projdir, 'bios.rom')
+    if not os.path.exists(bios):
+        bios = os.path.join(projdir, 'bios.bin')  # fallback
     if os.path.exists(bios):
         bin_to_hex(bios, os.path.join(simdir, 'bios.hex'))
     
