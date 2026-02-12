@@ -43,56 +43,61 @@ and **quad-core multicore dispatch** with IPI, spinlocks, and barriers.
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Megapad-64 CPU                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ Scalar Core   │  │ Tile Engine  │  │ CSR Registers │  │
-│  │ 16×64-bit GPR │  │ 64-byte SIMD │  │ FLAGS, TMODE  │  │
-│  │ 8-bit D acc   │  │ 256-bit ACC  │  │ TCTRL, IVT    │  │
-│  │ 8 flags       │  │ 8–64 lanes   │  │ cursor regs   │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────────────┘  │
-│         │                  │                              │
-│         └──────┬───────────┘                              │
-│                │                                          │
-│     ┌──────────▼──────────┐                               │
-│     │ Unified Address Bus │                               │
-│     └──────────┬──────────┘                               │
-└────────────────┼────────────────────────────────────────┘
-                 │
-    ┌────────────┼────────────┐
-    │            │            │
-┌───▼───┐  ┌────▼────┐  ┌────▼──────┐
-│  RAM  │  │  MMIO   │  │ Storage   │
-│1 MiB  │  │ Devices │  │Controller │
-└───────┘  └────┬────┘  └───────────┘
-                │
-      ┌────┬────┼────┬──────┐
-      │    │    │    │      │
-    UART Timer SysInfo NIC  │
-                           Disk
+┌───────────────────────────────────────────────────────────────┐
+│                      Megapad-64 SoC                           │
+│                                                               │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐             │
+│  │ Core 0  │ │ Core 1  │ │ Core 2  │ │ Core 3  │             │
+│  │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │             │
+│  │ Tile    │ │ Tile    │ │ Tile    │ │ Tile    │             │
+│  │ Engine  │ │ Engine  │ │ Engine  │ │ Engine  │             │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘             │
+│       │           │           │           │                   │
+│  ┌────▼───────────▼───────────▼───────────▼────┐              │
+│  │    Round-Robin Bus Arbiter (per-core QoS)   │              │
+│  └────────────────────┬────────────────────────┘              │
+│                       │                                       │
+│       ┌───────────────┼───────────────┐                       │
+│       │               │               │                       │
+│  ┌────▼────┐  ┌───────▼───────┐  ┌────▼──────┐               │
+│  │  SRAM   │  │  MMIO Devices │  │  Mailbox  │               │
+│  │ 1–4 MiB │  │  UART  Timer  │  │  IPI +    │               │
+│  │         │  │  Disk  NIC    │  │  Spinlock │               │
+│  │         │  │  CRC Engine   │  │           │               │
+│  └─────────┘  └───────────────┘  └───────────┘               │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-**Scalar CPU** — 16 general-purpose 64-bit registers, variable-length
-instructions (1–10 bytes), 16 instruction families, heritage from the RCA
-CDP1802 with modern 64-bit extensions.  Any GPR can serve as PC, data
-pointer, or stack pointer via runtime selectors.
+**Quad-Core SoC** — Four identical cores sharing a unified address space
+via a round-robin bus arbiter with per-core QoS weights.  Cores
+communicate through a hardware mailbox (IPI) and 8 spinlocks.  Secondary
+cores boot into a worker loop; the primary core dispatches work via
+`WAKE-CORE` / `IPI-SEND`.
 
-**Tile Engine** — A SIMD execution unit controlled through CSR registers
-and triggered by MEX instructions.  Each operation processes a 64-byte
-tile (8 to 64 lanes depending on element width) with element-wise ALU,
-multiply, dot product, or reduction functions.  A 256-bit accumulator
-supports multi-tile accumulation without overflow.
+**Scalar CPU** — Each core has 16 general-purpose 64-bit registers,
+variable-length instructions (1–10 bytes), 16 instruction families,
+heritage from the RCA CDP1802 with modern 64-bit extensions.  Any GPR can
+serve as PC, data pointer, or stack pointer via runtime selectors.
 
-**Megapad Memory** — The full design calls for 8–64 MiB of on-chip
-multi-ported SRAM organized into 16 banks, delivering GPU-class bandwidth
-from a single core.  The emulator models this as flat memory with
-simplified timing — behavior is correct, only cycle-level timing differs
-from the hardware target.
+**Tile Engine** — Per-core SIMD execution unit controlled through CSR
+registers and triggered by MEX instructions.  Each operation processes a
+64-byte tile (8 to 64 lanes depending on element width) with element-wise
+ALU, multiply, dot product, or reduction functions.  Extended operations
+include FMA, widening multiply, saturating arithmetic, rounding shifts,
+tile views (SHUFFLE/PACK/UNPACK/RROT), strided 2D loads/stores, and
+FP16/bfloat16 support.  A 256-bit accumulator enables multi-tile
+accumulation without overflow.
+
+**Megapad Memory** — 1 MiB on-chip SRAM in the base design (4 MiB in the
+expanded model), modeled as flat byte-addressable memory in the emulator.
+The FPGA target uses block RAM; a future multi-bank organization could
+deliver higher bandwidth for tile-heavy workloads.
 
 **Devices** — UART (serial I/O), Timer (cycle-accurate with interrupts),
 Storage Controller (sector-based disk I/O), NIC (Ethernet frames with
-DMA), SystemInfo (CPUID, memory size).  All are memory-mapped at
-`0xFFFF_FF00+`.
+DMA), CRC Engine (CRC32/CRC32C/CRC64), SystemInfo (CPUID, memory size),
+Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  All are
+memory-mapped at `0xFFFF_FF00+`.
 
 ---
 
@@ -288,24 +293,24 @@ powerful and surprisingly elegant.
 
 ---
 
-## Emulator vs. Hardware Design
+## Emulator vs. FPGA RTL
 
 The Python emulator is a **functional simulation** — it implements the
-full instruction set and produces correct results, but models the megapad
-and tile engine as flat memory with simplified cycle counting.
+full instruction set and produces correct results, but models memory as
+flat RAM with simplified cycle counting.
 
-The full hardware design envisions:
+The FPGA RTL (Nexys A7-200T target, ~21 k LUT) implements the full
+quad-core SoC including the extended tile engine.  Key differences from
+the emulator are cycle-level timing and block-RAM-backed memory:
 
-- **8–64 MiB on-chip SRAM** organized into 16 banks with multi-port access
-- **4 read ports + 2 write ports** for sustained tile throughput
-- **Bank-local operations** for rapid intra-bank calculation
+- **1 MiB SRAM** base (4 MiB expanded), backed by FPGA block RAM
 - **4-stage in-order pipeline** (IF, ID, EX, WB) with single-cycle
   bubble on taken branches
+- **Quad-core** with round-robin bus arbiter and per-core QoS weights
 - **Fully static design** — retains state down to DC for ultra-low power
 
-Software written for the emulator will run identically on any future
-hardware implementation.  The simplification affects only timing accuracy,
-not behavior.
+Software written for the emulator runs identically on the RTL.
+The simplification affects only timing accuracy, not behavior.
 
 ---
 
