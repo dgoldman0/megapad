@@ -516,6 +516,191 @@ module tb_tile;
         expected_tile = {64{8'h0A}};  // 0x08 + 0x01*0x02 = 0x0A
         check512(tile_mem[2], expected_tile, "TMUL.MAC");
 
+        // ================================================================
+        //  FP16 / BF16 TESTS
+        // ================================================================
+
+        // ====== TEST 25: FP16 TALU.ADD — 1.0 + 2.0 = 3.0 ======
+        // FP16: 1.0 = 0x3C00, 2.0 = 0x4000, 3.0 = 0x4200
+        $display("\n=== TEST 25: FP16 TALU.ADD ===");
+        tile_mem[0]  = {32{16'h3C00}};  // 32 lanes of 1.0
+        tile_mem[1]  = {32{16'h4000}};  // 32 lanes of 2.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);    // FP16 mode
+        mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
+        expected_tile = {32{16'h4200}};  // 32 lanes of 3.0
+        check512(tile_mem[2], expected_tile, "FP16 TALU.ADD 1.0+2.0=3.0");
+
+        // ====== TEST 26: FP16 TALU.SUB — 3.0 - 1.0 = 2.0 ======
+        $display("\n=== TEST 26: FP16 TALU.SUB ===");
+        tile_mem[0]  = {32{16'h4200}};  // 3.0
+        tile_mem[1]  = {32{16'h3C00}};  // 1.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TALU, TALU_SUB, 64'd0, 8'd0);
+        expected_tile = {32{16'h4000}};  // 2.0
+        check512(tile_mem[2], expected_tile, "FP16 TALU.SUB 3.0-1.0=2.0");
+
+        // ====== TEST 27: FP16 TALU.MIN — min(3.0, 1.0) = 1.0 ======
+        $display("\n=== TEST 27: FP16 TALU.MIN ===");
+        tile_mem[0]  = {32{16'h4200}};  // 3.0
+        tile_mem[1]  = {32{16'h3C00}};  // 1.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TALU, TALU_MIN, 64'd0, 8'd0);
+        expected_tile = {32{16'h3C00}};  // 1.0
+        check512(tile_mem[2], expected_tile, "FP16 TALU.MIN min(3,1)=1");
+
+        // ====== TEST 28: FP16 TALU.MAX — max(3.0, 1.0) = 3.0 ======
+        $display("\n=== TEST 28: FP16 TALU.MAX ===");
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TALU, TALU_MAX, 64'd0, 8'd0);
+        expected_tile = {32{16'h4200}};  // 3.0
+        check512(tile_mem[2], expected_tile, "FP16 TALU.MAX max(3,1)=3");
+
+        // ====== TEST 29: FP16 TALU.ABS — abs(-2.0) = 2.0 ======
+        // FP16 -2.0 = 0xC000
+        $display("\n=== TEST 29: FP16 TALU.ABS ===");
+        tile_mem[0]  = {32{16'hC000}};  // -2.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd3, MEX_TALU, TALU_ABS, 64'd0, 8'd0);  // ss=3 in-place
+        expected_tile = {32{16'h4000}};  // 2.0
+        check512(tile_mem[2], expected_tile, "FP16 TALU.ABS abs(-2)=2");
+
+        // ====== TEST 30: FP16 TMUL.MUL — 2.0 × 3.0 = 6.0 ======
+        // FP16: 6.0 = 0x4600
+        $display("\n=== TEST 30: FP16 TMUL.MUL ===");
+        tile_mem[0]  = {32{16'h4000}};  // 2.0
+        tile_mem[1]  = {32{16'h4200}};  // 3.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_MUL, 64'd0, 8'd0);
+        expected_tile = {32{16'h4600}};  // 6.0
+        check512(tile_mem[2], expected_tile, "FP16 TMUL.MUL 2*3=6");
+
+        // ====== TEST 31: FP16 TMUL.DOT — 32 × (1.0 × 1.0) = 32.0 ======
+        // FP32 32.0 = 0x42000000
+        $display("\n=== TEST 31: FP16 TMUL.DOT ===");
+        tile_mem[0]  = {32{16'h3C00}};  // 1.0
+        tile_mem[1]  = {32{16'h3C00}};  // 1.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TMODE, 64'd4);
+        csr_write(CSR_TCTRL, 64'h02);  // ACC_ZERO
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_DOT, 64'd0, 8'd0);
+        csr_read(CSR_ACC0, rd64);
+        check64(rd64, 64'h0000000042000000, "FP16 DOT 32×(1×1)=32.0");
+
+        // ====== TEST 32: FP16 TRED.SUM — 32 × 2.0 = 64.0 ======
+        // FP32 64.0 = 0x42800000
+        $display("\n=== TEST 32: FP16 TRED.SUM ===");
+        tile_mem[0]  = {32{16'h4000}};  // 2.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TMODE, 64'd4);
+        csr_write(CSR_TCTRL, 64'h02);  // ACC_ZERO
+        mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
+        csr_read(CSR_ACC0, rd64);
+        check64(rd64, 64'h0000000042800000, "FP16 TRED.SUM 32×2=64.0");
+
+        // ====== TEST 33: FP16 NaN propagation ======
+        // NaN + 1.0 = NaN
+        $display("\n=== TEST 33: FP16 NaN propagation ===");
+        tile_mem[0]  = {32{16'h7E00}};  // qNaN
+        tile_mem[1]  = {32{16'h3C00}};  // 1.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
+        expected_tile = {32{16'h7E00}};  // qNaN
+        check512(tile_mem[2], expected_tile, "FP16 NaN+1 = NaN");
+
+        // ====== TEST 34: BF16 TALU.ADD — 1.0 + 2.0 = 3.0 ======
+        // BF16: 1.0=0x3F80, 2.0=0x4000, 3.0=0x4040
+        $display("\n=== TEST 34: BF16 TALU.ADD ===");
+        tile_mem[0]  = {32{16'h3F80}};  // bfloat16 1.0
+        tile_mem[1]  = {32{16'h4000}};  // bfloat16 2.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd5);    // BF16 mode
+        mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
+        expected_tile = {32{16'h4040}};  // bfloat16 3.0
+        check512(tile_mem[2], expected_tile, "BF16 TALU.ADD 1.0+2.0=3.0");
+
+        // ====== TEST 35: BF16 TMUL.MUL — 2.0 × 3.0 = 6.0 ======
+        // BF16: 6.0=0x40C0
+        $display("\n=== TEST 35: BF16 TMUL.MUL ===");
+        tile_mem[0]  = {32{16'h4000}};  // 2.0
+        tile_mem[1]  = {32{16'h4040}};  // 3.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd5);
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_MUL, 64'd0, 8'd0);
+        expected_tile = {32{16'h40C0}};  // 6.0
+        check512(tile_mem[2], expected_tile, "BF16 TMUL.MUL 2*3=6");
+
+        // ====== TEST 36: FP16 TRED.MIN — min across lanes ======
+        $display("\n=== TEST 36: FP16 TRED.MIN ===");
+        tile_mem[0] = {32{16'h4200}};  // fill with 3.0
+        tile_mem[0][0 +: 16] = 16'h3C00;  // lane 0 = 1.0 (minimum)
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TMODE, 64'd4);
+        csr_write(CSR_TCTRL, 64'h02);
+        mex_dispatch(2'd0, MEX_TRED, TRED_MIN, 64'd0, 8'd0);
+        csr_read(CSR_ACC0, rd64);
+        // FP32 1.0 = 0x3F800000
+        check64(rd64, 64'h000000003F800000, "FP16 TRED.MIN = 1.0");
+
+        // ====== TEST 37: FP16 TRED.MAX — max across lanes ======
+        $display("\n=== TEST 37: FP16 TRED.MAX ===");
+        tile_mem[0] = {32{16'h3C00}};  // fill with 1.0
+        tile_mem[0][31*16 +: 16] = 16'h4500;  // lane 31 = 5.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TMODE, 64'd4);
+        csr_write(CSR_TCTRL, 64'h02);
+        mex_dispatch(2'd0, MEX_TRED, TRED_MAX, 64'd0, 8'd0);
+        csr_read(CSR_ACC0, rd64);
+        // FP32 5.0 = 0x40A00000
+        check64(rd64, 64'h0000000040A00000, "FP16 TRED.MAX = 5.0");
+
+        // ====== TEST 38: FP16 TMUL.MAC — c + a*b ======
+        // MAC: 1.0 + 2.0*3.0 = 7.0 (FP16 7.0 = 0x4700)
+        $display("\n=== TEST 38: FP16 TMUL.MAC ===");
+        tile_mem[0]  = {32{16'h4000}};  // a = 2.0
+        tile_mem[1]  = {32{16'h4200}};  // b = 3.0
+        tile_mem[2]  = {32{16'h3C00}};  // dst (c) = 1.0
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TMUL, TMUL_MAC, 64'd0, 8'd0);
+        expected_tile = {32{16'h4700}};  // 7.0
+        check512(tile_mem[2], expected_tile, "FP16 TMUL.MAC 1+2*3=7");
+
+        // ====== TEST 39: FP16 bitwise AND (raw bits) ======
+        $display("\n=== TEST 39: FP16 bitwise AND ===");
+        tile_mem[0] = {32{16'hFFFF}};
+        tile_mem[1] = {32{16'h7C00}};  // +inf mask
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd4);
+        mex_dispatch(2'd0, MEX_TALU, TALU_AND, 64'd0, 8'd0);
+        expected_tile = {32{16'h7C00}};
+        check512(tile_mem[2], expected_tile, "FP16 bitwise AND");
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
