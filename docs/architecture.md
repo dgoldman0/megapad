@@ -41,8 +41,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0100     │  Timer               │ │
     │   0x0200     │  Storage Controller  │ │
     │   0x0300     │  System Info (R/O)   │ │
-    │   0x0400     │  NIC                 │ │
-    │              └──────────────────────┘ │
+    │   0x0400     │  NIC                 │ │    │   0x0500     │  Mailbox (IPI)       │ │
+    │   0x0600     │  Spinlock            │ │    │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
 
@@ -81,6 +81,8 @@ device occupies a small range:
 | **Storage** | `+0x0200` | 16 bytes | Sector-based disk controller |
 | **System Info** | `+0x0300` | 16 bytes | Read-only board ID and config |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
+| **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
+| **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).
@@ -207,7 +209,7 @@ based on source ID.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.0  (kdos.f, 2,972 lines)              │
+│  KDOS v1.1  (kdos.f, 3,158 lines)              │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -221,8 +223,8 @@ based on source ID.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 8,187 lines)            │
-│  Subroutine-threaded Forth, 197 dictionary words│
+│  BIOS v1.0  (bios.asm, 8,880 lines)            │
+│  Subroutine-threaded Forth, 208 dictionary words│
 │  Disk I/O, FSLOAD, UART, timer, tile engine     │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
@@ -310,11 +312,12 @@ See `docs/tile-engine.md` for a complete programming guide.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 1,358 | Full ISA implementation |
-| System glue | `system.py` | 300 | MMIO devices, memory map |
-| BIOS | `bios.asm` | 8,187 | Forth interpreter, boot |
-| OS | `kdos.f` | 2,972 | Buffers, kernels, TUI, FS, bundles |
-| Assembler | `asm.py` | 677 | Two-pass macro assembler |
-| CLI/Monitor | `cli.py` | 990 | Debug, inspect, boot |
-| Disk tools | `diskutil.py` | 941 | Build/manage disk images |
-| Tests | `test_system.py` | 4,693 | 619 tests |
+| CPU emulator | `megapad64.py` | 1,393 | Full ISA implementation |
+| System glue | `system.py` | 472 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 855 | UART, Timer, Storage, NIC, Mailbox, Spinlock |
+| BIOS | `bios.asm` | 8,880 | Forth interpreter, boot, multicore |
+| OS | `kdos.f` | 3,158 | Buffers, kernels, TUI, FS, multicore dispatch |
+| Assembler | `asm.py` | 748 | Two-pass macro assembler |
+| CLI/Monitor | `cli.py` | 995 | Debug, inspect, boot |
+| Disk tools | `diskutil.py` | 1,038 | Build/manage disk images |
+| Tests | `test_system.py` | 6,227 | 515 tests |

@@ -4,9 +4,10 @@
 OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
-**Current state (Feb 2025):** BIOS (197 dict entries, 8,287 lines ASM,
-20.1 KB binary), KDOS (237 `: ` definitions + 127 variables/constants,
-2,972 lines), Emulator (1,358 lines), 678+ tests passing.
+**Current state (Feb 2025):** BIOS (208 dict entries, 8,880 lines ASM,
+20.7 KB binary), KDOS v1.1 (247 `:` definitions + 138 variables/constants,
+3,158 lines), Emulator (1,393 lines + 472-line quad-core SoC), 515+ tests
+passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -19,7 +20,7 @@ and release hardening**.
 
 ### BIOS v1.0 — ✅ DONE
 
-197 dictionary entries, 8,187 lines ASM, 19.7 KB binary.
+208 dictionary entries, 8,880 lines ASM, 20.7 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -34,21 +35,24 @@ and release hardening**.
 - ✅ Timer, NIC, tile-engine CSR access words
 - ✅ EVALUATE, COMPARE, VALUE/TO, POSTPONE, DOES>, RECURSE, 2>R/2R>/2R@
 - ✅ Bus-fault handler, ABORT/ABORT"
+- ✅ **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!,
+  MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS (11 words)
 
-### KDOS v1.0 — ✅ DONE (core)
+### KDOS v1.1 — ✅ DONE (core + multicore)
 
-237 word definitions + 127 variables/constants/creates, 2,972 lines.
+247 word definitions + 138 variables/constants/creates, 3,158 lines.
 
-15 sections:
+16 sections:
 - §1 Utility words, §2 Buffer subsystem, §3 Tile-aware buffer ops
 - §4 Kernel registry, §5 Sample kernels (12 kernels including kadd,
   knorm, khistogram, kpeak, kconvolve, etc.)
 - §6 Pipeline engine, §7 Storage & persistence
 - §7.5–7.8 Filesystem (MP64FS), documentation browser, dictionary search
-- §8 Scheduler & tasks, §9 Interactive screens (8-tab TUI)
+- §8 Scheduler & tasks, §9 Interactive screens (9-tab TUI)
 - §10 Data ports (NIC ingestion), §11 Benchmarking
 - §12 Dashboard, §13 Help system, §14 Startup
 - §15 Pipeline bundles (versioned, declarative config format)
+- §8.1 Multicore dispatch (CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR)
 
 ### Filesystem — ✅ DONE
 
@@ -61,18 +65,21 @@ and release hardening**.
 
 ### Emulator & Tools — ✅ DONE
 
-- ✅ megapad64.py: Full CPU emulation (1,358 lines)
-- ✅ system.py: System integration — UART, timer, storage, NIC, tile engine
-- ✅ asm.py: Two-pass assembler (677 lines), SKIP instruction
-- ✅ cli.py: Interactive monitor/debugger (990 lines)
-- ✅ diskutil.py: Filesystem tooling (941 lines)
+- ✅ megapad64.py: Full CPU emulation (1,393 lines)
+- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks (472 lines)
+- ✅ asm.py: Two-pass assembler (748 lines), SKIP instruction
+- ✅ cli.py: Interactive monitor/debugger (995 lines)
+- ✅ diskutil.py: Filesystem tooling (1,038 lines)
 
-### Test Suite — ✅ 619 tests
+### Test Suite — ✅ 515 tests
 
-- TestBIOS: 128, TestKDOS: 212, TestKDOSFilesystem: 15
+- TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
+- TestKDOS: 229, TestKDOSHardening: 12, TestKDOSFilesystem: 15
+- TestKDOSMulticore: 19, TestPipelineBundles: 13
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
+- test_megapad64.py: 18 CPU tests
 
 ---
 
@@ -90,12 +97,12 @@ development aid.
 These prevent having to re-read the source every time:
 
 - [x] **`docs/bios-forth.md`** — Complete BIOS Forth word reference.
-  All 197 entries grouped by category (stack, arithmetic, logic, memory,
+  All 208 entries grouped by category (stack, arithmetic, logic, memory,
   control flow, string, I/O, compilation, disk, timer, tile engine,
   NIC, system).  Stack effects, brief description, any quirks.
 - [x] **`docs/kdos-reference.md`** — Complete KDOS word/definition
-  reference.  All 217 `: ` definitions + key variables/constants.
-  Grouped by section (§1–§14).  Stack effects, usage examples,
+  reference.  All 247 `: ` definitions + key variables/constants.
+  Grouped by section (§1–§15).  Stack effects, usage examples,
   cross-references to BIOS primitives they use.
 
 **1.2  Architecture & System Docs**
@@ -231,14 +238,15 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 8,287 | ✅ Done (197 words, 20.1 KB) |
-| `kdos.f` | 2,972 | ✅ Done (237 defs + 127 vars) |
-| `megapad64.py` | 1,358 | ✅ Done |
-| `system.py` | 300 | ✅ Done |
-| `cli.py` | 992 | ✅ Done |
+| `bios.asm` | 8,880 | ✅ Done (208 words, 20.7 KB) |
+| `kdos.f` | 3,158 | ✅ Done (247 defs + 138 vars, multicore) |
+| `megapad64.py` | 1,393 | ✅ Done |
+| `system.py` | 472 | ✅ Done (quad-core SoC) |
+| `cli.py` | 995 | ✅ Done |
 | `asm.py` | 748 | ✅ Done (listing support) |
-| `diskutil.py` | 941 | ✅ Done |
-| `test_system.py` | 5,258 | 678+ tests ✅ |
+| `devices.py` | 855 | ✅ Done (+ Mailbox, Spinlock) |
+| `diskutil.py` | 1,038 | ✅ Done |
+| `test_system.py` | 6,227 | 515+ tests ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `docs/` | 8 files | ✅ Written |
-| `README.md` | 389 | ✅ Rewritten |
+| `README.md` | 310 | ✅ Rewritten |

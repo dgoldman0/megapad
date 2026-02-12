@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v1.0 — Pipeline Bundles, Full Help, 8-Screen TUI**
+**Current Status: KDOS v1.1 — Multicore Dispatch, 9-Screen TUI, Pipeline Bundles**
 
 ---
 
@@ -18,8 +18,12 @@ python cli.py --bios bios.asm --storage sample.img
 # Development mode (UART injection, no filesystem)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (327 tests)
-python test_system.py
+# Full test suite (515 tests, CPython)
+python -m pytest test_system.py test_megapad64.py -v --timeout=30
+
+# Fast tests with PyPy + parallel workers (~4 min vs ~40 min)
+make setup-pypy   # one-time
+make test
 
 # Build BIOS binary only
 python asm.py bios.asm
@@ -94,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v0.5** (155 words, ~5200 lines):
+**BIOS v1.0** (208 words, ~8,880 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -106,7 +110,7 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 
-**KDOS v0.9c** (~2273 lines Forth):
+**KDOS v1.1** (~3,158 lines Forth):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -120,7 +124,7 @@ PORTS                          \ List all port bindings
 - **Scheduler & tasks**: Cooperative multitasking with task registry (up to 8 tasks)
 - **Task lifecycle**: TASK, SPAWN, KILL, RESTART, BG, YIELD, SCHEDULE
 - **Timer preemption**: PREEMPT-ON/PREEMPT-OFF for timer-based preemption
-- **Interactive screens**: Full-screen ANSI TUI with 6 screens and keyboard navigation
+- **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
 - **Data ports**: NIC-based external data ingestion with frame protocol
@@ -145,7 +149,7 @@ PORTS                          \ List all port bindings
 - **Doc builder**: diskutil.py build_docs(), build_tutorials(), build_image()
 - **Pre-built content**: 10 documentation topics + 5 interactive tutorials
 
-**Tests**: 678+ passing
+**Tests**: 515+ passing
 - 208+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser, pipeline bundles)
 - 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
 - 18 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial/bundle building)
@@ -455,32 +459,37 @@ Flat address space.  Default 256 KiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (currently v0.4, 128 words, ~4400 lines) is the **permanent,
+The BIOS Forth (v1.0, 208 words, ~8,880 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
-### 4.1 Current State (v0.4)
+### 4.1 Current State (v1.0)
 
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 128 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 208 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE
-* **Loops**: DO/LOOP, BEGIN/UNTIL
-* **Variables & Constants**: VARIABLE, CONSTANT, ALLOT
-* **Tile engine**: Full MEX support with accumulator readback
+* **Loops**: DO/LOOP/+LOOP, BEGIN/UNTIL/WHILE/REPEAT/AGAIN, LEAVE, UNLOOP
+* **Variables & Constants**: VARIABLE, CONSTANT, VALUE/TO, CREATE/DOES>
+* **Tile engine**: Full MEX support with accumulator readback (ACC@..ACC3@)
 * Dictionary as linked-list with case-insensitive lookup
 * Number parser supporting `-`, `0x` prefix, `BASE` variable
 * `HERE`, `,`, `C,`, `ALLOT` — basic dictionary extension
 * **Comment words**: `\` (line comment), `(` (paren comment)
-* **Execution tokens**: `'` (tick), `EXECUTE`
+* **Execution tokens**: `'` (tick), `EXECUTE`, POSTPONE, RECURSE
+* **Return stack**: `>R`, `R>`, `R@`, `2>R`, `2R>`, `2R@`
+* **String ops**: S", .", COMPARE, TYPE, ACCEPT, WORD, COUNT
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
 * **Storage support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
+* **FSLOAD**: Load and EVALUATE files from MP64FS disk
+* **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!, MBOX@,
+  SPIN@, SPIN!, WAKE-CORE, CORE-STATUS
 
-All required BIOS extensions for KDOS are **complete** as of v0.7.
+All required BIOS extensions for KDOS are **complete** as of v1.0.
 
 ---
 
@@ -879,19 +888,19 @@ task-descriptor:
 
 ---
 
-## 6. Screen Flow (v0.7 Implementation)
+## 6. Screen Flow (v1.1 Implementation)
 
-KDOS v0.7 provides a full-screen ANSI TUI accessed via the `SCREENS` word.
-Six screens are navigable via number keys; `q` quits, `r` refreshes.
+KDOS v1.1 provides a full-screen ANSI TUI accessed via the `SCREENS` word.
+Nine screens are navigable via number keys; `q` quits, `r` refreshes.
 
 All screens share a common header (tab bar) and footer (key hints):
 
 ```
- KDOS v0.7  [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help
+ KDOS v1.1  [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help [7]Docs [8]Stor [9]Core
 ────────────────────────────────────────────────────────────────
   (screen content)
 
- [1-6] Switch screen  [r] Refresh  [q] Quit
+ [1-9] Switch screen  [r] Refresh  [q] Quit
 ```
 
 The active tab is shown in reverse video.  Bold and dim SGR attributes
@@ -1027,9 +1036,9 @@ BEGIN
 
 ---
 
-## 7. Data Ports — NIC-Based External Data Ingestion (v0.7)
+## 7. Data Ports — NIC-Based External Data Ingestion (v1.1)
 
-KDOS v0.7 introduces **Data Ports** — a system for ingesting external data
+KDOS v1.1 includes **Data Ports** — a system for ingesting external data
 through the NIC (Network Interface Controller) and routing it directly into
 buffers for kernel processing.
 
@@ -1187,7 +1196,8 @@ Summary:
 - **Phase 4**: Interactive Screens (✅ v0.6)
 - **Phase 5**: Data Ports (✅ v0.7)
 - **Phase 6**: Advanced Kernels & Real-World Data (✅ v0.8)
-- **Phase 7**: User Experience (planned)
+- **Phase 7**: User Experience (✅ v0.9a–v0.9e, v1.0)
+- **Phase 8**: Multicore (✅ v1.1 — BIOS multicore words, KDOS dispatch, parallel pipelines)
 
 ---
 

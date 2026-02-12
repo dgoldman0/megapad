@@ -1,14 +1,15 @@
 # KDOS Word Reference
 
-**KDOS v1.0** — the Kernel Dashboard Operating System — is a Forth-based
+**KDOS v1.1** — the Kernel Dashboard Operating System — is a Forth-based
 OS that runs on top of the Megapad-64 BIOS.  It provides buffers, compute
 kernels, pipelines, a cooperative scheduler, a named filesystem, networking,
-versioned pipeline bundles, and an interactive 8-screen TUI dashboard.
+versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
+TUI dashboard.
 
-This reference documents every word defined in KDOS, organized by the 15
-sections of `kdos.f`.  There are **237 colon definitions** and **127
-variables/constants/creates** — roughly 364 named entities in total across
-2,972 lines of Forth.
+This reference documents every word defined in KDOS, organized by the 16
+sections of `kdos.f`.  There are **247 colon definitions** and **138
+variables/constants/creates** — roughly 385 named entities in total across
+3,158 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -30,7 +31,8 @@ variables/constants/creates** — roughly 364 named entities in total across
 10. [§7.7 Documentation Browser](#77-documentation-browser)
 11. [§7.8 Dictionary Search](#78-dictionary-search)
 12. [§8 Scheduler & Tasks](#8-scheduler--tasks)
-13. [§9 Interactive Screens (TUI)](#9-interactive-screens-tui)
+13. [§8.1 Multicore Dispatch](#81-multicore-dispatch)
+14. [§9 Interactive Screens (TUI)](#9-interactive-screens-tui)
 14. [§10 Data Ports](#10-data-ports)
 15. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
 16. [§13 Help System](#13-help-system)
@@ -531,10 +533,59 @@ preventing runaway tasks.
 
 ---
 
+## §8.1 Multicore Dispatch
+
+KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
+(COREID, NCORES, WAKE-CORE, CORE-STATUS, SPIN@, SPIN!).
+
+### Dispatch Words
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CORE-RUN` | `( xt core -- )` | Dispatch XT to a secondary core via `WAKE-CORE`.  Does nothing if core is 0 (primary) or already busy. |
+| `CORE-WAIT` | `( core -- )` | Busy-wait until the given core finishes (polls `CORE-STATUS` until 0). |
+| `ALL-CORES-WAIT` | `( -- )` | Wait for all secondary cores to become idle. |
+| `BARRIER` | `( -- )` | Synchronize: waits for all secondary cores to finish. |
+
+### Synchronization Words
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `LOCK` | `( n -- )` | Acquire spinlock *n* with busy-wait (calls `SPIN@` in a loop). |
+| `UNLOCK` | `( n -- )` | Release spinlock *n* (calls `SPIN!`). |
+
+### Parallel Pipeline Execution
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `P.RUN-PAR` | `( pipe -- )` | Run pipeline steps in parallel across available cores.  Distributes steps round-robin to secondary cores via `CORE-RUN`, then waits for all to complete. |
+
+### Introspection
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CORES` | `( -- )` | Display per-core status (screen-compatible).  Shows core ID, idle/busy state for each hardware core. |
+
+**Example — parallel pipeline execution:**
+```forth
+4 PIPELINE my-pipe
+: step1 42 a B.FILL ;
+: step2 99 b B.FILL ;
+: step3 a b c B.ADD ;
+: step4 c B.SUM . ;
+' step1 my-pipe P.ADD
+' step2 my-pipe P.ADD
+' step3 my-pipe P.ADD
+' step4 my-pipe P.ADD
+my-pipe P.RUN-PAR     \ steps 1 & 2 run on different cores
+```
+
+---
+
 ## §9 Interactive Screens (TUI)
 
 The SCREENS system is a full-screen terminal UI built on **ANSI escape
-sequences**.  It provides a tabbed dashboard with 8 screens showing system
+sequences**.  It provides a tabbed dashboard with 9 screens showing system
 status in real time.
 
 ### Starting the TUI
@@ -547,11 +598,11 @@ SCREENS     \ enters the interactive dashboard
 
 | Key | Action |
 |-----|--------|
-| `1` – `8` | Switch to screen 1–8 |
+| `1` – `9` | Switch to screen 1–9 |
 | `r` | Refresh the current screen |
 | `q` | Quit back to the Forth REPL |
 
-### The 8 Screens
+### The 9 Screens
 
 | # | Name | What It Shows |
 |---|------|---------------|
@@ -562,7 +613,8 @@ SCREENS     \ enters the interactive dashboard
 | 5 | **Tasks** | All tasks with **color-coded** state (dim=FREE, green=READY, yellow=RUNNING, red=BLOCKED, dim=DONE), priority, and XT. |
 | 6 | **Help** | Quick-reference card listing key commands for all subsystems. |
 | 7 | **Docs** | Documentation browser — lists available topics and tutorials from the filesystem, plus doc commands. |
-| 8 | **Bundles** | Pipeline bundle inspector — shows current bundle state (version, buffer/kernel/pipeline counts, scheduling config, policies, dashboard settings). |
+| 8 | **Storage** | File browser — lists disk files with size, type, sector info; inline detail view for selected file; free sector count. |
+| 9 | **Cores** | Multicore status — shows each core's state (RUNNING, BUSY, IDLE) with color coding. |
 
 ### ANSI Terminal Helpers
 
@@ -754,7 +806,7 @@ They store values in bundle state variables; `BDL-END` applies them in live mode
 |------|-------------|-------------|
 | `BDL-SCHED` | `( pipe-idx interval flags -- )` | **Set scheduling config.**  *pipe-idx* is which pipeline to schedule (0-based), *interval* is the timer cycle interval, *flags* is a bitmask: bit 0 = auto-start on load, bit 1 = repeat indefinitely.  Stores values in `BDL-SCHED-P/I/F`. |
 | `BDL-POLICY` | `( permissions retention export -- )` | **Set access policy.**  *permissions*: 0=read-write, 7=read-only.  *retention*: days to keep data (0=forever).  *export*: 0=no external export, 1=allow.  Stores in `BDL-POL-PERM/RET/EXP`. |
-| `BDL-SCREEN` | `( default-screen screen-mask -- )` | **Set dashboard config.**  *default-screen* (1–8) is the initial screen on `SCREENS`.  *screen-mask* is a bitmask of visible screens (255 = all 8 visible).  Stores in `BDL-SCR-DEF/MASK`. |
+| `BDL-SCREEN` | `( default-screen screen-mask -- )` | **Set dashboard config.**  *default-screen* (1–9) is the initial screen on `SCREENS`.  *screen-mask* is a bitmask of visible screens (511 = all 9 visible).  Stores in `BDL-SCR-DEF/MASK`. |
 
 ### Loading & Inspection
 
@@ -782,8 +834,8 @@ These are internal tracking variables — you don't normally call them directly.
 | `BDL-POL-PERM` | Policy: permissions (0=RW, 7=RO). |
 | `BDL-POL-RET` | Policy: retention in days. |
 | `BDL-POL-EXP` | Policy: export allowed (0=no, 1=yes). |
-| `BDL-SCR-DEF` | Dashboard: default screen (1–8). |
-| `BDL-SCR-MASK` | Dashboard: screen visibility bitmask. |
+| `BDL-SCR-DEF` | Dashboard: default screen (1–9). |
+| `BDL-SCR-MASK` | Dashboard: screen visibility bitmask (511 = all 9). |
 
 ### File Type Constant
 
@@ -895,6 +947,16 @@ buf SAVE-BUFFER fname    \ save buffer to file
 ' work BG                \ spawn + run
 TASKS                    \ list tasks
 SCHEDULE                 \ run all READY tasks
+```
+
+**Multicore:**
+```forth
+' work 1 CORE-RUN       \ dispatch to core 1
+1 CORE-WAIT             \ wait for core 1
+BARRIER                 \ wait for all cores
+0 LOCK  0 UNLOCK        \ spinlock acquire/release
+pipe P.RUN-PAR           \ parallel pipeline
+CORES                    \ show core status
 ```
 
 **Dashboard:**

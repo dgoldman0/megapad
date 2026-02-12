@@ -39,11 +39,11 @@ What happens:
 2. The emulator loads the binary at address 0 and starts the CPU
 3. The BIOS boots, detects the disk, reads the MP64FS directory
 4. It finds `kdos.f` (the first Forth-type file) and loads it via FSLOAD
-5. KDOS loads all 15 sections and prints its banner:
+5. KDOS loads all 16 sections and prints its banner:
 
 ```
 ------------------------------------------------------------
-  KDOS v1.0 — Kernel Dashboard OS
+  KDOS v1.1 — Kernel Dashboard OS
 ------------------------------------------------------------
 Type HELP for command reference.
 Type SCREENS for interactive TUI.
@@ -125,7 +125,7 @@ DUP .S             \ <3> 1 3 3
 ```forth
 HELP               \ Full command reference — every KDOS word, grouped by category
 DESCRIBE BUF       \ Detailed help for a specific word (stack effect, description)
-WORDS              \ List all ~500 defined words
+WORDS              \ List all ~650+ defined words
 WORDS-LIKE BUF     \ Find words containing "BUF"
 APROPOS TILE       \ Find words related to tiles
 ```
@@ -269,7 +269,7 @@ DASHBOARD                \ Multi-section view:
 ### Interactive TUI
 
 ```forth
-SCREENS                  \ Launch the 8-screen interactive text UI:
+SCREENS                  \ Launch the 9-screen interactive text UI:
                          \   [1] Home    — system overview
                          \   [2] Buffers — buffer details
                          \   [3] Kernels — kernel registry
@@ -278,6 +278,7 @@ SCREENS                  \ Launch the 8-screen interactive text UI:
                          \   [6] Help    — full command reference
                          \   [7] Docs    — browse documentation
                          \   [8] Storage — file browser & disk info
+                         \   [9] Cores   — multicore status & dispatch
 ```
 
 Navigate with number keys and `q` to quit.
@@ -335,10 +336,10 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (678+ tests):
+The project has a comprehensive test suite (515 tests):
 
 ```bash
-# Full test suite
+# Full test suite (CPython)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
 
 # Just the KDOS tests
@@ -348,14 +349,33 @@ python -m pytest test_system.py -k "TestKDOS" --timeout=30
 python -m pytest test_megapad64.py -v
 ```
 
+### Fast Tests with PyPy + xdist
+
+The CPU emulator is pure Python and benefits enormously from PyPy's JIT
+compiler.  Combined with pytest-xdist for parallel execution, the full
+suite runs **~10× faster** (4 min vs 40 min under CPython):
+
+```bash
+make setup-pypy   # one-time: downloads PyPy 3.10, installs pytest + xdist
+make test          # PyPy + 8 parallel workers (~4 min)
+make test-seq      # PyPy sequential (~8 min, good for debugging)
+make test-quick    # BIOS + CPU only (~6 sec)
+```
+
+PyPy also speeds up interactive use of the emulator:
+
+```bash
+.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
+```
+
 ---
 
 ## What to Read Next
 
 | Topic | Document |
 |-------|----------|
-| All 197 BIOS Forth words | [docs/bios-forth.md](bios-forth.md) |
-| All 300+ KDOS definitions | [docs/kdos-reference.md](kdos-reference.md) |
+| All 208 BIOS Forth words | [docs/bios-forth.md](bios-forth.md) |
+| All 370+ KDOS definitions | [docs/kdos-reference.md](kdos-reference.md) |
 | CPU instruction set | [docs/isa-reference.md](isa-reference.md) |
 | System architecture & memory map | [docs/architecture.md](architecture.md) |
 | MP64FS filesystem format | [docs/filesystem.md](filesystem.md) |

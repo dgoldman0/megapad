@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 619+ tests.
+— all running inside a Python emulator and verified by 515+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -21,20 +21,21 @@ interactively.
 
 ---
 
-## Current Status: v1.0
+## Current Status: v1.0 (Multicore)
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 197 Forth dictionary words, 8,287 lines ASM, 20.1 KB binary |
-| **KDOS** | 237 colon definitions + 127 variables/constants, 2,972 lines Forth |
-| **Emulator** | Full CPU + tile engine, 1,358 lines Python |
-| **Tests** | 678+ passing (CPU, BIOS, KDOS, FS, devices, assembler, diskutil) |
+| **BIOS** | 208 Forth dictionary words, 8,880 lines ASM, 20.7 KB binary |
+| **KDOS** | v1.1 — 247 colon definitions + 138 variables/constants, 3,158 lines Forth |
+| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 1,393 lines Python |
+| **Tests** | 515+ passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
-I/O, auto-boot from disk, interactive TUI, built-in documentation browser.
+I/O, auto-boot from disk, interactive TUI, built-in documentation browser,
+and **quad-core multicore dispatch** with IPI, spinlocks, and barriers.
 
 ---
 
@@ -100,34 +101,36 @@ DMA), SystemInfo (CPUID, memory size).  All are memory-mapped at
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│     KDOS v1.0 (2,778 lines)    │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (3,158 lines)     │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
-│  Scheduler · Filesystem · TUI   │    data ports, documentation
+│  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
-│     BIOS v1.0 (8,287 lines)    │  ← Subroutine-threaded Forth,
-│  197 words · EVALUATE · FSLOAD  │    compiler, I/O, tile CSR words
+│    BIOS v1.0 (8,880 lines)     │  ← Subroutine-threaded Forth,
+│  208 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-197 dictionary words covering arithmetic, logic, stack manipulation,
+208 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
-strings, compilation, I/O, disk, timer, tile engine, and NIC.  Includes
-`FSLOAD` for booting KDOS directly from a disk image.  Hardened with
-stack underflow detection, EVALUATE depth limiting, dictionary-full
+strings, compilation, I/O, disk, timer, tile engine, NIC, and **multicore**
+(COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS).
+Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
+with stack underflow detection, EVALUATE depth limiting, dictionary-full
 guards, and FSLOAD error recovery with file/line context.
 
-**KDOS** — The Kernel Dashboard OS, written entirely in Forth.  15 sections
-covering: utility words, described buffers with tile-aligned storage,
-tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel registry
-with 18 built-in compute kernels, a pipeline engine, raw and named file
-I/O, the MP64FS filesystem, a documentation browser, dictionary search
-tools, a cooperative scheduler with timer-assisted preemption, an 8-screen
-interactive TUI (with auto-refresh), data ports for NIC ingestion,
-benchmarking, a full dashboard, a categorized help system with
-per-word `DESCRIBE`, versioned pipeline bundles, and auto-boot.
+**KDOS** — The Kernel Dashboard OS v1.1, written entirely in Forth.  16
+sections covering: utility words, described buffers with tile-aligned
+storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
+registry with 18 built-in compute kernels, a pipeline engine, raw and
+named file I/O, the MP64FS filesystem, a documentation browser, dictionary
+search tools, a cooperative scheduler with timer-assisted preemption, a
+9-screen interactive TUI (with auto-refresh), data ports for NIC ingestion,
+benchmarking, a full dashboard, a categorized help system with per-word
+`DESCRIBE`, versioned pipeline bundles, **multicore dispatch** (CORE-RUN,
+CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
 
 ---
 
@@ -154,13 +157,16 @@ python cli.py --bios bios.asm --storage sample.img
 
 # Without disk (development mode — KDOS injected via UART, no FS access)
 python cli.py --bios bios.asm --forth kdos.f
+
+# ~5× faster under PyPy (see 'make setup-pypy')
+.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
 ```
 
 You'll see the KDOS banner and land at the Forth REPL:
 
 ```
 ------------------------------------------------------------
-  KDOS v1.0 — Kernel Dashboard OS
+  KDOS v1.1 — Kernel Dashboard OS
 ------------------------------------------------------------
 Type HELP for command reference.
 Type SCREENS for interactive TUI.
@@ -184,17 +190,25 @@ demo kstats                       \ Prints sum, min, max
 a b demo kadd                     \ Tile-accelerated add: demo = a + b
 demo B.PREVIEW                    \ Hex dump first 64 bytes
 
-SCREENS                           \ Launch 8-screen TUI dashboard
+SCREENS                           \ Launch 9-screen TUI dashboard
 ```
 
 ### Run the Tests
 
 ```bash
+# CPython (works out of the box)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
+
+# PyPy + xdist (recommended — ~5× faster emulation, 8 parallel workers)
+make setup-pypy   # one-time
+make test          # ~4 min vs ~40 min under CPython
 ```
 
-All 678+ tests should pass, covering the CPU, BIOS, KDOS, filesystem,
-assembler, disk utility, devices, and networking.
+All 515+ tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+assembler, disk utility, devices, multicore, and networking.
+
+> **Tip:** PyPy's JIT dramatically speeds up the CPU emulator loop.  You
+> can also use it interactively: `.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img`
 
 ---
 
@@ -202,18 +216,21 @@ assembler, disk utility, devices, and networking.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | 1,358 | CPU + tile engine emulator |
-| `system.py` | 300 | System integration (CPU + devices + memory map) |
-| `bios.asm` | 8,287 | Forth BIOS in assembly (197 words, hardened) |
-| `bios.rom` | 20,605 B | Pre-assembled BIOS binary |
-| `kdos.f` | 2,778 | KDOS operating system in Forth (344 definitions) |
-| `cli.py` | 992 | CLI, boot modes, interactive debug monitor |
+| `megapad64.py` | 1,393 | CPU + tile engine emulator |
+| `system.py` | 472 | System integration (quad-core SoC, mailbox IPI, spinlocks) |
+| `bios.asm` | 8,880 | Forth BIOS in assembly (208 words, multicore, hardened) |
+| `bios.rom` | 20,722 B | Pre-assembled BIOS binary |
+| `kdos.f` | 3,158 | KDOS v1.1 operating system in Forth (247 definitions) |
+| `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 748 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 718 | MMIO devices: UART, Timer, Storage, SystemInfo, NIC |
-| `datasources.py` | 697 | Simulated network data sources |
-| `diskutil.py` | 941 | MP64FS filesystem utility and disk image builder |
-| `test_megapad64.py` | 712 | CPU instruction set unit tests |
-| `test_system.py` | 5,258 | Full integration test suite |
+| `devices.py` | 855 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock |
+| `data_sources.py` | 697 | Simulated network data sources |
+| `diskutil.py` | 1,038 | MP64FS filesystem utility and disk image builder |
+| `test_megapad64.py` | 711 | CPU instruction set unit tests |
+| `test_system.py` | 6,227 | Full integration test suite (incl. multicore) |
+| `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
+| `pyproject.toml` | 8 | Pytest configuration |
+| `conftest.py` | 14 | Test fixtures and snapshot caching |
 
 ---
 
@@ -224,8 +241,8 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 197 entries by category) |
-| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS word reference (all 300+ definitions by section) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 208 entries by category) |
+| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 400+ definitions by section, incl. multicore) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |
@@ -243,8 +260,8 @@ The `docs/` directory contains comprehensive reference material:
 Forth might seem like an unusual choice for a modern system, but it's
 remarkably well-suited to this architecture:
 
-**Compactness** — The entire BIOS interpreter, compiler, and 197 built-in
-words fit in under 20 KB of machine code.  Forth is one of the most
+**Compactness** — The entire BIOS interpreter, compiler, and 208 built-in
+words fit in under 21 KB of machine code.  Forth is one of the most
 space-efficient programming environments ever created.
 
 **Interactivity** — Type a word, it executes immediately.  Development is

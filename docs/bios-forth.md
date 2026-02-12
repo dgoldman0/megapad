@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **197 entries** —
+This document catalogs every word in the BIOS dictionary — **208 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -526,6 +526,36 @@ Low-level access to the network interface controller.
 |------|-------------|-------------|
 | `\` | *rest of line* | Line comment — everything after `\` to end-of-line is ignored. |
 | `(` | *...* `)` | Inline comment — everything between `(` and `)` is ignored.  Immediate. |
+
+---
+
+## Multicore (11 words)
+
+These words provide inter-core communication for the quad-core SoC.
+Secondary cores boot into a worker loop; the primary core dispatches
+work to them via IPI (inter-processor interrupt) through the mailbox
+device.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `COREID` | `( -- n )` | Push this core’s hardware ID (0–3).  Reads CSR 0x20. |
+| `NCORES` | `( -- n )` | Push the total number of hardware cores.  Reads CSR 0x21. |
+| `IPI-SEND` | `( xt core -- )` | Send an IPI to *core*: writes the 64-bit XT into the mailbox data register and triggers the interrupt.  The target core’s IPI handler will EXECUTE the XT. |
+| `IPI-STATUS` | `( -- mask )` | Read pending IPI bitmask for this core.  Bit *n* set means an IPI from core *n* is pending. |
+| `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
+| `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |
+| `MBOX@` | `( -- d )` | Read the 64-bit value from the mailbox incoming data register. |
+| `SPIN@` | `( n -- flag )` | Try to acquire spinlock *n*.  Returns 0 if successfully acquired, 1 if the lock is already held. |
+| `SPIN!` | `( n -- )` | Release spinlock *n*. |
+| `WAKE-CORE` | `( xt core -- )` | Convenience wrapper: pre-writes the XT into the shared worker table, then sends the IPI.  This ensures `CORE-STATUS` sees the pending work immediately. |
+| `CORE-STATUS` | `( core -- n )` | Read the worker XT slot for a core.  Returns 0 if the core is idle, or the pending XT if it’s busy/dispatched. |
+
+**Example — dispatching work to core 1:**
+```forth
+: my-work  42 mybuf B.FILL ;
+' my-work 1 WAKE-CORE      \ send XT to core 1 via IPI
+BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
+```
 
 ---
 
