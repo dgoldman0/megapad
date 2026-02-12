@@ -79,6 +79,10 @@ CSR_BIST_CMD       = 0x60   # W: 0=idle, 1=start-full, 2=start-quick
 CSR_BIST_STATUS    = 0x61   # R: 0=idle, 1=running, 2=pass, 3=fail
 CSR_BIST_FAIL_ADDR = 0x62   # R: first failing address
 CSR_BIST_FAIL_DATA = 0x63   # R: expected vs actual data
+
+# Tile Datapath Self-Test CSRs (§6.2)
+CSR_TILE_SELFTEST  = 0x64   # W: 1=start; R: 0=idle, 1=running, 2=pass, 3=fail
+CSR_TILE_ST_DETAIL = 0x65   # R: bitmask of failed sub-tests
 CSR_PERF_STALLS  = 0x69
 CSR_PERF_TILEOPS = 0x6A
 CSR_PERF_EXTMEM  = 0x6B
@@ -212,6 +216,10 @@ class Megapad64:
         self.bist_status: int    = 0   # 0=idle, 2=pass, 3=fail
         self.bist_fail_addr: int = 0   # first failing address
         self.bist_fail_data: int = 0   # expected vs actual (packed)
+
+        # Tile datapath self-test state
+        self.tile_selftest: int    = 0   # 0=idle, 2=pass, 3=fail
+        self.tile_st_detail: int   = 0   # bitmask of failed sub-tests
 
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
@@ -454,6 +462,8 @@ class Megapad64:
             CSR_BIST_STATUS:    lambda: self.bist_status,
             CSR_BIST_FAIL_ADDR: lambda: self.bist_fail_addr,
             CSR_BIST_FAIL_DATA: lambda: self.bist_fail_data,
+            CSR_TILE_SELFTEST:  lambda: self.tile_selftest,
+            CSR_TILE_ST_DETAIL: lambda: self.tile_st_detail,
         }
         fn = m.get(addr)
         if fn is None:
@@ -492,6 +502,7 @@ class Megapad64:
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
             CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
             CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
+            CSR_TILE_SELFTEST: lambda v: self._tile_selftest_write(v),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -585,6 +596,212 @@ class Megapad64:
         self.bist_fail_addr = addr
         # Pack expected in upper 32 bits, actual in lower 32 bits
         self.bist_fail_data = ((expected & 0xFFFFFFFF) << 32) | (actual & 0xFFFFFFFF)
+
+    # -- Tile Datapath Self-Test (§6.2) --
+
+    def _tile_selftest_write(self, val: int):
+        """Handle writes to CSR_TILE_SELFTEST — run tile self-test."""
+        if val != 1:
+            return
+        self.tile_selftest = 1   # running
+        self.tile_st_detail = 0
+        # Save tile engine state
+        save = (self.tsrc0, self.tsrc1, self.tdst, self.tmode,
+                self.tctrl, list(self.acc))
+        # Use scratchpad: 0xFFF80..0xFFFFF (128 bytes = 2 tiles)
+        # tile_a @ 0xFFF80, tile_b @ 0xFFFC0
+        TILE_A = 0xFFF80
+        TILE_B = 0xFFFC0
+        save_scratch = bytes(self.mem[TILE_A:TILE_A + 128])
+        fail_mask = 0
+        fail_mask |= self._tile_st_add(TILE_A, TILE_B)    # bit 0
+        fail_mask |= self._tile_st_mul(TILE_A, TILE_B)    # bit 1
+        fail_mask |= self._tile_st_dot(TILE_A, TILE_B)    # bit 2
+        fail_mask |= self._tile_st_sum(TILE_A)             # bit 3
+        # Restore scratchpad and tile state
+        self.mem[TILE_A:TILE_A + 128] = bytearray(save_scratch)
+        self.tsrc0, self.tsrc1, self.tdst, self.tmode, \
+            self.tctrl, self.acc = save
+        self.tile_st_detail = fail_mask
+        self.tile_selftest = 3 if fail_mask else 2
+
+    def _tile_st_write(self, addr: int, data: bytes):
+        """Write 64 bytes to memory for tile self-test."""
+        a = addr % self.mem_size
+        self.mem[a:a+64] = data[:64]
+
+    def _tile_st_read(self, addr: int) -> bytearray:
+        """Read 64 bytes from memory for tile self-test."""
+        a = addr % self.mem_size
+        return bytearray(self.mem[a:a+64])
+
+    def _tile_st_add(self, ta: int, tb: int) -> int:
+        """Sub-test 0: TALU ADD in 8-bit unsigned mode.
+        Pattern: a[i]=i, b[i]=100. Expect dst[i]=(i+100)&0xFF."""
+        pat_a = bytearray(i & 0xFF for i in range(64))
+        pat_b = bytearray(100 for _ in range(64))
+        self._tile_st_write(ta, pat_a)
+        self._tile_st_write(tb, pat_b)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00  # 8-bit unsigned, wrapping
+        self.tctrl = 0
+        # Execute TALU ADD: op=0, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=0, funct=0)
+        result = self._tile_st_read(ta)
+        for i in range(64):
+            if result[i] != ((i + 100) & 0xFF):
+                return 1  # bit 0
+        return 0
+
+    def _tile_st_mul(self, ta: int, tb: int) -> int:
+        """Sub-test 1: TMUL MUL in 8-bit unsigned mode.
+        Pattern: a[i]=i, b[i]=3. Expect dst[i]=(i*3)&0xFF."""
+        pat_a = bytearray(i & 0xFF for i in range(64))
+        pat_b = bytearray(3 for _ in range(64))
+        self._tile_st_write(ta, pat_a)
+        self._tile_st_write(tb, pat_b)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        # Execute TMUL MUL: op=1, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=1, funct=0)
+        result = self._tile_st_read(ta)
+        for i in range(64):
+            if result[i] != ((i * 3) & 0xFF):
+                return 2  # bit 1
+        return 0
+
+    def _tile_st_dot(self, ta: int, tb: int) -> int:
+        """Sub-test 2: TMUL DOT in 8-bit unsigned mode.
+        Pattern: a[i]=1, b[i]=1. Expect ACC0=64."""
+        pat = bytearray(1 for _ in range(64))
+        self._tile_st_write(ta, pat)
+        self._tile_st_write(tb, pat)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        self.acc = [0, 0, 0, 0]
+        # Execute TMUL DOT: op=1, funct=1, ss=0
+        self._exec_mex_direct(ss=0, op=1, funct=1)
+        if self.acc[0] != 64:
+            return 4  # bit 2
+        return 0
+
+    def _tile_st_sum(self, ta: int) -> int:
+        """Sub-test 3: TRED SUM in 8-bit unsigned mode.
+        Pattern: a[i]=2. Expect ACC0=128."""
+        pat = bytearray(2 for _ in range(64))
+        self._tile_st_write(ta, pat)
+        self.tsrc0 = ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        self.acc = [0, 0, 0, 0]
+        # Execute TRED SUM: op=2, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=2, funct=0)
+        if self.acc[0] != 128:
+            return 8  # bit 3
+        return 0
+
+    def _exec_mex_direct(self, ss: int, op: int, funct: int,
+                         broadcast_reg: int = -1):
+        """Execute a tile op directly without fetching from PC.
+        Used by tile datapath self-test."""
+        ew_bits = self.tmode & 0x3
+        elem_bytes = 1 << ew_bits
+        num_lanes = 64 // elem_bytes
+        signed = (self.tmode >> 4) & 1
+
+        def read_tile(addr):
+            a = u64(addr) % self.mem_size
+            return bytearray(self.mem[a:a+64]) if a+64 <= self.mem_size else bytearray(64)
+        def write_tile(addr, data):
+            a = u64(addr) % self.mem_size
+            if a + 64 <= self.mem_size:
+                self.mem[a:a+64] = data[:64]
+        def tile_get_elem(tile, lane, eb):
+            off = lane * eb
+            v = 0
+            for i in range(eb):
+                v |= tile[off + i] << (8 * i)
+            return v
+        def tile_set_elem(tile, lane, eb, val):
+            off = lane * eb
+            for i in range(eb):
+                tile[off + i] = (val >> (8 * i)) & 0xFF
+        def to_signed(v, eb):
+            bits = eb * 8
+            if v & (1 << (bits - 1)):
+                return v - (1 << bits)
+            return v
+
+        src_a = read_tile(self.tsrc0)
+        if ss == 0:
+            src_b = read_tile(self.tsrc1)
+        elif ss == 1:
+            bval = self.regs[broadcast_reg] if broadcast_reg >= 0 else 0
+            src_b = bytearray(64)
+            for lane in range(num_lanes):
+                tile_set_elem(src_b, lane, elem_bytes, bval & ((1 << (elem_bytes*8)) - 1))
+        elif ss == 3:
+            src_a = read_tile(self.tdst)
+            src_b = read_tile(self.tsrc0)
+        else:
+            src_b = bytearray(64)
+        dst = bytearray(64)
+
+        if op == 0:  # TALU
+            mask = (1 << (elem_bytes * 8)) - 1
+            for lane in range(num_lanes):
+                ea = tile_get_elem(src_a, lane, elem_bytes)
+                eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                if funct == 0:  # ADD
+                    r = (ea + eb_val) & mask
+                elif funct == 1:  # SUB
+                    r = (ea - eb_val) & mask
+                else:
+                    r = 0
+                tile_set_elem(dst, lane, elem_bytes, r)
+            write_tile(self.tdst, dst)
+
+        elif op == 1:  # TMUL
+            if funct == 0:  # MUL
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                    else:
+                        r = (ea * eb_val) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+            elif funct == 1:  # DOT
+                total = 0
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        total += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
+                    else:
+                        total += ea * eb_val
+                self.acc[0] = total & MASK64
+                self.acc[1] = (total >> 64) & MASK64
+
+        elif op == 2:  # TRED
+            values = [tile_get_elem(src_a, lane, elem_bytes) for lane in range(num_lanes)]
+            if signed:
+                values_s = [to_signed(v, elem_bytes) for v in values]
+            else:
+                values_s = values
+            result = 0
+            if funct == 0:  # SUM
+                result = sum(values_s)
+            elif funct == 1:  # MIN
+                result = min(values_s)
+            elif funct == 2:  # MAX
+                result = max(values_s)
+            self.acc[0] = result & MASK64
+            self.acc[1] = (result >> 64) & MASK64
 
     @property
     def _ipi_pending_mask(self) -> int:

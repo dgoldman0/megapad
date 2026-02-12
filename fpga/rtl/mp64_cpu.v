@@ -117,6 +117,10 @@ module mp64_cpu (
     reg [63:0] bist_fail_addr;  // first failing address
     reg [63:0] bist_fail_data;  // expected vs actual (packed)
 
+    // Tile datapath self-test state
+    reg  [1:0] tile_selftest;   // 0=idle, 2=pass, 3=fail
+    reg  [7:0] tile_st_detail;  // bitmask of failed sub-tests
+
     // EXT prefix modifier
     reg [3:0]  ext_mod;
     reg        ext_active;
@@ -454,6 +458,10 @@ module mp64_cpu (
             bist_status    <= 2'd0;
             bist_fail_addr <= 64'd0;
             bist_fail_data <= 64'd0;
+
+            // Tile self-test registers
+            tile_selftest  <= 2'd0;
+            tile_st_detail <= 8'd0;
 
             // Clear register file
             R[0]  <= 64'd0;  R[1]  <= 64'd0;  R[2]  <= 64'd0;  R[3]  <= 64'd0;
@@ -1202,6 +1210,13 @@ module mp64_cpu (
                                         bist_fail_data <= 64'd0;
                                     end
                                 end
+                                CSR_TILE_SELFTEST: begin
+                                    // RTL stub: instant pass
+                                    if (R[nib[2:0]][0]) begin
+                                        tile_selftest  <= 2'd2;
+                                        tile_st_detail <= 8'd0;
+                                    end
+                                end
                                 // COREID, NCORES are read-only — ignore writes
                             endcase
                         end else begin
@@ -1231,6 +1246,8 @@ module mp64_cpu (
                                 CSR_BIST_STATUS:    R[nib[2:0]] <= {62'd0, bist_status};
                                 CSR_BIST_FAIL_ADDR: R[nib[2:0]] <= bist_fail_addr;
                                 CSR_BIST_FAIL_DATA: R[nib[2:0]] <= bist_fail_data;
+                                CSR_TILE_SELFTEST:  R[nib[2:0]] <= {62'd0, tile_selftest};
+                                CSR_TILE_ST_DETAIL: R[nib[2:0]] <= {56'd0, tile_st_detail};
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end

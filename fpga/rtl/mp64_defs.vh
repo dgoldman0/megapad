@@ -228,6 +228,10 @@ parameter [7:0] CSR_BIST_STATUS    = 8'h61;  // R: 0=idle, 1=running, 2=pass, 3=
 parameter [7:0] CSR_BIST_FAIL_ADDR = 8'h62;  // R: first failing address
 parameter [7:0] CSR_BIST_FAIL_DATA = 8'h63;  // R: expected vs actual
 
+// Tile Datapath Self-Test CSRs (§6.2)
+parameter [7:0] CSR_TILE_SELFTEST  = 8'h64;  // W: 1=start; R: 0/1/2/3
+parameter [7:0] CSR_TILE_ST_DETAIL = 8'h65;  // R: failed sub-test bitmask
+
 // ----------------------------------------------------------------------------
 // Bus protocol
 // ----------------------------------------------------------------------------

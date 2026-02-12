@@ -7022,6 +7022,30 @@ w_bist_fail_data:
     str r14, r0
     ret.l
 
+; =====================================================================
+;  Tile Datapath Self-Test — CSR 0x64..0x65
+; =====================================================================
+
+; TILE-TEST ( -- )  start tile datapath self-test
+w_tile_test:
+    ldi r0, 1
+    csrw 0x64, r0
+    ret.l
+
+; TILE-TEST@ ( -- n )  read self-test status: 0=idle 2=pass 3=fail
+w_tile_test_fetch:
+    csrr r0, 0x64
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TILE-DETAIL@ ( -- n )  read failed sub-test bitmask
+w_tile_detail_fetch:
+    csrr r0, 0x65
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -9122,12 +9146,39 @@ d_bist_fail_addr:
     ret.l
 
 ; === BIST-FAIL-DATA ===
-latest_entry:
 d_bist_fail_data:
     .dq d_bist_fail_addr
     .db 14
     .ascii "BIST-FAIL-DATA"
     ldi64 r11, w_bist_fail_data
+    call.l r11
+    ret.l
+
+; === TILE-TEST ===
+d_tile_test:
+    .dq d_bist_fail_data
+    .db 9
+    .ascii "TILE-TEST"
+    ldi64 r11, w_tile_test
+    call.l r11
+    ret.l
+
+; === TILE-TEST@ ===
+d_tile_test_fetch:
+    .dq d_tile_test
+    .db 10
+    .ascii "TILE-TEST@"
+    ldi64 r11, w_tile_test_fetch
+    call.l r11
+    ret.l
+
+; === TILE-DETAIL@ ===
+latest_entry:
+d_tile_detail_fetch:
+    .dq d_tile_test_fetch
+    .db 12
+    .ascii "TILE-DETAIL@"
+    ldi64 r11, w_tile_detail_fetch
     call.l r11
     ret.l
 
