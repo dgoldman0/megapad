@@ -105,6 +105,14 @@ IVEC_SW_TRAP        = 0x06
 IVEC_TIMER          = 0x07
 IVEC_IPI            = 0x08  # Inter-processor interrupt
 
+# TMODE EW codes (bits [2:0])
+EW_U8    = 0  # 64 lanes × 8-bit
+EW_U16   = 1  # 32 lanes × 16-bit
+EW_U32   = 2  # 16 lanes × 32-bit
+EW_U64   = 3  #  8 lanes × 64-bit
+EW_FP16  = 4  # 32 lanes × IEEE 754 half-precision
+EW_BF16  = 5  # 32 lanes × bfloat16
+
 # ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
@@ -117,6 +125,128 @@ def s64(v: int) -> int:
     """Interpret a 64-bit value as signed."""
     v = u64(v)
     return v - (1 << 64) if v >= SIGN64 else v
+
+# ---------------------------------------------------------------------------
+#  FP16 / bfloat16 conversion helpers
+# ---------------------------------------------------------------------------
+
+def _fp16_to_float(h: int) -> float:
+    """Convert IEEE 754 half-precision (16-bit raw) to Python float."""
+    sign = (h >> 15) & 1
+    exp = (h >> 10) & 0x1F
+    frac = h & 0x3FF
+    if exp == 0:
+        if frac == 0:
+            return -0.0 if sign else 0.0
+        # Subnormal
+        val = (2.0 ** -14) * (frac / 1024.0)
+        return -val if sign else val
+    if exp == 0x1F:
+        if frac == 0:
+            return float('-inf') if sign else float('inf')
+        return float('nan')
+    val = (2.0 ** (exp - 15)) * (1.0 + frac / 1024.0)
+    return -val if sign else val
+
+
+def _float_to_fp16(f: float) -> int:
+    """Convert Python float to IEEE 754 half-precision (16-bit raw).
+    Uses round-to-nearest-even."""
+    import math
+    if math.isnan(f):
+        return 0x7E00  # quiet NaN
+    if math.isinf(f):
+        return 0xFC00 if f < 0 else 0x7C00
+    if f == 0.0:
+        return 0x8000 if math.copysign(1.0, f) < 0 else 0x0000
+    # Get FP32 bits for the rounding logic
+    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    sign = (bits >> 31) & 1
+    exp32 = (bits >> 23) & 0xFF
+    frac32 = bits & 0x7FFFFF
+    # Rebias exponent: FP32 bias=127, FP16 bias=15
+    new_exp = exp32 - 127 + 15
+    if new_exp >= 0x1F:
+        return (sign << 15) | 0x7C00  # overflow → ±inf
+    if new_exp <= 0:
+        if new_exp < -10:
+            return sign << 15  # underflow → ±0
+        # Subnormal: shift mantissa
+        frac32 |= 0x800000  # implicit 1
+        shift = 1 - new_exp  # how far into subnormal
+        # Round-to-nearest-even
+        round_bit = (frac32 >> (12 + shift)) & 1
+        sticky = (frac32 & ((1 << (12 + shift)) - 1)) != 0
+        result = frac32 >> (13 + shift)
+        if round_bit and (sticky or (result & 1)):
+            result += 1
+        return (sign << 15) | (result & 0x3FF)
+    # Normal: round mantissa from 23 bits to 10 bits
+    round_bit = (frac32 >> 12) & 1
+    sticky = (frac32 & 0xFFF) != 0
+    frac16 = frac32 >> 13
+    if round_bit and (sticky or (frac16 & 1)):
+        frac16 += 1
+        if frac16 >= 0x400:
+            frac16 = 0
+            new_exp += 1
+            if new_exp >= 0x1F:
+                return (sign << 15) | 0x7C00
+    return (sign << 15) | (new_exp << 10) | (frac16 & 0x3FF)
+
+
+def _bf16_to_float(b: int) -> float:
+    """Convert bfloat16 (16-bit raw) to Python float."""
+    bits32 = (b & 0xFFFF) << 16
+    return struct.unpack('<f', struct.pack('<I', bits32))[0]
+
+
+def _float_to_bf16(f: float) -> int:
+    """Convert Python float to bfloat16 (16-bit raw).
+    Uses round-to-nearest-even."""
+    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    # Round: look at lower 16 bits
+    round_bit = (bits >> 15) & 1
+    sticky = (bits & 0x7FFF) != 0
+    result = bits >> 16
+    if round_bit and (sticky or (result & 1)):
+        result += 1
+        # Overflow of mantissa into exponent is handled naturally
+    return result & 0xFFFF
+
+
+def _fp32_to_bits(f: float) -> int:
+    """Python float → 32-bit IEEE 754 bit pattern."""
+    return struct.unpack('<I', struct.pack('<f', f))[0]
+
+
+def _bits_to_fp32(b: int) -> float:
+    """32-bit IEEE 754 bit pattern → Python float."""
+    return struct.unpack('<f', struct.pack('<I', b & 0xFFFFFFFF))[0]
+
+
+def _fp_decode(raw: int, ew: int) -> float:
+    """Decode a raw 16-bit tile lane value to Python float based on EW code."""
+    if ew == EW_FP16:
+        return _fp16_to_float(raw & 0xFFFF)
+    else:  # EW_BF16
+        return _bf16_to_float(raw & 0xFFFF)
+
+
+def _fp_encode(val: float, ew: int) -> int:
+    """Encode a Python float back to 16-bit raw based on EW code."""
+    if ew == EW_FP16:
+        return _float_to_fp16(val)
+    else:  # EW_BF16
+        return _float_to_bf16(val)
+
+
+def _fp_is_nan(raw: int, ew: int) -> bool:
+    """Check if a raw 16-bit value is NaN for the given FP format."""
+    if ew == EW_FP16:
+        return ((raw >> 10) & 0x1F) == 0x1F and (raw & 0x3FF) != 0
+    else:  # EW_BF16
+        return ((raw >> 7) & 0xFF) == 0xFF and (raw & 0x7F) != 0
 
 def sign_extend(val: int, bits: int) -> int:
     """Sign-extend a *bits*-wide value to 64 bits."""
@@ -726,8 +856,12 @@ class Megapad64:
                          broadcast_reg: int = -1):
         """Execute a tile op directly without fetching from PC.
         Used by tile datapath self-test."""
-        ew_bits = self.tmode & 0x3
-        elem_bytes = 1 << ew_bits
+        ew_bits = self.tmode & 0x7
+        is_fp = ew_bits >= EW_FP16
+        if is_fp:
+            elem_bytes = 2  # both fp16 and bf16 are 16-bit
+        else:
+            elem_bytes = 1 << ew_bits
         num_lanes = 64 // elem_bytes
         signed = (self.tmode >> 4) & 1
 
@@ -1446,9 +1580,13 @@ class Megapad64:
         if ss == 1:
             broadcast_reg = self.fetch8() & 0xF
 
-        # Element width from TMODE
-        ew_bits = self.tmode & 0x3
-        elem_bytes = 1 << ew_bits  # 1, 2, 4, or 8
+        # Element width from TMODE (3-bit EW: 0-3 = int, 4 = fp16, 5 = bf16)
+        ew_bits = self.tmode & 0x7
+        is_fp = ew_bits >= EW_FP16
+        if is_fp:
+            elem_bytes = 2  # both fp16 and bf16 are 16-bit
+        else:
+            elem_bytes = 1 << ew_bits  # 1, 2, 4, or 8
         num_lanes = 64 // elem_bytes
         signed = (self.tmode >> 4) & 1
 
@@ -1542,6 +1680,46 @@ class Megapad64:
             return 1  # 2 cycles for extended tile ALU
 
         if op == 0x0:  # TALU
+            if is_fp:
+                # ---- Floating-point TALU ----
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if funct == 2:    # AND — bitwise, even for FP
+                        r = ea & eb_val
+                    elif funct == 3:  # OR — bitwise
+                        r = ea | eb_val
+                    elif funct == 4:  # XOR — bitwise
+                        r = ea ^ eb_val
+                    elif funct == 7:  # ABS — clear sign bit
+                        r = ea & 0x7FFF
+                    elif funct == 5:  # MIN — NaN-propagating
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0  # qNaN
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(min(fa, fb), ew_bits)
+                    elif funct == 6:  # MAX — NaN-propagating
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(max(fa, fb), ew_bits)
+                    else:
+                        # ADD (0) / SUB (1)
+                        fa = _fp_decode(ea, ew_bits)
+                        fb = _fp_decode(eb_val, ew_bits)
+                        if funct == 0:
+                            r = _fp_encode(fa + fb, ew_bits)
+                        else:  # funct == 1
+                            r = _fp_encode(fa - fb, ew_bits)
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 0
+
+            # ---- Integer TALU ----
             saturate = (self.tmode >> 5) & 1
             for lane in range(num_lanes):
                 ea = tile_get_elem(src_a, lane, elem_bytes)
@@ -1600,6 +1778,94 @@ class Megapad64:
             return 0
 
         elif op == 0x1:  # TMUL
+            if is_fp:
+                # ---- Floating-point TMUL ----
+                if funct == 0:  # MUL
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes, _fp_encode(fa * fb, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 1
+
+                elif funct == 1:  # DOT — FP16/BF16 → FP32 accumulate
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    total = 0.0
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        total += float(fa) * float(fb)
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0
+                    self.acc[2] = 0
+                    self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 3
+
+                elif funct == 2:  # WMUL — fp16/bf16 → fp32 widening multiply
+                    # Output: 16 fp32 values in 2 tiles (TDST and TDST+64)
+                    dst0 = bytearray(64)
+                    dst1 = bytearray(64)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fp32_bits = _fp32_to_bits(float(fa) * float(fb))
+                        if lane < 16:
+                            tile_set_elem(dst0, lane, 4, fp32_bits)
+                        else:
+                            tile_set_elem(dst1, lane - 16, 4, fp32_bits)
+                    write_tile(self.tdst, dst0)
+                    write_tile(u64(self.tdst + 64), dst1)
+                    return 2
+
+                elif funct == 3:  # MAC — fp mul-accumulate: dst += a*b
+                    existing = read_tile(self.tdst)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fc = _fp_decode(tile_get_elem(existing, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes,
+                                      _fp_encode(fc + fa * fb, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 2
+
+                elif funct == 4:  # FMA — dst = a*b + dst
+                    existing = read_tile(self.tdst)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fc = _fp_decode(tile_get_elem(existing, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes,
+                                      _fp_encode(fa * fb + fc, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 2
+
+                elif funct == 5:  # DOTACC — 4-way chunked dot, FP32 accumulate
+                    chunk_size = num_lanes // 4
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    for k in range(4):
+                        dot = 0.0
+                        for lane in range(chunk_size):
+                            idx = k * chunk_size + lane
+                            fa = _fp_decode(tile_get_elem(src_a, idx, elem_bytes), ew_bits)
+                            fb = _fp_decode(tile_get_elem(src_b, idx, elem_bytes), ew_bits)
+                            dot += float(fa) * float(fb)
+                        if self.tctrl & 0x1:  # ACC_ACC
+                            old_f = _bits_to_fp32(self.acc[k])
+                            dot = old_f + dot
+                        self.acc[k] = _fp32_to_bits(dot)
+                    self.flag_z = 1 if all(a == 0 for a in self.acc) else 0
+                    return 3
+
+                return 1  # unknown fp TMUL funct
+
             if funct == 0:  # MUL
                 for lane in range(num_lanes):
                     ea = tile_get_elem(src_a, lane, elem_bytes)
@@ -1719,6 +1985,92 @@ class Megapad64:
 
         elif op == 0x2:  # TRED
             tile = src_a
+
+            if is_fp:
+                # ---- Floating-point TRED ----
+                fp_vals = [_fp_decode(tile_get_elem(tile, lane, elem_bytes), ew_bits)
+                           for lane in range(num_lanes)]
+
+                if funct == 0:    # SUM — FP32 accumulate
+                    total = sum(float(v) for v in fp_vals)
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 0
+                elif funct == 1:  # MIN
+                    import math
+                    # Filter out NaN, or propagate if all NaN
+                    non_nan = [v for v in fp_vals if not math.isnan(v)]
+                    if non_nan:
+                        result_f = min(non_nan)
+                    else:
+                        result_f = float('nan')
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = _fp32_to_bits(result_f)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 2:  # MAX
+                    import math
+                    non_nan = [v for v in fp_vals if not math.isnan(v)]
+                    if non_nan:
+                        result_f = max(non_nan)
+                    else:
+                        result_f = float('nan')
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = _fp32_to_bits(result_f)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 5:  # SUMSQ — FP32 accumulate
+                    total = sum(float(v) * float(v) for v in fp_vals)
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    if self.tctrl & 0x1:
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 0
+                elif funct == 6:  # MINIDX
+                    import math
+                    best_idx = 0
+                    best_val = fp_vals[0]
+                    for i in range(1, num_lanes):
+                        if not math.isnan(fp_vals[i]) and (math.isnan(best_val) or fp_vals[i] < best_val):
+                            best_val = fp_vals[i]
+                            best_idx = i
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = best_idx & MASK64
+                    self.acc[1] = _fp32_to_bits(best_val)
+                    self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 7:  # MAXIDX
+                    import math
+                    best_idx = 0
+                    best_val = fp_vals[0]
+                    for i in range(1, num_lanes):
+                        if not math.isnan(fp_vals[i]) and (math.isnan(best_val) or fp_vals[i] > best_val):
+                            best_val = fp_vals[i]
+                            best_idx = i
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = best_idx & MASK64
+                    self.acc[1] = _fp32_to_bits(best_val)
+                    self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                # Unsupported FP reductions (POPCNT, L1) fall through to int path
+                # which is arguably correct (bitwise POPCNT on FP bits)
+
+            # ---- Integer TRED ----
             values = [tile_get_elem(tile, lane, elem_bytes) for lane in range(num_lanes)]
             if signed:
                 values_s = [to_signed(v, elem_bytes) for v in values]
@@ -1882,11 +2234,24 @@ class Megapad64:
                     tile_set_elem(out, lane, elem_bytes, out_val)
                 write_tile(self.tdst, out)
                 return 2  # 3 cycles total
-            elif funct == 5:  # PACK — narrow elements
-                # Takes elements from src0 at current width, narrows to half width
-                # Stores in lower half of output tile. If saturating, clamp.
+            elif funct == 5:  # PACK — narrow elements / FP format convert
                 src = read_tile(self.tsrc0)
                 out = bytearray(64)
+
+                if is_fp:
+                    # FP PACK: Convert to narrower FP format
+                    # fp16 PACK → bf16 (same width, different format)
+                    # bf16 PACK → fp16 (same width, different format)
+                    # Both are 16-bit, so this is format conversion, not narrowing
+                    target_ew = EW_BF16 if ew_bits == EW_FP16 else EW_FP16
+                    for lane in range(num_lanes):
+                        val = tile_get_elem(src, lane, elem_bytes)
+                        f = _fp_decode(val, ew_bits)
+                        tile_set_elem(out, lane, elem_bytes, _fp_encode(f, target_ew))
+                    write_tile(self.tdst, out)
+                    return 1
+
+                # Integer PACK: narrows to half width
                 if elem_bytes < 2:
                     # Can't pack below 8-bit; copy as-is
                     write_tile(self.tdst, src)
@@ -1911,11 +2276,23 @@ class Megapad64:
                     tile_set_elem(out, lane, out_eb, val)
                 write_tile(self.tdst, out)
                 return 1  # 2 cycles total
-            elif funct == 6:  # UNPACK — widen elements
-                # Takes elements from lower half of src0, widens to double width
-                # Sign-extend if TMODE bit 4 set, else zero-extend
+            elif funct == 6:  # UNPACK — widen elements / FP format convert
                 src = read_tile(self.tsrc0)
                 out = bytearray(64)
+
+                if is_fp:
+                    # FP UNPACK: Widen fp16/bf16 → fp32
+                    # Input: 32 × 16-bit FP values in src tile
+                    # Output: 16 × 32-bit FP32 values (only first 16 lanes fit)
+                    out_lanes = 16  # 64 bytes / 4 bytes per fp32
+                    for lane in range(out_lanes):
+                        val = tile_get_elem(src, lane, elem_bytes)
+                        f = _fp_decode(val, ew_bits)
+                        tile_set_elem(out, lane, 4, _fp32_to_bits(f))
+                    write_tile(self.tdst, out)
+                    return 1
+
+                # Integer UNPACK: widens to double width
                 out_eb = elem_bytes * 2
                 if out_eb > 8:
                     # Can't widen beyond 64-bit; copy as-is

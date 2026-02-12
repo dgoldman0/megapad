@@ -8,7 +8,10 @@ Run with:  python test_megapad64.py
 import sys
 import traceback
 
-from megapad64 import Megapad64, HaltError, TrapError, u64, sign_extend
+from megapad64 import (Megapad64, HaltError, TrapError, u64, sign_extend,
+                       EW_FP16, EW_BF16, _float_to_fp16, _fp16_to_float,
+                       _float_to_bf16, _bf16_to_float, _fp32_to_bits,
+                       _bits_to_fp32)
 from asm import assemble
 
 PASS = 0
@@ -1148,6 +1151,487 @@ def test_strided_2d():
           f"got 0x{cpu5.mem_read8(0x403F):02X}")
 
 
+def test_tile_fp():
+    """Tile engine FP16/bfloat16 operations"""
+    print("\n== Tile FP16 / bfloat16 ==")
+    import struct, math
+
+    # Helper: write fp16 value to tile lane
+    def write_fp16_lane(cpu, base, lane, val_f):
+        raw = _float_to_fp16(val_f)
+        off = base + lane * 2
+        cpu.mem_write8(off, raw & 0xFF)
+        cpu.mem_write8(off + 1, (raw >> 8) & 0xFF)
+
+    def read_fp16_lane(cpu, base, lane):
+        off = base + lane * 2
+        raw = cpu.mem_read8(off) | (cpu.mem_read8(off + 1) << 8)
+        return _fp16_to_float(raw)
+
+    def write_bf16_lane(cpu, base, lane, val_f):
+        raw = _float_to_bf16(val_f)
+        off = base + lane * 2
+        cpu.mem_write8(off, raw & 0xFF)
+        cpu.mem_write8(off + 1, (raw >> 8) & 0xFF)
+
+    def read_bf16_lane(cpu, base, lane):
+        off = base + lane * 2
+        raw = cpu.mem_read8(off) | (cpu.mem_read8(off + 1) << 8)
+        return _bf16_to_float(raw)
+
+    # ---- FP16 conversion round-trip ----
+    for val in [0.0, 1.0, -1.0, 0.5, 65504.0, -0.0]:
+        raw = _float_to_fp16(val)
+        back = _fp16_to_float(raw)
+        check(f"FP16 round-trip {val}", back == val or (val == 0.0 and back == 0.0),
+              f"got {back}")
+
+    # ---- BF16 conversion round-trip ----
+    for val in [0.0, 1.0, -1.0, 0.5, 256.0]:
+        raw = _float_to_bf16(val)
+        back = _bf16_to_float(raw)
+        check(f"BF16 round-trip {val}", back == val, f"got {back}")
+
+    # ---- FP16 TALU ADD: 1.0 + 2.0 = 3.0 in all 32 lanes ----
+    cpu = Megapad64()
+    cpu.tsrc0 = 0x1000
+    cpu.tsrc1 = 0x2000
+    cpu.tdst  = 0x3000
+    cpu.tmode = EW_FP16  # fp16 mode
+    for lane in range(32):
+        write_fp16_lane(cpu, 0x1000, lane, 1.0)
+        write_fp16_lane(cpu, 0x2000, lane, 2.0)
+
+    code = assemble("t.add\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    r = read_fp16_lane(cpu, 0x3000, 0)
+    check("FP16 T.ADD: 1.0+2.0=3.0", r == 3.0, f"got {r}")
+    check("FP16 T.ADD: all lanes",
+          all(read_fp16_lane(cpu, 0x3000, i) == 3.0 for i in range(32)))
+
+    # ---- FP16 TALU SUB: 5.0 - 2.0 = 3.0 ----
+    cpu2 = Megapad64()
+    cpu2.tsrc0 = 0x1000; cpu2.tsrc1 = 0x2000; cpu2.tdst = 0x3000
+    cpu2.tmode = EW_FP16
+    for lane in range(32):
+        write_fp16_lane(cpu2, 0x1000, lane, 5.0)
+        write_fp16_lane(cpu2, 0x2000, lane, 2.0)
+    code = assemble("t.sub\nhalt")
+    cpu2.load_bytes(0, code)
+    cpu2.pc = 0
+    try:
+        cpu2.run()
+    except HaltError:
+        pass
+    check("FP16 T.SUB: 5.0-2.0=3.0", read_fp16_lane(cpu2, 0x3000, 0) == 3.0,
+          f"got {read_fp16_lane(cpu2, 0x3000, 0)}")
+
+    # ---- FP16 TMUL MUL: 3.0 * 4.0 = 12.0 ----
+    cpu3 = Megapad64()
+    cpu3.tsrc0 = 0x1000; cpu3.tsrc1 = 0x2000; cpu3.tdst = 0x3000
+    cpu3.tmode = EW_FP16
+    for lane in range(32):
+        write_fp16_lane(cpu3, 0x1000, lane, 3.0)
+        write_fp16_lane(cpu3, 0x2000, lane, 4.0)
+    code = assemble("t.mul\nhalt")
+    cpu3.load_bytes(0, code)
+    cpu3.pc = 0
+    try:
+        cpu3.run()
+    except HaltError:
+        pass
+    check("FP16 T.MUL: 3.0*4.0=12.0", read_fp16_lane(cpu3, 0x3000, 0) == 12.0,
+          f"got {read_fp16_lane(cpu3, 0x3000, 0)}")
+
+    # ---- FP16 MIN/MAX ----
+    cpu4 = Megapad64()
+    cpu4.tsrc0 = 0x1000; cpu4.tsrc1 = 0x2000; cpu4.tdst = 0x3000
+    cpu4.tmode = EW_FP16
+    write_fp16_lane(cpu4, 0x1000, 0, 3.5)
+    write_fp16_lane(cpu4, 0x2000, 0, 7.0)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu4, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu4, 0x2000, lane, 0.0)
+    code = assemble("t.min\nhalt")
+    cpu4.load_bytes(0, code)
+    cpu4.pc = 0
+    try:
+        cpu4.run()
+    except HaltError:
+        pass
+    check("FP16 T.MIN: min(3.5,7.0)=3.5", read_fp16_lane(cpu4, 0x3000, 0) == 3.5,
+          f"got {read_fp16_lane(cpu4, 0x3000, 0)}")
+
+    cpu4b = Megapad64()
+    cpu4b.tsrc0 = 0x1000; cpu4b.tsrc1 = 0x2000; cpu4b.tdst = 0x3000
+    cpu4b.tmode = EW_FP16
+    write_fp16_lane(cpu4b, 0x1000, 0, 3.5)
+    write_fp16_lane(cpu4b, 0x2000, 0, 7.0)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu4b, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu4b, 0x2000, lane, 0.0)
+    code = assemble("t.max\nhalt")
+    cpu4b.load_bytes(0, code)
+    cpu4b.pc = 0
+    try:
+        cpu4b.run()
+    except HaltError:
+        pass
+    check("FP16 T.MAX: max(3.5,7.0)=7.0", read_fp16_lane(cpu4b, 0x3000, 0) == 7.0,
+          f"got {read_fp16_lane(cpu4b, 0x3000, 0)}")
+
+    # ---- FP16 ABS: abs(-5.0) = 5.0 ----
+    cpu5 = Megapad64()
+    cpu5.tsrc0 = 0x1000; cpu5.tsrc1 = 0x2000; cpu5.tdst = 0x3000
+    cpu5.tmode = EW_FP16
+    write_fp16_lane(cpu5, 0x1000, 0, -5.0)
+    write_fp16_lane(cpu5, 0x1000, 1, 3.0)
+    for lane in range(2, 32):
+        write_fp16_lane(cpu5, 0x1000, lane, 0.0)
+    code = assemble("t.abs\nhalt")
+    cpu5.load_bytes(0, code)
+    cpu5.pc = 0
+    try:
+        cpu5.run()
+    except HaltError:
+        pass
+    check("FP16 T.ABS: abs(-5.0)=5.0", read_fp16_lane(cpu5, 0x3000, 0) == 5.0,
+          f"got {read_fp16_lane(cpu5, 0x3000, 0)}")
+    check("FP16 T.ABS: abs(3.0)=3.0", read_fp16_lane(cpu5, 0x3000, 1) == 3.0,
+          f"got {read_fp16_lane(cpu5, 0x3000, 1)}")
+
+    # ---- FP16 DOT product: 32 lanes of 1.0 * 2.0 → ACC = 64.0 (FP32) ----
+    cpu6 = Megapad64()
+    cpu6.tsrc0 = 0x1000; cpu6.tsrc1 = 0x2000; cpu6.tdst = 0x3000
+    cpu6.tmode = EW_FP16
+    cpu6.tctrl = 0
+    for lane in range(32):
+        write_fp16_lane(cpu6, 0x1000, lane, 1.0)
+        write_fp16_lane(cpu6, 0x2000, lane, 2.0)
+    code = assemble("t.dot\nhalt")
+    cpu6.load_bytes(0, code)
+    cpu6.pc = 0
+    try:
+        cpu6.run()
+    except HaltError:
+        pass
+    dot_result = _bits_to_fp32(cpu6.acc[0])
+    check("FP16 T.DOT: 32×(1.0*2.0) = 64.0 (FP32 in ACC)",
+          dot_result == 64.0, f"got {dot_result}")
+
+    # ---- FP16 SUM: 32 lanes of 0.5 → 16.0 (FP32 in ACC) ----
+    cpu7 = Megapad64()
+    cpu7.tsrc0 = 0x1000; cpu7.tmode = EW_FP16; cpu7.tctrl = 0
+    for lane in range(32):
+        write_fp16_lane(cpu7, 0x1000, lane, 0.5)
+    code = assemble("t.sum\nhalt")
+    cpu7.load_bytes(0, code)
+    cpu7.pc = 0
+    try:
+        cpu7.run()
+    except HaltError:
+        pass
+    sum_result = _bits_to_fp32(cpu7.acc[0])
+    check("FP16 T.SUM: 32×0.5 = 16.0 (FP32 in ACC)",
+          sum_result == 16.0, f"got {sum_result}")
+
+    # ---- FP16 FMA: dst = a*b + dst ----
+    cpu8 = Megapad64()
+    cpu8.tsrc0 = 0x1000; cpu8.tsrc1 = 0x2000; cpu8.tdst = 0x3000
+    cpu8.tmode = EW_FP16
+    write_fp16_lane(cpu8, 0x1000, 0, 2.0)  # a
+    write_fp16_lane(cpu8, 0x2000, 0, 3.0)  # b
+    write_fp16_lane(cpu8, 0x3000, 0, 1.0)  # c (existing dst)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu8, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu8, 0x2000, lane, 0.0)
+        write_fp16_lane(cpu8, 0x3000, lane, 0.0)
+    code = assemble("t.fma\nhalt")
+    cpu8.load_bytes(0, code)
+    cpu8.pc = 0
+    try:
+        cpu8.run()
+    except HaltError:
+        pass
+    fma_result = read_fp16_lane(cpu8, 0x3000, 0)
+    check("FP16 T.FMA: 2.0*3.0+1.0=7.0", fma_result == 7.0,
+          f"got {fma_result}")
+
+    # ---- FP16 MAC: dst += a*b ----
+    cpu8b = Megapad64()
+    cpu8b.tsrc0 = 0x1000; cpu8b.tsrc1 = 0x2000; cpu8b.tdst = 0x3000
+    cpu8b.tmode = EW_FP16
+    write_fp16_lane(cpu8b, 0x1000, 0, 2.0)
+    write_fp16_lane(cpu8b, 0x2000, 0, 3.0)
+    write_fp16_lane(cpu8b, 0x3000, 0, 10.0)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu8b, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu8b, 0x2000, lane, 0.0)
+        write_fp16_lane(cpu8b, 0x3000, lane, 0.0)
+    code = assemble("t.mac\nhalt")
+    cpu8b.load_bytes(0, code)
+    cpu8b.pc = 0
+    try:
+        cpu8b.run()
+    except HaltError:
+        pass
+    mac_result = read_fp16_lane(cpu8b, 0x3000, 0)
+    check("FP16 T.MAC: 10.0+2.0*3.0=16.0", mac_result == 16.0,
+          f"got {mac_result}")
+
+    # ---- BF16 ADD: 1.0 + 2.0 = 3.0 ----
+    cpu9 = Megapad64()
+    cpu9.tsrc0 = 0x1000; cpu9.tsrc1 = 0x2000; cpu9.tdst = 0x3000
+    cpu9.tmode = EW_BF16
+    for lane in range(32):
+        write_bf16_lane(cpu9, 0x1000, lane, 1.0)
+        write_bf16_lane(cpu9, 0x2000, lane, 2.0)
+    code = assemble("t.add\nhalt")
+    cpu9.load_bytes(0, code)
+    cpu9.pc = 0
+    try:
+        cpu9.run()
+    except HaltError:
+        pass
+    bf_r = read_bf16_lane(cpu9, 0x3000, 0)
+    check("BF16 T.ADD: 1.0+2.0=3.0", bf_r == 3.0, f"got {bf_r}")
+    check("BF16 T.ADD: all lanes",
+          all(read_bf16_lane(cpu9, 0x3000, i) == 3.0 for i in range(32)))
+
+    # ---- BF16 MUL: 4.0 * 5.0 = 20.0 ----
+    cpu10 = Megapad64()
+    cpu10.tsrc0 = 0x1000; cpu10.tsrc1 = 0x2000; cpu10.tdst = 0x3000
+    cpu10.tmode = EW_BF16
+    for lane in range(32):
+        write_bf16_lane(cpu10, 0x1000, lane, 4.0)
+        write_bf16_lane(cpu10, 0x2000, lane, 5.0)
+    code = assemble("t.mul\nhalt")
+    cpu10.load_bytes(0, code)
+    cpu10.pc = 0
+    try:
+        cpu10.run()
+    except HaltError:
+        pass
+    check("BF16 T.MUL: 4.0*5.0=20.0", read_bf16_lane(cpu10, 0x3000, 0) == 20.0,
+          f"got {read_bf16_lane(cpu10, 0x3000, 0)}")
+
+    # ---- BF16 DOT: 32 lanes of 1.0 * 3.0 → 96.0 ----
+    cpu11 = Megapad64()
+    cpu11.tsrc0 = 0x1000; cpu11.tsrc1 = 0x2000
+    cpu11.tmode = EW_BF16; cpu11.tctrl = 0
+    for lane in range(32):
+        write_bf16_lane(cpu11, 0x1000, lane, 1.0)
+        write_bf16_lane(cpu11, 0x2000, lane, 3.0)
+    code = assemble("t.dot\nhalt")
+    cpu11.load_bytes(0, code)
+    cpu11.pc = 0
+    try:
+        cpu11.run()
+    except HaltError:
+        pass
+    dot_bf = _bits_to_fp32(cpu11.acc[0])
+    check("BF16 T.DOT: 32×(1.0*3.0)=96.0", dot_bf == 96.0,
+          f"got {dot_bf}")
+
+    # ---- FP16 PACK: fp16 → bf16 format conversion ----
+    cpu12 = Megapad64()
+    cpu12.tsrc0 = 0x1000; cpu12.tdst = 0x3000
+    cpu12.tmode = EW_FP16
+    write_fp16_lane(cpu12, 0x1000, 0, 1.5)
+    write_fp16_lane(cpu12, 0x1000, 1, -3.0)
+    for lane in range(2, 32):
+        write_fp16_lane(cpu12, 0x1000, lane, 0.0)
+    code = assemble("t.pack\nhalt")
+    cpu12.load_bytes(0, code)
+    cpu12.pc = 0
+    try:
+        cpu12.run()
+    except HaltError:
+        pass
+    # Result should be bf16 encoded values
+    raw0 = cpu12.mem_read8(0x3000) | (cpu12.mem_read8(0x3001) << 8)
+    raw1 = cpu12.mem_read8(0x3002) | (cpu12.mem_read8(0x3003) << 8)
+    check("FP16 PACK→BF16: 1.5", _bf16_to_float(raw0) == 1.5,
+          f"got {_bf16_to_float(raw0)}")
+    check("FP16 PACK→BF16: -3.0", _bf16_to_float(raw1) == -3.0,
+          f"got {_bf16_to_float(raw1)}")
+
+    # ---- FP16 UNPACK: fp16 → fp32 widening ----
+    cpu13 = Megapad64()
+    cpu13.tsrc0 = 0x1000; cpu13.tdst = 0x3000
+    cpu13.tmode = EW_FP16
+    write_fp16_lane(cpu13, 0x1000, 0, 2.5)
+    write_fp16_lane(cpu13, 0x1000, 1, -7.0)
+    for lane in range(2, 32):
+        write_fp16_lane(cpu13, 0x1000, lane, 0.0)
+    code = assemble("t.unpack\nhalt")
+    cpu13.load_bytes(0, code)
+    cpu13.pc = 0
+    try:
+        cpu13.run()
+    except HaltError:
+        pass
+    # Output: 16 × fp32 values (4 bytes each)
+    fp32_raw0 = cpu13.mem_read32(0x3000)
+    fp32_raw1 = cpu13.mem_read32(0x3004)
+    check("FP16 UNPACK→FP32: 2.5", _bits_to_fp32(fp32_raw0) == 2.5,
+          f"got {_bits_to_fp32(fp32_raw0)}")
+    check("FP16 UNPACK→FP32: -7.0", _bits_to_fp32(fp32_raw1) == -7.0,
+          f"got {_bits_to_fp32(fp32_raw1)}")
+
+    # ---- FP16 NaN propagation in MIN/MAX ----
+    cpu14 = Megapad64()
+    cpu14.tsrc0 = 0x1000; cpu14.tsrc1 = 0x2000; cpu14.tdst = 0x3000
+    cpu14.tmode = EW_FP16
+    write_fp16_lane(cpu14, 0x1000, 0, float('nan'))
+    write_fp16_lane(cpu14, 0x2000, 0, 5.0)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu14, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu14, 0x2000, lane, 0.0)
+    code = assemble("t.min\nhalt")
+    cpu14.load_bytes(0, code)
+    cpu14.pc = 0
+    try:
+        cpu14.run()
+    except HaltError:
+        pass
+    raw_nan = cpu14.mem_read8(0x3000) | (cpu14.mem_read8(0x3001) << 8)
+    is_nan_result = ((raw_nan >> 10) & 0x1F) == 0x1F and (raw_nan & 0x3FF) != 0
+    check("FP16 NaN propagation in MIN", is_nan_result,
+          f"got raw=0x{raw_nan:04X}")
+
+    # ---- FP16 DOTACC: 4-way chunked dot product ----
+    cpu15 = Megapad64()
+    cpu15.tsrc0 = 0x1000; cpu15.tsrc1 = 0x2000
+    cpu15.tmode = EW_FP16; cpu15.tctrl = 0
+    # 32 lanes, 4 chunks of 8: chunk0 all 1.0*2.0, chunk1 all 3.0*1.0, etc.
+    for lane in range(8):
+        write_fp16_lane(cpu15, 0x1000, lane, 1.0)
+        write_fp16_lane(cpu15, 0x2000, lane, 2.0)
+    for lane in range(8, 16):
+        write_fp16_lane(cpu15, 0x1000, lane, 3.0)
+        write_fp16_lane(cpu15, 0x2000, lane, 1.0)
+    for lane in range(16, 32):
+        write_fp16_lane(cpu15, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu15, 0x2000, lane, 0.0)
+    code = assemble("t.dotacc\nhalt")
+    cpu15.load_bytes(0, code)
+    cpu15.pc = 0
+    try:
+        cpu15.run()
+    except HaltError:
+        pass
+    dacc0 = _bits_to_fp32(cpu15.acc[0])
+    dacc1 = _bits_to_fp32(cpu15.acc[1])
+    check("FP16 DOTACC chunk0: 8×(1.0*2.0)=16.0", dacc0 == 16.0,
+          f"got {dacc0}")
+    check("FP16 DOTACC chunk1: 8×(3.0*1.0)=24.0", dacc1 == 24.0,
+          f"got {dacc1}")
+
+    # ---- FP16 SUMSQ: sum of squares ----
+    cpu16 = Megapad64()
+    cpu16.tsrc0 = 0x1000; cpu16.tmode = EW_FP16; cpu16.tctrl = 0
+    write_fp16_lane(cpu16, 0x1000, 0, 3.0)
+    write_fp16_lane(cpu16, 0x1000, 1, 4.0)
+    for lane in range(2, 32):
+        write_fp16_lane(cpu16, 0x1000, lane, 0.0)
+    code = assemble("t.sumsq\nhalt")
+    cpu16.load_bytes(0, code)
+    cpu16.pc = 0
+    try:
+        cpu16.run()
+    except HaltError:
+        pass
+    ssq = _bits_to_fp32(cpu16.acc[0])
+    check("FP16 SUMSQ: 3²+4²=25.0", ssq == 25.0, f"got {ssq}")
+
+    # ---- FP16 WMUL: widening multiply fp16→fp32 ----
+    cpu17 = Megapad64()
+    cpu17.tsrc0 = 0x1000; cpu17.tsrc1 = 0x2000; cpu17.tdst = 0x3000
+    cpu17.tmode = EW_FP16
+    write_fp16_lane(cpu17, 0x1000, 0, 2.0)
+    write_fp16_lane(cpu17, 0x2000, 0, 5.0)
+    write_fp16_lane(cpu17, 0x1000, 1, -3.0)
+    write_fp16_lane(cpu17, 0x2000, 1, 4.0)
+    for lane in range(2, 32):
+        write_fp16_lane(cpu17, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu17, 0x2000, lane, 0.0)
+    code = assemble("t.wmul\nhalt")
+    cpu17.load_bytes(0, code)
+    cpu17.pc = 0
+    try:
+        cpu17.run()
+    except HaltError:
+        pass
+    wmul0 = _bits_to_fp32(cpu17.mem_read32(0x3000))
+    wmul1 = _bits_to_fp32(cpu17.mem_read32(0x3004))
+    check("FP16 WMUL: 2.0*5.0=10.0 (fp32)", wmul0 == 10.0, f"got {wmul0}")
+    check("FP16 WMUL: -3.0*4.0=-12.0 (fp32)", wmul1 == -12.0, f"got {wmul1}")
+
+    # ---- FP16 TRED MIN/MAX with reduction ----
+    cpu18 = Megapad64()
+    cpu18.tsrc0 = 0x1000; cpu18.tmode = EW_FP16; cpu18.tctrl = 0
+    write_fp16_lane(cpu18, 0x1000, 0, 5.0)
+    write_fp16_lane(cpu18, 0x1000, 1, -2.0)
+    write_fp16_lane(cpu18, 0x1000, 2, 10.0)
+    for lane in range(3, 32):
+        write_fp16_lane(cpu18, 0x1000, lane, 0.0)
+    code = assemble("t.rmin\nhalt")
+    cpu18.load_bytes(0, code)
+    cpu18.pc = 0
+    try:
+        cpu18.run()
+    except HaltError:
+        pass
+    rmin_r = _bits_to_fp32(cpu18.acc[0])
+    check("FP16 TRED MIN: min(5,-2,10,0...)=-2.0", rmin_r == -2.0,
+          f"got {rmin_r}")
+
+    # ---- Bitwise ops work in FP mode (AND/OR/XOR are bitwise) ----
+    cpu19 = Megapad64()
+    cpu19.tsrc0 = 0x1000; cpu19.tsrc1 = 0x2000; cpu19.tdst = 0x3000
+    cpu19.tmode = EW_FP16
+    # Write raw 0xFFFF and 0x7FFF → AND should give 0x7FFF (clears sign bit)
+    cpu19.mem_write8(0x1000, 0xFF); cpu19.mem_write8(0x1001, 0xFF)
+    cpu19.mem_write8(0x2000, 0xFF); cpu19.mem_write8(0x2001, 0x7F)
+    for lane in range(1, 32):
+        write_fp16_lane(cpu19, 0x1000, lane, 0.0)
+        write_fp16_lane(cpu19, 0x2000, lane, 0.0)
+    code = assemble("t.and\nhalt")
+    cpu19.load_bytes(0, code)
+    cpu19.pc = 0
+    try:
+        cpu19.run()
+    except HaltError:
+        pass
+    raw = cpu19.mem_read8(0x3000) | (cpu19.mem_read8(0x3001) << 8)
+    check("FP16 bitwise AND: 0xFFFF & 0x7FFF = 0x7FFF", raw == 0x7FFF,
+          f"got 0x{raw:04X}")
+
+    # ---- TMODE EW=4 doesn't break existing integer ops (regression) ----
+    # Quick check: u8 mode still works after fp tests
+    cpu20 = Megapad64()
+    cpu20.tsrc0 = 0x1000; cpu20.tsrc1 = 0x2000; cpu20.tdst = 0x3000
+    cpu20.tmode = 0x00  # u8
+    for i in range(64):
+        cpu20.mem_write8(0x1000 + i, 1)
+        cpu20.mem_write8(0x2000 + i, 2)
+    code = assemble("t.add\nhalt")
+    cpu20.load_bytes(0, code)
+    cpu20.pc = 0
+    try:
+        cpu20.run()
+    except HaltError:
+        pass
+    check("u8 regression: 1+2=3 still works",
+          all(cpu20.mem_read8(0x3000 + i) == 3 for i in range(64)))
+
+
 def test_ext_prefix():
     """Family 0xF: EXT prefix"""
     print("\n== EXT (0xF) ==")
@@ -1284,6 +1768,7 @@ def main():
         test_vshr_vshl,
         test_tile_views,
         test_strided_2d,
+        test_tile_fp,
         test_ext_prefix,
         test_fibonacci,
         test_subroutine,

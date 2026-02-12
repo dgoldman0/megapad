@@ -9230,12 +9230,30 @@ d_tload2d:
     ret.l
 
 ; === TSTORE2D ( -- ) ===
-latest_entry:
 d_tstore2d:
     .dq d_tload2d
     .db 8
     .ascii "TSTORE2D"
     t.store2d
+    ret.l
+
+; === FP16-MODE ( -- ) set TMODE to fp16 (EW=4) ===
+d_fp16_mode:
+    .dq d_tstore2d
+    .db 9
+    .ascii "FP16-MODE"
+    ldi r0, 4
+    csrw 0x14, r0
+    ret.l
+
+; === BF16-MODE ( -- ) set TMODE to bf16 (EW=5) ===
+latest_entry:
+d_bf16_mode:
+    .dq d_fp16_mode
+    .db 9
+    .ascii "BF16-MODE"
+    ldi r0, 5
+    csrw 0x14, r0
     ret.l
 
 ; =====================================================================

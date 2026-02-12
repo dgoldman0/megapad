@@ -202,11 +202,13 @@ parameter TMODE_BIT_SIGNED   = 4;      // Bit 4: signed mode
 parameter TMODE_BIT_SATURATE = 5;      // Bit 5: saturating arithmetic
 parameter TMODE_BIT_ROUNDING = 6;      // Bit 6: rounding mode for shifts
 
-// Tile modes (TMODE CSR bits 1:0)
-parameter [1:0] TMODE_8   = 2'b00;   // 64 × 8-bit lanes
-parameter [1:0] TMODE_16  = 2'b01;   // 32 × 16-bit lanes
-parameter [1:0] TMODE_32  = 2'b10;   // 16 × 32-bit lanes
-parameter [1:0] TMODE_64  = 2'b11;   //  8 × 64-bit lanes
+// Tile modes (TMODE CSR bits [2:0] — 3-bit EW encoding)
+parameter [2:0] TMODE_8    = 3'b000;   // 64 × 8-bit  lanes (u8/i8)
+parameter [2:0] TMODE_16   = 3'b001;   // 32 × 16-bit lanes (u16/i16)
+parameter [2:0] TMODE_32   = 3'b010;   // 16 × 32-bit lanes (u32/i32)
+parameter [2:0] TMODE_64   = 3'b011;   //  8 × 64-bit lanes (u64/i64)
+parameter [2:0] TMODE_FP16 = 3'b100;   // 32 × 16-bit lanes (IEEE 754 fp16)
+parameter [2:0] TMODE_BF16 = 3'b101;   // 32 × 16-bit lanes (bfloat16)
 
 // ----------------------------------------------------------------------------
 // CSR addresses  (matches emulator megapad64.py numbering)
