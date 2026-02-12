@@ -6985,6 +6985,43 @@ w_crc_final:
     str r11, r0
     ret.l
 
+; =====================================================================
+;  Memory BIST — CSR 0x60..0x63
+; =====================================================================
+
+; BIST-FULL ( -- )  start full memory BIST (March C- + checkerboard + addr-as-data)
+w_bist_full:
+    ldi r0, 1
+    csrw 0x60, r0
+    ret.l
+
+; BIST-QUICK ( -- )  start quick memory BIST (March C- only)
+w_bist_quick:
+    ldi r0, 2
+    csrw 0x60, r0
+    ret.l
+
+; BIST-STATUS ( -- n )  read BIST status: 0=idle 1=running 2=pass 3=fail
+w_bist_status:
+    csrr r0, 0x61
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BIST-FAIL-ADDR ( -- n )  read first failing address
+w_bist_fail_addr:
+    csrr r0, 0x62
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BIST-FAIL-DATA ( -- n )  read expected/actual data (packed)
+w_bist_fail_data:
+    csrr r0, 0x63
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -9040,12 +9077,57 @@ d_crc_reset:
     ret.l
 
 ; === CRC-FINAL ===
-latest_entry:
 d_crc_final:
     .dq d_crc_reset
     .db 9
     .ascii "CRC-FINAL"
     ldi64 r11, w_crc_final
+    call.l r11
+    ret.l
+
+; === BIST-FULL ===
+d_bist_full:
+    .dq d_crc_final
+    .db 9
+    .ascii "BIST-FULL"
+    ldi64 r11, w_bist_full
+    call.l r11
+    ret.l
+
+; === BIST-QUICK ===
+d_bist_quick:
+    .dq d_bist_full
+    .db 10
+    .ascii "BIST-QUICK"
+    ldi64 r11, w_bist_quick
+    call.l r11
+    ret.l
+
+; === BIST-STATUS ===
+d_bist_status:
+    .dq d_bist_quick
+    .db 11
+    .ascii "BIST-STATUS"
+    ldi64 r11, w_bist_status
+    call.l r11
+    ret.l
+
+; === BIST-FAIL-ADDR ===
+d_bist_fail_addr:
+    .dq d_bist_status
+    .db 14
+    .ascii "BIST-FAIL-ADDR"
+    ldi64 r11, w_bist_fail_addr
+    call.l r11
+    ret.l
+
+; === BIST-FAIL-DATA ===
+latest_entry:
+d_bist_fail_data:
+    .dq d_bist_fail_addr
+    .db 14
+    .ascii "BIST-FAIL-DATA"
+    ldi64 r11, w_bist_fail_data
     call.l r11
     ret.l
 

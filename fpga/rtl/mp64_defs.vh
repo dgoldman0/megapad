@@ -222,6 +222,12 @@ parameter [7:0] CSR_PERF_TILEOPS = 8'h6A;  // Tile engine operations completed
 parameter [7:0] CSR_PERF_EXTMEM  = 8'h6B;  // External memory beats
 parameter [7:0] CSR_PERF_CTRL    = 8'h6C;  // Bit 0: enable, Bit 1: reset all
 
+// Memory BIST CSRs (§6.1)
+parameter [7:0] CSR_BIST_CMD       = 8'h60;  // W: 0=idle, 1=full, 2=quick
+parameter [7:0] CSR_BIST_STATUS    = 8'h61;  // R: 0=idle, 1=running, 2=pass, 3=fail
+parameter [7:0] CSR_BIST_FAIL_ADDR = 8'h62;  // R: first failing address
+parameter [7:0] CSR_BIST_FAIL_DATA = 8'h63;  // R: expected vs actual
+
 // ----------------------------------------------------------------------------
 // Bus protocol
 // ----------------------------------------------------------------------------

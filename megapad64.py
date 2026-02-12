@@ -73,6 +73,12 @@ CSR_CPUID       = 0x31
 
 # Performance counter CSRs
 CSR_PERF_CYCLES  = 0x68
+
+# BIST CSRs (§6.1 — Memory Built-In Self-Test)
+CSR_BIST_CMD       = 0x60   # W: 0=idle, 1=start-full, 2=start-quick
+CSR_BIST_STATUS    = 0x61   # R: 0=idle, 1=running, 2=pass, 3=fail
+CSR_BIST_FAIL_ADDR = 0x62   # R: first failing address
+CSR_BIST_FAIL_DATA = 0x63   # R: expected vs actual data
 CSR_PERF_STALLS  = 0x69
 CSR_PERF_TILEOPS = 0x6A
 CSR_PERF_EXTMEM  = 0x6B
@@ -201,6 +207,11 @@ class Megapad64:
         self.perf_stalls: int  = 0   # stall cycles (bus/memory wait)
         self.perf_tileops: int = 0   # tile engine operations completed
         self.perf_extmem: int  = 0   # external memory beats
+
+        # Memory BIST state
+        self.bist_status: int    = 0   # 0=idle, 2=pass, 3=fail
+        self.bist_fail_addr: int = 0   # first failing address
+        self.bist_fail_data: int = 0   # expected vs actual (packed)
 
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
@@ -439,6 +450,10 @@ class Megapad64:
             CSR_PERF_TILEOPS: lambda: u64(self.perf_tileops),
             CSR_PERF_EXTMEM:  lambda: u64(self.perf_extmem),
             CSR_PERF_CTRL:    lambda: self.perf_enable & 1,
+            CSR_BIST_CMD:       lambda: 0,  # write-only
+            CSR_BIST_STATUS:    lambda: self.bist_status,
+            CSR_BIST_FAIL_ADDR: lambda: self.bist_fail_addr,
+            CSR_BIST_FAIL_DATA: lambda: self.bist_fail_data,
         }
         fn = m.get(addr)
         if fn is None:
@@ -476,6 +491,7 @@ class Megapad64:
             CSR_IPIACK:   lambda v: self._ipi_ack(v),
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
             CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
+            CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -491,6 +507,84 @@ class Megapad64:
             self.perf_stalls  = 0
             self.perf_tileops = 0
             self.perf_extmem  = 0
+
+    def _bist_cmd_write(self, val: int):
+        """Handle writes to CSR_BIST_CMD — run memory BIST immediately.
+        0=idle (no-op), 1=full test, 2=quick (March C- only)."""
+        if val == 0:
+            return
+        self.bist_status = 1     # running
+        self.bist_fail_addr = 0
+        self.bist_fail_data = 0
+        # Scratchpad region 0xFFF80..0xFFFFF is excluded from BIST
+        end = min(self.mem_size, 0xFFF80)
+        ok = self._bist_march_c_minus(end)
+        if ok and val == 1:
+            ok = self._bist_checkerboard(end)
+        if ok and val == 1:
+            ok = self._bist_addr_as_data(end)
+        self.bist_status = 2 if ok else 3
+
+    def _bist_march_c_minus(self, end: int) -> bool:
+        """March C- pattern: detect stuck-at faults."""
+        # Phase 1: Write 0x00 everywhere
+        for a in range(end):
+            self.mem[a] = 0x00
+        # Phase 2: Read 0x00, write 0xFF (ascending)
+        for a in range(end):
+            if self.mem[a] != 0x00:
+                self._bist_fail(a, 0x00, self.mem[a])
+                return False
+            self.mem[a] = 0xFF
+        # Phase 3: Read 0xFF, write 0x00 (descending)
+        for a in range(end - 1, -1, -1):
+            if self.mem[a] != 0xFF:
+                self._bist_fail(a, 0xFF, self.mem[a])
+                return False
+            self.mem[a] = 0x00
+        # Phase 4: Verify all 0x00
+        for a in range(end):
+            if self.mem[a] != 0x00:
+                self._bist_fail(a, 0x00, self.mem[a])
+                return False
+        return True
+
+    def _bist_checkerboard(self, end: int) -> bool:
+        """Checkerboard pattern: detect coupling faults."""
+        # Pass 1: 0xAA at even addresses, 0x55 at odd
+        for a in range(end):
+            self.mem[a] = 0xAA if (a & 1) == 0 else 0x55
+        for a in range(end):
+            expected = 0xAA if (a & 1) == 0 else 0x55
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        # Pass 2: invert — 0x55 at even, 0xAA at odd
+        for a in range(end):
+            self.mem[a] = 0x55 if (a & 1) == 0 else 0xAA
+        for a in range(end):
+            expected = 0x55 if (a & 1) == 0 else 0xAA
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        return True
+
+    def _bist_addr_as_data(self, end: int) -> bool:
+        """Address-as-data pattern: detect address decoder faults."""
+        for a in range(end):
+            self.mem[a] = a & 0xFF
+        for a in range(end):
+            expected = a & 0xFF
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        return True
+
+    def _bist_fail(self, addr: int, expected: int, actual: int):
+        """Record a BIST failure."""
+        self.bist_fail_addr = addr
+        # Pack expected in upper 32 bits, actual in lower 32 bits
+        self.bist_fail_data = ((expected & 0xFFFFFFFF) << 32) | (actual & 0xFFFFFFFF)
 
     @property
     def _ipi_pending_mask(self) -> int:

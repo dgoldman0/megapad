@@ -112,6 +112,11 @@ module mp64_cpu (
     reg [63:0] perf_extmem;     // external memory beats
     reg        perf_enable;     // counting enabled
 
+    // Memory BIST state (CSR-accessible, stub in RTL — real BIST FSM is separate)
+    reg  [1:0] bist_status;     // 0=idle, 1=running, 2=pass, 3=fail
+    reg [63:0] bist_fail_addr;  // first failing address
+    reg [63:0] bist_fail_data;  // expected vs actual (packed)
+
     // EXT prefix modifier
     reg [3:0]  ext_mod;
     reg        ext_active;
@@ -444,6 +449,11 @@ module mp64_cpu (
             perf_tileops <= 64'd0;
             perf_extmem  <= 64'd0;
             perf_enable  <= 1'b1;  // enabled by default
+
+            // BIST registers
+            bist_status    <= 2'd0;
+            bist_fail_addr <= 64'd0;
+            bist_fail_data <= 64'd0;
 
             // Clear register file
             R[0]  <= 64'd0;  R[1]  <= 64'd0;  R[2]  <= 64'd0;  R[3]  <= 64'd0;
@@ -1184,6 +1194,14 @@ module mp64_cpu (
                                         perf_extmem  <= 64'd0;
                                     end
                                 end
+                                CSR_BIST_CMD: begin
+                                    // RTL stub: instant pass (real BIST FSM is external)
+                                    if (R[nib[2:0]][1:0] != 2'd0) begin
+                                        bist_status    <= 2'd2;  // pass
+                                        bist_fail_addr <= 64'd0;
+                                        bist_fail_data <= 64'd0;
+                                    end
+                                end
                                 // COREID, NCORES are read-only — ignore writes
                             endcase
                         end else begin
@@ -1210,6 +1228,9 @@ module mp64_cpu (
                                 CSR_PERF_TILEOPS: R[nib[2:0]] <= perf_tileops;
                                 CSR_PERF_EXTMEM:  R[nib[2:0]] <= perf_extmem;
                                 CSR_PERF_CTRL:    R[nib[2:0]] <= {63'd0, perf_enable};
+                                CSR_BIST_STATUS:    R[nib[2:0]] <= {62'd0, bist_status};
+                                CSR_BIST_FAIL_ADDR: R[nib[2:0]] <= bist_fail_addr;
+                                CSR_BIST_FAIL_DATA: R[nib[2:0]] <= bist_fail_data;
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end
