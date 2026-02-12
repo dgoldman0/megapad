@@ -5,7 +5,7 @@ memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
 > **Branch:** `features/extended-tpu-impl`
-> **Status:** Fully functional.  242-word BIOS v1.0 Forth system running on
+> **Status:** Fully functional.  247-word BIOS v1.0 Forth system running on
 > a quad-core emulated SoC with mailbox IPI, spinlocks, extended tile engine
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), and 1,207 tests passing.
 
@@ -101,7 +101,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (9,379 lines)  — Forth BIOS v1.0, 242 words
+    bios.asm  (9,379 lines)  — Forth BIOS v1.0, 247 words
     bios.rom  (~22 KB)       — precompiled binary
 ```
 
@@ -114,11 +114,11 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `devices.py` | 964 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC Engine |
 | `system.py` | 474 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, round-robin stepping |
 | `cli.py` | 995 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 9,379 | Forth BIOS v1.0 — subroutine-threaded interpreter, 242 built-in words (incl. multicore, extended tile) |
+| `bios.asm` | 9,379 | Forth BIOS v1.0 — subroutine-threaded interpreter, 247 built-in words (incl. multicore, extended tile, I-cache) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
 | `test_system.py` | 6,234 | System integration tests — 1,184 tests (devices, MMIO, BIOS, KDOS, multicore, FS, extended tile) |
 | `Makefile` | 71 | Build & test targets — PyPy + xdist parallel runner |
-| `fpga/rtl/` | 7,242 | 13 Verilog RTL modules — CPU, tile engine, FP16 ALU, SoC, peripherals |
+| `fpga/rtl/` | ~8,200 | 14 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, peripherals |
 | `fpga/sim/` | 3,930 | 8 Verilog testbenches — 72 hardware tests |
 | **Total** | **~35,000** | |
 
@@ -262,7 +262,7 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (242)
+### Built-in words (247)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -334,6 +334,9 @@ buffer), then tokenises and interprets:
 
 **FP16 / BF16 modes**
 `FP16-MODE` `BF16-MODE`
+
+**Instruction cache**
+`ICACHE-ON` `ICACHE-OFF` `ICACHE-INV` `ICACHE-HITS` `ICACHE-MISSES`
 
 **NIC**
 `NET-STATUS` `NET-SEND` `NET-RECV` `NET-MAC@`
@@ -504,7 +507,7 @@ adds **parallel execution** across 8 workers for another ~2× improvement.
 CPython works fine but takes ~40 minutes for the full suite.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 242 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 247 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC
 engine, memory BIST, tile self-test, performance counters, and multicore

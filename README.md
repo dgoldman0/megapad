@@ -25,13 +25,13 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 242 Forth dictionary words, 9,379 lines ASM, ~22 KB binary |
+| **BIOS** | 247 Forth dictionary words, 9,379 lines ASM, ~22 KB binary |
 | **KDOS** | v1.1 — 247 colon definitions + 138 variables/constants, 3,158 lines Forth |
 | **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,516 lines Python |
 | **Tests** | 1,207 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **FPGA RTL** | 13 Verilog modules + 8 testbenches, Nexys A7-200T target |
+| **FPGA RTL** | 14 Verilog modules + 9 testbenches, Nexys A7-200T target |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
@@ -49,6 +49,7 @@ and **quad-core multicore dispatch** with IPI, spinlocks, and barriers.
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐             │
 │  │ Core 0  │ │ Core 1  │ │ Core 2  │ │ Core 3  │             │
 │  │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │             │
+│  │ 4K I$   │ │ 4K I$   │ │ 4K I$   │ │ 4K I$   │             │
 │  │ Tile    │ │ Tile    │ │ Tile    │ │ Tile    │             │
 │  │ Engine  │ │ Engine  │ │ Engine  │ │ Engine  │             │
 │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘             │
@@ -78,6 +79,9 @@ cores boot into a worker loop; the primary core dispatches work via
 variable-length instructions (1–10 bytes), 16 instruction families,
 heritage from the RCA CDP1802 with modern 64-bit extensions.  Any GPR can
 serve as PC, data pointer, or stack pointer via runtime selectors.
+A 2-stage pipeline (IF + DEX) with a per-core 4 KiB direct-mapped
+instruction cache delivers ~2× throughput over the original FSM design
+with no speculation or out-of-order execution.
 
 **Tile Engine** — Per-core SIMD execution unit controlled through CSR
 registers and triggered by MEX instructions.  Each operation processes a
@@ -112,7 +116,7 @@ memory-mapped at `0xFFFF_FF00+`.
 │  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
 │    BIOS v1.0 (9,379 lines)     │  ← Subroutine-threaded Forth,
-│  242 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│  247 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
@@ -251,7 +255,7 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 242 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 247 entries by category) |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 400+ definitions by section, incl. multicore) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
@@ -304,8 +308,8 @@ quad-core SoC including the extended tile engine.  Key differences from
 the emulator are cycle-level timing and block-RAM-backed memory:
 
 - **1 MiB SRAM** base (4 MiB expanded), backed by FPGA block RAM
-- **4-stage in-order pipeline** (IF, ID, EX, WB) with single-cycle
-  bubble on taken branches
+- **2-stage pipeline** (IF + DEX) with per-core 4 KiB direct-mapped
+  instruction cache; no speculation or branch prediction
 - **Quad-core** with round-robin bus arbiter and per-core QoS weights
 - **Fully static design** — retains state down to DC for ultra-low power
 

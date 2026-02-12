@@ -7046,6 +7046,42 @@ w_tile_detail_fetch:
     str r14, r0
     ret.l
 
+; =====================================================================
+;  Instruction Cache — CSR 0x70..0x72
+; =====================================================================
+
+; ICACHE-ON ( -- )  enable I-cache (set bit 0 of ICACHE_CTRL)
+w_icache_on:
+    ldi r0, 1
+    csrw 0x70, r0
+    ret.l
+
+; ICACHE-OFF ( -- )  disable I-cache (clear bit 0 of ICACHE_CTRL)
+w_icache_off:
+    ldi r0, 0
+    csrw 0x70, r0
+    ret.l
+
+; ICACHE-INV ( -- )  invalidate all I-cache lines and reset stats
+w_icache_inv:
+    ldi r0, 3               ; bit0=enable, bit1=invalidate-all
+    csrw 0x70, r0
+    ret.l
+
+; ICACHE-HITS ( -- n )  push I-cache hit counter
+w_icache_hits:
+    csrr r0, 0x71
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ICACHE-MISSES ( -- n )  push I-cache miss counter
+w_icache_misses:
+    csrr r0, 0x72
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -9247,13 +9283,58 @@ d_fp16_mode:
     ret.l
 
 ; === BF16-MODE ( -- ) set TMODE to bf16 (EW=5) ===
-latest_entry:
 d_bf16_mode:
     .dq d_fp16_mode
     .db 9
     .ascii "BF16-MODE"
     ldi r0, 5
     csrw 0x14, r0
+    ret.l
+
+; === ICACHE-ON ( -- ) ===
+d_icache_on:
+    .dq d_bf16_mode
+    .db 9
+    .ascii "ICACHE-ON"
+    ldi64 r11, w_icache_on
+    call.l r11
+    ret.l
+
+; === ICACHE-OFF ( -- ) ===
+d_icache_off:
+    .dq d_icache_on
+    .db 10
+    .ascii "ICACHE-OFF"
+    ldi64 r11, w_icache_off
+    call.l r11
+    ret.l
+
+; === ICACHE-INV ( -- ) ===
+d_icache_inv:
+    .dq d_icache_off
+    .db 10
+    .ascii "ICACHE-INV"
+    ldi64 r11, w_icache_inv
+    call.l r11
+    ret.l
+
+; === ICACHE-HITS ( -- n ) ===
+d_icache_hits:
+    .dq d_icache_inv
+    .db 11
+    .ascii "ICACHE-HITS"
+    ldi64 r11, w_icache_hits
+    call.l r11
+    ret.l
+
+; === ICACHE-MISSES ( -- n ) ===
+latest_entry:
+d_icache_misses:
+    .dq d_icache_hits
+    .db 13
+    .ascii "ICACHE-MISSES"
+    ldi64 r11, w_icache_misses
+    call.l r11
     ret.l
 
 ; =====================================================================

@@ -562,6 +562,9 @@ low nibble of the opcode byte.
 | `0x6A` | **PERF_TILE_OPS** | 64 | R | Total MEX instructions completed |
 | `0x6B` | **PERF_EXTMEM** | 64 | R | 64-bit external memory transfers |
 | `0x6C` | **PERF_CTRL** | 64 | RW | Bit 0: enable counting, Bit 1: reset all |
+| `0x70` | **ICACHE_CTRL** | 64 | RW | Bit 0: enable, Bit 1: invalidate all (auto-clear) |
+| `0x71` | **ICACHE_HITS** | 64 | R | I-cache hit counter (since last invalidate) |
+| `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
 
 ---
 

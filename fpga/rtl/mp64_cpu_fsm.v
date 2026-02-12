@@ -1,5 +1,5 @@
 // ============================================================================
-// mp64_cpu.v — Megapad-64 CPU Core  (pipelined with I-cache)
+// mp64_cpu.v — Megapad-64 CPU Core  (complete ISA implementation)
 // ============================================================================
 //
 // 64-bit CPU with RCA 1802-inspired register architecture and a custom
@@ -16,19 +16,11 @@
 //   - Vectored interrupts (8+ vectors, IVT base in CSR)
 //   - CSR space for tile engine, interrupt, multicore, and system config
 //
-// Pipeline: 2-stage decoupled fetch pipeline with I-cache.
-//   - IF stage: reads 8 bytes per cycle from I-cache into a 16-byte
-//     instruction alignment buffer.  Runs ahead of execute.
-//   - DEX stage: decode + execute from the alignment buffer.  Same FSM
-//     as the original prototype but consumes pre-fetched bytes.
-//   - During multi-cycle execute (MEM, MEX, MULDIV), IF continues
-//     prefetching the next instruction bytes.
-//   - Branches / SEP / interrupts flush the prefetch buffer.
+// Pipeline: single-stage (fetch → decode → execute → writeback in one cycle
+// for simple instructions; multi-cycle for memory, MEX, and mul/div).
 //
-// Performance vs. prototype:
-//   - I-cache hit: ~1 cycle per 8 fetched bytes (vs. 8 cycles)
-//   - Simple instructions: 1 cycle throughput (fetch is free)
-//   - Branches: 1–2 cycle bubble (flush + refill)
+// This is a PROTOTYPE for FPGA bring-up.  A pipelined version would follow
+// after functional verification.
 //
 
 `include "mp64_defs.vh"
@@ -40,17 +32,7 @@ module mp64_cpu (
     // === Core identification (set per instance by SoC) ===
     input  wire [CORE_ID_BITS-1:0] core_id,
 
-    // === Instruction cache interface (fetch path) ===
-    output reg  [63:0] icache_addr,
-    output reg         icache_req,
-    input  wire [63:0] icache_data,
-    input  wire        icache_hit,
-    input  wire        icache_stall,
-    output reg         icache_inv_all,     // invalidate entire I-cache
-    output reg         icache_inv_line,    // invalidate single line
-    output reg  [63:0] icache_inv_addr,    // address for line invalidation
-
-    // === Data bus master (load/store/MMIO only) ===
+    // === Memory bus master ===
     output reg         bus_valid,
     output reg  [63:0] bus_addr,
     output reg  [63:0] bus_wdata,
@@ -145,19 +127,15 @@ module mp64_cpu (
     reg [3:0]  ext_mod;
     reg        ext_active;
 
-    // I-cache control CSR state
-    reg        icache_enabled;        // I-cache enable (CSR writable)
+    // Fetch handshake
+    reg        fetch_pending;
 
     // ========================================================================
-    // Instruction prefetch buffer (filled from I-cache, 8 bytes at a time)
+    // Instruction fetch buffer
     // ========================================================================
-    reg [7:0]  ibuf [0:15];    // 16-byte instruction alignment buffer
-    reg [4:0]  ibuf_len;       // bytes currently in buffer (0–16)
-    reg [3:0]  ibuf_need;      // bytes needed for current instruction
-
-    // Fetch PC (shadow — runs ahead of architectural PC during prefetch)
-    reg [63:0] fetch_pc;
-    reg        fetch_active;   // 1 = fetch unit is running
+    reg [7:0]  ibuf [0:10];    // instruction bytes (up to 11 for EXT+LDI imm64)
+    reg [3:0]  ibuf_len;       // bytes fetched so far
+    reg [3:0]  ibuf_need;      // bytes needed for this instruction
 
     // Decoded instruction fields
     wire [3:0] fam  = ibuf[0][7:4];   // family
@@ -174,7 +152,7 @@ module mp64_cpu (
     localparam CPU_MEX_WAIT   = 4'd5;
     localparam CPU_IRQ        = 4'd6;
     localparam CPU_HALT       = 4'd7;
-    // CPU_FETCH_MORE removed — replaced by I-cache prefetch buffer
+    localparam CPU_FETCH_MORE = 4'd8;
     localparam CPU_MULDIV     = 4'd9;
     localparam CPU_MEM_READ2  = 4'd10;   // second read (RTI flags pop)
     localparam CPU_IRQ_PUSH   = 4'd11;   // push flags in IRQ sequence
@@ -454,17 +432,9 @@ module mp64_cpu (
             mex_valid  <= 1'b0;
             ext_active <= 1'b0;
             ext_mod    <= 4'd0;
-            fetch_active <= 1'b1;
-            fetch_pc   <= 64'd0;
-            ibuf_len   <= 5'd0;
+            fetch_pending <= 1'b0;
+            ibuf_len   <= 4'd0;
             ibuf_need  <= 4'd1;
-
-            // I-cache control
-            icache_enabled  <= 1'b1;
-            icache_inv_all  <= 1'b0;
-            icache_inv_line <= 1'b0;
-            icache_inv_addr <= 64'd0;
-            icache_req      <= 1'b0;
 
             // Default register setup
             psel  <= 4'd3;
@@ -513,15 +483,12 @@ module mp64_cpu (
             csr_wen   <= 1'b0;
             mex_valid <= 1'b0;
 
-            // Clear one-shot invalidation pulses each cycle
-            icache_inv_all  <= 1'b0;
-            icache_inv_line <= 1'b0;
-
             // Performance counter increments (every cycle when enabled)
             if (perf_enable) begin
                 perf_cycles <= perf_cycles + 64'd1;
-                // Stall: waiting for bus or I-cache miss
-                if ((cpu_state == CPU_FETCH   && icache_stall) ||
+                // Stall: waiting for bus in MEM_READ, MEM_WRITE, FETCH_MORE,
+                // MEMALU_RD, MEMALU_WB, MEM_READ2, or IRQ push/load states
+                if ((cpu_state == CPU_FETCH_MORE && bus_valid && !bus_ready) ||
                     (cpu_state == CPU_MEM_READ  && !bus_ready) ||
                     (cpu_state == CPU_MEM_WRITE && !bus_ready) ||
                     (cpu_state == CPU_MEM_READ2 && !bus_ready) ||
@@ -538,119 +505,42 @@ module mp64_cpu (
             case (cpu_state)
 
                 // ============================================================
-                // FETCH: fill instruction buffer from I-cache, then decode
-                //
-                // The I-cache delivers 8 bytes per hit.  We request from
-                // fetch_pc (which tracks the architectural PC when the
-                // buffer is empty) and shift data into ibuf.  When ibuf
-                // holds enough bytes for the current instruction, we
-                // move to DECODE.
+                // FETCH: read instruction bytes from memory one at a time
                 // ============================================================
                 CPU_FETCH: begin
-                    if (irq_pending && ibuf_len == 5'd0) begin
+                    if (irq_pending && ibuf_len == 0) begin
                         cpu_state <= CPU_IRQ;
-                    end else if (ibuf_len >= {1'b0, ibuf_need}) begin
-                        // Buffer has a complete instruction — decode it
-                        cpu_state <= CPU_DECODE;
                     end else begin
-                        // Need more bytes — request from I-cache
-                        if (!icache_stall) begin
-                            icache_req  <= 1'b1;
-                            icache_addr <= fetch_pc;
+                        fetch_pending <= 1'b0;
+                        cpu_state <= CPU_FETCH_MORE;
+                    end
+                end
+
+                CPU_FETCH_MORE: begin
+                    if (!fetch_pending) begin
+                        bus_valid <= 1'b1;
+                        bus_addr  <= R[psel] + {60'd0, ibuf_len};
+                        bus_wen   <= 1'b0;
+                        bus_size  <= BUS_BYTE;
+                        fetch_pending <= 1'b1;
+                    end else if (!bus_ready) begin
+                        bus_valid <= 1'b1;
+                    end
+
+                    if (bus_ready && fetch_pending) begin
+                        fetch_pending <= 1'b0;
+                        ibuf[ibuf_len] <= bus_rdata[7:0];
+                        ibuf_len <= ibuf_len + 1;
+
+                        if (ibuf_len == 0) begin
+                            ibuf_need <= instr_len(bus_rdata[7:0], ext_active);
                         end
 
-                        // I-cache hit: copy up to 8 bytes into ibuf
-                        if (icache_hit) begin
-                            icache_req <= 1'b0;
-
-                            // Byte offset within the 8-byte fetch word
-                            // (low 3 bits of fetch_pc determine alignment)
-                            case (fetch_pc[2:0])
-                                3'd0: begin
-                                    ibuf[ibuf_len+0] <= icache_data[ 7: 0];
-                                    ibuf[ibuf_len+1] <= icache_data[15: 8];
-                                    ibuf[ibuf_len+2] <= icache_data[23:16];
-                                    ibuf[ibuf_len+3] <= icache_data[31:24];
-                                    ibuf[ibuf_len+4] <= icache_data[39:32];
-                                    ibuf[ibuf_len+5] <= icache_data[47:40];
-                                    ibuf[ibuf_len+6] <= icache_data[55:48];
-                                    ibuf[ibuf_len+7] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd8;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd1: begin
-                                    ibuf[ibuf_len+0] <= icache_data[15: 8];
-                                    ibuf[ibuf_len+1] <= icache_data[23:16];
-                                    ibuf[ibuf_len+2] <= icache_data[31:24];
-                                    ibuf[ibuf_len+3] <= icache_data[39:32];
-                                    ibuf[ibuf_len+4] <= icache_data[47:40];
-                                    ibuf[ibuf_len+5] <= icache_data[55:48];
-                                    ibuf[ibuf_len+6] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd7;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd2: begin
-                                    ibuf[ibuf_len+0] <= icache_data[23:16];
-                                    ibuf[ibuf_len+1] <= icache_data[31:24];
-                                    ibuf[ibuf_len+2] <= icache_data[39:32];
-                                    ibuf[ibuf_len+3] <= icache_data[47:40];
-                                    ibuf[ibuf_len+4] <= icache_data[55:48];
-                                    ibuf[ibuf_len+5] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd6;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd3: begin
-                                    ibuf[ibuf_len+0] <= icache_data[31:24];
-                                    ibuf[ibuf_len+1] <= icache_data[39:32];
-                                    ibuf[ibuf_len+2] <= icache_data[47:40];
-                                    ibuf[ibuf_len+3] <= icache_data[55:48];
-                                    ibuf[ibuf_len+4] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd5;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd4: begin
-                                    ibuf[ibuf_len+0] <= icache_data[39:32];
-                                    ibuf[ibuf_len+1] <= icache_data[47:40];
-                                    ibuf[ibuf_len+2] <= icache_data[55:48];
-                                    ibuf[ibuf_len+3] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd4;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd5: begin
-                                    ibuf[ibuf_len+0] <= icache_data[47:40];
-                                    ibuf[ibuf_len+1] <= icache_data[55:48];
-                                    ibuf[ibuf_len+2] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd3;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd6: begin
-                                    ibuf[ibuf_len+0] <= icache_data[55:48];
-                                    ibuf[ibuf_len+1] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd2;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                                3'd7: begin
-                                    ibuf[ibuf_len+0] <= icache_data[63:56];
-                                    ibuf_len <= ibuf_len + 5'd1;
-                                    fetch_pc <= (fetch_pc & ~64'd7) + 64'd8;
-                                end
-                            endcase
-
-                            // After the first byte arrives, determine instruction length
-                            if (ibuf_len == 5'd0) begin
-                                // byte0 just loaded — compute length on the fly
-                                // (use icache_data aligned by fetch_pc low bits)
-                                case (fetch_pc[2:0])
-                                    3'd0: ibuf_need <= instr_len(icache_data[ 7:0], ext_active);
-                                    3'd1: ibuf_need <= instr_len(icache_data[15:8], ext_active);
-                                    3'd2: ibuf_need <= instr_len(icache_data[23:16], ext_active);
-                                    3'd3: ibuf_need <= instr_len(icache_data[31:24], ext_active);
-                                    3'd4: ibuf_need <= instr_len(icache_data[39:32], ext_active);
-                                    3'd5: ibuf_need <= instr_len(icache_data[47:40], ext_active);
-                                    3'd6: ibuf_need <= instr_len(icache_data[55:48], ext_active);
-                                    3'd7: ibuf_need <= instr_len(icache_data[63:56], ext_active);
-                                endcase
-                            end
+                        if (ibuf_len == 0) begin
+                            if (instr_len(bus_rdata[7:0], ext_active) == 1)
+                                cpu_state <= CPU_DECODE;
+                        end else if (ibuf_len + 1 >= ibuf_need) begin
+                            cpu_state <= CPU_DECODE;
                         end
                     end
                 end
@@ -659,13 +549,10 @@ module mp64_cpu (
                 // DECODE + EXECUTE
                 // ============================================================
                 CPU_DECODE: begin
-                    // Advance PC past the instruction (by instr length, not buffer size)
-                    R[psel] <= R[psel] + {60'd0, ibuf_need};
-                    // Flush prefetch buffer — restart fetch from new PC
-                    ibuf_len  <= 5'd0;
+                    // Advance PC past the instruction
+                    R[psel] <= R[psel] + {60'd0, ibuf_len};
+                    ibuf_len <= 4'd0;
                     ibuf_need <= 4'd1;
-                    fetch_pc  <= R[psel] + {60'd0, ibuf_need};
-                    icache_req <= 1'b0;
                     post_action <= POST_NONE;
 
                     // --------------------------------------------------------
@@ -777,9 +664,8 @@ module mp64_cpu (
                             4'hD: begin // CALL.L Rn — push ret addr, PC←R(n)
                                 R[spsel] <= R[spsel] - 64'd8;
                                 effective_addr <= R[spsel] - 64'd8;
-                                mem_data <= R[psel] + {60'd0, ibuf_need};  // return addr
+                                mem_data <= R[psel] + {60'd0, ibuf_len};  // return addr
                                 R[psel] <= R[ibuf[1][3:0]];
-                                fetch_pc <= R[ibuf[1][3:0]];
                                 bus_size <= BUS_DWORD;
                                 cpu_state <= CPU_MEM_WRITE;
                             end
@@ -796,7 +682,7 @@ module mp64_cpu (
                                 // Step 1: push PC onto stack (advanced past TRAP)
                                 R[spsel] <= R[spsel] - 64'd8;
                                 effective_addr <= R[spsel] - 64'd8;
-                                mem_data <= R[psel] + {60'd0, ibuf_need}; // ret addr
+                                mem_data <= R[psel] + {60'd0, ibuf_len}; // ret addr
                                 flags[6] <= 1'b0;  // disable interrupts
                                 ivec_id <= 8'd6;    // IVEC_SW_TRAP
                                 post_action <= POST_IRQ_VEC;
@@ -832,10 +718,12 @@ module mp64_cpu (
                         if (ext_active && ext_mod == 4'd6) begin
                             // SKIP mode: if condition met, skip next instr
                             if (cond_eval(nib, flags, Q, ef_flags)) begin
-                                // Read next instruction's byte0 via I-cache for length
-                                icache_req  <= 1'b1;
-                                icache_addr <= R[psel] + {60'd0, ibuf_need};
-                                cpu_state   <= CPU_SKIP;
+                                // Fetch next instruction's byte0 to determine its length
+                                bus_valid <= 1'b1;
+                                bus_addr  <= R[psel] + {60'd0, ibuf_len};
+                                bus_wen   <= 1'b0;
+                                bus_size  <= 2'b00;
+                                cpu_state <= CPU_SKIP;
                             end else begin
                                 cpu_state <= CPU_FETCH;
                             end
@@ -843,10 +731,7 @@ module mp64_cpu (
                             if (cond_eval(nib, flags, Q, ef_flags)) begin
                                 R[psel] <= R[psel]
                                            + {{56{ibuf[1][7]}}, ibuf[1]}
-                                           - {60'd0, ibuf_need};
-                                fetch_pc <= R[psel]
-                                            + {{56{ibuf[1][7]}}, ibuf[1]}
-                                            - {60'd0, ibuf_need};
+                                           - {60'd0, ibuf_len};
                             end
                             cpu_state <= CPU_FETCH;
                         end
@@ -860,10 +745,7 @@ module mp64_cpu (
                         if (cond_eval(nib, flags, Q, ef_flags)) begin
                             R[psel] <= R[psel]
                                        + {{48{ibuf[1][7]}}, ibuf[1], ibuf[2]}
-                                       - {60'd0, ibuf_need};
-                            fetch_pc <= R[psel]
-                                        + {{48{ibuf[1][7]}}, ibuf[1], ibuf[2]}
-                                        - {60'd0, ibuf_need};
+                                       - {60'd0, ibuf_len};
                         end
                         cpu_state <= CPU_FETCH;
                     end
@@ -1199,8 +1081,6 @@ module mp64_cpu (
                     else if (fam == FAM_SEP) begin
                         ext_active <= 1'b0;
                         psel <= nib;
-                        // PC register changed — sync fetch_pc to new PC
-                        fetch_pc <= R[nib];
                         cpu_state <= CPU_FETCH;
                     end
 
@@ -1348,11 +1228,6 @@ module mp64_cpu (
                                         tile_st_detail <= 8'd0;
                                     end
                                 end
-                                CSR_ICACHE_CTRL: begin
-                                    icache_enabled <= R[nib[2:0]][0];
-                                    if (R[nib[2:0]][1])  // bit 1 = invalidate all
-                                        icache_inv_all <= 1'b1;
-                                end
                                 // COREID, NCORES are read-only — ignore writes
                             endcase
                         end else begin
@@ -1384,9 +1259,6 @@ module mp64_cpu (
                                 CSR_BIST_FAIL_DATA: R[nib[2:0]] <= bist_fail_data;
                                 CSR_TILE_SELFTEST:  R[nib[2:0]] <= {62'd0, tile_selftest};
                                 CSR_TILE_ST_DETAIL: R[nib[2:0]] <= {56'd0, tile_st_detail};
-                                CSR_ICACHE_CTRL:    R[nib[2:0]] <= {63'd0, icache_enabled};
-                                CSR_ICACHE_HITS:    R[nib[2:0]] <= 64'd0;  // stats in I-cache module
-                                CSR_ICACHE_MISSES:  R[nib[2:0]] <= 64'd0;  // stats in I-cache module
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end
@@ -1457,8 +1329,6 @@ module mp64_cpu (
                                 xsel <= bus_rdata[7:4];
                                 psel <= bus_rdata[3:0];
                                 flags[6] <= 1'b1; // IE←1
-                                // Sync fetch_pc to the new PC register
-                                fetch_pc <= R[bus_rdata[3:0]];
                                 cpu_state <= CPU_FETCH;
                             end
                             4'h6: begin // DIS — unpack T byte
@@ -1466,15 +1336,10 @@ module mp64_cpu (
                                 xsel <= bus_rdata[7:4];
                                 psel <= bus_rdata[3:0];
                                 flags[6] <= 1'b0; // IE←0
-                                fetch_pc <= R[bus_rdata[3:0]];
                                 cpu_state <= CPU_FETCH;
                             end
-                            default: begin
+                            default:
                                 R[dst_reg] <= bus_rdata;
-                                // If writing to the PC register, sync fetch_pc
-                                if (dst_reg == psel)
-                                    fetch_pc <= bus_rdata;
-                            end
                         endcase
 
                         // Post-increment for LDA (sub 1)
@@ -1521,13 +1386,6 @@ module mp64_cpu (
                     bus_wdata <= mem_data;
                     bus_wen   <= 1'b1;
                     if (bus_ready) begin
-                        // Store-to-code: conservatively invalidate I-cache
-                        // line containing the written address
-                        if (icache_enabled) begin
-                            icache_inv_line <= 1'b1;
-                            icache_inv_addr <= effective_addr;
-                        end
-
                         // Post-decrement for STXD (sub 5)
                         if (mem_sub == 4'h5)
                             R[xsel] <= R[xsel] - 64'd8;
@@ -1573,7 +1431,6 @@ module mp64_cpu (
                     bus_size  <= BUS_DWORD;
                     if (bus_ready) begin
                         R[psel] <= bus_rdata;
-                        fetch_pc <= bus_rdata;
                         cpu_state <= CPU_FETCH;
                     end
                 end
@@ -1736,34 +1593,16 @@ module mp64_cpu (
                 end
 
                 // ============================================================
-                // SKIP: read next instruction's byte0 via I-cache for length
+                // SKIP: fetch next instruction's byte0 to determine length
                 // ============================================================
                 CPU_SKIP: begin
-                    if (!icache_stall) begin
-                        icache_req  <= 1'b1;
-                        icache_addr <= R[psel];
-                    end
-                    if (icache_hit) begin
-                        icache_req <= 1'b0;
-                        // Extract byte0 from the cache line at the byte offset
-                        // and advance PC + fetch_pc past the skipped instruction
-                        begin : skip_block
-                            reg [7:0] skip_byte;
-                            reg [3:0] skip_len;
-                            case (R[psel][2:0])
-                                3'd0: skip_byte = icache_data[ 7: 0];
-                                3'd1: skip_byte = icache_data[15: 8];
-                                3'd2: skip_byte = icache_data[23:16];
-                                3'd3: skip_byte = icache_data[31:24];
-                                3'd4: skip_byte = icache_data[39:32];
-                                3'd5: skip_byte = icache_data[47:40];
-                                3'd6: skip_byte = icache_data[55:48];
-                                3'd7: skip_byte = icache_data[63:56];
-                            endcase
-                            skip_len = instr_len(skip_byte, 1'b0);
-                            R[psel]  <= R[psel]  + {59'd0, 1'b0, skip_len};
-                            fetch_pc <= R[psel]  + {59'd0, 1'b0, skip_len};
-                        end
+                    bus_valid <= 1'b1;
+                    bus_addr  <= R[psel];
+                    bus_wen   <= 1'b0;
+                    bus_size  <= 2'b00;
+                    if (bus_ready) begin
+                        // Skip the next instruction by advancing PC past it
+                        R[psel] <= R[psel] + {60'd0, instr_len(bus_rdata[7:0], 1'b0)};
                         cpu_state <= CPU_FETCH;
                     end
                 end

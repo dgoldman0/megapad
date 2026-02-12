@@ -4,10 +4,10 @@
 OS, filesystem, interactive TUI, comprehensive documentation — that feels
 complete and cohesive as a v1.0 release.
 
-**Current state (Feb 2025):** BIOS (242 dict entries, 9,379 lines ASM,
+**Current state (Feb 2026):** BIOS (247 dict entries, 9,379 lines ASM,
 ~22 KB binary), KDOS v1.1 (247 `:` definitions + 138 variables/constants,
-3,158 lines), Emulator (2,516 lines + 474-line quad-core SoC), FPGA RTL
-(13 Verilog modules + 8 testbenches), 1,207 tests passing.
+3,158 lines), Emulator (2,541 lines + 474-line quad-core SoC), FPGA RTL
+(14 Verilog modules + 9 testbenches), 1,207+ tests passing.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
@@ -20,7 +20,7 @@ and release hardening**.
 
 ### BIOS v1.0 — ✅ DONE
 
-242 dictionary entries, 9,379 lines ASM, ~22 KB binary.
+247 dictionary entries, 9,379 lines ASM, ~22 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -98,9 +98,9 @@ and release hardening**.
 
 ### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore)
 
-13 Verilog modules in `fpga/rtl/`, 8 testbenches, 72 hardware tests passing.
+14 Verilog modules in `fpga/rtl/`, 9 testbenches, 137 hardware tests passing.
 
-- ✅ mp64_cpu.v — Full ISA implementation (all 16 instruction families)
+- ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
 - ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring)
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
@@ -108,6 +108,7 @@ and release hardening**.
   saturating, rounding, SHUFFLE, PACK, UNPACK, RROT, VSHR, VSHL, VCLZ,
   LOAD2D, STORE2D)
 - ✅ mp64_fp16_alu.v — FP16/BF16 half-precision tile operations
+- ✅ mp64_icache.v — Per-core 4 KiB direct-mapped instruction cache (256×16B lines)
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
 - ✅ Nexys A7-200T target (no post-synthesis resource numbers yet)
 
@@ -283,7 +284,7 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 9,379 | ✅ Done (242 words, ~22 KB) |
+| `bios.asm` | 9,379 | ✅ Done (247 words, ~22 KB) |
 | `kdos.f` | 3,158 | ✅ Done (247 defs + 138 vars, multicore) |
 | `megapad64.py` | 2,516 | ✅ Done (incl. extended tile, FP16/BF16) |
 | `system.py` | 474 | ✅ Done (quad-core SoC) |
@@ -294,7 +295,7 @@ without docs, every subsequent change requires re-reading source.
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
 | `test_system.py` | 6,234 | 1,184 tests ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `fpga/rtl/` | 7,242 | ✅ 13 Verilog modules |
-| `fpga/sim/` | 3,930 | ✅ 8 testbenches (72 HW tests) |
+| `fpga/rtl/` | ~8,200 | ✅ 14 Verilog modules |
+| `fpga/sim/` | ~4,500 | ✅ 9 testbenches (137 HW tests) |
 | `docs/` | 9 files | ✅ Written |
 | `README.md` | 340 | ✅ Rewritten |

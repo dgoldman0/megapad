@@ -12,10 +12,10 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 ┌───────────────────────────────────────────────────────────┐
 │                    Megapad-64 CPU (×4 cores)               │
 │  16 × 64-bit GPRs    ┌──────────────────┐  ┌───────────┐ │
-│  8-bit Flags          │   Tile Engine    │  │ Perf Ctrs │ │
-│  256-bit Accumulator  │  (MEX extension) │  │ (4 × 64b) │ │
-│  Perf counters        │  FP16 / bf16     │  └───────────┘ │
-│  Optional FP32 unit   │  DMA queue       │                │
+│  4 KiB I-Cache        │   Tile Engine    │  │ Perf Ctrs │ │
+│  8-bit Flags          │  (MEX extension) │  │ (4 × 64b) │ │
+│  256-bit Accumulator  │  FP16 / bf16     │  └───────────┘ │
+│  Perf counters        │  DMA queue       │                │
 │                       └──────────────────┘                │
 └───────────────┬───────────────────────────────────────────┘
                 │  64-bit data bus (weighted round-robin QoS)
@@ -258,6 +258,7 @@ with 53 tile testbench tests passing.
 | BIST | 0x60–0x63 | Memory self-test (March C−, checkerboard, addr-as-data) |
 | Tile self-test | 0x64–0x65 | Datapath functional check (~200 cycles) |
 | Perf counters | 0x68–0x6C | Cycles, stalls, tile ops, ext-mem beats |
+| I-Cache | 0x70–0x72 | Instruction cache control, hit/miss counters |
 
 ---
 
