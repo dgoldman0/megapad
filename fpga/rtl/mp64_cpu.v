@@ -167,19 +167,25 @@ module mp64_cpu (
     // Interrupt pending logic
     // ========================================================================
     reg        irq_pending;
-    reg [2:0]  irq_vector;
+    reg [3:0]  irq_vector;
 
     always @(*) begin
         irq_pending = 1'b0;
-        irq_vector  = 3'd0;
+        irq_vector  = 4'd0;
         if (flag_i) begin
             // Priority: IPI > Timer > UART > NIC
             if (irq_ipi) begin
                 irq_pending = 1'b1;
-                irq_vector  = IRQ_NMI;
+                irq_vector  = IRQX_IPI;
             end else if (irq_timer) begin
                 irq_pending = 1'b1;
-                irq_vector  = IRQ_TIMER;
+                irq_vector  = {1'b0, IRQ_TIMER};
+            end else if (irq_uart) begin
+                irq_pending = 1'b1;
+                irq_vector  = IRQX_UART;
+            end else if (irq_nic) begin
+                irq_pending = 1'b1;
+                irq_vector  = IRQX_NIC;
             end
         end
     end
@@ -1573,7 +1579,7 @@ module mp64_cpu (
                     mem_data <= R[psel];
                     bus_size <= BUS_DWORD;
                     flags[6] <= 1'b0;  // disable interrupts
-                    ivec_id <= {5'd0, irq_vector};
+                    ivec_id <= {4'd0, irq_vector};
                     post_action <= POST_IRQ_VEC;
                     cpu_state <= CPU_MEM_WRITE;
                 end

@@ -64,6 +64,10 @@ module mp64_tile (
     reg [63:0] tile_row;
     reg [63:0] tile_col;
     reg [63:0] tile_stride;
+    reg [63:0] tstride_r;    // row stride in bytes (for LOAD2D/STORE2D)
+    reg [63:0] tstride_c;    // column stride in bytes (reserved)
+    reg [63:0] ttile_h;      // tile height (rows, 1-8)
+    reg [63:0] ttile_w;      // tile width (bytes per row, 1-64)
 
     // CSR read mux
     always @(*) begin
@@ -82,6 +86,10 @@ module mp64_tile (
             CSR_SR:    csr_rdata = tile_row;
             CSR_SC:    csr_rdata = tile_col;
             CSR_SW:    csr_rdata = tile_stride;
+            CSR_TSTRIDE_R: csr_rdata = tstride_r;
+            CSR_TSTRIDE_C: csr_rdata = tstride_c;
+            CSR_TTILE_H:   csr_rdata = ttile_h;
+            CSR_TTILE_W:   csr_rdata = ttile_w;
             default:   csr_rdata = 64'd0;
         endcase
     end
@@ -102,6 +110,10 @@ module mp64_tile (
             tile_row    <= 64'd0;
             tile_col    <= 64'd0;
             tile_stride <= 64'd0;
+            tstride_r   <= 64'd0;
+            tstride_c   <= 64'd0;
+            ttile_h     <= 64'd8;   // default 8 rows
+            ttile_w     <= 64'd8;   // default 8 bytes per row
         end else if (csr_wen) begin
             case (csr_addr)
                 CSR_TMODE: tmode       <= csr_wdata;
@@ -117,6 +129,10 @@ module mp64_tile (
                 CSR_SR:    tile_row    <= csr_wdata;
                 CSR_SC:    tile_col    <= csr_wdata;
                 CSR_SW:    tile_stride <= csr_wdata;
+                CSR_TSTRIDE_R: tstride_r <= csr_wdata;
+                CSR_TSTRIDE_C: tstride_c <= csr_wdata;
+                CSR_TTILE_H:   ttile_h   <= csr_wdata;
+                CSR_TTILE_W:   ttile_w   <= csr_wdata;
                 default: ;  // no-op for unrecognized CSR
             endcase
         end
