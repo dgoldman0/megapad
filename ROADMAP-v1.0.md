@@ -109,7 +109,7 @@ and release hardening**.
   LOAD2D, STORE2D)
 - ✅ mp64_fp16_alu.v — FP16/BF16 half-precision tile operations
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
-- ✅ Nexys A7-200T target — estimated ~21k LUT, ~19k FF, ~37 BRAM36
+- ✅ Nexys A7-200T target (no post-synthesis resource numbers yet)
 
 ### Extended TPU — ✅ IMPLEMENTED
 

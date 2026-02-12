@@ -193,28 +193,29 @@ hardware.
 
 ## 7  Resource Estimates (Artix-7 200T)
 
-| Resource | Used (quad-core) | Available | % |
+No post-synthesis numbers yet.  The estimates below are from the
+base-ISA quad-core design **before** the extended tile engine
+(FP16 ALU, LOAD2D/STORE2D FSM, RROT, saturating/rounding, CRC engine,
+BIST, perf counters) was implemented.  Actual utilization will be
+significantly higher.
+
+**Stale base-ISA estimate (for reference only):**
+
+| Resource | Est. (quad-core, base ISA) | Available | % |
 |----------|------------------:|----------:|---:|
 | Block RAM (36 Kb) | ~290 | 365 | 79% |
 | Slice LUTs | ~24 000 | 134 600 | 18% |
 | Slice Registers | ~12 000 | 269 200 | 4.5% |
 
-Per-core cost: ~5,000 LUTs (CPU ~2,000 + Tile ~3,000).  Four cores = ~20,000 LUTs
-for compute, plus ~4,000 for bus arbiter, mailbox, spinlocks, and tile
-Port A arbiter.  BRAM is shared (not replicated), so BRAM usage is nearly
-unchanged from single-core.
-
-**Headroom:** 82% LUT free, 95% registers free.  Could support up to
-8 cores before LUT usage reaches 40%.
-| DSP48E1 | 2 | 740 | 0.3% |
-| BUFG | 1 | 32 | 3% |
-
 BRAM dominates — 1 MiB = 8 Mb = 228 × 36 Kb blocks (228 of 365,
 ≈ 62%).  The remaining 137 blocks provide tile FIFO, UART FIFOs,
 NIC RX buffer, etc.
 
-Logic utilisation is minimal at ~6% LUTs.  There is ample headroom
-for cache, DMA engines, or a second CPU core.
+The extended tile engine (FP16 multipliers, wider muxes, 2D FSM,
+CRC barrel shifters, BIST state machines) likely pushes total LUT
+usage well beyond the base estimate.  A real synthesis run is needed
+to determine whether the full design fits the 200T or requires a
+larger target.
 
 ---
 

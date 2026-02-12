@@ -9,3 +9,4 @@ __pycache__/
 *.vvp
 .agent-context.md
 .vscode/
+fpga/sim/tb_tile_fp

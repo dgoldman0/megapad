@@ -31,7 +31,7 @@ interactively.
 | **Tests** | 1,207 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **FPGA RTL** | 13 Verilog modules + 8 testbenches, Nexys A7-200T target (~21 k LUT) |
+| **FPGA RTL** | 13 Verilog modules + 8 testbenches, Nexys A7-200T target |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
@@ -299,7 +299,7 @@ The Python emulator is a **functional simulation** — it implements the
 full instruction set and produces correct results, but models memory as
 flat RAM with simplified cycle counting.
 
-The FPGA RTL (Nexys A7-200T target, ~21 k LUT) implements the full
+The FPGA RTL (targeting Nexys A7-200T) implements the full
 quad-core SoC including the extended tile engine.  Key differences from
 the emulator are cycle-level timing and block-RAM-backed memory:
 
@@ -308,6 +308,10 @@ the emulator are cycle-level timing and block-RAM-backed memory:
   bubble on taken branches
 - **Quad-core** with round-robin bus arbiter and per-core QoS weights
 - **Fully static design** — retains state down to DC for ultra-low power
+
+No post-synthesis resource numbers yet — the extended tile engine
+(FP16 ALU, LOAD2D/STORE2D, CRC, BIST, perf counters) added significant
+logic beyond the original base-ISA estimates.
 
 Software written for the emulator runs identically on the RTL.
 The simplification affects only timing accuracy, not behavior.
