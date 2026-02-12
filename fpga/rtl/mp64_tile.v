@@ -151,6 +151,7 @@ module mp64_tile (
     wire [2:0] mode_ew       = tmode[2:0];
     wire       mode_signed   = tmode[4];
     wire       mode_saturate = tmode[5];
+    wire       mode_rounding = tmode[6];
     wire       mode_fp       = mode_ew[2];          // EW >= 4 → FP mode
     wire       mode_bf16     = (mode_ew == TMODE_BF16);  // 0 = FP16, 1 = BF16
 
@@ -1548,12 +1549,17 @@ module mp64_tile (
         ext_talu_result = 512'd0;
         case (mode_ew[1:0])
             2'd0: for (el=0; el<64; el=el+1) begin : ex8
-                reg [7:0] ea8, eb8;
+                reg [7:0] ea8, eb8, shr8;
                 reg [2:0] sh;
+                reg       rnd8;
                 ea8 = tile_a[el*8 +: 8]; eb8 = src_b_selected[el*8 +: 8]; sh = eb8[2:0];
+                rnd8 = (mode_rounding && sh != 0) ? ea8[sh - 3'd1] : 1'b0;
                 case (funct_reg)
-                    3'd0: if (mode_signed) ext_talu_result[el*8 +: 8] = $signed(ea8) >>> sh;
-                          else             ext_talu_result[el*8 +: 8] = ea8 >> sh;
+                    3'd0: begin
+                        if (mode_signed) shr8 = $signed(ea8) >>> sh;
+                        else             shr8 = ea8 >> sh;
+                        ext_talu_result[el*8 +: 8] = shr8 + {7'd0, rnd8};
+                    end
                     3'd1: ext_talu_result[el*8 +: 8] = ea8 << sh;
                     3'd2: ext_talu_result[el*8 +: 8] = ea8; // VSEL placeholder
                     3'd3: ext_talu_result[el*8 +: 8] = clz8(ea8);
@@ -1561,11 +1567,16 @@ module mp64_tile (
                 endcase
             end
             2'd1: for (el=0; el<32; el=el+1) begin : ex16
-                reg [15:0] ea16, eb16; reg [3:0] sh16;
+                reg [15:0] ea16, eb16, shr16; reg [3:0] sh16;
+                reg        rnd16;
                 ea16 = tile_a[el*16 +: 16]; eb16 = src_b_selected[el*16 +: 16]; sh16 = eb16[3:0];
+                rnd16 = (mode_rounding && sh16 != 0) ? ea16[sh16 - 4'd1] : 1'b0;
                 case (funct_reg)
-                    3'd0: if (mode_signed) ext_talu_result[el*16 +: 16] = $signed(ea16) >>> sh16;
-                          else             ext_talu_result[el*16 +: 16] = ea16 >> sh16;
+                    3'd0: begin
+                        if (mode_signed) shr16 = $signed(ea16) >>> sh16;
+                        else             shr16 = ea16 >> sh16;
+                        ext_talu_result[el*16 +: 16] = shr16 + {15'd0, rnd16};
+                    end
                     3'd1: ext_talu_result[el*16 +: 16] = ea16 << sh16;
                     3'd2: ext_talu_result[el*16 +: 16] = ea16;
                     3'd3: ext_talu_result[el*16 +: 16] = clz16(ea16);
@@ -1573,11 +1584,16 @@ module mp64_tile (
                 endcase
             end
             2'd2: for (el=0; el<16; el=el+1) begin : ex32
-                reg [31:0] ea32, eb32; reg [4:0] sh32;
+                reg [31:0] ea32, eb32, shr32; reg [4:0] sh32;
+                reg        rnd32;
                 ea32 = tile_a[el*32 +: 32]; eb32 = src_b_selected[el*32 +: 32]; sh32 = eb32[4:0];
+                rnd32 = (mode_rounding && sh32 != 0) ? ea32[sh32 - 5'd1] : 1'b0;
                 case (funct_reg)
-                    3'd0: if (mode_signed) ext_talu_result[el*32 +: 32] = $signed(ea32) >>> sh32;
-                          else             ext_talu_result[el*32 +: 32] = ea32 >> sh32;
+                    3'd0: begin
+                        if (mode_signed) shr32 = $signed(ea32) >>> sh32;
+                        else             shr32 = ea32 >> sh32;
+                        ext_talu_result[el*32 +: 32] = shr32 + {31'd0, rnd32};
+                    end
                     3'd1: ext_talu_result[el*32 +: 32] = ea32 << sh32;
                     3'd2: ext_talu_result[el*32 +: 32] = ea32;
                     3'd3: ext_talu_result[el*32 +: 32] = clz32(ea32);
@@ -1585,11 +1601,16 @@ module mp64_tile (
                 endcase
             end
             2'd3: for (el=0; el<8; el=el+1) begin : ex64
-                reg [63:0] ea64, eb64; reg [5:0] sh64;
+                reg [63:0] ea64, eb64, shr64; reg [5:0] sh64;
+                reg        rnd64;
                 ea64 = tile_a[el*64 +: 64]; eb64 = src_b_selected[el*64 +: 64]; sh64 = eb64[5:0];
+                rnd64 = (mode_rounding && sh64 != 0) ? ea64[sh64 - 6'd1] : 1'b0;
                 case (funct_reg)
-                    3'd0: if (mode_signed) ext_talu_result[el*64 +: 64] = $signed(ea64) >>> sh64;
-                          else             ext_talu_result[el*64 +: 64] = ea64 >> sh64;
+                    3'd0: begin
+                        if (mode_signed) shr64 = $signed(ea64) >>> sh64;
+                        else             shr64 = ea64 >> sh64;
+                        ext_talu_result[el*64 +: 64] = shr64 + {63'd0, rnd64};
+                    end
                     3'd1: ext_talu_result[el*64 +: 64] = ea64 << sh64;
                     3'd2: ext_talu_result[el*64 +: 64] = ea64;
                     3'd3: ext_talu_result[el*64 +: 64] = clz64(ea64);

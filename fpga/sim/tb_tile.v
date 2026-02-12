@@ -701,6 +701,44 @@ module tb_tile;
         expected_tile = {32{16'h7C00}};
         check512(tile_mem[2], expected_tile, "FP16 bitwise AND");
 
+        // ====== TEST 40: VSHR unsigned without rounding ======
+        $display("\n=== TEST 40: VSHR unsigned (no rounding) ===");
+        tile_mem[0] = {64{8'h07}};   // all 7
+        tile_mem[1] = {64{8'h01}};   // shift by 1
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd0);  // 8-bit, unsigned, no rounding
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd0, 64'd0, 8'd0, 4'd8);
+        expected_tile = {64{8'h03}};  // 7 >> 1 = 3
+        check512(tile_mem[2], expected_tile, "VSHR 7>>1=3 (no round)");
+
+        // ====== TEST 41: VSHR unsigned with rounding ======
+        $display("\n=== TEST 41: VSHR unsigned (rounding) ===");
+        // tmode[6] = rounding bit  →  tmode = 64'h40 = bit 6 set
+        csr_write(CSR_TMODE, 64'h40);
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd0, 64'd0, 8'd0, 4'd8);
+        expected_tile = {64{8'h04}};  // (7 + 1) >> 1 = 4 (round half-up)
+        check512(tile_mem[2], expected_tile, "VSHR 7>>1=4 (rounded)");
+
+        // ====== TEST 42: VSHR signed with rounding ======
+        $display("\n=== TEST 42: VSHR signed (rounding) ===");
+        tile_mem[0] = {64{8'hFD}};   // -3 in signed 8-bit
+        tile_mem[1] = {64{8'h01}};   // shift by 1
+        csr_write(CSR_TMODE, 64'h50);  // bit6=rounding, bit4=signed
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd0, 64'd0, 8'd0, 4'd8);
+        // (-3 + 1) >> 1 = -2 >> 1 = -1 = 0xFF
+        expected_tile = {64{8'hFF}};
+        check512(tile_mem[2], expected_tile, "VSHR -3>>1=-1 (signed+round)");
+
+        // ====== TEST 43: VSHR signed without rounding ======
+        $display("\n=== TEST 43: VSHR signed (no rounding) ===");
+        csr_write(CSR_TMODE, 64'h10);  // bit4=signed, no rounding
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd0, 64'd0, 8'd0, 4'd8);
+        // -3 >>> 1 = -2 = 0xFE (arithmetic right shift)
+        expected_tile = {64{8'hFE}};
+        check512(tile_mem[2], expected_tile, "VSHR -3>>1=-2 (signed,no round)");
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
