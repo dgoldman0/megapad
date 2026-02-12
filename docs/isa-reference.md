@@ -481,11 +481,12 @@ low nibble of the opcode byte.
 | `0x01` | **PSEL** | 4 | RW | Program counter register selector |
 | `0x02` | **XSEL** | 4 | RW | Data pointer register selector |
 | `0x03` | **SPSEL** | 4 | RW | Stack pointer register selector |
-| `0x04` | **D** | 8 | RW | 1802 D accumulator |
-| `0x05` | **DF** | 1 | RW | DF flag (alias for Carry) |
-| `0x06` | **Q** | 1 | RW | Q flip-flop |
-| `0x07` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
-| `0x08` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
+| `0x04` | **IVT_BASE** | 64 | RW | Interrupt vector table base address |
+| `0x05` | **D** | 8 | RW | 1802 D accumulator |
+| `0x06` | **DF** | 1 | RW | DF flag (alias for Carry) |
+| `0x07` | **Q** | 1 | RW | Q flip-flop |
+| `0x08` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
+| `0x09` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
 | | | | | |
 | `0x10` | **SB** | 4 | RW | Tile bank selector |
 | `0x11` | **SR** | 20 | RW | Tile row cursor |
@@ -501,9 +502,12 @@ low nibble of the opcode byte.
 | `0x1B` | **ACC2** | 64 | RW | Accumulator bits 191:128 |
 | `0x1C` | **ACC3** | 64 | RW | Accumulator bits 255:192 |
 | | | | | |
-| `0x20` | **IVT_BASE** | 64 | RW | Interrupt vector table base address |
-| `0x21` | **IVEC_ID** | 8 | RW | Last interrupt/trap vector ID |
-| `0x22` | **TRAP_ADDR** | 64 | R | Faulting address (bus fault) |
+| `0x20` | **COREID** | 64 | R | Core ID (0..N−1, multicore) |
+| `0x21` | **NCORES** | 64 | R | Total number of cores |
+| `0x22` | **MBOX** | 64 | RW | Read: pending IPI mask; Write: send IPI to core N |
+| `0x23` | **IPIACK** | 64 | W | Acknowledge IPI from core N |
+| `0x24` | **IVEC_ID** | 8 | RW | Last interrupt/trap vector ID |
+| `0x25` | **TRAP_ADDR** | 64 | R | Faulting address (bus fault) |
 | | | | | |
 | `0x30` | **MEGAPAD_SZ** | 64 | R | Memory size (returns 0) |
 | `0x31` | **CPUID** | 64 | R | CPU ID: `0x4D503634_00010000` ("MP64" v1.0) |

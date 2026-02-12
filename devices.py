@@ -35,6 +35,8 @@ TIMER_BASE   = 0x0100
 STORAGE_BASE = 0x0200
 SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
+MBOX_BASE    = 0x0500
+SPINLOCK_BASE = 0x0600
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +684,133 @@ class NetworkDevice(Device):
 
 
 # ---------------------------------------------------------------------------
+#  Inter-Core Mailbox (IPI)
+# ---------------------------------------------------------------------------
+# Emulates the hardware mailbox from the FPGA multicore SoC.
+# Each core has a 64-bit data slot. Writing MBOX_SEND triggers an IPI
+# to the target core. The target reads STATUS to see who sent it,
+# reads DATA, then writes ACK to clear the pending bit.
+#
+# Register map (offsets from MBOX_BASE):
+#   0x00..0x07  DATA_LO/HI — 64-bit mailbox data (per-requester slot)
+#   0x08        SEND       — write target_core_id to send IPI
+#   0x09        STATUS     — read: bit[n] = pending IPI from core n
+#   0x0A        ACK        — write source_core_id to clear pending bit
+#
+# Requester identity comes from DeviceBus.requester_id (set by system.py).
+
+class MailboxDevice(Device):
+    """Inter-core mailbox with IPI delivery."""
+
+    def __init__(self, num_cores: int = 4):
+        super().__init__("Mailbox", MBOX_BASE, 0x10)
+        self.num_cores = num_cores
+        # data[sender] = 64-bit value written by sender
+        self.data: list[int] = [0] * num_cores
+        # pending[target] = bitmask of which cores have sent an unacked IPI
+        self.pending: list[int] = [0] * num_cores
+        # Callback: called with (target_core_id,) when IPI is sent
+        self.on_ipi: Optional[callable] = None
+        # Callback: called with (acking_core_id,) after ACK clears a pending bit
+        self.on_ack: Optional[callable] = None
+        # Requester context — set by DeviceBus before each access
+        self._requester_id: int = 0
+
+    def read8(self, offset: int) -> int:
+        rid = self._requester_id
+        if 0x00 <= offset <= 0x07:
+            # Read mailbox data for the requesting core's slot
+            # Returns the data from the first pending sender
+            shift = 8 * offset
+            return (self.data[rid] >> shift) & 0xFF
+        elif offset == 0x09:  # STATUS
+            return self.pending[rid] & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        rid = self._requester_id
+        if 0x00 <= offset <= 0x07:
+            # Write to this core's outgoing data slot
+            shift = 8 * offset
+            mask = 0xFF << shift
+            self.data[rid] = (self.data[rid] & ~mask) | (value << shift)
+            self.data[rid] &= (1 << 64) - 1
+        elif offset == 0x08:  # SEND — value is target core ID
+            target = value & 0xFF
+            if target < self.num_cores and target != rid:
+                # Copy sender's outgoing data to target's inbox
+                self.data[target] = self.data[rid]
+                self.pending[target] |= (1 << rid)
+                if self.on_ipi:
+                    self.on_ipi(target)
+        elif offset == 0x0A:  # ACK — value is source core ID to clear
+            source = value & 0xFF
+            if source < self.num_cores:
+                self.pending[rid] &= ~(1 << source)
+                if self.on_ack:
+                    self.on_ack(rid)
+
+
+# ---------------------------------------------------------------------------
+#  Hardware Spinlocks
+# ---------------------------------------------------------------------------
+# 8 test-and-set spinlocks with owner tracking.
+# Read SLOCK_ACQUIRE: returns 0 if acquired, 1 if busy (atomic test-and-set).
+# Write SLOCK_RELEASE: releases the lock (only if caller is owner).
+#
+# Lock N is at SPINLOCK_BASE + N*4.
+# Offset within each 4-byte slot:
+#   +0  ACQUIRE (R) — read returns 0=got it, 1=busy
+#   +1  RELEASE (W) — write anything to release
+
+NUM_SPINLOCKS = 8
+
+class SpinlockDevice(Device):
+    """Hardware spinlocks with test-and-set semantics."""
+
+    def __init__(self, num_locks: int = NUM_SPINLOCKS):
+        super().__init__("Spinlock", SPINLOCK_BASE, num_locks * 4)
+        self.num_locks = num_locks
+        # locked[i] = True if lock i is held
+        self.locked: list[bool] = [False] * num_locks
+        # owner[i] = core_id that holds lock i (-1 if free)
+        self.owner: list[int] = [-1] * num_locks
+        # Requester context — set by DeviceBus before each access
+        self._requester_id: int = 0
+
+    def read8(self, offset: int) -> int:
+        lock_idx = offset // 4
+        sub = offset % 4
+        if lock_idx >= self.num_locks:
+            return 0xFF
+        rid = self._requester_id
+        if sub == 0:  # ACQUIRE (test-and-set)
+            if not self.locked[lock_idx]:
+                # Free — acquire it
+                self.locked[lock_idx] = True
+                self.owner[lock_idx] = rid
+                return 0  # success
+            elif self.owner[lock_idx] == rid:
+                # Re-entrant — already own it
+                return 0
+            else:
+                return 1  # busy
+        return 0
+
+    def write8(self, offset: int, value: int):
+        lock_idx = offset // 4
+        sub = offset % 4
+        if lock_idx >= self.num_locks:
+            return
+        rid = self._requester_id
+        if sub == 1:  # RELEASE
+            if self.locked[lock_idx] and self.owner[lock_idx] == rid:
+                self.locked[lock_idx] = False
+                self.owner[lock_idx] = -1
+
+
+# ---------------------------------------------------------------------------
 #  Device Bus — routes MMIO accesses to the correct device
 # ---------------------------------------------------------------------------
 
@@ -690,6 +819,7 @@ class DeviceBus:
 
     def __init__(self):
         self.devices: list[Device] = []
+        self.requester_id: int = 0  # set by system.py before per-core dispatch
 
     def register(self, device: Device):
         self.devices.append(device)
@@ -702,15 +832,22 @@ class DeviceBus:
                 return dev, mmio_offset - dev.base
         return None, 0
 
+    def _set_requester(self, dev: Device):
+        """Propagate requester_id to devices that need it."""
+        if hasattr(dev, '_requester_id'):
+            dev._requester_id = self.requester_id
+
     def read8(self, mmio_offset: int) -> int:
         dev, local = self.find_device(mmio_offset)
         if dev:
+            self._set_requester(dev)
             return dev.read8(local)
         return 0xFF  # open bus
 
     def write8(self, mmio_offset: int, value: int):
         dev, local = self.find_device(mmio_offset)
         if dev:
+            self._set_requester(dev)
             dev.write8(local, value)
 
     def tick(self, cycles: int):

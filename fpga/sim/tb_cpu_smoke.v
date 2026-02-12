@@ -114,6 +114,7 @@ module tb_cpu_smoke;
     mp64_cpu u_cpu (
         .clk        (clk),
         .rst_n      (rst_n),
+        .core_id    ({CORE_ID_BITS{1'b0}}),  // core 0 for smoke tests
         .bus_valid  (bus_valid),
         .bus_addr   (bus_addr),
         .bus_wdata  (bus_wdata),
@@ -135,7 +136,8 @@ module tb_cpu_smoke;
         .mex_busy   (1'b0),
         .irq_timer  (1'b0),
         .irq_uart   (1'b0),
-        .irq_nic    (1'b0)
+        .irq_nic    (1'b0),
+        .irq_ipi    (1'b0)
     );
 
     // ========================================================================

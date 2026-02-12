@@ -32,7 +32,7 @@ from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
-    NIC_BASE, SECTOR_SIZE,
+    NIC_BASE, MBOX_BASE, SPINLOCK_BASE, SECTOR_SIZE,
 )
 
 # ---------------------------------------------------------------------------
@@ -883,6 +883,8 @@ def main():
                         help="Enable NIC with UDP passthrough on PORT")
     parser.add_argument("--nic-peer-port", type=int, default=None, metavar="PORT",
                         help="UDP peer port for NIC passthrough (default: NIC+1)")
+    parser.add_argument("--cores", type=int, default=1, choices=[1, 2, 3, 4],
+                        help="Number of CPU cores (default: 1)")
     args = parser.parse_args()
 
     # ---- Assemble-only mode -------------------------------------------
@@ -906,6 +908,7 @@ def main():
         storage_image=args.storage,
         nic_port=args.nic,
         nic_peer_port=args.nic_peer_port,
+        num_cores=args.cores,
     )
 
     # Load files

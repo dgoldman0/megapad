@@ -36,6 +36,7 @@ python cli.py [flags]
 | `--listing` / `-l` | — | off | Print assembler listing to stdout (assemble-only mode). |
 | `--nic` | PORT | — | Enable NIC device with UDP passthrough on PORT. |
 | `--nic-peer` | PORT | NIC+1 | UDP peer port for NIC communication. |
+| `--cores` | N | 1 | Number of CPU cores (1–4 for multicore SoC). |
 
 ### Boot Modes
 
@@ -387,7 +388,7 @@ fs.save("myimage.img")
 | `pipelines` | Doc | Pipeline guide |
 | `data-ports` | Doc | Data ingestion guide |
 | `scheduler` | Doc | Task scheduler guide |
-| `screens` | Doc | Interactive TUI guide (8 screens) |
+| `screens` | Doc | Interactive TUI guide (9 screens) |
 | `storage` | Doc | MP64FS & storage guide |
 | `tile-engine` | Doc | Tile engine overview |
 | `reference` | Doc | Quick reference card (with DESCRIBE) |
@@ -403,15 +404,15 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **678+ passing tests**
+The project has a comprehensive test suite with **515 passing tests**
 that cover every layer of the system.
 
 ### Test Files
 
 | File | Tests | What It Covers |
 |------|-------|----------------|
-| `test_megapad64.py` | ~65 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | ~615 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, hardening |
+| `test_megapad64.py` | 18 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
+| `test_system.py` | 497 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening |
 
 ### Test Classes in `test_system.py`
 
@@ -419,22 +420,25 @@ that cover every layer of the system.
 |-------|--------------|
 | `TestUART` | UART TX callback, RX inject, TX drain |
 | `TestTimer` | Timer tick counting |
-| `TestDisk` | Disk image create, read/write sectors, no-image handling |
-| `TestMMIO` | MMIO routing to UART and SystemInfo devices |
+| `TestStorage` | Disk image create, read/write sectors, no-image handling |
+| `TestDeviceBus` | MMIO routing to UART and SystemInfo devices |
 | `TestNIC` | NIC: MAC, frame inject/recv, DMA, reset, counters, MTU |
-| `TestMMIOCPU` | CPU-level MMIO: UART TX, SystemInfo read, RAM passthrough |
-| `TestBios` | All BIOS Forth words — arithmetic, stack, comparisons, memory, control flow, strings, variables, constants, colon definitions, I/O, timer, return stack, loops, CREATE/DOES>, EVALUATE, and more |
-| `TestBIOSHardening` | FSLOAD edge cases (multi-sector, colon defs, dot-quote, nested evaluate, empty, comments-only, long line), error line context, stack underflow detection, EVALUATE depth limit, dictionary-full guard |
-| `TestBranchRange` | Assembler branch range validation, SKIP instruction |
+| `TestSystemMMIO` | CPU-level MMIO: UART TX, SystemInfo read, RAM passthrough |
+| `TestBIOS` | All BIOS Forth words — arithmetic, stack, comparisons, memory, control flow, strings, variables, constants, colon definitions, I/O, timer, return stack, loops, CREATE/DOES>, EVALUATE, and more |
+| `TestMulticore` | Multicore: core ID, IPI send/recv, mailbox, spinlock, wake |
+| `TestAssemblerBranchRange` | Assembler branch range validation, SKIP instruction |
 | `TestKDOS` | KDOS: buffers, kernels, pipelines, tasks, data ports, NIC ingestion, documentation browser, scheduler, tile engine, advanced kernels, TUI screens, filesystem commands, benchmarking |
-| `TestKDOSHardening` | SCREENS TUI renders (all 8 screens), header/footer verification, disk-only boot end-to-end tests |
 | `TestDiskUtil` | `diskutil.py`: format, inject, read, list, delete, sample image builder |
+| `TestBIOSHardening` | FSLOAD edge cases (multi-sector, colon defs, dot-quote, nested evaluate, empty, comments-only, long line), error line context, stack underflow detection, EVALUATE depth limit, dictionary-full guard |
+| `TestKDOSHardening` | SCREENS TUI renders (all 9 screens), header/footer verification, disk-only boot end-to-end tests |
 | `TestKDOSFilesystem` | End-to-end KDOS FS: FORMAT, MKFILE, DIR, CATALOG, CAT, RMFILE, RENAME, FWRITE/FREAD, FS-FREE, SAVE-BUFFER, DOC/DESCRIBE/TOPICS/LESSONS |
+| `TestPipelineBundles` | Pipeline bundle serialization, BUNDLE-SAVE, BUNDLE-LOAD, round-trip |
+| `TestKDOSMulticore` | KDOS multicore: CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES |
 
 ### Running Tests
 
 ```bash
-# Full suite (recommended)
+# Full suite with CPython (works out of the box, ~40 min)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
 
 # Just KDOS tests
@@ -452,6 +456,27 @@ python -m pytest test_system.py -k "test_buffer_create" -v
 # With short tracebacks
 python -m pytest test_system.py --tb=short --timeout=30
 ```
+
+### Fast Tests with PyPy + xdist
+
+The CPU emulator loop is pure Python and benefits enormously from PyPy's
+JIT compiler (~5× speedup).  pytest-xdist adds parallel execution across
+multiple workers for another ~2× improvement.  A `Makefile` wraps it all:
+
+```bash
+make setup-pypy          # one-time: downloads PyPy 3.10, installs pytest + xdist
+make test                # PyPy + 8 parallel workers  (~4 min)
+make test-seq            # PyPy sequential            (~8 min, good for debugging)
+make test-cpython        # CPython fallback           (~40 min)
+make test-quick          # PyPy, BIOS + CPU only      (~6 sec)
+make test-one K=test_coreid_word   # single test with PyPy
+```
+
+| Runner | Parallelism | Approximate Time |
+|--------|-------------|------------------|
+| CPython | sequential | ~40 min |
+| PyPy | sequential | ~8 min |
+| PyPy + xdist -n 8 | 8 workers | ~4 min |
 
 ### Test Infrastructure
 
@@ -475,15 +500,18 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | ~1,358 | CPU + tile engine emulator |
-| `system.py` | ~300 | System integration (CPU + devices + memory map) |
-| `cli.py` | ~992 | CLI, boot modes, debug monitor |
+| `megapad64.py` | ~1,393 | CPU + tile engine emulator |
+| `system.py` | ~472 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock) |
+| `cli.py` | ~995 | CLI, boot modes, debug monitor |
 | `asm.py` | ~748 | Two-pass assembler (with listing output) |
-| `devices.py` | ~720 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC) |
-| `datasources.py` | ~700 | Simulated data sources for NIC |
-| `diskutil.py` | ~941 | MP64FS disk utility and image builder |
-| `bios.asm` | ~8,287 | Forth BIOS (197 dictionary words, hardened) |
-| `bios.rom` | 20,605B | Pre-assembled BIOS binary |
-| `kdos.f` | ~2,778 | KDOS operating system (344 definitions) |
-| `test_megapad64.py` | ~712 | CPU unit tests |
-| `test_system.py` | ~5,258 | Integration test suite |
+| `devices.py` | ~855 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock) |
+| `data_sources.py` | ~697 | Simulated data sources for NIC |
+| `diskutil.py` | ~1,038 | MP64FS disk utility and image builder |
+| `bios.asm` | ~8,880 | Forth BIOS (208 dictionary words, hardened, multicore) |
+| `bios.rom` | 20,722B | Pre-assembled BIOS binary |
+| `kdos.f` | ~3,158 | KDOS v1.1 operating system (247 colon defs, 9 TUI screens, multicore) |
+| `test_megapad64.py` | ~357 | CPU unit tests (18 tests) |
+| `test_system.py` | ~6,227 | Integration test suite (497 tests, 16 classes) |
+| `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
+| `pyproject.toml` | 8 | Pytest configuration |
+| `conftest.py` | 14 | Test fixtures and snapshot caching |

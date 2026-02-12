@@ -4,9 +4,9 @@ A complete system-level emulator for the Megapad-64 architecture: CPU,
 memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
-> **Branch:** `feature/mvp-repl`
-> **Status:** Fully functional.  62-word Forth interpreter running on the
-> emulated hardware, 103 tests passing (61 CPU + 42 system).
+> **Branch:** `features/multicore`
+> **Status:** Fully functional.  208-word BIOS v1.0 Forth system running on
+> a quad-core emulated SoC with mailbox IPI, spinlocks, and 515+ tests passing.
 
 ---
 
@@ -19,13 +19,16 @@ python cli.py --bios bios.asm
 # Pre-compile to a .rom, then boot from binary
 python cli.py --assemble bios.asm bios.rom
 python cli.py --bios bios.rom
+
+# ~5× faster under PyPy (run 'make setup-pypy' once to install)
+.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
 ```
 
 When stdin is a terminal you get an interactive serial console — type Forth
 expressions at the `> ` prompt:
 
 ```
-Megapad-64 Forth BIOS v0.3
+Megapad-64 Forth BIOS v1.0
 RAM: 00100000 bytes
  ok
 > 3 4 + .
@@ -62,8 +65,10 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `--assemble SRC OUT` | — | Assemble `SRC.asm` → `OUT.rom` and exit |
 | `--ram KiB` | 1024 | RAM size in KiB |
 | `--storage IMAGE` | — | Attach a block-device image file |
+| `--forth FILE` | — | Inject Forth source via UART after BIOS boot |
 | `--load FILE[@ADDR]` | — | Load raw binary into RAM (repeatable) |
 | `--run` | off | Auto-boot and run immediately |
+| `--cores N` | 1 | Number of CPU cores (1–4) |
 
 ---
 
@@ -71,44 +76,48 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                      cli.py  (871 lines)                 │
+│                      cli.py  (995 lines)                 │
 │       Interactive monitor / debugger / console           │
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py  (273 lines)                 │
-│          MegapadSystem — unified memory map               │
+│                    system.py  (472 lines)                 │
+│       MegapadSystem — quad-core SoC, memory map          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (449 lines) │  │
+│  │  megapad64.py │    │       devices.py  (855 lines) │  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
-│  │  full ISA     │    │ ┌─────────┐                  │  │
-│  │  tile engine  │    │ │ SysInfo │    DeviceBus      │  │
-│  │  (1304 lines) │    │ └─────────┘                  │  │
-│  └──────────────┘    └────────────────────────────────┘  │
+│  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
+│  │  tile engine  │    │ │ SysInfo │ │Mailbox│  NIC   │  │
+│  │  (1393 lines) │    │ └─────────┘ └───────┘        │  │
+│  └──────────────┘    │ ┌──────────┐                  │  │
+│                      │ │ Spinlock │    DeviceBus      │  │
+│                      │ └──────────┘                  │  │
+│                      └────────────────────────────────┘  │
 │                                                          │
-│          asm.py  (640 lines)  — two-pass assembler        │
+│          asm.py  (748 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (2338 lines)  — Forth BIOS v0.3, 62 words
-    bios.rom  (5650 bytes)  — precompiled binary
+    bios.asm  (8,880 lines)  — Forth BIOS v1.0, 208 words
+    bios.rom  (20,722 bytes) — precompiled binary
 ```
 
 ### Source files
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | 1304 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine |
-| `asm.py` | 640 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq` |
-| `devices.py` | 449 | Peripherals — UART, Timer, Storage, SystemInfo, DeviceBus |
-| `system.py` | 273 | System glue — wires CPU + DeviceBus, patches memory accessors for MMIO |
-| `cli.py` | 871 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 2338 | Forth BIOS v0.3 — subroutine-threaded interpreter, 62 built-in words |
-| `test_megapad64.py` | 711 | CPU test suite — 61 tests |
-| `test_system.py` | 493 | System integration tests — 42 tests (devices, MMIO, Forth BIOS) |
-| **Total** | **~7100** | |
+| `megapad64.py` | 1,393 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine |
+| `asm.py` | 748 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
+| `devices.py` | 855 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock |
+| `system.py` | 472 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, round-robin stepping |
+| `cli.py` | 995 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
+| `bios.asm` | 8,880 | Forth BIOS v1.0 — subroutine-threaded interpreter, 208 built-in words (incl. multicore) |
+| `test_megapad64.py` | 711 | CPU test suite — 18 tests |
+| `test_system.py` | 6,227 | System integration tests — 497 tests (devices, MMIO, BIOS, KDOS, multicore, FS) |
+| `Makefile` | 71 | Build & test targets — PyPy + xdist parallel runner |
+| **Total** | **~20,000** | |
 
 ---
 
@@ -121,6 +130,9 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `0xFFFF_FF00_0000_0000` + `0x0100` | 256 B | Timer |
 | `0xFFFF_FF00_0000_0000` + `0x0200` | 256 B | Storage controller |
 | `0xFFFF_FF00_0000_0000` + `0x0300` | 256 B | System info |
+| `0xFFFF_FF00_0000_0000` + `0x0400` | 128 B | NIC (Network Interface) |
+| `0xFFFF_FF00_0000_0000` + `0x0500` | 256 B | Mailbox (inter-core IPI) |
+| `0xFFFF_FF00_0000_0000` + `0x0600` | 256 B | Spinlock (hardware mutexes) |
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -198,20 +210,22 @@ Read-only board identification.
 
 ---
 
-## BIOS — Forth REPL (v0.3)
+## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (2338 lines, 5650 bytes).  It boots from address 0 and
+Megapad-64 assembly (8,880 lines, 20,722 bytes).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
 
 1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
-2. Set up UART base in R8, subroutine pointers in R4/R5/R6
-3. Enable timer, install IVT for bus fault handler
-4. Initialise Forth variables: STATE=0, BASE=10, HERE=dict_free, LATEST
-5. Print banner (`Megapad-64 Forth BIOS v0.3`, RAM size)
-6. Enter the outer interpreter (`QUIT` loop)
+2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
+3. Set up UART base in R8, subroutine pointers in R4/R5/R6
+4. Enable timer, install IVT for bus fault handler
+5. Initialise Forth variables: STATE=0, BASE=10, HERE=dict_free, LATEST
+6. Print banner (`Megapad-64 Forth BIOS v1.0`, RAM size)
+7. Auto-boot: if disk present, scan MP64FS for first Forth file, FSLOAD it
+8. Enter the outer interpreter (`QUIT` loop)
 
 ### Outer interpreter
 
@@ -242,36 +256,72 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (62)
+### Built-in words (208)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
+`-ROT` `?DUP` `2OVER` `2SWAP` `2ROT`
 
 **Arithmetic**
-`+` `-` `*` `/` `MOD` `/MOD` `NEGATE` `ABS` `1+` `1-`
+`+` `-` `*` `/` `MOD` `/MOD` `NEGATE` `ABS` `1+` `1-` `2*` `2/`
+`MIN` `MAX` `CELLS` `CELL+`
 
 **Logic & bitwise**
 `AND` `OR` `XOR` `INVERT` `LSHIFT` `RSHIFT`
 
 **Comparison** (true = −1, false = 0)
-`=` `<` `>` `0=` `0<`
+`=` `<` `>` `0=` `0<` `0>` `<>` `0<>` `>=` `<=` `U<` `U>` `WITHIN`
 
 **Memory**
-`@` `!` `C@` `C!` `ALLOT` `,` `C,` `HERE`
+`@` `!` `C@` `C!` `W@` `W!` `L@` `L!` `+!` `OFF`
+`ALLOT` `,` `C,` `HERE` `CMOVE` `MOVE` `FILL` `DUMP`
 
 **I/O & display**
-`EMIT` `KEY` `CR` `.` `U.` `.S` `WORDS` `BYE`
+`EMIT` `KEY` `KEY?` `CR` `.` `U.` `.S` `WORDS` `BYE`
+`HEX` `DECIMAL` `BASE` `SPACE` `SPACES` `TYPE` `ACCEPT` `.ZSTR`
 
-**Number base**
-`HEX` `DECIMAL` `BASE`
+**String & parsing**
+`S"` `."` `WORD` `COUNT` `COMPARE` `CHAR` `[CHAR]` `UCHAR`
 
-**Memory utilities**
-`FILL` `DUMP`
+**Control flow**
+`IF` `ELSE` `THEN` `BEGIN` `UNTIL` `WHILE` `REPEAT` `AGAIN`
+`DO` `LOOP` `+LOOP` `I` `J` `LEAVE` `UNLOOP`
+
+**Compilation & defining**
+`:` `;` `EXIT` `VARIABLE` `CONSTANT` `VALUE` `TO` `CREATE` `DOES>`
+`IMMEDIATE` `STATE` `[` `]` `LITERAL` `POSTPONE` `RECURSE`
+`EXECUTE` `'` `FIND`
+
+**Return stack**
+`>R` `R>` `R@` `2>R` `2R>` `2R@`
+
+**Input source & interpreter**
+`SOURCE` `>IN` `EVALUATE` `>NUMBER` `QUIT`
+
+**Comments**
+`\` `(`
+
+**System**
+`BL` `TRUE` `FALSE` `LATEST` `ABORT` `ABORT"` `TALIGN` `FSLOAD`
 
 **Tile engine**
-`TVIEW` `TFILL` `TSRC0!` `TSRC1!` `TDST!` `TMODE!` `TCTRL!`
+`TVIEW` `TFILL` `TSRC0!` `TSRC1!` `TDST!` `TMODE!` `TCTRL!` `TMODE@` `TCTRL@`
 `TADD` `TSUB` `TAND` `TOR` `TXOR` `TMUL` `TDOT` `TSUM`
-`TMIN` `TMAX` `TTRANS` `TZERO` `TI` `CYCLES`
+`TMIN` `TMAX` `TTRANS` `TZERO` `TPOPCNT` `TL1` `TEMIN` `TEMAX` `TABS`
+`ACC@` `ACC1@` `ACC2@` `ACC3@` `TI` `CYCLES`
+
+**NIC**
+`NET-STATUS` `NET-SEND` `NET-RECV` `NET-MAC@`
+
+**Disk / Storage**
+`DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE`
+
+**Timer & Interrupts**
+`TIMER!` `TIMER-CTRL!` `TIMER-ACK` `EI!` `DI!` `ISR!`
+
+**Multicore**
+`COREID` `NCORES` `IPI-SEND` `IPI-STATUS` `IPI-ACK`
+`MBOX!` `MBOX@` `SPIN@` `SPIN!` `WAKE-CORE` `CORE-STATUS`
 
 ### Dictionary structure
 
@@ -411,16 +461,27 @@ There are no `push64`/`pop64` instructions.  Manual stack operations use
 ## Running Tests
 
 ```bash
-# CPU-level tests (61 tests)
-python test_megapad64.py
+# CPython (works out of the box)
+python -m pytest test_megapad64.py -v                          # 18 CPU tests
+python -m pytest test_system.py -v --timeout=30                # 497 integration tests
+python -m pytest test_system.py test_megapad64.py -v --timeout=30  # all 515
 
-# System + BIOS integration tests (42 tests)
-python test_system.py
+# PyPy + xdist (recommended — ~10× total speedup)
+make setup-pypy        # one-time: downloads PyPy, installs pytest + xdist
+make test              # PyPy + 8 parallel workers  (~4 min)
+make test-seq          # PyPy sequential            (~8 min)
+make test-quick        # PyPy, BIOS + CPU only      (~6 sec)
+make test-one K=test_coreid_word   # single test with PyPy
 ```
 
-The system tests exercise the full stack: devices, MMIO routing, and the
-Forth BIOS (arithmetic, stack ops, comparisons, logic, memory, hex parsing,
-WORDS, BYE, undefined-word handling, FILL/DUMP, EMIT, and more).
+PyPy's JIT gives **~5× speedup** on the CPU emulator loop; pytest-xdist
+adds **parallel execution** across 8 workers for another ~2× improvement.
+CPython works fine but takes ~40 minutes for the full suite.
+
+The system tests exercise the full stack: devices, MMIO routing, the
+Forth BIOS (all 208 words), KDOS (buffers, kernels, pipelines, scheduler,
+filesystem, screens, data ports, multicore dispatch), and multicore
+SoC features (IPI, mailbox, spinlocks, barriers).
 
 ---
 
@@ -430,7 +491,7 @@ WORDS, BYE, undefined-word handling, FILL/DUMP, EMIT, and more).
 $ printf '1 2 3 .S\nDROP DROP DROP\n100 7 /MOD . .\nBYE\n' \
     | python cli.py --bios bios.rom
 
-Megapad-64 Forth BIOS v0.3
+Megapad-64 Forth BIOS v1.0
 RAM: 00100000 bytes
  ok
 > 1 2 3 .S
@@ -459,3 +520,8 @@ Bye!
 | `220e2e2` | BIOS v0.2 — tile engine commands |
 | `a5ffeba` | `--assemble` flag for `.rom` precompilation |
 | `b879ff5` | **BIOS v0.3 — Forth MVP REPL**, 62 words, 42 system tests |
+| `182ab06` | **BIOS v1.0** — 197 words, FSLOAD, KDOS v1.0 |
+| `0efa9bb` | Quad-core FPGA SoC architecture |
+| `3d053d0` | Emulator multicore support (round-robin, mailbox, spinlocks) |
+| `9183f88` | BIOS multicore boot (11 words, worker loop, IPI handler) |
+| `366aace` | **KDOS v1.1** — multicore dispatch (CORE-RUN, BARRIER, P.RUN-PAR) |

@@ -27,6 +27,9 @@ module mp64_cpu (
     input  wire        clk,
     input  wire        rst_n,
 
+    // === Core identification (set per instance by SoC) ===
+    input  wire [CORE_ID_BITS-1:0] core_id,
+
     // === Memory bus master ===
     output reg         bus_valid,
     output reg  [63:0] bus_addr,
@@ -54,7 +57,8 @@ module mp64_cpu (
     // === Interrupts ===
     input  wire        irq_timer,
     input  wire        irq_uart,
-    input  wire        irq_nic
+    input  wire        irq_nic,
+    input  wire        irq_ipi       // inter-processor interrupt
 );
 
     // ========================================================================
@@ -137,11 +141,15 @@ module mp64_cpu (
         irq_pending = 1'b0;
         irq_vector  = 3'd0;
         if (flag_i) begin
-            if (irq_timer) begin
+            // Priority: IPI > Timer > UART > NIC
+            if (irq_ipi) begin
+                irq_pending = 1'b1;
+                irq_vector  = IRQ_NMI;    // IPI uses NMI vector (highest hw prio)
+            end else if (irq_timer) begin
                 irq_pending = 1'b1;
                 irq_vector  = IRQ_TIMER;
             end
-            // Add more interrupt sources with priority
+            // UART and NIC interrupt routing handled by SoC
         end
     end
 
@@ -346,15 +354,22 @@ module mp64_cpu (
                 end
 
                 CPU_FETCH_MORE: begin
-                    // Only drive bus_valid when fetch_pending is clear
-                    // (ibuf_len has been updated since last consume)
+                    // Drive bus_valid:
+                    //  - New fetch:  assert with updated address
+                    //  - Waiting:    keep asserted (multi-core visibility)
+                    //  - On response: deassert (let arbiter serve others)
                     if (!fetch_pending) begin
                         bus_valid <= 1'b1;
                         bus_addr  <= R[psel] + {60'd0, ibuf_len};
                         bus_wen   <= 1'b0;
                         bus_size  <= BUS_BYTE;
                         fetch_pending <= 1'b1;
+                    end else if (!bus_ready) begin
+                        // Keep request visible to arbiter while waiting
+                        bus_valid <= 1'b1;
                     end
+                    // else: bus_ready && fetch_pending → bus_valid stays 0
+                    // (default), giving the arbiter 1 cycle to move on
 
                     if (bus_ready && fetch_pending) begin
                         fetch_pending <= 1'b0;
@@ -638,6 +653,8 @@ module mp64_cpu (
                                 CSR_SPSEL:   R[ibuf[2][7:4]] <= {60'd0, spsel};
                                 CSR_FLAGS:   R[ibuf[2][7:4]] <= {56'd0, flags};
                                 CSR_IVTBASE: R[ibuf[2][7:4]] <= ivt_base;
+                                CSR_COREID:  R[ibuf[2][7:4]] <= {62'd0, core_id};
+                                CSR_NCORES:  R[ibuf[2][7:4]] <= {62'd0, NUM_CORES[1:0]};
                                 default:     R[ibuf[2][7:4]] <= csr_rdata;
                             endcase
                         end
@@ -752,10 +769,10 @@ module mp64_cpu (
                 end
 
                 // ============================================================
-                // HALT
+                // HALT: wait for interrupt (WFI behaviour)
                 // ============================================================
                 CPU_HALT: begin
-                    // Halted — only interrupt can wake us
+                    // Halted — any interrupt (including IPI) wakes us
                     if (irq_pending) begin
                         cpu_state <= CPU_IRQ;
                     end

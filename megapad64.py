@@ -43,11 +43,12 @@ CSR_FLAGS       = 0x00
 CSR_PSEL        = 0x01
 CSR_XSEL        = 0x02
 CSR_SPSEL       = 0x03
-CSR_D           = 0x04
-CSR_DF          = 0x05
-CSR_Q           = 0x06
-CSR_T           = 0x07
-CSR_IE          = 0x08
+CSR_IVT_BASE    = 0x04  # Interrupt vector table base (aligned with FPGA)
+CSR_D           = 0x05  # Legacy 1802 D register
+CSR_DF          = 0x06  # Legacy 1802 DF (carry alias)
+CSR_Q           = 0x07  # Legacy 1802 Q output
+CSR_T           = 0x08  # Legacy 1802 T register
+CSR_IE          = 0x09  # Interrupt enable (alias of flag_i)
 CSR_SB          = 0x10
 CSR_SR          = 0x11
 CSR_SC          = 0x12
@@ -61,9 +62,12 @@ CSR_ACC0        = 0x19
 CSR_ACC1        = 0x1A
 CSR_ACC2        = 0x1B
 CSR_ACC3        = 0x1C
-CSR_IVT_BASE    = 0x20
-CSR_IVEC_ID     = 0x21
-CSR_TRAP_ADDR   = 0x22
+CSR_COREID      = 0x20  # Read-only: core ID (0..N-1)
+CSR_NCORES      = 0x21  # Read-only: number of cores
+CSR_MBOX        = 0x22  # Read: pending IPI mask, Write: send IPI
+CSR_IPIACK      = 0x23  # Write: acknowledge IPI from core N
+CSR_IVEC_ID     = 0x24  # Current interrupt vector ID
+CSR_TRAP_ADDR   = 0x25  # Faulting address
 CSR_MEGAPAD_SZ  = 0x30
 CSR_CPUID       = 0x31
 
@@ -76,6 +80,7 @@ IVEC_DIV_ZERO       = 0x04
 IVEC_BUS_FAULT      = 0x05
 IVEC_SW_TRAP        = 0x06
 IVEC_TIMER          = 0x07
+IVEC_IPI            = 0x08  # Inter-processor interrupt
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -121,9 +126,15 @@ class HaltError(Megapad64Error):
 class Megapad64:
     """Megapad-64 TSP emulator — bytecode level."""
 
-    def __init__(self, mem_size: int = 1 << 20):
+    def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
+                 num_cores: int = 1):
         self.mem_size = mem_size
         self.mem = bytearray(mem_size)
+
+        # Core identity (multicore)
+        self.core_id: int = core_id
+        self.num_cores: int = num_cores
+        self.irq_ipi: bool = False  # pending IPI from mailbox
 
         # 16 × 64-bit GPRs
         self.regs: list[int] = [0] * 16
@@ -382,6 +393,7 @@ class Megapad64:
             CSR_PSEL:       lambda: self.psel,
             CSR_XSEL:       lambda: self.xsel,
             CSR_SPSEL:      lambda: self.spsel,
+            CSR_IVT_BASE:   lambda: self.ivt_base,
             CSR_D:          lambda: self.d_reg,
             CSR_DF:         lambda: self.flag_c,
             CSR_Q:          lambda: self.q_out,
@@ -400,7 +412,10 @@ class Megapad64:
             CSR_ACC1:       lambda: self.acc[1],
             CSR_ACC2:       lambda: self.acc[2],
             CSR_ACC3:       lambda: self.acc[3],
-            CSR_IVT_BASE:   lambda: self.ivt_base,
+            CSR_COREID:     lambda: self.core_id,
+            CSR_NCORES:     lambda: self.num_cores,
+            CSR_MBOX:       lambda: self._ipi_pending_mask,
+            CSR_IPIACK:     lambda: 0,  # write-only
             CSR_IVEC_ID:    lambda: self.ivec_id,
             CSR_TRAP_ADDR:  lambda: self.trap_addr,
             CSR_MEGAPAD_SZ: lambda: 0,      # 8 MiB config
@@ -418,6 +433,7 @@ class Megapad64:
             CSR_PSEL:     lambda v: setattr(self, 'psel',  v & 0xF),
             CSR_XSEL:     lambda v: setattr(self, 'xsel',  v & 0xF),
             CSR_SPSEL:    lambda v: setattr(self, 'spsel', v & 0xF),
+            CSR_IVT_BASE: lambda v: setattr(self, 'ivt_base', v),
             CSR_D:        lambda v: setattr(self, 'd_reg', v & 0xFF),
             CSR_DF:       lambda v: setattr(self, 'flag_c', v & 1),
             CSR_Q:        lambda v: setattr(self, 'q_out',  v & 1),
@@ -436,12 +452,29 @@ class Megapad64:
             CSR_ACC1:     lambda v: self.acc.__setitem__(1, v),
             CSR_ACC2:     lambda v: self.acc.__setitem__(2, v),
             CSR_ACC3:     lambda v: self.acc.__setitem__(3, v),
-            CSR_IVT_BASE: lambda v: setattr(self, 'ivt_base', v),
+            # COREID, NCORES are read-only — writes ignored
+            CSR_MBOX:     lambda v: self._ipi_send(v),
+            CSR_IPIACK:   lambda v: self._ipi_ack(v),
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
         }
         fn = dispatch.get(addr)
         if fn:
             fn(val)
+
+    # -- IPI helpers (stubs — system.py wires the real mailbox) --
+
+    @property
+    def _ipi_pending_mask(self) -> int:
+        """Override in system to return actual pending mask from mailbox."""
+        return 0
+
+    def _ipi_send(self, target_core: int):
+        """Override in system to route IPI through mailbox device."""
+        pass
+
+    def _ipi_ack(self, from_core: int):
+        """Override in system to clear IPI pending bit."""
+        pass
 
     # -- Trap entry --
 
@@ -1265,9 +1298,11 @@ class Megapad64:
         self.acc = [0, 0, 0, 0]
         self.ivt_base = 0
         self.ivec_id = 0
+        self.irq_ipi = False
         self.halted = False
         self.idle = False
         self._ext_modifier = -1
+        # Note: core_id and num_cores are NOT reset — they are hardware-fixed
 
     # -- Instruction size helper (for SKIP) --
 

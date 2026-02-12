@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+# Fast test runs: use PyPy + xdist (see Makefile targets).
+#   make test          # PyPy + 8 workers  (~4 min)
+#   make test-seq      # PyPy sequential   (~8 min)
+#   make test-cpython  # CPython fallback  (~40 min)
+addopts = "--tb=short -q"

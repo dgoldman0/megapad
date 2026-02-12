@@ -19,6 +19,24 @@ parameter TILE_BITS       = 512;           // 64 × 8
 parameter MAX_REGS        = 16;            // 16 GPRs
 
 // ----------------------------------------------------------------------------
+// Multi-core parameters
+// ----------------------------------------------------------------------------
+parameter NUM_CORES       = 4;             // Quad-core
+parameter CORE_ID_BITS    = 2;             // log2(NUM_CORES)
+
+// Per-core stack region sizes (within 1 MiB shared BRAM)
+// Layout: Core 0 boots from 0x0000, stacks at top of respective 64 KiB zone
+//   Core 0: stack region 0xF0000–0xFFFFF  (boot core)
+//   Core 1: stack region 0xE0000–0xEFFFF
+//   Core 2: stack region 0xD0000–0xDFFFF
+//   Core 3: stack region 0xC0000–0xCFFFF
+parameter CORE_STACK_SIZE = 65536;         // 64 KiB per core
+parameter CORE0_STACK_TOP = 20'hFFFFF;
+parameter CORE1_STACK_TOP = 20'hEFFFF;
+parameter CORE2_STACK_TOP = 20'hDFFFF;
+parameter CORE3_STACK_TOP = 20'hCFFFF;
+
+// ----------------------------------------------------------------------------
 // Internal memory — 1 MiB BRAM, dual-port
 // ----------------------------------------------------------------------------
 parameter INT_MEM_BYTES   = 1048576;       // 1 MiB
@@ -61,6 +79,8 @@ parameter [11:0] TIMER_BASE  = 12'h100;
 parameter [11:0] DISK_BASE   = 12'h200;
 parameter [11:0] SYSINFO_BASE= 12'h300;
 parameter [11:0] NIC_BASE    = 12'h400;
+parameter [11:0] MBOX_BASE   = 12'h500;   // Inter-core mailbox
+parameter [11:0] SPINLOCK_BASE = 12'h600; // Hardware spinlocks
 
 // UART registers (byte offsets from UART_BASE)
 parameter [3:0] UART_TX      = 4'h0;
@@ -89,6 +109,22 @@ parameter [3:0] NIC_DMA      = 4'h2;  // +2..+9 (64-bit)
 parameter [3:0] NIC_FRAMELEN = 4'hA;  // +A..+B (16-bit)
 parameter [3:0] NIC_IRQCTRL  = 4'hC;
 parameter [3:0] NIC_IRQSTAT  = 4'hD;
+
+// Mailbox registers (offsets from MBOX_BASE)
+// Each core has a 64-bit mailbox slot + doorbell + status
+// Slot[n] = MBOX_BASE + n*16
+parameter [3:0] MBOX_DATA_LO = 4'h0;     // +0: mailbox data low 32 bits
+parameter [3:0] MBOX_DATA_HI = 4'h4;     // +4: mailbox data high 32 bits
+parameter [3:0] MBOX_SEND    = 4'h8;     // +8: write target_core_id to send IPI
+parameter [3:0] MBOX_STATUS  = 4'h9;     // +9: bit[n] = pending IPI from core n
+parameter [3:0] MBOX_ACK     = 4'hA;     // +A: write core_id to clear pending bit
+
+// Hardware spinlock registers (offsets from SPINLOCK_BASE)
+// 8 hardware spinlocks, test-and-set
+parameter NUM_SPINLOCKS    = 8;
+parameter [3:0] SLOCK_ACQUIRE = 4'h0;    // read: returns 0=acquired, 1=busy
+parameter [3:0] SLOCK_RELEASE = 4'h1;    // write: release lock
+// Lock N at SPINLOCK_BASE + N*4
 
 // ----------------------------------------------------------------------------
 // ISA — Instruction families (upper nibble of opcode byte)
@@ -161,6 +197,12 @@ parameter [7:0] CSR_ACC1  = 8'h1A;
 parameter [7:0] CSR_ACC2  = 8'h1B;
 parameter [7:0] CSR_ACC3  = 8'h1C;
 
+// Multi-core CSR addresses
+parameter [7:0] CSR_COREID = 8'h20;      // Read-only: core ID (0–3)
+parameter [7:0] CSR_NCORES = 8'h21;      // Read-only: number of cores
+parameter [7:0] CSR_MBOX   = 8'h22;      // Read: pending IPI mask, Write: send IPI
+parameter [7:0] CSR_IPIACK = 8'h23;      // Write: acknowledge IPI from core N
+
 // ----------------------------------------------------------------------------
 // Bus protocol
 // ----------------------------------------------------------------------------
@@ -190,5 +232,15 @@ parameter [2:0] IRQ_DIVZ   = 3'd4;
 parameter [2:0] IRQ_BUS    = 3'd5;
 parameter [2:0] IRQ_SWTRAP = 3'd6;
 parameter [2:0] IRQ_TIMER  = 3'd7;
+
+// Extended interrupt sources (active on per-core irq_ext lines)
+parameter [3:0] IRQX_IPI     = 4'd8;     // Inter-processor interrupt
+parameter [3:0] IRQX_UART    = 4'd9;
+parameter [3:0] IRQX_NIC     = 4'd10;
+parameter [3:0] IRQX_DISK    = 4'd11;
+
+// IRQ routing: which core receives each peripheral IRQ (configurable)
+// Default: core 0 gets all peripheral IRQs
+parameter [1:0] IRQ_ROUTE_DEFAULT = 2'd0;
 
 `endif // MP64_DEFS_VH

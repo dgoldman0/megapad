@@ -1,5 +1,5 @@
 \ =====================================================================
-\  KDOS v1.0 — Kernel Dashboard OS for Megapad-64
+\  KDOS v1.1 — Kernel Dashboard OS for Megapad-64
 \ =====================================================================
 \
 \  Loaded via UART into the Megapad-64 BIOS v1.0 Forth system.
@@ -16,7 +16,8 @@
 \       7.7 Doc Browser — DOC, DESCRIBE, TUTORIAL, TOPICS, LESSONS
 \       7.8 Dict Search — WORDS-LIKE, APROPOS, .RECENT
 \    8. Scheduler       — cooperative & preemptive multitasking
-\    9. Screens         — interactive TUI (ANSI terminal, 7 screens)
+\    8.1 Multicore      — CORE-RUN, CORE-WAIT, BARRIER, P.RUN-PAR
+\    9. Screens         — interactive TUI (ANSI terminal, 9 screens)
 \   10. Data Ports      — NIC-based external data ingestion
 \   11. Benchmarking    — BENCH for timing via CYCLES
 \   12. Dashboard       — text-mode system overview
@@ -1942,6 +1943,134 @@ VARIABLE PREEMPT-ENABLED
         THEN
     THEN ;
 
+\ =====================================================================
+\  §8.1  Multicore Dispatch
+\ =====================================================================
+\
+\  High-level words that build on the BIOS multicore primitives
+\  (COREID, NCORES, WAKE-CORE, CORE-STATUS, SPIN@, SPIN!).
+\
+\  CORE-RUN   ( xt core -- )  dispatch XT to a secondary core
+\  CORE-WAIT  ( core -- )     busy-wait until a core finishes
+\  ALL-CORES-WAIT ( -- )      wait for all secondary cores to idle
+\  BARRIER    ( -- )          synchronize: wait for all cores
+\  LOCK       ( n -- )        acquire spinlock n (busy-wait)
+\  UNLOCK     ( n -- )        release spinlock n
+\  CORES      ( -- )          display per-core status
+\  P.RUN-PAR  ( pipe -- )     run pipeline steps in parallel across cores
+\
+\  Uses BIOS words: COREID NCORES WAKE-CORE CORE-STATUS SPIN@ SPIN!
+\                   IPI-SEND IPI-STATUS MBOX! MBOX@
+
+\ -- CORE-RUN ( xt core -- )  dispatch XT to secondary core --
+\   Validates the core number, then sends via WAKE-CORE.
+: CORE-RUN  ( xt core -- )
+    DUP COREID = ABORT" Cannot dispatch to self"
+    DUP 0<  OVER NCORES >= OR ABORT" Invalid core ID"
+    WAKE-CORE ;
+
+\ -- CORE-WAIT ( core -- )  busy-wait until core is idle --
+\   Polls CORE-STATUS (worker XT slot) until it reads 0.
+\   Each iteration also checks YIELD? so preemption still works.
+: CORE-WAIT  ( core -- )
+    BEGIN
+        DUP CORE-STATUS 0<>
+    WHILE
+        YIELD?
+    REPEAT
+    DROP ;
+
+\ -- ALL-CORES-WAIT ( -- )  wait for all secondary cores to idle --
+: ALL-CORES-WAIT  ( -- )
+    NCORES 1 DO
+        I CORE-WAIT
+    LOOP ;
+
+\ -- BARRIER ( -- )  synchronize: wait for all secondary cores --
+\   Core 0 calls this to wait until all dispatched work is finished.
+: BARRIER  ( -- )
+    ALL-CORES-WAIT ;
+
+\ -- LOCK ( n -- )  acquire spinlock n (busy-wait) --
+\   Retries SPIN@ until it returns 0 (acquired).
+: LOCK  ( n -- )
+    BEGIN
+        DUP SPIN@ 0<>
+    WHILE
+        YIELD?
+    REPEAT
+    DROP ;
+
+\ -- UNLOCK ( n -- )  release spinlock n --
+: UNLOCK  ( n -- )
+    SPIN! ;
+
+\ -- CORES ( -- )  display per-core status --
+: CORES  ( -- )
+    ." --- Cores (" NCORES . ." ) ---" CR
+    NCORES 0 DO
+        ."   Core " I .
+        I COREID = IF
+            ."  [self] RUNNING" CR
+        ELSE
+            I CORE-STATUS IF
+                ."  BUSY" CR
+            ELSE
+                ."  IDLE" CR
+            THEN
+        THEN
+    LOOP ;
+
+\ -- Parallel pipeline variables --
+VARIABLE PAR-PIPE       \ pipeline being dispatched
+VARIABLE PAR-STEP       \ current step index (used by wrappers)
+VARIABLE PAR-CORE       \ next core to assign
+
+\ -- Step wrapper XTs: executed on secondary cores --
+\   We pre-define wrappers for steps 0-7 (max pipeline capacity).
+\   Each wrapper reads the pipeline and step index from shared
+\   variables, looks up the step XT, and calls it.
+
+\ Since secondary cores call the XT directly and the pipeline
+\ step XTs are no-argument words (they operate on pre-bound
+\ buffers), we dispatch them directly via CORE-RUN.
+
+\ -- P.RUN-PAR ( pipe -- )  run pipeline steps in parallel --
+\   Distributes steps across available secondary cores.
+\   If there are more steps than cores, remaining steps run on core 0.
+\   Always waits for all dispatched work before returning.
+VARIABLE PAR-P          \ pipeline being dispatched
+VARIABLE PAR-N          \ next core to use
+
+: P.RUN-PAR  ( pipe -- )
+    NCORES 1 <= IF
+        \ Single core: fall back to sequential
+        P.RUN EXIT
+    THEN
+    DUP P.COUNT 0= IF DROP EXIT THEN
+    PAR-P !
+    1 PAR-N !               \ start dispatching to core 1
+    PAR-P @ P.COUNT 0 DO
+        PAR-P @ I P.GET      ( step-xt )
+        PAR-N @ NCORES < IF
+            PAR-N @ CORE-RUN
+            PAR-N @ 1+ PAR-N !
+        ELSE
+            EXECUTE
+        THEN
+    LOOP
+    ALL-CORES-WAIT ;
+
+\ -- P.BENCH-PAR ( pipe -- )  benchmark parallel pipeline --
+: P.BENCH-PAR  ( pipe -- )
+    ." Parallel pipeline (" DUP P.COUNT . ." steps, "
+    NCORES . ." cores):" CR
+    DUP
+    CYCLES >R
+    P.RUN-PAR
+    CYCLES R> -
+    ."   total = " . ." cycles" CR ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !
@@ -1953,8 +2082,8 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 \ =====================================================================
 \
 \  Full-screen TUI built on ANSI escape sequences.
-\  Screens: [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help [7]Docs [8]Stor
-\  Keys: 1-8 switch, n/p navigate, Enter select, a auto-refresh, r/q.
+\  Screens: [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help [7]Docs [8]Stor [9]Core
+\  Keys: 1-9 switch, n/p navigate, Enter select, a auto-refresh, r/q.
 \
 
 \ -- ANSI escape primitives --
@@ -2063,7 +2192,7 @@ VARIABLE DOC-TUT-COUNT
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v1.0 "
+    ."  KDOS v1.1 "
     RESET-COLOR
     SPACE
     SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
@@ -2073,13 +2202,14 @@ VARIABLE DOC-TUT-COUNT
     DUP 5 = IF REVERSE THEN ." [5]Task " RESET-COLOR
     DUP 6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
     DUP 7 = IF REVERSE THEN ." [7]Docs " RESET-COLOR
-    8 = IF REVERSE THEN ." [8]Stor " RESET-COLOR
+    DUP 8 = IF REVERSE THEN ." [8]Stor " RESET-COLOR
+    9 = IF REVERSE THEN ." [9]Core " RESET-COLOR
     CR HBAR ;
 
 \ -- Screen footer --
 : SCREEN-FOOTER  ( -- )
     DIM
-    ."  [1-8] Switch  [n/p] Select  [r] Refresh"
+    ."  [1-9] Switch  [n/p] Select  [r] Refresh"
     AUTO-REFRESH @ IF 2 FG ."  Auto:ON" RESET-COLOR DIM ELSE ."  [a]Auto" THEN
     ."   [q] Quit"
     RESET-COLOR CR ;
@@ -2088,6 +2218,8 @@ VARIABLE DOC-TUT-COUNT
 : SCR-HOME  ( -- )
     .LABEL ."  System Overview" ./LABEL CR CR
     ."   Memory  : HERE = " HERE . CR
+    ."   Cores   : " NCORES .N
+    NCORES 1 > IF 2 FG ."  multicore" ELSE DIM ."  single" THEN RESET-COLOR CR
     ."   Buffers : " BUF-COUNT @ .N CR
     ."   Kernels : " KERN-COUNT @ .N CR
     ."   Pipes   : " PIPE-COUNT @ .N CR
@@ -2219,9 +2351,16 @@ VARIABLE DOC-TUT-COUNT
     BOLD ."  Pipelines:" RESET-COLOR CR
     ."   3 PIPELINE name      Create pipeline" CR
     ."   ' w pipe P.ADD/RUN   Build & execute" CR
+    ."   pipe P.RUN-PAR       Parallel execute" CR
     BOLD ."  Tasks:" RESET-COLOR CR
     ."   ' w 0 TASK name      Create task" CR
     ."   SCHEDULE / BG         Run tasks" CR
+    BOLD ."  Multicore:" RESET-COLOR CR
+    ."   xt core CORE-RUN      Dispatch to core" CR
+    ."   core CORE-WAIT        Wait for core" CR
+    ."   BARRIER               Sync all cores" CR
+    ."   n LOCK / n UNLOCK     Spinlock ops" CR
+    ."   CORES                 Show core status" CR
     BOLD ."  Storage:" RESET-COLOR CR
     ."   buf sec B.SAVE/LOAD  Persist buffers" CR
     ."   DIR / CATALOG        List disk files" CR
@@ -2318,6 +2457,32 @@ VARIABLE DOC-TUT-COUNT
         ELSE DROP THEN
     THEN ;
 
+\ ---- Screen 9: Cores ----
+: SCR-CORES  ( -- )
+    .LABEL ."  Cores (" NCORES .N ." )" ./LABEL CR CR
+    NCORES 1 <= IF
+        ."   Single-core mode — no secondary cores available." CR
+    ELSE
+        NCORES 0 DO
+            ."   Core " I .N ."  "
+            I COREID = IF
+                3 FG ." RUNNING" RESET-COLOR ."  (self — scheduler)" CR
+            ELSE
+                I CORE-STATUS IF
+                    2 FG ." BUSY" RESET-COLOR CR
+                ELSE
+                    DIM ." IDLE" RESET-COLOR CR
+                THEN
+            THEN
+        LOOP
+        CR BOLD ."  Multicore Words:" RESET-COLOR CR
+        ."   xt core CORE-RUN    Dispatch work to core" CR
+        ."   core CORE-WAIT      Wait for core to finish" CR
+        ."   BARRIER             Sync all secondary cores" CR
+        ."   pipe P.RUN-PAR      Parallel pipeline execute" CR
+        ."   n LOCK / n UNLOCK   Spinlock operations" CR
+    THEN ;
+
 \ -- Screen dispatch --
 : RENDER-SCREEN  ( -- )
     PAGE SCREEN-HEADER
@@ -2330,8 +2495,9 @@ VARIABLE DOC-TUT-COUNT
     DUP 6 = IF DROP SCR-HELP    ELSE
     DUP 7 = IF DROP SCR-DOCS    ELSE
     DUP 8 = IF DROP SCR-STORAGE ELSE
+    DUP 9 = IF DROP SCR-CORES   ELSE
         DROP SCR-HOME
-    THEN THEN THEN THEN THEN THEN THEN THEN
+    THEN THEN THEN THEN THEN THEN THEN THEN THEN
     CR SCREEN-FOOTER ;
 
 \ -- Screen switch helper --
@@ -2361,6 +2527,7 @@ VARIABLE DOC-TUT-COUNT
     DUP 54 = IF DROP 6 SWITCH-SCREEN EXIT THEN  \ '6'
     DUP 55 = IF DROP 7 SWITCH-SCREEN EXIT THEN  \ '7'
     DUP 56 = IF DROP 8 SWITCH-SCREEN EXIT THEN  \ '8'
+    DUP 57 = IF DROP 9 SWITCH-SCREEN EXIT THEN  \ '9'
     DUP 113 = IF DROP 0 SCREEN-RUN ! EXIT THEN  \ 'q'
     DUP 114 = IF DROP RENDER-SCREEN EXIT THEN    \ 'r'
     DUP 97 = IF DROP                              \ 'a' = toggle auto-refresh
@@ -2547,9 +2714,11 @@ VARIABLE ROUTE-BUF
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v1.0 — Kernel Dashboard OS" CR
+    ."  KDOS v1.1 — Kernel Dashboard OS" CR
     HRULE
     .MEM
+    CR ."  Cores: " NCORES .
+    NCORES 1 > IF ." (multicore)" ELSE ." (single-core)" THEN CR
     CR DISK-INFO
     CR BUFFERS
     CR KERNELS
@@ -2561,7 +2730,8 @@ VARIABLE ROUTE-BUF
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS v1.0 | bufs=" BUF-COUNT @ .
+    ." KDOS v1.1 | cores=" NCORES .
+    ." bufs=" BUF-COUNT @ .
     ." kerns=" KERN-COUNT @ .
     ." pipes=" PIPE-COUNT @ .
     ." tasks=" TASK-COUNT @ .
@@ -2635,7 +2805,7 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
 \ -- Full reference --
 : .HELP-ALL  ( -- )
     CR HRULE
-    ."  KDOS v1.0 — Quick Reference" CR
+    ."  KDOS v1.1 — Quick Reference" CR
     HRULE
     CR ."  BUFFER WORDS:" CR
     ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
@@ -2722,6 +2892,18 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."    PREEMPT-ON             Enable timer preemption" CR
     ."    PREEMPT-OFF            Disable timer preemption" CR
     ."    TASKS                  List all tasks" CR
+    CR ."  MULTICORE WORDS:" CR
+    ."    COREID                 Push current core ID" CR
+    ."    NCORES                 Push number of hardware cores" CR
+    ."    xt core CORE-RUN       Dispatch XT to secondary core" CR
+    ."    core CORE-WAIT         Wait for core to finish" CR
+    ."    ALL-CORES-WAIT         Wait for all secondary cores" CR
+    ."    BARRIER                Synchronize all cores" CR
+    ."    n LOCK                 Acquire spinlock n (busy-wait)" CR
+    ."    n UNLOCK               Release spinlock n" CR
+    ."    CORES                  Show per-core status" CR
+    ."    pipe P.RUN-PAR         Run pipeline in parallel" CR
+    ."    pipe P.BENCH-PAR       Benchmark parallel pipeline" CR
     CR ."  DATA PORT WORDS:" CR
     ."    buf id PORT!           Bind source id to buffer" CR
     ."    id UNPORT              Unbind source" CR
@@ -2731,7 +2913,7 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."    PORTS                  List port bindings" CR
     ."    .FRAME                 Show last frame header" CR
     CR ."  SCREENS & TOOLS:" CR
-    ."    SCREENS                Interactive TUI (1-8, n/p, a, q, r)" CR
+    ."    SCREENS                Interactive TUI (1-9, n/p, a, q, r)" CR
     ."    DASHBOARD              Full system overview" CR
     ."    STATUS                 Quick status line" CR
     ."    ' word BENCH           Time word, leave cycles on stack" CR
@@ -2963,10 +3145,14 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
 \ =====================================================================
 
 CR HRULE
-."  KDOS v1.0 — Kernel Dashboard OS" CR
+."  KDOS v1.1 — Kernel Dashboard OS" CR
 HRULE
 ." Type HELP for commands, HELP <word> for details." CR
 ." Type SCREENS for interactive TUI." CR
 ." Type TOPICS or LESSONS for documentation." CR
+NCORES 1 > IF
+    ."  Multicore: " NCORES . ." cores available" CR
+    ."  Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work." CR
+THEN
 DISK? IF FS-LOAD THEN
 CR
