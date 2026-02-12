@@ -95,7 +95,7 @@ module tb_opcodes;
     end
 
     // ========================================================================
-    // DUT
+    // DUT  (CPU + I-cache)
     // ========================================================================
     wire        csr_wen_w;
     wire [7:0]  csr_addr_w;
@@ -108,10 +108,65 @@ module tb_opcodes;
 
     reg [3:0] ef_in;
 
+    // I-cache wires
+    wire [63:0] ic_fetch_addr, ic_fetch_data, ic_inv_addr;
+    wire        ic_fetch_req, ic_fetch_hit, ic_fetch_stall;
+    wire        ic_inv_all, ic_inv_line;
+
+    wire        ic_bus_valid;
+    wire [63:0] ic_bus_addr;
+    reg  [63:0] ic_bus_rdata;
+    reg         ic_bus_ready;
+
+    // I-cache memory port (read-only 1-cycle latency from same mem[])
+    always @(posedge clk) begin
+        ic_bus_ready <= 1'b0;
+        ic_bus_rdata <= 64'd0;
+        if (ic_bus_valid) begin
+            ic_bus_ready <= 1'b1;
+            ic_bus_rdata <= {mem[ic_bus_addr[12:0]+7],
+                             mem[ic_bus_addr[12:0]+6],
+                             mem[ic_bus_addr[12:0]+5],
+                             mem[ic_bus_addr[12:0]+4],
+                             mem[ic_bus_addr[12:0]+3],
+                             mem[ic_bus_addr[12:0]+2],
+                             mem[ic_bus_addr[12:0]+1],
+                             mem[ic_bus_addr[12:0]]};
+        end
+    end
+
+    mp64_icache u_icache (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .fetch_addr (ic_fetch_addr),
+        .fetch_valid(ic_fetch_req),
+        .fetch_data (ic_fetch_data),
+        .fetch_hit  (ic_fetch_hit),
+        .fetch_stall(ic_fetch_stall),
+        .inv_all    (ic_inv_all),
+        .inv_line   (ic_inv_line),
+        .inv_addr   (ic_inv_addr),
+        .bus_valid  (ic_bus_valid),
+        .bus_addr   (ic_bus_addr),
+        .bus_rdata  (ic_bus_rdata),
+        .bus_ready  (ic_bus_ready)
+    );
+
     mp64_cpu uut (
         .clk       (clk),
         .rst_n     (rst_n),
         .core_id   (2'd0),
+
+        // I-cache interface
+        .icache_addr    (ic_fetch_addr),
+        .icache_req     (ic_fetch_req),
+        .icache_data    (ic_fetch_data),
+        .icache_hit     (ic_fetch_hit),
+        .icache_stall   (ic_fetch_stall),
+        .icache_inv_all (ic_inv_all),
+        .icache_inv_line(ic_inv_line),
+        .icache_inv_addr(ic_inv_addr),
+
         .bus_valid (bus_valid),
         .bus_addr  (bus_addr),
         .bus_wdata (bus_wdata),

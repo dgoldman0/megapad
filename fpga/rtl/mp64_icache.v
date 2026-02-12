@@ -112,6 +112,7 @@ module mp64_icache (
     reg [INDEX_BITS-1:0]   refill_index;
     reg [TAG_BITS-1:0]     refill_tag;
     reg [63:0]             refill_base;    // line-aligned base address
+    reg                    refill_pending; // 1 = waiting for bus_ready on current beat
 
     // ========================================================================
     // Output control
@@ -134,6 +135,7 @@ module mp64_icache (
             refill_index <= {INDEX_BITS{1'b0}};
             refill_tag   <= {TAG_BITS{1'b0}};
             refill_base  <= 64'd0;
+            refill_pending <= 1'b0;
 
             // Invalidate all lines
             valid <= {NUM_LINES{1'b0}};
@@ -149,10 +151,7 @@ module mp64_icache (
             if (inv_all) begin
                 valid <= {NUM_LINES{1'b0}};
                 state <= IDLE;
-                // Don't reset stats — they persist across invalidations
             end else if (inv_line) begin
-                // Single-line invalidate (for store-to-code detection)
-                // Use mask approach for broad simulator compatibility
                 valid <= valid & ~({{(NUM_LINES-1){1'b0}}, 1'b1} << inv_index);
             end
 
@@ -162,19 +161,18 @@ module mp64_icache (
             case (state)
                 IDLE: begin
                     if (fetch_valid && tag_match) begin
-                        // Hit — data delivered combinationally, count it
                         stat_hits <= stat_hits + 64'd1;
                     end else if (fetch_valid && !tag_match) begin
                         // Miss — begin refill
                         stat_misses <= stat_misses + 64'd1;
                         state        <= REFILL;
                         beat_count   <= 1'b0;
+                        refill_pending <= 1'b1;
                         refill_index <= addr_index;
                         refill_tag   <= addr_tag;
-                        // Line-aligned base address (clear offset bits)
                         refill_base  <= {fetch_addr[63:OFFSET_BITS],
                                          {OFFSET_BITS{1'b0}}};
-                        // Issue first bus read
+                        // Issue first bus read immediately
                         bus_valid <= 1'b1;
                         bus_addr  <= {fetch_addr[63:OFFSET_BITS],
                                       {OFFSET_BITS{1'b0}}};
@@ -182,23 +180,32 @@ module mp64_icache (
                 end
 
                 REFILL: begin
-                    bus_valid <= 1'b1;
-                    bus_addr  <= refill_base + {60'd0, beat_count, 3'b000};
+                    if (refill_pending) begin
+                        // Outstanding request — keep bus_valid asserted, wait for bus_ready
+                        bus_valid <= 1'b1;
+                        bus_addr  <= refill_base + {60'd0, beat_count, 3'b000};
 
-                    if (bus_ready) begin
-                        // Store received beat
-                        if (beat_count == 1'b0) begin
-                            data_lo[refill_index] <= bus_rdata;
-                            beat_count <= 1'b1;
-                            // Continue: request second beat
-                            bus_addr <= refill_base + 64'd8;
-                        end else begin
-                            data_hi[refill_index] <= bus_rdata;
-                            tags[refill_index]    <= refill_tag;
-                            valid <= valid | ({{(NUM_LINES-1){1'b0}}, 1'b1} << refill_index);
-                            state <= IDLE;
-                            bus_valid <= 1'b0;
+                        if (bus_ready) begin
+                            // Response received for current beat
+                            refill_pending <= 1'b0;
+                            bus_valid      <= 1'b0;
+
+                            if (beat_count == 1'b0) begin
+                                data_lo[refill_index] <= bus_rdata;
+                                beat_count <= 1'b1;
+                            end else begin
+                                data_hi[refill_index] <= bus_rdata;
+                                tags[refill_index]    <= refill_tag;
+                                valid <= valid | ({{(NUM_LINES-1){1'b0}}, 1'b1} << refill_index);
+                                state <= IDLE;
+                            end
                         end
+                    end else begin
+                        // Issue request for next beat (bus_ready from previous beat
+                        // may still be high — refill_pending=0 prevents consuming it)
+                        bus_valid <= 1'b1;
+                        bus_addr  <= refill_base + {60'd0, beat_count, 3'b000};
+                        refill_pending <= 1'b1;
                     end
                 end
 

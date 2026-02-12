@@ -226,11 +226,75 @@ module mp64_soc (
     assign nic_dma_ack    = 1'b1;
 
     // ========================================================================
-    // Generate: NUM_CORES × (CPU + Tile Engine)
+    // Generate: NUM_CORES × (CPU + I-Cache + Tile Engine)
     // ========================================================================
     genvar c;
     generate
         for (c = 0; c < NUM_CORES; c = c + 1) begin : core
+
+            // ----------------------------------------------------------------
+            // Per-core I-Cache wires
+            // ----------------------------------------------------------------
+            wire [63:0] ic_fetch_addr;
+            wire        ic_fetch_req;
+            wire [63:0] ic_fetch_data;
+            wire        ic_fetch_hit;
+            wire        ic_fetch_stall;
+            wire        ic_inv_all;
+            wire        ic_inv_line;
+            wire [63:0] ic_inv_addr;
+
+            // I-cache → bus (refill path)
+            wire        ic_bus_valid;
+            wire [63:0] ic_bus_addr;
+            wire [63:0] ic_bus_rdata;
+            wire        ic_bus_ready;
+
+            // CPU data bus (load/store)
+            wire        cpu_data_valid;
+            wire [63:0] cpu_data_addr;
+            wire [63:0] cpu_data_wdata;
+            wire        cpu_data_wen;
+            wire [1:0]  cpu_data_size;
+
+            // ----------------------------------------------------------------
+            // I-cache instance (4 KiB, 16-byte lines, per-core)
+            // ----------------------------------------------------------------
+            mp64_icache u_icache (
+                .clk            (sys_clk),
+                .rst_n          (sys_rst_n),
+                .fetch_addr     (ic_fetch_addr),
+                .fetch_valid    (ic_fetch_req),
+                .fetch_data     (ic_fetch_data),
+                .fetch_hit      (ic_fetch_hit),
+                .fetch_stall    (ic_fetch_stall),
+                .inv_all        (ic_inv_all),
+                .inv_line       (ic_inv_line),
+                .inv_addr       (ic_inv_addr),
+                .bus_valid      (ic_bus_valid),
+                .bus_addr       (ic_bus_addr),
+                .bus_rdata      (ic_bus_rdata),
+                .bus_ready      (ic_bus_ready)
+            );
+
+            // ----------------------------------------------------------------
+            // Local bus mux: CPU data path vs I-cache refill
+            //
+            // CPU data operations (load/store/MMIO) take priority.
+            // I-cache refills only happen when the CPU data path is idle.
+            // ----------------------------------------------------------------
+            assign cpu_bus_valid[c] = cpu_data_valid | ic_bus_valid;
+            assign cpu_bus_addr [c*64 +: 64] = cpu_data_valid ? cpu_data_addr
+                                                              : ic_bus_addr;
+            assign cpu_bus_wdata[c*64 +: 64] = cpu_data_wdata;
+            assign cpu_bus_wen  [c]          = cpu_data_valid ? cpu_data_wen
+                                                              : 1'b0;
+            assign cpu_bus_size [c*2  +: 2]  = cpu_data_valid ? cpu_data_size
+                                                              : 2'b11;  // DWORD for refill
+
+            // Route bus responses
+            assign ic_bus_rdata = cpu_bus_rdata[c*64 +: 64];
+            assign ic_bus_ready = !cpu_data_valid && cpu_bus_ready[c];
 
             // ----------------------------------------------------------------
             // CPU core
@@ -240,14 +304,24 @@ module mp64_soc (
                 .rst_n      (sys_rst_n),
                 .core_id    (c[CORE_ID_BITS-1:0]),
 
-                // Bus master — packed into flat arrays
-                .bus_valid  (cpu_bus_valid[c]),
-                .bus_addr   (cpu_bus_addr [c*64 +: 64]),
-                .bus_wdata  (cpu_bus_wdata[c*64 +: 64]),
-                .bus_wen    (cpu_bus_wen  [c]),
-                .bus_size   (cpu_bus_size [c*2  +: 2]),
+                // I-cache interface
+                .icache_addr    (ic_fetch_addr),
+                .icache_req     (ic_fetch_req),
+                .icache_data    (ic_fetch_data),
+                .icache_hit     (ic_fetch_hit),
+                .icache_stall   (ic_fetch_stall),
+                .icache_inv_all (ic_inv_all),
+                .icache_inv_line(ic_inv_line),
+                .icache_inv_addr(ic_inv_addr),
+
+                // Data bus master — through local mux
+                .bus_valid  (cpu_data_valid),
+                .bus_addr   (cpu_data_addr),
+                .bus_wdata  (cpu_data_wdata),
+                .bus_wen    (cpu_data_wen),
+                .bus_size   (cpu_data_size),
                 .bus_rdata  (cpu_bus_rdata[c*64 +: 64]),
-                .bus_ready  (cpu_bus_ready[c]),
+                .bus_ready  (cpu_data_valid && cpu_bus_ready[c]),
 
                 // Tile CSR — per-core tile engine (rdata muxed with IPI)
                 .csr_wen    (core_csr_wen   [c]),
@@ -271,7 +345,10 @@ module mp64_soc (
                 .irq_timer  (irq_timer),
                 .irq_uart   (c == 0 ? irq_uart : 1'b0),
                 .irq_nic    (c == 0 ? irq_nic  : 1'b0),
-                .irq_ipi    (ipi_lines[c])
+                .irq_ipi    (ipi_lines[c]),
+
+                // External flags (active-low on 1802; tie high = inactive)
+                .ef_flags   (4'b0000)
             );
 
             // ----------------------------------------------------------------
