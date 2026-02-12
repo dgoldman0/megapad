@@ -183,6 +183,21 @@ parameter [2:0] TRED_SUMSQ  = 3'd5;
 parameter [2:0] TRED_MINIDX = 3'd6;
 parameter [2:0] TRED_MAXIDX = 3'd7;
 
+// TSYS functions
+parameter [2:0] TSYS_TRANS   = 3'd0;   // 8×8 byte transpose
+parameter [2:0] TSYS_SHUFFLE = 3'd1;   // Permute lanes by index tile
+parameter [2:0] TSYS_MOVBANK = 3'd2;   // Tile copy
+parameter [2:0] TSYS_LOADC   = 3'd3;   // Load from cursor
+parameter [2:0] TSYS_ZERO    = 3'd4;   // Zero tile
+parameter [2:0] TSYS_PACK    = 3'd5;   // Pack (narrow elements)
+parameter [2:0] TSYS_UNPACK  = 3'd6;   // Unpack (widen elements)
+parameter [2:0] TSYS_RROT    = 3'd7;   // Row/column rotate or mirror
+
+// TMODE extended bits
+parameter TMODE_BIT_SIGNED   = 4;      // Bit 4: signed mode
+parameter TMODE_BIT_SATURATE = 5;      // Bit 5: saturating arithmetic
+parameter TMODE_BIT_ROUNDING = 6;      // Bit 6: rounding mode for shifts
+
 // Tile modes (TMODE CSR bits 1:0)
 parameter [1:0] TMODE_8   = 2'b00;   // 64 × 8-bit lanes
 parameter [1:0] TMODE_16  = 2'b01;   // 32 × 16-bit lanes

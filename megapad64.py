@@ -1814,6 +1814,141 @@ class Megapad64:
                 src = read_tile(self.tsrc0)
                 write_tile(self.tdst, src)
                 return 2
+            elif funct == 1:  # SHUFFLE — permute lanes by index tile
+                # dst[i] = src0[index[i]] where index tile is TSRC1
+                src = read_tile(self.tsrc0)
+                idx = read_tile(self.tsrc1)
+                out = bytearray(64)
+                for lane in range(num_lanes):
+                    index_val = tile_get_elem(idx, lane, elem_bytes) % num_lanes
+                    out_val = tile_get_elem(src, index_val, elem_bytes)
+                    tile_set_elem(out, lane, elem_bytes, out_val)
+                write_tile(self.tdst, out)
+                return 2  # 3 cycles total
+            elif funct == 5:  # PACK — narrow elements
+                # Takes elements from src0 at current width, narrows to half width
+                # Stores in lower half of output tile. If saturating, clamp.
+                src = read_tile(self.tsrc0)
+                out = bytearray(64)
+                if elem_bytes < 2:
+                    # Can't pack below 8-bit; copy as-is
+                    write_tile(self.tdst, src)
+                    return 1
+                out_eb = elem_bytes // 2
+                out_bits = out_eb * 8
+                out_mask = (1 << out_bits) - 1
+                saturate = (self.tmode >> 5) & 1
+                for lane in range(num_lanes):
+                    val = tile_get_elem(src, lane, elem_bytes)
+                    if saturate:
+                        if signed:
+                            sv = to_signed(val, elem_bytes)
+                            hi = (1 << (out_bits - 1)) - 1
+                            lo = -(1 << (out_bits - 1))
+                            sv = max(lo, min(hi, sv))
+                            val = sv & out_mask
+                        else:
+                            val = min(val, out_mask)
+                    else:
+                        val = val & out_mask
+                    tile_set_elem(out, lane, out_eb, val)
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
+            elif funct == 6:  # UNPACK — widen elements
+                # Takes elements from lower half of src0, widens to double width
+                # Sign-extend if TMODE bit 4 set, else zero-extend
+                src = read_tile(self.tsrc0)
+                out = bytearray(64)
+                out_eb = elem_bytes * 2
+                if out_eb > 8:
+                    # Can't widen beyond 64-bit; copy as-is
+                    write_tile(self.tdst, src)
+                    return 1
+                out_mask = (1 << (out_eb * 8)) - 1
+                in_bits = elem_bytes * 8
+                out_lanes = 64 // out_eb
+                for lane in range(out_lanes):
+                    val = tile_get_elem(src, lane, elem_bytes)
+                    if signed:
+                        # Sign-extend
+                        sv = to_signed(val, elem_bytes)
+                        val = sv & out_mask
+                    # else: zero-extend (already unsigned)
+                    tile_set_elem(out, lane, out_eb, val)
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
+            elif funct == 7:  # RROT — row/column rotate or mirror
+                # Control from funct_byte (which we already consumed as funct)
+                # But RROT uses the full funct_byte for control bits:
+                #   bits[1:0] = direction (0=row-left, 1=row-right, 2=col-up, 3=col-down)
+                #   bits[4:2] = amount (0-7)
+                #   bit[5]    = mirror flag
+                # Since we already extracted funct = funct_byte & 0x07, and funct == 7,
+                # the direction was encoded in the low 2 bits along with funct.
+                # Re-read: Actually funct_byte IS the control byte for RROT.
+                # funct = funct_byte & 7 = 7 identifies this as RROT.
+                # The control information comes from a SECOND fetch byte.
+                ctrl = self.fetch8()
+                direction = ctrl & 0x3
+                amount = (ctrl >> 2) & 0x7
+                mirror = (ctrl >> 5) & 0x1
+                tile = read_tile(self.tsrc0)
+                out = bytearray(64)
+                # Treat tile as 8×8 matrix of bytes (for 8-bit mode)
+                # For wider modes: adjust rows/cols
+                rows = 8 // elem_bytes if elem_bytes <= 8 else 1
+                cols = 8
+                if elem_bytes == 1:
+                    rows, cols = 8, 8
+                elif elem_bytes == 2:
+                    rows, cols = 4, 8  # 4 rows of 8 16-bit = wrong, actually 4 rows × 8 cols of 16-bit would be 64 bytes
+                    # Actually: 32 lanes → treat as 4 rows × 8 cols (each element is 2 bytes)
+                    rows, cols = 4, 8
+                elif elem_bytes == 4:
+                    rows, cols = 4, 4
+                elif elem_bytes == 8:
+                    rows, cols = 2, 4
+
+                if mirror:
+                    # Mirror: bit[0] of direction selects H vs V
+                    if direction & 1:  # vertical mirror
+                        for r in range(rows):
+                            for c in range(cols):
+                                src_lane = (rows - 1 - r) * cols + c
+                                dst_lane = r * cols + c
+                                if src_lane < num_lanes and dst_lane < num_lanes:
+                                    tile_set_elem(out, dst_lane, elem_bytes,
+                                                  tile_get_elem(tile, src_lane, elem_bytes))
+                    else:  # horizontal mirror
+                        for r in range(rows):
+                            for c in range(cols):
+                                src_lane = r * cols + (cols - 1 - c)
+                                dst_lane = r * cols + c
+                                if src_lane < num_lanes and dst_lane < num_lanes:
+                                    tile_set_elem(out, dst_lane, elem_bytes,
+                                                  tile_get_elem(tile, src_lane, elem_bytes))
+                else:
+                    # Rotate
+                    for r in range(rows):
+                        for c in range(cols):
+                            if direction == 0:    # row-rotate-left
+                                src_c = (c + amount) % cols
+                                src_lane = r * cols + src_c
+                            elif direction == 1:  # row-rotate-right
+                                src_c = (c - amount) % cols
+                                src_lane = r * cols + src_c
+                            elif direction == 2:  # col-rotate-up
+                                src_r = (r + amount) % rows
+                                src_lane = src_r * cols + c
+                            else:                 # col-rotate-down
+                                src_r = (r - amount) % rows
+                                src_lane = src_r * cols + c
+                            dst_lane = r * cols + c
+                            if src_lane < num_lanes and dst_lane < num_lanes:
+                                tile_set_elem(out, dst_lane, elem_bytes,
+                                              tile_get_elem(tile, src_lane, elem_bytes))
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
             return 0
 
         return 0
@@ -1888,9 +2023,16 @@ class Megapad64:
         if f == 0xB:  return 1  # SEX
         if f == 0xC:  return 2  # MUL/DIV
         if f == 0xD:  return 2  # CSR
-        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg
+        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg or RROT ctrl
             ss = (n >> 2) & 0x3
-            return 3 if ss == 1 else 2
+            op = n & 0x3
+            if ss == 1:
+                return 3  # broadcast: opcode + funct + reg
+            if op == 3:   # TSYS
+                funct_b = self.mem_read8(u64(addr + 1))
+                if (funct_b & 0x07) == 7:  # RROT: opcode + funct + ctrl
+                    return 3
+            return 2
         return 1  # fallback
 
     # -- Run loop --

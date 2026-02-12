@@ -443,6 +443,9 @@ def _instruction_size(lineno: int, text: str) -> int:
         # Extended tile ALU ops use EXT.8 prefix: +1 byte
         ext_talu = {"vshr", "vshl", "vsel", "vclz"}
         extra = 1 if sub_name in ext_talu else 0
+        # RROT has an extra control byte
+        if sub_name == "rrot":
+            return 3  # opcode + funct + ctrl
         # Tile ops: 2 or 3 bytes depending on broadcast, + extra for EXT prefix
         ops = _split_ops(rest)
         for op in ops:
@@ -710,7 +713,8 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         tmul_ops = {"mul": 0, "dot": 1, "wmul": 2, "mac": 3, "fma": 4, "dotacc": 5}
         tred_ops = {"sum": 0, "rmin": 1, "rmax": 2, "popcnt": 3, "l1": 4,
                     "sumsq": 5, "minidx": 6, "maxidx": 7}
-        tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2}
+        tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2,
+                    "shuffle": 1, "pack": 5, "unpack": 6}
         # Extended tile ALU ops via EXT.8 prefix (0xF8)
         ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3}
 
@@ -759,6 +763,15 @@ def _emit_instruction(lineno: int, text: str, pc: int,
             n_nibble = 0x3  # TSYS
             out.append(0xE0 | n_nibble)
             out.append(funct & 0x07)
+            return out
+        elif sub_name == "rrot":
+            # RROT: TSYS funct 7 + control byte
+            # Syntax: t.rrot <ctrl_imm8>
+            ctrl = _parse_imm(ops[0]) if ops else 0
+            n_nibble = 0x3  # TSYS
+            out.append(0xE0 | n_nibble)
+            out.append(0x07)  # funct=7
+            out.append(ctrl & 0xFF)
             return out
         else:
             raise AsmError(lineno, f"Unknown tile op: {sub_name!r}")

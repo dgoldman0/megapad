@@ -713,6 +713,249 @@ def test_vshr_vshl():
     check("VSHR broadcast u8: 64 >> 3 = 8", result == 8, f"got {result}")
 
 
+def test_tile_views():
+    """TSYS tile views: SHUFFLE, PACK, UNPACK, RROT"""
+    print("\n== Tile Views ==")
+
+    # --- SHUFFLE: permute lanes by index tile ---
+    cpu = Megapad64()
+    cpu.tsrc0 = 0x1000
+    cpu.tsrc1 = 0x2000  # index tile
+    cpu.tdst  = 0x3000
+    cpu.tmode = 0x00  # 8-bit unsigned
+    # src0: lane i = i (identity)
+    for i in range(64):
+        cpu.mem_write8(0x1000 + i, i)
+    # index: reverse order
+    for i in range(64):
+        cpu.mem_write8(0x2000 + i, 63 - i)
+    code = assemble("t.shuffle\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    check("SHUFFLE: reverse permute [0]=63",
+          cpu.mem_read8(0x3000) == 63,
+          f"got {cpu.mem_read8(0x3000)}")
+    check("SHUFFLE: reverse permute [63]=0",
+          cpu.mem_read8(0x3000 + 63) == 0,
+          f"got {cpu.mem_read8(0x3000 + 63)}")
+    check("SHUFFLE: reverse permute [32]=31",
+          cpu.mem_read8(0x3000 + 32) == 31,
+          f"got {cpu.mem_read8(0x3000 + 32)}")
+
+    # SHUFFLE: broadcast (all indices = 5)
+    cpu2 = Megapad64()
+    cpu2.tsrc0 = 0x1000
+    cpu2.tsrc1 = 0x2000
+    cpu2.tdst  = 0x3000
+    cpu2.tmode = 0x00
+    for i in range(64):
+        cpu2.mem_write8(0x1000 + i, i * 2)  # src: 0, 2, 4, ...
+        cpu2.mem_write8(0x2000 + i, 5)       # all indices point to lane 5
+    code2 = assemble("t.shuffle\nhalt")
+    cpu2.load_bytes(0, code2)
+    cpu2.pc = 0
+    try:
+        cpu2.run()
+    except HaltError:
+        pass
+    expected = 5 * 2
+    check("SHUFFLE: broadcast index 5 → all lanes = 10",
+          all(cpu2.mem_read8(0x3000 + i) == expected for i in range(64)),
+          f"lane0={cpu2.mem_read8(0x3000)}")
+
+    # --- PACK: 16-bit → 8-bit (unsigned, no saturation) ---
+    cpu3 = Megapad64()
+    cpu3.tsrc0 = 0x1000
+    cpu3.tdst  = 0x3000
+    cpu3.tmode = 0x01  # 16-bit unsigned (pack to 8-bit)
+    # Write 32 × 16-bit values: [0x0042, 0x0043, 0x0044, ...]
+    for i in range(32):
+        val = 0x42 + i
+        cpu3.mem_write8(0x1000 + i*2, val & 0xFF)
+        cpu3.mem_write8(0x1000 + i*2 + 1, (val >> 8) & 0xFF)
+    code3 = assemble("t.pack\nhalt")
+    cpu3.load_bytes(0, code3)
+    cpu3.pc = 0
+    try:
+        cpu3.run()
+    except HaltError:
+        pass
+    check("PACK u16→u8: lane 0 = 0x42",
+          cpu3.mem_read8(0x3000) == 0x42,
+          f"got 0x{cpu3.mem_read8(0x3000):02X}")
+    check("PACK u16→u8: lane 1 = 0x43",
+          cpu3.mem_read8(0x3001) == 0x43,
+          f"got 0x{cpu3.mem_read8(0x3001):02X}")
+
+    # PACK with saturation: 16-bit signed → 8-bit signed, values > 127 clamped
+    cpu4 = Megapad64()
+    cpu4.tsrc0 = 0x1000
+    cpu4.tdst  = 0x3000
+    cpu4.tmode = 0x31  # 16-bit, signed (bit 4), saturating (bit 5)
+    # Lane 0: 200 (should saturate to 127)
+    cpu4.mem_write8(0x1000, 200 & 0xFF)
+    cpu4.mem_write8(0x1001, 0)
+    # Lane 1: -200 (0xFF38, should saturate to -128 = 0x80)
+    val_neg = (-200) & 0xFFFF
+    cpu4.mem_write8(0x1002, val_neg & 0xFF)
+    cpu4.mem_write8(0x1003, (val_neg >> 8) & 0xFF)
+    # Lane 2: 50 (fits in i8)
+    cpu4.mem_write8(0x1004, 50)
+    cpu4.mem_write8(0x1005, 0)
+    for i in range(3, 32):
+        cpu4.mem_write8(0x1000 + i*2, 0)
+        cpu4.mem_write8(0x1000 + i*2 + 1, 0)
+    code4 = assemble("t.pack\nhalt")
+    cpu4.load_bytes(0, code4)
+    cpu4.pc = 0
+    try:
+        cpu4.run()
+    except HaltError:
+        pass
+    check("PACK sat i16→i8: 200 → 127",
+          cpu4.mem_read8(0x3000) == 0x7F,
+          f"got 0x{cpu4.mem_read8(0x3000):02X}")
+    check("PACK sat i16→i8: -200 → -128 (0x80)",
+          cpu4.mem_read8(0x3001) == 0x80,
+          f"got 0x{cpu4.mem_read8(0x3001):02X}")
+    check("PACK sat i16→i8: 50 → 50",
+          cpu4.mem_read8(0x3002) == 50,
+          f"got {cpu4.mem_read8(0x3002)}")
+
+    # --- UNPACK: 8-bit → 16-bit (unsigned) ---
+    cpu5 = Megapad64()
+    cpu5.tsrc0 = 0x1000
+    cpu5.tdst  = 0x3000
+    cpu5.tmode = 0x00  # 8-bit unsigned (unpack to 16-bit)
+    for i in range(64):
+        cpu5.mem_write8(0x1000 + i, 0x42 + (i % 10))
+    code5 = assemble("t.unpack\nhalt")
+    cpu5.load_bytes(0, code5)
+    cpu5.pc = 0
+    try:
+        cpu5.run()
+    except HaltError:
+        pass
+    # Output: 32 × 16-bit values from first 32 bytes of input
+    lo = cpu5.mem_read8(0x3000)
+    hi = cpu5.mem_read8(0x3001)
+    check("UNPACK u8→u16: lane 0 = 0x0042",
+          lo == 0x42 and hi == 0x00,
+          f"got 0x{hi:02X}{lo:02X}")
+
+    # UNPACK signed: 8-bit signed → 16-bit signed (sign-extend)
+    cpu6 = Megapad64()
+    cpu6.tsrc0 = 0x1000
+    cpu6.tdst  = 0x3000
+    cpu6.tmode = 0x10  # 8-bit signed
+    cpu6.mem_write8(0x1000, 0xFE)  # -2 in i8
+    cpu6.mem_write8(0x1001, 0x05)  # +5 in i8
+    for i in range(2, 64):
+        cpu6.mem_write8(0x1000 + i, 0)
+    code6 = assemble("t.unpack\nhalt")
+    cpu6.load_bytes(0, code6)
+    cpu6.pc = 0
+    try:
+        cpu6.run()
+    except HaltError:
+        pass
+    lo0 = cpu6.mem_read8(0x3000)
+    hi0 = cpu6.mem_read8(0x3001)
+    val0 = lo0 | (hi0 << 8)
+    check("UNPACK signed i8→i16: -2 → 0xFFFE",
+          val0 == 0xFFFE, f"got 0x{val0:04X}")
+    lo1 = cpu6.mem_read8(0x3002)
+    hi1 = cpu6.mem_read8(0x3003)
+    val1 = lo1 | (hi1 << 8)
+    check("UNPACK signed i8→i16: +5 → 0x0005",
+          val1 == 0x0005, f"got 0x{val1:04X}")
+
+    # --- RROT: row-rotate-left by 2 (8-bit mode = 8×8 matrix) ---
+    cpu7 = Megapad64()
+    cpu7.tsrc0 = 0x1000
+    cpu7.tdst  = 0x3000
+    cpu7.tmode = 0x00  # 8-bit
+    # Fill src: lane i = i
+    for i in range(64):
+        cpu7.mem_write8(0x1000 + i, i)
+    # ctrl = direction 0 (row-left), amount 2, mirror=0
+    # ctrl byte = (amount << 2) | direction = (2 << 2) | 0 = 8
+    ctrl = (2 << 2) | 0  # 8
+    code7 = assemble(f"t.rrot {ctrl}\nhalt")
+    cpu7.load_bytes(0, code7)
+    cpu7.pc = 0
+    try:
+        cpu7.run()
+    except HaltError:
+        pass
+    # Row 0 of 8×8: [0,1,2,3,4,5,6,7] rotate left by 2 → [2,3,4,5,6,7,0,1]
+    check("RROT row-left-2: [0]=2",
+          cpu7.mem_read8(0x3000) == 2,
+          f"got {cpu7.mem_read8(0x3000)}")
+    check("RROT row-left-2: [6]=0",
+          cpu7.mem_read8(0x3006) == 0,
+          f"got {cpu7.mem_read8(0x3006)}")
+    check("RROT row-left-2: [7]=1",
+          cpu7.mem_read8(0x3007) == 1,
+          f"got {cpu7.mem_read8(0x3007)}")
+
+    # RROT: horizontal mirror (mirror=1, direction bit 0 = 0 → h-mirror)
+    cpu8 = Megapad64()
+    cpu8.tsrc0 = 0x1000
+    cpu8.tdst  = 0x3000
+    cpu8.tmode = 0x00
+    for i in range(64):
+        cpu8.mem_write8(0x1000 + i, i)
+    # ctrl: mirror=1 (bit 5), direction=0 (h-mirror)
+    ctrl = (1 << 5) | 0  # 0x20
+    code8 = assemble(f"t.rrot {ctrl}\nhalt")
+    cpu8.load_bytes(0, code8)
+    cpu8.pc = 0
+    try:
+        cpu8.run()
+    except HaltError:
+        pass
+    # Row 0: [0,1,2,3,4,5,6,7] h-mirror → [7,6,5,4,3,2,1,0]
+    check("RROT h-mirror: [0]=7",
+          cpu8.mem_read8(0x3000) == 7,
+          f"got {cpu8.mem_read8(0x3000)}")
+    check("RROT h-mirror: [7]=0",
+          cpu8.mem_read8(0x3007) == 0,
+          f"got {cpu8.mem_read8(0x3007)}")
+    # Row 1: [8,9,10,11,12,13,14,15] h-mirror → [15,14,13,12,11,10,9,8]
+    check("RROT h-mirror: [8]=15",
+          cpu8.mem_read8(0x3008) == 15,
+          f"got {cpu8.mem_read8(0x3008)}")
+
+    # RROT: column-rotate-down by 1
+    cpu9 = Megapad64()
+    cpu9.tsrc0 = 0x1000
+    cpu9.tdst  = 0x3000
+    cpu9.tmode = 0x00
+    for i in range(64):
+        cpu9.mem_write8(0x1000 + i, i)
+    # ctrl: direction=3 (col-down), amount=1
+    ctrl = (1 << 2) | 3  # 7
+    code9 = assemble(f"t.rrot {ctrl}\nhalt")
+    cpu9.load_bytes(0, code9)
+    cpu9.pc = 0
+    try:
+        cpu9.run()
+    except HaltError:
+        pass
+    # Col 0 was [0,8,16,24,32,40,48,56], rotate down by 1 → [56,0,8,16,24,32,40,48]
+    check("RROT col-down-1: [0]=56",
+          cpu9.mem_read8(0x3000) == 56,
+          f"got {cpu9.mem_read8(0x3000)}")
+    check("RROT col-down-1: [8]=0",
+          cpu9.mem_read8(0x3008) == 0,
+          f"got {cpu9.mem_read8(0x3008)}")
+
+
 def test_ext_prefix():
     """Family 0xF: EXT prefix"""
     print("\n== EXT (0xF) ==")
@@ -847,6 +1090,7 @@ def main():
         test_csr,
         test_mex,
         test_vshr_vshl,
+        test_tile_views,
         test_ext_prefix,
         test_fibonacci,
         test_subroutine,
