@@ -108,6 +108,15 @@ module mp64_soc (
     // --- Per-core IPI ---
     wire [NUM_CORES-1:0]        ipi_lines;
 
+    // --- Per-core CSR-side IPI interface (CPU → mailbox, bypasses bus) ---
+    wire [NUM_CORES-1:0]        csr_ipi_wen;
+    wire [NUM_CORES*8-1:0]      csr_ipi_addr;
+    wire [NUM_CORES*64-1:0]     csr_ipi_wdata;
+    wire [NUM_CORES*64-1:0]     csr_ipi_rdata;
+
+    // Per-core tile CSR rdata (before IPI mux)
+    wire [NUM_CORES*64-1:0]     tile_csr_rdata;
+
     // --- Shared bus wires ---
     wire        mem_req;
     wire [63:0] mem_addr;
@@ -238,7 +247,7 @@ module mp64_soc (
                 .bus_rdata  (cpu_bus_rdata[c*64 +: 64]),
                 .bus_ready  (cpu_bus_ready[c]),
 
-                // Tile CSR — per-core tile engine
+                // Tile CSR — per-core tile engine (rdata muxed with IPI)
                 .csr_wen    (core_csr_wen   [c]),
                 .csr_addr   (core_csr_addr  [c*8  +: 8]),
                 .csr_wdata  (core_csr_wdata [c*64 +: 64]),
@@ -262,6 +271,23 @@ module mp64_soc (
             );
 
             // ----------------------------------------------------------------
+            // CSR-side IPI: intercept CSR writes to 0x22/0x23 and forward
+            // to the mailbox's per-core CSR port.
+            // ----------------------------------------------------------------
+            assign csr_ipi_wen  [c]          = core_csr_wen[c] &&
+                                               (core_csr_addr[c*8 +: 8] == CSR_MBOX ||
+                                                core_csr_addr[c*8 +: 8] == CSR_IPIACK);
+            assign csr_ipi_addr [c*8  +: 8]  = core_csr_addr [c*8  +: 8];
+            assign csr_ipi_wdata[c*64 +: 64] = core_csr_wdata[c*64 +: 64];
+
+            // CSR read mux: IPI CSRs come from mailbox, everything else from tile
+            assign core_csr_rdata[c*64 +: 64] =
+                (core_csr_addr[c*8 +: 8] == CSR_MBOX ||
+                 core_csr_addr[c*8 +: 8] == CSR_IPIACK)
+                    ? csr_ipi_rdata[c*64 +: 64]
+                    : tile_csr_rdata[c*64 +: 64];
+
+            // ----------------------------------------------------------------
             // Tile engine (one per core — private state, shared memory)
             // ----------------------------------------------------------------
             mp64_tile u_tile (
@@ -272,7 +298,7 @@ module mp64_soc (
                 .csr_wen        (core_csr_wen   [c]),
                 .csr_addr       (core_csr_addr  [c*8  +: 8]),
                 .csr_wdata      (core_csr_wdata [c*64 +: 64]),
-                .csr_rdata      (core_csr_rdata [c*64 +: 64]),
+                .csr_rdata      (tile_csr_rdata [c*64 +: 64]),
 
                 // MEX dispatch (from this core's CPU)
                 .mex_valid      (core_mex_valid  [c]),
@@ -499,7 +525,12 @@ module mp64_soc (
         .rdata          (mbox_rdata8),
         .ack            (mbox_ack),
         .requester_id   (bus_grant),
-        .ipi_out        (ipi_lines)
+        .ipi_out        (ipi_lines),
+        // CSR-side IPI (per-core, bypasses bus)
+        .csr_ipi_wen    (csr_ipi_wen),
+        .csr_ipi_addr   (csr_ipi_addr),
+        .csr_ipi_wdata  (csr_ipi_wdata),
+        .csr_ipi_rdata  (csr_ipi_rdata)
     );
 
     // ========================================================================

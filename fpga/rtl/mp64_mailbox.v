@@ -38,7 +38,15 @@ module mp64_mailbox (
     input  wire [CORE_ID_BITS-1:0] requester_id,
 
     // === IPI outputs — active-high, one per core ===
-    output wire [NUM_CORES-1:0]    ipi_out
+    output wire [NUM_CORES-1:0]    ipi_out,
+
+    // === Per-core CSR-side IPI interface ===
+    // Allows each CPU to access mailbox via CSR instructions (CSR_MBOX,
+    // CSR_IPIACK) without going through the bus arbiter.
+    input  wire [NUM_CORES-1:0]       csr_ipi_wen,     // per-core CSR write enable
+    input  wire [NUM_CORES*8-1:0]     csr_ipi_addr,    // CSR address (0x22 or 0x23)
+    input  wire [NUM_CORES*64-1:0]    csr_ipi_wdata,   // CSR write data
+    output wire [NUM_CORES*64-1:0]    csr_ipi_rdata    // per-core: pending mask
 );
 
     assign ack = 1'b1;  // single-cycle MMIO
@@ -55,6 +63,18 @@ module mp64_mailbox (
     generate
         for (ci = 0; ci < NUM_CORES; ci = ci + 1) begin : ipi_gen
             assign ipi_out[ci] = |mbox_pending[ci];
+        end
+    endgenerate
+
+    // ========================================================================
+    // CSR-side IPI interface (per-core, no arbiter needed)
+    // ========================================================================
+    // CSR_MBOX (0x22) read  → returns pending mask for that core
+    // CSR_MBOX (0x22) write → send IPI (wdata[1:0] = target core)
+    // CSR_IPIACK (0x23) write → ack IPI (wdata[1:0] = source core)
+    generate
+        for (ci = 0; ci < NUM_CORES; ci = ci + 1) begin : csr_ipi_rdata_gen
+            assign csr_ipi_rdata[ci*64 +: 64] = {60'd0, mbox_pending[ci]};
         end
     endgenerate
 
@@ -171,6 +191,23 @@ module mp64_mailbox (
                     slock_owner[slock_idx] == requester_id) begin
                     slock_locked[slock_idx] <= 1'b0;
                     slock_held[slock_idx][requester_id] <= 1'b0;
+                end
+            end
+
+            // --- CSR-side IPI send/ack (per-core, bypasses bus arbiter) ---
+            for (wi = 0; wi < NUM_CORES; wi = wi + 1) begin
+                if (csr_ipi_wen[wi]) begin
+                    if (csr_ipi_addr[wi*8 +: 8] == CSR_MBOX) begin
+                        // CSR_MBOX write: send IPI to target core
+                        if (csr_ipi_wdata[wi*64 +: 64] < NUM_CORES) begin
+                            mbox_pending[csr_ipi_wdata[wi*64 +: 2]][wi] <= 1'b1;
+                        end
+                    end else if (csr_ipi_addr[wi*8 +: 8] == CSR_IPIACK) begin
+                        // CSR_IPIACK write: ack IPI from source core
+                        if (csr_ipi_wdata[wi*64 +: 64] < NUM_CORES) begin
+                            mbox_pending[wi][csr_ipi_wdata[wi*64 +: 2]] <= 1'b0;
+                        end
+                    end
                 end
             end
         end
