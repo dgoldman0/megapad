@@ -244,13 +244,48 @@ module tb_mp64_soc;
         $finish;
     end
 
+    // ========================================================================
+    // UART TX capture — print characters as they enter the TX FIFO
+    // ========================================================================
+    always @(posedge sys_clk) begin
+        if (sys_rst_n &&
+            u_soc.u_uart.req &&
+            u_soc.u_uart.wen &&
+            u_soc.u_uart.addr == 4'd0 && // UART_TX = 0
+            !u_soc.u_uart.tx_full) begin
+            $write("%c", u_soc.u_uart.wdata);
+        end
+    end
+
+    // Debug: any MMIO write at all (disabled for clean output)
+    // always @(posedge sys_clk) begin
+    //     if (sys_rst_n && u_soc.u_bus.mmio_req) begin
+    //         $display("[MMIO] ...");
+    //     end
+    // end
+
     // Watchdog: detect core 0 HALT (secondary cores halt normally)
     always @(posedge sys_clk) begin
         if (sys_rst_n &&
             u_soc.core[0].u_cpu.cpu_state == 4'd7) begin  // CPU_HALT
             #1000;
-            $display("[TB] Core 0 halted at t=%0t ns, PC=0x%016h",
+            $display("\n[TB] Core 0 halted at t=%0t ns, PC=0x%016h",
                      $time, u_soc.core[0].u_cpu.R[u_soc.core[0].u_cpu.psel]);
+            // Show key registers
+            $display("[TB] R0=0x%016h R1=0x%016h R2=0x%016h R3=0x%016h",
+                     u_soc.core[0].u_cpu.R[0],
+                     u_soc.core[0].u_cpu.R[1],
+                     u_soc.core[0].u_cpu.R[2],
+                     u_soc.core[0].u_cpu.R[3]);
+            $display("[TB] R4=0x%016h R8=0x%016h R10=0x%016h R15=0x%016h",
+                     u_soc.core[0].u_cpu.R[4],
+                     u_soc.core[0].u_cpu.R[8],
+                     u_soc.core[0].u_cpu.R[10],
+                     u_soc.core[0].u_cpu.R[15]);
+            $display("[TB] psel=%0d xsel=%0d flags=0x%02h",
+                     u_soc.core[0].u_cpu.psel,
+                     u_soc.core[0].u_cpu.xsel,
+                     u_soc.core[0].u_cpu.flags);
             $finish;
         end
     end
@@ -261,11 +296,18 @@ module tb_mp64_soc;
     always @(posedge sys_clk) begin
         cycle_cnt <= cycle_cnt + 1;
         if (cycle_cnt % 100000 == 0 && cycle_cnt > 0) begin
-            $display("[TB] %0d cycles, PC=0x%016h, flags=0x%02h",
+            $display("[TB] %0d cycles, PC=0x%016h, flags=0x%02h, state=%0d, R1=0x%016h, R10=0x%016h",
                      cycle_cnt,
                      u_soc.core[0].u_cpu.R[u_soc.core[0].u_cpu.psel],
-                     u_soc.core[0].u_cpu.flags);
+                     u_soc.core[0].u_cpu.flags,
+                     u_soc.core[0].u_cpu.cpu_state,
+                     u_soc.core[0].u_cpu.R[1],
+                     u_soc.core[0].u_cpu.R[10]);
         end
+        // Early detailed dump: first 200 cycles after reset (disabled)
+        // if (cycle_cnt >= 20 && cycle_cnt <= 500 && cycle_cnt % 10 == 0) begin
+        //     ...
+        // end
     end
 
 endmodule

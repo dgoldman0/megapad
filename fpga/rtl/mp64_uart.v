@@ -40,8 +40,12 @@ module mp64_uart #(
     // ========================================================================
     // Baud rate generator
     // ========================================================================
-    localparam DIVISOR = CLK_FREQ / BAUD_RATE;
-    localparam DIV_BITS = $clog2(DIVISOR);
+    `ifdef SIMULATION
+    localparam DIVISOR  = 1;       // instant TX/RX in simulation
+    `else
+    localparam DIVISOR  = CLK_FREQ / BAUD_RATE;
+    `endif
+    localparam DIV_BITS = $clog2(DIVISOR > 1 ? DIVISOR : 2);  // minimum 1 bit
 
     reg [DIV_BITS-1:0] tx_div, rx_div;
     wire tx_tick = (tx_div == 0);
@@ -201,7 +205,7 @@ module mp64_uart #(
     // ========================================================================
     // Status register
     // ========================================================================
-    wire [7:0] status = {2'b0, tx_empty, 4'b0, rx_avail, !tx_full};
+    wire [7:0] status = {2'b0, tx_empty, 3'b0, rx_avail, !tx_full};
     //                    bit7:6=0, bit5=tx_empty, bit4:2=0, bit1=rx_avail, bit0=tx_ready
 
     // ========================================================================

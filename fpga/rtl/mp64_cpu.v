@@ -1436,6 +1436,7 @@ module mp64_cpu (
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         // Sign-extending loads
                         case (mem_sub)
                             4'hC: // LD.SB
@@ -1493,7 +1494,7 @@ module mp64_cpu (
                             post_action <= POST_NONE;
                             cpu_state <= CPU_MEM_READ2;
                         end else if (mem_sub != 4'hF && mem_sub != 4'h5
-                                     && mem_sub != 4'h6) begin
+                                     && mem_sub != 4'hB) begin
                             cpu_state <= CPU_FETCH;
                         end
                     end
@@ -1507,6 +1508,7 @@ module mp64_cpu (
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         flags <= bus_rdata[7:0];
                         cpu_state <= CPU_FETCH;
                     end
@@ -1521,6 +1523,7 @@ module mp64_cpu (
                     bus_wdata <= mem_data;
                     bus_wen   <= 1'b1;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         // Store-to-code: conservatively invalidate I-cache
                         // line containing the written address
                         if (icache_enabled) begin
