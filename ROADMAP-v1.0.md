@@ -81,6 +81,28 @@ and release hardening**.
   TestTimer: 1, TestDeviceBus: 2
 - test_megapad64.py: 18 CPU tests
 
+### FPGA RTL — ✅ DONE (base ISA + multicore)
+
+12 Verilog modules in `fpga/rtl/`, 7 testbenches, 96 hardware tests passing.
+
+- ✅ mp64_cpu.v — Full ISA implementation (all 16 instruction families, 1506 lines)
+- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring)
+- ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
+- ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
+- ✅ mp64_tile.v — Base tile engine (TALU, TMUL, TRED, TSYS)
+- ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
+
+### Extended TPU Spec — ✅ DESIGNED (in `docs/extended-tpu-spec.md`)
+
+Part of the base design — these features make the Megapad-64 a real-world
+useful chip, not a toy. 5 feature families:
+
+- Enhanced tile engine: TMUL/MAC, tile views, richer reductions, FP16/bf16
+- Crypto accelerators: AES-256-GCM, SHA-3/SHAKE, CRC32/CRC64
+- Data movement: HW tile DMA, prefetch/write-combine, per-core QoS
+- Reliability: memory BIST, tile self-test, performance counters
+- Optional scalar FP32 unit
+
 ---
 
 ## Remaining for v1.0

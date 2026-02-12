@@ -9,20 +9,22 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 ## System Block Diagram
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Megapad-64 CPU                        │
-│  16 × 64-bit GPRs    ┌──────────────────┐              │
-│  8-bit Flags          │   Tile Engine    │              │
-│  256-bit Accumulator  │  (MEX extension) │              │
-│  Cycle counter        └──────────────────┘              │
-└───────────────┬─────────────────────────────────────────┘
-                │  64-bit data bus
+┌───────────────────────────────────────────────────────────┐
+│                    Megapad-64 CPU (×4 cores)               │
+│  16 × 64-bit GPRs    ┌──────────────────┐  ┌───────────┐ │
+│  8-bit Flags          │   Tile Engine    │  │ Perf Ctrs │ │
+│  256-bit Accumulator  │  (MEX extension) │  │ (4 × 64b) │ │
+│  Perf counters        │  FP16 / bf16     │  └───────────┘ │
+│  Optional FP32 unit   │  DMA queue       │                │
+│                       └──────────────────┘                │
+└───────────────┬───────────────────────────────────────────┘
+                │  64-bit data bus (weighted round-robin QoS)
     ┌───────────┴───────────────────────────┐
     │            Memory Map                  │
     │                                        │
     │  0x0000_0000 ┌──────────────────────┐ │
     │              │       RAM             │ │
-    │              │   (default 1 MiB)     │ │
+    │              │   (1 MiB BRAM + BIST) │ │
     │              │                       │ │
     │              │  BIOS code + dict     │ │
     │              │  KDOS Forth dict      │ │
@@ -41,8 +43,14 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0100     │  Timer               │ │
     │   0x0200     │  Storage Controller  │ │
     │   0x0300     │  System Info (R/O)   │ │
-    │   0x0400     │  NIC                 │ │    │   0x0500     │  Mailbox (IPI)       │ │
-    │   0x0600     │  Spinlock            │ │    │              └──────────────────────┘ │
+    │   0x0400     │  NIC                 │ │
+    │   0x0500     │  Mailbox (IPI)       │ │
+    │   0x0600     │  Spinlock            │ │
+    │   0x0700     │  AES-256-GCM         │ │
+    │   0x0780     │  SHA-3 / SHAKE       │ │
+    │   0x07C0     │  CRC32 / CRC64       │ │
+    │   0x07E0     │  QoS Config          │ │
+    │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
 
@@ -83,6 +91,10 @@ device occupies a small range:
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
+| **AES-256-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator |
+| **SHA-3/SHAKE** | `+0x0780` | 64 bytes | Keccak hash / XOF accelerator |
+| **CRC32/CRC64** | `+0x07C0` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
+| **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).
@@ -200,6 +212,50 @@ based on source ID.
 
 ---
 
+## Hardware Accelerators
+
+The Megapad-64 includes several hardware accelerator blocks beyond the
+base tile engine. These are part of the base design, not optional
+extensions. See `docs/extended-tpu-spec.md` for full register maps,
+encoding details, and implementation phases.
+
+### Enhanced Tile Engine
+
+The tile engine extends beyond the base TALU/TMUL/TRED/TSYS with:
+
+- **TMUL/MAC family** — widening multiply (WMUL), fused multiply-add
+  (FMA), lane-wise accumulate (MAC), 4-way dot product (DOTACC)
+- **Saturating arithmetic** — TMODE bit 5 enables clamping on overflow
+- **Rounding shifts** — TMODE bit 6 enables round-to-nearest on SHR
+- **Tile views** — SHUFFLE (arbitrary permutation), PACK/UNPACK (width
+  conversion), row/col rotate/mirror (RROT)
+- **Enhanced reductions** — sum-of-squares (SUMSQ), min/max with index
+  (MINIDX/MAXIDX)
+- **Strided/2D addressing** — TSTRIDE_R/C, TTILE_H/W CSRs for non-
+  contiguous tile loads (e.g., 8×8 patches from a 640-wide framebuffer)
+- **FP16 / bfloat16** — 32-lane half-precision tile operations with
+  FP32 accumulation for DOT/SUM
+
+### Crypto Accelerators (MMIO)
+
+| Block | Performance | Use Case |
+|-------|-------------|----------|
+| AES-256-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
+| SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing, key derivation, XOF |
+| CRC32/CRC64 | 8 bytes / cycle | Data integrity for disk sectors and network frames |
+
+### Per-Core Infrastructure
+
+| Feature | CSR Range | Description |
+|---------|-----------|-------------|
+| Tile DMA | 0x50–0x55 | Descriptor-ring DMA engine for async tile copies |
+| QoS | 0x58–0x59 | Per-core bus priority weight and bandwidth limit |
+| BIST | 0x60–0x63 | Memory self-test (March C−, checkerboard, addr-as-data) |
+| Tile self-test | 0x64–0x65 | Datapath functional check (~200 cycles) |
+| Perf counters | 0x68–0x6C | Cycles, stalls, tile ops, ext-mem beats |
+
+---
+
 ## Software Architecture
 
 ### Layer Diagram
@@ -228,7 +284,8 @@ based on source ID.
 │  Disk I/O, FSLOAD, UART, timer, tile engine     │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
-│  CPU, RAM, UART, Timer, Storage, NIC, Tile Eng  │
+│  4× CPU, RAM+BIST, UART, Timer, Storage, NIC,  │
+│  Tile Engine+FP16, AES, SHA-3, CRC, DMA, QoS   │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -304,7 +361,9 @@ the MEX instruction family.  Key concepts:
 
 In KDOS, tile operations power the buffer subsystem (B.SUM, B.MIN, B.MAX,
 B.ADD, B.SUB) and several kernels (kadd, ksum, kstats, knorm, kcorrelate).
-See `docs/tile-engine.md` for a complete programming guide.
+See `docs/tile-engine.md` for a complete programming guide and
+`docs/extended-tpu-spec.md` for the full enhanced tile engine, crypto,
+DMA, and reliability specifications.
 
 ---
 
