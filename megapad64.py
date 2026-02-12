@@ -1485,6 +1485,42 @@ class Megapad64:
 
         dst = bytearray(64)
 
+        # Extended Tile ALU (EXT modifier 8 = 0xF8 prefix)
+        if self._ext_modifier == 8 and op == 0x0:
+            rounding = (self.tmode >> 6) & 1
+            for lane in range(num_lanes):
+                ea = tile_get_elem(src_a, lane, elem_bytes)
+                eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                bits = elem_bytes * 8
+                mask = (1 << bits) - 1
+                shift_amt = eb_val & (bits - 1)  # clamp shift to element width
+                if funct == 0:    # VSHR — per-lane right shift
+                    if signed:
+                        sv = to_signed(ea, elem_bytes)
+                        if rounding and shift_amt > 0:
+                            # Round-to-nearest: add 0.5 ULP before truncation
+                            sv += (1 << (shift_amt - 1))
+                        r = (sv >> shift_amt) & mask
+                    else:
+                        if rounding and shift_amt > 0:
+                            ea += (1 << (shift_amt - 1))
+                        r = (ea >> shift_amt) & mask
+                elif funct == 1:  # VSHL — per-lane left shift
+                    r = (ea << shift_amt) & mask
+                elif funct == 2:  # VSEL — per-lane select (dst = b ? src0 : src1)
+                    # Not yet implemented
+                    r = ea
+                elif funct == 3:  # VCLZ — count leading zeros
+                    if ea == 0:
+                        r = bits
+                    else:
+                        r = bits - ea.bit_length()
+                else:
+                    r = 0
+                tile_set_elem(dst, lane, elem_bytes, r)
+            write_tile(self.tdst, dst)
+            return 1  # 2 cycles for extended tile ALU
+
         if op == 0x0:  # TALU
             saturate = (self.tmode >> 5) & 1
             for lane in range(num_lanes):

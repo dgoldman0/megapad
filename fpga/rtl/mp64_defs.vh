@@ -162,6 +162,17 @@ parameter [2:0] TALU_MIN  = 3'd5;
 parameter [2:0] TALU_MAX  = 3'd6;
 parameter [2:0] TALU_ABS  = 3'd7;
 
+// Extended TALU functions (via EXT modifier 8)
+parameter [2:0] ETALU_VSHR = 3'd0;
+parameter [2:0] ETALU_VSHL = 3'd1;
+parameter [2:0] ETALU_VSEL = 3'd2;
+parameter [2:0] ETALU_VCLZ = 3'd3;
+
+// EXT prefix modifier values
+parameter [3:0] EXT_IMM64  = 4'd0;   // 64-bit immediate
+parameter [3:0] EXT_SKIP   = 4'd6;   // Conditional skip
+parameter [3:0] EXT_ETALU  = 4'd8;   // Extended tile ALU
+
 // TRED functions
 parameter [2:0] TRED_SUM  = 3'd0;
 parameter [2:0] TRED_MIN  = 3'd1;

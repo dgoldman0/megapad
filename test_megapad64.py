@@ -554,6 +554,165 @@ def test_mex():
     check("T.SUM: sum of 64 ones = 64", cpu2.acc[0] == 64)
 
 
+def test_vshr_vshl():
+    """Extended tile ALU: VSHR / VSHL / VCLZ"""
+    print("\n== VSHR / VSHL / VCLZ ==")
+
+    # --- VSHR: 8-bit unsigned, shift each lane right by shift tile ---
+    cpu = Megapad64()
+    cpu.tsrc0 = 0x1000
+    cpu.tsrc1 = 0x2000
+    cpu.tdst  = 0x3000
+    cpu.tmode = 0x00  # 8-bit unsigned
+    for i in range(64):
+        cpu.mem_write8(0x1000 + i, 0x80)  # src0: all 128
+        cpu.mem_write8(0x2000 + i, 2)     # src1: shift by 2
+    code = assemble("t.vshr\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+    result = cpu.mem_read8(0x3000)
+    check("VSHR u8: 128 >> 2 = 32", result == 32,
+          f"got {result}")
+    check("VSHR u8: all lanes", all(cpu.mem_read8(0x3000 + i) == 32 for i in range(64)))
+
+    # --- VSHL: 8-bit unsigned ---
+    cpu2 = Megapad64()
+    cpu2.tsrc0 = 0x1000
+    cpu2.tsrc1 = 0x2000
+    cpu2.tdst  = 0x3000
+    cpu2.tmode = 0x00
+    for i in range(64):
+        cpu2.mem_write8(0x1000 + i, 3)   # src0: all 3
+        cpu2.mem_write8(0x2000 + i, 4)   # src1: shift by 4
+    code2 = assemble("t.vshl\nhalt")
+    cpu2.load_bytes(0, code2)
+    cpu2.pc = 0
+    try:
+        cpu2.run()
+    except HaltError:
+        pass
+    result = cpu2.mem_read8(0x3000)
+    check("VSHL u8: 3 << 4 = 48", result == 48, f"got {result}")
+
+    # --- VSHR with rounding (TMODE bit 6) ---
+    cpu3 = Megapad64()
+    cpu3.tsrc0 = 0x1000
+    cpu3.tsrc1 = 0x2000
+    cpu3.tdst  = 0x3000
+    cpu3.tmode = 0x40  # 8-bit unsigned, rounding (bit 6)
+    for i in range(64):
+        cpu3.mem_write8(0x1000 + i, 7)   # src0: all 7
+        cpu3.mem_write8(0x2000 + i, 1)   # src1: shift by 1
+    # Without rounding: 7 >> 1 = 3 (truncated)
+    # With rounding:    (7 + 1) >> 1 = 4 (rounded)
+    code3 = assemble("t.vshr\nhalt")
+    cpu3.load_bytes(0, code3)
+    cpu3.pc = 0
+    try:
+        cpu3.run()
+    except HaltError:
+        pass
+    result = cpu3.mem_read8(0x3000)
+    check("VSHR rounding u8: (7+0.5)>>1 = 4", result == 4, f"got {result}")
+
+    # --- VSHR signed ---
+    cpu4 = Megapad64()
+    cpu4.tsrc0 = 0x1000
+    cpu4.tsrc1 = 0x2000
+    cpu4.tdst  = 0x3000
+    cpu4.tmode = 0x10  # 8-bit signed (bit 4 = signed)
+    for i in range(64):
+        cpu4.mem_write8(0x1000 + i, 0xF0)  # -16 in signed i8
+        cpu4.mem_write8(0x2000 + i, 2)     # shift by 2
+    code4 = assemble("t.vshr\nhalt")
+    cpu4.load_bytes(0, code4)
+    cpu4.pc = 0
+    try:
+        cpu4.run()
+    except HaltError:
+        pass
+    result = cpu4.mem_read8(0x3000)
+    # -16 >> 2 = -4 → 0xFC
+    check("VSHR signed i8: -16 >> 2 = -4 (0xFC)", result == 0xFC,
+          f"got 0x{result:02X}")
+
+    # --- VSHR 16-bit ---
+    cpu5 = Megapad64()
+    cpu5.tsrc0 = 0x1000
+    cpu5.tsrc1 = 0x2000
+    cpu5.tdst  = 0x3000
+    cpu5.tmode = 0x01  # 16-bit unsigned
+    # Write 0x0100 (256) to each 16-bit lane of src0
+    for i in range(32):
+        cpu5.mem_write8(0x1000 + i*2, 0x00)
+        cpu5.mem_write8(0x1000 + i*2 + 1, 0x01)
+        # Shift amount: 4
+        cpu5.mem_write8(0x2000 + i*2, 4)
+        cpu5.mem_write8(0x2000 + i*2 + 1, 0)
+    code5 = assemble("t.vshr\nhalt")
+    cpu5.load_bytes(0, code5)
+    cpu5.pc = 0
+    try:
+        cpu5.run()
+    except HaltError:
+        pass
+    lo = cpu5.mem_read8(0x3000)
+    hi = cpu5.mem_read8(0x3001)
+    result16 = lo | (hi << 8)
+    check("VSHR u16: 256 >> 4 = 16", result16 == 16, f"got {result16}")
+
+    # --- VCLZ: count leading zeros ---
+    cpu6 = Megapad64()
+    cpu6.tsrc0 = 0x1000
+    cpu6.tsrc1 = 0x2000
+    cpu6.tdst  = 0x3000
+    cpu6.tmode = 0x00  # 8-bit unsigned
+    cpu6.mem_write8(0x1000, 0x01)  # CLZ = 7
+    cpu6.mem_write8(0x1000 + 1, 0x80)  # CLZ = 0
+    cpu6.mem_write8(0x1000 + 2, 0x00)  # CLZ = 8
+    cpu6.mem_write8(0x1000 + 3, 0x10)  # CLZ = 3
+    for i in range(4, 64):
+        cpu6.mem_write8(0x1000 + i, 0xFF)  # CLZ = 0
+        cpu6.mem_write8(0x2000 + i, 0)     # unused for VCLZ
+    code6 = assemble("t.vclz\nhalt")
+    cpu6.load_bytes(0, code6)
+    cpu6.pc = 0
+    try:
+        cpu6.run()
+    except HaltError:
+        pass
+    check("VCLZ u8: clz(0x01) = 7", cpu6.mem_read8(0x3000) == 7,
+          f"got {cpu6.mem_read8(0x3000)}")
+    check("VCLZ u8: clz(0x80) = 0", cpu6.mem_read8(0x3001) == 0,
+          f"got {cpu6.mem_read8(0x3001)}")
+    check("VCLZ u8: clz(0x00) = 8", cpu6.mem_read8(0x3002) == 8,
+          f"got {cpu6.mem_read8(0x3002)}")
+    check("VCLZ u8: clz(0x10) = 3", cpu6.mem_read8(0x3003) == 3,
+          f"got {cpu6.mem_read8(0x3003)}")
+
+    # --- VSHR broadcast mode ---
+    cpu7 = Megapad64()
+    cpu7.tsrc0 = 0x1000
+    cpu7.tdst  = 0x3000
+    cpu7.tmode = 0x00  # 8-bit unsigned
+    cpu7.regs[5] = 3    # shift all lanes by 3
+    for i in range(64):
+        cpu7.mem_write8(0x1000 + i, 0x40)  # src0: all 64
+    code7 = assemble("t.vshr r5\nhalt")
+    cpu7.load_bytes(0, code7)
+    cpu7.pc = 0
+    try:
+        cpu7.run()
+    except HaltError:
+        pass
+    result = cpu7.mem_read8(0x3000)
+    check("VSHR broadcast u8: 64 >> 3 = 8", result == 8, f"got {result}")
+
+
 def test_ext_prefix():
     """Family 0xF: EXT prefix"""
     print("\n== EXT (0xF) ==")
@@ -687,6 +846,7 @@ def main():
         test_muldiv,
         test_csr,
         test_mex,
+        test_vshr_vshl,
         test_ext_prefix,
         test_fibonacci,
         test_subroutine,
