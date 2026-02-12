@@ -94,6 +94,11 @@ CSR_PERF_TILEOPS = 0x6A
 CSR_PERF_EXTMEM  = 0x6B
 CSR_PERF_CTRL    = 0x6C
 
+# I-Cache CSRs (§12.2)
+CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
+CSR_ICACHE_HITS   = 0x71   # R: hit counter
+CSR_ICACHE_MISSES = 0x72   # R: miss counter
+
 # IVEC IDs
 IVEC_RESET          = 0x00
 IVEC_NMI            = 0x01
@@ -363,6 +368,11 @@ class Megapad64:
         self.tile_selftest: int    = 0   # 0=idle, 2=pass, 3=fail
         self.tile_st_detail: int   = 0   # bitmask of failed sub-tests
 
+        # I-cache emulation state (behavioural – no actual cache modelled)
+        self.icache_enabled: int = 1   # 1 = cache enabled
+        self.icache_hits: int    = 0   # hit counter (always 0 in emulator)
+        self.icache_misses: int  = 0   # miss counter (always 0 in emulator)
+
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
 
@@ -606,6 +616,9 @@ class Megapad64:
             CSR_BIST_FAIL_DATA: lambda: self.bist_fail_data,
             CSR_TILE_SELFTEST:  lambda: self.tile_selftest,
             CSR_TILE_ST_DETAIL: lambda: self.tile_st_detail,
+            CSR_ICACHE_CTRL:    lambda: self.icache_enabled & 1,
+            CSR_ICACHE_HITS:    lambda: u64(self.icache_hits),
+            CSR_ICACHE_MISSES:  lambda: u64(self.icache_misses),
             CSR_TSTRIDE_R:      lambda: self.tstride_r,
             CSR_TSTRIDE_C:      lambda: self.tstride_c,
             CSR_TTILE_H:        lambda: self.ttile_h,
@@ -649,6 +662,7 @@ class Megapad64:
             CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
             CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
             CSR_TILE_SELFTEST: lambda v: self._tile_selftest_write(v),
+            CSR_ICACHE_CTRL:   lambda v: self._icache_ctrl_write(v),
             CSR_TSTRIDE_R: lambda v: setattr(self, 'tstride_r', v & 0xFFFFF),
             CSR_TSTRIDE_C: lambda v: setattr(self, 'tstride_c', v & 0xFFFFF),
             CSR_TTILE_H:   lambda v: setattr(self, 'ttile_h', max(1, min(8, v & 0xFF))),
@@ -748,6 +762,17 @@ class Megapad64:
         self.bist_fail_data = ((expected & 0xFFFFFFFF) << 32) | (actual & 0xFFFFFFFF)
 
     # -- Tile Datapath Self-Test (§6.2) --
+
+    def _icache_ctrl_write(self, val: int):
+        """Handle writes to CSR_ICACHE_CTRL.
+
+        Bit 0: enable/disable cache.
+        Bit 1: if set, invalidate all lines (auto-clears).
+        """
+        self.icache_enabled = val & 1
+        if val & 2:                 # invalidate-all bit
+            self.icache_hits   = 0
+            self.icache_misses = 0
 
     def _tile_selftest_write(self, val: int):
         """Handle writes to CSR_TILE_SELFTEST — run tile self-test."""

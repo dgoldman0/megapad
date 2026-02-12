@@ -178,16 +178,24 @@ Variable-length, 1–11 bytes:
 
 ### 6.3  Execution Model
 
-**Current (FSM-based prototype)**: Single-issue, multi-cycle (no
-pipeline).  Simple instructions (INC, SEP, ALU) complete in **4 cycles**
-(FETCH → FETCH_MORE → DECODE → EXECUTE).  Memory operations add bus
-latency.  MEX operations stall CPU until tile engine completes.
+**Current (FSM-based prototype)**: Backup preserved as `mp64_cpu_fsm.v`.
 
-**Phase-2 (pipelined)**: A 2- or 3-stage pipeline (IF → DE → EX) with
-instruction prefetch buffer would achieve **3-cycle latency, 1
-instruction/cycle throughput** for simple instructions.  This is the
-planned optimization once functional correctness is established on
-hardware.
+**Production (pipelined, implemented)**: 2-stage decoupled fetch
+pipeline (IF + DEX).  The IF stage reads 8 bytes/cycle from a per-core
+4 KiB direct-mapped instruction cache into a 16-byte alignment buffer.
+The DEX stage decodes and executes from the buffer.
+
+- No out-of-order execution, no speculation, no branch prediction
+  (preserving the deterministic 1802 design ethos).
+- On a cache hit, simple instructions (INC, ALU, SEP) retire in **2
+  cycles**.  Cache misses incur a ~5 cycle refill penalty (2-beat ×
+  64-bit bus).
+- The I-cache uses `refill_pending` handshake to prevent stale
+  bus-data consumption between refill beats.
+- Store-to-code coherence: any MEM_WRITE triggers a single-line
+  I-cache invalidation for the written address.
+- CSRs: ICACHE_CTRL (0x70, enable/invalidate), ICACHE_HITS (0x71),
+  ICACHE_MISSES (0x72).
 
 ---
 
@@ -249,10 +257,13 @@ verilator --lint-only -Wall -Ifpga/rtl fpga/rtl/mp64_soc.v
 | Testbench | Tests | Coverage |
 |-----------|------:|----------|
 | `tb_cpu_smoke.v` | 19 | NOP/HALT, INC/DEC, LDI (multi-byte), ADD/SUB/CMP, AND/OR/XOR, SHL/SHR, SEP, flags (Z/C/G) |
+| `tb_opcodes.v` | 40 | Full ISA coverage (via I-cache) |
 | `tb_memory.v` | 9 | dword/word/half/byte R/W, tile 512-bit R/W, dual-port, CPU↔tile cross-check, ext fwd |
 | `tb_tile.v` | 10 | CSR read/write, TALU.ADD, TRED.SUM/MIN/MAX, imm8 splat, accumulate mode |
+| `tb_icache.v` | 22 | Hit/miss, refill, invalidation (all/single-line), stats, multi-line |
+| `tb_multicore_smoke.v` | 37 | Quad-core, IPI, mailbox, per-core I-cache |
 
-**Status:** ✅ **38/38 tests passing**
+**Status:** ✅ **137/137 tests passing**
 
 ```bash
 cd fpga/sim
@@ -297,7 +308,7 @@ vvp tb_soc.vvp
 gtkwave tb_mp64_soc.vcd
 ```
 
-**Note:** Full BIOS simulation is slow (multi-hour) due to byte-at-a-time fetch in the prototype CPU. Production version with instruction cache would be ~100× faster.
+**Note:** Full BIOS simulation benefits significantly from the per-core I-cache (4 KiB, direct-mapped) which reduces fetch latency from ~4 cycles/byte to 1 cycle/8 bytes on cache hits.
 
 ### 9.5  Synthesis (Vivado)
 
@@ -353,9 +364,9 @@ vivado -mode batch -source program.tcl
 
 ### 11.1  Performance
 
-- **No instruction cache**: CPU fetches 1 byte/cycle from BRAM. For a typical 2-byte instruction at 100 MHz, this is ~40 ns fetch + ~20 ns execute = 60 ns total (16.7 MIPS). With a 4 KiB I-cache, fetch would be 1 cycle → ~5× speedup.
-  
-- **No pipeline**: Single-issue multi-cycle FSM. A 3-stage pipeline (IF/DE/EX) would approximately double throughput for independent instruction streams.
+- ~~No instruction cache~~ — **Implemented.** Per-core 4 KiB direct-mapped I-cache (256 entries × 16-byte lines).  2-beat refill from 64-bit bus.  Hit latency: 0 extra cycles; miss penalty: ~5 cycles.
+
+- ~~No pipeline~~ — **Implemented.** 2-stage decoupled fetch pipeline (IF reads I-cache into 16-byte ibuf, DEX decodes/executes).  ~2× throughput over original FSM for cache-hot code.
 
 - **Tile engine serialization**: TALU operations complete in 3 cycles (load A, load B, compute+store) for internal memory, but external tile ops take ~24+ cycles. Double-buffering (load next tile while computing current) would hide latency.
 
@@ -394,8 +405,8 @@ Target: **Digilent Nexys A7-100T** ($299) or **Nexys A7-200T** ($499)
 
 ### 12.2  RTL Optimizations (Post-Hardware)
 
-1. **Pipelined CPU** — 3-stage (IF/DE/EX) for ~2× throughput
-2. **Instruction cache** — 4 KiB direct-mapped for ~5× fetch speedup
+1. ~~Pipelined CPU~~ — **Done.** 2-stage IF+DEX with 16-byte prefetch buffer
+2. ~~Instruction cache~~ — **Done.** 4 KiB per-core, direct-mapped, 16-byte lines
 3. **Tile double-buffering** — overlap load + compute for throughput
 4. **DMA completion handshake** — wire up disk/NIC DMA ack signals
 5. **Interrupt priority encoder** — timer highest, NIC/UART mid, disk low

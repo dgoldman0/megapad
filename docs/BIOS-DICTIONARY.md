@@ -462,6 +462,16 @@ Each entry is a linked list node:
 | 241 | `FP16-MODE` | `( -- )` | | Set TMODE to FP16 half-precision (EW=4) |
 | 242 | `BF16-MODE` | `( -- )` | | Set TMODE to bfloat16 (EW=5) |
 
+### Instruction Cache (5 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 243 | `ICACHE-ON` | `( -- )` | | Enable the instruction cache |
+| 244 | `ICACHE-OFF` | `( -- )` | | Disable the instruction cache |
+| 245 | `ICACHE-INV` | `( -- )` | | Invalidate all I-cache lines, reset stats, re-enable |
+| 246 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
+| 247 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
+
 ---
 
 ## Summary Statistics
@@ -492,7 +502,8 @@ Each entry is a linked list node:
 | Tile Self-Test | 3 |
 | Stride / 2D Addressing | 6 |
 | FP16 / BF16 Modes | 2 |
-| **Total** | **242** |
+| Instruction Cache | 5 |
+| **Total** | **247** |
 
 ### All Immediate Words (33)
 
@@ -501,6 +512,7 @@ Each entry is a linked list node:
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
+ICACHE-MISSES → ICACHE-HITS → ICACHE-INV → ICACHE-OFF → ICACHE-ON →
 BF16-MODE → FP16-MODE → TSTORE2D → TLOAD2D → TTILE-W! → TTILE-H! →
 TSTRIDE-R@ → TSTRIDE-R! → TILE-DETAIL@ → TILE-TEST@ → TILE-TEST →
 BIST-FAIL-DATA → BIST-FAIL-ADDR → BIST-STATUS → BIST-QUICK → BIST-FULL →
