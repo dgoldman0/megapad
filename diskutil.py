@@ -442,7 +442,7 @@ FIRST STEPS
   Type DESCRIBE <word> for detailed word help.
   Type STATUS for a quick system overview.
   Type DASHBOARD for a full system report.
-  Type SCREENS for the 8-screen interactive TUI.
+  Type SCREENS for the 9-screen interactive TUI.
 
 CREATING A BUFFER
   0 1 256 BUFFER mydata
@@ -649,10 +649,11 @@ SCREEN LIST
   [5] Task     Task listing (resume/kill)
   [6] Help     Full command reference card
   [7] Docs     Documentation browser
-  [8] Store    File browser & disk info
+  [8] Stor     File browser & disk info
+  [9] Core     Multicore status & dispatch
 
 CONTROLS
-  1-8            Switch to screen
+  1-9            Switch to screen
   r              Refresh current screen
   q              Quit back to REPL
 
@@ -1027,7 +1028,7 @@ def build_sample_image(path: str | Path | None = None,
         "0 0 3 BDL-POLICY\n"
         "\n"
         "\\ --- Dashboard ---\n"
-        "1 255 BDL-SCREEN\n"
+        "1 511 BDL-SCREEN\n"
         "\n"
         "BDL-END\n"
     ).encode("ascii")
