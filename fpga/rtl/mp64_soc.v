@@ -165,6 +165,9 @@ module mp64_soc (
     wire        irq_timer;
     wire        irq_uart;
     wire        irq_nic;
+    wire        irq_aes;
+    wire        irq_sha;
+    wire        irq_crc;
 
     // --- Per-peripheral 8-bit read data ---
     wire [7:0]  uart_rdata8;
@@ -174,6 +177,12 @@ module mp64_soc (
     wire [7:0]  mbox_rdata8;
 
     wire        uart_ack, timer_ack, disk_ack, nic_ack, mbox_ack;
+
+    // --- Crypto accelerator read data ---
+    wire [63:0] aes_rdata64;
+    wire [63:0] sha_rdata64;
+    wire [63:0] crc_rdata64;
+    wire        aes_ack, sha_ack, crc_ack;
 
     // --- Disk & NIC DMA ---
     wire        disk_dma_req;
@@ -190,6 +199,12 @@ module mp64_soc (
     wire [7:0]  nic_dma_rdata;
     wire        nic_dma_ack;
 
+    // --- QoS CSR sideband (any core can write) ---
+    reg         qos_csr_wen;
+    reg  [7:0]  qos_csr_addr;
+    reg  [63:0] qos_csr_wdata;
+    wire [63:0] qos_csr_rdata;
+
     // ========================================================================
     // MMIO Address Demux
     // ========================================================================
@@ -201,6 +216,11 @@ module mp64_soc (
     wire mbox_sel    = mmio_req && (mmio_addr[11:8] == 4'h5 ||
                                     mmio_addr[11:8] == 4'h6);  // mailbox + spinlocks
 
+    // Crypto peripherals at 0x7xx, sub-decoded
+    wire aes_sel     = mmio_req && (mmio_addr[11:7] == 5'b01110);       // 0x700-0x77F
+    wire sha_sel     = mmio_req && (mmio_addr[11:6] == 6'b011110);      // 0x780-0x7BF
+    wire crc_sel     = mmio_req && (mmio_addr[11:5] == 7'b0111110);     // 0x7C0-0x7DF
+
     // MMIO read mux
     wire [63:0] sysinfo_rdata;
 
@@ -210,6 +230,9 @@ module mp64_soc (
                             nic_sel     ? {56'd0, nic_rdata8}   :
                             mbox_sel    ? {56'd0, mbox_rdata8}  :
                             sysinfo_sel ? sysinfo_rdata         :
+                            aes_sel     ? aes_rdata64           :
+                            sha_sel     ? sha_rdata64           :
+                            crc_sel     ? crc_rdata64           :
                             64'd0;
     assign mmio_ack = 1'b1;  // all MMIO peripherals are single-cycle
 
@@ -224,6 +247,38 @@ module mp64_soc (
     assign disk_dma_ack   = 1'b1;
     assign nic_dma_rdata  = 8'd0;
     assign nic_dma_ack    = 1'b1;
+
+    // QoS CSR write mux: any core can write, core 0 priority
+    always @(*) begin
+        qos_csr_wen   = 1'b0;
+        qos_csr_addr  = 8'd0;
+        qos_csr_wdata = 64'd0;
+        if (core_csr_wen[0] &&
+            (core_csr_addr[7:0] == CSR_QOS_WEIGHT ||
+             core_csr_addr[7:0] == CSR_QOS_BWLIMIT)) begin
+            qos_csr_wen   = 1'b1;
+            qos_csr_addr  = core_csr_addr[7:0];
+            qos_csr_wdata = core_csr_wdata[63:0];
+        end else if (core_csr_wen[1] &&
+            (core_csr_addr[1*8 +: 8] == CSR_QOS_WEIGHT ||
+             core_csr_addr[1*8 +: 8] == CSR_QOS_BWLIMIT)) begin
+            qos_csr_wen   = 1'b1;
+            qos_csr_addr  = core_csr_addr[1*8 +: 8];
+            qos_csr_wdata = core_csr_wdata[1*64 +: 64];
+        end else if (core_csr_wen[2] &&
+            (core_csr_addr[2*8 +: 8] == CSR_QOS_WEIGHT ||
+             core_csr_addr[2*8 +: 8] == CSR_QOS_BWLIMIT)) begin
+            qos_csr_wen   = 1'b1;
+            qos_csr_addr  = core_csr_addr[2*8 +: 8];
+            qos_csr_wdata = core_csr_wdata[2*64 +: 64];
+        end else if (core_csr_wen[3] &&
+            (core_csr_addr[3*8 +: 8] == CSR_QOS_WEIGHT ||
+             core_csr_addr[3*8 +: 8] == CSR_QOS_BWLIMIT)) begin
+            qos_csr_wen   = 1'b1;
+            qos_csr_addr  = core_csr_addr[3*8 +: 8];
+            qos_csr_wdata = core_csr_wdata[3*64 +: 64];
+        end
+    end
 
     // ========================================================================
     // Generate: NUM_CORES × (CPU + I-Cache + Tile Engine)
@@ -260,6 +315,9 @@ module mp64_soc (
             // ----------------------------------------------------------------
             // I-cache instance (4 KiB, 16-byte lines, per-core)
             // ----------------------------------------------------------------
+            wire [63:0] ic_stat_hits;
+            wire [63:0] ic_stat_misses;
+
             mp64_icache u_icache (
                 .clk            (sys_clk),
                 .rst_n          (sys_rst_n),
@@ -274,7 +332,9 @@ module mp64_soc (
                 .bus_valid      (ic_bus_valid),
                 .bus_addr       (ic_bus_addr),
                 .bus_rdata      (ic_bus_rdata),
-                .bus_ready      (ic_bus_ready)
+                .bus_ready      (ic_bus_ready),
+                .stat_hits      (ic_stat_hits),
+                .stat_misses    (ic_stat_misses)
             );
 
             // ----------------------------------------------------------------
@@ -347,6 +407,13 @@ module mp64_soc (
                 .irq_nic    (c == 0 ? irq_nic  : 1'b0),
                 .irq_ipi    (ipi_lines[c]),
 
+                // I-Cache statistics
+                .icache_stat_hits   (ic_stat_hits),
+                .icache_stat_misses (ic_stat_misses),
+
+                // System configuration
+                .mem_size_bytes (64'd1048576),  // 1 MiB
+
                 // External flags (active-low on 1802; tie high = inactive)
                 .ef_flags   (4'b0000)
             );
@@ -361,11 +428,14 @@ module mp64_soc (
             assign csr_ipi_addr [c*8  +: 8]  = core_csr_addr [c*8  +: 8];
             assign csr_ipi_wdata[c*64 +: 64] = core_csr_wdata[c*64 +: 64];
 
-            // CSR read mux: IPI CSRs come from mailbox, everything else from tile
+            // CSR read mux: IPI CSRs come from mailbox, QoS from bus, else tile
             assign core_csr_rdata[c*64 +: 64] =
                 (core_csr_addr[c*8 +: 8] == CSR_MBOX ||
                  core_csr_addr[c*8 +: 8] == CSR_IPIACK)
                     ? csr_ipi_rdata[c*64 +: 64]
+                : (core_csr_addr[c*8 +: 8] == CSR_QOS_WEIGHT ||
+                   core_csr_addr[c*8 +: 8] == CSR_QOS_BWLIMIT)
+                    ? qos_csr_rdata
                     : tile_csr_rdata[c*64 +: 64];
 
             // ----------------------------------------------------------------
@@ -565,7 +635,12 @@ module mp64_soc (
         .mmio_wen   (mmio_wen),
         .mmio_size  (mmio_size),
         .mmio_rdata (mmio_rdata_bus),
-        .mmio_ack   (mmio_ack)
+        .mmio_ack   (mmio_ack),
+        // QoS CSR sideband
+        .qos_csr_wen   (qos_csr_wen),
+        .qos_csr_addr  (qos_csr_addr),
+        .qos_csr_wdata (qos_csr_wdata),
+        .qos_csr_rdata (qos_csr_rdata)
     );
 
     // ========================================================================
@@ -740,6 +815,51 @@ module mp64_soc (
         .dma_wen        (nic_dma_wen),
         .dma_rdata      (nic_dma_rdata),
         .dma_ack        (nic_dma_ack)
+    );
+
+    // ========================================================================
+    // AES-256-GCM Accelerator (MMIO 0x700-0x77F)
+    // ========================================================================
+    mp64_aes u_aes (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (aes_sel),
+        .addr   (mmio_addr[6:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (aes_rdata64),
+        .ack    (aes_ack),
+        .irq    (irq_aes)
+    );
+
+    // ========================================================================
+    // SHA-3/SHAKE Accelerator (MMIO 0x780-0x7BF)
+    // ========================================================================
+    mp64_sha3 u_sha3 (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (sha_sel),
+        .addr   (mmio_addr[5:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (sha_rdata64),
+        .ack    (sha_ack),
+        .irq    (irq_sha)
+    );
+
+    // ========================================================================
+    // CRC32/CRC64 Accelerator (MMIO 0x7C0-0x7DF)
+    // ========================================================================
+    mp64_crc u_crc (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (crc_sel),
+        .addr   (mmio_addr[4:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (crc_rdata64),
+        .ack    (crc_ack),
+        .irq    (irq_crc)
     );
 
     // ========================================================================

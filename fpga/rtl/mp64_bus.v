@@ -6,20 +6,20 @@
 //   - Memory subsystem (internal BRAM + external forwarding)
 //   - MMIO peripherals (UART, Timer, Disk, NIC, Mailbox, Spinlocks)
 //
-// Arbitration: round-robin among requesting cores with fairness.
-// One core owns the bus at a time.  Other cores stall (bus_ready low).
+// Arbitration: weighted round-robin with per-core bandwidth limiting.
+//   - Each core has a weight (1-255): core gets `weight` consecutive grants
+//     before the arbiter advances to the next requesting core.
+//   - Each core has a bandwidth limit: beats per epoch. Once exceeded,
+//     the core is throttled until the epoch resets.
+//
+// QoS CSRs (written from CPU via sideband):
+//   CSR_QOS_WEIGHT  (0x58) — per-core weights packed [7:0] per core
+//   CSR_QOS_BWLIMIT (0x59) — per-core BW limits packed [15:0] per core
 //
 // Protocol (3-state FSM):
-//   1. IDLE      — pick next requesting core (round-robin), register request
-//                  to target bus, advance to MMIO_RESP or MEM_WAIT.
-//   2. MMIO_RESP — mmio_addr now stable; capture combinational mmio_rdata,
-//                  assert cpu_ready, return to IDLE.
-//   3. MEM_WAIT  — hold mem_req; wait for mem_ack, capture mem_rdata,
-//                  assert cpu_ready, return to IDLE.
-//
-// Latency:
-//   MMIO:   2 arbiter cycles (register → capture).
-//   Memory: 3+ arbiter cycles (register → BRAM latency → capture).
+//   1. IDLE      — pick next requesting core (weighted RR), register request
+//   2. MMIO_RESP — capture mmio_rdata, assert cpu_ready, return to IDLE
+//   3. MEM_WAIT  — hold mem_req; wait for mem_ack, capture mem_rdata
 //
 
 `include "mp64_defs.vh"
@@ -53,7 +53,13 @@ module mp64_bus (
     output reg         mmio_wen,
     output reg  [1:0]  mmio_size,
     input  wire [63:0] mmio_rdata,
-    input  wire        mmio_ack
+    input  wire        mmio_ack,
+
+    // === QoS CSR sideband (from any core's CSR write) ===
+    input  wire        qos_csr_wen,
+    input  wire [7:0]  qos_csr_addr,
+    input  wire [63:0] qos_csr_wdata,
+    output reg  [63:0] qos_csr_rdata
 );
 
     // ========================================================================
@@ -85,28 +91,107 @@ module mp64_bus (
     endgenerate
 
     // ========================================================================
-    // Round-robin next-grant selection
+    // Round-robin next-grant selection (weighted, with BW throttling)
     // ========================================================================
+
+    // QoS registers (sideband CSR writes)
+    reg [7:0]  qos_weight [0:NUM_CORES-1];  // Grants before advancing
+    reg [15:0] qos_bwlimit[0:NUM_CORES-1]; // Max beats per epoch (0=unlimited)
+    reg [15:0] qos_bw_cnt [0:NUM_CORES-1]; // Current epoch beat count
+    reg [7:0]  weight_remain;               // Remaining grants for current core
+    reg [15:0] epoch_timer;                 // Epoch timer (65536 cycles)
+
+    // QoS CSR write handling
+    integer qi;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (qi = 0; qi < NUM_CORES; qi = qi + 1) begin
+                qos_weight[qi]  <= 8'd1;   // Default: equal weight
+                qos_bwlimit[qi] <= 16'd0;  // Default: unlimited
+                qos_bw_cnt[qi]  <= 16'd0;
+            end
+            epoch_timer <= 16'd0;
+            qos_csr_rdata <= 64'd0;
+        end else begin
+            // Epoch timer: reset BW counters every 65536 cycles
+            epoch_timer <= epoch_timer + 16'd1;
+            if (epoch_timer == 16'hFFFF) begin
+                for (qi = 0; qi < NUM_CORES; qi = qi + 1)
+                    qos_bw_cnt[qi] <= 16'd0;
+            end
+
+            // CSR writes
+            if (qos_csr_wen) begin
+                case (qos_csr_addr)
+                    CSR_QOS_WEIGHT: begin
+                        // Pack: bits [7:0]=core0, [15:8]=core1, etc.
+                        qos_weight[0] <= (qos_csr_wdata[7:0]   == 8'd0) ? 8'd1 : qos_csr_wdata[7:0];
+                        qos_weight[1] <= (qos_csr_wdata[15:8]  == 8'd0) ? 8'd1 : qos_csr_wdata[15:8];
+                        qos_weight[2] <= (qos_csr_wdata[23:16] == 8'd0) ? 8'd1 : qos_csr_wdata[23:16];
+                        qos_weight[3] <= (qos_csr_wdata[31:24] == 8'd0) ? 8'd1 : qos_csr_wdata[31:24];
+                    end
+                    CSR_QOS_BWLIMIT: begin
+                        qos_bwlimit[0] <= qos_csr_wdata[15:0];
+                        qos_bwlimit[1] <= qos_csr_wdata[31:16];
+                        qos_bwlimit[2] <= qos_csr_wdata[47:32];
+                        qos_bwlimit[3] <= qos_csr_wdata[63:48];
+                    end
+                    default: ;
+                endcase
+            end
+
+            // CSR read mux
+            case (qos_csr_addr)
+                CSR_QOS_WEIGHT:
+                    qos_csr_rdata <= {32'd0, qos_weight[3], qos_weight[2],
+                                      qos_weight[1], qos_weight[0]};
+                CSR_QOS_BWLIMIT:
+                    qos_csr_rdata <= {qos_bwlimit[3], qos_bwlimit[2],
+                                      qos_bwlimit[1], qos_bwlimit[0]};
+                default:
+                    qos_csr_rdata <= 64'd0;
+            endcase
+        end
+    end
+
+    // BW-throttled eligibility: a core can request if BW limit not exceeded
+    wire [NUM_CORES-1:0] eligible;
+    genvar ei;
+    generate
+        for (ei = 0; ei < NUM_CORES; ei = ei + 1) begin : elig
+            assign eligible[ei] = cpu_valid[ei] &&
+                (qos_bwlimit[ei] == 16'd0 || qos_bw_cnt[ei] < qos_bwlimit[ei]);
+        end
+    endgenerate
+
     reg [CORE_ID_BITS-1:0] next_grant;
     reg                     any_request;
 
-    // Scan starting from last_grant+1, wrap around (unrolled for 4 cores).
+    // Weighted round-robin: if current core still has weight remaining
+    // and is eligible, keep granting it. Otherwise scan next eligible core.
     always @(*) begin
         next_grant  = last_grant;
         any_request = 1'b0;
 
-        if (cpu_valid[(last_grant + 2'd1) & 2'd3]) begin
-            next_grant  = (last_grant + 2'd1) & 2'd3;
-            any_request = 1'b1;
-        end else if (cpu_valid[(last_grant + 2'd2) & 2'd3]) begin
-            next_grant  = (last_grant + 2'd2) & 2'd3;
-            any_request = 1'b1;
-        end else if (cpu_valid[(last_grant + 2'd3) & 2'd3]) begin
-            next_grant  = (last_grant + 2'd3) & 2'd3;
-            any_request = 1'b1;
-        end else if (cpu_valid[last_grant]) begin
+        // If current core still has weight budget and is requesting
+        if (weight_remain > 8'd0 && eligible[last_grant]) begin
             next_grant  = last_grant;
             any_request = 1'b1;
+        end else begin
+            // Scan for next eligible core (round-robin)
+            if (eligible[(last_grant + 2'd1) & 2'd3]) begin
+                next_grant  = (last_grant + 2'd1) & 2'd3;
+                any_request = 1'b1;
+            end else if (eligible[(last_grant + 2'd2) & 2'd3]) begin
+                next_grant  = (last_grant + 2'd2) & 2'd3;
+                any_request = 1'b1;
+            end else if (eligible[(last_grant + 2'd3) & 2'd3]) begin
+                next_grant  = (last_grant + 2'd3) & 2'd3;
+                any_request = 1'b1;
+            end else if (eligible[last_grant]) begin
+                next_grant  = last_grant;
+                any_request = 1'b1;
+            end
         end
     end
 
@@ -119,6 +204,7 @@ module mp64_bus (
             grant      <= {CORE_ID_BITS{1'b0}};
             last_grant <= {CORE_ID_BITS{1'b0}};
             served_last<= 1'b0;
+            weight_remain <= 8'd1;
             mem_req    <= 1'b0;
             mmio_req   <= 1'b0;
             cpu_ready  <= {NUM_CORES{1'b0}};
@@ -147,6 +233,13 @@ module mp64_bus (
                         !(served_last && next_grant == last_grant)) begin
                         grant      <= next_grant;
                         served_last<= 1'b0;
+
+                        // Update weight counter
+                        if (next_grant == last_grant && weight_remain > 8'd0) begin
+                            weight_remain <= weight_remain - 8'd1;
+                        end else begin
+                            weight_remain <= qos_weight[next_grant] - 8'd1;
+                        end
 
                         if (core_addr[next_grant][63:32] == MMIO_HI) begin
                             // MMIO: register request, respond next cycle
@@ -179,6 +272,7 @@ module mp64_bus (
                     last_grant                <= grant;
                     mmio_req                  <= 1'b0;
                     served_last               <= 1'b1;
+                    qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
                     arb_state                 <= ARB_IDLE;
                 end
 
@@ -192,6 +286,7 @@ module mp64_bus (
                         last_grant                <= grant;
                         mem_req                   <= 1'b0;
                         served_last               <= 1'b1;
+                        qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
                         arb_state                 <= ARB_IDLE;
                     end
                     // else: mem_req, mem_addr, etc. held stable from IDLE
