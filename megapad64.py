@@ -1250,6 +1250,83 @@ class Megapad64:
                 self.acc[3] = (total >> 192) & mask64
                 self.flag_z = 1 if total == 0 else 0
                 return 3  # 4 cycles total
+
+            elif funct == 2:  # WMUL — widening multiply
+                out_eb = elem_bytes * 2
+                out_mask = (1 << (out_eb * 8)) - 1
+                # Output has num_lanes elements at double width = 128 bytes
+                # Written across TDST and TDST+64
+                dst0 = bytearray(64)
+                dst1 = bytearray(64)
+                elems_per_tile = 64 // out_eb
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & out_mask
+                    else:
+                        r = (ea * eb_val) & out_mask
+                    if lane < elems_per_tile:
+                        tile_set_elem(dst0, lane, out_eb, r)
+                    else:
+                        tile_set_elem(dst1, lane - elems_per_tile, out_eb, r)
+                write_tile(self.tdst, dst0)
+                write_tile(u64(self.tdst + 64), dst1)
+                return 2
+
+            elif funct == 3:  # MAC — multiply-accumulate in-place
+                existing = read_tile(self.tdst)
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    ec = tile_get_elem(existing, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ec, elem_bytes) + to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                    else:
+                        r = (ec + ea * eb_val) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 2
+
+            elif funct == 4:  # FMA — fused multiply-add (dst = a*b + c where c=dst)
+                existing = read_tile(self.tdst)
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    ec = tile_get_elem(existing, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes) + to_signed(ec, elem_bytes)) & mask
+                    else:
+                        r = (ea * eb_val + ec) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 2
+
+            elif funct == 5:  # DOTACC — 4-way chunked dot product
+                chunk_size = num_lanes // 4
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                mask64 = MASK64
+                for k in range(4):
+                    dot = 0
+                    for lane in range(chunk_size):
+                        idx = k * chunk_size + lane
+                        ea = tile_get_elem(src_a, idx, elem_bytes)
+                        eb_val = tile_get_elem(src_b, idx, elem_bytes)
+                        if signed:
+                            dot += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
+                        else:
+                            dot += ea * eb_val
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        self.acc[k] = (self.acc[k] + dot) & mask64
+                    else:
+                        self.acc[k] = dot & mask64
+                self.flag_z = 1 if all(a == 0 for a in self.acc) else 0
+                return 3
+
             return 1
 
         elif op == 0x2:  # TRED

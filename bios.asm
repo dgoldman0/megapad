@@ -1811,6 +1811,26 @@ w_tmaxidx:
     t.maxidx
     ret.l
 
+; TWMUL ( -- ) widening multiply, output to TDST and TDST+64
+w_twmul:
+    t.wmul
+    ret.l
+
+; TMAC ( -- ) multiply-accumulate in-place: dst[i] += a[i]*b[i]
+w_tmac:
+    t.mac
+    ret.l
+
+; TFMA ( -- ) fused multiply-add: dst[i] = a[i]*b[i] + dst[i]
+w_tfma:
+    t.fma
+    ret.l
+
+; TDOTACC ( -- ) 4-way chunked dot product into ACC0-ACC3
+w_tdotacc:
+    t.dotacc
+    ret.l
+
 ; TMODE@ ( -- n ) read current tile mode
 w_tmode_fetch:
     csrr r0, 0x14
@@ -7705,9 +7725,45 @@ d_tmaxidx:
     call.l r11
     ret.l
 
+; === TWMUL ===
+d_twmul:
+    .dq d_tmaxidx
+    .db 5
+    .ascii "TWMUL"
+    ldi64 r11, w_twmul
+    call.l r11
+    ret.l
+
+; === TMAC ===
+d_tmac:
+    .dq d_twmul
+    .db 4
+    .ascii "TMAC"
+    ldi64 r11, w_tmac
+    call.l r11
+    ret.l
+
+; === TFMA ===
+d_tfma:
+    .dq d_tmac
+    .db 4
+    .ascii "TFMA"
+    ldi64 r11, w_tfma
+    call.l r11
+    ret.l
+
+; === TDOTACC ===
+d_tdotacc:
+    .dq d_tfma
+    .db 7
+    .ascii "TDOTACC"
+    ldi64 r11, w_tdotacc
+    call.l r11
+    ret.l
+
 ; === TABS ===
 d_tabs:
-    .dq d_tmaxidx
+    .dq d_tdotacc
     .db 4
     .ascii "TABS"
     ldi64 r11, w_tabs
