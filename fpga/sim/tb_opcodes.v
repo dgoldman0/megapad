@@ -706,6 +706,195 @@ module tb_opcodes;
         // Instead just verify RESET clears registers by checking after a short run
 
         // ================================================================
+        // TEST 29: EXT.IMM64 — LDI64 (64-bit immediate load)
+        // ================================================================
+        $display("\n=== TEST 29: LDI64 (EXT + LDI) ===");
+        clear_mem;
+        // EXT.IMM64 prefix (0xF0) + LDI R1 (0x60 0x10) + 8 bytes LE
+        mem[0]  = 8'hF0;                         // EXT prefix (mod=0 → IMM64)
+        mem[1]  = 8'h60;                         // LDI opcode
+        mem[2]  = 8'h10;                         // dest = R1
+        mem[3]  = 8'hEF;                         // imm[7:0]
+        mem[4]  = 8'hCD;                         // imm[15:8]
+        mem[5]  = 8'hAB;                         // imm[23:16]
+        mem[6]  = 8'h89;                         // imm[31:24]
+        mem[7]  = 8'h67;                         // imm[39:32]
+        mem[8]  = 8'h45;                         // imm[47:40]
+        mem[9]  = 8'h23;                         // imm[55:48]
+        mem[10] = 8'h01;                         // imm[63:56]
+        mem[11] = 8'h02;                         // HALT
+        load_and_run(600);
+        check64("R1 after LDI64", uut.R[1], 64'h0123_4567_89AB_CDEF);
+
+        // ================================================================
+        // TEST 30: LDI64 — MMIO-style address
+        // ================================================================
+        $display("\n=== TEST 30: LDI64 MMIO address ===");
+        clear_mem;
+        // LDI64 R8, 0xFFFF_FF00_0000_0000
+        mem[0]  = 8'hF0;                         // EXT.IMM64
+        mem[1]  = 8'h60;                         // LDI
+        mem[2]  = 8'h80;                         // R8
+        mem[3]  = 8'h00;                         // imm[7:0]
+        mem[4]  = 8'h00;                         // imm[15:8]
+        mem[5]  = 8'h00;                         // imm[23:16]
+        mem[6]  = 8'h00;                         // imm[31:24]
+        mem[7]  = 8'h00;                         // imm[39:32]
+        mem[8]  = 8'hFF;                         // imm[47:40]
+        mem[9]  = 8'hFF;                         // imm[55:48]
+        mem[10] = 8'hFF;                         // imm[63:56]
+        mem[11] = 8'h02;                         // HALT
+        load_and_run(600);
+        check64("R8 after LDI64 MMIO addr", uut.R[8], 64'hFFFF_FF00_0000_0000);
+
+        // ================================================================
+        // TEST 31: LBR unconditional (forward)
+        // Offset is relative to end of instruction: target = PC + 3 + offset
+        // LBR at addr 0, target addr 9: offset = 9 - 3 = 6
+        // ================================================================
+        $display("\n=== TEST 31: LBR unconditional ===");
+        clear_mem;
+        mem[0] = 8'h40; mem[1] = 8'h00; mem[2] = 8'h06;  // LBR.AL +6
+        mem[3] = 8'h60; mem[4] = 8'h00; mem[5] = 8'hFF;  // LDI R0, 0xFF (skipped)
+        mem[6] = 8'h60; mem[7] = 8'h10; mem[8] = 8'hEE;  // LDI R1, 0xEE (skipped)
+        mem[9] = 8'h60; mem[10] = 8'h00; mem[11] = 8'h42; // LDI R0, 0x42 (target)
+        mem[12] = 8'h02;                                   // HALT
+        load_and_run(400);
+        check64("R0 after LBR skip", uut.R[0], 64'h42);
+
+        // ================================================================
+        // TEST 32: LBR conditional (LBRNE taken)
+        // LBRNE at addr 6, target addr 15: offset = 15 - 9 = 6
+        // ================================================================
+        $display("\n=== TEST 32: LBRNE taken ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h05;  // LDI R0, 5
+        mem[3] = 8'h66; mem[4] = 8'h00; mem[5] = 8'h00;  // CMPI R0, 0
+        mem[6] = 8'h42; mem[7] = 8'h00; mem[8] = 8'h06;  // LBRNE +6
+        mem[9]  = 8'h60; mem[10] = 8'h10; mem[11] = 8'hDD; // LDI R1, 0xDD (skipped)
+        mem[12] = 8'h60; mem[13] = 8'h20; mem[14] = 8'hCC; // LDI R2, 0xCC (skipped)
+        mem[15] = 8'h60; mem[16] = 8'h10; mem[17] = 8'hAA; // LDI R1, 0xAA (target)
+        mem[18] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after LBRNE taken", uut.R[1], 64'hAA);
+
+        // ================================================================
+        // TEST 33: LBR conditional (LBREQ not taken)
+        // ================================================================
+        $display("\n=== TEST 33: LBREQ not taken ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h05;  // LDI R0, 5
+        mem[3] = 8'h66; mem[4] = 8'h00; mem[5] = 8'h00;  // CMPI R0, 0
+        mem[6] = 8'h41; mem[7] = 8'h00; mem[8] = 8'h06;  // LBREQ +6 (not taken)
+        mem[9]  = 8'h60; mem[10] = 8'h10; mem[11] = 8'hBB; // LDI R1, 0xBB (reached)
+        mem[12] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after LBREQ not taken", uut.R[1], 64'hBB);
+
+        // ================================================================
+        // TEST 34: LBR backward (loop)
+        // Use SUBI (sets flags) instead of DEC (does not set flags).
+        // SUBI R0,1 at addr 3 (3 bytes), LBRNE at addr 6, target addr 3:
+        //   offset = 3 - (6+3) = -6
+        // ================================================================
+        $display("\n=== TEST 34: LBR backward (loop) ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h03;  // LDI R0, 3
+        mem[3] = 8'h67; mem[4] = 8'h00; mem[5] = 8'h01;  // SUBI R0, 1
+        mem[6] = 8'h42; mem[7] = 8'hFF; mem[8] = 8'hFA;  // LBRNE -6 (back to SUBI)
+        mem[9] = 8'h02;                                    // HALT
+        load_and_run(600);
+        check64("R0 after loop to 0", uut.R[0], 64'h0);
+
+        // ================================================================
+        // TEST 35: MOV (inter-register copy)
+        // MOV = ALU family 0x7, sub 0x8 (MOV/PASS B)
+        // ================================================================
+        $display("\n=== TEST 35: MOV Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h55;  // LDI R0, 0x55
+        mem[3] = 8'h78; mem[4] = 8'h40;                   // MOV R4, R0 (sub=8)
+        mem[5] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R4 after MOV", uut.R[4], 64'h55);
+
+        // ================================================================
+        // TEST 36: ST.B + LD.B (byte store/load)
+        // ST.B = MEM family 0x5, sub 0x7: 57 <Ra Rs> (2 bytes)
+        // LD.B = MEM family 0x5, sub 0x6: 56 <Rd Rb> (2 bytes)
+        // ================================================================
+        $display("\n=== TEST 36: ST.B + LD.B ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h42;  // LDI R0, 0x42
+        mem[3] = 8'h60; mem[4] = 8'h10; mem[5] = 8'h80;  // LDI R1, 0x80 (address)
+        mem[6] = 8'h57; mem[7] = 8'h10;                   // ST.B [R1], R0
+        mem[8] = 8'h56; mem[9] = 8'h51;                   // LD.B R5, [R1]
+        mem[10] = 8'h02;                                   // HALT
+        load_and_run(400);
+        check64("R5 after ST.B+LD.B", uut.R[5], 64'h42);
+
+        // ================================================================
+        // TEST 37: CSRR COREID (boot pattern)
+        // CSRR = CSR family 0xD, sub 0 (read). 2 bytes: Dn <csr_addr>
+        // Register is in nib[2:0] of opcode byte.
+        // CSRR R0, 0x20: D0 20
+        // ================================================================
+        $display("\n=== TEST 37: CSRR COREID (boot pattern) ===");
+        clear_mem;
+        mem[0] = 8'hD0; mem[1] = 8'h20;                   // CSRR R0, CSR_COREID
+        mem[2] = 8'h66; mem[3] = 8'h00; mem[4] = 8'h00;  // CMPI R0, 0
+        mem[5] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R0 = COREID (0)", uut.R[0], 64'h0);
+        check1("Z flag after CMPI 0,0", uut.flags[0], 1'b1);
+
+        // ================================================================
+        // TEST 38: LDI64 + STR + LDN roundtrip
+        // STR (64-bit store) = MEM 0x5, sub 0x4: 54 <Ra Rs> (2 bytes)
+        // LDN (64-bit load)  = MEM 0x5, sub 0x0: 50 <Rd Rb> (2 bytes)
+        // ================================================================
+        $display("\n=== TEST 38: LDI64 + STR + LDN ===");
+        clear_mem;
+        mem[0]  = 8'hF0;                                   // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                  // LDI R1
+        mem[3]  = 8'hBE; mem[4]  = 8'hBA; mem[5]  = 8'hFE; // 0xDEADBEEFCAFEBABE LE
+        mem[6]  = 8'hCA; mem[7]  = 8'hEF; mem[8]  = 8'hBE;
+        mem[9]  = 8'hAD; mem[10] = 8'hDE;
+        mem[11] = 8'h60; mem[12] = 8'h50; mem[13] = 8'h80; // LDI R5, 0x80
+        mem[14] = 8'h54; mem[15] = 8'h51;                  // STR [R5], R1
+        mem[16] = 8'h50; mem[17] = 8'h45;                  // LDN R4, [R5]
+        mem[18] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("R4 after 64-bit store+load", uut.R[4], 64'hDEAD_BEEF_CAFE_BABE);
+
+        // ================================================================
+        // TEST 39: LSRI (logical shift right immediate)
+        // LSRI = IMM family 0x6, sub 0x9: 69 <Rn_shift> (2 bytes)
+        // ibuf[1][7:4] = register, ibuf[1][3:0] = shift amount
+        // ================================================================
+        $display("\n=== TEST 39: LSRI ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h80;  // LDI R0, 0x80
+        mem[3] = 8'h69; mem[4] = 8'h01;                   // LSRI R0, 1
+        mem[5] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R0 after LSRI 0x80>>1", uut.R[0], 64'h40);
+
+        // ================================================================
+        // TEST 40: EXT.SKIP + BR.EQ (skip NOT taken when Z=0)
+        // ================================================================
+        $display("\n=== TEST 40: EXT.SKIP + BR.EQ (skip when Z=0) ===");
+        clear_mem;
+        mem[0]  = 8'h60; mem[1]  = 8'h00; mem[2]  = 8'h05;  // LDI R0, 5
+        mem[3]  = 8'h66; mem[4]  = 8'h00; mem[5]  = 8'h00;  // CMPI R0, 0 (Z=0)
+        mem[6]  = 8'hF6;                                      // EXT.SKIP
+        mem[7]  = 8'h31; mem[8]  = 8'h00;                    // BR.EQ (cond false→no skip)
+        mem[9]  = 8'h60; mem[10] = 8'h10; mem[11] = 8'hFF;   // LDI R1, 0xFF (executes)
+        mem[12] = 8'h02;                                      // HALT
+        load_and_run(600);
+        check64("R1 after skip not taken", uut.R[1], 64'hFF);
+
+        // ================================================================
         // DONE
         // ================================================================
         $display("\n========================================");

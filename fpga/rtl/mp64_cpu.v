@@ -394,7 +394,7 @@ module mp64_cpu (
                                       : 4'd1;
                 FAM_INC:   instr_len = 4'd1;
                 FAM_DEC:   instr_len = 4'd1;
-                FAM_BR:    instr_len = (has_ext) ? 4'd1 : 4'd2; // SKIP=1, BR=2
+                FAM_BR:    instr_len = 4'd2; // always 2 bytes even in SKIP mode
                 FAM_LBR:   instr_len = 4'd3;
                 FAM_MEM:   instr_len = (byte0[3:0] == 4'hF) ? 4'd3  // LD.D+off
                                       : 4'd2;
@@ -733,7 +733,7 @@ module mp64_cpu (
                                 effective_addr <= R[spsel];
                                 R[spsel] <= R[spsel] + 64'd8;
                                 dst_reg <= 4'd0;
-                                mem_sub <= 4'h6;  // marker for DIS
+                                mem_sub <= 4'hB;  // marker for DIS (avoids LD.B sub=6 collision)
                                 cpu_state <= CPU_MEM_READ;
                             end
 
@@ -843,10 +843,10 @@ module mp64_cpu (
                             if (cond_eval(nib, flags, Q, ef_flags)) begin
                                 R[psel] <= R[psel]
                                            + {{56{ibuf[1][7]}}, ibuf[1]}
-                                           - {60'd0, ibuf_need};
+                                           + {60'd0, ibuf_need};
                                 fetch_pc <= R[psel]
                                             + {{56{ibuf[1][7]}}, ibuf[1]}
-                                            - {60'd0, ibuf_need};
+                                            + {60'd0, ibuf_need};
                             end
                             cpu_state <= CPU_FETCH;
                         end
@@ -860,10 +860,10 @@ module mp64_cpu (
                         if (cond_eval(nib, flags, Q, ef_flags)) begin
                             R[psel] <= R[psel]
                                        + {{48{ibuf[1][7]}}, ibuf[1], ibuf[2]}
-                                       - {60'd0, ibuf_need};
+                                       + {60'd0, ibuf_need};
                             fetch_pc <= R[psel]
                                         + {{48{ibuf[1][7]}}, ibuf[1], ibuf[2]}
-                                        - {60'd0, ibuf_need};
+                                        + {60'd0, ibuf_need};
                         end
                         cpu_state <= CPU_FETCH;
                     end
@@ -1436,6 +1436,7 @@ module mp64_cpu (
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         // Sign-extending loads
                         case (mem_sub)
                             4'hC: // LD.SB
@@ -1461,7 +1462,7 @@ module mp64_cpu (
                                 fetch_pc <= R[bus_rdata[3:0]];
                                 cpu_state <= CPU_FETCH;
                             end
-                            4'h6: begin // DIS — unpack T byte
+                            4'hB: begin // DIS — unpack T byte
                                 T <= bus_rdata[7:0];
                                 xsel <= bus_rdata[7:4];
                                 psel <= bus_rdata[3:0];
@@ -1493,7 +1494,7 @@ module mp64_cpu (
                             post_action <= POST_NONE;
                             cpu_state <= CPU_MEM_READ2;
                         end else if (mem_sub != 4'hF && mem_sub != 4'h5
-                                     && mem_sub != 4'h6) begin
+                                     && mem_sub != 4'hB) begin
                             cpu_state <= CPU_FETCH;
                         end
                     end
@@ -1507,6 +1508,7 @@ module mp64_cpu (
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         flags <= bus_rdata[7:0];
                         cpu_state <= CPU_FETCH;
                     end
@@ -1521,6 +1523,7 @@ module mp64_cpu (
                     bus_wdata <= mem_data;
                     bus_wen   <= 1'b1;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         // Store-to-code: conservatively invalidate I-cache
                         // line containing the written address
                         if (icache_enabled) begin
