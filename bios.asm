@@ -1796,6 +1796,21 @@ w_tabs:
     t.abs
     ret.l
 
+; TSUMSQ ( -- ) sum-of-squares reduction, result in ACC
+w_tsumsq:
+    t.sumsq
+    ret.l
+
+; TMINIDX ( -- ) argmin reduction, index in ACC0, value in ACC1
+w_tminidx:
+    t.minidx
+    ret.l
+
+; TMAXIDX ( -- ) argmax reduction, index in ACC0, value in ACC1
+w_tmaxidx:
+    t.maxidx
+    ret.l
+
 ; TMODE@ ( -- n ) read current tile mode
 w_tmode_fetch:
     csrr r0, 0x14
@@ -7663,9 +7678,36 @@ d_temax:
     call.l r11
     ret.l
 
+; === TSUMSQ ===
+d_tsumsq:
+    .dq d_temax
+    .db 6
+    .ascii "TSUMSQ"
+    ldi64 r11, w_tsumsq
+    call.l r11
+    ret.l
+
+; === TMINIDX ===
+d_tminidx:
+    .dq d_tsumsq
+    .db 7
+    .ascii "TMINIDX"
+    ldi64 r11, w_tminidx
+    call.l r11
+    ret.l
+
+; === TMAXIDX ===
+d_tmaxidx:
+    .dq d_tminidx
+    .db 7
+    .ascii "TMAXIDX"
+    ldi64 r11, w_tmaxidx
+    call.l r11
+    ret.l
+
 ; === TABS ===
 d_tabs:
-    .dq d_temax
+    .dq d_tmaxidx
     .db 4
     .ascii "TABS"
     ldi64 r11, w_tabs

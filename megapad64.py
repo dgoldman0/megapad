@@ -1275,6 +1275,64 @@ class Megapad64:
                     result = sum(abs(v) for v in values_s)
                 else:
                     result = sum(values)
+            elif funct == 5:  # SUMSQ
+                result = sum(v * v for v in values_s)
+            elif funct == 6:  # MINIDX
+                best_val = values_s[0]
+                best_idx = 0
+                for i in range(1, num_lanes):
+                    if values_s[i] < best_val:
+                        best_val = values_s[i]
+                        best_idx = i
+                # ACC0 = index, ACC1 = value
+                mask64 = MASK64
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                if self.tctrl & 0x1:  # ACC_ACC — compare with running min
+                    old_val = self.acc[1]
+                    if signed:
+                        old_signed = old_val if old_val < (1 << 63) else old_val - (1 << 64)
+                        if best_val < old_signed:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                    else:
+                        if (best_val & mask64) < old_val:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                else:
+                    self.acc[0] = best_idx & mask64
+                    self.acc[1] = best_val & mask64
+                self.flag_z = 1 if self.acc[0] == 0 else 0
+                return 0
+            elif funct == 7:  # MAXIDX
+                best_val = values_s[0]
+                best_idx = 0
+                for i in range(1, num_lanes):
+                    if values_s[i] > best_val:
+                        best_val = values_s[i]
+                        best_idx = i
+                # ACC0 = index, ACC1 = value
+                mask64 = MASK64
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                if self.tctrl & 0x1:  # ACC_ACC — compare with running max
+                    old_val = self.acc[1]
+                    if signed:
+                        old_signed = old_val if old_val < (1 << 63) else old_val - (1 << 64)
+                        if best_val > old_signed:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                    else:
+                        if (best_val & mask64) > old_val:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                else:
+                    self.acc[0] = best_idx & mask64
+                    self.acc[1] = best_val & mask64
+                self.flag_z = 1 if self.acc[0] == 0 else 0
+                return 0
 
             # Store to ACC
             if self.tctrl & 0x2:  # ACC_ZERO

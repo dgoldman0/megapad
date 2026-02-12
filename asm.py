@@ -705,7 +705,8 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         talu_ops = {"add": 0, "sub": 1, "and": 2, "or": 3, "xor": 4,
                     "min": 5, "max": 6, "abs": 7}
         tmul_ops = {"mul": 0, "dot": 1}
-        tred_ops = {"sum": 0, "rmin": 1, "rmax": 2, "popcnt": 3, "l1": 4}
+        tred_ops = {"sum": 0, "rmin": 1, "rmax": 2, "popcnt": 3, "l1": 4,
+                    "sumsq": 5, "minidx": 6, "maxidx": 7}
         tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2}
 
         if sub_name in talu_ops:

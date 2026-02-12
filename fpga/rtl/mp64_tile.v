@@ -233,11 +233,15 @@ module mp64_tile (
     // --- 8-bit lane ALU (64 lanes) ---
     reg [511:0] alu_result_8;
     reg [63:0]  red_result_8;    // reduction result
+    reg [63:0]  red_idx_8;       // reduction index (for MINIDX/MAXIDX)
+    reg [63:0]  red_val_8;       // reduction value (for MINIDX/MAXIDX)
     integer lane8;
 
     always @(*) begin
         alu_result_8 = 512'd0;
         red_result_8 = 64'd0;
+        red_idx_8    = 64'd0;
+        red_val_8    = 64'd0;
 
         // ALU operations
         for (lane8 = 0; lane8 < 64; lane8 = lane8 + 1) begin
@@ -280,6 +284,30 @@ module mp64_tile (
                 for (lane8 = 1; lane8 < 64; lane8 = lane8 + 1)
                     if ({56'd0, tile_a[lane8*8 +: 8]} > red_result_8)
                         red_result_8 = {56'd0, tile_a[lane8*8 +: 8]};
+            end
+            TRED_SUMSQ: begin
+                red_result_8 = 64'd0;
+                for (lane8 = 0; lane8 < 64; lane8 = lane8 + 1)
+                    red_result_8 = red_result_8 +
+                        ({56'd0, tile_a[lane8*8 +: 8]} * {56'd0, tile_a[lane8*8 +: 8]});
+            end
+            TRED_MINIDX: begin
+                red_val_8 = {56'd0, tile_a[7:0]};
+                red_idx_8 = 64'd0;
+                for (lane8 = 1; lane8 < 64; lane8 = lane8 + 1)
+                    if ({56'd0, tile_a[lane8*8 +: 8]} < red_val_8) begin
+                        red_val_8 = {56'd0, tile_a[lane8*8 +: 8]};
+                        red_idx_8 = lane8[63:0];
+                    end
+            end
+            TRED_MAXIDX: begin
+                red_val_8 = {56'd0, tile_a[7:0]};
+                red_idx_8 = 64'd0;
+                for (lane8 = 1; lane8 < 64; lane8 = lane8 + 1)
+                    if ({56'd0, tile_a[lane8*8 +: 8]} > red_val_8) begin
+                        red_val_8 = {56'd0, tile_a[lane8*8 +: 8]};
+                        red_idx_8 = lane8[63:0];
+                    end
             end
             default: red_result_8 = 64'd0;
         endcase
@@ -415,15 +443,41 @@ module mp64_tile (
                 // --------------------------------------------------------
                 S_REDUCE: begin
                     // Reduction: tile_a is loaded, compute reduction
-                    if (tctrl[1]) begin  // ACC_ZERO
-                        acc[0] <= red_result_8;
-                        acc[1] <= 64'd0;
-                        acc[2] <= 64'd0;
-                        acc[3] <= 64'd0;
-                    end else if (tctrl[0]) begin  // ACC_ACC (accumulate)
-                        acc[0] <= acc[0] + red_result_8;
+                    if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX) begin
+                        // MINIDX/MAXIDX: acc[0]=index, acc[1]=value
+                        if (tctrl[1]) begin  // ACC_ZERO
+                            acc[0] <= red_idx_8;
+                            acc[1] <= red_val_8;
+                            acc[2] <= 64'd0;
+                            acc[3] <= 64'd0;
+                        end else if (tctrl[0]) begin  // ACC_ACC — compare with running
+                            if (funct_reg == TRED_MINIDX) begin
+                                if (red_val_8 < acc[1]) begin
+                                    acc[0] <= red_idx_8;
+                                    acc[1] <= red_val_8;
+                                end
+                            end else begin  // MAXIDX
+                                if (red_val_8 > acc[1]) begin
+                                    acc[0] <= red_idx_8;
+                                    acc[1] <= red_val_8;
+                                end
+                            end
+                        end else begin
+                            acc[0] <= red_idx_8;
+                            acc[1] <= red_val_8;
+                        end
                     end else begin
-                        acc[0] <= red_result_8;
+                        // Standard scalar reductions
+                        if (tctrl[1]) begin  // ACC_ZERO
+                            acc[0] <= red_result_8;
+                            acc[1] <= 64'd0;
+                            acc[2] <= 64'd0;
+                            acc[3] <= 64'd0;
+                        end else if (tctrl[0]) begin  // ACC_ACC (accumulate)
+                            acc[0] <= acc[0] + red_result_8;
+                        end else begin
+                            acc[0] <= red_result_8;
+                        end
                     end
                     state <= S_DONE;
                 end

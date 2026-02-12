@@ -168,6 +168,9 @@ parameter [2:0] TRED_MIN  = 3'd1;
 parameter [2:0] TRED_MAX  = 3'd2;
 parameter [2:0] TRED_POPC = 3'd3;
 parameter [2:0] TRED_L1   = 3'd4;
+parameter [2:0] TRED_SUMSQ  = 3'd5;
+parameter [2:0] TRED_MINIDX = 3'd6;
+parameter [2:0] TRED_MAXIDX = 3'd7;
 
 // Tile modes (TMODE CSR bits 1:0)
 parameter [1:0] TMODE_8   = 2'b00;   // 64 × 8-bit lanes
