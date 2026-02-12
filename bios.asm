@@ -6855,6 +6855,44 @@ w_wake_core:
     call.l r11
     ret.l
 
+; =====================================================================
+;  Performance Counter Words
+; =====================================================================
+
+; PERF-CYCLES ( -- n )  push cycle counter
+w_perf_cycles:
+    csrr r0, 0x68
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-STALLS ( -- n )  push stall counter
+w_perf_stalls:
+    csrr r0, 0x69
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-TILEOPS ( -- n )  push tile-op counter
+w_perf_tileops:
+    csrr r0, 0x6A
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-EXTMEM ( -- n )  push external-memory beat counter
+w_perf_extmem:
+    csrr r0, 0x6B
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-RESET ( -- )  reset all perf counters and re-enable
+w_perf_reset:
+    ldi r0, 3
+    csrw 0x6C, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -8748,12 +8786,57 @@ d_wake_core:
     ret.l
 
 ; === CORE-STATUS ===
-latest_entry:
 d_core_status:
     .dq d_wake_core
     .db 11
     .ascii "CORE-STATUS"
     ldi64 r11, w_core_status
+    call.l r11
+    ret.l
+
+; === PERF-CYCLES ===
+d_perf_cycles:
+    .dq d_core_status
+    .db 11
+    .ascii "PERF-CYCLES"
+    ldi64 r11, w_perf_cycles
+    call.l r11
+    ret.l
+
+; === PERF-STALLS ===
+d_perf_stalls:
+    .dq d_perf_cycles
+    .db 11
+    .ascii "PERF-STALLS"
+    ldi64 r11, w_perf_stalls
+    call.l r11
+    ret.l
+
+; === PERF-TILEOPS ===
+d_perf_tileops:
+    .dq d_perf_stalls
+    .db 12
+    .ascii "PERF-TILEOPS"
+    ldi64 r11, w_perf_tileops
+    call.l r11
+    ret.l
+
+; === PERF-EXTMEM ===
+d_perf_extmem:
+    .dq d_perf_tileops
+    .db 11
+    .ascii "PERF-EXTMEM"
+    ldi64 r11, w_perf_extmem
+    call.l r11
+    ret.l
+
+; === PERF-RESET ===
+latest_entry:
+d_perf_reset:
+    .dq d_perf_extmem
+    .db 10
+    .ascii "PERF-RESET"
+    ldi64 r11, w_perf_reset
     call.l r11
     ret.l
 

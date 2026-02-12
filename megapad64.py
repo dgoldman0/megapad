@@ -71,6 +71,13 @@ CSR_TRAP_ADDR   = 0x25  # Faulting address
 CSR_MEGAPAD_SZ  = 0x30
 CSR_CPUID       = 0x31
 
+# Performance counter CSRs
+CSR_PERF_CYCLES  = 0x68
+CSR_PERF_STALLS  = 0x69
+CSR_PERF_TILEOPS = 0x6A
+CSR_PERF_EXTMEM  = 0x6B
+CSR_PERF_CTRL    = 0x6C
+
 # IVEC IDs
 IVEC_RESET          = 0x00
 IVEC_NMI            = 0x01
@@ -187,6 +194,13 @@ class Megapad64:
         self.halted: bool = False
         self.idle: bool   = False
         self.cycle_count: int = 0
+
+        # Performance counters
+        self.perf_enable: int  = 1   # counting enabled by default
+        self.perf_cycles: int  = 0   # total clock cycles
+        self.perf_stalls: int  = 0   # stall cycles (bus/memory wait)
+        self.perf_tileops: int = 0   # tile engine operations completed
+        self.perf_extmem: int  = 0   # external memory beats
 
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
@@ -420,6 +434,11 @@ class Megapad64:
             CSR_TRAP_ADDR:  lambda: self.trap_addr,
             CSR_MEGAPAD_SZ: lambda: 0,      # 8 MiB config
             CSR_CPUID:      lambda: 0x4D50_3634_0001_0000,  # "MP64" v1.0
+            CSR_PERF_CYCLES:  lambda: u64(self.perf_cycles),
+            CSR_PERF_STALLS:  lambda: u64(self.perf_stalls),
+            CSR_PERF_TILEOPS: lambda: u64(self.perf_tileops),
+            CSR_PERF_EXTMEM:  lambda: u64(self.perf_extmem),
+            CSR_PERF_CTRL:    lambda: self.perf_enable & 1,
         }
         fn = m.get(addr)
         if fn is None:
@@ -456,12 +475,22 @@ class Megapad64:
             CSR_MBOX:     lambda v: self._ipi_send(v),
             CSR_IPIACK:   lambda v: self._ipi_ack(v),
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
+            CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
         }
         fn = dispatch.get(addr)
         if fn:
             fn(val)
 
     # -- IPI helpers (stubs — system.py wires the real mailbox) --
+
+    def _perf_ctrl_write(self, val: int):
+        """Handle writes to CSR_PERF_CTRL."""
+        self.perf_enable = val & 1
+        if val & 2:  # bit 1 = reset all counters
+            self.perf_cycles  = 0
+            self.perf_stalls  = 0
+            self.perf_tileops = 0
+            self.perf_extmem  = 0
 
     @property
     def _ipi_pending_mask(self) -> int:
@@ -538,6 +567,17 @@ class Megapad64:
         # Clear EXT modifier after use
         self._ext_modifier = -1
         self.cycle_count += cycles
+
+        # Update performance counters
+        if self.perf_enable:
+            self.perf_cycles += cycles
+            # Stall cycles: any cycles beyond the base 1 for memory ops
+            if f in (0x5, 0x8) and cycles > 1:    # MEM, MEMALU
+                self.perf_stalls += cycles - 1
+            # Tile ops: MEX family
+            if f == 0xE:
+                self.perf_tileops += 1
+
         return cycles
 
     # =====================================================================

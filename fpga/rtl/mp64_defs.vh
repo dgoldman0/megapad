@@ -212,6 +212,13 @@ parameter [7:0] CSR_TRAP_ADDR= 8'h25;   // Faulting address
 parameter [7:0] CSR_MEGAPAD_SZ=8'h30;   // Memory size config (read-only)
 parameter [7:0] CSR_CPUID    = 8'h31;   // CPU identification (read-only)
 
+// Performance counter CSR addresses
+parameter [7:0] CSR_PERF_CYCLES  = 8'h68;  // Total clock cycles since reset
+parameter [7:0] CSR_PERF_STALLS  = 8'h69;  // Stall cycles (bus/memory wait)
+parameter [7:0] CSR_PERF_TILEOPS = 8'h6A;  // Tile engine operations completed
+parameter [7:0] CSR_PERF_EXTMEM  = 8'h6B;  // External memory beats
+parameter [7:0] CSR_PERF_CTRL    = 8'h6C;  // Bit 0: enable, Bit 1: reset all
+
 // ----------------------------------------------------------------------------
 // Bus protocol
 // ----------------------------------------------------------------------------

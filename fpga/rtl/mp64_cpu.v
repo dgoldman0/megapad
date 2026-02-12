@@ -105,6 +105,13 @@ module mp64_cpu (
     reg [7:0]  ivec_id;    // current interrupt vector ID
     reg [63:0] trap_addr;  // faulting address
 
+    // Performance counters (per-core)
+    reg [63:0] perf_cycles;     // total clock cycles
+    reg [63:0] perf_stalls;     // stall cycles (waiting for bus/memory)
+    reg [63:0] perf_tileops;    // tile engine operations completed
+    reg [63:0] perf_extmem;     // external memory beats
+    reg        perf_enable;     // counting enabled
+
     // EXT prefix modifier
     reg [3:0]  ext_mod;
     reg        ext_active;
@@ -431,6 +438,13 @@ module mp64_cpu (
             io_port     <= 3'd0;
             io_is_inp   <= 1'b0;
 
+            // Performance counters
+            perf_cycles  <= 64'd0;
+            perf_stalls  <= 64'd0;
+            perf_tileops <= 64'd0;
+            perf_extmem  <= 64'd0;
+            perf_enable  <= 1'b1;  // enabled by default
+
             // Clear register file
             R[0]  <= 64'd0;  R[1]  <= 64'd0;  R[2]  <= 64'd0;  R[3]  <= 64'd0;
             R[4]  <= 64'd0;  R[5]  <= 64'd0;  R[6]  <= 64'd0;  R[7]  <= 64'd0;
@@ -441,6 +455,25 @@ module mp64_cpu (
             bus_valid <= 1'b0;
             csr_wen   <= 1'b0;
             mex_valid <= 1'b0;
+
+            // Performance counter increments (every cycle when enabled)
+            if (perf_enable) begin
+                perf_cycles <= perf_cycles + 64'd1;
+                // Stall: waiting for bus in MEM_READ, MEM_WRITE, FETCH_MORE,
+                // MEMALU_RD, MEMALU_WB, MEM_READ2, or IRQ push/load states
+                if ((cpu_state == CPU_FETCH_MORE && bus_valid && !bus_ready) ||
+                    (cpu_state == CPU_MEM_READ  && !bus_ready) ||
+                    (cpu_state == CPU_MEM_WRITE && !bus_ready) ||
+                    (cpu_state == CPU_MEM_READ2 && !bus_ready) ||
+                    (cpu_state == CPU_MEMALU_RD && !bus_ready) ||
+                    (cpu_state == CPU_MEMALU_WB && !bus_ready) ||
+                    (cpu_state == CPU_IRQ_PUSH  && !bus_ready) ||
+                    (cpu_state == CPU_IRQ_LOAD  && !bus_ready))
+                    perf_stalls <= perf_stalls + 64'd1;
+                // Tile ops: count completed MEX instructions
+                if (cpu_state == CPU_MEX_WAIT && mex_done)
+                    perf_tileops <= perf_tileops + 64'd1;
+            end
 
             case (cpu_state)
 
@@ -1142,6 +1175,15 @@ module mp64_cpu (
                                 CSR_TREG:    T        <= R[nib[2:0]][7:0];
                                 CSR_IE:      flags[6] <= R[nib[2:0]][0];
                                 CSR_IVEC_ID: ivec_id  <= R[nib[2:0]][7:0];
+                                CSR_PERF_CTRL: begin
+                                    perf_enable <= R[nib[2:0]][0];
+                                    if (R[nib[2:0]][1]) begin  // bit 1 = reset
+                                        perf_cycles  <= 64'd0;
+                                        perf_stalls  <= 64'd0;
+                                        perf_tileops <= 64'd0;
+                                        perf_extmem  <= 64'd0;
+                                    end
+                                end
                                 // COREID, NCORES are read-only — ignore writes
                             endcase
                         end else begin
@@ -1163,6 +1205,11 @@ module mp64_cpu (
                                 CSR_TRAP_ADDR:  R[nib[2:0]] <= trap_addr;
                                 CSR_MEGAPAD_SZ: R[nib[2:0]] <= 64'd0;
                                 CSR_CPUID:      R[nib[2:0]] <= 64'h4D50_3634_0001_0000;
+                                CSR_PERF_CYCLES:  R[nib[2:0]] <= perf_cycles;
+                                CSR_PERF_STALLS:  R[nib[2:0]] <= perf_stalls;
+                                CSR_PERF_TILEOPS: R[nib[2:0]] <= perf_tileops;
+                                CSR_PERF_EXTMEM:  R[nib[2:0]] <= perf_extmem;
+                                CSR_PERF_CTRL:    R[nib[2:0]] <= {63'd0, perf_enable};
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end
