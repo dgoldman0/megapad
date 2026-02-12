@@ -43,6 +43,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
+;    CRC    0xFFFF_FF00_0000_07C0   POLY=+0 INIT=+8 DIN=+10 RESULT=+18 CTRL=+20
 ;
 ;  Multicore CSRs
 ;  ----
@@ -1794,6 +1795,41 @@ w_temax:
 ; TABS ( -- ) element-wise absolute value, writes to DST tile
 w_tabs:
     t.abs
+    ret.l
+
+; TSUMSQ ( -- ) sum-of-squares reduction, result in ACC
+w_tsumsq:
+    t.sumsq
+    ret.l
+
+; TMINIDX ( -- ) argmin reduction, index in ACC0, value in ACC1
+w_tminidx:
+    t.minidx
+    ret.l
+
+; TMAXIDX ( -- ) argmax reduction, index in ACC0, value in ACC1
+w_tmaxidx:
+    t.maxidx
+    ret.l
+
+; TWMUL ( -- ) widening multiply, output to TDST and TDST+64
+w_twmul:
+    t.wmul
+    ret.l
+
+; TMAC ( -- ) multiply-accumulate in-place: dst[i] += a[i]*b[i]
+w_tmac:
+    t.mac
+    ret.l
+
+; TFMA ( -- ) fused multiply-add: dst[i] = a[i]*b[i] + dst[i]
+w_tfma:
+    t.fma
+    ret.l
+
+; TDOTACC ( -- ) 4-way chunked dot product into ACC0-ACC3
+w_tdotacc:
+    t.dotacc
     ret.l
 
 ; TMODE@ ( -- n ) read current tile mode
@@ -6855,6 +6891,161 @@ w_wake_core:
     call.l r11
     ret.l
 
+; =====================================================================
+;  Performance Counter Words
+; =====================================================================
+
+; PERF-CYCLES ( -- n )  push cycle counter
+w_perf_cycles:
+    csrr r0, 0x68
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-STALLS ( -- n )  push stall counter
+w_perf_stalls:
+    csrr r0, 0x69
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-TILEOPS ( -- n )  push tile-op counter
+w_perf_tileops:
+    csrr r0, 0x6A
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-EXTMEM ( -- n )  push external-memory beat counter
+w_perf_extmem:
+    csrr r0, 0x6B
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; PERF-RESET ( -- )  reset all perf counters and re-enable
+w_perf_reset:
+    ldi r0, 3
+    csrw 0x6C, r0
+    ret.l
+
+; =====================================================================
+;  CRC Engine — MMIO at 0xFFFF_FF00_0000_07C0
+; =====================================================================
+; CRC base   = 0xFFFF_FF00_0000_07C0
+;   POLY  +0x00 (W)  polynomial select: 0=CRC32, 1=CRC32C, 2=CRC64
+;   INIT  +0x08 (W)  initial CRC value (64-bit LE)
+;   DIN   +0x10 (W)  data input (8 bytes, processes on full write)
+;   RESULT+0x18 (R)  current CRC value (64-bit LE)
+;   CTRL  +0x20 (W)  0=reset to init, 1=finalize (XOR-out)
+
+; CRC-POLY! ( n -- )  set polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
+w_crc_poly_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_07C0    ; CRC_POLY
+    str r11, r0
+    ret.l
+
+; CRC-INIT! ( n -- )  set initial CRC value
+w_crc_init_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_07C8    ; CRC_INIT
+    str r11, r0
+    ret.l
+
+; CRC-FEED ( n -- )  feed 8 bytes of data
+w_crc_feed:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_07D0    ; CRC_DIN
+    str r11, r0
+    ret.l
+
+; CRC@ ( -- n )  read current CRC result
+w_crc_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_07D8    ; CRC_RESULT
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; CRC-RESET ( -- )  reset CRC to init value
+w_crc_reset:
+    ldi r0, 0
+    ldi64 r11, 0xFFFF_FF00_0000_07E0    ; CRC_CTRL = 0 (reset)
+    str r11, r0
+    ret.l
+
+; CRC-FINAL ( -- )  finalize CRC (XOR-out)
+w_crc_final:
+    ldi r0, 1
+    ldi64 r11, 0xFFFF_FF00_0000_07E0    ; CRC_CTRL = 1 (finalize)
+    str r11, r0
+    ret.l
+
+; =====================================================================
+;  Memory BIST — CSR 0x60..0x63
+; =====================================================================
+
+; BIST-FULL ( -- )  start full memory BIST (March C- + checkerboard + addr-as-data)
+w_bist_full:
+    ldi r0, 1
+    csrw 0x60, r0
+    ret.l
+
+; BIST-QUICK ( -- )  start quick memory BIST (March C- only)
+w_bist_quick:
+    ldi r0, 2
+    csrw 0x60, r0
+    ret.l
+
+; BIST-STATUS ( -- n )  read BIST status: 0=idle 1=running 2=pass 3=fail
+w_bist_status:
+    csrr r0, 0x61
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BIST-FAIL-ADDR ( -- n )  read first failing address
+w_bist_fail_addr:
+    csrr r0, 0x62
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BIST-FAIL-DATA ( -- n )  read expected/actual data (packed)
+w_bist_fail_data:
+    csrr r0, 0x63
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
+;  Tile Datapath Self-Test — CSR 0x64..0x65
+; =====================================================================
+
+; TILE-TEST ( -- )  start tile datapath self-test
+w_tile_test:
+    ldi r0, 1
+    csrw 0x64, r0
+    ret.l
+
+; TILE-TEST@ ( -- n )  read self-test status: 0=idle 2=pass 3=fail
+w_tile_test_fetch:
+    csrr r0, 0x64
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TILE-DETAIL@ ( -- n )  read failed sub-test bitmask
+w_tile_detail_fetch:
+    csrr r0, 0x65
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; CORE-STATUS ( core -- n )  read worker XT slot for core (0 = idle)
 w_core_status:
     ldn r0, r14                         ; core ID
@@ -7625,9 +7816,72 @@ d_temax:
     call.l r11
     ret.l
 
+; === TSUMSQ ===
+d_tsumsq:
+    .dq d_temax
+    .db 6
+    .ascii "TSUMSQ"
+    ldi64 r11, w_tsumsq
+    call.l r11
+    ret.l
+
+; === TMINIDX ===
+d_tminidx:
+    .dq d_tsumsq
+    .db 7
+    .ascii "TMINIDX"
+    ldi64 r11, w_tminidx
+    call.l r11
+    ret.l
+
+; === TMAXIDX ===
+d_tmaxidx:
+    .dq d_tminidx
+    .db 7
+    .ascii "TMAXIDX"
+    ldi64 r11, w_tmaxidx
+    call.l r11
+    ret.l
+
+; === TWMUL ===
+d_twmul:
+    .dq d_tmaxidx
+    .db 5
+    .ascii "TWMUL"
+    ldi64 r11, w_twmul
+    call.l r11
+    ret.l
+
+; === TMAC ===
+d_tmac:
+    .dq d_twmul
+    .db 4
+    .ascii "TMAC"
+    ldi64 r11, w_tmac
+    call.l r11
+    ret.l
+
+; === TFMA ===
+d_tfma:
+    .dq d_tmac
+    .db 4
+    .ascii "TFMA"
+    ldi64 r11, w_tfma
+    call.l r11
+    ret.l
+
+; === TDOTACC ===
+d_tdotacc:
+    .dq d_tfma
+    .db 7
+    .ascii "TDOTACC"
+    ldi64 r11, w_tdotacc
+    call.l r11
+    ret.l
+
 ; === TABS ===
 d_tabs:
-    .dq d_temax
+    .dq d_tdotacc
     .db 4
     .ascii "TABS"
     ldi64 r11, w_tabs
@@ -8748,13 +9002,258 @@ d_wake_core:
     ret.l
 
 ; === CORE-STATUS ===
-latest_entry:
 d_core_status:
     .dq d_wake_core
     .db 11
     .ascii "CORE-STATUS"
     ldi64 r11, w_core_status
     call.l r11
+    ret.l
+
+; === PERF-CYCLES ===
+d_perf_cycles:
+    .dq d_core_status
+    .db 11
+    .ascii "PERF-CYCLES"
+    ldi64 r11, w_perf_cycles
+    call.l r11
+    ret.l
+
+; === PERF-STALLS ===
+d_perf_stalls:
+    .dq d_perf_cycles
+    .db 11
+    .ascii "PERF-STALLS"
+    ldi64 r11, w_perf_stalls
+    call.l r11
+    ret.l
+
+; === PERF-TILEOPS ===
+d_perf_tileops:
+    .dq d_perf_stalls
+    .db 12
+    .ascii "PERF-TILEOPS"
+    ldi64 r11, w_perf_tileops
+    call.l r11
+    ret.l
+
+; === PERF-EXTMEM ===
+d_perf_extmem:
+    .dq d_perf_tileops
+    .db 11
+    .ascii "PERF-EXTMEM"
+    ldi64 r11, w_perf_extmem
+    call.l r11
+    ret.l
+
+; === PERF-RESET ===
+d_perf_reset:
+    .dq d_perf_extmem
+    .db 10
+    .ascii "PERF-RESET"
+    ldi64 r11, w_perf_reset
+    call.l r11
+    ret.l
+
+; === CRC-POLY! ===
+d_crc_poly_store:
+    .dq d_perf_reset
+    .db 9
+    .ascii "CRC-POLY!"
+    ldi64 r11, w_crc_poly_store
+    call.l r11
+    ret.l
+
+; === CRC-INIT! ===
+d_crc_init_store:
+    .dq d_crc_poly_store
+    .db 9
+    .ascii "CRC-INIT!"
+    ldi64 r11, w_crc_init_store
+    call.l r11
+    ret.l
+
+; === CRC-FEED ===
+d_crc_feed:
+    .dq d_crc_init_store
+    .db 8
+    .ascii "CRC-FEED"
+    ldi64 r11, w_crc_feed
+    call.l r11
+    ret.l
+
+; === CRC@ ===
+d_crc_fetch:
+    .dq d_crc_feed
+    .db 4
+    .ascii "CRC@"
+    ldi64 r11, w_crc_fetch
+    call.l r11
+    ret.l
+
+; === CRC-RESET ===
+d_crc_reset:
+    .dq d_crc_fetch
+    .db 9
+    .ascii "CRC-RESET"
+    ldi64 r11, w_crc_reset
+    call.l r11
+    ret.l
+
+; === CRC-FINAL ===
+d_crc_final:
+    .dq d_crc_reset
+    .db 9
+    .ascii "CRC-FINAL"
+    ldi64 r11, w_crc_final
+    call.l r11
+    ret.l
+
+; === BIST-FULL ===
+d_bist_full:
+    .dq d_crc_final
+    .db 9
+    .ascii "BIST-FULL"
+    ldi64 r11, w_bist_full
+    call.l r11
+    ret.l
+
+; === BIST-QUICK ===
+d_bist_quick:
+    .dq d_bist_full
+    .db 10
+    .ascii "BIST-QUICK"
+    ldi64 r11, w_bist_quick
+    call.l r11
+    ret.l
+
+; === BIST-STATUS ===
+d_bist_status:
+    .dq d_bist_quick
+    .db 11
+    .ascii "BIST-STATUS"
+    ldi64 r11, w_bist_status
+    call.l r11
+    ret.l
+
+; === BIST-FAIL-ADDR ===
+d_bist_fail_addr:
+    .dq d_bist_status
+    .db 14
+    .ascii "BIST-FAIL-ADDR"
+    ldi64 r11, w_bist_fail_addr
+    call.l r11
+    ret.l
+
+; === BIST-FAIL-DATA ===
+d_bist_fail_data:
+    .dq d_bist_fail_addr
+    .db 14
+    .ascii "BIST-FAIL-DATA"
+    ldi64 r11, w_bist_fail_data
+    call.l r11
+    ret.l
+
+; === TILE-TEST ===
+d_tile_test:
+    .dq d_bist_fail_data
+    .db 9
+    .ascii "TILE-TEST"
+    ldi64 r11, w_tile_test
+    call.l r11
+    ret.l
+
+; === TILE-TEST@ ===
+d_tile_test_fetch:
+    .dq d_tile_test
+    .db 10
+    .ascii "TILE-TEST@"
+    ldi64 r11, w_tile_test_fetch
+    call.l r11
+    ret.l
+
+; === TILE-DETAIL@ ===
+d_tile_detail_fetch:
+    .dq d_tile_test_fetch
+    .db 12
+    .ascii "TILE-DETAIL@"
+    ldi64 r11, w_tile_detail_fetch
+    call.l r11
+    ret.l
+
+; === TSTRIDE-R! ( n -- ) ===
+d_tstride_r:
+    .dq d_tile_detail_fetch
+    .db 10
+    .ascii "TSTRIDE-R!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x40, r0
+    ret.l
+
+; === TSTRIDE-R@ ( -- n ) ===
+d_tstride_r_fetch:
+    .dq d_tstride_r
+    .db 10
+    .ascii "TSTRIDE-R@"
+    csrr r0, 0x40
+    subi r14, 8
+    str r0, r14
+    ret.l
+
+; === TTILE-H! ( n -- ) ===
+d_ttile_h:
+    .dq d_tstride_r_fetch
+    .db 8
+    .ascii "TTILE-H!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x42, r0
+    ret.l
+
+; === TTILE-W! ( n -- ) ===
+d_ttile_w:
+    .dq d_ttile_h
+    .db 8
+    .ascii "TTILE-W!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x43, r0
+    ret.l
+
+; === TLOAD2D ( -- ) ===
+d_tload2d:
+    .dq d_ttile_w
+    .db 7
+    .ascii "TLOAD2D"
+    t.load2d
+    ret.l
+
+; === TSTORE2D ( -- ) ===
+d_tstore2d:
+    .dq d_tload2d
+    .db 8
+    .ascii "TSTORE2D"
+    t.store2d
+    ret.l
+
+; === FP16-MODE ( -- ) set TMODE to fp16 (EW=4) ===
+d_fp16_mode:
+    .dq d_tstore2d
+    .db 9
+    .ascii "FP16-MODE"
+    ldi r0, 4
+    csrw 0x14, r0
+    ret.l
+
+; === BF16-MODE ( -- ) set TMODE to bf16 (EW=5) ===
+latest_entry:
+d_bf16_mode:
+    .dq d_fp16_mode
+    .db 9
+    .ascii "BF16-MODE"
+    ldi r0, 5
+    csrw 0x14, r0
     ret.l
 
 ; =====================================================================

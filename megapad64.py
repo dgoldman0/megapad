@@ -68,8 +68,31 @@ CSR_MBOX        = 0x22  # Read: pending IPI mask, Write: send IPI
 CSR_IPIACK      = 0x23  # Write: acknowledge IPI from core N
 CSR_IVEC_ID     = 0x24  # Current interrupt vector ID
 CSR_TRAP_ADDR   = 0x25  # Faulting address
+# Strided / 2D tile addressing CSRs (§2.5)
+CSR_TSTRIDE_R   = 0x40   # Row stride in bytes
+CSR_TSTRIDE_C   = 0x41   # Column stride in bytes (reserved)
+CSR_TTILE_H     = 0x42   # Tile height (rows to load, 1–8)
+CSR_TTILE_W     = 0x43   # Tile width (cols per row in bytes, 1–64)
+
 CSR_MEGAPAD_SZ  = 0x30
 CSR_CPUID       = 0x31
+
+# Performance counter CSRs
+CSR_PERF_CYCLES  = 0x68
+
+# BIST CSRs (§6.1 — Memory Built-In Self-Test)
+CSR_BIST_CMD       = 0x60   # W: 0=idle, 1=start-full, 2=start-quick
+CSR_BIST_STATUS    = 0x61   # R: 0=idle, 1=running, 2=pass, 3=fail
+CSR_BIST_FAIL_ADDR = 0x62   # R: first failing address
+CSR_BIST_FAIL_DATA = 0x63   # R: expected vs actual data
+
+# Tile Datapath Self-Test CSRs (§6.2)
+CSR_TILE_SELFTEST  = 0x64   # W: 1=start; R: 0=idle, 1=running, 2=pass, 3=fail
+CSR_TILE_ST_DETAIL = 0x65   # R: bitmask of failed sub-tests
+CSR_PERF_STALLS  = 0x69
+CSR_PERF_TILEOPS = 0x6A
+CSR_PERF_EXTMEM  = 0x6B
+CSR_PERF_CTRL    = 0x6C
 
 # IVEC IDs
 IVEC_RESET          = 0x00
@@ -81,6 +104,14 @@ IVEC_BUS_FAULT      = 0x05
 IVEC_SW_TRAP        = 0x06
 IVEC_TIMER          = 0x07
 IVEC_IPI            = 0x08  # Inter-processor interrupt
+
+# TMODE EW codes (bits [2:0])
+EW_U8    = 0  # 64 lanes × 8-bit
+EW_U16   = 1  # 32 lanes × 16-bit
+EW_U32   = 2  # 16 lanes × 32-bit
+EW_U64   = 3  #  8 lanes × 64-bit
+EW_FP16  = 4  # 32 lanes × IEEE 754 half-precision
+EW_BF16  = 5  # 32 lanes × bfloat16
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -94,6 +125,128 @@ def s64(v: int) -> int:
     """Interpret a 64-bit value as signed."""
     v = u64(v)
     return v - (1 << 64) if v >= SIGN64 else v
+
+# ---------------------------------------------------------------------------
+#  FP16 / bfloat16 conversion helpers
+# ---------------------------------------------------------------------------
+
+def _fp16_to_float(h: int) -> float:
+    """Convert IEEE 754 half-precision (16-bit raw) to Python float."""
+    sign = (h >> 15) & 1
+    exp = (h >> 10) & 0x1F
+    frac = h & 0x3FF
+    if exp == 0:
+        if frac == 0:
+            return -0.0 if sign else 0.0
+        # Subnormal
+        val = (2.0 ** -14) * (frac / 1024.0)
+        return -val if sign else val
+    if exp == 0x1F:
+        if frac == 0:
+            return float('-inf') if sign else float('inf')
+        return float('nan')
+    val = (2.0 ** (exp - 15)) * (1.0 + frac / 1024.0)
+    return -val if sign else val
+
+
+def _float_to_fp16(f: float) -> int:
+    """Convert Python float to IEEE 754 half-precision (16-bit raw).
+    Uses round-to-nearest-even."""
+    import math
+    if math.isnan(f):
+        return 0x7E00  # quiet NaN
+    if math.isinf(f):
+        return 0xFC00 if f < 0 else 0x7C00
+    if f == 0.0:
+        return 0x8000 if math.copysign(1.0, f) < 0 else 0x0000
+    # Get FP32 bits for the rounding logic
+    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    sign = (bits >> 31) & 1
+    exp32 = (bits >> 23) & 0xFF
+    frac32 = bits & 0x7FFFFF
+    # Rebias exponent: FP32 bias=127, FP16 bias=15
+    new_exp = exp32 - 127 + 15
+    if new_exp >= 0x1F:
+        return (sign << 15) | 0x7C00  # overflow → ±inf
+    if new_exp <= 0:
+        if new_exp < -10:
+            return sign << 15  # underflow → ±0
+        # Subnormal: shift mantissa
+        frac32 |= 0x800000  # implicit 1
+        shift = 1 - new_exp  # how far into subnormal
+        # Round-to-nearest-even
+        round_bit = (frac32 >> (12 + shift)) & 1
+        sticky = (frac32 & ((1 << (12 + shift)) - 1)) != 0
+        result = frac32 >> (13 + shift)
+        if round_bit and (sticky or (result & 1)):
+            result += 1
+        return (sign << 15) | (result & 0x3FF)
+    # Normal: round mantissa from 23 bits to 10 bits
+    round_bit = (frac32 >> 12) & 1
+    sticky = (frac32 & 0xFFF) != 0
+    frac16 = frac32 >> 13
+    if round_bit and (sticky or (frac16 & 1)):
+        frac16 += 1
+        if frac16 >= 0x400:
+            frac16 = 0
+            new_exp += 1
+            if new_exp >= 0x1F:
+                return (sign << 15) | 0x7C00
+    return (sign << 15) | (new_exp << 10) | (frac16 & 0x3FF)
+
+
+def _bf16_to_float(b: int) -> float:
+    """Convert bfloat16 (16-bit raw) to Python float."""
+    bits32 = (b & 0xFFFF) << 16
+    return struct.unpack('<f', struct.pack('<I', bits32))[0]
+
+
+def _float_to_bf16(f: float) -> int:
+    """Convert Python float to bfloat16 (16-bit raw).
+    Uses round-to-nearest-even."""
+    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    # Round: look at lower 16 bits
+    round_bit = (bits >> 15) & 1
+    sticky = (bits & 0x7FFF) != 0
+    result = bits >> 16
+    if round_bit and (sticky or (result & 1)):
+        result += 1
+        # Overflow of mantissa into exponent is handled naturally
+    return result & 0xFFFF
+
+
+def _fp32_to_bits(f: float) -> int:
+    """Python float → 32-bit IEEE 754 bit pattern."""
+    return struct.unpack('<I', struct.pack('<f', f))[0]
+
+
+def _bits_to_fp32(b: int) -> float:
+    """32-bit IEEE 754 bit pattern → Python float."""
+    return struct.unpack('<f', struct.pack('<I', b & 0xFFFFFFFF))[0]
+
+
+def _fp_decode(raw: int, ew: int) -> float:
+    """Decode a raw 16-bit tile lane value to Python float based on EW code."""
+    if ew == EW_FP16:
+        return _fp16_to_float(raw & 0xFFFF)
+    else:  # EW_BF16
+        return _bf16_to_float(raw & 0xFFFF)
+
+
+def _fp_encode(val: float, ew: int) -> int:
+    """Encode a Python float back to 16-bit raw based on EW code."""
+    if ew == EW_FP16:
+        return _float_to_fp16(val)
+    else:  # EW_BF16
+        return _float_to_bf16(val)
+
+
+def _fp_is_nan(raw: int, ew: int) -> bool:
+    """Check if a raw 16-bit value is NaN for the given FP format."""
+    if ew == EW_FP16:
+        return ((raw >> 10) & 0x1F) == 0x1F and (raw & 0x3FF) != 0
+    else:  # EW_BF16
+        return ((raw >> 7) & 0xFF) == 0xFF and (raw & 0x7F) != 0
 
 def sign_extend(val: int, bits: int) -> int:
     """Sign-extend a *bits*-wide value to 64 bits."""
@@ -187,6 +340,28 @@ class Megapad64:
         self.halted: bool = False
         self.idle: bool   = False
         self.cycle_count: int = 0
+
+        # Strided / 2D tile addressing
+        self.tstride_r: int = 0    # row stride in bytes (0 = disabled)
+        self.tstride_c: int = 0    # column stride (reserved)
+        self.ttile_h: int   = 8    # tile height (rows, 1-8)
+        self.ttile_w: int   = 8    # tile width (bytes per row, 1-64)
+
+        # Performance counters
+        self.perf_enable: int  = 1   # counting enabled by default
+        self.perf_cycles: int  = 0   # total clock cycles
+        self.perf_stalls: int  = 0   # stall cycles (bus/memory wait)
+        self.perf_tileops: int = 0   # tile engine operations completed
+        self.perf_extmem: int  = 0   # external memory beats
+
+        # Memory BIST state
+        self.bist_status: int    = 0   # 0=idle, 2=pass, 3=fail
+        self.bist_fail_addr: int = 0   # first failing address
+        self.bist_fail_data: int = 0   # expected vs actual (packed)
+
+        # Tile datapath self-test state
+        self.tile_selftest: int    = 0   # 0=idle, 2=pass, 3=fail
+        self.tile_st_detail: int   = 0   # bitmask of failed sub-tests
 
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
@@ -420,6 +595,21 @@ class Megapad64:
             CSR_TRAP_ADDR:  lambda: self.trap_addr,
             CSR_MEGAPAD_SZ: lambda: 0,      # 8 MiB config
             CSR_CPUID:      lambda: 0x4D50_3634_0001_0000,  # "MP64" v1.0
+            CSR_PERF_CYCLES:  lambda: u64(self.perf_cycles),
+            CSR_PERF_STALLS:  lambda: u64(self.perf_stalls),
+            CSR_PERF_TILEOPS: lambda: u64(self.perf_tileops),
+            CSR_PERF_EXTMEM:  lambda: u64(self.perf_extmem),
+            CSR_PERF_CTRL:    lambda: self.perf_enable & 1,
+            CSR_BIST_CMD:       lambda: 0,  # write-only
+            CSR_BIST_STATUS:    lambda: self.bist_status,
+            CSR_BIST_FAIL_ADDR: lambda: self.bist_fail_addr,
+            CSR_BIST_FAIL_DATA: lambda: self.bist_fail_data,
+            CSR_TILE_SELFTEST:  lambda: self.tile_selftest,
+            CSR_TILE_ST_DETAIL: lambda: self.tile_st_detail,
+            CSR_TSTRIDE_R:      lambda: self.tstride_r,
+            CSR_TSTRIDE_C:      lambda: self.tstride_c,
+            CSR_TTILE_H:        lambda: self.ttile_h,
+            CSR_TTILE_W:        lambda: self.ttile_w,
         }
         fn = m.get(addr)
         if fn is None:
@@ -456,12 +646,316 @@ class Megapad64:
             CSR_MBOX:     lambda v: self._ipi_send(v),
             CSR_IPIACK:   lambda v: self._ipi_ack(v),
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
+            CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
+            CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
+            CSR_TILE_SELFTEST: lambda v: self._tile_selftest_write(v),
+            CSR_TSTRIDE_R: lambda v: setattr(self, 'tstride_r', v & 0xFFFFF),
+            CSR_TSTRIDE_C: lambda v: setattr(self, 'tstride_c', v & 0xFFFFF),
+            CSR_TTILE_H:   lambda v: setattr(self, 'ttile_h', max(1, min(8, v & 0xFF))),
+            CSR_TTILE_W:   lambda v: setattr(self, 'ttile_w', max(1, min(64, v & 0xFF))),
         }
         fn = dispatch.get(addr)
         if fn:
             fn(val)
 
     # -- IPI helpers (stubs — system.py wires the real mailbox) --
+
+    def _perf_ctrl_write(self, val: int):
+        """Handle writes to CSR_PERF_CTRL."""
+        self.perf_enable = val & 1
+        if val & 2:  # bit 1 = reset all counters
+            self.perf_cycles  = 0
+            self.perf_stalls  = 0
+            self.perf_tileops = 0
+            self.perf_extmem  = 0
+
+    def _bist_cmd_write(self, val: int):
+        """Handle writes to CSR_BIST_CMD — run memory BIST immediately.
+        0=idle (no-op), 1=full test, 2=quick (March C- only)."""
+        if val == 0:
+            return
+        self.bist_status = 1     # running
+        self.bist_fail_addr = 0
+        self.bist_fail_data = 0
+        # Scratchpad region 0xFFF80..0xFFFFF is excluded from BIST
+        end = min(self.mem_size, 0xFFF80)
+        ok = self._bist_march_c_minus(end)
+        if ok and val == 1:
+            ok = self._bist_checkerboard(end)
+        if ok and val == 1:
+            ok = self._bist_addr_as_data(end)
+        self.bist_status = 2 if ok else 3
+
+    def _bist_march_c_minus(self, end: int) -> bool:
+        """March C- pattern: detect stuck-at faults."""
+        # Phase 1: Write 0x00 everywhere
+        for a in range(end):
+            self.mem[a] = 0x00
+        # Phase 2: Read 0x00, write 0xFF (ascending)
+        for a in range(end):
+            if self.mem[a] != 0x00:
+                self._bist_fail(a, 0x00, self.mem[a])
+                return False
+            self.mem[a] = 0xFF
+        # Phase 3: Read 0xFF, write 0x00 (descending)
+        for a in range(end - 1, -1, -1):
+            if self.mem[a] != 0xFF:
+                self._bist_fail(a, 0xFF, self.mem[a])
+                return False
+            self.mem[a] = 0x00
+        # Phase 4: Verify all 0x00
+        for a in range(end):
+            if self.mem[a] != 0x00:
+                self._bist_fail(a, 0x00, self.mem[a])
+                return False
+        return True
+
+    def _bist_checkerboard(self, end: int) -> bool:
+        """Checkerboard pattern: detect coupling faults."""
+        # Pass 1: 0xAA at even addresses, 0x55 at odd
+        for a in range(end):
+            self.mem[a] = 0xAA if (a & 1) == 0 else 0x55
+        for a in range(end):
+            expected = 0xAA if (a & 1) == 0 else 0x55
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        # Pass 2: invert — 0x55 at even, 0xAA at odd
+        for a in range(end):
+            self.mem[a] = 0x55 if (a & 1) == 0 else 0xAA
+        for a in range(end):
+            expected = 0x55 if (a & 1) == 0 else 0xAA
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        return True
+
+    def _bist_addr_as_data(self, end: int) -> bool:
+        """Address-as-data pattern: detect address decoder faults."""
+        for a in range(end):
+            self.mem[a] = a & 0xFF
+        for a in range(end):
+            expected = a & 0xFF
+            if self.mem[a] != expected:
+                self._bist_fail(a, expected, self.mem[a])
+                return False
+        return True
+
+    def _bist_fail(self, addr: int, expected: int, actual: int):
+        """Record a BIST failure."""
+        self.bist_fail_addr = addr
+        # Pack expected in upper 32 bits, actual in lower 32 bits
+        self.bist_fail_data = ((expected & 0xFFFFFFFF) << 32) | (actual & 0xFFFFFFFF)
+
+    # -- Tile Datapath Self-Test (§6.2) --
+
+    def _tile_selftest_write(self, val: int):
+        """Handle writes to CSR_TILE_SELFTEST — run tile self-test."""
+        if val != 1:
+            return
+        self.tile_selftest = 1   # running
+        self.tile_st_detail = 0
+        # Save tile engine state
+        save = (self.tsrc0, self.tsrc1, self.tdst, self.tmode,
+                self.tctrl, list(self.acc))
+        # Use scratchpad: 0xFFF80..0xFFFFF (128 bytes = 2 tiles)
+        # tile_a @ 0xFFF80, tile_b @ 0xFFFC0
+        TILE_A = 0xFFF80
+        TILE_B = 0xFFFC0
+        save_scratch = bytes(self.mem[TILE_A:TILE_A + 128])
+        fail_mask = 0
+        fail_mask |= self._tile_st_add(TILE_A, TILE_B)    # bit 0
+        fail_mask |= self._tile_st_mul(TILE_A, TILE_B)    # bit 1
+        fail_mask |= self._tile_st_dot(TILE_A, TILE_B)    # bit 2
+        fail_mask |= self._tile_st_sum(TILE_A)             # bit 3
+        # Restore scratchpad and tile state
+        self.mem[TILE_A:TILE_A + 128] = bytearray(save_scratch)
+        self.tsrc0, self.tsrc1, self.tdst, self.tmode, \
+            self.tctrl, self.acc = save
+        self.tile_st_detail = fail_mask
+        self.tile_selftest = 3 if fail_mask else 2
+
+    def _tile_st_write(self, addr: int, data: bytes):
+        """Write 64 bytes to memory for tile self-test."""
+        a = addr % self.mem_size
+        self.mem[a:a+64] = data[:64]
+
+    def _tile_st_read(self, addr: int) -> bytearray:
+        """Read 64 bytes from memory for tile self-test."""
+        a = addr % self.mem_size
+        return bytearray(self.mem[a:a+64])
+
+    def _tile_st_add(self, ta: int, tb: int) -> int:
+        """Sub-test 0: TALU ADD in 8-bit unsigned mode.
+        Pattern: a[i]=i, b[i]=100. Expect dst[i]=(i+100)&0xFF."""
+        pat_a = bytearray(i & 0xFF for i in range(64))
+        pat_b = bytearray(100 for _ in range(64))
+        self._tile_st_write(ta, pat_a)
+        self._tile_st_write(tb, pat_b)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00  # 8-bit unsigned, wrapping
+        self.tctrl = 0
+        # Execute TALU ADD: op=0, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=0, funct=0)
+        result = self._tile_st_read(ta)
+        for i in range(64):
+            if result[i] != ((i + 100) & 0xFF):
+                return 1  # bit 0
+        return 0
+
+    def _tile_st_mul(self, ta: int, tb: int) -> int:
+        """Sub-test 1: TMUL MUL in 8-bit unsigned mode.
+        Pattern: a[i]=i, b[i]=3. Expect dst[i]=(i*3)&0xFF."""
+        pat_a = bytearray(i & 0xFF for i in range(64))
+        pat_b = bytearray(3 for _ in range(64))
+        self._tile_st_write(ta, pat_a)
+        self._tile_st_write(tb, pat_b)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        # Execute TMUL MUL: op=1, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=1, funct=0)
+        result = self._tile_st_read(ta)
+        for i in range(64):
+            if result[i] != ((i * 3) & 0xFF):
+                return 2  # bit 1
+        return 0
+
+    def _tile_st_dot(self, ta: int, tb: int) -> int:
+        """Sub-test 2: TMUL DOT in 8-bit unsigned mode.
+        Pattern: a[i]=1, b[i]=1. Expect ACC0=64."""
+        pat = bytearray(1 for _ in range(64))
+        self._tile_st_write(ta, pat)
+        self._tile_st_write(tb, pat)
+        self.tsrc0, self.tsrc1, self.tdst = ta, tb, ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        self.acc = [0, 0, 0, 0]
+        # Execute TMUL DOT: op=1, funct=1, ss=0
+        self._exec_mex_direct(ss=0, op=1, funct=1)
+        if self.acc[0] != 64:
+            return 4  # bit 2
+        return 0
+
+    def _tile_st_sum(self, ta: int) -> int:
+        """Sub-test 3: TRED SUM in 8-bit unsigned mode.
+        Pattern: a[i]=2. Expect ACC0=128."""
+        pat = bytearray(2 for _ in range(64))
+        self._tile_st_write(ta, pat)
+        self.tsrc0 = ta
+        self.tmode = 0x00
+        self.tctrl = 0
+        self.acc = [0, 0, 0, 0]
+        # Execute TRED SUM: op=2, funct=0, ss=0
+        self._exec_mex_direct(ss=0, op=2, funct=0)
+        if self.acc[0] != 128:
+            return 8  # bit 3
+        return 0
+
+    def _exec_mex_direct(self, ss: int, op: int, funct: int,
+                         broadcast_reg: int = -1):
+        """Execute a tile op directly without fetching from PC.
+        Used by tile datapath self-test."""
+        ew_bits = self.tmode & 0x7
+        is_fp = ew_bits >= EW_FP16
+        if is_fp:
+            elem_bytes = 2  # both fp16 and bf16 are 16-bit
+        else:
+            elem_bytes = 1 << ew_bits
+        num_lanes = 64 // elem_bytes
+        signed = (self.tmode >> 4) & 1
+
+        def read_tile(addr):
+            a = u64(addr) % self.mem_size
+            return bytearray(self.mem[a:a+64]) if a+64 <= self.mem_size else bytearray(64)
+        def write_tile(addr, data):
+            a = u64(addr) % self.mem_size
+            if a + 64 <= self.mem_size:
+                self.mem[a:a+64] = data[:64]
+        def tile_get_elem(tile, lane, eb):
+            off = lane * eb
+            v = 0
+            for i in range(eb):
+                v |= tile[off + i] << (8 * i)
+            return v
+        def tile_set_elem(tile, lane, eb, val):
+            off = lane * eb
+            for i in range(eb):
+                tile[off + i] = (val >> (8 * i)) & 0xFF
+        def to_signed(v, eb):
+            bits = eb * 8
+            if v & (1 << (bits - 1)):
+                return v - (1 << bits)
+            return v
+
+        src_a = read_tile(self.tsrc0)
+        if ss == 0:
+            src_b = read_tile(self.tsrc1)
+        elif ss == 1:
+            bval = self.regs[broadcast_reg] if broadcast_reg >= 0 else 0
+            src_b = bytearray(64)
+            for lane in range(num_lanes):
+                tile_set_elem(src_b, lane, elem_bytes, bval & ((1 << (elem_bytes*8)) - 1))
+        elif ss == 3:
+            src_a = read_tile(self.tdst)
+            src_b = read_tile(self.tsrc0)
+        else:
+            src_b = bytearray(64)
+        dst = bytearray(64)
+
+        if op == 0:  # TALU
+            mask = (1 << (elem_bytes * 8)) - 1
+            for lane in range(num_lanes):
+                ea = tile_get_elem(src_a, lane, elem_bytes)
+                eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                if funct == 0:  # ADD
+                    r = (ea + eb_val) & mask
+                elif funct == 1:  # SUB
+                    r = (ea - eb_val) & mask
+                else:
+                    r = 0
+                tile_set_elem(dst, lane, elem_bytes, r)
+            write_tile(self.tdst, dst)
+
+        elif op == 1:  # TMUL
+            if funct == 0:  # MUL
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                    else:
+                        r = (ea * eb_val) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+            elif funct == 1:  # DOT
+                total = 0
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        total += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
+                    else:
+                        total += ea * eb_val
+                self.acc[0] = total & MASK64
+                self.acc[1] = (total >> 64) & MASK64
+
+        elif op == 2:  # TRED
+            values = [tile_get_elem(src_a, lane, elem_bytes) for lane in range(num_lanes)]
+            if signed:
+                values_s = [to_signed(v, elem_bytes) for v in values]
+            else:
+                values_s = values
+            result = 0
+            if funct == 0:  # SUM
+                result = sum(values_s)
+            elif funct == 1:  # MIN
+                result = min(values_s)
+            elif funct == 2:  # MAX
+                result = max(values_s)
+            self.acc[0] = result & MASK64
+            self.acc[1] = (result >> 64) & MASK64
 
     @property
     def _ipi_pending_mask(self) -> int:
@@ -538,6 +1032,17 @@ class Megapad64:
         # Clear EXT modifier after use
         self._ext_modifier = -1
         self.cycle_count += cycles
+
+        # Update performance counters
+        if self.perf_enable:
+            self.perf_cycles += cycles
+            # Stall cycles: any cycles beyond the base 1 for memory ops
+            if f in (0x5, 0x8) and cycles > 1:    # MEM, MEMALU
+                self.perf_stalls += cycles - 1
+            # Tile ops: MEX family
+            if f == 0xE:
+                self.perf_tileops += 1
+
         return cycles
 
     # =====================================================================
@@ -1075,9 +1580,13 @@ class Megapad64:
         if ss == 1:
             broadcast_reg = self.fetch8() & 0xF
 
-        # Element width from TMODE
-        ew_bits = self.tmode & 0x3
-        elem_bytes = 1 << ew_bits  # 1, 2, 4, or 8
+        # Element width from TMODE (3-bit EW: 0-3 = int, 4 = fp16, 5 = bf16)
+        ew_bits = self.tmode & 0x7
+        is_fp = ew_bits >= EW_FP16
+        if is_fp:
+            elem_bytes = 2  # both fp16 and bf16 are 16-bit
+        else:
+            elem_bytes = 1 << ew_bits  # 1, 2, 4, or 8
         num_lanes = 64 // elem_bytes
         signed = (self.tmode >> 4) & 1
 
@@ -1134,15 +1643,112 @@ class Megapad64:
 
         dst = bytearray(64)
 
+        # Extended Tile ALU (EXT modifier 8 = 0xF8 prefix)
+        if self._ext_modifier == 8 and op == 0x0:
+            rounding = (self.tmode >> 6) & 1
+            for lane in range(num_lanes):
+                ea = tile_get_elem(src_a, lane, elem_bytes)
+                eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                bits = elem_bytes * 8
+                mask = (1 << bits) - 1
+                shift_amt = eb_val & (bits - 1)  # clamp shift to element width
+                if funct == 0:    # VSHR — per-lane right shift
+                    if signed:
+                        sv = to_signed(ea, elem_bytes)
+                        if rounding and shift_amt > 0:
+                            # Round-to-nearest: add 0.5 ULP before truncation
+                            sv += (1 << (shift_amt - 1))
+                        r = (sv >> shift_amt) & mask
+                    else:
+                        if rounding and shift_amt > 0:
+                            ea += (1 << (shift_amt - 1))
+                        r = (ea >> shift_amt) & mask
+                elif funct == 1:  # VSHL — per-lane left shift
+                    r = (ea << shift_amt) & mask
+                elif funct == 2:  # VSEL — per-lane select (dst = b ? src0 : src1)
+                    # Not yet implemented
+                    r = ea
+                elif funct == 3:  # VCLZ — count leading zeros
+                    if ea == 0:
+                        r = bits
+                    else:
+                        r = bits - ea.bit_length()
+                else:
+                    r = 0
+                tile_set_elem(dst, lane, elem_bytes, r)
+            write_tile(self.tdst, dst)
+            return 1  # 2 cycles for extended tile ALU
+
         if op == 0x0:  # TALU
+            if is_fp:
+                # ---- Floating-point TALU ----
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if funct == 2:    # AND — bitwise, even for FP
+                        r = ea & eb_val
+                    elif funct == 3:  # OR — bitwise
+                        r = ea | eb_val
+                    elif funct == 4:  # XOR — bitwise
+                        r = ea ^ eb_val
+                    elif funct == 7:  # ABS — clear sign bit
+                        r = ea & 0x7FFF
+                    elif funct == 5:  # MIN — NaN-propagating
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0  # qNaN
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(min(fa, fb), ew_bits)
+                    elif funct == 6:  # MAX — NaN-propagating
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(max(fa, fb), ew_bits)
+                    else:
+                        # ADD (0) / SUB (1)
+                        fa = _fp_decode(ea, ew_bits)
+                        fb = _fp_decode(eb_val, ew_bits)
+                        if funct == 0:
+                            r = _fp_encode(fa + fb, ew_bits)
+                        else:  # funct == 1
+                            r = _fp_encode(fa - fb, ew_bits)
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 0
+
+            # ---- Integer TALU ----
+            saturate = (self.tmode >> 5) & 1
             for lane in range(num_lanes):
                 ea = tile_get_elem(src_a, lane, elem_bytes)
                 eb_val = tile_get_elem(src_b, lane, elem_bytes)
                 mask = (1 << (elem_bytes * 8)) - 1
                 if funct == 0:    # ADD
-                    r = (ea + eb_val) & mask
+                    if saturate:
+                        if signed:
+                            r = to_signed(ea, elem_bytes) + to_signed(eb_val, elem_bytes)
+                            hi = (1 << (elem_bytes * 8 - 1)) - 1
+                            lo = -(1 << (elem_bytes * 8 - 1))
+                            r = max(lo, min(hi, r)) & mask
+                        else:
+                            r = ea + eb_val
+                            r = min(r, mask)
+                    else:
+                        r = (ea + eb_val) & mask
                 elif funct == 1:  # SUB
-                    r = (ea - eb_val) & mask
+                    if saturate:
+                        if signed:
+                            r = to_signed(ea, elem_bytes) - to_signed(eb_val, elem_bytes)
+                            hi = (1 << (elem_bytes * 8 - 1)) - 1
+                            lo = -(1 << (elem_bytes * 8 - 1))
+                            r = max(lo, min(hi, r)) & mask
+                        else:
+                            r = ea - eb_val
+                            r = max(0, r)
+                    else:
+                        r = (ea - eb_val) & mask
                 elif funct == 2:  # AND
                     r = ea & eb_val
                 elif funct == 3:  # OR
@@ -1172,6 +1778,94 @@ class Megapad64:
             return 0
 
         elif op == 0x1:  # TMUL
+            if is_fp:
+                # ---- Floating-point TMUL ----
+                if funct == 0:  # MUL
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes, _fp_encode(fa * fb, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 1
+
+                elif funct == 1:  # DOT — FP16/BF16 → FP32 accumulate
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    total = 0.0
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        total += float(fa) * float(fb)
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0
+                    self.acc[2] = 0
+                    self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 3
+
+                elif funct == 2:  # WMUL — fp16/bf16 → fp32 widening multiply
+                    # Output: 16 fp32 values in 2 tiles (TDST and TDST+64)
+                    dst0 = bytearray(64)
+                    dst1 = bytearray(64)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fp32_bits = _fp32_to_bits(float(fa) * float(fb))
+                        if lane < 16:
+                            tile_set_elem(dst0, lane, 4, fp32_bits)
+                        else:
+                            tile_set_elem(dst1, lane - 16, 4, fp32_bits)
+                    write_tile(self.tdst, dst0)
+                    write_tile(u64(self.tdst + 64), dst1)
+                    return 2
+
+                elif funct == 3:  # MAC — fp mul-accumulate: dst += a*b
+                    existing = read_tile(self.tdst)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fc = _fp_decode(tile_get_elem(existing, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes,
+                                      _fp_encode(fc + fa * fb, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 2
+
+                elif funct == 4:  # FMA — dst = a*b + dst
+                    existing = read_tile(self.tdst)
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        fc = _fp_decode(tile_get_elem(existing, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes,
+                                      _fp_encode(fa * fb + fc, ew_bits))
+                    write_tile(self.tdst, dst)
+                    return 2
+
+                elif funct == 5:  # DOTACC — 4-way chunked dot, FP32 accumulate
+                    chunk_size = num_lanes // 4
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    for k in range(4):
+                        dot = 0.0
+                        for lane in range(chunk_size):
+                            idx = k * chunk_size + lane
+                            fa = _fp_decode(tile_get_elem(src_a, idx, elem_bytes), ew_bits)
+                            fb = _fp_decode(tile_get_elem(src_b, idx, elem_bytes), ew_bits)
+                            dot += float(fa) * float(fb)
+                        if self.tctrl & 0x1:  # ACC_ACC
+                            old_f = _bits_to_fp32(self.acc[k])
+                            dot = old_f + dot
+                        self.acc[k] = _fp32_to_bits(dot)
+                    self.flag_z = 1 if all(a == 0 for a in self.acc) else 0
+                    return 3
+
+                return 1  # unknown fp TMUL funct
+
             if funct == 0:  # MUL
                 for lane in range(num_lanes):
                     ea = tile_get_elem(src_a, lane, elem_bytes)
@@ -1210,10 +1904,173 @@ class Megapad64:
                 self.acc[3] = (total >> 192) & mask64
                 self.flag_z = 1 if total == 0 else 0
                 return 3  # 4 cycles total
+
+            elif funct == 2:  # WMUL — widening multiply
+                out_eb = elem_bytes * 2
+                out_mask = (1 << (out_eb * 8)) - 1
+                # Output has num_lanes elements at double width = 128 bytes
+                # Written across TDST and TDST+64
+                dst0 = bytearray(64)
+                dst1 = bytearray(64)
+                elems_per_tile = 64 // out_eb
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & out_mask
+                    else:
+                        r = (ea * eb_val) & out_mask
+                    if lane < elems_per_tile:
+                        tile_set_elem(dst0, lane, out_eb, r)
+                    else:
+                        tile_set_elem(dst1, lane - elems_per_tile, out_eb, r)
+                write_tile(self.tdst, dst0)
+                write_tile(u64(self.tdst + 64), dst1)
+                return 2
+
+            elif funct == 3:  # MAC — multiply-accumulate in-place
+                existing = read_tile(self.tdst)
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    ec = tile_get_elem(existing, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ec, elem_bytes) + to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                    else:
+                        r = (ec + ea * eb_val) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 2
+
+            elif funct == 4:  # FMA — fused multiply-add (dst = a*b + c where c=dst)
+                existing = read_tile(self.tdst)
+                mask = (1 << (elem_bytes * 8)) - 1
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    ec = tile_get_elem(existing, lane, elem_bytes)
+                    if signed:
+                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes) + to_signed(ec, elem_bytes)) & mask
+                    else:
+                        r = (ea * eb_val + ec) & mask
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+                return 2
+
+            elif funct == 5:  # DOTACC — 4-way chunked dot product
+                chunk_size = num_lanes // 4
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                mask64 = MASK64
+                for k in range(4):
+                    dot = 0
+                    for lane in range(chunk_size):
+                        idx = k * chunk_size + lane
+                        ea = tile_get_elem(src_a, idx, elem_bytes)
+                        eb_val = tile_get_elem(src_b, idx, elem_bytes)
+                        if signed:
+                            dot += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
+                        else:
+                            dot += ea * eb_val
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        self.acc[k] = (self.acc[k] + dot) & mask64
+                    else:
+                        self.acc[k] = dot & mask64
+                self.flag_z = 1 if all(a == 0 for a in self.acc) else 0
+                return 3
+
             return 1
 
         elif op == 0x2:  # TRED
             tile = src_a
+
+            if is_fp:
+                # ---- Floating-point TRED ----
+                fp_vals = [_fp_decode(tile_get_elem(tile, lane, elem_bytes), ew_bits)
+                           for lane in range(num_lanes)]
+
+                if funct == 0:    # SUM — FP32 accumulate
+                    total = sum(float(v) for v in fp_vals)
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]
+                        self.tctrl &= ~0x2
+                    if self.tctrl & 0x1:  # ACC_ACC
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 0
+                elif funct == 1:  # MIN
+                    import math
+                    # Filter out NaN, or propagate if all NaN
+                    non_nan = [v for v in fp_vals if not math.isnan(v)]
+                    if non_nan:
+                        result_f = min(non_nan)
+                    else:
+                        result_f = float('nan')
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = _fp32_to_bits(result_f)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 2:  # MAX
+                    import math
+                    non_nan = [v for v in fp_vals if not math.isnan(v)]
+                    if non_nan:
+                        result_f = max(non_nan)
+                    else:
+                        result_f = float('nan')
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = _fp32_to_bits(result_f)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 5:  # SUMSQ — FP32 accumulate
+                    total = sum(float(v) * float(v) for v in fp_vals)
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    if self.tctrl & 0x1:
+                        old_f = _bits_to_fp32(self.acc[0])
+                        total = old_f + total
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0; self.acc[2] = 0; self.acc[3] = 0
+                    self.flag_z = 1 if total == 0.0 else 0
+                    return 0
+                elif funct == 6:  # MINIDX
+                    import math
+                    best_idx = 0
+                    best_val = fp_vals[0]
+                    for i in range(1, num_lanes):
+                        if not math.isnan(fp_vals[i]) and (math.isnan(best_val) or fp_vals[i] < best_val):
+                            best_val = fp_vals[i]
+                            best_idx = i
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = best_idx & MASK64
+                    self.acc[1] = _fp32_to_bits(best_val)
+                    self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                elif funct == 7:  # MAXIDX
+                    import math
+                    best_idx = 0
+                    best_val = fp_vals[0]
+                    for i in range(1, num_lanes):
+                        if not math.isnan(fp_vals[i]) and (math.isnan(best_val) or fp_vals[i] > best_val):
+                            best_val = fp_vals[i]
+                            best_idx = i
+                    if self.tctrl & 0x2:
+                        self.acc = [0, 0, 0, 0]; self.tctrl &= ~0x2
+                    self.acc[0] = best_idx & MASK64
+                    self.acc[1] = _fp32_to_bits(best_val)
+                    self.acc[2] = 0; self.acc[3] = 0
+                    return 0
+                # Unsupported FP reductions (POPCNT, L1) fall through to int path
+                # which is arguably correct (bitwise POPCNT on FP bits)
+
+            # ---- Integer TRED ----
             values = [tile_get_elem(tile, lane, elem_bytes) for lane in range(num_lanes)]
             if signed:
                 values_s = [to_signed(v, elem_bytes) for v in values]
@@ -1235,6 +2092,64 @@ class Megapad64:
                     result = sum(abs(v) for v in values_s)
                 else:
                     result = sum(values)
+            elif funct == 5:  # SUMSQ
+                result = sum(v * v for v in values_s)
+            elif funct == 6:  # MINIDX
+                best_val = values_s[0]
+                best_idx = 0
+                for i in range(1, num_lanes):
+                    if values_s[i] < best_val:
+                        best_val = values_s[i]
+                        best_idx = i
+                # ACC0 = index, ACC1 = value
+                mask64 = MASK64
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                if self.tctrl & 0x1:  # ACC_ACC — compare with running min
+                    old_val = self.acc[1]
+                    if signed:
+                        old_signed = old_val if old_val < (1 << 63) else old_val - (1 << 64)
+                        if best_val < old_signed:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                    else:
+                        if (best_val & mask64) < old_val:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                else:
+                    self.acc[0] = best_idx & mask64
+                    self.acc[1] = best_val & mask64
+                self.flag_z = 1 if self.acc[0] == 0 else 0
+                return 0
+            elif funct == 7:  # MAXIDX
+                best_val = values_s[0]
+                best_idx = 0
+                for i in range(1, num_lanes):
+                    if values_s[i] > best_val:
+                        best_val = values_s[i]
+                        best_idx = i
+                # ACC0 = index, ACC1 = value
+                mask64 = MASK64
+                if self.tctrl & 0x2:  # ACC_ZERO
+                    self.acc = [0, 0, 0, 0]
+                    self.tctrl &= ~0x2
+                if self.tctrl & 0x1:  # ACC_ACC — compare with running max
+                    old_val = self.acc[1]
+                    if signed:
+                        old_signed = old_val if old_val < (1 << 63) else old_val - (1 << 64)
+                        if best_val > old_signed:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                    else:
+                        if (best_val & mask64) > old_val:
+                            self.acc[0] = best_idx & mask64
+                            self.acc[1] = best_val & mask64
+                else:
+                    self.acc[0] = best_idx & mask64
+                    self.acc[1] = best_val & mask64
+                self.flag_z = 1 if self.acc[0] == 0 else 0
+                return 0
 
             # Store to ACC
             if self.tctrl & 0x2:  # ACC_ZERO
@@ -1253,6 +2168,43 @@ class Megapad64:
             return 0
 
         elif op == 0x3:  # TSYS
+            # Extended TSYS via EXT.8 prefix
+            if self._ext_modifier == 8:
+                if funct == 0:  # LOAD2D — strided gather into TDST
+                    base = self._tile_cursor_addr()
+                    dst = bytearray(64)
+                    stride = self.tstride_r if self.tstride_r != 0 else self.ttile_w
+                    h = self.ttile_h
+                    w = self.ttile_w
+                    off = 0
+                    for row in range(h):
+                        src_addr = base + row * stride
+                        for col in range(w):
+                            if off < 64:
+                                dst[off] = self.mem_read8(u64(src_addr + col))
+                                off += 1
+                    # Zero-fill remainder
+                    while off < 64:
+                        dst[off] = 0
+                        off += 1
+                    write_tile(self.tdst, dst)
+                    return h  # ~1 cycle per row
+                elif funct == 1:  # STORE2D — strided scatter from TSRC0
+                    base = self._tile_cursor_addr()
+                    src = read_tile(self.tsrc0)
+                    stride = self.tstride_r if self.tstride_r != 0 else self.ttile_w
+                    h = self.ttile_h
+                    w = self.ttile_w
+                    off = 0
+                    for row in range(h):
+                        dst_addr = base + row * stride
+                        for col in range(w):
+                            if off < 64:
+                                self.mem_write8(u64(dst_addr + col), src[off])
+                                off += 1
+                    return h
+                return 0  # unknown ext TSYS funct
+
             if funct == 0:  # TRANS (8x8 transpose)
                 tile = read_tile(self.tdst)
                 out = bytearray(64)
@@ -1271,6 +2223,166 @@ class Megapad64:
                 src = read_tile(self.tsrc0)
                 write_tile(self.tdst, src)
                 return 2
+            elif funct == 1:  # SHUFFLE — permute lanes by index tile
+                # dst[i] = src0[index[i]] where index tile is TSRC1
+                src = read_tile(self.tsrc0)
+                idx = read_tile(self.tsrc1)
+                out = bytearray(64)
+                for lane in range(num_lanes):
+                    index_val = tile_get_elem(idx, lane, elem_bytes) % num_lanes
+                    out_val = tile_get_elem(src, index_val, elem_bytes)
+                    tile_set_elem(out, lane, elem_bytes, out_val)
+                write_tile(self.tdst, out)
+                return 2  # 3 cycles total
+            elif funct == 5:  # PACK — narrow elements / FP format convert
+                src = read_tile(self.tsrc0)
+                out = bytearray(64)
+
+                if is_fp:
+                    # FP PACK: Convert to narrower FP format
+                    # fp16 PACK → bf16 (same width, different format)
+                    # bf16 PACK → fp16 (same width, different format)
+                    # Both are 16-bit, so this is format conversion, not narrowing
+                    target_ew = EW_BF16 if ew_bits == EW_FP16 else EW_FP16
+                    for lane in range(num_lanes):
+                        val = tile_get_elem(src, lane, elem_bytes)
+                        f = _fp_decode(val, ew_bits)
+                        tile_set_elem(out, lane, elem_bytes, _fp_encode(f, target_ew))
+                    write_tile(self.tdst, out)
+                    return 1
+
+                # Integer PACK: narrows to half width
+                if elem_bytes < 2:
+                    # Can't pack below 8-bit; copy as-is
+                    write_tile(self.tdst, src)
+                    return 1
+                out_eb = elem_bytes // 2
+                out_bits = out_eb * 8
+                out_mask = (1 << out_bits) - 1
+                saturate = (self.tmode >> 5) & 1
+                for lane in range(num_lanes):
+                    val = tile_get_elem(src, lane, elem_bytes)
+                    if saturate:
+                        if signed:
+                            sv = to_signed(val, elem_bytes)
+                            hi = (1 << (out_bits - 1)) - 1
+                            lo = -(1 << (out_bits - 1))
+                            sv = max(lo, min(hi, sv))
+                            val = sv & out_mask
+                        else:
+                            val = min(val, out_mask)
+                    else:
+                        val = val & out_mask
+                    tile_set_elem(out, lane, out_eb, val)
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
+            elif funct == 6:  # UNPACK — widen elements / FP format convert
+                src = read_tile(self.tsrc0)
+                out = bytearray(64)
+
+                if is_fp:
+                    # FP UNPACK: Widen fp16/bf16 → fp32
+                    # Input: 32 × 16-bit FP values in src tile
+                    # Output: 16 × 32-bit FP32 values (only first 16 lanes fit)
+                    out_lanes = 16  # 64 bytes / 4 bytes per fp32
+                    for lane in range(out_lanes):
+                        val = tile_get_elem(src, lane, elem_bytes)
+                        f = _fp_decode(val, ew_bits)
+                        tile_set_elem(out, lane, 4, _fp32_to_bits(f))
+                    write_tile(self.tdst, out)
+                    return 1
+
+                # Integer UNPACK: widens to double width
+                out_eb = elem_bytes * 2
+                if out_eb > 8:
+                    # Can't widen beyond 64-bit; copy as-is
+                    write_tile(self.tdst, src)
+                    return 1
+                out_mask = (1 << (out_eb * 8)) - 1
+                in_bits = elem_bytes * 8
+                out_lanes = 64 // out_eb
+                for lane in range(out_lanes):
+                    val = tile_get_elem(src, lane, elem_bytes)
+                    if signed:
+                        # Sign-extend
+                        sv = to_signed(val, elem_bytes)
+                        val = sv & out_mask
+                    # else: zero-extend (already unsigned)
+                    tile_set_elem(out, lane, out_eb, val)
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
+            elif funct == 7:  # RROT — row/column rotate or mirror
+                # Control from funct_byte (which we already consumed as funct)
+                # But RROT uses the full funct_byte for control bits:
+                #   bits[1:0] = direction (0=row-left, 1=row-right, 2=col-up, 3=col-down)
+                #   bits[4:2] = amount (0-7)
+                #   bit[5]    = mirror flag
+                # Since we already extracted funct = funct_byte & 0x07, and funct == 7,
+                # the direction was encoded in the low 2 bits along with funct.
+                # Re-read: Actually funct_byte IS the control byte for RROT.
+                # funct = funct_byte & 7 = 7 identifies this as RROT.
+                # The control information comes from a SECOND fetch byte.
+                ctrl = self.fetch8()
+                direction = ctrl & 0x3
+                amount = (ctrl >> 2) & 0x7
+                mirror = (ctrl >> 5) & 0x1
+                tile = read_tile(self.tsrc0)
+                out = bytearray(64)
+                # Treat tile as 8×8 matrix of bytes (for 8-bit mode)
+                # For wider modes: adjust rows/cols
+                rows = 8 // elem_bytes if elem_bytes <= 8 else 1
+                cols = 8
+                if elem_bytes == 1:
+                    rows, cols = 8, 8
+                elif elem_bytes == 2:
+                    rows, cols = 4, 8  # 4 rows of 8 16-bit = wrong, actually 4 rows × 8 cols of 16-bit would be 64 bytes
+                    # Actually: 32 lanes → treat as 4 rows × 8 cols (each element is 2 bytes)
+                    rows, cols = 4, 8
+                elif elem_bytes == 4:
+                    rows, cols = 4, 4
+                elif elem_bytes == 8:
+                    rows, cols = 2, 4
+
+                if mirror:
+                    # Mirror: bit[0] of direction selects H vs V
+                    if direction & 1:  # vertical mirror
+                        for r in range(rows):
+                            for c in range(cols):
+                                src_lane = (rows - 1 - r) * cols + c
+                                dst_lane = r * cols + c
+                                if src_lane < num_lanes and dst_lane < num_lanes:
+                                    tile_set_elem(out, dst_lane, elem_bytes,
+                                                  tile_get_elem(tile, src_lane, elem_bytes))
+                    else:  # horizontal mirror
+                        for r in range(rows):
+                            for c in range(cols):
+                                src_lane = r * cols + (cols - 1 - c)
+                                dst_lane = r * cols + c
+                                if src_lane < num_lanes and dst_lane < num_lanes:
+                                    tile_set_elem(out, dst_lane, elem_bytes,
+                                                  tile_get_elem(tile, src_lane, elem_bytes))
+                else:
+                    # Rotate
+                    for r in range(rows):
+                        for c in range(cols):
+                            if direction == 0:    # row-rotate-left
+                                src_c = (c + amount) % cols
+                                src_lane = r * cols + src_c
+                            elif direction == 1:  # row-rotate-right
+                                src_c = (c - amount) % cols
+                                src_lane = r * cols + src_c
+                            elif direction == 2:  # col-rotate-up
+                                src_r = (r + amount) % rows
+                                src_lane = src_r * cols + c
+                            else:                 # col-rotate-down
+                                src_r = (r - amount) % rows
+                                src_lane = src_r * cols + c
+                            dst_lane = r * cols + c
+                            if src_lane < num_lanes and dst_lane < num_lanes:
+                                tile_set_elem(out, dst_lane, elem_bytes,
+                                              tile_get_elem(tile, src_lane, elem_bytes))
+                write_tile(self.tdst, out)
+                return 1  # 2 cycles total
             return 0
 
         return 0
@@ -1296,6 +2408,10 @@ class Megapad64:
         self.tmode = self.tctrl = 0
         self.tsrc0 = self.tsrc1 = self.tdst = 0
         self.acc = [0, 0, 0, 0]
+        self.tstride_r = 0
+        self.tstride_c = 0
+        self.ttile_h = 8
+        self.ttile_w = 8
         self.ivt_base = 0
         self.ivec_id = 0
         self.irq_ipi = False
@@ -1345,9 +2461,16 @@ class Megapad64:
         if f == 0xB:  return 1  # SEX
         if f == 0xC:  return 2  # MUL/DIV
         if f == 0xD:  return 2  # CSR
-        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg
+        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg or RROT ctrl
             ss = (n >> 2) & 0x3
-            return 3 if ss == 1 else 2
+            op = n & 0x3
+            if ss == 1:
+                return 3  # broadcast: opcode + funct + reg
+            if op == 3:   # TSYS
+                funct_b = self.mem_read8(u64(addr + 1))
+                if (funct_b & 0x07) == 7:  # RROT: opcode + funct + ctrl
+                    return 3
+            return 2
         return 1  # fallback
 
     # -- Run loop --

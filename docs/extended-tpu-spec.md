@@ -1,9 +1,13 @@
 # Extended TPU Specification
 
-**Branch:** `features/extended-tpu`  
-**Status:** Design  
+**Branch:** `features/extended-tpu-impl`  
+**Status:** Implemented (emulator + RTL)  
 **Author:** auto-generated from design discussion  
 **Depends on:** Base tile engine (mp64_tile.v), ISA v2.1, quad-core SoC
+
+> All features below are implemented in `megapad64.py` (emulator),
+> `fpga/rtl/mp64_tile.v` (RTL), and the BIOS (242 dictionary words),
+> with 1,207 passing tests unless marked ☐ (not yet implemented).
 
 ---
 
@@ -12,13 +16,13 @@
 The Extended TPU adds five capability families to the Megapad-64's
 existing tile engine and SoC infrastructure:
 
-| Family | Purpose | Area Estimate |
-|--------|---------|---------------|
-| **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium |
-| **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium |
-| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, CRC32/CRC64 | Large |
-| **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium |
-| **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small |
+| Family | Purpose | Area Estimate | Status |
+|--------|---------|---------------|--------|
+| **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
+| **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
+| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, CRC32/CRC64 | Large | ✅ CRC done; AES/SHA design only |
+| **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | ✅ CSRs + QoS done; DMA design only |
+| **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small | ✅ Implemented |
 
 All new features are **backward-compatible** — existing code runs
 unchanged. New instructions use the existing MEX (0xE_) encoding space

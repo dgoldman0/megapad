@@ -162,18 +162,61 @@ parameter [2:0] TALU_MIN  = 3'd5;
 parameter [2:0] TALU_MAX  = 3'd6;
 parameter [2:0] TALU_ABS  = 3'd7;
 
+// Extended TALU functions (via EXT modifier 8)
+parameter [2:0] ETALU_VSHR = 3'd0;
+parameter [2:0] ETALU_VSHL = 3'd1;
+parameter [2:0] ETALU_VSEL = 3'd2;
+parameter [2:0] ETALU_VCLZ = 3'd3;
+
+// TMUL functions
+parameter [2:0] TMUL_MUL    = 3'd0;
+parameter [2:0] TMUL_DOT    = 3'd1;
+parameter [2:0] TMUL_WMUL   = 3'd2;
+parameter [2:0] TMUL_MAC    = 3'd3;
+parameter [2:0] TMUL_FMA    = 3'd4;
+parameter [2:0] TMUL_DOTACC = 3'd5;
+
+// EXT prefix modifier values
+parameter [3:0] EXT_IMM64  = 4'd0;   // 64-bit immediate
+parameter [3:0] EXT_SKIP   = 4'd6;   // Conditional skip
+parameter [3:0] EXT_ETALU  = 4'd8;   // Extended tile ALU
+
 // TRED functions
 parameter [2:0] TRED_SUM  = 3'd0;
 parameter [2:0] TRED_MIN  = 3'd1;
 parameter [2:0] TRED_MAX  = 3'd2;
 parameter [2:0] TRED_POPC = 3'd3;
 parameter [2:0] TRED_L1   = 3'd4;
+parameter [2:0] TRED_SUMSQ  = 3'd5;
+parameter [2:0] TRED_MINIDX = 3'd6;
+parameter [2:0] TRED_MAXIDX = 3'd7;
 
-// Tile modes (TMODE CSR bits 1:0)
-parameter [1:0] TMODE_8   = 2'b00;   // 64 × 8-bit lanes
-parameter [1:0] TMODE_16  = 2'b01;   // 32 × 16-bit lanes
-parameter [1:0] TMODE_32  = 2'b10;   // 16 × 32-bit lanes
-parameter [1:0] TMODE_64  = 2'b11;   //  8 × 64-bit lanes
+// TSYS functions
+parameter [2:0] TSYS_TRANS   = 3'd0;   // 8×8 byte transpose
+parameter [2:0] TSYS_SHUFFLE = 3'd1;   // Permute lanes by index tile
+parameter [2:0] TSYS_MOVBANK = 3'd2;   // Tile copy
+parameter [2:0] TSYS_LOADC   = 3'd3;   // Load from cursor
+parameter [2:0] TSYS_ZERO    = 3'd4;   // Zero tile
+parameter [2:0] TSYS_PACK    = 3'd5;   // Pack (narrow elements)
+parameter [2:0] TSYS_UNPACK  = 3'd6;   // Unpack (widen elements)
+parameter [2:0] TSYS_RROT    = 3'd7;   // Row/column rotate or mirror
+
+// Extended TSYS functions (via EXT modifier 8)
+parameter [2:0] ETSYS_LOAD2D  = 3'd0;   // Strided 2D tile gather
+parameter [2:0] ETSYS_STORE2D = 3'd1;   // Strided 2D tile scatter
+
+// TMODE extended bits
+parameter TMODE_BIT_SIGNED   = 4;      // Bit 4: signed mode
+parameter TMODE_BIT_SATURATE = 5;      // Bit 5: saturating arithmetic
+parameter TMODE_BIT_ROUNDING = 6;      // Bit 6: rounding mode for shifts
+
+// Tile modes (TMODE CSR bits [2:0] — 3-bit EW encoding)
+parameter [2:0] TMODE_8    = 3'b000;   // 64 × 8-bit  lanes (u8/i8)
+parameter [2:0] TMODE_16   = 3'b001;   // 32 × 16-bit lanes (u16/i16)
+parameter [2:0] TMODE_32   = 3'b010;   // 16 × 32-bit lanes (u32/i32)
+parameter [2:0] TMODE_64   = 3'b011;   //  8 × 64-bit lanes (u64/i64)
+parameter [2:0] TMODE_FP16 = 3'b100;   // 32 × 16-bit lanes (IEEE 754 fp16)
+parameter [2:0] TMODE_BF16 = 3'b101;   // 32 × 16-bit lanes (bfloat16)
 
 // ----------------------------------------------------------------------------
 // CSR addresses  (matches emulator megapad64.py numbering)
@@ -209,8 +252,32 @@ parameter [7:0] CSR_MBOX     = 8'h22;   // Read: pending IPI mask, Write: send I
 parameter [7:0] CSR_IPIACK   = 8'h23;   // Write: acknowledge IPI from core N
 parameter [7:0] CSR_IVEC_ID  = 8'h24;   // Current interrupt vector ID
 parameter [7:0] CSR_TRAP_ADDR= 8'h25;   // Faulting address
+
+// Strided / 2D tile addressing CSRs (§2.5)
+parameter [7:0] CSR_TSTRIDE_R = 8'h40;  // Row stride in bytes
+parameter [7:0] CSR_TSTRIDE_C = 8'h41;  // Column stride in bytes
+parameter [7:0] CSR_TTILE_H   = 8'h42;  // Tile height (1–8)
+parameter [7:0] CSR_TTILE_W   = 8'h43;  // Tile width (1–64)
+
 parameter [7:0] CSR_MEGAPAD_SZ=8'h30;   // Memory size config (read-only)
 parameter [7:0] CSR_CPUID    = 8'h31;   // CPU identification (read-only)
+
+// Performance counter CSR addresses
+parameter [7:0] CSR_PERF_CYCLES  = 8'h68;  // Total clock cycles since reset
+parameter [7:0] CSR_PERF_STALLS  = 8'h69;  // Stall cycles (bus/memory wait)
+parameter [7:0] CSR_PERF_TILEOPS = 8'h6A;  // Tile engine operations completed
+parameter [7:0] CSR_PERF_EXTMEM  = 8'h6B;  // External memory beats
+parameter [7:0] CSR_PERF_CTRL    = 8'h6C;  // Bit 0: enable, Bit 1: reset all
+
+// Memory BIST CSRs (§6.1)
+parameter [7:0] CSR_BIST_CMD       = 8'h60;  // W: 0=idle, 1=full, 2=quick
+parameter [7:0] CSR_BIST_STATUS    = 8'h61;  // R: 0=idle, 1=running, 2=pass, 3=fail
+parameter [7:0] CSR_BIST_FAIL_ADDR = 8'h62;  // R: first failing address
+parameter [7:0] CSR_BIST_FAIL_DATA = 8'h63;  // R: expected vs actual
+
+// Tile Datapath Self-Test CSRs (§6.2)
+parameter [7:0] CSR_TILE_SELFTEST  = 8'h64;  // W: 1=start; R: 0/1/2/3
+parameter [7:0] CSR_TILE_ST_DETAIL = 8'h65;  // R: failed sub-test bitmask
 
 // ----------------------------------------------------------------------------
 // Bus protocol

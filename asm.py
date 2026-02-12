@@ -439,13 +439,20 @@ def _instruction_size(lineno: int, text: str) -> int:
 
     # -- MEX --
     if mnem_lower.startswith("t."):
-        # Tile ops: 2 or 3 bytes depending on broadcast
-        # For simplicity: 2 bytes default, 3 if has register arg
+        sub_name = mnem_lower[2:]
+        # Extended ops use EXT.8 prefix: +1 byte
+        ext_talu = {"vshr", "vshl", "vsel", "vclz"}
+        ext_tsys = {"load2d", "store2d"}
+        extra = 1 if sub_name in ext_talu or sub_name in ext_tsys else 0
+        # RROT has an extra control byte
+        if sub_name == "rrot":
+            return 3  # opcode + funct + ctrl
+        # Tile ops: 2 or 3 bytes depending on broadcast, + extra for EXT prefix
         ops = _split_ops(rest)
         for op in ops:
             if op.lower().startswith("r"):
-                return 3
-        return 2
+                return 3 + extra
+        return 2 + extra
 
     raise AsmError(lineno, f"Unknown mnemonic: {mnem!r}")
 
@@ -704,11 +711,35 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         sub_name = mnem_lower[2:]
         talu_ops = {"add": 0, "sub": 1, "and": 2, "or": 3, "xor": 4,
                     "min": 5, "max": 6, "abs": 7}
-        tmul_ops = {"mul": 0, "dot": 1}
-        tred_ops = {"sum": 0, "rmin": 1, "rmax": 2, "popcnt": 3, "l1": 4}
-        tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2}
+        tmul_ops = {"mul": 0, "dot": 1, "wmul": 2, "mac": 3, "fma": 4, "dotacc": 5}
+        tred_ops = {"sum": 0, "rmin": 1, "rmax": 2, "popcnt": 3, "l1": 4,
+                    "sumsq": 5, "minidx": 6, "maxidx": 7}
+        tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2,
+                    "shuffle": 1, "pack": 5, "unpack": 6}
+        # Extended tile ALU ops via EXT.8 prefix (0xF8)
+        ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3}
+        # Extended TSYS ops via EXT.8 prefix (0xF8)
+        ext_tsys_ops = {"load2d": 0, "store2d": 1}
 
-        if sub_name in talu_ops:
+        if sub_name in ext_tsys_ops:
+            ext_funct = ext_tsys_ops[sub_name]
+            out.append(0xF8)            # EXT prefix, modifier=8
+            out.append(0xE3)            # MEX byte: ss=0, op=3 (TSYS)
+            out.append(ext_funct & 0x07)
+            return out
+        elif sub_name in ext_talu_ops:
+            ext_funct = ext_talu_ops[sub_name]
+            ss = 0  # tile-tile
+            if ops and ops[0].lower().startswith("r"):
+                ss = 1  # broadcast
+            n_nibble = (ss << 2) | 0x0  # op=0 (TALU variant)
+            out.append(0xF8)            # EXT prefix, modifier=8
+            out.append(0xE0 | n_nibble) # MEX byte
+            out.append(ext_funct & 0x07)
+            if ss == 1:
+                out.append(_parse_reg(ops[0]) & 0xF)
+            return out
+        elif sub_name in talu_ops:
             funct = talu_ops[sub_name]
             ss = 0  # tile-tile
             if ops and ops[0].lower().startswith("r"):
@@ -741,6 +772,15 @@ def _emit_instruction(lineno: int, text: str, pc: int,
             n_nibble = 0x3  # TSYS
             out.append(0xE0 | n_nibble)
             out.append(funct & 0x07)
+            return out
+        elif sub_name == "rrot":
+            # RROT: TSYS funct 7 + control byte
+            # Syntax: t.rrot <ctrl_imm8>
+            ctrl = _parse_imm(ops[0]) if ops else 0
+            n_nibble = 0x3  # TSYS
+            out.append(0xE0 | n_nibble)
+            out.append(0x07)  # funct=7
+            out.append(ctrl & 0xFF)
             return out
         else:
             raise AsmError(lineno, f"Unknown tile op: {sub_name!r}")

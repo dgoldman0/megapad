@@ -249,10 +249,10 @@ module tb_mp64_soc;
 
     // Watchdog: detect HALT
     always @(posedge sys_clk) begin
-        if (u_soc.u_cpu.cpu_state == 4'd7) begin  // CPU_HALT
+        if (u_soc.core[0].u_cpu.cpu_state == 4'd7) begin  // CPU_HALT
             #1000;
             $display("[TB] CPU halted at t=%0t ns, PC=0x%016h",
-                     $time, u_soc.u_cpu.R[u_soc.u_cpu.psel]);
+                     $time, u_soc.core[0].u_cpu.R[u_soc.core[0].u_cpu.psel]);
             $finish;
         end
     end
@@ -265,8 +265,8 @@ module tb_mp64_soc;
         if (cycle_cnt % 100000 == 0 && cycle_cnt > 0) begin
             $display("[TB] %0d cycles, PC=0x%016h, flags=0x%02h",
                      cycle_cnt,
-                     u_soc.u_cpu.R[u_soc.u_cpu.psel],
-                     u_soc.u_cpu.flags);
+                     u_soc.core[0].u_cpu.R[u_soc.core[0].u_cpu.psel],
+                     u_soc.core[0].u_cpu.flags);
         end
     end
 

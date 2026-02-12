@@ -5,7 +5,9 @@ general-purpose registers, a rich flag set, and a built-in SIMD tile
 engine.  Its heritage traces to the RCA CDP1802, but it extends that
 architecture enormously with 64-bit registers, hardware multiply/divide,
 a full condition-code set, a 256-bit accumulator, and 64-byte tile
-operations.
+operations.  The tile engine includes FP16/BF16 support, saturating
+arithmetic, rounding shifts, strided 2D addressing, and a full suite of
+SIMD operations across 8 to 64 lanes.
 
 This document is the **authoritative ISA reference** — every instruction,
 every register, every encoding.
@@ -26,7 +28,7 @@ every register, every encoding.
 | Q flip-flop | 1-bit output latch |
 | T register | 8-bit saved `XSEL‖PSEL` (for MARK/RET) |
 | Flags | 8-bit packed `[S I G P V N C Z]` |
-| Tile engine | 64-byte tiles, 256-bit accumulator, SIMD lanes |
+| Tile engine | 64-byte tiles, 256-bit accumulator, SIMD lanes, FP16/BF16 |
 
 The indirection through `PSEL`, `XSEL`, and `SPSEL` means any GPR can
 serve as the program counter, data pointer, or stack pointer.  In practice,
@@ -381,8 +383,8 @@ The low nibble `n` decodes as `[SS:2][OP:2]`:
 
 | Funct | Name | Semantics |
 |-------|------|-----------|
-| 0 | **ADD** | `dst[i] = srcA[i] + srcB[i]` |
-| 1 | **SUB** | `dst[i] = srcA[i] − srcB[i]` |
+| 0 | **ADD** | `dst[i] = srcA[i] + srcB[i]` (saturating if TMODE bit 5 set) |
+| 1 | **SUB** | `dst[i] = srcA[i] − srcB[i]` (saturating if TMODE bit 5 set) |
 | 2 | **AND** | `dst[i] = srcA[i] & srcB[i]` |
 | 3 | **OR** | `dst[i] = srcA[i] \| srcB[i]` |
 | 4 | **XOR** | `dst[i] = srcA[i] ^ srcB[i]` |
@@ -394,8 +396,12 @@ The low nibble `n` decodes as `[SS:2][OP:2]`:
 
 | Funct | Name | Cycles | Semantics |
 |-------|------|--------|-----------|
-| 0 | **MUL** | 2 | `dst[i] = srcA[i] × srcB[i]` |
-| 1 | **DOT** | 4 | `ACC += Σ(srcA[i] × srcB[i])` (dot product across all lanes) |
+| 0 | **MUL** | 2 | `dst[i] = srcA[i] × srcB[i]` (truncated) |
+| 1 | **DOT** | 4 | `ACC += Σ(srcA[i] × srcB[i])` (dot product) |
+| 2 | **WMUL** | 2 | `dst[2i:2i+1] = srcA[i] × srcB[i]` (widening multiply) |
+| 3 | **MAC** | 2 | `dst[i] += srcA[i] × srcB[i]` (multiply-accumulate in-place) |
+| 4 | **FMA** | 2 | `dst[i] = srcA[i] × srcB[i] + dst[i]` (fused multiply-add) |
+| 5 | **DOTACC** | 4 | `ACC[k] += dot(chunk_k)` for k=0..3 (4-way dot product) |
 
 ### TRED Sub-Functions (OP=2, result → ACC)
 
@@ -406,15 +412,43 @@ The low nibble `n` decodes as `[SS:2][OP:2]`:
 | 2 | **MAX** | `ACC = max(src0[i])` |
 | 3 | **POPCNT** | `ACC = Σ popcount(src0[i])` |
 | 4 | **L1** | `ACC = Σ |src0[i]|` (L1 norm) |
+| 5 | **SUMSQ** | `ACC = Σ src0[i]²` (sum of squares, L2² norm) |
+| 6 | **MINIDX** | `ACC0 = argmin index, ACC1 = min value` |
+| 7 | **MAXIDX** | `ACC0 = argmax index, ACC1 = max value` |
 
 ### TSYS Sub-Functions (OP=3)
 
 | Funct | Name | Cycles | Semantics |
 |-------|------|--------|-----------|
 | 0 | **TRANS** | 1 | In-place 8×8 byte transpose at TDST |
+| 1 | **SHUFFLE** | 3 | Permute: `dst[i] = src0[index_tile[i]]` |
 | 2 | **MOVBANK** | 3 | Copy tile: `mem[TDST] ← mem[TSRC0]` |
 | 3 | **LOADC** | 1 | Load tile from cursor address |
 | 4 | **ZERO** | 1 | Zero 64 bytes at TDST |
+| 5 | **PACK** | 2 | Narrow elements: 32→16, 16→8, etc. (saturating if TMODE bit 5) |
+| 6 | **UNPACK** | 2 | Widen elements: 8→16, 16→32, etc. (sign-extend if TMODE bit 4) |
+| 7 | **RROT** | 2 | Row/column rotate or mirror (controlled by imm8) |
+
+### Extended Tile Operations (via EXT prefix, 0xF_)
+
+When a MEX-class operation is encoded with the EXT prefix family `0xF`
+instead of `0xE`, it accesses extended operations:
+
+**Extended TALU** (EXT.8 prefix + TALU):
+
+| Funct | Name | Semantics |
+|-------|------|-----------|
+| 0 | **VSHR** | `dst[i] = srcA[i] >> srcB[i]` (per-lane right shift; rounds if TMODE bit 6) |
+| 1 | **VSHL** | `dst[i] = srcA[i] << srcB[i]` (per-lane left shift) |
+| 2 | **VSEL** | `dst[i] = mask[i] ? srcA[i] : srcB[i]` (conditional select) |
+| 3 | **VCLZ** | `dst[i] = clz(srcA[i])` (count leading zeros per lane) |
+
+**Extended TSYS** (EXT.8 prefix + TSYS):
+
+| Funct | Name | Semantics |
+|-------|------|-----------|
+| 0 | **LOAD2D** | Strided gather using TSTRIDE_R/TTILE_H/TTILE_W CSRs |
+| 1 | **STORE2D** | Strided scatter using TSTRIDE_R/TTILE_H/TTILE_W CSRs |
 
 ---
 
@@ -511,6 +545,23 @@ low nibble of the opcode byte.
 | | | | | |
 | `0x30` | **MEGAPAD_SZ** | 64 | R | Memory size (returns 0) |
 | `0x31` | **CPUID** | 64 | R | CPU ID: `0x4D503634_00010000` ("MP64" v1.0) |
+| | | | | |
+| `0x40` | **TSTRIDE_R** | 64 | RW | Row stride in bytes (2D tile addressing) |
+| `0x41` | **TSTRIDE_C** | 64 | RW | Column stride in bytes |
+| `0x42` | **TTILE_H** | 64 | RW | Tile height in rows (1–8) |
+| `0x43` | **TTILE_W** | 64 | RW | Tile width in bytes per row (1–64) |
+| | | | | |
+| `0x60` | **BIST_CMD** | 64 | RW | Memory BIST: 0=idle, 1=full, 2=quick |
+| `0x61` | **BIST_STATUS** | 64 | R | BIST result: 0=idle, 1=running, 2=pass, 3=fail |
+| `0x62` | **BIST_FAIL_ADDR** | 64 | R | First failing address (if status=fail) |
+| `0x63` | **BIST_FAIL_DATA** | 64 | R | Expected vs actual data at failing address |
+| `0x64` | **TILE_SELFTEST** | 64 | RW | Write 1 to start; read: 0=idle, 1=running, 2=pass, 3=fail |
+| `0x65` | **TILE_ST_DETAIL** | 64 | R | Which sub-test failed (bitmask) |
+| `0x68` | **PERF_CYCLES** | 64 | R | Total core clock cycles since reset |
+| `0x69` | **PERF_STALLS** | 64 | R | Cycles spent waiting for bus/memory |
+| `0x6A` | **PERF_TILE_OPS** | 64 | R | Total MEX instructions completed |
+| `0x6B` | **PERF_EXTMEM** | 64 | R | 64-bit external memory transfers |
+| `0x6C` | **PERF_CTRL** | 64 | RW | Bit 0: enable counting, Bit 1: reset all |
 
 ---
 
@@ -529,6 +580,8 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 | 5 | `IVEC_BUS_FAULT` | Bus Fault | Access beyond RAM/MMIO bounds |
 | 6 | `IVEC_SW_TRAP` | Software Trap | TRAP instruction |
 | 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1) |
+| 8 | `IVEC_UART` | UART | UART RX data available (when IE=1 and UART IRQ enabled) |
+| 9 | `IVEC_NIC` | NIC | NIC RX frame available (when IE=1 and NIC IRQ enabled) |
 
 ### Trap Entry Sequence
 
