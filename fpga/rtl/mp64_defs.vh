@@ -279,6 +279,11 @@ parameter [7:0] CSR_BIST_FAIL_DATA = 8'h63;  // R: expected vs actual
 parameter [7:0] CSR_TILE_SELFTEST  = 8'h64;  // W: 1=start; R: 0/1/2/3
 parameter [7:0] CSR_TILE_ST_DETAIL = 8'h65;  // R: failed sub-test bitmask
 
+// Instruction cache CSRs
+parameter [7:0] CSR_ICACHE_CTRL    = 8'h70;  // W: bit0=enable, bit1=invalidate all
+parameter [7:0] CSR_ICACHE_HITS    = 8'h71;  // R: hit counter (64-bit)
+parameter [7:0] CSR_ICACHE_MISSES  = 8'h72;  // R: miss counter (64-bit)
+
 // ----------------------------------------------------------------------------
 // Bus protocol
 // ----------------------------------------------------------------------------
