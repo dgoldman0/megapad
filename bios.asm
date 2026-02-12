@@ -9173,13 +9173,69 @@ d_tile_test_fetch:
     ret.l
 
 ; === TILE-DETAIL@ ===
-latest_entry:
 d_tile_detail_fetch:
     .dq d_tile_test_fetch
     .db 12
     .ascii "TILE-DETAIL@"
     ldi64 r11, w_tile_detail_fetch
     call.l r11
+    ret.l
+
+; === TSTRIDE-R! ( n -- ) ===
+d_tstride_r:
+    .dq d_tile_detail_fetch
+    .db 10
+    .ascii "TSTRIDE-R!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x40, r0
+    ret.l
+
+; === TSTRIDE-R@ ( -- n ) ===
+d_tstride_r_fetch:
+    .dq d_tstride_r
+    .db 10
+    .ascii "TSTRIDE-R@"
+    csrr r0, 0x40
+    subi r14, 8
+    str r0, r14
+    ret.l
+
+; === TTILE-H! ( n -- ) ===
+d_ttile_h:
+    .dq d_tstride_r_fetch
+    .db 8
+    .ascii "TTILE-H!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x42, r0
+    ret.l
+
+; === TTILE-W! ( n -- ) ===
+d_ttile_w:
+    .dq d_ttile_h
+    .db 8
+    .ascii "TTILE-W!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x43, r0
+    ret.l
+
+; === TLOAD2D ( -- ) ===
+d_tload2d:
+    .dq d_ttile_w
+    .db 7
+    .ascii "TLOAD2D"
+    t.load2d
+    ret.l
+
+; === TSTORE2D ( -- ) ===
+latest_entry:
+d_tstore2d:
+    .dq d_tload2d
+    .db 8
+    .ascii "TSTORE2D"
+    t.store2d
     ret.l
 
 ; =====================================================================

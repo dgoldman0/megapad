@@ -956,6 +956,198 @@ def test_tile_views():
           f"got {cpu9.mem_read8(0x3008)}")
 
 
+def test_strided_2d():
+    """Strided/2D tile addressing: LOAD2D, STORE2D, stride CSRs"""
+    print("\n== Strided/2D Tile Addressing ==")
+
+    # --- LOAD2D: gather an 8×8 patch from a 16-byte-wide image ---
+    cpu = Megapad64()
+    # Lay out a 16-wide × 10-tall "image" at address 0x2000
+    img_base = 0x2000
+    img_width = 16
+    for row in range(10):
+        for col in range(16):
+            cpu.mem_write8(img_base + row * img_width + col, row * 16 + col)
+
+    # Set up cursor to point at the image base
+    cpu.sb = 0
+    cpu.sr = 0
+    cpu.sc = 0
+    cpu.sw = 1
+    # For _tile_cursor_addr: bank_base + (sr*sw + sc)*64 = 0
+    # We need cursor to point at 0x2000, so let's set it via direct tile address
+    # Actually, _tile_cursor_addr computes from sb/sr/sc/sw:
+    #   addr = sb*(4MiB) + (sr*sw + sc)*64
+    # We want addr=0x2000=8192, so (sr*sw + sc)*64 = 8192, sr*sw+sc = 128
+    # With sw=1: sr=128, sc=0
+    cpu.sr = 128
+    cpu.sc = 0
+    cpu.sw = 1
+
+    # Configure stride and tile dimensions
+    cpu.tstride_r = img_width   # 16 bytes between rows
+    cpu.ttile_h = 8             # 8 rows
+    cpu.ttile_w = 8             # 8 columns (bytes per row)
+    cpu.tdst = 0x4000           # output tile
+
+    code = assemble("t.load2d\nhalt")
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    try:
+        cpu.run()
+    except HaltError:
+        pass
+
+    # Check: output tile should contain the 8×8 top-left patch
+    # Row 0: pixels 0..7, Row 1: pixels 16..23, etc.
+    check("LOAD2D [0,0]=0",
+          cpu.mem_read8(0x4000) == 0,
+          f"got {cpu.mem_read8(0x4000)}")
+    check("LOAD2D [0,7]=7",
+          cpu.mem_read8(0x4007) == 7,
+          f"got {cpu.mem_read8(0x4007)}")
+    # Row 1 starts at offset 8 in the tile (8 bytes per row)
+    check("LOAD2D [1,0]=16",
+          cpu.mem_read8(0x4008) == 16,
+          f"got {cpu.mem_read8(0x4008)}")
+    check("LOAD2D [1,7]=23",
+          cpu.mem_read8(0x400F) == 23,
+          f"got {cpu.mem_read8(0x400F)}")
+    # Row 7 starts at offset 7*8=56 in the tile
+    check("LOAD2D [7,0]=112",
+          cpu.mem_read8(0x4038) == 112,
+          f"got {cpu.mem_read8(0x4038)}")
+    check("LOAD2D [7,7]=119",
+          cpu.mem_read8(0x403F) == 119,
+          f"got {cpu.mem_read8(0x403F)}")
+
+    # --- STORE2D: scatter tile back to a different location ---
+    cpu2 = Megapad64()
+    # Source tile at 0x4000 with sequential data
+    for i in range(64):
+        cpu2.mem_write8(0x4000 + i, i + 100)
+    cpu2.tsrc0 = 0x4000
+
+    # Destination: 32-byte-wide image at 0x6000
+    dst_base = 0x6000
+    dst_width = 32
+    # Cursor → 0x6000: (sr*sw + sc)*64 = 0x6000 = 24576, sr=384, sc=0, sw=1
+    cpu2.sr = 384
+    cpu2.sc = 0
+    cpu2.sw = 1
+    cpu2.tstride_r = dst_width  # 32 bytes between rows
+    cpu2.ttile_h = 4            # only 4 rows
+    cpu2.ttile_w = 8            # 8 bytes per row
+
+    code2 = assemble("t.store2d\nhalt")
+    cpu2.load_bytes(0, code2)
+    cpu2.pc = 0
+    try:
+        cpu2.run()
+    except HaltError:
+        pass
+
+    # Row 0: bytes 100..107 written to 0x6000..0x6007
+    check("STORE2D [0,0]=100",
+          cpu2.mem_read8(0x6000) == 100,
+          f"got {cpu2.mem_read8(0x6000)}")
+    check("STORE2D [0,7]=107",
+          cpu2.mem_read8(0x6007) == 107,
+          f"got {cpu2.mem_read8(0x6007)}")
+    # Row 1: bytes 108..115 written to 0x6020..0x6027 (stride=32)
+    check("STORE2D [1,0]=108",
+          cpu2.mem_read8(0x6020) == 108,
+          f"got {cpu2.mem_read8(0x6020)}")
+    # Gap between rows should be untouched (zero)
+    check("STORE2D gap untouched",
+          cpu2.mem_read8(0x6008) == 0,
+          f"got {cpu2.mem_read8(0x6008)}")
+    # Row 3: bytes 124..131 at 0x6060..0x6067
+    check("STORE2D [3,0]=124",
+          cpu2.mem_read8(0x6060) == 124,
+          f"got {cpu2.mem_read8(0x6060)}")
+
+    # --- LOAD2D with stride=0: defaults to contiguous (w=ttile_w) ---
+    cpu3 = Megapad64()
+    for i in range(64):
+        cpu3.mem_write8(0x2000 + i, i)
+    cpu3.sr = 128  # cursor → 0x2000
+    cpu3.sc = 0
+    cpu3.sw = 1
+    cpu3.tstride_r = 0  # disabled → stride = ttile_w
+    cpu3.ttile_h = 8
+    cpu3.ttile_w = 8
+    cpu3.tdst = 0x4000
+
+    code3 = assemble("t.load2d\nhalt")
+    cpu3.load_bytes(0, code3)
+    cpu3.pc = 0
+    try:
+        cpu3.run()
+    except HaltError:
+        pass
+    # With stride = ttile_w = 8, contiguous: tile byte 0 = mem[0x2000]
+    check("LOAD2D contiguous [0]=0",
+          cpu3.mem_read8(0x4000) == 0,
+          f"got {cpu3.mem_read8(0x4000)}")
+    check("LOAD2D contiguous [63]=63",
+          cpu3.mem_read8(0x403F) == 63,
+          f"got {cpu3.mem_read8(0x403F)}")
+
+    # --- CSR read/write for stride registers ---
+    # NOTE: R3 is the PC (psel=3), so avoid using it for CSR readback!
+    cpu4, _ = run_asm("""
+        ldi64 r1, 640
+        csrw 0x40, r1       ; TSTRIDE_R = 640
+        csrr r2, 0x40       ; read it back into r2
+        ldi r1, 6
+        csrw 0x42, r1       ; TTILE_H = 6
+        csrr r5, 0x42       ; read back into r5 (avoid r3=PC!)
+        ldi r1, 10
+        csrw 0x43, r1       ; TTILE_W = 10
+        csrr r4, 0x43       ; read back into r4
+        halt
+    """)
+    check("TSTRIDE_R CSR round-trip: 640",
+          cpu4.regs[2] == 640, f"got {cpu4.regs[2]}")
+    check("TTILE_H CSR round-trip: 6",
+          cpu4.regs[5] == 6, f"got {cpu4.regs[5]}")
+    check("TTILE_W CSR round-trip: 10",
+          cpu4.regs[4] == 10, f"got {cpu4.regs[4]}")
+
+    # --- Partial tile (H×W < 64): zero-fill remainder ---
+    cpu5 = Megapad64()
+    for i in range(64):
+        cpu5.mem_write8(0x2000 + i, 0xAA)
+    cpu5.sr = 128  # cursor → 0x2000
+    cpu5.sc = 0
+    cpu5.sw = 1
+    cpu5.tstride_r = 4
+    cpu5.ttile_h = 2
+    cpu5.ttile_w = 3    # only 2×3 = 6 bytes loaded
+    cpu5.tdst = 0x4000
+    # Pre-fill dst with 0xFF to verify zero-fill
+    for i in range(64):
+        cpu5.mem_write8(0x4000 + i, 0xFF)
+
+    code5 = assemble("t.load2d\nhalt")
+    cpu5.load_bytes(0, code5)
+    cpu5.pc = 0
+    try:
+        cpu5.run()
+    except HaltError:
+        pass
+    check("LOAD2D partial: [0]=0xAA",
+          cpu5.mem_read8(0x4000) == 0xAA,
+          f"got 0x{cpu5.mem_read8(0x4000):02X}")
+    check("LOAD2D partial: 6 bytes loaded, [6]=0 (zero-fill)",
+          cpu5.mem_read8(0x4006) == 0,
+          f"got 0x{cpu5.mem_read8(0x4006):02X}")
+    check("LOAD2D partial: [63]=0 (zero-fill)",
+          cpu5.mem_read8(0x403F) == 0,
+          f"got 0x{cpu5.mem_read8(0x403F):02X}")
+
+
 def test_ext_prefix():
     """Family 0xF: EXT prefix"""
     print("\n== EXT (0xF) ==")
@@ -1091,6 +1283,7 @@ def main():
         test_mex,
         test_vshr_vshl,
         test_tile_views,
+        test_strided_2d,
         test_ext_prefix,
         test_fibonacci,
         test_subroutine,

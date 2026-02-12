@@ -193,6 +193,10 @@ parameter [2:0] TSYS_PACK    = 3'd5;   // Pack (narrow elements)
 parameter [2:0] TSYS_UNPACK  = 3'd6;   // Unpack (widen elements)
 parameter [2:0] TSYS_RROT    = 3'd7;   // Row/column rotate or mirror
 
+// Extended TSYS functions (via EXT modifier 8)
+parameter [2:0] ETSYS_LOAD2D  = 3'd0;   // Strided 2D tile gather
+parameter [2:0] ETSYS_STORE2D = 3'd1;   // Strided 2D tile scatter
+
 // TMODE extended bits
 parameter TMODE_BIT_SIGNED   = 4;      // Bit 4: signed mode
 parameter TMODE_BIT_SATURATE = 5;      // Bit 5: saturating arithmetic
@@ -238,6 +242,13 @@ parameter [7:0] CSR_MBOX     = 8'h22;   // Read: pending IPI mask, Write: send I
 parameter [7:0] CSR_IPIACK   = 8'h23;   // Write: acknowledge IPI from core N
 parameter [7:0] CSR_IVEC_ID  = 8'h24;   // Current interrupt vector ID
 parameter [7:0] CSR_TRAP_ADDR= 8'h25;   // Faulting address
+
+// Strided / 2D tile addressing CSRs (§2.5)
+parameter [7:0] CSR_TSTRIDE_R = 8'h40;  // Row stride in bytes
+parameter [7:0] CSR_TSTRIDE_C = 8'h41;  // Column stride in bytes
+parameter [7:0] CSR_TTILE_H   = 8'h42;  // Tile height (1–8)
+parameter [7:0] CSR_TTILE_W   = 8'h43;  // Tile width (1–64)
+
 parameter [7:0] CSR_MEGAPAD_SZ=8'h30;   // Memory size config (read-only)
 parameter [7:0] CSR_CPUID    = 8'h31;   // CPU identification (read-only)
 

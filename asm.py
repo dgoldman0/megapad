@@ -440,9 +440,10 @@ def _instruction_size(lineno: int, text: str) -> int:
     # -- MEX --
     if mnem_lower.startswith("t."):
         sub_name = mnem_lower[2:]
-        # Extended tile ALU ops use EXT.8 prefix: +1 byte
+        # Extended ops use EXT.8 prefix: +1 byte
         ext_talu = {"vshr", "vshl", "vsel", "vclz"}
-        extra = 1 if sub_name in ext_talu else 0
+        ext_tsys = {"load2d", "store2d"}
+        extra = 1 if sub_name in ext_talu or sub_name in ext_tsys else 0
         # RROT has an extra control byte
         if sub_name == "rrot":
             return 3  # opcode + funct + ctrl
@@ -717,8 +718,16 @@ def _emit_instruction(lineno: int, text: str, pc: int,
                     "shuffle": 1, "pack": 5, "unpack": 6}
         # Extended tile ALU ops via EXT.8 prefix (0xF8)
         ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3}
+        # Extended TSYS ops via EXT.8 prefix (0xF8)
+        ext_tsys_ops = {"load2d": 0, "store2d": 1}
 
-        if sub_name in ext_talu_ops:
+        if sub_name in ext_tsys_ops:
+            ext_funct = ext_tsys_ops[sub_name]
+            out.append(0xF8)            # EXT prefix, modifier=8
+            out.append(0xE3)            # MEX byte: ss=0, op=3 (TSYS)
+            out.append(ext_funct & 0x07)
+            return out
+        elif sub_name in ext_talu_ops:
             ext_funct = ext_talu_ops[sub_name]
             ss = 0  # tile-tile
             if ops and ops[0].lower().startswith("r"):

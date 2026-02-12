@@ -68,6 +68,12 @@ CSR_MBOX        = 0x22  # Read: pending IPI mask, Write: send IPI
 CSR_IPIACK      = 0x23  # Write: acknowledge IPI from core N
 CSR_IVEC_ID     = 0x24  # Current interrupt vector ID
 CSR_TRAP_ADDR   = 0x25  # Faulting address
+# Strided / 2D tile addressing CSRs (§2.5)
+CSR_TSTRIDE_R   = 0x40   # Row stride in bytes
+CSR_TSTRIDE_C   = 0x41   # Column stride in bytes (reserved)
+CSR_TTILE_H     = 0x42   # Tile height (rows to load, 1–8)
+CSR_TTILE_W     = 0x43   # Tile width (cols per row in bytes, 1–64)
+
 CSR_MEGAPAD_SZ  = 0x30
 CSR_CPUID       = 0x31
 
@@ -204,6 +210,12 @@ class Megapad64:
         self.halted: bool = False
         self.idle: bool   = False
         self.cycle_count: int = 0
+
+        # Strided / 2D tile addressing
+        self.tstride_r: int = 0    # row stride in bytes (0 = disabled)
+        self.tstride_c: int = 0    # column stride (reserved)
+        self.ttile_h: int   = 8    # tile height (rows, 1-8)
+        self.ttile_w: int   = 8    # tile width (bytes per row, 1-64)
 
         # Performance counters
         self.perf_enable: int  = 1   # counting enabled by default
@@ -464,6 +476,10 @@ class Megapad64:
             CSR_BIST_FAIL_DATA: lambda: self.bist_fail_data,
             CSR_TILE_SELFTEST:  lambda: self.tile_selftest,
             CSR_TILE_ST_DETAIL: lambda: self.tile_st_detail,
+            CSR_TSTRIDE_R:      lambda: self.tstride_r,
+            CSR_TSTRIDE_C:      lambda: self.tstride_c,
+            CSR_TTILE_H:        lambda: self.ttile_h,
+            CSR_TTILE_W:        lambda: self.ttile_w,
         }
         fn = m.get(addr)
         if fn is None:
@@ -503,6 +519,10 @@ class Megapad64:
             CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
             CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
             CSR_TILE_SELFTEST: lambda v: self._tile_selftest_write(v),
+            CSR_TSTRIDE_R: lambda v: setattr(self, 'tstride_r', v & 0xFFFFF),
+            CSR_TSTRIDE_C: lambda v: setattr(self, 'tstride_c', v & 0xFFFFF),
+            CSR_TTILE_H:   lambda v: setattr(self, 'ttile_h', max(1, min(8, v & 0xFF))),
+            CSR_TTILE_W:   lambda v: setattr(self, 'ttile_w', max(1, min(64, v & 0xFF))),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -1796,6 +1816,43 @@ class Megapad64:
             return 0
 
         elif op == 0x3:  # TSYS
+            # Extended TSYS via EXT.8 prefix
+            if self._ext_modifier == 8:
+                if funct == 0:  # LOAD2D — strided gather into TDST
+                    base = self._tile_cursor_addr()
+                    dst = bytearray(64)
+                    stride = self.tstride_r if self.tstride_r != 0 else self.ttile_w
+                    h = self.ttile_h
+                    w = self.ttile_w
+                    off = 0
+                    for row in range(h):
+                        src_addr = base + row * stride
+                        for col in range(w):
+                            if off < 64:
+                                dst[off] = self.mem_read8(u64(src_addr + col))
+                                off += 1
+                    # Zero-fill remainder
+                    while off < 64:
+                        dst[off] = 0
+                        off += 1
+                    write_tile(self.tdst, dst)
+                    return h  # ~1 cycle per row
+                elif funct == 1:  # STORE2D — strided scatter from TSRC0
+                    base = self._tile_cursor_addr()
+                    src = read_tile(self.tsrc0)
+                    stride = self.tstride_r if self.tstride_r != 0 else self.ttile_w
+                    h = self.ttile_h
+                    w = self.ttile_w
+                    off = 0
+                    for row in range(h):
+                        dst_addr = base + row * stride
+                        for col in range(w):
+                            if off < 64:
+                                self.mem_write8(u64(dst_addr + col), src[off])
+                                off += 1
+                    return h
+                return 0  # unknown ext TSYS funct
+
             if funct == 0:  # TRANS (8x8 transpose)
                 tile = read_tile(self.tdst)
                 out = bytearray(64)
@@ -1974,6 +2031,10 @@ class Megapad64:
         self.tmode = self.tctrl = 0
         self.tsrc0 = self.tsrc1 = self.tdst = 0
         self.acc = [0, 0, 0, 0]
+        self.tstride_r = 0
+        self.tstride_c = 0
+        self.ttile_h = 8
+        self.ttile_w = 8
         self.ivt_base = 0
         self.ivec_id = 0
         self.irq_ipi = False
