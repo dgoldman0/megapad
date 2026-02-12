@@ -788,6 +788,83 @@ module tb_tile;
         end
         check512(tile_mem[2], expected_tile, "RROT col-up by 2");
 
+        // ====== TEST 47: LOAD2D — strided gather (4×8 from 128B stride) ======
+        $display("\n=== TEST 47: LOAD2D strided gather ===");
+        // Set up a "framebuffer" in BRAM tiles: 2 tiles wide (128 bytes/row)
+        // Tiles 4..7 form a 4-tile = 256-byte region = 2 rows of 128 bytes
+        // Tile 4 (addr 0x100): bytes 0x10..0x4F (row 0, cols 0-63)
+        // Tile 5 (addr 0x140): bytes 0x50..0x8F (row 0, cols 64-127)
+        // Tile 6 (addr 0x180): bytes 0xA0..0xDF (row 1, cols 0-63)
+        // Tile 7 (addr 0x1C0): bytes 0xE0..0x1F (row 1, cols 64-127)
+        for (i = 0; i < 64; i = i + 1) begin
+            tile_mem[4][i*8 +: 8] = (8'h10 + i) & 8'hFF;
+            tile_mem[5][i*8 +: 8] = (8'h50 + i) & 8'hFF;
+            tile_mem[6][i*8 +: 8] = (8'hA0 + i) & 8'hFF;
+            tile_mem[7][i*8 +: 8] = (8'hE0 + i) & 8'hFF;
+        end
+        // Set cursor: bank=0, row=0, col=0, stride=4 (4 tiles per row = 256 bytes)
+        // Cursor address = bank*4M + (row*stride + col) * 64 = 0
+        // We want to start at tile 4 = address 0x100
+        // row=1, col=0, stride=4: cursor = (1*4+0)*64 = 256 = 0x100
+        csr_write(CSR_SB, 64'd0);
+        csr_write(CSR_SR, 64'd1);     // row 1
+        csr_write(CSR_SC, 64'd0);     // col 0
+        csr_write(CSR_SW, 64'd4);     // stride 4 tiles
+        // LOAD2D params: stride_r=128 bytes (2 tiles), h=2, w=8
+        csr_write(CSR_TSTRIDE_R, 64'd128);
+        csr_write(CSR_TTILE_H,   64'd2);
+        csr_write(CSR_TTILE_W,   64'd8);
+        csr_write(CSR_TDST, 64'h80);  // destination tile 2
+        mex_dispatch_ext(2'd0, MEX_TSYS, 3'd0, 64'd0, 8'd0, 4'd8);  // LOAD2D
+        // Expected: 2 rows of 8 bytes packed contiguously into tile 2
+        // Row 0: tile 4, bytes 0-7 = 0x10 0x11 ... 0x17
+        // Row 1: addr 0x100+128=0x180 = tile 6, bytes 0-7 = 0xA0 0xA1 ... 0xA7
+        // Result: bytes 0-7: 10..17, bytes 8-15: A0..A7, rest 0
+        expected_tile = 512'd0;
+        for (i = 0; i < 8; i = i + 1) begin
+            expected_tile[i*8 +: 8] = (8'h10 + i);       // row 0
+            expected_tile[(8+i)*8 +: 8] = (8'hA0 + i);   // row 1
+        end
+        check512(tile_mem[2], expected_tile, "LOAD2D 2x8 stride=128");
+
+        // ====== TEST 48: STORE2D — strided scatter ======
+        $display("\n=== TEST 48: STORE2D strided scatter ===");
+        // Write a known pattern into tile 0 (TSRC0)
+        for (i = 0; i < 64; i = i + 1)
+            tile_mem[0][i*8 +: 8] = (8'hB0 + i) & 8'hFF;
+        csr_write(CSR_TSRC0, 64'h00);  // source tile 0
+        // Cursor → tile 12 (addr 0x300), stride_r=64, h=2, w=8
+        csr_write(CSR_SR, 64'd0);
+        csr_write(CSR_SC, 64'd12);     // col 12
+        csr_write(CSR_SW, 64'd16);     // stride 16 tiles (arbitrary, just for address calc)
+        // cursor = (0*16 + 12) * 64 = 768 = 0x300 = tile 12
+        csr_write(CSR_TSTRIDE_R, 64'd64);   // each row is in consecutive tiles
+        csr_write(CSR_TTILE_H,   64'd2);
+        csr_write(CSR_TTILE_W,   64'd8);
+        // Clear target tiles
+        tile_mem[12] = 512'hDEAD;  // non-zero to verify RMW
+        tile_mem[13] = 512'hBEEF;
+        mex_dispatch_ext(2'd0, MEX_TSYS, 3'd1, 64'd0, 8'd0, 4'd8);  // STORE2D
+        // Expected: tile 12 bytes 0-7 = 0xB0..0xB7, rest = 0 (from DEAD fill)
+        //           tile 13 bytes 0-7 = 0xB8..0xBF, rest = 0 (from BEEF fill)
+        begin
+            reg ok;
+            ok = 1;
+            for (i = 0; i < 8; i = i + 1) begin
+                if (tile_mem[12][i*8 +: 8] !== (8'hB0 + i)) ok = 0;
+                if (tile_mem[13][i*8 +: 8] !== (8'hB8 + i)) ok = 0;
+            end
+            if (ok) begin
+                $display("  PASS: STORE2D 2x8 stride=64");
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL: STORE2D 2x8 stride=64");
+                $display("    tile12[63:0]=0x%h", tile_mem[12][63:0]);
+                $display("    tile13[63:0]=0x%h", tile_mem[13][63:0]);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);

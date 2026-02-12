@@ -170,6 +170,10 @@ module mp64_tile (
     localparam S_DONE       = 4'd9;
     localparam S_LOAD_C     = 4'd10;   // load existing TDST for MAC/FMA
     localparam S_STORE2     = 4'd11;   // second tile store for WMUL
+    localparam S_LOAD2D_REQ = 4'd12;   // LOAD2D: issue tile read for row
+    localparam S_LOAD2D_WAIT= 4'd13;   // LOAD2D: wait for tile ack
+    localparam S_STORE2D_REQ= 4'd14;   // STORE2D: issue tile read (RMW)
+    localparam S_STORE2D_WAIT=4'd15;   // STORE2D: wait for read ack, then write
 
     reg [3:0]   state;
     reg [511:0] tile_a;
@@ -185,6 +189,15 @@ module mp64_tile (
     reg [3:0]   ext_mod_reg;
     reg         ext_active_reg;
     reg         needs_load_c;
+
+    // LOAD2D / STORE2D FSM registers
+    reg [63:0]  ld2d_base;       // starting memory address
+    reg [63:0]  ld2d_stride;     // effective row stride in bytes
+    reg [3:0]   ld2d_row;        // current row counter
+    reg [6:0]   ld2d_off;        // byte offset in result tile
+    reg [3:0]   ld2d_h;          // number of rows
+    reg [6:0]   ld2d_w;          // bytes per row
+    reg [63:0]  ld2d_row_addr;   // computed row address (cached)
 
     // Source B selection
     reg [511:0] src_b_selected;
@@ -1810,9 +1823,36 @@ module mp64_tile (
                             state         <= S_EXT_LOAD_A;
                         end
                     end
-                    // EXT.8 TSYS — TODO: LOAD2D/STORE2D (NOP for now)
+                    // EXT.8 TSYS — LOAD2D / STORE2D
                     else if (mex_op == MEX_TSYS && mex_ext_active && mex_ext_mod == 4'd8) begin
-                        state <= S_DONE;
+                        // Compute cursor base address
+                        ld2d_base   <= (tile_bank * 64'h400000)
+                                     + (tile_row * tile_stride + tile_col) * 64;
+                        ld2d_row_addr <= (tile_bank * 64'h400000)
+                                      + (tile_row * tile_stride + tile_col) * 64;
+                        ld2d_stride <= (tstride_r != 0) ? tstride_r : ttile_w;
+                        ld2d_h      <= ttile_h[3:0];
+                        ld2d_w      <= ttile_w[6:0];
+                        ld2d_row    <= 4'd0;
+                        ld2d_off    <= 7'd0;
+                        result      <= 512'd0;
+                        if (mex_funct == ETSYS_LOAD2D)
+                            state <= S_LOAD2D_REQ;
+                        else if (mex_funct == ETSYS_STORE2D) begin
+                            // STORE2D: load source tile first
+                            if (src0_internal) begin
+                                tile_req  <= 1'b1;
+                                tile_addr <= tsrc0[19:0];
+                                state     <= S_LOAD_A;
+                                // After S_LOAD_A completes, we'll check funct
+                                // and redirect to S_STORE2D_REQ
+                            end else begin
+                                ext_tile_req  <= 1'b1;
+                                ext_tile_addr <= tsrc0;
+                                state         <= S_EXT_LOAD_A;
+                            end
+                        end else
+                            state <= S_DONE;  // unknown ext TSYS funct
                     end
                     // Everything else: load TSRC0
                     else begin
@@ -1836,8 +1876,11 @@ module mp64_tile (
                         state <= S_REDUCE;
                     end
                     else if (op_reg == MEX_TSYS) begin
+                        // STORE2D via EXT.8: tile_a loaded, now scatter
+                        if (ext_active_reg && ext_mod_reg == 4'd8)
+                            state <= S_STORE2D_REQ;
                         // SHUFFLE needs index tile from TSRC1
-                        if (funct_reg == TSYS_SHUFFLE) begin
+                        else if (funct_reg == TSYS_SHUFFLE) begin
                             if (src1_internal) begin
                                 tile_req  <= 1'b1;
                                 tile_addr <= tsrc1[19:0];
@@ -2148,6 +2191,84 @@ module mp64_tile (
             end
 
             S_EXT_STORE: if (ext_tile_ack) state <= S_DONE;
+
+            // ================================================================
+            // LOAD2D: multi-cycle strided gather from tile BRAM → result
+            // ================================================================
+            S_LOAD2D_REQ: begin
+                tile_req  <= 1'b1;
+                tile_addr <= ld2d_row_addr[19:0];  // bits[5:0] ignored by BRAM
+                state     <= S_LOAD2D_WAIT;
+            end
+
+            S_LOAD2D_WAIT: begin
+                if (tile_ack) begin : load2d_extract
+                    integer bi;
+                    reg [6:0] byte_off;
+                    byte_off = {1'b0, ld2d_row_addr[5:0]};
+                    // Extract ld2d_w bytes from tile_rdata at byte_off
+                    // into result at ld2d_off
+                    for (bi = 0; bi < 64; bi = bi + 1) begin
+                        if (bi[6:0] < ld2d_w &&
+                            (ld2d_off + bi[6:0]) < 7'd64 &&
+                            (byte_off + bi[6:0]) < 7'd64)
+                            result[(ld2d_off + bi[6:0])*8 +: 8] <=
+                                tile_rdata[(byte_off + bi[6:0])*8 +: 8];
+                    end
+                    ld2d_row     <= ld2d_row + 4'd1;
+                    ld2d_off     <= ld2d_off + ld2d_w;
+                    ld2d_row_addr<= ld2d_row_addr + ld2d_stride;
+                    if ((ld2d_row + 4'd1) < ld2d_h &&
+                        (ld2d_off + ld2d_w) < 7'd64)
+                        state <= S_LOAD2D_REQ;
+                    else begin
+                        // Write gathered tile to TDST
+                        state <= S_STORE;
+                    end
+                end
+            end
+
+            // ================================================================
+            // STORE2D: multi-cycle strided scatter from tile_a → BRAM
+            //   Read-modify-write: read existing 64B block, merge w bytes,
+            //   write back.
+            // ================================================================
+            S_STORE2D_REQ: begin
+                tile_req  <= 1'b1;
+                tile_addr <= ld2d_row_addr[19:0];
+                state     <= S_STORE2D_WAIT;
+            end
+
+            S_STORE2D_WAIT: begin
+                if (tile_ack) begin : store2d_merge
+                    integer si;
+                    reg [6:0] st_byte_off;
+                    st_byte_off = {1'b0, ld2d_row_addr[5:0]};
+                    // Read-modify-write: start from existing data
+                    tile_wdata <= tile_rdata;
+                    // Overwrite w bytes from tile_a at ld2d_off
+                    for (si = 0; si < 64; si = si + 1) begin
+                        if (si[6:0] < ld2d_w &&
+                            (ld2d_off + si[6:0]) < 7'd64 &&
+                            (st_byte_off + si[6:0]) < 7'd64)
+                            tile_wdata[(st_byte_off + si[6:0])*8 +: 8] <=
+                                tile_a[(ld2d_off + si[6:0])*8 +: 8];
+                    end
+                    // Issue write
+                    tile_req  <= 1'b1;
+                    tile_addr <= ld2d_row_addr[19:0];
+                    tile_wen  <= 1'b1;
+                    // Advance to next row
+                    ld2d_row     <= ld2d_row + 4'd1;
+                    ld2d_off     <= ld2d_off + ld2d_w;
+                    ld2d_row_addr<= ld2d_row_addr + ld2d_stride;
+                    if ((ld2d_row + 4'd1) < ld2d_h &&
+                        (ld2d_off + ld2d_w) < 7'd64)
+                        state <= S_STORE2D_REQ;
+                    else
+                        state <= S_DONE;
+                end
+            end
 
             S_DONE: begin
                 mex_done <= 1'b1;
