@@ -1518,6 +1518,84 @@ module mp64_tile (
     end
 
     // ========================================================================
+    // RROT — Row/Column Rotate or Mirror
+    // ========================================================================
+    reg [511:0] rrot_result;
+    wire [1:0]  rrot_dir    = imm8_reg[1:0];
+    wire [2:0]  rrot_amt    = imm8_reg[4:2];
+    wire        rrot_mirror = imm8_reg[5];
+    integer rr, rc, rrot_src;
+    always @(*) begin
+        rrot_result = 512'd0;
+        case (mode_ew[1:0])
+            2'd0: // 8-bit: 8 rows × 8 cols
+                for (rr = 0; rr < 8; rr = rr + 1)
+                    for (rc = 0; rc < 8; rc = rc + 1) begin
+                        if (rrot_mirror) begin
+                            if (rrot_dir[0]) rrot_src = (7 - rr) * 8 + rc;
+                            else             rrot_src = rr * 8 + (7 - rc);
+                        end else begin
+                            case (rrot_dir)
+                                2'd0: rrot_src = rr * 8 + ((rc + rrot_amt) & 7);
+                                2'd1: rrot_src = rr * 8 + ((rc + 8 - rrot_amt) & 7);
+                                2'd2: rrot_src = ((rr + rrot_amt) & 7) * 8 + rc;
+                                default: rrot_src = ((rr + 8 - rrot_amt) & 7) * 8 + rc;
+                            endcase
+                        end
+                        rrot_result[(rr*8+rc)*8 +: 8] = tile_a[rrot_src*8 +: 8];
+                    end
+            2'd1: // 16-bit: 4 rows × 8 cols
+                for (rr = 0; rr < 4; rr = rr + 1)
+                    for (rc = 0; rc < 8; rc = rc + 1) begin
+                        if (rrot_mirror) begin
+                            if (rrot_dir[0]) rrot_src = (3 - rr) * 8 + rc;
+                            else             rrot_src = rr * 8 + (7 - rc);
+                        end else begin
+                            case (rrot_dir)
+                                2'd0: rrot_src = rr * 8 + ((rc + rrot_amt) & 7);
+                                2'd1: rrot_src = rr * 8 + ((rc + 8 - rrot_amt) & 7);
+                                2'd2: rrot_src = ((rr + rrot_amt) & 3) * 8 + rc;
+                                default: rrot_src = ((rr + 4 - rrot_amt) & 3) * 8 + rc;
+                            endcase
+                        end
+                        rrot_result[(rr*8+rc)*16 +: 16] = tile_a[rrot_src*16 +: 16];
+                    end
+            2'd2: // 32-bit: 4 rows × 4 cols
+                for (rr = 0; rr < 4; rr = rr + 1)
+                    for (rc = 0; rc < 4; rc = rc + 1) begin
+                        if (rrot_mirror) begin
+                            if (rrot_dir[0]) rrot_src = (3 - rr) * 4 + rc;
+                            else             rrot_src = rr * 4 + (3 - rc);
+                        end else begin
+                            case (rrot_dir)
+                                2'd0: rrot_src = rr * 4 + ((rc + rrot_amt) & 3);
+                                2'd1: rrot_src = rr * 4 + ((rc + 4 - rrot_amt) & 3);
+                                2'd2: rrot_src = ((rr + rrot_amt) & 3) * 4 + rc;
+                                default: rrot_src = ((rr + 4 - rrot_amt) & 3) * 4 + rc;
+                            endcase
+                        end
+                        rrot_result[(rr*4+rc)*32 +: 32] = tile_a[rrot_src*32 +: 32];
+                    end
+            2'd3: // 64-bit: 2 rows × 4 cols
+                for (rr = 0; rr < 2; rr = rr + 1)
+                    for (rc = 0; rc < 4; rc = rc + 1) begin
+                        if (rrot_mirror) begin
+                            if (rrot_dir[0]) rrot_src = (1 - rr) * 4 + rc;
+                            else             rrot_src = rr * 4 + (3 - rc);
+                        end else begin
+                            case (rrot_dir)
+                                2'd0: rrot_src = rr * 4 + ((rc + rrot_amt) & 3);
+                                2'd1: rrot_src = rr * 4 + ((rc + 4 - rrot_amt) & 3);
+                                2'd2: rrot_src = ((rr + rrot_amt) & 1) * 4 + rc;
+                                default: rrot_src = ((rr + 2 - rrot_amt) & 1) * 4 + rc;
+                            endcase
+                        end
+                        rrot_result[(rr*4+rc)*64 +: 64] = tile_a[rrot_src*64 +: 64];
+                    end
+        endcase
+    end
+
+    // ========================================================================
     // EXT.8 Extended TALU — VSHR, VSHL, VSEL, VCLZ
     // ========================================================================
     function [7:0] clz8; input [7:0] v; begin
@@ -1846,7 +1924,7 @@ module mp64_tile (
                         TSYS_PACK:    result <= mode_fp ? fp_pack_result : pack_result;
                         TSYS_UNPACK:  result <= mode_fp ? fp_unpack_result : unpack_result;
                         TSYS_SHUFFLE: result <= shuffle_result;
-                        TSYS_RROT:    result <= tile_a; // TODO: full RROT
+                        TSYS_RROT:    result <= rrot_result;
                         default:      result <= 512'd0;
                     endcase
                 end

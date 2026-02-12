@@ -739,6 +739,55 @@ module tb_tile;
         expected_tile = {64{8'hFE}};
         check512(tile_mem[2], expected_tile, "VSHR -3>>1=-2 (signed,no round)");
 
+        // ====== TEST 44: RROT row-rotate-left by 1 (8-bit) ======
+        $display("\n=== TEST 44: RROT row-left by 1 ===");
+        // Set up tile[0] as an identity-like pattern:
+        // Row 0: 00 01 02 03 04 05 06 07
+        // Row 1: 08 09 0A 0B 0C 0D 0E 0F
+        // ... (ascending bytes 0x00..0x3F)
+        for (i = 0; i < 64; i = i + 1)
+            tile_mem[0][i*8 +: 8] = i[7:0];
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd0);  // 8-bit mode
+        // imm8 = ctrl byte: dir=0 (row-left), amt=1 (bits[4:2]=001), mirror=0
+        // imm8 = 0b000_001_00 = 0x04
+        mex_dispatch(2'd0, MEX_TSYS, TSYS_RROT, 64'd0, 8'h04);
+        // After row-left by 1: each row rotated left by 1
+        // Row 0: 01 02 03 04 05 06 07 00
+        // Row 1: 09 0A 0B 0C 0D 0E 0F 08
+        // etc.
+        for (i = 0; i < 64; i = i + 1) begin
+            expected_tile[i*8 +: 8] = ((i / 8) * 8 + ((i % 8 + 1) % 8));
+        end
+        check512(tile_mem[2], expected_tile, "RROT row-left by 1");
+
+        // ====== TEST 45: RROT vertical mirror (8-bit) ======
+        $display("\n=== TEST 45: RROT vertical mirror ===");
+        // Same source tile (ascending 0x00..0x3F)
+        // imm8: mirror=1 (bit5), dir[0]=1 (vertical), amt=don't care
+        // imm8 = 0b1_000_01 = 0x21
+        mex_dispatch(2'd0, MEX_TSYS, TSYS_RROT, 64'd0, 8'h21);
+        // Vertical mirror: row 0 ↔ row 7, row 1 ↔ row 6, etc.
+        // Row 0 of result = Row 7 of source = 38 39 3A 3B 3C 3D 3E 3F
+        // Row 7 of result = Row 0 of source = 00 01 02 03 04 05 06 07
+        for (i = 0; i < 64; i = i + 1) begin
+            expected_tile[i*8 +: 8] = ((7 - i / 8) * 8 + (i % 8));
+        end
+        check512(tile_mem[2], expected_tile, "RROT vertical mirror");
+
+        // ====== TEST 46: RROT col-rotate-up by 2 (8-bit) ======
+        $display("\n=== TEST 46: RROT col-up by 2 ===");
+        // imm8: dir=2 (col-up), amt=2 (bits[4:2]=010), mirror=0
+        // imm8 = 0b000_010_10 = 0x0A
+        mex_dispatch(2'd0, MEX_TSYS, TSYS_RROT, 64'd0, 8'h0A);
+        // Col-up by 2: each column rotated up by 2 rows
+        // dst[r][c] = src[(r+2)%8][c]
+        for (i = 0; i < 64; i = i + 1) begin
+            expected_tile[i*8 +: 8] = (((i / 8 + 2) % 8) * 8 + (i % 8));
+        end
+        check512(tile_mem[2], expected_tile, "RROT col-up by 2");
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
