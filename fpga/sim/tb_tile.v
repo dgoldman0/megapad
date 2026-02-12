@@ -865,6 +865,157 @@ module tb_tile;
             end
         end
 
+        // ====== TEST 49: VSEL 8-bit — MSB-based conditional select ======
+        $display("\n=== TEST 49: VSEL 8-bit ===");
+        // tile A (src0) = 0x42 in every lane
+        // tile B (src1) = alternating 0x80 (MSB set → select A) and 0x01 (MSB clear → 0)
+        tile_mem[0] = {64{8'h42}};
+        begin
+            for (i = 0; i < 64; i = i + 1)
+                tile_mem[1][i*8 +: 8] = (i & 1) ? 8'h80 : 8'h01;
+        end
+        csr_write(CSR_TSRC0, 64'h00);      // tile 0
+        csr_write(CSR_TSRC1, 64'h40);      // tile 1  (addr = 1 * 64 = 64 = 0x40)
+        csr_write(CSR_TDST,  64'h80);      // tile 2
+        csr_write(CSR_TMODE, 64'd0);       // unsigned, no rounding
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd2, 64'd0, 8'd0, 4'd8);  // VSEL
+        begin
+            reg ok;
+            ok = 1;
+            for (i = 0; i < 64; i = i + 1) begin
+                if (i & 1) begin
+                    // B MSB set → result = A = 0x42
+                    if (tile_mem[2][i*8 +: 8] !== 8'h42) ok = 0;
+                end else begin
+                    // B MSB clear → result = 0
+                    if (tile_mem[2][i*8 +: 8] !== 8'h00) ok = 0;
+                end
+            end
+            if (ok) begin
+                $display("  PASS: VSEL 8-bit alternating mask");
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL: VSEL 8-bit");
+                $display("    tile2[63:0]=0x%h", tile_mem[2][63:0]);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+
+        // ====== TEST 50: VSEL 16-bit ======
+        $display("\n=== TEST 50: VSEL 16-bit ===");
+        // tile A = 0x1234 in every 16-bit lane
+        tile_mem[0] = {32{16'h1234}};
+        // tile B: even lanes MSB set (0x8000), odd lanes MSB clear (0x0001)
+        begin
+            for (i = 0; i < 32; i = i + 1)
+                tile_mem[1][i*16 +: 16] = (i & 1) ? 16'h0001 : 16'h8000;
+        end
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd1);  // 16-bit element width
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd2, 64'd0, 8'd0, 4'd8);  // VSEL 16-bit
+        begin
+            reg ok;
+            ok = 1;
+            for (i = 0; i < 32; i = i + 1) begin
+                if (i & 1) begin
+                    if (tile_mem[2][i*16 +: 16] !== 16'h0000) ok = 0;
+                end else begin
+                    if (tile_mem[2][i*16 +: 16] !== 16'h1234) ok = 0;
+                end
+            end
+            if (ok) begin
+                $display("  PASS: VSEL 16-bit");
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL: VSEL 16-bit");
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+
+        // ====== TEST 51: VCLZ 8-bit — count leading zeros ======
+        $display("\n=== TEST 51: VCLZ 8-bit ===");
+        // Known values: 0xFF→0, 0x40→1, 0x20→2, 0x10→3, 0x08→4, 0x04→5, 0x01→7, 0x00→8
+        tile_mem[0][7:0]   = 8'hFF;  // clz = 0
+        tile_mem[0][15:8]  = 8'h40;  // clz = 1
+        tile_mem[0][23:16] = 8'h20;  // clz = 2
+        tile_mem[0][31:24] = 8'h10;  // clz = 3
+        tile_mem[0][39:32] = 8'h08;  // clz = 4
+        tile_mem[0][47:40] = 8'h04;  // clz = 5
+        tile_mem[0][55:48] = 8'h01;  // clz = 7
+        tile_mem[0][63:56] = 8'h00;  // clz = 8
+        // Fill rest with 0x01 (clz=7)
+        for (i = 8; i < 64; i = i + 1)
+            tile_mem[0][i*8 +: 8] = 8'h01;
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h00);  // unused for VCLZ but set anyway
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd0);
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd3, 64'd0, 8'd0, 4'd8);  // VCLZ
+        begin
+            reg ok;
+            ok = 1;
+            if (tile_mem[2][7:0]   !== 8'd0) ok = 0;  // clz(0xFF) = 0
+            if (tile_mem[2][15:8]  !== 8'd1) ok = 0;  // clz(0x40) = 1
+            if (tile_mem[2][23:16] !== 8'd2) ok = 0;  // clz(0x20) = 2
+            if (tile_mem[2][31:24] !== 8'd3) ok = 0;  // clz(0x10) = 3
+            if (tile_mem[2][39:32] !== 8'd4) ok = 0;  // clz(0x08) = 4
+            if (tile_mem[2][47:40] !== 8'd5) ok = 0;  // clz(0x04) = 5
+            if (tile_mem[2][55:48] !== 8'd7) ok = 0;  // clz(0x01) = 7
+            if (tile_mem[2][63:56] !== 8'd8) ok = 0;  // clz(0x00) = 8
+            if (ok) begin
+                $display("  PASS: VCLZ 8-bit");
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL: VCLZ 8-bit");
+                $display("    tile2[63:0]=0x%h", tile_mem[2][63:0]);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+
+        // ====== TEST 52: VCLZ 32-bit ======
+        $display("\n=== TEST 52: VCLZ 32-bit ===");
+        tile_mem[0][31:0]    = 32'h0000_0001;  // clz = 31
+        tile_mem[0][63:32]   = 32'h8000_0000;  // clz = 0
+        tile_mem[0][95:64]   = 32'h0000_0100;  // clz = 23
+        tile_mem[0][127:96]  = 32'h0000_0000;  // clz = 32
+        // Fill rest with 0x1
+        for (i = 4; i < 16; i = i + 1)
+            tile_mem[0][i*32 +: 32] = 32'h0000_0001;
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd2);  // 32-bit element width
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd3, 64'd0, 8'd0, 4'd8);  // VCLZ 32-bit
+        begin
+            reg ok;
+            ok = 1;
+            if (tile_mem[2][31:0]    !== 32'd31) ok = 0;
+            if (tile_mem[2][63:32]   !== 32'd0)  ok = 0;
+            if (tile_mem[2][95:64]   !== 32'd23) ok = 0;
+            if (tile_mem[2][127:96]  !== 32'd32) ok = 0;
+            if (ok) begin
+                $display("  PASS: VCLZ 32-bit");
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL: VCLZ 32-bit");
+                $display("    tile2[127:0]=0x%h", tile_mem[2][127:0]);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+
+        // ====== TEST 53: VSEL 64-bit — all MSB set ======
+        $display("\n=== TEST 53: VSEL 64-bit all-select ===");
+        tile_mem[0] = {8{64'hDEAD_BEEF_CAFE_F00D}};
+        tile_mem[1] = {8{64'h8000_0000_0000_0001}};  // MSB set → select A
+        csr_write(CSR_TSRC0, 64'h00);
+        csr_write(CSR_TSRC1, 64'h40);
+        csr_write(CSR_TDST,  64'h80);
+        csr_write(CSR_TMODE, 64'd3);  // 64-bit element width
+        mex_dispatch_ext(2'd0, MEX_TALU, 3'd2, 64'd0, 8'd0, 4'd8);  // VSEL 64-bit
+        expected_tile = {8{64'hDEAD_BEEF_CAFE_F00D}};
+        check512(tile_mem[2], expected_tile, "VSEL 64-bit all-select");
+
         // ====== SUMMARY ======
         $display("\n========================================");
         $display("  Tile Tests: %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);

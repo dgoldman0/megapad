@@ -465,7 +465,6 @@ module mp64_aes (
                 // IDLE — wait for command
                 // ====================================================
                 AES_IDLE: begin
-                    done <= 1'b0;
                     ghash_valid <= 1'b0;
                 end
 
