@@ -2072,6 +2072,7 @@ class TestKDOS(unittest.TestCase):
         # The fast path now supports storage_image and nic_frames.
         if self.__class__._kdos_snapshot is not None:
             return self._run_kdos_fast(extra_lines,
+                                      max_steps=max_steps,
                                       nic_frames=nic_frames,
                                       storage_image=storage_image)
 
@@ -3700,9 +3701,15 @@ class TestKDOS(unittest.TestCase):
 
     def test_knorm_ramp(self):
         """Normalize ramp 0..63: min→0, max→255 (64-byte tiles only)."""
-        # NOTE: knorm byte-loop on ramp exceeds step budget.
-        # Covered indirectly by e2e tests; constant noop covers early-exit.
-        pass
+        text = self._run_kdos([
+            "0 1 64 BUFFER nb",
+            ": fill-ramp nb B.DATA 64 0 DO I OVER I + C! LOOP DROP ; fill-ramp",
+            "nb knorm",
+            "nb B.DATA C@ .",            # first element (was 0 → 0)
+            "nb B.DATA 63 + C@ .",       # last element  (was 63 → 255)
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("255 ", text)
 
     def test_knorm_constant_noop(self):
         """Normalize flat buffer: no change (range=0)."""
