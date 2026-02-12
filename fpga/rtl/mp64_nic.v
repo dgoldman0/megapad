@@ -75,10 +75,12 @@ module mp64_nic (
     // ========================================================================
     // Status register
     // ========================================================================
+    reg tx_busy;
     always @(*) begin
         status = 8'h80;                              // bit7=present
         status[2] = phy_link_up;                     // bit2=link
         status[1] = rx_frame_ready;                  // bit1=rx_avail
+        status[0] = tx_busy;                         // bit0=tx_busy
     end
 
     // ========================================================================
@@ -153,6 +155,86 @@ module mp64_nic (
                             rx_byte_cnt <= rx_byte_cnt + 1;
                         end
                     end
+                end
+            endcase
+        end
+    end
+
+    // ========================================================================
+    // TX path: RAM → DMA → tx_buf → PHY
+    // ========================================================================
+    localparam TX_IDLE     = 3'd0;
+    localparam TX_DMA_READ = 3'd1;
+    localparam TX_SEND     = 3'd2;
+    localparam TX_DONE     = 3'd3;
+
+    reg [2:0]  tx_state;
+    reg [10:0] tx_byte_cnt;
+    reg [7:0]  tx_buf [0:1499];  // MTU = 1500
+    reg [10:0] tx_len;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            tx_state     <= TX_IDLE;
+            tx_busy      <= 1'b0;
+            tx_count     <= 16'd0;
+            phy_tx_valid <= 1'b0;
+            phy_tx_data  <= 8'd0;
+            tx_len       <= 11'd0;
+        end else begin
+            case (tx_state)
+                TX_IDLE: begin
+                    phy_tx_valid <= 1'b0;
+                    // CMD=SEND (0x01) triggers TX
+                    if (req && wen && addr[6:0] == NIC_CMD && wdata == 8'h01) begin
+                        tx_busy     <= 1'b1;
+                        tx_len      <= frame_len[10:0];
+                        tx_byte_cnt <= 11'd0;
+                        tx_state    <= TX_DMA_READ;
+                    end
+                end
+
+                TX_DMA_READ: begin
+                    // DMA read from RAM into tx_buf
+                    // NOTE: DMA is shared with RX. TX only runs when RX is idle.
+                    if (rx_state == RX_IDLE || rx_state == RX_DONE) begin
+                        dma_req  <= 1'b1;
+                        dma_addr <= dma_base + {53'd0, tx_byte_cnt};
+                        dma_wen  <= 1'b0;  // read
+                        if (dma_ack) begin
+                            tx_buf[tx_byte_cnt] <= dma_rdata;
+                            dma_req <= 1'b0;
+                            if (tx_byte_cnt == tx_len - 11'd1) begin
+                                tx_byte_cnt <= 11'd0;
+                                tx_state    <= TX_SEND;
+                            end else begin
+                                tx_byte_cnt <= tx_byte_cnt + 11'd1;
+                            end
+                        end
+                    end
+                end
+
+                TX_SEND: begin
+                    // Stream bytes to PHY
+                    if (phy_tx_ready) begin
+                        phy_tx_valid <= 1'b1;
+                        phy_tx_data  <= tx_buf[tx_byte_cnt];
+                        if (tx_byte_cnt == tx_len - 11'd1) begin
+                            tx_state <= TX_DONE;
+                        end else begin
+                            tx_byte_cnt <= tx_byte_cnt + 11'd1;
+                        end
+                    end else begin
+                        phy_tx_valid <= 1'b0;
+                    end
+                end
+
+                TX_DONE: begin
+                    phy_tx_valid  <= 1'b0;
+                    tx_busy       <= 1'b0;
+                    tx_count      <= tx_count + 16'd1;
+                    irq_status[1] <= 1'b1;
+                    tx_state      <= TX_IDLE;
                 end
             endcase
         end

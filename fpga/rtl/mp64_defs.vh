@@ -81,6 +81,10 @@ parameter [11:0] SYSINFO_BASE= 12'h300;
 parameter [11:0] NIC_BASE    = 12'h400;
 parameter [11:0] MBOX_BASE   = 12'h500;   // Inter-core mailbox
 parameter [11:0] SPINLOCK_BASE = 12'h600; // Hardware spinlocks
+parameter [11:0] AES_BASE     = 12'h700; // AES-256-GCM accelerator
+parameter [11:0] SHA_BASE     = 12'h780; // SHA-3/SHAKE accelerator
+parameter [11:0] CRC_BASE     = 12'h7C0; // CRC32/CRC64 accelerator
+parameter [11:0] QOS_BASE     = 12'h7E0; // QoS global config
 
 // UART registers (byte offsets from UART_BASE)
 parameter [3:0] UART_TX      = 4'h0;
@@ -262,6 +266,18 @@ parameter [7:0] CSR_TTILE_W   = 8'h43;  // Tile width (1–64)
 parameter [7:0] CSR_MEGAPAD_SZ=8'h30;   // Memory size config (read-only)
 parameter [7:0] CSR_CPUID    = 8'h31;   // CPU identification (read-only)
 
+// DMA CSR addresses (per-core tile DMA engine)
+parameter [7:0] CSR_DMA_RING_BASE = 8'h50;
+parameter [7:0] CSR_DMA_RING_SIZE = 8'h51;
+parameter [7:0] CSR_DMA_HEAD      = 8'h52;
+parameter [7:0] CSR_DMA_TAIL      = 8'h53;
+parameter [7:0] CSR_DMA_STATUS    = 8'h54;
+parameter [7:0] CSR_DMA_CTRL      = 8'h55;
+
+// QoS CSR addresses (per-core)
+parameter [7:0] CSR_QOS_WEIGHT    = 8'h58;
+parameter [7:0] CSR_QOS_BWLIMIT   = 8'h59;
+
 // Performance counter CSR addresses
 parameter [7:0] CSR_PERF_CYCLES  = 8'h68;  // Total clock cycles since reset
 parameter [7:0] CSR_PERF_STALLS  = 8'h69;  // Stall cycles (bus/memory wait)
@@ -319,6 +335,35 @@ parameter [3:0] IRQX_IPI     = 4'd8;     // Inter-processor interrupt
 parameter [3:0] IRQX_UART    = 4'd9;
 parameter [3:0] IRQX_NIC     = 4'd10;
 parameter [3:0] IRQX_DISK    = 4'd11;
+parameter [3:0] IRQX_AES     = 4'd12;
+parameter [3:0] IRQX_SHA     = 4'd13;
+parameter [3:0] IRQX_DMA     = 4'd14;
+
+// AES-256-GCM register offsets (from AES_BASE)
+parameter [6:0] AES_KEY0     = 7'h00;  // ..0x1F: 256-bit key (8×32)
+parameter [6:0] AES_IV0      = 7'h20;  // ..0x2B: 96-bit IV  (3×32)
+parameter [6:0] AES_AAD_LEN  = 7'h30;
+parameter [6:0] AES_DATA_LEN = 7'h34;
+parameter [6:0] AES_CMD      = 7'h38;
+parameter [6:0] AES_STATUS   = 7'h39;
+parameter [6:0] AES_DIN      = 7'h40;  // ..0x4F: 128-bit data in
+parameter [6:0] AES_DOUT     = 7'h50;  // ..0x5F: 128-bit data out
+parameter [6:0] AES_TAG0     = 7'h60;  // ..0x6F: 128-bit GCM tag
+
+// SHA-3 register offsets (from SHA_BASE)
+parameter [5:0] SHA_CMD      = 6'h00;
+parameter [5:0] SHA_STATUS   = 6'h01;
+parameter [5:0] SHA_DIN      = 6'h10;  // 64-bit data in
+parameter [5:0] SHA_DOUT     = 6'h20;  // 64-bit hash out
+parameter [5:0] SHA_RATE     = 6'h28;  // read-only rate
+parameter [5:0] SHA_CTRL     = 6'h29;
+
+// CRC register offsets (from CRC_BASE)
+parameter [4:0] CRC_POLY     = 5'h00;
+parameter [4:0] CRC_INIT     = 5'h04;
+parameter [4:0] CRC_DIN      = 5'h08;
+parameter [4:0] CRC_RESULT   = 5'h10;
+parameter [4:0] CRC_CTRL     = 5'h18;
 
 // IRQ routing: which core receives each peripheral IRQ (configurable)
 // Default: core 0 gets all peripheral IRQs

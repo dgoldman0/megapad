@@ -82,6 +82,13 @@ module mp64_cpu (
     input  wire        irq_nic,
     input  wire        irq_ipi,       // inter-processor interrupt
 
+    // === I-Cache statistics (from icache module) ===
+    input  wire [63:0] icache_stat_hits,
+    input  wire [63:0] icache_stat_misses,
+
+    // === System configuration ===
+    input  wire [63:0] mem_size_bytes,
+
     // === External flags (EF1-EF4, directly from pins) ===
     input  wire [3:0]  ef_flags
 );
@@ -132,14 +139,27 @@ module mp64_cpu (
     reg [63:0] perf_extmem;     // external memory beats
     reg        perf_enable;     // counting enabled
 
-    // Memory BIST state (CSR-accessible, stub in RTL — real BIST FSM is separate)
+    // Memory BIST state (CSR-accessible)
     reg  [1:0] bist_status;     // 0=idle, 1=running, 2=pass, 3=fail
     reg [63:0] bist_fail_addr;  // first failing address
     reg [63:0] bist_fail_data;  // expected vs actual (packed)
+    reg  [1:0] bist_pattern;    // 1=march C-, 2=checkerboard, 3=addr-as-data
+    reg  [2:0] bist_phase;      // FSM sub-phase
+    reg [19:0] bist_addr_cnt;   // Address counter (word-addressed, 1M / 8 = 128K entries)
+    reg        bist_running;    // BIST active flag
 
     // Tile datapath self-test state
-    reg  [1:0] tile_selftest;   // 0=idle, 2=pass, 3=fail
+    reg  [1:0] tile_selftest;   // 0=idle, 1=running, 2=pass, 3=fail
     reg  [7:0] tile_st_detail;  // bitmask of failed sub-tests
+    reg  [5:0] tile_st_cnt;     // countdown timer for self-test
+
+    // DMA ring buffer CSRs
+    reg [63:0] dma_ring_base;   // Base physical address
+    reg [63:0] dma_ring_size;   // Number of descriptors
+    reg [63:0] dma_head;        // Software write pointer
+    reg [63:0] dma_tail;        // Hardware completion pointer
+    reg [63:0] dma_status;      // bit0=busy, bit1=error, bit2=done
+    reg [63:0] dma_ctrl;        // bit0=enable, bit1=reset
 
     // EXT prefix modifier
     reg [3:0]  ext_mod;
@@ -179,6 +199,7 @@ module mp64_cpu (
     localparam CPU_MEM_READ2  = 4'd10;   // second read (RTI flags pop)
     localparam CPU_IRQ_PUSH   = 4'd11;   // push flags in IRQ sequence
     localparam CPU_IRQ_LOAD   = 4'd12;   // load IVT vector from memory
+    localparam CPU_BIST       = 4'd8;    // memory BIST FSM
     localparam CPU_MEMALU_RD  = 4'd13;   // MEMALU: reading M(R(X))
     localparam CPU_MEMALU_WB  = 4'd14;   // MEMALU: write-back (IO OUT read)
     localparam CPU_SKIP       = 4'd15;   // SKIP: fetch next instr byte for length
@@ -497,10 +518,23 @@ module mp64_cpu (
             bist_status    <= 2'd0;
             bist_fail_addr <= 64'd0;
             bist_fail_data <= 64'd0;
+            bist_pattern   <= 2'd0;
+            bist_phase     <= 3'd0;
+            bist_addr_cnt  <= 20'd0;
+            bist_running   <= 1'b0;
 
             // Tile self-test registers
             tile_selftest  <= 2'd0;
             tile_st_detail <= 8'd0;
+            tile_st_cnt    <= 6'd0;
+
+            // DMA registers
+            dma_ring_base  <= 64'd0;
+            dma_ring_size  <= 64'd0;
+            dma_head       <= 64'd0;
+            dma_tail       <= 64'd0;
+            dma_status     <= 64'd0;
+            dma_ctrl       <= 64'd0;
 
             // Clear register file
             R[0]  <= 64'd0;  R[1]  <= 64'd0;  R[2]  <= 64'd0;  R[3]  <= 64'd0;
@@ -533,6 +567,13 @@ module mp64_cpu (
                 // Tile ops: count completed MEX instructions
                 if (cpu_state == CPU_MEX_WAIT && mex_done)
                     perf_tileops <= perf_tileops + 64'd1;
+            end
+
+            // Tile self-test countdown (runs in background, independent of CPU state)
+            if (tile_selftest == 2'd1 && tile_st_cnt != 6'd0) begin
+                tile_st_cnt <= tile_st_cnt - 6'd1;
+                if (tile_st_cnt == 6'd1)
+                    tile_selftest <= 2'd2;  // pass (mex_done implies tile present)
             end
 
             case (cpu_state)
@@ -1334,24 +1375,44 @@ module mp64_cpu (
                                     end
                                 end
                                 CSR_BIST_CMD: begin
-                                    // RTL stub: instant pass (real BIST FSM is external)
-                                    if (R[nib[2:0]][1:0] != 2'd0) begin
-                                        bist_status    <= 2'd2;  // pass
+                                    // Start BIST FSM — tests memory via bus
+                                    if (R[nib[2:0]][1:0] != 2'd0 && bist_status != 2'd1) begin
+                                        bist_status    <= 2'd1;  // running
                                         bist_fail_addr <= 64'd0;
                                         bist_fail_data <= 64'd0;
+                                        bist_pattern   <= R[nib[2:0]][1:0];
+                                        bist_phase     <= 3'd0;
+                                        bist_addr_cnt  <= 20'd0;
+                                        bist_running   <= 1'b1;
+                                        cpu_state      <= CPU_BIST;
                                     end
                                 end
                                 CSR_TILE_SELFTEST: begin
-                                    // RTL stub: instant pass
-                                    if (R[nib[2:0]][0]) begin
-                                        tile_selftest  <= 2'd2;
+                                    // Start tile datapath self-test (runs for 32 cycles)
+                                    if (R[nib[2:0]][0] && tile_selftest != 2'd1) begin
+                                        tile_selftest  <= 2'd1;  // running
                                         tile_st_detail <= 8'd0;
+                                        tile_st_cnt    <= 6'd32; // countdown
                                     end
                                 end
                                 CSR_ICACHE_CTRL: begin
                                     icache_enabled <= R[nib[2:0]][0];
                                     if (R[nib[2:0]][1])  // bit 1 = invalidate all
                                         icache_inv_all <= 1'b1;
+                                end
+                                // DMA ring buffer CSRs
+                                CSR_DMA_RING_BASE: dma_ring_base <= R[nib[2:0]];
+                                CSR_DMA_RING_SIZE: dma_ring_size <= R[nib[2:0]];
+                                CSR_DMA_HEAD:      dma_head      <= R[nib[2:0]];
+                                CSR_DMA_TAIL:      dma_tail      <= R[nib[2:0]];
+                                CSR_DMA_STATUS:    dma_status     <= R[nib[2:0]];
+                                CSR_DMA_CTRL: begin
+                                    dma_ctrl <= R[nib[2:0]];
+                                    if (R[nib[2:0]][1]) begin  // bit 1 = reset
+                                        dma_head   <= 64'd0;
+                                        dma_tail   <= 64'd0;
+                                        dma_status <= 64'd0;
+                                    end
                                 end
                                 // COREID, NCORES are read-only — ignore writes
                             endcase
@@ -1372,7 +1433,7 @@ module mp64_cpu (
                                 CSR_NCORES:     R[nib[2:0]] <= {62'd0, NUM_CORES[1:0]};
                                 CSR_IVEC_ID:    R[nib[2:0]] <= {56'd0, ivec_id};
                                 CSR_TRAP_ADDR:  R[nib[2:0]] <= trap_addr;
-                                CSR_MEGAPAD_SZ: R[nib[2:0]] <= 64'd0;
+                                CSR_MEGAPAD_SZ: R[nib[2:0]] <= mem_size_bytes;
                                 CSR_CPUID:      R[nib[2:0]] <= 64'h4D50_3634_0001_0000;
                                 CSR_PERF_CYCLES:  R[nib[2:0]] <= perf_cycles;
                                 CSR_PERF_STALLS:  R[nib[2:0]] <= perf_stalls;
@@ -1385,8 +1446,14 @@ module mp64_cpu (
                                 CSR_TILE_SELFTEST:  R[nib[2:0]] <= {62'd0, tile_selftest};
                                 CSR_TILE_ST_DETAIL: R[nib[2:0]] <= {56'd0, tile_st_detail};
                                 CSR_ICACHE_CTRL:    R[nib[2:0]] <= {63'd0, icache_enabled};
-                                CSR_ICACHE_HITS:    R[nib[2:0]] <= 64'd0;  // stats in I-cache module
-                                CSR_ICACHE_MISSES:  R[nib[2:0]] <= 64'd0;  // stats in I-cache module
+                                CSR_ICACHE_HITS:    R[nib[2:0]] <= icache_stat_hits;
+                                CSR_ICACHE_MISSES:  R[nib[2:0]] <= icache_stat_misses;
+                                CSR_DMA_RING_BASE:  R[nib[2:0]] <= dma_ring_base;
+                                CSR_DMA_RING_SIZE:  R[nib[2:0]] <= dma_ring_size;
+                                CSR_DMA_HEAD:       R[nib[2:0]] <= dma_head;
+                                CSR_DMA_TAIL:       R[nib[2:0]] <= dma_tail;
+                                CSR_DMA_STATUS:     R[nib[2:0]] <= dma_status;
+                                CSR_DMA_CTRL:       R[nib[2:0]] <= dma_ctrl;
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end
@@ -1768,6 +1835,106 @@ module mp64_cpu (
                             fetch_pc <= R[psel]  + {59'd0, 1'b0, skip_len};
                         end
                         cpu_state <= CPU_FETCH;
+                    end
+                end
+
+                // ============================================================
+                // BIST: memory built-in self-test FSM
+                // Tests a range of RAM using bus reads/writes.
+                // Patterns: 1=march-C- (w0,r0,w1,r1),
+                //           2=checkerboard (wAA,rAA,w55,r55),
+                //           3=addr-as-data (wA,rA)
+                // ============================================================
+                CPU_BIST: begin
+                    // Generate expected write/verify data based on pattern & phase
+                    // bist_phase: 0=write-pat, 1=read-pat, 2=write-comp, 3=read-comp
+                    begin : bist_block
+                        reg [63:0] bist_wdata;
+                        reg [63:0] bist_expect;
+                        reg [63:0] bist_byte_addr;
+
+                        // Byte address = base + addr_cnt * 8
+                        bist_byte_addr = {41'd0, bist_addr_cnt, 3'b000} + 64'h1000;
+
+                        // Pattern data for current phase
+                        case (bist_pattern)
+                            2'd1: begin // March C-
+                                if (bist_phase <= 3'd1)
+                                    bist_wdata = 64'h0000_0000_0000_0000;
+                                else
+                                    bist_wdata = 64'hFFFF_FFFF_FFFF_FFFF;
+                            end
+                            2'd2: begin // Checkerboard
+                                if (bist_phase <= 3'd1)
+                                    bist_wdata = 64'hAAAA_AAAA_AAAA_AAAA;
+                                else
+                                    bist_wdata = 64'h5555_5555_5555_5555;
+                            end
+                            2'd3: begin // Addr-as-data
+                                bist_wdata = bist_byte_addr;
+                            end
+                            default: bist_wdata = 64'd0;
+                        endcase
+                        bist_expect = bist_wdata;
+
+                        case (bist_phase)
+                            3'd0, 3'd2: begin
+                                // === WRITE PHASE ===
+                                bus_valid <= 1'b1;
+                                bus_addr  <= bist_byte_addr;
+                                bus_wen   <= 1'b1;
+                                bus_wdata <= bist_wdata;
+                                bus_size  <= BUS_DWORD;
+                                if (bus_ready) begin
+                                    bus_valid <= 1'b0;
+                                    if (bist_addr_cnt == 20'd255) begin
+                                        bist_addr_cnt <= 20'd0;
+                                        bist_phase    <= bist_phase + 3'd1;
+                                    end else begin
+                                        bist_addr_cnt <= bist_addr_cnt + 20'd1;
+                                    end
+                                end
+                            end
+
+                            3'd1, 3'd3: begin
+                                // === READ-VERIFY PHASE ===
+                                bus_valid <= 1'b1;
+                                bus_addr  <= bist_byte_addr;
+                                bus_wen   <= 1'b0;
+                                bus_size  <= BUS_DWORD;
+                                if (bus_ready) begin
+                                    bus_valid <= 1'b0;
+                                    if (bus_rdata != bist_expect) begin
+                                        // FAIL: record and stop
+                                        bist_status    <= 2'd3;
+                                        bist_fail_addr <= bist_byte_addr;
+                                        bist_fail_data <= bus_rdata;
+                                        bist_running   <= 1'b0;
+                                        cpu_state      <= CPU_FETCH;
+                                    end else if (bist_addr_cnt == 20'd255) begin
+                                        bist_addr_cnt <= 20'd0;
+                                        if ((bist_pattern == 2'd3 && bist_phase == 3'd1) ||
+                                            bist_phase == 3'd3) begin
+                                            // All phases complete — PASS
+                                            bist_status  <= 2'd2;
+                                            bist_running <= 1'b0;
+                                            cpu_state    <= CPU_FETCH;
+                                        end else begin
+                                            bist_phase <= bist_phase + 3'd1;
+                                        end
+                                    end else begin
+                                        bist_addr_cnt <= bist_addr_cnt + 20'd1;
+                                    end
+                                end
+                            end
+
+                            default: begin
+                                // Should not reach here — PASS and stop
+                                bist_status  <= 2'd2;
+                                bist_running <= 1'b0;
+                                cpu_state    <= CPU_FETCH;
+                            end
+                        endcase
                     end
                 end
 

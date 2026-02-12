@@ -1652,7 +1652,7 @@ module mp64_tile (
                         ext_talu_result[el*8 +: 8] = shr8 + {7'd0, rnd8};
                     end
                     3'd1: ext_talu_result[el*8 +: 8] = ea8 << sh;
-                    3'd2: ext_talu_result[el*8 +: 8] = ea8; // VSEL placeholder
+                    3'd2: ext_talu_result[el*8 +: 8] = eb8[7] ? ea8 : 8'd0; // VSEL
                     3'd3: ext_talu_result[el*8 +: 8] = clz8(ea8);
                     default: ;
                 endcase
@@ -1669,7 +1669,7 @@ module mp64_tile (
                         ext_talu_result[el*16 +: 16] = shr16 + {15'd0, rnd16};
                     end
                     3'd1: ext_talu_result[el*16 +: 16] = ea16 << sh16;
-                    3'd2: ext_talu_result[el*16 +: 16] = ea16;
+                    3'd2: ext_talu_result[el*16 +: 16] = eb16[15] ? ea16 : 16'd0; // VSEL
                     3'd3: ext_talu_result[el*16 +: 16] = clz16(ea16);
                     default: ;
                 endcase
@@ -1686,7 +1686,7 @@ module mp64_tile (
                         ext_talu_result[el*32 +: 32] = shr32 + {31'd0, rnd32};
                     end
                     3'd1: ext_talu_result[el*32 +: 32] = ea32 << sh32;
-                    3'd2: ext_talu_result[el*32 +: 32] = ea32;
+                    3'd2: ext_talu_result[el*32 +: 32] = eb32[31] ? ea32 : 32'd0; // VSEL
                     3'd3: ext_talu_result[el*32 +: 32] = clz32(ea32);
                     default: ;
                 endcase
@@ -1703,7 +1703,7 @@ module mp64_tile (
                         ext_talu_result[el*64 +: 64] = shr64 + {63'd0, rnd64};
                     end
                     3'd1: ext_talu_result[el*64 +: 64] = ea64 << sh64;
-                    3'd2: ext_talu_result[el*64 +: 64] = ea64;
+                    3'd2: ext_talu_result[el*64 +: 64] = eb64[63] ? ea64 : 64'd0; // VSEL
                     3'd3: ext_talu_result[el*64 +: 64] = clz64(ea64);
                     default: ;
                 endcase
