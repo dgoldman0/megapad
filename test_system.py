@@ -6509,6 +6509,166 @@ class TestKDOSFilesystem(TestKDOS):
 
 
 # ---------------------------------------------------------------------------
+#  Filesystem Encryption Tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSFileCrypto(TestKDOS):
+    """Tests for §7.6.1 Filesystem Encryption — FENCRYPT, FDECRYPT."""
+
+    _FS_KEY_SETUP = [
+        "CREATE enc-key 32 ALLOT",
+        ": init-enc-key 32 0 DO I enc-key I + C! LOOP ;",
+        "init-enc-key",
+        "enc-key FS-KEY!",
+    ]
+
+    def test_encrypted_flag_false(self):
+        """ENCRYPTED? returns 0 for a normal (unencrypted) file."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "plain", b"Hello World!", ftype=2)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'OPEN plain',
+                '." ENC=" ENCRYPTED? .',
+            ], storage_image=path)
+            self.assertIn("ENC=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_basic(self):
+        """FENCRYPT encrypts a file, ENCRYPTED? becomes true."""
+        path = self._make_formatted_image()
+        # Allocate 2 sectors so padded data + tag fits
+        du_inject_file(path, "secret", b"A" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN secret fd !',
+                'fd @ FENCRYPT',
+                '." EI=" .',                 # 0 = success
+                '." EF=" fd @ ENCRYPTED? .',  # should be -1
+            ], storage_image=path)
+            self.assertIn("EI=0 ", text)
+            self.assertIn("EF=-1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_changes_data(self):
+        """After FENCRYPT, raw bytes on disk differ from original."""
+        path = self._make_formatted_image()
+        data = b"SECRET DATA HERE" * 2  # 32 bytes
+        du_inject_file(path, "doc", data, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN doc fd !',
+                'fd @ FENCRYPT DROP',
+                # Read raw first byte from disk via DMA
+                'CREATE rbuf 512 ALLOT',
+                'fd @ F.START DISK-SEC!  rbuf DISK-DMA!  1 DISK-N!  DISK-READ',
+                # Check if first byte changed (83 = 'S' was the original)
+                # IF/ELSE/THEN must be in a colon definition
+                ': ?chg rbuf C@ 83 = IF 1 . ELSE 0 . THEN ;',
+                '?chg',
+            ], storage_image=path)
+            # 0 means data changed (encrypted), 1 means unchanged
+            self.assertIn("0 ", text.split("?chg")[1])
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_roundtrip(self):
+        """FENCRYPT then FDECRYPT restores original data."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "round", b"A" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN round fd !',
+                'fd @ FENCRYPT DROP',
+                'fd @ FDECRYPT',
+                '." DF=" .',                 # 0 = auth OK
+                '." EF=" fd @ ENCRYPTED? .',  # 0 = no longer encrypted
+                # Read data back via DMA
+                'CREATE vbuf 512 ALLOT',
+                'fd @ F.START DISK-SEC!  vbuf DISK-DMA!  1 DISK-N!  DISK-READ',
+                '." V0=" vbuf C@ .',         # should be 65 = 'A'
+                '." V1=" vbuf 31 + C@ .',    # last byte also 'A'
+            ], storage_image=path)
+            self.assertIn("DF=0 ", text)
+            self.assertIn("EF=0 ", text)
+            self.assertIn("V0=65 ", text)
+            self.assertIn("V1=65 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_already_encrypted(self):
+        """Encrypting an already-encrypted file is a no-op (returns 0)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "twice", b"X" * 16, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN twice fd !',
+                'fd @ FENCRYPT DROP',
+                'fd @ FENCRYPT',
+                '." E2=" .',                 # 0 = no-op, success
+            ], storage_image=path)
+            self.assertIn("E2=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_not_encrypted(self):
+        """Decrypting a non-encrypted file is a no-op (returns 0)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "plain", b"plain text", ftype=2)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'OPEN plain',
+                'FDECRYPT',
+                '." D=" .',
+            ], storage_image=path)
+            self.assertIn("D=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_wrong_key(self):
+        """Decrypting with a different key returns -1 (auth fail)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "locked", b"B" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN locked fd !',
+                'fd @ FENCRYPT DROP',
+                # Change FS-KEY to all 0xFF
+                'CREATE bad-key 32 ALLOT  bad-key 32 255 FILL',
+                'bad-key FS-KEY!',
+                'fd @ FDECRYPT',
+                '." WK=" .',             # -1 = auth fail
+            ], storage_image=path)
+            self.assertIn("WK=-1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_empty_file(self):
+        """Encrypting an empty file is a no-op."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "empty", b"", ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN empty fd !',
+                'fd @ FENCRYPT',
+                '." E=" .',                  # 0
+                '." EF=" fd @ ENCRYPTED? .',  # 0 — not encrypted (nothing to do)
+            ], storage_image=path)
+            self.assertIn("E=0 ", text)
+            self.assertIn("EF=0 ", text)
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
 #  Pipeline Bundle Tests
 # ---------------------------------------------------------------------------
 
