@@ -163,8 +163,8 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
    `SHA3-STATUS@`.  KDOS §1.6: `SHA3`, `.SHA3-STATUS`, `.SHA3`.
    (commit `82548db`, 10 tests)
 
-7. ☐ **KDOS crypto words** — `HASH` (buffer → digest), `ENCRYPT` /
-   `DECRYPT` (buffer → buffer), `HMAC`, `VERIFY`
+7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
+   (commit `d77db63`, 10 tests)
 
 8. ☐ **Filesystem encryption** — optional at-rest encryption for files
 
