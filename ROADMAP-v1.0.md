@@ -5,15 +5,15 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (261 dict entries, 9,792 lines ASM),
-KDOS v1.1 (3,580 lines), Emulator (2,541 lines + 476-line quad-core SoC),
-FPGA RTL (14 Verilog modules + 9 testbenches), devices.py (1,250 lines),
-356+ tests passing.  Branch: `features/kdos-improvements`.
+**Current state (Feb 2026):** BIOS (265 dict entries, 9,895 lines ASM),
+KDOS v1.1 (3,613 lines), Emulator (2,541 lines + 478-line quad-core SoC),
+FPGA RTL (14 Verilog modules + 9 testbenches), devices.py (1,376 lines),
+552 test methods passing.  Branch: `features/kdos-improvements`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
-**functionally complete**.  Foundation layer (items 1–4) and AES crypto
-(item 5) are done.  Remaining work: SHA-3 crypto, KDOS crypto words,
+**functionally complete**.  Foundation layer (items 1–4) and crypto
+accelerators (items 5–6) are done.  Remaining work: KDOS crypto words,
 filesystem encryption, full network stack (Ethernet → TLS 1.3 → sockets),
 multicore OS, and application-level features.
 
@@ -157,8 +157,11 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
    KDOS §1.5: `AES-ENCRYPT`, `AES-DECRYPT`, `.AES-STATUS`.
    (commit `c77c77f`, 9 tests)
 
-6. ☐ **BIOS words (SHA-3)** — `SHA3-INIT`, `SHA3-UPDATE`, `SHA3-FINAL`
-   (SHA3Device in `devices.py`, BIOS assembly words, dictionary entries)
+6. ✅ **SHA-3 (Keccak-256)** — `SHA3Device` in `devices.py`: full
+   Keccak-f[1600] permutation, byte-streaming absorb, SHA3-256 with
+   rate=136.  4 BIOS words: `SHA3-INIT`, `SHA3-UPDATE`, `SHA3-FINAL`,
+   `SHA3-STATUS@`.  KDOS §1.6: `SHA3`, `.SHA3-STATUS`, `.SHA3`.
+   (commit `82548db`, 10 tests)
 
 7. ☐ **KDOS crypto words** — `HASH` (buffer → digest), `ENCRYPT` /
    `DECRYPT` (buffer → buffer), `HMAC`, `VERIFY`
@@ -170,22 +173,62 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
 ### Layer 2: Network Stack (Items 9–18)
 
 Building bottom-up; the crypto accelerators make this genuinely useful.
+Each protocol item is large enough to warrant **multiple commits** — the
+sub-commit plan below ensures continuous progress and test coverage at
+every step.
 
 9.  ☐ **Ethernet framing** — MAC address, EtherType parsing/generation
+    - 9a. KDOS constants + frame buffer layout (EtherType, MAC addrs)
+    - 9b. `ETH-BUILD` / `ETH-PARSE` BIOS words + KDOS wrappers
+    - 9c. NIC TX integration: `ETH-SEND` writes frame via NIC DMA
+    - 9d. NIC RX integration: `ETH-RECV` reads frame from NIC ring buffer
+
 10. ☐ **ARP** — address resolution (small table, ~8 entries)
-11. ☐ **IPv4** — minimal: header build/parse, checksum (via CRC
-    hardware), fragmentation optional
+    - 10a. ARP table data structure + `ARP-LOOKUP` / `ARP-INSERT`
+    - 10b. ARP request/reply frame build+parse, `ARP-RESOLVE`
+    - 10c. ARP responder: auto-reply to incoming ARP requests
+
+11. ☐ **IPv4** — minimal: header build/parse, checksum, no fragmentation
+    - 11a. IP header struct, `IP-BUILD` / `IP-PARSE`, HW-CRC checksum
+    - 11b. `IP-SEND` — ARP-resolve → Ethernet-frame → NIC TX
+    - 11c. `IP-RECV` — demux incoming Ethernet frames by EtherType
+
 12. ☐ **ICMP** — ping reply (essential for diagnostics)
-13. ☐ **UDP** — connectionless datagrams (natural fit for Forth simplicity)
-14. ☐ **DHCP client** — auto-configure IP/mask/gateway (UDP-based,
-    straightforward)
-15. ☐ **DNS client** — name resolution (UDP query/response)
-16. ☐ **TCP** — connection-oriented streams (the big one — needs
-    retransmission, windowing, state machine)
-17. ☐ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation.  The
-    hardware accelerators are *exactly* what TLS needs
-18. ☐ **Socket API** — `SOCKET`, `BIND`, `LISTEN`, `ACCEPT`, `CONNECT`,
-    `SEND`, `RECV`, `CLOSE`
+    - 12a. ICMP echo-request / echo-reply parse+build
+    - 12b. Auto-responder: incoming ping → automatic pong
+
+13. ☐ **UDP** — connectionless datagrams
+    - 13a. UDP header build/parse, checksum (pseudo-header)
+    - 13b. `UDP-SEND` / `UDP-RECV` words, port demux table
+
+14. ☐ **DHCP client** — auto-configure IP/mask/gateway
+    - 14a. DHCP DISCOVER/OFFER/REQUEST/ACK state machine
+    - 14b. `DHCP-START` word, auto-configure on boot
+
+15. ☐ **DNS client** — name resolution
+    - 15a. DNS query builder (A record), response parser
+    - 15b. `DNS-RESOLVE` ( c-addr len -- ip ) word
+
+16. ☐ **TCP** — connection-oriented streams (largest item)
+    - 16a. TCB (Transmission Control Block) data structure + state enum
+    - 16b. TCP header build/parse, sequence number handling
+    - 16c. 3-way handshake: SYN → SYN-ACK → ACK (active open)
+    - 16d. Data TX: segmentation, `TCP-SEND`, retransmit timer
+    - 16e. Data RX: reassembly, `TCP-RECV`, ACK generation
+    - 16f. Connection teardown: FIN/FIN-ACK, TIME_WAIT
+    - 16g. Sliding window + congestion control (basic)
+
+17. ☐ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation
+    - 17a. HKDF-Extract / HKDF-Expand using SHA-3 HMAC
+    - 17b. TLS record layer: content type, length, encryption
+    - 17c. Handshake: ClientHello → ServerHello → key schedule
+    - 17d. Application data encrypt/decrypt via AES-256-GCM
+    - 17e. `TLS-CONNECT` / `TLS-SEND` / `TLS-RECV` words
+
+18. ☐ **Socket API** — unified interface over TCP/UDP
+    - 18a. Socket descriptor table, `SOCKET` / `CLOSE`
+    - 18b. `BIND` / `LISTEN` / `ACCEPT` (TCP server)
+    - 18c. `CONNECT` / `SEND` / `RECV` (TCP client + UDP)
 
 ---
 
@@ -220,9 +263,10 @@ Building bottom-up; the crypto accelerators make this genuinely useful.
 
 ```
 Layer 0  Items  1– 4  Foundation (allocator, exceptions, CRC, diag) ✅ DONE
-Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3, crypto words, FS encrypt)
+Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3 ✅, crypto words, FS encrypt)
 Layer 2  Items  9–18  Network Stack (Ethernet → ARP → IP → ICMP → UDP →
                       DHCP → DNS → TCP → TLS 1.3 → Socket API)
+                      ~35 sub-commits across 10 protocol items
 Layer 3  Items 19–24  Multi-Core OS (run queues, work stealing, affinity,
                       preemption, IPI, locks)
 Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
@@ -232,6 +276,9 @@ Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
 Each item is committed individually with its own test class and run via
 `make test-bg K=TestClassName` + `make test-status`.  Layer 2 is
 strictly bottom-up — each protocol builds on the one below it.
+**Layer 2 items are large enough that each is broken into multiple
+sub-commits** (a–d typically), each independently tested.  This ensures
+continuous progress, reviewable diffs, and a working system at every step.
 
 ---
 
@@ -239,16 +286,16 @@ strictly bottom-up — each protocol builds on the one below it.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 9,792 | ✅ 261 dictionary entries |
-| `kdos.f` | 3,580 | ✅ KDOS definitions + §1.5 crypto |
+| `bios.asm` | 9,895 | ✅ 265 dictionary entries |
+| `kdos.f` | 3,613 | ✅ KDOS definitions + §1.5–§1.6 crypto |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
-| `system.py` | 476 | ✅ Quad-core SoC + AES device |
+| `system.py` | 478 | ✅ Quad-core SoC + AES + SHA3 devices |
 | `cli.py` | 995 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 1,250 | ✅ AES-256-GCM, CRC, Mailbox, Spinlock |
+| `devices.py` | 1,376 | ✅ AES-256-GCM, SHA3, CRC, Mailbox, Spinlock |
 | `diskutil.py` | 1,038 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 6,842 | 542 test methods (356+ passing) ✅ |
+| `test_system.py` | 6,997 | 552 test methods ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `fpga/rtl/` | ~8,200 | ✅ 14 Verilog modules |
 | `fpga/sim/` | ~4,500 | ✅ 9 testbenches (137 HW tests) |
