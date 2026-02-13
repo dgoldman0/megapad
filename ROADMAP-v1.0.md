@@ -1,18 +1,21 @@
 # ROADMAP to v1.0
 
 **Goal:** A polished, self-documenting computer system — emulator, BIOS,
-OS, filesystem, interactive TUI, comprehensive documentation — that feels
-complete and cohesive as a v1.0 release.
+OS, filesystem, interactive TUI, crypto stack, full network stack,
+multicore OS, and comprehensive documentation — that feels complete and
+cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (247 dict entries, 9,379 lines ASM,
-~22 KB binary), KDOS v1.1 (247 `:` definitions + 138 variables/constants,
-3,158 lines), Emulator (2,541 lines + 474-line quad-core SoC), FPGA RTL
-(14 Verilog modules + 9 testbenches), 1,207+ tests passing.
+**Current state (Feb 2026):** BIOS (261 dict entries, 9,792 lines ASM),
+KDOS v1.1 (3,580 lines), Emulator (2,541 lines + 476-line quad-core SoC),
+FPGA RTL (14 Verilog modules + 9 testbenches), devices.py (1,250 lines),
+356+ tests passing.  Branch: `features/kdos-improvements`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
-scheduler, pipelines, networking, disk I/O, BIOS FSLOAD auto-boot — are
-**functionally complete**.  What remains is **documentation, UX polish,
-and release hardening**.
+scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
+**functionally complete**.  Foundation layer (items 1–4) and AES crypto
+(item 5) are done.  Remaining work: SHA-3 crypto, KDOS crypto words,
+filesystem encryption, full network stack (Ethernet → TLS 1.3 → sockets),
+multicore OS, and application-level features.
 
 ---
 
@@ -131,152 +134,104 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
 
 ## Remaining for v1.0
 
-### Phase 1: Documentation (← NEXT)
+### Foundation (Items 1–4) — ✅ DONE
 
-The biggest gap.  The existing .md files (README, EMULATOR, KDOS) are all
-badly outdated — they reference v0.9d, 62 words, 103 tests.  We need a
-proper documentation library that serves as both user reference and
-development aid.
-
-**1.1  Forth Dialect References (highest priority)**
-
-These prevent having to re-read the source every time:
-
-- [x] **`docs/bios-forth.md`** — Complete BIOS Forth word reference.
-  All 242 entries grouped by category (stack, arithmetic, logic, memory,
-  control flow, string, I/O, compilation, disk, timer, tile engine,
-  NIC, system, extended tile, CRC, BIST, perf counters, FP16/BF16).
-- [x] **`docs/kdos-reference.md`** — Complete KDOS word/definition
-  reference.  All 247 `: ` definitions + key variables/constants.
-  Grouped by section (§1–§15).  Stack effects, usage examples,
-  cross-references to BIOS primitives they use.
-
-**1.2  Architecture & System Docs**
-
-- [x] **`docs/isa-reference.md`** — Megapad-64 instruction set.  All 16
-  families (~110 mnemonics), encoding format, condition codes, CSRs,
-  tile engine registers.  The authoritative ISA document.
-- [x] **`docs/architecture.md`** — System overview: CPU, memory map,
-  MMIO register layout (UART, timer, storage, NIC, tile engine),
-  boot sequence, interrupt model.
-- [x] **`docs/filesystem.md`** — MP64FS specification: sector layout,
-  directory entry format, file types, bitmap allocation, diskutil.py API.
-- [x] **`docs/tile-engine.md`** — Tile engine programming: CSR registers,
-  MEX instruction, element widths, reduction operations, buffer/kernel
-  integration with KDOS.
-
-**1.3  User-Facing Docs**
-
-- [x] **`docs/getting-started.md`** — Quick-start guide: how to boot,
-  run KDOS, use SCREENS, create buffers, run a pipeline.
-- [x] **`docs/tools.md`** — CLI monitor, assembler usage, diskutil
-  commands, test suite.
-- [x] **`README.md`** — Full rewrite with current stats, architecture
-  summary, quick-start, links to docs/.
-
-**1.4  In-Disk Documentation**
-
-- [x] Review and update the 10 doc topics and 5 tutorials already in
-  sample.img — ensure they reflect current KDOS word names, stack effects,
-  and BIOS FSLOAD boot flow.
+1. ✅ **Memory allocator** — `ALLOCATE`, `FREE`, `RESIZE`, `HEAP-SETUP`,
+   `.HEAP` (commit `4d69ab9`, 13 tests)
+2. ✅ **CATCH/THROW** — exception handling, nested catch, re-throw
+   (commit `c505f8d`, 8 tests)
+3. ✅ **CRC integration** — `CRC-BUF`, `CRC32-BUF`, `CRC32C-BUF`,
+   `CRC64-BUF` KDOS convenience words (commit `da56135`, 8 tests)
+4. ✅ **Hardware diagnostics** — `.DIAG`, `BIST-REPORT`, `TILE-REPORT`,
+   `.PERF`, live test monitor infrastructure (commit `a9b353c`)
 
 ---
 
-### Phase 2: UX & Interactive Polish
+### Layer 1: Crypto Stack (Items 5–8)
 
-The SCREENS TUI works but is read-only.  The REPL works but has no
-creature comforts.  For v1.0 these should feel usable, not just
-demonstrable.
+5. ✅ **Emulator support (AES)** — `AESDevice` in `devices.py`: full
+   AES-256-GCM with S-box, key expansion, CTR-mode encryption,
+   GHASH/GCM tag generation and verification.  10 BIOS words:
+   `AES-KEY!`, `AES-IV!`, `AES-AAD-LEN!`, `AES-DATA-LEN!`, `AES-CMD!`,
+   `AES-STATUS@`, `AES-DIN!`, `AES-DOUT@`, `AES-TAG@`, `AES-TAG!`.
+   KDOS §1.5: `AES-ENCRYPT`, `AES-DECRYPT`, `.AES-STATUS`.
+   (commit `c77c77f`, 9 tests)
 
-**2.1  SCREENS Improvements**
+6. ☐ **BIOS words (SHA-3)** — `SHA3-INIT`, `SHA3-UPDATE`, `SHA3-FINAL`
+   (SHA3Device in `devices.py`, BIOS assembly words, dictionary entries)
 
-- [x] **Interactive actions** in screens — e.g. on Buffers screen: select
-  a buffer to inspect, see its data preview; on Tasks screen: resume/kill
-  a task; on Docs screen: select a topic to read inline
-- [x] **Auto-refresh** — optional timer-driven redraw (currently
-  manual 'r')
-- [x] **Screen 8: Storage** — dedicated file browser: DIR listing,
-  select file → CAT/LOAD/info
-- [x] **Better formatting** — column alignment, proper truncation of long
-  names, color consistency
+7. ☐ **KDOS crypto words** — `HASH` (buffer → digest), `ENCRYPT` /
+   `DECRYPT` (buffer → buffer), `HMAC`, `VERIFY`
 
-**2.2  REPL UX**
-
-- [ ] **Command history** — store last N lines, recall with up-arrow
-  (requires escape sequence parsing in read_line)
-- [ ] **Tab completion** — WORDS-LIKE prefix match on partial input
-- [x] **Error messages** — show the word that failed + context, not
-  just "?"
-- [ ] **`.S` stack display** — consider always showing depth in prompt
-
-**2.3  Help & Discoverability**
-
-- [x] **HELP \<word\>** — look up a specific word's stack effect and
-  one-line description (requires a built-in word database or doc lookup)
-- [ ] **Contextual hints** — when a word errors, suggest related words
-- [x] Ensure TOPICS, LESSONS, DESCRIBE all work correctly with
-  disk-booted KDOS
+8. ☐ **Filesystem encryption** — optional at-rest encryption for files
 
 ---
 
-### Phase 3: Hardening & Edge Cases
+### Layer 2: Network Stack (Items 9–18)
 
-**3.1  Robustness**
+Building bottom-up; the crypto accelerators make this genuinely useful.
 
-- [x] FSLOAD error recovery — if a line in a loaded file has an undefined
-  word, print error with file/line context instead of silently continuing
-- [x] Stack underflow protection in BIOS (currently silently corrupts)
-- [x] EVALUATE nested depth limit (prevent unbounded RSP growth)
-- [x] Graceful handling of full dictionary (HERE approaching stack)
-
-**3.2  Missing Tests**
-
-- [x] BIOS FSLOAD with multi-sector files (> 512 bytes)
-- [x] BIOS FSLOAD with files containing `: ` definitions, `."` strings,
-  nested `EVALUATE`
-- [x] End-to-end disk-only boot test (no `--forth`, just `--storage`)
-  that verifies KDOS words work after loading
-- [x] SCREENS TUI test (render each screen, verify output contains
-  expected sections)
-- [x] Edge cases: empty file FSLOAD, file with only comments, 255-char
-  line
-
-**3.3  Emulator Polish (nice-to-have)**
-
-- [x] Configurable RAM size (`--ram` flag, CSR reports actual size)
-- [x] Assembler listing output (`-l` flag)
-- [x] Assembler size report after assembly
+9.  ☐ **Ethernet framing** — MAC address, EtherType parsing/generation
+10. ☐ **ARP** — address resolution (small table, ~8 entries)
+11. ☐ **IPv4** — minimal: header build/parse, checksum (via CRC
+    hardware), fragmentation optional
+12. ☐ **ICMP** — ping reply (essential for diagnostics)
+13. ☐ **UDP** — connectionless datagrams (natural fit for Forth simplicity)
+14. ☐ **DHCP client** — auto-configure IP/mask/gateway (UDP-based,
+    straightforward)
+15. ☐ **DNS client** — name resolution (UDP query/response)
+16. ☐ **TCP** — connection-oriented streams (the big one — needs
+    retransmission, windowing, state machine)
+17. ☐ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation.  The
+    hardware accelerators are *exactly* what TLS needs
+18. ☐ **Socket API** — `SOCKET`, `BIND`, `LISTEN`, `ACCEPT`, `CONNECT`,
+    `SEND`, `RECV`, `CLOSE`
 
 ---
 
-### Phase 4: Release
+### Layer 3: Multi-Core OS (Items 19–24)
 
-- [ ] Final `README.md` with correct stats, architecture diagram,
-  quick-start, links to all docs
-- [ ] All docs written and proofread
-- [ ] Full test run — target 1,207+ tests, all green
-- [ ] `sample.img` rebuilt with updated in-disk docs
-- [ ] Git tag `v1.0`
+19. ☐ **Per-core run queues** — each core has its own task list
+20. ☐ **Work stealing** — idle cores pull from busy cores' queues
+21. ☐ **Core-affinity** — pin tasks to specific cores
+22. ☐ **Per-core preemption** — timer IRQ on all cores, not just core 0
+23. ☐ **IPI messaging** — use mailbox for structured inter-core messages
+    (not just wake-up)
+24. ☐ **Shared resource locks** — dictionary lock, UART lock, filesystem
+    lock (currently unprotected)
+
+---
+
+### Layer 4: Application-Level (Items 25–30)
+
+25. ☐ **Outbound data** — `NET-SEND` integration, `PORT-SEND` to
+    transmit buffer data
+26. ☐ **FP16 tile mode** — expose `FP16-MODE` for ML/signal processing
+    workloads
+27. ☐ **QoS** — bus bandwidth allocation per core
+28. ☐ **Editor** — simple line/screen editor for writing Forth on-device
+29. ☐ **Scripting** — `AUTOEXEC` file loaded at boot, cron-like
+    scheduled tasks
+30. ☐ **Remote REPL** — UART or TCP-based remote Forth session
 
 ---
 
 ## Implementation Order
 
 ```
-Phase 1.1  Forth dialect docs (bios-forth.md, kdos-reference.md) ← NEXT
-Phase 1.2  Architecture docs (isa, architecture, filesystem, tile-engine)
-Phase 1.3  User docs (getting-started, tools, README rewrite)
-Phase 1.4  In-disk doc review
-Phase 2.1  SCREENS interactive actions
-Phase 2.2  REPL UX (history, completion, better errors)
-Phase 2.3  Help & discoverability
-Phase 3.1  Robustness fixes
-Phase 3.2  Missing tests
-Phase 4    Release tag
+Layer 0  Items  1– 4  Foundation (allocator, exceptions, CRC, diag) ✅ DONE
+Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3, crypto words, FS encrypt)
+Layer 2  Items  9–18  Network Stack (Ethernet → ARP → IP → ICMP → UDP →
+                      DHCP → DNS → TCP → TLS 1.3 → Socket API)
+Layer 3  Items 19–24  Multi-Core OS (run queues, work stealing, affinity,
+                      preemption, IPI, locks)
+Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
+                      scripting, remote REPL)
 ```
 
-Phases 2 and 3 can be interleaved.  Phase 1 is the gating factor —
-without docs, every subsequent change requires re-reading source.
+Each item is committed individually with its own test class and run via
+`make test-bg K=TestClassName` + `make test-status`.  Layer 2 is
+strictly bottom-up — each protocol builds on the one below it.
 
 ---
 
@@ -284,18 +239,18 @@ without docs, every subsequent change requires re-reading source.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 9,379 | ✅ Done (247 words, ~22 KB) |
-| `kdos.f` | 3,158 | ✅ Done (247 defs + 138 vars, multicore) |
-| `megapad64.py` | 2,516 | ✅ Done (incl. extended tile, FP16/BF16) |
-| `system.py` | 474 | ✅ Done (quad-core SoC) |
-| `cli.py` | 995 | ✅ Done |
-| `asm.py` | 788 | ✅ Done (listing support) |
-| `devices.py` | 964 | ✅ Done (+ Mailbox, Spinlock, CRC) |
-| `diskutil.py` | 1,038 | ✅ Done |
+| `bios.asm` | 9,792 | ✅ 261 dictionary entries |
+| `kdos.f` | 3,580 | ✅ KDOS definitions + §1.5 crypto |
+| `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
+| `system.py` | 476 | ✅ Quad-core SoC + AES device |
+| `cli.py` | 995 | ✅ Interactive monitor/debugger |
+| `asm.py` | 788 | ✅ Two-pass assembler |
+| `devices.py` | 1,250 | ✅ AES-256-GCM, CRC, Mailbox, Spinlock |
+| `diskutil.py` | 1,038 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 6,234 | 1,184 tests ✅ |
+| `test_system.py` | 6,842 | 542 test methods (356+ passing) ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `fpga/rtl/` | ~8,200 | ✅ 14 Verilog modules |
 | `fpga/sim/` | ~4,500 | ✅ 9 testbenches (137 HW tests) |
 | `docs/` | 9 files | ✅ Written |
-| `README.md` | 340 | ✅ Rewritten |
+| `README.md` | 340 | ✅ Current |
