@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **242 entries** —
+This document catalogs every word in the BIOS dictionary — **265 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -644,6 +644,40 @@ SUMSQ) use FP32 accumulation for numerical stability.
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE to FP16 half-precision (EW=4, 32 lanes). |
 | `BF16-MODE` | `( -- )` | Set TMODE to bfloat16 (EW=5, 32 lanes). |
+
+---
+
+## AES-256-GCM Engine (10 words)
+
+Hardware-accelerated authenticated encryption via the MMIO AES engine
+at `0xFFFF_FF00_0000_0700`.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `AES-KEY!` | `( addr -- )` | Load 256-bit key (32 bytes at addr) into AES engine. |
+| `AES-IV!` | `( addr -- )` | Load 96-bit IV (12 bytes at addr) into AES engine. |
+| `AES-AAD-LEN!` | `( n -- )` | Set additional authenticated data length (bytes). |
+| `AES-DATA-LEN!` | `( n -- )` | Set plaintext/ciphertext data length (bytes). |
+| `AES-CMD!` | `( cmd -- )` | Start operation: 1 = encrypt, 2 = decrypt. |
+| `AES-STATUS@` | `( -- status )` | Read status: 0 = busy, 1 = done, 2 = auth fail. |
+| `AES-DIN!` | `( addr -- )` | Feed input data block (16 bytes at addr) to engine. |
+| `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
+| `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
+| `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+
+---
+
+## SHA-3 / Keccak-256 Engine (4 words)
+
+Hardware-accelerated cryptographic hashing via the MMIO SHA3 engine
+at `0xFFFF_FF00_0000_0780`.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA3-INIT` | `( -- )` | Initialize SHA3 engine for a new hash computation. |
+| `SHA3-UPDATE` | `( addr len -- )` | Feed data (len bytes at addr) into SHA3 engine. |
+| `SHA3-FINAL` | `( addr -- )` | Finalize hash and store 256-bit digest (32 bytes) at addr. |
+| `SHA3-STATUS@` | `( -- status )` | Read engine status: 0 = busy, 1 = ready. |
 
 ---
 

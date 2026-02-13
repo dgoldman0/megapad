@@ -108,6 +108,7 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 |-----|---------|-------------|
 | 0 | `readonly` | File should not be modified |
 | 1 | `system` | System file (e.g., `kdos.f`) |
+| 2 | `encrypted` | File data is AES-256-GCM encrypted (set by `FENCRYPT`) |
 
 ---
 
@@ -288,3 +289,17 @@ present.
 | `OPEN name` | Open a file, return a file descriptor for FREAD/FWRITE |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache |
 | `FIND-BY-NAME` | Search directory for a name (uses NAMEBUF) |
+
+### File Encryption (§7.6.1)
+
+| Word | Description |
+|------|-------------|
+| `FS-KEY!` | `( addr -- )` Set 256-bit encryption key for file operations |
+| `ENCRYPTED?` | `( fdesc -- flag )` Check whether a file's encrypted flag is set |
+| `FENCRYPT` | `( fdesc -- )` Encrypt file in-place using AES-256-GCM, set encrypted flag |
+| `FDECRYPT` | `( fdesc -- )` Decrypt file in-place, verify auth tag, clear encrypted flag |
+
+Encryption operates at the sector level: each sector is encrypted as
+a separate AES-256-GCM block with a unique IV derived from sector
+index.  The authentication tag is stored alongside the ciphertext.
+A file must be `OPEN`ed before encrypting/decrypting.

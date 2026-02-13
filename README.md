@@ -25,10 +25,10 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 247 Forth dictionary words, 9,379 lines ASM, ~22 KB binary |
-| **KDOS** | v1.1 — 247 colon definitions + 138 variables/constants, 3,158 lines Forth |
+| **BIOS** | 265 Forth dictionary words, 9,895 lines ASM, ~22 KB binary |
+| **KDOS** | v1.1 — 289 colon definitions + 144 variables/constants, 3,850 lines Forth |
 | **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,516 lines Python |
-| **Tests** | 1,207 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine) |
+| **Tests** | 593 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **FPGA RTL** | 14 Verilog modules + 9 testbenches, Nexys A7-200T target |
@@ -111,12 +111,12 @@ memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (3,158 lines)     │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (3,850 lines)     │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
-│    BIOS v1.0 (9,379 lines)     │  ← Subroutine-threaded Forth,
-│  247 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (9,895 lines)     │  ← Subroutine-threaded Forth,
+│  265 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
@@ -216,7 +216,7 @@ make setup-pypy   # one-time
 make test          # ~4 min vs ~40 min under CPython
 ```
 
-All 1,207 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+All 593 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking, and extended tile engine.
 
 > **Tip:** PyPy's JIT dramatically speeds up the CPU emulator loop.  You
@@ -230,16 +230,16 @@ assembler, disk utility, devices, multicore, networking, and extended tile engin
 |------|-------|---------|
 | `megapad64.py` | 2,516 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
 | `system.py` | 474 | System integration (quad-core SoC, mailbox IPI, spinlocks) |
-| `bios.asm` | 9,379 | Forth BIOS in assembly (242 words, multicore, hardened) |
+| `bios.asm` | 9,895 | Forth BIOS in assembly (265 words, multicore, hardened) |
 | `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 3,158 | KDOS v1.1 operating system in Forth (247 definitions) |
+| `kdos.f` | 3,850 | KDOS v1.1 operating system in Forth (289 definitions) |
 | `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 964 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC |
+| `devices.py` | 1,376 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,038 | MP64FS filesystem utility and disk image builder |
 | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 6,234 | 1,184 integration tests (incl. multicore & extended tile) |
+| `test_system.py` | 7,308 | 570 integration tests (incl. multicore, tile, crypto, filesystem) |
 | `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
 | `pyproject.toml` | 8 | Pytest configuration |
 | `conftest.py` | 14 | Test fixtures and snapshot caching |
@@ -255,7 +255,7 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 247 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 265 entries by category) |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 400+ definitions by section, incl. multicore) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |

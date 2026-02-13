@@ -6,9 +6,9 @@ multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
 **Current state (Feb 2026):** BIOS (265 dict entries, 9,895 lines ASM),
-KDOS v1.1 (3,613 lines), Emulator (2,541 lines + 478-line quad-core SoC),
+KDOS v1.1 (3,850 lines), Emulator (2,541 lines + 478-line quad-core SoC),
 FPGA RTL (14 Verilog modules + 9 testbenches), devices.py (1,376 lines),
-552 test methods passing.  Branch: `features/kdos-improvements`.
+570 test methods passing.  Branch: `features/kdos-improvements`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
@@ -288,7 +288,7 @@ continuous progress, reviewable diffs, and a working system at every step.
 | File | Lines | Status |
 |------|-------|--------|
 | `bios.asm` | 9,895 | ✅ 265 dictionary entries |
-| `kdos.f` | 3,613 | ✅ KDOS definitions + §1.5–§1.6 crypto |
+| `kdos.f` | 3,850 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `system.py` | 478 | ✅ Quad-core SoC + AES + SHA3 devices |
 | `cli.py` | 995 | ✅ Interactive monitor/debugger |
@@ -296,7 +296,7 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `devices.py` | 1,376 | ✅ AES-256-GCM, SHA3, CRC, Mailbox, Spinlock |
 | `diskutil.py` | 1,038 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 6,997 | 552 test methods ✅ |
+| `test_system.py` | 7,308 | 570 test methods ✅ |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `fpga/rtl/` | ~8,200 | ✅ 14 Verilog modules |
 | `fpga/sim/` | ~4,500 | ✅ 9 testbenches (137 HW tests) |

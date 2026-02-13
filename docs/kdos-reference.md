@@ -7,9 +7,9 @@ versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
 TUI dashboard.
 
 This reference documents every word defined in KDOS, organized by the 16
-sections of `kdos.f`.  There are **247 colon definitions** and **138
-variables/constants/creates** — roughly 385 named entities in total across
-3,158 lines of Forth.
+sections of `kdos.f`.  There are **289 colon definitions** and **144
+variables/constants/creates** — roughly 433 named entities in total across
+3,850 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -20,6 +20,13 @@ variables/constants/creates** — roughly 385 named entities in total across
 ## Table of Contents
 
 1. [§1 Utility Words](#1-utility-words)
+   - [§1.1 Memory Allocator](#11-memory-allocator)
+   - [§1.2 Exception Handling](#12-exception-handling)
+   - [§1.3 CRC Integration](#13-crc-integration)
+   - [§1.4 Hardware Diagnostics](#14-hardware-diagnostics)
+   - [§1.5 AES-256-GCM Encryption](#15-aes-256-gcm-encryption)
+   - [§1.6 SHA-3 Hashing](#16-sha-3-hashing)
+   - [§1.7 Unified Crypto Words](#17-unified-crypto-words)
 2. [§2 Buffer Subsystem](#2-buffer-subsystem)
 3. [§3 Tile-Aware Buffer Operations](#3-tile-aware-buffer-operations)
 4. [§4 Kernel Registry](#4-kernel-registry)
@@ -28,6 +35,7 @@ variables/constants/creates** — roughly 385 named entities in total across
 7. [§7 Storage & Persistence](#7-storage--persistence)
 8. [§7.5 File Abstraction](#75-file-abstraction)
 9. [§7.6 MP64FS Filesystem](#76-mp64fs-filesystem)
+   - [§7.6.1 Filesystem Encryption](#761-filesystem-encryption)
 10. [§7.7 Documentation Browser](#77-documentation-browser)
 11. [§7.8 Dictionary Search](#78-dictionary-search)
 12. [§8 Scheduler & Tasks](#8-scheduler--tasks)
@@ -61,6 +69,97 @@ Small general-purpose helpers used throughout KDOS.
 3 NEEDS          \ aborts if fewer than 3 items on stack
 PARSE-NAME cat   \ copies "cat" into NAMEBUF, PN-LEN = 3
 ```
+
+---
+
+### §1.1 Memory Allocator
+
+Dynamic heap allocator with first-fit free-list strategy.  The heap lives
+above HERE with a 4 KiB dictionary guard.  All allocations are 8-byte
+aligned with 16-byte minimum.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ALLOCATE` | `( u -- addr ior )` | Allocate *u* bytes.  Returns address and 0 on success, or 0 and -1 on failure. |
+| `FREE` | `( addr -- )` | Free a previously allocated block.  Merges adjacent free blocks. |
+| `RESIZE` | `( addr u -- addr' ior )` | Resize an allocated block.  May move data.  Returns 0 on success. |
+| `HEAP-SETUP` | `( -- )` | Initialize the heap (called automatically on first ALLOCATE). |
+| `HEAP-FREE-BYTES` | `( -- n )` | Return total free bytes in the heap. |
+| `.HEAP` | `( -- )` | Print heap statistics: total, free, largest block. |
+| `MEM-SIZE` | `( -- n )` | Return total RAM in bytes (from SysInfo MMIO). |
+
+---
+
+### §1.2 Exception Handling
+
+ANS Forth CATCH/THROW mechanism for structured error handling.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CATCH` | `( xt -- exception# \| 0 )` | Execute *xt*; if it THROWs, return the exception number.  Returns 0 on normal completion. |
+| `THROW` | `( n -- )` | If *n* is nonzero, unwind to the most recent CATCH frame and return *n*.  If *n* is 0, does nothing. |
+
+---
+
+### §1.3 CRC Integration
+
+Convenience wrappers over the BIOS CRC accelerator.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CRC-BUF` | `( addr len mode -- crc )` | Compute CRC of a buffer.  *mode*: 0=CRC-32, 1=CRC-32C, 2=CRC-64. |
+| `CRC32` | `( addr len -- crc )` | CRC-32 of a buffer (shortcut for mode 0). |
+| `CRC32C` | `( addr len -- crc )` | CRC-32C of a buffer (shortcut for mode 1). |
+| `CRC64` | `( addr len -- crc )` | CRC-64 of a buffer (shortcut for mode 2). |
+| `.CRC` | `( addr len -- )` | Print all three CRC values for a buffer. |
+
+---
+
+### §1.4 Hardware Diagnostics
+
+Live test monitor and diagnostic words.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `HW-DIAG` | `( -- )` | Run a comprehensive hardware diagnostics suite (UART, Timer, CRC, AES, SHA3). |
+| `.DIAG` | `( label pass -- )` | Print a pass/fail diagnostic line. |
+
+---
+
+### §1.5 AES-256-GCM Encryption
+
+High-level AES-256-GCM words built on the BIOS AES accelerator.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `AES-ENCRYPT` | `( key iv src dst len -- tag-addr )` | Encrypt *len* bytes from *src* to *dst*.  Returns address of 16-byte GCM tag. |
+| `AES-DECRYPT` | `( key iv src dst len tag -- flag )` | Decrypt and verify.  Returns 0 if auth OK, -1 if auth failed. |
+| `AES-ENCRYPT-BLK` | `( src dst -- )` | Process one 16-byte block (key/IV/CMD must already be set). |
+| `.AES-STATUS` | `( -- )` | Print human-readable AES status. |
+
+---
+
+### §1.6 SHA-3 Hashing
+
+SHA3-256 (Keccak) convenience word built on the BIOS SHA3 accelerator.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA3` | `( addr len out -- )` | Compute SHA3-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
+
+---
+
+### §1.7 Unified Crypto Words
+
+High-level crypto API combining AES and SHA3.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `HASH` | `( addr len out -- )` | Alias for SHA3-256. |
+| `HMAC` | `( key klen msg mlen out -- )` | HMAC-SHA3-256.  Uses ipad/opad (XOR 0x36/0x5C), block size 136. |
+| `ENCRYPT` | `( key iv src dst len -- tag-addr )` | AES-256-GCM encrypt (alias for AES-ENCRYPT). |
+| `DECRYPT` | `( key iv src dst len tag -- flag )` | AES-256-GCM decrypt (alias for AES-DECRYPT). |
+| `VERIFY` | `( addr1 addr2 len -- flag )` | Constant-time comparison.  Returns 0 if equal, -1 if different. |
 
 ---
 
@@ -402,6 +501,34 @@ CAT getting-started          \ print a file's contents
 my-buffer SAVE-BUFFER my-data   \ save buffer to existing file
 LOAD my-script.f             \ evaluate a Forth source file
 FS-FREE                      \ check remaining space
+```
+
+---
+
+### §7.6.1 Filesystem Encryption
+
+Optional at-rest encryption for MP64FS files using AES-256-GCM.  Operates
+on OPEN'd file descriptors.  Uses a system-level key stored in `FS-KEY`.
+The IV is derived deterministically from the file's directory slot number.
+
+On-disk layout of an encrypted file:
+- Sectors contain: ciphertext (zero-padded to 16-byte boundary) `||` 16-byte GCM tag
+- `used_bytes` in directory = original plaintext length (unchanged)
+- `flags` bit 2 = encrypted
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FS-KEY!` | `( addr -- )` | Copy 32-byte encryption key into `FS-KEY`. |
+| `ENCRYPTED?` | `( fdesc -- flag )` | True (-1) if file has the encrypted flag set. |
+| `FENCRYPT` | `( fdesc -- ior )` | Encrypt an open file in-place on disk.  Returns 0 on success, -1 on error.  No-op if already encrypted or empty. |
+| `FDECRYPT` | `( fdesc -- flag )` | Decrypt an encrypted file in-place.  Returns 0 if auth passed, -1 if failed.  On auth failure the file is unchanged. |
+
+**Example:**
+```forth
+CREATE my-key 32 ALLOT   my-key 32 0 FILL   my-key FS-KEY!
+OPEN secret              \ -- fdesc
+DUP ENCRYPTED? .         \ 0 (not encrypted)
+FENCRYPT .                \ 0 (success)
 ```
 
 ---
