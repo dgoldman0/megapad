@@ -3,8 +3,8 @@
 ## 1  Overview
 
 This document describes the FPGA implementation of the Megapad-64
-system-on-chip.  The design targets the **Digilent Nexys A7-200T**
-(Xilinx Artix-7 `xc7a200tsbg484-1`) as the primary prototype board.
+system-on-chip.  The design targets the **Digilent Genesys 2**
+(Xilinx Kintex-7 `xc7k325tffg900-2`) as the primary prototype board.
 
 ### 1.1  Design Goals
 
@@ -398,10 +398,10 @@ vivado -mode batch -source program.tcl
 
 ### 12.1  Hardware Acquisition
 
-Target: **Digilent Nexys A7-100T** ($299) or **Nexys A7-200T** ($499)
-- 100T has 135 BRAMs (sufficient for 1 MiB + FIFOs with tight budget)
-- 200T has 365 BRAMs (comfortable headroom for caches and buffers)
-- Both include USB-UART, micro-SD slot, 128 MiB DDR2 (alternative to HyperRAM PMOD)
+Target: **Digilent Genesys 2** (Kintex-7 325T, primary) or **Nexys A7-200T** (legacy, tight fit)
+- Genesys 2 has 445 BRAMs, 840 DSP48E1, 203K LUTs — comfortable headroom
+- Nexys A7-200T has 365 BRAMs but insufficient DSPs for 4× tile engines
+- Both include USB-UART, micro-SD slot; Genesys 2 adds DDR3, GbE PHY
 
 ### 12.2  RTL Optimizations (Post-Hardware)
 

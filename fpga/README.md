@@ -82,6 +82,62 @@ translates 64-bit CPU accesses into burst transactions.  The tile engine
 can also target external memory, but at reduced throughput (~8× slower
 than internal BRAM).
 
+## Resource Estimate (Manual Audit)
+
+Automated synthesis requires Vivado (Yosys 0.33 cannot handle the 512-bit
+SIMD tile engine or large BRAM arrays).  The following estimate was produced
+by auditing every RTL module for register counts, multiplier widths, memory
+arrays, and combinational logic.
+
+### Kintex-7 325T (xc7k325tffg900-2) — Genesys 2
+
+| Resource | Used (est.) | Available | Utilisation |
+|----------|------------:|----------:|:-----------:|
+| **LUTs** | ~125K–165K | 203,800 | 60–80% |
+| **FFs** | ~209K | 326,080 | 64% |
+| **BRAM36** | ~237 | 445 | 53% |
+| **DSP48E1** | ~400–600 | 840 | 48–71% |
+
+### Per-Module Breakdown
+
+| Module | ×N | FFs | BRAM36 | DSP48 | Notes |
+|--------|---:|----:|-------:|------:|-------|
+| **mp64_cpu** | 4 | 18.4K | — | — | 16×64b GPRs, flags, pipeline |
+| **mp64_icache** | 4 | 53.2K | — | — | 4 KiB data + tags (registers) |
+| **mp64_tile** | 4 | 110.4K | — | 400–600 | 512b SIMD, accumulators, dot-product |
+| **mp64_memory** | 1 | — | 228 | — | 16384×512b dual-port (1 MiB) |
+| **mp64_aes** | 1 | 4.2K | — | — | AES-256-GCM, 15 round keys |
+| **mp64_sha3** | 1 | 3.3K | — | — | Keccak-f[1600], 5×5×64 state |
+| **mp64_crc** | 1 | ~0.2K | — | — | CRC-32 |
+| **mp64_nic** | 1 | 13.6K | 6 | — | 1500B RX/TX buffers, data window |
+| **mp64_bus** | 1 | ~0.5K | — | — | QoS arbiter, weights/counters |
+| **mp64_uart** | 1 | ~0.3K | — | — | 16B TX/RX FIFOs |
+| **mp64_timer** | 1 | ~0.3K | — | — | 32-bit timer + compare |
+| **mp64_disk** | 1 | ~0.2K | 3 | — | SPI-SD + DMA buffer |
+| **mp64_mailbox** | 1 | ~1.0K | — | — | 4 slots + 8 spinlocks |
+| **mp64_extmem** | 1 | ~0.2K | — | — | External memory controller |
+| **mp64_fp16_alu** | 4 | ~3.2K | — | — | FP16/FP32 convert + add |
+
+### DSP Usage Notes
+
+The raw multiplier count across 4 tile engines is ~1,200–1,700 DSP48E1
+(integer TMUL at 4 element widths + FP16 multipliers).  However, only
+one `mode_ew` is active per tile at any time, so Vivado's resource-sharing
+optimisation (`AreaOptimized_high` + retiming) should fold mutually
+exclusive multipliers down to **~400–600 DSP48E1** — well within the
+840-slice budget.
+
+### Synthesis Status
+
+- **Yosys 0.33**: Cannot complete — Yosys flattens the tile engine's
+  combinational `always @(*)` block into thousands of latches and lacks
+  proper BRAM inference for the memory architecture.
+- **Vivado**: Required for correct synthesis.  Build scripts and
+  constraints are ready (`synth_genesys2.tcl`, `genesys2.xdc`).
+- **Conclusion**: Design is expected to fit the K325T comfortably with
+  Vivado synthesis.  DSP utilisation is the tightest resource but should
+  be feasible with resource sharing.
+
 ## Building
 
 ```bash
