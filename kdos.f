@@ -278,6 +278,79 @@ VARIABLE HANDLER   0 HANDLER !
     THEN ;
 
 \ =====================================================================
+\  §1.3  CRC Convenience Words
+\ =====================================================================
+\
+\  The BIOS provides six CRC primitives that talk directly to the
+\  hardware CRC accelerator (MMIO at +0x07C0):
+\    CRC-POLY!  ( n -- )       0=CRC32, 1=CRC32C, 2=CRC64
+\    CRC-INIT!  ( n -- )       initial CRC value
+\    CRC-FEED   ( n -- )       feed 8 bytes (LE 64-bit cell)
+\    CRC@       ( -- n )       current CRC result
+\    CRC-RESET  ( -- )         reset to init value
+\    CRC-FINAL  ( -- )         XOR-out (finalize)
+\
+\  Below we build high-level words on top of those primitives.
+
+\ CRC-BUF ( addr u -- )  Feed u bytes from addr into the CRC engine.
+\   Processes full 8-byte chunks via CRC-FEED, then zero-pads and
+\   feeds any remaining 1..7 bytes.
+: CRC-BUF  ( addr u -- )
+    \ Process full 8-byte chunks using BEGIN/WHILE/REPEAT
+    BEGIN  DUP 8 >=  WHILE
+        OVER @ CRC-FEED
+        SWAP 8 + SWAP
+        8 -
+    REPEAT
+    \ Remaining bytes: 0..7
+    DUP 0 > IF
+        \ Build a zero-padded 64-bit LE cell from remaining bytes.
+        \ Byte 0 → bits 0..7, byte 1 → bits 8..15, etc.
+        0 SWAP         ( addr cell rem )
+        0 DO
+            OVER I + C@   ( addr cell byte )
+            I 3 LSHIFT LSHIFT  ( addr cell byte<<shift )
+            OR            ( addr cell' )
+        LOOP
+        CRC-FEED
+        DROP
+    ELSE
+        2DROP
+    THEN
+;
+
+\ CRC32-BUF ( addr u -- crc )  Compute CRC-32 of a buffer.
+: CRC32-BUF
+    0 CRC-POLY!
+    0xFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC32C-BUF ( addr u -- crc )  Compute CRC-32C of a buffer.
+: CRC32C-BUF
+    1 CRC-POLY!
+    0xFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC64-BUF ( addr u -- crc )  Compute CRC-64-ECMA of a buffer.
+: CRC64-BUF
+    2 CRC-POLY!
+    0xFFFFFFFFFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC32-STR ( c-addr u -- crc )  CRC-32 of a counted/addr+len string.
+\   Same as CRC32-BUF, just an alias for readability.
+: CRC32-STR  CRC32-BUF ;
+
+\ .CRC32 ( addr u -- )  Print CRC-32 of buffer in hex.
+: .CRC32  CRC32-BUF BASE @ SWAP HEX U. BASE ! ;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \

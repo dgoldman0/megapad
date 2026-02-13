@@ -5508,6 +5508,92 @@ class TestKDOSExceptions(TestKDOS):
                         f"RP@ should return positive address, got {nums}")
 
 
+class TestKDOSCRC(TestKDOS):
+    """Tests for §1.3 CRC convenience words (CRC-BUF, CRC32-BUF, etc.)."""
+
+    def test_crc32_8_bytes(self):
+        """CRC32-BUF of 8 identical bytes matches reference."""
+        # 8 bytes of 0x41 ('A') → CRC32 = 0xF59A903A = 4120547386
+        text = self._run_kdos([
+            "CREATE crc-td 8 ALLOT",
+            "crc-td 8 65 FILL",
+            "crc-td 8 CRC32-BUF .",
+        ])
+        self.assertIn("4120547386 ", text)
+
+    def test_crc32_16_bytes(self):
+        """CRC32-BUF of 16 identical bytes (two chunks) matches reference."""
+        # 16 bytes of 0x41 ('A') → CRC32 = 2546901954
+        text = self._run_kdos([
+            "CREATE crc-td2 16 ALLOT",
+            "crc-td2 16 65 FILL",
+            "crc-td2 16 CRC32-BUF .",
+        ])
+        self.assertIn("2546901954 ", text)
+
+    def test_crc32_deterministic(self):
+        """Same data produces same CRC twice."""
+        text = self._run_kdos([
+            "CREATE crc-td3 8 ALLOT",
+            "crc-td3 8 65 FILL",
+            "crc-td3 8 CRC32-BUF",
+            "crc-td3 8 CRC32-BUF",
+            "= .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE
+
+    def test_crc32_different_data(self):
+        """Different data produces different CRC."""
+        text = self._run_kdos([
+            "CREATE crc-d1 8 ALLOT  crc-d1 8 65 FILL",
+            "CREATE crc-d2 8 ALLOT  crc-d2 8 66 FILL",
+            "crc-d1 8 CRC32-BUF",
+            "crc-d2 8 CRC32-BUF",
+            "<> .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE (they differ)
+
+    def test_crc32c_8_bytes(self):
+        """CRC32C-BUF of 8 bytes matches reference."""
+        # 8 bytes of 0x41 → CRC32C = 0xBD5B9F02 = 3176898306
+        text = self._run_kdos([
+            "CREATE crc-td4 8 ALLOT",
+            "crc-td4 8 65 FILL",
+            "crc-td4 8 CRC32C-BUF .",
+        ])
+        self.assertIn("3176898306 ", text)
+
+    def test_crc32_vs_crc32c_differ(self):
+        """CRC32 and CRC32C produce different results for same data."""
+        text = self._run_kdos([
+            "CREATE crc-td5 8 ALLOT  crc-td5 8 65 FILL",
+            "crc-td5 8 CRC32-BUF",
+            "crc-td5 8 CRC32C-BUF",
+            "<> .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE
+
+    def test_crc32_empty(self):
+        """CRC32-BUF of 0 bytes returns 0 (init XOR finalize cancels)."""
+        text = self._run_kdos([
+            "CREATE crc-td6 8 ALLOT",
+            "crc-td6 0 CRC32-BUF .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_crc_primitives_direct(self):
+        """Low-level CRC primitives work: POLY!, INIT!, FEED, RESET, FINAL, @."""
+        text = self._run_kdos([
+            "0 CRC-POLY!",
+            "0xFFFFFFFF CRC-INIT!",
+            "0x4141414141414141 CRC-FEED",
+            "CRC-FINAL",
+            "CRC@ .",
+        ])
+        # Same as CRC32 of 8 'A' bytes
+        self.assertIn("4120547386 ", text)
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 
