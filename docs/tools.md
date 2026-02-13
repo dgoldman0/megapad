@@ -404,7 +404,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **515 passing tests**
+The project has a comprehensive test suite with **593 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -504,14 +504,14 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `system.py` | ~472 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock) |
 | `cli.py` | ~995 | CLI, boot modes, debug monitor |
 | `asm.py` | ~748 | Two-pass assembler (with listing output) |
-| `devices.py` | ~855 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock) |
+| `devices.py` | ~1,376 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,038 | MP64FS disk utility and image builder |
-| `bios.asm` | ~8,880 | Forth BIOS (208 dictionary words, hardened, multicore) |
+| `bios.asm` | ~9,895 | Forth BIOS (265 dictionary words, hardened, multicore) |
 | `bios.rom` | 20,722B | Pre-assembled BIOS binary |
-| `kdos.f` | ~3,158 | KDOS v1.1 operating system (247 colon defs, 9 TUI screens, multicore) |
+| `kdos.f` | ~3,850 | KDOS v1.1 operating system (289 colon defs, 9 TUI screens, multicore, crypto) |
 | `test_megapad64.py` | ~357 | CPU unit tests (18 tests) |
-| `test_system.py` | ~6,227 | Integration test suite (497 tests, 16 classes) |
+| `test_system.py` | ~7,308 | Integration test suite (570 tests, 24 classes) |
 | `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
 | `pyproject.toml` | 8 | Pytest configuration |
 | `conftest.py` | 14 | Test fixtures and snapshot caching |

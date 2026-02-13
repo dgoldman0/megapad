@@ -70,8 +70,548 @@ VARIABLE PN-LEN
 : ASSERT  ( flag -- )
     0= ABORT" Assertion failed" ;
 
+\ ['] ( "name" -- )  compile-time: parse next word, compile its XT as literal
+\   Equivalent to: ' name LITERAL
+: ['] ' POSTPONE LITERAL ; IMMEDIATE
+
 \ .DEPTH ( -- )  show current stack depth
 : .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
+
+\ =====================================================================
+\  §1.1  Memory Allocator
+\ =====================================================================
+\
+\  First-fit free-list allocator.  Each block has a 16-byte header:
+\    +0   next    pointer to next free block (0 = end of list)
+\    +8   size    usable bytes in this block (excludes header)
+\
+\  ALLOCATE returns an address past the header.  FREE takes that
+\  address, backs up 16 bytes to find the header, and inserts
+\  the block into the free list (sorted by address, coalescing
+\  adjacent blocks).
+\
+\  The heap lives above HERE (which is reserved for the Forth
+\  dictionary).  HEAP-BASE marks the start; it's set at load time
+\  to a safe offset above HERE.
+\
+\  Memory layout:
+\    0x00000  ...  BIOS+KDOS dictionary  ...  HERE
+\    HEAP-BASE  ...  heap blocks  ...
+\    DSP ↓  (data stack grows down)
+\
+
+16 CONSTANT /ALLOC-HDR
+
+\ MEM-SIZE ( -- u )  total RAM in bytes
+\   Reads from SysInfo MMIO device: MEM_SIZE at offsets +0x06, +0x07
+\   Value is in KiB; multiply by 1024 for bytes.
+: MEM-SIZE  ( -- u )
+    0xFFFFFF0000000306 C@       \ MEM_SIZE_LO (KiB low byte)
+    0xFFFFFF0000000307 C@       \ MEM_SIZE_HI (KiB high byte)
+    8 LSHIFT OR  1024 * ;
+
+\ -- Heap state --
+VARIABLE HEAP-BASE    0 HEAP-BASE !
+VARIABLE HEAP-FREE    0 HEAP-FREE !    \ head of free list
+VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
+
+\ -- Allocator scratch variables (avoid deep stack gymnastics) --
+VARIABLE A-PREV       \ previous free-list node (0 = update HEAP-FREE)
+VARIABLE A-CURR       \ current free-list node being examined
+VARIABLE A-SIZE       \ requested allocation size (rounded)
+
+\ HEAP-SETUP ( -- )  initialise the heap above HERE
+\   Leaves a 4 KiB gap above HERE for dictionary growth,
+\   then creates one large free block spanning to the stack guard.
+: HEAP-SETUP  ( -- )
+    HEAP-INIT @ IF EXIT THEN
+    HERE 4096 + TALIGN  HEAP-BASE !
+    \ Heap end = data-stack bottom - 4096 guard
+    MEM-SIZE 2 / 4096 -   ( heap-end )
+    HEAP-BASE @ -          ( available-bytes )
+    /ALLOC-HDR -           ( usable size for first block )
+    DUP 64 < ABORT" Heap too small"
+    \ Write header for the single free block
+    0 HEAP-BASE @ !              \ next = 0 (end of list)
+    HEAP-BASE @ 8 + !            \ size = available
+    HEAP-BASE @ HEAP-FREE !      \ free list head
+    1 HEAP-INIT ! ;
+
+\ (LINK-PREV!) ( addr -- )
+\   Set previous node's next field (or HEAP-FREE) to addr.
+: (LINK-PREV!)  ( addr -- )
+    A-PREV @ 0= IF  HEAP-FREE !  ELSE  A-PREV @ !  THEN ;
+
+\ ALLOCATE ( u -- addr ior )
+\   Allocate u bytes.  Returns address and 0 on success,
+\   or 0 and -1 on failure.  First-fit search.
+: ALLOCATE  ( u -- addr ior )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    DUP 0= IF DROP 0 -1 EXIT THEN
+    \ Round up to 8-byte alignment, minimum 16
+    7 + -8 AND  DUP 16 < IF DROP 16 THEN
+    A-SIZE !
+    0 A-PREV !   HEAP-FREE @ A-CURR !
+    BEGIN
+        A-CURR @ 0= IF  0 -1 EXIT  THEN      \ OOM
+        A-CURR @ 8 + @                         ( block-size )
+        A-SIZE @ >= IF
+            \ Found a big enough block
+            A-CURR @ 8 + @  A-SIZE @ -         ( leftover )
+            DUP /ALLOC-HDR 16 + >= IF
+                \ Split: new free block after the allocated region
+                A-CURR @ /ALLOC-HDR + A-SIZE @ +  ( leftover new-blk )
+                A-CURR @ @ OVER !                  \ new-blk.next = curr.next
+                SWAP /ALLOC-HDR - OVER 8 + !       \ new-blk.size = leftover-hdr
+                A-SIZE @ A-CURR @ 8 + !            \ curr.size = requested
+                (LINK-PREV!)                        \ prev → new-blk
+            ELSE
+                \ Use whole block — unlink from free list
+                DROP
+                A-CURR @ @  (LINK-PREV!)            \ prev → curr.next
+            THEN
+            A-CURR @ /ALLOC-HDR +  0  EXIT          \ return user addr + success
+        THEN
+        \ Block too small — advance
+        A-CURR @ A-PREV !
+        A-CURR @ @ A-CURR !
+    AGAIN ;
+
+\ FREE ( addr -- )
+\   Return a previously allocated block to the free list.
+\   Inserts in address-sorted order (for future coalescing).
+: FREE  ( addr -- )
+    DUP 0= IF DROP EXIT THEN
+    /ALLOC-HDR -   ( block )
+    0 A-PREV !   HEAP-FREE @ A-CURR !
+    BEGIN
+        A-CURR @ 0= IF
+            \ End of list — append here
+            0 OVER !                                \ block.next = 0
+            A-PREV @ 0= IF  HEAP-FREE !
+            ELSE  A-PREV @ !  THEN
+            EXIT
+        THEN
+        A-CURR @ OVER > IF
+            \ Insert before curr
+            A-CURR @ OVER !                         \ block.next = curr
+            A-PREV @ 0= IF  HEAP-FREE !
+            ELSE  A-PREV @ !  THEN
+            EXIT
+        THEN
+        \ Advance
+        A-CURR @ A-PREV !
+        A-CURR @ @ A-CURR !
+    AGAIN ;
+
+\ RESIZE ( a1 u -- a2 ior )
+\   Resize an allocated block.  Simple: alloc new, copy, free old.
+\   On failure returns original address and non-zero ior.
+: RESIZE  ( a1 u -- a2 ior )
+    DUP ALLOCATE               ( a1 u a2 ior )
+    IF  2DROP DROP -1 EXIT  THEN
+    \ Success: ( a1 u a2 ) — copy u bytes from a1 to a2, free a1
+    A-CURR !                   \ stash a2
+    A-SIZE !                   \ stash u
+    DUP A-CURR @ A-SIZE @ CMOVE   \ copy u bytes from a1 to a2
+    FREE                           \ free a1
+    A-CURR @ 0 ;               \ return ( a2 0 )
+
+\ HEAP-FREE-BYTES ( -- u )
+\   Walk the free list summing available bytes.
+: HEAP-FREE-BYTES  ( -- u )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    0 HEAP-FREE @
+    BEGIN
+        DUP 0<> WHILE
+        DUP 8 + @ ROT + SWAP   ( sum' curr )
+        @                       ( sum' next )
+    REPEAT
+    DROP ;
+
+\ .HEAP ( -- ) show heap summary
+: .HEAP  ( -- )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    ." Heap: base=" HEAP-BASE @ .
+    ."  free=" HEAP-FREE-BYTES . ." bytes" CR ;
+
+\ =====================================================================
+\  §1.2  Exception Handling — CATCH / THROW
+\ =====================================================================
+\
+\  ANS Forth CATCH/THROW (EXCEPTION word set).
+\
+\  CATCH saves the current stack pointers and installs an exception
+\  frame.  If the executed XT calls THROW with a non-zero code,
+\  control returns to the matching CATCH with stacks restored.
+\
+\  Exception frames are chained via HANDLER variable.
+\
+\  Requires BIOS words: SP@ SP! RP@ RP!
+\
+
+VARIABLE HANDLER   0 HANDLER !
+
+\ CATCH ( xt -- exception# | 0 )
+\   Execute xt.  If it completes normally, return 0.
+\   If xt (or anything it calls) does THROW n, return n
+\   with data stack restored to depth at CATCH entry + 1.
+: CATCH  ( xt -- 0 | exception# )
+    SP@ >R              ( save data-stack pointer )
+    HANDLER @ >R        ( save previous handler frame )
+    RP@ HANDLER !       ( install new handler = current RSP )
+    EXECUTE             ( run the XT )
+    R> HANDLER !        ( restore previous handler )
+    R> DROP             ( discard saved SP )
+    0 ;                 ( no exception → 0 )
+
+\ THROW ( n -- )
+\   If n = 0, do nothing (identity).
+\   If n ≠ 0, unwind to most recent CATCH, restoring stacks.
+: THROW  ( n -- )
+    ?DUP IF
+        HANDLER @ RP!   ( unwind RSP to handler frame )
+        R> HANDLER !    ( pop & restore previous handler )
+        R> SWAP >R      ( recover saved SP, stash throw-code )
+        SP!             ( restore data stack )
+        DROP R>         ( drop stale TOS, retrieve throw-code )
+    THEN ;
+
+\ =====================================================================
+\  §1.3  CRC Convenience Words
+\ =====================================================================
+\
+\  The BIOS provides six CRC primitives that talk directly to the
+\  hardware CRC accelerator (MMIO at +0x07C0):
+\    CRC-POLY!  ( n -- )       0=CRC32, 1=CRC32C, 2=CRC64
+\    CRC-INIT!  ( n -- )       initial CRC value
+\    CRC-FEED   ( n -- )       feed 8 bytes (LE 64-bit cell)
+\    CRC@       ( -- n )       current CRC result
+\    CRC-RESET  ( -- )         reset to init value
+\    CRC-FINAL  ( -- )         XOR-out (finalize)
+\
+\  Below we build high-level words on top of those primitives.
+
+\ CRC-BUF ( addr u -- )  Feed u bytes from addr into the CRC engine.
+\   Processes full 8-byte chunks via CRC-FEED, then zero-pads and
+\   feeds any remaining 1..7 bytes.
+: CRC-BUF  ( addr u -- )
+    \ Process full 8-byte chunks using BEGIN/WHILE/REPEAT
+    BEGIN  DUP 8 >=  WHILE
+        OVER @ CRC-FEED
+        SWAP 8 + SWAP
+        8 -
+    REPEAT
+    \ Remaining bytes: 0..7
+    DUP 0 > IF
+        \ Build a zero-padded 64-bit LE cell from remaining bytes.
+        \ Byte 0 → bits 0..7, byte 1 → bits 8..15, etc.
+        0 SWAP         ( addr cell rem )
+        0 DO
+            OVER I + C@   ( addr cell byte )
+            I 3 LSHIFT LSHIFT  ( addr cell byte<<shift )
+            OR            ( addr cell' )
+        LOOP
+        CRC-FEED
+        DROP
+    ELSE
+        2DROP
+    THEN
+;
+
+\ CRC32-BUF ( addr u -- crc )  Compute CRC-32 of a buffer.
+: CRC32-BUF
+    0 CRC-POLY!
+    0xFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC32C-BUF ( addr u -- crc )  Compute CRC-32C of a buffer.
+: CRC32C-BUF
+    1 CRC-POLY!
+    0xFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC64-BUF ( addr u -- crc )  Compute CRC-64-ECMA of a buffer.
+: CRC64-BUF
+    2 CRC-POLY!
+    0xFFFFFFFFFFFFFFFF CRC-INIT!
+    CRC-BUF
+    CRC-FINAL
+    CRC@ ;
+
+\ CRC32-STR ( c-addr u -- crc )  CRC-32 of a counted/addr+len string.
+\   Same as CRC32-BUF, just an alias for readability.
+: CRC32-STR  CRC32-BUF ;
+
+\ .CRC32 ( addr u -- )  Print CRC-32 of buffer in hex.
+: .CRC32  CRC32-BUF BASE @ SWAP HEX U. BASE ! ;
+
+\ =====================================================================
+\  §1.4  Hardware Diagnostics
+\ =====================================================================
+\
+\  Wrapper words for the 18 BIOS diagnostic primitives:
+\    PERF-CYCLES, PERF-STALLS, PERF-TILEOPS, PERF-EXTMEM, PERF-RESET
+\    BIST-FULL, BIST-QUICK, BIST-STATUS, BIST-FAIL-ADDR, BIST-FAIL-DATA
+\    TILE-TEST, TILE-TEST@, TILE-DETAIL@
+\    ICACHE-ON, ICACHE-OFF, ICACHE-INV, ICACHE-HITS, ICACHE-MISSES
+
+\ .PERF ( -- )  Display performance counters.
+: .PERF
+    CR ."  Performance Counters" CR
+    ."    Cycles:   " PERF-CYCLES . CR
+    ."    Stalls:   " PERF-STALLS . CR
+    ."    Tile ops: " PERF-TILEOPS . CR
+    ."    Ext mem:  " PERF-EXTMEM . CR ;
+
+\ .BIST-STATUS ( -- )  Display last BIST result (from boot, NOT re-run).
+\   BIST destroys all RAM so must NOT be run after KDOS loads.
+: .BIST-STATUS
+    CR ."  Memory BIST Status" CR
+    BIST-STATUS
+    DUP 0 = IF DROP ."    idle (no BIST run)" CR ELSE
+    DUP 2 = IF DROP ."    PASS" CR ELSE
+    DUP 3 = IF DROP ."    FAIL at addr " BIST-FAIL-ADDR . CR
+                    ."    Expected/Actual: " BIST-FAIL-DATA . CR ELSE
+    DROP ."    running..." CR
+    THEN THEN THEN ;
+
+\ .TILE-DIAG ( -- )  Run tile self-test and display result.
+: .TILE-DIAG
+    CR ."  Tile Datapath Self-Test..." CR
+    TILE-TEST
+    BEGIN TILE-TEST@ DUP 0 = WHILE DROP REPEAT
+    DUP 2 = IF
+        DROP ."    PASS (ADD, MUL, DOT, SUM)" CR
+    ELSE
+        DROP ."    FAIL — failed sub-tests: " TILE-DETAIL@ . CR
+    THEN ;
+
+\ .ICACHE ( -- )  Display I-cache statistics.
+: .ICACHE
+    CR ."  I-Cache Statistics" CR
+    ."    Hits:     " ICACHE-HITS . CR
+    ."    Misses:   " ICACHE-MISSES . CR ;
+
+\ DIAG ( -- )  Run full hardware diagnostics suite.
+: DIAG
+    CR ." ======== Hardware Diagnostics ========" CR
+    .PERF
+    .BIST-STATUS
+    .TILE-DIAG
+    .ICACHE
+    ." ======================================" CR ;
+
+\ =====================================================================
+\  §1.5  AES-256-GCM Encryption
+\ =====================================================================
+\
+\  BIOS primitives (hardware accelerator at MMIO 0x0700):
+\    AES-KEY!      ( addr -- )      write 32-byte key
+\    AES-IV!       ( addr -- )      write 12-byte IV/nonce
+\    AES-AAD-LEN!  ( n -- )         set AAD length in bytes
+\    AES-DATA-LEN! ( n -- )         set data length in bytes
+\    AES-CMD!      ( n -- )         0=encrypt, 1=decrypt
+\    AES-STATUS@   ( -- n )         0=idle, 2=done, 3=auth-fail
+\    AES-DIN!      ( addr -- )      write 16-byte input block
+\    AES-DOUT@     ( addr -- )      read 16-byte output block
+\    AES-TAG@      ( addr -- )      read 16-byte GCM tag
+\    AES-TAG!      ( addr -- )      write 16-byte expected tag
+\
+\  Flow: set key → set IV → set lengths → CMD → feed blocks → read tag
+
+\ Scratch buffers for AES block I/O (16-byte aligned)
+CREATE AES-BLK-IN  16 ALLOT
+CREATE AES-BLK-OUT 16 ALLOT
+CREATE AES-TAG-BUF 16 ALLOT
+
+\ AES-ENCRYPT-BLK ( src dst -- )  Encrypt one 16-byte block in place.
+\   Assumes key/IV/lengths/CMD already set.
+: AES-ENCRYPT-BLK ( src dst -- )
+    SWAP AES-DIN!                \ feed src block to hardware
+    AES-DOUT@                    \ read result into dst
+;
+
+\ AES-ENCRYPT ( key iv src dst len -- tag-addr )
+\   Encrypt 'len' bytes (must be multiple of 16) from src to dst.
+\   key = 32-byte addr, iv = 12-byte addr.
+\   Returns address of 16-byte tag buffer.
+: AES-ENCRYPT ( key iv src dst len -- tag-addr )
+    >R >R >R          \ R: len dst src
+    AES-IV!            \ set IV
+    AES-KEY!           \ set key
+    0 AES-AAD-LEN!
+    R> R> R>           \ src dst len
+    DUP AES-DATA-LEN!
+    0 AES-CMD!         \ 0 = encrypt
+    \ loop over 16-byte blocks
+    DUP 4 RSHIFT       \ len nblocks (len/16)
+    >R                 \ R: nblocks  stack: src dst len
+    DROP                \ src dst
+    R> 0 DO             \ src dst  (I = block index)
+        OVER AES-DIN!       \ feed source block
+        DUP AES-DOUT@       \ read output to dest
+        SWAP 16 + SWAP 16 + \ advance both pointers
+    LOOP
+    2DROP
+    AES-TAG-BUF AES-TAG@    \ read computed tag
+    AES-TAG-BUF              \ return tag buffer address
+;
+
+\ AES-DECRYPT ( key iv src dst len tag -- flag )
+\   Decrypt 'len' bytes from src to dst.  tag = 16-byte expected tag addr.
+\   Returns 0 if authentication passed, -1 if failed.
+: AES-DECRYPT ( key iv src dst len tag -- flag )
+    AES-TAG!           \ write expected tag for verification
+    >R >R >R           \ R: len dst src
+    AES-IV!
+    AES-KEY!
+    0 AES-AAD-LEN!
+    R> R> R>           \ src dst len
+    DUP AES-DATA-LEN!
+    1 AES-CMD!         \ 1 = decrypt
+    DUP 4 RSHIFT       \ len nblocks
+    >R DROP             \ src dst   R: nblocks
+    R> 0 DO
+        OVER AES-DIN!
+        DUP AES-DOUT@
+        SWAP 16 + SWAP 16 +
+    LOOP
+    2DROP
+    AES-STATUS@ 3 = IF -1 ELSE 0 THEN
+;
+
+\ .AES-STATUS ( -- )  Print human-readable AES status.
+: .AES-STATUS
+    AES-STATUS@
+    DUP 0 = IF DROP ." AES: idle" CR ELSE
+    DUP 2 = IF DROP ." AES: done (OK)" CR ELSE
+    DUP 3 = IF DROP ." AES: AUTH FAIL" CR ELSE
+    DROP ." AES: busy" CR
+    THEN THEN THEN ;
+
+\ =====================================================================
+\  §1.6  SHA-3 (Keccak-256) Hashing
+\ =====================================================================
+\  BIOS primitives (hardware accelerator at MMIO 0x0780):
+\    SHA3-INIT  SHA3-UPDATE  SHA3-FINAL  SHA3-STATUS@
+
+CREATE SHA3-BUF 32 ALLOT
+
+\ SHA3 ( addr len hash-addr -- )  Hash buffer, store 32-byte digest.
+: SHA3
+    >R                        \ save dest
+    SHA3-INIT
+    SHA3-UPDATE
+    R> SHA3-FINAL ;
+
+\ .SHA3-STATUS ( -- )  Print human-readable SHA3 status.
+: .SHA3-STATUS
+    SHA3-STATUS@
+    DUP 0 = IF DROP ." SHA3: idle" CR ELSE
+    DUP 2 = IF DROP ." SHA3: done" CR ELSE
+    DROP ." SHA3: unknown" CR
+    THEN THEN ;
+
+\ .SHA3 ( addr -- )  Print 32-byte digest as hex string.
+: .SHA3
+    32 0 DO
+        DUP I + C@
+        DUP 4 RSHIFT
+        DUP 10 < IF 48 + ELSE 55 + THEN EMIT
+        15 AND
+        DUP 10 < IF 48 + ELSE 55 + THEN EMIT
+    LOOP DROP ;
+
+\ =====================================================================
+\  §1.7  Unified Crypto Words
+\ =====================================================================
+\  High-level wrappers over AES-256-GCM (§1.5) and SHA-3 (§1.6).
+\
+\  HASH      ( addr len out -- )           SHA3-256 hash
+\  HMAC      ( key klen msg mlen out -- )   HMAC-SHA3-256
+\  ENCRYPT   ( key iv src dst len -- tag )  AES-256-GCM encrypt
+\  DECRYPT   ( key iv src dst len tag -- f) AES-256-GCM decrypt
+\  VERIFY    ( a1 a2 len -- flag )          constant-time compare
+
+\ HASH ( addr len hash-addr -- )  Alias for SHA3.
+: HASH  SHA3 ;
+
+\ --- HMAC-SHA3-256 ---
+\ HMAC(K,m) = SHA3((K ^ opad) || SHA3((K ^ ipad) || m))
+\ SHA3-256 rate (block size) = 136 bytes
+
+136 CONSTANT HMAC-BLKSZ
+
+CREATE HMAC-IPAD 136 ALLOT
+CREATE HMAC-OPAD 136 ALLOT
+CREATE HMAC-INNER 32 ALLOT
+VARIABLE _HMAC-PAD-PTR
+VARIABLE _HMAC-XBYTE
+VARIABLE _HMAC-OUT
+VARIABLE _VERIFY-ACC
+
+\ HMAC-PAD ( key-addr key-len pad-addr xor-byte -- )
+\   Zero pad, copy key into pad, XOR entire pad with xor-byte.
+: HMAC-PAD
+    _HMAC-XBYTE !                     \ save xor-byte
+    _HMAC-PAD-PTR !                   \ save pad-addr
+    \ Zero the pad
+    _HMAC-PAD-PTR @ HMAC-BLKSZ 0 FILL
+    \ Copy key bytes into pad[0..klen-1]
+    0 DO                               \ key-addr  (limit=klen start=0)
+        DUP I + C@                     \ key-addr byte
+        _HMAC-PAD-PTR @ I + C!         \ key-addr
+    LOOP DROP
+    \ XOR every byte of pad with xor-byte
+    HMAC-BLKSZ 0 DO
+        _HMAC-PAD-PTR @ I + C@
+        _HMAC-XBYTE @ XOR
+        _HMAC-PAD-PTR @ I + C!
+    LOOP
+;
+
+\ HMAC ( key-addr key-len msg-addr msg-len out-addr -- )
+\   Compute HMAC-SHA3-256.
+: HMAC
+    _HMAC-OUT !                        \ save out-addr
+    >R >R                              \ R: mlen msg  S: key klen
+    \ Build ipad and opad from same key
+    2DUP HMAC-IPAD 54 HMAC-PAD        \ ipad = key XOR 0x36
+    HMAC-OPAD 92 HMAC-PAD             \ opad = key XOR 0x5C  (consumes key klen)
+    \ Inner hash: SHA3(ipad || message)
+    SHA3-INIT
+    HMAC-IPAD HMAC-BLKSZ SHA3-UPDATE
+    R> R> SHA3-UPDATE                  \ msg mlen
+    HMAC-INNER SHA3-FINAL
+    \ Outer hash: SHA3(opad || inner)
+    SHA3-INIT
+    HMAC-OPAD HMAC-BLKSZ SHA3-UPDATE
+    HMAC-INNER 32 SHA3-UPDATE
+    _HMAC-OUT @ SHA3-FINAL
+;
+
+\ ENCRYPT ( key iv src dst len -- tag-addr )  AES-256-GCM encrypt.
+: ENCRYPT  AES-ENCRYPT ;
+
+\ DECRYPT ( key iv src dst len tag -- flag )  AES-256-GCM decrypt+verify.
+: DECRYPT  AES-DECRYPT ;
+
+\ VERIFY ( addr1 addr2 len -- flag )
+\   Constant-time comparison.  Returns 0 if equal, -1 if different.
+: VERIFY
+    0 _VERIFY-ACC !                     \ acc = 0
+    0 DO                                \ a1 a2
+        OVER I + C@                     \ a1 a2 b1
+        OVER I + C@                     \ a1 a2 b1 b2
+        XOR _VERIFY-ACC @ OR _VERIFY-ACC !  \ acc |= (b1 ^ b2)
+    LOOP 2DROP
+    _VERIFY-ACC @ IF -1 ELSE 0 THEN     \ -1=different, 0=equal
+;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -1496,6 +2036,157 @@ VARIABLE LD-SZ
 : DIM      ( -- )  2 SGR ;
 
 \ =====================================================================
+\  §7.6.1  Filesystem Encryption
+\ =====================================================================
+\  Optional at-rest encryption for MP64FS files using AES-256-GCM.
+\  Requires FS-KEY to be set before use.  Operates on OPEN'd files.
+\
+\  On-disk layout of an encrypted file:
+\    Sectors contain: ciphertext (padded to 16B) || 16-byte GCM tag
+\    Directory used_bytes = original plaintext length (unchanged)
+\    Directory flags bit 2 = encrypted
+\    IV = 12 bytes derived from directory slot number
+\
+\  FS-KEY!     ( addr -- )          set 32-byte filesystem encryption key
+\  ENCRYPTED?  ( fdesc -- flag )    true if file has encrypted flag
+\  FENCRYPT    ( fdesc -- ior )     encrypt open file in-place (0=ok)
+\  FDECRYPT    ( fdesc -- flag )    decrypt open file (0=ok, -1=auth-fail)
+
+CREATE FS-KEY 32 ALLOT            \ system-level encryption key
+CREATE FS-IV  12 ALLOT            \ derived IV for current operation
+
+4 CONSTANT F-ENC-FLAG             \ flags bit 2 = encrypted
+
+VARIABLE _FE-DESC                 \ current file descriptor
+VARIABLE _FE-USED                 \ original plaintext byte count
+VARIABLE _FE-PAD                  \ padded length (multiple of 16)
+VARIABLE _FE-SECS                 \ number of sectors for I/O
+VARIABLE _FE-BUF1                 \ buffer 1
+VARIABLE _FE-BUF2                 \ buffer 2
+
+\ FS-KEY! ( addr -- )  Copy 32-byte key into FS-KEY.
+: FS-KEY!  FS-KEY 32 CMOVE ;
+
+\ _FE-MKIV ( fdesc -- )  Derive 12-byte IV from file's directory slot.
+: _FE-MKIV
+    FS-IV 12 0 FILL
+    F.SLOT FS-IV !
+;
+
+\ ENCRYPTED? ( fdesc -- flag )  True if file has encrypted flag set.
+: ENCRYPTED?
+    F.SLOT DIRENT 25 + C@
+    F-ENC-FLAG AND 0<>
+;
+
+\ _FE-SET-ENC ( fdesc -- )  Set encrypted flag in FS-DIR cache.
+: _FE-SET-ENC
+    F.SLOT DIRENT 25 +
+    DUP C@ F-ENC-FLAG OR SWAP C!
+;
+
+\ _FE-CLR-ENC ( fdesc -- )  Clear encrypted flag in FS-DIR cache.
+: _FE-CLR-ENC
+    F.SLOT DIRENT 25 +
+    DUP C@ F-ENC-FLAG INVERT AND SWAP C!
+;
+
+\ FENCRYPT ( fdesc -- ior )
+\   Encrypt an open file's data in-place on disk.
+\   Uses FS-KEY as the encryption key.
+\   Returns 0 on success, -1 on error.
+: FENCRYPT
+    DUP ENCRYPTED? IF DROP 0 EXIT THEN    \ already encrypted — no-op
+    _FE-DESC !                                      \ consume fdesc
+    _FE-DESC @ FSIZE DUP _FE-USED !
+    0= IF 0 EXIT THEN                              \ empty — skip
+    \ Padded length = round up to 16
+    _FE-USED @ 15 + -16 AND _FE-PAD !
+    \ Check: padded + 16 (tag) must fit in allocated sectors
+    _FE-PAD @ 16 +
+    _FE-DESC @ F.MAX 512 * > IF
+        ." FENCRYPT: insufficient space" CR -1 EXIT
+    THEN
+    \ Sectors for ciphertext + tag
+    _FE-PAD @ 16 + 511 + 512 / _FE-SECS !
+    \ Allocate sector-aligned buffers (DMA operates on full sectors)
+    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
+    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF _FE-BUF1 @ FREE -1 EXIT THEN _FE-BUF2 !
+    \ Zero both buffers
+    _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
+    _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
+    \ DMA-read file data from disk into buf1
+    _FE-DESC @ F.START DISK-SEC!
+    _FE-BUF1 @ DISK-DMA!
+    _FE-USED @ 511 + 512 / DISK-N!
+    DISK-READ
+    \ Derive IV from directory slot
+    _FE-DESC @ _FE-MKIV
+    \ Encrypt: ( key iv src dst len -- tag-addr )
+    FS-KEY FS-IV _FE-BUF1 @ _FE-BUF2 @ _FE-PAD @ ENCRYPT
+    \ Copy 16-byte tag after ciphertext in buf2
+    _FE-BUF2 @ _FE-PAD @ + 16 CMOVE
+    \ DMA-write ciphertext + tag back to disk
+    _FE-DESC @ F.START DISK-SEC!
+    _FE-BUF2 @ DISK-DMA!
+    _FE-SECS @ DISK-N!
+    DISK-WRITE
+    \ Set encrypted flag and sync directory
+    _FE-DESC @ _FE-SET-ENC
+    _FE-USED @ _FE-DESC @ F.SLOT DIRENT 20 + L!
+    FS-SYNC
+    \ Free buffers
+    _FE-BUF1 @ FREE
+    _FE-BUF2 @ FREE
+    0
+;
+
+\ FDECRYPT ( fdesc -- flag )
+\   Decrypt an encrypted file in-place on disk.
+\   Returns 0 if authentication passed, -1 if failed or not encrypted.
+: FDECRYPT
+    DUP ENCRYPTED? 0= IF DROP 0 EXIT THEN  \ not encrypted — no-op
+    _FE-DESC !                                      \ consume fdesc
+    _FE-DESC @ FSIZE DUP _FE-USED !
+    0= IF 0 EXIT THEN
+    \ Padded length
+    _FE-USED @ 15 + -16 AND _FE-PAD !
+    _FE-PAD @ 16 + 511 + 512 / _FE-SECS !
+    \ Allocate sector-aligned buffers (DMA operates on full sectors)
+    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
+    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF _FE-BUF1 @ FREE -1 EXIT THEN _FE-BUF2 !
+    \ Zero buffers
+    _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
+    _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
+    \ DMA-read ciphertext + tag from disk
+    _FE-DESC @ F.START DISK-SEC!
+    _FE-BUF1 @ DISK-DMA!
+    _FE-SECS @ DISK-N!
+    DISK-READ
+    \ Derive IV
+    _FE-DESC @ _FE-MKIV
+    \ Decrypt: ( key iv src dst len tag -- flag )
+    FS-KEY FS-IV _FE-BUF1 @ _FE-BUF2 @ _FE-PAD @
+    _FE-BUF1 @ _FE-PAD @ +       \ tag is right after ciphertext
+    DECRYPT
+    \ flag on stack: 0 = auth OK, -1 = auth fail
+    DUP 0= IF
+        \ Write plaintext back to disk
+        _FE-DESC @ F.START DISK-SEC!
+        _FE-BUF2 @ DISK-DMA!
+        _FE-USED @ 511 + 512 / DISK-N!
+        DISK-WRITE
+        \ Clear encrypted flag, sync
+        _FE-DESC @ _FE-CLR-ENC
+        _FE-USED @ _FE-DESC @ F.SLOT DIRENT 20 + L!
+        FS-SYNC
+    THEN
+    \ Free buffers
+    _FE-BUF1 @ FREE
+    _FE-BUF2 @ FREE
+;
+
+\ =====================================================================
 \  §7.7  Documentation Browser
 \ =====================================================================
 \
@@ -2726,6 +3417,7 @@ VARIABLE ROUTE-BUF
     CR TASKS
     CR FILES
     CR PORTS
+    CR .PERF
     CR HRULE ;
 
 \ -- Status: quick one-liner --

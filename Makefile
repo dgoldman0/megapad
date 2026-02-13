@@ -3,10 +3,24 @@
 #
 # PyPy gives ~5× speedup on the CPU emulator loop; xdist adds parallelism.
 #
-#   make test           PyPy + 8 xdist workers  (~4 min for 1183 tests)
+#   make test           PyPy + 8 xdist workers  (~4 min for full suite)
 #   make test-seq       PyPy sequential          (~8 min)
 #   make test-cpython   CPython fallback         (~40 min)
 #   make test-quick     PyPy, BIOS+CPU only      (~6 sec)
+#   make test-one K=X   Single test/class under PyPy (foreground)
+#
+# Background + Live Monitoring (preferred for long runs):
+#   make test-bg        Launch full suite in background
+#   make test-bg K=X    Launch subset in background
+#   make test-status    One-shot progress dashboard
+#   make test-watch     Auto-refresh dashboard every 5s
+#   make test-failures  Show only failures
+#   make test-kill      Kill stuck background run
+#
+# conftest.py writes live status to /tmp/megapad_test_status.json.
+# test_monitor.py reads it and renders the dashboard.
+#
+# NEVER run `python -m pytest` directly — always use these targets.
 #
 # PyPy setup (one-time):
 #   make setup-pypy
@@ -40,6 +54,62 @@ test-quick: check-pypy
 .PHONY: test-one
 test-one: check-pypy
 	$(PYPY) $(PYTEST) -k "$(K)" --tb=long -v
+
+# --- Background test run with live monitoring ---
+# Usage: make test-bg          (full suite)
+#        make test-bg K=TestFoo (subset)
+# Then:  make test-status  or  make test-watch
+.PHONY: test-bg
+test-bg: check-pypy
+	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
+		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
+		exit 1; \
+	fi
+	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
+	@echo "Starting tests in background..."
+	@if [ -n "$(K)" ]; then \
+		nohup $(PYPY) $(PYTEST) -n $(WORKERS) --tb=long -k "$(K)" \
+			> /tmp/megapad_test_output.txt 2>&1 & \
+		echo "$$!" > /tmp/megapad_test_pid.txt; \
+	else \
+		nohup $(PYPY) $(PYTEST) -n $(WORKERS) --tb=long \
+			> /tmp/megapad_test_output.txt 2>&1 & \
+		echo "$$!" > /tmp/megapad_test_pid.txt; \
+	fi
+	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
+	@echo "Monitor: make test-status  |  make test-watch"
+
+# --- Show live test status ---
+.PHONY: test-status
+test-status:
+	@python3 test_monitor.py
+
+# --- Auto-refresh test status ---
+.PHONY: test-watch
+test-watch:
+	@python3 test_monitor.py --watch 5
+
+# --- Show only test failures ---
+.PHONY: test-failures
+test-failures:
+	@python3 test_monitor.py --failures
+
+# --- Kill background test run ---
+.PHONY: test-kill
+test-kill:
+	@if [ -f /tmp/megapad_test_pid.txt ]; then \
+		PID=$$(cat /tmp/megapad_test_pid.txt); \
+		if kill -0 $$PID 2>/dev/null; then \
+			kill -- -$$PID 2>/dev/null || kill $$PID 2>/dev/null; \
+			rm -f /tmp/megapad_test_pid.txt; \
+			echo "Killed PID $$PID."; \
+		else \
+			rm -f /tmp/megapad_test_pid.txt; \
+			echo "Process already exited."; \
+		fi; \
+	else \
+		echo "No tests running (no PID file)."; \
+	fi
 
 # --- Run the interactive emulator ---
 .PHONY: run

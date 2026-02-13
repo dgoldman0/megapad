@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **242** dictionary words defined in `bios.asm`.
+Complete catalog of all **265** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -472,6 +472,39 @@ Each entry is a linked list node:
 | 246 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
 | 247 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
 
+### AES-256-GCM Engine (10 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 248 | `AES-KEY!` | `( addr -- )` | | Load 256-bit key (32 bytes at addr) into AES engine |
+| 249 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
+| 250 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
+| 251 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
+| 252 | `AES-CMD!` | `( cmd -- )` | | Start operation: 1 = encrypt, 2 = decrypt |
+| 253 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done, 2 = auth fail |
+| 254 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
+| 255 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
+| 256 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
+| 257 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+
+### SHA-3 / Keccak-256 Engine (4 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 258 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
+| 259 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
+| 260 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store 256-bit digest (32 bytes) at addr |
+| 261 | `SHA3-STATUS@` | `( -- status )` | | Read engine status: 0 = busy, 1 = ready |
+
+### CRC DMA (4 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 262 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
+| 263 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
+| 264 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
+| 265 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
+
 ---
 
 ## Summary Statistics
@@ -503,7 +536,10 @@ Each entry is a linked list node:
 | Stride / 2D Addressing | 6 |
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
-| **Total** | **247** |
+| AES-256-GCM Engine | 10 |
+| SHA-3 / Keccak-256 | 4 |
+| CRC DMA | 4 |
+| **Total** | **265** |
 
 ### All Immediate Words (33)
 
@@ -512,6 +548,10 @@ Each entry is a linked list node:
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
+CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
+SHA3-STATUS@ → SHA3-FINAL → SHA3-UPDATE → SHA3-INIT →
+AES-TAG! → AES-TAG@ → AES-DOUT@ → AES-DIN! → AES-STATUS@ → AES-CMD! →
+AES-DATA-LEN! → AES-AAD-LEN! → AES-IV! → AES-KEY! →
 ICACHE-MISSES → ICACHE-HITS → ICACHE-INV → ICACHE-OFF → ICACHE-ON →
 BF16-MODE → FP16-MODE → TSTORE2D → TLOAD2D → TTILE-W! → TTILE-H! →
 TSTRIDE-R@ → TSTRIDE-R! → TILE-DETAIL@ → TILE-TEST@ → TILE-TEST →

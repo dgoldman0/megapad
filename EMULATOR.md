@@ -5,9 +5,9 @@ memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
 > **Branch:** `features/extended-tpu-impl`
-> **Status:** Fully functional.  247-word BIOS v1.0 Forth system running on
+> **Status:** Fully functional.  265-word BIOS v1.0 Forth system running on
 > a quad-core emulated SoC with mailbox IPI, spinlocks, extended tile engine
-> (saturating, FP16/BF16, strided/2D, CRC, BIST), and 1,207 tests passing.
+> (saturating, FP16/BF16, strided/2D, CRC, BIST), and 593 tests passing.
 
 ---
 
@@ -86,7 +86,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │       MegapadSystem — quad-core SoC, memory map          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (964 lines) │  │
+│  │  megapad64.py │    │       devices.py  (1,376 lines) │  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
@@ -101,7 +101,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (9,379 lines)  — Forth BIOS v1.0, 247 words
+    bios.asm  (9,895 lines)  — Forth BIOS v1.0, 265 words
     bios.rom  (~22 KB)       — precompiled binary
 ```
 
@@ -111,12 +111,12 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 |---|---|---|
 | `megapad64.py` | 2,516 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16 |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 964 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC Engine |
+| `devices.py` | 1,376 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
 | `system.py` | 474 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, round-robin stepping |
 | `cli.py` | 995 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 9,379 | Forth BIOS v1.0 — subroutine-threaded interpreter, 247 built-in words (incl. multicore, extended tile, I-cache) |
+| `bios.asm` | 9,895 | Forth BIOS v1.0 — subroutine-threaded interpreter, 265 built-in words (incl. multicore, extended tile, I-cache, AES, SHA3) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
-| `test_system.py` | 6,234 | System integration tests — 1,184 tests (devices, MMIO, BIOS, KDOS, multicore, FS, extended tile) |
+| `test_system.py` | 7,308 | System integration tests — 570 tests (devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
 | `Makefile` | 71 | Build & test targets — PyPy + xdist parallel runner |
 | `fpga/rtl/` | ~8,200 | 14 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, peripherals |
 | `fpga/sim/` | 3,930 | 8 Verilog testbenches — 72 hardware tests |
@@ -219,7 +219,7 @@ Read-only board identification.
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (9,379 lines, ~22 KB).  It boots from address 0 and
+Megapad-64 assembly (9,895 lines, ~22 KB).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -262,7 +262,7 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (247)
+### Built-in words (265)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -507,7 +507,7 @@ adds **parallel execution** across 8 workers for another ~2× improvement.
 CPython works fine but takes ~40 minutes for the full suite.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 247 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 265 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC
 engine, memory BIST, tile self-test, performance counters, and multicore

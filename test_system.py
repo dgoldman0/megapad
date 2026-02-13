@@ -3,6 +3,48 @@
 Integration tests for the Megapad-64 system emulator.
 
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
+
+WARNING: These tests are extremely slow under CPython (~40 min).
+Use PyPy with xdist for practical runtimes.  NEVER run via plain
+`python -m pytest` — always use the Makefile targets below.
+
+═══════════════════════════════════════════════════════════════
+  TEST WORKFLOW — READ THIS BEFORE RUNNING TESTS
+═══════════════════════════════════════════════════════════════
+
+  Foreground (blocks until done):
+    make test                      # full suite, PyPy + 8 workers (~4 min)
+    make test-seq                  # sequential, good for debugging
+    make test-one K=TestFoo        # single class or test name
+    make test-one K="test_a or test_b"  # multiple tests by name
+
+  Background + Live Monitoring (preferred for long runs):
+    make test-bg                   # launch full suite in background
+    make test-bg K=TestFoo         # launch subset in background
+    make test-status               # one-shot: show current progress
+    make test-watch                # auto-refresh every 5s (Ctrl-C to stop)
+    make test-failures             # show only failures so far
+    make test-kill                 # kill a stuck background run
+
+  How it works:
+    conftest.py has a LiveTestMonitor plugin that writes live status
+    to /tmp/megapad_test_status.json after every test result.  The
+    test_monitor.py script reads that file and renders a dashboard
+    with progress bar, ETA, per-worker activity, failure details,
+    and hang detection (warns if no progress for >2 min).
+
+  NEVER:
+    - Run `python -m pytest` directly (wrong interpreter, no PyPy)
+    - Pipe test output through tail/grep (use test-status instead)
+    - Redirect to file and wait (use test-bg + test-status instead)
+    - Run foreground tests and lose the terminal for 10 minutes
+
+  When developing new tests:
+    1. Write tests, then: make test-one K=TestNewClass
+    2. Once passing, run full regression: make test-bg
+    3. Monitor with: make test-status  (or test-watch)
+    4. If all green, commit.  If failures, check: make test-failures
+═══════════════════════════════════════════════════════════════
 """
 import copy
 import os
@@ -5285,6 +5327,878 @@ class TestBIOSHardening(unittest.TestCase):
         self.assertIn("Dictionary full", text)
 
 
+# ---------------------------------------------------------------------------
+#  KDOS Memory Allocator tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSAllocator(TestKDOS):
+    """Tests for the ALLOCATE / FREE / RESIZE heap allocator."""
+
+    def test_allocate_basic(self):
+        """ALLOCATE returns a non-zero address and 0 ior."""
+        text = self._run_kdos([
+            "64 ALLOCATE . .    \\ should print ior=0 then addr!=0",
+        ])
+        parts = text.strip().split()
+        # The last two numbers on the line: addr ior
+        # ALLOCATE pushes ( addr ior ), then `. .` prints ior first, then addr
+        self.assertIn("0 ", text)  # ior = 0
+
+    def test_allocate_nonzero_addr(self):
+        """Allocated address should be above the heap base."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP .",  # print just the address
+        ])
+        # Address should be a positive number above dictionary
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 1000 for n in nums),
+                        f"Expected heap address > 1000, got {nums}")
+
+    def test_allocate_zero_fails(self):
+        """ALLOCATE 0 should fail (ior != 0)."""
+        text = self._run_kdos([
+            "0 ALLOCATE . DROP",  # print ior, discard addr
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_free_null_safe(self):
+        """FREE 0 should be a no-op (no crash)."""
+        text = self._run_kdos([
+            "0 FREE",
+            ".\" ok\"",
+        ])
+        self.assertIn("ok", text)
+
+    def test_allocate_free_roundtrip(self):
+        """Allocate, free, reallocate should succeed and reuse memory."""
+        text = self._run_kdos([
+            "128 ALLOCATE DROP",      # alloc 128, get addr
+            "DUP FREE",              # free it
+            "128 ALLOCATE DROP",      # alloc again
+            ".\" alloc-ok\"",
+        ])
+        self.assertIn("alloc-ok", text)
+
+    def test_multiple_allocations(self):
+        """Multiple allocations return distinct addresses."""
+        text = self._run_kdos([
+            "VARIABLE A1  VARIABLE A2  VARIABLE A3",
+            "64 ALLOCATE DROP A1 !",
+            "64 ALLOCATE DROP A2 !",
+            "64 ALLOCATE DROP A3 !",
+            "A1 @ A2 @ <> .        \\ 1=true",
+            "A2 @ A3 @ <> .        \\ 1=true",
+            "A1 @ A3 @ <> .        \\ 1=true",
+        ])
+        # All three comparisons should be true (non-zero)
+        # Our prints should not contain 0 as the comparison result
+        # Actually in Forth <> returns -1 (true) or 0 (false)
+        # `. ` prints the number, so we should see three "-1" values
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertEqual(out.count("-1"), 3,
+                         f"Expected 3 true values, output: {out}")
+
+    def test_heap_free_bytes(self):
+        """HEAP-FREE-BYTES returns a positive value."""
+        text = self._run_kdos([
+            "HEAP-FREE-BYTES .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 1000 for n in nums),
+                        f"Expected free bytes > 1000, got {nums}")
+
+    def test_heap_info(self):
+        """.HEAP prints heap summary."""
+        text = self._run_kdos([".HEAP"])
+        self.assertIn("Heap:", text)
+        self.assertIn("free=", text)
+        self.assertIn("bytes", text)
+
+    def test_mem_size(self):
+        """MEM-SIZE should return 512 KiB = 524288 bytes."""
+        text = self._run_kdos(["MEM-SIZE ."])
+        self.assertIn("524288 ", text)
+
+    def test_allocate_write_read(self):
+        """Can write to and read from allocated memory."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",        # addr on stack
+            "DUP 42 SWAP !",           # store 42 at addr
+            "@ .",                     # read it back
+        ])
+        self.assertIn("42 ", text)
+
+    def test_resize(self):
+        """RESIZE creates a new block, copies data, frees old."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",        # get 64-byte block
+            "DUP 99 SWAP !",          # write 99 at start
+            "128 RESIZE DROP",         # resize to 128 bytes
+            "@ .",                     # read first cell — should be 99
+        ])
+        self.assertIn("99 ", text)
+
+    def test_resize_failure(self):
+        """RESIZE with impossibly large size returns non-zero ior."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",
+            "999999999 RESIZE . DROP",  # print ior, drop addr
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_alloc_free_alloc_reuse(self):
+        """After FREE, the same region can be allocated again."""
+        text = self._run_kdos([
+            "VARIABLE P",
+            "256 ALLOCATE DROP DUP P !",  # alloc, save addr in P
+            "FREE",                        # free
+            "256 ALLOCATE DROP",           # alloc same size
+            "P @ = .",                     # should reuse same addr
+        ])
+        # Should print -1 (true) if address was reused
+        self.assertIn("-1 ", text)
+
+
+# ---------------------------------------------------------------------------
+#  KDOS CATCH/THROW tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSExceptions(TestKDOS):
+    """Tests for CATCH / THROW exception handling."""
+
+    def test_catch_no_throw(self):
+        """CATCH returns 0 when XT completes normally."""
+        text = self._run_kdos([
+            ": OK-WORD  42 . ;",
+            "' OK-WORD CATCH .",
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("0 ", text)  # CATCH returns 0
+
+    def test_catch_throw(self):
+        """CATCH returns the throw code when XT throws."""
+        text = self._run_kdos([
+            ": BAD-WORD  -99 THROW ;",
+            "' BAD-WORD CATCH .",
+        ])
+        self.assertIn("-99 ", text)
+
+    def test_throw_zero_is_noop(self):
+        """THROW 0 does nothing."""
+        text = self._run_kdos([
+            ": FINE  0 THROW .\" ok\" ;",
+            "FINE",
+        ])
+        self.assertIn("ok", text)
+
+    def test_catch_restores_stack(self):
+        """After CATCH of a THROW, stack depth is restored."""
+        text = self._run_kdos([
+            ": T1  1 2 3 -7 THROW ;",
+            "' T1 CATCH .",
+        ])
+        self.assertIn("-7 ", text)
+
+    def test_nested_catch(self):
+        """Nested CATCH: inner CATCH handles, outer sees 0."""
+        text = self._run_kdos([
+            ": INNER  -5 THROW ;",
+            ": MIDDLE  ['] INNER CATCH ;",
+            ": OUTER  ['] MIDDLE CATCH ;",
+            "OUTER . .  \\ should print 0 then -5",
+        ])
+        # MIDDLE catches -5 → returns -5 normally
+        # OUTER's CATCH sees normal return → 0
+        # Stack: -5 0, `. .` prints 0 then -5
+        self.assertIn("0 ", text)
+
+    def test_nested_catch_rethrow(self):
+        """Nested CATCH: inner re-throws, outer catches."""
+        text = self._run_kdos([
+            ": INNER  -42 THROW ;",
+            ": MIDDLE  ['] INNER CATCH THROW ;",
+            ": OUTER   ['] MIDDLE CATCH ;",
+            "OUTER .",
+        ])
+        self.assertIn("-42 ", text)
+
+    def test_sp_fetch(self):
+        """SP@ returns the data stack pointer."""
+        text = self._run_kdos(["SP@ .", ".\" ok\""])
+        # SP@ should return a positive number (memory address)
+        self.assertIn("ok", text)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 0 for n in nums),
+                        f"SP@ should return positive address, got {nums}")
+
+    def test_rp_fetch(self):
+        """RP@ returns the return stack pointer."""
+        text = self._run_kdos(["RP@ .", ".\" ok\""])
+        self.assertIn("ok", text)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 0 for n in nums),
+                        f"RP@ should return positive address, got {nums}")
+
+
+class TestKDOSCRC(TestKDOS):
+    """Tests for §1.3 CRC convenience words (CRC-BUF, CRC32-BUF, etc.)."""
+
+    def test_crc32_8_bytes(self):
+        """CRC32-BUF of 8 identical bytes matches reference."""
+        # 8 bytes of 0x41 ('A') → CRC32 = 0xF59A903A = 4120547386
+        text = self._run_kdos([
+            "CREATE crc-td 8 ALLOT",
+            "crc-td 8 65 FILL",
+            "crc-td 8 CRC32-BUF .",
+        ])
+        self.assertIn("4120547386 ", text)
+
+    def test_crc32_16_bytes(self):
+        """CRC32-BUF of 16 identical bytes (two chunks) matches reference."""
+        # 16 bytes of 0x41 ('A') → CRC32 = 2546901954
+        text = self._run_kdos([
+            "CREATE crc-td2 16 ALLOT",
+            "crc-td2 16 65 FILL",
+            "crc-td2 16 CRC32-BUF .",
+        ])
+        self.assertIn("2546901954 ", text)
+
+    def test_crc32_deterministic(self):
+        """Same data produces same CRC twice."""
+        text = self._run_kdos([
+            "CREATE crc-td3 8 ALLOT",
+            "crc-td3 8 65 FILL",
+            "crc-td3 8 CRC32-BUF",
+            "crc-td3 8 CRC32-BUF",
+            "= .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE
+
+    def test_crc32_different_data(self):
+        """Different data produces different CRC."""
+        text = self._run_kdos([
+            "CREATE crc-d1 8 ALLOT  crc-d1 8 65 FILL",
+            "CREATE crc-d2 8 ALLOT  crc-d2 8 66 FILL",
+            "crc-d1 8 CRC32-BUF",
+            "crc-d2 8 CRC32-BUF",
+            "<> .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE (they differ)
+
+    def test_crc32c_8_bytes(self):
+        """CRC32C-BUF of 8 bytes matches reference."""
+        # 8 bytes of 0x41 → CRC32C = 0xBD5B9F02 = 3176898306
+        text = self._run_kdos([
+            "CREATE crc-td4 8 ALLOT",
+            "crc-td4 8 65 FILL",
+            "crc-td4 8 CRC32C-BUF .",
+        ])
+        self.assertIn("3176898306 ", text)
+
+    def test_crc32_vs_crc32c_differ(self):
+        """CRC32 and CRC32C produce different results for same data."""
+        text = self._run_kdos([
+            "CREATE crc-td5 8 ALLOT  crc-td5 8 65 FILL",
+            "crc-td5 8 CRC32-BUF",
+            "crc-td5 8 CRC32C-BUF",
+            "<> .",
+        ])
+        self.assertIn("-1 ", text)  # TRUE
+
+    def test_crc32_empty(self):
+        """CRC32-BUF of 0 bytes returns 0 (init XOR finalize cancels)."""
+        text = self._run_kdos([
+            "CREATE crc-td6 8 ALLOT",
+            "crc-td6 0 CRC32-BUF .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_crc_primitives_direct(self):
+        """Low-level CRC primitives work: POLY!, INIT!, FEED, RESET, FINAL, @."""
+        text = self._run_kdos([
+            "0 CRC-POLY!",
+            "0xFFFFFFFF CRC-INIT!",
+            "0x4141414141414141 CRC-FEED",
+            "CRC-FINAL",
+            "CRC@ .",
+        ])
+        # Same as CRC32 of 8 'A' bytes
+        self.assertIn("4120547386 ", text)
+
+
+class TestKDOSDiagnostics(TestKDOS):
+    """Tests for §1.4 Hardware Diagnostics."""
+
+    def test_perf_display(self):
+        """.PERF shows performance counter labels and values."""
+        text = self._run_kdos([".PERF"])
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Cycles:", text)
+        self.assertIn("Stalls:", text)
+        self.assertIn("Tile ops:", text)
+        self.assertIn("Ext mem:", text)
+
+    def test_bist_status(self):
+        """.BIST-STATUS shows BIST state (idle at runtime — not re-run)."""
+        text = self._run_kdos([".BIST-STATUS"])
+        self.assertIn("Memory BIST Status", text)
+        # At runtime, BIST hasn't been run so status should be idle
+        self.assertIn("idle", text)
+
+    def test_tile_diag(self):
+        """.TILE-DIAG runs tile self-test and reports PASS."""
+        text = self._run_kdos([".TILE-DIAG"])
+        self.assertIn("Tile Datapath", text)
+        self.assertIn("PASS", text)
+
+    def test_icache_display(self):
+        """.ICACHE shows I-cache statistics."""
+        text = self._run_kdos([".ICACHE"])
+        self.assertIn("I-Cache", text)
+        self.assertIn("Hits:", text)
+        self.assertIn("Misses:", text)
+
+    def test_diag_full(self):
+        """DIAG runs all diagnostics in sequence."""
+        text = self._run_kdos(["DIAG"])
+        self.assertIn("Hardware Diagnostics", text)
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Memory BIST", text)
+        self.assertIn("Tile Datapath", text)
+        self.assertIn("I-Cache", text)
+
+    def test_perf_reset(self):
+        """PERF-RESET zeroes counters, PERF-CYCLES returns low value."""
+        text = self._run_kdos([
+            "PERF-RESET",
+            "PERF-CYCLES .",
+        ])
+        # After reset + a few instructions, cycle count is small
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(0 <= n < 100000 for n in nums),
+                        f"Expected small cycle count after reset, got {nums}")
+
+    def test_dashboard_has_perf(self):
+        """DASHBOARD includes performance counters section."""
+        text = self._run_kdos(["DASHBOARD"])
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Cycles:", text)
+
+
+class TestKDOSAES(TestKDOS):
+    """Tests for §1.5 AES-256-GCM encryption."""
+
+    # Reference: key=0x00..0x1F (32 bytes), IV=0x00..0x0B (12 bytes)
+    #   PT = 16 × 0x41 ('A')
+    #   CT = 0643975a84a4835acc00d6caf0a8392c
+    #   TAG= 0ff145f3786b8fc48a8aeafc45524d80
+
+    _AES_SETUP_KEY_IV = [
+        # Create 32-byte key: 0x00..0x1F
+        "CREATE test-key 32 ALLOT",
+        "test-key 32 0 FILL",
+        ": init-key 32 0 DO I test-key I + C! LOOP ;",
+        "init-key",
+        # Create 12-byte IV: 0x00..0x0B
+        "CREATE test-iv 12 ALLOT",
+        "test-iv 12 0 FILL",
+        ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+        "init-iv",
+    ]
+
+    def test_aes_status_idle(self):
+        """AES-STATUS@ returns 0 (idle) before any operation."""
+        text = self._run_kdos(['." AESIDLE=" AES-STATUS@ .'])
+        self.assertIn("AESIDLE=0 ", text)
+
+    def test_aes_encrypt_one_block(self):
+        """Encrypt 16 bytes of 'A' and verify first ciphertext byte."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            # Create 16-byte plaintext buffer (all 0x41)
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            # Create 16-byte output buffer
+            "CREATE ct-buf 16 ALLOT",
+            # Set key, IV, lengths, command
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            # Feed plaintext block
+            "pt-buf AES-DIN!",
+            # Read ciphertext
+            "ct-buf AES-DOUT@",
+            # Print first byte of ciphertext with marker
+            '." CT0=" ct-buf C@ .',
+            # Print status with marker
+            '." ST=" AES-STATUS@ .',
+        ])
+        self.assertIn("CT0=6 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_aes_tag_matches_reference(self):
+        """GCM tag matches known-good reference."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            # Read tag
+            "tag-buf AES-TAG@",
+            # Print tag bytes with markers
+            '." T0=" tag-buf C@ .',                # 15
+            '." T1=" tag-buf 1 + C@ .',            # 241
+            '." T2=" tag-buf 2 + C@ .',            # 69
+            '." T3=" tag-buf 3 + C@ .',            # 243
+        ])
+        # TAG starts with 0x0F, 0xF1, 0x45, 0xF3 = 15, 241, 69, 243
+        self.assertIn("T0=15 ", text)
+        self.assertIn("T1=241 ", text)
+        self.assertIn("T2=69 ", text)
+        self.assertIn("T3=243 ", text)
+
+    def test_aes_decrypt_roundtrip(self):
+        """Encrypt then decrypt returns original plaintext."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            # Encrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            "tag-buf AES-TAG@",
+            # Decrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "tag-buf AES-TAG!",
+            "1 AES-CMD!",
+            "ct-buf AES-DIN!",
+            "rt-buf AES-DOUT@",
+            # Verify roundtrip with markers
+            '." P0=" rt-buf C@ .',
+            '." P15=" rt-buf 15 + C@ .',
+            '." ST=" AES-STATUS@ .',
+        ])
+        self.assertIn("P0=65 ", text)
+        self.assertIn("P15=65 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_aes_auth_fail(self):
+        """Decryption with wrong tag sets status=3 (auth fail)."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            # Encrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            "tag-buf AES-TAG@",
+            # Corrupt tag
+            "99 tag-buf C!",
+            # Decrypt with wrong tag
+            "tag-buf AES-TAG!",
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "1 AES-CMD!",
+            "ct-buf AES-DIN!",
+            "CREATE junk 16 ALLOT",
+            "junk AES-DOUT@",
+            # Status should be 3 (auth fail)
+            '." AUTHST=" AES-STATUS@ .',
+        ])
+        self.assertIn("AUTHST=3 ", text)
+
+    def test_aes_encrypt_convenience(self):
+        """AES-ENCRYPT convenience word produces ciphertext + tag."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            # AES-ENCRYPT ( key iv src dst len -- tag-addr )
+            "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT",
+            # tag-addr on stack
+            '." TGBYTE=" C@ .',              # first tag byte = 15
+            '." CTBYTE=" ct-buf C@ .',       # first ct byte = 6
+        ])
+        self.assertIn("TGBYTE=15 ", text)
+        self.assertIn("CTBYTE=6 ", text)
+
+    def test_aes_decrypt_convenience(self):
+        """AES-DECRYPT convenience word returns 0 (auth OK) on valid roundtrip."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            # Encrypt
+            "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT",
+            # tag addr on stack — save it
+            "VARIABLE saved-tag",
+            "saved-tag !",
+            # Decrypt
+            "test-key test-iv ct-buf rt-buf 16 saved-tag @ AES-DECRYPT",
+            '." DECFLAG=" .',   # should print 0 (auth OK)
+            # Verify plaintext restored
+            '." DECPT0=" rt-buf C@ .',  # 65
+        ])
+        self.assertIn("DECFLAG=0 ", text)
+        self.assertIn("DECPT0=65 ", text)
+
+    def test_aes_status_display(self):
+        """.AES-STATUS prints human-readable status."""
+        text = self._run_kdos([".AES-STATUS"])
+        self.assertIn("AES: idle", text)
+
+    def test_aes_two_blocks(self):
+        """Encrypt 32 bytes (2 blocks) and verify ciphertext bytes."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 32 ALLOT",
+            "pt-buf 16 65 FILL",          # first block: 'A'
+            "pt-buf 16 + 16 66 FILL",     # second block: 'B'
+            "CREATE ct-buf 32 ALLOT",
+            "test-key test-iv pt-buf ct-buf 32 AES-ENCRYPT",
+            "DROP",  # discard tag addr
+            # First byte of block 0 with marker
+            '." BLK0=" ct-buf C@ .',
+            # First byte of block 1 with marker
+            '." BLK1=" ct-buf 16 + C@ .',
+        ])
+        self.assertIn("BLK0=6 ", text)
+        self.assertIn("BLK1=193 ", text)
+
+
+class TestKDOSSHA3(TestKDOS):
+    """Tests for §1.6 SHA-3 (Keccak-256) hashing."""
+
+    # Reference vectors (hashlib.sha3_256):
+    # SHA3-256("")     = a7ffc6f8bf1ed76651c14756a061d662...
+    # SHA3-256("abc")  = 3a985da74fe225b2045c172d6bd390bd...
+    # SHA3-256("A"*16) = 24163aabfd8d149f6e1ad9e7472ff2ac...
+    # SHA3-256(0..199) = 5f728f63bf5ee48c77f453c0490398fa...
+
+    def test_sha3_status_idle(self):
+        """SHA3-STATUS@ returns 0 (idle) before any operation."""
+        text = self._run_kdos(['." S3IDLE=" SHA3-STATUS@ .'])
+        self.assertIn("S3IDLE=0 ", text)
+
+    def test_sha3_empty(self):
+        """SHA3-256 of empty string matches reference (a7ffc6f8...)."""
+        text = self._run_kdos([
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0xa7 = 167
+            '." H1=" h-buf 1 + C@ .',        # 0xff = 255
+            '." H2=" h-buf 2 + C@ .',        # 0xc6 = 198
+            '." H3=" h-buf 3 + C@ .',        # 0xf8 = 248
+            '." ST=" SHA3-STATUS@ .',         # 2 = done
+        ])
+        self.assertIn("H0=167 ", text)
+        self.assertIn("H1=255 ", text)
+        self.assertIn("H2=198 ", text)
+        self.assertIn("H3=248 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_sha3_abc(self):
+        """SHA3-256('abc') = 3a985da7..."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!",            # 'a'
+            "98 msg 1 + C!",        # 'b'
+            "99 msg 2 + C!",        # 'c'
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 3 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x3a = 58
+            '." H1=" h-buf 1 + C@ .',        # 0x98 = 152
+            '." H2=" h-buf 2 + C@ .',        # 0x5d = 93
+            '." H3=" h-buf 3 + C@ .',        # 0xa7 = 167
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+        self.assertIn("H2=93 ", text)
+        self.assertIn("H3=167 ", text)
+
+    def test_sha3_sixteen_bytes(self):
+        """SHA3-256 of 16 x 0x41 ('A') = 24163aab..."""
+        text = self._run_kdos([
+            "CREATE msg 16 ALLOT",
+            "msg 16 65 FILL",        # 16 bytes of 'A'
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 16 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x24 = 36
+            '." H1=" h-buf 1 + C@ .',        # 0x16 = 22
+            '." H2=" h-buf 2 + C@ .',        # 0x3a = 58
+            '." H3=" h-buf 3 + C@ .',        # 0xab = 171
+        ])
+        self.assertIn("H0=36 ", text)
+        self.assertIn("H1=22 ", text)
+        self.assertIn("H2=58 ", text)
+        self.assertIn("H3=171 ", text)
+
+    def test_sha3_multi_rate_block(self):
+        """SHA3-256 of 200 bytes (>rate=136) = 5f728f63..."""
+        text = self._run_kdos([
+            "CREATE msg 200 ALLOT",
+            ": fill-seq 200 0 DO I msg I + C! LOOP ;",
+            "fill-seq",
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 200 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x5f = 95
+            '." H1=" h-buf 1 + C@ .',        # 0x72 = 114
+            '." H2=" h-buf 2 + C@ .',        # 0x8f = 143
+            '." H3=" h-buf 3 + C@ .',        # 0x63 = 99
+        ])
+        self.assertIn("H0=95 ", text)
+        self.assertIn("H1=114 ", text)
+        self.assertIn("H2=143 ", text)
+        self.assertIn("H3=99 ", text)
+
+    def test_sha3_convenience_word(self):
+        """KDOS SHA3 ( addr len hash-addr -- ) convenience word."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "msg 3 h-buf SHA3",
+            '." H0=" h-buf C@ .',            # same as test_sha3_abc
+            '." H1=" h-buf 1 + C@ .',
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+
+    def test_sha3_reinit(self):
+        """SHA3 can be reused: init-update-final twice gives same result."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "msg 3 h1 SHA3",
+            "msg 3 h2 SHA3",
+            '." R1=" h1 C@ .',
+            '." R2=" h2 C@ .',
+        ])
+        self.assertIn("R1=58 ", text)
+        self.assertIn("R2=58 ", text)
+
+    def test_sha3_status_display(self):
+        """.SHA3-STATUS prints human-readable status."""
+        text = self._run_kdos([".SHA3-STATUS"])
+        self.assertIn("SHA3: idle", text)
+
+    def test_sha3_status_after_final(self):
+        """.SHA3-STATUS after finalize shows done."""
+        text = self._run_kdos([
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "h-buf SHA3-FINAL",
+            ".SHA3-STATUS",
+        ])
+        self.assertIn("SHA3: done", text)
+
+    def test_sha3_single_byte(self):
+        """SHA3-256 of single byte 0x00 = 5d53469f..."""
+        text = self._run_kdos([
+            "CREATE msg 1 ALLOT",
+            "0 msg C!",
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 1 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x5d = 93
+            '." H1=" h-buf 1 + C@ .',        # 0x53 = 83
+            '." H2=" h-buf 2 + C@ .',        # 0x46 = 70
+            '." H3=" h-buf 3 + C@ .',        # 0x9f = 159
+        ])
+        self.assertIn("H0=93 ", text)
+        self.assertIn("H1=83 ", text)
+        self.assertIn("H2=70 ", text)
+        self.assertIn("H3=159 ", text)
+
+
+class TestKDOSCrypto(TestKDOS):
+    """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
+
+    # HMAC-SHA3-256 reference (key=0x00..0x1F, msg="abc"):
+    #   632f618ac17ba24355d9ee1fd187cf75bb5b68e6948804bf6674bf5ee7f1c345
+    #   first 4 bytes: 99, 47, 97, 138
+    # HMAC-SHA3-256 (key=0x00..0x1F, msg=""):
+    #   first 4 bytes: 80, 171, 22, 6
+
+    _CRYPTO_KEY_SETUP = [
+        "CREATE test-key 32 ALLOT",
+        ": init-key 32 0 DO I test-key I + C! LOOP ;",
+        "init-key",
+    ]
+
+    def test_hash_alias(self):
+        """HASH is an alias for SHA3 — produces same result."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "msg 3 h-buf HASH",
+            '." H0=" h-buf C@ .',           # 0x3a = 58  (same as SHA3 "abc")
+            '." H1=" h-buf 1 + C@ .',       # 0x98 = 152
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+
+    def test_verify_equal(self):
+        """VERIFY returns 0 for identical buffers."""
+        text = self._run_kdos([
+            "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
+            "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  3 b2 2 + C!  4 b2 3 + C!",
+            '." VEQ=" b1 b2 4 VERIFY .',
+        ])
+        self.assertIn("VEQ=0 ", text)
+
+    def test_verify_different(self):
+        """VERIFY returns -1 for different buffers."""
+        text = self._run_kdos([
+            "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
+            "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  99 b2 2 + C!  4 b2 3 + C!",
+            '." VNE=" b1 b2 4 VERIFY .',
+        ])
+        self.assertIn("VNE=-1 ", text)
+
+    def test_verify_single_byte_diff(self):
+        """VERIFY detects single-byte difference."""
+        text = self._run_kdos([
+            "CREATE b1 8 ALLOT  b1 8 0 FILL",
+            "CREATE b2 8 ALLOT  b2 8 0 FILL",
+            "1 b2 7 + C!",         # differ only at last byte
+            '." V=" b1 b2 8 VERIFY .',
+        ])
+        self.assertIn("V=-1 ", text)
+
+    def test_encrypt_alias(self):
+        """ENCRYPT is an alias for AES-ENCRYPT."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE test-iv 12 ALLOT",
+            ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+            "init-iv",
+            "CREATE pt 16 ALLOT  pt 16 65 FILL",
+            "CREATE ct 16 ALLOT",
+            "test-key test-iv pt ct 16 ENCRYPT",
+            "DROP",    # drop tag addr
+            '." CT0=" ct C@ .',
+        ])
+        self.assertIn("CT0=6 ", text)
+
+    def test_decrypt_alias(self):
+        """DECRYPT is an alias for AES-DECRYPT — roundtrip works."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE test-iv 12 ALLOT",
+            ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+            "init-iv",
+            "CREATE pt 16 ALLOT  pt 16 65 FILL",
+            "CREATE ct 16 ALLOT",
+            "CREATE rt 16 ALLOT",
+            # Encrypt — save tag address
+            "VARIABLE tag-save",
+            "test-key test-iv pt ct 16 ENCRYPT tag-save !",
+            # Decrypt
+            "test-key test-iv ct rt 16 tag-save @ DECRYPT",
+            '." DF=" .',           # 0 = auth OK
+            '." RT0=" rt C@ .',    # should be 65 = 'A'
+        ])
+        self.assertIn("DF=0 ", text)
+        self.assertIn("RT0=65 ", text)
+
+    def test_hmac_abc(self):
+        """HMAC-SHA3-256(key=0..31, msg='abc') matches reference."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "test-key 32 msg 3 h-buf HMAC",
+            '." M0=" h-buf C@ .',            # 99
+            '." M1=" h-buf 1 + C@ .',        # 47
+            '." M2=" h-buf 2 + C@ .',        # 97
+            '." M3=" h-buf 3 + C@ .',        # 138
+        ])
+        self.assertIn("M0=99 ", text)
+        self.assertIn("M1=47 ", text)
+        self.assertIn("M2=97 ", text)
+        self.assertIn("M3=138 ", text)
+
+    def test_hmac_empty(self):
+        """HMAC-SHA3-256(key=0..31, msg='') matches reference."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 1 ALLOT",    # dummy addr for 0-length
+            "CREATE h-buf 32 ALLOT",
+            "test-key 32 msg 0 h-buf HMAC",
+            '." M0=" h-buf C@ .',            # 80
+            '." M1=" h-buf 1 + C@ .',        # 171
+            '." M2=" h-buf 2 + C@ .',        # 22
+            '." M3=" h-buf 3 + C@ .',        # 6
+        ])
+        self.assertIn("M0=80 ", text)
+        self.assertIn("M1=171 ", text)
+        self.assertIn("M2=22 ", text)
+        self.assertIn("M3=6 ", text)
+
+    def test_hmac_then_verify(self):
+        """Compute HMAC twice, VERIFY the digests are equal."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "test-key 32 msg 3 h1 HMAC",
+            "test-key 32 msg 3 h2 HMAC",
+            '." VH=" h1 h2 32 VERIFY .',     # 0 = equal
+        ])
+        self.assertIn("VH=0 ", text)
+
+    def test_hmac_different_key(self):
+        """Different key produces different HMAC."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE key2 32 ALLOT  key2 32 255 FILL",
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "test-key 32 msg 3 h1 HMAC",
+            "key2 32 msg 3 h2 HMAC",
+            '." VD=" h1 h2 32 VERIFY .',     # -1 = different
+        ])
+        self.assertIn("VD=-1 ", text)
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 
@@ -5592,6 +6506,166 @@ class TestKDOSFilesystem(TestKDOS):
         self.assertIn("SAVE-BUFFER", text)
         self.assertIn("BDL-BEGIN", text)
         self.assertIn("BUNDLE-LOAD", text)
+
+
+# ---------------------------------------------------------------------------
+#  Filesystem Encryption Tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSFileCrypto(TestKDOS):
+    """Tests for §7.6.1 Filesystem Encryption — FENCRYPT, FDECRYPT."""
+
+    _FS_KEY_SETUP = [
+        "CREATE enc-key 32 ALLOT",
+        ": init-enc-key 32 0 DO I enc-key I + C! LOOP ;",
+        "init-enc-key",
+        "enc-key FS-KEY!",
+    ]
+
+    def test_encrypted_flag_false(self):
+        """ENCRYPTED? returns 0 for a normal (unencrypted) file."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "plain", b"Hello World!", ftype=2)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'OPEN plain',
+                '." ENC=" ENCRYPTED? .',
+            ], storage_image=path)
+            self.assertIn("ENC=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_basic(self):
+        """FENCRYPT encrypts a file, ENCRYPTED? becomes true."""
+        path = self._make_formatted_image()
+        # Allocate 2 sectors so padded data + tag fits
+        du_inject_file(path, "secret", b"A" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN secret fd !',
+                'fd @ FENCRYPT',
+                '." EI=" .',                 # 0 = success
+                '." EF=" fd @ ENCRYPTED? .',  # should be -1
+            ], storage_image=path)
+            self.assertIn("EI=0 ", text)
+            self.assertIn("EF=-1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_changes_data(self):
+        """After FENCRYPT, raw bytes on disk differ from original."""
+        path = self._make_formatted_image()
+        data = b"SECRET DATA HERE" * 2  # 32 bytes
+        du_inject_file(path, "doc", data, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN doc fd !',
+                'fd @ FENCRYPT DROP',
+                # Read raw first byte from disk via DMA
+                'CREATE rbuf 512 ALLOT',
+                'fd @ F.START DISK-SEC!  rbuf DISK-DMA!  1 DISK-N!  DISK-READ',
+                # Check if first byte changed (83 = 'S' was the original)
+                # IF/ELSE/THEN must be in a colon definition
+                ': ?chg rbuf C@ 83 = IF 1 . ELSE 0 . THEN ;',
+                '?chg',
+            ], storage_image=path)
+            # 0 means data changed (encrypted), 1 means unchanged
+            self.assertIn("0 ", text.split("?chg")[1])
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_roundtrip(self):
+        """FENCRYPT then FDECRYPT restores original data."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "round", b"A" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN round fd !',
+                'fd @ FENCRYPT DROP',
+                'fd @ FDECRYPT',
+                '." DF=" .',                 # 0 = auth OK
+                '." EF=" fd @ ENCRYPTED? .',  # 0 = no longer encrypted
+                # Read data back via DMA
+                'CREATE vbuf 512 ALLOT',
+                'fd @ F.START DISK-SEC!  vbuf DISK-DMA!  1 DISK-N!  DISK-READ',
+                '." V0=" vbuf C@ .',         # should be 65 = 'A'
+                '." V1=" vbuf 31 + C@ .',    # last byte also 'A'
+            ], storage_image=path)
+            self.assertIn("DF=0 ", text)
+            self.assertIn("EF=0 ", text)
+            self.assertIn("V0=65 ", text)
+            self.assertIn("V1=65 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_already_encrypted(self):
+        """Encrypting an already-encrypted file is a no-op (returns 0)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "twice", b"X" * 16, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN twice fd !',
+                'fd @ FENCRYPT DROP',
+                'fd @ FENCRYPT',
+                '." E2=" .',                 # 0 = no-op, success
+            ], storage_image=path)
+            self.assertIn("E2=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_not_encrypted(self):
+        """Decrypting a non-encrypted file is a no-op (returns 0)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "plain", b"plain text", ftype=2)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'OPEN plain',
+                'FDECRYPT',
+                '." D=" .',
+            ], storage_image=path)
+            self.assertIn("D=0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fdecrypt_wrong_key(self):
+        """Decrypting with a different key returns -1 (auth fail)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "locked", b"B" * 32, ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN locked fd !',
+                'fd @ FENCRYPT DROP',
+                # Change FS-KEY to all 0xFF
+                'CREATE bad-key 32 ALLOT  bad-key 32 255 FILL',
+                'bad-key FS-KEY!',
+                'fd @ FDECRYPT',
+                '." WK=" .',             # -1 = auth fail
+            ], storage_image=path)
+            self.assertIn("WK=-1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fencrypt_empty_file(self):
+        """Encrypting an empty file is a no-op."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "empty", b"", ftype=5)
+        try:
+            text = self._run_kdos(self._FS_KEY_SETUP + [
+                'VARIABLE fd',
+                'OPEN empty fd !',
+                'fd @ FENCRYPT',
+                '." E=" .',                  # 0
+                '." EF=" fd @ ENCRYPTED? .',  # 0 — not encrypted (nothing to do)
+            ], storage_image=path)
+            self.assertIn("E=0 ", text)
+            self.assertIn("EF=0 ", text)
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
 CRC_BASE     = 0x07C0
+AES_BASE     = 0x0700
+SHA3_BASE    = 0x0780
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +811,416 @@ class SpinlockDevice(Device):
             if self.locked[lock_idx] and self.owner[lock_idx] == rid:
                 self.locked[lock_idx] = False
                 self.owner[lock_idx] = -1
+
+
+# ---------------------------------------------------------------------------
+#  AES-256-GCM Accelerator
+# ---------------------------------------------------------------------------
+# Register map (offsets from AES_BASE = 0x0700):
+#   0x00..0x1F  AES_KEY    (W)   — 256-bit key (32 bytes LE)
+#   0x20..0x2B  AES_IV     (W)   — 96-bit IV/nonce (12 bytes LE)
+#   0x30..0x33  AES_AAD_LEN(W)   — AAD length in bytes (32-bit LE)
+#   0x34..0x37  AES_DATA_LEN(W)  — Plaintext/ciphertext length (32-bit LE)
+#   0x38        AES_CMD    (W)   — 0=encrypt, 1=decrypt
+#   0x39        AES_STATUS (R)   — 0=idle, 1=busy, 2=done, 3=auth-fail
+#   0x40..0x4F  AES_DIN    (W)   — 128-bit data input (16 bytes LE)
+#   0x50..0x5F  AES_DOUT   (R)   — 128-bit data output (16 bytes LE)
+#   0x60..0x6F  AES_TAG    (R/W) — 128-bit GCM authentication tag
+#
+# Data flow:
+#   1. Write key (32 bytes to 0x00..0x1F)
+#   2. Write IV  (12 bytes to 0x20..0x2B)
+#   3. Write AAD_LEN and DATA_LEN
+#   4. Write CMD (0=encrypt / 1=decrypt)
+#   5. For each 16-byte block: write DIN, read DOUT
+#   6. Read TAG (encrypt) or check STATUS for auth-fail (decrypt)
+
+# --- AES-256 S-Box ---
+_AES_SBOX = bytes([
+    0x63,0x7C,0x77,0x7B,0xF2,0x6B,0x6F,0xC5,0x30,0x01,0x67,0x2B,0xFE,0xD7,0xAB,0x76,
+    0xCA,0x82,0xC9,0x7D,0xFA,0x59,0x47,0xF0,0xAD,0xD4,0xA2,0xAF,0x9C,0xA4,0x72,0xC0,
+    0xB7,0xFD,0x93,0x26,0x36,0x3F,0xF7,0xCC,0x34,0xA5,0xE5,0xF1,0x71,0xD8,0x31,0x15,
+    0x04,0xC7,0x23,0xC3,0x18,0x96,0x05,0x9A,0x07,0x12,0x80,0xE2,0xEB,0x27,0xB2,0x75,
+    0x09,0x83,0x2C,0x1A,0x1B,0x6E,0x5A,0xA0,0x52,0x3B,0xD6,0xB3,0x29,0xE3,0x2F,0x84,
+    0x53,0xD1,0x00,0xED,0x20,0xFC,0xB1,0x5B,0x6A,0xCB,0xBE,0x39,0x4A,0x4C,0x58,0xCF,
+    0xD0,0xEF,0xAA,0xFB,0x43,0x4D,0x33,0x85,0x45,0xF9,0x02,0x7F,0x50,0x3C,0x9F,0xA8,
+    0x51,0xA3,0x40,0x8F,0x92,0x9D,0x38,0xF5,0xBC,0xB6,0xDA,0x21,0x10,0xFF,0xF3,0xD2,
+    0xCD,0x0C,0x13,0xEC,0x5F,0x97,0x44,0x17,0xC4,0xA7,0x7E,0x3D,0x64,0x5D,0x19,0x73,
+    0x60,0x81,0x4F,0xDC,0x22,0x2A,0x90,0x88,0x46,0xEE,0xB8,0x14,0xDE,0x5E,0x0B,0xDB,
+    0xE0,0x32,0x3A,0x0A,0x49,0x06,0x24,0x5C,0xC2,0xD3,0xAC,0x62,0x91,0x95,0xE4,0x79,
+    0xE7,0xC8,0x37,0x6D,0x8D,0xD5,0x4E,0xA9,0x6C,0x56,0xF4,0xEA,0x65,0x7A,0xAE,0x08,
+    0xBA,0x78,0x25,0x2E,0x1C,0xA6,0xB4,0xC6,0xE8,0xDD,0x74,0x1F,0x4B,0xBD,0x8B,0x8A,
+    0x70,0x3E,0xB5,0x66,0x48,0x03,0xF6,0x0E,0x61,0x35,0x57,0xB9,0x86,0xC1,0x1D,0x9E,
+    0xE1,0xF8,0x98,0x11,0x69,0xD9,0x8E,0x94,0x9B,0x1E,0x87,0xE9,0xCE,0x55,0x28,0xDF,
+    0x8C,0xA1,0x89,0x0D,0xBF,0xE6,0x42,0x68,0x41,0x99,0x2D,0x0F,0xB0,0x54,0xBB,0x16,
+])
+
+_AES_RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
+
+
+def _aes256_key_expand(key_bytes: bytes) -> list[bytes]:
+    """Expand 32-byte key into 15 round keys (each 16 bytes)."""
+    assert len(key_bytes) == 32
+    nk, nr = 8, 14
+    w = []
+    for i in range(nk):
+        w.append(key_bytes[4*i:4*i+4])
+    for i in range(nk, 4 * (nr + 1)):
+        t = bytearray(w[i-1])
+        if i % nk == 0:
+            t = bytearray([_AES_SBOX[t[1]], _AES_SBOX[t[2]],
+                           _AES_SBOX[t[3]], _AES_SBOX[t[0]]])
+            t[0] ^= _AES_RCON[i // nk - 1]
+        elif i % nk == 4:
+            t = bytearray([_AES_SBOX[b] for b in t])
+        w.append(bytes(a ^ b for a, b in zip(w[i - nk], t)))
+    rkeys = []
+    for r in range(nr + 1):
+        rkeys.append(b''.join(w[4*r:4*r+4]))
+    return rkeys
+
+
+def _aes_encrypt_block(block: bytes, rkeys: list[bytes]) -> bytes:
+    """Encrypt a single 16-byte block with AES-256."""
+    assert len(block) == 16
+    s = bytearray(a ^ b for a, b in zip(block, rkeys[0]))
+    for r in range(1, 14):
+        # SubBytes
+        s = bytearray(_AES_SBOX[b] for b in s)
+        # ShiftRows
+        s = bytearray([
+            s[0], s[5], s[10], s[15],
+            s[4], s[9], s[14], s[3],
+            s[8], s[13], s[2], s[7],
+            s[12], s[1], s[6], s[11],
+        ])
+        # MixColumns
+        t = bytearray(16)
+        for c in range(4):
+            a0, a1, a2, a3 = s[4*c], s[4*c+1], s[4*c+2], s[4*c+3]
+            t[4*c]   = _gm2(a0) ^ _gm3(a1) ^ a2 ^ a3
+            t[4*c+1] = a0 ^ _gm2(a1) ^ _gm3(a2) ^ a3
+            t[4*c+2] = a0 ^ a1 ^ _gm2(a2) ^ _gm3(a3)
+            t[4*c+3] = _gm3(a0) ^ a1 ^ a2 ^ _gm2(a3)
+        s = t
+        # AddRoundKey
+        s = bytearray(a ^ b for a, b in zip(s, rkeys[r]))
+    # Final round (no MixColumns)
+    s = bytearray(_AES_SBOX[b] for b in s)
+    s = bytearray([
+        s[0], s[5], s[10], s[15],
+        s[4], s[9], s[14], s[3],
+        s[8], s[13], s[2], s[7],
+        s[12], s[1], s[6], s[11],
+    ])
+    return bytes(a ^ b for a, b in zip(s, rkeys[14]))
+
+
+def _gm2(v):
+    """Galois field multiply by 2 in GF(2^8)."""
+    return ((v << 1) ^ (0x1B if v & 0x80 else 0)) & 0xFF
+
+def _gm3(v):
+    """Galois field multiply by 3 in GF(2^8)."""
+    return _gm2(v) ^ v
+
+
+def _ghash_mult(x: int, h: int) -> int:
+    """GF(2^128) multiplication for GHASH (big-endian bit order)."""
+    # x, h are 128-bit integers (MSB-first as in GCM spec)
+    R = 0xE1000000000000000000000000000000  # reduction polynomial
+    z = 0
+    v = h
+    for i in range(128):
+        if (x >> (127 - i)) & 1:
+            z ^= v
+        if v & 1:
+            v = (v >> 1) ^ R
+        else:
+            v >>= 1
+    return z
+
+
+def _bytes_to_int128(b: bytes) -> int:
+    """Convert 16 bytes (big-endian) to 128-bit integer."""
+    return int.from_bytes(b, 'big')
+
+def _int128_to_bytes(n: int) -> bytes:
+    """Convert 128-bit integer to 16 bytes (big-endian)."""
+    return n.to_bytes(16, 'big')
+
+
+def _inc32(counter: bytearray):
+    """Increment the rightmost 32 bits of a 16-byte counter."""
+    for i in range(15, 11, -1):
+        counter[i] = (counter[i] + 1) & 0xFF
+        if counter[i] != 0:
+            break
+
+
+class AESDevice(Device):
+    """AES-256-GCM hardware accelerator."""
+
+    def __init__(self):
+        super().__init__("AES", AES_BASE, 0x70)
+        self._reset()
+
+    def _reset(self):
+        self.key = bytearray(32)
+        self.iv = bytearray(12)
+        self.aad_len = 0
+        self.data_len = 0
+        self.cmd = 0          # 0=encrypt, 1=decrypt
+        self.status = 0       # 0=idle, 2=done, 3=auth-fail
+        self.din = bytearray(16)
+        self.dout = bytearray(16)
+        self.tag = bytearray(16)
+        # Internal GCM state
+        self._rkeys = None
+        self._h = 0           # GHASH subkey H = AES_K(0^128)
+        self._counter = bytearray(16)
+        self._j0 = bytearray(16)  # initial counter
+        self._ghash_state = 0
+        self._aad_processed = 0
+        self._data_processed = 0
+        self._expected_tag = bytearray(16)
+
+    def read8(self, offset: int) -> int:
+        if 0x39 <= offset < 0x3A:
+            return self.status
+        elif 0x50 <= offset < 0x60:
+            return self.dout[offset - 0x50]
+        elif 0x60 <= offset < 0x70:
+            return self.tag[offset - 0x60]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if 0x00 <= offset < 0x20:
+            self.key[offset] = value
+        elif 0x20 <= offset < 0x2C:
+            self.iv[offset - 0x20] = value
+        elif 0x30 <= offset < 0x34:
+            idx = offset - 0x30
+            self.aad_len = (self.aad_len & ~(0xFF << (8*idx))) | (value << (8*idx))
+            self.aad_len &= 0xFFFFFFFF
+        elif 0x34 <= offset < 0x38:
+            idx = offset - 0x34
+            self.data_len = (self.data_len & ~(0xFF << (8*idx))) | (value << (8*idx))
+            self.data_len &= 0xFFFFFFFF
+        elif offset == 0x38:
+            # CMD — triggers key expansion and GCM init
+            self.cmd = value & 1
+            self._start_gcm()
+        elif 0x40 <= offset < 0x50:
+            idx = offset - 0x40
+            self.din[idx] = value
+            if idx == 15:
+                # Full 16-byte block written — process it
+                self._process_block()
+        elif 0x60 <= offset < 0x70:
+            # Write expected tag (for decrypt verification)
+            self.tag[offset - 0x60] = value
+
+    def _start_gcm(self):
+        """Initialize GCM state: expand key, compute H, set up counter."""
+        self._rkeys = _aes256_key_expand(bytes(self.key))
+        # H = AES_K(0^128)
+        h_bytes = _aes_encrypt_block(b'\x00' * 16, self._rkeys)
+        self._h = _bytes_to_int128(h_bytes)
+        # J0 = IV || 0x00000001
+        self._j0 = bytearray(self.iv) + bytearray([0, 0, 0, 1])
+        self._counter = bytearray(self._j0)
+        self._ghash_state = 0
+        self._aad_processed = 0
+        self._data_processed = 0
+        self.status = 2  # done (ready for blocks)
+        # If there's AAD, it should be fed via DIN blocks before data.
+        # For simplicity, we handle AAD + data as sequential DIN writes.
+        # The first aad_len bytes of DIN writes are AAD, remaining are data.
+
+    def _process_block(self):
+        """Process one 16-byte DIN block (AAD or data)."""
+        if self._rkeys is None:
+            return
+        block = bytes(self.din)
+
+        if self._aad_processed < self.aad_len:
+            # This block is AAD — just feed to GHASH
+            self._ghash_update(block)
+            self._aad_processed += 16
+            self.dout = bytearray(16)  # no output for AAD
+            if self._aad_processed >= self.aad_len:
+                # Pad AAD to 128-bit boundary is implicit (we always write full blocks)
+                pass
+        else:
+            # This block is data — encrypt/decrypt via CTR
+            _inc32(self._counter)
+            keystream = _aes_encrypt_block(bytes(self._counter), self._rkeys)
+            out = bytearray(a ^ b for a, b in zip(block, keystream))
+            self.dout = out
+            self._data_processed += 16
+
+            # GHASH: encrypt feeds ciphertext, decrypt feeds ciphertext (=input)
+            if self.cmd == 0:
+                self._ghash_update(bytes(out))   # encrypt: hash ciphertext
+            else:
+                self._ghash_update(block)        # decrypt: hash ciphertext (=input)
+
+            # Check if all data processed → compute tag
+            if self._data_processed >= self.data_len:
+                self._finalize_tag()
+
+    def _ghash_update(self, block: bytes):
+        """Feed a 16-byte block into the GHASH accumulator."""
+        x = _bytes_to_int128(block)
+        self._ghash_state = _ghash_mult(self._ghash_state ^ x, self._h)
+
+    def _finalize_tag(self):
+        """Compute the GCM authentication tag."""
+        # Final GHASH block: lengths (AAD bits || data bits), each 64-bit BE
+        len_block = (self.aad_len * 8).to_bytes(8, 'big') + \
+                    (self.data_len * 8).to_bytes(8, 'big')
+        self._ghash_update(len_block)
+        # Tag = GHASH_final XOR AES_K(J0)
+        s = _int128_to_bytes(self._ghash_state)
+        j0_enc = _aes_encrypt_block(bytes(self._j0), self._rkeys)
+        computed_tag = bytes(a ^ b for a, b in zip(s, j0_enc))
+        if self.cmd == 0:
+            # Encrypt: store computed tag
+            self.tag = bytearray(computed_tag)
+            self.status = 2  # done
+        else:
+            # Decrypt: compare with expected tag
+            if computed_tag == bytes(self.tag):
+                self.status = 2  # done, auth OK
+            else:
+                self.status = 3  # auth fail
+
+
+# ---------------------------------------------------------------------------
+#  SHA-3 (Keccak) Accelerator — SHA3-256
+# ---------------------------------------------------------------------------
+# Register map (offsets from SHA3_BASE = 0x0780):
+#   0x00        SHA3_CMD     (W)   — 0=init (SHA3-256), 1=finalize
+#   0x01        SHA3_STATUS  (R)   — 0=idle, 2=done
+#   0x08        SHA3_DIN     (W)   — byte input (auto-absorbs at rate)
+#   0x10..0x2F  SHA3_DOUT    (R)   — 32-byte hash output (after finalize)
+
+# Keccak round constants
+_KECCAK_RC = [
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808A,
+    0x8000000080008000, 0x000000000000808B, 0x0000000080000001,
+    0x8000000080008081, 0x8000000000008009, 0x000000000000008A,
+    0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+    0x000000008000808B, 0x800000000000008B, 0x8000000000008089,
+    0x8000000000008003, 0x8000000000008002, 0x8000000000000080,
+    0x000000000000800A, 0x800000008000000A, 0x8000000080008081,
+    0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+]
+
+# Keccak rotation offsets (rho), indexed as [x + 5*y]
+_KECCAK_ROT = [
+     0,  1, 62, 28, 27,    # y=0
+    36, 44,  6, 55, 20,    # y=1
+     3, 10, 43, 25, 39,    # y=2
+    41, 45, 15, 21,  8,    # y=3
+    18,  2, 61, 56, 14,    # y=4
+]
+
+def _keccak_f1600(state: list[int]) -> list[int]:
+    """Keccak-f[1600] permutation on flat array of 25 64-bit lanes (x+5y)."""
+    lanes = list(state)
+    M64 = 0xFFFFFFFFFFFFFFFF
+    def _rot64(x: int, n: int) -> int:
+        return ((x << n) | (x >> (64 - n))) & M64 if n else x
+    for rc in _KECCAK_RC:
+        # θ — column parity
+        C = [lanes[x] ^ lanes[x+5] ^ lanes[x+10] ^ lanes[x+15] ^ lanes[x+20]
+             for x in range(5)]
+        D = [C[(x-1) % 5] ^ _rot64(C[(x+1) % 5], 1) for x in range(5)]
+        lanes = [(lanes[i] ^ D[i % 5]) & M64 for i in range(25)]
+        # ρ + π
+        B = [0] * 25
+        for x in range(5):
+            for y in range(5):
+                src = x + 5 * y
+                dst = y + 5 * ((2*x + 3*y) % 5)
+                B[dst] = _rot64(lanes[src], _KECCAK_ROT[src])
+        # χ
+        lanes = [
+            (B[x + 5*y] ^ ((~B[((x+1)%5) + 5*y]) & B[((x+2)%5) + 5*y])) & M64
+            for y in range(5) for x in range(5)
+        ]
+        # ι
+        lanes[0] = (lanes[0] ^ rc) & M64
+    return lanes
+
+
+class SHA3Device(Device):
+    """SHA-3/Keccak-256 hardware accelerator."""
+
+    # SHA3-256: rate = 1088 bits = 136 bytes, output = 32 bytes
+    RATE = 136
+
+    def __init__(self):
+        super().__init__("SHA3", SHA3_BASE, 0x30)
+        self._reset()
+
+    def _reset(self):
+        self.state = [0] * 25          # 5x5 lanes of 64-bit words
+        self.buf = bytearray()         # partial block buffer
+        self.status = 0                # 0=idle, 2=done
+        self.digest = bytearray(32)    # output hash
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x01:
+            return self.status
+        if 0x10 <= offset < 0x30:
+            return self.digest[offset - 0x10]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x00:
+            # CMD
+            if value == 0:
+                self._reset()          # init SHA3-256
+            elif value == 1:
+                self._finalize()       # pad + squeeze
+        elif offset == 0x08:
+            # DIN — absorb one byte
+            self.buf.append(value)
+            if len(self.buf) == self.RATE:
+                self._absorb_block()
+
+    def _absorb_block(self):
+        """XOR rate bytes into state, run Keccak-f[1600]."""
+        block = self.buf
+        for i in range(self.RATE // 8):
+            lane = int.from_bytes(block[i*8:(i+1)*8], 'little')
+            self.state[i] ^= lane
+        self.state = _keccak_f1600(self.state)
+        self.buf = bytearray()
+
+    def _finalize(self):
+        """Apply SHA-3 padding (domain sep 0x06, pad10*1) and squeeze."""
+        # Build padded final block (full rate-length buffer)
+        pad = bytearray(self.RATE)
+        pad[:len(self.buf)] = self.buf
+        pad[len(self.buf)] = 0x06
+        pad[-1] |= 0x80
+        # XOR into state and permute
+        for i in range(self.RATE // 8):
+            lane = int.from_bytes(pad[i*8:(i+1)*8], 'little')
+            self.state[i] ^= lane
+        self.state = _keccak_f1600(self.state)
+        # Squeeze: extract first 32 bytes (4 lanes) from state
+        out = bytearray()
+        for i in range(4):
+            out.extend(self.state[i].to_bytes(8, 'little'))
+        self.digest = out[:32]
+        self.status = 2  # done
 
 
 # ---------------------------------------------------------------------------

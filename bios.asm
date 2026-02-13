@@ -1002,6 +1002,57 @@ w_depth:
     str r14, r1
     ret.l
 
+; SP@ ( -- addr )  push current data stack pointer
+w_sp_fetch:
+    mov r1, r14
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; SP! (IMMEDIATE) — compile inline: set data stack pointer from TOS
+;   Emits:  ldn r14, r14  (50 EE)
+;   Total = 2 bytes
+w_sp_store:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xEE
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; RP@ ( -- addr )  push current return stack pointer
+;   Adjusts +8 to compensate for call.l overhead: the caller wants
+;   the RSP as it was *before* the call.l into RP@ pushed a return addr.
+w_rp_fetch:
+    mov r1, r15
+    addi r1, 8                ; compensate for call.l
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; RP! (IMMEDIATE) — compile inline: set return stack pointer from TOS
+;   Emits:  ldn r15, r14  (50 FE)
+;           addi r14, 8   (62 E0 08)
+;   Total = 5 bytes
+w_rp_store:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xFE
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
 ; PICK ( n -- x )
 w_pick:
     ldn r1, r14
@@ -6986,6 +7037,228 @@ w_crc_final:
     ret.l
 
 ; =====================================================================
+;  AES-256-GCM Engine — MMIO at 0xFFFF_FF00_0000_0700
+; =====================================================================
+; AES base   = 0xFFFF_FF00_0000_0700
+;   KEY    +0x00 (W)  256-bit key (32 bytes LE)
+;   IV     +0x20 (W)  96-bit IV/nonce (12 bytes LE)
+;   AAD-LEN+0x30 (W)  AAD length in bytes (32-bit LE)
+;   DAT-LEN+0x34 (W)  Data length in bytes (32-bit LE)
+;   CMD    +0x38 (W)  0=encrypt, 1=decrypt
+;   STATUS +0x39 (R)  0=idle, 1=busy, 2=done, 3=auth-fail
+;   DIN    +0x40 (W)  128-bit data input (16 bytes LE)
+;   DOUT   +0x50 (R)  128-bit data output (16 bytes LE)
+;   TAG    +0x60 (R/W) 128-bit GCM authentication tag
+
+; AES-KEY! ( addr -- )  Write 32-byte key from memory address.
+;   Writes all 32 bytes byte-by-byte to AES_KEY register.
+w_aes_key_store:
+    ldn r9, r14             ; r9 = source address
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0700    ; AES_KEY base
+    ldi r12, 0              ; byte counter
+.aes_key_loop:
+    mov r13, r9
+    add r13, r12            ; src + offset
+    ld.b r0, r13            ; load one byte from RAM
+    mov r11, r7
+    add r11, r12            ; dst + offset
+    st.b r11, r0            ; store to MMIO
+    addi r12, 1
+    cmpi r12, 32
+    brcc .aes_key_loop
+    ret.l
+
+; AES-IV! ( addr -- )  Write 12-byte IV from memory address.
+w_aes_iv_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0720    ; AES_IV base
+    ldi r12, 0
+.aes_iv_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 12
+    brcc .aes_iv_loop
+    ret.l
+
+; AES-AAD-LEN! ( n -- )  Set AAD length (32-bit).
+w_aes_aad_len_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0730   ; AES_AAD_LEN
+    st.w r11, r0
+    ret.l
+
+; AES-DATA-LEN! ( n -- )  Set data length (32-bit).
+w_aes_data_len_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0734   ; AES_DATA_LEN
+    st.w r11, r0
+    ret.l
+
+; AES-CMD! ( n -- )  Write command byte: 0=encrypt, 1=decrypt.
+w_aes_cmd_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0738   ; AES_CMD
+    st.b r11, r0
+    ret.l
+
+; AES-STATUS@ ( -- n )  Read AES status byte.
+w_aes_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0739   ; AES_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; AES-DIN! ( addr -- )  Write 16-byte block from memory to AES_DIN.
+w_aes_din_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0740   ; AES_DIN base
+    ldi r12, 0
+.aes_din_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_din_loop
+    ret.l
+
+; AES-DOUT@ ( addr -- )  Read 16-byte block from AES_DOUT to memory.
+w_aes_dout_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0750   ; AES_DOUT base
+    ldi r12, 0
+.aes_dout_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_dout_loop
+    ret.l
+
+; AES-TAG@ ( addr -- )  Read 16-byte tag from AES_TAG to memory.
+w_aes_tag_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0760   ; AES_TAG base
+    ldi r12, 0
+.aes_tag_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_tag_loop
+    ret.l
+
+; AES-TAG! ( addr -- )  Write 16-byte expected tag to AES_TAG.
+w_aes_tag_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0760   ; AES_TAG base
+    ldi r12, 0
+.aes_tag_store_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_tag_store_loop
+    ret.l
+
+; =====================================================================
+;  SHA-3 (Keccak-256) Hardware Accelerator
+; =====================================================================
+; SHA3 base = 0xFFFF_FF00_0000_0780
+;   CMD    +0x00 (W)  0=init, 1=finalize
+;   STATUS +0x01 (R)  0=idle, 2=done
+;   DIN    +0x08 (W)  byte input (auto-absorbs at rate)
+;   DOUT   +0x10 (R)  32-byte hash output
+
+; SHA3-INIT ( -- )  Initialize SHA3-256 state.
+w_sha3_init:
+    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
+    ldi r0, 0
+    st.b r7, r0
+    ret.l
+
+; SHA3-UPDATE ( addr len -- )  Feed len bytes to SHA3 absorber.
+w_sha3_update:
+    ldn r12, r14            ; r12 = len
+    addi r14, 8
+    ldn r9, r14             ; r9 = addr
+    addi r14, 8
+    cmpi r12, 0
+    breq .sha3_update_done
+    ldi64 r7, 0xFFFF_FF00_0000_0788   ; SHA3_DIN
+    ldi r11, 0              ; counter = 0
+.sha3_update_loop:
+    mov r13, r9
+    add r13, r11            ; src + counter
+    ld.b r0, r13            ; load byte from RAM
+    st.b r7, r0             ; write to DIN
+    addi r11, 1
+    cmp r11, r12            ; counter < len?
+    brcc .sha3_update_loop
+.sha3_update_done:
+    ret.l
+
+; SHA3-FINAL ( addr -- )  Finalize hash, copy 32 bytes to addr.
+w_sha3_final:
+    ldn r9, r14             ; r9 = dest addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
+    ldi r0, 1
+    st.b r7, r0             ; CMD=finalize
+    ; Read 32 bytes from DOUT (offset 0x10)
+    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
+    ldi r12, 0
+.sha3_final_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11            ; read from DOUT
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0            ; store to RAM
+    addi r12, 1
+    cmpi r12, 32
+    brcc .sha3_final_loop
+    ret.l
+
+; SHA3-STATUS@ ( -- n )  Read SHA3 status register.
+w_sha3_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -9145,9 +9418,135 @@ d_crc_final:
     call.l r11
     ret.l
 
+; === AES-KEY! ===
+d_aes_key_store:
+    .dq d_crc_final
+    .db 8
+    .ascii "AES-KEY!"
+    ldi64 r11, w_aes_key_store
+    call.l r11
+    ret.l
+
+; === AES-IV! ===
+d_aes_iv_store:
+    .dq d_aes_key_store
+    .db 7
+    .ascii "AES-IV!"
+    ldi64 r11, w_aes_iv_store
+    call.l r11
+    ret.l
+
+; === AES-AAD-LEN! ===
+d_aes_aad_len_store:
+    .dq d_aes_iv_store
+    .db 12
+    .ascii "AES-AAD-LEN!"
+    ldi64 r11, w_aes_aad_len_store
+    call.l r11
+    ret.l
+
+; === AES-DATA-LEN! ===
+d_aes_data_len_store:
+    .dq d_aes_aad_len_store
+    .db 13
+    .ascii "AES-DATA-LEN!"
+    ldi64 r11, w_aes_data_len_store
+    call.l r11
+    ret.l
+
+; === AES-CMD! ===
+d_aes_cmd_store:
+    .dq d_aes_data_len_store
+    .db 8
+    .ascii "AES-CMD!"
+    ldi64 r11, w_aes_cmd_store
+    call.l r11
+    ret.l
+
+; === AES-STATUS@ ===
+d_aes_status_fetch:
+    .dq d_aes_cmd_store
+    .db 11
+    .ascii "AES-STATUS@"
+    ldi64 r11, w_aes_status_fetch
+    call.l r11
+    ret.l
+
+; === AES-DIN! ===
+d_aes_din_store:
+    .dq d_aes_status_fetch
+    .db 8
+    .ascii "AES-DIN!"
+    ldi64 r11, w_aes_din_store
+    call.l r11
+    ret.l
+
+; === AES-DOUT@ ===
+d_aes_dout_fetch:
+    .dq d_aes_din_store
+    .db 9
+    .ascii "AES-DOUT@"
+    ldi64 r11, w_aes_dout_fetch
+    call.l r11
+    ret.l
+
+; === AES-TAG@ ===
+d_aes_tag_fetch:
+    .dq d_aes_dout_fetch
+    .db 8
+    .ascii "AES-TAG@"
+    ldi64 r11, w_aes_tag_fetch
+    call.l r11
+    ret.l
+
+; === AES-TAG! ===
+d_aes_tag_store:
+    .dq d_aes_tag_fetch
+    .db 8
+    .ascii "AES-TAG!"
+    ldi64 r11, w_aes_tag_store
+    call.l r11
+    ret.l
+
+; === SHA3-INIT ===
+d_sha3_init:
+    .dq d_aes_tag_store
+    .db 9
+    .ascii "SHA3-INIT"
+    ldi64 r11, w_sha3_init
+    call.l r11
+    ret.l
+
+; === SHA3-UPDATE ===
+d_sha3_update:
+    .dq d_sha3_init
+    .db 11
+    .ascii "SHA3-UPDATE"
+    ldi64 r11, w_sha3_update
+    call.l r11
+    ret.l
+
+; === SHA3-FINAL ===
+d_sha3_final:
+    .dq d_sha3_update
+    .db 10
+    .ascii "SHA3-FINAL"
+    ldi64 r11, w_sha3_final
+    call.l r11
+    ret.l
+
+; === SHA3-STATUS@ ===
+d_sha3_status_fetch:
+    .dq d_sha3_final
+    .db 12
+    .ascii "SHA3-STATUS@"
+    ldi64 r11, w_sha3_status_fetch
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_crc_final
+    .dq d_sha3_status_fetch
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full
@@ -9328,12 +9727,48 @@ d_icache_hits:
     ret.l
 
 ; === ICACHE-MISSES ( -- n ) ===
-latest_entry:
 d_icache_misses:
     .dq d_icache_hits
     .db 13
     .ascii "ICACHE-MISSES"
     ldi64 r11, w_icache_misses
+    call.l r11
+    ret.l
+
+; === SP@ ( -- addr ) ===
+d_sp_fetch:
+    .dq d_icache_misses
+    .db 3
+    .ascii "SP@"
+    ldi64 r11, w_sp_fetch
+    call.l r11
+    ret.l
+
+; === SP! ( addr -- ) [IMMEDIATE] ===
+d_sp_store:
+    .dq d_sp_fetch
+    .db 0x83
+    .ascii "SP!"
+    ldi64 r11, w_sp_store
+    call.l r11
+    ret.l
+
+; === RP@ ( -- addr ) ===
+d_rp_fetch:
+    .dq d_sp_store
+    .db 3
+    .ascii "RP@"
+    ldi64 r11, w_rp_fetch
+    call.l r11
+    ret.l
+
+; === RP! ( addr -- ) [IMMEDIATE] ===
+latest_entry:
+d_rp_store:
+    .dq d_rp_fetch
+    .db 0x83
+    .ascii "RP!"
+    ldi64 r11, w_rp_store
     call.l r11
     ret.l
 
