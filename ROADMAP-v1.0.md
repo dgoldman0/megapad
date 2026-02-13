@@ -166,7 +166,8 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
 7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
    (commit `d77db63`, 10 tests)
 
-8. ☐ **Filesystem encryption** — optional at-rest encryption for files
+8. ✅ **Filesystem encryption** — `FENCRYPT`, `FDECRYPT`, `FS-KEY!`, `ENCRYPTED?`
+   (commit `463cac6`, 8 tests)
 
 ---
 
