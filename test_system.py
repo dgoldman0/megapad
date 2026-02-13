@@ -6048,6 +6048,157 @@ class TestKDOSSHA3(TestKDOS):
         self.assertIn("H3=159 ", text)
 
 
+class TestKDOSCrypto(TestKDOS):
+    """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
+
+    # HMAC-SHA3-256 reference (key=0x00..0x1F, msg="abc"):
+    #   632f618ac17ba24355d9ee1fd187cf75bb5b68e6948804bf6674bf5ee7f1c345
+    #   first 4 bytes: 99, 47, 97, 138
+    # HMAC-SHA3-256 (key=0x00..0x1F, msg=""):
+    #   first 4 bytes: 80, 171, 22, 6
+
+    _CRYPTO_KEY_SETUP = [
+        "CREATE test-key 32 ALLOT",
+        ": init-key 32 0 DO I test-key I + C! LOOP ;",
+        "init-key",
+    ]
+
+    def test_hash_alias(self):
+        """HASH is an alias for SHA3 — produces same result."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "msg 3 h-buf HASH",
+            '." H0=" h-buf C@ .',           # 0x3a = 58  (same as SHA3 "abc")
+            '." H1=" h-buf 1 + C@ .',       # 0x98 = 152
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+
+    def test_verify_equal(self):
+        """VERIFY returns 0 for identical buffers."""
+        text = self._run_kdos([
+            "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
+            "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  3 b2 2 + C!  4 b2 3 + C!",
+            '." VEQ=" b1 b2 4 VERIFY .',
+        ])
+        self.assertIn("VEQ=0 ", text)
+
+    def test_verify_different(self):
+        """VERIFY returns -1 for different buffers."""
+        text = self._run_kdos([
+            "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
+            "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  99 b2 2 + C!  4 b2 3 + C!",
+            '." VNE=" b1 b2 4 VERIFY .',
+        ])
+        self.assertIn("VNE=-1 ", text)
+
+    def test_verify_single_byte_diff(self):
+        """VERIFY detects single-byte difference."""
+        text = self._run_kdos([
+            "CREATE b1 8 ALLOT  b1 8 0 FILL",
+            "CREATE b2 8 ALLOT  b2 8 0 FILL",
+            "1 b2 7 + C!",         # differ only at last byte
+            '." V=" b1 b2 8 VERIFY .',
+        ])
+        self.assertIn("V=-1 ", text)
+
+    def test_encrypt_alias(self):
+        """ENCRYPT is an alias for AES-ENCRYPT."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE test-iv 12 ALLOT",
+            ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+            "init-iv",
+            "CREATE pt 16 ALLOT  pt 16 65 FILL",
+            "CREATE ct 16 ALLOT",
+            "test-key test-iv pt ct 16 ENCRYPT",
+            "DROP",    # drop tag addr
+            '." CT0=" ct C@ .',
+        ])
+        self.assertIn("CT0=6 ", text)
+
+    def test_decrypt_alias(self):
+        """DECRYPT is an alias for AES-DECRYPT — roundtrip works."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE test-iv 12 ALLOT",
+            ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+            "init-iv",
+            "CREATE pt 16 ALLOT  pt 16 65 FILL",
+            "CREATE ct 16 ALLOT",
+            "CREATE rt 16 ALLOT",
+            # Encrypt — save tag address
+            "VARIABLE tag-save",
+            "test-key test-iv pt ct 16 ENCRYPT tag-save !",
+            # Decrypt
+            "test-key test-iv ct rt 16 tag-save @ DECRYPT",
+            '." DF=" .',           # 0 = auth OK
+            '." RT0=" rt C@ .',    # should be 65 = 'A'
+        ])
+        self.assertIn("DF=0 ", text)
+        self.assertIn("RT0=65 ", text)
+
+    def test_hmac_abc(self):
+        """HMAC-SHA3-256(key=0..31, msg='abc') matches reference."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "test-key 32 msg 3 h-buf HMAC",
+            '." M0=" h-buf C@ .',            # 99
+            '." M1=" h-buf 1 + C@ .',        # 47
+            '." M2=" h-buf 2 + C@ .',        # 97
+            '." M3=" h-buf 3 + C@ .',        # 138
+        ])
+        self.assertIn("M0=99 ", text)
+        self.assertIn("M1=47 ", text)
+        self.assertIn("M2=97 ", text)
+        self.assertIn("M3=138 ", text)
+
+    def test_hmac_empty(self):
+        """HMAC-SHA3-256(key=0..31, msg='') matches reference."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 1 ALLOT",    # dummy addr for 0-length
+            "CREATE h-buf 32 ALLOT",
+            "test-key 32 msg 0 h-buf HMAC",
+            '." M0=" h-buf C@ .',            # 80
+            '." M1=" h-buf 1 + C@ .',        # 171
+            '." M2=" h-buf 2 + C@ .',        # 22
+            '." M3=" h-buf 3 + C@ .',        # 6
+        ])
+        self.assertIn("M0=80 ", text)
+        self.assertIn("M1=171 ", text)
+        self.assertIn("M2=22 ", text)
+        self.assertIn("M3=6 ", text)
+
+    def test_hmac_then_verify(self):
+        """Compute HMAC twice, VERIFY the digests are equal."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "test-key 32 msg 3 h1 HMAC",
+            "test-key 32 msg 3 h2 HMAC",
+            '." VH=" h1 h2 32 VERIFY .',     # 0 = equal
+        ])
+        self.assertIn("VH=0 ", text)
+
+    def test_hmac_different_key(self):
+        """Different key produces different HMAC."""
+        text = self._run_kdos(self._CRYPTO_KEY_SETUP + [
+            "CREATE key2 32 ALLOT  key2 32 255 FILL",
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "test-key 32 msg 3 h1 HMAC",
+            "key2 32 msg 3 h2 HMAC",
+            '." VD=" h1 h2 32 VERIFY .',     # -1 = different
+        ])
+        self.assertIn("VD=-1 ", text)
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 

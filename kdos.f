@@ -528,6 +528,92 @@ CREATE SHA3-BUF 32 ALLOT
     LOOP DROP ;
 
 \ =====================================================================
+\  §1.7  Unified Crypto Words
+\ =====================================================================
+\  High-level wrappers over AES-256-GCM (§1.5) and SHA-3 (§1.6).
+\
+\  HASH      ( addr len out -- )           SHA3-256 hash
+\  HMAC      ( key klen msg mlen out -- )   HMAC-SHA3-256
+\  ENCRYPT   ( key iv src dst len -- tag )  AES-256-GCM encrypt
+\  DECRYPT   ( key iv src dst len tag -- f) AES-256-GCM decrypt
+\  VERIFY    ( a1 a2 len -- flag )          constant-time compare
+
+\ HASH ( addr len hash-addr -- )  Alias for SHA3.
+: HASH  SHA3 ;
+
+\ --- HMAC-SHA3-256 ---
+\ HMAC(K,m) = SHA3((K ^ opad) || SHA3((K ^ ipad) || m))
+\ SHA3-256 rate (block size) = 136 bytes
+
+136 CONSTANT HMAC-BLKSZ
+
+CREATE HMAC-IPAD 136 ALLOT
+CREATE HMAC-OPAD 136 ALLOT
+CREATE HMAC-INNER 32 ALLOT
+VARIABLE _HMAC-PAD-PTR
+VARIABLE _HMAC-XBYTE
+VARIABLE _HMAC-OUT
+VARIABLE _VERIFY-ACC
+
+\ HMAC-PAD ( key-addr key-len pad-addr xor-byte -- )
+\   Zero pad, copy key into pad, XOR entire pad with xor-byte.
+: HMAC-PAD
+    _HMAC-XBYTE !                     \ save xor-byte
+    _HMAC-PAD-PTR !                   \ save pad-addr
+    \ Zero the pad
+    _HMAC-PAD-PTR @ HMAC-BLKSZ 0 FILL
+    \ Copy key bytes into pad[0..klen-1]
+    0 DO                               \ key-addr  (limit=klen start=0)
+        DUP I + C@                     \ key-addr byte
+        _HMAC-PAD-PTR @ I + C!         \ key-addr
+    LOOP DROP
+    \ XOR every byte of pad with xor-byte
+    HMAC-BLKSZ 0 DO
+        _HMAC-PAD-PTR @ I + C@
+        _HMAC-XBYTE @ XOR
+        _HMAC-PAD-PTR @ I + C!
+    LOOP
+;
+
+\ HMAC ( key-addr key-len msg-addr msg-len out-addr -- )
+\   Compute HMAC-SHA3-256.
+: HMAC
+    _HMAC-OUT !                        \ save out-addr
+    >R >R                              \ R: mlen msg  S: key klen
+    \ Build ipad and opad from same key
+    2DUP HMAC-IPAD 54 HMAC-PAD        \ ipad = key XOR 0x36
+    HMAC-OPAD 92 HMAC-PAD             \ opad = key XOR 0x5C  (consumes key klen)
+    \ Inner hash: SHA3(ipad || message)
+    SHA3-INIT
+    HMAC-IPAD HMAC-BLKSZ SHA3-UPDATE
+    R> R> SHA3-UPDATE                  \ msg mlen
+    HMAC-INNER SHA3-FINAL
+    \ Outer hash: SHA3(opad || inner)
+    SHA3-INIT
+    HMAC-OPAD HMAC-BLKSZ SHA3-UPDATE
+    HMAC-INNER 32 SHA3-UPDATE
+    _HMAC-OUT @ SHA3-FINAL
+;
+
+\ ENCRYPT ( key iv src dst len -- tag-addr )  AES-256-GCM encrypt.
+: ENCRYPT  AES-ENCRYPT ;
+
+\ DECRYPT ( key iv src dst len tag -- flag )  AES-256-GCM decrypt+verify.
+: DECRYPT  AES-DECRYPT ;
+
+\ VERIFY ( addr1 addr2 len -- flag )
+\   Constant-time comparison.  Returns 0 if equal, -1 if different.
+: VERIFY
+    0 _VERIFY-ACC !                     \ acc = 0
+    0 DO                                \ a1 a2
+        OVER I + C@                     \ a1 a2 b1
+        OVER I + C@                     \ a1 a2 b1 b2
+        XOR _VERIFY-ACC @ OR _VERIFY-ACC !  \ acc |= (b1 ^ b2)
+    LOOP 2DROP
+    _VERIFY-ACC @ IF -1 ELSE 0 THEN     \ -1=different, 0=equal
+;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \
