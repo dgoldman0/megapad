@@ -5,13 +5,46 @@ Integration tests for the Megapad-64 system emulator.
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
 
 WARNING: These tests are extremely slow under CPython (~40 min).
-Use PyPy with xdist for practical runtimes:
+Use PyPy with xdist for practical runtimes.  NEVER run via plain
+`python -m pytest` — always use the Makefile targets below.
 
-    make test           # PyPy + 8 xdist workers  (~4 min)
-    make test-seq       # PyPy sequential          (~8 min)
-    make test-one K=test_foo   # single test under PyPy
+═══════════════════════════════════════════════════════════════
+  TEST WORKFLOW — READ THIS BEFORE RUNNING TESTS
+═══════════════════════════════════════════════════════════════
 
-See the Makefile for all targets.  Never run via plain `python -m pytest`.
+  Foreground (blocks until done):
+    make test                      # full suite, PyPy + 8 workers (~4 min)
+    make test-seq                  # sequential, good for debugging
+    make test-one K=TestFoo        # single class or test name
+    make test-one K="test_a or test_b"  # multiple tests by name
+
+  Background + Live Monitoring (preferred for long runs):
+    make test-bg                   # launch full suite in background
+    make test-bg K=TestFoo         # launch subset in background
+    make test-status               # one-shot: show current progress
+    make test-watch                # auto-refresh every 5s (Ctrl-C to stop)
+    make test-failures             # show only failures so far
+    make test-kill                 # kill a stuck background run
+
+  How it works:
+    conftest.py has a LiveTestMonitor plugin that writes live status
+    to /tmp/megapad_test_status.json after every test result.  The
+    test_monitor.py script reads that file and renders a dashboard
+    with progress bar, ETA, per-worker activity, failure details,
+    and hang detection (warns if no progress for >2 min).
+
+  NEVER:
+    - Run `python -m pytest` directly (wrong interpreter, no PyPy)
+    - Pipe test output through tail/grep (use test-status instead)
+    - Redirect to file and wait (use test-bg + test-status instead)
+    - Run foreground tests and lose the terminal for 10 minutes
+
+  When developing new tests:
+    1. Write tests, then: make test-one K=TestNewClass
+    2. Once passing, run full regression: make test-bg
+    3. Monitor with: make test-status  (or test-watch)
+    4. If all green, commit.  If failures, check: make test-failures
+═══════════════════════════════════════════════════════════════
 """
 import copy
 import os
@@ -5592,6 +5625,65 @@ class TestKDOSCRC(TestKDOS):
         ])
         # Same as CRC32 of 8 'A' bytes
         self.assertIn("4120547386 ", text)
+
+
+class TestKDOSDiagnostics(TestKDOS):
+    """Tests for §1.4 Hardware Diagnostics."""
+
+    def test_perf_display(self):
+        """.PERF shows performance counter labels and values."""
+        text = self._run_kdos([".PERF"])
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Cycles:", text)
+        self.assertIn("Stalls:", text)
+        self.assertIn("Tile ops:", text)
+        self.assertIn("Ext mem:", text)
+
+    def test_bist_status(self):
+        """.BIST-STATUS shows BIST state (idle at runtime — not re-run)."""
+        text = self._run_kdos([".BIST-STATUS"])
+        self.assertIn("Memory BIST Status", text)
+        # At runtime, BIST hasn't been run so status should be idle
+        self.assertIn("idle", text)
+
+    def test_tile_diag(self):
+        """.TILE-DIAG runs tile self-test and reports PASS."""
+        text = self._run_kdos([".TILE-DIAG"])
+        self.assertIn("Tile Datapath", text)
+        self.assertIn("PASS", text)
+
+    def test_icache_display(self):
+        """.ICACHE shows I-cache statistics."""
+        text = self._run_kdos([".ICACHE"])
+        self.assertIn("I-Cache", text)
+        self.assertIn("Hits:", text)
+        self.assertIn("Misses:", text)
+
+    def test_diag_full(self):
+        """DIAG runs all diagnostics in sequence."""
+        text = self._run_kdos(["DIAG"])
+        self.assertIn("Hardware Diagnostics", text)
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Memory BIST", text)
+        self.assertIn("Tile Datapath", text)
+        self.assertIn("I-Cache", text)
+
+    def test_perf_reset(self):
+        """PERF-RESET zeroes counters, PERF-CYCLES returns low value."""
+        text = self._run_kdos([
+            "PERF-RESET",
+            "PERF-CYCLES .",
+        ])
+        # After reset + a few instructions, cycle count is small
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(0 <= n < 100000 for n in nums),
+                        f"Expected small cycle count after reset, got {nums}")
+
+    def test_dashboard_has_perf(self):
+        """DASHBOARD includes performance counters section."""
+        text = self._run_kdos(["DASHBOARD"])
+        self.assertIn("Performance Counters", text)
+        self.assertIn("Cycles:", text)
 
 
 class TestKDOSHardening(TestKDOS):

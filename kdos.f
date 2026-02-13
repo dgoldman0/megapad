@@ -351,6 +351,62 @@ VARIABLE HANDLER   0 HANDLER !
 : .CRC32  CRC32-BUF BASE @ SWAP HEX U. BASE ! ;
 
 \ =====================================================================
+\  §1.4  Hardware Diagnostics
+\ =====================================================================
+\
+\  Wrapper words for the 18 BIOS diagnostic primitives:
+\    PERF-CYCLES, PERF-STALLS, PERF-TILEOPS, PERF-EXTMEM, PERF-RESET
+\    BIST-FULL, BIST-QUICK, BIST-STATUS, BIST-FAIL-ADDR, BIST-FAIL-DATA
+\    TILE-TEST, TILE-TEST@, TILE-DETAIL@
+\    ICACHE-ON, ICACHE-OFF, ICACHE-INV, ICACHE-HITS, ICACHE-MISSES
+
+\ .PERF ( -- )  Display performance counters.
+: .PERF
+    CR ."  Performance Counters" CR
+    ."    Cycles:   " PERF-CYCLES . CR
+    ."    Stalls:   " PERF-STALLS . CR
+    ."    Tile ops: " PERF-TILEOPS . CR
+    ."    Ext mem:  " PERF-EXTMEM . CR ;
+
+\ .BIST-STATUS ( -- )  Display last BIST result (from boot, NOT re-run).
+\   BIST destroys all RAM so must NOT be run after KDOS loads.
+: .BIST-STATUS
+    CR ."  Memory BIST Status" CR
+    BIST-STATUS
+    DUP 0 = IF DROP ."    idle (no BIST run)" CR ELSE
+    DUP 2 = IF DROP ."    PASS" CR ELSE
+    DUP 3 = IF DROP ."    FAIL at addr " BIST-FAIL-ADDR . CR
+                    ."    Expected/Actual: " BIST-FAIL-DATA . CR ELSE
+    DROP ."    running..." CR
+    THEN THEN THEN ;
+
+\ .TILE-DIAG ( -- )  Run tile self-test and display result.
+: .TILE-DIAG
+    CR ."  Tile Datapath Self-Test..." CR
+    TILE-TEST
+    BEGIN TILE-TEST@ DUP 0 = WHILE DROP REPEAT
+    DUP 2 = IF
+        DROP ."    PASS (ADD, MUL, DOT, SUM)" CR
+    ELSE
+        DROP ."    FAIL — failed sub-tests: " TILE-DETAIL@ . CR
+    THEN ;
+
+\ .ICACHE ( -- )  Display I-cache statistics.
+: .ICACHE
+    CR ."  I-Cache Statistics" CR
+    ."    Hits:     " ICACHE-HITS . CR
+    ."    Misses:   " ICACHE-MISSES . CR ;
+
+\ DIAG ( -- )  Run full hardware diagnostics suite.
+: DIAG
+    CR ." ======== Hardware Diagnostics ========" CR
+    .PERF
+    .BIST-STATUS
+    .TILE-DIAG
+    .ICACHE
+    ." ======================================" CR ;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \
@@ -3003,6 +3059,7 @@ VARIABLE ROUTE-BUF
     CR TASKS
     CR FILES
     CR PORTS
+    CR .PERF
     CR HRULE ;
 
 \ -- Status: quick one-liner --
