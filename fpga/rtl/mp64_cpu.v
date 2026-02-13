@@ -1346,6 +1346,7 @@ module mp64_cpu (
                     // --------------------------------------------------------
                     else if (fam == FAM_CSR) begin
                         ext_active <= 1'b0;
+                        cpu_state <= CPU_FETCH;  // default: return to fetch
                         // Encoding: nib[3] = W bit, nib[2:0] = register 0-7
                         if (nib[3]) begin
                             // CSRW: write GPR[nib[2:0]] to CSR[ibuf[1]]
@@ -1457,7 +1458,6 @@ module mp64_cpu (
                                 default:        R[nib[2:0]] <= csr_rdata;
                             endcase
                         end
-                        cpu_state <= CPU_FETCH;
                     end
 
                     // --------------------------------------------------------
@@ -1512,13 +1512,18 @@ module mp64_cpu (
                                 R[dst_reg] <= {{48{bus_rdata[15]}}, bus_rdata[15:0]};
                             4'hE: // LD.SW
                                 R[dst_reg] <= {{32{bus_rdata[31]}}, bus_rdata[31:0]};
-                            4'hF: begin // INP — store to D and M(R(X))
-                                D <= bus_rdata[7:0];
-                                // Write to M(R(X))
-                                effective_addr <= R[xsel];
-                                mem_data <= {56'd0, bus_rdata[7:0]};
-                                bus_size <= BUS_BYTE;
-                                cpu_state <= CPU_MEM_WRITE;
+                            4'hF: begin
+                                if (io_is_inp) begin // INP — store to D and M(R(X))
+                                    D <= bus_rdata[7:0];
+                                    effective_addr <= R[xsel];
+                                    mem_data <= {56'd0, bus_rdata[7:0]};
+                                    bus_size <= BUS_BYTE;
+                                    cpu_state <= CPU_MEM_WRITE;
+                                end else begin // LD.D — regular 64-bit load
+                                    R[dst_reg] <= bus_rdata;
+                                    if (dst_reg == psel)
+                                        fetch_pc <= bus_rdata;
+                                end
                             end
                             4'h5: begin // 1802 RET — unpack T byte
                                 T <= bus_rdata[7:0];
@@ -1560,7 +1565,8 @@ module mp64_cpu (
                             bus_size <= BUS_DWORD;
                             post_action <= POST_NONE;
                             cpu_state <= CPU_MEM_READ2;
-                        end else if (mem_sub != 4'hF && mem_sub != 4'h5
+                        end else if ((mem_sub != 4'hF || !io_is_inp)
+                                     && mem_sub != 4'h5
                                      && mem_sub != 4'hB) begin
                             cpu_state <= CPU_FETCH;
                         end

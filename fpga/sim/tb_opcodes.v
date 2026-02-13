@@ -895,6 +895,509 @@ module tb_opcodes;
         check64("R1 after skip not taken", uut.R[1], 64'hFF);
 
         // ================================================================
+        // TEST 41: INC / DEC
+        // INC Rn = 0x1n, DEC Rn = 0x2n
+        // ================================================================
+        $display("\n=== TEST 41: INC / DEC ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h40; mem[2] = 8'h0A; // LDI R4, 10
+        mem[3] = 8'h14;                                   // INC R4
+        mem[4] = 8'h14;                                   // INC R4
+        mem[5] = 8'h24;                                   // DEC R4
+        mem[6] = 8'h02;                                   // HALT
+        load_and_run(400);
+        check64("R4 after INC+INC+DEC(10)", uut.R[4], 64'd11);
+
+        // ================================================================
+        // TEST 42: SEP / SEX
+        // SEP Rn = 0xAn, SEX Rn = 0xBn
+        // ================================================================
+        $display("\n=== TEST 42: SEP / SEX ===");
+        clear_mem;
+        // Default: P=3(PC), X=2. Change X to 5 via SEX R5.
+        mem[0] = 8'hB5;  // SEX R5
+        mem[1] = 8'h02;  // HALT
+        load_and_run(300);
+        check64("xsel after SEX R5", {60'd0, uut.xsel}, 64'd5);
+
+        // ================================================================
+        // TEST 43: ADD register-register
+        // ADD Rd,Rs = 0x70 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 43: ADD Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h07; // LDI R1, 7
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h03; // LDI R2, 3
+        mem[6] = 8'h70; mem[7] = 8'h12;                   // ADD R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after ADD R1,R2 (7+3)", uut.R[1], 64'd10);
+        check1("Z flag (not zero)", uut.flags[0], 1'b0);
+
+        // ================================================================
+        // TEST 44: SUB register-register
+        // SUB Rd,Rs = 0x72 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 44: SUB Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h14; // LDI R1, 20
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h07; // LDI R2, 7
+        mem[6] = 8'h72; mem[7] = 8'h12;                   // SUB R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after SUB R1,R2 (20-7)", uut.R[1], 64'd13);
+
+        // ================================================================
+        // TEST 45: AND register-register
+        // AND Rd,Rs = 0x74 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 45: AND Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hF0; // LDI R1, 0xF0
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h3C; // LDI R2, 0x3C
+        mem[6] = 8'h74; mem[7] = 8'h12;                   // AND R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after AND (0xF0&0x3C)", uut.R[1], 64'h30);
+
+        // ================================================================
+        // TEST 46: OR register-register
+        // OR Rd,Rs = 0x75 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 46: OR Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hF0; // LDI R1, 0xF0
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h0F; // LDI R2, 0x0F
+        mem[6] = 8'h75; mem[7] = 8'h12;                   // OR R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after OR (0xF0|0x0F)", uut.R[1], 64'hFF);
+
+        // ================================================================
+        // TEST 47: XOR register-register
+        // XOR Rd,Rs = 0x76 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 47: XOR Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hAA; // LDI R1, 0xAA
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'hFF; // LDI R2, 0xFF
+        mem[6] = 8'h76; mem[7] = 8'h12;                   // XOR R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after XOR (0xAA^0xFF)", uut.R[1], 64'h55);
+
+        // ================================================================
+        // TEST 48: NOT register
+        // NOT Rd,Rs = 0x79 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 48: NOT Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'hFF; // LDI R2, 0xFF
+        mem[3] = 8'h79; mem[4] = 8'h12;                   // NOT R1, R2
+        mem[5] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after NOT 0xFF", uut.R[1], 64'hFFFFFFFF_FFFFFF00);
+
+        // ================================================================
+        // TEST 49: NEG register
+        // NEG Rd,Rs = 0x7A <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 49: NEG Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'h05; // LDI R2, 5
+        mem[3] = 8'h7A; mem[4] = 8'h12;                   // NEG R1, R2
+        mem[5] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after NEG 5", uut.R[1], -64'sd5);
+
+        // ================================================================
+        // TEST 50: SHR register-register (logical shift right)
+        // SHR Rd,Rs = 0x7C <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 50: SHR Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h80; // LDI R1, 0x80
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h03; // LDI R2, 3
+        mem[6] = 8'h7C; mem[7] = 8'h12;                   // SHR R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after SHR 0x80>>3", uut.R[1], 64'h10);
+
+        // ================================================================
+        // TEST 51: ROR register-register (rotate right)
+        // ROR Rd,Rs = 0x7F <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 51: ROR Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h01; // LDI R1, 0x01
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h04; // LDI R2, 4
+        mem[6] = 8'h7F; mem[7] = 8'h12;                   // ROR R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        // 0x01 rotated right by 4 = 0x1000_0000_0000_0000
+        check64("R1 after ROR 0x01 by 4", uut.R[1], 64'h1000_0000_0000_0000);
+
+        // ================================================================
+        // TEST 52: CMP register-register (sets flags, no writeback)
+        // CMP Rd,Rs = 0x77 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 52: CMP Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h05; // LDI R1, 5
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h05; // LDI R2, 5
+        mem[6] = 8'h77; mem[7] = 8'h12;                   // CMP R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 unchanged after CMP", uut.R[1], 64'd5);
+        check1("Z flag after CMP equal", uut.flags[0], 1'b1);
+
+        // ================================================================
+        // TEST 53: MULH (signed multiply high)
+        // MULH Rd,Rs = 0xC1 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 53: MULH Rd,Rs ===");
+        clear_mem;
+        // 0x1_0000_0000 * 0x1_0000_0000 = 0x1_0000_0000_0000_0000
+        // low 64 = 0, high 64 = 1
+        mem[0]  = 8'hF0;                                    // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                   // LDI R1
+        mem[3]  = 8'h00; mem[4]  = 8'h00; mem[5]  = 8'h00;  // 0x00000001_00000000 LE
+        mem[6]  = 8'h00; mem[7]  = 8'h01; mem[8]  = 8'h00;
+        mem[9]  = 8'h00; mem[10] = 8'h00;
+        mem[11] = 8'hF0;                                     // EXT.IMM64
+        mem[12] = 8'h60; mem[13] = 8'h20;                   // LDI R2
+        mem[14] = 8'h00; mem[15] = 8'h00; mem[16] = 8'h00;  // same value
+        mem[17] = 8'h00; mem[18] = 8'h01; mem[19] = 8'h00;
+        mem[20] = 8'h00; mem[21] = 8'h00;
+        mem[22] = 8'hC1; mem[23] = 8'h12;                   // MULH R1, R2
+        mem[24] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("MULH high 64 of 2^32*2^32", uut.R[1], 64'd1);
+
+        // ================================================================
+        // TEST 54: DIV signed (quotient in Rd, remainder in R0)
+        // DIV Rd,Rs = 0xC4 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 54: DIV Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h11; // LDI R1, 17
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h05; // LDI R2, 5
+        mem[6] = 8'hC4; mem[7] = 8'h12;                   // DIV R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("R1 quotient 17/5", uut.R[1], 64'd3);
+        check64("R0 remainder 17%5", uut.R[0], 64'd2);
+
+        // ================================================================
+        // TEST 55: MOD signed
+        // MOD Rd,Rs = 0xC6 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 55: MOD Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h11; // LDI R1, 17
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h05; // LDI R2, 5
+        mem[6] = 8'hC6; mem[7] = 8'h12;                   // MOD R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("R1 mod 17%5", uut.R[1], 64'd2);
+
+        // ================================================================
+        // TEST 56: LBR BQ / BNQ (branch on Q flag)
+        // LBR BQ = 0x4B <hi> <lo>, LBR BNQ = 0x4C <hi> <lo>
+        // ================================================================
+        $display("\n=== TEST 56: LBR BQ / BNQ ===");
+        clear_mem;
+        // SEQ → Q=1, then LBR BQ (should take branch +3 → PC=3+3+3=9)
+        // skip over an LDI that would set R1=0xFF
+        // reached target sets R1=0x42
+        mem[0] = 8'h09;                                    // SEQ (Q=1)
+        mem[1] = 8'h4B; mem[2] = 8'h00; mem[3] = 8'h03;  // LBR BQ, +3
+        mem[4] = 8'h60; mem[5] = 8'h10; mem[6] = 8'hFF;  // LDI R1, 0xFF (skipped)
+        mem[7] = 8'h60; mem[8] = 8'h10; mem[9] = 8'h42;  // LDI R1, 0x42 (target)
+        mem[10]= 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after BQ taken", uut.R[1], 64'h42);
+
+        // ================================================================
+        // TEST 57: LBR BNQ (Q=0 → branch taken)
+        // ================================================================
+        $display("\n=== TEST 57: LBR BNQ ===");
+        clear_mem;
+        // REQ → Q=0, then LBR BNQ +3 → skip one LDI
+        mem[0] = 8'h0A;                                    // REQ (Q=0)
+        mem[1] = 8'h4C; mem[2] = 8'h00; mem[3] = 8'h03;  // LBR BNQ, +3
+        mem[4] = 8'h60; mem[5] = 8'h10; mem[6] = 8'hFF;  // LDI R1, 0xFF (skipped)
+        mem[7] = 8'h60; mem[8] = 8'h10; mem[9] = 8'h99;  // LDI R1, 0x99 (target)
+        mem[10]= 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after BNQ taken", uut.R[1], 64'h99);
+
+        // ================================================================
+        // TEST 58: ST.H / LD.H (16-bit store/load)
+        // ST.H [Rn],Rs = 0x59 <Rn:Rs>
+        // LD.H Rd,[Rn]  = 0x58 <Rd:Rn>
+        // ================================================================
+        $display("\n=== TEST 58: ST.H / LD.H ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h50; mem[2] = 8'h80;  // LDI R5, 0x80 (addr)
+        // Load 0xBEEF into R1 via LDI low + PHI high
+        mem[3] = 8'h60; mem[4] = 8'h10; mem[5] = 8'hEF;  // LDI R1, 0xEF (R1=0xEF)
+        // Use ORI to set D, then PHI to set R1[15:8]
+        // Actually simpler: load full 16-bit value with ADDI/LDI tricks
+        // LDI R1, 0xEF; LHI is upper 16 of 64-bit, not useful here
+        // Let's use EXT.IMM64 for simplicity
+        mem[3]  = 8'hF0;                                    // EXT.IMM64
+        mem[4]  = 8'h60; mem[5]  = 8'h10;                   // LDI R1
+        mem[6]  = 8'hEF; mem[7]  = 8'hBE; mem[8]  = 8'h00;  // 0x000000000000BEEF LE
+        mem[9]  = 8'h00; mem[10] = 8'h00; mem[11] = 8'h00;
+        mem[12] = 8'h00; mem[13] = 8'h00;
+        mem[14] = 8'h59; mem[15] = 8'h51;                   // ST.H [R5], R1
+        mem[16] = 8'h58; mem[17] = 8'h45;                   // LD.H R4, [R5]
+        mem[18] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("R4 after ST.H+LD.H 0xBEEF", uut.R[4], 64'hBEEF);
+
+        // ================================================================
+        // TEST 59: ST.W / LD.W (32-bit store/load)
+        // ST.W [Rn],Rs = 0x5B <Rn:Rs>
+        // LD.W Rd,[Rn]  = 0x5A <Rd:Rn>
+        // ================================================================
+        $display("\n=== TEST 59: ST.W / LD.W ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h50; mem[2] = 8'h80;  // LDI R5, 0x80 (addr)
+        mem[3]  = 8'hF0;                                    // EXT.IMM64
+        mem[4]  = 8'h60; mem[5]  = 8'h10;                   // LDI R1
+        mem[6]  = 8'hEF; mem[7]  = 8'hBE; mem[8]  = 8'hAD;  // 0x00000000DEADBEEF LE
+        mem[9]  = 8'hDE; mem[10] = 8'h00; mem[11] = 8'h00;
+        mem[12] = 8'h00; mem[13] = 8'h00;
+        mem[14] = 8'h5B; mem[15] = 8'h51;                   // ST.W [R5], R1
+        mem[16] = 8'h5A; mem[17] = 8'h45;                   // LD.W R4, [R5]
+        mem[18] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("R4 after ST.W+LD.W 0xDEADBEEF", uut.R[4], 64'hDEAD_BEEF);
+
+        // ================================================================
+        // TEST 60: LD.D with scaled offset
+        // LD.D Rd,[Rn+off8*8] = 0x5F <Rd:Rn> <off8>
+        // Store via STR then load via LD.D with offset
+        // ================================================================
+        $display("\n=== TEST 60: LD.D scaled offset ===");
+        clear_mem;
+        // Program: R5=0x80, R1=test pattern, STR [R5], R1  (store at 0x80)
+        //          R6=0x70, LD.D R4, [R6+2]  → addr=0x70+2*8=0x80
+        mem[0]  = 8'hF0;                                    // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                   // LDI R1
+        mem[3]  = 8'hAA; mem[4]  = 8'hBB; mem[5]  = 8'hCC;
+        mem[6]  = 8'hDD; mem[7]  = 8'h11; mem[8]  = 8'h22;
+        mem[9]  = 8'h33; mem[10] = 8'h44;                   // R1=0x44332211DDCCBBAA
+        mem[11] = 8'h60; mem[12] = 8'h50; mem[13] = 8'h80;  // LDI R5, 0x80
+        mem[14] = 8'h54; mem[15] = 8'h51;                   // STR [R5], R1
+        mem[16] = 8'h60; mem[17] = 8'h60; mem[18] = 8'h70;  // LDI R6, 0x70
+        mem[19] = 8'h5F; mem[20] = 8'h46; mem[21] = 8'h02;  // LD.D R4, [R6+2]
+        mem[22] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("R4 after LD.D [R6+2*8]", uut.R[4], 64'h44332211_DDCCBBAA);
+
+        // ================================================================
+        // TEST 61: ANDI immediate
+        // ANDI Rn, imm8 = 0x63 <Rn:x> <imm8>
+        // ================================================================
+        $display("\n=== TEST 61: ANDI immediate ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hFF; // LDI R1, 0xFF
+        mem[3] = 8'h63; mem[4] = 8'h10; mem[5] = 8'h0F; // ANDI R1, 0x0F
+        mem[6] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after ANDI 0xFF & 0x0F", uut.R[1], 64'h0F);
+
+        // ================================================================
+        // TEST 62: ORI immediate
+        // ORI Rn, imm8 = 0x64 <Rn:x> <imm8>
+        // ================================================================
+        $display("\n=== TEST 62: ORI immediate ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hF0; // LDI R1, 0xF0
+        mem[3] = 8'h64; mem[4] = 8'h10; mem[5] = 8'h0F; // ORI R1, 0x0F
+        mem[6] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after ORI 0xF0 | 0x0F", uut.R[1], 64'hFF);
+
+        // ================================================================
+        // TEST 63: XORI immediate
+        // XORI Rn, imm8 = 0x65 <Rn:x> <imm8>
+        // ================================================================
+        $display("\n=== TEST 63: XORI immediate ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hAA; // LDI R1, 0xAA
+        mem[3] = 8'h65; mem[4] = 8'h10; mem[5] = 8'hFF; // XORI R1, 0xFF
+        mem[6] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1 after XORI 0xAA ^ 0xFF", uut.R[1], 64'h55);
+
+        // ================================================================
+        // TEST 64: GHI / PLO
+        // GHI Rn = 0x6D <Rn:x>, PLO Rn = 0x6E <Rn:x>
+        // ================================================================
+        $display("\n=== TEST 64: GHI / PLO ===");
+        clear_mem;
+        // Load R1 = 0x1234 via EXT.IMM64
+        mem[0]  = 8'hF0;                                    // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                   // LDI R1
+        mem[3]  = 8'h34; mem[4]  = 8'h12; mem[5]  = 8'h00;  // 0x0000000000001234 LE
+        mem[6]  = 8'h00; mem[7]  = 8'h00; mem[8]  = 8'h00;
+        mem[9]  = 8'h00; mem[10] = 8'h00;
+        // GHI R1 → D = R1[15:8] = 0x12
+        mem[11] = 8'h6D; mem[12] = 8'h10;                   // GHI R1
+        // PLO R2 → R2[7:0] = D = 0x12
+        mem[13] = 8'h6E; mem[14] = 8'h20;                   // PLO R2
+        mem[15] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("D after GHI R1", {56'd0, uut.D}, 64'h12);
+        check64("R2[7:0] after PLO", uut.R[2] & 64'hFF, 64'h12);
+
+        // ================================================================
+        // TEST 65: LHI (load high immediate — sets R[n][63:48])
+        // LHI Rn, imm16 = 0x61 <Rn:x> <lo> <hi>
+        // ================================================================
+        $display("\n=== TEST 65: LHI ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h00;  // LDI R1, 0 (clear)
+        mem[3] = 8'h61; mem[4] = 8'h10; mem[5] = 8'hEF;  // LHI R1, 0xBEEF
+        mem[6] = 8'hBE;
+        mem[7] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("R1[63:48] after LHI", uut.R[1], 64'hBEEF_0000_0000_0000);
+
+        // ================================================================
+        // TEST 66: ADC register-register (add with carry)
+        // ADC Rd,Rs = 0x71 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 66: ADC (add with carry) ===");
+        clear_mem;
+        // Set carry by adding large values: 0xFFFF...FF + 1 → C=1
+        mem[0]  = 8'hF0;                                    // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                   // LDI R1
+        mem[3]  = 8'hFF; mem[4]  = 8'hFF; mem[5]  = 8'hFF;
+        mem[6]  = 8'hFF; mem[7]  = 8'hFF; mem[8]  = 8'hFF;
+        mem[9]  = 8'hFF; mem[10] = 8'hFF;                   // R1 = -1
+        mem[11] = 8'h60; mem[12] = 8'h20; mem[13] = 8'h01; // LDI R2, 1
+        mem[14] = 8'h70; mem[15] = 8'h12;                   // ADD R1, R2 (overflow, C=1)
+        // Now R1=0, C=1. Load fresh values and ADC.
+        mem[16] = 8'h60; mem[17] = 8'h40; mem[18] = 8'h0A; // LDI R4, 10
+        mem[19] = 8'h60; mem[20] = 8'h50; mem[21] = 8'h05; // LDI R5, 5
+        mem[22] = 8'h71; mem[23] = 8'h45;                   // ADC R4, R5 (10+5+1=16)
+        mem[24] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("R4 after ADC 10+5+C(1)", uut.R[4], 64'd16);
+
+        // ================================================================
+        // TEST 67: SBB register-register (subtract with borrow)
+        // SBB Rd,Rs = 0x73 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 67: SBB (sub with borrow) ===");
+        clear_mem;
+        // Clear carry: subtract 5-5 → C=1 (no borrow)
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h05; // LDI R1, 5
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h05; // LDI R2, 5
+        mem[6] = 8'h72; mem[7] = 8'h12;                   // SUB R1, R2 (C=1, no borrow)
+        // Now C=1. SBB R4,R5 = R4 - R5 - (1-C) = R4 - R5 - 0 = 15-3=12
+        mem[8]  = 8'h60; mem[9]  = 8'h40; mem[10] = 8'h0F; // LDI R4, 15
+        mem[11] = 8'h60; mem[12] = 8'h50; mem[13] = 8'h03; // LDI R5, 3
+        mem[14] = 8'h73; mem[15] = 8'h45;                   // SBB R4, R5
+        mem[16] = 8'h02;                                     // HALT
+        load_and_run(600);
+        check64("R4 after SBB 15-3-0", uut.R[4], 64'd12);
+
+        // ================================================================
+        // TEST 68: SAR register-register (arithmetic shift right)
+        // SAR Rd,Rs = 0x7D <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 68: SAR Rd,Rs ===");
+        clear_mem;
+        // -16 >> 2 should give -4 (sign extension)
+        mem[0]  = 8'hF0;                                    // EXT.IMM64
+        mem[1]  = 8'h60; mem[2]  = 8'h10;                   // LDI R1
+        mem[3]  = 8'hF0; mem[4]  = 8'hFF; mem[5]  = 8'hFF;  // 0xFFFFFFFFFFFFFFF0 = -16
+        mem[6]  = 8'hFF; mem[7]  = 8'hFF; mem[8]  = 8'hFF;
+        mem[9]  = 8'hFF; mem[10] = 8'hFF;
+        mem[11] = 8'h60; mem[12] = 8'h20; mem[13] = 8'h02; // LDI R2, 2
+        mem[14] = 8'h7D; mem[15] = 8'h12;                   // SAR R1, R2
+        mem[16] = 8'h02;                                     // HALT
+        load_and_run(800);
+        check64("R1 after SAR -16>>2", uut.R[1], -64'sd4);
+
+        // ================================================================
+        // TEST 69: UMUL (unsigned multiply low)
+        // UMUL Rd,Rs = 0xC2 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 69: UMUL Rd,Rs ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'hC8; // LDI R1, 200
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h64; // LDI R2, 100
+        mem[6] = 8'hC2; mem[7] = 8'h12;                   // UMUL R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("R1 after UMUL 200*100", uut.R[1], 64'd20000);
+
+        // ================================================================
+        // TEST 70: UMULH (unsigned multiply high)
+        // UMULH Rd,Rs = 0xC3 <Rd:Rs>
+        // ================================================================
+        $display("\n=== TEST 70: UMULH Rd,Rs ===");
+        clear_mem;
+        // Small values → high 64 bits = 0
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h0A; // LDI R1, 10
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h05; // LDI R2, 5
+        mem[6] = 8'hC3; mem[7] = 8'h12;                   // UMULH R1, R2
+        mem[8] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("UMULH high64 of 10*5", uut.R[1], 64'd0);
+
+        // ================================================================
+        // TEST 71: BIST March-C pass
+        // CSRW CSR_BIST_CMD(0x60), R0 → triggers BIST pattern 1
+        // CPU enters CPU_BIST, runs to completion, returns to FETCH
+        // CSRR CSR_BIST_STATUS(0x61) → 2 = pass
+        // ================================================================
+        $display("\n=== TEST 71: BIST March-C pass ===");
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h01;  // LDI R0, 1 (march-C)
+        mem[3] = 8'hD8; mem[4] = 8'h60;                   // CSRW CSR_BIST_CMD, R0
+        // BIST runs synchronously, next instr after completion
+        mem[5] = 8'hD0; mem[6] = 8'h61;                   // CSRR R0, CSR_BIST_STATUS
+        mem[7] = 8'hD1; mem[8] = 8'h62;                   // CSRR R1, CSR_BIST_FAIL_ADDR
+        mem[9] = 8'h02;                                    // HALT
+        load_and_run(8000);
+        check64("BIST status (2=pass)", uut.R[0], 64'd2);
+        check64("BIST fail_addr (0=none)", uut.R[1], 64'd0);
+
+        // ================================================================
+        // TEST 72: I-cache CSR control
+        // CSR_ICACHE_CTRL = 0x70
+        // Default: enabled (bit0=1). Write 0 to disable, read back.
+        // NOTE: R3 is PC (psel=3), avoid using it as GPR!
+        // ================================================================
+        $display("\n=== TEST 72: I-cache CSR control ===");
+        clear_mem;
+        // Read initial state (enabled by default)
+        mem[0] = 8'hD0; mem[1] = 8'h70;                   // CSRR R0, CSR_ICACHE_CTRL
+        // Disable cache: write 0
+        mem[2] = 8'h60; mem[3] = 8'h10; mem[4] = 8'h00;  // LDI R1, 0
+        mem[5] = 8'hD9; mem[6] = 8'h70;                   // CSRW CSR_ICACHE_CTRL, R1
+        // Read back disabled state
+        mem[7] = 8'hD2; mem[8] = 8'h70;                   // CSRR R2, CSR_ICACHE_CTRL
+        // Re-enable + invalidate: write 3 (bit0=enable, bit1=inv)
+        mem[9]  = 8'h60; mem[10] = 8'h60; mem[11] = 8'h03; // LDI R6, 3
+        mem[12] = 8'hDE; mem[13] = 8'h70;                  // CSRW CSR_ICACHE_CTRL, R6
+        // Read back (should be 1, inv is auto-cleared)
+        mem[14] = 8'hD4; mem[15] = 8'h70;                  // CSRR R4, CSR_ICACHE_CTRL
+        mem[16] = 8'h02;                                    // HALT
+        load_and_run(600);
+        check64("icache initially enabled", uut.R[0], 64'd1);
+        check64("icache after disable", uut.R[2], 64'd0);
+        check64("icache after re-enable", uut.R[4], 64'd1);
+
+        // ================================================================
         // DONE
         // ================================================================
         $display("\n========================================");
