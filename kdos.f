@@ -70,6 +70,10 @@ VARIABLE PN-LEN
 : ASSERT  ( flag -- )
     0= ABORT" Assertion failed" ;
 
+\ ['] ( "name" -- )  compile-time: parse next word, compile its XT as literal
+\   Equivalent to: ' name LITERAL
+: ['] ' POSTPONE LITERAL ; IMMEDIATE
+
 \ .DEPTH ( -- )  show current stack depth
 : .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
 
@@ -230,6 +234,48 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
     ." Heap: base=" HEAP-BASE @ .
     ."  free=" HEAP-FREE-BYTES . ." bytes" CR ;
+
+\ =====================================================================
+\  §1.2  Exception Handling — CATCH / THROW
+\ =====================================================================
+\
+\  ANS Forth CATCH/THROW (EXCEPTION word set).
+\
+\  CATCH saves the current stack pointers and installs an exception
+\  frame.  If the executed XT calls THROW with a non-zero code,
+\  control returns to the matching CATCH with stacks restored.
+\
+\  Exception frames are chained via HANDLER variable.
+\
+\  Requires BIOS words: SP@ SP! RP@ RP!
+\
+
+VARIABLE HANDLER   0 HANDLER !
+
+\ CATCH ( xt -- exception# | 0 )
+\   Execute xt.  If it completes normally, return 0.
+\   If xt (or anything it calls) does THROW n, return n
+\   with data stack restored to depth at CATCH entry + 1.
+: CATCH  ( xt -- 0 | exception# )
+    SP@ >R              ( save data-stack pointer )
+    HANDLER @ >R        ( save previous handler frame )
+    RP@ HANDLER !       ( install new handler = current RSP )
+    EXECUTE             ( run the XT )
+    R> HANDLER !        ( restore previous handler )
+    R> DROP             ( discard saved SP )
+    0 ;                 ( no exception → 0 )
+
+\ THROW ( n -- )
+\   If n = 0, do nothing (identity).
+\   If n ≠ 0, unwind to most recent CATCH, restoring stacks.
+: THROW  ( n -- )
+    ?DUP IF
+        HANDLER @ RP!   ( unwind RSP to handler frame )
+        R> HANDLER !    ( pop & restore previous handler )
+        R> SWAP >R      ( recover saved SP, stash throw-code )
+        SP!             ( restore data stack )
+        DROP R>         ( drop stale TOS, retrieve throw-code )
+    THEN ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem

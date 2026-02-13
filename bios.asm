@@ -1002,6 +1002,57 @@ w_depth:
     str r14, r1
     ret.l
 
+; SP@ ( -- addr )  push current data stack pointer
+w_sp_fetch:
+    mov r1, r14
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; SP! (IMMEDIATE) — compile inline: set data stack pointer from TOS
+;   Emits:  ldn r14, r14  (50 EE)
+;   Total = 2 bytes
+w_sp_store:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xEE
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
+; RP@ ( -- addr )  push current return stack pointer
+;   Adjusts +8 to compensate for call.l overhead: the caller wants
+;   the RSP as it was *before* the call.l into RP@ pushed a return addr.
+w_rp_fetch:
+    mov r1, r15
+    addi r1, 8                ; compensate for call.l
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; RP! (IMMEDIATE) — compile inline: set return stack pointer from TOS
+;   Emits:  ldn r15, r14  (50 FE)
+;           addi r14, 8   (62 E0 08)
+;   Total = 5 bytes
+w_rp_store:
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xFE
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ret.l
+
 ; PICK ( n -- x )
 w_pick:
     ldn r1, r14
@@ -9328,12 +9379,48 @@ d_icache_hits:
     ret.l
 
 ; === ICACHE-MISSES ( -- n ) ===
-latest_entry:
 d_icache_misses:
     .dq d_icache_hits
     .db 13
     .ascii "ICACHE-MISSES"
     ldi64 r11, w_icache_misses
+    call.l r11
+    ret.l
+
+; === SP@ ( -- addr ) ===
+d_sp_fetch:
+    .dq d_icache_misses
+    .db 3
+    .ascii "SP@"
+    ldi64 r11, w_sp_fetch
+    call.l r11
+    ret.l
+
+; === SP! ( addr -- ) [IMMEDIATE] ===
+d_sp_store:
+    .dq d_sp_fetch
+    .db 0x83
+    .ascii "SP!"
+    ldi64 r11, w_sp_store
+    call.l r11
+    ret.l
+
+; === RP@ ( -- addr ) ===
+d_rp_fetch:
+    .dq d_sp_store
+    .db 3
+    .ascii "RP@"
+    ldi64 r11, w_rp_fetch
+    call.l r11
+    ret.l
+
+; === RP! ( addr -- ) [IMMEDIATE] ===
+latest_entry:
+d_rp_store:
+    .dq d_rp_fetch
+    .db 0x83
+    .ascii "RP!"
+    ldi64 r11, w_rp_store
     call.l r11
     ret.l
 

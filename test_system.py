@@ -5427,6 +5427,87 @@ class TestKDOSAllocator(TestKDOS):
         self.assertIn("-1 ", text)
 
 
+# ---------------------------------------------------------------------------
+#  KDOS CATCH/THROW tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSExceptions(TestKDOS):
+    """Tests for CATCH / THROW exception handling."""
+
+    def test_catch_no_throw(self):
+        """CATCH returns 0 when XT completes normally."""
+        text = self._run_kdos([
+            ": OK-WORD  42 . ;",
+            "' OK-WORD CATCH .",
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("0 ", text)  # CATCH returns 0
+
+    def test_catch_throw(self):
+        """CATCH returns the throw code when XT throws."""
+        text = self._run_kdos([
+            ": BAD-WORD  -99 THROW ;",
+            "' BAD-WORD CATCH .",
+        ])
+        self.assertIn("-99 ", text)
+
+    def test_throw_zero_is_noop(self):
+        """THROW 0 does nothing."""
+        text = self._run_kdos([
+            ": FINE  0 THROW .\" ok\" ;",
+            "FINE",
+        ])
+        self.assertIn("ok", text)
+
+    def test_catch_restores_stack(self):
+        """After CATCH of a THROW, stack depth is restored."""
+        text = self._run_kdos([
+            ": T1  1 2 3 -7 THROW ;",
+            "' T1 CATCH .",
+        ])
+        self.assertIn("-7 ", text)
+
+    def test_nested_catch(self):
+        """Nested CATCH: inner CATCH handles, outer sees 0."""
+        text = self._run_kdos([
+            ": INNER  -5 THROW ;",
+            ": MIDDLE  ['] INNER CATCH ;",
+            ": OUTER  ['] MIDDLE CATCH ;",
+            "OUTER . .  \\ should print 0 then -5",
+        ])
+        # MIDDLE catches -5 → returns -5 normally
+        # OUTER's CATCH sees normal return → 0
+        # Stack: -5 0, `. .` prints 0 then -5
+        self.assertIn("0 ", text)
+
+    def test_nested_catch_rethrow(self):
+        """Nested CATCH: inner re-throws, outer catches."""
+        text = self._run_kdos([
+            ": INNER  -42 THROW ;",
+            ": MIDDLE  ['] INNER CATCH THROW ;",
+            ": OUTER   ['] MIDDLE CATCH ;",
+            "OUTER .",
+        ])
+        self.assertIn("-42 ", text)
+
+    def test_sp_fetch(self):
+        """SP@ returns the data stack pointer."""
+        text = self._run_kdos(["SP@ .", ".\" ok\""])
+        # SP@ should return a positive number (memory address)
+        self.assertIn("ok", text)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 0 for n in nums),
+                        f"SP@ should return positive address, got {nums}")
+
+    def test_rp_fetch(self):
+        """RP@ returns the return stack pointer."""
+        text = self._run_kdos(["RP@ .", ".\" ok\""])
+        self.assertIn("ok", text)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 0 for n in nums),
+                        f"RP@ should return positive address, got {nums}")
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 
