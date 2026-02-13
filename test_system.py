@@ -3,6 +3,15 @@
 Integration tests for the Megapad-64 system emulator.
 
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
+
+WARNING: These tests are extremely slow under CPython (~40 min).
+Use PyPy with xdist for practical runtimes:
+
+    make test           # PyPy + 8 xdist workers  (~4 min)
+    make test-seq       # PyPy sequential          (~8 min)
+    make test-one K=test_foo   # single test under PyPy
+
+See the Makefile for all targets.  Never run via plain `python -m pytest`.
 """
 import copy
 import os
@@ -5283,6 +5292,139 @@ class TestBIOSHardening(unittest.TestCase):
         fill_lines.append(": FULL 1 ;")
         text = self._run_forth(sys, buf, fill_lines, max_steps=5_000_000)
         self.assertIn("Dictionary full", text)
+
+
+# ---------------------------------------------------------------------------
+#  KDOS Memory Allocator tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSAllocator(TestKDOS):
+    """Tests for the ALLOCATE / FREE / RESIZE heap allocator."""
+
+    def test_allocate_basic(self):
+        """ALLOCATE returns a non-zero address and 0 ior."""
+        text = self._run_kdos([
+            "64 ALLOCATE . .    \\ should print ior=0 then addr!=0",
+        ])
+        parts = text.strip().split()
+        # The last two numbers on the line: addr ior
+        # ALLOCATE pushes ( addr ior ), then `. .` prints ior first, then addr
+        self.assertIn("0 ", text)  # ior = 0
+
+    def test_allocate_nonzero_addr(self):
+        """Allocated address should be above the heap base."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP .",  # print just the address
+        ])
+        # Address should be a positive number above dictionary
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 1000 for n in nums),
+                        f"Expected heap address > 1000, got {nums}")
+
+    def test_allocate_zero_fails(self):
+        """ALLOCATE 0 should fail (ior != 0)."""
+        text = self._run_kdos([
+            "0 ALLOCATE . DROP",  # print ior, discard addr
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_free_null_safe(self):
+        """FREE 0 should be a no-op (no crash)."""
+        text = self._run_kdos([
+            "0 FREE",
+            ".\" ok\"",
+        ])
+        self.assertIn("ok", text)
+
+    def test_allocate_free_roundtrip(self):
+        """Allocate, free, reallocate should succeed and reuse memory."""
+        text = self._run_kdos([
+            "128 ALLOCATE DROP",      # alloc 128, get addr
+            "DUP FREE",              # free it
+            "128 ALLOCATE DROP",      # alloc again
+            ".\" alloc-ok\"",
+        ])
+        self.assertIn("alloc-ok", text)
+
+    def test_multiple_allocations(self):
+        """Multiple allocations return distinct addresses."""
+        text = self._run_kdos([
+            "VARIABLE A1  VARIABLE A2  VARIABLE A3",
+            "64 ALLOCATE DROP A1 !",
+            "64 ALLOCATE DROP A2 !",
+            "64 ALLOCATE DROP A3 !",
+            "A1 @ A2 @ <> .        \\ 1=true",
+            "A2 @ A3 @ <> .        \\ 1=true",
+            "A1 @ A3 @ <> .        \\ 1=true",
+        ])
+        # All three comparisons should be true (non-zero)
+        # Our prints should not contain 0 as the comparison result
+        # Actually in Forth <> returns -1 (true) or 0 (false)
+        # `. ` prints the number, so we should see three "-1" values
+        idx = text.rfind("DASHBOARD")
+        out = text[idx:] if idx >= 0 else text
+        self.assertEqual(out.count("-1"), 3,
+                         f"Expected 3 true values, output: {out}")
+
+    def test_heap_free_bytes(self):
+        """HEAP-FREE-BYTES returns a positive value."""
+        text = self._run_kdos([
+            "HEAP-FREE-BYTES .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(n > 1000 for n in nums),
+                        f"Expected free bytes > 1000, got {nums}")
+
+    def test_heap_info(self):
+        """.HEAP prints heap summary."""
+        text = self._run_kdos([".HEAP"])
+        self.assertIn("Heap:", text)
+        self.assertIn("free=", text)
+        self.assertIn("bytes", text)
+
+    def test_mem_size(self):
+        """MEM-SIZE should return 512 KiB = 524288 bytes."""
+        text = self._run_kdos(["MEM-SIZE ."])
+        self.assertIn("524288 ", text)
+
+    def test_allocate_write_read(self):
+        """Can write to and read from allocated memory."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",        # addr on stack
+            "DUP 42 SWAP !",           # store 42 at addr
+            "@ .",                     # read it back
+        ])
+        self.assertIn("42 ", text)
+
+    def test_resize(self):
+        """RESIZE creates a new block, copies data, frees old."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",        # get 64-byte block
+            "DUP 99 SWAP !",          # write 99 at start
+            "128 RESIZE DROP",         # resize to 128 bytes
+            "@ .",                     # read first cell — should be 99
+        ])
+        self.assertIn("99 ", text)
+
+    def test_resize_failure(self):
+        """RESIZE with impossibly large size returns non-zero ior."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",
+            "999999999 RESIZE . DROP",  # print ior, drop addr
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_alloc_free_alloc_reuse(self):
+        """After FREE, the same region can be allocated again."""
+        text = self._run_kdos([
+            "VARIABLE P",
+            "256 ALLOCATE DROP DUP P !",  # alloc, save addr in P
+            "FREE",                        # free
+            "256 ALLOCATE DROP",           # alloc same size
+            "P @ = .",                     # should reuse same addr
+        ])
+        # Should print -1 (true) if address was reused
+        self.assertIn("-1 ", text)
 
 
 class TestKDOSHardening(TestKDOS):

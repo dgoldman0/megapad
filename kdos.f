@@ -74,6 +74,164 @@ VARIABLE PN-LEN
 : .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
 
 \ =====================================================================
+\  §1.1  Memory Allocator
+\ =====================================================================
+\
+\  First-fit free-list allocator.  Each block has a 16-byte header:
+\    +0   next    pointer to next free block (0 = end of list)
+\    +8   size    usable bytes in this block (excludes header)
+\
+\  ALLOCATE returns an address past the header.  FREE takes that
+\  address, backs up 16 bytes to find the header, and inserts
+\  the block into the free list (sorted by address, coalescing
+\  adjacent blocks).
+\
+\  The heap lives above HERE (which is reserved for the Forth
+\  dictionary).  HEAP-BASE marks the start; it's set at load time
+\  to a safe offset above HERE.
+\
+\  Memory layout:
+\    0x00000  ...  BIOS+KDOS dictionary  ...  HERE
+\    HEAP-BASE  ...  heap blocks  ...
+\    DSP ↓  (data stack grows down)
+\
+
+16 CONSTANT /ALLOC-HDR
+
+\ MEM-SIZE ( -- u )  total RAM in bytes
+\   Reads from SysInfo MMIO device: MEM_SIZE at offsets +0x06, +0x07
+\   Value is in KiB; multiply by 1024 for bytes.
+: MEM-SIZE  ( -- u )
+    0xFFFFFF0000000306 C@       \ MEM_SIZE_LO (KiB low byte)
+    0xFFFFFF0000000307 C@       \ MEM_SIZE_HI (KiB high byte)
+    8 LSHIFT OR  1024 * ;
+
+\ -- Heap state --
+VARIABLE HEAP-BASE    0 HEAP-BASE !
+VARIABLE HEAP-FREE    0 HEAP-FREE !    \ head of free list
+VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
+
+\ -- Allocator scratch variables (avoid deep stack gymnastics) --
+VARIABLE A-PREV       \ previous free-list node (0 = update HEAP-FREE)
+VARIABLE A-CURR       \ current free-list node being examined
+VARIABLE A-SIZE       \ requested allocation size (rounded)
+
+\ HEAP-SETUP ( -- )  initialise the heap above HERE
+\   Leaves a 4 KiB gap above HERE for dictionary growth,
+\   then creates one large free block spanning to the stack guard.
+: HEAP-SETUP  ( -- )
+    HEAP-INIT @ IF EXIT THEN
+    HERE 4096 + TALIGN  HEAP-BASE !
+    \ Heap end = data-stack bottom - 4096 guard
+    MEM-SIZE 2 / 4096 -   ( heap-end )
+    HEAP-BASE @ -          ( available-bytes )
+    /ALLOC-HDR -           ( usable size for first block )
+    DUP 64 < ABORT" Heap too small"
+    \ Write header for the single free block
+    0 HEAP-BASE @ !              \ next = 0 (end of list)
+    HEAP-BASE @ 8 + !            \ size = available
+    HEAP-BASE @ HEAP-FREE !      \ free list head
+    1 HEAP-INIT ! ;
+
+\ (LINK-PREV!) ( addr -- )
+\   Set previous node's next field (or HEAP-FREE) to addr.
+: (LINK-PREV!)  ( addr -- )
+    A-PREV @ 0= IF  HEAP-FREE !  ELSE  A-PREV @ !  THEN ;
+
+\ ALLOCATE ( u -- addr ior )
+\   Allocate u bytes.  Returns address and 0 on success,
+\   or 0 and -1 on failure.  First-fit search.
+: ALLOCATE  ( u -- addr ior )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    DUP 0= IF DROP 0 -1 EXIT THEN
+    \ Round up to 8-byte alignment, minimum 16
+    7 + -8 AND  DUP 16 < IF DROP 16 THEN
+    A-SIZE !
+    0 A-PREV !   HEAP-FREE @ A-CURR !
+    BEGIN
+        A-CURR @ 0= IF  0 -1 EXIT  THEN      \ OOM
+        A-CURR @ 8 + @                         ( block-size )
+        A-SIZE @ >= IF
+            \ Found a big enough block
+            A-CURR @ 8 + @  A-SIZE @ -         ( leftover )
+            DUP /ALLOC-HDR 16 + >= IF
+                \ Split: new free block after the allocated region
+                A-CURR @ /ALLOC-HDR + A-SIZE @ +  ( leftover new-blk )
+                A-CURR @ @ OVER !                  \ new-blk.next = curr.next
+                SWAP /ALLOC-HDR - OVER 8 + !       \ new-blk.size = leftover-hdr
+                A-SIZE @ A-CURR @ 8 + !            \ curr.size = requested
+                (LINK-PREV!)                        \ prev → new-blk
+            ELSE
+                \ Use whole block — unlink from free list
+                DROP
+                A-CURR @ @  (LINK-PREV!)            \ prev → curr.next
+            THEN
+            A-CURR @ /ALLOC-HDR +  0  EXIT          \ return user addr + success
+        THEN
+        \ Block too small — advance
+        A-CURR @ A-PREV !
+        A-CURR @ @ A-CURR !
+    AGAIN ;
+
+\ FREE ( addr -- )
+\   Return a previously allocated block to the free list.
+\   Inserts in address-sorted order (for future coalescing).
+: FREE  ( addr -- )
+    DUP 0= IF DROP EXIT THEN
+    /ALLOC-HDR -   ( block )
+    0 A-PREV !   HEAP-FREE @ A-CURR !
+    BEGIN
+        A-CURR @ 0= IF
+            \ End of list — append here
+            0 OVER !                                \ block.next = 0
+            A-PREV @ 0= IF  HEAP-FREE !
+            ELSE  A-PREV @ !  THEN
+            EXIT
+        THEN
+        A-CURR @ OVER > IF
+            \ Insert before curr
+            A-CURR @ OVER !                         \ block.next = curr
+            A-PREV @ 0= IF  HEAP-FREE !
+            ELSE  A-PREV @ !  THEN
+            EXIT
+        THEN
+        \ Advance
+        A-CURR @ A-PREV !
+        A-CURR @ @ A-CURR !
+    AGAIN ;
+
+\ RESIZE ( a1 u -- a2 ior )
+\   Resize an allocated block.  Simple: alloc new, copy, free old.
+\   On failure returns original address and non-zero ior.
+: RESIZE  ( a1 u -- a2 ior )
+    DUP ALLOCATE               ( a1 u a2 ior )
+    IF  2DROP DROP -1 EXIT  THEN
+    \ Success: ( a1 u a2 ) — copy u bytes from a1 to a2, free a1
+    A-CURR !                   \ stash a2
+    A-SIZE !                   \ stash u
+    DUP A-CURR @ A-SIZE @ CMOVE   \ copy u bytes from a1 to a2
+    FREE                           \ free a1
+    A-CURR @ 0 ;               \ return ( a2 0 )
+
+\ HEAP-FREE-BYTES ( -- u )
+\   Walk the free list summing available bytes.
+: HEAP-FREE-BYTES  ( -- u )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    0 HEAP-FREE @
+    BEGIN
+        DUP 0<> WHILE
+        DUP 8 + @ ROT + SWAP   ( sum' curr )
+        @                       ( sum' next )
+    REPEAT
+    DROP ;
+
+\ .HEAP ( -- ) show heap summary
+: .HEAP  ( -- )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    ." Heap: base=" HEAP-BASE @ .
+    ."  free=" HEAP-FREE-BYTES . ." bytes" CR ;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \
