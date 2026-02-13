@@ -5893,6 +5893,161 @@ class TestKDOSAES(TestKDOS):
         self.assertIn("BLK1=193 ", text)
 
 
+class TestKDOSSHA3(TestKDOS):
+    """Tests for §1.6 SHA-3 (Keccak-256) hashing."""
+
+    # Reference vectors (hashlib.sha3_256):
+    # SHA3-256("")     = a7ffc6f8bf1ed76651c14756a061d662...
+    # SHA3-256("abc")  = 3a985da74fe225b2045c172d6bd390bd...
+    # SHA3-256("A"*16) = 24163aabfd8d149f6e1ad9e7472ff2ac...
+    # SHA3-256(0..199) = 5f728f63bf5ee48c77f453c0490398fa...
+
+    def test_sha3_status_idle(self):
+        """SHA3-STATUS@ returns 0 (idle) before any operation."""
+        text = self._run_kdos(['." S3IDLE=" SHA3-STATUS@ .'])
+        self.assertIn("S3IDLE=0 ", text)
+
+    def test_sha3_empty(self):
+        """SHA3-256 of empty string matches reference (a7ffc6f8...)."""
+        text = self._run_kdos([
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0xa7 = 167
+            '." H1=" h-buf 1 + C@ .',        # 0xff = 255
+            '." H2=" h-buf 2 + C@ .',        # 0xc6 = 198
+            '." H3=" h-buf 3 + C@ .',        # 0xf8 = 248
+            '." ST=" SHA3-STATUS@ .',         # 2 = done
+        ])
+        self.assertIn("H0=167 ", text)
+        self.assertIn("H1=255 ", text)
+        self.assertIn("H2=198 ", text)
+        self.assertIn("H3=248 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_sha3_abc(self):
+        """SHA3-256('abc') = 3a985da7..."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!",            # 'a'
+            "98 msg 1 + C!",        # 'b'
+            "99 msg 2 + C!",        # 'c'
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 3 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x3a = 58
+            '." H1=" h-buf 1 + C@ .',        # 0x98 = 152
+            '." H2=" h-buf 2 + C@ .',        # 0x5d = 93
+            '." H3=" h-buf 3 + C@ .',        # 0xa7 = 167
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+        self.assertIn("H2=93 ", text)
+        self.assertIn("H3=167 ", text)
+
+    def test_sha3_sixteen_bytes(self):
+        """SHA3-256 of 16 x 0x41 ('A') = 24163aab..."""
+        text = self._run_kdos([
+            "CREATE msg 16 ALLOT",
+            "msg 16 65 FILL",        # 16 bytes of 'A'
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 16 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x24 = 36
+            '." H1=" h-buf 1 + C@ .',        # 0x16 = 22
+            '." H2=" h-buf 2 + C@ .',        # 0x3a = 58
+            '." H3=" h-buf 3 + C@ .',        # 0xab = 171
+        ])
+        self.assertIn("H0=36 ", text)
+        self.assertIn("H1=22 ", text)
+        self.assertIn("H2=58 ", text)
+        self.assertIn("H3=171 ", text)
+
+    def test_sha3_multi_rate_block(self):
+        """SHA3-256 of 200 bytes (>rate=136) = 5f728f63..."""
+        text = self._run_kdos([
+            "CREATE msg 200 ALLOT",
+            ": fill-seq 200 0 DO I msg I + C! LOOP ;",
+            "fill-seq",
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 200 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x5f = 95
+            '." H1=" h-buf 1 + C@ .',        # 0x72 = 114
+            '." H2=" h-buf 2 + C@ .',        # 0x8f = 143
+            '." H3=" h-buf 3 + C@ .',        # 0x63 = 99
+        ])
+        self.assertIn("H0=95 ", text)
+        self.assertIn("H1=114 ", text)
+        self.assertIn("H2=143 ", text)
+        self.assertIn("H3=99 ", text)
+
+    def test_sha3_convenience_word(self):
+        """KDOS SHA3 ( addr len hash-addr -- ) convenience word."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 32 ALLOT",
+            "msg 3 h-buf SHA3",
+            '." H0=" h-buf C@ .',            # same as test_sha3_abc
+            '." H1=" h-buf 1 + C@ .',
+        ])
+        self.assertIn("H0=58 ", text)
+        self.assertIn("H1=152 ", text)
+
+    def test_sha3_reinit(self):
+        """SHA3 can be reused: init-update-final twice gives same result."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h1 32 ALLOT",
+            "CREATE h2 32 ALLOT",
+            "msg 3 h1 SHA3",
+            "msg 3 h2 SHA3",
+            '." R1=" h1 C@ .',
+            '." R2=" h2 C@ .',
+        ])
+        self.assertIn("R1=58 ", text)
+        self.assertIn("R2=58 ", text)
+
+    def test_sha3_status_display(self):
+        """.SHA3-STATUS prints human-readable status."""
+        text = self._run_kdos([".SHA3-STATUS"])
+        self.assertIn("SHA3: idle", text)
+
+    def test_sha3_status_after_final(self):
+        """.SHA3-STATUS after finalize shows done."""
+        text = self._run_kdos([
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "h-buf SHA3-FINAL",
+            ".SHA3-STATUS",
+        ])
+        self.assertIn("SHA3: done", text)
+
+    def test_sha3_single_byte(self):
+        """SHA3-256 of single byte 0x00 = 5d53469f..."""
+        text = self._run_kdos([
+            "CREATE msg 1 ALLOT",
+            "0 msg C!",
+            "CREATE h-buf 32 ALLOT",
+            "SHA3-INIT",
+            "msg 1 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',            # 0x5d = 93
+            '." H1=" h-buf 1 + C@ .',        # 0x53 = 83
+            '." H2=" h-buf 2 + C@ .',        # 0x46 = 70
+            '." H3=" h-buf 3 + C@ .',        # 0x9f = 159
+        ])
+        self.assertIn("H0=93 ", text)
+        self.assertIn("H1=83 ", text)
+        self.assertIn("H2=70 ", text)
+        self.assertIn("H3=159 ", text)
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 

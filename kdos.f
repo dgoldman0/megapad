@@ -495,6 +495,39 @@ CREATE AES-TAG-BUF 16 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
+\  §1.6  SHA-3 (Keccak-256) Hashing
+\ =====================================================================
+\  BIOS primitives (hardware accelerator at MMIO 0x0780):
+\    SHA3-INIT  SHA3-UPDATE  SHA3-FINAL  SHA3-STATUS@
+
+CREATE SHA3-BUF 32 ALLOT
+
+\ SHA3 ( addr len hash-addr -- )  Hash buffer, store 32-byte digest.
+: SHA3
+    >R                        \ save dest
+    SHA3-INIT
+    SHA3-UPDATE
+    R> SHA3-FINAL ;
+
+\ .SHA3-STATUS ( -- )  Print human-readable SHA3 status.
+: .SHA3-STATUS
+    SHA3-STATUS@
+    DUP 0 = IF DROP ." SHA3: idle" CR ELSE
+    DUP 2 = IF DROP ." SHA3: done" CR ELSE
+    DROP ." SHA3: unknown" CR
+    THEN THEN ;
+
+\ .SHA3 ( addr -- )  Print 32-byte digest as hex string.
+: .SHA3
+    32 0 DO
+        DUP I + C@
+        DUP 4 RSHIFT
+        DUP 10 < IF 48 + ELSE 55 + THEN EMIT
+        15 AND
+        DUP 10 < IF 48 + ELSE 55 + THEN EMIT
+    LOOP DROP ;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \

@@ -39,6 +39,7 @@ MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
 CRC_BASE     = 0x07C0
 AES_BASE     = 0x0700
+SHA3_BASE    = 0x0780
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1096,131 @@ class AESDevice(Device):
                 self.status = 2  # done, auth OK
             else:
                 self.status = 3  # auth fail
+
+
+# ---------------------------------------------------------------------------
+#  SHA-3 (Keccak) Accelerator — SHA3-256
+# ---------------------------------------------------------------------------
+# Register map (offsets from SHA3_BASE = 0x0780):
+#   0x00        SHA3_CMD     (W)   — 0=init (SHA3-256), 1=finalize
+#   0x01        SHA3_STATUS  (R)   — 0=idle, 2=done
+#   0x08        SHA3_DIN     (W)   — byte input (auto-absorbs at rate)
+#   0x10..0x2F  SHA3_DOUT    (R)   — 32-byte hash output (after finalize)
+
+# Keccak round constants
+_KECCAK_RC = [
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808A,
+    0x8000000080008000, 0x000000000000808B, 0x0000000080000001,
+    0x8000000080008081, 0x8000000000008009, 0x000000000000008A,
+    0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+    0x000000008000808B, 0x800000000000008B, 0x8000000000008089,
+    0x8000000000008003, 0x8000000000008002, 0x8000000000000080,
+    0x000000000000800A, 0x800000008000000A, 0x8000000080008081,
+    0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+]
+
+# Keccak rotation offsets (rho), indexed as [x + 5*y]
+_KECCAK_ROT = [
+     0,  1, 62, 28, 27,    # y=0
+    36, 44,  6, 55, 20,    # y=1
+     3, 10, 43, 25, 39,    # y=2
+    41, 45, 15, 21,  8,    # y=3
+    18,  2, 61, 56, 14,    # y=4
+]
+
+def _keccak_f1600(state: list[int]) -> list[int]:
+    """Keccak-f[1600] permutation on flat array of 25 64-bit lanes (x+5y)."""
+    lanes = list(state)
+    M64 = 0xFFFFFFFFFFFFFFFF
+    def _rot64(x: int, n: int) -> int:
+        return ((x << n) | (x >> (64 - n))) & M64 if n else x
+    for rc in _KECCAK_RC:
+        # θ — column parity
+        C = [lanes[x] ^ lanes[x+5] ^ lanes[x+10] ^ lanes[x+15] ^ lanes[x+20]
+             for x in range(5)]
+        D = [C[(x-1) % 5] ^ _rot64(C[(x+1) % 5], 1) for x in range(5)]
+        lanes = [(lanes[i] ^ D[i % 5]) & M64 for i in range(25)]
+        # ρ + π
+        B = [0] * 25
+        for x in range(5):
+            for y in range(5):
+                src = x + 5 * y
+                dst = y + 5 * ((2*x + 3*y) % 5)
+                B[dst] = _rot64(lanes[src], _KECCAK_ROT[src])
+        # χ
+        lanes = [
+            (B[x + 5*y] ^ ((~B[((x+1)%5) + 5*y]) & B[((x+2)%5) + 5*y])) & M64
+            for y in range(5) for x in range(5)
+        ]
+        # ι
+        lanes[0] = (lanes[0] ^ rc) & M64
+    return lanes
+
+
+class SHA3Device(Device):
+    """SHA-3/Keccak-256 hardware accelerator."""
+
+    # SHA3-256: rate = 1088 bits = 136 bytes, output = 32 bytes
+    RATE = 136
+
+    def __init__(self):
+        super().__init__("SHA3", SHA3_BASE, 0x30)
+        self._reset()
+
+    def _reset(self):
+        self.state = [0] * 25          # 5x5 lanes of 64-bit words
+        self.buf = bytearray()         # partial block buffer
+        self.status = 0                # 0=idle, 2=done
+        self.digest = bytearray(32)    # output hash
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x01:
+            return self.status
+        if 0x10 <= offset < 0x30:
+            return self.digest[offset - 0x10]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x00:
+            # CMD
+            if value == 0:
+                self._reset()          # init SHA3-256
+            elif value == 1:
+                self._finalize()       # pad + squeeze
+        elif offset == 0x08:
+            # DIN — absorb one byte
+            self.buf.append(value)
+            if len(self.buf) == self.RATE:
+                self._absorb_block()
+
+    def _absorb_block(self):
+        """XOR rate bytes into state, run Keccak-f[1600]."""
+        block = self.buf
+        for i in range(self.RATE // 8):
+            lane = int.from_bytes(block[i*8:(i+1)*8], 'little')
+            self.state[i] ^= lane
+        self.state = _keccak_f1600(self.state)
+        self.buf = bytearray()
+
+    def _finalize(self):
+        """Apply SHA-3 padding (domain sep 0x06, pad10*1) and squeeze."""
+        # Build padded final block (full rate-length buffer)
+        pad = bytearray(self.RATE)
+        pad[:len(self.buf)] = self.buf
+        pad[len(self.buf)] = 0x06
+        pad[-1] |= 0x80
+        # XOR into state and permute
+        for i in range(self.RATE // 8):
+            lane = int.from_bytes(pad[i*8:(i+1)*8], 'little')
+            self.state[i] ^= lane
+        self.state = _keccak_f1600(self.state)
+        # Squeeze: extract first 32 bytes (4 lanes) from state
+        out = bytearray()
+        for i in range(4):
+            out.extend(self.state[i].to_bytes(8, 'little'))
+        self.digest = out[:32]
+        self.status = 2  # done
 
 
 # ---------------------------------------------------------------------------

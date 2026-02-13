@@ -7192,6 +7192,73 @@ w_aes_tag_store:
     ret.l
 
 ; =====================================================================
+;  SHA-3 (Keccak-256) Hardware Accelerator
+; =====================================================================
+; SHA3 base = 0xFFFF_FF00_0000_0780
+;   CMD    +0x00 (W)  0=init, 1=finalize
+;   STATUS +0x01 (R)  0=idle, 2=done
+;   DIN    +0x08 (W)  byte input (auto-absorbs at rate)
+;   DOUT   +0x10 (R)  32-byte hash output
+
+; SHA3-INIT ( -- )  Initialize SHA3-256 state.
+w_sha3_init:
+    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
+    ldi r0, 0
+    st.b r7, r0
+    ret.l
+
+; SHA3-UPDATE ( addr len -- )  Feed len bytes to SHA3 absorber.
+w_sha3_update:
+    ldn r12, r14            ; r12 = len
+    addi r14, 8
+    ldn r9, r14             ; r9 = addr
+    addi r14, 8
+    cmpi r12, 0
+    breq .sha3_update_done
+    ldi64 r7, 0xFFFF_FF00_0000_0788   ; SHA3_DIN
+    ldi r11, 0              ; counter = 0
+.sha3_update_loop:
+    mov r13, r9
+    add r13, r11            ; src + counter
+    ld.b r0, r13            ; load byte from RAM
+    st.b r7, r0             ; write to DIN
+    addi r11, 1
+    cmp r11, r12            ; counter < len?
+    brcc .sha3_update_loop
+.sha3_update_done:
+    ret.l
+
+; SHA3-FINAL ( addr -- )  Finalize hash, copy 32 bytes to addr.
+w_sha3_final:
+    ldn r9, r14             ; r9 = dest addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
+    ldi r0, 1
+    st.b r7, r0             ; CMD=finalize
+    ; Read 32 bytes from DOUT (offset 0x10)
+    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
+    ldi r12, 0
+.sha3_final_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11            ; read from DOUT
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0            ; store to RAM
+    addi r12, 1
+    cmpi r12, 32
+    brcc .sha3_final_loop
+    ret.l
+
+; SHA3-STATUS@ ( -- n )  Read SHA3 status register.
+w_sha3_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -9441,9 +9508,45 @@ d_aes_tag_store:
     call.l r11
     ret.l
 
+; === SHA3-INIT ===
+d_sha3_init:
+    .dq d_aes_tag_store
+    .db 9
+    .ascii "SHA3-INIT"
+    ldi64 r11, w_sha3_init
+    call.l r11
+    ret.l
+
+; === SHA3-UPDATE ===
+d_sha3_update:
+    .dq d_sha3_init
+    .db 11
+    .ascii "SHA3-UPDATE"
+    ldi64 r11, w_sha3_update
+    call.l r11
+    ret.l
+
+; === SHA3-FINAL ===
+d_sha3_final:
+    .dq d_sha3_update
+    .db 10
+    .ascii "SHA3-FINAL"
+    ldi64 r11, w_sha3_final
+    call.l r11
+    ret.l
+
+; === SHA3-STATUS@ ===
+d_sha3_status_fetch:
+    .dq d_sha3_final
+    .db 12
+    .ascii "SHA3-STATUS@"
+    ldi64 r11, w_sha3_status_fetch
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_aes_tag_store
+    .dq d_sha3_status_fetch
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full
