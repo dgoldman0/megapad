@@ -436,6 +436,7 @@ module mp64_aes (
     // ========================================================================
     // Main Sequential Logic
     // ========================================================================
+    integer rk_rst_i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             aes_state    <= AES_IDLE;
@@ -457,6 +458,13 @@ module mp64_aes (
             cmd_encrypt  <= 1'b0;
             data_in      <= 128'd0;
             state_blk    <= 128'd0;
+            for (rk_rst_i = 0; rk_rst_i < 15; rk_rst_i = rk_rst_i + 1)
+                rk[rk_rst_i] <= 128'd0;
+            for (rk_rst_i = 0; rk_rst_i < 8; rk_rst_i = rk_rst_i + 1)
+                w[rk_rst_i] <= 32'd0;
+            rk_gen_cnt   <= 4'd0;
+            ks_step      <= 4'd0;
+            ks_temp      <= 32'd0;
         end else begin
             irq <= 1'b0;  // pulse
 

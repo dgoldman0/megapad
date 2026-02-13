@@ -78,6 +78,7 @@ module mp64_uart #(
 
     assign tx = tx_active ? tx_shift[0] : 1'b1;  // idle high
 
+    integer tx_rst_i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             tx_wr_ptr  <= 4'd0;
@@ -86,6 +87,8 @@ module mp64_uart #(
             tx_active  <= 1'b0;
             tx_shift   <= 10'h3FF;
             tx_bit_cnt <= 4'd0;
+            for (tx_rst_i = 0; tx_rst_i < 16; tx_rst_i = tx_rst_i + 1)
+                tx_fifo[tx_rst_i] <= 8'd0;
         end else begin
             // FIFO write (from register interface)
             if (req && wen && addr == UART_TX && !tx_full) begin
@@ -137,6 +140,7 @@ module mp64_uart #(
         rx_sync2 <= rx_sync1;
     end
 
+    integer rx_rst_i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rx_wr_ptr    <= 4'd0;
@@ -145,6 +149,8 @@ module mp64_uart #(
             rx_active    <= 1'b0;
             rx_bit_cnt   <= 4'd0;
             rx_sample_cnt<= 0;
+            for (rx_rst_i = 0; rx_rst_i < 16; rx_rst_i = rx_rst_i + 1)
+                rx_fifo[rx_rst_i] <= 8'd0;
         end else begin
             if (!rx_active) begin
                 // Wait for start bit (falling edge)

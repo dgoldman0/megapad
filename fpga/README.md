@@ -35,14 +35,14 @@ Synthesizable RTL for the Megapad-64 system-on-chip.
 
 ## Target FPGAs
 
-| Target | BRAM | Notes |
-|--------|------|-------|
-| **Xilinx Artix-7 200T** | 1,620 KB | Plenty for 1 MiB + FIFOs |
-| **Lattice ECP5-85F** | 468 KB | Need external SRAM for full 1 MiB |
-| **Xilinx Kintex-7 70T** | 2,700 KB | Comfortable margin |
-| **Gowin GW5A** | 1,152 KB | Tight but feasible |
+| Target | LUTs | BRAM | DSPs | Notes |
+|--------|------|------|------|-------|
+| **Xilinx Kintex-7 325T** | 203,800 | 4,005 KB | 840 | **Primary — Genesys 2** |
+| **Xilinx Artix-7 200T** | 134,600 | 1,620 KB | 740 | Tight fit (legacy target) |
+| **Xilinx Kintex-7 410T** | 254,200 | 5,663 KB | 1,540 | Comfortable headroom |
+| **Lattice ECP5-85F** | 84,000 | 468 KB | — | Needs external SRAM |
 
-Primary target: **Artix-7 200T** (Digilent Nexys A7 or Arty A7-200T).
+Primary target: **Kintex-7 325T** (Digilent Genesys 2).
 
 ## Directory Structure
 
@@ -63,8 +63,10 @@ fpga/
 │   └── mp64_defs.vh     ← shared constants & parameters
 ├── sim/
 │   └── tb_mp64_soc.v    ← testbench
-└── constraints/
-    └── nexys_a7.xdc     ← Nexys A7 pin constraints
+├── constraints/
+│   ├── genesys2.xdc     ← Genesys 2 (Kintex-7 325T) pin constraints
+│   └── nexys_a7.xdc     ← Nexys A7 pin constraints (legacy)
+└── synth_genesys2.tcl   ← Vivado synthesis script
 ```
 
 ## Memory Architecture
@@ -82,11 +84,13 @@ than internal BRAM).
 
 ## Building
 
-```
-# Xilinx Vivado
-vivado -mode batch -source build.tcl
+```bash
+# Vivado synthesis (Genesys 2 / Kintex-7 325T)
+cd fpga
+vivado -mode batch -source synth_genesys2.tcl
 
-# Open source (yosys + nextpnr for ECP5)
-yosys -p "read_verilog rtl/*.v; synth_ecp5 -top mp64_soc" -o mp64.json
-nextpnr-ecp5 --85k --json mp64.json --lpf constraints/ecp5.lpf --textcfg mp64.cfg
+# Reports written to fpga/build/
+#   utilisation.rpt        — LUT/FF/BRAM/DSP usage
+#   utilisation_hier.rpt   — per-module breakdown
+#   timing_summary.rpt     — WNS/TNS
 ```
