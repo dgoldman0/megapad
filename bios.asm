@@ -7037,6 +7037,161 @@ w_crc_final:
     ret.l
 
 ; =====================================================================
+;  AES-256-GCM Engine — MMIO at 0xFFFF_FF00_0000_0700
+; =====================================================================
+; AES base   = 0xFFFF_FF00_0000_0700
+;   KEY    +0x00 (W)  256-bit key (32 bytes LE)
+;   IV     +0x20 (W)  96-bit IV/nonce (12 bytes LE)
+;   AAD-LEN+0x30 (W)  AAD length in bytes (32-bit LE)
+;   DAT-LEN+0x34 (W)  Data length in bytes (32-bit LE)
+;   CMD    +0x38 (W)  0=encrypt, 1=decrypt
+;   STATUS +0x39 (R)  0=idle, 1=busy, 2=done, 3=auth-fail
+;   DIN    +0x40 (W)  128-bit data input (16 bytes LE)
+;   DOUT   +0x50 (R)  128-bit data output (16 bytes LE)
+;   TAG    +0x60 (R/W) 128-bit GCM authentication tag
+
+; AES-KEY! ( addr -- )  Write 32-byte key from memory address.
+;   Writes all 32 bytes byte-by-byte to AES_KEY register.
+w_aes_key_store:
+    ldn r9, r14             ; r9 = source address
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0700    ; AES_KEY base
+    ldi r12, 0              ; byte counter
+.aes_key_loop:
+    mov r13, r9
+    add r13, r12            ; src + offset
+    ld.b r0, r13            ; load one byte from RAM
+    mov r11, r7
+    add r11, r12            ; dst + offset
+    st.b r11, r0            ; store to MMIO
+    addi r12, 1
+    cmpi r12, 32
+    brcc .aes_key_loop
+    ret.l
+
+; AES-IV! ( addr -- )  Write 12-byte IV from memory address.
+w_aes_iv_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0720    ; AES_IV base
+    ldi r12, 0
+.aes_iv_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 12
+    brcc .aes_iv_loop
+    ret.l
+
+; AES-AAD-LEN! ( n -- )  Set AAD length (32-bit).
+w_aes_aad_len_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0730   ; AES_AAD_LEN
+    st.w r11, r0
+    ret.l
+
+; AES-DATA-LEN! ( n -- )  Set data length (32-bit).
+w_aes_data_len_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0734   ; AES_DATA_LEN
+    st.w r11, r0
+    ret.l
+
+; AES-CMD! ( n -- )  Write command byte: 0=encrypt, 1=decrypt.
+w_aes_cmd_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0738   ; AES_CMD
+    st.b r11, r0
+    ret.l
+
+; AES-STATUS@ ( -- n )  Read AES status byte.
+w_aes_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0739   ; AES_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; AES-DIN! ( addr -- )  Write 16-byte block from memory to AES_DIN.
+w_aes_din_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0740   ; AES_DIN base
+    ldi r12, 0
+.aes_din_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_din_loop
+    ret.l
+
+; AES-DOUT@ ( addr -- )  Read 16-byte block from AES_DOUT to memory.
+w_aes_dout_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0750   ; AES_DOUT base
+    ldi r12, 0
+.aes_dout_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_dout_loop
+    ret.l
+
+; AES-TAG@ ( addr -- )  Read 16-byte tag from AES_TAG to memory.
+w_aes_tag_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0760   ; AES_TAG base
+    ldi r12, 0
+.aes_tag_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_tag_loop
+    ret.l
+
+; AES-TAG! ( addr -- )  Write 16-byte expected tag to AES_TAG.
+w_aes_tag_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0760   ; AES_TAG base
+    ldi r12, 0
+.aes_tag_store_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_tag_store_loop
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -9196,9 +9351,99 @@ d_crc_final:
     call.l r11
     ret.l
 
+; === AES-KEY! ===
+d_aes_key_store:
+    .dq d_crc_final
+    .db 8
+    .ascii "AES-KEY!"
+    ldi64 r11, w_aes_key_store
+    call.l r11
+    ret.l
+
+; === AES-IV! ===
+d_aes_iv_store:
+    .dq d_aes_key_store
+    .db 7
+    .ascii "AES-IV!"
+    ldi64 r11, w_aes_iv_store
+    call.l r11
+    ret.l
+
+; === AES-AAD-LEN! ===
+d_aes_aad_len_store:
+    .dq d_aes_iv_store
+    .db 12
+    .ascii "AES-AAD-LEN!"
+    ldi64 r11, w_aes_aad_len_store
+    call.l r11
+    ret.l
+
+; === AES-DATA-LEN! ===
+d_aes_data_len_store:
+    .dq d_aes_aad_len_store
+    .db 13
+    .ascii "AES-DATA-LEN!"
+    ldi64 r11, w_aes_data_len_store
+    call.l r11
+    ret.l
+
+; === AES-CMD! ===
+d_aes_cmd_store:
+    .dq d_aes_data_len_store
+    .db 8
+    .ascii "AES-CMD!"
+    ldi64 r11, w_aes_cmd_store
+    call.l r11
+    ret.l
+
+; === AES-STATUS@ ===
+d_aes_status_fetch:
+    .dq d_aes_cmd_store
+    .db 11
+    .ascii "AES-STATUS@"
+    ldi64 r11, w_aes_status_fetch
+    call.l r11
+    ret.l
+
+; === AES-DIN! ===
+d_aes_din_store:
+    .dq d_aes_status_fetch
+    .db 8
+    .ascii "AES-DIN!"
+    ldi64 r11, w_aes_din_store
+    call.l r11
+    ret.l
+
+; === AES-DOUT@ ===
+d_aes_dout_fetch:
+    .dq d_aes_din_store
+    .db 9
+    .ascii "AES-DOUT@"
+    ldi64 r11, w_aes_dout_fetch
+    call.l r11
+    ret.l
+
+; === AES-TAG@ ===
+d_aes_tag_fetch:
+    .dq d_aes_dout_fetch
+    .db 8
+    .ascii "AES-TAG@"
+    ldi64 r11, w_aes_tag_fetch
+    call.l r11
+    ret.l
+
+; === AES-TAG! ===
+d_aes_tag_store:
+    .dq d_aes_tag_fetch
+    .db 8
+    .ascii "AES-TAG!"
+    ldi64 r11, w_aes_tag_store
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_crc_final
+    .dq d_aes_tag_store
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full

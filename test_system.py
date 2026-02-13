@@ -5686,6 +5686,213 @@ class TestKDOSDiagnostics(TestKDOS):
         self.assertIn("Cycles:", text)
 
 
+class TestKDOSAES(TestKDOS):
+    """Tests for §1.5 AES-256-GCM encryption."""
+
+    # Reference: key=0x00..0x1F (32 bytes), IV=0x00..0x0B (12 bytes)
+    #   PT = 16 × 0x41 ('A')
+    #   CT = 0643975a84a4835acc00d6caf0a8392c
+    #   TAG= 0ff145f3786b8fc48a8aeafc45524d80
+
+    _AES_SETUP_KEY_IV = [
+        # Create 32-byte key: 0x00..0x1F
+        "CREATE test-key 32 ALLOT",
+        "test-key 32 0 FILL",
+        ": init-key 32 0 DO I test-key I + C! LOOP ;",
+        "init-key",
+        # Create 12-byte IV: 0x00..0x0B
+        "CREATE test-iv 12 ALLOT",
+        "test-iv 12 0 FILL",
+        ": init-iv 12 0 DO I test-iv I + C! LOOP ;",
+        "init-iv",
+    ]
+
+    def test_aes_status_idle(self):
+        """AES-STATUS@ returns 0 (idle) before any operation."""
+        text = self._run_kdos(['." AESIDLE=" AES-STATUS@ .'])
+        self.assertIn("AESIDLE=0 ", text)
+
+    def test_aes_encrypt_one_block(self):
+        """Encrypt 16 bytes of 'A' and verify first ciphertext byte."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            # Create 16-byte plaintext buffer (all 0x41)
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            # Create 16-byte output buffer
+            "CREATE ct-buf 16 ALLOT",
+            # Set key, IV, lengths, command
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            # Feed plaintext block
+            "pt-buf AES-DIN!",
+            # Read ciphertext
+            "ct-buf AES-DOUT@",
+            # Print first byte of ciphertext with marker
+            '." CT0=" ct-buf C@ .',
+            # Print status with marker
+            '." ST=" AES-STATUS@ .',
+        ])
+        self.assertIn("CT0=6 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_aes_tag_matches_reference(self):
+        """GCM tag matches known-good reference."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            # Read tag
+            "tag-buf AES-TAG@",
+            # Print tag bytes with markers
+            '." T0=" tag-buf C@ .',                # 15
+            '." T1=" tag-buf 1 + C@ .',            # 241
+            '." T2=" tag-buf 2 + C@ .',            # 69
+            '." T3=" tag-buf 3 + C@ .',            # 243
+        ])
+        # TAG starts with 0x0F, 0xF1, 0x45, 0xF3 = 15, 241, 69, 243
+        self.assertIn("T0=15 ", text)
+        self.assertIn("T1=241 ", text)
+        self.assertIn("T2=69 ", text)
+        self.assertIn("T3=243 ", text)
+
+    def test_aes_decrypt_roundtrip(self):
+        """Encrypt then decrypt returns original plaintext."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            # Encrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            "tag-buf AES-TAG@",
+            # Decrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "tag-buf AES-TAG!",
+            "1 AES-CMD!",
+            "ct-buf AES-DIN!",
+            "rt-buf AES-DOUT@",
+            # Verify roundtrip with markers
+            '." P0=" rt-buf C@ .',
+            '." P15=" rt-buf 15 + C@ .',
+            '." ST=" AES-STATUS@ .',
+        ])
+        self.assertIn("P0=65 ", text)
+        self.assertIn("P15=65 ", text)
+        self.assertIn("ST=2 ", text)
+
+    def test_aes_auth_fail(self):
+        """Decryption with wrong tag sets status=3 (auth fail)."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE tag-buf 16 ALLOT",
+            # Encrypt
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "0 AES-CMD!",
+            "pt-buf AES-DIN!",
+            "ct-buf AES-DOUT@",
+            "tag-buf AES-TAG@",
+            # Corrupt tag
+            "99 tag-buf C!",
+            # Decrypt with wrong tag
+            "tag-buf AES-TAG!",
+            "test-key AES-KEY!",
+            "test-iv AES-IV!",
+            "0 AES-AAD-LEN!",
+            "16 AES-DATA-LEN!",
+            "1 AES-CMD!",
+            "ct-buf AES-DIN!",
+            "CREATE junk 16 ALLOT",
+            "junk AES-DOUT@",
+            # Status should be 3 (auth fail)
+            '." AUTHST=" AES-STATUS@ .',
+        ])
+        self.assertIn("AUTHST=3 ", text)
+
+    def test_aes_encrypt_convenience(self):
+        """AES-ENCRYPT convenience word produces ciphertext + tag."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            # AES-ENCRYPT ( key iv src dst len -- tag-addr )
+            "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT",
+            # tag-addr on stack
+            '." TGBYTE=" C@ .',              # first tag byte = 15
+            '." CTBYTE=" ct-buf C@ .',       # first ct byte = 6
+        ])
+        self.assertIn("TGBYTE=15 ", text)
+        self.assertIn("CTBYTE=6 ", text)
+
+    def test_aes_decrypt_convenience(self):
+        """AES-DECRYPT convenience word returns 0 (auth OK) on valid roundtrip."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 16 ALLOT",
+            "pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            # Encrypt
+            "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT",
+            # tag addr on stack — save it
+            "VARIABLE saved-tag",
+            "saved-tag !",
+            # Decrypt
+            "test-key test-iv ct-buf rt-buf 16 saved-tag @ AES-DECRYPT",
+            '." DECFLAG=" .',   # should print 0 (auth OK)
+            # Verify plaintext restored
+            '." DECPT0=" rt-buf C@ .',  # 65
+        ])
+        self.assertIn("DECFLAG=0 ", text)
+        self.assertIn("DECPT0=65 ", text)
+
+    def test_aes_status_display(self):
+        """.AES-STATUS prints human-readable status."""
+        text = self._run_kdos([".AES-STATUS"])
+        self.assertIn("AES: idle", text)
+
+    def test_aes_two_blocks(self):
+        """Encrypt 32 bytes (2 blocks) and verify ciphertext bytes."""
+        text = self._run_kdos(self._AES_SETUP_KEY_IV + [
+            "CREATE pt-buf 32 ALLOT",
+            "pt-buf 16 65 FILL",          # first block: 'A'
+            "pt-buf 16 + 16 66 FILL",     # second block: 'B'
+            "CREATE ct-buf 32 ALLOT",
+            "test-key test-iv pt-buf ct-buf 32 AES-ENCRYPT",
+            "DROP",  # discard tag addr
+            # First byte of block 0 with marker
+            '." BLK0=" ct-buf C@ .',
+            # First byte of block 1 with marker
+            '." BLK1=" ct-buf 16 + C@ .',
+        ])
+        self.assertIn("BLK0=6 ", text)
+        self.assertIn("BLK1=193 ", text)
+
+
 class TestKDOSHardening(TestKDOS):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 
