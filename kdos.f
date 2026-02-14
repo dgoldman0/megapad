@@ -2962,6 +2962,71 @@ RQ-INIT       \ initialise at load time
 : SCHED-BALANCED  ( -- )
     BALANCE SCHED-ALL ;
 
+\ =====================================================================
+\  §8.4  Core Affinity
+\ =====================================================================
+\
+\  Pin tasks to specific cores.  An affinity table maps task slots
+\  (from the §8 TASK-TABLE) to a preferred core.  -1 means "any core"
+\  (no affinity).  SPAWN-ON creates a task directly on a core's queue.
+
+VARIABLE AFF-TABLE  63 ALLOT
+
+: AFF-INIT  ( -- )
+    8 0 DO
+        -1  I CELLS AFF-TABLE + !
+    LOOP ;
+
+AFF-INIT
+
+: AFFINITY!  ( core task# -- )
+    DUP 8 >= ABORT" Invalid task slot"
+    CELLS AFF-TABLE + ! ;
+
+: AFFINITY@  ( task# -- core )
+    DUP 8 >= ABORT" Invalid task slot"
+    CELLS AFF-TABLE + @ ;
+
+: SPAWN-ON  ( xt core -- )
+    DUP 0<  OVER NCORES >= OR ABORT" Invalid core ID"
+    OVER OVER
+    RQ-PUSH
+    TASK-COUNT @ DUP 8 < IF
+        DUP >R AFFINITY!
+        HERE TDESC-TEMP !
+        T.READY , 128 , , 0 , 0 , 0 ,
+        TDESC-TEMP @ R> CELLS TASK-TABLE + !
+        TASK-COUNT @ 1+ TASK-COUNT !
+    ELSE
+        DROP 2DROP
+    THEN ;
+
+: SCHED-AFFINE  ( -- )
+    TASK-COUNT @ 0 ?DO
+        I CELLS TASK-TABLE + @
+        DUP T.STATUS T.READY = IF
+            DUP T.XT
+            I AFFINITY@
+            DUP -1 = IF DROP 0 THEN
+            RQ-PUSH
+            T.RUNNING SWAP T.STATUS!
+        ELSE DROP THEN
+    LOOP
+    SCHED-ALL ;
+
+: AFF-INFO  ( -- )
+    ." --- Core Affinity ---" CR
+    TASK-COUNT @ DUP 0= IF DROP ."   (no tasks)" CR EXIT THEN
+    0 DO
+        ."   Task " I . ." -> "
+        I AFFINITY@ DUP -1 = IF
+            DROP ." any"
+        ELSE
+            ." core " .
+        THEN
+        CR
+    LOOP ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !

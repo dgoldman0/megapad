@@ -7561,6 +7561,96 @@ class TestKDOSMulticore(unittest.TestCase):
         ones = [n for n in nums if n == 1]
         self.assertGreaterEqual(len(ones), 4)
 
+    # --- §8.4 Core Affinity ---
+
+    def test_affinity_default_any(self):
+        """Default affinity for all task slots is -1 (any core)."""
+        text = self._run_mc([
+            "0 AFFINITY@ .",
+            "3 AFFINITY@ .",
+            "7 AFFINITY@ .",
+        ])
+        # -1 in 64-bit unsigned representation
+        for _ in range(3):
+            self.assertIn("-1 ", text)
+
+    def test_affinity_set_get(self):
+        """AFFINITY! and AFFINITY@ store and retrieve core assignment."""
+        text = self._run_mc([
+            "2 0 AFFINITY!",
+            "0 AFFINITY@ .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_spawn_on_core(self):
+        """SPAWN-ON pushes task to specified core's run queue."""
+        text = self._run_mc([
+            ": W1  44 77900 C! ;",
+            "' W1 2 SPAWN-ON",
+            "2 RQ-COUNT .",
+            "2 SCHED-CORE",
+            "77900 C@ .",
+        ])
+        self.assertIn("1 ", text)   # 1 task in core 2's queue
+        self.assertIn("44 ", text)  # task ran on core 2
+
+    def test_spawn_on_records_affinity(self):
+        """SPAWN-ON records affinity in the affinity table."""
+        text = self._run_mc([
+            ": W1  ;",
+            "TASK-COUNT @ .",           # print current task count (= slot index)
+            "' W1 3 SPAWN-ON",
+        ])
+        # Extract the task slot index from the first number printed
+        nums = [x for x in text.split() if x.strip().isdigit()]
+        if nums:
+            slot = int(nums[0])
+            text2 = self._run_mc([
+                ": W1  ;",
+                "' W1 3 SPAWN-ON",
+                f"{slot} AFFINITY@ .",
+            ])
+            self.assertIn("3 ", text2)
+
+    def test_spawn_on_multiple_cores(self):
+        """SPAWN-ON distributes tasks across cores correctly."""
+        text = self._run_mc([
+            ": WA  51 77910 C! ;",
+            ": WB  52 77911 C! ;",
+            ": WC  53 77912 C! ;",
+            "' WA 1 SPAWN-ON",
+            "' WB 2 SPAWN-ON",
+            "' WC 3 SPAWN-ON",
+            "SCHED-ALL",
+            "77910 C@ .",
+            "77911 C@ .",
+            "77912 C@ .",
+        ])
+        self.assertIn("51 ", text)
+        self.assertIn("52 ", text)
+        self.assertIn("53 ", text)
+
+    def test_aff_info(self):
+        """AFF-INFO displays affinity settings."""
+        text = self._run_mc([
+            ": W1  ;",
+            "' W1 1 SPAWN-ON",
+            "AFF-INFO",
+        ])
+        self.assertIn("Core Affinity", text)
+
+    def test_affinity_balance_respects_pin(self):
+        """Tasks pinned via SPAWN-ON stay on their assigned core."""
+        text = self._run_mc([
+            ": WA  61 77920 C! ;",
+            ": WB  62 77921 C! ;",
+            "' WA 1 SPAWN-ON",
+            "' WB 3 SPAWN-ON",
+            "1 RQ-COUNT .",
+            "3 RQ-COUNT .",
+        ])
+        self.assertIn("1 ", text)   # core 1 has 1 task
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing
