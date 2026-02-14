@@ -2610,6 +2610,149 @@ w_do:
     str r11, r1               ; leave_count = 0
     ret.l
 
+; ?DO (IMMEDIATE) — start a counted loop, skip body if limit == index
+;   ( limit index -- ) at runtime
+;   Same as DO but compiles a forward branch when limit == index.
+;   Uses LEAVE fixup mechanism so LOOP resolves the skip.
+w_qdo:
+    ; Compile the DO preamble: pop limit & index, push to RSP
+    ;   ldn r1, r14       ; index (TOS)          = 50 1E
+    ;   addi r14, 8                               = 62 E0 08
+    ;   ldn r7, r14       ; limit (NOS)           = 50 7E
+    ;   addi r14, 8                               = 62 E0 08
+    ;   subi r15, 8       ; push limit to RSP     = 67 F0 08
+    ;   str r15, r7                               = 54 F7
+    ;   subi r15, 8       ; push index to RSP     = 67 F0 08
+    ;   str r15, r1                               = 54 F1
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x7E
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF7
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x67
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x54
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF1
+    ldi64 r11, compile_byte
+    call.l r11
+    ; --- ?DO skip check ---
+    ; At runtime r1=index, r7=limit (still in regs from preamble above).
+    ; Compile:
+    ;   cmp r1, r7        ; 77 17
+    ;   lbrne +6          ; 42 00 06  (skip unloop+lbr if NOT equal)
+    ;   addi r15, 16      ; 62 F0 10  (unloop)
+    ;   lbr <fixup>       ; 40 XX XX  (forward jump, LEAVE-style)
+    ; cmp r1, r7 = 77 17
+    ldi r1, 0x77
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x17
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbrne +6 = 42 00 06
+    ldi r1, 0x42
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x06
+    ldi64 r11, compile_byte
+    call.l r11
+    ; addi r15, 16 = 62 F0 10  (unloop)
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xF0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ; lbr <placeholder> = 40 XX XX
+    ldi r1, 0x40
+    ldi64 r11, compile_byte
+    call.l r11
+    ; Record fixup address (HERE = first offset byte)
+    ldi64 r11, var_here
+    ldn r13, r11              ; R13 = fixup addr
+    ; Placeholder offset bytes
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ; --- Now push loop-target = HERE (after the skip check) ---
+    ldi64 r11, var_here
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ; Save current leave_count on data stack, reset to 0
+    ldi64 r11, var_leave_count
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1               ; push saved leave_count
+    ldi r1, 0
+    str r11, r1               ; leave_count = 0
+    ; Store skip fixup in var_leave_fixups[0] (leave_count is now 0)
+    ldi64 r11, var_leave_fixups
+    str r11, r13               ; fixups[0] = skip fixup addr
+    ldi64 r11, var_leave_count
+    ldi r1, 1
+    str r11, r1               ; leave_count = 1
+w_qdo_done:
+    ret.l
+
 ; LOOP (IMMEDIATE) — end counted loop
 ;   Compiles: increment index on RSP, compare to limit, branch back if not done
 ;   Then: clean up RSP (drop limit & index)
@@ -8323,9 +8466,18 @@ d_do:
     call.l r11
     ret.l
 
+; === ?DO (IMMEDIATE) ===
+d_qdo:
+    .dq d_do
+    .db 0x83                  ; IMMEDIATE | len 3
+    .ascii "?DO"
+    ldi64 r11, w_qdo
+    call.l r11
+    ret.l
+
 ; === LOOP (IMMEDIATE) ===
 d_loop:
-    .dq d_do
+    .dq d_qdo
     .db 0x84                  ; IMMEDIATE | len 4
     .ascii "LOOP"
     ldi64 r11, w_loop

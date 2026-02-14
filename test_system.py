@@ -86,7 +86,7 @@ from diskutil import (
 BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
 
 
-def make_system(ram_kib: int = 256, storage_image: str = None,
+def make_system(ram_kib: int = 1024, storage_image: str = None,
                 num_cores: int = 1) -> MegapadSystem:
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
                          num_cores=num_cores)
@@ -2107,7 +2107,8 @@ class TestKDOS(unittest.TestCase):
     def _run_kdos(self, extra_lines: list[str],
                   max_steps=400_000_000,
                   storage_image=None,
-                  nic_frames=None) -> str:
+                  nic_frames=None,
+                  nic_tx_callback=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
@@ -2115,12 +2116,15 @@ class TestKDOS(unittest.TestCase):
             return self._run_kdos_fast(extra_lines,
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
-                                      storage_image=storage_image)
+                                      storage_image=storage_image,
+                                      nic_tx_callback=nic_tx_callback)
 
         sys, buf = self._boot_bios(storage_image=storage_image)
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
+        if nic_tx_callback:
+            sys.nic.on_tx_frame = lambda data: nic_tx_callback(sys.nic, data)
         all_lines = self.kdos_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
@@ -2146,7 +2150,8 @@ class TestKDOS(unittest.TestCase):
     def _run_kdos_fast(self, extra_lines: list[str],
                        max_steps=50_000_000,
                        nic_frames=None,
-                       storage_image=None) -> str:
+                       storage_image=None,
+                       nic_tx_callback=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
@@ -2162,6 +2167,10 @@ class TestKDOS(unittest.TestCase):
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
+
+        # Set TX callback for dynamic response (e.g. DHCP)
+        if nic_tx_callback:
+            sys.nic.on_tx_frame = lambda data: nic_tx_callback(sys.nic, data)
 
         # Now just process the extra_lines + BYE
         payload = "\n".join(extra_lines) + "\nBYE\n"
@@ -7231,6 +7240,2388 @@ class TestKDOSMulticore(unittest.TestCase):
         text = self._run_mc(["SCR-HOME"])
         self.assertIn("Cores", text)
         self.assertIn("multicore", text)
+
+
+# ---------------------------------------------------------------------------
+#  KDOS network stack tests — §16 Ethernet Framing
+# ---------------------------------------------------------------------------
+
+class TestKDOSNetStack(TestKDOS):
+    """Tests for §16 Network Stack — Ethernet framing constants and layout."""
+
+    # --- 9a: Constants and frame buffer layout ---
+
+    def test_eth_hdr_constant(self):
+        """/ETH-HDR should be 14."""
+        text = self._run_kdos(["/ETH-HDR ."])
+        self.assertIn("14 ", text)
+
+    def test_mac_constant(self):
+        """/MAC should be 6."""
+        text = self._run_kdos(["/MAC ."])
+        self.assertIn("6 ", text)
+
+    def test_eth_mtu_constant(self):
+        """ETH-MTU should be 1500."""
+        text = self._run_kdos(["ETH-MTU ."])
+        self.assertIn("1500 ", text)
+
+    def test_eth_max_pld_constant(self):
+        """ETH-MAX-PLD should be 1486."""
+        text = self._run_kdos(["ETH-MAX-PLD ."])
+        self.assertIn("1486 ", text)
+
+    def test_etype_ip4_constant(self):
+        """ETYPE-IP4 should be 2048 (0x0800)."""
+        text = self._run_kdos(["ETYPE-IP4 ."])
+        self.assertIn("2048 ", text)
+
+    def test_etype_arp_constant(self):
+        """ETYPE-ARP should be 2054 (0x0806)."""
+        text = self._run_kdos(["ETYPE-ARP ."])
+        self.assertIn("2054 ", text)
+
+    def test_mac_bcast_all_ff(self):
+        """MAC-BCAST should contain 6 bytes of 0xFF."""
+        text = self._run_kdos([
+            "MAC-BCAST C@ .",
+            "MAC-BCAST 1+ C@ .",
+            "MAC-BCAST 5 + C@ .",
+        ])
+        self.assertIn("255 ", text)
+        # All three reads must produce 255
+        self.assertEqual(text.count("255 "), 3)
+
+    def test_my_mac_initialized(self):
+        """MY-MAC should contain the NIC's default MAC after MAC-INIT."""
+        # Default NIC MAC is 02:4D:50:36:34:00
+        text = self._run_kdos([
+            "MY-MAC C@ . .\" m0\" ",
+            "MY-MAC 1+ C@ . .\" m1\" ",
+            "MY-MAC 2 + C@ . .\" m2\" ",
+            "MY-MAC 3 + C@ . .\" m3\" ",
+            "MY-MAC 4 + C@ . .\" m4\" ",
+            "MY-MAC 5 + C@ . .\" m5\" ",
+        ])
+        # 02:4D:50:36:34:00  (. adds trailing space, ." adds another)
+        self.assertIn("2  m0", text)
+        self.assertIn("77  m1", text)
+        self.assertIn("80  m2", text)
+        self.assertIn("54  m3", text)
+        self.assertIn("52  m4", text)
+        self.assertIn("0  m5", text)
+
+    def test_nw_store_and_fetch(self):
+        """NW! and NW@ should store/fetch big-endian 16-bit values."""
+        text = self._run_kdos([
+            "CREATE nw-test 4 ALLOT",
+            "2048 nw-test NW!",
+            "nw-test NW@ . .\" val\" ",
+            "nw-test C@ . .\" hi\" ",
+            "nw-test 1+ C@ . .\" lo\" ",
+        ])
+        self.assertIn("2048  val", text)
+        self.assertIn("8  hi", text)
+        self.assertIn("0  lo", text)
+
+    def test_n_to_h_swap(self):
+        """N>H should byte-swap a 16-bit value."""
+        text = self._run_kdos(["2048 N>H ."])   # 0x0800 → 0x0008 = 8
+        self.assertIn("8 ", text)
+
+    def test_h_to_n_swap(self):
+        """H>N should byte-swap (same as N>H)."""
+        text = self._run_kdos(["8 H>N ."])      # 0x0008 → 0x0800 = 2048
+        self.assertIn("2048 ", text)
+
+    def test_eth_type_accessor(self):
+        """ETH-TYPE should read big-endian EtherType at offset 12."""
+        text = self._run_kdos([
+            "CREATE eth-t 20 ALLOT",
+            "eth-t 20 0 FILL",
+            "ETYPE-IP4 eth-t ETH-TYPE!",
+            "eth-t ETH-TYPE .",
+        ])
+        self.assertIn("2048 ", text)
+
+    def test_eth_pld_offset(self):
+        """ETH-PLD should return frame + 14."""
+        text = self._run_kdos([
+            "CREATE eth-p 20 ALLOT",
+            "eth-p ETH-PLD eth-p - .",
+        ])
+        self.assertIn("14 ", text)
+
+    def test_eth_src_dst_offsets(self):
+        """ETH-DST = frame+0, ETH-SRC = frame+6."""
+        text = self._run_kdos([
+            "CREATE eth-o 20 ALLOT",
+            "eth-o ETH-DST eth-o - . .\" dst\" ",
+            "eth-o ETH-SRC eth-o - . .\" src\" ",
+        ])
+        self.assertIn("0  dst", text)
+        self.assertIn("6  src", text)
+
+    def test_mac_equal(self):
+        """MAC= should return true for identical MACs."""
+        text = self._run_kdos([
+            "MAC-BCAST MAC-BCAST MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_mac_not_equal(self):
+        """MAC= should return false for different MACs."""
+        text = self._run_kdos([
+            "MAC-BCAST MY-MAC MAC= .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_dot_eth_prints_header(self):
+        """.ETH should print dst, src, type fields."""
+        text = self._run_kdos([
+            "CREATE eth-d 20 ALLOT",
+            "eth-d 20 0 FILL",
+            "MAC-BCAST eth-d ETH-DST 6 CMOVE",
+            "MY-MAC eth-d ETH-SRC 6 CMOVE",
+            "ETYPE-IP4 eth-d ETH-TYPE!",
+            "eth-d .ETH",
+        ])
+        self.assertIn("dst=", text)
+        self.assertIn("src=", text)
+        self.assertIn("type=", text)
+
+    # --- 9b: ETH-BUILD / ETH-PARSE ---
+
+    def test_eth_build_frame(self):
+        """ETH-BUILD should construct a frame with correct header."""
+        text = self._run_kdos([
+            "CREATE epay 4 ALLOT",
+            "epay 4 65 FILL",                         # payload = AAAA
+            "CREATE efr 64 ALLOT",
+            "efr 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay 4 efr ETH-BUILD .",  # total
+            "efr ETH-TYPE .",                          # should be 2048
+            "efr ETH-PLD C@ .",                        # should be 65
+        ])
+        self.assertIn("18 ", text)     # 14 + 4 = 18
+        self.assertIn("2048 ", text)   # ETYPE-IP4
+        self.assertIn("65 ", text)     # 'A'
+
+    def test_eth_build_dst_mac(self):
+        """ETH-BUILD should copy dst MAC correctly."""
+        text = self._run_kdos([
+            "CREATE epay2 1 ALLOT  0 epay2 C!",
+            "CREATE efr2 64 ALLOT  efr2 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay2 1 efr2 ETH-BUILD DROP",
+            "efr2 ETH-DST MAC-BCAST MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_build_src_mac(self):
+        """ETH-BUILD should copy src MAC correctly."""
+        text = self._run_kdos([
+            "CREATE epay3 1 ALLOT  0 epay3 C!",
+            "CREATE efr3 64 ALLOT  efr3 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay3 1 efr3 ETH-BUILD DROP",
+            "efr3 ETH-SRC MY-MAC MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_build_tx_convenience(self):
+        """ETH-BUILD-TX should use MY-MAC and ETH-TX-BUF."""
+        text = self._run_kdos([
+            "CREATE epay4 8 ALLOT  epay4 8 42 FILL",
+            "MAC-BCAST ETYPE-ARP epay4 8 ETH-BUILD-TX .",
+            "ETH-TX-BUF ETH-SRC MY-MAC MAC= .",
+            "ETH-TX-BUF ETH-TYPE .",
+        ])
+        self.assertIn("22 ", text)     # 14 + 8
+        self.assertIn("-1 ", text)     # src MAC matches MY-MAC
+        self.assertIn("2054 ", text)   # ETYPE-ARP
+
+    def test_eth_is_ip4(self):
+        """ETH-IS-IP4? should detect IPv4 frames."""
+        text = self._run_kdos([
+            "CREATE eip 20 ALLOT  eip 20 0 FILL",
+            "ETYPE-IP4 eip ETH-TYPE!",
+            "eip ETH-IS-IP4? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_is_arp(self):
+        """ETH-IS-ARP? should detect ARP frames."""
+        text = self._run_kdos([
+            "CREATE earp 20 ALLOT  earp 20 0 FILL",
+            "ETYPE-ARP earp ETH-TYPE!",
+            "earp ETH-IS-ARP? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_unicast(self):
+        """ETH-FOR-US? should match frames addressed to MY-MAC."""
+        text = self._run_kdos([
+            "CREATE efu 20 ALLOT  efu 20 0 FILL",
+            "MY-MAC efu ETH-DST 6 CMOVE",
+            "efu ETH-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_broadcast(self):
+        """ETH-FOR-US? should match broadcast frames."""
+        text = self._run_kdos([
+            "CREATE efub 20 ALLOT  efub 20 0 FILL",
+            "MAC-BCAST efub ETH-DST 6 CMOVE",
+            "efub ETH-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_other(self):
+        """ETH-FOR-US? should reject frames for other MACs."""
+        text = self._run_kdos([
+            "CREATE efuo 20 ALLOT  efuo 20 0 FILL",
+            "efuo ETH-FOR-US? .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_eth_frame_paylen(self):
+        """ETH-FRAME-PAYLEN computes payload length from ETH-RX-LEN."""
+        text = self._run_kdos([
+            "64 ETH-RX-LEN !",
+            "ETH-FRAME-PAYLEN .",
+        ])
+        self.assertIn("50 ", text)  # 64 - 14 = 50
+
+    # --- 9c: NIC TX integration ---
+
+    def test_eth_send_tx_builds_and_sends(self):
+        """ETH-SEND-TX should build a frame and transmit via NIC."""
+        text = self._run_kdos([
+            "CREATE etx-pay 4 ALLOT  etx-pay 4 99 FILL",
+            "MAC-BCAST ETYPE-IP4 etx-pay 4 ETH-SEND-TX",
+            ".\" ok-send\"",
+        ])
+        self.assertIn("ok-send", text)
+
+    def test_eth_send_counted(self):
+        """ETH-SEND-COUNTED should increment ETH-TX-COUNT."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !",
+            "CREATE etxp2 4 ALLOT  etxp2 4 1 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp2 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "ETH-TX-COUNT @ .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_eth_send_counted_increments(self):
+        """Multiple ETH-SEND-COUNTED calls increment the counter."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !",
+            "CREATE etxp3 4 ALLOT  etxp3 4 1 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp3 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp3 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "ETH-TX-COUNT @ .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_eth_send_is_net_send(self):
+        """ETH-SEND is a direct alias for NET-SEND."""
+        text = self._run_kdos([
+            "CREATE etxp4 20 ALLOT  etxp4 20 0 FILL",
+            "MY-MAC etxp4 ETH-SRC 6 CMOVE",
+            "ETYPE-IP4 etxp4 ETH-TYPE!",
+            "etxp4 20 ETH-SEND",
+            ".\" sent\"",
+        ])
+        self.assertIn("sent", text)
+
+    # --- 9d: NIC RX integration ---
+
+    @staticmethod
+    def _build_eth_frame(dst_mac, src_mac, ethertype, payload):
+        """Build a raw Ethernet frame (bytes) for NIC injection."""
+        frame = bytearray(dst_mac) + bytearray(src_mac) + \
+                ethertype.to_bytes(2, 'big') + bytearray(payload)
+        return bytes(frame)
+
+    # Default NIC MAC: 02:4D:50:36:34:00
+    NIC_MAC = bytes([0x02, 0x4D, 0x50, 0x36, 0x34, 0x00])
+    BCAST_MAC = bytes([0xFF] * 6)
+    OTHER_MAC = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01])
+
+    def test_eth_recv_no_frame(self):
+        """ETH-RECV should return 0 when no frame is available."""
+        text = self._run_kdos(["ETH-RECV ."])
+        self.assertIn("0 ", text)
+
+    def test_eth_recv_gets_frame(self):
+        """ETH-RECV should receive an injected frame."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x41' * 10)
+        text = self._run_kdos(
+            ["ETH-RECV ."],
+            nic_frames=[frame])
+        self.assertIn("24 ", text)  # 14 hdr + 10 payload = 24
+
+    def test_eth_recv_updates_rx_len(self):
+        """ETH-RECV should store frame length in ETH-RX-LEN."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 20)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-LEN @ ."],
+            nic_frames=[frame])
+        self.assertIn("34 ", text)  # 14 + 20
+
+    def test_eth_recv_increments_count(self):
+        """ETH-RECV should increment ETH-RX-COUNT."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["0 ETH-RX-COUNT !", "ETH-RECV DROP ETH-RX-COUNT @ ."],
+            nic_frames=[frame])
+        self.assertIn("1 ", text)
+
+    def test_eth_recv_reads_ethertype(self):
+        """After ETH-RECV, ETH-RX-BUF should have correct EtherType."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0806, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-BUF ETH-TYPE ."],
+            nic_frames=[frame])
+        self.assertIn("2054 ", text)  # 0x0806 = ETYPE-ARP
+
+    def test_eth_recv_reads_payload(self):
+        """After ETH-RECV, ETH-RX-BUF payload should match injected data."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x42' * 8)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-BUF ETH-PLD C@ ."],
+            nic_frames=[frame])
+        self.assertIn("66 ", text)  # 0x42
+
+    def test_eth_recv_filter_for_us(self):
+        """ETH-RECV-FILTER should accept frames addressed to us."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("18 ", text)  # 14 + 4
+
+    def test_eth_recv_filter_broadcast(self):
+        """ETH-RECV-FILTER should accept broadcast frames."""
+        frame = self._build_eth_frame(
+            self.BCAST_MAC, self.OTHER_MAC, 0x0806, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("18 ", text)
+
+    def test_eth_recv_filter_rejects_other(self):
+        """ETH-RECV-FILTER should reject frames for other MACs."""
+        other_dst = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        frame = self._build_eth_frame(
+            other_dst, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_net_stats(self):
+        """.NET-STATS should print tx= and rx= counters."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !  0 ETH-RX-COUNT !",
+            ".NET-STATS",
+        ])
+        self.assertIn("tx=", text)
+        self.assertIn("rx=", text)
+
+    def test_eth_recv_wait_no_frame(self):
+        """ETH-RECV-WAIT should return 0 if no frame arrives."""
+        text = self._run_kdos(["5 ETH-RECV-WAIT ."])
+        self.assertIn("0 ", text)
+
+    # --- 10a: ARP table data structure + lookup/insert ---
+
+    def test_arp_constants(self):
+        """ARP constants should have correct values."""
+        text = self._run_kdos([
+            "/ARP-ENTRY .",
+            "ARP-MAX-ENTRIES .",
+            "/ARP-PKT .",
+        ])
+        self.assertIn("16 ", text)
+        self.assertIn("8 ", text)
+        self.assertIn("28 ", text)
+
+    def test_arp_table_initially_empty(self):
+        """ARP-LOOKUP should return 0 for unknown IP."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE tip 4 ALLOT  10 tip C!  0 tip 1+ C!  0 tip 2 + C!  1 tip 3 + C!",
+            "tip ARP-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_arp_insert_and_lookup(self):
+        """ARP-INSERT then ARP-LOOKUP should return the MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip 4 ALLOT  192 aip C!  168 aip 1+ C!  1 aip 2 + C!  1 aip 3 + C!",
+            "CREATE amac 6 ALLOT  170 amac C!  187 amac 1+ C!  204 amac 2 + C!",
+            "221 amac 3 + C!  238 amac 4 + C!  1 amac 5 + C!",
+            "aip amac ARP-INSERT",
+            "aip ARP-LOOKUP DUP 0<> . .\" found\"",
+        ])
+        self.assertIn("-1  found", text)
+
+    def test_arp_lookup_returns_correct_mac(self):
+        """ARP-LOOKUP should return address of stored MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip2 4 ALLOT  10 aip2 C!  0 aip2 1+ C!  0 aip2 2 + C!  1 aip2 3 + C!",
+            "CREATE amac2 6 ALLOT  17 amac2 C!  34 amac2 1+ C!  51 amac2 2 + C!",
+            "68 amac2 3 + C!  85 amac2 4 + C!  102 amac2 5 + C!",
+            "aip2 amac2 ARP-INSERT",
+            "aip2 ARP-LOOKUP DUP 0<> IF",
+            "  DUP C@ . DUP 1+ C@ .",   # first 2 MAC bytes
+            "THEN DROP",
+        ])
+        self.assertIn("17 ", text)     # 0x11
+        self.assertIn("34 ", text)     # 0x22
+
+    def test_arp_insert_update(self):
+        """ARP-INSERT with same IP should update the MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip3 4 ALLOT  10 aip3 C!  1 aip3 1+ C!  1 aip3 2 + C!  1 aip3 3 + C!",
+            "CREATE am3a 6 ALLOT  am3a 6 17 FILL",
+            "CREATE am3b 6 ALLOT  am3b 6 34 FILL",
+            "aip3 am3a ARP-INSERT",
+            "aip3 am3b ARP-INSERT",           # update same IP
+            "aip3 ARP-LOOKUP C@ .",
+        ])
+        self.assertIn("34 ", text)   # updated to 0x22
+
+    def test_arp_clear(self):
+        """ARP-CLEAR should wipe all entries."""
+        text = self._run_kdos([
+            "CREATE aip4 4 ALLOT  10 aip4 C!  0 aip4 1+ C!  0 aip4 2 + C!  99 aip4 3 + C!",
+            "CREATE am4 6 ALLOT  am4 6 255 FILL",
+            "aip4 am4 ARP-INSERT",
+            "ARP-CLEAR",
+            "aip4 ARP-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_ip_set_and_my_ip(self):
+        """IP-SET should configure MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            ".\" ip=\" MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
+        ])
+        # Use tagged output to avoid matching echoed input
+        self.assertIn("ip=192 168 1 100 ", text)
+
+    def test_dot_arp_prints_table(self):
+        """.ARP should print the ARP table."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            ".ARP",
+        ])
+        self.assertIn("ARP table", text)
+
+    def test_ip_equal(self):
+        """IP= should compare two 4-byte addresses."""
+        text = self._run_kdos([
+            "CREATE iq1 4 ALLOT  10 iq1 C!  0 iq1 1+ C!  0 iq1 2 + C!  1 iq1 3 + C!",
+            "CREATE iq2 4 ALLOT  10 iq2 C!  0 iq2 1+ C!  0 iq2 2 + C!  1 iq2 3 + C!",
+            "iq1 iq2 IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_not_equal(self):
+        """IP= should detect different addresses."""
+        text = self._run_kdos([
+            "CREATE iq3 4 ALLOT  10 iq3 C!  0 iq3 1+ C!  0 iq3 2 + C!  1 iq3 3 + C!",
+            "CREATE iq4 4 ALLOT  10 iq4 C!  0 iq4 1+ C!  0 iq4 2 + C!  2 iq4 3 + C!",
+            "iq3 iq4 IP= .",
+        ])
+        self.assertIn("0 ", text)
+
+    # --- 10b: ARP request/reply build+parse + ARP-RESOLVE ---
+
+    def test_arp_op_constants(self):
+        """ARP operation constants."""
+        text = self._run_kdos([
+            "ARP-OP-REQUEST .",
+            "ARP-OP-REPLY .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+
+    def test_arp_build_request_length(self):
+        """ARP-BUILD-REQUEST should return 28-byte payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip 4 ALLOT  192 tip C!  168 tip 1+ C!  1 tip 2 + C!  1 tip 3 + C!",
+            "tip ARP-BUILD-REQUEST . DROP",
+        ])
+        self.assertIn("28 ", text)
+
+    def test_arp_build_request_htype(self):
+        """ARP request should have HTYPE=0x0001."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip2 4 ALLOT  10 tip2 C!  0 tip2 1+ C!  0 tip2 2 + C!  1 tip2 3 + C!",
+            "tip2 ARP-BUILD-REQUEST DROP",   # buf on stack
+            "DUP ARP-F.HTYPE C@ .  DUP ARP-F.HTYPE 1+ C@ . DROP",
+        ])
+        self.assertIn("0 ", text)   # high byte = 0
+        self.assertIn("1 ", text)   # low byte = 1
+
+    def test_arp_build_request_ptype(self):
+        """ARP request should have PTYPE=0x0800."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip3 4 ALLOT  10 tip3 C!  0 tip3 1+ C!  0 tip3 2 + C!  1 tip3 3 + C!",
+            "tip3 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.PTYPE C@ .  DUP ARP-F.PTYPE 1+ C@ . DROP",
+        ])
+        self.assertIn("8 ", text)    # high byte
+        self.assertIn("0 ", text)    # low byte
+
+    def test_arp_build_request_oper(self):
+        """ARP request should have OPER=1 (request)."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip4 4 ALLOT  10 tip4 C!  0 tip4 1+ C!  0 tip4 2 + C!  1 tip4 3 + C!",
+            "tip4 ARP-BUILD-REQUEST DROP",
+            "ARP-IS-REQUEST? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_sha_is_my_mac(self):
+        """ARP request SHA should be MY-MAC."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip5 4 ALLOT  10 tip5 C!  0 tip5 1+ C!  0 tip5 2 + C!  1 tip5 3 + C!",
+            "tip5 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.SHA MY-MAC 6 SAMESTR? .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_spa_is_my_ip(self):
+        """ARP request SPA should be MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip6 4 ALLOT  10 tip6 C!  0 tip6 1+ C!  0 tip6 2 + C!  1 tip6 3 + C!",
+            "tip6 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.SPA MY-IP IP= .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_tpa_matches(self):
+        """ARP request TPA should be the target IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip7 4 ALLOT  10 tip7 C!  0 tip7 1+ C!  0 tip7 2 + C!  99 tip7 3 + C!",
+            "tip7 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.TPA tip7 IP= .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_is_request(self):
+        """ARP-IS-REQUEST? on a built request."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip8 4 ALLOT  10 tip8 C!  0 tip8 1+ C!  0 tip8 2 + C!  1 tip8 3 + C!",
+            "tip8 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-IS-REQUEST? . ARP-IS-REPLY? .",
+        ])
+        self.assertIn("-1 ", text)   # is request
+        self.assertIn("0 ", text)    # not reply
+
+    def test_arp_build_reply(self):
+        """ARP-BUILD-REPLY should produce OPER=2 with correct THA/TPA."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Build a fake request buffer in memory
+            "CREATE rq 28 ALLOT  rq 28 0 FILL",
+            # Set SHA = AA:BB:CC:DD:EE:01
+            "170 rq 8 + C!  187 rq 9 + C!  204 rq 10 + C!",
+            "221 rq 11 + C!  238 rq 12 + C!  1 rq 13 + C!",
+            # Set SPA = 192.168.1.50
+            "192 rq 14 + C!  168 rq 15 + C!  1 rq 16 + C!  50 rq 17 + C!",
+            "rq ARP-BUILD-REPLY DROP",   # build reply in ARP-PKT-BUF
+            "DUP ARP-IS-REPLY? .\" rep\"",
+            # THA should be the requester's SHA
+            "DUP ARP-F.THA C@ .",        # should be 170 (0xAA)
+            # TPA should be requester's SPA (192.168.1.50)
+            "DUP ARP-F.TPA C@ .",        # should be 192
+            "DROP",
+        ])
+        self.assertIn("rep", text)
+        self.assertIn("170 ", text)
+        self.assertIn("192 ", text)
+
+    def test_arp_for_us(self):
+        """ARP-FOR-US? should match when TPA = MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE rq2 28 ALLOT  rq2 28 0 FILL",
+            # TPA = 192.168.1.100 (MY-IP)
+            "192 rq2 24 + C!  168 rq2 25 + C!  1 rq2 26 + C!  100 rq2 27 + C!",
+            "rq2 ARP-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_not_for_us(self):
+        """ARP-FOR-US? should reject when TPA != MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE rq3 28 ALLOT  rq3 28 0 FILL",
+            "192 rq3 24 + C!  168 rq3 25 + C!  1 rq3 26 + C!  200 rq3 27 + C!",
+            "rq3 ARP-FOR-US? .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_arp_parse_reply_inserts(self):
+        """ARP-PARSE-REPLY should insert sender into ARP table."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            # Build a fake reply buffer: SPA=10.0.0.42, SHA=11:22:33:44:55:66
+            "CREATE rep 28 ALLOT  rep 28 0 FILL",
+            "17 rep 8 + C!  34 rep 9 + C!  51 rep 10 + C!",
+            "68 rep 11 + C!  85 rep 12 + C!  102 rep 13 + C!",
+            "10 rep 14 + C!  0 rep 15 + C!  0 rep 16 + C!  42 rep 17 + C!",
+            "rep ARP-PARSE-REPLY",
+            # Now look up 10.0.0.42
+            "CREATE lip 4 ALLOT  10 lip C!  0 lip 1+ C!  0 lip 2 + C!  42 lip 3 + C!",
+            "lip ARP-LOOKUP DUP 0<> .\" ok\"",
+            "DUP IF C@ . THEN DROP",
+        ])
+        self.assertIn("ok", text)
+        self.assertIn("17 ", text)   # first MAC byte
+
+    @staticmethod
+    def _build_arp_reply_frame(sender_mac, sender_ip, target_mac, target_ip):
+        """Build a raw ARP reply Ethernet frame for NIC injection."""
+        # Ethernet header: dst=target_mac, src=sender_mac, type=0x0806
+        frame = bytes(target_mac) + bytes(sender_mac) + b'\x08\x06'
+        # ARP payload (28 bytes)
+        arp = bytearray(28)
+        arp[0:2] = b'\x00\x01'   # HTYPE=1
+        arp[2:4] = b'\x08\x00'   # PTYPE=0x0800
+        arp[4] = 6               # HLEN
+        arp[5] = 4               # PLEN
+        arp[6:8] = b'\x00\x02'   # OPER=2 (reply)
+        arp[8:14] = bytes(sender_mac)   # SHA
+        arp[14:18] = bytes(sender_ip)   # SPA
+        arp[18:24] = bytes(target_mac)  # THA
+        arp[24:28] = bytes(target_ip)   # TPA
+        return frame + bytes(arp)
+
+    def test_arp_resolve_cached(self):
+        """ARP-RESOLVE should return cached entry without sending."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE rip 4 ALLOT  10 rip C!  0 rip 1+ C!  0 rip 2 + C!  1 rip 3 + C!",
+            "CREATE rmac 6 ALLOT  rmac 6 170 FILL",
+            "rip rmac ARP-INSERT",
+            "rip ARP-RESOLVE 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_resolve_with_reply(self):
+        """ARP-RESOLVE should get MAC from injected ARP reply."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        other_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        my_ip = [192, 168, 1, 100]
+        target_ip = [192, 168, 1, 50]
+        reply_frame = self._build_arp_reply_frame(
+            other_mac, target_ip, nic_mac, my_ip)
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE trg 4 ALLOT  192 trg C!  168 trg 1+ C!  1 trg 2 + C!  50 trg 3 + C!",
+            "trg ARP-RESOLVE 0<> .\" resolved\"",
+            "trg ARP-LOOKUP C@ .",
+        ], nic_frames=[reply_frame])
+        self.assertIn("resolved", text)
+        self.assertIn("170 ", text)  # 0xAA = first byte of other_mac
+
+    def test_arp_resolve_miss_no_reply(self):
+        """ARP-RESOLVE should return 0 when no reply arrives."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE trg2 4 ALLOT  10 trg2 C!  0 trg2 1+ C!  0 trg2 2 + C!  99 trg2 3 + C!",
+            "trg2 ARP-RESOLVE .",
+        ])
+        self.assertIn("0 ", text)
+
+    # --- 10c: ARP auto-responder ---
+
+    @staticmethod
+    def _build_arp_request_frame(sender_mac, sender_ip, target_ip):
+        """Build a raw ARP request Ethernet frame (broadcast)."""
+        dst = b'\xff\xff\xff\xff\xff\xff'
+        frame = dst + bytes(sender_mac) + b'\x08\x06'
+        arp = bytearray(28)
+        arp[0:2] = b'\x00\x01'   # HTYPE
+        arp[2:4] = b'\x08\x00'   # PTYPE
+        arp[4] = 6               # HLEN
+        arp[5] = 4               # PLEN
+        arp[6:8] = b'\x00\x01'   # OPER=1 (request)
+        arp[8:14] = bytes(sender_mac)
+        arp[14:18] = bytes(sender_ip)
+        # THA = 00:00:00:00:00:00 (unknown)
+        arp[24:28] = bytes(target_ip)
+        return frame + bytes(arp)
+
+    def test_arp_handle_request_for_us(self):
+        """ARP-HANDLE should return -1 when it handles a request for us."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",   # receive the injected frame
+            "ARP-HANDLE .",
+        ], nic_frames=[req])
+        self.assertIn("-1 ", text)
+
+    def test_arp_handle_learns_sender(self):
+        """ARP-HANDLE should record the requester's MAC/IP in the table."""
+        req = self._build_arp_request_frame(
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            [10, 0, 0, 42],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE DROP",
+            "CREATE lip 4 ALLOT  10 lip C!  0 lip 1+ C!  0 lip 2 + C!  42 lip 3 + C!",
+            "lip ARP-LOOKUP C@ .",
+        ], nic_frames=[req])
+        self.assertIn("17 ", text)   # 0x11
+
+    def test_arp_handle_sends_reply(self):
+        """ARP-HANDLE should increment TX count (sent a reply)."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE DROP",
+            "ETH-TX-COUNT @ .",
+        ], nic_frames=[req])
+        self.assertIn("1 ", text)
+
+    def test_arp_handle_not_for_us(self):
+        """ARP-HANDLE should return 0 for requests targeting other IPs."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 200])  # not our IP
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE .",
+        ], nic_frames=[req])
+        self.assertIn("0 ", text)
+
+    def test_arp_handle_not_arp(self):
+        """ARP-HANDLE should return 0 for non-ARP frames."""
+        # Build an IPv4 frame (not ARP)
+        frame = self._build_eth_frame(
+            self.BCAST_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 20)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_arp_poll_handles_request(self):
+        """ARP-POLL should receive and auto-handle an ARP request."""
+        req = self._build_arp_request_frame(
+            [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+            [10, 0, 0, 1],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ARP-POLL .\" h\" .",
+        ], nic_frames=[req])
+        # ARP-POLL returns ( len handled? ) — handled? should be -1
+        self.assertIn("h", text)
+        self.assertIn("-1 ", text)
+
+    def test_arp_poll_no_frame(self):
+        """ARP-POLL should return 0 0 when no frame is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "ARP-POLL . .",
+        ])
+        self.assertIn("0 0 ", text)
+
+    # --- 11a: IPv4 header struct, IP-BUILD, IP-PARSE, checksum ---
+
+    def test_ip_hdr_size(self):
+        """/IP-HDR should be 20."""
+        text = self._run_kdos(["/IP-HDR ."])
+        self.assertIn("20 ", text)
+
+    def test_ip_proto_constants(self):
+        """IP protocol constants."""
+        text = self._run_kdos([
+            "IP-PROTO-ICMP . IP-PROTO-TCP . IP-PROTO-UDP .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("6 ", text)
+        self.assertIn("17 ", text)
+
+    def test_nw16_store_fetch(self):
+        """NW16! and NW16@ should round-trip big-endian 16-bit values."""
+        text = self._run_kdos([
+            "CREATE nb 2 ALLOT",
+            "4660 nb NW16!  nb NW16@ .",   # 0x1234
+        ])
+        self.assertIn("4660 ", text)
+
+    def test_ip_checksum_zeros(self):
+        """Checksum of all-zero buffer should be 0xFFFF."""
+        text = self._run_kdos([
+            "CREATE zb 20 ALLOT  zb 20 0 FILL",
+            "zb 20 IP-CHECKSUM .",
+        ])
+        self.assertIn("65535 ", text)
+
+    def test_ip_build_returns_correct_length(self):
+        """IP-BUILD should return total = 20 + payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst 4 ALLOT  10 dst C!  0 dst 1+ C!  0 dst 2 + C!  1 dst 3 + C!",
+            "CREATE pay 8 ALLOT  pay 8 65 FILL",   # 'A' * 8
+            "IP-PROTO-UDP dst pay 8 IP-BUILD .\" len=\" . DROP",
+        ])
+        self.assertIn("len=28 ", text)   # 20 + 8
+
+    def test_ip_build_ver_ihl(self):
+        """IP-BUILD header should have ver/ihl = 0x45."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst2 4 ALLOT  10 dst2 C!  0 dst2 1+ C!  0 dst2 2 + C!  1 dst2 3 + C!",
+            "CREATE pay2 4 ALLOT  pay2 4 0 FILL",
+            "IP-PROTO-ICMP dst2 pay2 4 IP-BUILD DROP",
+            "IP-H.VER C@ .",
+        ])
+        self.assertIn("69 ", text)   # 0x45
+
+    def test_ip_build_ttl(self):
+        """IP-BUILD header should have TTL = 64."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst3 4 ALLOT  10 dst3 C!  0 dst3 1+ C!  0 dst3 2 + C!  1 dst3 3 + C!",
+            "CREATE pay3 4 ALLOT  pay3 4 0 FILL",
+            "IP-PROTO-TCP dst3 pay3 4 IP-BUILD DROP",
+            "IP-H.TTL C@ .",
+        ])
+        self.assertIn("64 ", text)
+
+    def test_ip_build_proto(self):
+        """IP-BUILD should set the protocol field."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst4 4 ALLOT  10 dst4 C!  0 dst4 1+ C!  0 dst4 2 + C!  1 dst4 3 + C!",
+            "CREATE pay4 4 ALLOT  pay4 4 0 FILL",
+            "IP-PROTO-UDP dst4 pay4 4 IP-BUILD DROP",
+            "IP-H.PROTO C@ .",
+        ])
+        self.assertIn("17 ", text)
+
+    def test_ip_build_src_is_my_ip(self):
+        """IP-BUILD source should be MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst5 4 ALLOT  10 dst5 C!  0 dst5 1+ C!  0 dst5 2 + C!  1 dst5 3 + C!",
+            "CREATE pay5 4 ALLOT  pay5 4 0 FILL",
+            "IP-PROTO-ICMP dst5 pay5 4 IP-BUILD DROP",
+            "IP-H.SRC MY-IP IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_dst(self):
+        """IP-BUILD destination should match target."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst6 4 ALLOT  10 dst6 C!  0 dst6 1+ C!  0 dst6 2 + C!  99 dst6 3 + C!",
+            "CREATE pay6 4 ALLOT  pay6 4 0 FILL",
+            "IP-PROTO-UDP dst6 pay6 4 IP-BUILD DROP",
+            "IP-H.DST dst6 IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_valid_checksum(self):
+        """IP-BUILD header checksum should verify correctly."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst7 4 ALLOT  10 dst7 C!  0 dst7 1+ C!  0 dst7 2 + C!  1 dst7 3 + C!",
+            "CREATE pay7 4 ALLOT  pay7 4 0 FILL",
+            "IP-PROTO-ICMP dst7 pay7 4 IP-BUILD DROP",
+            "IP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_dont_fragment(self):
+        """IP-BUILD should set Don't Fragment flag (0x4000)."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst8 4 ALLOT  10 dst8 C!  0 dst8 1+ C!  0 dst8 2 + C!  1 dst8 3 + C!",
+            "CREATE pay8 4 ALLOT  pay8 4 0 FILL",
+            "IP-PROTO-TCP dst8 pay8 4 IP-BUILD DROP",
+            "IP-H.FLAGS NW16@ .",
+        ])
+        self.assertIn("16384 ", text)  # 0x4000
+
+    def test_ip_parse_extracts_fields(self):
+        """IP-PARSE should extract proto, src, dst, data, datalen."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst9 4 ALLOT  10 dst9 C!  0 dst9 1+ C!  0 dst9 2 + C!  1 dst9 3 + C!",
+            "CREATE pay9 5 ALLOT  pay9 5 66 FILL",  # 'B' * 5
+            "IP-PROTO-UDP dst9 pay9 5 IP-BUILD DROP",
+            # IP-PARSE returns ( proto src dst data datalen )
+            "IP-PARSE .\" dl=\" . DROP DROP",
+            "DROP .",  # proto
+        ])
+        self.assertIn("dl=5 ", text)
+        self.assertIn("17 ", text)   # UDP proto
+
+    def test_ip_build_total_len_field(self):
+        """IP total length field should be /IP-HDR + payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dstA 4 ALLOT  10 dstA C!  0 dstA 1+ C!  0 dstA 2 + C!  1 dstA 3 + C!",
+            "CREATE payA 10 ALLOT  payA 10 0 FILL",
+            "IP-PROTO-ICMP dstA payA 10 IP-BUILD DROP",
+            "IP-H.TLEN NW16@ .",
+        ])
+        self.assertIn("30 ", text)  # 20 + 10
+
+    # --- 11b: IP-SEND (ARP resolve → Ethernet → NIC TX) ---
+
+    def test_ip_send_with_cached_arp(self):
+        """IP-SEND should succeed when ARP entry is pre-cached."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE gw 4 ALLOT  192 gw C!  168 gw 1+ C!  1 gw 2 + C!  1 gw 3 + C!",
+            "CREATE gwm 6 ALLOT  gwm 6 170 FILL",
+            "gw gwm ARP-INSERT",
+            "CREATE pl 4 ALLOT  pl 4 72 FILL",  # 'H' * 4
+            "IP-PROTO-UDP gw pl 4 IP-SEND .",
+        ])
+        self.assertIn("0 ", text)   # ior = 0 (success)
+
+    def test_ip_send_increments_tx(self):
+        """IP-SEND should transmit a frame (check NIC tx_count register)."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE gw2 4 ALLOT  192 gw2 C!  168 gw2 1+ C!  1 gw2 2 + C!  1 gw2 3 + C!",
+            "CREATE gwm2 6 ALLOT  gwm2 6 187 FILL",
+            "gw2 gwm2 ARP-INSERT",
+            "CREATE pl2 4 ALLOT  pl2 4 0 FILL",
+            "IP-PROTO-ICMP gw2 pl2 4 IP-SEND .\" s=\" .",
+        ])
+        self.assertIn("s=0 ", text)   # ior=0 means success
+
+    def test_ip_send_arp_failure(self):
+        """IP-SEND should return -1 when ARP resolution fails."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE unk 4 ALLOT  10 unk C!  99 unk 1+ C!  99 unk 2 + C!  99 unk 3 + C!",
+            "CREATE pl3 4 ALLOT  pl3 4 0 FILL",
+            "IP-PROTO-UDP unk pl3 4 IP-SEND .",
+        ])
+        self.assertIn("-1 ", text)   # ARP failure
+
+    # --- 11c: IP-RECV (demux incoming Ethernet by EtherType) ---
+
+    @staticmethod
+    def _build_ip_frame(dst_mac, src_mac, proto, src_ip, dst_ip, payload):
+        """Build a raw Ethernet+IPv4 frame for NIC injection."""
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'  # EtherType=IPv4
+        # IPv4 header
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45          # ver/ihl
+        total_len = 20 + len(payload)
+        ip_hdr[2] = (total_len >> 8) & 0xFF
+        ip_hdr[3] = total_len & 0xFF
+        ip_hdr[6] = 0x40          # DF
+        ip_hdr[8] = 64            # TTL
+        ip_hdr[9] = proto
+        ip_hdr[12:16] = bytes(src_ip)
+        ip_hdr[16:20] = bytes(dst_ip)
+        # Compute header checksum
+        s = 0
+        for i in range(0, 20, 2):
+            s += (ip_hdr[i] << 8) | ip_hdr[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        ip_hdr[10] = (cksum >> 8) & 0xFF
+        ip_hdr[11] = cksum & 0xFF
+        return eth + bytes(ip_hdr) + bytes(payload)
+
+    def test_ip_recv_ipv4_frame(self):
+        """IP-RECV should return IP header+len for valid IPv4 frames."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xAA]*6, 17,   # UDP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x42' * 8)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV .\" len=\" . 0<> .\" got\"",
+        ], nic_frames=[frame])
+        self.assertIn("len=28 ", text)  # 20 hdr + 8 payload
+        self.assertIn("got", text)
+
+    def test_ip_recv_no_frame(self):
+        """IP-RECV should return 0 0 when nothing is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_arp_handled_transparently(self):
+        """IP-RECV should auto-handle ARP and return 0 0."""
+        req = self._build_arp_request_frame(
+            [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+            [10, 0, 0, 1],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ], nic_frames=[req])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_non_ip_discarded(self):
+        """IP-RECV should discard non-IPv4, non-ARP frames."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x86DD, b'\x00' * 20)  # IPv6
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ], nic_frames=[frame])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_extracts_proto(self):
+        """IP-RECV result can be parsed to extract protocol."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xBB]*6, 1,   # ICMP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 12)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV .\" len=\" . DROP",
+            "ETH-RX-BUF ETH-PLD IP-H.PROTO C@ .\" p=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("p=1 ", text)
+
+    def test_ip_recv_wait_timeout(self):
+        """IP-RECV-WAIT should return 0 0 after timeout."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "5 IP-RECV-WAIT . .",
+        ])
+        self.assertIn("0 0 ", text)
+
+    # --- 12a: ICMP echo request/reply parse+build ---
+
+    def test_icmp_constants(self):
+        """ICMP constants should be correct."""
+        text = self._run_kdos([
+            "/ICMP-HDR . ICMP-TYPE-ECHO-REQ . ICMP-TYPE-ECHO-REP .",
+        ])
+        self.assertIn("8 ", text)   # header size and echo req type
+        self.assertIn("0 ", text)   # echo rep type
+
+    def test_icmp_build_echo_req_length(self):
+        """ICMP-BUILD-ECHO-REQ returns correct total length."""
+        text = self._run_kdos([
+            "CREATE ep 4 ALLOT  ep 4 65 FILL",
+            "ep 4 ICMP-BUILD-ECHO-REQ .\" len=\" . DROP",
+        ])
+        self.assertIn("len=12 ", text)  # 8 hdr + 4 payload
+
+    def test_icmp_build_echo_req_type(self):
+        """ICMP echo request should have type=8."""
+        text = self._run_kdos([
+            "CREATE ep2 4 ALLOT  ep2 4 0 FILL",
+            "ep2 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-H.TYPE C@ .",
+        ])
+        self.assertIn("8 ", text)
+
+    def test_icmp_build_echo_req_checksum_valid(self):
+        """ICMP echo request checksum should validate."""
+        text = self._run_kdos([
+            "CREATE ep3 4 ALLOT  ep3 4 66 FILL",
+            "ep3 4 ICMP-BUILD-ECHO-REQ",
+            "IP-CHECKSUM .",  # should be 0 for valid checksum
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_build_echo_req_ident(self):
+        """ICMP echo request ident should be 0x4D50 (MP)."""
+        text = self._run_kdos([
+            "CREATE ep4 4 ALLOT  ep4 4 0 FILL",
+            "ep4 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-H.IDENT NW16@ .",
+        ])
+        self.assertIn("19792 ", text)  # 0x4D50
+
+    def test_icmp_build_echo_rep_type(self):
+        """ICMP-BUILD-ECHO-REP should produce type=0."""
+        text = self._run_kdos([
+            # Build a request first
+            "CREATE ep5 4 ALLOT  ep5 4 67 FILL",
+            "ep5 4 ICMP-BUILD-ECHO-REQ",
+            # Save req somewhere to build reply from it
+            "CREATE rq 12 ALLOT",
+            "OVER rq 12 CMOVE  2DROP",   # copy ICMP-BUF to rq
+            # Build reply from rq
+            "rq 12 ICMP-BUILD-ECHO-REP DROP",
+            "ICMP-H.TYPE C@ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_build_echo_rep_checksum_valid(self):
+        """ICMP echo reply checksum should validate."""
+        text = self._run_kdos([
+            "CREATE ep6 4 ALLOT  ep6 4 68 FILL",
+            "ep6 4 ICMP-BUILD-ECHO-REQ",
+            "CREATE rq2 12 ALLOT",
+            "OVER rq2 12 CMOVE  2DROP",
+            "rq2 12 ICMP-BUILD-ECHO-REP",
+            "IP-CHECKSUM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_is_echo_req(self):
+        """ICMP-IS-ECHO-REQ? should detect type 8."""
+        text = self._run_kdos([
+            "CREATE ep7 4 ALLOT  ep7 4 0 FILL",
+            "ep7 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-IS-ECHO-REQ? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_icmp_seq_increments(self):
+        """ICMP seq number should increment on successive calls."""
+        text = self._run_kdos([
+            "0 ICMP-SEQ !",
+            "CREATE ep8 1 ALLOT  0 ep8 C!",
+            "ep8 1 ICMP-BUILD-ECHO-REQ DROP ICMP-H.SEQ NW16@ .",
+            "ep8 1 ICMP-BUILD-ECHO-REQ DROP ICMP-H.SEQ NW16@ .",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+
+    # --- 12b: ICMP auto-responder ---
+
+    @staticmethod
+    def _build_icmp_echo_req_frame(dst_mac, src_mac, src_ip, dst_ip,
+                                    ident=0x1234, seq=1, payload=b''):
+        """Build a full Ethernet+IPv4+ICMP echo request frame."""
+        # ICMP message
+        icmp = bytearray(8 + len(payload))
+        icmp[0] = 8   # type=8 echo request
+        icmp[1] = 0   # code=0
+        icmp[4] = (ident >> 8) & 0xFF
+        icmp[5] = ident & 0xFF
+        icmp[6] = (seq >> 8) & 0xFF
+        icmp[7] = seq & 0xFF
+        icmp[8:] = payload
+        # ICMP checksum
+        s = 0
+        padded = bytes(icmp) + (b'\x00' if len(icmp) % 2 else b'')
+        for i in range(0, len(padded), 2):
+            s += (padded[i] << 8) | padded[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        icmp[2] = (cksum >> 8) & 0xFF
+        icmp[3] = cksum & 0xFF
+
+        # IPv4 header
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45
+        total_len = 20 + len(icmp)
+        ip_hdr[2] = (total_len >> 8) & 0xFF
+        ip_hdr[3] = total_len & 0xFF
+        ip_hdr[6] = 0x40  # DF
+        ip_hdr[8] = 64    # TTL
+        ip_hdr[9] = 1     # ICMP
+        ip_hdr[12:16] = bytes(src_ip)
+        ip_hdr[16:20] = bytes(dst_ip)
+        s = 0
+        for i in range(0, 20, 2):
+            s += (ip_hdr[i] << 8) | ip_hdr[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        ip_hdr[10] = (cksum >> 8) & 0xFF
+        ip_hdr[11] = cksum & 0xFF
+
+        # Ethernet
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'
+        return eth + bytes(ip_hdr) + bytes(icmp)
+
+    def test_icmp_handle_echo_req(self):
+        """ICMP-HANDLE should return -1 for an echo request."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_icmp_echo_req_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            payload=b'hello123')
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            # Pre-cache ARP for the sender
+            "CREATE sip 4 ALLOT  10 sip C!  0 sip 1+ C!  0 sip 2 + C!  1 sip 3 + C!",
+            "CREATE smac 6 ALLOT  smac 6 170 FILL",
+            "sip smac ARP-INSERT",
+            "IP-RECV ICMP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_icmp_handle_non_icmp(self):
+        """ICMP-HANDLE should return 0 for non-ICMP packets."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xBB]*6, 17,   # UDP not ICMP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 8)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV ICMP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_ping_poll_handles_ping(self):
+        """PING-POLL should auto-reply to an echo request."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_icmp_echo_req_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            payload=b'ping')
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE sip2 4 ALLOT  10 sip2 C!  0 sip2 1+ C!  0 sip2 2 + C!  1 sip2 3 + C!",
+            "CREATE smac2 6 ALLOT  smac2 6 170 FILL",
+            "sip2 smac2 ARP-INSERT",
+            "PING-POLL .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_ping_poll_no_frame(self):
+        """PING-POLL should return 0 when nothing is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "PING-POLL .",
+        ])
+        self.assertIn("0 ", text)
+
+    # -- 13a: UDP header build/parse, checksum --
+
+    def test_udp_hdr_size(self):
+        """/UDP-HDR should be 8."""
+        text = self._run_kdos(["/UDP-HDR ."])
+        self.assertIn("8 ", text)
+
+    def test_udp_build_basic(self):
+        """UDP-BUILD should produce an 8+N byte datagram."""
+        text = self._run_kdos([
+            "CREATE TPAY 4 ALLOT",
+            "65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            ".\" tlen=\" .",            # total len = 8 + 4 = 12
+        ])
+        self.assertIn("tlen=12 ", text)
+
+    def test_udp_build_ports(self):
+        """UDP-BUILD should store src/dst ports correctly."""
+        text = self._run_kdos([
+            "CREATE TPAY 2 ALLOT  72 TPAY C!  73 TPAY 1+ C!",
+            "1234 5678 TPAY 2 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.SPORT NW16@ .\" sp=\" .",
+            "UDP-TX-BUF UDP-H.DPORT NW16@ .\" dp=\" .",
+        ])
+        self.assertIn("sp=1234 ", text)
+        self.assertIn("dp=5678 ", text)
+
+    def test_udp_build_length_field(self):
+        """UDP-BUILD should set length field = header + payload."""
+        text = self._run_kdos([
+            "CREATE TPAY 10 ALLOT  TPAY 10 65 FILL",
+            "100 200 TPAY 10 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.LEN NW16@ .\" len=\" .",
+        ])
+        self.assertIn("len=18 ", text)   # 8 + 10
+
+    def test_udp_build_payload_copied(self):
+        """UDP-BUILD should copy payload into the datagram."""
+        text = self._run_kdos([
+            "CREATE TPAY 3 ALLOT  88 TPAY C!  89 TPAY 1+ C!  90 TPAY 2 + C!",
+            "100 200 TPAY 3 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.DATA C@ .\" b0=\" .",
+            "UDP-TX-BUF UDP-H.DATA 1+ C@ .\" b1=\" .",
+            "UDP-TX-BUF UDP-H.DATA 2 + C@ .\" b2=\" .",
+        ])
+        self.assertIn("b0=88 ", text)
+        self.assertIn("b1=89 ", text)
+        self.assertIn("b2=90 ", text)
+
+    def test_udp_checksum_basic(self):
+        """UDP-CHECKSUM should produce a non-zero value for a datagram."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",       # ( buf total=12 )
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",                    # save buf and len
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-CHECKSUM 0<> .",                # non-zero → -1
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_fill_cksum(self):
+        """UDP-FILL-CKSUM should store a non-zero checksum in the header."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",
+            "MY-IP GW-IP UBUF @ ULEN @",
+            "UDP-FILL-CKSUM",
+            "UDP-TX-BUF UDP-H.CKSUM NW16@ 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_verify_cksum_good(self):
+        """UDP-VERIFY-CKSUM should return -1 for valid checksum."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",        # ( buf len )
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",                    # save buf and len
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-FILL-CKSUM",
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("-1 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_udp_verify_cksum_bad(self):
+        """UDP-VERIFY-CKSUM should return 0 for corrupted checksum."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            "MY-IP GW-IP ROT ROT",
+            "UDP-FILL-CKSUM",
+            "99 UDP-TX-BUF UDP-H.CKSUM NW16!",   # corrupt it
+            "MY-IP GW-IP UDP-TX-BUF 12 UDP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_parse_fields(self):
+        """UDP-PARSE should extract sport, dport, data, datalen."""
+        text = self._run_kdos([
+            "CREATE TPAY 4 ALLOT  65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
+            "4000 8080 TPAY 4 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-PARSE",
+            ".\" dlen=\" .",
+            "C@ .\" d0=\" .",
+            ".\" dp=\" .",
+            ".\" sp=\" .",
+        ])
+        self.assertIn("sp=4000 ", text)
+        self.assertIn("dp=8080 ", text)
+        self.assertIn("dlen=4 ", text)
+        self.assertIn("d0=65 ", text)
+
+    @staticmethod
+    def _build_udp_frame(dst_mac, src_mac, src_ip, dst_ip, sport, dport, payload):
+        """Build a raw Ethernet+IPv4+UDP frame for NIC injection."""
+        udp_hdr = bytearray(8)
+        udp_hdr[0] = (sport >> 8) & 0xFF
+        udp_hdr[1] = sport & 0xFF
+        udp_hdr[2] = (dport >> 8) & 0xFF
+        udp_hdr[3] = dport & 0xFF
+        udp_len = 8 + len(payload)
+        udp_hdr[4] = (udp_len >> 8) & 0xFF
+        udp_hdr[5] = udp_len & 0xFF
+        # Compute UDP checksum with pseudo-header
+        pseudo = bytes(src_ip) + bytes(dst_ip) + b'\x00\x11'
+        pseudo += bytes([(udp_len >> 8) & 0xFF, udp_len & 0xFF])
+        data = pseudo + bytes(udp_hdr) + bytes(payload)
+        # Pad to even length if needed
+        if len(data) % 2:
+            data += b'\x00'
+        s = 0
+        for i in range(0, len(data), 2):
+            s += (data[i] << 8) | data[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        if cksum == 0:
+            cksum = 0xFFFF
+        udp_hdr[6] = (cksum >> 8) & 0xFF
+        udp_hdr[7] = cksum & 0xFF
+        ip_payload = bytes(udp_hdr) + bytes(payload)
+        return TestKDOSNetStack._build_ip_frame(
+            dst_mac, src_mac, 17, src_ip, dst_ip, ip_payload)
+
+    def test_udp_recv_via_ip_recv(self):
+        """A UDP frame should be receivable via IP-RECV and parseable."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\xDE\xAD\xBE\xEF')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV SWAP IP-H.PROTO C@ .\" pr=\" .",
+            ".\" iplen=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("pr=17 ", text)     # UDP protocol
+        self.assertIn("iplen=32 ", text)  # 20 + 8 + 4
+
+    # -- 13b: UDP-SEND / UDP-RECV, port demux --
+
+    def test_udp_port_bind(self):
+        """UDP-PORT-BIND should succeed and return -1."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_port_bind_full(self):
+        """UDP-PORT-BIND should return 0 when table is full."""
+        lines = []
+        for i in range(8):
+            lines.append(f": H{i} 2DROP 2DROP ;")
+            lines.append(f"{5000+i} ' H{i} UDP-PORT-BIND DROP")
+        lines.append(": H8 2DROP 2DROP ;")
+        lines.append("9999 ' H8 UDP-PORT-BIND .")
+        text = self._run_kdos(lines)
+        self.assertIn("0 ", text)
+
+    def test_udp_port_lookup(self):
+        """UDP-PORT-LOOKUP should find a bound port handler."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND DROP",
+            "8080 UDP-PORT-LOOKUP 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_port_lookup_miss(self):
+        """UDP-PORT-LOOKUP should return 0 for unbound port."""
+        text = self._run_kdos([
+            "9999 UDP-PORT-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_port_unbind(self):
+        """UDP-PORT-UNBIND should remove a binding."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND DROP",
+            "8080 UDP-PORT-UNBIND",
+            "8080 UDP-PORT-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_send_basic(self):
+        """UDP-SEND should produce an Ethernet+IPv4+UDP frame on the NIC."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Pre-cache ARP for dest
+        arp_reply = self._build_arp_reply_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 100], [10, 0, 0, 1])
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "ARP-CLEAR",
+            # Pre-load ARP (inject a reply frame and parse it)
+            "ETH-RECV DROP DROP",
+            "ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY DROP",
+            # Now send UDP
+            "CREATE UPAY 4 ALLOT  65 UPAY C!  66 UPAY 1+ C!  67 UPAY 2 + C!  68 UPAY 3 + C!",
+            "GW-IP 5000 3000 UPAY 4 UDP-SEND .",
+        ], nic_frames=[arp_reply])
+        self.assertIn("0 ", text)  # ior = 0 (success)
+
+    def test_udp_recv_basic(self):
+        """UDP-RECV should return src-ip, udp-buf, udp-len for a valid UDP frame."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\xDE\xAD\xBE\xEF')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV .\" ulen=\" .",   # udp-len
+            "UDP-H.SPORT NW16@ .\" sp=\" .",
+            "DROP",                       # drop src-ip
+        ], nic_frames=[frame])
+        self.assertIn("ulen=12 ", text)   # 8 hdr + 4 payload
+        self.assertIn("sp=3000 ", text)
+
+    def test_udp_recv_no_frame(self):
+        """UDP-RECV should return 0 0 0 when no frame available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV . . .",
+        ])
+        self.assertIn("0 0 0 ", text)
+
+    def test_udp_recv_non_udp(self):
+        """UDP-RECV should return 0 0 0 for non-UDP IP frames."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Send a TCP (proto 6) frame
+        frame = self._build_ip_frame(
+            nic_mac, [0xAA]*6, 6,  # TCP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 20)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV . . .",
+        ], nic_frames=[frame])
+        self.assertIn("0 0 0 ", text)
+
+    def test_udp_dispatch_calls_handler(self):
+        """UDP-DISPATCH should call the bound handler for a matching port."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\x42\x43')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "VARIABLE GOT-IT  0 GOT-IT !",
+            ": MY-H  2DROP DROP DROP  -1 GOT-IT ! ;",
+            "4000 ' MY-H UDP-PORT-BIND DROP",
+            "UDP-DISPATCH .",
+            "GOT-IT @ .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_udp_dispatch_no_handler(self):
+        """UDP-DISPATCH should return 0 when no handler is bound."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 9999, b'\x42\x43')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-DISPATCH .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    # -- 14: DHCP client --
+
+    @staticmethod
+    def _build_dhcp_reply(msg_type, xid, yiaddr, siaddr, chaddr,
+                          subnet=None, router=None, server_id=None):
+        """Build a raw DHCP reply packet (BOOTP format) payload."""
+        pkt = bytearray(548)  # Max DHCP packet
+        pkt[0] = 2          # op = BOOTREPLY
+        pkt[1] = 1          # htype = Ethernet
+        pkt[2] = 6          # hlen
+        # xid
+        pkt[4] = (xid >> 24) & 0xFF
+        pkt[5] = (xid >> 16) & 0xFF
+        pkt[6] = (xid >> 8) & 0xFF
+        pkt[7] = xid & 0xFF
+        # yiaddr
+        pkt[16:20] = bytes(yiaddr)
+        # siaddr
+        pkt[20:24] = bytes(siaddr)
+        # chaddr
+        pkt[28:34] = bytes(chaddr)
+        # Magic cookie
+        pkt[236] = 99; pkt[237] = 130; pkt[238] = 83; pkt[239] = 99
+        # Options
+        off = 240
+        # Message type (option 53)
+        pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = msg_type; off += 3
+        # Server identifier (option 54)
+        if server_id:
+            pkt[off] = 54; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(server_id); off += 4
+        # Subnet mask (option 1)
+        if subnet:
+            pkt[off] = 1; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(subnet); off += 4
+        # Router (option 3)
+        if router:
+            pkt[off] = 3; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(router); off += 4
+        # End option
+        pkt[off] = 255; off += 1
+        return bytes(pkt[:off])
+
+    @staticmethod
+    def _build_dhcp_frame(dst_mac, src_mac, src_ip, dst_ip, dhcp_payload):
+        """Wrap DHCP payload in UDP(67→68) + IPv4 + Ethernet."""
+        return TestKDOSNetStack._build_udp_frame(
+            dst_mac, src_mac, src_ip, dst_ip,
+            67, 68, dhcp_payload)
+
+    def test_dhcp_hdr_size(self):
+        """/DHCP-HDR should be 240."""
+        text = self._run_kdos(["/DHCP-HDR ."])
+        self.assertIn("240 ", text)
+
+    def test_dhcp_build_discover(self):
+        """DHCP-BUILD-DISCOVER should produce a valid DISCOVER packet."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER",
+            ".\" len=\" .",
+            "C@ .\" op=\" .",            # op should be 1 (BOOTREQUEST)
+        ])
+        self.assertIn("op=1 ", text)
+        # Length: 240 hdr + 3 (opt53 msgtype) + 6 (opt55 paramlist) + 1 (end) = 250
+        self.assertIn("len=250 ", text)
+
+    def test_dhcp_build_discover_magic(self):
+        """DHCP DISCOVER should have correct magic cookie."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-F.MAGIC C@ . DHCP-BUF DHCP-F.MAGIC 1+ C@ . DHCP-BUF DHCP-F.MAGIC 2 + C@ . DHCP-BUF DHCP-F.MAGIC 3 + C@ .",
+        ])
+        self.assertIn("99 130 83 99 ", text)
+
+    def test_dhcp_build_discover_msgtype(self):
+        """DHCP DISCOVER should have message type = 1."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_dhcp_build_request(self):
+        """DHCP-BUILD-REQUEST should include requested IP and server ID."""
+        text = self._run_kdos([
+            "192 168 1 50 IP-SET",           # just to have MY-IP
+            "CREATE OIP 4 ALLOT  192 168 1 100 OIP IP!",
+            "CREATE SIP 4 ALLOT  192 168 1 1 SIP IP!",
+            "OIP SIP DHCP-BUILD-REQUEST",
+            ".\" len=\" .",
+            "DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .\" mt=\" .",
+        ])
+        self.assertIn("mt=3 ", text)   # DHCP-REQUEST
+
+    def test_dhcp_get_msgtype_discover(self):
+        """DHCP-GET-MSGTYPE should return 1 for DISCOVER."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_dhcp_parse_offer(self):
+        """DHCP-PARSE-OFFER should extract offered IP and server IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2,  # OFFER
+            xid=0x12345678,
+            yiaddr=[192, 168, 1, 100],
+            siaddr=[192, 168, 1, 1],
+            chaddr=nic_mac,
+            server_id=[192, 168, 1, 1],
+            subnet=[255, 255, 255, 0],
+            router=[192, 168, 1, 1])
+        # Write the DHCP data into DHCP-BUF manually via the test
+        # We'll inject it as a frame and parse via UDP-RECV
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 1], [255, 255, 255, 255],
+            dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA",         # get DHCP data
+            "NIP",                               # drop src-ip, keep dhcp ptr
+            "DUP DHCP-GET-MSGTYPE .\" mt=\" .",
+            "DHCP-PARSE-OFFER",
+            "SWAP C@ .\" oip0=\" .",
+            "C@ .\" sip0=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("mt=2 ", text)      # OFFER
+        self.assertIn("oip0=192 ", text)  # first byte of offered IP
+        self.assertIn("sip0=192 ", text)  # first byte of server IP
+
+    def test_dhcp_parse_ack(self):
+        """DHCP-PARSE-ACK should configure MY-IP from ACK."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=5,  # ACK
+            xid=0x12345678,
+            yiaddr=[10, 0, 0, 42],
+            siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac,
+            server_id=[10, 0, 0, 1],
+            subnet=[255, 255, 255, 0],
+            router=[10, 0, 0, 1])
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255],
+            dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA",
+            "NIP",
+            "DHCP-PARSE-ACK .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)        # ACK accepted
+        self.assertIn("a=10 ", text)
+        self.assertIn("b=0 ", text)
+        self.assertIn("c=0 ", text)
+        self.assertIn("d=42 ", text)
+
+    def test_dhcp_start_full_exchange(self):
+        """DHCP-START should do DISCOVER→OFFER→REQUEST→ACK."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+
+        def dhcp_server(nic, frame_bytes):
+            """Dynamic DHCP responder: intercept TX, inject reply."""
+            # Frame: 14B Ethernet + 20B IP + 8B UDP + DHCP payload
+            if len(frame_bytes) < 42 + 240:
+                return
+            # Check ethertype = IPv4 (0x0800)
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            # Check protocol = UDP (17)
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            # Check dst port = 67 (DHCP server)
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            # Extract XID (4 bytes at offset 4 of DHCP)
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            # Extract message type from options
+            msg_type = 0
+            opt_off = dhcp_start + 240
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            if msg_type == 1:  # DISCOVER → inject OFFER
+                offer = self._build_dhcp_reply(
+                    msg_type=2, xid=xid,
+                    yiaddr=[192, 168, 1, 50],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], offer))
+            elif msg_type == 3:  # REQUEST → inject ACK
+                ack = self._build_dhcp_reply(
+                    msg_type=5, xid=xid,
+                    yiaddr=[192, 168, 1, 50],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], ack))
+
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_tx_callback=dhcp_server)
+        self.assertIn("-1 ", text)          # success
+        self.assertIn("a=192 ", text)
+        self.assertIn("b=168 ", text)
+        self.assertIn("c=1 ", text)
+        self.assertIn("d=50 ", text)
+
+    def test_dhcp_start_no_offer(self):
+        """DHCP-START should return 0 if no OFFER is received."""
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_xid_changes(self):
+        """DHCP-NEW-XID should produce a different XID each call."""
+        text = self._run_kdos([
+            "DHCP-NEW-XID DHCP-XID @ .\" x1=\" .",
+            "DHCP-NEW-XID DHCP-XID @ .\" x2=\" .",
+        ])
+        # Extract the two values
+        import re
+        m1 = re.search(r'x1=(-?\d+)', text)
+        m2 = re.search(r'x2=(-?\d+)', text)
+        self.assertIsNotNone(m1)
+        self.assertIsNotNone(m2)
+        self.assertNotEqual(m1.group(1), m2.group(1))
+
+    def test_dhcp_validate_reply_good(self):
+        """DHCP-VALIDATE-REPLY should accept a valid reply."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",        # 0x12345678
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_dhcp_validate_reply_bad_xid(self):
+        """DHCP-VALIDATE-REPLY should reject reply with wrong XID."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0xDEADBEEF,    # wrong XID
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",        # 0x12345678
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_chaddr(self):
+        """DHCP-VALIDATE-REPLY should reject reply with wrong chaddr."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        wrong_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=wrong_mac)               # wrong MAC
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_op(self):
+        """DHCP-VALIDATE-REPLY should reject BOOTREQUEST (op=1)."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = bytearray(self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac))
+        dhcp_pkt[0] = 1  # op = BOOTREQUEST (not BOOTREPLY)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], bytes(dhcp_pkt))
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_magic(self):
+        """DHCP-VALIDATE-REPLY should reject wrong magic cookie."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = bytearray(self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac))
+        dhcp_pkt[236] = 0  # corrupt magic cookie
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], bytes(dhcp_pkt))
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_discover_has_paramlist(self):
+        """DHCP DISCOVER should contain Parameter Request List (opt 55)."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF 55 DHCP-GET-OPTION",
+            ".\" plen=\" .",
+            "DUP C@ .\" p0=\" .",
+            "1+ C@ .\" p1=\" .",
+        ])
+        self.assertIn("plen=4 ", text)     # 4 items requested
+        self.assertIn("p0=1 ", text)       # subnet mask
+        self.assertIn("p1=3 ", text)       # router
+
+    def test_dhcp_ack_applies_dns(self):
+        """DHCP-PARSE-ACK should extract DNS server from option 6."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build ACK with DNS option (6)
+        pkt = bytearray(548)
+        pkt[0] = 2   # BOOTREPLY
+        pkt[1] = 1; pkt[2] = 6
+        pkt[4:8] = (0x12345678).to_bytes(4, 'big')
+        pkt[16:20] = bytes([10, 0, 0, 42])  # yiaddr
+        pkt[28:34] = bytes(nic_mac)          # chaddr
+        pkt[236:240] = bytes([99, 130, 83, 99])  # magic
+        off = 240
+        # opt 53: ACK (5)
+        pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 5; off += 3
+        # opt 1: subnet
+        pkt[off] = 1; pkt[off+1] = 4; off += 2
+        pkt[off:off+4] = bytes([255, 255, 255, 0]); off += 4
+        # opt 6: DNS server
+        pkt[off] = 6; pkt[off+1] = 4; off += 2
+        pkt[off:off+4] = bytes([1, 2, 3, 4]); off += 4
+        # end
+        pkt[off] = 255; off += 1
+        dhcp_pkt = bytes(pkt[:off])
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-PARSE-ACK .",
+            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+        self.assertIn("a=1 ", text)
+        self.assertIn("b=2 ", text)
+        self.assertIn("c=3 ", text)
+        self.assertIn("d=4 ", text)
+
+    def test_dhcp_start_retry_on_bad_offer(self):
+        """DHCP-START should retry when first offer has wrong XID."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        attempt = [0]
+
+        def dhcp_server_retry(nic, frame_bytes):
+            """On first DISCOVER, send offer with wrong XID. Second works."""
+            if len(frame_bytes) < 42 + 240:
+                return
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            opt_off = dhcp_start + 240
+            msg_type = 0
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            if msg_type == 1:  # DISCOVER
+                attempt[0] += 1
+                # First DISCOVER gets no valid reply (bad XID)
+                if attempt[0] == 1:
+                    bad_offer = self._build_dhcp_reply(
+                        msg_type=2, xid=0x00000000,  # wrong XID
+                        yiaddr=[10, 0, 0, 99],
+                        siaddr=[10, 0, 0, 1],
+                        chaddr=nic_mac,
+                        server_id=[10, 0, 0, 1])
+                    nic.inject_frame(self._build_dhcp_frame(
+                        nic_mac, [0xBB]*6,
+                        [10, 0, 0, 1], [255, 255, 255, 255], bad_offer))
+                else:
+                    # Second attempt: correct XID
+                    offer = self._build_dhcp_reply(
+                        msg_type=2, xid=xid,
+                        yiaddr=[192, 168, 1, 77],
+                        siaddr=[192, 168, 1, 1],
+                        chaddr=nic_mac,
+                        server_id=[192, 168, 1, 1],
+                        subnet=[255, 255, 255, 0],
+                        router=[192, 168, 1, 1])
+                    nic.inject_frame(self._build_dhcp_frame(
+                        nic_mac, [0xBB]*6,
+                        [192, 168, 1, 1], [255, 255, 255, 255], offer))
+            elif msg_type == 3:  # REQUEST
+                ack = self._build_dhcp_reply(
+                    msg_type=5, xid=xid,
+                    yiaddr=[192, 168, 1, 77],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], ack))
+
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_tx_callback=dhcp_server_retry)
+        self.assertIn("-1 ", text)
+        self.assertIn("a=192 ", text)
+        self.assertIn("c=1 ", text)
+        self.assertIn("d=77 ", text)
+        self.assertGreater(attempt[0], 1, "Should have retried")
+
+    def test_dhcp_full_with_dns_option(self):
+        """DHCP-START should set DNS-SERVER-IP from DHCP option 6."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+
+        def dhcp_server_dns(nic, frame_bytes):
+            if len(frame_bytes) < 42 + 240:
+                return
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            opt_off = dhcp_start + 240
+            msg_type = 0
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            # Build reply with DNS option 6
+            pkt = bytearray(548)
+            pkt[0] = 2; pkt[1] = 1; pkt[2] = 6
+            pkt[4:8] = xid.to_bytes(4, 'big')
+            pkt[16:20] = bytes([10, 0, 0, 42])
+            pkt[20:24] = bytes([10, 0, 0, 1])
+            pkt[28:34] = bytes(nic_mac)
+            pkt[236:240] = bytes([99, 130, 83, 99])
+            off = 240
+            if msg_type == 1:
+                pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 2; off += 3  # OFFER
+            elif msg_type == 3:
+                pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 5; off += 3  # ACK
+            else:
+                return
+            # opt 54: server id
+            pkt[off] = 54; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([10, 0, 0, 1]); off += 4
+            # opt 1: subnet
+            pkt[off] = 1; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([255, 255, 255, 0]); off += 4
+            # opt 3: router
+            pkt[off] = 3; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([10, 0, 0, 1]); off += 4
+            # opt 6: DNS server
+            pkt[off] = 6; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([9, 9, 9, 9]); off += 4
+            # end
+            pkt[off] = 255; off += 1
+            reply = bytes(pkt[:off])
+            nic.inject_frame(self._build_dhcp_frame(
+                nic_mac, [0xBB]*6,
+                [10, 0, 0, 1], [255, 255, 255, 255], reply))
+
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_tx_callback=dhcp_server_dns)
+        self.assertIn("-1 ", text)
+        self.assertIn("a=9 ", text)
+        self.assertIn("b=9 ", text)
+        self.assertIn("c=9 ", text)
+        self.assertIn("d=9 ", text)
+
+    # -- 15: DNS client --
+
+    @staticmethod
+    def _build_dns_response(query_id, domain, ip_bytes):
+        """Build a minimal DNS A-record response packet."""
+        # Header
+        hdr = bytearray(12)
+        hdr[0] = (query_id >> 8) & 0xFF
+        hdr[1] = query_id & 0xFF
+        hdr[2] = 0x81  # QR=1, RD=1
+        hdr[3] = 0x80  # RA=1
+        hdr[4] = 0; hdr[5] = 1   # QDCOUNT=1
+        hdr[6] = 0; hdr[7] = 1   # ANCOUNT=1
+        # Question section: encode domain name
+        q = bytearray()
+        for label in domain.split('.'):
+            q.append(len(label))
+            q.extend(label.encode())
+        q.append(0)  # terminator
+        q.extend(b'\x00\x01')  # QTYPE=A
+        q.extend(b'\x00\x01')  # QCLASS=IN
+        # Answer section
+        ans = bytearray()
+        ans.extend(b'\xC0\x0C')  # pointer to name in question
+        ans.extend(b'\x00\x01')  # TYPE=A
+        ans.extend(b'\x00\x01')  # CLASS=IN
+        ans.extend(b'\x00\x00\x00\x3C')  # TTL=60
+        ans.extend(b'\x00\x04')  # RDLENGTH=4
+        ans.extend(bytes(ip_bytes))  # RDATA = IP address
+        return bytes(hdr) + bytes(q) + bytes(ans)
+
+    def test_dns_encode_name(self):
+        """DNS-ENCODE-NAME should encode a domain name correctly."""
+        text = self._run_kdos([
+            'CREATE DNAME 11 ALLOT',
+            '72 DNAME C! 105 DNAME 1+ C!',  # 'hi'
+            # Use S" for the domain literal
+            'CREATE OUTBUF 64 ALLOT',
+            'CREATE DN 11 ALLOT',
+            # Manually store "a.bc" (4 chars)
+            '97 DN C!  46 DN 1+ C!  98 DN 2 + C!  99 DN 3 + C!',
+            'DN 4 OUTBUF DNS-ENCODE-NAME',
+            'OVER - .\" elen=\" .',   # encoded length
+            'DROP',
+            'OUTBUF C@ .\" l0=\" .',   # first label len=1
+            'OUTBUF 1+ C@ .\" c0=\" .',  # 'a'=97
+            'OUTBUF 2 + C@ .\" l1=\" .',  # second label len=2
+            'OUTBUF 3 + C@ .\" c1=\" .',  # 'b'=98
+            'OUTBUF 4 + C@ .\" c2=\" .',  # 'c'=99
+            'OUTBUF 5 + C@ .\" t=\" .',   # terminator=0
+        ])
+        self.assertIn("elen=6 ", text)   # 1+'a'+2+'bc'+0 = 6
+        self.assertIn("l0=1 ", text)
+        self.assertIn("c0=97 ", text)
+        self.assertIn("l1=2 ", text)
+        self.assertIn("c1=98 ", text)
+        self.assertIn("c2=99 ", text)
+        self.assertIn("t=0 ", text)
+
+    def test_dns_build_query(self):
+        """DNS-BUILD-QUERY should produce a valid DNS query packet."""
+        text = self._run_kdos([
+            'CREATE DN 7 ALLOT',
+            # Store "a.b" (3 chars)
+            '97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
+            'DN 3 DNS-BUILD-QUERY',
+            '.\" qlen=\" .',   # total length: 12(hdr) + 1+1+1+1+0(name) + 4(type+class) = 21
+        ])
+        self.assertIn("qlen=21 ", text)  # 12 + 5 + 4
+
+    def test_dns_build_query_flags(self):
+        """DNS query should have RD=1 flag set."""
+        text = self._run_kdos([
+            'CREATE DN 3 ALLOT  97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
+            'DN 3 DNS-BUILD-QUERY DROP',
+            'DNS-BUF 2 + NW16@ .\" fl=\" .',
+        ])
+        self.assertIn("fl=256 ", text)  # 0x0100
+
+    def test_dns_resolve_full_ip_check(self):
+        """DNS-RESOLVE should return all 4 bytes of the resolved IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dns_resp = self._build_dns_response(42, "x.y", [93, 184, 216, 34])
+        dns_frame = self._build_udp_frame(
+            nic_mac, [0xCC]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
+            "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
+            "FIP FMAC ARP-INSERT",
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE',
+            'DUP 0<> .\" ok=\" .',
+            'DUP C@ .\" a=\" .',
+            'DUP 1+ C@ .\" b=\" .',
+            'DUP 2 + C@ .\" c=\" .',
+            '3 + C@ .\" d=\" .',
+        ], nic_frames=[dns_frame])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("a=93 ", text)
+        self.assertIn("b=184 ", text)
+        self.assertIn("c=216 ", text)
+        self.assertIn("d=34 ", text)
+
+    def test_dns_parse_response_a_record(self):
+        """DNS-PARSE-RESPONSE should extract the A record IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build a DNS response for "a.b" → 1.2.3.4
+        dns_resp = self._build_dns_response(42, "a.b", [1, 2, 3, 4])
+        # Wrap in UDP frame from DNS server (port 53)
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Receive the frame and parse DNS
+            "UDP-RECV DROP UDP-H.DATA NIP",   # ( dns-buf )
+            str(len(dns_resp)),                # push dns-len
+            "DNS-PARSE-RESPONSE",
+            "DUP 0<> .\" found=\" .",
+            "DUP C@ .\" a=\" .",
+            "DUP 1+ C@ .\" b=\" .",
+            "DUP 2 + C@ .\" c=\" .",
+            "3 + C@ .\" d=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("found=-1 ", text)
+        self.assertIn("a=1 ", text)
+        self.assertIn("b=2 ", text)
+        self.assertIn("c=3 ", text)
+        self.assertIn("d=4 ", text)
+
+    def test_dns_parse_response_no_answer(self):
+        """DNS-PARSE-RESPONSE should return 0 when ANCOUNT=0."""
+        # Build a response with no answers
+        hdr = bytearray(12)
+        hdr[2] = 0x81; hdr[3] = 0x80  # QR=1, RA=1
+        hdr[4] = 0; hdr[5] = 1   # QDCOUNT=1
+        hdr[6] = 0; hdr[7] = 0   # ANCOUNT=0
+        q = bytearray([1, 97, 0, 0, 1, 0, 1])  # "a" + type A + class IN
+        dns_data = bytes(hdr) + bytes(q)
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_data)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            str(len(dns_data)),
+            "DNS-PARSE-RESPONSE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dns_resolve_full(self):
+        """DNS-RESOLVE should send query and parse the response."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dns_resp = self._build_dns_response(42, "x.y", [93, 184, 216, 34])
+        dns_frame = self._build_udp_frame(
+            nic_mac, [0xCC]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Pre-cache ARP for 8.8.8.8 via direct insert
+            "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
+            "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
+            "FIP FMAC ARP-INSERT",
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE',
+            'DUP 0<> .\" ok=\" .',
+            'DUP C@ .\" a=\" .',
+            '1+ C@ .\" b=\" .',
+        ], nic_frames=[dns_frame])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("a=93 ", text)
+        self.assertIn("b=184 ", text)
+
+    def test_dns_resolve_no_response(self):
+        """DNS-RESOLVE should return 0 when no response is received."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # No ARP entry for DNS server, so UDP-SEND fails
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE .',
+        ])
+        self.assertIn("0 ", text)
 
 
 # ---------------------------------------------------------------------------

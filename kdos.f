@@ -3833,6 +3833,1483 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
     ." mask=" BDL-SCR-MASK @ . CR ;
 
 \ =====================================================================
+\  §16  Network Stack — Ethernet Framing
+\ =====================================================================
+\
+\  Bottom-up network stack built on the NIC hardware (§10 data ports).
+\  §16 covers Ethernet II frame layout: MAC addresses, EtherType,
+\  constants, and frame build/parse words.
+\
+\  Ethernet II frame layout (no VLAN, no FCS — NIC handles FCS):
+\    +0   6 bytes   Destination MAC
+\    +6   6 bytes   Source MAC
+\    +12  2 bytes   EtherType (big-endian)
+\    +14  ...       Payload (46–1486 bytes; MTU 1500 - 14 = 1486)
+\
+\  All multi-byte network fields are big-endian (network byte order).
+
+\ -- Network byte order helpers (big-endian 16-bit) --
+: N>H  ( be16 -- he16 )   DUP 8 RSHIFT SWAP 255 AND 8 LSHIFT OR ;
+: H>N  ( he16 -- be16 )   N>H ;   \ same swap operation
+
+\ -- Big-endian 16-bit memory access --
+: NW@  ( addr -- u16 )   DUP C@ 8 LSHIFT  SWAP 1 + C@ OR ;
+: NW!  ( u16 addr -- )   OVER 8 RSHIFT OVER C!  1 + SWAP 255 AND SWAP C! ;
+
+\ -- Ethernet constants --
+6  CONSTANT /MAC            \ MAC address length
+14 CONSTANT /ETH-HDR        \ Ethernet header length (no VLAN)
+1500 CONSTANT ETH-MTU       \ Maximum frame size
+1486 CONSTANT ETH-MAX-PLD   \ Maximum payload (MTU - header)
+
+\ -- EtherType constants (big-endian values as seen on wire) --
+2048  CONSTANT ETYPE-IP4    \ 0x0800  IPv4
+2054  CONSTANT ETYPE-ARP    \ 0x0806  ARP
+34525 CONSTANT ETYPE-IP6    \ 0x86DD  IPv6 (reserved, not implemented)
+
+\ -- Broadcast MAC --
+CREATE MAC-BCAST  255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+
+\ -- Our MAC address (6 bytes, copied from NIC at init) --
+CREATE MY-MAC  6 ALLOT
+: MAC-INIT  ( -- )   NET-MAC@ MY-MAC 6 CMOVE ;
+
+\ -- Ethernet TX frame buffer (MTU bytes) --
+CREATE ETH-TX-BUF  ETH-MTU ALLOT
+
+\ -- Ethernet RX frame buffer (MTU bytes) --
+CREATE ETH-RX-BUF  ETH-MTU ALLOT
+
+\ -- Frame header field accessors (given frame base address) --
+: ETH-DST   ( frame -- addr )  ;               \ +0
+: ETH-SRC   ( frame -- addr )  6 + ;           \ +6
+: ETH-TYPE  ( frame -- etype ) 12 + NW@ ;      \ +12, big-endian
+: ETH-TYPE! ( etype frame -- ) 12 + NW! ;      \ +12, big-endian
+: ETH-PLD   ( frame -- addr )  /ETH-HDR + ;    \ +14
+
+\ -- MAC comparison --
+: MAC=  ( addr1 addr2 -- flag )   6 SAMESTR? ;
+
+\ -- Print MAC address --
+: .MAC  ( addr -- )
+    BASE @ >R HEX
+    6 0 DO
+        DUP I + C@
+        DUP 16 < IF 48 EMIT THEN   \ leading zero for single hex digit
+        .
+        I 5 < IF 58 EMIT THEN      \ colon separator
+    LOOP DROP
+    R> BASE ! ;
+
+\ -- Debug: print Ethernet frame header --
+: .ETH  ( frame -- )
+    ." dst=" DUP ETH-DST .MAC
+    ."  src=" DUP ETH-SRC .MAC
+    ."  type=" ETH-TYPE . CR ;
+
+\ -- ETH-BUILD: construct an Ethernet frame in a buffer --
+\   ( dst-mac src-mac etype payload pay-len frame -- total-len )
+\   Copies dst MAC, src MAC, writes EtherType, copies payload.
+\   Returns total frame length (14 + pay-len).
+VARIABLE _EB-LEN
+: ETH-BUILD  ( dst src etype payload paylen frame -- total )
+    >R                              \ save frame addr
+    DUP _EB-LEN !                   \ save paylen
+    R@ /ETH-HDR + SWAP CMOVE       \ copy payload to frame+14
+    R@ ETH-TYPE!                    \ write EtherType (big-endian)
+    R@ ETH-SRC /MAC CMOVE          \ copy src MAC to frame+6
+    R@ ETH-DST /MAC CMOVE          \ copy dst MAC to frame+0
+    R> DROP                         \ discard frame addr
+    _EB-LEN @ /ETH-HDR + ;         \ paylen + 14 = total length
+
+\ -- ETH-BUILD-TX: build frame in ETH-TX-BUF with MY-MAC as source --
+\   ( dst-mac etype payload paylen -- total-len )
+VARIABLE _ETB-ETYPE
+VARIABLE _ETB-PAY
+VARIABLE _ETB-PAYLEN
+: ETH-BUILD-TX  ( dst etype payload paylen -- total )
+    _ETB-PAYLEN !  _ETB-PAY !  _ETB-ETYPE !
+    \ stack: dst
+    MY-MAC _ETB-ETYPE @ _ETB-PAY @ _ETB-PAYLEN @
+    ETH-TX-BUF ETH-BUILD ;
+
+\ -- ETH-PARSE: extract fields from a received frame in ETH-RX-BUF --
+\   ( frame -- dst-mac src-mac etype payload paylen )
+\   Pushes field addresses/values for inspection.
+\   paylen must be computed from total frame length minus /ETH-HDR.
+\   This word pushes addresses — caller uses the accessors.
+
+VARIABLE ETH-RX-LEN   0 ETH-RX-LEN !   \ last received frame length
+
+: ETH-FRAME-PAYLEN  ( -- n )   ETH-RX-LEN @ /ETH-HDR - 0 MAX ;
+: ETH-IS-IP4?   ( frame -- flag )   ETH-TYPE ETYPE-IP4 = ;
+: ETH-IS-ARP?   ( frame -- flag )   ETH-TYPE ETYPE-ARP = ;
+: ETH-FOR-US?   ( frame -- flag )
+    DUP ETH-DST MY-MAC MAC=         \ unicast to us?
+    SWAP ETH-DST MAC-BCAST MAC= OR ; \ or broadcast?
+
+\ -- ETH-SEND: transmit an Ethernet frame via NIC DMA --
+\   ( frame len -- )
+\   Uses NET-SEND BIOS primitive (sets DMA addr + len, issues SEND cmd).
+: ETH-SEND  ( frame len -- )   NET-SEND ;
+
+\ -- ETH-SEND-TX: build and send in one step --
+\   ( dst etype payload paylen -- )
+: ETH-SEND-TX  ( dst etype payload paylen -- )
+    ETH-BUILD-TX                    \ ( total-len )
+    ETH-TX-BUF SWAP NET-SEND ;     \ send from ETH-TX-BUF
+
+\ -- Transmit statistics --
+VARIABLE ETH-TX-COUNT   0 ETH-TX-COUNT !
+
+: ETH-SEND-COUNTED  ( frame len -- )
+    NET-SEND  1 ETH-TX-COUNT +! ;
+
+\ -- ETH-RECV: receive an Ethernet frame from NIC into ETH-RX-BUF --
+\   ( -- len | 0 )
+\   Returns frame length or 0 if no frame available.
+\   Stores the length in ETH-RX-LEN for ETH-FRAME-PAYLEN.
+VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
+
+: ETH-RECV  ( -- len )
+    NET-RX? 0= IF 0 EXIT THEN       \ no frame waiting
+    ETH-RX-BUF NET-RECV             \ receive into ETH-RX-BUF
+    DUP ETH-RX-LEN !               \ save length
+    DUP 0<> IF 1 ETH-RX-COUNT +! THEN ;
+
+\ -- ETH-RECV-WAIT: blocking receive with timeout (in attempts) --
+\   ( max-attempts -- len | 0 )
+: ETH-RECV-WAIT  ( n -- len )
+    0 DO
+        ETH-RECV DUP 0<> IF UNLOOP EXIT THEN
+        DROP
+    LOOP
+    0 ;
+
+\ -- ETH-RECV-FILTER: receive, keep only frames for us --
+\   ( -- len | 0 )
+: ETH-RECV-FILTER  ( -- len )
+    ETH-RECV DUP 0= IF EXIT THEN     \ no frame → 0
+    ETH-RX-BUF ETH-FOR-US? 0= IF
+        DROP 0                        \ not for us → discard
+    THEN ;
+
+\ -- Network statistics --
+: .NET-STATS  ( -- )
+    ." tx=" ETH-TX-COUNT @ .
+    ." rx=" ETH-RX-COUNT @ . CR ;
+
+\ =====================================================================
+\  §16.1  ARP — Address Resolution Protocol
+\ =====================================================================
+\
+\  ARP maps IPv4 addresses to MAC addresses.  We maintain a small
+\  static table (8 entries) and support request/reply for resolution.
+\
+\  ARP table entry layout (16 bytes):
+\    +0   4 bytes   IPv4 address (network byte order)
+\    +4   6 bytes   MAC address
+\    +10  2 bytes   flags: bit0 = valid
+\    +12  4 bytes   (reserved/padding)
+\
+\  ARP packet layout (28 bytes, inside Ethernet payload):
+\    +0   2 bytes   HTYPE (0x0001 = Ethernet)
+\    +2   2 bytes   PTYPE (0x0800 = IPv4)
+\    +4   1 byte    HLEN  (6)
+\    +5   1 byte    PLEN  (4)
+\    +6   2 bytes   OPER  (1=request, 2=reply)
+\    +8   6 bytes   SHA   (sender hardware address)
+\    +14  4 bytes   SPA   (sender protocol address)
+\    +18  6 bytes   THA   (target hardware address)
+\    +24  4 bytes   TPA   (target protocol address)
+
+\ -- ARP constants --
+16 CONSTANT /ARP-ENTRY
+8  CONSTANT ARP-MAX-ENTRIES
+28 CONSTANT /ARP-PKT
+
+\ -- ARP table (8 entries × 16 bytes = 128 bytes) --
+CREATE ARP-TABLE  ARP-MAX-ENTRIES /ARP-ENTRY * ALLOT
+ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL
+
+\ -- Our IPv4 address (4 bytes, network byte order) --
+CREATE MY-IP  4 ALLOT
+MY-IP 4 0 FILL                 \ 0.0.0.0 until configured
+
+\ -- Gateway and subnet --
+CREATE GW-IP  4 ALLOT
+GW-IP 4 0 FILL                 \ 0.0.0.0 until configured
+CREATE NET-MASK  4 ALLOT
+255 NET-MASK C!  255 NET-MASK 1+ C!  255 NET-MASK 2 + C!  0 NET-MASK 3 + C!
+\ default 255.255.255.0
+
+\ -- ARP entry accessors --
+: ARP-ENTRY  ( idx -- addr )    /ARP-ENTRY * ARP-TABLE + ;
+: ARP-E.IP   ( entry -- addr )  ;          \ +0
+: ARP-E.MAC  ( entry -- addr )  4 + ;      \ +4
+: ARP-E.FLAG ( entry -- addr )  10 + ;     \ +10
+: ARP-E.VALID? ( entry -- flag ) ARP-E.FLAG W@ 1 AND 0<> ;
+
+\ -- IPv4 address comparison (4 bytes) --
+: IP=  ( addr1 addr2 -- flag )   4 SAMESTR? ;
+
+\ -- IP address store/fetch helpers --
+: IP!  ( a b c d addr -- )   \ store dotted quad a.b.c.d
+    >R
+    R@ 3 + C!    \ d at addr+3
+    R@ 2 + C!    \ c at addr+2
+    R@ 1+ C!     \ b at addr+1
+    R> C! ;      \ a at addr+0
+
+: IP@  ( addr -- a b c d )   \ fetch dotted quad a.b.c.d
+    DUP C@ SWAP
+    DUP 1+ C@ SWAP
+    DUP 2 + C@ SWAP
+    3 + C@ ;
+
+\ -- Set our IP address (dotted quad) --
+: IP-SET  ( b0 b1 b2 b3 -- )   MY-IP IP! ;
+
+\ -- Print IPv4 address --
+: .IP  ( addr -- )
+    DUP C@ .  46 EMIT
+    DUP 1+ C@ .  46 EMIT
+    DUP 2 + C@ .  46 EMIT
+    3 + C@ . ;
+
+\ -- ARP-LOOKUP: find MAC for a given IPv4 address --
+\   ( ip-addr -- mac-addr | 0 )
+: ARP-LOOKUP  ( ip -- mac|0 )
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            DUP ARP-E.IP 2 PICK IP= IF
+                ARP-E.MAC NIP UNLOOP EXIT
+            THEN
+        THEN
+        DROP
+    LOOP
+    DROP 0 ;
+
+\ -- ARP-INSERT: add or update an entry in the ARP table --
+\   ( ip-addr mac-addr -- )
+\   If ip already exists, update MAC.  Otherwise use first free slot.
+VARIABLE _ARP-SLOT
+: ARP-INSERT  ( ip mac -- )
+    -1 _ARP-SLOT !
+    \ First pass: look for existing entry with same IP
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            ARP-E.IP 2 PICK IP= IF
+                I _ARP-SLOT !  LEAVE
+            THEN
+        ELSE
+            DROP
+            _ARP-SLOT @ -1 = IF I _ARP-SLOT ! THEN  \ remember first free
+        THEN
+    LOOP
+    _ARP-SLOT @ -1 = IF 2DROP EXIT THEN  \ table full
+    _ARP-SLOT @ ARP-ENTRY >R
+    OVER R@ ARP-E.IP 4 CMOVE            \ copy IP
+    R@ ARP-E.MAC 6 CMOVE                \ copy MAC
+    DROP                                 \ drop ip-addr
+    1 R> ARP-E.FLAG W! ;                 \ mark valid
+
+\ -- ARP-CLEAR: clear the ARP table --
+: ARP-CLEAR  ( -- )
+    ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL ;
+
+\ -- .ARP: print the ARP table --
+: .ARP  ( -- )
+    ." --- ARP table ---" CR
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            ."   " DUP ARP-E.IP .IP ."  -> " ARP-E.MAC .MAC CR
+        ELSE
+            DROP
+        THEN
+    LOOP ;
+
+\ -- 10b: ARP request / reply build + parse + resolve --
+\ ARP payload is 28 bytes (Ethernet/IPv4):
+\   +0  HTYPE  2B  0x0001 (Ethernet)
+\   +2  PTYPE  2B  0x0800 (IPv4)
+\   +4  HLEN   1B  6
+\   +5  PLEN   1B  4
+\   +6  OPER   2B  1=request  2=reply
+\   +8  SHA    6B  sender MAC
+\  +14  SPA    4B  sender IP
+\  +18  THA    6B  target MAC
+\  +24  TPA    4B  target IP
+
+1 CONSTANT ARP-OP-REQUEST
+2 CONSTANT ARP-OP-REPLY
+
+CREATE ARP-PKT-BUF  /ARP-PKT ALLOT   \ 28-byte scratch for building ARP
+
+\ -- field offsets within ARP payload --
+: ARP-F.HTYPE  ( buf -- addr )        ;             \ +0
+: ARP-F.PTYPE  ( buf -- addr )  2 + ;               \ +2
+: ARP-F.HLEN   ( buf -- addr )  4 + ;               \ +4
+: ARP-F.PLEN   ( buf -- addr )  5 + ;               \ +5
+: ARP-F.OPER   ( buf -- addr )  6 + ;               \ +6
+: ARP-F.SHA    ( buf -- addr )  8 + ;               \ +8
+: ARP-F.SPA    ( buf -- addr )  14 + ;              \ +14
+: ARP-F.THA    ( buf -- addr )  18 + ;              \ +18
+: ARP-F.TPA    ( buf -- addr )  24 + ;              \ +24
+
+\ -- ARP-FILL-HDR: set the invariant Ethernet/IPv4 header fields --
+: ARP-FILL-HDR  ( buf -- )
+    DUP /ARP-PKT 0 FILL        \ zero entire buffer
+    DUP ARP-F.HTYPE  0 SWAP C!  DUP ARP-F.HTYPE 1+ 1 SWAP C!   \ HTYPE=1 (BE)
+    DUP ARP-F.PTYPE  8 SWAP C!  DUP ARP-F.PTYPE 1+ 0 SWAP C!   \ PTYPE=0x0800 (BE)
+    DUP ARP-F.HLEN   6 SWAP C!                                   \ HLEN=6
+    ARP-F.PLEN   4 SWAP C! ;                                     \ PLEN=4
+
+\ -- ARP-SET-OPER: write operation code (big-endian 16-bit) --
+: ARP-SET-OPER  ( op buf -- )
+    ARP-F.OPER  SWAP DUP 8 RSHIFT  ( addr lo hi )
+    2 PICK C!  SWAP 1+ C! ;
+
+\ -- ARP-BUILD-REQUEST: build ARP request for target IP --
+\ ( target-ip -- buf len )   buf = ARP-PKT-BUF, len = /ARP-PKT
+: ARP-BUILD-REQUEST
+    ARP-PKT-BUF ARP-FILL-HDR
+    ARP-OP-REQUEST ARP-PKT-BUF ARP-SET-OPER
+    \ SHA = MY-MAC
+    MY-MAC ARP-PKT-BUF ARP-F.SHA 6 CMOVE
+    \ SPA = MY-IP
+    MY-IP ARP-PKT-BUF ARP-F.SPA 4 CMOVE
+    \ THA = 00:00:00:00:00:00  (already zeroed)
+    \ TPA = target-ip
+    ARP-PKT-BUF ARP-F.TPA 4 CMOVE
+    ARP-PKT-BUF /ARP-PKT ;
+
+\ -- ARP-BUILD-REPLY: build ARP reply to a received ARP request --
+\ ( rx-arp-buf -- buf len )  builds reply in ARP-PKT-BUF
+: ARP-BUILD-REPLY  ( rx-arp -- buf len )
+    ARP-PKT-BUF ARP-FILL-HDR
+    ARP-OP-REPLY ARP-PKT-BUF ARP-SET-OPER
+    \ SHA = MY-MAC
+    MY-MAC ARP-PKT-BUF ARP-F.SHA 6 CMOVE
+    \ SPA = MY-IP
+    MY-IP ARP-PKT-BUF ARP-F.SPA 4 CMOVE
+    \ THA = requester's SHA
+    DUP ARP-F.SHA ARP-PKT-BUF ARP-F.THA 6 CMOVE
+    \ TPA = requester's SPA
+    ARP-F.SPA ARP-PKT-BUF ARP-F.TPA 4 CMOVE
+    ARP-PKT-BUF /ARP-PKT ;
+
+\ -- ARP-SEND-REQUEST: broadcast ARP request for target IP --
+\ ( target-ip -- )
+: ARP-SEND-REQUEST
+    ARP-BUILD-REQUEST               \ ( buf len )
+    >R >R                           \ save buf,len on R
+    MAC-BCAST ETYPE-ARP R> R>       \ ( dst etype buf len )
+    ETH-SEND-TX ;
+
+\ -- ARP-PARSE-REPLY: extract sender MAC+IP from ARP reply into table --
+\ ( arp-buf -- )  feeds ARP-INSERT with sender info
+: ARP-PARSE-REPLY  ( arp-buf -- )
+    DUP ARP-F.SPA SWAP ARP-F.SHA   \ ( spa sha )
+    ARP-INSERT ;
+
+\ -- ARP-IS-REQUEST?: check if ARP payload is a request (OPER=1) --
+: ARP-IS-REQUEST?  ( arp-buf -- flag )
+    ARP-F.OPER DUP C@ 8 LSHIFT SWAP 1+ C@ +  \ big-endian 16-bit
+    ARP-OP-REQUEST = ;
+
+\ -- ARP-IS-REPLY?: check if ARP payload is a reply (OPER=2) --
+: ARP-IS-REPLY?  ( arp-buf -- flag )
+    ARP-F.OPER DUP C@ 8 LSHIFT SWAP 1+ C@ +
+    ARP-OP-REPLY = ;
+
+\ -- ARP-FOR-US?: check if ARP TPA matches MY-IP --
+: ARP-FOR-US?  ( arp-buf -- flag )
+    ARP-F.TPA MY-IP IP= ;
+
+VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
+\ -- ARP-RESOLVE: resolve IP to MAC, sending request if needed --
+\ ( ip-addr -- mac-addr | 0 )
+\ First checks table; if miss, sends request & waits for reply.
+: ARP-RESOLVE  ( ip -- mac|0 )
+    DUP ARP-LOOKUP DUP 0<> IF
+        NIP EXIT   \ found in table
+    THEN
+    DROP                      \ drop the 0
+    DUP _ARP-RES-IP !         \ save IP
+    ARP-SEND-REQUEST           \ broadcast request (consumes ip)
+    \ Wait for ARP reply (up to 10 receive attempts)
+    10 0 DO
+        3 ETH-RECV-WAIT           \ ( len ) — ETH-RECV uses ETH-RX-BUF internally
+        DUP 0 > IF
+            ETH-RX-BUF ETH-IS-ARP? IF
+                ETH-RX-BUF ETH-PLD ARP-IS-REPLY? IF
+                    ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY
+                    _ARP-RES-IP @ ARP-LOOKUP
+                    DUP 0<> IF
+                        SWAP DROP   \ drop recv len under mac
+                        UNLOOP EXIT
+                    THEN
+                    DROP   \ drop 0 from failed lookup
+                THEN
+            THEN
+        THEN
+        DROP   \ drop recv len
+    LOOP
+    0 ;        \ timeout — no reply
+
+\ -- 10c: ARP auto-responder --
+\ Handles an incoming Ethernet frame if it is an ARP request for us.
+\ Sends an ARP reply and records the requester in the ARP table.
+\ Returns: -1 if handled, 0 if not an ARP request for us.
+
+: ARP-HANDLE  ( -- flag )
+    \ Assumes a frame is already in ETH-RX-BUF
+    ETH-RX-BUF ETH-IS-ARP? 0= IF 0 EXIT THEN
+    ETH-RX-BUF ETH-PLD ARP-IS-REQUEST? 0= IF 0 EXIT THEN
+    ETH-RX-BUF ETH-PLD ARP-FOR-US? 0= IF 0 EXIT THEN
+    \ It's an ARP request for us — learn the sender
+    ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY   \ record sender MAC+IP
+    \ Build and send reply
+    ETH-RX-BUF ETH-PLD ARP-BUILD-REPLY   \ ( buf len )
+    >R >R
+    ETH-RX-BUF ETH-SRC ETYPE-ARP R> R>   \ ( dst etype buf len )
+    ETH-SEND-TX
+    -1 ;    \ handled
+
+\ -- ARP-POLL: receive one frame; auto-reply if ARP request for us --
+\   Returns: received frame length (0 if nothing), with flag on top
+\   ( -- len handled? )
+: ARP-POLL  ( -- len handled? )
+    ETH-RECV DUP 0= IF 0 EXIT THEN   \ no frame → 0 0
+    ARP-HANDLE ;
+
+\ ---------------------------------------------------------------------
+\  §16.2  IPv4 — minimal, no fragmentation
+\ ---------------------------------------------------------------------
+\ IPv4 header (20 bytes, no options):
+\   +0   ver/ihl  1B   0x45 (v4, 5×4=20 byte header)
+\   +1   DSCP/ECN 1B   0x00
+\   +2   total-len 2B  header+payload (big-endian)
+\   +4   ident    2B   packet ID
+\   +6   flags/fo 2B   0x4000 = Don't Fragment
+\   +8   TTL      1B   default 64
+\   +9   protocol 1B   1=ICMP  6=TCP  17=UDP
+\  +10   checksum 2B   header checksum (big-endian)
+\  +12   src-ip   4B
+\  +16   dst-ip   4B
+
+20 CONSTANT /IP-HDR
+1  CONSTANT IP-PROTO-ICMP
+6  CONSTANT IP-PROTO-TCP
+17 CONSTANT IP-PROTO-UDP
+
+CREATE IP-TX-BUF  /IP-HDR 1480 + ALLOT    \ max IP packet buffer (1500)
+
+VARIABLE IP-IDENT    \ rolling packet ID
+0 IP-IDENT !
+
+\ -- IPv4 header field accessors (from start of IP header) --
+: IP-H.VER     ( hdr -- addr )           ;    \ +0
+: IP-H.DSCP    ( hdr -- addr )  1 +  ;        \ +1
+: IP-H.TLEN    ( hdr -- addr )  2 +  ;        \ +2  total length (BE)
+: IP-H.IDENT   ( hdr -- addr )  4 +  ;        \ +4
+: IP-H.FLAGS   ( hdr -- addr )  6 +  ;        \ +6  flags+frag offset (BE)
+: IP-H.TTL     ( hdr -- addr )  8 +  ;        \ +8
+: IP-H.PROTO   ( hdr -- addr )  9 +  ;        \ +9
+: IP-H.CKSUM   ( hdr -- addr )  10 + ;        \ +10 checksum (BE)
+: IP-H.SRC     ( hdr -- addr )  12 + ;        \ +12 source IP
+: IP-H.DST     ( hdr -- addr )  16 + ;        \ +16 dest IP
+: IP-H.DATA    ( hdr -- addr )  /IP-HDR + ;   \ +20 payload
+
+\ -- NW16!: store 16-bit big-endian --
+: NW16!  ( val addr -- )
+    OVER 8 RSHIFT OVER C!  1+ SWAP 255 AND SWAP C! ;
+
+\ -- NW16@: fetch 16-bit big-endian --
+: NW16@  ( addr -- val )
+    DUP C@ 8 LSHIFT SWAP 1+ C@ + ;
+
+\ -- IP-CHECKSUM: compute ones-complement checksum over n bytes --
+\   ( addr n -- cksum )
+VARIABLE _IPCS-SUM
+: IP-CHECKSUM  ( addr n -- cksum )
+    0 _IPCS-SUM !
+    2 / 0 DO                        \ iterate 16-bit words
+        DUP NW16@ _IPCS-SUM @ +
+        _IPCS-SUM !
+        2 +
+    LOOP DROP
+    \ fold carries
+    _IPCS-SUM @
+    BEGIN DUP 65535 > WHILE
+        DUP 65535 AND SWAP 16 RSHIFT +
+    REPEAT
+    65535 XOR ;   \ ones complement
+
+\ -- IP-FILL-HDR: fill invariant IPv4 header fields --
+\   ( proto payload-len dst-ip buf -- )
+VARIABLE _IPF-BUF
+VARIABLE _IPF-DST
+VARIABLE _IPF-PLEN
+: IP-FILL-HDR  ( proto paylen dst-ip buf -- )
+    _IPF-BUF !  _IPF-DST !  _IPF-PLEN !
+    \ zero header
+    _IPF-BUF @ /IP-HDR 0 FILL
+    \ ver/ihl = 0x45
+    69 _IPF-BUF @ IP-H.VER C!
+    \ total length = header + payload
+    _IPF-PLEN @ /IP-HDR + _IPF-BUF @ IP-H.TLEN NW16!
+    \ ident
+    IP-IDENT @ _IPF-BUF @ IP-H.IDENT NW16!
+    IP-IDENT @ 1+ 65535 AND IP-IDENT !
+    \ flags = Don't Fragment (0x4000)
+    16384 _IPF-BUF @ IP-H.FLAGS NW16!
+    \ TTL = 64
+    64 _IPF-BUF @ IP-H.TTL C!
+    \ protocol
+    _IPF-BUF @ IP-H.PROTO C!   \ proto still on stack
+    \ source = MY-IP
+    MY-IP _IPF-BUF @ IP-H.SRC 4 CMOVE
+    \ destination
+    _IPF-DST @ _IPF-BUF @ IP-H.DST 4 CMOVE
+    \ checksum (computed over header with cksum field = 0)
+    _IPF-BUF @ /IP-HDR IP-CHECKSUM
+    _IPF-BUF @ IP-H.CKSUM NW16! ;
+
+\ -- IP-BUILD: build IPv4 packet in IP-TX-BUF --
+\   ( proto dst-ip payload paylen -- buf total-len )
+VARIABLE _IPB-PAY
+VARIABLE _IPB-PLEN
+: IP-BUILD  ( proto dst-ip payload paylen -- buf total-len )
+    _IPB-PLEN !  _IPB-PAY !
+    \ IP-FILL-HDR ( proto paylen dst-ip buf -- )
+    _IPB-PLEN @  SWAP  IP-TX-BUF  IP-FILL-HDR
+    \ copy payload after header
+    _IPB-PAY @ IP-TX-BUF IP-H.DATA _IPB-PLEN @ CMOVE
+    IP-TX-BUF  _IPB-PLEN @ /IP-HDR + ;
+
+\ -- IP-PARSE: extract fields from a received IPv4 header --
+\   ( ip-hdr -- proto src-ip dst-ip payload paylen )
+: IP-PARSE  ( hdr -- proto src dst data datalen )
+    DUP IP-H.PROTO C@            \ proto
+    OVER IP-H.SRC                \ src-ip addr
+    2 PICK IP-H.DST              \ dst-ip addr
+    3 PICK IP-H.DATA             \ payload addr
+    4 PICK IP-H.TLEN NW16@
+    /IP-HDR -                    \ payload length
+    >R >R >R >R >R
+    DROP                         \ drop original hdr
+    R> R> R> R> R> ;
+
+\ -- IP-VERIFY-CKSUM: check if IP header checksum is valid --
+\   ( ip-hdr -- flag )  returns -1 if valid
+: IP-VERIFY-CKSUM  ( hdr -- flag )
+    /IP-HDR IP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
+
+\ -- 11b: IP-SEND — ARP-resolve → Ethernet → NIC TX --
+
+VARIABLE _IPS-PROTO
+VARIABLE _IPS-DST
+VARIABLE _IPS-PAY
+VARIABLE _IPS-PLEN
+
+\ -- IP-SEND: build + send an IPv4 packet over Ethernet --
+\   ( proto dst-ip payload paylen -- ior )
+\   ior = 0 on success, -1 if ARP resolution failed
+: IP-SEND  ( proto dst-ip payload paylen -- ior )
+    _IPS-PLEN !  _IPS-PAY !  _IPS-DST !  _IPS-PROTO !
+    \ Resolve destination IP → MAC
+    _IPS-DST @ ARP-RESOLVE DUP 0= IF
+        DROP -1 EXIT                   \ ARP failure
+    THEN
+    \ mac-addr on stack; build the IP packet
+    _IPS-PROTO @ _IPS-DST @ _IPS-PAY @ _IPS-PLEN @ IP-BUILD
+    \ stack: mac buf total-len
+    >R >R                              \ R: total-len buf
+    ETYPE-IP4 R> R>                    \ stack: mac etype buf total-len
+    ETH-SEND-TX
+    0 ;                                \ success
+
+\ -- 11c: IP-RECV — demux incoming Ethernet frames by EtherType --
+
+\ -- IP-RECV: receive an IP packet from the network --
+\   Polls ETH-RECV; if EtherType=IPv4 and checksum valid,
+\   returns pointer to IP header in ETH-RX-BUF and its length.
+\   Also auto-handles ARP requests via ARP-HANDLE.
+\   ( -- ip-hdr ip-len | 0 0 )
+: IP-RECV  ( -- hdr len | 0 0 )
+    ETH-RECV DUP 0= IF 0 EXIT THEN    \ no frame → 0 0
+    DROP                               \ drop raw frame len
+    \ Is it ARP? Handle transparently
+    ETH-RX-BUF ETH-IS-ARP? IF
+        ARP-HANDLE DROP
+        0 0 EXIT
+    THEN
+    \ Is it IPv4?
+    ETH-RX-BUF ETH-IS-IP4? 0= IF 0 0 EXIT THEN
+    \ Verify checksum
+    ETH-RX-BUF ETH-PLD IP-VERIFY-CKSUM 0= IF 0 0 EXIT THEN
+    \ Return pointer to IP header and its total length
+    ETH-RX-BUF ETH-PLD
+    DUP IP-H.TLEN NW16@ ;
+
+\ -- IP-RECV-WAIT: blocking IP receive with timeout --
+\   ( max-attempts -- hdr len | 0 0 )
+: IP-RECV-WAIT  ( n -- hdr len | 0 0 )
+    0 DO
+        IP-RECV DUP 0<> IF UNLOOP EXIT THEN
+        DROP   \ drop the extra 0
+    LOOP
+    0 0 ;
+
+\ ---------------------------------------------------------------------
+\  §16.3  ICMP — echo request / echo reply
+\ ---------------------------------------------------------------------
+\ ICMP header (8 bytes for echo req/rep):
+\   +0  type      1B   8=echo-request  0=echo-reply
+\   +1  code      1B   0
+\   +2  checksum  2B   (big-endian, over entire ICMP message)
+\   +4  ident     2B   (big-endian)
+\   +6  seq       2B   (big-endian)
+\   +8  data      nB   echo payload
+
+8   CONSTANT /ICMP-HDR
+8   CONSTANT ICMP-TYPE-ECHO-REQ
+0   CONSTANT ICMP-TYPE-ECHO-REP
+CREATE ICMP-BUF  /ICMP-HDR 1480 + ALLOT   \ scratch for building ICMP
+
+\ -- ICMP field accessors --
+: ICMP-H.TYPE   ( buf -- addr )          ;       \ +0
+: ICMP-H.CODE   ( buf -- addr )  1 +  ;          \ +1
+: ICMP-H.CKSUM  ( buf -- addr )  2 +  ;          \ +2
+: ICMP-H.IDENT  ( buf -- addr )  4 +  ;          \ +4
+: ICMP-H.SEQ    ( buf -- addr )  6 +  ;          \ +6
+: ICMP-H.DATA   ( buf -- addr )  /ICMP-HDR + ;   \ +8
+
+\ -- ICMP-IS-ECHO-REQ?: check type=8 --
+: ICMP-IS-ECHO-REQ?  ( icmp-buf -- flag )
+    ICMP-H.TYPE C@ ICMP-TYPE-ECHO-REQ = ;
+
+\ -- ICMP-IS-ECHO-REP?: check type=0 --
+: ICMP-IS-ECHO-REP?  ( icmp-buf -- flag )
+    ICMP-H.TYPE C@ ICMP-TYPE-ECHO-REP = ;
+
+VARIABLE ICMP-SEQ    0 ICMP-SEQ !
+
+\ -- ICMP-BUILD-ECHO-REQ: build echo request --
+\   ( payload paylen -- buf total-len )
+VARIABLE _ICR-PLEN
+: ICMP-BUILD-ECHO-REQ  ( payload paylen -- buf total-len )
+    DUP _ICR-PLEN !
+    \ Clear header area
+    ICMP-BUF /ICMP-HDR 0 FILL
+    \ Type=8 (echo request)
+    ICMP-TYPE-ECHO-REQ ICMP-BUF ICMP-H.TYPE C!
+    \ Ident = 0x4D50 ("MP")
+    19792 ICMP-BUF ICMP-H.IDENT NW16!
+    \ Seq number
+    ICMP-SEQ @ ICMP-BUF ICMP-H.SEQ NW16!
+    ICMP-SEQ @ 1+ 65535 AND ICMP-SEQ !
+    \ Copy payload
+    ICMP-BUF ICMP-H.DATA _ICR-PLEN @ CMOVE   \ ( payload → consumed )
+    \ Compute checksum over entire ICMP message
+    ICMP-BUF _ICR-PLEN @ /ICMP-HDR + IP-CHECKSUM
+    ICMP-BUF ICMP-H.CKSUM NW16!
+    ICMP-BUF _ICR-PLEN @ /ICMP-HDR + ;
+
+\ -- ICMP-BUILD-ECHO-REP: build echo reply from received echo request --
+\   Copies ident, seq, and data from request; sets type=0.
+\   ( icmp-req req-total-len -- buf rep-total-len )
+: ICMP-BUILD-ECHO-REP  ( req rlen -- buf rlen )
+    DUP >R                          \ save rlen on R
+    OVER ICMP-BUF ROT CMOVE        \ copy entire request to ICMP-BUF
+    DROP                             \ drop req addr
+    ICMP-TYPE-ECHO-REP ICMP-BUF ICMP-H.TYPE C!   \ type=0
+    \ Recompute checksum
+    0 ICMP-BUF ICMP-H.CKSUM NW16!   \ zero checksum field
+    ICMP-BUF R@ IP-CHECKSUM          \ compute over full ICMP message
+    ICMP-BUF ICMP-H.CKSUM NW16!
+    ICMP-BUF R> ;
+
+\ -- 12b: ICMP auto-responder --
+
+\ -- ICMP-HANDLE: handle an incoming ICMP echo request --
+\   Assumes IP-RECV has been called and ip-hdr is on the stack.
+\   If it's an echo request for us, sends a reply. Returns flag.
+\   ( ip-hdr ip-len -- flag )   -1 if handled
+VARIABLE _ICH-SRC
+: ICMP-HANDLE  ( ip-hdr ip-len -- flag )
+    DROP                                      \ drop ip-len
+    DUP IP-H.PROTO C@ IP-PROTO-ICMP <> IF     \ not ICMP?
+        DROP 0 EXIT
+    THEN
+    DUP IP-H.SRC _ICH-SRC !                  \ save sender IP addr
+    DUP IP-H.TLEN NW16@ /IP-HDR -            \ ICMP message length
+    SWAP IP-H.DATA SWAP                      \ ( icmp-data icmp-len )
+    OVER ICMP-IS-ECHO-REQ? 0= IF 2DROP 0 EXIT THEN
+    \ Build echo reply
+    ICMP-BUILD-ECHO-REP                       \ ( buf rlen )
+    \ Send via IP to the sender
+    >R >R
+    IP-PROTO-ICMP _ICH-SRC @ R> R>           \ ( proto dst buf len )
+    IP-SEND DROP                              \ ignore ior
+    -1 ;
+
+\ -- PING-POLL: receive one IP frame, auto-reply to pings --
+\   ( -- flag )  -1 if ping was handled, 0 otherwise
+: PING-POLL  ( -- flag )
+    IP-RECV DUP 0= IF DROP EXIT THEN    \ no frame → 0
+    ICMP-HANDLE ;
+
+\ ---------------------------------------------------------------------
+\  §16.4  UDP — connectionless datagrams
+\ ---------------------------------------------------------------------
+\ UDP header (8 bytes):
+\   +0  src-port  2B   big-endian
+\   +2  dst-port  2B   big-endian
+\   +4  length    2B   header + data (big-endian)
+\   +6  checksum  2B   pseudo-header checksum (big-endian)
+
+8 CONSTANT /UDP-HDR
+
+CREATE UDP-TX-BUF  /UDP-HDR 1472 + ALLOT   \ max UDP datagram (1480 max IP payload)
+
+\ -- UDP header field accessors --
+: UDP-H.SPORT  ( buf -- addr )           ;   \ +0
+: UDP-H.DPORT  ( buf -- addr )  2 +  ;      \ +2
+: UDP-H.LEN    ( buf -- addr )  4 +  ;      \ +4
+: UDP-H.CKSUM  ( buf -- addr )  6 +  ;      \ +6
+: UDP-H.DATA   ( buf -- addr )  /UDP-HDR + ; \ +8
+
+\ -- UDP-CHECKSUM: compute UDP checksum with IPv4 pseudo-header --
+\   Pseudo-header: src-ip(4) + dst-ip(4) + 0 + proto(1) + udp-len(2)
+\   Then the UDP header + data.
+\   ( src-ip dst-ip udp-buf udp-len -- cksum )
+VARIABLE _UCK-SUM
+: UDP-CHECKSUM  ( src-ip dst-ip udp-buf udp-len -- cksum )
+    0 _UCK-SUM !
+    \ Accumulate pseudo-header: src-ip (4 bytes → 2 words)
+    >R >R                              \ R: udp-buf udp-len→ wait, order: R: udp-len udp-buf
+    SWAP                               \ ( dst-ip src-ip )
+    DUP NW16@ _UCK-SUM @ + _UCK-SUM !  \ src-ip[0:1]
+    2 + NW16@ _UCK-SUM @ + _UCK-SUM !  \ src-ip[2:3]
+    DUP NW16@ _UCK-SUM @ + _UCK-SUM !  \ dst-ip[0:1]
+    2 + NW16@ _UCK-SUM @ + _UCK-SUM !  \ dst-ip[2:3]
+    \ proto=17 as 16-bit: 0x0011
+    17 _UCK-SUM @ + _UCK-SUM !
+    \ udp-len
+    R> R>                              \ ( udp-buf udp-len )
+    DUP _UCK-SUM @ + _UCK-SUM !       \ add udp-len to sum
+    \ Accumulate UDP header + data (16-bit words)
+    DUP 1 AND >R                       \ R: odd-flag
+    2 / 0 DO
+        DUP NW16@ _UCK-SUM @ + _UCK-SUM !
+        2 +
+    LOOP
+    R> IF DUP C@ 8 LSHIFT _UCK-SUM @ + _UCK-SUM ! THEN
+    DROP
+    \ Fold carries
+    _UCK-SUM @
+    BEGIN DUP 65535 > WHILE
+        DUP 65535 AND SWAP 16 RSHIFT +
+    REPEAT
+    65535 XOR ;
+
+\ -- UDP-BUILD: build a UDP datagram in UDP-TX-BUF --
+\   ( src-port dst-port payload paylen -- buf udp-total-len )
+\   Note: caller must supply src-ip/dst-ip for checksum via UDP-FILL-CKSUM
+VARIABLE _UDB-PLEN
+VARIABLE _UDB-PAY
+: UDP-BUILD  ( sport dport payload paylen -- buf total )
+    _UDB-PLEN !  _UDB-PAY !
+    \ Zero header
+    UDP-TX-BUF /UDP-HDR 0 FILL
+    \ dst-port, src-port
+    UDP-TX-BUF UDP-H.DPORT NW16!
+    UDP-TX-BUF UDP-H.SPORT NW16!
+    \ length = header + payload
+    _UDB-PLEN @ /UDP-HDR +
+    UDP-TX-BUF UDP-H.LEN NW16!
+    \ Copy payload
+    _UDB-PAY @ UDP-TX-BUF UDP-H.DATA _UDB-PLEN @ CMOVE
+    \ Checksum left as 0 (caller fills via UDP-FILL-CKSUM)
+    UDP-TX-BUF  _UDB-PLEN @ /UDP-HDR + ;
+
+\ -- UDP-FILL-CKSUM: compute and store the UDP checksum --
+\   ( src-ip dst-ip udp-buf udp-len -- )
+VARIABLE _UFC-BUF
+VARIABLE _UFC-LEN
+: UDP-FILL-CKSUM  ( src-ip dst-ip buf len -- )
+    _UFC-LEN !  _UFC-BUF !
+    \ Zero the checksum field
+    0 _UFC-BUF @ UDP-H.CKSUM NW16!
+    \ Compute checksum  ( src-ip dst-ip buf len -- cksum )
+    _UFC-BUF @ _UFC-LEN @  UDP-CHECKSUM
+    \ Per RFC 768: if checksum is 0, transmit 0xFFFF
+    DUP 0= IF DROP 65535 THEN
+    _UFC-BUF @ UDP-H.CKSUM NW16! ;
+
+\ -- UDP-PARSE: extract fields from a received UDP datagram --
+\   ( udp-buf -- sport dport data datalen )
+: UDP-PARSE  ( buf -- sport dport data datalen )
+    DUP UDP-H.SPORT NW16@
+    OVER UDP-H.DPORT NW16@
+    2 PICK UDP-H.DATA
+    3 PICK UDP-H.LEN NW16@ /UDP-HDR -
+    >R >R >R >R
+    DROP
+    R> R> R> R> ;
+
+\ -- UDP-VERIFY-CKSUM: verify UDP checksum --
+\   ( src-ip dst-ip udp-buf udp-len -- flag )   -1 if valid, 0 if bad
+: UDP-VERIFY-CKSUM  ( src-ip dst-ip buf len -- flag )
+    UDP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
+
+\ -- 13b: UDP-SEND / UDP-RECV, port demux table --
+
+\ -- Port demux table: maps listening ports to handler XTs --
+\   Each entry: 2-cell (port, xt). Up to 8 listeners.
+8 CONSTANT /UDP-PORT-MAX
+CREATE UDP-PORT-TABLE  /UDP-PORT-MAX 2 * CELLS ALLOT
+: UDP-PORT-CLEAR  ( -- )
+    UDP-PORT-TABLE /UDP-PORT-MAX 2 * CELLS 0 FILL ;
+UDP-PORT-CLEAR
+
+\ -- UDP-PORT-BIND: register a handler for a port --
+\   ( port xt -- flag )  -1 if bound, 0 if table full
+: UDP-PORT-BIND  ( port xt -- flag )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 0= IF          \ empty slot
+            >R               \ save slot addr
+            OVER R@ !        \ store port
+            R> CELL+ !       \ store xt
+            DROP -1           \ success
+            UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    2DROP 0 ;                 \ table full
+
+\ -- UDP-PORT-UNBIND: remove a port binding --
+\   ( port -- )
+: UDP-PORT-UNBIND  ( port -- )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 2 PICK = IF
+            DUP 0 SWAP !               \ clear port
+            CELL+ 0 SWAP !             \ clear xt
+            DROP UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    DROP ;
+
+\ -- UDP-PORT-LOOKUP: find handler for a port --
+\   ( port -- xt | 0 )
+: UDP-PORT-LOOKUP  ( port -- xt | 0 )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 2 PICK = IF
+            CELL+ @ NIP
+            UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    DROP 0 ;
+
+\ -- UDP-SEND: send a UDP datagram over IPv4 --
+\   ( dst-ip dst-port src-port payload paylen -- ior )
+\   ior = 0 on success, -1 on ARP failure
+VARIABLE _UDS-DST
+VARIABLE _UDS-DPORT
+VARIABLE _UDS-SPORT
+: UDP-SEND  ( dst-ip dport sport payload paylen -- ior )
+    >R >R                              \ save paylen, payload on R
+    _UDS-SPORT !  _UDS-DPORT !  _UDS-DST !
+    \ Build UDP datagram
+    _UDS-SPORT @ _UDS-DPORT @ R> R>    \ ( sport dport payload paylen )
+    UDP-BUILD                           \ ( buf udp-len )
+    \ Fill checksum
+    2DUP                                \ ( buf len buf len )
+    MY-IP _UDS-DST @ ROT ROT           \ ( buf len src dst buf len )
+    UDP-FILL-CKSUM                      \ ( buf len )
+    \ Send via IP
+    >R >R
+    IP-PROTO-UDP _UDS-DST @ R> R>      \ ( proto dst buf len )
+    IP-SEND ;
+
+\ -- UDP-RECV: receive a UDP datagram from the network --
+\   Receives an IP frame, checks for UDP, verifies checksum.
+\   Returns source IP address pointer, UDP header pointer, and UDP length.
+\   Also auto-handles ARP (via IP-RECV) and ICMP ping.
+\   ( -- src-ip udp-buf udp-len | 0 0 0 )
+VARIABLE _UDR-HDR
+VARIABLE _UDR-IPLEN
+: UDP-RECV  ( -- src-ip udp-buf udp-len | 0 0 0 )
+    IP-RECV DUP 0= IF DROP 0 0 EXIT THEN    \ no frame → 0 0 0
+    _UDR-IPLEN !  _UDR-HDR !
+    \ Auto-handle ICMP pings
+    _UDR-HDR @ IP-H.PROTO C@ IP-PROTO-ICMP = IF
+        _UDR-HDR @ _UDR-IPLEN @ ICMP-HANDLE DROP
+        0 0 0 EXIT
+    THEN
+    \ Check for UDP
+    _UDR-HDR @ IP-H.PROTO C@ IP-PROTO-UDP <> IF
+        0 0 0 EXIT
+    THEN
+    \ Verify UDP checksum
+    _UDR-HDR @ IP-H.SRC
+    _UDR-HDR @ IP-H.DST
+    _UDR-HDR @ IP-H.DATA
+    _UDR-IPLEN @ /IP-HDR -
+    UDP-VERIFY-CKSUM 0= IF
+        0 0 0 EXIT
+    THEN
+    \ Return ( src-ip udp-buf udp-len )
+    _UDR-HDR @ IP-H.SRC
+    _UDR-HDR @ IP-H.DATA
+    _UDR-IPLEN @ /IP-HDR - ;
+
+\ -- UDP-DISPATCH: receive and dispatch to bound port handler --
+\   Calls the registered handler xt with ( src-ip sport data dlen -- )
+\   ( -- flag )  -1 if dispatched, 0 if not
+: UDP-DISPATCH  ( -- flag )
+    UDP-RECV DUP 0= IF DROP DROP EXIT THEN    \ no frame → 0
+    \ Stack: ( src-ip udp-buf udp-len )
+    DROP                                       \ drop udp-len
+    DUP UDP-H.DPORT NW16@                     \ get dest port
+    UDP-PORT-LOOKUP DUP 0= IF                 \ no handler?
+        DROP DROP DROP 0 EXIT
+    THEN
+    \ Stack: ( src-ip udp-buf xt )
+    >R                                         \ save xt
+    DUP UDP-H.SPORT NW16@                     \ ( src-ip udp-buf sport )
+    OVER UDP-H.DATA                            \ ( src-ip udp-buf sport data )
+    2 PICK UDP-H.LEN NW16@ /UDP-HDR -         \ ( src-ip udp-buf sport data dlen )
+    >R >R >R
+    DROP                                       \ drop udp-buf
+    R> R> R>                                   \ ( src-ip sport data dlen )
+    R> EXECUTE                                 \ call handler
+    -1 ;
+
+\ ---------------------------------------------------------------------
+\  §16.5  DHCP — Dynamic Host Configuration Protocol
+\ ---------------------------------------------------------------------
+\ DHCP uses BOOTP format over UDP 67(server)/68(client).
+\ Simplified packet layout (first 240 bytes):
+\   +0   op       1B   1=BOOTREQUEST 2=BOOTREPLY
+\   +1   htype    1B   1=Ethernet
+\   +2   hlen     1B   6
+\   +3   hops     1B   0
+\   +4   xid      4B   transaction ID
+\   +8   secs     2B   0
+\  +10   flags    2B   0x8000=broadcast
+\  +12   ciaddr   4B   client IP
+\  +16   yiaddr   4B   "your" IP (offered)
+\  +20   siaddr   4B   server IP
+\  +24   giaddr   4B   gateway IP
+\  +28   chaddr  16B   client hardware address (MAC + padding)
+\  +44   sname   64B   server hostname (unused)
+\ +108   file   128B   boot filename (unused)
+\ +236   magic    4B   99.130.83.99 = DHCP magic cookie
+\ +240   options  var  DHCP options (type, len, data...)
+
+240 CONSTANT /DHCP-HDR
+CREATE DHCP-BUF  /DHCP-HDR 312 + ALLOT   \ 548 bytes max (options up to 312)
+
+\ DNS-SERVER-IP: declared here so DHCP can populate it from option 6.
+\ Default value (8.8.8.8) is set later in §16.6 DNS.
+CREATE DNS-SERVER-IP  4 ALLOT
+8 8 8 8 DNS-SERVER-IP IP!
+
+\ DHCP message types (option 53)
+1 CONSTANT DHCP-DISCOVER
+2 CONSTANT DHCP-OFFER
+3 CONSTANT DHCP-REQUEST
+5 CONSTANT DHCP-ACK
+6 CONSTANT DHCP-NAK
+
+\ DHCP field accessors
+: DHCP-F.OP     ( buf -- addr )             ;       \ +0
+: DHCP-F.HTYPE  ( buf -- addr )   1 +  ;            \ +1
+: DHCP-F.HLEN   ( buf -- addr )   2 +  ;            \ +2
+: DHCP-F.XID    ( buf -- addr )   4 +  ;            \ +4
+: DHCP-F.FLAGS  ( buf -- addr )  10 + ;              \ +10
+: DHCP-F.CIADDR ( buf -- addr )  12 + ;              \ +12
+: DHCP-F.YIADDR ( buf -- addr )  16 + ;              \ +16
+: DHCP-F.SIADDR ( buf -- addr )  20 + ;              \ +20
+: DHCP-F.CHADDR ( buf -- addr )  28 + ;              \ +28
+: DHCP-F.MAGIC  ( buf -- addr ) 236 + ;              \ +236
+: DHCP-F.OPTS   ( buf -- addr ) 240 + ;              \ +240
+
+VARIABLE DHCP-XID    305419896 DHCP-XID !   \ 0x12345678
+
+\ -- DHCP-NEW-XID: generate a pseudo-random transaction ID --
+\   Uses CYCLES (CPU cycle counter) and a simple xorshift mixer.
+VARIABLE _DHCP-RNG-STATE  48271 _DHCP-RNG-STATE !
+: DHCP-NEW-XID  ( -- )
+    _DHCP-RNG-STATE @ CYCLES XOR
+    DUP 13 LSHIFT XOR
+    DUP  7 RSHIFT XOR
+    DUP 17 LSHIFT XOR
+    DUP _DHCP-RNG-STATE !
+    0xFFFFFFFF AND            \ DHCP XID is 32-bit
+    DHCP-XID ! ;
+
+\ -- DHCP-VALIDATE-REPLY: strict validation of incoming DHCP reply --
+\   Checks: op=BOOTREPLY(2), magic cookie, xid match, chaddr match
+\   ( dhcp-buf -- flag )  -1 if valid, 0 if invalid
+: DHCP-VALIDATE-REPLY  ( buf -- flag )
+    \ Check op = BOOTREPLY (2)
+    DUP DHCP-F.OP C@ 2 <> IF DROP 0 EXIT THEN
+    \ Check magic cookie = 99.130.83.99
+    DUP DHCP-F.MAGIC DUP C@ 99 <> IF 2DROP 0 EXIT THEN
+    DUP 1+ C@ 130 <> IF 2DROP 0 EXIT THEN
+    DUP 2 + C@ 83 <> IF 2DROP 0 EXIT THEN
+    3 + C@ 99 <> IF DROP 0 EXIT THEN
+    \ Check XID matches
+    DUP DHCP-F.XID NW16@ 16 LSHIFT
+    OVER DHCP-F.XID 2 + NW16@ OR
+    DHCP-XID @ <> IF DROP 0 EXIT THEN
+    \ Check chaddr matches MY-MAC (first 6 bytes)
+    DUP DHCP-F.CHADDR MY-MAC 6 TUCK COMPARE 0<> IF DROP 0 EXIT THEN
+    DROP -1 ;
+
+\ -- DHCP-FILL-COMMON: fill common BOOTP fields --
+\   ( buf -- )
+: DHCP-FILL-COMMON  ( buf -- )
+    DUP /DHCP-HDR 312 + 0 FILL      \ zero entire buffer
+    1 OVER DHCP-F.OP C!              \ op = BOOTREQUEST
+    1 OVER DHCP-F.HTYPE C!           \ htype = Ethernet
+    6 OVER DHCP-F.HLEN C!            \ hlen = 6
+    \ xid (4 bytes, big-endian) using two 16-bit stores
+    DHCP-XID @ DUP 16 RSHIFT 2 PICK DHCP-F.XID NW16!
+    65535 AND OVER DHCP-F.XID 2 + NW16!
+    \ flags = broadcast (0x8000)
+    32768 OVER DHCP-F.FLAGS NW16!
+    \ chaddr = our MAC (6 bytes)
+    MY-MAC OVER DHCP-F.CHADDR 6 CMOVE
+    \ magic cookie: 99.130.83.99
+    DUP DHCP-F.MAGIC
+    99 OVER C!  130 OVER 1+ C!  83 OVER 2 + C!  99 SWAP 3 + C!
+    DROP ;
+
+\ -- DHCP-ADD-MSGTYPE: append message type option --
+\   ( opt-ptr type -- opt-ptr' )
+: DHCP-ADD-MSGTYPE  ( ptr type -- ptr' )
+    OVER     53 SWAP C!        \ option 53
+    OVER 1+   1 SWAP C!        \ length 1
+    OVER 2 +     C!            \ value = type
+    3 + ;
+
+\ -- DHCP-ADD-END: append end option --
+\   ( opt-ptr -- opt-ptr' )
+: DHCP-ADD-END  ( ptr -- ptr' )
+    255 OVER C!  1+ ;
+
+\ -- DHCP-ADD-REQIP: append requested IP option (50) --
+\   ( opt-ptr ip-addr -- opt-ptr' )
+: DHCP-ADD-REQIP  ( ptr ip -- ptr' )
+    OVER      50 SWAP C!      \ option 50
+    OVER 1+    4 SWAP C!      \ length 4
+    OVER 2 + SWAP 4 CMOVE     \ copy 4 IP bytes
+    6 + ;
+
+\ -- DHCP-ADD-SERVERID: append server identifier option (54) --
+\   ( opt-ptr ip-addr -- opt-ptr' )
+: DHCP-ADD-SERVERID  ( ptr ip -- ptr' )
+    OVER      54 SWAP C!
+    OVER 1+    4 SWAP C!
+    OVER 2 + SWAP 4 CMOVE
+    6 + ;
+
+\ -- DHCP-ADD-PARAMLIST: append Parameter Request List option (55) --
+\   Requests: subnet(1), router(3), DNS(6), lease-time(51)
+\   ( opt-ptr -- opt-ptr' )
+: DHCP-ADD-PARAMLIST  ( ptr -- ptr' )
+    55 OVER C!              \ option 55
+     4 OVER 1+ C!           \ length 4
+     1 OVER 2 + C!          \ subnet mask
+     3 OVER 3 + C!          \ router
+     6 OVER 4 + C!          \ DNS server
+    51 OVER 5 + C!          \ lease time
+    6 + ;
+
+\ -- DHCP-BUILD-DISCOVER: build a DHCP DISCOVER packet --
+\   ( -- buf len )
+: DHCP-BUILD-DISCOVER  ( -- buf len )
+    DHCP-NEW-XID
+    DHCP-BUF DHCP-FILL-COMMON
+    DHCP-BUF DHCP-F.OPTS
+    DHCP-DISCOVER DHCP-ADD-MSGTYPE
+    DHCP-ADD-PARAMLIST
+    DHCP-ADD-END
+    DHCP-BUF - DHCP-BUF SWAP ;
+
+\ -- DHCP-BUILD-REQUEST: build a DHCP REQUEST packet --
+\   Requests the offered IP, includes server ID.
+\   ( offered-ip server-ip -- buf len )
+VARIABLE _DHR-OIP
+VARIABLE _DHR-SIP
+: DHCP-BUILD-REQUEST  ( offered-ip server-ip -- buf len )
+    _DHR-SIP !  _DHR-OIP !
+    DHCP-BUF DHCP-FILL-COMMON
+    DHCP-BUF DHCP-F.OPTS
+    DHCP-REQUEST DHCP-ADD-MSGTYPE
+    _DHR-OIP @ DHCP-ADD-REQIP
+    _DHR-SIP @ DHCP-ADD-SERVERID
+    DHCP-ADD-END
+    DHCP-BUF - DHCP-BUF SWAP ;
+
+\ -- DHCP-SEND: send a DHCP packet via broadcast UDP --
+\   ( buf len -- )  uses src-ip 0.0.0.0, dst-ip 255.255.255.255
+VARIABLE _DHS-BUF
+VARIABLE _DHS-LEN
+CREATE DHCP-BCAST-IP  255 C, 255 C, 255 C, 255 C,
+CREATE DHCP-ZERO-IP      0 C,   0 C,   0 C,   0 C,
+: DHCP-SEND  ( buf len -- )
+    _DHS-LEN !  _DHS-BUF !
+    \ Build UDP datagram: sport=68, dport=67
+    68 67 _DHS-BUF @ _DHS-LEN @ UDP-BUILD   \ ( udp-buf udp-len )
+    \ Fill UDP checksum with src=0.0.0.0, dst=255.255.255.255
+    DHCP-ZERO-IP DHCP-BCAST-IP 2 PICK 2 PICK UDP-FILL-CKSUM
+    \ Build IP header around UDP payload
+    \ IP-FILL-HDR ( proto paylen dst-ip buf -- )
+    IP-PROTO-UDP OVER DHCP-BCAST-IP IP-TX-BUF IP-FILL-HDR
+    \ Override src=0.0.0.0 (we don't have an IP yet)
+    DHCP-ZERO-IP IP-TX-BUF IP-H.SRC 4 CMOVE
+    \ Recompute IP header checksum
+    0 IP-TX-BUF IP-H.CKSUM NW16!
+    IP-TX-BUF /IP-HDR IP-CHECKSUM IP-TX-BUF IP-H.CKSUM NW16!
+    \ Copy UDP data after IP header
+    \ stack: ( udp-buf udp-len )
+    >R
+    IP-TX-BUF IP-H.DATA R@ CMOVE     \ copy udp-buf → IP payload area
+    \ Send raw Ethernet broadcast
+    MAC-BCAST ETYPE-IP4
+    IP-TX-BUF R> /IP-HDR +           \ ( mac etype ip-buf total-len )
+    ETH-SEND-TX ;
+
+\ -- DHCP-GET-MSGTYPE: extract message type from DHCP options --
+\   ( buf -- type | 0 )
+: DHCP-GET-MSGTYPE  ( buf -- type )
+    DHCP-F.OPTS
+    BEGIN
+        DUP C@ 255 <> WHILE           \ not END option
+        DUP C@ 53 = IF                \ option 53 = message type
+            2 + C@ EXIT
+        THEN
+        DUP C@ 0= IF 1+ ELSE         \ pad option (type 0, no len)
+            DUP 1+ C@ 2 + +           \ skip: type + len + data
+        THEN
+    REPEAT
+    DROP 0 ;
+
+\ -- DHCP-GET-OPTION: extract a specific option from DHCP packet --
+\   ( buf option-code -- addr len | 0 0 )
+: DHCP-GET-OPTION  ( buf code -- addr len | 0 0 )
+    SWAP DHCP-F.OPTS SWAP
+    BEGIN
+        OVER C@ 255 <> WHILE
+        OVER C@ OVER = IF            \ found!
+            DROP 2 + DUP 1- C@       \ ( data-addr data-len )
+            EXIT
+        THEN
+        OVER C@ 0= IF SWAP 1+ SWAP ELSE
+            SWAP DUP 1+ C@ 2 + + SWAP
+        THEN
+    REPEAT
+    2DROP 0 0 ;
+
+\ -- DHCP-PARSE-OFFER: parse DHCP OFFER, extract offered IP + server IP --
+\   ( dhcp-buf -- offered-ip server-ip | 0 0 )
+CREATE DHCP-OFFERED-IP  4 ALLOT
+CREATE DHCP-SERVER-IP   4 ALLOT
+CREATE DHCP-GW-OFFER    4 ALLOT
+CREATE DHCP-MASK-OFFER  4 ALLOT
+: DHCP-PARSE-OFFER  ( buf -- offered-ip server-ip | 0 0 )
+    DUP DHCP-GET-MSGTYPE DHCP-OFFER <> IF DROP 0 0 EXIT THEN
+    \ Offered IP = yiaddr
+    DUP DHCP-F.YIADDR DHCP-OFFERED-IP 4 CMOVE
+    \ Server IP = siaddr (or option 54)
+    DUP DHCP-F.SIADDR DHCP-SERVER-IP 4 CMOVE
+    \ Try option 54 (server identifier) as override
+    DUP 54 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-SERVER-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Extract subnet mask (option 1) if present
+    DUP 1 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-MASK-OFFER 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Extract router/gateway (option 3) if present
+    DUP 3 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-GW-OFFER 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    DROP
+    DHCP-OFFERED-IP  DHCP-SERVER-IP ;
+
+\ -- DHCP-PARSE-ACK: parse DHCP ACK, configure network --
+\   ( dhcp-buf -- flag )  -1 if ACK applied, 0 if not ACK
+: DHCP-PARSE-ACK  ( buf -- flag )
+    DUP DHCP-GET-MSGTYPE DHCP-ACK <> IF DROP 0 EXIT THEN
+    \ Set MY-IP from yiaddr
+    DUP DHCP-F.YIADDR MY-IP 4 CMOVE
+    \ Set subnet mask from option 1
+    DUP 1 DHCP-GET-OPTION DUP 0<> IF
+        DROP NET-MASK 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Set gateway from option 3
+    DUP 3 DHCP-GET-OPTION DUP 0<> IF
+        DROP GW-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Set DNS server from option 6 (first 4 bytes = primary DNS)
+    DUP 6 DHCP-GET-OPTION DUP 4 >= IF
+        DROP DNS-SERVER-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    DROP -1 ;
+
+\ -- DHCP-WAIT-REPLY: wait for a validated DHCP reply on port 68 --
+\   ( max-attempts expected-type -- dhcp-buf | 0 )
+\   Returns pointer to DHCP data or 0. Validates reply and type.
+: DHCP-WAIT-REPLY  ( n expected-type -- dhcp-buf | 0 )
+    SWAP 0 DO
+        UDP-RECV DUP 0<> IF
+            \ Stack: ( expected-type src-ip udp-buf udp-len )
+            DROP              \ drop udp-len
+            DUP UDP-H.DPORT NW16@ 68 = IF
+                UDP-H.DATA    \ pointer to DHCP data
+                \ Stack: ( expected-type src-ip dhcp-data )
+                DUP DHCP-VALIDATE-REPLY IF
+                    \ Check message type matches expected
+                    DUP DHCP-GET-MSGTYPE 3 PICK = IF
+                        NIP NIP   \ drop src-ip & expected-type
+                        UNLOOP EXIT
+                    THEN
+                THEN
+                DROP          \ invalid reply, discard dhcp-data
+            ELSE
+                DROP          \ drop udp-buf (wrong port)
+            THEN
+        ELSE
+            DROP DROP         \ drop 2 of 3 zeros from failure
+        THEN
+        DROP                  \ drop src-ip (or last 0)
+    LOOP
+    DROP                      \ drop expected-type
+    0 ;
+
+\ -- DHCP-START: run DHCP client with retry/backoff --
+\   Retries DISCOVER up to 4 times with increasing wait attempts.
+\   ( -- flag )  -1 if success, 0 if failed
+VARIABLE _DHST-OIP
+VARIABLE _DHST-SIP
+: DHCP-START  ( -- flag )
+    4 0 DO                           \ retry loop (up to 4 attempts)
+        \ Step 1: Send DISCOVER (generates new XID each time)
+        DHCP-BUILD-DISCOVER DHCP-SEND
+        \ Step 2: Wait for OFFER (increasing patience: 50, 100, 200, 400)
+        50 I 0 ?DO 2 * LOOP
+        DHCP-OFFER DHCP-WAIT-REPLY
+        DUP 0<> IF
+            \ Parse OFFER
+            DUP DHCP-PARSE-OFFER
+            OVER 0= IF 2DROP DROP ELSE
+                _DHST-SIP !  _DHST-OIP !
+                DROP                     \ drop dhcp-buf
+                \ Step 3: Send REQUEST
+                _DHST-OIP @ _DHST-SIP @ DHCP-BUILD-REQUEST DHCP-SEND
+                \ Step 4: Wait for ACK
+                100 DHCP-ACK DHCP-WAIT-REPLY
+                DUP 0<> IF
+                    DHCP-PARSE-ACK
+                    UNLOOP EXIT
+                THEN
+                DROP
+            THEN
+        ELSE
+            DROP                         \ drop 0
+        THEN
+    LOOP
+    0 ;
+
+\ ---------------------------------------------------------------------
+\  §16.6  DNS — Domain Name System (A-record client)
+\ ---------------------------------------------------------------------
+\ DNS query/response format:
+\   +0   ID        2B   transaction ID
+\   +2   flags     2B   0x0100 = standard query (RD=1)
+\   +4   QDCOUNT   2B   number of questions (1)
+\   +6   ANCOUNT   2B   number of answers
+\   +8   NSCOUNT   2B   0
+\  +10   ARCOUNT   2B   0
+\  +12   question  var  encoded domain name + type + class
+\        answer    var  name + type + class + TTL + rdlen + rdata
+
+12 CONSTANT /DNS-HDR
+CREATE DNS-BUF  512 ALLOT  \ max DNS message
+\ DNS-SERVER-IP is declared in §16.5 (DHCP) so DHCP-PARSE-ACK can set it.
+
+VARIABLE DNS-ID   42 DNS-ID !
+
+\ -- DNS-ENCODE-NAME: encode domain name in DNS wire format --
+\   Converts "example.com" → [7]example[3]com[0]
+\   ( c-addr len buf -- buf end-ptr )
+\   c-addr/len is the domain string; buf is where to write.
+VARIABLE _DNE-BUF
+VARIABLE _DNE-LEN
+VARIABLE _DNE-SRC
+VARIABLE _DNE-LPTR
+: DNS-ENCODE-NAME  ( src slen buf -- buf end )
+    _DNE-BUF !              \ save output buffer
+    _DNE-LEN !  _DNE-SRC !  \ save source string
+    _DNE-BUF @              \ output pointer
+    DUP _DNE-LPTR !         \ save label length position
+    1+                      \ advance past length byte
+    0                        \ label-count = 0
+    _DNE-LEN @ 0 DO
+        _DNE-SRC @ I + C@
+        DUP 46 = IF          \ '.' found
+            DROP
+            \ store label length at _DNE-LPTR
+            OVER _DNE-LPTR @ -  1-   _DNE-LPTR @ C!
+            \ set new label length position
+            OVER _DNE-LPTR !
+            SWAP 1+ SWAP     \ advance output ptr past length byte
+        ELSE
+            2 PICK C!        \ store character
+            SWAP 1+ SWAP     \ advance output ptr
+        THEN
+    LOOP
+    DROP                     \ drop label-count
+    \ Store final label length
+    DUP _DNE-LPTR @ -  1-  _DNE-LPTR @ C!
+    \ Terminate with 0-length label
+    0 OVER C!  1+
+    _DNE-BUF @ SWAP ;
+
+\ -- DNS-BUILD-QUERY: build a DNS A-record query --
+\   ( domain-addr domain-len -- buf total-len )
+VARIABLE _DNQ-DADDR
+VARIABLE _DNQ-DLEN
+: DNS-BUILD-QUERY  ( daddr dlen -- buf total )
+    _DNQ-DLEN !  _DNQ-DADDR !
+    DNS-BUF 512 0 FILL
+    \ Header
+    DNS-ID @ DNS-BUF NW16!           \ ID
+    256 DNS-BUF 2 + NW16!            \ flags = 0x0100 (RD=1)
+    1 DNS-BUF 4 + NW16!              \ QDCOUNT = 1
+    \ Question section: encoded name + type(A=1) + class(IN=1)
+    _DNQ-DADDR @ _DNQ-DLEN @ DNS-BUF /DNS-HDR + DNS-ENCODE-NAME
+    NIP                               \ drop buf, keep end ptr
+    DUP 1 SWAP NW16!  2 +            \ QTYPE = A (1)
+    DUP 1 SWAP NW16!  2 +            \ QCLASS = IN (1)
+    DNS-BUF -                         \ total length
+    DNS-ID @ 1+ 65535 AND DNS-ID !    \ increment ID
+    DNS-BUF SWAP ;
+
+\ -- DNS-PARSE-RESPONSE: parse DNS response, extract first A record IP --
+\   ( buf len -- ip-addr | 0 )   ip-addr points to 4-byte resolved IP
+\   Returns 0 if no A record found or response indicates error.
+CREATE DNS-RESULT-IP  4 ALLOT
+
+\ Helper: skip a DNS name (labels or compression pointer)
+: DNS-SKIP-NAME  ( ptr -- ptr' )
+    BEGIN
+        DUP C@ DUP 0= IF DROP 1+ EXIT THEN
+        DUP 192 AND 192 = IF DROP 2 + EXIT THEN
+        1+ +
+    0 UNTIL ;
+
+VARIABLE _DNP-BUF
+VARIABLE _DNP-LEN
+: DNS-PARSE-RESPONSE  ( buf len -- ip | 0 )
+    _DNP-LEN !  _DNP-BUF !
+    \ Check response flag (bit 15 of flags = QR must be 1)
+    _DNP-BUF @ 2 + NW16@ 32768 AND 0= IF 0 EXIT THEN
+    \ Check RCODE (lower 4 bits of flags) = 0
+    _DNP-BUF @ 2 + NW16@ 15 AND 0<> IF 0 EXIT THEN
+    \ Get ANCOUNT
+    _DNP-BUF @ 6 + NW16@ DUP 0= IF DROP 0 EXIT THEN
+    >R                               \ save ANCOUNT
+    \ Skip question section: jump over header
+    _DNP-BUF @ /DNS-HDR + DNS-SKIP-NAME
+    4 +                               \ skip QTYPE + QCLASS
+    \ Now sitting at the answer section
+    R> 0 DO                          \ iterate ANCOUNT answers
+        \ Skip NAME (may be compressed pointer)
+        DUP C@ 192 AND 192 = IF
+            2 +
+        ELSE
+            BEGIN DUP C@ 0<> WHILE DUP C@ 1+ + REPEAT 1+
+        THEN
+        \ Read TYPE (2B) and CLASS (2B)
+        DUP NW16@ 1 = IF             \ TYPE = A?
+            DUP 2 + NW16@ 1 = IF     \ CLASS = IN?
+                \ TTL at +4 (4B), RDLENGTH at +8 (2B), RDATA at +10
+                DUP 8 + NW16@ 4 = IF  \ RDLENGTH = 4?
+                    10 + DNS-RESULT-IP 4 CMOVE
+                    DNS-RESULT-IP
+                    UNLOOP EXIT
+                THEN
+            THEN
+        THEN
+        \ Skip this RR: +2(type) +2(class) +4(TTL) +2(rdlength) + rdlength
+        DUP 8 + NW16@                \ RDLENGTH
+        10 + +                       \ skip to next RR
+    LOOP
+    DROP 0 ;
+
+\ -- DNS-RESOLVE: resolve a domain name to an IP address --
+\   ( c-addr len -- ip-addr | 0 )
+\   Sends DNS query to DNS-SERVER-IP, waits for response.
+VARIABLE _DNR-DADDR
+VARIABLE _DNR-DLEN
+: DNS-RESOLVE  ( daddr dlen -- ip | 0 )
+    _DNR-DLEN !  _DNR-DADDR !
+    \ Build query
+    _DNR-DADDR @ _DNR-DLEN @ DNS-BUILD-QUERY
+    \ Send via UDP to DNS server, port 53
+    \ DNS-BUILD-QUERY returns ( buf total )
+    \ UDP-SEND expects ( dst-ip dport sport payload paylen )
+    >R >R
+    DNS-SERVER-IP 53 12345 R> R>     \ ( dst-ip dport sport payload paylen )
+    UDP-SEND DROP                    \ ignore ior
+    \ Wait for response on our port 12345
+    50 0 DO
+        UDP-RECV DUP 0<> IF
+            \ ( src-ip udp-buf udp-len )
+            >R                        \ save udp-len
+            DUP UDP-H.SPORT NW16@ 53 = IF
+                UDP-H.DATA R>
+                /UDP-HDR -            \ ( src-ip dns-buf dns-len )
+                DNS-PARSE-RESPONSE
+                NIP                   \ drop src-ip
+                UNLOOP EXIT
+            ELSE
+                DROP R> DROP          \ wrong port, discard
+            THEN
+        ELSE
+            DROP DROP                \ drop udp-buf(0) and udp-len(0)
+        THEN
+        DROP                         \ drop src-ip / 0
+    LOOP
+    0 ;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 
@@ -3846,5 +5323,6 @@ NCORES 1 > IF
     ."  Multicore: " NCORES . ." cores available" CR
     ."  Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work." CR
 THEN
+MAC-INIT
 DISK? IF FS-LOAD THEN
 CR

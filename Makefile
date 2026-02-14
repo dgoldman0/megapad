@@ -74,6 +74,11 @@ test-quick: check-pypy
 test-one: check-pypy
 	$(PYPY) $(PYTEST) -k "$(K)" --tb=long -v
 
+# --- Single test with C++ accelerator (faster for KDOS tests) ---
+.PHONY: test-one-accel
+test-one-accel: accel
+	$(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
+
 # --- Background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
 #        make test-bg K=TestFoo (subset)
