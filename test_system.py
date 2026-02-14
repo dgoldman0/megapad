@@ -8214,6 +8214,138 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("30 ", text)  # 20 + 10
 
+    # --- 11b: IP-SEND (ARP resolve → Ethernet → NIC TX) ---
+
+    def test_ip_send_with_cached_arp(self):
+        """IP-SEND should succeed when ARP entry is pre-cached."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE gw 4 ALLOT  192 gw C!  168 gw 1+ C!  1 gw 2 + C!  1 gw 3 + C!",
+            "CREATE gwm 6 ALLOT  gwm 6 170 FILL",
+            "gw gwm ARP-INSERT",
+            "CREATE pl 4 ALLOT  pl 4 72 FILL",  # 'H' * 4
+            "IP-PROTO-UDP gw pl 4 IP-SEND .",
+        ])
+        self.assertIn("0 ", text)   # ior = 0 (success)
+
+    def test_ip_send_increments_tx(self):
+        """IP-SEND should transmit a frame (check NIC tx_count register)."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE gw2 4 ALLOT  192 gw2 C!  168 gw2 1+ C!  1 gw2 2 + C!  1 gw2 3 + C!",
+            "CREATE gwm2 6 ALLOT  gwm2 6 187 FILL",
+            "gw2 gwm2 ARP-INSERT",
+            "CREATE pl2 4 ALLOT  pl2 4 0 FILL",
+            "IP-PROTO-ICMP gw2 pl2 4 IP-SEND .\" s=\" .",
+        ])
+        self.assertIn("s=0 ", text)   # ior=0 means success
+
+    def test_ip_send_arp_failure(self):
+        """IP-SEND should return -1 when ARP resolution fails."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE unk 4 ALLOT  10 unk C!  99 unk 1+ C!  99 unk 2 + C!  99 unk 3 + C!",
+            "CREATE pl3 4 ALLOT  pl3 4 0 FILL",
+            "IP-PROTO-UDP unk pl3 4 IP-SEND .",
+        ])
+        self.assertIn("-1 ", text)   # ARP failure
+
+    # --- 11c: IP-RECV (demux incoming Ethernet by EtherType) ---
+
+    @staticmethod
+    def _build_ip_frame(dst_mac, src_mac, proto, src_ip, dst_ip, payload):
+        """Build a raw Ethernet+IPv4 frame for NIC injection."""
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'  # EtherType=IPv4
+        # IPv4 header
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45          # ver/ihl
+        total_len = 20 + len(payload)
+        ip_hdr[2] = (total_len >> 8) & 0xFF
+        ip_hdr[3] = total_len & 0xFF
+        ip_hdr[6] = 0x40          # DF
+        ip_hdr[8] = 64            # TTL
+        ip_hdr[9] = proto
+        ip_hdr[12:16] = bytes(src_ip)
+        ip_hdr[16:20] = bytes(dst_ip)
+        # Compute header checksum
+        s = 0
+        for i in range(0, 20, 2):
+            s += (ip_hdr[i] << 8) | ip_hdr[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        ip_hdr[10] = (cksum >> 8) & 0xFF
+        ip_hdr[11] = cksum & 0xFF
+        return eth + bytes(ip_hdr) + bytes(payload)
+
+    def test_ip_recv_ipv4_frame(self):
+        """IP-RECV should return IP header+len for valid IPv4 frames."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xAA]*6, 17,   # UDP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x42' * 8)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV .\" len=\" . 0<> .\" got\"",
+        ], nic_frames=[frame])
+        self.assertIn("len=28 ", text)  # 20 hdr + 8 payload
+        self.assertIn("got", text)
+
+    def test_ip_recv_no_frame(self):
+        """IP-RECV should return 0 0 when nothing is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_arp_handled_transparently(self):
+        """IP-RECV should auto-handle ARP and return 0 0."""
+        req = self._build_arp_request_frame(
+            [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+            [10, 0, 0, 1],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ], nic_frames=[req])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_non_ip_discarded(self):
+        """IP-RECV should discard non-IPv4, non-ARP frames."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x86DD, b'\x00' * 20)  # IPv6
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV . .",
+        ], nic_frames=[frame])
+        self.assertIn("0 0 ", text)
+
+    def test_ip_recv_extracts_proto(self):
+        """IP-RECV result can be parsed to extract protocol."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xBB]*6, 1,   # ICMP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 12)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV .\" len=\" . DROP",
+            "ETH-RX-BUF ETH-PLD IP-H.PROTO C@ .\" p=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("p=1 ", text)
+
+    def test_ip_recv_wait_timeout(self):
+        """IP-RECV-WAIT should return 0 0 after timeout."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "5 IP-RECV-WAIT . .",
+        ])
+        self.assertIn("0 0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main

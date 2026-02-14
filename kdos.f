@@ -4407,6 +4407,62 @@ VARIABLE _IPB-PLEN
 : IP-VERIFY-CKSUM  ( hdr -- flag )
     /IP-HDR IP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
 
+\ -- 11b: IP-SEND — ARP-resolve → Ethernet → NIC TX --
+
+VARIABLE _IPS-PROTO
+VARIABLE _IPS-DST
+VARIABLE _IPS-PAY
+VARIABLE _IPS-PLEN
+
+\ -- IP-SEND: build + send an IPv4 packet over Ethernet --
+\   ( proto dst-ip payload paylen -- ior )
+\   ior = 0 on success, -1 if ARP resolution failed
+: IP-SEND  ( proto dst-ip payload paylen -- ior )
+    _IPS-PLEN !  _IPS-PAY !  _IPS-DST !  _IPS-PROTO !
+    \ Resolve destination IP → MAC
+    _IPS-DST @ ARP-RESOLVE DUP 0= IF
+        DROP -1 EXIT                   \ ARP failure
+    THEN
+    \ mac-addr on stack; build the IP packet
+    _IPS-PROTO @ _IPS-DST @ _IPS-PAY @ _IPS-PLEN @ IP-BUILD
+    \ stack: mac buf total-len
+    >R >R                              \ R: total-len buf
+    ETYPE-IP4 R> R>                    \ stack: mac etype buf total-len
+    ETH-SEND-TX
+    0 ;                                \ success
+
+\ -- 11c: IP-RECV — demux incoming Ethernet frames by EtherType --
+
+\ -- IP-RECV: receive an IP packet from the network --
+\   Polls ETH-RECV; if EtherType=IPv4 and checksum valid,
+\   returns pointer to IP header in ETH-RX-BUF and its length.
+\   Also auto-handles ARP requests via ARP-HANDLE.
+\   ( -- ip-hdr ip-len | 0 0 )
+: IP-RECV  ( -- hdr len | 0 0 )
+    ETH-RECV DUP 0= IF 0 EXIT THEN    \ no frame → 0 0
+    DROP                               \ drop raw frame len
+    \ Is it ARP? Handle transparently
+    ETH-RX-BUF ETH-IS-ARP? IF
+        ARP-HANDLE DROP
+        0 0 EXIT
+    THEN
+    \ Is it IPv4?
+    ETH-RX-BUF ETH-IS-IP4? 0= IF 0 0 EXIT THEN
+    \ Verify checksum
+    ETH-RX-BUF ETH-PLD IP-VERIFY-CKSUM 0= IF 0 0 EXIT THEN
+    \ Return pointer to IP header and its total length
+    ETH-RX-BUF ETH-PLD
+    DUP IP-H.TLEN NW16@ ;
+
+\ -- IP-RECV-WAIT: blocking IP receive with timeout --
+\   ( max-attempts -- hdr len | 0 0 )
+: IP-RECV-WAIT  ( n -- hdr len | 0 0 )
+    0 DO
+        IP-RECV DUP 0<> IF UNLOOP EXIT THEN
+        DROP   \ drop the extra 0
+    LOOP
+    0 0 ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
