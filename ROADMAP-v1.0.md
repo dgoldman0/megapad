@@ -183,35 +183,35 @@ Each protocol item is large enough to warrant **multiple commits** — the
 sub-commit plan below ensures continuous progress and test coverage at
 every step.
 
-9.  ☐ **Ethernet framing** — MAC address, EtherType parsing/generation
+9.  ✅ **Ethernet framing** — MAC address, EtherType parsing/generation
     - 9a. KDOS constants + frame buffer layout (EtherType, MAC addrs)
     - 9b. `ETH-BUILD` / `ETH-PARSE` BIOS words + KDOS wrappers
     - 9c. NIC TX integration: `ETH-SEND` writes frame via NIC DMA
     - 9d. NIC RX integration: `ETH-RECV` reads frame from NIC ring buffer
 
-10. ☐ **ARP** — address resolution (small table, ~8 entries)
+10. ✅ **ARP** — address resolution (small table, ~8 entries)
     - 10a. ARP table data structure + `ARP-LOOKUP` / `ARP-INSERT`
     - 10b. ARP request/reply frame build+parse, `ARP-RESOLVE`
     - 10c. ARP responder: auto-reply to incoming ARP requests
 
-11. ☐ **IPv4** — minimal: header build/parse, checksum, no fragmentation
+11. ✅ **IPv4** — minimal: header build/parse, checksum, no fragmentation
     - 11a. IP header struct, `IP-BUILD` / `IP-PARSE`, HW-CRC checksum
     - 11b. `IP-SEND` — ARP-resolve → Ethernet-frame → NIC TX
     - 11c. `IP-RECV` — demux incoming Ethernet frames by EtherType
 
-12. ☐ **ICMP** — ping reply (essential for diagnostics)
+12. ✅ **ICMP** — ping reply (essential for diagnostics)
     - 12a. ICMP echo-request / echo-reply parse+build
     - 12b. Auto-responder: incoming ping → automatic pong
 
-13. ☐ **UDP** — connectionless datagrams
+13. ✅ **UDP** — connectionless datagrams
     - 13a. UDP header build/parse, checksum (pseudo-header)
     - 13b. `UDP-SEND` / `UDP-RECV` words, port demux table
 
-14. ☐ **DHCP client** — auto-configure IP/mask/gateway
+14. ✅ **DHCP client** — auto-configure IP/mask/gateway
     - 14a. DHCP DISCOVER/OFFER/REQUEST/ACK state machine
     - 14b. `DHCP-START` word, auto-configure on boot
 
-15. ☐ **DNS client** — name resolution
+15. ✅ **DNS client** — name resolution
     - 15a. DNS query builder (A record), response parser
     - 15b. `DNS-RESOLVE` ( c-addr len -- ip ) word
 
@@ -269,9 +269,9 @@ every step.
 
 ```
 Layer 0  Items  1– 4  Foundation (allocator, exceptions, CRC, diag) ✅ DONE
-Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3 ✅, crypto words, FS encrypt)
-Layer 2  Items  9–18  Network Stack (Ethernet → ARP → IP → ICMP → UDP →
-                      DHCP → DNS → TCP → TLS 1.3 → Socket API)
+Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3 ✅, crypto words ✅, FS encrypt ✅) ✅ DONE
+Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → ICMP ✅ → UDP ✅ →
+                      DHCP ✅ → DNS ✅ → TCP → TLS 1.3 → Socket API)
                       ~35 sub-commits across 10 protocol items
 Layer 3  Items 19–24  Multi-Core OS (run queues, work stealing, affinity,
                       preemption, IPI, locks)
