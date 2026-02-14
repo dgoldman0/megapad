@@ -7234,6 +7234,155 @@ class TestKDOSMulticore(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+#  KDOS network stack tests — §16 Ethernet Framing
+# ---------------------------------------------------------------------------
+
+class TestKDOSNetStack(TestKDOS):
+    """Tests for §16 Network Stack — Ethernet framing constants and layout."""
+
+    # --- 9a: Constants and frame buffer layout ---
+
+    def test_eth_hdr_constant(self):
+        """/ETH-HDR should be 14."""
+        text = self._run_kdos(["/ETH-HDR ."])
+        self.assertIn("14 ", text)
+
+    def test_mac_constant(self):
+        """/MAC should be 6."""
+        text = self._run_kdos(["/MAC ."])
+        self.assertIn("6 ", text)
+
+    def test_eth_mtu_constant(self):
+        """ETH-MTU should be 1500."""
+        text = self._run_kdos(["ETH-MTU ."])
+        self.assertIn("1500 ", text)
+
+    def test_eth_max_pld_constant(self):
+        """ETH-MAX-PLD should be 1486."""
+        text = self._run_kdos(["ETH-MAX-PLD ."])
+        self.assertIn("1486 ", text)
+
+    def test_etype_ip4_constant(self):
+        """ETYPE-IP4 should be 2048 (0x0800)."""
+        text = self._run_kdos(["ETYPE-IP4 ."])
+        self.assertIn("2048 ", text)
+
+    def test_etype_arp_constant(self):
+        """ETYPE-ARP should be 2054 (0x0806)."""
+        text = self._run_kdos(["ETYPE-ARP ."])
+        self.assertIn("2054 ", text)
+
+    def test_mac_bcast_all_ff(self):
+        """MAC-BCAST should contain 6 bytes of 0xFF."""
+        text = self._run_kdos([
+            "MAC-BCAST C@ .",
+            "MAC-BCAST 1+ C@ .",
+            "MAC-BCAST 5 + C@ .",
+        ])
+        self.assertIn("255 ", text)
+        # All three reads must produce 255
+        self.assertEqual(text.count("255 "), 3)
+
+    def test_my_mac_initialized(self):
+        """MY-MAC should contain the NIC's default MAC after MAC-INIT."""
+        # Default NIC MAC is 02:4D:50:36:34:00
+        text = self._run_kdos([
+            "MY-MAC C@ . .\" m0\" ",
+            "MY-MAC 1+ C@ . .\" m1\" ",
+            "MY-MAC 2 + C@ . .\" m2\" ",
+            "MY-MAC 3 + C@ . .\" m3\" ",
+            "MY-MAC 4 + C@ . .\" m4\" ",
+            "MY-MAC 5 + C@ . .\" m5\" ",
+        ])
+        # 02:4D:50:36:34:00  (. adds trailing space, ." adds another)
+        self.assertIn("2  m0", text)
+        self.assertIn("77  m1", text)
+        self.assertIn("80  m2", text)
+        self.assertIn("54  m3", text)
+        self.assertIn("52  m4", text)
+        self.assertIn("0  m5", text)
+
+    def test_nw_store_and_fetch(self):
+        """NW! and NW@ should store/fetch big-endian 16-bit values."""
+        text = self._run_kdos([
+            "CREATE nw-test 4 ALLOT",
+            "2048 nw-test NW!",
+            "nw-test NW@ . .\" val\" ",
+            "nw-test C@ . .\" hi\" ",
+            "nw-test 1+ C@ . .\" lo\" ",
+        ])
+        self.assertIn("2048  val", text)
+        self.assertIn("8  hi", text)
+        self.assertIn("0  lo", text)
+
+    def test_n_to_h_swap(self):
+        """N>H should byte-swap a 16-bit value."""
+        text = self._run_kdos(["2048 N>H ."])   # 0x0800 → 0x0008 = 8
+        self.assertIn("8 ", text)
+
+    def test_h_to_n_swap(self):
+        """H>N should byte-swap (same as N>H)."""
+        text = self._run_kdos(["8 H>N ."])      # 0x0008 → 0x0800 = 2048
+        self.assertIn("2048 ", text)
+
+    def test_eth_type_accessor(self):
+        """ETH-TYPE should read big-endian EtherType at offset 12."""
+        text = self._run_kdos([
+            "CREATE eth-t 20 ALLOT",
+            "eth-t 20 0 FILL",
+            "ETYPE-IP4 eth-t ETH-TYPE!",
+            "eth-t ETH-TYPE .",
+        ])
+        self.assertIn("2048 ", text)
+
+    def test_eth_pld_offset(self):
+        """ETH-PLD should return frame + 14."""
+        text = self._run_kdos([
+            "CREATE eth-p 20 ALLOT",
+            "eth-p ETH-PLD eth-p - .",
+        ])
+        self.assertIn("14 ", text)
+
+    def test_eth_src_dst_offsets(self):
+        """ETH-DST = frame+0, ETH-SRC = frame+6."""
+        text = self._run_kdos([
+            "CREATE eth-o 20 ALLOT",
+            "eth-o ETH-DST eth-o - . .\" dst\" ",
+            "eth-o ETH-SRC eth-o - . .\" src\" ",
+        ])
+        self.assertIn("0  dst", text)
+        self.assertIn("6  src", text)
+
+    def test_mac_equal(self):
+        """MAC= should return true for identical MACs."""
+        text = self._run_kdos([
+            "MAC-BCAST MAC-BCAST MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_mac_not_equal(self):
+        """MAC= should return false for different MACs."""
+        text = self._run_kdos([
+            "MAC-BCAST MY-MAC MAC= .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_dot_eth_prints_header(self):
+        """.ETH should print dst, src, type fields."""
+        text = self._run_kdos([
+            "CREATE eth-d 20 ALLOT",
+            "eth-d 20 0 FILL",
+            "MAC-BCAST eth-d ETH-DST 6 CMOVE",
+            "MY-MAC eth-d ETH-SRC 6 CMOVE",
+            "ETYPE-IP4 eth-d ETH-TYPE!",
+            "eth-d .ETH",
+        ])
+        self.assertIn("dst=", text)
+        self.assertIn("src=", text)
+        self.assertIn("type=", text)
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 

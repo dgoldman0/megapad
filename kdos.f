@@ -3833,6 +3833,81 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
     ." mask=" BDL-SCR-MASK @ . CR ;
 
 \ =====================================================================
+\  §16  Network Stack — Ethernet Framing
+\ =====================================================================
+\
+\  Bottom-up network stack built on the NIC hardware (§10 data ports).
+\  §16 covers Ethernet II frame layout: MAC addresses, EtherType,
+\  constants, and frame build/parse words.
+\
+\  Ethernet II frame layout (no VLAN, no FCS — NIC handles FCS):
+\    +0   6 bytes   Destination MAC
+\    +6   6 bytes   Source MAC
+\    +12  2 bytes   EtherType (big-endian)
+\    +14  ...       Payload (46–1486 bytes; MTU 1500 - 14 = 1486)
+\
+\  All multi-byte network fields are big-endian (network byte order).
+
+\ -- Network byte order helpers (big-endian 16-bit) --
+: N>H  ( be16 -- he16 )   DUP 8 RSHIFT SWAP 255 AND 8 LSHIFT OR ;
+: H>N  ( he16 -- be16 )   N>H ;   \ same swap operation
+
+\ -- Big-endian 16-bit memory access --
+: NW@  ( addr -- u16 )   DUP C@ 8 LSHIFT  SWAP 1 + C@ OR ;
+: NW!  ( u16 addr -- )   OVER 8 RSHIFT OVER C!  1 + SWAP 255 AND SWAP C! ;
+
+\ -- Ethernet constants --
+6  CONSTANT /MAC            \ MAC address length
+14 CONSTANT /ETH-HDR        \ Ethernet header length (no VLAN)
+1500 CONSTANT ETH-MTU       \ Maximum frame size
+1486 CONSTANT ETH-MAX-PLD   \ Maximum payload (MTU - header)
+
+\ -- EtherType constants (big-endian values as seen on wire) --
+2048  CONSTANT ETYPE-IP4    \ 0x0800  IPv4
+2054  CONSTANT ETYPE-ARP    \ 0x0806  ARP
+34525 CONSTANT ETYPE-IP6    \ 0x86DD  IPv6 (reserved, not implemented)
+
+\ -- Broadcast MAC --
+CREATE MAC-BCAST  255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+
+\ -- Our MAC address (6 bytes, copied from NIC at init) --
+CREATE MY-MAC  6 ALLOT
+: MAC-INIT  ( -- )   NET-MAC@ MY-MAC 6 CMOVE ;
+
+\ -- Ethernet TX frame buffer (MTU bytes) --
+CREATE ETH-TX-BUF  ETH-MTU ALLOT
+
+\ -- Ethernet RX frame buffer (MTU bytes) --
+CREATE ETH-RX-BUF  ETH-MTU ALLOT
+
+\ -- Frame header field accessors (given frame base address) --
+: ETH-DST   ( frame -- addr )  ;               \ +0
+: ETH-SRC   ( frame -- addr )  6 + ;           \ +6
+: ETH-TYPE  ( frame -- etype ) 12 + NW@ ;      \ +12, big-endian
+: ETH-TYPE! ( etype frame -- ) 12 + NW! ;      \ +12, big-endian
+: ETH-PLD   ( frame -- addr )  /ETH-HDR + ;    \ +14
+
+\ -- MAC comparison --
+: MAC=  ( addr1 addr2 -- flag )   6 SAMESTR? ;
+
+\ -- Print MAC address --
+: .MAC  ( addr -- )
+    BASE @ >R HEX
+    6 0 DO
+        DUP I + C@
+        DUP 16 < IF 48 EMIT THEN   \ leading zero for single hex digit
+        .
+        I 5 < IF 58 EMIT THEN      \ colon separator
+    LOOP DROP
+    R> BASE ! ;
+
+\ -- Debug: print Ethernet frame header --
+: .ETH  ( frame -- )
+    ." dst=" DUP ETH-DST .MAC
+    ."  src=" DUP ETH-SRC .MAC
+    ."  type=" ETH-TYPE . CR ;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 
@@ -3846,5 +3921,6 @@ NCORES 1 > IF
     ."  Multicore: " NCORES . ." cores available" CR
     ."  Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work." CR
 THEN
+MAC-INIT
 DISK? IF FS-LOAD THEN
 CR
