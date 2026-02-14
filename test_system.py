@@ -8543,6 +8543,179 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("0 ", text)
 
+    # -- 13a: UDP header build/parse, checksum --
+
+    def test_udp_hdr_size(self):
+        """/UDP-HDR should be 8."""
+        text = self._run_kdos(["/UDP-HDR ."])
+        self.assertIn("8 ", text)
+
+    def test_udp_build_basic(self):
+        """UDP-BUILD should produce an 8+N byte datagram."""
+        text = self._run_kdos([
+            "CREATE TPAY 4 ALLOT",
+            "65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            ".\" tlen=\" .",            # total len = 8 + 4 = 12
+        ])
+        self.assertIn("tlen=12 ", text)
+
+    def test_udp_build_ports(self):
+        """UDP-BUILD should store src/dst ports correctly."""
+        text = self._run_kdos([
+            "CREATE TPAY 2 ALLOT  72 TPAY C!  73 TPAY 1+ C!",
+            "1234 5678 TPAY 2 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.SPORT NW16@ .\" sp=\" .",
+            "UDP-TX-BUF UDP-H.DPORT NW16@ .\" dp=\" .",
+        ])
+        self.assertIn("sp=1234 ", text)
+        self.assertIn("dp=5678 ", text)
+
+    def test_udp_build_length_field(self):
+        """UDP-BUILD should set length field = header + payload."""
+        text = self._run_kdos([
+            "CREATE TPAY 10 ALLOT  TPAY 10 65 FILL",
+            "100 200 TPAY 10 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.LEN NW16@ .\" len=\" .",
+        ])
+        self.assertIn("len=18 ", text)   # 8 + 10
+
+    def test_udp_build_payload_copied(self):
+        """UDP-BUILD should copy payload into the datagram."""
+        text = self._run_kdos([
+            "CREATE TPAY 3 ALLOT  88 TPAY C!  89 TPAY 1+ C!  90 TPAY 2 + C!",
+            "100 200 TPAY 3 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-H.DATA C@ .\" b0=\" .",
+            "UDP-TX-BUF UDP-H.DATA 1+ C@ .\" b1=\" .",
+            "UDP-TX-BUF UDP-H.DATA 2 + C@ .\" b2=\" .",
+        ])
+        self.assertIn("b0=88 ", text)
+        self.assertIn("b1=89 ", text)
+        self.assertIn("b2=90 ", text)
+
+    def test_udp_checksum_basic(self):
+        """UDP-CHECKSUM should produce a non-zero value for a datagram."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",       # ( buf total=12 )
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",                    # save buf and len
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-CHECKSUM 0<> .",                # non-zero → -1
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_fill_cksum(self):
+        """UDP-FILL-CKSUM should store a non-zero checksum in the header."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",
+            "MY-IP GW-IP UBUF @ ULEN @",
+            "UDP-FILL-CKSUM",
+            "UDP-TX-BUF UDP-H.CKSUM NW16@ 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_verify_cksum_good(self):
+        """UDP-VERIFY-CKSUM should return -1 for valid checksum."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",        # ( buf len )
+            "VARIABLE UBUF  VARIABLE ULEN",
+            "ULEN !  UBUF !",                    # save buf and len
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-FILL-CKSUM",
+            "MY-IP GW-IP UBUF @ ULEN @",         # ( src dst buf len )
+            "UDP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("-1 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_udp_verify_cksum_bad(self):
+        """UDP-VERIFY-CKSUM should return 0 for corrupted checksum."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE TPAY 4 ALLOT  TPAY 4 0 FILL",
+            "1234 5678 TPAY 4 UDP-BUILD",
+            "MY-IP GW-IP ROT ROT",
+            "UDP-FILL-CKSUM",
+            "99 UDP-TX-BUF UDP-H.CKSUM NW16!",   # corrupt it
+            "MY-IP GW-IP UDP-TX-BUF 12 UDP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_parse_fields(self):
+        """UDP-PARSE should extract sport, dport, data, datalen."""
+        text = self._run_kdos([
+            "CREATE TPAY 4 ALLOT  65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
+            "4000 8080 TPAY 4 UDP-BUILD DROP",
+            "UDP-TX-BUF UDP-PARSE",
+            ".\" dlen=\" .",
+            "C@ .\" d0=\" .",
+            ".\" dp=\" .",
+            ".\" sp=\" .",
+        ])
+        self.assertIn("sp=4000 ", text)
+        self.assertIn("dp=8080 ", text)
+        self.assertIn("dlen=4 ", text)
+        self.assertIn("d0=65 ", text)
+
+    @staticmethod
+    def _build_udp_frame(dst_mac, src_mac, src_ip, dst_ip, sport, dport, payload):
+        """Build a raw Ethernet+IPv4+UDP frame for NIC injection."""
+        udp_hdr = bytearray(8)
+        udp_hdr[0] = (sport >> 8) & 0xFF
+        udp_hdr[1] = sport & 0xFF
+        udp_hdr[2] = (dport >> 8) & 0xFF
+        udp_hdr[3] = dport & 0xFF
+        udp_len = 8 + len(payload)
+        udp_hdr[4] = (udp_len >> 8) & 0xFF
+        udp_hdr[5] = udp_len & 0xFF
+        # Compute UDP checksum with pseudo-header
+        pseudo = bytes(src_ip) + bytes(dst_ip) + b'\x00\x11'
+        pseudo += bytes([(udp_len >> 8) & 0xFF, udp_len & 0xFF])
+        data = pseudo + bytes(udp_hdr) + bytes(payload)
+        # Pad to even length if needed
+        if len(data) % 2:
+            data += b'\x00'
+        s = 0
+        for i in range(0, len(data), 2):
+            s += (data[i] << 8) | data[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        if cksum == 0:
+            cksum = 0xFFFF
+        udp_hdr[6] = (cksum >> 8) & 0xFF
+        udp_hdr[7] = cksum & 0xFF
+        ip_payload = bytes(udp_hdr) + bytes(payload)
+        return TestKDOSNetStack._build_ip_frame(
+            dst_mac, src_mac, 17, src_ip, dst_ip, ip_payload)
+
+    def test_udp_recv_via_ip_recv(self):
+        """A UDP frame should be receivable via IP-RECV and parseable."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\xDE\xAD\xBE\xEF')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV SWAP IP-H.PROTO C@ .\" pr=\" .",
+            ".\" iplen=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("pr=17 ", text)     # UDP protocol
+        self.assertIn("iplen=32 ", text)  # 20 + 8 + 4
+
 
 # ---------------------------------------------------------------------------
 #  Main

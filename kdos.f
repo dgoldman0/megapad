@@ -4562,6 +4562,107 @@ VARIABLE _ICH-SRC
     IP-RECV DUP 0= IF DROP EXIT THEN    \ no frame → 0
     ICMP-HANDLE ;
 
+\ ---------------------------------------------------------------------
+\  §16.4  UDP — connectionless datagrams
+\ ---------------------------------------------------------------------
+\ UDP header (8 bytes):
+\   +0  src-port  2B   big-endian
+\   +2  dst-port  2B   big-endian
+\   +4  length    2B   header + data (big-endian)
+\   +6  checksum  2B   pseudo-header checksum (big-endian)
+
+8 CONSTANT /UDP-HDR
+
+CREATE UDP-TX-BUF  /UDP-HDR 1472 + ALLOT   \ max UDP datagram (1480 max IP payload)
+
+\ -- UDP header field accessors --
+: UDP-H.SPORT  ( buf -- addr )           ;   \ +0
+: UDP-H.DPORT  ( buf -- addr )  2 +  ;      \ +2
+: UDP-H.LEN    ( buf -- addr )  4 +  ;      \ +4
+: UDP-H.CKSUM  ( buf -- addr )  6 +  ;      \ +6
+: UDP-H.DATA   ( buf -- addr )  /UDP-HDR + ; \ +8
+
+\ -- UDP-CHECKSUM: compute UDP checksum with IPv4 pseudo-header --
+\   Pseudo-header: src-ip(4) + dst-ip(4) + 0 + proto(1) + udp-len(2)
+\   Then the UDP header + data.
+\   ( src-ip dst-ip udp-buf udp-len -- cksum )
+VARIABLE _UCK-SUM
+: UDP-CHECKSUM  ( src-ip dst-ip udp-buf udp-len -- cksum )
+    0 _UCK-SUM !
+    \ Accumulate pseudo-header: src-ip (4 bytes → 2 words)
+    >R >R                              \ R: udp-buf udp-len→ wait, order: R: udp-len udp-buf
+    SWAP                               \ ( dst-ip src-ip )
+    DUP NW16@ _UCK-SUM @ + _UCK-SUM !  \ src-ip[0:1]
+    2 + NW16@ _UCK-SUM @ + _UCK-SUM !  \ src-ip[2:3]
+    DUP NW16@ _UCK-SUM @ + _UCK-SUM !  \ dst-ip[0:1]
+    2 + NW16@ _UCK-SUM @ + _UCK-SUM !  \ dst-ip[2:3]
+    \ proto=17 as 16-bit: 0x0011
+    17 _UCK-SUM @ + _UCK-SUM !
+    \ udp-len
+    R> R>                              \ ( udp-buf udp-len )
+    DUP _UCK-SUM @ + _UCK-SUM !       \ add udp-len to sum
+    \ Accumulate UDP header + data (16-bit words)
+    2 / 0 DO
+        DUP NW16@ _UCK-SUM @ + _UCK-SUM !
+        2 +
+    LOOP DROP
+    \ Fold carries
+    _UCK-SUM @
+    BEGIN DUP 65535 > WHILE
+        DUP 65535 AND SWAP 16 RSHIFT +
+    REPEAT
+    65535 XOR ;
+
+\ -- UDP-BUILD: build a UDP datagram in UDP-TX-BUF --
+\   ( src-port dst-port payload paylen -- buf udp-total-len )
+\   Note: caller must supply src-ip/dst-ip for checksum via UDP-FILL-CKSUM
+VARIABLE _UDB-PLEN
+VARIABLE _UDB-PAY
+: UDP-BUILD  ( sport dport payload paylen -- buf total )
+    _UDB-PLEN !  _UDB-PAY !
+    \ Zero header
+    UDP-TX-BUF /UDP-HDR 0 FILL
+    \ dst-port, src-port
+    UDP-TX-BUF UDP-H.DPORT NW16!
+    UDP-TX-BUF UDP-H.SPORT NW16!
+    \ length = header + payload
+    _UDB-PLEN @ /UDP-HDR +
+    UDP-TX-BUF UDP-H.LEN NW16!
+    \ Copy payload
+    _UDB-PAY @ UDP-TX-BUF UDP-H.DATA _UDB-PLEN @ CMOVE
+    \ Checksum left as 0 (caller fills via UDP-FILL-CKSUM)
+    UDP-TX-BUF  _UDB-PLEN @ /UDP-HDR + ;
+
+\ -- UDP-FILL-CKSUM: compute and store the UDP checksum --
+\   ( src-ip dst-ip udp-buf udp-len -- )
+VARIABLE _UFC-BUF
+VARIABLE _UFC-LEN
+: UDP-FILL-CKSUM  ( src-ip dst-ip buf len -- )
+    _UFC-LEN !  _UFC-BUF !
+    \ Zero the checksum field
+    0 _UFC-BUF @ UDP-H.CKSUM NW16!
+    \ Compute checksum  ( src-ip dst-ip buf len -- cksum )
+    _UFC-BUF @ _UFC-LEN @  UDP-CHECKSUM
+    \ Per RFC 768: if checksum is 0, transmit 0xFFFF
+    DUP 0= IF DROP 65535 THEN
+    _UFC-BUF @ UDP-H.CKSUM NW16! ;
+
+\ -- UDP-PARSE: extract fields from a received UDP datagram --
+\   ( udp-buf -- sport dport data datalen )
+: UDP-PARSE  ( buf -- sport dport data datalen )
+    DUP UDP-H.SPORT NW16@
+    OVER UDP-H.DPORT NW16@
+    2 PICK UDP-H.DATA
+    3 PICK UDP-H.LEN NW16@ /UDP-HDR -
+    >R >R >R >R
+    DROP
+    R> R> R> R> ;
+
+\ -- UDP-VERIFY-CKSUM: verify UDP checksum --
+\   ( src-ip dst-ip udp-buf udp-len -- flag )   -1 if valid, 0 if bad
+: UDP-VERIFY-CKSUM  ( src-ip dst-ip buf len -- flag )
+    UDP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
