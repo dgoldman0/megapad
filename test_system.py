@@ -8850,6 +8850,218 @@ class TestKDOSNetStack(TestKDOS):
         ], nic_frames=[frame])
         self.assertIn("0 ", text)
 
+    # -- 14: DHCP client --
+
+    @staticmethod
+    def _build_dhcp_reply(msg_type, xid, yiaddr, siaddr, chaddr,
+                          subnet=None, router=None, server_id=None):
+        """Build a raw DHCP reply packet (BOOTP format) payload."""
+        pkt = bytearray(548)  # Max DHCP packet
+        pkt[0] = 2          # op = BOOTREPLY
+        pkt[1] = 1          # htype = Ethernet
+        pkt[2] = 6          # hlen
+        # xid
+        pkt[4] = (xid >> 24) & 0xFF
+        pkt[5] = (xid >> 16) & 0xFF
+        pkt[6] = (xid >> 8) & 0xFF
+        pkt[7] = xid & 0xFF
+        # yiaddr
+        pkt[16:20] = bytes(yiaddr)
+        # siaddr
+        pkt[20:24] = bytes(siaddr)
+        # chaddr
+        pkt[28:34] = bytes(chaddr)
+        # Magic cookie
+        pkt[236] = 99; pkt[237] = 130; pkt[238] = 83; pkt[239] = 99
+        # Options
+        off = 240
+        # Message type (option 53)
+        pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = msg_type; off += 3
+        # Server identifier (option 54)
+        if server_id:
+            pkt[off] = 54; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(server_id); off += 4
+        # Subnet mask (option 1)
+        if subnet:
+            pkt[off] = 1; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(subnet); off += 4
+        # Router (option 3)
+        if router:
+            pkt[off] = 3; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes(router); off += 4
+        # End option
+        pkt[off] = 255; off += 1
+        return bytes(pkt[:off])
+
+    @staticmethod
+    def _build_dhcp_frame(dst_mac, src_mac, src_ip, dst_ip, dhcp_payload):
+        """Wrap DHCP payload in UDP(67→68) + IPv4 + Ethernet."""
+        return TestKDOSNetStack._build_udp_frame(
+            dst_mac, src_mac, src_ip, dst_ip,
+            67, 68, dhcp_payload)
+
+    def test_dhcp_hdr_size(self):
+        """/DHCP-HDR should be 240."""
+        text = self._run_kdos(["/DHCP-HDR ."])
+        self.assertIn("240 ", text)
+
+    def test_dhcp_build_discover(self):
+        """DHCP-BUILD-DISCOVER should produce a valid DISCOVER packet."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER",
+            ".\" len=\" .",
+            "C@ .\" op=\" .",            # op should be 1 (BOOTREQUEST)
+        ])
+        self.assertIn("op=1 ", text)
+        # Length should be >= 243 (240 header + 3 for type option + END)
+        # Actually: 240 + 53,1,type=3 bytes + 255=1 byte = 244
+        self.assertIn("len=244 ", text)
+
+    def test_dhcp_build_discover_magic(self):
+        """DHCP DISCOVER should have correct magic cookie."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-F.MAGIC C@ . DHCP-BUF DHCP-F.MAGIC 1+ C@ . DHCP-BUF DHCP-F.MAGIC 2 + C@ . DHCP-BUF DHCP-F.MAGIC 3 + C@ .",
+        ])
+        self.assertIn("99 130 83 99 ", text)
+
+    def test_dhcp_build_discover_msgtype(self):
+        """DHCP DISCOVER should have message type = 1."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_dhcp_build_request(self):
+        """DHCP-BUILD-REQUEST should include requested IP and server ID."""
+        text = self._run_kdos([
+            "192 168 1 50 IP-SET",           # just to have MY-IP
+            "CREATE OIP 4 ALLOT  192 168 1 100 OIP IP!",
+            "CREATE SIP 4 ALLOT  192 168 1 1 SIP IP!",
+            "OIP SIP DHCP-BUILD-REQUEST",
+            ".\" len=\" .",
+            "DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .\" mt=\" .",
+        ])
+        self.assertIn("mt=3 ", text)   # DHCP-REQUEST
+
+    def test_dhcp_get_msgtype_discover(self):
+        """DHCP-GET-MSGTYPE should return 1 for DISCOVER."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF DHCP-GET-MSGTYPE .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_dhcp_parse_offer(self):
+        """DHCP-PARSE-OFFER should extract offered IP and server IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2,  # OFFER
+            xid=0x12345678,
+            yiaddr=[192, 168, 1, 100],
+            siaddr=[192, 168, 1, 1],
+            chaddr=nic_mac,
+            server_id=[192, 168, 1, 1],
+            subnet=[255, 255, 255, 0],
+            router=[192, 168, 1, 1])
+        # Write the DHCP data into DHCP-BUF manually via the test
+        # We'll inject it as a frame and parse via UDP-RECV
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 1], [255, 255, 255, 255],
+            dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA",         # get DHCP data
+            "NIP",                               # drop src-ip, keep dhcp ptr
+            "DUP DHCP-GET-MSGTYPE .\" mt=\" .",
+            "DHCP-PARSE-OFFER",
+            "SWAP C@ .\" oip0=\" .",
+            "C@ .\" sip0=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("mt=2 ", text)      # OFFER
+        self.assertIn("oip0=192 ", text)  # first byte of offered IP
+        self.assertIn("sip0=192 ", text)  # first byte of server IP
+
+    def test_dhcp_parse_ack(self):
+        """DHCP-PARSE-ACK should configure MY-IP from ACK."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=5,  # ACK
+            xid=0x12345678,
+            yiaddr=[10, 0, 0, 42],
+            siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac,
+            server_id=[10, 0, 0, 1],
+            subnet=[255, 255, 255, 0],
+            router=[10, 0, 0, 1])
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255],
+            dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA",
+            "NIP",
+            "DHCP-PARSE-ACK .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)        # ACK accepted
+        self.assertIn("a=10 ", text)
+        self.assertIn("b=0 ", text)
+        self.assertIn("c=0 ", text)
+        self.assertIn("d=42 ", text)
+
+    def test_dhcp_start_full_exchange(self):
+        """DHCP-START should do DISCOVER→OFFER→REQUEST→ACK."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # DHCP OFFER reply
+        offer = self._build_dhcp_reply(
+            msg_type=2,
+            xid=0x12345678,
+            yiaddr=[192, 168, 1, 50],
+            siaddr=[192, 168, 1, 1],
+            chaddr=nic_mac,
+            server_id=[192, 168, 1, 1],
+            subnet=[255, 255, 255, 0],
+            router=[192, 168, 1, 1])
+        offer_frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 1], [255, 255, 255, 255], offer)
+        # DHCP ACK reply
+        ack = self._build_dhcp_reply(
+            msg_type=5,
+            xid=0x12345678,
+            yiaddr=[192, 168, 1, 50],
+            siaddr=[192, 168, 1, 1],
+            chaddr=nic_mac,
+            server_id=[192, 168, 1, 1],
+            subnet=[255, 255, 255, 0],
+            router=[192, 168, 1, 1])
+        ack_frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 1], [255, 255, 255, 255], ack)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_frames=[offer_frame, ack_frame])
+        self.assertIn("-1 ", text)          # success
+        self.assertIn("a=192 ", text)
+        self.assertIn("b=168 ", text)
+        self.assertIn("c=1 ", text)
+        self.assertIn("d=50 ", text)
+
+    def test_dhcp_start_no_offer(self):
+        """DHCP-START should return 0 if no OFFER is received."""
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+        ])
+        self.assertIn("0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main

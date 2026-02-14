@@ -4791,6 +4791,278 @@ VARIABLE _UDR-IPLEN
     R> EXECUTE                                 \ call handler
     -1 ;
 
+\ ---------------------------------------------------------------------
+\  §16.5  DHCP — Dynamic Host Configuration Protocol
+\ ---------------------------------------------------------------------
+\ DHCP uses BOOTP format over UDP 67(server)/68(client).
+\ Simplified packet layout (first 240 bytes):
+\   +0   op       1B   1=BOOTREQUEST 2=BOOTREPLY
+\   +1   htype    1B   1=Ethernet
+\   +2   hlen     1B   6
+\   +3   hops     1B   0
+\   +4   xid      4B   transaction ID
+\   +8   secs     2B   0
+\  +10   flags    2B   0x8000=broadcast
+\  +12   ciaddr   4B   client IP
+\  +16   yiaddr   4B   "your" IP (offered)
+\  +20   siaddr   4B   server IP
+\  +24   giaddr   4B   gateway IP
+\  +28   chaddr  16B   client hardware address (MAC + padding)
+\  +44   sname   64B   server hostname (unused)
+\ +108   file   128B   boot filename (unused)
+\ +236   magic    4B   99.130.83.99 = DHCP magic cookie
+\ +240   options  var  DHCP options (type, len, data...)
+
+240 CONSTANT /DHCP-HDR
+CREATE DHCP-BUF  /DHCP-HDR 312 + ALLOT   \ 548 bytes max (options up to 312)
+
+\ DHCP message types (option 53)
+1 CONSTANT DHCP-DISCOVER
+2 CONSTANT DHCP-OFFER
+3 CONSTANT DHCP-REQUEST
+5 CONSTANT DHCP-ACK
+6 CONSTANT DHCP-NAK
+
+\ DHCP field accessors
+: DHCP-F.OP     ( buf -- addr )             ;       \ +0
+: DHCP-F.HTYPE  ( buf -- addr )   1 +  ;            \ +1
+: DHCP-F.HLEN   ( buf -- addr )   2 +  ;            \ +2
+: DHCP-F.XID    ( buf -- addr )   4 +  ;            \ +4
+: DHCP-F.FLAGS  ( buf -- addr )  10 + ;              \ +10
+: DHCP-F.CIADDR ( buf -- addr )  12 + ;              \ +12
+: DHCP-F.YIADDR ( buf -- addr )  16 + ;              \ +16
+: DHCP-F.SIADDR ( buf -- addr )  20 + ;              \ +20
+: DHCP-F.CHADDR ( buf -- addr )  28 + ;              \ +28
+: DHCP-F.MAGIC  ( buf -- addr ) 236 + ;              \ +236
+: DHCP-F.OPTS   ( buf -- addr ) 240 + ;              \ +240
+
+VARIABLE DHCP-XID    305419896 DHCP-XID !   \ 0x12345678
+
+\ -- DHCP-FILL-COMMON: fill common BOOTP fields --
+\   ( buf -- )
+: DHCP-FILL-COMMON  ( buf -- )
+    DUP /DHCP-HDR 312 + 0 FILL      \ zero entire buffer
+    1 OVER DHCP-F.OP C!              \ op = BOOTREQUEST
+    1 OVER DHCP-F.HTYPE C!           \ htype = Ethernet
+    6 OVER DHCP-F.HLEN C!            \ hlen = 6
+    \ xid (4 bytes, big-endian) using two 16-bit stores
+    DHCP-XID @ DUP 16 RSHIFT 2 PICK DHCP-F.XID NW16!
+    65535 AND OVER DHCP-F.XID 2 + NW16!
+    \ flags = broadcast (0x8000)
+    32768 OVER DHCP-F.FLAGS NW16!
+    \ chaddr = our MAC (6 bytes)
+    MY-MAC OVER DHCP-F.CHADDR 6 CMOVE
+    \ magic cookie: 99.130.83.99
+    DUP DHCP-F.MAGIC
+    99 OVER C!  130 OVER 1+ C!  83 OVER 2 + C!  99 SWAP 3 + C!
+    DROP ;
+
+\ -- DHCP-ADD-MSGTYPE: append message type option --
+\   ( opt-ptr type -- opt-ptr' )
+: DHCP-ADD-MSGTYPE  ( ptr type -- ptr' )
+    OVER     53 SWAP C!        \ option 53
+    OVER 1+   1 SWAP C!        \ length 1
+    OVER 2 +     C!            \ value = type
+    3 + ;
+
+\ -- DHCP-ADD-END: append end option --
+\   ( opt-ptr -- opt-ptr' )
+: DHCP-ADD-END  ( ptr -- ptr' )
+    255 OVER C!  1+ ;
+
+\ -- DHCP-ADD-REQIP: append requested IP option (50) --
+\   ( opt-ptr ip-addr -- opt-ptr' )
+: DHCP-ADD-REQIP  ( ptr ip -- ptr' )
+    OVER      50 SWAP C!      \ option 50
+    OVER 1+    4 SWAP C!      \ length 4
+    OVER 2 + SWAP 4 CMOVE     \ copy 4 IP bytes
+    6 + ;
+
+\ -- DHCP-ADD-SERVERID: append server identifier option (54) --
+\   ( opt-ptr ip-addr -- opt-ptr' )
+: DHCP-ADD-SERVERID  ( ptr ip -- ptr' )
+    OVER      54 SWAP C!
+    OVER 1+    4 SWAP C!
+    OVER 2 + SWAP 4 CMOVE
+    6 + ;
+
+\ -- DHCP-BUILD-DISCOVER: build a DHCP DISCOVER packet --
+\   ( -- buf len )
+: DHCP-BUILD-DISCOVER  ( -- buf len )
+    DHCP-BUF DHCP-FILL-COMMON
+    DHCP-BUF DHCP-F.OPTS
+    DHCP-DISCOVER DHCP-ADD-MSGTYPE
+    DHCP-ADD-END
+    DHCP-BUF - DHCP-BUF SWAP ;
+
+\ -- DHCP-BUILD-REQUEST: build a DHCP REQUEST packet --
+\   Requests the offered IP, includes server ID.
+\   ( offered-ip server-ip -- buf len )
+VARIABLE _DHR-OIP
+VARIABLE _DHR-SIP
+: DHCP-BUILD-REQUEST  ( offered-ip server-ip -- buf len )
+    _DHR-SIP !  _DHR-OIP !
+    DHCP-BUF DHCP-FILL-COMMON
+    DHCP-BUF DHCP-F.OPTS
+    DHCP-REQUEST DHCP-ADD-MSGTYPE
+    _DHR-OIP @ DHCP-ADD-REQIP
+    _DHR-SIP @ DHCP-ADD-SERVERID
+    DHCP-ADD-END
+    DHCP-BUF - DHCP-BUF SWAP ;
+
+\ -- DHCP-SEND: send a DHCP packet via broadcast UDP --
+\   ( buf len -- )  uses src-ip 0.0.0.0, dst-ip 255.255.255.255
+VARIABLE _DHS-BUF
+VARIABLE _DHS-LEN
+CREATE DHCP-BCAST-IP  255 C, 255 C, 255 C, 255 C,
+CREATE DHCP-ZERO-IP      0 C,   0 C,   0 C,   0 C,
+: DHCP-SEND  ( buf len -- )
+    _DHS-LEN !  _DHS-BUF !
+    \ Build UDP datagram: sport=68, dport=67
+    68 67 _DHS-BUF @ _DHS-LEN @ UDP-BUILD   \ ( udp-buf udp-len )
+    \ Fill UDP checksum with src=0.0.0.0, dst=255.255.255.255
+    DHCP-ZERO-IP DHCP-BCAST-IP 2 PICK 2 PICK UDP-FILL-CKSUM
+    \ Build IP header around UDP payload
+    \ IP-FILL-HDR ( proto paylen dst-ip buf -- )
+    IP-PROTO-UDP OVER DHCP-BCAST-IP IP-TX-BUF IP-FILL-HDR
+    \ Override src=0.0.0.0 (we don't have an IP yet)
+    DHCP-ZERO-IP IP-TX-BUF IP-H.SRC 4 CMOVE
+    \ Recompute IP header checksum
+    0 IP-TX-BUF IP-H.CKSUM NW16!
+    IP-TX-BUF /IP-HDR IP-CHECKSUM IP-TX-BUF IP-H.CKSUM NW16!
+    \ Copy UDP data after IP header
+    \ stack: ( udp-buf udp-len )
+    >R
+    IP-TX-BUF IP-H.DATA R@ CMOVE     \ copy udp-buf → IP payload area
+    \ Send raw Ethernet broadcast
+    MAC-BCAST ETYPE-IP4
+    IP-TX-BUF R> /IP-HDR +           \ ( mac etype ip-buf total-len )
+    ETH-SEND-TX ;
+
+\ -- DHCP-GET-MSGTYPE: extract message type from DHCP options --
+\   ( buf -- type | 0 )
+: DHCP-GET-MSGTYPE  ( buf -- type )
+    DHCP-F.OPTS
+    BEGIN
+        DUP C@ 255 <> WHILE           \ not END option
+        DUP C@ 53 = IF                \ option 53 = message type
+            2 + C@ EXIT
+        THEN
+        DUP C@ 0= IF 1+ ELSE         \ pad option (type 0, no len)
+            DUP 1+ C@ 2 + +           \ skip: type + len + data
+        THEN
+    REPEAT
+    DROP 0 ;
+
+\ -- DHCP-GET-OPTION: extract a specific option from DHCP packet --
+\   ( buf option-code -- addr len | 0 0 )
+: DHCP-GET-OPTION  ( buf code -- addr len | 0 0 )
+    SWAP DHCP-F.OPTS SWAP
+    BEGIN
+        OVER C@ 255 <> WHILE
+        OVER C@ OVER = IF            \ found!
+            DROP 2 + DUP 1- C@       \ ( data-addr data-len )
+            EXIT
+        THEN
+        OVER C@ 0= IF SWAP 1+ SWAP ELSE
+            SWAP DUP 1+ C@ 2 + + SWAP
+        THEN
+    REPEAT
+    2DROP 0 0 ;
+
+\ -- DHCP-PARSE-OFFER: parse DHCP OFFER, extract offered IP + server IP --
+\   ( dhcp-buf -- offered-ip server-ip | 0 0 )
+CREATE DHCP-OFFERED-IP  4 ALLOT
+CREATE DHCP-SERVER-IP   4 ALLOT
+CREATE DHCP-GW-OFFER    4 ALLOT
+CREATE DHCP-MASK-OFFER  4 ALLOT
+: DHCP-PARSE-OFFER  ( buf -- offered-ip server-ip | 0 0 )
+    DUP DHCP-GET-MSGTYPE DHCP-OFFER <> IF DROP 0 0 EXIT THEN
+    \ Offered IP = yiaddr
+    DUP DHCP-F.YIADDR DHCP-OFFERED-IP 4 CMOVE
+    \ Server IP = siaddr (or option 54)
+    DUP DHCP-F.SIADDR DHCP-SERVER-IP 4 CMOVE
+    \ Try option 54 (server identifier) as override
+    DUP 54 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-SERVER-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Extract subnet mask (option 1) if present
+    DUP 1 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-MASK-OFFER 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Extract router/gateway (option 3) if present
+    DUP 3 DHCP-GET-OPTION DUP 0<> IF
+        DROP DHCP-GW-OFFER 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    DROP
+    DHCP-OFFERED-IP  DHCP-SERVER-IP ;
+
+\ -- DHCP-PARSE-ACK: parse DHCP ACK, configure network --
+\   ( dhcp-buf -- flag )  -1 if ACK applied, 0 if not ACK
+: DHCP-PARSE-ACK  ( buf -- flag )
+    DUP DHCP-GET-MSGTYPE DHCP-ACK <> IF DROP 0 EXIT THEN
+    \ Set MY-IP from yiaddr
+    DUP DHCP-F.YIADDR MY-IP 4 CMOVE
+    \ Set subnet mask from option 1
+    DUP 1 DHCP-GET-OPTION DUP 0<> IF
+        DROP NET-MASK 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    \ Set gateway from option 3
+    DUP 3 DHCP-GET-OPTION DUP 0<> IF
+        DROP GW-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
+    DROP -1 ;
+
+\ -- DHCP-WAIT-REPLY: wait for a DHCP reply on port 68 --
+\   ( max-attempts -- dhcp-buf | 0 )  returns pointer to DHCP data or 0
+: DHCP-WAIT-REPLY  ( n -- dhcp-buf | 0 )
+    0 DO
+        UDP-RECV DUP 0<> IF
+            \ Stack: ( src-ip udp-buf udp-len )
+            DROP              \ drop udp-len
+            DUP UDP-H.DPORT NW16@ 68 = IF
+                UDP-H.DATA    \ pointer to DHCP data
+                NIP           \ drop src-ip
+                UNLOOP EXIT
+            THEN
+            DROP              \ drop udp-buf
+        ELSE
+            DROP              \ drop extra 0 from udp-len
+        THEN
+        DROP                  \ drop src-ip (or 0)
+    LOOP
+    0 ;
+
+\ -- DHCP-START: run DHCP client, auto-configure IP/mask/gateway --
+\   ( -- flag )  -1 if success, 0 if failed
+VARIABLE _DHST-OIP
+VARIABLE _DHST-SIP
+: DHCP-START  ( -- flag )
+    \ Step 1: Send DISCOVER
+    DHCP-BUILD-DISCOVER DHCP-SEND
+    \ Step 2: Wait for OFFER
+    50 DHCP-WAIT-REPLY DUP 0= IF EXIT THEN
+    \ Parse OFFER
+    DUP DHCP-PARSE-OFFER
+    OVER 0= IF 2DROP DROP 0 EXIT THEN
+    _DHST-SIP !  _DHST-OIP !
+    DROP                         \ drop dhcp-buf
+    \ Step 3: Send REQUEST
+    _DHST-OIP @ _DHST-SIP @ DHCP-BUILD-REQUEST DHCP-SEND
+    \ Step 4: Wait for ACK
+    50 DHCP-WAIT-REPLY DUP 0= IF EXIT THEN
+    DHCP-PARSE-ACK ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
