@@ -240,13 +240,13 @@ every step.
 
 ### Layer 3: Multi-Core OS (Items 19–24)
 
-19. ☐ **Per-core run queues** — each core has its own task list
-20. ☐ **Work stealing** — idle cores pull from busy cores' queues
-21. ☐ **Core-affinity** — pin tasks to specific cores
-22. ☐ **Per-core preemption** — timer IRQ on all cores, not just core 0
-23. ☐ **IPI messaging** — use mailbox for structured inter-core messages
+19. ✅ **Per-core run queues** — each core has its own task list
+20. ✅ **Work stealing** — idle cores pull from busy cores' queues
+21. ✅ **Core-affinity** — pin tasks to specific cores
+22. ✅ **Per-core preemption** — timer IRQ on all cores, not just core 0
+23. ✅ **IPI messaging** — use mailbox for structured inter-core messages
     (not just wake-up)
-24. ☐ **Shared resource locks** — dictionary lock, UART lock, filesystem
+24. ✅ **Shared resource locks** — dictionary lock, UART lock, filesystem
     lock (currently unprotected)
 
 ---
