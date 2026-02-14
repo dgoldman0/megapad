@@ -4,10 +4,11 @@ A complete system-level emulator for the Megapad-64 architecture: CPU,
 memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
-> **Branch:** `features/extended-tpu-impl`
+> **Branch:** `features/cpp-accelerator`
 > **Status:** Fully functional.  265-word BIOS v1.0 Forth system running on
 > a quad-core emulated SoC with mailbox IPI, spinlocks, extended tile engine
-> (saturating, FP16/BF16, strided/2D, CRC, BIST), and 593 tests passing.
+> (saturating, FP16/BF16, strided/2D, CRC, BIST), optional C++ CPU accelerator
+> (63× speedup), and 3,112 tests passing.
 
 ---
 
@@ -20,6 +21,10 @@ python cli.py --bios bios.asm
 # Pre-compile to a .rom, then boot from binary
 python cli.py --assemble bios.asm bios.rom
 python cli.py --bios bios.rom
+
+# With the C++ accelerator (recommended — 63× faster)
+make accel          # one-time: build pybind11 extension
+python cli.py --bios bios.asm --storage sample.img
 
 # ~5× faster under PyPy (run 'make setup-pypy' once to install)
 .pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
@@ -82,11 +87,11 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py  (474 lines)                 │
+│                    system.py  (546 lines)                 │
 │       MegapadSystem — quad-core SoC, memory map          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (1,376 lines) │  │
+│  │  megapad64.py │    │       devices.py  (1,418 lines) │  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
@@ -109,18 +114,23 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | 2,516 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16 |
+| `megapad64.py` | 2,541 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16 |
+| `accel/mp64_accel.cpp` | 1,929 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
+| `accel_wrapper.py` | 829 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 1,376 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
-| `system.py` | 474 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, round-robin stepping |
+| `devices.py` | 1,418 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
+| `system.py` | 546 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 995 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
 | `bios.asm` | 9,895 | Forth BIOS v1.0 — subroutine-threaded interpreter, 265 built-in words (incl. multicore, extended tile, I-cache, AES, SHA3) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
-| `test_system.py` | 7,308 | System integration tests — 570 tests (devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
-| `Makefile` | 71 | Build & test targets — PyPy + xdist parallel runner |
+| `test_system.py` | 7,270 | System integration tests — 3,089 tests (24 classes: devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
+| `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
+| `bench_accel.py` | 139 | C++ vs Python speed comparison script |
+| `Makefile` | 159 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
+| `conftest.py` | 159 | Test fixtures, snapshot caching, live status reporting |
 | `fpga/rtl/` | ~8,200 | 14 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, peripherals |
 | `fpga/sim/` | 3,930 | 8 Verilog testbenches — 72 hardware tests |
-| **Total** | **~35,000** | |
+| **Total** | **~38,000** | |
 
 ---
 
@@ -489,22 +499,40 @@ There are no `push64`/`pop64` instructions.  Manual stack operations use
 ## Running Tests
 
 ```bash
-# CPython (works out of the box)
-python -m pytest test_megapad64.py -v                          # 23 CPU + tile tests
-python -m pytest test_system.py -v --timeout=30                # 1184 integration tests
-python -m pytest test_system.py test_megapad64.py -v --timeout=30  # all 1207
+# C++ accelerator (recommended — 63× faster than PyPy)
+make accel                                                 # build C++ extension
+.venv/bin/python -m pytest test_system.py test_megapad64.py -n 8   # ~23 s
 
-# PyPy + xdist (recommended — ~10× total speedup)
+# Or use the Makefile target:
+make test-accel                                            # builds + runs
+
+# PyPy + xdist (no C++ compiler needed)
 make setup-pypy        # one-time: downloads PyPy, installs pytest + xdist
-make test              # PyPy + 8 parallel workers  (~4 min)
-make test-seq          # PyPy sequential            (~8 min)
+make test              # PyPy + 8 parallel workers  (~24 min)
+make test-seq          # PyPy sequential
 make test-quick        # PyPy, BIOS + CPU only      (~6 sec)
 make test-one K=test_coreid_word   # single test with PyPy
+
+# CPython fallback (no setup required)
+python -m pytest test_megapad64.py -v                          # 23 CPU + tile tests
+python -m pytest test_system.py -v --timeout=30                # 3,089 integration tests
+python -m pytest test_system.py test_megapad64.py -v --timeout=30  # all 3,112
 ```
 
-PyPy's JIT gives **~5× speedup** on the CPU emulator loop; pytest-xdist
-adds **parallel execution** across 8 workers for another ~2× improvement.
-CPython works fine but takes ~40 minutes for the full suite.
+| Runner | Parallelism | Approximate Time | Speedup |
+|--------|-------------|-------------------|---------| 
+| CPython | sequential | ~40 min | 1× |
+| PyPy + xdist -n 8 | 8 workers | ~24 min | 1.7× |
+| **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
+
+The C++ accelerator (`accel/mp64_accel.cpp`) reimplements the CPU step
+loop in pybind11 C++.  `system.py` imports it automatically when available
+and falls back to pure Python if not.  The accelerator handles single-core
+and multicore execution (C++ for the active core, Python for device I/O
+and MMIO dispatch).
+
+PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
+adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
 Forth BIOS (all 265 words), KDOS (buffers, kernels, pipelines, scheduler,
@@ -555,3 +583,4 @@ Bye!
 | `3d053d0` | Emulator multicore support (round-robin, mailbox, spinlocks) |
 | `9183f88` | BIOS multicore boot (11 words, worker loop, IPI handler) |
 | `366aace` | **KDOS v1.1** — multicore dispatch (CORE-RUN, BARRIER, P.RUN-PAR) |
+| `f5578b0` | **C++ CPU accelerator** — pybind11, 63× speedup, 3,112 tests (23 s) |

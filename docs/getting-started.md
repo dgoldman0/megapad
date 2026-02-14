@@ -8,16 +8,23 @@ take you from zero to running your first pipeline in about ten minutes.
 
 ## Prerequisites
 
-You need **Python 3.8+** (3.10 or later recommended).  That's it — the
-entire project is pure Python with no external dependencies.
+You need **Python 3.8+** (3.12 recommended).  The emulator and all tools
+run with no external dependencies — pure Python standard library.
+
+For the optional **C++ accelerator** (63× speedup for tests):
+
+```bash
+python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
+make accel
+```
 
 ```bash
 git clone <repository-url>
 cd megapad-64
 ```
 
-No `pip install` required.  Every tool — the emulator, assembler, disk
-utility, and test suite — is a self-contained Python file.
+Without the C++ extension, everything still works — just slower for
+automated test runs.
 
 ---
 

@@ -6,9 +6,10 @@ multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
 **Current state (Feb 2026):** BIOS (265 dict entries, 9,895 lines ASM),
-KDOS v1.1 (3,850 lines), Emulator (2,541 lines + 478-line quad-core SoC),
-FPGA RTL (14 Verilog modules + 9 testbenches), devices.py (1,376 lines),
-570 test methods passing.  Branch: `features/kdos-improvements`.
+KDOS v1.1 (3,850 lines), Emulator (2,541 lines + 546-line quad-core SoC +
+1,929-line C++ accelerator), FPGA RTL (14 Verilog modules + 9 testbenches),
+devices.py (1,418 lines), 3,112 test methods passing in 23 s (CPython + C++).
+Branch: `features/cpp-accelerator`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
@@ -80,18 +81,23 @@ multicore OS, and application-level features.
 
 ### Emulator & Tools — ✅ DONE
 
-- ✅ megapad64.py: Full CPU emulation (2,516 lines, incl. extended tile, FP16/BF16)
-- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks (474 lines)
+- ✅ megapad64.py: Full CPU emulation (2,541 lines, incl. extended tile, FP16/BF16)
+- ✅ accel/mp64_accel.cpp: C++ CPU core via pybind11 (1,929 lines, 63× speedup)
+- ✅ accel_wrapper.py: Drop-in wrapper for C++ CPU (829 lines)
+- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, `run_batch()` (546 lines)
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
-- ✅ diskutil.py: Filesystem tooling (1,038 lines)
-- ✅ devices.py: MMIO peripherals including CRC engine (964 lines)
+- ✅ diskutil.py: Filesystem tooling (1,039 lines)
+- ✅ devices.py: MMIO peripherals including CRC engine, AES, SHA3 (1,418 lines)
 
-### Test Suite — ✅ 1,207 tests
+### Test Suite — ✅ 3,112 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
-- TestKDOS: 229, TestKDOSHardening: 12, TestKDOSFilesystem: 15
-- TestKDOSMulticore: 19, TestPipelineBundles: 13
+- TestKDOS: 229, TestKDOSAllocator: 242, TestKDOSExceptions: 237
+- TestKDOSCRC: 237, TestKDOSDiagnostics: 231, TestKDOSAES: 238
+- TestKDOSSHA3: 239, TestKDOSCrypto: 239, TestKDOSHardening: 241
+- TestKDOSFilesystem: 244, TestKDOSFileCrypto: 237
+- TestPipelineBundles: 242, TestKDOSMulticore: 19
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
@@ -290,15 +296,21 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `bios.asm` | 9,895 | ✅ 265 dictionary entries |
 | `kdos.f` | 3,850 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
-| `system.py` | 478 | ✅ Quad-core SoC + AES + SHA3 devices |
+| `accel/mp64_accel.cpp` | 1,929 | ✅ C++ CPU core (pybind11, 63× speedup) |
+| `accel_wrapper.py` | 829 | ✅ Drop-in wrapper for C++ CPU core |
+| `system.py` | 546 | ✅ Quad-core SoC + `run_batch()` C++ fast path |
 | `cli.py` | 995 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 1,376 | ✅ AES-256-GCM, SHA3, CRC, Mailbox, Spinlock |
-| `diskutil.py` | 1,038 | ✅ MP64FS tooling |
+| `devices.py` | 1,418 | ✅ AES-256-GCM, SHA3, CRC, Mailbox, Spinlock |
+| `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 7,308 | 570 test methods ✅ |
+| `test_system.py` | 7,270 | 3,089 test methods (24 classes) ✅ |
+| `setup_accel.py` | 35 | ✅ pybind11 build configuration |
+| `bench_accel.py` | 139 | ✅ C++ vs Python speed comparison |
+| `Makefile` | 159 | ✅ Build, test, & accel targets |
+| `conftest.py` | 159 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `fpga/rtl/` | ~8,200 | ✅ 14 Verilog modules |
 | `fpga/sim/` | ~4,500 | ✅ 9 testbenches (137 HW tests) |
 | `docs/` | 9 files | ✅ Written |
-| `README.md` | 340 | ✅ Current |
+| `README.md` | 350 | ✅ Current |
