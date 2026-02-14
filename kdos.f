@@ -4284,6 +4284,129 @@ VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
     ETH-RECV DUP 0= IF 0 EXIT THEN   \ no frame → 0 0
     ARP-HANDLE ;
 
+\ ---------------------------------------------------------------------
+\  §16.2  IPv4 — minimal, no fragmentation
+\ ---------------------------------------------------------------------
+\ IPv4 header (20 bytes, no options):
+\   +0   ver/ihl  1B   0x45 (v4, 5×4=20 byte header)
+\   +1   DSCP/ECN 1B   0x00
+\   +2   total-len 2B  header+payload (big-endian)
+\   +4   ident    2B   packet ID
+\   +6   flags/fo 2B   0x4000 = Don't Fragment
+\   +8   TTL      1B   default 64
+\   +9   protocol 1B   1=ICMP  6=TCP  17=UDP
+\  +10   checksum 2B   header checksum (big-endian)
+\  +12   src-ip   4B
+\  +16   dst-ip   4B
+
+20 CONSTANT /IP-HDR
+1  CONSTANT IP-PROTO-ICMP
+6  CONSTANT IP-PROTO-TCP
+17 CONSTANT IP-PROTO-UDP
+
+CREATE IP-TX-BUF  /IP-HDR 1480 + ALLOT    \ max IP packet buffer (1500)
+
+VARIABLE IP-IDENT    \ rolling packet ID
+0 IP-IDENT !
+
+\ -- IPv4 header field accessors (from start of IP header) --
+: IP-H.VER     ( hdr -- addr )           ;    \ +0
+: IP-H.DSCP    ( hdr -- addr )  1 +  ;        \ +1
+: IP-H.TLEN    ( hdr -- addr )  2 +  ;        \ +2  total length (BE)
+: IP-H.IDENT   ( hdr -- addr )  4 +  ;        \ +4
+: IP-H.FLAGS   ( hdr -- addr )  6 +  ;        \ +6  flags+frag offset (BE)
+: IP-H.TTL     ( hdr -- addr )  8 +  ;        \ +8
+: IP-H.PROTO   ( hdr -- addr )  9 +  ;        \ +9
+: IP-H.CKSUM   ( hdr -- addr )  10 + ;        \ +10 checksum (BE)
+: IP-H.SRC     ( hdr -- addr )  12 + ;        \ +12 source IP
+: IP-H.DST     ( hdr -- addr )  16 + ;        \ +16 dest IP
+: IP-H.DATA    ( hdr -- addr )  /IP-HDR + ;   \ +20 payload
+
+\ -- NW16!: store 16-bit big-endian --
+: NW16!  ( val addr -- )
+    OVER 8 RSHIFT OVER C!  1+ SWAP 255 AND SWAP C! ;
+
+\ -- NW16@: fetch 16-bit big-endian --
+: NW16@  ( addr -- val )
+    DUP C@ 8 LSHIFT SWAP 1+ C@ + ;
+
+\ -- IP-CHECKSUM: compute ones-complement checksum over n bytes --
+\   ( addr n -- cksum )
+VARIABLE _IPCS-SUM
+: IP-CHECKSUM  ( addr n -- cksum )
+    0 _IPCS-SUM !
+    2 / 0 DO                        \ iterate 16-bit words
+        DUP NW16@ _IPCS-SUM @ +
+        _IPCS-SUM !
+        2 +
+    LOOP DROP
+    \ fold carries
+    _IPCS-SUM @
+    BEGIN DUP 65535 > WHILE
+        DUP 65535 AND SWAP 16 RSHIFT +
+    REPEAT
+    65535 XOR ;   \ ones complement
+
+\ -- IP-FILL-HDR: fill invariant IPv4 header fields --
+\   ( proto payload-len dst-ip buf -- )
+VARIABLE _IPF-BUF
+VARIABLE _IPF-DST
+VARIABLE _IPF-PLEN
+: IP-FILL-HDR  ( proto paylen dst-ip buf -- )
+    _IPF-BUF !  _IPF-DST !  _IPF-PLEN !
+    \ zero header
+    _IPF-BUF @ /IP-HDR 0 FILL
+    \ ver/ihl = 0x45
+    69 _IPF-BUF @ IP-H.VER C!
+    \ total length = header + payload
+    _IPF-PLEN @ /IP-HDR + _IPF-BUF @ IP-H.TLEN NW16!
+    \ ident
+    IP-IDENT @ _IPF-BUF @ IP-H.IDENT NW16!
+    IP-IDENT @ 1+ 65535 AND IP-IDENT !
+    \ flags = Don't Fragment (0x4000)
+    16384 _IPF-BUF @ IP-H.FLAGS NW16!
+    \ TTL = 64
+    64 _IPF-BUF @ IP-H.TTL C!
+    \ protocol
+    _IPF-BUF @ IP-H.PROTO C!   \ proto still on stack
+    \ source = MY-IP
+    MY-IP _IPF-BUF @ IP-H.SRC 4 CMOVE
+    \ destination
+    _IPF-DST @ _IPF-BUF @ IP-H.DST 4 CMOVE
+    \ checksum (computed over header with cksum field = 0)
+    _IPF-BUF @ /IP-HDR IP-CHECKSUM
+    _IPF-BUF @ IP-H.CKSUM NW16! ;
+
+\ -- IP-BUILD: build IPv4 packet in IP-TX-BUF --
+\   ( proto dst-ip payload paylen -- buf total-len )
+VARIABLE _IPB-PAY
+VARIABLE _IPB-PLEN
+: IP-BUILD  ( proto dst-ip payload paylen -- buf total-len )
+    _IPB-PLEN !  _IPB-PAY !
+    \ IP-FILL-HDR ( proto paylen dst-ip buf -- )
+    _IPB-PLEN @  SWAP  IP-TX-BUF  IP-FILL-HDR
+    \ copy payload after header
+    _IPB-PAY @ IP-TX-BUF IP-H.DATA _IPB-PLEN @ CMOVE
+    IP-TX-BUF  _IPB-PLEN @ /IP-HDR + ;
+
+\ -- IP-PARSE: extract fields from a received IPv4 header --
+\   ( ip-hdr -- proto src-ip dst-ip payload paylen )
+: IP-PARSE  ( hdr -- proto src dst data datalen )
+    DUP IP-H.PROTO C@            \ proto
+    OVER IP-H.SRC                \ src-ip addr
+    2 PICK IP-H.DST              \ dst-ip addr
+    3 PICK IP-H.DATA             \ payload addr
+    4 PICK IP-H.TLEN NW16@
+    /IP-HDR -                    \ payload length
+    >R >R >R >R >R
+    DROP                         \ drop original hdr
+    R> R> R> R> R> ;
+
+\ -- IP-VERIFY-CKSUM: check if IP header checksum is valid --
+\   ( ip-hdr -- flag )  returns -1 if valid
+: IP-VERIFY-CKSUM  ( hdr -- flag )
+    /IP-HDR IP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================

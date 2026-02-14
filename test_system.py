@@ -8070,6 +8070,150 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("0 0 ", text)
 
+    # --- 11a: IPv4 header struct, IP-BUILD, IP-PARSE, checksum ---
+
+    def test_ip_hdr_size(self):
+        """/IP-HDR should be 20."""
+        text = self._run_kdos(["/IP-HDR ."])
+        self.assertIn("20 ", text)
+
+    def test_ip_proto_constants(self):
+        """IP protocol constants."""
+        text = self._run_kdos([
+            "IP-PROTO-ICMP . IP-PROTO-TCP . IP-PROTO-UDP .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("6 ", text)
+        self.assertIn("17 ", text)
+
+    def test_nw16_store_fetch(self):
+        """NW16! and NW16@ should round-trip big-endian 16-bit values."""
+        text = self._run_kdos([
+            "CREATE nb 2 ALLOT",
+            "4660 nb NW16!  nb NW16@ .",   # 0x1234
+        ])
+        self.assertIn("4660 ", text)
+
+    def test_ip_checksum_zeros(self):
+        """Checksum of all-zero buffer should be 0xFFFF."""
+        text = self._run_kdos([
+            "CREATE zb 20 ALLOT  zb 20 0 FILL",
+            "zb 20 IP-CHECKSUM .",
+        ])
+        self.assertIn("65535 ", text)
+
+    def test_ip_build_returns_correct_length(self):
+        """IP-BUILD should return total = 20 + payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst 4 ALLOT  10 dst C!  0 dst 1+ C!  0 dst 2 + C!  1 dst 3 + C!",
+            "CREATE pay 8 ALLOT  pay 8 65 FILL",   # 'A' * 8
+            "IP-PROTO-UDP dst pay 8 IP-BUILD .\" len=\" . DROP",
+        ])
+        self.assertIn("len=28 ", text)   # 20 + 8
+
+    def test_ip_build_ver_ihl(self):
+        """IP-BUILD header should have ver/ihl = 0x45."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst2 4 ALLOT  10 dst2 C!  0 dst2 1+ C!  0 dst2 2 + C!  1 dst2 3 + C!",
+            "CREATE pay2 4 ALLOT  pay2 4 0 FILL",
+            "IP-PROTO-ICMP dst2 pay2 4 IP-BUILD DROP",
+            "IP-H.VER C@ .",
+        ])
+        self.assertIn("69 ", text)   # 0x45
+
+    def test_ip_build_ttl(self):
+        """IP-BUILD header should have TTL = 64."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst3 4 ALLOT  10 dst3 C!  0 dst3 1+ C!  0 dst3 2 + C!  1 dst3 3 + C!",
+            "CREATE pay3 4 ALLOT  pay3 4 0 FILL",
+            "IP-PROTO-TCP dst3 pay3 4 IP-BUILD DROP",
+            "IP-H.TTL C@ .",
+        ])
+        self.assertIn("64 ", text)
+
+    def test_ip_build_proto(self):
+        """IP-BUILD should set the protocol field."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst4 4 ALLOT  10 dst4 C!  0 dst4 1+ C!  0 dst4 2 + C!  1 dst4 3 + C!",
+            "CREATE pay4 4 ALLOT  pay4 4 0 FILL",
+            "IP-PROTO-UDP dst4 pay4 4 IP-BUILD DROP",
+            "IP-H.PROTO C@ .",
+        ])
+        self.assertIn("17 ", text)
+
+    def test_ip_build_src_is_my_ip(self):
+        """IP-BUILD source should be MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst5 4 ALLOT  10 dst5 C!  0 dst5 1+ C!  0 dst5 2 + C!  1 dst5 3 + C!",
+            "CREATE pay5 4 ALLOT  pay5 4 0 FILL",
+            "IP-PROTO-ICMP dst5 pay5 4 IP-BUILD DROP",
+            "IP-H.SRC MY-IP IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_dst(self):
+        """IP-BUILD destination should match target."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst6 4 ALLOT  10 dst6 C!  0 dst6 1+ C!  0 dst6 2 + C!  99 dst6 3 + C!",
+            "CREATE pay6 4 ALLOT  pay6 4 0 FILL",
+            "IP-PROTO-UDP dst6 pay6 4 IP-BUILD DROP",
+            "IP-H.DST dst6 IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_valid_checksum(self):
+        """IP-BUILD header checksum should verify correctly."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst7 4 ALLOT  10 dst7 C!  0 dst7 1+ C!  0 dst7 2 + C!  1 dst7 3 + C!",
+            "CREATE pay7 4 ALLOT  pay7 4 0 FILL",
+            "IP-PROTO-ICMP dst7 pay7 4 IP-BUILD DROP",
+            "IP-VERIFY-CKSUM .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_build_dont_fragment(self):
+        """IP-BUILD should set Don't Fragment flag (0x4000)."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst8 4 ALLOT  10 dst8 C!  0 dst8 1+ C!  0 dst8 2 + C!  1 dst8 3 + C!",
+            "CREATE pay8 4 ALLOT  pay8 4 0 FILL",
+            "IP-PROTO-TCP dst8 pay8 4 IP-BUILD DROP",
+            "IP-H.FLAGS NW16@ .",
+        ])
+        self.assertIn("16384 ", text)  # 0x4000
+
+    def test_ip_parse_extracts_fields(self):
+        """IP-PARSE should extract proto, src, dst, data, datalen."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dst9 4 ALLOT  10 dst9 C!  0 dst9 1+ C!  0 dst9 2 + C!  1 dst9 3 + C!",
+            "CREATE pay9 5 ALLOT  pay9 5 66 FILL",  # 'B' * 5
+            "IP-PROTO-UDP dst9 pay9 5 IP-BUILD DROP",
+            # IP-PARSE returns ( proto src dst data datalen )
+            "IP-PARSE .\" dl=\" . DROP DROP",
+            "DROP .",  # proto
+        ])
+        self.assertIn("dl=5 ", text)
+        self.assertIn("17 ", text)   # UDP proto
+
+    def test_ip_build_total_len_field(self):
+        """IP total length field should be /IP-HDR + payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE dstA 4 ALLOT  10 dstA C!  0 dstA 1+ C!  0 dstA 2 + C!  1 dstA 3 + C!",
+            "CREATE payA 10 ALLOT  payA 10 0 FILL",
+            "IP-PROTO-ICMP dstA payA 10 IP-BUILD DROP",
+            "IP-H.TLEN NW16@ .",
+        ])
+        self.assertIn("30 ", text)  # 20 + 10
+
 
 # ---------------------------------------------------------------------------
 #  Main
