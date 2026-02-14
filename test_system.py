@@ -7528,6 +7528,112 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("sent", text)
 
+    # --- 9d: NIC RX integration ---
+
+    @staticmethod
+    def _build_eth_frame(dst_mac, src_mac, ethertype, payload):
+        """Build a raw Ethernet frame (bytes) for NIC injection."""
+        frame = bytearray(dst_mac) + bytearray(src_mac) + \
+                ethertype.to_bytes(2, 'big') + bytearray(payload)
+        return bytes(frame)
+
+    # Default NIC MAC: 02:4D:50:36:34:00
+    NIC_MAC = bytes([0x02, 0x4D, 0x50, 0x36, 0x34, 0x00])
+    BCAST_MAC = bytes([0xFF] * 6)
+    OTHER_MAC = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01])
+
+    def test_eth_recv_no_frame(self):
+        """ETH-RECV should return 0 when no frame is available."""
+        text = self._run_kdos(["ETH-RECV ."])
+        self.assertIn("0 ", text)
+
+    def test_eth_recv_gets_frame(self):
+        """ETH-RECV should receive an injected frame."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x41' * 10)
+        text = self._run_kdos(
+            ["ETH-RECV ."],
+            nic_frames=[frame])
+        self.assertIn("24 ", text)  # 14 hdr + 10 payload = 24
+
+    def test_eth_recv_updates_rx_len(self):
+        """ETH-RECV should store frame length in ETH-RX-LEN."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 20)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-LEN @ ."],
+            nic_frames=[frame])
+        self.assertIn("34 ", text)  # 14 + 20
+
+    def test_eth_recv_increments_count(self):
+        """ETH-RECV should increment ETH-RX-COUNT."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["0 ETH-RX-COUNT !", "ETH-RECV DROP ETH-RX-COUNT @ ."],
+            nic_frames=[frame])
+        self.assertIn("1 ", text)
+
+    def test_eth_recv_reads_ethertype(self):
+        """After ETH-RECV, ETH-RX-BUF should have correct EtherType."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0806, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-BUF ETH-TYPE ."],
+            nic_frames=[frame])
+        self.assertIn("2054 ", text)  # 0x0806 = ETYPE-ARP
+
+    def test_eth_recv_reads_payload(self):
+        """After ETH-RECV, ETH-RX-BUF payload should match injected data."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x42' * 8)
+        text = self._run_kdos(
+            ["ETH-RECV DROP ETH-RX-BUF ETH-PLD C@ ."],
+            nic_frames=[frame])
+        self.assertIn("66 ", text)  # 0x42
+
+    def test_eth_recv_filter_for_us(self):
+        """ETH-RECV-FILTER should accept frames addressed to us."""
+        frame = self._build_eth_frame(
+            self.NIC_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("18 ", text)  # 14 + 4
+
+    def test_eth_recv_filter_broadcast(self):
+        """ETH-RECV-FILTER should accept broadcast frames."""
+        frame = self._build_eth_frame(
+            self.BCAST_MAC, self.OTHER_MAC, 0x0806, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("18 ", text)
+
+    def test_eth_recv_filter_rejects_other(self):
+        """ETH-RECV-FILTER should reject frames for other MACs."""
+        other_dst = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        frame = self._build_eth_frame(
+            other_dst, self.OTHER_MAC, 0x0800, b'\x00' * 4)
+        text = self._run_kdos(
+            ["ETH-RECV-FILTER ."],
+            nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_net_stats(self):
+        """.NET-STATS should print tx= and rx= counters."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !  0 ETH-RX-COUNT !",
+            ".NET-STATS",
+        ])
+        self.assertIn("tx=", text)
+        self.assertIn("rx=", text)
+
+    def test_eth_recv_wait_no_frame(self):
+        """ETH-RECV-WAIT should return 0 if no frame arrives."""
+        text = self._run_kdos(["5 ETH-RECV-WAIT ."])
+        self.assertIn("0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main

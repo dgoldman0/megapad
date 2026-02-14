@@ -3965,6 +3965,40 @@ VARIABLE ETH-TX-COUNT   0 ETH-TX-COUNT !
 : ETH-SEND-COUNTED  ( frame len -- )
     NET-SEND  1 ETH-TX-COUNT +! ;
 
+\ -- ETH-RECV: receive an Ethernet frame from NIC into ETH-RX-BUF --
+\   ( -- len | 0 )
+\   Returns frame length or 0 if no frame available.
+\   Stores the length in ETH-RX-LEN for ETH-FRAME-PAYLEN.
+VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
+
+: ETH-RECV  ( -- len )
+    NET-RX? 0= IF 0 EXIT THEN       \ no frame waiting
+    ETH-RX-BUF NET-RECV             \ receive into ETH-RX-BUF
+    DUP ETH-RX-LEN !               \ save length
+    DUP 0<> IF 1 ETH-RX-COUNT +! THEN ;
+
+\ -- ETH-RECV-WAIT: blocking receive with timeout (in attempts) --
+\   ( max-attempts -- len | 0 )
+: ETH-RECV-WAIT  ( n -- len )
+    0 DO
+        ETH-RECV DUP 0<> IF UNLOOP EXIT THEN
+        DROP
+    LOOP
+    0 ;
+
+\ -- ETH-RECV-FILTER: receive, keep only frames for us --
+\   ( -- len | 0 )
+: ETH-RECV-FILTER  ( -- len )
+    ETH-RECV DUP 0= IF EXIT THEN     \ no frame → 0
+    ETH-RX-BUF ETH-FOR-US? 0= IF
+        DROP 0                        \ not for us → discard
+    THEN ;
+
+\ -- Network statistics --
+: .NET-STATS  ( -- )
+    ." tx=" ETH-TX-COUNT @ .
+    ." rx=" ETH-RX-COUNT @ . CR ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
