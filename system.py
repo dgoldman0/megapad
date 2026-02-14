@@ -11,7 +11,10 @@ inter-core mailbox (IPI), and hardware spinlocks.
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nic_backends import NICBackend
 
 try:
     from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
@@ -62,6 +65,7 @@ class MegapadSystem:
                  storage_image: Optional[str] = None,
                  nic_port: Optional[int] = None,
                  nic_peer_port: Optional[int] = None,
+                 nic_backend: 'Optional[NICBackend]' = None,
                  num_cores: int = 1):
         self.ram_size = ram_size
         self.num_cores = num_cores
@@ -88,6 +92,7 @@ class MegapadSystem:
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
             passthrough_peer_port=nic_peer_port,
+            backend=nic_backend,
         )
         self.sysinfo = SystemInfo(
             mem_size_kib=ram_size // 1024,
@@ -587,7 +592,7 @@ class MegapadSystem:
                       f"mac={self.nic.mac.hex(':')} "
                       f"tx={self.nic.tx_count} rx={self.nic.rx_count} "
                       f"rxq={len(self.nic.rx_queue)} "
-                      f"passthrough={'port ' + str(self.nic._passthrough_port) if self.nic._passthrough_port else 'none'}")
+                      f"backend={self.nic.backend_name}")
         if self.num_cores > 1:
             lines.append(f"  Mailbox: cores={self.num_cores} "
                          f"pending={[self.mailbox.pending[i] for i in range(self.num_cores)]}")

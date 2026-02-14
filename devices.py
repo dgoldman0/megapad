@@ -21,8 +21,11 @@ from __future__ import annotations
 import socket
 import time
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from collections import deque
+
+if TYPE_CHECKING:
+    from nic_backends import NICBackend
 
 # ---------------------------------------------------------------------------
 #  Base addresses (offsets within the MMIO aperture)
@@ -497,12 +500,23 @@ class SystemInfo(Device):
 NIC_MTU = 1500
 
 class NetworkDevice(Device):
-    """Emulated NIC with optional UDP passthrough to a real host port."""
+    """Emulated NIC with pluggable backend.
+
+    Supports three operating modes:
+      1. Loopback (default) — for unit tests; inject_frame() / on_tx_frame
+      2. UDP passthrough    — tunnel raw frames over UDP (--nic PORT)
+      3. Real backend        — TAP device for real L2 networking (--nic-tap)
+
+    When a NICBackend is attached, TX frames are forwarded to the
+    backend's send() and inbound frames from the backend are queued
+    into rx_queue automatically.
+    """
 
     def __init__(self, mac: bytes = b'\x02\x4D\x50\x36\x34\x00',
                  passthrough_port: Optional[int] = None,
                  passthrough_host: str = '127.0.0.1',
-                 passthrough_peer_port: Optional[int] = None):
+                 passthrough_peer_port: Optional[int] = None,
+                 backend: 'Optional[NICBackend]' = None):
         super().__init__("NIC", NIC_BASE, 0x80)
         self.mac = bytearray(mac[:6].ljust(6, b'\x00'))
         self.dma_addr: int = 0
@@ -529,7 +543,14 @@ class NetworkDevice(Device):
         # TX callback — for test inspection
         self.on_tx_frame: Optional[callable] = None
 
-        # UDP passthrough
+        # --- Pluggable backend ---
+        self._backend: 'Optional[NICBackend]' = backend
+        if self._backend is not None:
+            self._backend.on_rx_frame = self._backend_rx
+            self._backend.start()
+            self.link_up = self._backend.link_up
+
+        # UDP passthrough (legacy mode — used when no backend is set)
         self._passthrough_port = passthrough_port
         self._passthrough_host = passthrough_host
         self._passthrough_peer_port = passthrough_peer_port or (
@@ -539,8 +560,30 @@ class NetworkDevice(Device):
         self._rx_thread: Optional[threading.Thread] = None
         self._running = False
 
-        if passthrough_port is not None:
+        if passthrough_port is not None and self._backend is None:
             self._start_passthrough()
+
+    def _backend_rx(self, frame: bytes):
+        """Callback from NICBackend when a frame arrives from the wire."""
+        if len(frame) > NIC_MTU:
+            frame = frame[:NIC_MTU]
+        if len(self.rx_queue) < (self.rx_queue.maxlen or 64):
+            self.rx_queue.append(bytes(frame))
+            self.rx_count = (self.rx_count + 1) & 0xFFFF
+            if self.irq_ctrl & 1:  # RX IRQ enable
+                self.irq_status |= 1
+
+    @property
+    def backend(self) -> 'Optional[NICBackend]':
+        return self._backend
+
+    @property
+    def backend_name(self) -> str:
+        if self._backend:
+            return self._backend.name
+        if self._passthrough_port:
+            return f"udp-legacy:{self._passthrough_port}"
+        return "loopback"
 
     def _start_passthrough(self):
         """Bind a UDP socket and start a background RX listener thread."""
@@ -574,7 +617,7 @@ class NetworkDevice(Device):
                 break
 
     def stop(self):
-        """Shut down the passthrough listener."""
+        """Shut down the passthrough listener and backend."""
         self._running = False
         if self._sock:
             try:
@@ -582,6 +625,8 @@ class NetworkDevice(Device):
             except OSError:
                 pass
             self._sock = None
+        if self._backend:
+            self._backend.stop()
 
     def inject_frame(self, data: bytes):
         """Push a frame into the RX queue (for testing or local injection)."""
@@ -663,8 +708,12 @@ class NetworkDevice(Device):
                 self.tx_count = (self.tx_count + 1) & 0xFFFF
                 if self.on_tx_frame:
                     self.on_tx_frame(frame)
-                # UDP passthrough
-                if self._sock and self._passthrough_peer_port:
+                # Backend TX (real networking)
+                if self._backend:
+                    if not self._backend.send(frame):
+                        self.error = True
+                # UDP passthrough (legacy)
+                elif self._sock and self._passthrough_peer_port:
                     try:
                         self._sock.sendto(
                             frame,

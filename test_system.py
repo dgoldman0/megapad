@@ -10529,6 +10529,1015 @@ class TestKDOSNetStack(_KDOSTestBase):
         ])
         self.assertIn("0 ", text)
 
+    # =================================================================
+    #  §16.7  TCP tests
+    # =================================================================
+
+    # -- TCP frame builder helper --
+    @staticmethod
+    def _build_tcp_frame(dst_mac, src_mac, src_ip, dst_ip,
+                         sport, dport, seq, ack, flags, window,
+                         payload=b''):
+        """Build a raw Ethernet+IPv4+TCP frame for NIC injection.
+
+        flags is the raw TCP flags byte (SYN=0x02, ACK=0x10, etc.).
+        """
+        tcp_hdr = bytearray(20)
+        tcp_hdr[0] = (sport >> 8) & 0xFF
+        tcp_hdr[1] = sport & 0xFF
+        tcp_hdr[2] = (dport >> 8) & 0xFF
+        tcp_hdr[3] = dport & 0xFF
+        # seq (32-bit BE)
+        tcp_hdr[4] = (seq >> 24) & 0xFF
+        tcp_hdr[5] = (seq >> 16) & 0xFF
+        tcp_hdr[6] = (seq >> 8) & 0xFF
+        tcp_hdr[7] = seq & 0xFF
+        # ack (32-bit BE)
+        tcp_hdr[8] = (ack >> 24) & 0xFF
+        tcp_hdr[9] = (ack >> 16) & 0xFF
+        tcp_hdr[10] = (ack >> 8) & 0xFF
+        tcp_hdr[11] = ack & 0xFF
+        # data offset: 5 (20 bytes, no options) → upper nibble
+        tcp_hdr[12] = 0x50
+        tcp_hdr[13] = flags & 0xFF
+        tcp_hdr[14] = (window >> 8) & 0xFF
+        tcp_hdr[15] = window & 0xFF
+        # checksum (computed below), urgent = 0
+
+        tcp_seg = bytes(tcp_hdr) + bytes(payload)
+        tcp_len = len(tcp_seg)
+
+        # TCP pseudo-header checksum
+        pseudo = bytes(src_ip) + bytes(dst_ip) + b'\x00\x06'
+        pseudo += bytes([(tcp_len >> 8) & 0xFF, tcp_len & 0xFF])
+        data = pseudo + tcp_seg
+        if len(data) % 2:
+            data += b'\x00'
+        s = 0
+        for i in range(0, len(data), 2):
+            s += (data[i] << 8) | data[i + 1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+
+        tcp_seg_ba = bytearray(tcp_seg)
+        tcp_seg_ba[16] = (cksum >> 8) & 0xFF
+        tcp_seg_ba[17] = cksum & 0xFF
+
+        return TestKDOSNetStack._build_ip_frame(
+            dst_mac, src_mac, 6, src_ip, dst_ip, bytes(tcp_seg_ba))
+
+    # -- helper to parse a TX TCP frame from the NIC --
+    @staticmethod
+    def _parse_tcp_frame(frame_bytes):
+        """Parse an outgoing TCP frame.  Returns dict or None."""
+        if len(frame_bytes) < 54:   # 14 eth + 20 ip + 20 tcp minimum
+            return None
+        if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+            return None  # not IPv4
+        ip_start = 14
+        if frame_bytes[ip_start + 9] != 6:
+            return None  # not TCP
+        ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+        tcp_start = ip_start + ip_hdr_len
+        tcp_hdr_len = (frame_bytes[tcp_start + 12] >> 4) * 4
+        sport = (frame_bytes[tcp_start] << 8) | frame_bytes[tcp_start + 1]
+        dport = (frame_bytes[tcp_start + 2] << 8) | frame_bytes[tcp_start + 3]
+        seq = ((frame_bytes[tcp_start + 4] << 24) |
+               (frame_bytes[tcp_start + 5] << 16) |
+               (frame_bytes[tcp_start + 6] << 8) |
+               frame_bytes[tcp_start + 7])
+        ack = ((frame_bytes[tcp_start + 8] << 24) |
+               (frame_bytes[tcp_start + 9] << 16) |
+               (frame_bytes[tcp_start + 10] << 8) |
+               frame_bytes[tcp_start + 11])
+        flags = frame_bytes[tcp_start + 13]
+        window = (frame_bytes[tcp_start + 14] << 8) | frame_bytes[tcp_start + 15]
+        src_ip = list(frame_bytes[ip_start + 12:ip_start + 16])
+        dst_ip = list(frame_bytes[ip_start + 16:ip_start + 20])
+        payload = frame_bytes[tcp_start + tcp_hdr_len:]
+        return {
+            'sport': sport, 'dport': dport, 'seq': seq, 'ack': ack,
+            'flags': flags, 'window': window, 'payload': payload,
+            'src_ip': src_ip, 'dst_ip': dst_ip,
+        }
+
+    # TCP flag constants (matching kdos.f)
+    TCP_FIN = 0x01
+    TCP_SYN = 0x02
+    TCP_RST = 0x04
+    TCP_PSH = 0x08
+    TCP_ACK = 0x10
+
+    # -- 16.7a: TCP constants --
+
+    def test_tcp_hdr_size(self):
+        """/TCP-HDR should be 20."""
+        text = self._run_kdos(["/TCP-HDR ."])
+        self.assertIn("20 ", text)
+
+    def test_tcp_max_conn(self):
+        """/TCP-MAX-CONN should be 4."""
+        text = self._run_kdos(["/TCP-MAX-CONN ."])
+        self.assertIn("4 ", text)
+
+    def test_tcp_mss(self):
+        """TCP-MSS should be 1460."""
+        text = self._run_kdos(["TCP-MSS ."])
+        self.assertIn("1460 ", text)
+
+    def test_tcp_rxbuf_size(self):
+        """/TCP-RXBUF should be 4096."""
+        text = self._run_kdos(["/TCP-RXBUF ."])
+        self.assertIn("4096 ", text)
+
+    def test_tcp_flag_constants(self):
+        """TCP flag constants should have correct values."""
+        text = self._run_kdos([
+            "TCP-FIN .\" f=\" .",
+            "TCP-SYN .\" s=\" .",
+            "TCP-RST .\" r=\" .",
+            "TCP-PSH .\" p=\" .",
+            "TCP-ACK .\" a=\" .",
+        ])
+        self.assertIn("f=1 ", text)
+        self.assertIn("s=2 ", text)
+        self.assertIn("r=4 ", text)
+        self.assertIn("p=8 ", text)
+        self.assertIn("a=16 ", text)
+
+    def test_tcp_state_constants(self):
+        """TCP state constants should be enumerated 0..10."""
+        text = self._run_kdos([
+            "TCPS-CLOSED .\" c=\" .",
+            "TCPS-LISTEN .\" l=\" .",
+            "TCPS-SYN-SENT .\" ss=\" .",
+            "TCPS-SYN-RCVD .\" sr=\" .",
+            "TCPS-ESTABLISHED .\" e=\" .",
+            "TCPS-FIN-WAIT-1 .\" f1=\" .",
+            "TCPS-FIN-WAIT-2 .\" f2=\" .",
+            "TCPS-CLOSE-WAIT .\" cw=\" .",
+            "TCPS-CLOSING .\" cl=\" .",
+            "TCPS-LAST-ACK .\" la=\" .",
+            "TCPS-TIME-WAIT .\" tw=\" .",
+        ])
+        self.assertIn("c=0 ", text)
+        self.assertIn("l=1 ", text)
+        self.assertIn("ss=2 ", text)
+        self.assertIn("sr=3 ", text)
+        self.assertIn("e=4 ", text)
+        self.assertIn("f1=5 ", text)
+        self.assertIn("f2=6 ", text)
+        self.assertIn("cw=7 ", text)
+        self.assertIn("cl=8 ", text)
+        self.assertIn("la=9 ", text)
+        self.assertIn("tw=10 ", text)
+
+    # -- 16.7b: TCB data structure --
+
+    def test_tcb_size(self):
+        """/TCB should be 5728."""
+        text = self._run_kdos(["/TCB ."])
+        self.assertIn("5728 ", text)
+
+    def test_tcb_n_indexing(self):
+        """TCB-N should return different addresses for different indices."""
+        text = self._run_kdos([
+            "0 TCB-N .\" a=\" .",
+            "1 TCB-N .\" b=\" .",
+            "1 TCB-N 0 TCB-N - .\" diff=\" .",
+        ])
+        self.assertIn("diff=5728 ", text)
+
+    def test_tcb_init_sets_closed(self):
+        """TCB-INIT should set state to TCPS-CLOSED (0)."""
+        text = self._run_kdos([
+            "0 TCB-N DUP TCB.STATE 42 SWAP !",  # set garbage state
+            "0 TCB-N TCB-INIT",
+            "0 TCB-N TCB.STATE @ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_tcp_init_all(self):
+        """TCP-INIT-ALL should set all TCBs to CLOSED."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "0 TCB-N TCB.STATE @ .\" s0=\" .",
+            "1 TCB-N TCB.STATE @ .\" s1=\" .",
+            "2 TCB-N TCB.STATE @ .\" s2=\" .",
+            "3 TCB-N TCB.STATE @ .\" s3=\" .",
+        ])
+        self.assertIn("s0=0 ", text)
+        self.assertIn("s1=0 ", text)
+        self.assertIn("s2=0 ", text)
+        self.assertIn("s3=0 ", text)
+
+    def test_tcb_alloc_returns_index(self):
+        """TCB-ALLOC should return a valid index (0..3)."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCB-ALLOC .",
+        ])
+        # Output line: " N  ok" — extract the number
+        import re
+        nums = re.findall(r'\n\s*(\d+)\s+ok', text)
+        self.assertTrue(len(nums) >= 1, f"no alloc output: {text}")
+        idx = int(nums[-1])
+        self.assertIn(idx, [0, 1, 2, 3])
+
+    def test_tcb_alloc_exhaustion(self):
+        """TCB-ALLOC should return -1 when all slots are in use."""
+        text = self._run_kdos([
+            # Set all 4 TCBs to non-CLOSED state
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 1 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 2 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 3 TCB-N TCB.STATE !",
+            "TCB-ALLOC .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_tcb_find_match(self):
+        """TCB-FIND should locate a TCB by lport+rport+rip."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "8080 0 TCB-N TCB.LOCAL-PORT !",
+            "80 0 TCB-N TCB.REMOTE-PORT !",
+            "CREATE RIP 4 ALLOT  10 RIP C!  0 RIP 1+ C!  0 RIP 2 + C!  1 RIP 3 + C!",
+            "RIP 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "8080 80 RIP TCB-FIND 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_tcb_find_no_match(self):
+        """TCB-FIND should return 0 when no TCB matches."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "CREATE RIP2 4 ALLOT  10 RIP2 C!  0 RIP2 1+ C!  0 RIP2 2 + C!  1 RIP2 3 + C!",
+            "9999 80 RIP2 TCB-FIND .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_tcb_find_lport(self):
+        """TCB-FIND-LPORT should find a LISTEN TCB on the given port."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "8080 0 TCB-N TCB.LOCAL-PORT !",
+            "8080 TCB-FIND-LPORT 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_tcb_find_lport_no_listener(self):
+        """TCB-FIND-LPORT should return 0 when no LISTEN TCB exists."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "8080 TCB-FIND-LPORT .",
+        ])
+        self.assertIn("0 ", text)
+
+    # -- 16.7c: NW32! / NW32@ --
+
+    def test_nw32_store_fetch(self):
+        """NW32! and NW32@ should round-trip a 32-bit value in BE."""
+        text = self._run_kdos([
+            "CREATE NW32T 4 ALLOT",
+            "305419896 NW32T NW32!",   # 0x12345678
+            "NW32T NW32@ .",
+        ])
+        self.assertIn("305419896 ", text)
+
+    def test_nw32_byte_order(self):
+        """NW32! should store bytes in big-endian order."""
+        text = self._run_kdos([
+            "CREATE NW32B 4 ALLOT",
+            "287454020 NW32B NW32!",   # 0x11223344
+            "NW32B C@ .\" b0=\" .",
+            "NW32B 1+ C@ .\" b1=\" .",
+            "NW32B 2 + C@ .\" b2=\" .",
+            "NW32B 3 + C@ .\" b3=\" .",
+        ])
+        self.assertIn("b0=17 ", text)   # 0x11
+        self.assertIn("b1=34 ", text)   # 0x22
+        self.assertIn("b2=51 ", text)   # 0x33
+        self.assertIn("b3=68 ", text)   # 0x44
+
+    # -- 16.7d: TCP checksum --
+
+    def test_tcp_checksum_computed(self):
+        """TCP-FILL-CKSUM should produce a non-zero checksum."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE RIP3 4 ALLOT  10 RIP3 C!  0 RIP3 1+ C!  0 RIP3 2 + C!  1 RIP3 3 + C!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "8080 0 TCB-N TCB.LOCAL-PORT !",
+            "80 0 TCB-N TCB.REMOTE-PORT !",
+            "RIP3 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "1000 0 TCB-N TCB.SND-NXT !",
+            "2000 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            # Build a simple ACK segment (no payload)
+            "0 TCB-N TCP-ACK 0 0 TCP-BUILD",   # ( buf len )
+            # Fill checksum — use variables since >R/R> are compile-only
+            "VARIABLE _CK-BUF  VARIABLE _CK-LEN",
+            "_CK-LEN ! _CK-BUF !",
+            "MY-IP RIP3 _CK-BUF @ _CK-LEN @ TCP-FILL-CKSUM",
+            # Read the checksum field
+            "_CK-BUF @ TCP-H.CKSUM NW16@ .\" CK: \" .",
+        ])
+        # Parse from the output line (avoid echo collision)
+        import re
+        m = re.search(r'CK:\s+(\d+)', text)
+        self.assertIsNotNone(m, f"checksum output missing: {text[-500:]}")
+        ck = int(m.group(1))
+        self.assertNotEqual(ck, 0, "TCP checksum should be non-zero")
+
+    def test_tcp_verify_cksum_valid(self):
+        """TCP-VERIFY-CKSUM should return -1 for a valid checksum."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build a TCP SYN frame (peer→us) with valid checksum
+        frame = self._build_tcp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            80, 8080, 1000, 0, self.TCP_SYN, 8192)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Receive the IP frame — use variables since >R/R@ are compile-only
+            "VARIABLE _VCK-HDR  VARIABLE _VCK-LEN",
+            "IP-RECV _VCK-LEN ! _VCK-HDR !",
+            "_VCK-HDR @ IP-H.SRC _VCK-HDR @ IP-H.DST",
+            "_VCK-HDR @ IP-H.DATA",
+            "_VCK-HDR @ IP-H.TLEN NW16@ 20 -",   # tcp-len = ip-total - 20
+            "TCP-VERIFY-CKSUM .\" valid=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("valid=-1 ", text)
+
+    # -- 16.7e: TCP-CONNECT (active open — client sends SYN) --
+
+    def test_tcp_connect_allocates_tcb(self):
+        """TCP-CONNECT should allocate a TCB and set SYN-SENT state."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            # Pre-populate ARP for peer
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Connect
+            "PIP 80 12345 TCP-CONNECT",
+            "DUP 0<> .\" ok=\" .",
+            "TCB.STATE @ .\" st=\" .",
+        ])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("st=2 ", text)  # TCPS-SYN-SENT = 2
+
+    def test_tcp_connect_sends_syn(self):
+        """TCP-CONNECT should send a SYN segment."""
+        sent_frames = []
+
+        def capture_tx(nic, frame_bytes):
+            sent_frames.append(bytes(frame_bytes))
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT DROP",
+            '.\" done\"',
+        ], nic_tx_callback=capture_tx)
+        self.assertIn("done", text)
+        # Should have sent at least one TCP frame (the SYN)
+        tcp_frames = [self._parse_tcp_frame(f) for f in sent_frames]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertGreaterEqual(len(tcp_frames), 1, "should send SYN")
+        syn = tcp_frames[0]
+        self.assertEqual(syn['dport'], 80)
+        self.assertEqual(syn['sport'], 12345)
+        self.assertTrue(syn['flags'] & self.TCP_SYN, "SYN flag should be set")
+
+    def test_tcp_connect_returns_zero_when_full(self):
+        """TCP-CONNECT should return 0 when all TCBs are in use."""
+        text = self._run_kdos([
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 1 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 2 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 3 TCB-N TCB.STATE !",
+            "CREATE PIP2 4 ALLOT  10 PIP2 C! 0 PIP2 1+ C! 0 PIP2 2 + C! 1 PIP2 3 + C!",
+            "PIP2 80 12345 TCP-CONNECT .",
+        ])
+        self.assertIn("0 ", text)
+
+    # -- 16.7f: TCP-LISTEN (passive open) --
+
+    def test_tcp_listen_sets_state(self):
+        """TCP-LISTEN should allocate a TCB in LISTEN state."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "8080 TCP-LISTEN",
+            "DUP 0<> .\" ok=\" .",
+            "TCB.STATE @ .\" st=\" .",
+        ])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("st=1 ", text)  # TCPS-LISTEN = 1
+
+    def test_tcp_listen_sets_port(self):
+        """TCP-LISTEN should set the local port correctly."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "8080 TCP-LISTEN TCB.LOCAL-PORT @ .",
+        ])
+        self.assertIn("8080 ", text)
+
+    # -- 16.7g: TCP 3-way handshake (active open) --
+
+    def test_tcp_handshake_active_open(self):
+        """Full active-open: CONNECT → SYN → SYN+ACK → ACK → ESTABLISHED."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+
+        def tcp_peer_active(nic, frame_bytes):
+            """Simulate server: on SYN, reply SYN+ACK."""
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # Respond to SYN with SYN+ACK
+            if parsed['flags'] & 0x02:  # SYN
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac,
+                    peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn,                     # server seq
+                    parsed['seq'] + 1,              # ack = client ISN + 1
+                    0x12,                           # SYN+ACK
+                    8192)
+                nic.inject_frame(syn_ack)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Connect — sends SYN
+            "PIP 80 12345 TCP-CONNECT",
+            "DUP 0<> .\" alloc=\" .",
+            # SYN+ACK should arrive; poll to process it
+            "VARIABLE _HA-TCB  DUP _HA-TCB !",
+            "5 TCP-POLL-WAIT",
+            "_HA-TCB @ TCB.STATE @ .\" st=\" .",
+        ], nic_tx_callback=tcp_peer_active)
+        self.assertIn("alloc=-1 ", text)
+        self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
+
+    # -- 16.7h: TCP 3-way handshake (passive open — server) --
+
+    def test_tcp_handshake_passive_open(self):
+        """Passive open: LISTEN → peer SYN → SYN+ACK → peer ACK → ESTABLISHED."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 8080
+        client_port = 54321
+        client_isn = 3000
+
+        def tcp_peer_passive(nic, frame_bytes):
+            """Simulate client: on SYN+ACK, reply ACK."""
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            # If we see SYN+ACK from our server, send ACK back
+            if (parsed['flags'] & 0x12) == 0x12:  # SYN+ACK
+                ack_frame = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac,
+                    peer_ip, my_ip,
+                    client_port, server_port,
+                    client_isn + 1,                # client seq (past SYN)
+                    parsed['seq'] + 1,             # ack = server ISN + 1
+                    0x10,                          # ACK only
+                    8192)
+                nic.inject_frame(ack_frame)
+
+        # First inject a SYN from the client
+        syn_frame = self._build_tcp_frame(
+            nic_mac, peer_mac,
+            peer_ip, my_ip,
+            client_port, server_port,
+            client_isn, 0, 0x02, 8192)  # SYN
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            # ARP entry for peer
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Listen on port 8080
+            "8080 TCP-LISTEN DUP 0<> .\" listen=\" .",
+            "VARIABLE _HP-TCB  DUP _HP-TCB !",
+            # Poll — processes the SYN, sends SYN+ACK, callback sends ACK
+            "10 TCP-POLL-WAIT",
+            "_HP-TCB @ TCB.STATE @ .\" st=\" .",
+        ], nic_frames=[syn_frame], nic_tx_callback=tcp_peer_passive)
+        self.assertIn("listen=-1 ", text)
+        self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
+
+    # -- 16.7i: TCP data transfer --
+
+    def test_tcp_send_data(self):
+        """TCP-SEND should transmit data on an ESTABLISHED connection."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+        sent_data = []
+
+        def tcp_peer_data(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # On SYN: respond SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+            # On data (PSH+ACK) — capture it and send ACK
+            elif (parsed['flags'] & 0x18) and len(parsed['payload']) > 0:
+                sent_data.append(bytes(parsed['payload']))
+                resp_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1,
+                    parsed['seq'] + len(parsed['payload']),
+                    0x10, 8192)
+                nic.inject_frame(resp_ack)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT",
+            "VARIABLE _SD-TCB  DUP _SD-TCB !",
+            "5 TCP-POLL-WAIT",                 # process SYN+ACK
+            "_SD-TCB @ TCB.STATE @ .\" st1=\" .",
+            # Now send some data: "Hello"
+            'CREATE MSG 5 ALLOT  72 MSG C!  101 MSG 1+ C!  108 MSG 2 + C!  108 MSG 3 + C!  111 MSG 4 + C!',
+            "_SD-TCB @ MSG 5 TCP-SEND .\" sent=\" .",
+        ], nic_tx_callback=tcp_peer_data)
+        self.assertIn("st1=4 ", text)    # ESTABLISHED
+        self.assertIn("sent=5 ", text)   # sent 5 bytes
+        # Verify the peer received "Hello"
+        self.assertGreaterEqual(len(sent_data), 1, "peer should have received data")
+        all_data = b''.join(sent_data)
+        self.assertEqual(all_data, b'Hello')
+
+    def test_tcp_send_not_established(self):
+        """TCP-SEND should return 0 if connection is not ESTABLISHED."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            # TCB 0 is in CLOSED state
+            "CREATE MSG2 4 ALLOT",
+            "0 TCB-N MSG2 4 TCP-SEND .",
+        ])
+        self.assertIn("0 ", text)
+
+    # -- 16.7j: TCP receive data --
+
+    def test_tcp_recv_data(self):
+        """TCP-RECV should return data pushed into the RX ring by peer."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+
+        def tcp_peer_recv(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # On SYN: respond SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+            # On ACK (handshake complete) — send data to client
+            elif (parsed['flags'] & 0x10) and not (parsed['flags'] & 0x02):
+                # Only send data once (check seq = ISN+1 to detect first ACK)
+                if len(parsed['payload']) == 0:
+                    # Send "Hi" to client
+                    data_frame = TestKDOSNetStack._build_tcp_frame(
+                        nic_mac, peer_mac, peer_ip, my_ip,
+                        server_port, client_port,
+                        server_isn + 1, parsed['seq'],
+                        0x18, 8192,  # PSH+ACK
+                        b'\x48\x69')  # "Hi"
+                    nic.inject_frame(data_frame)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT",
+            "VARIABLE _RD-TCB  DUP _RD-TCB !",
+            "10 TCP-POLL-WAIT",                # SYN+ACK + data arrival
+            "_RD-TCB @ TCB.STATE @ .\" st=\" .",
+            # Read data
+            "CREATE RBUF 64 ALLOT  RBUF 64 0 FILL",
+            "_RD-TCB @ RBUF 64 TCP-RECV .\" got=\" .",
+            "RBUF C@ .\" b0=\" .",
+            "RBUF 1+ C@ .\" b1=\" .",
+        ], nic_tx_callback=tcp_peer_recv)
+        self.assertIn("st=4 ", text)     # ESTABLISHED
+        self.assertIn("got=2 ", text)    # received 2 bytes
+        self.assertIn("b0=72 ", text)    # 'H' = 72
+        self.assertIn("b1=105 ", text)   # 'i' = 105
+
+    # -- 16.7k: TCP RX ring buffer --
+
+    def test_tcp_rx_push_pop(self):
+        """TCP-RX-PUSH / TCP-RX-POP should round-trip data through the ring."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "CREATE TDATA 4 ALLOT  65 TDATA C!  66 TDATA 1+ C!  67 TDATA 2 + C!  68 TDATA 3 + C!",
+            "0 TCB-N TDATA 4 TCP-RX-PUSH .\" pushed=\" .",
+            "CREATE TOUT 8 ALLOT  TOUT 8 0 FILL",
+            "0 TCB-N TOUT 4 TCP-RX-POP .\" popped=\" .",
+            "TOUT C@ .\" a=\" .",
+            "TOUT 1+ C@ .\" b=\" .",
+            "TOUT 2 + C@ .\" c=\" .",
+            "TOUT 3 + C@ .\" d=\" .",
+        ])
+        self.assertIn("pushed=4 ", text)
+        self.assertIn("popped=4 ", text)
+        self.assertIn("a=65 ", text)   # 'A'
+        self.assertIn("b=66 ", text)   # 'B'
+        self.assertIn("c=67 ", text)   # 'C'
+        self.assertIn("d=68 ", text)   # 'D'
+
+    def test_tcp_rx_push_full(self):
+        """TCP-RX-PUSH should stop at buffer capacity."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            # Fill the entire 4096-byte RX buffer
+            "CREATE BIGDATA 4096 ALLOT  BIGDATA 4096 42 FILL",
+            "0 TCB-N BIGDATA 4096 TCP-RX-PUSH .\" full=\" .",
+            # Now try to push 1 more byte
+            "CREATE ONE 1 ALLOT  99 ONE C!",
+            "0 TCB-N ONE 1 TCP-RX-PUSH .\" extra=\" .",
+        ])
+        self.assertIn("full=4096 ", text)
+        self.assertIn("extra=0 ", text)
+
+    def test_tcp_rx_count_tracks(self):
+        """RX-COUNT should track bytes in the ring."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "CREATE RDATA 10 ALLOT RDATA 10 55 FILL",
+            "0 TCB-N RDATA 10 TCP-RX-PUSH DROP",
+            "0 TCB-N TCB.RX-COUNT @ .\" cnt=\" .",
+            "CREATE ROUT 5 ALLOT",
+            "0 TCB-N ROUT 5 TCP-RX-POP DROP",
+            "0 TCB-N TCB.RX-COUNT @ .\" cnt2=\" .",
+        ])
+        self.assertIn("cnt=10 ", text)
+        self.assertIn("cnt2=5 ", text)
+
+    # -- 16.7l: TCP RST handling --
+
+    def test_tcp_rst_resets_connection(self):
+        """Receiving RST should move connection to CLOSED."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+
+        def tcp_peer_rst(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # On SYN: respond SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+            # On ACK (handshake complete) — send RST
+            elif (parsed['flags'] & 0x10) and not (parsed['flags'] & 0x02):
+                if len(parsed['payload']) == 0:
+                    rst_frame = TestKDOSNetStack._build_tcp_frame(
+                        nic_mac, peer_mac, peer_ip, my_ip,
+                        server_port, client_port,
+                        server_isn + 1, parsed['seq'],
+                        0x04, 0)  # RST
+                    nic.inject_frame(rst_frame)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT",
+            "VARIABLE _RST-TCB  DUP _RST-TCB !",
+            "10 TCP-POLL-WAIT",
+            "_RST-TCB @ TCB.STATE @ .\" st=\" .",
+        ], nic_tx_callback=tcp_peer_rst)
+        self.assertIn("st=0 ", text)  # TCPS-CLOSED = 0
+
+    def test_tcp_rst_sent_for_unmatched(self):
+        """An incoming segment for no TCB should elicit a RST."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        sent_frames = []
+
+        def capture_rst(nic, frame_bytes):
+            sent_frames.append(bytes(frame_bytes))
+
+        # Build an unexpected SYN to a port nobody is listening on
+        syn_frame = self._build_tcp_frame(
+            nic_mac, peer_mac,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            54321, 9999, 1000, 0, 0x02, 8192)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            # ARP entry so RST can be sent back
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "5 TCP-POLL-WAIT",
+            '.\" done\"',
+        ], nic_frames=[syn_frame], nic_tx_callback=capture_rst)
+        self.assertIn("done", text)
+        # Should have sent a RST
+        tcp_out = [self._parse_tcp_frame(f) for f in sent_frames]
+        tcp_out = [f for f in tcp_out if f is not None]
+        rst_frames = [f for f in tcp_out if f['flags'] & 0x04]
+        self.assertGreaterEqual(len(rst_frames), 1, "should send RST for unmatched segment")
+
+    # -- 16.7m: TCP graceful close --
+
+    def test_tcp_close_from_established(self):
+        """TCP-CLOSE should send FIN and transition to FIN-WAIT-1."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+        fin_sent = []
+
+        def tcp_peer_close(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # On SYN: respond SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+            # On FIN+ACK — record it
+            elif parsed['flags'] & 0x01:  # FIN
+                fin_sent.append(parsed)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT",
+            "VARIABLE _CL-TCB  DUP _CL-TCB !",
+            "5 TCP-POLL-WAIT",                 # handshake
+            "_CL-TCB @ TCB.STATE @ .\" st1=\" .",
+            "_CL-TCB @ TCP-CLOSE",
+            "_CL-TCB @ TCB.STATE @ .\" st2=\" .",
+        ], nic_tx_callback=tcp_peer_close)
+        self.assertIn("st1=4 ", text)    # ESTABLISHED
+        self.assertIn("st2=5 ", text)    # FIN-WAIT-1
+        self.assertGreaterEqual(len(fin_sent), 1, "should send FIN")
+
+    def test_tcp_close_full_teardown(self):
+        """Full teardown: FIN → ACK+FIN → ACK → TIME-WAIT."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+
+        def tcp_peer_teardown(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+            # SYN → SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+            # FIN → ACK the FIN, then send our own FIN
+            elif parsed['flags'] & 0x01:  # FIN
+                # ACK the client's FIN + send our FIN
+                fin_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1,
+                    parsed['seq'] + 1,       # ACK the FIN
+                    0x11, 8192)              # FIN+ACK
+                nic.inject_frame(fin_ack)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "PIP 80 12345 TCP-CONNECT",
+            "VARIABLE _TD-TCB  DUP _TD-TCB !",
+            "5 TCP-POLL-WAIT",                 # handshake
+            "_TD-TCB @ TCP-CLOSE",             # sends FIN
+            "10 TCP-POLL-WAIT",                # process peer's FIN+ACK
+            "_TD-TCB @ TCB.STATE @ .\" st=\" .",
+        ], nic_tx_callback=tcp_peer_teardown)
+        # After receiving peer's FIN+ACK we should be in TIME-WAIT
+        self.assertIn("st=10 ", text)  # TCPS-TIME-WAIT = 10
+
+    def test_tcp_close_listen(self):
+        """TCP-CLOSE on a LISTEN TCB should reset it to CLOSED."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "8080 TCP-LISTEN",
+            "VARIABLE _CLL-TCB  DUP _CLL-TCB !",
+            "_CLL-TCB @ TCP-CLOSE",
+            "_CLL-TCB @ TCB.STATE @ .",
+        ])
+        self.assertIn("0 ", text)  # CLOSED
+
+    # -- 16.7n: TCP-POLL --
+
+    def test_tcp_poll_no_frame(self):
+        """TCP-POLL should not crash when no frame is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-POLL",
+            '.\" ok\"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_tcp_poll_handles_icmp(self):
+        """TCP-POLL should handle ICMP transparently."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build an ICMP echo request
+        icmp_frame = self._build_icmp_echo_req_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            1234, 1, b'\x00' * 8)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-POLL",
+            '.\" ok\"',
+        ], nic_frames=[icmp_frame])
+        self.assertIn("ok", text)
+
+    # -- 16.7o: Full round-trip: connect, send, recv, close --
+
+    def test_tcp_full_round_trip(self):
+        """Complete TCP session: connect → send → recv → close."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+        state = {'phase': 'handshake', 'client_data_acked': False}
+
+        def tcp_echo_server(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            if parsed['dport'] != server_port:
+                return
+
+            # SYN → SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                syn_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1,
+                    0x12, 8192)
+                nic.inject_frame(syn_ack)
+                state['phase'] = 'established'
+                return
+
+            # Data: echo it back
+            if len(parsed['payload']) > 0 and not state['client_data_acked']:
+                state['client_data_acked'] = True
+                # ACK the data AND echo it back
+                echo = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1,
+                    parsed['seq'] + len(parsed['payload']),
+                    0x18, 8192,  # PSH+ACK
+                    parsed['payload'])
+                nic.inject_frame(echo)
+                return
+
+            # FIN → ACK+FIN
+            if parsed['flags'] & 0x01:
+                fin_ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1 + 3,    # past echoed data
+                    parsed['seq'] + 1,
+                    0x11, 8192)            # FIN+ACK
+                nic.inject_frame(fin_ack)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C! 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Connect
+            "VARIABLE _RT-TCB",
+            "PIP 80 12345 TCP-CONNECT DUP _RT-TCB !",
+            "5 TCP-POLL-WAIT",
+            "_RT-TCB @ TCB.STATE @ .\" st1=\" .",
+            # Send "Cat"
+            'CREATE MSG 3 ALLOT  67 MSG C!  97 MSG 1+ C!  116 MSG 2 + C!',
+            "_RT-TCB @ MSG 3 TCP-SEND .\" sent=\" .",
+            "5 TCP-POLL-WAIT",      # process ACK+echo
+            # Receive the echo
+            "CREATE RBUF 64 ALLOT  RBUF 64 0 FILL",
+            "_RT-TCB @ RBUF 64 TCP-RECV .\" got=\" .",
+            "RBUF C@ .\" e0=\" .",
+            "RBUF 1+ C@ .\" e1=\" .",
+            "RBUF 2 + C@ .\" e2=\" .",
+            # Close
+            "_RT-TCB @ TCP-CLOSE",
+            "10 TCP-POLL-WAIT",
+            "_RT-TCB @ TCB.STATE @ .\" st2=\" .",
+        ], nic_tx_callback=tcp_echo_server)
+        self.assertIn("st1=4 ", text)    # ESTABLISHED
+        self.assertIn("sent=3 ", text)   # sent 3 bytes
+        self.assertIn("got=3 ", text)    # received echo of 3 bytes
+        self.assertIn("e0=67 ", text)    # 'C'
+        self.assertIn("e1=97 ", text)    # 'a'
+        self.assertIn("e2=116 ", text)   # 't'
+        self.assertIn("st2=10 ", text)   # TIME-WAIT
+
 
 # ---------------------------------------------------------------------------
 #  Main

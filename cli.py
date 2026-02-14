@@ -618,11 +618,10 @@ class MegapadCLI(cmd.Cmd):
             print(f"  NIC: link={link}  mac={n.mac.hex(':')}")
             print(f"  TX: {n.tx_count} frames sent   RX: {n.rx_count} received")
             print(f"  RX queue: {len(n.rx_queue)} frames pending")
-            pt = n._passthrough_port
-            if pt:
-                print(f"  Passthrough: UDP port {pt} → peer {n._passthrough_peer_port}")
-            else:
-                print(f"  Passthrough: none")
+            print(f"  Backend: {n.backend_name}")
+            if n.backend and hasattr(n.backend, 'stats'):
+                for k, v in n.backend.stats().items():
+                    print(f"    {k}: {v}")
         elif sub == 'inject':
             if len(parts) < 2:
                 print("Usage: nic inject <hex bytes>")
@@ -883,6 +882,10 @@ def main():
                         help="Enable NIC with UDP passthrough on PORT")
     parser.add_argument("--nic-peer-port", type=int, default=None, metavar="PORT",
                         help="UDP peer port for NIC passthrough (default: NIC+1)")
+    parser.add_argument("--nic-tap", type=str, nargs='?', const='mp64tap0',
+                        default=None, metavar="IFNAME",
+                        help="Attach NIC to a Linux TAP device for real L2 "
+                             "networking (default: mp64tap0)")
     parser.add_argument("--cores", type=int, default=1, choices=[1, 2, 3, 4],
                         help="Number of CPU cores (default: 1)")
     args = parser.parse_args()
@@ -902,12 +905,26 @@ def main():
         print(f"Assembled {src_path} → {out_path} ({len(code)} bytes)")
         return
 
+    # Build NIC backend
+    nic_backend = None
+    if args.nic_tap:
+        from nic_backends import TAPBackend, tap_available, setup_tap
+        if not tap_available(args.nic_tap):
+            print(f"ERROR: TAP device '{args.nic_tap}' is not accessible.",
+                  file=sys.stderr)
+            print(f"\nTo create it, run:\n", file=sys.stderr)
+            print(setup_tap(args.nic_tap), file=sys.stderr)
+            sys.exit(1)
+        nic_backend = TAPBackend(tap_name=args.nic_tap)
+        print(f"NIC attached to TAP device: {args.nic_tap}")
+
     # Create system
     sys_emu = MegapadSystem(
         ram_size=args.ram * 1024,
         storage_image=args.storage,
         nic_port=args.nic,
         nic_peer_port=args.nic_peer_port,
+        nic_backend=nic_backend,
         num_cores=args.cores,
     )
 

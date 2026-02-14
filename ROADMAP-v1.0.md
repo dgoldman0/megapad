@@ -5,10 +5,10 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (272 dict entries, 10,237 lines ASM),
-KDOS v1.1 (5,851 lines), Emulator (2,541 lines + 597-line quad-core SoC +
-1,929-line C++ accelerator), FPGA RTL (20 Verilog modules + 14 testbenches),
-devices.py (1,500 lines), 828 test methods passing in 24 s (CPython + C++).
+**Current state (Feb 2026):** BIOS (272 dict entries, 10,389 lines ASM),
+KDOS v1.1 (6,600 lines), Emulator (2,541 lines + 602-line quad-core SoC +
+1,930-line C++ accelerator), FPGA RTL (20 Verilog modules + 14 testbenches),
+devices.py (1,549 lines), 896 test methods passing in 24 s (CPython + C++).
 Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
@@ -16,8 +16,9 @@ scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
 **functionally complete**.  Foundation (items 1–4), crypto stack
 (items 5–8), network L2–L4 through DNS (items 9–15), and multicore OS
 (items 19–24) are done.  Crypto enhanced with hardware TRNG, SHAKE
-XOF support, and post-quantum readiness.  Remaining work: TCP, TLS 1.3,
-socket API, and application-level features.
+XOF support, and post-quantum readiness.  Real-network testing
+infrastructure added (TAP device backends, 27 integration tests).
+Remaining work: TCP, TLS 1.3, socket API, and application-level features.
 
 ---
 
@@ -62,7 +63,7 @@ socket API, and application-level features.
 
 ### KDOS v1.1 — ✅ DONE (core + multicore + crypto)
 
-445+ word definitions + 230+ variables/constants/creates, 5,851 lines.
+445+ word definitions + 230+ variables/constants/creates, 6,600 lines.
 
 16 sections:
 - §1 Utility words, §2 Buffer subsystem, §3 Tile-aware buffer ops
@@ -96,7 +97,7 @@ socket API, and application-level features.
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
 - ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG (1,500 lines)
 
-### Test Suite — ✅ 828 tests
+### Test Suite — ✅ 896 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
@@ -110,6 +111,8 @@ socket API, and application-level features.
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
 - test_megapad64.py: 23 CPU + tile tests
+- test_networking.py: 27 real-network tests (NIC backends, TAP,
+  ARP, ICMP, UDP) across 7 test classes
 
 ### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore)
 
@@ -307,22 +310,24 @@ continuous progress, reviewable diffs, and a working system at every step.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 10,237 | ✅ 272 dictionary entries |
-| `kdos.f` | 5,851 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
+| `bios.asm` | 10,389 | ✅ 272 dictionary entries |
+| `kdos.f` | 6,600 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
-| `accel/mp64_accel.cpp` | 1,929 | ✅ C++ CPU core (pybind11, 63× speedup) |
+| `accel/mp64_accel.cpp` | 1,930 | ✅ C++ CPU core (pybind11, 63× speedup) |
 | `accel_wrapper.py` | 830 | ✅ Drop-in wrapper for C++ CPU core |
-| `system.py` | 597 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
-| `cli.py` | 995 | ✅ Interactive monitor/debugger |
+| `system.py` | 602 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
+| `cli.py` | 1,012 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 1,500 | ✅ AES-256-GCM, SHA3/SHAKE, TRNG, CRC, Mailbox, Spinlock |
+| `devices.py` | 1,549 | ✅ AES-256-GCM, SHA3/SHAKE, TRNG, CRC, Mailbox, Spinlock |
+| `nic_backends.py` | 399 | ✅ Pluggable NIC backends (Loopback, UDP, TAP) |
 | `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 10,567 | 805 test methods (27 classes) ✅ |
+| `test_system.py` | 11,576 | 846 test methods (27 classes) ✅ |
+| `test_networking.py` | 860 | 27 real-network tests (7 classes) ✅ |
 | `setup_accel.py` | 35 | ✅ pybind11 build configuration |
 | `bench_accel.py` | 139 | ✅ C++ vs Python speed comparison |
-| `Makefile` | 177 | ✅ Build, test, & accel targets |
-| `conftest.py` | 193 | ✅ Test fixtures, snapshot caching, live status |
+| `Makefile` | 190 | ✅ Build, test, & accel targets |
+| `conftest.py` | 197 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
 | `fpga/rtl/` | ~11,493 | ✅ 20 Verilog modules |
 | `fpga/sim/` | ~7,557 | ✅ 14 testbenches (146 HW tests) |

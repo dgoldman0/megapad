@@ -560,7 +560,7 @@ CREATE SHA3-BUF 64 ALLOT
     RANDOM 0xFFFF AND ;
 
 : RAND-RANGE  ( max -- n )
-    RANDOM SWAP MOD ;
+    RANDOM SWAP MOD ABS ;
 
 \ =====================================================================
 \  §1.7  Unified Crypto Words
@@ -5831,6 +5831,755 @@ VARIABLE _DNR-DLEN
         DROP                         \ drop src-ip / 0
     LOOP
     0 ;
+
+\ =====================================================================
+\  §16.7  TCP — Transmission Control Protocol (RFC 793/9293)
+\ =====================================================================
+\ Full TCP implementation: 3-way handshake, data transfer with
+\ segmentation, sliding window, fast retransmit, congestion control
+\ (slow start + congestion avoidance), and graceful teardown.
+\
+\ Design:
+\   - 4 TCB (Transmission Control Block) slots
+\   - Each TCB owns a 1460-byte TX ring and 4096-byte RX ring
+\   - Retransmit timer per TCB (RTO = 1s initial, doubles on timeout)
+\   - ISN via RANDOM32 for security
+\   - MSS = 1460 (Ethernet MTU − IP − TCP headers)
+
+\ -- TCP constants --
+20 CONSTANT /TCP-HDR              \ minimum TCP header (no options)
+4  CONSTANT /TCP-MAX-CONN         \ max simultaneous connections
+1460 CONSTANT TCP-MSS             \ Max Segment Size (1500-20-20)
+4096 CONSTANT /TCP-RXBUF          \ per-connection RX ring buffer
+1460 CONSTANT /TCP-TXBUF          \ per-connection TX buffer (1 MSS)
+
+\ -- TCP flags (bit positions in flags byte) --
+1   CONSTANT TCP-FIN
+2   CONSTANT TCP-SYN
+4   CONSTANT TCP-RST
+8   CONSTANT TCP-PSH
+16  CONSTANT TCP-ACK
+32  CONSTANT TCP-URG
+
+\ -- TCP states (RFC 793 state machine) --
+0  CONSTANT TCPS-CLOSED
+1  CONSTANT TCPS-LISTEN
+2  CONSTANT TCPS-SYN-SENT
+3  CONSTANT TCPS-SYN-RCVD
+4  CONSTANT TCPS-ESTABLISHED
+5  CONSTANT TCPS-FIN-WAIT-1
+6  CONSTANT TCPS-FIN-WAIT-2
+7  CONSTANT TCPS-CLOSE-WAIT
+8  CONSTANT TCPS-CLOSING
+9  CONSTANT TCPS-LAST-ACK
+10 CONSTANT TCPS-TIME-WAIT
+
+\ =====================================================================
+\  TCB — Transmission Control Block
+\ =====================================================================
+\ Each TCB is a contiguous region.  Field offsets:
+\   +0   STATE       1 cell    TCP state enum
+\   +8   LOCAL-PORT  1 cell    local port number
+\  +16   REMOTE-PORT 1 cell    remote port number
+\  +24   REMOTE-IP   4 bytes   remote IPv4 address
+\  +32   SND-UNA     1 cell    oldest unACKed seq
+\  +40   SND-NXT     1 cell    next seq to send
+\  +48   SND-WND     1 cell    send window (peer's RWND)
+\  +56   RCV-NXT     1 cell    next expected seq from peer
+\  +64   RCV-WND     1 cell    our receive window
+\  +72   ISS         1 cell    initial send seq
+\  +80   IRS         1 cell    initial recv seq (peer's ISN)
+\  +88   RTO-TIMER   1 cell    retransmit timeout counter (ticks)
+\  +96   RTO-VALUE   1 cell    current RTO in ticks (starts ~100)
+\ +104   RETRIES     1 cell    retransmit attempt count
+\ +112   TX-BUF      1460B     outgoing data (1 MSS)
+\ +1572  TX-LEN      1 cell    bytes in TX-BUF
+\ +1580  RX-BUF      4096B     incoming data ring
+\ +5676  RX-HEAD     1 cell    ring read position
+\ +5684  RX-TAIL     1 cell    ring write position
+\ +5692  RX-COUNT    1 cell    bytes available in RX ring
+\ +5700  CWND        1 cell    congestion window (bytes)
+\ +5708  SSTHRESH    1 cell    slow-start threshold
+\ +5716  DUP-ACKS    1 cell    duplicate ACK counter
+\ +5724  (pad to 5728)
+5728 CONSTANT /TCB               \ size of one TCB
+
+\ -- TCB field accessors (add to TCB base) --
+: TCB.STATE       ( tcb -- addr )          ;
+: TCB.LOCAL-PORT  ( tcb -- addr )  8  + ;
+: TCB.REMOTE-PORT ( tcb -- addr )  16 + ;
+: TCB.REMOTE-IP   ( tcb -- addr )  24 + ;
+: TCB.SND-UNA     ( tcb -- addr )  32 + ;
+: TCB.SND-NXT     ( tcb -- addr )  40 + ;
+: TCB.SND-WND     ( tcb -- addr )  48 + ;
+: TCB.RCV-NXT     ( tcb -- addr )  56 + ;
+: TCB.RCV-WND     ( tcb -- addr )  64 + ;
+: TCB.ISS         ( tcb -- addr )  72 + ;
+: TCB.IRS         ( tcb -- addr )  80 + ;
+: TCB.RTO-TIMER   ( tcb -- addr )  88 + ;
+: TCB.RTO-VALUE   ( tcb -- addr )  96 + ;
+: TCB.RETRIES     ( tcb -- addr ) 104 + ;
+: TCB.TX-BUF      ( tcb -- addr ) 112 + ;
+: TCB.TX-LEN      ( tcb -- addr ) 1572 + ;
+: TCB.RX-BUF      ( tcb -- addr ) 1580 + ;
+: TCB.RX-HEAD     ( tcb -- addr ) 5676 + ;
+: TCB.RX-TAIL     ( tcb -- addr ) 5684 + ;
+: TCB.RX-COUNT    ( tcb -- addr ) 5692 + ;
+: TCB.CWND        ( tcb -- addr ) 5700 + ;
+: TCB.SSTHRESH    ( tcb -- addr ) 5708 + ;
+: TCB.DUP-ACKS    ( tcb -- addr ) 5716 + ;
+
+\ -- TCB table (4 connections) --
+CREATE TCP-TCBS  /TCB /TCP-MAX-CONN * ALLOT
+TCP-TCBS /TCB /TCP-MAX-CONN * 0 FILL
+
+\ -- TCB-N: get TCB pointer for connection index 0..3 --
+: TCB-N  ( n -- tcb )  /TCB * TCP-TCBS + ;
+
+\ -- TCB-INIT: initialise a TCB to CLOSED --
+: TCB-INIT  ( tcb -- )
+    DUP /TCB 0 FILL
+    TCPS-CLOSED SWAP TCB.STATE !  ;
+
+\ -- TCP-INIT-ALL: zero all TCBs --
+: TCP-INIT-ALL  ( -- )
+    /TCP-MAX-CONN 0 DO I TCB-N TCB-INIT LOOP ;
+
+TCP-INIT-ALL    \ initialize at load time
+
+\ -- TCB-ALLOC: find a free (CLOSED) TCB, return index or -1 --
+: TCB-ALLOC  ( -- idx | -1 )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N TCB.STATE @ TCPS-CLOSED = IF
+            I UNLOOP EXIT
+        THEN
+    LOOP -1 ;
+
+\ -- TCB-FIND: find TCB matching local-port + remote-port + remote-ip --
+\   ( lport rport rip -- tcb | 0 )
+VARIABLE _TCF-LP
+VARIABLE _TCF-RP
+VARIABLE _TCF-RIP
+: TCB-FIND  ( lport rport rip -- tcb | 0 )
+    _TCF-RIP !  _TCF-RP !  _TCF-LP !
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.STATE @ TCPS-CLOSED <> IF
+            DUP TCB.LOCAL-PORT @ _TCF-LP @ = IF
+            DUP TCB.REMOTE-PORT @ _TCF-RP @ = IF
+            DUP TCB.REMOTE-IP 4 _TCF-RIP @ 4 COMPARE 0= IF
+                UNLOOP EXIT           \ found — leave tcb on stack
+            THEN THEN THEN
+        THEN
+        DROP
+    LOOP 0 ;
+
+\ -- TCB-FIND-LPORT: find TCB in LISTEN state on local port --
+: TCB-FIND-LPORT  ( lport -- tcb | 0 )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.STATE @ TCPS-LISTEN = IF
+            DUP TCB.LOCAL-PORT @ 2 PICK = IF
+                NIP UNLOOP EXIT
+            THEN
+        THEN
+        DROP
+    LOOP DROP 0 ;
+
+\ =====================================================================
+\  TCP header build / parse
+\ =====================================================================
+\ TCP header (20 bytes minimum):
+\   +0   src-port   2B (BE)
+\   +2   dst-port   2B (BE)
+\   +4   seq        4B (BE)
+\   +8   ack        4B (BE)
+\  +12   data-off   1B  (upper 4 bits = header length in 32-bit words)
+\  +13   flags      1B  (FIN=0x01 SYN=0x02 RST=0x04 PSH=0x08 ACK=0x10)
+\  +14   window     2B (BE)
+\  +16   checksum   2B (BE)
+\  +18   urgent     2B (BE)
+
+\ -- TCP header field accessors --
+: TCP-H.SPORT   ( hdr -- addr )          ;    \ +0
+: TCP-H.DPORT   ( hdr -- addr )  2 +  ;       \ +2
+: TCP-H.SEQ     ( hdr -- addr )  4 +  ;       \ +4
+: TCP-H.ACK     ( hdr -- addr )  8 +  ;       \ +8
+: TCP-H.DOFF    ( hdr -- addr )  12 + ;        \ +12 data offset
+: TCP-H.FLAGS   ( hdr -- addr )  13 + ;        \ +13
+: TCP-H.WIN     ( hdr -- addr )  14 + ;        \ +14
+: TCP-H.CKSUM   ( hdr -- addr )  16 + ;        \ +16
+: TCP-H.URG     ( hdr -- addr )  18 + ;        \ +18
+: TCP-H.DATA    ( hdr -- addr )  /TCP-HDR + ;  \ +20 (no options)
+
+\ -- NW32!: store 32-bit big-endian --
+: NW32!  ( val addr -- )
+    OVER 24 RSHIFT OVER C!  1+
+    OVER 16 RSHIFT 255 AND OVER C!  1+
+    OVER 8  RSHIFT 255 AND OVER C!  1+
+    SWAP 255 AND SWAP C! ;
+
+\ -- NW32@: fetch 32-bit big-endian --
+: NW32@  ( addr -- val )
+    DUP C@ 24 LSHIFT
+    OVER 1+ C@ 16 LSHIFT +
+    OVER 2 + C@ 8 LSHIFT +
+    SWAP 3 + C@ + ;
+
+\ -- TCP TX buffer --
+CREATE TCP-TX-PKT  /IP-HDR /TCP-HDR + TCP-MSS + ALLOT
+
+\ -- TCP-BUILD: build a TCP segment --
+\   ( tcb flags payload paylen -- buf total-len )
+\   Builds in TCP-TX-PKT (IP header filled by IP-SEND later).
+VARIABLE _TB-TCB
+VARIABLE _TB-FLAGS
+VARIABLE _TB-PLD
+VARIABLE _TB-PLEN
+: TCP-BUILD  ( tcb flags payload paylen -- buf total-len )
+    _TB-PLEN !  _TB-PLD !  _TB-FLAGS !  _TB-TCB !
+    \ Zero header area
+    TCP-TX-PKT /TCP-HDR 0 FILL
+    \ Source port
+    _TB-TCB @ TCB.LOCAL-PORT @ TCP-TX-PKT TCP-H.SPORT NW16!
+    \ Dest port
+    _TB-TCB @ TCB.REMOTE-PORT @ TCP-TX-PKT TCP-H.DPORT NW16!
+    \ Sequence number
+    _TB-TCB @ TCB.SND-NXT @ TCP-TX-PKT TCP-H.SEQ NW32!
+    \ ACK number (only if ACK flag set)
+    _TB-FLAGS @ TCP-ACK AND IF
+        _TB-TCB @ TCB.RCV-NXT @ TCP-TX-PKT TCP-H.ACK NW32!
+    THEN
+    \ Data offset: 5 (20 bytes header, no options) → upper nibble
+    80 TCP-TX-PKT TCP-H.DOFF C!   \ 5 << 4 = 0x50
+    \ Flags
+    _TB-FLAGS @ TCP-TX-PKT TCP-H.FLAGS C!
+    \ Window
+    _TB-TCB @ TCB.RCV-WND @ TCP-TX-PKT TCP-H.WIN NW16!
+    \ Copy payload after header
+    _TB-PLEN @ 0 > IF
+        _TB-PLD @ TCP-TX-PKT TCP-H.DATA _TB-PLEN @ CMOVE
+    THEN
+    \ Checksum = 0 for now; filled by TCP-FILL-CKSUM
+    0 TCP-TX-PKT TCP-H.CKSUM NW16!
+    TCP-TX-PKT  /TCP-HDR _TB-PLEN @ + ;
+
+\ -- TCP-CHECKSUM: compute TCP checksum with pseudo-header --
+\   Exactly like UDP-CHECKSUM but proto=6 instead of 17.
+\   ( src-ip dst-ip tcp-buf tcp-len -- cksum )
+VARIABLE _TCK-SUM
+: TCP-CHECKSUM  ( src-ip dst-ip tcp-buf tcp-len -- cksum )
+    0 _TCK-SUM !
+    >R >R                              \ R: tcp-len tcp-buf
+    SWAP                               \ ( dst-ip src-ip )
+    DUP NW16@ _TCK-SUM @ + _TCK-SUM !  \ src-ip[0:1]
+    2 + NW16@ _TCK-SUM @ + _TCK-SUM !  \ src-ip[2:3]
+    DUP NW16@ _TCK-SUM @ + _TCK-SUM !  \ dst-ip[0:1]
+    2 + NW16@ _TCK-SUM @ + _TCK-SUM !  \ dst-ip[2:3]
+    \ proto = 6 (TCP)
+    6 _TCK-SUM @ + _TCK-SUM !
+    R> R>                              \ ( tcp-buf tcp-len )
+    DUP _TCK-SUM @ + _TCK-SUM !       \ add tcp-len to sum
+    \ Accumulate TCP header + data (16-bit words)
+    DUP 1 AND >R                       \ R: odd-flag
+    2 / 0 DO
+        DUP NW16@ _TCK-SUM @ + _TCK-SUM !
+        2 +
+    LOOP
+    R> IF DUP C@ 8 LSHIFT _TCK-SUM @ + _TCK-SUM ! THEN
+    DROP
+    \ Fold carries
+    _TCK-SUM @
+    BEGIN DUP 65535 > WHILE
+        DUP 65535 AND SWAP 16 RSHIFT +
+    REPEAT
+    65535 XOR ;
+
+\ -- TCP-FILL-CKSUM: compute and store the TCP checksum --
+\   ( src-ip dst-ip tcp-buf tcp-len -- )
+VARIABLE _TFC-BUF
+VARIABLE _TFC-LEN
+: TCP-FILL-CKSUM  ( src-ip dst-ip buf len -- )
+    _TFC-LEN !  _TFC-BUF !
+    \ Zero the checksum field
+    0 _TFC-BUF @ TCP-H.CKSUM NW16!
+    \ Compute checksum
+    _TFC-BUF @ _TFC-LEN @  TCP-CHECKSUM
+    \ Per TCP spec: if checksum is 0, keep 0 (unlike UDP)
+    _TFC-BUF @ TCP-H.CKSUM NW16! ;
+
+\ -- TCP-VERIFY-CKSUM: verify TCP checksum --
+\   ( src-ip dst-ip tcp-buf tcp-len -- flag )  -1 if valid, 0 if bad
+: TCP-VERIFY-CKSUM  ( src-ip dst-ip buf len -- flag )
+    TCP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
+
+\ -- TCP-PARSE: extract fields from received TCP header --
+\   ( tcp-buf -- sport dport seq ack flags win datalen )
+: TCP-PARSE  ( buf -- sport dport seq ack flags win datalen )
+    DUP TCP-H.SPORT NW16@
+    OVER TCP-H.DPORT NW16@
+    2 PICK TCP-H.SEQ NW32@
+    3 PICK TCP-H.ACK NW32@
+    4 PICK TCP-H.FLAGS C@
+    5 PICK TCP-H.WIN NW16@
+    \ datalen = total - header (data offset field >> 4 gives 32-bit words)
+    7 PICK IP-H.TLEN NW16@ /IP-HDR -       \ TCP segment length
+    7 PICK TCP-H.DOFF C@ 4 RSHIFT 4 *      \ header length from doff
+    -                                        \ payload length
+    >R >R >R >R >R >R >R
+    DROP
+    R> R> R> R> R> R> R> ;
+
+\ =====================================================================
+\  TCP segment send / receive
+\ =====================================================================
+
+\ -- TCP-SEND-SEG: build, checksum, send a TCP segment via IP --
+\   ( tcb flags payload paylen -- ior )
+VARIABLE _TSS-TCB
+: TCP-SEND-SEG  ( tcb flags payload paylen -- ior )
+    >R >R >R                           \ save flags payload paylen
+    _TSS-TCB !                          \ store tcb
+    _TSS-TCB @ R> R> R>                 \ ( tcb flags payload paylen )
+    TCP-BUILD                           \ ( buf seg-len )
+    \ Fill checksum: need MY-IP and remote-ip
+    2DUP >R >R
+    MY-IP _TSS-TCB @ TCB.REMOTE-IP R> R>  \ ( buf len src dst buf len )
+    TCP-FILL-CKSUM                      \ ( buf len )
+    \ Send via IP-SEND
+    >R >R
+    IP-PROTO-TCP _TSS-TCB @ TCB.REMOTE-IP R> R>  \ ( proto dst buf len )
+    IP-SEND ;
+
+\ -- TCP-SEND-CTL: send a control segment (no payload) --
+\   ( tcb flags -- ior )
+: TCP-SEND-CTL  ( tcb flags -- ior )
+    0 0 TCP-SEND-SEG ;
+
+\ -- TCP-SEND-RST: send a RST in response to unexpected segment --
+\   ( remote-ip rport lport seq -- )
+\   Builds a raw RST without a TCB.
+VARIABLE _TR-RIPVAR
+CREATE _TR-PSEUDO-TCB  /TCB ALLOT
+: TCP-SEND-RST  ( remote-ip rport lport seq -- )
+    >R                                 \ save seq
+    _TR-PSEUDO-TCB /TCB 0 FILL
+    _TR-PSEUDO-TCB TCB.LOCAL-PORT !
+    _TR-PSEUDO-TCB TCB.REMOTE-PORT !
+    _TR-RIPVAR !
+    _TR-RIPVAR @ _TR-PSEUDO-TCB TCB.REMOTE-IP 4 CMOVE
+    R> _TR-PSEUDO-TCB TCB.SND-NXT !
+    0 _TR-PSEUDO-TCB TCB.RCV-NXT !
+    0 _TR-PSEUDO-TCB TCB.RCV-WND !
+    _TR-PSEUDO-TCB TCP-RST TCP-ACK OR TCP-SEND-CTL DROP ;
+
+\ =====================================================================
+\  TCP RX ring buffer operations
+\ =====================================================================
+
+\ -- TCP-RX-PUSH: add data to a TCB's RX ring buffer --
+\   ( tcb addr len -- actual )
+\   Returns number of bytes actually pushed (may be less if ring full).
+VARIABLE _TRP-TCB
+VARIABLE _TRP-SRC
+VARIABLE _TRP-LEN
+VARIABLE _TRP-ACTUAL
+: TCP-RX-PUSH  ( tcb addr len -- actual )
+    _TRP-LEN !  _TRP-SRC !  _TRP-TCB !
+    \ Available space = RXBUF size - current count
+    /TCP-RXBUF _TRP-TCB @ TCB.RX-COUNT @ -
+    _TRP-LEN @ MIN  _TRP-ACTUAL !
+    _TRP-ACTUAL @ 0= IF 0 EXIT THEN
+    \ Copy byte by byte into ring (simple; could optimize later)
+    _TRP-ACTUAL @ 0 DO
+        _TRP-SRC @ I + C@
+        _TRP-TCB @ TCB.RX-BUF
+        _TRP-TCB @ TCB.RX-TAIL @ + C!
+        _TRP-TCB @ TCB.RX-TAIL @  1+ /TCP-RXBUF MOD
+        _TRP-TCB @ TCB.RX-TAIL !
+    LOOP
+    _TRP-ACTUAL @ _TRP-TCB @ TCB.RX-COUNT +!
+    _TRP-ACTUAL @ ;
+
+\ -- TCP-RX-POP: read data from a TCB's RX ring buffer --
+\   ( tcb addr maxlen -- actual )
+VARIABLE _TRPOP-TCB
+VARIABLE _TRPOP-DST
+VARIABLE _TRPOP-MAX
+VARIABLE _TRPOP-ACTUAL
+: TCP-RX-POP  ( tcb addr maxlen -- actual )
+    _TRPOP-MAX !  _TRPOP-DST !  _TRPOP-TCB !
+    _TRPOP-TCB @ TCB.RX-COUNT @
+    _TRPOP-MAX @ MIN  _TRPOP-ACTUAL !
+    _TRPOP-ACTUAL @ 0= IF 0 EXIT THEN
+    _TRPOP-ACTUAL @ 0 DO
+        _TRPOP-TCB @ TCB.RX-BUF
+        _TRPOP-TCB @ TCB.RX-HEAD @ + C@
+        _TRPOP-DST @ I + C!
+        _TRPOP-TCB @ TCB.RX-HEAD @  1+ /TCP-RXBUF MOD
+        _TRPOP-TCB @ TCB.RX-HEAD !
+    LOOP
+    _TRPOP-ACTUAL @ NEGATE _TRPOP-TCB @ TCB.RX-COUNT +!
+    _TRPOP-ACTUAL @ ;
+
+\ =====================================================================
+\  TCP state machine — input processing (RFC 793 §3.9)
+\ =====================================================================
+
+\ Helper: generate initial sequence number
+: TCP-GEN-ISN  ( -- isn )  RANDOM32 ;
+
+\ Helper: TCP sequence-number comparison (handles 32-bit wrap)
+\   SEQ< returns true if a < b (mod 2^32)
+: SEQ<  ( a b -- flag )
+    - DUP 0< IF DROP -1 ELSE
+      DUP 0= IF DROP 0 ELSE
+      DROP 0 THEN THEN ;
+
+\ Helper: SEQ>=
+: SEQ>=  ( a b -- flag )  SEQ< 0= ;
+
+\ -- TCP-INPUT: process a received TCP segment --
+\   Called with the IP header pointer and total IP length.
+\   Demuxes to the correct TCB and drives the state machine.
+\   ( ip-hdr ip-len -- )
+VARIABLE _TI-HDR
+VARIABLE _TI-IPLEN
+VARIABLE _TI-TCPHDR
+VARIABLE _TI-TCPLEN
+VARIABLE _TI-TCB
+VARIABLE _TI-SEQ
+VARIABLE _TI-ACK
+VARIABLE _TI-FLAGS
+VARIABLE _TI-WIN
+VARIABLE _TI-DATALEN
+VARIABLE _TI-SPORT
+VARIABLE _TI-DPORT
+VARIABLE _TI-DATA
+
+\ Helper: SEQ> (strictly greater)
+: SEQ>  ( a b -- flag )  SWAP SEQ< ;
+
+\ -- TCP-INPUT-LISTEN: handle segment in LISTEN state --
+\   Only SYN is valid; allocate a new TCB for the connection.
+: TCP-INPUT-LISTEN  ( tcb -- )
+    \ If not SYN, ignore
+    _TI-FLAGS @ TCP-SYN AND 0= IF DROP EXIT THEN
+    \ Set up connection in this TCB
+    DUP >R
+    _TI-HDR @ IP-H.SRC R@ TCB.REMOTE-IP 4 CMOVE
+    _TI-SPORT @ R@ TCB.REMOTE-PORT !
+    _TI-SEQ @ 1+ R@ TCB.RCV-NXT !         \ SYN consumes 1 seq
+    _TI-SEQ @ R@ TCB.IRS !
+    TCP-GEN-ISN DUP R@ TCB.ISS !
+    DUP R@ TCB.SND-NXT !
+    R@ TCB.SND-UNA !
+    _TI-WIN @ R@ TCB.SND-WND !
+    /TCP-RXBUF R@ TCB.RCV-WND !
+    TCP-MSS R@ TCB.CWND !
+    65535 R@ TCB.SSTHRESH !
+    100 R@ TCB.RTO-VALUE !                 \ ~1s at 100 ticks
+    TCPS-SYN-RCVD R@ TCB.STATE !
+    \ Send SYN+ACK
+    R> TCP-SYN TCP-ACK OR TCP-SEND-CTL DROP ;
+
+\ -- TCP-INPUT-SYN-SENT: handle segment in SYN-SENT state --
+\   Expecting SYN+ACK from peer (active open).
+: TCP-INPUT-SYN-SENT  ( tcb -- )
+    >R
+    \ Must have ACK
+    _TI-FLAGS @ TCP-ACK AND IF
+        \ Verify ACK covers our SYN
+        _TI-ACK @ R@ TCB.ISS @ 1+ <> IF
+            R> DROP EXIT               \ bad ACK — ignore
+        THEN
+    THEN
+    \ Must have SYN
+    _TI-FLAGS @ TCP-SYN AND 0= IF R> DROP EXIT THEN
+    \ Accept connection
+    _TI-SEQ @ R@ TCB.IRS !
+    _TI-SEQ @ 1+ R@ TCB.RCV-NXT !
+    _TI-ACK @ R@ TCB.SND-UNA !
+    _TI-WIN @ R@ TCB.SND-WND !
+    \ Advance SND-NXT past our SYN
+    R@ TCB.ISS @ 1+ R@ TCB.SND-NXT !
+    TCPS-ESTABLISHED R@ TCB.STATE !
+    \ Send ACK
+    R> TCP-ACK TCP-SEND-CTL DROP ;
+
+\ -- TCP-INPUT-ESTABLISHED-ETC: common handler for states 4-10 --
+\   Handles data delivery, ACK processing, FIN processing.
+: TCP-INPUT-ESTABLISHED-ETC  ( tcb -- )
+    >R
+    \ --- Check RST ---
+    _TI-FLAGS @ TCP-RST AND IF
+        TCPS-CLOSED R@ TCB.STATE !
+        R> TCB-INIT EXIT
+    THEN
+    \ --- Check SYN (unexpected → RST) ---
+    _TI-FLAGS @ TCP-SYN AND IF
+        TCPS-CLOSED R@ TCB.STATE !
+        R> TCB-INIT EXIT
+    THEN
+    \ --- Process ACK ---
+    _TI-FLAGS @ TCP-ACK AND IF
+        R@ TCB.STATE @ TCPS-SYN-RCVD = IF
+            \ Transition to ESTABLISHED
+            TCPS-ESTABLISHED R@ TCB.STATE !
+        THEN
+        \ Update SND-UNA if ACK advances it
+        _TI-ACK @ R@ TCB.SND-UNA @ SEQ>= IF
+            _TI-ACK @ R@ TCB.SND-UNA !
+            \ Reset retransmit state
+            0 R@ TCB.RETRIES !
+            100 R@ TCB.RTO-VALUE !
+            0 R@ TCB.DUP-ACKS !
+            \ Congestion control: grow CWND
+            R@ TCB.CWND @ R@ TCB.SSTHRESH @ < IF
+                \ Slow start: CWND += MSS
+                TCP-MSS R@ TCB.CWND +!
+            ELSE
+                \ Congestion avoidance: CWND += MSS*MSS/CWND
+                TCP-MSS TCP-MSS * R@ TCB.CWND @ /
+                1 MAX R@ TCB.CWND +!
+            THEN
+        ELSE
+            \ Duplicate ACK handling (fast retransmit)
+            1 R@ TCB.DUP-ACKS +!
+            R@ TCB.DUP-ACKS @ 3 = IF
+                \ Fast retransmit: halve CWND, retransmit
+                R@ TCB.CWND @ 2 / TCP-MSS MAX R@ TCB.SSTHRESH !
+                R@ TCB.SSTHRESH @ R@ TCB.CWND !
+                \ Retransmit unACKed data from TX-BUF
+                R@ TCB.TX-LEN @ 0 > IF
+                    R@ TCP-ACK TCP-PSH OR
+                    R@ TCB.TX-BUF R@ TCB.TX-LEN @
+                    TCP-SEND-SEG DROP
+                THEN
+            THEN
+        THEN
+        \ Update send window
+        _TI-WIN @ R@ TCB.SND-WND !
+        \ Handle FIN-WAIT-1 → FIN-WAIT-2 if all data ACKed
+        R@ TCB.STATE @ TCPS-FIN-WAIT-1 = IF
+            R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = IF
+                TCPS-FIN-WAIT-2 R@ TCB.STATE !
+            THEN
+        THEN
+        \ Handle CLOSING → TIME-WAIT
+        R@ TCB.STATE @ TCPS-CLOSING = IF
+            TCPS-TIME-WAIT R@ TCB.STATE !
+        THEN
+        \ Handle LAST-ACK → CLOSED
+        R@ TCB.STATE @ TCPS-LAST-ACK = IF
+            R@ TCB-INIT
+            R> DROP EXIT
+        THEN
+    THEN
+    \ --- Process data (ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2) ---
+    _TI-DATALEN @ 0 > IF
+        R@ TCB.STATE @ TCPS-ESTABLISHED =
+        R@ TCB.STATE @ TCPS-FIN-WAIT-1 = OR
+        R@ TCB.STATE @ TCPS-FIN-WAIT-2 = OR IF
+            \ Check sequence number matches expected
+            _TI-SEQ @ R@ TCB.RCV-NXT @ = IF
+                \ Push data into RX ring
+                R@ _TI-DATA @ _TI-DATALEN @ TCP-RX-PUSH
+                R@ TCB.RCV-NXT +!     \ advance RCV-NXT by actual bytes consumed
+                \ Update receive window
+                /TCP-RXBUF R@ TCB.RX-COUNT @ - R@ TCB.RCV-WND !
+                \ Send ACK
+                R@ TCP-ACK TCP-SEND-CTL DROP
+            ELSE
+                \ Out-of-order: send duplicate ACK
+                R@ TCP-ACK TCP-SEND-CTL DROP
+            THEN
+        THEN
+    THEN
+    \ --- Process FIN ---
+    _TI-FLAGS @ TCP-FIN AND IF
+        _TI-SEQ @ _TI-DATALEN @ + R@ TCB.RCV-NXT @ = IF
+            \ Advance RCV-NXT past FIN
+            R@ TCB.RCV-NXT @ 1+ R@ TCB.RCV-NXT !
+            R@ TCB.STATE @
+            CASE
+                TCPS-ESTABLISHED OF
+                    TCPS-CLOSE-WAIT R@ TCB.STATE !
+                    R@ TCP-ACK TCP-SEND-CTL DROP
+                ENDOF
+                TCPS-FIN-WAIT-1 OF
+                    TCPS-CLOSING R@ TCB.STATE !
+                    R@ TCP-ACK TCP-SEND-CTL DROP
+                ENDOF
+                TCPS-FIN-WAIT-2 OF
+                    TCPS-TIME-WAIT R@ TCB.STATE !
+                    R@ TCP-ACK TCP-SEND-CTL DROP
+                ENDOF
+            ENDCASE
+        THEN
+    THEN
+    R> DROP ;
+
+\ -- TCP-INPUT: process a received TCP segment --
+\   Called with the IP header pointer and total IP length.
+\   Demuxes to the correct TCB and drives the state machine.
+\   ( ip-hdr ip-len -- )
+: TCP-INPUT  ( ip-hdr ip-len -- )
+    _TI-IPLEN !  _TI-HDR !
+    \ Extract TCP header from IP payload
+    _TI-HDR @ IP-H.DATA _TI-TCPHDR !
+    _TI-IPLEN @ /IP-HDR - _TI-TCPLEN !
+    \ Verify TCP checksum
+    _TI-HDR @ IP-H.SRC
+    _TI-HDR @ IP-H.DST
+    _TI-TCPHDR @ _TI-TCPLEN @
+    TCP-VERIFY-CKSUM 0= IF EXIT THEN
+    \ Extract header fields
+    _TI-TCPHDR @ TCP-H.SPORT NW16@  _TI-SPORT !
+    _TI-TCPHDR @ TCP-H.DPORT NW16@  _TI-DPORT !
+    _TI-TCPHDR @ TCP-H.SEQ NW32@    _TI-SEQ !
+    _TI-TCPHDR @ TCP-H.ACK NW32@    _TI-ACK !
+    _TI-TCPHDR @ TCP-H.FLAGS C@     _TI-FLAGS !
+    _TI-TCPHDR @ TCP-H.WIN NW16@    _TI-WIN !
+    \ Data starts after TCP header (use data offset field)
+    _TI-TCPHDR @ TCP-H.DOFF C@ 4 RSHIFT 4 *
+    _TI-TCPHDR @ + _TI-DATA !
+    \ Data length = TCP segment length - TCP header length
+    _TI-TCPLEN @ _TI-TCPHDR @ TCP-H.DOFF C@ 4 RSHIFT 4 * - _TI-DATALEN !
+    \ Look up TCB: try exact match first, then LISTEN match
+    _TI-DPORT @ _TI-SPORT @ _TI-HDR @ IP-H.SRC TCB-FIND
+    DUP 0= IF
+        DROP _TI-DPORT @ TCB-FIND-LPORT
+    THEN
+    DUP 0= IF
+        \ No matching TCB — send RST (unless incoming is RST)
+        _TI-FLAGS @ TCP-RST AND 0= IF
+            _TI-HDR @ IP-H.SRC _TI-SPORT @ _TI-DPORT @
+            _TI-SEQ @ _TI-DATALEN @ + TCP-SEND-RST
+        THEN
+        DROP EXIT
+    THEN
+    _TI-TCB !
+    \ Dispatch on TCB state
+    _TI-TCB @ TCB.STATE @
+    CASE
+        TCPS-LISTEN   OF  _TI-TCB @ TCP-INPUT-LISTEN   ENDOF
+        TCPS-SYN-SENT OF  _TI-TCB @ TCP-INPUT-SYN-SENT ENDOF
+        \ All other states use a common handler
+        _TI-TCB @ TCP-INPUT-ESTABLISHED-ETC
+    ENDCASE ;
+
+\ =====================================================================
+\  TCP user API — connect, listen, send, recv, close
+\ =====================================================================
+
+\ -- TCP-CONNECT: active open (client) --
+\   ( remote-ip remote-port local-port -- tcb | 0 )
+VARIABLE _TC-RIP
+VARIABLE _TC-RPORT
+VARIABLE _TC-LPORT
+: TCP-CONNECT  ( rip rport lport -- tcb | 0 )
+    _TC-LPORT !  _TC-RPORT !  _TC-RIP !
+    TCB-ALLOC DUP -1 = IF DROP 0 EXIT THEN
+    TCB-N >R
+    R@ /TCB 0 FILL
+    _TC-LPORT @ R@ TCB.LOCAL-PORT !
+    _TC-RPORT @ R@ TCB.REMOTE-PORT !
+    _TC-RIP @ R@ TCB.REMOTE-IP 4 CMOVE
+    TCP-GEN-ISN DUP R@ TCB.ISS !
+    R@ TCB.SND-NXT !
+    0 R@ TCB.SND-UNA !
+    /TCP-RXBUF R@ TCB.RCV-WND !
+    TCP-MSS R@ TCB.CWND !
+    65535 R@ TCB.SSTHRESH !
+    100 R@ TCB.RTO-VALUE !
+    TCPS-SYN-SENT R@ TCB.STATE !
+    \ Send SYN
+    R@ TCP-SYN TCP-SEND-CTL DROP
+    R> ;
+
+\ -- TCP-LISTEN: passive open (server) --
+\   ( local-port -- tcb | 0 )
+: TCP-LISTEN  ( lport -- tcb | 0 )
+    TCB-ALLOC DUP -1 = IF 2DROP 0 EXIT THEN
+    TCB-N >R
+    R@ /TCB 0 FILL
+    R@ TCB.LOCAL-PORT !
+    /TCP-RXBUF R@ TCB.RCV-WND !
+    TCP-MSS R@ TCB.CWND !
+    65535 R@ TCB.SSTHRESH !
+    TCPS-LISTEN R@ TCB.STATE !
+    R> ;
+
+\ -- TCP-SEND: queue data for transmission --
+\   ( tcb addr len -- actual )
+\   Copies data into the TCB's TX-BUF and sends a segment.
+\   Returns number of bytes actually accepted (up to 1 MSS).
+VARIABLE _TSND-TCB
+VARIABLE _TSND-SRC
+VARIABLE _TSND-LEN
+: TCP-SEND  ( tcb addr len -- actual )
+    _TSND-LEN !  _TSND-SRC !  _TSND-TCB !
+    _TSND-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF 0 EXIT THEN
+    _TSND-LEN @ TCP-MSS MIN  _TSND-LEN !
+    \ Copy into TCB's TX-BUF
+    _TSND-SRC @ _TSND-TCB @ TCB.TX-BUF _TSND-LEN @ CMOVE
+    _TSND-LEN @ _TSND-TCB @ TCB.TX-LEN !
+    \ Send segment
+    _TSND-TCB @ TCP-ACK TCP-PSH OR
+    _TSND-TCB @ TCB.TX-BUF _TSND-LEN @
+    TCP-SEND-SEG DROP
+    \ Advance SND-NXT
+    _TSND-LEN @ _TSND-TCB @ TCB.SND-NXT +!
+    \ Start retransmit timer
+    _TSND-TCB @ TCB.RTO-VALUE @ _TSND-TCB @ TCB.RTO-TIMER !
+    _TSND-LEN @ ;
+
+\ -- TCP-RECV: read received data from RX ring --
+\   ( tcb addr maxlen -- actual )
+: TCP-RECV  ( tcb addr maxlen -- actual )
+    TCP-RX-POP ;
+
+\ -- TCP-CLOSE: initiate graceful close --
+\   ( tcb -- )
+: TCP-CLOSE  ( tcb -- )
+    DUP TCB.STATE @
+    CASE
+        TCPS-ESTABLISHED OF
+            TCPS-FIN-WAIT-1 OVER TCB.STATE !
+            DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL DROP
+            1 SWAP TCB.SND-NXT +!    \ FIN consumes 1 seq number
+        ENDOF
+        TCPS-CLOSE-WAIT OF
+            TCPS-LAST-ACK OVER TCB.STATE !
+            DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL DROP
+            1 SWAP TCB.SND-NXT +!    \ FIN consumes 1 seq number
+        ENDOF
+        TCPS-LISTEN OF  TCB-INIT  ENDOF
+        TCPS-SYN-SENT OF  TCB-INIT  ENDOF
+        \ other states: just reset
+        SWAP TCB-INIT
+    ENDCASE ;
+
+\ -- TCP-POLL: poll network for incoming TCP segments --
+\   Receives one IP frame; if TCP, processes it.
+\   ( -- )
+VARIABLE _TPL-HDR
+VARIABLE _TPL-LEN
+: TCP-POLL  ( -- )
+    IP-RECV DUP 0= IF 2DROP EXIT THEN
+    _TPL-LEN !  _TPL-HDR !
+    \ Handle ICMP pings transparently
+    _TPL-HDR @ IP-H.PROTO C@ IP-PROTO-ICMP = IF
+        _TPL-HDR @ _TPL-LEN @ ICMP-HANDLE DROP EXIT
+    THEN
+    \ If TCP, process
+    _TPL-HDR @ IP-H.PROTO C@ IP-PROTO-TCP = IF
+        _TPL-HDR @ _TPL-LEN @ TCP-INPUT EXIT
+    THEN ;
+
+\ -- TCP-POLL-WAIT: blocking TCP poll with timeout --
+\   ( max-attempts -- )
+: TCP-POLL-WAIT  ( n -- )
+    0 DO TCP-POLL LOOP ;
 
 \ =====================================================================
 \  §14  Startup

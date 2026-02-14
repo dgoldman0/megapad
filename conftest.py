@@ -23,7 +23,11 @@ STATUS_FILE = "/tmp/megapad_test_status.json"
 
 
 def pytest_configure(config):
-    """Register plugins and enforce Makefile usage."""
+    """Register plugins, markers, and enforce Makefile usage."""
+    # Register custom markers
+    config.addinivalue_line("markers",
+        "realnet: tests requiring a real TAP network device (deselected by default)")
+
     # --- Guard against raw `python -m pytest` without Make ---
     # All Makefile targets set MP64_VIA_MAKE=1.  Direct invocation
     # is blocked unless MP64_RAW_PYTEST=1 is explicitly set.

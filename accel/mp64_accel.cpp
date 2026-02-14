@@ -1809,6 +1809,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("perf_extmem", &CPUState::perf_extmem)
         .def_readwrite("bist_status", &CPUState::bist_status)
         .def_readwrite("bist_fail_addr", &CPUState::bist_fail_addr)
+        .def_readwrite("bist_fail_data", &CPUState::bist_fail_data)
         .def_readwrite("tile_selftest", &CPUState::tile_selftest)
         .def_readwrite("tile_st_detail", &CPUState::tile_st_detail)
         .def_readwrite("icache_enabled", &CPUState::icache_enabled)
