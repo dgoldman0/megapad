@@ -4,16 +4,15 @@ Integration tests for the Megapad-64 system emulator.
 
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
 
-WARNING: These tests are extremely slow under CPython (~40 min).
-Use PyPy with xdist for practical runtimes.  NEVER run via plain
-`python -m pytest` — always use the Makefile targets below.
+The C++ accelerator is the default backend (~50× faster than CPython).
+Running `python -m pytest` directly will fail — use the Makefile.
 
 ═══════════════════════════════════════════════════════════════
   TEST WORKFLOW — READ THIS BEFORE RUNNING TESTS
 ═══════════════════════════════════════════════════════════════
 
   Foreground (blocks until done):
-    make test                      # full suite, PyPy + 8 workers (~4 min)
+    make test                      # full suite, C++ accel + 8 workers (~1 min)
     make test-seq                  # sequential, good for debugging
     make test-one K=TestFoo        # single class or test name
     make test-one K="test_a or test_b"  # multiple tests by name
@@ -34,10 +33,9 @@ Use PyPy with xdist for practical runtimes.  NEVER run via plain
     and hang detection (warns if no progress for >2 min).
 
   NEVER:
-    - Run `python -m pytest` directly (wrong interpreter, no PyPy)
+    - Run `python -m pytest` directly (no accel, will be blocked)
     - Pipe test output through tail/grep (use test-status instead)
     - Redirect to file and wait (use test-bg + test-status instead)
-    - Run foreground tests and lose the terminal for 10 minutes
 
   When developing new tests:
     1. Write tests, then: make test-one K=TestNewClass
@@ -956,7 +954,7 @@ class TestBIOS(unittest.TestCase):
             path = f.name
             fs.save(path)
         try:
-            sys, buf = self._boot_bios(ram_kib=512, storage_image=path)
+            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
             text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=200_000_000)
@@ -2001,11 +1999,12 @@ class TestAssemblerBranchRange(unittest.TestCase):
 KDOS_PATH = os.path.join(os.path.dirname(__file__), "kdos.f")
 
 
-class TestKDOS(unittest.TestCase):
-    """Integration tests for KDOS — Kernel Dashboard OS.
+class _KDOSTestBase(unittest.TestCase):
+    """Base class for KDOS tests — provides snapshot, helpers, and _run_kdos.
 
-    Loads kdos.f via UART injection, then sends additional commands
-    and checks output.
+    Subclasses that only need the KDOS test harness (without re-running
+    the 229 base KDOS tests) should inherit from this class, NOT from
+    TestKDOS.  Pytest ignores classes whose name starts with underscore.
     """
 
     # Class-level cache: snapshot of system state after KDOS loads.
@@ -2061,7 +2060,7 @@ class TestKDOS(unittest.TestCase):
                 cls._kdos_lines.append(line)
 
         # Boot BIOS and load KDOS fully
-        sys_obj = make_system(ram_kib=512)
+        sys_obj = make_system(ram_kib=1024)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
@@ -2097,7 +2096,7 @@ class TestKDOS(unittest.TestCase):
         self.bios_code = self.__class__._bios_code
         self.kdos_lines = self.__class__._kdos_lines
 
-    def _boot_bios(self, ram_kib=512, storage_image=None):
+    def _boot_bios(self, ram_kib=1024, storage_image=None):
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
@@ -2155,7 +2154,7 @@ class TestKDOS(unittest.TestCase):
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
-        sys = make_system(ram_kib=512, storage_image=storage_image)
+        sys = make_system(ram_kib=1024, storage_image=storage_image)
         buf = capture_uart(sys)
 
         # Restore memory (BIOS + KDOS already compiled)
@@ -2193,6 +2192,33 @@ class TestKDOS(unittest.TestCase):
             steps += max(batch, 1)
 
         return uart_text(buf)
+
+    # ------------------------------------------------------------------
+    #  MP64FS helpers (shared by Filesystem / FileCrypto subclasses)
+    # ------------------------------------------------------------------
+
+    def _make_formatted_image(self):
+        """Create a temp formatted MP64FS image, return path."""
+        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        format_image(f.name)
+        f.close()
+        return f.name
+
+    def _make_image_with_file(self, name="readme", data=b"Hello MP64!",
+                               ftype=2):
+        """Create a formatted image with one pre-injected file."""
+        path = self._make_formatted_image()
+        du_inject_file(path, name, data, ftype=ftype)
+        return path
+
+
+class TestKDOS(_KDOSTestBase):
+    """Integration tests for KDOS — Kernel Dashboard OS.
+
+    All 229 base KDOS tests live here.  Subsystem test classes
+    (Allocator, CRC, AES, etc.) inherit from _KDOSTestBase instead
+    to avoid re-running these tests.
+    """
 
     # -- Loading --
 
@@ -4309,20 +4335,6 @@ class TestKDOS(unittest.TestCase):
     #  MP64FS: Forth-side integration (KDOS + formatted disk image)
     # ------------------------------------------------------------------
 
-    def _make_formatted_image(self):
-        """Create a temp formatted MP64FS image, return path."""
-        f = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
-        format_image(f.name)
-        f.close()
-        return f.name
-
-    def _make_image_with_file(self, name="readme", data=b"Hello MP64!",
-                               ftype=2):
-        """Create a formatted image with one pre-injected file."""
-        path = self._make_formatted_image()
-        du_inject_file(path, name, data, ftype=ftype)
-        return path
-
     def test_fs_load(self):
         """FS-LOAD reads MP64FS superblock and prints confirmation."""
         path = self._make_formatted_image()
@@ -5320,7 +5332,7 @@ class TestBIOSHardening(unittest.TestCase):
 #  KDOS Memory Allocator tests
 # ---------------------------------------------------------------------------
 
-class TestKDOSAllocator(TestKDOS):
+class TestKDOSAllocator(_KDOSTestBase):
     """Tests for the ALLOCATE / FREE / RESIZE heap allocator."""
 
     def test_allocate_basic(self):
@@ -5405,9 +5417,9 @@ class TestKDOSAllocator(TestKDOS):
         self.assertIn("bytes", text)
 
     def test_mem_size(self):
-        """MEM-SIZE should return 512 KiB = 524288 bytes."""
+        """MEM-SIZE should return 1 MiB = 1048576 bytes."""
         text = self._run_kdos(["MEM-SIZE ."])
-        self.assertIn("524288 ", text)
+        self.assertIn("1048576 ", text)
 
     def test_allocate_write_read(self):
         """Can write to and read from allocated memory."""
@@ -5453,7 +5465,7 @@ class TestKDOSAllocator(TestKDOS):
 #  KDOS CATCH/THROW tests
 # ---------------------------------------------------------------------------
 
-class TestKDOSExceptions(TestKDOS):
+class TestKDOSExceptions(_KDOSTestBase):
     """Tests for CATCH / THROW exception handling."""
 
     def test_catch_no_throw(self):
@@ -5530,7 +5542,7 @@ class TestKDOSExceptions(TestKDOS):
                         f"RP@ should return positive address, got {nums}")
 
 
-class TestKDOSCRC(TestKDOS):
+class TestKDOSCRC(_KDOSTestBase):
     """Tests for §1.3 CRC convenience words (CRC-BUF, CRC32-BUF, etc.)."""
 
     def test_crc32_8_bytes(self):
@@ -5616,7 +5628,7 @@ class TestKDOSCRC(TestKDOS):
         self.assertIn("4120547386 ", text)
 
 
-class TestKDOSDiagnostics(TestKDOS):
+class TestKDOSDiagnostics(_KDOSTestBase):
     """Tests for §1.4 Hardware Diagnostics."""
 
     def test_perf_display(self):
@@ -5675,7 +5687,7 @@ class TestKDOSDiagnostics(TestKDOS):
         self.assertIn("Cycles:", text)
 
 
-class TestKDOSAES(TestKDOS):
+class TestKDOSAES(_KDOSTestBase):
     """Tests for §1.5 AES-256-GCM encryption."""
 
     # Reference: key=0x00..0x1F (32 bytes), IV=0x00..0x0B (12 bytes)
@@ -5882,7 +5894,7 @@ class TestKDOSAES(TestKDOS):
         self.assertIn("BLK1=193 ", text)
 
 
-class TestKDOSSHA3(TestKDOS):
+class TestKDOSSHA3(_KDOSTestBase):
     """Tests for §1.6 SHA-3 (Keccak-256) hashing."""
 
     # Reference vectors (hashlib.sha3_256):
@@ -6037,7 +6049,7 @@ class TestKDOSSHA3(TestKDOS):
         self.assertIn("H3=159 ", text)
 
 
-class TestKDOSCrypto(TestKDOS):
+class TestKDOSCrypto(_KDOSTestBase):
     """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
 
     # HMAC-SHA3-256 reference (key=0x00..0x1F, msg="abc"):
@@ -6188,7 +6200,7 @@ class TestKDOSCrypto(TestKDOS):
         self.assertIn("VD=-1 ", text)
 
 
-class TestKDOSHardening(TestKDOS):
+class TestKDOSHardening(_KDOSTestBase):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 
     # -- SCREENS TUI rendering --
@@ -6313,7 +6325,7 @@ class TestKDOSHardening(TestKDOS):
         return uart_text(buf)
 
 
-class TestKDOSFilesystem(TestKDOS):
+class TestKDOSFilesystem(_KDOSTestBase):
     """Tests for the new KDOS filesystem utility words."""
 
     def test_cat_prints_file(self):
@@ -6496,7 +6508,7 @@ class TestKDOSFilesystem(TestKDOS):
 #  Filesystem Encryption Tests
 # ---------------------------------------------------------------------------
 
-class TestKDOSFileCrypto(TestKDOS):
+class TestKDOSFileCrypto(_KDOSTestBase):
     """Tests for §7.6.1 Filesystem Encryption — FENCRYPT, FDECRYPT."""
 
     _FS_KEY_SETUP = [
@@ -6656,7 +6668,7 @@ class TestKDOSFileCrypto(TestKDOS):
 #  Pipeline Bundle Tests
 # ---------------------------------------------------------------------------
 
-class TestPipelineBundles(TestKDOS):
+class TestPipelineBundles(_KDOSTestBase):
     """Tests for §15 Pipeline Bundles — declarative config format."""
 
     def test_bdl_begin_end(self):
@@ -7246,7 +7258,7 @@ class TestKDOSMulticore(unittest.TestCase):
 #  KDOS network stack tests — §16 Ethernet Framing
 # ---------------------------------------------------------------------------
 
-class TestKDOSNetStack(TestKDOS):
+class TestKDOSNetStack(_KDOSTestBase):
     """Tests for §16 Network Stack — Ethernet framing constants and layout."""
 
     # --- 9a: Constants and frame buffer layout ---

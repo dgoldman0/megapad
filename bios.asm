@@ -29,7 +29,7 @@
 ;    R14 = DSP (data stack pointer, grows downward)
 ;    R15 = RSP (return/call stack, grows downward)
 ;
-;  Memory map (256 KiB default)
+;  Memory map (1 MiB default)
 ;  ----------------------------
 ;    0x00000 – ~BIOS end   BIOS code + dictionary + strings
 ;    dict_free  onward     User dictionary (HERE grows up)
@@ -1022,11 +1022,13 @@ w_sp_store:
     ret.l
 
 ; RP@ ( -- addr )  push current return stack pointer
-;   Adjusts +8 to compensate for call.l overhead: the caller wants
-;   the RSP as it was *before* the call.l into RP@ pushed a return addr.
+;   Adjusts +16 to compensate for the double call.l overhead:
+;   the dictionary trampoline does `ldi64 r11, w_rp_fetch; call.l r11`
+;   and the caller's compiled code does `ldi64 r11, xt; call.l r11`,
+;   so two return addresses sit on r15 before we read it.
 w_rp_fetch:
     mov r1, r15
-    addi r1, 8                ; compensate for call.l
+    addi r1, 16               ; compensate for 2× call.l (trampoline + caller)
     subi r14, 8
     str r14, r1
     ret.l
@@ -4409,8 +4411,20 @@ w_disk_write:
 
 ; disk_read_sectors: internal helper — DMA read from disk.
 ;   R1 = start sector (32-bit), R9 = DMA dest addr, R12 = sector count
-;   Clobbers: R7, R11
+;   Clobbers: R7, R11, R13
+;   Handles transfers > 255 sectors via multi-batch loop (hardware
+;   SEC_COUNT register is 1 byte, max 255 per command).
 disk_read_sectors:
+disk_read_next_batch:
+    cmpi r12, 0
+    lbreq disk_read_all_done
+    ; Batch size = min(R12, 255)
+    mov r13, r12              ; R13 = total remaining
+    ldi r7, 255
+    cmp r12, r7
+    brle disk_rd_clamp_ok
+    ldi r12, 255              ; clamp to hardware max
+disk_rd_clamp_ok:
     ; --- Set sector number (4 bytes LE) ---
     ldi64 r11, 0xFFFF_FF00_0000_0202
     mov r7, r1
@@ -4464,6 +4478,15 @@ disk_read_sectors:
     ldi64 r11, 0xFFFF_FF00_0000_0200
     ldi r7, 0x01
     st.b r11, r7
+    ; --- Advance for next batch ---
+    add r1, r12               ; sector_num += batch
+    mov r7, r12
+    lsli r7, 9               ; batch * 512
+    add r9, r7               ; DMA addr += batch * 512
+    sub r13, r12              ; remaining -= batch
+    mov r12, r13              ; R12 = new remaining
+    lbr disk_read_next_batch
+disk_read_all_done:
     ret.l
 
 ; FSLOAD ( "name" -- )  Load a file from MP64FS and EVALUATE its contents.

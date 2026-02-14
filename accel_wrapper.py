@@ -466,6 +466,7 @@ def {_attr}(self, v):
                     return 1, 0
                 elif msg.startswith("TRAP:"):
                     self._handle_trap(msg)
+                    return 1, 0  # trap handled, continue
                 else:
                     raise
 

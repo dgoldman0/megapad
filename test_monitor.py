@@ -59,10 +59,15 @@ def display(status, *, show_failures_only=False):
     alive = _pid_alive(pid)
 
     # Header
-    if status["finished"]:
+    if status["finished"] and not alive:
+        # Truly done — process exited
         ec = status["exit_code"]
         color = GREEN if ec == 0 else RED
         state = f"{color}{BOLD}FINISHED (exit {ec}){RESET}"
+    elif status["finished"] and alive:
+        # JSON says finished but process still alive — stale/worker race
+        ec = status["exit_code"]
+        state = f"{YELLOW}{BOLD}FINISHING (exit {ec}, pid {pid} alive){RESET}"
     elif alive:
         state = f"{CYAN}{BOLD}RUNNING{RESET}"
     else:

@@ -1,26 +1,31 @@
 # Megapad-64 — Build & Test
 # ==========================
 #
-# PyPy gives ~5× speedup on the CPU emulator loop; xdist adds parallelism.
+# The C++ accelerator (~50× faster than CPython, ~10× faster than PyPy)
+# is the DEFAULT test backend.  All targets auto-build it.
 #
-#   make test           PyPy + 8 xdist workers  (~4 min for full suite)
-#   make test-seq       PyPy sequential          (~8 min)
-#   make test-cpython   CPython fallback         (~40 min)
-#   make test-quick     PyPy, BIOS+CPU only      (~6 sec)
-#   make test-one K=X   Single test/class under PyPy (foreground)
+# NEVER run `python -m pytest` directly — conftest.py will block it.
+# Always use these Makefile targets.
 #
-# Background + Live Monitoring (preferred for long runs):
-#   make test-bg        Launch full suite in background
-#   make test-bg K=X    Launch subset in background
+#   make test           Background + live dashboard   (DEFAULT, ~1 min)
+#   make test K=X       Background subset
 #   make test-status    One-shot progress dashboard
 #   make test-watch     Auto-refresh dashboard every 5s
 #   make test-failures  Show only failures
 #   make test-kill      Kill stuck background run
 #
+# Foreground (for debugging / CI):
+#   make test-fg        C++ accel + 8 xdist workers, foreground
+#   make test-seq       C++ accel sequential          (~3 min)
+#   make test-one K=X   Single test/class, accel      (foreground)
+#   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
+#
+# Fallback targets (non-accelerated):
+#   make test-pypy      PyPy + 8 workers (no C++ accel)
+#   make test-cpython   CPython fallback (~40 min, no accel)
+#
 # conftest.py writes live status to /tmp/megapad_test_status.json.
 # test_monitor.py reads it and renders the dashboard.
-#
-# NEVER run `python -m pytest` directly — always use these targets.
 #
 # PyPy setup (one-time):
 #   make setup-pypy
@@ -42,61 +47,69 @@ accel-clean:
 # --- Accelerated test run: CPython + C++ extension ---
 .PHONY: test-accel
 test-accel: accel
-	$(VENV_PY) $(PYTEST)
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST)
 
 # --- Benchmark: compare Python vs C++ ---
 .PHONY: bench
 bench: accel
 	$(VENV_PY) bench_accel.py
 
-# --- Primary test target: PyPy + xdist ---
+# --- Primary test target: background + live dashboard (DEFAULT) ---
 .PHONY: test
-test: check-pypy
-	$(PYPY) $(PYTEST) -n $(WORKERS)
+test: test-bg
 
-# --- PyPy sequential (no xdist overhead, good for debugging) ---
+# --- Foreground: C++ accel + xdist ---
+.PHONY: test-fg
+test-fg: accel
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n $(WORKERS)
+
+# --- Sequential (C++ accel, no xdist overhead, good for debugging) ---
 .PHONY: test-seq
-test-seq: check-pypy
-	$(PYPY) $(PYTEST)
+test-seq: accel
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST)
+
+# --- PyPy fallback (no C++ accel, JIT instead) ---
+.PHONY: test-pypy
+test-pypy: check-pypy
+	MP64_VIA_MAKE=1 $(PYPY) $(PYTEST) -n $(WORKERS)
 
 # --- CPython fallback ---
 .PHONY: test-cpython
 test-cpython:
-	$(CPYTHON) $(PYTEST)
+	MP64_VIA_MAKE=1 $(CPYTHON) $(PYTEST)
 
-# --- Quick smoke test: BIOS + CPU only (~6s under PyPy) ---
+# --- Quick smoke test: BIOS + CPU only ---
 .PHONY: test-quick
-test-quick: check-pypy
-	$(PYPY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short
+test-quick: accel
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short
 
 # --- Single test (usage: make test-one K=test_coreid_word) ---
 .PHONY: test-one
-test-one: check-pypy
-	$(PYPY) $(PYTEST) -k "$(K)" --tb=long -v
+test-one: accel
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
 
-# --- Single test with C++ accelerator (faster for KDOS tests) ---
+# --- Single test with C++ accelerator (alias for test-one) ---
 .PHONY: test-one-accel
-test-one-accel: accel
-	$(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
+test-one-accel: test-one
 
 # --- Background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
 #        make test-bg K=TestFoo (subset)
 # Then:  make test-status  or  make test-watch
 .PHONY: test-bg
-test-bg: check-pypy
+test-bg: accel
 	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
 		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
 		exit 1; \
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting tests in background..."
+	@echo "Starting tests in background (C++ accel)..."
 	@if [ -n "$(K)" ]; then \
-		nohup $(PYPY) $(PYTEST) -n $(WORKERS) --tb=long -k "$(K)" \
+		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n $(WORKERS) --tb=long -k "$(K)" \
 			> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt; \
 	else \
-		nohup $(PYPY) $(PYTEST) -n $(WORKERS) --tb=long \
+		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n $(WORKERS) --tb=long \
 			> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt; \
 	fi

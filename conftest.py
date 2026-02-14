@@ -1,29 +1,61 @@
 """
 Pytest configuration for Megapad-64 test suite.
 
-Recommended: run tests with PyPy for ~5× speedup on CPU emulation.
-    make test               # PyPy + 8 xdist workers (~4 min)
-    make test-seq           # PyPy sequential (~8 min)
-    make test-cpython       # CPython fallback (~40 min)
+Always use the Makefile targets — they build the C++ accelerator
+and use the correct Python interpreter:
 
-For parallel execution with xdist:
-    pypy3 -m pytest -n 8            # 8 workers
-    pypy3 -m pytest -n auto         # auto-detect CPU count
+    make test               # background + live dashboard (DEFAULT)
+    make test-one K=X       # single test/class with accel
+    make test-fg            # foreground C++ accel + xdist
+    make test-status        # show progress
 
-Without -n, tests run sequentially.
-
-Live monitoring (with background runs):
-    make test-bg            # start tests in background
-    make test-status        # show live progress
-    make test-watch         # auto-refresh every 5s
+Running `python -m pytest` directly will fail unless you set
+MP64_RAW_PYTEST=1 (you shouldn't need to).
 """
 
 import json
 import os
+import sys
 import time
 import pytest
 
 STATUS_FILE = "/tmp/megapad_test_status.json"
+
+
+def pytest_configure(config):
+    """Register plugins and enforce Makefile usage."""
+    # --- Guard against raw `python -m pytest` without Make ---
+    # All Makefile targets set MP64_VIA_MAKE=1.  Direct invocation
+    # is blocked unless MP64_RAW_PYTEST=1 is explicitly set.
+    if not os.environ.get("MP64_VIA_MAKE") and not os.environ.get("MP64_RAW_PYTEST"):
+        msg = (
+            "\n"
+            "═══════════════════════════════════════════════════════\n"
+            "  ERROR: Do not run pytest directly.\n"
+            "\n"
+            "  Use the Makefile targets instead:\n"
+            "\n"
+            "    make test               # background + dashboard (~1 min)\n"
+            "    make test-one K=TestFoo  # single test, foreground\n"
+            "    make test-fg             # full suite, foreground\n"
+            "    make test-seq            # sequential, for debugging\n"
+            "\n"
+            "  Override (you shouldn't need to):\n"
+            "    MP64_RAW_PYTEST=1 python -m pytest ...\n"
+            "═══════════════════════════════════════════════════════\n"
+        )
+        pytest.exit(msg, returncode=1)
+
+    # Register live monitor plugin — but NOT on xdist workers.
+    # With xdist (-n N), each worker gets its own pytest session.
+    # If a worker writes status, it clobbers the controller's status
+    # (e.g. marking "finished" when only that worker is done).
+    # Workers are identified by having 'workerinput' on config.
+    is_xdist_worker = hasattr(config, "workerinput")
+    if not is_xdist_worker:
+        monitor = LiveTestMonitor()
+        config._live_monitor = monitor
+        config.pluginmanager.register(monitor, "live_test_monitor")
 
 
 class LiveTestMonitor:
@@ -87,6 +119,13 @@ class LiveTestMonitor:
         # -k filtering deselects items after collection
         self.total -= len(items)
         self._write_status()
+
+    def pytest_xdist_node_collection_finished(self, node, ids):
+        """xdist: controller receives each worker's collected test ids.
+        Use the first worker's count (all workers collect the same set)."""
+        if self.total == 0:
+            self.total = len(ids)
+            self._write_status()
 
     @pytest.hookimpl(trylast=True)
     def pytest_runtest_logreport(self, report):
@@ -152,8 +191,3 @@ def _fmt_duration(seconds):
         return f"{s}s"
 
 
-# Register the plugin
-def pytest_configure(config):
-    monitor = LiveTestMonitor()
-    config._live_monitor = monitor
-    config.pluginmanager.register(monitor, "live_test_monitor")

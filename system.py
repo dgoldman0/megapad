@@ -403,9 +403,14 @@ class MegapadSystem:
 
         For single-core systems with the C++ accelerator this runs the
         entire inner loop in C++ (``cpu.run_steps``), calling back to
-        Python only for the rare MMIO access.  Falls back to per-step
-        execution when the accelerator is not loaded or when running
-        multi-core.
+        Python only for the rare MMIO access.
+
+        For multicore systems with the accelerator, each active core
+        runs a chunk of steps in C++ per round, with device ticking
+        and IRQ delivery between rounds.
+
+        Falls back to per-step execution when the accelerator is not
+        loaded.
 
         Returns the number of steps actually executed.
         """
@@ -422,8 +427,7 @@ class MegapadSystem:
         if self.all_halted or self.all_idle_or_halted:
             return 0
 
-        # ---------- C++ fast path ----------
-        # Use C++ for core 0 when it's the only active core (others idle/halted)
+        # ---------- C++ fast path (single active core) ----------
         cpu = self.cores[0]
         if (hasattr(cpu, '_accel_backend')
                 and not cpu.halted and not cpu.idle
@@ -449,6 +453,54 @@ class MegapadSystem:
                         break
 
             return max(steps, 1)
+
+        # ---------- C++ multicore path ----------
+        # Run each active core for a chunk via C++ run_steps, with
+        # device ticking and IRQ delivery between rounds.
+        has_accel = hasattr(self.cores[0], '_accel_backend')
+        if has_accel and self.num_cores > 1:
+            CHUNK = 1000  # steps per core per round
+            total = 0
+            remaining = n
+            while remaining > 0 and not self.all_halted:
+                if self.all_idle_or_halted:
+                    break
+                chunk = min(CHUNK, remaining)
+                round_steps = 0
+                for cpu in self.cores:
+                    if cpu.halted or cpu.idle:
+                        continue
+                    try:
+                        steps, reason = cpu.run_steps(chunk)
+                        round_steps += steps
+                    except TrapError as e:
+                        if cpu.ivt_base != 0:
+                            cpu._trap(e.ivec_id)
+                        round_steps += 1
+                    except HaltError:
+                        round_steps += 1
+
+                # Device ticking + IRQ delivery
+                if round_steps > 0:
+                    self.bus.tick(round_steps)
+                    total += round_steps
+                    remaining -= round_steps
+
+                # Timer IRQ delivery
+                if self.timer.irq_pending:
+                    for c in self.cores:
+                        if c.flag_i and not c.halted:
+                            c._trap(IVEC_TIMER)
+                            break
+
+                # IPI delivery
+                for cpu in self.cores:
+                    if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
+                        cpu._trap(IVEC_IPI)
+
+                if round_steps == 0:
+                    break
+            return max(total, 1)
 
         # ---------- Pure-Python fallback ----------
         total = 0
