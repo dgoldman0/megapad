@@ -201,16 +201,58 @@ class Timer(Device):
                 self.irq_pending = False
 
     def tick(self, cycles: int):
-        if not (self.control & 1):  # not enabled
+        if not (self.control & 1) or cycles == 0:  # not enabled
             return
-        for _ in range(cycles):
+
+        if cycles == 1:
+            # Fast path for single-tick (common in per-step execution)
             self.counter = (self.counter + 1) & 0xFFFFFFFF
             if self.counter == self.compare:
-                self.status |= 1  # match flag
-                if self.control & 2:  # interrupt enable
+                self.status |= 1
+                if self.control & 2:
                     self.irq_pending = True
-                if self.control & 4:  # auto-reload
+                if self.control & 4:
                     self.counter = 0
+            return
+
+        # O(1) batch tick — avoid per-cycle Python loop
+        old = self.counter
+        cmp = self.compare
+
+        if self.control & 4:
+            # Auto-reload mode: counter resets to 0 on match
+            if cmp == 0:
+                # Degenerate: compare=0 means match every tick
+                self.status |= 1
+                if self.control & 2:
+                    self.irq_pending = True
+                self.counter = 0
+                return
+            # How many ticks until we hit compare?
+            gap = (cmp - old) & 0xFFFFFFFF
+            if cycles >= gap:
+                # We hit (and possibly wrap past) the compare value
+                self.status |= 1
+                if self.control & 2:
+                    self.irq_pending = True
+                # After match, counter reloads to 0 and keeps counting
+                remaining = cycles - gap
+                self.counter = remaining % cmp if cmp > 0 else 0
+            else:
+                self.counter = (old + cycles) & 0xFFFFFFFF
+        else:
+            # No auto-reload: just check if compare is crossed
+            new = old + cycles  # unbounded to detect crossing
+            if old < cmp <= new:
+                self.status |= 1
+                if self.control & 2:
+                    self.irq_pending = True
+            # Also handle 32-bit wrap-around case
+            elif new > 0xFFFFFFFF and cmp <= (new & 0xFFFFFFFF):
+                self.status |= 1
+                if self.control & 2:
+                    self.irq_pending = True
+            self.counter = new & 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------

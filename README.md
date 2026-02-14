@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,200+ tests.
+— all running inside a Python emulator and verified by 3,100+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -27,8 +27,9 @@ interactively.
 |-----------|-------|
 | **BIOS** | 265 Forth dictionary words, 9,895 lines ASM, ~22 KB binary |
 | **KDOS** | v1.1 — 289 colon definitions + 144 variables/constants, 3,850 lines Forth |
-| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,516 lines Python |
-| **Tests** | 593 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
+| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,541 lines Python |
+| **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (23 s full suite) |
+| **Tests** | 3,112 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **FPGA RTL** | 14 Verilog modules + 9 testbenches, Nexys A7-200T target |
@@ -150,8 +151,11 @@ CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
 
 ### Prerequisites
 
-Python 3.8+ (3.10 recommended).  **No external dependencies** — the
-entire project is pure Python standard library.
+Python 3.8+ (3.12 recommended).  The emulator and all tools run with
+**no external dependencies** — pure Python standard library.
+
+For the optional **C++ accelerator** (63× speedup), you need CPython 3.12
+and pybind11 (`pip install pybind11`).  Build with `make accel`.
 
 ```bash
 git clone <repository-url>
@@ -208,19 +212,28 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 ### Run the Tests
 
 ```bash
-# CPython (works out of the box)
-python -m pytest test_system.py test_megapad64.py -v --timeout=30
+# C++ accelerator (recommended — 63× faster than PyPy)
+python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
+make accel                         # build C++ extension
+make test-accel                    # ~23 s, all 3,112 tests
 
-# PyPy + xdist (recommended — ~5× faster emulation, 8 parallel workers)
-make setup-pypy   # one-time
-make test          # ~4 min vs ~40 min under CPython
+# PyPy + xdist (no C++ compiler needed)
+make setup-pypy                    # one-time
+make test                          # ~24 min
+
+# CPython fallback (no setup required)
+python -m pytest test_system.py test_megapad64.py -v --timeout=30  # ~40 min
 ```
 
-All 593 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
-assembler, disk utility, devices, multicore, networking, and extended tile engine.
+All 3,112 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+assembler, disk utility, devices, multicore, networking, crypto, and
+extended tile engine.
 
-> **Tip:** PyPy's JIT dramatically speeds up the CPU emulator loop.  You
-> can also use it interactively: `.pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img`
+| Runner | Time | Speedup |
+|--------|------|---------|
+| CPython (pure Python) | ~40 min | 1× |
+| PyPy + xdist -n 8 | ~24 min | 1.7× |
+| **CPython + C++ accel -n 8** | **~23 s** | **104×** |
 
 ---
 
@@ -228,21 +241,24 @@ assembler, disk utility, devices, multicore, networking, and extended tile engin
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | 2,516 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
-| `system.py` | 474 | System integration (quad-core SoC, mailbox IPI, spinlocks) |
+| `megapad64.py` | 2,541 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
+| `accel/mp64_accel.cpp` | 1,929 | C++ CPU core (pybind11) — 63× speedup |
+| `accel_wrapper.py` | 829 | Drop-in Python wrapper for the C++ CPU core |
+| `system.py` | 546 | Quad-core SoC integration + `run_batch()` C++ fast path |
 | `bios.asm` | 9,895 | Forth BIOS in assembly (265 words, multicore, hardened) |
 | `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
 | `kdos.f` | 3,850 | KDOS v1.1 operating system in Forth (289 definitions) |
 | `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 1,376 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
+| `devices.py` | 1,418 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
 | `data_sources.py` | 697 | Simulated network data sources |
-| `diskutil.py` | 1,038 | MP64FS filesystem utility and disk image builder |
+| `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
 | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 7,308 | 570 integration tests (incl. multicore, tile, crypto, filesystem) |
-| `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
-| `pyproject.toml` | 8 | Pytest configuration |
-| `conftest.py` | 14 | Test fixtures and snapshot caching |
+| `test_system.py` | 7,270 | 3,089 integration tests (24 classes, incl. multicore, tile, crypto, FS) |
+| `Makefile` | 159 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
+| `setup_accel.py` | 35 | pybind11 build configuration |
+| `bench_accel.py` | 139 | C++ vs Python speed comparison script |
+| `conftest.py` | 159 | Test fixtures, snapshot caching, live status reporting |
 | `fpga/rtl/` | 7,242 | 13 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
 | `fpga/sim/` | 3,930 | 8 Verilog testbenches (72 hardware tests) |
 
@@ -262,7 +278,7 @@ The `docs/` directory contains comprehensive reference material:
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |
 | [docs/tile-engine.md](docs/tile-engine.md) | Tile engine programming guide — CSRs, MEX encoding, extended ops, FP16/BF16 |
 | [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
-| [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite |
+| [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite, C++ accelerator |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)
 > reflect the simplified emulator model rather than the complete hardware

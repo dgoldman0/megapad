@@ -116,6 +116,18 @@ def uart_text(buf: list[int]) -> str:
     )
 
 
+def _next_line_chunk(data: bytes, pos: int) -> bytes:
+    """Return bytes from *pos* up to and including the next newline.
+
+    Injects one line at a time so KEY? sees no look-ahead.
+    If no newline remains, returns the tail.
+    """
+    nl = data.find(b'\n', pos)
+    if nl == -1:
+        return data[pos:]          # last fragment, no newline
+    return data[pos:nl + 1]
+
+
 # ---------------------------------------------------------------------------
 #  Device-level tests
 # ---------------------------------------------------------------------------
@@ -501,34 +513,27 @@ class TestBIOS(unittest.TestCase):
                    max_steps=2_000_000) -> str:
         """Feed newline-terminated Forth commands and collect UART output.
 
-        Sends input one byte at a time with CPU execution between bytes
-        (matching _console_pipe behaviour).  Always appends BYE to ensure
-        the CPU halts.
+        Injects input in 256-byte chunks and uses run_batch() for CPU
+        execution.  Always appends BYE to ensure the CPU halts.
         """
         payload = "\n".join(input_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
+        total = 0
 
-        for _ in range(len(data) + 20):          # outer byte-feed loop
-            # Run CPU until idle (waiting for UART) or halt
-            for _ in range(max_steps // (len(data) + 20)):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                try:
-                    sys.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         return uart_text(buf)
 
@@ -1684,20 +1689,20 @@ class TestMulticore(unittest.TestCase):
         payload = "\n".join(input_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        for _ in range(len(data) + 20):
-            for _ in range(max_steps // (len(data) + 20)):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                sys.step()
+        total = 0
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            elif sys.cpu.idle and not sys.uart.has_rx_data:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
         return uart_text(buf)
 
     # --- Core gate tests ---
@@ -2065,27 +2070,21 @@ class TestKDOS(unittest.TestCase):
         data = payload.encode()
         pos = 0
         max_steps = 200_000_000
-        chunk = max_steps // (len(data) + 20)
+        total = 0
 
-        for _ in range(len(data) + 20):
-            for _ in range(chunk):
-                if sys_obj.cpu.halted:
-                    break
-                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                    break
-                try:
-                    sys_obj.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        while total < max_steps:
             if sys_obj.cpu.halted:
                 break
-            if pos < len(data):
-                sys_obj.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys_obj.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         # Save snapshot: raw memory + CPU state
         cls._kdos_snapshot = (
@@ -2126,27 +2125,21 @@ class TestKDOS(unittest.TestCase):
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        chunk = max_steps // (len(data) + 20)
+        total = 0
 
-        for _ in range(len(data) + 20):
-            for _ in range(chunk):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                try:
-                    sys.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         return uart_text(buf)
 
@@ -2179,20 +2172,16 @@ class TestKDOS(unittest.TestCase):
         while steps < max_steps:
             if sys.cpu.halted:
                 break
-            # When CPU is idle and waiting for input, feed the next byte
             if sys.cpu.idle and not sys.uart.has_rx_data:
                 if pos < len(data):
-                    sys.uart.inject_input(bytes([data[pos]]))
-                    pos += 1
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
                 else:
                     break  # all input sent, CPU idle → done
-            try:
-                sys.step()
-                steps += 1
-            except HaltError:
-                break
-            except Exception:
-                break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - steps))
+            steps += max(batch, 1)
 
         return uart_text(buf)
 
@@ -2207,26 +2196,22 @@ class TestKDOS(unittest.TestCase):
         data = payload.encode()
         pos = 0
         max_steps = 200_000_000
-        chunk = max_steps // (len(data) + 20)
-        for _ in range(len(data) + 20):
-            for _ in range(chunk):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                try:
-                    sys.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        total = 0
+
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
+
         text = uart_text(buf)
         self.assertIn("KDOS v1.1", text)
         self.assertIn("HELP", text)
@@ -5109,25 +5094,20 @@ class TestBIOSHardening(unittest.TestCase):
         payload = "\n".join(input_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        for _ in range(len(data) + 20):
-            for _ in range(max_steps // (len(data) + 20)):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                try:
-                    sys.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        total = 0
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
         return uart_text(buf)
 
     # -- FSLOAD multi-sector (> 512 bytes) --
@@ -6307,25 +6287,20 @@ class TestKDOSHardening(TestKDOS):
         payload = "\n".join(input_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        for _ in range(len(data) + 20):
-            for _ in range(max_steps // (len(data) + 20)):
-                if sys.cpu.halted:
-                    break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    break
-                try:
-                    sys.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        total = 0
+        while total < max_steps:
             if sys.cpu.halted:
                 break
-            if pos < len(data):
-                sys.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
         return uart_text(buf)
 
 
@@ -6934,27 +6909,21 @@ class TestKDOSMulticore(unittest.TestCase):
         data = payload.encode()
         pos = 0
         max_steps = 200_000_000
-        chunk = max_steps // (len(data) + 20)
+        total = 0
 
-        for _ in range(len(data) + 20):
-            for _ in range(chunk):
-                if sys_obj.cpu.halted:
-                    break
-                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                    break
-                try:
-                    sys_obj.step()
-                except HaltError:
-                    break
-                except Exception:
-                    break
+        while total < max_steps:
             if sys_obj.cpu.halted:
                 break
-            if pos < len(data):
-                sys_obj.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            elif sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                break  # all sent AND core 0 idle → done
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys_obj.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         # Save snapshot: raw memory + core 0 CPU state + per-core states
         cls._mc_snapshot = (
@@ -6991,17 +6960,14 @@ class TestKDOSMulticore(unittest.TestCase):
                 break
             if sys.cpu.idle and not sys.uart.has_rx_data:
                 if pos < len(data):
-                    sys.uart.inject_input(bytes([data[pos]]))
-                    pos += 1
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
                 else:
                     break
-            try:
-                sys.step()
-                steps += 1
-            except HaltError:
-                break
-            except Exception:
-                break
+                continue
+            batch = sys.run_batch(min(100_000, max_steps - steps))
+            steps += max(batch, 1)
 
         return uart_text(buf)
 
@@ -7024,23 +6990,21 @@ class TestKDOSMulticore(unittest.TestCase):
         payload = "\n".join(lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        for _ in range(len(data) + 20):
-            for _ in range(200_000_000 // (len(data) + 20)):
-                if sys_obj.cpu.halted:
-                    break
-                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                    break
-                try:
-                    sys_obj.step()
-                except (HaltError, Exception):
-                    break
+        total = 0
+        max_steps = 200_000_000
+        while total < max_steps:
             if sys_obj.cpu.halted:
                 break
-            if pos < len(data):
-                sys_obj.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys_obj.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         text = uart_text(buf)
         self.assertIn("KDOS v1.1", text)
@@ -7061,23 +7025,21 @@ class TestKDOSMulticore(unittest.TestCase):
         payload = "\n".join(lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        for _ in range(len(data) + 20):
-            for _ in range(200_000_000 // (len(data) + 20)):
-                if sys_obj.cpu.halted:
-                    break
-                if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                    break
-                try:
-                    sys_obj.step()
-                except (HaltError, Exception):
-                    break
+        total = 0
+        max_steps = 200_000_000
+        while total < max_steps:
             if sys_obj.cpu.halted:
                 break
-            if pos < len(data):
-                sys_obj.uart.inject_input(bytes([data[pos]]))
-                pos += 1
-            else:
-                break
+            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+                if pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys_obj.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys_obj.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         text = uart_text(buf)
         self.assertIn("4", text)

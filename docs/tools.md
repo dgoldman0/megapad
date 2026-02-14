@@ -7,8 +7,10 @@ Megapad-64 development environment:
 2. **Assembler** (`asm.py`) — translate assembly source to machine code
 3. **Disk Utility** (`diskutil.py`) — create and manage MP64FS disk images
 4. **Test Suite** (`test_megapad64.py`, `test_system.py`) — verify everything works
+5. **C++ Accelerator** (`accel/mp64_accel.cpp`) — optional 63× speedup
 
-All tools are pure Python 3 with no external dependencies.
+The core tools are pure Python 3 with no external dependencies.
+The optional C++ accelerator requires CPython 3.12 and pybind11.
 
 ---
 
@@ -404,15 +406,15 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **593 passing tests**
+The project has a comprehensive test suite with **3,112 passing tests**
 that cover every layer of the system.
 
 ### Test Files
 
 | File | Tests | What It Covers |
 |------|-------|----------------|
-| `test_megapad64.py` | 18 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 497 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening |
+| `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
+| `test_system.py` | 3,089 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
 
 ### Test Classes in `test_system.py`
 
@@ -428,16 +430,28 @@ that cover every layer of the system.
 | `TestMulticore` | Multicore: core ID, IPI send/recv, mailbox, spinlock, wake |
 | `TestAssemblerBranchRange` | Assembler branch range validation, SKIP instruction |
 | `TestKDOS` | KDOS: buffers, kernels, pipelines, tasks, data ports, NIC ingestion, documentation browser, scheduler, tile engine, advanced kernels, TUI screens, filesystem commands, benchmarking |
+| `TestKDOSAllocator` | ALLOCATE, FREE, RESIZE, heap management |
+| `TestKDOSExceptions` | CATCH, THROW, nested catch, rethrow |
+| `TestKDOSCRC` | CRC-BUF, CRC32-BUF, CRC32C-BUF, CRC64-BUF |
+| `TestKDOSDiagnostics` | .DIAG, BIST-REPORT, TILE-REPORT, .PERF |
+| `TestKDOSAES` | AES-ENCRYPT, AES-DECRYPT, .AES-STATUS |
+| `TestKDOSSHA3` | SHA3, .SHA3-STATUS, .SHA3 |
+| `TestKDOSCrypto` | HASH, HMAC, ENCRYPT, DECRYPT, VERIFY |
 | `TestDiskUtil` | `diskutil.py`: format, inject, read, list, delete, sample image builder |
 | `TestBIOSHardening` | FSLOAD edge cases (multi-sector, colon defs, dot-quote, nested evaluate, empty, comments-only, long line), error line context, stack underflow detection, EVALUATE depth limit, dictionary-full guard |
 | `TestKDOSHardening` | SCREENS TUI renders (all 9 screens), header/footer verification, disk-only boot end-to-end tests |
 | `TestKDOSFilesystem` | End-to-end KDOS FS: FORMAT, MKFILE, DIR, CATALOG, CAT, RMFILE, RENAME, FWRITE/FREAD, FS-FREE, SAVE-BUFFER, DOC/DESCRIBE/TOPICS/LESSONS |
+| `TestKDOSFileCrypto` | FENCRYPT, FDECRYPT, FS-KEY!, ENCRYPTED? |
 | `TestPipelineBundles` | Pipeline bundle serialization, BUNDLE-SAVE, BUNDLE-LOAD, round-trip |
 | `TestKDOSMulticore` | KDOS multicore: CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES |
 
 ### Running Tests
 
 ```bash
+# C++ accelerator (recommended — 63× faster than PyPy)
+make accel                                                 # build C++ extension
+make test-accel                                            # ~23 s, all 3,112 tests
+
 # Full suite with CPython (works out of the box, ~40 min)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
 
@@ -457,26 +471,39 @@ python -m pytest test_system.py -k "test_buffer_create" -v
 python -m pytest test_system.py --tb=short --timeout=30
 ```
 
+### Fast Tests with C++ Accelerator (recommended)
+
+The optional C++ accelerator reimplements the CPU step loop in pybind11
+C++, delivering a **63× speedup** over PyPy.  `system.py` imports it
+automatically when the shared library is present; otherwise it falls
+back to pure Python.
+
+```bash
+python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
+make accel                   # build the C++ extension
+make test-accel              # ~23 s for all 3,112 tests
+make bench                   # raw CPU speed comparison
+```
+
 ### Fast Tests with PyPy + xdist
 
-The CPU emulator loop is pure Python and benefits enormously from PyPy's
-JIT compiler (~5× speedup).  pytest-xdist adds parallel execution across
-multiple workers for another ~2× improvement.  A `Makefile` wraps it all:
+The pure-Python CPU loop benefits from PyPy's JIT compiler (~5× speedup).
+pytest-xdist adds parallel execution across multiple workers.
 
 ```bash
 make setup-pypy          # one-time: downloads PyPy 3.10, installs pytest + xdist
-make test                # PyPy + 8 parallel workers  (~4 min)
-make test-seq            # PyPy sequential            (~8 min, good for debugging)
+make test                # PyPy + 8 parallel workers  (~24 min)
+make test-seq            # PyPy sequential
 make test-cpython        # CPython fallback           (~40 min)
 make test-quick          # PyPy, BIOS + CPU only      (~6 sec)
 make test-one K=test_coreid_word   # single test with PyPy
 ```
 
-| Runner | Parallelism | Approximate Time |
-|--------|-------------|------------------|
-| CPython | sequential | ~40 min |
-| PyPy | sequential | ~8 min |
-| PyPy + xdist -n 8 | 8 workers | ~4 min |
+| Runner | Parallelism | Approximate Time | Speedup |
+|--------|-------------|-------------------|---------|
+| CPython | sequential | ~40 min | 1× |
+| PyPy + xdist -n 8 | 8 workers | ~24 min | 1.7× |
+| **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
 
 ### Test Infrastructure
 
@@ -488,6 +515,7 @@ The test files include several helper functions:
 | `run_until_halt()` | Execute until the CPU halts or a step limit is reached |
 | `capture_output()` | Attach an output capture callback to the UART; returns a byte list |
 | `bytes_to_str()` | Convert a captured byte buffer to a printable string |
+| `_next_line_chunk()` | Return bytes up to next newline for line-at-a-time UART injection |
 
 **KDOS snapshot caching:** The `TestKDOS` class uses pickle-based
 snapshots (`.kdos_snapshot_*.pkl`) to avoid re-loading the entire KDOS
@@ -500,18 +528,21 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | ~1,393 | CPU + tile engine emulator |
-| `system.py` | ~472 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock) |
+| `megapad64.py` | ~2,541 | CPU + tile engine emulator |
+| `accel/mp64_accel.cpp` | ~1,929 | C++ CPU core (pybind11) — 63× speedup |
+| `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
+| `system.py` | ~546 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
 | `cli.py` | ~995 | CLI, boot modes, debug monitor |
-| `asm.py` | ~748 | Two-pass assembler (with listing output) |
-| `devices.py` | ~1,376 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
+| `asm.py` | ~788 | Two-pass assembler (with listing output) |
+| `devices.py` | ~1,418 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
-| `diskutil.py` | ~1,038 | MP64FS disk utility and image builder |
+| `diskutil.py` | ~1,039 | MP64FS disk utility and image builder |
 | `bios.asm` | ~9,895 | Forth BIOS (265 dictionary words, hardened, multicore) |
 | `bios.rom` | 20,722B | Pre-assembled BIOS binary |
 | `kdos.f` | ~3,850 | KDOS v1.1 operating system (289 colon defs, 9 TUI screens, multicore, crypto) |
-| `test_megapad64.py` | ~357 | CPU unit tests (18 tests) |
-| `test_system.py` | ~7,308 | Integration test suite (570 tests, 24 classes) |
-| `Makefile` | 71 | Build & test targets (PyPy + xdist parallel runner) |
-| `pyproject.toml` | 8 | Pytest configuration |
-| `conftest.py` | 14 | Test fixtures and snapshot caching |
+| `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
+| `test_system.py` | ~7,270 | Integration test suite (3,089 tests, 24 classes) |
+| `setup_accel.py` | ~35 | pybind11 build configuration |
+| `bench_accel.py` | ~139 | C++ vs Python speed comparison |
+| `Makefile` | 159 | Build, test, & accel targets |
+| `conftest.py` | 159 | Test fixtures, snapshot caching, live status |
