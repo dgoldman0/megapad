@@ -4258,6 +4258,32 @@ VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
     LOOP
     0 ;        \ timeout — no reply
 
+\ -- 10c: ARP auto-responder --
+\ Handles an incoming Ethernet frame if it is an ARP request for us.
+\ Sends an ARP reply and records the requester in the ARP table.
+\ Returns: -1 if handled, 0 if not an ARP request for us.
+
+: ARP-HANDLE  ( -- flag )
+    \ Assumes a frame is already in ETH-RX-BUF
+    ETH-RX-BUF ETH-IS-ARP? 0= IF 0 EXIT THEN
+    ETH-RX-BUF ETH-PLD ARP-IS-REQUEST? 0= IF 0 EXIT THEN
+    ETH-RX-BUF ETH-PLD ARP-FOR-US? 0= IF 0 EXIT THEN
+    \ It's an ARP request for us — learn the sender
+    ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY   \ record sender MAC+IP
+    \ Build and send reply
+    ETH-RX-BUF ETH-PLD ARP-BUILD-REPLY   \ ( buf len )
+    >R >R
+    ETH-RX-BUF ETH-SRC ETYPE-ARP R> R>   \ ( dst etype buf len )
+    ETH-SEND-TX
+    -1 ;    \ handled
+
+\ -- ARP-POLL: receive one frame; auto-reply if ARP request for us --
+\   Returns: received frame length (0 if nothing), with flag on top
+\   ( -- len handled? )
+: ARP-POLL  ( -- len handled? )
+    ETH-RECV DUP 0= IF 0 EXIT THEN   \ no frame → 0 0
+    ARP-HANDLE ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================

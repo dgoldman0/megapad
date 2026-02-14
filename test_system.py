@@ -7957,6 +7957,119 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("0 ", text)
 
+    # --- 10c: ARP auto-responder ---
+
+    @staticmethod
+    def _build_arp_request_frame(sender_mac, sender_ip, target_ip):
+        """Build a raw ARP request Ethernet frame (broadcast)."""
+        dst = b'\xff\xff\xff\xff\xff\xff'
+        frame = dst + bytes(sender_mac) + b'\x08\x06'
+        arp = bytearray(28)
+        arp[0:2] = b'\x00\x01'   # HTYPE
+        arp[2:4] = b'\x08\x00'   # PTYPE
+        arp[4] = 6               # HLEN
+        arp[5] = 4               # PLEN
+        arp[6:8] = b'\x00\x01'   # OPER=1 (request)
+        arp[8:14] = bytes(sender_mac)
+        arp[14:18] = bytes(sender_ip)
+        # THA = 00:00:00:00:00:00 (unknown)
+        arp[24:28] = bytes(target_ip)
+        return frame + bytes(arp)
+
+    def test_arp_handle_request_for_us(self):
+        """ARP-HANDLE should return -1 when it handles a request for us."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",   # receive the injected frame
+            "ARP-HANDLE .",
+        ], nic_frames=[req])
+        self.assertIn("-1 ", text)
+
+    def test_arp_handle_learns_sender(self):
+        """ARP-HANDLE should record the requester's MAC/IP in the table."""
+        req = self._build_arp_request_frame(
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            [10, 0, 0, 42],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE DROP",
+            "CREATE lip 4 ALLOT  10 lip C!  0 lip 1+ C!  0 lip 2 + C!  42 lip 3 + C!",
+            "lip ARP-LOOKUP C@ .",
+        ], nic_frames=[req])
+        self.assertIn("17 ", text)   # 0x11
+
+    def test_arp_handle_sends_reply(self):
+        """ARP-HANDLE should increment TX count (sent a reply)."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE DROP",
+            "ETH-TX-COUNT @ .",
+        ], nic_frames=[req])
+        self.assertIn("1 ", text)
+
+    def test_arp_handle_not_for_us(self):
+        """ARP-HANDLE should return 0 for requests targeting other IPs."""
+        req = self._build_arp_request_frame(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            [192, 168, 1, 50],
+            [192, 168, 1, 200])  # not our IP
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE .",
+        ], nic_frames=[req])
+        self.assertIn("0 ", text)
+
+    def test_arp_handle_not_arp(self):
+        """ARP-HANDLE should return 0 for non-ARP frames."""
+        # Build an IPv4 frame (not ARP)
+        frame = self._build_eth_frame(
+            self.BCAST_MAC, self.OTHER_MAC, 0x0800, b'\x00' * 20)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "ETH-RECV DROP",
+            "ARP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_arp_poll_handles_request(self):
+        """ARP-POLL should receive and auto-handle an ARP request."""
+        req = self._build_arp_request_frame(
+            [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+            [10, 0, 0, 1],
+            [192, 168, 1, 100])
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "ARP-POLL .\" h\" .",
+        ], nic_frames=[req])
+        # ARP-POLL returns ( len handled? ) — handled? should be -1
+        self.assertIn("h", text)
+        self.assertIn("-1 ", text)
+
+    def test_arp_poll_no_frame(self):
+        """ARP-POLL should return 0 0 when no frame is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "ARP-POLL . .",
+        ])
+        self.assertIn("0 0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main
