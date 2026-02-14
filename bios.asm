@@ -7366,10 +7366,10 @@ w_aes_tag_store:
 ;   DIN    +0x08 (W)  byte input (auto-absorbs at rate)
 ;   DOUT   +0x10 (R)  32-byte hash output
 
-; SHA3-INIT ( -- )  Initialize SHA3-256 state.
+; SHA3-INIT ( -- )  Initialize SHA3 state (current mode).
 w_sha3_init:
     ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
-    ldi r0, 0
+    ldi r0, 1                          ; CMD_INIT=1
     st.b r7, r0
     ret.l
 
@@ -7399,7 +7399,7 @@ w_sha3_final:
     ldn r9, r14             ; r9 = dest addr
     addi r14, 8
     ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
-    ldi r0, 1
+    ldi r0, 3                          ; CMD_FINAL=3
     st.b r7, r0             ; CMD=finalize
     ; Read 32 bytes from DOUT (offset 0x10)
     ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
@@ -7422,6 +7422,119 @@ w_sha3_status_fetch:
     ld.b r0, r11
     subi r14, 8
     str r14, r0
+    ret.l
+
+; SHA3-MODE! ( mode -- )  Set SHA3/SHAKE mode: 0=SHA3-256 1=SHA3-512 2=SHAKE128 3=SHAKE256
+w_sha3_mode_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0782  ; SHA3_CTRL
+    st.b r11, r0
+    ret.l
+
+; SHA3-MODE@ ( -- mode )  Read current SHA3/SHAKE mode.
+w_sha3_mode_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0782  ; SHA3_CTRL
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SHA3-SQUEEZE ( addr len -- )  Squeeze len bytes of XOF output (SHAKE).
+;   Triggers CMD=SQUEEZE after each rate-block boundary, copies to addr.
+;   Assumes FINAL has already been called; first rate-block already in DOUT.
+;   For subsequent blocks, writes CMD=4 (SQUEEZE), then reads DOUT again.
+w_sha3_squeeze:
+    ldn r12, r14            ; r12 = len
+    addi r14, 8
+    ldn r9, r14             ; r9 = dest addr
+    addi r14, 8
+    cmpi r12, 0
+    breq .sha3_squeeze_done
+    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
+    ldi r11, 0              ; bytes read
+    ldi r1, 0               ; position within current block
+.sha3_squeeze_loop:
+    ; Read byte from DOUT[pos]
+    mov r13, r7
+    add r13, r1
+    ld.b r0, r13
+    ; Store to dest
+    mov r13, r9
+    add r13, r11
+    st.b r13, r0
+    addi r11, 1
+    addi r1, 1
+    ; Check if we need a new squeeze block
+    cmpi r1, 136            ; rate (SHA3-256/SHAKE256 rate, conservative)
+    brcc .sha3_squeeze_no_resqueeze
+    ; Trigger another squeeze permutation
+    ldi64 r13, 0xFFFF_FF00_0000_0780  ; SHA3_CMD
+    ldi r0, 4                          ; CMD_SQUEEZE
+    st.b r13, r0
+    ldi r1, 0               ; reset block position
+.sha3_squeeze_no_resqueeze:
+    cmp r11, r12
+    brcc .sha3_squeeze_loop
+.sha3_squeeze_done:
+    ret.l
+
+; =====================================================================
+;  True Random Number Generator (TRNG)
+; =====================================================================
+; TRNG base = 0xFFFF_FF00_0000_0800
+;   RAND8    +0x00 (R)  read 1 random byte
+;   RAND64   +0x08 (R)  read 8 random bytes (64-bit LE)
+;   STATUS   +0x10 (R)  always 1 (entropy available)
+;   SEED     +0x18 (W)  write 64-bit seed to mix in
+
+; RANDOM ( -- u )  Push a 64-bit hardware random number.
+w_random:
+    ldi64 r11, 0xFFFF_FF00_0000_0808  ; TRNG_RAND64
+    ldi r0, 0
+    ldi r12, 0
+.random_loop:
+    mov r1, r11
+    add r1, r12
+    ld.b r1, r1
+    mov r7, r12
+    ldi r9, 3
+    shl r7, r9              ; byte_index * 8
+    shl r1, r7
+    or r0, r1
+    addi r12, 1
+    cmpi r12, 8
+    brcc .random_loop
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; RANDOM8 ( -- b )  Push a single random byte.
+w_random8:
+    ldi64 r11, 0xFFFF_FF00_0000_0800  ; TRNG_RAND8
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SEED-RNG ( u -- )  Mix a 64-bit value into the TRNG entropy pool.
+w_seed_rng:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0818  ; TRNG_SEED
+    ; Write 8 bytes little-endian
+    ldi r12, 0
+.seed_rng_loop:
+    mov r7, r0
+    ldi r9, 0xFF
+    and r7, r9
+    mov r9, r11
+    add r9, r12
+    st.b r9, r7
+    lsri r0, 8
+    addi r12, 1
+    cmpi r12, 8
+    brcc .seed_rng_loop
     ret.l
 
 ; =====================================================================
@@ -9719,9 +9832,63 @@ d_sha3_status_fetch:
     call.l r11
     ret.l
 
+; === SHA3-MODE! ===
+d_sha3_mode_store:
+    .dq d_sha3_status_fetch
+    .db 10
+    .ascii "SHA3-MODE!"
+    ldi64 r11, w_sha3_mode_store
+    call.l r11
+    ret.l
+
+; === SHA3-MODE@ ===
+d_sha3_mode_fetch:
+    .dq d_sha3_mode_store
+    .db 10
+    .ascii "SHA3-MODE@"
+    ldi64 r11, w_sha3_mode_fetch
+    call.l r11
+    ret.l
+
+; === SHA3-SQUEEZE ===
+d_sha3_squeeze:
+    .dq d_sha3_mode_fetch
+    .db 12
+    .ascii "SHA3-SQUEEZE"
+    ldi64 r11, w_sha3_squeeze
+    call.l r11
+    ret.l
+
+; === RANDOM ===
+d_random:
+    .dq d_sha3_squeeze
+    .db 6
+    .ascii "RANDOM"
+    ldi64 r11, w_random
+    call.l r11
+    ret.l
+
+; === RANDOM8 ===
+d_random8:
+    .dq d_random
+    .db 7
+    .ascii "RANDOM8"
+    ldi64 r11, w_random8
+    call.l r11
+    ret.l
+
+; === SEED-RNG ===
+d_seed_rng:
+    .dq d_random8
+    .db 8
+    .ascii "SEED-RNG"
+    ldi64 r11, w_seed_rng
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_sha3_status_fetch
+    .dq d_seed_rng
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full

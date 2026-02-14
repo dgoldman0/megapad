@@ -182,7 +182,8 @@ module mp64_soc (
     wire [63:0] aes_rdata64;
     wire [63:0] sha_rdata64;
     wire [63:0] crc_rdata64;
-    wire        aes_ack, sha_ack, crc_ack;
+    wire [63:0] trng_rdata64;
+    wire        aes_ack, sha_ack, crc_ack, trng_ack;
 
     // --- Disk & NIC DMA ---
     wire        disk_dma_req;
@@ -220,6 +221,7 @@ module mp64_soc (
     wire aes_sel     = mmio_req && (mmio_addr[11:7] == 5'b01110);       // 0x700-0x77F
     wire sha_sel     = mmio_req && (mmio_addr[11:6] == 6'b011110);      // 0x780-0x7BF
     wire crc_sel     = mmio_req && (mmio_addr[11:5] == 7'b0111110);     // 0x7C0-0x7DF
+    wire trng_sel    = mmio_req && (mmio_addr[11:5] == 7'b1000000);     // 0x800-0x81F
 
     // MMIO read mux
     wire [63:0] sysinfo_rdata;
@@ -233,6 +235,7 @@ module mp64_soc (
                             aes_sel     ? aes_rdata64           :
                             sha_sel     ? sha_rdata64           :
                             crc_sel     ? crc_rdata64           :
+                            trng_sel    ? trng_rdata64          :
                             64'd0;
     assign mmio_ack = 1'b1;  // all MMIO peripherals are single-cycle
 
@@ -860,6 +863,20 @@ module mp64_soc (
         .rdata  (crc_rdata64),
         .ack    (crc_ack),
         .irq    (irq_crc)
+    );
+
+    // ========================================================================
+    // TRNG — True Random Number Generator (MMIO 0x800-0x81F)
+    // ========================================================================
+    mp64_trng u_trng (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (trng_sel),
+        .addr   (mmio_addr[4:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (trng_rdata64),
+        .ack    (trng_ack)
     );
 
     // ========================================================================

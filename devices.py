@@ -40,6 +40,7 @@ SPINLOCK_BASE = 0x0600
 CRC_BASE     = 0x07C0
 AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
+TRNG_BASE    = 0x0800
 
 
 # ---------------------------------------------------------------------------
@@ -1200,69 +1201,102 @@ def _keccak_f1600(state: list[int]) -> list[int]:
 
 
 class SHA3Device(Device):
-    """SHA-3/Keccak-256 hardware accelerator."""
+    """SHA-3/SHAKE hardware accelerator (matches FPGA mp64_sha3.v).
 
-    # SHA3-256: rate = 1088 bits = 136 bytes, output = 32 bytes
-    RATE = 136
+    Modes: 0=SHA3-256 (rate=136, out=32), 1=SHA3-512 (rate=72, out=64),
+           2=SHAKE128 (rate=168, XOF),    3=SHAKE256 (rate=136, XOF).
+
+    Register map (offsets from SHA3_BASE = 0x0780):
+      0x00  CMD      (W)  0=NOP, 1=INIT, 2=ABSORB (internal), 3=FINAL, 4=SQUEEZE
+      0x01  STATUS   (R)  bit 0=busy, bit 1=done
+      0x02  CTRL     (W)  mode select (bits [1:0])
+      0x08  DIN      (W)  byte input (auto-absorbs at rate boundary)
+      0x10..0x4F  DOUT (R)  hash/XOF output (up to 64 bytes)
+    """
+
+    _RATES = {0: 136, 1: 72, 2: 168, 3: 136}
+    _OUTSZ = {0: 32, 1: 64, 2: 0, 3: 0}  # 0 = extendable (XOF)
+    _DSEP  = {0: 0x06, 1: 0x06, 2: 0x1F, 3: 0x1F}  # domain separator
 
     def __init__(self):
-        super().__init__("SHA3", SHA3_BASE, 0x30)
+        super().__init__("SHA3", SHA3_BASE, 0x50)
+        self.mode = 0
         self._reset()
 
     def _reset(self):
-        self.state = [0] * 25          # 5x5 lanes of 64-bit words
-        self.buf = bytearray()         # partial block buffer
-        self.status = 0                # 0=idle, 2=done
-        self.digest = bytearray(32)    # output hash
+        self.state = [0] * 25
+        self.buf = bytearray()
+        self.status = 0
+        self.digest = bytearray(64)
+        self._squeezed = 0  # bytes already squeezed (for XOF)
+
+    @property
+    def rate(self) -> int:
+        return self._RATES[self.mode]
 
     def read8(self, offset: int) -> int:
         if offset == 0x01:
             return self.status
-        if 0x10 <= offset < 0x30:
-            return self.digest[offset - 0x10]
+        if offset == 0x02:
+            return self.mode
+        if 0x10 <= offset < 0x50:
+            return self.digest[offset - 0x10] if (offset - 0x10) < len(self.digest) else 0
         return 0
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        if offset == 0x00:
-            # CMD
-            if value == 0:
-                self._reset()          # init SHA3-256
-            elif value == 1:
-                self._finalize()       # pad + squeeze
-        elif offset == 0x08:
-            # DIN — absorb one byte
+        if offset == 0x00:  # CMD
+            if value == 1:    # INIT
+                self._reset()
+            elif value == 3:  # FINAL
+                self._finalize()
+            elif value == 4:  # SQUEEZE (XOF: permute and extract more)
+                self._squeeze()
+        elif offset == 0x02:  # CTRL — mode select
+            self.mode = value & 0x03
+        elif offset == 0x08:  # DIN
             self.buf.append(value)
-            if len(self.buf) == self.RATE:
+            if len(self.buf) == self.rate:
                 self._absorb_block()
 
     def _absorb_block(self):
-        """XOR rate bytes into state, run Keccak-f[1600]."""
         block = self.buf
-        for i in range(self.RATE // 8):
+        for i in range(self.rate // 8):
             lane = int.from_bytes(block[i*8:(i+1)*8], 'little')
             self.state[i] ^= lane
         self.state = _keccak_f1600(self.state)
         self.buf = bytearray()
 
     def _finalize(self):
-        """Apply SHA-3 padding (domain sep 0x06, pad10*1) and squeeze."""
-        # Build padded final block (full rate-length buffer)
-        pad = bytearray(self.RATE)
+        pad = bytearray(self.rate)
         pad[:len(self.buf)] = self.buf
-        pad[len(self.buf)] = 0x06
+        pad[len(self.buf)] = self._DSEP[self.mode]
         pad[-1] |= 0x80
-        # XOR into state and permute
-        for i in range(self.RATE // 8):
+        for i in range(self.rate // 8):
             lane = int.from_bytes(pad[i*8:(i+1)*8], 'little')
             self.state[i] ^= lane
         self.state = _keccak_f1600(self.state)
-        # Squeeze: extract first 32 bytes (4 lanes) from state
+        # Squeeze first block of output
         out = bytearray()
-        for i in range(4):
+        for i in range(self.rate // 8):
             out.extend(self.state[i].to_bytes(8, 'little'))
-        self.digest = out[:32]
+        outsz = self._OUTSZ[self.mode]
+        if outsz > 0:
+            self.digest = out[:outsz]
+        else:
+            self.digest = out[:self.rate]
+        self._squeezed = len(self.digest)
         self.status = 2  # done
+
+    def _squeeze(self):
+        """SHAKE XOF: apply Keccak-f again and extract another rate block."""
+        self.state = _keccak_f1600(self.state)
+        out = bytearray()
+        for i in range(self.rate // 8):
+            out.extend(self.state[i].to_bytes(8, 'little'))
+        self.digest = out[:self.rate]
+        self._squeezed += self.rate
+        self.status = 2
 
 
 # ---------------------------------------------------------------------------
@@ -1371,6 +1405,54 @@ class CRCDevice(Device):
                 elif value == 1:
                     # Finalize: XOR with all-ones mask
                     self.crc ^= self._mask()
+
+
+# ---------------------------------------------------------------------------
+#  True Random Number Generator (TRNG)
+# ---------------------------------------------------------------------------
+# Hardware TRNG backed by os.urandom() in the emulator.
+# On real FPGA, ring-oscillator jitter + SHA-3 conditioner.
+#
+# Register map (offsets from TRNG_BASE = 0x0800):
+#   0x00        RAND8    (R)  — read 1 random byte
+#   0x08..0x0F  RAND64   (R)  — read 8 random bytes (64-bit LE)
+#   0x10        STATUS   (R)  — always 1 (entropy available)
+#   0x18..0x1F  SEED     (W)  — write 64-bit seed to mix into pool
+
+import os as _os
+
+class TRNGDevice(Device):
+    """True Random Number Generator (CSPRNG-backed in emulator)."""
+
+    def __init__(self):
+        super().__init__("TRNG", TRNG_BASE, 0x20)
+        # Internal entropy pool — seeded from os.urandom
+        self._pool = bytearray(_os.urandom(64))
+        self._pool_pos = 0
+
+    def _next_byte(self) -> int:
+        """Draw one byte from pool, refill if exhausted."""
+        if self._pool_pos >= len(self._pool):
+            self._pool = bytearray(_os.urandom(64))
+            self._pool_pos = 0
+        b = self._pool[self._pool_pos]
+        self._pool_pos += 1
+        return b
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:           # RAND8
+            return self._next_byte()
+        if 0x08 <= offset < 0x10:    # RAND64 — each byte read is independent
+            return self._next_byte()
+        if offset == 0x10:           # STATUS — always ready
+            return 1
+        return 0
+
+    def write8(self, offset: int, value: int):
+        if 0x18 <= offset < 0x20:    # SEED — mix into pool
+            idx = offset - 0x18
+            if idx < len(self._pool):
+                self._pool[idx] ^= (value & 0xFF)
 
 
 # ---------------------------------------------------------------------------

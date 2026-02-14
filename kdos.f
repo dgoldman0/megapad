@@ -495,21 +495,48 @@ CREATE AES-TAG-BUF 16 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
-\  §1.6  SHA-3 (Keccak-256) Hashing
+\  §1.6  SHA-3 / SHAKE Hashing
 \ =====================================================================
 \  BIOS primitives (hardware accelerator at MMIO 0x0780):
 \    SHA3-INIT  SHA3-UPDATE  SHA3-FINAL  SHA3-STATUS@
+\    SHA3-MODE! SHA3-MODE@  SHA3-SQUEEZE
+\  BIOS TRNG (hardware at MMIO 0x0800):
+\    RANDOM  RANDOM8  SEED-RNG
+\
+\  Modes: 0=SHA3-256  1=SHA3-512  2=SHAKE128  3=SHAKE256
 
-CREATE SHA3-BUF 32 ALLOT
+0 CONSTANT SHA3-256-MODE
+1 CONSTANT SHA3-512-MODE
+2 CONSTANT SHAKE128-MODE
+3 CONSTANT SHAKE256-MODE
 
-\ SHA3 ( addr len hash-addr -- )  Hash buffer, store 32-byte digest.
+CREATE SHA3-BUF 64 ALLOT
+
 : SHA3
-    >R                        \ save dest
+    >R
     SHA3-INIT
     SHA3-UPDATE
     R> SHA3-FINAL ;
 
-\ .SHA3-STATUS ( -- )  Print human-readable SHA3 status.
+: SHAKE128  ( addr len out outlen -- )
+    >R >R
+    SHAKE128-MODE SHA3-MODE!
+    SHA3-INIT
+    SHA3-UPDATE
+    R> R>
+    OVER SHA3-FINAL
+    DROP ;
+
+: SHAKE256  ( addr len out outlen -- )
+    >R >R
+    SHAKE256-MODE SHA3-MODE!
+    SHA3-INIT
+    SHA3-UPDATE
+    R> R>
+    OVER SHA3-FINAL
+    DROP
+    SHA3-256-MODE SHA3-MODE! ;
+
 : .SHA3-STATUS
     SHA3-STATUS@
     DUP 0 = IF DROP ." SHA3: idle" CR ELSE
@@ -517,15 +544,23 @@ CREATE SHA3-BUF 32 ALLOT
     DROP ." SHA3: unknown" CR
     THEN THEN ;
 
-\ .SHA3 ( addr -- )  Print 32-byte digest as hex string.
-: .SHA3
-    32 0 DO
+: .SHA3  ( addr len -- )
+    0 DO
         DUP I + C@
         DUP 4 RSHIFT
         DUP 10 < IF 48 + ELSE 55 + THEN EMIT
         15 AND
         DUP 10 < IF 48 + ELSE 55 + THEN EMIT
     LOOP DROP ;
+
+: RANDOM32  ( -- u )
+    RANDOM 0xFFFFFFFF AND ;
+
+: RANDOM16  ( -- u )
+    RANDOM 0xFFFF AND ;
+
+: RAND-RANGE  ( max -- n )
+    RANDOM SWAP MOD ;
 
 \ =====================================================================
 \  §1.7  Unified Crypto Words
@@ -5343,17 +5378,8 @@ CREATE DNS-SERVER-IP  4 ALLOT
 
 VARIABLE DHCP-XID    305419896 DHCP-XID !   \ 0x12345678
 
-\ -- DHCP-NEW-XID: generate a pseudo-random transaction ID --
-\   Uses CYCLES (CPU cycle counter) and a simple xorshift mixer.
-VARIABLE _DHCP-RNG-STATE  48271 _DHCP-RNG-STATE !
 : DHCP-NEW-XID  ( -- )
-    _DHCP-RNG-STATE @ CYCLES XOR
-    DUP 13 LSHIFT XOR
-    DUP  7 RSHIFT XOR
-    DUP 17 LSHIFT XOR
-    DUP _DHCP-RNG-STATE !
-    0xFFFFFFFF AND            \ DHCP XID is 32-bit
-    DHCP-XID ! ;
+    RANDOM32 DHCP-XID ! ;
 
 \ -- DHCP-VALIDATE-REPLY: strict validation of incoming DHCP reply --
 \   Checks: op=BOOTREPLY(2), magic cookie, xid match, chaddr match
@@ -5660,7 +5686,7 @@ VARIABLE _DHST-SIP
 CREATE DNS-BUF  512 ALLOT  \ max DNS message
 \ DNS-SERVER-IP is declared in §16.5 (DHCP) so DHCP-PARSE-ACK can set it.
 
-VARIABLE DNS-ID   42 DNS-ID !
+VARIABLE DNS-ID   RANDOM16 DNS-ID !
 
 \ -- DNS-ENCODE-NAME: encode domain name in DNS wire format --
 \   Converts "example.com" → [7]example[3]com[0]
@@ -5715,7 +5741,7 @@ VARIABLE _DNQ-DLEN
     DUP 1 SWAP NW16!  2 +            \ QTYPE = A (1)
     DUP 1 SWAP NW16!  2 +            \ QCLASS = IN (1)
     DNS-BUF -                         \ total length
-    DNS-ID @ 1+ 65535 AND DNS-ID !    \ increment ID
+    RANDOM16 DNS-ID !                  \ random ID per query
     DNS-BUF SWAP ;
 
 \ -- DNS-PARSE-RESPONSE: parse DNS response, extract first A record IP --

@@ -5,18 +5,19 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (265 dict entries, 10,070 lines ASM),
-KDOS v1.1 (5,328 lines), Emulator (2,541 lines + 598-line quad-core SoC +
-1,929-line C++ accelerator), FPGA RTL (18 Verilog modules + 13 testbenches),
-devices.py (1,418 lines), 754 test methods passing in 23 s (CPython + C++).
-Branch: `features/cpp-accelerator`.
+**Current state (Feb 2026):** BIOS (272 dict entries, 10,237 lines ASM),
+KDOS v1.1 (5,851 lines), Emulator (2,541 lines + 597-line quad-core SoC +
+1,929-line C++ accelerator), FPGA RTL (20 Verilog modules + 14 testbenches),
+devices.py (1,500 lines), 828 test methods passing in 24 s (CPython + C++).
+Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
-**functionally complete**.  Foundation layer (items 1–4) and crypto
-accelerators (items 5–6) are done.  Remaining work: KDOS crypto words,
-filesystem encryption, full network stack (Ethernet → TLS 1.3 → sockets),
-multicore OS, and application-level features.
+**functionally complete**.  Foundation (items 1–4), crypto stack
+(items 5–8), network L2–L4 through DNS (items 9–15), and multicore OS
+(items 19–24) are done.  Crypto enhanced with hardware TRNG, SHAKE
+XOF support, and post-quantum readiness.  Remaining work: TCP, TLS 1.3,
+socket API, and application-level features.
 
 ---
 
@@ -24,7 +25,7 @@ multicore OS, and application-level features.
 
 ### BIOS v1.0 — ✅ DONE
 
-265 dictionary entries, 10,070 lines ASM, ~22 KB binary.
+272 dictionary entries, 10,237 lines ASM, ~22 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -39,6 +40,11 @@ multicore OS, and application-level features.
 - ✅ Timer, NIC, tile-engine CSR access words
 - ✅ EVALUATE, COMPARE, VALUE/TO, POSTPONE, DOES>, RECURSE, 2>R/2R>/2R@
 - ✅ Bus-fault handler, ABORT/ABORT"
+- ✅ **SHA-3/SHAKE**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@,
+  SHA3-MODE!, SHA3-MODE@, SHA3-SQUEEZE (7 words, 4 modes: SHA3-256/512,
+  SHAKE128/256)
+- ✅ **Hardware TRNG**: RANDOM, RANDOM8, SEED-RNG (3 words, CSPRNG-backed
+  in emulator, ring-oscillator + SHA-3 conditioner on FPGA)
 - ✅ **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!,
   MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS (11 words)
 - ✅ **Extended tile**: TSUMSQ, TMINIDX, TMAXIDX, TWMUL, TMAC, TFMA,
@@ -54,9 +60,9 @@ multicore OS, and application-level features.
   TSTORE2D (6 words)
 - ✅ **FP16/BF16**: FP16-MODE, BF16-MODE (2 words)
 
-### KDOS v1.1 — ✅ DONE (core + multicore)
+### KDOS v1.1 — ✅ DONE (core + multicore + crypto)
 
-433 word definitions + 219 variables/constants/creates, 5,328 lines.
+445+ word definitions + 230+ variables/constants/creates, 5,851 lines.
 
 16 sections:
 - §1 Utility words, §2 Buffer subsystem, §3 Tile-aware buffer ops
@@ -84,20 +90,21 @@ multicore OS, and application-level features.
 - ✅ megapad64.py: Full CPU emulation (2,541 lines, incl. extended tile, FP16/BF16)
 - ✅ accel/mp64_accel.cpp: C++ CPU core via pybind11 (1,929 lines, 63× speedup)
 - ✅ accel_wrapper.py: Drop-in wrapper for C++ CPU (829 lines)
-- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, `run_batch()` (546 lines)
+- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, TRNG, `run_batch()` (597 lines)
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals including CRC engine, AES, SHA3 (1,418 lines)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG (1,500 lines)
 
-### Test Suite — ✅ 754 tests
+### Test Suite — ✅ 828 tests
 
-- TestBIOS: 140, TestBIOSHardening: 12, TestMulticore: 17
-- TestKDOS: 303, TestKDOSAllocator: 13, TestKDOSExceptions: 8
+- TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
+- TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
 - TestKDOSCRC: 8, TestKDOSDiagnostics: 7, TestKDOSAES: 9
-- TestKDOSSHA3: 10, TestKDOSCrypto: 10, TestKDOSHardening: 12
+- TestKDOSSHA3: 10, TestKDOSSHAKE: 6, TestKDOSTRNG: 8
+- TestKDOSCrypto: 10, TestKDOSHardening: 12
 - TestKDOSFilesystem: 15, TestKDOSFileCrypto: 8
-- TestPipelineBundles: 13, TestKDOSMulticore: 19
+- TestPipelineBundles: 13, TestKDOSMulticore: 79
 - TestKDOSNetStack: 161
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
@@ -106,10 +113,10 @@ multicore OS, and application-level features.
 
 ### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore)
 
-18 Verilog modules in `fpga/rtl/`, 13 testbenches, 137 hardware tests passing.
+20 Verilog modules in `fpga/rtl/`, 14 testbenches, 146 hardware tests passing.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
-- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring)
+- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring, TRNG)
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
 - ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
@@ -117,6 +124,8 @@ multicore OS, and application-level features.
   LOAD2D, STORE2D)
 - ✅ mp64_fp16_alu.v — FP16/BF16 half-precision tile operations
 - ✅ mp64_icache.v — Per-core 4 KiB direct-mapped instruction cache (256×16B lines)
+- ✅ mp64_trng.v — True Random Number Generator (ring-oscillator + LFSR
+  conditioner, health monitoring, 9 unit tests)
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
 - ✅ Nexys A7-200T target (no post-synthesis resource numbers yet)
 
@@ -162,11 +171,17 @@ Fully implemented in both emulator and RTL with comprehensive test coverage.
    KDOS §1.5: `AES-ENCRYPT`, `AES-DECRYPT`, `.AES-STATUS`.
    (commit `c77c77f`, 9 tests)
 
-6. ✅ **SHA-3 (Keccak-256)** — `SHA3Device` in `devices.py`: full
-   Keccak-f[1600] permutation, byte-streaming absorb, SHA3-256 with
-   rate=136.  4 BIOS words: `SHA3-INIT`, `SHA3-UPDATE`, `SHA3-FINAL`,
-   `SHA3-STATUS@`.  KDOS §1.6: `SHA3`, `.SHA3-STATUS`, `.SHA3`.
-   (commit `82548db`, 10 tests)
+6. ✅ **SHA-3 / SHAKE / TRNG** — `SHA3Device` in `devices.py`: full
+   Keccak-f[1600] permutation, 4 modes (SHA3-256, SHA3-512, SHAKE128,
+   SHAKE256), XOF squeeze support.  `TRNGDevice`: hardware CSPRNG
+   backed by `os.urandom()`, MMIO at 0x0800.  7 BIOS words:
+   `SHA3-INIT`, `SHA3-UPDATE`, `SHA3-FINAL`, `SHA3-STATUS@`,
+   `SHA3-MODE!`, `SHA3-MODE@`, `SHA3-SQUEEZE`.  3 TRNG words:
+   `RANDOM`, `RANDOM8`, `SEED-RNG`.  KDOS §1.6: `SHA3`, `SHAKE128`,
+   `SHAKE256`, `RANDOM32`, `RANDOM16`, `RAND-RANGE`, `.SHA3-STATUS`,
+   `.SHA3`.  FPGA: `mp64_trng.v` with ring-oscillator entropy +
+   conditioned pool + health monitoring (9 HW tests).
+   (commits `82548db`..`pending`, 24 tests)
 
 7. ✅ **KDOS crypto words** — `HASH`, `HMAC`, `ENCRYPT`, `DECRYPT`, `VERIFY`
    (commit `d77db63`, 10 tests)
@@ -273,7 +288,7 @@ Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3 ✅, crypto words ✅, FS e
 Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → ICMP ✅ → UDP ✅ →
                       DHCP ✅ → DNS ✅ → TCP → TLS 1.3 → Socket API)
                       ~35 sub-commits across 10 protocol items
-Layer 3  Items 19–24  Multi-Core OS (run queues, work stealing, affinity,
+Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
 Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
                       scripting, remote REPL)
@@ -292,24 +307,24 @@ continuous progress, reviewable diffs, and a working system at every step.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 10,070 | ✅ 265 dictionary entries |
-| `kdos.f` | 5,328 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
+| `bios.asm` | 10,237 | ✅ 272 dictionary entries |
+| `kdos.f` | 5,851 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `accel/mp64_accel.cpp` | 1,929 | ✅ C++ CPU core (pybind11, 63× speedup) |
 | `accel_wrapper.py` | 830 | ✅ Drop-in wrapper for C++ CPU core |
-| `system.py` | 598 | ✅ Quad-core SoC + `run_batch()` C++ fast path |
+| `system.py` | 597 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
 | `cli.py` | 995 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 1,418 | ✅ AES-256-GCM, SHA3, CRC, Mailbox, Spinlock |
+| `devices.py` | 1,500 | ✅ AES-256-GCM, SHA3/SHAKE, TRNG, CRC, Mailbox, Spinlock |
 | `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 9,673 | 754 test methods (25 classes) ✅ |
+| `test_system.py` | 10,567 | 805 test methods (27 classes) ✅ |
 | `setup_accel.py` | 35 | ✅ pybind11 build configuration |
 | `bench_accel.py` | 139 | ✅ C++ vs Python speed comparison |
 | `Makefile` | 177 | ✅ Build, test, & accel targets |
 | `conftest.py` | 193 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `fpga/rtl/` | ~11,284 | ✅ 18 Verilog modules |
-| `fpga/sim/` | ~7,293 | ✅ 13 testbenches (137 HW tests) |
+| `fpga/rtl/` | ~11,493 | ✅ 20 Verilog modules |
+| `fpga/sim/` | ~7,557 | ✅ 14 testbenches (146 HW tests) |
 | `docs/` | 9 files | ✅ Written |
 | `README.md` | 350 | ✅ Current |

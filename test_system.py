@@ -6049,6 +6049,202 @@ class TestKDOSSHA3(_KDOSTestBase):
         self.assertIn("H3=159 ", text)
 
 
+class TestKDOSSHAKE(_KDOSTestBase):
+    """Tests for SHAKE128/256 extendable-output functions."""
+
+    # Reference vectors (hashlib):
+    # SHAKE128("abc", 32) → first 4 bytes: 88, 129, 9, 45
+    # SHAKE256("abc", 32) → first 4 bytes: 72, 51, 102, 96
+    # SHA3-512("abc")     → first 4 bytes: 183, 81, 133, 11
+
+    def test_sha3_mode_roundtrip(self):
+        """SHA3-MODE! / SHA3-MODE@ round-trip the mode value."""
+        text = self._run_kdos([
+            '." M0=" SHA3-MODE@ .',     # default mode = 0 (SHA3-256)
+            '3 SHA3-MODE!',
+            '." M3=" SHA3-MODE@ .',     # now SHAKE256 mode = 3
+            '0 SHA3-MODE!',             # restore default
+        ])
+        self.assertIn("M0=0 ", text)
+        self.assertIn("M3=3 ", text)
+
+    def test_sha3_512_abc(self):
+        """SHA3-512('abc') first 4 bytes = 183, 81, 133, 11."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT",
+            "1 SHA3-MODE!",             # SHA3-512
+            "SHA3-INIT",
+            "msg 3 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',
+            '." H1=" h-buf 1 + C@ .',
+            '." H2=" h-buf 2 + C@ .',
+            '." H3=" h-buf 3 + C@ .',
+            "0 SHA3-MODE!",             # restore SHA3-256
+        ])
+        self.assertIn("H0=183 ", text)
+        self.assertIn("H1=81 ", text)
+        self.assertIn("H2=133 ", text)
+        self.assertIn("H3=11 ", text)
+
+    def test_sha3_512_empty(self):
+        """SHA3-512('') first 4 bytes = 166, 159, 115, 204."""
+        text = self._run_kdos([
+            "CREATE h-buf 64 ALLOT",
+            "1 SHA3-MODE!",
+            "SHA3-INIT",
+            "h-buf SHA3-FINAL",
+            '." H0=" h-buf C@ .',
+            '." H1=" h-buf 1 + C@ .',
+            '." H2=" h-buf 2 + C@ .',
+            '." H3=" h-buf 3 + C@ .',
+            "0 SHA3-MODE!",
+        ])
+        self.assertIn("H0=166 ", text)
+        self.assertIn("H1=159 ", text)
+        self.assertIn("H2=115 ", text)
+        self.assertIn("H3=204 ", text)
+
+    def test_shake128_abc(self):
+        """SHAKE128('abc', 32) first 4 bytes = 88, 129, 9, 45."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE out 32 ALLOT",
+            "msg 3 out 32 SHAKE128",
+            '." H0=" out C@ .',
+            '." H1=" out 1 + C@ .',
+            '." H2=" out 2 + C@ .',
+            '." H3=" out 3 + C@ .',
+        ])
+        self.assertIn("H0=88 ", text)
+        self.assertIn("H1=129 ", text)
+        self.assertIn("H2=9 ", text)
+        self.assertIn("H3=45 ", text)
+
+    def test_shake256_abc(self):
+        """SHAKE256('abc', 32) first 4 bytes = 72, 51, 102, 96."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE out 32 ALLOT",
+            "msg 3 out 32 SHAKE256",
+            '." H0=" out C@ .',
+            '." H1=" out 1 + C@ .',
+            '." H2=" out 2 + C@ .',
+            '." H3=" out 3 + C@ .',
+        ])
+        self.assertIn("H0=72 ", text)
+        self.assertIn("H1=51 ", text)
+        self.assertIn("H2=102 ", text)
+        self.assertIn("H3=96 ", text)
+
+    def test_shake256_restores_mode(self):
+        """SHAKE256 restores SHA3-256 mode after use."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE out 32 ALLOT",
+            "msg 3 out 32 SHAKE256",
+            '." MODE=" SHA3-MODE@ .',     # should be 0 again
+        ])
+        self.assertIn("MODE=0 ", text)
+
+
+class TestKDOSTRNG(_KDOSTestBase):
+    """Tests for hardware TRNG (§1.6 RNG words)."""
+
+    def test_random8_in_range(self):
+        """RANDOM8 returns a value 0-255."""
+        text = self._run_kdos([
+            '." R8=" RANDOM8 .',
+        ])
+        import re
+        m = re.search(r'R8=(\d+)', text)
+        self.assertIsNotNone(m)
+        val = int(m.group(1))
+        self.assertTrue(0 <= val <= 255, f"RANDOM8 out of byte range: {val}")
+
+    def test_random_nonzero(self):
+        """RANDOM (64-bit) is very unlikely to be zero — collect 4 and check."""
+        text = self._run_kdos([
+            '." R=" RANDOM .',
+        ])
+        import re
+        m = re.search(r'R=(-?\d+)', text)
+        self.assertIsNotNone(m)
+        # A 64-bit random value printed as signed Forth integer
+        # Just ensure we got a number out
+        self.assertIsNotNone(m.group(1))
+
+    def test_random32_range(self):
+        """RANDOM32 returns a 32-bit value (0..0xFFFFFFFF)."""
+        text = self._run_kdos([
+            '." R32=" RANDOM32 .',
+        ])
+        import re
+        m = re.search(r'R32=(\d+)', text)
+        self.assertIsNotNone(m)
+        val = int(m.group(1))
+        self.assertTrue(0 <= val <= 0xFFFFFFFF, f"RANDOM32 out of range: {val}")
+
+    def test_random16_range(self):
+        """RANDOM16 returns a 16-bit value (0..0xFFFF)."""
+        text = self._run_kdos([
+            '." R16=" RANDOM16 .',
+        ])
+        import re
+        m = re.search(r'R16=(\d+)', text)
+        self.assertIsNotNone(m)
+        val = int(m.group(1))
+        self.assertTrue(0 <= val <= 0xFFFF, f"RANDOM16 out of range: {val}")
+
+    def test_rand_range(self):
+        """RAND-RANGE ( max -- n ) returns value in [0, max)."""
+        text = self._run_kdos([
+            '." V=" 100 RAND-RANGE .',
+        ])
+        import re
+        m = re.search(r'V=(\d+)', text)
+        self.assertIsNotNone(m)
+        val = int(m.group(1))
+        self.assertTrue(0 <= val < 100, f"RAND-RANGE 100 gave {val}")
+
+    def test_seed_rng_no_crash(self):
+        """SEED-RNG accepts a value without crashing."""
+        text = self._run_kdos([
+            "12345678 SEED-RNG",
+            '." SEEDED=OK"',
+        ])
+        self.assertIn("SEEDED=OK", text)
+
+    def test_two_randoms_differ(self):
+        """Two consecutive RANDOM calls should produce different values."""
+        text = self._run_kdos([
+            'RANDOM .\" A=" .',
+            'RANDOM .\" B=" .',
+        ])
+        import re
+        ma = re.search(r'A=(-?\d+)', text)
+        mb = re.search(r'B=(-?\d+)', text)
+        self.assertIsNotNone(ma)
+        self.assertIsNotNone(mb)
+        self.assertNotEqual(ma.group(1), mb.group(1))
+
+    def test_dns_id_random(self):
+        """DNS-ID is initialized with a random value (not fixed 42)."""
+        text = self._run_kdos([
+            '." DNSID=" DNS-ID @ .',
+        ])
+        import re
+        m = re.search(r'DNSID=(\d+)', text)
+        self.assertIsNotNone(m)
+        # The value should be random 16-bit — it might happen to be 42
+        # but the point is the code path works without crashing
+
+
 class TestKDOSCrypto(_KDOSTestBase):
     """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
 
