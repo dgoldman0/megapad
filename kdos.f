@@ -4054,20 +4054,18 @@ CREATE NET-MASK  4 ALLOT
 : IP=  ( addr1 addr2 -- flag )   4 SAMESTR? ;
 
 \ -- IP address store/fetch helpers --
-: IP!  ( b3 b2 b1 b0 addr -- )   \ store 4 octets (b3.b2.b1.b0)
-    DUP >R
-    R@ C!
-    R@ 1+ C!
-    R@ 2 + C!
-    R> 3 + C! ;
+: IP!  ( a b c d addr -- )   \ store dotted quad a.b.c.d
+    >R
+    R@ 3 + C!    \ d at addr+3
+    R@ 2 + C!    \ c at addr+2
+    R@ 1+ C!     \ b at addr+1
+    R> C! ;      \ a at addr+0
 
-: IP@  ( addr -- b3 b2 b1 b0 )   \ fetch 4 octets
-    DUP 3 + C@
-    OVER 2 + C@
-    2 PICK 1+ C@
-    3 PICK C@
-    SWAP >R SWAP >R SWAP R> R>
-    ROT DROP ;
+: IP@  ( addr -- a b c d )   \ fetch dotted quad a.b.c.d
+    DUP C@ SWAP
+    DUP 1+ C@ SWAP
+    DUP 2 + C@ SWAP
+    3 + C@ ;
 
 \ -- Set our IP address (dotted quad) --
 : IP-SET  ( b0 b1 b2 b3 -- )   MY-IP IP! ;
@@ -4130,6 +4128,135 @@ VARIABLE _ARP-SLOT
             DROP
         THEN
     LOOP ;
+
+\ -- 10b: ARP request / reply build + parse + resolve --
+\ ARP payload is 28 bytes (Ethernet/IPv4):
+\   +0  HTYPE  2B  0x0001 (Ethernet)
+\   +2  PTYPE  2B  0x0800 (IPv4)
+\   +4  HLEN   1B  6
+\   +5  PLEN   1B  4
+\   +6  OPER   2B  1=request  2=reply
+\   +8  SHA    6B  sender MAC
+\  +14  SPA    4B  sender IP
+\  +18  THA    6B  target MAC
+\  +24  TPA    4B  target IP
+
+1 CONSTANT ARP-OP-REQUEST
+2 CONSTANT ARP-OP-REPLY
+
+CREATE ARP-PKT-BUF  /ARP-PKT ALLOT   \ 28-byte scratch for building ARP
+
+\ -- field offsets within ARP payload --
+: ARP-F.HTYPE  ( buf -- addr )        ;             \ +0
+: ARP-F.PTYPE  ( buf -- addr )  2 + ;               \ +2
+: ARP-F.HLEN   ( buf -- addr )  4 + ;               \ +4
+: ARP-F.PLEN   ( buf -- addr )  5 + ;               \ +5
+: ARP-F.OPER   ( buf -- addr )  6 + ;               \ +6
+: ARP-F.SHA    ( buf -- addr )  8 + ;               \ +8
+: ARP-F.SPA    ( buf -- addr )  14 + ;              \ +14
+: ARP-F.THA    ( buf -- addr )  18 + ;              \ +18
+: ARP-F.TPA    ( buf -- addr )  24 + ;              \ +24
+
+\ -- ARP-FILL-HDR: set the invariant Ethernet/IPv4 header fields --
+: ARP-FILL-HDR  ( buf -- )
+    DUP /ARP-PKT 0 FILL        \ zero entire buffer
+    DUP ARP-F.HTYPE  0 SWAP C!  DUP ARP-F.HTYPE 1+ 1 SWAP C!   \ HTYPE=1 (BE)
+    DUP ARP-F.PTYPE  8 SWAP C!  DUP ARP-F.PTYPE 1+ 0 SWAP C!   \ PTYPE=0x0800 (BE)
+    DUP ARP-F.HLEN   6 SWAP C!                                   \ HLEN=6
+    ARP-F.PLEN   4 SWAP C! ;                                     \ PLEN=4
+
+\ -- ARP-SET-OPER: write operation code (big-endian 16-bit) --
+: ARP-SET-OPER  ( op buf -- )
+    ARP-F.OPER  SWAP DUP 8 RSHIFT  ( addr lo hi )
+    2 PICK C!  SWAP 1+ C! ;
+
+\ -- ARP-BUILD-REQUEST: build ARP request for target IP --
+\ ( target-ip -- buf len )   buf = ARP-PKT-BUF, len = /ARP-PKT
+: ARP-BUILD-REQUEST
+    ARP-PKT-BUF ARP-FILL-HDR
+    ARP-OP-REQUEST ARP-PKT-BUF ARP-SET-OPER
+    \ SHA = MY-MAC
+    MY-MAC ARP-PKT-BUF ARP-F.SHA 6 CMOVE
+    \ SPA = MY-IP
+    MY-IP ARP-PKT-BUF ARP-F.SPA 4 CMOVE
+    \ THA = 00:00:00:00:00:00  (already zeroed)
+    \ TPA = target-ip
+    ARP-PKT-BUF ARP-F.TPA 4 CMOVE
+    ARP-PKT-BUF /ARP-PKT ;
+
+\ -- ARP-BUILD-REPLY: build ARP reply to a received ARP request --
+\ ( rx-arp-buf -- buf len )  builds reply in ARP-PKT-BUF
+: ARP-BUILD-REPLY  ( rx-arp -- buf len )
+    ARP-PKT-BUF ARP-FILL-HDR
+    ARP-OP-REPLY ARP-PKT-BUF ARP-SET-OPER
+    \ SHA = MY-MAC
+    MY-MAC ARP-PKT-BUF ARP-F.SHA 6 CMOVE
+    \ SPA = MY-IP
+    MY-IP ARP-PKT-BUF ARP-F.SPA 4 CMOVE
+    \ THA = requester's SHA
+    DUP ARP-F.SHA ARP-PKT-BUF ARP-F.THA 6 CMOVE
+    \ TPA = requester's SPA
+    ARP-F.SPA ARP-PKT-BUF ARP-F.TPA 4 CMOVE
+    ARP-PKT-BUF /ARP-PKT ;
+
+\ -- ARP-SEND-REQUEST: broadcast ARP request for target IP --
+\ ( target-ip -- )
+: ARP-SEND-REQUEST
+    ARP-BUILD-REQUEST               \ ( buf len )
+    >R >R                           \ save buf,len on R
+    MAC-BCAST ETYPE-ARP R> R>       \ ( dst etype buf len )
+    ETH-SEND-TX ;
+
+\ -- ARP-PARSE-REPLY: extract sender MAC+IP from ARP reply into table --
+\ ( arp-buf -- )  feeds ARP-INSERT with sender info
+: ARP-PARSE-REPLY  ( arp-buf -- )
+    DUP ARP-F.SPA SWAP ARP-F.SHA   \ ( spa sha )
+    ARP-INSERT ;
+
+\ -- ARP-IS-REQUEST?: check if ARP payload is a request (OPER=1) --
+: ARP-IS-REQUEST?  ( arp-buf -- flag )
+    ARP-F.OPER DUP C@ 8 LSHIFT SWAP 1+ C@ +  \ big-endian 16-bit
+    ARP-OP-REQUEST = ;
+
+\ -- ARP-IS-REPLY?: check if ARP payload is a reply (OPER=2) --
+: ARP-IS-REPLY?  ( arp-buf -- flag )
+    ARP-F.OPER DUP C@ 8 LSHIFT SWAP 1+ C@ +
+    ARP-OP-REPLY = ;
+
+\ -- ARP-FOR-US?: check if ARP TPA matches MY-IP --
+: ARP-FOR-US?  ( arp-buf -- flag )
+    ARP-F.TPA MY-IP IP= ;
+
+VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
+\ -- ARP-RESOLVE: resolve IP to MAC, sending request if needed --
+\ ( ip-addr -- mac-addr | 0 )
+\ First checks table; if miss, sends request & waits for reply.
+: ARP-RESOLVE  ( ip -- mac|0 )
+    DUP ARP-LOOKUP DUP 0<> IF
+        NIP EXIT   \ found in table
+    THEN
+    DROP                      \ drop the 0
+    DUP _ARP-RES-IP !         \ save IP
+    ARP-SEND-REQUEST           \ broadcast request (consumes ip)
+    \ Wait for ARP reply (up to 10 receive attempts)
+    10 0 DO
+        3 ETH-RECV-WAIT           \ ( len ) — ETH-RECV uses ETH-RX-BUF internally
+        DUP 0 > IF
+            ETH-RX-BUF ETH-IS-ARP? IF
+                ETH-RX-BUF ETH-PLD ARP-IS-REPLY? IF
+                    ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY
+                    _ARP-RES-IP @ ARP-LOOKUP
+                    DUP 0<> IF
+                        SWAP DROP   \ drop recv len under mac
+                        UNLOOP EXIT
+                    THEN
+                    DROP   \ drop 0 from failed lookup
+                THEN
+            THEN
+        THEN
+        DROP   \ drop recv len
+    LOOP
+    0 ;        \ timeout — no reply
 
 \ =====================================================================
 \  §14  Startup

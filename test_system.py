@@ -7711,11 +7711,10 @@ class TestKDOSNetStack(TestKDOS):
         """IP-SET should configure MY-IP."""
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            "MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
+            ".\" ip=\" MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
         ])
-        self.assertIn("192 ", text)
-        self.assertIn("168 ", text)
-        self.assertIn("100 ", text)
+        # Use tagged output to avoid matching echoed input
+        self.assertIn("ip=192 168 1 100 ", text)
 
     def test_dot_arp_prints_table(self):
         """.ARP should print the ARP table."""
@@ -7740,6 +7739,221 @@ class TestKDOSNetStack(TestKDOS):
             "CREATE iq3 4 ALLOT  10 iq3 C!  0 iq3 1+ C!  0 iq3 2 + C!  1 iq3 3 + C!",
             "CREATE iq4 4 ALLOT  10 iq4 C!  0 iq4 1+ C!  0 iq4 2 + C!  2 iq4 3 + C!",
             "iq3 iq4 IP= .",
+        ])
+        self.assertIn("0 ", text)
+
+    # --- 10b: ARP request/reply build+parse + ARP-RESOLVE ---
+
+    def test_arp_op_constants(self):
+        """ARP operation constants."""
+        text = self._run_kdos([
+            "ARP-OP-REQUEST .",
+            "ARP-OP-REPLY .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+
+    def test_arp_build_request_length(self):
+        """ARP-BUILD-REQUEST should return 28-byte payload."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip 4 ALLOT  192 tip C!  168 tip 1+ C!  1 tip 2 + C!  1 tip 3 + C!",
+            "tip ARP-BUILD-REQUEST . DROP",
+        ])
+        self.assertIn("28 ", text)
+
+    def test_arp_build_request_htype(self):
+        """ARP request should have HTYPE=0x0001."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip2 4 ALLOT  10 tip2 C!  0 tip2 1+ C!  0 tip2 2 + C!  1 tip2 3 + C!",
+            "tip2 ARP-BUILD-REQUEST DROP",   # buf on stack
+            "DUP ARP-F.HTYPE C@ .  DUP ARP-F.HTYPE 1+ C@ . DROP",
+        ])
+        self.assertIn("0 ", text)   # high byte = 0
+        self.assertIn("1 ", text)   # low byte = 1
+
+    def test_arp_build_request_ptype(self):
+        """ARP request should have PTYPE=0x0800."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip3 4 ALLOT  10 tip3 C!  0 tip3 1+ C!  0 tip3 2 + C!  1 tip3 3 + C!",
+            "tip3 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.PTYPE C@ .  DUP ARP-F.PTYPE 1+ C@ . DROP",
+        ])
+        self.assertIn("8 ", text)    # high byte
+        self.assertIn("0 ", text)    # low byte
+
+    def test_arp_build_request_oper(self):
+        """ARP request should have OPER=1 (request)."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip4 4 ALLOT  10 tip4 C!  0 tip4 1+ C!  0 tip4 2 + C!  1 tip4 3 + C!",
+            "tip4 ARP-BUILD-REQUEST DROP",
+            "ARP-IS-REQUEST? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_sha_is_my_mac(self):
+        """ARP request SHA should be MY-MAC."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip5 4 ALLOT  10 tip5 C!  0 tip5 1+ C!  0 tip5 2 + C!  1 tip5 3 + C!",
+            "tip5 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.SHA MY-MAC 6 SAMESTR? .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_spa_is_my_ip(self):
+        """ARP request SPA should be MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip6 4 ALLOT  10 tip6 C!  0 tip6 1+ C!  0 tip6 2 + C!  1 tip6 3 + C!",
+            "tip6 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.SPA MY-IP IP= .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_build_request_tpa_matches(self):
+        """ARP request TPA should be the target IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip7 4 ALLOT  10 tip7 C!  0 tip7 1+ C!  0 tip7 2 + C!  99 tip7 3 + C!",
+            "tip7 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-F.TPA tip7 IP= .",
+            "DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_is_request(self):
+        """ARP-IS-REQUEST? on a built request."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE tip8 4 ALLOT  10 tip8 C!  0 tip8 1+ C!  0 tip8 2 + C!  1 tip8 3 + C!",
+            "tip8 ARP-BUILD-REQUEST DROP",
+            "DUP ARP-IS-REQUEST? . ARP-IS-REPLY? .",
+        ])
+        self.assertIn("-1 ", text)   # is request
+        self.assertIn("0 ", text)    # not reply
+
+    def test_arp_build_reply(self):
+        """ARP-BUILD-REPLY should produce OPER=2 with correct THA/TPA."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Build a fake request buffer in memory
+            "CREATE rq 28 ALLOT  rq 28 0 FILL",
+            # Set SHA = AA:BB:CC:DD:EE:01
+            "170 rq 8 + C!  187 rq 9 + C!  204 rq 10 + C!",
+            "221 rq 11 + C!  238 rq 12 + C!  1 rq 13 + C!",
+            # Set SPA = 192.168.1.50
+            "192 rq 14 + C!  168 rq 15 + C!  1 rq 16 + C!  50 rq 17 + C!",
+            "rq ARP-BUILD-REPLY DROP",   # build reply in ARP-PKT-BUF
+            "DUP ARP-IS-REPLY? .\" rep\"",
+            # THA should be the requester's SHA
+            "DUP ARP-F.THA C@ .",        # should be 170 (0xAA)
+            # TPA should be requester's SPA (192.168.1.50)
+            "DUP ARP-F.TPA C@ .",        # should be 192
+            "DROP",
+        ])
+        self.assertIn("rep", text)
+        self.assertIn("170 ", text)
+        self.assertIn("192 ", text)
+
+    def test_arp_for_us(self):
+        """ARP-FOR-US? should match when TPA = MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE rq2 28 ALLOT  rq2 28 0 FILL",
+            # TPA = 192.168.1.100 (MY-IP)
+            "192 rq2 24 + C!  168 rq2 25 + C!  1 rq2 26 + C!  100 rq2 27 + C!",
+            "rq2 ARP-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_not_for_us(self):
+        """ARP-FOR-US? should reject when TPA != MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE rq3 28 ALLOT  rq3 28 0 FILL",
+            "192 rq3 24 + C!  168 rq3 25 + C!  1 rq3 26 + C!  200 rq3 27 + C!",
+            "rq3 ARP-FOR-US? .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_arp_parse_reply_inserts(self):
+        """ARP-PARSE-REPLY should insert sender into ARP table."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            # Build a fake reply buffer: SPA=10.0.0.42, SHA=11:22:33:44:55:66
+            "CREATE rep 28 ALLOT  rep 28 0 FILL",
+            "17 rep 8 + C!  34 rep 9 + C!  51 rep 10 + C!",
+            "68 rep 11 + C!  85 rep 12 + C!  102 rep 13 + C!",
+            "10 rep 14 + C!  0 rep 15 + C!  0 rep 16 + C!  42 rep 17 + C!",
+            "rep ARP-PARSE-REPLY",
+            # Now look up 10.0.0.42
+            "CREATE lip 4 ALLOT  10 lip C!  0 lip 1+ C!  0 lip 2 + C!  42 lip 3 + C!",
+            "lip ARP-LOOKUP DUP 0<> .\" ok\"",
+            "DUP IF C@ . THEN DROP",
+        ])
+        self.assertIn("ok", text)
+        self.assertIn("17 ", text)   # first MAC byte
+
+    @staticmethod
+    def _build_arp_reply_frame(sender_mac, sender_ip, target_mac, target_ip):
+        """Build a raw ARP reply Ethernet frame for NIC injection."""
+        # Ethernet header: dst=target_mac, src=sender_mac, type=0x0806
+        frame = bytes(target_mac) + bytes(sender_mac) + b'\x08\x06'
+        # ARP payload (28 bytes)
+        arp = bytearray(28)
+        arp[0:2] = b'\x00\x01'   # HTYPE=1
+        arp[2:4] = b'\x08\x00'   # PTYPE=0x0800
+        arp[4] = 6               # HLEN
+        arp[5] = 4               # PLEN
+        arp[6:8] = b'\x00\x02'   # OPER=2 (reply)
+        arp[8:14] = bytes(sender_mac)   # SHA
+        arp[14:18] = bytes(sender_ip)   # SPA
+        arp[18:24] = bytes(target_mac)  # THA
+        arp[24:28] = bytes(target_ip)   # TPA
+        return frame + bytes(arp)
+
+    def test_arp_resolve_cached(self):
+        """ARP-RESOLVE should return cached entry without sending."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE rip 4 ALLOT  10 rip C!  0 rip 1+ C!  0 rip 2 + C!  1 rip 3 + C!",
+            "CREATE rmac 6 ALLOT  rmac 6 170 FILL",
+            "rip rmac ARP-INSERT",
+            "rip ARP-RESOLVE 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arp_resolve_with_reply(self):
+        """ARP-RESOLVE should get MAC from injected ARP reply."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        other_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        my_ip = [192, 168, 1, 100]
+        target_ip = [192, 168, 1, 50]
+        reply_frame = self._build_arp_reply_frame(
+            other_mac, target_ip, nic_mac, my_ip)
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE trg 4 ALLOT  192 trg C!  168 trg 1+ C!  1 trg 2 + C!  50 trg 3 + C!",
+            "trg ARP-RESOLVE 0<> .\" resolved\"",
+            "trg ARP-LOOKUP C@ .",
+        ], nic_frames=[reply_frame])
+        self.assertIn("resolved", text)
+        self.assertIn("170 ", text)  # 0xAA = first byte of other_mac
+
+    def test_arp_resolve_miss_no_reply(self):
+        """ARP-RESOLVE should return 0 when no reply arrives."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE trg2 4 ALLOT  10 trg2 C!  0 trg2 1+ C!  0 trg2 2 + C!  99 trg2 3 + C!",
+            "trg2 ARP-RESOLVE .",
         ])
         self.assertIn("0 ", text)
 
