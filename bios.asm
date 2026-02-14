@@ -2524,6 +2524,122 @@ w_repeat:
     st.b r13, r1              ; low byte at fixup_addr+1
     ret.l
 
+; =====================================================================
+; CASE/OF/ENDOF/ENDCASE (all IMMEDIATE) — ANS Forth CORE EXT
+; =====================================================================
+; Compile-time data stack usage:
+;   CASE pushes 0 sentinel
+;   OF compiles OVER = IF DROP, pushes forward-branch fixup
+;   ENDOF resolves OF branch (like ELSE), pushes its own fixup
+;   ENDCASE compiles DROP, resolves all ENDOF fixups until sentinel 0
+
+; CASE (IMMEDIATE) — push sentinel
+w_case:
+    ; push 0 onto data stack as sentinel
+    subi r14, 8
+    ldi r1, 0
+    str r14, r1
+    ret.l
+
+; OF (IMMEDIATE) — compile OVER = IF DROP
+;   At runtime: ( x1 x2 -- | x1 )  if x2=x1 drop both, else skip clause
+w_of:
+    ; compile_call(w_over) — duplicate selector under test value
+    ldi64 r1, w_over
+    ldi64 r11, compile_call
+    call.l r11
+    ; compile_call(w_equal) — compare
+    ldi64 r1, w_equal
+    ldi64 r11, compile_call
+    call.l r11
+    ; IF: compile pop-test-branch (same as w_if)
+    ;   ldn r1, r14 (0x50 0x1E)
+    ldi r1, 0x50
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x1E
+    ldi64 r11, compile_byte
+    call.l r11
+    ;   addi r14, 8 (0x62 0xE0 0x08)
+    ldi r1, 0x62
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0xE0
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x08
+    ldi64 r11, compile_byte
+    call.l r11
+    ;   cmpi r1, 0 (0x66 0x10 0x00)
+    ldi r1, 0x66
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x10
+    ldi64 r11, compile_byte
+    call.l r11
+    ldi r1, 0x00
+    ldi64 r11, compile_byte
+    call.l r11
+    ;   lbreq <placeholder> (0x41 + 2 bytes offset)
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x41
+    st.b r0, r7
+    inc r0
+    ; push fixup address
+    subi r14, 8
+    str r14, r0
+    ; placeholder offset
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    ; update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; compile_call(w_drop) — if matched, drop the selector
+    ldi64 r1, w_drop
+    ldi64 r11, compile_call
+    call.l r11
+    ret.l
+
+; ENDOF (IMMEDIATE) — same as ELSE: compile forward jump, resolve OF branch
+w_endof:
+    ldi64 r11, w_else
+    call.l r11
+    ret.l
+
+; ENDCASE (IMMEDIATE) — compile DROP, resolve all ENDOF fixups
+w_endcase:
+    ; compile_call(w_drop) — drop the selector at runtime
+    ldi64 r1, w_drop
+    ldi64 r11, compile_call
+    call.l r11
+    ; Loop: pop fixup addresses and resolve (THEN) until sentinel 0
+w_endcase_loop:
+    ldn r9, r14               ; peek at TOS
+    cmpi r9, 0
+    breq w_endcase_done       ; sentinel reached
+    ; Pop and resolve (same as w_then logic)
+    addi r14, 8               ; pop fixup addr into R9
+    ; offset = HERE - (fixup_addr + 2)
+    ldi64 r11, var_here
+    ldn r0, r11               ; target = HERE
+    mov r1, r0
+    sub r1, r9                ; r1 = HERE - fixup_addr
+    subi r1, 2                ; r1 = HERE - (fixup_addr + 2)
+    ; Patch big-endian offset
+    mov r7, r1
+    lsri r7, 8
+    st.b r9, r7               ; high byte
+    inc r9
+    st.b r9, r1               ; low byte
+    lbr w_endcase_loop
+w_endcase_done:
+    addi r14, 8               ; pop the sentinel 0
+    ret.l
+
 ; DO (IMMEDIATE) — start a counted loop
 ;   ( limit index -- ) at runtime
 ;   Compiles: move limit and index to return stack
@@ -8593,9 +8709,45 @@ d_repeat:
     call.l r11
     ret.l
 
+; === CASE (IMMEDIATE) ===
+d_case:
+    .dq d_repeat
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "CASE"
+    ldi64 r11, w_case
+    call.l r11
+    ret.l
+
+; === OF (IMMEDIATE) ===
+d_of:
+    .dq d_case
+    .db 0x82                  ; IMMEDIATE | len 2
+    .ascii "OF"
+    ldi64 r11, w_of
+    call.l r11
+    ret.l
+
+; === ENDOF (IMMEDIATE) ===
+d_endof:
+    .dq d_of
+    .db 0x85                  ; IMMEDIATE | len 5
+    .ascii "ENDOF"
+    ldi64 r11, w_endof
+    call.l r11
+    ret.l
+
+; === ENDCASE (IMMEDIATE) ===
+d_endcase:
+    .dq d_endof
+    .db 0x87                  ; IMMEDIATE | len 7
+    .ascii "ENDCASE"
+    ldi64 r11, w_endcase
+    call.l r11
+    ret.l
+
 ; === DO (IMMEDIATE) ===
 d_do:
-    .dq d_repeat
+    .dq d_endcase
     .db 0x82                  ; IMMEDIATE | len 2
     .ascii "DO"
     ldi64 r11, w_do
