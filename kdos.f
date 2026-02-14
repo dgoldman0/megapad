@@ -4000,6 +4000,138 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
     ." rx=" ETH-RX-COUNT @ . CR ;
 
 \ =====================================================================
+\  §16.1  ARP — Address Resolution Protocol
+\ =====================================================================
+\
+\  ARP maps IPv4 addresses to MAC addresses.  We maintain a small
+\  static table (8 entries) and support request/reply for resolution.
+\
+\  ARP table entry layout (16 bytes):
+\    +0   4 bytes   IPv4 address (network byte order)
+\    +4   6 bytes   MAC address
+\    +10  2 bytes   flags: bit0 = valid
+\    +12  4 bytes   (reserved/padding)
+\
+\  ARP packet layout (28 bytes, inside Ethernet payload):
+\    +0   2 bytes   HTYPE (0x0001 = Ethernet)
+\    +2   2 bytes   PTYPE (0x0800 = IPv4)
+\    +4   1 byte    HLEN  (6)
+\    +5   1 byte    PLEN  (4)
+\    +6   2 bytes   OPER  (1=request, 2=reply)
+\    +8   6 bytes   SHA   (sender hardware address)
+\    +14  4 bytes   SPA   (sender protocol address)
+\    +18  6 bytes   THA   (target hardware address)
+\    +24  4 bytes   TPA   (target protocol address)
+
+\ -- ARP constants --
+16 CONSTANT /ARP-ENTRY
+8  CONSTANT ARP-MAX-ENTRIES
+28 CONSTANT /ARP-PKT
+
+\ -- ARP table (8 entries × 16 bytes = 128 bytes) --
+CREATE ARP-TABLE  ARP-MAX-ENTRIES /ARP-ENTRY * ALLOT
+ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL
+
+\ -- Our IPv4 address (4 bytes, network byte order) --
+CREATE MY-IP  4 ALLOT
+MY-IP 4 0 FILL                 \ 0.0.0.0 until configured
+
+\ -- Gateway and subnet --
+CREATE GW-IP  4 ALLOT
+GW-IP 4 0 FILL                 \ 0.0.0.0 until configured
+CREATE NET-MASK  4 ALLOT
+255 NET-MASK C!  255 NET-MASK 1+ C!  255 NET-MASK 2 + C!  0 NET-MASK 3 + C!
+\ default 255.255.255.0
+
+\ -- ARP entry accessors --
+: ARP-ENTRY  ( idx -- addr )    /ARP-ENTRY * ARP-TABLE + ;
+: ARP-E.IP   ( entry -- addr )  ;          \ +0
+: ARP-E.MAC  ( entry -- addr )  4 + ;      \ +4
+: ARP-E.FLAG ( entry -- addr )  10 + ;     \ +10
+: ARP-E.VALID? ( entry -- flag ) ARP-E.FLAG W@ 1 AND 0<> ;
+
+\ -- IPv4 address comparison (4 bytes) --
+: IP=  ( addr1 addr2 -- flag )   4 SAMESTR? ;
+
+\ -- IP address store/fetch helpers --
+: IP!  ( b3 b2 b1 b0 addr -- )   \ store 4 octets (b3.b2.b1.b0)
+    DUP >R
+    R@ C!
+    R@ 1+ C!
+    R@ 2 + C!
+    R> 3 + C! ;
+
+: IP@  ( addr -- b3 b2 b1 b0 )   \ fetch 4 octets
+    DUP 3 + C@
+    OVER 2 + C@
+    2 PICK 1+ C@
+    3 PICK C@
+    SWAP >R SWAP >R SWAP R> R>
+    ROT DROP ;
+
+\ -- Set our IP address (dotted quad) --
+: IP-SET  ( b0 b1 b2 b3 -- )   MY-IP IP! ;
+
+\ -- Print IPv4 address --
+: .IP  ( addr -- )
+    DUP C@ .  46 EMIT
+    DUP 1+ C@ .  46 EMIT
+    DUP 2 + C@ .  46 EMIT
+    3 + C@ . ;
+
+\ -- ARP-LOOKUP: find MAC for a given IPv4 address --
+\   ( ip-addr -- mac-addr | 0 )
+: ARP-LOOKUP  ( ip -- mac|0 )
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            DUP ARP-E.IP 2 PICK IP= IF
+                ARP-E.MAC NIP UNLOOP EXIT
+            THEN
+        THEN
+        DROP
+    LOOP
+    DROP 0 ;
+
+\ -- ARP-INSERT: add or update an entry in the ARP table --
+\   ( ip-addr mac-addr -- )
+\   If ip already exists, update MAC.  Otherwise use first free slot.
+VARIABLE _ARP-SLOT
+: ARP-INSERT  ( ip mac -- )
+    -1 _ARP-SLOT !
+    \ First pass: look for existing entry with same IP
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            ARP-E.IP 2 PICK IP= IF
+                I _ARP-SLOT !  LEAVE
+            THEN
+        ELSE
+            DROP
+            _ARP-SLOT @ -1 = IF I _ARP-SLOT ! THEN  \ remember first free
+        THEN
+    LOOP
+    _ARP-SLOT @ -1 = IF 2DROP EXIT THEN  \ table full
+    _ARP-SLOT @ ARP-ENTRY >R
+    OVER R@ ARP-E.IP 4 CMOVE            \ copy IP
+    R@ ARP-E.MAC 6 CMOVE                \ copy MAC
+    DROP                                 \ drop ip-addr
+    1 R> ARP-E.FLAG W! ;                 \ mark valid
+
+\ -- ARP-CLEAR: clear the ARP table --
+: ARP-CLEAR  ( -- )
+    ARP-TABLE ARP-MAX-ENTRIES /ARP-ENTRY * 0 FILL ;
+
+\ -- .ARP: print the ARP table --
+: .ARP  ( -- )
+    ." --- ARP table ---" CR
+    ARP-MAX-ENTRIES 0 DO
+        I ARP-ENTRY DUP ARP-E.VALID? IF
+            ."   " DUP ARP-E.IP .IP ."  -> " ARP-E.MAC .MAC CR
+        ELSE
+            DROP
+        THEN
+    LOOP ;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 

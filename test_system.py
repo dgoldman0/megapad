@@ -7634,6 +7634,115 @@ class TestKDOSNetStack(TestKDOS):
         text = self._run_kdos(["5 ETH-RECV-WAIT ."])
         self.assertIn("0 ", text)
 
+    # --- 10a: ARP table data structure + lookup/insert ---
+
+    def test_arp_constants(self):
+        """ARP constants should have correct values."""
+        text = self._run_kdos([
+            "/ARP-ENTRY .",
+            "ARP-MAX-ENTRIES .",
+            "/ARP-PKT .",
+        ])
+        self.assertIn("16 ", text)
+        self.assertIn("8 ", text)
+        self.assertIn("28 ", text)
+
+    def test_arp_table_initially_empty(self):
+        """ARP-LOOKUP should return 0 for unknown IP."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE tip 4 ALLOT  10 tip C!  0 tip 1+ C!  0 tip 2 + C!  1 tip 3 + C!",
+            "tip ARP-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_arp_insert_and_lookup(self):
+        """ARP-INSERT then ARP-LOOKUP should return the MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip 4 ALLOT  192 aip C!  168 aip 1+ C!  1 aip 2 + C!  1 aip 3 + C!",
+            "CREATE amac 6 ALLOT  170 amac C!  187 amac 1+ C!  204 amac 2 + C!",
+            "221 amac 3 + C!  238 amac 4 + C!  1 amac 5 + C!",
+            "aip amac ARP-INSERT",
+            "aip ARP-LOOKUP DUP 0<> . .\" found\"",
+        ])
+        self.assertIn("-1  found", text)
+
+    def test_arp_lookup_returns_correct_mac(self):
+        """ARP-LOOKUP should return address of stored MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip2 4 ALLOT  10 aip2 C!  0 aip2 1+ C!  0 aip2 2 + C!  1 aip2 3 + C!",
+            "CREATE amac2 6 ALLOT  17 amac2 C!  34 amac2 1+ C!  51 amac2 2 + C!",
+            "68 amac2 3 + C!  85 amac2 4 + C!  102 amac2 5 + C!",
+            "aip2 amac2 ARP-INSERT",
+            "aip2 ARP-LOOKUP DUP 0<> IF",
+            "  DUP C@ . DUP 1+ C@ .",   # first 2 MAC bytes
+            "THEN DROP",
+        ])
+        self.assertIn("17 ", text)     # 0x11
+        self.assertIn("34 ", text)     # 0x22
+
+    def test_arp_insert_update(self):
+        """ARP-INSERT with same IP should update the MAC."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "CREATE aip3 4 ALLOT  10 aip3 C!  1 aip3 1+ C!  1 aip3 2 + C!  1 aip3 3 + C!",
+            "CREATE am3a 6 ALLOT  am3a 6 17 FILL",
+            "CREATE am3b 6 ALLOT  am3b 6 34 FILL",
+            "aip3 am3a ARP-INSERT",
+            "aip3 am3b ARP-INSERT",           # update same IP
+            "aip3 ARP-LOOKUP C@ .",
+        ])
+        self.assertIn("34 ", text)   # updated to 0x22
+
+    def test_arp_clear(self):
+        """ARP-CLEAR should wipe all entries."""
+        text = self._run_kdos([
+            "CREATE aip4 4 ALLOT  10 aip4 C!  0 aip4 1+ C!  0 aip4 2 + C!  99 aip4 3 + C!",
+            "CREATE am4 6 ALLOT  am4 6 255 FILL",
+            "aip4 am4 ARP-INSERT",
+            "ARP-CLEAR",
+            "aip4 ARP-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_ip_set_and_my_ip(self):
+        """IP-SET should configure MY-IP."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
+        ])
+        self.assertIn("192 ", text)
+        self.assertIn("168 ", text)
+        self.assertIn("100 ", text)
+
+    def test_dot_arp_prints_table(self):
+        """.ARP should print the ARP table."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            ".ARP",
+        ])
+        self.assertIn("ARP table", text)
+
+    def test_ip_equal(self):
+        """IP= should compare two 4-byte addresses."""
+        text = self._run_kdos([
+            "CREATE iq1 4 ALLOT  10 iq1 C!  0 iq1 1+ C!  0 iq1 2 + C!  1 iq1 3 + C!",
+            "CREATE iq2 4 ALLOT  10 iq2 C!  0 iq2 1+ C!  0 iq2 2 + C!  1 iq2 3 + C!",
+            "iq1 iq2 IP= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_ip_not_equal(self):
+        """IP= should detect different addresses."""
+        text = self._run_kdos([
+            "CREATE iq3 4 ALLOT  10 iq3 C!  0 iq3 1+ C!  0 iq3 2 + C!  1 iq3 3 + C!",
+            "CREATE iq4 4 ALLOT  10 iq4 C!  0 iq4 1+ C!  0 iq4 2 + C!  2 iq4 3 + C!",
+            "iq3 iq4 IP= .",
+        ])
+        self.assertIn("0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main
