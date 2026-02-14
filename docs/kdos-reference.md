@@ -7,9 +7,9 @@ versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
 TUI dashboard.
 
 This reference documents every word defined in KDOS, organized by the 16
-sections of `kdos.f`.  There are **289 colon definitions** and **144
-variables/constants/creates** — roughly 433 named entities in total across
-3,850 lines of Forth.
+sections of `kdos.f`.  There are **433 colon definitions** and **219
+variables/constants/creates** — roughly 652 named entities in total across
+5,328 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -859,7 +859,7 @@ Stack & diagnostics.
 
 The startup section runs automatically when KDOS loads.  It:
 
-1. Prints the banner: **"KDOS v1.0 — Kernel Dashboard OS"**
+1. Prints the banner: **"KDOS v1.1 — Kernel Dashboard OS"**
 2. Prints usage hints: `HELP`, `SCREENS`, `TOPICS`/`LESSONS`
 3. If a disk is attached (`DISK?`), automatically loads the filesystem
    (`FS-LOAD`) so DIR, CAT, LOAD, etc. work immediately

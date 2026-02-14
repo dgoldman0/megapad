@@ -271,7 +271,7 @@ with 53 tile testbench tests passing.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.1  (kdos.f, 3,850 lines)              │
+│  KDOS v1.1  (kdos.f, 5,328 lines)              │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -285,7 +285,7 @@ with 53 tile testbench tests passing.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 9,895 lines)            │
+│  BIOS v1.0  (bios.asm, 10,070 lines)           │
 │  Subroutine-threaded Forth, 265 dictionary words│
 │  Disk I/O, FSLOAD, UART, timer, tile engine     │
 ├─────────────────────────────────────────────────┤
@@ -377,15 +377,15 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 2,516 | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | 474 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 964 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC |
-| BIOS | `bios.asm` | 9,895 | Forth interpreter, boot, multicore, 265 dictionary words |
-| OS | `kdos.f` | 3,850 | Buffers, kernels, TUI, FS, crypto, multicore dispatch |
+| CPU emulator | `megapad64.py` | 2,541 | Full ISA + extended tile engine implementation |
+| System glue | `system.py` | 598 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 1,418 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
+| BIOS | `bios.asm` | 10,070 | Forth interpreter, boot, multicore, 265 dictionary words |
+| OS | `kdos.f` | 5,328 | Buffers, kernels, TUI, FS, crypto, multicore dispatch |
 | Assembler | `asm.py` | 788 | Two-pass macro assembler |
 | CLI/Monitor | `cli.py` | 995 | Debug, inspect, boot |
-| Disk tools | `diskutil.py` | 1,038 | Build/manage disk images |
+| Disk tools | `diskutil.py` | 1,039 | Build/manage disk images |
 | Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| Tests | `test_system.py` | 7,308 | 570 integration tests |
-| FPGA RTL | `fpga/rtl/` | 7,242 | 13 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
-| FPGA tests | `fpga/sim/` | 3,930 | 8 testbenches (72 hardware tests) |
+| Tests | `test_system.py` | 9,673 | 754 integration tests |
+| FPGA RTL | `fpga/rtl/` | 11,284 | 18 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
+| FPGA tests | `fpga/sim/` | 7,293 | 13 testbenches (137 hardware tests) |

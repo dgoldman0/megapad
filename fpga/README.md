@@ -52,17 +52,37 @@ fpga/
 ├── rtl/
 │   ├── mp64_soc.v      ← top-level SoC
 │   ├── mp64_cpu.v       ← CPU core (fetch/decode/execute)
+│   ├── mp64_cpu_fsm.v   ← CPU FSM controller
 │   ├── mp64_tile.v      ← tile engine (MEX unit)
 │   ├── mp64_memory.v    ← memory subsystem (BRAM + arbiter)
 │   ├── mp64_extmem.v    ← external memory controller
 │   ├── mp64_bus.v       ← bus arbiter + address decoder
+│   ├── mp64_icache.v    ← instruction cache
+│   ├── mp64_fp16_alu.v  ← FP16/BF16 ALU
 │   ├── mp64_uart.v      ← UART peripheral
 │   ├── mp64_timer.v     ← timer peripheral
 │   ├── mp64_disk.v      ← storage controller (SPI-SD)
 │   ├── mp64_nic.v       ← network interface
+│   ├── mp64_mailbox.v   ← multicore mailbox + IPI
+│   ├── mp64_aes.v       ← AES-256-GCM engine
+│   ├── mp64_sha3.v      ← SHA3/Keccak engine
+│   ├── mp64_crc.v       ← CRC-32 engine
+│   ├── mp64_synth_top.v ← synthesis top-level wrapper
 │   └── mp64_defs.vh     ← shared constants & parameters
 ├── sim/
-│   └── tb_mp64_soc.v    ← testbench
+│   ├── tb_bus_arbiter.v  ← bus arbiter tests
+│   ├── tb_cpu_smoke.v    ← CPU smoke tests
+│   ├── tb_crypto.v       ← AES/SHA3/CRC tests
+│   ├── tb_icache.v       ← I-cache tests
+│   ├── tb_mailbox.v      ← mailbox/IPI tests
+│   ├── tb_memory.v       ← memory subsystem tests
+│   ├── tb_mp64_soc.v     ← full SoC integration test
+│   ├── tb_multicore_smoke.v ← multicore tests
+│   ├── tb_nic.v          ← NIC tests
+│   ├── tb_opcodes.v      ← opcode tests
+│   ├── tb_peripherals.v  ← peripheral tests
+│   ├── tb_qos.v          ← QoS arbiter tests
+│   └── tb_tile.v         ← tile engine tests
 ├── constraints/
 │   ├── genesys2.xdc     ← Genesys 2 (Kintex-7 325T) pin constraints
 │   └── nexys_a7.xdc     ← Nexys A7 pin constraints (legacy)

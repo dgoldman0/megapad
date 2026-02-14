@@ -343,7 +343,7 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (593 tests):
+The project has a comprehensive test suite (754 tests):
 
 ```bash
 # Full test suite (CPython)

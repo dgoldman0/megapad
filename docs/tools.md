@@ -406,7 +406,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **3,112 passing tests**
+The project has a comprehensive test suite with **754 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -414,7 +414,7 @@ that cover every layer of the system.
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 3,089 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
+| `test_system.py` | 731 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
 
 ### Test Classes in `test_system.py`
 
@@ -450,7 +450,7 @@ that cover every layer of the system.
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-make test-accel                                            # ~23 s, all 3,112 tests
+make test-accel                                            # ~23 s, all 754 tests
 
 # Full suite with CPython (works out of the box, ~40 min)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
@@ -481,7 +481,7 @@ back to pure Python.
 ```bash
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                   # build the C++ extension
-make test-accel              # ~23 s for all 3,112 tests
+make test-accel              # ~23 s for all 754 tests
 make bench                   # raw CPU speed comparison
 ```
 
@@ -531,18 +531,18 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `megapad64.py` | ~2,541 | CPU + tile engine emulator |
 | `accel/mp64_accel.cpp` | ~1,929 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
-| `system.py` | ~546 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
+| `system.py` | ~598 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
 | `cli.py` | ~995 | CLI, boot modes, debug monitor |
 | `asm.py` | ~788 | Two-pass assembler (with listing output) |
 | `devices.py` | ~1,418 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,039 | MP64FS disk utility and image builder |
-| `bios.asm` | ~9,895 | Forth BIOS (265 dictionary words, hardened, multicore) |
+| `bios.asm` | ~10,070 | Forth BIOS (265 dictionary words, hardened, multicore) |
 | `bios.rom` | 20,722B | Pre-assembled BIOS binary |
-| `kdos.f` | ~3,850 | KDOS v1.1 operating system (289 colon defs, 9 TUI screens, multicore, crypto) |
+| `kdos.f` | ~5,328 | KDOS v1.1 operating system (433 colon defs, 9 TUI screens, multicore, crypto) |
 | `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
-| `test_system.py` | ~7,270 | Integration test suite (3,089 tests, 24 classes) |
+| `test_system.py` | ~9,673 | Integration test suite (754 tests, 25 classes) |
 | `setup_accel.py` | ~35 | pybind11 build configuration |
 | `bench_accel.py` | ~139 | C++ vs Python speed comparison |
-| `Makefile` | 159 | Build, test, & accel targets |
-| `conftest.py` | 159 | Test fixtures, snapshot caching, live status |
+| `Makefile` | 177 | Build, test, & accel targets |
+| `conftest.py` | 193 | Test fixtures, snapshot caching, live status |

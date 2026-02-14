@@ -7,7 +7,7 @@
 
 > All features below are implemented in `megapad64.py` (emulator),
 > `fpga/rtl/mp64_tile.v` (RTL), and the BIOS (265 dictionary words),
-> with 593 passing tests unless marked ☐ (not yet implemented).
+> with 754 passing tests unless marked ☐ (not yet implemented).
 
 ---
 

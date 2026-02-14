@@ -62,7 +62,7 @@ Bit:   7    6    5    4    3    2    1    0
 
 ## Instruction Encoding
 
-Instructions are **variable-length** (1 to 10 bytes).  The first byte
+Instructions are **variable-length** (1 to 11 bytes).  The first byte
 encodes the **family** in the upper nibble and the **sub-opcode or register
 selector** in the lower nibble:
 

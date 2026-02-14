@@ -18,7 +18,7 @@ python cli.py --bios bios.asm --storage sample.img
 # Development mode (UART injection, no filesystem)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (593 tests, CPython)
+# Full test suite (754 tests, CPython)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
 
 # Fast tests with PyPy + parallel workers (~4 min vs ~40 min)
@@ -98,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (265 words, ~9,895 lines):
+**BIOS v1.0** (265 words, ~10,070 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -113,7 +113,7 @@ PORTS                          \ List all port bindings
 - **SHA-3 / Keccak-256**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@
 - **CRC-32**: CRC-RESET, CRC-FEED, CRC-RESULT, CRC-DMA
 
-**KDOS v1.1** (~3,850 lines Forth):
+**KDOS v1.1** (~5,328 lines Forth):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -162,7 +162,7 @@ PORTS                          \ List all port bindings
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
-**Tests**: 593+ passing
+**Tests**: 754+ passing
 - 286+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser, pipeline bundles, allocator, exceptions, CRC, diagnostics, AES, SHA3, crypto, file crypto)
 - 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
 - 18 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial/bundle building)
@@ -465,14 +465,14 @@ accumulation supported via TCTRL (ACC_ACC bit).
 
 ### 3.4 Memory
 
-Flat address space.  Default 256 KiB RAM, configurable up to 64 MiB via
+Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 `--ram` flag.  MMIO devices at `0xFFFF_FF00_0000_0000`.
 
 ---
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 265 words, ~9,895 lines) is the **permanent,
+The BIOS Forth (v1.0, 265 words, ~10,070 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)

@@ -61,23 +61,27 @@ UART_TXD ◄──│       bus  │         │         │  tile              
 
 | Module | File | Lines | Description |
 |--------|------|------:|-------------|
-| `mp64_defs` | `rtl/mp64_defs.vh` | ~195 | Shared constants, ISA encoding, CSR map |
-| `mp64_cpu` | `rtl/mp64_cpu.v` | ~764 | CPU core: fetch/decode/execute, 16 GPRs, flags |
-| `mp64_bus` | `rtl/mp64_bus.v` | ~96 | Bus arbiter & MMIO/memory address decoder |
-| `mp64_memory` | `rtl/mp64_memory.v` | ~203 | Dual-port 1 MiB BRAM (512-bit tile + 64-bit CPU) |
-| `mp64_tile` | `rtl/mp64_tile.v` | ~479 | Tile engine (MEX), 64×8-bit SIMD lanes |
-| `mp64_extmem` | `rtl/mp64_extmem.v` | ~215 | External memory controller (HyperRAM/SDRAM) |
-| `mp64_uart` | `rtl/mp64_uart.v` | ~293 | UART 8N1, 16-byte FIFOs |
-| `mp64_timer` | `rtl/mp64_timer.v` | ~154 | 32-bit timer, compare-match, auto-reload |
-| `mp64_disk` | `rtl/mp64_disk.v` | ~347 | SPI-SD controller with DMA |
-| `mp64_nic` | `rtl/mp64_nic.v` | ~332 | NIC with 1500-byte RX buffer, DMA |
-| `mp64_soc` | `rtl/mp64_soc.v` | ~440 | Top-level SoC wiring |
-| `tb_mp64_soc` | `sim/tb_mp64_soc.v` | ~243 | SoC testbench with PHY stub, UART monitor |
-| `tb_cpu_smoke` | `sim/tb_cpu_smoke.v` | ~402 | CPU unit tests (19 tests) |
-| `tb_memory` | `sim/tb_memory.v` | ~277 | Memory unit tests (9 tests) |
-| `tb_tile` | `sim/tb_tile.v` | ~319 | Tile engine unit tests (10 tests) |
+| `mp64_defs` | `rtl/mp64_defs.vh` | ~372 | Shared constants, ISA encoding, CSR map |
+| `mp64_cpu` | `rtl/mp64_cpu.v` | ~1,951 | CPU core: fetch/decode/execute, 16 GPRs, flags |
+| `mp64_cpu_fsm` | `rtl/mp64_cpu_fsm.v` | ~1,614 | CPU FSM controller |
+| `mp64_bus` | `rtl/mp64_bus.v` | ~300 | Bus arbiter & MMIO/memory address decoder |
+| `mp64_memory` | `rtl/mp64_memory.v` | ~186 | Dual-port 1 MiB BRAM (512-bit tile + 64-bit CPU) |
+| `mp64_tile` | `rtl/mp64_tile.v` | ~2,283 | Tile engine (MEX), 64×8-bit SIMD lanes |
+| `mp64_fp16_alu` | `rtl/mp64_fp16_alu.v` | ~724 | FP16/BF16 ALU |
+| `mp64_icache` | `rtl/mp64_icache.v` | ~217 | Instruction cache |
+| `mp64_extmem` | `rtl/mp64_extmem.v` | ~165 | External memory controller (HyperRAM/SDRAM) |
+| `mp64_uart` | `rtl/mp64_uart.v` | ~238 | UART 8N1, 16-byte FIFOs |
+| `mp64_timer` | `rtl/mp64_timer.v` | ~120 | 32-bit timer, compare-match, auto-reload |
+| `mp64_disk` | `rtl/mp64_disk.v` | ~270 | SPI-SD controller with DMA |
+| `mp64_nic` | `rtl/mp64_nic.v` | ~309 | NIC with 1500-byte RX buffer, DMA |
+| `mp64_mailbox` | `rtl/mp64_mailbox.v` | ~216 | Multicore mailbox + IPI |
+| `mp64_aes` | `rtl/mp64_aes.v` | ~735 | AES-256-GCM engine |
+| `mp64_sha3` | `rtl/mp64_sha3.v` | ~395 | SHA3/Keccak engine |
+| `mp64_crc` | `rtl/mp64_crc.v` | ~174 | CRC-32 engine |
+| `mp64_synth_top` | `rtl/mp64_synth_top.v` | ~136 | Synthesis top-level wrapper |
+| `mp64_soc` | `rtl/mp64_soc.v` | ~879 | Top-level SoC wiring |
 
-**Total:** ~3,853 lines RTL, ~1,241 lines testbench code.
+**Total:** ~11,284 lines RTL, ~7,293 lines testbench code (13 testbenches).
 
 ---
 
@@ -262,6 +266,13 @@ verilator --lint-only -Wall -Ifpga/rtl fpga/rtl/mp64_soc.v
 | `tb_tile.v` | 10 | CSR read/write, TALU.ADD, TRED.SUM/MIN/MAX, imm8 splat, accumulate mode |
 | `tb_icache.v` | 22 | Hit/miss, refill, invalidation (all/single-line), stats, multi-line |
 | `tb_multicore_smoke.v` | 37 | Quad-core, IPI, mailbox, per-core I-cache |
+| `tb_bus_arbiter.v` | — | Priority arbitration, round-robin |
+| `tb_crypto.v` | — | AES, SHA3, CRC engine tests |
+| `tb_mailbox.v` | — | Mailbox/IPI slots, spinlocks |
+| `tb_nic.v` | — | NIC TX/RX, DMA |
+| `tb_peripherals.v` | — | UART, Timer, Disk |
+| `tb_qos.v` | — | QoS weight-based scheduling |
+| `tb_mp64_soc.v` | — | Full SoC integration |
 
 **Status:** ✅ **137/137 tests passing**
 
@@ -321,17 +332,6 @@ launch_runs synth_1 -jobs 8
 launch_runs impl_1 -to_step write_bitstream
 ```
 
-### 9.5  Synthesis (Vivado)
-
-```tcl
-create_project mp64 -part xc7a200tsbg484-1
-add_files [glob rtl/*.v rtl/*.vh]
-add_files -fileset constrs_1 constraints/nexys_a7.xdc
-set_property top mp64_soc [current_fileset]
-launch_runs synth_1 -jobs 8
-launch_runs impl_1 -to_step write_bitstream
-```
-
 **Note:** Synthesis not yet attempted (no hardware available). RTL is lint-clean and unit-tested, ready for synthesis when FPGA hardware is acquired.
 
 ### 9.6  Programming (Requires Hardware)
@@ -347,9 +347,9 @@ vivado -mode batch -source program.tcl
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| RTL design | ✅ Complete | 11 modules, ~3,853 lines |
+| RTL design | ✅ Complete | 18 modules, ~11,284 lines |
 | Lint verification | ✅ Pass | 0 errors (Verilator) |
-| Unit tests | ✅ Pass | 38/38 tests (Icarus) |
+| Unit tests | ✅ Pass | 137/137 tests (Icarus) |
 | CPU bugs | ✅ Fixed | Multi-byte fetch + address staleness |
 | Synthesis | ⏸️ Pending | Requires Vivado + time |
 | Timing closure | ⏸️ Pending | Requires synthesis |
@@ -391,8 +391,6 @@ vivado -mode batch -source program.tcl
 **Recommendation:** Prioritize UART testbench next (critical for debugging on hardware). Then timer (interrupt delivery test).
 
 ---
-
-## 12  Future Work
 
 ## 12  Future Work
 

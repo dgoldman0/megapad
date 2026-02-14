@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 3,100+ tests.
+— all running inside a Python emulator and verified by 750+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -25,14 +25,14 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 265 Forth dictionary words, 9,895 lines ASM, ~22 KB binary |
-| **KDOS** | v1.1 — 289 colon definitions + 144 variables/constants, 3,850 lines Forth |
+| **BIOS** | 265 Forth dictionary words, 10,070 lines ASM, ~22 KB binary |
+| **KDOS** | v1.1 — 433 colon definitions + 219 variables/constants, 5,328 lines Forth |
 | **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,541 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (23 s full suite) |
-| **Tests** | 3,112 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
+| **Tests** | 754 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **FPGA RTL** | 14 Verilog modules + 9 testbenches, Nexys A7-200T target |
+| **FPGA RTL** | 18 Verilog modules + 13 testbenches, Genesys 2 (Kintex-7) target |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
@@ -112,11 +112,11 @@ memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (3,850 lines)     │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (5,328 lines)     │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
-│    BIOS v1.0 (9,895 lines)     │  ← Subroutine-threaded Forth,
+│    BIOS v1.0 (10,070 lines)    │  ← Subroutine-threaded Forth,
 │  265 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
@@ -124,7 +124,7 @@ memory-mapped at `0xFFFF_FF00+`.
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-242 dictionary words covering arithmetic, logic, stack manipulation,
+265 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
@@ -215,7 +215,7 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 # C++ accelerator (recommended — 63× faster than PyPy)
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 3,112 tests
+make test-accel                    # ~23 s, all 754 tests
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy                    # one-time
@@ -225,7 +225,7 @@ make test                          # ~24 min
 python -m pytest test_system.py test_megapad64.py -v --timeout=30  # ~40 min
 ```
 
-All 3,112 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+All 754 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking, crypto, and
 extended tile engine.
 
@@ -243,24 +243,24 @@ extended tile engine.
 |------|-------|---------|
 | `megapad64.py` | 2,541 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
 | `accel/mp64_accel.cpp` | 1,929 | C++ CPU core (pybind11) — 63× speedup |
-| `accel_wrapper.py` | 829 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 546 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 9,895 | Forth BIOS in assembly (265 words, multicore, hardened) |
+| `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
+| `system.py` | 598 | Quad-core SoC integration + `run_batch()` C++ fast path |
+| `bios.asm` | 10,070 | Forth BIOS in assembly (265 words, multicore, hardened) |
 | `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 3,850 | KDOS v1.1 operating system in Forth (289 definitions) |
+| `kdos.f` | 5,328 | KDOS v1.1 operating system in Forth (433 definitions) |
 | `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
 | `devices.py` | 1,418 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
 | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 7,270 | 3,089 integration tests (24 classes, incl. multicore, tile, crypto, FS) |
-| `Makefile` | 159 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
+| `test_system.py` | 9,673 | 754 integration tests (25 classes, incl. multicore, tile, crypto, FS) |
+| `Makefile` | 177 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `conftest.py` | 159 | Test fixtures, snapshot caching, live status reporting |
-| `fpga/rtl/` | 7,242 | 13 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
-| `fpga/sim/` | 3,930 | 8 Verilog testbenches (72 hardware tests) |
+| `conftest.py` | 193 | Test fixtures, snapshot caching, live status reporting |
+| `fpga/rtl/` | 11,284 | 18 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
+| `fpga/sim/` | 7,293 | 13 Verilog testbenches (137 hardware tests) |
 
 ---
 
@@ -291,7 +291,7 @@ The `docs/` directory contains comprehensive reference material:
 Forth might seem like an unusual choice for a modern system, but it's
 remarkably well-suited to this architecture:
 
-**Compactness** — The entire BIOS interpreter, compiler, and 242 built-in
+**Compactness** — The entire BIOS interpreter, compiler, and 265 built-in
 words fit in roughly 22 KB of machine code.  Forth is one of the most
 space-efficient programming environments ever created.
 
