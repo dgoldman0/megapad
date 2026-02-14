@@ -4663,6 +4663,134 @@ VARIABLE _UFC-LEN
 : UDP-VERIFY-CKSUM  ( src-ip dst-ip buf len -- flag )
     UDP-CHECKSUM 0= IF -1 ELSE 0 THEN ;
 
+\ -- 13b: UDP-SEND / UDP-RECV, port demux table --
+
+\ -- Port demux table: maps listening ports to handler XTs --
+\   Each entry: 2-cell (port, xt). Up to 8 listeners.
+8 CONSTANT /UDP-PORT-MAX
+CREATE UDP-PORT-TABLE  /UDP-PORT-MAX 2 * CELLS ALLOT
+: UDP-PORT-CLEAR  ( -- )
+    UDP-PORT-TABLE /UDP-PORT-MAX 2 * CELLS 0 FILL ;
+UDP-PORT-CLEAR
+
+\ -- UDP-PORT-BIND: register a handler for a port --
+\   ( port xt -- flag )  -1 if bound, 0 if table full
+: UDP-PORT-BIND  ( port xt -- flag )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 0= IF          \ empty slot
+            >R               \ save slot addr
+            OVER R@ !        \ store port
+            R> CELL+ !       \ store xt
+            DROP -1           \ success
+            UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    2DROP 0 ;                 \ table full
+
+\ -- UDP-PORT-UNBIND: remove a port binding --
+\   ( port -- )
+: UDP-PORT-UNBIND  ( port -- )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 2 PICK = IF
+            DUP 0 SWAP !               \ clear port
+            CELL+ 0 SWAP !             \ clear xt
+            DROP UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    DROP ;
+
+\ -- UDP-PORT-LOOKUP: find handler for a port --
+\   ( port -- xt | 0 )
+: UDP-PORT-LOOKUP  ( port -- xt | 0 )
+    /UDP-PORT-MAX 0 DO
+        UDP-PORT-TABLE I 2 * CELLS +
+        DUP @ 2 PICK = IF
+            CELL+ @ NIP
+            UNLOOP EXIT
+        THEN
+        DROP
+    LOOP
+    DROP 0 ;
+
+\ -- UDP-SEND: send a UDP datagram over IPv4 --
+\   ( dst-ip dst-port src-port payload paylen -- ior )
+\   ior = 0 on success, -1 on ARP failure
+VARIABLE _UDS-DST
+VARIABLE _UDS-DPORT
+VARIABLE _UDS-SPORT
+: UDP-SEND  ( dst-ip dport sport payload paylen -- ior )
+    >R >R                              \ save paylen, payload on R
+    _UDS-SPORT !  _UDS-DPORT !  _UDS-DST !
+    \ Build UDP datagram
+    _UDS-SPORT @ _UDS-DPORT @ R> R>    \ ( sport dport payload paylen )
+    UDP-BUILD                           \ ( buf udp-len )
+    \ Fill checksum
+    2DUP                                \ ( buf len buf len )
+    MY-IP _UDS-DST @ ROT ROT           \ ( buf len src dst buf len )
+    UDP-FILL-CKSUM                      \ ( buf len )
+    \ Send via IP
+    >R >R
+    IP-PROTO-UDP _UDS-DST @ R> R>      \ ( proto dst buf len )
+    IP-SEND ;
+
+\ -- UDP-RECV: receive a UDP datagram from the network --
+\   Receives an IP frame, checks for UDP, verifies checksum.
+\   Returns source IP address pointer, UDP header pointer, and UDP length.
+\   Also auto-handles ARP (via IP-RECV) and ICMP ping.
+\   ( -- src-ip udp-buf udp-len | 0 0 0 )
+VARIABLE _UDR-HDR
+VARIABLE _UDR-IPLEN
+: UDP-RECV  ( -- src-ip udp-buf udp-len | 0 0 0 )
+    IP-RECV DUP 0= IF DROP 0 EXIT THEN    \ no frame → 0 0 0
+    _UDR-IPLEN !  _UDR-HDR !
+    \ Auto-handle ICMP pings
+    _UDR-HDR @ IP-H.PROTO C@ IP-PROTO-ICMP = IF
+        _UDR-HDR @ _UDR-IPLEN @ ICMP-HANDLE DROP
+        0 0 0 EXIT
+    THEN
+    \ Check for UDP
+    _UDR-HDR @ IP-H.PROTO C@ IP-PROTO-UDP <> IF
+        0 0 0 EXIT
+    THEN
+    \ Verify UDP checksum
+    _UDR-HDR @ IP-H.SRC
+    _UDR-HDR @ IP-H.DST
+    _UDR-HDR @ IP-H.DATA
+    _UDR-IPLEN @ /IP-HDR -
+    UDP-VERIFY-CKSUM 0= IF
+        0 0 0 EXIT
+    THEN
+    \ Return ( src-ip udp-buf udp-len )
+    _UDR-HDR @ IP-H.SRC
+    _UDR-HDR @ IP-H.DATA
+    _UDR-IPLEN @ /IP-HDR - ;
+
+\ -- UDP-DISPATCH: receive and dispatch to bound port handler --
+\   Calls the registered handler xt with ( src-ip sport data dlen -- )
+\   ( -- flag )  -1 if dispatched, 0 if not
+: UDP-DISPATCH  ( -- flag )
+    UDP-RECV DUP 0= IF DROP DROP EXIT THEN    \ no frame → 0
+    \ Stack: ( src-ip udp-buf udp-len )
+    DROP                                       \ drop udp-len
+    DUP UDP-H.DPORT NW16@                     \ get dest port
+    UDP-PORT-LOOKUP DUP 0= IF                 \ no handler?
+        DROP DROP DROP 0 EXIT
+    THEN
+    \ Stack: ( src-ip udp-buf xt )
+    >R                                         \ save xt
+    DUP UDP-H.SPORT NW16@                     \ ( src-ip udp-buf sport )
+    OVER UDP-H.DATA                            \ ( src-ip udp-buf sport data )
+    2 PICK UDP-H.LEN NW16@ /UDP-HDR -         \ ( src-ip udp-buf sport data dlen )
+    >R >R >R
+    DROP                                       \ drop udp-buf
+    R> R> R>                                   \ ( src-ip sport data dlen )
+    R> EXECUTE                                 \ call handler
+    -1 ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================

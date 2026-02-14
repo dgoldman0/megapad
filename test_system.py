@@ -8716,6 +8716,140 @@ class TestKDOSNetStack(TestKDOS):
         self.assertIn("pr=17 ", text)     # UDP protocol
         self.assertIn("iplen=32 ", text)  # 20 + 8 + 4
 
+    # -- 13b: UDP-SEND / UDP-RECV, port demux --
+
+    def test_udp_port_bind(self):
+        """UDP-PORT-BIND should succeed and return -1."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_port_bind_full(self):
+        """UDP-PORT-BIND should return 0 when table is full."""
+        lines = []
+        for i in range(8):
+            lines.append(f": H{i} 2DROP 2DROP ;")
+            lines.append(f"{5000+i} ' H{i} UDP-PORT-BIND DROP")
+        lines.append(": H8 2DROP 2DROP ;")
+        lines.append("9999 ' H8 UDP-PORT-BIND .")
+        text = self._run_kdos(lines)
+        self.assertIn("0 ", text)
+
+    def test_udp_port_lookup(self):
+        """UDP-PORT-LOOKUP should find a bound port handler."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND DROP",
+            "8080 UDP-PORT-LOOKUP 0<> .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_udp_port_lookup_miss(self):
+        """UDP-PORT-LOOKUP should return 0 for unbound port."""
+        text = self._run_kdos([
+            "9999 UDP-PORT-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_port_unbind(self):
+        """UDP-PORT-UNBIND should remove a binding."""
+        text = self._run_kdos([
+            ": MY-HANDLER 2DROP 2DROP ;",
+            "8080 ' MY-HANDLER UDP-PORT-BIND DROP",
+            "8080 UDP-PORT-UNBIND",
+            "8080 UDP-PORT-LOOKUP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_udp_send_basic(self):
+        """UDP-SEND should produce an Ethernet+IPv4+UDP frame on the NIC."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Pre-cache ARP for dest
+        arp_reply = self._build_arp_reply_frame(
+            nic_mac, [0xBB]*6,
+            [192, 168, 1, 100], [10, 0, 0, 1])
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "10 0 0 1 GW-IP IP!",
+            "ARP-CLEAR",
+            # Pre-load ARP (inject a reply frame and parse it)
+            "ETH-RECV DROP DROP",
+            "ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY DROP",
+            # Now send UDP
+            "CREATE UPAY 4 ALLOT  65 UPAY C!  66 UPAY 1+ C!  67 UPAY 2 + C!  68 UPAY 3 + C!",
+            "GW-IP 5000 3000 UPAY 4 UDP-SEND .",
+        ], nic_frames=[arp_reply])
+        self.assertIn("0 ", text)  # ior = 0 (success)
+
+    def test_udp_recv_basic(self):
+        """UDP-RECV should return src-ip, udp-buf, udp-len for a valid UDP frame."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\xDE\xAD\xBE\xEF')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV .\" ulen=\" .",   # udp-len
+            "UDP-H.SPORT NW16@ .\" sp=\" .",
+            "DROP",                       # drop src-ip
+        ], nic_frames=[frame])
+        self.assertIn("ulen=12 ", text)   # 8 hdr + 4 payload
+        self.assertIn("sp=3000 ", text)
+
+    def test_udp_recv_no_frame(self):
+        """UDP-RECV should return 0 0 0 when no frame available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV . . .",
+        ])
+        self.assertIn("0 0 0 ", text)
+
+    def test_udp_recv_non_udp(self):
+        """UDP-RECV should return 0 0 0 for non-UDP IP frames."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Send a TCP (proto 6) frame
+        frame = self._build_ip_frame(
+            nic_mac, [0xAA]*6, 6,  # TCP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 20)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV . . .",
+        ], nic_frames=[frame])
+        self.assertIn("0 0 0 ", text)
+
+    def test_udp_dispatch_calls_handler(self):
+        """UDP-DISPATCH should call the bound handler for a matching port."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 4000, b'\x42\x43')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "VARIABLE GOT-IT  0 GOT-IT !",
+            ": MY-H  2DROP DROP DROP  -1 GOT-IT ! ;",
+            "4000 ' MY-H UDP-PORT-BIND DROP",
+            "UDP-DISPATCH .",
+            "GOT-IT @ .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_udp_dispatch_no_handler(self):
+        """UDP-DISPATCH should return 0 when no handler is bound."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            3000, 9999, b'\x42\x43')
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-DISPATCH .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main
