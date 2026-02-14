@@ -4602,10 +4602,13 @@ VARIABLE _UCK-SUM
     R> R>                              \ ( udp-buf udp-len )
     DUP _UCK-SUM @ + _UCK-SUM !       \ add udp-len to sum
     \ Accumulate UDP header + data (16-bit words)
+    DUP 1 AND >R                       \ R: odd-flag
     2 / 0 DO
         DUP NW16@ _UCK-SUM @ + _UCK-SUM !
         2 +
-    LOOP DROP
+    LOOP
+    R> IF DUP C@ 8 LSHIFT _UCK-SUM @ + _UCK-SUM ! THEN
+    DROP
     \ Fold carries
     _UCK-SUM @
     BEGIN DUP 65535 > WHILE
@@ -5062,6 +5065,170 @@ VARIABLE _DHST-SIP
     \ Step 4: Wait for ACK
     50 DHCP-WAIT-REPLY DUP 0= IF EXIT THEN
     DHCP-PARSE-ACK ;
+
+\ ---------------------------------------------------------------------
+\  §16.6  DNS — Domain Name System (A-record client)
+\ ---------------------------------------------------------------------
+\ DNS query/response format:
+\   +0   ID        2B   transaction ID
+\   +2   flags     2B   0x0100 = standard query (RD=1)
+\   +4   QDCOUNT   2B   number of questions (1)
+\   +6   ANCOUNT   2B   number of answers
+\   +8   NSCOUNT   2B   0
+\  +10   ARCOUNT   2B   0
+\  +12   question  var  encoded domain name + type + class
+\        answer    var  name + type + class + TTL + rdlen + rdata
+
+12 CONSTANT /DNS-HDR
+CREATE DNS-BUF  512 ALLOT  \ max DNS message
+CREATE DNS-SERVER-IP  4 ALLOT   \ configured DNS server
+8 8 8 8 DNS-SERVER-IP IP!       \ default: 8.8.8.8
+
+VARIABLE DNS-ID   42 DNS-ID !
+
+\ -- DNS-ENCODE-NAME: encode domain name in DNS wire format --
+\   Converts "example.com" → [7]example[3]com[0]
+\   ( c-addr len buf -- buf end-ptr )
+\   c-addr/len is the domain string; buf is where to write.
+VARIABLE _DNE-BUF
+VARIABLE _DNE-LEN
+VARIABLE _DNE-SRC
+VARIABLE _DNE-LPTR
+: DNS-ENCODE-NAME  ( src slen buf -- buf end )
+    _DNE-BUF !              \ save output buffer
+    _DNE-LEN !  _DNE-SRC !  \ save source string
+    _DNE-BUF @              \ output pointer
+    DUP _DNE-LPTR !         \ save label length position
+    1+                      \ advance past length byte
+    0                        \ label-count = 0
+    _DNE-LEN @ 0 DO
+        _DNE-SRC @ I + C@
+        DUP 46 = IF          \ '.' found
+            DROP
+            \ store label length at _DNE-LPTR
+            OVER _DNE-LPTR @ -  1-   _DNE-LPTR @ C!
+            \ set new label length position
+            OVER _DNE-LPTR !
+            SWAP 1+ SWAP     \ advance output ptr past length byte
+        ELSE
+            2 PICK C!        \ store character
+            SWAP 1+ SWAP     \ advance output ptr
+        THEN
+    LOOP
+    DROP                     \ drop label-count
+    \ Store final label length
+    DUP _DNE-LPTR @ -  1-  _DNE-LPTR @ C!
+    \ Terminate with 0-length label
+    0 OVER C!  1+
+    _DNE-BUF @ SWAP ;
+
+\ -- DNS-BUILD-QUERY: build a DNS A-record query --
+\   ( domain-addr domain-len -- buf total-len )
+VARIABLE _DNQ-DADDR
+VARIABLE _DNQ-DLEN
+: DNS-BUILD-QUERY  ( daddr dlen -- buf total )
+    _DNQ-DLEN !  _DNQ-DADDR !
+    DNS-BUF 512 0 FILL
+    \ Header
+    DNS-ID @ DNS-BUF NW16!           \ ID
+    256 DNS-BUF 2 + NW16!            \ flags = 0x0100 (RD=1)
+    1 DNS-BUF 4 + NW16!              \ QDCOUNT = 1
+    \ Question section: encoded name + type(A=1) + class(IN=1)
+    _DNQ-DADDR @ _DNQ-DLEN @ DNS-BUF /DNS-HDR + DNS-ENCODE-NAME
+    NIP                               \ drop buf, keep end ptr
+    DUP 1 SWAP NW16!  2 +            \ QTYPE = A (1)
+    DUP 1 SWAP NW16!  2 +            \ QCLASS = IN (1)
+    DNS-BUF -                         \ total length
+    DNS-ID @ 1+ 65535 AND DNS-ID !    \ increment ID
+    DNS-BUF SWAP ;
+
+\ -- DNS-PARSE-RESPONSE: parse DNS response, extract first A record IP --
+\   ( buf len -- ip-addr | 0 )   ip-addr points to 4-byte resolved IP
+\   Returns 0 if no A record found or response indicates error.
+CREATE DNS-RESULT-IP  4 ALLOT
+
+\ Helper: skip a DNS name (labels or compression pointer)
+: DNS-SKIP-NAME  ( ptr -- ptr' )
+    BEGIN
+        DUP C@ DUP 0= IF DROP 1+ EXIT THEN
+        DUP 192 AND 192 = IF DROP 2 + EXIT THEN
+        1+ +
+    0 UNTIL ;
+
+VARIABLE _DNP-BUF
+VARIABLE _DNP-LEN
+: DNS-PARSE-RESPONSE  ( buf len -- ip | 0 )
+    _DNP-LEN !  _DNP-BUF !
+    \ Check response flag (bit 15 of flags = QR must be 1)
+    _DNP-BUF @ 2 + NW16@ 32768 AND 0= IF 0 EXIT THEN
+    \ Check RCODE (lower 4 bits of flags) = 0
+    _DNP-BUF @ 2 + NW16@ 15 AND 0<> IF 0 EXIT THEN
+    \ Get ANCOUNT
+    _DNP-BUF @ 6 + NW16@ DUP 0= IF DROP 0 EXIT THEN
+    >R                               \ save ANCOUNT
+    \ Skip question section: jump over header
+    _DNP-BUF @ /DNS-HDR + DNS-SKIP-NAME
+    4 +                               \ skip QTYPE + QCLASS
+    \ Now sitting at the answer section
+    R> 0 DO                          \ iterate ANCOUNT answers
+        \ Skip NAME (may be compressed pointer)
+        DUP C@ 192 AND 192 = IF
+            2 +
+        ELSE
+            BEGIN DUP C@ 0<> WHILE DUP C@ 1+ + REPEAT 1+
+        THEN
+        \ Read TYPE (2B) and CLASS (2B)
+        DUP NW16@ 1 = IF             \ TYPE = A?
+            DUP 2 + NW16@ 1 = IF     \ CLASS = IN?
+                \ TTL at +4 (4B), RDLENGTH at +8 (2B), RDATA at +10
+                DUP 8 + NW16@ 4 = IF  \ RDLENGTH = 4?
+                    10 + DNS-RESULT-IP 4 CMOVE
+                    DNS-RESULT-IP
+                    UNLOOP EXIT
+                THEN
+            THEN
+        THEN
+        \ Skip this RR: +2(type) +2(class) +4(TTL) +2(rdlength) + rdlength
+        DUP 8 + NW16@                \ RDLENGTH
+        10 + +                       \ skip to next RR
+    LOOP
+    DROP 0 ;
+
+\ -- DNS-RESOLVE: resolve a domain name to an IP address --
+\   ( c-addr len -- ip-addr | 0 )
+\   Sends DNS query to DNS-SERVER-IP, waits for response.
+VARIABLE _DNR-DADDR
+VARIABLE _DNR-DLEN
+: DNS-RESOLVE  ( daddr dlen -- ip | 0 )
+    _DNR-DLEN !  _DNR-DADDR !
+    \ Build query
+    _DNR-DADDR @ _DNR-DLEN @ DNS-BUILD-QUERY
+    \ Send via UDP to DNS server, port 53
+    \ DNS-BUILD-QUERY returns ( buf total )
+    \ UDP-SEND expects ( dst-ip dport sport payload paylen )
+    >R >R
+    DNS-SERVER-IP 53 12345 R> R>     \ ( dst-ip dport sport payload paylen )
+    UDP-SEND DROP                    \ ignore ior
+    \ Wait for response on our port 12345
+    50 0 DO
+        UDP-RECV DUP 0<> IF
+            \ ( src-ip udp-buf udp-len )
+            >R                        \ save udp-len
+            DUP UDP-H.SPORT NW16@ 53 = IF
+                UDP-H.DATA R>
+                /UDP-HDR -            \ ( src-ip dns-buf dns-len )
+                DNS-PARSE-RESPONSE
+                NIP                   \ drop src-ip
+                UNLOOP EXIT
+            ELSE
+                DROP R> DROP          \ wrong port, discard
+            THEN
+        ELSE
+            DROP DROP                \ drop udp-buf(0) and udp-len(0)
+        THEN
+        DROP                         \ drop src-ip / 0
+    LOOP
+    0 ;
 
 \ =====================================================================
 \  §14  Startup

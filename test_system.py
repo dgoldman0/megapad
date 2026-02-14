@@ -86,7 +86,7 @@ from diskutil import (
 BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
 
 
-def make_system(ram_kib: int = 256, storage_image: str = None,
+def make_system(ram_kib: int = 1024, storage_image: str = None,
                 num_cores: int = 1) -> MegapadSystem:
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
                          num_cores=num_cores)
@@ -9059,6 +9059,196 @@ class TestKDOSNetStack(TestKDOS):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "DHCP-START .",
+        ])
+        self.assertIn("0 ", text)
+
+    # -- 15: DNS client --
+
+    @staticmethod
+    def _build_dns_response(query_id, domain, ip_bytes):
+        """Build a minimal DNS A-record response packet."""
+        # Header
+        hdr = bytearray(12)
+        hdr[0] = (query_id >> 8) & 0xFF
+        hdr[1] = query_id & 0xFF
+        hdr[2] = 0x81  # QR=1, RD=1
+        hdr[3] = 0x80  # RA=1
+        hdr[4] = 0; hdr[5] = 1   # QDCOUNT=1
+        hdr[6] = 0; hdr[7] = 1   # ANCOUNT=1
+        # Question section: encode domain name
+        q = bytearray()
+        for label in domain.split('.'):
+            q.append(len(label))
+            q.extend(label.encode())
+        q.append(0)  # terminator
+        q.extend(b'\x00\x01')  # QTYPE=A
+        q.extend(b'\x00\x01')  # QCLASS=IN
+        # Answer section
+        ans = bytearray()
+        ans.extend(b'\xC0\x0C')  # pointer to name in question
+        ans.extend(b'\x00\x01')  # TYPE=A
+        ans.extend(b'\x00\x01')  # CLASS=IN
+        ans.extend(b'\x00\x00\x00\x3C')  # TTL=60
+        ans.extend(b'\x00\x04')  # RDLENGTH=4
+        ans.extend(bytes(ip_bytes))  # RDATA = IP address
+        return bytes(hdr) + bytes(q) + bytes(ans)
+
+    def test_dns_encode_name(self):
+        """DNS-ENCODE-NAME should encode a domain name correctly."""
+        text = self._run_kdos([
+            'CREATE DNAME 11 ALLOT',
+            '72 DNAME C! 105 DNAME 1+ C!',  # 'hi'
+            # Use S" for the domain literal
+            'CREATE OUTBUF 64 ALLOT',
+            'CREATE DN 11 ALLOT',
+            # Manually store "a.bc" (4 chars)
+            '97 DN C!  46 DN 1+ C!  98 DN 2 + C!  99 DN 3 + C!',
+            'DN 4 OUTBUF DNS-ENCODE-NAME',
+            'OVER - .\" elen=\" .',   # encoded length
+            'DROP',
+            'OUTBUF C@ .\" l0=\" .',   # first label len=1
+            'OUTBUF 1+ C@ .\" c0=\" .',  # 'a'=97
+            'OUTBUF 2 + C@ .\" l1=\" .',  # second label len=2
+            'OUTBUF 3 + C@ .\" c1=\" .',  # 'b'=98
+            'OUTBUF 4 + C@ .\" c2=\" .',  # 'c'=99
+            'OUTBUF 5 + C@ .\" t=\" .',   # terminator=0
+        ])
+        self.assertIn("elen=6 ", text)   # 1+'a'+2+'bc'+0 = 6
+        self.assertIn("l0=1 ", text)
+        self.assertIn("c0=97 ", text)
+        self.assertIn("l1=2 ", text)
+        self.assertIn("c1=98 ", text)
+        self.assertIn("c2=99 ", text)
+        self.assertIn("t=0 ", text)
+
+    def test_dns_build_query(self):
+        """DNS-BUILD-QUERY should produce a valid DNS query packet."""
+        text = self._run_kdos([
+            'CREATE DN 7 ALLOT',
+            # Store "a.b" (3 chars)
+            '97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
+            'DN 3 DNS-BUILD-QUERY',
+            '.\" qlen=\" .',   # total length: 12(hdr) + 1+1+1+1+0(name) + 4(type+class) = 21
+        ])
+        self.assertIn("qlen=21 ", text)  # 12 + 5 + 4
+
+    def test_dns_build_query_flags(self):
+        """DNS query should have RD=1 flag set."""
+        text = self._run_kdos([
+            'CREATE DN 3 ALLOT  97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
+            'DN 3 DNS-BUILD-QUERY DROP',
+            'DNS-BUF 2 + NW16@ .\" fl=\" .',
+        ])
+        self.assertIn("fl=256 ", text)  # 0x0100
+
+    def test_dns_resolve_full_ip_check(self):
+        """DNS-RESOLVE should return all 4 bytes of the resolved IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dns_resp = self._build_dns_response(42, "x.y", [93, 184, 216, 34])
+        dns_frame = self._build_udp_frame(
+            nic_mac, [0xCC]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
+            "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
+            "FIP FMAC ARP-INSERT",
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE',
+            'DUP 0<> .\" ok=\" .',
+            'DUP C@ .\" a=\" .',
+            'DUP 1+ C@ .\" b=\" .',
+            'DUP 2 + C@ .\" c=\" .',
+            '3 + C@ .\" d=\" .',
+        ], nic_frames=[dns_frame])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("a=93 ", text)
+        self.assertIn("b=184 ", text)
+        self.assertIn("c=216 ", text)
+        self.assertIn("d=34 ", text)
+
+    def test_dns_parse_response_a_record(self):
+        """DNS-PARSE-RESPONSE should extract the A record IP."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build a DNS response for "a.b" → 1.2.3.4
+        dns_resp = self._build_dns_response(42, "a.b", [1, 2, 3, 4])
+        # Wrap in UDP frame from DNS server (port 53)
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Receive the frame and parse DNS
+            "UDP-RECV DROP UDP-H.DATA NIP",   # ( dns-buf )
+            str(len(dns_resp)),                # push dns-len
+            "DNS-PARSE-RESPONSE",
+            "DUP 0<> .\" found=\" .",
+            "DUP C@ .\" a=\" .",
+            "DUP 1+ C@ .\" b=\" .",
+            "DUP 2 + C@ .\" c=\" .",
+            "3 + C@ .\" d=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("found=-1 ", text)
+        self.assertIn("a=1 ", text)
+        self.assertIn("b=2 ", text)
+        self.assertIn("c=3 ", text)
+        self.assertIn("d=4 ", text)
+
+    def test_dns_parse_response_no_answer(self):
+        """DNS-PARSE-RESPONSE should return 0 when ANCOUNT=0."""
+        # Build a response with no answers
+        hdr = bytearray(12)
+        hdr[2] = 0x81; hdr[3] = 0x80  # QR=1, RA=1
+        hdr[4] = 0; hdr[5] = 1   # QDCOUNT=1
+        hdr[6] = 0; hdr[7] = 0   # ANCOUNT=0
+        q = bytearray([1, 97, 0, 0, 1, 0, 1])  # "a" + type A + class IN
+        dns_data = bytes(hdr) + bytes(q)
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_data)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            str(len(dns_data)),
+            "DNS-PARSE-RESPONSE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dns_resolve_full(self):
+        """DNS-RESOLVE should send query and parse the response."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dns_resp = self._build_dns_response(42, "x.y", [93, 184, 216, 34])
+        dns_frame = self._build_udp_frame(
+            nic_mac, [0xCC]*6,
+            [8, 8, 8, 8], [192, 168, 1, 100],
+            53, 12345, dns_resp)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # Pre-cache ARP for 8.8.8.8 via direct insert
+            "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
+            "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
+            "FIP FMAC ARP-INSERT",
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE',
+            'DUP 0<> .\" ok=\" .',
+            'DUP C@ .\" a=\" .',
+            '1+ C@ .\" b=\" .',
+        ], nic_frames=[dns_frame])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("a=93 ", text)
+        self.assertIn("b=184 ", text)
+
+    def test_dns_resolve_no_response(self):
+        """DNS-RESOLVE should return 0 when no response is received."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            # No ARP entry for DNS server, so UDP-SEND fails
+            'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
+            'DNAME 3 DNS-RESOLVE .',
         ])
         self.assertIn("0 ", text)
 
