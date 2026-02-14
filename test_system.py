@@ -7729,6 +7729,142 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         self.assertIn("1 ", text)
 
+    # ---- §8.6 IPI messaging ----
+
+    def test_msg_constants(self):
+        """Message type constants exist."""
+        text = self._run_mc([
+            "MSG-CALL .",
+            "MSG-DATA .",
+            "MSG-SIGNAL .",
+            "MSG-USER .",
+            "MSG-DEPTH .",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+        self.assertIn("3 ", text)
+        self.assertIn("8 ", text)
+
+    def test_msg_inbox_empty_at_init(self):
+        """All inboxes start empty."""
+        text = self._run_mc([
+            "0 MSG-IEMPTY? .",
+            "1 MSG-IEMPTY? .",
+            "0 MSG-ICOUNT .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_msg_send_recv(self):
+        """MSG-SEND to self-core then MSG-RECV retrieves the message."""
+        text = self._run_mc([
+            "MSG-DATA 42 0 MSG-SEND .",
+            "MSG-RECV . . . .",
+        ])
+        # send returns -1 (success)
+        self.assertIn("-1 ", text)
+        # recv returns: type=1 sender=0 payload=42 flag=-1
+        self.assertIn("42 ", text)
+
+    def test_msg_peek(self):
+        """MSG-PEEK returns flag showing inbox status."""
+        text = self._run_mc([
+            "MSG-PEEK .",
+            "MSG-CALL 99 0 MSG-SEND DROP",
+            "MSG-PEEK .",
+        ])
+        # first peek: empty -> 0, second peek: has msg -> -1
+        self.assertIn("0 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_msg_multiple(self):
+        """Multiple messages queued and dequeued in FIFO order."""
+        text = self._run_mc([
+            "MSG-CALL 10 0 MSG-SEND DROP",
+            "MSG-DATA 20 0 MSG-SEND DROP",
+            "0 MSG-ICOUNT .",
+            "MSG-RECV DROP . DROP DROP",
+            "MSG-RECV DROP . DROP DROP",
+            "0 MSG-ICOUNT .",
+        ])
+        # count=2, then payloads 10,20 in order, then count=0
+        self.assertIn("2 ", text)
+        self.assertIn("10 ", text)
+        self.assertIn("20 ", text)
+
+    def test_msg_full(self):
+        """MSG-SEND returns 0 when inbox is full."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-CALL 2 0 MSG-SEND DROP",
+            "MSG-CALL 3 0 MSG-SEND DROP",
+            "MSG-CALL 4 0 MSG-SEND DROP",
+            "MSG-CALL 5 0 MSG-SEND DROP",
+            "MSG-CALL 6 0 MSG-SEND DROP",
+            "MSG-CALL 7 0 MSG-SEND DROP",
+            "MSG-CALL 8 0 MSG-SEND .",
+        ])
+        # 8th msg should fail (depth=8 but circular queue holds depth-1=7)
+        self.assertIn("0 ", text)
+
+    def test_msg_recv_empty(self):
+        """MSG-RECV on empty inbox returns 0 0 0 0."""
+        text = self._run_mc([
+            "MSG-RECV . . . .",
+        ])
+        self.assertIn("0 0 0 0", text)
+
+    def test_msg_flush(self):
+        """MSG-FLUSH drains all pending messages."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-DATA 2 0 MSG-SEND DROP",
+            "MSG-SIGNAL 3 0 MSG-SEND DROP",
+            "MSG-FLUSH .",
+            "0 MSG-ICOUNT .",
+        ])
+        self.assertIn("3 ", text)
+
+    def test_msg_handler_dispatch(self):
+        """MSG-HANDLER! registers handler, MSG-DISPATCH invokes it."""
+        text = self._run_mc([
+            ": MY-H  DROP .\" got:\" . .\" from:\" . CR ;",
+            "' MY-H MSG-DATA MSG-HANDLER!",
+            "MSG-DATA 77 0 MSG-SEND DROP",
+            "MSG-DISPATCH .",
+        ])
+        self.assertIn("got:", text)
+        self.assertIn("77", text)
+        self.assertIn("-1 ", text)
+
+    def test_msg_dispatch_no_handler(self):
+        """MSG-DISPATCH with no handler returns 0 and discards message."""
+        text = self._run_mc([
+            "MSG-SIGNAL 55 0 MSG-SEND DROP",
+            "MSG-DISPATCH .",
+            "MSG-PEEK .",
+        ])
+        # dispatch returns 0 (no handler), message consumed
+        self.assertIn("0 ", text)
+
+    def test_msg_info(self):
+        """MSG-INFO displays inbox status."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-INFO",
+        ])
+        self.assertIn("IPI Messages", text)
+        self.assertIn("Core 0", text)
+        self.assertIn("1  msg(s)", text)
+
+    def test_msg_broadcast(self):
+        """MSG-BROADCAST sends to all other cores."""
+        text = self._run_mc([
+            "MSG-DATA 99 MSG-BROADCAST .",
+        ])
+        # Should send to 3 other cores (1,2,3)
+        self.assertIn("3 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing

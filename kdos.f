@@ -3083,6 +3083,140 @@ PREEMPT-FLAGS-INIT
         I PREEMPT-FLAG@ . CR
     LOOP ;
 
+\ =====================================================================
+\  §8.6  IPI Messaging
+\ =====================================================================
+\
+\  Structured inter-core message passing via shared-memory queues.
+\  Each core has a MSG-DEPTH-deep circular inbox.  Messages are
+\  3 cells wide: type, sender, payload.  Protected by hardware
+\  spinlock MSG-SLOCK.
+\
+\  MSG-SEND      ( type payload target -- flag )
+\  MSG-RECV      ( -- type sender payload flag )
+\  MSG-PEEK      ( -- flag )
+\  MSG-BROADCAST ( type payload -- n )
+\  MSG-FLUSH     ( -- n )
+\  MSG-HANDLER!  ( xt type -- )
+\  MSG-DISPATCH  ( -- flag )
+\  MSG-INFO      ( -- )
+
+8 CONSTANT MSG-DEPTH
+3 CONSTANT MSG-CELLS
+7 CONSTANT MSG-SLOCK
+
+VARIABLE MSG-INBOX  767 ALLOT
+VARIABLE MSG-IHEAD  31 ALLOT
+VARIABLE MSG-ITAIL  31 ALLOT
+
+0 CONSTANT MSG-CALL
+1 CONSTANT MSG-DATA
+2 CONSTANT MSG-SIGNAL
+3 CONSTANT MSG-USER
+
+: MSG-ISLOT  ( idx core -- addr )
+    MSG-DEPTH MSG-CELLS * CELLS *  MSG-INBOX +
+    SWAP MSG-CELLS CELLS * + ;
+
+: MSG-ICOUNT  ( core -- n )
+    DUP CELLS MSG-ITAIL + @  SWAP CELLS MSG-IHEAD + @  -
+    MSG-DEPTH + MSG-DEPTH MOD ;
+
+: MSG-IFULL?  ( core -- flag )
+    MSG-ICOUNT MSG-DEPTH 1- >= ;
+
+: MSG-IEMPTY?  ( core -- flag )
+    DUP CELLS MSG-IHEAD + @  SWAP CELLS MSG-ITAIL + @  = ;
+
+: MSG-INIT  ( -- )
+    NCORES_MAX 0 DO
+        0 I CELLS MSG-IHEAD + !
+        0 I CELLS MSG-ITAIL + !
+    LOOP
+    MSG-INBOX  MSG-DEPTH MSG-CELLS * NCORES_MAX * CELLS  0 FILL ;
+
+MSG-INIT
+
+VARIABLE MS-T   VARIABLE MS-P   VARIABLE MS-G
+
+: MSG-SEND  ( type payload target -- flag )
+    MS-G !  MS-P !  MS-T !
+    MSG-SLOCK LOCK
+    MS-G @ MSG-IFULL? IF  MSG-SLOCK UNLOCK  0 EXIT  THEN
+    MS-G @ DUP CELLS MSG-ITAIL + @  SWAP MSG-ISLOT
+    MS-T @  OVER !  CELL+
+    COREID  OVER !  CELL+
+    MS-P @  SWAP !
+    MS-G @ CELLS MSG-ITAIL + @  1+  MSG-DEPTH MOD
+    MS-G @ CELLS MSG-ITAIL + !
+    MSG-SLOCK UNLOCK  -1 ;
+
+VARIABLE MR-T   VARIABLE MR-S   VARIABLE MR-P
+
+: MSG-RECV  ( -- type sender payload flag )
+    COREID MSG-IEMPTY? IF  0 0 0 0 EXIT  THEN
+    MSG-SLOCK LOCK
+    COREID DUP CELLS MSG-IHEAD + @  SWAP MSG-ISLOT
+    DUP @ MR-T !  CELL+
+    DUP @ MR-S !  CELL+
+    @     MR-P !
+    COREID DUP CELLS MSG-IHEAD + @  1+  MSG-DEPTH MOD
+    COREID CELLS MSG-IHEAD + !
+    MSG-SLOCK UNLOCK
+    MR-T @ MR-S @ MR-P @ -1 ;
+
+: MSG-PEEK  ( -- flag )
+    COREID MSG-IEMPTY? INVERT ;
+
+4 CONSTANT MSG-HTYPES
+VARIABLE MSG-HTABLE  31 ALLOT
+
+: MSG-HINIT  ( -- )
+    MSG-HTYPES 0 DO  0 I CELLS MSG-HTABLE + !  LOOP ;
+
+MSG-HINIT
+
+: MSG-HANDLER!  ( xt type -- )
+    CELLS MSG-HTABLE + ! ;
+
+: MSG-HANDLER@  ( type -- xt|0 )
+    DUP MSG-HTYPES < IF  CELLS MSG-HTABLE + @  ELSE  DROP 0  THEN ;
+
+: MSG-DISPATCH  ( -- flag )
+    MSG-PEEK 0= IF  0 EXIT  THEN
+    MSG-RECV DROP
+    ROT DUP MSG-HANDLER@
+    DUP IF  EXECUTE -1  ELSE  DROP DROP DROP DROP 0  THEN ;
+
+VARIABLE MB-T   VARIABLE MB-P
+
+: MSG-BROADCAST  ( type payload -- n )
+    MB-P !  MB-T !
+    0
+    NCORES 0 DO
+        I COREID <> IF
+            MB-T @ MB-P @ I MSG-SEND IF  1+  THEN
+        THEN
+    LOOP ;
+
+: MSG-FLUSH  ( -- n )
+    0
+    BEGIN  MSG-PEEK  WHILE
+        MSG-RECV IF  DROP DROP DROP  THEN  1+
+    REPEAT ;
+
+: MSG-INFO  ( -- )
+    ." --- IPI Messages ---" CR
+    NCORES 0 DO
+        ."   Core " I . ." : " I MSG-ICOUNT . ." msg(s)" CR
+    LOOP
+    ." Handlers:" CR
+    MSG-HTYPES 0 DO
+        I MSG-HANDLER@ IF
+            ."   type " I . CR
+        THEN
+    LOOP ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !
