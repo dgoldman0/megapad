@@ -4748,7 +4748,7 @@ VARIABLE _UDS-SPORT
 VARIABLE _UDR-HDR
 VARIABLE _UDR-IPLEN
 : UDP-RECV  ( -- src-ip udp-buf udp-len | 0 0 0 )
-    IP-RECV DUP 0= IF DROP 0 EXIT THEN    \ no frame → 0 0 0
+    IP-RECV DUP 0= IF DROP 0 0 EXIT THEN    \ no frame → 0 0 0
     _UDR-IPLEN !  _UDR-HDR !
     \ Auto-handle ICMP pings
     _UDR-HDR @ IP-H.PROTO C@ IP-PROTO-ICMP = IF
@@ -4819,6 +4819,11 @@ VARIABLE _UDR-IPLEN
 240 CONSTANT /DHCP-HDR
 CREATE DHCP-BUF  /DHCP-HDR 312 + ALLOT   \ 548 bytes max (options up to 312)
 
+\ DNS-SERVER-IP: declared here so DHCP can populate it from option 6.
+\ Default value (8.8.8.8) is set later in §16.6 DNS.
+CREATE DNS-SERVER-IP  4 ALLOT
+8 8 8 8 DNS-SERVER-IP IP!
+
 \ DHCP message types (option 53)
 1 CONSTANT DHCP-DISCOVER
 2 CONSTANT DHCP-OFFER
@@ -4840,6 +4845,37 @@ CREATE DHCP-BUF  /DHCP-HDR 312 + ALLOT   \ 548 bytes max (options up to 312)
 : DHCP-F.OPTS   ( buf -- addr ) 240 + ;              \ +240
 
 VARIABLE DHCP-XID    305419896 DHCP-XID !   \ 0x12345678
+
+\ -- DHCP-NEW-XID: generate a pseudo-random transaction ID --
+\   Uses CYCLES (CPU cycle counter) and a simple xorshift mixer.
+VARIABLE _DHCP-RNG-STATE  48271 _DHCP-RNG-STATE !
+: DHCP-NEW-XID  ( -- )
+    _DHCP-RNG-STATE @ CYCLES XOR
+    DUP 13 LSHIFT XOR
+    DUP  7 RSHIFT XOR
+    DUP 17 LSHIFT XOR
+    DUP _DHCP-RNG-STATE !
+    0xFFFFFFFF AND            \ DHCP XID is 32-bit
+    DHCP-XID ! ;
+
+\ -- DHCP-VALIDATE-REPLY: strict validation of incoming DHCP reply --
+\   Checks: op=BOOTREPLY(2), magic cookie, xid match, chaddr match
+\   ( dhcp-buf -- flag )  -1 if valid, 0 if invalid
+: DHCP-VALIDATE-REPLY  ( buf -- flag )
+    \ Check op = BOOTREPLY (2)
+    DUP DHCP-F.OP C@ 2 <> IF DROP 0 EXIT THEN
+    \ Check magic cookie = 99.130.83.99
+    DUP DHCP-F.MAGIC DUP C@ 99 <> IF 2DROP 0 EXIT THEN
+    DUP 1+ C@ 130 <> IF 2DROP 0 EXIT THEN
+    DUP 2 + C@ 83 <> IF 2DROP 0 EXIT THEN
+    3 + C@ 99 <> IF DROP 0 EXIT THEN
+    \ Check XID matches
+    DUP DHCP-F.XID NW16@ 16 LSHIFT
+    OVER DHCP-F.XID 2 + NW16@ OR
+    DHCP-XID @ <> IF DROP 0 EXIT THEN
+    \ Check chaddr matches MY-MAC (first 6 bytes)
+    DUP DHCP-F.CHADDR MY-MAC 6 TUCK COMPARE 0<> IF DROP 0 EXIT THEN
+    DROP -1 ;
 
 \ -- DHCP-FILL-COMMON: fill common BOOTP fields --
 \   ( buf -- )
@@ -4889,12 +4925,26 @@ VARIABLE DHCP-XID    305419896 DHCP-XID !   \ 0x12345678
     OVER 2 + SWAP 4 CMOVE
     6 + ;
 
+\ -- DHCP-ADD-PARAMLIST: append Parameter Request List option (55) --
+\   Requests: subnet(1), router(3), DNS(6), lease-time(51)
+\   ( opt-ptr -- opt-ptr' )
+: DHCP-ADD-PARAMLIST  ( ptr -- ptr' )
+    55 OVER C!              \ option 55
+     4 OVER 1+ C!           \ length 4
+     1 OVER 2 + C!          \ subnet mask
+     3 OVER 3 + C!          \ router
+     6 OVER 4 + C!          \ DNS server
+    51 OVER 5 + C!          \ lease time
+    6 + ;
+
 \ -- DHCP-BUILD-DISCOVER: build a DHCP DISCOVER packet --
 \   ( -- buf len )
 : DHCP-BUILD-DISCOVER  ( -- buf len )
+    DHCP-NEW-XID
     DHCP-BUF DHCP-FILL-COMMON
     DHCP-BUF DHCP-F.OPTS
     DHCP-DISCOVER DHCP-ADD-MSGTYPE
+    DHCP-ADD-PARAMLIST
     DHCP-ADD-END
     DHCP-BUF - DHCP-BUF SWAP ;
 
@@ -5024,47 +5074,77 @@ CREATE DHCP-MASK-OFFER  4 ALLOT
     ELSE
         2DROP
     THEN
+    \ Set DNS server from option 6 (first 4 bytes = primary DNS)
+    DUP 6 DHCP-GET-OPTION DUP 4 >= IF
+        DROP DNS-SERVER-IP 4 CMOVE
+    ELSE
+        2DROP
+    THEN
     DROP -1 ;
 
-\ -- DHCP-WAIT-REPLY: wait for a DHCP reply on port 68 --
-\   ( max-attempts -- dhcp-buf | 0 )  returns pointer to DHCP data or 0
-: DHCP-WAIT-REPLY  ( n -- dhcp-buf | 0 )
-    0 DO
+\ -- DHCP-WAIT-REPLY: wait for a validated DHCP reply on port 68 --
+\   ( max-attempts expected-type -- dhcp-buf | 0 )
+\   Returns pointer to DHCP data or 0. Validates reply and type.
+: DHCP-WAIT-REPLY  ( n expected-type -- dhcp-buf | 0 )
+    SWAP 0 DO
         UDP-RECV DUP 0<> IF
-            \ Stack: ( src-ip udp-buf udp-len )
+            \ Stack: ( expected-type src-ip udp-buf udp-len )
             DROP              \ drop udp-len
             DUP UDP-H.DPORT NW16@ 68 = IF
                 UDP-H.DATA    \ pointer to DHCP data
-                NIP           \ drop src-ip
-                UNLOOP EXIT
+                \ Stack: ( expected-type src-ip dhcp-data )
+                DUP DHCP-VALIDATE-REPLY IF
+                    \ Check message type matches expected
+                    DUP DHCP-GET-MSGTYPE 3 PICK = IF
+                        NIP NIP   \ drop src-ip & expected-type
+                        UNLOOP EXIT
+                    THEN
+                THEN
+                DROP          \ invalid reply, discard dhcp-data
+            ELSE
+                DROP          \ drop udp-buf (wrong port)
             THEN
-            DROP              \ drop udp-buf
         ELSE
-            DROP              \ drop extra 0 from udp-len
+            DROP DROP         \ drop 2 of 3 zeros from failure
         THEN
-        DROP                  \ drop src-ip (or 0)
+        DROP                  \ drop src-ip (or last 0)
     LOOP
+    DROP                      \ drop expected-type
     0 ;
 
-\ -- DHCP-START: run DHCP client, auto-configure IP/mask/gateway --
+\ -- DHCP-START: run DHCP client with retry/backoff --
+\   Retries DISCOVER up to 4 times with increasing wait attempts.
 \   ( -- flag )  -1 if success, 0 if failed
 VARIABLE _DHST-OIP
 VARIABLE _DHST-SIP
 : DHCP-START  ( -- flag )
-    \ Step 1: Send DISCOVER
-    DHCP-BUILD-DISCOVER DHCP-SEND
-    \ Step 2: Wait for OFFER
-    50 DHCP-WAIT-REPLY DUP 0= IF EXIT THEN
-    \ Parse OFFER
-    DUP DHCP-PARSE-OFFER
-    OVER 0= IF 2DROP DROP 0 EXIT THEN
-    _DHST-SIP !  _DHST-OIP !
-    DROP                         \ drop dhcp-buf
-    \ Step 3: Send REQUEST
-    _DHST-OIP @ _DHST-SIP @ DHCP-BUILD-REQUEST DHCP-SEND
-    \ Step 4: Wait for ACK
-    50 DHCP-WAIT-REPLY DUP 0= IF EXIT THEN
-    DHCP-PARSE-ACK ;
+    4 0 DO                           \ retry loop (up to 4 attempts)
+        \ Step 1: Send DISCOVER (generates new XID each time)
+        DHCP-BUILD-DISCOVER DHCP-SEND
+        \ Step 2: Wait for OFFER (increasing patience: 50, 100, 200, 400)
+        50 I 0 ?DO 2 * LOOP
+        DHCP-OFFER DHCP-WAIT-REPLY
+        DUP 0<> IF
+            \ Parse OFFER
+            DUP DHCP-PARSE-OFFER
+            OVER 0= IF 2DROP DROP ELSE
+                _DHST-SIP !  _DHST-OIP !
+                DROP                     \ drop dhcp-buf
+                \ Step 3: Send REQUEST
+                _DHST-OIP @ _DHST-SIP @ DHCP-BUILD-REQUEST DHCP-SEND
+                \ Step 4: Wait for ACK
+                100 DHCP-ACK DHCP-WAIT-REPLY
+                DUP 0<> IF
+                    DHCP-PARSE-ACK
+                    UNLOOP EXIT
+                THEN
+                DROP
+            THEN
+        ELSE
+            DROP                         \ drop 0
+        THEN
+    LOOP
+    0 ;
 
 \ ---------------------------------------------------------------------
 \  §16.6  DNS — Domain Name System (A-record client)
@@ -5081,8 +5161,7 @@ VARIABLE _DHST-SIP
 
 12 CONSTANT /DNS-HDR
 CREATE DNS-BUF  512 ALLOT  \ max DNS message
-CREATE DNS-SERVER-IP  4 ALLOT   \ configured DNS server
-8 8 8 8 DNS-SERVER-IP IP!       \ default: 8.8.8.8
+\ DNS-SERVER-IP is declared in §16.5 (DHCP) so DHCP-PARSE-ACK can set it.
 
 VARIABLE DNS-ID   42 DNS-ID !
 

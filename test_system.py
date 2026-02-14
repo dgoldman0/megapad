@@ -2107,7 +2107,8 @@ class TestKDOS(unittest.TestCase):
     def _run_kdos(self, extra_lines: list[str],
                   max_steps=400_000_000,
                   storage_image=None,
-                  nic_frames=None) -> str:
+                  nic_frames=None,
+                  nic_tx_callback=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
@@ -2115,12 +2116,15 @@ class TestKDOS(unittest.TestCase):
             return self._run_kdos_fast(extra_lines,
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
-                                      storage_image=storage_image)
+                                      storage_image=storage_image,
+                                      nic_tx_callback=nic_tx_callback)
 
         sys, buf = self._boot_bios(storage_image=storage_image)
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
+        if nic_tx_callback:
+            sys.nic.on_tx_frame = lambda data: nic_tx_callback(sys.nic, data)
         all_lines = self.kdos_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
@@ -2146,7 +2150,8 @@ class TestKDOS(unittest.TestCase):
     def _run_kdos_fast(self, extra_lines: list[str],
                        max_steps=50_000_000,
                        nic_frames=None,
-                       storage_image=None) -> str:
+                       storage_image=None,
+                       nic_tx_callback=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
@@ -2162,6 +2167,10 @@ class TestKDOS(unittest.TestCase):
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
+
+        # Set TX callback for dynamic response (e.g. DHCP)
+        if nic_tx_callback:
+            sys.nic.on_tx_frame = lambda data: nic_tx_callback(sys.nic, data)
 
         # Now just process the extra_lines + BYE
         payload = "\n".join(extra_lines) + "\nBYE\n"
@@ -8913,9 +8922,8 @@ class TestKDOSNetStack(TestKDOS):
             "C@ .\" op=\" .",            # op should be 1 (BOOTREQUEST)
         ])
         self.assertIn("op=1 ", text)
-        # Length should be >= 243 (240 header + 3 for type option + END)
-        # Actually: 240 + 53,1,type=3 bytes + 255=1 byte = 244
-        self.assertIn("len=244 ", text)
+        # Length: 240 hdr + 3 (opt53 msgtype) + 6 (opt55 paramlist) + 1 (end) = 250
+        self.assertIn("len=250 ", text)
 
     def test_dhcp_build_discover_magic(self):
         """DHCP DISCOVER should have correct magic cookie."""
@@ -9017,37 +9025,75 @@ class TestKDOSNetStack(TestKDOS):
     def test_dhcp_start_full_exchange(self):
         """DHCP-START should do DISCOVER→OFFER→REQUEST→ACK."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
-        # DHCP OFFER reply
-        offer = self._build_dhcp_reply(
-            msg_type=2,
-            xid=0x12345678,
-            yiaddr=[192, 168, 1, 50],
-            siaddr=[192, 168, 1, 1],
-            chaddr=nic_mac,
-            server_id=[192, 168, 1, 1],
-            subnet=[255, 255, 255, 0],
-            router=[192, 168, 1, 1])
-        offer_frame = self._build_dhcp_frame(
-            nic_mac, [0xBB]*6,
-            [192, 168, 1, 1], [255, 255, 255, 255], offer)
-        # DHCP ACK reply
-        ack = self._build_dhcp_reply(
-            msg_type=5,
-            xid=0x12345678,
-            yiaddr=[192, 168, 1, 50],
-            siaddr=[192, 168, 1, 1],
-            chaddr=nic_mac,
-            server_id=[192, 168, 1, 1],
-            subnet=[255, 255, 255, 0],
-            router=[192, 168, 1, 1])
-        ack_frame = self._build_dhcp_frame(
-            nic_mac, [0xBB]*6,
-            [192, 168, 1, 1], [255, 255, 255, 255], ack)
+
+        def dhcp_server(nic, frame_bytes):
+            """Dynamic DHCP responder: intercept TX, inject reply."""
+            # Frame: 14B Ethernet + 20B IP + 8B UDP + DHCP payload
+            if len(frame_bytes) < 42 + 240:
+                return
+            # Check ethertype = IPv4 (0x0800)
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            # Check protocol = UDP (17)
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            # Check dst port = 67 (DHCP server)
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            # Extract XID (4 bytes at offset 4 of DHCP)
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            # Extract message type from options
+            msg_type = 0
+            opt_off = dhcp_start + 240
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            if msg_type == 1:  # DISCOVER → inject OFFER
+                offer = self._build_dhcp_reply(
+                    msg_type=2, xid=xid,
+                    yiaddr=[192, 168, 1, 50],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], offer))
+            elif msg_type == 3:  # REQUEST → inject ACK
+                ack = self._build_dhcp_reply(
+                    msg_type=5, xid=xid,
+                    yiaddr=[192, 168, 1, 50],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], ack))
+
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "DHCP-START .",
             "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
-        ], nic_frames=[offer_frame, ack_frame])
+        ], nic_tx_callback=dhcp_server)
         self.assertIn("-1 ", text)          # success
         self.assertIn("a=192 ", text)
         self.assertIn("b=168 ", text)
@@ -9061,6 +9107,331 @@ class TestKDOSNetStack(TestKDOS):
             "DHCP-START .",
         ])
         self.assertIn("0 ", text)
+
+    def test_dhcp_xid_changes(self):
+        """DHCP-NEW-XID should produce a different XID each call."""
+        text = self._run_kdos([
+            "DHCP-NEW-XID DHCP-XID @ .\" x1=\" .",
+            "DHCP-NEW-XID DHCP-XID @ .\" x2=\" .",
+        ])
+        # Extract the two values
+        import re
+        m1 = re.search(r'x1=(-?\d+)', text)
+        m2 = re.search(r'x2=(-?\d+)', text)
+        self.assertIsNotNone(m1)
+        self.assertIsNotNone(m2)
+        self.assertNotEqual(m1.group(1), m2.group(1))
+
+    def test_dhcp_validate_reply_good(self):
+        """DHCP-VALIDATE-REPLY should accept a valid reply."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",        # 0x12345678
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_dhcp_validate_reply_bad_xid(self):
+        """DHCP-VALIDATE-REPLY should reject reply with wrong XID."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0xDEADBEEF,    # wrong XID
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",        # 0x12345678
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_chaddr(self):
+        """DHCP-VALIDATE-REPLY should reject reply with wrong chaddr."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        wrong_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+        dhcp_pkt = self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=wrong_mac)               # wrong MAC
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_op(self):
+        """DHCP-VALIDATE-REPLY should reject BOOTREQUEST (op=1)."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = bytearray(self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac))
+        dhcp_pkt[0] = 1  # op = BOOTREQUEST (not BOOTREPLY)
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], bytes(dhcp_pkt))
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_validate_reply_bad_magic(self):
+        """DHCP-VALIDATE-REPLY should reject wrong magic cookie."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        dhcp_pkt = bytearray(self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 1], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac))
+        dhcp_pkt[236] = 0  # corrupt magic cookie
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], bytes(dhcp_pkt))
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-VALIDATE-REPLY .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_dhcp_discover_has_paramlist(self):
+        """DHCP DISCOVER should contain Parameter Request List (opt 55)."""
+        text = self._run_kdos([
+            "DHCP-BUILD-DISCOVER DROP",
+            "DHCP-BUF 55 DHCP-GET-OPTION",
+            ".\" plen=\" .",
+            "DUP C@ .\" p0=\" .",
+            "1+ C@ .\" p1=\" .",
+        ])
+        self.assertIn("plen=4 ", text)     # 4 items requested
+        self.assertIn("p0=1 ", text)       # subnet mask
+        self.assertIn("p1=3 ", text)       # router
+
+    def test_dhcp_ack_applies_dns(self):
+        """DHCP-PARSE-ACK should extract DNS server from option 6."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build ACK with DNS option (6)
+        pkt = bytearray(548)
+        pkt[0] = 2   # BOOTREPLY
+        pkt[1] = 1; pkt[2] = 6
+        pkt[4:8] = (0x12345678).to_bytes(4, 'big')
+        pkt[16:20] = bytes([10, 0, 0, 42])  # yiaddr
+        pkt[28:34] = bytes(nic_mac)          # chaddr
+        pkt[236:240] = bytes([99, 130, 83, 99])  # magic
+        off = 240
+        # opt 53: ACK (5)
+        pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 5; off += 3
+        # opt 1: subnet
+        pkt[off] = 1; pkt[off+1] = 4; off += 2
+        pkt[off:off+4] = bytes([255, 255, 255, 0]); off += 4
+        # opt 6: DNS server
+        pkt[off] = 6; pkt[off+1] = 4; off += 2
+        pkt[off:off+4] = bytes([1, 2, 3, 4]); off += 4
+        # end
+        pkt[off] = 255; off += 1
+        dhcp_pkt = bytes(pkt[:off])
+        frame = self._build_dhcp_frame(
+            nic_mac, [0xBB]*6,
+            [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "UDP-RECV DROP UDP-H.DATA NIP",
+            "DHCP-PARSE-ACK .",
+            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+        self.assertIn("a=1 ", text)
+        self.assertIn("b=2 ", text)
+        self.assertIn("c=3 ", text)
+        self.assertIn("d=4 ", text)
+
+    def test_dhcp_start_retry_on_bad_offer(self):
+        """DHCP-START should retry when first offer has wrong XID."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        attempt = [0]
+
+        def dhcp_server_retry(nic, frame_bytes):
+            """On first DISCOVER, send offer with wrong XID. Second works."""
+            if len(frame_bytes) < 42 + 240:
+                return
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            opt_off = dhcp_start + 240
+            msg_type = 0
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            if msg_type == 1:  # DISCOVER
+                attempt[0] += 1
+                # First DISCOVER gets no valid reply (bad XID)
+                if attempt[0] == 1:
+                    bad_offer = self._build_dhcp_reply(
+                        msg_type=2, xid=0x00000000,  # wrong XID
+                        yiaddr=[10, 0, 0, 99],
+                        siaddr=[10, 0, 0, 1],
+                        chaddr=nic_mac,
+                        server_id=[10, 0, 0, 1])
+                    nic.inject_frame(self._build_dhcp_frame(
+                        nic_mac, [0xBB]*6,
+                        [10, 0, 0, 1], [255, 255, 255, 255], bad_offer))
+                else:
+                    # Second attempt: correct XID
+                    offer = self._build_dhcp_reply(
+                        msg_type=2, xid=xid,
+                        yiaddr=[192, 168, 1, 77],
+                        siaddr=[192, 168, 1, 1],
+                        chaddr=nic_mac,
+                        server_id=[192, 168, 1, 1],
+                        subnet=[255, 255, 255, 0],
+                        router=[192, 168, 1, 1])
+                    nic.inject_frame(self._build_dhcp_frame(
+                        nic_mac, [0xBB]*6,
+                        [192, 168, 1, 1], [255, 255, 255, 255], offer))
+            elif msg_type == 3:  # REQUEST
+                ack = self._build_dhcp_reply(
+                    msg_type=5, xid=xid,
+                    yiaddr=[192, 168, 1, 77],
+                    siaddr=[192, 168, 1, 1],
+                    chaddr=nic_mac,
+                    server_id=[192, 168, 1, 1],
+                    subnet=[255, 255, 255, 0],
+                    router=[192, 168, 1, 1])
+                nic.inject_frame(self._build_dhcp_frame(
+                    nic_mac, [0xBB]*6,
+                    [192, 168, 1, 1], [255, 255, 255, 255], ack))
+
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_tx_callback=dhcp_server_retry)
+        self.assertIn("-1 ", text)
+        self.assertIn("a=192 ", text)
+        self.assertIn("c=1 ", text)
+        self.assertIn("d=77 ", text)
+        self.assertGreater(attempt[0], 1, "Should have retried")
+
+    def test_dhcp_full_with_dns_option(self):
+        """DHCP-START should set DNS-SERVER-IP from DHCP option 6."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+
+        def dhcp_server_dns(nic, frame_bytes):
+            if len(frame_bytes) < 42 + 240:
+                return
+            if frame_bytes[12] != 0x08 or frame_bytes[13] != 0x00:
+                return
+            ip_start = 14
+            if frame_bytes[ip_start + 9] != 17:
+                return
+            ip_hdr_len = (frame_bytes[ip_start] & 0x0F) * 4
+            udp_start = ip_start + ip_hdr_len
+            dport = (frame_bytes[udp_start + 2] << 8) | frame_bytes[udp_start + 3]
+            if dport != 67:
+                return
+            dhcp_start = udp_start + 8
+            xid = ((frame_bytes[dhcp_start + 4] << 24) |
+                   (frame_bytes[dhcp_start + 5] << 16) |
+                   (frame_bytes[dhcp_start + 6] << 8) |
+                   frame_bytes[dhcp_start + 7])
+            opt_off = dhcp_start + 240
+            msg_type = 0
+            while opt_off < len(frame_bytes):
+                code = frame_bytes[opt_off]
+                if code == 255:
+                    break
+                if code == 0:
+                    opt_off += 1
+                    continue
+                olen = frame_bytes[opt_off + 1]
+                if code == 53:
+                    msg_type = frame_bytes[opt_off + 2]
+                opt_off += 2 + olen
+            # Build reply with DNS option 6
+            pkt = bytearray(548)
+            pkt[0] = 2; pkt[1] = 1; pkt[2] = 6
+            pkt[4:8] = xid.to_bytes(4, 'big')
+            pkt[16:20] = bytes([10, 0, 0, 42])
+            pkt[20:24] = bytes([10, 0, 0, 1])
+            pkt[28:34] = bytes(nic_mac)
+            pkt[236:240] = bytes([99, 130, 83, 99])
+            off = 240
+            if msg_type == 1:
+                pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 2; off += 3  # OFFER
+            elif msg_type == 3:
+                pkt[off] = 53; pkt[off+1] = 1; pkt[off+2] = 5; off += 3  # ACK
+            else:
+                return
+            # opt 54: server id
+            pkt[off] = 54; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([10, 0, 0, 1]); off += 4
+            # opt 1: subnet
+            pkt[off] = 1; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([255, 255, 255, 0]); off += 4
+            # opt 3: router
+            pkt[off] = 3; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([10, 0, 0, 1]); off += 4
+            # opt 6: DNS server
+            pkt[off] = 6; pkt[off+1] = 4; off += 2
+            pkt[off:off+4] = bytes([9, 9, 9, 9]); off += 4
+            # end
+            pkt[off] = 255; off += 1
+            reply = bytes(pkt[:off])
+            nic.inject_frame(self._build_dhcp_frame(
+                nic_mac, [0xBB]*6,
+                [10, 0, 0, 1], [255, 255, 255, 255], reply))
+
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "DHCP-START .",
+            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+        ], nic_tx_callback=dhcp_server_dns)
+        self.assertIn("-1 ", text)
+        self.assertIn("a=9 ", text)
+        self.assertIn("b=9 ", text)
+        self.assertIn("c=9 ", text)
+        self.assertIn("d=9 ", text)
 
     # -- 15: DNS client --
 
