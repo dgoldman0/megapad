@@ -3948,6 +3948,23 @@ VARIABLE ETH-RX-LEN   0 ETH-RX-LEN !   \ last received frame length
     DUP ETH-DST MY-MAC MAC=         \ unicast to us?
     SWAP ETH-DST MAC-BCAST MAC= OR ; \ or broadcast?
 
+\ -- ETH-SEND: transmit an Ethernet frame via NIC DMA --
+\   ( frame len -- )
+\   Uses NET-SEND BIOS primitive (sets DMA addr + len, issues SEND cmd).
+: ETH-SEND  ( frame len -- )   NET-SEND ;
+
+\ -- ETH-SEND-TX: build and send in one step --
+\   ( dst etype payload paylen -- )
+: ETH-SEND-TX  ( dst etype payload paylen -- )
+    ETH-BUILD-TX                    \ ( total-len )
+    ETH-TX-BUF SWAP NET-SEND ;     \ send from ETH-TX-BUF
+
+\ -- Transmit statistics --
+VARIABLE ETH-TX-COUNT   0 ETH-TX-COUNT !
+
+: ETH-SEND-COUNTED  ( frame len -- )
+    NET-SEND  1 ETH-TX-COUNT +! ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================

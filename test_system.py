@@ -7482,6 +7482,52 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("50 ", text)  # 64 - 14 = 50
 
+    # --- 9c: NIC TX integration ---
+
+    def test_eth_send_tx_builds_and_sends(self):
+        """ETH-SEND-TX should build a frame and transmit via NIC."""
+        text = self._run_kdos([
+            "CREATE etx-pay 4 ALLOT  etx-pay 4 99 FILL",
+            "MAC-BCAST ETYPE-IP4 etx-pay 4 ETH-SEND-TX",
+            ".\" ok-send\"",
+        ])
+        self.assertIn("ok-send", text)
+
+    def test_eth_send_counted(self):
+        """ETH-SEND-COUNTED should increment ETH-TX-COUNT."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !",
+            "CREATE etxp2 4 ALLOT  etxp2 4 1 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp2 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "ETH-TX-COUNT @ .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_eth_send_counted_increments(self):
+        """Multiple ETH-SEND-COUNTED calls increment the counter."""
+        text = self._run_kdos([
+            "0 ETH-TX-COUNT !",
+            "CREATE etxp3 4 ALLOT  etxp3 4 1 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp3 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "MAC-BCAST MY-MAC ETYPE-IP4 etxp3 4 ETH-TX-BUF ETH-BUILD",
+            "ETH-TX-BUF SWAP ETH-SEND-COUNTED",
+            "ETH-TX-COUNT @ .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_eth_send_is_net_send(self):
+        """ETH-SEND is a direct alias for NET-SEND."""
+        text = self._run_kdos([
+            "CREATE etxp4 20 ALLOT  etxp4 20 0 FILL",
+            "MY-MAC etxp4 ETH-SRC 6 CMOVE",
+            "ETYPE-IP4 etxp4 ETH-TYPE!",
+            "etxp4 20 ETH-SEND",
+            ".\" sent\"",
+        ])
+        self.assertIn("sent", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main
