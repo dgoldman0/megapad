@@ -283,6 +283,34 @@ every step.
 
 ---
 
+### Known Issues / Investigation
+
+31. ☐ **CLI boot performance** — interactive `cli.py --bios bios.asm
+    --storage sample.img` takes noticeably longer to reach the KDOS
+    prompt than the equivalent test-suite boot (which processes the same
+    KDOS source in seconds via C++ accel).  Investigate whether the CLI
+    is actually engaging the C++ accelerator, whether the TAP backend
+    poll loop is throttling throughput, or whether the interactive UART
+    injection path is the bottleneck.  Goal: CLI boot should feel
+    instant (~2–3 s) with the C++ accel built.
+
+32. ☐ **Real-world networking hardening** — the TAP backend and test
+    suite cover basic frame exchange, but more rigorous real-world
+    testing is needed:
+    - 32a. `PING` command — user-facing word that ARP-resolves the
+      target, sends ICMP echo requests, polls for replies, and prints
+      round-trip time.  Should work for both LAN (10.64.0.1) and
+      external IPs (via gateway NAT).
+    - 32b. Outbound connectivity validation — verify that ARP →
+      IP → ICMP/UDP packets survive the full round-trip through the
+      host's NAT and back.
+    - 32c. Stress / robustness — malformed frames, MTU edge cases,
+      back-to-back packet bursts, TAP fd recovery after errors.
+    - 32d. Integration tests for PING, outbound UDP, and (once TCP
+      lands) outbound TCP connections against real hosts.
+
+---
+
 ## Implementation Order
 
 ```
