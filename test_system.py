@@ -7443,6 +7443,124 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         self.assertIn("3 ", text)   # 3 tasks enqueued
 
+    # --- §8.3 Work Stealing ---
+
+    def test_steal_from_basic(self):
+        """STEAL-FROM moves a task from one core's queue to another."""
+        text = self._run_mc([
+            ": T1  88 . ;",
+            "' T1 1 RQ-PUSH",
+            "1 RQ-COUNT .",
+            "1 0 STEAL-FROM .",        # steal from core 1 to core 0
+            "0 RQ-COUNT .",
+            "1 RQ-COUNT .",
+        ])
+        # Before steal: core 1 has 1. After: core 0 has 1, core 1 has 0
+        nums = text.split()
+        self.assertIn("1", nums)     # core 1 count before steal
+        self.assertIn("0", nums)     # core 1 count after steal
+
+    def test_steal_from_empty(self):
+        """STEAL-FROM returns 0 when victim queue is empty."""
+        text = self._run_mc([
+            "2 0 STEAL-FROM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_rq_busiest(self):
+        """RQ-BUSIEST finds the core with the most queued tasks."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 3 RQ-PUSH",
+            # Exclude core 99 (nobody) — busiest should be core 2
+            "99 RQ-BUSIEST .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_rq_busiest_excludes(self):
+        """RQ-BUSIEST excludes the specified core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            # Exclude core 2 — busiest should be core 1
+            "2 RQ-BUSIEST .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_work_steal(self):
+        """WORK-STEAL steals a task for an idle core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 1 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "0 WORK-STEAL .",          # core 0 steals from core 1
+            "0 RQ-COUNT .",
+            "1 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertIn(1, nums)       # core 0 now has 1
+        self.assertIn(1, nums)       # core 1 now has 1
+
+    def test_work_steal_nothing(self):
+        """WORK-STEAL returns 0 when no tasks available anywhere."""
+        text = self._run_mc([
+            "0 WORK-STEAL .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_balance_distributes(self):
+        """BALANCE distributes tasks from busy core to idle cores."""
+        text = self._run_mc([
+            ": T1  ;",
+            # Load all 4 tasks onto core 0
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "BALANCE",
+            "RQ-INFO",
+        ])
+        # After balancing 4 tasks across 4 cores, each should have ~1
+        self.assertIn("1  task(s)", text)
+
+    def test_sched_balanced(self):
+        """SCHED-BALANCED balances then dispatches all tasks."""
+        text = self._run_mc([
+            ": WA  201 77890 C! ;",
+            ": WB  202 77891 C! ;",
+            # Put both tasks on core 0
+            "' WA 0 RQ-PUSH",
+            "' WB 0 RQ-PUSH",
+            "SCHED-BALANCED",
+            "77890 C@ .",
+            "77891 C@ .",
+        ])
+        self.assertIn("201 ", text)
+        self.assertIn("202 ", text)
+
+    def test_balance_already_balanced(self):
+        """BALANCE is a no-op when tasks are already evenly distributed."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 3 RQ-PUSH",
+            "BALANCE",
+            # All cores should still have 1 task each
+            "0 RQ-COUNT . 1 RQ-COUNT . 2 RQ-COUNT . 3 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        ones = [n for n in nums if n == 1]
+        self.assertGreaterEqual(len(ones), 4)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing

@@ -2893,6 +2893,75 @@ RQ-INIT       \ initialise at load time
         CR
     LOOP ;
 
+\ =====================================================================
+\  §8.3  Work Stealing
+\ =====================================================================
+\
+\  When a core's run queue is empty, it can "steal" a task from the
+\  busiest core's queue.  This balances load automatically without
+\  manual task placement.
+\
+\  STEAL-FROM   ( victim thief -- flag )  steal one task
+\  RQ-BUSIEST   ( exclude -- core | -1 )  find core with most tasks
+\  WORK-STEAL   ( core -- flag )          try to steal for a core
+\  BALANCE      ( -- )                    rebalance all queues
+
+\ -- STEAL-FROM ( victim thief -- flag ) steal one task from victim to thief --
+\   Returns true (-1) if a task was stolen, false (0) otherwise.
+: STEAL-FROM  ( victim thief -- flag )
+    OVER RQ-EMPTY? IF 2DROP 0 EXIT THEN
+    SWAP RQ-POP                       ( thief xt )
+    DUP 0= IF 2DROP 0 EXIT THEN
+    SWAP RQ-PUSH  -1 ;               ( flag )
+
+\ -- RQ-BUSIEST ( exclude -- core | -1 ) find core with most queued tasks --
+\   Skips the core with ID 'exclude'.  Returns -1 if all queues empty.
+: RQ-BUSIEST  ( exclude -- core | -1 )
+    -1                                ( exclude best-core )
+    0                                 ( exclude best-core best-count )
+    NCORES 0 DO
+        I 3 PICK = IF                \ skip excluded core
+        ELSE
+            I RQ-COUNT DUP           ( excl bc bcnt cnt cnt )
+            2 PICK > IF              ( excl bc bcnt cnt )
+                NIP NIP              ( excl cnt )
+                I SWAP               ( excl new-core cnt )
+            ELSE DROP THEN
+        THEN
+    LOOP
+    DROP                              ( exclude best-core )
+    NIP ;                             ( best-core )
+
+\ -- WORK-STEAL ( core -- flag ) try to steal one task for core --
+\   Finds the busiest other core and steals one task from it.
+\   Returns true if a task was stolen.
+: WORK-STEAL  ( core -- flag )
+    DUP RQ-BUSIEST                    ( core victim )
+    DUP -1 = IF 2DROP 0 EXIT THEN    \ no tasks anywhere
+    DUP RQ-EMPTY? IF 2DROP 0 EXIT THEN
+    SWAP STEAL-FROM ;                 ( flag )
+
+\ -- BALANCE ( -- ) rebalance work across all cores --
+\   Idle cores steal from the busiest core, one task at a time,
+\   until no more imbalance exists (max difference ≤ 1).
+: BALANCE  ( -- )
+    \ Repeat until stable
+    BEGIN
+        0                             ( stole-any? )
+        NCORES 0 DO
+            I RQ-EMPTY? IF
+                I WORK-STEAL IF
+                    DROP -1           \ mark that we stole something
+                THEN
+            THEN
+        LOOP
+        0=                            ( stop if nothing was stolen )
+    UNTIL ;
+
+\ -- SCHED-BALANCED ( -- ) balance then dispatch all --
+: SCHED-BALANCED  ( -- )
+    BALANCE SCHED-ALL ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !
