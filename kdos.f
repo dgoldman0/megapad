@@ -3217,6 +3217,48 @@ VARIABLE MB-T   VARIABLE MB-P
         THEN
     LOOP ;
 
+\ =====================================================================
+\  §8.7  Shared Resource Locks
+\ =====================================================================
+\
+\  Named spinlock assignments for shared resources.
+\  Uses hardware spinlocks 0-3 for specific subsystems.
+\  Spinlock 7 reserved for IPI messaging (MSG-SLOCK).
+\
+\  DICT-ACQUIRE / DICT-RELEASE   — dictionary (HERE, ALLOT, CREATE)
+\  UART-ACQUIRE / UART-RELEASE   — UART output (EMIT, TYPE, .)
+\  FS-ACQUIRE   / FS-RELEASE     — filesystem (F-OPEN, F-READ, etc.)
+\  HEAP-ACQUIRE / HEAP-RELEASE   — heap allocator (ALLOC, FREE)
+\  WITH-LOCK    ( xt lock# -- )  — execute xt while holding lock
+
+0 CONSTANT DICT-LOCK
+1 CONSTANT UART-LOCK
+2 CONSTANT FS-LOCK
+3 CONSTANT HEAP-LOCK
+
+: DICT-ACQUIRE  ( -- )  DICT-LOCK LOCK ;
+: DICT-RELEASE  ( -- )  DICT-LOCK UNLOCK ;
+: UART-ACQUIRE  ( -- )  UART-LOCK LOCK ;
+: UART-RELEASE  ( -- )  UART-LOCK UNLOCK ;
+: FS-ACQUIRE    ( -- )  FS-LOCK LOCK ;
+: FS-RELEASE    ( -- )  FS-LOCK UNLOCK ;
+: HEAP-ACQUIRE  ( -- )  HEAP-LOCK LOCK ;
+: HEAP-RELEASE  ( -- )  HEAP-LOCK UNLOCK ;
+
+: WITH-LOCK  ( xt lock# -- )
+    DUP >R LOCK
+    EXECUTE
+    R> UNLOCK ;
+
+: LOCK-INFO  ( -- )
+    ." --- Resource Locks ---" CR
+    ." Assignments:" CR
+    ."   0 = Dictionary" CR
+    ."   1 = UART" CR
+    ."   2 = Filesystem" CR
+    ."   3 = Heap" CR
+    ."   7 = IPI Messaging" CR ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !

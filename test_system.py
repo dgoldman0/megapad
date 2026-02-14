@@ -7865,6 +7865,92 @@ class TestKDOSMulticore(unittest.TestCase):
         # Should send to 3 other cores (1,2,3)
         self.assertIn("3 ", text)
 
+    # ---- §8.7 Shared resource locks ----
+
+    def test_dict_lock_constant(self):
+        """DICT-LOCK is spinlock 0."""
+        text = self._run_mc(["DICT-LOCK ."])
+        self.assertIn("0 ", text)
+
+    def test_uart_lock_constant(self):
+        """UART-LOCK is spinlock 1."""
+        text = self._run_mc(["UART-LOCK ."])
+        self.assertIn("1 ", text)
+
+    def test_fs_lock_constant(self):
+        """FS-LOCK is spinlock 2."""
+        text = self._run_mc(["FS-LOCK ."])
+        self.assertIn("2 ", text)
+
+    def test_heap_lock_constant(self):
+        """HEAP-LOCK is spinlock 3."""
+        text = self._run_mc(["HEAP-LOCK ."])
+        self.assertIn("3 ", text)
+
+    def test_dict_acquire_release(self):
+        """DICT-ACQUIRE / DICT-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "DICT-ACQUIRE",
+            "DICT-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_uart_acquire_release(self):
+        """UART-ACQUIRE / UART-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "UART-ACQUIRE",
+            "UART-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_fs_acquire_release(self):
+        """FS-ACQUIRE / FS-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "FS-ACQUIRE",
+            "FS-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_heap_acquire_release(self):
+        """HEAP-ACQUIRE / HEAP-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "HEAP-ACQUIRE",
+            "HEAP-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_with_lock(self):
+        """WITH-LOCK executes XT while holding a lock."""
+        text = self._run_mc([
+            ': TEST-LK .\" locked" ;',
+            "' TEST-LK DICT-LOCK WITH-LOCK",
+        ])
+        self.assertIn("locked", text)
+
+    def test_with_lock_releases(self):
+        """WITH-LOCK releases the lock after XT completes."""
+        text = self._run_mc([
+            ': NOP-XT ;',
+            "' NOP-XT UART-LOCK WITH-LOCK",
+            "UART-ACQUIRE",
+            "UART-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_lock_info(self):
+        """LOCK-INFO displays lock assignments."""
+        text = self._run_mc(["LOCK-INFO"])
+        self.assertIn("Resource Locks", text)
+        self.assertIn("Dictionary", text)
+        self.assertIn("UART", text)
+        self.assertIn("Filesystem", text)
+        self.assertIn("Heap", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing
