@@ -7381,6 +7381,107 @@ class TestKDOSNetStack(TestKDOS):
         self.assertIn("src=", text)
         self.assertIn("type=", text)
 
+    # --- 9b: ETH-BUILD / ETH-PARSE ---
+
+    def test_eth_build_frame(self):
+        """ETH-BUILD should construct a frame with correct header."""
+        text = self._run_kdos([
+            "CREATE epay 4 ALLOT",
+            "epay 4 65 FILL",                         # payload = AAAA
+            "CREATE efr 64 ALLOT",
+            "efr 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay 4 efr ETH-BUILD .",  # total
+            "efr ETH-TYPE .",                          # should be 2048
+            "efr ETH-PLD C@ .",                        # should be 65
+        ])
+        self.assertIn("18 ", text)     # 14 + 4 = 18
+        self.assertIn("2048 ", text)   # ETYPE-IP4
+        self.assertIn("65 ", text)     # 'A'
+
+    def test_eth_build_dst_mac(self):
+        """ETH-BUILD should copy dst MAC correctly."""
+        text = self._run_kdos([
+            "CREATE epay2 1 ALLOT  0 epay2 C!",
+            "CREATE efr2 64 ALLOT  efr2 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay2 1 efr2 ETH-BUILD DROP",
+            "efr2 ETH-DST MAC-BCAST MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_build_src_mac(self):
+        """ETH-BUILD should copy src MAC correctly."""
+        text = self._run_kdos([
+            "CREATE epay3 1 ALLOT  0 epay3 C!",
+            "CREATE efr3 64 ALLOT  efr3 64 0 FILL",
+            "MAC-BCAST MY-MAC ETYPE-IP4 epay3 1 efr3 ETH-BUILD DROP",
+            "efr3 ETH-SRC MY-MAC MAC= .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_build_tx_convenience(self):
+        """ETH-BUILD-TX should use MY-MAC and ETH-TX-BUF."""
+        text = self._run_kdos([
+            "CREATE epay4 8 ALLOT  epay4 8 42 FILL",
+            "MAC-BCAST ETYPE-ARP epay4 8 ETH-BUILD-TX .",
+            "ETH-TX-BUF ETH-SRC MY-MAC MAC= .",
+            "ETH-TX-BUF ETH-TYPE .",
+        ])
+        self.assertIn("22 ", text)     # 14 + 8
+        self.assertIn("-1 ", text)     # src MAC matches MY-MAC
+        self.assertIn("2054 ", text)   # ETYPE-ARP
+
+    def test_eth_is_ip4(self):
+        """ETH-IS-IP4? should detect IPv4 frames."""
+        text = self._run_kdos([
+            "CREATE eip 20 ALLOT  eip 20 0 FILL",
+            "ETYPE-IP4 eip ETH-TYPE!",
+            "eip ETH-IS-IP4? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_is_arp(self):
+        """ETH-IS-ARP? should detect ARP frames."""
+        text = self._run_kdos([
+            "CREATE earp 20 ALLOT  earp 20 0 FILL",
+            "ETYPE-ARP earp ETH-TYPE!",
+            "earp ETH-IS-ARP? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_unicast(self):
+        """ETH-FOR-US? should match frames addressed to MY-MAC."""
+        text = self._run_kdos([
+            "CREATE efu 20 ALLOT  efu 20 0 FILL",
+            "MY-MAC efu ETH-DST 6 CMOVE",
+            "efu ETH-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_broadcast(self):
+        """ETH-FOR-US? should match broadcast frames."""
+        text = self._run_kdos([
+            "CREATE efub 20 ALLOT  efub 20 0 FILL",
+            "MAC-BCAST efub ETH-DST 6 CMOVE",
+            "efub ETH-FOR-US? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_eth_for_us_other(self):
+        """ETH-FOR-US? should reject frames for other MACs."""
+        text = self._run_kdos([
+            "CREATE efuo 20 ALLOT  efuo 20 0 FILL",
+            "efuo ETH-FOR-US? .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_eth_frame_paylen(self):
+        """ETH-FRAME-PAYLEN computes payload length from ETH-RX-LEN."""
+        text = self._run_kdos([
+            "64 ETH-RX-LEN !",
+            "ETH-FRAME-PAYLEN .",
+        ])
+        self.assertIn("50 ", text)  # 64 - 14 = 50
+
 
 # ---------------------------------------------------------------------------
 #  Main

@@ -3907,6 +3907,47 @@ CREATE ETH-RX-BUF  ETH-MTU ALLOT
     ."  src=" DUP ETH-SRC .MAC
     ."  type=" ETH-TYPE . CR ;
 
+\ -- ETH-BUILD: construct an Ethernet frame in a buffer --
+\   ( dst-mac src-mac etype payload pay-len frame -- total-len )
+\   Copies dst MAC, src MAC, writes EtherType, copies payload.
+\   Returns total frame length (14 + pay-len).
+VARIABLE _EB-LEN
+: ETH-BUILD  ( dst src etype payload paylen frame -- total )
+    >R                              \ save frame addr
+    DUP _EB-LEN !                   \ save paylen
+    R@ /ETH-HDR + SWAP CMOVE       \ copy payload to frame+14
+    R@ ETH-TYPE!                    \ write EtherType (big-endian)
+    R@ ETH-SRC /MAC CMOVE          \ copy src MAC to frame+6
+    R@ ETH-DST /MAC CMOVE          \ copy dst MAC to frame+0
+    R> DROP                         \ discard frame addr
+    _EB-LEN @ /ETH-HDR + ;         \ paylen + 14 = total length
+
+\ -- ETH-BUILD-TX: build frame in ETH-TX-BUF with MY-MAC as source --
+\   ( dst-mac etype payload paylen -- total-len )
+VARIABLE _ETB-ETYPE
+VARIABLE _ETB-PAY
+VARIABLE _ETB-PAYLEN
+: ETH-BUILD-TX  ( dst etype payload paylen -- total )
+    _ETB-PAYLEN !  _ETB-PAY !  _ETB-ETYPE !
+    \ stack: dst
+    MY-MAC _ETB-ETYPE @ _ETB-PAY @ _ETB-PAYLEN @
+    ETH-TX-BUF ETH-BUILD ;
+
+\ -- ETH-PARSE: extract fields from a received frame in ETH-RX-BUF --
+\   ( frame -- dst-mac src-mac etype payload paylen )
+\   Pushes field addresses/values for inspection.
+\   paylen must be computed from total frame length minus /ETH-HDR.
+\   This word pushes addresses — caller uses the accessors.
+
+VARIABLE ETH-RX-LEN   0 ETH-RX-LEN !   \ last received frame length
+
+: ETH-FRAME-PAYLEN  ( -- n )   ETH-RX-LEN @ /ETH-HDR - 0 MAX ;
+: ETH-IS-IP4?   ( frame -- flag )   ETH-TYPE ETYPE-IP4 = ;
+: ETH-IS-ARP?   ( frame -- flag )   ETH-TYPE ETYPE-ARP = ;
+: ETH-FOR-US?   ( frame -- flag )
+    DUP ETH-DST MY-MAC MAC=         \ unicast to us?
+    SWAP ETH-DST MAC-BCAST MAC= OR ; \ or broadcast?
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================
