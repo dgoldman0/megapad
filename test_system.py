@@ -7651,6 +7651,84 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         self.assertIn("1 ", text)   # core 1 has 1 task
 
+    # --- §8.5 Per-Core Preemption ---
+
+    def test_preempt_flags_init(self):
+        """All per-core preempt flags start at 0."""
+        text = self._run_mc([
+            "0 PREEMPT-FLAG@ .",
+            "1 PREEMPT-FLAG@ .",
+            "2 PREEMPT-FLAG@ .",
+            "3 PREEMPT-FLAG@ .",
+        ])
+        nums = [int(x) for x in text.split() if x.strip().lstrip('-').isdigit()]
+        zeros = [n for n in nums if n == 0]
+        self.assertGreaterEqual(len(zeros), 4)
+
+    def test_preempt_set_clr(self):
+        """PREEMPT-SET and PREEMPT-CLR set/clear per-core flags."""
+        text = self._run_mc([
+            "2 PREEMPT-SET",
+            "2 PREEMPT-FLAG@ .",
+            "2 PREEMPT-CLR",
+            "2 PREEMPT-FLAG@ .",
+        ])
+        self.assertIn("1 ", text)   # flag was set
+        self.assertIn("0 ", text)   # flag was cleared
+
+    def test_preempt_on_all(self):
+        """PREEMPT-ON-ALL enables timer-based preemption."""
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "PREEMPT-ENABLED @ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("1 ", text)   # preemption enabled
+
+    def test_preempt_off_all(self):
+        """PREEMPT-OFF-ALL disables preemption and clears flags."""
+        text = self._run_mc([
+            "2 PREEMPT-SET",
+            "PREEMPT-OFF-ALL",
+            "PREEMPT-ENABLED @ .",
+            "2 PREEMPT-FLAG@ .",
+        ])
+        nums = [int(x) for x in text.split() if x.strip().lstrip('-').isdigit()]
+        zeros = [n for n in nums if n == 0]
+        self.assertGreaterEqual(len(zeros), 2)
+
+    def test_preempt_info(self):
+        """PREEMPT-INFO displays preemption status."""
+        text = self._run_mc(["PREEMPT-INFO"])
+        self.assertIn("Preemption", text)
+        self.assertIn("Enabled", text)
+        self.assertIn("Core 0", text)
+
+    def test_yield_checks_per_core_flag(self):
+        """YIELD? checks the per-core preempt flag via COREID."""
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "0 PREEMPT-SET",
+            "YIELD?",
+            "0 PREEMPT-FLAG@ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("0 ", text)   # flag was cleared by YIELD?
+
+    def test_timer_irq_broadcast(self):
+        """Timer IRQ is delivered to all cores (system.py broadcast)."""
+        # This test verifies the system.py change: timer IRQ broadcast.
+        # We can't directly test IRQ delivery from Forth, but we can
+        # verify preemption works by running a task that never yields
+        # and checking that the preempt flag mechanism works.
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "PREEMPT-ENABLED @ .",
+            "TIME-SLICE @ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("1 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing

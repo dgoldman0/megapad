@@ -364,7 +364,6 @@ class MegapadSystem:
             for cpu in self.cores:
                 if cpu.flag_i and not cpu.halted:
                     cpu._trap(IVEC_TIMER)
-                    break  # only deliver to first eligible core (like FPGA)
 
         # Deliver IPI interrupts to cores with pending IPI
         for cpu in self.cores:
@@ -450,7 +449,6 @@ class MegapadSystem:
                 for c in self.cores:
                     if c.flag_i and not c.halted:
                         c._trap(IVEC_TIMER)
-                        break
 
             return max(steps, 1)
 
@@ -491,7 +489,6 @@ class MegapadSystem:
                     for c in self.cores:
                         if c.flag_i and not c.halted:
                             c._trap(IVEC_TIMER)
-                            break
 
                 # IPI delivery
                 for cpu in self.cores:

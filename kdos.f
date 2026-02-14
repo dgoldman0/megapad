@@ -3027,6 +3027,62 @@ AFF-INIT
         CR
     LOOP ;
 
+\ =====================================================================
+\  §8.5  Per-Core Preemption
+\ =====================================================================
+\
+\  Timer-assisted preemption for all cores.  The timer IRQ is
+\  broadcast to all cores, and each core's ISR sets its own preempt
+\  flag.  Cooperative yield points (YIELD?) check the per-core flag.
+
+VARIABLE PREEMPT-FLAGS  31 ALLOT
+
+: PREEMPT-FLAGS-INIT  ( -- )
+    NCORES_MAX 0 DO
+        0  I CELLS PREEMPT-FLAGS + !
+    LOOP ;
+
+PREEMPT-FLAGS-INIT
+
+: PREEMPT-FLAG!  ( val core -- )
+    CELLS PREEMPT-FLAGS + ! ;
+
+: PREEMPT-FLAG@  ( core -- val )
+    CELLS PREEMPT-FLAGS + @ ;
+
+: PREEMPT-SET  ( core -- )
+    1 SWAP PREEMPT-FLAG! ;
+
+: PREEMPT-CLR  ( core -- )
+    0 SWAP PREEMPT-FLAG! ;
+
+: PREEMPT-ON-ALL  ( -- )
+    TIME-SLICE @ TIMER!
+    7 TIMER-CTRL!
+    1 PREEMPT-ENABLED ! ;
+
+: PREEMPT-OFF-ALL  ( -- )
+    1 TIMER-CTRL!
+    0 PREEMPT-ENABLED !
+    PREEMPT-FLAGS-INIT ;
+
+: YIELD?  ( -- )
+    PREEMPT-ENABLED @ IF
+        COREID PREEMPT-FLAG@ IF
+            COREID PREEMPT-CLR
+            YIELD
+        THEN
+    THEN ;
+
+: PREEMPT-INFO  ( -- )
+    ." --- Preemption ---" CR
+    ."   Enabled: " PREEMPT-ENABLED @ IF ." yes" ELSE ." no" THEN CR
+    ."   Slice:   " TIME-SLICE @ . ." cycles" CR
+    NCORES 0 DO
+        ."   Core " I . ." : flag="
+        I PREEMPT-FLAG@ . CR
+    LOOP ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !
