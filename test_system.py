@@ -7253,6 +7253,196 @@ class TestKDOSMulticore(unittest.TestCase):
         self.assertIn("Cores", text)
         self.assertIn("multicore", text)
 
+    # --- §8.2 Per-Core Run Queues ---
+
+    def test_rq_init_empty(self):
+        """All run queues start empty after RQ-INIT."""
+        text = self._run_mc([
+            "0 RQ-EMPTY? . 1 RQ-EMPTY? . 2 RQ-EMPTY? . 3 RQ-EMPTY? .",
+        ])
+        # All should print -1 (true)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        trues = [n for n in nums if n != 0]
+        self.assertGreaterEqual(len(trues), 4)
+
+    def test_rq_push_pop_core0(self):
+        """RQ-PUSH/RQ-POP on core 0 enqueues and dequeues an XT."""
+        text = self._run_mc([
+            ": T1  42 . ;",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP EXECUTE",
+        ])
+        self.assertIn("1 ", text)   # count = 1
+        self.assertIn("42 ", text)  # T1 ran
+
+    def test_rq_push_pop_fifo(self):
+        """Run queue is FIFO — first pushed is first popped."""
+        text = self._run_mc([
+            ": TA  10 . ;",
+            ": TB  20 . ;",
+            ": TC  30 . ;",
+            "' TA 0 RQ-PUSH",
+            "' TB 0 RQ-PUSH",
+            "' TC 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP EXECUTE",
+            "0 RQ-POP EXECUTE",
+            "0 RQ-POP EXECUTE",
+        ])
+        self.assertIn("3 ", text)   # count = 3
+        # Output should show 10 20 30 in order
+        idx10 = text.find("10 ")
+        idx20 = text.find("20 ")
+        idx30 = text.find("30 ")
+        self.assertNotEqual(idx10, -1)
+        self.assertNotEqual(idx20, -1)
+        self.assertNotEqual(idx30, -1)
+        self.assertLess(idx10, idx20)
+        self.assertLess(idx20, idx30)
+
+    def test_rq_pop_empty_returns_zero(self):
+        """RQ-POP on an empty queue returns 0."""
+        text = self._run_mc([
+            "0 RQ-POP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_rq_count(self):
+        """RQ-COUNT reflects the number of enqueued tasks."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP DROP",
+            "0 RQ-COUNT .",
+        ])
+        self.assertIn("2 ", text)
+        self.assertIn("1 ", text)
+
+    def test_rq_clear(self):
+        """RQ-CLEAR empties a core's queue."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 1 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "1 RQ-COUNT .",
+            "1 RQ-CLEAR",
+            "1 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertIn(2, nums)
+        self.assertIn(0, nums)
+
+    def test_rq_push_secondary_core(self):
+        """RQ-PUSH can enqueue tasks for a secondary core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 2 RQ-PUSH",
+            "2 RQ-COUNT .",
+            "2 RQ-EMPTY? .",
+        ])
+        self.assertIn("1 ", text)   # count = 1
+
+    def test_sched_core_core0(self):
+        """SCHED-CORE 0 runs all queued tasks on core 0."""
+        text = self._run_mc([
+            ": TA  11 . ;",
+            ": TB  22 . ;",
+            "' TA 0 RQ-PUSH",
+            "' TB 0 RQ-PUSH",
+            "0 SCHED-CORE",
+            "0 RQ-EMPTY? .",
+        ])
+        self.assertIn("11 ", text)
+        self.assertIn("22 ", text)
+
+    def test_sched_core_secondary(self):
+        """SCHED-CORE dispatches queued tasks to a secondary core."""
+        text = self._run_mc([
+            ": W1  55 77840 C! ;",
+            "' W1 1 RQ-PUSH",
+            "1 SCHED-CORE",
+            "77840 C@ .",
+        ])
+        self.assertIn("55 ", text)
+
+    def test_sched_all_parallel(self):
+        """SCHED-ALL dispatches tasks across all core queues."""
+        text = self._run_mc([
+            ": WA  101 77870 C! ;",
+            ": WB  102 77871 C! ;",
+            ": WC  103 77872 C! ;",
+            "' WA 1 RQ-PUSH",
+            "' WB 2 RQ-PUSH",
+            "' WC 3 RQ-PUSH",
+            "SCHED-ALL",
+            "77870 C@ .",
+            "77871 C@ .",
+            "77872 C@ .",
+        ])
+        self.assertIn("101 ", text)
+        self.assertIn("102 ", text)
+        self.assertIn("103 ", text)
+
+    def test_sched_all_with_core0_tasks(self):
+        """SCHED-ALL runs core 0 tasks locally."""
+        text = self._run_mc([
+            ": W0  77 . ;",
+            "' W0 0 RQ-PUSH",
+            "SCHED-ALL",
+        ])
+        self.assertIn("77 ", text)
+
+    def test_rq_info(self):
+        """RQ-INFO displays per-core queue status."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "RQ-INFO",
+        ])
+        self.assertIn("Run Queues", text)
+        self.assertIn("Core 0", text)
+        self.assertIn("Core 2", text)
+        self.assertIn("task(s)", text)
+
+    def test_rq_multiple_dispatch_secondary(self):
+        """Multiple tasks queued on secondary core execute sequentially."""
+        text = self._run_mc([
+            ": W1  41 77880 C! ;",
+            ": W2  42 77881 C! ;",
+            "' W1 1 RQ-PUSH",
+            "' W2 1 RQ-PUSH",
+            "1 SCHED-CORE",
+            "77880 C@ .",
+            "77881 C@ .",
+        ])
+        self.assertIn("41 ", text)
+        self.assertIn("42 ", text)
+
+    def test_rq_wrap_around(self):
+        """Circular queue wraps around correctly."""
+        text = self._run_mc([
+            ": T1  ;",
+            # Push and pop 6 times to advance head/tail past midpoint
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            # Now push 3 — this should wrap around depth boundary
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP DROP  0 RQ-POP DROP  0 RQ-POP DROP",
+            "0 RQ-EMPTY? .",
+        ])
+        self.assertIn("3 ", text)   # 3 tasks enqueued
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing

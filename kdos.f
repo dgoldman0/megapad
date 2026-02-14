@@ -2762,6 +2762,137 @@ VARIABLE PAR-N          \ next core to use
     CYCLES R> -
     ."   total = " . ." cycles" CR ;
 
+\ =====================================================================
+\  §8.2  Per-Core Run Queues
+\ =====================================================================
+\
+\  Each core has its own circular queue of task XTs.  Tasks can be
+\  enqueued on any core and dequeued/dispatched independently.
+\  Core 0 runs dequeued tasks locally; secondary cores receive
+\  tasks via CORE-RUN (IPI dispatch).
+\
+\  Queue layout: circular buffer with head/tail indices per core.
+\  RQ-DEPTH entries per core, NCORES_MAX (4) cores.
+
+\ -- Constants --
+8 CONSTANT RQ-DEPTH       \ max tasks per core queue
+4 CONSTANT NCORES_MAX     \ maximum cores supported
+
+\ -- Per-core queue storage --
+\    RQ-SLOTS: NCORES_MAX × RQ-DEPTH × CELL = 4×8×8 = 256 bytes
+\    Each slot holds an XT (0 = empty).
+VARIABLE RQ-SLOTS  255 ALLOT
+
+\ -- Per-core head/tail indices (one CELL each per core) --
+\    HEAD = next slot to dequeue from
+\    TAIL = next slot to enqueue into
+VARIABLE RQ-HEADS  31 ALLOT      \ 4 × 8 = 32 bytes
+VARIABLE RQ-TAILS  31 ALLOT      \ 4 × 8 = 32 bytes
+
+\ -- Queue initialisation --
+: RQ-INIT  ( -- )
+    NCORES_MAX 0 DO
+        0 I CELLS RQ-HEADS + !
+        0 I CELLS RQ-TAILS + !
+        RQ-DEPTH 0 DO
+            0  J RQ-DEPTH * I + CELLS RQ-SLOTS + !
+        LOOP
+    LOOP ;
+
+RQ-INIT       \ initialise at load time
+
+\ -- Slot address: ( slot core -- addr ) --
+: RQ-SLOT  ( slot core -- addr )
+    RQ-DEPTH * + CELLS RQ-SLOTS + ;
+
+\ -- RQ-COUNT ( core -- n ) number of enqueued tasks --
+: RQ-COUNT  ( core -- n )
+    DUP CELLS RQ-TAILS + @          ( core tail )
+    SWAP CELLS RQ-HEADS + @         ( tail head )
+    - DUP 0< IF RQ-DEPTH + THEN ;
+
+\ -- RQ-EMPTY? ( core -- flag ) true if core's queue is empty --
+: RQ-EMPTY?  ( core -- flag )
+    RQ-COUNT 0= ;
+
+\ -- RQ-FULL? ( core -- flag ) true if core's queue is full --
+: RQ-FULL?  ( core -- flag )
+    RQ-COUNT RQ-DEPTH 1- >= ;
+
+\ -- RQ-PUSH ( xt core -- ) enqueue a task XT onto a core's queue --
+: RQ-PUSH  ( xt core -- )
+    DUP RQ-FULL? ABORT" Run queue full"
+    DUP CELLS RQ-TAILS + @          ( xt core tail )
+    2 PICK                           ( xt core tail xt )
+    DROP                             ( xt core tail )
+    OVER                             ( xt core tail core )
+    RQ-SLOT                          ( xt core slot-addr )
+    ROT SWAP !                       ( core )  \ store xt at slot
+    DUP CELLS RQ-TAILS + @          ( core tail )
+    1+ RQ-DEPTH MOD                  ( core new-tail )
+    SWAP CELLS RQ-TAILS + ! ;
+
+\ -- RQ-POP ( core -- xt | 0 ) dequeue next XT from a core's queue --
+: RQ-POP  ( core -- xt | 0 )
+    DUP RQ-EMPTY? IF DROP 0 EXIT THEN
+    DUP CELLS RQ-HEADS + @          ( core head )
+    OVER                             ( core head core )
+    RQ-SLOT @                        ( core xt )
+    SWAP                             ( xt core )
+    DUP CELLS RQ-HEADS + @          ( xt core head )
+    1+ RQ-DEPTH MOD                  ( xt core new-head )
+    SWAP CELLS RQ-HEADS + ! ;        ( xt )
+
+\ -- RQ-CLEAR ( core -- ) clear a core's queue --
+: RQ-CLEAR  ( core -- )
+    DUP CELLS RQ-HEADS + 0 SWAP !
+    CELLS RQ-TAILS + 0 SWAP ! ;
+
+\ -- SCHED-CORE ( core -- ) dispatch all queued tasks on a core --
+\   Core 0: runs locally via EXECUTE.
+\   Cores 1-N: dispatches via CORE-RUN, waits for each to finish.
+: SCHED-CORE  ( core -- )
+    BEGIN
+        DUP RQ-EMPTY? 0=
+    WHILE
+        DUP RQ-POP                   ( core xt )
+        OVER 0= IF
+            EXECUTE                  \ core 0: run locally
+        ELSE
+            OVER CORE-RUN            \ secondary: dispatch via IPI
+            DUP CORE-WAIT            \ wait for completion
+        THEN
+    REPEAT
+    DROP ;
+
+\ -- SCHED-ALL ( -- ) dispatch tasks from all core queues --
+\   Dispatches secondary cores first (so they run in parallel),
+\   then drains core 0's queue locally.
+: SCHED-ALL  ( -- )
+    \ First pass: kick one task to each secondary core
+    NCORES 1 DO
+        I RQ-EMPTY? 0= IF
+            I RQ-POP I CORE-RUN      \ dispatch first task
+        THEN
+    LOOP
+    \ Drain core 0's queue locally while secondaries work
+    0 SCHED-CORE
+    \ Wait for all secondary cores and drain their remaining tasks
+    NCORES 1 DO
+        I CORE-WAIT                  \ wait for current task
+        I SCHED-CORE                 \ drain remaining tasks
+    LOOP ;
+
+\ -- RQ-INFO ( -- ) display per-core queue status --
+: RQ-INFO  ( -- )
+    ." --- Run Queues ---" CR
+    NCORES 0 DO
+        ."   Core " I . ." : "
+        I RQ-COUNT . ." task(s)"
+        I RQ-EMPTY? IF ."  [empty]" THEN
+        CR
+    LOOP ;
+
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
 VARIABLE PORT-RX        0 PORT-RX !
