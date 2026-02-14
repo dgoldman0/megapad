@@ -13,7 +13,10 @@ inter-core mailbox (IPI), and hardware spinlocks.
 from __future__ import annotations
 from typing import Optional
 
-from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
+try:
+    from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
+except ImportError:
+    from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device,
@@ -394,6 +397,71 @@ class MegapadSystem:
                 continue
             total += self.step()
         return total
+
+    def run_batch(self, n: int = 100_000) -> int:
+        """Execute up to *n* instructions using C++ batch mode when available.
+
+        For single-core systems with the C++ accelerator this runs the
+        entire inner loop in C++ (``cpu.run_steps``), calling back to
+        Python only for the rare MMIO access.  Falls back to per-step
+        execution when the accelerator is not loaded or when running
+        multi-core.
+
+        Returns the number of steps actually executed.
+        """
+        # --- wake checks (same as step()) ---
+        for cpu in self.cores:
+            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
+                cpu.idle = False
+            if cpu.idle and cpu.core_id == 0:
+                if self.uart.has_rx_data:
+                    cpu.idle = False
+                elif self.timer.irq_pending and cpu.flag_i:
+                    cpu.idle = False
+
+        if self.all_halted or self.all_idle_or_halted:
+            return 0
+
+        # ---------- C++ fast path ----------
+        # Use C++ for core 0 when it's the only active core (others idle/halted)
+        cpu = self.cores[0]
+        if (hasattr(cpu, '_accel_backend')
+                and not cpu.halted and not cpu.idle
+                and all(c.idle or c.halted for c in self.cores[1:])):
+            try:
+                steps, reason = cpu.run_steps(n)
+            except TrapError as e:
+                if cpu.ivt_base != 0:
+                    cpu._trap(e.ivec_id)
+                steps = 1
+            except HaltError:
+                return 1
+
+            # Timer / device catch-up
+            if steps > 0:
+                self.bus.tick(steps)
+
+            # Timer IRQ delivery
+            if self.timer.irq_pending:
+                for c in self.cores:
+                    if c.flag_i and not c.halted:
+                        c._trap(IVEC_TIMER)
+                        break
+
+            return max(steps, 1)
+
+        # ---------- Pure-Python fallback ----------
+        total = 0
+        for _ in range(n):
+            if self.all_halted:
+                break
+            if self.all_idle_or_halted:
+                break
+            try:
+                total += self.step()
+            except HaltError:
+                break
+        return max(total, 1)
 
     def run_until_halt(self, max_steps: int = 10_000_000) -> int:
         """Run until all cores HALT."""

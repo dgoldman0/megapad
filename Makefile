@@ -27,8 +27,27 @@
 
 PYPY     := .pypy/bin/pypy3
 CPYTHON  := python
+VENV_PY  := .venv/bin/python
 PYTEST   := -m pytest test_system.py test_megapad64.py
 WORKERS  := 8
+
+# --- C++ accelerator ---
+.PHONY: accel accel-clean
+accel:
+	$(VENV_PY) setup_accel.py build_ext --inplace
+
+accel-clean:
+	rm -rf build/ _mp64_accel*.so
+
+# --- Accelerated test run: CPython + C++ extension ---
+.PHONY: test-accel
+test-accel: accel
+	$(VENV_PY) $(PYTEST)
+
+# --- Benchmark: compare Python vs C++ ---
+.PHONY: bench
+bench: accel
+	$(VENV_PY) bench_accel.py
 
 # --- Primary test target: PyPy + xdist ---
 .PHONY: test

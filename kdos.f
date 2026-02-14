@@ -958,9 +958,9 @@ VARIABLE MAVG-WIN
 VARIABLE MAVG-NBYTES
 : kavg  ( window buf-desc -- )
     SWAP MAVG-WIN !
-    DUP B.DATA mavg-scratch B.DATA
-    OVER B.BYTES CMOVE
     DUP B.BYTES MAVG-NBYTES !
+    DUP B.DATA mavg-scratch B.DATA
+    MAVG-NBYTES @ CMOVE
     DUP B.DATA SWAP B.BYTES
     0 DO
         mavg-scratch B.DATA I + C@
