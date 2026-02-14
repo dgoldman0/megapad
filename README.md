@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 750+ tests.
+— all running inside a Python emulator and verified by 890+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -26,18 +26,19 @@ interactively.
 | Component | Stats |
 |-----------|-------|
 | **BIOS** | 265 Forth dictionary words, 10,070 lines ASM, ~22 KB binary |
-| **KDOS** | v1.1 — 433 colon definitions + 219 variables/constants, 5,328 lines Forth |
+| **KDOS** | v1.1 — 560 colon definitions + 274 variables/constants, 6,600 lines Forth |
 | **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,541 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (23 s full suite) |
-| **Tests** | 754 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto) |
+| **Tests** | 896 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto, networking) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **FPGA RTL** | 18 Verilog modules + 13 testbenches, Genesys 2 (Kintex-7) target |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
-dashboard, tile engine, filesystem, scheduler, pipelines, networking, disk
-I/O, auto-boot from disk, interactive TUI, built-in documentation browser,
-and **quad-core multicore dispatch** with IPI, spinlocks, and barriers.
+dashboard, tile engine, filesystem, scheduler, pipelines, networking (with
+real TAP device testing), disk I/O, auto-boot from disk, interactive TUI,
+built-in documentation browser, and **quad-core multicore dispatch** with
+IPI, spinlocks, and barriers.
 
 ---
 
@@ -112,7 +113,7 @@ memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (5,328 lines)     │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (6,600 lines)     │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
 ├─────────────────────────────────┤
@@ -215,7 +216,7 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 # C++ accelerator (recommended — 63× faster than PyPy)
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 754 tests
+make test-accel                    # ~23 s, all 896 tests
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy                    # one-time
@@ -225,9 +226,15 @@ make test                          # ~24 min
 python -m pytest test_system.py test_megapad64.py -v --timeout=30  # ~40 min
 ```
 
-All 754 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
-assembler, disk utility, devices, multicore, networking, crypto, and
-extended tile engine.
+All 896 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+assembler, disk utility, devices, multicore, networking (simulated +
+real TAP), crypto, and extended tile engine.
+
+For real-network tests against a Linux TAP device:
+
+```bash
+make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
+```
 
 | Runner | Time | Speedup |
 |--------|------|---------|
@@ -242,23 +249,25 @@ extended tile engine.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `megapad64.py` | 2,541 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
-| `accel/mp64_accel.cpp` | 1,929 | C++ CPU core (pybind11) — 63× speedup |
+| `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 598 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 10,070 | Forth BIOS in assembly (265 words, multicore, hardened) |
+| `system.py` | 602 | Quad-core SoC integration + `run_batch()` C++ fast path |
+| `bios.asm` | 10,389 | Forth BIOS in assembly (265 words, multicore, hardened) |
 | `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 5,328 | KDOS v1.1 operating system in Forth (433 definitions) |
-| `cli.py` | 995 | CLI, boot modes, interactive debug monitor |
+| `kdos.f` | 6,600 | KDOS v1.1 operating system in Forth (560 definitions) |
+| `cli.py` | 1,012 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 1,418 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
+| `devices.py` | 1,549 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
+| `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
 | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 9,673 | 754 integration tests (25 classes, incl. multicore, tile, crypto, FS) |
-| `Makefile` | 177 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
+| `test_system.py` | 11,576 | 846 integration tests (27 classes, incl. multicore, tile, crypto, FS) |
+| `test_networking.py` | 860 | 27 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP) |
+| `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `conftest.py` | 193 | Test fixtures, snapshot caching, live status reporting |
+| `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
 | `fpga/rtl/` | 11,284 | 18 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
 | `fpga/sim/` | 7,293 | 13 Verilog testbenches (137 hardware tests) |
 

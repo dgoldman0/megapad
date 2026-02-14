@@ -38,6 +38,7 @@ python cli.py [flags]
 | `--listing` / `-l` | — | off | Print assembler listing to stdout (assemble-only mode). |
 | `--nic` | PORT | — | Enable NIC device with UDP passthrough on PORT. |
 | `--nic-peer` | PORT | NIC+1 | UDP peer port for NIC communication. |
+| `--nic-tap` | IFNAME | mp64tap0 | Wire NIC to a Linux TAP device for real L2 networking. Requires a pre-created TAP interface (see below). |
 | `--cores` | N | 1 | Number of CPU cores (1–4 for multicore SoC). |
 
 ### Boot Modes
@@ -406,7 +407,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **754 passing tests**
+The project has a comprehensive test suite with **896 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -414,7 +415,8 @@ that cover every layer of the system.
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 731 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
+| `test_system.py` | 846 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
+| `test_networking.py` | 27 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, IP stack integration |
 
 ### Test Classes in `test_system.py`
 
@@ -445,12 +447,24 @@ that cover every layer of the system.
 | `TestPipelineBundles` | Pipeline bundle serialization, BUNDLE-SAVE, BUNDLE-LOAD, round-trip |
 | `TestKDOSMulticore` | KDOS multicore: CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES |
 
+### Test Classes in `test_networking.py`
+
+| Class | Coverage Area |
+|-------|---------------|
+| `TestNICBackends` | Backend lifecycle, loopback/UDP/TAP roundtrip, graceful shutdown |
+| `TestBackwardCompat` | Default NIC (no backend), inject/drain, legacy passthrough |
+| `TestRealNetBIOS` | NET-STATUS and NET-MAC@ over real TAP device |
+| `TestRealNetARP` | ARP-RESOLVE gateway, ARP table, ARP-HANDLE |
+| `TestRealNetICMP` | ICMP ping host, respond to ping from host |
+| `TestRealNetUDP` | UDP send to host, UDP receive from host |
+| `TestRealNetIntegration` | Full IP stack init, status display, backend stats tracking |
+
 ### Running Tests
 
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-make test-accel                                            # ~23 s, all 754 tests
+make test-accel                                            # ~23 s, all 896 tests
 
 # Full suite with CPython (works out of the box, ~40 min)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
@@ -529,20 +543,22 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `megapad64.py` | ~2,541 | CPU + tile engine emulator |
-| `accel/mp64_accel.cpp` | ~1,929 | C++ CPU core (pybind11) — 63× speedup |
+| `accel/mp64_accel.cpp` | ~1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
-| `system.py` | ~598 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
-| `cli.py` | ~995 | CLI, boot modes, debug monitor |
+| `system.py` | ~602 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
+| `cli.py` | ~1,012 | CLI, boot modes, debug monitor |
 | `asm.py` | ~788 | Two-pass assembler (with listing output) |
-| `devices.py` | ~1,418 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
+| `devices.py` | ~1,549 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
+| `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,039 | MP64FS disk utility and image builder |
 | `bios.asm` | ~10,070 | Forth BIOS (265 dictionary words, hardened, multicore) |
 | `bios.rom` | 20,722B | Pre-assembled BIOS binary |
-| `kdos.f` | ~5,328 | KDOS v1.1 operating system (433 colon defs, 9 TUI screens, multicore, crypto) |
+| `kdos.f` | ~6,600 | KDOS v1.1 operating system (560 colon defs, 9 TUI screens, multicore, crypto, networking) |
 | `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
-| `test_system.py` | ~9,673 | Integration test suite (754 tests, 25 classes) |
+| `test_system.py` | ~11,576 | Integration test suite (846 tests, 27 classes) |
+| `test_networking.py` | ~860 | Real-networking tests (27 tests, 7 classes) |
 | `setup_accel.py` | ~35 | pybind11 build configuration |
 | `bench_accel.py` | ~139 | C++ vs Python speed comparison |
-| `Makefile` | 177 | Build, test, & accel targets |
-| `conftest.py` | 193 | Test fixtures, snapshot caching, live status |
+| `Makefile` | 190 | Build, test, & accel targets |
+| `conftest.py` | 197 | Test fixtures, snapshot caching, live status |

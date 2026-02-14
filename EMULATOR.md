@@ -8,7 +8,8 @@ and an interactive CLI monitor/debugger.
 > **Status:** Fully functional.  265-word BIOS v1.0 Forth system running on
 > a quad-core emulated SoC with mailbox IPI, spinlocks, extended tile engine
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), optional C++ CPU accelerator
-> (63× speedup), and 754 tests passing.
+> (63× speedup), pluggable NIC backends (loopback, UDP, TAP), and 896 tests
+> passing.
 
 ---
 
@@ -106,7 +107,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (10,070 lines) — Forth BIOS v1.0, 265 words
+    bios.asm  (10,389 lines) — Forth BIOS v1.0, 265 words
     bios.rom  (~22 KB)       — precompiled binary
 ```
 
@@ -115,19 +116,21 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | File | Lines | Role |
 |---|---|---|
 | `megapad64.py` | 2,541 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16 |
-| `accel/mp64_accel.cpp` | 1,929 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
+| `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 1,418 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
-| `system.py` | 598 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
-| `cli.py` | 995 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 10,070 | Forth BIOS v1.0 — subroutine-threaded interpreter, 265 built-in words (incl. multicore, extended tile, I-cache, AES, SHA3) |
+| `devices.py` | 1,549 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
+| `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
+| `system.py` | 602 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `cli.py` | 1,012 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
+| `bios.asm` | 10,389 | Forth BIOS v1.0 — subroutine-threaded interpreter, 265 built-in words (incl. multicore, extended tile, I-cache, AES, SHA3) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
-| `test_system.py` | 9,673 | System integration tests — 731 tests (25 classes: devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
+| `test_system.py` | 11,576 | System integration tests — 846 tests (27 classes: devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
+| `test_networking.py` | 860 | Real-networking tests — 27 tests (NIC backends, TAP, ARP, ICMP, UDP) |
 | `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `Makefile` | 177 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
-| `conftest.py` | 193 | Test fixtures, snapshot caching, live status reporting |
+| `Makefile` | 190 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
+| `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
 | `fpga/rtl/` | ~11,284 | 18 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, peripherals |
 | `fpga/sim/` | 7,293 | 13 Verilog testbenches — 137 hardware tests |
 | **Total** | **~42,000** | |
@@ -229,7 +232,7 @@ Read-only board identification.
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (10,070 lines, ~22 KB).  It boots from address 0 and
+Megapad-64 assembly (10,389 lines, ~22 KB).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -501,10 +504,11 @@ There are no `push64`/`pop64` instructions.  Manual stack operations use
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-.venv/bin/python -m pytest test_system.py test_megapad64.py -n 8   # ~23 s
+.venv/bin/python -m pytest test_system.py test_megapad64.py test_networking.py -n 8   # ~23 s
 
 # Or use the Makefile target:
 make test-accel                                            # builds + runs
+make test-net                                              # real-network tests (requires TAP)
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy        # one-time: downloads PyPy, installs pytest + xdist
@@ -515,8 +519,8 @@ make test-one K=test_coreid_word   # single test with PyPy
 
 # CPython fallback (no setup required)
 python -m pytest test_megapad64.py -v                          # 23 CPU + tile tests
-python -m pytest test_system.py -v --timeout=30                # 731 integration tests
-python -m pytest test_system.py test_megapad64.py -v --timeout=30  # all 754
+python -m pytest test_system.py -v --timeout=30                # 846 integration tests
+python -m pytest test_system.py test_megapad64.py test_networking.py -v --timeout=30  # all 896
 ```
 
 | Runner | Parallelism | Approximate Time | Speedup |
@@ -538,8 +542,9 @@ The system tests exercise the full stack: devices, MMIO routing, the
 Forth BIOS (all 265 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC
-engine, memory BIST, tile self-test, performance counters, and multicore
-SoC features (IPI, mailbox, spinlocks, barriers).
+engine, memory BIST, tile self-test, performance counters, multicore
+SoC features (IPI, mailbox, spinlocks, barriers), and real-network tests
+against a Linux TAP device (ARP, ICMP, UDP).
 
 ---
 
