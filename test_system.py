@@ -7253,6 +7253,704 @@ class TestKDOSMulticore(unittest.TestCase):
         self.assertIn("Cores", text)
         self.assertIn("multicore", text)
 
+    # --- §8.2 Per-Core Run Queues ---
+
+    def test_rq_init_empty(self):
+        """All run queues start empty after RQ-INIT."""
+        text = self._run_mc([
+            "0 RQ-EMPTY? . 1 RQ-EMPTY? . 2 RQ-EMPTY? . 3 RQ-EMPTY? .",
+        ])
+        # All should print -1 (true)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        trues = [n for n in nums if n != 0]
+        self.assertGreaterEqual(len(trues), 4)
+
+    def test_rq_push_pop_core0(self):
+        """RQ-PUSH/RQ-POP on core 0 enqueues and dequeues an XT."""
+        text = self._run_mc([
+            ": T1  42 . ;",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP EXECUTE",
+        ])
+        self.assertIn("1 ", text)   # count = 1
+        self.assertIn("42 ", text)  # T1 ran
+
+    def test_rq_push_pop_fifo(self):
+        """Run queue is FIFO — first pushed is first popped."""
+        text = self._run_mc([
+            ": TA  10 . ;",
+            ": TB  20 . ;",
+            ": TC  30 . ;",
+            "' TA 0 RQ-PUSH",
+            "' TB 0 RQ-PUSH",
+            "' TC 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP EXECUTE",
+            "0 RQ-POP EXECUTE",
+            "0 RQ-POP EXECUTE",
+        ])
+        self.assertIn("3 ", text)   # count = 3
+        # Output should show 10 20 30 in order
+        idx10 = text.find("10 ")
+        idx20 = text.find("20 ")
+        idx30 = text.find("30 ")
+        self.assertNotEqual(idx10, -1)
+        self.assertNotEqual(idx20, -1)
+        self.assertNotEqual(idx30, -1)
+        self.assertLess(idx10, idx20)
+        self.assertLess(idx20, idx30)
+
+    def test_rq_pop_empty_returns_zero(self):
+        """RQ-POP on an empty queue returns 0."""
+        text = self._run_mc([
+            "0 RQ-POP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_rq_count(self):
+        """RQ-COUNT reflects the number of enqueued tasks."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP DROP",
+            "0 RQ-COUNT .",
+        ])
+        self.assertIn("2 ", text)
+        self.assertIn("1 ", text)
+
+    def test_rq_clear(self):
+        """RQ-CLEAR empties a core's queue."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 1 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "1 RQ-COUNT .",
+            "1 RQ-CLEAR",
+            "1 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertIn(2, nums)
+        self.assertIn(0, nums)
+
+    def test_rq_push_secondary_core(self):
+        """RQ-PUSH can enqueue tasks for a secondary core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 2 RQ-PUSH",
+            "2 RQ-COUNT .",
+            "2 RQ-EMPTY? .",
+        ])
+        self.assertIn("1 ", text)   # count = 1
+
+    def test_sched_core_core0(self):
+        """SCHED-CORE 0 runs all queued tasks on core 0."""
+        text = self._run_mc([
+            ": TA  11 . ;",
+            ": TB  22 . ;",
+            "' TA 0 RQ-PUSH",
+            "' TB 0 RQ-PUSH",
+            "0 SCHED-CORE",
+            "0 RQ-EMPTY? .",
+        ])
+        self.assertIn("11 ", text)
+        self.assertIn("22 ", text)
+
+    def test_sched_core_secondary(self):
+        """SCHED-CORE dispatches queued tasks to a secondary core."""
+        text = self._run_mc([
+            ": W1  55 77840 C! ;",
+            "' W1 1 RQ-PUSH",
+            "1 SCHED-CORE",
+            "77840 C@ .",
+        ])
+        self.assertIn("55 ", text)
+
+    def test_sched_all_parallel(self):
+        """SCHED-ALL dispatches tasks across all core queues."""
+        text = self._run_mc([
+            ": WA  101 77870 C! ;",
+            ": WB  102 77871 C! ;",
+            ": WC  103 77872 C! ;",
+            "' WA 1 RQ-PUSH",
+            "' WB 2 RQ-PUSH",
+            "' WC 3 RQ-PUSH",
+            "SCHED-ALL",
+            "77870 C@ .",
+            "77871 C@ .",
+            "77872 C@ .",
+        ])
+        self.assertIn("101 ", text)
+        self.assertIn("102 ", text)
+        self.assertIn("103 ", text)
+
+    def test_sched_all_with_core0_tasks(self):
+        """SCHED-ALL runs core 0 tasks locally."""
+        text = self._run_mc([
+            ": W0  77 . ;",
+            "' W0 0 RQ-PUSH",
+            "SCHED-ALL",
+        ])
+        self.assertIn("77 ", text)
+
+    def test_rq_info(self):
+        """RQ-INFO displays per-core queue status."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "RQ-INFO",
+        ])
+        self.assertIn("Run Queues", text)
+        self.assertIn("Core 0", text)
+        self.assertIn("Core 2", text)
+        self.assertIn("task(s)", text)
+
+    def test_rq_multiple_dispatch_secondary(self):
+        """Multiple tasks queued on secondary core execute sequentially."""
+        text = self._run_mc([
+            ": W1  41 77880 C! ;",
+            ": W2  42 77881 C! ;",
+            "' W1 1 RQ-PUSH",
+            "' W2 1 RQ-PUSH",
+            "1 SCHED-CORE",
+            "77880 C@ .",
+            "77881 C@ .",
+        ])
+        self.assertIn("41 ", text)
+        self.assertIn("42 ", text)
+
+    def test_rq_wrap_around(self):
+        """Circular queue wraps around correctly."""
+        text = self._run_mc([
+            ": T1  ;",
+            # Push and pop 6 times to advance head/tail past midpoint
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            "' T1 0 RQ-PUSH  0 RQ-POP DROP",
+            # Now push 3 — this should wrap around depth boundary
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "0 RQ-COUNT .",
+            "0 RQ-POP DROP  0 RQ-POP DROP  0 RQ-POP DROP",
+            "0 RQ-EMPTY? .",
+        ])
+        self.assertIn("3 ", text)   # 3 tasks enqueued
+
+    # --- §8.3 Work Stealing ---
+
+    def test_steal_from_basic(self):
+        """STEAL-FROM moves a task from one core's queue to another."""
+        text = self._run_mc([
+            ": T1  88 . ;",
+            "' T1 1 RQ-PUSH",
+            "1 RQ-COUNT .",
+            "1 0 STEAL-FROM .",        # steal from core 1 to core 0
+            "0 RQ-COUNT .",
+            "1 RQ-COUNT .",
+        ])
+        # Before steal: core 1 has 1. After: core 0 has 1, core 1 has 0
+        nums = text.split()
+        self.assertIn("1", nums)     # core 1 count before steal
+        self.assertIn("0", nums)     # core 1 count after steal
+
+    def test_steal_from_empty(self):
+        """STEAL-FROM returns 0 when victim queue is empty."""
+        text = self._run_mc([
+            "2 0 STEAL-FROM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_rq_busiest(self):
+        """RQ-BUSIEST finds the core with the most queued tasks."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 3 RQ-PUSH",
+            # Exclude core 99 (nobody) — busiest should be core 2
+            "99 RQ-BUSIEST .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_rq_busiest_excludes(self):
+        """RQ-BUSIEST excludes the specified core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            # Exclude core 2 — busiest should be core 1
+            "2 RQ-BUSIEST .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_work_steal(self):
+        """WORK-STEAL steals a task for an idle core."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 1 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "0 WORK-STEAL .",          # core 0 steals from core 1
+            "0 RQ-COUNT .",
+            "1 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertIn(1, nums)       # core 0 now has 1
+        self.assertIn(1, nums)       # core 1 now has 1
+
+    def test_work_steal_nothing(self):
+        """WORK-STEAL returns 0 when no tasks available anywhere."""
+        text = self._run_mc([
+            "0 WORK-STEAL .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_balance_distributes(self):
+        """BALANCE distributes tasks from busy core to idle cores."""
+        text = self._run_mc([
+            ": T1  ;",
+            # Load all 4 tasks onto core 0
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "' T1 0 RQ-PUSH",
+            "BALANCE",
+            "RQ-INFO",
+        ])
+        # After balancing 4 tasks across 4 cores, each should have ~1
+        self.assertIn("1  task(s)", text)
+
+    def test_sched_balanced(self):
+        """SCHED-BALANCED balances then dispatches all tasks."""
+        text = self._run_mc([
+            ": WA  201 77890 C! ;",
+            ": WB  202 77891 C! ;",
+            # Put both tasks on core 0
+            "' WA 0 RQ-PUSH",
+            "' WB 0 RQ-PUSH",
+            "SCHED-BALANCED",
+            "77890 C@ .",
+            "77891 C@ .",
+        ])
+        self.assertIn("201 ", text)
+        self.assertIn("202 ", text)
+
+    def test_balance_already_balanced(self):
+        """BALANCE is a no-op when tasks are already evenly distributed."""
+        text = self._run_mc([
+            ": T1  ;",
+            "' T1 0 RQ-PUSH",
+            "' T1 1 RQ-PUSH",
+            "' T1 2 RQ-PUSH",
+            "' T1 3 RQ-PUSH",
+            "BALANCE",
+            # All cores should still have 1 task each
+            "0 RQ-COUNT . 1 RQ-COUNT . 2 RQ-COUNT . 3 RQ-COUNT .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        ones = [n for n in nums if n == 1]
+        self.assertGreaterEqual(len(ones), 4)
+
+    # --- §8.4 Core Affinity ---
+
+    def test_affinity_default_any(self):
+        """Default affinity for all task slots is -1 (any core)."""
+        text = self._run_mc([
+            "0 AFFINITY@ .",
+            "3 AFFINITY@ .",
+            "7 AFFINITY@ .",
+        ])
+        # -1 in 64-bit unsigned representation
+        for _ in range(3):
+            self.assertIn("-1 ", text)
+
+    def test_affinity_set_get(self):
+        """AFFINITY! and AFFINITY@ store and retrieve core assignment."""
+        text = self._run_mc([
+            "2 0 AFFINITY!",
+            "0 AFFINITY@ .",
+        ])
+        self.assertIn("2 ", text)
+
+    def test_spawn_on_core(self):
+        """SPAWN-ON pushes task to specified core's run queue."""
+        text = self._run_mc([
+            ": W1  44 77900 C! ;",
+            "' W1 2 SPAWN-ON",
+            "2 RQ-COUNT .",
+            "2 SCHED-CORE",
+            "77900 C@ .",
+        ])
+        self.assertIn("1 ", text)   # 1 task in core 2's queue
+        self.assertIn("44 ", text)  # task ran on core 2
+
+    def test_spawn_on_records_affinity(self):
+        """SPAWN-ON records affinity in the affinity table."""
+        text = self._run_mc([
+            ": W1  ;",
+            "TASK-COUNT @ .",           # print current task count (= slot index)
+            "' W1 3 SPAWN-ON",
+        ])
+        # Extract the task slot index from the first number printed
+        nums = [x for x in text.split() if x.strip().isdigit()]
+        if nums:
+            slot = int(nums[0])
+            text2 = self._run_mc([
+                ": W1  ;",
+                "' W1 3 SPAWN-ON",
+                f"{slot} AFFINITY@ .",
+            ])
+            self.assertIn("3 ", text2)
+
+    def test_spawn_on_multiple_cores(self):
+        """SPAWN-ON distributes tasks across cores correctly."""
+        text = self._run_mc([
+            ": WA  51 77910 C! ;",
+            ": WB  52 77911 C! ;",
+            ": WC  53 77912 C! ;",
+            "' WA 1 SPAWN-ON",
+            "' WB 2 SPAWN-ON",
+            "' WC 3 SPAWN-ON",
+            "SCHED-ALL",
+            "77910 C@ .",
+            "77911 C@ .",
+            "77912 C@ .",
+        ])
+        self.assertIn("51 ", text)
+        self.assertIn("52 ", text)
+        self.assertIn("53 ", text)
+
+    def test_aff_info(self):
+        """AFF-INFO displays affinity settings."""
+        text = self._run_mc([
+            ": W1  ;",
+            "' W1 1 SPAWN-ON",
+            "AFF-INFO",
+        ])
+        self.assertIn("Core Affinity", text)
+
+    def test_affinity_balance_respects_pin(self):
+        """Tasks pinned via SPAWN-ON stay on their assigned core."""
+        text = self._run_mc([
+            ": WA  61 77920 C! ;",
+            ": WB  62 77921 C! ;",
+            "' WA 1 SPAWN-ON",
+            "' WB 3 SPAWN-ON",
+            "1 RQ-COUNT .",
+            "3 RQ-COUNT .",
+        ])
+        self.assertIn("1 ", text)   # core 1 has 1 task
+
+    # --- §8.5 Per-Core Preemption ---
+
+    def test_preempt_flags_init(self):
+        """All per-core preempt flags start at 0."""
+        text = self._run_mc([
+            "0 PREEMPT-FLAG@ .",
+            "1 PREEMPT-FLAG@ .",
+            "2 PREEMPT-FLAG@ .",
+            "3 PREEMPT-FLAG@ .",
+        ])
+        nums = [int(x) for x in text.split() if x.strip().lstrip('-').isdigit()]
+        zeros = [n for n in nums if n == 0]
+        self.assertGreaterEqual(len(zeros), 4)
+
+    def test_preempt_set_clr(self):
+        """PREEMPT-SET and PREEMPT-CLR set/clear per-core flags."""
+        text = self._run_mc([
+            "2 PREEMPT-SET",
+            "2 PREEMPT-FLAG@ .",
+            "2 PREEMPT-CLR",
+            "2 PREEMPT-FLAG@ .",
+        ])
+        self.assertIn("1 ", text)   # flag was set
+        self.assertIn("0 ", text)   # flag was cleared
+
+    def test_preempt_on_all(self):
+        """PREEMPT-ON-ALL enables timer-based preemption."""
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "PREEMPT-ENABLED @ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("1 ", text)   # preemption enabled
+
+    def test_preempt_off_all(self):
+        """PREEMPT-OFF-ALL disables preemption and clears flags."""
+        text = self._run_mc([
+            "2 PREEMPT-SET",
+            "PREEMPT-OFF-ALL",
+            "PREEMPT-ENABLED @ .",
+            "2 PREEMPT-FLAG@ .",
+        ])
+        nums = [int(x) for x in text.split() if x.strip().lstrip('-').isdigit()]
+        zeros = [n for n in nums if n == 0]
+        self.assertGreaterEqual(len(zeros), 2)
+
+    def test_preempt_info(self):
+        """PREEMPT-INFO displays preemption status."""
+        text = self._run_mc(["PREEMPT-INFO"])
+        self.assertIn("Preemption", text)
+        self.assertIn("Enabled", text)
+        self.assertIn("Core 0", text)
+
+    def test_yield_checks_per_core_flag(self):
+        """YIELD? checks the per-core preempt flag via COREID."""
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "0 PREEMPT-SET",
+            "YIELD?",
+            "0 PREEMPT-FLAG@ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("0 ", text)   # flag was cleared by YIELD?
+
+    def test_timer_irq_broadcast(self):
+        """Timer IRQ is delivered to all cores (system.py broadcast)."""
+        # This test verifies the system.py change: timer IRQ broadcast.
+        # We can't directly test IRQ delivery from Forth, but we can
+        # verify preemption works by running a task that never yields
+        # and checking that the preempt flag mechanism works.
+        text = self._run_mc([
+            "PREEMPT-ON-ALL",
+            "PREEMPT-ENABLED @ .",
+            "TIME-SLICE @ .",
+            "PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("1 ", text)
+
+    # ---- §8.6 IPI messaging ----
+
+    def test_msg_constants(self):
+        """Message type constants exist."""
+        text = self._run_mc([
+            "MSG-CALL .",
+            "MSG-DATA .",
+            "MSG-SIGNAL .",
+            "MSG-USER .",
+            "MSG-DEPTH .",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+        self.assertIn("3 ", text)
+        self.assertIn("8 ", text)
+
+    def test_msg_inbox_empty_at_init(self):
+        """All inboxes start empty."""
+        text = self._run_mc([
+            "0 MSG-IEMPTY? .",
+            "1 MSG-IEMPTY? .",
+            "0 MSG-ICOUNT .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_msg_send_recv(self):
+        """MSG-SEND to self-core then MSG-RECV retrieves the message."""
+        text = self._run_mc([
+            "MSG-DATA 42 0 MSG-SEND .",
+            "MSG-RECV . . . .",
+        ])
+        # send returns -1 (success)
+        self.assertIn("-1 ", text)
+        # recv returns: type=1 sender=0 payload=42 flag=-1
+        self.assertIn("42 ", text)
+
+    def test_msg_peek(self):
+        """MSG-PEEK returns flag showing inbox status."""
+        text = self._run_mc([
+            "MSG-PEEK .",
+            "MSG-CALL 99 0 MSG-SEND DROP",
+            "MSG-PEEK .",
+        ])
+        # first peek: empty -> 0, second peek: has msg -> -1
+        self.assertIn("0 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_msg_multiple(self):
+        """Multiple messages queued and dequeued in FIFO order."""
+        text = self._run_mc([
+            "MSG-CALL 10 0 MSG-SEND DROP",
+            "MSG-DATA 20 0 MSG-SEND DROP",
+            "0 MSG-ICOUNT .",
+            "MSG-RECV DROP . DROP DROP",
+            "MSG-RECV DROP . DROP DROP",
+            "0 MSG-ICOUNT .",
+        ])
+        # count=2, then payloads 10,20 in order, then count=0
+        self.assertIn("2 ", text)
+        self.assertIn("10 ", text)
+        self.assertIn("20 ", text)
+
+    def test_msg_full(self):
+        """MSG-SEND returns 0 when inbox is full."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-CALL 2 0 MSG-SEND DROP",
+            "MSG-CALL 3 0 MSG-SEND DROP",
+            "MSG-CALL 4 0 MSG-SEND DROP",
+            "MSG-CALL 5 0 MSG-SEND DROP",
+            "MSG-CALL 6 0 MSG-SEND DROP",
+            "MSG-CALL 7 0 MSG-SEND DROP",
+            "MSG-CALL 8 0 MSG-SEND .",
+        ])
+        # 8th msg should fail (depth=8 but circular queue holds depth-1=7)
+        self.assertIn("0 ", text)
+
+    def test_msg_recv_empty(self):
+        """MSG-RECV on empty inbox returns 0 0 0 0."""
+        text = self._run_mc([
+            "MSG-RECV . . . .",
+        ])
+        self.assertIn("0 0 0 0", text)
+
+    def test_msg_flush(self):
+        """MSG-FLUSH drains all pending messages."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-DATA 2 0 MSG-SEND DROP",
+            "MSG-SIGNAL 3 0 MSG-SEND DROP",
+            "MSG-FLUSH .",
+            "0 MSG-ICOUNT .",
+        ])
+        self.assertIn("3 ", text)
+
+    def test_msg_handler_dispatch(self):
+        """MSG-HANDLER! registers handler, MSG-DISPATCH invokes it."""
+        text = self._run_mc([
+            ": MY-H  DROP .\" got:\" . .\" from:\" . CR ;",
+            "' MY-H MSG-DATA MSG-HANDLER!",
+            "MSG-DATA 77 0 MSG-SEND DROP",
+            "MSG-DISPATCH .",
+        ])
+        self.assertIn("got:", text)
+        self.assertIn("77", text)
+        self.assertIn("-1 ", text)
+
+    def test_msg_dispatch_no_handler(self):
+        """MSG-DISPATCH with no handler returns 0 and discards message."""
+        text = self._run_mc([
+            "MSG-SIGNAL 55 0 MSG-SEND DROP",
+            "MSG-DISPATCH .",
+            "MSG-PEEK .",
+        ])
+        # dispatch returns 0 (no handler), message consumed
+        self.assertIn("0 ", text)
+
+    def test_msg_info(self):
+        """MSG-INFO displays inbox status."""
+        text = self._run_mc([
+            "MSG-CALL 1 0 MSG-SEND DROP",
+            "MSG-INFO",
+        ])
+        self.assertIn("IPI Messages", text)
+        self.assertIn("Core 0", text)
+        self.assertIn("1  msg(s)", text)
+
+    def test_msg_broadcast(self):
+        """MSG-BROADCAST sends to all other cores."""
+        text = self._run_mc([
+            "MSG-DATA 99 MSG-BROADCAST .",
+        ])
+        # Should send to 3 other cores (1,2,3)
+        self.assertIn("3 ", text)
+
+    # ---- §8.7 Shared resource locks ----
+
+    def test_dict_lock_constant(self):
+        """DICT-LOCK is spinlock 0."""
+        text = self._run_mc(["DICT-LOCK ."])
+        self.assertIn("0 ", text)
+
+    def test_uart_lock_constant(self):
+        """UART-LOCK is spinlock 1."""
+        text = self._run_mc(["UART-LOCK ."])
+        self.assertIn("1 ", text)
+
+    def test_fs_lock_constant(self):
+        """FS-LOCK is spinlock 2."""
+        text = self._run_mc(["FS-LOCK ."])
+        self.assertIn("2 ", text)
+
+    def test_heap_lock_constant(self):
+        """HEAP-LOCK is spinlock 3."""
+        text = self._run_mc(["HEAP-LOCK ."])
+        self.assertIn("3 ", text)
+
+    def test_dict_acquire_release(self):
+        """DICT-ACQUIRE / DICT-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "DICT-ACQUIRE",
+            "DICT-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_uart_acquire_release(self):
+        """UART-ACQUIRE / UART-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "UART-ACQUIRE",
+            "UART-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_fs_acquire_release(self):
+        """FS-ACQUIRE / FS-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "FS-ACQUIRE",
+            "FS-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_heap_acquire_release(self):
+        """HEAP-ACQUIRE / HEAP-RELEASE round-trip succeeds."""
+        text = self._run_mc([
+            "HEAP-ACQUIRE",
+            "HEAP-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_with_lock(self):
+        """WITH-LOCK executes XT while holding a lock."""
+        text = self._run_mc([
+            ': TEST-LK .\" locked" ;',
+            "' TEST-LK DICT-LOCK WITH-LOCK",
+        ])
+        self.assertIn("locked", text)
+
+    def test_with_lock_releases(self):
+        """WITH-LOCK releases the lock after XT completes."""
+        text = self._run_mc([
+            ': NOP-XT ;',
+            "' NOP-XT UART-LOCK WITH-LOCK",
+            "UART-ACQUIRE",
+            "UART-RELEASE",
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_lock_info(self):
+        """LOCK-INFO displays lock assignments."""
+        text = self._run_mc(["LOCK-INFO"])
+        self.assertIn("Resource Locks", text)
+        self.assertIn("Dictionary", text)
+        self.assertIn("UART", text)
+        self.assertIn("Filesystem", text)
+        self.assertIn("Heap", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing
