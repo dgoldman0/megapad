@@ -4463,6 +4463,105 @@ VARIABLE _IPS-PLEN
     LOOP
     0 0 ;
 
+\ ---------------------------------------------------------------------
+\  §16.3  ICMP — echo request / echo reply
+\ ---------------------------------------------------------------------
+\ ICMP header (8 bytes for echo req/rep):
+\   +0  type      1B   8=echo-request  0=echo-reply
+\   +1  code      1B   0
+\   +2  checksum  2B   (big-endian, over entire ICMP message)
+\   +4  ident     2B   (big-endian)
+\   +6  seq       2B   (big-endian)
+\   +8  data      nB   echo payload
+
+8   CONSTANT /ICMP-HDR
+8   CONSTANT ICMP-TYPE-ECHO-REQ
+0   CONSTANT ICMP-TYPE-ECHO-REP
+CREATE ICMP-BUF  /ICMP-HDR 1480 + ALLOT   \ scratch for building ICMP
+
+\ -- ICMP field accessors --
+: ICMP-H.TYPE   ( buf -- addr )          ;       \ +0
+: ICMP-H.CODE   ( buf -- addr )  1 +  ;          \ +1
+: ICMP-H.CKSUM  ( buf -- addr )  2 +  ;          \ +2
+: ICMP-H.IDENT  ( buf -- addr )  4 +  ;          \ +4
+: ICMP-H.SEQ    ( buf -- addr )  6 +  ;          \ +6
+: ICMP-H.DATA   ( buf -- addr )  /ICMP-HDR + ;   \ +8
+
+\ -- ICMP-IS-ECHO-REQ?: check type=8 --
+: ICMP-IS-ECHO-REQ?  ( icmp-buf -- flag )
+    ICMP-H.TYPE C@ ICMP-TYPE-ECHO-REQ = ;
+
+\ -- ICMP-IS-ECHO-REP?: check type=0 --
+: ICMP-IS-ECHO-REP?  ( icmp-buf -- flag )
+    ICMP-H.TYPE C@ ICMP-TYPE-ECHO-REP = ;
+
+VARIABLE ICMP-SEQ    0 ICMP-SEQ !
+
+\ -- ICMP-BUILD-ECHO-REQ: build echo request --
+\   ( payload paylen -- buf total-len )
+VARIABLE _ICR-PLEN
+: ICMP-BUILD-ECHO-REQ  ( payload paylen -- buf total-len )
+    DUP _ICR-PLEN !
+    \ Clear header area
+    ICMP-BUF /ICMP-HDR 0 FILL
+    \ Type=8 (echo request)
+    ICMP-TYPE-ECHO-REQ ICMP-BUF ICMP-H.TYPE C!
+    \ Ident = 0x4D50 ("MP")
+    19792 ICMP-BUF ICMP-H.IDENT NW16!
+    \ Seq number
+    ICMP-SEQ @ ICMP-BUF ICMP-H.SEQ NW16!
+    ICMP-SEQ @ 1+ 65535 AND ICMP-SEQ !
+    \ Copy payload
+    ICMP-BUF ICMP-H.DATA _ICR-PLEN @ CMOVE   \ ( payload → consumed )
+    \ Compute checksum over entire ICMP message
+    ICMP-BUF _ICR-PLEN @ /ICMP-HDR + IP-CHECKSUM
+    ICMP-BUF ICMP-H.CKSUM NW16!
+    ICMP-BUF _ICR-PLEN @ /ICMP-HDR + ;
+
+\ -- ICMP-BUILD-ECHO-REP: build echo reply from received echo request --
+\   Copies ident, seq, and data from request; sets type=0.
+\   ( icmp-req req-total-len -- buf rep-total-len )
+: ICMP-BUILD-ECHO-REP  ( req rlen -- buf rlen )
+    DUP >R                          \ save rlen on R
+    OVER ICMP-BUF ROT CMOVE        \ copy entire request to ICMP-BUF
+    DROP                             \ drop req addr
+    ICMP-TYPE-ECHO-REP ICMP-BUF ICMP-H.TYPE C!   \ type=0
+    \ Recompute checksum
+    0 ICMP-BUF ICMP-H.CKSUM NW16!   \ zero checksum field
+    ICMP-BUF R@ IP-CHECKSUM          \ compute over full ICMP message
+    ICMP-BUF ICMP-H.CKSUM NW16!
+    ICMP-BUF R> ;
+
+\ -- 12b: ICMP auto-responder --
+
+\ -- ICMP-HANDLE: handle an incoming ICMP echo request --
+\   Assumes IP-RECV has been called and ip-hdr is on the stack.
+\   If it's an echo request for us, sends a reply. Returns flag.
+\   ( ip-hdr ip-len -- flag )   -1 if handled
+VARIABLE _ICH-SRC
+: ICMP-HANDLE  ( ip-hdr ip-len -- flag )
+    DROP                                      \ drop ip-len
+    DUP IP-H.PROTO C@ IP-PROTO-ICMP <> IF     \ not ICMP?
+        DROP 0 EXIT
+    THEN
+    DUP IP-H.SRC _ICH-SRC !                  \ save sender IP addr
+    DUP IP-H.TLEN NW16@ /IP-HDR -            \ ICMP message length
+    SWAP IP-H.DATA SWAP                      \ ( icmp-data icmp-len )
+    OVER ICMP-IS-ECHO-REQ? 0= IF 2DROP 0 EXIT THEN
+    \ Build echo reply
+    ICMP-BUILD-ECHO-REP                       \ ( buf rlen )
+    \ Send via IP to the sender
+    >R >R
+    IP-PROTO-ICMP _ICH-SRC @ R> R>           \ ( proto dst buf len )
+    IP-SEND DROP                              \ ignore ior
+    -1 ;
+
+\ -- PING-POLL: receive one IP frame, auto-reply to pings --
+\   ( -- flag )  -1 if ping was handled, 0 otherwise
+: PING-POLL  ( -- flag )
+    IP-RECV DUP 0= IF DROP EXIT THEN    \ no frame → 0
+    ICMP-HANDLE ;
+
 \ =====================================================================
 \  §14  Startup
 \ =====================================================================

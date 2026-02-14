@@ -8346,6 +8346,203 @@ class TestKDOSNetStack(TestKDOS):
         ])
         self.assertIn("0 0 ", text)
 
+    # --- 12a: ICMP echo request/reply parse+build ---
+
+    def test_icmp_constants(self):
+        """ICMP constants should be correct."""
+        text = self._run_kdos([
+            "/ICMP-HDR . ICMP-TYPE-ECHO-REQ . ICMP-TYPE-ECHO-REP .",
+        ])
+        self.assertIn("8 ", text)   # header size and echo req type
+        self.assertIn("0 ", text)   # echo rep type
+
+    def test_icmp_build_echo_req_length(self):
+        """ICMP-BUILD-ECHO-REQ returns correct total length."""
+        text = self._run_kdos([
+            "CREATE ep 4 ALLOT  ep 4 65 FILL",
+            "ep 4 ICMP-BUILD-ECHO-REQ .\" len=\" . DROP",
+        ])
+        self.assertIn("len=12 ", text)  # 8 hdr + 4 payload
+
+    def test_icmp_build_echo_req_type(self):
+        """ICMP echo request should have type=8."""
+        text = self._run_kdos([
+            "CREATE ep2 4 ALLOT  ep2 4 0 FILL",
+            "ep2 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-H.TYPE C@ .",
+        ])
+        self.assertIn("8 ", text)
+
+    def test_icmp_build_echo_req_checksum_valid(self):
+        """ICMP echo request checksum should validate."""
+        text = self._run_kdos([
+            "CREATE ep3 4 ALLOT  ep3 4 66 FILL",
+            "ep3 4 ICMP-BUILD-ECHO-REQ",
+            "IP-CHECKSUM .",  # should be 0 for valid checksum
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_build_echo_req_ident(self):
+        """ICMP echo request ident should be 0x4D50 (MP)."""
+        text = self._run_kdos([
+            "CREATE ep4 4 ALLOT  ep4 4 0 FILL",
+            "ep4 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-H.IDENT NW16@ .",
+        ])
+        self.assertIn("19792 ", text)  # 0x4D50
+
+    def test_icmp_build_echo_rep_type(self):
+        """ICMP-BUILD-ECHO-REP should produce type=0."""
+        text = self._run_kdos([
+            # Build a request first
+            "CREATE ep5 4 ALLOT  ep5 4 67 FILL",
+            "ep5 4 ICMP-BUILD-ECHO-REQ",
+            # Save req somewhere to build reply from it
+            "CREATE rq 12 ALLOT",
+            "OVER rq 12 CMOVE  2DROP",   # copy ICMP-BUF to rq
+            # Build reply from rq
+            "rq 12 ICMP-BUILD-ECHO-REP DROP",
+            "ICMP-H.TYPE C@ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_build_echo_rep_checksum_valid(self):
+        """ICMP echo reply checksum should validate."""
+        text = self._run_kdos([
+            "CREATE ep6 4 ALLOT  ep6 4 68 FILL",
+            "ep6 4 ICMP-BUILD-ECHO-REQ",
+            "CREATE rq2 12 ALLOT",
+            "OVER rq2 12 CMOVE  2DROP",
+            "rq2 12 ICMP-BUILD-ECHO-REP",
+            "IP-CHECKSUM .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_icmp_is_echo_req(self):
+        """ICMP-IS-ECHO-REQ? should detect type 8."""
+        text = self._run_kdos([
+            "CREATE ep7 4 ALLOT  ep7 4 0 FILL",
+            "ep7 4 ICMP-BUILD-ECHO-REQ DROP",
+            "ICMP-IS-ECHO-REQ? .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_icmp_seq_increments(self):
+        """ICMP seq number should increment on successive calls."""
+        text = self._run_kdos([
+            "0 ICMP-SEQ !",
+            "CREATE ep8 1 ALLOT  0 ep8 C!",
+            "ep8 1 ICMP-BUILD-ECHO-REQ DROP ICMP-H.SEQ NW16@ .",
+            "ep8 1 ICMP-BUILD-ECHO-REQ DROP ICMP-H.SEQ NW16@ .",
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("1 ", text)
+
+    # --- 12b: ICMP auto-responder ---
+
+    @staticmethod
+    def _build_icmp_echo_req_frame(dst_mac, src_mac, src_ip, dst_ip,
+                                    ident=0x1234, seq=1, payload=b''):
+        """Build a full Ethernet+IPv4+ICMP echo request frame."""
+        # ICMP message
+        icmp = bytearray(8 + len(payload))
+        icmp[0] = 8   # type=8 echo request
+        icmp[1] = 0   # code=0
+        icmp[4] = (ident >> 8) & 0xFF
+        icmp[5] = ident & 0xFF
+        icmp[6] = (seq >> 8) & 0xFF
+        icmp[7] = seq & 0xFF
+        icmp[8:] = payload
+        # ICMP checksum
+        s = 0
+        padded = bytes(icmp) + (b'\x00' if len(icmp) % 2 else b'')
+        for i in range(0, len(padded), 2):
+            s += (padded[i] << 8) | padded[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        icmp[2] = (cksum >> 8) & 0xFF
+        icmp[3] = cksum & 0xFF
+
+        # IPv4 header
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45
+        total_len = 20 + len(icmp)
+        ip_hdr[2] = (total_len >> 8) & 0xFF
+        ip_hdr[3] = total_len & 0xFF
+        ip_hdr[6] = 0x40  # DF
+        ip_hdr[8] = 64    # TTL
+        ip_hdr[9] = 1     # ICMP
+        ip_hdr[12:16] = bytes(src_ip)
+        ip_hdr[16:20] = bytes(dst_ip)
+        s = 0
+        for i in range(0, 20, 2):
+            s += (ip_hdr[i] << 8) | ip_hdr[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        ip_hdr[10] = (cksum >> 8) & 0xFF
+        ip_hdr[11] = cksum & 0xFF
+
+        # Ethernet
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'
+        return eth + bytes(ip_hdr) + bytes(icmp)
+
+    def test_icmp_handle_echo_req(self):
+        """ICMP-HANDLE should return -1 for an echo request."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_icmp_echo_req_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            payload=b'hello123')
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            # Pre-cache ARP for the sender
+            "CREATE sip 4 ALLOT  10 sip C!  0 sip 1+ C!  0 sip 2 + C!  1 sip 3 + C!",
+            "CREATE smac 6 ALLOT  smac 6 170 FILL",
+            "sip smac ARP-INSERT",
+            "IP-RECV ICMP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_icmp_handle_non_icmp(self):
+        """ICMP-HANDLE should return 0 for non-ICMP packets."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_ip_frame(
+            nic_mac, [0xBB]*6, 17,   # UDP not ICMP
+            [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 8)
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "IP-RECV ICMP-HANDLE .",
+        ], nic_frames=[frame])
+        self.assertIn("0 ", text)
+
+    def test_ping_poll_handles_ping(self):
+        """PING-POLL should auto-reply to an echo request."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frame = self._build_icmp_echo_req_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [192, 168, 1, 100],
+            payload=b'ping')
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE sip2 4 ALLOT  10 sip2 C!  0 sip2 1+ C!  0 sip2 2 + C!  1 sip2 3 + C!",
+            "CREATE smac2 6 ALLOT  smac2 6 170 FILL",
+            "sip2 smac2 ARP-INSERT",
+            "PING-POLL .",
+        ], nic_frames=[frame])
+        self.assertIn("-1 ", text)
+
+    def test_ping_poll_no_frame(self):
+        """PING-POLL should return 0 when nothing is available."""
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "PING-POLL .",
+        ])
+        self.assertIn("0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  Main
