@@ -258,6 +258,70 @@ every step.
 
 ---
 
+### Layer 5: Field ALU & Post-Quantum Crypto (Items 34–38)
+
+Promotes the existing X25519 block into a general GF(p) coprocessor
+and adds post-quantum cryptographic primitives.
+
+34. ☐ **Field ALU** — Expand X25519 hardware into a general GF(2²⁵⁵−19) ALU
+    with raw 256×256→512-bit multiply.  Zero additional DSPs — reuses
+    the existing shared multiplier.
+    - 34a. RTL: Add `mode` register to mp64_x25519.v (modes 0–7):
+           mode 0 = X25519 (legacy full scalar multiply)
+           mode 1 = FADD (a+b) mod p, mode 2 = FSUB (a−b) mod p
+           mode 3 = FMUL (a·b) mod p, mode 4 = FSQR (a²) mod p
+           mode 5 = FINV (a^(p−2)) mod p, mode 6 = FPOW (a^b) mod p
+           mode 7 = MUL_RAW — raw 256×256→512-bit product (no reduction)
+    - 34b. RTL: Add RESULT_HI read register (256 bits) for MUL_RAW mode.
+           Expand MMIO window: operands at 0x00–0x3F, CMD at 0x40
+           with {mode[3:0], go[0]}, RESULT_HI at 0x28–0x47 read path.
+    - 34c. Emulator: `FieldALUDevice` replaces `X25519Device` in devices.py;
+           backward-compatible (mode 0 = existing X25519 flow).
+    - 34d. BIOS words: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW,
+           FIELD-A!, FIELD-B!, FIELD-CMD!, FIELD-STATUS@, FIELD-RESULT@,
+           FIELD-RESULT-HI@, FIELD-WAIT (13 new words)
+    - 34e. KDOS §1.10: F+ F- F* convenience wrappers, multi-limb
+           big-int utilities (BIG-MUL-LIMB)
+    - 34f. Tests: TestFieldALU (≥15 tests: each mode, edge cases, MUL_RAW
+           carry, compatibility with existing X25519 tests)
+
+35. ☐ **NTT Engine** — Number Theoretic Transform accelerator for
+    ML-KEM (Kyber) and ML-DSA (Dilithium) lattice-based PQC.
+    - 35a. RTL: `mp64_ntt.v` — 256-point NTT/INTT over configurable
+           modulus (q=3329 for ML-KEM, q=8380417 for ML-DSA).
+           Butterfly network, ~12 DSP48, ~3K LUTs.
+           MMIO base 0x8C0, 128-byte window.
+           Operations: NTT_FWD, NTT_INV, NTT_PMUL, NTT_PADD.
+    - 35b. RTL: Wire into mp64_soc.v MMIO mux, add to mp64_defs.vh.
+    - 35c. Emulator: `NTTDevice` in devices.py — pure-Python NTT
+           with Cooley-Tukey butterfly, supports both moduli.
+    - 35d. BIOS words: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV,
+           NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
+           (9 new words)
+    - 35e. KDOS §1.11: NTT convenience wrappers, polynomial
+           multiply helper (NTT-POLYMUL)
+    - 35f. Tests: TestNTT (≥12 tests: forward/inverse round-trip,
+           pointwise multiply, both moduli, known-answer vectors)
+
+36. ☐ **SHA-3 SHAKE Streaming** — XOF auto-squeeze for SPHINCS+ speedup
+    - 36a. RTL: Add SQUEEZE_NEXT command to mp64_sha3.v — auto-permutes
+           and outputs next block without CPU round-trip.
+    - 36b. Emulator: Add squeeze_next support to SHA3Device.
+    - 36c. BIOS word: SHA3-SQUEEZE-NEXT
+    - 36d. KDOS: SHAKE-STREAM helper for continuous XOF output.
+    - 36e. Tests: TestSHA3Streaming (≥4 tests)
+
+37. ☐ **ML-KEM (Kyber) high-level** — Key encapsulation using NTT engine
+    - 37a. KDOS: KYBER-KEYGEN, KYBER-ENCAPS, KYBER-DECAPS
+    - 37b. Tests: TestMLKEM (≥6 tests, known-answer vectors)
+
+38. ☐ **Hybrid PQ Key Exchange** — X25519 + ML-KEM combined
+    - 38a. KDOS: PQ-EXCHANGE (runs both X25519 and ML-KEM, concatenates
+           shared secrets, derives via HKDF)
+    - 38b. Tests: TestPQExchange (≥4 tests)
+
+---
+
 ### Layer 3: Multi-Core OS (Items 19–24)
 
 19. ✅ **Per-core run queues** — each core has its own task list
@@ -337,6 +401,13 @@ Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affin
                       preemption, IPI, locks)
 Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
                       scripting, remote REPL)
+Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto
+                      - Field ALU (expand X25519 → general GF(p) coprocessor + MUL_RAW)
+                      - NTT engine (ML-KEM / ML-DSA lattice-based PQC)
+                      - SHA-3 SHAKE streaming (SPHINCS+ speedup)
+                      - ML-KEM (Kyber) high-level words
+                      - Hybrid PQ key exchange (X25519 + ML-KEM)
+                      ~6 sub-commits
 ```
 
 Each item is committed individually with its own test class and run via
