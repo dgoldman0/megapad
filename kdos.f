@@ -75,7 +75,7 @@ VARIABLE PN-LEN
 : ['] ' POSTPONE LITERAL ; IMMEDIATE
 
 \ .DEPTH ( -- )  show current stack depth
-: .DEPTH  ( -- )  ." [" DEPTH . ." deep]" ;
+: .DEPTH  ( -- )  ."  [" DEPTH . ."  deep]" ;
 
 \ =====================================================================
 \  §1.1  Memory Allocator
@@ -232,8 +232,8 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 \ .HEAP ( -- ) show heap summary
 : .HEAP  ( -- )
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
-    ." Heap: base=" HEAP-BASE @ .
-    ."  free=" HEAP-FREE-BYTES . ." bytes" CR ;
+    ."  Heap: base=" HEAP-BASE @ .
+    ."   free=" HEAP-FREE-BYTES . ."  bytes" CR ;
 
 \ =====================================================================
 \  §1.2  Exception Handling — CATCH / THROW
@@ -362,49 +362,49 @@ VARIABLE HANDLER   0 HANDLER !
 
 \ .PERF ( -- )  Display performance counters.
 : .PERF
-    CR ."  Performance Counters" CR
-    ."    Cycles:   " PERF-CYCLES . CR
-    ."    Stalls:   " PERF-STALLS . CR
-    ."    Tile ops: " PERF-TILEOPS . CR
-    ."    Ext mem:  " PERF-EXTMEM . CR ;
+    CR ."   Performance Counters" CR
+    ."     Cycles:   " PERF-CYCLES . CR
+    ."     Stalls:   " PERF-STALLS . CR
+    ."     Tile ops: " PERF-TILEOPS . CR
+    ."     Ext mem:  " PERF-EXTMEM . CR ;
 
 \ .BIST-STATUS ( -- )  Display last BIST result (from boot, NOT re-run).
 \   BIST destroys all RAM so must NOT be run after KDOS loads.
 : .BIST-STATUS
-    CR ."  Memory BIST Status" CR
+    CR ."   Memory BIST Status" CR
     BIST-STATUS
-    DUP 0 = IF DROP ."    idle (no BIST run)" CR ELSE
-    DUP 2 = IF DROP ."    PASS" CR ELSE
-    DUP 3 = IF DROP ."    FAIL at addr " BIST-FAIL-ADDR . CR
-                    ."    Expected/Actual: " BIST-FAIL-DATA . CR ELSE
-    DROP ."    running..." CR
+    DUP 0 = IF DROP ."     idle (no BIST run)" CR ELSE
+    DUP 2 = IF DROP ."     PASS" CR ELSE
+    DUP 3 = IF DROP ."     FAIL at addr " BIST-FAIL-ADDR . CR
+                    ."     Expected/Actual: " BIST-FAIL-DATA . CR ELSE
+    DROP ."     running..."  CR
     THEN THEN THEN ;
 
 \ .TILE-DIAG ( -- )  Run tile self-test and display result.
 : .TILE-DIAG
-    CR ."  Tile Datapath Self-Test..." CR
+    CR ."   Tile Datapath Self-Test..."  CR
     TILE-TEST
     BEGIN TILE-TEST@ DUP 0 = WHILE DROP REPEAT
     DUP 2 = IF
-        DROP ."    PASS (ADD, MUL, DOT, SUM)" CR
+        DROP ."     PASS (ADD, MUL, DOT, SUM)" CR
     ELSE
-        DROP ."    FAIL — failed sub-tests: " TILE-DETAIL@ . CR
+        DROP ."     FAIL — failed sub-tests: " TILE-DETAIL@ . CR
     THEN ;
 
 \ .ICACHE ( -- )  Display I-cache statistics.
 : .ICACHE
-    CR ."  I-Cache Statistics" CR
-    ."    Hits:     " ICACHE-HITS . CR
-    ."    Misses:   " ICACHE-MISSES . CR ;
+    CR ."   I-Cache Statistics" CR
+    ."     Hits:     " ICACHE-HITS . CR
+    ."     Misses:   " ICACHE-MISSES . CR ;
 
 \ DIAG ( -- )  Run full hardware diagnostics suite.
 : DIAG
-    CR ." ======== Hardware Diagnostics ========" CR
+    CR ."  ======== Hardware Diagnostics ========" CR
     .PERF
     .BIST-STATUS
     .TILE-DIAG
     .ICACHE
-    ." ======================================" CR ;
+    ."  ======================================" CR ;
 
 \ =====================================================================
 \  §1.5  AES-256-GCM Encryption
@@ -488,10 +488,10 @@ CREATE AES-TAG-BUF 16 ALLOT
 \ .AES-STATUS ( -- )  Print human-readable AES status.
 : .AES-STATUS
     AES-STATUS@
-    DUP 0 = IF DROP ." AES: idle" CR ELSE
-    DUP 2 = IF DROP ." AES: done (OK)" CR ELSE
-    DUP 3 = IF DROP ." AES: AUTH FAIL" CR ELSE
-    DROP ." AES: busy" CR
+    DUP 0 = IF DROP ."  AES: idle" CR ELSE
+    DUP 2 = IF DROP ."  AES: done (OK)" CR ELSE
+    DUP 3 = IF DROP ."  AES: AUTH FAIL" CR ELSE
+    DROP ."  AES: busy" CR
     THEN THEN THEN ;
 
 \ =====================================================================
@@ -539,9 +539,9 @@ CREATE SHA3-BUF 64 ALLOT
 
 : .SHA3-STATUS
     SHA3-STATUS@
-    DUP 0 = IF DROP ." SHA3: idle" CR ELSE
-    DUP 2 = IF DROP ." SHA3: done" CR ELSE
-    DROP ." SHA3: unknown" CR
+    DUP 0 = IF DROP ."  SHA3: idle" CR ELSE
+    DUP 2 = IF DROP ."  SHA3: done" CR ELSE
+    DROP ."  SHA3: unknown" CR
     THEN THEN ;
 
 : .SHA3  ( addr len -- )
@@ -705,12 +705,12 @@ VARIABLE BDESC
 
 \ -- Info --
 : B.INFO   ( desc -- )
-    ." [buf"
-    DUP ."  t=" B.TYPE .
-    DUP ."  w=" B.WIDTH .
-    DUP ."  n=" B.LEN .
-    DUP ."  tiles=" B.TILES .
-    ."  @" B.DATA . ." ]" CR ;
+    ."  [buf"
+    DUP ."   t=" B.TYPE .
+    DUP ."   w=" B.WIDTH .
+    DUP ."   n=" B.LEN .
+    DUP ."   tiles=" B.TILES .
+    ."   @" B.DATA . ."  ]" CR ;
 
 \ -- Preview first tile (64 bytes) as hex --
 : B.PREVIEW ( desc -- )
@@ -724,10 +724,10 @@ VARIABLE BDESC
 
 \ -- List all registered buffers --
 : BUFFERS  ( -- )
-    ." --- Buffers (" BUF-COUNT @ . ." ) ---" CR
+    ."  --- Buffers (" BUF-COUNT @ . ."  ) ---" CR
     BUF-COUNT @ DUP IF
         0 DO
-            I . ." : "
+            I . ."  : "
             I CELLS BUF-TABLE + @ B.INFO
         LOOP
     ELSE DROP THEN ;
@@ -907,18 +907,18 @@ VARIABLE KDESC
 
 \ -- Info --
 : K.INFO   ( desc -- )
-    ." [kern"
-    DUP ."  in=" K.IN .
-    DUP ."  out=" K.OUT .
-    DUP ."  foot=" K.FOOT .
-    ."  fl=" K.FLAGS . ." ]" CR ;
+    ."  [kern"
+    DUP ."   in=" K.IN .
+    DUP ."   out=" K.OUT .
+    DUP ."   foot=" K.FOOT .
+    ."   fl=" K.FLAGS . ."  ]" CR ;
 
 \ -- List all registered kernels --
 : KERNELS  ( -- )
-    ." --- Kernels (" KERN-COUNT @ . ." ) ---" CR
+    ."  --- Kernels (" KERN-COUNT @ . ."  ) ---" CR
     KERN-COUNT @ DUP IF
         0 DO
-            I . ." : "
+            I . ."  : "
             I CELLS KERN-TABLE + @ K.INFO
         LOOP
     ELSE DROP THEN ;
@@ -1026,10 +1026,10 @@ VARIABLE MAVG-NBYTES
 
 \ -- histogram display: show non-zero bins --
 : .HIST  ( -- )
-    ." --- Histogram ---" CR
+    ."  --- Histogram ---" CR
     256 0 DO
         I HIST@ DUP IF
-            ."  [" I . ." ]=" . CR
+            ."   [" I . ."  ]=" . CR
         ELSE DROP THEN
     LOOP ;
 
@@ -1310,30 +1310,30 @@ VARIABLE BENCH-T0
 
 : .BENCH  ( xt -- )
     BENCH
-    ." cycles=" . CR ;
+    ."  cycles=" . CR ;
 
 \ P.BENCH ( pipe -- ) execute and time each step
 : P.BENCH  ( pipe -- )
-    ." Pipeline (" DUP P.COUNT . ." steps):" CR
+    ."  Pipeline (" DUP P.COUNT . ."  steps):" CR
     DUP P.COUNT DUP IF
         0 DO
             DUP I P.GET BENCH
-            ."   step " I . ." = " . ." cycles" CR
+            ."    step " I . ."  = " . ."  cycles" CR
         LOOP
     ELSE DROP THEN
     DROP ;
 
 \ P.INFO ( pipe -- ) show pipeline descriptor
 : P.INFO  ( pipe -- )
-    ." [pipe cap=" DUP P.CAP .
-    ." steps=" P.COUNT . ." ]" CR ;
+    ."  [pipe cap=" DUP P.CAP .
+    ."  steps=" P.COUNT . ."  ]" CR ;
 
 \ -- List all registered pipelines --
 : PIPES  ( -- )
-    ." --- Pipelines (" PIPE-COUNT @ . ." ) ---" CR
+    ."  --- Pipelines (" PIPE-COUNT @ . ."  ) ---" CR
     PIPE-COUNT @ DUP IF
         0 DO
-            I . ." : "
+            I . ."  : "
             I CELLS PIPE-TABLE + @ P.INFO
         LOOP
     ELSE DROP THEN ;
@@ -1346,7 +1346,7 @@ VARIABLE BENCH-T0
 \ --- Pipeline 1: fill-sum ---
 \   Fill demo-a with 42, then sum and print.
 : p1-fill ( -- ) 42 demo-a B.FILL ;
-: p1-sum  ( -- ) demo-a B.SUM ." sum=" . CR ;
+: p1-sum  ( -- ) demo-a B.SUM ."  sum=" . CR ;
 2 PIPELINE pipe-fill-sum
 ' p1-fill pipe-fill-sum P.ADD
 ' p1-sum  pipe-fill-sum P.ADD
@@ -1355,7 +1355,7 @@ VARIABLE BENCH-T0
 \   Fill a with 10, b with 20, add a+b->c, print stats.
 : p2-init  ( -- ) 10 demo-a B.FILL  20 demo-b B.FILL ;
 : p2-add   ( -- ) demo-a demo-b demo-c kadd ;
-: p2-stats ( -- ) demo-c kstats ." max=" . ."  min=" . ."  sum=" . CR ;
+: p2-stats ( -- ) demo-c kstats ."  max=" . ."   min=" . ."   sum=" . CR ;
 3 PIPELINE pipe-add-stats
 ' p2-init  pipe-add-stats P.ADD
 ' p2-add   pipe-add-stats P.ADD
@@ -1366,7 +1366,7 @@ VARIABLE BENCH-T0
 : p3-fill ( -- )
     demo-a B.DATA 64 0 DO I OVER I + C! LOOP DROP ;
 : p3-thresh ( -- ) 32 demo-a kthresh ;
-: p3-stats  ( -- ) demo-a kstats ." max=" . ."  min=" . ."  sum=" . CR ;
+: p3-stats  ( -- ) demo-a kstats ."  max=" . ."   min=" . ."   sum=" . CR ;
 3 PIPELINE pipe-thresh
 ' p3-fill   pipe-thresh P.ADD
 ' p3-thresh pipe-thresh P.ADD
@@ -1417,11 +1417,11 @@ VARIABLE BENCH-T0
 
 \ DISK-INFO ( -- ) print storage device status
 : DISK-INFO  ( -- )
-    ." Storage: "
+    ."  Storage: "
     DISK? IF
-        ." present" CR
+        ."  present" CR
     ELSE
-        ." not attached" CR
+        ."  not attached" CR
     THEN ;
 
 \ =====================================================================
@@ -1492,7 +1492,7 @@ VARIABLE FW-LEN
     \ Bounds check: cursor + len <= max_sectors * 512
     FW-FD @ F.CURSOR FW-LEN @ +
     FW-FD @ F.MAX SECTOR * > IF
-        ." FWRITE: out of space" CR EXIT
+        ."  FWRITE: out of space" CR EXIT
     THEN
     \ Set up DMA: sector = cursor/512 + start_sector
     FW-FD @ F.CURSOR SECTOR /
@@ -1532,18 +1532,18 @@ VARIABLE FR-LEN
 
 \ F.INFO ( fdesc -- ) print file descriptor
 : F.INFO  ( fdesc -- )
-    ." [file"
-    DUP ."  sec=" F.START .
-    DUP ."  max=" F.MAX .
-    DUP ."  used=" F.USED .
-    ."  cur=" F.CURSOR . ." ]" CR ;
+    ."  [file"
+    DUP ."   sec=" F.START .
+    DUP ."   max=" F.MAX .
+    DUP ."   used=" F.USED .
+    ."   cur=" F.CURSOR . ."  ]" CR ;
 
 \ -- List all registered (legacy) files --
 : FILES  ( -- )
-    ." --- Files (" FILE-COUNT @ . ." ) ---" CR
+    ."  --- Files (" FILE-COUNT @ . ."  ) ---" CR
     FILE-COUNT @ DUP IF
         0 DO
-            I . ." : "
+            I . ."  : "
             I CELLS FILE-TABLE + @ F.INFO
         LOOP
     ELSE DROP THEN ;
@@ -1661,7 +1661,7 @@ VARIABLE FF-LEN
 \ FS-LOAD ( -- ) read superblock + bitmap + directory from disk
 : FS-LOAD  ( -- )
     DISK? 0= IF
-        ." No disk attached" CR EXIT
+        ."  No disk attached" CR EXIT
     THEN
     \ Read superblock (sector 0)
     0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-READ
@@ -1671,18 +1671,18 @@ VARIABLE FF-LEN
     FS-SUPER 2 + C@ 54 <> OR
     FS-SUPER 3 + C@ 52 <> OR
     IF
-        ." Not an MP64FS disk" CR EXIT
+        ."  Not an MP64FS disk" CR EXIT
     THEN
     \ Read bitmap (sector 1)
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-READ
     \ Read directory (sectors 2-5)
     2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-READ
     -1 FS-OK !
-    ." MP64FS loaded" CR ;
+    ."  MP64FS loaded" CR ;
 
 \ FS-SYNC ( -- ) write bitmap + directory back to disk
 : FS-SYNC  ( -- )
-    FS-OK @ 0= IF ." FS not loaded" CR EXIT THEN
+    FS-OK @ 0= IF ."  FS not loaded" CR EXIT THEN
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
     2 DISK-SEC!  FS-DIR  DISK-DMA!  4 DISK-N!  DISK-WRITE ;
 
@@ -1696,7 +1696,7 @@ VARIABLE FF-LEN
 
 \ FORMAT ( -- ) initialise a fresh MP64FS on the attached disk
 : FORMAT  ( -- )
-    DISK? 0= IF ." No disk" CR EXIT THEN
+    DISK? 0= IF ."  No disk" CR EXIT THEN
     \ Build superblock in RAM
     FS-SUPER SECTOR 0 FILL
     77 FS-SUPER     C!              \ 'M'
@@ -1719,66 +1719,66 @@ VARIABLE FF-LEN
     FS-DIR SECTOR 4 * 0 FILL
     2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-WRITE
     -1 FS-OK !
-    ." MP64FS formatted" CR ;
+    ."  MP64FS formatted" CR ;
 
 \ ── .FTYPE — print file type name ───────────────────────────────────
 
 : .FTYPE  ( type -- )
-    DUP 0 = IF DROP ." free"  EXIT THEN
-    DUP 1 = IF DROP ." raw"   EXIT THEN
-    DUP 2 = IF DROP ." text"  EXIT THEN
-    DUP 3 = IF DROP ." forth" EXIT THEN
-    DUP 4 = IF DROP ." doc"   EXIT THEN
-    DUP 5 = IF DROP ." data"  EXIT THEN
-    DUP 6 = IF DROP ." tut"   EXIT THEN
-    DUP 7 = IF DROP ." bdl"   EXIT THEN
-    ." ?" . ;
+    DUP 0 = IF DROP ."  free"  EXIT THEN
+    DUP 1 = IF DROP ."  raw"   EXIT THEN
+    DUP 2 = IF DROP ."  text"  EXIT THEN
+    DUP 3 = IF DROP ."  forth" EXIT THEN
+    DUP 4 = IF DROP ."  doc"   EXIT THEN
+    DUP 5 = IF DROP ."  data"  EXIT THEN
+    DUP 6 = IF DROP ."  tut"   EXIT THEN
+    DUP 7 = IF DROP ."  bdl"   EXIT THEN
+    ."  ?" . ;
 
 \ ── DIR — list files ─────────────────────────────────────────────────
 
 : DIR  ( -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
-    ." --- Directory ---" CR
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    ."  --- Directory ---" CR
     0
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
             1+
-            ."  " I DIRENT .ZSTR
-            ."   " I DIRENT DE.USED . ." B"
-            ."   " I DIRENT DE.TYPE .FTYPE
+            ."   " I DIRENT .ZSTR
+            ."    " I DIRENT DE.USED . ."  B"
+            ."    " I DIRENT DE.TYPE .FTYPE
             CR
         THEN
     LOOP
-    DUP . ." file(s), "
+    DUP . ."  file(s), "
     0  2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
-    DUP . ." free sectors ("
-    SECTOR * . ." bytes free)" CR
+    DUP . ."  free sectors ("
+    SECTOR * . ."  bytes free)" CR
     DROP ;
 
 \ CATALOG ( -- ) detailed directory listing
 : CATALOG  ( -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
-    ." Name             Bytes     Secs  Type" CR
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    ."  Name             Bytes     Secs  Type" CR
     0
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
             1+
-            ."  " I DIRENT .ZSTR
-            ."  " I DIRENT DE.USED .
-            ."  " I DIRENT DE.COUNT .
-            ."  " I DIRENT DE.TYPE .
+            ."   " I DIRENT .ZSTR
+            ."   " I DIRENT DE.USED .
+            ."   " I DIRENT DE.COUNT .
+            ."   " I DIRENT DE.TYPE .
             CR
         THEN
     LOOP
-    ." (" . ." files, "
+    ."  (" . ."  files, "
     0 2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
-    . ." free sectors)" CR ;
+    . ."  free sectors)" CR ;
 
 \ ── FIND-BY-NAME — shared directory lookup ───────────────────────────
 \ Searches directory for an entry whose first 16 bytes match NAMEBUF.
@@ -1803,19 +1803,19 @@ VARIABLE MK-START
 
 : MKFILE  ( nsectors type "name" -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR 2DROP EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR 2DROP EXIT THEN
     MK-TYPE !  MK-NSEC !
     PARSE-NAME
     \ Check for duplicate name
     FIND-BY-NAME -1 <> IF
-        ." File exists: " NAMEBUF .ZSTR CR EXIT
+        ."  File exists: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Find empty directory slot
     FIND-FREE-SLOT MK-SLOT !
-    MK-SLOT @ -1 = IF ." Directory full" CR EXIT THEN
+    MK-SLOT @ -1 = IF ."  Directory full" CR EXIT THEN
     \ Find contiguous free sectors
     MK-NSEC @ FIND-FREE MK-START !
-    MK-START @ -1 = IF ." No space on disk" CR EXIT THEN
+    MK-START @ -1 = IF ."  No space on disk" CR EXIT THEN
     \ Allocate sectors in bitmap
     MK-NSEC @ 0 DO
         MK-START @ I + BIT-SET
@@ -1829,8 +1829,8 @@ VARIABLE MK-START
     DUP 0          SWAP 20 + L!     \ used_bytes = 0
     MK-TYPE  @ SWAP 24 + C!         \ type
     FS-SYNC
-    ." Created: " NAMEBUF .ZSTR
-    ." (" MK-NSEC @ . ." sectors at " MK-START @ . ." )" CR ;
+    ."  Created: " NAMEBUF .ZSTR
+    ."  (" MK-NSEC @ . ."  sectors at " MK-START @ . ."  )" CR ;
 
 \ ── RMFILE — delete a file ───────────────────────────────────────────
 
@@ -1838,11 +1838,11 @@ VARIABLE RM-SLOT
 
 : RMFILE  ( "name" -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     PARSE-NAME
     FIND-BY-NAME RM-SLOT !
     RM-SLOT @ -1 = IF
-        ." Not found: " NAMEBUF .ZSTR CR EXIT
+        ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Free bitmap sectors
     RM-SLOT @ DIRENT DE.COUNT
@@ -1853,7 +1853,7 @@ VARIABLE RM-SLOT
     \ Clear directory entry
     RM-SLOT @ DIRENT FS-ENTRY-SIZE 0 FILL
     FS-SYNC
-    ." Deleted: " NAMEBUF .ZSTR CR ;
+    ."  Deleted: " NAMEBUF .ZSTR CR ;
 
 \ ── RENAME — rename a file ───────────────────────────────────────────
 
@@ -1861,24 +1861,24 @@ VARIABLE RN-SLOT
 
 : RENAME  ( "oldname" "newname" -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     \ Look up old name
     PARSE-NAME
     FIND-BY-NAME RN-SLOT !
     RN-SLOT @ -1 = IF
-        ." Not found: " NAMEBUF .ZSTR CR EXIT
+        ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Parse new name
     PARSE-NAME
     \ Check new name doesn't already exist
     FIND-BY-NAME -1 <> IF
-        ." Name taken: " NAMEBUF .ZSTR CR EXIT
+        ."  Name taken: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Overwrite name in directory entry
     RN-SLOT @ DIRENT 16 0 FILL       \ zero old name
     NAMEBUF RN-SLOT @ DIRENT 16 CMOVE
     FS-SYNC
-    ." Renamed to: " NAMEBUF .ZSTR CR ;
+    ."  Renamed to: " NAMEBUF .ZSTR CR ;
 
 \ ── CAT — print file contents to terminal ────────────────────────────
 
@@ -1886,14 +1886,14 @@ VARIABLE CAT-SLOT
 
 : CAT  ( "name" -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     PARSE-NAME
     FIND-BY-NAME CAT-SLOT !
     CAT-SLOT @ -1 = IF
-        ." Not found: " NAMEBUF .ZSTR CR EXIT
+        ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
     CAT-SLOT @ DIRENT DE.USED DUP 0= IF
-        DROP ." (empty file)" CR EXIT
+        DROP ."  (empty file)" CR EXIT
     THEN                                 ( used_bytes )
     \ Read file sectors into HERE (temporary)
     CAT-SLOT @ DIRENT DE.SEC DISK-SEC!
@@ -1914,18 +1914,18 @@ VARIABLE CAT-SLOT
 
 : FS-FREE  ( -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     0   \ free sector count
     2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
-    DUP . ." free sectors ("
-    SECTOR * . ." bytes)" CR
+    DUP . ."  free sectors ("
+    SECTOR * . ."  bytes)" CR
     \ Count used files
     0  FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF 1+ THEN
     LOOP
-    . ." files, " FS-MAX-FILES . ." max" CR ;
+    . ."  files, " FS-MAX-FILES . ."  max" CR ;
 
 \ ── SAVE-BUFFER — save buffer data to a named file ──────────────────
 
@@ -1934,13 +1934,13 @@ VARIABLE SB-DESC
 
 : SAVE-BUFFER  ( buf "name" -- )
     FS-ENSURE
-    FS-OK @ 0= IF DROP ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF DROP ."  No filesystem" CR EXIT THEN
     SB-DESC !
     PARSE-NAME
     FIND-BY-NAME SB-SLOT !
     SB-SLOT @ -1 = IF
-        ." Not found: " NAMEBUF .ZSTR
-        ."  (create with MKFILE first)" CR EXIT
+        ."  Not found: " NAMEBUF .ZSTR
+        ."   (create with MKFILE first)" CR EXIT
     THEN
     \ Write buffer data into file's sectors
     SB-SLOT @ DIRENT DE.SEC DISK-SEC!
@@ -1951,7 +1951,7 @@ VARIABLE SB-DESC
     SB-DESC @ B.LEN
     SB-SLOT @ DIRENT 20 + L!
     FS-SYNC
-    ." Saved " SB-DESC @ B.LEN . ." bytes to " NAMEBUF .ZSTR CR ;
+    ."  Saved " SB-DESC @ B.LEN . ."  bytes to " NAMEBUF .ZSTR CR ;
 
 \ ── OPEN — open a file by name ───────────────────────────────────────
 
@@ -1959,11 +1959,11 @@ VARIABLE OP-SLOT
 
 : OPEN  ( "name" -- fdesc | 0 )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR 0 EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR 0 EXIT THEN
     PARSE-NAME
     FIND-BY-NAME OP-SLOT !
     OP-SLOT @ -1 = IF
-        ." Not found: " NAMEBUF .ZSTR CR 0 EXIT
+        ."  Not found: " NAMEBUF .ZSTR CR 0 EXIT
     THEN
     \ Create file descriptor in dictionary (5 cells = 40 bytes)
     HERE
@@ -1979,7 +1979,7 @@ VARIABLE OP-SLOT
 
 \ FFLUSH ( fdesc -- ) write metadata back to directory on disk
 : FFLUSH  ( fdesc -- )
-    FS-OK @ 0= IF DROP ." FS not loaded" CR EXIT THEN
+    FS-OK @ 0= IF DROP ."  FS not loaded" CR EXIT THEN
     DUP F.USED
     OVER F.SLOT DIRENT 20 + L!      \ update used_bytes in dir cache
     DROP
@@ -1996,15 +1996,15 @@ VARIABLE LD-SZ
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     PARSE-NAME
     FIND-BY-NAME DUP -1 = IF
-        DROP ." Not found: " NAMEBUF .ZSTR CR EXIT
+        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
     DIRENT                               ( de )
     \ Open by slot
     DUP DE.USED DUP 0= IF
-        2DROP ." Empty file" CR EXIT
+        2DROP ."  Empty file" CR EXIT
     THEN LD-SZ !                         ( de )
     DUP 16 + W@ SWAP DE.COUNT           ( start count )
     \ Read file data into HERE, then advance HERE past it
@@ -2140,7 +2140,7 @@ VARIABLE _FE-BUF2                 \ buffer 2
     \ Check: padded + 16 (tag) must fit in allocated sectors
     _FE-PAD @ 16 +
     _FE-DESC @ F.MAX 512 * > IF
-        ." FENCRYPT: insufficient space" CR -1 EXIT
+        ."  FENCRYPT: insufficient space" CR -1 EXIT
     THEN
     \ Sectors for ciphertext + tag
     _FE-PAD @ 16 + 511 + 512 / _FE-SECS !
@@ -2250,7 +2250,7 @@ VARIABLE DOC-LINES              \ newline counter for pagination
             DROP CR
             1 DOC-LINES +!
             DOC-LINES @ PAGE-LINES >= IF
-                DIM ." --- more ---" RESET-COLOR
+                DIM ."  --- more ---" RESET-COLOR
                 KEY DROP CR
                 DOC-LINES OFF
             THEN
@@ -2274,36 +2274,36 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 \ TOPICS ( -- )  list available documentation files (type=4)
 : TOPICS  ( -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
-    ." Available topics:" CR
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    ."  Available topics:" CR
     0                                        \ count
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
             I DIRENT DE.TYPE FTYPE-DOC = IF
                 1+
-                ."   " I DIRENT .ZSTR CR
+                ."    " I DIRENT .ZSTR CR
             THEN
         THEN
     LOOP
-    DUP 0= IF ."   (none)" CR THEN
-    ." (" . ." topics)" CR ;
+    DUP 0= IF ."    (none)" CR THEN
+    ."  (" . ."  topics)" CR ;
 
 \ LESSONS ( -- )  list available tutorials (type=6)
 : LESSONS  ( -- )
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
-    ." Available lessons:" CR
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    ."  Available lessons:" CR
     0
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
             I DIRENT DE.TYPE FTYPE-TUT = IF
                 1+
-                ."   " I DIRENT .ZSTR CR
+                ."    " I DIRENT .ZSTR CR
             THEN
         THEN
     LOOP
-    DUP 0= IF ."   (none)" CR THEN
-    ." (" . ." lessons)" CR ;
+    DUP 0= IF ."    (none)" CR THEN
+    ."  (" . ."  lessons)" CR ;
 
 \ DOC ( "name" -- )  page through a documentation file
 : DOC  ( "name" -- )
@@ -2331,9 +2331,9 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 \   Tries to open a doc file matching the name.  If no exact match,
 \   suggests using TOPICS.
 : DESCRIBE  ( "word" -- )
-    PARSE-NAME PN-LEN @ 0= IF ." Usage: DESCRIBE <word>" CR EXIT THEN
+    PARSE-NAME PN-LEN @ 0= IF ."  Usage: DESCRIBE <word>" CR EXIT THEN
     FS-ENSURE
-    FS-OK @ 0= IF ." No filesystem" CR EXIT THEN
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     \ Search for a doc file whose name matches NAMEBUF
     -1
     FS-MAX-FILES 0 DO
@@ -2347,8 +2347,8 @@ VARIABLE DOC-LINES              \ newline counter for pagination
     LOOP
     DUP -1 = IF
         DROP
-        ." No doc for: " NAMEBUF .ZSTR CR
-        ." Use TOPICS to list available documentation." CR
+        ."  No doc for: " NAMEBUF .ZSTR CR
+        ."  Use TOPICS to list available documentation."  CR
         EXIT
     THEN
     OPEN-BY-SLOT DUP 0= IF EXIT THEN
@@ -2404,7 +2404,7 @@ VARIABLE WL-PL
 
 : WORDS-LIKE  ( "pattern" -- )
     BL WORD DUP C@ DUP 0= IF
-        2DROP ." Usage: WORDS-LIKE <pattern>" CR EXIT
+        2DROP ."  Usage: WORDS-LIKE <pattern>" CR EXIT
     THEN                              ( waddr len )
     SWAP 1+ SWAP                      ( pataddr patlen )
     WL-PL !  WL-PA !
@@ -2421,14 +2421,14 @@ VARIABLE WL-PL
         THEN
         WL-ENT @ ENTRY>LINK WL-ENT !
     REPEAT
-    CR ." (" WL-CNT @ . ." found)" CR ;
+    CR ."  (" WL-CNT @ . ."  found)" CR ;
 
 \ APROPOS ( "pattern" -- )  alias for WORDS-LIKE
 : APROPOS  ( "pattern" -- )  WORDS-LIKE ;
 
 \ .RECENT ( n -- )  show the last n words defined in the dictionary
 : .RECENT  ( n -- )
-    CR ." Recent words:" CR
+    CR ."  Recent words:" CR
     LATEST
     BEGIN  OVER 0> OVER AND WHILE
         DUP ENTRY>NAME TYPE SPACE
@@ -2528,16 +2528,16 @@ VARIABLE TDESC-TEMP
 
 \ -- Task queries --
 : T.INFO  ( tdesc -- )
-    ." [task"
-    DUP ."  st=" T.STATUS .
-    DUP ."  pri=" T.PRIORITY .
-    ."  xt=" T.XT . ." ]" CR ;
+    ."  [task"
+    DUP ."   st=" T.STATUS .
+    DUP ."   pri=" T.PRIORITY .
+    ."   xt=" T.XT . ."  ]" CR ;
 
 : TASKS  ( -- )
-    ." --- Tasks (" TASK-COUNT @ . ." ) ---" CR
+    ."  --- Tasks (" TASK-COUNT @ . ."  ) ---" CR
     TASK-COUNT @ DUP IF
         0 DO
-            I . ." : "
+            I . ."  : "
             I CELLS TASK-TABLE + @ T.INFO
         LOOP
     ELSE DROP THEN ;
@@ -2733,16 +2733,16 @@ VARIABLE PREEMPT-ENABLED
 
 \ -- CORES ( -- )  display per-core status --
 : CORES  ( -- )
-    ." --- Cores (" NCORES . ." ) ---" CR
+    ."  --- Cores (" NCORES . ."  ) ---" CR
     NCORES 0 DO
-        ."   Core " I .
+        ."    Core " I .
         I COREID = IF
-            ."  [self] RUNNING" CR
+            ."   [self] RUNNING" CR
         ELSE
             I CORE-STATUS IF
-                ."  BUSY" CR
+                ."   BUSY" CR
             ELSE
-                ."  IDLE" CR
+                ."   IDLE" CR
             THEN
         THEN
     LOOP ;
@@ -2789,13 +2789,13 @@ VARIABLE PAR-N          \ next core to use
 
 \ -- P.BENCH-PAR ( pipe -- )  benchmark parallel pipeline --
 : P.BENCH-PAR  ( pipe -- )
-    ." Parallel pipeline (" DUP P.COUNT . ." steps, "
-    NCORES . ." cores):" CR
+    ."  Parallel pipeline (" DUP P.COUNT . ."  steps, "
+    NCORES . ."  cores):" CR
     DUP
     CYCLES >R
     P.RUN-PAR
     CYCLES R> -
-    ."   total = " . ." cycles" CR ;
+    ."    total = " . ."  cycles" CR ;
 
 \ =====================================================================
 \  §8.2  Per-Core Run Queues
@@ -2920,11 +2920,11 @@ RQ-INIT       \ initialise at load time
 
 \ -- RQ-INFO ( -- ) display per-core queue status --
 : RQ-INFO  ( -- )
-    ." --- Run Queues ---" CR
+    ."  --- Run Queues ---" CR
     NCORES 0 DO
-        ."   Core " I . ." : "
-        I RQ-COUNT . ." task(s)"
-        I RQ-EMPTY? IF ."  [empty]" THEN
+        ."    Core " I . ."  : "
+        I RQ-COUNT . ."  task(s)"
+        I RQ-EMPTY? IF ."   [empty]" THEN
         CR
     LOOP ;
 
@@ -3050,14 +3050,14 @@ AFF-INIT
     SCHED-ALL ;
 
 : AFF-INFO  ( -- )
-    ." --- Core Affinity ---" CR
-    TASK-COUNT @ DUP 0= IF DROP ."   (no tasks)" CR EXIT THEN
+    ."  --- Core Affinity ---" CR
+    TASK-COUNT @ DUP 0= IF DROP ."    (no tasks)" CR EXIT THEN
     0 DO
-        ."   Task " I . ." -> "
+        ."    Task " I . ."  -> "
         I AFFINITY@ DUP -1 = IF
-            DROP ." any"
+            DROP ."  any"
         ELSE
-            ." core " .
+            ."  core " .
         THEN
         CR
     LOOP ;
@@ -3110,11 +3110,11 @@ PREEMPT-FLAGS-INIT
     THEN ;
 
 : PREEMPT-INFO  ( -- )
-    ." --- Preemption ---" CR
-    ."   Enabled: " PREEMPT-ENABLED @ IF ." yes" ELSE ." no" THEN CR
-    ."   Slice:   " TIME-SLICE @ . ." cycles" CR
+    ."  --- Preemption ---" CR
+    ."    Enabled: " PREEMPT-ENABLED @ IF ."  yes" ELSE ."  no" THEN CR
+    ."    Slice:   " TIME-SLICE @ . ."  cycles" CR
     NCORES 0 DO
-        ."   Core " I . ." : flag="
+        ."    Core " I . ."  : flag="
         I PREEMPT-FLAG@ . CR
     LOOP ;
 
@@ -3241,14 +3241,14 @@ VARIABLE MB-T   VARIABLE MB-P
     REPEAT ;
 
 : MSG-INFO  ( -- )
-    ." --- IPI Messages ---" CR
+    ."  --- IPI Messages ---" CR
     NCORES 0 DO
-        ."   Core " I . ." : " I MSG-ICOUNT . ." msg(s)" CR
+        ."    Core " I . ."  : " I MSG-ICOUNT . ."  msg(s)" CR
     LOOP
-    ." Handlers:" CR
+    ."  Handlers:" CR
     MSG-HTYPES 0 DO
         I MSG-HANDLER@ IF
-            ."   type " I . CR
+            ."    type " I . CR
         THEN
     LOOP ;
 
@@ -3286,13 +3286,13 @@ VARIABLE MB-T   VARIABLE MB-P
     R> UNLOCK ;
 
 : LOCK-INFO  ( -- )
-    ." --- Resource Locks ---" CR
-    ." Assignments:" CR
-    ."   0 = Dictionary" CR
-    ."   1 = UART" CR
-    ."   2 = Filesystem" CR
-    ."   3 = Heap" CR
-    ."   7 = IPI Messaging" CR ;
+    ."  --- Resource Locks ---" CR
+    ."  Assignments:" CR
+    ."    0 = Dictionary" CR
+    ."    1 = UART" CR
+    ."    2 = Filesystem" CR
+    ."    3 = Heap" CR
+    ."    7 = IPI Messaging" CR ;
 
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
@@ -3370,7 +3370,7 @@ VARIABLE DOC-SEL-FOUND
                 DOC-SEL-FOUND @ DOC-SEL-N @ = IF
                     I OPEN-BY-SLOT DUP 0<> IF
                         PAGE SHOW-FILE
-                        CR DIM ."  Press any key to return..." RESET-COLOR
+                        CR DIM ."   Press any key to return..."  RESET-COLOR
                         KEY DROP
                     ELSE DROP THEN
                     LEAVE
@@ -3389,67 +3389,67 @@ VARIABLE DOC-TUT-COUNT
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
-    ."  KDOS v1.1 "
+    ."   KDOS v1.1 "
     RESET-COLOR
     SPACE
-    SCREEN-ID @ DUP 1 = IF REVERSE THEN ." [1]Home " RESET-COLOR
-    DUP 2 = IF REVERSE THEN ." [2]Bufs " RESET-COLOR
-    DUP 3 = IF REVERSE THEN ." [3]Kern " RESET-COLOR
-    DUP 4 = IF REVERSE THEN ." [4]Pipe " RESET-COLOR
-    DUP 5 = IF REVERSE THEN ." [5]Task " RESET-COLOR
-    DUP 6 = IF REVERSE THEN ." [6]Help " RESET-COLOR
-    DUP 7 = IF REVERSE THEN ." [7]Docs " RESET-COLOR
-    DUP 8 = IF REVERSE THEN ." [8]Stor " RESET-COLOR
-    9 = IF REVERSE THEN ." [9]Core " RESET-COLOR
+    SCREEN-ID @ DUP 1 = IF REVERSE THEN ."  [1]Home " RESET-COLOR
+    DUP 2 = IF REVERSE THEN ."  [2]Bufs " RESET-COLOR
+    DUP 3 = IF REVERSE THEN ."  [3]Kern " RESET-COLOR
+    DUP 4 = IF REVERSE THEN ."  [4]Pipe " RESET-COLOR
+    DUP 5 = IF REVERSE THEN ."  [5]Task " RESET-COLOR
+    DUP 6 = IF REVERSE THEN ."  [6]Help " RESET-COLOR
+    DUP 7 = IF REVERSE THEN ."  [7]Docs " RESET-COLOR
+    DUP 8 = IF REVERSE THEN ."  [8]Stor " RESET-COLOR
+    9 = IF REVERSE THEN ."  [9]Core " RESET-COLOR
     CR HBAR ;
 
 \ -- Screen footer --
 : SCREEN-FOOTER  ( -- )
     DIM
-    ."  [1-9] Switch  [n/p] Select  [r] Refresh"
-    AUTO-REFRESH @ IF 2 FG ."  Auto:ON" RESET-COLOR DIM ELSE ."  [a]Auto" THEN
-    ."   [q] Quit"
+    ."   [1-9] Switch  [n/p] Select  [r] Refresh"
+    AUTO-REFRESH @ IF 2 FG ."   Auto:ON" RESET-COLOR DIM ELSE ."   [a]Auto" THEN
+    ."    [q] Quit"
     RESET-COLOR CR ;
 
 \ ---- Screen 1: Home ----
 : SCR-HOME  ( -- )
-    .LABEL ."  System Overview" ./LABEL CR CR
-    ."   Memory  : HERE = " HERE . CR
-    ."   Cores   : " NCORES .N
-    NCORES 1 > IF 2 FG ."  multicore" ELSE DIM ."  single" THEN RESET-COLOR CR
-    ."   Buffers : " BUF-COUNT @ .N CR
-    ."   Kernels : " KERN-COUNT @ .N CR
-    ."   Pipes   : " PIPE-COUNT @ .N CR
-    ."   Tasks   : " TASK-COUNT @ .N CR
-    ."   Files   : " FILE-COUNT @ .N CR
-    ."   Storage : " DISK? IF 2 FG ." present" ELSE 1 FG ." not attached" THEN RESET-COLOR CR
-    ."   Ports   : " PORT-COUNT @ .N ."  bound  rx=" PORT-RX @ .N ."  drop=" PORT-DROP @ .N CR
-    ."   Network : " NET-RX? IF 2 FG ." frame waiting" ELSE DIM ." idle" THEN RESET-COLOR CR
+    .LABEL ."   System Overview" ./LABEL CR CR
+    ."    Memory  : HERE = " HERE . CR
+    ."    Cores   : " NCORES .N
+    NCORES 1 > IF 2 FG ."   multicore" ELSE DIM ."   single" THEN RESET-COLOR CR
+    ."    Buffers : " BUF-COUNT @ .N CR
+    ."    Kernels : " KERN-COUNT @ .N CR
+    ."    Pipes   : " PIPE-COUNT @ .N CR
+    ."    Tasks   : " TASK-COUNT @ .N CR
+    ."    Files   : " FILE-COUNT @ .N CR
+    ."    Storage : " DISK? IF 2 FG ."  present" ELSE 1 FG ."  not attached" THEN RESET-COLOR CR
+    ."    Ports   : " PORT-COUNT @ .N ."   bound  rx=" PORT-RX @ .N ."   drop=" PORT-DROP @ .N CR
+    ."    Network : " NET-RX? IF 2 FG ."  frame waiting" ELSE DIM ."  idle" THEN RESET-COLOR CR
     CR
-    ."   Scheduler: " PREEMPT-ENABLED @ IF 2 FG ." preempt ON" ELSE DIM ." cooperative" THEN RESET-COLOR CR
-    ."   Tasks rdy: " TASK-COUNT-READY .N CR ;
+    ."    Scheduler: " PREEMPT-ENABLED @ IF 2 FG ."  preempt ON" ELSE DIM ."  cooperative" THEN RESET-COLOR CR
+    ."    Tasks rdy: " TASK-COUNT-READY .N CR ;
 
 \ ---- Screen 2: Buffers ----
 : SCR-BUFFERS  ( -- )
-    .LABEL ."  Buffers (" BUF-COUNT @ .N ." )" ./LABEL CR CR
+    .LABEL ."   Buffers (" BUF-COUNT @ .N ."  )" ./LABEL CR CR
     BUF-COUNT @ DUP 0= IF
-        DROP ."   (none registered)" CR
+        DROP ."    (none registered)" CR
         0 SCR-MAX !
     ELSE
         DUP SCR-MAX !
         0 DO
-            SCR-SEL @ I = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
-            I .N ."  "
+            SCR-SEL @ I = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
+            I .N ."   "
             I CELLS BUF-TABLE + @
             DUP B.TYPE
-            DUP 0 = IF DROP ." raw " THEN
-            DUP 1 = IF DROP ." rec " THEN
-            DUP 2 = IF DROP ." til " THEN
-            DUP 3 = IF DROP ." bit " THEN
-            ." w=" DUP B.WIDTH .N
-            ."  n=" DUP B.LEN .N
-            ."  tiles=" DUP B.TILES .N
-            ."  @" B.DATA .N
+            DUP 0 = IF DROP ."  raw " THEN
+            DUP 1 = IF DROP ."  rec " THEN
+            DUP 2 = IF DROP ."  til " THEN
+            DUP 3 = IF DROP ."  bit " THEN
+            ."  w=" DUP B.WIDTH .N
+            ."   n=" DUP B.LEN .N
+            ."   tiles=" DUP B.TILES .N
+            ."   @" B.DATA .N
             CR
         LOOP
     THEN
@@ -3463,57 +3463,57 @@ VARIABLE DOC-TUT-COUNT
 
 \ ---- Screen 3: Kernels ----
 : SCR-KERNELS  ( -- )
-    .LABEL ."  Kernels (" KERN-COUNT @ .N ." )" ./LABEL CR CR
+    .LABEL ."   Kernels (" KERN-COUNT @ .N ."  )" ./LABEL CR CR
     KERN-COUNT @ DUP 0= IF
-        DROP ."   (none registered)" CR
+        DROP ."    (none registered)" CR
     ELSE
         0 DO
-            ."   " I .N ."  "
+            ."    " I .N ."   "
             I CELLS KERN-TABLE + @
-            DUP K.IN .N ." in "
-            DUP K.OUT .N ." out "
-            DUP K.FOOT .N ." foot "
-            K.FLAGS IF 3 FG ." [tile]" RESET-COLOR ELSE DIM ." [cpu]" RESET-COLOR THEN
+            DUP K.IN .N ."  in "
+            DUP K.OUT .N ."  out "
+            DUP K.FOOT .N ."  foot "
+            K.FLAGS IF 3 FG ."  [tile]" RESET-COLOR ELSE DIM ."  [cpu]" RESET-COLOR THEN
             CR
         LOOP
     THEN ;
 
 \ ---- Screen 4: Pipelines ----
 : SCR-PIPES  ( -- )
-    .LABEL ."  Pipelines (" PIPE-COUNT @ .N ." )" ./LABEL CR CR
+    .LABEL ."   Pipelines (" PIPE-COUNT @ .N ."  )" ./LABEL CR CR
     PIPE-COUNT @ DUP 0= IF
-        DROP ."   (none registered)" CR
+        DROP ."    (none registered)" CR
     ELSE
         0 DO
-            ."   " I .N ."  "
+            ."    " I .N ."   "
             I CELLS PIPE-TABLE + @
-            ." cap=" DUP P.CAP .N
-            ."  steps=" P.COUNT .N
+            ."  cap=" DUP P.CAP .N
+            ."   steps=" P.COUNT .N
             CR
         LOOP
     THEN ;
 
 \ ---- Screen 5: Tasks ----
 : SCR-TASKS  ( -- )
-    .LABEL ."  Tasks (" TASK-COUNT @ .N ." )" ./LABEL CR CR
+    .LABEL ."   Tasks (" TASK-COUNT @ .N ."  )" ./LABEL CR CR
     TASK-COUNT @ DUP 0= IF
-        DROP ."   (none registered)" CR
+        DROP ."    (none registered)" CR
         0 SCR-MAX !
     ELSE
         DUP SCR-MAX !
         0 DO
-            SCR-SEL @ I = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
-            I .N ."  "
+            SCR-SEL @ I = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
+            I .N ."   "
             I CELLS TASK-TABLE + @
             DUP T.STATUS
-            DUP 0 = IF DIM ." FREE " RESET-COLOR THEN
-            DUP 1 = IF 2 FG ." READY" RESET-COLOR THEN
-            DUP 2 = IF 3 FG ." RUN  " RESET-COLOR THEN
-            DUP 3 = IF 1 FG ." BLOCK" RESET-COLOR THEN
-            DUP 4 = IF DIM ." DONE " RESET-COLOR THEN
+            DUP 0 = IF DIM ."  FREE " RESET-COLOR THEN
+            DUP 1 = IF 2 FG ."  READY" RESET-COLOR THEN
+            DUP 2 = IF 3 FG ."  RUN  " RESET-COLOR THEN
+            DUP 3 = IF 1 FG ."  BLOCK" RESET-COLOR THEN
+            DUP 4 = IF DIM ."  DONE " RESET-COLOR THEN
             DROP
-            ."  pri=" DUP T.PRIORITY .N
-            ."  xt=" T.XT .N
+            ."   pri=" DUP T.PRIORITY .N
+            ."   xt=" T.XT .N
             CR
         LOOP
     THEN
@@ -3521,163 +3521,163 @@ VARIABLE DOC-TUT-COUNT
     SCR-SEL @ -1 <> SCR-SEL @ TASK-COUNT @ < AND IF
         CR HBAR
         SCR-SEL @ CELLS TASK-TABLE + @
-        ."  Status: " DUP T.STATUS
-        DUP 0 = IF ." FREE" THEN
-        DUP 1 = IF 2 FG ." READY" RESET-COLOR THEN
-        DUP 2 = IF 3 FG ." RUNNING" RESET-COLOR THEN
-        DUP 3 = IF 1 FG ." BLOCKED" RESET-COLOR THEN
-        DUP 4 = IF DIM ." DONE" RESET-COLOR THEN
+        ."   Status: " DUP T.STATUS
+        DUP 0 = IF ."  FREE" THEN
+        DUP 1 = IF 2 FG ."  READY" RESET-COLOR THEN
+        DUP 2 = IF 3 FG ."  RUNNING" RESET-COLOR THEN
+        DUP 3 = IF 1 FG ."  BLOCKED" RESET-COLOR THEN
+        DUP 4 = IF DIM ."  DONE" RESET-COLOR THEN
         DROP CR
-        ."  XT: " DUP T.XT .N ."   Priority: " T.PRIORITY .N CR
-        CR DIM ."  [k] Kill  [s] Restart" RESET-COLOR CR
+        ."   XT: " DUP T.XT .N ."    Priority: " T.PRIORITY .N CR
+        CR DIM ."   [k] Kill  [s] Restart" RESET-COLOR CR
     THEN ;
 
 \ ---- Screen 6: Help ----
 : SCR-HELP  ( -- )
-    .LABEL ."  Quick Reference" ./LABEL CR CR
-    BOLD ."  Buffers:" RESET-COLOR CR
-    ."   0 1 N BUFFER name    Create buffer" CR
-    ."   buf B.SUM/MIN/MAX    Tile reductions" CR
-    ."   a b c B.ADD/SUB      Element-wise ops" CR
-    ."   n buf B.SCALE/FILL   Modify buffer" CR
-    BOLD ."  Kernels:" RESET-COLOR CR
-    ."   1 1 2 0 KERNEL name  Register kernel" CR
-    ."   buf kzero/kfill/kadd Sample kernels" CR
-    ."   buf knorm/khistogram  Advanced kernels" CR
-    ."   th src dst kpeak      Peak detection" CR
-    BOLD ."  Pipelines:" RESET-COLOR CR
-    ."   3 PIPELINE name      Create pipeline" CR
-    ."   ' w pipe P.ADD/RUN   Build & execute" CR
-    ."   pipe P.RUN-PAR       Parallel execute" CR
-    BOLD ."  Tasks:" RESET-COLOR CR
-    ."   ' w 0 TASK name      Create task" CR
-    ."   SCHEDULE / BG         Run tasks" CR
-    BOLD ."  Multicore:" RESET-COLOR CR
-    ."   xt core CORE-RUN      Dispatch to core" CR
-    ."   core CORE-WAIT        Wait for core" CR
-    ."   BARRIER               Sync all cores" CR
-    ."   n LOCK / n UNLOCK     Spinlock ops" CR
-    ."   CORES                 Show core status" CR
-    BOLD ."  Storage:" RESET-COLOR CR
-    ."   buf sec B.SAVE/LOAD  Persist buffers" CR
-    ."   DIR / CATALOG        List disk files" CR
-    ."   CAT name             Print file" CR
-    ."   buf SAVE-BUFFER name Save buf to file" CR
-    BOLD ."  Data Ports:" RESET-COLOR CR
-    ."   buf id PORT!          Bind NIC source" CR
-    ."   POLL / n INGEST       Receive frames" CR
-    ."   PORTS                 List bindings" CR
-    BOLD ."  Tools:" RESET-COLOR CR
-    ."   DASHBOARD / STATUS    System views" CR
-    ."   ' w BENCH / .BENCH   Benchmark" CR ;
+    .LABEL ."   Quick Reference" ./LABEL CR CR
+    BOLD ."   Buffers:" RESET-COLOR CR
+    ."    0 1 N BUFFER name    Create buffer" CR
+    ."    buf B.SUM/MIN/MAX    Tile reductions" CR
+    ."    a b c B.ADD/SUB      Element-wise ops" CR
+    ."    n buf B.SCALE/FILL   Modify buffer" CR
+    BOLD ."   Kernels:" RESET-COLOR CR
+    ."    1 1 2 0 KERNEL name  Register kernel" CR
+    ."    buf kzero/kfill/kadd Sample kernels" CR
+    ."    buf knorm/khistogram  Advanced kernels" CR
+    ."    th src dst kpeak      Peak detection" CR
+    BOLD ."   Pipelines:" RESET-COLOR CR
+    ."    3 PIPELINE name      Create pipeline" CR
+    ."    ' w pipe P.ADD/RUN   Build & execute" CR
+    ."    pipe P.RUN-PAR       Parallel execute" CR
+    BOLD ."   Tasks:" RESET-COLOR CR
+    ."    ' w 0 TASK name      Create task" CR
+    ."    SCHEDULE / BG         Run tasks" CR
+    BOLD ."   Multicore:" RESET-COLOR CR
+    ."    xt core CORE-RUN      Dispatch to core" CR
+    ."    core CORE-WAIT        Wait for core" CR
+    ."    BARRIER               Sync all cores" CR
+    ."    n LOCK / n UNLOCK     Spinlock ops" CR
+    ."    CORES                 Show core status" CR
+    BOLD ."   Storage:" RESET-COLOR CR
+    ."    buf sec B.SAVE/LOAD  Persist buffers" CR
+    ."    DIR / CATALOG        List disk files" CR
+    ."    CAT name             Print file" CR
+    ."    buf SAVE-BUFFER name Save buf to file" CR
+    BOLD ."   Data Ports:" RESET-COLOR CR
+    ."    buf id PORT!          Bind NIC source" CR
+    ."    POLL / n INGEST       Receive frames" CR
+    ."    PORTS                 List bindings" CR
+    BOLD ."   Tools:" RESET-COLOR CR
+    ."    DASHBOARD / STATUS    System views" CR
+    ."    ' w BENCH / .BENCH   Benchmark" CR ;
 
 \ ---- Screen 7: Documentation ----
 : SCR-DOCS  ( -- )
-    .LABEL ."  Documentation" ./LABEL CR CR
+    .LABEL ."   Documentation" ./LABEL CR CR
     0 DOC-N !
-    BOLD ."  Topics:" RESET-COLOR CR
+    BOLD ."   Topics:" RESET-COLOR CR
     FS-OK @ IF
         0 DOC-TUT-COUNT !
         FS-MAX-FILES 0 DO
             I DIRENT C@ 0<> IF
                 I DIRENT DE.TYPE FTYPE-DOC = IF
-                    SCR-SEL @ DOC-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."    " THEN
-                    DOC-N @ .N ."  " I DIRENT .ZSTR CR
+                    SCR-SEL @ DOC-N @ = IF 2 FG ."  > " RESET-COLOR ELSE ."     " THEN
+                    DOC-N @ .N ."   " I DIRENT .ZSTR CR
                     1 DOC-N +!  1 DOC-TUT-COUNT +!
                 THEN
             THEN
         LOOP
-        DOC-TUT-COUNT @ 0= IF ."    (none)" CR THEN
+        DOC-TUT-COUNT @ 0= IF ."     (none)" CR THEN
     ELSE
-        ."    (no filesystem loaded)" CR
+        ."     (no filesystem loaded)" CR
     THEN
     CR
-    BOLD ."  Tutorials:" RESET-COLOR CR
+    BOLD ."   Tutorials:" RESET-COLOR CR
     FS-OK @ IF
         0 DOC-TUT-COUNT !
         FS-MAX-FILES 0 DO
             I DIRENT C@ 0<> IF
                 I DIRENT DE.TYPE FTYPE-TUT = IF
-                    SCR-SEL @ DOC-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."    " THEN
-                    DOC-N @ .N ."  " I DIRENT .ZSTR CR
+                    SCR-SEL @ DOC-N @ = IF 2 FG ."  > " RESET-COLOR ELSE ."     " THEN
+                    DOC-N @ .N ."   " I DIRENT .ZSTR CR
                     1 DOC-N +!  1 DOC-TUT-COUNT +!
                 THEN
             THEN
         LOOP
-        DOC-TUT-COUNT @ 0= IF ."    (none)" CR THEN
+        DOC-TUT-COUNT @ 0= IF ."     (none)" CR THEN
     ELSE
-        ."    (no filesystem loaded)" CR
+        ."     (no filesystem loaded)" CR
     THEN
     DOC-N @ SCR-MAX !
     CR
-    DIM ."  [Enter] Read selected document" RESET-COLOR CR ;
+    DIM ."   [Enter] Read selected document" RESET-COLOR CR ;
 
 \ ---- Screen 8: Storage ----
 : SCR-STORAGE  ( -- )
-    .LABEL ."  Storage" ./LABEL CR CR
+    .LABEL ."   Storage" ./LABEL CR CR
     DISK? 0= IF
-        ."   (no storage attached)" CR
+        ."    (no storage attached)" CR
         0 SCR-MAX ! EXIT
     THEN
     FS-OK @ 0= IF
-        ."   (filesystem not loaded)" CR
+        ."    (filesystem not loaded)" CR
         0 SCR-MAX ! EXIT
     THEN
     0 STOR-N !
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
-            SCR-SEL @ STOR-N @ = IF 2 FG ." > " RESET-COLOR ELSE ."   " THEN
-            STOR-N @ .N ."  "
+            SCR-SEL @ STOR-N @ = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
+            STOR-N @ .N ."   "
             I DIRENT .ZSTR
-            ."  " I DIRENT DE.USED .N ." B"
-            ."  " I DIRENT DE.TYPE .FTYPE
+            ."   " I DIRENT DE.USED .N ."  B"
+            ."   " I DIRENT DE.TYPE .FTYPE
             CR
             1 STOR-N +!
         THEN
     LOOP
     STOR-N @ SCR-MAX !
-    STOR-N @ 0= IF ."   (empty)" CR THEN
+    STOR-N @ 0= IF ."    (empty)" CR THEN
     CR
     0  2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
-    DIM ."  " .N ."  free sectors" RESET-COLOR CR
+    DIM ."   " .N ."   free sectors" RESET-COLOR CR
     \ -- Inline detail for selected file --
     SCR-SEL @ -1 <> SCR-SEL @ STOR-N @ < AND IF
         CR HBAR
         SCR-SEL @ FIND-NTH-ACTIVE DUP -1 <> IF
-            ."  Name  : " DUP DIRENT .ZSTR CR
-            ."  Type  : " DUP DIRENT DE.TYPE .FTYPE CR
-            ."  Size  : " DUP DIRENT DE.USED .N ."  bytes" CR
-            ."  Start : sector " DUP DIRENT DE.SEC .N CR
-            ."  Count : " DIRENT DE.COUNT .N ."  sectors" CR
+            ."   Name  : " DUP DIRENT .ZSTR CR
+            ."   Type  : " DUP DIRENT DE.TYPE .FTYPE CR
+            ."   Size  : " DUP DIRENT DE.USED .N ."   bytes" CR
+            ."   Start : sector " DUP DIRENT DE.SEC .N CR
+            ."   Count : " DIRENT DE.COUNT .N ."   sectors" CR
         ELSE DROP THEN
     THEN ;
 
 \ ---- Screen 9: Cores ----
 : SCR-CORES  ( -- )
-    .LABEL ."  Cores (" NCORES .N ." )" ./LABEL CR CR
+    .LABEL ."   Cores (" NCORES .N ."  )" ./LABEL CR CR
     NCORES 1 <= IF
-        ."   Single-core mode — no secondary cores available." CR
+        ."    Single-core mode — no secondary cores available."  CR
     ELSE
         NCORES 0 DO
-            ."   Core " I .N ."  "
+            ."    Core " I .N ."   "
             I COREID = IF
-                3 FG ." RUNNING" RESET-COLOR ."  (self — scheduler)" CR
+                3 FG ."  RUNNING" RESET-COLOR ."   (self — scheduler)" CR
             ELSE
                 I CORE-STATUS IF
-                    2 FG ." BUSY" RESET-COLOR CR
+                    2 FG ."  BUSY" RESET-COLOR CR
                 ELSE
-                    DIM ." IDLE" RESET-COLOR CR
+                    DIM ."  IDLE" RESET-COLOR CR
                 THEN
             THEN
         LOOP
-        CR BOLD ."  Multicore Words:" RESET-COLOR CR
-        ."   xt core CORE-RUN    Dispatch work to core" CR
-        ."   core CORE-WAIT      Wait for core to finish" CR
-        ."   BARRIER             Sync all secondary cores" CR
-        ."   pipe P.RUN-PAR      Parallel pipeline execute" CR
-        ."   n LOCK / n UNLOCK   Spinlock operations" CR
+        CR BOLD ."   Multicore Words:" RESET-COLOR CR
+        ."    xt core CORE-RUN    Dispatch work to core" CR
+        ."    core CORE-WAIT      Wait for core to finish" CR
+        ."    BARRIER             Sync all secondary cores" CR
+        ."    pipe P.RUN-PAR      Parallel pipeline execute" CR
+        ."    n LOCK / n UNLOCK   Spinlock operations" CR
     THEN ;
 
 \ -- Screen dispatch --
@@ -3787,7 +3787,7 @@ VARIABLE DOC-TUT-COUNT
         SCREEN-RUN @
     0= UNTIL
     PAGE
-    ." Returned to REPL." CR ;
+    ."  Returned to REPL."  CR ;
 
 \ =====================================================================
 \  §10  Data Ports — NIC-Based External Data Ingestion
@@ -3868,26 +3868,26 @@ VARIABLE ROUTE-BUF
 
 \ -- Debug: print last received frame header --
 : .FRAME  ( -- )
-    ." src=" FRAME-SRC .
-    ." type=" FRAME-TYPE .
-    ." seq=" FRAME-SEQ .
-    ." len=" FRAME-LEN . CR ;
+    ."  src=" FRAME-SRC .
+    ."  type=" FRAME-TYPE .
+    ."  seq=" FRAME-SEQ .
+    ."  len=" FRAME-LEN . CR ;
 
 \ -- List bound ports --
 : PORTS  ( -- )
-    ." --- Ports (" PORT-COUNT @ . ." ) ---" CR
+    ."  --- Ports (" PORT-COUNT @ . ."  ) ---" CR
     256 0 DO
         I PORT@ DUP 0<> IF
-            ."   src=" I . ."  -> buf @" . CR
+            ."    src=" I . ."   -> buf @" . CR
         ELSE DROP THEN
     LOOP
-    ."   rx=" PORT-RX @ . ." drop=" PORT-DROP @ . CR ;
+    ."    rx=" PORT-RX @ . ."  drop=" PORT-DROP @ . CR ;
 
 \ -- Port stats one-liner --
 : PORT-STATS  ( -- )
-    ." ports=" PORT-COUNT @ .
-    ." rx=" PORT-RX @ .
-    ." drop=" PORT-DROP @ . ;
+    ."  ports=" PORT-COUNT @ .
+    ."  rx=" PORT-RX @ .
+    ."  drop=" PORT-DROP @ . ;
 
 \ =====================================================================
 \  §11  Benchmarking
@@ -3905,17 +3905,17 @@ VARIABLE ROUTE-BUF
 
 \ -- Memory usage bar --
 : .MEM  ( -- )
-    ."  Memory:" CR
-    ."    HERE  = " HERE . CR ;
+    ."   Memory:" CR
+    ."     HERE  = " HERE . CR ;
 
 \ -- Dashboard --
 : DASHBOARD ( -- )
     CR HRULE
-    ."  KDOS v1.1 — Kernel Dashboard OS" CR
+    ."   KDOS v1.1 — Kernel Dashboard OS" CR
     HRULE
     .MEM
-    CR ."  Cores: " NCORES .
-    NCORES 1 > IF ." (multicore)" ELSE ." (single-core)" THEN CR
+    CR ."   Cores: " NCORES .
+    NCORES 1 > IF ."  (multicore)" ELSE ."  (single-core)" THEN CR
     CR DISK-INFO
     CR BUFFERS
     CR KERNELS
@@ -3928,15 +3928,15 @@ VARIABLE ROUTE-BUF
 
 \ -- Status: quick one-liner --
 : STATUS ( -- )
-    ." KDOS v1.1 | cores=" NCORES .
-    ." bufs=" BUF-COUNT @ .
-    ." kerns=" KERN-COUNT @ .
-    ." pipes=" PIPE-COUNT @ .
-    ." tasks=" TASK-COUNT @ .
-    ." files=" FILE-COUNT @ .
-    ." ports=" PORT-COUNT @ .
-    ." disk=" DISK? IF ." yes" ELSE ." no" THEN
-    ."  HERE=" HERE . CR ;
+    ."  KDOS v1.1 | cores=" NCORES .
+    ."  bufs=" BUF-COUNT @ .
+    ."  kerns=" KERN-COUNT @ .
+    ."  pipes=" PIPE-COUNT @ .
+    ."  tasks=" TASK-COUNT @ .
+    ."  files=" FILE-COUNT @ .
+    ."  ports=" PORT-COUNT @ .
+    ."  disk=" DISK? IF ."  yes" ELSE ."  no" THEN
+    ."   HERE=" HERE . CR ;
 
 \ =====================================================================
 \  §13  Help System
@@ -3960,25 +3960,25 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     HW-CSTR FIND SWAP DROP    ( flag: 0=miss, 1/-1=found )
     DUP HW-FOUND !
     0<> IF
-        2 FG ." Found: " RESET-COLOR
-        NAMEBUF .ZSTR ."  — defined in dictionary" CR
+        2 FG ."  Found: " RESET-COLOR
+        NAMEBUF .ZSTR ."   — defined in dictionary" CR
     ELSE
-        1 FG ." Not found: " RESET-COLOR
-        NAMEBUF .ZSTR ."  — not in dictionary" CR
+        1 FG ."  Not found: " RESET-COLOR
+        NAMEBUF .ZSTR ."   — not in dictionary" CR
     THEN
     \ Check for matching doc on disk
     FS-OK @ IF
         FIND-BY-NAME DUP -1 <> IF
-            CR ."  Documentation available:" CR
-            DUP DIRENT DE.TYPE .FTYPE ."  file: "
+            CR ."   Documentation available:" CR
+            DUP DIRENT DE.TYPE .FTYPE ."   file: "
             DIRENT .ZSTR CR
-            ."  Use: DOC " NAMEBUF .ZSTR ."  or  DESCRIBE " NAMEBUF .ZSTR CR
+            ."   Use: DOC " NAMEBUF .ZSTR ."   or  DESCRIBE " NAMEBUF .ZSTR CR
         ELSE
             DROP
         THEN
     THEN
     \ Show related words
-    CR ."  Related words:" CR ."  "
+    CR ."   Related words:" CR ."   "
     0                                    \ match count
     LATEST
     BEGIN DUP WHILE
@@ -3997,156 +3997,156 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
         ENTRY>LINK
     REPEAT
     DROP
-    DUP 0= IF ." (none)" THEN
-    CR ." (" . ." related)" CR ;
+    DUP 0= IF ."  (none)" THEN
+    CR ."  (" . ."  related)" CR ;
 
 \ -- Full reference --
 : .HELP-ALL  ( -- )
     CR HRULE
-    ."  KDOS v1.1 — Quick Reference" CR
+    ."   KDOS v1.1 — Quick Reference" CR
     HRULE
-    CR ."  BUFFER WORDS:" CR
-    ."    0 1 256 BUFFER name   Create 256-byte raw buffer" CR
-    ."    buf B.INFO             Show buffer descriptor" CR
-    ."    buf B.PREVIEW          Hex dump first tile" CR
-    ."    byte buf B.FILL        Fill buffer with byte" CR
-    ."    buf B.ZERO             Zero buffer" CR
-    ."    buf B.SUM              Sum all bytes (via tile engine)" CR
-    ."    buf B.MIN              Minimum byte (via tile engine)" CR
-    ."    buf B.MAX              Maximum byte (via tile engine)" CR
-    ."    a b c B.ADD            Element-wise add a+b -> c" CR
-    ."    a b c B.SUB            Element-wise sub a-b -> c" CR
-    ."    n buf B.SCALE          Multiply each byte by n" CR
-    ."    BUFFERS                List all buffers" CR
-    CR ."  KERNEL WORDS:" CR
-    ."    1 1 2 0 KERNEL name   Register kernel metadata" CR
-    ."    desc K.INFO            Show kernel descriptor" CR
-    ."    KERNELS                List all kernels" CR
-    CR ."  SAMPLE KERNELS:" CR
-    ."    buf kzero              Zero a buffer" CR
-    ."    byte buf kfill         Fill a buffer" CR
-    ."    a b c kadd             Add two buffers" CR
-    ."    buf ksum               Sum buffer -> stack" CR
-    ."    buf kstats             Sum, min, max -> stack" CR
-    ."    n buf kscale           Scale buffer by n" CR
-    ."    n buf kthresh          Threshold: <n->0, >=n->255" CR
-    CR ."  ADVANCED KERNELS:" CR
-    ."    lo hi buf kclamp       Clamp bytes to [lo,hi]" CR
-    ."    w buf kavg             Moving average (window w)" CR
-    ."    buf khistogram         256-bin histogram -> hist-bins" CR
-    ."    v HIST@                Query histogram bin v" CR
-    ."    .HIST                  Print non-zero histogram bins" CR
-    ."    src dst kdelta         Delta encode src -> dst" CR
-    ."    buf knorm              Normalize to full 0-255 range" CR
-    ."    th src dst kpeak       Peak detect (thresh th)" CR
-    ."    buf krms-buf           RMS of buffer -> stack" CR
-    ."    a b kcorrelate         Dot product (tile engine)" CR
-    ."    c0 c1 c2 buf kconvolve3  3-tap FIR convolution" CR
-    ."    buf kinvert            Bitwise invert (255-val)" CR
-    ."    val buf kcount         Count matching bytes" CR
-    CR ."  PIPELINE WORDS:" CR
-    ."    3 PIPELINE name        Create 3-step pipeline" CR
-    ."    ' word pipe P.ADD      Append step to pipeline" CR
-    ."    pipe P.RUN             Execute all steps" CR
-    ."    pipe P.BENCH           Time each step" CR
-    ."    pipe P.INFO            Show pipeline descriptor" CR
-    ."    pipe P.CLEAR           Reset pipeline" CR
-    ."    PIPES                  List all pipelines" CR
-    CR ."  STORAGE WORDS:" CR
-    ."    DISK?                  Is storage present?" CR
-    ."    DISK-INFO              Print storage status" CR
-    ."    buf sec B.SAVE         Save buffer to disk" CR
-    ."    buf sec B.LOAD         Load buffer from disk" CR
-    CR ."  MP64FS FILE SYSTEM:" CR
-    ."    FORMAT                 Format disk with MP64FS" CR
-    ."    FS-LOAD                Load FS from disk into RAM" CR
-    ."    FS-SYNC                Write FS changes to disk" CR
-    ."    FS-FREE                Show free disk space" CR
-    ."    DIR                    List files on disk" CR
-    ."    CATALOG                Detailed file listing" CR
-    ."    8 2 MKFILE name        Create file (8 secs, type 2)" CR
-    ."    RMFILE name            Delete file from disk" CR
-    ."    RENAME old new         Rename a file" CR
-    ."    CAT name               Print file to terminal" CR
-    ."    OPEN name              Open file -> fdesc" CR
-    ."    f FFLUSH               Write metadata to disk" CR
-    ."    buf SAVE-BUFFER name   Save buffer to file" CR
-    CR ."  FILE I/O:" CR
-    ."    10 8 FILE name         Create manual file (legacy)" CR
-    ."    addr len f FWRITE      Write bytes (advances cursor)" CR
-    ."    addr len f FREAD       Read bytes (advances cursor)" CR
-    ."    pos f FSEEK            Set file cursor" CR
-    ."    f FREWIND              Reset cursor to 0" CR
-    ."    f FSIZE / f F.INFO     File size / info" CR
-    ."    FILES                  List legacy files" CR
-    CR ."  SCHEDULER WORDS:" CR
-    ."    ' word 0 TASK name     Create named task (xt pri)" CR
-    ."    xt SPAWN               Spawn anonymous task" CR
-    ."    xt BG                  Spawn + run scheduler" CR
-    ."    SCHEDULE               Run all ready tasks" CR
-    ."    YIELD                  Cooperative yield" CR
-    ."    tdesc KILL             Cancel task" CR
-    ."    tdesc RESTART          Reset done task to ready" CR
-    ."    PREEMPT-ON             Enable timer preemption" CR
-    ."    PREEMPT-OFF            Disable timer preemption" CR
-    ."    TASKS                  List all tasks" CR
-    CR ."  MULTICORE WORDS:" CR
-    ."    COREID                 Push current core ID" CR
-    ."    NCORES                 Push number of hardware cores" CR
-    ."    xt core CORE-RUN       Dispatch XT to secondary core" CR
-    ."    core CORE-WAIT         Wait for core to finish" CR
-    ."    ALL-CORES-WAIT         Wait for all secondary cores" CR
-    ."    BARRIER                Synchronize all cores" CR
-    ."    n LOCK                 Acquire spinlock n (busy-wait)" CR
-    ."    n UNLOCK               Release spinlock n" CR
-    ."    CORES                  Show per-core status" CR
-    ."    pipe P.RUN-PAR         Run pipeline in parallel" CR
-    ."    pipe P.BENCH-PAR       Benchmark parallel pipeline" CR
-    CR ."  DATA PORT WORDS:" CR
-    ."    buf id PORT!           Bind source id to buffer" CR
-    ."    id UNPORT              Unbind source" CR
-    ."    POLL                   Receive & route one frame" CR
-    ."    n INGEST               Receive & route n frames" CR
-    ."    NET-RX?                Is a NIC frame waiting?" CR
-    ."    PORTS                  List port bindings" CR
-    ."    .FRAME                 Show last frame header" CR
-    CR ."  SCREENS & TOOLS:" CR
-    ."    SCREENS                Interactive TUI (1-9, n/p, a, q, r)" CR
-    ."    DASHBOARD              Full system overview" CR
-    ."    STATUS                 Quick status line" CR
-    ."    ' word BENCH           Time word, leave cycles on stack" CR
-    ."    ' word .BENCH          Time word and print cycles" CR
-    ."    HELP                   Full quick reference" CR
-    ."    HELP <word>            Look up a specific word" CR
-    CR ."  DOCUMENTATION:" CR
-    ."    TOPICS                 List available doc topics" CR
-    ."    LESSONS                List available tutorials" CR
-    ."    DOC <topic>            Page through documentation" CR
-    ."    DESCRIBE <topic>       Show topic by name" CR
-    ."    TUTORIAL <name>        Interactive lesson" CR
-    CR ."  DICTIONARY SEARCH:" CR
-    ."    WORDS-LIKE <pat>       Find words containing pattern" CR
-    ."    APROPOS <pat>          Alias for WORDS-LIKE" CR
-    ."    n .RECENT              Show last n defined words" CR
-    ."    LATEST                 Push most-recent dict entry addr" CR
-    ."    entry ENTRY>NAME       Get name (addr len) from entry" CR
-    ."    entry ENTRY>LINK       Follow dict link to next entry" CR
-    CR ."  PIPELINE BUNDLES:" CR
-    ."    1 BDL-BEGIN             Start bundle (version 1)" CR
-    ."    0 1 256 BDL-BUF name   Declare buffer in bundle" CR
-    ."    1 1 2 1 BDL-KERN name  Declare kernel in bundle" CR
-    ."    3 BDL-PIPE name         Declare pipeline in bundle" CR
-    ."    0 50000 3 BDL-SCHED    Set schedule (pipe int flags)" CR
-    ."    0 0 3 BDL-POLICY       Set policy (perms ret exp)" CR
-    ."    1 255 BDL-SCREEN        Set screen (default mask)" CR
-    ."    BDL-END                 Finalize bundle" CR
-    ."    BUNDLE-LOAD name       Load bundle from disk" CR
-    ."    BUNDLE-INFO name       Inspect bundle (dry run)" CR
-    ."    .BUNDLE                Show current bundle state" CR
-    CR ."  STACK & DIAGNOSTICS:" CR
-    ."    n NEEDS                Abort if stack has < n items" CR
-    ."    flag ASSERT            Abort if flag is false" CR
-    ."    .DEPTH                 Show current stack depth" CR
+    CR ."   BUFFER WORDS:" CR
+    ."     0 1 256 BUFFER name   Create 256-byte raw buffer" CR
+    ."     buf B.INFO             Show buffer descriptor" CR
+    ."     buf B.PREVIEW          Hex dump first tile" CR
+    ."     byte buf B.FILL        Fill buffer with byte" CR
+    ."     buf B.ZERO             Zero buffer" CR
+    ."     buf B.SUM              Sum all bytes (via tile engine)" CR
+    ."     buf B.MIN              Minimum byte (via tile engine)" CR
+    ."     buf B.MAX              Maximum byte (via tile engine)" CR
+    ."     a b c B.ADD            Element-wise add a+b -> c" CR
+    ."     a b c B.SUB            Element-wise sub a-b -> c" CR
+    ."     n buf B.SCALE          Multiply each byte by n" CR
+    ."     BUFFERS                List all buffers" CR
+    CR ."   KERNEL WORDS:" CR
+    ."     1 1 2 0 KERNEL name   Register kernel metadata" CR
+    ."     desc K.INFO            Show kernel descriptor" CR
+    ."     KERNELS                List all kernels" CR
+    CR ."   SAMPLE KERNELS:" CR
+    ."     buf kzero              Zero a buffer" CR
+    ."     byte buf kfill         Fill a buffer" CR
+    ."     a b c kadd             Add two buffers" CR
+    ."     buf ksum               Sum buffer -> stack" CR
+    ."     buf kstats             Sum, min, max -> stack" CR
+    ."     n buf kscale           Scale buffer by n" CR
+    ."     n buf kthresh          Threshold: <n->0, >=n->255" CR
+    CR ."   ADVANCED KERNELS:" CR
+    ."     lo hi buf kclamp       Clamp bytes to [lo,hi]" CR
+    ."     w buf kavg             Moving average (window w)" CR
+    ."     buf khistogram         256-bin histogram -> hist-bins" CR
+    ."     v HIST@                Query histogram bin v" CR
+    ."     .HIST                  Print non-zero histogram bins" CR
+    ."     src dst kdelta         Delta encode src -> dst" CR
+    ."     buf knorm              Normalize to full 0-255 range" CR
+    ."     th src dst kpeak       Peak detect (thresh th)" CR
+    ."     buf krms-buf           RMS of buffer -> stack" CR
+    ."     a b kcorrelate         Dot product (tile engine)" CR
+    ."     c0 c1 c2 buf kconvolve3  3-tap FIR convolution" CR
+    ."     buf kinvert            Bitwise invert (255-val)" CR
+    ."     val buf kcount         Count matching bytes" CR
+    CR ."   PIPELINE WORDS:" CR
+    ."     3 PIPELINE name        Create 3-step pipeline" CR
+    ."     ' word pipe P.ADD      Append step to pipeline" CR
+    ."     pipe P.RUN             Execute all steps" CR
+    ."     pipe P.BENCH           Time each step" CR
+    ."     pipe P.INFO            Show pipeline descriptor" CR
+    ."     pipe P.CLEAR           Reset pipeline" CR
+    ."     PIPES                  List all pipelines" CR
+    CR ."   STORAGE WORDS:" CR
+    ."     DISK?                  Is storage present?" CR
+    ."     DISK-INFO              Print storage status" CR
+    ."     buf sec B.SAVE         Save buffer to disk" CR
+    ."     buf sec B.LOAD         Load buffer from disk" CR
+    CR ."   MP64FS FILE SYSTEM:" CR
+    ."     FORMAT                 Format disk with MP64FS" CR
+    ."     FS-LOAD                Load FS from disk into RAM" CR
+    ."     FS-SYNC                Write FS changes to disk" CR
+    ."     FS-FREE                Show free disk space" CR
+    ."     DIR                    List files on disk" CR
+    ."     CATALOG                Detailed file listing" CR
+    ."     8 2 MKFILE name        Create file (8 secs, type 2)" CR
+    ."     RMFILE name            Delete file from disk" CR
+    ."     RENAME old new         Rename a file" CR
+    ."     CAT name               Print file to terminal" CR
+    ."     OPEN name              Open file -> fdesc" CR
+    ."     f FFLUSH               Write metadata to disk" CR
+    ."     buf SAVE-BUFFER name   Save buffer to file" CR
+    CR ."   FILE I/O:" CR
+    ."     10 8 FILE name         Create manual file (legacy)" CR
+    ."     addr len f FWRITE      Write bytes (advances cursor)" CR
+    ."     addr len f FREAD       Read bytes (advances cursor)" CR
+    ."     pos f FSEEK            Set file cursor" CR
+    ."     f FREWIND              Reset cursor to 0" CR
+    ."     f FSIZE / f F.INFO     File size / info" CR
+    ."     FILES                  List legacy files" CR
+    CR ."   SCHEDULER WORDS:" CR
+    ."     ' word 0 TASK name     Create named task (xt pri)" CR
+    ."     xt SPAWN               Spawn anonymous task" CR
+    ."     xt BG                  Spawn + run scheduler" CR
+    ."     SCHEDULE               Run all ready tasks" CR
+    ."     YIELD                  Cooperative yield" CR
+    ."     tdesc KILL             Cancel task" CR
+    ."     tdesc RESTART          Reset done task to ready" CR
+    ."     PREEMPT-ON             Enable timer preemption" CR
+    ."     PREEMPT-OFF            Disable timer preemption" CR
+    ."     TASKS                  List all tasks" CR
+    CR ."   MULTICORE WORDS:" CR
+    ."     COREID                 Push current core ID" CR
+    ."     NCORES                 Push number of hardware cores" CR
+    ."     xt core CORE-RUN       Dispatch XT to secondary core" CR
+    ."     core CORE-WAIT         Wait for core to finish" CR
+    ."     ALL-CORES-WAIT         Wait for all secondary cores" CR
+    ."     BARRIER                Synchronize all cores" CR
+    ."     n LOCK                 Acquire spinlock n (busy-wait)" CR
+    ."     n UNLOCK               Release spinlock n" CR
+    ."     CORES                  Show per-core status" CR
+    ."     pipe P.RUN-PAR         Run pipeline in parallel" CR
+    ."     pipe P.BENCH-PAR       Benchmark parallel pipeline" CR
+    CR ."   DATA PORT WORDS:" CR
+    ."     buf id PORT!           Bind source id to buffer" CR
+    ."     id UNPORT              Unbind source" CR
+    ."     POLL                   Receive & route one frame" CR
+    ."     n INGEST               Receive & route n frames" CR
+    ."     NET-RX?                Is a NIC frame waiting?" CR
+    ."     PORTS                  List port bindings" CR
+    ."     .FRAME                 Show last frame header" CR
+    CR ."   SCREENS & TOOLS:" CR
+    ."     SCREENS                Interactive TUI (1-9, n/p, a, q, r)" CR
+    ."     DASHBOARD              Full system overview" CR
+    ."     STATUS                 Quick status line" CR
+    ."     ' word BENCH           Time word, leave cycles on stack" CR
+    ."     ' word .BENCH          Time word and print cycles" CR
+    ."     HELP                   Full quick reference" CR
+    ."     HELP <word>            Look up a specific word" CR
+    CR ."   DOCUMENTATION:" CR
+    ."     TOPICS                 List available doc topics" CR
+    ."     LESSONS                List available tutorials" CR
+    ."     DOC <topic>            Page through documentation" CR
+    ."     DESCRIBE <topic>       Show topic by name" CR
+    ."     TUTORIAL <name>        Interactive lesson" CR
+    CR ."   DICTIONARY SEARCH:" CR
+    ."     WORDS-LIKE <pat>       Find words containing pattern" CR
+    ."     APROPOS <pat>          Alias for WORDS-LIKE" CR
+    ."     n .RECENT              Show last n defined words" CR
+    ."     LATEST                 Push most-recent dict entry addr" CR
+    ."     entry ENTRY>NAME       Get name (addr len) from entry" CR
+    ."     entry ENTRY>LINK       Follow dict link to next entry" CR
+    CR ."   PIPELINE BUNDLES:" CR
+    ."     1 BDL-BEGIN             Start bundle (version 1)" CR
+    ."     0 1 256 BDL-BUF name   Declare buffer in bundle" CR
+    ."     1 1 2 1 BDL-KERN name  Declare kernel in bundle" CR
+    ."     3 BDL-PIPE name         Declare pipeline in bundle" CR
+    ."     0 50000 3 BDL-SCHED    Set schedule (pipe int flags)" CR
+    ."     0 0 3 BDL-POLICY       Set policy (perms ret exp)" CR
+    ."     1 255 BDL-SCREEN        Set screen (default mask)" CR
+    ."     BDL-END                 Finalize bundle" CR
+    ."     BUNDLE-LOAD name       Load bundle from disk" CR
+    ."     BUNDLE-INFO name       Inspect bundle (dry run)" CR
+    ."     .BUNDLE                Show current bundle state" CR
+    CR ."   STACK & DIAGNOSTICS:" CR
+    ."     n NEEDS                Abort if stack has < n items" CR
+    ."     flag ASSERT            Abort if flag is false" CR
+    ."     .DEPTH                 Show current stack depth" CR
     CR HRULE ;
 
 \ -- Dispatching HELP --
@@ -4272,24 +4272,24 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
 \ BDL-END ( -- ) finalize bundle, report summary
 : BDL-END  ( -- )
     BDL-DRY @ IF
-        ." --- Bundle v" BDL-VER @ . ." ---" CR
-        ."   Buffers  : " BDL-NBUFS @ . CR
-        ."   Kernels  : " BDL-NKERNS @ . CR
-        ."   Pipelines: " BDL-NPIPES @ . CR
+        ."  --- Bundle v" BDL-VER @ . ."  ---" CR
+        ."    Buffers  : " BDL-NBUFS @ . CR
+        ."    Kernels  : " BDL-NKERNS @ . CR
+        ."    Pipelines: " BDL-NPIPES @ . CR
         BDL-SCHED-P @ -1 <> IF
-            ."   Schedule : pipe " BDL-SCHED-P @ .
-            ."  interval=" BDL-SCHED-I @ .
-            BDL-SCHED-F @ 1 AND IF ."  auto" THEN
-            BDL-SCHED-F @ 2 AND IF ."  repeat" THEN
+            ."    Schedule : pipe " BDL-SCHED-P @ .
+            ."   interval=" BDL-SCHED-I @ .
+            BDL-SCHED-F @ 1 AND IF ."   auto" THEN
+            BDL-SCHED-F @ 2 AND IF ."   repeat" THEN
             CR
         ELSE
-            ."   Schedule : (none)" CR
+            ."    Schedule : (none)" CR
         THEN
-        ."   Policy   : perms=" BDL-POL-PERM @ .
-        ." ret=" BDL-POL-RET @ .
-        ." exp=" BDL-POL-EXP @ . CR
-        ."   Screen   : default=" BDL-SCR-DEF @ .
-        ." mask=" BDL-SCR-MASK @ . CR
+        ."    Policy   : perms=" BDL-POL-PERM @ .
+        ."  ret=" BDL-POL-RET @ .
+        ."  exp=" BDL-POL-EXP @ . CR
+        ."    Screen   : default=" BDL-SCR-DEF @ .
+        ."  mask=" BDL-SCR-MASK @ . CR
     ELSE
         \ Apply schedule interval to TIME-SLICE
         BDL-SCHED-P @ -1 <> IF
@@ -4298,10 +4298,10 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
         \ Apply screen default
         BDL-SCR-DEF @ SCREEN-ID !
         \ Report
-        CR ." Bundle v" BDL-VER @ . ." loaded: "
-        BDL-NBUFS @ . ." bufs "
-        BDL-NKERNS @ . ." kerns "
-        BDL-NPIPES @ . ." pipes" CR
+        CR ."  Bundle v" BDL-VER @ . ."  loaded: "
+        BDL-NBUFS @ . ."  bufs "
+        BDL-NKERNS @ . ."  kerns "
+        BDL-NPIPES @ . ."  pipes" CR
     THEN
     0 BDL-ACTIVE ! ;
 
@@ -4315,28 +4315,28 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
 
 \ .BUNDLE ( -- ) show current bundle state
 : .BUNDLE  ( -- )
-    ." --- Current Bundle ---" CR
+    ."  --- Current Bundle ---" CR
     BDL-VER @ 0= IF
-        ."   (no bundle loaded)" CR EXIT
+        ."    (no bundle loaded)" CR EXIT
     THEN
-    ."   Version  : " BDL-VER @ . CR
-    ."   Buffers  : " BDL-NBUFS @ . CR
-    ."   Kernels  : " BDL-NKERNS @ . CR
-    ."   Pipelines: " BDL-NPIPES @ . CR
-    ."   Schedule : "
-    BDL-SCHED-P @ -1 = IF ." none" ELSE
-        ." pipe " BDL-SCHED-P @ .
-        ." interval=" BDL-SCHED-I @ .
-        BDL-SCHED-F @ 1 AND IF ." [auto]" THEN
-        BDL-SCHED-F @ 2 AND IF ." [repeat]" THEN
+    ."    Version  : " BDL-VER @ . CR
+    ."    Buffers  : " BDL-NBUFS @ . CR
+    ."    Kernels  : " BDL-NKERNS @ . CR
+    ."    Pipelines: " BDL-NPIPES @ . CR
+    ."    Schedule : "
+    BDL-SCHED-P @ -1 = IF ."  none" ELSE
+        ."  pipe " BDL-SCHED-P @ .
+        ."  interval=" BDL-SCHED-I @ .
+        BDL-SCHED-F @ 1 AND IF ."  [auto]" THEN
+        BDL-SCHED-F @ 2 AND IF ."  [repeat]" THEN
     THEN CR
-    ."   Policy   : "
-    BDL-POL-PERM @ 1 AND IF ." RO" THEN
-    BDL-POL-PERM @ 2 AND IF ." SYS" THEN
-    ." ret=" BDL-POL-RET @ .
-    ." exp=" BDL-POL-EXP @ . CR
-    ."   Screen   : default=" BDL-SCR-DEF @ .
-    ." mask=" BDL-SCR-MASK @ . CR ;
+    ."    Policy   : "
+    BDL-POL-PERM @ 1 AND IF ."  RO" THEN
+    BDL-POL-PERM @ 2 AND IF ."  SYS" THEN
+    ."  ret=" BDL-POL-RET @ .
+    ."  exp=" BDL-POL-EXP @ . CR
+    ."    Screen   : default=" BDL-SCR-DEF @ .
+    ."  mask=" BDL-SCR-MASK @ . CR ;
 
 \ =====================================================================
 \  §16  Network Stack — Ethernet Framing
@@ -4409,9 +4409,9 @@ CREATE ETH-RX-BUF  ETH-MTU ALLOT
 
 \ -- Debug: print Ethernet frame header --
 : .ETH  ( frame -- )
-    ." dst=" DUP ETH-DST .MAC
-    ."  src=" DUP ETH-SRC .MAC
-    ."  type=" ETH-TYPE . CR ;
+    ."  dst=" DUP ETH-DST .MAC
+    ."   src=" DUP ETH-SRC .MAC
+    ."   type=" ETH-TYPE . CR ;
 
 \ -- ETH-BUILD: construct an Ethernet frame in a buffer --
 \   ( dst-mac src-mac etype payload pay-len frame -- total-len )
@@ -4502,8 +4502,8 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
 
 \ -- Network statistics --
 : .NET-STATS  ( -- )
-    ." tx=" ETH-TX-COUNT @ .
-    ." rx=" ETH-RX-COUNT @ . CR ;
+    ."  tx=" ETH-TX-COUNT @ .
+    ."  rx=" ETH-RX-COUNT @ . CR ;
 
 \ =====================================================================
 \  §16.1  ARP — Address Resolution Protocol
@@ -4650,10 +4650,10 @@ VARIABLE _ARP-SLOT
 
 \ -- .ARP: print the ARP table --
 : .ARP  ( -- )
-    ." --- ARP table ---" CR
+    ."  --- ARP table ---" CR
     ARP-MAX-ENTRIES 0 DO
         I ARP-ENTRY DUP ARP-E.VALID? IF
-            ."   " DUP ARP-E.IP .IP ."  -> " ARP-E.MAC .MAC CR
+            ."    " DUP ARP-E.IP .IP ."   -> " ARP-E.MAC .MAC CR
         ELSE
             DROP
         THEN
@@ -5140,7 +5140,7 @@ VARIABLE _PING-FLAG
 : PING  ( ip count -- )
     SWAP PING-TARGET 4 CMOVE          \ save target IP
     0 PING-SENT !  0 PING-RCVD !
-    ." PING " PING-TARGET .IP CR
+    ."  PING " PING-TARGET .IP CR
     ( count ) 0 DO
         I PING-SEND1 0= IF
             1 PING-SENT +!
@@ -5150,20 +5150,20 @@ VARIABLE _PING-FLAG
             PERF-CYCLES _PING-T0 @ -  \ elapsed = end - start
             _PING-FLAG @ IF
                 1 PING-RCVD +!
-                ."   Reply seq=" I .N
-                ."  time=" .N ." cy" CR
+                ."    Reply seq=" I .N
+                ."   time=" .N ."  cy" CR
             ELSE
                 DROP                   \ discard elapsed
-                ."   Request timeout seq=" I .N CR
+                ."    Request timeout seq=" I .N CR
             THEN
         ELSE
             1 PING-SENT +!
-            ."   ARP failure seq=" I .N CR
+            ."    ARP failure seq=" I .N CR
         THEN
     LOOP
-    ." --- " PING-TARGET .IP ."  ping statistics ---" CR
-    PING-SENT @ .N ." sent, "
-    PING-RCVD @ .N ." received" CR ;
+    ."  --- " PING-TARGET .IP ."   ping statistics ---" CR
+    PING-SENT @ .N ."  sent, "
+    PING-RCVD @ .N ."  received" CR ;
 
 \ -- PING-IP: convenience wrapper with dotted-quad --
 \   ( a b c d count -- )
@@ -6664,14 +6664,14 @@ VARIABLE _TPL-LEN
 \ =====================================================================
 
 CR HRULE
-."  KDOS v1.1 — Kernel Dashboard OS" CR
+."   KDOS v1.1 — Kernel Dashboard OS" CR
 HRULE
-." Type HELP for commands, HELP <word> for details." CR
-." Type SCREENS for interactive TUI." CR
-." Type TOPICS or LESSONS for documentation." CR
+."  Type HELP for commands, HELP <word> for details."  CR
+."  Type SCREENS for interactive TUI."  CR
+."  Type TOPICS or LESSONS for documentation."  CR
 NCORES 1 > IF
-    ."  Multicore: " NCORES . ." cores available" CR
-    ."  Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work." CR
+    ."   Multicore: " NCORES . ."  cores available" CR
+    ."   Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work."  CR
 THEN
 MAC-INIT
 DISK? IF FS-LOAD THEN

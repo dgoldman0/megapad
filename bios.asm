@@ -4171,16 +4171,9 @@ w_paren_done:
 ;   Compile mode:   embeds the string and compiles a call to print it.
 ;   Compiles: ldi64 r11, dotquote_runtime; call.l r11; <bytes> <null>
 ;
-; BUG: The delimiter space after ." is included in the output.
-;   ANS Forth specifies .' hello" prints "hello", but this
-;   implementation prints " hello" (leading space).  Both interpret
-;   and compile paths start reading from >IN without skipping the
-;   delimiter character.  Fix: add `inc r13` before dq_interp_loop
-;   and before dq_scan to skip the space.  CAUTION: all 6,600+ lines
-;   of KDOS rely on the current (buggy) behaviour — every .' string
-;   that depends on the leading space must be audited and adjusted
-;   after fixing.  See also: S" has the same issue.
-;   Tracked as ROADMAP item 33.
+; Fixed: delimiter space is now correctly skipped (ANS Forth compliant).
+; Both interpret and compile paths skip one space after .' before
+; scanning for the closing quote.  See ROADMAP item 33.
 w_dotquote:
     ; Check STATE — interpret vs compile
     ldi64 r11, var_state
@@ -4191,6 +4184,7 @@ w_dotquote:
     ; ---- Interpret mode: print chars immediately ----
     ldi64 r11, var_to_in
     ldn r13, r11              ; >IN
+    inc r13                   ; skip delimiter space
     ldi64 r9, tib_buffer
 dq_interp_loop:
     ldi64 r11, var_tib_len
@@ -4219,6 +4213,7 @@ w_dotquote_compile:
     ; Now read chars from input and compile them as bytes until "
     ldi64 r11, var_to_in
     ldn r13, r11              ; >IN
+    inc r13                   ; skip delimiter space
     ldi64 r9, tib_buffer
 dq_scan:
     ldi64 r11, var_tib_len
