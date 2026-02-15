@@ -6245,6 +6245,203 @@ class TestKDOSTRNG(_KDOSTestBase):
         # but the point is the code path works without crashing
 
 
+class TestKDOSX25519(_KDOSTestBase):
+    """Tests for §1.8 X25519 ECDH (RFC 7748) hardware accelerator."""
+
+    # RFC 7748 §6.1 test vector 1:
+    #   scalar (hex bytes): a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4
+    #   point  (hex bytes): e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c
+    #   result (hex bytes): c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+
+    _SCALAR1_BYTES = (
+        "0xa5 0x46 0xe3 0x6b 0xf0 0x52 0x7c 0x9d "
+        "0x3b 0x16 0x15 0x4b 0x82 0x46 0x5e 0xdd "
+        "0x62 0x14 0x4c 0x0a 0xc1 0xfc 0x5a 0x18 "
+        "0x50 0x6a 0x22 0x44 0xba 0x44 0x9a 0xc4"
+    ).split()
+
+    _POINT1_BYTES = (
+        "0xe6 0xdb 0x68 0x67 0x58 0x30 0x30 0xdb "
+        "0x35 0x94 0xc1 0xa4 0x24 0xb1 0x5f 0x7c "
+        "0x72 0x66 0x24 0xec 0x26 0xb3 0x35 0x3b "
+        "0x10 0xa9 0x03 0xa6 0xd0 0xab 0x1c 0x4c"
+    ).split()
+
+    _EXPECT1_BYTES = (
+        "0xc3 0xda 0x55 0x37 0x9d 0xe9 0xc6 0x90 "
+        "0x8e 0x94 0xea 0x4d 0xf2 0x8d 0x08 0x4f "
+        "0x32 0xec 0xcf 0x03 0x49 0x1c 0x71 0xf7 "
+        "0x54 0xb4 0x07 0x55 0x77 0xa2 0x85 0x52"
+    ).split()
+
+    def _setup_vector1(self):
+        """Forth code to allocate buffers and load RFC 7748 vector 1."""
+        lines = [
+            "CREATE tv-scalar 32 ALLOT",
+            "CREATE tv-point  32 ALLOT",
+            "CREATE tv-result 32 ALLOT",
+        ]
+        for i, b in enumerate(self._SCALAR1_BYTES):
+            lines.append(f"{b} tv-scalar {i} + C!")
+        for i, b in enumerate(self._POINT1_BYTES):
+            lines.append(f"{b} tv-point {i} + C!")
+        return lines
+
+    def test_x25519_status_idle(self):
+        """X25519-STATUS@ returns 0 (idle) before any computation."""
+        text = self._run_kdos([
+            '."  ST=" X25519-STATUS@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+
+    def test_x25519_bios_primitives(self):
+        """BIOS primitives compute RFC 7748 vector 1 correctly."""
+        setup = self._setup_vector1()
+        setup.extend([
+            "tv-scalar X25519-SCALAR!",
+            "tv-point  X25519-POINT!",
+            "X25519-GO",
+            "X25519-WAIT",
+            "tv-result X25519-RESULT@",
+            # Print first 4 result bytes
+            '."  B0=" tv-result C@ .',
+            '."  B1=" tv-result 1 + C@ .',
+            '."  B2=" tv-result 2 + C@ .',
+            '."  B3=" tv-result 3 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Expected: 0xc3=195, 0xda=218, 0x55=85, 0x37=55
+        self.assertIn("B0=195 ", text)
+        self.assertIn("B1=218 ", text)
+        self.assertIn("B2=85 ", text)
+        self.assertIn("B3=55 ", text)
+
+    def test_x25519_high_level(self):
+        """X25519 word computes RFC 7748 vector 1 correctly."""
+        setup = self._setup_vector1()
+        setup.extend([
+            "tv-scalar tv-point tv-result X25519",
+            '."  B0=" tv-result C@ .',
+            '."  B1=" tv-result 1 + C@ .',
+            '."  B2=" tv-result 2 + C@ .',
+            '."  B3=" tv-result 3 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("B0=195 ", text)
+        self.assertIn("B1=218 ", text)
+        self.assertIn("B2=85 ", text)
+        self.assertIn("B3=55 ", text)
+
+    def test_x25519_status_done(self):
+        """X25519-STATUS@ returns 2 (done) after computation."""
+        setup = self._setup_vector1()
+        setup.extend([
+            "tv-scalar tv-point tv-result X25519",
+            '."  ST=" X25519-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+    def test_x25519_full_result(self):
+        """All 32 result bytes match RFC 7748 vector 1."""
+        setup = self._setup_vector1()
+        setup.extend([
+            "tv-scalar tv-point tv-result X25519",
+        ])
+        # Print all 32 bytes
+        for i in range(32):
+            setup.append(f'."  R{i}=" tv-result {i} + C@ .')
+        text = self._run_kdos(setup)
+        for i, b_hex in enumerate(self._EXPECT1_BYTES):
+            expected = int(b_hex, 16)
+            self.assertIn(f"R{i}={expected} ", text,
+                          f"Byte {i}: expected {expected}, output: {text[-200:]}")
+
+    def test_x25519_keygen(self):
+        """X25519-KEYGEN generates a non-zero public key."""
+        text = self._run_kdos([
+            "X25519-KEYGEN",
+            # Check that public key is not all zeros (check 4 bytes)
+            '."  P0=" X25519-PUB C@ .',
+            '."  P1=" X25519-PUB 1 + C@ .',
+            '."  P2=" X25519-PUB 2 + C@ .',
+            '."  P3=" X25519-PUB 3 + C@ .',
+        ])
+        import re
+        vals = []
+        for i in range(4):
+            m = re.search(rf'P{i}=(\d+)', text)
+            self.assertIsNotNone(m, f"P{i} not found in output")
+            vals.append(int(m.group(1)))
+        # Extremely unlikely all 4 bytes are zero with true randomness
+        self.assertFalse(all(v == 0 for v in vals),
+                         f"Public key bytes all zero: {vals}")
+
+    def test_x25519_ecdh_agreement(self):
+        """Two parties doing X25519 DH arrive at the same shared secret."""
+        text = self._run_kdos([
+            # Alice keygen
+            "X25519-KEYGEN",
+            "CREATE alice-pub 32 ALLOT",
+            "CREATE alice-priv 32 ALLOT",
+            "32 0 DO X25519-PUB I + C@ alice-pub I + C! LOOP",
+            "32 0 DO X25519-PRIV I + C@ alice-priv I + C! LOOP",
+            # Bob keygen
+            "X25519-KEYGEN",
+            "CREATE bob-pub 32 ALLOT",
+            "CREATE bob-priv 32 ALLOT",
+            "32 0 DO X25519-PUB I + C@ bob-pub I + C! LOOP",
+            "32 0 DO X25519-PRIV I + C@ bob-priv I + C! LOOP",
+            # Alice computes shared secret = alice_priv * bob_pub
+            "CREATE shared-a 32 ALLOT",
+            "alice-priv bob-pub shared-a X25519",
+            # Bob computes shared secret = bob_priv * alice_pub
+            "CREATE shared-b 32 ALLOT",
+            "bob-priv alice-pub shared-b X25519",
+            # Compare first 4 bytes
+            '."  A0=" shared-a C@ .',
+            '."  B0=" shared-b C@ .',
+            '."  A1=" shared-a 1 + C@ .',
+            '."  B1=" shared-b 1 + C@ .',
+            '."  EQ=" shared-a shared-b 32 VERIFY .',
+        ])
+        import re
+        # VERIFY returns 0 if equal
+        self.assertIn("EQ=0 ", text)
+        # Also check the bytes match
+        for i in range(2):
+            ma = re.search(rf'A{i}=(\d+)', text)
+            mb = re.search(rf'B{i}=(\d+)', text)
+            self.assertIsNotNone(ma)
+            self.assertIsNotNone(mb)
+            self.assertEqual(ma.group(1), mb.group(1),
+                             f"Shared secret byte {i} mismatch")
+
+    def test_x25519_dh_word(self):
+        """X25519-DH word computes shared secret using stored private key."""
+        text = self._run_kdos([
+            # Generate keypair
+            "X25519-KEYGEN",
+            "CREATE my-pub 32 ALLOT",
+            "32 0 DO X25519-PUB I + C@ my-pub I + C! LOOP",
+            # Compute DH with our own public key (self-DH)
+            "my-pub X25519-DH",
+            '."  S0=" X25519-SHARED C@ .',
+            '."  S1=" X25519-SHARED 1 + C@ .',
+            '."  OK=1"',
+        ])
+        self.assertIn("OK=1", text)
+        # Just verify it didn't crash and produced some output
+        import re
+        m = re.search(r'S0=(\d+)', text)
+        self.assertIsNotNone(m)
+
+    def test_x25519_status_display(self):
+        """.X25519-STATUS prints human-readable status."""
+        text = self._run_kdos([".X25519-STATUS"])
+        self.assertIn("X25519: idle", text)
+
+
 class TestKDOSCrypto(_KDOSTestBase):
     """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
 

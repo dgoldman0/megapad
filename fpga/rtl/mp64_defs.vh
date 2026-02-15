@@ -85,6 +85,7 @@ parameter [11:0] AES_BASE     = 12'h700; // AES-256-GCM accelerator
 parameter [11:0] SHA_BASE     = 12'h780; // SHA-3/SHAKE accelerator
 parameter [11:0] CRC_BASE     = 12'h7C0; // CRC32/CRC64 accelerator
 parameter [11:0] QOS_BASE     = 12'h7E0; // QoS global config
+parameter [11:0] X25519_BASE  = 12'h840; // X25519 ECDH accelerator
 
 // UART registers (byte offsets from UART_BASE)
 parameter [3:0] UART_TX      = 4'h0;
@@ -364,6 +365,24 @@ parameter [4:0] CRC_INIT     = 5'h04;
 parameter [4:0] CRC_DIN      = 5'h08;
 parameter [4:0] CRC_RESULT   = 5'h10;
 parameter [4:0] CRC_CTRL     = 5'h18;
+
+// X25519 register offsets (from X25519_BASE)
+// Write: 0x00..0x18 = scalar (4×64), 0x20..0x38 = point (4×64), 0x3F = CMD
+// Read:  0x00 = STATUS, 0x08..0x20 = result (4×64)
+parameter [5:0] X25519_SCALAR0 = 6'h00;
+parameter [5:0] X25519_SCALAR1 = 6'h08;
+parameter [5:0] X25519_SCALAR2 = 6'h10;
+parameter [5:0] X25519_SCALAR3 = 6'h18;
+parameter [5:0] X25519_POINT0  = 6'h20;
+parameter [5:0] X25519_POINT1  = 6'h28;
+parameter [5:0] X25519_POINT2  = 6'h30;
+parameter [5:0] X25519_POINT3  = 6'h38;
+parameter [5:0] X25519_CMD     = 6'h3F;
+parameter [5:0] X25519_STATUS  = 6'h00;  // read: {done, busy}
+parameter [5:0] X25519_RESULT0 = 6'h08;
+parameter [5:0] X25519_RESULT1 = 6'h10;
+parameter [5:0] X25519_RESULT2 = 6'h18;
+parameter [5:0] X25519_RESULT3 = 6'h20;
 
 // IRQ routing: which core receives each peripheral IRQ (configurable)
 // Default: core 0 gets all peripheral IRQs

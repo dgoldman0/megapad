@@ -7660,6 +7660,96 @@ w_seed_rng:
     ret.l
 
 ; =====================================================================
+;  X25519 — Elliptic Curve Diffie-Hellman (RFC 7748)
+; =====================================================================
+; X25519 base = 0xFFFF_FF00_0000_0840
+;   SCALAR +0x00 (W)  32-byte scalar (little-endian)
+;   POINT  +0x20 (W)  32-byte u-coordinate (little-endian)
+;   CMD    +0x3F (W)  write 1 to start computation
+;   STATUS +0x00 (R)  bit[0]=busy, bit[1]=done
+;   RESULT +0x08 (R)  32-byte result (little-endian)
+
+; X25519-SCALAR! ( addr -- )  Write 32-byte scalar from memory.
+w_x25519_scalar_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0840    ; X25519_SCALAR base
+    ldi r12, 0
+.x25519_scalar_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .x25519_scalar_loop
+    ret.l
+
+; X25519-POINT! ( addr -- )  Write 32-byte u-coordinate from memory.
+w_x25519_point_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0860    ; X25519_POINT base (+0x20)
+    ldi r12, 0
+.x25519_point_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .x25519_point_loop
+    ret.l
+
+; X25519-GO ( -- )  Start X25519 computation.
+w_x25519_go:
+    ldi64 r11, 0xFFFF_FF00_0000_0880   ; X25519_CMD (+0x40)
+    ldi r0, 1
+    st.b r11, r0
+    ret.l
+
+; X25519-STATUS@ ( -- n )  Read status: bit0=busy, bit1=done.
+w_x25519_status:
+    ldi64 r11, 0xFFFF_FF00_0000_0840   ; X25519_STATUS (+0x00 read)
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; X25519-RESULT@ ( addr -- )  Read 32-byte result into memory.
+w_x25519_result_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0848    ; X25519_RESULT base (+0x08)
+    ldi r12, 0
+.x25519_result_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .x25519_result_loop
+    ret.l
+
+; X25519-WAIT ( -- )  Poll until done (bit 1 set).
+w_x25519_wait:
+    ldi64 r11, 0xFFFF_FF00_0000_0840   ; X25519_STATUS
+.x25519_wait_loop:
+    ld.b r0, r11
+    ldi r1, 2                          ; done bit mask
+    and r0, r1
+    cmpi r0, 0
+    breq .x25519_wait_loop
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -10044,9 +10134,63 @@ d_seed_rng:
     call.l r11
     ret.l
 
+; === X25519-SCALAR! ===
+d_x25519_scalar_store:
+    .dq d_seed_rng
+    .db 14
+    .ascii "X25519-SCALAR!"
+    ldi64 r11, w_x25519_scalar_store
+    call.l r11
+    ret.l
+
+; === X25519-POINT! ===
+d_x25519_point_store:
+    .dq d_x25519_scalar_store
+    .db 13
+    .ascii "X25519-POINT!"
+    ldi64 r11, w_x25519_point_store
+    call.l r11
+    ret.l
+
+; === X25519-GO ===
+d_x25519_go:
+    .dq d_x25519_point_store
+    .db 9
+    .ascii "X25519-GO"
+    ldi64 r11, w_x25519_go
+    call.l r11
+    ret.l
+
+; === X25519-STATUS@ ===
+d_x25519_status:
+    .dq d_x25519_go
+    .db 14
+    .ascii "X25519-STATUS@"
+    ldi64 r11, w_x25519_status
+    call.l r11
+    ret.l
+
+; === X25519-RESULT@ ===
+d_x25519_result_fetch:
+    .dq d_x25519_status
+    .db 14
+    .ascii "X25519-RESULT@"
+    ldi64 r11, w_x25519_result_fetch
+    call.l r11
+    ret.l
+
+; === X25519-WAIT ===
+d_x25519_wait:
+    .dq d_x25519_result_fetch
+    .db 11
+    .ascii "X25519-WAIT"
+    ldi64 r11, w_x25519_wait
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_seed_rng
+    .dq d_x25519_wait
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full

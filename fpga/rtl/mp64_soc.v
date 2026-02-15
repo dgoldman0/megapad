@@ -183,7 +183,8 @@ module mp64_soc (
     wire [63:0] sha_rdata64;
     wire [63:0] crc_rdata64;
     wire [63:0] trng_rdata64;
-    wire        aes_ack, sha_ack, crc_ack, trng_ack;
+    wire [63:0] x25519_rdata64;
+    wire        aes_ack, sha_ack, crc_ack, trng_ack, x25519_ack;
 
     // --- Disk & NIC DMA ---
     wire        disk_dma_req;
@@ -222,6 +223,7 @@ module mp64_soc (
     wire sha_sel     = mmio_req && (mmio_addr[11:6] == 6'b011110);      // 0x780-0x7BF
     wire crc_sel     = mmio_req && (mmio_addr[11:5] == 7'b0111110);     // 0x7C0-0x7DF
     wire trng_sel    = mmio_req && (mmio_addr[11:5] == 7'b1000000);     // 0x800-0x81F
+    wire x25519_sel  = mmio_req && (mmio_addr[11:6] == 6'b100001);      // 0x840-0x87F
 
     // MMIO read mux
     wire [63:0] sysinfo_rdata;
@@ -236,6 +238,7 @@ module mp64_soc (
                             sha_sel     ? sha_rdata64           :
                             crc_sel     ? crc_rdata64           :
                             trng_sel    ? trng_rdata64          :
+                            x25519_sel  ? x25519_rdata64        :
                             64'd0;
     assign mmio_ack = 1'b1;  // all MMIO peripherals are single-cycle
 
@@ -877,6 +880,20 @@ module mp64_soc (
         .wen    (mmio_wen),
         .rdata  (trng_rdata64),
         .ack    (trng_ack)
+    );
+
+    // ========================================================================
+    // X25519 ECDH Accelerator (MMIO 0x840-0x87F)
+    // ========================================================================
+    mp64_x25519 u_x25519 (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (x25519_sel),
+        .addr   (mmio_addr[5:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (x25519_rdata64),
+        .ack    (x25519_ack)
     );
 
     // ========================================================================
