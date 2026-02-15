@@ -1035,6 +1035,38 @@ CREATE _NTT-TMP-B 1024 ALLOT
     THEN THEN ;
 
 \ =====================================================================
+\  §1.13  Hybrid PQ Key Exchange — X25519 + ML-KEM-512
+\ =====================================================================
+\ Combines classical X25519 ECDH with post-quantum ML-KEM-512 Kyber.
+\ Both shared secrets are concatenated and fed through HKDF-Extract +
+\ HKDF-Expand to derive the final hybrid shared secret.
+\
+\ Usage:
+\   1. Both parties generate X25519 keypairs (X25519-KEYGEN)
+\   2. Both parties generate Kyber keypairs (KYBER-KEYGEN with seed)
+\   3. Initiator calls PQ-EXCHANGE-INIT with peer's X25519 pub + Kyber pk
+\   4. Responder calls PQ-EXCHANGE-RESP with peer's X25519 pub + the ct
+\
+\ Scratch buffers for hybrid exchange:
+CREATE _PQ-SS-X 32 ALLOT        \ X25519 shared secret
+CREATE _PQ-SS-K 32 ALLOT        \ Kyber shared secret
+CREATE _PQ-CAT  64 ALLOT        \ concatenated ss: X25519 || Kyber
+CREATE _PQ-PRK  32 ALLOT        \ HKDF-Extract output
+CREATE _PQ-COIN 32 ALLOT        \ Kyber encaps coin
+CREATE _PQ-INFO 9 ALLOT         \ HKDF info string "pq-hybrid"
+: _PQ-INFO-INIT
+    112 _PQ-INFO C!
+    113 _PQ-INFO 1 + C!
+    45  _PQ-INFO 2 + C!
+    104 _PQ-INFO 3 + C!
+    121 _PQ-INFO 4 + C!
+    98  _PQ-INFO 5 + C!
+    114 _PQ-INFO 6 + C!
+    105 _PQ-INFO 7 + C!
+    100 _PQ-INFO 8 + C! ;
+_PQ-INFO-INIT
+
+\ =====================================================================
 \  §1.9  HKDF — HMAC-based Key Derivation Function (RFC 5869)
 \ =====================================================================
 \  Uses HMAC-SHA3-256 as the underlying PRF.
@@ -1117,6 +1149,56 @@ VARIABLE _HKDF-COUNTER
         _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
     REPEAT
 ;
+
+\ PQ-DERIVE ( out -- )
+\   Internal: HKDF-derive final 32-byte key from concatenated secrets.
+\   Assumes _PQ-CAT already has 64 bytes of combined keying material.
+: PQ-DERIVE ( out-addr -- )
+    >R
+    \ HKDF-Extract: salt=empty(0), ikm=_PQ-CAT(64B) → _PQ-PRK
+    0 0 _PQ-CAT 64 _PQ-PRK HKDF-EXTRACT
+    \ HKDF-Expand: prk=_PQ-PRK, info="pq-hybrid"(9B), len=32, out
+    _PQ-PRK _PQ-INFO 9 32 R> HKDF-EXPAND ;
+
+\ PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+\   Initiator side:
+\   1. X25519-DH with their X25519 public key → _PQ-SS-X
+\   2. Generate random coin, KYBER-ENCAPS with their Kyber pk → ct + _PQ-SS-K
+\   3. Concatenate, HKDF-derive → ss-out
+: PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+    >R >R                          \ R: ss-out ct-out
+    \ X25519 DH
+    SWAP                            \ Stack: kyber-pk their-x-pub
+    X25519-PRIV OVER _PQ-SS-X X25519
+    DROP                            \ Stack: kyber-pk
+    \ Generate random coin for Kyber
+    32 0 DO RANDOM8 _PQ-COIN I + C! LOOP
+    \ KYBER-ENCAPS ( pk coin ct ss -- )
+    _PQ-COIN R> _PQ-SS-K KYBER-ENCAPS
+    \ Concatenate: _PQ-CAT = _PQ-SS-X || _PQ-SS-K
+    _PQ-SS-X _PQ-CAT 32 CMOVE
+    _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
+    \ Derive final key
+    R> PQ-DERIVE ;
+
+\ PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+\   Responder side:
+\   1. X25519-DH with their X25519 public key → _PQ-SS-X
+\   2. KYBER-DECAPS with ct and our Kyber sk → _PQ-SS-K
+\   3. Concatenate, HKDF-derive → ss-out
+: PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+    >R                              \ R: ss-out
+    \ Stack: their-x-pub ct kyber-sk
+    ROT                             \ Stack: ct kyber-sk their-x-pub
+    X25519-PRIV OVER _PQ-SS-X X25519
+    DROP                            \ Stack: ct kyber-sk
+    \ KYBER-DECAPS ( ct sk ss -- )
+    SWAP _PQ-SS-K KYBER-DECAPS
+    \ Concatenate
+    _PQ-SS-X _PQ-CAT 32 CMOVE
+    _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
+    \ Derive final key
+    R> PQ-DERIVE ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem

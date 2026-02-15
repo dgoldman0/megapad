@@ -7365,6 +7365,120 @@ class TestMLKEM(_KDOSTestBase):
         self.assertIn("ST=2 ", text)
 
 
+class TestPQExchange(_KDOSTestBase):
+    """Tests for Hybrid PQ Key Exchange — X25519 + ML-KEM-512 (§1.13)."""
+
+    def _setup_keypairs(self):
+        """Create X25519 and Kyber keypairs for self-exchange testing."""
+        return [
+            # X25519 keygen (TRNG-based)
+            'X25519-KEYGEN',
+            # Kyber keygen (deterministic zero seed)
+            'CREATE dz 64 ALLOT  dz 64 0 FILL',
+            'CREATE kpk 800 ALLOT',
+            'CREATE ksk 1632 ALLOT',
+            'dz kpk ksk KYBER-KEYGEN',
+        ]
+
+    def test_hybrid_roundtrip(self):
+        """PQ-EXCHANGE-INIT + PQ-EXCHANGE-RESP produce matching secrets."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss1 32 ALLOT',
+            'X25519-PUB kpk ct ss1 PQ-EXCHANGE-INIT',
+            'CREATE ss2 32 ALLOT',
+            'X25519-PUB ct ksk ss2 PQ-EXCHANGE-RESP',
+            ': CMP32 32 0 DO OVER I + C@ OVER I + C@ <>'
+            ' IF 2DROP 0 UNLOOP EXIT THEN LOOP 2DROP 1 ;',
+            'ss1 ss2 CMP32 IF ."  PQ-MATCH" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PQ-MATCH", text)
+
+    def test_hybrid_nonzero_secret(self):
+        """Hybrid shared secret is not all zeros."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss 32 ALLOT  ss 32 0 FILL',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '0 32 0 DO ss I + C@ OR LOOP',
+            'IF ."  SS-NONZERO" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-NONZERO", text)
+
+    def test_hybrid_ct_nonzero(self):
+        """Hybrid exchange produces non-trivial ciphertext."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT  ct 768 0 FILL',
+            'CREATE ss 32 ALLOT',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '0 32 0 DO ct I + C@ OR LOOP',
+            'IF ."  CT-NONZERO" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("CT-NONZERO", text)
+
+    def test_kem_status_after_exchange(self):
+        """KEM device reports done after hybrid exchange."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss 32 ALLOT',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            'KEM-STATUS@ ."  ST=" .',
+        ])
+        text = self._run_kdos(setup, max_steps=2_000_000_000)
+        self.assertIn("ST=2 ", text)
+
+
+class TestSQuote(_KDOSTestBase):
+    """Tests for S\" compile-mode string literal."""
+
+    def test_squote_length(self):
+        """S\" pushes correct length."""
+        text = self._run_kdos([': SLEN S" hello" NIP . ; SLEN'])
+        self.assertIn("5 ", text)
+
+    def test_squote_content(self):
+        """S\" pushes correct string content."""
+        text = self._run_kdos([
+            ': SFIRST S" AB" DROP C@ . ; SFIRST',
+        ])
+        self.assertIn("65 ", text)  # 'A' = 65
+
+    def test_squote_in_word(self):
+        """S\" works inside a colon definition with other words."""
+        text = self._run_kdos([
+            ': STEST S" pq-hybrid" ."  LEN=" . ; STEST',
+        ])
+        self.assertIn("LEN=9 ", text)
+
+    def test_squote_with_r_stack(self):
+        """S\" works alongside >R / R> in same definition."""
+        text = self._run_kdos([
+            ': RMIX 99 >R S" abc" R> ."  L=" . ."  R=" . ;',
+            'RMIX',
+        ])
+        # S" pushes (addr len), then R> pushes 99 on top
+        # . prints TOS first: so L=99, R=3
+        self.assertIn("L=99 ", text)
+        self.assertIn("R=3 ", text)
+
+    def test_pq_derive_direct(self):
+        """PQ-DERIVE can be called directly without hanging."""
+        text = self._run_kdos([
+            '_PQ-CAT 64 0 FILL',
+            'CREATE dout 32 ALLOT',
+            'dout PQ-DERIVE',
+            'dout C@ ."  B0=" .',
+        ])
+        self.assertIn("B0=", text)
+
+
 class TestKDOSHKDF(_KDOSTestBase):
     """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
 
