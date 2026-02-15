@@ -17,8 +17,10 @@ scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
 (items 5–8), network L2–L4 through DNS (items 9–15), and multicore OS
 (items 19–24) are done.  Crypto enhanced with hardware TRNG, SHAKE
 XOF support, and post-quantum readiness.  Real-network testing
-infrastructure added (TAP device backends, 27 integration tests).
-Remaining work: TCP, TLS 1.3, socket API, and application-level features.
+infrastructure added (TAP device backends, 38 integration tests).
+TCP fully implemented (4 TCB slots, 3-way handshake, sliding window,
+congestion control, retransmit, graceful close, 32 tests).
+Remaining work: TLS 1.3, socket API, and application-level features.
 
 ---
 
@@ -233,14 +235,14 @@ every step.
     - 15a. DNS query builder (A record), response parser
     - 15b. `DNS-RESOLVE` ( c-addr len -- ip ) word
 
-16. ☐ **TCP** — connection-oriented streams (largest item)
-    - 16a. TCB (Transmission Control Block) data structure + state enum
-    - 16b. TCP header build/parse, sequence number handling
-    - 16c. 3-way handshake: SYN → SYN-ACK → ACK (active open)
-    - 16d. Data TX: segmentation, `TCP-SEND`, retransmit timer
-    - 16e. Data RX: reassembly, `TCP-RECV`, ACK generation
-    - 16f. Connection teardown: FIN/FIN-ACK, TIME_WAIT
-    - 16g. Sliding window + congestion control (basic)
+16. ✅ **TCP** — connection-oriented streams (32 tests)
+    - 16a. ✅ TCB (Transmission Control Block) data structure + 11-state enum
+    - 16b. ✅ TCP header build/parse, sequence number handling, checksums
+    - 16c. ✅ 3-way handshake: `TCP-CONNECT` (active), `TCP-LISTEN` (passive)
+    - 16d. ✅ Data TX: `TCP-SEND`, MSS segmentation, retransmit timer
+    - 16e. ✅ Data RX: `TCP-RECV`, `TCP-RX-PUSH`/`TCP-RX-POP`, ACK generation
+    - 16f. ✅ Connection teardown: `TCP-CLOSE`, FIN/FIN-ACK, TIME_WAIT
+    - 16g. ✅ Sliding window (`CWND`/`SSTHRESH`) + congestion control
 
 17. ☐ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation
     - 17a. HKDF-Extract / HKDF-Expand using SHA-3 HMAC
