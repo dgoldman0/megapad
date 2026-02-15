@@ -713,6 +713,90 @@ CREATE X25519-BASE  32 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
+\  §1.9  HKDF — HMAC-based Key Derivation Function (RFC 5869)
+\ =====================================================================
+\  Uses HMAC-SHA3-256 as the underlying PRF.
+\  Hash output length (L_H) = 32 bytes.
+\
+\  HKDF-EXTRACT ( salt slen ikm ilen out -- )
+\    PRK = HMAC(salt, IKM)
+\    If salt is 0 / slen=0, uses 32 zero bytes as salt.
+\
+\  HKDF-EXPAND ( prk info ilen len out -- )
+\    OKM = T(1) || T(2) || ...  truncated to len bytes.
+\    T(i) = HMAC(PRK, T(i-1) || info || i)
+
+32 CONSTANT HKDF-HASHLEN
+
+CREATE _HKDF-ZERO-SALT  32 ALLOT       \ 32 zero bytes for null-salt case
+_HKDF-ZERO-SALT 32 0 FILL
+
+\ Scratch buffers for Expand
+CREATE _HKDF-T       32 ALLOT          \ T(i-1) / T(i) — running HMAC output
+CREATE _HKDF-BLOCK  200 ALLOT          \ T(i-1) || info || counter (max ~200B)
+VARIABLE _HKDF-PRK-PTR
+VARIABLE _HKDF-INFO-PTR
+VARIABLE _HKDF-INFO-LEN
+VARIABLE _HKDF-OUT-PTR
+VARIABLE _HKDF-REMAIN
+VARIABLE _HKDF-TPREV-LEN
+VARIABLE _HKDF-COUNTER
+
+: HKDF-EXTRACT ( salt slen ikm ilen out -- )
+    >R                                  \ R: out
+    2SWAP                               \ ikm ilen salt slen
+    DUP 0= IF                           \ null salt → use zero-salt
+        2DROP _HKDF-ZERO-SALT 32
+    THEN
+    \ Stack: ikm ilen salt slen   R: out
+    \ HMAC( salt, IKM ) → out
+    2SWAP                               \ salt slen ikm ilen
+    R>                                  \ salt slen ikm ilen out
+    HMAC
+;
+
+: HKDF-EXPAND ( prk info ilen len out -- )
+    _HKDF-OUT-PTR !
+    _HKDF-REMAIN !
+    _HKDF-INFO-LEN !
+    _HKDF-INFO-PTR !
+    _HKDF-PRK-PTR !
+    0 _HKDF-TPREV-LEN !                \ T(0) = empty
+    1 _HKDF-COUNTER !                  \ counter starts at 1
+    BEGIN _HKDF-REMAIN @ 0> WHILE
+        \ --- Build block: T(i-1) || info || counter_byte ---
+        \ Step 1: copy T(i-1) into _HKDF-BLOCK[0..]
+        _HKDF-TPREV-LEN @ 0> IF
+            _HKDF-T _HKDF-BLOCK _HKDF-TPREV-LEN @ CMOVE
+        THEN
+        \ Step 2: append info at _HKDF-BLOCK[tprev_len..]
+        _HKDF-INFO-PTR @
+        _HKDF-BLOCK _HKDF-TPREV-LEN @ +
+        _HKDF-INFO-LEN @ CMOVE
+        \ Step 3: append counter byte
+        _HKDF-COUNTER @
+        _HKDF-BLOCK _HKDF-TPREV-LEN @ + _HKDF-INFO-LEN @ + C!
+        \ block_len = tprev_len + info_len + 1
+        _HKDF-TPREV-LEN @ _HKDF-INFO-LEN @ + 1+
+        \ --- HMAC(PRK, block) → _HKDF-T ---
+        >R                              \ R: block_len
+        _HKDF-PRK-PTR @ HKDF-HASHLEN
+        _HKDF-BLOCK R>
+        _HKDF-T HMAC                   \ ( )
+        \ --- Copy min(HASHLEN, remain) → output ---
+        _HKDF-REMAIN @ HKDF-HASHLEN MIN
+        _HKDF-T _HKDF-OUT-PTR @ ROT CMOVE
+        \ Update output pointer and remaining count
+        _HKDF-REMAIN @ HKDF-HASHLEN MIN
+        DUP _HKDF-OUT-PTR @ + _HKDF-OUT-PTR !
+        _HKDF-REMAIN @ SWAP - _HKDF-REMAIN !
+        \ Next iteration
+        HKDF-HASHLEN _HKDF-TPREV-LEN !
+        _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
+    REPEAT
+;
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \

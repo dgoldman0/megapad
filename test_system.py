@@ -6442,6 +6442,174 @@ class TestKDOSX25519(_KDOSTestBase):
         self.assertIn("X25519: idle", text)
 
 
+class TestKDOSHKDF(_KDOSTestBase):
+    """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
+
+    # Python HMAC-SHA3-256 reference values:
+    # Extract(salt=0..31, ikm="input key material") → PRK[0:4] = 67, 197, 249, 24
+    # Extract(null-salt, ikm="input key material")  → PRK[0:2] = 181, 9
+    # Extract(zero-salt, empty-ikm)                 → PRK[0:2] = 232, 65
+    # Expand(PRK1, "tls13 derived", 32) → OKM[0:4] = 73, 19, 243, 242
+    # Expand(PRK1, "tls13 derived", 48) → OKM[32:34] = 121, 93
+    # Expand(PRK3, "", 16) → OKM[0:4] = 3, 82, 135, 102
+
+    _HKDF_SETUP = [
+        "CREATE hkdf-salt 32 ALLOT",
+        ": init-salt 32 0 DO I hkdf-salt I + C! LOOP ;",
+        "init-salt",
+        'CREATE hkdf-ikm 18 ALLOT',
+        ': fill-ikm',
+        '  105 hkdf-ikm 0 + C!',   # 'i'
+        '  110 hkdf-ikm 1 + C!',   # 'n'
+        '  112 hkdf-ikm 2 + C!',   # 'p'
+        '  117 hkdf-ikm 3 + C!',   # 'u'
+        '  116 hkdf-ikm 4 + C!',   # 't'
+        '   32 hkdf-ikm 5 + C!',   # ' '
+        '  107 hkdf-ikm 6 + C!',   # 'k'
+        '  101 hkdf-ikm 7 + C!',   # 'e'
+        '  121 hkdf-ikm 8 + C!',   # 'y'
+        '   32 hkdf-ikm 9 + C!',   # ' '
+        '  109 hkdf-ikm 10 + C!',  # 'm'
+        '   97 hkdf-ikm 11 + C!',  # 'a'
+        '  116 hkdf-ikm 12 + C!',  # 't'
+        '  101 hkdf-ikm 13 + C!',  # 'e'
+        '  114 hkdf-ikm 14 + C!',  # 'r'
+        '  105 hkdf-ikm 15 + C!',  # 'i'
+        '   97 hkdf-ikm 16 + C!',  # 'a'
+        '  108 hkdf-ikm 17 + C!',  # 'l'
+        ';',
+        'fill-ikm',
+        "CREATE hkdf-prk 32 ALLOT",
+        "CREATE hkdf-okm 48 ALLOT",
+    ]
+
+    def test_hkdf_extract_basic(self):
+        """HKDF-EXTRACT produces correct PRK from salt + IKM."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            '." P0=" hkdf-prk C@ .',
+            '." P1=" hkdf-prk 1 + C@ .',
+            '." P2=" hkdf-prk 2 + C@ .',
+            '." P3=" hkdf-prk 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("P0=67 ", text)
+        self.assertIn("P1=197 ", text)
+        self.assertIn("P2=249 ", text)
+        self.assertIn("P3=24 ", text)
+
+    def test_hkdf_extract_null_salt(self):
+        """HKDF-EXTRACT with null salt uses 32 zero bytes."""
+        lines = self._HKDF_SETUP + [
+            "0 0 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            '." N0=" hkdf-prk C@ .',
+            '." N1=" hkdf-prk 1 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N0=181 ", text)
+        self.assertIn("N1=9 ", text)
+
+    def test_hkdf_expand_32(self):
+        """HKDF-EXPAND produces correct 32-byte OKM."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "CREATE hkdf-info 13 ALLOT",
+            ": fill-info",
+            "  116 hkdf-info 0 + C!",      # t
+            "  108 hkdf-info 1 + C!",      # l
+            "  115 hkdf-info 2 + C!",      # s
+            "   49 hkdf-info 3 + C!",      # 1
+            "   51 hkdf-info 4 + C!",      # 3
+            "   32 hkdf-info 5 + C!",      # ' '
+            "  100 hkdf-info 6 + C!",      # d
+            "  101 hkdf-info 7 + C!",      # e
+            "  114 hkdf-info 8 + C!",      # r
+            "  105 hkdf-info 9 + C!",      # i
+            "  118 hkdf-info 10 + C!",     # v
+            "  101 hkdf-info 11 + C!",     # e
+            "  100 hkdf-info 12 + C!",     # d
+            ";",
+            "fill-info",
+            "hkdf-prk hkdf-info 13 32 hkdf-okm HKDF-EXPAND",
+            '." E0=" hkdf-okm C@ .',
+            '." E1=" hkdf-okm 1 + C@ .',
+            '." E2=" hkdf-okm 2 + C@ .',
+            '." E3=" hkdf-okm 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("E0=73 ", text)
+        self.assertIn("E1=19 ", text)
+        self.assertIn("E2=243 ", text)
+        self.assertIn("E3=242 ", text)
+
+    def test_hkdf_expand_48_multiblock(self):
+        """HKDF-EXPAND to 48 bytes spans two HMAC blocks."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "CREATE hkdf-info 13 ALLOT",
+            ": fill-info",
+            "  116 hkdf-info 0 + C!",
+            "  108 hkdf-info 1 + C!",
+            "  115 hkdf-info 2 + C!",
+            "   49 hkdf-info 3 + C!",
+            "   51 hkdf-info 4 + C!",
+            "   32 hkdf-info 5 + C!",
+            "  100 hkdf-info 6 + C!",
+            "  101 hkdf-info 7 + C!",
+            "  114 hkdf-info 8 + C!",
+            "  105 hkdf-info 9 + C!",
+            "  118 hkdf-info 10 + C!",
+            "  101 hkdf-info 11 + C!",
+            "  100 hkdf-info 12 + C!",
+            ";",
+            "fill-info",
+            "hkdf-prk hkdf-info 13 48 hkdf-okm HKDF-EXPAND",
+            '." M0=" hkdf-okm C@ .',
+            '." M1=" hkdf-okm 1 + C@ .',
+            '." M32=" hkdf-okm 32 + C@ .',
+            '." M33=" hkdf-okm 33 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("M0=73 ", text)
+        self.assertIn("M1=19 ", text)
+        self.assertIn("M32=121 ", text)
+        self.assertIn("M33=93 ", text)
+
+    def test_hkdf_extract_empty_ikm(self):
+        """HKDF-EXTRACT with empty IKM produces deterministic PRK."""
+        lines = self._HKDF_SETUP + [
+            "CREATE zero-salt 32 ALLOT",
+            "zero-salt 32 0 FILL",
+            'CREATE empty-ikm 1 ALLOT',
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            '." Z0=" hkdf-prk C@ .',
+            '." Z1=" hkdf-prk 1 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("Z0=232 ", text)
+        self.assertIn("Z1=65 ", text)
+
+    def test_hkdf_expand_empty_info(self):
+        """HKDF-EXPAND with empty info and len=16."""
+        lines = self._HKDF_SETUP + [
+            "CREATE zero-salt 32 ALLOT",
+            "zero-salt 32 0 FILL",
+            'CREATE empty-ikm 1 ALLOT',
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            'CREATE empty-info 1 ALLOT',
+            "hkdf-prk empty-info 0 16 hkdf-okm HKDF-EXPAND",
+            '." I0=" hkdf-okm C@ .',
+            '." I1=" hkdf-okm 1 + C@ .',
+            '." I2=" hkdf-okm 2 + C@ .',
+            '." I3=" hkdf-okm 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("I0=3 ", text)
+        self.assertIn("I1=82 ", text)
+        self.assertIn("I2=135 ", text)
+        self.assertIn("I3=102 ", text)
+
+
 class TestKDOSCrypto(_KDOSTestBase):
     """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
 
