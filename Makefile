@@ -9,6 +9,7 @@
 #
 #   make test           Background + live dashboard   (DEFAULT, ~1 min)
 #   make test K=X       Background subset
+#   make test-one K=X   Background single test/class + monitoring
 #   make test-status    One-shot progress dashboard
 #   make test-watch     Auto-refresh dashboard every 5s
 #   make test-failures  Show only failures
@@ -17,7 +18,7 @@
 # Foreground (for debugging / CI):
 #   make test-fg        C++ accel + 8 xdist workers, foreground
 #   make test-seq       C++ accel sequential          (~3 min)
-#   make test-one K=X   Single test/class, accel      (foreground)
+#   make test-one-fg K=X Single test/class, foreground
 #   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
 #
 # Fallback targets (non-accelerated):
@@ -88,14 +89,28 @@ test-cpython:
 test-quick: accel
 	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short
 
-# --- Single test (usage: make test-one K=test_coreid_word) ---
+# --- Single test (usage: make test-one K=TestFoo) ---
+# Runs in background with monitoring, like `make test`.
+# Use `make test-one-fg K=TestFoo` for foreground.
 .PHONY: test-one
 test-one: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
+	@if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi
+	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
+		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
+		exit 1; \
+	fi
+	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
+	@echo "Starting tests in background (K=$(K))..."
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -n $(WORKERS) --tb=long -v -k "$(K)" \
+		> /tmp/megapad_test_output.txt 2>&1 & \
+		echo "$$!" > /tmp/megapad_test_pid.txt
+	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
+	@echo "Monitor: make test-status  |  make test-watch"
 
-# --- Single test with C++ accelerator (alias for test-one) ---
-.PHONY: test-one-accel
-test-one-accel: test-one
+# --- Single test foreground (usage: make test-one-fg K=TestFoo) ---
+.PHONY: test-one-fg
+test-one-fg: accel
+	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
 
 # --- Background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
