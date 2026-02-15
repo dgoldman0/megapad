@@ -598,6 +598,24 @@ CREATE SHA3-BUF 64 ALLOT
     DROP
     SHA3-256-MODE SHA3-MODE! ;
 
+\ SHAKE-STREAM ( addr blocks -- )
+\   Read `blocks` 32-byte chunks of continuous XOF output into addr.
+\   Must be called AFTER SHAKE-INIT + SHA3-UPDATE + SHA3-FINAL has been
+\   used to set up the SHAKE state.  First 32 bytes are already in DOUT
+\   after FINAL.  For each subsequent block, SHA3-SQUEEZE-NEXT permutes
+\   the Keccak state and refills DOUT.
+\
+\   BIOS primitives used:
+\     SHA3-DOUT@ ( addr -- )         — read 32 bytes from DOUT
+\     SHA3-SQUEEZE-NEXT ( -- )       — permute, refill DOUT
+: SHAKE-STREAM ( addr blocks -- )
+    0 DO
+        DUP SHA3-DOUT@          \ read current DOUT block
+        32 +                    \ advance addr
+        SHA3-SQUEEZE-NEXT       \ permute for next block
+    LOOP
+    DROP ;
+
 : .SHA3-STATUS
     SHA3-STATUS@
     DUP 0 = IF DROP ."  SHA3: idle" CR ELSE

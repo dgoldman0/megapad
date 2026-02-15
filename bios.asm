@@ -7686,6 +7686,34 @@ w_sha3_squeeze:
 .sha3_squeeze_done:
     ret.l
 
+; SHA3-SQUEEZE-NEXT ( -- )  Trigger another squeeze permutation (CMD=5).
+;   For streaming XOF output. After this call, DOUT is refilled with the
+;   next rate bytes of SHAKE output.
+w_sha3_squeeze_next:
+    ldi64 r11, 0xFFFF_FF00_0000_0780  ; SHA3_CMD
+    ldi r0, 5                          ; CMD_SQUEEZE_NEXT
+    st.b r11, r0
+    ret.l
+
+; SHA3-DOUT@ ( addr -- )  Read 32 bytes from DOUT register to memory.
+;   Does not trigger any command — just copies current DOUT contents.
+w_sha3_dout_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
+    ldi r12, 0
+.sha3_dout_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .sha3_dout_loop
+    ret.l
+
 ; =====================================================================
 ;  True Random Number Generator (TRNG)
 ; =====================================================================
@@ -10418,9 +10446,27 @@ d_sha3_squeeze:
     call.l r11
     ret.l
 
+; === SHA3-SQUEEZE-NEXT ===
+d_sha3_squeeze_next:
+    .dq d_sha3_squeeze
+    .db 17
+    .ascii "SHA3-SQUEEZE-NEXT"
+    ldi64 r11, w_sha3_squeeze_next
+    call.l r11
+    ret.l
+
+; === SHA3-DOUT@ ===
+d_sha3_dout_fetch:
+    .dq d_sha3_squeeze_next
+    .db 10
+    .ascii "SHA3-DOUT@"
+    ldi64 r11, w_sha3_dout_fetch
+    call.l r11
+    ret.l
+
 ; === RANDOM ===
 d_random:
-    .dq d_sha3_squeeze
+    .dq d_sha3_dout_fetch
     .db 6
     .ascii "RANDOM"
     ldi64 r11, w_random

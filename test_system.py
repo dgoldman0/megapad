@@ -6229,6 +6229,129 @@ class TestKDOSSHAKE(_KDOSTestBase):
         self.assertIn("MODE=0 ", text)
 
 
+class TestSHA3Streaming(_KDOSTestBase):
+    """Tests for SHAKE-STREAM and SHA3-SQUEEZE-NEXT (§36 roadmap)."""
+
+    # Reference: hashlib.shake_256(b"abc").digest(96)
+    # Block 0 (bytes 0-31):   [0]=72, [1]=51, [31]=57
+    # Block 1 (bytes 32-63):  [32]=213, [33]=161, [63]=228
+    # Block 2 (bytes 64-95):  [64]=19, [65]=133, [95]=120
+
+    def _setup_shake256_abc(self):
+        """Set up SHAKE256 state absorbing b'abc', finalize."""
+        return [
+            'CREATE msg 3 ALLOT',
+            '97 msg C!  98 msg 1 + C!  99 msg 2 + C!',   # 'a', 'b', 'c'
+            'SHAKE256-MODE SHA3-MODE!',
+            'SHA3-INIT',
+            'msg 3 SHA3-UPDATE',
+            'CREATE _final-tmp 32 ALLOT',
+            '_final-tmp SHA3-FINAL',     # triggers FINAL + reads first 32 bytes
+        ]
+
+    def test_squeeze_next_basic(self):
+        """SHA3-SQUEEZE-NEXT permutes and gives new DOUT content."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            # Read first byte from DOUT (should be byte 0 of SHAKE256("abc"))
+            '."  B0=" _final-tmp C@ .',
+            # Now SQUEEZE-NEXT: permutes, refills DOUT
+            'SHA3-SQUEEZE-NEXT',
+            # Read first byte of next block
+            'CREATE _blk1 32 ALLOT',
+            '_blk1 SHA3-DOUT@',
+            '."  B32=" _blk1 C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("B0=72 ", text)     # byte 0 of SHAKE256("abc")
+        self.assertIn("B32=213 ", text)   # byte 32
+
+    def test_shake_stream_3_blocks(self):
+        """SHAKE-STREAM reads 3 blocks (96 bytes) of XOF output."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE sbuf 96 ALLOT',
+            'sbuf 96 0 FILL',
+            'sbuf 3 SHAKE-STREAM',
+            # Verify block 0
+            '."  S0=" sbuf C@ .',           # byte 0 = 72
+            '."  S1=" sbuf 1 + C@ .',       # byte 1 = 51
+            '."  S31=" sbuf 31 + C@ .',     # byte 31 = 57
+            # Verify block 1
+            '."  S32=" sbuf 32 + C@ .',     # byte 32 = 213
+            '."  S33=" sbuf 33 + C@ .',     # byte 33 = 161
+            '."  S63=" sbuf 63 + C@ .',     # byte 63 = 228
+            # Verify block 2
+            '."  S64=" sbuf 64 + C@ .',     # byte 64 = 19
+            '."  S65=" sbuf 65 + C@ .',     # byte 65 = 133
+            '."  S95=" sbuf 95 + C@ .',     # byte 95 = 120
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("S0=72 ", text)
+        self.assertIn("S1=51 ", text)
+        self.assertIn("S31=57 ", text)
+        self.assertIn("S32=213 ", text)
+        self.assertIn("S33=161 ", text)
+        self.assertIn("S63=228 ", text)
+        self.assertIn("S64=19 ", text)
+        self.assertIn("S65=133 ", text)
+        self.assertIn("S95=120 ", text)
+
+    def test_shake_stream_1_block(self):
+        """SHAKE-STREAM with 1 block matches FINAL output."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE sbuf 32 ALLOT',
+            'sbuf 1 SHAKE-STREAM',
+            # Should match first 32 bytes (same as FINAL output)
+            '."  F0=" _final-tmp C@ .',
+            '."  S0=" sbuf C@ .',
+            '."  F31=" _final-tmp 31 + C@ .',
+            '."  S31=" sbuf 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Both should have byte 0 = 72
+        self.assertIn("F0=72 ", text)
+        self.assertIn("S0=72 ", text)
+        self.assertIn("F31=57 ", text)
+        self.assertIn("S31=57 ", text)
+
+    def test_squeeze_next_multiple(self):
+        """Multiple SHA3-SQUEEZE-NEXT calls produce distinct blocks."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE b1 32 ALLOT',
+            'CREATE b2 32 ALLOT',
+            # Block 1 (bytes 32-63): squeeze first
+            'SHA3-SQUEEZE-NEXT',
+            'b1 SHA3-DOUT@',
+            # Block 2 (bytes 64-95): squeeze again
+            'SHA3-SQUEEZE-NEXT',
+            'b2 SHA3-DOUT@',
+            '."  B1-0=" b1 C@ .',     # byte 32 = 213
+            '."  B2-0=" b2 C@ .',     # byte 64 = 19
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("B1-0=213 ", text)
+        self.assertIn("B2-0=19 ", text)
+
+    def test_dout_read_idempotent(self):
+        """SHA3-DOUT@ can read DOUT multiple times without changing state."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE r1 32 ALLOT',
+            'CREATE r2 32 ALLOT',
+            'r1 SHA3-DOUT@',
+            'r2 SHA3-DOUT@',
+            '."  R1=" r1 C@ .',
+            '."  R2=" r2 C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Both reads should produce the same byte
+        self.assertIn("R1=72 ", text)
+        self.assertIn("R2=72 ", text)
+
+
 class TestKDOSTRNG(_KDOSTestBase):
     """Tests for hardware TRNG (§1.6 RNG words)."""
 

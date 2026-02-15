@@ -1258,7 +1258,8 @@ class SHA3Device(Device):
            2=SHAKE128 (rate=168, XOF),    3=SHAKE256 (rate=136, XOF).
 
     Register map (offsets from SHA3_BASE = 0x0780):
-      0x00  CMD      (W)  0=NOP, 1=INIT, 2=ABSORB (internal), 3=FINAL, 4=SQUEEZE
+      0x00  CMD      (W)  0=NOP, 1=INIT, 2=ABSORB (internal), 3=FINAL,
+                          4=SQUEEZE, 5=SQUEEZE_NEXT (auto-permute for streaming)
       0x01  STATUS   (R)  bit 0=busy, bit 1=done
       0x02  CTRL     (W)  mode select (bits [1:0])
       0x08  DIN      (W)  byte input (auto-absorbs at rate boundary)
@@ -1280,6 +1281,8 @@ class SHA3Device(Device):
         self.status = 0
         self.digest = bytearray(64)
         self._squeezed = 0  # bytes already squeezed (for XOF)
+        self._stream_pos = 0  # byte position within current squeeze block
+        self._squeeze_buf = bytearray()  # full rate output for streaming
 
     @property
     def rate(self) -> int:
@@ -1303,6 +1306,8 @@ class SHA3Device(Device):
                 self._finalize()
             elif value == 4:  # SQUEEZE (XOF: permute and extract more)
                 self._squeeze()
+            elif value == 5:  # SQUEEZE_NEXT (streaming: advance 32-byte window)
+                self._squeeze_next_stream()
         elif offset == 0x02:  # CTRL — mode select
             self.mode = value & 0x03
         elif offset == 0x08:  # DIN
@@ -1336,6 +1341,9 @@ class SHA3Device(Device):
             self.digest = out[:outsz]
         else:
             self.digest = out[:self.rate]
+        # Initialise streaming buffer for SQUEEZE-NEXT
+        self._squeeze_buf = bytearray(out[:self.rate])
+        self._stream_pos = 0
         self._squeezed = len(self.digest)
         self.status = 2  # done
 
@@ -1347,6 +1355,28 @@ class SHA3Device(Device):
             out.extend(self.state[i].to_bytes(8, 'little'))
         self.digest = out[:self.rate]
         self._squeezed += self.rate
+        self.status = 2
+
+    def _squeeze_next_stream(self):
+        """Streaming SQUEEZE: advance DOUT window by 32 bytes.
+
+        Walks through the current rate block 32 bytes at a time.
+        When the window would exceed the buffered output, apply
+        Keccak-f to produce the next rate block and append it.
+        """
+        self._stream_pos += 32
+        # Extend squeeze buffer if the 64-byte DOUT window would overrun
+        while self._stream_pos + 64 > len(self._squeeze_buf):
+            self.state = _keccak_f1600(self.state)
+            out = bytearray()
+            for i in range(self.rate // 8):
+                out.extend(self.state[i].to_bytes(8, 'little'))
+            self._squeeze_buf.extend(out[:self.rate])
+        # Update visible DOUT to show current 64-byte window
+        self.digest = bytearray(
+            self._squeeze_buf[self._stream_pos:self._stream_pos + 64]
+        )
+        self._squeezed = self._stream_pos + 64
         self.status = 2
 
 
