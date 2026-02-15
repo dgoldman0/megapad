@@ -395,9 +395,10 @@ class MegapadCLI(cmd.Cmd):
 
     def do_run(self, arg):
         """Run until halt/idle/breakpoint: run [max_steps]"""
-        max_steps = self._parse_int(arg) if arg.strip() else 1_000_000
+        max_steps = self._parse_int(arg) if arg.strip() else 10_000_000
         total = 0
-        for _ in range(max_steps):
+        batch = 100_000
+        while total < max_steps:
             if self.sys.cpu.halted:
                 print(f"\nCPU halted after {total} cycles.")
                 break
@@ -408,23 +409,32 @@ class MegapadCLI(cmd.Cmd):
                     print(f"\nCPU idle after {total} cycles (waiting for input).")
                     print("  Use 'send <text>' to provide input, then 'run' to continue.")
                     break
-            pc = self.sys.cpu.pc
-            if pc in self.breakpoints:
-                print(f"\nBreakpoint hit at {pc:#010x}")
-                break
-            try:
-                total += self.sys.step()
-            except HaltError:
-                print(f"\nCPU halted after {total} cycles.")
-                break
-            except TrapError as e:
-                if self.sys.cpu.ivt_base != 0:
-                    self.sys.cpu._trap(e.ivec_id)
-                else:
-                    print(f"\nUnhandled trap: {e}")
+            if self.breakpoints:
+                pc = self.sys.cpu.pc
+                if pc in self.breakpoints:
+                    print(f"\nBreakpoint hit at {pc:#010x}")
+                    break
+                # Fall back to step() when breakpoints are set
+                try:
+                    total += self.sys.step()
+                except HaltError:
+                    print(f"\nCPU halted after {total} cycles.")
+                    break
+                except TrapError as e:
+                    if self.sys.cpu.ivt_base != 0:
+                        self.sys.cpu._trap(e.ivec_id)
+                    else:
+                        print(f"\nUnhandled trap: {e}")
+                        break
+            else:
+                try:
+                    ran = self.sys.run_batch(min(batch, max_steps - total))
+                    total += max(ran, 1)
+                except HaltError:
+                    print(f"\nCPU halted after {total} cycles.")
                     break
         else:
-            print(f"\nStopped after {max_steps} steps ({total} cycles).")
+            print(f"\nStopped after {total} steps.")
 
     def do_continue(self, arg):
         """Alias for 'run'."""
@@ -722,26 +732,24 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
         tty.setraw(fd)
         while True:
             # --- Run CPU in a batch until idle / halt ---------------
-            for _ in range(10_000):
-                if sys_emu.cpu.halted:
-                    return False
-                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
-                    break
+            if not sys_emu.cpu.halted and not (
+                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data):
                 try:
-                    sys_emu.step()
+                    sys_emu.run_batch(100_000)
                 except HaltError:
                     return False
-                except TrapError as e:
-                    if sys_emu.cpu.ivt_base != 0:
-                        sys_emu.cpu._trap(e.ivec_id)
-                    else:
-                        return False
+
+            if sys_emu.cpu.halted:
+                return False
 
             # --- Poll stdin (non-blocking) -------------------------
-            if select.select([sys.stdin], [], [], 0.02)[0]:
+            timeout = 0.0 if not sys_emu.cpu.idle else 0.02
+            if select.select([sys.stdin], [], [], timeout)[0]:
                 ch = os.read(fd, 1)
                 if ch == b'\x1d':          # Ctrl+]
                     return True
+                if ch == b'\x03':          # Ctrl+C
+                    return False
                 if ch:
                     sys_emu.uart.inject_input(ch)
     except KeyboardInterrupt:
@@ -763,31 +771,24 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
     try:
         while True:
             # --- Run CPU until idle / halt -------------------------
-            for _ in range(500_000):
-                if sys_emu.cpu.halted:
-                    return False
-                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
-                    break
+            if not sys_emu.cpu.halted and not (
+                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data):
                 try:
-                    sys_emu.step()
+                    sys_emu.run_batch(100_000)
                 except HaltError:
                     return False
-                except TrapError as e:
-                    if sys_emu.cpu.ivt_base != 0:
-                        sys_emu.cpu._trap(e.ivec_id)
-                    else:
-                        return False
 
             if sys_emu.cpu.halted:
                 return False
 
-            # --- Read from pipe (blocking, one byte) ---------------
-            ch = os.read(fd, 1)
-            if not ch:                     # EOF
-                return False
-            if ch == b'\x1d':              # Ctrl+]
-                return True
-            sys_emu.uart.inject_input(ch)
+            if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                # --- Read from pipe (blocking, one byte) -----------
+                ch = os.read(fd, 1)
+                if not ch:                     # EOF
+                    return False
+                if ch == b'\x1d':              # Ctrl+]
+                    return True
+                sys_emu.uart.inject_input(ch)
     except (KeyboardInterrupt, OSError):
         return False
     finally:
@@ -802,8 +803,8 @@ def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
     """Inject Forth source files through UART, line by line.
 
     Filters out pure comment lines (starting with \\) and blank lines
-    to reduce the byte count.  Waits for the CPU to process each line
-    before sending the next.
+    to reduce the byte count.  Injects a full line at a time and uses
+    run_batch() (C++ accelerated) instead of step().
     """
     out_fd = sys.stdout.fileno()
     old_tx = sys_emu.uart.on_tx
@@ -822,27 +823,19 @@ def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
                     continue
                 lines.append(line)
 
-            payload = "\n".join(lines) + "\n"
-            data = payload.encode()
-
-            for i, byte in enumerate(data):
-                # Inject one byte
-                sys_emu.uart.inject_input(bytes([byte]))
-                # Run CPU until idle (processed the byte)
-                for _ in range(500_000):
+            for line in lines:
+                # Inject one full line + newline
+                sys_emu.uart.inject_input((line + "\n").encode())
+                # Run CPU until idle (processed the line)
+                for _ in range(5_000):
                     if sys_emu.cpu.halted:
                         return
                     if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
                         break
                     try:
-                        sys_emu.step()
+                        sys_emu.run_batch(100_000)
                     except HaltError:
                         return
-                    except TrapError as e:
-                        if sys_emu.cpu.ivt_base != 0:
-                            sys_emu.cpu._trap(e.ivec_id)
-                        else:
-                            return
     finally:
         sys_emu.uart.on_tx = old_tx
 
