@@ -432,13 +432,13 @@ class TestRealNetARP(_RealNetBase):
             # Resolve the gateway's MAC — should return non-zero
             "GW-IP IP@ ARP-RESOLVE",
             "DUP 0<> IF",
-            "  .\" ARP-OK \"",
-            "  DUP C@ . .\" m0 \"",
-            "  DUP 1+ C@ . .\" m1 \"",
-            "  DUP 2 + C@ . .\" m2 \"",
+            "  .\"  ARP-OK \"",
+            "  DUP C@ . .\"  m0 \"",
+            "  DUP 1+ C@ . .\"  m1 \"",
+            "  DUP 2 + C@ . .\"  m2 \"",
             "  DROP",
             "ELSE",
-            "  .\" ARP-FAIL \"",
+            "  .\"  ARP-FAIL \"",
             "  DROP",
             "THEN",
         ], max_steps=200_000_000)
@@ -468,7 +468,7 @@ class TestRealNetARP(_RealNetBase):
         text = self._run_kdos_tap([
             # Poll for ARP requests a few times
             "20 0 DO ARP-POLL LOOP",
-            ".\" POLL-DONE \"",
+            ".\"  POLL-DONE \"",
         ], max_steps=200_000_000)
         # If no crash, ARP-POLL successfully ran against real frames
         self.assertIn("POLL-DONE", text)
@@ -488,17 +488,17 @@ class TestRealNetICMP(_RealNetBase):
         text = self._run_kdos_tap([
             # Build and send an ICMP echo request to the gateway
             "GW-IP IP@ ARP-RESOLVE",
-            "DUP 0= IF .\" NO-ARP \" DROP",
+            "DUP 0= IF .\"  NO-ARP \" DROP",
             "ELSE DROP",
             # Build ICMP echo request manually
             "  GW-IP IP@ 0 0 ICMP-BUILD-ECHO-REQ",
             "  1 IP-PROTO-ICMP GW-IP IP@ ROT ROT IP-SEND",
-            "  .\" PING-SENT \"",
+            "  .\"  PING-SENT \"",
             # Try to receive the reply
             "  20 0 DO",
             "    IP-RECV",
             "    DUP 0<> IF",
-            "      .\" IP-GOT \"",
+            "      .\"  IP-GOT \"",
             "      2DROP LEAVE",
             "    ELSE",
             "      2DROP",
@@ -520,7 +520,7 @@ class TestRealNetICMP(_RealNetBase):
         """
         text = self._run_kdos_tap([
             "50 0 DO PING-POLL LOOP",
-            ".\" PING-RESPONDED \"",
+            ".\"  PING-RESPONDED \"",
         ], max_steps=200_000_000)
         self.assertIn("PING-RESPONDED", text)
 
@@ -605,7 +605,7 @@ class TestRealNetUDP(_RealNetBase):
             "100 0 DO",
             "  UDP-RECV",
             "  DUP 0<> IF",
-            "    .\" UDP-GOT \"",
+            "    .\"  UDP-GOT \"",
             "    DROP 2DROP LEAVE",
             "  ELSE",
             "    DROP 2DROP",
@@ -627,9 +627,9 @@ class TestRealNetIntegration(_RealNetBase):
     def test_full_ip_stack_init(self):
         """IP-SET + MAC-INIT should configure the stack without errors."""
         text = self._run_kdos_tap([
-            "MY-IP .IP .\" myip \"",
-            "GW-IP .IP .\" gw \"",
-            "NET-STATUS . .\" status \"",
+            "MY-IP .IP .\"  myip \"",
+            "GW-IP .IP .\"  gw \"",
+            "NET-STATUS . .\"  status \"",
         ])
         self.assertIn("status", text)
         # .IP prints dotted-quad: "10 .64 .0 .2 "
@@ -840,7 +840,7 @@ class TestRealNetHardening(_RealNetBase):
         """100 consecutive ARP-POLL calls should not crash or hang."""
         text = self._run_kdos_tap([
             ": ARP100 100 0 DO ARP-POLL LOOP ;",
-            "ARP100 .\" ARP100-OK\"",
+            "ARP100 .\"  ARP100-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("ARP100-OK", text)
 
@@ -848,7 +848,7 @@ class TestRealNetHardening(_RealNetBase):
         """100 consecutive PING-POLL calls should not crash."""
         text = self._run_kdos_tap([
             ": PP100 100 0 DO PING-POLL LOOP ;",
-            "PP100 .\" PP100-OK\"",
+            "PP100 .\"  PP100-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("PP100-OK", text)
 
@@ -860,7 +860,7 @@ class TestRealNetHardening(_RealNetBase):
         text = self._run_kdos_tap([
             "10 0 DO ARP-POLL LOOP",
             "10 0 DO PING-POLL LOOP",
-            ".\" RUNT-OK\"",
+            ".\"  RUNT-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("RUNT-OK", text)
 
@@ -868,7 +868,7 @@ class TestRealNetHardening(_RealNetBase):
         """Many broadcast frames from the host should not crash the stack."""
         text = self._run_kdos_tap([
             ": STORM-DRAIN 50 0 DO ARP-POLL LOOP ;",
-            "STORM-DRAIN .\" STORM-OK\"",
+            "STORM-DRAIN .\"  STORM-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("STORM-OK", text)
 
@@ -907,13 +907,13 @@ class TestRealNetHardening(_RealNetBase):
         text = self._run_kdos_tap([
             # Step 1: ARP resolve gateway
             "GW-IP IP@ ARP-RESOLVE",
-            "DUP 0<> IF .\" ARP-OK\" DROP ELSE .\" ARP-FAIL\" DROP THEN",
+            "DUP 0<> IF .\"  ARP-OK\" DROP ELSE .\"  ARP-FAIL\" DROP THEN",
             # Step 2: PING-POLL a few times
             "10 0 DO PING-POLL LOOP",
-            ".\" PING-OK\"",
+            ".\"  PING-OK\"",
             # Step 3: UDP send
             'GW-IP IP@ 9999 8888 S" SEQ-TEST" UDP-SEND DROP',
-            ".\" SEQ-OK\"",
+            ".\"  SEQ-OK\"",
         ], max_steps=300_000_000)
         # At minimum, all three stages should complete
         self.assertIn("PING-OK", text)
@@ -925,8 +925,8 @@ class TestRealNetHardening(_RealNetBase):
             "VARIABLE IPCNT  0 IPCNT !",
             ": RX-MANY 20 0 DO IP-RECV DUP 0<> IF DROP 1 IPCNT +! ELSE DROP THEN LOOP ;",
             "RX-MANY",
-            "IPCNT @ .\" ipcnt=\" .",
-            ".\" RX-OK\"",
+            "IPCNT @ .\"  ipcnt=\" .",
+            ".\"  RX-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("RX-OK", text)
 
@@ -937,7 +937,7 @@ class TestRealNetHardening(_RealNetBase):
             "50 0 DO ARP-POLL LOOP",
             "50 0 DO PING-POLL LOOP",
             # Now check status
-            "NET-STATUS .\" ns=\" .",
+            "NET-STATUS .\"  ns=\" .",
         ], max_steps=200_000_000)
         # Should still show present + link up (132 = 0x84)
         self.assertIn("ns=132 ", text)
@@ -945,7 +945,7 @@ class TestRealNetHardening(_RealNetBase):
     def test_tcp_init_all_on_tap(self):
         """TCP-INIT-ALL should not crash when TAP is active."""
         text = self._run_kdos_tap([
-            "TCP-INIT-ALL .\" TCP-INIT-OK\"",
+            "TCP-INIT-ALL .\"  TCP-INIT-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("TCP-INIT-OK", text)
 
@@ -954,7 +954,7 @@ class TestRealNetHardening(_RealNetBase):
         text = self._run_kdos_tap([
             "TCP-INIT-ALL",
             ": TPOLL50 50 0 DO TCP-POLL LOOP ;",
-            "TPOLL50 .\" TPOLL-OK\"",
+            "TPOLL50 .\"  TPOLL-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("TPOLL-OK", text)
 

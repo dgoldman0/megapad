@@ -815,12 +815,12 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("A B", text)
 
-    # -- v0.4: ." (dot-quote) --
+    # -- v0.4: ."  (dot-quote) --
 
     def test_dotquote(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            ': HELLO ." Hello World" ;',
+            ': HELLO ."  Hello World" ;',
             "HELLO",
         ])
         self.assertIn("Hello World", text)
@@ -1013,7 +1013,7 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("42 ", text)
         # 77 must not appear as execution output (only in echoed definition)
-        after_run = text.split("TE .")[-1] if "TE ." in text else text
+        after_run = text.split("TE .")[-1] if "TE ."  in text else text
         self.assertNotIn("77", after_run)
 
     def test_to_r_r_from(self):
@@ -1447,7 +1447,7 @@ class TestBIOS(unittest.TestCase):
     def test_evaluate(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            ': TEST  S" 2 3 + ." EVALUATE ;',
+            ': TEST  S" 2 3 + ."  EVALUATE ;',
             'TEST'
         ])
         self.assertIn("5", text)
@@ -3333,7 +3333,7 @@ class TestKDOS(_KDOSTestBase):
             "0 SCR-SEL !",
             "SCR-BUFFERS",
         ])
-        # B.INFO prints "[buf ..." and B.PREVIEW prints hex
+        # B.INFO prints "[buf ..."  and B.PREVIEW prints hex
         self.assertIn(">", text)  # cursor '>'
 
     def test_buffer_detail_shows_preview(self):
@@ -3651,7 +3651,7 @@ class TestKDOS(_KDOSTestBase):
         ], nic_frames=[frame])
         # Sine wave should have min near 1 and max near 255
         # Just verify kstats runs without error and produces output
-        # The sum/min/max are on the stack; ". . ." prints them
+        # The sum/min/max are on the stack; ". . ."  prints them
         lines = text.strip().split("\n")
         combined = " ".join(lines)
         # Check some numbers appeared (not error messages)
@@ -5157,7 +5157,7 @@ class TestBIOSHardening(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    # -- FSLOAD with colon definitions, ." strings, nested EVALUATE --
+    # -- FSLOAD with colon definitions, ."  strings, nested EVALUATE --
 
     def test_fsload_colon_defs(self):
         """FSLOAD file containing colon definitions works correctly."""
@@ -5177,7 +5177,7 @@ class TestBIOSHardening(unittest.TestCase):
     def test_fsload_dotquote(self):
         """FSLOAD file with .\\" strings prints them correctly."""
         fs = build_image()
-        src = b': GREET ." Hello from disk" ;\nGREET\n'
+        src = b': GREET ."  Hello from disk" ;\nGREET\n'
         fs.inject_file("greet.f", src, ftype=FTYPE_FORTH)
         with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
             path = f.name
@@ -5192,7 +5192,7 @@ class TestBIOSHardening(unittest.TestCase):
     def test_fsload_nested_evaluate(self):
         """FSLOAD file containing S\\" ... \\" EVALUATE works."""
         fs = build_image()
-        src = b': CALC  S" 7 7 * ." EVALUATE ;\nCALC\n'
+        src = b': CALC  S" 7 7 * ."  EVALUATE ;\nCALC\n'
         fs.inject_file("nested.f", src, ftype=FTYPE_FORTH)
         with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
             path = f.name
@@ -5366,7 +5366,7 @@ class TestKDOSAllocator(_KDOSTestBase):
         """FREE 0 should be a no-op (no crash)."""
         text = self._run_kdos([
             "0 FREE",
-            ".\" ok\"",
+            ".\"  ok\"",
         ])
         self.assertIn("ok", text)
 
@@ -5376,7 +5376,7 @@ class TestKDOSAllocator(_KDOSTestBase):
             "128 ALLOCATE DROP",      # alloc 128, get addr
             "DUP FREE",              # free it
             "128 ALLOCATE DROP",      # alloc again
-            ".\" alloc-ok\"",
+            ".\"  alloc-ok\"",
         ])
         self.assertIn("alloc-ok", text)
 
@@ -5488,7 +5488,7 @@ class TestKDOSExceptions(_KDOSTestBase):
     def test_throw_zero_is_noop(self):
         """THROW 0 does nothing."""
         text = self._run_kdos([
-            ": FINE  0 THROW .\" ok\" ;",
+            ": FINE  0 THROW .\"  ok\" ;",
             "FINE",
         ])
         self.assertIn("ok", text)
@@ -5526,7 +5526,7 @@ class TestKDOSExceptions(_KDOSTestBase):
 
     def test_sp_fetch(self):
         """SP@ returns the data stack pointer."""
-        text = self._run_kdos(["SP@ .", ".\" ok\""])
+        text = self._run_kdos(["SP@ .", ".\"  ok\""])
         # SP@ should return a positive number (memory address)
         self.assertIn("ok", text)
         nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
@@ -5535,7 +5535,7 @@ class TestKDOSExceptions(_KDOSTestBase):
 
     def test_rp_fetch(self):
         """RP@ returns the return stack pointer."""
-        text = self._run_kdos(["RP@ .", ".\" ok\""])
+        text = self._run_kdos(["RP@ .", ".\"  ok\""])
         self.assertIn("ok", text)
         nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
         self.assertTrue(any(n > 0 for n in nums),
@@ -5710,7 +5710,7 @@ class TestKDOSAES(_KDOSTestBase):
 
     def test_aes_status_idle(self):
         """AES-STATUS@ returns 0 (idle) before any operation."""
-        text = self._run_kdos(['." AESIDLE=" AES-STATUS@ .'])
+        text = self._run_kdos(['."  AESIDLE=" AES-STATUS@ .'])
         self.assertIn("AESIDLE=0 ", text)
 
     def test_aes_encrypt_one_block(self):
@@ -5732,9 +5732,9 @@ class TestKDOSAES(_KDOSTestBase):
             # Read ciphertext
             "ct-buf AES-DOUT@",
             # Print first byte of ciphertext with marker
-            '." CT0=" ct-buf C@ .',
+            '."  CT0=" ct-buf C@ .',
             # Print status with marker
-            '." ST=" AES-STATUS@ .',
+            '."  ST=" AES-STATUS@ .',
         ])
         self.assertIn("CT0=6 ", text)
         self.assertIn("ST=2 ", text)
@@ -5756,10 +5756,10 @@ class TestKDOSAES(_KDOSTestBase):
             # Read tag
             "tag-buf AES-TAG@",
             # Print tag bytes with markers
-            '." T0=" tag-buf C@ .',                # 15
-            '." T1=" tag-buf 1 + C@ .',            # 241
-            '." T2=" tag-buf 2 + C@ .',            # 69
-            '." T3=" tag-buf 3 + C@ .',            # 243
+            '."  T0=" tag-buf C@ .',                # 15
+            '."  T1=" tag-buf 1 + C@ .',            # 241
+            '."  T2=" tag-buf 2 + C@ .',            # 69
+            '."  T3=" tag-buf 3 + C@ .',            # 243
         ])
         # TAG starts with 0x0F, 0xF1, 0x45, 0xF3 = 15, 241, 69, 243
         self.assertIn("T0=15 ", text)
@@ -5794,9 +5794,9 @@ class TestKDOSAES(_KDOSTestBase):
             "ct-buf AES-DIN!",
             "rt-buf AES-DOUT@",
             # Verify roundtrip with markers
-            '." P0=" rt-buf C@ .',
-            '." P15=" rt-buf 15 + C@ .',
-            '." ST=" AES-STATUS@ .',
+            '."  P0=" rt-buf C@ .',
+            '."  P15=" rt-buf 15 + C@ .',
+            '."  ST=" AES-STATUS@ .',
         ])
         self.assertIn("P0=65 ", text)
         self.assertIn("P15=65 ", text)
@@ -5831,7 +5831,7 @@ class TestKDOSAES(_KDOSTestBase):
             "CREATE junk 16 ALLOT",
             "junk AES-DOUT@",
             # Status should be 3 (auth fail)
-            '." AUTHST=" AES-STATUS@ .',
+            '."  AUTHST=" AES-STATUS@ .',
         ])
         self.assertIn("AUTHST=3 ", text)
 
@@ -5844,8 +5844,8 @@ class TestKDOSAES(_KDOSTestBase):
             # AES-ENCRYPT ( key iv src dst len -- tag-addr )
             "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT",
             # tag-addr on stack
-            '." TGBYTE=" C@ .',              # first tag byte = 15
-            '." CTBYTE=" ct-buf C@ .',       # first ct byte = 6
+            '."  TGBYTE=" C@ .',              # first tag byte = 15
+            '."  CTBYTE=" ct-buf C@ .',       # first ct byte = 6
         ])
         self.assertIn("TGBYTE=15 ", text)
         self.assertIn("CTBYTE=6 ", text)
@@ -5864,9 +5864,9 @@ class TestKDOSAES(_KDOSTestBase):
             "saved-tag !",
             # Decrypt
             "test-key test-iv ct-buf rt-buf 16 saved-tag @ AES-DECRYPT",
-            '." DECFLAG=" .',   # should print 0 (auth OK)
+            '."  DECFLAG=" .',   # should print 0 (auth OK)
             # Verify plaintext restored
-            '." DECPT0=" rt-buf C@ .',  # 65
+            '."  DECPT0=" rt-buf C@ .',  # 65
         ])
         self.assertIn("DECFLAG=0 ", text)
         self.assertIn("DECPT0=65 ", text)
@@ -5886,9 +5886,9 @@ class TestKDOSAES(_KDOSTestBase):
             "test-key test-iv pt-buf ct-buf 32 AES-ENCRYPT",
             "DROP",  # discard tag addr
             # First byte of block 0 with marker
-            '." BLK0=" ct-buf C@ .',
+            '."  BLK0=" ct-buf C@ .',
             # First byte of block 1 with marker
-            '." BLK1=" ct-buf 16 + C@ .',
+            '."  BLK1=" ct-buf 16 + C@ .',
         ])
         self.assertIn("BLK0=6 ", text)
         self.assertIn("BLK1=193 ", text)
@@ -5905,7 +5905,7 @@ class TestKDOSSHA3(_KDOSTestBase):
 
     def test_sha3_status_idle(self):
         """SHA3-STATUS@ returns 0 (idle) before any operation."""
-        text = self._run_kdos(['." S3IDLE=" SHA3-STATUS@ .'])
+        text = self._run_kdos(['."  S3IDLE=" SHA3-STATUS@ .'])
         self.assertIn("S3IDLE=0 ", text)
 
     def test_sha3_empty(self):
@@ -5914,11 +5914,11 @@ class TestKDOSSHA3(_KDOSTestBase):
             "CREATE h-buf 32 ALLOT",
             "SHA3-INIT",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',            # 0xa7 = 167
-            '." H1=" h-buf 1 + C@ .',        # 0xff = 255
-            '." H2=" h-buf 2 + C@ .',        # 0xc6 = 198
-            '." H3=" h-buf 3 + C@ .',        # 0xf8 = 248
-            '." ST=" SHA3-STATUS@ .',         # 2 = done
+            '."  H0=" h-buf C@ .',            # 0xa7 = 167
+            '."  H1=" h-buf 1 + C@ .',        # 0xff = 255
+            '."  H2=" h-buf 2 + C@ .',        # 0xc6 = 198
+            '."  H3=" h-buf 3 + C@ .',        # 0xf8 = 248
+            '."  ST=" SHA3-STATUS@ .',         # 2 = done
         ])
         self.assertIn("H0=167 ", text)
         self.assertIn("H1=255 ", text)
@@ -5937,10 +5937,10 @@ class TestKDOSSHA3(_KDOSTestBase):
             "SHA3-INIT",
             "msg 3 SHA3-UPDATE",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',            # 0x3a = 58
-            '." H1=" h-buf 1 + C@ .',        # 0x98 = 152
-            '." H2=" h-buf 2 + C@ .',        # 0x5d = 93
-            '." H3=" h-buf 3 + C@ .',        # 0xa7 = 167
+            '."  H0=" h-buf C@ .',            # 0x3a = 58
+            '."  H1=" h-buf 1 + C@ .',        # 0x98 = 152
+            '."  H2=" h-buf 2 + C@ .',        # 0x5d = 93
+            '."  H3=" h-buf 3 + C@ .',        # 0xa7 = 167
         ])
         self.assertIn("H0=58 ", text)
         self.assertIn("H1=152 ", text)
@@ -5956,10 +5956,10 @@ class TestKDOSSHA3(_KDOSTestBase):
             "SHA3-INIT",
             "msg 16 SHA3-UPDATE",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',            # 0x24 = 36
-            '." H1=" h-buf 1 + C@ .',        # 0x16 = 22
-            '." H2=" h-buf 2 + C@ .',        # 0x3a = 58
-            '." H3=" h-buf 3 + C@ .',        # 0xab = 171
+            '."  H0=" h-buf C@ .',            # 0x24 = 36
+            '."  H1=" h-buf 1 + C@ .',        # 0x16 = 22
+            '."  H2=" h-buf 2 + C@ .',        # 0x3a = 58
+            '."  H3=" h-buf 3 + C@ .',        # 0xab = 171
         ])
         self.assertIn("H0=36 ", text)
         self.assertIn("H1=22 ", text)
@@ -5976,10 +5976,10 @@ class TestKDOSSHA3(_KDOSTestBase):
             "SHA3-INIT",
             "msg 200 SHA3-UPDATE",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',            # 0x5f = 95
-            '." H1=" h-buf 1 + C@ .',        # 0x72 = 114
-            '." H2=" h-buf 2 + C@ .',        # 0x8f = 143
-            '." H3=" h-buf 3 + C@ .',        # 0x63 = 99
+            '."  H0=" h-buf C@ .',            # 0x5f = 95
+            '."  H1=" h-buf 1 + C@ .',        # 0x72 = 114
+            '."  H2=" h-buf 2 + C@ .',        # 0x8f = 143
+            '."  H3=" h-buf 3 + C@ .',        # 0x63 = 99
         ])
         self.assertIn("H0=95 ", text)
         self.assertIn("H1=114 ", text)
@@ -5993,8 +5993,8 @@ class TestKDOSSHA3(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
             "msg 3 h-buf SHA3",
-            '." H0=" h-buf C@ .',            # same as test_sha3_abc
-            '." H1=" h-buf 1 + C@ .',
+            '."  H0=" h-buf C@ .',            # same as test_sha3_abc
+            '."  H1=" h-buf 1 + C@ .',
         ])
         self.assertIn("H0=58 ", text)
         self.assertIn("H1=152 ", text)
@@ -6008,8 +6008,8 @@ class TestKDOSSHA3(_KDOSTestBase):
             "CREATE h2 32 ALLOT",
             "msg 3 h1 SHA3",
             "msg 3 h2 SHA3",
-            '." R1=" h1 C@ .',
-            '." R2=" h2 C@ .',
+            '."  R1=" h1 C@ .',
+            '."  R2=" h2 C@ .',
         ])
         self.assertIn("R1=58 ", text)
         self.assertIn("R2=58 ", text)
@@ -6038,10 +6038,10 @@ class TestKDOSSHA3(_KDOSTestBase):
             "SHA3-INIT",
             "msg 1 SHA3-UPDATE",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',            # 0x5d = 93
-            '." H1=" h-buf 1 + C@ .',        # 0x53 = 83
-            '." H2=" h-buf 2 + C@ .',        # 0x46 = 70
-            '." H3=" h-buf 3 + C@ .',        # 0x9f = 159
+            '."  H0=" h-buf C@ .',            # 0x5d = 93
+            '."  H1=" h-buf 1 + C@ .',        # 0x53 = 83
+            '."  H2=" h-buf 2 + C@ .',        # 0x46 = 70
+            '."  H3=" h-buf 3 + C@ .',        # 0x9f = 159
         ])
         self.assertIn("H0=93 ", text)
         self.assertIn("H1=83 ", text)
@@ -6060,9 +6060,9 @@ class TestKDOSSHAKE(_KDOSTestBase):
     def test_sha3_mode_roundtrip(self):
         """SHA3-MODE! / SHA3-MODE@ round-trip the mode value."""
         text = self._run_kdos([
-            '." M0=" SHA3-MODE@ .',     # default mode = 0 (SHA3-256)
+            '."  M0=" SHA3-MODE@ .',     # default mode = 0 (SHA3-256)
             '3 SHA3-MODE!',
-            '." M3=" SHA3-MODE@ .',     # now SHAKE256 mode = 3
+            '."  M3=" SHA3-MODE@ .',     # now SHAKE256 mode = 3
             '0 SHA3-MODE!',             # restore default
         ])
         self.assertIn("M0=0 ", text)
@@ -6078,10 +6078,10 @@ class TestKDOSSHAKE(_KDOSTestBase):
             "SHA3-INIT",
             "msg 3 SHA3-UPDATE",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',
-            '." H1=" h-buf 1 + C@ .',
-            '." H2=" h-buf 2 + C@ .',
-            '." H3=" h-buf 3 + C@ .',
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  H2=" h-buf 2 + C@ .',
+            '."  H3=" h-buf 3 + C@ .',
             "0 SHA3-MODE!",             # restore SHA3-256
         ])
         self.assertIn("H0=183 ", text)
@@ -6096,10 +6096,10 @@ class TestKDOSSHAKE(_KDOSTestBase):
             "1 SHA3-MODE!",
             "SHA3-INIT",
             "h-buf SHA3-FINAL",
-            '." H0=" h-buf C@ .',
-            '." H1=" h-buf 1 + C@ .',
-            '." H2=" h-buf 2 + C@ .',
-            '." H3=" h-buf 3 + C@ .',
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  H2=" h-buf 2 + C@ .',
+            '."  H3=" h-buf 3 + C@ .',
             "0 SHA3-MODE!",
         ])
         self.assertIn("H0=166 ", text)
@@ -6114,10 +6114,10 @@ class TestKDOSSHAKE(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE out 32 ALLOT",
             "msg 3 out 32 SHAKE128",
-            '." H0=" out C@ .',
-            '." H1=" out 1 + C@ .',
-            '." H2=" out 2 + C@ .',
-            '." H3=" out 3 + C@ .',
+            '."  H0=" out C@ .',
+            '."  H1=" out 1 + C@ .',
+            '."  H2=" out 2 + C@ .',
+            '."  H3=" out 3 + C@ .',
         ])
         self.assertIn("H0=88 ", text)
         self.assertIn("H1=129 ", text)
@@ -6131,10 +6131,10 @@ class TestKDOSSHAKE(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE out 32 ALLOT",
             "msg 3 out 32 SHAKE256",
-            '." H0=" out C@ .',
-            '." H1=" out 1 + C@ .',
-            '." H2=" out 2 + C@ .',
-            '." H3=" out 3 + C@ .',
+            '."  H0=" out C@ .',
+            '."  H1=" out 1 + C@ .',
+            '."  H2=" out 2 + C@ .',
+            '."  H3=" out 3 + C@ .',
         ])
         self.assertIn("H0=72 ", text)
         self.assertIn("H1=51 ", text)
@@ -6148,7 +6148,7 @@ class TestKDOSSHAKE(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE out 32 ALLOT",
             "msg 3 out 32 SHAKE256",
-            '." MODE=" SHA3-MODE@ .',     # should be 0 again
+            '."  MODE=" SHA3-MODE@ .',     # should be 0 again
         ])
         self.assertIn("MODE=0 ", text)
 
@@ -6159,7 +6159,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_random8_in_range(self):
         """RANDOM8 returns a value 0-255."""
         text = self._run_kdos([
-            '." R8=" RANDOM8 .',
+            '."  R8=" RANDOM8 .',
         ])
         import re
         m = re.search(r'R8=(\d+)', text)
@@ -6170,7 +6170,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_random_nonzero(self):
         """RANDOM (64-bit) is very unlikely to be zero — collect 4 and check."""
         text = self._run_kdos([
-            '." R=" RANDOM .',
+            '."  R=" RANDOM .',
         ])
         import re
         m = re.search(r'R=(-?\d+)', text)
@@ -6182,7 +6182,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_random32_range(self):
         """RANDOM32 returns a 32-bit value (0..0xFFFFFFFF)."""
         text = self._run_kdos([
-            '." R32=" RANDOM32 .',
+            '."  R32=" RANDOM32 .',
         ])
         import re
         m = re.search(r'R32=(\d+)', text)
@@ -6193,7 +6193,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_random16_range(self):
         """RANDOM16 returns a 16-bit value (0..0xFFFF)."""
         text = self._run_kdos([
-            '." R16=" RANDOM16 .',
+            '."  R16=" RANDOM16 .',
         ])
         import re
         m = re.search(r'R16=(\d+)', text)
@@ -6204,7 +6204,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_rand_range(self):
         """RAND-RANGE ( max -- n ) returns value in [0, max)."""
         text = self._run_kdos([
-            '." V=" 100 RAND-RANGE .',
+            '."  V=" 100 RAND-RANGE .',
         ])
         import re
         m = re.search(r'V=(\d+)', text)
@@ -6216,15 +6216,15 @@ class TestKDOSTRNG(_KDOSTestBase):
         """SEED-RNG accepts a value without crashing."""
         text = self._run_kdos([
             "12345678 SEED-RNG",
-            '." SEEDED=OK"',
+            '."  SEEDED=OK"',
         ])
         self.assertIn("SEEDED=OK", text)
 
     def test_two_randoms_differ(self):
         """Two consecutive RANDOM calls should produce different values."""
         text = self._run_kdos([
-            'RANDOM .\" A=" .',
-            'RANDOM .\" B=" .',
+            'RANDOM .\"  A=" .',
+            'RANDOM .\"  B=" .',
         ])
         import re
         ma = re.search(r'A=(-?\d+)', text)
@@ -6236,7 +6236,7 @@ class TestKDOSTRNG(_KDOSTestBase):
     def test_dns_id_random(self):
         """DNS-ID is initialized with a random value (not fixed 42)."""
         text = self._run_kdos([
-            '." DNSID=" DNS-ID @ .',
+            '."  DNSID=" DNS-ID @ .',
         ])
         import re
         m = re.search(r'DNSID=(\d+)', text)
@@ -6267,8 +6267,8 @@ class TestKDOSCrypto(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
             "msg 3 h-buf HASH",
-            '." H0=" h-buf C@ .',           # 0x3a = 58  (same as SHA3 "abc")
-            '." H1=" h-buf 1 + C@ .',       # 0x98 = 152
+            '."  H0=" h-buf C@ .',           # 0x3a = 58  (same as SHA3 "abc")
+            '."  H1=" h-buf 1 + C@ .',       # 0x98 = 152
         ])
         self.assertIn("H0=58 ", text)
         self.assertIn("H1=152 ", text)
@@ -6278,7 +6278,7 @@ class TestKDOSCrypto(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
             "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  3 b2 2 + C!  4 b2 3 + C!",
-            '." VEQ=" b1 b2 4 VERIFY .',
+            '."  VEQ=" b1 b2 4 VERIFY .',
         ])
         self.assertIn("VEQ=0 ", text)
 
@@ -6287,7 +6287,7 @@ class TestKDOSCrypto(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE b1 4 ALLOT  1 b1 C!  2 b1 1 + C!  3 b1 2 + C!  4 b1 3 + C!",
             "CREATE b2 4 ALLOT  1 b2 C!  2 b2 1 + C!  99 b2 2 + C!  4 b2 3 + C!",
-            '." VNE=" b1 b2 4 VERIFY .',
+            '."  VNE=" b1 b2 4 VERIFY .',
         ])
         self.assertIn("VNE=-1 ", text)
 
@@ -6297,7 +6297,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE b1 8 ALLOT  b1 8 0 FILL",
             "CREATE b2 8 ALLOT  b2 8 0 FILL",
             "1 b2 7 + C!",         # differ only at last byte
-            '." V=" b1 b2 8 VERIFY .',
+            '."  V=" b1 b2 8 VERIFY .',
         ])
         self.assertIn("V=-1 ", text)
 
@@ -6311,7 +6311,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE ct 16 ALLOT",
             "test-key test-iv pt ct 16 ENCRYPT",
             "DROP",    # drop tag addr
-            '." CT0=" ct C@ .',
+            '."  CT0=" ct C@ .',
         ])
         self.assertIn("CT0=6 ", text)
 
@@ -6329,8 +6329,8 @@ class TestKDOSCrypto(_KDOSTestBase):
             "test-key test-iv pt ct 16 ENCRYPT tag-save !",
             # Decrypt
             "test-key test-iv ct rt 16 tag-save @ DECRYPT",
-            '." DF=" .',           # 0 = auth OK
-            '." RT0=" rt C@ .',    # should be 65 = 'A'
+            '."  DF=" .',           # 0 = auth OK
+            '."  RT0=" rt C@ .',    # should be 65 = 'A'
         ])
         self.assertIn("DF=0 ", text)
         self.assertIn("RT0=65 ", text)
@@ -6342,10 +6342,10 @@ class TestKDOSCrypto(_KDOSTestBase):
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
             "CREATE h-buf 32 ALLOT",
             "test-key 32 msg 3 h-buf HMAC",
-            '." M0=" h-buf C@ .',            # 99
-            '." M1=" h-buf 1 + C@ .',        # 47
-            '." M2=" h-buf 2 + C@ .',        # 97
-            '." M3=" h-buf 3 + C@ .',        # 138
+            '."  M0=" h-buf C@ .',            # 99
+            '."  M1=" h-buf 1 + C@ .',        # 47
+            '."  M2=" h-buf 2 + C@ .',        # 97
+            '."  M3=" h-buf 3 + C@ .',        # 138
         ])
         self.assertIn("M0=99 ", text)
         self.assertIn("M1=47 ", text)
@@ -6358,10 +6358,10 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE msg 1 ALLOT",    # dummy addr for 0-length
             "CREATE h-buf 32 ALLOT",
             "test-key 32 msg 0 h-buf HMAC",
-            '." M0=" h-buf C@ .',            # 80
-            '." M1=" h-buf 1 + C@ .',        # 171
-            '." M2=" h-buf 2 + C@ .',        # 22
-            '." M3=" h-buf 3 + C@ .',        # 6
+            '."  M0=" h-buf C@ .',            # 80
+            '."  M1=" h-buf 1 + C@ .',        # 171
+            '."  M2=" h-buf 2 + C@ .',        # 22
+            '."  M3=" h-buf 3 + C@ .',        # 6
         ])
         self.assertIn("M0=80 ", text)
         self.assertIn("M1=171 ", text)
@@ -6377,7 +6377,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE h2 32 ALLOT",
             "test-key 32 msg 3 h1 HMAC",
             "test-key 32 msg 3 h2 HMAC",
-            '." VH=" h1 h2 32 VERIFY .',     # 0 = equal
+            '."  VH=" h1 h2 32 VERIFY .',     # 0 = equal
         ])
         self.assertIn("VH=0 ", text)
 
@@ -6391,7 +6391,7 @@ class TestKDOSCrypto(_KDOSTestBase):
             "CREATE h2 32 ALLOT",
             "test-key 32 msg 3 h1 HMAC",
             "key2 32 msg 3 h2 HMAC",
-            '." VD=" h1 h2 32 VERIFY .',     # -1 = different
+            '."  VD=" h1 h2 32 VERIFY .',     # -1 = different
         ])
         self.assertIn("VD=-1 ", text)
 
@@ -6721,7 +6721,7 @@ class TestKDOSFileCrypto(_KDOSTestBase):
         try:
             text = self._run_kdos(self._FS_KEY_SETUP + [
                 'OPEN plain',
-                '." ENC=" ENCRYPTED? .',
+                '."  ENC=" ENCRYPTED? .',
             ], storage_image=path)
             self.assertIn("ENC=0 ", text)
         finally:
@@ -6737,8 +6737,8 @@ class TestKDOSFileCrypto(_KDOSTestBase):
                 'VARIABLE fd',
                 'OPEN secret fd !',
                 'fd @ FENCRYPT',
-                '." EI=" .',                 # 0 = success
-                '." EF=" fd @ ENCRYPTED? .',  # should be -1
+                '."  EI=" .',                 # 0 = success
+                '."  EF=" fd @ ENCRYPTED? .',  # should be -1
             ], storage_image=path)
             self.assertIn("EI=0 ", text)
             self.assertIn("EF=-1 ", text)
@@ -6778,13 +6778,13 @@ class TestKDOSFileCrypto(_KDOSTestBase):
                 'OPEN round fd !',
                 'fd @ FENCRYPT DROP',
                 'fd @ FDECRYPT',
-                '." DF=" .',                 # 0 = auth OK
-                '." EF=" fd @ ENCRYPTED? .',  # 0 = no longer encrypted
+                '."  DF=" .',                 # 0 = auth OK
+                '."  EF=" fd @ ENCRYPTED? .',  # 0 = no longer encrypted
                 # Read data back via DMA
                 'CREATE vbuf 512 ALLOT',
                 'fd @ F.START DISK-SEC!  vbuf DISK-DMA!  1 DISK-N!  DISK-READ',
-                '." V0=" vbuf C@ .',         # should be 65 = 'A'
-                '." V1=" vbuf 31 + C@ .',    # last byte also 'A'
+                '."  V0=" vbuf C@ .',         # should be 65 = 'A'
+                '."  V1=" vbuf 31 + C@ .',    # last byte also 'A'
             ], storage_image=path)
             self.assertIn("DF=0 ", text)
             self.assertIn("EF=0 ", text)
@@ -6803,7 +6803,7 @@ class TestKDOSFileCrypto(_KDOSTestBase):
                 'OPEN twice fd !',
                 'fd @ FENCRYPT DROP',
                 'fd @ FENCRYPT',
-                '." E2=" .',                 # 0 = no-op, success
+                '."  E2=" .',                 # 0 = no-op, success
             ], storage_image=path)
             self.assertIn("E2=0 ", text)
         finally:
@@ -6817,7 +6817,7 @@ class TestKDOSFileCrypto(_KDOSTestBase):
             text = self._run_kdos(self._FS_KEY_SETUP + [
                 'OPEN plain',
                 'FDECRYPT',
-                '." D=" .',
+                '."  D=" .',
             ], storage_image=path)
             self.assertIn("D=0 ", text)
         finally:
@@ -6836,7 +6836,7 @@ class TestKDOSFileCrypto(_KDOSTestBase):
                 'CREATE bad-key 32 ALLOT  bad-key 32 255 FILL',
                 'bad-key FS-KEY!',
                 'fd @ FDECRYPT',
-                '." WK=" .',             # -1 = auth fail
+                '."  WK=" .',             # -1 = auth fail
             ], storage_image=path)
             self.assertIn("WK=-1 ", text)
         finally:
@@ -6851,8 +6851,8 @@ class TestKDOSFileCrypto(_KDOSTestBase):
                 'VARIABLE fd',
                 'OPEN empty fd !',
                 'fd @ FENCRYPT',
-                '." E=" .',                  # 0
-                '." EF=" fd @ ENCRYPTED? .',  # 0 — not encrypted (nothing to do)
+                '."  E=" .',                  # 0
+                '."  EF=" fd @ ENCRYPTED? .',  # 0 — not encrypted (nothing to do)
             ], storage_image=path)
             self.assertIn("E=0 ", text)
             self.assertIn("EF=0 ", text)
@@ -8024,7 +8024,7 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_msg_handler_dispatch(self):
         """MSG-HANDLER! registers handler, MSG-DISPATCH invokes it."""
         text = self._run_mc([
-            ": MY-H  DROP .\" got:\" . .\" from:\" . CR ;",
+            ": MY-H  DROP .\"  got:\" . .\"  from:\" . CR ;",
             "' MY-H MSG-DATA MSG-HANDLER!",
             "MSG-DATA 77 0 MSG-SEND DROP",
             "MSG-DISPATCH .",
@@ -8088,7 +8088,7 @@ class TestKDOSMulticore(unittest.TestCase):
         text = self._run_mc([
             "DICT-ACQUIRE",
             "DICT-RELEASE",
-            '.\" ok"',
+            '.\"  ok"',
         ])
         self.assertIn("ok", text)
 
@@ -8097,7 +8097,7 @@ class TestKDOSMulticore(unittest.TestCase):
         text = self._run_mc([
             "UART-ACQUIRE",
             "UART-RELEASE",
-            '.\" ok"',
+            '.\"  ok"',
         ])
         self.assertIn("ok", text)
 
@@ -8106,7 +8106,7 @@ class TestKDOSMulticore(unittest.TestCase):
         text = self._run_mc([
             "FS-ACQUIRE",
             "FS-RELEASE",
-            '.\" ok"',
+            '.\"  ok"',
         ])
         self.assertIn("ok", text)
 
@@ -8115,14 +8115,14 @@ class TestKDOSMulticore(unittest.TestCase):
         text = self._run_mc([
             "HEAP-ACQUIRE",
             "HEAP-RELEASE",
-            '.\" ok"',
+            '.\"  ok"',
         ])
         self.assertIn("ok", text)
 
     def test_with_lock(self):
         """WITH-LOCK executes XT while holding a lock."""
         text = self._run_mc([
-            ': TEST-LK .\" locked" ;',
+            ': TEST-LK .\"  locked" ;',
             "' TEST-LK DICT-LOCK WITH-LOCK",
         ])
         self.assertIn("locked", text)
@@ -8134,7 +8134,7 @@ class TestKDOSMulticore(unittest.TestCase):
             "' NOP-XT UART-LOCK WITH-LOCK",
             "UART-ACQUIRE",
             "UART-RELEASE",
-            '.\" ok"',
+            '.\"  ok"',
         ])
         self.assertIn("ok", text)
 
@@ -8202,14 +8202,14 @@ class TestKDOSNetStack(_KDOSTestBase):
         """MY-MAC should contain the NIC's default MAC after MAC-INIT."""
         # Default NIC MAC is 02:4D:50:36:34:00
         text = self._run_kdos([
-            "MY-MAC C@ . .\" m0\" ",
-            "MY-MAC 1+ C@ . .\" m1\" ",
-            "MY-MAC 2 + C@ . .\" m2\" ",
-            "MY-MAC 3 + C@ . .\" m3\" ",
-            "MY-MAC 4 + C@ . .\" m4\" ",
-            "MY-MAC 5 + C@ . .\" m5\" ",
+            "MY-MAC C@ . .\"  m0\" ",
+            "MY-MAC 1+ C@ . .\"  m1\" ",
+            "MY-MAC 2 + C@ . .\"  m2\" ",
+            "MY-MAC 3 + C@ . .\"  m3\" ",
+            "MY-MAC 4 + C@ . .\"  m4\" ",
+            "MY-MAC 5 + C@ . .\"  m5\" ",
         ])
-        # 02:4D:50:36:34:00  (. adds trailing space, ." adds another)
+        # 02:4D:50:36:34:00  (. adds trailing space, ."  adds another)
         self.assertIn("2  m0", text)
         self.assertIn("77  m1", text)
         self.assertIn("80  m2", text)
@@ -8222,9 +8222,9 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE nw-test 4 ALLOT",
             "2048 nw-test NW!",
-            "nw-test NW@ . .\" val\" ",
-            "nw-test C@ . .\" hi\" ",
-            "nw-test 1+ C@ . .\" lo\" ",
+            "nw-test NW@ . .\"  val\" ",
+            "nw-test C@ . .\"  hi\" ",
+            "nw-test 1+ C@ . .\"  lo\" ",
         ])
         self.assertIn("2048  val", text)
         self.assertIn("8  hi", text)
@@ -8262,8 +8262,8 @@ class TestKDOSNetStack(_KDOSTestBase):
         """ETH-DST = frame+0, ETH-SRC = frame+6."""
         text = self._run_kdos([
             "CREATE eth-o 20 ALLOT",
-            "eth-o ETH-DST eth-o - . .\" dst\" ",
-            "eth-o ETH-SRC eth-o - . .\" src\" ",
+            "eth-o ETH-DST eth-o - . .\"  dst\" ",
+            "eth-o ETH-SRC eth-o - . .\"  src\" ",
         ])
         self.assertIn("0  dst", text)
         self.assertIn("6  src", text)
@@ -8404,7 +8404,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE etx-pay 4 ALLOT  etx-pay 4 99 FILL",
             "MAC-BCAST ETYPE-IP4 etx-pay 4 ETH-SEND-TX",
-            ".\" ok-send\"",
+            ".\"  ok-send\"",
         ])
         self.assertIn("ok-send", text)
 
@@ -8439,7 +8439,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "MY-MAC etxp4 ETH-SRC 6 CMOVE",
             "ETYPE-IP4 etxp4 ETH-TYPE!",
             "etxp4 20 ETH-SEND",
-            ".\" sent\"",
+            ".\"  sent\"",
         ])
         self.assertIn("sent", text)
 
@@ -8579,7 +8579,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE amac 6 ALLOT  170 amac C!  187 amac 1+ C!  204 amac 2 + C!",
             "221 amac 3 + C!  238 amac 4 + C!  1 amac 5 + C!",
             "aip amac ARP-INSERT",
-            "aip ARP-LOOKUP DUP 0<> . .\" found\"",
+            "aip ARP-LOOKUP DUP 0<> . .\"  found\"",
         ])
         self.assertIn("-1  found", text)
 
@@ -8626,7 +8626,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         """IP-SET should configure MY-IP."""
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            ".\" ip=\" MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
+            ".\"  ip=\" MY-IP C@ . MY-IP 1+ C@ . MY-IP 2 + C@ . MY-IP 3 + C@ .",
         ])
         # Use tagged output to avoid matching echoed input
         self.assertIn("ip=192 168 1 100 ", text)
@@ -8765,7 +8765,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             # Set SPA = 192.168.1.50
             "192 rq 14 + C!  168 rq 15 + C!  1 rq 16 + C!  50 rq 17 + C!",
             "rq ARP-BUILD-REPLY DROP",   # build reply in ARP-PKT-BUF
-            "DUP ARP-IS-REPLY? .\" rep\"",
+            "DUP ARP-IS-REPLY? .\"  rep\"",
             # THA should be the requester's SHA
             "DUP ARP-F.THA C@ .",        # should be 170 (0xAA)
             # TPA should be requester's SPA (192.168.1.50)
@@ -8809,7 +8809,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "rep ARP-PARSE-REPLY",
             # Now look up 10.0.0.42
             "CREATE lip 4 ALLOT  10 lip C!  0 lip 1+ C!  0 lip 2 + C!  42 lip 3 + C!",
-            "lip ARP-LOOKUP DUP 0<> .\" ok\"",
+            "lip ARP-LOOKUP DUP 0<> .\"  ok\"",
             "DUP IF C@ . THEN DROP",
         ])
         self.assertIn("ok", text)
@@ -8856,7 +8856,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "ARP-CLEAR",
             "192 168 1 100 IP-SET",
             "CREATE trg 4 ALLOT  192 trg C!  168 trg 1+ C!  1 trg 2 + C!  50 trg 3 + C!",
-            "trg ARP-RESOLVE 0<> .\" resolved\"",
+            "trg ARP-RESOLVE 0<> .\"  resolved\"",
             "trg ARP-LOOKUP C@ .",
         ], nic_frames=[reply_frame])
         self.assertIn("resolved", text)
@@ -8971,7 +8971,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "ARP-CLEAR",
             "192 168 1 100 IP-SET",
-            "ARP-POLL .\" h\" .",
+            "ARP-POLL .\"  h\" .",
         ], nic_frames=[req])
         # ARP-POLL returns ( len handled? ) — handled? should be -1
         self.assertIn("h", text)
@@ -9023,7 +9023,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "192 168 1 100 IP-SET",
             "CREATE dst 4 ALLOT  10 dst C!  0 dst 1+ C!  0 dst 2 + C!  1 dst 3 + C!",
             "CREATE pay 8 ALLOT  pay 8 65 FILL",   # 'A' * 8
-            "IP-PROTO-UDP dst pay 8 IP-BUILD .\" len=\" . DROP",
+            "IP-PROTO-UDP dst pay 8 IP-BUILD .\"  len=\" . DROP",
         ])
         self.assertIn("len=28 ", text)   # 20 + 8
 
@@ -9112,7 +9112,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE pay9 5 ALLOT  pay9 5 66 FILL",  # 'B' * 5
             "IP-PROTO-UDP dst9 pay9 5 IP-BUILD DROP",
             # IP-PARSE returns ( proto src dst data datalen )
-            "IP-PARSE .\" dl=\" . DROP DROP",
+            "IP-PARSE .\"  dl=\" . DROP DROP",
             "DROP .",  # proto
         ])
         self.assertIn("dl=5 ", text)
@@ -9153,7 +9153,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE gwm2 6 ALLOT  gwm2 6 187 FILL",
             "gw2 gwm2 ARP-INSERT",
             "CREATE pl2 4 ALLOT  pl2 4 0 FILL",
-            "IP-PROTO-ICMP gw2 pl2 4 IP-SEND .\" s=\" .",
+            "IP-PROTO-ICMP gw2 pl2 4 IP-SEND .\"  s=\" .",
         ])
         self.assertIn("s=0 ", text)   # ior=0 means success
 
@@ -9204,7 +9204,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             [10, 0, 0, 1], [192, 168, 1, 100], b'\x42' * 8)
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            "IP-RECV .\" len=\" . 0<> .\" got\"",
+            "IP-RECV .\"  len=\" . 0<> .\"  got\"",
         ], nic_frames=[frame])
         self.assertIn("len=28 ", text)  # 20 hdr + 8 payload
         self.assertIn("got", text)
@@ -9248,8 +9248,8 @@ class TestKDOSNetStack(_KDOSTestBase):
             [10, 0, 0, 1], [192, 168, 1, 100], b'\x00' * 12)
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            "IP-RECV .\" len=\" . DROP",
-            "ETH-RX-BUF ETH-PLD IP-H.PROTO C@ .\" p=\" .",
+            "IP-RECV .\"  len=\" . DROP",
+            "ETH-RX-BUF ETH-PLD IP-H.PROTO C@ .\"  p=\" .",
         ], nic_frames=[frame])
         self.assertIn("p=1 ", text)
 
@@ -9275,7 +9275,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         """ICMP-BUILD-ECHO-REQ returns correct total length."""
         text = self._run_kdos([
             "CREATE ep 4 ALLOT  ep 4 65 FILL",
-            "ep 4 ICMP-BUILD-ECHO-REQ .\" len=\" . DROP",
+            "ep 4 ICMP-BUILD-ECHO-REQ .\"  len=\" . DROP",
         ])
         self.assertIn("len=12 ", text)  # 8 hdr + 4 payload
 
@@ -9471,7 +9471,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE TPAY 4 ALLOT",
             "65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
             "1234 5678 TPAY 4 UDP-BUILD",
-            ".\" tlen=\" .",            # total len = 8 + 4 = 12
+            ".\"  tlen=\" .",            # total len = 8 + 4 = 12
         ])
         self.assertIn("tlen=12 ", text)
 
@@ -9480,8 +9480,8 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE TPAY 2 ALLOT  72 TPAY C!  73 TPAY 1+ C!",
             "1234 5678 TPAY 2 UDP-BUILD DROP",
-            "UDP-TX-BUF UDP-H.SPORT NW16@ .\" sp=\" .",
-            "UDP-TX-BUF UDP-H.DPORT NW16@ .\" dp=\" .",
+            "UDP-TX-BUF UDP-H.SPORT NW16@ .\"  sp=\" .",
+            "UDP-TX-BUF UDP-H.DPORT NW16@ .\"  dp=\" .",
         ])
         self.assertIn("sp=1234 ", text)
         self.assertIn("dp=5678 ", text)
@@ -9491,7 +9491,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE TPAY 10 ALLOT  TPAY 10 65 FILL",
             "100 200 TPAY 10 UDP-BUILD DROP",
-            "UDP-TX-BUF UDP-H.LEN NW16@ .\" len=\" .",
+            "UDP-TX-BUF UDP-H.LEN NW16@ .\"  len=\" .",
         ])
         self.assertIn("len=18 ", text)   # 8 + 10
 
@@ -9500,9 +9500,9 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE TPAY 3 ALLOT  88 TPAY C!  89 TPAY 1+ C!  90 TPAY 2 + C!",
             "100 200 TPAY 3 UDP-BUILD DROP",
-            "UDP-TX-BUF UDP-H.DATA C@ .\" b0=\" .",
-            "UDP-TX-BUF UDP-H.DATA 1+ C@ .\" b1=\" .",
-            "UDP-TX-BUF UDP-H.DATA 2 + C@ .\" b2=\" .",
+            "UDP-TX-BUF UDP-H.DATA C@ .\"  b0=\" .",
+            "UDP-TX-BUF UDP-H.DATA 1+ C@ .\"  b1=\" .",
+            "UDP-TX-BUF UDP-H.DATA 2 + C@ .\"  b2=\" .",
         ])
         self.assertIn("b0=88 ", text)
         self.assertIn("b1=89 ", text)
@@ -9574,10 +9574,10 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE TPAY 4 ALLOT  65 TPAY C!  66 TPAY 1+ C!  67 TPAY 2 + C!  68 TPAY 3 + C!",
             "4000 8080 TPAY 4 UDP-BUILD DROP",
             "UDP-TX-BUF UDP-PARSE",
-            ".\" dlen=\" .",
-            "C@ .\" d0=\" .",
-            ".\" dp=\" .",
-            ".\" sp=\" .",
+            ".\"  dlen=\" .",
+            "C@ .\"  d0=\" .",
+            ".\"  dp=\" .",
+            ".\"  sp=\" .",
         ])
         self.assertIn("sp=4000 ", text)
         self.assertIn("dp=8080 ", text)
@@ -9625,8 +9625,8 @@ class TestKDOSNetStack(_KDOSTestBase):
             3000, 4000, b'\xDE\xAD\xBE\xEF')
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            "IP-RECV SWAP IP-H.PROTO C@ .\" pr=\" .",
-            ".\" iplen=\" .",
+            "IP-RECV SWAP IP-H.PROTO C@ .\"  pr=\" .",
+            ".\"  iplen=\" .",
         ], nic_frames=[frame])
         self.assertIn("pr=17 ", text)     # UDP protocol
         self.assertIn("iplen=32 ", text)  # 20 + 8 + 4
@@ -9707,8 +9707,8 @@ class TestKDOSNetStack(_KDOSTestBase):
             3000, 4000, b'\xDE\xAD\xBE\xEF')
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
-            "UDP-RECV .\" ulen=\" .",   # udp-len
-            "UDP-H.SPORT NW16@ .\" sp=\" .",
+            "UDP-RECV .\"  ulen=\" .",   # udp-len
+            "UDP-H.SPORT NW16@ .\"  sp=\" .",
             "DROP",                       # drop src-ip
         ], nic_frames=[frame])
         self.assertIn("ulen=12 ", text)   # 8 hdr + 4 payload
@@ -9824,8 +9824,8 @@ class TestKDOSNetStack(_KDOSTestBase):
         """DHCP-BUILD-DISCOVER should produce a valid DISCOVER packet."""
         text = self._run_kdos([
             "DHCP-BUILD-DISCOVER",
-            ".\" len=\" .",
-            "C@ .\" op=\" .",            # op should be 1 (BOOTREQUEST)
+            ".\"  len=\" .",
+            "C@ .\"  op=\" .",            # op should be 1 (BOOTREQUEST)
         ])
         self.assertIn("op=1 ", text)
         # Length: 240 hdr + 3 (opt53 msgtype) + 6 (opt55 paramlist) + 1 (end) = 250
@@ -9854,9 +9854,9 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE OIP 4 ALLOT  192 168 1 100 OIP IP!",
             "CREATE SIP 4 ALLOT  192 168 1 1 SIP IP!",
             "OIP SIP DHCP-BUILD-REQUEST",
-            ".\" len=\" .",
+            ".\"  len=\" .",
             "DROP",
-            "DHCP-BUF DHCP-GET-MSGTYPE .\" mt=\" .",
+            "DHCP-BUF DHCP-GET-MSGTYPE .\"  mt=\" .",
         ])
         self.assertIn("mt=3 ", text)   # DHCP-REQUEST
 
@@ -9890,10 +9890,10 @@ class TestKDOSNetStack(_KDOSTestBase):
             "0 0 0 0 IP-SET",
             "UDP-RECV DROP UDP-H.DATA",         # get DHCP data
             "NIP",                               # drop src-ip, keep dhcp ptr
-            "DUP DHCP-GET-MSGTYPE .\" mt=\" .",
+            "DUP DHCP-GET-MSGTYPE .\"  mt=\" .",
             "DHCP-PARSE-OFFER",
-            "SWAP C@ .\" oip0=\" .",
-            "C@ .\" sip0=\" .",
+            "SWAP C@ .\"  oip0=\" .",
+            "C@ .\"  sip0=\" .",
         ], nic_frames=[frame])
         self.assertIn("mt=2 ", text)      # OFFER
         self.assertIn("oip0=192 ", text)  # first byte of offered IP
@@ -9920,7 +9920,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "UDP-RECV DROP UDP-H.DATA",
             "NIP",
             "DHCP-PARSE-ACK .",
-            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+            "MY-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_frames=[frame])
         self.assertIn("-1 ", text)        # ACK accepted
         self.assertIn("a=10 ", text)
@@ -9998,7 +9998,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "DHCP-START .",
-            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+            "MY-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_tx_callback=dhcp_server)
         self.assertIn("-1 ", text)          # success
         self.assertIn("a=192 ", text)
@@ -10017,8 +10017,8 @@ class TestKDOSNetStack(_KDOSTestBase):
     def test_dhcp_xid_changes(self):
         """DHCP-NEW-XID should produce a different XID each call."""
         text = self._run_kdos([
-            "DHCP-NEW-XID DHCP-XID @ .\" x1=\" .",
-            "DHCP-NEW-XID DHCP-XID @ .\" x2=\" .",
+            "DHCP-NEW-XID DHCP-XID @ .\"  x1=\" .",
+            "DHCP-NEW-XID DHCP-XID @ .\"  x2=\" .",
         ])
         # Extract the two values
         import re
@@ -10126,9 +10126,9 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "DHCP-BUILD-DISCOVER DROP",
             "DHCP-BUF 55 DHCP-GET-OPTION",
-            ".\" plen=\" .",
-            "DUP C@ .\" p0=\" .",
-            "1+ C@ .\" p1=\" .",
+            ".\"  plen=\" .",
+            "DUP C@ .\"  p0=\" .",
+            "1+ C@ .\"  p1=\" .",
         ])
         self.assertIn("plen=4 ", text)     # 4 items requested
         self.assertIn("p0=1 ", text)       # subnet mask
@@ -10164,7 +10164,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "0 0 0 0 IP-SET",
             "UDP-RECV DROP UDP-H.DATA NIP",
             "DHCP-PARSE-ACK .",
-            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+            "DNS-SERVER-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_frames=[frame])
         self.assertIn("-1 ", text)
         self.assertIn("a=1 ", text)
@@ -10251,7 +10251,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "DHCP-START .",
-            "MY-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+            "MY-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_tx_callback=dhcp_server_retry)
         self.assertIn("-1 ", text)
         self.assertIn("a=192 ", text)
@@ -10331,7 +10331,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "DHCP-START .",
-            "DNS-SERVER-IP IP@ .\" d=\" . .\" c=\" . .\" b=\" . .\" a=\" .",
+            "DNS-SERVER-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_tx_callback=dhcp_server_dns)
         self.assertIn("-1 ", text)
         self.assertIn("a=9 ", text)
@@ -10381,14 +10381,14 @@ class TestKDOSNetStack(_KDOSTestBase):
             # Manually store "a.bc" (4 chars)
             '97 DN C!  46 DN 1+ C!  98 DN 2 + C!  99 DN 3 + C!',
             'DN 4 OUTBUF DNS-ENCODE-NAME',
-            'OVER - .\" elen=\" .',   # encoded length
+            'OVER - .\"  elen=\" .',   # encoded length
             'DROP',
-            'OUTBUF C@ .\" l0=\" .',   # first label len=1
-            'OUTBUF 1+ C@ .\" c0=\" .',  # 'a'=97
-            'OUTBUF 2 + C@ .\" l1=\" .',  # second label len=2
-            'OUTBUF 3 + C@ .\" c1=\" .',  # 'b'=98
-            'OUTBUF 4 + C@ .\" c2=\" .',  # 'c'=99
-            'OUTBUF 5 + C@ .\" t=\" .',   # terminator=0
+            'OUTBUF C@ .\"  l0=\" .',   # first label len=1
+            'OUTBUF 1+ C@ .\"  c0=\" .',  # 'a'=97
+            'OUTBUF 2 + C@ .\"  l1=\" .',  # second label len=2
+            'OUTBUF 3 + C@ .\"  c1=\" .',  # 'b'=98
+            'OUTBUF 4 + C@ .\"  c2=\" .',  # 'c'=99
+            'OUTBUF 5 + C@ .\"  t=\" .',   # terminator=0
         ])
         self.assertIn("elen=6 ", text)   # 1+'a'+2+'bc'+0 = 6
         self.assertIn("l0=1 ", text)
@@ -10405,7 +10405,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             # Store "a.b" (3 chars)
             '97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
             'DN 3 DNS-BUILD-QUERY',
-            '.\" qlen=\" .',   # total length: 12(hdr) + 1+1+1+1+0(name) + 4(type+class) = 21
+            '.\"  qlen=\" .',   # total length: 12(hdr) + 1+1+1+1+0(name) + 4(type+class) = 21
         ])
         self.assertIn("qlen=21 ", text)  # 12 + 5 + 4
 
@@ -10414,7 +10414,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             'CREATE DN 3 ALLOT  97 DN C!  46 DN 1+ C!  98 DN 2 + C!',
             'DN 3 DNS-BUILD-QUERY DROP',
-            'DNS-BUF 2 + NW16@ .\" fl=\" .',
+            'DNS-BUF 2 + NW16@ .\"  fl=\" .',
         ])
         self.assertIn("fl=256 ", text)  # 0x0100
 
@@ -10433,11 +10433,11 @@ class TestKDOSNetStack(_KDOSTestBase):
             "FIP FMAC ARP-INSERT",
             'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
             'DNAME 3 DNS-RESOLVE',
-            'DUP 0<> .\" ok=\" .',
-            'DUP C@ .\" a=\" .',
-            'DUP 1+ C@ .\" b=\" .',
-            'DUP 2 + C@ .\" c=\" .',
-            '3 + C@ .\" d=\" .',
+            'DUP 0<> .\"  ok=\" .',
+            'DUP C@ .\"  a=\" .',
+            'DUP 1+ C@ .\"  b=\" .',
+            'DUP 2 + C@ .\"  c=\" .',
+            '3 + C@ .\"  d=\" .',
         ], nic_frames=[dns_frame])
         self.assertIn("ok=-1 ", text)
         self.assertIn("a=93 ", text)
@@ -10461,11 +10461,11 @@ class TestKDOSNetStack(_KDOSTestBase):
             "UDP-RECV DROP UDP-H.DATA NIP",   # ( dns-buf )
             str(len(dns_resp)),                # push dns-len
             "DNS-PARSE-RESPONSE",
-            "DUP 0<> .\" found=\" .",
-            "DUP C@ .\" a=\" .",
-            "DUP 1+ C@ .\" b=\" .",
-            "DUP 2 + C@ .\" c=\" .",
-            "3 + C@ .\" d=\" .",
+            "DUP 0<> .\"  found=\" .",
+            "DUP C@ .\"  a=\" .",
+            "DUP 1+ C@ .\"  b=\" .",
+            "DUP 2 + C@ .\"  c=\" .",
+            "3 + C@ .\"  d=\" .",
         ], nic_frames=[frame])
         self.assertIn("found=-1 ", text)
         self.assertIn("a=1 ", text)
@@ -10511,9 +10511,9 @@ class TestKDOSNetStack(_KDOSTestBase):
             "FIP FMAC ARP-INSERT",
             'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
             'DNAME 3 DNS-RESOLVE',
-            'DUP 0<> .\" ok=\" .',
-            'DUP C@ .\" a=\" .',
-            '1+ C@ .\" b=\" .',
+            'DUP 0<> .\"  ok=\" .',
+            'DUP C@ .\"  a=\" .',
+            '1+ C@ .\"  b=\" .',
         ], nic_frames=[dns_frame])
         self.assertIn("ok=-1 ", text)
         self.assertIn("a=93 ", text)
@@ -10654,11 +10654,11 @@ class TestKDOSNetStack(_KDOSTestBase):
     def test_tcp_flag_constants(self):
         """TCP flag constants should have correct values."""
         text = self._run_kdos([
-            "TCP-FIN .\" f=\" .",
-            "TCP-SYN .\" s=\" .",
-            "TCP-RST .\" r=\" .",
-            "TCP-PSH .\" p=\" .",
-            "TCP-ACK .\" a=\" .",
+            "TCP-FIN .\"  f=\" .",
+            "TCP-SYN .\"  s=\" .",
+            "TCP-RST .\"  r=\" .",
+            "TCP-PSH .\"  p=\" .",
+            "TCP-ACK .\"  a=\" .",
         ])
         self.assertIn("f=1 ", text)
         self.assertIn("s=2 ", text)
@@ -10669,17 +10669,17 @@ class TestKDOSNetStack(_KDOSTestBase):
     def test_tcp_state_constants(self):
         """TCP state constants should be enumerated 0..10."""
         text = self._run_kdos([
-            "TCPS-CLOSED .\" c=\" .",
-            "TCPS-LISTEN .\" l=\" .",
-            "TCPS-SYN-SENT .\" ss=\" .",
-            "TCPS-SYN-RCVD .\" sr=\" .",
-            "TCPS-ESTABLISHED .\" e=\" .",
-            "TCPS-FIN-WAIT-1 .\" f1=\" .",
-            "TCPS-FIN-WAIT-2 .\" f2=\" .",
-            "TCPS-CLOSE-WAIT .\" cw=\" .",
-            "TCPS-CLOSING .\" cl=\" .",
-            "TCPS-LAST-ACK .\" la=\" .",
-            "TCPS-TIME-WAIT .\" tw=\" .",
+            "TCPS-CLOSED .\"  c=\" .",
+            "TCPS-LISTEN .\"  l=\" .",
+            "TCPS-SYN-SENT .\"  ss=\" .",
+            "TCPS-SYN-RCVD .\"  sr=\" .",
+            "TCPS-ESTABLISHED .\"  e=\" .",
+            "TCPS-FIN-WAIT-1 .\"  f1=\" .",
+            "TCPS-FIN-WAIT-2 .\"  f2=\" .",
+            "TCPS-CLOSE-WAIT .\"  cw=\" .",
+            "TCPS-CLOSING .\"  cl=\" .",
+            "TCPS-LAST-ACK .\"  la=\" .",
+            "TCPS-TIME-WAIT .\"  tw=\" .",
         ])
         self.assertIn("c=0 ", text)
         self.assertIn("l=1 ", text)
@@ -10703,9 +10703,9 @@ class TestKDOSNetStack(_KDOSTestBase):
     def test_tcb_n_indexing(self):
         """TCB-N should return different addresses for different indices."""
         text = self._run_kdos([
-            "0 TCB-N .\" a=\" .",
-            "1 TCB-N .\" b=\" .",
-            "1 TCB-N 0 TCB-N - .\" diff=\" .",
+            "0 TCB-N .\"  a=\" .",
+            "1 TCB-N .\"  b=\" .",
+            "1 TCB-N 0 TCB-N - .\"  diff=\" .",
         ])
         self.assertIn("diff=5728 ", text)
 
@@ -10722,10 +10722,10 @@ class TestKDOSNetStack(_KDOSTestBase):
         """TCP-INIT-ALL should set all TCBs to CLOSED."""
         text = self._run_kdos([
             "TCP-INIT-ALL",
-            "0 TCB-N TCB.STATE @ .\" s0=\" .",
-            "1 TCB-N TCB.STATE @ .\" s1=\" .",
-            "2 TCB-N TCB.STATE @ .\" s2=\" .",
-            "3 TCB-N TCB.STATE @ .\" s3=\" .",
+            "0 TCB-N TCB.STATE @ .\"  s0=\" .",
+            "1 TCB-N TCB.STATE @ .\"  s1=\" .",
+            "2 TCB-N TCB.STATE @ .\"  s2=\" .",
+            "3 TCB-N TCB.STATE @ .\"  s3=\" .",
         ])
         self.assertIn("s0=0 ", text)
         self.assertIn("s1=0 ", text)
@@ -10813,10 +10813,10 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "CREATE NW32B 4 ALLOT",
             "287454020 NW32B NW32!",   # 0x11223344
-            "NW32B C@ .\" b0=\" .",
-            "NW32B 1+ C@ .\" b1=\" .",
-            "NW32B 2 + C@ .\" b2=\" .",
-            "NW32B 3 + C@ .\" b3=\" .",
+            "NW32B C@ .\"  b0=\" .",
+            "NW32B 1+ C@ .\"  b1=\" .",
+            "NW32B 2 + C@ .\"  b2=\" .",
+            "NW32B 3 + C@ .\"  b3=\" .",
         ])
         self.assertIn("b0=17 ", text)   # 0x11
         self.assertIn("b1=34 ", text)   # 0x22
@@ -10845,7 +10845,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "_CK-LEN ! _CK-BUF !",
             "MY-IP RIP3 _CK-BUF @ _CK-LEN @ TCP-FILL-CKSUM",
             # Read the checksum field
-            "_CK-BUF @ TCP-H.CKSUM NW16@ .\" CK: \" .",
+            "_CK-BUF @ TCP-H.CKSUM NW16@ .\"  CK: \" .",
         ])
         # Parse from the output line (avoid echo collision)
         import re
@@ -10870,7 +10870,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "_VCK-HDR @ IP-H.SRC _VCK-HDR @ IP-H.DST",
             "_VCK-HDR @ IP-H.DATA",
             "_VCK-HDR @ IP-H.TLEN NW16@ 20 -",   # tcp-len = ip-total - 20
-            "TCP-VERIFY-CKSUM .\" valid=\" .",
+            "TCP-VERIFY-CKSUM .\"  valid=\" .",
         ], nic_frames=[frame])
         self.assertIn("valid=-1 ", text)
 
@@ -10887,8 +10887,8 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP PMAC ARP-INSERT",
             # Connect
             "PIP 80 12345 TCP-CONNECT",
-            "DUP 0<> .\" ok=\" .",
-            "TCB.STATE @ .\" st=\" .",
+            "DUP 0<> .\"  ok=\" .",
+            "TCB.STATE @ .\"  st=\" .",
         ])
         self.assertIn("ok=-1 ", text)
         self.assertIn("st=2 ", text)  # TCPS-SYN-SENT = 2
@@ -10907,7 +10907,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
             "PIP PMAC ARP-INSERT",
             "PIP 80 12345 TCP-CONNECT DROP",
-            '.\" done\"',
+            '.\"  done\"',
         ], nic_tx_callback=capture_tx)
         self.assertIn("done", text)
         # Should have sent at least one TCP frame (the SYN)
@@ -10938,8 +10938,8 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "TCP-INIT-ALL",
             "8080 TCP-LISTEN",
-            "DUP 0<> .\" ok=\" .",
-            "TCB.STATE @ .\" st=\" .",
+            "DUP 0<> .\"  ok=\" .",
+            "TCB.STATE @ .\"  st=\" .",
         ])
         self.assertIn("ok=-1 ", text)
         self.assertIn("st=1 ", text)  # TCPS-LISTEN = 1
@@ -10991,11 +10991,11 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP PMAC ARP-INSERT",
             # Connect — sends SYN
             "PIP 80 12345 TCP-CONNECT",
-            "DUP 0<> .\" alloc=\" .",
+            "DUP 0<> .\"  alloc=\" .",
             # SYN+ACK should arrive; poll to process it
             "VARIABLE _HA-TCB  DUP _HA-TCB !",
             "5 TCP-POLL-WAIT",
-            "_HA-TCB @ TCB.STATE @ .\" st=\" .",
+            "_HA-TCB @ TCB.STATE @ .\"  st=\" .",
         ], nic_tx_callback=tcp_peer_active)
         self.assertIn("alloc=-1 ", text)
         self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
@@ -11044,11 +11044,11 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
             "PIP PMAC ARP-INSERT",
             # Listen on port 8080
-            "8080 TCP-LISTEN DUP 0<> .\" listen=\" .",
+            "8080 TCP-LISTEN DUP 0<> .\"  listen=\" .",
             "VARIABLE _HP-TCB  DUP _HP-TCB !",
             # Poll — processes the SYN, sends SYN+ACK, callback sends ACK
             "10 TCP-POLL-WAIT",
-            "_HP-TCB @ TCB.STATE @ .\" st=\" .",
+            "_HP-TCB @ TCB.STATE @ .\"  st=\" .",
         ], nic_frames=[syn_frame], nic_tx_callback=tcp_peer_passive)
         self.assertIn("listen=-1 ", text)
         self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
@@ -11100,10 +11100,10 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP 80 12345 TCP-CONNECT",
             "VARIABLE _SD-TCB  DUP _SD-TCB !",
             "5 TCP-POLL-WAIT",                 # process SYN+ACK
-            "_SD-TCB @ TCB.STATE @ .\" st1=\" .",
+            "_SD-TCB @ TCB.STATE @ .\"  st1=\" .",
             # Now send some data: "Hello"
             'CREATE MSG 5 ALLOT  72 MSG C!  101 MSG 1+ C!  108 MSG 2 + C!  108 MSG 3 + C!  111 MSG 4 + C!',
-            "_SD-TCB @ MSG 5 TCP-SEND .\" sent=\" .",
+            "_SD-TCB @ MSG 5 TCP-SEND .\"  sent=\" .",
         ], nic_tx_callback=tcp_peer_data)
         self.assertIn("st1=4 ", text)    # ESTABLISHED
         self.assertIn("sent=5 ", text)   # sent 5 bytes
@@ -11170,12 +11170,12 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP 80 12345 TCP-CONNECT",
             "VARIABLE _RD-TCB  DUP _RD-TCB !",
             "10 TCP-POLL-WAIT",                # SYN+ACK + data arrival
-            "_RD-TCB @ TCB.STATE @ .\" st=\" .",
+            "_RD-TCB @ TCB.STATE @ .\"  st=\" .",
             # Read data
             "CREATE RBUF 64 ALLOT  RBUF 64 0 FILL",
-            "_RD-TCB @ RBUF 64 TCP-RECV .\" got=\" .",
-            "RBUF C@ .\" b0=\" .",
-            "RBUF 1+ C@ .\" b1=\" .",
+            "_RD-TCB @ RBUF 64 TCP-RECV .\"  got=\" .",
+            "RBUF C@ .\"  b0=\" .",
+            "RBUF 1+ C@ .\"  b1=\" .",
         ], nic_tx_callback=tcp_peer_recv)
         self.assertIn("st=4 ", text)     # ESTABLISHED
         self.assertIn("got=2 ", text)    # received 2 bytes
@@ -11189,13 +11189,13 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "TCP-INIT-ALL",
             "CREATE TDATA 4 ALLOT  65 TDATA C!  66 TDATA 1+ C!  67 TDATA 2 + C!  68 TDATA 3 + C!",
-            "0 TCB-N TDATA 4 TCP-RX-PUSH .\" pushed=\" .",
+            "0 TCB-N TDATA 4 TCP-RX-PUSH .\"  pushed=\" .",
             "CREATE TOUT 8 ALLOT  TOUT 8 0 FILL",
-            "0 TCB-N TOUT 4 TCP-RX-POP .\" popped=\" .",
-            "TOUT C@ .\" a=\" .",
-            "TOUT 1+ C@ .\" b=\" .",
-            "TOUT 2 + C@ .\" c=\" .",
-            "TOUT 3 + C@ .\" d=\" .",
+            "0 TCB-N TOUT 4 TCP-RX-POP .\"  popped=\" .",
+            "TOUT C@ .\"  a=\" .",
+            "TOUT 1+ C@ .\"  b=\" .",
+            "TOUT 2 + C@ .\"  c=\" .",
+            "TOUT 3 + C@ .\"  d=\" .",
         ])
         self.assertIn("pushed=4 ", text)
         self.assertIn("popped=4 ", text)
@@ -11210,10 +11210,10 @@ class TestKDOSNetStack(_KDOSTestBase):
             "TCP-INIT-ALL",
             # Fill the entire 4096-byte RX buffer
             "CREATE BIGDATA 4096 ALLOT  BIGDATA 4096 42 FILL",
-            "0 TCB-N BIGDATA 4096 TCP-RX-PUSH .\" full=\" .",
+            "0 TCB-N BIGDATA 4096 TCP-RX-PUSH .\"  full=\" .",
             # Now try to push 1 more byte
             "CREATE ONE 1 ALLOT  99 ONE C!",
-            "0 TCB-N ONE 1 TCP-RX-PUSH .\" extra=\" .",
+            "0 TCB-N ONE 1 TCP-RX-PUSH .\"  extra=\" .",
         ])
         self.assertIn("full=4096 ", text)
         self.assertIn("extra=0 ", text)
@@ -11224,10 +11224,10 @@ class TestKDOSNetStack(_KDOSTestBase):
             "TCP-INIT-ALL",
             "CREATE RDATA 10 ALLOT RDATA 10 55 FILL",
             "0 TCB-N RDATA 10 TCP-RX-PUSH DROP",
-            "0 TCB-N TCB.RX-COUNT @ .\" cnt=\" .",
+            "0 TCB-N TCB.RX-COUNT @ .\"  cnt=\" .",
             "CREATE ROUT 5 ALLOT",
             "0 TCB-N ROUT 5 TCP-RX-POP DROP",
-            "0 TCB-N TCB.RX-COUNT @ .\" cnt2=\" .",
+            "0 TCB-N TCB.RX-COUNT @ .\"  cnt2=\" .",
         ])
         self.assertIn("cnt=10 ", text)
         self.assertIn("cnt2=5 ", text)
@@ -11277,7 +11277,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP 80 12345 TCP-CONNECT",
             "VARIABLE _RST-TCB  DUP _RST-TCB !",
             "10 TCP-POLL-WAIT",
-            "_RST-TCB @ TCB.STATE @ .\" st=\" .",
+            "_RST-TCB @ TCB.STATE @ .\"  st=\" .",
         ], nic_tx_callback=tcp_peer_rst)
         self.assertIn("st=0 ", text)  # TCPS-CLOSED = 0
 
@@ -11304,7 +11304,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE PIP 4 ALLOT  10 PIP C!  0 PIP 1+ C!  0 PIP 2 + C!  1 PIP 3 + C!",
             "PIP PMAC ARP-INSERT",
             "5 TCP-POLL-WAIT",
-            '.\" done\"',
+            '.\"  done\"',
         ], nic_frames=[syn_frame], nic_tx_callback=capture_rst)
         self.assertIn("done", text)
         # Should have sent a RST
@@ -11353,9 +11353,9 @@ class TestKDOSNetStack(_KDOSTestBase):
             "PIP 80 12345 TCP-CONNECT",
             "VARIABLE _CL-TCB  DUP _CL-TCB !",
             "5 TCP-POLL-WAIT",                 # handshake
-            "_CL-TCB @ TCB.STATE @ .\" st1=\" .",
+            "_CL-TCB @ TCB.STATE @ .\"  st1=\" .",
             "_CL-TCB @ TCP-CLOSE",
-            "_CL-TCB @ TCB.STATE @ .\" st2=\" .",
+            "_CL-TCB @ TCB.STATE @ .\"  st2=\" .",
         ], nic_tx_callback=tcp_peer_close)
         self.assertIn("st1=4 ", text)    # ESTABLISHED
         self.assertIn("st2=5 ", text)    # FIN-WAIT-1
@@ -11407,7 +11407,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "5 TCP-POLL-WAIT",                 # handshake
             "_TD-TCB @ TCP-CLOSE",             # sends FIN
             "10 TCP-POLL-WAIT",                # process peer's FIN+ACK
-            "_TD-TCB @ TCB.STATE @ .\" st=\" .",
+            "_TD-TCB @ TCB.STATE @ .\"  st=\" .",
         ], nic_tx_callback=tcp_peer_teardown)
         # After receiving peer's FIN+ACK we should be in TIME-WAIT
         self.assertIn("st=10 ", text)  # TCPS-TIME-WAIT = 10
@@ -11430,7 +11430,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
             "TCP-POLL",
-            '.\" ok\"',
+            '.\"  ok\"',
         ])
         self.assertIn("ok", text)
 
@@ -11445,7 +11445,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "192 168 1 100 IP-SET",
             "TCP-POLL",
-            '.\" ok\"',
+            '.\"  ok\"',
         ], nic_frames=[icmp_frame])
         self.assertIn("ok", text)
 
@@ -11514,21 +11514,21 @@ class TestKDOSNetStack(_KDOSTestBase):
             "VARIABLE _RT-TCB",
             "PIP 80 12345 TCP-CONNECT DUP _RT-TCB !",
             "5 TCP-POLL-WAIT",
-            "_RT-TCB @ TCB.STATE @ .\" st1=\" .",
+            "_RT-TCB @ TCB.STATE @ .\"  st1=\" .",
             # Send "Cat"
             'CREATE MSG 3 ALLOT  67 MSG C!  97 MSG 1+ C!  116 MSG 2 + C!',
-            "_RT-TCB @ MSG 3 TCP-SEND .\" sent=\" .",
+            "_RT-TCB @ MSG 3 TCP-SEND .\"  sent=\" .",
             "5 TCP-POLL-WAIT",      # process ACK+echo
             # Receive the echo
             "CREATE RBUF 64 ALLOT  RBUF 64 0 FILL",
-            "_RT-TCB @ RBUF 64 TCP-RECV .\" got=\" .",
-            "RBUF C@ .\" e0=\" .",
-            "RBUF 1+ C@ .\" e1=\" .",
-            "RBUF 2 + C@ .\" e2=\" .",
+            "_RT-TCB @ RBUF 64 TCP-RECV .\"  got=\" .",
+            "RBUF C@ .\"  e0=\" .",
+            "RBUF 1+ C@ .\"  e1=\" .",
+            "RBUF 2 + C@ .\"  e2=\" .",
             # Close
             "_RT-TCB @ TCP-CLOSE",
             "10 TCP-POLL-WAIT",
-            "_RT-TCB @ TCB.STATE @ .\" st2=\" .",
+            "_RT-TCB @ TCB.STATE @ .\"  st2=\" .",
         ], nic_tx_callback=tcp_echo_server)
         self.assertIn("st1=4 ", text)    # ESTABLISHED
         self.assertIn("sent=3 ", text)   # sent 3 bytes
@@ -11624,7 +11624,7 @@ class TestNetHardening(_KDOSTestBase):
             "10 0 0 100 IP-SET",
             "255 255 255 0 NET-MASK IP!",
             "CREATE DST1 4 ALLOT  10 DST1 C!  0 DST1 1+ C!  0 DST1 2 + C!  5 DST1 3 + C!",
-            "DST1 NEXT-HOP DST1 = .\" on=\" .",
+            "DST1 NEXT-HOP DST1 = .\"  on=\" .",
         ])
         self.assertIn("on=-1 ", text)
 
@@ -11635,7 +11635,7 @@ class TestNetHardening(_KDOSTestBase):
             "255 255 255 0 NET-MASK IP!",
             "10 0 0 1 GW-IP IP!",
             "CREATE DST2 4 ALLOT  8 DST2 C!  8 DST2 1+ C!  8 DST2 2 + C!  8 DST2 3 + C!",
-            "DST2 NEXT-HOP GW-IP = .\" gw=\" .",
+            "DST2 NEXT-HOP GW-IP = .\"  gw=\" .",
         ])
         self.assertIn("gw=-1 ", text)
 
@@ -11645,7 +11645,7 @@ class TestNetHardening(_KDOSTestBase):
             "192 168 1 50 IP-SET",
             "255 255 255 0 NET-MASK IP!",
             "CREATE DST3 4 ALLOT  192 DST3 C!  168 DST3 1+ C!  1 DST3 2 + C!  50 DST3 3 + C!",
-            "DST3 NEXT-HOP DST3 = .\" self=\" .",
+            "DST3 NEXT-HOP DST3 = .\"  self=\" .",
         ])
         self.assertIn("self=-1 ", text)
 
@@ -11664,7 +11664,7 @@ class TestNetHardening(_KDOSTestBase):
             # Send to off-subnet 8.8.8.8 — should succeed using gateway MAC
             "CREATE REMOTE 4 ALLOT  8 REMOTE C!  8 REMOTE 1+ C!  8 REMOTE 2 + C!  8 REMOTE 3 + C!",
             "CREATE PL 4 ALLOT  PL 4 0 FILL",
-            "IP-PROTO-ICMP REMOTE PL 4 IP-SEND .\" ior=\" .",
+            "IP-PROTO-ICMP REMOTE PL 4 IP-SEND .\"  ior=\" .",
         ])
         self.assertIn("ior=0 ", text)   # should succeed via gateway
 
@@ -11678,7 +11678,7 @@ class TestNetHardening(_KDOSTestBase):
             # No ARP entry for gateway
             "CREATE REM2 4 ALLOT  8 REM2 C!  8 REM2 1+ C!  4 REM2 2 + C!  4 REM2 3 + C!",
             "CREATE PL2 4 ALLOT  PL2 4 0 FILL",
-            "IP-PROTO-ICMP REM2 PL2 4 IP-SEND .\" ior=\" .",
+            "IP-PROTO-ICMP REM2 PL2 4 IP-SEND .\"  ior=\" .",
         ])
         self.assertIn("ior=-1 ", text)  # ARP failure
 
@@ -11841,12 +11841,12 @@ class TestNetHardening(_KDOSTestBase):
             "CREATE PSM 6 ALLOT  PSM 6 170 FILL",
             "PS1 PSM ARP-INSERT",
             "PS1 PING-TARGET 4 CMOVE",
-            "0 PING-SEND1 .\" ok=\" .",
+            "0 PING-SEND1 .\"  ok=\" .",
             # Now try without ARP for a different target
             "ARP-CLEAR",
             "CREATE PS2 4 ALLOT  10 PS2 C!  99 PS2 1+ C!  99 PS2 2 + C!  99 PS2 3 + C!",
             "PS2 PING-TARGET 4 CMOVE",
-            "0 PING-SEND1 .\" fail=\" .",
+            "0 PING-SEND1 .\"  fail=\" .",
         ])
         self.assertIn("ok=0 ", text)
         self.assertIn("fail=-1 ", text)
@@ -11855,7 +11855,7 @@ class TestNetHardening(_KDOSTestBase):
         """PING-WAIT-REPLY with no frames should return 0."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "5 PING-WAIT-REPLY .\" r=\" .",
+            "5 PING-WAIT-REPLY .\"  r=\" .",
         ])
         self.assertIn("r=0 ", text)
 
@@ -11867,7 +11867,7 @@ class TestNetHardening(_KDOSTestBase):
         """Receiving a truncated frame should not crash."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV .\" got=\" .",       # try receive on the truncated frame
+            "ETH-RECV .\"  got=\" .",       # try receive on the truncated frame
         ], nic_frames=[b'\x00\x01\x02'])   # 3 bytes — way too short
         self.assertIn("got=", text)        # didn't crash
         # Should return 0 (no valid frame) or some small number
@@ -11880,7 +11880,7 @@ class TestNetHardening(_KDOSTestBase):
         frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\xBE\xEF' + b'\x00' * 20
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV .\" iphdr=\" . .\" iplen=\" .",
+            "IP-RECV .\"  iphdr=\" . .\"  iplen=\" .",
         ], nic_frames=[frame])
         self.assertIn("iphdr=0 ", text)    # not recognized as IPv4
         self.assertIn("iplen=0 ", text)
@@ -11900,7 +11900,7 @@ class TestNetHardening(_KDOSTestBase):
         frame = eth + bytes(ip_hdr) + b'\x00' * 8
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV .\" ok=\" . .\" len=\" .",
+            "IP-RECV .\"  ok=\" . .\"  len=\" .",
         ], nic_frames=[frame])
         self.assertIn("ok=0 ", text)
         self.assertIn("len=0 ", text)
@@ -11920,7 +11920,7 @@ class TestNetHardening(_KDOSTestBase):
             "VARIABLE FCOUNT  0 FCOUNT !",
             ": BURST-RX 5 0 DO IP-RECV 0<> IF DROP 1 FCOUNT +! ELSE DROP THEN LOOP ;",
             "BURST-RX",
-            "FCOUNT @ .\" cnt=\" .",
+            "FCOUNT @ .\"  cnt=\" .",
         ], nic_frames=frames)
         self.assertIn("cnt=5 ", text)
 
@@ -11933,7 +11933,7 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], payload)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV .\" len=\" . 0<> .\" got\"",
+            "IP-RECV .\"  len=\" . 0<> .\"  got\"",
         ], nic_frames=[frame])
         self.assertIn("got", text)
 
@@ -11952,7 +11952,7 @@ class TestNetHardening(_KDOSTestBase):
                 f"CREATE AM{i} 6 ALLOT  AM{i} 6 {100+i} FILL"
             )
             lines.append(f"AI{i} AM{i} ARP-INSERT")
-        lines.append(".\" done\"")
+        lines.append(".\"  done\"")
         text = self._run_kdos(lines)
         self.assertIn("done", text)
 
@@ -11960,7 +11960,7 @@ class TestNetHardening(_KDOSTestBase):
         """ETH-RECV with no frames should return 0 cleanly."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV .\" r=\" .",
+            "ETH-RECV .\"  r=\" .",
         ])
         self.assertIn("r=0 ", text)
 
@@ -11974,7 +11974,7 @@ class TestNetHardening(_KDOSTestBase):
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "IP-RECV . .",
-            ".\" ok\"",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -11991,7 +11991,7 @@ class TestNetHardening(_KDOSTestBase):
         frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' + bytes(ip_hdr) + b'\x00'*8
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV . . .\" done\"",
+            "IP-RECV . . .\"  done\"",
         ], nic_frames=[frame])
         # Should return 0 0 (checksum will fail since version is wrong)
         self.assertIn("0 0", text)
@@ -12009,7 +12009,7 @@ class TestNetHardening(_KDOSTestBase):
         frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' + bytes(ip_hdr) + b'\x00'*8
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV . . .\" ok\"",
+            "IP-RECV . . .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12033,7 +12033,7 @@ class TestNetHardening(_KDOSTestBase):
         fa[14+11] = cksum & 0xFF
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV DUP .\" len=\" . .\" ok\"",
+            "IP-RECV DUP .\"  len=\" . .\"  ok\"",
         ], nic_frames=[bytes(fa)])
         # We don't mandate TTL=0 is dropped — just that it doesn't crash
         self.assertIn("ok", text)
@@ -12051,8 +12051,8 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], bytes(udp_hdr))
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV DUP 0<> IF .\" got\" 2DROP ELSE .\" empty\" DROP THEN",
-            ".\" ok\"",
+            "IP-RECV DUP 0<> IF .\"  got\" 2DROP ELSE .\"  empty\" DROP THEN",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12072,7 +12072,7 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], bytes(icmp))
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "PING-POLL .\" ok\"",
+            "PING-POLL .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12086,8 +12086,8 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], payload)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV .\" len=\" .",
-            ".\" ok\"",
+            "ETH-RECV .\"  len=\" .",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12095,8 +12095,8 @@ class TestNetHardening(_KDOSTestBase):
         """A 1-byte runt frame should not crash ETH-RECV."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV .\" r=\" .",
-            ".\" ok\"",
+            "ETH-RECV .\"  r=\" .",
+            ".\"  ok\"",
         ], nic_frames=[b'\xFF'])
         self.assertIn("ok", text)
 
@@ -12104,8 +12104,8 @@ class TestNetHardening(_KDOSTestBase):
         """A zero-byte frame should not crash."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV .\" r=\" .",
-            ".\" ok\"",
+            "ETH-RECV .\"  r=\" .",
+            ".\"  ok\"",
         ], nic_frames=[b''])
         self.assertIn("ok", text)
 
@@ -12129,7 +12129,7 @@ class TestNetHardening(_KDOSTestBase):
         fa[14+11] = cksum & 0xFF
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV . . .\" ok\"",
+            "IP-RECV . . .\"  ok\"",
         ], nic_frames=[bytes(fa)])
         self.assertIn("ok", text)
 
@@ -12147,8 +12147,8 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], bytes(udp_hdr))
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV DUP 0<> IF .\" ip-got\" 2DROP ELSE .\" no-ip\" DROP THEN",
-            ".\" ok\"",
+            "IP-RECV DUP 0<> IF .\"  ip-got\" 2DROP ELSE .\"  no-ip\" DROP THEN",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         # IP-RECV should still deliver (checksum check is UDP layer)
         self.assertIn("ok", text)
@@ -12170,7 +12170,7 @@ class TestNetHardening(_KDOSTestBase):
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "TCP-INIT-ALL",
-            "TCP-POLL .\" ok\"",
+            "TCP-POLL .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12185,8 +12185,8 @@ class TestNetHardening(_KDOSTestBase):
             "CREATE TIP 4 ALLOT  10 TIP C!  0 TIP 1+ C!  0 TIP 2 + C!  1 TIP 3 + C!",
             "CREATE TMAC 6 ALLOT  17 TMAC C!  34 TMAC 1+ C!  51 TMAC 2 + C!  68 TMAC 3 + C!  85 TMAC 4 + C!  102 TMAC 5 + C!",
             "TIP TMAC ARP-INSERT",
-            "TIP ARP-LOOKUP DUP 0<> IF .\" found\" DROP ELSE .\" miss\" DROP THEN",
-            ".\" ok\"",
+            "TIP ARP-LOOKUP DUP 0<> IF .\"  found\" DROP ELSE .\"  miss\" DROP THEN",
+            ".\"  ok\"",
         ])
         self.assertIn("found", text)
         self.assertIn("ok", text)
@@ -12206,7 +12206,7 @@ class TestNetHardening(_KDOSTestBase):
             "VARIABLE FCOUNT  0 FCOUNT !",
             ": BURST20 20 0 DO IP-RECV 0<> IF DROP 1 FCOUNT +! ELSE DROP THEN LOOP ;",
             "BURST20",
-            "FCOUNT @ .\" cnt=\" .",
+            "FCOUNT @ .\"  cnt=\" .",
         ], nic_frames=frames)
         self.assertIn("cnt=20 ", text)
 
@@ -12227,7 +12227,7 @@ class TestNetHardening(_KDOSTestBase):
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             ": DRAIN-ARP 30 0 DO ARP-POLL LOOP ;",
-            "DRAIN-ARP .\" ok\"",
+            "DRAIN-ARP .\"  ok\"",
         ], nic_frames=frames)
         self.assertIn("ok", text)
 
@@ -12252,7 +12252,7 @@ class TestNetHardening(_KDOSTestBase):
             "TCP-INIT-ALL",
             "8080 TCP-LISTEN DROP",
             ": FLOOD-POLL 10 0 DO TCP-POLL LOOP ;",
-            "FLOOD-POLL .\" ok\"",
+            "FLOOD-POLL .\"  ok\"",
         ], nic_frames=frames)
         self.assertIn("ok", text)
 
@@ -12285,8 +12285,8 @@ class TestNetHardening(_KDOSTestBase):
             # Change to a DIFFERENT expected ID
             "12345 DNS-ID !",
             # Try to receive the injected DNS via IP layer
-            "IP-RECV DUP 0<> IF .\" ip-got\" 2DROP ELSE .\" ip-empty\" DROP THEN",
-            ".\" ok\"",
+            "IP-RECV DUP 0<> IF .\"  ip-got\" 2DROP ELSE .\"  ip-empty\" DROP THEN",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         # The frame arrives at IP level, but if DNS-RESOLVE were running
         # it would reject the ID mismatch. Here we just verify no crash.
@@ -12307,7 +12307,7 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], bytes(icmp))
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "PING-POLL .\" ok\"",
+            "PING-POLL .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12348,8 +12348,8 @@ class TestNetHardening(_KDOSTestBase):
             "VARIABLE MIXCNT  0 MIXCNT !",
             ": MIX-DRAIN 5 0 DO IP-RECV DUP 0<> IF DROP 1 MIXCNT +! ELSE DROP THEN LOOP ;",
             "MIX-DRAIN",
-            "MIXCNT @ .\" mix=\" .",
-            ".\" ok\"",
+            "MIXCNT @ .\"  mix=\" .",
+            ".\"  ok\"",
         ], nic_frames=frames)
         self.assertIn("ok", text)
 
@@ -12360,9 +12360,9 @@ class TestNetHardening(_KDOSTestBase):
             "0 0 0 0 GW-IP IP!",
             "CREATE RHOST 4 ALLOT  8 RHOST C!  8 RHOST 1+ C!  8 RHOST 2 + C!  8 RHOST 3 + C!",
             "RHOST NEXT-HOP",
-            "DUP C@ .\" h0=\" .",
-            "DUP 1+ C@ .\" h1=\" .",
-            "DROP .\" ok\"",
+            "DUP C@ .\"  h0=\" .",
+            "DUP 1+ C@ .\"  h1=\" .",
+            "DROP .\"  ok\"",
         ])
         # Should return the original dst (8.8.8.8), not GW-IP
         self.assertIn("h0=8 ", text)
@@ -12379,7 +12379,7 @@ class TestNetHardening(_KDOSTestBase):
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "TCP-INIT-ALL",
-            "TCP-POLL .\" ok\"",
+            "TCP-POLL .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12392,8 +12392,8 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], udp_partial)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV DUP 0<> IF .\" got\" 2DROP ELSE .\" empty\" DROP THEN",
-            ".\" ok\"",
+            "IP-RECV DUP 0<> IF .\"  got\" 2DROP ELSE .\"  empty\" DROP THEN",
+            ".\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
@@ -12403,7 +12403,7 @@ class TestNetHardening(_KDOSTestBase):
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "ETH-RECV DROP",
-            "IP-RECV . . .\" ok\"",
+            "IP-RECV . . .\"  ok\"",
         ], nic_frames=[frame, frame])
         self.assertIn("ok", text)
 
@@ -12412,7 +12412,7 @@ class TestNetHardening(_KDOSTestBase):
         frame = b'\xFF' * 64
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "ETH-RECV DROP .\" ok\"",
+            "ETH-RECV DROP .\"  ok\"",
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 

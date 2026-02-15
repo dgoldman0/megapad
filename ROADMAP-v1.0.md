@@ -315,15 +315,11 @@ every step.
       roundtrip, ARP→ICMP→UDP sequence, IP-RECV noise resilience,
       NET-STATUS after heavy traffic, TCP-INIT/TCP-POLL on live TAP.
 
-33. ☐ **BIOS `.'` delimiter bug** — the `.'` (dot-quote) implementation
-    includes the delimiter space in the output.  ANS Forth specifies
-    `." hello"` prints `hello`, but ours prints ` hello` (leading
-    space).  Both interpret and compile paths in `w_dotquote` start
-    reading from `>IN` without skipping the delimiter.  Fix: add
-    `inc r13` before `dq_interp_loop` and `dq_scan`.  **All 6,600+
-    lines of KDOS depend on the current (buggy) behaviour** — every
-    `.'` string that uses the leading space as intentional whitespace
-    must be audited and adjusted.  `S"` likely has the same issue.
+33. ✅ **BIOS `.'` delimiter bug** — FIXED. Added `inc r13` before
+    `dq_interp_loop` and `dq_scan` in `w_dotquote` to skip the
+    delimiter space (ANS Forth compliant).  `S"` already had the fix.
+    All 661 `."` strings in KDOS and 348 in tests were mechanically
+    updated to add an explicit leading space, preserving exact output.
 
 ---
 
