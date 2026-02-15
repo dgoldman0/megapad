@@ -86,6 +86,9 @@ parameter [11:0] SHA_BASE     = 12'h780; // SHA-3/SHAKE accelerator
 parameter [11:0] CRC_BASE     = 12'h7C0; // CRC32/CRC64 accelerator
 parameter [11:0] QOS_BASE     = 12'h7E0; // QoS global config
 parameter [11:0] X25519_BASE  = 12'h840; // X25519 ECDH accelerator
+parameter [11:0] FIELD_ALU_BASE = 12'h840; // Field ALU (supersedes X25519)
+parameter [11:0] NTT_BASE      = 12'h8C0; // 256-point NTT accelerator
+parameter [11:0] KEM_BASE      = 12'h900; // ML-KEM-512 accelerator
 
 // UART registers (byte offsets from UART_BASE)
 parameter [3:0] UART_TX      = 4'h0;
@@ -383,6 +386,45 @@ parameter [5:0] X25519_RESULT0 = 6'h08;
 parameter [5:0] X25519_RESULT1 = 6'h10;
 parameter [5:0] X25519_RESULT2 = 6'h18;
 parameter [5:0] X25519_RESULT3 = 6'h20;
+
+// Field ALU register offsets (from FIELD_ALU_BASE = X25519_BASE = 0x840)
+// Supersedes X25519: mode 0 = backward-compatible X25519 scalar multiply.
+// Write: 0x00..0x18 = operand_a (4×64), 0x20..0x38 = operand_b (4×64), 0x3F = CMD
+// Read:  0x00 = STATUS, 0x08..0x20 = RESULT (4×64, selected by result_sel)
+// CMD bits: [0]=go, [4:1]=mode (0-7), [5]=result_sel (0=LO, 1=HI)
+parameter [5:0] FALU_OPERAND_A0 = 6'h00;
+parameter [5:0] FALU_OPERAND_A1 = 6'h08;
+parameter [5:0] FALU_OPERAND_A2 = 6'h10;
+parameter [5:0] FALU_OPERAND_A3 = 6'h18;
+parameter [5:0] FALU_OPERAND_B0 = 6'h20;
+parameter [5:0] FALU_OPERAND_B1 = 6'h28;
+parameter [5:0] FALU_OPERAND_B2 = 6'h30;
+parameter [5:0] FALU_OPERAND_B3 = 6'h38;
+parameter [5:0] FALU_CMD        = 6'h3F;
+parameter [5:0] FALU_STATUS     = 6'h00;  // read: {done, busy}
+parameter [5:0] FALU_RESULT0    = 6'h08;
+parameter [5:0] FALU_RESULT1    = 6'h10;
+parameter [5:0] FALU_RESULT2    = 6'h18;
+parameter [5:0] FALU_RESULT3    = 6'h20;
+
+// NTT register offsets (from NTT_BASE = 0x8C0)
+parameter [5:0] NTT_CMD         = 6'h00;  // W: bit[0]=go, bits[2:1]=op
+parameter [5:0] NTT_Q           = 6'h08;  // RW: modulus (default 3329)
+parameter [5:0] NTT_IDX         = 6'h10;  // RW: coefficient index (0-255)
+parameter [5:0] NTT_LOAD_A      = 6'h18;  // W: wdata[31:0] → A[IDX]; IDX++
+parameter [5:0] NTT_LOAD_B      = 6'h20;  // W: wdata[31:0] → B[IDX]; IDX++
+parameter [5:0] NTT_STATUS      = 6'h00;  // R: {done, busy}
+parameter [5:0] NTT_RESULT      = 6'h20;  // R: result[IDX]; IDX++
+
+// KEM register offsets (from KEM_BASE = 0x900)
+parameter [5:0] KEM_CMD         = 6'h00;  // W: 1=keygen, 2=encaps, 3=decaps
+parameter [5:0] KEM_BUF_SEL     = 6'h08;  // W: buffer ID (0-4); resets idx
+parameter [5:0] KEM_DIN         = 6'h10;  // W: wdata[7:0] → buf[sel][idx++]
+parameter [5:0] KEM_IDX_SET     = 6'h18;  // W: wdata[15:0] → buf_idx
+parameter [5:0] KEM_STATUS      = 6'h00;  // R: 0=idle, 1=busy, 2=done
+parameter [5:0] KEM_DOUT        = 6'h10;  // R: buf[sel][idx++]
+parameter [5:0] KEM_BUF_SIZE    = 6'h18;  // R: size of selected buffer
+parameter [5:0] KEM_IDX         = 6'h20;  // R: current buf_idx
 
 // IRQ routing: which core receives each peripheral IRQ (configurable)
 // Default: core 0 gets all peripheral IRQs
