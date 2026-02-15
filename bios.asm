@@ -239,6 +239,10 @@ no_autoboot:
 forth_quit:
     ; Reset RSP to top of RAM each time
     mov r15, r2
+    ; Reset interpret-mode IF depth
+    ldi r0, 0
+    ldi64 r11, var_interp_if_depth
+    str r11, r0
 
 quit_loop:
     ; Prompt  "> " if interpreting (STATE=0)
@@ -349,6 +353,9 @@ interp_undefined:
     ; Reset STATE to interpret mode (recover from compile-mode errors)
     ldi r1, 0
     ldi64 r11, var_state
+    str r11, r1
+    ; Reset interpret-mode IF depth (recover from unfinished temp blocks)
+    ldi64 r11, var_interp_if_depth
     str r11, r1
     ; Abort rest of line
     lbr quit_loop
@@ -2245,12 +2252,46 @@ w_semicolon:
 ;   Emits: ldn r1, r14; addi r14, 8; cmpi r1, 0; lbreq <placeholder>
 ;   Pushes fixup address onto data stack
 w_if:
-    ; Compile: ldn r1, r14   → 0x50 0xE1  (LDN Rx,Ry = 0x50, xE|y1 → 0xE1? no...)
-    ; LDN is MEM F=5,N=0, regbyte = dst<<4|src → r1,r14 = 0x1E
-    ; Wait — let me re-check the encoding.
-    ; MEM family: byte0 = 0x50 | subop.  LDN = subop 0 → 0x50
-    ; byte1 = (dst << 4) | src → (1 << 4) | 14 = 0x1E
-    ; So LDN r1, r14 = 0x50, 0x1E
+    ; --- Interpret-mode IF support ---
+    ; If STATE=0 (interpret), start a temporary compilation block.
+    ; If already in temp-compile (depth>0), just increment depth.
+    ldi64 r11, var_interp_if_depth
+    ldn r0, r11
+    cmpi r0, 0
+    brne w_if_bump_depth       ; depth>0 → nested IF in temp block
+
+    ; depth==0 — check STATE
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_if_compile          ; STATE=1 → normal colon def, compile
+
+    ; STATE=0, depth=0 → interpret-mode IF.  Start temp compilation.
+    ; Save HERE as entry point
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi64 r11, var_interp_if_start
+    str r11, r0
+    ; Set depth = 1
+    ldi r0, 1
+    ldi64 r11, var_interp_if_depth
+    str r11, r0
+    ; Switch to compile mode
+    ldi r0, 1
+    ldi64 r11, var_state
+    str r11, r0
+    lbr w_if_compile
+
+w_if_bump_depth:
+    ; Already in temp-compile block, nested IF — increment depth
+    addi r0, 1
+    ldi64 r11, var_interp_if_depth
+    str r11, r0
+    ; Fall through to compile IF code
+
+w_if_compile:
+    ; --- Original IF compilation ---
+    ; Compile: ldn r1, r14 (0x50, 0x1E)
     ldi r1, 0x50
     ldi64 r11, compile_byte
     call.l r11
@@ -2362,6 +2403,50 @@ w_then:
     st.b r9, r7               ; high byte at fixup_addr
     inc r9
     st.b r9, r1               ; low byte at fixup_addr+1
+
+    ; --- Interpret-mode IF: check if this closes a temp block ---
+    ldi64 r11, var_interp_if_depth
+    ldn r0, r11
+    cmpi r0, 0
+    breq w_then_done           ; not in temp mode
+    subi r0, 1
+    str r11, r0               ; decrement depth
+    cmpi r0, 0
+    brne w_then_done           ; still nested, not outermost
+
+    ; Outermost THEN — compile ret, execute temp code, restore HERE
+    ldi64 r11, compile_ret
+    call.l r11
+    ; Switch back to interpret mode
+    ldi r0, 0
+    ldi64 r11, var_state
+    str r11, r0
+    ; Execute the temporary code
+    ldi64 r11, var_interp_if_start
+    ldn r9, r11
+    call.l r9
+    ; Clear temp code memory to prevent residual data issues.
+    ; Without this, ALLOT'd memory past HERE retains compiled
+    ; temp bytes, causing spurious mismatches in COMPARE etc.
+    ldi64 r11, var_here
+    ldn r1, r11               ; r1 = current HERE (end of temp code)
+    ldi64 r11, var_interp_if_start
+    ldn r0, r11               ; r0 = start of temp code
+w_then_clear:
+    cmp r0, r1
+    breq w_then_clear_done
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    br w_then_clear
+w_then_clear_done:
+    ; Restore HERE to discard temp code
+    ldi64 r11, var_interp_if_start
+    ldn r0, r11
+    ldi64 r11, var_here
+    str r11, r0
+
+w_then_done:
     ret.l
 
 ; BEGIN (IMMEDIATE) — push current HERE as loop target
@@ -10443,6 +10528,12 @@ var_fsload_line:
 ; EVALUATE nesting depth — prevents unbounded RSP growth
 var_eval_depth:
     .dq 0
+
+; Interpret-mode IF support — temporary compilation
+var_interp_if_depth:
+    .dq 0                     ; nesting depth (0 = not in temp IF block)
+var_interp_if_start:
+    .dq 0                     ; HERE value at start of outermost temp IF
 
 ; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
 var_leave_count:
