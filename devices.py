@@ -44,6 +44,7 @@ CRC_BASE     = 0x07C0
 AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
+X25519_BASE  = 0x0840
 
 
 # ---------------------------------------------------------------------------
@@ -1502,6 +1503,114 @@ class TRNGDevice(Device):
             idx = offset - 0x18
             if idx < len(self._pool):
                 self._pool[idx] ^= (value & 0xFF)
+
+
+# ---------------------------------------------------------------------------
+#  X25519 — Elliptic Curve Diffie-Hellman Accelerator (RFC 7748)
+# ---------------------------------------------------------------------------
+# Register map (offsets from X25519_BASE = 0x0840):
+#   Write:
+#     0x00..0x1F  SCALAR  — 32-byte scalar (little-endian)
+#     0x20..0x3F  POINT   — 32-byte u-coordinate (little-endian)
+#                           byte 0x3E: reserved
+#                           byte 0x3F: CMD — write 1 to start computation
+#   Read:
+#     0x00        STATUS  — bit 0 = busy, bit 1 = done
+#     0x08..0x27  RESULT  — 32-byte result (little-endian) at offsets 0x08-0x27
+
+class X25519Device(Device):
+    """X25519 scalar multiplication accelerator (RFC 7748)."""
+
+    _P = (1 << 255) - 19
+    _A24 = 121665            # (486662 - 2) / 4, per RFC 7748 §5
+
+    def __init__(self):
+        super().__init__("X25519", X25519_BASE, 0x41)
+        self._scalar = bytearray(32)
+        self._point = bytearray(32)
+        self._result = bytearray(32)
+        self._busy = False
+        self._done = False
+
+    # --- RFC 7748 scalar multiplication ---
+
+    @staticmethod
+    def _clamp(k_bytes: bytearray) -> int:
+        """Decode and clamp a 32-byte scalar per RFC 7748 §5."""
+        k = list(k_bytes)
+        k[0] &= 248           # clear bits 0,1,2
+        k[31] &= 127          # clear bit 255
+        k[31] |= 64           # set bit 254
+        return int.from_bytes(bytes(k), 'little')
+
+    @staticmethod
+    def _decode_u(u_bytes: bytearray) -> int:
+        """Decode a 32-byte u-coordinate, masking bit 255."""
+        return int.from_bytes(bytes(u_bytes), 'little') & ((1 << 255) - 1)
+
+    @classmethod
+    def _x25519(cls, k_int: int, u_int: int) -> int:
+        """RFC 7748 Montgomery ladder: compute k * u on Curve25519."""
+        p = cls._P
+        a24 = cls._A24
+        x_1 = u_int
+        x_2, z_2 = 1, 0
+        x_3, z_3 = u_int, 1
+        swap = 0
+        for t in range(254, -1, -1):
+            k_t = (k_int >> t) & 1
+            swap ^= k_t
+            if swap:
+                x_2, x_3 = x_3, x_2
+                z_2, z_3 = z_3, z_2
+            swap = k_t
+            A  = (x_2 + z_2) % p
+            AA = (A * A) % p
+            B  = (x_2 - z_2) % p
+            BB = (B * B) % p
+            E  = (AA - BB) % p
+            C  = (x_3 + z_3) % p
+            D  = (x_3 - z_3) % p
+            DA = (D * A) % p
+            CB = (C * B) % p
+            x_3 = pow(DA + CB, 2, p)
+            z_3 = (x_1 * pow(DA - CB, 2, p)) % p
+            x_2 = (AA * BB) % p
+            z_2 = (E * (AA + a24 * E)) % p
+        if swap:
+            x_2, x_3 = x_3, x_2
+            z_2, z_3 = z_3, z_2
+        return (x_2 * pow(z_2, p - 2, p)) % p
+
+    def _compute(self):
+        """Run X25519 scalar multiplication and store result."""
+        k = self._clamp(self._scalar)
+        u = self._decode_u(self._point)
+        r = self._x25519(k, u)
+        self._result = bytearray(r.to_bytes(32, 'little'))
+        self._busy = False
+        self._done = True
+
+    # --- MMIO interface ---
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:                     # STATUS
+            return (int(self._done) << 1) | int(self._busy)
+        if 0x08 <= offset < 0x28:              # RESULT (32 bytes at 0x08..0x27)
+            return self._result[offset - 0x08]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if 0x00 <= offset < 0x20:               # SCALAR (32 bytes)
+            self._scalar[offset] = value
+        elif 0x20 <= offset < 0x40:              # POINT (32 bytes)
+            self._point[offset - 0x20] = value
+        elif offset == 0x40:                     # CMD
+            if (value & 1) and not self._busy:
+                self._busy = True
+                self._done = False
+                self._compute()
 
 
 # ---------------------------------------------------------------------------
