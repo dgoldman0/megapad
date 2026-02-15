@@ -8720,12 +8720,389 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=392 ", text)
+        self.assertIn("SZ=552 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
         text = self._run_kdos(["0 TLS-CTX@ .TLS-STATUS"])
         self.assertIn("TLS: none", text)
+
+
+# ---------------------------------------------------------------------------
+#  TLS 1.3 Handshake tests — §16.9
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSHandshake(_KDOSTestBase):
+    """Tests for §16.9 TLS 1.3 handshake — key schedule, ClientHello,
+    ServerHello, Finished MAC, and handshake state machine."""
+
+    # Python reference: HMAC-SHA3-256 / HKDF with SHA3-256
+    # shared_secret = 0xAA * 32, transcript = 0xBB*32 || 0xCC*32
+    # C_HS_KEY: [245, 102, 194, 81]  S_HS_KEY: [127, 190, 91, 227]
+    # C_HS_IV:  [77, 146, 230, 138]  S_HS_IV:  [11, 205, 119, 228]
+
+    _TLS_KS_SETUP = [
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Shared secret = 32 bytes of 0xAA
+        ": init-shared 32 0 DO 170 test-ctx @ TLS-CTX.SHARED I + C! LOOP ;",
+        "init-shared",
+        # Transcript = 0xBB*32 || 0xCC*32 (fake CH||SH, 64 bytes)
+        "TLS-TR-RESET",
+        "CREATE fake-ch 32 ALLOT  fake-ch 32 187 FILL",
+        "CREATE fake-sh 32 ALLOT  fake-sh 32 204 FILL",
+        "fake-ch 32 TLS-TR-APPEND",
+        "fake-sh 32 TLS-TR-APPEND",
+    ]
+
+    def test_empty_hash_constant(self):
+        """TLS-EMPTY-HASH contains SHA3-256 of empty string."""
+        text = self._run_kdos([
+            '." H0=" TLS-EMPTY-HASH C@ .',
+            '." H1=" TLS-EMPTY-HASH 1 + C@ .',
+            '." H2=" TLS-EMPTY-HASH 2 + C@ .',
+            '." H3=" TLS-EMPTY-HASH 3 + C@ .',
+        ])
+        self.assertIn("H0=167 ", text)   # SHA3-256("") = a7ffc6f8...
+        self.assertIn("H1=255 ", text)
+        self.assertIn("H2=198 ", text)
+        self.assertIn("H3=248 ", text)
+
+    def test_expand_label_key(self):
+        """TLS-EXPAND-LABEL with 'key' label produces correct output."""
+        lines = [
+            "CREATE el-prk 32 ALLOT",
+            ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
+            "CREATE el-out 32 ALLOT",
+            "el-prk  TLS-L-KEY /TLS-L-KEY  0 0  32  el-out  TLS-EXPAND-LABEL",
+            '." K0=" el-out C@ .',
+            '." K1=" el-out 1 + C@ .',
+            '." K2=" el-out 2 + C@ .',
+            '." K3=" el-out 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("K0=144 ", text)
+        self.assertIn("K1=218 ", text)
+        self.assertIn("K2=9 ", text)
+        self.assertIn("K3=27 ", text)
+
+    def test_expand_label_iv(self):
+        """TLS-EXPAND-LABEL with 'iv' label produces 12-byte output."""
+        lines = [
+            "CREATE el-prk 32 ALLOT",
+            ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
+            "CREATE el-out 12 ALLOT",
+            "el-prk  TLS-L-IV /TLS-L-IV  0 0  12  el-out  TLS-EXPAND-LABEL",
+            '." V0=" el-out C@ .',
+            '." V1=" el-out 1 + C@ .',
+            '." V2=" el-out 2 + C@ .',
+            '." V3=" el-out 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("V0=170 ", text)
+        self.assertIn("V1=25 ", text)
+        self.assertIn("V2=44 ", text)
+        self.assertIn("V3=204 ", text)
+
+    def test_transcript_reset_append(self):
+        """TLS-TR-RESET/TLS-TR-APPEND manage transcript buffer."""
+        lines = [
+            "TLS-TR-RESET",
+            '." L0=" TLS-HS-TR-LEN @ .',
+            "CREATE tr-data 8 ALLOT  tr-data 8 65 FILL",
+            "tr-data 8 TLS-TR-APPEND",
+            '." L1=" TLS-HS-TR-LEN @ .',
+            '." B0=" TLS-HS-TRANSCRIPT C@ .',
+            "TLS-TR-RESET",
+            '." L2=" TLS-HS-TR-LEN @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("L0=0 ", text)
+        self.assertIn("L1=8 ", text)
+        self.assertIn("B0=65 ", text)    # 'A'
+        self.assertIn("L2=0 ", text)
+
+    def test_ks_handshake_wr_key(self):
+        """TLS-KS-HANDSHAKE derives correct client HS key (WR-KEY)."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." W0=" test-ctx @ TLS-CTX.WR-KEY C@ .',
+            '." W1=" test-ctx @ TLS-CTX.WR-KEY 1 + C@ .',
+            '." W2=" test-ctx @ TLS-CTX.WR-KEY 2 + C@ .',
+            '." W3=" test-ctx @ TLS-CTX.WR-KEY 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("W0=245 ", text)
+        self.assertIn("W1=102 ", text)
+        self.assertIn("W2=194 ", text)
+        self.assertIn("W3=81 ", text)
+
+    def test_ks_handshake_rd_key(self):
+        """TLS-KS-HANDSHAKE derives correct server HS key (RD-KEY)."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." R0=" test-ctx @ TLS-CTX.RD-KEY C@ .',
+            '." R1=" test-ctx @ TLS-CTX.RD-KEY 1 + C@ .',
+            '." R2=" test-ctx @ TLS-CTX.RD-KEY 2 + C@ .',
+            '." R3=" test-ctx @ TLS-CTX.RD-KEY 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("R0=127 ", text)
+        self.assertIn("R1=190 ", text)
+        self.assertIn("R2=91 ", text)
+        self.assertIn("R3=227 ", text)
+
+    def test_ks_handshake_wr_iv(self):
+        """TLS-KS-HANDSHAKE derives correct client HS IV."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." I0=" test-ctx @ TLS-CTX.WR-IV C@ .',
+            '." I1=" test-ctx @ TLS-CTX.WR-IV 1 + C@ .',
+            '." I2=" test-ctx @ TLS-CTX.WR-IV 2 + C@ .',
+            '." I3=" test-ctx @ TLS-CTX.WR-IV 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("I0=77 ", text)
+        self.assertIn("I1=146 ", text)
+        self.assertIn("I2=230 ", text)
+        self.assertIn("I3=138 ", text)
+
+    def test_ks_handshake_rd_iv(self):
+        """TLS-KS-HANDSHAKE derives correct server HS IV."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." J0=" test-ctx @ TLS-CTX.RD-IV C@ .',
+            '." J1=" test-ctx @ TLS-CTX.RD-IV 1 + C@ .',
+            '." J2=" test-ctx @ TLS-CTX.RD-IV 2 + C@ .',
+            '." J3=" test-ctx @ TLS-CTX.RD-IV 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("J0=11 ", text)
+        self.assertIn("J1=205 ", text)
+        self.assertIn("J2=119 ", text)
+        self.assertIn("J3=228 ", text)
+
+    def test_build_ch_record_header(self):
+        """TLS-BUILD-CLIENT-HELLO produces correct TLS record header."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            'VARIABLE ch-len  ch-len !',
+            'VARIABLE ch-addr  ch-addr !',
+            '." LEN=" ch-len @ .',
+            '." CT=" ch-addr @ C@ .',
+            '." V0=" ch-addr @ 1 + C@ .',
+            '." V1=" ch-addr @ 2 + C@ .',
+            '." HT=" ch-addr @ 5 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("LEN=149 ", text)
+        self.assertIn("CT=22 ", text)     # ContentType=handshake
+        self.assertIn("V0=3 ", text)      # 0x0301
+        self.assertIn("V1=1 ", text)
+        self.assertIn("HT=1 ", text)      # ClientHello
+
+    def test_build_ch_cipher_suite(self):
+        """ClientHello contains correct cipher suite 0xFF01."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." CS0=" TLS-CH-BUF 78 + C@ .',
+            '." CS1=" TLS-CH-BUF 79 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CS0=255 ", text)   # 0xFF
+        self.assertIn("CS1=1 ", text)     # 0x01
+
+    def test_build_ch_extensions(self):
+        """ClientHello contains correct extension types."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." EL=" TLS-CH-BUF 83 + C@ .',           # extensions_len
+            '." SV=" TLS-CH-BUF 85 + C@ .',           # supported_versions type low
+            '." KS=" TLS-CH-BUF 92 + C@ .',           # key_share type low
+            '." SA=" TLS-CH-BUF 134 + C@ .',          # sig_algs type low
+            '." SG=" TLS-CH-BUF 142 + C@ .',          # supported_groups type low
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("EL=65 ", text)
+        self.assertIn("SV=43 ", text)     # 0x2B
+        self.assertIn("KS=51 ", text)     # 0x33
+        self.assertIn("SA=13 ", text)     # 0x0D
+        self.assertIn("SG=10 ", text)     # 0x0A
+
+    def test_build_ch_transcript_length(self):
+        """After building CH, transcript contains 144 bytes."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." TL=" TLS-HS-TR-LEN @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("TL=144 ", text)
+
+    def test_parse_sh_extracts_pubkey(self):
+        """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
+        # Build a crafted ServerHello: type=2, len=86, version=0x0303,
+        # random=0*32, sid_len=0, cipher=0xFF01, comp=0,
+        # extensions: supported_versions(0x0304) + key_share(x25519, pubkey)
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 96 ALLOT",
+            "sh-buf 96 0 FILL",
+            # Handshake header
+            "2 sh-buf C!",                                # type=ServerHello
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!  86 sh-buf 3 + C!",  # len=86
+            # Body
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",          # version 0x0303
+            # random = 0 (already)
+            "0 sh-buf 38 + C!",                            # sid_len=0
+            "255 sh-buf 39 + C!  1 sh-buf 40 + C!",      # cipher=0xFF01
+            "0 sh-buf 41 + C!",                            # comp=0
+            "0 sh-buf 42 + C!  46 sh-buf 43 + C!",       # ext_len=46
+            # supported_versions ext (6 bytes)
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",       # type=0x002B
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",        # len=2
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",        # 0x0304
+            # key_share ext (40 bytes)
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",       # type=0x0033
+            "0 sh-buf 52 + C!  36 sh-buf 53 + C!",       # len=36
+            "0 sh-buf 54 + C!  29 sh-buf 55 + C!",       # group=x25519
+            "0 sh-buf 56 + C!  32 sh-buf 57 + C!",       # key_len=32
+            # pubkey = 66..97 (0x42..0x61)
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            # Parse
+            "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+            '." PK0=" test-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
+            '." PK1=" test-ctx @ TLS-CTX.PEER-PUBKEY 1 + C@ .',
+            '." PK31=" test-ctx @ TLS-CTX.PEER-PUBKEY 31 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("F=0 ", text)        # success
+        self.assertIn("PK0=66 ", text)     # first pubkey byte
+        self.assertIn("PK1=67 ", text)
+        self.assertIn("PK31=97 ", text)    # last pubkey byte
+
+    def test_parse_sh_bad_suite_rejected(self):
+        """ServerHello with wrong cipher suite is rejected."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 96 ALLOT",
+            "sh-buf 96 0 FILL",
+            "2 sh-buf C!",
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!  86 sh-buf 3 + C!",
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",
+            "0 sh-buf 38 + C!",
+            # Wrong cipher suite: 0xFF02 instead of 0xFF01
+            "255 sh-buf 39 + C!  2 sh-buf 40 + C!",
+            "0 sh-buf 41 + C!",
+            "0 sh-buf 42 + C!  46 sh-buf 43 + C!",
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",
+            "0 sh-buf 52 + C!  36 sh-buf 53 + C!",
+            "0 sh-buf 54 + C!  29 sh-buf 55 + C!",
+            "0 sh-buf 56 + C!  32 sh-buf 57 + C!",
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("F=-1 ", text)       # rejected
+
+    def test_verify_finished_ok(self):
+        """TLS-VERIFY-FINISHED accepts correct server Finished MAC."""
+        # Use known key schedule state and pre-computed verify_data
+        # S_VERIFY_DATA from Python: [189, 227, 95, 172, 210, 27, 22, 137,
+        #   29, 38, 21, 194, 9, 172, 198, 38, 125, 204, 199, 254,
+        #   58, 152, 166, 226, 87, 177, 185, 223, 238, 193, 79, 94]
+        s_verify = [189, 227, 95, 172, 210, 27, 22, 137,
+                    29, 38, 21, 194, 9, 172, 198, 38,
+                    125, 204, 199, 254, 58, 152, 166, 226,
+                    87, 177, 185, 223, 238, 193, 79, 94]
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            # Build fake verify_data with pre-computed bytes
+            "CREATE vd-buf 32 ALLOT",
+        ]
+        for i, b in enumerate(s_verify):
+            lines.append(f"{b} vd-buf {i} + C!")
+        lines += [
+            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            '." VF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("VF=0 ", text)       # valid
+
+    def test_verify_finished_bad_mac(self):
+        """TLS-VERIFY-FINISHED rejects wrong verify_data."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            # verify_data = all zeros (wrong)
+            "CREATE vd-buf 32 ALLOT  vd-buf 32 0 FILL",
+            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            '." VF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("VF=-1 ", text)      # rejected
+
+    def test_build_finished_format(self):
+        """TLS-BUILD-FINISHED produces encrypted record with correct header."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            "CREATE fin-rec 128 ALLOT",
+            "test-ctx @  fin-rec  TLS-BUILD-FINISHED",
+            "VARIABLE fin-rl  fin-rl !",
+            '." RL=" fin-rl @ .',
+            # Record header: type=23 (app_data), version=0x0303
+            '." RT=" fin-rec C@ .',
+            '." RV0=" fin-rec 1 + C@ .',
+            '." RV1=" fin-rec 2 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("RT=23 ", text)      # app_data outer type
+        self.assertIn("RV0=3 ", text)      # 0x0303
+        self.assertIn("RV1=3 ", text)
+
+    def test_ctx_size_updated(self):
+        """TLS context is 552 bytes after handshake field expansion."""
+        text = self._run_kdos(['." SZ=" /TLS-CTX .'])
+        self.assertIn("SZ=552 ", text)
+
+    def test_label_strings_correct(self):
+        """TLS label constants contain correct ASCII bytes."""
+        lines = [
+            # "derived" = 100 101 114 105 118 101 100
+            '." D0=" TLS-L-DERIVED C@ .',
+            '." D6=" TLS-L-DERIVED 6 + C@ .',
+            # "key" = 107 101 121
+            '." K0=" TLS-L-KEY C@ .',
+            '." K2=" TLS-L-KEY 2 + C@ .',
+            # "finished" = 102 105 110 105 115 104 101 100
+            '." F0=" TLS-L-FINISHED C@ .',
+            '." F7=" TLS-L-FINISHED 7 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("D0=100 ", text)     # 'd'
+        self.assertIn("D6=100 ", text)     # 'd'
+        self.assertIn("K0=107 ", text)     # 'k'
+        self.assertIn("K2=121 ", text)     # 'y'
+        self.assertIn("F0=102 ", text)     # 'f'
+        self.assertIn("F7=100 ", text)     # 'd'
+
+    def test_handshake_state_after_ch(self):
+        """After building ClientHello, handshake state is CLIENT-HELLO-SENT."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." ST=" test-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ST=1 ", text)       # TLSS-HANDSHAKE
+        self.assertIn("HS=1 ", text)       # TLSH-CLIENT-HELLO-SENT
 
 
 # ---------------------------------------------------------------------------

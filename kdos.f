@@ -6915,9 +6915,14 @@ VARIABLE _TPL-LEN
 \  +296    PEER-PUBKEY    32    Peer X25519 public key
 \  +328    SHARED-SECRET  32    X25519 shared secret
 \  +360    EARLY-SECRET   32    Early secret (from HKDF-Extract)
-\  Total: 392 bytes
+\  +392    C-HS-TRAFFIC   32    Client handshake traffic secret
+\  +424    S-HS-TRAFFIC   32    Server handshake traffic secret
+\  +456    C-AP-TRAFFIC   32    Client application traffic secret
+\  +488    S-AP-TRAFFIC   32    Server application traffic secret
+\  +520    PSK            32    Pre-shared key (reserved)
+\  Total: 552 bytes
 
-392 CONSTANT /TLS-CTX
+552 CONSTANT /TLS-CTX
 4 CONSTANT TLS-MAX-CTX
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -6937,6 +6942,11 @@ VARIABLE _TPL-LEN
 : TLS-CTX.PEER-PUBKEY ( ctx -- addr )  296 + ;
 : TLS-CTX.SHARED      ( ctx -- addr )  328 + ;
 : TLS-CTX.EARLY       ( ctx -- addr )  360 + ;
+: TLS-CTX.C-HS-TRAFFIC ( ctx -- addr ) 392 + ;
+: TLS-CTX.S-HS-TRAFFIC ( ctx -- addr ) 424 + ;
+: TLS-CTX.C-AP-TRAFFIC ( ctx -- addr ) 456 + ;
+: TLS-CTX.S-AP-TRAFFIC ( ctx -- addr ) 488 + ;
+: TLS-CTX.PSK          ( ctx -- addr ) 520 + ;
 
 CREATE TLS-CTXS  /TLS-CTX TLS-MAX-CTX * ALLOT
 TLS-CTXS /TLS-CTX TLS-MAX-CTX * 0 FILL
@@ -7093,6 +7103,486 @@ VARIABLE _TDR-CLEN
     DROP ."  TLS: unknown" CR
     THEN THEN THEN THEN
     DROP                              \ drop ctx
+;
+
+\ =====================================================================
+\  §16.9  TLS 1.3 Handshake (RFC 8446)
+\ =====================================================================
+\
+\  Full TLS 1.3 handshake state machine (client side).
+\  Cipher suite 0xFF01: TLS_X25519_AES_256_GCM_SHA3_256 (private use).
+\
+\  Flow: CH → SH → [EncExt] → [Cert] → [CertVerify] → Finished → Finished
+\
+\  Certificates are hashed into transcript but not validated (no X.509).
+\  HelloRetryRequest → abort.  CCS records → silently ignored by caller.
+
+\ --- Cipher Suite ---
+65281 CONSTANT TLS-SUITE-X25519-SHA3    \ 0xFF01
+
+\ --- Handshake Message Types ---
+1  CONSTANT TLSHT-CLIENT-HELLO
+2  CONSTANT TLSHT-SERVER-HELLO
+8  CONSTANT TLSHT-ENCRYPTED-EXT
+11 CONSTANT TLSHT-CERTIFICATE
+15 CONSTANT TLSHT-CERT-VERIFY
+20 CONSTANT TLSHT-FINISHED
+
+\ --- Scratch Buffers for Handshake ---
+CREATE TLS-HKDF-LABEL  64 ALLOT
+CREATE TLS-HS-TRANSCRIPT 1024 ALLOT
+VARIABLE TLS-HS-TR-LEN
+CREATE TLS-CH-BUF 256 ALLOT
+CREATE TLS-HS-HASH 32 ALLOT
+CREATE TLS-TEMP-SECRET 32 ALLOT
+CREATE TLS-TEMP-SECRET2 32 ALLOT
+CREATE TLS-FINISHED-KEY 32 ALLOT
+CREATE TLS-VERIFY-DATA 32 ALLOT
+CREATE TLS-FINISHED-MSG 40 ALLOT
+
+\ Pre-compute SHA3-256 of empty string (for "derived" key schedule steps).
+CREATE TLS-EMPTY-HASH 32 ALLOT
+SHA3-INIT  TLS-EMPTY-HASH SHA3-FINAL
+
+\ --- TLS 1.3 Label Strings ---
+\ Labels WITHOUT "tls13 " prefix (added by TLS-EXPAND-LABEL).
+CREATE TLS-L-DERIVED    100 C, 101 C, 114 C, 105 C, 118 C, 101 C, 100 C,
+7 CONSTANT /TLS-L-DERIVED
+
+CREATE TLS-L-C-HS-TR   99 C, 32 C, 104 C, 115 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-C-HS-TR
+
+CREATE TLS-L-S-HS-TR   115 C, 32 C, 104 C, 115 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-S-HS-TR
+
+CREATE TLS-L-KEY   107 C, 101 C, 121 C,
+3 CONSTANT /TLS-L-KEY
+
+CREATE TLS-L-IV   105 C, 118 C,
+2 CONSTANT /TLS-L-IV
+
+CREATE TLS-L-C-AP-TR   99 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-C-AP-TR
+
+CREATE TLS-L-S-AP-TR   115 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-S-AP-TR
+
+CREATE TLS-L-FINISHED   102 C, 105 C, 110 C, 105 C, 115 C, 104 C, 101 C, 100 C,
+8 CONSTANT /TLS-L-FINISHED
+
+\ --- TLS-EXPAND-LABEL ---
+\ TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+\   Construct HkdfLabel and call HKDF-EXPAND.
+\   HkdfLabel = length(2BE) || (6+llen)(1) || "tls13 " || label || clen(1) || ctx
+VARIABLE _TEL-SECRET
+VARIABLE _TEL-LABEL
+VARIABLE _TEL-LLEN
+VARIABLE _TEL-CTXP
+VARIABLE _TEL-CLEN
+VARIABLE _TEL-OLEN
+VARIABLE _TEL-OUT
+
+: TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+    _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
+    _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET !
+    \ [0-1] output length (big-endian)
+    _TEL-OLEN @ 8 RSHIFT TLS-HKDF-LABEL C!
+    _TEL-OLEN @ 255 AND TLS-HKDF-LABEL 1+ C!
+    \ [2] total label length = 6 + llen
+    _TEL-LLEN @ 6 + TLS-HKDF-LABEL 2 + C!
+    \ [3..8] "tls13 "
+    116 TLS-HKDF-LABEL 3 + C!
+    108 TLS-HKDF-LABEL 4 + C!
+    115 TLS-HKDF-LABEL 5 + C!
+    49  TLS-HKDF-LABEL 6 + C!
+    51  TLS-HKDF-LABEL 7 + C!
+    32  TLS-HKDF-LABEL 8 + C!
+    \ [9..9+llen-1] label bytes
+    _TEL-LABEL @ TLS-HKDF-LABEL 9 + _TEL-LLEN @ CMOVE
+    \ [9+llen] context length
+    _TEL-CLEN @ TLS-HKDF-LABEL 9 + _TEL-LLEN @ + C!
+    \ [10+llen..] context bytes (if any)
+    _TEL-CLEN @ 0> IF
+        _TEL-CTXP @ TLS-HKDF-LABEL 10 + _TEL-LLEN @ + _TEL-CLEN @ CMOVE
+    THEN
+    \ HKDF-EXPAND( prk, info, info_len, output_len, output )
+    \ info_len = 2 + 1 + 6 + llen + 1 + clen = 10 + llen + clen
+    _TEL-SECRET @ TLS-HKDF-LABEL
+    _TEL-LLEN @ 10 + _TEL-CLEN @ +
+    _TEL-OLEN @ _TEL-OUT @ HKDF-EXPAND
+;
+
+\ --- Transcript Management ---
+: TLS-TR-RESET ( -- )  0 TLS-HS-TR-LEN ! ;
+
+VARIABLE _TTA-SRC
+VARIABLE _TTA-LEN
+
+: TLS-TR-APPEND ( addr len -- )
+    _TTA-LEN !  _TTA-SRC !
+    _TTA-LEN @ TLS-HS-TR-LEN @ + 1024 > IF EXIT THEN
+    _TTA-SRC @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ + _TTA-LEN @ CMOVE
+    _TTA-LEN @ TLS-HS-TR-LEN @ + TLS-HS-TR-LEN !
+;
+
+\ --- TLS-DERIVE-DERIVED ---
+\ TLS-DERIVE-DERIVED ( secret out -- )
+\   = HKDF-Expand-Label(Secret, "derived", SHA3-256(""), 32)
+: TLS-DERIVE-DERIVED ( secret out -- )
+    >R
+    TLS-L-DERIVED /TLS-L-DERIVED
+    TLS-EMPTY-HASH 32 32 R> TLS-EXPAND-LABEL
+;
+
+\ --- TLS-DERIVE-SECRET ---
+\ TLS-DERIVE-SECRET ( secret label llen out -- )
+\   = HKDF-Expand-Label(Secret, Label, Hash(Messages), 32)
+\   Messages = current transcript buffer.
+VARIABLE _TDS-SECRET
+VARIABLE _TDS-LABEL
+VARIABLE _TDS-LLEN
+VARIABLE _TDS-OUT
+
+: TLS-DERIVE-SECRET ( secret label llen out -- )
+    _TDS-OUT !  _TDS-LLEN !  _TDS-LABEL !  _TDS-SECRET !
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ HKDF-Expand-Label(secret, label, llen, hash, 32, 32, out)
+    _TDS-SECRET @ _TDS-LABEL @ _TDS-LLEN @
+    TLS-HS-HASH 32 32 _TDS-OUT @ TLS-EXPAND-LABEL
+;
+
+\ --- Key Schedule Phase 1 ---
+\ TLS-KS-HANDSHAKE ( ctx -- )
+\   Derive and install handshake traffic keys.
+\   Prerequisite: ctx.SHARED filled, transcript = CH||SH.
+VARIABLE _TKSH-CTX
+
+: TLS-KS-HANDSHAKE ( ctx -- )
+    _TKSH-CTX !
+    \ 1. Early Secret = HKDF-Extract(0*32, 0*32)
+    0 0  _HKDF-ZERO-SALT 32  _TKSH-CTX @ TLS-CTX.EARLY  HKDF-EXTRACT
+    \ 2. derived_es = Expand-Label(ES, "derived", empty_hash, 32)
+    _TKSH-CTX @ TLS-CTX.EARLY  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    \ 3. HS = HKDF-Extract(derived_es, shared_secret)
+    TLS-TEMP-SECRET 32  _TKSH-CTX @ TLS-CTX.SHARED 32
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  HKDF-EXTRACT
+    \ 4. c_hs_traffic = Derive-Secret(HS, "c hs traffic", Hash(CH||SH))
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-C-HS-TR /TLS-L-C-HS-TR
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC  TLS-DERIVE-SECRET
+    \ 5. s_hs_traffic = Derive-Secret(HS, "s hs traffic", Hash(CH||SH))
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-S-HS-TR /TLS-L-S-HS-TR
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC  TLS-DERIVE-SECRET
+    \ 6-7. Client HS key+IV → WR-KEY/WR-IV
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSH-CTX @ TLS-CTX.WR-KEY
+    TLS-EXPAND-LABEL
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.WR-IV
+    TLS-EXPAND-LABEL
+    \ 8-9. Server HS key+IV → RD-KEY/RD-IV
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSH-CTX @ TLS-CTX.RD-KEY
+    TLS-EXPAND-LABEL
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.RD-IV
+    TLS-EXPAND-LABEL
+    \ 10. Zero sequence numbers
+    0 _TKSH-CTX @ TLS-CTX.WR-SEQ !
+    0 _TKSH-CTX @ TLS-CTX.RD-SEQ !
+;
+
+\ --- Key Schedule Phase 2 ---
+\ TLS-KS-APPLICATION ( ctx -- )
+\   Derive and install application traffic keys from master secret.
+\   Prerequisite: HS-SECRET set, transcript through server Finished.
+VARIABLE _TKSA-CTX
+
+: TLS-KS-APPLICATION ( ctx -- )
+    _TKSA-CTX !
+    \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
+    _TKSA-CTX @ TLS-CTX.HS-SECRET  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    \ 2. MS = HKDF-Extract(derived_hs, 0*32)
+    TLS-TEMP-SECRET 32  _HKDF-ZERO-SALT 32
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  HKDF-EXTRACT
+    \ 3. c_ap_traffic = Derive-Secret(MS, "c ap traffic", Hash(full))
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-C-AP-TR /TLS-L-C-AP-TR
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC  TLS-DERIVE-SECRET
+    \ 4. s_ap_traffic = Derive-Secret(MS, "s ap traffic", Hash(full))
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-S-AP-TR /TLS-L-S-AP-TR
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC  TLS-DERIVE-SECRET
+    \ 5-6. Client app key+IV → WR-KEY/WR-IV
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSA-CTX @ TLS-CTX.WR-KEY
+    TLS-EXPAND-LABEL
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.WR-IV
+    TLS-EXPAND-LABEL
+    \ 7-8. Server app key+IV → RD-KEY/RD-IV
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSA-CTX @ TLS-CTX.RD-KEY
+    TLS-EXPAND-LABEL
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.RD-IV
+    TLS-EXPAND-LABEL
+    \ 9. Zero sequence numbers
+    0 _TKSA-CTX @ TLS-CTX.WR-SEQ !
+    0 _TKSA-CTX @ TLS-CTX.RD-SEQ !
+    \ 10. Mark connection established
+    TLSS-ESTABLISHED _TKSA-CTX @ TLS-CTX.STATE !
+    TLSH-CONNECTED _TKSA-CTX @ TLS-CTX.HS-STATE !
+;
+
+\ --- ClientHello Builder ---
+\ TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
+\   Build complete ClientHello record (149 bytes).
+\   Generates X25519 ephemeral keypair, stores in context.
+\   Appends handshake message to transcript.
+\   Returns buffer address and total length.
+VARIABLE _TBCH-CTX
+
+: TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
+    _TBCH-CTX !
+    TLS-TR-RESET
+    \ Generate ephemeral keypair
+    X25519-KEYGEN
+    X25519-PRIV _TBCH-CTX @ TLS-CTX.MY-PRIVKEY 32 CMOVE
+    X25519-PUB  _TBCH-CTX @ TLS-CTX.MY-PUBKEY  32 CMOVE
+    \ --- TLS Record Header (5 bytes) ---
+    TLS-CT-HANDSHAKE TLS-CH-BUF C!                    \ [0] = 22
+    3 TLS-CH-BUF 1 + C!   1 TLS-CH-BUF 2 + C!        \ [1-2] = 0x0301
+    0 TLS-CH-BUF 3 + C!   144 TLS-CH-BUF 4 + C!      \ [3-4] len=144
+    \ --- Handshake Header (4 bytes) ---
+    TLSHT-CLIENT-HELLO TLS-CH-BUF 5 + C!              \ [5] = 1
+    0 TLS-CH-BUF 6 + C!  0 TLS-CH-BUF 7 + C!         \ [6-8] = 140
+    140 TLS-CH-BUF 8 + C!
+    \ --- ClientHello Body ---
+    3 TLS-CH-BUF 9 + C!   3 TLS-CH-BUF 10 + C!       \ [9-10] 0x0303
+    32 0 DO RANDOM8 TLS-CH-BUF 11 I + + C! LOOP       \ [11-42] random
+    32 TLS-CH-BUF 43 + C!                              \ [43] sid_len=32
+    32 0 DO RANDOM8 TLS-CH-BUF 44 I + + C! LOOP       \ [44-75] sid
+    0 TLS-CH-BUF 76 + C!  2 TLS-CH-BUF 77 + C!       \ [76-77] suites_len=2
+    255 TLS-CH-BUF 78 + C!  1 TLS-CH-BUF 79 + C!     \ [78-79] 0xFF01
+    1 TLS-CH-BUF 80 + C!                               \ [80] comp_len=1
+    0 TLS-CH-BUF 81 + C!                               \ [81] null comp
+    0 TLS-CH-BUF 82 + C!  65 TLS-CH-BUF 83 + C!      \ [82-83] ext_len=65
+    \ --- Extensions ---
+    \ supported_versions (0x002B): 7 bytes
+    0  TLS-CH-BUF 84 + C!   43 TLS-CH-BUF 85 + C!
+    0  TLS-CH-BUF 86 + C!   3  TLS-CH-BUF 87 + C!
+    2  TLS-CH-BUF 88 + C!
+    3  TLS-CH-BUF 89 + C!   4  TLS-CH-BUF 90 + C!    \ 0x0304
+    \ key_share (0x0033): 42 bytes
+    0  TLS-CH-BUF 91 + C!   51 TLS-CH-BUF 92 + C!
+    0  TLS-CH-BUF 93 + C!   38 TLS-CH-BUF 94 + C!
+    0  TLS-CH-BUF 95 + C!   36 TLS-CH-BUF 96 + C!
+    0  TLS-CH-BUF 97 + C!   29 TLS-CH-BUF 98 + C!    \ x25519
+    0  TLS-CH-BUF 99 + C!   32 TLS-CH-BUF 100 + C!
+    _TBCH-CTX @ TLS-CTX.MY-PUBKEY TLS-CH-BUF 101 + 32 CMOVE
+    \ signature_algorithms (0x000D): 8 bytes
+    0  TLS-CH-BUF 133 + C!  13 TLS-CH-BUF 134 + C!
+    0  TLS-CH-BUF 135 + C!  4  TLS-CH-BUF 136 + C!
+    0  TLS-CH-BUF 137 + C!  2  TLS-CH-BUF 138 + C!
+    8  TLS-CH-BUF 139 + C!  7  TLS-CH-BUF 140 + C!   \ ed25519
+    \ supported_groups (0x000A): 8 bytes
+    0  TLS-CH-BUF 141 + C!  10 TLS-CH-BUF 142 + C!
+    0  TLS-CH-BUF 143 + C!  4  TLS-CH-BUF 144 + C!
+    0  TLS-CH-BUF 145 + C!  2  TLS-CH-BUF 146 + C!
+    0  TLS-CH-BUF 147 + C!  29 TLS-CH-BUF 148 + C!   \ x25519
+    \ Set handshake state
+    TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
+    TLSH-CLIENT-HELLO-SENT _TBCH-CTX @ TLS-CTX.HS-STATE !
+    \ Append handshake message to transcript (bytes 5..148 = 144 bytes)
+    TLS-CH-BUF 5 + 144 TLS-TR-APPEND
+    \ Return buffer + total length
+    TLS-CH-BUF 149
+;
+
+\ --- ServerHello Parser ---
+\ TLS-PARSE-SERVER-HELLO ( ctx msg mlen -- flag )
+\   Parse ServerHello handshake message (without TLS record header).
+\   msg starts at handshake type byte.  Extracts peer X25519 public key.
+\   Returns 0 on success, -1 on error.
+VARIABLE _TPSH-CTX
+VARIABLE _TPSH-MSG
+VARIABLE _TPSH-MLEN
+VARIABLE _TPSH-POS
+VARIABLE _TPSH-SIDLEN
+VARIABLE _TPSH-EXTLEN
+VARIABLE _TPSH-ETYPE
+VARIABLE _TPSH-ELEN
+VARIABLE _TPSH-OK
+
+: TLS-PARSE-SERVER-HELLO ( ctx msg mlen -- flag )
+    _TPSH-MLEN !  _TPSH-MSG !  _TPSH-CTX !
+    0 _TPSH-OK !
+    \ Verify handshake type = 2
+    _TPSH-MSG @ C@ TLSHT-SERVER-HELLO <> IF -1 EXIT THEN
+    \ +4: server_version(2), +6: random(32), +38: session_id_len
+    _TPSH-MSG @ 38 + C@ _TPSH-SIDLEN !
+    39 _TPSH-SIDLEN @ + _TPSH-POS !
+    \ cipher_suite (2 bytes)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+    _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+    TLS-SUITE-X25519-SHA3 <> IF -1 _TPSH-OK ! THEN
+    _TPSH-POS @ 2 + _TPSH-POS !
+    \ compression_method (1 byte, must be 0)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 0<> IF -1 _TPSH-OK ! THEN
+    _TPSH-POS @ 1+ _TPSH-POS !
+    \ extensions_len (2 bytes)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+    _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+    _TPSH-EXTLEN !
+    _TPSH-POS @ 2 + _TPSH-POS !
+    \ Walk extensions
+    _TPSH-EXTLEN @
+    BEGIN DUP 0> WHILE
+        _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+        _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR  _TPSH-ETYPE !
+        _TPSH-MSG @ _TPSH-POS @ 2 + + C@ 8 LSHIFT
+        _TPSH-MSG @ _TPSH-POS @ 3 + + C@ OR  _TPSH-ELEN !
+        _TPSH-POS @ 4 + _TPSH-POS !
+        \ key_share (0x0033 = 51)
+        _TPSH-ETYPE @ 51 = IF
+            _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+            _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+            29 <> IF -1 _TPSH-OK ! THEN
+            _TPSH-MSG @ _TPSH-POS @ 4 + +
+            _TPSH-CTX @ TLS-CTX.PEER-PUBKEY 32 CMOVE
+        THEN
+        \ supported_versions (0x002B = 43)
+        _TPSH-ETYPE @ 43 = IF
+            _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+            _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+            772 <> IF -1 _TPSH-OK ! THEN
+        THEN
+        _TPSH-POS @ _TPSH-ELEN @ + _TPSH-POS !
+        _TPSH-ELEN @ 4 + -
+    REPEAT DROP
+    _TPSH-OK @
+;
+
+\ --- Finished MAC Verification ---
+\ TLS-VERIFY-FINISHED ( traffic-secret verify-data -- flag )
+\   Verify a Finished message's verify_data (32 bytes).
+\   Returns 0 if valid, -1 if not.
+VARIABLE _TVF-SECRET
+VARIABLE _TVF-VERIFY
+
+: TLS-VERIFY-FINISHED ( traffic-secret verify-data -- flag )
+    _TVF-VERIFY !  _TVF-SECRET !
+    \ finished_key = HKDF-Expand-Label(secret, "finished", "", 32)
+    _TVF-SECRET @
+    TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
+    TLS-EXPAND-LABEL
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ expected = HMAC(finished_key, transcript_hash)
+    TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  HMAC
+    \ Compare with received
+    TLS-VERIFY-DATA _TVF-VERIFY @ 32 VERIFY
+;
+
+\ --- Client Finished Builder ---
+\ TLS-BUILD-FINISHED ( ctx rec -- reclen )
+\   Build and encrypt client Finished message.
+\   Does NOT append to transcript (caller manages for key derivation order).
+\   Returns encrypted record length.
+VARIABLE _TBF-CTX
+VARIABLE _TBF-REC
+
+: TLS-BUILD-FINISHED ( ctx rec -- reclen )
+    _TBF-REC !  _TBF-CTX !
+    \ finished_key = Expand-Label(c_hs_traffic, "finished", "", 32)
+    _TBF-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
+    TLS-EXPAND-LABEL
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ verify_data = HMAC(finished_key, hash)
+    TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  HMAC
+    \ Build Finished handshake message (36 bytes)
+    TLSHT-FINISHED  TLS-FINISHED-MSG C!
+    0  TLS-FINISHED-MSG 1 + C!
+    0  TLS-FINISHED-MSG 2 + C!
+    32 TLS-FINISHED-MSG 3 + C!
+    TLS-VERIFY-DATA TLS-FINISHED-MSG 4 + 32 CMOVE
+    \ Encrypt: TLS-ENCRYPT-RECORD(ctx, HANDSHAKE, msg, 36, rec)
+    _TBF-CTX @ TLS-CT-HANDSHAKE TLS-FINISHED-MSG 36 _TBF-REC @
+    TLS-ENCRYPT-RECORD
+;
+
+\ --- Handshake Message Processor ---
+\ TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
+\   Process a received handshake message (decrypted, no record header).
+\   Dispatches on handshake type, updates transcript and state.
+\   Returns 0 for success, -1 for error.
+VARIABLE _TPHM-CTX
+VARIABLE _TPHM-MSG
+VARIABLE _TPHM-MLEN
+VARIABLE _TPHM-TYPE
+
+: TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
+    _TPHM-MLEN !  _TPHM-MSG !  _TPHM-CTX !
+    _TPHM-MSG @ C@ _TPHM-TYPE !
+    _TPHM-TYPE @ TLSHT-SERVER-HELLO = IF
+        _TPHM-CTX @ _TPHM-MSG @ _TPHM-MLEN @ TLS-PARSE-SERVER-HELLO
+        DUP 0<> IF EXIT THEN DROP
+        \ Append SH to transcript
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        \ Compute shared secret via X25519
+        _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE
+        _TPHM-CTX @ TLS-CTX.PEER-PUBKEY X25519-DH
+        X25519-SHARED _TPHM-CTX @ TLS-CTX.SHARED 32 CMOVE
+        \ Key schedule phase 1
+        _TPHM-CTX @ TLS-KS-HANDSHAKE
+        TLSH-SERVER-HELLO-RCVD _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-ENCRYPTED-EXT = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-EE _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-CERTIFICATE = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-CERT _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-CERT-VERIFY = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-CV _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-FINISHED = IF
+        \ Verify server Finished MAC (transcript without this Finished)
+        _TPHM-CTX @ TLS-CTX.S-HS-TRAFFIC
+        _TPHM-MSG @ 4 +
+        TLS-VERIFY-FINISHED
+        DUP 0<> IF EXIT THEN DROP
+        \ Append server Finished to transcript
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-FINISHED _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    \ Unknown type — hash into transcript, continue
+    _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+    0
+;
+
+\ --- Handshake Completion ---
+\ TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+\   After server Finished verified and appended to transcript:
+\   1. Build+encrypt client Finished (using handshake keys)
+\   2. Derive and install application traffic keys
+\   Returns encrypted client Finished record length.
+VARIABLE _THC-CTX
+VARIABLE _THC-REC
+
+: TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+    _THC-REC !  _THC-CTX !
+    _THC-CTX @  _THC-REC @  TLS-BUILD-FINISHED
+    _THC-CTX @ TLS-KS-APPLICATION
 ;
 
 \ =====================================================================
