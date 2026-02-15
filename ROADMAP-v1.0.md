@@ -296,20 +296,24 @@ every step.
     Goal: CLI boot should feel
     instant (~2–3 s) with the C++ accel built.
 
-32. ☐ **Real-world networking hardening** — the TAP backend and test
-    suite cover basic frame exchange, but more rigorous real-world
-    testing is needed:
-    - 32a. `PING` command — user-facing word that ARP-resolves the
-      target, sends ICMP echo requests, polls for replies, and prints
-      round-trip time.  Should work for both LAN (10.64.0.1) and
-      external IPs (via gateway NAT).
-    - 32b. Outbound connectivity validation — verify that ARP →
-      IP → ICMP/UDP packets survive the full round-trip through the
-      host's NAT and back.
-    - 32c. Stress / robustness — malformed frames, MTU edge cases,
-      back-to-back packet bursts, TAP fd recovery after errors.
-    - 32d. Integration tests for PING, outbound UDP, and (once TCP
-      lands) outbound TCP connections against real hosts.
+32. ✅ **Real-world networking hardening** — comprehensive edge-case,
+    stress, and robustness testing for the full networking stack:
+    - 32a. ✅ `PING` / `PING-IP` commands — ARP-resolve target, send
+      ICMP echo request, poll for reply, print result.  `NEXT-HOP`
+      subnet routing with GW-IP zero-check fallback.  `.IP` formatting.
+    - 32b. ✅ Outbound connectivity validation — ARP → IP → ICMP/UDP
+      full round-trip verified via TAP integration tests.
+    - 32c. ✅ Stress / robustness — 24 unit tests covering truncated
+      IP headers, IP version≠4, bad IHL, TTL=0, zero-length payloads,
+      oversized/runt/empty frames, IP fragment flags, bad UDP/TCP
+      checksums, ARP insert+lookup, rapid 20-frame burst, 30-frame
+      broadcast storm, TCP SYN flood (10 SYNs), DNS wrong-ID, ICMP
+      non-echo types, mixed protocol burst, all-zeros/all-0xFF frames,
+      truncated TCP/UDP headers, NEXT-HOP unconfigured gateway.
+    - 32d. ✅ TAP integration tests — 12 tests: PING-IP outbound,
+      rapid ARP/PING poll (100×), broadcast storm drain, full UDP
+      roundtrip, ARP→ICMP→UDP sequence, IP-RECV noise resilience,
+      NET-STATUS after heavy traffic, TCP-INIT/TCP-POLL on live TAP.
 
 33. ☐ **BIOS `.'` delimiter bug** — the `.'` (dot-quote) implementation
     includes the delimiter space in the output.  ANS Forth specifies
