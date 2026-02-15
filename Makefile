@@ -177,9 +177,12 @@ test-kill:
 	fi
 
 # --- Run the interactive emulator ---
-.PHONY: run
+.PHONY: run disk
 run:
 	$(CPYTHON) cli.py --bios bios.asm --forth kdos.f
+
+disk:
+	$(CPYTHON) diskutil.py sample
 
 # --- PyPy setup ---
 .PHONY: setup-pypy

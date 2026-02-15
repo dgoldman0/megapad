@@ -38,7 +38,9 @@ Allocation bitmap:
 
 from __future__ import annotations
 
+import os
 import struct
+import sys
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -1037,3 +1039,104 @@ def build_sample_image(path: str | Path | None = None,
     if path is not None:
         fs.save(path)
     return fs
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="diskutil",
+        description="Megapad-64 MP64FS disk image utility",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    # sample — build a ready-to-boot image with KDOS + docs + tutorials
+    p_sample = sub.add_parser("sample", help="Build sample image with KDOS")
+    p_sample.add_argument("-o", "--output", default="sample.img",
+                          help="Output path (default: sample.img)")
+    p_sample.add_argument("--kdos", default="kdos.f",
+                          help="KDOS source file (default: kdos.f)")
+
+    # format — create a blank formatted image
+    p_fmt = sub.add_parser("format", help="Create a blank formatted image")
+    p_fmt.add_argument("-o", "--output", default="disk.img",
+                       help="Output path (default: disk.img)")
+    p_fmt.add_argument("--sectors", type=int, default=DEFAULT_TOTAL_SECTORS,
+                       help=f"Total sectors (default: {DEFAULT_TOTAL_SECTORS})")
+
+    # ls — list files in an image
+    p_ls = sub.add_parser("ls", help="List files in an image")
+    p_ls.add_argument("image", help="Disk image path")
+
+    # inject — add a file to an image
+    p_inj = sub.add_parser("inject", help="Inject a file into an image")
+    p_inj.add_argument("image", help="Disk image path")
+    p_inj.add_argument("file", help="File to inject")
+    p_inj.add_argument("-n", "--name", default=None,
+                       help="Name in image (default: basename of file)")
+    p_inj.add_argument("-t", "--type", default="raw",
+                       choices=list(FTYPE_NAMES.values()),
+                       help="File type (default: raw)")
+
+    # cat — read a file from an image
+    p_cat = sub.add_parser("cat", help="Read a file from an image")
+    p_cat.add_argument("image", help="Disk image path")
+    p_cat.add_argument("name", help="File name to read")
+
+    # rm — delete a file from an image
+    p_rm = sub.add_parser("rm", help="Delete a file from an image")
+    p_rm.add_argument("image", help="Disk image path")
+    p_rm.add_argument("name", help="File name to delete")
+
+    args = parser.parse_args()
+
+    if args.cmd is None:
+        parser.print_help()
+        return
+
+    if args.cmd == "sample":
+        build_sample_image(args.output, kdos_path=args.kdos)
+        fs = MP64FS.load(args.output)
+        files = fs.list_files()
+        total_bytes = sum(e.used_bytes for e in files)
+        print(f"Created {args.output} ({os.path.getsize(args.output)} bytes, "
+              f"{len(files)} files, {total_bytes} bytes used)")
+
+    elif args.cmd == "format":
+        format_image(args.output, total_sectors=args.sectors)
+        print(f"Formatted {args.output} ({args.sectors} sectors)")
+
+    elif args.cmd == "ls":
+        entries = list_files(args.image)
+        if not entries:
+            print("(empty)")
+            return
+        print(f"{'Name':<16} {'Type':<8} {'Size':>8}  {'Sectors':>7}  Flags")
+        print("-" * 56)
+        for e in entries:
+            tname = FTYPE_NAMES.get(e.ftype, f"?{e.ftype}")
+            print(f"{e.name:<16} {tname:<8} {e.used_bytes:>8}  {e.sector_count:>7}  "
+                  f"0x{e.flags:02x}")
+
+    elif args.cmd == "inject":
+        name = args.name or os.path.basename(args.file)
+        ftype_rev = {v: k for k, v in FTYPE_NAMES.items()}
+        ftype = ftype_rev[args.type]
+        with open(args.file, "rb") as f:
+            data = f.read()
+        inject_file(args.image, name, data, ftype=ftype)
+        print(f"Injected '{name}' ({len(data)} bytes, type={args.type})")
+
+    elif args.cmd == "cat":
+        data = read_file(args.image, args.name)
+        sys.stdout.buffer.write(data)
+
+    elif args.cmd == "rm":
+        delete_file(args.image, args.name)
+        print(f"Deleted '{args.name}'")
+
+
+if __name__ == "__main__":
+    main()

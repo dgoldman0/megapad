@@ -15,3 +15,6 @@ fpga/sim/tb_tile_fp
 build/
 *.so
 *.o
+
+# Disk images
+*.img
