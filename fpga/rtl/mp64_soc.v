@@ -183,8 +183,11 @@ module mp64_soc (
     wire [63:0] sha_rdata64;
     wire [63:0] crc_rdata64;
     wire [63:0] trng_rdata64;
-    wire [63:0] x25519_rdata64;
-    wire        aes_ack, sha_ack, crc_ack, trng_ack, x25519_ack;
+    wire [63:0] field_alu_rdata64;
+    wire [63:0] ntt_rdata64;
+    wire [63:0] kem_rdata64;
+    wire        aes_ack, sha_ack, crc_ack, trng_ack;
+    wire        field_alu_ack, ntt_ack, kem_ack;
 
     // --- Disk & NIC DMA ---
     wire        disk_dma_req;
@@ -223,7 +226,9 @@ module mp64_soc (
     wire sha_sel     = mmio_req && (mmio_addr[11:6] == 6'b011110);      // 0x780-0x7BF
     wire crc_sel     = mmio_req && (mmio_addr[11:5] == 7'b0111110);     // 0x7C0-0x7DF
     wire trng_sel    = mmio_req && (mmio_addr[11:5] == 7'b1000000);     // 0x800-0x81F
-    wire x25519_sel  = mmio_req && (mmio_addr[11:6] == 6'b100001);      // 0x840-0x87F
+    wire field_alu_sel = mmio_req && (mmio_addr[11:6] == 6'b100001);    // 0x840-0x87F
+    wire ntt_sel     = mmio_req && (mmio_addr[11:6] == 6'b100011);      // 0x8C0-0x8FF
+    wire kem_sel     = mmio_req && (mmio_addr[11:6] == 6'b100100);      // 0x900-0x93F
 
     // MMIO read mux
     wire [63:0] sysinfo_rdata;
@@ -238,7 +243,9 @@ module mp64_soc (
                             sha_sel     ? sha_rdata64           :
                             crc_sel     ? crc_rdata64           :
                             trng_sel    ? trng_rdata64          :
-                            x25519_sel  ? x25519_rdata64        :
+                            field_alu_sel ? field_alu_rdata64    :
+                            ntt_sel     ? ntt_rdata64            :
+                            kem_sel     ? kem_rdata64            :
                             64'd0;
     assign mmio_ack = 1'b1;  // all MMIO peripherals are single-cycle
 
@@ -883,17 +890,47 @@ module mp64_soc (
     );
 
     // ========================================================================
-    // X25519 ECDH Accelerator (MMIO 0x840-0x87F)
+    // Field ALU — GF(2²⁵⁵−19) Coprocessor (MMIO 0x840-0x87F)
+    // Supersedes X25519: mode 0 = backward-compatible scalar multiply.
+    // Modes 1-7: FADD, FSUB, FMUL, FSQR, FINV, FPOW, MUL_RAW.
     // ========================================================================
-    mp64_x25519 u_x25519 (
+    mp64_field_alu u_field_alu (
         .clk    (sys_clk),
         .rst_n  (sys_rst_n),
-        .req    (x25519_sel),
+        .req    (field_alu_sel),
         .addr   (mmio_addr[5:0]),
         .wdata  (mmio_wdata_bus),
         .wen    (mmio_wen),
-        .rdata  (x25519_rdata64),
-        .ack    (x25519_ack)
+        .rdata  (field_alu_rdata64),
+        .ack    (field_alu_ack)
+    );
+
+    // ========================================================================
+    // NTT Accelerator — 256-point NTT for lattice crypto (MMIO 0x8C0-0x8FF)
+    // ========================================================================
+    mp64_ntt u_ntt (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (ntt_sel),
+        .addr   (mmio_addr[5:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (ntt_rdata64),
+        .ack    (ntt_ack)
+    );
+
+    // ========================================================================
+    // ML-KEM-512 Accelerator (MMIO 0x900-0x93F)
+    // ========================================================================
+    mp64_kem u_kem (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .req    (kem_sel),
+        .addr   (mmio_addr[5:0]),
+        .wdata  (mmio_wdata_bus),
+        .wen    (mmio_wen),
+        .rdata  (kem_rdata64),
+        .ack    (kem_ack)
     );
 
     // ========================================================================
