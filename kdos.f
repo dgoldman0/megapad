@@ -494,6 +494,67 @@ CREATE AES-TAG-BUF 16 ALLOT
     DROP ."  AES: busy" CR
     THEN THEN THEN ;
 
+\ -- AES-256-GCM with AAD (Authenticated Associated Data) --
+\   TLS 1.3 requires AAD (the 5-byte record header) be authenticated
+\   but not encrypted.  These words extend AES-ENCRYPT/DECRYPT with AAD.
+CREATE AES-AAD-PAD 16 ALLOT           \ zero-padded AAD block
+VARIABLE _AEAD-AAD
+VARIABLE _AEAD-AADLEN
+
+: AES-ENCRYPT-AEAD ( key iv aad aadlen src dst dlen -- tag-addr )
+    >R >R >R            \ R: dlen dst src.  Stack: key iv aad aadlen
+    _AEAD-AADLEN !
+    _AEAD-AAD !
+    AES-IV!
+    AES-KEY!
+    _AEAD-AADLEN @ AES-AAD-LEN!
+    R> R> R>             \ src dst dlen
+    DUP AES-DATA-LEN!
+    0 AES-CMD!
+    \ Feed AAD block (zero-padded to 16 bytes)
+    AES-AAD-PAD 16 0 FILL
+    _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
+    AES-AAD-PAD AES-DIN!
+    \ Feed data blocks
+    DUP 4 RSHIFT         \ src dst dlen nblocks
+    >R DROP               \ src dst   R: nblocks
+    R> 0 DO
+        OVER AES-DIN!
+        DUP AES-DOUT@
+        SWAP 16 + SWAP 16 +
+    LOOP
+    2DROP
+    AES-TAG-BUF AES-TAG@
+    AES-TAG-BUF
+;
+
+: AES-DECRYPT-AEAD ( key iv aad aadlen src dst dlen tag -- flag )
+    AES-TAG!
+    >R >R >R             \ R: dlen dst src.  Stack: key iv aad aadlen
+    _AEAD-AADLEN !
+    _AEAD-AAD !
+    AES-IV!
+    AES-KEY!
+    _AEAD-AADLEN @ AES-AAD-LEN!
+    R> R> R>             \ src dst dlen
+    DUP AES-DATA-LEN!
+    1 AES-CMD!
+    \ Feed AAD block (zero-padded to 16 bytes)
+    AES-AAD-PAD 16 0 FILL
+    _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
+    AES-AAD-PAD AES-DIN!
+    \ Feed data blocks
+    DUP 4 RSHIFT
+    >R DROP
+    R> 0 DO
+        OVER AES-DIN!
+        DUP AES-DOUT@
+        SWAP 16 + SWAP 16 +
+    LOOP
+    2DROP
+    AES-STATUS@ 3 = IF -1 ELSE 0 THEN
+;
+
 \ =====================================================================
 \  §1.6  SHA-3 / SHAKE Hashing
 \ =====================================================================
@@ -6806,6 +6867,233 @@ VARIABLE _TPL-LEN
 \   ( max-attempts -- )
 : TCP-POLL-WAIT  ( n -- )
     0 DO TCP-POLL LOOP ;
+
+\ =====================================================================
+\  §16.8  TLS 1.3 Record Layer
+\ =====================================================================
+\
+\  TLS 1.3 (RFC 8446) record-level encrypt/decrypt.
+\  Cipher suite: X25519 + AES-256-GCM + SHA3-256 (non-standard hash).
+\
+\  Record format (§5.1):
+\    ContentType      = 23 (app_data) for all encrypted records
+\    ProtocolVersion  = 0x0303
+\    Length           = len(ciphertext) + 16 (tag)
+\    EncryptedRecord  = AES-256-GCM( inner_plaintext || content_type )
+\
+\  Nonce (§5.3):  nonce = write_iv XOR padded_seqnum
+\    padded_seqnum = 4 zero bytes || 8-byte sequence number (big-endian)
+\
+\  Uses AES-ENCRYPT-AEAD / AES-DECRYPT-AEAD from §1.5.
+
+\ --- Content Type Constants ---
+21 CONSTANT TLS-CT-ALERT
+22 CONSTANT TLS-CT-HANDSHAKE
+23 CONSTANT TLS-CT-APP-DATA
+20 CONSTANT TLS-CT-CCS
+
+\ --- TLS Context Structure ---
+\  Per-connection TLS state.  4 contexts, one per TCB slot.
+\
+\  Offset  Field          Size  Description
+\  +0      STATE          8     0=NONE 1=HS 2=ESTABLISHED 3=CLOSING
+\  +8      TCB-IDX        8     Associated TCB slot index
+\  +16     WR-KEY         32    Our write key (e.g., client_traffic_key)
+\  +48     WR-IV          12    Our write IV
+\  +60     PAD            4     (alignment)
+\  +64     WR-SEQ         8     Write sequence number
+\  +72     RD-KEY         32    Peer write key (e.g., server_traffic_key)
+\  +104    RD-IV          12    Peer write IV
+\  +116    PAD            4     (alignment)
+\  +120    RD-SEQ         8     Read sequence number
+\  +128    HS-STATE       8     Handshake sub-state
+\  +136    TRANSCRIPT     32    Running SHA3-256 transcript hash
+\  +168    HS-SECRET      32    Handshake secret
+\  +200    MS-SECRET      32    Master secret
+\  +232    MY-PRIVKEY     32    X25519 ephemeral private key
+\  +264    MY-PUBKEY      32    X25519 ephemeral public key
+\  +296    PEER-PUBKEY    32    Peer X25519 public key
+\  +328    SHARED-SECRET  32    X25519 shared secret
+\  +360    EARLY-SECRET   32    Early secret (from HKDF-Extract)
+\  Total: 392 bytes
+
+392 CONSTANT /TLS-CTX
+4 CONSTANT TLS-MAX-CTX
+
+: TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
+: TLS-CTX.TCB         ( ctx -- addr )  8 +  ;
+: TLS-CTX.WR-KEY      ( ctx -- addr )  16 + ;
+: TLS-CTX.WR-IV       ( ctx -- addr )  48 + ;
+: TLS-CTX.WR-SEQ      ( ctx -- addr )  64 + ;
+: TLS-CTX.RD-KEY      ( ctx -- addr )  72 + ;
+: TLS-CTX.RD-IV       ( ctx -- addr )  104 + ;
+: TLS-CTX.RD-SEQ      ( ctx -- addr )  120 + ;
+: TLS-CTX.HS-STATE    ( ctx -- addr )  128 + ;
+: TLS-CTX.TRANSCRIPT  ( ctx -- addr )  136 + ;
+: TLS-CTX.HS-SECRET   ( ctx -- addr )  168 + ;
+: TLS-CTX.MS-SECRET   ( ctx -- addr )  200 + ;
+: TLS-CTX.MY-PRIVKEY  ( ctx -- addr )  232 + ;
+: TLS-CTX.MY-PUBKEY   ( ctx -- addr )  264 + ;
+: TLS-CTX.PEER-PUBKEY ( ctx -- addr )  296 + ;
+: TLS-CTX.SHARED      ( ctx -- addr )  328 + ;
+: TLS-CTX.EARLY       ( ctx -- addr )  360 + ;
+
+CREATE TLS-CTXS  /TLS-CTX TLS-MAX-CTX * ALLOT
+TLS-CTXS /TLS-CTX TLS-MAX-CTX * 0 FILL
+
+\ TLS-CTX@ ( idx -- ctx-addr )  Get context by index (0..3).
+: TLS-CTX@ ( idx -- ctx )
+    /TLS-CTX * TLS-CTXS + ;
+
+\ --- TLS State Constants ---
+0 CONSTANT TLSS-NONE
+1 CONSTANT TLSS-HANDSHAKE
+2 CONSTANT TLSS-ESTABLISHED
+3 CONSTANT TLSS-CLOSING
+
+\ --- Handshake Sub-States ---
+0 CONSTANT TLSH-IDLE
+1 CONSTANT TLSH-CLIENT-HELLO-SENT
+2 CONSTANT TLSH-SERVER-HELLO-RCVD
+3 CONSTANT TLSH-WAIT-EE
+4 CONSTANT TLSH-WAIT-CERT
+5 CONSTANT TLSH-WAIT-CV
+6 CONSTANT TLSH-WAIT-FINISHED
+7 CONSTANT TLSH-CONNECTED
+
+\ --- Scratch Buffers for Record Layer ---
+CREATE TLS-NONCE-BUF  12 ALLOT        \ constructed per-record nonce
+CREATE TLS-REC-HDR     5 ALLOT        \ 5-byte TLS record header (AAD)
+CREATE TLS-PAD-BUF    16 ALLOT        \ plaintext padding to 16B boundary
+CREATE TLS-INNER-BUF 1500 ALLOT       \ inner plaintext + content type byte
+CREATE TLS-CIPHER-BUF 1520 ALLOT      \ ciphertext output
+CREATE TLS-PLAIN-BUF  1500 ALLOT      \ decrypted plaintext scratch
+
+\ --- TLS Nonce Construction ---
+\ TLS-BUILD-NONCE ( iv seq out -- )
+\   nonce = iv XOR (0x00000000 || seq_be64)
+\   iv is 12 bytes, seq is a 64-bit cell (native endian).
+\   out receives 12 bytes.
+: TLS-BUILD-NONCE ( iv seq out -- )
+    >R                         \ R: out
+    \ Convert seq to 8-byte big-endian in out[4..11]
+    \ First, copy iv to out
+    SWAP R@ 12 CMOVE           \ copy iv → out.  Stack: seq  R: out
+    \ XOR seq bytes into out[4..11] (big-endian)
+    DUP 56 RSHIFT 255 AND R@  4 + C@ XOR R@  4 + C!
+    DUP 48 RSHIFT 255 AND R@  5 + C@ XOR R@  5 + C!
+    DUP 40 RSHIFT 255 AND R@  6 + C@ XOR R@  6 + C!
+    DUP 32 RSHIFT 255 AND R@  7 + C@ XOR R@  7 + C!
+    DUP 24 RSHIFT 255 AND R@  8 + C@ XOR R@  8 + C!
+    DUP 16 RSHIFT 255 AND R@  9 + C@ XOR R@  9 + C!
+    DUP  8 RSHIFT 255 AND R@ 10 + C@ XOR R@ 10 + C!
+                  255 AND R@ 11 + C@ XOR R@ 11 + C!
+    R> DROP
+;
+
+\ --- TLS Record Encryption ---
+\ TLS-ENCRYPT-RECORD ( ctx content-type plaintext plen rec-buf -- rec-len )
+\   Builds a TLS 1.3 encrypted record:
+\     rec-buf = [type=23 | ver=0x0303 | length(BE16)] ++ ciphertext ++ tag
+\   The inner plaintext = plaintext || content_type_byte, padded to 16B.
+\   Returns total record length (5 + padded_inner + 16).
+VARIABLE _TER-CTX
+VARIABLE _TER-CTYPE
+VARIABLE _TER-PT
+VARIABLE _TER-PLEN
+VARIABLE _TER-REC
+VARIABLE _TER-PADLEN
+
+: TLS-ENCRYPT-RECORD ( ctx ctype pt plen rec -- reclen )
+    _TER-REC !  _TER-PLEN !  _TER-PT !
+    _TER-CTYPE !  _TER-CTX !
+    \ 1. Build inner plaintext: data || content_type, pad to 16B
+    _TER-PT @ TLS-INNER-BUF _TER-PLEN @ CMOVE
+    _TER-CTYPE @ TLS-INNER-BUF _TER-PLEN @ + C!
+    _TER-PLEN @ 1+ 15 + -16 AND _TER-PADLEN !
+    \ Zero-pad remainder
+    _TER-PLEN @ 1+ _TER-PADLEN @ < IF
+        TLS-INNER-BUF _TER-PLEN @ 1+ +
+        _TER-PADLEN @ _TER-PLEN @ 1+ - 0 FILL
+    THEN
+    \ 2. Build nonce from write IV + write seq
+    _TER-CTX @ TLS-CTX.WR-IV
+    _TER-CTX @ TLS-CTX.WR-SEQ @
+    TLS-NONCE-BUF TLS-BUILD-NONCE
+    \ 3. Build AAD (5-byte record header)
+    TLS-CT-APP-DATA TLS-REC-HDR C!
+    3 TLS-REC-HDR 1 + C!   3 TLS-REC-HDR 2 + C!
+    _TER-PADLEN @ 16 +
+    DUP 8 RSHIFT TLS-REC-HDR 3 + C!
+    255 AND      TLS-REC-HDR 4 + C!
+    \ 4. Copy header to rec-buf
+    TLS-REC-HDR _TER-REC @ 5 CMOVE
+    \ 5. Encrypt with AAD
+    _TER-CTX @ TLS-CTX.WR-KEY  TLS-NONCE-BUF
+    TLS-REC-HDR 5
+    TLS-INNER-BUF  _TER-REC @ 5 +  _TER-PADLEN @
+    AES-ENCRYPT-AEAD DROP
+    \ 6. Copy tag after ciphertext
+    AES-TAG-BUF  _TER-REC @ 5 + _TER-PADLEN @ +  16 CMOVE
+    \ 7. Increment write sequence number
+    _TER-CTX @ TLS-CTX.WR-SEQ DUP @ 1+ SWAP !
+    \ 8. Return total record length
+    _TER-PADLEN @ 5 + 16 +
+;
+
+\ --- TLS Record Decryption ---
+\ TLS-DECRYPT-RECORD ( ctx rec-buf rec-len plain-buf -- ctype plen | -1 0 )
+\   Decrypts a TLS 1.3 record.
+\   rec-buf starts with 5-byte header, then ciphertext, then 16-byte tag.
+\   Returns content type and plaintext length, or -1 0 on auth failure.
+VARIABLE _TDR-CTX
+VARIABLE _TDR-REC
+VARIABLE _TDR-RLEN
+VARIABLE _TDR-PLAIN
+VARIABLE _TDR-CLEN
+
+: TLS-DECRYPT-RECORD ( ctx rec rlen plain -- ctype plen | -1 0 )
+    _TDR-PLAIN !  _TDR-RLEN !  _TDR-REC !  _TDR-CTX !
+    \ Encrypted payload length = rec-len - 5 (header) - 16 (tag)
+    _TDR-RLEN @ 5 - 16 -  DUP _TDR-CLEN !
+    DUP 1 < IF DROP -1 0 EXIT THEN
+    DROP
+    \ 1. Build nonce from read IV + read seq
+    _TDR-CTX @ TLS-CTX.RD-IV
+    _TDR-CTX @ TLS-CTX.RD-SEQ @
+    TLS-NONCE-BUF TLS-BUILD-NONCE
+    \ 2. Decrypt: AES-DECRYPT-AEAD(rd-key, nonce, hdr, 5, ct, plain, clen, tag)
+    _TDR-CTX @ TLS-CTX.RD-KEY  TLS-NONCE-BUF
+    _TDR-REC @ 5                                     \ AAD = rec[0..4], len=5
+    _TDR-REC @ 5 +                                   \ ciphertext start
+    _TDR-PLAIN @                                     \ plaintext output
+    _TDR-CLEN @                                      \ cipher_len
+    _TDR-REC @ 5 + _TDR-CLEN @ +                     \ tag address
+    AES-DECRYPT-AEAD                                  \ → flag (0=ok, -1=fail)
+    0<> IF -1 0 EXIT THEN                             \ auth failure
+    \ 3. Increment read sequence number
+    _TDR-CTX @ TLS-CTX.RD-SEQ DUP @ 1+ SWAP !
+    \ 4. Extract inner content type = last non-zero byte of plaintext
+    _TDR-CLEN @
+    BEGIN
+        1-
+        DUP 0< IF DROP -1 0 EXIT THEN
+        DUP _TDR-PLAIN @ + C@ 0<>
+    UNTIL
+    DUP _TDR-PLAIN @ + C@  SWAP                      \ ctype plen
+;
+
+\ .TLS-STATUS ( ctx -- )  Print TLS context status.
+: .TLS-STATUS ( ctx -- )
+    DUP TLS-CTX.STATE @
+    DUP TLSS-NONE        = IF DROP ."  TLS: none" CR ELSE
+    DUP TLSS-HANDSHAKE   = IF DROP ."  TLS: handshake" CR ELSE
+    DUP TLSS-ESTABLISHED = IF DROP ."  TLS: established" CR ELSE
+    DUP TLSS-CLOSING     = IF DROP ."  TLS: closing" CR ELSE
+    DROP ."  TLS: unknown" CR
+    THEN THEN THEN THEN
+    DROP                              \ drop ctx
+;
 
 \ =====================================================================
 \  §14  Startup

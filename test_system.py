@@ -8514,6 +8514,221 @@ class TestKDOSMulticore(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+#  TLS 1.3 Record Layer tests — §16.8
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSRecord(_KDOSTestBase):
+    """Tests for §16.8 TLS 1.3 record layer — nonce, AEAD, encrypt/decrypt."""
+
+    _TLS_CTX_SETUP = [
+        # Set up TLS context 0 with known key/IV for testing
+        "0 TLS-CTX@",
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Write key = 0x00..0x1F (32 bytes)
+        ": init-wr-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
+        "init-wr-key",
+        # Write IV = 0x00..0x0B (12 bytes)
+        ": init-wr-iv 12 0 DO I test-ctx @ TLS-CTX.WR-IV I + C! LOOP ;",
+        "init-wr-iv",
+        # Write seq = 0
+        "0 test-ctx @ TLS-CTX.WR-SEQ !",
+        # Read key = same as write key (for roundtrip test)
+        ": init-rd-key 32 0 DO I test-ctx @ TLS-CTX.RD-KEY I + C! LOOP ;",
+        "init-rd-key",
+        # Read IV = same as write IV
+        ": init-rd-iv 12 0 DO I test-ctx @ TLS-CTX.RD-IV I + C! LOOP ;",
+        "init-rd-iv",
+        # Read seq = 0
+        "0 test-ctx @ TLS-CTX.RD-SEQ !",
+        # State = ESTABLISHED
+        "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+    ]
+
+    def test_tls_nonce_seq0(self):
+        """TLS-BUILD-NONCE with seq=0 returns IV unchanged."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE nonce-buf 12 ALLOT",
+            "test-ctx @ TLS-CTX.WR-IV  0  nonce-buf TLS-BUILD-NONCE",
+            '." N0=" nonce-buf C@ .',
+            '." N4=" nonce-buf 4 + C@ .',
+            '." N11=" nonce-buf 11 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N0=0 ", text)
+        self.assertIn("N4=4 ", text)
+        self.assertIn("N11=11 ", text)
+
+    def test_tls_nonce_seq1(self):
+        """TLS-BUILD-NONCE with seq=1 XORs last byte."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE nonce-buf 12 ALLOT",
+            "test-ctx @ TLS-CTX.WR-IV  1  nonce-buf TLS-BUILD-NONCE",
+            '." N10=" nonce-buf 10 + C@ .',
+            '." N11=" nonce-buf 11 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N10=10 ", text)     # unchanged
+        self.assertIn("N11=10 ", text)     # 11 XOR 1 = 10
+
+    def test_aes_encrypt_aead_roundtrip(self):
+        """AES-ENCRYPT-AEAD / AES-DECRYPT-AEAD roundtrip with 5-byte AAD."""
+        lines = self._TLS_CTX_SETUP + [
+            # Plaintext = 16 bytes of 0x41 ('A')
+            "CREATE pt-buf 16 ALLOT  pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            # AAD = 5 bytes: 23 3 3 0 32
+            "CREATE aad-buf 5 ALLOT",
+            "23 aad-buf C!  3 aad-buf 1 + C!  3 aad-buf 2 + C!",
+            "0 aad-buf 3 + C!  32 aad-buf 4 + C!",
+            # IV
+            "CREATE iv-buf 12 ALLOT",
+            ": init-iv 12 0 DO I iv-buf I + C! LOOP ; init-iv",
+            # Encrypt
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  pt-buf ct-buf 16",
+            "AES-ENCRYPT-AEAD",
+            "VARIABLE tag-save  tag-save !",
+            # Verify ciphertext differs from plaintext
+            '." CT0=" ct-buf C@ .',
+            # Decrypt
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  ct-buf rt-buf 16",
+            "tag-save @ AES-DECRYPT-AEAD",
+            '." DF=" .',
+            '." RT0=" rt-buf C@ .',
+            '." RT15=" rt-buf 15 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DF=0 ", text)       # auth OK
+        self.assertIn("RT0=65 ", text)     # 'A'
+        self.assertIn("RT15=65 ", text)    # 'A'
+
+    def test_aes_decrypt_aead_bad_tag(self):
+        """AES-DECRYPT-AEAD with corrupted tag returns -1."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE pt-buf 16 ALLOT  pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            "CREATE aad-buf 5 ALLOT",
+            "23 aad-buf C!  3 aad-buf 1 + C!  3 aad-buf 2 + C!",
+            "0 aad-buf 3 + C!  32 aad-buf 4 + C!",
+            "CREATE iv-buf 12 ALLOT",
+            ": init-iv 12 0 DO I iv-buf I + C! LOOP ; init-iv",
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  pt-buf ct-buf 16",
+            "AES-ENCRYPT-AEAD",
+            # Corrupt the tag (flip first byte)
+            "DUP C@ 255 XOR SWAP C!",
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  ct-buf rt-buf 16",
+            "AES-TAG-BUF AES-DECRYPT-AEAD",
+            '." DF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DF=-1 ", text)      # auth FAIL
+
+    def test_tls_encrypt_record_header(self):
+        """TLS-ENCRYPT-RECORD produces correct 5-byte TLS header."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 10 ALLOT",
+            ": fill-msg  72 msg C!  101 msg 1 + C!  108 msg 2 + C!",
+            "  108 msg 3 + C!  111 msg 4 + C! ;",     # "Hello"
+            "fill-msg",
+            "CREATE rec-buf 64 ALLOT",
+            "test-ctx @  TLS-CT-APP-DATA  msg 5  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            '." RL=" .',
+            # Header bytes
+            '." H0=" rec-buf C@ .',               # type = 23
+            '." H1=" rec-buf 1 + C@ .',           # version hi = 3
+            '." H2=" rec-buf 2 + C@ .',           # version lo = 3
+        ]
+        text = self._run_kdos(lines)
+        # Record len = 5 (hdr) + 16 (padded inner: 5 data + 1 CT + 10 pad) + 16 (tag)
+        self.assertIn("RL=37 ", text)
+        self.assertIn("H0=23 ", text)      # content type
+        self.assertIn("H1=3 ", text)       # version
+        self.assertIn("H2=3 ", text)
+
+    def test_tls_encrypt_decrypt_roundtrip(self):
+        """TLS-ENCRYPT-RECORD → TLS-DECRYPT-RECORD recovers plaintext."""
+        lines = self._TLS_CTX_SETUP + [
+            # Message: "ABCDE" (5 bytes)
+            "CREATE msg 5 ALLOT",
+            "65 msg C!  66 msg 1 + C!  67 msg 2 + C!",
+            "68 msg 3 + C!  69 msg 4 + C!",
+            "CREATE rec-buf 64 ALLOT",
+            "CREATE plain-out 32 ALLOT",
+            # Encrypt
+            "test-ctx @  TLS-CT-APP-DATA  msg 5  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            "VARIABLE rec-len  rec-len !",
+            # Reset read seq to match write seq at time of encryption (was 0)
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            # Decrypt
+            "test-ctx @  rec-buf  rec-len @  plain-out",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',
+            '." CT=" .',
+            '." B0=" plain-out C@ .',
+            '." B4=" plain-out 4 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=23 ", text)      # content type = APP_DATA
+        self.assertIn("PL=5 ", text)       # plaintext length = 5
+        self.assertIn("B0=65 ", text)      # 'A'
+        self.assertIn("B4=69 ", text)      # 'E'
+
+    def test_tls_seq_increment(self):
+        """TLS-ENCRYPT-RECORD increments write sequence number."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 16 ALLOT  msg 16 65 FILL",
+            "CREATE rec-buf 80 ALLOT",
+            '." S0=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            "test-ctx @  TLS-CT-APP-DATA  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD DROP",
+            '." S1=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            "test-ctx @  TLS-CT-APP-DATA  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD DROP",
+            '." S2=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S0=0 ", text)
+        self.assertIn("S1=1 ", text)
+        self.assertIn("S2=2 ", text)
+
+    def test_tls_handshake_content_type(self):
+        """TLS-ENCRYPT/DECRYPT roundtrip preserves HANDSHAKE content type."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 16 ALLOT  msg 16 0 FILL  1 msg C!",
+            "CREATE rec-buf 80 ALLOT",
+            "CREATE plain-out 32 ALLOT",
+            "test-ctx @  TLS-CT-HANDSHAKE  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            "VARIABLE rec-len  rec-len !",
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            "test-ctx @  rec-buf  rec-len @  plain-out",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',
+            '." CT=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=22 ", text)      # HANDSHAKE
+        self.assertIn("PL=16 ", text)
+
+    def test_tls_ctx_init(self):
+        """TLS context starts in NONE state."""
+        text = self._run_kdos([
+            '." S=" 0 TLS-CTX@ TLS-CTX.STATE @ .',
+            '." SZ=" /TLS-CTX .',
+        ])
+        self.assertIn("S=0 ", text)        # TLSS-NONE
+        self.assertIn("SZ=392 ", text)
+
+    def test_tls_status_display(self):
+        """.TLS-STATUS prints human-readable state."""
+        text = self._run_kdos(["0 TLS-CTX@ .TLS-STATUS"])
+        self.assertIn("TLS: none", text)
+
+
+# ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing
 # ---------------------------------------------------------------------------
 
