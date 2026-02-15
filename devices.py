@@ -45,6 +45,8 @@ AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
 X25519_BASE  = 0x0840
+NTT_BASE     = 0x08C0
+KEM_BASE     = 0x0900
 
 
 # ---------------------------------------------------------------------------
@@ -1257,7 +1259,8 @@ class SHA3Device(Device):
            2=SHAKE128 (rate=168, XOF),    3=SHAKE256 (rate=136, XOF).
 
     Register map (offsets from SHA3_BASE = 0x0780):
-      0x00  CMD      (W)  0=NOP, 1=INIT, 2=ABSORB (internal), 3=FINAL, 4=SQUEEZE
+      0x00  CMD      (W)  0=NOP, 1=INIT, 2=ABSORB (internal), 3=FINAL,
+                          4=SQUEEZE, 5=SQUEEZE_NEXT (auto-permute for streaming)
       0x01  STATUS   (R)  bit 0=busy, bit 1=done
       0x02  CTRL     (W)  mode select (bits [1:0])
       0x08  DIN      (W)  byte input (auto-absorbs at rate boundary)
@@ -1279,6 +1282,8 @@ class SHA3Device(Device):
         self.status = 0
         self.digest = bytearray(64)
         self._squeezed = 0  # bytes already squeezed (for XOF)
+        self._stream_pos = 0  # byte position within current squeeze block
+        self._squeeze_buf = bytearray()  # full rate output for streaming
 
     @property
     def rate(self) -> int:
@@ -1302,6 +1307,8 @@ class SHA3Device(Device):
                 self._finalize()
             elif value == 4:  # SQUEEZE (XOF: permute and extract more)
                 self._squeeze()
+            elif value == 5:  # SQUEEZE_NEXT (streaming: advance 32-byte window)
+                self._squeeze_next_stream()
         elif offset == 0x02:  # CTRL — mode select
             self.mode = value & 0x03
         elif offset == 0x08:  # DIN
@@ -1335,6 +1342,9 @@ class SHA3Device(Device):
             self.digest = out[:outsz]
         else:
             self.digest = out[:self.rate]
+        # Initialise streaming buffer for SQUEEZE-NEXT
+        self._squeeze_buf = bytearray(out[:self.rate])
+        self._stream_pos = 0
         self._squeezed = len(self.digest)
         self.status = 2  # done
 
@@ -1346,6 +1356,397 @@ class SHA3Device(Device):
             out.extend(self.state[i].to_bytes(8, 'little'))
         self.digest = out[:self.rate]
         self._squeezed += self.rate
+        self.status = 2
+
+    def _squeeze_next_stream(self):
+        """Streaming SQUEEZE: advance DOUT window by 32 bytes.
+
+        Walks through the current rate block 32 bytes at a time.
+        When the window would exceed the buffered output, apply
+        Keccak-f to produce the next rate block and append it.
+        """
+        self._stream_pos += 32
+        # Extend squeeze buffer if the 64-byte DOUT window would overrun
+        while self._stream_pos + 64 > len(self._squeeze_buf):
+            self.state = _keccak_f1600(self.state)
+            out = bytearray()
+            for i in range(self.rate // 8):
+                out.extend(self.state[i].to_bytes(8, 'little'))
+            self._squeeze_buf.extend(out[:self.rate])
+        # Update visible DOUT to show current 64-byte window
+        self.digest = bytearray(
+            self._squeeze_buf[self._stream_pos:self._stream_pos + 64]
+        )
+        self._squeezed = self._stream_pos + 64
+        self.status = 2
+
+
+# ---------------------------------------------------------------------------
+#  ML-KEM-512 (Kyber) Key Encapsulation Mechanism Accelerator
+# ---------------------------------------------------------------------------
+# Implements FIPS 203 ML-KEM-512 entirely in the emulator.
+# Register map (offsets from KEM_BASE):
+#   0x00  STATUS  (R)   0=idle, 2=done
+#   0x01  CMD     (W)   1=KEYGEN, 2=ENCAPS, 3=DECAPS
+#   0x08  BUF_SEL (W)   Buffer select: 0=SEED(64B) 1=PK(800B)
+#                        2=SK(1632B) 3=CT(768B) 4=SS(32B)
+#                        Writing resets byte index to 0.
+#   0x10  DIN     (W)   Write byte to selected buffer, auto-inc
+#   0x18  DOUT    (R)   Read byte from selected buffer, auto-inc
+#   0x20  BUF_SIZE(R,2B LE) Size of selected buffer
+
+import hashlib as _hashlib
+
+# --- ML-KEM-512 parameters ---------------------------------------------------
+_KEM_N   = 256
+_KEM_K   = 2
+_KEM_Q   = 3329
+_KEM_ETA1 = 3
+_KEM_ETA2 = 2
+_KEM_DU  = 10
+_KEM_DV  = 4
+
+def _bit_rev7(x: int) -> int:
+    r = 0
+    for _ in range(7):
+        r = (r << 1) | (x & 1)
+        x >>= 1
+    return r
+
+# Pre-compute NTT twiddle factors: ζ = 17 (primitive 256th root of unity mod q)
+_KEM_ZETAS = [pow(17, _bit_rev7(i), _KEM_Q) for i in range(128)]
+
+def _kem_ntt(f: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 9 — Number Theoretic Transform."""
+    fh = list(f)
+    i = 1
+    length = 128
+    while length >= 2:
+        for start in range(0, 256, 2 * length):
+            z = _KEM_ZETAS[i]; i += 1
+            for j in range(start, start + length):
+                t = (z * fh[j + length]) % _KEM_Q
+                fh[j + length] = (fh[j] - t) % _KEM_Q
+                fh[j] = (fh[j] + t) % _KEM_Q
+        length //= 2
+    return fh
+
+def _kem_intt(fh: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 10 — Inverse NTT."""
+    f = list(fh)
+    i = 127
+    length = 2
+    while length <= 128:
+        for start in range(0, 256, 2 * length):
+            z = _KEM_ZETAS[i]; i -= 1
+            for j in range(start, start + length):
+                t = f[j]
+                f[j] = (t + f[j + length]) % _KEM_Q
+                f[j + length] = (z * (f[j + length] - t)) % _KEM_Q
+        length *= 2
+    return [(x * 3303) % _KEM_Q for x in f]  # 3303 = 128⁻¹ mod q
+
+def _kem_basemul(fh: list[int], gh: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 11 — Multiply NTT-domain polynomials.
+
+    Processes 64 groups of 4 coefficients.  Each group uses zetas[64+i]
+    for the first pair and -zetas[64+i] for the second pair, matching
+    the reference pqcrystals-kyber implementation.
+    """
+    h = [0] * 256
+    for i in range(64):
+        z = _KEM_ZETAS[64 + i]
+        nz = (-z) % _KEM_Q
+        # First pair (4i, 4i+1)
+        a0, a1 = fh[4*i], fh[4*i+1]
+        b0, b1 = gh[4*i], gh[4*i+1]
+        h[4*i]   = (a0*b0 + a1*b1*z) % _KEM_Q
+        h[4*i+1] = (a0*b1 + a1*b0) % _KEM_Q
+        # Second pair (4i+2, 4i+3) — negated zeta
+        a0, a1 = fh[4*i+2], fh[4*i+3]
+        b0, b1 = gh[4*i+2], gh[4*i+3]
+        h[4*i+2] = (a0*b0 + a1*b1*nz) % _KEM_Q
+        h[4*i+3] = (a0*b1 + a1*b0) % _KEM_Q
+    return h
+
+def _kem_add(a: list[int], b: list[int]) -> list[int]:
+    return [(a[i] + b[i]) % _KEM_Q for i in range(256)]
+
+def _kem_sub(a: list[int], b: list[int]) -> list[int]:
+    return [(a[i] - b[i]) % _KEM_Q for i in range(256)]
+
+# --- CBD / Encode / Decode / Compress ----------------------------------------
+
+def _kem_cbd(eta: int, B: bytes) -> list[int]:
+    """FIPS 203 Algorithm 7 — Centered Binomial Distribution."""
+    bits = []
+    for byte in B:
+        for j in range(8):
+            bits.append((byte >> j) & 1)
+    f = [0] * 256
+    for i in range(256):
+        x = sum(bits[2*i*eta + j] for j in range(eta))
+        y = sum(bits[2*i*eta + eta + j] for j in range(eta))
+        f[i] = (x - y) % _KEM_Q
+    return f
+
+def _kem_byte_encode(F: list[int], d: int) -> bytes:
+    """FIPS 203 Algorithm 4 — ByteEncode_d."""
+    bits: list[int] = []
+    for c in F:
+        for j in range(d):
+            bits.append((c >> j) & 1)
+    B = bytearray(32 * d)
+    for i, b in enumerate(bits):
+        B[i >> 3] |= b << (i & 7)
+    return bytes(B)
+
+def _kem_byte_decode(B: bytes, d: int) -> list[int]:
+    """FIPS 203 Algorithm 5 — ByteDecode_d."""
+    bits: list[int] = []
+    for byte in B:
+        for j in range(8):
+            bits.append((byte >> j) & 1)
+    F = [0] * 256
+    m = (1 << d) - 1 if d < 12 else _KEM_Q
+    for i in range(256):
+        v = 0
+        for j in range(d):
+            v |= bits[i*d + j] << j
+        F[i] = v % (m + 1) if d < 12 else v % _KEM_Q
+    return F
+
+def _kem_compress(x: int, d: int) -> int:
+    return ((x * (1 << d) + _KEM_Q // 2) // _KEM_Q) % (1 << d)
+
+def _kem_decompress(y: int, d: int) -> int:
+    return (y * _KEM_Q + (1 << (d - 1))) >> d
+
+def _kem_compress_poly(f: list[int], d: int) -> list[int]:
+    return [_kem_compress(c, d) for c in f]
+
+def _kem_decompress_poly(f: list[int], d: int) -> list[int]:
+    return [_kem_decompress(c, d) for c in f]
+
+# --- Hash helpers (SHA3/SHAKE via hashlib) ------------------------------------
+
+def _kem_G(x: bytes) -> bytes:
+    """G = SHA3-512."""
+    return _hashlib.sha3_512(x).digest()
+
+def _kem_H(x: bytes) -> bytes:
+    """H = SHA3-256."""
+    return _hashlib.sha3_256(x).digest()
+
+def _kem_J(x: bytes) -> bytes:
+    """J = SHAKE-256, 32-byte output."""
+    return _hashlib.shake_256(x).digest(32)
+
+def _kem_XOF(rho: bytes, i: int, j: int) -> bytes:
+    """XOF = SHAKE-128(ρ ‖ i ‖ j) — enough for SampleNTT."""
+    return _hashlib.shake_128(rho + bytes([i, j])).digest(840)
+
+def _kem_PRF(eta: int, s: bytes, N: int) -> bytes:
+    """PRF = SHAKE-256(s ‖ N) with 64·η output bytes."""
+    return _hashlib.shake_256(s + bytes([N])).digest(64 * eta)
+
+def _kem_sample_ntt(xof: bytes) -> list[int]:
+    """FIPS 203 Algorithm 6 — SampleNTT (rejection sampling)."""
+    a: list[int] = []
+    i = 0
+    while len(a) < 256:
+        d1 = xof[i] + 256 * (xof[i+1] % 16)
+        d2 = (xof[i+1] >> 4) + 16 * xof[i+2]
+        if d1 < _KEM_Q:
+            a.append(d1)
+        if d2 < _KEM_Q and len(a) < 256:
+            a.append(d2)
+        i += 3
+    return a
+
+# --- K-PKE (inner CPA-secure scheme) -----------------------------------------
+
+def _kem_pke_keygen(d: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 13 — K-PKE.KeyGen."""
+    g = _kem_G(d + bytes([_KEM_K]))
+    rho, sigma = g[:32], g[32:]
+    A_hat = [[_kem_sample_ntt(_kem_XOF(rho, j, i))
+              for j in range(_KEM_K)] for i in range(_KEM_K)]
+    N = 0
+    s = []
+    for _ in range(_KEM_K):
+        s.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, sigma, N))); N += 1
+    e = []
+    for _ in range(_KEM_K):
+        e.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, sigma, N))); N += 1
+    s_hat = [_kem_ntt(si) for si in s]
+    e_hat = [_kem_ntt(ei) for ei in e]
+    t_hat = []
+    for i in range(_KEM_K):
+        ti = [0] * 256
+        for j in range(_KEM_K):
+            ti = _kem_add(ti, _kem_basemul(A_hat[i][j], s_hat[j]))
+        t_hat.append(_kem_add(ti, e_hat[i]))
+    ek = bytearray()
+    for i in range(_KEM_K):
+        ek.extend(_kem_byte_encode(t_hat[i], 12))
+    ek.extend(rho)
+    dk = bytearray()
+    for i in range(_KEM_K):
+        dk.extend(_kem_byte_encode(s_hat[i], 12))
+    return bytes(ek), bytes(dk)
+
+def _kem_pke_encrypt(ek: bytes, m: bytes, r: bytes) -> bytes:
+    """FIPS 203 Algorithm 14 — K-PKE.Encrypt."""
+    t_hat = [_kem_byte_decode(ek[384*i:384*(i+1)], 12) for i in range(_KEM_K)]
+    rho = ek[384*_KEM_K:]
+    A_hat = [[_kem_sample_ntt(_kem_XOF(rho, j, i))
+              for j in range(_KEM_K)] for i in range(_KEM_K)]
+    N = 0
+    rv = []
+    for _ in range(_KEM_K):
+        rv.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, r, N))); N += 1
+    e1 = []
+    for _ in range(_KEM_K):
+        e1.append(_kem_cbd(_KEM_ETA2, _kem_PRF(_KEM_ETA2, r, N))); N += 1
+    e2 = _kem_cbd(_KEM_ETA2, _kem_PRF(_KEM_ETA2, r, N))
+    r_hat = [_kem_ntt(ri) for ri in rv]
+    u = []
+    for i in range(_KEM_K):
+        ui = [0] * 256
+        for j in range(_KEM_K):
+            ui = _kem_add(ui, _kem_basemul(A_hat[j][i], r_hat[j]))
+        u.append(_kem_add(_kem_intt(ui), e1[i]))
+    mu = _kem_decompress_poly(_kem_byte_decode(m, 1), 1)
+    v = [0] * 256
+    for i in range(_KEM_K):
+        v = _kem_add(v, _kem_basemul(t_hat[i], r_hat[i]))
+    v = _kem_add(_kem_add(_kem_intt(v), e2), mu)
+    c1 = bytearray()
+    for i in range(_KEM_K):
+        c1.extend(_kem_byte_encode(_kem_compress_poly(u[i], _KEM_DU), _KEM_DU))
+    c2 = _kem_byte_encode(_kem_compress_poly(v, _KEM_DV), _KEM_DV)
+    return bytes(c1) + bytes(c2)
+
+def _kem_pke_decrypt(dk: bytes, c: bytes) -> bytes:
+    """FIPS 203 Algorithm 15 — K-PKE.Decrypt."""
+    du_chunk = 32 * _KEM_DU   # 320
+    c1, c2 = c[:du_chunk * _KEM_K], c[du_chunk * _KEM_K:]
+    u = [_kem_decompress_poly(_kem_byte_decode(c1[du_chunk*i:du_chunk*(i+1)],
+         _KEM_DU), _KEM_DU) for i in range(_KEM_K)]
+    v = _kem_decompress_poly(_kem_byte_decode(c2, _KEM_DV), _KEM_DV)
+    s_hat = [_kem_byte_decode(dk[384*i:384*(i+1)], 12) for i in range(_KEM_K)]
+    u_hat = [_kem_ntt(ui) for ui in u]
+    inner = [0] * 256
+    for i in range(_KEM_K):
+        inner = _kem_add(inner, _kem_basemul(s_hat[i], u_hat[i]))
+    w = _kem_sub(v, _kem_intt(inner))
+    return bytes(_kem_byte_encode(_kem_compress_poly(w, 1), 1))
+
+# --- ML-KEM (CCA-secure KEM) -------------------------------------------------
+
+def _kem_keygen(d: bytes, z: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 16 — ML-KEM.KeyGen."""
+    ek, dk_pke = _kem_pke_keygen(d)
+    dk = dk_pke + ek + _kem_H(ek) + z
+    return ek, dk
+
+def _kem_encaps(ek: bytes, coin: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 17 — ML-KEM.Encaps.
+    Returns (shared_secret, ciphertext)."""
+    g = _kem_G(coin + _kem_H(ek))
+    K, r = g[:32], g[32:]
+    c = _kem_pke_encrypt(ek, coin, r)
+    return K, c
+
+def _kem_decaps(c: bytes, dk: bytes) -> bytes:
+    """FIPS 203 Algorithm 18 — ML-KEM.Decaps."""
+    dk_pke = dk[:384 * _KEM_K]
+    ek = dk[384 * _KEM_K : 384 * _KEM_K + 384 * _KEM_K + 32]
+    h  = dk[384 * _KEM_K + 384 * _KEM_K + 32 :
+            384 * _KEM_K + 384 * _KEM_K + 64]
+    z  = dk[384 * _KEM_K + 384 * _KEM_K + 64 :]
+    m_prime = _kem_pke_decrypt(dk_pke, c)
+    g = _kem_G(m_prime + h)
+    K_prime, r_prime = g[:32], g[32:]
+    K_bar = _kem_J(z + c)
+    c_prime = _kem_pke_encrypt(ek, m_prime, r_prime)
+    return K_prime if c == c_prime else K_bar
+
+
+class KemDevice(Device):
+    """ML-KEM-512 (Kyber) hardware KEM accelerator.
+
+    Buffers: 0=SEED/COIN(64B) 1=PK(800B) 2=SK(1632B) 3=CT(768B) 4=SS(32B).
+    """
+
+    _BUF_SIZES = [64, 800, 1632, 768, 32]
+
+    def __init__(self):
+        super().__init__("KEM", KEM_BASE, 0x28)   # 40-byte register window
+        self._reset_kem()
+
+    def _reset_kem(self):
+        self.status = 0
+        self._buf_sel = 0
+        self._buf_idx = 0
+        self._bufs = [bytearray(s) for s in self._BUF_SIZES]
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:
+            return self.status
+        if offset == 0x18:                        # DOUT
+            buf = self._bufs[self._buf_sel]
+            if self._buf_idx < len(buf):
+                v = buf[self._buf_idx]
+                self._buf_idx += 1
+                return v
+            return 0
+        if offset == 0x20:
+            return self._BUF_SIZES[self._buf_sel] & 0xFF
+        if offset == 0x21:
+            return (self._BUF_SIZES[self._buf_sel] >> 8) & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x01:                        # CMD
+            if value == 1:
+                self._do_keygen()
+            elif value == 2:
+                self._do_encaps()
+            elif value == 3:
+                self._do_decaps()
+        elif offset == 0x08:                      # BUF_SEL
+            self._buf_sel = min(value, 4)
+            self._buf_idx = 0
+        elif offset == 0x10:                      # DIN
+            buf = self._bufs[self._buf_sel]
+            if self._buf_idx < len(buf):
+                buf[self._buf_idx] = value
+                self._buf_idx += 1
+
+    def _do_keygen(self):
+        d = bytes(self._bufs[0][:32])
+        z = bytes(self._bufs[0][32:64])
+        ek, dk = _kem_keygen(d, z)
+        self._bufs[1] = bytearray(ek)
+        self._bufs[2] = bytearray(dk)
+        self.status = 2
+
+    def _do_encaps(self):
+        ek   = bytes(self._bufs[1])
+        coin = bytes(self._bufs[0][:32])
+        K, c = _kem_encaps(ek, coin)
+        self._bufs[3] = bytearray(c)
+        self._bufs[4] = bytearray(K)
+        self.status = 2
+
+    def _do_decaps(self):
+        c  = bytes(self._bufs[3])
+        dk = bytes(self._bufs[2])
+        K  = _kem_decaps(c, dk)
+        self._bufs[4] = bytearray(K)
         self.status = 2
 
 
@@ -1506,51 +1907,87 @@ class TRNGDevice(Device):
 
 
 # ---------------------------------------------------------------------------
-#  X25519 — Elliptic Curve Diffie-Hellman Accelerator (RFC 7748)
+#  Field ALU — General GF(2²⁵⁵−19) Coprocessor + Raw 256×256 Multiplier
 # ---------------------------------------------------------------------------
+# Expanded from X25519 ECDH accelerator.  Mode 0 is backward-compatible
+# with the original X25519 scalar multiplication interface.
+#
 # Register map (offsets from X25519_BASE = 0x0840):
 #   Write:
-#     0x00..0x1F  SCALAR  — 32-byte scalar (little-endian)
-#     0x20..0x3F  POINT   — 32-byte u-coordinate (little-endian)
-#                           byte 0x3E: reserved
-#                           byte 0x3F: CMD — write 1 to start computation
+#     0x00..0x1F  OPERAND_A  — 256-bit operand A / scalar (little-endian)
+#     0x20..0x3F  OPERAND_B  — 256-bit operand B / point  (little-endian)
+#     0x40        CMD        — bits [4:1] = mode, bit [0] = go
+#                              mode 0 = X25519 (legacy scalar multiply)
+#                              mode 1 = FADD  (a+b) mod p
+#                              mode 2 = FSUB  (a−b) mod p
+#                              mode 3 = FMUL  (a·b) mod p
+#                              mode 4 = FSQR  (a²)  mod p
+#                              mode 5 = FINV  a^(p−2) mod p
+#                              mode 6 = FPOW  a^b mod p
+#                              mode 7 = MUL_RAW  256×256→512-bit product
 #   Read:
-#     0x00        STATUS  — bit 0 = busy, bit 1 = done
-#     0x08..0x27  RESULT  — 32-byte result (little-endian) at offsets 0x08-0x27
+#     0x00        STATUS     — bit 0 = busy, bit 1 = done
+#     0x08..0x27  RESULT_LO  — 256-bit result (or low half for MUL_RAW)
+#     0x28..0x47  RESULT_HI  — 256-bit high half (MUL_RAW only, else 0)
 
-class X25519Device(Device):
-    """X25519 scalar multiplication accelerator (RFC 7748)."""
+# Field ALU mode constants
+FIELD_MODE_X25519  = 0
+FIELD_MODE_FADD    = 1
+FIELD_MODE_FSUB    = 2
+FIELD_MODE_FMUL    = 3
+FIELD_MODE_FSQR    = 4
+FIELD_MODE_FINV    = 5
+FIELD_MODE_FPOW    = 6
+FIELD_MODE_MUL_RAW = 7
+
+class FieldALUDevice(Device):
+    """GF(2²⁵⁵−19) field ALU + raw 256×256 multiplier.
+
+    Backward-compatible: mode 0 = X25519 scalar multiply (RFC 7748).
+    """
 
     _P = (1 << 255) - 19
     _A24 = 121665            # (486662 - 2) / 4, per RFC 7748 §5
 
     def __init__(self):
-        super().__init__("X25519", X25519_BASE, 0x41)
-        self._scalar = bytearray(32)
-        self._point = bytearray(32)
-        self._result = bytearray(32)
+        super().__init__("FieldALU", X25519_BASE, 0x48)  # 72-byte window
+        self._operand_a = bytearray(32)   # also: scalar for mode 0
+        self._operand_b = bytearray(32)   # also: point  for mode 0
+        self._result_lo = bytearray(32)
+        self._result_hi = bytearray(32)   # only populated by MUL_RAW
         self._busy = False
         self._done = False
 
-    # --- RFC 7748 scalar multiplication ---
+    # --- helpers ---
+
+    def _get_a(self) -> int:
+        return int.from_bytes(bytes(self._operand_a), 'little')
+
+    def _get_b(self) -> int:
+        return int.from_bytes(bytes(self._operand_b), 'little')
+
+    def _set_result(self, lo: int, hi: int = 0):
+        self._result_lo = bytearray(lo.to_bytes(32, 'little'))
+        self._result_hi = bytearray(hi.to_bytes(32, 'little'))
+        self._busy = False
+        self._done = True
+
+    # --- RFC 7748 scalar multiplication (mode 0) ---
 
     @staticmethod
     def _clamp(k_bytes: bytearray) -> int:
-        """Decode and clamp a 32-byte scalar per RFC 7748 §5."""
         k = list(k_bytes)
-        k[0] &= 248           # clear bits 0,1,2
-        k[31] &= 127          # clear bit 255
-        k[31] |= 64           # set bit 254
+        k[0] &= 248
+        k[31] &= 127
+        k[31] |= 64
         return int.from_bytes(bytes(k), 'little')
 
     @staticmethod
     def _decode_u(u_bytes: bytearray) -> int:
-        """Decode a 32-byte u-coordinate, masking bit 255."""
         return int.from_bytes(bytes(u_bytes), 'little') & ((1 << 255) - 1)
 
     @classmethod
     def _x25519(cls, k_int: int, u_int: int) -> int:
-        """RFC 7748 Montgomery ladder: compute k * u on Curve25519."""
         p = cls._P
         a24 = cls._A24
         x_1 = u_int
@@ -1582,35 +2019,254 @@ class X25519Device(Device):
             z_2, z_3 = z_3, z_2
         return (x_2 * pow(z_2, p - 2, p)) % p
 
-    def _compute(self):
-        """Run X25519 scalar multiplication and store result."""
-        k = self._clamp(self._scalar)
-        u = self._decode_u(self._point)
-        r = self._x25519(k, u)
-        self._result = bytearray(r.to_bytes(32, 'little'))
+    # --- dispatch ---
+
+    def _execute(self, mode: int):
+        p = self._P
+        a = self._get_a()
+        b = self._get_b()
+
+        if mode == FIELD_MODE_X25519:
+            k = self._clamp(self._operand_a)
+            u = self._decode_u(self._operand_b)
+            r = self._x25519(k, u)
+            self._set_result(r)
+        elif mode == FIELD_MODE_FADD:
+            self._set_result((a + b) % p)
+        elif mode == FIELD_MODE_FSUB:
+            self._set_result((a - b) % p)
+        elif mode == FIELD_MODE_FMUL:
+            self._set_result((a * b) % p)
+        elif mode == FIELD_MODE_FSQR:
+            self._set_result((a * a) % p)
+        elif mode == FIELD_MODE_FINV:
+            self._set_result(pow(a, p - 2, p))
+        elif mode == FIELD_MODE_FPOW:
+            self._set_result(pow(a, b, p))
+        elif mode == FIELD_MODE_MUL_RAW:
+            wide = a * b
+            lo = wide & ((1 << 256) - 1)
+            hi = wide >> 256
+            self._set_result(lo, hi)
+        else:
+            # Unknown mode — just mark done with zero result
+            self._set_result(0)
+
+    # --- MMIO interface ---
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:                          # STATUS
+            return (int(self._done) << 1) | int(self._busy)
+        if 0x08 <= offset < 0x28:                   # RESULT_LO (32 bytes)
+            return self._result_lo[offset - 0x08]
+        if 0x28 <= offset < 0x48:                   # RESULT_HI (32 bytes)
+            return self._result_hi[offset - 0x28]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if 0x00 <= offset < 0x20:                   # OPERAND_A
+            self._operand_a[offset] = value
+        elif 0x20 <= offset < 0x40:                  # OPERAND_B
+            self._operand_b[offset - 0x20] = value
+        elif offset == 0x40:                         # CMD
+            if (value & 1) and not self._busy:
+                mode = (value >> 1) & 0xF
+                self._busy = True
+                self._done = False
+                self._execute(mode)
+
+
+# ---------------------------------------------------------------------------
+#  NTT Engine — 256-point Number Theoretic Transform accelerator
+# ---------------------------------------------------------------------------
+# Register map (offsets from NTT_BASE = 0x8C0):
+#   0x00       STATUS (R)  — 0=idle, 1=busy, 2=done
+#   0x08-0x0F  Q      (RW) — modulus, 64-bit LE (default 3329)
+#   0x10-0x11  IDX    (RW) — coefficient index, 16-bit LE (0-255)
+#   0x18-0x1B  LOAD_A (W)  — write A[IDX], LE 32-bit, IDX++ on byte-3
+#   0x1C-0x1F  LOAD_B (W)  — write B[IDX], LE 32-bit, IDX++ on byte-3
+#   0x20-0x23  RESULT (R)  — read result[IDX], LE 32-bit, IDX++ on byte-3
+#   0x28       CMD    (W)  — bits[2:1]=op, bit[0]=go
+#
+# CMD operations:
+#   0x01  NTT_FWD   — forward NTT(A)        → result
+#   0x03  NTT_INV   — inverse NTT(A)        → result
+#   0x05  NTT_PMUL  — pointwise A·B mod q   → result
+#   0x07  NTT_PADD  — pointwise (A+B) mod q → result
+
+NTT_OP_FWD  = 0
+NTT_OP_INV  = 1
+NTT_OP_PMUL = 2
+NTT_OP_PADD = 3
+
+
+class NTTDevice(Device):
+    """256-point NTT accelerator for ML-KEM / ML-DSA lattice crypto."""
+
+    NTT_N = 256
+
+    def __init__(self):
+        super().__init__("NTT", NTT_BASE, 0x30)
+        self._q = 3329            # default: ML-KEM modulus
+        self._idx = 0
+        self._poly_a = [0] * self.NTT_N
+        self._poly_b = [0] * self.NTT_N
+        self._result = [0] * self.NTT_N
+        self._busy = False
+        self._done = False
+        self._load_a_buf = bytearray(4)
+        self._load_b_buf = bytearray(4)
+        self._omega = None
+        self._omega_inv = None
+        self._n_inv = None
+        self._update_roots()
+
+    # --- root-of-unity computation ---
+
+    def _update_roots(self):
+        """Find primitive N-th root of unity for current q."""
+        q = self._q
+        n = self.NTT_N
+        if q < 2 or (q - 1) % n != 0:
+            self._omega = None
+            return
+        for g in range(2, min(q, 10000)):
+            if pow(g, (q - 1) // 2, q) != 1:
+                omega = pow(g, (q - 1) // n, q)
+                if pow(omega, n // 2, q) != 1:
+                    self._omega = omega
+                    self._omega_inv = pow(omega, q - 2, q)
+                    self._n_inv = pow(n, q - 2, q)
+                    return
+        self._omega = None
+
+    # --- NTT algorithms ---
+
+    def _bit_reverse(self, a):
+        n = len(a)
+        j = 0
+        for i in range(1, n):
+            bit = n >> 1
+            while j & bit:
+                j ^= bit
+                bit >>= 1
+            j ^= bit
+            if i < j:
+                a[i], a[j] = a[j], a[i]
+
+    def _ntt_forward(self, coeffs):
+        q = self._q
+        n = self.NTT_N
+        a = [x % q for x in coeffs]
+        self._bit_reverse(a)
+        length = 2
+        while length <= n:
+            wn = pow(self._omega, n // length, q)
+            for i in range(0, n, length):
+                w = 1
+                half = length // 2
+                for k in range(half):
+                    u = a[i + k]
+                    v = (a[i + k + half] * w) % q
+                    a[i + k] = (u + v) % q
+                    a[i + k + half] = (u - v) % q
+                    w = (w * wn) % q
+            length <<= 1
+        return a
+
+    def _ntt_inverse(self, coeffs):
+        q = self._q
+        n = self.NTT_N
+        a = [x % q for x in coeffs]
+        self._bit_reverse(a)
+        length = 2
+        while length <= n:
+            wn = pow(self._omega_inv, n // length, q)
+            for i in range(0, n, length):
+                w = 1
+                half = length // 2
+                for k in range(half):
+                    u = a[i + k]
+                    v = (a[i + k + half] * w) % q
+                    a[i + k] = (u + v) % q
+                    a[i + k + half] = (u - v) % q
+                    w = (w * wn) % q
+            length <<= 1
+        return [(x * self._n_inv) % q for x in a]
+
+    # --- dispatch ---
+
+    def _execute(self, op):
+        if self._omega is None:
+            self._done = True
+            self._busy = False
+            return
+        q = self._q
+        if op == NTT_OP_FWD:
+            self._result = self._ntt_forward(self._poly_a)
+        elif op == NTT_OP_INV:
+            self._result = self._ntt_inverse(self._poly_a)
+        elif op == NTT_OP_PMUL:
+            self._result = [(a * b) % q
+                            for a, b in zip(self._poly_a, self._poly_b)]
+        elif op == NTT_OP_PADD:
+            self._result = [(a + b) % q
+                            for a, b in zip(self._poly_a, self._poly_b)]
         self._busy = False
         self._done = True
 
     # --- MMIO interface ---
 
     def read8(self, offset: int) -> int:
-        if offset == 0x00:                     # STATUS
+        if offset == 0x00:                          # STATUS
             return (int(self._done) << 1) | int(self._busy)
-        if 0x08 <= offset < 0x28:              # RESULT (32 bytes at 0x08..0x27)
-            return self._result[offset - 0x08]
+        if 0x08 <= offset < 0x10:                   # Q (8 bytes)
+            return (self._q >> ((offset - 0x08) * 8)) & 0xFF
+        if 0x10 <= offset < 0x12:                   # IDX (2 bytes)
+            return (self._idx >> ((offset - 0x10) * 8)) & 0xFF
+        if 0x20 <= offset < 0x24:                   # RESULT[IDX]
+            byte_idx = offset - 0x20
+            idx = self._idx % self.NTT_N
+            val = self._result[idx]
+            r = (val >> (byte_idx * 8)) & 0xFF
+            if byte_idx == 3:
+                self._idx = (self._idx + 1) % self.NTT_N
+            return r
         return 0
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        if 0x00 <= offset < 0x20:               # SCALAR (32 bytes)
-            self._scalar[offset] = value
-        elif 0x20 <= offset < 0x40:              # POINT (32 bytes)
-            self._point[offset - 0x20] = value
-        elif offset == 0x40:                     # CMD
+        if 0x08 <= offset < 0x10:                   # Q (8 bytes)
+            shift = (offset - 0x08) * 8
+            self._q = (self._q & ~(0xFF << shift)) | (value << shift)
+            if offset == 0x0F:
+                self._update_roots()
+        elif 0x10 <= offset < 0x12:                  # IDX (2 bytes)
+            shift = (offset - 0x10) * 8
+            self._idx = (self._idx & ~(0xFF << shift)) | (value << shift)
+        elif 0x18 <= offset < 0x1C:                  # LOAD_A
+            byte_idx = offset - 0x18
+            self._load_a_buf[byte_idx] = value
+            if byte_idx == 3:
+                idx = self._idx % self.NTT_N
+                self._poly_a[idx] = int.from_bytes(
+                    self._load_a_buf, 'little') % self._q
+                self._idx = (self._idx + 1) % self.NTT_N
+        elif 0x1C <= offset < 0x20:                  # LOAD_B
+            byte_idx = offset - 0x1C
+            self._load_b_buf[byte_idx] = value
+            if byte_idx == 3:
+                idx = self._idx % self.NTT_N
+                self._poly_b[idx] = int.from_bytes(
+                    self._load_b_buf, 'little') % self._q
+                self._idx = (self._idx + 1) % self.NTT_N
+        elif offset == 0x28:                         # CMD
             if (value & 1) and not self._busy:
+                op = (value >> 1) & 0x3
                 self._busy = True
                 self._done = False
-                self._compute()
+                self._execute(op)
 
 
 # ---------------------------------------------------------------------------

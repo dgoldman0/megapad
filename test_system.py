@@ -6229,6 +6229,129 @@ class TestKDOSSHAKE(_KDOSTestBase):
         self.assertIn("MODE=0 ", text)
 
 
+class TestSHA3Streaming(_KDOSTestBase):
+    """Tests for SHAKE-STREAM and SHA3-SQUEEZE-NEXT (§36 roadmap)."""
+
+    # Reference: hashlib.shake_256(b"abc").digest(96)
+    # Block 0 (bytes 0-31):   [0]=72, [1]=51, [31]=57
+    # Block 1 (bytes 32-63):  [32]=213, [33]=161, [63]=228
+    # Block 2 (bytes 64-95):  [64]=19, [65]=133, [95]=120
+
+    def _setup_shake256_abc(self):
+        """Set up SHAKE256 state absorbing b'abc', finalize."""
+        return [
+            'CREATE msg 3 ALLOT',
+            '97 msg C!  98 msg 1 + C!  99 msg 2 + C!',   # 'a', 'b', 'c'
+            'SHAKE256-MODE SHA3-MODE!',
+            'SHA3-INIT',
+            'msg 3 SHA3-UPDATE',
+            'CREATE _final-tmp 32 ALLOT',
+            '_final-tmp SHA3-FINAL',     # triggers FINAL + reads first 32 bytes
+        ]
+
+    def test_squeeze_next_basic(self):
+        """SHA3-SQUEEZE-NEXT permutes and gives new DOUT content."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            # Read first byte from DOUT (should be byte 0 of SHAKE256("abc"))
+            '."  B0=" _final-tmp C@ .',
+            # Now SQUEEZE-NEXT: permutes, refills DOUT
+            'SHA3-SQUEEZE-NEXT',
+            # Read first byte of next block
+            'CREATE _blk1 32 ALLOT',
+            '_blk1 SHA3-DOUT@',
+            '."  B32=" _blk1 C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("B0=72 ", text)     # byte 0 of SHAKE256("abc")
+        self.assertIn("B32=213 ", text)   # byte 32
+
+    def test_shake_stream_3_blocks(self):
+        """SHAKE-STREAM reads 3 blocks (96 bytes) of XOF output."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE sbuf 96 ALLOT',
+            'sbuf 96 0 FILL',
+            'sbuf 3 SHAKE-STREAM',
+            # Verify block 0
+            '."  S0=" sbuf C@ .',           # byte 0 = 72
+            '."  S1=" sbuf 1 + C@ .',       # byte 1 = 51
+            '."  S31=" sbuf 31 + C@ .',     # byte 31 = 57
+            # Verify block 1
+            '."  S32=" sbuf 32 + C@ .',     # byte 32 = 213
+            '."  S33=" sbuf 33 + C@ .',     # byte 33 = 161
+            '."  S63=" sbuf 63 + C@ .',     # byte 63 = 228
+            # Verify block 2
+            '."  S64=" sbuf 64 + C@ .',     # byte 64 = 19
+            '."  S65=" sbuf 65 + C@ .',     # byte 65 = 133
+            '."  S95=" sbuf 95 + C@ .',     # byte 95 = 120
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("S0=72 ", text)
+        self.assertIn("S1=51 ", text)
+        self.assertIn("S31=57 ", text)
+        self.assertIn("S32=213 ", text)
+        self.assertIn("S33=161 ", text)
+        self.assertIn("S63=228 ", text)
+        self.assertIn("S64=19 ", text)
+        self.assertIn("S65=133 ", text)
+        self.assertIn("S95=120 ", text)
+
+    def test_shake_stream_1_block(self):
+        """SHAKE-STREAM with 1 block matches FINAL output."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE sbuf 32 ALLOT',
+            'sbuf 1 SHAKE-STREAM',
+            # Should match first 32 bytes (same as FINAL output)
+            '."  F0=" _final-tmp C@ .',
+            '."  S0=" sbuf C@ .',
+            '."  F31=" _final-tmp 31 + C@ .',
+            '."  S31=" sbuf 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Both should have byte 0 = 72
+        self.assertIn("F0=72 ", text)
+        self.assertIn("S0=72 ", text)
+        self.assertIn("F31=57 ", text)
+        self.assertIn("S31=57 ", text)
+
+    def test_squeeze_next_multiple(self):
+        """Multiple SHA3-SQUEEZE-NEXT calls produce distinct blocks."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE b1 32 ALLOT',
+            'CREATE b2 32 ALLOT',
+            # Block 1 (bytes 32-63): squeeze first
+            'SHA3-SQUEEZE-NEXT',
+            'b1 SHA3-DOUT@',
+            # Block 2 (bytes 64-95): squeeze again
+            'SHA3-SQUEEZE-NEXT',
+            'b2 SHA3-DOUT@',
+            '."  B1-0=" b1 C@ .',     # byte 32 = 213
+            '."  B2-0=" b2 C@ .',     # byte 64 = 19
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("B1-0=213 ", text)
+        self.assertIn("B2-0=19 ", text)
+
+    def test_dout_read_idempotent(self):
+        """SHA3-DOUT@ can read DOUT multiple times without changing state."""
+        setup = self._setup_shake256_abc()
+        setup.extend([
+            'CREATE r1 32 ALLOT',
+            'CREATE r2 32 ALLOT',
+            'r1 SHA3-DOUT@',
+            'r2 SHA3-DOUT@',
+            '."  R1=" r1 C@ .',
+            '."  R2=" r2 C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Both reads should produce the same byte
+        self.assertIn("R1=72 ", text)
+        self.assertIn("R2=72 ", text)
+
+
 class TestKDOSTRNG(_KDOSTestBase):
     """Tests for hardware TRNG (§1.6 RNG words)."""
 
@@ -6516,6 +6639,844 @@ class TestKDOSX25519(_KDOSTestBase):
         """.X25519-STATUS prints human-readable status."""
         text = self._run_kdos([".X25519-STATUS"])
         self.assertIn("X25519: idle", text)
+
+
+class TestFieldALU(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — GF(2^255-19) coprocessor."""
+
+    # p = 2^255 - 19
+    # Test with small values: a=42, b=17
+
+    def _load_small_int(self, name, value):
+        """Generate Forth code to store a small int as 32 LE bytes."""
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        # Store little-endian bytes
+        for i in range(8):  # 8 bytes is enough for values < 2^64
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _setup_ab(self, a=42, b=17):
+        """Allocate buffers and load two small operands."""
+        lines = self._load_small_int("tv-a", a)
+        lines.extend(self._load_small_int("tv-b", b))
+        lines.append("CREATE tv-r  32 ALLOT")
+        lines.append("CREATE tv-rh 32 ALLOT")
+        return lines
+
+    def _read_result_u64(self):
+        """Forth code to print first 8 bytes of tv-r as decimal."""
+        # Read 8 bytes and reconstruct a 64-bit value
+        # For small results, byte0 + byte1*256 is enough
+        return [
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+            '."  R2=" tv-r 2 + C@ .',
+            '."  R3=" tv-r 3 + C@ .',
+        ]
+
+    def test_fadd_small(self):
+        """FADD: 42 + 17 = 59 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=59 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fsub_small(self):
+        """FSUB: 42 - 17 = 25 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FSUB",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=25 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fmul_small(self):
+        """FMUL: 42 * 17 = 714 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("R0=202 ", text)
+        self.assertIn("R1=2 ", text)
+
+    def test_fsqr_small(self):
+        """FSQR: 42^2 = 1764 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FSQR",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 1764 = 0x6E4 → byte0=228, byte1=6
+        self.assertIn("R0=228 ", text)
+        self.assertIn("R1=6 ", text)
+
+    def test_finv_small(self):
+        """FINV: 42^(p-2) mod p, verify first bytes."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FINV",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # inv(42) mod p → byte0=14, byte1=134, byte2=97, byte3=24
+        self.assertIn("R0=14 ", text)
+        self.assertIn("R1=134 ", text)
+        self.assertIn("R2=97 ", text)
+        self.assertIn("R3=24 ", text)
+
+    def test_finv_roundtrip(self):
+        """FINV roundtrip: a * inv(a) = 1 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FINV",             # tv-r = inv(42)
+            "tv-a tv-r tv-r FMUL",        # tv-r = 42 * inv(42) = 1
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fpow_small(self):
+        """FPOW: 42^17 mod p, verify first bytes."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FPOW",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 42^17 mod p = 3937657486715347520027492352
+        # LE bytes: 0x00, 0x00, 0xAA, 0xA7, ...
+        # byte0=0, byte1=0, byte2=170, byte3=167
+        self.assertIn("R0=0 ", text)
+        self.assertIn("R2=170 ", text)
+        self.assertIn("R3=167 ", text)
+
+    def test_mul_raw_small(self):
+        """MUL_RAW: 42 * 17 = 714 (fits in low half, hi=0)."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r tv-rh FMUL-RAW",
+            '."  LO0=" tv-r C@ .',
+            '."  LO1=" tv-r 1 + C@ .',
+            '."  HI0=" tv-rh C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("LO0=202 ", text)
+        self.assertIn("LO1=2 ", text)
+        self.assertIn("HI0=0 ", text)
+
+    def test_fadd_wraparound(self):
+        """FADD with near-p values wraps correctly: (p-1)+3 = 2."""
+        # p - 1 has specific LE byte pattern
+        # p = 2^255 - 19, so p-1 = 2^255 - 20
+        # LE bytes: 0xEC, 0xFF, ..., 0x7F
+        setup = ["CREATE tv-a 32 ALLOT"]
+        # Write p-1 as LE bytes
+        p_minus_1 = (1 << 255) - 20
+        for i in range(32):
+            b = (p_minus_1 >> (i * 8)) & 0xFF
+            setup.append(f"{b} tv-a {i} + C!")
+        setup.extend(self._load_small_int("tv-b", 3))
+        setup.extend([
+            "CREATE tv-r 32 ALLOT",
+            "tv-a tv-b tv-r FADD",
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=2 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fsub_negative_wrap(self):
+        """FSUB: 3 - (p-1) = 4 mod p."""
+        setup = self._load_small_int("tv-b", 3)
+        # Write p-1 as LE bytes for tv-a (the subtrahend)
+        setup.append("CREATE tv-a 32 ALLOT")
+        p_minus_1 = (1 << 255) - 20
+        for i in range(32):
+            b = (p_minus_1 >> (i * 8)) & 0xFF
+            setup.append(f"{b} tv-a {i} + C!")
+        setup.extend([
+            "CREATE tv-r 32 ALLOT",
+            "tv-b tv-a tv-r FSUB",     # 3 - (p-1) mod p = 4
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=4 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_field_status_idle(self):
+        """FIELD-STATUS@ returns 0 when idle."""
+        text = self._run_kdos([
+            '."  ST=" FIELD-STATUS@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+
+    def test_field_status_done(self):
+        """FIELD-STATUS@ returns 2 after computation."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+            '."  ST=" FIELD-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+    def test_field_status_display(self):
+        """.FIELD-STATUS prints human-readable status."""
+        text = self._run_kdos([".FIELD-STATUS"])
+        self.assertIn("Field ALU: idle", text)
+
+    def test_x25519_still_works(self):
+        """Existing X25519 word still works (mode 0 backward compat)."""
+        # Use RFC 7748 vector 1
+        scalar_bytes = (
+            "0xa5 0x46 0xe3 0x6b 0xf0 0x52 0x7c 0x9d "
+            "0x3b 0x16 0x15 0x4b 0x82 0x46 0x5e 0xdd "
+            "0x62 0x14 0x4c 0x0a 0xc1 0xfc 0x5a 0x18 "
+            "0x50 0x6a 0x22 0x44 0xba 0x44 0x9a 0xc4"
+        ).split()
+        point_bytes = (
+            "0xe6 0xdb 0x68 0x67 0x58 0x30 0x30 0xdb "
+            "0x35 0x94 0xc1 0xa4 0x24 0xb1 0x5f 0x7c "
+            "0x72 0x66 0x24 0xec 0x26 0xb3 0x35 0x3b "
+            "0x10 0xa9 0x03 0xa6 0xd0 0xab 0x1c 0x4c"
+        ).split()
+        setup = [
+            "CREATE tv-scalar 32 ALLOT",
+            "CREATE tv-point  32 ALLOT",
+            "CREATE tv-result 32 ALLOT",
+        ]
+        for i, b in enumerate(scalar_bytes):
+            setup.append(f"{b} tv-scalar {i} + C!")
+        for i, b in enumerate(point_bytes):
+            setup.append(f"{b} tv-point {i} + C!")
+        setup.extend([
+            "tv-scalar tv-point tv-result X25519",
+            '."  B0=" tv-result C@ .',
+            '."  B1=" tv-result 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Expected: 0xc3=195, 0xda=218
+        self.assertIn("B0=195 ", text)
+        self.assertIn("B1=218 ", text)
+
+    def test_fadd_identity(self):
+        """FADD: a + 0 = a."""
+        setup = self._setup_ab(42, 0)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=42 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fmul_identity(self):
+        """FMUL: a * 1 = a."""
+        setup = self._setup_ab(42, 1)
+        setup.extend([
+            "tv-a tv-b tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=42 ", text)
+        self.assertIn("R1=0 ", text)
+
+
+class TestNTT(_KDOSTestBase):
+    """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
+
+    # q=3329 (ML-KEM / Kyber default modulus)
+    # Coefficients stored as 4-byte LE words in contiguous 1024-byte buffers.
+
+    def _alloc_poly(self, name, coeffs):
+        """Create a 1024-byte buffer and fill with coefficients (4B LE each)."""
+        lines = [f"CREATE {name} 1024 ALLOT"]
+        lines.append(f"{name} 1024 0 FILL")
+        for i, c in enumerate(coeffs):
+            if c != 0:
+                for bi in range(4):
+                    b = (c >> (bi * 8)) & 0xFF
+                    if b != 0:
+                        lines.append(f"{b} {name} {i * 4 + bi} + C!")
+        return lines
+
+    def _read_coeff(self, buf_name, idx):
+        """Generate Forth to print coefficient at index idx."""
+        off = idx * 4
+        return [
+            f'."  C{idx}B0=" {buf_name} {off} + C@ .',
+            f'."  C{idx}B1=" {buf_name} {off + 1} + C@ .',
+            f'."  C{idx}B2=" {buf_name} {off + 2} + C@ .',
+            f'."  C{idx}B3=" {buf_name} {off + 3} + C@ .',
+        ]
+
+    def test_ntt_status_idle(self):
+        """NTT-STATUS@ returns 0 when idle."""
+        text = self._run_kdos([
+            '."  ST=" NTT-STATUS@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+
+    def test_ntt_status_display(self):
+        """.NTT-STATUS prints human-readable status."""
+        text = self._run_kdos([".NTT-STATUS"])
+        self.assertIn("NTT: idle", text)
+
+    def test_ntt_forward_inverse_roundtrip(self):
+        """NTT(INTT(a)) = a — forward then inverse recovers original."""
+        # Use a simple polynomial: a[0]=1, a[1]=2, a[2]=3, rest=0
+        coeffs = [0] * 256
+        coeffs[0], coeffs[1], coeffs[2] = 1, 2, 3
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            # Store NTT result to tv-r
+            "tv-r NTT-STORE",
+            # Load NTT result back into A and do INTT
+            "tv-r NTT-BUF-A NTT-LOAD",
+            "NTT-INV NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 2))
+        setup.extend(self._read_coeff("tv-r", 3))
+        text = self._run_kdos(setup)
+        # Should recover: coeff[0]=1, coeff[1]=2, coeff[2]=3, coeff[3]=0
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=2 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C2B0=3 ", text)
+        self.assertIn("C2B1=0 ", text)
+        self.assertIn("C3B0=0 ", text)
+
+    def test_ntt_padd(self):
+        """NTT-PADD: pointwise (A+B) mod q."""
+        # a[0]=100, a[1]=200; b[0]=3000, b[1]=3200
+        # result: (100+3000)%3329=3100, (200+3200)%3329=71
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 100, 200
+        coeffs_b[0], coeffs_b[1] = 3000, 3200
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        # 3100 = 0x0C1C → byte0=28, byte1=12
+        self.assertIn("C0B0=28 ", text)
+        self.assertIn("C0B1=12 ", text)
+        # 71 = 0x47 → byte0=71, byte1=0
+        self.assertIn("C1B0=71 ", text)
+        self.assertIn("C1B1=0 ", text)
+
+    def test_ntt_pmul(self):
+        """NTT-PMUL: pointwise (A*B) mod q."""
+        # a[0]=100, b[0]=33 → 3300 mod 3329 = 3300
+        # a[1]=50, b[1]=100 → 5000 mod 3329 = 1671
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 100, 50
+        coeffs_b[0], coeffs_b[1] = 33, 100
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PMUL NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        # 3300 = 0x0CE4 → byte0=228, byte1=12
+        self.assertIn("C0B0=228 ", text)
+        self.assertIn("C0B1=12 ", text)
+        # 1671 = 0x0687 → byte0=135, byte1=6
+        self.assertIn("C1B0=135 ", text)
+        self.assertIn("C1B1=6 ", text)
+
+    def test_ntt_padd_wraparound(self):
+        """NTT-PADD wraps modulo q: (3328 + 2) mod 3329 = 1."""
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0] = 3328
+        coeffs_b[0] = 2
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+
+    def test_ntt_setq_dilithium(self):
+        """NTT-SETQ with Dilithium modulus q=8380417."""
+        # Set q, do a simple PADD to verify it's using the right modulus
+        # 8380416 + 2 mod 8380417 = 1
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0] = 8380416
+        coeffs_b[0] = 2
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-DILITHIUM NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+
+    def test_ntt_fwd_inv_dilithium(self):
+        """Forward/inverse round-trip with Dilithium modulus."""
+        coeffs = [0] * 256
+        coeffs[0], coeffs[1] = 42, 17
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-DILITHIUM NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+            "tv-r NTT-BUF-A NTT-LOAD",
+            "NTT-INV NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 2))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=42 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=17 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C2B0=0 ", text)
+
+    def test_ntt_status_done_after_op(self):
+        """NTT-STATUS@ returns 2 (done) after an operation."""
+        coeffs = [0] * 256
+        coeffs[0] = 1
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            '."  ST=" NTT-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+    def test_ntt_fwd_known_value(self):
+        """NTT forward produces non-trivial output for [1,0,...,0]."""
+        # NTT of [1,0,...,0] should be [1,1,...,1] (all ones)
+        coeffs = [0] * 256
+        coeffs[0] = 1
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        # NTT([1,0,...,0]) = [1,1,...,1] — constant polynomial transforms to all 1s
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 255))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=1 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C255B0=1 ", text)
+        self.assertIn("C255B1=0 ", text)
+
+    def test_ntt_pmul_identity(self):
+        """Pointwise multiply by all-ones (NTT of unit impulse) = identity."""
+        # If B = [1,1,...,1] and A is anything, PMUL gives A
+        coeffs_a = [0] * 256
+        coeffs_a[0], coeffs_a[1], coeffs_a[2] = 42, 17, 3000
+        coeffs_b = [1] * 256
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PMUL NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=42 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=17 ", text)
+        self.assertIn("C1B1=0 ", text)
+
+    def test_ntt_zero_polynomial(self):
+        """NTT of all-zero polynomial is all zeros."""
+        coeffs = [0] * 256
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 127))
+        setup.extend(self._read_coeff("tv-r", 255))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=0 ", text)
+        self.assertIn("C127B0=0 ", text)
+        self.assertIn("C255B0=0 ", text)
+
+    def test_ntt_linearity(self):
+        """NTT is linear: NTT(a + b) = NTT(a) + NTT(b) (via PADD)."""
+        # a=[5,10,0,...], b=[3,7,0,...], a+b=[8,17,0,...]
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_sum = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 5, 10
+        coeffs_b[0], coeffs_b[1] = 3, 7
+        coeffs_sum[0], coeffs_sum[1] = 8, 17
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.extend(self._alloc_poly("tv-s", coeffs_sum))
+        setup.append("CREATE tv-r1 1024 ALLOT")
+        setup.append("CREATE tv-r2 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            # NTT(a)
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r1 NTT-STORE",
+            # NTT(b)
+            "tv-b NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r2 NTT-STORE",
+            # NTT(a) + NTT(b) pointwise
+            "tv-r1 NTT-BUF-A NTT-LOAD",
+            "tv-r2 NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r1 NTT-STORE",           # tv-r1 = NTT(a)+NTT(b)
+            # NTT(a+b)
+            "tv-s NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r2 NTT-STORE",           # tv-r2 = NTT(a+b)
+            # Compare first 2 coefficients
+            '."  LHS0=" tv-r1 C@ .',
+            '."  RHS0=" tv-r2 C@ .',
+            '."  LHS4=" tv-r1 4 + C@ .',
+            '."  RHS4=" tv-r2 4 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Extract values and verify they match
+        import re
+        lhs0 = re.search(r'LHS0=(\d+)', text)
+        rhs0 = re.search(r'RHS0=(\d+)', text)
+        lhs4 = re.search(r'LHS4=(\d+)', text)
+        rhs4 = re.search(r'RHS4=(\d+)', text)
+        self.assertIsNotNone(lhs0)
+        self.assertIsNotNone(rhs0)
+        self.assertEqual(lhs0.group(1), rhs0.group(1))
+        self.assertEqual(lhs4.group(1), rhs4.group(1))
+
+
+class TestMLKEM(_KDOSTestBase):
+    """Tests for ML-KEM-512 (Kyber) key encapsulation (§1.12)."""
+
+    # KAT0: d=32×0x00, z=32×0x00, coin=32×0x00
+    # PK[0]=223, SS[0]=74, SS[1]=213, SS[31]=39
+    # CT[0]=107, CT[767]=10
+
+    def _allot_kem_buffers(self):
+        """Forth preamble that creates all KEM scratch buffers."""
+        return [
+            'CREATE dz 64 ALLOT  dz 64 0 FILL',
+            'CREATE pk 800 ALLOT',
+            'CREATE sk 1632 ALLOT',
+            'CREATE coin 32 ALLOT  coin 32 0 FILL',
+            'CREATE ct 768 ALLOT',
+            'CREATE ss1 32 ALLOT',
+            'CREATE ss2 32 ALLOT',
+        ]
+
+    def test_keygen_deterministic(self):
+        """Same seed produces same public key."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  PK0=" pk C@ .',
+            '."  PK1=" pk 1 + C@ .',
+            '."  PK799=" pk 799 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PK0=223 ", text)
+        self.assertIn("PK1=23 ", text)
+        self.assertIn("PK799=231 ", text)
+
+    def test_encaps_roundtrip(self):
+        """KEYGEN → ENCAPS → DECAPS produces matching shared secrets."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            'ct sk ss2 KYBER-DECAPS',
+            # Define compare helper
+            ': CMP32 32 0 DO OVER I + C@ OVER I + C@ <> IF 2DROP 0 UNLOOP EXIT THEN LOOP 2DROP 1 ;',
+            'ss1 ss2 CMP32 IF ."  SS-MATCH" THEN',
+            '."  SS0=" ss1 C@ .',
+            '."  SS31=" ss1 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-MATCH", text)
+        self.assertIn("SS0=74 ", text)
+        self.assertIn("SS31=39 ", text)
+
+    def test_encaps_kat_values(self):
+        """Shared secret and ciphertext match known-answer values."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            '."  SS1=" ss1 1 + C@ .',
+            '."  CT0=" ct C@ .',
+            '."  CT767=" ct 767 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS1=213 ", text)
+        self.assertIn("CT0=107 ", text)
+        self.assertIn("CT767=10 ", text)
+
+    def test_different_coins(self):
+        """Different coins produce different ciphertexts and shared secrets."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            # Encaps with zero coin
+            'pk coin ct ss1 KYBER-ENCAPS',
+            # Encaps with coin=0x01 0x00...
+            '1 coin C!',
+            'CREATE ct2 768 ALLOT',
+            'CREATE ss3 32 ALLOT',
+            'pk coin ct2 ss3 KYBER-ENCAPS',
+            # Compare shared secrets (should differ)
+            'ss1 C@ ss3 C@ <> IF ."  SS-DIFFER" THEN',
+            # Compare ciphertexts (should differ)
+            'ct C@ ct2 C@ <> IF ."  CT-DIFFER" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-DIFFER", text)
+        self.assertIn("CT-DIFFER", text)
+
+    def test_implicit_rejection(self):
+        """Corrupted ciphertext triggers implicit rejection (different SS)."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            # Corrupt first byte of ciphertext
+            'ct C@ 255 XOR ct C!',
+            # Decaps with corrupted ct
+            'ct sk ss2 KYBER-DECAPS',
+            # Shared secrets must differ
+            'ss1 C@ ss2 C@ <> IF ."  REJECT-OK" THEN',
+            '."  REJ0=" ss2 C@ .',
+            '."  REJ31=" ss2 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("REJECT-OK", text)
+        self.assertIn("REJ0=76 ", text)
+        self.assertIn("REJ31=186 ", text)
+
+    def test_different_seeds(self):
+        """Different seeds produce different public keys."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  A0=" pk C@ .',
+            # Change seed byte 0
+            '1 dz C!',
+            'CREATE pk2 800 ALLOT',
+            'CREATE sk2 1632 ALLOT',
+            'dz pk2 sk2 KYBER-KEYGEN',
+            '."  B0=" pk2 C@ .',
+            'pk C@ pk2 C@ <> IF ."  PK-DIFFER" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PK-DIFFER", text)
+
+    def test_kem_status(self):
+        """KEM-STATUS@ returns done (2) after keygen."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  ST=" KEM-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+
+class TestPQExchange(_KDOSTestBase):
+    """Tests for Hybrid PQ Key Exchange — X25519 + ML-KEM-512 (§1.13)."""
+
+    def _setup_keypairs(self):
+        """Create X25519 and Kyber keypairs for self-exchange testing."""
+        return [
+            # X25519 keygen (TRNG-based)
+            'X25519-KEYGEN',
+            # Kyber keygen (deterministic zero seed)
+            'CREATE dz 64 ALLOT  dz 64 0 FILL',
+            'CREATE kpk 800 ALLOT',
+            'CREATE ksk 1632 ALLOT',
+            'dz kpk ksk KYBER-KEYGEN',
+        ]
+
+    def test_hybrid_roundtrip(self):
+        """PQ-EXCHANGE-INIT + PQ-EXCHANGE-RESP produce matching secrets."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss1 32 ALLOT',
+            'X25519-PUB kpk ct ss1 PQ-EXCHANGE-INIT',
+            'CREATE ss2 32 ALLOT',
+            'X25519-PUB ct ksk ss2 PQ-EXCHANGE-RESP',
+            ': CMP32 32 0 DO OVER I + C@ OVER I + C@ <>'
+            ' IF 2DROP 0 UNLOOP EXIT THEN LOOP 2DROP 1 ;',
+            'ss1 ss2 CMP32 IF ."  PQ-MATCH" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PQ-MATCH", text)
+
+    def test_hybrid_nonzero_secret(self):
+        """Hybrid shared secret is not all zeros."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss 32 ALLOT  ss 32 0 FILL',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '0 32 0 DO ss I + C@ OR LOOP',
+            'IF ."  SS-NONZERO" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-NONZERO", text)
+
+    def test_hybrid_ct_nonzero(self):
+        """Hybrid exchange produces non-trivial ciphertext."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT  ct 768 0 FILL',
+            'CREATE ss 32 ALLOT',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            '0 32 0 DO ct I + C@ OR LOOP',
+            'IF ."  CT-NONZERO" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("CT-NONZERO", text)
+
+    def test_kem_status_after_exchange(self):
+        """KEM device reports done after hybrid exchange."""
+        setup = self._setup_keypairs()
+        setup.extend([
+            'CREATE ct 768 ALLOT',
+            'CREATE ss 32 ALLOT',
+            'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
+            'KEM-STATUS@ ."  ST=" .',
+        ])
+        text = self._run_kdos(setup, max_steps=2_000_000_000)
+        self.assertIn("ST=2 ", text)
+
+
+class TestSQuote(_KDOSTestBase):
+    """Tests for S\" compile-mode string literal."""
+
+    def test_squote_length(self):
+        """S\" pushes correct length."""
+        text = self._run_kdos([': SLEN S" hello" NIP . ; SLEN'])
+        self.assertIn("5 ", text)
+
+    def test_squote_content(self):
+        """S\" pushes correct string content."""
+        text = self._run_kdos([
+            ': SFIRST S" AB" DROP C@ . ; SFIRST',
+        ])
+        self.assertIn("65 ", text)  # 'A' = 65
+
+    def test_squote_in_word(self):
+        """S\" works inside a colon definition with other words."""
+        text = self._run_kdos([
+            ': STEST S" pq-hybrid" ."  LEN=" . ; STEST',
+        ])
+        self.assertIn("LEN=9 ", text)
+
+    def test_squote_with_r_stack(self):
+        """S\" works alongside >R / R> in same definition."""
+        text = self._run_kdos([
+            ': RMIX 99 >R S" abc" R> ."  L=" . ."  R=" . ;',
+            'RMIX',
+        ])
+        # S" pushes (addr len), then R> pushes 99 on top
+        # . prints TOS first: so L=99, R=3
+        self.assertIn("L=99 ", text)
+        self.assertIn("R=3 ", text)
+
+    def test_pq_derive_direct(self):
+        """PQ-DERIVE can be called directly without hanging."""
+        text = self._run_kdos([
+            '_PQ-CAT 64 0 FILL',
+            'CREATE dout 32 ALLOT',
+            'dout PQ-DERIVE',
+            'dout C@ ."  B0=" .',
+        ])
+        self.assertIn("B0=", text)
 
 
 class TestKDOSHKDF(_KDOSTestBase):

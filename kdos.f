@@ -598,6 +598,24 @@ CREATE SHA3-BUF 64 ALLOT
     DROP
     SHA3-256-MODE SHA3-MODE! ;
 
+\ SHAKE-STREAM ( addr blocks -- )
+\   Read `blocks` 32-byte chunks of continuous XOF output into addr.
+\   Must be called AFTER SHAKE-INIT + SHA3-UPDATE + SHA3-FINAL has been
+\   used to set up the SHAKE state.  First 32 bytes are already in DOUT
+\   after FINAL.  For each subsequent block, SHA3-SQUEEZE-NEXT permutes
+\   the Keccak state and refills DOUT.
+\
+\   BIOS primitives used:
+\     SHA3-DOUT@ ( addr -- )         — read 32 bytes from DOUT
+\     SHA3-SQUEEZE-NEXT ( -- )       — permute, refill DOUT
+: SHAKE-STREAM ( addr blocks -- )
+    0 DO
+        DUP SHA3-DOUT@          \ read current DOUT block
+        32 +                    \ advance addr
+        SHA3-SQUEEZE-NEXT       \ permute for next block
+    LOOP
+    DROP ;
+
 : .SHA3-STATUS
     SHA3-STATUS@
     DUP 0 = IF DROP ."  SHA3: idle" CR ELSE
@@ -774,6 +792,281 @@ CREATE X25519-BASE  32 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
+\  §1.10  Field ALU — GF(2^255-19) Coprocessor + Raw 256x256 Multiply
+\ =====================================================================
+\  Hardware-accelerated field arithmetic over GF(p), p = 2^255 - 19.
+\  Shares the same MMIO base as X25519 (0x0840).
+\
+\  BIOS primitives used:
+\    X25519-SCALAR! ( addr -- )   = FIELD-A! (write operand A, 32 bytes)
+\    X25519-POINT!  ( addr -- )   = FIELD-B! (write operand B, 32 bytes)
+\    FIELD-CMD!     ( mode -- )   Start computation with given mode
+\    X25519-WAIT    ( -- )        = FIELD-WAIT
+\    X25519-STATUS@ ( -- n )      = FIELD-STATUS@
+\    X25519-RESULT@ ( addr -- )   = FIELD-RESULT@ (read result_lo)
+\    FIELD-RESULT-HI@ ( addr -- ) Read result_hi (MUL_RAW only)
+\
+\  Modes:
+\    0 = X25519 (legacy scalar multiply)
+\    1 = FADD  (a+b) mod p
+\    2 = FSUB  (a-b) mod p
+\    3 = FMUL  (a*b) mod p
+\    4 = FSQR  (a^2) mod p
+\    5 = FINV  a^(p-2) mod p
+\    6 = FPOW  a^b mod p
+\    7 = MUL_RAW  256x256 -> 512-bit product (no reduction)
+
+\ Mode constants
+0 CONSTANT FMODE-X25519
+1 CONSTANT FMODE-ADD
+2 CONSTANT FMODE-SUB
+3 CONSTANT FMODE-MUL
+4 CONSTANT FMODE-SQR
+5 CONSTANT FMODE-INV
+6 CONSTANT FMODE-POW
+7 CONSTANT FMODE-RAW
+
+\ Aliases for readability
+: FIELD-A!      X25519-SCALAR! ;
+: FIELD-B!      X25519-POINT! ;
+: FIELD-WAIT    X25519-WAIT ;
+: FIELD-STATUS@ X25519-STATUS@ ;
+: FIELD-RESULT@ X25519-RESULT@ ;
+
+\ Scratch buffers for field ops (32 bytes each)
+CREATE _FA  32 ALLOT
+CREATE _FB  32 ALLOT
+CREATE _FR  32 ALLOT
+CREATE _FRH 32 ALLOT
+
+\ ------------------------------------------------------------------
+\ Core field operations — all take/return 32-byte buffer addresses
+\ ------------------------------------------------------------------
+
+\ FADD ( a-addr b-addr result-addr -- )  (a+b) mod p
+: FADD ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-ADD FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FSUB ( a-addr b-addr result-addr -- )  (a-b) mod p
+: FSUB ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-SUB FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMUL ( a-addr b-addr result-addr -- )  (a*b) mod p
+: FMUL ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-MUL FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FSQR ( a-addr result-addr -- )  a^2 mod p
+: FSQR ( a r -- )
+    >R
+    FIELD-A!
+    FMODE-SQR FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FINV ( a-addr result-addr -- )  a^(p-2) mod p  (Fermat inversion)
+: FINV ( a r -- )
+    >R
+    FIELD-A!
+    FMODE-INV FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FPOW ( base-addr exp-addr result-addr -- )  base^exp mod p
+: FPOW ( a e r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-POW FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMUL-RAW ( a-addr b-addr rlo-addr rhi-addr -- )
+\   Raw 256x256 -> 512-bit product.  No modular reduction.
+\   Result split: low 256 bits in rlo, high 256 bits in rhi.
+: FMUL-RAW ( a b rlo rhi -- )
+    >R >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-RAW FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@
+    R> FIELD-RESULT-HI@ ;
+
+\ .FIELD-STATUS ( -- )  Print human-readable field ALU status.
+: .FIELD-STATUS
+    FIELD-STATUS@
+    DUP 0 = IF DROP ."  Field ALU: idle" CR ELSE
+    DUP 2 = IF DROP ."  Field ALU: done" CR ELSE
+    DUP 1 = IF DROP ."  Field ALU: busy" CR ELSE
+    DROP ."  Field ALU: unknown" CR
+    THEN THEN THEN ;
+
+\ =====================================================================
+\  §1.11  NTT Engine — 256-point Number Theoretic Transform
+\ =====================================================================
+\  Hardware-accelerated NTT for ML-KEM (Kyber) and ML-DSA (Dilithium)
+\  post-quantum lattice-based cryptography.
+\
+\  BIOS primitives:
+\    NTT-SETQ ( q -- )          Set modulus
+\    NTT-IDX! ( idx -- )        Set coefficient index
+\    NTT-LOAD ( addr buf -- )   Load 256 coefficients (buf: 0=A, 1=B)
+\    NTT-STORE ( addr -- )      Store 256 result coefficients
+\    NTT-FWD ( -- )             Forward NTT
+\    NTT-INV ( -- )             Inverse NTT
+\    NTT-PMUL ( -- )            Pointwise multiply A*B mod q
+\    NTT-PADD ( -- )            Pointwise add (A+B) mod q
+\    NTT-STATUS@ ( -- n )       Read status
+\    NTT-WAIT ( -- )            Poll until done
+\
+\  Convenience:
+\    NTT-POLYMUL ( a b r -- )   Full polynomial multiply via NTT
+\      Load a→A, b→B, forward NTT both, pointwise multiply, inverse NTT,
+\      store to r. Requires q already set.
+
+\ Standard modulus constants
+3329     CONSTANT Q-KYBER      \ ML-KEM (Kyber)
+8380417  CONSTANT Q-DILITHIUM  \ ML-DSA (Dilithium)
+
+\ NTT buffer selector constants
+0 CONSTANT NTT-BUF-A
+1 CONSTANT NTT-BUF-B
+
+\ Internal temp buffers for NTT-POLYMUL (256 coefficients × 4 bytes)
+CREATE _NTT-TMP-A 1024 ALLOT
+CREATE _NTT-TMP-B 1024 ALLOT
+
+\ NTT-POLYMUL ( a-addr b-addr r-addr -- )
+\   Full polynomial multiply: r = INTT( NTT(a) · NTT(b) )
+\   Modulus q must be set beforehand via NTT-SETQ.
+: NTT-POLYMUL ( a-addr b-addr r-addr -- )
+    >R >R                         \ ( a-addr ) R:( r-addr b-addr )
+    \ Step 1: NTT(a) → _NTT-TMP-A
+    NTT-BUF-A NTT-LOAD            \ load a → A
+    NTT-FWD NTT-WAIT              \ forward NTT
+    _NTT-TMP-A NTT-STORE          \ store NTT(a)
+    \ Step 2: NTT(b) → _NTT-TMP-B
+    R> NTT-BUF-A NTT-LOAD         \ load b → A
+    NTT-FWD NTT-WAIT              \ forward NTT
+    _NTT-TMP-B NTT-STORE          \ store NTT(b)
+    \ Step 3: Pointwise multiply NTT(a) * NTT(b)
+    _NTT-TMP-A NTT-BUF-A NTT-LOAD
+    _NTT-TMP-B NTT-BUF-B NTT-LOAD
+    NTT-PMUL NTT-WAIT             \ result = NTT(a) · NTT(b)
+    \ Step 4: INTT → r
+    \ To do INTT, we need result in A. Store result, reload to A.
+    _NTT-TMP-A NTT-STORE          \ reuse TMP-A for product
+    _NTT-TMP-A NTT-BUF-A NTT-LOAD
+    NTT-INV NTT-WAIT              \ result = INTT(product)
+    R> NTT-STORE                  \ store to r
+;
+
+\ .NTT-STATUS ( -- )  Print human-readable NTT status.
+: .NTT-STATUS
+    NTT-STATUS@
+    DUP 0 = IF DROP ."  NTT: idle" CR ELSE
+    DUP 2 = IF DROP ."  NTT: done" CR ELSE
+    DUP 1 = IF DROP ."  NTT: busy" CR ELSE
+    DROP ."  NTT: unknown" CR
+    THEN THEN THEN ;
+
+\ =====================================================================
+\  §1.12  ML-KEM-512 (Kyber) — Lattice-Based Key Encapsulation
+\ =====================================================================
+\ Uses KEM accelerator device for FIPS 203 ML-KEM-512.
+\ BIOS primitives: KEM-SEL! KEM-LOAD KEM-STORE KEM-KEYGEN KEM-ENCAPS
+\                  KEM-DECAPS KEM-STATUS@
+\ Buffer IDs: 0=SEED/COIN(64B) 1=PK(800B) 2=SK(1632B) 3=CT(768B) 4=SS(32B)
+
+0 CONSTANT KBUF-SEED
+1 CONSTANT KBUF-PK
+2 CONSTANT KBUF-SK
+3 CONSTANT KBUF-CT
+4 CONSTANT KBUF-SS
+
+32  CONSTANT KEM-SEED-SIZE
+800 CONSTANT KEM-PK-SIZE
+1632 CONSTANT KEM-SK-SIZE
+768 CONSTANT KEM-CT-SIZE
+32  CONSTANT KEM-SS-SIZE
+
+: KYBER-KEYGEN ( seed64-addr pk-addr sk-addr -- )
+    >R >R
+    KBUF-SEED KEM-SEL!  64 KEM-LOAD
+    KEM-KEYGEN
+    KBUF-PK KEM-SEL!  R> KEM-PK-SIZE KEM-STORE
+    KBUF-SK KEM-SEL!  R> KEM-SK-SIZE KEM-STORE ;
+
+: KYBER-ENCAPS ( pk-addr coin-addr ct-addr ss-addr -- )
+    >R >R
+    KBUF-SEED KEM-SEL!  32 KEM-LOAD
+    KBUF-PK KEM-SEL!  KEM-PK-SIZE KEM-LOAD
+    KEM-ENCAPS
+    KBUF-CT KEM-SEL!  R> KEM-CT-SIZE KEM-STORE
+    KBUF-SS KEM-SEL!  R> KEM-SS-SIZE KEM-STORE ;
+
+: KYBER-DECAPS ( ct-addr sk-addr ss-addr -- )
+    >R
+    KBUF-SK KEM-SEL!  KEM-SK-SIZE KEM-LOAD
+    KBUF-CT KEM-SEL!  KEM-CT-SIZE KEM-LOAD
+    KEM-DECAPS
+    KBUF-SS KEM-SEL!  R> KEM-SS-SIZE KEM-STORE ;
+
+: .KEM-STATUS
+    KEM-STATUS@
+    DUP 0 = IF DROP ."  KEM: idle" CR ELSE
+    DUP 2 = IF DROP ."  KEM: done" CR ELSE
+    DROP ."  KEM: unknown" CR
+    THEN THEN ;
+
+\ =====================================================================
+\  §1.13  Hybrid PQ Key Exchange — X25519 + ML-KEM-512
+\ =====================================================================
+\ Combines classical X25519 ECDH with post-quantum ML-KEM-512 Kyber.
+\ Both shared secrets are concatenated and fed through HKDF-Extract +
+\ HKDF-Expand to derive the final hybrid shared secret.
+\
+\ Usage:
+\   1. Both parties generate X25519 keypairs (X25519-KEYGEN)
+\   2. Both parties generate Kyber keypairs (KYBER-KEYGEN with seed)
+\   3. Initiator calls PQ-EXCHANGE-INIT with peer's X25519 pub + Kyber pk
+\   4. Responder calls PQ-EXCHANGE-RESP with peer's X25519 pub + the ct
+\
+\ Scratch buffers for hybrid exchange:
+CREATE _PQ-SS-X 32 ALLOT        \ X25519 shared secret
+CREATE _PQ-SS-K 32 ALLOT        \ Kyber shared secret
+CREATE _PQ-CAT  64 ALLOT        \ concatenated ss: X25519 || Kyber
+CREATE _PQ-PRK  32 ALLOT        \ HKDF-Extract output
+CREATE _PQ-COIN 32 ALLOT        \ Kyber encaps coin
+CREATE _PQ-INFO 9 ALLOT         \ HKDF info string "pq-hybrid"
+: _PQ-INFO-INIT
+    112 _PQ-INFO C!
+    113 _PQ-INFO 1 + C!
+    45  _PQ-INFO 2 + C!
+    104 _PQ-INFO 3 + C!
+    121 _PQ-INFO 4 + C!
+    98  _PQ-INFO 5 + C!
+    114 _PQ-INFO 6 + C!
+    105 _PQ-INFO 7 + C!
+    100 _PQ-INFO 8 + C! ;
+_PQ-INFO-INIT
+
+\ =====================================================================
 \  §1.9  HKDF — HMAC-based Key Derivation Function (RFC 5869)
 \ =====================================================================
 \  Uses HMAC-SHA3-256 as the underlying PRF.
@@ -856,6 +1149,56 @@ VARIABLE _HKDF-COUNTER
         _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
     REPEAT
 ;
+
+\ PQ-DERIVE ( out -- )
+\   Internal: HKDF-derive final 32-byte key from concatenated secrets.
+\   Assumes _PQ-CAT already has 64 bytes of combined keying material.
+: PQ-DERIVE ( out-addr -- )
+    >R
+    \ HKDF-Extract: salt=empty(0), ikm=_PQ-CAT(64B) → _PQ-PRK
+    0 0 _PQ-CAT 64 _PQ-PRK HKDF-EXTRACT
+    \ HKDF-Expand: prk=_PQ-PRK, info="pq-hybrid"(9B), len=32, out
+    _PQ-PRK _PQ-INFO 9 32 R> HKDF-EXPAND ;
+
+\ PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+\   Initiator side:
+\   1. X25519-DH with their X25519 public key → _PQ-SS-X
+\   2. Generate random coin, KYBER-ENCAPS with their Kyber pk → ct + _PQ-SS-K
+\   3. Concatenate, HKDF-derive → ss-out
+: PQ-EXCHANGE-INIT ( their-x-pub kyber-pk ct-out ss-out -- )
+    >R >R                          \ R: ss-out ct-out
+    \ X25519 DH
+    SWAP                            \ Stack: kyber-pk their-x-pub
+    X25519-PRIV OVER _PQ-SS-X X25519
+    DROP                            \ Stack: kyber-pk
+    \ Generate random coin for Kyber
+    32 0 DO RANDOM8 _PQ-COIN I + C! LOOP
+    \ KYBER-ENCAPS ( pk coin ct ss -- )
+    _PQ-COIN R> _PQ-SS-K KYBER-ENCAPS
+    \ Concatenate: _PQ-CAT = _PQ-SS-X || _PQ-SS-K
+    _PQ-SS-X _PQ-CAT 32 CMOVE
+    _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
+    \ Derive final key
+    R> PQ-DERIVE ;
+
+\ PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+\   Responder side:
+\   1. X25519-DH with their X25519 public key → _PQ-SS-X
+\   2. KYBER-DECAPS with ct and our Kyber sk → _PQ-SS-K
+\   3. Concatenate, HKDF-derive → ss-out
+: PQ-EXCHANGE-RESP ( their-x-pub ct kyber-sk ss-out -- )
+    >R                              \ R: ss-out
+    \ Stack: their-x-pub ct kyber-sk
+    ROT                             \ Stack: ct kyber-sk their-x-pub
+    X25519-PRIV OVER _PQ-SS-X X25519
+    DROP                            \ Stack: ct kyber-sk
+    \ KYBER-DECAPS ( ct sk ss -- )
+    SWAP _PQ-SS-K KYBER-DECAPS
+    \ Concatenate
+    _PQ-SS-X _PQ-CAT 32 CMOVE
+    _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
+    \ Derive final key
+    R> PQ-DERIVE ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
