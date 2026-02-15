@@ -4170,6 +4170,17 @@ w_paren_done:
 ;   Interpret mode: reads chars until " and prints them immediately.
 ;   Compile mode:   embeds the string and compiles a call to print it.
 ;   Compiles: ldi64 r11, dotquote_runtime; call.l r11; <bytes> <null>
+;
+; BUG: The delimiter space after ." is included in the output.
+;   ANS Forth specifies .' hello" prints "hello", but this
+;   implementation prints " hello" (leading space).  Both interpret
+;   and compile paths start reading from >IN without skipping the
+;   delimiter character.  Fix: add `inc r13` before dq_interp_loop
+;   and before dq_scan to skip the space.  CAUTION: all 6,600+ lines
+;   of KDOS rely on the current (buggy) behaviour — every .' string
+;   that depends on the leading space must be audited and adjusted
+;   after fixing.  See also: S" has the same issue.
+;   Tracked as ROADMAP item 33.
 w_dotquote:
     ; Check STATE — interpret vs compile
     ldi64 r11, var_state

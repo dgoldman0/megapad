@@ -291,7 +291,9 @@ every step.
     KDOS source in seconds via C++ accel).  Investigate whether the CLI
     is actually engaging the C++ accelerator, whether the TAP backend
     poll loop is throttling throughput, or whether the interactive UART
-    injection path is the bottleneck.  Goal: CLI boot should feel
+    injection path is the bottleneck.  Also, even after building image,
+    it appers that certain words are missing (out of date KDOS somehow)?
+    Goal: CLI boot should feel
     instant (~2–3 s) with the C++ accel built.
 
 32. ☐ **Real-world networking hardening** — the TAP backend and test
@@ -308,6 +310,16 @@ every step.
       back-to-back packet bursts, TAP fd recovery after errors.
     - 32d. Integration tests for PING, outbound UDP, and (once TCP
       lands) outbound TCP connections against real hosts.
+
+33. ☐ **BIOS `.'` delimiter bug** — the `.'` (dot-quote) implementation
+    includes the delimiter space in the output.  ANS Forth specifies
+    `." hello"` prints `hello`, but ours prints ` hello` (leading
+    space).  Both interpret and compile paths in `w_dotquote` start
+    reading from `>IN` without skipping the delimiter.  Fix: add
+    `inc r13` before `dq_interp_loop` and `dq_scan`.  **All 6,600+
+    lines of KDOS depend on the current (buggy) behaviour** — every
+    `.'` string that uses the leading space as intentional whitespace
+    must be audited and adjusted.  `S"` likely has the same issue.
 
 ---
 

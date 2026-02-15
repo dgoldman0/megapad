@@ -11540,6 +11540,432 @@ class TestKDOSNetStack(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
+#  Network Hardening (Item 32)
+# ---------------------------------------------------------------------------
+
+class TestNetHardening(_KDOSTestBase):
+    """Tests for item 32 — real-world networking hardening.
+
+    32a: PING command, NEXT-HOP subnet routing
+    32c: Stress / robustness (malformed frames, MTU, bursts)
+    """
+
+    # ---- helpers ----
+
+    @staticmethod
+    def _build_arp_reply(dst_mac, src_mac, sender_ip, sender_mac,
+                         target_ip, target_mac):
+        """Build a complete ARP reply Ethernet frame."""
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x06'
+        arp = bytearray(28)
+        arp[0:2] = b'\x00\x01'    # HTYPE = Ethernet
+        arp[2:4] = b'\x08\x00'    # PTYPE = IPv4
+        arp[4] = 6                 # HLEN
+        arp[5] = 4                 # PLEN
+        arp[6:8] = b'\x00\x02'    # OPER = reply
+        arp[8:14] = bytes(sender_mac)
+        arp[14:18] = bytes(sender_ip)
+        arp[18:24] = bytes(target_mac)
+        arp[24:28] = bytes(target_ip)
+        return eth + bytes(arp)
+
+    @staticmethod
+    def _build_icmp_echo_reply(dst_mac, src_mac, src_ip, dst_ip,
+                                ident=0x4D50, seq=0, payload=b''):
+        """Build an Ethernet+IPv4+ICMP echo reply frame."""
+        icmp = bytearray(8 + len(payload))
+        icmp[0] = 0    # type=0 echo reply
+        icmp[1] = 0
+        icmp[4] = (ident >> 8) & 0xFF
+        icmp[5] = ident & 0xFF
+        icmp[6] = (seq >> 8) & 0xFF
+        icmp[7] = seq & 0xFF
+        icmp[8:] = payload
+        # ICMP checksum
+        s = 0
+        padded = bytes(icmp) + (b'\x00' if len(icmp) % 2 else b'')
+        for i in range(0, len(padded), 2):
+            s += (padded[i] << 8) | padded[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        icmp[2] = (cksum >> 8) & 0xFF
+        icmp[3] = cksum & 0xFF
+
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45
+        total_len = 20 + len(icmp)
+        ip_hdr[2] = (total_len >> 8) & 0xFF
+        ip_hdr[3] = total_len & 0xFF
+        ip_hdr[6] = 0x40
+        ip_hdr[8] = 64
+        ip_hdr[9] = 1   # ICMP
+        ip_hdr[12:16] = bytes(src_ip)
+        ip_hdr[16:20] = bytes(dst_ip)
+        s = 0
+        for i in range(0, 20, 2):
+            s += (ip_hdr[i] << 8) | ip_hdr[i+1]
+        while s > 0xFFFF:
+            s = (s & 0xFFFF) + (s >> 16)
+        cksum = (~s) & 0xFFFF
+        ip_hdr[10] = (cksum >> 8) & 0xFF
+        ip_hdr[11] = cksum & 0xFF
+
+        eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'
+        return eth + bytes(ip_hdr) + bytes(icmp)
+
+    # ================================================================
+    #  32a: NEXT-HOP subnet routing
+    # ================================================================
+
+    def test_next_hop_on_subnet(self):
+        """NEXT-HOP should return the original IP when on-subnet."""
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE DST1 4 ALLOT  10 DST1 C!  0 DST1 1+ C!  0 DST1 2 + C!  5 DST1 3 + C!",
+            "DST1 NEXT-HOP DST1 = .\" on=\" .",
+        ])
+        self.assertIn("on=-1 ", text)
+
+    def test_next_hop_off_subnet(self):
+        """NEXT-HOP should return GW-IP when destination is off-subnet."""
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "10 0 0 1 GW-IP IP!",
+            "CREATE DST2 4 ALLOT  8 DST2 C!  8 DST2 1+ C!  8 DST2 2 + C!  8 DST2 3 + C!",
+            "DST2 NEXT-HOP GW-IP = .\" gw=\" .",
+        ])
+        self.assertIn("gw=-1 ", text)
+
+    def test_next_hop_same_host(self):
+        """NEXT-HOP returns dst when it equals MY-IP (on-subnet)."""
+        text = self._run_kdos([
+            "192 168 1 50 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE DST3 4 ALLOT  192 DST3 C!  168 DST3 1+ C!  1 DST3 2 + C!  50 DST3 3 + C!",
+            "DST3 NEXT-HOP DST3 = .\" self=\" .",
+        ])
+        self.assertIn("self=-1 ", text)
+
+    def test_ip_send_off_subnet_uses_gateway(self):
+        """IP-SEND for off-subnet dst should ARP the gateway, not dst."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 64 0 2 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "10 64 0 1 GW-IP IP!",
+            # Pre-cache gateway MAC only
+            "CREATE GWA 4 ALLOT  10 GWA C!  64 GWA 1+ C!  0 GWA 2 + C!  1 GWA 3 + C!",
+            "CREATE GWM 6 ALLOT  170 GWM C!  187 GWM 1+ C!  204 GWM 2 + C! 221 GWM 3 + C!  238 GWM 4 + C! 255 GWM 5 + C!",
+            "GWA GWM ARP-INSERT",
+            # Send to off-subnet 8.8.8.8 — should succeed using gateway MAC
+            "CREATE REMOTE 4 ALLOT  8 REMOTE C!  8 REMOTE 1+ C!  8 REMOTE 2 + C!  8 REMOTE 3 + C!",
+            "CREATE PL 4 ALLOT  PL 4 0 FILL",
+            "IP-PROTO-ICMP REMOTE PL 4 IP-SEND .\" ior=\" .",
+        ])
+        self.assertIn("ior=0 ", text)   # should succeed via gateway
+
+    def test_ip_send_off_subnet_no_gateway_fails(self):
+        """IP-SEND off-subnet with no gateway ARP entry should fail."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 64 0 2 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "10 64 0 1 GW-IP IP!",
+            # No ARP entry for gateway
+            "CREATE REM2 4 ALLOT  8 REM2 C!  8 REM2 1+ C!  4 REM2 2 + C!  4 REM2 3 + C!",
+            "CREATE PL2 4 ALLOT  PL2 4 0 FILL",
+            "IP-PROTO-ICMP REM2 PL2 4 IP-SEND .\" ior=\" .",
+        ])
+        self.assertIn("ior=-1 ", text)  # ARP failure
+
+    # ================================================================
+    #  32a: .IP formatting
+    # ================================================================
+
+    def test_dot_ip_format(self):
+        """.IP should print dotted-quad without trailing spaces between octets."""
+        text = self._run_kdos([
+            "CREATE TIP 4 ALLOT  10 TIP C!  64 TIP 1+ C!  0 TIP 2 + C!  1 TIP 3 + C!",
+            "91 EMIT TIP .IP 93 EMIT",  # '[' ... ']' via EMIT — avoids .' delimiter-space bug
+        ])
+        self.assertIn("[10.64.0.1]", text)
+
+    def test_dot_ip_high_octets(self):
+        """.IP handles 255.255.255.255."""
+        text = self._run_kdos([
+            "CREATE TIP2 4 ALLOT  TIP2 4 255 FILL",
+            "91 EMIT TIP2 .IP 93 EMIT",  # '[' ... ']' via EMIT
+        ])
+        self.assertIn("[255.255.255.255]", text)
+
+    # ================================================================
+    #  32a: PING command
+    # ================================================================
+
+    def test_ping_words_exist(self):
+        """PING, PING-IP, PING-SEND1, PING-WAIT-REPLY should be defined."""
+        text = self._run_kdos([
+            "' PING 0<> .",
+            "' PING-IP 0<> .",
+            "' PING-SEND1 0<> .",
+            "' PING-WAIT-REPLY 0<> .",
+        ])
+        self.assertEqual(text.count("-1 "), 4)
+
+    def test_ping_arp_failure(self):
+        """PING with no ARP entry should report ARP failure."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE TARG 4 ALLOT  192 TARG C!  168 TARG 1+ C!  1 TARG 2 + C!  1 TARG 3 + C!",
+            "TARG 1 PING",
+        ])
+        self.assertIn("ARP failure", text)
+        self.assertIn("1 sent", text)
+        self.assertIn("0 received", text)
+
+    def test_ping_timeout(self):
+        """PING with cached ARP but no reply should report timeout."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE TARG2 4 ALLOT  192 TARG2 C!  168 TARG2 1+ C!  1 TARG2 2 + C!  1 TARG2 3 + C!",
+            "CREATE TMAC 6 ALLOT  TMAC 6 170 FILL",
+            "TARG2 TMAC ARP-INSERT",
+            "TARG2 2 PING",
+        ])
+        self.assertIn("Request timeout", text)
+        self.assertIn("2 sent", text)
+        self.assertIn("0 received", text)
+
+    def test_ping_with_reply(self):
+        """PING should report Reply when echo reply is injected."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [10, 0, 0, 100]
+
+        def ping_responder(nic, data):
+            """Respond to ICMP echo requests with echo replies."""
+            if len(data) < 34:
+                return
+            # Check EtherType = 0x0800 (IPv4)
+            if data[12] != 0x08 or data[13] != 0x00:
+                return
+            # Check IP protocol = 1 (ICMP)
+            if data[23] != 1:
+                return
+            # Check ICMP type = 8 (echo request)
+            ip_hdr_len = (data[14] & 0x0F) * 4
+            icmp_offset = 14 + ip_hdr_len
+            if icmp_offset >= len(data):
+                return
+            if data[icmp_offset] != 8:
+                return
+            # Extract ident and seq from the request
+            ident = (data[icmp_offset + 4] << 8) | data[icmp_offset + 5]
+            seq = (data[icmp_offset + 6] << 8) | data[icmp_offset + 7]
+            payload = bytes(data[icmp_offset + 8:])
+            # Build echo reply
+            reply = self._build_icmp_echo_reply(
+                nic_mac, peer_mac, peer_ip, my_ip,
+                ident=ident, seq=seq, payload=payload)
+            nic.inject_frame(reply)
+
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 0 0 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE PEER 4 ALLOT  10 PEER C!  0 PEER 1+ C!  0 PEER 2 + C!  1 PEER 3 + C!",
+            "CREATE PMAC 6 ALLOT  PMAC 6 170 FILL",
+            "PEER PMAC ARP-INSERT",
+            "PEER 3 PING",
+        ], nic_tx_callback=ping_responder)
+        self.assertIn("PING 10.0.0.1", text)
+        self.assertIn("Reply seq=", text)
+        self.assertIn("3 sent", text)
+        self.assertIn("3 received", text)
+
+    def test_ping_ip_convenience(self):
+        """PING-IP should accept dotted-quad + count."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [10, 0, 0, 100]
+
+        def ping_responder2(nic, data):
+            if len(data) < 34:
+                return
+            if data[12] != 0x08 or data[13] != 0x00:
+                return
+            if data[23] != 1:
+                return
+            ip_hdr_len = (data[14] & 0x0F) * 4
+            icmp_offset = 14 + ip_hdr_len
+            if icmp_offset >= len(data) or data[icmp_offset] != 8:
+                return
+            ident = (data[icmp_offset + 4] << 8) | data[icmp_offset + 5]
+            seq = (data[icmp_offset + 6] << 8) | data[icmp_offset + 7]
+            payload = bytes(data[icmp_offset + 8:])
+            reply = self._build_icmp_echo_reply(
+                nic_mac, peer_mac, peer_ip, my_ip,
+                ident=ident, seq=seq, payload=payload)
+            nic.inject_frame(reply)
+
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 0 0 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE P2 4 ALLOT  10 P2 C!  0 P2 1+ C!  0 P2 2 + C!  1 P2 3 + C!",
+            "CREATE PM2 6 ALLOT  PM2 6 170 FILL",
+            "P2 PM2 ARP-INSERT",
+            "10 0 0 1 1 PING-IP",
+        ], nic_tx_callback=ping_responder2)
+        self.assertIn("PING 10.0.0.1", text)
+        self.assertIn("1 sent", text)
+        self.assertIn("1 received", text)
+
+    def test_ping_send1_returns_ior(self):
+        """PING-SEND1 should return 0 on success, -1 on ARP failure."""
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 0 0 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            "CREATE PS1 4 ALLOT  10 PS1 C!  0 PS1 1+ C!  0 PS1 2 + C!  1 PS1 3 + C!",
+            "CREATE PSM 6 ALLOT  PSM 6 170 FILL",
+            "PS1 PSM ARP-INSERT",
+            "PS1 PING-TARGET 4 CMOVE",
+            "0 PING-SEND1 .\" ok=\" .",
+            # Now try without ARP for a different target
+            "ARP-CLEAR",
+            "CREATE PS2 4 ALLOT  10 PS2 C!  99 PS2 1+ C!  99 PS2 2 + C!  99 PS2 3 + C!",
+            "PS2 PING-TARGET 4 CMOVE",
+            "0 PING-SEND1 .\" fail=\" .",
+        ])
+        self.assertIn("ok=0 ", text)
+        self.assertIn("fail=-1 ", text)
+
+    def test_ping_wait_reply_timeout(self):
+        """PING-WAIT-REPLY with no frames should return 0."""
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "5 PING-WAIT-REPLY .\" r=\" .",
+        ])
+        self.assertIn("r=0 ", text)
+
+    # ================================================================
+    #  32c: Stress / robustness
+    # ================================================================
+
+    def test_malformed_frame_too_short(self):
+        """Receiving a truncated frame should not crash."""
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "ETH-RECV .\" got=\" .",       # try receive on the truncated frame
+        ], nic_frames=[b'\x00\x01\x02'])   # 3 bytes — way too short
+        self.assertIn("got=", text)        # didn't crash
+        # Should return 0 (no valid frame) or some small number
+        self.assertNotIn("ABORT", text)
+
+    def test_malformed_frame_bad_ethertype(self):
+        """Frame with unknown EtherType should be ignored by IP-RECV."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build frame with bogus EtherType 0xBEEF
+        frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\xBE\xEF' + b'\x00' * 20
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "IP-RECV .\" iphdr=\" . .\" iplen=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("iphdr=0 ", text)    # not recognized as IPv4
+        self.assertIn("iplen=0 ", text)
+
+    def test_malformed_ip_bad_checksum(self):
+        """IPv4 frame with bad header checksum should be dropped by IP-RECV."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        # Build valid-looking IPv4 but corrupt checksum
+        eth = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00'
+        ip_hdr = bytearray(20)
+        ip_hdr[0] = 0x45
+        ip_hdr[2] = 0; ip_hdr[3] = 28   # total_len = 28
+        ip_hdr[8] = 64; ip_hdr[9] = 17  # TTL=64, UDP
+        ip_hdr[10] = 0xFF; ip_hdr[11] = 0xFF  # bad checksum
+        ip_hdr[12:16] = bytes([10,0,0,1])
+        ip_hdr[16:20] = bytes([10,0,0,100])
+        frame = eth + bytes(ip_hdr) + b'\x00' * 8
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "IP-RECV .\" ok=\" . .\" len=\" .",
+        ], nic_frames=[frame])
+        self.assertIn("ok=0 ", text)
+        self.assertIn("len=0 ", text)
+
+    def test_multiple_frames_burst(self):
+        """Receiving multiple frames in a burst should all be processable."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        frames = []
+        for i in range(5):
+            frame = TestKDOSNetStack._build_ip_frame(
+                nic_mac, [0xAA]*6, 17,
+                [10, 0, 0, 1], [10, 0, 0, 100],
+                bytes([0x00, i+1, 0x00, 80, 0x00, 16, 0x00, 0x00]))
+            frames.append(frame)
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "VARIABLE FCOUNT  0 FCOUNT !",
+            ": BURST-RX 5 0 DO IP-RECV 0<> IF DROP 1 FCOUNT +! ELSE DROP THEN LOOP ;",
+            "BURST-RX",
+            "FCOUNT @ .\" cnt=\" .",
+        ], nic_frames=frames)
+        self.assertIn("cnt=5 ", text)
+
+    def test_mtu_max_frame(self):
+        """A frame with exactly 1500-byte payload (MTU) should be receivable."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        payload = bytes(range(256)) * 5 + bytes(range(256))[:220]  # 1480 bytes
+        frame = TestKDOSNetStack._build_ip_frame(
+            nic_mac, [0xAA]*6, 17,
+            [10, 0, 0, 1], [10, 0, 0, 100], payload)
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "IP-RECV .\" len=\" . 0<> .\" got\"",
+        ], nic_frames=[frame])
+        self.assertIn("got", text)
+
+    def test_arp_table_overflow(self):
+        """Inserting more than ARP-MAX-ENTRIES should not crash."""
+        lines = [
+            "10 0 0 100 IP-SET",
+            "ARP-CLEAR",
+        ]
+        # Insert 10 entries (max is 8)
+        for i in range(10):
+            lines.append(
+                f"CREATE AI{i} 4 ALLOT  10 AI{i} C!  0 AI{i} 1+ C!  0 AI{i} 2 + C!  {i+1} AI{i} 3 + C!"
+            )
+            lines.append(
+                f"CREATE AM{i} 6 ALLOT  AM{i} 6 {100+i} FILL"
+            )
+            lines.append(f"AI{i} AM{i} ARP-INSERT")
+        lines.append(".\" done\"")
+        text = self._run_kdos(lines)
+        self.assertIn("done", text)
+
+    def test_eth_recv_empty_queue(self):
+        """ETH-RECV with no frames should return 0 cleanly."""
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "ETH-RECV .\" r=\" .",
+        ])
+        self.assertIn("r=0 ", text)
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 

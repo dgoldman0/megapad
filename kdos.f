@@ -2047,7 +2047,7 @@ VARIABLE LD-SZ
     REPEAT
     2DROP ;
 
-\ -- ANSI helpers (needed by .DOC-CHUNK; full set defined in §9) --
+\ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
 : CSI   ( -- )  ESC 91 EMIT ;
 : .N  ( n -- )
@@ -3309,39 +3309,13 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 \  Keys: 1-9 switch, n/p navigate, Enter select, a auto-refresh, r/q.
 \
 
-\ -- ANSI escape primitives --
-: ESC   ( -- )  27 EMIT ;
-: CSI   ( -- )  ESC 91 EMIT ;     \ ESC [
-
-\ .N ( n -- )  print number without trailing space
-: .N  ( n -- )
-    DUP 0< IF 45 EMIT NEGATE THEN
-    DUP 10 < IF
-        48 + EMIT
-    ELSE DUP 100 < IF
-        DUP 10 / 48 + EMIT
-        10 MOD 48 + EMIT
-    ELSE
-        \ General case: use .  and trim space
-        DUP 1000 < IF
-            DUP 100 / 48 + EMIT
-            DUP 10 / 10 MOD 48 + EMIT
-            10 MOD 48 + EMIT
-        ELSE
-            . \ fallback with trailing space for large numbers
-        THEN
-    THEN THEN ;
-
-\ -- Cursor & screen control --
+\ -- Cursor & screen control (ESC/CSI/.N/SGR/RESET-COLOR/DIM defined above §7.6.1) --
 : AT-XY   ( col row -- )  CSI .N 59 EMIT .N 72 EMIT ;   \ ESC[row;colH
 : PAGE     ( -- )  CSI 50 EMIT 74 EMIT CSI 72 EMIT ;     \ ESC[2J ESC[H
 : CLS      ( -- )  PAGE ;                                  \ alias
 
-\ -- Colors (SGR) --
-: SGR      ( n -- )  CSI .N 109 EMIT ;   \ ESC[Nm
-: RESET-COLOR  ( -- )  0 SGR ;
+\ -- Extra colors --
 : BOLD     ( -- )  1 SGR ;
-: DIM      ( -- )  2 SGR ;
 : REVERSE  ( -- )  7 SGR ;
 : FG       ( n -- )  30 + SGR ;    \ 0=black 1=red 2=green 3=yellow 4=blue 5=magenta 6=cyan 7=white
 : BG-COLOR ( n -- )  40 + SGR ;
@@ -4602,12 +4576,36 @@ CREATE NET-MASK  4 ALLOT
 \ -- Set our IP address (dotted quad) --
 : IP-SET  ( b0 b1 b2 b3 -- )   MY-IP IP! ;
 
-\ -- Print IPv4 address --
+\ -- Print IPv4 address (compact, no trailing space) --
 : .IP  ( addr -- )
-    DUP C@ .  46 EMIT
-    DUP 1+ C@ .  46 EMIT
-    DUP 2 + C@ .  46 EMIT
-    3 + C@ . ;
+    DUP C@ .N  46 EMIT
+    DUP 1+ C@ .N  46 EMIT
+    DUP 2 + C@ .N  46 EMIT
+    3 + C@ .N ;
+
+\ -- NEXT-HOP: determine ARP target for a destination IP --
+\   If dst is on our subnet (same masked network), ARP-resolve dst
+\   directly. Otherwise, ARP-resolve the gateway.
+\   If GW-IP is 0.0.0.0 (unconfigured), treat all destinations as on-link.
+\   ( dst-ip -- arp-target )
+: NEXT-HOP  ( dst -- target )
+    \ If gateway is unconfigured (0.0.0.0), treat everything as on-link
+    GW-IP C@ GW-IP 1+ C@ OR GW-IP 2 + C@ OR GW-IP 3 + C@ OR
+    0= IF EXIT THEN    \ no gateway → return dst as-is
+    \ Compute dst AND mask
+    DUP C@            NET-MASK C@            AND  >R
+    DUP 1+ C@         NET-MASK 1+ C@         AND  >R
+    DUP 2 + C@        NET-MASK 2 + C@        AND  >R
+    DUP 3 + C@        NET-MASK 3 + C@        AND  >R
+    \ Compute my-ip AND mask
+    MY-IP C@           NET-MASK C@            AND
+    MY-IP 1+ C@        NET-MASK 1+ C@         AND
+    MY-IP 2 + C@       NET-MASK 2 + C@        AND
+    MY-IP 3 + C@       NET-MASK 3 + C@        AND
+    \ Compare: my-masked[3] == dst-masked[3], etc
+    R> = SWAP R> = AND SWAP R> = AND SWAP R> = AND
+    IF EXIT THEN    \ on-subnet: return dst as-is
+    DROP GW-IP ;    \ off-subnet: return gateway
 
 \ -- ARP-LOOKUP: find MAC for a given IPv4 address --
 \   ( ip-addr -- mac-addr | 0 )
@@ -4949,10 +4947,11 @@ VARIABLE _IPS-PLEN
 \ -- IP-SEND: build + send an IPv4 packet over Ethernet --
 \   ( proto dst-ip payload paylen -- ior )
 \   ior = 0 on success, -1 if ARP resolution failed
+\   Uses NEXT-HOP to route via gateway when dst is off-subnet.
 : IP-SEND  ( proto dst-ip payload paylen -- ior )
     _IPS-PLEN !  _IPS-PAY !  _IPS-DST !  _IPS-PROTO !
-    \ Resolve destination IP → MAC
-    _IPS-DST @ ARP-RESOLVE DUP 0= IF
+    \ Determine L2 next-hop (gateway if off-subnet)
+    _IPS-DST @ NEXT-HOP ARP-RESOLVE DUP 0= IF
         DROP -1 EXIT                   \ ARP failure
     THEN
     \ mac-addr on stack; build the IP packet
@@ -5093,6 +5092,85 @@ VARIABLE _ICH-SRC
 : PING-POLL  ( -- flag )
     IP-RECV DUP 0= IF DROP EXIT THEN    \ no frame → 0
     ICMP-HANDLE ;
+
+\ -- 32a: PING command — user-facing ICMP echo request --
+\ Sends N echo requests to the target IP, waits for replies, prints RTT.
+\ Uses PERF-CYCLES for timing.  Target can be on- or off-subnet (NEXT-HOP).
+
+CREATE PING-TARGET  4 ALLOT           \ target IP for current ping
+VARIABLE PING-RTT                     \ cycle count at send time
+VARIABLE PING-SENT                    \ number of echo requests sent
+VARIABLE PING-RCVD                    \ number of echo replies received
+CREATE PING-PAY  8 ALLOT             \ static payload buffer for echo
+PING-PAY 8 65 FILL                   \ fill with 'A'
+
+\ -- PING-SEND1: send one ICMP echo request to PING-TARGET --
+\   ( seq -- ior )
+: PING-SEND1  ( seq -- ior )
+    ICMP-SEQ !                        \ set sequence number
+    PING-PAY 8 ICMP-BUILD-ECHO-REQ   \ ( buf total-len )
+    >R >R
+    IP-PROTO-ICMP PING-TARGET R> R>   \ ( proto dst buf len )
+    IP-SEND ;
+
+\ -- PING-WAIT-REPLY: poll for ICMP echo reply, return flag --
+\   Polls up to max-attempts, handles ARP/ICMP passively.
+\   ( max-attempts -- reply-flag )
+: PING-WAIT-REPLY  ( n -- flag )
+    0 DO
+        IP-RECV DUP 0<> IF            \ got a frame
+            OVER IP-H.PROTO C@ IP-PROTO-ICMP = IF
+                OVER IP-H.DATA ICMP-IS-ECHO-REP? IF
+                    2DROP -1 UNLOOP EXIT    \ got our reply!
+                THEN
+            THEN
+            \ Not our reply — might be ARP, handle transparently
+            2DROP
+        ELSE
+            DROP                       \ drop extra 0
+        THEN
+    LOOP
+    0 ;                                \ timeout
+
+\ -- PING: send N echo requests to an IP address --
+\   ( ip-addr count -- )
+\   Prints summary: bytes, seq, RTT in cycles.
+VARIABLE _PING-T0
+VARIABLE _PING-FLAG
+: PING  ( ip count -- )
+    SWAP PING-TARGET 4 CMOVE          \ save target IP
+    0 PING-SENT !  0 PING-RCVD !
+    ." PING " PING-TARGET .IP CR
+    ( count ) 0 DO
+        I PING-SEND1 0= IF
+            1 PING-SENT +!
+            PERF-CYCLES _PING-T0 !    \ record start time
+            50 PING-WAIT-REPLY        \ ( flag )
+            _PING-FLAG !
+            PERF-CYCLES _PING-T0 @ -  \ elapsed = end - start
+            _PING-FLAG @ IF
+                1 PING-RCVD +!
+                ."   Reply seq=" I .N
+                ."  time=" .N ." cy" CR
+            ELSE
+                DROP                   \ discard elapsed
+                ."   Request timeout seq=" I .N CR
+            THEN
+        ELSE
+            1 PING-SENT +!
+            ."   ARP failure seq=" I .N CR
+        THEN
+    LOOP
+    ." --- " PING-TARGET .IP ."  ping statistics ---" CR
+    PING-SENT @ .N ." sent, "
+    PING-RCVD @ .N ." received" CR ;
+
+\ -- PING-IP: convenience wrapper with dotted-quad --
+\   ( a b c d count -- )
+CREATE PING-IP-BUF  4 ALLOT
+: PING-IP  ( a b c d n -- )
+    >R  PING-IP-BUF IP!
+    PING-IP-BUF R> PING ;
 
 \ ---------------------------------------------------------------------
 \  §16.4  UDP — connectionless datagrams
