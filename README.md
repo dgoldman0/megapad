@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 890+ tests.
+— all running inside a Python emulator and verified by 1,060+ tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -21,24 +21,26 @@ interactively.
 
 ---
 
-## Current Status: v1.0 (Multicore)
+## Current Status: v1.0 (Multicore + PQC)
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 265 Forth dictionary words, 10,070 lines ASM, ~22 KB binary |
-| **KDOS** | v1.1 — 560 colon definitions + 274 variables/constants, 6,600 lines Forth |
+| **BIOS** | 291 Forth dictionary words, 11,158 lines ASM, ~24 KB binary |
+| **KDOS** | v1.1 — 653 colon definitions + 405 variables/constants, 8,296 lines Forth |
 | **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,541 lines Python |
-| **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (23 s full suite) |
-| **Tests** | 896 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile engine, crypto, networking) |
+| **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (~23 s full suite) |
+| **Tests** | 1,068 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **FPGA RTL** | 18 Verilog modules + 13 testbenches, Genesys 2 (Kintex-7) target |
+| **Devices** | 14 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| **FPGA RTL** | 23 Verilog modules + 18 testbenches (~180 HW tests), Genesys 2 (Kintex-7 325T) target |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
-dashboard, tile engine, filesystem, scheduler, pipelines, networking (with
-real TAP device testing), disk I/O, auto-boot from disk, interactive TUI,
-built-in documentation browser, and **quad-core multicore dispatch** with
-IPI, spinlocks, and barriers.
+dashboard, tile engine, filesystem, scheduler, pipelines, full network
+stack (L2–L7 through TLS 1.3 + socket API), disk I/O, auto-boot from
+disk, interactive TUI, built-in documentation browser, **quad-core
+multicore dispatch** with IPI, spinlocks, and barriers, and
+**post-quantum crypto** (Field ALU, NTT, ML-KEM-512, hybrid PQ exchange).
 
 ---
 
@@ -66,7 +68,10 @@ IPI, spinlocks, and barriers.
 │  │  SRAM   │  │  MMIO Devices │  │  Mailbox  │               │
 │  │ 1–4 MiB │  │  UART  Timer  │  │  IPI +    │               │
 │  │         │  │  Disk  NIC    │  │  Spinlock │               │
-│  │         │  │  CRC Engine   │  │           │               │
+│  │         │  │  CRC  AES    │  │           │               │
+│  │         │  │  SHA3 TRNG   │  │           │               │
+│  │         │  │  FieldALU    │  │           │               │
+│  │         │  │  NTT  KEM    │  │           │               │
 │  └─────────┘  └───────────────┘  └───────────┘               │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -101,9 +106,14 @@ deliver higher bandwidth for tile-heavy workloads.
 
 **Devices** — UART (serial I/O), Timer (cycle-accurate with interrupts),
 Storage Controller (sector-based disk I/O), NIC (Ethernet frames with
-DMA), CRC Engine (CRC32/CRC32C/CRC64), SystemInfo (CPUID, memory size),
-Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  All are
-memory-mapped at `0xFFFF_FF00+`.
+DMA), CRC Engine (CRC32/CRC32C/CRC64), AES-256-GCM (encrypt/decrypt with
+authentication), SHA-3/SHAKE (Keccak-f[1600], 4 modes + XOF squeeze),
+TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
+arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
+INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
+key encapsulation via NTT+SHA3+TRNG), SystemInfo (CPUID, memory size),
+Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  14 device
+classes, all memory-mapped at `0xFFFF_FF00+`.
 
 ---
 
@@ -113,29 +123,32 @@ memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (6,600 lines)     │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (8,296 lines)     │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
-│  Scheduler · Filesystem · TUI   │    data ports, multicore dispatch
+│  Scheduler · Filesystem · TUI   │    data ports, multicore, network,
+│  Network Stack · TLS 1.3       │    TLS 1.3, sockets, PQC
 ├─────────────────────────────────┤
-│    BIOS v1.0 (10,070 lines)    │  ← Subroutine-threaded Forth,
-│  265 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (11,158 lines)    │  ← Subroutine-threaded Forth,
+│  291 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-265 dictionary words covering arithmetic, logic, stack manipulation,
+291 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
-**performance counters**, **CRC engine**, **memory BIST**, **tile self-test**,
+**performance counters**, **CRC engine**, **AES-256-GCM**, **SHA-3/SHAKE**,
+**TRNG**, **Field ALU** (FADD–FPOW + MUL_RAW), **NTT engine**,
+**KEM engine** (ML-KEM-512), **memory BIST**, **tile self-test**,
 **strided/2D addressing**, and **FP16/BF16 modes**.
 Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
 with stack underflow detection, EVALUATE depth limiting, dictionary-full
 guards, and FSLOAD error recovery with file/line context.
 
-**KDOS** — The Kernel Dashboard OS v1.1, written entirely in Forth.  16
+**KDOS** — The Kernel Dashboard OS v1.1, written entirely in Forth.  19
 sections covering: utility words, described buffers with tile-aligned
 storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
 registry with 18 built-in compute kernels, a pipeline engine, raw and
@@ -144,7 +157,8 @@ search tools, a cooperative scheduler with timer-assisted preemption, a
 9-screen interactive TUI (with auto-refresh), data ports for NIC ingestion,
 benchmarking, a full dashboard, a categorized help system with per-word
 `DESCRIBE`, versioned pipeline bundles, **multicore dispatch** (CORE-RUN,
-CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
+CORE-WAIT, BARRIER, P.RUN-PAR), a full **TCP/IP network stack** (Ethernet
+through TLS 1.3), **socket API**, and auto-boot.
 
 ---
 
@@ -216,7 +230,7 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 # C++ accelerator (recommended — 63× faster than PyPy)
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 896 tests
+make test-accel                    # ~23 s, all 1,068 tests
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy                    # one-time
@@ -226,9 +240,9 @@ make test                          # ~24 min
 python -m pytest test_system.py test_megapad64.py -v --timeout=30  # ~40 min
 ```
 
-All 896 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+All 1,068 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking (simulated +
-real TAP), crypto, and extended tile engine.
+real TAP), crypto, post-quantum crypto, and extended tile engine.
 
 For real-network tests against a Linux TAP device:
 
@@ -251,25 +265,25 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `megapad64.py` | 2,541 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
 | `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 602 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 10,389 | Forth BIOS in assembly (265 words, multicore, hardened) |
-| `bios.rom` | ~22 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 6,600 | KDOS v1.1 operating system in Forth (560 definitions) |
+| `system.py` | 610 | Quad-core SoC integration + `run_batch()` C++ fast path |
+| `bios.asm` | 11,158 | Forth BIOS in assembly (291 words, multicore, crypto, hardened) |
+| `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
+| `kdos.f` | 8,296 | KDOS v1.1 operating system in Forth (653 colon defs, §1–§17) |
 | `cli.py` | 1,012 | CLI, boot modes, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 1,549 | MMIO devices: UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
+| `devices.py` | 2,314 | 14 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
 | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 11,576 | 846 integration tests (27 classes, incl. multicore, tile, crypto, FS) |
-| `test_networking.py` | 860 | 27 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP) |
+| `test_system.py` | 14,751 | 1,007 integration tests (40 classes, incl. multicore, tile, crypto, FS, PQC) |
+| `test_networking.py` | 860 | 38 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
 | `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
 | `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `fpga/rtl/` | 11,284 | 18 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
-| `fpga/sim/` | 7,293 | 13 Verilog testbenches (137 hardware tests) |
+| `fpga/rtl/` | 13,367 | 23 Verilog modules (CPU, tile, FP16 ALU, SoC, crypto, PQC) |
+| `fpga/sim/` | 8,677 | 18 Verilog testbenches (~180 hardware tests) |
 
 ---
 
@@ -280,8 +294,8 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 265 entries by category) |
-| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 400+ definitions by section, incl. multicore) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 291 entries by category) |
+| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 653 definitions by section, §1–§17) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |
@@ -300,8 +314,8 @@ The `docs/` directory contains comprehensive reference material:
 Forth might seem like an unusual choice for a modern system, but it's
 remarkably well-suited to this architecture:
 
-**Compactness** — The entire BIOS interpreter, compiler, and 265 built-in
-words fit in roughly 22 KB of machine code.  Forth is one of the most
+**Compactness** — The entire BIOS interpreter, compiler, and 291 built-in
+words fit in roughly 24 KB of machine code.  Forth is one of the most
 space-efficient programming environments ever created.
 
 **Interactivity** — Type a word, it executes immediately.  Development is
@@ -328,19 +342,27 @@ The Python emulator is a **functional simulation** — it implements the
 full instruction set and produces correct results, but models memory as
 flat RAM with simplified cycle counting.
 
-The FPGA RTL (targeting Nexys A7-200T) implements the full
-quad-core SoC including the extended tile engine.  Key differences from
-the emulator are cycle-level timing and block-RAM-backed memory:
+The FPGA RTL (targeting Genesys 2 / Kintex-7 325T) implements the full
+quad-core SoC including the extended tile engine and crypto/PQC
+accelerators.  Key differences from the emulator are cycle-level timing
+and block-RAM-backed memory:
 
 - **1 MiB SRAM** base (4 MiB expanded), backed by FPGA block RAM
 - **2-stage pipeline** (IF + DEX) with per-core 4 KiB direct-mapped
   instruction cache; no speculation or branch prediction
 - **Quad-core** with round-robin bus arbiter and per-core QoS weights
+- **Crypto accelerators**: AES-256-GCM, SHA-3/SHAKE, CRC, TRNG, X25519/
+  Field ALU, NTT, KEM (ML-KEM-512)
 - **Fully static design** — retains state down to DC for ultra-low power
 
-No post-synthesis resource numbers yet — the extended tile engine
-(FP16 ALU, LOAD2D/STORE2D, CRC, BIST, perf counters) added significant
-logic beyond the original base-ISA estimates.
+Manual resource estimates (Kintex-7 325T, no Vivado synthesis yet):
+
+| Resource | Used | Available | Utilization |
+|----------|------|-----------|-------------|
+| LUTs | ~145K–185K | 203,800 | 70–90% |
+| FFs | ~220K | 326,080 | 67% |
+| BRAM36 | ~240 | 445 | 54% |
+| DSP48E1 | ~420–620 | 840 | 50–74% |
 
 Software written for the emulator runs identically on the RTL.
 The simplification affects only timing accuracy, not behavior.

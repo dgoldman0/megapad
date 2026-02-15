@@ -407,7 +407,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **896 passing tests**
+The project has a comprehensive test suite with **1,068 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -415,8 +415,8 @@ that cover every layer of the system.
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 846 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto |
-| `test_networking.py` | 27 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, IP stack integration |
+| `test_system.py` | 1,007 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto, PQC, network stack |
+| `test_networking.py` | 38 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, TCP, IP stack integration |
 
 ### Test Classes in `test_system.py`
 
@@ -446,6 +446,20 @@ that cover every layer of the system.
 | `TestKDOSFileCrypto` | FENCRYPT, FDECRYPT, FS-KEY!, ENCRYPTED? |
 | `TestPipelineBundles` | Pipeline bundle serialization, BUNDLE-SAVE, BUNDLE-LOAD, round-trip |
 | `TestKDOSMulticore` | KDOS multicore: CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR, CORES |
+| `TestKDOSNetStack` | Full network stack: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP (32 tests) |
+| `TestSQuote` | S" string word tests |
+| `TestKDOSSHAKE` | SHAKE128/256 XOF, SHA3-SQUEEZE, SHA3-SQUEEZE-NEXT, SHAKE-STREAM |
+| `TestKDOSTRNG` | RANDOM, RANDOM8, SEED-RNG, RANDOM32, RANDOM16, RAND-RANGE |
+| `TestKDOSHKDF` | HKDF-Extract, HKDF-Expand, SHA-3 HMAC key derivation |
+| `TestKDOSTLSRecord` | TLS 1.3 record layer: content type, length, AES-GCM encrypt/decrypt |
+| `TestKDOSTLSHandshake` | TLS 1.3 handshake: ClientHello, ServerHello, key schedule, Finished |
+| `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |
+| `TestKDOSSocket` | Socket API: SOCKET, BIND, LISTEN, ACCEPT, CONNECT, SEND, RECV, CLOSE |
+| `TestFieldALU` | Field ALU: FADD–FPOW, MUL_RAW, edge cases, X25519 compatibility |
+| `TestNTT` | NTT engine: forward/inverse round-trip, pointwise ops, both moduli |
+| `TestMLKEM` | ML-KEM-512: KeyGen, Encaps, Decaps, known-answer vectors |
+| `TestPQExchange` | Hybrid PQ exchange: X25519 + ML-KEM + HKDF derivation |
+| `TestNetHardening` | Network hardening: truncated headers, bad checksums, floods, stress |
 
 ### Test Classes in `test_networking.py`
 
@@ -458,13 +472,14 @@ that cover every layer of the system.
 | `TestRealNetICMP` | ICMP ping host, respond to ping from host |
 | `TestRealNetUDP` | UDP send to host, UDP receive from host |
 | `TestRealNetIntegration` | Full IP stack init, status display, backend stats tracking |
+| `TestRealNetTCP` | TCP over TAP: SYN/ACK, data transfer, FIN close |
 
 ### Running Tests
 
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-make test-accel                                            # ~23 s, all 896 tests
+make test-accel                                            # ~23 s, all 1,068 tests
 
 # Full suite with CPython (works out of the box, ~40 min)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
@@ -495,7 +510,7 @@ back to pure Python.
 ```bash
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                   # build the C++ extension
-make test-accel              # ~23 s for all 754 tests
+make test-accel              # ~23 s for all 1,068 tests
 make bench                   # raw CPU speed comparison
 ```
 
@@ -545,19 +560,19 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `megapad64.py` | ~2,541 | CPU + tile engine emulator |
 | `accel/mp64_accel.cpp` | ~1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
-| `system.py` | ~602 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
+| `system.py` | ~610 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
 | `cli.py` | ~1,012 | CLI, boot modes, debug monitor |
 | `asm.py` | ~788 | Two-pass assembler (with listing output) |
-| `devices.py` | ~1,549 | MMIO devices (UART, Timer, Storage, SystemInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3) |
+| `devices.py` | ~2,314 | 14 MMIO devices (UART, Timer, Storage, SysInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM) |
 | `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,039 | MP64FS disk utility and image builder |
-| `bios.asm` | ~10,070 | Forth BIOS (265 dictionary words, hardened, multicore) |
-| `bios.rom` | 20,722B | Pre-assembled BIOS binary |
-| `kdos.f` | ~6,600 | KDOS v1.1 operating system (560 colon defs, 9 TUI screens, multicore, crypto, networking) |
+| `bios.asm` | ~11,158 | Forth BIOS (291 dictionary words, crypto, PQC, hardened, multicore) |
+| `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
+| `kdos.f` | ~8,296 | KDOS v1.1 operating system (653 colon defs, §1–§17, multicore, crypto, network, PQC) |
 | `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
-| `test_system.py` | ~11,576 | Integration test suite (846 tests, 27 classes) |
-| `test_networking.py` | ~860 | Real-networking tests (27 tests, 7 classes) |
+| `test_system.py` | ~14,751 | Integration test suite (1,007 tests, 40 classes) |
+| `test_networking.py` | ~860 | Real-networking tests (38 tests, 8 classes) |
 | `setup_accel.py` | ~35 | pybind11 build configuration |
 | `bench_accel.py` | ~139 | C++ vs Python speed comparison |
 | `Makefile` | 190 | Build, test, & accel targets |

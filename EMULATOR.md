@@ -4,11 +4,13 @@ A complete system-level emulator for the Megapad-64 architecture: CPU,
 memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
-> **Branch:** `features/cpp-accelerator`
-> **Status:** Fully functional.  265-word BIOS v1.0 Forth system running on
+> **Branch:** `main`
+> **Status:** Fully functional.  291-word BIOS v1.0 Forth system running on
 > a quad-core emulated SoC with mailbox IPI, spinlocks, extended tile engine
-> (saturating, FP16/BF16, strided/2D, CRC, BIST), optional C++ CPU accelerator
-> (63× speedup), pluggable NIC backends (loopback, UDP, TAP), and 896 tests
+> (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512), optional
+> C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
+> UDP, TAP), full TCP/IP network stack through TLS 1.3, and 1,068 tests
 > passing.
 
 ---
@@ -88,11 +90,11 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py  (598 lines)                 │
+│                    system.py  (610 lines)                 │
 │       MegapadSystem — quad-core SoC, memory map          │
 │                                                          │
-│  ┌──────────────┐    ┌────────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (1,418 lines)│  │
+│  ┌──────────────┐    ┌────────────────────────────┐  │
+│  │  megapad64.py │    │       devices.py  (2,314 lines)│  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
@@ -102,13 +104,24 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │  │  extended ops │    │ ┌──────────┐ ┌─────┐         │  │
 │  │  FP16/BF16   │    │ │ Spinlock │ │ CRC │ DevBus  │  │
 │  └──────────────┘    │ └──────────┘ └─────┘         │  │
+│                      │ ┌─────┐ ┌─────┐ ┌──────┐  │  │
+│                      │ │ AES │ │ SHA3│ │ TRNG │  │  │
+│                      │ └─────┘ └─────┘ └──────┘  │  │
+│                      │ ┌───────────┐ ┌───┐ ┌───┐ │  │
+│                      │ │ FieldALU  │ │NTT│ │KEM│ │  │
+│                      │ └───────────┘ └───┘ └───┘ │  │
+│                      └────────────────────────────┘  │
+│  │  (2516 lines) │    │ └─────────┘ └───────┘        │  │
+│  │  extended ops │    │ ┌──────────┐ ┌─────┐         │  │
+│  │  FP16/BF16   │    │ │ Spinlock │ │ CRC │ DevBus  │  │
+│  └──────────────┘    │ └──────────┘ └─────┘         │  │
 │                      └────────────────────────────────┘  │
 │                                                          │
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (10,389 lines) — Forth BIOS v1.0, 265 words
-    bios.rom  (~22 KB)       — precompiled binary
+    bios.asm  (11,158 lines) — Forth BIOS v1.0, 291 words
+    bios.rom  (~24 KB)       — precompiled binary
 ```
 
 ### Source files
@@ -119,21 +132,21 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 1,549 | Peripherals — UART, Timer, Storage, SystemInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3-256 |
+| `devices.py` | 2,314 | 14 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM |
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | 602 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `system.py` | 610 | Quad-core SoC glue — wires N CPU cores + DeviceBus, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,012 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 10,389 | Forth BIOS v1.0 — subroutine-threaded interpreter, 265 built-in words (incl. multicore, extended tile, I-cache, AES, SHA3) |
+| `bios.asm` | 11,158 | Forth BIOS v1.0 — subroutine-threaded interpreter, 291 built-in words (incl. multicore, crypto, PQC, extended tile, I-cache) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
-| `test_system.py` | 11,576 | System integration tests — 846 tests (27 classes: devices, MMIO, BIOS, KDOS, multicore, FS, crypto, extended tile) |
-| `test_networking.py` | 860 | Real-networking tests — 27 tests (NIC backends, TAP, ARP, ICMP, UDP) |
+| `test_system.py` | 14,751 | System integration tests — 1,007 tests (40 classes: devices, MMIO, BIOS, KDOS, multicore, FS, crypto, PQC, network, extended tile) |
+| `test_networking.py` | 860 | Real-networking tests — 38 tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
 | `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
 | `Makefile` | 190 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
 | `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `fpga/rtl/` | ~11,284 | 18 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, peripherals |
-| `fpga/sim/` | 7,293 | 13 Verilog testbenches — 137 hardware tests |
-| **Total** | **~42,000** | |
+| `fpga/rtl/` | 13,367 | 23 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, crypto, PQC accelerators |
+| `fpga/sim/` | 8,677 | 18 Verilog testbenches — ~180 hardware tests |
+| **Total** | **~58,000** | |
 
 ---
 
@@ -152,6 +165,10 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `0xFFFF_FF00_0000_0000` + `0x0700` | 128 B | AES-256-GCM (authenticated encryption) |
 | `0xFFFF_FF00_0000_0000` + `0x0780` | 64 B | SHA-3/SHAKE (hashing, key derivation) |
 | `0xFFFF_FF00_0000_0000` + `0x07C0` | 64 B | CRC Engine (CRC32/CRC32C/CRC64) |
+| `0xFFFF_FF00_0000_0000` + `0x0800` | 64 B | TRNG (hardware CSPRNG) |
+| `0xFFFF_FF00_0000_0000` + `0x0880` | 128 B | Field ALU (GF(2²⁵⁵−19) arithmetic + MUL_RAW) |
+| `0xFFFF_FF00_0000_0000` + `0x08C0` | 128 B | NTT Engine (256-point NTT/INTT, configurable q) |
+| `0xFFFF_FF00_0000_0000` + `0x0940` | 128 B | KEM Engine (ML-KEM-512 key encapsulation) |
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -232,7 +249,7 @@ Read-only board identification.
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (10,389 lines, ~22 KB).  It boots from address 0 and
+Megapad-64 assembly (11,158 lines, ~24 KB).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -275,7 +292,7 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (265)
+### Built-in words (291)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -353,6 +370,30 @@ buffer), then tokenises and interprets:
 
 **NIC**
 `NET-STATUS` `NET-SEND` `NET-RECV` `NET-MAC@`
+
+**AES-256-GCM**
+`AES-KEY!` `AES-IV!` `AES-AAD-LEN!` `AES-DATA-LEN!` `AES-CMD!`
+`AES-STATUS@` `AES-DIN!` `AES-DOUT@` `AES-TAG@` `AES-TAG!`
+
+**SHA-3 / SHAKE**
+`SHA3-INIT` `SHA3-UPDATE` `SHA3-FINAL` `SHA3-STATUS@`
+`SHA3-MODE!` `SHA3-MODE@` `SHA3-SQUEEZE` `SHA3-SQUEEZE-NEXT`
+
+**TRNG**
+`RANDOM` `RANDOM8` `SEED-RNG`
+
+**Field ALU (GF(p) arithmetic)**
+`FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`
+`FIELD-A!` `FIELD-B!` `FIELD-CMD!` `FIELD-STATUS@` `FIELD-RESULT@`
+`FIELD-RESULT-HI@`
+
+**NTT Engine**
+`NTT-LOAD` `NTT-STORE` `NTT-FWD` `NTT-INV` `NTT-PMUL`
+`NTT-PADD` `NTT-SETQ` `NTT-STATUS@` `NTT-WAIT`
+
+**KEM Engine (ML-KEM-512)**
+`KEM-KEYGEN` `KEM-ENCAPS` `KEM-DECAPS` `KEM-SETQ`
+`KEM-STATUS@` `KEM-PK@` `KEM-CT@`
 
 **Disk / Storage**
 `DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE`
@@ -519,8 +560,8 @@ make test-one K=test_coreid_word   # single test with PyPy
 
 # CPython fallback (no setup required)
 python -m pytest test_megapad64.py -v                          # 23 CPU + tile tests
-python -m pytest test_system.py -v --timeout=30                # 846 integration tests
-python -m pytest test_system.py test_megapad64.py test_networking.py -v --timeout=30  # all 896
+python -m pytest test_system.py -v --timeout=30                # 1,007 integration tests
+python -m pytest test_system.py test_megapad64.py test_networking.py -v --timeout=30  # all 1,068
 ```
 
 | Runner | Parallelism | Approximate Time | Speedup |
@@ -539,12 +580,13 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 265 words), KDOS (buffers, kernels, pipelines, scheduler,
-filesystem, screens, data ports, multicore dispatch), extended tile engine
+Forth BIOS (all 291 words), KDOS (buffers, kernels, pipelines, scheduler,
+filesystem, screens, data ports, multicore dispatch, network stack,
+TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC
 engine, memory BIST, tile self-test, performance counters, multicore
-SoC features (IPI, mailbox, spinlocks, barriers), and real-network tests
-against a Linux TAP device (ARP, ICMP, UDP).
+SoC features (IPI, mailbox, spinlocks, barriers), Field ALU, NTT, KEM,
+and real-network tests against a Linux TAP device (ARP, ICMP, UDP, TCP).
 
 ---
 

@@ -50,6 +50,10 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0780     │  SHA-3 / SHAKE       │ │
     │   0x07C0     │  CRC32 / CRC64       │ │
     │   0x07E0     │  QoS Config          │ │
+    │   0x0800     │  TRNG                │ │
+    │   0x0840     │  Field ALU (GF(p))   │ │
+    │   0x08C0     │  NTT Engine          │ │
+    │   0x0900     │  KEM (ML-KEM-512)    │ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -95,6 +99,10 @@ device occupies a small range:
 | **SHA-3/SHAKE** | `+0x0780` | 64 bytes | Keccak hash / XOF accelerator |
 | **CRC32/CRC64** | `+0x07C0` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
+| **TRNG** | `+0x0800` | 64 bytes | Hardware true random number generator |
+| **Field ALU** | `+0x0840` | 128 bytes | GF(2²⁵⁵−19) coprocessor (8 modes, supersedes X25519) |
+| **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
+| **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).
@@ -248,6 +256,99 @@ with 53 tile testbench tests passing.
 | AES-256-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
 | SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing, key derivation, XOF |
 | CRC32/CRC64 | 8 bytes / cycle | Data integrity for disk sectors and network frames |
+| Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519) |
+| NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
+| KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
+| TRNG | 64 bits / 2 cycles | Hardware true random number generator |
+
+### Field ALU (GF(2²⁵⁵−19) Coprocessor)
+
+A general-purpose field arithmetic unit at MMIO base `+0x0840`,
+superseding the original X25519-only block.  Eight operation modes:
+
+| Mode | Name | Description |
+|------|------|-------------|
+| 0 | X25519 | Full scalar multiplication (Montgomery ladder, ~255 iterations) |
+| 1 | FADD | (a + b) mod p |
+| 2 | FSUB | (a − b) mod p |
+| 3 | FMUL | (a · b) mod p (shared 256-bit multiplier) |
+| 4 | FSQR | a² mod p |
+| 5 | FINV | a^(p−2) mod p (Fermat's little theorem) |
+| 6 | FPOW | a^b mod p (general exponentiation) |
+| 7 | MUL_RAW | Raw 256×256→512-bit multiply (no modular reduction) |
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| OPERAND_A | `+0x00`–`+0x1F` | RW | 256-bit operand A (4 × 64-bit LE) |
+| OPERAND_B | `+0x20`–`+0x3F` | RW | 256-bit operand B (4 × 64-bit LE) |
+| CMD | `+0x40` | W | `{result_sel[5], mode[4:1], go[0]}` — write starts operation |
+| STATUS | `+0x48` | R | **bit 0:** busy, **bit 1:** done |
+| RESULT | `+0x00`–`+0x1F` | R | 256-bit result (read path, low half for MUL_RAW) |
+| RESULT_HI | `+0x20`–`+0x3F` | R | Upper 256 bits of MUL_RAW (via CMD bit 5) |
+
+Zero additional DSPs — reuses the existing shared 256-bit multiplier.
+**BIOS words:** `FIELD-A!`, `FIELD-B!`, `FIELD-CMD!`, `FIELD-STATUS@`,
+`FIELD-RESULT@`, `FIELD-RESULT-HI@`, `FIELD-WAIT`.
+**KDOS words (§1.10):** `FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`,
+`FMUL-RAW`, `F+`, `F-`, `F*`.
+
+### NTT Engine (Number Theoretic Transform)
+
+A 256-point NTT accelerator at MMIO base `+0x08C0` for lattice-based
+post-quantum cryptography (ML-KEM, ML-DSA).
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| CMD | `+0x00` | W | **1:** NTT_FWD, **2:** NTT_INV, **3:** NTT_PMUL, **4:** NTT_PADD |
+| Q | `+0x08` | RW | Modulus (default 3329 for ML-KEM, 8380417 for ML-DSA) |
+| IDX | `+0x10` | RW | Coefficient index (0–255), auto-increments on RESULT read |
+| LOAD_A | `+0x18` | W | Write coefficient to polynomial A[IDX] |
+| LOAD_B / RESULT | `+0x20` | RW | Write to B[IDX], read from work[IDX] |
+
+Internal storage: 3 × 256 × 32-bit register files (poly_a, poly_b, work).
+Cooley-Tukey butterfly with precomputed twiddle ROM (ω = 17 for q = 3329).
+~1,280 cycles for forward/inverse NTT, ~256 cycles for PMUL/PADD.
+
+**BIOS words:** `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`, `NTT-INV`, `NTT-PMUL`,
+`NTT-PADD`, `NTT-SETQ`, `NTT-STATUS@`, `NTT-WAIT`.
+**KDOS word (§1.11):** `NTT-POLYMUL` (full polynomial multiply via NTT).
+
+### KEM (ML-KEM-512 Key Encapsulation)
+
+An ML-KEM-512 accelerator framework at MMIO base `+0x0900`.  Provides
+hardware-managed key/ciphertext buffers and keygen/encaps/decaps operations.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| CMD | `+0x00` | W | **1:** KEYGEN, **2:** ENCAPS, **3:** DECAPS |
+| BUF_SEL | `+0x08` | RW | Buffer select: 0=SEED(64B), 1=PK(800B), 2=SK(1632B), 3=CT(768B), 4=SS(32B) |
+| DIN / DOUT | `+0x10` | RW | Byte-streaming data port (auto-increment index) |
+| IDX_SET / BUF_SIZE | `+0x18` | RW | Write: set byte index; Read: selected buffer size |
+| IDX | `+0x20` | R | Current byte index |
+
+5 internal buffers (3,296 bytes total).  Current RTL has stub crypto
+datapath (deterministic XOR fill); phase 2 will add real CRYSTALS-Kyber
+polynomial arithmetic.
+
+**BIOS words:** `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, `KEM-KEYGEN`,
+`KEM-ENCAPS`, `KEM-DECAPS`, `KEM-STATUS@`.
+**KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
+`KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
+
+### TRNG (True Random Number Generator)
+
+A hardware TRNG at MMIO base `+0x0800`.  On FPGA: ring-oscillator entropy
+source with LFSR conditioner and health monitoring.  In the emulator:
+backed by `os.urandom()`.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| DATA | `+0x00` | R | 64-bit random value |
+| STATUS | `+0x08` | R | **bit 0:** ready, **bit 1:** health OK |
+| CONTROL | `+0x10` | RW | **bit 0:** enable, **bit 1:** reseed |
+| SEED | `+0x18` | W | Manual seed input |
+
+**BIOS words:** `RANDOM`, `RANDOM8`, `SEED-RNG`.
 
 ### Per-Core Infrastructure
 
@@ -271,7 +372,7 @@ with 53 tile testbench tests passing.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.1  (kdos.f, 5,328 lines)              │
+│  KDOS v1.1  (kdos.f, 8,296 lines)              │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -285,13 +386,14 @@ with 53 tile testbench tests passing.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 10,070 lines)           │
-│  Subroutine-threaded Forth, 265 dictionary words│
+│  BIOS v1.0  (bios.asm, 11,158 lines)           │
+│  Subroutine-threaded Forth, 291 dictionary words│
 │  Disk I/O, FSLOAD, UART, timer, tile engine     │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
 │  4× CPU, RAM+BIST, UART, Timer, Storage, NIC,  │
-│  Tile Engine+FP16, AES, SHA-3, CRC, DMA, QoS   │
+│  Tile Engine+FP16, AES, SHA-3, CRC, DMA, QoS,  │
+│  TRNG, Field ALU, NTT Engine, KEM (ML-KEM-512) │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -378,14 +480,15 @@ DMA, and reliability specifications.
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
 | CPU emulator | `megapad64.py` | 2,541 | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | 598 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 1,418 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3 |
-| BIOS | `bios.asm` | 10,070 | Forth interpreter, boot, multicore, 265 dictionary words |
-| OS | `kdos.f` | 5,328 | Buffers, kernels, TUI, FS, crypto, multicore dispatch |
+| System glue | `system.py` | 610 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 2,314 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM |
+| BIOS | `bios.asm` | 11,158 | Forth interpreter, boot, multicore, 291 dictionary words |
+| OS | `kdos.f` | 8,296 | Buffers, kernels, TUI, FS, crypto, networking, PQC, multicore |
 | Assembler | `asm.py` | 788 | Two-pass macro assembler |
 | CLI/Monitor | `cli.py` | 995 | Debug, inspect, boot |
 | Disk tools | `diskutil.py` | 1,039 | Build/manage disk images |
 | Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| Tests | `test_system.py` | 9,673 | 754 integration tests |
-| FPGA RTL | `fpga/rtl/` | 11,284 | 18 Verilog modules (CPU, tile, FP16 ALU, SoC, peripherals) |
-| FPGA tests | `fpga/sim/` | 7,293 | 13 testbenches (137 hardware tests) |
+| Tests | `test_system.py` | 14,751 | 1,007 integration tests (40 classes) |
+| Tests | `test_networking.py` | 860 | 38 real-network tests (8 classes) |
+| FPGA RTL | `fpga/rtl/` | 13,367 | 23 Verilog modules (CPU, tile, FP16, crypto, PQC, SoC) |
+| FPGA tests | `fpga/sim/` | 8,677 | 18 testbenches (~180 hardware tests) |

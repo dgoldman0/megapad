@@ -6,10 +6,10 @@ kernels, pipelines, a cooperative scheduler, a named filesystem, networking,
 versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
 TUI dashboard.
 
-This reference documents every word defined in KDOS, organized by the 16
-sections of `kdos.f`.  There are **433 colon definitions** and **219
-variables/constants/creates** — roughly 652 named entities in total across
-5,328 lines of Forth.
+This reference documents every word defined in KDOS, organized by the
+sections of `kdos.f`.  There are **653 colon definitions** and **405
+variables/constants/creates** — roughly 1,058 named entities in total across
+8,296 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -27,6 +27,12 @@ variables/constants/creates** — roughly 652 named entities in total across
    - [§1.5 AES-256-GCM Encryption](#15-aes-256-gcm-encryption)
    - [§1.6 SHA-3 Hashing](#16-sha-3-hashing)
    - [§1.7 Unified Crypto Words](#17-unified-crypto-words)
+   - [§1.8 X25519 ECDH](#18-x25519-ecdh)
+   - [§1.9 HKDF Key Derivation](#19-hkdf-key-derivation)
+   - [§1.10 Field ALU](#110-field-alu)
+   - [§1.11 NTT Engine](#111-ntt-engine)
+   - [§1.12 ML-KEM-512 (Kyber)](#112-ml-kem-512-kyber)
+   - [§1.13 Hybrid PQ Key Exchange](#113-hybrid-pq-key-exchange)
 2. [§2 Buffer Subsystem](#2-buffer-subsystem)
 3. [§3 Tile-Aware Buffer Operations](#3-tile-aware-buffer-operations)
 4. [§4 Kernel Registry](#4-kernel-registry)
@@ -41,11 +47,13 @@ variables/constants/creates** — roughly 652 named entities in total across
 12. [§8 Scheduler & Tasks](#8-scheduler--tasks)
 13. [§8.1 Multicore Dispatch](#81-multicore-dispatch)
 14. [§9 Interactive Screens (TUI)](#9-interactive-screens-tui)
-14. [§10 Data Ports](#10-data-ports)
-15. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
-16. [§13 Help System](#13-help-system)
-17. [§14 Startup](#14-startup)
-18. [§15 Pipeline Bundles](#15-pipeline-bundles)
+15. [§10 Data Ports](#10-data-ports)
+16. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
+17. [§13 Help System](#13-help-system)
+18. [§14 Startup](#14-startup)
+19. [§15 Pipeline Bundles](#15-pipeline-bundles)
+20. [§16 Network Stack](#16-network-stack)
+21. [§17 Socket API](#17-socket-api)
 
 ---
 
@@ -160,6 +168,99 @@ High-level crypto API combining AES and SHA3.
 | `ENCRYPT` | `( key iv src dst len -- tag-addr )` | AES-256-GCM encrypt (alias for AES-ENCRYPT). |
 | `DECRYPT` | `( key iv src dst len tag -- flag )` | AES-256-GCM decrypt (alias for AES-DECRYPT). |
 | `VERIFY` | `( addr1 addr2 len -- flag )` | Constant-time comparison.  Returns 0 if equal, -1 if different. |
+
+---
+
+### §1.8 X25519 ECDH
+
+Elliptic Curve Diffie-Hellman key exchange (RFC 7748) using the Field ALU
+in mode 0 (X25519 scalar multiplication).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `X25519-CLAMP` | `( addr -- )` | Apply RFC 7748 clamping to a 32-byte scalar. |
+| `X25519-PUBKEY` | `( priv pub -- )` | Compute public key from private key (base point × scalar). |
+| `X25519` | `( priv peer shared -- )` | Full ECDH: shared = scalar × peer point.  All args are 32-byte addresses. |
+
+---
+
+### §1.9 HKDF Key Derivation
+
+HMAC-based Key Derivation Function (RFC 5869) using SHA3-HMAC.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `HKDF-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract: PRK = HMAC(salt, IKM).  32-byte output. |
+| `HKDF-EXPAND` | `( prk info ilen len out -- )` | Expand: OKM = HMAC(PRK, info \|\| counter).  Up to 255×32 bytes. |
+
+---
+
+### §1.10 Field ALU
+
+GF(2²⁵⁵−19) field arithmetic coprocessor with 8 operation modes.
+Supersedes the original X25519-only interface.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FADD` | `( a b r -- )` | (a + b) mod p.  All args are 32-byte field element addresses. |
+| `FSUB` | `( a b r -- )` | (a − b) mod p. |
+| `FMUL` | `( a b r -- )` | (a · b) mod p. |
+| `FSQR` | `( a r -- )` | a² mod p. |
+| `FINV` | `( a r -- )` | a^(p−2) mod p (modular inverse via Fermat). |
+| `FPOW` | `( a b r -- )` | a^b mod p (general modular exponentiation). |
+| `FMUL-RAW` | `( a b r -- )` | Raw 256×256→512-bit multiply (64 bytes output, no reduction). |
+| `F+` | `( a b r -- )` | Alias for `FADD`. |
+| `F-` | `( a b r -- )` | Alias for `FSUB`. |
+| `F*` | `( a b r -- )` | Alias for `FMUL`. |
+
+---
+
+### §1.11 NTT Engine
+
+256-point Number Theoretic Transform for lattice-based post-quantum crypto.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `NTT-SETQ` | `( q -- )` | Set the NTT modulus (3329 for ML-KEM, 8380417 for ML-DSA). |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 coefficients from memory.  *buf*: 0 = poly A, 1 = poly B. |
+| `NTT-STORE` | `( addr -- )` | Store 256 result coefficients to memory. |
+| `NTT-FWD` | `( -- )` | Forward NTT (time → frequency domain). |
+| `NTT-INV` | `( -- )` | Inverse NTT (frequency → time domain). |
+| `NTT-PMUL` | `( -- )` | Pointwise multiply A × B mod q. |
+| `NTT-PADD` | `( -- )` | Pointwise add (A + B) mod q. |
+| `NTT-STATUS@` | `( -- n )` | Read NTT status (0 = idle, 1 = busy, 2 = done). |
+| `NTT-WAIT` | `( -- )` | Poll until NTT operation completes. |
+| `NTT-POLYMUL` | `( a b r -- )` | Full polynomial multiply: r = a · b via forward NTT, pointwise multiply, inverse NTT. |
+| `.NTT-STATUS` | `( -- )` | Print human-readable NTT status. |
+
+---
+
+### §1.12 ML-KEM-512 (Kyber)
+
+Lattice-based key encapsulation mechanism (FIPS 203) using the KEM
+accelerator and NTT engine.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `KYBER-KEYGEN` | `( seed pk sk -- )` | Generate ML-KEM-512 keypair.  *seed*: 64 bytes, *pk*: 800 bytes, *sk*: 1632 bytes. |
+| `KYBER-ENCAPS` | `( pk ct ss -- )` | Encapsulate: produce ciphertext (768 bytes) and shared secret (32 bytes). |
+| `KYBER-DECAPS` | `( sk ct ss -- )` | Decapsulate: recover shared secret from ciphertext using secret key. |
+| `KEM-STATUS@` | `( -- n )` | Read KEM accelerator status. |
+
+---
+
+### §1.13 Hybrid PQ Key Exchange
+
+Combined X25519 + ML-KEM-512 key exchange.  Both shared secrets are
+concatenated and passed through HKDF-Extract + HKDF-Expand to derive
+a single 32-byte hybrid shared secret.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PQ-EXCHANGE` | `( seed pk sk -- )` | Full hybrid setup: X25519 keygen + ML-KEM keygen. |
+| `PQ-EXCHANGE-INIT` | `( peer-x25519 peer-pk ct ss -- )` | Initiator side: X25519 ECDH + ML-KEM encaps → hybrid SS. |
+| `PQ-EXCHANGE-RESP` | `( peer-x25519 ct ss -- )` | Responder side: X25519 ECDH + ML-KEM decaps → hybrid SS. |
+| `PQ-DERIVE` | `( x-ss k-ss out -- )` | Derive 32-byte hybrid key from X25519 SS + Kyber SS via HKDF. |
 
 ---
 
@@ -1093,3 +1194,107 @@ DASHBOARD                \ text overview
 STATUS                   \ one-liner
 HELP                     \ reference
 ```
+
+---
+
+## §16 Network Stack
+
+Full TCP/IP network stack built on the NIC hardware (§16–§16.11 in
+`kdos.f`).  Bottom-up: Ethernet → ARP → IPv4 → ICMP → UDP → DHCP →
+DNS → TCP → TLS 1.3.
+
+### §16 Ethernet Framing
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ETH-BUILD` | `( dst-mac src-mac ethertype -- )` | Build Ethernet header in frame buffer. |
+| `ETH-PARSE` | `( frame -- ethertype )` | Parse Ethernet header, extract EtherType. |
+| `ETH-SEND` | `( buf len -- )` | Transmit Ethernet frame via NIC. |
+| `ETH-RECV` | `( buf -- len \| 0 )` | Receive Ethernet frame from NIC. |
+
+### §16.1 ARP
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ARP-LOOKUP` | `( ip -- mac flag )` | Look up MAC address for IP.  *flag* = -1 if found. |
+| `ARP-INSERT` | `( ip mac -- )` | Insert/update ARP table entry. |
+| `ARP-RESOLVE` | `( ip -- mac )` | Resolve IP to MAC via ARP request.  Blocks until reply. |
+| `ARP-RESPONDER` | `( frame -- )` | Auto-reply to incoming ARP requests. |
+
+### §16.2 IPv4
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `IP-BUILD` | `( src dst proto payload-len -- )` | Build IPv4 header with HW-CRC checksum. |
+| `IP-SEND` | `( dst proto buf len -- )` | Send IP packet: ARP-resolve → ETH-frame → NIC TX. |
+| `IP-RECV` | `( -- proto src buf len \| 0 )` | Receive and parse incoming IP packet. |
+| `NEXT-HOP` | `( dst-ip -- hop-ip )` | Route: if dst is on subnet, return dst; otherwise return gateway. |
+
+### §16.3 ICMP
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PING` | `( ip -- )` | Send ICMP echo request, wait for reply, print result. |
+| `PING-IP` | `( ip -- rtt-ms flag )` | Programmatic ping, returns round-trip time and success flag. |
+
+### §16.4 UDP
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `UDP-SEND` | `( dst-ip dst-port src-port buf len -- )` | Send UDP datagram. |
+| `UDP-RECV` | `( -- src-ip src-port buf len \| 0 )` | Receive UDP datagram. |
+
+### §16.5 DHCP
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `DHCP-START` | `( -- flag )` | Run full DHCP DISCOVER/OFFER/REQUEST/ACK.  Configures MY-IP, NETMASK, GW-IP. |
+
+### §16.6 DNS
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `DNS-RESOLVE` | `( c-addr len -- ip )` | Resolve hostname to IP via DNS A-record query. |
+
+### §16.7 TCP
+
+Full TCP with 4 TCB slots, 3-way handshake, sliding window, congestion
+control, and retransmit.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TCP-CONNECT` | `( ip port -- tcb )` | Active open: SYN → SYN-ACK → ACK.  Returns TCB handle. |
+| `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN. |
+| `TCP-SEND` | `( tcb buf len -- )` | Send data on an established connection. |
+| `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
+| `TCP-CLOSE` | `( tcb -- )` | Graceful close: FIN → FIN-ACK → TIME_WAIT. |
+| `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
+| `.TCP` | `( -- )` | Print all active TCB connections. |
+
+### §16.8–§16.11 TLS 1.3
+
+Full TLS 1.3 implementation using AES-256-GCM and SHA-3 HMAC.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `TLS-CONNECT` | `( ip port -- tls )` | TLS handshake over TCP: ClientHello → key schedule → Finished. |
+| `TLS-SEND` | `( tls buf len -- )` | Encrypt and send application data. |
+| `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
+| `TLS-CLOSE` | `( tls -- )` | Send close_notify and tear down connection. |
+
+---
+
+## §17 Socket API
+
+Unified socket interface over TCP and UDP (§17 in `kdos.f`).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SOCKET` | `( proto -- sd )` | Create socket descriptor.  *proto*: 6 = TCP, 17 = UDP. |
+| `BIND` | `( sd port -- )` | Bind socket to local port. |
+| `LISTEN` | `( sd -- )` | Mark socket as listening (TCP only). |
+| `ACCEPT` | `( sd -- sd' )` | Accept incoming connection, return new socket. |
+| `CONNECT` | `( sd ip port -- )` | Connect to remote host (TCP) or set default destination (UDP). |
+| `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
+| `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
+| `CLOSE` | `( sd -- )` | Close socket and release resources. |

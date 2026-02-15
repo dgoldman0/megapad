@@ -67,22 +67,31 @@ fpga/
 │   ├── mp64_aes.v       ← AES-256-GCM engine
 │   ├── mp64_sha3.v      ← SHA3/Keccak engine
 │   ├── mp64_crc.v       ← CRC-32 engine
+│   ├── mp64_trng.v      ← true random number generator
+│   ├── mp64_field_alu.v ← GF(2²⁵⁵−19) field coprocessor (8 modes)
+│   ├── mp64_ntt.v       ← 256-point NTT engine (lattice crypto)
+│   ├── mp64_kem.v       ← ML-KEM-512 key encapsulation
 │   ├── mp64_synth_top.v ← synthesis top-level wrapper
 │   └── mp64_defs.vh     ← shared constants & parameters
 ├── sim/
 │   ├── tb_bus_arbiter.v  ← bus arbiter tests
 │   ├── tb_cpu_smoke.v    ← CPU smoke tests
 │   ├── tb_crypto.v       ← AES/SHA3/CRC tests
+│   ├── tb_field_alu.v    ← GF(p) field ALU tests (11 tests)
 │   ├── tb_icache.v       ← I-cache tests
+│   ├── tb_kem.v          ← ML-KEM-512 tests (15 tests)
 │   ├── tb_mailbox.v      ← mailbox/IPI tests
 │   ├── tb_memory.v       ← memory subsystem tests
 │   ├── tb_mp64_soc.v     ← full SoC integration test
 │   ├── tb_multicore_smoke.v ← multicore tests
 │   ├── tb_nic.v          ← NIC tests
+│   ├── tb_ntt.v          ← NTT engine tests (8 tests)
 │   ├── tb_opcodes.v      ← opcode tests
 │   ├── tb_peripherals.v  ← peripheral tests
 │   ├── tb_qos.v          ← QoS arbiter tests
-│   └── tb_tile.v         ← tile engine tests
+│   ├── tb_tile.v         ← tile engine tests
+│   ├── tb_trng.v         ← TRNG tests (9 tests)
+│   └── tb_x25519.v       ← legacy X25519 tests
 ├── constraints/
 │   ├── genesys2.xdc     ← Genesys 2 (Kintex-7 325T) pin constraints
 │   └── nexys_a7.xdc     ← Nexys A7 pin constraints (legacy)
@@ -113,10 +122,10 @@ arrays, and combinational logic.
 
 | Resource | Used (est.) | Available | Utilisation |
 |----------|------------:|----------:|:-----------:|
-| **LUTs** | ~125K–165K | 203,800 | 60–80% |
-| **FFs** | ~209K | 326,080 | 64% |
-| **BRAM36** | ~237 | 445 | 53% |
-| **DSP48E1** | ~400–600 | 840 | 48–71% |
+| **LUTs** | ~145K–185K | 203,800 | 70–90% |
+| **FFs** | ~220K | 326,080 | 67% |
+| **BRAM36** | ~240 | 445 | 54% |
+| **DSP48E1** | ~400–620 | 840 | 48–74% |
 
 ### Per-Module Breakdown
 
@@ -137,6 +146,10 @@ arrays, and combinational logic.
 | **mp64_mailbox** | 1 | ~1.0K | — | — | 4 slots + 8 spinlocks |
 | **mp64_extmem** | 1 | ~0.2K | — | — | External memory controller |
 | **mp64_fp16_alu** | 4 | ~3.2K | — | — | FP16/FP32 convert + add |
+| **mp64_trng** | 1 | ~0.6K | — | — | Ring-osc entropy + LFSR conditioner |
+| **mp64_field_alu** | 1 | ~4.5K | — | 4–8 | GF(p) coprocessor, reuses shared multiplier |
+| **mp64_ntt** | 1 | ~5.0K | 3 | 8–12 | 256-pt butterfly, twiddle ROM, 3×256×32b reg files |
+| **mp64_kem** | 1 | ~0.8K | 3 | — | 3,296B buffer array, FSM, byte-stream port |
 
 ### DSP Usage Notes
 
@@ -144,8 +157,15 @@ The raw multiplier count across 4 tile engines is ~1,200–1,700 DSP48E1
 (integer TMUL at 4 element widths + FP16 multipliers).  However, only
 one `mode_ew` is active per tile at any time, so Vivado's resource-sharing
 optimisation (`AreaOptimized_high` + retiming) should fold mutually
-exclusive multipliers down to **~400–600 DSP48E1** — well within the
-840-slice budget.
+exclusive multipliers down to **~400–600 DSP48E1**.  The NTT engine adds
+~8–12 DSPs for its modular butterfly multiplier, and the Field ALU adds
+~4–8 DSPs for its 256-bit Montgomery multiplier core.  Total DSP budget:
+**~420–620 DSP48E1** — well within the 840-slice budget.
+
+The NTT engine's 3×256×32-bit register files (~24 Kbit each) could
+optionally be inferred as BRAM36 slices (~3 blocks) to reduce FF pressure,
+or kept as distributed registers for lower latency.  The KEM module's
+3,296-byte buffer array similarly benefits from BRAM inference (~3 blocks).
 
 ### Synthesis Status
 

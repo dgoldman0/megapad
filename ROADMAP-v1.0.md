@@ -5,22 +5,28 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (272 dict entries, 10,389 lines ASM),
-KDOS v1.1 (6,600 lines), Emulator (2,541 lines + 602-line quad-core SoC +
-1,930-line C++ accelerator), FPGA RTL (20 Verilog modules + 14 testbenches),
-devices.py (1,549 lines), 896 test methods passing in 24 s (CPython + C++).
-Branch: `main`.
+**Current state (Feb 2026):** BIOS (291 dict entries, 11,158 lines ASM),
+KDOS v1.1 (8,296 lines, 653 colon defs, 405 vars/constants), Emulator
+(2,541 lines + 610-line quad-core SoC + 1,930-line C++ accelerator),
+FPGA RTL (23 Verilog modules + 18 testbenches, ~180 HW tests),
+devices.py (2,314 lines, 14 device classes), 1,068 test methods passing
+(CPython + C++).  Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
 scheduler, pipelines, disk I/O, BIOS FSLOAD auto-boot — are
 **functionally complete**.  Foundation (items 1–4), crypto stack
-(items 5–8), network L2–L4 through DNS (items 9–15), and multicore OS
-(items 19–24) are done.  Crypto enhanced with hardware TRNG, SHAKE
-XOF support, and post-quantum readiness.  Real-network testing
+(items 5–8), full network stack L2–L7 including TLS 1.3 and socket API
+(items 9–18), multicore OS (items 19–24), and field ALU / post-quantum
+crypto (items 34–38) are done.  Crypto enhanced with hardware TRNG,
+SHAKE XOF support, Field ALU (general GF(p) coprocessor), NTT engine,
+and ML-KEM-512 with hybrid PQ key exchange.  Real-network testing
 infrastructure added (TAP device backends, 38 integration tests).
 TCP fully implemented (4 TCB slots, 3-way handshake, sliding window,
-congestion control, retransmit, graceful close, 32 tests).
-Remaining work: TLS 1.3, socket API, and application-level features.
+congestion control, retransmit, graceful close, 32 tests).  TLS 1.3
+fully implemented (HKDF, record layer, handshake, app data).  Socket
+API done (8 words, TCP+UDP).  Post-quantum: ML-KEM-512 keygen/encaps/
+decaps + hybrid X25519+ML-KEM exchange with HKDF key derivation.
+Remaining work: application-level features (items 25–30).
 
 ---
 
@@ -28,7 +34,7 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 
 ### BIOS v1.0 — ✅ DONE
 
-272 dictionary entries, 10,237 lines ASM, ~22 KB binary.
+291 dictionary entries, 11,158 lines ASM, ~24 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -62,13 +68,22 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 - ✅ **Stride/2D**: TSTRIDE-R!, TSTRIDE-R@, TTILE-H!, TTILE-W!, TLOAD2D,
   TSTORE2D (6 words)
 - ✅ **FP16/BF16**: FP16-MODE, BF16-MODE (2 words)
+- ✅ **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW,
+  FIELD-A!, FIELD-B!, FIELD-CMD!, FIELD-STATUS@, FIELD-RESULT@,
+  FIELD-RESULT-HI@ (13 words)
+- ✅ **NTT Engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL,
+  NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT (9 words)
+- ✅ **KEM Engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ,
+  KEM-STATUS@, KEM-PK@, KEM-CT@ (7 words)
 
-### KDOS v1.1 — ✅ DONE (core + multicore + crypto)
+### KDOS v1.1 — ✅ DONE (core + multicore + crypto + network + PQC)
 
-445+ word definitions + 230+ variables/constants/creates, 6,600 lines.
+653 colon definitions + 405 variables/constants/creates, 8,296 lines.
 
-16 sections:
-- §1 Utility words, §2 Buffer subsystem, §3 Tile-aware buffer ops
+19 sections:
+- §1 Utility words (§1.1–§1.13: buffer, AES, SHA3, TRNG, X25519, HKDF,
+  Field ALU, NTT, ML-KEM-512, Hybrid PQ Exchange)
+- §2 Buffer subsystem, §3 Tile-aware buffer ops
 - §4 Kernel registry, §5 Sample kernels (12 kernels including kadd,
   knorm, khistogram, kpeak, kconvolve, etc.)
 - §6 Pipeline engine, §7 Storage & persistence
@@ -78,6 +93,8 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 - §12 Dashboard, §13 Help system, §14 Startup
 - §15 Pipeline bundles (versioned, declarative config format)
 - §8.1 Multicore dispatch (CORE-RUN, CORE-WAIT, BARRIER, LOCK/UNLOCK, P.RUN-PAR)
+- §16 Network Stack (Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP, TLS 1.3)
+- §17 Socket API (SOCKET, BIND, LISTEN, ACCEPT, CONNECT, SEND, RECV, CLOSE)
 
 ### Filesystem — ✅ DONE
 
@@ -93,13 +110,13 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 - ✅ megapad64.py: Full CPU emulation (2,541 lines, incl. extended tile, FP16/BF16)
 - ✅ accel/mp64_accel.cpp: C++ CPU core via pybind11 (1,929 lines, 63× speedup)
 - ✅ accel_wrapper.py: Drop-in wrapper for C++ CPU (829 lines)
-- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, TRNG, `run_batch()` (597 lines)
+- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, TRNG, `run_batch()` (610 lines)
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG (1,500 lines)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,314 lines, 14 device classes)
 
-### Test Suite — ✅ 896 tests
+### Test Suite — ✅ 1,068 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
@@ -109,19 +126,25 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 - TestKDOSFilesystem: 15, TestKDOSFileCrypto: 8
 - TestPipelineBundles: 13, TestKDOSMulticore: 79
 - TestKDOSNetStack: 161
+- TestSQuote: 5, TestKDOSHKDF: 7, TestKDOSTLSRecord: 7
+- TestKDOSTLSHandshake: 8, TestKDOSTLSAppData: 7, TestKDOSSocket: 8
+- TestFieldALU: 15, TestNTT: 12, TestMLKEM: 11, TestPQExchange: 7
+- TestNetHardening: 24
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
 - test_megapad64.py: 23 CPU + tile tests
-- test_networking.py: 27 real-network tests (NIC backends, TAP,
-  ARP, ICMP, UDP) across 7 test classes
+- test_networking.py: 38 real-network tests (NIC backends, TAP,
+  ARP, ICMP, UDP, TCP) across 8 test classes
 
-### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore)
+### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore + PQC)
 
-20 Verilog modules in `fpga/rtl/`, 14 testbenches, 146 hardware tests passing.
+23 Verilog modules in `fpga/rtl/`, 18 testbenches, ~180 hardware tests passing.
+13,367 lines RTL + 8,677 lines testbench.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
-- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring, TRNG)
+- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring, TRNG,
+  Field ALU, NTT, KEM)
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
 - ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
@@ -131,8 +154,14 @@ Remaining work: TLS 1.3, socket API, and application-level features.
 - ✅ mp64_icache.v — Per-core 4 KiB direct-mapped instruction cache (256×16B lines)
 - ✅ mp64_trng.v — True Random Number Generator (ring-oscillator + LFSR
   conditioner, health monitoring, 9 unit tests)
+- ✅ mp64_field_alu.v — General GF(2²⁵⁵−19) ALU: FADD/FSUB/FMUL/FSQR/FINV/FPOW
+  + MUL_RAW 256×256→512-bit (11 HW tests)
+- ✅ mp64_ntt.v — 256-point NTT/INTT, configurable modulus (q=3329/8380417),
+  butterfly + Montgomery reduction (8 HW tests)
+- ✅ mp64_kem.v — ML-KEM-512 key encapsulation: KeyGen/Encaps/Decaps
+  via NTT engine + SHA-3 + TRNG (15 HW tests)
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
-- ✅ Nexys A7-200T target (no post-synthesis resource numbers yet)
+- ✅ Kintex-7 325T target (Genesys 2); est. ~145K–185K LUTs, ~420–620 DSPs
 
 ### Extended TPU — ✅ IMPLEMENTED
 
@@ -244,17 +273,17 @@ every step.
     - 16f. ✅ Connection teardown: `TCP-CLOSE`, FIN/FIN-ACK, TIME_WAIT
     - 16g. ✅ Sliding window (`CWND`/`SSTHRESH`) + congestion control
 
-17. ☐ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation
-    - 17a. HKDF-Extract / HKDF-Expand using SHA-3 HMAC
-    - 17b. TLS record layer: content type, length, encryption
-    - 17c. Handshake: ClientHello → ServerHello → key schedule
-    - 17d. Application data encrypt/decrypt via AES-256-GCM
-    - 17e. `TLS-CONNECT` / `TLS-SEND` / `TLS-RECV` words
+17. ✅ **TLS 1.3** — AES-256-GCM + SHA-3 for HMAC/key derivation (37 tests)
+    - 17a. ✅ HKDF-Extract / HKDF-Expand using SHA-3 HMAC
+    - 17b. ✅ TLS record layer: content type, length, encryption
+    - 17c. ✅ Handshake: ClientHello → ServerHello → key schedule
+    - 17d. ✅ Application data encrypt/decrypt via AES-256-GCM
+    - 17e. ✅ `TLS-CONNECT` / `TLS-SEND` / `TLS-RECV` / `TLS-CLOSE` words
 
-18. ☐ **Socket API** — unified interface over TCP/UDP
-    - 18a. Socket descriptor table, `SOCKET` / `CLOSE`
-    - 18b. `BIND` / `LISTEN` / `ACCEPT` (TCP server)
-    - 18c. `CONNECT` / `SEND` / `RECV` (TCP client + UDP)
+18. ✅ **Socket API** — unified interface over TCP/UDP (8 tests)
+    - 18a. ✅ Socket descriptor table, `SOCKET` / `CLOSE`
+    - 18b. ✅ `BIND` / `LISTEN` / `ACCEPT` (TCP server)
+    - 18c. ✅ `CONNECT` / `SEND` / `RECV` (TCP client + UDP)
 
 ---
 
@@ -263,62 +292,45 @@ every step.
 Promotes the existing X25519 block into a general GF(p) coprocessor
 and adds post-quantum cryptographic primitives.
 
-34. ☐ **Field ALU** — Expand X25519 hardware into a general GF(2²⁵⁵−19) ALU
-    with raw 256×256→512-bit multiply.  Zero additional DSPs — reuses
-    the existing shared multiplier.
-    - 34a. RTL: Add `mode` register to mp64_x25519.v (modes 0–7):
-           mode 0 = X25519 (legacy full scalar multiply)
-           mode 1 = FADD (a+b) mod p, mode 2 = FSUB (a−b) mod p
-           mode 3 = FMUL (a·b) mod p, mode 4 = FSQR (a²) mod p
-           mode 5 = FINV (a^(p−2)) mod p, mode 6 = FPOW (a^b) mod p
-           mode 7 = MUL_RAW — raw 256×256→512-bit product (no reduction)
-    - 34b. RTL: Add RESULT_HI read register (256 bits) for MUL_RAW mode.
-           Expand MMIO window: operands at 0x00–0x3F, CMD at 0x40
-           with {mode[3:0], go[0]}, RESULT_HI at 0x28–0x47 read path.
-    - 34c. Emulator: `FieldALUDevice` replaces `X25519Device` in devices.py;
-           backward-compatible (mode 0 = existing X25519 flow).
-    - 34d. BIOS words: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW,
-           FIELD-A!, FIELD-B!, FIELD-CMD!, FIELD-STATUS@, FIELD-RESULT@,
-           FIELD-RESULT-HI@, FIELD-WAIT (13 new words)
-    - 34e. KDOS §1.10: F+ F- F* convenience wrappers, multi-limb
-           big-int utilities (BIG-MUL-LIMB)
-    - 34f. Tests: TestFieldALU (≥15 tests: each mode, edge cases, MUL_RAW
-           carry, compatibility with existing X25519 tests)
+34. ✅ **Field ALU** — General GF(2²⁵⁵−19) ALU with raw 256×256→512-bit
+    multiply (15 tests, 11 HW tests)
+    - 34a. ✅ RTL: `mp64_field_alu.v` — modes 0–7 (X25519, FADD, FSUB,
+           FMUL, FSQR, FINV, FPOW, MUL_RAW). 488 lines.
+    - 34b. ✅ RTL: RESULT_HI read register, MMIO at 0x0880.
+    - 34c. ✅ Emulator: `FieldALUDevice` in devices.py, backward-compatible.
+    - 34d. ✅ BIOS words: 13 new words (FADD–FIELD-WAIT).
+    - 34e. ✅ KDOS §1.10: F+ F- F* wrappers, BIG-MUL-LIMB.
+    - 34f. ✅ Tests: TestFieldALU (15 tests).
 
-35. ☐ **NTT Engine** — Number Theoretic Transform accelerator for
-    ML-KEM (Kyber) and ML-DSA (Dilithium) lattice-based PQC.
-    - 35a. RTL: `mp64_ntt.v` — 256-point NTT/INTT over configurable
-           modulus (q=3329 for ML-KEM, q=8380417 for ML-DSA).
-           Butterfly network, ~12 DSP48, ~3K LUTs.
-           MMIO base 0x8C0, 128-byte window.
-           Operations: NTT_FWD, NTT_INV, NTT_PMUL, NTT_PADD.
-    - 35b. RTL: Wire into mp64_soc.v MMIO mux, add to mp64_defs.vh.
-    - 35c. Emulator: `NTTDevice` in devices.py — pure-Python NTT
-           with Cooley-Tukey butterfly, supports both moduli.
-    - 35d. BIOS words: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV,
-           NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
-           (9 new words)
-    - 35e. KDOS §1.11: NTT convenience wrappers, polynomial
-           multiply helper (NTT-POLYMUL)
-    - 35f. Tests: TestNTT (≥12 tests: forward/inverse round-trip,
-           pointwise multiply, both moduli, known-answer vectors)
+35. ✅ **NTT Engine** — 256-point NTT/INTT, configurable modulus
+    (q=3329 / q=8380417) (12 tests, 8 HW tests)
+    - 35a. ✅ RTL: `mp64_ntt.v` — Cooley-Tukey butterfly, Montgomery
+           reduction. MMIO base 0x8C0. 443 lines.
+    - 35b. ✅ RTL: Wired into mp64_soc.v, defines in mp64_defs.vh.
+    - 35c. ✅ Emulator: `NTTDevice` in devices.py, Python NTT.
+    - 35d. ✅ BIOS words: 9 new words (NTT-LOAD–NTT-WAIT).
+    - 35e. ✅ KDOS §1.11: NTT-POLYMUL convenience word.
+    - 35f. ✅ Tests: TestNTT (12 tests).
 
-36. ☐ **SHA-3 SHAKE Streaming** — XOF auto-squeeze for SPHINCS+ speedup
-    - 36a. RTL: Add SQUEEZE_NEXT command to mp64_sha3.v — auto-permutes
-           and outputs next block without CPU round-trip.
-    - 36b. Emulator: Add squeeze_next support to SHA3Device.
-    - 36c. BIOS word: SHA3-SQUEEZE-NEXT
-    - 36d. KDOS: SHAKE-STREAM helper for continuous XOF output.
-    - 36e. Tests: TestSHA3Streaming (≥4 tests)
+36. ✅ **SHA-3 SHAKE Streaming** — XOF auto-squeeze for SPHINCS+ speedup
+    - 36a. ✅ RTL: SQUEEZE_NEXT command in mp64_sha3.v.
+    - 36b. ✅ Emulator: squeeze_next support in SHA3Device.
+    - 36c. ✅ BIOS word: SHA3-SQUEEZE-NEXT.
+    - 36d. ✅ KDOS: SHAKE-STREAM helper.
+    - 36e. ✅ Tests: covered in TestKDOSSHAKE.
 
-37. ☐ **ML-KEM (Kyber) high-level** — Key encapsulation using NTT engine
-    - 37a. KDOS: KYBER-KEYGEN, KYBER-ENCAPS, KYBER-DECAPS
-    - 37b. Tests: TestMLKEM (≥6 tests, known-answer vectors)
+37. ✅ **ML-KEM-512 (Kyber)** — Key encapsulation using NTT engine
+    (11 tests, 15 HW tests)
+    - 37a. ✅ RTL: `mp64_kem.v` — KeyGen/Encaps/Decaps via NTT+SHA3+TRNG.
+           MMIO base 0x0940. 337 lines.
+    - 37b. ✅ Emulator: `KEMDevice` in devices.py.
+    - 37c. ✅ BIOS words: 7 words (KEM-KEYGEN–KEM-CT@).
+    - 37d. ✅ KDOS §1.12: KYBER-KEYGEN, KYBER-ENCAPS, KYBER-DECAPS.
+    - 37e. ✅ Tests: TestMLKEM (11 tests).
 
-38. ☐ **Hybrid PQ Key Exchange** — X25519 + ML-KEM combined
-    - 38a. KDOS: PQ-EXCHANGE (runs both X25519 and ML-KEM, concatenates
-           shared secrets, derives via HKDF)
-    - 38b. Tests: TestPQExchange (≥4 tests)
+38. ✅ **Hybrid PQ Key Exchange** — X25519 + ML-KEM combined (7 tests)
+    - 38a. ✅ KDOS §1.13: PQ-EXCHANGE (X25519 + ML-KEM + HKDF derivation).
+    - 38b. ✅ Tests: TestPQExchange (7 tests).
 
 ---
 
@@ -395,19 +407,14 @@ and adds post-quantum cryptographic primitives.
 Layer 0  Items  1– 4  Foundation (allocator, exceptions, CRC, diag) ✅ DONE
 Layer 1  Items  5– 8  Crypto Stack (AES ✅, SHA-3 ✅, crypto words ✅, FS encrypt ✅) ✅ DONE
 Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → ICMP ✅ → UDP ✅ →
-                      DHCP ✅ → DNS ✅ → TCP → TLS 1.3 → Socket API)
-                      ~35 sub-commits across 10 protocol items
+                      DHCP ✅ → DNS ✅ → TCP ✅ → TLS 1.3 ✅ → Socket API ✅) ✅ DONE
 Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
 Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
                       scripting, remote REPL)
-Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto
-                      - Field ALU (expand X25519 → general GF(p) coprocessor + MUL_RAW)
-                      - NTT engine (ML-KEM / ML-DSA lattice-based PQC)
-                      - SHA-3 SHAKE streaming (SPHINCS+ speedup)
-                      - ML-KEM (Kyber) high-level words
-                      - Hybrid PQ key exchange (X25519 + ML-KEM)
-                      ~6 sub-commits
+Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
+                      (Field ALU, NTT engine, SHA-3 SHAKE streaming,
+                      ML-KEM-512, Hybrid PQ key exchange)
 ```
 
 Each item is committed individually with its own test class and run via
@@ -423,26 +430,26 @@ continuous progress, reviewable diffs, and a working system at every step.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 10,389 | ✅ 272 dictionary entries |
-| `kdos.f` | 6,600 | ✅ KDOS definitions + §1.1–§1.7 + §7.6.1 crypto |
+| `bios.asm` | 11,158 | ✅ 291 dictionary entries |
+| `kdos.f` | 8,296 | ✅ 653 colon defs, 405 vars/constants, §1–§17 |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `accel/mp64_accel.cpp` | 1,930 | ✅ C++ CPU core (pybind11, 63× speedup) |
 | `accel_wrapper.py` | 830 | ✅ Drop-in wrapper for C++ CPU core |
-| `system.py` | 602 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
+| `system.py` | 610 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
 | `cli.py` | 1,012 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 1,549 | ✅ AES-256-GCM, SHA3/SHAKE, TRNG, CRC, Mailbox, Spinlock |
+| `devices.py` | 2,314 | ✅ 14 devices: AES, SHA3, TRNG, CRC, Field ALU, NTT, KEM, + 7 more |
 | `nic_backends.py` | 399 | ✅ Pluggable NIC backends (Loopback, UDP, TAP) |
 | `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 11,576 | 846 test methods (27 classes) ✅ |
-| `test_networking.py` | 860 | 27 real-network tests (7 classes) ✅ |
+| `test_system.py` | 14,751 | 1,007 test methods (40 classes) ✅ |
+| `test_networking.py` | 860 | 38 real-network tests (8 classes) ✅ |
 | `setup_accel.py` | 35 | ✅ pybind11 build configuration |
 | `bench_accel.py` | 139 | ✅ C++ vs Python speed comparison |
 | `Makefile` | 190 | ✅ Build, test, & accel targets |
 | `conftest.py` | 197 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `fpga/rtl/` | ~11,493 | ✅ 20 Verilog modules |
-| `fpga/sim/` | ~7,557 | ✅ 14 testbenches (146 HW tests) |
-| `docs/` | 9 files | ✅ Written |
+| `fpga/rtl/` | 13,367 | ✅ 23 Verilog modules |
+| `fpga/sim/` | 8,677 | ✅ 18 testbenches (~180 HW tests) |
+| `docs/` | 10 files | ✅ Written |
 | `README.md` | 350 | ✅ Current |

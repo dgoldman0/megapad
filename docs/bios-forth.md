@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **265 entries** —
+This document catalogs every word in the BIOS dictionary — **291 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -667,17 +667,96 @@ at `0xFFFF_FF00_0000_0700`.
 
 ---
 
-## SHA-3 / Keccak-256 Engine (4 words)
+## SHA-3 / SHAKE Engine (8 words)
 
 Hardware-accelerated cryptographic hashing via the MMIO SHA3 engine
-at `0xFFFF_FF00_0000_0780`.
+at `0xFFFF_FF00_0000_0780`.  Supports SHA3-256, SHA3-512, SHAKE128,
+SHAKE256 modes, plus XOF squeeze for arbitrary-length output.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `SHA3-INIT` | `( -- )` | Initialize SHA3 engine for a new hash computation. |
 | `SHA3-UPDATE` | `( addr len -- )` | Feed data (len bytes at addr) into SHA3 engine. |
-| `SHA3-FINAL` | `( addr -- )` | Finalize hash and store 256-bit digest (32 bytes) at addr. |
+| `SHA3-FINAL` | `( addr -- )` | Finalize hash and store digest at addr. |
 | `SHA3-STATUS@` | `( -- status )` | Read engine status: 0 = busy, 1 = ready. |
+| `SHA3-MODE!` | `( mode -- )` | Set hash mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256. |
+| `SHA3-MODE@` | `( -- mode )` | Read current hash mode. |
+| `SHA3-SQUEEZE` | `( addr len -- )` | Squeeze len bytes of XOF output to addr (SHAKE modes). |
+| `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | Auto-permute and squeeze next XOF block. |
+
+---
+
+## TRNG (3 words)
+
+Hardware true random number generator at `0xFFFF_FF00_0000_0800`.
+CSPRNG-backed in emulator, ring-oscillator + SHA-3 conditioner on FPGA.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `RANDOM` | `( -- u )` | Return a 64-bit random number. |
+| `RANDOM8` | `( -- u )` | Return an 8-bit random number (0–255). |
+| `SEED-RNG` | `( u -- )` | Seed the CSPRNG (emulator only). |
+
+---
+
+## Field ALU — GF(2²⁵⁵−19) Arithmetic (13 words)
+
+General-purpose finite-field coprocessor at `0xFFFF_FF00_0000_0880`.
+Modes 0–7: X25519 (legacy), FADD, FSUB, FMUL, FSQR, FINV, FPOW,
+MUL_RAW (256×256→512-bit).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FIELD-A!` | `( addr -- )` | Load 256-bit operand A from addr. |
+| `FIELD-B!` | `( addr -- )` | Load 256-bit operand B from addr. |
+| `FIELD-CMD!` | `( cmd -- )` | Start operation (mode in bits 7:4, go in bit 0). |
+| `FIELD-STATUS@` | `( -- status )` | Read status: 0 = busy, 1 = done. |
+| `FIELD-RESULT@` | `( addr -- )` | Read 256-bit result to addr. |
+| `FIELD-RESULT-HI@` | `( addr -- )` | Read upper 256 bits (MUL_RAW mode) to addr. |
+| `FADD` | `( a b -- r )` | (a + b) mod p — loads operands, executes, returns result. |
+| `FSUB` | `( a b -- r )` | (a − b) mod p. |
+| `FMUL` | `( a b -- r )` | (a · b) mod p. |
+| `FSQR` | `( a -- r )` | a² mod p. |
+| `FINV` | `( a -- r )` | a^(p−2) mod p (modular inverse). |
+| `FPOW` | `( a b -- r )` | a^b mod p. |
+| `FMUL-RAW` | `( a b -- rlo rhi )` | Raw 256×256→512-bit multiply (no reduction). |
+
+---
+
+## NTT Engine (9 words)
+
+256-point Number Theoretic Transform accelerator at
+`0xFFFF_FF00_0000_08C0`.  Configurable modulus (q=3329 for ML-KEM,
+q=8380417 for ML-DSA).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `NTT-LOAD` | `( addr -- )` | Load 256-element polynomial from addr. |
+| `NTT-STORE` | `( addr -- )` | Store 256-element result to addr. |
+| `NTT-FWD` | `( -- )` | Run forward NTT (time → frequency). |
+| `NTT-INV` | `( -- )` | Run inverse NTT (frequency → time). |
+| `NTT-PMUL` | `( addr -- )` | Pointwise multiply with polynomial at addr. |
+| `NTT-PADD` | `( addr -- )` | Pointwise add with polynomial at addr. |
+| `NTT-SETQ` | `( q -- )` | Set modulus (3329 or 8380417). |
+| `NTT-STATUS@` | `( -- status )` | Read engine status. |
+| `NTT-WAIT` | `( -- )` | Busy-wait until NTT operation completes. |
+
+---
+
+## KEM Engine — ML-KEM-512 (7 words)
+
+Key encapsulation mechanism at `0xFFFF_FF00_0000_0940`.  Uses NTT,
+SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `KEM-KEYGEN` | `( -- )` | Generate ML-KEM-512 keypair.  Public key readable via KEM-PK@. |
+| `KEM-ENCAPS` | `( pk-addr -- )` | Encapsulate: produce ciphertext + shared secret. |
+| `KEM-DECAPS` | `( ct-addr -- )` | Decapsulate: recover shared secret from ciphertext. |
+| `KEM-SETQ` | `( q -- )` | Set underlying NTT modulus. |
+| `KEM-STATUS@` | `( -- status )` | Read engine status. |
+| `KEM-PK@` | `( addr -- )` | Read public key to addr. |
+| `KEM-CT@` | `( addr -- )` | Read ciphertext to addr. |
 
 ---
 

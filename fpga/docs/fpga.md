@@ -61,7 +61,7 @@ UART_TXD ◄──│       bus  │         │         │  tile              
 
 | Module | File | Lines | Description |
 |--------|------|------:|-------------|
-| `mp64_defs` | `rtl/mp64_defs.vh` | ~372 | Shared constants, ISA encoding, CSR map |
+| `mp64_defs` | `rtl/mp64_defs.vh` | ~433 | Shared constants, ISA encoding, CSR map |
 | `mp64_cpu` | `rtl/mp64_cpu.v` | ~1,951 | CPU core: fetch/decode/execute, 16 GPRs, flags |
 | `mp64_cpu_fsm` | `rtl/mp64_cpu_fsm.v` | ~1,614 | CPU FSM controller |
 | `mp64_bus` | `rtl/mp64_bus.v` | ~300 | Bus arbiter & MMIO/memory address decoder |
@@ -78,10 +78,14 @@ UART_TXD ◄──│       bus  │         │         │  tile              
 | `mp64_aes` | `rtl/mp64_aes.v` | ~735 | AES-256-GCM engine |
 | `mp64_sha3` | `rtl/mp64_sha3.v` | ~395 | SHA3/Keccak engine |
 | `mp64_crc` | `rtl/mp64_crc.v` | ~174 | CRC-32 engine |
+| `mp64_trng` | `rtl/mp64_trng.v` | ~192 | True RNG (ring-osc + LFSR conditioner) |
+| `mp64_field_alu` | `rtl/mp64_field_alu.v` | ~488 | GF(2²⁵⁵−19) field coprocessor (8 modes) |
+| `mp64_ntt` | `rtl/mp64_ntt.v` | ~443 | 256-point NTT engine (Cooley-Tukey butterfly) |
+| `mp64_kem` | `rtl/mp64_kem.v` | ~337 | ML-KEM-512 key encapsulation accelerator |
 | `mp64_synth_top` | `rtl/mp64_synth_top.v` | ~136 | Synthesis top-level wrapper |
-| `mp64_soc` | `rtl/mp64_soc.v` | ~879 | Top-level SoC wiring |
+| `mp64_soc` | `rtl/mp64_soc.v` | ~950 | Top-level SoC wiring |
 
-**Total:** ~11,284 lines RTL, ~7,293 lines testbench code (13 testbenches).
+**Total:** ~13,367 lines RTL, ~8,677 lines testbench code (18 testbenches).
 
 ---
 
@@ -272,9 +276,14 @@ verilator --lint-only -Wall -Ifpga/rtl fpga/rtl/mp64_soc.v
 | `tb_nic.v` | — | NIC TX/RX, DMA |
 | `tb_peripherals.v` | — | UART, Timer, Disk |
 | `tb_qos.v` | — | QoS weight-based scheduling |
+| `tb_trng.v` | 9 | TRNG readback, entropy, pool, health monitoring |
+| `tb_x25519.v` | — | Legacy X25519 scalar multiply |
+| `tb_field_alu.v` | 11 | FADD, FSUB, FMUL, FSQR, FINV, MUL_RAW (LO+HI), STATUS, FPOW |
+| `tb_ntt.v` | 8 | Q readback, PADD, PMUL, NTT_FWD, STATUS |
+| `tb_kem.v` | 15 | Buffer sizes, DIN/DOUT roundtrip, keygen, encaps, decaps, IDX_SET |
 | `tb_mp64_soc.v` | — | Full SoC integration |
 
-**Status:** ✅ **137/137 tests passing**
+**Status:** ✅ **~180 tests passing**
 
 ```bash
 cd fpga/sim
@@ -347,9 +356,9 @@ vivado -mode batch -source program.tcl
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| RTL design | ✅ Complete | 18 modules, ~11,284 lines |
+| RTL design | ✅ Complete | 23 modules, ~13,367 lines |
 | Lint verification | ✅ Pass | 0 errors (Verilator) |
-| Unit tests | ✅ Pass | 137/137 tests (Icarus) |
+| Unit tests | ✅ Pass | ~180 tests (Icarus) |
 | CPU bugs | ✅ Fixed | Multi-byte fetch + address staleness |
 | Synthesis | ⏸️ Pending | Requires Vivado + time |
 | Timing closure | ⏸️ Pending | Requires synthesis |

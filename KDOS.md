@@ -2,7 +2,7 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v1.1 — Multicore Dispatch, 9-Screen TUI, Pipeline Bundles**
+**Current Status: KDOS v1.1 — Multicore Dispatch, Network Stack, TLS 1.3, Post-Quantum Crypto**
 
 ---
 
@@ -18,7 +18,7 @@ python cli.py --bios bios.asm --storage sample.img
 # Development mode (UART injection, no filesystem)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (754 tests, CPython)
+# Full test suite (1,068 tests, CPython)
 python -m pytest test_system.py test_megapad64.py -v --timeout=30
 
 # Fast tests with PyPy + parallel workers (~4 min vs ~40 min)
@@ -98,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (265 words, ~10,070 lines):
+**BIOS v1.0** (291 words, ~11,158 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -110,10 +110,14 @@ PORTS                          \ List all port bindings
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
-- **SHA-3 / Keccak-256**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@
+- **SHA-3 / SHAKE**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@, SHA3-MODE!, SHA3-MODE@, SHA3-SQUEEZE, SHA3-SQUEEZE-NEXT
+- **TRNG**: RANDOM, RANDOM8, SEED-RNG
+- **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, FIELD-A!, FIELD-B!, FIELD-CMD!, FIELD-STATUS@, FIELD-RESULT@, FIELD-RESULT-HI@
+- **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
+- **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
 - **CRC-32**: CRC-RESET, CRC-FEED, CRC-RESULT, CRC-DMA
 
-**KDOS v1.1** (~5,328 lines Forth):
+**KDOS v1.1** (~8,296 lines Forth, 653 colon defs, 405 vars/constants):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -162,11 +166,10 @@ PORTS                          \ List all port bindings
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
-**Tests**: 754+ passing
-- 286+ KDOS tests (buffers, tile ops, kernels, advanced kernels, pipelines, storage, files, MP64FS, scheduler, screens, data ports, real-world data sources, end-to-end pipelines, dashboard, doc browser, pipeline bundles, allocator, exceptions, CRC, diagnostics, AES, SHA3, crypto, file crypto)
-- 73 BIOS tests (all Forth words, compilation, tile engine, disk I/O, timer, KEY?, WORD)
-- 18 diskutil tests (pure Python MP64FS image manipulation + doc/tutorial/bundle building)
-- 24 system tests (UART, Timer, Storage, NIC, DeviceBus, MMIO)
+**Tests**: 1,068+ passing
+- 1,007 test_system.py (40 classes: KDOS, BIOS, multicore, crypto, PQC, network, FS, devices)
+- 23 test_megapad64.py (CPU + tile engine)
+- 38 test_networking.py (NIC backends, TAP, ARP, ICMP, UDP, TCP)
 
 ### � Roadmap to v1.0
 
@@ -462,6 +465,15 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **Storage** | Sector-based block device (512-byte sectors, DMA) |
 | **NIC** | Ethernet device with DMA, TX/RX queues, 1500-byte MTU |
 | **SysInfo** | Board ID, RAM size, feature flags |
+| **Mailbox** | Inter-core IPI messaging (4 cores) |
+| **Spinlock** | 8 hardware mutexes for shared resources |
+| **CRC** | CRC32/CRC32C/CRC64 with DMA |
+| **AES** | AES-256-GCM authenticated encryption |
+| **SHA-3** | Keccak-f[1600]: SHA3-256/512, SHAKE128/256, XOF squeeze |
+| **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
+| **Field ALU** | GF(2²⁵⁵−19) arithmetic + raw 256×256→512-bit multiply |
+| **NTT** | 256-point NTT/INTT, configurable modulus (ML-KEM / ML-DSA) |
+| **KEM** | ML-KEM-512 key encapsulation (KeyGen/Encaps/Decaps) |
 
 ### 3.4 Memory
 
@@ -472,7 +484,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 265 words, ~10,070 lines) is the **permanent,
+The BIOS Forth (v1.0, 291 words, ~11,158 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -480,7 +492,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 265 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 291 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **265** dictionary words defined in `bios.asm`.
+Complete catalog of all **291** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -487,23 +487,79 @@ Each entry is a linked list node:
 | 256 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
 | 257 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
 
-### SHA-3 / Keccak-256 Engine (4 words)
+### SHA-3 / SHAKE Engine (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 258 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
 | 259 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
-| 260 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store 256-bit digest (32 bytes) at addr |
+| 260 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store digest at addr |
 | 261 | `SHA3-STATUS@` | `( -- status )` | | Read engine status: 0 = busy, 1 = ready |
+| 262 | `SHA3-MODE!` | `( mode -- )` | | Set mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
+| 263 | `SHA3-MODE@` | `( -- mode )` | | Read current hash mode |
+| 264 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
+| 265 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
 
 ### CRC DMA (4 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 262 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
-| 263 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
-| 264 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
-| 265 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
+| 266 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
+| 267 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
+| 268 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
+| 269 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
+
+### TRNG (3 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 270 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
+| 271 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
+| 272 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
+
+### Field ALU (13 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 273 | `FIELD-A!` | `( addr -- )` | | Load 256-bit operand A from addr |
+| 274 | `FIELD-B!` | `( addr -- )` | | Load 256-bit operand B from addr |
+| 275 | `FIELD-CMD!` | `( cmd -- )` | | Start operation (mode in bits 7:4, go in bit 0) |
+| 276 | `FIELD-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done |
+| 277 | `FIELD-RESULT@` | `( addr -- )` | | Read 256-bit result to addr |
+| 278 | `FIELD-RESULT-HI@` | `( addr -- )` | | Read upper 256 bits (MUL_RAW) to addr |
+| 279 | `FADD` | `( a b -- r )` | | (a + b) mod p |
+| 280 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
+| 281 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
+| 282 | `FSQR` | `( a -- r )` | | a² mod p |
+| 283 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
+| 284 | `FPOW` | `( a b -- r )` | | a^b mod p |
+| 285 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
+
+### NTT Engine (9 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 286 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
+| 287 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
+| 288 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
+| 289 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
+| 290 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
+| 291 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
+| 292 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
+| 293 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
+| 294 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
+
+### KEM Engine — ML-KEM-512 (7 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 295 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
+| 296 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
+| 297 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
+| 298 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
+| 299 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
+| 300 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
+| 301 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
 ---
 
@@ -537,9 +593,13 @@ Each entry is a linked list node:
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
 | AES-256-GCM Engine | 10 |
-| SHA-3 / Keccak-256 | 4 |
+| SHA-3 / SHAKE | 8 |
 | CRC DMA | 4 |
-| **Total** | **265** |
+| TRNG | 3 |
+| Field ALU | 13 |
+| NTT Engine | 9 |
+| KEM Engine | 7 |
+| **Total** | **291** |
 
 ### All Immediate Words (33)
 
@@ -597,6 +657,10 @@ TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 | `0xFFFF_FF00_0000_0700` | AES-256-GCM | Key/IV/data/tag registers |
 | `0xFFFF_FF00_0000_0780` | SHA-3/SHAKE | Rate/state/control |
 | `0xFFFF_FF00_0000_07C0` | CRC Engine | POLY=+0, INIT=+8, DIN=+10, RESULT=+18, CTRL=+20 |
+| `0xFFFF_FF00_0000_0800` | TRNG | DATA=+0..+7, STATUS=+8 |
+| `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
+| `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
+| `0xFFFF_FF00_0000_0940` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 
 ### Memory Layout
 
