@@ -762,6 +762,82 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("5 ", text)
         self.assertIn("3 ", text)
 
+    # -- Interpret-mode IF/ELSE/THEN (bugfix) --
+
+    def test_if_then_true_interpret(self):
+        """Interpret-mode IF/THEN: true branch executes."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '1 IF 42 . THEN',
+        ])
+        self.assertIn("42 ", text)
+
+    def test_if_then_false_interpret(self):
+        """Interpret-mode IF/THEN: false skips body."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '0 IF 99 . THEN 7 .',
+        ])
+        # Only look at output after the echoed input line
+        idx = text.rfind("THEN 7 .")
+        after = text[idx + len("THEN 7 ."):] if idx >= 0 else text
+        self.assertNotIn("99 ", after)
+        self.assertIn("7 ", after)
+
+    def test_if_else_then_true_interpret(self):
+        """Interpret-mode IF/ELSE/THEN: true branch only."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '1 IF ." YES1 " ELSE ." NO1 " THEN',
+        ])
+        # Output after the echoed input line
+        idx = text.find("THEN")
+        after = text[idx + 4:] if idx >= 0 else text
+        self.assertIn("YES1 ", after)
+        self.assertNotIn("NO1 ", after)
+
+    def test_if_else_then_false_interpret(self):
+        """Interpret-mode IF/ELSE/THEN: false branch only."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '0 IF ." YES2 " ELSE ." NO2 " THEN',
+        ])
+        idx = text.find("THEN")
+        after = text[idx + 4:] if idx >= 0 else text
+        self.assertNotIn("YES2 ", after)
+        self.assertIn("NO2 ", after)
+
+    def test_if_nested_interpret(self):
+        """Interpret-mode nested IF/THEN."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '1 IF 1 IF 42 . THEN THEN',
+        ])
+        self.assertIn("42 ", text)
+
+    def test_if_nested_false_outer_interpret(self):
+        """Interpret-mode nested IF: false outer skips inner entirely."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '0 IF 1 IF ." INNER1 " THEN THEN 7 .',
+        ])
+        # Look past the echoed input
+        idx = text.rfind("THEN 7 .")
+        after = text[idx + len("THEN 7 ."):] if idx >= 0 else text
+        self.assertNotIn("INNER1 ", after)
+        self.assertIn("7 ", after)
+
+    def test_if_colon_def_still_works(self):
+        """IF inside colon definitions still works (regression check)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': T1 1 IF 42 . ELSE 99 . THEN ;',
+            ': T2 0 IF 42 . ELSE 99 . THEN ;',
+            'T1 T2',
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("99 ", text)
+
     # -- v0.4: BEGIN / UNTIL --
 
     def test_begin_until(self):
