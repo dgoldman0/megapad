@@ -774,6 +774,131 @@ CREATE X25519-BASE  32 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
+\  §1.10  Field ALU — GF(2^255-19) Coprocessor + Raw 256x256 Multiply
+\ =====================================================================
+\  Hardware-accelerated field arithmetic over GF(p), p = 2^255 - 19.
+\  Shares the same MMIO base as X25519 (0x0840).
+\
+\  BIOS primitives used:
+\    X25519-SCALAR! ( addr -- )   = FIELD-A! (write operand A, 32 bytes)
+\    X25519-POINT!  ( addr -- )   = FIELD-B! (write operand B, 32 bytes)
+\    FIELD-CMD!     ( mode -- )   Start computation with given mode
+\    X25519-WAIT    ( -- )        = FIELD-WAIT
+\    X25519-STATUS@ ( -- n )      = FIELD-STATUS@
+\    X25519-RESULT@ ( addr -- )   = FIELD-RESULT@ (read result_lo)
+\    FIELD-RESULT-HI@ ( addr -- ) Read result_hi (MUL_RAW only)
+\
+\  Modes:
+\    0 = X25519 (legacy scalar multiply)
+\    1 = FADD  (a+b) mod p
+\    2 = FSUB  (a-b) mod p
+\    3 = FMUL  (a*b) mod p
+\    4 = FSQR  (a^2) mod p
+\    5 = FINV  a^(p-2) mod p
+\    6 = FPOW  a^b mod p
+\    7 = MUL_RAW  256x256 -> 512-bit product (no reduction)
+
+\ Mode constants
+0 CONSTANT FMODE-X25519
+1 CONSTANT FMODE-ADD
+2 CONSTANT FMODE-SUB
+3 CONSTANT FMODE-MUL
+4 CONSTANT FMODE-SQR
+5 CONSTANT FMODE-INV
+6 CONSTANT FMODE-POW
+7 CONSTANT FMODE-RAW
+
+\ Aliases for readability
+: FIELD-A!      X25519-SCALAR! ;
+: FIELD-B!      X25519-POINT! ;
+: FIELD-WAIT    X25519-WAIT ;
+: FIELD-STATUS@ X25519-STATUS@ ;
+: FIELD-RESULT@ X25519-RESULT@ ;
+
+\ Scratch buffers for field ops (32 bytes each)
+CREATE _FA  32 ALLOT
+CREATE _FB  32 ALLOT
+CREATE _FR  32 ALLOT
+CREATE _FRH 32 ALLOT
+
+\ ------------------------------------------------------------------
+\ Core field operations — all take/return 32-byte buffer addresses
+\ ------------------------------------------------------------------
+
+\ FADD ( a-addr b-addr result-addr -- )  (a+b) mod p
+: FADD ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-ADD FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FSUB ( a-addr b-addr result-addr -- )  (a-b) mod p
+: FSUB ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-SUB FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMUL ( a-addr b-addr result-addr -- )  (a*b) mod p
+: FMUL ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-MUL FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FSQR ( a-addr result-addr -- )  a^2 mod p
+: FSQR ( a r -- )
+    >R
+    FIELD-A!
+    FMODE-SQR FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FINV ( a-addr result-addr -- )  a^(p-2) mod p  (Fermat inversion)
+: FINV ( a r -- )
+    >R
+    FIELD-A!
+    FMODE-INV FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FPOW ( base-addr exp-addr result-addr -- )  base^exp mod p
+: FPOW ( a e r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-POW FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMUL-RAW ( a-addr b-addr rlo-addr rhi-addr -- )
+\   Raw 256x256 -> 512-bit product.  No modular reduction.
+\   Result split: low 256 bits in rlo, high 256 bits in rhi.
+: FMUL-RAW ( a b rlo rhi -- )
+    >R >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-RAW FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@
+    R> FIELD-RESULT-HI@ ;
+
+\ .FIELD-STATUS ( -- )  Print human-readable field ALU status.
+: .FIELD-STATUS
+    FIELD-STATUS@
+    DUP 0 = IF DROP ."  Field ALU: idle" CR ELSE
+    DUP 2 = IF DROP ."  Field ALU: done" CR ELSE
+    DUP 1 = IF DROP ."  Field ALU: busy" CR ELSE
+    DROP ."  Field ALU: unknown" CR
+    THEN THEN THEN ;
+
+\ =====================================================================
 \  §1.9  HKDF — HMAC-based Key Derivation Function (RFC 5869)
 \ =====================================================================
 \  Uses HMAC-SHA3-256 as the underlying PRF.

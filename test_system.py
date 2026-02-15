@@ -6518,6 +6518,264 @@ class TestKDOSX25519(_KDOSTestBase):
         self.assertIn("X25519: idle", text)
 
 
+class TestFieldALU(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — GF(2^255-19) coprocessor."""
+
+    # p = 2^255 - 19
+    # Test with small values: a=42, b=17
+
+    def _load_small_int(self, name, value):
+        """Generate Forth code to store a small int as 32 LE bytes."""
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        # Store little-endian bytes
+        for i in range(8):  # 8 bytes is enough for values < 2^64
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _setup_ab(self, a=42, b=17):
+        """Allocate buffers and load two small operands."""
+        lines = self._load_small_int("tv-a", a)
+        lines.extend(self._load_small_int("tv-b", b))
+        lines.append("CREATE tv-r  32 ALLOT")
+        lines.append("CREATE tv-rh 32 ALLOT")
+        return lines
+
+    def _read_result_u64(self):
+        """Forth code to print first 8 bytes of tv-r as decimal."""
+        # Read 8 bytes and reconstruct a 64-bit value
+        # For small results, byte0 + byte1*256 is enough
+        return [
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+            '."  R2=" tv-r 2 + C@ .',
+            '."  R3=" tv-r 3 + C@ .',
+        ]
+
+    def test_fadd_small(self):
+        """FADD: 42 + 17 = 59 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=59 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fsub_small(self):
+        """FSUB: 42 - 17 = 25 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FSUB",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=25 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fmul_small(self):
+        """FMUL: 42 * 17 = 714 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("R0=202 ", text)
+        self.assertIn("R1=2 ", text)
+
+    def test_fsqr_small(self):
+        """FSQR: 42^2 = 1764 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FSQR",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 1764 = 0x6E4 → byte0=228, byte1=6
+        self.assertIn("R0=228 ", text)
+        self.assertIn("R1=6 ", text)
+
+    def test_finv_small(self):
+        """FINV: 42^(p-2) mod p, verify first bytes."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FINV",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # inv(42) mod p → byte0=14, byte1=134, byte2=97, byte3=24
+        self.assertIn("R0=14 ", text)
+        self.assertIn("R1=134 ", text)
+        self.assertIn("R2=97 ", text)
+        self.assertIn("R3=24 ", text)
+
+    def test_finv_roundtrip(self):
+        """FINV roundtrip: a * inv(a) = 1 mod p."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-r FINV",             # tv-r = inv(42)
+            "tv-a tv-r tv-r FMUL",        # tv-r = 42 * inv(42) = 1
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fpow_small(self):
+        """FPOW: 42^17 mod p, verify first bytes."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FPOW",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 42^17 mod p = 3937657486715347520027492352
+        # LE bytes: 0x00, 0x00, 0xAA, 0xA7, ...
+        # byte0=0, byte1=0, byte2=170, byte3=167
+        self.assertIn("R0=0 ", text)
+        self.assertIn("R2=170 ", text)
+        self.assertIn("R3=167 ", text)
+
+    def test_mul_raw_small(self):
+        """MUL_RAW: 42 * 17 = 714 (fits in low half, hi=0)."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r tv-rh FMUL-RAW",
+            '."  LO0=" tv-r C@ .',
+            '."  LO1=" tv-r 1 + C@ .',
+            '."  HI0=" tv-rh C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("LO0=202 ", text)
+        self.assertIn("LO1=2 ", text)
+        self.assertIn("HI0=0 ", text)
+
+    def test_fadd_wraparound(self):
+        """FADD with near-p values wraps correctly: (p-1)+3 = 2."""
+        # p - 1 has specific LE byte pattern
+        # p = 2^255 - 19, so p-1 = 2^255 - 20
+        # LE bytes: 0xEC, 0xFF, ..., 0x7F
+        setup = ["CREATE tv-a 32 ALLOT"]
+        # Write p-1 as LE bytes
+        p_minus_1 = (1 << 255) - 20
+        for i in range(32):
+            b = (p_minus_1 >> (i * 8)) & 0xFF
+            setup.append(f"{b} tv-a {i} + C!")
+        setup.extend(self._load_small_int("tv-b", 3))
+        setup.extend([
+            "CREATE tv-r 32 ALLOT",
+            "tv-a tv-b tv-r FADD",
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=2 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fsub_negative_wrap(self):
+        """FSUB: 3 - (p-1) = 4 mod p."""
+        setup = self._load_small_int("tv-b", 3)
+        # Write p-1 as LE bytes for tv-a (the subtrahend)
+        setup.append("CREATE tv-a 32 ALLOT")
+        p_minus_1 = (1 << 255) - 20
+        for i in range(32):
+            b = (p_minus_1 >> (i * 8)) & 0xFF
+            setup.append(f"{b} tv-a {i} + C!")
+        setup.extend([
+            "CREATE tv-r 32 ALLOT",
+            "tv-b tv-a tv-r FSUB",     # 3 - (p-1) mod p = 4
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=4 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_field_status_idle(self):
+        """FIELD-STATUS@ returns 0 when idle."""
+        text = self._run_kdos([
+            '."  ST=" FIELD-STATUS@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+
+    def test_field_status_done(self):
+        """FIELD-STATUS@ returns 2 after computation."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+            '."  ST=" FIELD-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+    def test_field_status_display(self):
+        """.FIELD-STATUS prints human-readable status."""
+        text = self._run_kdos([".FIELD-STATUS"])
+        self.assertIn("Field ALU: idle", text)
+
+    def test_x25519_still_works(self):
+        """Existing X25519 word still works (mode 0 backward compat)."""
+        # Use RFC 7748 vector 1
+        scalar_bytes = (
+            "0xa5 0x46 0xe3 0x6b 0xf0 0x52 0x7c 0x9d "
+            "0x3b 0x16 0x15 0x4b 0x82 0x46 0x5e 0xdd "
+            "0x62 0x14 0x4c 0x0a 0xc1 0xfc 0x5a 0x18 "
+            "0x50 0x6a 0x22 0x44 0xba 0x44 0x9a 0xc4"
+        ).split()
+        point_bytes = (
+            "0xe6 0xdb 0x68 0x67 0x58 0x30 0x30 0xdb "
+            "0x35 0x94 0xc1 0xa4 0x24 0xb1 0x5f 0x7c "
+            "0x72 0x66 0x24 0xec 0x26 0xb3 0x35 0x3b "
+            "0x10 0xa9 0x03 0xa6 0xd0 0xab 0x1c 0x4c"
+        ).split()
+        setup = [
+            "CREATE tv-scalar 32 ALLOT",
+            "CREATE tv-point  32 ALLOT",
+            "CREATE tv-result 32 ALLOT",
+        ]
+        for i, b in enumerate(scalar_bytes):
+            setup.append(f"{b} tv-scalar {i} + C!")
+        for i, b in enumerate(point_bytes):
+            setup.append(f"{b} tv-point {i} + C!")
+        setup.extend([
+            "tv-scalar tv-point tv-result X25519",
+            '."  B0=" tv-result C@ .',
+            '."  B1=" tv-result 1 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Expected: 0xc3=195, 0xda=218
+        self.assertIn("B0=195 ", text)
+        self.assertIn("B1=218 ", text)
+
+    def test_fadd_identity(self):
+        """FADD: a + 0 = a."""
+        setup = self._setup_ab(42, 0)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=42 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fmul_identity(self):
+        """FMUL: a * 1 = a."""
+        setup = self._setup_ab(42, 1)
+        setup.extend([
+            "tv-a tv-b tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=42 ", text)
+        self.assertIn("R1=0 ", text)
+
+
 class TestKDOSHKDF(_KDOSTestBase):
     """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
 

@@ -23,7 +23,7 @@ except ImportError:
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device, TRNGDevice,
-    X25519Device,
+    FieldALUDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
     MBOX_BASE, SPINLOCK_BASE, CRC_BASE, AES_BASE, SHA3_BASE, TRNG_BASE,
     X25519_BASE, NIC_MTU,
@@ -107,7 +107,7 @@ class MegapadSystem:
         self.aes = AESDevice()
         self.sha3 = SHA3Device()
         self.trng = TRNGDevice()
-        self.x25519 = X25519Device()
+        self.x25519 = FieldALUDevice()
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)

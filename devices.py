@@ -1506,51 +1506,87 @@ class TRNGDevice(Device):
 
 
 # ---------------------------------------------------------------------------
-#  X25519 — Elliptic Curve Diffie-Hellman Accelerator (RFC 7748)
+#  Field ALU — General GF(2²⁵⁵−19) Coprocessor + Raw 256×256 Multiplier
 # ---------------------------------------------------------------------------
+# Expanded from X25519 ECDH accelerator.  Mode 0 is backward-compatible
+# with the original X25519 scalar multiplication interface.
+#
 # Register map (offsets from X25519_BASE = 0x0840):
 #   Write:
-#     0x00..0x1F  SCALAR  — 32-byte scalar (little-endian)
-#     0x20..0x3F  POINT   — 32-byte u-coordinate (little-endian)
-#                           byte 0x3E: reserved
-#                           byte 0x3F: CMD — write 1 to start computation
+#     0x00..0x1F  OPERAND_A  — 256-bit operand A / scalar (little-endian)
+#     0x20..0x3F  OPERAND_B  — 256-bit operand B / point  (little-endian)
+#     0x40        CMD        — bits [4:1] = mode, bit [0] = go
+#                              mode 0 = X25519 (legacy scalar multiply)
+#                              mode 1 = FADD  (a+b) mod p
+#                              mode 2 = FSUB  (a−b) mod p
+#                              mode 3 = FMUL  (a·b) mod p
+#                              mode 4 = FSQR  (a²)  mod p
+#                              mode 5 = FINV  a^(p−2) mod p
+#                              mode 6 = FPOW  a^b mod p
+#                              mode 7 = MUL_RAW  256×256→512-bit product
 #   Read:
-#     0x00        STATUS  — bit 0 = busy, bit 1 = done
-#     0x08..0x27  RESULT  — 32-byte result (little-endian) at offsets 0x08-0x27
+#     0x00        STATUS     — bit 0 = busy, bit 1 = done
+#     0x08..0x27  RESULT_LO  — 256-bit result (or low half for MUL_RAW)
+#     0x28..0x47  RESULT_HI  — 256-bit high half (MUL_RAW only, else 0)
 
-class X25519Device(Device):
-    """X25519 scalar multiplication accelerator (RFC 7748)."""
+# Field ALU mode constants
+FIELD_MODE_X25519  = 0
+FIELD_MODE_FADD    = 1
+FIELD_MODE_FSUB    = 2
+FIELD_MODE_FMUL    = 3
+FIELD_MODE_FSQR    = 4
+FIELD_MODE_FINV    = 5
+FIELD_MODE_FPOW    = 6
+FIELD_MODE_MUL_RAW = 7
+
+class FieldALUDevice(Device):
+    """GF(2²⁵⁵−19) field ALU + raw 256×256 multiplier.
+
+    Backward-compatible: mode 0 = X25519 scalar multiply (RFC 7748).
+    """
 
     _P = (1 << 255) - 19
     _A24 = 121665            # (486662 - 2) / 4, per RFC 7748 §5
 
     def __init__(self):
-        super().__init__("X25519", X25519_BASE, 0x41)
-        self._scalar = bytearray(32)
-        self._point = bytearray(32)
-        self._result = bytearray(32)
+        super().__init__("FieldALU", X25519_BASE, 0x48)  # 72-byte window
+        self._operand_a = bytearray(32)   # also: scalar for mode 0
+        self._operand_b = bytearray(32)   # also: point  for mode 0
+        self._result_lo = bytearray(32)
+        self._result_hi = bytearray(32)   # only populated by MUL_RAW
         self._busy = False
         self._done = False
 
-    # --- RFC 7748 scalar multiplication ---
+    # --- helpers ---
+
+    def _get_a(self) -> int:
+        return int.from_bytes(bytes(self._operand_a), 'little')
+
+    def _get_b(self) -> int:
+        return int.from_bytes(bytes(self._operand_b), 'little')
+
+    def _set_result(self, lo: int, hi: int = 0):
+        self._result_lo = bytearray(lo.to_bytes(32, 'little'))
+        self._result_hi = bytearray(hi.to_bytes(32, 'little'))
+        self._busy = False
+        self._done = True
+
+    # --- RFC 7748 scalar multiplication (mode 0) ---
 
     @staticmethod
     def _clamp(k_bytes: bytearray) -> int:
-        """Decode and clamp a 32-byte scalar per RFC 7748 §5."""
         k = list(k_bytes)
-        k[0] &= 248           # clear bits 0,1,2
-        k[31] &= 127          # clear bit 255
-        k[31] |= 64           # set bit 254
+        k[0] &= 248
+        k[31] &= 127
+        k[31] |= 64
         return int.from_bytes(bytes(k), 'little')
 
     @staticmethod
     def _decode_u(u_bytes: bytearray) -> int:
-        """Decode a 32-byte u-coordinate, masking bit 255."""
         return int.from_bytes(bytes(u_bytes), 'little') & ((1 << 255) - 1)
 
     @classmethod
     def _x25519(cls, k_int: int, u_int: int) -> int:
-        """RFC 7748 Montgomery ladder: compute k * u on Curve25519."""
         p = cls._P
         a24 = cls._A24
         x_1 = u_int
@@ -1582,35 +1618,62 @@ class X25519Device(Device):
             z_2, z_3 = z_3, z_2
         return (x_2 * pow(z_2, p - 2, p)) % p
 
-    def _compute(self):
-        """Run X25519 scalar multiplication and store result."""
-        k = self._clamp(self._scalar)
-        u = self._decode_u(self._point)
-        r = self._x25519(k, u)
-        self._result = bytearray(r.to_bytes(32, 'little'))
-        self._busy = False
-        self._done = True
+    # --- dispatch ---
+
+    def _execute(self, mode: int):
+        p = self._P
+        a = self._get_a()
+        b = self._get_b()
+
+        if mode == FIELD_MODE_X25519:
+            k = self._clamp(self._operand_a)
+            u = self._decode_u(self._operand_b)
+            r = self._x25519(k, u)
+            self._set_result(r)
+        elif mode == FIELD_MODE_FADD:
+            self._set_result((a + b) % p)
+        elif mode == FIELD_MODE_FSUB:
+            self._set_result((a - b) % p)
+        elif mode == FIELD_MODE_FMUL:
+            self._set_result((a * b) % p)
+        elif mode == FIELD_MODE_FSQR:
+            self._set_result((a * a) % p)
+        elif mode == FIELD_MODE_FINV:
+            self._set_result(pow(a, p - 2, p))
+        elif mode == FIELD_MODE_FPOW:
+            self._set_result(pow(a, b, p))
+        elif mode == FIELD_MODE_MUL_RAW:
+            wide = a * b
+            lo = wide & ((1 << 256) - 1)
+            hi = wide >> 256
+            self._set_result(lo, hi)
+        else:
+            # Unknown mode — just mark done with zero result
+            self._set_result(0)
 
     # --- MMIO interface ---
 
     def read8(self, offset: int) -> int:
-        if offset == 0x00:                     # STATUS
+        if offset == 0x00:                          # STATUS
             return (int(self._done) << 1) | int(self._busy)
-        if 0x08 <= offset < 0x28:              # RESULT (32 bytes at 0x08..0x27)
-            return self._result[offset - 0x08]
+        if 0x08 <= offset < 0x28:                   # RESULT_LO (32 bytes)
+            return self._result_lo[offset - 0x08]
+        if 0x28 <= offset < 0x48:                   # RESULT_HI (32 bytes)
+            return self._result_hi[offset - 0x28]
         return 0
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        if 0x00 <= offset < 0x20:               # SCALAR (32 bytes)
-            self._scalar[offset] = value
-        elif 0x20 <= offset < 0x40:              # POINT (32 bytes)
-            self._point[offset - 0x20] = value
-        elif offset == 0x40:                     # CMD
+        if 0x00 <= offset < 0x20:                   # OPERAND_A
+            self._operand_a[offset] = value
+        elif 0x20 <= offset < 0x40:                  # OPERAND_B
+            self._operand_b[offset - 0x20] = value
+        elif offset == 0x40:                         # CMD
             if (value & 1) and not self._busy:
+                mode = (value >> 1) & 0xF
                 self._busy = True
                 self._done = False
-                self._compute()
+                self._execute(mode)
 
 
 # ---------------------------------------------------------------------------

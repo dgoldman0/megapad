@@ -7835,6 +7835,44 @@ w_x25519_wait:
     ret.l
 
 ; =====================================================================
+;  Field ALU — GF(2^255-19) coprocessor + raw 256x256 multiplier
+; =====================================================================
+; Uses same MMIO base as X25519 (0x0840).
+; CMD byte: bits [4:1] = mode, bit [0] = go.
+;   mode 0 = X25519 (legacy), 1 = FADD, 2 = FSUB, 3 = FMUL,
+;   4 = FSQR, 5 = FINV, 6 = FPOW, 7 = MUL_RAW.
+; RESULT_HI at read offset 0x28..0x47 (only meaningful for MUL_RAW).
+
+; FIELD-CMD! ( mode -- )  Start field ALU with given mode.
+w_field_cmd_store:
+    ldn r9, r14              ; pop mode
+    addi r14, 8
+    ldi r0, 1
+    shl r9, r0               ; mode << 1
+    ori r9, 1                ; | go bit
+    ldi64 r11, 0xFFFF_FF00_0000_0880   ; CMD offset 0x40
+    st.b r11, r9
+    ret.l
+
+; FIELD-RESULT-HI@ ( addr -- )  Read 32-byte RESULT_HI into memory.
+w_field_result_hi_fetch:
+    ldn r9, r14              ; pop dest addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0868    ; RESULT_HI base (+0x28)
+    ldi r12, 0
+.field_rhi_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .field_rhi_loop
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -10273,9 +10311,27 @@ d_x25519_wait:
     call.l r11
     ret.l
 
+; === FIELD-CMD! ===
+d_field_cmd_store:
+    .dq d_x25519_wait
+    .db 10
+    .ascii "FIELD-CMD!"
+    ldi64 r11, w_field_cmd_store
+    call.l r11
+    ret.l
+
+; === FIELD-RESULT-HI@ ===
+d_field_result_hi_fetch:
+    .dq d_field_cmd_store
+    .db 16
+    .ascii "FIELD-RESULT-HI@"
+    ldi64 r11, w_field_result_hi_fetch
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_x25519_wait
+    .dq d_field_result_hi_fetch
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full
