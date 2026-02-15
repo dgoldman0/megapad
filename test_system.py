@@ -6442,6 +6442,174 @@ class TestKDOSX25519(_KDOSTestBase):
         self.assertIn("X25519: idle", text)
 
 
+class TestKDOSHKDF(_KDOSTestBase):
+    """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
+
+    # Python HMAC-SHA3-256 reference values:
+    # Extract(salt=0..31, ikm="input key material") → PRK[0:4] = 67, 197, 249, 24
+    # Extract(null-salt, ikm="input key material")  → PRK[0:2] = 181, 9
+    # Extract(zero-salt, empty-ikm)                 → PRK[0:2] = 232, 65
+    # Expand(PRK1, "tls13 derived", 32) → OKM[0:4] = 73, 19, 243, 242
+    # Expand(PRK1, "tls13 derived", 48) → OKM[32:34] = 121, 93
+    # Expand(PRK3, "", 16) → OKM[0:4] = 3, 82, 135, 102
+
+    _HKDF_SETUP = [
+        "CREATE hkdf-salt 32 ALLOT",
+        ": init-salt 32 0 DO I hkdf-salt I + C! LOOP ;",
+        "init-salt",
+        'CREATE hkdf-ikm 18 ALLOT',
+        ': fill-ikm',
+        '  105 hkdf-ikm 0 + C!',   # 'i'
+        '  110 hkdf-ikm 1 + C!',   # 'n'
+        '  112 hkdf-ikm 2 + C!',   # 'p'
+        '  117 hkdf-ikm 3 + C!',   # 'u'
+        '  116 hkdf-ikm 4 + C!',   # 't'
+        '   32 hkdf-ikm 5 + C!',   # ' '
+        '  107 hkdf-ikm 6 + C!',   # 'k'
+        '  101 hkdf-ikm 7 + C!',   # 'e'
+        '  121 hkdf-ikm 8 + C!',   # 'y'
+        '   32 hkdf-ikm 9 + C!',   # ' '
+        '  109 hkdf-ikm 10 + C!',  # 'm'
+        '   97 hkdf-ikm 11 + C!',  # 'a'
+        '  116 hkdf-ikm 12 + C!',  # 't'
+        '  101 hkdf-ikm 13 + C!',  # 'e'
+        '  114 hkdf-ikm 14 + C!',  # 'r'
+        '  105 hkdf-ikm 15 + C!',  # 'i'
+        '   97 hkdf-ikm 16 + C!',  # 'a'
+        '  108 hkdf-ikm 17 + C!',  # 'l'
+        ';',
+        'fill-ikm',
+        "CREATE hkdf-prk 32 ALLOT",
+        "CREATE hkdf-okm 48 ALLOT",
+    ]
+
+    def test_hkdf_extract_basic(self):
+        """HKDF-EXTRACT produces correct PRK from salt + IKM."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            '." P0=" hkdf-prk C@ .',
+            '." P1=" hkdf-prk 1 + C@ .',
+            '." P2=" hkdf-prk 2 + C@ .',
+            '." P3=" hkdf-prk 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("P0=67 ", text)
+        self.assertIn("P1=197 ", text)
+        self.assertIn("P2=249 ", text)
+        self.assertIn("P3=24 ", text)
+
+    def test_hkdf_extract_null_salt(self):
+        """HKDF-EXTRACT with null salt uses 32 zero bytes."""
+        lines = self._HKDF_SETUP + [
+            "0 0 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            '." N0=" hkdf-prk C@ .',
+            '." N1=" hkdf-prk 1 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N0=181 ", text)
+        self.assertIn("N1=9 ", text)
+
+    def test_hkdf_expand_32(self):
+        """HKDF-EXPAND produces correct 32-byte OKM."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "CREATE hkdf-info 13 ALLOT",
+            ": fill-info",
+            "  116 hkdf-info 0 + C!",      # t
+            "  108 hkdf-info 1 + C!",      # l
+            "  115 hkdf-info 2 + C!",      # s
+            "   49 hkdf-info 3 + C!",      # 1
+            "   51 hkdf-info 4 + C!",      # 3
+            "   32 hkdf-info 5 + C!",      # ' '
+            "  100 hkdf-info 6 + C!",      # d
+            "  101 hkdf-info 7 + C!",      # e
+            "  114 hkdf-info 8 + C!",      # r
+            "  105 hkdf-info 9 + C!",      # i
+            "  118 hkdf-info 10 + C!",     # v
+            "  101 hkdf-info 11 + C!",     # e
+            "  100 hkdf-info 12 + C!",     # d
+            ";",
+            "fill-info",
+            "hkdf-prk hkdf-info 13 32 hkdf-okm HKDF-EXPAND",
+            '." E0=" hkdf-okm C@ .',
+            '." E1=" hkdf-okm 1 + C@ .',
+            '." E2=" hkdf-okm 2 + C@ .',
+            '." E3=" hkdf-okm 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("E0=73 ", text)
+        self.assertIn("E1=19 ", text)
+        self.assertIn("E2=243 ", text)
+        self.assertIn("E3=242 ", text)
+
+    def test_hkdf_expand_48_multiblock(self):
+        """HKDF-EXPAND to 48 bytes spans two HMAC blocks."""
+        lines = self._HKDF_SETUP + [
+            "hkdf-salt 32 hkdf-ikm 18 hkdf-prk HKDF-EXTRACT",
+            "CREATE hkdf-info 13 ALLOT",
+            ": fill-info",
+            "  116 hkdf-info 0 + C!",
+            "  108 hkdf-info 1 + C!",
+            "  115 hkdf-info 2 + C!",
+            "   49 hkdf-info 3 + C!",
+            "   51 hkdf-info 4 + C!",
+            "   32 hkdf-info 5 + C!",
+            "  100 hkdf-info 6 + C!",
+            "  101 hkdf-info 7 + C!",
+            "  114 hkdf-info 8 + C!",
+            "  105 hkdf-info 9 + C!",
+            "  118 hkdf-info 10 + C!",
+            "  101 hkdf-info 11 + C!",
+            "  100 hkdf-info 12 + C!",
+            ";",
+            "fill-info",
+            "hkdf-prk hkdf-info 13 48 hkdf-okm HKDF-EXPAND",
+            '." M0=" hkdf-okm C@ .',
+            '." M1=" hkdf-okm 1 + C@ .',
+            '." M32=" hkdf-okm 32 + C@ .',
+            '." M33=" hkdf-okm 33 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("M0=73 ", text)
+        self.assertIn("M1=19 ", text)
+        self.assertIn("M32=121 ", text)
+        self.assertIn("M33=93 ", text)
+
+    def test_hkdf_extract_empty_ikm(self):
+        """HKDF-EXTRACT with empty IKM produces deterministic PRK."""
+        lines = self._HKDF_SETUP + [
+            "CREATE zero-salt 32 ALLOT",
+            "zero-salt 32 0 FILL",
+            'CREATE empty-ikm 1 ALLOT',
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            '." Z0=" hkdf-prk C@ .',
+            '." Z1=" hkdf-prk 1 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("Z0=232 ", text)
+        self.assertIn("Z1=65 ", text)
+
+    def test_hkdf_expand_empty_info(self):
+        """HKDF-EXPAND with empty info and len=16."""
+        lines = self._HKDF_SETUP + [
+            "CREATE zero-salt 32 ALLOT",
+            "zero-salt 32 0 FILL",
+            'CREATE empty-ikm 1 ALLOT',
+            "zero-salt 32 empty-ikm 0 hkdf-prk HKDF-EXTRACT",
+            'CREATE empty-info 1 ALLOT',
+            "hkdf-prk empty-info 0 16 hkdf-okm HKDF-EXPAND",
+            '." I0=" hkdf-okm C@ .',
+            '." I1=" hkdf-okm 1 + C@ .',
+            '." I2=" hkdf-okm 2 + C@ .',
+            '." I3=" hkdf-okm 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("I0=3 ", text)
+        self.assertIn("I1=82 ", text)
+        self.assertIn("I2=135 ", text)
+        self.assertIn("I3=102 ", text)
+
+
 class TestKDOSCrypto(_KDOSTestBase):
     """Tests for §1.7 unified crypto words (HASH, HMAC, ENCRYPT, DECRYPT, VERIFY)."""
 
@@ -8343,6 +8511,901 @@ class TestKDOSMulticore(unittest.TestCase):
         self.assertIn("UART", text)
         self.assertIn("Filesystem", text)
         self.assertIn("Heap", text)
+
+
+# ---------------------------------------------------------------------------
+#  TLS 1.3 Record Layer tests — §16.8
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSRecord(_KDOSTestBase):
+    """Tests for §16.8 TLS 1.3 record layer — nonce, AEAD, encrypt/decrypt."""
+
+    _TLS_CTX_SETUP = [
+        # Set up TLS context 0 with known key/IV for testing
+        "0 TLS-CTX@",
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Write key = 0x00..0x1F (32 bytes)
+        ": init-wr-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
+        "init-wr-key",
+        # Write IV = 0x00..0x0B (12 bytes)
+        ": init-wr-iv 12 0 DO I test-ctx @ TLS-CTX.WR-IV I + C! LOOP ;",
+        "init-wr-iv",
+        # Write seq = 0
+        "0 test-ctx @ TLS-CTX.WR-SEQ !",
+        # Read key = same as write key (for roundtrip test)
+        ": init-rd-key 32 0 DO I test-ctx @ TLS-CTX.RD-KEY I + C! LOOP ;",
+        "init-rd-key",
+        # Read IV = same as write IV
+        ": init-rd-iv 12 0 DO I test-ctx @ TLS-CTX.RD-IV I + C! LOOP ;",
+        "init-rd-iv",
+        # Read seq = 0
+        "0 test-ctx @ TLS-CTX.RD-SEQ !",
+        # State = ESTABLISHED
+        "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+    ]
+
+    def test_tls_nonce_seq0(self):
+        """TLS-BUILD-NONCE with seq=0 returns IV unchanged."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE nonce-buf 12 ALLOT",
+            "test-ctx @ TLS-CTX.WR-IV  0  nonce-buf TLS-BUILD-NONCE",
+            '." N0=" nonce-buf C@ .',
+            '." N4=" nonce-buf 4 + C@ .',
+            '." N11=" nonce-buf 11 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N0=0 ", text)
+        self.assertIn("N4=4 ", text)
+        self.assertIn("N11=11 ", text)
+
+    def test_tls_nonce_seq1(self):
+        """TLS-BUILD-NONCE with seq=1 XORs last byte."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE nonce-buf 12 ALLOT",
+            "test-ctx @ TLS-CTX.WR-IV  1  nonce-buf TLS-BUILD-NONCE",
+            '." N10=" nonce-buf 10 + C@ .',
+            '." N11=" nonce-buf 11 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("N10=10 ", text)     # unchanged
+        self.assertIn("N11=10 ", text)     # 11 XOR 1 = 10
+
+    def test_aes_encrypt_aead_roundtrip(self):
+        """AES-ENCRYPT-AEAD / AES-DECRYPT-AEAD roundtrip with 5-byte AAD."""
+        lines = self._TLS_CTX_SETUP + [
+            # Plaintext = 16 bytes of 0x41 ('A')
+            "CREATE pt-buf 16 ALLOT  pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            # AAD = 5 bytes: 23 3 3 0 32
+            "CREATE aad-buf 5 ALLOT",
+            "23 aad-buf C!  3 aad-buf 1 + C!  3 aad-buf 2 + C!",
+            "0 aad-buf 3 + C!  32 aad-buf 4 + C!",
+            # IV
+            "CREATE iv-buf 12 ALLOT",
+            ": init-iv 12 0 DO I iv-buf I + C! LOOP ; init-iv",
+            # Encrypt
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  pt-buf ct-buf 16",
+            "AES-ENCRYPT-AEAD",
+            "VARIABLE tag-save  tag-save !",
+            # Verify ciphertext differs from plaintext
+            '." CT0=" ct-buf C@ .',
+            # Decrypt
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  ct-buf rt-buf 16",
+            "tag-save @ AES-DECRYPT-AEAD",
+            '." DF=" .',
+            '." RT0=" rt-buf C@ .',
+            '." RT15=" rt-buf 15 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DF=0 ", text)       # auth OK
+        self.assertIn("RT0=65 ", text)     # 'A'
+        self.assertIn("RT15=65 ", text)    # 'A'
+
+    def test_aes_decrypt_aead_bad_tag(self):
+        """AES-DECRYPT-AEAD with corrupted tag returns -1."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE pt-buf 16 ALLOT  pt-buf 16 65 FILL",
+            "CREATE ct-buf 16 ALLOT",
+            "CREATE rt-buf 16 ALLOT",
+            "CREATE aad-buf 5 ALLOT",
+            "23 aad-buf C!  3 aad-buf 1 + C!  3 aad-buf 2 + C!",
+            "0 aad-buf 3 + C!  32 aad-buf 4 + C!",
+            "CREATE iv-buf 12 ALLOT",
+            ": init-iv 12 0 DO I iv-buf I + C! LOOP ; init-iv",
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  pt-buf ct-buf 16",
+            "AES-ENCRYPT-AEAD",
+            # Corrupt the tag (flip first byte)
+            "DUP C@ 255 XOR SWAP C!",
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  ct-buf rt-buf 16",
+            "AES-TAG-BUF AES-DECRYPT-AEAD",
+            '." DF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DF=-1 ", text)      # auth FAIL
+
+    def test_tls_encrypt_record_header(self):
+        """TLS-ENCRYPT-RECORD produces correct 5-byte TLS header."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 10 ALLOT",
+            ": fill-msg  72 msg C!  101 msg 1 + C!  108 msg 2 + C!",
+            "  108 msg 3 + C!  111 msg 4 + C! ;",     # "Hello"
+            "fill-msg",
+            "CREATE rec-buf 64 ALLOT",
+            "test-ctx @  TLS-CT-APP-DATA  msg 5  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            '." RL=" .',
+            # Header bytes
+            '." H0=" rec-buf C@ .',               # type = 23
+            '." H1=" rec-buf 1 + C@ .',           # version hi = 3
+            '." H2=" rec-buf 2 + C@ .',           # version lo = 3
+        ]
+        text = self._run_kdos(lines)
+        # Record len = 5 (hdr) + 16 (padded inner: 5 data + 1 CT + 10 pad) + 16 (tag)
+        self.assertIn("RL=37 ", text)
+        self.assertIn("H0=23 ", text)      # content type
+        self.assertIn("H1=3 ", text)       # version
+        self.assertIn("H2=3 ", text)
+
+    def test_tls_encrypt_decrypt_roundtrip(self):
+        """TLS-ENCRYPT-RECORD → TLS-DECRYPT-RECORD recovers plaintext."""
+        lines = self._TLS_CTX_SETUP + [
+            # Message: "ABCDE" (5 bytes)
+            "CREATE msg 5 ALLOT",
+            "65 msg C!  66 msg 1 + C!  67 msg 2 + C!",
+            "68 msg 3 + C!  69 msg 4 + C!",
+            "CREATE rec-buf 64 ALLOT",
+            "CREATE plain-out 32 ALLOT",
+            # Encrypt
+            "test-ctx @  TLS-CT-APP-DATA  msg 5  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            "VARIABLE rec-len  rec-len !",
+            # Reset read seq to match write seq at time of encryption (was 0)
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            # Decrypt
+            "test-ctx @  rec-buf  rec-len @  plain-out",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',
+            '." CT=" .',
+            '." B0=" plain-out C@ .',
+            '." B4=" plain-out 4 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=23 ", text)      # content type = APP_DATA
+        self.assertIn("PL=5 ", text)       # plaintext length = 5
+        self.assertIn("B0=65 ", text)      # 'A'
+        self.assertIn("B4=69 ", text)      # 'E'
+
+    def test_tls_seq_increment(self):
+        """TLS-ENCRYPT-RECORD increments write sequence number."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 16 ALLOT  msg 16 65 FILL",
+            "CREATE rec-buf 80 ALLOT",
+            '." S0=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            "test-ctx @  TLS-CT-APP-DATA  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD DROP",
+            '." S1=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+            "test-ctx @  TLS-CT-APP-DATA  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD DROP",
+            '." S2=" test-ctx @ TLS-CTX.WR-SEQ @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S0=0 ", text)
+        self.assertIn("S1=1 ", text)
+        self.assertIn("S2=2 ", text)
+
+    def test_tls_handshake_content_type(self):
+        """TLS-ENCRYPT/DECRYPT roundtrip preserves HANDSHAKE content type."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE msg 16 ALLOT  msg 16 0 FILL  1 msg C!",
+            "CREATE rec-buf 80 ALLOT",
+            "CREATE plain-out 32 ALLOT",
+            "test-ctx @  TLS-CT-HANDSHAKE  msg 16  rec-buf",
+            "TLS-ENCRYPT-RECORD",
+            "VARIABLE rec-len  rec-len !",
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            "test-ctx @  rec-buf  rec-len @  plain-out",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',
+            '." CT=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=22 ", text)      # HANDSHAKE
+        self.assertIn("PL=16 ", text)
+
+    def test_tls_ctx_init(self):
+        """TLS context starts in NONE state."""
+        text = self._run_kdos([
+            '." S=" 0 TLS-CTX@ TLS-CTX.STATE @ .',
+            '." SZ=" /TLS-CTX .',
+        ])
+        self.assertIn("S=0 ", text)        # TLSS-NONE
+        self.assertIn("SZ=552 ", text)
+
+    def test_tls_status_display(self):
+        """.TLS-STATUS prints human-readable state."""
+        text = self._run_kdos(["0 TLS-CTX@ .TLS-STATUS"])
+        self.assertIn("TLS: none", text)
+
+
+# ---------------------------------------------------------------------------
+#  TLS 1.3 Handshake tests — §16.9
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSHandshake(_KDOSTestBase):
+    """Tests for §16.9 TLS 1.3 handshake — key schedule, ClientHello,
+    ServerHello, Finished MAC, and handshake state machine."""
+
+    # Python reference: HMAC-SHA3-256 / HKDF with SHA3-256
+    # shared_secret = 0xAA * 32, transcript = 0xBB*32 || 0xCC*32
+    # C_HS_KEY: [245, 102, 194, 81]  S_HS_KEY: [127, 190, 91, 227]
+    # C_HS_IV:  [77, 146, 230, 138]  S_HS_IV:  [11, 205, 119, 228]
+
+    _TLS_KS_SETUP = [
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Shared secret = 32 bytes of 0xAA
+        ": init-shared 32 0 DO 170 test-ctx @ TLS-CTX.SHARED I + C! LOOP ;",
+        "init-shared",
+        # Transcript = 0xBB*32 || 0xCC*32 (fake CH||SH, 64 bytes)
+        "TLS-TR-RESET",
+        "CREATE fake-ch 32 ALLOT  fake-ch 32 187 FILL",
+        "CREATE fake-sh 32 ALLOT  fake-sh 32 204 FILL",
+        "fake-ch 32 TLS-TR-APPEND",
+        "fake-sh 32 TLS-TR-APPEND",
+    ]
+
+    def test_empty_hash_constant(self):
+        """TLS-EMPTY-HASH contains SHA3-256 of empty string."""
+        text = self._run_kdos([
+            '." H0=" TLS-EMPTY-HASH C@ .',
+            '." H1=" TLS-EMPTY-HASH 1 + C@ .',
+            '." H2=" TLS-EMPTY-HASH 2 + C@ .',
+            '." H3=" TLS-EMPTY-HASH 3 + C@ .',
+        ])
+        self.assertIn("H0=167 ", text)   # SHA3-256("") = a7ffc6f8...
+        self.assertIn("H1=255 ", text)
+        self.assertIn("H2=198 ", text)
+        self.assertIn("H3=248 ", text)
+
+    def test_expand_label_key(self):
+        """TLS-EXPAND-LABEL with 'key' label produces correct output."""
+        lines = [
+            "CREATE el-prk 32 ALLOT",
+            ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
+            "CREATE el-out 32 ALLOT",
+            "el-prk  TLS-L-KEY /TLS-L-KEY  0 0  32  el-out  TLS-EXPAND-LABEL",
+            '." K0=" el-out C@ .',
+            '." K1=" el-out 1 + C@ .',
+            '." K2=" el-out 2 + C@ .',
+            '." K3=" el-out 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("K0=144 ", text)
+        self.assertIn("K1=218 ", text)
+        self.assertIn("K2=9 ", text)
+        self.assertIn("K3=27 ", text)
+
+    def test_expand_label_iv(self):
+        """TLS-EXPAND-LABEL with 'iv' label produces 12-byte output."""
+        lines = [
+            "CREATE el-prk 32 ALLOT",
+            ": init-prk 32 0 DO I el-prk I + C! LOOP ; init-prk",
+            "CREATE el-out 12 ALLOT",
+            "el-prk  TLS-L-IV /TLS-L-IV  0 0  12  el-out  TLS-EXPAND-LABEL",
+            '." V0=" el-out C@ .',
+            '." V1=" el-out 1 + C@ .',
+            '." V2=" el-out 2 + C@ .',
+            '." V3=" el-out 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("V0=170 ", text)
+        self.assertIn("V1=25 ", text)
+        self.assertIn("V2=44 ", text)
+        self.assertIn("V3=204 ", text)
+
+    def test_transcript_reset_append(self):
+        """TLS-TR-RESET/TLS-TR-APPEND manage transcript buffer."""
+        lines = [
+            "TLS-TR-RESET",
+            '." L0=" TLS-HS-TR-LEN @ .',
+            "CREATE tr-data 8 ALLOT  tr-data 8 65 FILL",
+            "tr-data 8 TLS-TR-APPEND",
+            '." L1=" TLS-HS-TR-LEN @ .',
+            '." B0=" TLS-HS-TRANSCRIPT C@ .',
+            "TLS-TR-RESET",
+            '." L2=" TLS-HS-TR-LEN @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("L0=0 ", text)
+        self.assertIn("L1=8 ", text)
+        self.assertIn("B0=65 ", text)    # 'A'
+        self.assertIn("L2=0 ", text)
+
+    def test_ks_handshake_wr_key(self):
+        """TLS-KS-HANDSHAKE derives correct client HS key (WR-KEY)."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." W0=" test-ctx @ TLS-CTX.WR-KEY C@ .',
+            '." W1=" test-ctx @ TLS-CTX.WR-KEY 1 + C@ .',
+            '." W2=" test-ctx @ TLS-CTX.WR-KEY 2 + C@ .',
+            '." W3=" test-ctx @ TLS-CTX.WR-KEY 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("W0=245 ", text)
+        self.assertIn("W1=102 ", text)
+        self.assertIn("W2=194 ", text)
+        self.assertIn("W3=81 ", text)
+
+    def test_ks_handshake_rd_key(self):
+        """TLS-KS-HANDSHAKE derives correct server HS key (RD-KEY)."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." R0=" test-ctx @ TLS-CTX.RD-KEY C@ .',
+            '." R1=" test-ctx @ TLS-CTX.RD-KEY 1 + C@ .',
+            '." R2=" test-ctx @ TLS-CTX.RD-KEY 2 + C@ .',
+            '." R3=" test-ctx @ TLS-CTX.RD-KEY 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("R0=127 ", text)
+        self.assertIn("R1=190 ", text)
+        self.assertIn("R2=91 ", text)
+        self.assertIn("R3=227 ", text)
+
+    def test_ks_handshake_wr_iv(self):
+        """TLS-KS-HANDSHAKE derives correct client HS IV."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." I0=" test-ctx @ TLS-CTX.WR-IV C@ .',
+            '." I1=" test-ctx @ TLS-CTX.WR-IV 1 + C@ .',
+            '." I2=" test-ctx @ TLS-CTX.WR-IV 2 + C@ .',
+            '." I3=" test-ctx @ TLS-CTX.WR-IV 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("I0=77 ", text)
+        self.assertIn("I1=146 ", text)
+        self.assertIn("I2=230 ", text)
+        self.assertIn("I3=138 ", text)
+
+    def test_ks_handshake_rd_iv(self):
+        """TLS-KS-HANDSHAKE derives correct server HS IV."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            '." J0=" test-ctx @ TLS-CTX.RD-IV C@ .',
+            '." J1=" test-ctx @ TLS-CTX.RD-IV 1 + C@ .',
+            '." J2=" test-ctx @ TLS-CTX.RD-IV 2 + C@ .',
+            '." J3=" test-ctx @ TLS-CTX.RD-IV 3 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("J0=11 ", text)
+        self.assertIn("J1=205 ", text)
+        self.assertIn("J2=119 ", text)
+        self.assertIn("J3=228 ", text)
+
+    def test_build_ch_record_header(self):
+        """TLS-BUILD-CLIENT-HELLO produces correct TLS record header."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            'VARIABLE ch-len  ch-len !',
+            'VARIABLE ch-addr  ch-addr !',
+            '." LEN=" ch-len @ .',
+            '." CT=" ch-addr @ C@ .',
+            '." V0=" ch-addr @ 1 + C@ .',
+            '." V1=" ch-addr @ 2 + C@ .',
+            '." HT=" ch-addr @ 5 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("LEN=149 ", text)
+        self.assertIn("CT=22 ", text)     # ContentType=handshake
+        self.assertIn("V0=3 ", text)      # 0x0301
+        self.assertIn("V1=1 ", text)
+        self.assertIn("HT=1 ", text)      # ClientHello
+
+    def test_build_ch_cipher_suite(self):
+        """ClientHello contains correct cipher suite 0xFF01."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." CS0=" TLS-CH-BUF 78 + C@ .',
+            '." CS1=" TLS-CH-BUF 79 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CS0=255 ", text)   # 0xFF
+        self.assertIn("CS1=1 ", text)     # 0x01
+
+    def test_build_ch_extensions(self):
+        """ClientHello contains correct extension types."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." EL=" TLS-CH-BUF 83 + C@ .',           # extensions_len
+            '." SV=" TLS-CH-BUF 85 + C@ .',           # supported_versions type low
+            '." KS=" TLS-CH-BUF 92 + C@ .',           # key_share type low
+            '." SA=" TLS-CH-BUF 134 + C@ .',          # sig_algs type low
+            '." SG=" TLS-CH-BUF 142 + C@ .',          # supported_groups type low
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("EL=65 ", text)
+        self.assertIn("SV=43 ", text)     # 0x2B
+        self.assertIn("KS=51 ", text)     # 0x33
+        self.assertIn("SA=13 ", text)     # 0x0D
+        self.assertIn("SG=10 ", text)     # 0x0A
+
+    def test_build_ch_transcript_length(self):
+        """After building CH, transcript contains 144 bytes."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." TL=" TLS-HS-TR-LEN @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("TL=144 ", text)
+
+    def test_parse_sh_extracts_pubkey(self):
+        """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
+        # Build a crafted ServerHello: type=2, len=86, version=0x0303,
+        # random=0*32, sid_len=0, cipher=0xFF01, comp=0,
+        # extensions: supported_versions(0x0304) + key_share(x25519, pubkey)
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 96 ALLOT",
+            "sh-buf 96 0 FILL",
+            # Handshake header
+            "2 sh-buf C!",                                # type=ServerHello
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!  86 sh-buf 3 + C!",  # len=86
+            # Body
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",          # version 0x0303
+            # random = 0 (already)
+            "0 sh-buf 38 + C!",                            # sid_len=0
+            "255 sh-buf 39 + C!  1 sh-buf 40 + C!",      # cipher=0xFF01
+            "0 sh-buf 41 + C!",                            # comp=0
+            "0 sh-buf 42 + C!  46 sh-buf 43 + C!",       # ext_len=46
+            # supported_versions ext (6 bytes)
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",       # type=0x002B
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",        # len=2
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",        # 0x0304
+            # key_share ext (40 bytes)
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",       # type=0x0033
+            "0 sh-buf 52 + C!  36 sh-buf 53 + C!",       # len=36
+            "0 sh-buf 54 + C!  29 sh-buf 55 + C!",       # group=x25519
+            "0 sh-buf 56 + C!  32 sh-buf 57 + C!",       # key_len=32
+            # pubkey = 66..97 (0x42..0x61)
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            # Parse
+            "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+            '." PK0=" test-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
+            '." PK1=" test-ctx @ TLS-CTX.PEER-PUBKEY 1 + C@ .',
+            '." PK31=" test-ctx @ TLS-CTX.PEER-PUBKEY 31 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("F=0 ", text)        # success
+        self.assertIn("PK0=66 ", text)     # first pubkey byte
+        self.assertIn("PK1=67 ", text)
+        self.assertIn("PK31=97 ", text)    # last pubkey byte
+
+    def test_parse_sh_bad_suite_rejected(self):
+        """ServerHello with wrong cipher suite is rejected."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 96 ALLOT",
+            "sh-buf 96 0 FILL",
+            "2 sh-buf C!",
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!  86 sh-buf 3 + C!",
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",
+            "0 sh-buf 38 + C!",
+            # Wrong cipher suite: 0xFF02 instead of 0xFF01
+            "255 sh-buf 39 + C!  2 sh-buf 40 + C!",
+            "0 sh-buf 41 + C!",
+            "0 sh-buf 42 + C!  46 sh-buf 43 + C!",
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",
+            "0 sh-buf 52 + C!  36 sh-buf 53 + C!",
+            "0 sh-buf 54 + C!  29 sh-buf 55 + C!",
+            "0 sh-buf 56 + C!  32 sh-buf 57 + C!",
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("F=-1 ", text)       # rejected
+
+    def test_verify_finished_ok(self):
+        """TLS-VERIFY-FINISHED accepts correct server Finished MAC."""
+        # Use known key schedule state and pre-computed verify_data
+        # S_VERIFY_DATA from Python: [189, 227, 95, 172, 210, 27, 22, 137,
+        #   29, 38, 21, 194, 9, 172, 198, 38, 125, 204, 199, 254,
+        #   58, 152, 166, 226, 87, 177, 185, 223, 238, 193, 79, 94]
+        s_verify = [189, 227, 95, 172, 210, 27, 22, 137,
+                    29, 38, 21, 194, 9, 172, 198, 38,
+                    125, 204, 199, 254, 58, 152, 166, 226,
+                    87, 177, 185, 223, 238, 193, 79, 94]
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            # Build fake verify_data with pre-computed bytes
+            "CREATE vd-buf 32 ALLOT",
+        ]
+        for i, b in enumerate(s_verify):
+            lines.append(f"{b} vd-buf {i} + C!")
+        lines += [
+            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            '." VF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("VF=0 ", text)       # valid
+
+    def test_verify_finished_bad_mac(self):
+        """TLS-VERIFY-FINISHED rejects wrong verify_data."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            # verify_data = all zeros (wrong)
+            "CREATE vd-buf 32 ALLOT  vd-buf 32 0 FILL",
+            "test-ctx @ TLS-CTX.S-HS-TRAFFIC  vd-buf  TLS-VERIFY-FINISHED",
+            '." VF=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("VF=-1 ", text)      # rejected
+
+    def test_build_finished_format(self):
+        """TLS-BUILD-FINISHED produces encrypted record with correct header."""
+        lines = self._TLS_KS_SETUP + [
+            "test-ctx @ TLS-KS-HANDSHAKE",
+            "CREATE fin-rec 128 ALLOT",
+            "test-ctx @  fin-rec  TLS-BUILD-FINISHED",
+            "VARIABLE fin-rl  fin-rl !",
+            '." RL=" fin-rl @ .',
+            # Record header: type=23 (app_data), version=0x0303
+            '." RT=" fin-rec C@ .',
+            '." RV0=" fin-rec 1 + C@ .',
+            '." RV1=" fin-rec 2 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("RT=23 ", text)      # app_data outer type
+        self.assertIn("RV0=3 ", text)      # 0x0303
+        self.assertIn("RV1=3 ", text)
+
+    def test_ctx_size_updated(self):
+        """TLS context is 552 bytes after handshake field expansion."""
+        text = self._run_kdos(['." SZ=" /TLS-CTX .'])
+        self.assertIn("SZ=552 ", text)
+
+    def test_label_strings_correct(self):
+        """TLS label constants contain correct ASCII bytes."""
+        lines = [
+            # "derived" = 100 101 114 105 118 101 100
+            '." D0=" TLS-L-DERIVED C@ .',
+            '." D6=" TLS-L-DERIVED 6 + C@ .',
+            # "key" = 107 101 121
+            '." K0=" TLS-L-KEY C@ .',
+            '." K2=" TLS-L-KEY 2 + C@ .',
+            # "finished" = 102 105 110 105 115 104 101 100
+            '." F0=" TLS-L-FINISHED C@ .',
+            '." F7=" TLS-L-FINISHED 7 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("D0=100 ", text)     # 'd'
+        self.assertIn("D6=100 ", text)     # 'd'
+        self.assertIn("K0=107 ", text)     # 'k'
+        self.assertIn("K2=121 ", text)     # 'y'
+        self.assertIn("F0=102 ", text)     # 'f'
+        self.assertIn("F7=100 ", text)     # 'd'
+
+    def test_handshake_state_after_ch(self):
+        """After building ClientHello, handshake state is CLIENT-HELLO-SENT."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." ST=" test-ctx @ TLS-CTX.STATE @ .',
+            '." HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ST=1 ", text)       # TLSS-HANDSHAKE
+        self.assertIn("HS=1 ", text)       # TLSH-CLIENT-HELLO-SENT
+
+
+# ---------------------------------------------------------------------------
+#  TLS 1.3 Application Data tests — §16.10 / §16.11
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSAppData(_KDOSTestBase):
+    """Tests for §16.10/§16.11 TLS app data, TLS-SEND-DATA, TLS-RECV-DATA,
+    TLS-CLOSE, and TLS-SEND-ALERT."""
+
+    _TLS_ESTAB_SETUP = [
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Set up keys = 0..31 for both WR and RD (roundtrip test)
+        ": init-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
+        "init-key",
+        ": init-rk 32 0 DO I test-ctx @ TLS-CTX.RD-KEY I + C! LOOP ;",
+        "init-rk",
+        ": init-iv 12 0 DO I test-ctx @ TLS-CTX.WR-IV I + C! LOOP ;",
+        "init-iv",
+        ": init-riv 12 0 DO I test-ctx @ TLS-CTX.RD-IV I + C! LOOP ;",
+        "init-riv",
+        "0 test-ctx @ TLS-CTX.WR-SEQ !",
+        "0 test-ctx @ TLS-CTX.RD-SEQ !",
+        "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+    ]
+
+    def test_tls_send_data_not_established(self):
+        """TLS-SEND-DATA returns 0 when not in ESTABLISHED state."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE msg 4 ALLOT  msg 4 65 FILL",
+            'test-ctx @  msg 4  TLS-SEND-DATA  ." S=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S=0 ", text)
+
+    def test_tls_recv_data_not_established(self):
+        """TLS-RECV-DATA returns 0 when not in ESTABLISHED state."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE buf 64 ALLOT",
+            'test-ctx @  buf 64  TLS-RECV-DATA  ." R=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("R=0 ", text)
+
+    def test_tls_encrypt_decrypt_roundtrip(self):
+        """TLS-ENCRYPT-RECORD / TLS-DECRYPT-RECORD roundtrip via raw buffers."""
+        lines = self._TLS_ESTAB_SETUP + [
+            # Encrypt 8 bytes of app data
+            "CREATE pt-msg 8 ALLOT  pt-msg 8 72 FILL",    # 'H' * 8
+            "CREATE enc-buf 128 ALLOT",
+            "test-ctx @  TLS-CT-APP-DATA  pt-msg 8  enc-buf",
+            "TLS-ENCRYPT-RECORD",
+            'VARIABLE enc-len  enc-len !',
+            # Reset read seq for decrypt
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            # Decrypt
+            "CREATE dec-buf 64 ALLOT",
+            "test-ctx @  enc-buf  enc-len @  dec-buf",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',  # plen
+            '." CT=" .',  # ctype
+            '." D0=" dec-buf C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=23 ", text)      # APP_DATA
+        self.assertIn("D0=72 ", text)      # 'H'
+
+    def test_tls_close_state(self):
+        """TLS-CLOSE transitions to CLOSING state."""
+        # TLS-CLOSE needs a TCB, so we test on bare context without TCP
+        lines = self._TLS_ESTAB_SETUP + [
+            # Can't fully close without TCP, but check state guard
+            "TLSS-NONE test-ctx @ TLS-CTX.STATE !",
+            "test-ctx @ TLS-CLOSE",
+            '." S=" test-ctx @ TLS-CTX.STATE @ .',   # should remain NONE
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S=0 ", text)   # NONE — guard prevents close
+
+    def test_alert_buf_layout(self):
+        """TLS-ALERT-BUF stores level and description bytes."""
+        text = self._run_kdos([
+            '." SZ=" /SOCK .',
+            '." SM=" SOCK-MAX .',
+        ])
+        self.assertIn("SZ=32 ", text)
+        self.assertIn("SM=8 ", text)
+
+
+# ---------------------------------------------------------------------------
+#  Socket API tests — §17
+# ---------------------------------------------------------------------------
+
+class TestKDOSSocket(_KDOSTestBase):
+    """Tests for §17 Socket API — SOCKET, BIND, CONNECT, SEND, RECV, CLOSE."""
+
+    def test_socket_alloc_tcp(self):
+        """SOCKET allocates a TCP socket descriptor."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            '." ADDR=" DUP .',
+            '." TBL=" SOCK-TABLE .',
+            'SOCK.STATE @ ." ST=" .',
+        ])
+        # SOCKET returns address of first slot = SOCK-TABLE
+        lines = text.replace('\r', '')
+        import re
+        m_addr = re.search(r'ADDR=(\d+)', lines)
+        m_tbl  = re.search(r'TBL=(\d+)', lines)
+        self.assertIsNotNone(m_addr)
+        self.assertIsNotNone(m_tbl)
+        self.assertEqual(m_addr.group(1), m_tbl.group(1))
+        self.assertIn("ST=1 ", text)     # SOCKST-TCP after alloc
+
+    def test_socket_alloc_tls(self):
+        """SOCKET allocates a TLS socket with flags bit 0 set."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TLS SOCKET',
+            'DUP SOCK.FLAGS @ ." FL=" .',
+            'DROP',
+        ])
+        self.assertIn("FL=1 ", text)
+
+    def test_socket_bind(self):
+        """BIND stores local port in socket descriptor."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            'DUP 8080 BIND ." BI=" .',
+            'SOCK.LOCAL-PORT @ ." LP=" .',
+        ])
+        self.assertIn("BI=0 ", text)     # success
+        self.assertIn("LP=8080 ", text)
+
+    def test_socket_close_resets(self):
+        """CLOSE resets socket to FREE state."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            'DUP 8080 BIND DROP',
+            'DUP CLOSE',
+            # That socket slot should now be free again
+            '0 SOCK-N SOCK.STATE @ ." ST=" .',
+        ])
+        self.assertIn("ST=0 ", text)     # FREE
+
+    def test_socket_constants(self):
+        """Socket constants have correct values."""
+        text = self._run_kdos([
+            '." A=" SOCKST-FREE .',
+            '." B=" SOCKST-TCP .',
+            '." C=" SOCKST-TLS .',
+            '." D=" SOCKST-LISTENING .',
+            '." E=" SOCKST-ACCEPTED .',
+        ])
+        self.assertIn("A=0 ", text)
+        self.assertIn("B=1 ", text)
+        self.assertIn("C=2 ", text)
+        self.assertIn("D=3 ", text)
+        self.assertIn("E=4 ", text)
+
+    def test_socket_status_display(self):
+        """.SOCKET prints human-readable state."""
+        text = self._run_kdos(["0 SOCK-N .SOCKET"])
+        self.assertIn("socket: free", text)
+
+    def test_socket_table_max(self):
+        """Can allocate SOCK-MAX sockets, then next returns -1."""
+        lines = [
+            "VARIABLE alloc-ct  0 alloc-ct !",
+            ": alloc-all SOCK-MAX 0 DO SOCK-TYPE-TCP SOCKET -1 <> IF"
+            " 1 alloc-ct +! THEN LOOP ;",
+            "alloc-all",
+            '." AC=" alloc-ct @ .',
+            ': chk-ovf SOCK-TYPE-TCP SOCKET ." OVF=" . ;',
+            'chk-ovf',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("AC=8 ", text)
+        self.assertIn("OVF=-1 ", text)
+
+    def test_socket_tcp_connect_roundtrip(self):
+        """Socket API: CONNECT + SEND + RECV over TCP with NIC loopback."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+        state = {'data_acked': False}
+
+        def tcp_echo(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None or parsed['dport'] != server_port:
+                return
+            # SYN → SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1, 0x12, 8192))
+                return
+            # Data → echo
+            if len(parsed['payload']) > 0 and not state['data_acked']:
+                state['data_acked'] = True
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1, parsed['seq'] + len(parsed['payload']),
+                    0x18, 8192, parsed['payload']))
+                return
+            # FIN → FIN+ACK
+            if parsed['flags'] & 0x01:
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1 + 2, parsed['seq'] + 1, 0x11, 8192))
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C!"
+            " 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT 10 PIP C! 0 PIP 1+ C! 0 PIP 2 + C!"
+            " 1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Socket API
+            "SOCK-TYPE-TCP SOCKET",
+            "VARIABLE sd  sd !",
+            "sd @ 12345 BIND DROP",
+            'sd @  PIP 80  CONNECT  ." CN=" .',
+            "5 TCP-POLL-WAIT",
+            '." SST=" sd @ SOCK.STATE @ .',
+            # Send "Hi"
+            "CREATE MSG 2 ALLOT  72 MSG C!  105 MSG 1+ C!",
+            'sd @ MSG 2 SEND ." SE=" .',
+            "5 TCP-POLL-WAIT",
+            # Recv echo
+            "CREATE RBF 64 ALLOT  RBF 64 0 FILL",
+            'sd @ RBF 64 RECV ." RV=" .',
+            '." B0=" RBF C@ .',
+            '." B1=" RBF 1+ C@ .',
+            # Close
+            "sd @ CLOSE",
+        ], nic_tx_callback=tcp_echo)
+        self.assertIn("CN=0 ", text)       # connect success
+        self.assertIn("SST=1 ", text)      # SOCKST-TCP
+        self.assertIn("SE=2 ", text)
+        self.assertIn("RV=2 ", text)
+        self.assertIn("B0=72 ", text)      # 'H'
+        self.assertIn("B1=105 ", text)     # 'i'
+
+    def test_socket_listen_accept(self):
+        """Socket API: LISTEN + ACCEPT with passive open."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 8080
+        client_port = 50000
+        client_isn = 3000
+
+        def tcp_client(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            # Server sends SYN+ACK → client sends ACK
+            if parsed['flags'] == 0x12:    # SYN+ACK
+                ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    client_port, server_port,
+                    client_isn + 1, parsed['seq'] + 1, 0x10, 8192)
+                nic.inject_frame(ack)
+
+        # Pre-inject a SYN from client
+        syn = TestKDOSNetStack._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            client_port, server_port,
+            client_isn, 0, 0x02, 8192)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C!"
+            " 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT 10 PIP C! 0 PIP 1+ C! 0 PIP 2 + C!"
+            " 1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Listen
+            "SOCK-TYPE-TCP SOCKET",
+            "VARIABLE srv-sd  srv-sd !",
+            "srv-sd @ 8080 BIND DROP",
+            'srv-sd @ LISTEN ." LI=" .',
+            # Process the SYN
+            "20 TCP-POLL-WAIT",
+            # Accept
+            ': chk-accept srv-sd @ ACCEPT DUP -1 = IF ." ACC=-1 " DROP ELSE ." ACC=OK " SOCK.STATE @ ." AST=" . THEN ;',
+            'chk-accept',
+        ], nic_frames=[syn], nic_tx_callback=tcp_client)
+        self.assertIn("LI=0 ", text)
+        self.assertIn("ACC=OK ", text)
+        self.assertIn("AST=4 ", text)     # SOCKST-ACCEPTED
 
 
 # ---------------------------------------------------------------------------

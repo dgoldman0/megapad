@@ -494,6 +494,67 @@ CREATE AES-TAG-BUF 16 ALLOT
     DROP ."  AES: busy" CR
     THEN THEN THEN ;
 
+\ -- AES-256-GCM with AAD (Authenticated Associated Data) --
+\   TLS 1.3 requires AAD (the 5-byte record header) be authenticated
+\   but not encrypted.  These words extend AES-ENCRYPT/DECRYPT with AAD.
+CREATE AES-AAD-PAD 16 ALLOT           \ zero-padded AAD block
+VARIABLE _AEAD-AAD
+VARIABLE _AEAD-AADLEN
+
+: AES-ENCRYPT-AEAD ( key iv aad aadlen src dst dlen -- tag-addr )
+    >R >R >R            \ R: dlen dst src.  Stack: key iv aad aadlen
+    _AEAD-AADLEN !
+    _AEAD-AAD !
+    AES-IV!
+    AES-KEY!
+    _AEAD-AADLEN @ AES-AAD-LEN!
+    R> R> R>             \ src dst dlen
+    DUP AES-DATA-LEN!
+    0 AES-CMD!
+    \ Feed AAD block (zero-padded to 16 bytes)
+    AES-AAD-PAD 16 0 FILL
+    _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
+    AES-AAD-PAD AES-DIN!
+    \ Feed data blocks
+    DUP 4 RSHIFT         \ src dst dlen nblocks
+    >R DROP               \ src dst   R: nblocks
+    R> 0 DO
+        OVER AES-DIN!
+        DUP AES-DOUT@
+        SWAP 16 + SWAP 16 +
+    LOOP
+    2DROP
+    AES-TAG-BUF AES-TAG@
+    AES-TAG-BUF
+;
+
+: AES-DECRYPT-AEAD ( key iv aad aadlen src dst dlen tag -- flag )
+    AES-TAG!
+    >R >R >R             \ R: dlen dst src.  Stack: key iv aad aadlen
+    _AEAD-AADLEN !
+    _AEAD-AAD !
+    AES-IV!
+    AES-KEY!
+    _AEAD-AADLEN @ AES-AAD-LEN!
+    R> R> R>             \ src dst dlen
+    DUP AES-DATA-LEN!
+    1 AES-CMD!
+    \ Feed AAD block (zero-padded to 16 bytes)
+    AES-AAD-PAD 16 0 FILL
+    _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
+    AES-AAD-PAD AES-DIN!
+    \ Feed data blocks
+    DUP 4 RSHIFT
+    >R DROP
+    R> 0 DO
+        OVER AES-DIN!
+        DUP AES-DOUT@
+        SWAP 16 + SWAP 16 +
+    LOOP
+    2DROP
+    AES-STATUS@ 3 = IF -1 ELSE 0 THEN
+;
+
 \ =====================================================================
 \  §1.6  SHA-3 / SHAKE Hashing
 \ =====================================================================
@@ -711,6 +772,90 @@ CREATE X25519-BASE  32 ALLOT
     DUP 1 = IF DROP ."  X25519: busy" CR ELSE
     DROP ."  X25519: unknown" CR
     THEN THEN THEN ;
+
+\ =====================================================================
+\  §1.9  HKDF — HMAC-based Key Derivation Function (RFC 5869)
+\ =====================================================================
+\  Uses HMAC-SHA3-256 as the underlying PRF.
+\  Hash output length (L_H) = 32 bytes.
+\
+\  HKDF-EXTRACT ( salt slen ikm ilen out -- )
+\    PRK = HMAC(salt, IKM)
+\    If salt is 0 / slen=0, uses 32 zero bytes as salt.
+\
+\  HKDF-EXPAND ( prk info ilen len out -- )
+\    OKM = T(1) || T(2) || ...  truncated to len bytes.
+\    T(i) = HMAC(PRK, T(i-1) || info || i)
+
+32 CONSTANT HKDF-HASHLEN
+
+CREATE _HKDF-ZERO-SALT  32 ALLOT       \ 32 zero bytes for null-salt case
+_HKDF-ZERO-SALT 32 0 FILL
+
+\ Scratch buffers for Expand
+CREATE _HKDF-T       32 ALLOT          \ T(i-1) / T(i) — running HMAC output
+CREATE _HKDF-BLOCK  200 ALLOT          \ T(i-1) || info || counter (max ~200B)
+VARIABLE _HKDF-PRK-PTR
+VARIABLE _HKDF-INFO-PTR
+VARIABLE _HKDF-INFO-LEN
+VARIABLE _HKDF-OUT-PTR
+VARIABLE _HKDF-REMAIN
+VARIABLE _HKDF-TPREV-LEN
+VARIABLE _HKDF-COUNTER
+
+: HKDF-EXTRACT ( salt slen ikm ilen out -- )
+    >R                                  \ R: out
+    2SWAP                               \ ikm ilen salt slen
+    DUP 0= IF                           \ null salt → use zero-salt
+        2DROP _HKDF-ZERO-SALT 32
+    THEN
+    \ Stack: ikm ilen salt slen   R: out
+    \ HMAC( salt, IKM ) → out
+    2SWAP                               \ salt slen ikm ilen
+    R>                                  \ salt slen ikm ilen out
+    HMAC
+;
+
+: HKDF-EXPAND ( prk info ilen len out -- )
+    _HKDF-OUT-PTR !
+    _HKDF-REMAIN !
+    _HKDF-INFO-LEN !
+    _HKDF-INFO-PTR !
+    _HKDF-PRK-PTR !
+    0 _HKDF-TPREV-LEN !                \ T(0) = empty
+    1 _HKDF-COUNTER !                  \ counter starts at 1
+    BEGIN _HKDF-REMAIN @ 0> WHILE
+        \ --- Build block: T(i-1) || info || counter_byte ---
+        \ Step 1: copy T(i-1) into _HKDF-BLOCK[0..]
+        _HKDF-TPREV-LEN @ 0> IF
+            _HKDF-T _HKDF-BLOCK _HKDF-TPREV-LEN @ CMOVE
+        THEN
+        \ Step 2: append info at _HKDF-BLOCK[tprev_len..]
+        _HKDF-INFO-PTR @
+        _HKDF-BLOCK _HKDF-TPREV-LEN @ +
+        _HKDF-INFO-LEN @ CMOVE
+        \ Step 3: append counter byte
+        _HKDF-COUNTER @
+        _HKDF-BLOCK _HKDF-TPREV-LEN @ + _HKDF-INFO-LEN @ + C!
+        \ block_len = tprev_len + info_len + 1
+        _HKDF-TPREV-LEN @ _HKDF-INFO-LEN @ + 1+
+        \ --- HMAC(PRK, block) → _HKDF-T ---
+        >R                              \ R: block_len
+        _HKDF-PRK-PTR @ HKDF-HASHLEN
+        _HKDF-BLOCK R>
+        _HKDF-T HMAC                   \ ( )
+        \ --- Copy min(HASHLEN, remain) → output ---
+        _HKDF-REMAIN @ HKDF-HASHLEN MIN
+        _HKDF-T _HKDF-OUT-PTR @ ROT CMOVE
+        \ Update output pointer and remaining count
+        _HKDF-REMAIN @ HKDF-HASHLEN MIN
+        DUP _HKDF-OUT-PTR @ + _HKDF-OUT-PTR !
+        _HKDF-REMAIN @ SWAP - _HKDF-REMAIN !
+        \ Next iteration
+        HKDF-HASHLEN _HKDF-TPREV-LEN !
+        _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
+    REPEAT
+;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -6722,6 +6867,1072 @@ VARIABLE _TPL-LEN
 \   ( max-attempts -- )
 : TCP-POLL-WAIT  ( n -- )
     0 DO TCP-POLL LOOP ;
+
+\ =====================================================================
+\  §16.8  TLS 1.3 Record Layer
+\ =====================================================================
+\
+\  TLS 1.3 (RFC 8446) record-level encrypt/decrypt.
+\  Cipher suite: X25519 + AES-256-GCM + SHA3-256 (non-standard hash).
+\
+\  Record format (§5.1):
+\    ContentType      = 23 (app_data) for all encrypted records
+\    ProtocolVersion  = 0x0303
+\    Length           = len(ciphertext) + 16 (tag)
+\    EncryptedRecord  = AES-256-GCM( inner_plaintext || content_type )
+\
+\  Nonce (§5.3):  nonce = write_iv XOR padded_seqnum
+\    padded_seqnum = 4 zero bytes || 8-byte sequence number (big-endian)
+\
+\  Uses AES-ENCRYPT-AEAD / AES-DECRYPT-AEAD from §1.5.
+
+\ --- Content Type Constants ---
+21 CONSTANT TLS-CT-ALERT
+22 CONSTANT TLS-CT-HANDSHAKE
+23 CONSTANT TLS-CT-APP-DATA
+20 CONSTANT TLS-CT-CCS
+
+\ --- TLS Context Structure ---
+\  Per-connection TLS state.  4 contexts, one per TCB slot.
+\
+\  Offset  Field          Size  Description
+\  +0      STATE          8     0=NONE 1=HS 2=ESTABLISHED 3=CLOSING
+\  +8      TCB-IDX        8     Associated TCB slot index
+\  +16     WR-KEY         32    Our write key (e.g., client_traffic_key)
+\  +48     WR-IV          12    Our write IV
+\  +60     PAD            4     (alignment)
+\  +64     WR-SEQ         8     Write sequence number
+\  +72     RD-KEY         32    Peer write key (e.g., server_traffic_key)
+\  +104    RD-IV          12    Peer write IV
+\  +116    PAD            4     (alignment)
+\  +120    RD-SEQ         8     Read sequence number
+\  +128    HS-STATE       8     Handshake sub-state
+\  +136    TRANSCRIPT     32    Running SHA3-256 transcript hash
+\  +168    HS-SECRET      32    Handshake secret
+\  +200    MS-SECRET      32    Master secret
+\  +232    MY-PRIVKEY     32    X25519 ephemeral private key
+\  +264    MY-PUBKEY      32    X25519 ephemeral public key
+\  +296    PEER-PUBKEY    32    Peer X25519 public key
+\  +328    SHARED-SECRET  32    X25519 shared secret
+\  +360    EARLY-SECRET   32    Early secret (from HKDF-Extract)
+\  +392    C-HS-TRAFFIC   32    Client handshake traffic secret
+\  +424    S-HS-TRAFFIC   32    Server handshake traffic secret
+\  +456    C-AP-TRAFFIC   32    Client application traffic secret
+\  +488    S-AP-TRAFFIC   32    Server application traffic secret
+\  +520    PSK            32    Pre-shared key (reserved)
+\  Total: 552 bytes
+
+552 CONSTANT /TLS-CTX
+4 CONSTANT TLS-MAX-CTX
+
+: TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
+: TLS-CTX.TCB         ( ctx -- addr )  8 +  ;
+: TLS-CTX.WR-KEY      ( ctx -- addr )  16 + ;
+: TLS-CTX.WR-IV       ( ctx -- addr )  48 + ;
+: TLS-CTX.WR-SEQ      ( ctx -- addr )  64 + ;
+: TLS-CTX.RD-KEY      ( ctx -- addr )  72 + ;
+: TLS-CTX.RD-IV       ( ctx -- addr )  104 + ;
+: TLS-CTX.RD-SEQ      ( ctx -- addr )  120 + ;
+: TLS-CTX.HS-STATE    ( ctx -- addr )  128 + ;
+: TLS-CTX.TRANSCRIPT  ( ctx -- addr )  136 + ;
+: TLS-CTX.HS-SECRET   ( ctx -- addr )  168 + ;
+: TLS-CTX.MS-SECRET   ( ctx -- addr )  200 + ;
+: TLS-CTX.MY-PRIVKEY  ( ctx -- addr )  232 + ;
+: TLS-CTX.MY-PUBKEY   ( ctx -- addr )  264 + ;
+: TLS-CTX.PEER-PUBKEY ( ctx -- addr )  296 + ;
+: TLS-CTX.SHARED      ( ctx -- addr )  328 + ;
+: TLS-CTX.EARLY       ( ctx -- addr )  360 + ;
+: TLS-CTX.C-HS-TRAFFIC ( ctx -- addr ) 392 + ;
+: TLS-CTX.S-HS-TRAFFIC ( ctx -- addr ) 424 + ;
+: TLS-CTX.C-AP-TRAFFIC ( ctx -- addr ) 456 + ;
+: TLS-CTX.S-AP-TRAFFIC ( ctx -- addr ) 488 + ;
+: TLS-CTX.PSK          ( ctx -- addr ) 520 + ;
+
+CREATE TLS-CTXS  /TLS-CTX TLS-MAX-CTX * ALLOT
+TLS-CTXS /TLS-CTX TLS-MAX-CTX * 0 FILL
+
+\ TLS-CTX@ ( idx -- ctx-addr )  Get context by index (0..3).
+: TLS-CTX@ ( idx -- ctx )
+    /TLS-CTX * TLS-CTXS + ;
+
+\ --- TLS State Constants ---
+0 CONSTANT TLSS-NONE
+1 CONSTANT TLSS-HANDSHAKE
+2 CONSTANT TLSS-ESTABLISHED
+3 CONSTANT TLSS-CLOSING
+
+\ --- Handshake Sub-States ---
+0 CONSTANT TLSH-IDLE
+1 CONSTANT TLSH-CLIENT-HELLO-SENT
+2 CONSTANT TLSH-SERVER-HELLO-RCVD
+3 CONSTANT TLSH-WAIT-EE
+4 CONSTANT TLSH-WAIT-CERT
+5 CONSTANT TLSH-WAIT-CV
+6 CONSTANT TLSH-WAIT-FINISHED
+7 CONSTANT TLSH-CONNECTED
+
+\ --- Scratch Buffers for Record Layer ---
+CREATE TLS-NONCE-BUF  12 ALLOT        \ constructed per-record nonce
+CREATE TLS-REC-HDR     5 ALLOT        \ 5-byte TLS record header (AAD)
+CREATE TLS-PAD-BUF    16 ALLOT        \ plaintext padding to 16B boundary
+CREATE TLS-INNER-BUF 1500 ALLOT       \ inner plaintext + content type byte
+CREATE TLS-CIPHER-BUF 1520 ALLOT      \ ciphertext output
+CREATE TLS-PLAIN-BUF  1500 ALLOT      \ decrypted plaintext scratch
+
+\ --- TLS Nonce Construction ---
+\ TLS-BUILD-NONCE ( iv seq out -- )
+\   nonce = iv XOR (0x00000000 || seq_be64)
+\   iv is 12 bytes, seq is a 64-bit cell (native endian).
+\   out receives 12 bytes.
+: TLS-BUILD-NONCE ( iv seq out -- )
+    >R                         \ R: out
+    \ Convert seq to 8-byte big-endian in out[4..11]
+    \ First, copy iv to out
+    SWAP R@ 12 CMOVE           \ copy iv → out.  Stack: seq  R: out
+    \ XOR seq bytes into out[4..11] (big-endian)
+    DUP 56 RSHIFT 255 AND R@  4 + C@ XOR R@  4 + C!
+    DUP 48 RSHIFT 255 AND R@  5 + C@ XOR R@  5 + C!
+    DUP 40 RSHIFT 255 AND R@  6 + C@ XOR R@  6 + C!
+    DUP 32 RSHIFT 255 AND R@  7 + C@ XOR R@  7 + C!
+    DUP 24 RSHIFT 255 AND R@  8 + C@ XOR R@  8 + C!
+    DUP 16 RSHIFT 255 AND R@  9 + C@ XOR R@  9 + C!
+    DUP  8 RSHIFT 255 AND R@ 10 + C@ XOR R@ 10 + C!
+                  255 AND R@ 11 + C@ XOR R@ 11 + C!
+    R> DROP
+;
+
+\ --- TLS Record Encryption ---
+\ TLS-ENCRYPT-RECORD ( ctx content-type plaintext plen rec-buf -- rec-len )
+\   Builds a TLS 1.3 encrypted record:
+\     rec-buf = [type=23 | ver=0x0303 | length(BE16)] ++ ciphertext ++ tag
+\   The inner plaintext = plaintext || content_type_byte, padded to 16B.
+\   Returns total record length (5 + padded_inner + 16).
+VARIABLE _TER-CTX
+VARIABLE _TER-CTYPE
+VARIABLE _TER-PT
+VARIABLE _TER-PLEN
+VARIABLE _TER-REC
+VARIABLE _TER-PADLEN
+
+: TLS-ENCRYPT-RECORD ( ctx ctype pt plen rec -- reclen )
+    _TER-REC !  _TER-PLEN !  _TER-PT !
+    _TER-CTYPE !  _TER-CTX !
+    \ 1. Build inner plaintext: data || content_type, pad to 16B
+    _TER-PT @ TLS-INNER-BUF _TER-PLEN @ CMOVE
+    _TER-CTYPE @ TLS-INNER-BUF _TER-PLEN @ + C!
+    _TER-PLEN @ 1+ 15 + -16 AND _TER-PADLEN !
+    \ Zero-pad remainder
+    _TER-PLEN @ 1+ _TER-PADLEN @ < IF
+        TLS-INNER-BUF _TER-PLEN @ 1+ +
+        _TER-PADLEN @ _TER-PLEN @ 1+ - 0 FILL
+    THEN
+    \ 2. Build nonce from write IV + write seq
+    _TER-CTX @ TLS-CTX.WR-IV
+    _TER-CTX @ TLS-CTX.WR-SEQ @
+    TLS-NONCE-BUF TLS-BUILD-NONCE
+    \ 3. Build AAD (5-byte record header)
+    TLS-CT-APP-DATA TLS-REC-HDR C!
+    3 TLS-REC-HDR 1 + C!   3 TLS-REC-HDR 2 + C!
+    _TER-PADLEN @ 16 +
+    DUP 8 RSHIFT TLS-REC-HDR 3 + C!
+    255 AND      TLS-REC-HDR 4 + C!
+    \ 4. Copy header to rec-buf
+    TLS-REC-HDR _TER-REC @ 5 CMOVE
+    \ 5. Encrypt with AAD
+    _TER-CTX @ TLS-CTX.WR-KEY  TLS-NONCE-BUF
+    TLS-REC-HDR 5
+    TLS-INNER-BUF  _TER-REC @ 5 +  _TER-PADLEN @
+    AES-ENCRYPT-AEAD DROP
+    \ 6. Copy tag after ciphertext
+    AES-TAG-BUF  _TER-REC @ 5 + _TER-PADLEN @ +  16 CMOVE
+    \ 7. Increment write sequence number
+    _TER-CTX @ TLS-CTX.WR-SEQ DUP @ 1+ SWAP !
+    \ 8. Return total record length
+    _TER-PADLEN @ 5 + 16 +
+;
+
+\ --- TLS Record Decryption ---
+\ TLS-DECRYPT-RECORD ( ctx rec-buf rec-len plain-buf -- ctype plen | -1 0 )
+\   Decrypts a TLS 1.3 record.
+\   rec-buf starts with 5-byte header, then ciphertext, then 16-byte tag.
+\   Returns content type and plaintext length, or -1 0 on auth failure.
+VARIABLE _TDR-CTX
+VARIABLE _TDR-REC
+VARIABLE _TDR-RLEN
+VARIABLE _TDR-PLAIN
+VARIABLE _TDR-CLEN
+
+: TLS-DECRYPT-RECORD ( ctx rec rlen plain -- ctype plen | -1 0 )
+    _TDR-PLAIN !  _TDR-RLEN !  _TDR-REC !  _TDR-CTX !
+    \ Encrypted payload length = rec-len - 5 (header) - 16 (tag)
+    _TDR-RLEN @ 5 - 16 -  DUP _TDR-CLEN !
+    DUP 1 < IF DROP -1 0 EXIT THEN
+    DROP
+    \ 1. Build nonce from read IV + read seq
+    _TDR-CTX @ TLS-CTX.RD-IV
+    _TDR-CTX @ TLS-CTX.RD-SEQ @
+    TLS-NONCE-BUF TLS-BUILD-NONCE
+    \ 2. Decrypt: AES-DECRYPT-AEAD(rd-key, nonce, hdr, 5, ct, plain, clen, tag)
+    _TDR-CTX @ TLS-CTX.RD-KEY  TLS-NONCE-BUF
+    _TDR-REC @ 5                                     \ AAD = rec[0..4], len=5
+    _TDR-REC @ 5 +                                   \ ciphertext start
+    _TDR-PLAIN @                                     \ plaintext output
+    _TDR-CLEN @                                      \ cipher_len
+    _TDR-REC @ 5 + _TDR-CLEN @ +                     \ tag address
+    AES-DECRYPT-AEAD                                  \ → flag (0=ok, -1=fail)
+    0<> IF -1 0 EXIT THEN                             \ auth failure
+    \ 3. Increment read sequence number
+    _TDR-CTX @ TLS-CTX.RD-SEQ DUP @ 1+ SWAP !
+    \ 4. Extract inner content type = last non-zero byte of plaintext
+    _TDR-CLEN @
+    BEGIN
+        1-
+        DUP 0< IF DROP -1 0 EXIT THEN
+        DUP _TDR-PLAIN @ + C@ 0<>
+    UNTIL
+    DUP _TDR-PLAIN @ + C@  SWAP                      \ ctype plen
+;
+
+\ .TLS-STATUS ( ctx -- )  Print TLS context status.
+: .TLS-STATUS ( ctx -- )
+    DUP TLS-CTX.STATE @
+    DUP TLSS-NONE        = IF DROP ."  TLS: none" CR ELSE
+    DUP TLSS-HANDSHAKE   = IF DROP ."  TLS: handshake" CR ELSE
+    DUP TLSS-ESTABLISHED = IF DROP ."  TLS: established" CR ELSE
+    DUP TLSS-CLOSING     = IF DROP ."  TLS: closing" CR ELSE
+    DROP ."  TLS: unknown" CR
+    THEN THEN THEN THEN
+    DROP                              \ drop ctx
+;
+
+\ =====================================================================
+\  §16.9  TLS 1.3 Handshake (RFC 8446)
+\ =====================================================================
+\
+\  Full TLS 1.3 handshake state machine (client side).
+\  Cipher suite 0xFF01: TLS_X25519_AES_256_GCM_SHA3_256 (private use).
+\
+\  Flow: CH → SH → [EncExt] → [Cert] → [CertVerify] → Finished → Finished
+\
+\  Certificates are hashed into transcript but not validated (no X.509).
+\  HelloRetryRequest → abort.  CCS records → silently ignored by caller.
+
+\ --- Cipher Suite ---
+65281 CONSTANT TLS-SUITE-X25519-SHA3    \ 0xFF01
+
+\ --- Handshake Message Types ---
+1  CONSTANT TLSHT-CLIENT-HELLO
+2  CONSTANT TLSHT-SERVER-HELLO
+8  CONSTANT TLSHT-ENCRYPTED-EXT
+11 CONSTANT TLSHT-CERTIFICATE
+15 CONSTANT TLSHT-CERT-VERIFY
+20 CONSTANT TLSHT-FINISHED
+
+\ --- Scratch Buffers for Handshake ---
+CREATE TLS-HKDF-LABEL  64 ALLOT
+CREATE TLS-HS-TRANSCRIPT 1024 ALLOT
+VARIABLE TLS-HS-TR-LEN
+CREATE TLS-CH-BUF 256 ALLOT
+CREATE TLS-HS-HASH 32 ALLOT
+CREATE TLS-TEMP-SECRET 32 ALLOT
+CREATE TLS-TEMP-SECRET2 32 ALLOT
+CREATE TLS-FINISHED-KEY 32 ALLOT
+CREATE TLS-VERIFY-DATA 32 ALLOT
+CREATE TLS-FINISHED-MSG 40 ALLOT
+
+\ Pre-compute SHA3-256 of empty string (for "derived" key schedule steps).
+CREATE TLS-EMPTY-HASH 32 ALLOT
+SHA3-INIT  TLS-EMPTY-HASH SHA3-FINAL
+
+\ --- TLS 1.3 Label Strings ---
+\ Labels WITHOUT "tls13 " prefix (added by TLS-EXPAND-LABEL).
+CREATE TLS-L-DERIVED    100 C, 101 C, 114 C, 105 C, 118 C, 101 C, 100 C,
+7 CONSTANT /TLS-L-DERIVED
+
+CREATE TLS-L-C-HS-TR   99 C, 32 C, 104 C, 115 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-C-HS-TR
+
+CREATE TLS-L-S-HS-TR   115 C, 32 C, 104 C, 115 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-S-HS-TR
+
+CREATE TLS-L-KEY   107 C, 101 C, 121 C,
+3 CONSTANT /TLS-L-KEY
+
+CREATE TLS-L-IV   105 C, 118 C,
+2 CONSTANT /TLS-L-IV
+
+CREATE TLS-L-C-AP-TR   99 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-C-AP-TR
+
+CREATE TLS-L-S-AP-TR   115 C, 32 C, 97 C, 112 C, 32 C, 116 C, 114 C, 97 C, 102 C, 102 C, 105 C, 99 C,
+12 CONSTANT /TLS-L-S-AP-TR
+
+CREATE TLS-L-FINISHED   102 C, 105 C, 110 C, 105 C, 115 C, 104 C, 101 C, 100 C,
+8 CONSTANT /TLS-L-FINISHED
+
+\ --- TLS-EXPAND-LABEL ---
+\ TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+\   Construct HkdfLabel and call HKDF-EXPAND.
+\   HkdfLabel = length(2BE) || (6+llen)(1) || "tls13 " || label || clen(1) || ctx
+VARIABLE _TEL-SECRET
+VARIABLE _TEL-LABEL
+VARIABLE _TEL-LLEN
+VARIABLE _TEL-CTXP
+VARIABLE _TEL-CLEN
+VARIABLE _TEL-OLEN
+VARIABLE _TEL-OUT
+
+: TLS-EXPAND-LABEL ( secret label llen context clen olen out -- )
+    _TEL-OUT !  _TEL-OLEN !  _TEL-CLEN !  _TEL-CTXP !
+    _TEL-LLEN !  _TEL-LABEL !  _TEL-SECRET !
+    \ [0-1] output length (big-endian)
+    _TEL-OLEN @ 8 RSHIFT TLS-HKDF-LABEL C!
+    _TEL-OLEN @ 255 AND TLS-HKDF-LABEL 1+ C!
+    \ [2] total label length = 6 + llen
+    _TEL-LLEN @ 6 + TLS-HKDF-LABEL 2 + C!
+    \ [3..8] "tls13 "
+    116 TLS-HKDF-LABEL 3 + C!
+    108 TLS-HKDF-LABEL 4 + C!
+    115 TLS-HKDF-LABEL 5 + C!
+    49  TLS-HKDF-LABEL 6 + C!
+    51  TLS-HKDF-LABEL 7 + C!
+    32  TLS-HKDF-LABEL 8 + C!
+    \ [9..9+llen-1] label bytes
+    _TEL-LABEL @ TLS-HKDF-LABEL 9 + _TEL-LLEN @ CMOVE
+    \ [9+llen] context length
+    _TEL-CLEN @ TLS-HKDF-LABEL 9 + _TEL-LLEN @ + C!
+    \ [10+llen..] context bytes (if any)
+    _TEL-CLEN @ 0> IF
+        _TEL-CTXP @ TLS-HKDF-LABEL 10 + _TEL-LLEN @ + _TEL-CLEN @ CMOVE
+    THEN
+    \ HKDF-EXPAND( prk, info, info_len, output_len, output )
+    \ info_len = 2 + 1 + 6 + llen + 1 + clen = 10 + llen + clen
+    _TEL-SECRET @ TLS-HKDF-LABEL
+    _TEL-LLEN @ 10 + _TEL-CLEN @ +
+    _TEL-OLEN @ _TEL-OUT @ HKDF-EXPAND
+;
+
+\ --- Transcript Management ---
+: TLS-TR-RESET ( -- )  0 TLS-HS-TR-LEN ! ;
+
+VARIABLE _TTA-SRC
+VARIABLE _TTA-LEN
+
+: TLS-TR-APPEND ( addr len -- )
+    _TTA-LEN !  _TTA-SRC !
+    _TTA-LEN @ TLS-HS-TR-LEN @ + 1024 > IF EXIT THEN
+    _TTA-SRC @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ + _TTA-LEN @ CMOVE
+    _TTA-LEN @ TLS-HS-TR-LEN @ + TLS-HS-TR-LEN !
+;
+
+\ --- TLS-DERIVE-DERIVED ---
+\ TLS-DERIVE-DERIVED ( secret out -- )
+\   = HKDF-Expand-Label(Secret, "derived", SHA3-256(""), 32)
+: TLS-DERIVE-DERIVED ( secret out -- )
+    >R
+    TLS-L-DERIVED /TLS-L-DERIVED
+    TLS-EMPTY-HASH 32 32 R> TLS-EXPAND-LABEL
+;
+
+\ --- TLS-DERIVE-SECRET ---
+\ TLS-DERIVE-SECRET ( secret label llen out -- )
+\   = HKDF-Expand-Label(Secret, Label, Hash(Messages), 32)
+\   Messages = current transcript buffer.
+VARIABLE _TDS-SECRET
+VARIABLE _TDS-LABEL
+VARIABLE _TDS-LLEN
+VARIABLE _TDS-OUT
+
+: TLS-DERIVE-SECRET ( secret label llen out -- )
+    _TDS-OUT !  _TDS-LLEN !  _TDS-LABEL !  _TDS-SECRET !
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ HKDF-Expand-Label(secret, label, llen, hash, 32, 32, out)
+    _TDS-SECRET @ _TDS-LABEL @ _TDS-LLEN @
+    TLS-HS-HASH 32 32 _TDS-OUT @ TLS-EXPAND-LABEL
+;
+
+\ --- Key Schedule Phase 1 ---
+\ TLS-KS-HANDSHAKE ( ctx -- )
+\   Derive and install handshake traffic keys.
+\   Prerequisite: ctx.SHARED filled, transcript = CH||SH.
+VARIABLE _TKSH-CTX
+
+: TLS-KS-HANDSHAKE ( ctx -- )
+    _TKSH-CTX !
+    \ 1. Early Secret = HKDF-Extract(0*32, 0*32)
+    0 0  _HKDF-ZERO-SALT 32  _TKSH-CTX @ TLS-CTX.EARLY  HKDF-EXTRACT
+    \ 2. derived_es = Expand-Label(ES, "derived", empty_hash, 32)
+    _TKSH-CTX @ TLS-CTX.EARLY  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    \ 3. HS = HKDF-Extract(derived_es, shared_secret)
+    TLS-TEMP-SECRET 32  _TKSH-CTX @ TLS-CTX.SHARED 32
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  HKDF-EXTRACT
+    \ 4. c_hs_traffic = Derive-Secret(HS, "c hs traffic", Hash(CH||SH))
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-C-HS-TR /TLS-L-C-HS-TR
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC  TLS-DERIVE-SECRET
+    \ 5. s_hs_traffic = Derive-Secret(HS, "s hs traffic", Hash(CH||SH))
+    _TKSH-CTX @ TLS-CTX.HS-SECRET  TLS-L-S-HS-TR /TLS-L-S-HS-TR
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC  TLS-DERIVE-SECRET
+    \ 6-7. Client HS key+IV → WR-KEY/WR-IV
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSH-CTX @ TLS-CTX.WR-KEY
+    TLS-EXPAND-LABEL
+    _TKSH-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.WR-IV
+    TLS-EXPAND-LABEL
+    \ 8-9. Server HS key+IV → RD-KEY/RD-IV
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSH-CTX @ TLS-CTX.RD-KEY
+    TLS-EXPAND-LABEL
+    _TKSH-CTX @ TLS-CTX.S-HS-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSH-CTX @ TLS-CTX.RD-IV
+    TLS-EXPAND-LABEL
+    \ 10. Zero sequence numbers
+    0 _TKSH-CTX @ TLS-CTX.WR-SEQ !
+    0 _TKSH-CTX @ TLS-CTX.RD-SEQ !
+;
+
+\ --- Key Schedule Phase 2 ---
+\ TLS-KS-APPLICATION ( ctx -- )
+\   Derive and install application traffic keys from master secret.
+\   Prerequisite: HS-SECRET set, transcript through server Finished.
+VARIABLE _TKSA-CTX
+
+: TLS-KS-APPLICATION ( ctx -- )
+    _TKSA-CTX !
+    \ 1. derived_hs = Expand-Label(HS, "derived", empty_hash, 32)
+    _TKSA-CTX @ TLS-CTX.HS-SECRET  TLS-TEMP-SECRET  TLS-DERIVE-DERIVED
+    \ 2. MS = HKDF-Extract(derived_hs, 0*32)
+    TLS-TEMP-SECRET 32  _HKDF-ZERO-SALT 32
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  HKDF-EXTRACT
+    \ 3. c_ap_traffic = Derive-Secret(MS, "c ap traffic", Hash(full))
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-C-AP-TR /TLS-L-C-AP-TR
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC  TLS-DERIVE-SECRET
+    \ 4. s_ap_traffic = Derive-Secret(MS, "s ap traffic", Hash(full))
+    _TKSA-CTX @ TLS-CTX.MS-SECRET  TLS-L-S-AP-TR /TLS-L-S-AP-TR
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC  TLS-DERIVE-SECRET
+    \ 5-6. Client app key+IV → WR-KEY/WR-IV
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSA-CTX @ TLS-CTX.WR-KEY
+    TLS-EXPAND-LABEL
+    _TKSA-CTX @ TLS-CTX.C-AP-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.WR-IV
+    TLS-EXPAND-LABEL
+    \ 7-8. Server app key+IV → RD-KEY/RD-IV
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
+    TLS-L-KEY /TLS-L-KEY  0 0  32  _TKSA-CTX @ TLS-CTX.RD-KEY
+    TLS-EXPAND-LABEL
+    _TKSA-CTX @ TLS-CTX.S-AP-TRAFFIC
+    TLS-L-IV /TLS-L-IV  0 0  12  _TKSA-CTX @ TLS-CTX.RD-IV
+    TLS-EXPAND-LABEL
+    \ 9. Zero sequence numbers
+    0 _TKSA-CTX @ TLS-CTX.WR-SEQ !
+    0 _TKSA-CTX @ TLS-CTX.RD-SEQ !
+    \ 10. Mark connection established
+    TLSS-ESTABLISHED _TKSA-CTX @ TLS-CTX.STATE !
+    TLSH-CONNECTED _TKSA-CTX @ TLS-CTX.HS-STATE !
+;
+
+\ --- ClientHello Builder ---
+\ TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
+\   Build complete ClientHello record (149 bytes).
+\   Generates X25519 ephemeral keypair, stores in context.
+\   Appends handshake message to transcript.
+\   Returns buffer address and total length.
+VARIABLE _TBCH-CTX
+
+: TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
+    _TBCH-CTX !
+    TLS-TR-RESET
+    \ Generate ephemeral keypair
+    X25519-KEYGEN
+    X25519-PRIV _TBCH-CTX @ TLS-CTX.MY-PRIVKEY 32 CMOVE
+    X25519-PUB  _TBCH-CTX @ TLS-CTX.MY-PUBKEY  32 CMOVE
+    \ --- TLS Record Header (5 bytes) ---
+    TLS-CT-HANDSHAKE TLS-CH-BUF C!                    \ [0] = 22
+    3 TLS-CH-BUF 1 + C!   1 TLS-CH-BUF 2 + C!        \ [1-2] = 0x0301
+    0 TLS-CH-BUF 3 + C!   144 TLS-CH-BUF 4 + C!      \ [3-4] len=144
+    \ --- Handshake Header (4 bytes) ---
+    TLSHT-CLIENT-HELLO TLS-CH-BUF 5 + C!              \ [5] = 1
+    0 TLS-CH-BUF 6 + C!  0 TLS-CH-BUF 7 + C!         \ [6-8] = 140
+    140 TLS-CH-BUF 8 + C!
+    \ --- ClientHello Body ---
+    3 TLS-CH-BUF 9 + C!   3 TLS-CH-BUF 10 + C!       \ [9-10] 0x0303
+    32 0 DO RANDOM8 TLS-CH-BUF 11 I + + C! LOOP       \ [11-42] random
+    32 TLS-CH-BUF 43 + C!                              \ [43] sid_len=32
+    32 0 DO RANDOM8 TLS-CH-BUF 44 I + + C! LOOP       \ [44-75] sid
+    0 TLS-CH-BUF 76 + C!  2 TLS-CH-BUF 77 + C!       \ [76-77] suites_len=2
+    255 TLS-CH-BUF 78 + C!  1 TLS-CH-BUF 79 + C!     \ [78-79] 0xFF01
+    1 TLS-CH-BUF 80 + C!                               \ [80] comp_len=1
+    0 TLS-CH-BUF 81 + C!                               \ [81] null comp
+    0 TLS-CH-BUF 82 + C!  65 TLS-CH-BUF 83 + C!      \ [82-83] ext_len=65
+    \ --- Extensions ---
+    \ supported_versions (0x002B): 7 bytes
+    0  TLS-CH-BUF 84 + C!   43 TLS-CH-BUF 85 + C!
+    0  TLS-CH-BUF 86 + C!   3  TLS-CH-BUF 87 + C!
+    2  TLS-CH-BUF 88 + C!
+    3  TLS-CH-BUF 89 + C!   4  TLS-CH-BUF 90 + C!    \ 0x0304
+    \ key_share (0x0033): 42 bytes
+    0  TLS-CH-BUF 91 + C!   51 TLS-CH-BUF 92 + C!
+    0  TLS-CH-BUF 93 + C!   38 TLS-CH-BUF 94 + C!
+    0  TLS-CH-BUF 95 + C!   36 TLS-CH-BUF 96 + C!
+    0  TLS-CH-BUF 97 + C!   29 TLS-CH-BUF 98 + C!    \ x25519
+    0  TLS-CH-BUF 99 + C!   32 TLS-CH-BUF 100 + C!
+    _TBCH-CTX @ TLS-CTX.MY-PUBKEY TLS-CH-BUF 101 + 32 CMOVE
+    \ signature_algorithms (0x000D): 8 bytes
+    0  TLS-CH-BUF 133 + C!  13 TLS-CH-BUF 134 + C!
+    0  TLS-CH-BUF 135 + C!  4  TLS-CH-BUF 136 + C!
+    0  TLS-CH-BUF 137 + C!  2  TLS-CH-BUF 138 + C!
+    8  TLS-CH-BUF 139 + C!  7  TLS-CH-BUF 140 + C!   \ ed25519
+    \ supported_groups (0x000A): 8 bytes
+    0  TLS-CH-BUF 141 + C!  10 TLS-CH-BUF 142 + C!
+    0  TLS-CH-BUF 143 + C!  4  TLS-CH-BUF 144 + C!
+    0  TLS-CH-BUF 145 + C!  2  TLS-CH-BUF 146 + C!
+    0  TLS-CH-BUF 147 + C!  29 TLS-CH-BUF 148 + C!   \ x25519
+    \ Set handshake state
+    TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
+    TLSH-CLIENT-HELLO-SENT _TBCH-CTX @ TLS-CTX.HS-STATE !
+    \ Append handshake message to transcript (bytes 5..148 = 144 bytes)
+    TLS-CH-BUF 5 + 144 TLS-TR-APPEND
+    \ Return buffer + total length
+    TLS-CH-BUF 149
+;
+
+\ --- ServerHello Parser ---
+\ TLS-PARSE-SERVER-HELLO ( ctx msg mlen -- flag )
+\   Parse ServerHello handshake message (without TLS record header).
+\   msg starts at handshake type byte.  Extracts peer X25519 public key.
+\   Returns 0 on success, -1 on error.
+VARIABLE _TPSH-CTX
+VARIABLE _TPSH-MSG
+VARIABLE _TPSH-MLEN
+VARIABLE _TPSH-POS
+VARIABLE _TPSH-SIDLEN
+VARIABLE _TPSH-EXTLEN
+VARIABLE _TPSH-ETYPE
+VARIABLE _TPSH-ELEN
+VARIABLE _TPSH-OK
+
+: TLS-PARSE-SERVER-HELLO ( ctx msg mlen -- flag )
+    _TPSH-MLEN !  _TPSH-MSG !  _TPSH-CTX !
+    0 _TPSH-OK !
+    \ Verify handshake type = 2
+    _TPSH-MSG @ C@ TLSHT-SERVER-HELLO <> IF -1 EXIT THEN
+    \ +4: server_version(2), +6: random(32), +38: session_id_len
+    _TPSH-MSG @ 38 + C@ _TPSH-SIDLEN !
+    39 _TPSH-SIDLEN @ + _TPSH-POS !
+    \ cipher_suite (2 bytes)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+    _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+    TLS-SUITE-X25519-SHA3 <> IF -1 _TPSH-OK ! THEN
+    _TPSH-POS @ 2 + _TPSH-POS !
+    \ compression_method (1 byte, must be 0)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 0<> IF -1 _TPSH-OK ! THEN
+    _TPSH-POS @ 1+ _TPSH-POS !
+    \ extensions_len (2 bytes)
+    _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+    _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+    _TPSH-EXTLEN !
+    _TPSH-POS @ 2 + _TPSH-POS !
+    \ Walk extensions
+    _TPSH-EXTLEN @
+    BEGIN DUP 0> WHILE
+        _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+        _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR  _TPSH-ETYPE !
+        _TPSH-MSG @ _TPSH-POS @ 2 + + C@ 8 LSHIFT
+        _TPSH-MSG @ _TPSH-POS @ 3 + + C@ OR  _TPSH-ELEN !
+        _TPSH-POS @ 4 + _TPSH-POS !
+        \ key_share (0x0033 = 51)
+        _TPSH-ETYPE @ 51 = IF
+            _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+            _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+            29 <> IF -1 _TPSH-OK ! THEN
+            _TPSH-MSG @ _TPSH-POS @ 4 + +
+            _TPSH-CTX @ TLS-CTX.PEER-PUBKEY 32 CMOVE
+        THEN
+        \ supported_versions (0x002B = 43)
+        _TPSH-ETYPE @ 43 = IF
+            _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
+            _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
+            772 <> IF -1 _TPSH-OK ! THEN
+        THEN
+        _TPSH-POS @ _TPSH-ELEN @ + _TPSH-POS !
+        _TPSH-ELEN @ 4 + -
+    REPEAT DROP
+    _TPSH-OK @
+;
+
+\ --- Finished MAC Verification ---
+\ TLS-VERIFY-FINISHED ( traffic-secret verify-data -- flag )
+\   Verify a Finished message's verify_data (32 bytes).
+\   Returns 0 if valid, -1 if not.
+VARIABLE _TVF-SECRET
+VARIABLE _TVF-VERIFY
+
+: TLS-VERIFY-FINISHED ( traffic-secret verify-data -- flag )
+    _TVF-VERIFY !  _TVF-SECRET !
+    \ finished_key = HKDF-Expand-Label(secret, "finished", "", 32)
+    _TVF-SECRET @
+    TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
+    TLS-EXPAND-LABEL
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ expected = HMAC(finished_key, transcript_hash)
+    TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  HMAC
+    \ Compare with received
+    TLS-VERIFY-DATA _TVF-VERIFY @ 32 VERIFY
+;
+
+\ --- Client Finished Builder ---
+\ TLS-BUILD-FINISHED ( ctx rec -- reclen )
+\   Build and encrypt client Finished message.
+\   Does NOT append to transcript (caller manages for key derivation order).
+\   Returns encrypted record length.
+VARIABLE _TBF-CTX
+VARIABLE _TBF-REC
+
+: TLS-BUILD-FINISHED ( ctx rec -- reclen )
+    _TBF-REC !  _TBF-CTX !
+    \ finished_key = Expand-Label(c_hs_traffic, "finished", "", 32)
+    _TBF-CTX @ TLS-CTX.C-HS-TRAFFIC
+    TLS-L-FINISHED /TLS-L-FINISHED  0 0  32  TLS-FINISHED-KEY
+    TLS-EXPAND-LABEL
+    \ Hash transcript → TLS-HS-HASH
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ TLS-HS-HASH SHA3
+    \ verify_data = HMAC(finished_key, hash)
+    TLS-FINISHED-KEY 32  TLS-HS-HASH 32  TLS-VERIFY-DATA  HMAC
+    \ Build Finished handshake message (36 bytes)
+    TLSHT-FINISHED  TLS-FINISHED-MSG C!
+    0  TLS-FINISHED-MSG 1 + C!
+    0  TLS-FINISHED-MSG 2 + C!
+    32 TLS-FINISHED-MSG 3 + C!
+    TLS-VERIFY-DATA TLS-FINISHED-MSG 4 + 32 CMOVE
+    \ Encrypt: TLS-ENCRYPT-RECORD(ctx, HANDSHAKE, msg, 36, rec)
+    _TBF-CTX @ TLS-CT-HANDSHAKE TLS-FINISHED-MSG 36 _TBF-REC @
+    TLS-ENCRYPT-RECORD
+;
+
+\ --- Handshake Message Processor ---
+\ TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
+\   Process a received handshake message (decrypted, no record header).
+\   Dispatches on handshake type, updates transcript and state.
+\   Returns 0 for success, -1 for error.
+VARIABLE _TPHM-CTX
+VARIABLE _TPHM-MSG
+VARIABLE _TPHM-MLEN
+VARIABLE _TPHM-TYPE
+
+: TLS-PROCESS-HS-MSG ( ctx msg mlen -- flag )
+    _TPHM-MLEN !  _TPHM-MSG !  _TPHM-CTX !
+    _TPHM-MSG @ C@ _TPHM-TYPE !
+    _TPHM-TYPE @ TLSHT-SERVER-HELLO = IF
+        _TPHM-CTX @ _TPHM-MSG @ _TPHM-MLEN @ TLS-PARSE-SERVER-HELLO
+        DUP 0<> IF EXIT THEN DROP
+        \ Append SH to transcript
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        \ Compute shared secret via X25519
+        _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE
+        _TPHM-CTX @ TLS-CTX.PEER-PUBKEY X25519-DH
+        X25519-SHARED _TPHM-CTX @ TLS-CTX.SHARED 32 CMOVE
+        \ Key schedule phase 1
+        _TPHM-CTX @ TLS-KS-HANDSHAKE
+        TLSH-SERVER-HELLO-RCVD _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-ENCRYPTED-EXT = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-EE _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-CERTIFICATE = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-CERT _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-CERT-VERIFY = IF
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-CV _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    _TPHM-TYPE @ TLSHT-FINISHED = IF
+        \ Verify server Finished MAC (transcript without this Finished)
+        _TPHM-CTX @ TLS-CTX.S-HS-TRAFFIC
+        _TPHM-MSG @ 4 +
+        TLS-VERIFY-FINISHED
+        DUP 0<> IF EXIT THEN DROP
+        \ Append server Finished to transcript
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+        TLSH-WAIT-FINISHED _TPHM-CTX @ TLS-CTX.HS-STATE !
+        0 EXIT
+    THEN
+    \ Unknown type — hash into transcript, continue
+    _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
+    0
+;
+
+\ --- Handshake Completion ---
+\ TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+\   After server Finished verified and appended to transcript:
+\   1. Build+encrypt client Finished (using handshake keys)
+\   2. Derive and install application traffic keys
+\   Returns encrypted client Finished record length.
+VARIABLE _THC-CTX
+VARIABLE _THC-REC
+
+: TLS-HANDSHAKE-COMPLETE ( ctx rec -- reclen )
+    _THC-REC !  _THC-CTX !
+    _THC-CTX @  _THC-REC @  TLS-BUILD-FINISHED
+    _THC-CTX @ TLS-KS-APPLICATION
+;
+
+\ =====================================================================
+\  §16.10  TLS 1.3 Application Data (RFC 8446 §5.1)
+\ =====================================================================
+\
+\  High-level words for sending/receiving application data over an
+\  established TLS connection.  Uses the record layer from §16.8.
+\
+\  TLS-SEND-DATA  ( ctx addr len -- actual )
+\  TLS-RECV-DATA  ( ctx addr maxlen -- actual | -1 )
+\  TLS-SEND-ALERT ( ctx level desc -- )
+\  TLS-CLOSE      ( ctx -- )
+
+CREATE TLS-SEND-REC 1600 ALLOT
+CREATE TLS-RECV-REC 1600 ALLOT
+
+\ --- TLS-SEND-DATA ---
+\ Encrypt plaintext as app_data record and send via TCP.
+VARIABLE _TSD-CTX
+VARIABLE _TSD-SRC
+VARIABLE _TSD-LEN
+
+: TLS-SEND-DATA ( ctx addr len -- actual )
+    _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
+    _TSD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
+    _TSD-LEN @ 1400 MIN _TSD-LEN !
+    \ Encrypt
+    _TSD-CTX @  TLS-CT-APP-DATA  _TSD-SRC @  _TSD-LEN @
+    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    \ Send via TCP
+    _TSD-CTX @ TLS-CTX.TCB @   TLS-SEND-REC  ROT  TCP-SEND
+    DUP 0> IF DROP _TSD-LEN @ ELSE DROP 0 THEN
+;
+
+\ --- TLS-RECV-DATA ---
+\ Receive TCP data, decrypt, and return plaintext.
+\ Returns actual bytes received, or -1 on decryption error, or 0 if nothing.
+VARIABLE _TRD-CTX
+VARIABLE _TRD-DST
+VARIABLE _TRD-MAXLEN
+VARIABLE _TRD-RLEN
+
+: TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
+    _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
+    _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
+    \ Try to receive raw TCP data
+    _TRD-CTX @ TLS-CTX.TCB @  TLS-RECV-REC 1600  TCP-RECV
+    DUP 0= IF EXIT THEN
+    _TRD-RLEN !
+    \ Decrypt
+    _TRD-CTX @  TLS-RECV-REC  _TRD-RLEN @  TLS-PLAIN-BUF
+    TLS-DECRYPT-RECORD
+    \ Stack: ctype plen  (or -1 0)
+    DUP 0= IF 2DROP -1 EXIT THEN \ decrypt failed
+    SWAP TLS-CT-APP-DATA <> IF DROP -1 EXIT THEN \ not app data
+    \ Copy min(plen, maxlen) to destination
+    _TRD-MAXLEN @ MIN
+    TLS-PLAIN-BUF _TRD-DST @ ROT DUP >R CMOVE
+    R>
+;
+
+\ --- TLS-SEND-ALERT ---
+\ Send a TLS alert (e.g., close_notify = level=1, desc=0).
+CREATE TLS-ALERT-BUF 2 ALLOT
+
+: TLS-SEND-ALERT ( ctx level desc -- )
+    TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
+    TLS-CT-ALERT  TLS-ALERT-BUF  2
+    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    \ Send via TCP
+    SWAP TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
+;
+
+\ --- TLS-CLOSE ---
+\ Send close_notify alert and close TCP connection.
+: TLS-CLOSE ( ctx -- )
+    DUP TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF DROP EXIT THEN
+    DUP 1 0 TLS-SEND-ALERT                   \ close_notify
+    DUP TLSS-CLOSING SWAP TLS-CTX.STATE !
+    TLS-CTX.TCB @ TCP-CLOSE
+;
+
+\ =====================================================================
+\  §16.11  TLS 1.3 Connection API
+\ =====================================================================
+\
+\  User-facing words for TLS connections.
+\
+\  TLS-CONNECT ( rip rport lport -- ctx | 0 )
+\    Allocate TLS context, do TCP connect, run full TLS handshake.
+\    Blocks until handshake completes or times out.
+\
+\  TLS-SEND ( ctx addr len -- actual )
+\    Encrypt and send application data.  (Alias for TLS-SEND-DATA.)
+\
+\  TLS-RECV ( ctx addr maxlen -- actual | -1 )
+\    Receive and decrypt application data.  (Alias for TLS-RECV-DATA.)
+
+\ -- TLS context allocator --
+: TLS-CTX-ALLOC ( -- ctx | 0 )
+    TLS-MAX-CTX 0 DO
+        I TLS-CTX@ TLS-CTX.STATE @ TLSS-NONE = IF
+            I TLS-CTX@ UNLOOP EXIT
+        THEN
+    LOOP 0 ;
+
+\ -- TLS-CONNECT --
+VARIABLE _TLSC-CTX
+VARIABLE _TLSC-TCB
+VARIABLE _TLSC-RLEN
+VARIABLE _TLSC-CTYPE
+
+: TLS-CONNECT ( rip rport lport -- ctx | 0 )
+    >R >R >R
+    \ 1. Allocate TLS context
+    TLS-CTX-ALLOC DUP 0= IF R> R> R> 2DROP DROP EXIT THEN
+    _TLSC-CTX !
+    _TLSC-CTX @ /TLS-CTX 0 FILL
+    \ 2. TCP connect
+    R> R> R> ROT SWAP ROT TCP-CONNECT
+    DUP 0= IF _TLSC-CTX @ DROP EXIT THEN
+    _TLSC-TCB !
+    _TLSC-TCB @ _TLSC-CTX @ TLS-CTX.TCB !
+    \ 3. Wait for TCP established
+    50 TCP-POLL-WAIT
+    _TLSC-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF 0 EXIT THEN
+    \ 4. Build+send ClientHello
+    _TLSC-CTX @ TLS-BUILD-CLIENT-HELLO
+    _TLSC-TCB @ ROT ROT TCP-SEND DROP
+    20 TCP-POLL-WAIT
+    \ 5. Receive ServerHello (plaintext)
+    _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+    DUP 0= IF DROP 0 EXIT THEN
+    _TLSC-RLEN !
+    \ Parse SH: skip 5-byte TLS record header
+    _TLSC-CTX @  TLS-RECV-REC 5 +  _TLSC-RLEN @ 5 -
+    TLS-PROCESS-HS-MSG 0<> IF 0 EXIT THEN
+    \ 6. Receive encrypted handshake messages
+    \ (EncryptedExtensions, optionally Cert/CertVerify, server Finished)
+    20 TCP-POLL-WAIT
+    BEGIN
+        _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-WAIT-FINISHED <
+    WHILE
+        _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+        DUP 0= IF DROP 0 EXIT THEN
+        _TLSC-RLEN !
+        \ Decrypt record
+        _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
+        TLS-DECRYPT-RECORD
+        DUP 0= IF 2DROP 0 EXIT THEN
+        _TLSC-CTYPE !
+        _TLSC-CTYPE @ TLS-CT-CCS = IF DROP
+        ELSE
+            _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSG
+            0<> IF 0 EXIT THEN
+        THEN
+        10 TCP-POLL-WAIT
+    REPEAT
+    \ 7. Send client Finished + install app keys
+    _TLSC-CTX @  TLS-SEND-REC  TLS-HANDSHAKE-COMPLETE
+    _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
+    \ 8. Return context
+    _TLSC-CTX @
+;
+
+\ -- TLS-SEND / TLS-RECV convenience aliases --
+: TLS-SEND ( ctx addr len -- actual )  TLS-SEND-DATA ;
+: TLS-RECV ( ctx addr maxlen -- actual | -1 )  TLS-RECV-DATA ;
+
+\ =====================================================================
+\  §17  Socket API
+\ =====================================================================
+\
+\  BSD-style socket abstraction over TCP and TLS.
+\
+\  Socket descriptor table: 8 slots.
+\  Each socket is 32 bytes:
+\    +0   STATE      8    0=FREE 1=TCP 2=TLS 3=LISTENING 4=ACCEPTED
+\    +8   TCB/CTX    8    TCB pointer (TCP) or TLS-CTX pointer (TLS)
+\    +16  LOCAL-PORT 8    Local port number
+\    +24  FLAGS      8    Bit0: TLS mode
+\
+\  API:
+\    SOCKET     ( type -- sd | -1 )   type: 0=TCP, 1=TLS
+\    BIND       ( sd port -- ior )
+\    LISTEN     ( sd -- ior )
+\    ACCEPT     ( sd -- new-sd | -1 )
+\    CONNECT    ( sd rip rport -- ior )
+\    SEND       ( sd addr len -- actual )
+\    RECV       ( sd addr maxlen -- actual )
+\    CLOSE      ( sd -- )
+
+\ --- Socket Constants ---
+32 CONSTANT /SOCK
+8  CONSTANT SOCK-MAX
+
+0 CONSTANT SOCKST-FREE
+1 CONSTANT SOCKST-TCP
+2 CONSTANT SOCKST-TLS
+3 CONSTANT SOCKST-LISTENING
+4 CONSTANT SOCKST-ACCEPTED
+
+0 CONSTANT SOCK-TYPE-TCP
+1 CONSTANT SOCK-TYPE-TLS
+
+\ --- Socket Descriptor Table ---
+CREATE SOCK-TABLE  /SOCK SOCK-MAX * ALLOT
+SOCK-TABLE /SOCK SOCK-MAX * 0 FILL
+
+: SOCK-N ( n -- addr )  /SOCK * SOCK-TABLE + ;
+: SOCK.STATE      ( sd -- addr )           ;
+: SOCK.HANDLE     ( sd -- addr )   8  + ;
+: SOCK.LOCAL-PORT ( sd -- addr )   16 + ;
+: SOCK.FLAGS      ( sd -- addr )   24 + ;
+
+\ --- SOCKET ( type -- sd | -1 ) ---
+\ Allocate a new socket descriptor.
+VARIABLE _SOK-TYPE
+
+: SOCKET ( type -- sd | -1 )
+    _SOK-TYPE !
+    SOCK-MAX 0 DO
+        I SOCK-N SOCK.STATE @ SOCKST-FREE = IF
+            I SOCK-N /SOCK 0 FILL
+            _SOK-TYPE @ 1 AND I SOCK-N SOCK.FLAGS !
+            _SOK-TYPE @ 1 AND IF SOCKST-TLS ELSE SOCKST-TCP THEN
+            I SOCK-N SOCK.STATE !
+            I SOCK-N UNLOOP EXIT
+        THEN
+    LOOP -1 ;
+
+\ --- BIND ( sd port -- ior ) ---
+: BIND ( sd port -- ior )
+    SWAP SOCK.LOCAL-PORT ! 0 ;
+
+\ --- LISTEN ( sd -- ior ) ---
+\ Move to LISTENING state, open TCP passive listener.
+VARIABLE _SLSN-SD
+
+: LISTEN ( sd -- ior )
+    _SLSN-SD !
+    _SLSN-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
+    DUP 0= IF DROP -1 EXIT THEN
+    _SLSN-SD @ SOCK.HANDLE !
+    SOCKST-LISTENING _SLSN-SD @ SOCK.STATE !
+    0
+;
+
+\ --- ACCEPT ( sd -- new-sd | -1 ) ---
+\ Poll for incoming connection on a listening socket.
+\ Returns a new socket descriptor for the accepted connection.
+VARIABLE _SACC-SD
+VARIABLE _SACC-TCB
+
+: ACCEPT ( sd -- new-sd | -1 )
+    _SACC-SD !
+    _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
+    \ Check if the listening TCB has transitioned to ESTABLISHED
+    _SACC-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED <> IF -1 EXIT THEN
+    _SACC-SD @ SOCK.HANDLE @ _SACC-TCB !
+    \ Allocate new socket for the accepted connection
+    _SACC-SD @ SOCK.FLAGS @ 1 AND SOCKET   \ same type (TCP/TLS)
+    DUP -1 = IF EXIT THEN
+    DUP >R
+    _SACC-TCB @ R@ SOCK.HANDLE !
+    SOCKST-ACCEPTED R@ SOCK.STATE !
+    _SACC-SD @ SOCK.LOCAL-PORT @ R@ SOCK.LOCAL-PORT !
+    \ Re-open listener for next connection
+    _SACC-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
+    DUP 0<> IF _SACC-SD @ SOCK.HANDLE ! THEN
+    DROP
+    R>
+;
+
+\ --- CONNECT ( sd rip rport -- ior ) ---
+\ Active open: TCP connect (+ TLS handshake if TLS socket).
+VARIABLE _SCON-SD
+VARIABLE _SCON-RIP
+VARIABLE _SCON-RPORT
+
+: CONNECT ( sd rip rport -- ior )
+    _SCON-RPORT !  _SCON-RIP !  _SCON-SD !
+    _SCON-SD @ SOCK.FLAGS @ 1 AND IF
+        \ TLS socket
+        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        TLS-CONNECT
+        DUP 0= IF DROP -1 EXIT THEN
+        _SCON-SD @ SOCK.HANDLE !
+        SOCKST-TLS _SCON-SD @ SOCK.STATE !
+        0
+    ELSE
+        \ Plain TCP
+        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        TCP-CONNECT
+        DUP 0= IF DROP -1 EXIT THEN
+        _SCON-SD @ SOCK.HANDLE !
+        50 TCP-POLL-WAIT
+        _SCON-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED = IF
+            SOCKST-TCP _SCON-SD @ SOCK.STATE !
+            0
+        ELSE -1 THEN
+    THEN
+;
+
+\ --- SEND ( sd addr len -- actual ) ---
+: SEND ( sd addr len -- actual )
+    ROT DUP SOCK.STATE @ CASE
+        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
+        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-SEND  ENDOF
+        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
+        >R 2DROP DROP 0 R>
+    ENDCASE
+;
+
+\ --- RECV ( sd addr maxlen -- actual ) ---
+: RECV ( sd addr maxlen -- actual )
+    ROT DUP SOCK.STATE @ CASE
+        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
+        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-RECV  ENDOF
+        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
+        >R 2DROP DROP 0 R>
+    ENDCASE
+;
+
+\ --- CLOSE ( sd -- ) ---
+: CLOSE ( sd -- )
+    DUP SOCK.HANDLE @ 0<> IF
+        DUP SOCK.STATE @ CASE
+            SOCKST-TCP     OF DUP SOCK.HANDLE @ TCP-CLOSE  ENDOF
+            SOCKST-TLS     OF DUP SOCK.HANDLE @ TLS-CLOSE  ENDOF
+            SOCKST-ACCEPTED OF DUP SOCK.HANDLE @ TCP-CLOSE ENDOF
+            SOCKST-LISTENING OF DUP SOCK.HANDLE @ TCB-INIT ENDOF
+        ENDCASE
+    THEN
+    /SOCK 0 FILL   \ reset slot to FREE
+;
+
+\ .SOCKET ( sd -- )  Print socket status.
+: .SOCKET ( sd -- )
+    DUP SOCK.STATE @
+    DUP SOCKST-FREE = IF DROP ."  socket: free" CR ELSE
+    DUP SOCKST-TCP  = IF DROP ."  socket: TCP connected" CR ELSE
+    DUP SOCKST-TLS  = IF DROP ."  socket: TLS connected" CR ELSE
+    DUP SOCKST-LISTENING = IF DROP ."  socket: listening" CR ELSE
+    DUP SOCKST-ACCEPTED  = IF DROP ."  socket: accepted" CR ELSE
+    DROP ."  socket: unknown" CR
+    THEN THEN THEN THEN THEN
+    DROP
+;
 
 \ =====================================================================
 \  §14  Startup
