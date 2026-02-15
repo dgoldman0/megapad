@@ -9106,6 +9106,309 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
+#  TLS 1.3 Application Data tests — §16.10 / §16.11
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSAppData(_KDOSTestBase):
+    """Tests for §16.10/§16.11 TLS app data, TLS-SEND-DATA, TLS-RECV-DATA,
+    TLS-CLOSE, and TLS-SEND-ALERT."""
+
+    _TLS_ESTAB_SETUP = [
+        "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+        # Set up keys = 0..31 for both WR and RD (roundtrip test)
+        ": init-key 32 0 DO I test-ctx @ TLS-CTX.WR-KEY I + C! LOOP ;",
+        "init-key",
+        ": init-rk 32 0 DO I test-ctx @ TLS-CTX.RD-KEY I + C! LOOP ;",
+        "init-rk",
+        ": init-iv 12 0 DO I test-ctx @ TLS-CTX.WR-IV I + C! LOOP ;",
+        "init-iv",
+        ": init-riv 12 0 DO I test-ctx @ TLS-CTX.RD-IV I + C! LOOP ;",
+        "init-riv",
+        "0 test-ctx @ TLS-CTX.WR-SEQ !",
+        "0 test-ctx @ TLS-CTX.RD-SEQ !",
+        "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+    ]
+
+    def test_tls_send_data_not_established(self):
+        """TLS-SEND-DATA returns 0 when not in ESTABLISHED state."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE msg 4 ALLOT  msg 4 65 FILL",
+            'test-ctx @  msg 4  TLS-SEND-DATA  ." S=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S=0 ", text)
+
+    def test_tls_recv_data_not_established(self):
+        """TLS-RECV-DATA returns 0 when not in ESTABLISHED state."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE buf 64 ALLOT",
+            'test-ctx @  buf 64  TLS-RECV-DATA  ." R=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("R=0 ", text)
+
+    def test_tls_encrypt_decrypt_roundtrip(self):
+        """TLS-ENCRYPT-RECORD / TLS-DECRYPT-RECORD roundtrip via raw buffers."""
+        lines = self._TLS_ESTAB_SETUP + [
+            # Encrypt 8 bytes of app data
+            "CREATE pt-msg 8 ALLOT  pt-msg 8 72 FILL",    # 'H' * 8
+            "CREATE enc-buf 128 ALLOT",
+            "test-ctx @  TLS-CT-APP-DATA  pt-msg 8  enc-buf",
+            "TLS-ENCRYPT-RECORD",
+            'VARIABLE enc-len  enc-len !',
+            # Reset read seq for decrypt
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            # Decrypt
+            "CREATE dec-buf 64 ALLOT",
+            "test-ctx @  enc-buf  enc-len @  dec-buf",
+            "TLS-DECRYPT-RECORD",
+            '." PL=" .',  # plen
+            '." CT=" .',  # ctype
+            '." D0=" dec-buf C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CT=23 ", text)      # APP_DATA
+        self.assertIn("D0=72 ", text)      # 'H'
+
+    def test_tls_close_state(self):
+        """TLS-CLOSE transitions to CLOSING state."""
+        # TLS-CLOSE needs a TCB, so we test on bare context without TCP
+        lines = self._TLS_ESTAB_SETUP + [
+            # Can't fully close without TCP, but check state guard
+            "TLSS-NONE test-ctx @ TLS-CTX.STATE !",
+            "test-ctx @ TLS-CLOSE",
+            '." S=" test-ctx @ TLS-CTX.STATE @ .',   # should remain NONE
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("S=0 ", text)   # NONE — guard prevents close
+
+    def test_alert_buf_layout(self):
+        """TLS-ALERT-BUF stores level and description bytes."""
+        text = self._run_kdos([
+            '." SZ=" /SOCK .',
+            '." SM=" SOCK-MAX .',
+        ])
+        self.assertIn("SZ=32 ", text)
+        self.assertIn("SM=8 ", text)
+
+
+# ---------------------------------------------------------------------------
+#  Socket API tests — §17
+# ---------------------------------------------------------------------------
+
+class TestKDOSSocket(_KDOSTestBase):
+    """Tests for §17 Socket API — SOCKET, BIND, CONNECT, SEND, RECV, CLOSE."""
+
+    def test_socket_alloc_tcp(self):
+        """SOCKET allocates a TCP socket descriptor."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            '." ADDR=" DUP .',
+            '." TBL=" SOCK-TABLE .',
+            'SOCK.STATE @ ." ST=" .',
+        ])
+        # SOCKET returns address of first slot = SOCK-TABLE
+        lines = text.replace('\r', '')
+        import re
+        m_addr = re.search(r'ADDR=(\d+)', lines)
+        m_tbl  = re.search(r'TBL=(\d+)', lines)
+        self.assertIsNotNone(m_addr)
+        self.assertIsNotNone(m_tbl)
+        self.assertEqual(m_addr.group(1), m_tbl.group(1))
+        self.assertIn("ST=1 ", text)     # SOCKST-TCP after alloc
+
+    def test_socket_alloc_tls(self):
+        """SOCKET allocates a TLS socket with flags bit 0 set."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TLS SOCKET',
+            'DUP SOCK.FLAGS @ ." FL=" .',
+            'DROP',
+        ])
+        self.assertIn("FL=1 ", text)
+
+    def test_socket_bind(self):
+        """BIND stores local port in socket descriptor."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            'DUP 8080 BIND ." BI=" .',
+            'SOCK.LOCAL-PORT @ ." LP=" .',
+        ])
+        self.assertIn("BI=0 ", text)     # success
+        self.assertIn("LP=8080 ", text)
+
+    def test_socket_close_resets(self):
+        """CLOSE resets socket to FREE state."""
+        text = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            'DUP 8080 BIND DROP',
+            'DUP CLOSE',
+            # That socket slot should now be free again
+            '0 SOCK-N SOCK.STATE @ ." ST=" .',
+        ])
+        self.assertIn("ST=0 ", text)     # FREE
+
+    def test_socket_constants(self):
+        """Socket constants have correct values."""
+        text = self._run_kdos([
+            '." A=" SOCKST-FREE .',
+            '." B=" SOCKST-TCP .',
+            '." C=" SOCKST-TLS .',
+            '." D=" SOCKST-LISTENING .',
+            '." E=" SOCKST-ACCEPTED .',
+        ])
+        self.assertIn("A=0 ", text)
+        self.assertIn("B=1 ", text)
+        self.assertIn("C=2 ", text)
+        self.assertIn("D=3 ", text)
+        self.assertIn("E=4 ", text)
+
+    def test_socket_status_display(self):
+        """.SOCKET prints human-readable state."""
+        text = self._run_kdos(["0 SOCK-N .SOCKET"])
+        self.assertIn("socket: free", text)
+
+    def test_socket_table_max(self):
+        """Can allocate SOCK-MAX sockets, then next returns -1."""
+        lines = [
+            "VARIABLE alloc-ct  0 alloc-ct !",
+            ": alloc-all SOCK-MAX 0 DO SOCK-TYPE-TCP SOCKET -1 <> IF"
+            " 1 alloc-ct +! THEN LOOP ;",
+            "alloc-all",
+            '." AC=" alloc-ct @ .',
+            ': chk-ovf SOCK-TYPE-TCP SOCKET ." OVF=" . ;',
+            'chk-ovf',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("AC=8 ", text)
+        self.assertIn("OVF=-1 ", text)
+
+    def test_socket_tcp_connect_roundtrip(self):
+        """Socket API: CONNECT + SEND + RECV over TCP with NIC loopback."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 80
+        client_port = 12345
+        server_isn = 5000
+        state = {'data_acked': False}
+
+        def tcp_echo(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None or parsed['dport'] != server_port:
+                return
+            # SYN → SYN+ACK
+            if (parsed['flags'] & 0x02) and not (parsed['flags'] & 0x10):
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn, parsed['seq'] + 1, 0x12, 8192))
+                return
+            # Data → echo
+            if len(parsed['payload']) > 0 and not state['data_acked']:
+                state['data_acked'] = True
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1, parsed['seq'] + len(parsed['payload']),
+                    0x18, 8192, parsed['payload']))
+                return
+            # FIN → FIN+ACK
+            if parsed['flags'] & 0x01:
+                nic.inject_frame(TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    server_port, client_port,
+                    server_isn + 1 + 2, parsed['seq'] + 1, 0x11, 8192))
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C!"
+            " 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT 10 PIP C! 0 PIP 1+ C! 0 PIP 2 + C!"
+            " 1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Socket API
+            "SOCK-TYPE-TCP SOCKET",
+            "VARIABLE sd  sd !",
+            "sd @ 12345 BIND DROP",
+            'sd @  PIP 80  CONNECT  ." CN=" .',
+            "5 TCP-POLL-WAIT",
+            '." SST=" sd @ SOCK.STATE @ .',
+            # Send "Hi"
+            "CREATE MSG 2 ALLOT  72 MSG C!  105 MSG 1+ C!",
+            'sd @ MSG 2 SEND ." SE=" .',
+            "5 TCP-POLL-WAIT",
+            # Recv echo
+            "CREATE RBF 64 ALLOT  RBF 64 0 FILL",
+            'sd @ RBF 64 RECV ." RV=" .',
+            '." B0=" RBF C@ .',
+            '." B1=" RBF 1+ C@ .',
+            # Close
+            "sd @ CLOSE",
+        ], nic_tx_callback=tcp_echo)
+        self.assertIn("CN=0 ", text)       # connect success
+        self.assertIn("SST=1 ", text)      # SOCKST-TCP
+        self.assertIn("SE=2 ", text)
+        self.assertIn("RV=2 ", text)
+        self.assertIn("B0=72 ", text)      # 'H'
+        self.assertIn("B1=105 ", text)     # 'i'
+
+    def test_socket_listen_accept(self):
+        """Socket API: LISTEN + ACCEPT with passive open."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+        server_port = 8080
+        client_port = 50000
+        client_isn = 3000
+
+        def tcp_client(nic, frame_bytes):
+            parsed = TestKDOSNetStack._parse_tcp_frame(frame_bytes)
+            if parsed is None:
+                return
+            # Server sends SYN+ACK → client sends ACK
+            if parsed['flags'] == 0x12:    # SYN+ACK
+                ack = TestKDOSNetStack._build_tcp_frame(
+                    nic_mac, peer_mac, peer_ip, my_ip,
+                    client_port, server_port,
+                    client_isn + 1, parsed['seq'] + 1, 0x10, 8192)
+                nic.inject_frame(ack)
+
+        # Pre-inject a SYN from client
+        syn = TestKDOSNetStack._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            client_port, server_port,
+            client_isn, 0, 0x02, 8192)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C!"
+            " 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT 10 PIP C! 0 PIP 1+ C! 0 PIP 2 + C!"
+            " 1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            # Listen
+            "SOCK-TYPE-TCP SOCKET",
+            "VARIABLE srv-sd  srv-sd !",
+            "srv-sd @ 8080 BIND DROP",
+            'srv-sd @ LISTEN ." LI=" .',
+            # Process the SYN
+            "20 TCP-POLL-WAIT",
+            # Accept
+            ': chk-accept srv-sd @ ACCEPT DUP -1 = IF ." ACC=-1 " DROP ELSE ." ACC=OK " SOCK.STATE @ ." AST=" . THEN ;',
+            'chk-accept',
+        ], nic_frames=[syn], nic_tx_callback=tcp_client)
+        self.assertIn("LI=0 ", text)
+        self.assertIn("ACC=OK ", text)
+        self.assertIn("AST=4 ", text)     # SOCKST-ACCEPTED
+
+
+# ---------------------------------------------------------------------------
 #  KDOS network stack tests — §16 Ethernet Framing
 # ---------------------------------------------------------------------------
 

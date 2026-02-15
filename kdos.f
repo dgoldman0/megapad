@@ -7586,6 +7586,355 @@ VARIABLE _THC-REC
 ;
 
 \ =====================================================================
+\  §16.10  TLS 1.3 Application Data (RFC 8446 §5.1)
+\ =====================================================================
+\
+\  High-level words for sending/receiving application data over an
+\  established TLS connection.  Uses the record layer from §16.8.
+\
+\  TLS-SEND-DATA  ( ctx addr len -- actual )
+\  TLS-RECV-DATA  ( ctx addr maxlen -- actual | -1 )
+\  TLS-SEND-ALERT ( ctx level desc -- )
+\  TLS-CLOSE      ( ctx -- )
+
+CREATE TLS-SEND-REC 1600 ALLOT
+CREATE TLS-RECV-REC 1600 ALLOT
+
+\ --- TLS-SEND-DATA ---
+\ Encrypt plaintext as app_data record and send via TCP.
+VARIABLE _TSD-CTX
+VARIABLE _TSD-SRC
+VARIABLE _TSD-LEN
+
+: TLS-SEND-DATA ( ctx addr len -- actual )
+    _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
+    _TSD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
+    _TSD-LEN @ 1400 MIN _TSD-LEN !
+    \ Encrypt
+    _TSD-CTX @  TLS-CT-APP-DATA  _TSD-SRC @  _TSD-LEN @
+    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    \ Send via TCP
+    _TSD-CTX @ TLS-CTX.TCB @   TLS-SEND-REC  ROT  TCP-SEND
+    DUP 0> IF DROP _TSD-LEN @ ELSE DROP 0 THEN
+;
+
+\ --- TLS-RECV-DATA ---
+\ Receive TCP data, decrypt, and return plaintext.
+\ Returns actual bytes received, or -1 on decryption error, or 0 if nothing.
+VARIABLE _TRD-CTX
+VARIABLE _TRD-DST
+VARIABLE _TRD-MAXLEN
+VARIABLE _TRD-RLEN
+
+: TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
+    _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
+    _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
+    \ Try to receive raw TCP data
+    _TRD-CTX @ TLS-CTX.TCB @  TLS-RECV-REC 1600  TCP-RECV
+    DUP 0= IF EXIT THEN
+    _TRD-RLEN !
+    \ Decrypt
+    _TRD-CTX @  TLS-RECV-REC  _TRD-RLEN @  TLS-PLAIN-BUF
+    TLS-DECRYPT-RECORD
+    \ Stack: ctype plen  (or -1 0)
+    DUP 0= IF 2DROP -1 EXIT THEN \ decrypt failed
+    SWAP TLS-CT-APP-DATA <> IF DROP -1 EXIT THEN \ not app data
+    \ Copy min(plen, maxlen) to destination
+    _TRD-MAXLEN @ MIN
+    TLS-PLAIN-BUF _TRD-DST @ ROT DUP >R CMOVE
+    R>
+;
+
+\ --- TLS-SEND-ALERT ---
+\ Send a TLS alert (e.g., close_notify = level=1, desc=0).
+CREATE TLS-ALERT-BUF 2 ALLOT
+
+: TLS-SEND-ALERT ( ctx level desc -- )
+    TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
+    TLS-CT-ALERT  TLS-ALERT-BUF  2
+    TLS-SEND-REC  TLS-ENCRYPT-RECORD
+    \ Send via TCP
+    SWAP TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
+;
+
+\ --- TLS-CLOSE ---
+\ Send close_notify alert and close TCP connection.
+: TLS-CLOSE ( ctx -- )
+    DUP TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF DROP EXIT THEN
+    DUP 1 0 TLS-SEND-ALERT                   \ close_notify
+    DUP TLSS-CLOSING SWAP TLS-CTX.STATE !
+    TLS-CTX.TCB @ TCP-CLOSE
+;
+
+\ =====================================================================
+\  §16.11  TLS 1.3 Connection API
+\ =====================================================================
+\
+\  User-facing words for TLS connections.
+\
+\  TLS-CONNECT ( rip rport lport -- ctx | 0 )
+\    Allocate TLS context, do TCP connect, run full TLS handshake.
+\    Blocks until handshake completes or times out.
+\
+\  TLS-SEND ( ctx addr len -- actual )
+\    Encrypt and send application data.  (Alias for TLS-SEND-DATA.)
+\
+\  TLS-RECV ( ctx addr maxlen -- actual | -1 )
+\    Receive and decrypt application data.  (Alias for TLS-RECV-DATA.)
+
+\ -- TLS context allocator --
+: TLS-CTX-ALLOC ( -- ctx | 0 )
+    TLS-MAX-CTX 0 DO
+        I TLS-CTX@ TLS-CTX.STATE @ TLSS-NONE = IF
+            I TLS-CTX@ UNLOOP EXIT
+        THEN
+    LOOP 0 ;
+
+\ -- TLS-CONNECT --
+VARIABLE _TLSC-CTX
+VARIABLE _TLSC-TCB
+VARIABLE _TLSC-RLEN
+VARIABLE _TLSC-CTYPE
+
+: TLS-CONNECT ( rip rport lport -- ctx | 0 )
+    >R >R >R
+    \ 1. Allocate TLS context
+    TLS-CTX-ALLOC DUP 0= IF R> R> R> 2DROP DROP EXIT THEN
+    _TLSC-CTX !
+    _TLSC-CTX @ /TLS-CTX 0 FILL
+    \ 2. TCP connect
+    R> R> R> ROT SWAP ROT TCP-CONNECT
+    DUP 0= IF _TLSC-CTX @ DROP EXIT THEN
+    _TLSC-TCB !
+    _TLSC-TCB @ _TLSC-CTX @ TLS-CTX.TCB !
+    \ 3. Wait for TCP established
+    50 TCP-POLL-WAIT
+    _TLSC-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF 0 EXIT THEN
+    \ 4. Build+send ClientHello
+    _TLSC-CTX @ TLS-BUILD-CLIENT-HELLO
+    _TLSC-TCB @ ROT ROT TCP-SEND DROP
+    20 TCP-POLL-WAIT
+    \ 5. Receive ServerHello (plaintext)
+    _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+    DUP 0= IF DROP 0 EXIT THEN
+    _TLSC-RLEN !
+    \ Parse SH: skip 5-byte TLS record header
+    _TLSC-CTX @  TLS-RECV-REC 5 +  _TLSC-RLEN @ 5 -
+    TLS-PROCESS-HS-MSG 0<> IF 0 EXIT THEN
+    \ 6. Receive encrypted handshake messages
+    \ (EncryptedExtensions, optionally Cert/CertVerify, server Finished)
+    20 TCP-POLL-WAIT
+    BEGIN
+        _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-WAIT-FINISHED <
+    WHILE
+        _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+        DUP 0= IF DROP 0 EXIT THEN
+        _TLSC-RLEN !
+        \ Decrypt record
+        _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
+        TLS-DECRYPT-RECORD
+        DUP 0= IF 2DROP 0 EXIT THEN
+        _TLSC-CTYPE !
+        _TLSC-CTYPE @ TLS-CT-CCS = IF DROP
+        ELSE
+            _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSG
+            0<> IF 0 EXIT THEN
+        THEN
+        10 TCP-POLL-WAIT
+    REPEAT
+    \ 7. Send client Finished + install app keys
+    _TLSC-CTX @  TLS-SEND-REC  TLS-HANDSHAKE-COMPLETE
+    _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
+    \ 8. Return context
+    _TLSC-CTX @
+;
+
+\ -- TLS-SEND / TLS-RECV convenience aliases --
+: TLS-SEND ( ctx addr len -- actual )  TLS-SEND-DATA ;
+: TLS-RECV ( ctx addr maxlen -- actual | -1 )  TLS-RECV-DATA ;
+
+\ =====================================================================
+\  §17  Socket API
+\ =====================================================================
+\
+\  BSD-style socket abstraction over TCP and TLS.
+\
+\  Socket descriptor table: 8 slots.
+\  Each socket is 32 bytes:
+\    +0   STATE      8    0=FREE 1=TCP 2=TLS 3=LISTENING 4=ACCEPTED
+\    +8   TCB/CTX    8    TCB pointer (TCP) or TLS-CTX pointer (TLS)
+\    +16  LOCAL-PORT 8    Local port number
+\    +24  FLAGS      8    Bit0: TLS mode
+\
+\  API:
+\    SOCKET     ( type -- sd | -1 )   type: 0=TCP, 1=TLS
+\    BIND       ( sd port -- ior )
+\    LISTEN     ( sd -- ior )
+\    ACCEPT     ( sd -- new-sd | -1 )
+\    CONNECT    ( sd rip rport -- ior )
+\    SEND       ( sd addr len -- actual )
+\    RECV       ( sd addr maxlen -- actual )
+\    CLOSE      ( sd -- )
+
+\ --- Socket Constants ---
+32 CONSTANT /SOCK
+8  CONSTANT SOCK-MAX
+
+0 CONSTANT SOCKST-FREE
+1 CONSTANT SOCKST-TCP
+2 CONSTANT SOCKST-TLS
+3 CONSTANT SOCKST-LISTENING
+4 CONSTANT SOCKST-ACCEPTED
+
+0 CONSTANT SOCK-TYPE-TCP
+1 CONSTANT SOCK-TYPE-TLS
+
+\ --- Socket Descriptor Table ---
+CREATE SOCK-TABLE  /SOCK SOCK-MAX * ALLOT
+SOCK-TABLE /SOCK SOCK-MAX * 0 FILL
+
+: SOCK-N ( n -- addr )  /SOCK * SOCK-TABLE + ;
+: SOCK.STATE      ( sd -- addr )           ;
+: SOCK.HANDLE     ( sd -- addr )   8  + ;
+: SOCK.LOCAL-PORT ( sd -- addr )   16 + ;
+: SOCK.FLAGS      ( sd -- addr )   24 + ;
+
+\ --- SOCKET ( type -- sd | -1 ) ---
+\ Allocate a new socket descriptor.
+VARIABLE _SOK-TYPE
+
+: SOCKET ( type -- sd | -1 )
+    _SOK-TYPE !
+    SOCK-MAX 0 DO
+        I SOCK-N SOCK.STATE @ SOCKST-FREE = IF
+            I SOCK-N /SOCK 0 FILL
+            _SOK-TYPE @ 1 AND I SOCK-N SOCK.FLAGS !
+            _SOK-TYPE @ 1 AND IF SOCKST-TLS ELSE SOCKST-TCP THEN
+            I SOCK-N SOCK.STATE !
+            I SOCK-N UNLOOP EXIT
+        THEN
+    LOOP -1 ;
+
+\ --- BIND ( sd port -- ior ) ---
+: BIND ( sd port -- ior )
+    SWAP SOCK.LOCAL-PORT ! 0 ;
+
+\ --- LISTEN ( sd -- ior ) ---
+\ Move to LISTENING state, open TCP passive listener.
+VARIABLE _SLSN-SD
+
+: LISTEN ( sd -- ior )
+    _SLSN-SD !
+    _SLSN-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
+    DUP 0= IF DROP -1 EXIT THEN
+    _SLSN-SD @ SOCK.HANDLE !
+    SOCKST-LISTENING _SLSN-SD @ SOCK.STATE !
+    0
+;
+
+\ --- ACCEPT ( sd -- new-sd | -1 ) ---
+\ Poll for incoming connection on a listening socket.
+\ Returns a new socket descriptor for the accepted connection.
+VARIABLE _SACC-SD
+VARIABLE _SACC-TCB
+
+: ACCEPT ( sd -- new-sd | -1 )
+    _SACC-SD !
+    _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
+    \ Check if the listening TCB has transitioned to ESTABLISHED
+    _SACC-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED <> IF -1 EXIT THEN
+    _SACC-SD @ SOCK.HANDLE @ _SACC-TCB !
+    \ Allocate new socket for the accepted connection
+    _SACC-SD @ SOCK.FLAGS @ 1 AND SOCKET   \ same type (TCP/TLS)
+    DUP -1 = IF EXIT THEN
+    DUP >R
+    _SACC-TCB @ R@ SOCK.HANDLE !
+    SOCKST-ACCEPTED R@ SOCK.STATE !
+    _SACC-SD @ SOCK.LOCAL-PORT @ R@ SOCK.LOCAL-PORT !
+    \ Re-open listener for next connection
+    _SACC-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
+    DUP 0<> IF _SACC-SD @ SOCK.HANDLE ! THEN
+    DROP
+    R>
+;
+
+\ --- CONNECT ( sd rip rport -- ior ) ---
+\ Active open: TCP connect (+ TLS handshake if TLS socket).
+VARIABLE _SCON-SD
+VARIABLE _SCON-RIP
+VARIABLE _SCON-RPORT
+
+: CONNECT ( sd rip rport -- ior )
+    _SCON-RPORT !  _SCON-RIP !  _SCON-SD !
+    _SCON-SD @ SOCK.FLAGS @ 1 AND IF
+        \ TLS socket
+        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        TLS-CONNECT
+        DUP 0= IF DROP -1 EXIT THEN
+        _SCON-SD @ SOCK.HANDLE !
+        SOCKST-TLS _SCON-SD @ SOCK.STATE !
+        0
+    ELSE
+        \ Plain TCP
+        _SCON-RIP @  _SCON-RPORT @  _SCON-SD @ SOCK.LOCAL-PORT @
+        TCP-CONNECT
+        DUP 0= IF DROP -1 EXIT THEN
+        _SCON-SD @ SOCK.HANDLE !
+        50 TCP-POLL-WAIT
+        _SCON-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED = IF
+            SOCKST-TCP _SCON-SD @ SOCK.STATE !
+            0
+        ELSE -1 THEN
+    THEN
+;
+
+\ --- SEND ( sd addr len -- actual ) ---
+: SEND ( sd addr len -- actual )
+    ROT DUP SOCK.STATE @ CASE
+        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
+        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-SEND  ENDOF
+        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-SEND  ENDOF
+        >R 2DROP DROP 0 R>
+    ENDCASE
+;
+
+\ --- RECV ( sd addr maxlen -- actual ) ---
+: RECV ( sd addr maxlen -- actual )
+    ROT DUP SOCK.STATE @ CASE
+        SOCKST-TCP OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
+        SOCKST-TLS OF SOCK.HANDLE @  -ROT  TLS-RECV  ENDOF
+        SOCKST-ACCEPTED OF SOCK.HANDLE @  -ROT  TCP-RECV  ENDOF
+        >R 2DROP DROP 0 R>
+    ENDCASE
+;
+
+\ --- CLOSE ( sd -- ) ---
+: CLOSE ( sd -- )
+    DUP SOCK.HANDLE @ 0<> IF
+        DUP SOCK.STATE @ CASE
+            SOCKST-TCP     OF DUP SOCK.HANDLE @ TCP-CLOSE  ENDOF
+            SOCKST-TLS     OF DUP SOCK.HANDLE @ TLS-CLOSE  ENDOF
+            SOCKST-ACCEPTED OF DUP SOCK.HANDLE @ TCP-CLOSE ENDOF
+            SOCKST-LISTENING OF DUP SOCK.HANDLE @ TCB-INIT ENDOF
+        ENDCASE
+    THEN
+    /SOCK 0 FILL   \ reset slot to FREE
+;
+
+\ .SOCKET ( sd -- )  Print socket status.
+: .SOCKET ( sd -- )
+    DUP SOCK.STATE @
+    DUP SOCKST-FREE = IF DROP ."  socket: free" CR ELSE
+    DUP SOCKST-TCP  = IF DROP ."  socket: TCP connected" CR ELSE
+    DUP SOCKST-TLS  = IF DROP ."  socket: TLS connected" CR ELSE
+    DUP SOCKST-LISTENING = IF DROP ."  socket: listening" CR ELSE
+    DUP SOCKST-ACCEPTED  = IF DROP ."  socket: accepted" CR ELSE
+    DROP ."  socket: unknown" CR
+    THEN THEN THEN THEN THEN
+    DROP
+;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 
