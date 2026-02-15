@@ -23,10 +23,10 @@ except ImportError:
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device, TRNGDevice,
-    FieldALUDevice, NTTDevice,
+    FieldALUDevice, NTTDevice, KemDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
     MBOX_BASE, SPINLOCK_BASE, CRC_BASE, AES_BASE, SHA3_BASE, TRNG_BASE,
-    X25519_BASE, NTT_BASE, NIC_MTU,
+    X25519_BASE, NTT_BASE, KEM_BASE, NIC_MTU,
 )
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,7 @@ class MegapadSystem:
         self.trng = TRNGDevice()
         self.x25519 = FieldALUDevice()
         self.ntt = NTTDevice()
+        self.kem = KemDevice()
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)
@@ -123,6 +124,7 @@ class MegapadSystem:
         self.bus.register(self.trng)
         self.bus.register(self.x25519)
         self.bus.register(self.ntt)
+        self.bus.register(self.kem)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

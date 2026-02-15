@@ -46,6 +46,7 @@ SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
 X25519_BASE  = 0x0840
 NTT_BASE     = 0x08C0
+KEM_BASE     = 0x0900
 
 
 # ---------------------------------------------------------------------------
@@ -1377,6 +1378,375 @@ class SHA3Device(Device):
             self._squeeze_buf[self._stream_pos:self._stream_pos + 64]
         )
         self._squeezed = self._stream_pos + 64
+        self.status = 2
+
+
+# ---------------------------------------------------------------------------
+#  ML-KEM-512 (Kyber) Key Encapsulation Mechanism Accelerator
+# ---------------------------------------------------------------------------
+# Implements FIPS 203 ML-KEM-512 entirely in the emulator.
+# Register map (offsets from KEM_BASE):
+#   0x00  STATUS  (R)   0=idle, 2=done
+#   0x01  CMD     (W)   1=KEYGEN, 2=ENCAPS, 3=DECAPS
+#   0x08  BUF_SEL (W)   Buffer select: 0=SEED(64B) 1=PK(800B)
+#                        2=SK(1632B) 3=CT(768B) 4=SS(32B)
+#                        Writing resets byte index to 0.
+#   0x10  DIN     (W)   Write byte to selected buffer, auto-inc
+#   0x18  DOUT    (R)   Read byte from selected buffer, auto-inc
+#   0x20  BUF_SIZE(R,2B LE) Size of selected buffer
+
+import hashlib as _hashlib
+
+# --- ML-KEM-512 parameters ---------------------------------------------------
+_KEM_N   = 256
+_KEM_K   = 2
+_KEM_Q   = 3329
+_KEM_ETA1 = 3
+_KEM_ETA2 = 2
+_KEM_DU  = 10
+_KEM_DV  = 4
+
+def _bit_rev7(x: int) -> int:
+    r = 0
+    for _ in range(7):
+        r = (r << 1) | (x & 1)
+        x >>= 1
+    return r
+
+# Pre-compute NTT twiddle factors: ζ = 17 (primitive 256th root of unity mod q)
+_KEM_ZETAS = [pow(17, _bit_rev7(i), _KEM_Q) for i in range(128)]
+
+def _kem_ntt(f: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 9 — Number Theoretic Transform."""
+    fh = list(f)
+    i = 1
+    length = 128
+    while length >= 2:
+        for start in range(0, 256, 2 * length):
+            z = _KEM_ZETAS[i]; i += 1
+            for j in range(start, start + length):
+                t = (z * fh[j + length]) % _KEM_Q
+                fh[j + length] = (fh[j] - t) % _KEM_Q
+                fh[j] = (fh[j] + t) % _KEM_Q
+        length //= 2
+    return fh
+
+def _kem_intt(fh: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 10 — Inverse NTT."""
+    f = list(fh)
+    i = 127
+    length = 2
+    while length <= 128:
+        for start in range(0, 256, 2 * length):
+            z = _KEM_ZETAS[i]; i -= 1
+            for j in range(start, start + length):
+                t = f[j]
+                f[j] = (t + f[j + length]) % _KEM_Q
+                f[j + length] = (z * (f[j + length] - t)) % _KEM_Q
+        length *= 2
+    return [(x * 3303) % _KEM_Q for x in f]  # 3303 = 128⁻¹ mod q
+
+def _kem_basemul(fh: list[int], gh: list[int]) -> list[int]:
+    """FIPS 203 Algorithm 11 — Multiply NTT-domain polynomials.
+
+    Processes 64 groups of 4 coefficients.  Each group uses zetas[64+i]
+    for the first pair and -zetas[64+i] for the second pair, matching
+    the reference pqcrystals-kyber implementation.
+    """
+    h = [0] * 256
+    for i in range(64):
+        z = _KEM_ZETAS[64 + i]
+        nz = (-z) % _KEM_Q
+        # First pair (4i, 4i+1)
+        a0, a1 = fh[4*i], fh[4*i+1]
+        b0, b1 = gh[4*i], gh[4*i+1]
+        h[4*i]   = (a0*b0 + a1*b1*z) % _KEM_Q
+        h[4*i+1] = (a0*b1 + a1*b0) % _KEM_Q
+        # Second pair (4i+2, 4i+3) — negated zeta
+        a0, a1 = fh[4*i+2], fh[4*i+3]
+        b0, b1 = gh[4*i+2], gh[4*i+3]
+        h[4*i+2] = (a0*b0 + a1*b1*nz) % _KEM_Q
+        h[4*i+3] = (a0*b1 + a1*b0) % _KEM_Q
+    return h
+
+def _kem_add(a: list[int], b: list[int]) -> list[int]:
+    return [(a[i] + b[i]) % _KEM_Q for i in range(256)]
+
+def _kem_sub(a: list[int], b: list[int]) -> list[int]:
+    return [(a[i] - b[i]) % _KEM_Q for i in range(256)]
+
+# --- CBD / Encode / Decode / Compress ----------------------------------------
+
+def _kem_cbd(eta: int, B: bytes) -> list[int]:
+    """FIPS 203 Algorithm 7 — Centered Binomial Distribution."""
+    bits = []
+    for byte in B:
+        for j in range(8):
+            bits.append((byte >> j) & 1)
+    f = [0] * 256
+    for i in range(256):
+        x = sum(bits[2*i*eta + j] for j in range(eta))
+        y = sum(bits[2*i*eta + eta + j] for j in range(eta))
+        f[i] = (x - y) % _KEM_Q
+    return f
+
+def _kem_byte_encode(F: list[int], d: int) -> bytes:
+    """FIPS 203 Algorithm 4 — ByteEncode_d."""
+    bits: list[int] = []
+    for c in F:
+        for j in range(d):
+            bits.append((c >> j) & 1)
+    B = bytearray(32 * d)
+    for i, b in enumerate(bits):
+        B[i >> 3] |= b << (i & 7)
+    return bytes(B)
+
+def _kem_byte_decode(B: bytes, d: int) -> list[int]:
+    """FIPS 203 Algorithm 5 — ByteDecode_d."""
+    bits: list[int] = []
+    for byte in B:
+        for j in range(8):
+            bits.append((byte >> j) & 1)
+    F = [0] * 256
+    m = (1 << d) - 1 if d < 12 else _KEM_Q
+    for i in range(256):
+        v = 0
+        for j in range(d):
+            v |= bits[i*d + j] << j
+        F[i] = v % (m + 1) if d < 12 else v % _KEM_Q
+    return F
+
+def _kem_compress(x: int, d: int) -> int:
+    return ((x * (1 << d) + _KEM_Q // 2) // _KEM_Q) % (1 << d)
+
+def _kem_decompress(y: int, d: int) -> int:
+    return (y * _KEM_Q + (1 << (d - 1))) >> d
+
+def _kem_compress_poly(f: list[int], d: int) -> list[int]:
+    return [_kem_compress(c, d) for c in f]
+
+def _kem_decompress_poly(f: list[int], d: int) -> list[int]:
+    return [_kem_decompress(c, d) for c in f]
+
+# --- Hash helpers (SHA3/SHAKE via hashlib) ------------------------------------
+
+def _kem_G(x: bytes) -> bytes:
+    """G = SHA3-512."""
+    return _hashlib.sha3_512(x).digest()
+
+def _kem_H(x: bytes) -> bytes:
+    """H = SHA3-256."""
+    return _hashlib.sha3_256(x).digest()
+
+def _kem_J(x: bytes) -> bytes:
+    """J = SHAKE-256, 32-byte output."""
+    return _hashlib.shake_256(x).digest(32)
+
+def _kem_XOF(rho: bytes, i: int, j: int) -> bytes:
+    """XOF = SHAKE-128(ρ ‖ i ‖ j) — enough for SampleNTT."""
+    return _hashlib.shake_128(rho + bytes([i, j])).digest(840)
+
+def _kem_PRF(eta: int, s: bytes, N: int) -> bytes:
+    """PRF = SHAKE-256(s ‖ N) with 64·η output bytes."""
+    return _hashlib.shake_256(s + bytes([N])).digest(64 * eta)
+
+def _kem_sample_ntt(xof: bytes) -> list[int]:
+    """FIPS 203 Algorithm 6 — SampleNTT (rejection sampling)."""
+    a: list[int] = []
+    i = 0
+    while len(a) < 256:
+        d1 = xof[i] + 256 * (xof[i+1] % 16)
+        d2 = (xof[i+1] >> 4) + 16 * xof[i+2]
+        if d1 < _KEM_Q:
+            a.append(d1)
+        if d2 < _KEM_Q and len(a) < 256:
+            a.append(d2)
+        i += 3
+    return a
+
+# --- K-PKE (inner CPA-secure scheme) -----------------------------------------
+
+def _kem_pke_keygen(d: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 13 — K-PKE.KeyGen."""
+    g = _kem_G(d + bytes([_KEM_K]))
+    rho, sigma = g[:32], g[32:]
+    A_hat = [[_kem_sample_ntt(_kem_XOF(rho, j, i))
+              for j in range(_KEM_K)] for i in range(_KEM_K)]
+    N = 0
+    s = []
+    for _ in range(_KEM_K):
+        s.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, sigma, N))); N += 1
+    e = []
+    for _ in range(_KEM_K):
+        e.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, sigma, N))); N += 1
+    s_hat = [_kem_ntt(si) for si in s]
+    e_hat = [_kem_ntt(ei) for ei in e]
+    t_hat = []
+    for i in range(_KEM_K):
+        ti = [0] * 256
+        for j in range(_KEM_K):
+            ti = _kem_add(ti, _kem_basemul(A_hat[i][j], s_hat[j]))
+        t_hat.append(_kem_add(ti, e_hat[i]))
+    ek = bytearray()
+    for i in range(_KEM_K):
+        ek.extend(_kem_byte_encode(t_hat[i], 12))
+    ek.extend(rho)
+    dk = bytearray()
+    for i in range(_KEM_K):
+        dk.extend(_kem_byte_encode(s_hat[i], 12))
+    return bytes(ek), bytes(dk)
+
+def _kem_pke_encrypt(ek: bytes, m: bytes, r: bytes) -> bytes:
+    """FIPS 203 Algorithm 14 — K-PKE.Encrypt."""
+    t_hat = [_kem_byte_decode(ek[384*i:384*(i+1)], 12) for i in range(_KEM_K)]
+    rho = ek[384*_KEM_K:]
+    A_hat = [[_kem_sample_ntt(_kem_XOF(rho, j, i))
+              for j in range(_KEM_K)] for i in range(_KEM_K)]
+    N = 0
+    rv = []
+    for _ in range(_KEM_K):
+        rv.append(_kem_cbd(_KEM_ETA1, _kem_PRF(_KEM_ETA1, r, N))); N += 1
+    e1 = []
+    for _ in range(_KEM_K):
+        e1.append(_kem_cbd(_KEM_ETA2, _kem_PRF(_KEM_ETA2, r, N))); N += 1
+    e2 = _kem_cbd(_KEM_ETA2, _kem_PRF(_KEM_ETA2, r, N))
+    r_hat = [_kem_ntt(ri) for ri in rv]
+    u = []
+    for i in range(_KEM_K):
+        ui = [0] * 256
+        for j in range(_KEM_K):
+            ui = _kem_add(ui, _kem_basemul(A_hat[j][i], r_hat[j]))
+        u.append(_kem_add(_kem_intt(ui), e1[i]))
+    mu = _kem_decompress_poly(_kem_byte_decode(m, 1), 1)
+    v = [0] * 256
+    for i in range(_KEM_K):
+        v = _kem_add(v, _kem_basemul(t_hat[i], r_hat[i]))
+    v = _kem_add(_kem_add(_kem_intt(v), e2), mu)
+    c1 = bytearray()
+    for i in range(_KEM_K):
+        c1.extend(_kem_byte_encode(_kem_compress_poly(u[i], _KEM_DU), _KEM_DU))
+    c2 = _kem_byte_encode(_kem_compress_poly(v, _KEM_DV), _KEM_DV)
+    return bytes(c1) + bytes(c2)
+
+def _kem_pke_decrypt(dk: bytes, c: bytes) -> bytes:
+    """FIPS 203 Algorithm 15 — K-PKE.Decrypt."""
+    du_chunk = 32 * _KEM_DU   # 320
+    c1, c2 = c[:du_chunk * _KEM_K], c[du_chunk * _KEM_K:]
+    u = [_kem_decompress_poly(_kem_byte_decode(c1[du_chunk*i:du_chunk*(i+1)],
+         _KEM_DU), _KEM_DU) for i in range(_KEM_K)]
+    v = _kem_decompress_poly(_kem_byte_decode(c2, _KEM_DV), _KEM_DV)
+    s_hat = [_kem_byte_decode(dk[384*i:384*(i+1)], 12) for i in range(_KEM_K)]
+    u_hat = [_kem_ntt(ui) for ui in u]
+    inner = [0] * 256
+    for i in range(_KEM_K):
+        inner = _kem_add(inner, _kem_basemul(s_hat[i], u_hat[i]))
+    w = _kem_sub(v, _kem_intt(inner))
+    return bytes(_kem_byte_encode(_kem_compress_poly(w, 1), 1))
+
+# --- ML-KEM (CCA-secure KEM) -------------------------------------------------
+
+def _kem_keygen(d: bytes, z: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 16 — ML-KEM.KeyGen."""
+    ek, dk_pke = _kem_pke_keygen(d)
+    dk = dk_pke + ek + _kem_H(ek) + z
+    return ek, dk
+
+def _kem_encaps(ek: bytes, coin: bytes) -> tuple[bytes, bytes]:
+    """FIPS 203 Algorithm 17 — ML-KEM.Encaps.
+    Returns (shared_secret, ciphertext)."""
+    g = _kem_G(coin + _kem_H(ek))
+    K, r = g[:32], g[32:]
+    c = _kem_pke_encrypt(ek, coin, r)
+    return K, c
+
+def _kem_decaps(c: bytes, dk: bytes) -> bytes:
+    """FIPS 203 Algorithm 18 — ML-KEM.Decaps."""
+    dk_pke = dk[:384 * _KEM_K]
+    ek = dk[384 * _KEM_K : 384 * _KEM_K + 384 * _KEM_K + 32]
+    h  = dk[384 * _KEM_K + 384 * _KEM_K + 32 :
+            384 * _KEM_K + 384 * _KEM_K + 64]
+    z  = dk[384 * _KEM_K + 384 * _KEM_K + 64 :]
+    m_prime = _kem_pke_decrypt(dk_pke, c)
+    g = _kem_G(m_prime + h)
+    K_prime, r_prime = g[:32], g[32:]
+    K_bar = _kem_J(z + c)
+    c_prime = _kem_pke_encrypt(ek, m_prime, r_prime)
+    return K_prime if c == c_prime else K_bar
+
+
+class KemDevice(Device):
+    """ML-KEM-512 (Kyber) hardware KEM accelerator.
+
+    Buffers: 0=SEED/COIN(64B) 1=PK(800B) 2=SK(1632B) 3=CT(768B) 4=SS(32B).
+    """
+
+    _BUF_SIZES = [64, 800, 1632, 768, 32]
+
+    def __init__(self):
+        super().__init__("KEM", KEM_BASE, 0x28)   # 40-byte register window
+        self._reset_kem()
+
+    def _reset_kem(self):
+        self.status = 0
+        self._buf_sel = 0
+        self._buf_idx = 0
+        self._bufs = [bytearray(s) for s in self._BUF_SIZES]
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:
+            return self.status
+        if offset == 0x18:                        # DOUT
+            buf = self._bufs[self._buf_sel]
+            if self._buf_idx < len(buf):
+                v = buf[self._buf_idx]
+                self._buf_idx += 1
+                return v
+            return 0
+        if offset == 0x20:
+            return self._BUF_SIZES[self._buf_sel] & 0xFF
+        if offset == 0x21:
+            return (self._BUF_SIZES[self._buf_sel] >> 8) & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x01:                        # CMD
+            if value == 1:
+                self._do_keygen()
+            elif value == 2:
+                self._do_encaps()
+            elif value == 3:
+                self._do_decaps()
+        elif offset == 0x08:                      # BUF_SEL
+            self._buf_sel = min(value, 4)
+            self._buf_idx = 0
+        elif offset == 0x10:                      # DIN
+            buf = self._bufs[self._buf_sel]
+            if self._buf_idx < len(buf):
+                buf[self._buf_idx] = value
+                self._buf_idx += 1
+
+    def _do_keygen(self):
+        d = bytes(self._bufs[0][:32])
+        z = bytes(self._bufs[0][32:64])
+        ek, dk = _kem_keygen(d, z)
+        self._bufs[1] = bytearray(ek)
+        self._bufs[2] = bytearray(dk)
+        self.status = 2
+
+    def _do_encaps(self):
+        ek   = bytes(self._bufs[1])
+        coin = bytes(self._bufs[0][:32])
+        K, c = _kem_encaps(ek, coin)
+        self._bufs[3] = bytearray(c)
+        self._bufs[4] = bytearray(K)
+        self.status = 2
+
+    def _do_decaps(self):
+        c  = bytes(self._bufs[3])
+        dk = bytes(self._bufs[2])
+        K  = _kem_decaps(c, dk)
+        self._bufs[4] = bytearray(K)
         self.status = 2
 
 

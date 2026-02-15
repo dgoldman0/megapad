@@ -7230,6 +7230,141 @@ class TestNTT(_KDOSTestBase):
         self.assertEqual(lhs4.group(1), rhs4.group(1))
 
 
+class TestMLKEM(_KDOSTestBase):
+    """Tests for ML-KEM-512 (Kyber) key encapsulation (§1.12)."""
+
+    # KAT0: d=32×0x00, z=32×0x00, coin=32×0x00
+    # PK[0]=223, SS[0]=74, SS[1]=213, SS[31]=39
+    # CT[0]=107, CT[767]=10
+
+    def _allot_kem_buffers(self):
+        """Forth preamble that creates all KEM scratch buffers."""
+        return [
+            'CREATE dz 64 ALLOT  dz 64 0 FILL',
+            'CREATE pk 800 ALLOT',
+            'CREATE sk 1632 ALLOT',
+            'CREATE coin 32 ALLOT  coin 32 0 FILL',
+            'CREATE ct 768 ALLOT',
+            'CREATE ss1 32 ALLOT',
+            'CREATE ss2 32 ALLOT',
+        ]
+
+    def test_keygen_deterministic(self):
+        """Same seed produces same public key."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  PK0=" pk C@ .',
+            '."  PK1=" pk 1 + C@ .',
+            '."  PK799=" pk 799 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PK0=223 ", text)
+        self.assertIn("PK1=23 ", text)
+        self.assertIn("PK799=231 ", text)
+
+    def test_encaps_roundtrip(self):
+        """KEYGEN → ENCAPS → DECAPS produces matching shared secrets."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            'ct sk ss2 KYBER-DECAPS',
+            # Define compare helper
+            ': CMP32 32 0 DO OVER I + C@ OVER I + C@ <> IF 2DROP 0 UNLOOP EXIT THEN LOOP 2DROP 1 ;',
+            'ss1 ss2 CMP32 IF ."  SS-MATCH" THEN',
+            '."  SS0=" ss1 C@ .',
+            '."  SS31=" ss1 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-MATCH", text)
+        self.assertIn("SS0=74 ", text)
+        self.assertIn("SS31=39 ", text)
+
+    def test_encaps_kat_values(self):
+        """Shared secret and ciphertext match known-answer values."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            '."  SS1=" ss1 1 + C@ .',
+            '."  CT0=" ct C@ .',
+            '."  CT767=" ct 767 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS1=213 ", text)
+        self.assertIn("CT0=107 ", text)
+        self.assertIn("CT767=10 ", text)
+
+    def test_different_coins(self):
+        """Different coins produce different ciphertexts and shared secrets."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            # Encaps with zero coin
+            'pk coin ct ss1 KYBER-ENCAPS',
+            # Encaps with coin=0x01 0x00...
+            '1 coin C!',
+            'CREATE ct2 768 ALLOT',
+            'CREATE ss3 32 ALLOT',
+            'pk coin ct2 ss3 KYBER-ENCAPS',
+            # Compare shared secrets (should differ)
+            'ss1 C@ ss3 C@ <> IF ."  SS-DIFFER" THEN',
+            # Compare ciphertexts (should differ)
+            'ct C@ ct2 C@ <> IF ."  CT-DIFFER" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("SS-DIFFER", text)
+        self.assertIn("CT-DIFFER", text)
+
+    def test_implicit_rejection(self):
+        """Corrupted ciphertext triggers implicit rejection (different SS)."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            'pk coin ct ss1 KYBER-ENCAPS',
+            # Corrupt first byte of ciphertext
+            'ct C@ 255 XOR ct C!',
+            # Decaps with corrupted ct
+            'ct sk ss2 KYBER-DECAPS',
+            # Shared secrets must differ
+            'ss1 C@ ss2 C@ <> IF ."  REJECT-OK" THEN',
+            '."  REJ0=" ss2 C@ .',
+            '."  REJ31=" ss2 31 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("REJECT-OK", text)
+        self.assertIn("REJ0=76 ", text)
+        self.assertIn("REJ31=186 ", text)
+
+    def test_different_seeds(self):
+        """Different seeds produce different public keys."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  A0=" pk C@ .',
+            # Change seed byte 0
+            '1 dz C!',
+            'CREATE pk2 800 ALLOT',
+            'CREATE sk2 1632 ALLOT',
+            'dz pk2 sk2 KYBER-KEYGEN',
+            '."  B0=" pk2 C@ .',
+            'pk C@ pk2 C@ <> IF ."  PK-DIFFER" THEN',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("PK-DIFFER", text)
+
+    def test_kem_status(self):
+        """KEM-STATUS@ returns done (2) after keygen."""
+        setup = self._allot_kem_buffers()
+        setup.extend([
+            'dz pk sk KYBER-KEYGEN',
+            '."  ST=" KEM-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+
 class TestKDOSHKDF(_KDOSTestBase):
     """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
 

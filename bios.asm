@@ -8089,6 +8089,91 @@ w_ntt_wait:
     ret.l
 
 ; =====================================================================
+;  KEM Accelerator — ML-KEM-512 (Kyber)  MMIO 0x0900
+; =====================================================================
+; Register map:
+;   +0x00  STATUS  (R)   0=idle, 2=done
+;   +0x01  CMD     (W)   1=KEYGEN, 2=ENCAPS, 3=DECAPS
+;   +0x08  BUF_SEL (W)   buffer select (resets index)
+;   +0x10  DIN     (W)   byte input, auto-inc
+;   +0x18  DOUT    (R)   byte output, auto-inc
+
+; KEM-SEL! ( n -- )  Select KEM buffer.
+w_kem_sel_store:
+    ldn r0, r14              ; pop n
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0908
+    st.b r7, r0
+    ret.l
+
+; KEM-LOAD ( addr count -- )  Write count bytes to selected buffer via DIN.
+w_kem_load:
+    ldn r1, r14              ; pop count
+    addi r14, 8
+    ldn r0, r14              ; pop addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0910
+    xor r12, r12
+.kem_load_loop:
+    cmp r12, r1
+    breq .kem_load_done
+    ld.b r9, r0              ; read byte from memory
+    st.b r7, r9              ; write to DIN
+    addi r0, 1
+    addi r12, 1
+    br .kem_load_loop
+.kem_load_done:
+    ret.l
+
+; KEM-STORE ( addr count -- )  Read count bytes from selected buffer via DOUT.
+w_kem_store:
+    ldn r1, r14              ; pop count
+    addi r14, 8
+    ldn r0, r14              ; pop addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0918
+    xor r12, r12
+.kem_store_loop:
+    cmp r12, r1
+    breq .kem_store_done
+    ld.b r9, r7              ; read from DOUT
+    st.b r0, r9              ; write to memory
+    addi r0, 1
+    addi r12, 1
+    br .kem_store_loop
+.kem_store_done:
+    ret.l
+
+; KEM-KEYGEN ( -- )  Trigger ML-KEM KeyGen.
+w_kem_keygen:
+    ldi64 r7, 0xFFFF_FF00_0000_0901
+    ldi r0, 1
+    st.b r7, r0
+    ret.l
+
+; KEM-ENCAPS ( -- )  Trigger ML-KEM Encaps.
+w_kem_encaps:
+    ldi64 r7, 0xFFFF_FF00_0000_0901
+    ldi r0, 2
+    st.b r7, r0
+    ret.l
+
+; KEM-DECAPS ( -- )  Trigger ML-KEM Decaps.
+w_kem_decaps:
+    ldi64 r7, 0xFFFF_FF00_0000_0901
+    ldi r0, 3
+    st.b r7, r0
+    ret.l
+
+; KEM-STATUS@ ( -- n )  Read KEM status register.
+w_kem_status:
+    ldi64 r7, 0xFFFF_FF00_0000_0900
+    ld.b r0, r7
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -10653,9 +10738,72 @@ d_ntt_wait:
     call.l r11
     ret.l
 
+; === KEM-SEL! ===
+d_kem_sel_store:
+    .dq d_ntt_wait
+    .db 8
+    .ascii "KEM-SEL!"
+    ldi64 r11, w_kem_sel_store
+    call.l r11
+    ret.l
+
+; === KEM-LOAD ===
+d_kem_load:
+    .dq d_kem_sel_store
+    .db 8
+    .ascii "KEM-LOAD"
+    ldi64 r11, w_kem_load
+    call.l r11
+    ret.l
+
+; === KEM-STORE ===
+d_kem_store:
+    .dq d_kem_load
+    .db 9
+    .ascii "KEM-STORE"
+    ldi64 r11, w_kem_store
+    call.l r11
+    ret.l
+
+; === KEM-KEYGEN ===
+d_kem_keygen:
+    .dq d_kem_store
+    .db 10
+    .ascii "KEM-KEYGEN"
+    ldi64 r11, w_kem_keygen
+    call.l r11
+    ret.l
+
+; === KEM-ENCAPS ===
+d_kem_encaps:
+    .dq d_kem_keygen
+    .db 10
+    .ascii "KEM-ENCAPS"
+    ldi64 r11, w_kem_encaps
+    call.l r11
+    ret.l
+
+; === KEM-DECAPS ===
+d_kem_decaps:
+    .dq d_kem_encaps
+    .db 10
+    .ascii "KEM-DECAPS"
+    ldi64 r11, w_kem_decaps
+    call.l r11
+    ret.l
+
+; === KEM-STATUS@ ===
+d_kem_status:
+    .dq d_kem_decaps
+    .db 11
+    .ascii "KEM-STATUS@"
+    ldi64 r11, w_kem_status
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_ntt_wait
+    .dq d_kem_status
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full
