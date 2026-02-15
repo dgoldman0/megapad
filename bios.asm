@@ -7873,6 +7873,194 @@ w_field_result_hi_fetch:
     ret.l
 
 ; =====================================================================
+;  NTT Engine — 256-point Number Theoretic Transform accelerator
+; =====================================================================
+; MMIO base 0x8C0 → 0xFFFF_FF00_0000_08C0
+;   +0x00 STATUS (R), +0x08 Q (RW 8B), +0x10 IDX (RW 2B),
+;   +0x18 LOAD_A (W 4B auto-inc), +0x1C LOAD_B (W 4B auto-inc),
+;   +0x20 RESULT (R 4B auto-inc), +0x28 CMD (W)
+; CMD: bits[2:1]=op, bit[0]=go
+;   0x01=NTT_FWD, 0x03=NTT_INV, 0x05=NTT_PMUL, 0x07=NTT_PADD
+
+; NTT-SETQ ( q -- )  Write 64-bit modulus q.
+w_ntt_setq:
+    ldn r9, r14              ; pop q
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_08C8    ; Q offset 0x08
+    ldi r12, 0
+.ntt_setq_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r9
+    ldi r0, 8
+    shr r9, r0
+    addi r12, 1
+    cmpi r12, 8
+    brcc .ntt_setq_loop
+    ret.l
+
+; NTT-IDX! ( idx -- )  Set coefficient index register.
+w_ntt_idx_store:
+    ldn r9, r14              ; pop idx
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_08D0   ; IDX offset 0x10
+    st.b r11, r9             ; low byte
+    ldi r0, 8
+    shr r9, r0
+    addi r11, 1
+    st.b r11, r9             ; high byte
+    ret.l
+
+; NTT-LOAD ( addr buf -- )  Load 256 coefficients (4B each) from addr.
+;   buf=0 → LOAD_A (0x18), buf=1 → LOAD_B (0x1C).
+;   Resets IDX to 0 first.
+;   Uses ONLY scratch regs: R0, R1, R7, R9, R11, R12, R13.
+w_ntt_load:
+    ldn r1, r14              ; pop buf selector
+    addi r14, 8
+    ldn r9, r14              ; pop source addr
+    addi r14, 8
+    ; Reset IDX = 0
+    ldi64 r11, 0xFFFF_FF00_0000_08D0
+    ldi r0, 0
+    st.b r11, r0
+    addi r11, 1
+    st.b r11, r0
+    ; Compute target MMIO base: LOAD_A=0x08D8 or LOAD_B=0x08DC
+    ldi64 r7, 0xFFFF_FF00_0000_08D8
+    cmpi r1, 0
+    breq .ntt_load_base_ok
+    ldi64 r7, 0xFFFF_FF00_0000_08DC
+.ntt_load_base_ok:
+    ldi r12, 0               ; coeff counter
+    ldi64 r1, 256            ; loop limit (can't fit in cmpi imm8)
+.ntt_load_coeff:
+    ; Byte 0
+    ld.b r0, r9
+    st.b r7, r0
+    ; Byte 1
+    mov r11, r9
+    addi r11, 1
+    mov r13, r7
+    addi r13, 1
+    ld.b r0, r11
+    st.b r13, r0
+    ; Byte 2
+    mov r11, r9
+    addi r11, 2
+    mov r13, r7
+    addi r13, 2
+    ld.b r0, r11
+    st.b r13, r0
+    ; Byte 3 (triggers auto-inc on device)
+    mov r11, r9
+    addi r11, 3
+    mov r13, r7
+    addi r13, 3
+    ld.b r0, r11
+    st.b r13, r0
+    ; Advance source, bump counter
+    addi r9, 4
+    addi r12, 1
+    cmp r12, r1              ; r12 < 256?
+    brcc .ntt_load_coeff
+    ret.l
+
+; NTT-STORE ( addr -- )  Read 256 result coefficients (4B each) to addr.
+;   Resets IDX to 0 first.
+;   Uses ONLY scratch regs: R0, R1, R7, R9, R11, R12, R13.
+w_ntt_store:
+    ldn r9, r14              ; pop dest addr
+    addi r14, 8
+    ; Reset IDX = 0
+    ldi64 r11, 0xFFFF_FF00_0000_08D0
+    ldi r0, 0
+    st.b r11, r0
+    addi r11, 1
+    st.b r11, r0
+    ldi64 r7, 0xFFFF_FF00_0000_08E0    ; RESULT offset 0x20
+    ldi r12, 0               ; coeff counter
+    ldi64 r1, 256            ; loop limit
+.ntt_store_coeff:
+    ; Byte 0
+    ld.b r0, r7
+    st.b r9, r0
+    ; Byte 1
+    mov r11, r7
+    addi r11, 1
+    mov r13, r9
+    addi r13, 1
+    ld.b r0, r11
+    st.b r13, r0
+    ; Byte 2
+    mov r11, r7
+    addi r11, 2
+    mov r13, r9
+    addi r13, 2
+    ld.b r0, r11
+    st.b r13, r0
+    ; Byte 3 (triggers auto-inc on device)
+    mov r11, r7
+    addi r11, 3
+    mov r13, r9
+    addi r13, 3
+    ld.b r0, r11
+    st.b r13, r0
+    ; Advance dest, bump counter
+    addi r9, 4
+    addi r12, 1
+    cmp r12, r1
+    brcc .ntt_store_coeff
+    ret.l
+
+; NTT-FWD ( -- )  Forward NTT on poly A.
+w_ntt_fwd:
+    ldi64 r11, 0xFFFF_FF00_0000_08E8   ; CMD offset 0x28
+    ldi r0, 0x01             ; (0 << 1) | 1
+    st.b r11, r0
+    ret.l
+
+; NTT-INV ( -- )  Inverse NTT on poly A.
+w_ntt_inv:
+    ldi64 r11, 0xFFFF_FF00_0000_08E8
+    ldi r0, 0x03             ; (1 << 1) | 1
+    st.b r11, r0
+    ret.l
+
+; NTT-PMUL ( -- )  Pointwise multiply A * B mod q.
+w_ntt_pmul:
+    ldi64 r11, 0xFFFF_FF00_0000_08E8
+    ldi r0, 0x05             ; (2 << 1) | 1
+    st.b r11, r0
+    ret.l
+
+; NTT-PADD ( -- )  Pointwise add (A + B) mod q.
+w_ntt_padd:
+    ldi64 r11, 0xFFFF_FF00_0000_08E8
+    ldi r0, 0x07             ; (3 << 1) | 1
+    st.b r11, r0
+    ret.l
+
+; NTT-STATUS@ ( -- n )  Read NTT status byte.
+w_ntt_status:
+    ldi64 r11, 0xFFFF_FF00_0000_08C0   ; STATUS offset 0x00
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; NTT-WAIT ( -- )  Poll until NTT done (bit 1 set).
+w_ntt_wait:
+    ldi64 r11, 0xFFFF_FF00_0000_08C0
+.ntt_wait_loop:
+    ld.b r0, r11
+    ldi r1, 2
+    and r0, r1
+    cmpi r0, 0
+    breq .ntt_wait_loop
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -10329,9 +10517,99 @@ d_field_result_hi_fetch:
     call.l r11
     ret.l
 
+; === NTT-SETQ ===
+d_ntt_setq:
+    .dq d_field_result_hi_fetch
+    .db 8
+    .ascii "NTT-SETQ"
+    ldi64 r11, w_ntt_setq
+    call.l r11
+    ret.l
+
+; === NTT-IDX! ===
+d_ntt_idx_store:
+    .dq d_ntt_setq
+    .db 8
+    .ascii "NTT-IDX!"
+    ldi64 r11, w_ntt_idx_store
+    call.l r11
+    ret.l
+
+; === NTT-LOAD ===
+d_ntt_load:
+    .dq d_ntt_idx_store
+    .db 8
+    .ascii "NTT-LOAD"
+    ldi64 r11, w_ntt_load
+    call.l r11
+    ret.l
+
+; === NTT-STORE ===
+d_ntt_store:
+    .dq d_ntt_load
+    .db 9
+    .ascii "NTT-STORE"
+    ldi64 r11, w_ntt_store
+    call.l r11
+    ret.l
+
+; === NTT-FWD ===
+d_ntt_fwd:
+    .dq d_ntt_store
+    .db 7
+    .ascii "NTT-FWD"
+    ldi64 r11, w_ntt_fwd
+    call.l r11
+    ret.l
+
+; === NTT-INV ===
+d_ntt_inv:
+    .dq d_ntt_fwd
+    .db 7
+    .ascii "NTT-INV"
+    ldi64 r11, w_ntt_inv
+    call.l r11
+    ret.l
+
+; === NTT-PMUL ===
+d_ntt_pmul:
+    .dq d_ntt_inv
+    .db 8
+    .ascii "NTT-PMUL"
+    ldi64 r11, w_ntt_pmul
+    call.l r11
+    ret.l
+
+; === NTT-PADD ===
+d_ntt_padd:
+    .dq d_ntt_pmul
+    .db 8
+    .ascii "NTT-PADD"
+    ldi64 r11, w_ntt_padd
+    call.l r11
+    ret.l
+
+; === NTT-STATUS@ ===
+d_ntt_status:
+    .dq d_ntt_padd
+    .db 11
+    .ascii "NTT-STATUS@"
+    ldi64 r11, w_ntt_status
+    call.l r11
+    ret.l
+
+; === NTT-WAIT ===
+d_ntt_wait:
+    .dq d_ntt_status
+    .db 8
+    .ascii "NTT-WAIT"
+    ldi64 r11, w_ntt_wait
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_field_result_hi_fetch
+    .dq d_ntt_wait
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full

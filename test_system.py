@@ -6776,6 +6776,337 @@ class TestFieldALU(_KDOSTestBase):
         self.assertIn("R1=0 ", text)
 
 
+class TestNTT(_KDOSTestBase):
+    """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
+
+    # q=3329 (ML-KEM / Kyber default modulus)
+    # Coefficients stored as 4-byte LE words in contiguous 1024-byte buffers.
+
+    def _alloc_poly(self, name, coeffs):
+        """Create a 1024-byte buffer and fill with coefficients (4B LE each)."""
+        lines = [f"CREATE {name} 1024 ALLOT"]
+        lines.append(f"{name} 1024 0 FILL")
+        for i, c in enumerate(coeffs):
+            if c != 0:
+                for bi in range(4):
+                    b = (c >> (bi * 8)) & 0xFF
+                    if b != 0:
+                        lines.append(f"{b} {name} {i * 4 + bi} + C!")
+        return lines
+
+    def _read_coeff(self, buf_name, idx):
+        """Generate Forth to print coefficient at index idx."""
+        off = idx * 4
+        return [
+            f'."  C{idx}B0=" {buf_name} {off} + C@ .',
+            f'."  C{idx}B1=" {buf_name} {off + 1} + C@ .',
+            f'."  C{idx}B2=" {buf_name} {off + 2} + C@ .',
+            f'."  C{idx}B3=" {buf_name} {off + 3} + C@ .',
+        ]
+
+    def test_ntt_status_idle(self):
+        """NTT-STATUS@ returns 0 when idle."""
+        text = self._run_kdos([
+            '."  ST=" NTT-STATUS@ .',
+        ])
+        self.assertIn("ST=0 ", text)
+
+    def test_ntt_status_display(self):
+        """.NTT-STATUS prints human-readable status."""
+        text = self._run_kdos([".NTT-STATUS"])
+        self.assertIn("NTT: idle", text)
+
+    def test_ntt_forward_inverse_roundtrip(self):
+        """NTT(INTT(a)) = a — forward then inverse recovers original."""
+        # Use a simple polynomial: a[0]=1, a[1]=2, a[2]=3, rest=0
+        coeffs = [0] * 256
+        coeffs[0], coeffs[1], coeffs[2] = 1, 2, 3
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            # Store NTT result to tv-r
+            "tv-r NTT-STORE",
+            # Load NTT result back into A and do INTT
+            "tv-r NTT-BUF-A NTT-LOAD",
+            "NTT-INV NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 2))
+        setup.extend(self._read_coeff("tv-r", 3))
+        text = self._run_kdos(setup)
+        # Should recover: coeff[0]=1, coeff[1]=2, coeff[2]=3, coeff[3]=0
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=2 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C2B0=3 ", text)
+        self.assertIn("C2B1=0 ", text)
+        self.assertIn("C3B0=0 ", text)
+
+    def test_ntt_padd(self):
+        """NTT-PADD: pointwise (A+B) mod q."""
+        # a[0]=100, a[1]=200; b[0]=3000, b[1]=3200
+        # result: (100+3000)%3329=3100, (200+3200)%3329=71
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 100, 200
+        coeffs_b[0], coeffs_b[1] = 3000, 3200
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        # 3100 = 0x0C1C → byte0=28, byte1=12
+        self.assertIn("C0B0=28 ", text)
+        self.assertIn("C0B1=12 ", text)
+        # 71 = 0x47 → byte0=71, byte1=0
+        self.assertIn("C1B0=71 ", text)
+        self.assertIn("C1B1=0 ", text)
+
+    def test_ntt_pmul(self):
+        """NTT-PMUL: pointwise (A*B) mod q."""
+        # a[0]=100, b[0]=33 → 3300 mod 3329 = 3300
+        # a[1]=50, b[1]=100 → 5000 mod 3329 = 1671
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 100, 50
+        coeffs_b[0], coeffs_b[1] = 33, 100
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PMUL NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        # 3300 = 0x0CE4 → byte0=228, byte1=12
+        self.assertIn("C0B0=228 ", text)
+        self.assertIn("C0B1=12 ", text)
+        # 1671 = 0x0687 → byte0=135, byte1=6
+        self.assertIn("C1B0=135 ", text)
+        self.assertIn("C1B1=6 ", text)
+
+    def test_ntt_padd_wraparound(self):
+        """NTT-PADD wraps modulo q: (3328 + 2) mod 3329 = 1."""
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0] = 3328
+        coeffs_b[0] = 2
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+
+    def test_ntt_setq_dilithium(self):
+        """NTT-SETQ with Dilithium modulus q=8380417."""
+        # Set q, do a simple PADD to verify it's using the right modulus
+        # 8380416 + 2 mod 8380417 = 1
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_a[0] = 8380416
+        coeffs_b[0] = 2
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-DILITHIUM NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+
+    def test_ntt_fwd_inv_dilithium(self):
+        """Forward/inverse round-trip with Dilithium modulus."""
+        coeffs = [0] * 256
+        coeffs[0], coeffs[1] = 42, 17
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-DILITHIUM NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+            "tv-r NTT-BUF-A NTT-LOAD",
+            "NTT-INV NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 2))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=42 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=17 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C2B0=0 ", text)
+
+    def test_ntt_status_done_after_op(self):
+        """NTT-STATUS@ returns 2 (done) after an operation."""
+        coeffs = [0] * 256
+        coeffs[0] = 1
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            '."  ST=" NTT-STATUS@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("ST=2 ", text)
+
+    def test_ntt_fwd_known_value(self):
+        """NTT forward produces non-trivial output for [1,0,...,0]."""
+        # NTT of [1,0,...,0] should be [1,1,...,1] (all ones)
+        coeffs = [0] * 256
+        coeffs[0] = 1
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        # NTT([1,0,...,0]) = [1,1,...,1] — constant polynomial transforms to all 1s
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        setup.extend(self._read_coeff("tv-r", 255))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=1 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=1 ", text)
+        self.assertIn("C1B1=0 ", text)
+        self.assertIn("C255B0=1 ", text)
+        self.assertIn("C255B1=0 ", text)
+
+    def test_ntt_pmul_identity(self):
+        """Pointwise multiply by all-ones (NTT of unit impulse) = identity."""
+        # If B = [1,1,...,1] and A is anything, PMUL gives A
+        coeffs_a = [0] * 256
+        coeffs_a[0], coeffs_a[1], coeffs_a[2] = 42, 17, 3000
+        coeffs_b = [1] * 256
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "tv-b NTT-BUF-B NTT-LOAD",
+            "NTT-PMUL NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 1))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=42 ", text)
+        self.assertIn("C0B1=0 ", text)
+        self.assertIn("C1B0=17 ", text)
+        self.assertIn("C1B1=0 ", text)
+
+    def test_ntt_zero_polynomial(self):
+        """NTT of all-zero polynomial is all zeros."""
+        coeffs = [0] * 256
+        setup = self._alloc_poly("tv-a", coeffs)
+        setup.append("CREATE tv-r 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r NTT-STORE",
+        ])
+        setup.extend(self._read_coeff("tv-r", 0))
+        setup.extend(self._read_coeff("tv-r", 127))
+        setup.extend(self._read_coeff("tv-r", 255))
+        text = self._run_kdos(setup)
+        self.assertIn("C0B0=0 ", text)
+        self.assertIn("C127B0=0 ", text)
+        self.assertIn("C255B0=0 ", text)
+
+    def test_ntt_linearity(self):
+        """NTT is linear: NTT(a + b) = NTT(a) + NTT(b) (via PADD)."""
+        # a=[5,10,0,...], b=[3,7,0,...], a+b=[8,17,0,...]
+        coeffs_a = [0] * 256
+        coeffs_b = [0] * 256
+        coeffs_sum = [0] * 256
+        coeffs_a[0], coeffs_a[1] = 5, 10
+        coeffs_b[0], coeffs_b[1] = 3, 7
+        coeffs_sum[0], coeffs_sum[1] = 8, 17
+        setup = self._alloc_poly("tv-a", coeffs_a)
+        setup.extend(self._alloc_poly("tv-b", coeffs_b))
+        setup.extend(self._alloc_poly("tv-s", coeffs_sum))
+        setup.append("CREATE tv-r1 1024 ALLOT")
+        setup.append("CREATE tv-r2 1024 ALLOT")
+        setup.extend([
+            "Q-KYBER NTT-SETQ",
+            # NTT(a)
+            "tv-a NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r1 NTT-STORE",
+            # NTT(b)
+            "tv-b NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r2 NTT-STORE",
+            # NTT(a) + NTT(b) pointwise
+            "tv-r1 NTT-BUF-A NTT-LOAD",
+            "tv-r2 NTT-BUF-B NTT-LOAD",
+            "NTT-PADD NTT-WAIT",
+            "tv-r1 NTT-STORE",           # tv-r1 = NTT(a)+NTT(b)
+            # NTT(a+b)
+            "tv-s NTT-BUF-A NTT-LOAD",
+            "NTT-FWD NTT-WAIT",
+            "tv-r2 NTT-STORE",           # tv-r2 = NTT(a+b)
+            # Compare first 2 coefficients
+            '."  LHS0=" tv-r1 C@ .',
+            '."  RHS0=" tv-r2 C@ .',
+            '."  LHS4=" tv-r1 4 + C@ .',
+            '."  RHS4=" tv-r2 4 + C@ .',
+        ])
+        text = self._run_kdos(setup)
+        # Extract values and verify they match
+        import re
+        lhs0 = re.search(r'LHS0=(\d+)', text)
+        rhs0 = re.search(r'RHS0=(\d+)', text)
+        lhs4 = re.search(r'LHS4=(\d+)', text)
+        rhs4 = re.search(r'RHS4=(\d+)', text)
+        self.assertIsNotNone(lhs0)
+        self.assertIsNotNone(rhs0)
+        self.assertEqual(lhs0.group(1), rhs0.group(1))
+        self.assertEqual(lhs4.group(1), rhs4.group(1))
+
+
 class TestKDOSHKDF(_KDOSTestBase):
     """Tests for §1.9 HKDF-Extract / HKDF-Expand (RFC 5869 with HMAC-SHA3-256)."""
 

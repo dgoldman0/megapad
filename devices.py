@@ -45,6 +45,7 @@ AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
 X25519_BASE  = 0x0840
+NTT_BASE     = 0x08C0
 
 
 # ---------------------------------------------------------------------------
@@ -1674,6 +1675,198 @@ class FieldALUDevice(Device):
                 self._busy = True
                 self._done = False
                 self._execute(mode)
+
+
+# ---------------------------------------------------------------------------
+#  NTT Engine — 256-point Number Theoretic Transform accelerator
+# ---------------------------------------------------------------------------
+# Register map (offsets from NTT_BASE = 0x8C0):
+#   0x00       STATUS (R)  — 0=idle, 1=busy, 2=done
+#   0x08-0x0F  Q      (RW) — modulus, 64-bit LE (default 3329)
+#   0x10-0x11  IDX    (RW) — coefficient index, 16-bit LE (0-255)
+#   0x18-0x1B  LOAD_A (W)  — write A[IDX], LE 32-bit, IDX++ on byte-3
+#   0x1C-0x1F  LOAD_B (W)  — write B[IDX], LE 32-bit, IDX++ on byte-3
+#   0x20-0x23  RESULT (R)  — read result[IDX], LE 32-bit, IDX++ on byte-3
+#   0x28       CMD    (W)  — bits[2:1]=op, bit[0]=go
+#
+# CMD operations:
+#   0x01  NTT_FWD   — forward NTT(A)        → result
+#   0x03  NTT_INV   — inverse NTT(A)        → result
+#   0x05  NTT_PMUL  — pointwise A·B mod q   → result
+#   0x07  NTT_PADD  — pointwise (A+B) mod q → result
+
+NTT_OP_FWD  = 0
+NTT_OP_INV  = 1
+NTT_OP_PMUL = 2
+NTT_OP_PADD = 3
+
+
+class NTTDevice(Device):
+    """256-point NTT accelerator for ML-KEM / ML-DSA lattice crypto."""
+
+    NTT_N = 256
+
+    def __init__(self):
+        super().__init__("NTT", NTT_BASE, 0x30)
+        self._q = 3329            # default: ML-KEM modulus
+        self._idx = 0
+        self._poly_a = [0] * self.NTT_N
+        self._poly_b = [0] * self.NTT_N
+        self._result = [0] * self.NTT_N
+        self._busy = False
+        self._done = False
+        self._load_a_buf = bytearray(4)
+        self._load_b_buf = bytearray(4)
+        self._omega = None
+        self._omega_inv = None
+        self._n_inv = None
+        self._update_roots()
+
+    # --- root-of-unity computation ---
+
+    def _update_roots(self):
+        """Find primitive N-th root of unity for current q."""
+        q = self._q
+        n = self.NTT_N
+        if q < 2 or (q - 1) % n != 0:
+            self._omega = None
+            return
+        for g in range(2, min(q, 10000)):
+            if pow(g, (q - 1) // 2, q) != 1:
+                omega = pow(g, (q - 1) // n, q)
+                if pow(omega, n // 2, q) != 1:
+                    self._omega = omega
+                    self._omega_inv = pow(omega, q - 2, q)
+                    self._n_inv = pow(n, q - 2, q)
+                    return
+        self._omega = None
+
+    # --- NTT algorithms ---
+
+    def _bit_reverse(self, a):
+        n = len(a)
+        j = 0
+        for i in range(1, n):
+            bit = n >> 1
+            while j & bit:
+                j ^= bit
+                bit >>= 1
+            j ^= bit
+            if i < j:
+                a[i], a[j] = a[j], a[i]
+
+    def _ntt_forward(self, coeffs):
+        q = self._q
+        n = self.NTT_N
+        a = [x % q for x in coeffs]
+        self._bit_reverse(a)
+        length = 2
+        while length <= n:
+            wn = pow(self._omega, n // length, q)
+            for i in range(0, n, length):
+                w = 1
+                half = length // 2
+                for k in range(half):
+                    u = a[i + k]
+                    v = (a[i + k + half] * w) % q
+                    a[i + k] = (u + v) % q
+                    a[i + k + half] = (u - v) % q
+                    w = (w * wn) % q
+            length <<= 1
+        return a
+
+    def _ntt_inverse(self, coeffs):
+        q = self._q
+        n = self.NTT_N
+        a = [x % q for x in coeffs]
+        self._bit_reverse(a)
+        length = 2
+        while length <= n:
+            wn = pow(self._omega_inv, n // length, q)
+            for i in range(0, n, length):
+                w = 1
+                half = length // 2
+                for k in range(half):
+                    u = a[i + k]
+                    v = (a[i + k + half] * w) % q
+                    a[i + k] = (u + v) % q
+                    a[i + k + half] = (u - v) % q
+                    w = (w * wn) % q
+            length <<= 1
+        return [(x * self._n_inv) % q for x in a]
+
+    # --- dispatch ---
+
+    def _execute(self, op):
+        if self._omega is None:
+            self._done = True
+            self._busy = False
+            return
+        q = self._q
+        if op == NTT_OP_FWD:
+            self._result = self._ntt_forward(self._poly_a)
+        elif op == NTT_OP_INV:
+            self._result = self._ntt_inverse(self._poly_a)
+        elif op == NTT_OP_PMUL:
+            self._result = [(a * b) % q
+                            for a, b in zip(self._poly_a, self._poly_b)]
+        elif op == NTT_OP_PADD:
+            self._result = [(a + b) % q
+                            for a, b in zip(self._poly_a, self._poly_b)]
+        self._busy = False
+        self._done = True
+
+    # --- MMIO interface ---
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x00:                          # STATUS
+            return (int(self._done) << 1) | int(self._busy)
+        if 0x08 <= offset < 0x10:                   # Q (8 bytes)
+            return (self._q >> ((offset - 0x08) * 8)) & 0xFF
+        if 0x10 <= offset < 0x12:                   # IDX (2 bytes)
+            return (self._idx >> ((offset - 0x10) * 8)) & 0xFF
+        if 0x20 <= offset < 0x24:                   # RESULT[IDX]
+            byte_idx = offset - 0x20
+            idx = self._idx % self.NTT_N
+            val = self._result[idx]
+            r = (val >> (byte_idx * 8)) & 0xFF
+            if byte_idx == 3:
+                self._idx = (self._idx + 1) % self.NTT_N
+            return r
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if 0x08 <= offset < 0x10:                   # Q (8 bytes)
+            shift = (offset - 0x08) * 8
+            self._q = (self._q & ~(0xFF << shift)) | (value << shift)
+            if offset == 0x0F:
+                self._update_roots()
+        elif 0x10 <= offset < 0x12:                  # IDX (2 bytes)
+            shift = (offset - 0x10) * 8
+            self._idx = (self._idx & ~(0xFF << shift)) | (value << shift)
+        elif 0x18 <= offset < 0x1C:                  # LOAD_A
+            byte_idx = offset - 0x18
+            self._load_a_buf[byte_idx] = value
+            if byte_idx == 3:
+                idx = self._idx % self.NTT_N
+                self._poly_a[idx] = int.from_bytes(
+                    self._load_a_buf, 'little') % self._q
+                self._idx = (self._idx + 1) % self.NTT_N
+        elif 0x1C <= offset < 0x20:                  # LOAD_B
+            byte_idx = offset - 0x1C
+            self._load_b_buf[byte_idx] = value
+            if byte_idx == 3:
+                idx = self._idx % self.NTT_N
+                self._poly_b[idx] = int.from_bytes(
+                    self._load_b_buf, 'little') % self._q
+                self._idx = (self._idx + 1) % self.NTT_N
+        elif offset == 0x28:                         # CMD
+            if (value & 1) and not self._busy:
+                op = (value >> 1) & 0x3
+                self._busy = True
+                self._done = False
+                self._execute(op)
 
 
 # ---------------------------------------------------------------------------
