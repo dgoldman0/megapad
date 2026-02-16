@@ -130,6 +130,82 @@ implications:
    verify MEX faults, verify multiply produces correct results (slower),
    verify QoS interaction with major cores.
 
+### Size Comparison (Post-Implementation Estimate)
+
+Based on the actual `mp64_cpu.v` and `mp64_cpu_micro.v` RTL as
+implemented, counting all `reg` declarations and logic resources:
+
+#### Flip-Flop Breakdown
+
+| Component              | Major Core | Micro Core | Notes                        |
+|------------------------|:----------:|:----------:|------------------------------|
+| Register file R[0:15]  | 1,024      | 1,024      | 16 × 64                     |
+| Bus output regs        | 132        | 132        | valid+addr+wdata+wen+size    |
+| ALU inputs             | 132        | 132        | op+a+b                      |
+| Temp regs (mem_data…)  | 140        | 140        | effective_addr+mem_data+subs |
+| IVT + trap context     | 136        | 136        | ivt_base+ivec_id+trap_addr   |
+| DMA ring CSRs          | 384        | 0          | 6 × 64-bit                  |
+| Performance counters   | 257        | 65         | 4×64+1 vs 1×64+1            |
+| BIST state             | 156        | 0          | status+fail_addr+pattern…    |
+| Multiply result        | 128        | 0          | 64×64→128                   |
+| I-cache I/O            | 131        | 0          | addr+req+inv signals         |
+| MEX/tile I/O           | 158        | 0          | csr_wen+mex_valid+etc.       |
+| Fetch control          | 65         | 1          | fetch_pc(64)+active vs pending|
+| Instruction buffer     | 137        | 96         | 16B vs 11B + len regs        |
+| Misc (flags, selectors)| ~100       | ~100       | 1802 regs, FSM, EXT, IO…    |
+| **Raw Total**          | **~3,100** | **~1,830** |                              |
+| **Est. Post-Synthesis**| **~2,500** | **~1,800** | Vivado optimises unused regs |
+
+#### LUT Estimates
+
+| Logic Block                     | Major  | Micro  | Notes                       |
+|---------------------------------|:------:|:------:|-----------------------------|
+| Shared ALU (mp64_alu.v)         | ~350   | ~350   | 16-op 64-bit combinational  |
+| Decoder/FSM                     | ~450   | ~300   | Major adds MULDIV/MEX/BIST  |
+| Register file MUX               | ~130   | ~130   | 16:1 × 64                   |
+| I-cache alignment & control     | ~140   | 0      | Byte extract + FSM          |
+| CSR read MUX                    | ~130   | ~70    | ~30 CSRs vs ~18 CSRs        |
+| Multiply control (DSP glue)     | ~50    | 0      |                             |
+| BIST FSM                        | ~60    | 0      |                             |
+| MEX mux + misc                  | ~100   | 0      |                             |
+| Bus / MEMALU / condition / sign | ~190   | ~180   |                             |
+| **Total (MUL→DSP48)**           | **~1,600** | **~1,030** |                       |
+
+#### DSP48 & BRAM
+
+| Resource     | Major Core | Micro Core |
+|--------------|:----------:|:----------:|
+| DSP48E1      | **16**     | **0**      |
+| BRAM36K      | **1–2**    | **0**      |
+
+#### Packing Ratios
+
+| Metric                       | Ratio    | Notes                              |
+|------------------------------|:--------:|--------------------------------------|
+| FF ratio (CPU only)          | 1.39:1   | Register file is 57% of micro FFs  |
+| FF ratio (CPU + I-cache)     | ~1.6:1   | I-cache adds ~530 FFs              |
+| LUT ratio (DSP used for MUL) | 1.55:1   |                                    |
+| LUT ratio (MUL in fabric)    | ~3.4:1   | +2000 LUTs for 64-bit multiply    |
+| DSP-equivalent LUT ratio     | ~3.5:1   | Counting each DSP48 ≈ 125 LUTs    |
+
+**Practical packing:** ~1.3–1.5 micro cores per major core area when
+DSP48 stays on die (FFs are the binding constraint because the
+1,024-FF register file is incompressible — it's 57% of the micro
+core's total FFs).
+
+With the register file moved to distributed LUT-RAM (synthesis can
+do this automatically), the FF bottleneck loosens to ~2–2.5:1 and
+the binding constraint shifts to LUT area.
+
+#### Test Results
+
+| Testbench          | Pass | Fail | Notes                            |
+|--------------------|:----:|:----:|----------------------------------|
+| tb_alu.v           | 53   | 0    | All 16 ALU ops + flag edge cases |
+| tb_cpu_micro.v     | 11   | 0    | NOP/HALT/LDI/ALU/MEM/BR/TRAP/CSR/SEP |
+| tb_cpu_smoke.v     | 19   | 0    | Regression — refactored major core |
+| tb_opcodes.v       | 91   | 1    | Pre-existing EXT.SKIP failure    |
+
 ---
 
 ## 2. Multi-Prime Field ALU (Roadmap Layer 6, Item 40)

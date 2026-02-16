@@ -184,25 +184,14 @@ module mp64_cpu (
     wire [3:0] nib  = ibuf[0][3:0];   // sub-selector
 
     // ========================================================================
+    // Shared constants and functions
+    // ========================================================================
+    `include "mp64_cpu_common.vh"
+
+    // ========================================================================
     // CPU state machine
     // ========================================================================
-    localparam CPU_FETCH      = 4'd0;
-    localparam CPU_DECODE     = 4'd1;
-    localparam CPU_EXECUTE    = 4'd2;
-    localparam CPU_MEM_READ   = 4'd3;
-    localparam CPU_MEM_WRITE  = 4'd4;
-    localparam CPU_MEX_WAIT   = 4'd5;
-    localparam CPU_IRQ        = 4'd6;
-    localparam CPU_HALT       = 4'd7;
-    // CPU_FETCH_MORE removed — replaced by I-cache prefetch buffer
-    localparam CPU_MULDIV     = 4'd9;
-    localparam CPU_MEM_READ2  = 4'd10;   // second read (RTI flags pop)
-    localparam CPU_IRQ_PUSH   = 4'd11;   // push flags in IRQ sequence
-    localparam CPU_IRQ_LOAD   = 4'd12;   // load IVT vector from memory
-    localparam CPU_BIST       = 4'd8;    // memory BIST FSM
-    localparam CPU_MEMALU_RD  = 4'd13;   // MEMALU: reading M(R(X))
-    localparam CPU_MEMALU_WB  = 4'd14;   // MEMALU: write-back (IO OUT read)
-    localparam CPU_SKIP       = 4'd15;   // SKIP: fetch next instr byte for length
+    localparam CPU_BIST       = 4'd8;    // memory BIST FSM (major core only)
 
     reg [3:0]  cpu_state;
 
@@ -234,208 +223,21 @@ module mp64_cpu (
     end
 
     // ========================================================================
-    // Condition code evaluation (for branches)
+    // ALU instance (shared combinational module)
     // ========================================================================
-    function cond_eval;
-        input [3:0] cond;
-        input [7:0] f;
-        input       q_val;
-        input [3:0] ef_val;
-        begin
-            case (cond)
-                4'h0: cond_eval = 1'b1;           // AL (always)
-                4'h1: cond_eval = f[0];            // EQ (Z=1)
-                4'h2: cond_eval = !f[0];           // NE (Z=0)
-                4'h3: cond_eval = f[1];            // CS (C=1)
-                4'h4: cond_eval = !f[1];           // CC (C=0)
-                4'h5: cond_eval = f[2];            // MI (N=1)
-                4'h6: cond_eval = !f[2];           // PL (N=0)
-                4'h7: cond_eval = f[3];            // VS (V=1)
-                4'h8: cond_eval = !f[3];           // VC (V=0)
-                4'h9: cond_eval = f[5];            // GT (G=1)
-                4'hA: cond_eval = !f[5];           // LE (G=0)
-                4'hB: cond_eval = q_val;           // BQ  (Q=1)
-                4'hC: cond_eval = !q_val;          // BNQ (Q=0)
-                4'hD: cond_eval = f[7];            // SAT (S=1)
-                4'hE: cond_eval = |ef_val;         // EF  (any EF set)
-                4'hF: cond_eval = 1'b0;            // NV (never)
-                default: cond_eval = 1'b0;
-            endcase
-        end
-    endfunction
+    reg  [3:0]  alu_op;
+    reg  [63:0] alu_a, alu_b;
+    wire [63:0] alu_result;
+    wire [7:0]  alu_flags_out;
 
-    // ========================================================================
-    // Parity (even parity of low 8 bits)
-    // ========================================================================
-    function parity8;
-        input [63:0] val;
-        reg [7:0] b;
-        begin
-            b = val[7:0];
-            b = b ^ (b >> 4);
-            b = b ^ (b >> 2);
-            b = b ^ (b >> 1);
-            parity8 = ~b[0];   // 1 = even number of 1-bits
-        end
-    endfunction
-
-    // ========================================================================
-    // ALU
-    // ========================================================================
-    reg [63:0] alu_a, alu_b, alu_result;
-    reg [7:0]  alu_flags_out;
-    reg [3:0]  alu_op;
-
-    localparam ALU_ADD = 4'd0;
-    localparam ALU_SUB = 4'd1;
-    localparam ALU_AND = 4'd2;
-    localparam ALU_OR  = 4'd3;
-    localparam ALU_XOR = 4'd4;
-    localparam ALU_MOV = 4'd5;
-    localparam ALU_NOT = 4'd6;
-    localparam ALU_NEG = 4'd7;
-    localparam ALU_SHL = 4'd8;
-    localparam ALU_SHR = 4'd9;
-    localparam ALU_SAR = 4'd10;
-    localparam ALU_CMP = 4'd11;
-    localparam ALU_ADC = 4'd12;
-    localparam ALU_SBB = 4'd13;
-    localparam ALU_ROL = 4'd14;
-    localparam ALU_ROR = 4'd15;
-
-    reg [64:0] alu_wide;   // 65-bit for carry
-
-    always @(*) begin
-        alu_result = 64'd0;
-        alu_flags_out = flags;
-        alu_wide = 65'd0;
-
-        case (alu_op)
-            ALU_ADD: begin
-                alu_wide = {1'b0, alu_a} + {1'b0, alu_b};
-                alu_result = alu_wide[63:0];
-                alu_flags_out[1] = alu_wide[64];  // carry
-                alu_flags_out[3] = (~(alu_a[63] ^ alu_b[63])) &
-                                   (alu_a[63] ^ alu_wide[63]);  // V
-            end
-            ALU_ADC: begin
-                alu_wide = {1'b0, alu_a} + {1'b0, alu_b} + {64'd0, flag_c};
-                alu_result = alu_wide[63:0];
-                alu_flags_out[1] = alu_wide[64];
-                alu_flags_out[3] = (~(alu_a[63] ^ alu_b[63])) &
-                                   (alu_a[63] ^ alu_wide[63]);
-            end
-            ALU_SUB, ALU_CMP: begin
-                alu_wide = {1'b0, alu_a} - {1'b0, alu_b};
-                alu_result = alu_wide[63:0];
-                // C=1 means no borrow (a >= b unsigned)
-                alu_flags_out[1] = (alu_a >= alu_b) ? 1'b1 : 1'b0;
-                alu_flags_out[3] = (alu_a[63] ^ alu_b[63]) &
-                                   (alu_a[63] ^ alu_result[63]);  // V
-                alu_flags_out[5] = (alu_a > alu_b) ? 1'b1 : 1'b0; // G
-            end
-            ALU_SBB: begin
-                alu_wide = {1'b0, alu_a} - {1'b0, alu_b} - {64'd0, ~flag_c};
-                alu_result = alu_wide[63:0];
-                alu_flags_out[1] = !alu_wide[64];
-            end
-            ALU_AND: begin
-                alu_result = alu_a & alu_b;
-                alu_flags_out[1] = 1'b0;  // logic: clear C
-                alu_flags_out[3] = 1'b0;  // logic: clear V
-            end
-            ALU_OR: begin
-                alu_result = alu_a | alu_b;
-                alu_flags_out[1] = 1'b0;
-                alu_flags_out[3] = 1'b0;
-            end
-            ALU_XOR: begin
-                alu_result = alu_a ^ alu_b;
-                alu_flags_out[1] = 1'b0;
-                alu_flags_out[3] = 1'b0;
-            end
-            ALU_MOV: alu_result = alu_b;
-            ALU_NOT: begin
-                alu_result = ~alu_b;
-                alu_flags_out[1] = 1'b0;
-                alu_flags_out[3] = 1'b0;
-            end
-            ALU_NEG: begin
-                alu_result = (~alu_b) + 64'd1;
-                alu_flags_out[1] = (alu_b != 64'd0) ? 1'b1 : 1'b0;
-            end
-            ALU_SHL: begin
-                alu_result = alu_a << alu_b[5:0];
-                // carry = last bit shifted out
-                alu_flags_out[1] = (alu_b[5:0] != 0) ?
-                    alu_a[64 - alu_b[5:0]] : 1'b0;
-            end
-            ALU_SHR: begin
-                alu_result = alu_a >> alu_b[5:0];
-                alu_flags_out[1] = (alu_b[5:0] != 0) ?
-                    alu_a[alu_b[5:0] - 1] : 1'b0;
-            end
-            ALU_SAR: begin
-                alu_result = $signed(alu_a) >>> alu_b[5:0];
-                alu_flags_out[1] = (alu_b[5:0] != 0) ?
-                    alu_a[alu_b[5:0] - 1] : 1'b0;
-            end
-            ALU_ROL: begin
-                if (alu_b[5:0] != 0)
-                    alu_result = (alu_a << alu_b[5:0]) |
-                                 (alu_a >> (7'd64 - {1'b0, alu_b[5:0]}));
-                else
-                    alu_result = alu_a;
-            end
-            ALU_ROR: begin
-                if (alu_b[5:0] != 0)
-                    alu_result = (alu_a >> alu_b[5:0]) |
-                                 (alu_a << (7'd64 - {1'b0, alu_b[5:0]}));
-                else
-                    alu_result = alu_a;
-            end
-            default: alu_result = 64'd0;
-        endcase
-
-        // Common flags for all ALU ops
-        alu_flags_out[0] = (alu_result == 64'd0);             // Z
-        alu_flags_out[2] = alu_result[63];                    // N
-        alu_flags_out[4] = parity8(alu_result);               // P
-    end
-
-    // ========================================================================
-    // Instruction length decoder
-    // ========================================================================
-    function [3:0] instr_len;
-        input [7:0] byte0;
-        input       has_ext;
-        begin
-            case (byte0[7:4])
-                FAM_SYS:   instr_len = (byte0[3:0] == 4'hD) ? 4'd2  // CALL.L Rn
-                                      : 4'd1;
-                FAM_INC:   instr_len = 4'd1;
-                FAM_DEC:   instr_len = 4'd1;
-                FAM_BR:    instr_len = 4'd2; // always 2 bytes even in SKIP mode
-                FAM_LBR:   instr_len = 4'd3;
-                FAM_MEM:   instr_len = (byte0[3:0] == 4'hF) ? 4'd3  // LD.D+off
-                                      : 4'd2;
-                FAM_IMM:   instr_len = (byte0[3:0] == 4'h1) ? 4'd4  // LHI imm16
-                                      : (has_ext) ? 4'd10            // EXT.IMM64
-                                      : (byte0[3:0] >= 4'h8) ? 4'd2 // shifts, GLO/GHI/PLO/PHI
-                                      : 4'd3;                        // LDI/ADDI/etc imm8
-                FAM_ALU:   instr_len = 4'd2;
-                FAM_MEMALU:instr_len = 4'd1;
-                FAM_IO:    instr_len = 4'd1;
-                FAM_SEP:   instr_len = 4'd1;
-                FAM_SEX:   instr_len = 4'd1;
-                FAM_MULDIV:instr_len = 4'd2;
-                FAM_CSR:   instr_len = 4'd2;  // opcode + CSR addr
-                FAM_MEX:   instr_len = (byte0[3:2] == 2'd1) ? 4'd3 : 4'd2;
-                FAM_EXT:   instr_len = 4'd1;
-                default:   instr_len = 4'd1;
-            endcase
-        end
-    endfunction
+    mp64_alu u_alu (
+        .op       (alu_op),
+        .a        (alu_a),
+        .b        (alu_b),
+        .flags_in (flags),
+        .result   (alu_result),
+        .flags_out(alu_flags_out)
+    );
 
     // ========================================================================
     // Temporary registers for multi-cycle operations
@@ -457,10 +259,6 @@ module mp64_cpu (
     reg [2:0]  io_port;
     reg        io_is_inp;
 
-    // Post-operation action codes
-    localparam POST_NONE     = 3'd0;
-    localparam POST_RTI_POP2 = 3'd1;  // after popping PC, pop flags
-    localparam POST_IRQ_VEC  = 3'd2;  // after pushing, load IVT vector
     reg [2:0]  post_action;
 
     // ========================================================================
@@ -1632,6 +1430,7 @@ module mp64_cpu (
                     bus_wen   <= 1'b1;
                     bus_size  <= BUS_DWORD;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;
                         // Now load IVT vector from memory
                         effective_addr <= ivt_base + {56'd0, ivec_id, 3'b000};
                         bus_size <= BUS_DWORD;
@@ -1648,6 +1447,7 @@ module mp64_cpu (
                     bus_wen   <= 1'b0;
                     bus_size  <= BUS_DWORD;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;
                         R[psel] <= bus_rdata;
                         fetch_pc <= bus_rdata;
                         cpu_state <= CPU_FETCH;
@@ -1663,6 +1463,7 @@ module mp64_cpu (
                     bus_wen   <= 1'b0;
                     bus_size  <= BUS_BYTE;
                     if (bus_ready) begin
+                        bus_valid <= 1'b0;
                         memalu_byte <= bus_rdata[7:0];
 
                         if (memalu_sub == 4'hF) begin
