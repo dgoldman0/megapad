@@ -1042,7 +1042,7 @@ module mp64_cpu (
                                 CSR_TREG:       R[nib[2:0]] <= {56'd0, T};
                                 CSR_IE:         R[nib[2:0]] <= {63'd0, flags[6]};
                                 CSR_COREID:     R[nib[2:0]] <= {62'd0, core_id};
-                                CSR_NCORES:     R[nib[2:0]] <= {62'd0, NUM_CORES[1:0]};
+                                CSR_NCORES:     R[nib[2:0]] <= NUM_ALL_CORES;
                                 CSR_IVEC_ID:    R[nib[2:0]] <= {56'd0, ivec_id};
                                 CSR_TRAP_ADDR:  R[nib[2:0]] <= trap_addr;
                                 CSR_MEGAPAD_SZ: R[nib[2:0]] <= 64'd0;

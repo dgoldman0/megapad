@@ -21,8 +21,29 @@ parameter MAX_REGS        = 16;            // 16 GPRs
 // ----------------------------------------------------------------------------
 // Multi-core parameters
 // ----------------------------------------------------------------------------
-parameter NUM_CORES       = 4;             // Quad-core
-parameter CORE_ID_BITS    = 2;             // log2(NUM_CORES)
+parameter NUM_CORES       = 4;             // Major (full) cores
+parameter CORE_ID_BITS    = 4;             // 4-bit core IDs (0-15)
+
+// Micro-cluster parameters
+parameter NUM_CLUSTERS    = 3;             // Micro-core clusters
+parameter MICRO_PER_CLUSTER = 4;           // Micro-cores per cluster
+parameter NUM_MICRO_CORES = NUM_CLUSTERS * MICRO_PER_CLUSTER;  // 12 total
+parameter NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES;       // 16 total
+
+// Bus port topology: each full core = 1 port, each cluster = 1 port
+parameter NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS;          // 7 bus ports
+parameter BUS_PORT_BITS   = 3;             // ceil(log2(7))
+
+// Micro-core global ID mapping:
+//   Full cores:  0 – 3
+//   Cluster 0:   4 – 7  (micro-cores 0-3)
+//   Cluster 1:   8 – 11 (micro-cores 0-3)
+//   Cluster 2:  12 – 15 (micro-cores 0-3)
+parameter MICRO_ID_BASE   = NUM_CORES;     // first micro-core global ID
+
+// Cluster scratchpad
+parameter CLUSTER_SPAD_BYTES = 1024;       // 1 KiB per cluster
+parameter CLUSTER_SPAD_DEPTH = CLUSTER_SPAD_BYTES / CELL;  // 128 × 64-bit
 
 // Per-core stack region sizes (within 1 MiB shared BRAM)
 // Layout: Core 0 boots from 0x0000, stacks at top of respective 64 KiB zone
@@ -30,7 +51,8 @@ parameter CORE_ID_BITS    = 2;             // log2(NUM_CORES)
 //   Core 1: stack region 0xE0000–0xEFFFF
 //   Core 2: stack region 0xD0000–0xDFFFF
 //   Core 3: stack region 0xC0000–0xCFFFF
-parameter CORE_STACK_SIZE = 65536;         // 64 KiB per core
+// Micro-cores use cluster scratchpad or software-managed stack zones.
+parameter CORE_STACK_SIZE = 65536;         // 64 KiB per major core
 parameter CORE0_STACK_TOP = 20'hFFFFF;
 parameter CORE1_STACK_TOP = 20'hEFFFF;
 parameter CORE2_STACK_TOP = 20'hDFFFF;
