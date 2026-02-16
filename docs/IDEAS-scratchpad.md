@@ -797,3 +797,96 @@ all prior work: banked memory, clean primitives, parameterized bus).
   KDOS image, or just act as slaves that execute dispatched tasks only.
   Leaning toward *slave-only* — micro-cores don't run their own REPL or
   scheduler, they just wait for IPI, execute a word, and signal done.
+
+---
+
+## 5. What Micro-Cores Enable
+
+### KDOS Software Patterns
+
+With enriched micro-clusters (shared MUL + scratchpad + barrier), the
+Full config (4F+12µ) unlocks workloads that were inefficient or
+impossible with just major cores:
+
+#### Many-Thread I/O Concurrency
+- **Pattern:** 12 concurrent network connections, each with its own
+  micro handling the state machine (parse → validate → encrypt → send).
+- **Why major cores couldn't:** Context-switching 12 tasks on 4 cores
+  = constant save/restore overhead.  Micros *are* the contexts.
+- **Cluster benefit:** Each micro blocks on I/O without starving
+  others (cluster arbiter keeps rotating).  Scratchpad holds shared
+  connection table (no main-bus trip).
+
+#### Event-Driven Processing Pipelines
+- **Pattern:** Multi-stage pipeline with one micro per stage.  Data
+  flows through cluster scratchpad.  Hardware barrier syncs stages.
+- **Example:** REPL server — lexer (µ0) → parser (µ1) → compiler (µ2)
+  → executor (major core).  Micros prefetch/validate while major core
+  computes.
+- **Why major cores couldn't:** Pipeline stalls whenever any stage
+  blocks.  With micros, each stage progresses independently.
+
+#### Forth Word Dispatch Farm
+- **Pattern:** Major cores compile/optimize dictionary, micros execute
+  user scripts.  12 micros = 12 parallel `EVALUATE` contexts.
+- **Use case:** MUD/REPL server where each logged-in user gets a
+  dedicated micro.  Users can't DoS each other (QoS isolation), can't
+  starve tile workloads (major cores reserved for graphics/physics).
+- **Cluster benefit:** Shared multiplier means even math-heavy scripts
+  work (just slower).  Scratchpad = shared environment bindings.
+
+#### Redundant Computation / Fault Tolerance
+- **Pattern:** Run same computation on 3 micros, vote on result
+  (triple modular redundancy).  Scratchpad holds intermediate state,
+  barrier synchronizes before vote.
+- **Why major cores couldn't:** Too expensive to triple (4→12 cores
+  blows gate budget).  Micros are cheap enough to waste on redundancy.
+- **Use case:** Safety-critical control loop in embedded deployment.
+
+#### Packet Processing / Routing
+- **Pattern:** Each micro owns a NIC RX queue, inspects packet headers,
+  forwards based on routing table.  12 micros = 12 simultaneous packet
+  inspections.
+- **Cluster benefit:** Scratchpad = forwarding table cache (1 KiB ~128
+  entries, shared hit rate).  Barrier = "all queues drained" signal
+  for batch processing.
+- **Why major cores couldn't:** 4 cores × deep packet inspection =
+  head-of-line blocking.  Micros naturally parallelize.
+
+#### Cooperative Multitasking Without an OS
+- **Pattern:** Micros naturally yield on multiply (arbitration wait)
+  or bus I/O.  No preemption, no context save/restore, no scheduler
+  overhead.
+- **Use case:** Major cores run "real work" (tile kernels, crypto),
+  micros handle housekeeping (watchdog, logging, stats, heartbeat).
+- **Cluster benefit:** Hardware barrier = join point for coordinated
+  startup/shutdown.  Scratchpad = lock-free message passing.
+
+### Application-Level Wins
+
+| Workload | Major Cores Only (4F) | With Micro-Clusters (4F+12µ) |
+|----------|----------------------|------------------------------|
+| **Web server** | 4 concurrent connections max | 12+ connections, one micro per state machine |
+| **Game server** | 4 player sessions | 12 player sessions + major cores for physics/AI |
+| **Data pipeline** | Sequential stages, CPU-bound | 12-stage pipeline, µ prefetch/validate in parallel |
+| **Redundant control** | Can't afford TMR | 3× redundancy on critical paths (9 micros) |
+| **Crypto offload** | Major cores time-slice | Micros queue requests, majors batch-process via tile engine |
+
+### The Big Shift
+
+**Before (4 major cores):** You had 4 hammers.  Good for compute-heavy
+tasks (tile ops, crypto, FFTs), but awkward for I/O, concurrency, or
+low-latency control loops.
+
+**After (4F+12µ):** You have 4 hammers + 12 pairs of tweezers.  Major
+cores = computational horsepower (MUL/DIV/tile in 1 cycle), micro
+clusters = concurrency fabric (many threads, cooperative scheduling,
+shared local state).  The two tiers naturally separate concerns:
+
+- **Major cores:** Batch work (compile a function, encrypt a buffer,
+  render a frame).
+- **Micro-cores:** Streaming work (handle connections, parse packets,
+  dispatch tasks, poll sensors).
+
+Neither starves the other because QoS weights are tuned and enforced
+in hardware at the main arbiter.
