@@ -414,62 +414,137 @@ CREATE GFX-FONT
     R> R> DROP DROP DROP ;
 
 : GFX-TEST-CARD  ( -- )
-    320 240 0 GFX-INIT
+    640 480 0 GFX-INIT
     GFX-PAL-DEFAULT
 
-    \ Clear to dark blue
+    \ Clear to dark blue background
     1 GFX-CLEAR
 
-    \ Color bar test pattern across top
+    \ === Color bar test pattern across top (16 bars, 40px each) ===
     16 0 DO
-        I                               ( color )
-        I 20 * 0 20 30 GFX-RECT
+        I  I 40 * 0 40 24 GFX-RECT
     LOOP
 
-    \ Title bar
-    0 10 35 320 14 GFX-RECT             ( black bar )
-    2 GFX-CX !  37 GFX-CY !
+    \ === Title bar ===
+    0 0 28 640 18 GFX-RECT
+    4 GFX-CX !  33 GFX-CY !
     S" MEGAPAD-64 GRAPHICS ENGINE" 15 GFX-TYPE
+    220 GFX-CX !  33 GFX-CY !
+    S" 640x480 Framebuffer" 7 GFX-TYPE
 
-    \ System info box
-    0 10 55 200 50 GFX-RECT
-    12 GFX-CX !  57 GFX-CY !
-    S" CPU: MP64 @ 1 MHz" 7 GFX-TYPE
-    12 GFX-CX !  67 GFX-CY !
-    S" Mode: 320x240x8bpp" 7 GFX-TYPE
-    12 GFX-CX !  77 GFX-CY !
-    S" Font: 8x8 bitmap" 7 GFX-TYPE
-    12 GFX-CX !  87 GFX-CY !
-    S" Palette: 16-color CGA" 7 GFX-TYPE
+    \ === System info box (left panel) ===
+    0 8 56 280 80 GFX-RECT
+    7 8 56 280 80 GFX-BOX
+    16 GFX-CX !  60 GFX-CY !
+    S" System Information" 14 GFX-TYPE
+    16 GFX-CX !  76 GFX-CY !
+    S" CPU:     Megapad-64 @ 1 MHz" 15 GFX-TYPE
+    16 GFX-CX !  88 GFX-CY !
+    S" Video:   640x480, 8bpp indexed" 15 GFX-TYPE
+    16 GFX-CX !  100 GFX-CY !
+    S" Font:    8x8 bitmap (96 glyphs)" 15 GFX-TYPE
+    16 GFX-CX !  112 GFX-CY !
+    S" Palette: 16-color CGA + 240 free" 15 GFX-TYPE
 
-    \ Nested rectangles (right side)
-    4  220 55 90 50 GFX-RECT
-    2  225 60 80 40 GFX-RECT
-    14 230 65 70 30 GFX-RECT
-    0  235 70 60 20 GFX-RECT
-    15 237 72 56 16 GFX-RECT
+    \ === Nested rectangles (right panel) ===
+    4  350 56 140 80 GFX-RECT
+    2  358 62 124 68 GFX-RECT
+    14 366 68 108 56 GFX-RECT
+    6  374 74 92  44 GFX-RECT
+    5  382 80 76  32 GFX-RECT
+    3  390 86 60  20 GFX-RECT
+    15 398 90 44  12 GFX-RECT
 
-    \ ASCII glyph table
-    0 10 110 300 80 GFX-RECT           ( dark background )
-    12 GFX-CX !  112 GFX-CY !
-    S" ASCII Table:" 14 GFX-TYPE
+    \ === Color palette display (far right) ===
+    0 510 56 122 80 GFX-RECT
+    7 510 56 122 80 GFX-BOX
+    516 GFX-CX !  60 GFX-CY !
+    S" Palette" 14 GFX-TYPE
+    16 0 DO
+        I  I 4 MOD 24 * 516 +  I 4 / 12 * 76 +
+        22 10 GFX-RECT
+    LOOP
+
+    \ === Full ASCII glyph table ===
+    0 8 148 624 108 GFX-RECT
+    7 8 148 624 108 GFX-BOX
+    16 GFX-CX !  152 GFX-CY !
+    S" Complete ASCII Table (32-127):" 14 GFX-TYPE
     96 0 DO
         I 32 +                          ( char )
-        I 16 / 8 * 122 + GFX-CY !
-        I 16 MOD 8 * 12 + GFX-CX !
+        I 32 / 10 * 166 + GFX-CY !
+        I 32 MOD 8 * 16 + GFX-CX !
         GFX-CX @ GFX-CY @
         I 7 AND 9 +                     ( char x y color )
         GFX-CHAR
     LOOP
+    \ Row labels
+    16 GFX-CX !  228 GFX-CY !
+    S" 32          64          96          128" 8 GFX-TYPE
 
-    \ Bottom status bar
-    8 0 195 320 12 GFX-RECT
-    2 GFX-CX !  197 GFX-CY !
-    S" KDOS v1.1 -- Type GFX-DEMO for simple demo" 0 GFX-TYPE
+    \ === Horizontal line test ===
+    0 8 268 300 56 GFX-RECT
+    7 8 268 300 56 GFX-BOX
+    16 GFX-CX !  272 GFX-CY !
+    S" Line Test:" 14 GFX-TYPE
+    16 0 DO
+        I 9 +  16 I 3 * 286 + 280 GFX-HLINE
+    LOOP
 
-    \ Credits
-    2 GFX-CX !  215 GFX-CY !
-    S" Framebuffer ready. Press key to exit." 7 GFX-TYPE
+    \ === Gradient ramp ===
+    0 320 268 312 56 GFX-RECT
+    7 320 268 312 56 GFX-BOX
+    328 GFX-CX !  272 GFX-CY !
+    S" Color Gradient:" 14 GFX-TYPE
+    16 0 DO
+        I  I 18 * 328 +  286  16 32 GFX-RECT
+    LOOP
+
+    \ === Drawing primitives showcase ===
+    0 8 336 360 104 GFX-RECT
+    7 8 336 360 104 GFX-BOX
+    16 GFX-CX !  340 GFX-CY !
+    S" Drawing Primitives:" 14 GFX-TYPE
+    \ Filled boxes
+    4  16 356 48 36 GFX-RECT
+    2  72 356 48 36 GFX-RECT
+    14 128 356 48 36 GFX-RECT
+    5  184 356 48 36 GFX-RECT
+    3  240 356 48 36 GFX-RECT
+    \ Outlines
+    15 16  398 48 36 GFX-BOX
+    11 72  398 48 36 GFX-BOX
+    10 128 398 48 36 GFX-BOX
+    13 184 398 48 36 GFX-BOX
+    9  240 398 48 36 GFX-BOX
+    \ Labels
+    24 GFX-CX !  396 GFX-CY !
+    S" Filled" 7 GFX-TYPE
+    200 GFX-CX !  396 GFX-CY !
+    S" Outlined" 7 GFX-TYPE
+
+    \ === Text rendering demo (right side) ===
+    0 380 336 252 104 GFX-RECT
+    7 380 336 252 104 GFX-BOX
+    388 GFX-CX !  340 GFX-CY !
+    S" Text Rendering:" 14 GFX-TYPE
+    388 GFX-CX !  356 GFX-CY !
+    S" The quick brown fox" 15 GFX-TYPE
+    388 GFX-CX !  368 GFX-CY !
+    S" jumps over the lazy" 11 GFX-TYPE
+    388 GFX-CX !  380 GFX-CY !
+    S" dog. 0123456789" 10 GFX-TYPE
+    388 GFX-CX !  396 GFX-CY !
+    S" !@#$%^&*()-=+[]{}|" 13 GFX-TYPE
+    388 GFX-CX !  412 GFX-CY !
+    S" ABCDEFGHIJKLMNOPQRS" 9 GFX-TYPE
+    388 GFX-CX !  424 GFX-CY !
+    S" tuvwxyz ~`<>,.;:'" 12 GFX-TYPE
+
+    \ === Bottom status bar ===
+    8 0 452 640 20 GFX-RECT
+    4 GFX-CX !  458 GFX-CY !
+    S" KDOS v1.1 | 640x480x8bpp | Type GFX-DEMO for simple demo | ESC to close" 0 GFX-TYPE
 
     GFX-SYNC
     ." GFX-TEST-CARD complete" CR ;
