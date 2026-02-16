@@ -2568,10 +2568,23 @@ class Megapad64:
 #   - CPUID returns micro-core variant ID
 #   - Barrier CSRs (0x66/0x67) forwarded to cluster
 #   - BIST CSRs (0x60-0x63) forwarded to cluster
+#   - No 1802-heritage state: D accum, Q flip-flop, T register removed
+#   - No 1802-heritage families: MEMALU (0x8), I/O (0x9), SEP (0xA),
+#     SEX (0xB) — all trap as ILLEGAL_OP
+#   - No 1802-heritage sub-ops: GLO/GHI/PLO/PHI (0x6C-0x6F),
+#     RET/DIS/MARK/SAV/SEQ/REQ (0x05-0x0A) — trap as ILLEGAL_OP
+#   - No port_in/port_out arrays
+#   - PSEL fixed at 3, XSEL fixed at 2 (cannot be changed)
 # ---------------------------------------------------------------------------
 
 class Megapad64Micro(Megapad64):
-    """Micro-core CPU — lightweight variant for cluster execution."""
+    """Micro-core CPU — lightweight variant for cluster execution.
+
+    Strips all CDP1802-heritage features to minimise silicon area:
+    no D accumulator, no Q flip-flop, no T register, no SCRT calling
+    convention (MARK/SAV/RET/DIS), no port I/O, no SEP/SEX.
+    PSEL and XSEL are fixed at boot defaults (3 and 2).
+    """
 
     def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
                  num_cores: int = NUM_ALL_CORES):
@@ -2584,6 +2597,34 @@ class Megapad64Micro(Megapad64):
         self.icache_enabled = 0
         self.icache_hits = 0
         self.icache_misses = 0
+        # Strip 1802-heritage state
+        self.d_reg = 0
+        self.q_out = 0
+        self.t_reg = 0
+        self.port_out = None  # not present
+        self.port_in = None   # not present
+
+    # -- Families 0x8, 0x9, 0xA, 0xB — not available on micro-cores --
+
+    def _exec_memalu(self, sub: int) -> int:
+        """MEMALU (1802 D-register ops) not present on micro-cores."""
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "MEMALU (family 0x8) not available on micro-core")
+
+    def _exec_io(self, n: int) -> int:
+        """Port I/O (1802-style) not present on micro-cores."""
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "Port I/O (family 0x9) not available on micro-core")
+
+    def _exec_sep(self, n: int) -> int:
+        """SEP (set PC register) not present on micro-cores."""
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "SEP (family 0xA) not available on micro-core")
+
+    def _exec_sex(self, n: int) -> int:
+        """SEX (set data pointer register) not present on micro-cores."""
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "SEX (family 0xB) not available on micro-core")
 
     # -- MEX (tile engine) — not available on micro-cores --
 
@@ -2592,6 +2633,28 @@ class Megapad64Micro(Megapad64):
         self.fetch8()  # consume the funct byte
         raise TrapError(IVEC_ILLEGAL_OP,
                         "MEX (tile engine) not available on micro-core")
+
+    # -- SYS family: trap 1802-heritage sub-ops --
+
+    def _exec_sys(self, n: int) -> int:
+        """SYS family — traps RET/DIS/MARK/SAV/SEQ/REQ (1802 SCRT)."""
+        if n in (0x5, 0x6, 0x7, 0x8, 0x9, 0xA):
+            names = {0x5: 'RET', 0x6: 'DIS', 0x7: 'MARK',
+                     0x8: 'SAV', 0x9: 'SEQ', 0xA: 'REQ'}
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"{names[n]} (1802 SCRT) not available on micro-core")
+        return super()._exec_sys(n)
+
+    # -- IMM family: trap GLO/GHI/PLO/PHI --
+
+    def _exec_imm(self, sub: int) -> int:
+        """IMM family — traps GLO/GHI/PLO/PHI (D-register byte ops)."""
+        if sub in (0xC, 0xD, 0xE, 0xF):
+            self.fetch8()  # consume the Rx byte
+            names = {0xC: 'GLO', 0xD: 'GHI', 0xE: 'PLO', 0xF: 'PHI'}
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"{names[sub]} (D-register) not available on micro-core")
+        return super()._exec_imm(sub)
 
     # -- MUL/DIV — delegated to cluster shared unit --
 
@@ -2615,13 +2678,16 @@ class Megapad64Micro(Megapad64):
     def csr_read(self, addr: int) -> int:
         """Restricted CSR set matching RTL mp64_cpu_micro.v."""
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
-                    CSR_IVT_BASE, CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE,
+                    CSR_IVT_BASE, CSR_IE,
                     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
                     CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_MEGAPAD_SZ,
                     CSR_PERF_CYCLES, CSR_PERF_CTRL):
             return super().csr_read(addr)
         if addr == CSR_CPUID:
             return CPUID_MICRO
+        # D/DF/Q/T CSRs — not present, always return 0
+        if addr in (CSR_D, CSR_DF, CSR_Q, CSR_T):
+            return 0
         # Barrier CSRs — forwarded to cluster
         if addr == CSR_BARRIER_ARRIVE:
             return self._cluster.barrier_arrive if self._cluster else 0
@@ -2643,10 +2709,13 @@ class Megapad64Micro(Megapad64):
         """Restricted CSR set matching RTL mp64_cpu_micro.v."""
         val = u64(val)
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
-                    CSR_IVT_BASE, CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE,
+                    CSR_IVT_BASE, CSR_IE,
                     CSR_IVEC_ID, CSR_PERF_CTRL,
                     CSR_MBOX, CSR_IPIACK):
             return super().csr_write(addr, val)
+        # D/DF/Q/T CSR writes — silently ignored
+        if addr in (CSR_D, CSR_DF, CSR_Q, CSR_T):
+            return
         # Barrier arrive — set this core's bit
         if addr == CSR_BARRIER_ARRIVE:
             if self._cluster:

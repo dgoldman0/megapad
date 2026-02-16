@@ -101,6 +101,12 @@ Byte 1:  [Rd:4][Rs:4]
 | `0xE` | MEX | 2–3 bytes | Tile engine ops |
 | `0xF` | EXT | 1 byte | Prefix modifier for next insn |
 
+> **Micro-core restrictions:** Families 0x8, 0x9, 0xA, 0xB, 0xE, and
+> SYS sub-ops 0x5–0xA (RET/DIS/MARK/SAV/SEQ/REQ) plus IMM sub-ops
+> 0xC–0xF (GLO/GHI/PLO/PHI) are **not available** on micro-cores.
+> They trap as `ILLEGAL_OP`.  See [architecture.md](architecture.md)
+> for the full stripped-feature list.
+
 ---
 
 ## Family 0x0 — SYS (System)

@@ -58,6 +58,7 @@ from megapad64 import (
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
     CSR_COREID, CSR_NCORES, CSR_CPUID, CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
     CSR_BIST_CMD, CSR_BIST_STATUS,
+    CSR_D, CSR_DF, CSR_Q, CSR_T,
 )
 from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START, MicroCluster
@@ -2355,6 +2356,100 @@ class TestMicroCluster(unittest.TestCase):
                      "BARRIER-ARRIVE", "BARRIER-STATUS", "SPAD"]:
             self.assertIn(word, text,
                           f"'{word}' should be in WORDS output")
+
+    # -- 1802-heritage strip tests (micro-core only) --
+
+    def test_memalu_traps_on_micro_core(self):
+        """MEMALU (family 0x8) raises ILLEGAL_OP on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.mem[0] = 0x80  # LDX (MEMALU sub 0x0)
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_io_traps_on_micro_core(self):
+        """Port I/O (family 0x9) raises ILLEGAL_OP on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.mem[0] = 0x91  # OUT 1
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_sep_traps_on_micro_core(self):
+        """SEP (family 0xA) raises ILLEGAL_OP on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.mem[0] = 0xA3  # SEP R3
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_sex_traps_on_micro_core(self):
+        """SEX (family 0xB) raises ILLEGAL_OP on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.mem[0] = 0xB2  # SEX R2
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_glo_ghi_plo_phi_trap_on_micro_core(self):
+        """GLO/GHI/PLO/PHI (IMM sub 0xC–0xF) trap on micro-cores."""
+        for sub, name in [(0xC, 'GLO'), (0xD, 'GHI'),
+                          (0xE, 'PLO'), (0xF, 'PHI')]:
+            mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+            mc.mem[0] = 0x60 | sub  # IMM family, sub
+            mc.mem[1] = 0x50        # R5 operand byte
+            mc.pc = 0
+            with self.assertRaises(TrapError, msg=f"{name} should trap") as ctx:
+                mc.step()
+            self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP,
+                             f"{name} should raise IVEC_ILLEGAL_OP")
+
+    def test_mark_sav_ret_dis_seq_req_trap_on_micro_core(self):
+        """SYS sub-ops 0x5–0xA (RET/DIS/MARK/SAV/SEQ/REQ) trap on micro-cores."""
+        for sub, name in [(0x5, 'RET'), (0x6, 'DIS'), (0x7, 'MARK'),
+                          (0x8, 'SAV'), (0x9, 'SEQ'), (0xA, 'REQ')]:
+            mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+            mc.mem[0] = 0x00 | sub  # SYS family
+            mc.pc = 0
+            with self.assertRaises(TrapError, msg=f"{name} should trap") as ctx:
+                mc.step()
+            self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP,
+                             f"{name} should raise IVEC_ILLEGAL_OP")
+
+    def test_d_q_t_csr_returns_zero_on_micro_core(self):
+        """CSR reads for D/DF/Q/T return 0 on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        self.assertEqual(mc.csr_read(CSR_D), 0)
+        self.assertEqual(mc.csr_read(CSR_DF), 0)
+        self.assertEqual(mc.csr_read(CSR_Q), 0)
+        self.assertEqual(mc.csr_read(CSR_T), 0)
+
+    def test_d_q_t_csr_write_ignored_on_micro_core(self):
+        """CSR writes to D/DF/Q/T are silently ignored on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.csr_write(CSR_D, 0xFF)
+        mc.csr_write(CSR_DF, 1)
+        mc.csr_write(CSR_Q, 1)
+        mc.csr_write(CSR_T, 0xAA)
+        # All still read as 0
+        self.assertEqual(mc.csr_read(CSR_D), 0)
+        self.assertEqual(mc.csr_read(CSR_DF), 0)
+        self.assertEqual(mc.csr_read(CSR_Q), 0)
+        self.assertEqual(mc.csr_read(CSR_T), 0)
+
+    def test_non_heritage_ops_still_work_on_micro_core(self):
+        """INC/DEC/ALU/CALL.L/RET.L still work on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        # INC R5 — opcode 0x15
+        mc.regs[5] = 10
+        mc.mem[0] = 0x15  # INC R5
+        mc.pc = 0
+        mc.step()
+        self.assertEqual(mc.regs[5], 11)
 
 
 # ---------------------------------------------------------------------------
