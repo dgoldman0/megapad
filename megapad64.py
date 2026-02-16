@@ -97,6 +97,11 @@ CSR_PERF_TILEOPS = 0x6A
 CSR_PERF_EXTMEM  = 0x6B
 CSR_PERF_CTRL    = 0x6C
 
+# Cluster MPU CSRs (§6.3 — shared per micro-core cluster)
+CSR_CL_PRIV      = 0x6D   # Cluster privilege level (0=S, 1=U)
+CSR_CL_MPU_BASE  = 0x6E   # Cluster MPU lower bound (inclusive)
+CSR_CL_MPU_LIMIT = 0x6F   # Cluster MPU upper bound (exclusive)
+
 # I-Cache CSRs (§12.2)
 CSR_BARRIER_ARRIVE = 0x66  # R/W: per-core barrier arrive bitmask (cluster)
 CSR_BARRIER_STATUS = 0x67  # R: barrier done flag + arrive mask  (cluster)
@@ -2757,6 +2762,11 @@ class Megapad64Micro(Megapad64):
             if self._cluster:
                 return self._cluster.bist_csr_read(addr)
             return 0
+        # Cluster MPU CSRs — forwarded to cluster
+        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT):
+            if self._cluster:
+                return self._cluster.bist_csr_read(addr)
+            return 0
         # Removed CSRs: tile, I-cache, perf stalls/tileops/extmem → 0
         return 0
 
@@ -2779,6 +2789,11 @@ class Megapad64Micro(Megapad64):
         # BIST CSRs — forwarded to cluster
         if addr in (CSR_BIST_CMD, CSR_BIST_STATUS,
                     CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA):
+            if self._cluster:
+                self._cluster.bist_csr_write(addr, val)
+            return
+        # Cluster MPU CSRs — forwarded to cluster (S-mode only)
+        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT):
             if self._cluster:
                 self._cluster.bist_csr_write(addr, val)
             return

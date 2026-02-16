@@ -19,6 +19,7 @@
 \    8. Scheduler       — cooperative & preemptive multitasking
 \    8.1 Multicore      — CORE-RUN, CORE-WAIT, BARRIER, P.RUN-PAR
 \    8.8 Micro-Cluster  — CLUSTER-ENABLE, HW-BARRIER-WAIT, SPAD
+\    8.9 Cluster MPU    — CL-MPU-SETUP, CL-ENTER-USER, CL-MPU-OFF
 \    9. Screens         — interactive TUI (ANSI terminal, 9 screens)
 \   10. Data Ports      — NIC-based external data ingestion
 \   11. Benchmarking    — BENCH for timing via CYCLES
@@ -4087,6 +4088,43 @@ VARIABLE MB-T   VARIABLE MB-P
 \ SPAD-C! ( c off -- )  write byte to cluster scratchpad
 : SPAD-C!  ( c off -- )
     SPAD + C! ;
+
+\ =====================================================================
+\  §8.9  Cluster MPU — Memory Protection for Micro-Cores
+\ =====================================================================
+\
+\  One shared MPU per cluster (not per micro-core) — enforced in the
+\  cluster bus arbiter.  MMIO and scratchpad always allowed.
+\
+\  CL-MPU-SETUP   ( base limit -- )  configure cluster MPU window
+\  CL-ENTER-USER  ( -- )             switch cluster to user mode
+\  CL-EXIT-USER   ( -- )             return cluster to supervisor mode
+\  CL-MPU-OFF     ( -- )             disable cluster MPU (base=limit=0)
+\  .CL-MPU        ( -- )             display cluster MPU state
+
+\ CL-MPU-SETUP ( base limit -- )  set cluster MPU window [base, limit)
+: CL-MPU-SETUP  ( base limit -- )
+    CL-MPU-LIMIT! CL-MPU-BASE! ;
+
+\ CL-ENTER-USER ( -- )  switch cluster privilege to user mode
+: CL-ENTER-USER  ( -- )
+    1 CL-PRIV! ;
+
+\ CL-EXIT-USER ( -- )  switch cluster back to supervisor mode
+: CL-EXIT-USER  ( -- )
+    0 CL-PRIV! ;
+
+\ CL-MPU-OFF ( -- )  disable cluster MPU (clear window)
+: CL-MPU-OFF  ( -- )
+    0 CL-PRIV!
+    0 0 CL-MPU-SETUP ;
+
+\ .CL-MPU ( -- )  display cluster MPU configuration
+: .CL-MPU  ( -- )
+    ."  Cluster MPU:" CR
+    ."    priv = " CL-PRIV@ . CR
+    ."    base = " CL-MPU-BASE@ HEX U. DECIMAL CR
+    ."    limit= " CL-MPU-LIMIT@ HEX U. DECIMAL CR ;
 
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !

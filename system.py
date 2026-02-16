@@ -25,6 +25,7 @@ from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
+    CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
 )
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -106,6 +107,11 @@ class MicroCluster:
         self.bist_fail_addr = 0
         self.bist_fail_data = 0
 
+        # Cluster-level MPU (shared across all micro-cores in cluster)
+        self.cl_priv_level = 0   # 0 = supervisor, 1 = user
+        self.cl_mpu_base = 0     # inclusive lower bound
+        self.cl_mpu_limit = 0    # exclusive upper bound
+
         # Create micro-cores
         self.cores: list[Megapad64Micro] = []
         for i in range(n):
@@ -141,6 +147,12 @@ class MicroCluster:
             return self.bist_fail_addr
         if addr == CSR_BIST_FAIL_DATA:
             return self.bist_fail_data
+        if addr == CSR_CL_PRIV:
+            return self.cl_priv_level
+        if addr == CSR_CL_MPU_BASE:
+            return self.cl_mpu_base
+        if addr == CSR_CL_MPU_LIMIT:
+            return self.cl_mpu_limit
         return 0
 
     def bist_csr_write(self, addr: int, val: int):
@@ -153,6 +165,15 @@ class MicroCluster:
             # March C- on scratchpad
             ok = self._bist_spad()
             self.bist_status = 2 if ok else 3
+            return
+        # Cluster MPU CSRs — only writable from supervisor mode
+        if self.cl_priv_level == 0:
+            if addr == CSR_CL_PRIV:
+                self.cl_priv_level = val & 1
+            elif addr == CSR_CL_MPU_BASE:
+                self.cl_mpu_base = val & ((1 << 64) - 1)
+            elif addr == CSR_CL_MPU_LIMIT:
+                self.cl_mpu_limit = val & ((1 << 64) - 1)
 
     def _bist_spad(self) -> bool:
         """March C- test on scratchpad memory."""
@@ -202,6 +223,10 @@ class MicroCluster:
             for mc in self.cores:
                 mc._reset_state()
                 mc.halted = True  # held in reset → halted
+            # Reset cluster MPU to supervisor / open
+            self.cl_priv_level = 0
+            self.cl_mpu_base = 0
+            self.cl_mpu_limit = 0
         self.enabled = en
         if not en:
             # Entering reset — halt all micro-cores
@@ -434,6 +459,17 @@ class MegapadSystem:
         # Scratchpad interception for micro-cores
         cluster = getattr(cpu, '_cluster', None)
 
+        # For micro-cores in a cluster, MPU is enforced at cluster level.
+        # For full cores, MPU is per-core.
+        if cluster:
+            _priv = lambda: cluster.cl_priv_level
+            _mpu_base = lambda: cluster.cl_mpu_base
+            _mpu_limit = lambda: cluster.cl_mpu_limit
+        else:
+            _priv = lambda: cpu.priv_level
+            _mpu_base = lambda: cpu.mpu_base
+            _mpu_limit = lambda: cpu.mpu_limit
+
         def patched_read8(addr: int) -> int:
             addr = u64(addr)
             if MMIO_START <= addr < MMIO_END:
@@ -443,16 +479,21 @@ class MegapadSystem:
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 return cluster.spad_read8(addr & 0xFFFF_FFFF)
             # MPU / privilege check for non-MMIO accesses
-            if cpu.priv_level:
+            if _priv():
                 # User mode: block HBW entirely
                 if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                     cpu.trap_addr = addr
+                    if cluster:
+                        cluster.cl_priv_level = 0  # drop to S-mode
                     raise TrapError(IVEC_PRIV_FAULT,
                                     f"User read from HBW @ {addr:#018x}")
                 # Check MPU window for RAM
-                if cpu.mpu_limit > cpu.mpu_base:
-                    if addr < cpu.mpu_base or addr >= cpu.mpu_limit:
+                mpu_b, mpu_l = _mpu_base(), _mpu_limit()
+                if mpu_l > mpu_b:
+                    if addr < mpu_b or addr >= mpu_l:
                         cpu.trap_addr = addr
+                        if cluster:
+                            cluster.cl_priv_level = 0  # drop to S-mode
                         raise TrapError(IVEC_PRIV_FAULT,
                                         f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
@@ -470,16 +511,21 @@ class MegapadSystem:
                 cluster.spad_write8(addr & 0xFFFF_FFFF, val)
                 return
             # MPU / privilege check for non-MMIO accesses
-            if cpu.priv_level:
+            if _priv():
                 # User mode: block HBW entirely
                 if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                     cpu.trap_addr = addr
+                    if cluster:
+                        cluster.cl_priv_level = 0  # drop to S-mode
                     raise TrapError(IVEC_PRIV_FAULT,
                                     f"User write to HBW @ {addr:#018x}")
                 # Check MPU window for RAM
-                if cpu.mpu_limit > cpu.mpu_base:
-                    if addr < cpu.mpu_base or addr >= cpu.mpu_limit:
+                mpu_b, mpu_l = _mpu_base(), _mpu_limit()
+                if mpu_l > mpu_b:
+                    if addr < mpu_b or addr >= mpu_l:
                         cpu.trap_addr = addr
+                        if cluster:
+                            cluster.cl_priv_level = 0  # drop to S-mode
                         raise TrapError(IVEC_PRIV_FAULT,
                                         f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:

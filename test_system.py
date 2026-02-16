@@ -59,6 +59,7 @@ from megapad64 import (
     CSR_COREID, CSR_NCORES, CSR_CPUID, CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
     CSR_BIST_CMD, CSR_BIST_STATUS, CSR_PRIV,
     CSR_MPU_BASE, CSR_MPU_LIMIT,
+    CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
     CSR_D, CSR_DF, CSR_Q, CSR_T,
     CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL,
 )
@@ -15643,6 +15644,213 @@ class TestMPU(unittest.TestCase):
         cpu._reset_state()
         self.assertEqual(cpu.mpu_base, 0)
         self.assertEqual(cpu.mpu_limit, 0)
+
+
+class TestClusterMPU(unittest.TestCase):
+    """Test the cluster-level MPU for micro-cores."""
+
+    def _make_sys(self, ram_kib=256):
+        """Create a MegapadSystem with clusters enabled."""
+        s = MegapadSystem(ram_size=ram_kib * 1024, num_clusters=3)
+        # Enable cluster 0
+        s.sysinfo.cluster_en = 0x01
+        s.clusters[0].set_enabled(True)
+        return s
+
+    def _cluster(self, s):
+        return s.clusters[0]
+
+    def _mc(self, s, idx=0):
+        """Return micro-core idx from cluster 0."""
+        return self._cluster(s).cores[idx]
+
+    def test_cluster_mpu_defaults_zero(self):
+        """Cluster MPU CSRs default to 0 (supervisor, no window)."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        self.assertEqual(cl.cl_priv_level, 0)
+        self.assertEqual(cl.cl_mpu_base, 0)
+        self.assertEqual(cl.cl_mpu_limit, 0)
+
+    def test_cluster_mpu_csr_read(self):
+        """Micro-core can read cluster MPU CSRs."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x8000
+        self.assertEqual(mc.csr_read(CSR_CL_PRIV), 0)
+        self.assertEqual(mc.csr_read(CSR_CL_MPU_BASE), 0x1000)
+        self.assertEqual(mc.csr_read(CSR_CL_MPU_LIMIT), 0x8000)
+
+    def test_cluster_mpu_csr_write_supervisor(self):
+        """Supervisor-mode micro-core can write cluster MPU CSRs."""
+        s = self._make_sys()
+        mc = self._mc(s)
+        mc.csr_write(CSR_CL_MPU_BASE, 0x2000)
+        mc.csr_write(CSR_CL_MPU_LIMIT, 0xA000)
+        mc.csr_write(CSR_CL_PRIV, 1)
+        cl = self._cluster(s)
+        self.assertEqual(cl.cl_mpu_base, 0x2000)
+        self.assertEqual(cl.cl_mpu_limit, 0xA000)
+        self.assertEqual(cl.cl_priv_level, 1)
+
+    def test_cluster_mpu_csr_write_blocked_in_user(self):
+        """User-mode cluster cannot modify its own MPU."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        # Set up window and switch to user
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        # Try to override — should be silently ignored
+        mc.csr_write(CSR_CL_MPU_BASE, 0)
+        mc.csr_write(CSR_CL_MPU_LIMIT, 0)
+        mc.csr_write(CSR_CL_PRIV, 0)
+        self.assertEqual(cl.cl_mpu_base, 0x1000)
+        self.assertEqual(cl.cl_mpu_limit, 0x8000)
+        self.assertEqual(cl.cl_priv_level, 1)
+
+    def test_supervisor_ignores_cluster_mpu(self):
+        """Cluster in supervisor mode ignores MPU — all RAM allowed."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x4000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 0  # supervisor
+        mc.mem_write8(0x100, 0xAB)
+        self.assertEqual(mc.mem_read8(0x100), 0xAB)
+
+    def test_user_access_within_window_ok(self):
+        """User-mode micro-core can access within cluster MPU window."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        mc.mem_write8(0x2000, 42)
+        self.assertEqual(mc.mem_read8(0x2000), 42)
+
+    def test_user_read_below_window_faults(self):
+        """User-mode micro-core read below cluster MPU base faults."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x4000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            mc.mem_read8(0x100)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_user_read_above_window_faults(self):
+        """User-mode micro-core read at/above limit faults."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x4000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            mc.mem_read8(0x8000)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_user_write_below_window_faults(self):
+        """User-mode micro-core write below window faults."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x4000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            mc.mem_write8(0x100, 0xFF)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_mmio_always_allowed(self):
+        """MMIO is always allowed even in user mode."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x2000
+        cl.cl_priv_level = 1
+        # UART is in MMIO range — should not fault
+        mc.mem_read8(MMIO_START)  # no exception
+
+    def test_scratchpad_always_allowed(self):
+        """Cluster scratchpad is always allowed in user mode."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x2000
+        cl.cl_priv_level = 1
+        spad_addr = CLUSTER_SPAD_ADDR  # 0xFFFF_FE00_0000_0000
+        mc.mem_write8(spad_addr, 0xAB)
+        self.assertEqual(mc.mem_read8(spad_addr), 0xAB)
+
+    def test_mpu_disabled_when_equal(self):
+        """When base == limit, cluster MPU is disabled — all RAM allowed."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0
+        cl.cl_mpu_limit = 0
+        cl.cl_priv_level = 1
+        mc.mem_write8(0x0, 0xAA)
+        self.assertEqual(mc.mem_read8(0x0), 0xAA)
+
+    def test_fault_drops_to_supervisor(self):
+        """Cluster MPU fault drops cluster priv to supervisor."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc = self._mc(s)
+        cl.cl_mpu_base = 0x4000
+        cl.cl_mpu_limit = 0x8000
+        cl.cl_priv_level = 1
+        with self.assertRaises(TrapError):
+            mc.mem_read8(0x100)
+        # After fault, cluster should be back in supervisor mode
+        self.assertEqual(cl.cl_priv_level, 0)
+
+    def test_cluster_mpu_shared_across_cores(self):
+        """All micro-cores in a cluster share the same MPU window."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        mc0 = self._mc(s, 0)
+        mc1 = self._mc(s, 1)
+        cl.cl_mpu_base = 0x2000
+        cl.cl_mpu_limit = 0x6000
+        cl.cl_priv_level = 1
+        # Both cores can access within window
+        mc0.mem_write8(0x3000, 0x11)
+        mc1.mem_write8(0x4000, 0x22)
+        self.assertEqual(mc0.mem_read8(0x3000), 0x11)
+        self.assertEqual(mc1.mem_read8(0x4000), 0x22)
+        # Both cores fault below window
+        with self.assertRaises(TrapError):
+            mc0.mem_read8(0x100)
+        cl.cl_priv_level = 1  # re-enter user for second test
+        with self.assertRaises(TrapError):
+            mc1.mem_read8(0x100)
+
+    def test_reset_clears_cluster_mpu(self):
+        """Cluster enable/disable reset cycle clears MPU."""
+        s = self._make_sys()
+        cl = self._cluster(s)
+        cl.cl_priv_level = 1
+        cl.cl_mpu_base = 0x1000
+        cl.cl_mpu_limit = 0x8000
+        # Disable then re-enable — should reset
+        cl.set_enabled(False)
+        cl.set_enabled(True)
+        self.assertEqual(cl.cl_priv_level, 0)
+        self.assertEqual(cl.cl_mpu_base, 0)
+        self.assertEqual(cl.cl_mpu_limit, 0)
 
 
 class TestAppLoad(_KDOSTestBase):

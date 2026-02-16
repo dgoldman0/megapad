@@ -7038,6 +7038,48 @@ w_mpu_limit_fetch:
     str r14, r0
     ret.l
 
+; CL-PRIV! ( n -- ) — set cluster privilege level (CSR 0x6D)
+w_cl_priv_store:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x6D, r0
+    ret.l
+
+; CL-PRIV@ ( -- n ) — read cluster privilege level
+w_cl_priv_fetch:
+    csrr r0, 0x6D
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; CL-MPU-BASE! ( n -- ) — set cluster MPU lower bound (CSR 0x6E)
+w_cl_mpu_base_store:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x6E, r0
+    ret.l
+
+; CL-MPU-LIMIT! ( n -- ) — set cluster MPU upper bound (CSR 0x6F)
+w_cl_mpu_limit_store:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x6F, r0
+    ret.l
+
+; CL-MPU-BASE@ ( -- n ) — read cluster MPU lower bound
+w_cl_mpu_base_fetch:
+    csrr r0, 0x6E
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; CL-MPU-LIMIT@ ( -- n ) — read cluster MPU upper bound
+w_cl_mpu_limit_fetch:
+    csrr r0, 0x6F
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
 ; =====================================================================
@@ -11353,12 +11395,66 @@ d_mpu_base_fetch:
     ret.l
 
 ; === MPU-LIMIT@ ( -- n ) ===
-latest_entry:
 d_mpu_limit_fetch:
     .dq d_mpu_base_fetch
     .db 10
     .ascii "MPU-LIMIT@"
     ldi64 r11, w_mpu_limit_fetch
+    call.l r11
+    ret.l
+
+; === CL-PRIV! ( n -- ) ===
+d_cl_priv_store:
+    .dq d_mpu_limit_fetch
+    .db 8
+    .ascii "CL-PRIV!"
+    ldi64 r11, w_cl_priv_store
+    call.l r11
+    ret.l
+
+; === CL-PRIV@ ( -- n ) ===
+d_cl_priv_fetch:
+    .dq d_cl_priv_store
+    .db 7
+    .ascii "CL-PRIV@"
+    ldi64 r11, w_cl_priv_fetch
+    call.l r11
+    ret.l
+
+; === CL-MPU-BASE! ( n -- ) ===
+d_cl_mpu_base_store:
+    .dq d_cl_priv_fetch
+    .db 12
+    .ascii "CL-MPU-BASE!"
+    ldi64 r11, w_cl_mpu_base_store
+    call.l r11
+    ret.l
+
+; === CL-MPU-LIMIT! ( n -- ) ===
+d_cl_mpu_limit_store:
+    .dq d_cl_mpu_base_store
+    .db 13
+    .ascii "CL-MPU-LIMIT!"
+    ldi64 r11, w_cl_mpu_limit_store
+    call.l r11
+    ret.l
+
+; === CL-MPU-BASE@ ( -- n ) ===
+d_cl_mpu_base_fetch:
+    .dq d_cl_mpu_limit_store
+    .db 12
+    .ascii "CL-MPU-BASE@"
+    ldi64 r11, w_cl_mpu_base_fetch
+    call.l r11
+    ret.l
+
+; === CL-MPU-LIMIT@ ( -- n ) ===
+latest_entry:
+d_cl_mpu_limit_fetch:
+    .dq d_cl_mpu_base_fetch
+    .db 13
+    .ascii "CL-MPU-LIMIT@"
+    ldi64 r11, w_cl_mpu_limit_fetch
     call.l r11
     ret.l
 
