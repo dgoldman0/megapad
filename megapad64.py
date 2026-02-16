@@ -50,6 +50,8 @@ CSR_Q           = 0x07  # Legacy 1802 Q output
 CSR_T           = 0x08  # Legacy 1802 T register
 CSR_IE          = 0x09  # Interrupt enable (alias of flag_i)
 CSR_PRIV        = 0x0A  # Privilege level (0=supervisor, 1=user)
+CSR_MPU_BASE    = 0x0B  # MPU lower bound (inclusive)
+CSR_MPU_LIMIT   = 0x0C  # MPU upper bound (exclusive)
 CSR_SB          = 0x10
 CSR_SR          = 0x11
 CSR_SC          = 0x12
@@ -121,7 +123,7 @@ _PRIV_SYS_SUBS = frozenset({0x5, 0x6, 0x7, 0x8, 0x9, 0xA})  # RET/DIS/MARK/SAV/S
 _PRIV_IMM_SUBS = frozenset({0xC, 0xD, 0xE, 0xF})  # GLO/GHI/PLO/PHI
 # CSRs that cannot be written from user mode
 _PRIV_CSRS_W   = frozenset({CSR_PRIV, CSR_IVT_BASE, CSR_IE, CSR_BIST_CMD,
-                            CSR_ICACHE_CTRL})
+                            CSR_ICACHE_CTRL, CSR_MPU_BASE, CSR_MPU_LIMIT})
 
 # Micro-cluster constants (matches mp64_defs.vh)
 NUM_FULL_CORES     = 4
@@ -344,6 +346,10 @@ class Megapad64:
 
         # Privilege level: 0 = supervisor, 1 = user
         self.priv_level: int = 0
+
+        # MPU window (user-mode data access bounds)
+        self.mpu_base: int = 0
+        self.mpu_limit: int = 0
 
         # Tile / MEX CSRs
         self.sb: int  = 0
@@ -613,6 +619,8 @@ class Megapad64:
             CSR_T:          lambda: self.t_reg,
             CSR_IE:         lambda: self.flag_i,
             CSR_PRIV:       lambda: self.priv_level,
+            CSR_MPU_BASE:   lambda: self.mpu_base,
+            CSR_MPU_LIMIT:  lambda: self.mpu_limit,
             CSR_SB:         lambda: self.sb,
             CSR_SR:         lambda: self.sr,
             CSR_SC:         lambda: self.sc,
@@ -672,6 +680,8 @@ class Megapad64:
             CSR_T:        lambda v: setattr(self, 't_reg',  v & 0xFF),
             CSR_IE:       lambda v: setattr(self, 'flag_i', v & 1),
             CSR_PRIV:     lambda v: setattr(self, 'priv_level', v & 1),
+            CSR_MPU_BASE: lambda v: setattr(self, 'mpu_base', v),
+            CSR_MPU_LIMIT:lambda v: setattr(self, 'mpu_limit', v),
             CSR_SB:       lambda v: setattr(self, 'sb', v & 0xF),
             CSR_SR:       lambda v: setattr(self, 'sr', v & 0xFFFFF),
             CSR_SC:       lambda v: setattr(self, 'sc', v & 0xFFFFF),
@@ -2486,6 +2496,8 @@ class Megapad64:
         self.q_out = 0
         self.t_reg = 0
         self.priv_level = 0
+        self.mpu_base = 0
+        self.mpu_limit = 0
         self.sb = self.sr = self.sc = 0
         self.sw = 1
         self.tmode = self.tctrl = 0

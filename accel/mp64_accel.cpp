@@ -34,6 +34,7 @@ enum CSR {
     CSR_FLAGS=0x00, CSR_PSEL=0x01, CSR_XSEL=0x02, CSR_SPSEL=0x03,
     CSR_IVT_BASE=0x04, CSR_D=0x05, CSR_DF=0x06, CSR_Q=0x07,
     CSR_T=0x08, CSR_IE=0x09, CSR_PRIV=0x0A,
+    CSR_MPU_BASE=0x0B, CSR_MPU_LIMIT=0x0C,
     CSR_SB=0x10, CSR_SR=0x11, CSR_SC=0x12, CSR_SW=0x13,
     CSR_TMODE=0x14, CSR_TCTRL=0x15,
     CSR_TSRC0=0x16, CSR_TSRC1=0x17, CSR_TDST=0x18,
@@ -121,6 +122,10 @@ struct CPUState {
 
     // Privilege level (0=supervisor, 1=user)
     uint8_t  priv_level;
+
+    // MPU — user-mode memory window
+    uint64_t mpu_base;   // inclusive lower bound
+    uint64_t mpu_limit;  // exclusive upper bound
 
     // EXT prefix
     int ext_modifier;   // -1 = none
@@ -376,6 +381,8 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_T:         return s.t_reg;
         case CSR_IE:        return s.flag_i;
         case CSR_PRIV:      return s.priv_level;
+        case CSR_MPU_BASE:  return s.mpu_base;
+        case CSR_MPU_LIMIT: return s.mpu_limit;
         case CSR_SB:        return s.sb;
         case CSR_SR:        return s.sr;
         case CSR_SC:        return s.sc;
@@ -428,6 +435,8 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_T:         s.t_reg = val & 0xFF; break;
         case CSR_IE:        s.flag_i = val & 1; break;
         case CSR_PRIV:      s.priv_level = val & 1; break;
+        case CSR_MPU_BASE:  s.mpu_base = val; break;
+        case CSR_MPU_LIMIT: s.mpu_limit = val; break;
         case CSR_SB:        s.sb = val; break;
         case CSR_SR:        s.sr = val; break;
         case CSR_SC:        s.sc = val; break;
@@ -957,12 +966,29 @@ struct StepCallbacks {
     bool has_mmio;
 };
 
+// MPU check — user-mode memory window enforcement
+static inline void mpu_check(CPUState& s, uint64_t addr) {
+    if (s.priv_level && s.mpu_limit > s.mpu_base) {
+        if (addr < s.mpu_base || addr >= s.mpu_limit) {
+            s.trap_addr = addr;
+            throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+    }
+}
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
-        return cb.mmio_read8(addr);
+        return cb.mmio_read8(addr);  // MMIO always allowed
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        // User mode: block HBW entirely, check MPU for RAM
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr;
+            throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
         return s.hbw_mem[addr - s.hbw_base];
     }
     return mem_read8(s, addr);
@@ -970,10 +996,16 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
 
 static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint8_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
-        cb.mmio_write8(addr, val);
+        cb.mmio_write8(addr, val);  // MMIO always allowed
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr;
+            throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
         s.hbw_mem[addr - s.hbw_base] = val;
         return;
     }
@@ -988,7 +1020,12 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
         return v;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
         uint64_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 8);
         return v;
@@ -1002,7 +1039,12 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 8);
         return;
     }
@@ -1013,7 +1055,12 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
         uint16_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 2);
         return v;
@@ -1027,7 +1074,12 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         cb.mmio_write8(addr+1, (val >> 8) & 0xFF);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 2);
         return;
     }
@@ -1041,7 +1093,12 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
         return v;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
         uint32_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 4);
         return v;
@@ -1055,7 +1112,12 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+    if (s.priv_level) {
+        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+            s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
+        }
+        mpu_check(s, addr);
+    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 4);
         return;
     }
@@ -1723,7 +1785,8 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             // Privilege check for protected CSR writes
             if (s.priv_level && (csr_addr == CSR_PRIV || csr_addr == CSR_IVT_BASE ||
                                  csr_addr == CSR_IE || csr_addr == CSR_BIST_CMD ||
-                                 csr_addr == CSR_ICACHE_CTRL)) {
+                                 csr_addr == CSR_ICACHE_CTRL ||
+                                 csr_addr == CSR_MPU_BASE || csr_addr == CSR_MPU_LIMIT)) {
                 throw std::runtime_error("TRAP:PRIV_FAULT");
             }
             csr_write(s, csr_addr, s.regs[rn]);
@@ -1886,6 +1949,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("icache_hits", &CPUState::icache_hits)
         .def_readwrite("icache_misses", &CPUState::icache_misses)
         .def_readwrite("priv_level", &CPUState::priv_level)
+        .def_readwrite("mpu_base", &CPUState::mpu_base)
+        .def_readwrite("mpu_limit", &CPUState::mpu_limit)
         .def_readwrite("ext_modifier", &CPUState::ext_modifier)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)

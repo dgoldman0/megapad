@@ -7010,6 +7010,34 @@ w_priv_fetch:
     str r14, r0
     ret.l
 
+; MPU-BASE! ( n -- ) — set MPU lower bound (CSR 0x0B)
+w_mpu_base_store:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x0B, r0
+    ret.l
+
+; MPU-LIMIT! ( n -- ) — set MPU upper bound (CSR 0x0C)
+w_mpu_limit_store:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x0C, r0
+    ret.l
+
+; MPU-BASE@ ( -- n ) — read MPU lower bound
+w_mpu_base_fetch:
+    csrr r0, 0x0B
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; MPU-LIMIT@ ( -- n ) — read MPU upper bound
+w_mpu_limit_fetch:
+    csrr r0, 0x0C
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
 ; =====================================================================
@@ -11289,12 +11317,48 @@ d_sys_exit:
     ret.l
 
 ; === PRIV@ ( -- n ) ===
-latest_entry:
 d_priv_fetch:
     .dq d_sys_exit
     .db 5
     .ascii "PRIV@"
     ldi64 r11, w_priv_fetch
+    call.l r11
+    ret.l
+
+; === MPU-BASE! ( n -- ) ===
+d_mpu_base_store:
+    .dq d_priv_fetch
+    .db 9
+    .ascii "MPU-BASE!"
+    ldi64 r11, w_mpu_base_store
+    call.l r11
+    ret.l
+
+; === MPU-LIMIT! ( n -- ) ===
+d_mpu_limit_store:
+    .dq d_mpu_base_store
+    .db 10
+    .ascii "MPU-LIMIT!"
+    ldi64 r11, w_mpu_limit_store
+    call.l r11
+    ret.l
+
+; === MPU-BASE@ ( -- n ) ===
+d_mpu_base_fetch:
+    .dq d_mpu_limit_store
+    .db 9
+    .ascii "MPU-BASE@"
+    ldi64 r11, w_mpu_base_fetch
+    call.l r11
+    ret.l
+
+; === MPU-LIMIT@ ( -- n ) ===
+latest_entry:
+d_mpu_limit_fetch:
+    .dq d_mpu_base_fetch
+    .db 10
+    .ascii "MPU-LIMIT@"
+    ldi64 r11, w_mpu_limit_fetch
     call.l r11
     ret.l
 

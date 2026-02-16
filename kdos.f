@@ -2695,10 +2695,18 @@ VARIABLE LD-SZ
 \  1802-heritage families (MEMALU, IO, SEP, SEX) and protected CSR
 \  writes are blocked — those trigger IVEC_PRIV_FAULT.
 \
+\  MPU is configured to [0, MEM-SIZE) so user code can access all
+\  system RAM (needed for dictionary lookup by EVALUATE) but HBW
+\  access is blocked unconditionally for user mode.  For tighter
+\  sandboxing (e.g. running pre-compiled code with its own stack),
+\  set MPU-BASE!/MPU-LIMIT! to a narrower window before ENTER-USER.
+\
 \  LOAD / FSLOAD remain supervisor-mode for OS modules and drivers.
 
 : APP-EVAL  ( addr u -- )
-    ENTER-USER EVALUATE SYS-EXIT ;
+    0 MPU-BASE!  MEM-SIZE MPU-LIMIT!
+    ENTER-USER EVALUATE SYS-EXIT
+    0 MPU-BASE!  0 MPU-LIMIT! ;
 
 : APP-LOAD  ( "filename" -- )
     FS-ENSURE
@@ -2719,7 +2727,8 @@ VARIABLE LD-SZ
     DUP DISK-N!
     DISK-READ
     2DROP
-    \ Enter user mode, evaluate line by line, exit user mode
+    \ Configure MPU and enter user mode, evaluate line by line, exit
+    0 MPU-BASE!  MEM-SIZE MPU-LIMIT!
     ENTER-USER
     LD-BUF @
     LD-SZ @
@@ -2746,7 +2755,8 @@ VARIABLE LD-SZ
         R>
     REPEAT
     2DROP
-    SYS-EXIT ;
+    SYS-EXIT
+    0 MPU-BASE!  0 MPU-LIMIT! ;
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;

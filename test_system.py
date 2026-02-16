@@ -58,6 +58,7 @@ from megapad64 import (
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
     CSR_COREID, CSR_NCORES, CSR_CPUID, CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
     CSR_BIST_CMD, CSR_BIST_STATUS, CSR_PRIV,
+    CSR_MPU_BASE, CSR_MPU_LIMIT,
     CSR_D, CSR_DF, CSR_Q, CSR_T,
     CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL,
 )
@@ -2599,6 +2600,8 @@ class _KDOSTestBase(unittest.TestCase):
             'cycle_count': cpu.cycle_count,
             '_ext_modifier': cpu._ext_modifier,
             'priv_level': getattr(cpu, 'priv_level', 0),
+            'mpu_base': getattr(cpu, 'mpu_base', 0),
+            'mpu_limit': getattr(cpu, 'mpu_limit', 0),
         }
 
     @classmethod
@@ -2611,7 +2614,7 @@ class _KDOSTestBase(unittest.TestCase):
                    'd_reg', 'q_out', 't_reg',
                    'ivt_base', 'ivec_id', 'trap_addr',
                    'halted', 'idle', 'cycle_count', '_ext_modifier',
-                   'priv_level'):
+                   'priv_level', 'mpu_base', 'mpu_limit'):
             setattr(cpu, k, state.get(k, 0) if isinstance(state, dict) else getattr(state, k, 0))
 
     @classmethod
@@ -15501,6 +15504,145 @@ class TestPrivilege(unittest.TestCase):
         self.assertEqual(mc.csr_read(CSR_PRIV), 0)
         mc.csr_write(CSR_PRIV, 1)
         self.assertEqual(mc.csr_read(CSR_PRIV), 1)
+
+
+class TestMPU(unittest.TestCase):
+    """Test the Memory Protection Unit (MPU) — user-mode address window."""
+
+    def _make_cpu(self, mem_kib=64):
+        cpu = Megapad64(mem_size=mem_kib * 1024)
+        return cpu
+
+    def _make_sys(self, ram_kib=64):
+        """Create a MegapadSystem for memory-access tests (patched mem)."""
+        return make_system(ram_kib=ram_kib)
+
+    def test_mpu_csr_default_zero(self):
+        """MPU CSRs default to 0."""
+        cpu = self._make_cpu()
+        self.assertEqual(cpu.csr_read(CSR_MPU_BASE), 0)
+        self.assertEqual(cpu.csr_read(CSR_MPU_LIMIT), 0)
+        self.assertEqual(cpu.mpu_base, 0)
+        self.assertEqual(cpu.mpu_limit, 0)
+
+    def test_mpu_csr_readwrite(self):
+        """MPU CSRs can be read/written in supervisor mode."""
+        cpu = self._make_cpu()
+        cpu.csr_write(CSR_MPU_BASE, 0x1000)
+        cpu.csr_write(CSR_MPU_LIMIT, 0x8000)
+        self.assertEqual(cpu.csr_read(CSR_MPU_BASE), 0x1000)
+        self.assertEqual(cpu.csr_read(CSR_MPU_LIMIT), 0x8000)
+
+    def test_mpu_csr_user_write_traps(self):
+        """Writing MPU CSRs from user mode traps."""
+        cpu = self._make_cpu()
+        cpu.priv_level = 1
+        # CSRW R0, CSR_MPU_BASE (0x0B)
+        cpu.mem[0] = 0xD8  # CSRW R0
+        cpu.mem[1] = 0x0B  # CSR_MPU_BASE
+        cpu.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            cpu.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_mpu_csr_user_read_ok(self):
+        """Reading MPU CSRs from user mode is fine."""
+        cpu = self._make_cpu()
+        cpu.csr_write(CSR_MPU_BASE, 0x2000)
+        cpu.priv_level = 1
+        # CSRR R0, CSR_MPU_BASE (0x0B)
+        cpu.mem[0] = 0xD0  # CSRR R0
+        cpu.mem[1] = 0x0B  # CSR_MPU_BASE
+        cpu.pc = 0
+        cpu.step()
+        self.assertEqual(cpu.regs[0], 0x2000)
+
+    def test_supervisor_ignores_mpu(self):
+        """Supervisor mode ignores MPU — can access any address."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0x4000
+        cpu.mpu_limit = 0x8000
+        cpu.priv_level = 0  # supervisor
+        # Write and read at address 0 (below MPU base) — should work
+        cpu.mem_write8(0, 0xAB)
+        self.assertEqual(cpu.mem_read8(0), 0xAB)
+
+    def test_user_access_within_window_ok(self):
+        """User-mode access within MPU window succeeds."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0x1000
+        cpu.mpu_limit = 0x8000
+        cpu.priv_level = 1
+        # Write a value within the window
+        cpu.mem_write8(0x2000, 42)
+        self.assertEqual(cpu.mem_read8(0x2000), 42)
+
+    def test_user_access_below_window_faults(self):
+        """User-mode access below MPU base faults."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0x4000
+        cpu.mpu_limit = 0x8000
+        cpu.priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            cpu.mem_read8(0x100)  # below 0x4000
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_user_access_above_window_faults(self):
+        """User-mode access at/above MPU limit faults."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0x4000
+        cpu.mpu_limit = 0x8000
+        cpu.priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            cpu.mem_read8(0x8000)  # at limit (exclusive)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_user_write_below_window_faults(self):
+        """User-mode write below MPU base faults."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0x4000
+        cpu.mpu_limit = 0x8000
+        cpu.priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            cpu.mem_write8(0x100, 0xFF)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_mpu_disabled_when_equal(self):
+        """When mpu_base == mpu_limit, MPU is disabled — all RAM allowed."""
+        s = self._make_sys()
+        cpu = s.cpu
+        cpu.mpu_base = 0
+        cpu.mpu_limit = 0  # both zero = disabled
+        cpu.priv_level = 1
+        # Should not fault
+        cpu.mem_write8(0x0, 0xAA)
+        self.assertEqual(cpu.mem_read8(0x0), 0xAA)
+
+    def test_user_hbw_always_blocked(self):
+        """User-mode HBW access is always blocked regardless of MPU."""
+        from system import HBW_BASE
+        s = make_system(ram_kib=1024)
+        cpu = s.cpu
+        cpu.mpu_base = 0
+        cpu.mpu_limit = 0xFFFFFFFF  # wide window
+        cpu.priv_level = 1
+        with self.assertRaises(TrapError) as ctx:
+            cpu.mem_read8(HBW_BASE)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
+
+    def test_mpu_cleared_on_reset(self):
+        """Reset clears MPU CSRs to 0."""
+        cpu = self._make_cpu()
+        cpu.mpu_base = 0x1000
+        cpu.mpu_limit = 0x8000
+        cpu._reset_state()
+        self.assertEqual(cpu.mpu_base, 0)
+        self.assertEqual(cpu.mpu_limit, 0)
 
 
 class TestAppLoad(_KDOSTestBase):

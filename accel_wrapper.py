@@ -39,6 +39,7 @@ from megapad64 import (
     # CSR addresses
     CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL, CSR_IVT_BASE,
     CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE, CSR_PRIV,
+    CSR_MPU_BASE, CSR_MPU_LIMIT,
     CSR_SB, CSR_SR, CSR_SC, CSR_SW,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
@@ -188,6 +189,7 @@ if ACCEL_AVAILABLE:
             'tile_selftest', 'tile_st_detail',
             'icache_enabled', 'icache_hits', 'icache_misses',
             'priv_level',
+            'mpu_base', 'mpu_limit',
             'ext_modifier',
             'core_id', 'num_cores',
         ):
@@ -538,6 +540,8 @@ def {_attr}(self, v):
             self._cs.halted = False
             self._cs.idle = False
             self._cs.priv_level = 0
+            self._cs.mpu_base = 0
+            self._cs.mpu_limit = 0
             self._cs.ext_modifier = -1
 
         # -- Run (high-level loop) --
@@ -685,6 +689,8 @@ def {_attr}(self, v):
         py_cpu.icache_hits = cs.icache_hits
         py_cpu.icache_misses = cs.icache_misses
         py_cpu.priv_level = cs.priv_level
+        py_cpu.mpu_base = cs.mpu_base
+        py_cpu.mpu_limit = cs.mpu_limit
 
     def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
         """Copy Python Megapad64 state → C++ CPUState after fallback."""
@@ -740,6 +746,8 @@ def {_attr}(self, v):
         cs.icache_hits = py_cpu.icache_hits
         cs.icache_misses = py_cpu.icache_misses
         cs.priv_level = py_cpu.priv_level
+        cs.mpu_base = py_cpu.mpu_base
+        cs.mpu_limit = py_cpu.mpu_limit
 
     # ── CSR access (Python-side, matching megapad64.py) ──────
 
@@ -758,6 +766,8 @@ def {_attr}(self, v):
             CSR_T: lambda: cs.t_reg,
             CSR_IE: lambda: cs.flag_i,
             CSR_PRIV: lambda: cs.priv_level,
+            CSR_MPU_BASE: lambda: cs.mpu_base,
+            CSR_MPU_LIMIT: lambda: cs.mpu_limit,
             CSR_SB: lambda: cs.sb,
             CSR_SR: lambda: cs.sr,
             CSR_SC: lambda: cs.sc,
@@ -811,6 +821,8 @@ def {_attr}(self, v):
         elif addr == CSR_T:       cs.t_reg = val & 0xFF
         elif addr == CSR_IE:      cs.flag_i = val & 1
         elif addr == CSR_PRIV:    cs.priv_level = val & 1
+        elif addr == CSR_MPU_BASE: cs.mpu_base = val
+        elif addr == CSR_MPU_LIMIT: cs.mpu_limit = val
         elif addr == CSR_SB:      cs.sb = val
         elif addr == CSR_SR:      cs.sr = val
         elif addr == CSR_SC:      cs.sc = val

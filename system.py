@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from nic_backends import NICBackend
 
 try:
-    from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
+    from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
 except ImportError:
-    from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
+    from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
 from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
@@ -442,6 +442,19 @@ class MegapadSystem:
                 return bus.read8(offset)
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 return cluster.spad_read8(addr & 0xFFFF_FFFF)
+            # MPU / privilege check for non-MMIO accesses
+            if cpu.priv_level:
+                # User mode: block HBW entirely
+                if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+                    cpu.trap_addr = addr
+                    raise TrapError(IVEC_PRIV_FAULT,
+                                    f"User read from HBW @ {addr:#018x}")
+                # Check MPU window for RAM
+                if cpu.mpu_limit > cpu.mpu_base:
+                    if addr < cpu.mpu_base or addr >= cpu.mpu_limit:
+                        cpu.trap_addr = addr
+                        raise TrapError(IVEC_PRIV_FAULT,
+                                        f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 return hbw_mem[addr - HBW_BASE]
             return original_read8(addr)
@@ -456,6 +469,19 @@ class MegapadSystem:
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 cluster.spad_write8(addr & 0xFFFF_FFFF, val)
                 return
+            # MPU / privilege check for non-MMIO accesses
+            if cpu.priv_level:
+                # User mode: block HBW entirely
+                if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+                    cpu.trap_addr = addr
+                    raise TrapError(IVEC_PRIV_FAULT,
+                                    f"User write to HBW @ {addr:#018x}")
+                # Check MPU window for RAM
+                if cpu.mpu_limit > cpu.mpu_base:
+                    if addr < cpu.mpu_base or addr >= cpu.mpu_limit:
+                        cpu.trap_addr = addr
+                        raise TrapError(IVEC_PRIV_FAULT,
+                                        f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 hbw_mem[addr - HBW_BASE] = val & 0xFF
                 return
