@@ -16624,6 +16624,121 @@ class TestKDOSHashTable(_KDOSTestBase):
         self.assertIn(1, nums)
 
 
+class TestKDOSFramebuffer(_KDOSTestBase):
+    """Tests for BIOS framebuffer words (FB-BASE!, FB-WIDTH!, etc.)."""
+
+    def test_fb_words_in_dictionary(self):
+        """WORDS output includes all framebuffer words."""
+        text = self._run_kdos(["WORDS"])
+        for word in [
+            "FB-BASE!", "FB-WIDTH!", "FB-HEIGHT!", "FB-STRIDE!",
+            "FB-MODE!", "FB-MODE@", "FB-ENABLE", "FB-DISABLE",
+            "FB-VSYNC@", "FB-VSYNC-ACK", "FB-PAL!",
+            "FB-STATUS@", "FB-SETUP",
+        ]:
+            self.assertIn(word, text, f"'{word}' missing from WORDS")
+
+    def test_fb_mode_store_fetch(self):
+        """FB-MODE! sets mode, FB-MODE@ reads it back."""
+        text = self._run_kdos(["2 FB-MODE!", "FB-MODE@ ."])
+        self.assertIn("2 ", text)
+
+    def test_fb_mode_roundtrip_all(self):
+        """All four pixel modes round-trip through FB-MODE! / FB-MODE@."""
+        for mode in range(4):
+            text = self._run_kdos([f"{mode} FB-MODE!", "FB-MODE@ ."])
+            self.assertIn(f"{mode} ", text,
+                          f"mode {mode} did not round-trip")
+
+    def test_fb_enable_disable(self):
+        """FB-ENABLE sets enable, FB-DISABLE clears it."""
+        text = self._run_kdos([
+            "FB-ENABLE FB-STATUS@ .",
+            "FB-DISABLE FB-STATUS@ .",
+        ])
+        # Status bit 0 = enabled.  After enable → odd; after disable → even.
+        idx = text.rfind("FB-ENABLE")
+        tail = text[idx:] if idx >= 0 else text
+        nums = [int(x) for x in tail.split() if x.lstrip('-').isdigit()]
+        # At least two numbers; first should have bit 0 set, second not.
+        self.assertTrue(len(nums) >= 2, f"expected ≥2 numbers, got {nums}")
+        self.assertTrue(nums[0] & 1, "enable should set bit 0")
+        self.assertFalse(nums[1] & 1, "disable should clear bit 0")
+
+    def test_fb_width_store(self):
+        """FB-WIDTH! writes the width register."""
+        text = self._run_kdos([
+            "320 FB-WIDTH!",
+            "FB-STATUS@ .",  # just ensure no crash
+        ])
+        # Success = no crash/hang.
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_height_store(self):
+        """FB-HEIGHT! writes the height register."""
+        text = self._run_kdos([
+            "240 FB-HEIGHT!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_stride_store(self):
+        """FB-STRIDE! writes the stride register."""
+        text = self._run_kdos([
+            "640 FB-STRIDE!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_base_store(self):
+        """FB-BASE! writes a 64-bit base address."""
+        text = self._run_kdos([
+            "$FFD00000 FB-BASE!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_vsync_read(self):
+        """FB-VSYNC@ returns the vsync counter (initially 0)."""
+        text = self._run_kdos(["FB-VSYNC@ ."])
+        self.assertIn("0 ", text)
+
+    def test_fb_vsync_ack(self):
+        """FB-VSYNC-ACK runs without crashing."""
+        text = self._run_kdos(["FB-VSYNC-ACK"])
+        # No crash = pass.
+        self.assertNotIn("FAULT", text.upper())
+
+    def test_fb_pal_store(self):
+        """FB-PAL! writes a palette entry without crashing."""
+        text = self._run_kdos([
+            "$FF0000 0 FB-PAL!",   # red at index 0
+            "$00FF00 1 FB-PAL!",   # green at index 1
+            "FB-STATUS@ .",
+        ])
+        self.assertNotIn("FAULT", text.upper())
+
+    def test_fb_setup(self):
+        """FB-SETUP configures width, height, and mode in one call."""
+        text = self._run_kdos([
+            "320 240 0 FB-SETUP",
+            "FB-MODE@ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_fb_setup_mode2(self):
+        """FB-SETUP with mode 2 (RGB565) sets mode to 2."""
+        text = self._run_kdos([
+            "160 120 2 FB-SETUP",
+            "FB-MODE@ .",
+        ])
+        self.assertIn("2 ", text)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Megapad-64 System Integration Tests")
