@@ -3,7 +3,7 @@ Megapad-64 Peripheral / Device Layer
 =====================================
 Memory-mapped I/O devices for the system emulator.
 
-Physical memory map (from SPECS.html §2):
+Physical memory map (from docs/architecture.md):
   FFFF_FF00_0000_0000 – FFFF_FF7F_FFFF_FFFF  : 32 GiB MMIO region
 
 We carve out the first slice for our emulated peripherals:

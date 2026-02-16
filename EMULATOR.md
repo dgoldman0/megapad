@@ -615,7 +615,6 @@ Bye!
 
 | Commit | Milestone |
 |---|---|
-| `3d321a9` | Instruction encoding spec (`ENCODING.html`) |
 | `32481a2` | Bytecode emulator + assembler + 61 CPU tests |
 | `c3b9001` | Peripheral layer: UART, Timer, Storage, SysInfo |
 | `8ef8f3b` | System emulator with unified memory map |

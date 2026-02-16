@@ -2,7 +2,7 @@
 Megapad-64 Bytecode Emulator
 =============================
 A cycle-step emulator for the Megapad-64 TSP architecture, implementing the
-instruction encoding from ENCODING.html.  Spiritual successor to the RCA 1802.
+instruction encoding from docs/isa-reference.md.  Spiritual successor to the RCA 1802.
 
 Every instruction is decoded from raw bytes in memory — no text parsing at
 runtime.  The fetch/decode/execute loop mirrors what real hardware would do:

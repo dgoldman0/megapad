@@ -1,7 +1,7 @@
 """
 Megapad-64 Assembler
 =====================
-Translates assembly text into raw bytecode per ENCODING.html.
+Translates assembly text into raw bytecode per docs/isa-reference.md.
 
 Supports:
   - Labels (terminated with ':')
