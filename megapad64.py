@@ -95,6 +95,9 @@ CSR_PERF_EXTMEM  = 0x6B
 CSR_PERF_CTRL    = 0x6C
 
 # I-Cache CSRs (§12.2)
+CSR_BARRIER_ARRIVE = 0x66  # R/W: per-core barrier arrive bitmask (cluster)
+CSR_BARRIER_STATUS = 0x67  # R: barrier done flag + arrive mask  (cluster)
+
 CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
 CSR_ICACHE_HITS   = 0x71   # R: hit counter
 CSR_ICACHE_MISSES = 0x72   # R: miss counter
@@ -109,6 +112,18 @@ IVEC_BUS_FAULT      = 0x05
 IVEC_SW_TRAP        = 0x06
 IVEC_TIMER          = 0x07
 IVEC_IPI            = 0x08  # Inter-processor interrupt
+
+# Micro-cluster constants (matches mp64_defs.vh)
+NUM_FULL_CORES     = 4
+NUM_CLUSTERS       = 3
+MICRO_PER_CLUSTER  = 4
+NUM_ALL_CORES      = NUM_FULL_CORES + NUM_CLUSTERS * MICRO_PER_CLUSTER  # 16
+MICRO_ID_BASE      = NUM_FULL_CORES                                      # 4
+CLUSTER_SPAD_BYTES = 1024  # 1 KiB per cluster
+CLUSTER_SPAD_ADDR  = 0xFFFF_FE00_0000_0000  # scratchpad addr[63:32] sentinel
+
+# Micro-core CPUID: "MP64" v1 "MC" (micro-core variant)
+CPUID_MICRO = 0x4D50_3634_0001_4D43
 
 # TMODE EW codes (bits [2:0])
 EW_U8    = 0  # 64 lanes × 8-bit
@@ -2539,3 +2554,118 @@ class Megapad64:
         lines.append(f"  D = {self.d_reg:#04x}  Q = {self.q_out}  "
                       f"PSEL={self.psel} XSEL={self.xsel} SPSEL={self.spsel}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+#  Micro-Core CPU — reduced-feature variant (matches RTL mp64_cpu_micro.v)
+# ---------------------------------------------------------------------------
+# Differences from the full Megapad64 core:
+#   - No I-cache (no CSR_ICACHE_*)
+#   - No tile/MEX engine — family 0xE traps as ILLEGAL_OP
+#   - No tile datapath self-test (CSR_TILE_SELFTEST/DETAIL → 0)
+#   - MUL/DIV delegated to cluster's shared unit (or trap if standalone)
+#   - Only PERF_CYCLES counter (stalls/tileops/extmem → 0)
+#   - CPUID returns micro-core variant ID
+#   - Barrier CSRs (0x66/0x67) forwarded to cluster
+#   - BIST CSRs (0x60-0x63) forwarded to cluster
+# ---------------------------------------------------------------------------
+
+class Megapad64Micro(Megapad64):
+    """Micro-core CPU — lightweight variant for cluster execution."""
+
+    def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
+                 num_cores: int = NUM_ALL_CORES):
+        super().__init__(mem_size=mem_size, core_id=core_id, num_cores=num_cores)
+        # Cluster reference (set by MicroCluster after construction)
+        self._cluster = None
+        # Override fields — not available on micro-cores
+        self.tile_selftest = 0
+        self.tile_st_detail = 0
+        self.icache_enabled = 0
+        self.icache_hits = 0
+        self.icache_misses = 0
+
+    # -- MEX (tile engine) — not available on micro-cores --
+
+    def _exec_mex(self, n: int) -> int:
+        """Tile/MEX is not present on micro-cores — trap as illegal opcode."""
+        self.fetch8()  # consume the funct byte
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "MEX (tile engine) not available on micro-core")
+
+    # -- MUL/DIV — delegated to cluster shared unit --
+
+    def _exec_muldiv(self, sub: int) -> int:
+        """MUL/DIV uses the cluster's shared multiplier.
+
+        If not inside a cluster, traps as illegal opcode (matching
+        RTL behaviour when IN_CLUSTER=0).
+        """
+        if self._cluster is None:
+            self.fetch8()  # consume operand byte
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            "MUL/DIV not available on standalone micro-core")
+        # Delegate to parent class — cluster shared MUL/DIV is modelled
+        # as immediate (no cycle-accurate contention).
+        cycles = super()._exec_muldiv(sub)
+        return cycles + 3  # shared unit overhead
+
+    # -- CSR overrides --
+
+    def csr_read(self, addr: int) -> int:
+        """Restricted CSR set matching RTL mp64_cpu_micro.v."""
+        if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
+                    CSR_IVT_BASE, CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE,
+                    CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
+                    CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_MEGAPAD_SZ,
+                    CSR_PERF_CYCLES, CSR_PERF_CTRL):
+            return super().csr_read(addr)
+        if addr == CSR_CPUID:
+            return CPUID_MICRO
+        # Barrier CSRs — forwarded to cluster
+        if addr == CSR_BARRIER_ARRIVE:
+            return self._cluster.barrier_arrive if self._cluster else 0
+        if addr == CSR_BARRIER_STATUS:
+            if self._cluster:
+                done = 1 if self._cluster.barrier_done else 0
+                return (done << 8) | (self._cluster.barrier_arrive & 0xFF)
+            return 0
+        # BIST CSRs — forwarded to cluster
+        if addr in (CSR_BIST_CMD, CSR_BIST_STATUS,
+                    CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA):
+            if self._cluster:
+                return self._cluster.bist_csr_read(addr)
+            return 0
+        # Removed CSRs: tile, I-cache, perf stalls/tileops/extmem → 0
+        return 0
+
+    def csr_write(self, addr: int, val: int):
+        """Restricted CSR set matching RTL mp64_cpu_micro.v."""
+        val = u64(val)
+        if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
+                    CSR_IVT_BASE, CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE,
+                    CSR_IVEC_ID, CSR_PERF_CTRL,
+                    CSR_MBOX, CSR_IPIACK):
+            return super().csr_write(addr, val)
+        # Barrier arrive — set this core's bit
+        if addr == CSR_BARRIER_ARRIVE:
+            if self._cluster:
+                self._cluster.barrier_arrive_core(self.core_id)
+            return
+        # BIST CSRs — forwarded to cluster
+        if addr in (CSR_BIST_CMD, CSR_BIST_STATUS,
+                    CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA):
+            if self._cluster:
+                self._cluster.bist_csr_write(addr, val)
+            return
+        # All other CSR writes silently ignored
+
+    def _bist_cmd_write(self, val: int):
+        if self._cluster:
+            self._cluster.bist_csr_write(CSR_BIST_CMD, val)
+
+    def _tile_selftest_write(self, val: int):
+        pass  # no tile self-test on micro-cores
+
+    def _icache_ctrl_write(self, val: int):
+        pass  # no I-cache on micro-cores

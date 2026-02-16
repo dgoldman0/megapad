@@ -52,8 +52,15 @@ import tempfile
 import unittest
 
 from megapad64 import Megapad64, HaltError
+from megapad64 import (
+    Megapad64Micro, TrapError, IVEC_ILLEGAL_OP,
+    NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
+    MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
+    CSR_COREID, CSR_NCORES, CSR_CPUID, CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
+    CSR_BIST_CMD, CSR_BIST_STATUS,
+)
 from asm import assemble, AsmError
-from system import MegapadSystem, MMIO_START
+from system import MegapadSystem, MMIO_START, MicroCluster
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
@@ -218,13 +225,15 @@ class TestDeviceBus(unittest.TestCase):
 
     def test_route_sysinfo(self):
         bus = DeviceBus()
-        si = SystemInfo(mem_size_kib=256)
+        si = SystemInfo(bank0_size=256 * 1024)
         bus.register(si)
-        # SYSINFO_BASE (0x0300) is the MMIO aperture offset
-        self.assertEqual(bus.read8(SYSINFO_BASE + 0), ord("M"))
-        self.assertEqual(bus.read8(SYSINFO_BASE + 1), ord("P"))
-        self.assertEqual(bus.read8(SYSINFO_BASE + 2), ord("6"))
-        self.assertEqual(bus.read8(SYSINFO_BASE + 3), ord("4"))
+        # SysInfo register 0x00: 64'h4D50_3634_0002_0001 (LE bytes)
+        # bytes 0-3: version part, bytes 4-7: board ID "MP64" reversed
+        self.assertEqual(bus.read8(SYSINFO_BASE + 0), 0x01)  # ver minor
+        self.assertEqual(bus.read8(SYSINFO_BASE + 4), ord("4"))
+        self.assertEqual(bus.read8(SYSINFO_BASE + 5), ord("6"))
+        self.assertEqual(bus.read8(SYSINFO_BASE + 6), ord("P"))
+        self.assertEqual(bus.read8(SYSINFO_BASE + 7), ord("M"))
 
 
 class TestNIC(unittest.TestCase):
@@ -337,11 +346,43 @@ class TestNIC(unittest.TestCase):
         self.assertEqual(nic.read8(0x14), 2)  # TX_COUNT_LO
         self.assertEqual(nic.read8(0x16), 3)  # RX_COUNT_LO
 
-    def test_sysinfo_nic_present(self):
-        si = SystemInfo(has_nic=True)
-        self.assertEqual(si.read8(0x0A), 1)
-        si2 = SystemInfo(has_nic=False)
-        self.assertEqual(si2.read8(0x0A), 0)
+    def test_sysinfo_bank0_size(self):
+        """SysInfo register at offset 0x08 reports bank0 size in bytes."""
+        si = SystemInfo(bank0_size=1 << 20)  # 1 MiB
+        # Read 64-bit value at offset 0x08 (little-endian bytes)
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x08 + i) << (8 * i)
+        self.assertEqual(val, 1 << 20)
+
+    def test_sysinfo_hbw_info(self):
+        """SysInfo reports HBW base, size, and total memory."""
+        si = SystemInfo(bank0_size=1 << 20, hbw_base=0xFFD0_0000,
+                        hbw_size=3 * (1 << 20), int_mem_total=4 * (1 << 20))
+        # Read HBW base at offset 0x20
+        hbw_base = 0
+        for i in range(8):
+            hbw_base |= si.read8(0x20 + i) << (8 * i)
+        self.assertEqual(hbw_base, 0xFFD0_0000)
+        # Read HBW size at offset 0x28
+        hbw_size = 0
+        for i in range(8):
+            hbw_size |= si.read8(0x28 + i) << (8 * i)
+        self.assertEqual(hbw_size, 3 * (1 << 20))
+        # Read total at offset 0x30
+        total = 0
+        for i in range(8):
+            total |= si.read8(0x30 + i) << (8 * i)
+        self.assertEqual(total, 4 * (1 << 20))
+
+    def test_sysinfo_cluster_en_rw(self):
+        """SysInfo cluster_en at offset 0x18 is read-write."""
+        si = SystemInfo()
+        self.assertEqual(si.read8(0x18), 0)  # default off
+        si.write8(0x18, 0x05)  # enable clusters 0 and 2
+        self.assertEqual(si.read8(0x18), 0x05)
+        si.write8(0x19, 0x03)  # set byte 1
+        self.assertEqual(si.cluster_en, 0x0305)
 
     def test_bus_routes_nic(self):
         bus = DeviceBus()
@@ -385,8 +426,9 @@ class TestSystemMMIO(unittest.TestCase):
         """CPU reading SysInfo board ID through MMIO."""
         sys = make_system(ram_kib=64)
         sysinfo_addr = MMIO_BASE + SYSINFO_BASE
+        # Read bytes 4 and 5 of the board-id register (contain '4' and '6')
         code = assemble(f"""
-            ldi64 r1, {sysinfo_addr}
+            ldi64 r1, {sysinfo_addr + 4}
             ld.b r4, r1
             inc r1
             ld.b r5, r1
@@ -396,8 +438,8 @@ class TestSystemMMIO(unittest.TestCase):
         sys.boot()
         run_until(sys)
         self.assertTrue(sys.cpu.halted)
-        self.assertEqual(sys.cpu.regs[4], ord("M"))
-        self.assertEqual(sys.cpu.regs[5], ord("P"))
+        self.assertEqual(sys.cpu.regs[4], ord("4"))
+        self.assertEqual(sys.cpu.regs[5], ord("6"))
 
     def test_normal_ram_unaffected(self):
         """Non-MMIO addresses should read/write RAM normally."""
@@ -415,6 +457,124 @@ class TestSystemMMIO(unittest.TestCase):
         run_until(sys)
         self.assertTrue(sys.cpu.halted)
         self.assertEqual(sys.cpu.regs[5], 0xAA)
+
+
+# ---------------------------------------------------------------------------
+#  HBW memory tests
+# ---------------------------------------------------------------------------
+
+class TestHBWMemory(unittest.TestCase):
+    """Tests for the High-Bandwidth (HBW) math RAM banks."""
+
+    def test_hbw_direct_read_write(self):
+        """CPU can read/write HBW memory at 0xFFD0_0000."""
+        sys = make_system()
+        hbw_addr = 0xFFD0_0000
+        code = assemble(f"""
+            ldi r1, 0x42
+            ldi64 r4, {hbw_addr}
+            st.b r4, r1
+            ldi r5, 0
+            ld.b r5, r4
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(sys.cpu.regs[5], 0x42)
+
+    def test_hbw_does_not_alias_bank0(self):
+        """HBW writes must not corrupt bank 0 RAM."""
+        sys = make_system()
+        # 0xFFD0_0000 % 0x100000 = 0xD0000 — same offset in bank 0
+        bank0_offset = 0xD0000
+        hbw_addr = 0xFFD0_0000
+        # Write different values to the same offset in bank 0 vs HBW
+        sys.cpu.mem_write8(bank0_offset, 0xAA)
+        sys.cpu.mem_write8(hbw_addr, 0xBB)
+        # Read back — they must be independent
+        self.assertEqual(sys.cpu.mem_read8(bank0_offset), 0xAA,
+                         "bank 0 should be 0xAA")
+        self.assertEqual(sys.cpu.mem_read8(hbw_addr), 0xBB,
+                         "HBW should be 0xBB")
+
+    def test_hbw_64bit_access(self):
+        """64-bit read/write to HBW memory via CPU mem functions."""
+        sys = make_system()
+        hbw_addr = 0xFFE0_0000  # bank 2
+        val = 0xDEADBEEF_CAFEBABE
+        # Use the CPU's (patched) memory functions directly
+        sys.cpu.mem_write64(hbw_addr, val)
+        result = sys.cpu.mem_read64(hbw_addr)
+        self.assertEqual(result, val)
+
+    def test_hbw_bank3(self):
+        """Write/read to bank 3 (0xFFF0_0000)."""
+        sys = make_system()
+        hbw_addr = 0xFFF0_0000
+        code = assemble(f"""
+            ldi r1, 0x77
+            ldi64 r4, {hbw_addr}
+            st.b r4, r1
+            ldi r5, 0
+            ld.b r5, r4
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(sys.cpu.regs[5], 0x77)
+
+    def test_load_binary_to_hbw(self):
+        """load_binary() can target HBW addresses."""
+        sys = make_system()
+        hbw_addr = 0xFFD0_0100
+        sys.load_binary(hbw_addr, b'\xAA\xBB\xCC\xDD')
+        # Read back via internal HBW buffer
+        self.assertEqual(sys._hbw_mem[0x100], 0xAA)
+        self.assertEqual(sys._hbw_mem[0x101], 0xBB)
+        self.assertEqual(sys._hbw_mem[0x102], 0xCC)
+        self.assertEqual(sys._hbw_mem[0x103], 0xDD)
+
+    def test_dma_read_hbw(self):
+        """DMA _raw_mem_read routes HBW addresses correctly."""
+        sys = make_system()
+        sys._hbw_mem[0] = 0x42
+        self.assertEqual(sys._raw_mem_read(0xFFD0_0000), 0x42)
+
+    def test_dma_write_hbw(self):
+        """DMA _raw_mem_write routes HBW addresses correctly."""
+        sys = make_system()
+        sys._raw_mem_write(0xFFD0_0000, 0x99)
+        self.assertEqual(sys._hbw_mem[0], 0x99)
+
+    def test_hbw_system_has_correct_sizes(self):
+        """MegapadSystem creates correct HBW allocation."""
+        sys = make_system()
+        self.assertEqual(len(sys._hbw_mem), 3 * (1 << 20))
+        self.assertEqual(sys.hbw_size, 3 * (1 << 20))
+
+    def test_sysinfo_reports_hbw(self):
+        """SysInfo registers reflect HBW configuration."""
+        sys = make_system()
+        si = sys.sysinfo
+        # Read bank0_size at offset 0x08
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x08 + i) << (8 * i)
+        self.assertEqual(val, 1024 * 1024)  # 1 MiB
+        # Read HBW base at offset 0x20
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x20 + i) << (8 * i)
+        self.assertEqual(val, 0xFFD0_0000)
+        # Read int_mem_total at offset 0x30
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x30 + i) << (8 * i)
+        self.assertEqual(val, 4 * 1024 * 1024)  # 4 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -1033,7 +1193,7 @@ class TestBIOS(unittest.TestCase):
             sys, buf = self._boot_bios(ram_kib=1024, storage_image=path)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
-            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=200_000_000)
+            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=250_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("3 ", text)
         finally:
@@ -1958,6 +2118,243 @@ class TestMulticore(unittest.TestCase):
                      "IPI-ACK", "MBOX!", "SPIN@", "SPIN!",
                      "WAKE-CORE", "CORE-STATUS"]:
             self.assertIn(word, text, f"'{word}' should be in WORDS output")
+
+
+# ---------------------------------------------------------------------------
+#  Micro-Cluster tests
+# ---------------------------------------------------------------------------
+
+class TestMicroCluster(unittest.TestCase):
+    """Test micro-core cluster emulation (matches RTL mp64_cluster.v)."""
+
+    # -- Standalone MicroCluster unit tests --
+
+    def test_cluster_creation(self):
+        """MicroCluster creates the right number of micro-cores."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        self.assertEqual(len(cl.cores), 4)
+        for i, mc in enumerate(cl.cores):
+            self.assertEqual(mc.core_id, 4 + i)
+            self.assertIsInstance(mc, Megapad64Micro)
+            self.assertIs(mc._cluster, cl)
+
+    def test_micro_core_cpuid(self):
+        """Micro-core CPUID returns the micro-core variant ID."""
+        mc = Megapad64Micro(core_id=4, num_cores=16)
+        self.assertEqual(mc.csr_read(CSR_CPUID), CPUID_MICRO)
+
+    def test_micro_core_coreid_and_ncores(self):
+        """Micro-core COREID and NCORES CSRs reflect assigned values."""
+        mc = Megapad64Micro(core_id=7, num_cores=16)
+        self.assertEqual(mc.csr_read(CSR_COREID), 7)
+        self.assertEqual(mc.csr_read(CSR_NCORES), 16)
+
+    def test_mex_traps_on_micro_core(self):
+        """MEX (tile engine) raises ILLEGAL_OP on micro-cores."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        # Write a MEX instruction: family 0xE, sub 0x00
+        mc.mem[0] = 0xE0  # MEX family
+        mc.mem[1] = 0x00  # funct byte
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_scratchpad_rw(self):
+        """Cluster scratchpad reads and writes correctly."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, shared_mem=mem)
+        cl.spad_write8(0, 0x42)
+        cl.spad_write8(100, 0xAB)
+        self.assertEqual(cl.spad_read8(0), 0x42)
+        self.assertEqual(cl.spad_read8(100), 0xAB)
+        # Wraps at CLUSTER_SPAD_BYTES
+        cl.spad_write8(CLUSTER_SPAD_BYTES, 0xCD)
+        self.assertEqual(cl.spad_read8(0), 0xCD)
+
+    def test_scratchpad_isolation(self):
+        """Different clusters have independent scratchpads."""
+        mem = bytearray(1 << 20)
+        cl0 = MicroCluster(cluster_id=0, id_base=4, shared_mem=mem)
+        cl1 = MicroCluster(cluster_id=1, id_base=8, shared_mem=mem)
+        cl0.spad_write8(0, 0xAA)
+        cl1.spad_write8(0, 0xBB)
+        self.assertEqual(cl0.spad_read8(0), 0xAA)
+        self.assertEqual(cl1.spad_read8(0), 0xBB)
+
+    def test_barrier_arrive_and_done(self):
+        """Hardware barrier fires when all cores arrive."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        self.assertFalse(cl.barrier_done)
+        # Cores 4, 5, 6 arrive — not yet all
+        cl.barrier_arrive_core(4)
+        cl.barrier_arrive_core(5)
+        cl.barrier_arrive_core(6)
+        self.assertFalse(cl.barrier_done)
+        self.assertEqual(cl.barrier_arrive, 0b0111)
+        # Core 7 arrives — all present → done + auto-clear
+        cl.barrier_arrive_core(7)
+        self.assertTrue(cl.barrier_done)
+        self.assertEqual(cl.barrier_arrive, 0)  # auto-cleared
+
+    def test_barrier_csr_forwarding(self):
+        """Micro-core CSR reads/writes for barrier forward to cluster."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        mc = cl.cores[0]  # core_id = 4
+        # Write to BARRIER_ARRIVE CSR → arrive
+        mc.csr_write(CSR_BARRIER_ARRIVE, 1)
+        self.assertEqual(cl.barrier_arrive, 0b0001)
+        # Read BARRIER_STATUS
+        status = mc.csr_read(CSR_BARRIER_STATUS)
+        self.assertEqual(status & 0xFF, 0b0001)  # arrive mask
+        self.assertEqual(status >> 8, 0)  # not done yet
+
+    def test_bist_pass(self):
+        """BIST on scratchpad passes under normal conditions."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, shared_mem=mem)
+        # Write some data to scratchpad first
+        for i in range(10):
+            cl.spad_write8(i, i)
+        # Trigger BIST
+        cl.bist_csr_write(CSR_BIST_CMD, 1)
+        self.assertEqual(cl.bist_status, 2)  # pass
+        # Verify scratchpad data was restored
+        for i in range(10):
+            self.assertEqual(cl.spad_read8(i), i)
+
+    def test_cluster_enable_disable(self):
+        """Enable/disable cluster gates micro-core halted state."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, shared_mem=mem)
+        # Starts disabled
+        self.assertFalse(cl.enabled)
+        for mc in cl.cores:
+            self.assertFalse(mc.halted)  # constructor doesn't halt
+        # Enable — resets and halts cores (held in reset)
+        cl.set_enabled(True)
+        self.assertTrue(cl.enabled)
+        for mc in cl.cores:
+            self.assertTrue(mc.halted)
+        # Disable — halts cores
+        cl.set_enabled(False)
+        self.assertFalse(cl.enabled)
+        for mc in cl.cores:
+            self.assertTrue(mc.halted)
+
+    # -- System-level micro-cluster tests --
+
+    def test_system_with_clusters(self):
+        """MegapadSystem creates clusters and adds micro-cores to core list."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=4, num_clusters=3)
+        self.assertEqual(sys.num_cores, 16)  # 4 full + 3*4 micro
+        self.assertEqual(sys.num_full_cores, 4)
+        self.assertEqual(len(sys.clusters), 3)
+        self.assertEqual(len(sys.cores), 16)
+        # First 4 are full cores (may be accel_wrapper.Megapad64)
+        for i in range(4):
+            self.assertNotIsInstance(sys.cores[i], Megapad64Micro)
+        # Next 12 are micro-cores
+        for i in range(4, 16):
+            self.assertIsInstance(sys.cores[i], Megapad64Micro)
+
+    def test_micro_cores_start_halted(self):
+        """Micro-cores start halted after boot (cluster_en defaults 0)."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=1)
+        # Write a halt instruction for core 0
+        code = assemble("halt")
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        # Core 0 halted (full core)
+        self.assertTrue(sys.cores[0].halted)
+        # Micro-cores should be halted (cluster disabled)
+        for mc in sys.clusters[0].cores:
+            self.assertTrue(mc.halted)
+
+    def test_cluster_en_sysinfo(self):
+        """Writing cluster_en via SysInfo enables/disables clusters."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=3)
+        code = assemble("halt")
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        # Enable cluster 0 (bit 0)
+        sys.sysinfo.write8(0x18, 0x01)
+        # Trigger the callback (the patched write8)
+        self.assertTrue(sys.clusters[0].enabled)
+        self.assertFalse(sys.clusters[1].enabled)
+        self.assertFalse(sys.clusters[2].enabled)
+        # Enable all 3 clusters (mask 0x07)
+        sys.sysinfo.write8(0x18, 0x07)
+        for cl in sys.clusters:
+            self.assertTrue(cl.enabled)
+
+    def test_scratchpad_via_cpu_mem(self):
+        """Micro-core can access cluster scratchpad via sentinel address."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=1)
+        code = assemble("halt")
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        # Enable cluster 0
+        sys.sysinfo.write8(0x18, 0x01)
+        mc = sys.clusters[0].cores[0]  # micro-core 4
+        # Write to scratchpad via sentinel address
+        spad_addr = CLUSTER_SPAD_ADDR  # 0xFFFF_FE00_0000_0000
+        mc.mem_write8(spad_addr + 10, 0x42)
+        # Read back via cluster scratchpad
+        self.assertEqual(sys.clusters[0].spad_read8(10), 0x42)
+        # Read back via CPU mem
+        self.assertEqual(mc.mem_read8(spad_addr + 10), 0x42)
+
+    def test_sysinfo_reports_all_cores(self):
+        """SysInfo NUM_CORES register includes micro-cores."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=4, num_clusters=3)
+        # Read NUM_CORES at SysInfo offset 0x10
+        val = 0
+        for i in range(8):
+            val |= sys.sysinfo.read8(0x10 + i) << (8 * i)
+        self.assertEqual(val, 16)
+
+    def test_bios_cluster_words_in_dictionary(self):
+        """BIOS dictionary includes cluster control words."""
+        sys, buf = TestMulticore._get_bios_code, None
+        # Reuse TestMulticore boot infrastructure
+        code = TestMulticore._get_bios_code()
+        sys = make_system(ram_kib=1024, num_cores=1)
+        buf = capture_uart(sys)
+        sys.load_binary(0, code)
+        sys.boot()
+        for _ in range(3_000_000):
+            if sys.cpu.idle:
+                break
+            sys.step()
+        # Run WORDS to check new words are present
+        payload = "WORDS\nBYE\n".encode()
+        pos = 0
+        total = 0
+        while total < 2_000_000:
+            if sys.cpu.halted:
+                break
+            if sys.cpu.idle and not sys.uart.has_rx_data:
+                if pos < len(payload):
+                    chunk = _next_line_chunk(payload, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                else:
+                    break
+                continue
+            batch = sys.run_batch(min(100_000, 2_000_000 - total))
+            total += max(batch, 1)
+        text = uart_text(buf)
+        for word in ["CLUSTER-EN!", "CLUSTER-EN@",
+                     "BARRIER-ARRIVE", "BARRIER-STATUS", "SPAD"]:
+            self.assertIn(word, text,
+                          f"'{word}' should be in WORDS output")
 
 
 # ---------------------------------------------------------------------------
@@ -7877,7 +8274,7 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "10 20 + .",
                 "BUF-COUNT @ .",
-            ], max_steps=200_000_000)
+            ], max_steps=250_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("30 ", text)
             # BUF-COUNT should be a valid number (0 initially)
@@ -7896,7 +8293,7 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "0 1 64 BUFFER diskbuf",
                 "BUF-COUNT @ .",
-            ], max_steps=200_000_000)
+            ], max_steps=250_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("1 ", text)
         finally:

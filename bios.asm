@@ -7160,18 +7160,30 @@ ipi_handler_done:
     ; Return from interrupt
     rti
 
-; Per-core worker XT slots (one 64-bit entry per core)
+; Per-core worker XT slots (one 64-bit entry per core, 16 max)
 worker_xt_table:
     .dq 0                               ; core 0
     .dq 0                               ; core 1
     .dq 0                               ; core 2
     .dq 0                               ; core 3
+    .dq 0                               ; micro-core 4  (cluster 0)
+    .dq 0                               ; micro-core 5
+    .dq 0                               ; micro-core 6
+    .dq 0                               ; micro-core 7
+    .dq 0                               ; micro-core 8  (cluster 1)
+    .dq 0                               ; micro-core 9
+    .dq 0                               ; micro-core 10
+    .dq 0                               ; micro-core 11
+    .dq 0                               ; micro-core 12 (cluster 2)
+    .dq 0                               ; micro-core 13
+    .dq 0                               ; micro-core 14
+    .dq 0                               ; micro-core 15
 
 ; =====================================================================
 ;  Multicore Forth Words
 ; =====================================================================
 
-; COREID ( -- n )  push this core's hardware ID (0-3)
+; COREID ( -- n )  push this core's hardware ID (0-15)
 w_coreid:
     csrr r0, 0x20
     subi r14, 8
@@ -8279,6 +8291,84 @@ w_core_status:
     add r11, r0
     ldn r0, r11                         ; worker_xt[core_id]
     str r14, r0                         ; replace TOS
+    ret.l
+
+; =====================================================================
+;  Micro-Cluster — SysInfo CLUSTER_EN + CSR barrier + scratchpad
+; =====================================================================
+
+; CLUSTER-EN! ( mask -- )  set cluster enable mask (SysInfo offset 0x18)
+w_cluster_en_store:
+    ldn r0, r14                         ; R0 = mask
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0318    ; SysInfo + 0x18 = CLUSTER_EN
+    str r11, r0
+    ret.l
+
+; CLUSTER-EN@ ( -- mask )  read cluster enable mask
+w_cluster_en_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0318    ; SysInfo + 0x18 = CLUSTER_EN
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BARRIER-ARRIVE ( -- )  signal barrier arrival for this core (CSR 0x66)
+w_barrier_arrive:
+    ldi r0, 1
+    csrw 0x66, r0
+    ret.l
+
+; BARRIER-STATUS ( -- n )  read barrier status: bit8=done, [N-1:0]=arrive mask
+w_barrier_status:
+    csrr r0, 0x67
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SPAD ( -- addr )  push cluster scratchpad base address sentinel
+w_spad:
+    ldi64 r0, 0xFFFF_FE00_0000_0000
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; =====================================================================
+;  HBW Memory & Core-Type Identification
+; =====================================================================
+
+; HBW-BASE ( -- addr )  read HBW math RAM base address from SysInfo
+w_hbw_base:
+    ldi64 r11, 0xFFFF_FF00_0000_0320    ; SysInfo + 0x20 = HBW_BASE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; HBW-SIZE ( -- u )  read HBW math RAM size in bytes from SysInfo
+w_hbw_size:
+    ldi64 r11, 0xFFFF_FF00_0000_0328    ; SysInfo + 0x28 = HBW_SIZE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; N-FULL ( -- n )  number of full (major) cores (always 4)
+w_n_full:
+    ldi r0, 4
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; MICRO? ( id -- flag )  true if core id is a micro-core (>= 4)
+w_micro_q:
+    ldn r0, r14                         ; R0 = core id
+    cmpi r0, 4                          ; compare with MICRO_ID_BASE
+    ldi r1, 0
+    lbrcc micro_q_no                    ; if id < 4, not micro
+    ldi r1, -1                          ; id >= 4 → true
+micro_q_no:
+    str r14, r1                         ; replace TOS
     ret.l
 
 ; =====================================================================
@@ -10992,9 +11082,90 @@ d_icache_misses:
     call.l r11
     ret.l
 
+; === CLUSTER-EN! ( mask -- ) ===
+d_cluster_en_store:
+    .dq d_icache_misses
+    .db 11
+    .ascii "CLUSTER-EN!"
+    ldi64 r11, w_cluster_en_store
+    call.l r11
+    ret.l
+
+; === CLUSTER-EN@ ( -- mask ) ===
+d_cluster_en_fetch:
+    .dq d_cluster_en_store
+    .db 11
+    .ascii "CLUSTER-EN@"
+    ldi64 r11, w_cluster_en_fetch
+    call.l r11
+    ret.l
+
+; === BARRIER-ARRIVE ( -- ) ===
+d_barrier_arrive:
+    .dq d_cluster_en_fetch
+    .db 14
+    .ascii "BARRIER-ARRIVE"
+    ldi64 r11, w_barrier_arrive
+    call.l r11
+    ret.l
+
+; === BARRIER-STATUS ( -- n ) ===
+d_barrier_status:
+    .dq d_barrier_arrive
+    .db 14
+    .ascii "BARRIER-STATUS"
+    ldi64 r11, w_barrier_status
+    call.l r11
+    ret.l
+
+; === SPAD ( -- addr ) ===
+d_spad:
+    .dq d_barrier_status
+    .db 4
+    .ascii "SPAD"
+    ldi64 r11, w_spad
+    call.l r11
+    ret.l
+
+; === HBW-BASE ( -- addr ) ===
+d_hbw_base:
+    .dq d_spad
+    .db 8
+    .ascii "HBW-BASE"
+    ldi64 r11, w_hbw_base
+    call.l r11
+    ret.l
+
+; === HBW-SIZE ( -- u ) ===
+d_hbw_size:
+    .dq d_hbw_base
+    .db 8
+    .ascii "HBW-SIZE"
+    ldi64 r11, w_hbw_size
+    call.l r11
+    ret.l
+
+; === N-FULL ( -- n ) ===
+d_n_full:
+    .dq d_hbw_size
+    .db 6
+    .ascii "N-FULL"
+    ldi64 r11, w_n_full
+    call.l r11
+    ret.l
+
+; === MICRO? ( id -- flag ) ===
+d_micro_q:
+    .dq d_n_full
+    .db 6
+    .ascii "MICRO?"
+    ldi64 r11, w_micro_q
+    call.l r11
+    ret.l
+
 ; === SP@ ( -- addr ) ===
 d_sp_fetch:
-    .dq d_icache_misses
+    .dq d_micro_q
     .db 3
     .ascii "SP@"
     ldi64 r11, w_sp_fetch

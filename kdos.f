@@ -6,7 +6,8 @@
 \
 \  Subsystems:
 \    1. Utilities       — common words, CMOVE, +!, tile-alignment
-\    2. Buffers         — typed, tile-aligned data regions
+\    1.12 HBW Math RAM  — HBW-ALLOT, HBW-BUFFER, HBW-RESET
+\    2. Buffers         — typed, tile-aligned data regions (Bank 0 + HBW)
 \    3. Tile Ops        — SIMD buffer operations (SUM, ADD, etc.)
 \    4. Kernels         — metadata registry for compute kernels
 \    5. Sample Kernels  — kzero, kfill, kadd, kscale, kstats, kthresh
@@ -17,6 +18,7 @@
 \       7.8 Dict Search — WORDS-LIKE, APROPOS, .RECENT
 \    8. Scheduler       — cooperative & preemptive multitasking
 \    8.1 Multicore      — CORE-RUN, CORE-WAIT, BARRIER, P.RUN-PAR
+\    8.8 Micro-Cluster  — CLUSTER-ENABLE, HW-BARRIER-WAIT, SPAD
 \    9. Screens         — interactive TUI (ANSI terminal, 9 screens)
 \   10. Data Ports      — NIC-based external data ingestion
 \   11. Benchmarking    — BENCH for timing via CYCLES
@@ -103,12 +105,19 @@ VARIABLE PN-LEN
 16 CONSTANT /ALLOC-HDR
 
 \ MEM-SIZE ( -- u )  total RAM in bytes
-\   Reads from SysInfo MMIO device: MEM_SIZE at offsets +0x06, +0x07
-\   Value is in KiB; multiply by 1024 for bytes.
+\   Reads bank0_size (64-bit, in bytes) from SysInfo register at offset 0x08.
 : MEM-SIZE  ( -- u )
-    0xFFFFFF0000000306 C@       \ MEM_SIZE_LO (KiB low byte)
-    0xFFFFFF0000000307 C@       \ MEM_SIZE_HI (KiB high byte)
-    8 LSHIFT OR  1024 * ;
+    0xFFFFFF0000000308 @ ;        \ SysInfo + 0x08 = bank0_size (bytes)
+
+\ -- Core-type identification --
+4 CONSTANT MICRO-ID-BASE      \ first micro-core ID
+4 CONSTANT N-FULL-CORES       \ number of full (major) cores
+
+\ MICRO-CORE? ( id -- flag )  true if core id is a micro-core
+: MICRO-CORE?  ( id -- flag )  MICRO-ID-BASE >= ;
+
+\ FULL-CORE? ( id -- flag )  true if core id is a full core
+: FULL-CORE?   ( id -- flag )  MICRO-ID-BASE < ;
 
 \ -- Heap state --
 VARIABLE HEAP-BASE    0 HEAP-BASE !
@@ -1201,6 +1210,63 @@ VARIABLE _HKDF-COUNTER
     R> PQ-DERIVE ;
 
 \ =====================================================================
+\  §1.12  HBW Math RAM Allocator
+\ =====================================================================
+\
+\  Simple bump allocator for the High-Bandwidth (HBW) math RAM.
+\  HBW is 3 MiB of dedicated internal BRAM (banks 1-3) at addresses
+\  starting from HBW-BASE (typically 0xFFD0_0000).  Ideal for large
+\  tile/SIMD working buffers to avoid contention with Bank 0 (system
+\  RAM, dictionary, stacks, heap).
+\
+\  Unlike the heap (§1.1), HBW uses a bump allocator — no individual
+\  FREE.  Use HBW-RESET to reclaim all HBW memory at once.
+\
+\  HBW-INIT     ( -- )          initialise HBW allocator
+\  HBW-ALLOT    ( u -- addr )   allocate u bytes from HBW, return addr
+\  HBW-TALIGN   ( -- )          align HBW-HERE to 64-byte tile boundary
+\  HBW-RESET    ( -- )          reclaim all HBW memory
+\  HBW-FREE     ( -- u )        bytes remaining in HBW
+\  .HBW         ( -- )          display HBW status
+
+VARIABLE HBW-HERE    0 HBW-HERE !
+VARIABLE HBW-LIMIT   0 HBW-LIMIT !
+
+\ HBW-INIT ( -- )  set up HBW pointers from SysInfo registers
+: HBW-INIT  ( -- )
+    HBW-BASE HBW-HERE !
+    HBW-BASE HBW-SIZE + HBW-LIMIT ! ;
+
+\ HBW-ALLOT ( u -- addr )  bump-allocate u bytes from HBW
+: HBW-ALLOT  ( u -- addr )
+    HBW-HERE @ SWAP                  \ addr u
+    OVER + DUP HBW-LIMIT @ > ABORT" HBW overflow"
+    HBW-HERE !                        \ update pointer
+    ;                                 \ leave addr on stack
+
+\ HBW-TALIGN ( -- )  align HBW-HERE up to 64-byte boundary
+: HBW-TALIGN  ( -- )
+    HBW-HERE @  63 + -64 AND  HBW-HERE ! ;
+
+\ HBW-RESET ( -- )  reclaim all HBW memory (bulk free)
+: HBW-RESET  ( -- )
+    HBW-BASE HBW-HERE ! ;
+
+\ HBW-FREE ( -- u )  bytes remaining in HBW
+: HBW-FREE  ( -- u )
+    HBW-LIMIT @ HBW-HERE @ - ;
+
+\ .HBW ( -- )  display HBW status
+: .HBW  ( -- )
+    ."  HBW Math RAM:" CR
+    ."    Base = " HBW-BASE . CR
+    ."    Size = " HBW-SIZE . ."  bytes" CR
+    ."    Used = " HBW-HERE @ HBW-BASE - . ."  bytes" CR
+    ."    Free = " HBW-FREE . ."  bytes" CR ;
+
+HBW-INIT      \ initialise at load time
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \
@@ -1240,6 +1306,26 @@ VARIABLE BDESC
     TALIGN                    \ align HERE for data start
     HERE BDESC @ 24 + !       \ +24 store data_addr = HERE
     ALLOT                     \ advance HERE past data region
+    \ register
+    BUF-COUNT @ 16 < IF
+        BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
+        BUF-COUNT @ 1+ BUF-COUNT !
+    THEN
+    BDESC @ CONSTANT ;
+
+\ HBW-BUFFER ( type width length "name" -- )
+\   Like BUFFER, but allocates the data region in HBW math RAM.
+\   Descriptor stays in Bank 0 (dictionary); data in HBW for fast tile ops.
+: HBW-BUFFER
+    HERE BDESC !              \ descriptor in dictionary
+    ROT ,                     \ +0  store type
+    SWAP ,                    \ +8  store width
+    DUP ,                     \ +16 store length
+    BDESC @ B.WIDTH *         \ total data bytes
+    0 ,                       \ +24 reserve cell for data_addr
+    HBW-TALIGN                \ align HBW pointer
+    HBW-HERE @ BDESC @ 24 + ! \ +24 data_addr = HBW-HERE
+    HBW-ALLOT DROP            \ advance HBW-HERE past data region
     \ register
     BUF-COUNT @ 16 < IF
         BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
@@ -3242,6 +3328,8 @@ VARIABLE PREEMPT-ENABLED
 
 \ -- CORE-RUN ( xt core -- )  dispatch XT to secondary core --
 \   Validates the core number, then sends via WAKE-CORE.
+\   Note: caller is responsible for ensuring the XT is safe for
+\   the target core type (micro-cores cannot run tile/MEX ops).
 : CORE-RUN  ( xt core -- )
     DUP COREID = ABORT" Cannot dispatch to self"
     DUP 0<  OVER NCORES >= OR ABORT" Invalid core ID"
@@ -3261,6 +3349,12 @@ VARIABLE PREEMPT-ENABLED
 \ -- ALL-CORES-WAIT ( -- )  wait for all secondary cores to idle --
 : ALL-CORES-WAIT  ( -- )
     NCORES 1 DO
+        I CORE-WAIT
+    LOOP ;
+
+\ -- ALL-FULL-WAIT ( -- )  wait for all secondary full cores to idle --
+: ALL-FULL-WAIT  ( -- )
+    N-FULL-CORES 1 DO
         I CORE-WAIT
     LOOP ;
 
@@ -3314,14 +3408,15 @@ VARIABLE PAR-CORE       \ next core to assign
 \ buffers), we dispatch them directly via CORE-RUN.
 
 \ -- P.RUN-PAR ( pipe -- )  run pipeline steps in parallel --
-\   Distributes steps across available secondary cores.
-\   If there are more steps than cores, remaining steps run on core 0.
+\   Distributes steps across available secondary FULL cores only.
+\   Pipeline steps use tile/MEX ops which micro-cores cannot execute.
+\   If there are more steps than full cores, remaining steps run on core 0.
 \   Always waits for all dispatched work before returning.
 VARIABLE PAR-P          \ pipeline being dispatched
 VARIABLE PAR-N          \ next core to use
 
 : P.RUN-PAR  ( pipe -- )
-    NCORES 1 <= IF
+    N-FULL-CORES 1 <= IF
         \ Single core: fall back to sequential
         P.RUN EXIT
     THEN
@@ -3330,14 +3425,14 @@ VARIABLE PAR-N          \ next core to use
     1 PAR-N !               \ start dispatching to core 1
     PAR-P @ P.COUNT 0 DO
         PAR-P @ I P.GET      ( step-xt )
-        PAR-N @ NCORES < IF
+        PAR-N @ N-FULL-CORES < IF
             PAR-N @ CORE-RUN
             PAR-N @ 1+ PAR-N !
         ELSE
             EXECUTE
         THEN
     LOOP
-    ALL-CORES-WAIT ;
+    ALL-FULL-WAIT ;
 
 \ -- P.BENCH-PAR ( pipe -- )  benchmark parallel pipeline --
 : P.BENCH-PAR  ( pipe -- )
@@ -3359,22 +3454,22 @@ VARIABLE PAR-N          \ next core to use
 \  tasks via CORE-RUN (IPI dispatch).
 \
 \  Queue layout: circular buffer with head/tail indices per core.
-\  RQ-DEPTH entries per core, NCORES_MAX (4) cores.
+\  RQ-DEPTH entries per core, NCORES_MAX (16) cores.
 
 \ -- Constants --
 8 CONSTANT RQ-DEPTH       \ max tasks per core queue
-4 CONSTANT NCORES_MAX     \ maximum cores supported
+16 CONSTANT NCORES_MAX    \ maximum cores (4 full + 12 micro)
 
 \ -- Per-core queue storage --
-\    RQ-SLOTS: NCORES_MAX × RQ-DEPTH × CELL = 4×8×8 = 256 bytes
+\    RQ-SLOTS: NCORES_MAX × RQ-DEPTH × CELL = 16×8×8 = 1024 bytes
 \    Each slot holds an XT (0 = empty).
-VARIABLE RQ-SLOTS  255 ALLOT
+VARIABLE RQ-SLOTS  1023 ALLOT
 
 \ -- Per-core head/tail indices (one CELL each per core) --
 \    HEAD = next slot to dequeue from
 \    TAIL = next slot to enqueue into
-VARIABLE RQ-HEADS  31 ALLOT      \ 4 × 8 = 32 bytes
-VARIABLE RQ-TAILS  31 ALLOT      \ 4 × 8 = 32 bytes
+VARIABLE RQ-HEADS  127 ALLOT      \ 16 × 8 = 128 bytes
+VARIABLE RQ-TAILS  127 ALLOT      \ 16 × 8 = 128 bytes
 
 \ -- Queue initialisation --
 : RQ-INIT  ( -- )
@@ -3501,12 +3596,13 @@ RQ-INIT       \ initialise at load time
     DUP 0= IF 2DROP 0 EXIT THEN
     SWAP RQ-PUSH  -1 ;               ( flag )
 
-\ -- RQ-BUSIEST ( exclude -- core | -1 ) find core with most queued tasks --
-\   Skips the core with ID 'exclude'.  Returns -1 if all queues empty.
+\ -- RQ-BUSIEST ( exclude -- core | -1 ) find full core with most queued tasks --
+\   Skips the core with ID 'exclude' and micro-cores.
+\   Returns -1 if all full-core queues empty.
 : RQ-BUSIEST  ( exclude -- core | -1 )
     -1                                ( exclude best-core )
     0                                 ( exclude best-core best-count )
-    NCORES 0 DO
+    N-FULL-CORES 0 DO
         I 3 PICK = IF                \ skip excluded core
         ELSE
             I RQ-COUNT DUP           ( excl bc bcnt cnt cnt )
@@ -3528,14 +3624,14 @@ RQ-INIT       \ initialise at load time
     DUP RQ-EMPTY? IF 2DROP 0 EXIT THEN
     SWAP STEAL-FROM ;                 ( flag )
 
-\ -- BALANCE ( -- ) rebalance work across all cores --
-\   Idle cores steal from the busiest core, one task at a time,
+\ -- BALANCE ( -- ) rebalance work across all full cores --
+\   Idle full cores steal from the busiest full core, one task at a time,
 \   until no more imbalance exists (max difference ≤ 1).
 : BALANCE  ( -- )
     \ Repeat until stable
     BEGIN
         0                             ( stole-any? )
-        NCORES 0 DO
+        N-FULL-CORES 0 DO
             I RQ-EMPTY? IF
                 I WORK-STEAL IF
                     DROP -1           \ mark that we stole something
@@ -3576,6 +3672,9 @@ AFF-INIT
 
 : SPAWN-ON  ( xt core -- )
     DUP 0<  OVER NCORES >= OR ABORT" Invalid core ID"
+    DUP MICRO-CORE? IF
+        ." WARNING: dispatching to micro-core (no tile/MEX)" CR
+    THEN
     OVER OVER
     RQ-PUSH
     TASK-COUNT @ DUP 8 < IF
@@ -3622,7 +3721,7 @@ AFF-INIT
 \  broadcast to all cores, and each core's ISR sets its own preempt
 \  flag.  Cooperative yield points (YIELD?) check the per-core flag.
 
-VARIABLE PREEMPT-FLAGS  31 ALLOT
+VARIABLE PREEMPT-FLAGS  127 ALLOT     \ 16 × 8 = 128 bytes
 
 : PREEMPT-FLAGS-INIT  ( -- )
     NCORES_MAX 0 DO
@@ -3692,9 +3791,9 @@ PREEMPT-FLAGS-INIT
 3 CONSTANT MSG-CELLS
 7 CONSTANT MSG-SLOCK
 
-VARIABLE MSG-INBOX  767 ALLOT
-VARIABLE MSG-IHEAD  31 ALLOT
-VARIABLE MSG-ITAIL  31 ALLOT
+VARIABLE MSG-INBOX  3071 ALLOT        \ 16 × 8 × 3 × 8 = 3072 bytes
+VARIABLE MSG-IHEAD  127 ALLOT         \ 16 × 8 = 128 bytes
+VARIABLE MSG-ITAIL  127 ALLOT         \ 16 × 8 = 128 bytes
 
 0 CONSTANT MSG-CALL
 1 CONSTANT MSG-DATA
@@ -3845,6 +3944,76 @@ VARIABLE MB-T   VARIABLE MB-P
     ."    2 = Filesystem" CR
     ."    3 = Heap" CR
     ."    7 = IPI Messaging" CR ;
+
+\ =====================================================================
+\  §8.8  Micro-Cluster Support
+\ =====================================================================
+\
+\  High-level words for managing micro-core clusters.  Builds on the
+\  BIOS primitives: CLUSTER-EN! CLUSTER-EN@ BARRIER-ARRIVE
+\  BARRIER-STATUS SPAD N-FULL MICRO? HBW-BASE HBW-SIZE
+\  and KDOS §1 words: MICRO-CORE? FULL-CORE? N-FULL-CORES
+\
+\  CLUSTER-ENABLE   ( n -- )    enable cluster n (0-based)
+\  CLUSTER-DISABLE  ( n -- )    disable cluster n
+\  CLUSTERS-ON      ( -- )      enable all 3 clusters
+\  CLUSTERS-OFF     ( -- )      disable all clusters
+\  CLUSTER-STATE    ( -- )      display cluster enable state
+\  HW-BARRIER-WAIT  ( -- )      arrive at hardware barrier, spin until done
+\  SPAD-C@          ( off -- c ) read byte from cluster scratchpad
+\  SPAD-C!          ( c off -- ) write byte to cluster scratchpad
+
+3 CONSTANT NUM-CLUSTERS
+
+\ CLUSTER-ENABLE ( n -- )  enable cluster n by setting bit n in mask
+: CLUSTER-ENABLE  ( n -- )
+    DUP 0< OVER NUM-CLUSTERS >= OR ABORT" Invalid cluster ID"
+    1 SWAP LSHIFT
+    CLUSTER-EN@ OR
+    CLUSTER-EN! ;
+
+\ CLUSTER-DISABLE ( n -- )  disable cluster n by clearing bit n
+: CLUSTER-DISABLE  ( n -- )
+    DUP 0< OVER NUM-CLUSTERS >= OR ABORT" Invalid cluster ID"
+    1 SWAP LSHIFT INVERT
+    CLUSTER-EN@ AND
+    CLUSTER-EN! ;
+
+\ CLUSTERS-ON ( -- )  enable all clusters (mask = 0x07)
+: CLUSTERS-ON  ( -- )
+    7 CLUSTER-EN! ;
+
+\ CLUSTERS-OFF ( -- )  disable all clusters
+: CLUSTERS-OFF  ( -- )
+    0 CLUSTER-EN! ;
+
+\ CLUSTER-STATE ( -- )  display cluster enable status
+: CLUSTER-STATE  ( -- )
+    ."  Clusters: " CLUSTER-EN@ DUP . ."  (mask)" CR
+    NUM-CLUSTERS 0 DO
+        ."    Cluster " I .
+        DUP 1 I LSHIFT AND IF
+            ."   ENABLED" CR
+        ELSE
+            ."   disabled" CR
+        THEN
+    LOOP DROP ;
+
+\ HW-BARRIER-WAIT ( -- )  arrive and spin until hardware barrier fires
+\   Uses the CSR-based barrier (micro-core clusters only).
+: HW-BARRIER-WAIT  ( -- )
+    BARRIER-ARRIVE
+    BEGIN
+        BARRIER-STATUS 256 AND 0<>      \ bit 8 = done flag
+    UNTIL ;
+
+\ SPAD-C@ ( off -- c )  read byte from cluster scratchpad
+: SPAD-C@  ( off -- c )
+    SPAD + C@ ;
+
+\ SPAD-C! ( c off -- )  write byte to cluster scratchpad
+: SPAD-C!  ( c off -- )
+    SPAD + C! ;
 
 \ -- Forward declarations for §10 words needed by §9 TUI --
 VARIABLE PORT-COUNT     0 PORT-COUNT !
