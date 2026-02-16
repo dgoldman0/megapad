@@ -165,6 +165,46 @@ The **Full** config (4F+12µ) packs 16 cores into ~1.5× the gate area
 of the 4-core Compute config, adding 12 auxiliary threads at ~50%
 area overhead.
 
+### SoC Total Size Estimate (Full Config)
+
+| Block | GE | Notes |
+|-------|:--:|-------|
+| 4 full cores (w/ MUL, I-cache, tile, BIST) | ~400K | 4 × ~100K |
+| 3 enriched clusters (4µ + shared MUL + scratchpad + barrier) | ~300K | 3 × ~100K (see Cluster Enrichment below) |
+| Peripherals (AES, SHA3, CRC, TRNG, FieldALU, NIC, UART, timer, disk) | ~200K | Existing devices |
+| Bus fabric + arbiter + mailbox + spinlocks | ~50K | 7-port weighted RR |
+| **Total logic** | **~950K GE** | **Medium SoC** |
+
+Plus 4 MiB SRAM (1 MiB system + 3 MiB HBW).  Comparable in
+complexity to an ESP32 or a beefy RISC-V SoC with hardware crypto.
+Not small (16-core, hardware crypto, tile engine), not large (no MMU,
+no GPU pipeline, no cache coherency protocol).
+
+On **Kintex-7 325T**: ~60–80K LUTs (30–40%), ~80 DSPs (10%), BRAM is
+the squeeze point (~54% for 2 MiB internal).
+
+**Scaling down:** drop to Standard config (1F+3µ, ~250K GE total
+with peripherals) for a **small** SoC suitable for low-cost FPGA or
+ASIC tapeout.
+
+### Cluster Enrichment — Filling 6:1 → 4:1
+
+A bare cluster of 4 micros is ~66K GE — well below the ~100K GE
+target ("same scale as one full core").  Budget: ~34K GE.
+
+| Addition | GE | What it does |
+|----------|:--:|----|
+| **Shared multiplier** (1× Booth-Wallace 64×64→128, arbitrated) | ~28K | MUL goes from illegal-op trap to "works, 4–8 cycles with arbitration wait".  Huge capability uplift.  Four micros time-share one multiplier — most real code doesn't MUL every cycle. |
+| **Cluster scratchpad** (1 KiB dual-port SRAM) | ~5K | Fast local memory only the 4 micros see.  Work queues, message passing, shared buffers — no main-bus trip. |
+| **Hardware barrier register** | ~1K | 4-bit arrive/depart flags + IRQ-on-all-arrived.  Intra-cluster sync without spinlocks or IPI. |
+| **Total enrichment** | **~34K** | |
+| **Enriched cluster total** | **~100K** | **= 1 full core footprint** |
+
+The shared multiplier is the big win — it transforms the micro-cores
+from "can't do math" to "can do math, just takes turns."  The
+scratchpad + barrier make the cluster feel like a cooperative unit
+rather than four isolated cores that happen to share a bus port.
+
 ### Open Questions
 
 - Should micro-cores share crypto accelerators or have none?  Leaning
@@ -188,7 +228,8 @@ area overhead.
    bus handshake fix applied to all 3 CPU variants.
 4. **Parameterize `mp64_soc.v`** — `NUM_MAJOR_CORES`, `NUM_MICRO_CORES`,
    generate blocks per type, wire cluster topology.
-5. **Build cluster arbiter** — `mp64_cluster.v` with shared I-cache,
+5. **Build cluster module** — `mp64_cluster.v` with shared I-cache,
+   shared multiplier (arbitrated), 1 KiB scratchpad, barrier register,
    round-robin among 3–4 micro-cores, single bus port output.
 6. **Update main bus arbiter** — weighted round-robin, per-port BW
    limit registers, parameterized port count.
