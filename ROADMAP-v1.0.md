@@ -401,6 +401,84 @@ and adds post-quantum cryptographic primitives.
 
 ---
 
+### Layer 6: Architecture & Portability (Items 39–42)
+
+Hardware-level redesigns.  Detailed design notes, trade-offs, open
+questions, and implementation sketches are in
+[`docs/IDEAS-scratchpad.md`](docs/IDEAS-scratchpad.md) — a living
+document that will be folded into proper docs as each item ships.
+
+39. ☐ **Micro-core CPU variant (MP64µ)** — a stripped-down core that
+    is base-ISA-compatible but removes the 64-bit hardware multiplier
+    (shift-add instead, 0 DSPs), I-cache, tile engine, FP16 ALU,
+    BIST, and most perf counters.  Requires factoring the shared
+    decoder/ALU/flags/branch/interrupt logic into `mp64_cpu_common.v`,
+    building `mp64_cpu_micro.v` on top, and refactoring the existing
+    `mp64_cpu.v` to also use the common core.  Bus arbiter generalized
+    to `NUM_MAJOR_CORES + NUM_MICRO_CORES` with per-type default QoS
+    weights.  Emulator gains a `micro=True` CPU flag.
+    - 39a. Factor `mp64_cpu_common.v` (shared decoder, ALU, FSM)
+    - 39b. `mp64_cpu_micro.v` (shift-add mul, no tile/cache/BIST)
+    - 39c. Refactor `mp64_cpu.v` to use common core
+    - 39d. Parameterize `mp64_soc.v` for mixed major+micro configs
+    - 39e. Generalize bus arbiter for N cores with type-aware QoS
+    - 39f. Emulator: micro-core mode + mixed-core `MegapadSystem`
+    - 39g. Add `CSR_CORE_TYPE` (0=major, 1=micro) for KDOS scheduler
+    - 39h. Tests: `TestMicroCore` — base ISA ops, MEX faults, slow mul
+
+40. ☐ **Multi-prime Field ALU** — make the modulus programmable across
+    a small set of primes ($2^{255}-19$, secp256k1, P-256) with
+    dedicated fast-reduction circuits per prime, plus a generic
+    Montgomery reduction path for arbitrary 256-bit primes.  Add
+    constant-time primitives (FCMOV, FCEQ) required for real ECC.
+    - 40a. `PRIME_SEL` register + prime table (4 entries)
+    - 40b. Dedicated reduction: secp256k1 sparse subtract
+    - 40c. Dedicated reduction: P-256 NIST special form
+    - 40d. Generic Montgomery reduction path (`PRIME_SEL=3`)
+    - 40e. Mode 8: `FCMOV` (constant-time conditional move)
+    - 40f. Mode 9: `FCEQ` (constant-time equality comparison)
+    - 40g. Emulator: multi-prime + Montgomery in `FieldALUDevice`
+    - 40h. RTL: `mp64_field_reduce_*.v` modules + mux
+    - 40i. BIOS/KDOS: `PRIME-SEL!`, `FCMOV`, `FCEQ` words
+    - 40j. Tests: `TestFieldALUMultiPrime` — secp256k1, P-256,
+           Montgomery, constant-time ops
+
+41. ☐ **Memory model redesign** — expand from 1 MiB monolithic to a
+    banked architecture with differentiated bandwidth tiers.  Default
+    4 MiB: Bank 0 (1 MiB, regular BW at 0x0 — BIOS/OS/stacks) +
+    Banks 1–3 (1 MiB each, high BW, dual-port for tile engine, pinned
+    to the top of the internal address space).  High-BW banks keep
+    fixed addresses so external regular-BW memory fills the gap.
+    Last 256 MiB of address space guarded (unmapped, faults) to
+    protect MMIO.  Hard QoS: per-bank bandwidth allocation, bank
+    affinity CSRs per core.
+    - 41a. `mp64_memory_bank.v` — parameterized single-bank module
+    - 41b. `mp64_memory_subsys.v` — 4-bank instantiation, address
+           decoder, tile port arbiter across banks, ext-mem forwarding
+    - 41c. Update `mp64_defs.vh` — `INT_MEM_BYTES=4M`, `NUM_BANKS`,
+           `HBW_BASE_ADDR`, `GUARD_BASE`
+    - 41d. Bus arbiter: bank-aware routing, per-bank QoS
+    - 41e. Emulator: banked memory model in `system.py`
+    - 41f. BIOS/KDOS: `HBW-BASE`, `BANK@`, `HBW-ALLOC`, `BANK-COPY`
+    - 41g. SysInfo: report bank count, sizes, HBW base
+    - 41h. Tests: `TestBankedMemory` — bank routing, QoS, guard faults
+
+42. ☐ **Technology-agnostic RTL** — move all FPGA/ASIC-specific
+    primitives behind clean wrappers so the core builds portably.
+    Wrap: block RAM, PLL/MMCM, clock gating, IO buffers, DSP multiply,
+    reset synchronizers, FIFOs.
+    - 42a. Create `fpga/rtl/prim/` directory with abstract interfaces
+    - 42b. `mp64_prim_ram.v` — parameterized SRAM (depth, width, ports)
+    - 42c. `mp64_prim_mul.v` — multiplier with optional pipelining
+    - 42d. `mp64_prim_pll.v`, `mp64_prim_clkgate.v`, `mp64_prim_rstsync.v`
+    - 42e. `fpga/rtl/target/xilinx7/` — Xilinx 7-series implementations
+    - 42f. Refactor `mp64_memory.v` → use `mp64_prim_ram`
+    - 42g. Refactor `mp64_cpu.v` multiply → use `mp64_prim_mul`
+    - 42h. `fpga/rtl/target/asic/` — stub ASIC wrappers (placeholders)
+    - 42i. Verify all 18 testbenches still pass under `SIMULATION` define
+
+---
+
 ## Implementation Order
 
 ```
@@ -415,7 +493,17 @@ Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
+Layer 6  Items 39–42  Architecture & Portability
+                      (micro-core variant, multi-prime Field ALU,
+                      banked memory model, tech-agnostic RTL)
 ```
+
+Suggested Layer 6 ordering: **42 → 41 → 40 → 39** — abstraction
+layer first (clean foundation), then memory redesign (on top of
+clean primitives), then Field ALU (self-contained), and finally
+micro-core (most complex, benefits from all prior work).  Alternatively
+**40 → 42 → 41 → 39** for an early visible win (multi-prime ALU is
+fully independent and immediately useful).
 
 Each item is committed individually with its own test class and run via
 `make test-bg K=TestClassName` + `make test-status`.  Layer 2 is
