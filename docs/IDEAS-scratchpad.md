@@ -53,9 +53,9 @@ be factored into a common RTL module or `include` file:
 
 | Feature | MP64 Major | MP64µ Micro |
 |---------|-----------|-------------|
-| Multiplier | 64×64→128, 1 cycle, ~16 DSP | Shift-add 8 cycles, 0 DSP |
-| Divider | Inferred `/` `%` operators | Same shift-subtract, but slower |
-| I-Cache | 4 KiB per core | None (or shared 1 KiB cluster cache) |
+| Multiplier | 64×64→128, 1 cycle, ~16 DSP (~28K GE) | ❌ Illegal-op trap (0 DSP, 0 GE) |
+| Divider | Iterative shift-subtract, 64 cycles (~4K GE) | ❌ Illegal-op trap |
+| I-Cache | 4 KiB per core (~40K GE SRAM+tags) | None (shared 1–2 KiB cluster cache) |
 | Tile engine | Full MEX + DMA + FP16 | ❌ Not present |
 | BIST | March C−, checkerboard, addr | ❌ Not present |
 | Perf counters | 4 × 64-bit | 1 × 64-bit (cycles only) |
@@ -67,33 +67,103 @@ everywhere; halving it would require a decoder mode bit and creates
 binary incompatibility.  The 16×64-bit register file is only 128 bytes
 of LUTRAM — negligible.
 
-### Integration & QoS
+### Integration & QoS — Cluster Topology
 
-Micro-cores connect to the same bus arbiter as major cores.  QoS
-implications:
+Micro-cores are **clustered**, not individually connected to the main
+bus arbiter.  A cluster of 3–4 micro-cores shares an I-cache and a
+local arbiter, presenting as a **single bus port** to the main arbiter.
 
-- **Bus bandwidth:** Micro-cores without I-cache will generate more
-  bus traffic (every instruction fetch goes through the arbiter).
-  QoS weights should default lower for micro-cores.
-- **Suggested topology:** Major cores get `weight=4`, micro-cores get
-  `weight=1`.  BW limits can throttle micro-cores if they saturate
-  the bus.
-- **Core ID space:** Current `NUM_CORES=4` with 2-bit IDs.  With mixed
-  major+micro cores, expand to e.g. 3-bit IDs (up to 8 cores total).
-  The bus arbiter RR scan must become a parameterized loop instead of
-  the current `& 2'd3` mask.
-- **IPI/Mailbox:** Micro-cores need IPI support.  The mailbox already
-  supports per-core addressing; just extend `NUM_CORES`.
-- **Spinlocks:** Already parameterized by core count; works as-is.
+#### Cluster Architecture
+
+```
+┌──────────── Micro-Cluster ─────────────┐
+│                                         │
+│  ┌────┐  ┌────┐  ┌────┐  ┌────┐       │
+│  │ µ0 │  │ µ1 │  │ µ2 │  │ µ3 │       │
+│  └──┬─┘  └──┬─┘  └──┬─┘  └──┬─┘       │
+│     └───┬────┴───┬───┴───┬───┘         │
+│      ┌──┴────────┴───────┴──┐          │
+│      │  Cluster Arbiter (RR) │          │
+│      │  + Shared I-Cache     │          │
+│      │    (1–2 KiB)          │          │
+│      └──────────┬────────────┘          │
+└─────────────────┤
+                  │  single bus port
+═══════════════════╪════════════════════════
+                Main Bus Arbiter
+```
+
+#### Two-Level QoS
+
+**Level 1 — Main arbiter (hard QoS):**
+
+The main bus arbiter uses **weighted round-robin** with per-port
+bandwidth limit registers.  Each port is either a full core or a
+micro-cluster — the arbiter doesn't know or care what's behind a port.
+Because the arbiter physically controls bus grants, this is **hard
+QoS** by definition.
+
+- Full core port: `weight = 4` (needs bandwidth for I-cache refills,
+  tile DMA, multiply operands).
+- Micro-cluster port: `weight = 2` (lower per-port — shared I-cache
+  absorbs most instruction fetches).
+- BW limit registers: max grants per N-cycle window, configurable
+  per port at runtime.
+- Guarantee: a full core gets ≥ 2× the bus bandwidth of a
+  micro-cluster, regardless of load.
+
+The main arbiter enforces **isolation**: a runaway micro-cluster
+cannot starve a full core because the bandwidth limit caps its
+grants per time window.  No software cooperation required.
+
+**Level 2 — Intra-cluster (soft, equal peers):**
+
+Inside each cluster, a simple round-robin arbiter rotates among 3–4
+micro-cores.  All are equal peers — no weighting.  The cluster arbiter
+tags outgoing requests with a 2-bit micro-ID so bus responses route
+back to the correct core.
+
+The shared I-cache is the force multiplier: instruction fetches hit
+locally (~85–90% hit rate for typical Forth inner loops at 1–2 KiB),
+so the cluster's main-bus demand is almost entirely data traffic.
+Four micro-cores sharing one bus port naturally self-throttle their
+aggregate bandwidth.
+
+#### Why Hard QoS Lives at the Main Arbiter
+
+- **Few ports:** the main arbiter sees only **N ports** (e.g. 7 in
+  the Full config: 4 full + 3 clusters), not 16 individual cores —
+  arbitration stays single-cycle.
+- **Physical control:** the arbiter holds the bus-grant signal; no
+  software cooperation required.
+- **Per-port BW limits** provide a hard ceiling — even if all 4 micros
+  in a cluster fire uncacheable loads simultaneously, the cluster's
+  bus port is rate-limited.
+- **Intra-cluster** scheduling is purely local: a micro waiting for
+  the cluster arbiter does not block any main-arbiter port.
+
+#### Core ID Space
+
+With up to 16 cores, use **4-bit** core IDs:
+
+- IDs 0–3: full cores (or just ID 0 in the Standard config).
+- IDs 4–15: micro-cores (3 clusters × 4, or 1 cluster × 3).
+- Mailbox and IPI: extend to 4-bit addressing, parameterize
+  `NUM_CORES`.
+- Spinlocks: already parameterized — works as-is.
 
 ### Suggested Configurations
 
-| Config | Major | Micro | Est. LUTs | Est. DSPs | Use Case |
-|--------|-------|-------|-----------|-----------|----------|
-| Balanced | 2 | 4 | ~160K | ~300 | General-purpose with helper cores |
-| Compute | 4 | 0 | ~185K | ~620 | Current design (unchanged) |
-| Dense | 1 | 8 | ~130K | ~170 | Many-core control plane |
-| Minimal | 1 | 0 | ~70K | ~170 | Single-core embedded |
+| Config | Full | Micro | Clusters | Bus Ports | Est. ASIC GE | Use Case |
+|--------|:----:|:-----:|:--------:|:---------:|:------------:|----------|
+| Minimal   | 1 | 0  | 0   | 1 | ~100K | Single-core embedded |
+| Standard  | 1 | 3  | 1×3 | 2 | ~153K | IoT / control plane |
+| Compute   | 4 | 0  | 0   | 4 | ~400K | Current design (tile-heavy) |
+| **Full**  | **4** | **12** | **3×4** | **7** | **~598K** | **General-purpose + helpers** |
+
+The **Full** config (4F+12µ) packs 16 cores into ~1.5× the gate area
+of the 4-core Compute config, adding 12 auxiliary threads at ~50%
+area overhead.
 
 ### Open Questions
 
@@ -110,92 +180,102 @@ implications:
 
 ### Implementation Approach
 
-1. **Factor `mp64_cpu_common.v`** — extract the shared decoder, ALU,
-   flags, branch, interrupt, CSR, and memory FSM into a common include
-   or module.
-2. **Build `mp64_cpu_micro.v`** — instantiate the common core, add
-   the shift-add multiplier, wire MEX port to a stub (bus fault on
-   MEX instructions), remove I-cache port.
-3. **Refactor `mp64_cpu.v`** — make it also use `mp64_cpu_common.v`
-   plus its tile engine, I-cache, BIST, and hardware multiplier.
+1. ~~**Factor `mp64_cpu_common.v`**~~ — ✅ Done: `mp64_cpu_common.vh`
+   with shared FSM states, ALU opcodes, `cond_eval`, `instr_len`.
+2. ~~**Build `mp64_cpu_micro.v`**~~ — ✅ Done: ~1200 lines, 0 DSP,
+   MUL/DIV trap as illegal opcode, no I-cache/tile/BIST.
+3. ~~**Refactor `mp64_cpu.v`**~~ — ✅ Done: uses shared components,
+   bus handshake fix applied to all 3 CPU variants.
 4. **Parameterize `mp64_soc.v`** — `NUM_MAJOR_CORES`, `NUM_MICRO_CORES`,
-   generate blocks for each type.
-5. **Update bus arbiter** — generalize `NUM_CORES` width, default QoS
-   weights by core type.
-6. **Emulator side:** `megapad64.py` gets a `micro=True` flag that
-   disables tile ops and uses a Python shift-add multiply (for cycle-
-   accurate behavior modeling).  `system.py` `MegapadSystem()` takes
-   `num_major` and `num_micro` params.
-7. **Tests:** `TestMicroCore` class — verify all base ISA ops work,
-   verify MEX faults, verify multiply produces correct results (slower),
-   verify QoS interaction with major cores.
+   generate blocks per type, wire cluster topology.
+5. **Build cluster arbiter** — `mp64_cluster.v` with shared I-cache,
+   round-robin among 3–4 micro-cores, single bus port output.
+6. **Update main bus arbiter** — weighted round-robin, per-port BW
+   limit registers, parameterized port count.
+7. **Emulator side:** `megapad64.py` gets a `micro=True` flag that
+   traps MUL/DIV.  `system.py` takes `num_major` and `num_micro`
+   params, instantiates clusters.
+8. **Tests:** extend `TestMicroCore` with cluster-level tests — shared
+   I-cache hits, intra-cluster arbitration, QoS interaction.
 
-### Size Comparison (Post-Implementation Estimate)
+### Size Comparison — ASIC Gate Estimates
 
-Based on the actual `mp64_cpu.v` and `mp64_cpu_micro.v` RTL as
-implemented, counting all `reg` declarations and logic resources:
+The meaningful size comparison is in **ASIC gate equivalents** (GE,
+where 1 GE = one 2-input NAND).  FPGA LUT/FF comparisons are
+misleading because the multiplier hides in DSP48 hard macros and the
+I-cache hides in BRAM — they look "free" on resource summaries but
+dominate die area on silicon.
 
-#### Flip-Flop Breakdown
+#### Where the Area Actually Goes
 
-| Component              | Major Core | Micro Core | Notes                        |
-|------------------------|:----------:|:----------:|------------------------------|
-| Register file R[0:15]  | 1,024      | 1,024      | 16 × 64                     |
-| Bus output regs        | 132        | 132        | valid+addr+wdata+wen+size    |
-| ALU inputs             | 132        | 132        | op+a+b                      |
-| Temp regs (mem_data…)  | 140        | 140        | effective_addr+mem_data+subs |
-| IVT + trap context     | 136        | 136        | ivt_base+ivec_id+trap_addr   |
-| DMA ring CSRs          | 384        | 0          | 6 × 64-bit                  |
-| Performance counters   | 257        | 65         | 4×64+1 vs 1×64+1            |
-| BIST state             | 156        | 0          | status+fail_addr+pattern…    |
-| Multiply result        | 128        | 0          | 64×64→128                   |
-| I-cache I/O            | 131        | 0          | addr+req+inv signals         |
-| MEX/tile I/O           | 158        | 0          | csr_wen+mex_valid+etc.       |
-| Fetch control          | 65         | 1          | fetch_pc(64)+active vs pending|
-| Instruction buffer     | 137        | 96         | 16B vs 11B + len regs        |
-| Misc (flags, selectors)| ~100       | ~100       | 1802 regs, FSM, EXT, IO…    |
-| **Raw Total**          | **~3,100** | **~1,830** |                              |
-| **Est. Post-Synthesis**| **~2,500** | **~1,800** | Vivado optimises unused regs |
+| Component | Major Core | Micro Core | Notes |
+|-----------|:----------:|:----------:|-------|
+| Register file (16×64b, 2R1W) | ~5K GE | ~5K GE | Identical |
+| ALU (16-op, 64-bit) | ~3K GE | ~3K GE | Shared `mp64_alu.v` |
+| Decoder / FSM | ~2.5K GE | ~1.5K GE | Major adds MULDIV/MEX/BIST states |
+| Bus interface + memory FSM | ~1.5K GE | ~1.5K GE | Near-identical |
+| Flags, IRQ, IO, selectors | ~1.5K GE | ~1.5K GE | Same interrupt controller |
+| CSRs + perf counters + DMA | ~3.5K GE | ~0.5K GE | Major: +DMA ring +3 perf ctrs |
+| **Core logic subtotal** | **~17K GE** | **~13K GE** | **Only 1.3× — noise** |
+| Booth-Wallace 64×64→128 MUL | **~28K GE** | 0 | **2× entire micro core** |
+| Iterative 64-bit divider | ~4K GE | 0 | Shift-subtract, 64 cycles |
+| I-cache 4 KiB SRAM + tags | **~40K GE** | 0 | **3× entire micro core** |
+| Tile / MEX / FP16 dispatch | ~8K GE | 0 | Ports + CSRs + mux |
+| BIST controller | ~3K GE | 0 | March-C, checkerboard, addr |
+| **Full total** | **~100K GE** | **~13K GE** | **~8:1** |
 
-#### LUT Estimates
+The core logic (register file + ALU + decoder + bus) is nearly the
+same — the **hard blocks** dominate the major core:
 
-| Logic Block                     | Major  | Micro  | Notes                       |
-|---------------------------------|:------:|:------:|-----------------------------|
-| Shared ALU (mp64_alu.v)         | ~350   | ~350   | 16-op 64-bit combinational  |
-| Decoder/FSM                     | ~450   | ~300   | Major adds MULDIV/MEX/BIST  |
-| Register file MUX               | ~130   | ~130   | 16:1 × 64                   |
-| I-cache alignment & control     | ~140   | 0      | Byte extract + FSM          |
-| CSR read MUX                    | ~130   | ~70    | ~30 CSRs vs ~18 CSRs        |
-| Multiply control (DSP glue)     | ~50    | 0      |                             |
-| BIST FSM                        | ~60    | 0      |                             |
-| MEX mux + misc                  | ~100   | 0      |                             |
-| Bus / MEMALU / condition / sign | ~190   | ~180   |                             |
-| **Total (MUL→DSP48)**           | **~1,600** | **~1,030** |                       |
+- **Multiplier alone** (~28K GE) is larger than two entire micro-cores.
+- **I-cache alone** (~40K GE) is larger than three entire micro-cores.
+- On FPGA these hide in DSP48 and BRAM hard macros, making the
+  LUT/FF ratio look deceptively close (~1.5:1).  That number is
+  meaningless for area planning.
 
-#### DSP48 & BRAM
+#### Cluster Overhead
 
-| Resource     | Major Core | Micro Core |
-|--------------|:----------:|:----------:|
-| DSP48E1      | **16**     | **0**      |
-| BRAM36K      | **1–2**    | **0**      |
+Micro-cores are clustered (see Integration & QoS above).  The cluster
+adds shared infrastructure:
+
+| Cluster Component | GE | Notes |
+|-------------------|:--:|-------|
+| Shared I-cache (1–2 KiB) + tags | ~12K | 4× smaller than full core's cache |
+| Cluster arbiter + response tag | ~2K | Round-robin, 2-bit micro-ID |
+| **Cluster overhead** | **~14K** | Amortized across 3–4 micros |
+
+A cluster of 4 micros: 4 × 13K + 14K = **~66K GE** → **16.5K GE per
+thread**.
+
+A cluster of 3 micros: 3 × 13K + 14K = **~53K GE** → **17.7K GE per
+thread**.
 
 #### Packing Ratios
 
-| Metric                       | Ratio    | Notes                              |
-|------------------------------|:--------:|--------------------------------------|
-| FF ratio (CPU only)          | 1.39:1   | Register file is 57% of micro FFs  |
-| FF ratio (CPU + I-cache)     | ~1.6:1   | I-cache adds ~530 FFs              |
-| LUT ratio (DSP used for MUL) | 1.55:1   |                                    |
-| LUT ratio (MUL in fabric)    | ~3.4:1   | +2000 LUTs for 64-bit multiply    |
-| DSP-equivalent LUT ratio     | ~3.5:1   | Counting each DSP48 ≈ 125 LUTs    |
+| Metric | Ratio | Notes |
+|--------|:-----:|-------|
+| Raw core logic (no hard blocks) | 1.3:1 | Register file dominates both — noise |
+| Full core vs bare micro | **8:1** | MUL + I-cache + DIV + tile dominate |
+| Full core vs clustered micro (per thread) | **6:1** | Cluster overhead amortized |
+| Gate area: 4F vs 4F+12µ | 1 : 1.5 | +50% area for +300% threads |
 
-**Practical packing:** ~1.3–1.5 micro cores per major core area when
-DSP48 stays on die (FFs are the binding constraint because the
-1,024-FF register file is incompressible — it's 57% of the micro
-core's total FFs).
+**Practical packing:** ≥ 4 micro-cores fit in the area of one full
+core.  With aggressive synthesis (shared BRAM regfiles, gate-level
+I-cache), 6–8:1 is plausible on an ASIC standard-cell flow.
 
-With the register file moved to distributed LUT-RAM (synthesis can
-do this automatically), the FF bottleneck loosens to ~2–2.5:1 and
-the binding constraint shifts to LUT area.
+#### FPGA vs ASIC — Why the Numbers Diverge
+
+On **FPGA (Kintex-7)**, the apparent LUT/FF ratio is only ~1.5:1
+because:
+
+- The 64-bit multiplier maps to ~16 DSP48E1 slices (hard macros,
+  zero LUTs — already on die whether used or not).
+- The 4 KiB I-cache maps to 4 BRAM36K (hard macros, zero LUTs).
+- What remains is just the FSM/decoder difference: ~600 extra LUTs.
+
+This makes the major core look "cheap" on FPGA resource summaries.
+But each DSP48 is equivalent to ~25–30K gates of custom silicon, and
+each BRAM36 is ~250K GE.  Any ASIC translation must account for them.
 
 #### Test Results
 
@@ -204,7 +284,7 @@ the binding constraint shifts to LUT area.
 | tb_alu.v           | 53   | 0    | All 16 ALU ops + flag edge cases |
 | tb_cpu_micro.v     | 11   | 0    | NOP/HALT/LDI/ALU/MEM/BR/TRAP/CSR/SEP |
 | tb_cpu_smoke.v     | 19   | 0    | Regression — refactored major core |
-| tb_opcodes.v       | 91   | 1    | Pre-existing EXT.SKIP failure    |
+| tb_opcodes.v       | 92   | 0    | All pass (EXT.SKIP fix: b15d918) |
 
 ---
 
@@ -644,21 +724,18 @@ SIMULATION``).  Current Icarus Verilog flow should work unchanged.
 
 ## Implementation Priority
 
-| Priority | Item | Dependency | Effort |
-|----------|------|------------|--------|
-| 1 | Memory Model (§3) | None | Large — touches memory, bus, SoC, emulator, BIOS, KDOS |
-| 2 | Micro-Core (§1) | Benefits from §3 (banking) and §4 (primitives) | Large |
-| 3 | Multi-Prime Field ALU (§2) | Independent | Medium |
-| 4 | Tech-Agnostic RTL (§4) | Independent, but best done before §2 refactor | Medium |
+| Priority | Item | Status | Effort |
+|----------|------|--------|--------|
+| — | Micro-Core RTL (§1, steps 1–3) | ✅ Done (d169089, b15d918) | — |
+| 1 | Memory Model (§3) | Not started | Large |
+| 2 | Multi-Prime Field ALU (§2) | Not started | Medium |
+| 3 | Tech-Agnostic RTL (§4) | Not started | Medium |
+| 4 | Micro-Core SoC Integration (§1, steps 4–8) | Blocked on §3/§4 | Medium |
 
-Suggested order: **§4 → §3 → §2 → §1** — get the abstraction layer
-right first, then redesign memory on top of clean primitives, then
-the Field ALU (which touches fewer files), and finally the micro-core
-(which is the most complex integration task and benefits from all the
-prior work).
-
-Alternatively: **§2 → §4 → §3 → §1** if we want an early visible
-win (multi-prime ALU is self-contained and useful immediately).
+Suggested order: **§3 → §4 → §2 → §1.4–8** — memory model first
+(biggest impact), then abstraction layer, then Field ALU (self-
+contained win), then micro-core cluster integration (benefits from
+all prior work: banked memory, clean primitives, parameterized bus).
 
 ---
 
