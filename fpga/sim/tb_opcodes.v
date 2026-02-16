@@ -882,15 +882,18 @@ module tb_opcodes;
 
         // ================================================================
         // TEST 40: EXT.SKIP + BR.EQ (skip NOT taken when Z=0)
+        //   EXT.SKIP converts FAM_BR into a 1-byte SKIP instruction
+        //   (no offset byte).  Condition=EQ, Z=0 → false → no skip
+        //   → LDI R1,0xFF executes normally.
         // ================================================================
         $display("\n=== TEST 40: EXT.SKIP + BR.EQ (skip when Z=0) ===");
         clear_mem;
         mem[0]  = 8'h60; mem[1]  = 8'h00; mem[2]  = 8'h05;  // LDI R0, 5
         mem[3]  = 8'h66; mem[4]  = 8'h00; mem[5]  = 8'h00;  // CMPI R0, 0 (Z=0)
         mem[6]  = 8'hF6;                                      // EXT.SKIP
-        mem[7]  = 8'h31; mem[8]  = 8'h00;                    // BR.EQ (cond false→no skip)
-        mem[9]  = 8'h60; mem[10] = 8'h10; mem[11] = 8'hFF;   // LDI R1, 0xFF (executes)
-        mem[12] = 8'h02;                                      // HALT
+        mem[7]  = 8'h31;                                      // SKIP.EQ (1 byte)
+        mem[8]  = 8'h60; mem[9]  = 8'h10; mem[10] = 8'hFF;   // LDI R1, 0xFF (executes)
+        mem[11] = 8'h02;                                      // HALT
         load_and_run(600);
         check64("R1 after skip not taken", uut.R[1], 64'hFF);
 
