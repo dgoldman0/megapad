@@ -500,7 +500,7 @@ DISK PERSISTENCE
   buf sec B.SAVE           Save buffer to sector
   buf sec B.LOAD           Load buffer from sector
 
-Press 2 in SCREENS to see all buffers listed
+Press 1 in SCREENS to see all buffers listed
 with type, width, length, and data address.
 """,
 
@@ -559,7 +559,7 @@ MANAGEMENT
   mypipe P.CLEAR         Reset pipeline
   PIPES                  List all pipelines
 
-Press 4 in SCREENS to see all pipelines listed
+Press 3 in SCREENS to see all pipelines listed
 with their step count and execution status.
 """,
 
@@ -595,7 +595,7 @@ FILE I/O
   fd FFLUSH              Flush metadata to disk
 
 STORAGE SCREEN
-  Press 8 in SCREENS to open the Storage screen.
+  Press 7 in SCREENS to open the Storage screen.
   It shows a DIR listing and disk usage info.
 
 DISK LAYOUT
@@ -633,7 +633,7 @@ PREEMPTION
 The scheduler round-robins among READY tasks,
 respecting priority levels.
 
-Press 5 in SCREENS to see the Task screen where
+Press 4 in SCREENS to see the Task screen where
 you can view, resume, or kill tasks interactively.
 """,
 
@@ -644,19 +644,21 @@ INTERACTIVE TUI (SCREENS)
 Type SCREENS to enter the interactive terminal UI.
 
 SCREEN LIST
-  [1] Home     System overview & status
-  [2] Bufs     Buffer listing with details
-  [3] Kern     Kernel registry & metadata
-  [4] Pipe     Pipeline listing & steps
-  [5] Task     Task listing (resume/kill)
-  [6] Help     Full command reference card
-  [7] Docs     Documentation browser
-  [8] Stor     File browser & disk info
-  [9] Core     Multicore status & dispatch
+  [0] Home     System overview & status
+  [1] Bufs     Buffer listing with details
+  [2] Kern     Kernel registry & metadata
+  [3] Pipe     Pipeline listing & steps
+  [4] Task     Task listing (resume/kill)
+  [5] Help     Full command reference card
+  [6] Docs     Documentation browser
+  [7] Stor     File browser & disk info
+  [8] Core     Multicore status & dispatch
 
 CONTROLS
-  1-9            Switch to screen
+  0-9, a-f       Switch to screen
+  [/]            Next/prev subscreen
   r              Refresh current screen
+  A              Toggle auto-refresh
   q              Quit back to REPL
 
 AUTO-REFRESH
@@ -852,7 +854,7 @@ Kernels track metadata about their inputs,
 outputs, and resource footprint.
 
 TIP: Use DESCRIBE ksum to see help for any
-kernel word. Press 3 in SCREENS to browse
+kernel word. Press 2 in SCREENS to browse
 all registered kernels.
 """,
 
@@ -886,7 +888,7 @@ STEP 6: Benchmark it
 Pipelines make complex workflows repeatable
 and benchmarkable.
 
-TIP: Press 4 in SCREENS to see your pipeline.
+TIP: Press 3 in SCREENS to see your pipeline.
 Use DESCRIBE P.RUN for detailed word help.
 """,
 

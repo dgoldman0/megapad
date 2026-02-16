@@ -3857,11 +3857,31 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 \ =====================================================================
 \
 \  Full-screen TUI built on ANSI escape sequences.
-\  Screens: [1]Home [2]Bufs [3]Kern [4]Pipe [5]Task [6]Help [7]Docs [8]Stor [9]Core
-\  Keys: 1-9 switch, n/p navigate, Enter select, a auto-refresh, r/q.
+\  Screens are registered dynamically via REGISTER-SCREEN.
+\  Each screen can own subscreens, navigated with [ and ].
+\  Keys: 0-9/a-f switch, n/p select, [/] sub-switch, Enter activate, A auto, r/q.
 \
 
-\ -- Cursor & screen control (ESC/CSI/.N/SGR/RESET-COLOR/DIM defined above §7.6.1) --
+\ -- §9.1  Screen & subscreen registry tables --
+16 CONSTANT MAX-SCREENS
+ 8 CONSTANT MAX-SUBS
+
+CREATE SCR-XT      MAX-SCREENS CELLS ALLOT    \ render xt per screen
+CREATE SCR-LBL-XT  MAX-SCREENS CELLS ALLOT    \ label-print xt
+CREATE SCR-FLAGS   MAX-SCREENS CELLS ALLOT    \ bit 0 = selectable
+CREATE SCR-KEY-XT  MAX-SCREENS CELLS ALLOT    \ per-screen key handler (0=none)
+
+CREATE SUB-XT      MAX-SCREENS MAX-SUBS * CELLS ALLOT
+CREATE SUB-LBL-XT  MAX-SCREENS MAX-SUBS * CELLS ALLOT
+CREATE SUB-COUNTS  MAX-SCREENS CELLS ALLOT
+
+VARIABLE NSCREENS      0 NSCREENS !
+
+\ -- Hex digit printer for screen labels --
+: .HEXDIG  ( n -- )   \ print single hex digit 0-15
+    DUP 10 < IF 48 + EMIT ELSE 10 - 65 + EMIT THEN ;
+
+\ -- §9.2  Cursor & screen control (ESC/CSI/.N/SGR/RESET-COLOR/DIM above §7.6.1) --
 : AT-XY   ( col row -- )  CSI .N 59 EMIT .N 72 EMIT ;   \ ESC[row;colH
 : PAGE     ( -- )  CSI 50 EMIT 74 EMIT CSI 72 EMIT ;     \ ESC[2J ESC[H
 : CLS      ( -- )  PAGE ;                                  \ alias
@@ -3883,7 +3903,7 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 : ./LABEL ( -- )  RESET-COLOR ;  \ turn off after
 
 \ -- Screen state --
-VARIABLE SCREEN-ID      \ current screen: 1-8
+VARIABLE SCREEN-ID      1 SCREEN-ID !   \ current screen: 1-based (index+1)
 VARIABLE SCREEN-RUN     \ flag: 0 = exit loop
 
 \ -- Extended screen state --
@@ -3891,6 +3911,7 @@ VARIABLE SCR-SEL      -1 SCR-SEL !     \ selected item on current screen
 VARIABLE SCR-MAX       0 SCR-MAX !     \ max selectable items on screen
 VARIABLE AUTO-REFRESH  0 AUTO-REFRESH !
 VARIABLE REFRESH-LAST
+VARIABLE SUBSCREEN-ID  0 SUBSCREEN-ID !  \ active subscreen index
 
 \ -- Find Nth active directory entry (for Storage screen) --
 VARIABLE FNA-WANT
@@ -3937,29 +3958,76 @@ VARIABLE STOR-N
 VARIABLE DOC-N
 VARIABLE DOC-TUT-COUNT
 
-\ -- Screen header --
+\ -- §9.4  Registration API --
+
+VARIABLE _ASUB-P
+VARIABLE _ASUB-I
+
+: REGISTER-SCREEN  ( xt-render xt-label flags -- id )
+    NSCREENS @ DUP MAX-SCREENS >= ABORT" screen table full"
+    >R
+    R@ CELLS SCR-FLAGS + !
+    R@ CELLS SCR-LBL-XT + !
+    R@ CELLS SCR-XT + !
+    0 R@ CELLS SCR-KEY-XT + !
+    0 R@ CELLS SUB-COUNTS + !
+    NSCREENS @ 1+ NSCREENS !
+    R> ;
+
+: SET-SCREEN-KEYS  ( xt screen-id -- )
+    CELLS SCR-KEY-XT + ! ;
+
+: ADD-SUBSCREEN  ( xt-render xt-label parent-id -- )
+    _ASUB-P !
+    _ASUB-P @ CELLS SUB-COUNTS + @ _ASUB-I !
+    _ASUB-I @ MAX-SUBS >= ABORT" sub table full"
+    _ASUB-P @ MAX-SUBS * _ASUB-I @ + CELLS SUB-LBL-XT +
+    !
+    _ASUB-P @ MAX-SUBS * _ASUB-I @ + CELLS SUB-XT +
+    !
+    _ASUB-P @ CELLS SUB-COUNTS + DUP @ 1+ SWAP ! ;
+
+: SCREEN-SUBS  ( -- n )
+    SCREEN-ID @ 1- CELLS SUB-COUNTS + @ ;
+
+: SCREEN-SELECTABLE?  ( -- flag )
+    SCREEN-ID @ 1- CELLS SCR-FLAGS + @ 1 AND 0<> ;
+
+\ -- Screen header (loops over registry) --
 : SCREEN-HEADER  ( -- )
     1 1 AT-XY
     REVERSE
     ."   KDOS v1.1 "
     RESET-COLOR
     SPACE
-    SCREEN-ID @ DUP 1 = IF REVERSE THEN ."  [1]Home " RESET-COLOR
-    DUP 2 = IF REVERSE THEN ."  [2]Bufs " RESET-COLOR
-    DUP 3 = IF REVERSE THEN ."  [3]Kern " RESET-COLOR
-    DUP 4 = IF REVERSE THEN ."  [4]Pipe " RESET-COLOR
-    DUP 5 = IF REVERSE THEN ."  [5]Task " RESET-COLOR
-    DUP 6 = IF REVERSE THEN ."  [6]Help " RESET-COLOR
-    DUP 7 = IF REVERSE THEN ."  [7]Docs " RESET-COLOR
-    DUP 8 = IF REVERSE THEN ."  [8]Stor " RESET-COLOR
-    9 = IF REVERSE THEN ."  [9]Core " RESET-COLOR
+    NSCREENS @ 0 DO
+        SCREEN-ID @ I 1+ = IF REVERSE THEN
+        ."  [" I .HEXDIG ." ]"
+        I CELLS SCR-LBL-XT + @ EXECUTE
+        ."  " RESET-COLOR
+    LOOP
     CR HBAR ;
+
+\ -- Subscreen tabs (shown when screen has subs) --
+: SUB-TABS  ( -- )
+    SCREEN-SUBS DUP 0= IF DROP EXIT THEN
+    DIM ."    "
+    0 DO
+        SUBSCREEN-ID @ I = IF BOLD THEN
+        ." ["
+        SCREEN-ID @ 1- MAX-SUBS * I + CELLS SUB-LBL-XT + @ EXECUTE
+        ." ] "
+        RESET-COLOR DIM
+    LOOP
+    RESET-COLOR CR ;
 
 \ -- Screen footer --
 : SCREEN-FOOTER  ( -- )
     DIM
-    ."   [1-9] Switch  [n/p] Select  [r] Refresh"
-    AUTO-REFRESH @ IF 2 FG ."   Auto:ON" RESET-COLOR DIM ELSE ."   [a]Auto" THEN
+    ."   [0-" NSCREENS @ 1- .HEXDIG ." ] Switch  [n/p] Select"
+    SCREEN-SUBS 0> IF ."   [[/]] Sub" THEN
+    ."   [r] Refresh"
+    AUTO-REFRESH @ IF 2 FG ."   Auto:ON" RESET-COLOR DIM ELSE ."   [A]Auto" THEN
     ."    [q] Quit"
     RESET-COLOR CR ;
 
@@ -4232,64 +4300,183 @@ VARIABLE DOC-TUT-COUNT
         ."    n LOCK / n UNLOCK   Spinlock operations" CR
     THEN ;
 
-\ -- Screen dispatch --
+\ ---- Home subscreens ----
+
+: SCR-HOME-OVERVIEW  ( -- )  SCR-HOME ;
+
+: SCR-HOME-MEMORY  ( -- )
+    .LABEL ."   Memory Detail" ./LABEL CR CR
+    ."    HERE       : " HERE . CR
+    ."    Free dict  : " 65536 HERE - .N ."  bytes" CR
+    ."    Heap       : " HEAP-INIT @ IF 2 FG ."  initialized" ELSE DIM ."  not initialized" THEN RESET-COLOR CR
+    HEAP-INIT @ IF
+        ."    Heap base  : " HEAP-BASE @ .N CR
+    THEN
+    CR
+    BOLD ."   Stack:" RESET-COLOR CR
+    ."    SP depth   : " DEPTH .N CR
+    CR
+    BOLD ."   Buffers memory:" RESET-COLOR CR
+    ."    Count      : " BUF-COUNT @ .N CR
+    BUF-COUNT @ 0 DO
+        ."      " I .N ."  "
+        I CELLS BUF-TABLE + @ DUP B.WIDTH .N ." x" B.LEN .N
+        CR
+    LOOP ;
+
+: SCR-HOME-NET  ( -- )
+    .LABEL ."   Network Status" ./LABEL CR CR
+    ."    NIC state  : " NET-RX? IF 2 FG ."  frame waiting" ELSE DIM ."  idle" THEN RESET-COLOR CR
+    ."    Ports      : " PORT-COUNT @ .N CR
+    ."    RX count   : " PORT-RX @ .N CR
+    ."    Drops      : " PORT-DROP @ .N CR
+    CR
+    BOLD ."   Port Bindings:" RESET-COLOR CR
+    PORT-COUNT @ DUP 0= IF
+        DROP ."    (none)" CR
+    ELSE
+        0 DO
+            ."    port " I .N CR
+        LOOP
+    THEN ;
+
+\ ---- Buffer subscreens ----
+
+: SCR-BUF-LIST  ( -- )  SCR-BUFFERS ;
+
+VARIABLE _SRAW
+VARIABLE _SREC
+VARIABLE _STIL
+VARIABLE _SBIT
+
+: SCR-BUF-STATS  ( -- )
+    .LABEL ."   Buffer Statistics" ./LABEL CR CR
+    ."    Total buffers : " BUF-COUNT @ .N CR
+    BUF-COUNT @ 0= IF EXIT THEN
+    0 _SRAW !  0 _SREC !  0 _STIL !  0 _SBIT !
+    BUF-COUNT @ 0 DO
+        I CELLS BUF-TABLE + @ B.TYPE
+        DUP 0 = IF 1 _SRAW +! THEN
+        DUP 1 = IF 1 _SREC +! THEN
+        DUP 2 = IF 1 _STIL +! THEN
+        3 = IF 1 _SBIT +! THEN
+    LOOP
+    CR
+    BOLD ."   By Type:" RESET-COLOR CR
+    ."    Raw    : " _SRAW @ .N CR
+    ."    Record : " _SREC @ .N CR
+    ."    Tile   : " _STIL @ .N CR
+    ."    Bitmap : " _SBIT @ .N CR ;
+
+\ ---- Screen label words (for registry) ----
+
+: LBL-HOME  ." Home" ;
+: LBL-BUFS  ." Bufs" ;
+: LBL-KERN  ." Kern" ;
+: LBL-PIPE  ." Pipe" ;
+: LBL-TASK  ." Task" ;
+: LBL-HELP  ." Help" ;
+: LBL-DOCS  ." Docs" ;
+: LBL-STOR  ." Stor" ;
+: LBL-CORE  ." Core" ;
+
+\ ---- Subscreen label words ----
+
+: LBL-OVERVIEW  ." Overview" ;
+: LBL-MEMORY    ." Memory" ;
+: LBL-NET       ." Network" ;
+: LBL-BLIST     ." List" ;
+: LBL-BSTATS    ." Stats" ;
+
+\ -- Screen dispatch (registry-based) --
 : RENDER-SCREEN  ( -- )
     PAGE SCREEN-HEADER
-    SCREEN-ID @
-    DUP 1 = IF DROP SCR-HOME    ELSE
-    DUP 2 = IF DROP SCR-BUFFERS ELSE
-    DUP 3 = IF DROP SCR-KERNELS ELSE
-    DUP 4 = IF DROP SCR-PIPES   ELSE
-    DUP 5 = IF DROP SCR-TASKS   ELSE
-    DUP 6 = IF DROP SCR-HELP    ELSE
-    DUP 7 = IF DROP SCR-DOCS    ELSE
-    DUP 8 = IF DROP SCR-STORAGE ELSE
-    DUP 9 = IF DROP SCR-CORES   ELSE
-        DROP SCR-HOME
-    THEN THEN THEN THEN THEN THEN THEN THEN THEN
+    SCREEN-ID @ DUP 1 < OVER NSCREENS @ > OR IF DROP 1 THEN
+    1-                                          \ 0-based index
+    DUP CELLS SUB-COUNTS + @ DUP 0> IF
+        DROP SUB-TABS                           \ show sub-tab bar
+        SCREEN-ID @ 1- MAX-SUBS * SUBSCREEN-ID @ +
+        CELLS SUB-XT + @ EXECUTE                \ render active sub
+    ELSE
+        DROP
+        CELLS SCR-XT + @ EXECUTE                \ render main screen
+    THEN
     CR SCREEN-FOOTER ;
 
-\ -- Screen switch helper --
+\ -- Screen switch helper (registry-based) --
 : SWITCH-SCREEN  ( n -- )
     DUP SCREEN-ID !
-    DUP 2 = OVER 5 = OR OVER 7 = OR SWAP 8 = OR
+    1- CELLS SCR-FLAGS + @ 1 AND
     IF 0 ELSE -1 THEN SCR-SEL !
     0 SCR-MAX !
+    0 SUBSCREEN-ID !
     RENDER-SCREEN ;
 
-\ -- Navigation predicates --
-: SCREEN-SELECTABLE?  ( -- flag )
-    SCREEN-ID @ 2 = SCREEN-ID @ 5 = OR
-    SCREEN-ID @ 7 = OR SCREEN-ID @ 8 = OR ;
+\ ---- Screen-specific key handlers ----
+
+: TASK-KEYS  ( c -- )
+    DUP 107 = IF DROP                         \ 'k' = kill task
+        SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
+            CELLS TASK-TABLE + @ KILL
+            RENDER-SCREEN
+        ELSE DROP THEN EXIT
+    THEN
+    DUP 115 = IF DROP                         \ 's' = restart task
+        SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
+            CELLS TASK-TABLE + @ RESTART
+            RENDER-SCREEN
+        ELSE DROP THEN EXIT
+    THEN
+    DROP ;
 
 \ -- Activate selected item --
 : DO-SELECT  ( -- )
     SCREEN-ID @ 7 = IF SCR-SEL @ SHOW-NTH-DOC THEN ;
 
-\ -- Event loop: poll KEY?, dispatch on keypress --
+\ -- Event loop: poll KEY?, dispatch on keypress (registry-based) --
 : HANDLE-KEY  ( c -- )
-    DUP 49 = IF DROP 1 SWITCH-SCREEN EXIT THEN  \ '1'
-    DUP 50 = IF DROP 2 SWITCH-SCREEN EXIT THEN  \ '2'
-    DUP 51 = IF DROP 3 SWITCH-SCREEN EXIT THEN  \ '3'
-    DUP 52 = IF DROP 4 SWITCH-SCREEN EXIT THEN  \ '4'
-    DUP 53 = IF DROP 5 SWITCH-SCREEN EXIT THEN  \ '5'
-    DUP 54 = IF DROP 6 SWITCH-SCREEN EXIT THEN  \ '6'
-    DUP 55 = IF DROP 7 SWITCH-SCREEN EXIT THEN  \ '7'
-    DUP 56 = IF DROP 8 SWITCH-SCREEN EXIT THEN  \ '8'
-    DUP 57 = IF DROP 9 SWITCH-SCREEN EXIT THEN  \ '9'
-    DUP 113 = IF DROP 0 SCREEN-RUN ! EXIT THEN  \ 'q'
-    DUP 114 = IF DROP RENDER-SCREEN EXIT THEN    \ 'r'
-    DUP 97 = IF DROP                              \ 'a' = toggle auto-refresh
+    \ Digit keys 0-9: switch to screen 1-10 (key '0'=48...'9'=57)
+    DUP 48 >= OVER 57 <= AND IF
+        DUP 48 - DUP NSCREENS @ < IF
+            1+ SWITCH-SCREEN DROP EXIT
+        ELSE DROP THEN
+    THEN
+    \ Hex keys a-f: switch to screen 11-16 (key 'a'=97...'f'=102)
+    DUP 97 >= OVER 102 <= AND IF
+        DUP 97 - 10 + DUP NSCREENS @ < IF
+            1+ SWITCH-SCREEN DROP EXIT
+        ELSE DROP THEN
+    THEN
+    DUP 113 = IF DROP 0 SCREEN-RUN ! EXIT THEN   \ 'q'
+    DUP 114 = IF DROP RENDER-SCREEN EXIT THEN     \ 'r'
+    DUP 65 = IF DROP                               \ 'A' = toggle auto-refresh
         AUTO-REFRESH @ IF 0 ELSE -1 THEN AUTO-REFRESH !
         RENDER-SCREEN EXIT
     THEN
-    DUP 110 = IF DROP                             \ 'n' = next item
+    \ Subscreen navigation: '[' = prev sub, ']' = next sub
+    DUP 91 = IF DROP                               \ '['
+        SCREEN-SUBS 0> IF
+            SUBSCREEN-ID @ 1- DUP 0< IF
+                DROP SCREEN-SUBS 1-
+            THEN SUBSCREEN-ID !
+            RENDER-SCREEN
+        THEN EXIT
+    THEN
+    DUP 93 = IF DROP                               \ ']'
+        SCREEN-SUBS 0> IF
+            SUBSCREEN-ID @ 1+ DUP SCREEN-SUBS >= IF
+                DROP 0
+            THEN SUBSCREEN-ID !
+            RENDER-SCREEN
+        THEN EXIT
+    THEN
+    DUP 110 = IF DROP                              \ 'n' = next item
         SCREEN-SELECTABLE? IF
             SCR-SEL @ 1+ DUP SCR-MAX @ >= IF DROP 0 THEN
             SCR-SEL !  RENDER-SCREEN
         THEN EXIT
     THEN
-    DUP 112 = IF DROP                             \ 'p' = prev item
+    DUP 112 = IF DROP                              \ 'p' = prev item
         SCREEN-SELECTABLE? IF
             SCR-SEL @ 1- DUP 0< IF
                 DROP SCR-MAX @ 1- DUP 0< IF DROP 0 THEN
@@ -4297,35 +4484,50 @@ VARIABLE DOC-TUT-COUNT
             SCR-SEL !  RENDER-SCREEN
         THEN EXIT
     THEN
-    DUP 13 = OVER 32 = OR IF DROP                 \ ENTER / SPACE = activate
+    DUP 13 = OVER 32 = OR IF DROP                  \ ENTER / SPACE = activate
         SCREEN-SELECTABLE? IF
             SCR-SEL @ -1 <> IF
                 DO-SELECT RENDER-SCREEN
             THEN
         THEN EXIT
     THEN
-    \ -- Task-specific actions --
-    SCREEN-ID @ 5 = IF
-        DUP 107 = IF DROP                         \ 'k' = kill task
-            SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
-                CELLS TASK-TABLE + @ KILL
-                RENDER-SCREEN
-            ELSE DROP THEN EXIT
-        THEN
-        DUP 115 = IF DROP                         \ 's' = restart task
-            SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
-                CELLS TASK-TABLE + @ RESTART
-                RENDER-SCREEN
-            ELSE DROP THEN EXIT
-        THEN
-    THEN
+    \ Per-screen custom key handler (from registry)
+    SCREEN-ID @ 1- CELLS SCR-KEY-XT + @ DUP 0<> IF
+        EXECUTE EXIT
+    ELSE DROP THEN
     DROP ;
+
+\ -- §9.10  Screen registration --
+
+\ Register screens (order = display order; index 0..N-1, key = hex 0..F)
+' SCR-HOME     ' LBL-HOME 0 REGISTER-SCREEN DROP  \ [0]Home
+' SCR-BUFFERS  ' LBL-BUFS 1 REGISTER-SCREEN DROP  \ [1]Bufs  (selectable)
+' SCR-KERNELS  ' LBL-KERN 0 REGISTER-SCREEN DROP  \ [2]Kern
+' SCR-PIPES    ' LBL-PIPE 0 REGISTER-SCREEN DROP  \ [3]Pipe
+' SCR-TASKS    ' LBL-TASK 1 REGISTER-SCREEN DROP  \ [4]Task  (selectable)
+' SCR-HELP     ' LBL-HELP 0 REGISTER-SCREEN DROP  \ [5]Help
+' SCR-DOCS     ' LBL-DOCS 1 REGISTER-SCREEN DROP  \ [6]Docs  (selectable)
+' SCR-STORAGE  ' LBL-STOR 1 REGISTER-SCREEN DROP  \ [7]Stor  (selectable)
+' SCR-CORES    ' LBL-CORE 0 REGISTER-SCREEN DROP  \ [8]Core
+
+\ Per-screen custom key handlers
+' TASK-KEYS  4 SET-SCREEN-KEYS    \ screen [5]Task (index 4) gets k/s keys
+
+\ Home subscreens:  Overview | Memory | Network
+' SCR-HOME-OVERVIEW  ' LBL-OVERVIEW 0 ADD-SUBSCREEN
+' SCR-HOME-MEMORY    ' LBL-MEMORY   0 ADD-SUBSCREEN
+' SCR-HOME-NET       ' LBL-NET      0 ADD-SUBSCREEN
+
+\ Buffers subscreens: List | Stats
+' SCR-BUF-LIST       ' LBL-BLIST   1 ADD-SUBSCREEN
+' SCR-BUF-STATS      ' LBL-BSTATS  1 ADD-SUBSCREEN
 
 \ -- Main TUI entry point --
 : SCREENS  ( -- )
     1 SCREEN-ID !
     1 SCREEN-RUN !
     -1 SCR-SEL !  0 SCR-MAX !
+    0 SUBSCREEN-ID !
     CYCLES REFRESH-LAST !
     RENDER-SCREEN
     BEGIN

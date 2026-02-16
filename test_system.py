@@ -3298,7 +3298,7 @@ class TestKDOS(_KDOSTestBase):
             "RENDER-SCREEN",
         ])
         self.assertIn("KDOS v1.1", text)
-        self.assertIn("[1]Home", text)
+        self.assertIn("[0]Home", text)
         self.assertIn("System Overview", text)
 
     def test_handle_key_switch(self):
@@ -3306,7 +3306,7 @@ class TestKDOS(_KDOSTestBase):
         text = self._run_kdos([
             "1 SCREEN-ID !",
             "1 SCREEN-RUN !",
-            "53 HANDLE-KEY",   # '5' = Tasks
+            "52 HANDLE-KEY",   # '4' = Tasks (index 4)
             "SCREEN-ID @ .",
         ])
         self.assertIn("5 ", text)
@@ -3344,11 +3344,11 @@ class TestKDOS(_KDOSTestBase):
             os.unlink(path)
 
     def test_handle_key_screen_8(self):
-        """HANDLE-KEY '8' switches to screen 8."""
+        """HANDLE-KEY '7' switches to screen 8 (Storage, index 7)."""
         text = self._run_kdos([
             "1 SCREEN-ID !",
             "1 SCREEN-RUN !",
-            "56 HANDLE-KEY",   # '8'
+            "55 HANDLE-KEY",   # '7' = Storage (index 7)
             "SCREEN-ID @ .",
         ])
         self.assertIn("8 ", text)
@@ -3361,19 +3361,19 @@ class TestKDOS(_KDOSTestBase):
             "1 SCREEN-ID !",
             "SCREEN-HEADER",
         ])
-        self.assertIn("[1]Home", text)
-        self.assertIn("[7]Docs", text)
-        self.assertIn("[8]Stor", text)
+        self.assertIn("[0]Home", text)
+        self.assertIn("[6]Docs", text)
+        self.assertIn("[7]Stor", text)
 
     # -- Auto-refresh toggle --
 
     def test_auto_refresh_toggle(self):
-        """'a' key toggles AUTO-REFRESH variable."""
+        """'A' key toggles AUTO-REFRESH variable."""
         text = self._run_kdos([
             "AUTO-REFRESH @ .",    # should be 0
-            "97 HANDLE-KEY",       # 'a' = toggle on
+            "65 HANDLE-KEY",       # 'A' = toggle on
             "AUTO-REFRESH @ .",    # should be -1 (true)
-            "97 HANDLE-KEY",       # 'a' = toggle off
+            "65 HANDLE-KEY",       # 'A' = toggle off
             "AUTO-REFRESH @ .",    # should be 0
         ])
         # Check sequence: 0, -1, 0
@@ -7854,8 +7854,8 @@ class TestKDOSHardening(_KDOSTestBase):
     def test_screen_header_tabs(self):
         """Screen header shows all 8 tab labels."""
         text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
-        for label in ["[1]Home", "[2]Bufs", "[3]Kern", "[4]Pipe",
-                       "[5]Task", "[6]Help", "[7]Docs", "[8]Stor"]:
+        for label in ["[0]Home", "[1]Bufs", "[2]Kern", "[3]Pipe",
+                       "[4]Task", "[5]Help", "[6]Docs", "[7]Stor"]:
             self.assertIn(label, text)
 
     def test_screen_footer_keys(self):
