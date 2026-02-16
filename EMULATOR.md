@@ -128,7 +128,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | 2,671 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, micro-core variant |
+| `megapad64.py` | 2,741 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, micro-core variant (1802-heritage stripped) |
 | `accel/mp64_accel.cpp` | 1,978 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
 | `accel_wrapper.py` | 840 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
@@ -138,7 +138,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `cli.py` | 1,012 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
 | `bios.asm` | 11,329 | Forth BIOS v1.0 — subroutine-threaded interpreter, 300 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
-| `test_system.py` | 15,148 | System integration tests — 1,034 tests (42 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile) |
+| `test_system.py` | 15,243 | System integration tests — 1,043 tests (42 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile) |
 | `test_networking.py` | 860 | Real-networking tests — 38 tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
 | `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
@@ -615,7 +615,6 @@ Bye!
 
 | Commit | Milestone |
 |---|---|
-| `3d321a9` | Instruction encoding spec (`ENCODING.html`) |
 | `32481a2` | Bytecode emulator + assembler + 61 CPU tests |
 | `c3b9001` | Peripheral layer: UART, Timer, Storage, SysInfo |
 | `8ef8f3b` | System emulator with unified memory map |

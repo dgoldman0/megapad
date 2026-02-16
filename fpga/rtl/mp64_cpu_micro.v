@@ -3,29 +3,35 @@
 // ============================================================================
 //
 // Stripped-down CPU core for packing into micro-core clusters.
-// ISA-compatible with the major core for the base instruction set;
-// unsupported families (MEX) trap as illegal opcodes.
-// MULDIV dispatches to the cluster's shared multiplier (IN_CLUSTER=1)
-// or traps as illegal opcode (IN_CLUSTER=0, standalone mode).
+// ISA-compatible with the major core for the modern instruction set;
+// all CDP1802 heritage features are REMOVED to minimise area.
 //
 // Compared to the major core (mp64_cpu.v / mp64_cpu_fsm.v):
 //   REMOVED — I-cache interface (fetches byte-by-byte from bus)
 //   REMOVED — Tile/MEX engine ports and FAM_MEX dispatch
-//   SHARED — Hardware MUL/DIV via cluster (IN_CLUSTER=1) or trap (=0)
-//   SHARED — BIST via cluster controller CSR forwarding (IN_CLUSTER=1)
+//   REMOVED — 1802-heritage D accumulator, Q flip-flop, T register
+//   REMOVED — Family 0x8 (MEMALU — D-register ops) → ILLEGAL_OP
+//   REMOVED — Family 0x9 (I/O — port input/output) → ILLEGAL_OP
+//   REMOVED — Family 0xA (SEP — set PC register) → ILLEGAL_OP
+//   REMOVED — Family 0xB (SEX — set data pointer) → ILLEGAL_OP
+//   REMOVED — SYS sub-ops: RET/DIS/MARK/SAV/SEQ/REQ → ILLEGAL_OP
+//   REMOVED — IMM sub-ops: GLO/GHI/PLO/PHI → ILLEGAL_OP
 //   REMOVED — Tile datapath self-test
 //   REMOVED — DMA ring-buffer CSRs
 //   REMOVED — I-cache CSRs
 //   REMOVED — QoS CSRs (managed by cluster controller)
+//   SHARED — Hardware MUL/DIV via cluster (IN_CLUSTER=1) or trap (=0)
+//   SHARED — BIST via cluster controller CSR forwarding (IN_CLUSTER=1)
 //   REDUCED — Performance counters: 1 (cycles only)
+//   FIXED  — PSEL=3, XSEL=2 (cannot be changed; no SEP/SEX)
 //
 // Area budget (Kintex-7 estimates):
-//   ~1,800 FFs / ~1,100 LUTs / 0 DSP48
+//   ~1,500 FFs / ~900 LUTs / 0 DSP48  (savings: ~300 FF, ~200 LUT)
 //   vs major core: ~2,450 FFs / ~1,300 LUTs / 16 DSP48
 //
 // The micro-core is designed to be a slave compute element:
 //   - Receives work via IPI from its cluster controller
-//   - Executes base ISA (integer, branch, load/store, MEMALU, IO, CSR)
+//   - Executes modern ISA (integer, branch, load/store, CSR, CALL.L/RET.L)
 //   - Returns results via shared memory or mailbox
 //   - Does NOT independently access peripheral MMIO (cluster mediates)
 //
@@ -114,10 +120,8 @@ module mp64_cpu_micro #(
     // IVT base address (CSR)
     reg [63:0] ivt_base;
 
-    // 1802-heritage special registers
-    reg [7:0]  D;          // 8-bit D accumulator
-    reg        Q;          // Q flip-flop
-    reg [7:0]  T;          // T register (saved XSEL|PSEL on MARK)
+    // 1802-heritage registers REMOVED from micro-core
+    // (D, Q, T not instantiated — saves ~17 FFs)
 
     // Trap / interrupt context
     reg [7:0]  ivec_id;
@@ -206,13 +210,7 @@ module mp64_cpu_micro #(
     reg [63:0] effective_addr;
     reg [3:0]  mem_sub;
 
-    // MEMALU temp
-    reg [7:0]  memalu_byte;
-    reg [3:0]  memalu_sub;
-
-    // IO temp
-    reg [2:0]  io_port;
-    reg        io_is_inp;
+    // MEMALU/IO temporaries removed (families stripped)
 
     reg [2:0]  post_action;
 
@@ -239,16 +237,10 @@ module mp64_cpu_micro #(
             ivt_base  <= 64'd0;
             ivec_id   <= 8'd0;
             trap_addr <= 64'd0;
-            D         <= 8'd0;
-            Q         <= 1'b0;
-            T         <= 8'd0;
+            // D, Q, T not present on micro-core
 
             post_action <= POST_NONE;
             mem_sub     <= 4'd0;
-            memalu_sub  <= 4'd0;
-            memalu_byte <= 8'd0;
-            io_port     <= 3'd0;
-            io_is_inp   <= 1'b0;
 
             alu_op <= 4'd0;
             alu_a  <= 64'd0;
@@ -364,7 +356,7 @@ module mp64_cpu_micro #(
                                 xsel  <= 4'd2;
                                 spsel <= 4'd15;
                                 flags <= 8'h40;
-                                D <= 8'd0;  Q <= 1'b0;  T <= 8'd0;
+                                // D, Q, T not present on micro-core
                                 ivt_base <= 64'd0;
                                 ivec_id  <= 8'd0;
                                 R[0]  <= 64'd0;  R[1]  <= 64'd0;
@@ -386,40 +378,19 @@ module mp64_cpu_micro #(
                                 cpu_state   <= CPU_MEM_READ;
                             end
 
-                            4'h5: begin // RET (1802)
-                                effective_addr <= R[spsel];
-                                R[spsel] <= R[spsel] + 64'd8;
-                                dst_reg  <= 4'd0;
-                                mem_sub  <= 4'h5;
-                                cpu_state <= CPU_MEM_READ;
-                            end
-
-                            4'h6: begin // DIS
-                                effective_addr <= R[spsel];
-                                R[spsel] <= R[spsel] + 64'd8;
-                                dst_reg  <= 4'd0;
-                                mem_sub  <= 4'h6;
-                                cpu_state <= CPU_MEM_READ;
-                            end
-
-                            4'h7: begin // MARK
-                                T <= {xsel, psel};
+                            // 1802-heritage SCRT: RET/DIS/MARK/SAV/SEQ/REQ
+                            // NOT AVAILABLE on micro-core — trap as ILLEGAL_OP
+                            4'h5, 4'h6, 4'h7, 4'h8, 4'h9, 4'hA: begin
+                                // Trap: push PC, load IVT[ILLEGAL_OP]
                                 R[spsel] <= R[spsel] - 64'd8;
                                 effective_addr <= R[spsel] - 64'd8;
-                                mem_data <= {56'd0, xsel, psel};
-                                xsel <= psel;
+                                mem_data <= R[psel];
+                                flags[6] <= 1'b0;
+                                ivec_id <= `IVEC_ILLEGAL_OP;
+                                post_action <= POST_IRQ_VEC;
+                                bus_size <= BUS_DWORD;
                                 cpu_state <= CPU_MEM_WRITE;
                             end
-
-                            4'h8: begin // SAV
-                                effective_addr <= R[xsel];
-                                mem_data <= {56'd0, T};
-                                bus_size <= BUS_BYTE;
-                                cpu_state <= CPU_MEM_WRITE;
-                            end
-
-                            4'h9: begin Q <= 1'b1; cpu_state <= CPU_FETCH; end  // SEQ
-                            4'hA: begin Q <= 1'b0; cpu_state <= CPU_FETCH; end  // REQ
                             4'hB: begin flags[6] <= 1'b1; cpu_state <= CPU_FETCH; end  // EI
                             4'hC: begin flags[6] <= 1'b0; cpu_state <= CPU_FETCH; end  // DI
 
@@ -690,21 +661,17 @@ module mp64_cpu_micro #(
                                             (R[ibuf[1][7:4]] >> (4'd0 - ibuf[1][3:0]));
                                     cpu_state <= CPU_FETCH;
                                 end
-                                4'hC: begin // GLO
-                                    D <= R[ibuf[1][7:4]][7:0];
-                                    cpu_state <= CPU_FETCH;
-                                end
-                                4'hD: begin // GHI
-                                    D <= R[ibuf[1][7:4]][15:8];
-                                    cpu_state <= CPU_FETCH;
-                                end
-                                4'hE: begin // PLO
-                                    R[ibuf[1][7:4]][7:0] <= D;
-                                    cpu_state <= CPU_FETCH;
-                                end
-                                4'hF: begin // PHI
-                                    R[ibuf[1][7:4]][15:8] <= D;
-                                    cpu_state <= CPU_FETCH;
+                                // GLO/GHI/PLO/PHI (D-register ops)
+                                // NOT AVAILABLE on micro-core — trap
+                                4'hC, 4'hD, 4'hE, 4'hF: begin
+                                    R[spsel] <= R[spsel] - 64'd8;
+                                    effective_addr <= R[spsel] - 64'd8;
+                                    mem_data <= R[psel];
+                                    flags[6] <= 1'b0;
+                                    ivec_id <= `IVEC_ILLEGAL_OP;
+                                    post_action <= POST_IRQ_VEC;
+                                    bus_size <= BUS_DWORD;
+                                    cpu_state <= CPU_MEM_WRITE;
                                 end
                             endcase
                         end
@@ -741,101 +708,67 @@ module mp64_cpu_micro #(
                     end
 
                     // --------------------------------------------------------
-                    // MEMALU — 1802 heritage D-register ops (0x8)
+                    // MEMALU — STRIPPED from micro-core (0x8)
+                    // All MEMALU sub-ops trap as illegal opcode.
                     // --------------------------------------------------------
                     else if (fam == FAM_MEMALU) begin
                         ext_active <= 1'b0;
-                        memalu_sub <= nib;
-
-                        case (nib)
-                            4'hE: begin // IRX
-                                R[xsel] <= R[xsel] + 64'd1;
-                                cpu_state <= CPU_FETCH;
-                            end
-                            4'h6: begin // SHR.D
-                                flags[1] <= D[0];
-                                D <= {1'b0, D[7:1]};
-                                flags[0] <= ({1'b0, D[7:1]} == 8'd0) ? 1'b1 : 1'b0;
-                                cpu_state <= CPU_FETCH;
-                            end
-                            4'hA: begin // SHRC.D
-                                begin
-                                    reg old_c;
-                                    old_c = flags[1];
-                                    flags[1] <= D[0];
-                                    D <= {old_c, D[7:1]};
-                                    flags[0] <= ({old_c, D[7:1]} == 8'd0) ? 1'b1 : 1'b0;
-                                end
-                                cpu_state <= CPU_FETCH;
-                            end
-                            4'hC: begin // SHL.D
-                                flags[1] <= D[7];
-                                D <= {D[6:0], 1'b0};
-                                flags[0] <= ({D[6:0], 1'b0} == 8'd0) ? 1'b1 : 1'b0;
-                                cpu_state <= CPU_FETCH;
-                            end
-                            4'hD: begin // SHLC.D
-                                begin
-                                    reg old_c2;
-                                    old_c2 = flags[1];
-                                    flags[1] <= D[7];
-                                    D <= {D[6:0], old_c2};
-                                    flags[0] <= ({D[6:0], old_c2} == 8'd0) ? 1'b1 : 1'b0;
-                                end
-                                cpu_state <= CPU_FETCH;
-                            end
-                            default: begin
-                                // All others read M(R(X))
-                                effective_addr <= R[xsel];
-                                bus_size <= BUS_BYTE;
-                                cpu_state <= CPU_MEMALU_RD;
-                            end
-                        endcase
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
                     end
 
                     // --------------------------------------------------------
-                    // IO — port I/O (0x9)
+                    // IO — STRIPPED from micro-core (0x9)
+                    // All I/O sub-ops trap as illegal opcode.
                     // --------------------------------------------------------
                     else if (fam == FAM_IO) begin
                         ext_active <= 1'b0;
-                        if (nib >= 4'd1 && nib <= 4'd7) begin
-                            // OUT N
-                            io_port   <= nib[2:0];
-                            io_is_inp <= 1'b0;
-                            effective_addr <= R[xsel];
-                            bus_size  <= BUS_BYTE;
-                            cpu_state <= CPU_MEMALU_RD;
-                            memalu_sub <= 4'hF;
-                        end else if (nib >= 4'd9) begin
-                            // INP (N-8)
-                            io_port   <= nib[2:0];
-                            io_is_inp <= 1'b1;
-                            effective_addr <= {MMIO_HI, 20'd0, nib[2:0], 9'd0};
-                            bus_size  <= BUS_BYTE;
-                            cpu_state <= CPU_MEM_READ;
-                            dst_reg   <= 4'd0;
-                            mem_sub   <= 4'hF;
-                        end else begin
-                            cpu_state <= CPU_FETCH;
-                        end
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
                     end
 
                     // --------------------------------------------------------
-                    // SEP (0xA)
+                    // SEP — STRIPPED from micro-core (0xA)
+                    // PSEL is fixed at 3. SEP traps as illegal opcode.
                     // --------------------------------------------------------
                     else if (fam == FAM_SEP) begin
                         ext_active <= 1'b0;
-                        psel <= nib;
-                        cpu_state <= CPU_FETCH;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
                     end
 
                     // --------------------------------------------------------
-                    // SEX (0xB)
+                    // SEX — STRIPPED from micro-core (0xB)
+                    // XSEL is fixed at 2. SEX traps as illegal opcode.
                     // --------------------------------------------------------
                     else if (fam == FAM_SEX) begin
                         ext_active <= 1'b0;
-                        xsel <= nib;
-                        cpu_state <= CPU_FETCH;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
                     end
 
                     // --------------------------------------------------------
@@ -885,10 +818,8 @@ module mp64_cpu_micro #(
                                 CSR_XSEL:     xsel     <= R[nib[2:0]][3:0];
                                 CSR_SPSEL:    spsel    <= R[nib[2:0]][3:0];
                                 CSR_IVTBASE:  ivt_base <= R[nib[2:0]];
-                                CSR_D:        D        <= R[nib[2:0]][7:0];
-                                CSR_DF:       flags[1] <= R[nib[2:0]][0];
-                                CSR_QREG:     Q        <= R[nib[2:0]][0];
-                                CSR_TREG:     T        <= R[nib[2:0]][7:0];
+                                // CSR_D, CSR_DF, CSR_QREG, CSR_TREG:
+                                // Silently ignored — D/Q/T stripped from micro-core
                                 CSR_IE:       flags[6] <= R[nib[2:0]][0];
                                 CSR_IVEC_ID:  ivec_id  <= R[nib[2:0]][7:0];
                                 CSR_PERF_CTRL: begin
@@ -917,10 +848,11 @@ module mp64_cpu_micro #(
                                 CSR_XSEL:        R[nib[2:0]] <= {60'd0, xsel};
                                 CSR_SPSEL:       R[nib[2:0]] <= {60'd0, spsel};
                                 CSR_IVTBASE:     R[nib[2:0]] <= ivt_base;
-                                CSR_D:           R[nib[2:0]] <= {56'd0, D};
-                                CSR_DF:          R[nib[2:0]] <= {63'd0, flags[1]};
-                                CSR_QREG:        R[nib[2:0]] <= {63'd0, Q};
-                                CSR_TREG:        R[nib[2:0]] <= {56'd0, T};
+                                // D/Q/T: stripped — read as 0
+                                CSR_D:           R[nib[2:0]] <= 64'd0;
+                                CSR_DF:          R[nib[2:0]] <= 64'd0;
+                                CSR_QREG:        R[nib[2:0]] <= 64'd0;
+                                CSR_TREG:        R[nib[2:0]] <= 64'd0;
                                 CSR_IE:          R[nib[2:0]] <= {63'd0, flags[6]};
                                 CSR_COREID:      R[nib[2:0]] <= {62'd0, core_id};
                                 CSR_NCORES:      R[nib[2:0]] <= NUM_ALL_CORES;
@@ -991,27 +923,9 @@ module mp64_cpu_micro #(
                             4'hC: R[dst_reg] <= {{56{bus_rdata[7]}}, bus_rdata[7:0]};
                             4'hD: R[dst_reg] <= {{48{bus_rdata[15]}}, bus_rdata[15:0]};
                             4'hE: R[dst_reg] <= {{32{bus_rdata[31]}}, bus_rdata[31:0]};
-                            4'hF: begin // INP
-                                D <= bus_rdata[7:0];
-                                effective_addr <= R[xsel];
-                                mem_data <= {56'd0, bus_rdata[7:0]};
-                                bus_size <= BUS_BYTE;
-                                cpu_state <= CPU_MEM_WRITE;
-                            end
-                            4'h5: begin // 1802 RET
-                                T <= bus_rdata[7:0];
-                                xsel <= bus_rdata[7:4];
-                                psel <= bus_rdata[3:0];
-                                flags[6] <= 1'b1;
-                                cpu_state <= CPU_FETCH;
-                            end
-                            4'h6: begin // DIS
-                                T <= bus_rdata[7:0];
-                                xsel <= bus_rdata[7:4];
-                                psel <= bus_rdata[3:0];
-                                flags[6] <= 1'b0;
-                                cpu_state <= CPU_FETCH;
-                            end
+                            // 4'hF (INP): stripped — IO family traps in DECODE
+                            // 4'h5 (RET): stripped — SYS RET traps in DECODE
+                            // 4'h6 (DIS): stripped — SYS DIS traps in DECODE
                             default:
                                 R[dst_reg] <= bus_rdata;
                         endcase
@@ -1112,109 +1026,10 @@ module mp64_cpu_micro #(
                 end
 
                 // ============================================================
-                // MEMALU_RD: read M(R(X)) for MEMALU / IO ops
+                // MEMALU_RD: REMOVED — D-register MEMALU/IO ops stripped
+                // from micro-core.  All family 0x8/0x9 opcodes now trap
+                // in the DECODE stage before reaching this state.
                 // ============================================================
-                CPU_MEMALU_RD: begin
-                    bus_addr  <= effective_addr;
-                    bus_wen   <= 1'b0;
-                    bus_size  <= BUS_BYTE;
-                    if (bus_ready) begin
-                        bus_valid <= 1'b0;
-                        memalu_byte <= bus_rdata[7:0];
-
-                        if (memalu_sub == 4'hF) begin
-                            // IO OUT
-                            D <= bus_rdata[7:0];
-                            effective_addr <= {MMIO_HI, 20'd0, io_port, 9'd0};
-                            mem_data <= {56'd0, bus_rdata[7:0]};
-                            bus_size <= BUS_BYTE;
-                            R[xsel] <= R[xsel] + 64'd1;
-                            cpu_state <= CPU_MEM_WRITE;
-                            mem_sub <= 4'd0;
-                        end else begin
-                            case (memalu_sub)
-                                4'h0: D <= bus_rdata[7:0];          // LDX
-                                4'h1: begin                         // OR.X
-                                    D <= (bus_rdata[7:0] | D);
-                                    flags[0] <= ((bus_rdata[7:0] | D) == 8'd0);
-                                end
-                                4'h2: begin                         // AND.X
-                                    D <= (bus_rdata[7:0] & D);
-                                    flags[0] <= ((bus_rdata[7:0] & D) == 8'd0);
-                                end
-                                4'h3: begin                         // XOR.X
-                                    D <= (bus_rdata[7:0] ^ D);
-                                    flags[0] <= ((bus_rdata[7:0] ^ D) == 8'd0);
-                                end
-                                4'h4: begin                         // ADD.X
-                                    begin
-                                        reg [8:0] sum9;
-                                        sum9 = {1'b0, bus_rdata[7:0]} + {1'b0, D};
-                                        D <= sum9[7:0];
-                                        flags[1] <= sum9[8];
-                                        flags[0] <= (sum9[7:0] == 8'd0);
-                                    end
-                                end
-                                4'h5: begin                         // SD.X
-                                    begin
-                                        reg [8:0] diff9;
-                                        diff9 = {1'b0, bus_rdata[7:0]} - {1'b0, D};
-                                        D <= diff9[7:0];
-                                        flags[1] <= ~diff9[8];
-                                        flags[0] <= (diff9[7:0] == 8'd0);
-                                    end
-                                end
-                                4'h7: begin                         // SM.X
-                                    begin
-                                        reg [8:0] diff9b;
-                                        diff9b = {1'b0, D} - {1'b0, bus_rdata[7:0]};
-                                        D <= diff9b[7:0];
-                                        flags[1] <= ~diff9b[8];
-                                        flags[0] <= (diff9b[7:0] == 8'd0);
-                                    end
-                                end
-                                4'h8: begin                         // ADC.X
-                                    begin
-                                        reg [8:0] sum9c;
-                                        sum9c = {1'b0, bus_rdata[7:0]} + {1'b0, D}
-                                                + {8'd0, flags[1]};
-                                        D <= sum9c[7:0];
-                                        flags[1] <= sum9c[8];
-                                        flags[0] <= (sum9c[7:0] == 8'd0);
-                                    end
-                                end
-                                4'h9: begin                         // SDB.X
-                                    begin
-                                        reg [8:0] diff9c;
-                                        diff9c = {1'b0, bus_rdata[7:0]} - {1'b0, D}
-                                                 - {8'd0, ~flags[1]};
-                                        D <= diff9c[7:0];
-                                        flags[1] <= ~diff9c[8];
-                                        flags[0] <= (diff9c[7:0] == 8'd0);
-                                    end
-                                end
-                                4'hB: begin                         // SMB.X
-                                    begin
-                                        reg [8:0] diff9d;
-                                        diff9d = {1'b0, D} - {1'b0, bus_rdata[7:0]}
-                                                 - {8'd0, ~flags[1]};
-                                        D <= diff9d[7:0];
-                                        flags[1] <= ~diff9d[8];
-                                        flags[0] <= (diff9d[7:0] == 8'd0);
-                                    end
-                                end
-                                4'hF: begin                         // LDXA
-                                    D <= bus_rdata[7:0];
-                                    R[xsel] <= R[xsel] + 64'd1;
-                                end
-                                default: ;
-                            endcase
-                            cpu_state <= CPU_FETCH;
-                        end
-                    end else begin
-                        bus_valid <= 1'b1;
-                    end
-                end
 
                 // ============================================================
                 // IRQ: vectored interrupt entry
