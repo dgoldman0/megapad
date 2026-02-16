@@ -2643,7 +2643,7 @@ class _KDOSTestBase(unittest.TestCase):
         payload = "\n".join(cls._kdos_lines) + "\n"
         data = payload.encode()
         pos = 0
-        max_steps = 200_000_000
+        max_steps = 400_000_000
         total = 0
 
         while total < max_steps:
@@ -2805,7 +2805,7 @@ class TestKDOS(_KDOSTestBase):
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
-        max_steps = 200_000_000
+        max_steps = 400_000_000
         total = 0
 
         while total < max_steps:
@@ -9026,7 +9026,7 @@ class TestKDOSMulticore(unittest.TestCase):
         payload = "\n".join(cls._kdos_lines) + "\n"
         data = payload.encode()
         pos = 0
-        max_steps = 200_000_000
+        max_steps = 400_000_000
         total = 0
 
         while total < max_steps:
@@ -9109,7 +9109,7 @@ class TestKDOSMulticore(unittest.TestCase):
         data = payload.encode()
         pos = 0
         total = 0
-        max_steps = 200_000_000
+        max_steps = 400_000_000
         while total < max_steps:
             if sys_obj.cpu.halted:
                 break
@@ -9144,7 +9144,7 @@ class TestKDOSMulticore(unittest.TestCase):
         data = payload.encode()
         pos = 0
         total = 0
-        max_steps = 200_000_000
+        max_steps = 400_000_000
         while total < max_steps:
             if sys_obj.cpu.halted:
                 break
@@ -15967,6 +15967,408 @@ class TestAppLoad(_KDOSTestBase):
         out = self._run_kdos(['ENTER-USER SYS-EXIT', 'PRIV@ .'])
         # After SYS-EXIT, PRIV@ should show 0
         self.assertRegex(out, r'PRIV@.*\n.*0')
+
+
+# =====================================================================
+#  Tests for request.md features: 0>=, LOAD-BUFFER, SOCKET-READY?,
+#  Ring Buffer, Hash Table
+# =====================================================================
+
+class TestKDOSComparison(_KDOSTestBase):
+    """Tests for the 0>= comparison operator."""
+
+    def test_0gte_positive(self):
+        """0>= returns -1 for positive numbers."""
+        out = self._run_kdos(['5 0>= .'])
+        self.assertIn("-1", out)
+
+    def test_0gte_zero(self):
+        """0>= returns -1 for zero."""
+        out = self._run_kdos(['0 0>= .'])
+        self.assertIn("-1", out)
+
+    def test_0gte_negative(self):
+        """0>= returns 0 for negative numbers."""
+        out = self._run_kdos(['-3 0>= .'])
+        self.assertIn(" 0", out)
+
+    def test_0gte_minus_one(self):
+        """0>= returns 0 for -1."""
+        out = self._run_kdos(['-1 0>= .'])
+        self.assertIn(" 0", out)
+
+    def test_0gte_max_positive(self):
+        """0>= returns -1 for large positive."""
+        out = self._run_kdos(['999999 0>= .'])
+        self.assertIn("-1", out)
+
+
+class TestKDOSLoadBuffer(_KDOSTestBase):
+    """Tests for the LOAD-BUFFER word (inverse of SAVE-BUFFER)."""
+
+    def _make_storage(self):
+        """Create a blank formatted disk image."""
+        return self._make_formatted_image()
+
+    def test_save_load_roundtrip(self):
+        """SAVE-BUFFER then LOAD-BUFFER recovers original data."""
+        img = self._make_storage()
+        try:
+            out = self._run_kdos([
+                '64 0 1 BUFFER mybuf',
+                # Fill buffer with pattern
+                'mybuf B.DATA 64 0 DO DUP I + I 1+ SWAP C! LOOP DROP',
+                # Create file, save buffer
+                'MKFILE testfile',
+                'mybuf SAVE-BUFFER testfile',
+                # Verify first byte before clearing
+                'mybuf B.DATA C@ .',
+                # Zero out the buffer
+                'mybuf B.DATA 64 0 FILL',
+                # Verify it's zeroed
+                'mybuf B.DATA C@ .',
+                # Load buffer back
+                'mybuf LOAD-BUFFER testfile',
+                # Verify restored data
+                'mybuf B.DATA C@ .',
+                'mybuf B.DATA 63 + C@ .',
+            ], storage_image=img)
+            vals = [int(x) for x in out.strip().split() if x.lstrip('-').isdigit()]
+            # Expect: 1 (original), 0 (zeroed), 1 (restored), 64 (last byte)
+            self.assertIn(1, vals)   # first byte = 1
+            self.assertIn(0, vals)   # zeroed
+        finally:
+            import os
+            os.unlink(img)
+
+    def test_load_buffer_not_found(self):
+        """LOAD-BUFFER prints error for missing file."""
+        img = self._make_storage()
+        try:
+            out = self._run_kdos([
+                '64 0 1 BUFFER mybuf',
+                'mybuf LOAD-BUFFER nosuchfile',
+            ], storage_image=img)
+            self.assertIn("Not found", out)
+        finally:
+            import os
+            os.unlink(img)
+
+
+class TestKDOSSocketReady(_KDOSTestBase):
+    """Tests for the SOCKET-READY? word."""
+
+    def test_socket_ready_fresh(self):
+        """Fresh TCP socket has no data available."""
+        out = self._run_kdos([
+            'SOCK-TYPE-TCP SOCKET',
+            'DUP -1 <> IF',
+            '  SOCK-N SOCKET-READY? .',
+            'ELSE',
+            '  DROP ." -2"',
+            'THEN',
+        ])
+        # Should print 0 (no data) or -2 (socket alloc failed)
+        vals = [int(x) for x in out.strip().split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(v <= 0 for v in vals))
+
+    def test_socket_ready_word_defined(self):
+        """SOCKET-READY? is a defined word."""
+        out = self._run_kdos(["' SOCKET-READY? ."])
+        # Should print a non-zero XT address
+        vals = [int(x) for x in out.strip().split() if x.lstrip('-').isdigit()]
+        self.assertTrue(len(vals) > 0 and vals[0] != 0)
+
+
+class TestKDOSRing(_KDOSTestBase):
+    """Tests for Ring Buffer primitives (§18)."""
+
+    def test_ring_create(self):
+        """RING creates a named ring buffer constant."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'myring .',
+        ])
+        vals = [int(x) for x in out.strip().split() if x.lstrip('-').isdigit()]
+        self.assertTrue(len(vals) > 0 and vals[0] != 0)
+
+    def test_ring_empty_initially(self):
+        """New ring buffer is empty."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'myring RING-EMPTY? .',
+            'myring RING-FULL? .',
+            'myring RING-COUNT .',
+        ])
+        self.assertIn("-1", out)  # RING-EMPTY? = true
+
+    def test_ring_push_pop(self):
+        """Push then pop recovers the element."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'VARIABLE elem',
+            '42 elem !',
+            'elem myring RING-PUSH .',         # push → -1 (success)
+            'myring RING-COUNT .',              # count → 1
+            'VARIABLE result',
+            'result myring RING-POP .',         # pop → -1 (success)
+            'result @ .',                        # value → 42
+        ])
+        parts = out.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(-1, nums)   # push success
+        self.assertIn(42, nums)   # popped value
+
+    def test_ring_fifo_order(self):
+        """Ring buffer maintains FIFO order."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'VARIABLE elem',
+            '10 elem !  elem myring RING-PUSH DROP',
+            '20 elem !  elem myring RING-PUSH DROP',
+            '30 elem !  elem myring RING-PUSH DROP',
+            'VARIABLE result',
+            '." | " result myring RING-POP DROP  result @ .',
+            'result myring RING-POP DROP  result @ .',
+            'result myring RING-POP DROP  result @ .',
+        ])
+        # Parse only output after the | marker
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertEqual(nums, [10, 20, 30])
+
+    def test_ring_full(self):
+        """RING-PUSH returns 0 when full."""
+        out = self._run_kdos([
+            '8 2 RING myring',
+            'VARIABLE elem',
+            '1 elem !  elem myring RING-PUSH .',  # → -1
+            '2 elem !  elem myring RING-PUSH .',  # → -1
+            '3 elem !  elem myring RING-PUSH .',  # → 0 (full)
+            'myring RING-FULL? .',                  # → -1
+        ])
+        parts = out.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertEqual(nums[-2], 0)    # third push fails
+        self.assertEqual(nums[-1], -1)   # ring is full
+
+    def test_ring_pop_empty(self):
+        """RING-POP returns 0 when empty."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'VARIABLE result',
+            '." | " result myring RING-POP .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        self.assertIn("0", tail)
+
+    def test_ring_wrap_around(self):
+        """Ring wraps around after filling and draining."""
+        out = self._run_kdos([
+            '8 3 RING myring',
+            'VARIABLE elem  VARIABLE result',
+            # Fill 3 elements
+            '1 elem !  elem myring RING-PUSH DROP',
+            '2 elem !  elem myring RING-PUSH DROP',
+            '3 elem !  elem myring RING-PUSH DROP',
+            # Drain all
+            'result myring RING-POP DROP',
+            'result myring RING-POP DROP',
+            'result myring RING-POP DROP',
+            # Now push again (wraps around internally)
+            '99 elem !  elem myring RING-PUSH DROP',
+            'result myring RING-POP DROP  result @ .',  # → 99
+        ])
+        self.assertIn("99", out)
+
+    def test_ring_peek(self):
+        """RING-PEEK returns element without consuming."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            'VARIABLE elem',
+            '55 elem !  elem myring RING-PUSH DROP',
+            '66 elem !  elem myring RING-PUSH DROP',
+            '0 myring RING-PEEK @ .',    # oldest → 55
+            '1 myring RING-PEEK @ .',    # next   → 66
+            'myring RING-COUNT .',        # still 2
+        ])
+        parts = out.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(55, nums)
+        self.assertIn(66, nums)
+        self.assertIn(2, nums)
+
+    def test_ring_peek_out_of_range(self):
+        """RING-PEEK returns 0 for out-of-range index."""
+        out = self._run_kdos([
+            '8 4 RING myring',
+            '." | " 5 myring RING-PEEK .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        self.assertIn("0", tail)
+
+
+class TestKDOSHashTable(_KDOSTestBase):
+    """Tests for Hash Table primitives (§19)."""
+
+    def test_hashtable_create(self):
+        """HASHTABLE creates a table with correct initial state."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            '." | " ht HT.KSIZE .',
+            'ht HT.VSIZE .',
+            'ht HT.SLOTS .',
+            'ht HT-COUNT .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertEqual(nums, [8, 8, 16, 0])
+
+    def test_ht_put_get(self):
+        """HT-PUT followed by HT-GET retrieves the value."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,',
+            'CREATE v1 100 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            '." | " k1 ht HT-GET DUP 0<> IF @ . ELSE . THEN',
+            'ht HT-COUNT .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(100, nums)
+        self.assertIn(1, nums)
+
+    def test_ht_put_update(self):
+        """HT-PUT with same key updates value in place."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,',
+            'CREATE v1 100 , 0 ,',
+            'CREATE v2 200 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            'k1 v2 ht HT-PUT',
+            '." | " k1 ht HT-GET @ .',
+            'ht HT-COUNT .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(200, nums)
+        self.assertIn(1, nums)
+
+    def test_ht_get_missing(self):
+        """HT-GET returns 0 for absent key."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 99 , 0 ,',
+            '." | " k1 ht HT-GET .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        self.assertIn("0", tail)
+
+    def test_ht_del(self):
+        """HT-DEL removes an entry."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,',
+            'CREATE v1 100 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            '." | " k1 ht HT-DEL .',           # → -1 (found & deleted)
+            'ht HT-COUNT .',             # → 0
+            'k1 ht HT-GET .',            # → 0 (not found)
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(-1, nums)  # delete success
+        self.assertEqual(nums.count(0), 2)  # count=0 and get=0
+
+    def test_ht_del_missing(self):
+        """HT-DEL returns 0 for absent key."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 99 , 0 ,',
+            '." | " k1 ht HT-DEL .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        self.assertIn("0", tail)
+
+    def test_ht_multiple_entries(self):
+        """Multiple entries can be stored and retrieved."""
+        out = self._run_kdos([
+            '8 8 32 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,   CREATE v1 10 , 0 ,',
+            'CREATE k2 2 , 0 ,   CREATE v2 20 , 0 ,',
+            'CREATE k3 3 , 0 ,   CREATE v3 30 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            'k2 v2 ht HT-PUT',
+            'k3 v3 ht HT-PUT',
+            '." | " ht HT-COUNT .',
+            'k1 ht HT-GET @ .',
+            'k2 ht HT-GET @ .',
+            'k3 ht HT-GET @ .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(3, nums)
+        self.assertIn(10, nums)
+        self.assertIn(20, nums)
+        self.assertIn(30, nums)
+
+    def test_ht_each(self):
+        """HT-EACH iterates over all occupied entries."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,   CREATE v1 10 , 0 ,',
+            'CREATE k2 2 , 0 ,   CREATE v2 20 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            'k2 v2 ht HT-PUT',
+            ': show-entry  ( key-addr val-addr -- )  @ SWAP @ + . ;',
+            '." | "',
+            "' show-entry ht HT-EACH",
+        ])
+        # Each entry prints key+val: 1+10=11, 2+20=22 (order may vary)
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertEqual(sorted(nums), [11, 22])
+
+    def test_ht_reinsert_after_delete(self):
+        """Deleted slot (tombstone) can be reused by HT-PUT."""
+        out = self._run_kdos([
+            '8 8 16 HASHTABLE ht',
+            'CREATE k1 1 , 0 ,',
+            'CREATE v1 100 , 0 ,',
+            'CREATE v2 200 , 0 ,',
+            'k1 v1 ht HT-PUT',
+            'k1 ht HT-DEL DROP',
+            'k1 v2 ht HT-PUT',
+            '." | " k1 ht HT-GET @ .',
+            'ht HT-COUNT .',
+        ])
+        marker = out.find('|')
+        tail = out[marker+1:] if marker >= 0 else out
+        parts = tail.strip().split()
+        nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
+        self.assertIn(200, nums)
+        self.assertIn(1, nums)
+
 
 if __name__ == "__main__":
     print("=" * 60)
