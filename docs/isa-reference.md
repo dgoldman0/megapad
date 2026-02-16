@@ -119,18 +119,18 @@ Single-byte system operations (except CALL.L which is 2 bytes).
 | `01` | **NOP** | 1 | No operation. |
 | `02` | **HALT** | 1 | Stop the CPU permanently. |
 | `03` | **RESET** | 1 | Full CPU state reset (all registers zeroed, PSEL=3, etc.). |
-| `04` | **RTI** | 2 | Return from interrupt: pop PC, pop FLAGS (restores IE). |
-| `05` | **RET** | 2 | 1802-style return: pop T byte, restore XSEL and PSEL, enable interrupts. |
-| `06` | **DIS** | 2 | Same as RET but disables interrupts (IE ← 0). |
-| `07` | **MARK** | 2 | Save XSEL‖PSEL into T; push T; set XSEL ← PSEL.  Used for 1802-style subroutine calls. |
-| `08` | **SAV** | 1 | Store T register to memory at R(X): `M(R(X)) ← T`. |
-| `09` | **SEQ** | 1 | Set Q flip-flop to 1. |
-| `0A` | **REQ** | 1 | Reset Q flip-flop to 0. |
+| `04` | **RTI** | 2 | Return from interrupt: pop PC, pop FLAGS+PRIV (restores IE and privilege level). |
+| `05` | **RET** | 2 | 1802-style return: pop T byte, restore XSEL and PSEL, enable interrupts.  **Supervisor-only.** |
+| `06` | **DIS** | 2 | Same as RET but disables interrupts (IE ← 0).  **Supervisor-only.** |
+| `07` | **MARK** | 2 | Save XSEL‖PSEL into T; push T; set XSEL ← PSEL.  **Supervisor-only.** |
+| `08` | **SAV** | 1 | Store T register to memory at R(X): `M(R(X)) ← T`.  **Supervisor-only.** |
+| `09` | **SEQ** | 1 | Set Q flip-flop to 1.  **Supervisor-only.** |
+| `0A` | **REQ** | 1 | Reset Q flip-flop to 0.  **Supervisor-only.** |
 | `0B` | **EI** | 1 | Enable interrupts (I flag ← 1). |
 | `0C` | **DI** | 1 | Disable interrupts (I flag ← 0). |
 | `0D nn` | **CALL.L Rn** | 2 | Long call: push PC; PC ← R[n].  2 bytes: opcode + register byte. |
 | `0E` | **RET.L** | 2 | Long return: PC ← pop from stack. |
-| `0F` | **TRAP** | 3 | Software trap — enters the `IVEC_SW_TRAP` handler. |
+| `0F` | **TRAP** | 3 | Software trap — saves FLAGS+PRIV, escalates to supervisor, enters `IVEC_SW_TRAP` handler. |
 
 ---
 
@@ -241,10 +241,10 @@ Variable-length instructions with embedded constants.  Byte 1 is
 | `69 Ri` | **LSRI Rn, imm4** | 2 | 1 | `Rn ← Rn >>> imm4` (logical right shift) |
 | `6A Ri` | **ASRI Rn, imm4** | 2 | 1 | `Rn ← Rn >> imm4` (arithmetic right shift) |
 | `6B Ri` | **ROLI Rn, imm4** | 2 | 1 | `Rn ← rotate_left(Rn, imm4)` |
-| `6C Rx` | **GLO Rn** | 2 | 1 | `D ← R[n][7:0]` — get low byte into D accumulator |
-| `6D Rx` | **GHI Rn** | 2 | 1 | `D ← R[n][15:8]` — get high byte into D |
-| `6E Rx` | **PLO Rn** | 2 | 1 | `R[n][7:0] ← D` — put D into low byte |
-| `6F Rx` | **PHI Rn** | 2 | 1 | `R[n][15:8] ← D` — put D into high byte |
+| `6C Rx` | **GLO Rn** | 2 | 1 | `D ← R[n][7:0]` — get low byte into D accumulator.  **Supervisor-only.** |
+| `6D Rx` | **GHI Rn** | 2 | 1 | `D ← R[n][15:8]` — get high byte into D.  **Supervisor-only.** |
+| `6E Rx` | **PLO Rn** | 2 | 1 | `R[n][7:0] ← D` — put D into low byte.  **Supervisor-only.** |
+| `6F Rx` | **PHI Rn** | 2 | 1 | `R[n][15:8] ← D` — put D into high byte.  **Supervisor-only.** |
 
 ---
 
@@ -280,6 +280,9 @@ Single-byte instructions that operate on the **8-bit D accumulator** and
 memory at `M(R(X))`.  These provide backward compatibility with the
 CDP1802 instruction set.
 
+> **Privilege:** All MEMALU instructions are **supervisor-only**.  Executing
+> any opcode in this family from user mode triggers `IVEC_PRIV_FAULT`.
+
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
 | `80` | **LDX** | 1 | `D ← M(R(X))` |
@@ -306,6 +309,9 @@ CDP1802 instruction set.
 Single-byte 1802-style port I/O.  7 output ports and 7 input ports,
 each 4 bits wide.
 
+> **Privilege:** All I/O instructions are **supervisor-only**.  Executing
+> any opcode in this family from user mode triggers `IVEC_PRIV_FAULT`.
+
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
 | `91`–`97` | **OUT 1–7** | 1 | `port_out[n] ← M(R(X)); R(X) += 1` |
@@ -315,6 +321,8 @@ each 4 bits wide.
 
 ## Family 0xA — SEP (Set Program Counter)
 
+> **Privilege:** SEP is **supervisor-only**.  Triggers `IVEC_PRIV_FAULT` in user mode.
+
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
 | `An` | **SEP Rn** | 1 | `PSEL ← n` — PC is now R[n].  Used for 1802-style subroutine dispatch. |
@@ -322,6 +330,8 @@ each 4 bits wide.
 ---
 
 ## Family 0xB — SEX (Set Data Pointer)
+
+> **Privilege:** SEX is **supervisor-only**.  Triggers `IVEC_PRIV_FAULT` in user mode.
 
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
@@ -527,6 +537,7 @@ low nibble of the opcode byte.
 | `0x07` | **Q** | 1 | RW | Q flip-flop |
 | `0x08` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
 | `0x09` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
+| `0x0A` | **PRIV** | 1 | RW | Privilege level: 0=supervisor, 1=user.  Write is **supervisor-only**. |
 | | | | | |
 | `0x10` | **SB** | 4 | RW | Tile bank selector |
 | `0x11` | **SR** | 20 | RW | Tile row cursor |
@@ -591,22 +602,27 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 | 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1) |
 | 8 | `IVEC_UART` | UART | UART RX data available (when IE=1 and UART IRQ enabled) |
 | 9 | `IVEC_NIC` | NIC | NIC RX frame available (when IE=1 and NIC IRQ enabled) |
+| … | | | *(vectors 10–14 reserved)* |
+| 15 | `IVEC_PRIV_FAULT` | Privilege Fault | User-mode code executed a supervisor-only instruction or wrote a protected CSR |
 
 ### Trap Entry Sequence
 
 When an interrupt or trap fires:
 
-1. `push64(FLAGS)` — save flags on stack
+1. `push64(FLAGS | (PRIV << 8))` — save flags with privilege level in bit 8
 2. `push64(PC)` — save program counter
 3. `IVEC_ID ← vector_number`
 4. `PC ← mem64(IVT_BASE + 8 × vector_number)` — jump to handler
 5. `IE ← 0` — disable further interrupts
+6. `PRIV ← 0` — escalate to supervisor mode
 
 ### Return from Interrupt
 
 `RTI` reverses the process:
 1. `PC ← pop64()` — restore program counter
-2. `FLAGS ← pop64()` — restore flags (including IE, so interrupts re-enable)
+2. `qword ← pop64()` — restore flags from bits 7:0, privilege from bit 8
+3. `FLAGS ← qword[7:0]` (including IE, so interrupts re-enable)
+4. `PRIV ← qword[8]` — restore privilege level
 
 ---
 

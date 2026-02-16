@@ -399,6 +399,82 @@ IMM (arithmetic immediates), ALU, CSR (reduced set), and CALL.L / RET.L.
 
 Estimated area savings: ~300 FFs / ~200 LUTs per micro-core vs a full core.
 
+### Privilege Model
+
+The Megapad-64 implements a two-level privilege model:
+
+| Level | Value | Name | Context |
+|-------|-------|------|---------|
+| 0 | `PRIV=0` | **Supervisor** | BIOS, KDOS, interrupt/trap handlers |
+| 1 | `PRIV=1` | **User** | Application code |
+
+The current privilege level is stored in **CSR_PRIV** (address `0x0A`).
+The CPU resets to supervisor mode (level 0).
+
+#### Privilege Transitions
+
+```
+                ┌──────────────┐
+                │  Supervisor  │  ←── Reset, TRAP, IRQ
+                │   (priv=0)   │
+                └──────┬───────┘
+                       │ CSRW CSR_PRIV, 1
+                       ▼
+                ┌──────────────┐
+                │    User      │  ←── Application code
+                │   (priv=1)   │
+                └──────┬───────┘
+                       │ TRAP / IRQ / privilege fault
+                       ▼
+                ┌──────────────┐
+                │  Supervisor  │  ←── Handler runs in supervisor mode
+                │   (priv=0)   │
+                └──────┬───────┘
+                       │ RTI (restores saved privilege from bit 8 of flags qword)
+                       ▼
+                ┌──────────────┐
+                │  Restored    │  ←── Returns to whatever level was saved
+                └──────────────┘
+```
+
+#### Restricted Operations
+
+The following instruction families and sub-operations are **supervisor-only**.
+Executing them from user mode triggers an `IVEC_PRIV_FAULT` (vector 15):
+
+| Category | Opcodes | Rationale |
+|----------|---------|-----------|
+| MEMALU (family 0x8) | LDX, OR.X, ADD.X, etc. | Operate on D + M(R(X)); 1802 heritage |
+| Port I/O (family 0x9) | OUT 1–7, INP 1–7 | Direct hardware I/O access |
+| SEP (family 0xA) | SEP Rn | Arbitrary PC register swap |
+| SEX (family 0xB) | SEX Rn | Arbitrary data pointer swap |
+| SYS sub-ops 0x5–0xA | RET, DIS, MARK, SAV, SEQ, REQ | 1802 SCRT + Q flip-flop |
+| IMM sub-ops 0xC–0xF | GLO, GHI, PLO, PHI | D ↔ GPR byte transfer |
+
+Additionally, **CSR writes** to the following registers are supervisor-only:
+
+| CSR | Address | Reason |
+|-----|---------|--------|
+| CSR_PRIV | `0x0A` | Controls privilege level itself |
+| CSR_IVT_BASE | `0x04` | Relocates interrupt vector table |
+| CSR_IE | `0x09` | Enables/disables interrupts globally |
+| CSR_BIST_CMD | `0x60` | Triggers memory self-test |
+| CSR_ICACHE_CTRL | `0x70` | Cache enable/invalidate |
+
+CSR **reads** are unrestricted — user code can freely inspect any CSR.
+
+#### Privilege in Trap/Interrupt Context
+
+When a TRAP instruction or hardware interrupt fires, the CPU:
+1. Pushes a 64-bit flags qword with **bit 8 = current privilege level**
+2. Pushes the 64-bit PC
+3. Sets `priv_level ← 0` (escalate to supervisor)
+
+When RTI executes, it restores the privilege level from bit 8 of the
+popped flags qword.  This is backward-compatible: code written before
+the privilege model pushes flags with bit 8 = 0 (supervisor), which is
+the correct default for pre-privilege firmware.
+
 ---
 
 ## Software Architecture

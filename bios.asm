@@ -6940,6 +6940,29 @@ bus_fault_handler:
     halt
 
 ; =====================================================================
+;  Privilege Fault Handler
+; =====================================================================
+priv_fault_handler:
+    ldi64 r8, 0xFFFF_FF00_0000_0000
+    ldi64 r4, emit_char
+    ldi64 r5, key_char
+    ldi64 r6, print_hex_byte
+    csrr r0, 0x25                    ; CSR_TRAP_ADDR
+    ldi64 r10, str_privfault
+    ldi64 r11, print_str
+    call.l r11
+    mov r1, r0
+    ldi64 r11, print_hex32
+    call.l r11
+    ldi64 r11, print_crlf
+    call.l r11
+    ; Resume REPL (in supervisor mode — RTI from trap already escalated)
+    addi r15, 16
+    ldi64 r11, quit_loop
+    call.l r11
+    halt
+
+; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
 ; =====================================================================
 ;
@@ -11290,6 +11313,8 @@ str_fsload_err:
 
 str_busfault:
     .asciiz "\n*** BUS FAULT @ "
+str_privfault:
+    .asciiz "\n*** PRIVILEGE FAULT @ "
 
 ; =====================================================================
 ;  IVT (Interrupt Vector Table)
@@ -11304,6 +11329,13 @@ ivt_table:
     .dq 0                            ; [6] SW TRAP
     .dq 0                            ; [7] TIMER — installed by KDOS via ISR!
     .dq ipi_handler                  ; [8] IPI — inter-processor interrupt
+    .dq 0                            ; [9] reserved
+    .dq 0                            ; [10] reserved
+    .dq 0                            ; [11] reserved
+    .dq 0                            ; [12] reserved
+    .dq 0                            ; [13] reserved
+    .dq 0                            ; [14] reserved
+    .dq priv_fault_handler           ; [15] PRIVILEGE FAULT
 
 ; =====================================================================
 ;  TIB (Text Input Buffer) — 256 bytes

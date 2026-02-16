@@ -132,6 +132,9 @@ module mp64_cpu (
     reg [7:0]  ivec_id;    // current interrupt vector ID
     reg [63:0] trap_addr;  // faulting address
 
+    // Privilege level: 0 = supervisor, 1 = user
+    reg        priv_level;
+
     // Performance counters (per-core)
     reg [63:0] perf_cycles;     // total clock cycles
     reg [63:0] perf_stalls;     // stall cycles (waiting for bus/memory)
@@ -294,6 +297,7 @@ module mp64_cpu (
             ivt_base  <= 64'd0;
             ivec_id   <= 8'd0;
             trap_addr <= 64'd0;
+            priv_level <= 1'b0;   // supervisor mode on reset
             D         <= 8'd0;
             Q         <= 1'b0;
             T         <= 8'd0;
@@ -536,6 +540,7 @@ module mp64_cpu (
                                 xsel  <= 4'd2;
                                 spsel <= 4'd15;
                                 flags <= 8'h40;
+                                priv_level <= 1'b0;  // supervisor
                                 D <= 8'd0;
                                 Q <= 1'b0;
                                 T <= 8'd0;
@@ -637,6 +642,7 @@ module mp64_cpu (
                                 effective_addr <= R[spsel] - 64'd8;
                                 mem_data <= R[psel] + {60'd0, ibuf_need}; // ret addr
                                 flags[6] <= 1'b0;  // disable interrupts
+                                priv_level <= 1'b0; // escalate to supervisor
                                 ivec_id <= 8'd6;    // IVEC_SW_TRAP
                                 post_action <= POST_IRQ_VEC;
                                 bus_size <= BUS_DWORD;
@@ -956,6 +962,18 @@ module mp64_cpu (
                     // --------------------------------------------------------
                     else if (fam == FAM_MEMALU) begin
                         ext_active <= 1'b0;
+                        if (priv_level) begin
+                            // Privilege violation — trap
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_PRIV;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
                         memalu_sub <= nib;
 
                         case (nib)
@@ -1002,6 +1020,7 @@ module mp64_cpu (
                                 cpu_state <= CPU_MEMALU_RD;
                             end
                         endcase
+                        end // priv_level else
                     end
 
                     // --------------------------------------------------------
@@ -1009,6 +1028,18 @@ module mp64_cpu (
                     // --------------------------------------------------------
                     else if (fam == FAM_IO) begin
                         ext_active <= 1'b0;
+                        if (priv_level) begin
+                            // Privilege violation
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_PRIV;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
                         if (nib >= 4'd1 && nib <= 4'd7) begin
                             // OUT N: read M(R(X)), write to MMIO port, R(X)++
                             io_port <= nib[2:0];
@@ -1030,6 +1061,7 @@ module mp64_cpu (
                         end else begin
                             cpu_state <= CPU_FETCH; // OUT 0 / INP 0 = no-op
                         end
+                        end // priv_level else
                     end
 
                     // --------------------------------------------------------
@@ -1037,10 +1069,22 @@ module mp64_cpu (
                     // --------------------------------------------------------
                     else if (fam == FAM_SEP) begin
                         ext_active <= 1'b0;
+                        if (priv_level) begin
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_PRIV;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
                         psel <= nib;
                         // PC register changed — sync fetch_pc to new PC
                         fetch_pc <= R[nib];
                         cpu_state <= CPU_FETCH;
+                        end
                     end
 
                     // --------------------------------------------------------
@@ -1048,8 +1092,20 @@ module mp64_cpu (
                     // --------------------------------------------------------
                     else if (fam == FAM_SEX) begin
                         ext_active <= 1'b0;
+                        if (priv_level) begin
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_PRIV;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
                         xsel <= nib;
                         cpu_state <= CPU_FETCH;
+                        end
                     end
 
                     // --------------------------------------------------------
@@ -1163,6 +1219,7 @@ module mp64_cpu (
                                 CSR_QREG:    Q        <= R[nib[2:0]][0];
                                 CSR_TREG:    T        <= R[nib[2:0]][7:0];
                                 CSR_IE:      flags[6] <= R[nib[2:0]][0];
+                                CSR_PRIV:    if (!priv_level) priv_level <= R[nib[2:0]][0]; // S-mode only
                                 CSR_IVEC_ID: ivec_id  <= R[nib[2:0]][7:0];
                                 CSR_PERF_CTRL: begin
                                     perf_enable <= R[nib[2:0]][0];
@@ -1228,6 +1285,7 @@ module mp64_cpu (
                                 CSR_QREG:       R[nib[2:0]] <= {63'd0, Q};
                                 CSR_TREG:       R[nib[2:0]] <= {56'd0, T};
                                 CSR_IE:         R[nib[2:0]] <= {63'd0, flags[6]};
+                                CSR_PRIV:       R[nib[2:0]] <= {63'd0, priv_level};
                                 CSR_COREID:     R[nib[2:0]] <= {62'd0, core_id};
                                 CSR_NCORES:     R[nib[2:0]] <= NUM_ALL_CORES;
                                 CSR_IVEC_ID:    R[nib[2:0]] <= {56'd0, ivec_id};
@@ -1381,6 +1439,7 @@ module mp64_cpu (
                     if (bus_ready) begin
                         bus_valid <= 1'b0;  // deassert to prevent spurious re-request
                         flags <= bus_rdata[7:0];
+                        priv_level <= bus_rdata[8]; // restore privilege from saved context
                         cpu_state <= CPU_FETCH;
                     end
                 end
@@ -1406,12 +1465,12 @@ module mp64_cpu (
                         if (mem_sub == 4'h5)
                             R[xsel] <= R[xsel] - 64'd8;
 
-                        // Post-action: after TRAP/IRQ push PC, push flags
+                        // Post-action: after TRAP/IRQ push PC, push flags+priv
                         if (post_action == POST_IRQ_VEC) begin
-                            // Push flags next
+                            // Push flags next (bit 8 = saved privilege level)
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= {56'd0, flags};
+                            mem_data <= {55'd0, priv_level, flags};
                             post_action <= POST_NONE;
                             cpu_state <= CPU_IRQ_PUSH;
                         end else begin
@@ -1599,6 +1658,7 @@ module mp64_cpu (
                     mem_data <= R[psel];
                     bus_size <= BUS_DWORD;
                     flags[6] <= 1'b0;  // disable interrupts
+                    priv_level <= 1'b0; // escalate to supervisor
                     ivec_id <= {4'd0, irq_vector};
                     post_action <= POST_IRQ_VEC;
                     cpu_state <= CPU_MEM_WRITE;

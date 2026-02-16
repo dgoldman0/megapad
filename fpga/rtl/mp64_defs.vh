@@ -284,6 +284,7 @@ parameter [7:0] CSR_DF       = 8'h06;   // Legacy 1802 DF (carry alias)
 parameter [7:0] CSR_QREG     = 8'h07;   // Legacy 1802 Q output flip-flop
 parameter [7:0] CSR_TREG     = 8'h08;   // Legacy 1802 T register (saved X|P)
 parameter [7:0] CSR_IE       = 8'h09;   // Interrupt enable (alias of flag_i)
+parameter [7:0] CSR_PRIV     = 8'h0A;   // Privilege level (0=supervisor, 1=user)
 parameter [7:0] CSR_SB       = 8'h10;   // Tile bank
 parameter [7:0] CSR_SR       = 8'h11;   // Tile cursor row
 parameter [7:0] CSR_SC       = 8'h12;   // Tile cursor col
@@ -387,6 +388,7 @@ parameter [3:0] IRQX_DISK    = 4'd11;
 parameter [3:0] IRQX_AES     = 4'd12;
 parameter [3:0] IRQX_SHA     = 4'd13;
 parameter [3:0] IRQX_DMA     = 4'd14;
+parameter [3:0] IRQX_PRIV    = 4'd15;    // Privilege violation
 
 // AES-256-GCM register offsets (from AES_BASE)
 parameter [6:0] AES_KEY0     = 7'h00;  // ..0x1F: 256-bit key (8×32)
