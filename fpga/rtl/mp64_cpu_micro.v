@@ -386,7 +386,7 @@ module mp64_cpu_micro #(
                                 effective_addr <= R[spsel] - 64'd8;
                                 mem_data <= R[psel];
                                 flags[6] <= 1'b0;
-                                ivec_id <= `IVEC_ILLEGAL_OP;
+                                ivec_id <= IRQX_ILLEGAL_OP;
                                 post_action <= POST_IRQ_VEC;
                                 bus_size <= BUS_DWORD;
                                 cpu_state <= CPU_MEM_WRITE;
@@ -449,7 +449,7 @@ module mp64_cpu_micro #(
                         ext_active <= 1'b0;
                         if (ext_active && ext_mod == 4'd6) begin
                             // SKIP mode
-                            if (cond_eval(nib, flags, Q, ef_flags)) begin
+                            if (cond_eval(nib, flags, 1'b0, ef_flags)) begin
                                 bus_valid <= 1'b1;
                                 bus_addr  <= R[psel] + {60'd0, ibuf_len};
                                 bus_wen   <= 1'b0;
@@ -459,7 +459,7 @@ module mp64_cpu_micro #(
                                 cpu_state <= CPU_FETCH;
                             end
                         end else begin
-                            if (cond_eval(nib, flags, Q, ef_flags)) begin
+                            if (cond_eval(nib, flags, 1'b0, ef_flags)) begin
                                 R[psel] <= R[psel]
                                            + {{56{ibuf[1][7]}}, ibuf[1]}
                                            - {60'd0, ibuf_len};
@@ -473,7 +473,7 @@ module mp64_cpu_micro #(
                     // --------------------------------------------------------
                     else if (fam == FAM_LBR) begin
                         ext_active <= 1'b0;
-                        if (cond_eval(nib, flags, Q, ef_flags)) begin
+                        if (cond_eval(nib, flags, 1'b0, ef_flags)) begin
                             R[psel] <= R[psel]
                                        + {{48{ibuf[1][7]}}, ibuf[1], ibuf[2]}
                                        - {60'd0, ibuf_len};
@@ -668,7 +668,7 @@ module mp64_cpu_micro #(
                                     effective_addr <= R[spsel] - 64'd8;
                                     mem_data <= R[psel];
                                     flags[6] <= 1'b0;
-                                    ivec_id <= `IVEC_ILLEGAL_OP;
+                                    ivec_id <= IRQX_ILLEGAL_OP;
                                     post_action <= POST_IRQ_VEC;
                                     bus_size <= BUS_DWORD;
                                     cpu_state <= CPU_MEM_WRITE;
@@ -717,7 +717,7 @@ module mp64_cpu_micro #(
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];
                         flags[6] <= 1'b0;
-                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        ivec_id <= IRQX_ILLEGAL_OP;
                         post_action <= POST_IRQ_VEC;
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;
@@ -733,7 +733,7 @@ module mp64_cpu_micro #(
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];
                         flags[6] <= 1'b0;
-                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        ivec_id <= IRQX_ILLEGAL_OP;
                         post_action <= POST_IRQ_VEC;
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;
@@ -749,7 +749,7 @@ module mp64_cpu_micro #(
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];
                         flags[6] <= 1'b0;
-                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        ivec_id <= IRQX_ILLEGAL_OP;
                         post_action <= POST_IRQ_VEC;
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;
@@ -765,7 +765,7 @@ module mp64_cpu_micro #(
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];
                         flags[6] <= 1'b0;
-                        ivec_id <= `IVEC_ILLEGAL_OP;
+                        ivec_id <= IRQX_ILLEGAL_OP;
                         post_action <= POST_IRQ_VEC;
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;

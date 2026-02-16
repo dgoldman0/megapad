@@ -285,6 +285,8 @@ parameter [7:0] CSR_QREG     = 8'h07;   // Legacy 1802 Q output flip-flop
 parameter [7:0] CSR_TREG     = 8'h08;   // Legacy 1802 T register (saved X|P)
 parameter [7:0] CSR_IE       = 8'h09;   // Interrupt enable (alias of flag_i)
 parameter [7:0] CSR_PRIV     = 8'h0A;   // Privilege level (0=supervisor, 1=user)
+parameter [7:0] CSR_MPU_BASE = 8'h0B;   // MPU lower bound (inclusive)
+parameter [7:0] CSR_MPU_LIMIT= 8'h0C;   // MPU upper bound (exclusive)
 parameter [7:0] CSR_SB       = 8'h10;   // Tile bank
 parameter [7:0] CSR_SR       = 8'h11;   // Tile cursor row
 parameter [7:0] CSR_SC       = 8'h12;   // Tile cursor col
@@ -379,6 +381,10 @@ parameter [2:0] IRQ_DIVZ   = 3'd4;
 parameter [2:0] IRQ_BUS    = 3'd5;
 parameter [2:0] IRQ_SWTRAP = 3'd6;
 parameter [2:0] IRQ_TIMER  = 3'd7;
+
+// Software / internal interrupt vectors (IVT indices 0-7)
+parameter [7:0] IRQX_ILLEGAL_OP = 8'd4;  // Illegal opcode trap
+parameter [7:0] IRQX_SW_TRAP    = 8'd6;  // Software TRAP instruction
 
 // Extended interrupt sources (active on per-core irq_ext lines)
 parameter [3:0] IRQX_IPI     = 4'd8;     // Inter-processor interrupt

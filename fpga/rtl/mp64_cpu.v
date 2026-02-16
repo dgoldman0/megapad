@@ -135,6 +135,23 @@ module mp64_cpu (
     // Privilege level: 0 = supervisor, 1 = user
     reg        priv_level;
 
+    // Memory Protection Unit
+    reg [63:0] mpu_base;   // user-mode lower bound (inclusive)
+    reg [63:0] mpu_limit;  // user-mode upper bound (exclusive)
+
+    // MPU fault detection (combinational)
+    // Fires when: user mode, MPU enabled (limit > base), and
+    //   addr is outside [base, limit) OR addr is in HBW range.
+    // MMIO addresses (addr[63:32] != 0) bypass this check entirely.
+    wire mpu_enabled = priv_level && (mpu_limit > mpu_base);
+    wire addr_is_hbw = (effective_addr[63:32] == 32'd0)
+                     && (effective_addr[31:20] >= 12'hFFD);
+    wire addr_is_mmio = (effective_addr[63:32] == MMIO_HI);
+    wire mpu_fault = priv_level && !addr_is_mmio && (
+        addr_is_hbw ||
+        (mpu_enabled && (effective_addr < mpu_base || effective_addr >= mpu_limit))
+    );
+
     // Performance counters (per-core)
     reg [63:0] perf_cycles;     // total clock cycles
     reg [63:0] perf_stalls;     // stall cycles (waiting for bus/memory)
@@ -298,6 +315,8 @@ module mp64_cpu (
             ivec_id   <= 8'd0;
             trap_addr <= 64'd0;
             priv_level <= 1'b0;   // supervisor mode on reset
+            mpu_base   <= 64'd0;
+            mpu_limit  <= 64'd0;
             D         <= 8'd0;
             Q         <= 1'b0;
             T         <= 8'd0;
@@ -643,7 +662,7 @@ module mp64_cpu (
                                 mem_data <= R[psel] + {60'd0, ibuf_need}; // ret addr
                                 flags[6] <= 1'b0;  // disable interrupts
                                 priv_level <= 1'b0; // escalate to supervisor
-                                ivec_id <= 8'd6;    // IVEC_SW_TRAP
+                                ivec_id <= IRQX_SW_TRAP;
                                 post_action <= POST_IRQ_VEC;
                                 bus_size <= BUS_DWORD;
                                 cpu_state <= CPU_MEM_WRITE;
@@ -1142,7 +1161,7 @@ module mp64_cpu (
                             4'h4: begin // DIV (signed)
                                 if (R[ibuf[1][3:0]] == 64'd0) begin
                                     // divide-by-zero trap
-                                    ivec_id <= 8'd4;
+                                    ivec_id <= IRQX_ILLEGAL_OP;
                                     cpu_state <= CPU_IRQ;
                                 end else begin
                                     R[ibuf[1][7:4]] <=
@@ -1157,7 +1176,7 @@ module mp64_cpu (
                             end
                             4'h5: begin // UDIV
                                 if (R[ibuf[1][3:0]] == 64'd0) begin
-                                    ivec_id <= 8'd4;
+                                    ivec_id <= IRQX_ILLEGAL_OP;
                                     cpu_state <= CPU_IRQ;
                                 end else begin
                                     R[0] <= R[ibuf[1][7:4]] %
@@ -1170,7 +1189,7 @@ module mp64_cpu (
                             end
                             4'h6: begin // MOD (signed)
                                 if (R[ibuf[1][3:0]] == 64'd0) begin
-                                    ivec_id <= 8'd4;
+                                    ivec_id <= IRQX_ILLEGAL_OP;
                                     cpu_state <= CPU_IRQ;
                                 end else begin
                                     R[ibuf[1][7:4]] <=
@@ -1181,7 +1200,7 @@ module mp64_cpu (
                             end
                             4'h7: begin // UMOD
                                 if (R[ibuf[1][3:0]] == 64'd0) begin
-                                    ivec_id <= 8'd4;
+                                    ivec_id <= IRQX_ILLEGAL_OP;
                                     cpu_state <= CPU_IRQ;
                                 end else begin
                                     R[ibuf[1][7:4]] <=
@@ -1220,6 +1239,8 @@ module mp64_cpu (
                                 CSR_TREG:    T        <= R[nib[2:0]][7:0];
                                 CSR_IE:      flags[6] <= R[nib[2:0]][0];
                                 CSR_PRIV:    if (!priv_level) priv_level <= R[nib[2:0]][0]; // S-mode only
+                                CSR_MPU_BASE: if (!priv_level) mpu_base <= R[nib[2:0]]; // S-mode only
+                                CSR_MPU_LIMIT:if (!priv_level) mpu_limit <= R[nib[2:0]]; // S-mode only
                                 CSR_IVEC_ID: ivec_id  <= R[nib[2:0]][7:0];
                                 CSR_PERF_CTRL: begin
                                     perf_enable <= R[nib[2:0]][0];
@@ -1286,6 +1307,8 @@ module mp64_cpu (
                                 CSR_TREG:       R[nib[2:0]] <= {56'd0, T};
                                 CSR_IE:         R[nib[2:0]] <= {63'd0, flags[6]};
                                 CSR_PRIV:       R[nib[2:0]] <= {63'd0, priv_level};
+                                CSR_MPU_BASE:   R[nib[2:0]] <= mpu_base;
+                                CSR_MPU_LIMIT:  R[nib[2:0]] <= mpu_limit;
                                 CSR_COREID:     R[nib[2:0]] <= {62'd0, core_id};
                                 CSR_NCORES:     R[nib[2:0]] <= NUM_ALL_CORES;
                                 CSR_IVEC_ID:    R[nib[2:0]] <= {56'd0, ivec_id};
@@ -1355,6 +1378,19 @@ module mp64_cpu (
                 // MEM_READ: wait for bus, handle sign-extension, post-ops
                 // ============================================================
                 CPU_MEM_READ: begin
+                    // MPU check: only for user-initiated accesses (not trap pushes)
+                    if (mpu_fault && post_action == POST_NONE) begin
+                        trap_addr <= effective_addr;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        priv_level <= 1'b0;
+                        ivec_id <= IRQX_PRIV;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else begin
                     bus_valid <= 1'b1;
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
@@ -1427,6 +1463,7 @@ module mp64_cpu (
                             cpu_state <= CPU_FETCH;
                         end
                     end
+                    end // else (no MPU fault)
                 end
 
                 // ============================================================
@@ -1448,6 +1485,19 @@ module mp64_cpu (
                 // MEM_WRITE: wait for bus to accept write
                 // ============================================================
                 CPU_MEM_WRITE: begin
+                    // MPU check: only for user-initiated accesses (not trap pushes)
+                    if (mpu_fault && post_action == POST_NONE) begin
+                        trap_addr <= effective_addr;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        priv_level <= 1'b0;
+                        ivec_id <= IRQX_PRIV;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else begin
                     bus_valid <= 1'b1;
                     bus_addr  <= effective_addr;
                     bus_wdata <= mem_data;
@@ -1477,6 +1527,7 @@ module mp64_cpu (
                             cpu_state <= CPU_FETCH;
                         end
                     end
+                    end // else (no MPU fault)
                 end
 
                 // ============================================================

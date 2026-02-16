@@ -538,6 +538,8 @@ low nibble of the opcode byte.
 | `0x08` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
 | `0x09` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
 | `0x0A` | **PRIV** | 1 | RW | Privilege level: 0=supervisor, 1=user.  Write is **supervisor-only**. |
+| `0x0B` | **MPU_BASE** | 64 | RW | MPU base address (inclusive).  Write is **supervisor-only**. |
+| `0x0C` | **MPU_LIMIT** | 64 | RW | MPU limit address (exclusive).  Write is **supervisor-only**. |
 | | | | | |
 | `0x10` | **SB** | 4 | RW | Tile bank selector |
 | `0x11` | **SR** | 20 | RW | Tile row cursor |
@@ -603,7 +605,34 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 | 8 | `IVEC_UART` | UART | UART RX data available (when IE=1 and UART IRQ enabled) |
 | 9 | `IVEC_NIC` | NIC | NIC RX frame available (when IE=1 and NIC IRQ enabled) |
 | … | | | *(vectors 10–14 reserved)* |
-| 15 | `IVEC_PRIV_FAULT` | Privilege Fault | User-mode code executed a supervisor-only instruction or wrote a protected CSR |
+| 15 | `IVEC_PRIV_FAULT` | Privilege Fault | User-mode code executed a supervisor-only instruction, wrote a protected CSR, or triggered an MPU violation (access outside [MPU_BASE, MPU_LIMIT) or to HBW) |
+
+### Memory Protection Unit (MPU)
+
+The MPU enforces address-range checks on **user-mode data accesses** (loads
+and stores).  It is controlled by two supervisor-only CSRs:
+
+| CSR | Description |
+|-----|-------------|
+| `MPU_BASE` (0x0B) | Lower bound of the allowed address window (inclusive) |
+| `MPU_LIMIT` (0x0C) | Upper bound of the allowed address window (exclusive) |
+
+**Rules** (evaluated only when `PRIV == 1`, i.e. user mode):
+
+1. **MMIO** (`addr[63:32] == 0xFFFF_FF00`) — always allowed (device I/O is
+   mediated by the kernel via port words).
+2. **HBW** (High Block Window, `addr[31:20] >= 0xFFD` with `addr[63:32] == 0`)
+   — always blocked for user mode regardless of MPU window.
+3. **RAM** — allowed only if `MPU_BASE <= addr < MPU_LIMIT` (when
+   `MPU_LIMIT > MPU_BASE`; if `MPU_LIMIT <= MPU_BASE` the MPU window is
+   disabled and all RAM is accessible).
+
+A violation fires `IVEC_PRIV_FAULT` (vector 15) with the faulting address
+saved in `TRAP_ADDR`.  Supervisor mode (`PRIV == 0`) is never checked —
+all addresses are accessible.
+
+Micro-cores do not implement the MPU (they have no privilege model and run
+exclusively in supervisor-equivalent mode).
 
 ### Trap Entry Sequence
 
