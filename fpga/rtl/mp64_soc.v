@@ -77,7 +77,7 @@ module mp64_soc (
 
     // --- Per-core tile engine wires (need arbiter for Port A) ---
     wire [NUM_CORES-1:0]        tile_int_req;
-    wire [NUM_CORES*20-1:0]     tile_int_addr;
+    wire [NUM_CORES*32-1:0]     tile_int_addr;
     wire [NUM_CORES-1:0]        tile_int_wen;
     wire [NUM_CORES*512-1:0]    tile_int_wdata;
     wire [NUM_CORES*512-1:0]    tile_int_rdata;
@@ -148,7 +148,7 @@ module mp64_soc (
 
     // --- Tile Port A (shared, arbitrated) ---
     wire        tile_arb_req;
-    wire [19:0] tile_arb_addr;
+    wire [31:0] tile_arb_addr;
     wire        tile_arb_wen;
     wire [511:0] tile_arb_wdata;
     wire [511:0] tile_arb_rdata;
@@ -260,9 +260,12 @@ module mp64_soc (
     end
 
     assign sysinfo_rdata = (mmio_addr[7:0] == 8'h00) ? 64'h4D50_3634_0002_0001 :  // "MP64" v2.1 (multi-core)
-                           (mmio_addr[7:0] == 8'h08) ? 64'd1048576               :  // RAM size
+                           (mmio_addr[7:0] == 8'h08) ? 64'd1048576               :  // Bank 0 size (1 MiB)
                            (mmio_addr[7:0] == 8'h10) ? NUM_ALL_CORES[63:0]      :  // Core count
                            (mmio_addr[7:0] == 8'h18) ? {{(64-NUM_CLUSTERS){1'b0}}, cluster_en} :  // Cluster enable
+                           (mmio_addr[7:0] == 8'h20) ? {32'd0, HBW_BASE_ADDR}   :  // HBW base address
+                           (mmio_addr[7:0] == 8'h28) ? 64'd3145728              :  // HBW size (3 MiB)
+                           (mmio_addr[7:0] == 8'h30) ? INT_MEM_TOTAL[63:0]      :  // Total internal BRAM (4 MiB)
                            64'd0;
 
     // DMA ack stubs
@@ -488,7 +491,7 @@ module mp64_soc (
 
                 // Internal BRAM Port A (goes to tile arbiter)
                 .tile_req       (tile_int_req  [c]),
-                .tile_addr      (tile_int_addr [c*20 +: 20]),
+                .tile_addr      (tile_int_addr [c*32 +: 32]),
                 .tile_wen       (tile_int_wen  [c]),
                 .tile_wdata     (tile_int_wdata[c*512 +: 512]),
                 .tile_rdata     (tile_int_rdata[c*512 +: 512]),
@@ -605,7 +608,7 @@ module mp64_soc (
     // Tile arbiter state
     assign tile_arb_req   = tile_any && !tile_busy ? 1'b1 :
                             tile_busy              ? 1'b1 : 1'b0;
-    assign tile_arb_addr  = tile_int_addr [tile_grant*20 +: 20];
+    assign tile_arb_addr  = tile_int_addr [tile_grant*32 +: 32];
     assign tile_arb_wen   = tile_int_wen  [tile_grant];
     assign tile_arb_wdata = tile_int_wdata[tile_grant*512 +: 512];
 
@@ -733,7 +736,7 @@ module mp64_soc (
     );
 
     // ========================================================================
-    // Dual-Port Memory (1 MiB shared BRAM)
+    // Banked Memory (4 MiB: 1 MiB system + 3 MiB HBW)
     // ========================================================================
     mp64_memory u_memory (
         .clk        (sys_clk),

@@ -1,13 +1,20 @@
 // ============================================================================
-// tb_memory.v — Memory Subsystem Unit Tests
+// tb_memory.v — Banked Memory Subsystem Unit Tests
 // ============================================================================
 //
-// Tests for mp64_memory.v:
-//   1. CPU single-cycle read/write (dword, word, half, byte)
-//   2. Tile port 512-bit read/write
-//   3. Simultaneous dual-port access (no collision)
-//   4. Dual-port collision (same row) — tile has priority, CPU stalls
-//   5. External memory forwarding (address ≥ 1 MiB)
+// Tests for mp64_memory.v with 4-bank architecture:
+//   1. CPU dword read/write — Bank 0 (system BRAM)
+//   2. CPU sub-dword access (byte/half/word)
+//   3. Tile 512-bit read/write — Bank 0 (legacy)
+//   4. Dual-port no collision (different banks)
+//   5. CPU write → tile read cross-check (Bank 0)
+//   6. External memory forwarding (address between banks)
+//   7. HBW Bank 1 CPU read/write (0xFFD0_xxxx)
+//   8. HBW Bank 2 CPU read/write (0xFFE0_xxxx)
+//   9. HBW Bank 3 CPU read/write (0xFFF0_xxxx)
+//  10. HBW tile 512-bit read/write (Bank 1)
+//  11. Bank isolation (write to one, others unchanged)
+//  12. HBW cross-bank tile operations
 //
 
 `timescale 1ns / 1ps
@@ -28,9 +35,9 @@ module tb_memory;
     wire [63:0] cpu_rdata;
     wire        cpu_ack;
 
-    // === Tile port ===
+    // === Tile port (32-bit address) ===
     reg         tile_req;
-    reg  [19:0] tile_addr;
+    reg  [31:0] tile_addr;
     reg         tile_wen;
     reg  [511:0] tile_wdata;
     wire [511:0] tile_rdata;
@@ -111,7 +118,7 @@ module tb_memory;
     endtask
 
     task automatic tile_write;
-        input [19:0]  addr;
+        input [31:0]  addr;
         input [511:0] data;
     begin
         @(posedge clk);
@@ -127,7 +134,7 @@ module tb_memory;
     endtask
 
     task automatic tile_read;
-        input  [19:0]  addr;
+        input  [31:0]  addr;
         output [511:0] data;
     begin
         @(posedge clk);
@@ -191,11 +198,11 @@ module tb_memory;
         rst_n = 1;
         @(posedge clk);
 
-        // ====== TEST 1: CPU dword write + read ======
-        $display("\n=== TEST 1: CPU dword write/read ===");
+        // ====== TEST 1: CPU dword write + read (Bank 0) ======
+        $display("\n=== TEST 1: CPU dword write/read (Bank 0) ===");
         cpu_write(64'h0000_0100, 64'hDEAD_BEEF_CAFE_BABE, BUS_DWORD);
         cpu_read (64'h0000_0100, BUS_DWORD, rd64);
-        check64(rd64, 64'hDEAD_BEEF_CAFE_BABE, "dword");
+        check64(rd64, 64'hDEAD_BEEF_CAFE_BABE, "bank0 dword");
 
         // ====== TEST 2: CPU byte / half / word access ======
         $display("\n=== TEST 2: sub-dword access ===");
@@ -212,22 +219,20 @@ module tb_memory;
         cpu_read (64'h0000_0200, BUS_WORD, rd64);
         check64(rd64, 64'h0506_0708, "word");
 
-        // ====== TEST 3: Tile 512-bit write + read ======
-        $display("\n=== TEST 3: Tile 512-bit write/read ===");
+        // ====== TEST 3: Tile 512-bit write + read (Bank 0) ======
+        $display("\n=== TEST 3: Tile 512-bit write/read (Bank 0) ===");
         begin : tile_test
             reg [511:0] tile_pattern;
             tile_pattern = 512'd0;
             for (i = 0; i < 64; i = i + 1)
-                tile_pattern[i*8 +: 8] = i[7:0];   // bytes 0x00..0x3F
-            tile_write(20'h0_0000, tile_pattern);
-            tile_read (20'h0_0000, rd512);
-            check512(rd512, tile_pattern, "tile rw");
+                tile_pattern[i*8 +: 8] = i[7:0];
+            tile_write(32'h0000_0000, tile_pattern);
+            tile_read (32'h0000_0000, rd512);
+            check512(rd512, tile_pattern, "bank0 tile rw");
         end
 
-        // ====== TEST 4: Dual-port — different rows (no collision) ======
+        // ====== TEST 4: Dual-port no collision (different rows) ======
         $display("\n=== TEST 4: Dual-port no-collision ===");
-        // Write via tile to row 0 (addr 0x000), read via CPU from row 4 (addr 0x100)
-        // They are in different rows, so both should complete immediately.
         cpu_write(64'h0000_0100, 64'hAAAA_BBBB_CCCC_DDDD, BUS_DWORD);
         cpu_read (64'h0000_0100, BUS_DWORD, rd64);
         check64(rd64, 64'hAAAA_BBBB_CCCC_DDDD, "no-collision cpu");
@@ -235,19 +240,17 @@ module tb_memory;
         // ====== TEST 5: CPU write cross-check via tile ======
         $display("\n=== TEST 5: CPU write visible via tile ===");
         cpu_write(64'h0000_0000, 64'h1234_5678_9ABC_DEF0, BUS_DWORD);
-        tile_read(20'h0_0000, rd512);
-        // First dword of the row should be our value
-        check64(rd512[63:0], 64'h1234_5678_9ABC_DEF0, "cpu→tile xcheck");
+        tile_read(32'h0000_0000, rd512);
+        check64(rd512[63:0], 64'h1234_5678_9ABC_DEF0, "cpu->tile xcheck");
 
         // ====== TEST 6: External memory forwarding ======
         $display("\n=== TEST 6: External memory forwarding ===");
-        // Address >= 1 MiB → forwarded to ext_mem interface
+        // Address 0x0010_0000 is between Bank 0 and HBW — external
         fork
             begin
-                cpu_read(64'h0010_0000, BUS_DWORD, rd64);  // 1 MiB = external
+                cpu_read(64'h0010_0000, BUS_DWORD, rd64);
             end
             begin
-                // Wait for ext_req, then respond
                 @(posedge clk);
                 while (!ext_req) @(posedge clk);
                 ext_rdata <= 64'hEEEE_FFFF_0000_1111;
@@ -257,6 +260,64 @@ module tb_memory;
             end
         join
         check64(rd64, 64'hEEEE_FFFF_0000_1111, "ext fwd");
+
+        // ====== TEST 7: HBW Bank 1 CPU read/write (0xFFD0_xxxx) ======
+        $display("\n=== TEST 7: HBW Bank 1 CPU read/write ===");
+        cpu_write(64'h0000_0000_FFD0_0000, 64'hB100_B100_B100_B100, BUS_DWORD);
+        cpu_read (64'h0000_0000_FFD0_0000, BUS_DWORD, rd64);
+        check64(rd64, 64'hB100_B100_B100_B100, "bank1 dword");
+
+        cpu_write(64'h0000_0000_FFD0_0100, 64'hB1FF_B1FF_B1FF_B1FF, BUS_DWORD);
+        cpu_read (64'h0000_0000_FFD0_0100, BUS_DWORD, rd64);
+        check64(rd64, 64'hB1FF_B1FF_B1FF_B1FF, "bank1 offset");
+
+        // ====== TEST 8: HBW Bank 2 CPU read/write (0xFFE0_xxxx) ======
+        $display("\n=== TEST 8: HBW Bank 2 CPU read/write ===");
+        cpu_write(64'h0000_0000_FFE0_0000, 64'hB200_AAAA_BBBB_CCCC, BUS_DWORD);
+        cpu_read (64'h0000_0000_FFE0_0000, BUS_DWORD, rd64);
+        check64(rd64, 64'hB200_AAAA_BBBB_CCCC, "bank2 dword");
+
+        // ====== TEST 9: HBW Bank 3 CPU read/write (0xFFF0_xxxx) ======
+        $display("\n=== TEST 9: HBW Bank 3 CPU read/write ===");
+        cpu_write(64'h0000_0000_FFF0_0000, 64'hB300_DEAD_FACE_CAFE, BUS_DWORD);
+        cpu_read (64'h0000_0000_FFF0_0000, BUS_DWORD, rd64);
+        check64(rd64, 64'hB300_DEAD_FACE_CAFE, "bank3 dword");
+
+        // ====== TEST 10: HBW tile 512-bit read/write (Bank 1) ======
+        $display("\n=== TEST 10: HBW tile 512-bit read/write (Bank 1) ===");
+        begin : hbw_tile
+            reg [511:0] hbw_pattern;
+            hbw_pattern = 512'd0;
+            for (i = 0; i < 64; i = i + 1)
+                hbw_pattern[i*8 +: 8] = (64 + i) & 8'hFF;
+            tile_write(32'hFFD0_0040, hbw_pattern);  // offset 0x40 = row 1
+            tile_read (32'hFFD0_0040, rd512);
+            check512(rd512, hbw_pattern, "bank1 tile rw");
+        end
+
+        // ====== TEST 11: Bank isolation ======
+        $display("\n=== TEST 11: Bank isolation ===");
+        // Write unique values to addr 0x0008 in each bank
+        cpu_write(64'h0000_0008, 64'hB0B0_B0B0_B0B0_B0B0, BUS_DWORD);            // Bank 0
+        cpu_write(64'h0000_0000_FFD0_0008, 64'hB1B1_B1B1_B1B1_B1B1, BUS_DWORD);  // Bank 1
+        cpu_write(64'h0000_0000_FFE0_0008, 64'hB2B2_B2B2_B2B2_B2B2, BUS_DWORD);  // Bank 2
+        cpu_write(64'h0000_0000_FFF0_0008, 64'hB3B3_B3B3_B3B3_B3B3, BUS_DWORD);  // Bank 3
+
+        // Read back — each should have its own value
+        cpu_read(64'h0000_0008, BUS_DWORD, rd64);
+        check64(rd64, 64'hB0B0_B0B0_B0B0_B0B0, "iso bank0");
+        cpu_read(64'h0000_0000_FFD0_0008, BUS_DWORD, rd64);
+        check64(rd64, 64'hB1B1_B1B1_B1B1_B1B1, "iso bank1");
+        cpu_read(64'h0000_0000_FFE0_0008, BUS_DWORD, rd64);
+        check64(rd64, 64'hB2B2_B2B2_B2B2_B2B2, "iso bank2");
+        cpu_read(64'h0000_0000_FFF0_0008, BUS_DWORD, rd64);
+        check64(rd64, 64'hB3B3_B3B3_B3B3_B3B3, "iso bank3");
+
+        // ====== TEST 12: HBW CPU write → tile read cross-check ======
+        $display("\n=== TEST 12: HBW CPU→tile cross-check ===");
+        cpu_write(64'h0000_0000_FFE0_0000, 64'hCB01_CB02_CB03_CB04, BUS_DWORD);
+        tile_read(32'hFFE0_0000, rd512);
+        check64(rd512[63:0], 64'hCB01_CB02_CB03_CB04, "hbw cpu->tile");
 
         // ====== SUMMARY ======
         $display("\n========================================");
@@ -269,7 +330,7 @@ module tb_memory;
 
     // Timeout
     initial begin
-        #500000;
+        #1000000;
         $display("GLOBAL TIMEOUT");
         $finish(1);
     end

@@ -36,7 +36,7 @@ module mp64_tile (
 
     // === Tile memory port (512-bit, directly to BRAM Port A) ===
     output reg         tile_req,
-    output reg  [19:0] tile_addr,
+    output reg  [31:0] tile_addr,
     output reg         tile_wen,
     output reg  [511:0]tile_wdata,
     input  wire [511:0]tile_rdata,
@@ -139,11 +139,19 @@ module mp64_tile (
     end
 
     // ========================================================================
-    // Address classification
+    // Address classification — internal = Bank 0 OR HBW banks
     // ========================================================================
-    wire src0_internal = (tsrc0[63:20] == 44'd0);
-    wire src1_internal = (tsrc1[63:20] == 44'd0);
-    wire dst_internal  = (tdst[63:20]  == 44'd0);
+    wire src0_bank0 = (tsrc0[63:20] == 44'd0);
+    wire src0_hbw   = (tsrc0[63:32] == 32'd0) && (tsrc0[31:20] >= 12'hFFD);
+    wire src0_internal = src0_bank0 || src0_hbw;
+
+    wire src1_bank0 = (tsrc1[63:20] == 44'd0);
+    wire src1_hbw   = (tsrc1[63:32] == 32'd0) && (tsrc1[31:20] >= 12'hFFD);
+    wire src1_internal = src1_bank0 || src1_hbw;
+
+    wire dst_bank0 = (tdst[63:20] == 44'd0);
+    wire dst_hbw   = (tdst[63:32] == 32'd0) && (tdst[31:20] >= 12'hFFD);
+    wire dst_internal  = dst_bank0 || dst_hbw;
 
     // ========================================================================
     // Mode decode
@@ -1778,7 +1786,7 @@ module mp64_tile (
                     if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
                         !(mex_ext_active && mex_ext_mod == 4'd8)) begin
                         tile_req  <= 1'b1;
-                        tile_addr <= tdst[19:0];
+                        tile_addr <= tdst[31:0];
                         tile_wen  <= 1'b1;
                         tile_wdata<= 512'd0;
                         state     <= S_DONE;
@@ -1787,21 +1795,21 @@ module mp64_tile (
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_TRANS &&
                              !(mex_ext_active && mex_ext_mod == 4'd8)) begin
                         tile_req  <= 1'b1;
-                        tile_addr <= tdst[19:0];
+                        tile_addr <= tdst[31:0];
                         state     <= S_LOAD_A;
                     end
                     // TSYS.LOADC — cursor address
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_LOADC &&
                              !(mex_ext_active && mex_ext_mod == 4'd8)) begin
                         tile_req  <= 1'b1;
-                        tile_addr <= (tile_row[19:0] * tile_stride[19:0] + tile_col[19:0]) * 20'd64;
+                        tile_addr <= (tile_row[31:0] * tile_stride[31:0] + tile_col[31:0]) * 32'd64;
                         state     <= S_LOAD_A;
                     end
                     // TRED — load TSRC0 only
                     else if (mex_op == MEX_TRED) begin
                         if (src0_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[19:0];
+                            tile_addr <= tsrc0[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -1815,7 +1823,7 @@ module mp64_tile (
                         needs_load_c <= 1'b1;
                         if (src0_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[19:0];
+                            tile_addr <= tsrc0[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -1842,7 +1850,7 @@ module mp64_tile (
                             // STORE2D: load source tile first
                             if (src0_internal) begin
                                 tile_req  <= 1'b1;
-                                tile_addr <= tsrc0[19:0];
+                                tile_addr <= tsrc0[31:0];
                                 state     <= S_LOAD_A;
                                 // After S_LOAD_A completes, we'll check funct
                                 // and redirect to S_STORE2D_REQ
@@ -1858,7 +1866,7 @@ module mp64_tile (
                     else begin
                         if (src0_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[19:0];
+                            tile_addr <= tsrc0[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -1883,7 +1891,7 @@ module mp64_tile (
                         else if (funct_reg == TSYS_SHUFFLE) begin
                             if (src1_internal) begin
                                 tile_req  <= 1'b1;
-                                tile_addr <= tsrc1[19:0];
+                                tile_addr <= tsrc1[31:0];
                                 state     <= S_LOAD_B;
                             end else begin
                                 ext_tile_req  <= 1'b1;
@@ -1896,7 +1904,7 @@ module mp64_tile (
                     else if (ss_reg == 2'd0) begin
                         if (src1_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc1[19:0];
+                            tile_addr <= tsrc1[31:0];
                             state     <= S_LOAD_B;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -1907,7 +1915,7 @@ module mp64_tile (
                     else begin
                         if (needs_load_c) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tdst[19:0];
+                            tile_addr <= tdst[31:0];
                             state     <= S_LOAD_C;
                         end else
                             state <= S_COMPUTE;
@@ -1920,7 +1928,7 @@ module mp64_tile (
                     tile_b <= tile_rdata;
                     if (needs_load_c) begin
                         tile_req  <= 1'b1;
-                        tile_addr <= tdst[19:0];
+                        tile_addr <= tdst[31:0];
                         state     <= S_LOAD_C;
                     end else
                         state <= S_COMPUTE;
@@ -2039,7 +2047,7 @@ module mp64_tile (
             S_STORE: begin
                 if (dst_internal) begin
                     tile_req   <= 1'b1;
-                    tile_addr  <= tdst[19:0];
+                    tile_addr  <= tdst[31:0];
                     tile_wen   <= 1'b1;
                     tile_wdata <= result;
                     if (op_reg == MEX_TMUL && funct_reg == TMUL_WMUL)
@@ -2058,7 +2066,7 @@ module mp64_tile (
             S_STORE2: begin
                 if (tile_ack) begin
                     tile_req   <= 1'b1;
-                    tile_addr  <= tdst[19:0] + 20'd64;
+                    tile_addr  <= tdst[31:0] + 32'd64;
                     tile_wen   <= 1'b1;
                     tile_wdata <= result2;
                     state      <= S_DONE;
@@ -2155,7 +2163,7 @@ module mp64_tile (
                     else if (op_reg == MEX_TSYS && funct_reg == TSYS_SHUFFLE) begin
                         if (src1_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc1[19:0];
+                            tile_addr <= tsrc1[31:0];
                             state     <= S_LOAD_B;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -2166,7 +2174,7 @@ module mp64_tile (
                     else if (ss_reg == 2'd0) begin
                         if (src1_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc1[19:0];
+                            tile_addr <= tsrc1[31:0];
                             state     <= S_LOAD_B;
                         end else begin
                             ext_tile_req  <= 1'b1;
@@ -2175,7 +2183,7 @@ module mp64_tile (
                         end
                     end else begin
                         if (needs_load_c) begin
-                            tile_req <= 1'b1; tile_addr <= tdst[19:0]; state <= S_LOAD_C;
+                            tile_req <= 1'b1; tile_addr <= tdst[31:0]; state <= S_LOAD_C;
                         end else state <= S_COMPUTE;
                     end
                 end
@@ -2185,7 +2193,7 @@ module mp64_tile (
                 if (ext_tile_ack) begin
                     tile_b <= ext_tile_rdata;
                     if (needs_load_c) begin
-                        tile_req <= 1'b1; tile_addr <= tdst[19:0]; state <= S_LOAD_C;
+                        tile_req <= 1'b1; tile_addr <= tdst[31:0]; state <= S_LOAD_C;
                     end else state <= S_COMPUTE;
                 end
             end
@@ -2197,7 +2205,7 @@ module mp64_tile (
             // ================================================================
             S_LOAD2D_REQ: begin
                 tile_req  <= 1'b1;
-                tile_addr <= ld2d_row_addr[19:0];  // bits[5:0] ignored by BRAM
+                tile_addr <= ld2d_row_addr[31:0];  // bits[5:0] ignored by BRAM
                 state     <= S_LOAD2D_WAIT;
             end
 
@@ -2235,7 +2243,7 @@ module mp64_tile (
             // ================================================================
             S_STORE2D_REQ: begin
                 tile_req  <= 1'b1;
-                tile_addr <= ld2d_row_addr[19:0];
+                tile_addr <= ld2d_row_addr[31:0];
                 state     <= S_STORE2D_WAIT;
             end
 
@@ -2256,7 +2264,7 @@ module mp64_tile (
                     end
                     // Issue write
                     tile_req  <= 1'b1;
-                    tile_addr <= ld2d_row_addr[19:0];
+                    tile_addr <= ld2d_row_addr[31:0];
                     tile_wen  <= 1'b1;
                     // Advance to next row
                     ld2d_row     <= ld2d_row + 4'd1;

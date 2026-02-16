@@ -39,7 +39,7 @@ module tb_tile;
 
     // === Tile memory port — simple 1-cycle BRAM model ===
     wire        tile_req;
-    wire [19:0] tile_addr;
+    wire [31:0] tile_addr;
     wire        tile_wen;
     wire [511:0] tile_wdata;
     reg  [511:0] tile_rdata;

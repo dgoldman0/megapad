@@ -1,23 +1,25 @@
 // ============================================================================
-// mp64_memory.v — Megapad-64 Memory Subsystem
+// mp64_memory.v — Megapad-64 Banked Memory Subsystem
 // ============================================================================
 //
-// Dual-port 1 MiB internal BRAM + bus arbiter for tile engine fast-path.
+// 4-bank architecture: 4 MiB total internal BRAM.
+//
+//   Bank 0 (1 MiB):  System BRAM at 0x0000_0000 – 0x000F_FFFF.
+//                     Dual-port (CPU + Tile), tile access supported for
+//                     backward compatibility but software should prefer HBW.
+//
+//   Bank 1 (1 MiB):  HBW at 0xFFD0_0000 – 0xFFDF_FFFF.  Dual-port.
+//   Bank 2 (1 MiB):  HBW at 0xFFE0_0000 – 0xFFEF_FFFF.  Dual-port.
+//   Bank 3 (1 MiB):  HBW at 0xFFF0_0000 – 0xFFFF_FFFF.  Dual-port.
 //
 // Port A (tile port): 512-bit wide, single-cycle tile load/store.
-//   Address granularity: 64 bytes (one tile).
-//   Used exclusively by the tile engine for TSRC0/TSRC1 reads and TDST writes.
+//   Routes to Bank 0 (legacy) or Banks 1–3 (HBW) based on tile_addr[31:0].
 //
 // Port B (CPU port): 64-bit wide, single-cycle read/write.
-//   Address granularity: 8 bytes (one cell).
-//   Used by the CPU for normal load/store instructions.
+//   Routes to any bank based on cpu_addr.
 //
-// Both ports can operate simultaneously with no contention (true dual-port).
-// When both ports access the same 64-byte tile, Port A (tile) has priority
-// and Port B stalls for one cycle.
-//
-// External memory requests are forwarded to the ext_mem interface when the
-// address is >= INT_MEM_BYTES.
+// External memory requests are forwarded when the address falls between
+// Bank 0 and HBW (i.e., not in any internal bank).
 //
 
 `include "mp64_defs.vh"
@@ -37,7 +39,7 @@ module mp64_memory (
 
     // === Tile port (Port A) — 512-bit ===
     input  wire        tile_req,       // request valid
-    input  wire [19:0] tile_addr,      // byte address (64B aligned, bits [5:0]=0)
+    input  wire [31:0] tile_addr,      // byte address (32-bit physical)
     input  wire        tile_wen,       // 1=write, 0=read
     input  wire [511:0]tile_wdata,     // 512-bit write data (full tile)
     output reg  [511:0]tile_rdata,     // 512-bit read data (full tile)
@@ -54,64 +56,87 @@ module mp64_memory (
 );
 
     // ========================================================================
-    // Internal BRAM — true dual-port
+    // Internal BRAM — 4 banks × 16384 × 512-bit = 4 MiB
     // ========================================================================
     //
-    // Physical organization: 16384 rows × 512 bits = 1 MiB
-    // Port A (tile): addressed by tile_addr[19:6] → 14-bit row index
-    // Port B (CPU):  addressed by cpu_addr[19:0]
-    //   - Row index: cpu_addr[19:6] (same 14-bit row as Port A)
-    //   - Word select within row: cpu_addr[5:3] (which of 8 doublewords)
-    //
-    // For sub-doubleword access (byte, half, word), the CPU port reads the
-    // full doubleword and the output mux selects the requested portion.
+    // Each bank: 16384 rows × 512 bits = 1 MiB
+    //   Row index:   addr[19:6]  (14 bits)
+    //   Word within row: addr[5:3] (3 bits, selects one of 8 doublewords)
     //
 
-    // BRAM storage — inferred as true dual-port block RAM by synthesis tools
     (* ram_style = "block" *)
-    reg [511:0] mem [0:16383];  // 16384 × 512-bit = 1 MiB
-
-    // Port A (tile) — 512-bit access, single cycle
-    wire [13:0] tile_row = tile_addr[19:6];
-
-    // Port B (CPU) — 64-bit access within a 512-bit row
-    wire        cpu_is_internal = (cpu_addr[63:20] == 44'd0);  // addr < 1 MiB
-    wire [13:0] cpu_row  = cpu_addr[19:6];
-    wire [2:0]  cpu_word = cpu_addr[5:3];   // which 64-bit word in the row
-
-    // Collision detection: both ports hitting the same row
-    wire collision = tile_req && cpu_req && cpu_is_internal
-                     && (tile_row == cpu_row);
-
-    // Port B stall: CPU must wait if collision (tile has priority)
-    wire cpu_stall = collision && !tile_wen;  // stall on tile read (1 cycle)
+    reg [511:0] bank0 [0:16383];  // Bank 0: system BRAM (0x0000_0000)
+    (* ram_style = "block" *)
+    reg [511:0] bank1 [0:16383];  // Bank 1: HBW (0xFFD0_0000)
+    (* ram_style = "block" *)
+    reg [511:0] bank2 [0:16383];  // Bank 2: HBW (0xFFE0_0000)
+    (* ram_style = "block" *)
+    reg [511:0] bank3 [0:16383];  // Bank 3: HBW (0xFFF0_0000)
 
     // ========================================================================
-    // Port A — Tile engine (always single-cycle for internal memory)
+    // Tile port address decode
+    // ========================================================================
+    wire tile_is_bank0 = (tile_addr[31:20] == 12'd0);
+    wire tile_is_hbw   = (tile_addr[31:20] >= 12'hFFD);
+    wire tile_is_valid = tile_is_bank0 || tile_is_hbw;
+    wire [1:0] tile_bank_sel = tile_is_hbw ? tile_addr[21:20] : 2'd0;
+    wire [13:0] tile_row_idx = tile_addr[19:6];
+
+    // ========================================================================
+    // CPU port address decode
+    // ========================================================================
+    wire cpu_is_bank0 = (cpu_addr[63:20] == 44'd0);
+    wire cpu_is_hbw   = (cpu_addr[63:32] == 32'd0) && (cpu_addr[31:20] >= 12'hFFD);
+    wire cpu_is_internal = cpu_is_bank0 || cpu_is_hbw;
+    wire [1:0] cpu_bank_sel = cpu_is_hbw ? cpu_addr[21:20] : 2'd0;
+    wire [13:0] cpu_row_idx = cpu_addr[19:6];
+    wire [2:0]  cpu_word    = cpu_addr[5:3];
+
+    // ========================================================================
+    // Collision detection (same bank, same row)
+    // ========================================================================
+    wire collision = tile_req && cpu_req && cpu_is_internal && tile_is_valid
+                     && (tile_bank_sel == cpu_bank_sel)
+                     && (tile_row_idx == cpu_row_idx);
+    wire cpu_stall = collision && !tile_wen;
+
+    // ========================================================================
+    // Bank read helper — combinational mux
+    // ========================================================================
+    reg [511:0] tile_bank_rdata;
+    always @(*) begin
+        case (tile_bank_sel)
+            2'd0: tile_bank_rdata = bank0[tile_row_idx];
+            2'd1: tile_bank_rdata = bank1[tile_row_idx];
+            2'd2: tile_bank_rdata = bank2[tile_row_idx];
+            2'd3: tile_bank_rdata = bank3[tile_row_idx];
+        endcase
+    end
+
+    // ========================================================================
+    // Port A — Tile engine (single-cycle for all internal banks)
     // ========================================================================
     always @(posedge clk) begin
         tile_ack <= 1'b0;
-        if (tile_req) begin
+        if (tile_req && tile_is_valid) begin
             if (tile_wen) begin
-                mem[tile_row] <= tile_wdata;
+                case (tile_bank_sel)
+                    2'd0: bank0[tile_row_idx] <= tile_wdata;
+                    2'd1: bank1[tile_row_idx] <= tile_wdata;
+                    2'd2: bank2[tile_row_idx] <= tile_wdata;
+                    2'd3: bank3[tile_row_idx] <= tile_wdata;
+                endcase
             end
-            tile_rdata <= mem[tile_row];
+            tile_rdata <= tile_bank_rdata;
             tile_ack   <= 1'b1;
         end
     end
 
     // ========================================================================
-    // Port B — CPU access
+    // Port B — CPU access (bank-routed or external forward)
     // ========================================================================
-    //
-    // Three paths:
-    //   1. Internal memory, no collision → single-cycle
-    //   2. Internal memory, collision    → stall 1 cycle, then complete
-    //   3. External memory              → forward to ext_mem interface
-    //
-
-    reg         cpu_stall_r;     // registered stall (for 1-cycle delay)
-    reg  [511:0] cpu_row_data;   // full row read from BRAM
+    reg         cpu_stall_r;
+    reg  [511:0] cpu_row_data;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -124,28 +149,38 @@ module mp64_memory (
             ext_req     <= 1'b0;
 
             if (cpu_req && cpu_is_internal) begin
-                // --- Internal memory access ---
+                // --- Internal bank access ---
                 if (cpu_stall && !cpu_stall_r) begin
-                    // Collision: tile engine has priority, stall 1 cycle
                     cpu_stall_r <= 1'b1;
                 end else begin
                     cpu_stall_r <= 1'b0;
 
+                    // Read row from selected bank
+                    case (cpu_bank_sel)
+                        2'd0: cpu_row_data = bank0[cpu_row_idx];
+                        2'd1: cpu_row_data = bank1[cpu_row_idx];
+                        2'd2: cpu_row_data = bank2[cpu_row_idx];
+                        2'd3: cpu_row_data = bank3[cpu_row_idx];
+                    endcase
+
                     if (cpu_wen) begin
                         // Write: read-modify-write the 512-bit row
-                        // (Insert the 64-bit word at the correct position)
-                        cpu_row_data = mem[cpu_row];
                         case (cpu_size)
                             BUS_DWORD: cpu_row_data[cpu_word*64 +: 64] = cpu_wdata;
                             BUS_WORD:  cpu_row_data[cpu_addr[5:2]*32 +: 32] = cpu_wdata[31:0];
                             BUS_HALF:  cpu_row_data[cpu_addr[5:1]*16 +: 16] = cpu_wdata[15:0];
                             BUS_BYTE:  cpu_row_data[cpu_addr[5:0]*8  +:  8] = cpu_wdata[7:0];
                         endcase
-                        mem[cpu_row] <= cpu_row_data;
+                        // Write back to selected bank
+                        case (cpu_bank_sel)
+                            2'd0: bank0[cpu_row_idx] <= cpu_row_data;
+                            2'd1: bank1[cpu_row_idx] <= cpu_row_data;
+                            2'd2: bank2[cpu_row_idx] <= cpu_row_data;
+                            2'd3: bank3[cpu_row_idx] <= cpu_row_data;
+                        endcase
                         cpu_ack <= 1'b1;
                     end else begin
                         // Read: extract the requested portion from the row
-                        cpu_row_data = mem[cpu_row];
                         case (cpu_size)
                             BUS_DWORD: cpu_rdata <= cpu_row_data[cpu_word*64 +: 64];
                             BUS_WORD:  cpu_rdata <= {32'd0, cpu_row_data[cpu_addr[5:2]*32 +: 32]};
@@ -173,13 +208,17 @@ module mp64_memory (
     end
 
     // ========================================================================
-    // Init for simulation — zero-fill memory
+    // Init for simulation — zero-fill all banks
     // ========================================================================
     `ifdef SIMULATION
     integer i;
     initial begin
-        for (i = 0; i < 16384; i = i + 1)
-            mem[i] = 512'd0;
+        for (i = 0; i < 16384; i = i + 1) begin
+            bank0[i] = 512'd0;
+            bank1[i] = 512'd0;
+            bank2[i] = 512'd0;
+            bank3[i] = 512'd0;
+        end
     end
     `endif
 

@@ -228,7 +228,7 @@ module tb_mp64_soc;
     initial begin
         // Load BIOS binary into BRAM via hierarchical reference
         $display("[TB] Loading BIOS...");
-        $readmemh("bios.hex", u_soc.u_memory.mem);
+        $readmemh("bios.hex", u_soc.u_memory.bank0);
         $display("[TB] BIOS loaded.");
     end
 
