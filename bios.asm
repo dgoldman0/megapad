@@ -11657,7 +11657,7 @@ d_cl_priv_store:
 ; === CL-PRIV@ ( -- n ) ===
 d_cl_priv_fetch:
     .dq d_cl_priv_store
-    .db 7
+    .db 8
     .ascii "CL-PRIV@"
     ldi64 r11, w_cl_priv_fetch
     call.l r11

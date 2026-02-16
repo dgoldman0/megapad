@@ -159,6 +159,7 @@ class FramebufferDisplay:
     def _render_fb(self, fb, surface, w: int, h: int, mode: int):
         """Read HBW pixel data and paint onto a pygame Surface."""
         import pygame
+        import numpy as np
 
         base_addr = fb.fb_base
         stride = fb.stride
@@ -170,58 +171,56 @@ class FramebufferDisplay:
             return
 
         if mode == 0:
-            # 8-bit indexed color
-            pal = fb.palette
-            pixels = pygame.PixelArray(surface)
-            try:
-                for y in range(h):
-                    row_off = hbw_off + y * stride
-                    if row_off + w > len(hbw_mem):
-                        break
-                    for x in range(w):
-                        idx = hbw_mem[row_off + x]
-                        rgb = pal[idx]
-                        r = (rgb >> 16) & 0xFF
-                        g = (rgb >> 8) & 0xFF
-                        b = rgb & 0xFF
-                        pixels[x, y] = (r, g, b)
-            finally:
-                pixels.close()
+            # 8-bit indexed color — fast path via numpy
+            pal = fb.palette  # list of 0x00RRGGBB ints
+            # Build palette lookup table (256 × 3 uint8)
+            pal_lut = np.zeros((256, 3), dtype=np.uint8)
+            for i in range(256):
+                rgb = pal[i]
+                pal_lut[i, 0] = (rgb >> 16) & 0xFF
+                pal_lut[i, 1] = (rgb >> 8) & 0xFF
+                pal_lut[i, 2] = rgb & 0xFF
+            # Read raw index bytes for entire frame
+            pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
+            for y in range(h):
+                row_off = hbw_off + y * stride
+                end = row_off + w
+                if end > len(hbw_mem):
+                    break
+                row = np.frombuffer(hbw_mem, dtype=np.uint8,
+                                    count=w, offset=row_off)
+                pixels_rgb[:, y, :] = pal_lut[row]
+            pygame.surfarray.blit_array(surface, pixels_rgb)
 
         elif mode == 1:
-            # RGB565
-            pixels = pygame.PixelArray(surface)
-            try:
-                for y in range(h):
-                    row_off = hbw_off + y * stride
-                    for x in range(w):
-                        off = row_off + x * 2
-                        if off + 2 > len(hbw_mem):
-                            break
-                        val = hbw_mem[off] | (hbw_mem[off + 1] << 8)
-                        r = ((val >> 11) & 0x1F) << 3
-                        g = ((val >> 5) & 0x3F) << 2
-                        b = (val & 0x1F) << 3
-                        pixels[x, y] = (r, g, b)
-            finally:
-                pixels.close()
+            # RGB565 — fast path via numpy
+            pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
+            for y in range(h):
+                row_off = hbw_off + y * stride
+                end = row_off + w * 2
+                if end > len(hbw_mem):
+                    break
+                raw = np.frombuffer(hbw_mem, dtype=np.uint16,
+                                    count=w, offset=row_off)
+                pixels_rgb[:, y, 0] = ((raw >> 11) & 0x1F).astype(np.uint8) << 3
+                pixels_rgb[:, y, 1] = ((raw >> 5) & 0x3F).astype(np.uint8) << 2
+                pixels_rgb[:, y, 2] = (raw & 0x1F).astype(np.uint8) << 3
+            pygame.surfarray.blit_array(surface, pixels_rgb)
 
         elif mode == 3:
-            # RGBA8888
-            pixels = pygame.PixelArray(surface)
-            try:
-                for y in range(h):
-                    row_off = hbw_off + y * stride
-                    for x in range(w):
-                        off = row_off + x * 4
-                        if off + 4 > len(hbw_mem):
-                            break
-                        r = hbw_mem[off]
-                        g = hbw_mem[off + 1]
-                        b = hbw_mem[off + 2]
-                        pixels[x, y] = (r, g, b)
-            finally:
-                pixels.close()
+            # RGBA8888 — fast path via numpy
+            pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
+            for y in range(h):
+                row_off = hbw_off + y * stride
+                end = row_off + w * 4
+                if end > len(hbw_mem):
+                    break
+                raw = np.frombuffer(hbw_mem, dtype=np.uint8,
+                                    count=w * 4, offset=row_off).reshape(w, 4)
+                pixels_rgb[:, y, 0] = raw[:, 0]
+                pixels_rgb[:, y, 1] = raw[:, 1]
+                pixels_rgb[:, y, 2] = raw[:, 2]
+            pygame.surfarray.blit_array(surface, pixels_rgb)
 
         else:
             # Unsupported mode — fill gray

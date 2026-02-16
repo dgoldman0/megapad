@@ -456,7 +456,7 @@ CREATE GFX-FONT
     96 0 DO
         I 32 +                          ( char )
         I 16 / 8 * 122 + GFX-CY !
-        I 16 AND 15 AND 8 * 12 + GFX-CX !
+        I 16 MOD 8 * 12 + GFX-CX !
         GFX-CX @ GFX-CY @
         I 7 AND 9 +                     ( char x y color )
         GFX-CHAR
