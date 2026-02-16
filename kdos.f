@@ -2660,6 +2660,51 @@ VARIABLE OP-SLOT
 VARIABLE LD-FD
 VARIABLE LD-BUF
 VARIABLE LD-SZ
+VARIABLE LD-CUR
+VARIABLE LD-LEN
+
+\ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
+CREATE _LD-STK 128 ALLOT    \ 4 vars * 8 bytes * 4 nesting levels
+VARIABLE _LD-SP
+0 _LD-SP !
+
+: _LD-SAVE  ( -- )
+    LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+
+: _LD-RESTORE  ( -- )
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
+
+\ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
+\   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
+\   clean across EVALUATE calls so compile-time control-flow items
+\   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
+: _LD-WALK  ( -- )
+    LD-BUF @ LD-CUR !
+    BEGIN LD-SZ @ 0> WHILE
+        \ Find length of current line (up to newline or end)
+        LD-SZ @                          ( rem )
+        0                                ( rem i )
+        BEGIN
+            DUP 2 PICK < IF
+                LD-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+            ELSE TRUE THEN
+        UNTIL                            ( rem linelen )
+        NIP LD-LEN !
+        \ EVALUATE if non-empty
+        LD-LEN @ 0> IF
+            LD-CUR @ LD-LEN @ EVALUATE
+        THEN
+        \ Advance past line + newline
+        LD-LEN @ 1+
+        DUP NEGATE LD-SZ +!
+        LD-CUR +!
+    REPEAT ;
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
@@ -2672,7 +2717,10 @@ VARIABLE LD-SZ
     \ Open by slot
     DUP DE.USED DUP 0= IF
         2DROP ."  Empty file" CR EXIT
-    THEN LD-SZ !                         ( de )
+    THEN
+    \ Save outer walker state before modifying variables (nesting).
+    _LD-SAVE
+    LD-SZ !                              ( de )
     DUP 16 + W@ SWAP DE.COUNT           ( start count )
     \ Read file data into HERE, then advance HERE past it
     \ so that EVALUATE'd code (BUFFER, KERNEL, BL WORD, etc.)
@@ -2685,34 +2733,8 @@ VARIABLE LD-SZ
     DUP DISK-N!
     DISK-READ
     2DROP                                ( -- clean stack )
-    \ Now walk buffer line by line and EVALUATE each line
-    LD-BUF @                             ( addr )
-    LD-SZ @                              ( addr remaining )
-    BEGIN DUP 0> WHILE
-        \ Find next newline or end
-        OVER                             ( addr rem linestart )
-        2 PICK                           ( addr rem linestart rem )
-        0                                ( addr rem linestart rem i )
-        BEGIN
-            DUP 2 PICK < IF
-                OVER OVER + C@ 10 = IF
-                    TRUE                 \ found newline
-                ELSE
-                    1+ FALSE
-                THEN
-            ELSE TRUE THEN              \ end of buffer
-        UNTIL                            ( addr rem linestart rem linelen )
-        NIP                              ( addr rem linestart linelen )
-        DUP 0> IF
-            2DUP EVALUATE
-        THEN
-        \ Advance past line + newline
-        1+                               ( addr rem linestart skip )
-        ROT OVER - >R                    ( addr linestart skip  R: rem' )
-        + SWAP DROP                      ( addr' )
-        R>                               ( addr' rem' )
-    REPEAT
-    2DROP ;
+    _LD-WALK
+    _LD-RESTORE ;
 
 \ ── User-Mode Application Loading ───────────────────────────────────
 \  APP-EVAL evaluates a string in user mode.  ENTER-USER drops the
@@ -9065,6 +9087,83 @@ VARIABLE _HTE-HT
         THEN
         DROP
     LOOP ;
+
+\ =====================================================================
+\  §20  Module System
+\ =====================================================================
+\
+\  REQUIRE / PROVIDED prevent duplicate loading of Forth source files.
+\  Each module should call  PROVIDED <name>  at the top to register
+\  itself.  REQUIRE <name>  checks the registry; if already loaded it
+\  is a no-op, otherwise it LOADs the file and marks it loaded.
+\
+\  Uses a hash table (§19) for O(1) lookup.  16-byte key = filename
+\  (zero-padded, matching NAMEBUF layout), 1-byte value.
+
+16 1 32 HASHTABLE _MOD-HT
+
+\ Scratch for the 1-byte "loaded" marker value.
+CREATE _MOD-VAL  1 ALLOT
+1 _MOD-VAL C!
+
+\ _MOD-MARK ( -- )  Mark NAMEBUF as a loaded module in _MOD-HT.
+: _MOD-MARK  ( -- )
+    NAMEBUF _MOD-VAL _MOD-HT HT-PUT ;
+
+\ _MOD-LOADED? ( -- flag )  True if current NAMEBUF is in _MOD-HT.
+: _MOD-LOADED?  ( -- flag )
+    NAMEBUF _MOD-HT HT-GET 0<> ;
+
+\ PROVIDED ( "name" -- )  Register a module as loaded.
+\   Typically called at the top of a module file.
+: PROVIDED  ( "name" -- )
+    PARSE-NAME  _MOD-MARK ;
+
+\ MODULE? ( "name" -- flag )  Test if a module is already loaded.
+: MODULE?  ( "name" -- flag )
+    PARSE-NAME  _MOD-LOADED? ;
+
+\ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
+\   This is the core of LOAD without the PARSE-NAME call.
+: _MOD-LOAD-BODY  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Module not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DIRENT
+    DUP DE.USED DUP 0= IF
+        2DROP ."  Empty module" CR EXIT
+    THEN
+    _LD-SAVE
+    LD-SZ !
+    DUP 16 + W@ SWAP DE.COUNT
+    HERE LD-BUF !
+    LD-SZ @ ALLOT
+    OVER DISK-SEC!
+    LD-BUF @ DISK-DMA!
+    DUP DISK-N!
+    DISK-READ
+    2DROP
+    _LD-WALK
+    _LD-RESTORE ;
+
+\ REQUIRE ( "name" -- )  Load a module if not already loaded.
+: REQUIRE  ( "name" -- )
+    PARSE-NAME
+    _MOD-LOADED? IF EXIT THEN
+    _MOD-MARK
+    _MOD-LOAD-BODY ;
+
+\ _MOD-SHOW ( key-addr val-addr -- )  Print one module name.
+: _MOD-SHOW  ( key-addr val-addr -- )
+    DROP ."   " .ZSTR CR ;
+
+\ MODULES ( -- )  List all loaded modules.
+: MODULES  ( -- )
+    ."  Loaded modules:" CR
+    ['] _MOD-SHOW _MOD-HT HT-EACH
+    _MOD-HT HT-COUNT . ."  module(s)" CR ;
 
 \ =====================================================================
 \  §14  Startup

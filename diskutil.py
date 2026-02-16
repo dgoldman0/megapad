@@ -1038,6 +1038,12 @@ def build_sample_image(path: str | Path | None = None,
     ).encode("ascii")
     fs.inject_file("demo-bundle", demo_bundle, ftype=FTYPE_BUNDLE)
 
+    # Inject graphics module (Forth, loadable via REQUIRE graphics.f)
+    gfx_path = Path(__file__).parent / "graphics.f"
+    if gfx_path.exists():
+        gfx_src = gfx_path.read_bytes()
+        fs.inject_file("graphics.f", gfx_src, ftype=FTYPE_FORTH)
+
     if path is not None:
         fs.save(path)
     return fs

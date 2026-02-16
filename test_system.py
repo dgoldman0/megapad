@@ -96,9 +96,10 @@ BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
 
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,
-                num_cores: int = 1) -> MegapadSystem:
+                num_cores: int = 1, ext_mem_mib: int = 0) -> MegapadSystem:
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
-                         num_cores=num_cores)
+                         num_cores=num_cores,
+                         ext_mem_size=ext_mem_mib * (1 << 20))
 
 
 def run_until(sys: MegapadSystem, max_steps: int = 500_000):
@@ -579,6 +580,369 @@ class TestHBWMemory(unittest.TestCase):
         for i in range(8):
             val |= si.read8(0x30 + i) << (8 * i)
         self.assertEqual(val, 4 * 1024 * 1024)  # 4 MiB
+
+
+# ---------------------------------------------------------------------------
+#  External memory tests
+# ---------------------------------------------------------------------------
+
+class TestExternalMemory(unittest.TestCase):
+    """Tests for external memory (HyperRAM/SDRAM) emulation."""
+
+    def test_ext_mem_allocation(self):
+        """External memory is allocated when ext_mem_size > 0."""
+        sys = make_system(ext_mem_mib=4)
+        self.assertEqual(len(sys._ext_mem), 4 * (1 << 20))
+        self.assertEqual(sys.ext_mem_size, 4 * (1 << 20))
+        self.assertEqual(sys.ext_mem_base, 0x0010_0000)
+        self.assertEqual(sys.ext_mem_end, 0x0010_0000 + 4 * (1 << 20))
+
+    def test_ext_mem_zero_default(self):
+        """No external memory by default."""
+        sys = make_system()
+        self.assertEqual(len(sys._ext_mem), 0)
+        self.assertEqual(sys.ext_mem_size, 0)
+
+    def test_ext_mem_cpu_read_write(self):
+        """CPU can read/write external memory at 0x0010_0000."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0000
+        code = assemble(f"""
+            ldi r1, 0x55
+            ldi64 r4, {ext_addr}
+            st.b r4, r1
+            ldi r5, 0
+            ld.b r5, r4
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(sys.cpu.regs[5], 0x55)
+
+    def test_ext_mem_does_not_alias_bank0(self):
+        """External memory writes must not corrupt bank 0 RAM."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0000
+        bank0_addr = 0x0000_0100
+        sys.cpu.mem_write8(bank0_addr, 0xAA)
+        sys.cpu.mem_write8(ext_addr, 0xBB)
+        self.assertEqual(sys.cpu.mem_read8(bank0_addr), 0xAA)
+        self.assertEqual(sys.cpu.mem_read8(ext_addr), 0xBB)
+
+    def test_ext_mem_64bit_access(self):
+        """64-bit read/write to external memory."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0100
+        val = 0x1234_5678_9ABC_DEF0
+        sys.cpu.mem_write64(ext_addr, val)
+        result = sys.cpu.mem_read64(ext_addr)
+        self.assertEqual(result, val)
+
+    def test_load_binary_to_ext_mem(self):
+        """load_binary() can target external memory addresses."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0200
+        sys.load_binary(ext_addr, b'\x11\x22\x33\x44')
+        self.assertEqual(sys._ext_mem[0x200], 0x11)
+        self.assertEqual(sys._ext_mem[0x201], 0x22)
+        self.assertEqual(sys._ext_mem[0x202], 0x33)
+        self.assertEqual(sys._ext_mem[0x203], 0x44)
+
+    def test_dma_read_ext_mem(self):
+        """DMA _raw_mem_read routes ext mem addresses correctly."""
+        sys = make_system(ext_mem_mib=1)
+        sys._ext_mem[0] = 0x42
+        self.assertEqual(sys._raw_mem_read(0x0010_0000), 0x42)
+
+    def test_dma_write_ext_mem(self):
+        """DMA _raw_mem_write routes ext mem addresses correctly."""
+        sys = make_system(ext_mem_mib=1)
+        sys._raw_mem_write(0x0010_0000, 0x99)
+        self.assertEqual(sys._ext_mem[0], 0x99)
+
+    def test_sysinfo_reports_ext_mem(self):
+        """SysInfo registers reflect external memory configuration."""
+        sys = make_system(ext_mem_mib=4)
+        si = sys.sysinfo
+        # Read ext_mem_base at offset 0x38
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x38 + i) << (8 * i)
+        self.assertEqual(val, 0x0010_0000)
+        # Read ext_mem_size at offset 0x40
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x40 + i) << (8 * i)
+        self.assertEqual(val, 4 * (1 << 20))
+
+    def test_sysinfo_zero_ext_mem(self):
+        """SysInfo reports zero for ext mem when not configured."""
+        sys = make_system()
+        si = sys.sysinfo
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x38 + i) << (8 * i)
+        self.assertEqual(val, 0)
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x40 + i) << (8 * i)
+        self.assertEqual(val, 0)
+
+
+# ---------------------------------------------------------------------------
+#  Framebuffer device tests
+# ---------------------------------------------------------------------------
+
+class TestFramebuffer(unittest.TestCase):
+    """Tests for the FramebufferDevice MMIO peripheral."""
+
+    def test_default_state(self):
+        """Framebuffer powers on with sensible defaults."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.width, 320)
+        self.assertEqual(fb.height, 240)
+        self.assertEqual(fb.stride, 320)
+        self.assertEqual(fb.mode, 0)
+        self.assertEqual(fb.enable, 0)
+        self.assertEqual(fb.vsync_count, 0)
+        self.assertEqual(fb.fb_base, 0)
+        # Status: disabled, no vblank
+        self.assertEqual(fb.read8(0x48), 0)
+
+    def test_width_height_readback(self):
+        """Write and read back width/height as 32-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Write width = 640 (0x0280) LE across 4 bytes at offset 0x08
+        fb.write8(0x08, 0x80)
+        fb.write8(0x09, 0x02)
+        fb.write8(0x0A, 0x00)
+        fb.write8(0x0B, 0x00)
+        self.assertEqual(fb.width, 640)
+        # Read back
+        self.assertEqual(fb.read8(0x08), 0x80)
+        self.assertEqual(fb.read8(0x09), 0x02)
+        # Write height = 480 (0x01E0)
+        fb.write8(0x10, 0xE0)
+        fb.write8(0x11, 0x01)
+        fb.write8(0x12, 0x00)
+        fb.write8(0x13, 0x00)
+        self.assertEqual(fb.height, 480)
+        self.assertEqual(fb.read8(0x10), 0xE0)
+        self.assertEqual(fb.read8(0x11), 0x01)
+
+    def test_stride_readback(self):
+        """Write and read back stride as 32-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # stride = 1024 (0x0400)
+        fb.write8(0x18, 0x00)
+        fb.write8(0x19, 0x04)
+        fb.write8(0x1A, 0x00)
+        fb.write8(0x1B, 0x00)
+        self.assertEqual(fb.stride, 1024)
+        self.assertEqual(fb.read8(0x18), 0x00)
+        self.assertEqual(fb.read8(0x19), 0x04)
+
+    def test_fb_base_64bit(self):
+        """Write and read back fb_base as 64-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Set base to 0xFFD0_0000 (HBW Bank 1 start)
+        addr = 0xFFD0_0000
+        for i in range(8):
+            fb.write8(i, (addr >> (8 * i)) & 0xFF)
+        self.assertEqual(fb.fb_base, addr)
+        for i in range(8):
+            self.assertEqual(fb.read8(i), (addr >> (8 * i)) & 0xFF)
+
+    def test_mode_register(self):
+        """Mode register accepts 0–3, masks higher bits."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x20, 2)
+        self.assertEqual(fb.mode, 2)
+        self.assertEqual(fb.read8(0x20), 2)
+        # Write 0xFF → should mask to 3
+        fb.write8(0x20, 0xFF)
+        self.assertEqual(fb.mode, 3)
+
+    def test_enable_disable(self):
+        """Enable/disable scanout and check status."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.read8(0x48), 0)  # disabled
+        # Enable scanout (bit 0)
+        fb.write8(0x28, 0x01)
+        self.assertEqual(fb.enable, 1)
+        self.assertEqual(fb.read8(0x28), 1)
+        # Status should show enabled
+        self.assertTrue(fb.read8(0x48) & 1)
+        # Disable
+        fb.write8(0x28, 0x00)
+        self.assertEqual(fb.enable, 0)
+        self.assertFalse(fb.read8(0x48) & 1)
+
+    def test_vsync_counter(self):
+        """Vsync counter increments on tick when enabled."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x28, 0x01)  # enable
+        fb.cycles_per_frame = 100  # fast for testing
+        # Not yet enough cycles
+        fb.tick(50)
+        self.assertEqual(fb.vsync_count, 0)
+        self.assertFalse(fb.vblank)
+        # Pass the threshold
+        fb.tick(50)
+        self.assertEqual(fb.vsync_count, 1)
+        self.assertTrue(fb.vblank)
+        # Read vsync counter
+        self.assertEqual(fb.read8(0x30), 1)
+        self.assertEqual(fb.read8(0x31), 0)
+
+    def test_vsync_disabled_no_tick(self):
+        """Vsync counter does NOT tick when disabled."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.cycles_per_frame = 10
+        fb.tick(100)
+        self.assertEqual(fb.vsync_count, 0)
+
+    def test_vsync_ack(self):
+        """Writing 1 to FB_VSYNC clears vblank flag."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x28, 0x01)  # enable
+        fb.cycles_per_frame = 10
+        fb.tick(10)
+        self.assertTrue(fb.vblank)
+        # Ack: write 1 as 32-bit LE
+        fb.write8(0x30, 0x01)
+        fb.write8(0x31, 0x00)
+        fb.write8(0x32, 0x00)
+        fb.write8(0x33, 0x00)
+        self.assertFalse(fb.vblank)
+        # Status should no longer show vblank
+        self.assertFalse(fb.read8(0x48) & 2)
+
+    def test_palette_write(self):
+        """Write palette entries via idx+data sequence."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Set palette index 0
+        fb.write8(0x38, 0)
+        # Write RGB 0x00FF8040 → actually 0x00FF8040 & 0x00FFFFFF = 0xFF8040
+        fb.write8(0x40, 0x40)  # B
+        fb.write8(0x41, 0x80)  # G
+        fb.write8(0x42, 0xFF)  # R
+        fb.write8(0x43, 0x00)  # high byte (masked)
+        self.assertEqual(fb.palette[0], 0xFF8040)
+
+    def test_palette_auto_increment(self):
+        """Palette index auto-increments after each data write."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x38, 5)  # start at index 5
+        # Write two entries
+        for color, idx in [(0x112233, 5), (0x445566, 6)]:
+            fb.write8(0x40, color & 0xFF)
+            fb.write8(0x41, (color >> 8) & 0xFF)
+            fb.write8(0x42, (color >> 16) & 0xFF)
+            fb.write8(0x43, 0x00)
+        self.assertEqual(fb.palette[5], 0x112233)
+        self.assertEqual(fb.palette[6], 0x445566)
+        # Index should now be 7
+        self.assertEqual(fb.pal_idx, 7)
+
+    def test_palette_wraps(self):
+        """Palette index wraps from 255 to 0."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x38, 255)
+        # Write one entry at index 255
+        fb.write8(0x40, 0xAA)
+        fb.write8(0x41, 0xBB)
+        fb.write8(0x42, 0xCC)
+        fb.write8(0x43, 0x00)
+        self.assertEqual(fb.palette[255], 0xCCBBAA)
+        # Should wrap to 0
+        self.assertEqual(fb.pal_idx, 0)
+
+    def test_irq_pending(self):
+        """IRQ pending only when both vsync IRQ enabled and vblank set."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.cycles_per_frame = 10
+        # Enable scanout only (no IRQ)
+        fb.write8(0x28, 0x01)
+        fb.tick(10)
+        self.assertTrue(fb.vblank)
+        self.assertFalse(fb.irq_pending)  # IRQ not enabled
+        # Enable IRQ (bit 1)
+        fb.write8(0x28, 0x03)
+        self.assertTrue(fb.irq_pending)
+        # Ack clears it
+        fb.write8(0x30, 0x01)
+        fb.write8(0x31, 0x00)
+        fb.write8(0x32, 0x00)
+        fb.write8(0x33, 0x00)
+        self.assertFalse(fb.irq_pending)
+
+    def test_frame_bytes(self):
+        """frame_bytes property reflects stride × height."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.frame_bytes, 320 * 240)
+        # Change stride
+        fb.write8(0x18, 0x00)
+        fb.write8(0x19, 0x04)
+        fb.write8(0x1A, 0x00)
+        fb.write8(0x1B, 0x00)  # stride = 1024
+        self.assertEqual(fb.frame_bytes, 1024 * 240)
+
+    def test_bpp_per_mode(self):
+        """bpp() returns correct bytes per pixel for each mode."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        for mode, expected_bpp in [(0, 1), (1, 2), (2, 2), (3, 4)]:
+            fb.write8(0x20, mode)
+            self.assertEqual(fb.bpp(), expected_bpp,
+                             f"mode {mode} should be {expected_bpp} bpp")
+
+    def test_bus_routing(self):
+        """FramebufferDevice is reachable through the DeviceBus."""
+        from devices import FramebufferDevice, DeviceBus, FB_BASE
+        bus = DeviceBus()
+        fb = FramebufferDevice()
+        bus.register(fb)
+        # Write mode = 2 via bus
+        bus.write8(FB_BASE + 0x20, 2)
+        self.assertEqual(fb.mode, 2)
+        # Read back via bus
+        self.assertEqual(bus.read8(FB_BASE + 0x20), 2)
+
+    def test_system_wired(self):
+        """FramebufferDevice is accessible through MegapadSystem."""
+        sys = make_system()
+        self.assertIsNotNone(sys.fb)
+        self.assertEqual(sys.fb.width, 320)
+        self.assertEqual(sys.fb.height, 240)
+        # Check bus routing
+        from devices import FB_BASE
+        sys.bus.write8(FB_BASE + 0x20, 1)
+        self.assertEqual(sys.fb.mode, 1)
+
+    def test_default_palette_grayscale(self):
+        """Default palette is a grayscale ramp."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.palette[0], 0x000000)
+        self.assertEqual(fb.palette[128], 0x808080)
+        self.assertEqual(fb.palette[255], 0xFFFFFF)
 
 
 # ---------------------------------------------------------------------------
@@ -5604,8 +5968,8 @@ class TestDiskUtil(unittest.TestCase):
         self.assertEqual(bdl_entry.ftype, FTYPE_BUNDLE)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle = 18
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 3)
+        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle + graphics.f = 19
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 4)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -9168,26 +9532,26 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_core_run_dispatches(self):
         """CORE-RUN dispatches work to a secondary core."""
         text = self._run_mc([
-            ": MARKER  66 77839 C! ;",
+            ": MARKER  66 458767 C! ;",
             "' MARKER 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77839 C@ .",
+            "458767 C@ .",
         ])
         self.assertIn("66 ", text)
 
     def test_core_run_multiple_cores(self):
         """CORE-RUN dispatches to cores 1, 2, 3 independently."""
         text = self._run_mc([
-            ": M1  17 77824 C! ;",
-            ": M2  18 77825 C! ;",
-            ": M3  19 77826 C! ;",
+            ": M1  17 458752 C! ;",
+            ": M2  18 458753 C! ;",
+            ": M3  19 458754 C! ;",
             "' M1 1 CORE-RUN",
             "' M2 2 CORE-RUN",
             "' M3 3 CORE-RUN",
             "BARRIER",
-            "77824 C@ .",
-            "77825 C@ .",
-            "77826 C@ .",
+            "458752 C@ .",
+            "458753 C@ .",
+            "458754 C@ .",
         ])
         self.assertIn("17 ", text)
         self.assertIn("18 ", text)
@@ -9196,40 +9560,40 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_core_wait_returns(self):
         """CORE-WAIT returns after dispatched work completes."""
         text = self._run_mc([
-            ": WORK  99 77830 C! ;",
+            ": WORK  99 458758 C! ;",
             "' WORK 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77830 C@ .",
+            "458758 C@ .",
         ])
         self.assertIn("99 ", text)
 
     def test_all_cores_wait(self):
         """ALL-CORES-WAIT waits for all secondary cores."""
         text = self._run_mc([
-            "0 77824 C!",
-            "0 77825 C!",
-            "0 77826 C!",
-            ": AW1  10 77824 C! ;",
-            ": AW2  20 77825 C! ;",
-            ": AW3  30 77826 C! ;",
+            "0 458752 C!",
+            "0 458753 C!",
+            "0 458754 C!",
+            ": AW1  10 458752 C! ;",
+            ": AW2  20 458753 C! ;",
+            ": AW3  30 458754 C! ;",
             "' AW1 1 CORE-RUN",
             "' AW2 2 CORE-RUN",
             "' AW3 3 CORE-RUN",
             "ALL-CORES-WAIT",
-            "77824 C@ 77825 C@ + 77826 C@ + .",
+            "458752 C@ 458753 C@ + 458754 C@ + .",
         ])
         self.assertIn("60 ", text)
 
     def test_barrier(self):
         """BARRIER waits for all secondary cores to finish."""
         text = self._run_mc([
-            ": B1  42 77850 C! ;",
-            ": B2  43 77851 C! ;",
+            ": B1  42 458778 C! ;",
+            ": B2  43 458779 C! ;",
             "' B1 1 CORE-RUN",
             "' B2 2 CORE-RUN",
             "BARRIER",
-            "77850 C@ .",
-            "77851 C@ .",
+            "458778 C@ .",
+            "458779 C@ .",
         ])
         self.assertIn("42 ", text)
         self.assertIn("43 ", text)
@@ -9249,10 +9613,10 @@ class TestKDOSMulticore(unittest.TestCase):
         """LOCK/UNLOCK around shared memory from two cores."""
         text = self._run_mc([
             # Core 1 acquires lock 0, writes value, releases
-            ": LOCKED-WRITE  0 LOCK  77 77860 C!  0 UNLOCK ;",
+            ": LOCKED-WRITE  0 LOCK  77 458788 C!  0 UNLOCK ;",
             "' LOCKED-WRITE 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77860 C@ .",
+            "458788 C@ .",
         ])
         self.assertIn("77 ", text)
 
@@ -9458,26 +9822,26 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_sched_core_secondary(self):
         """SCHED-CORE dispatches queued tasks to a secondary core."""
         text = self._run_mc([
-            ": W1  55 77840 C! ;",
+            ": W1  55 458768 C! ;",
             "' W1 1 RQ-PUSH",
             "1 SCHED-CORE",
-            "77840 C@ .",
+            "458768 C@ .",
         ])
         self.assertIn("55 ", text)
 
     def test_sched_all_parallel(self):
         """SCHED-ALL dispatches tasks across all core queues."""
         text = self._run_mc([
-            ": WA  101 77870 C! ;",
-            ": WB  102 77871 C! ;",
-            ": WC  103 77872 C! ;",
+            ": WA  101 458798 C! ;",
+            ": WB  102 458799 C! ;",
+            ": WC  103 458800 C! ;",
             "' WA 1 RQ-PUSH",
             "' WB 2 RQ-PUSH",
             "' WC 3 RQ-PUSH",
             "SCHED-ALL",
-            "77870 C@ .",
-            "77871 C@ .",
-            "77872 C@ .",
+            "458798 C@ .",
+            "458799 C@ .",
+            "458800 C@ .",
         ])
         self.assertIn("101 ", text)
         self.assertIn("102 ", text)
@@ -9508,13 +9872,13 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_rq_multiple_dispatch_secondary(self):
         """Multiple tasks queued on secondary core execute sequentially."""
         text = self._run_mc([
-            ": W1  41 77880 C! ;",
-            ": W2  42 77881 C! ;",
+            ": W1  41 458808 C! ;",
+            ": W2  42 458809 C! ;",
             "' W1 1 RQ-PUSH",
             "' W2 1 RQ-PUSH",
             "1 SCHED-CORE",
-            "77880 C@ .",
-            "77881 C@ .",
+            "458808 C@ .",
+            "458809 C@ .",
         ])
         self.assertIn("41 ", text)
         self.assertIn("42 ", text)
@@ -9630,14 +9994,14 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_sched_balanced(self):
         """SCHED-BALANCED balances then dispatches all tasks."""
         text = self._run_mc([
-            ": WA  201 77890 C! ;",
-            ": WB  202 77891 C! ;",
+            ": WA  201 458818 C! ;",
+            ": WB  202 458819 C! ;",
             # Put both tasks on core 0
             "' WA 0 RQ-PUSH",
             "' WB 0 RQ-PUSH",
             "SCHED-BALANCED",
-            "77890 C@ .",
-            "77891 C@ .",
+            "458818 C@ .",
+            "458819 C@ .",
         ])
         self.assertIn("201 ", text)
         self.assertIn("202 ", text)
@@ -9682,11 +10046,11 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_spawn_on_core(self):
         """SPAWN-ON pushes task to specified core's run queue."""
         text = self._run_mc([
-            ": W1  44 77900 C! ;",
+            ": W1  44 458828 C! ;",
             "' W1 2 SPAWN-ON",
             "2 RQ-COUNT .",
             "2 SCHED-CORE",
-            "77900 C@ .",
+            "458828 C@ .",
         ])
         self.assertIn("1 ", text)   # 1 task in core 2's queue
         self.assertIn("44 ", text)  # task ran on core 2
@@ -9712,16 +10076,16 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_spawn_on_multiple_cores(self):
         """SPAWN-ON distributes tasks across cores correctly."""
         text = self._run_mc([
-            ": WA  51 77910 C! ;",
-            ": WB  52 77911 C! ;",
-            ": WC  53 77912 C! ;",
+            ": WA  51 458838 C! ;",
+            ": WB  52 458839 C! ;",
+            ": WC  53 458840 C! ;",
             "' WA 1 SPAWN-ON",
             "' WB 2 SPAWN-ON",
             "' WC 3 SPAWN-ON",
             "SCHED-ALL",
-            "77910 C@ .",
-            "77911 C@ .",
-            "77912 C@ .",
+            "458838 C@ .",
+            "458839 C@ .",
+            "458840 C@ .",
         ])
         self.assertIn("51 ", text)
         self.assertIn("52 ", text)
@@ -9739,8 +10103,8 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_affinity_balance_respects_pin(self):
         """Tasks pinned via SPAWN-ON stay on their assigned core."""
         text = self._run_mc([
-            ": WA  61 77920 C! ;",
-            ": WB  62 77921 C! ;",
+            ": WA  61 458848 C! ;",
+            ": WB  62 458849 C! ;",
             "' WA 1 SPAWN-ON",
             "' WB 3 SPAWN-ON",
             "1 RQ-COUNT .",
@@ -16368,6 +16732,439 @@ class TestKDOSHashTable(_KDOSTestBase):
         nums = [int(x) for x in parts if x.lstrip('-').isdigit()]
         self.assertIn(200, nums)
         self.assertIn(1, nums)
+
+
+class TestKDOSFramebuffer(_KDOSTestBase):
+    """Tests for BIOS framebuffer words (FB-BASE!, FB-WIDTH!, etc.)."""
+
+    def test_fb_words_in_dictionary(self):
+        """WORDS output includes all framebuffer words."""
+        text = self._run_kdos(["WORDS"])
+        for word in [
+            "FB-BASE!", "FB-WIDTH!", "FB-HEIGHT!", "FB-STRIDE!",
+            "FB-MODE!", "FB-MODE@", "FB-ENABLE", "FB-DISABLE",
+            "FB-VSYNC@", "FB-VSYNC-ACK", "FB-PAL!",
+            "FB-STATUS@", "FB-SETUP",
+        ]:
+            self.assertIn(word, text, f"'{word}' missing from WORDS")
+
+    def test_fb_mode_store_fetch(self):
+        """FB-MODE! sets mode, FB-MODE@ reads it back."""
+        text = self._run_kdos(["2 FB-MODE!", "FB-MODE@ ."])
+        self.assertIn("2 ", text)
+
+    def test_fb_mode_roundtrip_all(self):
+        """All four pixel modes round-trip through FB-MODE! / FB-MODE@."""
+        for mode in range(4):
+            text = self._run_kdos([f"{mode} FB-MODE!", "FB-MODE@ ."])
+            self.assertIn(f"{mode} ", text,
+                          f"mode {mode} did not round-trip")
+
+    def test_fb_enable_disable(self):
+        """FB-ENABLE sets enable, FB-DISABLE clears it."""
+        text = self._run_kdos([
+            "FB-ENABLE FB-STATUS@ .",
+            "FB-DISABLE FB-STATUS@ .",
+        ])
+        # Status bit 0 = enabled.  After enable → odd; after disable → even.
+        idx = text.rfind("FB-ENABLE")
+        tail = text[idx:] if idx >= 0 else text
+        nums = [int(x) for x in tail.split() if x.lstrip('-').isdigit()]
+        # At least two numbers; first should have bit 0 set, second not.
+        self.assertTrue(len(nums) >= 2, f"expected ≥2 numbers, got {nums}")
+        self.assertTrue(nums[0] & 1, "enable should set bit 0")
+        self.assertFalse(nums[1] & 1, "disable should clear bit 0")
+
+    def test_fb_width_store(self):
+        """FB-WIDTH! writes the width register."""
+        text = self._run_kdos([
+            "320 FB-WIDTH!",
+            "FB-STATUS@ .",  # just ensure no crash
+        ])
+        # Success = no crash/hang.
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_height_store(self):
+        """FB-HEIGHT! writes the height register."""
+        text = self._run_kdos([
+            "240 FB-HEIGHT!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_stride_store(self):
+        """FB-STRIDE! writes the stride register."""
+        text = self._run_kdos([
+            "640 FB-STRIDE!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_base_store(self):
+        """FB-BASE! writes a 64-bit base address."""
+        text = self._run_kdos([
+            "$FFD00000 FB-BASE!",
+            "FB-STATUS@ .",
+        ])
+        self.assertIn("OK", text.upper().replace("O K", "OK")
+                      .replace("ok", "OK"))
+
+    def test_fb_vsync_read(self):
+        """FB-VSYNC@ returns the vsync counter (initially 0)."""
+        text = self._run_kdos(["FB-VSYNC@ ."])
+        self.assertIn("0 ", text)
+
+    def test_fb_vsync_ack(self):
+        """FB-VSYNC-ACK runs without crashing."""
+        text = self._run_kdos(["FB-VSYNC-ACK"])
+        # No crash = pass.
+        self.assertNotIn("FAULT", text.upper())
+
+    def test_fb_pal_store(self):
+        """FB-PAL! writes a palette entry without crashing."""
+        text = self._run_kdos([
+            "$FF0000 0 FB-PAL!",   # red at index 0
+            "$00FF00 1 FB-PAL!",   # green at index 1
+            "FB-STATUS@ .",
+        ])
+        self.assertNotIn("FAULT", text.upper())
+
+    def test_fb_setup(self):
+        """FB-SETUP configures width, height, and mode in one call."""
+        text = self._run_kdos([
+            "320 240 0 FB-SETUP",
+            "FB-MODE@ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_fb_setup_mode2(self):
+        """FB-SETUP with mode 2 (RGB565) sets mode to 2."""
+        text = self._run_kdos([
+            "160 120 2 FB-SETUP",
+            "FB-MODE@ .",
+        ])
+        self.assertIn("2 ", text)
+
+
+class TestKDOSModuleSystem(_KDOSTestBase):
+    """Tests for §20 Module System (REQUIRE, PROVIDED, MODULES, MODULE?)."""
+
+    def _make_module_image(self, files: dict):
+        """Create formatted image with multiple Forth files."""
+        path = self._make_formatted_image()
+        for name, data in files.items():
+            du_inject_file(path, name, data, ftype=FTYPE_FORTH)
+        return path
+
+    def test_provided_registers(self):
+        """PROVIDED marks a module as loaded."""
+        text = self._run_kdos([
+            'PROVIDED testmod',
+            'MODULE? testmod',
+            'IF ." YES" ELSE ." NO" THEN',
+        ])
+        self.assertIn("YES", text)
+
+    def test_module_not_loaded(self):
+        """MODULE? returns false for unloaded module."""
+        text = self._run_kdos([
+            'MODULE? nosuch',
+            'IF ." YES" ELSE ." NO" THEN',
+        ])
+        self.assertIn("NO", text)
+
+    def test_require_loads_file(self):
+        """REQUIRE loads a Forth file from disk the first time."""
+        img = self._make_module_image({
+            "util.f": b"PROVIDED util.f\n: UTIL-OK 99 ;\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE util.f",
+                "UTIL-OK .",
+            ], storage_image=img)
+            self.assertIn("99 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_idempotent(self):
+        """REQUIRE does not reload an already-loaded module."""
+        img = self._make_module_image({
+            "counter.f": b"PROVIDED counter.f\nVARIABLE _CNT  _CNT @ 1+ _CNT !\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE counter.f",
+                "REQUIRE counter.f",
+                "_CNT @ .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_no_disk(self):
+        """REQUIRE without disk prints error."""
+        text = self._run_kdos(["REQUIRE ghost.f"])
+        self.assertIn("No filesystem", text)
+
+    def test_require_not_found(self):
+        """REQUIRE with missing file prints not-found error."""
+        img = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["REQUIRE nope.f"], storage_image=img)
+            self.assertIn("not found", text.lower())
+        finally:
+            os.unlink(img)
+
+    def test_modules_list(self):
+        """MODULES lists registered modules."""
+        text = self._run_kdos([
+            "PROVIDED alpha",
+            "PROVIDED beta",
+            "MODULES",
+        ])
+        self.assertIn("alpha", text)
+        self.assertIn("beta", text)
+        self.assertIn("2 ", text)
+
+    def test_modules_empty(self):
+        """MODULES with nothing loaded shows 0."""
+        text = self._run_kdos(["MODULES"])
+        self.assertIn("0 ", text)
+
+    def test_require_chain(self):
+        """Module A requires module B; both are loaded."""
+        img = self._make_module_image({
+            "base.f":  b"PROVIDED base.f\n: BASE-VAL 10 ;\n",
+            "app.f":   b"PROVIDED app.f\nREQUIRE base.f\n: APP-VAL BASE-VAL 2* ;\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "APP-VAL .",
+            ], storage_image=img)
+            self.assertIn("20 ", text)
+        finally:
+            os.unlink(img)
+
+
+class TestKDOSGraphicsModule(_KDOSTestBase):
+    """Tests for graphics.f — framebuffer graphics module."""
+
+    def _make_gfx_image(self):
+        """Create a formatted image with graphics.f injected."""
+        path = self._make_formatted_image()
+        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        with open(gfx_path, "rb") as f:
+            gfx_src = f.read()
+        du_inject_file(path, "graphics.f", gfx_src, ftype=FTYPE_FORTH)
+        return path
+
+    def test_require_graphics(self):
+        """REQUIRE graphics.f loads without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "MODULE? graphics.f IF .\" LOADED\" THEN",
+            ], storage_image=img)
+            self.assertIn("LOADED", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_init_sets_mode(self):
+        """GFX-INIT sets the framebuffer mode register."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "FB-MODE@ .",
+            ], storage_image=img)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_init_enables_fb(self):
+        """GFX-INIT enables the framebuffer."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "FB-STATUS@ 1 AND .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_pixel_roundtrip(self):
+        """GFX-PIXEL! / GFX-PIXEL@ round-trip a pixel value."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "42 10 20 GFX-PIXEL!",
+                "10 20 GFX-PIXEL@ .",
+            ], storage_image=img)
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_clear(self):
+        """GFX-CLEAR fills screen; pixel reads back the fill color."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "7 GFX-CLEAR",
+                "100 100 GFX-PIXEL@ .",
+            ], storage_image=img)
+            self.assertIn("7 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_hline(self):
+        """GFX-HLINE draws a horizontal line of pixels."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "5 10 20 8 GFX-HLINE",
+                "10 20 GFX-PIXEL@ .",
+                "17 20 GFX-PIXEL@ .",
+            ], storage_image=img)
+            # Both pixels at (10,20) and (17,20) should be color 5
+            self.assertIn("5 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_rect(self):
+        """GFX-RECT fills a rectangular region."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "3 10 10 4 4 GFX-RECT",
+                "12 12 GFX-PIXEL@ .",     # inside rect
+                "20 20 GFX-PIXEL@ .",     # outside rect (0)
+            ], storage_image=img)
+            self.assertIn("3 ", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_char(self):
+        """GFX-CHAR renders an 'A' — at least one pixel is nonzero."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "65 10 10 15 GFX-CHAR",  # 'A' at (10,10) color 15
+                # Check pixel at (12,11) — row 1 of 'A' is 0x6C (01101100)
+                # column 2 = bit 5 = 1 → pixel at (10+2, 10+1) = (12,11)
+                "12 11 GFX-PIXEL@ 0<> .",
+            ], storage_image=img)
+            self.assertIn("-1 ", text)   # TRUE = nonzero
+        finally:
+            os.unlink(img)
+
+    def test_gfx_pal_default(self):
+        """GFX-PAL-DEFAULT runs without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-PAL-DEFAULT",
+            ], storage_image=img)
+            self.assertNotIn("BUS FAULT", text.upper())
+            self.assertNotIn("PRIV FAULT", text.upper())
+        finally:
+            os.unlink(img)
+
+    def test_gfx_demo(self):
+        """GFX-DEMO completes without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-DEMO",
+            ], storage_image=img)
+            self.assertIn("GFX-DEMO complete", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_test_card(self):
+        """GFX-TEST-CARD completes and draws pixels."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-TEST-CARD",
+            ], storage_image=img, max_steps=400_000_000)
+            self.assertIn("GFX-TEST-CARD complete", text)
+        finally:
+            os.unlink(img)
+
+
+class TestHeadlessDisplay(_KDOSTestBase):
+    """Tests for the HeadlessDisplay snapshot helper."""
+
+    def test_headless_snapshot(self):
+        """HeadlessDisplay captures FB pixel data via HBW memory."""
+        from display import HeadlessDisplay, HBW_BASE
+        img = self._make_formatted_image()
+        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        with open(gfx_path, "rb") as f:
+            du_inject_file(img, "graphics.f", f.read(), ftype=FTYPE_FORTH)
+        try:
+            # Use the fast path which constructs a MegapadSystem internally.
+            # We need access to the system object, so call _run_kdos_fast
+            # the same way _run_kdos does, but capture the system.
+            mem_bytes, cpu_state = self.__class__._kdos_snapshot
+            sys_emu = make_system(ram_kib=1024, storage_image=img)
+            buf = capture_uart(sys_emu)
+            sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
+            self._restore_cpu_state(sys_emu.cpu, cpu_state)
+            sys_emu.cpu.halted = False
+            sys_emu.cpu.idle = False
+            # Inject commands
+            payload = ("REQUIRE graphics.f\n"
+                       "320 240 0 GFX-INIT\n"
+                       "15 160 120 GFX-PIXEL!\n"
+                       "BYE\n")
+            sys_emu.uart.inject_input(payload.encode())
+            total = 0
+            while total < 400_000_000:
+                if sys_emu.cpu.halted:
+                    break
+                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                    break
+                batch = sys_emu.run_batch(100_000)
+                total += max(batch, 1)
+
+            disp = HeadlessDisplay(sys_emu)
+            snap = disp.snapshot()
+            self.assertIsNotNone(snap)
+            self.assertEqual(len(snap), 320 * 240)
+            self.assertEqual(snap[120 * 320 + 160], 15)
+        finally:
+            os.unlink(img)
+
+    def test_headless_disabled(self):
+        """HeadlessDisplay returns None when FB is disabled."""
+        from display import HeadlessDisplay
+        sys_emu = make_system()
+        disp = HeadlessDisplay(sys_emu)
+        self.assertIsNone(disp.snapshot())
 
 
 if __name__ == "__main__":

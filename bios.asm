@@ -7081,6 +7081,248 @@ w_cl_mpu_limit_fetch:
     ret.l
 
 ; =====================================================================
+;  Framebuffer — MMIO at 0xFFFF_FF00_0000_0A00
+; =====================================================================
+;  A memory-mapped framebuffer controller.  Does not own pixel memory;
+;  reads from HBW RAM at the address set by FB-BASE!.
+;  Register offsets (from 0x0A00):
+;    0x00  FB_BASE     (RW)  64-bit pixel data address
+;    0x08  FB_WIDTH    (RW)  32-bit width in pixels
+;    0x10  FB_HEIGHT   (RW)  32-bit height in pixels
+;    0x18  FB_STRIDE   (RW)  32-bit bytes per scanline
+;    0x20  FB_MODE     (RW)   8-bit pixel format
+;    0x28  FB_ENABLE   (RW)   8-bit enable flags
+;    0x30  FB_VSYNC    (RW)  32-bit frame counter / ack
+;    0x38  FB_PAL_IDX  (W)    8-bit palette index
+;    0x40  FB_PAL_DATA (W)   32-bit palette RGB entry
+;    0x48  FB_STATUS   (R)    8-bit status
+
+; FB-BASE! ( addr -- )  Set framebuffer base address (64-bit LE write).
+w_fb_base_store:
+    ldn r9, r14              ; pop addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0A00    ; FB_BASE offset 0x00
+    ldi r12, 0
+.fb_base_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r9
+    ldi r0, 8
+    shr r9, r0
+    addi r12, 1
+    cmpi r12, 8
+    brcc .fb_base_loop
+    ret.l
+
+; FB-WIDTH! ( n -- )  Set framebuffer width (32-bit LE write).
+w_fb_width_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0A08    ; FB_WIDTH offset 0x08
+    ldi r12, 0
+.fb_width_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r9
+    ldi r0, 8
+    shr r9, r0
+    addi r12, 1
+    cmpi r12, 4
+    brcc .fb_width_loop
+    ret.l
+
+; FB-HEIGHT! ( n -- )  Set framebuffer height (32-bit LE write).
+w_fb_height_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0A10    ; FB_HEIGHT offset 0x10
+    ldi r12, 0
+.fb_height_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r9
+    ldi r0, 8
+    shr r9, r0
+    addi r12, 1
+    cmpi r12, 4
+    brcc .fb_height_loop
+    ret.l
+
+; FB-STRIDE! ( n -- )  Set framebuffer stride in bytes (32-bit LE write).
+w_fb_stride_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0A18    ; FB_STRIDE offset 0x18
+    ldi r12, 0
+.fb_stride_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r9
+    ldi r0, 8
+    shr r9, r0
+    addi r12, 1
+    cmpi r12, 4
+    brcc .fb_stride_loop
+    ret.l
+
+; FB-MODE! ( n -- )  Set pixel mode (byte write).
+w_fb_mode_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0A20    ; FB_MODE offset 0x20
+    st.b r7, r0
+    ret.l
+
+; FB-MODE@ ( -- n )  Read pixel mode.
+w_fb_mode_fetch:
+    ldi64 r7, 0xFFFF_FF00_0000_0A20
+    ld.b r0, r7
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; FB-ENABLE ( -- )  Enable framebuffer scanout (set bit 0 of ENABLE).
+w_fb_enable:
+    ldi64 r7, 0xFFFF_FF00_0000_0A28    ; FB_ENABLE offset 0x28
+    ld.b r0, r7
+    ori r0, 1
+    st.b r7, r0
+    ret.l
+
+; FB-DISABLE ( -- )  Disable framebuffer scanout.
+w_fb_disable:
+    ldi64 r7, 0xFFFF_FF00_0000_0A28
+    ldi r0, 0
+    st.b r7, r0
+    ret.l
+
+; FB-VSYNC@ ( -- n )  Read vsync frame counter (32-bit LE).
+w_fb_vsync_fetch:
+    ldi64 r7, 0xFFFF_FF00_0000_0A30    ; FB_VSYNC offset 0x30
+    ldi r0, 0
+    ldi r12, 0
+.fb_vsync_rd_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r9, r11
+    mov r1, r12
+    ldi r13, 3
+    shl r1, r13              ; r1 = byte_idx * 8
+    shl r9, r1
+    or r0, r9
+    addi r12, 1
+    cmpi r12, 4
+    brcc .fb_vsync_rd_loop
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; FB-VSYNC-ACK ( -- )  Acknowledge vsync interrupt (write 1 to VSYNC).
+w_fb_vsync_ack:
+    ldi64 r7, 0xFFFF_FF00_0000_0A30
+    ldi r0, 1
+    st.b r7, r0
+    ldi r0, 0
+    addi r7, 1
+    st.b r7, r0
+    addi r7, 1
+    st.b r7, r0
+    addi r7, 1
+    st.b r7, r0
+    ret.l
+
+; FB-PAL! ( rgb index -- )  Set palette entry. rgb = 0x00RRGGBB.
+w_fb_pal_store:
+    ldn r9, r14              ; pop index
+    addi r14, 8
+    ldn r1, r14              ; pop rgb
+    addi r14, 8
+    ; Write index to FB_PAL_IDX
+    ldi64 r7, 0xFFFF_FF00_0000_0A38    ; FB_PAL_IDX offset 0x38
+    st.b r7, r9
+    ; Write 32-bit RGB to FB_PAL_DATA (4 bytes LE)
+    ldi64 r7, 0xFFFF_FF00_0000_0A40    ; FB_PAL_DATA offset 0x40
+    ldi r12, 0
+.fb_pal_loop:
+    mov r11, r7
+    add r11, r12
+    st.b r11, r1
+    ldi r0, 8
+    shr r1, r0
+    addi r12, 1
+    cmpi r12, 4
+    brcc .fb_pal_loop
+    ret.l
+
+; FB-STATUS@ ( -- n )  Read framebuffer status register.
+w_fb_status_fetch:
+    ldi64 r7, 0xFFFF_FF00_0000_0A48    ; FB_STATUS offset 0x48
+    ld.b r0, r7
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; FB-SETUP ( width height mode -- )  Configure framebuffer in one call.
+;   Sets base to HBW Bank 3 (0xFFE0_0000), sets width/height/stride/mode,
+;   does NOT enable — caller must use FB-ENABLE separately.
+;   Uses ONLY scratch regs: R0, R1, R7, R9, R11, R12, R13.
+;   Sub-words clobber R0, R7, R9, R11, R12.  R1 and R13 survive calls.
+;   Plan: r1 = width (preserved), r13 = mode (preserved),
+;         height stashed on DSP below working area.
+w_fb_setup:
+    ; Pop args: ( width height mode -- )  TOS = mode
+    ldn r13, r14             ; r13 = mode   (survives sub-calls)
+    addi r14, 8
+    ldn r9, r14              ; r9  = height (temp — stash to DSP)
+    addi r14, 8
+    ldn r1, r14              ; r1  = width  (survives sub-calls)
+    addi r14, 8
+    ; Stash height on data stack
+    subi r14, 8
+    str r14, r9              ; [DSP+0] = height
+    ; 1) FB_BASE = 0xFFE0_0000
+    ldi64 r9, 0xFFE00000
+    subi r14, 8
+    str r14, r9              ; push base for w_fb_base_store
+    ldi64 r11, w_fb_base_store
+    call.l r11               ; pops base; DSP → stashed height
+    ; 2) FB-WIDTH!  — width is in r1
+    subi r14, 8
+    str r14, r1              ; push width
+    ldi64 r11, w_fb_width_store
+    call.l r11               ; pops width; DSP → stashed height
+    ; 3) FB-HEIGHT!  — height is TOS (stashed earlier)
+    ;    Already on top of stack — just call
+    ldi64 r11, w_fb_height_store
+    call.l r11               ; pops height
+    ; 4) Compute stride = width * bytes_per_pixel
+    ;    mode 0 → 1 (<<0), mode 1/2 → 2 (<<1), mode 3 → 4 (<<2)
+    mov r9, r1               ; r9 = width (r1 still intact)
+    cmpi r13, 3
+    brcc .fb_setup_not4
+    ldi r0, 2
+    shl r9, r0               ; width * 4
+    br .fb_setup_stride
+.fb_setup_not4:
+    cmpi r13, 1
+    brcc .fb_setup_not2
+    ldi r0, 1
+    shl r9, r0               ; width * 2
+    br .fb_setup_stride
+.fb_setup_not2:
+.fb_setup_stride:
+    subi r14, 8
+    str r14, r9              ; push stride
+    ldi64 r11, w_fb_stride_store
+    call.l r11               ; pops stride
+    ; 5) FB-MODE!
+    subi r14, 8
+    str r14, r13             ; push mode
+    ldi64 r11, w_fb_mode_store
+    call.l r11               ; pops mode
+    ret.l
+
+; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
 ; =====================================================================
 ;
@@ -8489,6 +8731,22 @@ w_hbw_base:
 ; HBW-SIZE ( -- u )  read HBW math RAM size in bytes from SysInfo
 w_hbw_size:
     ldi64 r11, 0xFFFF_FF00_0000_0328    ; SysInfo + 0x28 = HBW_SIZE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; EXT-MEM-BASE ( -- addr )  read external memory base address from SysInfo
+w_ext_mem_base:
+    ldi64 r11, 0xFFFF_FF00_0000_0338    ; SysInfo + 0x38 = EXT_MEM_BASE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; EXT-MEM-SIZE ( -- u )  read external memory size in bytes from SysInfo
+w_ext_mem_size:
+    ldi64 r11, 0xFFFF_FF00_0000_0340    ; SysInfo + 0x40 = EXT_MEM_SIZE
     ldn r0, r11
     subi r14, 8
     str r14, r0
@@ -11286,9 +11544,27 @@ d_hbw_size:
     call.l r11
     ret.l
 
+; === EXT-MEM-BASE ( -- addr ) ===
+d_ext_mem_base:
+    .dq d_hbw_size
+    .db 12
+    .ascii "EXT-MEM-BASE"
+    ldi64 r11, w_ext_mem_base
+    call.l r11
+    ret.l
+
+; === EXT-MEM-SIZE ( -- u ) ===
+d_ext_mem_size:
+    .dq d_ext_mem_base
+    .db 12
+    .ascii "EXT-MEM-SIZE"
+    ldi64 r11, w_ext_mem_size
+    call.l r11
+    ret.l
+
 ; === N-FULL ( -- n ) ===
 d_n_full:
-    .dq d_hbw_size
+    .dq d_ext_mem_size
     .db 6
     .ascii "N-FULL"
     ldi64 r11, w_n_full
@@ -11415,7 +11691,7 @@ d_cl_priv_store:
 ; === CL-PRIV@ ( -- n ) ===
 d_cl_priv_fetch:
     .dq d_cl_priv_store
-    .db 7
+    .db 8
     .ascii "CL-PRIV@"
     ldi64 r11, w_cl_priv_fetch
     call.l r11
@@ -11449,12 +11725,129 @@ d_cl_mpu_base_fetch:
     ret.l
 
 ; === CL-MPU-LIMIT@ ( -- n ) ===
-latest_entry:
 d_cl_mpu_limit_fetch:
     .dq d_cl_mpu_base_fetch
     .db 13
     .ascii "CL-MPU-LIMIT@"
     ldi64 r11, w_cl_mpu_limit_fetch
+    call.l r11
+    ret.l
+
+; === FB-BASE! ( addr -- ) ===
+d_fb_base_store:
+    .dq d_cl_mpu_limit_fetch
+    .db 8
+    .ascii "FB-BASE!"
+    ldi64 r11, w_fb_base_store
+    call.l r11
+    ret.l
+
+; === FB-WIDTH! ( n -- ) ===
+d_fb_width_store:
+    .dq d_fb_base_store
+    .db 9
+    .ascii "FB-WIDTH!"
+    ldi64 r11, w_fb_width_store
+    call.l r11
+    ret.l
+
+; === FB-HEIGHT! ( n -- ) ===
+d_fb_height_store:
+    .dq d_fb_width_store
+    .db 10
+    .ascii "FB-HEIGHT!"
+    ldi64 r11, w_fb_height_store
+    call.l r11
+    ret.l
+
+; === FB-STRIDE! ( n -- ) ===
+d_fb_stride_store:
+    .dq d_fb_height_store
+    .db 10
+    .ascii "FB-STRIDE!"
+    ldi64 r11, w_fb_stride_store
+    call.l r11
+    ret.l
+
+; === FB-MODE! ( n -- ) ===
+d_fb_mode_store:
+    .dq d_fb_stride_store
+    .db 8
+    .ascii "FB-MODE!"
+    ldi64 r11, w_fb_mode_store
+    call.l r11
+    ret.l
+
+; === FB-MODE@ ( -- n ) ===
+d_fb_mode_fetch:
+    .dq d_fb_mode_store
+    .db 8
+    .ascii "FB-MODE@"
+    ldi64 r11, w_fb_mode_fetch
+    call.l r11
+    ret.l
+
+; === FB-ENABLE ( -- ) ===
+d_fb_enable:
+    .dq d_fb_mode_fetch
+    .db 9
+    .ascii "FB-ENABLE"
+    ldi64 r11, w_fb_enable
+    call.l r11
+    ret.l
+
+; === FB-DISABLE ( -- ) ===
+d_fb_disable:
+    .dq d_fb_enable
+    .db 10
+    .ascii "FB-DISABLE"
+    ldi64 r11, w_fb_disable
+    call.l r11
+    ret.l
+
+; === FB-VSYNC@ ( -- n ) ===
+d_fb_vsync_fetch:
+    .dq d_fb_disable
+    .db 9
+    .ascii "FB-VSYNC@"
+    ldi64 r11, w_fb_vsync_fetch
+    call.l r11
+    ret.l
+
+; === FB-VSYNC-ACK ( -- ) ===
+d_fb_vsync_ack:
+    .dq d_fb_vsync_fetch
+    .db 12
+    .ascii "FB-VSYNC-ACK"
+    ldi64 r11, w_fb_vsync_ack
+    call.l r11
+    ret.l
+
+; === FB-PAL! ( rgb index -- ) ===
+d_fb_pal_store:
+    .dq d_fb_vsync_ack
+    .db 7
+    .ascii "FB-PAL!"
+    ldi64 r11, w_fb_pal_store
+    call.l r11
+    ret.l
+
+; === FB-STATUS@ ( -- n ) ===
+d_fb_status_fetch:
+    .dq d_fb_pal_store
+    .db 10
+    .ascii "FB-STATUS@"
+    ldi64 r11, w_fb_status_fetch
+    call.l r11
+    ret.l
+
+; === FB-SETUP ( width height mode -- ) ===
+latest_entry:
+d_fb_setup:
+    .dq d_fb_status_fetch
+    .db 8
+    .ascii "FB-SETUP"
+    ldi64 r11, w_fb_setup
     call.l r11
     ret.l
 
