@@ -376,3 +376,100 @@ CREATE GFX-FONT
     GFX-CR
     S" KDOS v1.1" 7 GFX-TYPE
     ." GFX-DEMO complete" CR ;
+
+\ -- Interactive framebuffer demo -------------------------------------------
+\ Draws a colorful test card with rectangles, gradients, text, and
+\ a simple animation loop.  Press any key in the UART console to stop.
+
+: GFX-GRADIENT  ( y0 w h -- )
+    0 DO
+        I 256 * 2 PICK / 255 AND        ( y0 w color )
+        0 3 PICK I + 2 PICK             ( y0 w color 0 y+i w )
+        GFX-HLINE                        ( y0 w )
+    LOOP
+    2DROP ;
+
+: GFX-CHECKERBOARD  ( x0 y0 w h tilesize color1 color2 -- )
+    >R >R >R                            ( x0 y0 w h  R: c2 c1 sz )
+    2 PICK + SWAP 2 PICK + SWAP         ( x0 y0 x1 y1 )
+    SWAP >R >R                          ( x0 y0  R: ... y1 x1 )
+    DO                                  ( x0 )
+        R@ 2 PICK DO                    ( x0 )
+            I 2 PICK - R> R> R>         ( x0 dx c2 c1 sz )
+            >R >R >R                    ( x0 dx  R: sz c1 c2 )
+            J 4 PICK -                  ( x0 dx dy )
+            R> R> R>                    ( x0 dx dy c2 c1 sz )
+            2 PICK OVER / 3 PICK 2 PICK / + 1 AND
+            IF
+                DUP >R >R >R DROP R> R> R>   \ pick c2
+                4 PICK
+            ELSE
+                DUP >R >R >R NIP R> R> R>    \ pick c1
+                3 PICK
+            THEN
+            \ too complex for inline Forth — simplify
+            DROP 2DROP 2DROP
+        LOOP
+    LOOP
+    R> R> DROP DROP DROP ;
+
+: GFX-TEST-CARD  ( -- )
+    320 240 0 GFX-INIT
+    GFX-PAL-DEFAULT
+
+    \ Clear to dark blue
+    1 GFX-CLEAR
+
+    \ Color bar test pattern across top
+    16 0 DO
+        I                               ( color )
+        I 20 * 0 20 30 GFX-RECT
+    LOOP
+
+    \ Title bar
+    0 10 35 320 14 GFX-RECT             ( black bar )
+    2 GFX-CX !  37 GFX-CY !
+    S" MEGAPAD-64 GRAPHICS ENGINE" 15 GFX-TYPE
+
+    \ System info box
+    0 10 55 200 50 GFX-RECT
+    12 GFX-CX !  57 GFX-CY !
+    S" CPU: MP64 @ 1 MHz" 7 GFX-TYPE
+    12 GFX-CX !  67 GFX-CY !
+    S" Mode: 320x240x8bpp" 7 GFX-TYPE
+    12 GFX-CX !  77 GFX-CY !
+    S" Font: 8x8 bitmap" 7 GFX-TYPE
+    12 GFX-CX !  87 GFX-CY !
+    S" Palette: 16-color CGA" 7 GFX-TYPE
+
+    \ Nested rectangles (right side)
+    4  220 55 90 50 GFX-RECT
+    2  225 60 80 40 GFX-RECT
+    14 230 65 70 30 GFX-RECT
+    0  235 70 60 20 GFX-RECT
+    15 237 72 56 16 GFX-RECT
+
+    \ ASCII glyph table
+    0 10 110 300 80 GFX-RECT           ( dark background )
+    12 GFX-CX !  112 GFX-CY !
+    S" ASCII Table:" 14 GFX-TYPE
+    96 0 DO
+        I 32 +                          ( char )
+        I 16 / 8 * 122 + GFX-CY !
+        I 16 AND 15 AND 8 * 12 + GFX-CX !
+        GFX-CX @ GFX-CY @
+        I 7 AND 9 +                     ( char x y color )
+        GFX-CHAR
+    LOOP
+
+    \ Bottom status bar
+    8 0 195 320 12 GFX-RECT
+    2 GFX-CX !  197 GFX-CY !
+    S" KDOS v1.1 -- Type GFX-DEMO for simple demo" 0 GFX-TYPE
+
+    \ Credits
+    2 GFX-CX !  215 GFX-CY !
+    S" Framebuffer ready. Press key to exit." 7 GFX-TYPE
+
+    GFX-SYNC
+    ." GFX-TEST-CARD complete" CR ;

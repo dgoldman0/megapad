@@ -15,6 +15,7 @@ Provides:
 
 Usage:
   python cli.py [--ram SIZE_KIB] [--storage IMAGE] [--load FILE@ADDR] [--bios FILE]
+                [--display] [--scale N]
 """
 
 from __future__ import annotations
@@ -881,6 +882,10 @@ def main():
                              "networking (default: mp64tap0)")
     parser.add_argument("--cores", type=int, default=1, choices=[1, 2, 3, 4],
                         help="Number of CPU cores (default: 1)")
+    parser.add_argument("--display", action="store_true",
+                        help="Open a pygame window showing the framebuffer")
+    parser.add_argument("--scale", type=int, default=2, metavar="N",
+                        help="Pixel scale factor for display window (default: 2)")
     args = parser.parse_args()
 
     # ---- Assemble-only mode -------------------------------------------
@@ -956,6 +961,21 @@ def main():
     if bios_loaded:
         sys_emu.boot(0)
 
+        # Start framebuffer display window if requested
+        display = None
+        if args.display:
+            try:
+                from display import FramebufferDisplay
+                display = FramebufferDisplay(sys_emu, scale=args.scale)
+                display.start()
+                print("[display] Framebuffer window opened "
+                      f"(scale={args.scale}x)")
+            except ImportError as e:
+                print(f"[display] pygame not available: {e}",
+                      file=sys.stderr)
+                print("[display] Install with: pip install pygame",
+                      file=sys.stderr)
+
         # Inject Forth source files through UART before interactive console
         if args.forth:
             _inject_forth_files(sys_emu, args.forth)
@@ -975,6 +995,9 @@ def main():
             if cli._return_to_console and not sys_emu.cpu.halted:
                 continue  # back to BIOS console
             break
+        # Shut down display if running
+        if display is not None:
+            display.stop()
         print()  # clean newline on exit
         return
 

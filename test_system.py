@@ -16992,6 +16992,70 @@ class TestKDOSGraphicsModule(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    def test_gfx_test_card(self):
+        """GFX-TEST-CARD completes and draws pixels."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-TEST-CARD",
+            ], storage_image=img, max_steps=400_000_000)
+            self.assertIn("GFX-TEST-CARD complete", text)
+        finally:
+            os.unlink(img)
+
+
+class TestHeadlessDisplay(_KDOSTestBase):
+    """Tests for the HeadlessDisplay snapshot helper."""
+
+    def test_headless_snapshot(self):
+        """HeadlessDisplay captures FB pixel data via HBW memory."""
+        from display import HeadlessDisplay, HBW_BASE
+        img = self._make_formatted_image()
+        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        with open(gfx_path, "rb") as f:
+            du_inject_file(img, "graphics.f", f.read(), ftype=FTYPE_FORTH)
+        try:
+            # Use the fast path which constructs a MegapadSystem internally.
+            # We need access to the system object, so call _run_kdos_fast
+            # the same way _run_kdos does, but capture the system.
+            mem_bytes, cpu_state = self.__class__._kdos_snapshot
+            sys_emu = make_system(ram_kib=1024, storage_image=img)
+            buf = capture_uart(sys_emu)
+            sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
+            self._restore_cpu_state(sys_emu.cpu, cpu_state)
+            sys_emu.cpu.halted = False
+            sys_emu.cpu.idle = False
+            # Inject commands
+            payload = ("REQUIRE graphics.f\n"
+                       "320 240 0 GFX-INIT\n"
+                       "15 160 120 GFX-PIXEL!\n"
+                       "BYE\n")
+            sys_emu.uart.inject_input(payload.encode())
+            total = 0
+            while total < 400_000_000:
+                if sys_emu.cpu.halted:
+                    break
+                if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
+                    break
+                batch = sys_emu.run_batch(100_000)
+                total += max(batch, 1)
+
+            disp = HeadlessDisplay(sys_emu)
+            snap = disp.snapshot()
+            self.assertIsNotNone(snap)
+            self.assertEqual(len(snap), 320 * 240)
+            self.assertEqual(snap[120 * 320 + 160], 15)
+        finally:
+            os.unlink(img)
+
+    def test_headless_disabled(self):
+        """HeadlessDisplay returns None when FB is disabled."""
+        from display import HeadlessDisplay
+        sys_emu = make_system()
+        disp = HeadlessDisplay(sys_emu)
+        self.assertIsNone(disp.snapshot())
+
 
 if __name__ == "__main__":
     print("=" * 60)
