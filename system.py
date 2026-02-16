@@ -53,6 +53,10 @@ HBW_BASE   = 0xFFD0_0000
 HBW_SIZE   = 3 * (1 << 20)          # 3 MiB (banks 1–3)
 HBW_END    = HBW_BASE + HBW_SIZE    # exclusive
 
+# External memory (HyperRAM / SDRAM).
+# Fills the gap between Bank 0 top and HBW base.
+EXT_MEM_BASE = 0x0010_0000          # right after 1 MiB Bank 0
+
 # Boot vector: on reset, PC (R3) is loaded with this address.
 # BIOS is expected to be loaded here.
 BOOT_VECTOR = 0x0000_0000_0000_0000
@@ -251,11 +255,13 @@ class MegapadSystem:
                  nic_backend: 'Optional[NICBackend]' = None,
                  num_cores: int = 1,
                  num_clusters: int = 0,
-                 hbw_size: int = HBW_SIZE):
+                 hbw_size: int = HBW_SIZE,
+                 ext_mem_size: int = 0):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
         self.hbw_size = hbw_size          # Banks 1–3 (HBW math RAM)
+        self.ext_mem_size = ext_mem_size  # External memory (HyperRAM/SDRAM)
 
         # Total core count matches RTL NUM_ALL_CORES
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
@@ -266,6 +272,11 @@ class MegapadSystem:
 
         # HBW math RAM (contiguous; banks 1–3)
         self._hbw_mem = bytearray(hbw_size) if hbw_size > 0 else bytearray()
+
+        # External memory (HyperRAM / SDRAM)
+        self._ext_mem = bytearray(ext_mem_size) if ext_mem_size > 0 else bytearray()
+        self.ext_mem_base = EXT_MEM_BASE if ext_mem_size > 0 else 0
+        self.ext_mem_end = (EXT_MEM_BASE + ext_mem_size) if ext_mem_size > 0 else 0
 
         # Create full CPU cores
         self.cores: list[Megapad64] = []
@@ -317,6 +328,8 @@ class MegapadSystem:
             int_mem_total=ram_size + hbw_size,
             has_storage=storage_image is not None,
             has_nic=True,
+            ext_mem_base=self.ext_mem_base,
+            ext_mem_size=ext_mem_size,
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.spinlock = SpinlockDevice()
@@ -457,6 +470,10 @@ class MegapadSystem:
         bus = self.bus
         hbw_mem = self._hbw_mem
         hbw_size = self.hbw_size
+        ext_mem = self._ext_mem
+        ext_mem_size = self.ext_mem_size
+        ext_mem_base = self.ext_mem_base
+        ext_mem_end = self.ext_mem_end
 
         # Scratchpad interception for micro-cores
         cluster = getattr(cpu, '_cluster', None)
@@ -500,6 +517,8 @@ class MegapadSystem:
                                         f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 return hbw_mem[addr - HBW_BASE]
+            if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
+                return ext_mem[addr - ext_mem_base]
             return original_read8(addr)
 
         def patched_write8(addr: int, val: int):
@@ -532,6 +551,9 @@ class MegapadSystem:
                                         f"MPU violation @ {addr:#018x}")
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 hbw_mem[addr - HBW_BASE] = val & 0xFF
+                return
+            if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
+                ext_mem[addr - ext_mem_base] = val & 0xFF
                 return
             original_write8(addr, val)
 
@@ -584,12 +606,16 @@ class MegapadSystem:
         addr = u64(addr)
         if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
             return self._hbw_mem[addr - HBW_BASE]
+        if self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
+            return self._ext_mem[addr - self.ext_mem_base]
         return self._shared_mem[addr % self.ram_size]
 
     def _raw_mem_write(self, addr: int, val: int):
         addr = u64(addr)
         if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
             self._hbw_mem[addr - HBW_BASE] = val & 0xFF
+        elif self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
+            self._ext_mem[addr - self.ext_mem_base] = val & 0xFF
         else:
             self._shared_mem[addr % self.ram_size] = val & 0xFF
 
@@ -598,11 +624,13 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def load_binary(self, addr: int, data: bytes | bytearray):
-        """Load raw bytes into shared RAM (or HBW) at the given address."""
+        """Load raw bytes into shared RAM, HBW, or external memory."""
         for i, b in enumerate(data):
             target = (addr + i)
             if self.hbw_size > 0 and HBW_BASE <= target < HBW_END:
                 self._hbw_mem[target - HBW_BASE] = b
+            elif self.ext_mem_size > 0 and self.ext_mem_base <= target < self.ext_mem_end:
+                self._ext_mem[target - self.ext_mem_base] = b
             else:
                 self._shared_mem[target % self.ram_size] = b
 

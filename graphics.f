@@ -10,7 +10,8 @@
 \            GFX-DEMO
 \
 \  Depends on:  BIOS framebuffer words (FB-*), tile engine (TFILL,
-\               TDST!, TZERO), HBW allocator (HBW-BASE), and
+\               TDST!, TZERO), external memory (EXT-MEM-BASE,
+\               EXT-MEM-SIZE) or HBW allocator (HBW-BASE), and
 \               standard Forth (C!, C@, W!, W@, L!, L@, CMOVE, FILL).
 \ =====================================================================
 
@@ -21,7 +22,7 @@ VARIABLE GFX-W          \ current width in pixels
 VARIABLE GFX-H          \ current height in pixels
 VARIABLE GFX-BPP        \ bytes per pixel (1, 2, or 4)
 VARIABLE GFX-STR        \ stride in bytes
-VARIABLE GFX-FB         \ framebuffer base address (HBW)
+VARIABLE GFX-FB         \ framebuffer base address (ext mem or HBW)
 
 \ Text cursor state for GFX-TYPE / GFX-CR
 VARIABLE GFX-CX         \ cursor column (pixels)
@@ -45,8 +46,13 @@ VARIABLE GFX-CLR        \ current drawing color (used by GFX-CHAR)
     \ Compute stride = width * bpp
     OVER GFX-BPP @ * DUP GFX-STR !     \ save stride  ( w h stride )
     DROP                                ( w h )
-    \ Set FB base to HBW Bank 3 = HBW-BASE + 2*1024*1024
-    HBW-BASE 0x200000 + DUP GFX-FB !    ( w h fb )
+    \ Set FB base: prefer external memory, fall back to HBW Bank 3
+    EXT-MEM-SIZE 0 > IF
+        EXT-MEM-BASE
+    ELSE
+        HBW-BASE 0x200000 +
+    THEN
+    DUP GFX-FB !                        ( w h fb )
     FB-BASE!                            ( w h )
     SWAP DUP FB-WIDTH!                  ( h w )
     DROP DUP FB-HEIGHT!                 ( h )
@@ -58,6 +64,27 @@ VARIABLE GFX-CLR        \ current drawing color (used by GFX-CHAR)
     \ Reset cursor
     0 GFX-CX !  0 GFX-CY !
     \ Enable framebuffer
+    FB-ENABLE ;
+
+\ GFX-INIT-HBW ( width height mode -- )  Force FB into HBW Bank 3.
+\   Use this for tile-accelerated rendering where dual-port HBW
+\   bandwidth matters.  Otherwise prefer GFX-INIT (external memory).
+: GFX-INIT-HBW  ( width height mode -- )
+    DUP GFX-MODE>BPP GFX-BPP !
+    >R
+    OVER GFX-W !
+    DUP  GFX-H !
+    OVER GFX-BPP @ * DUP GFX-STR !
+    DROP
+    HBW-BASE 0x200000 + DUP GFX-FB !
+    FB-BASE!
+    SWAP DUP FB-WIDTH!
+    DROP DUP FB-HEIGHT!
+    DROP
+    GFX-STR @ FB-STRIDE!
+    R> FB-MODE!
+    GFX-FB @ GFX-STR @ GFX-H @ * 0 FILL
+    0 GFX-CX !  0 GFX-CY !
     FB-ENABLE ;
 
 \ -- Screen clear (tile-accelerated) ---------------------------------

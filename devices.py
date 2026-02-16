@@ -446,6 +446,8 @@ class Storage(Device):
 #   0x20  HBW_BASE     — High-Bandwidth math RAM base address
 #   0x28  HBW_SIZE     — HBW region size in bytes
 #   0x30  INT_MEM_TOTAL — total internal memory in bytes
+#   0x38  EXT_MEM_BASE — external memory base address
+#   0x40  EXT_MEM_SIZE — external memory size in bytes
 
 # Board ID + version packed as 64-bit LE value:
 #   bytes 0-1: version (minor=1, then 0x00)
@@ -464,8 +466,10 @@ class SystemInfo(Device):
                  # Legacy compat — ignored if bank0_size is set explicitly
                  mem_size_kib: int | None = None,
                  has_storage: bool = False,
-                 has_nic: bool = False):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x38)
+                 has_nic: bool = False,
+                 ext_mem_base: int = 0,
+                 ext_mem_size: int = 0):
+        super().__init__("SysInfo", SYSINFO_BASE, 0x48)
         if mem_size_kib is not None and bank0_size == (1 << 20):
             # Legacy caller: convert KiB → bytes
             bank0_size = mem_size_kib * 1024
@@ -475,6 +479,8 @@ class SystemInfo(Device):
         self.hbw_base = hbw_base
         self.hbw_size = hbw_size
         self.int_mem_total = int_mem_total
+        self.ext_mem_base = ext_mem_base
+        self.ext_mem_size = ext_mem_size
         # Legacy flags (kept for backward compat, not in RTL)
         self.has_storage = has_storage
         self.has_nic = has_nic
@@ -488,10 +494,12 @@ class SystemInfo(Device):
             0x20: self.hbw_base,
             0x28: self.hbw_size,
             0x30: self.int_mem_total,
+            0x38: self.ext_mem_base,
+            0x40: self.ext_mem_size,
         }
 
     def read8(self, offset: int) -> int:
-        if offset < 0 or offset >= 0x38:
+        if offset < 0 or offset >= 0x48:
             return 0
         reg_base = offset & ~0x07            # align down to 8
         byte_idx = offset & 0x07

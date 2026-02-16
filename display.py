@@ -1,9 +1,10 @@
 """
 Megapad-64 Framebuffer Display
 ================================
-Reads the FramebufferDevice configuration and HBW pixel data from the
-emulator and renders them in a pygame window.  Runs in a background
-thread so it doesn't block the UART console loop.
+Reads the FramebufferDevice configuration and pixel data from the
+emulator — either external memory or HBW — and renders them in a
+pygame window.  Runs in a background thread so it doesn't block the
+UART console loop.
 
 Usage (programmatic):
     from display import FramebufferDisplay
@@ -26,8 +27,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from system import MegapadSystem
 
-# HBW constants (must match system.py)
+# Memory map constants (must match system.py)
 HBW_BASE = 0xFFD0_0000
+EXT_MEM_BASE = 0x0010_0000
 
 
 class FramebufferDisplay:
@@ -156,18 +158,34 @@ class FramebufferDisplay:
         finally:
             pygame.quit()
 
+    def _resolve_fb_mem(self, base_addr: int):
+        """Return (buffer, offset) for the given framebuffer base address.
+
+        Checks external memory first, then HBW.  Returns (None, 0) if
+        the address doesn't fall in either region.
+        """
+        # External memory?
+        if self.sys.ext_mem_size > 0:
+            ext_base = self.sys.ext_mem_base
+            ext_end = self.sys.ext_mem_end
+            if ext_base <= base_addr < ext_end:
+                return self.sys._ext_mem, base_addr - ext_base
+        # HBW?
+        if base_addr >= HBW_BASE:
+            off = base_addr - HBW_BASE
+            if off < len(self.sys._hbw_mem):
+                return self.sys._hbw_mem, off
+        return None, 0
+
     def _render_fb(self, fb, surface, w: int, h: int, mode: int):
-        """Read HBW pixel data and paint onto a pygame Surface."""
+        """Read pixel data from ext mem or HBW and paint onto a pygame Surface."""
         import pygame
         import numpy as np
 
         base_addr = fb.fb_base
         stride = fb.stride
-        hbw_mem = self.sys._hbw_mem
-
-        # Compute offset into HBW memory
-        hbw_off = base_addr - HBW_BASE
-        if hbw_off < 0:
+        mem, mem_off = self._resolve_fb_mem(base_addr)
+        if mem is None:
             return
 
         if mode == 0:
@@ -183,11 +201,11 @@ class FramebufferDisplay:
             # Read raw index bytes for entire frame
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
             for y in range(h):
-                row_off = hbw_off + y * stride
+                row_off = mem_off + y * stride
                 end = row_off + w
-                if end > len(hbw_mem):
+                if end > len(mem):
                     break
-                row = np.frombuffer(hbw_mem, dtype=np.uint8,
+                row = np.frombuffer(mem, dtype=np.uint8,
                                     count=w, offset=row_off)
                 pixels_rgb[:, y, :] = pal_lut[row]
             pygame.surfarray.blit_array(surface, pixels_rgb)
@@ -196,11 +214,11 @@ class FramebufferDisplay:
             # RGB565 — fast path via numpy
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
             for y in range(h):
-                row_off = hbw_off + y * stride
+                row_off = mem_off + y * stride
                 end = row_off + w * 2
-                if end > len(hbw_mem):
+                if end > len(mem):
                     break
-                raw = np.frombuffer(hbw_mem, dtype=np.uint16,
+                raw = np.frombuffer(mem, dtype=np.uint16,
                                     count=w, offset=row_off)
                 pixels_rgb[:, y, 0] = ((raw >> 11) & 0x1F).astype(np.uint8) << 3
                 pixels_rgb[:, y, 1] = ((raw >> 5) & 0x3F).astype(np.uint8) << 2
@@ -211,11 +229,11 @@ class FramebufferDisplay:
             # RGBA8888 — fast path via numpy
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
             for y in range(h):
-                row_off = hbw_off + y * stride
+                row_off = mem_off + y * stride
                 end = row_off + w * 4
-                if end > len(hbw_mem):
+                if end > len(mem):
                     break
-                raw = np.frombuffer(hbw_mem, dtype=np.uint8,
+                raw = np.frombuffer(mem, dtype=np.uint8,
                                     count=w * 4, offset=row_off).reshape(w, 4)
                 pixels_rgb[:, y, 0] = raw[:, 0]
                 pixels_rgb[:, y, 1] = raw[:, 1]
@@ -240,6 +258,19 @@ class HeadlessDisplay:
     def stop(self):
         pass
 
+    def _resolve_fb_mem(self, base_addr: int):
+        """Return (buffer, offset) — same logic as FramebufferDisplay."""
+        if self.sys.ext_mem_size > 0:
+            ext_base = self.sys.ext_mem_base
+            ext_end = self.sys.ext_mem_end
+            if ext_base <= base_addr < ext_end:
+                return self.sys._ext_mem, base_addr - ext_base
+        if base_addr >= HBW_BASE:
+            off = base_addr - HBW_BASE
+            if off < len(self.sys._hbw_mem):
+                return self.sys._hbw_mem, off
+        return None, 0
+
     def snapshot(self) -> bytes | None:
         """Capture current FB pixel data as raw bytes."""
         fb = self.sys.fb
@@ -248,13 +279,13 @@ class HeadlessDisplay:
         base_addr = fb.fb_base
         stride = fb.stride
         h = fb.height
-        hbw_off = base_addr - HBW_BASE
-        if hbw_off < 0:
+        mem, mem_off = self._resolve_fb_mem(base_addr)
+        if mem is None:
             return None
-        end = hbw_off + stride * h
-        if end > len(self.sys._hbw_mem):
+        end = mem_off + stride * h
+        if end > len(mem):
             return None
-        data = bytes(self.sys._hbw_mem[hbw_off:end])
+        data = bytes(mem[mem_off:end])
         self.snapshots.append(data)
         return data
 

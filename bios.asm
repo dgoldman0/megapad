@@ -8736,6 +8736,22 @@ w_hbw_size:
     str r14, r0
     ret.l
 
+; EXT-MEM-BASE ( -- addr )  read external memory base address from SysInfo
+w_ext_mem_base:
+    ldi64 r11, 0xFFFF_FF00_0000_0338    ; SysInfo + 0x38 = EXT_MEM_BASE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; EXT-MEM-SIZE ( -- u )  read external memory size in bytes from SysInfo
+w_ext_mem_size:
+    ldi64 r11, 0xFFFF_FF00_0000_0340    ; SysInfo + 0x40 = EXT_MEM_SIZE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; N-FULL ( -- n )  number of full (major) cores (always 4)
 w_n_full:
     ldi r0, 4
@@ -11528,9 +11544,27 @@ d_hbw_size:
     call.l r11
     ret.l
 
+; === EXT-MEM-BASE ( -- addr ) ===
+d_ext_mem_base:
+    .dq d_hbw_size
+    .db 12
+    .ascii "EXT-MEM-BASE"
+    ldi64 r11, w_ext_mem_base
+    call.l r11
+    ret.l
+
+; === EXT-MEM-SIZE ( -- u ) ===
+d_ext_mem_size:
+    .dq d_ext_mem_base
+    .db 12
+    .ascii "EXT-MEM-SIZE"
+    ldi64 r11, w_ext_mem_size
+    call.l r11
+    ret.l
+
 ; === N-FULL ( -- n ) ===
 d_n_full:
-    .dq d_hbw_size
+    .dq d_ext_mem_size
     .db 6
     .ascii "N-FULL"
     ldi64 r11, w_n_full

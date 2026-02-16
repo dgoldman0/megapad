@@ -96,9 +96,10 @@ BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
 
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,
-                num_cores: int = 1) -> MegapadSystem:
+                num_cores: int = 1, ext_mem_mib: int = 0) -> MegapadSystem:
     return MegapadSystem(ram_size=ram_kib * 1024, storage_image=storage_image,
-                         num_cores=num_cores)
+                         num_cores=num_cores,
+                         ext_mem_size=ext_mem_mib * (1 << 20))
 
 
 def run_until(sys: MegapadSystem, max_steps: int = 500_000):
@@ -579,6 +580,115 @@ class TestHBWMemory(unittest.TestCase):
         for i in range(8):
             val |= si.read8(0x30 + i) << (8 * i)
         self.assertEqual(val, 4 * 1024 * 1024)  # 4 MiB
+
+
+# ---------------------------------------------------------------------------
+#  External memory tests
+# ---------------------------------------------------------------------------
+
+class TestExternalMemory(unittest.TestCase):
+    """Tests for external memory (HyperRAM/SDRAM) emulation."""
+
+    def test_ext_mem_allocation(self):
+        """External memory is allocated when ext_mem_size > 0."""
+        sys = make_system(ext_mem_mib=4)
+        self.assertEqual(len(sys._ext_mem), 4 * (1 << 20))
+        self.assertEqual(sys.ext_mem_size, 4 * (1 << 20))
+        self.assertEqual(sys.ext_mem_base, 0x0010_0000)
+        self.assertEqual(sys.ext_mem_end, 0x0010_0000 + 4 * (1 << 20))
+
+    def test_ext_mem_zero_default(self):
+        """No external memory by default."""
+        sys = make_system()
+        self.assertEqual(len(sys._ext_mem), 0)
+        self.assertEqual(sys.ext_mem_size, 0)
+
+    def test_ext_mem_cpu_read_write(self):
+        """CPU can read/write external memory at 0x0010_0000."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0000
+        code = assemble(f"""
+            ldi r1, 0x55
+            ldi64 r4, {ext_addr}
+            st.b r4, r1
+            ldi r5, 0
+            ld.b r5, r4
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(sys.cpu.regs[5], 0x55)
+
+    def test_ext_mem_does_not_alias_bank0(self):
+        """External memory writes must not corrupt bank 0 RAM."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0000
+        bank0_addr = 0x0000_0100
+        sys.cpu.mem_write8(bank0_addr, 0xAA)
+        sys.cpu.mem_write8(ext_addr, 0xBB)
+        self.assertEqual(sys.cpu.mem_read8(bank0_addr), 0xAA)
+        self.assertEqual(sys.cpu.mem_read8(ext_addr), 0xBB)
+
+    def test_ext_mem_64bit_access(self):
+        """64-bit read/write to external memory."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0100
+        val = 0x1234_5678_9ABC_DEF0
+        sys.cpu.mem_write64(ext_addr, val)
+        result = sys.cpu.mem_read64(ext_addr)
+        self.assertEqual(result, val)
+
+    def test_load_binary_to_ext_mem(self):
+        """load_binary() can target external memory addresses."""
+        sys = make_system(ext_mem_mib=1)
+        ext_addr = 0x0010_0200
+        sys.load_binary(ext_addr, b'\x11\x22\x33\x44')
+        self.assertEqual(sys._ext_mem[0x200], 0x11)
+        self.assertEqual(sys._ext_mem[0x201], 0x22)
+        self.assertEqual(sys._ext_mem[0x202], 0x33)
+        self.assertEqual(sys._ext_mem[0x203], 0x44)
+
+    def test_dma_read_ext_mem(self):
+        """DMA _raw_mem_read routes ext mem addresses correctly."""
+        sys = make_system(ext_mem_mib=1)
+        sys._ext_mem[0] = 0x42
+        self.assertEqual(sys._raw_mem_read(0x0010_0000), 0x42)
+
+    def test_dma_write_ext_mem(self):
+        """DMA _raw_mem_write routes ext mem addresses correctly."""
+        sys = make_system(ext_mem_mib=1)
+        sys._raw_mem_write(0x0010_0000, 0x99)
+        self.assertEqual(sys._ext_mem[0], 0x99)
+
+    def test_sysinfo_reports_ext_mem(self):
+        """SysInfo registers reflect external memory configuration."""
+        sys = make_system(ext_mem_mib=4)
+        si = sys.sysinfo
+        # Read ext_mem_base at offset 0x38
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x38 + i) << (8 * i)
+        self.assertEqual(val, 0x0010_0000)
+        # Read ext_mem_size at offset 0x40
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x40 + i) << (8 * i)
+        self.assertEqual(val, 4 * (1 << 20))
+
+    def test_sysinfo_zero_ext_mem(self):
+        """SysInfo reports zero for ext mem when not configured."""
+        sys = make_system()
+        si = sys.sysinfo
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x38 + i) << (8 * i)
+        self.assertEqual(val, 0)
+        val = 0
+        for i in range(8):
+            val |= si.read8(0x40 + i) << (8 * i)
+        self.assertEqual(val, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -9422,26 +9532,26 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_core_run_dispatches(self):
         """CORE-RUN dispatches work to a secondary core."""
         text = self._run_mc([
-            ": MARKER  66 77839 C! ;",
+            ": MARKER  66 458767 C! ;",
             "' MARKER 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77839 C@ .",
+            "458767 C@ .",
         ])
         self.assertIn("66 ", text)
 
     def test_core_run_multiple_cores(self):
         """CORE-RUN dispatches to cores 1, 2, 3 independently."""
         text = self._run_mc([
-            ": M1  17 77824 C! ;",
-            ": M2  18 77825 C! ;",
-            ": M3  19 77826 C! ;",
+            ": M1  17 458752 C! ;",
+            ": M2  18 458753 C! ;",
+            ": M3  19 458754 C! ;",
             "' M1 1 CORE-RUN",
             "' M2 2 CORE-RUN",
             "' M3 3 CORE-RUN",
             "BARRIER",
-            "77824 C@ .",
-            "77825 C@ .",
-            "77826 C@ .",
+            "458752 C@ .",
+            "458753 C@ .",
+            "458754 C@ .",
         ])
         self.assertIn("17 ", text)
         self.assertIn("18 ", text)
@@ -9450,40 +9560,40 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_core_wait_returns(self):
         """CORE-WAIT returns after dispatched work completes."""
         text = self._run_mc([
-            ": WORK  99 77830 C! ;",
+            ": WORK  99 458758 C! ;",
             "' WORK 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77830 C@ .",
+            "458758 C@ .",
         ])
         self.assertIn("99 ", text)
 
     def test_all_cores_wait(self):
         """ALL-CORES-WAIT waits for all secondary cores."""
         text = self._run_mc([
-            "0 77824 C!",
-            "0 77825 C!",
-            "0 77826 C!",
-            ": AW1  10 77824 C! ;",
-            ": AW2  20 77825 C! ;",
-            ": AW3  30 77826 C! ;",
+            "0 458752 C!",
+            "0 458753 C!",
+            "0 458754 C!",
+            ": AW1  10 458752 C! ;",
+            ": AW2  20 458753 C! ;",
+            ": AW3  30 458754 C! ;",
             "' AW1 1 CORE-RUN",
             "' AW2 2 CORE-RUN",
             "' AW3 3 CORE-RUN",
             "ALL-CORES-WAIT",
-            "77824 C@ 77825 C@ + 77826 C@ + .",
+            "458752 C@ 458753 C@ + 458754 C@ + .",
         ])
         self.assertIn("60 ", text)
 
     def test_barrier(self):
         """BARRIER waits for all secondary cores to finish."""
         text = self._run_mc([
-            ": B1  42 77850 C! ;",
-            ": B2  43 77851 C! ;",
+            ": B1  42 458778 C! ;",
+            ": B2  43 458779 C! ;",
             "' B1 1 CORE-RUN",
             "' B2 2 CORE-RUN",
             "BARRIER",
-            "77850 C@ .",
-            "77851 C@ .",
+            "458778 C@ .",
+            "458779 C@ .",
         ])
         self.assertIn("42 ", text)
         self.assertIn("43 ", text)
@@ -9503,10 +9613,10 @@ class TestKDOSMulticore(unittest.TestCase):
         """LOCK/UNLOCK around shared memory from two cores."""
         text = self._run_mc([
             # Core 1 acquires lock 0, writes value, releases
-            ": LOCKED-WRITE  0 LOCK  77 77860 C!  0 UNLOCK ;",
+            ": LOCKED-WRITE  0 LOCK  77 458788 C!  0 UNLOCK ;",
             "' LOCKED-WRITE 1 CORE-RUN",
             "1 CORE-WAIT",
-            "77860 C@ .",
+            "458788 C@ .",
         ])
         self.assertIn("77 ", text)
 
@@ -9712,26 +9822,26 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_sched_core_secondary(self):
         """SCHED-CORE dispatches queued tasks to a secondary core."""
         text = self._run_mc([
-            ": W1  55 77840 C! ;",
+            ": W1  55 458768 C! ;",
             "' W1 1 RQ-PUSH",
             "1 SCHED-CORE",
-            "77840 C@ .",
+            "458768 C@ .",
         ])
         self.assertIn("55 ", text)
 
     def test_sched_all_parallel(self):
         """SCHED-ALL dispatches tasks across all core queues."""
         text = self._run_mc([
-            ": WA  101 77870 C! ;",
-            ": WB  102 77871 C! ;",
-            ": WC  103 77872 C! ;",
+            ": WA  101 458798 C! ;",
+            ": WB  102 458799 C! ;",
+            ": WC  103 458800 C! ;",
             "' WA 1 RQ-PUSH",
             "' WB 2 RQ-PUSH",
             "' WC 3 RQ-PUSH",
             "SCHED-ALL",
-            "77870 C@ .",
-            "77871 C@ .",
-            "77872 C@ .",
+            "458798 C@ .",
+            "458799 C@ .",
+            "458800 C@ .",
         ])
         self.assertIn("101 ", text)
         self.assertIn("102 ", text)
@@ -9762,13 +9872,13 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_rq_multiple_dispatch_secondary(self):
         """Multiple tasks queued on secondary core execute sequentially."""
         text = self._run_mc([
-            ": W1  41 77880 C! ;",
-            ": W2  42 77881 C! ;",
+            ": W1  41 458808 C! ;",
+            ": W2  42 458809 C! ;",
             "' W1 1 RQ-PUSH",
             "' W2 1 RQ-PUSH",
             "1 SCHED-CORE",
-            "77880 C@ .",
-            "77881 C@ .",
+            "458808 C@ .",
+            "458809 C@ .",
         ])
         self.assertIn("41 ", text)
         self.assertIn("42 ", text)
@@ -9884,14 +9994,14 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_sched_balanced(self):
         """SCHED-BALANCED balances then dispatches all tasks."""
         text = self._run_mc([
-            ": WA  201 77890 C! ;",
-            ": WB  202 77891 C! ;",
+            ": WA  201 458818 C! ;",
+            ": WB  202 458819 C! ;",
             # Put both tasks on core 0
             "' WA 0 RQ-PUSH",
             "' WB 0 RQ-PUSH",
             "SCHED-BALANCED",
-            "77890 C@ .",
-            "77891 C@ .",
+            "458818 C@ .",
+            "458819 C@ .",
         ])
         self.assertIn("201 ", text)
         self.assertIn("202 ", text)
@@ -9936,11 +10046,11 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_spawn_on_core(self):
         """SPAWN-ON pushes task to specified core's run queue."""
         text = self._run_mc([
-            ": W1  44 77900 C! ;",
+            ": W1  44 458828 C! ;",
             "' W1 2 SPAWN-ON",
             "2 RQ-COUNT .",
             "2 SCHED-CORE",
-            "77900 C@ .",
+            "458828 C@ .",
         ])
         self.assertIn("1 ", text)   # 1 task in core 2's queue
         self.assertIn("44 ", text)  # task ran on core 2
@@ -9966,16 +10076,16 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_spawn_on_multiple_cores(self):
         """SPAWN-ON distributes tasks across cores correctly."""
         text = self._run_mc([
-            ": WA  51 77910 C! ;",
-            ": WB  52 77911 C! ;",
-            ": WC  53 77912 C! ;",
+            ": WA  51 458838 C! ;",
+            ": WB  52 458839 C! ;",
+            ": WC  53 458840 C! ;",
             "' WA 1 SPAWN-ON",
             "' WB 2 SPAWN-ON",
             "' WC 3 SPAWN-ON",
             "SCHED-ALL",
-            "77910 C@ .",
-            "77911 C@ .",
-            "77912 C@ .",
+            "458838 C@ .",
+            "458839 C@ .",
+            "458840 C@ .",
         ])
         self.assertIn("51 ", text)
         self.assertIn("52 ", text)
@@ -9993,8 +10103,8 @@ class TestKDOSMulticore(unittest.TestCase):
     def test_affinity_balance_respects_pin(self):
         """Tasks pinned via SPAWN-ON stay on their assigned core."""
         text = self._run_mc([
-            ": WA  61 77920 C! ;",
-            ": WB  62 77921 C! ;",
+            ": WA  61 458848 C! ;",
+            ": WB  62 458849 C! ;",
             "' WA 1 SPAWN-ON",
             "' WB 3 SPAWN-ON",
             "1 RQ-COUNT .",
