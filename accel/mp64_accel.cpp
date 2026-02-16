@@ -128,6 +128,11 @@ struct CPUState {
     // Memory
     uint8_t* mem;
     uint64_t mem_size;
+
+    // HBW math RAM (banks 1-3, contiguous)
+    uint8_t* hbw_mem;
+    uint64_t hbw_base;
+    uint64_t hbw_size;
 };
 
 // ---------------------------------------------------------------------------
@@ -945,10 +950,13 @@ struct StepCallbacks {
     bool has_mmio;
 };
 
-// Memory access with MMIO intercept
+// Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         return cb.mmio_read8(addr);
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        return s.hbw_mem[addr - s.hbw_base];
     }
     return mem_read8(s, addr);
 }
@@ -958,15 +966,24 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         cb.mmio_write8(addr, val);
         return;
     }
+    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        s.hbw_mem[addr - s.hbw_base] = val;
+        return;
+    }
     mem_write8(s, addr, val);
 }
 
-// Wider MMIO-aware reads/writes
+// Wider MMIO/HBW-aware reads/writes
 static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
+        return v;
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+        uint64_t v;
+        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 8);
         return v;
     }
     return mem_read64(s, addr);
@@ -978,12 +995,21 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
     }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 8);
+        return;
+    }
     mem_write64(s, addr, val);
 }
 
 static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+        uint16_t v;
+        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 2);
+        return v;
     }
     return mem_read16(s, addr);
 }
@@ -992,6 +1018,10 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         cb.mmio_write8(addr, val & 0xFF);
         cb.mmio_write8(addr+1, (val >> 8) & 0xFF);
+        return;
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 2);
         return;
     }
     mem_write16(s, addr, val);
@@ -1004,6 +1034,11 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
         return v;
     }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+        uint32_t v;
+        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 4);
+        return v;
+    }
     return mem_read32(s, addr);
 }
 
@@ -1011,6 +1046,10 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         for (int i = 0; i < 4; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
+        return;
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 4);
         return;
     }
     mem_write32(s, addr, val);
@@ -1834,6 +1873,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.mem = static_cast<uint8_t*>(info.ptr);
             s.mem_size = size;
         })
+        // HBW memory attachment
+        .def("attach_hbw_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            py::buffer_info info = buf.request(true);  // writable
+            s.hbw_mem = static_cast<uint8_t*>(info.ptr);
+            s.hbw_base = base;
+            s.hbw_size = size;
+        })
+        .def_readwrite("hbw_base", &CPUState::hbw_base)
+        .def_readwrite("hbw_size", &CPUState::hbw_size)
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })

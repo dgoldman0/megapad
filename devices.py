@@ -437,41 +437,75 @@ class Storage(Device):
 #   0x03  BOARD_ID_3  — '4'
 #   0x04  VERSION_MAJ
 #   0x05  VERSION_MIN
-#   0x06  MEM_SIZE_LO — total memory in KiB, low byte
-#   0x07  MEM_SIZE_HI — high byte
-#   0x08  STORAGE_PRESENT — 0 or 1
-#   0x09  UART_PRESENT    — 0 or 1
-#   0x0A  NIC_PRESENT     — 0 or 1
+#  Register map (64-bit aligned, matches RTL mp64_soc.v SysInfo):
+#   0x00  BOARD_ID_VER — "MP64" + version 2.1  [64'h4D50_3634_0002_0001]
+#   0x08  BANK0_SIZE   — Bank 0 (system RAM) size in bytes
+#   0x10  NUM_CORES    — total core count
+#   0x18  CLUSTER_EN   — per-cluster enable mask (R/W)
+#   0x20  HBW_BASE     — High-Bandwidth math RAM base address
+#   0x28  HBW_SIZE     — HBW region size in bytes
+#   0x30  INT_MEM_TOTAL — total internal memory in bytes
+
+# Board ID + version packed as 64-bit LE value:
+#   bytes 0-1: version (minor=1, then 0x00)
+#   bytes 2-3: version (major=2, then 0x00)
+#   bytes 4-7: "MP64" reversed → '4','6','P','M' = 0x34,0x36,0x50,0x4D
+_BOARD_ID_VER = 0x4D50_3634_0002_0001
 
 class SystemInfo(Device):
-    """Read-only board identification and capability reporting."""
+    """Board identification and capability reporting (matches RTL SysInfo)."""
 
-    def __init__(self, mem_size_kib: int = 1024, has_storage: bool = False,
+    def __init__(self, bank0_size: int = 1 << 20,
+                 num_cores: int = 1,
+                 hbw_base: int = 0xFFD0_0000,
+                 hbw_size: int = 3 * (1 << 20),
+                 int_mem_total: int = 4 * (1 << 20),
+                 # Legacy compat — ignored if bank0_size is set explicitly
+                 mem_size_kib: int | None = None,
+                 has_storage: bool = False,
                  has_nic: bool = False):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x10)
-        self.mem_size_kib = mem_size_kib
+        super().__init__("SysInfo", SYSINFO_BASE, 0x38)
+        if mem_size_kib is not None and bank0_size == (1 << 20):
+            # Legacy caller: convert KiB → bytes
+            bank0_size = mem_size_kib * 1024
+        self.bank0_size = bank0_size
+        self.num_cores = num_cores
+        self.cluster_en = 0
+        self.hbw_base = hbw_base
+        self.hbw_size = hbw_size
+        self.int_mem_total = int_mem_total
+        # Legacy flags (kept for backward compat, not in RTL)
         self.has_storage = has_storage
         self.has_nic = has_nic
 
+        # Pre-build register table (offset → 64-bit value)
+        self._regs = {
+            0x00: _BOARD_ID_VER,
+            0x08: self.bank0_size,
+            0x10: self.num_cores,
+            # 0x18 is dynamic (cluster_en)
+            0x20: self.hbw_base,
+            0x28: self.hbw_size,
+            0x30: self.int_mem_total,
+        }
+
     def read8(self, offset: int) -> int:
-        board_id = b"MP64"
-        if 0x00 <= offset <= 0x03:
-            return board_id[offset]
-        if offset == 0x04:
-            return 1   # major version
-        if offset == 0x05:
-            return 0   # minor version
-        if offset == 0x06:
-            return self.mem_size_kib & 0xFF
-        if offset == 0x07:
-            return (self.mem_size_kib >> 8) & 0xFF
-        if offset == 0x08:
-            return 1 if self.has_storage else 0
-        if offset == 0x09:
-            return 1  # UART always present
-        if offset == 0x0A:
-            return 1 if self.has_nic else 0
-        return 0
+        if offset < 0 or offset >= 0x38:
+            return 0
+        reg_base = offset & ~0x07            # align down to 8
+        byte_idx = offset & 0x07
+        if reg_base == 0x18:
+            val = self.cluster_en            # dynamic
+        else:
+            val = self._regs.get(reg_base, 0)
+        return (val >> (byte_idx * 8)) & 0xFF
+
+    def write8(self, offset: int, val: int):
+        # Only cluster_en (0x18) is writable
+        if 0x18 <= offset < 0x20:
+            byte_idx = offset - 0x18
+            mask = 0xFF << (byte_idx * 8)
+            self.cluster_en = (self.cluster_en & ~mask) | ((val & 0xFF) << (byte_idx * 8))
 
 
 # ---------------------------------------------------------------------------

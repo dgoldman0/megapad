@@ -65,18 +65,19 @@ module mp64_soc (
     // Per-core wires (generated for NUM_CORES)
     // ========================================================================
 
-    // --- CPU ↔ Bus (flat-packed for arbiter) ---
-    wire [NUM_CORES-1:0]        cpu_bus_valid;
-    wire [NUM_CORES*64-1:0]     cpu_bus_addr;
-    wire [NUM_CORES*64-1:0]     cpu_bus_wdata;
-    wire [NUM_CORES-1:0]        cpu_bus_wen;
-    wire [NUM_CORES*2-1:0]      cpu_bus_size;
-    wire [NUM_CORES*64-1:0]     cpu_bus_rdata;
-    wire [NUM_CORES-1:0]        cpu_bus_ready;
+    // --- CPU ↔ Bus (flat-packed for arbiter, NUM_BUS_PORTS wide) ---
+    // Ports [0..NUM_CORES-1] = full cores, [NUM_CORES..NUM_BUS_PORTS-1] = clusters
+    wire [NUM_BUS_PORTS-1:0]        cpu_bus_valid;
+    wire [NUM_BUS_PORTS*64-1:0]     cpu_bus_addr;
+    wire [NUM_BUS_PORTS*64-1:0]     cpu_bus_wdata;
+    wire [NUM_BUS_PORTS-1:0]        cpu_bus_wen;
+    wire [NUM_BUS_PORTS*2-1:0]      cpu_bus_size;
+    wire [NUM_BUS_PORTS*64-1:0]     cpu_bus_rdata;
+    wire [NUM_BUS_PORTS-1:0]        cpu_bus_ready;
 
     // --- Per-core tile engine wires (need arbiter for Port A) ---
     wire [NUM_CORES-1:0]        tile_int_req;
-    wire [NUM_CORES*20-1:0]     tile_int_addr;
+    wire [NUM_CORES*32-1:0]     tile_int_addr;
     wire [NUM_CORES-1:0]        tile_int_wen;
     wire [NUM_CORES*512-1:0]    tile_int_wdata;
     wire [NUM_CORES*512-1:0]    tile_int_rdata;
@@ -107,14 +108,14 @@ module mp64_soc (
     wire [NUM_CORES-1:0]        core_mex_done;
     wire [NUM_CORES-1:0]        core_mex_busy;
 
-    // --- Per-core IPI ---
-    wire [NUM_CORES-1:0]        ipi_lines;
+    // --- Per-core IPI (NUM_ALL_CORES: full + micro) ---
+    wire [NUM_ALL_CORES-1:0]        ipi_lines;
 
     // --- Per-core CSR-side IPI interface (CPU → mailbox, bypasses bus) ---
-    wire [NUM_CORES-1:0]        csr_ipi_wen;
-    wire [NUM_CORES*8-1:0]      csr_ipi_addr;
-    wire [NUM_CORES*64-1:0]     csr_ipi_wdata;
-    wire [NUM_CORES*64-1:0]     csr_ipi_rdata;
+    wire [NUM_ALL_CORES-1:0]        csr_ipi_wen;
+    wire [NUM_ALL_CORES*8-1:0]      csr_ipi_addr;
+    wire [NUM_ALL_CORES*64-1:0]     csr_ipi_wdata;
+    wire [NUM_ALL_CORES*64-1:0]     csr_ipi_rdata;
 
     // Per-core tile CSR rdata (before IPI mux)
     wire [NUM_CORES*64-1:0]     tile_csr_rdata;
@@ -147,7 +148,7 @@ module mp64_soc (
 
     // --- Tile Port A (shared, arbitrated) ---
     wire        tile_arb_req;
-    wire [19:0] tile_arb_addr;
+    wire [31:0] tile_arb_addr;
     wire        tile_arb_wen;
     wire [511:0] tile_arb_wdata;
     wire [511:0] tile_arb_rdata;
@@ -249,10 +250,22 @@ module mp64_soc (
                             64'd0;
     assign mmio_ack = 1'b1;  // all MMIO peripherals are single-cycle
 
-    // SysInfo: now includes core count
+    // SysInfo: now includes core count + cluster enable
+    reg [NUM_CLUSTERS-1:0] cluster_en;    // per-cluster enable (default: all off)
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n)
+            cluster_en <= {NUM_CLUSTERS{1'b0}};
+        else if (sysinfo_sel && mmio_wen && mmio_addr[7:0] == 8'h18)
+            cluster_en <= mmio_wdata_bus[NUM_CLUSTERS-1:0];
+    end
+
     assign sysinfo_rdata = (mmio_addr[7:0] == 8'h00) ? 64'h4D50_3634_0002_0001 :  // "MP64" v2.1 (multi-core)
-                           (mmio_addr[7:0] == 8'h08) ? 64'd1048576               :  // RAM size
-                           (mmio_addr[7:0] == 8'h10) ? {62'd0, NUM_CORES[1:0]}   :  // Core count
+                           (mmio_addr[7:0] == 8'h08) ? 64'd1048576               :  // Bank 0 size (1 MiB)
+                           (mmio_addr[7:0] == 8'h10) ? NUM_ALL_CORES[63:0]      :  // Core count
+                           (mmio_addr[7:0] == 8'h18) ? {{(64-NUM_CLUSTERS){1'b0}}, cluster_en} :  // Cluster enable
+                           (mmio_addr[7:0] == 8'h20) ? {32'd0, HBW_BASE_ADDR}   :  // HBW base address
+                           (mmio_addr[7:0] == 8'h28) ? 64'd3145728              :  // HBW size (3 MiB)
+                           (mmio_addr[7:0] == 8'h30) ? INT_MEM_TOTAL[63:0]      :  // Total internal BRAM (4 MiB)
                            64'd0;
 
     // DMA ack stubs
@@ -478,7 +491,7 @@ module mp64_soc (
 
                 // Internal BRAM Port A (goes to tile arbiter)
                 .tile_req       (tile_int_req  [c]),
-                .tile_addr      (tile_int_addr [c*20 +: 20]),
+                .tile_addr      (tile_int_addr [c*32 +: 32]),
                 .tile_wen       (tile_int_wen  [c]),
                 .tile_wdata     (tile_int_wdata[c*512 +: 512]),
                 .tile_rdata     (tile_int_rdata[c*512 +: 512]),
@@ -497,39 +510,105 @@ module mp64_soc (
     endgenerate
 
     // ========================================================================
+    // Generate: NUM_CLUSTERS × Micro-Core Cluster
+    // ========================================================================
+    // Each cluster occupies one bus port and contains MICRO_PER_CLUSTER cores.
+    // Bus ports: [NUM_CORES..NUM_CORES+NUM_CLUSTERS-1] = [4..6]
+    // Core IDs:  MICRO_ID_BASE + cluster * MICRO_PER_CLUSTER + local
+    //            Cluster 0 → IDs 4-7, Cluster 1 → IDs 8-11, Cluster 2 → IDs 12-15
+
+    // Per-cluster IPI/CSR winding helper wires
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER-1:0]       cl_csr_ipi_wen;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER*8-1:0]     cl_csr_ipi_addr;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER*64-1:0]    cl_csr_ipi_wdata;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER*64-1:0]    cl_csr_ipi_rdata_flat;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER-1:0]       cl_core_csr_wen;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER*8-1:0]     cl_core_csr_addr;
+    wire [NUM_CLUSTERS*MICRO_PER_CLUSTER*64-1:0]    cl_core_csr_wdata;
+
+    generate
+        for (c = 0; c < NUM_CLUSTERS; c = c + 1) begin : cluster
+
+            localparam BUS_PORT = NUM_CORES + c;
+            localparam ID_BASE  = MICRO_ID_BASE + c * MICRO_PER_CLUSTER;
+
+            mp64_cluster #(
+                .N               (MICRO_PER_CLUSTER),
+                .CLUSTER_ID_BASE (ID_BASE)
+            ) u_cluster (
+                .clk        (sys_clk),
+                .rst_n      (sys_rst_n),
+                .cluster_en (cluster_en[c]),
+
+                // Bus port → main arbiter port [BUS_PORT]
+                .bus_valid  (cpu_bus_valid [BUS_PORT]),
+                .bus_addr   (cpu_bus_addr  [BUS_PORT*64 +: 64]),
+                .bus_wdata  (cpu_bus_wdata [BUS_PORT*64 +: 64]),
+                .bus_wen    (cpu_bus_wen   [BUS_PORT]),
+                .bus_size   (cpu_bus_size  [BUS_PORT*2  +: 2]),
+                .bus_rdata  (cpu_bus_rdata [BUS_PORT*64 +: 64]),
+                .bus_ready  (cpu_bus_ready [BUS_PORT]),
+
+                // Interrupts from SoC
+                .irq_timer  ({MICRO_PER_CLUSTER{irq_timer}}),
+                .irq_ipi    (ipi_lines[ID_BASE +: MICRO_PER_CLUSTER]),
+
+                // CSR IPI (per micro-core within cluster → mailbox)
+                .csr_ipi_wen   (cl_csr_ipi_wen  [c*MICRO_PER_CLUSTER +: MICRO_PER_CLUSTER]),
+                .csr_ipi_addr  (cl_csr_ipi_addr [c*MICRO_PER_CLUSTER*8 +: MICRO_PER_CLUSTER*8]),
+                .csr_ipi_wdata (cl_csr_ipi_wdata[c*MICRO_PER_CLUSTER*64 +: MICRO_PER_CLUSTER*64]),
+                .csr_ipi_rdata (cl_csr_ipi_rdata_flat[c*MICRO_PER_CLUSTER*64 +: MICRO_PER_CLUSTER*64]),
+
+                // Core CSR sideband (for QoS etc.)
+                .core_csr_wen  (cl_core_csr_wen  [c*MICRO_PER_CLUSTER +: MICRO_PER_CLUSTER]),
+                .core_csr_addr (cl_core_csr_addr [c*MICRO_PER_CLUSTER*8 +: MICRO_PER_CLUSTER*8]),
+                .core_csr_wdata(cl_core_csr_wdata[c*MICRO_PER_CLUSTER*64 +: MICRO_PER_CLUSTER*64])
+            );
+
+        end
+    endgenerate
+
+    // Connect cluster CSR IPI to the wider mailbox arrays
+    // Full cores: indices [0..NUM_CORES-1], Cluster micro-cores: [NUM_CORES..NUM_ALL_CORES-1]
+    generate
+        for (c = 0; c < NUM_MICRO_CORES; c = c + 1) begin : cl_ipi_map
+            assign csr_ipi_wen  [MICRO_ID_BASE + c]           = cl_csr_ipi_wen  [c];
+            assign csr_ipi_addr [(MICRO_ID_BASE + c)*8 +: 8]  = cl_csr_ipi_addr [c*8 +: 8];
+            assign csr_ipi_wdata[(MICRO_ID_BASE + c)*64 +: 64]= cl_csr_ipi_wdata[c*64 +: 64];
+            assign cl_csr_ipi_rdata_flat[c*64 +: 64]          = csr_ipi_rdata[(MICRO_ID_BASE + c)*64 +: 64];
+        end
+    endgenerate
+
+    // ========================================================================
     // Tile Port A Arbiter (round-robin among NUM_CORES tile engines)
     // ========================================================================
     // Simple round-robin: only one tile engine accesses BRAM Port A per cycle.
-    reg [CORE_ID_BITS-1:0] tile_grant;
-    reg [CORE_ID_BITS-1:0] tile_last_grant;
-    reg                     tile_busy;
+    localparam TILE_BITS = $clog2(NUM_CORES);   // only full cores have tiles
+    reg [TILE_BITS-1:0] tile_grant;
+    reg [TILE_BITS-1:0] tile_last_grant;
+    reg                 tile_busy;
 
     // Round-robin scan for tile requests
-    reg [CORE_ID_BITS-1:0] tile_next;
-    reg                     tile_any;
+    reg [TILE_BITS-1:0] tile_next;
+    reg                 tile_any;
+    integer             tile_rr_i;
 
     always @(*) begin
         tile_next = tile_last_grant;
         tile_any  = 1'b0;
-        if (tile_int_req[(tile_last_grant + 2'd1) & 2'd3]) begin
-            tile_next = (tile_last_grant + 2'd1) & 2'd3;
-            tile_any  = 1'b1;
-        end else if (tile_int_req[(tile_last_grant + 2'd2) & 2'd3]) begin
-            tile_next = (tile_last_grant + 2'd2) & 2'd3;
-            tile_any  = 1'b1;
-        end else if (tile_int_req[(tile_last_grant + 2'd3) & 2'd3]) begin
-            tile_next = (tile_last_grant + 2'd3) & 2'd3;
-            tile_any  = 1'b1;
-        end else if (tile_int_req[tile_last_grant]) begin
-            tile_next = tile_last_grant;
-            tile_any  = 1'b1;
+        for (tile_rr_i = 1; tile_rr_i <= NUM_CORES; tile_rr_i = tile_rr_i + 1) begin
+            if (!tile_any &&
+                tile_int_req[(tile_last_grant + tile_rr_i[TILE_BITS-1:0]) % NUM_CORES]) begin
+                tile_next = (tile_last_grant + tile_rr_i[TILE_BITS-1:0]) % NUM_CORES;
+                tile_any  = 1'b1;
+            end
         end
     end
 
     // Tile arbiter state
     assign tile_arb_req   = tile_any && !tile_busy ? 1'b1 :
                             tile_busy              ? 1'b1 : 1'b0;
-    assign tile_arb_addr  = tile_int_addr [tile_grant*20 +: 20];
+    assign tile_arb_addr  = tile_int_addr [tile_grant*32 +: 32];
     assign tile_arb_wen   = tile_int_wen  [tile_grant];
     assign tile_arb_wdata = tile_int_wdata[tile_grant*512 +: 512];
 
@@ -538,14 +617,14 @@ module mp64_soc (
     generate
         for (ti = 0; ti < NUM_CORES; ti = ti + 1) begin : tile_ack_mux
             assign tile_int_rdata[ti*512 +: 512] = tile_arb_rdata;
-            assign tile_int_ack[ti] = tile_arb_ack && (tile_grant == ti[CORE_ID_BITS-1:0]);
+            assign tile_int_ack[ti] = tile_arb_ack && (tile_grant == ti[TILE_BITS-1:0]);
         end
     endgenerate
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            tile_grant      <= {CORE_ID_BITS{1'b0}};
-            tile_last_grant <= {CORE_ID_BITS{1'b0}};
+            tile_grant      <= {TILE_BITS{1'b0}};
+            tile_last_grant <= {TILE_BITS{1'b0}};
             tile_busy       <= 1'b0;
         end else begin
             if (tile_busy) begin
@@ -563,28 +642,23 @@ module mp64_soc (
     // ========================================================================
     // Tile External Memory Arbiter (round-robin, mirrors internal arbiter)
     // ========================================================================
-    reg [CORE_ID_BITS-1:0] ext_tile_grant;
-    reg [CORE_ID_BITS-1:0] ext_tile_last_grant;
-    reg                     ext_tile_busy;
+    reg [TILE_BITS-1:0] ext_tile_grant;
+    reg [TILE_BITS-1:0] ext_tile_last_grant;
+    reg                 ext_tile_busy;
 
-    reg [CORE_ID_BITS-1:0] ext_tile_next;
-    reg                     ext_tile_any;
+    reg [TILE_BITS-1:0] ext_tile_next;
+    reg                 ext_tile_any;
+    integer             ext_tile_rr_i;
 
     always @(*) begin
         ext_tile_next = ext_tile_last_grant;
         ext_tile_any  = 1'b0;
-        if (tile_ext_req[(ext_tile_last_grant + 2'd1) & 2'd3]) begin
-            ext_tile_next = (ext_tile_last_grant + 2'd1) & 2'd3;
-            ext_tile_any  = 1'b1;
-        end else if (tile_ext_req[(ext_tile_last_grant + 2'd2) & 2'd3]) begin
-            ext_tile_next = (ext_tile_last_grant + 2'd2) & 2'd3;
-            ext_tile_any  = 1'b1;
-        end else if (tile_ext_req[(ext_tile_last_grant + 2'd3) & 2'd3]) begin
-            ext_tile_next = (ext_tile_last_grant + 2'd3) & 2'd3;
-            ext_tile_any  = 1'b1;
-        end else if (tile_ext_req[ext_tile_last_grant]) begin
-            ext_tile_next = ext_tile_last_grant;
-            ext_tile_any  = 1'b1;
+        for (ext_tile_rr_i = 1; ext_tile_rr_i <= NUM_CORES; ext_tile_rr_i = ext_tile_rr_i + 1) begin
+            if (!ext_tile_any &&
+                tile_ext_req[(ext_tile_last_grant + ext_tile_rr_i[TILE_BITS-1:0]) % NUM_CORES]) begin
+                ext_tile_next = (ext_tile_last_grant + ext_tile_rr_i[TILE_BITS-1:0]) % NUM_CORES;
+                ext_tile_any  = 1'b1;
+            end
         end
     end
 
@@ -597,14 +671,14 @@ module mp64_soc (
     generate
         for (ti = 0; ti < NUM_CORES; ti = ti + 1) begin : ext_tile_ack_mux
             assign tile_ext_rdata[ti*512 +: 512] = tile_ext_arb_rdata;
-            assign tile_ext_ack[ti] = tile_ext_arb_ack && (ext_tile_grant == ti[CORE_ID_BITS-1:0]);
+            assign tile_ext_ack[ti] = tile_ext_arb_ack && (ext_tile_grant == ti[TILE_BITS-1:0]);
         end
     endgenerate
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            ext_tile_grant      <= {CORE_ID_BITS{1'b0}};
-            ext_tile_last_grant <= {CORE_ID_BITS{1'b0}};
+            ext_tile_grant      <= {TILE_BITS{1'b0}};
+            ext_tile_last_grant <= {TILE_BITS{1'b0}};
             ext_tile_busy       <= 1'b0;
         end else begin
             if (ext_tile_busy) begin
@@ -622,7 +696,12 @@ module mp64_soc (
     // ========================================================================
     // Multi-Master Bus Arbiter (4 CPUs → Memory + MMIO)
     // ========================================================================
-    mp64_bus u_bus (
+    // Multi-Master Bus Arbiter (NUM_BUS_PORTS masters → Memory + MMIO)
+    // ========================================================================
+    mp64_bus #(
+        .N_PORTS   (NUM_BUS_PORTS),
+        .PORT_BITS (BUS_PORT_BITS)
+    ) u_bus (
         .clk        (sys_clk),
         .rst_n      (sys_rst_n),
         // Multi-core CPU masters (flat-packed)
@@ -657,7 +736,7 @@ module mp64_soc (
     );
 
     // ========================================================================
-    // Dual-Port Memory (1 MiB shared BRAM)
+    // Banked Memory (4 MiB: 1 MiB system + 3 MiB HBW)
     // ========================================================================
     mp64_memory u_memory (
         .clk        (sys_clk),
@@ -725,10 +804,13 @@ module mp64_soc (
     // The requester_id comes from the bus arbiter's current grant.
     // We expose it as a wire from the bus arbiter.
     // (For simplicity, mailbox reads the grant register directly.)
-    wire [CORE_ID_BITS-1:0] bus_grant;
+    wire [BUS_PORT_BITS-1:0] bus_grant;
     assign bus_grant = u_bus.grant;
 
-    mp64_mailbox u_mailbox (
+    mp64_mailbox #(
+        .N_CORES (NUM_ALL_CORES),
+        .ID_BITS (CORE_ID_BITS)
+    ) u_mailbox (
         .clk            (sys_clk),
         .rst_n          (sys_rst_n),
         .req            (mbox_sel),
@@ -737,7 +819,7 @@ module mp64_soc (
         .wen            (mmio_wen),
         .rdata          (mbox_rdata8),
         .ack            (mbox_ack),
-        .requester_id   (bus_grant),
+        .requester_id   ({{(CORE_ID_BITS - BUS_PORT_BITS){1'b0}}, bus_grant}),
         .ipi_out        (ipi_lines),
         // CSR-side IPI (per-core, bypasses bus)
         .csr_ipi_wen    (csr_ipi_wen),

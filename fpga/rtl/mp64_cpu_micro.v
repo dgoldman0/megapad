@@ -4,13 +4,15 @@
 //
 // Stripped-down CPU core for packing into micro-core clusters.
 // ISA-compatible with the major core for the base instruction set;
-// unsupported families (MULDIV, MEX) trap as illegal opcodes.
+// unsupported families (MEX) trap as illegal opcodes.
+// MULDIV dispatches to the cluster's shared multiplier (IN_CLUSTER=1)
+// or traps as illegal opcode (IN_CLUSTER=0, standalone mode).
 //
 // Compared to the major core (mp64_cpu.v / mp64_cpu_fsm.v):
 //   REMOVED — I-cache interface (fetches byte-by-byte from bus)
 //   REMOVED — Tile/MEX engine ports and FAM_MEX dispatch
-//   REMOVED — Hardware 64×64→128 multiplier (FAM_MULDIV traps)
-//   REMOVED — Memory BIST controller
+//   SHARED — Hardware MUL/DIV via cluster (IN_CLUSTER=1) or trap (=0)
+//   SHARED — BIST via cluster controller CSR forwarding (IN_CLUSTER=1)
 //   REMOVED — Tile datapath self-test
 //   REMOVED — DMA ring-buffer CSRs
 //   REMOVED — I-cache CSRs
@@ -34,7 +36,9 @@
 
 `include "mp64_defs.vh"
 
-module mp64_cpu_micro (
+module mp64_cpu_micro #(
+    parameter IN_CLUSTER = 0    // 1 = inside cluster (shared MUL/DIV + BIST)
+) (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -57,7 +61,22 @@ module mp64_cpu_micro (
     input  wire        irq_ipi,
 
     // === External flags (EF1-EF4) ===
-    input  wire [3:0]  ef_flags
+    input  wire [3:0]  ef_flags,
+
+    // === Shared MUL/DIV interface (to cluster controller) ===
+    // Active only when IN_CLUSTER=1; otherwise outputs idle.
+    output reg         mul_req,
+    output reg  [3:0]  mul_op,      // 0-7: MUL MULH UMUL UMULH DIV UDIV MOD UMOD
+    output reg  [63:0] mul_a,       // operand A (dst reg value)
+    output reg  [63:0] mul_b,       // operand B (src reg value)
+    input  wire [127:0] mul_result, // [63:0]=low/quot, [127:64]=high/rem
+    input  wire        mul_done,    // 1-cycle pulse: result valid
+
+    // === Cluster BIST CSR interface (to cluster controller) ===
+    output reg  [7:0]  bist_csr_addr,   // CSR address (combinational via always@*)
+    output reg         bist_csr_wen,    // pulsed for CSR writes
+    output reg  [63:0] bist_csr_wdata,  // CSR write data
+    input  wire [63:0] bist_csr_rdata   // cluster provides read data
 );
 
     // ========================================================================
@@ -148,6 +167,9 @@ module mp64_cpu_micro (
         .flags_out(alu_flags_out)
     );
 
+    // Combinational BIST CSR address — cluster muxes rdata on this
+    always @(*) bist_csr_addr = ibuf[1];
+
     // ========================================================================
     // Interrupt pending logic
     // ========================================================================
@@ -232,6 +254,16 @@ module mp64_cpu_micro (
             alu_a  <= 64'd0;
             alu_b  <= 64'd0;
 
+            // Shared MUL/DIV
+            mul_req <= 1'b0;
+            mul_op  <= 4'd0;
+            mul_a   <= 64'd0;
+            mul_b   <= 64'd0;
+
+            // BIST CSR forwarding
+            bist_csr_wen   <= 1'b0;
+            bist_csr_wdata <= 64'd0;
+
             // Performance counter
             perf_cycles <= 64'd0;
             perf_enable <= 1'b1;
@@ -244,6 +276,7 @@ module mp64_cpu_micro (
 
         end else begin
             bus_valid <= 1'b0;
+            bist_csr_wen <= 1'b0;
 
             // Cycle counter
             if (perf_enable)
@@ -806,20 +839,37 @@ module mp64_cpu_micro (
                     end
 
                     // --------------------------------------------------------
-                    // MULDIV (0xC) — NOT SUPPORTED ON MICRO-CORE
+                    // MULDIV (0xC) — shared via cluster or trap
                     // --------------------------------------------------------
                     else if (fam == FAM_MULDIV) begin
                         ext_active <= 1'b0;
-                        // Trap: illegal opcode
-                        trap_addr <= R[psel];
-                        ivec_id   <= {5'd0, IRQ_ILLOP};
-                        R[spsel]  <= R[spsel] - 64'd8;
-                        effective_addr <= R[spsel] - 64'd8;
-                        mem_data  <= R[psel] + {60'd0, ibuf_len};
-                        flags[6]  <= 1'b0;
-                        post_action <= POST_IRQ_VEC;
-                        bus_size  <= BUS_DWORD;
-                        cpu_state <= CPU_MEM_WRITE;
+                        dst_reg <= ibuf[1][7:4];
+                        src_reg <= ibuf[1][3:0];
+                        if (IN_CLUSTER) begin
+                            // Dispatch to cluster's shared MUL/DIV unit
+                            // Divide-by-zero check for DIV/UDIV/MOD/UMOD
+                            if (nib >= 4'h4 && R[ibuf[1][3:0]] == 64'd0) begin
+                                ivec_id   <= {4'd0, 4'd4}; // IRQ_DIVZ
+                                cpu_state <= CPU_IRQ;
+                            end else begin
+                                mul_req <= 1'b1;
+                                mul_op  <= nib;
+                                mul_a   <= R[ibuf[1][7:4]];
+                                mul_b   <= R[ibuf[1][3:0]];
+                                cpu_state <= CPU_MULDIV;
+                            end
+                        end else begin
+                            // Trap: illegal opcode (standalone micro-core)
+                            trap_addr <= R[psel];
+                            ivec_id   <= {5'd0, IRQ_ILLOP};
+                            R[spsel]  <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data  <= R[psel] + {60'd0, ibuf_len};
+                            flags[6]  <= 1'b0;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size  <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end
                     end
 
                     // --------------------------------------------------------
@@ -846,6 +896,16 @@ module mp64_cpu_micro (
                                     if (R[nib[2:0]][1])
                                         perf_cycles <= 64'd0;
                                 end
+                                // Cluster BIST CSR forwarding
+                                CSR_BIST_CMD,
+                                CSR_BIST_STATUS,
+                                CSR_BIST_FAIL_ADDR,
+                                CSR_BIST_FAIL_DATA: begin
+                                    if (IN_CLUSTER) begin
+                                        bist_csr_wen   <= 1'b1;
+                                        bist_csr_wdata <= R[nib[2:0]];
+                                    end
+                                end
                                 // All other CSRs: silently ignored
                                 default: ;
                             endcase
@@ -863,13 +923,19 @@ module mp64_cpu_micro (
                                 CSR_TREG:        R[nib[2:0]] <= {56'd0, T};
                                 CSR_IE:          R[nib[2:0]] <= {63'd0, flags[6]};
                                 CSR_COREID:      R[nib[2:0]] <= {62'd0, core_id};
-                                CSR_NCORES:      R[nib[2:0]] <= {62'd0, NUM_CORES[1:0]};
+                                CSR_NCORES:      R[nib[2:0]] <= NUM_ALL_CORES;
                                 CSR_IVEC_ID:     R[nib[2:0]] <= {56'd0, ivec_id};
                                 CSR_TRAP_ADDR:   R[nib[2:0]] <= trap_addr;
                                 CSR_MEGAPAD_SZ:  R[nib[2:0]] <= 64'd0;
                                 CSR_CPUID:       R[nib[2:0]] <= 64'h4D50_3634_0001_4D43; // "MP64" v1 "MC"
                                 CSR_PERF_CYCLES: R[nib[2:0]] <= perf_cycles;
                                 CSR_PERF_CTRL:   R[nib[2:0]] <= {63'd0, perf_enable};
+                                // Cluster BIST CSR reads (forwarded)
+                                CSR_BIST_CMD,
+                                CSR_BIST_STATUS,
+                                CSR_BIST_FAIL_ADDR,
+                                CSR_BIST_FAIL_DATA:
+                                    R[nib[2:0]] <= IN_CLUSTER ? bist_csr_rdata : 64'd0;
                                 // Unsupported CSRs read as 0
                                 default:         R[nib[2:0]] <= 64'd0;
                             endcase
@@ -1170,6 +1236,40 @@ module mp64_cpu_micro (
                 CPU_HALT: begin
                     if (irq_pending)
                         cpu_state <= CPU_IRQ;
+                end
+
+                // ============================================================
+                // MULDIV: wait for shared cluster MUL/DIV unit
+                // ============================================================
+                CPU_MULDIV: begin
+                    if (mul_done) begin
+                        mul_req <= 1'b0;
+                        case (nib)
+                            4'h0, 4'h2: begin // MUL, UMUL (low 64)
+                                R[dst_reg] <= mul_result[63:0];
+                                flags[0] <= (mul_result[63:0] == 64'd0);
+                                flags[2] <= mul_result[63];
+                            end
+                            4'h1, 4'h3: begin // MULH, UMULH (high 64)
+                                R[dst_reg] <= mul_result[127:64];
+                                flags[0] <= (mul_result[127:64] == 64'd0);
+                                flags[2] <= mul_result[127];
+                            end
+                            4'h4, 4'h5: begin // DIV, UDIV
+                                R[dst_reg] <= mul_result[63:0];   // quotient
+                                R[0] <= mul_result[127:64];        // remainder
+                                flags[0] <= (mul_result[63:0] == 64'd0);
+                                flags[2] <= mul_result[63];
+                            end
+                            4'h6, 4'h7: begin // MOD, UMOD
+                                R[dst_reg] <= mul_result[127:64]; // remainder
+                                flags[0] <= (mul_result[127:64] == 64'd0);
+                                flags[2] <= mul_result[127];
+                            end
+                            default: ;
+                        endcase
+                        cpu_state <= CPU_FETCH;
+                    end
                 end
 
                 // ============================================================

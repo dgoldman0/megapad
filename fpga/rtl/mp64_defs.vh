@@ -21,8 +21,29 @@ parameter MAX_REGS        = 16;            // 16 GPRs
 // ----------------------------------------------------------------------------
 // Multi-core parameters
 // ----------------------------------------------------------------------------
-parameter NUM_CORES       = 4;             // Quad-core
-parameter CORE_ID_BITS    = 2;             // log2(NUM_CORES)
+parameter NUM_CORES       = 4;             // Major (full) cores
+parameter CORE_ID_BITS    = 4;             // 4-bit core IDs (0-15)
+
+// Micro-cluster parameters
+parameter NUM_CLUSTERS    = 3;             // Micro-core clusters
+parameter MICRO_PER_CLUSTER = 4;           // Micro-cores per cluster
+parameter NUM_MICRO_CORES = NUM_CLUSTERS * MICRO_PER_CLUSTER;  // 12 total
+parameter NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES;       // 16 total
+
+// Bus port topology: each full core = 1 port, each cluster = 1 port
+parameter NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS;          // 7 bus ports
+parameter BUS_PORT_BITS   = 3;             // ceil(log2(7))
+
+// Micro-core global ID mapping:
+//   Full cores:  0 – 3
+//   Cluster 0:   4 – 7  (micro-cores 0-3)
+//   Cluster 1:   8 – 11 (micro-cores 0-3)
+//   Cluster 2:  12 – 15 (micro-cores 0-3)
+parameter MICRO_ID_BASE   = NUM_CORES;     // first micro-core global ID
+
+// Cluster scratchpad
+parameter CLUSTER_SPAD_BYTES = 1024;       // 1 KiB per cluster
+parameter CLUSTER_SPAD_DEPTH = CLUSTER_SPAD_BYTES / CELL;  // 128 × 64-bit
 
 // Per-core stack region sizes (within 1 MiB shared BRAM)
 // Layout: Core 0 boots from 0x0000, stacks at top of respective 64 KiB zone
@@ -30,7 +51,8 @@ parameter CORE_ID_BITS    = 2;             // log2(NUM_CORES)
 //   Core 1: stack region 0xE0000–0xEFFFF
 //   Core 2: stack region 0xD0000–0xDFFFF
 //   Core 3: stack region 0xC0000–0xCFFFF
-parameter CORE_STACK_SIZE = 65536;         // 64 KiB per core
+// Micro-cores use cluster scratchpad or software-managed stack zones.
+parameter CORE_STACK_SIZE = 65536;         // 64 KiB per major core
 parameter CORE0_STACK_TOP = 20'hFFFFF;
 parameter CORE1_STACK_TOP = 20'hEFFFF;
 parameter CORE2_STACK_TOP = 20'hDFFFF;
@@ -54,21 +76,44 @@ parameter CPU_PORT_DEPTH  = INT_MEM_BYTES / (CPU_PORT_WIDTH / 8);   // 131072
 parameter CPU_ADDR_BITS   = 17;            // log2(131072)
 
 // ----------------------------------------------------------------------------
+// Banked memory architecture — 4 MiB total (1 MiB system + 3 MiB HBW)
+// ----------------------------------------------------------------------------
+// Bank 0: 1 MiB regular BW (CPU-only, stacks/dict/BIOS)
+// Banks 1–3: 3 × 1 MiB high-BW (dual-port: CPU + Tile engine)
+//   HBW banks are pinned to the top 3 MiB of the 32-bit physical space.
+parameter PHYS_ADDR_BITS  = 32;            // 32-bit physical addresses (4 GiB max)
+parameter BANK_SIZE       = 1048576;       // 1 MiB per bank
+parameter BANK_ADDR_BITS  = 20;            // log2(1 MiB)
+parameter NUM_MEM_BANKS   = 4;             // 1 system + 3 HBW
+parameter HBW_BANKS       = 3;             // banks 1-3
+parameter INT_MEM_TOTAL   = NUM_MEM_BANKS * BANK_SIZE;  // 4 MiB total internal
+parameter [31:0] HBW_BASE_ADDR = 32'hFFD0_0000;  // bank 1 start
+// Bank 1: 0xFFD0_0000 – 0xFFDF_FFFF
+// Bank 2: 0xFFE0_0000 – 0xFFEF_FFFF
+// Bank 3: 0xFFF0_0000 – 0xFFFF_FFFF
+
+// FPGA target: Virtex UltraScale VU095 (1728 BRAM36, ample for 4 MiB)
+
+// ----------------------------------------------------------------------------
 // External memory
 // ----------------------------------------------------------------------------
-parameter EXT_MEM_MAX     = 32'h0100_0000; // Up to 16 MiB addressable
+parameter [31:0] EXT_MEM_MAX = HBW_BASE_ADDR;  // ext fills 0x100000..HBW_BASE-1
 parameter EXT_BURST_LEN   = 8;             // 8-beat burst (64 bytes = 1 tile)
 
 // ----------------------------------------------------------------------------
-// Address map
+// Address map (32-bit physical, 64-bit virtual)
 // ----------------------------------------------------------------------------
-// Internal RAM: 0x0000_0000 – 0x000F_FFFF  (1 MiB)
-// External RAM: 0x0010_0000 – 0x00FF_FFFF  (up to 15 MiB)
-// MMIO:         0xFFFF_FF00_0000_0000 – 0xFFFF_FF00_0000_04FF
+// Bank 0:    0x0000_0000 – 0x000F_FFFF  (1 MiB system BRAM, CPU-only)
+// External:  0x0010_0000 – 0xFFCF_FFFF  (up to ~4 GiB, HyperRAM/SDRAM)
+// Bank 1:    0xFFD0_0000 – 0xFFDF_FFFF  (1 MiB HBW, dual-port)
+// Bank 2:    0xFFE0_0000 – 0xFFEF_FFFF  (1 MiB HBW, dual-port)
+// Bank 3:    0xFFF0_0000 – 0xFFFF_FFFF  (1 MiB HBW, dual-port)
+// MMIO:      0xFFFF_FF00_0000_0000+     (decoded via addr[63:32])
 //
-// For FPGA, we decode the top 32 bits to distinguish MMIO:
-//   if addr[63:32] == 0xFFFF_FF00 → MMIO
-//   else → memory (internal if addr < INT_MEM_BYTES, else external)
+// MMIO detection: addr[63:32] == 0xFFFF_FF00 → MMIO
+// HBW detection:  addr[63:32] == 0 && addr[31:20] >= 12'hFFD → HBW internal
+// Bank 0:         addr[63:20] == 0 → system BRAM
+// Otherwise:      external memory
 
 parameter [63:0] MMIO_BASE = 64'hFFFF_FF00_0000_0000;
 parameter [31:0] MMIO_HI   = 32'hFFFF_FF00;  // upper 32 bits for MMIO detect

@@ -29,6 +29,7 @@ from typing import Optional
 # exception classes regardless of whether the accelerator is available.
 from megapad64 import (
     Megapad64 as _PyMegapad64,
+    Megapad64Micro,
     Megapad64Error, TrapError, HaltError,
     u64, s64, sign_extend, zero_extend,
     MASK64, SIGN64,
@@ -49,12 +50,16 @@ from megapad64 import (
     CSR_TILE_SELFTEST, CSR_TILE_ST_DETAIL,
     CSR_PERF_CYCLES, CSR_PERF_STALLS, CSR_PERF_TILEOPS, CSR_PERF_EXTMEM,
     CSR_PERF_CTRL,
+    CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
     CSR_ICACHE_CTRL, CSR_ICACHE_HITS, CSR_ICACHE_MISSES,
     # IVEC IDs
     IVEC_RESET, IVEC_NMI, IVEC_ILLEGAL_OP, IVEC_ALIGN_FAULT,
     IVEC_DIV_ZERO, IVEC_BUS_FAULT, IVEC_SW_TRAP, IVEC_TIMER, IVEC_IPI,
     # EW codes
     EW_U8, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16,
+    # Micro-cluster constants
+    NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
+    MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
     # FP helpers (needed for Python fallback in MEX FP)
     _fp16_to_float, _float_to_fp16, _bf16_to_float, _float_to_bf16,
     _fp_decode, _fp_encode, _fp_is_nan,
@@ -121,6 +126,11 @@ if ACCEL_AVAILABLE:
             sz = len(value)
             self._cs.mem_size = sz
             self._cs.attach_mem(self._mem, sz)
+
+        def attach_hbw(self, buf: bytearray, base: int, size: int):
+            """Attach HBW math RAM buffer to C++ state."""
+            self._hbw_buf = buf  # prevent GC
+            self._cs.attach_hbw_mem(buf, base, size)
 
         # ── Register access ──────────────────────────────────
 

@@ -40,11 +40,7 @@ module mp64_uart #(
     // ========================================================================
     // Baud rate generator
     // ========================================================================
-    `ifdef SIMULATION
-    localparam DIVISOR  = 1;       // instant TX/RX in simulation
-    `else
     localparam DIVISOR  = CLK_FREQ / BAUD_RATE;
-    `endif
     localparam DIV_BITS = $clog2(DIVISOR > 1 ? DIVISOR : 2);  // minimum 1 bit
 
     reg [DIV_BITS-1:0] tx_div, rx_div;

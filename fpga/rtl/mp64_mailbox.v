@@ -22,7 +22,10 @@
 
 `include "mp64_defs.vh"
 
-module mp64_mailbox (
+module mp64_mailbox #(
+    parameter N_CORES = NUM_CORES,     // number of cores to support
+    parameter ID_BITS = CORE_ID_BITS   // bits for core ID
+) (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -35,18 +38,18 @@ module mp64_mailbox (
     output wire        ack,
 
     // === Which core is making this request (from arbiter grant) ===
-    input  wire [CORE_ID_BITS-1:0] requester_id,
+    input  wire [ID_BITS-1:0] requester_id,
 
     // === IPI outputs — active-high, one per core ===
-    output wire [NUM_CORES-1:0]    ipi_out,
+    output wire [N_CORES-1:0]    ipi_out,
 
     // === Per-core CSR-side IPI interface ===
     // Allows each CPU to access mailbox via CSR instructions (CSR_MBOX,
     // CSR_IPIACK) without going through the bus arbiter.
-    input  wire [NUM_CORES-1:0]       csr_ipi_wen,     // per-core CSR write enable
-    input  wire [NUM_CORES*8-1:0]     csr_ipi_addr,    // CSR address (0x22 or 0x23)
-    input  wire [NUM_CORES*64-1:0]    csr_ipi_wdata,   // CSR write data
-    output wire [NUM_CORES*64-1:0]    csr_ipi_rdata    // per-core: pending mask
+    input  wire [N_CORES-1:0]       csr_ipi_wen,     // per-core CSR write enable
+    input  wire [N_CORES*8-1:0]     csr_ipi_addr,    // CSR address (0x22 or 0x23)
+    input  wire [N_CORES*64-1:0]    csr_ipi_wdata,   // CSR write data
+    output wire [N_CORES*64-1:0]    csr_ipi_rdata    // per-core: pending mask
 );
 
     assign ack = 1'b1;  // single-cycle MMIO
@@ -55,13 +58,13 @@ module mp64_mailbox (
     // Mailbox registers
     // ========================================================================
     // Per-core: 64-bit data, 4-bit pending mask (which cores sent to us)
-    reg [63:0] mbox_data    [0:NUM_CORES-1];   // outgoing data per core
-    reg [NUM_CORES-1:0] mbox_pending [0:NUM_CORES-1]; // pending IPIs per target
+    reg [63:0] mbox_data    [0:N_CORES-1];   // outgoing data per core
+    reg [N_CORES-1:0] mbox_pending [0:N_CORES-1]; // pending IPIs per target
 
     // IPI output = any pending bit set for that core
     genvar ci;
     generate
-        for (ci = 0; ci < NUM_CORES; ci = ci + 1) begin : ipi_gen
+        for (ci = 0; ci < N_CORES; ci = ci + 1) begin : ipi_gen
             assign ipi_out[ci] = |mbox_pending[ci];
         end
     endgenerate
@@ -70,11 +73,11 @@ module mp64_mailbox (
     // CSR-side IPI interface (per-core, no arbiter needed)
     // ========================================================================
     // CSR_MBOX (0x22) read  → returns pending mask for that core
-    // CSR_MBOX (0x22) write → send IPI (wdata[1:0] = target core)
-    // CSR_IPIACK (0x23) write → ack IPI (wdata[1:0] = source core)
+    // CSR_MBOX (0x22) write → send IPI (wdata[ID_BITS-1:0] = target core)
+    // CSR_IPIACK (0x23) write → ack IPI (wdata[ID_BITS-1:0] = source core)
     generate
-        for (ci = 0; ci < NUM_CORES; ci = ci + 1) begin : csr_ipi_rdata_gen
-            assign csr_ipi_rdata[ci*64 +: 64] = {60'd0, mbox_pending[ci]};
+        for (ci = 0; ci < N_CORES; ci = ci + 1) begin : csr_ipi_rdata_gen
+            assign csr_ipi_rdata[ci*64 +: 64] = {{(64-N_CORES){1'b0}}, mbox_pending[ci]};
         end
     endgenerate
 
@@ -88,9 +91,9 @@ module mp64_mailbox (
     // ========================================================================
     // Hardware spinlocks
     // ========================================================================
-    reg [NUM_CORES-1:0] slock_held  [0:NUM_SPINLOCKS-1]; // bit mask: who holds
-    reg                 slock_locked[0:NUM_SPINLOCKS-1]; // is lock held?
-    reg [CORE_ID_BITS-1:0] slock_owner[0:NUM_SPINLOCKS-1]; // owning core
+    reg [N_CORES-1:0] slock_held  [0:NUM_SPINLOCKS-1]; // bit mask: who holds
+    reg                slock_locked[0:NUM_SPINLOCKS-1]; // is lock held?
+    reg [ID_BITS-1:0]  slock_owner[0:NUM_SPINLOCKS-1]; // owning core
 
     // Spinlock index from address: lock N at offset N*4
     wire [2:0] slock_idx = addr[4:2];
@@ -113,7 +116,7 @@ module mp64_mailbox (
                 4'h5:         rdata = mbox_data[requester_id][47:40];
                 4'h6:         rdata = mbox_data[requester_id][55:48];
                 4'h7:         rdata = mbox_data[requester_id][63:56];
-                MBOX_STATUS:  rdata = {4'd0, mbox_pending[requester_id]};
+                MBOX_STATUS:  rdata = mbox_pending[requester_id][7:0];
                 default:      rdata = 8'd0;
             endcase
         end else if (is_slock) begin
@@ -133,14 +136,14 @@ module mp64_mailbox (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (wi = 0; wi < NUM_CORES; wi = wi + 1) begin
+            for (wi = 0; wi < N_CORES; wi = wi + 1) begin
                 mbox_data[wi]    <= 64'd0;
-                mbox_pending[wi] <= {NUM_CORES{1'b0}};
+                mbox_pending[wi] <= {N_CORES{1'b0}};
             end
             for (wi = 0; wi < NUM_SPINLOCKS; wi = wi + 1) begin
                 slock_locked[wi] <= 1'b0;
-                slock_held[wi]   <= {NUM_CORES{1'b0}};
-                slock_owner[wi]  <= {CORE_ID_BITS{1'b0}};
+                slock_held[wi]   <= {N_CORES{1'b0}};
+                slock_owner[wi]  <= {ID_BITS{1'b0}};
             end
         end else begin
 
@@ -159,15 +162,15 @@ module mp64_mailbox (
 
                     // SEND: write target core ID → set pending bit on target
                     MBOX_SEND: begin
-                        if (wdata[1:0] < NUM_CORES) begin
-                            mbox_pending[wdata[1:0]][requester_id] <= 1'b1;
+                        if (wdata[ID_BITS-1:0] < N_CORES) begin
+                            mbox_pending[wdata[ID_BITS-1:0]][requester_id] <= 1'b1;
                         end
                     end
 
                     // ACK: write source core ID → clear pending bit from that source
                     MBOX_ACK: begin
-                        if (wdata[1:0] < NUM_CORES) begin
-                            mbox_pending[requester_id][wdata[1:0]] <= 1'b0;
+                        if (wdata[ID_BITS-1:0] < N_CORES) begin
+                            mbox_pending[requester_id][wdata[ID_BITS-1:0]] <= 1'b0;
                         end
                     end
                 endcase
@@ -195,17 +198,17 @@ module mp64_mailbox (
             end
 
             // --- CSR-side IPI send/ack (per-core, bypasses bus arbiter) ---
-            for (wi = 0; wi < NUM_CORES; wi = wi + 1) begin
+            for (wi = 0; wi < N_CORES; wi = wi + 1) begin
                 if (csr_ipi_wen[wi]) begin
                     if (csr_ipi_addr[wi*8 +: 8] == CSR_MBOX) begin
                         // CSR_MBOX write: send IPI to target core
-                        if (csr_ipi_wdata[wi*64 +: 64] < NUM_CORES) begin
-                            mbox_pending[csr_ipi_wdata[wi*64 +: 2]][wi] <= 1'b1;
+                        if (csr_ipi_wdata[wi*64 +: 64] < N_CORES) begin
+                            mbox_pending[csr_ipi_wdata[wi*64 +: ID_BITS]][wi] <= 1'b1;
                         end
                     end else if (csr_ipi_addr[wi*8 +: 8] == CSR_IPIACK) begin
                         // CSR_IPIACK write: ack IPI from source core
-                        if (csr_ipi_wdata[wi*64 +: 64] < NUM_CORES) begin
-                            mbox_pending[wi][csr_ipi_wdata[wi*64 +: 2]] <= 1'b0;
+                        if (csr_ipi_wdata[wi*64 +: 64] < N_CORES) begin
+                            mbox_pending[wi][csr_ipi_wdata[wi*64 +: ID_BITS]] <= 1'b0;
                         end
                     end
                 end

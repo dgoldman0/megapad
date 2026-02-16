@@ -6,8 +6,9 @@ Wires together:
   - The device bus (devices.py) for MMIO peripherals
   - A unified memory map that dispatches to RAM vs. MMIO
 
-Supports 1–4 cores with round-robin stepping, per-core IRQ delivery,
-inter-core mailbox (IPI), and hardware spinlocks.
+Supports 1–4 full cores plus up to 3 micro-core clusters (12
+micro-cores), round-robin stepping, per-core IRQ delivery, inter-core
+mailbox (IPI), hardware spinlocks, and cluster enable/disable gating.
 """
 
 from __future__ import annotations
@@ -20,6 +21,11 @@ try:
     from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
 except ImportError:
     from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI
+from megapad64 import (
+    Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
+    CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
+    NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
+)
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device, TRNGDevice,
@@ -40,6 +46,12 @@ MMIO_END   = 0xFFFF_FF80_0000_0000  # exclusive
 # RAM occupies the low end of the 64-bit address space.
 # In the emulator, RAM size is configurable (default 1 MiB).
 
+# High-Bandwidth (HBW) math RAM — 3 banks of 1 MiB each.
+# Physically internal BRAM on FPGA, mapped at a high 32-bit address.
+HBW_BASE   = 0xFFD0_0000
+HBW_SIZE   = 3 * (1 << 20)          # 3 MiB (banks 1–3)
+HBW_END    = HBW_BASE + HBW_SIZE    # exclusive
+
 # Boot vector: on reset, PC (R3) is loaded with this address.
 # BIOS is expected to be loaded here.
 BOOT_VECTOR = 0x0000_0000_0000_0000
@@ -52,6 +64,150 @@ BOOT_VECTOR = 0x0000_0000_0000_0000
 #   Core 2: stack at top of 0xD0000–0xDFFFF  → SP = 0xE0000
 #   Core 3: stack at top of 0xC0000–0xCFFFF  → SP = 0xD0000
 CORE_STACK_TOPS = [0x100000, 0xF0000, 0xE0000, 0xD0000]
+
+
+# ---------------------------------------------------------------------------
+#  MicroCluster — matches RTL mp64_cluster.v
+# ---------------------------------------------------------------------------
+
+class MicroCluster:
+    """Emulates an mp64_cluster: N micro-cores with shared resources.
+
+    Shared resources:
+      - 1 KiB scratchpad RAM (cluster-local, not on main bus)
+      - Shared MUL/DIV unit (modelled as immediate, no contention)
+      - Hardware barrier register
+      - BIST controller for scratchpad/multiplier
+
+    Cluster enable/disable is controlled by the SysInfo CLUSTER_EN
+    register.  When disabled, all micro-cores are held in reset.
+    """
+
+    def __init__(self, cluster_id: int, id_base: int,
+                 n: int = MICRO_PER_CLUSTER,
+                 shared_mem: bytearray = None,
+                 mem_size: int = 1 << 20,
+                 num_all_cores: int = NUM_ALL_CORES):
+        self.cluster_id = cluster_id
+        self.id_base = id_base
+        self.n = n
+        self.enabled = False   # matches RTL default: clusters off at reset
+
+        # Scratchpad — 1 KiB, cluster-local
+        self.scratchpad = bytearray(CLUSTER_SPAD_BYTES)
+
+        # Barrier register
+        self.barrier_arrive = 0   # N-bit mask
+        self.barrier_done = False
+        self._barrier_all = (1 << n) - 1  # all-arrived mask
+
+        # BIST state
+        self.bist_status = 0      # 0=idle, 1=running, 2=pass, 3=fail
+        self.bist_fail_addr = 0
+        self.bist_fail_data = 0
+
+        # Create micro-cores
+        self.cores: list[Megapad64Micro] = []
+        for i in range(n):
+            core_id = id_base + i
+            mc = Megapad64Micro(mem_size=mem_size, core_id=core_id,
+                                num_cores=num_all_cores)
+            mc._cluster = self
+            if shared_mem is not None:
+                mc.mem = shared_mem
+            self.cores.append(mc)
+
+    # -- Barrier --
+
+    def barrier_arrive_core(self, global_core_id: int):
+        """A micro-core signals barrier arrival."""
+        local = global_core_id - self.id_base
+        if 0 <= local < self.n:
+            self.barrier_arrive |= (1 << local)
+            if self.barrier_arrive == self._barrier_all:
+                self.barrier_done = True
+                self.barrier_arrive = 0  # auto-clear
+
+    def barrier_reset(self):
+        self.barrier_arrive = 0
+        self.barrier_done = False
+
+    # -- BIST --
+
+    def bist_csr_read(self, addr: int) -> int:
+        if addr == CSR_BIST_STATUS:
+            return self.bist_status
+        if addr == CSR_BIST_FAIL_ADDR:
+            return self.bist_fail_addr
+        if addr == CSR_BIST_FAIL_DATA:
+            return self.bist_fail_data
+        return 0
+
+    def bist_csr_write(self, addr: int, val: int):
+        if addr == CSR_BIST_CMD:
+            if val == 0:
+                return
+            self.bist_status = 1  # running
+            self.bist_fail_addr = 0
+            self.bist_fail_data = 0
+            # March C- on scratchpad
+            ok = self._bist_spad()
+            self.bist_status = 2 if ok else 3
+
+    def _bist_spad(self) -> bool:
+        """March C- test on scratchpad memory."""
+        sz = len(self.scratchpad)
+        saved = bytes(self.scratchpad)  # save contents
+        ok = True
+        # Phase 0: write all 0x00
+        for i in range(sz):
+            self.scratchpad[i] = 0x00
+        # Phase 1: read 0x00, write 0xFF ascending
+        for i in range(sz):
+            if self.scratchpad[i] != 0x00:
+                self.bist_fail_addr = i
+                self.bist_fail_data = (0x00 << 8) | self.scratchpad[i]
+                ok = False
+                break
+            self.scratchpad[i] = 0xFF
+        if ok:
+            # Phase 2: read 0xFF, write 0x00 descending
+            for i in range(sz - 1, -1, -1):
+                if self.scratchpad[i] != 0xFF:
+                    self.bist_fail_addr = i
+                    self.bist_fail_data = (0xFF << 8) | self.scratchpad[i]
+                    ok = False
+                    break
+                self.scratchpad[i] = 0x00
+        # Restore
+        self.scratchpad[:] = saved
+        return ok
+
+    # -- Scratchpad access helpers --
+
+    def spad_read8(self, offset: int) -> int:
+        offset = offset % CLUSTER_SPAD_BYTES
+        return self.scratchpad[offset]
+
+    def spad_write8(self, offset: int, val: int):
+        offset = offset % CLUSTER_SPAD_BYTES
+        self.scratchpad[offset] = val & 0xFF
+
+    # -- Enable / disable --
+
+    def set_enabled(self, en: bool):
+        """Enable or disable the cluster (matching RTL cluster_en gating)."""
+        if en and not self.enabled:
+            # Coming out of reset — reset all micro-cores
+            for mc in self.cores:
+                mc._reset_state()
+                mc.halted = True  # held in reset → halted
+        self.enabled = en
+        if not en:
+            # Entering reset — halt all micro-cores
+            for mc in self.cores:
+                mc.halted = True
+                mc.idle = False
 
 
 class MegapadSystem:
@@ -68,19 +224,51 @@ class MegapadSystem:
                  nic_port: Optional[int] = None,
                  nic_peer_port: Optional[int] = None,
                  nic_backend: 'Optional[NICBackend]' = None,
-                 num_cores: int = 1):
-        self.ram_size = ram_size
-        self.num_cores = num_cores
+                 num_cores: int = 1,
+                 num_clusters: int = 0,
+                 hbw_size: int = HBW_SIZE):
+        self.ram_size = ram_size          # Bank 0 (system RAM)
+        self.num_full_cores = num_cores   # full (major) cores
+        self.num_clusters = num_clusters
+        self.hbw_size = hbw_size          # Banks 1–3 (HBW math RAM)
+
+        # Total core count matches RTL NUM_ALL_CORES
+        self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
+        self.num_cores = num_cores + self.num_micro_cores
 
         # Shared memory — all cores reference the same bytearray
         self._shared_mem = bytearray(ram_size)
 
-        # Create CPU cores
+        # HBW math RAM (contiguous; banks 1–3)
+        self._hbw_mem = bytearray(hbw_size) if hbw_size > 0 else bytearray()
+
+        # Create full CPU cores
         self.cores: list[Megapad64] = []
         for i in range(num_cores):
-            cpu = Megapad64(mem_size=ram_size, core_id=i, num_cores=num_cores)
-            cpu.mem = self._shared_mem  # share memory
+            cpu = Megapad64(mem_size=ram_size, core_id=i,
+                            num_cores=self.num_cores)
+            cpu.mem = self._shared_mem
+            if hbw_size > 0 and hasattr(cpu, 'attach_hbw'):
+                cpu.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
             self.cores.append(cpu)
+
+        # Create micro-core clusters
+        self.clusters: list[MicroCluster] = []
+        for c in range(num_clusters):
+            id_base = MICRO_ID_BASE + c * MICRO_PER_CLUSTER
+            cluster = MicroCluster(
+                cluster_id=c, id_base=id_base,
+                n=MICRO_PER_CLUSTER,
+                shared_mem=self._shared_mem,
+                mem_size=ram_size,
+                num_all_cores=self.num_cores,
+            )
+            self.clusters.append(cluster)
+            # Add all micro-cores to the flat core list
+            for mc in cluster.cores:
+                if hbw_size > 0 and hasattr(mc, 'attach_hbw'):
+                    mc.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
+                self.cores.append(mc)
 
         # Convenience alias: self.cpu always refers to core 0
         self.cpu = self.cores[0]
@@ -97,11 +285,15 @@ class MegapadSystem:
             backend=nic_backend,
         )
         self.sysinfo = SystemInfo(
-            mem_size_kib=ram_size // 1024,
+            bank0_size=ram_size,
+            num_cores=self.num_cores,
+            hbw_base=HBW_BASE,
+            hbw_size=hbw_size,
+            int_mem_total=ram_size + hbw_size,
             has_storage=storage_image is not None,
             has_nic=True,
         )
-        self.mailbox = MailboxDevice(num_cores=num_cores)
+        self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.spinlock = SpinlockDevice()
         self.crc = CRCDevice()
         self.aes = AESDevice()
@@ -149,6 +341,20 @@ class MegapadSystem:
         # Default UART TX handler: buffer (CLI will override)
         self._tx_log: list[int] = []
         self.uart.on_tx = lambda b: self._tx_log.append(b)
+
+        # Wire cluster_en callback — writes to SysInfo 0x18 actually
+        # enable/disable clusters
+        if self.clusters:
+            original_sysinfo_write = self.sysinfo.write8
+            clusters = self.clusters
+            def cluster_en_write(offset: int, val: int):
+                original_sysinfo_write(offset, val)
+                if 0x18 <= offset < 0x20:
+                    # Update cluster enable state
+                    en_mask = self.sysinfo.cluster_en
+                    for i, cl in enumerate(clusters):
+                        cl.set_enabled(bool(en_mask & (1 << i)))
+            self.sysinfo.write8 = cluster_en_write
 
         # Boot state
         self._booted = False
@@ -213,13 +419,20 @@ class MegapadSystem:
     def _patch_cpu_mem(self, cpu: Megapad64):
         """
         Replace the CPU's mem_read8 / mem_write8 so that accesses in
-        the MMIO range get routed to the device bus, with the correct
-        requester_id set on the bus.
+        the MMIO range get routed to the device bus, accesses in the
+        HBW range get routed to the HBW memory banks, and accesses to
+        the cluster scratchpad sentinel get routed to the cluster's
+        local scratchpad (micro-cores only).
         """
         original_read8 = cpu.mem_read8
         original_write8 = cpu.mem_write8
         core_id = cpu.core_id
         bus = self.bus
+        hbw_mem = self._hbw_mem
+        hbw_size = self.hbw_size
+
+        # Scratchpad interception for micro-cores
+        cluster = getattr(cpu, '_cluster', None)
 
         def patched_read8(addr: int) -> int:
             addr = u64(addr)
@@ -227,6 +440,10 @@ class MegapadSystem:
                 bus.requester_id = core_id
                 offset = addr - MMIO_START
                 return bus.read8(offset)
+            if cluster and (addr >> 32) == 0xFFFF_FE00:
+                return cluster.spad_read8(addr & 0xFFFF_FFFF)
+            if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+                return hbw_mem[addr - HBW_BASE]
             return original_read8(addr)
 
         def patched_write8(addr: int, val: int):
@@ -235,6 +452,12 @@ class MegapadSystem:
                 bus.requester_id = core_id
                 offset = addr - MMIO_START
                 bus.write8(offset, val)
+                return
+            if cluster and (addr >> 32) == 0xFFFF_FE00:
+                cluster.spad_write8(addr & 0xFFFF_FFFF, val)
+                return
+            if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+                hbw_mem[addr - HBW_BASE] = val & 0xFF
                 return
             original_write8(addr, val)
 
@@ -284,21 +507,30 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def _raw_mem_read(self, addr: int) -> int:
-        addr = u64(addr) % self.ram_size
-        return self._shared_mem[addr]
+        addr = u64(addr)
+        if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+            return self._hbw_mem[addr - HBW_BASE]
+        return self._shared_mem[addr % self.ram_size]
 
     def _raw_mem_write(self, addr: int, val: int):
-        addr = u64(addr) % self.ram_size
-        self._shared_mem[addr] = val & 0xFF
+        addr = u64(addr)
+        if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+            self._hbw_mem[addr - HBW_BASE] = val & 0xFF
+        else:
+            self._shared_mem[addr % self.ram_size] = val & 0xFF
 
     # -----------------------------------------------------------------
     #  Loading
     # -----------------------------------------------------------------
 
     def load_binary(self, addr: int, data: bytes | bytearray):
-        """Load raw bytes into shared RAM at the given address."""
+        """Load raw bytes into shared RAM (or HBW) at the given address."""
         for i, b in enumerate(data):
-            self._shared_mem[(addr + i) % self.ram_size] = b
+            target = (addr + i)
+            if self.hbw_size > 0 and HBW_BASE <= target < HBW_END:
+                self._hbw_mem[target - HBW_BASE] = b
+            else:
+                self._shared_mem[target % self.ram_size] = b
 
     def load_binary_file(self, path: str, addr: int = 0):
         """Load a binary file into RAM."""
@@ -313,13 +545,20 @@ class MegapadSystem:
     def boot(self, entry: int = BOOT_VECTOR):
         """Cold boot the system.
 
-        All cores start at the same entry point (matching FPGA behaviour).
+        Full cores start at the entry point (matching FPGA behaviour).
         Core 0 gets SP at top of RAM; secondary cores get per-core stacks.
-        In the BIOS, core 0 will continue booting while cores 1–3 read
-        their COREID CSR and HALT, waiting for an IPI to wake them.
+        Micro-cores start halted — they are only activated when their
+        cluster is enabled via the SysInfo CLUSTER_EN register.
         """
         for i, cpu in enumerate(self.cores):
             cpu._reset_state()
+
+            # Micro-cores in clusters start halted (cluster_en defaults to 0)
+            if isinstance(cpu, Megapad64Micro):
+                cpu.halted = True
+                cpu.idle = False
+                continue
+
             cpu.pc = entry
 
             # Per-core stack tops (match FPGA layout)
