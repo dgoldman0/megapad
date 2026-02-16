@@ -30,10 +30,10 @@ from megapad64 import (
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device, TRNGDevice,
-    FieldALUDevice, NTTDevice, KemDevice,
+    FieldALUDevice, NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
     MBOX_BASE, SPINLOCK_BASE, CRC_BASE, AES_BASE, SHA3_BASE, TRNG_BASE,
-    X25519_BASE, NTT_BASE, KEM_BASE, NIC_MTU,
+    X25519_BASE, NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
 )
 
 # ---------------------------------------------------------------------------
@@ -327,6 +327,7 @@ class MegapadSystem:
         self.x25519 = FieldALUDevice()
         self.ntt = NTTDevice()
         self.kem = KemDevice()
+        self.fb = FramebufferDevice()
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)
@@ -342,6 +343,7 @@ class MegapadSystem:
         self.bus.register(self.x25519)
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
+        self.bus.register(self.fb)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

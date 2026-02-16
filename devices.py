@@ -47,6 +47,7 @@ TRNG_BASE    = 0x0800
 X25519_BASE  = 0x0840
 NTT_BASE     = 0x08C0
 KEM_BASE     = 0x0900
+FB_BASE      = 0x0A00
 
 
 # ---------------------------------------------------------------------------
@@ -2301,6 +2302,196 @@ class NTTDevice(Device):
                 self._busy = True
                 self._done = False
                 self._execute(op)
+
+
+# ---------------------------------------------------------------------------
+#  Framebuffer — Memory-Mapped Display Controller
+# ---------------------------------------------------------------------------
+# A dumb framebuffer device that reads pixel data from HBW RAM.
+# The device owns no pixel memory — it simply records configuration
+# (base address, dimensions, pixel format, palette) and exposes a
+# vsync counter.  The emulator display layer (if enabled) reads the
+# HBW RAM region pointed to by FB_BASE each frame.
+#
+# Register map (offsets from FB_BASE = 0x0A00):
+#   0x00..0x07  FB_BASE     (RW)  64-bit pixel data start address
+#   0x08..0x0B  FB_WIDTH    (RW)  32-bit active width in pixels
+#   0x10..0x13  FB_HEIGHT   (RW)  32-bit active height in pixels
+#   0x18..0x1B  FB_STRIDE   (RW)  32-bit bytes per scanline
+#   0x20        FB_MODE     (RW)  pixel format (0=8bpp indexed,
+#                                  1=RGB565, 2=FP16 gray, 3=RGBA8888)
+#   0x28        FB_ENABLE   (RW)  bit 0: scanout on/off
+#                                  bit 1: vsync IRQ enable
+#   0x30..0x33  FB_VSYNC    (RW)  32-bit frame counter; write 1 to ack
+#   0x38        FB_PAL_IDX  (W)   palette index (0–255)
+#   0x40..0x43  FB_PAL_DATA (W)   24-bit RGB (0x00RRGGBB), LE
+#   0x48        FB_STATUS   (R)   bit 0: enabled, bit 1: in-vblank
+
+# Pixel mode constants
+FB_MODE_INDEXED  = 0   # 8-bit indexed (palette), 64 pixels/tile
+FB_MODE_RGB565   = 1   # 16-bit RGB565, 32 pixels/tile
+FB_MODE_FP16     = 2   # 16-bit FP16 grayscale, 32 pixels/tile
+FB_MODE_RGBA8888 = 3   # 32-bit RGBA, 16 pixels/tile
+
+# Bytes per pixel for each mode
+FB_BPP = {0: 1, 1: 2, 2: 2, 3: 4}
+
+
+class FramebufferDevice(Device):
+    """Memory-mapped framebuffer controller.
+
+    Does not own pixel memory — reads from HBW RAM at the address
+    specified by fb_base.  The emulator display loop reads that RAM
+    region each vsync frame.
+    """
+
+    def __init__(self):
+        super().__init__("Framebuffer", FB_BASE, 0x50)  # 80-byte window
+        self.fb_base: int = 0           # 64-bit address in HBW
+        self.width: int = 320           # default 320×240
+        self.height: int = 240
+        self.stride: int = 320          # bytes per row (mode 0: 1 bpp)
+        self.mode: int = 0              # FB_MODE_INDEXED
+        self.enable: int = 0            # bit 0: scanout, bit 1: vsync IRQ
+        self.vsync_count: int = 0       # frame counter
+        self.pal_idx: int = 0           # current palette write index
+        self.palette: list[int] = [0] * 256  # 24-bit 0x00RRGGBB entries
+        self.vblank: bool = False       # toggled by tick()
+
+        # Byte assembly buffers for multi-byte LE writes
+        self._base_buf = [0] * 8
+        self._width_buf = [0] * 4
+        self._height_buf = [0] * 4
+        self._stride_buf = [0] * 4
+        self._vsync_buf = [0] * 4
+        self._pal_data_buf = [0] * 4
+
+        # Cycles-per-frame tracking for vsync tick
+        self._frame_cycles = 0
+        # ~33333 cycles per frame at 1 MHz → ~30 FPS
+        # ~16667 for 60 FPS.  Configurable, default 30 FPS.
+        self.cycles_per_frame = 33333
+
+        # Default palette: simple grayscale ramp
+        for i in range(256):
+            self.palette[i] = (i << 16) | (i << 8) | i
+
+    def read8(self, offset: int) -> int:
+        # FB_BASE — 8 bytes LE
+        if 0x00 <= offset < 0x08:
+            return (self.fb_base >> (8 * offset)) & 0xFF
+        # FB_WIDTH — 4 bytes LE
+        if 0x08 <= offset < 0x0C:
+            return (self.width >> (8 * (offset - 0x08))) & 0xFF
+        # FB_HEIGHT — 4 bytes LE
+        if 0x10 <= offset < 0x14:
+            return (self.height >> (8 * (offset - 0x10))) & 0xFF
+        # FB_STRIDE — 4 bytes LE
+        if 0x18 <= offset < 0x1C:
+            return (self.stride >> (8 * (offset - 0x18))) & 0xFF
+        # FB_MODE — 1 byte
+        if offset == 0x20:
+            return self.mode & 0xFF
+        # FB_ENABLE — 1 byte
+        if offset == 0x28:
+            return self.enable & 0xFF
+        # FB_VSYNC — 4 bytes LE
+        if 0x30 <= offset < 0x34:
+            return (self.vsync_count >> (8 * (offset - 0x30))) & 0xFF
+        # FB_STATUS — 1 byte
+        if offset == 0x48:
+            status = 0
+            if self.enable & 1:
+                status |= 1       # bit 0: enabled
+            if self.vblank:
+                status |= 2       # bit 1: in vblank
+            return status
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value = value & 0xFF
+        # FB_BASE — 8-byte LE accumulator
+        if 0x00 <= offset < 0x08:
+            self._base_buf[offset] = value
+            if offset == 0x07:  # commit on last byte
+                self.fb_base = int.from_bytes(self._base_buf, 'little')
+            return
+        # FB_WIDTH — 4-byte LE
+        if 0x08 <= offset < 0x0C:
+            idx = offset - 0x08
+            self._width_buf[idx] = value
+            if idx == 3:
+                self.width = int.from_bytes(self._width_buf, 'little')
+            return
+        # FB_HEIGHT — 4-byte LE
+        if 0x10 <= offset < 0x14:
+            idx = offset - 0x10
+            self._height_buf[idx] = value
+            if idx == 3:
+                self.height = int.from_bytes(self._height_buf, 'little')
+            return
+        # FB_STRIDE — 4-byte LE
+        if 0x18 <= offset < 0x1C:
+            idx = offset - 0x18
+            self._stride_buf[idx] = value
+            if idx == 3:
+                self.stride = int.from_bytes(self._stride_buf, 'little')
+            return
+        # FB_MODE — 1 byte
+        if offset == 0x20:
+            self.mode = value & 0x03  # only modes 0–3
+            return
+        # FB_ENABLE — 1 byte
+        if offset == 0x28:
+            self.enable = value & 0x03  # bits 0–1
+            return
+        # FB_VSYNC — write 1 to ack / clear IRQ
+        if 0x30 <= offset < 0x34:
+            idx = offset - 0x30
+            self._vsync_buf[idx] = value
+            if idx == 3:
+                ack = int.from_bytes(self._vsync_buf, 'little')
+                if ack & 1:
+                    # Acknowledge: clear the vblank flag
+                    self.vblank = False
+            return
+        # FB_PAL_IDX — 1 byte
+        if offset == 0x38:
+            self.pal_idx = value
+            return
+        # FB_PAL_DATA — 4-byte LE (0x00RRGGBB)
+        if 0x40 <= offset < 0x44:
+            idx = offset - 0x40
+            self._pal_data_buf[idx] = value
+            if idx == 3:
+                rgb = int.from_bytes(self._pal_data_buf, 'little') & 0x00FFFFFF
+                self.palette[self.pal_idx] = rgb
+                self.pal_idx = (self.pal_idx + 1) & 0xFF  # auto-increment
+            return
+
+    def tick(self, cycles: int):
+        """Advance frame counter based on accumulated cycles."""
+        if not (self.enable & 1):
+            return
+        self._frame_cycles += cycles
+        if self._frame_cycles >= self.cycles_per_frame:
+            self._frame_cycles -= self.cycles_per_frame
+            self.vsync_count = (self.vsync_count + 1) & 0xFFFFFFFF
+            self.vblank = True
+
+    def bpp(self) -> int:
+        """Bytes per pixel for the current mode."""
+        return FB_BPP.get(self.mode, 1)
+
+    @property
+    def irq_pending(self) -> bool:
+        """True if vsync IRQ is enabled and vblank has occurred."""
+        return bool((self.enable & 2) and self.vblank)
+
+    @property
+    def frame_bytes(self) -> int:
+        """Total bytes in the framebuffer (stride × height)."""
+        return self.stride * self.height
 
 
 # ---------------------------------------------------------------------------

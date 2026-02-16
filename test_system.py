@@ -582,6 +582,260 @@ class TestHBWMemory(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+#  Framebuffer device tests
+# ---------------------------------------------------------------------------
+
+class TestFramebuffer(unittest.TestCase):
+    """Tests for the FramebufferDevice MMIO peripheral."""
+
+    def test_default_state(self):
+        """Framebuffer powers on with sensible defaults."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.width, 320)
+        self.assertEqual(fb.height, 240)
+        self.assertEqual(fb.stride, 320)
+        self.assertEqual(fb.mode, 0)
+        self.assertEqual(fb.enable, 0)
+        self.assertEqual(fb.vsync_count, 0)
+        self.assertEqual(fb.fb_base, 0)
+        # Status: disabled, no vblank
+        self.assertEqual(fb.read8(0x48), 0)
+
+    def test_width_height_readback(self):
+        """Write and read back width/height as 32-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Write width = 640 (0x0280) LE across 4 bytes at offset 0x08
+        fb.write8(0x08, 0x80)
+        fb.write8(0x09, 0x02)
+        fb.write8(0x0A, 0x00)
+        fb.write8(0x0B, 0x00)
+        self.assertEqual(fb.width, 640)
+        # Read back
+        self.assertEqual(fb.read8(0x08), 0x80)
+        self.assertEqual(fb.read8(0x09), 0x02)
+        # Write height = 480 (0x01E0)
+        fb.write8(0x10, 0xE0)
+        fb.write8(0x11, 0x01)
+        fb.write8(0x12, 0x00)
+        fb.write8(0x13, 0x00)
+        self.assertEqual(fb.height, 480)
+        self.assertEqual(fb.read8(0x10), 0xE0)
+        self.assertEqual(fb.read8(0x11), 0x01)
+
+    def test_stride_readback(self):
+        """Write and read back stride as 32-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # stride = 1024 (0x0400)
+        fb.write8(0x18, 0x00)
+        fb.write8(0x19, 0x04)
+        fb.write8(0x1A, 0x00)
+        fb.write8(0x1B, 0x00)
+        self.assertEqual(fb.stride, 1024)
+        self.assertEqual(fb.read8(0x18), 0x00)
+        self.assertEqual(fb.read8(0x19), 0x04)
+
+    def test_fb_base_64bit(self):
+        """Write and read back fb_base as 64-bit LE."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Set base to 0xFFD0_0000 (HBW Bank 1 start)
+        addr = 0xFFD0_0000
+        for i in range(8):
+            fb.write8(i, (addr >> (8 * i)) & 0xFF)
+        self.assertEqual(fb.fb_base, addr)
+        for i in range(8):
+            self.assertEqual(fb.read8(i), (addr >> (8 * i)) & 0xFF)
+
+    def test_mode_register(self):
+        """Mode register accepts 0–3, masks higher bits."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x20, 2)
+        self.assertEqual(fb.mode, 2)
+        self.assertEqual(fb.read8(0x20), 2)
+        # Write 0xFF → should mask to 3
+        fb.write8(0x20, 0xFF)
+        self.assertEqual(fb.mode, 3)
+
+    def test_enable_disable(self):
+        """Enable/disable scanout and check status."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.read8(0x48), 0)  # disabled
+        # Enable scanout (bit 0)
+        fb.write8(0x28, 0x01)
+        self.assertEqual(fb.enable, 1)
+        self.assertEqual(fb.read8(0x28), 1)
+        # Status should show enabled
+        self.assertTrue(fb.read8(0x48) & 1)
+        # Disable
+        fb.write8(0x28, 0x00)
+        self.assertEqual(fb.enable, 0)
+        self.assertFalse(fb.read8(0x48) & 1)
+
+    def test_vsync_counter(self):
+        """Vsync counter increments on tick when enabled."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x28, 0x01)  # enable
+        fb.cycles_per_frame = 100  # fast for testing
+        # Not yet enough cycles
+        fb.tick(50)
+        self.assertEqual(fb.vsync_count, 0)
+        self.assertFalse(fb.vblank)
+        # Pass the threshold
+        fb.tick(50)
+        self.assertEqual(fb.vsync_count, 1)
+        self.assertTrue(fb.vblank)
+        # Read vsync counter
+        self.assertEqual(fb.read8(0x30), 1)
+        self.assertEqual(fb.read8(0x31), 0)
+
+    def test_vsync_disabled_no_tick(self):
+        """Vsync counter does NOT tick when disabled."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.cycles_per_frame = 10
+        fb.tick(100)
+        self.assertEqual(fb.vsync_count, 0)
+
+    def test_vsync_ack(self):
+        """Writing 1 to FB_VSYNC clears vblank flag."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x28, 0x01)  # enable
+        fb.cycles_per_frame = 10
+        fb.tick(10)
+        self.assertTrue(fb.vblank)
+        # Ack: write 1 as 32-bit LE
+        fb.write8(0x30, 0x01)
+        fb.write8(0x31, 0x00)
+        fb.write8(0x32, 0x00)
+        fb.write8(0x33, 0x00)
+        self.assertFalse(fb.vblank)
+        # Status should no longer show vblank
+        self.assertFalse(fb.read8(0x48) & 2)
+
+    def test_palette_write(self):
+        """Write palette entries via idx+data sequence."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        # Set palette index 0
+        fb.write8(0x38, 0)
+        # Write RGB 0x00FF8040 → actually 0x00FF8040 & 0x00FFFFFF = 0xFF8040
+        fb.write8(0x40, 0x40)  # B
+        fb.write8(0x41, 0x80)  # G
+        fb.write8(0x42, 0xFF)  # R
+        fb.write8(0x43, 0x00)  # high byte (masked)
+        self.assertEqual(fb.palette[0], 0xFF8040)
+
+    def test_palette_auto_increment(self):
+        """Palette index auto-increments after each data write."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x38, 5)  # start at index 5
+        # Write two entries
+        for color, idx in [(0x112233, 5), (0x445566, 6)]:
+            fb.write8(0x40, color & 0xFF)
+            fb.write8(0x41, (color >> 8) & 0xFF)
+            fb.write8(0x42, (color >> 16) & 0xFF)
+            fb.write8(0x43, 0x00)
+        self.assertEqual(fb.palette[5], 0x112233)
+        self.assertEqual(fb.palette[6], 0x445566)
+        # Index should now be 7
+        self.assertEqual(fb.pal_idx, 7)
+
+    def test_palette_wraps(self):
+        """Palette index wraps from 255 to 0."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.write8(0x38, 255)
+        # Write one entry at index 255
+        fb.write8(0x40, 0xAA)
+        fb.write8(0x41, 0xBB)
+        fb.write8(0x42, 0xCC)
+        fb.write8(0x43, 0x00)
+        self.assertEqual(fb.palette[255], 0xCCBBAA)
+        # Should wrap to 0
+        self.assertEqual(fb.pal_idx, 0)
+
+    def test_irq_pending(self):
+        """IRQ pending only when both vsync IRQ enabled and vblank set."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        fb.cycles_per_frame = 10
+        # Enable scanout only (no IRQ)
+        fb.write8(0x28, 0x01)
+        fb.tick(10)
+        self.assertTrue(fb.vblank)
+        self.assertFalse(fb.irq_pending)  # IRQ not enabled
+        # Enable IRQ (bit 1)
+        fb.write8(0x28, 0x03)
+        self.assertTrue(fb.irq_pending)
+        # Ack clears it
+        fb.write8(0x30, 0x01)
+        fb.write8(0x31, 0x00)
+        fb.write8(0x32, 0x00)
+        fb.write8(0x33, 0x00)
+        self.assertFalse(fb.irq_pending)
+
+    def test_frame_bytes(self):
+        """frame_bytes property reflects stride × height."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.frame_bytes, 320 * 240)
+        # Change stride
+        fb.write8(0x18, 0x00)
+        fb.write8(0x19, 0x04)
+        fb.write8(0x1A, 0x00)
+        fb.write8(0x1B, 0x00)  # stride = 1024
+        self.assertEqual(fb.frame_bytes, 1024 * 240)
+
+    def test_bpp_per_mode(self):
+        """bpp() returns correct bytes per pixel for each mode."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        for mode, expected_bpp in [(0, 1), (1, 2), (2, 2), (3, 4)]:
+            fb.write8(0x20, mode)
+            self.assertEqual(fb.bpp(), expected_bpp,
+                             f"mode {mode} should be {expected_bpp} bpp")
+
+    def test_bus_routing(self):
+        """FramebufferDevice is reachable through the DeviceBus."""
+        from devices import FramebufferDevice, DeviceBus, FB_BASE
+        bus = DeviceBus()
+        fb = FramebufferDevice()
+        bus.register(fb)
+        # Write mode = 2 via bus
+        bus.write8(FB_BASE + 0x20, 2)
+        self.assertEqual(fb.mode, 2)
+        # Read back via bus
+        self.assertEqual(bus.read8(FB_BASE + 0x20), 2)
+
+    def test_system_wired(self):
+        """FramebufferDevice is accessible through MegapadSystem."""
+        sys = make_system()
+        self.assertIsNotNone(sys.fb)
+        self.assertEqual(sys.fb.width, 320)
+        self.assertEqual(sys.fb.height, 240)
+        # Check bus routing
+        from devices import FB_BASE
+        sys.bus.write8(FB_BASE + 0x20, 1)
+        self.assertEqual(sys.fb.mode, 1)
+
+    def test_default_palette_grayscale(self):
+        """Default palette is a grayscale ramp."""
+        from devices import FramebufferDevice
+        fb = FramebufferDevice()
+        self.assertEqual(fb.palette[0], 0x000000)
+        self.assertEqual(fb.palette[128], 0x808080)
+        self.assertEqual(fb.palette[255], 0xFFFFFF)
+
+
+# ---------------------------------------------------------------------------
 #  BIOS tests
 # ---------------------------------------------------------------------------
 
