@@ -117,6 +117,21 @@ module mp64_cluster #(
     reg [ARB_BITS-1:0]  mul_grant;
 
     // ========================================================================
+    // Cluster-Level MPU (shared by all micro-cores)
+    // ========================================================================
+    // One privilege level + one [base, limit) window per cluster.
+    // Enforced in the bus arbiter before any external transaction.
+    // Same rules as full-core MPU: MMIO allowed, HBW blocked in user mode,
+    // RAM range-checked against [cl_mpu_base, cl_mpu_limit).
+
+    reg         cl_priv_level;     // 0 = supervisor, 1 = user
+    reg [63:0]  cl_mpu_base;       // inclusive lower bound
+    reg [63:0]  cl_mpu_limit;      // exclusive upper bound
+
+    // Per-micro-core MPU fault signal (arbiter → micro-core)
+    reg [N-1:0] mc_mpu_fault;
+
+    // ========================================================================
     // Unpack per-micro-core signals
     // ========================================================================
     wire [63:0] mc_addr  [0:N-1];
@@ -153,6 +168,9 @@ module mp64_cluster #(
                 .bus_size  (mc_bus_size [gi*2  +: 2]),
                 .bus_rdata (mc_bus_rdata[gi*64 +: 64]),
                 .bus_ready (mc_bus_ready[gi]),
+
+                // MPU fault from cluster arbiter
+                .mpu_fault (mc_mpu_fault[gi]),
 
                 // Interrupts
                 .irq_timer (irq_timer[gi]),
@@ -219,6 +237,22 @@ module mp64_cluster #(
     wire grant_addr_is_spad = (mc_addr[arb_grant][63:32] == SPAD_HI);
 
     // ========================================================================
+    // Cluster MPU fault detection (combinational, evaluated on arb_next)
+    // ========================================================================
+    wire cl_mpu_enabled = cl_priv_level && (cl_mpu_limit > cl_mpu_base);
+    wire [63:0] arb_next_addr = mc_addr[arb_next];
+    wire arb_addr_is_mmio = (arb_next_addr[63:32] == MMIO_HI);
+    wire arb_addr_is_hbw  = (arb_next_addr[63:32] == 32'd0) &&
+                            (arb_next_addr[31:20] >= 12'hFFD);
+    wire arb_mpu_fault = cl_priv_level && !arb_addr_is_mmio &&
+                         !arb_addr_is_spad && (
+                             arb_addr_is_hbw ||
+                             (cl_mpu_enabled &&
+                              (arb_next_addr < cl_mpu_base ||
+                               arb_next_addr >= cl_mpu_limit))
+                         );
+
+    // ========================================================================
     // Scratchpad Memory (1 KiB, 64-bit, single-cycle)
     // ========================================================================
     reg [63:0] spad_mem [0:CLUSTER_SPAD_DEPTH-1];
@@ -250,8 +284,13 @@ module mp64_cluster #(
             bus_size   <= 2'd0;
             mc_bus_ready <= {N{1'b0}};
             mc_bus_rdata <= {(N*64){1'b0}};
+            mc_mpu_fault <= {N{1'b0}};
+            cl_priv_level <= 1'b0;
+            cl_mpu_base   <= 64'd0;
+            cl_mpu_limit  <= 64'd0;
         end else begin
             mc_bus_ready <= {N{1'b0}};  // default: deassert
+            mc_mpu_fault <= {N{1'b0}};  // default: deassert
             bus_valid    <= 1'b0;
 
             if (arb_busy) begin
@@ -274,18 +313,51 @@ module mp64_cluster #(
                 end
             end else if (arb_any) begin
                 arb_grant <= arb_next;
-                arb_busy  <= 1'b1;
-                if (arb_addr_is_spad) begin
+                if (arb_mpu_fault) begin
+                    // MPU violation: signal fault to micro-core, no bus txn
+                    mc_mpu_fault[arb_next] <= 1'b1;
+                    mc_bus_ready[arb_next] <= 1'b1;
+                    mc_bus_rdata[arb_next*64 +: 64] <= 64'd0;
+                    arb_last <= arb_next;
+                    cl_priv_level <= 1'b0;  // drop to S-mode for trap handling
+                    // arb_busy stays 0 — no bus transaction needed
+                end else if (arb_addr_is_spad) begin
                     // Scratchpad access — handle internally
+                    arb_busy <= 1'b1;
                     arb_spad <= 1'b1;
                 end else begin
                     // External bus access
+                    arb_busy  <= 1'b1;
                     arb_spad  <= 1'b0;
                     bus_valid <= 1'b1;
                     bus_addr  <= mc_addr[arb_next];
                     bus_wdata <= mc_wdata[arb_next];
                     bus_wen   <= mc_bus_wen[arb_next];
                     bus_size  <= mc_size[arb_next];
+                end
+            end
+
+            // —————————————————————————————————————————————————————————
+            // Cluster MPU CSR writes (via BIST CSR forwarding path)
+            // Only supervisor (cl_priv_level==0) may modify MPU regs.
+            // —————————————————————————————————————————————————————————
+            for (mi = 0; mi < N; mi = mi + 1) begin
+                if (mc_bist_wen[mi]) begin
+                    case (mc_bist_addr[mi*8 +: 8])
+                        CSR_CL_PRIV: begin
+                            if (!cl_priv_level)
+                                cl_priv_level <= mc_bist_wdata[mi*64];
+                        end
+                        CSR_CL_MPU_BASE: begin
+                            if (!cl_priv_level)
+                                cl_mpu_base <= mc_bist_wdata[mi*64 +: 64];
+                        end
+                        CSR_CL_MPU_LIMIT: begin
+                            if (!cl_priv_level)
+                                cl_mpu_limit <= mc_bist_wdata[mi*64 +: 64];
+                        end
+                        default: ;
+                    endcase
                 end
             end
         end
@@ -656,6 +728,9 @@ module mp64_cluster #(
             CSR_BIST_FAIL_DATA: bist_rdata = bist_fail_data;
             CSR_BARRIER_ARRIVE: bist_rdata = {60'd0, barrier_arrive};
             CSR_BARRIER_STATUS: bist_rdata = {60'd0, barrier_done, barrier_arrive[N-2:0]};
+            CSR_CL_PRIV:       bist_rdata = {63'd0, cl_priv_level};
+            CSR_CL_MPU_BASE:   bist_rdata = cl_mpu_base;
+            CSR_CL_MPU_LIMIT:  bist_rdata = cl_mpu_limit;
             default:            bist_rdata = 64'd0;
         endcase
     end

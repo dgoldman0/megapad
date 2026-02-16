@@ -60,6 +60,9 @@ module mp64_cpu_micro #(
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
 
+    // === Cluster MPU fault (from cluster arbiter) ===
+    input  wire        mpu_fault,
+
     // === Interrupts ===
     input  wire        irq_timer,
     input  wire        irq_uart,
@@ -917,7 +920,18 @@ module mp64_cpu_micro #(
                 CPU_MEM_READ: begin
                     bus_addr  <= effective_addr;
                     bus_wen   <= 1'b0;
-                    if (bus_ready) begin
+                    if (bus_ready && mpu_fault) begin
+                        // Cluster MPU violation — trap
+                        bus_valid <= 1'b0;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id  <= {4'd0, IRQX_PRIV};
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else if (bus_ready) begin
                         bus_valid <= 1'b0;
                         case (mem_sub)
                             4'hC: R[dst_reg] <= {{56{bus_rdata[7]}}, bus_rdata[7:0]};
@@ -970,7 +984,18 @@ module mp64_cpu_micro #(
                     bus_addr  <= effective_addr;
                     bus_wdata <= mem_data;
                     bus_wen   <= 1'b1;
-                    if (bus_ready) begin
+                    if (bus_ready && mpu_fault) begin
+                        // Cluster MPU violation — trap
+                        bus_valid <= 1'b0;
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id  <= {4'd0, IRQX_PRIV};
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else if (bus_ready) begin
                         // Deassert bus_valid on ack to create 1-cycle gap
                         // before the next bus-active state (IRQ_PUSH etc.)
                         bus_valid <= 1'b0;

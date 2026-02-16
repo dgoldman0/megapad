@@ -336,6 +336,10 @@ parameter [7:0] CSR_PERF_STALLS  = 8'h69;  // Stall cycles (bus/memory wait)
 parameter [7:0] CSR_PERF_TILEOPS = 8'h6A;  // Tile engine operations completed
 parameter [7:0] CSR_PERF_EXTMEM  = 8'h6B;  // External memory beats
 parameter [7:0] CSR_PERF_CTRL    = 8'h6C;  // Bit 0: enable, Bit 1: reset all
+// Cluster-level MPU CSRs (shared by all micro-cores in cluster)
+parameter [7:0] CSR_CL_PRIV      = 8'h6D;  // RW: cluster privilege (0=S,1=U). S-only write.
+parameter [7:0] CSR_CL_MPU_BASE  = 8'h6E;  // RW: cluster MPU base (inclusive). S-only write.
+parameter [7:0] CSR_CL_MPU_LIMIT = 8'h6F;  // RW: cluster MPU limit (exclusive). S-only write.
 
 // Memory BIST CSRs (§6.1)
 parameter [7:0] CSR_BIST_CMD       = 8'h60;  // W: 0=idle, 1=full, 2=quick
