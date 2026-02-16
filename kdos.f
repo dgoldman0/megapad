@@ -2660,6 +2660,51 @@ VARIABLE OP-SLOT
 VARIABLE LD-FD
 VARIABLE LD-BUF
 VARIABLE LD-SZ
+VARIABLE LD-CUR
+VARIABLE LD-LEN
+
+\ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
+CREATE _LD-STK 128 ALLOT    \ 4 vars * 8 bytes * 4 nesting levels
+VARIABLE _LD-SP
+0 _LD-SP !
+
+: _LD-SAVE  ( -- )
+    LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+
+: _LD-RESTORE  ( -- )
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
+
+\ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
+\   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
+\   clean across EVALUATE calls so compile-time control-flow items
+\   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
+: _LD-WALK  ( -- )
+    LD-BUF @ LD-CUR !
+    BEGIN LD-SZ @ 0> WHILE
+        \ Find length of current line (up to newline or end)
+        LD-SZ @                          ( rem )
+        0                                ( rem i )
+        BEGIN
+            DUP 2 PICK < IF
+                LD-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+            ELSE TRUE THEN
+        UNTIL                            ( rem linelen )
+        NIP LD-LEN !
+        \ EVALUATE if non-empty
+        LD-LEN @ 0> IF
+            LD-CUR @ LD-LEN @ EVALUATE
+        THEN
+        \ Advance past line + newline
+        LD-LEN @ 1+
+        DUP NEGATE LD-SZ +!
+        LD-CUR +!
+    REPEAT ;
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
@@ -2672,7 +2717,10 @@ VARIABLE LD-SZ
     \ Open by slot
     DUP DE.USED DUP 0= IF
         2DROP ."  Empty file" CR EXIT
-    THEN LD-SZ !                         ( de )
+    THEN
+    \ Save outer walker state before modifying variables (nesting).
+    _LD-SAVE
+    LD-SZ !                              ( de )
     DUP 16 + W@ SWAP DE.COUNT           ( start count )
     \ Read file data into HERE, then advance HERE past it
     \ so that EVALUATE'd code (BUFFER, KERNEL, BL WORD, etc.)
@@ -2685,34 +2733,8 @@ VARIABLE LD-SZ
     DUP DISK-N!
     DISK-READ
     2DROP                                ( -- clean stack )
-    \ Now walk buffer line by line and EVALUATE each line
-    LD-BUF @                             ( addr )
-    LD-SZ @                              ( addr remaining )
-    BEGIN DUP 0> WHILE
-        \ Find next newline or end
-        OVER                             ( addr rem linestart )
-        2 PICK                           ( addr rem linestart rem )
-        0                                ( addr rem linestart rem i )
-        BEGIN
-            DUP 2 PICK < IF
-                OVER OVER + C@ 10 = IF
-                    TRUE                 \ found newline
-                ELSE
-                    1+ FALSE
-                THEN
-            ELSE TRUE THEN              \ end of buffer
-        UNTIL                            ( addr rem linestart rem linelen )
-        NIP                              ( addr rem linestart linelen )
-        DUP 0> IF
-            2DUP EVALUATE
-        THEN
-        \ Advance past line + newline
-        1+                               ( addr rem linestart skip )
-        ROT OVER - >R                    ( addr linestart skip  R: rem' )
-        + SWAP DROP                      ( addr' )
-        R>                               ( addr' rem' )
-    REPEAT
-    2DROP ;
+    _LD-WALK
+    _LD-RESTORE ;
 
 \ ── User-Mode Application Loading ───────────────────────────────────
 \  APP-EVAL evaluates a string in user mode.  ENTER-USER drops the
@@ -9112,7 +9134,9 @@ CREATE _MOD-VAL  1 ALLOT
     DIRENT
     DUP DE.USED DUP 0= IF
         2DROP ."  Empty module" CR EXIT
-    THEN LD-SZ !
+    THEN
+    _LD-SAVE
+    LD-SZ !
     DUP 16 + W@ SWAP DE.COUNT
     HERE LD-BUF !
     LD-SZ @ ALLOT
@@ -9121,21 +9145,8 @@ CREATE _MOD-VAL  1 ALLOT
     DUP DISK-N!
     DISK-READ
     2DROP
-    LD-BUF @
-    LD-SZ @
-    BEGIN DUP 0> WHILE
-        OVER 2 PICK 0
-        BEGIN
-            DUP 2 PICK < IF
-                OVER OVER + C@ 10 = IF TRUE
-                ELSE 1+ FALSE THEN
-            ELSE TRUE THEN
-        UNTIL
-        NIP
-        DUP 0> IF 2DUP EVALUATE THEN
-        1+ ROT OVER - >R + SWAP DROP R>
-    REPEAT
-    2DROP ;
+    _LD-WALK
+    _LD-RESTORE ;
 
 \ REQUIRE ( "name" -- )  Load a module if not already loaded.
 : REQUIRE  ( "name" -- )

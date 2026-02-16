@@ -5858,8 +5858,8 @@ class TestDiskUtil(unittest.TestCase):
         self.assertEqual(bdl_entry.ftype, FTYPE_BUNDLE)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle = 18
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 3)
+        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle + graphics.f = 19
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 4)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -16837,6 +16837,158 @@ class TestKDOSModuleSystem(_KDOSTestBase):
                 "APP-VAL .",
             ], storage_image=img)
             self.assertIn("20 ", text)
+        finally:
+            os.unlink(img)
+
+
+class TestKDOSGraphicsModule(_KDOSTestBase):
+    """Tests for graphics.f — framebuffer graphics module."""
+
+    def _make_gfx_image(self):
+        """Create a formatted image with graphics.f injected."""
+        path = self._make_formatted_image()
+        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        with open(gfx_path, "rb") as f:
+            gfx_src = f.read()
+        du_inject_file(path, "graphics.f", gfx_src, ftype=FTYPE_FORTH)
+        return path
+
+    def test_require_graphics(self):
+        """REQUIRE graphics.f loads without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "MODULE? graphics.f IF .\" LOADED\" THEN",
+            ], storage_image=img)
+            self.assertIn("LOADED", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_init_sets_mode(self):
+        """GFX-INIT sets the framebuffer mode register."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "FB-MODE@ .",
+            ], storage_image=img)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_init_enables_fb(self):
+        """GFX-INIT enables the framebuffer."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "FB-STATUS@ 1 AND .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_pixel_roundtrip(self):
+        """GFX-PIXEL! / GFX-PIXEL@ round-trip a pixel value."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "42 10 20 GFX-PIXEL!",
+                "10 20 GFX-PIXEL@ .",
+            ], storage_image=img)
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_clear(self):
+        """GFX-CLEAR fills screen; pixel reads back the fill color."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "7 GFX-CLEAR",
+                "100 100 GFX-PIXEL@ .",
+            ], storage_image=img)
+            self.assertIn("7 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_hline(self):
+        """GFX-HLINE draws a horizontal line of pixels."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "5 10 20 8 GFX-HLINE",
+                "10 20 GFX-PIXEL@ .",
+                "17 20 GFX-PIXEL@ .",
+            ], storage_image=img)
+            # Both pixels at (10,20) and (17,20) should be color 5
+            self.assertIn("5 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_rect(self):
+        """GFX-RECT fills a rectangular region."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "3 10 10 4 4 GFX-RECT",
+                "12 12 GFX-PIXEL@ .",     # inside rect
+                "20 20 GFX-PIXEL@ .",     # outside rect (0)
+            ], storage_image=img)
+            self.assertIn("3 ", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_char(self):
+        """GFX-CHAR renders an 'A' — at least one pixel is nonzero."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "65 10 10 15 GFX-CHAR",  # 'A' at (10,10) color 15
+                # Check pixel at (12,11) — row 1 of 'A' is 0x6C (01101100)
+                # column 2 = bit 5 = 1 → pixel at (10+2, 10+1) = (12,11)
+                "12 11 GFX-PIXEL@ 0<> .",
+            ], storage_image=img)
+            self.assertIn("-1 ", text)   # TRUE = nonzero
+        finally:
+            os.unlink(img)
+
+    def test_gfx_pal_default(self):
+        """GFX-PAL-DEFAULT runs without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-PAL-DEFAULT",
+            ], storage_image=img)
+            self.assertNotIn("BUS FAULT", text.upper())
+            self.assertNotIn("PRIV FAULT", text.upper())
+        finally:
+            os.unlink(img)
+
+    def test_gfx_demo(self):
+        """GFX-DEMO completes without error."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "GFX-DEMO",
+            ], storage_image=img)
+            self.assertIn("GFX-DEMO complete", text)
         finally:
             os.unlink(img)
 
