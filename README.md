@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,060+ tests.
+— all running inside a Python emulator and verified by 1,095 tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -25,22 +25,24 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 291 Forth dictionary words, 11,158 lines ASM, ~24 KB binary |
-| **KDOS** | v1.1 — 653 colon definitions + 405 variables/constants, 8,296 lines Forth |
-| **Emulator** | Quad-core SoC with mailbox IPI & spinlocks, 2,541 lines Python |
-| **C++ Accelerator** | Optional pybind11 CPU core — 63× speedup over PyPy (~23 s full suite) |
-| **Tests** | 1,068 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, tile, crypto, networking, PQC) |
+| **BIOS** | 300+ Forth dictionary words, 11,329 lines ASM, ~26 KB binary |
+| **KDOS** | v1.1 — 670+ colon definitions + 430+ variables/constants, 8,667 lines Forth |
+| **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 2,671+849 lines Python |
+| **C++ Accelerator** | Optional pybind11 CPU core (1,978 lines) — 63× speedup over PyPy |
+| **Tests** | 1,095 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **Devices** | 14 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
-| **FPGA RTL** | 23 Verilog modules + 18 testbenches (~180 HW tests), Genesys 2 (Kintex-7 325T) target |
+| **FPGA RTL** | 27 Verilog modules + 18 testbenches (~180 HW tests), Genesys 2 + VU095 targets |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
 dashboard, tile engine, filesystem, scheduler, pipelines, full network
 stack (L2–L7 through TLS 1.3 + socket API), disk I/O, auto-boot from
-disk, interactive TUI, built-in documentation browser, **quad-core
-multicore dispatch** with IPI, spinlocks, and barriers, and
-**post-quantum crypto** (Field ALU, NTT, ML-KEM-512, hybrid PQ exchange).
+disk, interactive TUI, built-in documentation browser, **16-core
+heterogeneous SoC** (4 full cores + 3 micro-clusters of 4 cores each)
+with IPI, spinlocks, barriers, and **3 MiB HBW math RAM**,
+**core-type-aware scheduling**, and **post-quantum crypto** (Field ALU,
+NTT, ML-KEM-512, hybrid PQ exchange).
 
 ---
 
@@ -51,36 +53,43 @@ multicore dispatch** with IPI, spinlocks, and barriers, and
 │                      Megapad-64 SoC                           │
 │                                                               │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐             │
-│  │ Core 0  │ │ Core 1  │ │ Core 2  │ │ Core 3  │             │
-│  │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │             │
+│  │ Core 0  │ │ Core 1  │ │ Core 2  │ │ Core 3  │  Full cores │
+│  │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │ │ 16×GPR  │  (tile+MEX) │
 │  │ 4K I$   │ │ 4K I$   │ │ 4K I$   │ │ 4K I$   │             │
 │  │ Tile    │ │ Tile    │ │ Tile    │ │ Tile    │             │
 │  │ Engine  │ │ Engine  │ │ Engine  │ │ Engine  │             │
 │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘             │
 │       │           │           │           │                   │
-│  ┌────▼───────────▼───────────▼───────────▼────┐              │
-│  │    Round-Robin Bus Arbiter (per-core QoS)   │              │
-│  └────────────────────┬────────────────────────┘              │
-│                       │                                       │
+│  ┌────┴───┐  ┌────┴───┐  ┌────┴───┐                          │
+│  │Cluster0│  │Cluster1│  │Cluster2│  3 × 4 micro-cores       │
+│  │ 4× μC  │  │ 4× μC  │  │ 4× μC  │  (scalar only, shared   │
+│  │ 1K SPAD│  │ 1K SPAD│  │ 1K SPAD│   MUL/DIV, HW barrier)  │
+│  └────┬───┘  └────┬───┘  └────┬───┘                          │
+│       │           │           │                               │
+│  ┌────▼───────────▼───────────▼───────────────┐               │
+│  │    Round-Robin Bus Arbiter (per-core QoS)  │               │
+│  └────────────────────┬───────────────────────┘               │
 │       ┌───────────────┼───────────────┐                       │
 │       │               │               │                       │
 │  ┌────▼────┐  ┌───────▼───────┐  ┌────▼──────┐               │
-│  │  SRAM   │  │  MMIO Devices │  │  Mailbox  │               │
-│  │ 1–4 MiB │  │  UART  Timer  │  │  IPI +    │               │
-│  │         │  │  Disk  NIC    │  │  Spinlock │               │
-│  │         │  │  CRC  AES    │  │           │               │
-│  │         │  │  SHA3 TRNG   │  │           │               │
-│  │         │  │  FieldALU    │  │           │               │
-│  │         │  │  NTT  KEM    │  │           │               │
+│  │Bank 0   │  │  MMIO Devices │  │  Mailbox  │               │
+│  │ 1 MiB   │  │  UART  Timer  │  │  IPI +    │               │
+│  │ System  │  │  Disk  NIC    │  │  Spinlock │               │
+│  ├─────────┤  │  CRC  AES    │  │           │               │
+│  │Banks 1-3│  │  SHA3 TRNG   │  │           │               │
+│  │ 3 MiB   │  │  FieldALU    │  │           │               │
+│  │ HBW Math│  │  NTT  KEM    │  │           │               │
 │  └─────────┘  └───────────────┘  └───────────┘               │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-**Quad-Core SoC** — Four identical cores sharing a unified address space
-via a round-robin bus arbiter with per-core QoS weights.  Cores
-communicate through a hardware mailbox (IPI) and 8 spinlocks.  Secondary
-cores boot into a worker loop; the primary core dispatches work via
-`WAKE-CORE` / `IPI-SEND`.
+**Heterogeneous 16-Core SoC** — Four full cores (with tile engine, I-cache,
+and full ISA) plus three micro-core clusters of 4 cores each (scalar-only,
+shared MUL/DIV, 1 KiB scratchpad, hardware barrier per cluster).  All 16
+cores share a unified address space via a round-robin bus arbiter with
+per-core QoS weights.  Cores communicate through a hardware mailbox (IPI)
+and 8 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
+register.  KDOS automatically routes tile/SIMD work to full cores only.
 
 **Scalar CPU** — Each core has 16 general-purpose 64-bit registers,
 variable-length instructions (1–10 bytes), 16 instruction families,
@@ -99,10 +108,12 @@ tile views (SHUFFLE/PACK/UNPACK/RROT), strided 2D loads/stores, and
 FP16/bfloat16 support.  A 256-bit accumulator enables multi-tile
 accumulation without overflow.
 
-**Megapad Memory** — 1 MiB on-chip SRAM in the base design (4 MiB in the
-expanded model), modeled as flat byte-addressable memory in the emulator.
-The FPGA target uses block RAM; a future multi-bank organization could
-deliver higher bandwidth for tile-heavy workloads.
+**4 MiB Internal Memory** — Bank 0 (1 MiB system RAM at address 0) holds
+the BIOS, dictionary, stacks, and heap.  Banks 1–3 (3 MiB HBW math RAM
+at 0xFFD0_0000) provide dedicated high-bandwidth storage for tile/SIMD
+working buffers, avoiding contention with Bank 0.  KDOS includes an HBW
+bump allocator (`HBW-ALLOT`, `HBW-BUFFER`, `HBW-RESET`) and the BIOS
+exposes `HBW-BASE` / `HBW-SIZE` words.
 
 **Devices** — UART (serial I/O), Timer (cycle-accurate with interrupts),
 Storage Controller (sector-based disk I/O), NIC (Ethernet frames with

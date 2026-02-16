@@ -10,21 +10,23 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    Megapad-64 CPU (×4 cores)               │
-│  16 × 64-bit GPRs    ┌──────────────────┐  ┌───────────┐ │
-│  4 KiB I-Cache        │   Tile Engine    │  │ Perf Ctrs │ │
-│  8-bit Flags          │  (MEX extension) │  │ (4 × 64b) │ │
-│  256-bit Accumulator  │  FP16 / bf16     │  └───────────┘ │
-│  Perf counters        │  DMA queue       │                │
-│                       └──────────────────┘                │
+│                    Megapad-64 CPU (×16 cores)              │
+│  4 full cores       ┌──────────────────┐  ┌───────────┐ │
+│  16 × 64-bit GPRs    │   Tile Engine    │  │ Perf Ctrs │ │
+│  4 KiB I-Cache        │  (MEX extension) │  │ (4 × 64b) │ │
+│  8-bit Flags          │  FP16 / bf16     │  └───────────┘ │
+│  256-bit Accumulator  │  DMA queue       │                │
+│  Perf counters        └──────────────────┘                │
+│  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV, │
+│    1 KiB scratchpad, HW barrier per cluster)               │
 └───────────────┬───────────────────────────────────────────┘
                 │  64-bit data bus (weighted round-robin QoS)
     ┌───────────┴───────────────────────────┐
     │            Memory Map                  │
     │                                        │
     │  0x0000_0000 ┌──────────────────────┐ │
-    │              │       RAM             │ │
-    │              │   (1 MiB BRAM + BIST) │ │
+    │              │     Bank 0 (System)    │ │
+    │              │   (1 MiB BRAM + BIST)  │ │
     │              │                       │ │
     │              │  BIOS code + dict     │ │
     │              │  KDOS Forth dict      │ │
@@ -38,6 +40,11 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │              │  Return stack         │ │
     │  0x000F_FFFF └──────────────────────┘ │
     │              ...                       │
+    │  0xFFD0_0000 ┌──────────────────────┐ │
+    │              │  Banks 1–3 (HBW Math)  │ │
+    │              │   3 MiB, high-BW      │ │
+    │              │   tile/SIMD working    │ │
+    │  0xFFFF_FFFF └──────────────────────┘ │
     │  FFFF_FF00+  ┌──────────────────────┐ │
     │   0x0000     │  UART                │ │
     │   0x0100     │  Timer               │ │
@@ -69,12 +76,13 @@ MMIO devices live at the top of the address space.
 
 | Address | Content |
 |---------|---------|
-| `0x0000_0000` | BIOS code (loaded at boot, ~20 KB) |
+| `0x0000_0000` | **Bank 0** — BIOS code (loaded at boot, ~20 KB) |
 | `0x0000_4F00`+ | Forth dictionary grows upward from HERE |
 | *(varies)* | KDOS code, buffer data, FS caches, task stacks |
 | *(varies)* | Free space between HERE and SP |
-| ← SP | Data stack grows downward from top of RAM |
-| `RAM_SIZE` | Top of RAM (default 0x0010_0000 = 1 MiB) |
+| ← SP | Data stack grows downward from top of Bank 0 |
+| `RAM_SIZE` | Top of Bank 0 (default 0x0010_0000 = 1 MiB) |
+| `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 
 The BIOS sets `HERE` just past its own code.  As KDOS loads (via FSLOAD),
 it compiles words and allocates data, advancing HERE.  The data stack lives
@@ -91,7 +99,7 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 16 bytes | Sector-based disk controller |
-| **System Info** | `+0x0300` | 16 bytes | Read-only board ID and config |
+| **System Info** | `+0x0300` | 56 bytes | Board ID, config, core topology, HBW, cluster enable |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
@@ -179,7 +187,7 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 
 ## System Info (Read-Only)
 
-Static board identification registers.
+Static board identification and core-topology registers.
 
 | Register | Offset | Value | Description |
 |----------|--------|-------|-------------|
@@ -190,6 +198,11 @@ Static board identification registers.
 | STORAGE_PRESENT | `+0x08` | 0 or 1 | Is a disk attached? |
 | UART_PRESENT | `+0x09` | 1 | Always present |
 | NIC_PRESENT | `+0x0A` | 0 or 1 | Is a NIC attached? |
+| N_CORES | `+0x10` | 1–4 | Number of full CPU cores |
+| N_CLUSTERS | `+0x18` | 0–3 | Number of micro-core clusters |
+| HBW_BASE | `+0x20` | 0xFFD00000 | HBW math RAM base address |
+| HBW_SIZE | `+0x28` | 0x300000 | HBW math RAM size (3 MiB) |
+| CLUSTER_EN | `+0x30` | bitmask | Per-cluster enable bits (R/W) |
 
 ---
 

@@ -5,11 +5,11 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (291 dict entries, 11,158 lines ASM),
-KDOS v1.1 (8,296 lines, 653 colon defs, 405 vars/constants), Emulator
-(2,541 lines + 610-line quad-core SoC + 1,930-line C++ accelerator),
-FPGA RTL (23 Verilog modules + 18 testbenches, ~180 HW tests),
-devices.py (2,314 lines, 14 device classes), 1,068 test methods passing
+**Current state (Feb 2026):** BIOS (300 dict entries, 11,329 lines ASM),
+KDOS v1.1 (8,667 lines, 670+ colon defs, 430+ vars/constants), Emulator
+(2,671 lines + 849-line 16-core heterogeneous SoC + 1,978-line C++ accelerator),
+FPGA RTL (27 Verilog modules + 18 testbenches, ~180 HW tests),
+devices.py (2,348 lines, 14 device classes), 1,095 test methods passing
 (CPython + C++).  Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
@@ -34,7 +34,7 @@ Remaining work: application-level features (items 25–30).
 
 ### BIOS v1.0 — ✅ DONE
 
-291 dictionary entries, 11,158 lines ASM, ~24 KB binary.
+291 dictionary entries, 11,329 lines ASM, ~26 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -56,6 +56,8 @@ Remaining work: application-level features (items 25–30).
   in emulator, ring-oscillator + SHA-3 conditioner on FPGA)
 - ✅ **Multicore**: COREID, NCORES, IPI-SEND, IPI-STATUS, IPI-ACK, MBOX!,
   MBOX@, SPIN@, SPIN!, WAKE-CORE, CORE-STATUS (11 words)
+- ✅ **Micro-cluster / HBW**: CLUSTER-EN!, CLUSTER-EN@, BARRIER-ARRIVE,
+  BARRIER-STATUS, SPAD, HBW-BASE, HBW-SIZE, N-FULL, MICRO? (9 words)
 - ✅ **Extended tile**: TSUMSQ, TMINIDX, TMAXIDX, TWMUL, TMAC, TFMA,
   TDOTACC (7 words)
 - ✅ **Performance counters**: PERF-CYCLES, PERF-STALLS, PERF-TILEOPS,
@@ -78,17 +80,17 @@ Remaining work: application-level features (items 25–30).
 
 ### KDOS v1.1 — ✅ DONE (core + multicore + crypto + network + PQC)
 
-653 colon definitions + 405 variables/constants/creates, 8,296 lines.
+653 colon definitions + 405 variables/constants/creates, 8,667 lines.
 
 19 sections:
 - §1 Utility words (§1.1–§1.13: buffer, AES, SHA3, TRNG, X25519, HKDF,
-  Field ALU, NTT, ML-KEM-512, Hybrid PQ Exchange)
+  Field ALU, NTT, ML-KEM-512, Hybrid PQ Exchange, HBW allocator)
 - §2 Buffer subsystem, §3 Tile-aware buffer ops
 - §4 Kernel registry, §5 Sample kernels (12 kernels including kadd,
   knorm, khistogram, kpeak, kconvolve, etc.)
 - §6 Pipeline engine, §7 Storage & persistence
 - §7.5–7.8 Filesystem (MP64FS), documentation browser, dictionary search
-- §8 Scheduler & tasks, §9 Interactive screens (9-tab TUI)
+- §8 Scheduler & tasks, §8.8 Micro-cluster dispatch, §9 Interactive screens (9-tab TUI)
 - §10 Data ports (NIC ingestion), §11 Benchmarking
 - §12 Dashboard, §13 Help system, §14 Startup
 - §15 Pipeline bundles (versioned, declarative config format)
@@ -107,16 +109,16 @@ Remaining work: application-level features (items 25–30).
 
 ### Emulator & Tools — ✅ DONE
 
-- ✅ megapad64.py: Full CPU emulation (2,541 lines, incl. extended tile, FP16/BF16)
-- ✅ accel/mp64_accel.cpp: C++ CPU core via pybind11 (1,929 lines, 63× speedup)
-- ✅ accel_wrapper.py: Drop-in wrapper for C++ CPU (829 lines)
-- ✅ system.py: Quad-core SoC — UART, timer, storage, NIC, mailbox IPI, spinlocks, TRNG, `run_batch()` (610 lines)
+- ✅ megapad64.py: Full CPU emulation (2,671 lines, incl. extended tile, FP16/BF16, micro-core variant)
+- ✅ accel/mp64_accel.cpp: C++ CPU core via pybind11 (1,978 lines, 63× speedup)
+- ✅ accel_wrapper.py: Drop-in wrapper for C++ CPU (840 lines)
+- ✅ system.py: 16-core heterogeneous SoC — 4 full + 3×4 micro-clusters, HBW math RAM, UART, timer, storage, NIC, mailbox IPI, spinlocks, TRNG, `run_batch()` (849 lines)
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,314 lines, 14 device classes)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,348 lines, 14 device classes)
 
-### Test Suite — ✅ 1,068 tests
+### Test Suite — ✅ 1,095 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
@@ -130,6 +132,7 @@ Remaining work: application-level features (items 25–30).
 - TestKDOSTLSHandshake: 8, TestKDOSTLSAppData: 7, TestKDOSSocket: 8
 - TestFieldALU: 15, TestNTT: 12, TestMLKEM: 11, TestPQExchange: 7
 - TestNetHardening: 24
+- TestMicroCluster: 16, TestHBWMemory: 14
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
@@ -143,8 +146,8 @@ Remaining work: application-level features (items 25–30).
 13,367 lines RTL + 8,677 lines testbench.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
-- ✅ mp64_soc.v — Quad-core SoC top-level (bus arbiter, MMIO, IPI wiring, TRNG,
-  Field ALU, NTT, KEM)
+- ✅ mp64_soc.v — 16-core heterogeneous SoC top-level (bus arbiter, MMIO, IPI wiring,
+  TRNG, Field ALU, NTT, KEM, micro-cluster gating)
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
 - ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
