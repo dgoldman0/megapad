@@ -16739,6 +16739,108 @@ class TestKDOSFramebuffer(_KDOSTestBase):
         self.assertIn("2 ", text)
 
 
+class TestKDOSModuleSystem(_KDOSTestBase):
+    """Tests for §20 Module System (REQUIRE, PROVIDED, MODULES, MODULE?)."""
+
+    def _make_module_image(self, files: dict):
+        """Create formatted image with multiple Forth files."""
+        path = self._make_formatted_image()
+        for name, data in files.items():
+            du_inject_file(path, name, data, ftype=FTYPE_FORTH)
+        return path
+
+    def test_provided_registers(self):
+        """PROVIDED marks a module as loaded."""
+        text = self._run_kdos([
+            'PROVIDED testmod',
+            'MODULE? testmod',
+            'IF ." YES" ELSE ." NO" THEN',
+        ])
+        self.assertIn("YES", text)
+
+    def test_module_not_loaded(self):
+        """MODULE? returns false for unloaded module."""
+        text = self._run_kdos([
+            'MODULE? nosuch',
+            'IF ." YES" ELSE ." NO" THEN',
+        ])
+        self.assertIn("NO", text)
+
+    def test_require_loads_file(self):
+        """REQUIRE loads a Forth file from disk the first time."""
+        img = self._make_module_image({
+            "util.f": b"PROVIDED util.f\n: UTIL-OK 99 ;\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE util.f",
+                "UTIL-OK .",
+            ], storage_image=img)
+            self.assertIn("99 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_idempotent(self):
+        """REQUIRE does not reload an already-loaded module."""
+        img = self._make_module_image({
+            "counter.f": b"PROVIDED counter.f\nVARIABLE _CNT  _CNT @ 1+ _CNT !\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE counter.f",
+                "REQUIRE counter.f",
+                "_CNT @ .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_no_disk(self):
+        """REQUIRE without disk prints error."""
+        text = self._run_kdos(["REQUIRE ghost.f"])
+        self.assertIn("No filesystem", text)
+
+    def test_require_not_found(self):
+        """REQUIRE with missing file prints not-found error."""
+        img = self._make_formatted_image()
+        try:
+            text = self._run_kdos(["REQUIRE nope.f"], storage_image=img)
+            self.assertIn("not found", text.lower())
+        finally:
+            os.unlink(img)
+
+    def test_modules_list(self):
+        """MODULES lists registered modules."""
+        text = self._run_kdos([
+            "PROVIDED alpha",
+            "PROVIDED beta",
+            "MODULES",
+        ])
+        self.assertIn("alpha", text)
+        self.assertIn("beta", text)
+        self.assertIn("2 ", text)
+
+    def test_modules_empty(self):
+        """MODULES with nothing loaded shows 0."""
+        text = self._run_kdos(["MODULES"])
+        self.assertIn("0 ", text)
+
+    def test_require_chain(self):
+        """Module A requires module B; both are loaded."""
+        img = self._make_module_image({
+            "base.f":  b"PROVIDED base.f\n: BASE-VAL 10 ;\n",
+            "app.f":   b"PROVIDED app.f\nREQUIRE base.f\n: APP-VAL BASE-VAL 2* ;\n",
+        })
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "APP-VAL .",
+            ], storage_image=img)
+            self.assertIn("20 ", text)
+        finally:
+            os.unlink(img)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Megapad-64 System Integration Tests")

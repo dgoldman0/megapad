@@ -9067,6 +9067,94 @@ VARIABLE _HTE-HT
     LOOP ;
 
 \ =====================================================================
+\  §20  Module System
+\ =====================================================================
+\
+\  REQUIRE / PROVIDED prevent duplicate loading of Forth source files.
+\  Each module should call  PROVIDED <name>  at the top to register
+\  itself.  REQUIRE <name>  checks the registry; if already loaded it
+\  is a no-op, otherwise it LOADs the file and marks it loaded.
+\
+\  Uses a hash table (§19) for O(1) lookup.  16-byte key = filename
+\  (zero-padded, matching NAMEBUF layout), 1-byte value.
+
+16 1 32 HASHTABLE _MOD-HT
+
+\ Scratch for the 1-byte "loaded" marker value.
+CREATE _MOD-VAL  1 ALLOT
+1 _MOD-VAL C!
+
+\ _MOD-MARK ( -- )  Mark NAMEBUF as a loaded module in _MOD-HT.
+: _MOD-MARK  ( -- )
+    NAMEBUF _MOD-VAL _MOD-HT HT-PUT ;
+
+\ _MOD-LOADED? ( -- flag )  True if current NAMEBUF is in _MOD-HT.
+: _MOD-LOADED?  ( -- flag )
+    NAMEBUF _MOD-HT HT-GET 0<> ;
+
+\ PROVIDED ( "name" -- )  Register a module as loaded.
+\   Typically called at the top of a module file.
+: PROVIDED  ( "name" -- )
+    PARSE-NAME  _MOD-MARK ;
+
+\ MODULE? ( "name" -- flag )  Test if a module is already loaded.
+: MODULE?  ( "name" -- flag )
+    PARSE-NAME  _MOD-LOADED? ;
+
+\ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
+\   This is the core of LOAD without the PARSE-NAME call.
+: _MOD-LOAD-BODY  ( -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Module not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DIRENT
+    DUP DE.USED DUP 0= IF
+        2DROP ."  Empty module" CR EXIT
+    THEN LD-SZ !
+    DUP 16 + W@ SWAP DE.COUNT
+    HERE LD-BUF !
+    LD-SZ @ ALLOT
+    OVER DISK-SEC!
+    LD-BUF @ DISK-DMA!
+    DUP DISK-N!
+    DISK-READ
+    2DROP
+    LD-BUF @
+    LD-SZ @
+    BEGIN DUP 0> WHILE
+        OVER 2 PICK 0
+        BEGIN
+            DUP 2 PICK < IF
+                OVER OVER + C@ 10 = IF TRUE
+                ELSE 1+ FALSE THEN
+            ELSE TRUE THEN
+        UNTIL
+        NIP
+        DUP 0> IF 2DUP EVALUATE THEN
+        1+ ROT OVER - >R + SWAP DROP R>
+    REPEAT
+    2DROP ;
+
+\ REQUIRE ( "name" -- )  Load a module if not already loaded.
+: REQUIRE  ( "name" -- )
+    PARSE-NAME
+    _MOD-LOADED? IF EXIT THEN
+    _MOD-MARK
+    _MOD-LOAD-BODY ;
+
+\ _MOD-SHOW ( key-addr val-addr -- )  Print one module name.
+: _MOD-SHOW  ( key-addr val-addr -- )
+    DROP ."   " .ZSTR CR ;
+
+\ MODULES ( -- )  List all loaded modules.
+: MODULES  ( -- )
+    ."  Loaded modules:" CR
+    ['] _MOD-SHOW _MOD-HT HT-EACH
+    _MOD-HT HT-COUNT . ."  module(s)" CR ;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 
