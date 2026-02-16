@@ -33,7 +33,7 @@ enum CC {
 enum CSR {
     CSR_FLAGS=0x00, CSR_PSEL=0x01, CSR_XSEL=0x02, CSR_SPSEL=0x03,
     CSR_IVT_BASE=0x04, CSR_D=0x05, CSR_DF=0x06, CSR_Q=0x07,
-    CSR_T=0x08, CSR_IE=0x09,
+    CSR_T=0x08, CSR_IE=0x09, CSR_PRIV=0x0A,
     CSR_SB=0x10, CSR_SR=0x11, CSR_SC=0x12, CSR_SW=0x13,
     CSR_TMODE=0x14, CSR_TCTRL=0x15,
     CSR_TSRC0=0x16, CSR_TSRC1=0x17, CSR_TDST=0x18,
@@ -54,7 +54,8 @@ enum CSR {
 // IVEC IDs
 enum IVEC {
     IVEC_RESET=0, IVEC_NMI, IVEC_ILLEGAL_OP, IVEC_ALIGN_FAULT,
-    IVEC_DIV_ZERO, IVEC_BUS_FAULT, IVEC_SW_TRAP, IVEC_TIMER, IVEC_IPI
+    IVEC_DIV_ZERO, IVEC_BUS_FAULT, IVEC_SW_TRAP, IVEC_TIMER, IVEC_IPI,
+    IVEC_PRIV_FAULT = 15
 };
 
 // Tile EW codes
@@ -117,6 +118,9 @@ struct CPUState {
     // I-cache
     uint8_t  icache_enabled;
     uint64_t icache_hits, icache_misses;
+
+    // Privilege level (0=supervisor, 1=user)
+    uint8_t  priv_level;
 
     // EXT prefix
     int ext_modifier;   // -1 = none
@@ -371,6 +375,7 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_Q:         return s.q_out;
         case CSR_T:         return s.t_reg;
         case CSR_IE:        return s.flag_i;
+        case CSR_PRIV:      return s.priv_level;
         case CSR_SB:        return s.sb;
         case CSR_SR:        return s.sr;
         case CSR_SC:        return s.sc;
@@ -422,6 +427,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_Q:         s.q_out = val & 1; break;
         case CSR_T:         s.t_reg = val & 0xFF; break;
         case CSR_IE:        s.flag_i = val & 1; break;
+        case CSR_PRIV:      s.priv_level = val & 1; break;
         case CSR_SB:        s.sb = val; break;
         case CSR_SR:        s.sr = val; break;
         case CSR_SC:        s.sc = val; break;
@@ -466,9 +472,10 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 
 static void do_trap(CPUState& s, int ivec_id) {
     if (s.ivt_base == 0) return;  // no IVT, caller will handle
-    push64(s, flags_pack(s));
+    push64(s, flags_pack(s) | ((uint64_t)s.priv_level << 8));
     push64(s, pc(s));
     s.flag_i = 0;
+    s.priv_level = 0;  // escalate to supervisor
     s.ivec_id = ivec_id;
     uint64_t handler = mem_read64(s, s.ivt_base + ivec_id * 8);
     pc(s) = handler;
@@ -1104,11 +1111,14 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             case 0x3: /* RESET — leave to Python */ throw std::runtime_error("TRAP:RESET"); break;
             case 0x4: {  // RTI
                 pc(s) = sys_pop64(s, cb);
-                flags_unpack(s, sys_pop64(s, cb) & 0xFF);
+                uint64_t saved = sys_pop64(s, cb);
+                flags_unpack(s, saved & 0xFF);
+                s.priv_level = (saved >> 8) & 1;
                 cycles++;
                 break;
             }
             case 0x5: {  // RET
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 uint64_t t = sys_pop64(s, cb) & 0xFF;
                 s.xsel = (t >> 4) & 0xF;
                 s.psel = t & 0xF;
@@ -1117,6 +1127,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 break;
             }
             case 0x6: {  // DIS
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 uint64_t t = sys_pop64(s, cb) & 0xFF;
                 s.xsel = (t >> 4) & 0xF;
                 s.psel = t & 0xF;
@@ -1125,6 +1136,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 break;
             }
             case 0x7: {  // MARK
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 uint8_t t = ((s.xsel & 0xF) << 4) | (s.psel & 0xF);
                 s.t_reg = t;
                 sys_push64(s, cb, t);
@@ -1133,10 +1145,15 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 break;
             }
             case 0x8:  // SAV
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 sys_write8(s, cb, rx(s), s.t_reg);
                 break;
-            case 0x9: s.q_out = 1; break;   // SEQ
-            case 0xA: s.q_out = 0; break;   // REQ
+            case 0x9:  // SEQ
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
+                s.q_out = 1; break;
+            case 0xA:  // REQ
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
+                s.q_out = 0; break;
             case 0xB: s.flag_i = 1; break;  // EI
             case 0xC: s.flag_i = 0; break;  // DI
             case 0xD: {  // CALL.L
@@ -1348,15 +1365,19 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 break;
             }
             case 0xC:  // GLO
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.d_reg = s.regs[rn] & 0xFF;
                 break;
             case 0xD:  // GHI
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.d_reg = (s.regs[rn] >> 8) & 0xFF;
                 break;
             case 0xE:  // PLO
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.regs[rn] = (s.regs[rn] & ~0xFFULL) | (s.d_reg & 0xFF);
                 break;
             case 0xF:  // PHI
+                if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
                 s.regs[rn] = (s.regs[rn] & ~0xFF00ULL) | (((uint64_t)(s.d_reg & 0xFF)) << 8);
                 break;
         }
@@ -1488,6 +1509,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
     }
 
     case 0x8: {  // MEMALU
+        if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
         uint8_t m;
         switch (n) {
             case 0x0: s.d_reg = sys_read8(s, cb, rx(s)); break;
@@ -1591,6 +1613,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
     }
 
     case 0x9: {  // I/O
+        if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
         if (n >= 1 && n <= 7) {  // OUT
             uint8_t val = sys_read8(s, cb, rx(s));
             s.port_out[n] = val;
@@ -1607,10 +1630,12 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
     }
 
     case 0xA:  // SEP Rn
+        if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
         s.psel = n;
         break;
 
     case 0xB:  // SEX Rn
+        if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
         s.xsel = n;
         break;
 
@@ -1695,6 +1720,12 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             }
             s.regs[rn] = csr_read(s, csr_addr);
         } else {
+            // Privilege check for protected CSR writes
+            if (s.priv_level && (csr_addr == CSR_PRIV || csr_addr == CSR_IVT_BASE ||
+                                 csr_addr == CSR_IE || csr_addr == CSR_BIST_CMD ||
+                                 csr_addr == CSR_ICACHE_CTRL)) {
+                throw std::runtime_error("TRAP:PRIV_FAULT");
+            }
             csr_write(s, csr_addr, s.regs[rn]);
         }
         break;
@@ -1854,6 +1885,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("icache_enabled", &CPUState::icache_enabled)
         .def_readwrite("icache_hits", &CPUState::icache_hits)
         .def_readwrite("icache_misses", &CPUState::icache_misses)
+        .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("ext_modifier", &CPUState::ext_modifier)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)

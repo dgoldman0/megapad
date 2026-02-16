@@ -6940,6 +6940,31 @@ bus_fault_handler:
     halt
 
 ; =====================================================================
+;  Software Trap Handler (Syscall Dispatcher)
+; =====================================================================
+;
+;  TRAP pushes flags+priv (64-bit) and PC (64-bit) onto R15.
+;  R1 = syscall number (set by caller before TRAP).
+;
+;  Syscall 0 — SYS_EXIT: clear privilege bit in saved context so that
+;  RTI returns to supervisor mode.  Used by SYS-EXIT / APP-EVAL.
+;
+sw_trap_handler:
+    cmpi r1, 0
+    breq .sw_trap_exit
+    ; Unknown syscall — just return
+    rti
+.sw_trap_exit:
+    ; Stack: [R15+0]=saved_PC, [R15+8]=saved_flags+priv
+    ; Clear bit 8 (privilege) so RTI restores supervisor mode
+    addi r15, 8
+    ldn r1, r15
+    andi r1, 0xFF
+    str r15, r1
+    subi r15, 8
+    rti
+
+; =====================================================================
 ;  Privilege Fault Handler
 ; =====================================================================
 priv_fault_handler:
@@ -6961,6 +6986,29 @@ priv_fault_handler:
     ldi64 r11, quit_loop
     call.l r11
     halt
+
+; =====================================================================
+;  User-Mode Transition Words
+; =====================================================================
+
+; ENTER-USER — drop from supervisor to user mode (CSR_PRIV ← 1)
+w_enter_user:
+    ldi r1, 1
+    csrw 0x0A, r1
+    ret.l
+
+; SYS-EXIT — fire TRAP with syscall 0 to return to supervisor mode
+w_sys_exit:
+    ldi r1, 0
+    trap
+    ret.l
+
+; PRIV@ — push current privilege level (0=supervisor, 1=user)
+w_priv_fetch:
+    csrr r0, 0x0A
+    subi r14, 8
+    str r14, r0
+    ret.l
 
 ; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
@@ -11214,12 +11262,39 @@ d_rp_fetch:
     ret.l
 
 ; === RP! ( addr -- ) [IMMEDIATE] ===
-latest_entry:
 d_rp_store:
     .dq d_rp_fetch
     .db 0x83
     .ascii "RP!"
     ldi64 r11, w_rp_store
+    call.l r11
+    ret.l
+
+; === ENTER-USER ( -- ) ===
+d_enter_user:
+    .dq d_rp_store
+    .db 10
+    .ascii "ENTER-USER"
+    ldi64 r11, w_enter_user
+    call.l r11
+    ret.l
+
+; === SYS-EXIT ( -- ) ===
+d_sys_exit:
+    .dq d_enter_user
+    .db 8
+    .ascii "SYS-EXIT"
+    ldi64 r11, w_sys_exit
+    call.l r11
+    ret.l
+
+; === PRIV@ ( -- n ) ===
+latest_entry:
+d_priv_fetch:
+    .dq d_sys_exit
+    .db 5
+    .ascii "PRIV@"
+    ldi64 r11, w_priv_fetch
     call.l r11
     ret.l
 
@@ -11326,7 +11401,7 @@ ivt_table:
     .dq 0                            ; [3] ALIGN FAULT
     .dq 0                            ; [4] DIV ZERO
     .dq bus_fault_handler            ; [5] BUS FAULT
-    .dq 0                            ; [6] SW TRAP
+    .dq sw_trap_handler               ; [6] SW TRAP
     .dq 0                            ; [7] TIMER — installed by KDOS via ISR!
     .dq ipi_handler                  ; [8] IPI — inter-processor interrupt
     .dq 0                            ; [9] reserved

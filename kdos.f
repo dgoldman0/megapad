@@ -2685,6 +2685,69 @@ VARIABLE LD-SZ
     REPEAT
     2DROP ;
 
+\ ── User-Mode Application Loading ───────────────────────────────────
+\  APP-EVAL evaluates a string in user mode.  ENTER-USER drops the
+\  privilege level to 1 (user); EVALUATE runs the code; SYS-EXIT
+\  fires a TRAP syscall that returns to supervisor mode.
+\
+\  User code can call all standard Forth words (EMIT, KEY, +, IF, :,
+\  VARIABLE, etc.) because those use unrestricted instructions.  Only
+\  1802-heritage families (MEMALU, IO, SEP, SEX) and protected CSR
+\  writes are blocked — those trigger IVEC_PRIV_FAULT.
+\
+\  LOAD / FSLOAD remain supervisor-mode for OS modules and drivers.
+
+: APP-EVAL  ( addr u -- )
+    ENTER-USER EVALUATE SYS-EXIT ;
+
+: APP-LOAD  ( "filename" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DIRENT
+    DUP DE.USED DUP 0= IF
+        2DROP ."  Empty file" CR EXIT
+    THEN LD-SZ !
+    DUP 16 + W@ SWAP DE.COUNT
+    HERE LD-BUF !
+    LD-SZ @ ALLOT
+    OVER DISK-SEC!
+    LD-BUF @ DISK-DMA!
+    DUP DISK-N!
+    DISK-READ
+    2DROP
+    \ Enter user mode, evaluate line by line, exit user mode
+    ENTER-USER
+    LD-BUF @
+    LD-SZ @
+    BEGIN DUP 0> WHILE
+        OVER
+        2 PICK
+        0
+        BEGIN
+            DUP 2 PICK < IF
+                OVER OVER + C@ 10 = IF
+                    TRUE
+                ELSE
+                    1+ FALSE
+                THEN
+            ELSE TRUE THEN
+        UNTIL
+        NIP
+        DUP 0> IF
+            2DUP EVALUATE
+        THEN
+        1+
+        ROT OVER - >R
+        + SWAP DROP
+        R>
+    REPEAT
+    2DROP
+    SYS-EXIT ;
+
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
 : CSI   ( -- )  ESC 91 EMIT ;

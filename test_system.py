@@ -2598,6 +2598,7 @@ class _KDOSTestBase(unittest.TestCase):
             'halted': cpu.halted, 'idle': cpu.idle,
             'cycle_count': cpu.cycle_count,
             '_ext_modifier': cpu._ext_modifier,
+            'priv_level': getattr(cpu, 'priv_level', 0),
         }
 
     @classmethod
@@ -2609,8 +2610,9 @@ class _KDOSTestBase(unittest.TestCase):
                    'flag_p', 'flag_g', 'flag_i', 'flag_s',
                    'd_reg', 'q_out', 't_reg',
                    'ivt_base', 'ivec_id', 'trap_addr',
-                   'halted', 'idle', 'cycle_count', '_ext_modifier'):
-            setattr(cpu, k, state[k])
+                   'halted', 'idle', 'cycle_count', '_ext_modifier',
+                   'priv_level'):
+            setattr(cpu, k, state.get(k, 0) if isinstance(state, dict) else getattr(state, k, 0))
 
     @classmethod
     def _ensure_snapshot(cls):
@@ -15501,9 +15503,120 @@ class TestPrivilege(unittest.TestCase):
         self.assertEqual(mc.csr_read(CSR_PRIV), 1)
 
 
-# ---------------------------------------------------------------------------
-#  Main
-# ---------------------------------------------------------------------------
+class TestAppLoad(_KDOSTestBase):
+    """Test privileged/user-mode code loading (APP-EVAL, APP-LOAD)."""
+
+    def test_priv_fetch_returns_zero(self):
+        """PRIV@ returns 0 in supervisor mode."""
+        out = self._run_kdos(["PRIV@ ."])
+        # Check the line after the echo
+        self.assertRegex(out, r'PRIV@.*\n.*0')
+
+    def test_app_eval_basic_arithmetic(self):
+        """APP-EVAL can evaluate simple arithmetic."""
+        out = self._run_kdos([': T S" 1 2 + . " APP-EVAL ; T'])
+        self.assertIn("3", out)
+
+    def test_app_eval_emit(self):
+        """EMIT works inside APP-EVAL (MMIO not privilege-restricted)."""
+        out = self._run_kdos([': T S" 65 EMIT " APP-EVAL ; T'])
+        # 65 EMIT prints 'A'
+        self.assertIn("A", out)
+
+    def test_app_eval_user_mode(self):
+        """PRIV@ inside APP-EVAL returns 1 (user mode)."""
+        out = self._run_kdos([': T S" PRIV@ . " APP-EVAL ; T'])
+        # output should contain '1' from PRIV@ in user mode
+        self.assertIn("1", out)
+
+    def test_app_eval_restores_supervisor(self):
+        """After APP-EVAL, privilege is restored to supervisor."""
+        out = self._run_kdos([
+            ': T S" 42 . " APP-EVAL PRIV@ . ; T',
+        ])
+        self.assertIn("42", out)
+        self.assertIn("0", out)
+
+    def test_app_eval_define_word(self):
+        """User code can define and execute colon definitions."""
+        out = self._run_kdos([
+            ': T S" : DOUBLE 2 * ; 21 DOUBLE . " APP-EVAL ; T',
+        ])
+        self.assertIn("42", out)
+
+    def test_app_eval_variable(self):
+        """VARIABLE works inside APP-EVAL."""
+        out = self._run_kdos([
+            ': T S" VARIABLE XX 99 XX ! XX @ . " APP-EVAL ; T',
+        ])
+        self.assertIn("99", out)
+
+    def test_app_eval_multiple_calls(self):
+        """Multiple APP-EVAL calls work correctly."""
+        out = self._run_kdos([
+            ': T1 S" 10 . " APP-EVAL ; T1',
+            ': T2 S" 20 . " APP-EVAL ; T2',
+            ': T3 S" 30 . " APP-EVAL ; T3',
+        ])
+        self.assertIn("10", out)
+        self.assertIn("20", out)
+        self.assertIn("30", out)
+
+    def test_app_eval_cr_type(self):
+        """CR and TYPE work in user mode."""
+        out = self._run_kdos([
+            ': T S" CR 72 EMIT 73 EMIT " APP-EVAL ; T',
+        ])
+        self.assertIn("HI", out)
+
+    def test_app_load_from_disk(self):
+        """APP-LOAD reads and evaluates a file in user mode."""
+        img = self._make_image_with_file(
+            "hello", b"42 .\n", ftype=3)
+        try:
+            out = self._run_kdos(["APP-LOAD hello"], storage_image=img)
+            self.assertIn("42", out)
+        finally:
+            import os
+            os.unlink(img)
+
+    def test_app_load_priv_in_user_mode(self):
+        """APP-LOAD runs file content in user mode (PRIV@ shows 1)."""
+        img = self._make_image_with_file(
+            "chkpriv", b"PRIV@ .\n", ftype=3)
+        try:
+            out = self._run_kdos(["APP-LOAD chkpriv"], storage_image=img)
+            self.assertIn("1", out)
+        finally:
+            import os
+            os.unlink(img)
+
+    def test_load_stays_supervisor(self):
+        """Existing LOAD word runs in supervisor mode (PRIV@ shows 0)."""
+        img = self._make_image_with_file(
+            "chkpriv", b"PRIV@ .\n", ftype=3)
+        try:
+            out = self._run_kdos(["LOAD chkpriv"], storage_image=img)
+            self.assertIn("0", out)
+        finally:
+            import os
+            os.unlink(img)
+
+    def test_enter_user_inline(self):
+        """ENTER-USER + SYS-EXIT work for inline user-mode code."""
+        out = self._run_kdos(['ENTER-USER 42 . SYS-EXIT'])
+        self.assertIn("42", out)
+
+    def test_enter_user_priv_check(self):
+        """ENTER-USER switches to user mode (PRIV@ returns 1)."""
+        out = self._run_kdos(['ENTER-USER PRIV@ . SYS-EXIT'])
+        self.assertIn("1", out)
+
+    def test_sys_exit_restores_supervisor(self):
+        """SYS-EXIT returns to supervisor (PRIV@ returns 0 after)."""
+        out = self._run_kdos(['ENTER-USER SYS-EXIT', 'PRIV@ .'])
+        # After SYS-EXIT, PRIV@ should show 0
+        self.assertRegex(out, r'PRIV@.*\n.*0')
 
 if __name__ == "__main__":
     print("=" * 60)
