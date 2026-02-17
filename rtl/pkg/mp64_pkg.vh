@@ -41,17 +41,19 @@ localparam MP64_MAX_REGS           = 16;            // 16 GPRs
 
 // Multi-core defaults
 localparam MP64_NUM_CORES_DEFAULT       = 4;
-localparam MP64_CORE_ID_BITS            = 4;        // 4-bit core IDs (0–15)
+localparam MP64_CORE_ID_BITS            = 5;        // 5-bit core IDs (0–31)
 localparam MP64_NUM_CLUSTERS_DEFAULT    = 3;
 localparam MP64_MICRO_PER_CLUSTER       = 4;
 // Derived (at default counts):
-//   NUM_MICRO_CORES = NUM_CLUSTERS × MICRO_PER_CLUSTER
-//   NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES
-//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS
+//   NUM_MICRO_CORES = NUM_CLUSTERS × MICRO_PER_CLUSTER = 12
+//   NUM_ALL_CORES   = NUM_CORES + NUM_MICRO_CORES = 16
+//   NUM_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS = 7
 
 // Cluster scratchpad
 localparam MP64_CLUSTER_SPAD_BYTES = 1024;          // 1 KiB per cluster
-// SPAD depth = CLUSTER_SPAD_BYTES / CELL = 128 × 64-bit
+localparam MP64_CLUSTER_SPAD_DEPTH = 128;           // 128 × 64-bit words
+// Scratchpad address detection: addr[63:32] == SPAD_HI
+localparam [31:0] MP64_SPAD_HI = 32'hFFFF_FE00;
 
 // Per-core stack region layout (within 1 MiB Bank 0)
 //   Core 0: 0xF0000–0xFFFFF (boot core)
@@ -286,10 +288,13 @@ localparam [7:0] CSR_PERF_TILEOPS  = 8'h6A;
 localparam [7:0] CSR_PERF_EXTMEM   = 8'h6B;
 localparam [7:0] CSR_PERF_CTRL     = 8'h6C;
 
-// Cluster-level MPU CSRs
-localparam [7:0] CSR_CL_PRIV      = 8'h6D;
-localparam [7:0] CSR_CL_MPU_BASE  = 8'h6E;
-localparam [7:0] CSR_CL_MPU_LIMIT = 8'h6F;
+// Cluster-level CSRs
+localparam [7:0] CSR_CL_PRIV          = 8'h6D;
+localparam [7:0] CSR_CL_MPU_BASE      = 8'h6E;
+localparam [7:0] CSR_CL_MPU_LIMIT     = 8'h6F;
+localparam [7:0] CSR_CL_IVTBASE       = 8'h73;
+localparam [7:0] CSR_BARRIER_ARRIVE   = 8'h74;
+localparam [7:0] CSR_BARRIER_STATUS   = 8'h75;
 
 // I-cache CSRs
 localparam [7:0] CSR_ICACHE_CTRL   = 8'h70;
