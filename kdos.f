@@ -4361,217 +4361,343 @@ VARIABLE _ASUB-I
     ."    [q] Quit"
     RESET-COLOR CR ;
 
-\ ---- Screen 1: Home ----
-: SCR-HOME  ( -- )
-    .LABEL ."   System Overview" ./LABEL CR CR
-    ."    Memory  : HERE = " HERE . CR
-    ."    Cores   : " NCORES .N
-    NCORES 1 > IF 2 FG ."   multicore" ELSE DIM ."   single" THEN RESET-COLOR CR
-    ."    Buffers : " BUF-COUNT @ .N CR
-    ."    Kernels : " KERN-COUNT @ .N CR
-    ."    Pipes   : " PIPE-COUNT @ .N CR
-    ."    Tasks   : " TASK-COUNT @ .N CR
-    ."    Files   : " FILE-COUNT @ .N CR
-    ."    Storage : " DISK? IF 2 FG ."  present" ELSE 1 FG ."  not attached" THEN RESET-COLOR CR
-    ."    Ports   : " PORT-COUNT @ .N ."   bound  rx=" PORT-RX @ .N ."   drop=" PORT-DROP @ .N CR
-    ."    Network : " NET-RX? IF 2 FG ."  frame waiting" ELSE DIM ."  idle" THEN RESET-COLOR CR
-    CR
-    ."    Scheduler: " PREEMPT-ENABLED @ IF 2 FG ."  preempt ON" ELSE DIM ."  cooperative" THEN RESET-COLOR CR
-    ."    Tasks rdy: " TASK-COUNT-READY .N CR ;
+\ =====================================================================
+\ §9.5  Screen Definition Language (SDL) — Widget Vocabulary
+\ =====================================================================
+\
+\  Standard building blocks for screen definitions.
+\  Each W.xxx word encapsulates a common TUI pattern, making screens
+\  declarative.  A future renderer (e.g. web/HTML) can redefine these
+\  through the vector table (WVEC) without touching screen definitions.
+\
+\  Widget vocabulary:
+\    W.TITLE     ( addr len -- )           Bold section title
+\    W.SECTION   ( addr len -- )           Bold sub-heading
+\    W.LINE      ( addr len -- )           Indented text line
+\    W.KV        ( n addr len -- )         Key : number
+\    W.KV-XT     ( xt addr len -- )        Key : <execute xt>
+\    W.FLAG      ( flag addr len -- )      Key : green-ON / dim-OFF
+\    W.FLAG-2    ( flag t-a t-n f-a f-n addr len -- )  Key : colored yes/no text
+\    W.HBAR      ( -- )                    Horizontal rule
+\    W.GAP       ( -- )                    Blank line
+\    W.LIST      ( count item-xt -- )      Iterable list (sets SCR-MAX)
+\    W.DETAIL    ( count xt -- )           Detail pane for selected item
+\    W.HINT      ( addr len -- )           Dim action-hint line
+\    W.CUSTOM    ( xt -- )                 Escape hatch: call xt directly
 
-\ ---- Screen 2: Buffers ----
-: SCR-BUFFERS  ( -- )
-    .LABEL ."   Buffers (" BUF-COUNT @ .N ."  )" ./LABEL CR CR
-    BUF-COUNT @ DUP 0= IF
-        DROP ."    (none registered)" CR
-        0 SCR-MAX !
+\ ── Renderer vector table ─────────────────────────────────────────
+\ 14 entries — each holds an xt dispatched by the corresponding W.xxx.
+\ Default = TUI renderer.  Swap for web/HTML by replacing all entries.
+
+14 CONSTANT WVEC-SIZE
+CREATE WVEC  WVEC-SIZE CELLS ALLOT
+ 0 CONSTANT WV-TITLE      1 CONSTANT WV-SECTION
+ 2 CONSTANT WV-LINE       3 CONSTANT WV-KV
+ 4 CONSTANT WV-KV-XT      5 CONSTANT WV-FLAG
+ 6 CONSTANT WV-FLAG-2     7 CONSTANT WV-HBAR
+ 8 CONSTANT WV-GAP        9 CONSTANT WV-LIST
+10 CONSTANT WV-DETAIL    11 CONSTANT WV-HINT
+12 CONSTANT WV-CUSTOM    13 CONSTANT WV-NONE
+
+: WV@  ( idx -- xt )  CELLS WVEC + @ ;
+: WV!  ( xt idx -- )  CELLS WVEC + ! ;
+
+\ ── TUI renderer implementation ───────────────────────────────────
+
+: TUI-TITLE  ( addr len -- )
+    .LABEL ."   " TYPE ./LABEL CR CR ;
+
+: TUI-SECTION  ( addr len -- )
+    CR BOLD ."   " TYPE ." :" RESET-COLOR CR ;
+
+: TUI-LINE  ( addr len -- )
+    ."    " TYPE CR ;
+
+: TUI-KV  ( n addr len -- )
+    ."    " TYPE ."  : " .N CR ;
+
+: TUI-KV-XT  ( xt addr len -- )
+    ."    " TYPE ."  : " EXECUTE CR ;
+
+: TUI-FLAG  ( flag addr len -- )
+    ."    " TYPE ."  : "
+    IF 2 FG ." ON" ELSE DIM ." OFF" THEN RESET-COLOR CR ;
+
+: TUI-FLAG-2  ( flag true-a true-n false-a false-n addr len -- )
+    ."    " TYPE ."  : "
+    2>R IF 2R> 2DROP 2 FG ELSE 2R> ROT DROP ROT DROP DIM THEN
+    TYPE RESET-COLOR CR ;
+
+: TUI-HBAR  ( -- )  HBAR ;
+
+: TUI-GAP   ( -- )  CR ;
+
+: TUI-LIST  ( count item-xt -- )
+    OVER 0= IF 2DROP ."    (none)" CR  0 SCR-MAX ! EXIT THEN
+    OVER SCR-MAX !
+    SWAP 0 DO
+        SCR-SEL @ I = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
+        I OVER EXECUTE CR
+    LOOP DROP ;
+
+: TUI-DETAIL  ( count xt -- )
+    SWAP SCR-SEL @ DUP -1 = IF 2DROP DROP EXIT THEN
+    SWAP OVER >= IF 2DROP EXIT THEN
+    CR HBAR EXECUTE ;
+
+: TUI-HINT  ( addr len -- )
+    DIM ."   " TYPE RESET-COLOR CR ;
+
+: TUI-CUSTOM  ( xt -- )  EXECUTE ;
+
+\ ── Install TUI renderer ──────────────────────────────────────────
+: INSTALL-TUI  ( -- )
+    ['] TUI-TITLE    WV-TITLE   WV!
+    ['] TUI-SECTION  WV-SECTION WV!
+    ['] TUI-LINE     WV-LINE    WV!
+    ['] TUI-KV       WV-KV      WV!
+    ['] TUI-KV-XT    WV-KV-XT   WV!
+    ['] TUI-FLAG     WV-FLAG    WV!
+    ['] TUI-FLAG-2   WV-FLAG-2  WV!
+    ['] TUI-HBAR     WV-HBAR    WV!
+    ['] TUI-GAP      WV-GAP     WV!
+    ['] TUI-LIST     WV-LIST    WV!
+    ['] TUI-DETAIL   WV-DETAIL  WV!
+    ['] TUI-HINT     WV-HINT    WV!
+    ['] TUI-CUSTOM   WV-CUSTOM  WV! ;
+INSTALL-TUI
+
+\ ── Public widget API (dispatch through WVEC) ─────────────────────
+: W.TITLE    ( addr len -- )                           WV-TITLE   WV@ EXECUTE ;
+: W.SECTION  ( addr len -- )                           WV-SECTION WV@ EXECUTE ;
+: W.LINE     ( addr len -- )                           WV-LINE    WV@ EXECUTE ;
+: W.KV       ( n addr len -- )                         WV-KV      WV@ EXECUTE ;
+: W.KV-XT    ( xt addr len -- )                        WV-KV-XT   WV@ EXECUTE ;
+: W.FLAG     ( flag addr len -- )                      WV-FLAG    WV@ EXECUTE ;
+: W.FLAG-2   ( flag t-a t-n f-a f-n addr len -- )      WV-FLAG-2  WV@ EXECUTE ;
+: W.HBAR     ( -- )                                    WV-HBAR    WV@ EXECUTE ;
+: W.GAP      ( -- )                                    WV-GAP     WV@ EXECUTE ;
+: W.LIST     ( count item-xt -- )                      WV-LIST    WV@ EXECUTE ;
+: W.DETAIL   ( count xt -- )                           WV-DETAIL  WV@ EXECUTE ;
+: W.HINT     ( addr len -- )                           WV-HINT    WV@ EXECUTE ;
+: W.CUSTOM   ( xt -- )                                 WV-CUSTOM  WV@ EXECUTE ;
+
+\ ── Title with dynamic count suffix ──────────────────────────────
+\ Convenience: "Label (N)" — used by many list screens.
+: W.TITLE-N  ( n addr len -- )
+    .LABEL ."   " TYPE ."  (" .N ." )" ./LABEL CR CR ;
+
+
+\ =====================================================================
+\ §9.6  Screen Definitions (SDL)
+\ =====================================================================
+\
+\  Each screen is a word that calls W.xxx widgets.  Registration,
+\  event loop, and SCREENS are unchanged.  Item renderers (.XXX-ROW)
+\  are small helper words called by W.LIST.
+
+\ ── List-item renderers ──────────────────────────────────────────
+
+: .BTYPE  ( n -- )    \ print buffer type tag
+    DUP 0 = IF DROP ." raw" EXIT THEN
+    DUP 1 = IF DROP ." rec" EXIT THEN
+    DUP 2 = IF DROP ." til" EXIT THEN
+    3 = IF ." bit" EXIT THEN
+    ." ?" ;
+
+: .BUF-ROW  ( i -- )
+    DUP .N ."   "
+    CELLS BUF-TABLE + @
+    DUP B.TYPE .BTYPE
+    ."  w=" DUP B.WIDTH .N
+    ."  n=" DUP B.LEN .N
+    ."  tiles=" DUP B.TILES .N
+    ."  @" B.DATA .N ;
+
+: .BUF-DETAIL  ( -- )
+    SCR-SEL @ CELLS BUF-TABLE + @
+    DUP B.INFO B.PREVIEW ;
+
+: .KERN-ROW  ( i -- )
+    DUP .N ."   "
+    CELLS KERN-TABLE + @
+    DUP K.IN .N ."  in "
+    DUP K.OUT .N ."  out "
+    DUP K.FOOT .N ."  foot "
+    K.FLAGS IF 3 FG ." [tile]" RESET-COLOR ELSE DIM ." [cpu]" RESET-COLOR THEN ;
+
+: .PIPE-ROW  ( i -- )
+    DUP .N ."   "
+    CELLS PIPE-TABLE + @
+    ." cap=" DUP P.CAP .N
+    ."  steps=" P.COUNT .N ;
+
+: .TASK-STATUS  ( st -- )    \ print colored status tag
+    DUP 0 = IF DROP DIM ." FREE " RESET-COLOR EXIT THEN
+    DUP 1 = IF DROP 2 FG ." READY" RESET-COLOR EXIT THEN
+    DUP 2 = IF DROP 3 FG ." RUN  " RESET-COLOR EXIT THEN
+    DUP 3 = IF DROP 1 FG ." BLOCK" RESET-COLOR EXIT THEN
+    4 = IF DIM ." DONE " RESET-COLOR EXIT THEN
+    ." ?    " ;
+
+: .TASK-ROW  ( i -- )
+    DUP .N ."   "
+    CELLS TASK-TABLE + @
+    DUP T.STATUS .TASK-STATUS
+    ."  pri=" DUP T.PRIORITY .N
+    ."  xt=" T.XT .N ;
+
+: .TASK-DETAIL  ( -- )
+    SCR-SEL @ CELLS TASK-TABLE + @
+    ."   Status: " DUP T.STATUS .TASK-STATUS CR
+    ."   XT: " DUP T.XT .N ."    Priority: " T.PRIORITY .N CR
+    S" [k] Kill  [s] Restart" W.HINT ;
+
+: .CORE-ROW  ( i -- )
+    DUP .N ."   "
+    DUP COREID = IF
+        3 FG ." RUNNING" RESET-COLOR ."  (self)"
     ELSE
-        DUP SCR-MAX !
-        0 DO
-            SCR-SEL @ I = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
-            I .N ."   "
-            I CELLS BUF-TABLE + @
-            DUP B.TYPE
-            DUP 0 = IF DROP ."  raw " THEN
-            DUP 1 = IF DROP ."  rec " THEN
-            DUP 2 = IF DROP ."  til " THEN
-            DUP 3 = IF DROP ."  bit " THEN
-            ."  w=" DUP B.WIDTH .N
-            ."   n=" DUP B.LEN .N
-            ."   tiles=" DUP B.TILES .N
-            ."   @" B.DATA .N
-            CR
-        LOOP
-    THEN
-    \ -- Inline detail for selected buffer --
-    SCR-SEL @ -1 <> SCR-SEL @ BUF-COUNT @ < AND IF
-        CR HBAR
-        SCR-SEL @ CELLS BUF-TABLE + @
-        DUP B.INFO
-        B.PREVIEW
+        CORE-STATUS IF 2 FG ." BUSY" RESET-COLOR
+        ELSE DIM ." IDLE" RESET-COLOR THEN
     THEN ;
 
-\ ---- Screen 3: Kernels ----
-: SCR-KERNELS  ( -- )
-    .LABEL ."   Kernels (" KERN-COUNT @ .N ."  )" ./LABEL CR CR
-    KERN-COUNT @ DUP 0= IF
-        DROP ."    (none registered)" CR
-    ELSE
-        0 DO
-            ."    " I .N ."   "
-            I CELLS KERN-TABLE + @
-            DUP K.IN .N ."  in "
-            DUP K.OUT .N ."  out "
-            DUP K.FOOT .N ."  foot "
-            K.FLAGS IF 3 FG ."  [tile]" RESET-COLOR ELSE DIM ."  [cpu]" RESET-COLOR THEN
-            CR
-        LOOP
-    THEN ;
+: .PORT-ROW  ( i -- )
+    ." port " .N ;
 
-\ ---- Screen 4: Pipelines ----
-: SCR-PIPES  ( -- )
-    .LABEL ."   Pipelines (" PIPE-COUNT @ .N ."  )" ./LABEL CR CR
-    PIPE-COUNT @ DUP 0= IF
-        DROP ."    (none registered)" CR
-    ELSE
-        0 DO
-            ."    " I .N ."   "
-            I CELLS PIPE-TABLE + @
-            ."  cap=" DUP P.CAP .N
-            ."   steps=" P.COUNT .N
-            CR
-        LOOP
-    THEN ;
-
-\ ---- Screen 5: Tasks ----
-: SCR-TASKS  ( -- )
-    .LABEL ."   Tasks (" TASK-COUNT @ .N ."  )" ./LABEL CR CR
-    TASK-COUNT @ DUP 0= IF
-        DROP ."    (none registered)" CR
-        0 SCR-MAX !
-    ELSE
-        DUP SCR-MAX !
-        0 DO
-            SCR-SEL @ I = IF 2 FG ."  > " RESET-COLOR ELSE ."    " THEN
-            I .N ."   "
-            I CELLS TASK-TABLE + @
-            DUP T.STATUS
-            DUP 0 = IF DIM ."  FREE " RESET-COLOR THEN
-            DUP 1 = IF 2 FG ."  READY" RESET-COLOR THEN
-            DUP 2 = IF 3 FG ."  RUN  " RESET-COLOR THEN
-            DUP 3 = IF 1 FG ."  BLOCK" RESET-COLOR THEN
-            DUP 4 = IF DIM ."  DONE " RESET-COLOR THEN
-            DROP
-            ."   pri=" DUP T.PRIORITY .N
-            ."   xt=" T.XT .N
-            CR
-        LOOP
-    THEN
-    \ -- Inline detail for selected task --
-    SCR-SEL @ -1 <> SCR-SEL @ TASK-COUNT @ < AND IF
-        CR HBAR
-        SCR-SEL @ CELLS TASK-TABLE + @
-        ."   Status: " DUP T.STATUS
-        DUP 0 = IF ."  FREE" THEN
-        DUP 1 = IF 2 FG ."  READY" RESET-COLOR THEN
-        DUP 2 = IF 3 FG ."  RUNNING" RESET-COLOR THEN
-        DUP 3 = IF 1 FG ."  BLOCKED" RESET-COLOR THEN
-        DUP 4 = IF DIM ."  DONE" RESET-COLOR THEN
-        DROP CR
-        ."   XT: " DUP T.XT .N ."    Priority: " T.PRIORITY .N CR
-        CR DIM ."   [k] Kill  [s] Restart" RESET-COLOR CR
-    THEN ;
-
-\ ---- Screen 6: Help ----
-: SCR-HELP  ( -- )
-    .LABEL ."   Quick Reference" ./LABEL CR CR
-    BOLD ."   Buffers:" RESET-COLOR CR
-    ."    0 1 N BUFFER name    Create buffer" CR
-    ."    buf B.SUM/MIN/MAX    Tile reductions" CR
-    ."    a b c B.ADD/SUB      Element-wise ops" CR
-    ."    n buf B.SCALE/FILL   Modify buffer" CR
-    BOLD ."   Kernels:" RESET-COLOR CR
-    ."    1 1 2 0 KERNEL name  Register kernel" CR
-    ."    buf kzero/kfill/kadd Sample kernels" CR
-    ."    buf knorm/khistogram  Advanced kernels" CR
-    ."    th src dst kpeak      Peak detection" CR
-    BOLD ."   Pipelines:" RESET-COLOR CR
-    ."    3 PIPELINE name      Create pipeline" CR
-    ."    ' w pipe P.ADD/RUN   Build & execute" CR
-    ."    pipe P.RUN-PAR       Parallel execute" CR
-    BOLD ."   Tasks:" RESET-COLOR CR
-    ."    ' w 0 TASK name      Create task" CR
-    ."    SCHEDULE / BG         Run tasks" CR
-    BOLD ."   Multicore:" RESET-COLOR CR
-    ."    xt core CORE-RUN      Dispatch to core" CR
-    ."    core CORE-WAIT        Wait for core" CR
-    ."    BARRIER               Sync all cores" CR
-    ."    n LOCK / n UNLOCK     Spinlock ops" CR
-    ."    CORES                 Show core status" CR
-    BOLD ."   Storage:" RESET-COLOR CR
-    ."    buf sec B.SAVE/LOAD  Persist buffers" CR
-    ."    DIR / CATALOG        List disk files" CR
-    ."    CAT name             Print file" CR
-    ."    buf SAVE-BUFFER name Save buf to file" CR
-    BOLD ."   Data Ports:" RESET-COLOR CR
-    ."    buf id PORT!          Bind NIC source" CR
-    ."    POLL / n INGEST       Receive frames" CR
-    ."    PORTS                 List bindings" CR
-    BOLD ."   Tools:" RESET-COLOR CR
-    ."    DASHBOARD / STATUS    System views" CR
-    ."    ' w BENCH / .BENCH   Benchmark" CR ;
-
-\ ---- Screen 7: Documentation ----
-: SCR-DOCS  ( -- )
-    .LABEL ."   Documentation" ./LABEL CR CR
+\ ── Helper: count active dir entries by file-type ────────────────
+\ .DOC-FILE-LIST ( ftype -- n )  list docs/tuts with selection
+: .DOC-FILE-LIST  ( ftype -- n )
     0 DOC-N !
-    BOLD ."   Topics:" RESET-COLOR CR
     FS-OK @ IF
         0 DOC-TUT-COUNT !
         FS-MAX-FILES 0 DO
             I DIRENT C@ 0<> IF
-                I DIRENT DE.TYPE FTYPE-DOC = IF
+                I DIRENT DE.TYPE OVER = IF
                     SCR-SEL @ DOC-N @ = IF 2 FG ."  > " RESET-COLOR ELSE ."     " THEN
                     DOC-N @ .N ."   " I DIRENT .ZSTR CR
                     1 DOC-N +!  1 DOC-TUT-COUNT +!
                 THEN
             THEN
         LOOP
+        DROP
         DOC-TUT-COUNT @ 0= IF ."     (none)" CR THEN
     ELSE
-        ."     (no filesystem loaded)" CR
+        DROP ."     (no filesystem loaded)" CR
     THEN
-    CR
-    BOLD ."   Tutorials:" RESET-COLOR CR
-    FS-OK @ IF
-        0 DOC-TUT-COUNT !
-        FS-MAX-FILES 0 DO
-            I DIRENT C@ 0<> IF
-                I DIRENT DE.TYPE FTYPE-TUT = IF
-                    SCR-SEL @ DOC-N @ = IF 2 FG ."  > " RESET-COLOR ELSE ."     " THEN
-                    DOC-N @ .N ."   " I DIRENT .ZSTR CR
-                    1 DOC-N +!  1 DOC-TUT-COUNT +!
-                THEN
-            THEN
-        LOOP
-        DOC-TUT-COUNT @ 0= IF ."     (none)" CR THEN
-    ELSE
-        ."     (no filesystem loaded)" CR
-    THEN
-    DOC-N @ SCR-MAX !
-    CR
-    DIM ."   [Enter] Read selected document" RESET-COLOR CR ;
+    DOC-N @ ;
 
-\ ---- Screen 8: Storage ----
-: SCR-STORAGE  ( -- )
-    .LABEL ."   Storage" ./LABEL CR CR
+: .STOR-ROW  ( slot i -- )     \ storage row from STOR-N iteration
+    DUP .N ."   "
+    DROP    \ slot unused here — row printed by caller
+    ;
+
+\ ── Screen 1: Home ──
+: .HOME-CORES-VAL  ( -- )
+    NCORES .N
+    NCORES 1 > IF 2 FG ."  multicore" ELSE DIM ."  single" THEN RESET-COLOR ;
+: .HOME-PORTS-VAL  ( -- )
+    PORT-COUNT @ .N ."  bound  rx=" PORT-RX @ .N ."  drop=" PORT-DROP @ .N ;
+
+: SCR-HOME  ( -- )
+    S" System Overview" W.TITLE
+    HERE          S" Memory"    W.KV
+    ['] .HOME-CORES-VAL S" Cores" W.KV-XT
+    BUF-COUNT @   S" Buffers"   W.KV
+    KERN-COUNT @  S" Kernels"   W.KV
+    PIPE-COUNT @  S" Pipes"     W.KV
+    TASK-COUNT @  S" Tasks"     W.KV
+    FILE-COUNT @  S" Files"     W.KV
+    DISK? S" present" S" not attached" S" Storage" W.FLAG-2
+    ['] .HOME-PORTS-VAL S" Ports" W.KV-XT
+    NET-RX? S" frame waiting" S" idle" S" Network" W.FLAG-2
+    W.GAP
+    PREEMPT-ENABLED @ S" preempt ON" S" cooperative" S" Scheduler" W.FLAG-2
+    TASK-COUNT-READY  S" Tasks rdy" W.KV ;
+
+\ ── Screen 2: Buffers ──
+: SCR-BUFFERS  ( -- )
+    BUF-COUNT @ S" Buffers" W.TITLE-N
+    BUF-COUNT @ ['] .BUF-ROW W.LIST
+    BUF-COUNT @ ['] .BUF-DETAIL W.DETAIL ;
+
+\ ── Screen 3: Kernels ──
+: SCR-KERNELS  ( -- )
+    KERN-COUNT @ S" Kernels" W.TITLE-N
+    KERN-COUNT @ ['] .KERN-ROW W.LIST ;
+
+\ ── Screen 4: Pipelines ──
+: SCR-PIPES  ( -- )
+    PIPE-COUNT @ S" Pipelines" W.TITLE-N
+    PIPE-COUNT @ ['] .PIPE-ROW W.LIST ;
+
+\ ── Screen 5: Tasks ──
+: SCR-TASKS  ( -- )
+    TASK-COUNT @ S" Tasks" W.TITLE-N
+    TASK-COUNT @ ['] .TASK-ROW W.LIST
+    TASK-COUNT @ ['] .TASK-DETAIL W.DETAIL ;
+
+\ ── Screen 6: Help ──
+: SCR-HELP  ( -- )
+    S" Quick Reference" W.TITLE
+    S" Buffers" W.SECTION
+    S" 0 1 N BUFFER name    Create buffer" W.LINE
+    S" buf B.SUM/MIN/MAX    Tile reductions" W.LINE
+    S" a b c B.ADD/SUB      Element-wise ops" W.LINE
+    S" n buf B.SCALE/FILL   Modify buffer" W.LINE
+    S" Kernels" W.SECTION
+    S" 1 1 2 0 KERNEL name  Register kernel" W.LINE
+    S" buf kzero/kfill/kadd Sample kernels" W.LINE
+    S" buf knorm/khistogram  Advanced kernels" W.LINE
+    S" th src dst kpeak      Peak detection" W.LINE
+    S" Pipelines" W.SECTION
+    S" 3 PIPELINE name      Create pipeline" W.LINE
+    S" ' w pipe P.ADD/RUN   Build & execute" W.LINE
+    S" pipe P.RUN-PAR       Parallel execute" W.LINE
+    S" Tasks" W.SECTION
+    S" ' w 0 TASK name      Create task" W.LINE
+    S" SCHEDULE / BG         Run tasks" W.LINE
+    S" Multicore" W.SECTION
+    S" xt core CORE-RUN      Dispatch to core" W.LINE
+    S" core CORE-WAIT        Wait for core" W.LINE
+    S" BARRIER               Sync all cores" W.LINE
+    S" n LOCK / n UNLOCK     Spinlock ops" W.LINE
+    S" CORES                 Show core status" W.LINE
+    S" Storage" W.SECTION
+    S" buf sec B.SAVE/LOAD  Persist buffers" W.LINE
+    S" DIR / CATALOG        List disk files" W.LINE
+    S" CAT name             Print file" W.LINE
+    S" buf SAVE-BUFFER name Save buf to file" W.LINE
+    S" Data Ports" W.SECTION
+    S" buf id PORT!          Bind NIC source" W.LINE
+    S" POLL / n INGEST       Receive frames" W.LINE
+    S" PORTS                 List bindings" W.LINE
+    S" Tools" W.SECTION
+    S" DASHBOARD / STATUS    System views" W.LINE
+    S" ' w BENCH / .BENCH   Benchmark" W.LINE ;
+
+\ ── Screen 7: Documentation ──
+: .DOCS-BODY  ( -- )
+    S" Topics" W.SECTION
+    FTYPE-DOC .DOC-FILE-LIST DROP
+    W.GAP
+    S" Tutorials" W.SECTION
+    FTYPE-TUT .DOC-FILE-LIST DROP
+    DOC-N @ SCR-MAX !
+    W.GAP
+    S" [Enter] Read selected document" W.HINT ;
+
+: SCR-DOCS  ( -- )
+    S" Documentation" W.TITLE
+    ['] .DOCS-BODY W.CUSTOM ;
+
+\ ── Screen 8: Storage ──
+: .STOR-BODY  ( -- )
     DISK? 0= IF
-        ."    (no storage attached)" CR
-        0 SCR-MAX ! EXIT
+        S" (no storage attached)" W.LINE  0 SCR-MAX ! EXIT
     THEN
     FS-OK @ 0= IF
-        ."    (filesystem not loaded)" CR
-        0 SCR-MAX ! EXIT
+        S" (filesystem not loaded)" W.LINE  0 SCR-MAX ! EXIT
     THEN
     0 STOR-N !
     FS-MAX-FILES 0 DO
@@ -4586,91 +4712,78 @@ VARIABLE _ASUB-I
         THEN
     LOOP
     STOR-N @ SCR-MAX !
-    STOR-N @ 0= IF ."    (empty)" CR THEN
-    CR
+    STOR-N @ 0= IF S" (empty)" W.LINE THEN
+    W.GAP
     0  2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
-    DIM ."   " .N ."   free sectors" RESET-COLOR CR
-    \ -- Inline detail for selected file --
+    DIM ."   " .N ."  free sectors" RESET-COLOR CR
+    \ detail pane
     SCR-SEL @ -1 <> SCR-SEL @ STOR-N @ < AND IF
-        CR HBAR
+        W.HBAR
         SCR-SEL @ FIND-NTH-ACTIVE DUP -1 <> IF
             ."   Name  : " DUP DIRENT .ZSTR CR
             ."   Type  : " DUP DIRENT DE.TYPE .FTYPE CR
-            ."   Size  : " DUP DIRENT DE.USED .N ."   bytes" CR
+            ."   Size  : " DUP DIRENT DE.USED .N ."  bytes" CR
             ."   Start : sector " DUP DIRENT DE.SEC .N CR
-            ."   Count : " DIRENT DE.COUNT .N ."   sectors" CR
+            ."   Count : " DIRENT DE.COUNT .N ."  sectors" CR
         ELSE DROP THEN
     THEN ;
 
-\ ---- Screen 9: Cores ----
-: SCR-CORES  ( -- )
-    .LABEL ."   Cores (" NCORES .N ."  )" ./LABEL CR CR
+: SCR-STORAGE  ( -- )
+    S" Storage" W.TITLE
+    ['] .STOR-BODY W.CUSTOM ;
+
+\ ── Screen 9: Cores ──
+: .CORES-BODY  ( -- )
     NCORES 1 <= IF
-        ."    Single-core mode — no secondary cores available."  CR
+        S" Single-core mode -- no secondary cores available." W.LINE
     ELSE
-        NCORES 0 DO
-            ."    Core " I .N ."   "
-            I COREID = IF
-                3 FG ."  RUNNING" RESET-COLOR ."   (self — scheduler)" CR
-            ELSE
-                I CORE-STATUS IF
-                    2 FG ."  BUSY" RESET-COLOR CR
-                ELSE
-                    DIM ."  IDLE" RESET-COLOR CR
-                THEN
-            THEN
-        LOOP
-        CR BOLD ."   Multicore Words:" RESET-COLOR CR
-        ."    xt core CORE-RUN    Dispatch work to core" CR
-        ."    core CORE-WAIT      Wait for core to finish" CR
-        ."    BARRIER             Sync all secondary cores" CR
-        ."    pipe P.RUN-PAR      Parallel pipeline execute" CR
-        ."    n LOCK / n UNLOCK   Spinlock operations" CR
+        NCORES ['] .CORE-ROW W.LIST
+        S" Multicore Words" W.SECTION
+        S" xt core CORE-RUN    Dispatch work to core" W.LINE
+        S" core CORE-WAIT      Wait for core to finish" W.LINE
+        S" BARRIER             Sync all secondary cores" W.LINE
+        S" pipe P.RUN-PAR      Parallel pipeline execute" W.LINE
+        S" n LOCK / n UNLOCK   Spinlock operations" W.LINE
     THEN ;
 
-\ ---- Home subscreens ----
+: SCR-CORES  ( -- )
+    NCORES S" Cores" W.TITLE-N
+    ['] .CORES-BODY W.CUSTOM ;
+
+\ ── Home subscreens ──
 
 : SCR-HOME-OVERVIEW  ( -- )  SCR-HOME ;
 
-: SCR-HOME-MEMORY  ( -- )
-    .LABEL ."   Memory Detail" ./LABEL CR CR
-    ."    HERE       : " HERE . CR
-    ."    Free dict  : " 65536 HERE - .N ."  bytes" CR
-    ."    Heap       : " HEAP-INIT @ IF 2 FG ."  initialized" ELSE DIM ."  not initialized" THEN RESET-COLOR CR
-    HEAP-INIT @ IF
-        ."    Heap base  : " HEAP-BASE @ .N CR
-    THEN
-    CR
-    BOLD ."   Stack:" RESET-COLOR CR
-    ."    SP depth   : " DEPTH .N CR
-    CR
-    BOLD ."   Buffers memory:" RESET-COLOR CR
-    ."    Count      : " BUF-COUNT @ .N CR
+: .HOME-MEM-BUFS  ( -- )
     BUF-COUNT @ 0 DO
         ."      " I .N ."  "
-        I CELLS BUF-TABLE + @ DUP B.WIDTH .N ." x" B.LEN .N
-        CR
+        I CELLS BUF-TABLE + @ DUP B.WIDTH .N ." x" B.LEN .N CR
     LOOP ;
 
-: SCR-HOME-NET  ( -- )
-    .LABEL ."   Network Status" ./LABEL CR CR
-    ."    NIC state  : " NET-RX? IF 2 FG ."  frame waiting" ELSE DIM ."  idle" THEN RESET-COLOR CR
-    ."    Ports      : " PORT-COUNT @ .N CR
-    ."    RX count   : " PORT-RX @ .N CR
-    ."    Drops      : " PORT-DROP @ .N CR
-    CR
-    BOLD ."   Port Bindings:" RESET-COLOR CR
-    PORT-COUNT @ DUP 0= IF
-        DROP ."    (none)" CR
-    ELSE
-        0 DO
-            ."    port " I .N CR
-        LOOP
-    THEN ;
+: SCR-HOME-MEMORY  ( -- )
+    S" Memory Detail" W.TITLE
+    HERE             S" HERE"       W.KV
+    65536 HERE -     S" Free dict"  W.KV
+    HEAP-INIT @ S" initialized" S" not initialized" S" Heap" W.FLAG-2
+    HEAP-INIT @ IF HEAP-BASE @ S" Heap base" W.KV THEN
+    S" Stack" W.SECTION
+    DEPTH            S" SP depth"   W.KV
+    S" Buffers memory" W.SECTION
+    BUF-COUNT @      S" Count"      W.KV
+    ['] .HOME-MEM-BUFS W.CUSTOM ;
 
-\ ---- Buffer subscreens ----
+: SCR-HOME-NET  ( -- )
+    S" Network Status" W.TITLE
+    NET-RX? S" frame waiting" S" idle" S" NIC state" W.FLAG-2
+    PORT-COUNT @     S" Ports"      W.KV
+    PORT-RX @        S" RX count"   W.KV
+    PORT-DROP @      S" Drops"      W.KV
+    S" Port Bindings" W.SECTION
+    PORT-COUNT @ ['] .PORT-ROW W.LIST ;
+
+\ ── Buffer subscreens ──
 
 : SCR-BUF-LIST  ( -- )  SCR-BUFFERS ;
 
@@ -4679,9 +4792,7 @@ VARIABLE _SREC
 VARIABLE _STIL
 VARIABLE _SBIT
 
-: SCR-BUF-STATS  ( -- )
-    .LABEL ."   Buffer Statistics" ./LABEL CR CR
-    ."    Total buffers : " BUF-COUNT @ .N CR
+: .BSTATS-BODY  ( -- )
     BUF-COUNT @ 0= IF EXIT THEN
     0 _SRAW !  0 _SREC !  0 _STIL !  0 _SBIT !
     BUF-COUNT @ 0 DO
@@ -4691,12 +4802,16 @@ VARIABLE _SBIT
         DUP 2 = IF 1 _STIL +! THEN
         3 = IF 1 _SBIT +! THEN
     LOOP
-    CR
-    BOLD ."   By Type:" RESET-COLOR CR
-    ."    Raw    : " _SRAW @ .N CR
-    ."    Record : " _SREC @ .N CR
-    ."    Tile   : " _STIL @ .N CR
-    ."    Bitmap : " _SBIT @ .N CR ;
+    S" By Type" W.SECTION
+    _SRAW @ S" Raw"    W.KV
+    _SREC @ S" Record" W.KV
+    _STIL @ S" Tile"   W.KV
+    _SBIT @ S" Bitmap" W.KV ;
+
+: SCR-BUF-STATS  ( -- )
+    S" Buffer Statistics" W.TITLE
+    BUF-COUNT @  S" Total buffers" W.KV
+    ['] .BSTATS-BODY W.CUSTOM ;
 
 \ ---- Screen label words (for registry) ----
 
