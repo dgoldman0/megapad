@@ -29,6 +29,13 @@ VARIABLE GFX-CX         \ cursor column (pixels)
 VARIABLE GFX-CY         \ cursor row (pixels)
 VARIABLE GFX-CLR        \ current drawing color (used by GFX-CHAR)
 
+\ Scratch variables for drawing primitives (avoids deep PICK chains)
+VARIABLE GFX-DC          \ drawing color
+VARIABLE GFX-DX          \ drawing x
+VARIABLE GFX-DY          \ drawing y
+VARIABLE GFX-DW          \ drawing width
+VARIABLE GFX-DH          \ drawing height
+
 \ -- BPP lookup -------------------------------------------------------
 \ Mode 0 -> 1, mode 1 -> 2, mode 2 -> 2, mode 3 -> 4
 : GFX-MODE>BPP  ( mode -- bpp )
@@ -132,16 +139,21 @@ VARIABLE GFX-CLR        \ current drawing color (used by GFX-CHAR)
 
 \ -- Line drawing -----------------------------------------------------
 
+\ GFX-HLINE and GFX-VLINE use only stack — no variables — so they
+\ are safe to call from GFX-RECT / GFX-BOX (which use GFX-D* vars).
+
 : GFX-HLINE  ( color x y len -- )
     0 DO                                ( color x y )
-        2 PICK OVER 2 PICK GFX-PIXEL!  \ plot (color, x+i, y)
+        2 PICK 2 PICK 2 PICK           ( color x y color x y )
+        GFX-PIXEL!                      ( color x y )
         SWAP 1+ SWAP                    \ x++
     LOOP
     DROP 2DROP ;
 
 : GFX-VLINE  ( color x y len -- )
     0 DO                                ( color x y )
-        2 PICK OVER 2 PICK SWAP GFX-PIXEL!  \ plot (color, x, y+i)
+        2 PICK 2 PICK 2 PICK           ( color x y color x y )
+        GFX-PIXEL!                      ( color x y )
         1+                              \ y++
     LOOP
     DROP 2DROP ;
@@ -149,26 +161,21 @@ VARIABLE GFX-CLR        \ current drawing color (used by GFX-CHAR)
 \ -- Rectangles -------------------------------------------------------
 
 : GFX-RECT  ( color x y w h -- )
-    0 DO                                ( color x y w )
-        3 PICK                          ( color x y w color )
-        3 PICK                          ( ... color x )
-        3 PICK I +                      ( ... color x y+i )
-        3 PICK                          ( ... color x y+i w )
-        GFX-HLINE                       ( color x y w )
-    LOOP
-    2DROP 2DROP ;
+    GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
+    GFX-DH @ 0 DO
+        GFX-DC @ GFX-DX @ GFX-DY @ I + GFX-DW @ GFX-HLINE
+    LOOP ;
 
 : GFX-BOX  ( color x y w h -- )
-    >R >R                               ( color x y  R: h w )
+    GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
     \ Top edge
-    2 PICK 2 PICK 2 PICK R@ GFX-HLINE
+    GFX-DC @ GFX-DX @ GFX-DY @ GFX-DW @ GFX-HLINE
     \ Bottom edge
-    2 PICK 2 PICK 2 PICK R> 1- + R@ GFX-HLINE
-    \ Left edge  (skip top/bottom corners)
-    2 PICK 2 PICK 2 PICK 1+ R> 2 - GFX-VLINE
+    GFX-DC @ GFX-DX @ GFX-DY @ GFX-DH @ + 1- GFX-DW @ GFX-HLINE
+    \ Left edge (skip corners)
+    GFX-DC @ GFX-DX @ GFX-DY @ 1+ GFX-DH @ 2 - GFX-VLINE
     \ Right edge
-    \ For right edge we need w-1 offset... stack is tricky, skip for now
-    DROP 2DROP ;
+    GFX-DC @ GFX-DX @ GFX-DW @ + 1- GFX-DY @ 1+ GFX-DH @ 2 - GFX-VLINE ;
 
 \ -- Blitting ---------------------------------------------------------
 

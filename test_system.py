@@ -17030,34 +17030,102 @@ class TestKDOSGraphicsModule(_KDOSTestBase):
             os.unlink(img)
 
     def test_gfx_hline(self):
-        """GFX-HLINE draws a horizontal line of pixels."""
+        """GFX-HLINE draws a horizontal line at the correct position."""
         img = self._make_gfx_image()
         try:
             text = self._run_kdos([
                 "REQUIRE graphics.f",
                 "320 240 0 GFX-INIT",
-                "5 10 20 8 GFX-HLINE",
-                "10 20 GFX-PIXEL@ .",
-                "17 20 GFX-PIXEL@ .",
+                "0 GFX-CLEAR",
+                "5 100 50 10 GFX-HLINE",
+                # First and last pixel of the line
+                '.\" A=" 100 50 GFX-PIXEL@ . CR',
+                '.\" B=" 109 50 GFX-PIXEL@ . CR',
+                # Just outside the line
+                '.\" C=" 99 50 GFX-PIXEL@ . CR',
+                '.\" D=" 110 50 GFX-PIXEL@ . CR',
             ], storage_image=img)
-            # Both pixels at (10,20) and (17,20) should be color 5
-            self.assertIn("5 ", text)
+            self.assertIn("A=5 ", text)
+            self.assertIn("B=5 ", text)
+            self.assertIn("C=0 ", text)
+            self.assertIn("D=0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_vline(self):
+        """GFX-VLINE draws a vertical line at the correct position."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "0 GFX-CLEAR",
+                "7 200 30 5 GFX-VLINE",
+                '.\" A=" 200 30 GFX-PIXEL@ . CR',
+                '.\" B=" 200 34 GFX-PIXEL@ . CR',
+                '.\" C=" 200 29 GFX-PIXEL@ . CR',
+                '.\" D=" 200 35 GFX-PIXEL@ . CR',
+            ], storage_image=img)
+            self.assertIn("A=7 ", text)
+            self.assertIn("B=7 ", text)
+            self.assertIn("C=0 ", text)
+            self.assertIn("D=0 ", text)
         finally:
             os.unlink(img)
 
     def test_gfx_rect(self):
-        """GFX-RECT fills a rectangular region."""
+        """GFX-RECT fills a rectangular region at the correct position."""
         img = self._make_gfx_image()
         try:
             text = self._run_kdos([
                 "REQUIRE graphics.f",
                 "320 240 0 GFX-INIT",
+                "0 GFX-CLEAR",
                 "3 10 10 4 4 GFX-RECT",
-                "12 12 GFX-PIXEL@ .",     # inside rect
-                "20 20 GFX-PIXEL@ .",     # outside rect (0)
+                '.\" A=" 10 10 GFX-PIXEL@ . CR',     # top-left corner
+                '.\" B=" 13 13 GFX-PIXEL@ . CR',     # bottom-right corner
+                '.\" C=" 12 12 GFX-PIXEL@ . CR',     # inside
+                '.\" D=" 9 10 GFX-PIXEL@ . CR',      # outside left
+                '.\" E=" 14 10 GFX-PIXEL@ . CR',     # outside right
+                '.\" F=" 10 14 GFX-PIXEL@ . CR',     # outside bottom
             ], storage_image=img)
-            self.assertIn("3 ", text)
-            self.assertIn("0 ", text)
+            self.assertIn("A=3 ", text)
+            self.assertIn("B=3 ", text)
+            self.assertIn("C=3 ", text)
+            self.assertIn("D=0 ", text)
+            self.assertIn("E=0 ", text)
+            self.assertIn("F=0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_gfx_box(self):
+        """GFX-BOX draws a rectangle outline with all 4 edges."""
+        img = self._make_gfx_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE graphics.f",
+                "320 240 0 GFX-INIT",
+                "0 GFX-CLEAR",
+                "9 50 50 20 10 GFX-BOX",
+                # Top edge
+                '.\" A=" 60 50 GFX-PIXEL@ . CR',
+                # Bottom edge
+                '.\" B=" 60 59 GFX-PIXEL@ . CR',
+                # Left edge
+                '.\" C=" 50 55 GFX-PIXEL@ . CR',
+                # Right edge
+                '.\" D=" 69 55 GFX-PIXEL@ . CR',
+                # Inside (should be clear)
+                '.\" E=" 60 55 GFX-PIXEL@ . CR',
+                # Outside
+                '.\" F=" 49 50 GFX-PIXEL@ . CR',
+            ], storage_image=img)
+            self.assertIn("A=9 ", text)
+            self.assertIn("B=9 ", text)
+            self.assertIn("C=9 ", text)
+            self.assertIn("D=9 ", text)
+            self.assertIn("E=0 ", text)
+            self.assertIn("F=0 ", text)
         finally:
             os.unlink(img)
 
