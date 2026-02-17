@@ -1,5 +1,5 @@
 # ============================================================================
-# rtl/sim/Makefile — Phase 1 testbench runner
+# rtl/sim/Makefile — Phase 1 & 2 testbench runner
 # ============================================================================
 
 IVERILOG ?= iverilog
@@ -12,6 +12,8 @@ INC = -I../pkg
 PRIM = ../prim
 SOC  = ../soc
 PLAT = ../platform/sim
+BUS  = ../bus
+MEM  = ../mem
 
 # Primitive sources (shared)
 PRIM_SRC = $(PRIM)/mp64_sram_sp.v \
@@ -20,13 +22,23 @@ PRIM_SRC = $(PRIM)/mp64_sram_sp.v \
            $(PRIM)/mp64_clkgate.v \
            $(PRIM)/mp64_rst_sync.v
 
-.PHONY: all clean sram_sp sram_dp rom clkgate rst_sync platform_sim
+.PHONY: all clean phase1 phase2 \
+        sram_sp sram_dp rom clkgate rst_sync platform_sim \
+        bus_arbiter memory extmem
 
-all: sram_sp sram_dp rom clkgate rst_sync platform_sim
+all: phase1 phase2
 	@echo ""
 	@echo "============================================"
-	@echo " Phase 1: All testbenches complete"
+	@echo " All testbenches complete"
 	@echo "============================================"
+
+phase1: sram_sp sram_dp rom clkgate rst_sync platform_sim
+	@echo ""
+	@echo "--- Phase 1 complete ---"
+
+phase2: bus_arbiter memory extmem
+	@echo ""
+	@echo "--- Phase 2 complete ---"
 
 # --- Single-port SRAM ---
 sram_sp: tb_sram_sp.vvp
@@ -74,3 +86,28 @@ tb_platform_sim.vvp: tb_platform_sim.v $(PLAT)/mp64_platform_sim.v \
 # --- Clean ---
 clean:
 	rm -f *.vvp *.vcd
+
+# ==========================================================================
+# Phase 2: Bus & Memory
+# ==========================================================================
+
+# --- Bus arbiter ---
+bus_arbiter: tb_bus_arbiter.vvp
+	$(VVP) $<
+
+tb_bus_arbiter.vvp: tb_bus_arbiter.v $(BUS)/mp64_bus.v
+	$(IVERILOG) $(INC) -o $@ $^
+
+# --- Memory subsystem ---
+memory: tb_memory.vvp
+	$(VVP) $<
+
+tb_memory.vvp: tb_memory.v $(MEM)/mp64_memory.v $(PRIM)/mp64_sram_dp.v
+	$(IVERILOG) $(INC) -o $@ $^
+
+# --- External memory controller ---
+extmem: tb_extmem.vvp
+	$(VVP) $<
+
+tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
+	$(IVERILOG) $(INC) -o $@ $^
