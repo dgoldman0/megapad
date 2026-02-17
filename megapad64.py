@@ -102,13 +102,27 @@ CSR_CL_PRIV      = 0x6D   # Cluster privilege level (0=S, 1=U)
 CSR_CL_MPU_BASE  = 0x6E   # Cluster MPU lower bound (inclusive)
 CSR_CL_MPU_LIMIT = 0x6F   # Cluster MPU upper bound (exclusive)
 
-# I-Cache CSRs (§12.2)
-CSR_BARRIER_ARRIVE = 0x66  # R/W: per-core barrier arrive bitmask (cluster)
-CSR_BARRIER_STATUS = 0x67  # R: barrier done flag + arrive mask  (cluster)
+# DMA CSRs (§5.3)
+CSR_DMA_RING_BASE  = 0x50   # DMA ring buffer base address
+CSR_DMA_RING_SIZE  = 0x51   # DMA ring buffer size
+CSR_DMA_HEAD       = 0x52   # DMA head pointer
+CSR_DMA_TAIL       = 0x53   # DMA tail pointer
+CSR_DMA_STATUS     = 0x54   # DMA status
+CSR_DMA_CTRL       = 0x55   # DMA control (bit1=reset)
 
+# QoS CSRs (§5.4)
+CSR_QOS_WEIGHT     = 0x58   # Bus arbiter priority weight
+CSR_QOS_BWLIMIT    = 0x59   # Bandwidth limit
+
+# I-Cache CSRs (§12.2)
 CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
 CSR_ICACHE_HITS   = 0x71   # R: hit counter
 CSR_ICACHE_MISSES = 0x72   # R: miss counter
+
+# Cluster-level IVT / Barrier CSRs (§6.3)
+CSR_CL_IVTBASE     = 0x73   # Cluster shared IVT base address
+CSR_BARRIER_ARRIVE = 0x74   # R/W: per-core barrier arrive bitmask (cluster)
+CSR_BARRIER_STATUS = 0x75   # R: barrier done flag + arrive mask  (cluster)
 
 # IVEC IDs
 IVEC_RESET          = 0x00
@@ -412,6 +426,18 @@ class Megapad64:
         self.icache_hits: int    = 0   # hit counter (always 0 in emulator)
         self.icache_misses: int  = 0   # miss counter (always 0 in emulator)
 
+        # DMA ring buffer state
+        self.dma_ring_base: int = 0
+        self.dma_ring_size: int = 0
+        self.dma_head: int      = 0
+        self.dma_tail: int      = 0
+        self.dma_status: int    = 0
+        self.dma_ctrl: int      = 0
+
+        # QoS state
+        self.qos_weight: int    = 0
+        self.qos_bwlimit: int   = 0
+
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
 
@@ -645,8 +671,8 @@ class Megapad64:
             CSR_IPIACK:     lambda: 0,  # write-only
             CSR_IVEC_ID:    lambda: self.ivec_id,
             CSR_TRAP_ADDR:  lambda: self.trap_addr,
-            CSR_MEGAPAD_SZ: lambda: 0,      # 8 MiB config
-            CSR_CPUID:      lambda: 0x4D50_3634_0001_0000,  # "MP64" v1.0
+            CSR_MEGAPAD_SZ: lambda: self.mem_size,
+            CSR_CPUID:      lambda: 0x4D50_3634_0001_4350,  # "MP64" v1 "CP"
             CSR_PERF_CYCLES:  lambda: u64(self.perf_cycles),
             CSR_PERF_STALLS:  lambda: u64(self.perf_stalls),
             CSR_PERF_TILEOPS: lambda: u64(self.perf_tileops),
@@ -665,6 +691,14 @@ class Megapad64:
             CSR_TSTRIDE_C:      lambda: self.tstride_c,
             CSR_TTILE_H:        lambda: self.ttile_h,
             CSR_TTILE_W:        lambda: self.ttile_w,
+            CSR_DMA_RING_BASE:  lambda: self.dma_ring_base,
+            CSR_DMA_RING_SIZE:  lambda: self.dma_ring_size,
+            CSR_DMA_HEAD:       lambda: self.dma_head,
+            CSR_DMA_TAIL:       lambda: self.dma_tail,
+            CSR_DMA_STATUS:     lambda: self.dma_status,
+            CSR_DMA_CTRL:       lambda: self.dma_ctrl,
+            CSR_QOS_WEIGHT:     lambda: self.qos_weight,
+            CSR_QOS_BWLIMIT:    lambda: self.qos_bwlimit,
         }
         fn = m.get(addr)
         if fn is None:
@@ -712,6 +746,14 @@ class Megapad64:
             CSR_TSTRIDE_C: lambda v: setattr(self, 'tstride_c', v & 0xFFFFF),
             CSR_TTILE_H:   lambda v: setattr(self, 'ttile_h', max(1, min(8, v & 0xFF))),
             CSR_TTILE_W:   lambda v: setattr(self, 'ttile_w', max(1, min(64, v & 0xFF))),
+            CSR_DMA_RING_BASE: lambda v: setattr(self, 'dma_ring_base', v),
+            CSR_DMA_RING_SIZE: lambda v: setattr(self, 'dma_ring_size', v),
+            CSR_DMA_HEAD:      lambda v: setattr(self, 'dma_head', v),
+            CSR_DMA_TAIL:      lambda v: setattr(self, 'dma_tail', v),
+            CSR_DMA_STATUS:    lambda v: setattr(self, 'dma_status', v),
+            CSR_DMA_CTRL:      lambda v: self._dma_ctrl_write(v),
+            CSR_QOS_WEIGHT:    lambda v: setattr(self, 'qos_weight', v),
+            CSR_QOS_BWLIMIT:   lambda v: setattr(self, 'qos_bwlimit', v),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -818,6 +860,17 @@ class Megapad64:
         if val & 2:                 # invalidate-all bit
             self.icache_hits   = 0
             self.icache_misses = 0
+
+    def _dma_ctrl_write(self, val: int):
+        """Handle writes to CSR_DMA_CTRL — matches RTL mp64_cpu.v.
+
+        Bit 1: reset pointers and status.
+        """
+        self.dma_ctrl = u64(val)
+        if val & 2:
+            self.dma_head = 0
+            self.dma_tail = 0
+            self.dma_status = 0
 
     def _tile_selftest_write(self, val: int):
         """Handle writes to CSR_TILE_SELFTEST — run tile self-test."""
@@ -2518,6 +2571,15 @@ class Megapad64:
         self.halted = False
         self.idle = False
         self._ext_modifier = -1
+        # DMA / QoS
+        self.dma_ring_base = 0
+        self.dma_ring_size = 0
+        self.dma_head = 0
+        self.dma_tail = 0
+        self.dma_status = 0
+        self.dma_ctrl = 0
+        self.qos_weight = 0
+        self.qos_bwlimit = 0
         # Note: core_id and num_cores are NOT reset — they are hardware-fixed
 
     # -- Instruction size helper (for SKIP) --
@@ -2626,24 +2688,26 @@ class Megapad64:
 #   - MUL/DIV delegated to cluster's shared unit (or trap if standalone)
 #   - Only PERF_CYCLES counter (stalls/tileops/extmem → 0)
 #   - CPUID returns micro-core variant ID
-#   - Barrier CSRs (0x66/0x67) forwarded to cluster
+#   - Barrier CSRs (0x74/0x75) forwarded to cluster
 #   - BIST CSRs (0x60-0x63) forwarded to cluster
+#   - Cluster IVT base CSR (0x73) forwarded to cluster
 #   - No 1802-heritage state: D accum, Q flip-flop, T register removed
-#   - No 1802-heritage families: MEMALU (0x8), I/O (0x9), SEP (0xA),
-#     SEX (0xB) — all trap as ILLEGAL_OP
+#   - No 1802-heritage families: MEMALU (0x8), I/O (0x9)
+#   - SEP (0xA) and SEX (0xB) ARE available (zero area cost)
 #   - No 1802-heritage sub-ops: GLO/GHI/PLO/PHI (0x6C-0x6F),
 #     RET/DIS/MARK/SAV/SEQ/REQ (0x05-0x0A) — trap as ILLEGAL_OP
 #   - No port_in/port_out arrays
-#   - PSEL fixed at 3, XSEL fixed at 2 (cannot be changed)
 # ---------------------------------------------------------------------------
 
 class Megapad64Micro(Megapad64):
     """Micro-core CPU — lightweight variant for cluster execution.
 
-    Strips all CDP1802-heritage features to minimise silicon area:
+    Strips CDP1802-heritage features to minimise silicon area:
     no D accumulator, no Q flip-flop, no T register, no SCRT calling
-    convention (MARK/SAV/RET/DIS), no port I/O, no SEP/SEX.
-    PSEL and XSEL are fixed at boot defaults (3 and 2).
+    convention (MARK/SAV/RET/DIS), no port I/O.
+
+    SEP and SEX ARE available on micro-cores (zero area cost — they
+    only update the psel/xsel pointer, which micro-cores already have).
     """
 
     def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
@@ -2664,7 +2728,9 @@ class Megapad64Micro(Megapad64):
         self.port_out = None  # not present
         self.port_in = None   # not present
 
-    # -- Families 0x8, 0x9, 0xA, 0xB — not available on micro-cores --
+    # -- Families 0x8, 0x9 — not available on micro-cores --
+    # Note: SEP (0xA) and SEX (0xB) ARE available (zero cost, just
+    # update psel/xsel pointers) — inherited from parent class.
 
     def _exec_memalu(self, sub: int) -> int:
         """MEMALU (1802 D-register ops) not present on micro-cores."""
@@ -2675,16 +2741,6 @@ class Megapad64Micro(Megapad64):
         """Port I/O (1802-style) not present on micro-cores."""
         raise TrapError(IVEC_ILLEGAL_OP,
                         "Port I/O (family 0x9) not available on micro-core")
-
-    def _exec_sep(self, n: int) -> int:
-        """SEP (set PC register) not present on micro-cores."""
-        raise TrapError(IVEC_ILLEGAL_OP,
-                        "SEP (family 0xA) not available on micro-core")
-
-    def _exec_sex(self, n: int) -> int:
-        """SEX (set data pointer register) not present on micro-cores."""
-        raise TrapError(IVEC_ILLEGAL_OP,
-                        "SEX (family 0xB) not available on micro-core")
 
     # -- MEX (tile engine) — not available on micro-cores --
 
@@ -2763,7 +2819,8 @@ class Megapad64Micro(Megapad64):
                 return self._cluster.bist_csr_read(addr)
             return 0
         # Cluster MPU CSRs — forwarded to cluster
-        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT):
+        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
+                    CSR_CL_IVTBASE):
             if self._cluster:
                 return self._cluster.bist_csr_read(addr)
             return 0
@@ -2793,7 +2850,8 @@ class Megapad64Micro(Megapad64):
                 self._cluster.bist_csr_write(addr, val)
             return
         # Cluster MPU CSRs — forwarded to cluster (S-mode only)
-        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT):
+        if addr in (CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
+                    CSR_CL_IVTBASE):
             if self._cluster:
                 self._cluster.bist_csr_write(addr, val)
             return

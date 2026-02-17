@@ -130,7 +130,7 @@ module tb_cpu_smoke;
     mp64_cpu uut (
         .clk       (clk),
         .rst       (rst),
-        .core_id   (5'd0),
+        .core_id   (8'd0),
 
         // I-cache interface
         .icache_addr    (icache_addr),

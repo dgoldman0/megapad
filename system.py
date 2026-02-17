@@ -25,7 +25,7 @@ from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
-    CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
+    CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
 )
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -115,6 +115,7 @@ class MicroCluster:
         self.cl_priv_level = 0   # 0 = supervisor, 1 = user
         self.cl_mpu_base = 0     # inclusive lower bound
         self.cl_mpu_limit = 0    # exclusive upper bound
+        self.cl_ivt_base = 0     # shared IVT base address
 
         # Create micro-cores
         self.cores: list[Megapad64Micro] = []
@@ -157,6 +158,8 @@ class MicroCluster:
             return self.cl_mpu_base
         if addr == CSR_CL_MPU_LIMIT:
             return self.cl_mpu_limit
+        if addr == CSR_CL_IVTBASE:
+            return self.cl_ivt_base
         return 0
 
     def bist_csr_write(self, addr: int, val: int):
@@ -178,6 +181,8 @@ class MicroCluster:
                 self.cl_mpu_base = val & ((1 << 64) - 1)
             elif addr == CSR_CL_MPU_LIMIT:
                 self.cl_mpu_limit = val & ((1 << 64) - 1)
+            elif addr == CSR_CL_IVTBASE:
+                self.cl_ivt_base = val & ((1 << 64) - 1)
 
     def _bist_spad(self) -> bool:
         """March C- test on scratchpad memory."""

@@ -2744,23 +2744,26 @@ class TestMicroCluster(unittest.TestCase):
             mc.step()
         self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
 
-    def test_sep_traps_on_micro_core(self):
-        """SEP (family 0xA) raises ILLEGAL_OP on micro-cores."""
+    def test_sep_works_on_micro_core(self):
+        """SEP (family 0xA) is allowed on micro-cores (zero area cost)."""
         mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
-        mc.mem[0] = 0xA3  # SEP R3
+        mc.regs[5] = 0x100  # target PC in R5
+        mc.mem[0] = 0xA5    # SEP R5
+        mc.mem[1] = 0x02    # HALT
+        mc.mem[0x100] = 0x02  # HALT at the new PC
         mc.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            mc.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+        mc.step()  # should NOT trap
+        self.assertEqual(mc.psel, 5, "PSEL should switch to R5")
+        self.assertEqual(mc.pc, 0x100, "PC should be R5's value")
 
-    def test_sex_traps_on_micro_core(self):
-        """SEX (family 0xB) raises ILLEGAL_OP on micro-cores."""
+    def test_sex_works_on_micro_core(self):
+        """SEX (family 0xB) is allowed on micro-cores (zero area cost)."""
         mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
-        mc.mem[0] = 0xB2  # SEX R2
+        mc.mem[0] = 0xB7  # SEX R7
+        mc.mem[1] = 0x02  # HALT
         mc.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            mc.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+        mc.step()  # should NOT trap
+        self.assertEqual(mc.xsel, 7, "XSEL should switch to R7")
 
     def test_glo_ghi_plo_phi_trap_on_micro_core(self):
         """GLO/GHI/PLO/PHI (IMM sub 0xC–0xF) trap on micro-cores."""

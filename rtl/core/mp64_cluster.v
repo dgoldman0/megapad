@@ -25,7 +25,7 @@
 
 module mp64_cluster #(
     parameter N               = MP64_MICRO_PER_CLUSTER,
-    parameter [MP64_CORE_ID_BITS-1:0] CLUSTER_ID_BASE = 5'd4
+    parameter [MP64_CORE_ID_BITS-1:0] CLUSTER_ID_BASE = 8'd4
 ) (
     input  wire        clk,
     input  wire        rst,

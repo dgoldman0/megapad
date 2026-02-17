@@ -94,7 +94,7 @@ module tb_cluster;
 
     mp64_cluster #(
         .N              (N),
-        .CLUSTER_ID_BASE(5'd4)
+        .CLUSTER_ID_BASE(8'd4)
     ) uut (
         .clk        (clk),
         .rst        (rst),

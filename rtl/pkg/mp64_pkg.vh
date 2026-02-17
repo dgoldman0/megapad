@@ -41,7 +41,7 @@ localparam MP64_MAX_REGS           = 16;            // 16 GPRs
 
 // Multi-core defaults
 localparam MP64_NUM_CORES_DEFAULT       = 4;
-localparam MP64_CORE_ID_BITS            = 5;        // 5-bit core IDs (0–31)
+localparam MP64_CORE_ID_BITS            = 8;        // 8-bit core IDs (0–255)
 localparam MP64_NUM_CLUSTERS_DEFAULT    = 3;
 localparam MP64_MICRO_PER_CLUSTER       = 4;
 // Derived (at default counts):
@@ -355,6 +355,8 @@ localparam [11:0] QOS_BASE        = 12'h7E0;
 localparam [11:0] FIELD_ALU_BASE  = 12'h840;
 localparam [11:0] NTT_BASE        = 12'h8C0;
 localparam [11:0] KEM_BASE        = 12'h900;
+localparam [11:0] TRNG_BASE       = 12'h800;
+localparam [11:0] FB_BASE         = 12'hA00;
 
 // --- UART registers ---
 localparam [3:0] UART_TX      = 4'h0;
