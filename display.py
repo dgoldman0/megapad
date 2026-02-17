@@ -6,6 +6,12 @@ emulator — either external memory or HBW — and renders them in a
 pygame window.  Runs in a background thread so it doesn't block the
 UART console loop.
 
+The window has two tabs:
+  [Terminal]  — virtual VT100-style console mirroring UART output
+  [Graphics]  — live view of the hardware framebuffer
+
+Press F1/F2 or click the tab buttons to switch.
+
 Usage (programmatic):
     from display import FramebufferDisplay
     disp = FramebufferDisplay(sys_emu)
@@ -22,6 +28,7 @@ from __future__ import annotations
 import threading
 import time
 import struct
+from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,9 +38,285 @@ if TYPE_CHECKING:
 HBW_BASE = 0xFFD0_0000
 EXT_MEM_BASE = 0x0010_0000
 
+# Virtual terminal defaults
+TERM_COLS = 80
+TERM_ROWS = 30
+TAB_HEIGHT = 24          # pixels for tab bar
+CURSOR_BLINK_MS = 530    # cursor blink interval
+
+
+# ── Virtual Terminal ──────────────────────────────────────────────────
+
+
+class VirtualTerminal:
+    """VT100-ish text terminal backed by a character grid.
+
+    Supports a subset of ANSI/VT100:
+      - printable ASCII
+      - \\r, \\n, \\t, \\b (BS), \\x7f (DEL)
+      - ESC [ <n> ; <m> H  (cursor position)
+      - ESC [ <n> J         (erase in display)
+      - ESC [ <n> K         (erase in line)
+      - ESC [ <n> m         (SGR — bold, color)
+      - ESC [ ? 25 h/l      (show/hide cursor)
+    """
+
+    # Default CGA-ish 16-color palette (R, G, B)
+    COLORS = [
+        (0, 0, 0),          # 0 black
+        (170, 0, 0),        # 1 red
+        (0, 170, 0),        # 2 green
+        (170, 85, 0),       # 3 yellow/brown
+        (0, 0, 170),        # 4 blue
+        (170, 0, 170),      # 5 magenta
+        (0, 170, 170),      # 6 cyan
+        (170, 170, 170),    # 7 white (light gray)
+        (85, 85, 85),       # 8 bright black (dark gray)
+        (255, 85, 85),      # 9 bright red
+        (85, 255, 85),      # 10 bright green
+        (255, 255, 85),     # 11 bright yellow
+        (85, 85, 255),      # 12 bright blue
+        (255, 85, 255),     # 13 bright magenta
+        (85, 255, 255),     # 14 bright cyan
+        (255, 255, 255),    # 15 bright white
+    ]
+
+    def __init__(self, cols: int = TERM_COLS, rows: int = TERM_ROWS):
+        self.cols = cols
+        self.rows = rows
+        self.cx = 0        # cursor column
+        self.cy = 0        # cursor row
+        self.fg = 7        # foreground color index
+        self.bg = 0        # background color index
+        self.bold = False
+        self.cursor_visible = True
+
+        # Character grid: list of rows, each row = list of (char, fg, bg)
+        self.grid: list[list[tuple[str, int, int]]] = []
+        self._clear_grid()
+
+        # Scrollback buffer (lines that scrolled off the top)
+        self.scrollback: deque[list[tuple[str, int, int]]] = deque(maxlen=1000)
+
+        # ESC sequence parser state
+        self._esc_state = 0   # 0=normal, 1=got ESC, 2=got CSI
+        self._esc_buf = ""
+
+        # Lock for thread safety
+        self._lock = threading.Lock()
+        self._dirty = True
+
+    def _clear_grid(self):
+        self.grid = [
+            [(' ', self.fg, self.bg) for _ in range(self.cols)]
+            for _ in range(self.rows)
+        ]
+
+    def write(self, data: bytes | int):
+        """Feed raw bytes (or a single int) into the terminal."""
+        with self._lock:
+            if isinstance(data, int):
+                self._process_byte(data)
+            else:
+                for b in data:
+                    self._process_byte(b)
+            self._dirty = True
+
+    def _process_byte(self, b: int):
+        ch = chr(b) if b < 128 else ''
+
+        # ESC sequence parsing
+        if self._esc_state == 1:
+            if ch == '[':
+                self._esc_state = 2
+                self._esc_buf = ""
+            else:
+                self._esc_state = 0  # unsupported ESC sequence
+            return
+        if self._esc_state == 2:
+            if ch.isdigit() or ch in ';?':
+                self._esc_buf += ch
+                return
+            # Got final character
+            self._handle_csi(self._esc_buf, ch)
+            self._esc_state = 0
+            return
+
+        # Normal character processing
+        if b == 0x1B:   # ESC
+            self._esc_state = 1
+            return
+        if b == 0x0D:   # CR
+            self.cx = 0
+            return
+        if b == 0x0A:   # LF
+            self._line_feed()
+            return
+        if b == 0x09:   # TAB
+            self.cx = min((self.cx // 8 + 1) * 8, self.cols - 1)
+            return
+        if b == 0x08 or b == 0x7F:  # BS or DEL
+            if self.cx > 0:
+                self.cx -= 1
+                self.grid[self.cy][self.cx] = (' ', self.fg, self.bg)
+            return
+        if b == 0x07:   # BEL — ignore
+            return
+        if b < 0x20:    # other control chars — ignore
+            return
+
+        # Printable character
+        fg = min(self.fg + (8 if self.bold and self.fg < 8 else 0), 15)
+        self.grid[self.cy][self.cx] = (ch, fg, self.bg)
+        self.cx += 1
+        if self.cx >= self.cols:
+            self.cx = 0
+            self._line_feed()
+
+    def _line_feed(self):
+        self.cy += 1
+        if self.cy >= self.rows:
+            self.cy = self.rows - 1
+            self._scroll_up()
+
+    def _scroll_up(self):
+        """Scroll the display up one line."""
+        old_top = self.grid[0]
+        self.scrollback.append(old_top)
+        del self.grid[0]
+        self.grid.append(
+            [(' ', self.fg, self.bg) for _ in range(self.cols)]
+        )
+
+    def _handle_csi(self, params: str, cmd: str):
+        """Handle CSI (ESC [) sequences."""
+        parts = params.split(';') if params else ['']
+
+        def num(idx=0, default=1):
+            try:
+                return int(parts[idx]) if parts[idx] else default
+            except (IndexError, ValueError):
+                return default
+
+        if cmd == 'H' or cmd == 'f':
+            # Cursor position: ESC[row;colH
+            self.cy = max(0, min(num(0, 1) - 1, self.rows - 1))
+            self.cx = max(0, min(num(1, 1) - 1, self.cols - 1))
+        elif cmd == 'A':
+            self.cy = max(0, self.cy - num())
+        elif cmd == 'B':
+            self.cy = min(self.rows - 1, self.cy + num())
+        elif cmd == 'C':
+            self.cx = min(self.cols - 1, self.cx + num())
+        elif cmd == 'D':
+            self.cx = max(0, self.cx - num())
+        elif cmd == 'J':
+            n = num(0, 0)
+            if n == 2:
+                self._clear_grid()
+                self.cx = self.cy = 0
+            elif n == 0:
+                # Erase from cursor to end
+                for x in range(self.cx, self.cols):
+                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+                for y in range(self.cy + 1, self.rows):
+                    for x in range(self.cols):
+                        self.grid[y][x] = (' ', self.fg, self.bg)
+        elif cmd == 'K':
+            n = num(0, 0)
+            if n == 0:
+                for x in range(self.cx, self.cols):
+                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+            elif n == 1:
+                for x in range(0, self.cx + 1):
+                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+            elif n == 2:
+                for x in range(self.cols):
+                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+        elif cmd == 'm':
+            # SGR — set graphic rendition
+            codes = [num(i, 0) for i in range(len(parts))]
+            for code in codes:
+                if code == 0:
+                    self.fg, self.bg, self.bold = 7, 0, False
+                elif code == 1:
+                    self.bold = True
+                elif code == 22:
+                    self.bold = False
+                elif 30 <= code <= 37:
+                    self.fg = code - 30
+                elif 40 <= code <= 47:
+                    self.bg = code - 40
+                elif 90 <= code <= 97:
+                    self.fg = code - 90 + 8
+                elif 100 <= code <= 107:
+                    self.bg = code - 100 + 8
+                elif code == 39:
+                    self.fg = 7
+                elif code == 49:
+                    self.bg = 0
+        elif cmd == 'h':
+            if params == '?25':
+                self.cursor_visible = True
+        elif cmd == 'l':
+            if params == '?25':
+                self.cursor_visible = False
+
+    def render(self, pygame_module, font, cell_w: int, cell_h: int,
+               show_cursor: bool = True,
+               _cache: dict | None = None) -> 'pygame.Surface':
+        """Render the terminal grid to a pygame surface.
+
+        Pass a dict as *_cache* across calls to enable glyph caching
+        (maps (char, fg_index) -> pre-rendered Surface).  The cache is
+        populated lazily and typically stays small (~200 entries).
+        """
+        with self._lock:
+            surf_w = self.cols * cell_w
+            surf_h = self.rows * cell_h
+            surface = pygame_module.Surface((surf_w, surf_h))
+            surface.fill(self.COLORS[0])
+
+            cache = _cache if _cache is not None else {}
+
+            for y in range(self.rows):
+                for x in range(self.cols):
+                    ch, fg, bg = self.grid[y][x]
+                    px = x * cell_w
+                    py = y * cell_h
+                    if bg != 0:
+                        pygame_module.draw.rect(
+                            surface, self.COLORS[bg],
+                            (px, py, cell_w, cell_h))
+                    if ch != ' ':
+                        key = (ch, fg)
+                        glyph = cache.get(key)
+                        if glyph is None:
+                            glyph = font.render(
+                                ch, False, self.COLORS[fg])
+                            cache[key] = glyph
+                        surface.blit(glyph, (px, py))
+
+            # Draw cursor
+            if show_cursor and self.cursor_visible:
+                cx_px = self.cx * cell_w
+                cy_px = self.cy * cell_h
+                pygame_module.draw.rect(
+                    surface, self.COLORS[7],
+                    (cx_px, cy_px + cell_h - 2, cell_w, 2))
+
+            self._dirty = False
+        return surface
+
 
 class FramebufferDisplay:
-    """Background-threaded pygame display for the Megapad-64 framebuffer."""
+    """Background-threaded pygame display for the Megapad-64 framebuffer.
+
+    Shows two tabs: Terminal (VT100 console) and Graphics (hardware FB).
+    """
+
+    TAB_TERMINAL = 0
+    TAB_GRAPHICS = 1
 
     def __init__(self, sys_emu: "MegapadSystem", scale: int = 2,
                  title: str = "Megapad-64"):
@@ -44,11 +327,17 @@ class FramebufferDisplay:
         self._stop_event = threading.Event()
         self._started = threading.Event()
         self.fps = 30
+        self.active_tab = self.TAB_TERMINAL
+        self.term = VirtualTerminal(TERM_COLS, TERM_ROWS)
 
     # -- public API -------------------------------------------------------
 
     def start(self):
         """Start the display thread.  Returns once the window is open."""
+        # Register as a TX listener so every byte also feeds the vterm.
+        # This coexists with on_tx (set by run_console for stdout).
+        self.sys.uart._tx_listeners.append(self.term.write)
+
         self._stop_event.clear()
         self._started.clear()
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -62,6 +351,11 @@ class FramebufferDisplay:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        # Remove TX listener
+        try:
+            self.sys.uart._tx_listeners.remove(self.term.write)
+        except ValueError:
+            pass
 
     @property
     def running(self) -> bool:
@@ -77,15 +371,44 @@ class FramebufferDisplay:
         pygame.init()
         pygame.display.set_caption(self.title)
 
-        # Start with a small default window; resize when FB changes
-        win_w = 320 * self.scale
-        win_h = 240 * self.scale
-        screen = pygame.display.set_mode((win_w, win_h))
+        # Monospace font for virtual terminal — scale with display scale
+        term_font_size = max(12, 14 * self.scale)
+        term_font = pygame.font.SysFont("monospace", term_font_size)
+        # Measure cell size from font
+        test = term_font.render("M", False, (255, 255, 255))
+        cell_w = test.get_width()
+        cell_h = term_font.get_linesize()
+
+        # Compute window dimensions from terminal size
+        term_pixel_w = self.term.cols * cell_w
+        term_pixel_h = self.term.rows * cell_h
+        tab_h = max(TAB_HEIGHT, term_font_size + 10)
+        content_w = term_pixel_w
+        content_h = term_pixel_h
+        win_w = content_w
+        win_h = content_h + tab_h
+
+        screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
         clock = pygame.time.Clock()
 
-        # Surface for the actual framebuffer pixels (unscaled)
+        # Tab bar font (scales with terminal font)
+        tab_font_size = max(12, term_font_size - 2)
+        tab_font = pygame.font.SysFont("sans", tab_font_size, bold=True)
+
+        # Framebuffer surface (will be resized when FB dimensions change)
         fb_surface = pygame.Surface((320, 240))
         last_w, last_h, last_mode = 0, 0, -1
+
+        # Glyph cache for terminal rendering (huge speedup)
+        glyph_cache: dict = {}
+
+        # Cached terminal surface — reused when nothing changed
+        term_surf_cached = None
+        last_cursor_blink = True
+
+        # Cursor blink state
+        cursor_blink = True
+        last_blink = pygame.time.get_ticks()
 
         self._started.set()
 
@@ -100,63 +423,144 @@ class FramebufferDisplay:
                         if event.key == pygame.K_ESCAPE:
                             self._stop_event.set()
                             return
-                        # Forward printable keys to UART
-                        if event.unicode and ord(event.unicode) < 128:
-                            ch = event.unicode.encode('ascii', 'ignore')
-                            if ch:
-                                self.sys.uart.inject_input(ch)
-                        elif event.key == pygame.K_RETURN:
-                            self.sys.uart.inject_input(b'\r')
-                        elif event.key == pygame.K_BACKSPACE:
-                            self.sys.uart.inject_input(b'\x08')
+                        elif event.key == pygame.K_F1:
+                            self.active_tab = self.TAB_TERMINAL
+                        elif event.key == pygame.K_F2:
+                            self.active_tab = self.TAB_GRAPHICS
+                        else:
+                            # Forward keys to UART
+                            if event.unicode and ord(event.unicode) < 128:
+                                ch = event.unicode.encode('ascii', 'ignore')
+                                if ch:
+                                    self.sys.uart.inject_input(ch)
+                            elif event.key == pygame.K_RETURN:
+                                self.sys.uart.inject_input(b'\r')
+                            elif event.key == pygame.K_BACKSPACE:
+                                self.sys.uart.inject_input(b'\x08')
+                            elif event.key == pygame.K_UP:
+                                self.sys.uart.inject_input(b'\x1b[A')
+                            elif event.key == pygame.K_DOWN:
+                                self.sys.uart.inject_input(b'\x1b[B')
+                            elif event.key == pygame.K_RIGHT:
+                                self.sys.uart.inject_input(b'\x1b[C')
+                            elif event.key == pygame.K_LEFT:
+                                self.sys.uart.inject_input(b'\x1b[D')
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        # Check tab bar clicks
+                        mx, my = event.pos
+                        if my < tab_h:
+                            if mx < win_w // 2:
+                                self.active_tab = self.TAB_TERMINAL
+                            else:
+                                self.active_tab = self.TAB_GRAPHICS
 
-                # Check if FB is enabled
-                if not (fb.enable & 1):
-                    # Not enabled — show a dark screen with a label
-                    screen.fill((24, 24, 32))
-                    font = pygame.font.SysFont("monospace", 14)
-                    label = font.render("Framebuffer disabled", True,
-                                        (100, 100, 120))
-                    screen.blit(label, (10, 10))
-                    pygame.display.flip()
-                    clock.tick(10)
-                    continue
+                # Cursor blink
+                now = pygame.time.get_ticks()
+                if now - last_blink >= CURSOR_BLINK_MS:
+                    cursor_blink = not cursor_blink
+                    last_blink = now
 
-                w, h, mode = fb.width, fb.height, fb.mode
-                if w < 1 or h < 1:
-                    clock.tick(10)
-                    continue
+                screen.fill((32, 32, 40))
 
-                # Resize window / surface if dimensions changed
-                if w != last_w or h != last_h or mode != last_mode:
-                    last_w, last_h, last_mode = w, h, mode
-                    win_w = w * self.scale
-                    win_h = h * self.scale
-                    screen = pygame.display.set_mode((win_w, win_h))
-                    fb_surface = pygame.Surface((w, h))
+                # ── Draw tab bar ──────────────────────────────────
+                self._draw_tabs(pygame, screen, tab_font, win_w, tab_h)
 
-                # Read pixel data from HBW memory
-                self._render_fb(fb, fb_surface, w, h, mode)
+                # ── Draw content area ─────────────────────────────
+                content_rect = pygame.Rect(0, tab_h, win_w,
+                                           win_h - tab_h)
 
-                # Scale and blit
-                if self.scale != 1:
-                    scaled = pygame.transform.scale(fb_surface, (win_w, win_h))
-                    screen.blit(scaled, (0, 0))
-                else:
-                    screen.blit(fb_surface, (0, 0))
+                if self.active_tab == self.TAB_TERMINAL:
+                    # Render virtual terminal (skip if clean + same blink)
+                    need_render = (self.term._dirty
+                                   or cursor_blink != last_cursor_blink
+                                   or term_surf_cached is None)
+                    if need_render:
+                        term_surf_cached = self.term.render(
+                            pygame, term_font, cell_w, cell_h,
+                            show_cursor=cursor_blink,
+                            _cache=glyph_cache)
+                        last_cursor_blink = cursor_blink
+                    term_surf = term_surf_cached
+                    # Center it in the content area
+                    tx = (content_rect.width - term_surf.get_width()) // 2
+                    ty = (content_rect.height - term_surf.get_height()) // 2
+                    screen.blit(term_surf,
+                                (content_rect.x + max(0, tx),
+                                 content_rect.y + max(0, ty)))
+
+                elif self.active_tab == self.TAB_GRAPHICS:
+                    if not (fb.enable & 1):
+                        label = tab_font.render(
+                            "Framebuffer disabled  —  use GFX-INIT",
+                            True, (100, 100, 120))
+                        screen.blit(label,
+                                    (content_rect.x + 10,
+                                     content_rect.y + 10))
+                    else:
+                        w, h, mode = fb.width, fb.height, fb.mode
+                        if w >= 1 and h >= 1:
+                            if (w != last_w or h != last_h
+                                    or mode != last_mode):
+                                last_w, last_h, last_mode = w, h, mode
+                                fb_surface = pygame.Surface((w, h))
+
+                            self._render_fb(fb, fb_surface, w, h, mode)
+
+                            # Scale to fit content area
+                            sw = content_rect.width
+                            sh = content_rect.height
+                            aspect = w / h
+                            if sw / sh > aspect:
+                                sh2 = sh
+                                sw2 = int(sh2 * aspect)
+                            else:
+                                sw2 = sw
+                                sh2 = int(sw2 / aspect)
+                            scaled = pygame.transform.scale(
+                                fb_surface, (sw2, sh2))
+                            ox = (content_rect.width - sw2) // 2
+                            oy = (content_rect.height - sh2) // 2
+                            screen.blit(scaled,
+                                        (content_rect.x + ox,
+                                         content_rect.y + oy))
+
+                            # Tick vsync
+                            fb.vsync_count += 1
+                            fb.vblank = True
 
                 pygame.display.flip()
-
-                # Tick vsync counter
-                fb.vsync_count += 1
-                fb.vblank = True
-
                 clock.tick(self.fps)
 
         except Exception as e:
             print(f"\n[display] error: {e}")
         finally:
             pygame.quit()
+
+    def _draw_tabs(self, pygame, screen, font, win_w: int,
+                    tab_h: int = TAB_HEIGHT):
+        """Draw the tab bar at the top of the window."""
+        tab_w = win_w // 2
+        tabs = [
+            ("Terminal [F1]", self.TAB_TERMINAL),
+            ("Graphics [F2]", self.TAB_GRAPHICS),
+        ]
+        for i, (label, tab_id) in enumerate(tabs):
+            x = i * tab_w
+            active = (self.active_tab == tab_id)
+            bg = (50, 50, 65) if active else (30, 30, 38)
+            fg = (220, 220, 240) if active else (110, 110, 130)
+            pygame.draw.rect(screen, bg, (x, 0, tab_w, tab_h))
+            if active:
+                # Active tab indicator line
+                pygame.draw.rect(screen, (80, 140, 255),
+                                 (x, tab_h - 2, tab_w, 2))
+            text = font.render(label, True, fg)
+            tx = x + (tab_w - text.get_width()) // 2
+            ty = (tab_h - text.get_height()) // 2
+            screen.blit(text, (tx, ty))
+        # Separator line
+        pygame.draw.line(screen, (60, 60, 75),
+                         (tab_w, 0), (tab_w, tab_h - 1))
 
     def _resolve_fb_mem(self, base_addr: int):
         """Return (buffer, offset) for the given framebuffer base address.
