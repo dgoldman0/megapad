@@ -512,9 +512,6 @@ CREATE GFX-FONT
         I 7 AND 9 +                     ( char x y color )
         GFX-CHAR
     LOOP
-    \ Row labels
-    16 GFX-CX !  228 GFX-CY !
-    S" 32          64          96          128" 8 GFX-TYPE
 
     \ === Horizontal line test ===
     0 8 268 300 56 GFX-RECT
@@ -552,9 +549,9 @@ CREATE GFX-FONT
     13 184 398 48 36 GFX-BOX
     9  240 398 48 36 GFX-BOX
     \ Labels
-    24 GFX-CX !  396 GFX-CY !
+    128 GFX-CX !  348 GFX-CY !
     S" Filled" 7 GFX-TYPE
-    200 GFX-CX !  396 GFX-CY !
+    120 GFX-CX !  390 GFX-CY !
     S" Outlined" 7 GFX-TYPE
 
     \ === Text rendering demo (right side) ===
