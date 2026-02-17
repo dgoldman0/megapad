@@ -183,17 +183,17 @@ with optional SDL2 display in the emulator.
 
 ### Commit 7: RTL framebuffer module
 
-- `fpga/rtl/mp64_framebuffer.v` (~250 lines)
+- `rtl/periph/mp64_framebuffer.v` (~250 lines)
   - MMIO register bank (matches emulator exactly)
   - Palette LUT (256×24-bit, distributed RAM)
   - VGA timing generator (640×480 @ 60 Hz, active area configurable)
   - Line buffer (double-buffered, 1 BRAM18 each)
   - HBW read port: fetches one scanline per hblank
   - Pixel clock: 25.175 MHz for 640×480 VGA (from PLL)
-- `fpga/rtl/mp64_soc.v`: Wire framebuffer into SoC
+- `rtl/soc/mp64_top.v`: Wire framebuffer into SoC
   - MMIO decode at offset 0x0A00
   - Connect HBW read port (shared with tile, arbitrated)
-- `fpga/sim/tb_framebuffer.v`: Testbench (~200 lines)
+- `rtl/sim/tb_framebuffer.v`: Testbench (~200 lines)
   - Register read/write for all CSRs
   - Palette programming
   - Scanline fetch sequence verification
@@ -264,9 +264,9 @@ depend only on 2.  Documentation is last.
 | `cli.py` (1,005 → ~1,125) | `--display` option | +120 |
 | `pyproject.toml` | Optional pygame dependency | +3 |
 | `test_system.py` (16,403 → ~16,750) | 3 new test classes | +350 |
-| `fpga/rtl/mp64_framebuffer.v` (new) | RTL scanout module | +250 |
-| `fpga/rtl/mp64_soc.v` | Wire FB into SoC | +30 |
-| `fpga/sim/tb_framebuffer.v` (new) | RTL testbench | +200 |
+| `rtl/periph/mp64_framebuffer.v` (new) | RTL scanout module | +250 |
+| `rtl/soc/mp64_top.v` | Wire FB into SoC | +30 |
+| `rtl/sim/tb_framebuffer.v` (new) | RTL testbench | +200 |
 | Docs (5 files) | Spec, arch, reference, emulator, roadmap | +250 |
 | **Total** | | **~1,930** |
 

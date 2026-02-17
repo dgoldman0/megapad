@@ -343,17 +343,18 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (754 tests):
+The project has a comprehensive test suite (1,258+ tests):
 
 ```bash
-# Full test suite (CPython)
-python -m pytest test_system.py test_megapad64.py -v --timeout=30
+# Full test suite (background — runs via conftest guard)
+make test                                # launches in background
+make test-status                         # check progress
 
-# Just the KDOS tests
-python -m pytest test_system.py -k "TestKDOS" --timeout=30
+# Run a specific test class
+make test-one K=TestKDOS                 # just KDOS tests
 
 # CPU unit tests only
-python -m pytest test_megapad64.py -v
+make test-one K=TestCPU
 ```
 
 ### Fast Tests with PyPy + xdist

@@ -48,54 +48,19 @@ Primary target: **Kintex-7 325T** (Digilent Genesys 2).
 
 ```
 fpga/
-├── README.md           ← this file
-├── rtl/
-│   ├── mp64_soc.v      ← top-level SoC
-│   ├── mp64_cpu.v       ← CPU core (fetch/decode/execute)
-│   ├── mp64_cpu_fsm.v   ← CPU FSM controller
-│   ├── mp64_tile.v      ← tile engine (MEX unit)
-│   ├── mp64_memory.v    ← memory subsystem (BRAM + arbiter)
-│   ├── mp64_extmem.v    ← external memory controller
-│   ├── mp64_bus.v       ← bus arbiter + address decoder
-│   ├── mp64_icache.v    ← instruction cache
-│   ├── mp64_fp16_alu.v  ← FP16/BF16 ALU
-│   ├── mp64_uart.v      ← UART peripheral
-│   ├── mp64_timer.v     ← timer peripheral
-│   ├── mp64_disk.v      ← storage controller (SPI-SD)
-│   ├── mp64_nic.v       ← network interface
-│   ├── mp64_mailbox.v   ← multicore mailbox + IPI
-│   ├── mp64_aes.v       ← AES-256-GCM engine
-│   ├── mp64_sha3.v      ← SHA3/Keccak engine
-│   ├── mp64_crc.v       ← CRC-32 engine
-│   ├── mp64_trng.v      ← true random number generator
-│   ├── mp64_field_alu.v ← GF(2²⁵⁵−19) field coprocessor (8 modes)
-│   ├── mp64_ntt.v       ← 256-point NTT engine (lattice crypto)
-│   ├── mp64_kem.v       ← ML-KEM-512 key encapsulation
-│   ├── mp64_synth_top.v ← synthesis top-level wrapper
-│   └── mp64_defs.vh     ← shared constants & parameters
-├── sim/
-│   ├── tb_bus_arbiter.v  ← bus arbiter tests
-│   ├── tb_cpu_smoke.v    ← CPU smoke tests
-│   ├── tb_crypto.v       ← AES/SHA3/CRC tests
-│   ├── tb_field_alu.v    ← GF(p) field ALU tests (11 tests)
-│   ├── tb_icache.v       ← I-cache tests
-│   ├── tb_kem.v          ← ML-KEM-512 tests (15 tests)
-│   ├── tb_mailbox.v      ← mailbox/IPI tests
-│   ├── tb_memory.v       ← memory subsystem tests
-│   ├── tb_mp64_soc.v     ← full SoC integration test
-│   ├── tb_multicore_smoke.v ← multicore tests
-│   ├── tb_nic.v          ← NIC tests
-│   ├── tb_ntt.v          ← NTT engine tests (8 tests)
-│   ├── tb_opcodes.v      ← opcode tests
-│   ├── tb_peripherals.v  ← peripheral tests
-│   ├── tb_qos.v          ← QoS arbiter tests
-│   ├── tb_tile.v         ← tile engine tests
-│   ├── tb_trng.v         ← TRNG tests (9 tests)
-│   └── tb_x25519.v       ← legacy X25519 tests
+├── README.md            ← this file
+├── synth_genesys2.tcl   ← Vivado synthesis script
+├── synth_yosys.tcl      ← Yosys synthesis script
 ├── constraints/
 │   ├── genesys2.xdc     ← Genesys 2 (Kintex-7 325T) pin constraints
-│   └── nexys_a7.xdc     ← Nexys A7 pin constraints (legacy)
-└── synth_genesys2.tcl   ← Vivado synthesis script
+│   └── nexys_a7.xdc     ← Nexys A7 pin constraints
+├── docs/
+│   └── fpga.md          ← FPGA-specific documentation
+└── build/               ← synthesis output (gitignored)
+
+RTL source and testbenches are in the portable `rtl/` tree at the
+project root.  See `rtl/README.md` or the project-level README for
+the full module listing.
 ```
 
 ## Memory Architecture

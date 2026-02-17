@@ -140,10 +140,11 @@ Remaining work: application-level features (items 25–30).
 - test_networking.py: 38 real-network tests (NIC backends, TAP,
   ARP, ICMP, UDP, TCP) across 8 test classes
 
-### FPGA RTL — ✅ DONE (full ISA + extended tile + multicore + PQC)
+### RTL — ✅ DONE (full ISA + extended tile + multicore + PQC)
 
-23 Verilog modules in `fpga/rtl/`, 18 testbenches, ~180 hardware tests passing.
-13,367 lines RTL + 8,677 lines testbench.
+30 portable Verilog modules in `rtl/` + 12 target overrides (Xilinx-7 + ASIC stubs),
+28 testbenches, ~414 hardware assertions passing.
+~25,000 lines RTL + ~11,100 lines testbench.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
 - ✅ mp64_soc.v — 16-core heterogeneous SoC top-level (bus arbiter, MMIO, IPI wiring,
@@ -466,19 +467,19 @@ document that will be folded into proper docs as each item ships.
     - 41g. SysInfo: report bank count, sizes, HBW base
     - 41h. Tests: `TestBankedMemory` — bank routing, QoS, guard faults
 
-42. ☐ **Technology-agnostic RTL** — move all FPGA/ASIC-specific
-    primitives behind clean wrappers so the core builds portably.
-    Wrap: block RAM, PLL/MMCM, clock gating, IO buffers, DSP multiply,
-    reset synchronizers, FIFOs.
-    - 42a. Create `fpga/rtl/prim/` directory with abstract interfaces
-    - 42b. `mp64_prim_ram.v` — parameterized SRAM (depth, width, ports)
-    - 42c. `mp64_prim_mul.v` — multiplier with optional pipelining
-    - 42d. `mp64_prim_pll.v`, `mp64_prim_clkgate.v`, `mp64_prim_rstsync.v`
-    - 42e. `fpga/rtl/target/xilinx7/` — Xilinx 7-series implementations
-    - 42f. Refactor `mp64_memory.v` → use `mp64_prim_ram`
-    - 42g. Refactor `mp64_cpu.v` multiply → use `mp64_prim_mul`
-    - 42h. `fpga/rtl/target/asic/` — stub ASIC wrappers (placeholders)
-    - 42i. Verify all 18 testbenches still pass under `SIMULATION` define
+42. ✅ **Technology-agnostic RTL** — DONE (commits 50320a5, 6221469).
+    Moved all FPGA/ASIC-specific primitives behind clean wrappers;
+    core builds portably.  Wrapped: block RAM, PLL/MMCM, clock gating,
+    IO buffers, DSP multiply, reset synchronizers, FIFOs.
+    - 42a. ✅ `rtl/prim/` — abstract interfaces (RAM, MUL, PLL, clkgate, rstsync)
+    - 42b. ✅ `mp64_prim_ram.v` — parameterized SRAM (depth, width, ports)
+    - 42c. ✅ `mp64_prim_mul.v` — multiplier with optional pipelining
+    - 42d. ✅ `mp64_prim_pll.v`, `mp64_prim_clkgate.v`, `mp64_prim_rstsync.v`
+    - 42e. ✅ `rtl/target/xilinx7/` — Xilinx 7-series implementations
+    - 42f. ✅ Refactored `mp64_memory.v` → uses `mp64_prim_ram`
+    - 42g. ✅ Refactored `mp64_cpu.v` multiply → uses `mp64_prim_mul`
+    - 42h. ✅ `rtl/target/asic/` — stub ASIC wrappers (placeholders)
+    - 42i. ✅ All 28 testbenches pass under `SIMULATION` define (414 assertions)
 
 ---
 
@@ -509,7 +510,7 @@ micro-core (most complex, benefits from all prior work).  Alternatively
 fully independent and immediately useful).
 
 Each item is committed individually with its own test class and run via
-`make test-bg K=TestClassName` + `make test-status`.  Layer 2 is
+`make test-one K=TestClassName` + `make test-status`.  Layer 2 is
 strictly bottom-up — each protocol builds on the one below it.
 **Layer 2 items are large enough that each is broken into multiple
 sub-commits** (a–d typically), each independently tested.  This ensures
@@ -540,7 +541,7 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `Makefile` | 190 | ✅ Build, test, & accel targets |
 | `conftest.py` | 197 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `fpga/rtl/` | 13,367 | ✅ 23 Verilog modules |
-| `fpga/sim/` | 8,677 | ✅ 18 testbenches (~180 HW tests) |
+| `rtl/` | ~25,000 | ✅ 30 portable Verilog modules + 12 target overrides |
+| `rtl/sim/` | ~11,100 | ✅ 28 testbenches (~414 HW assertions) |
 | `docs/` | 10 files | ✅ Written |
 | `README.md` | 350 | ✅ Current |

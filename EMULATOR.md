@@ -144,8 +144,8 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
 | `Makefile` | 190 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
 | `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `fpga/rtl/` | 13,367 | 27 Verilog RTL modules — CPU, tile engine, FP16 ALU, I-cache, SoC, crypto, PQC accelerators |
-| `fpga/sim/` | 8,677 | 18 Verilog testbenches — ~180 hardware tests |
+| `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
+| `rtl/sim/` | ~11,100 | 28 Verilog testbenches (~414 hardware assertions) |
 | **Total** | **~60,000** | |
 
 ---
@@ -542,26 +542,18 @@ There are no `push64`/`pop64` instructions.  Manual stack operations use
 
 ## Running Tests
 
+All tests are run via the Makefile — never invoke `python -m pytest`
+directly (conftest.py blocks it).
+
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-.venv/bin/python -m pytest test_system.py test_megapad64.py test_networking.py -n 8   # ~23 s
+make test-accel                                            # ~23 s
 
-# Or use the Makefile target:
-make test-accel                                            # builds + runs
-make test-net                                              # real-network tests (requires TAP)
-
-# PyPy + xdist (no C++ compiler needed)
-make setup-pypy        # one-time: downloads PyPy, installs pytest + xdist
-make test              # PyPy + 8 parallel workers  (~24 min)
-make test-seq          # PyPy sequential
-make test-quick        # PyPy, BIOS + CPU only      (~6 sec)
-make test-one K=test_coreid_word   # single test with PyPy
-
-# CPython fallback (no setup required)
-python -m pytest test_megapad64.py -v                          # 23 CPU + tile tests
-python -m pytest test_system.py -v --timeout=30                # 1,007 integration tests
-python -m pytest test_system.py test_megapad64.py test_networking.py -v --timeout=30  # all 1,068
+# Or use the standard background runner:
+make test                                                  # background, check with make test-status
+make test-one K=TestKDOS                                   # single class
+make test-one K=test_coreid_word                           # single test
 ```
 
 | Runner | Parallelism | Approximate Time | Speedup |

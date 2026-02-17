@@ -18,12 +18,12 @@ python cli.py --bios bios.asm --storage sample.img
 # Development mode (UART injection, no filesystem)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (1,068 tests, CPython)
-python -m pytest test_system.py test_megapad64.py -v --timeout=30
+# Full test suite (1,258+ tests)
+make test                    # runs in background
+make test-status             # check progress
 
-# Fast tests with PyPy + parallel workers (~4 min vs ~40 min)
-make setup-pypy   # one-time
-make test
+# Run a specific test class
+make test-one K=TestKDOS
 
 # Build BIOS binary only
 python asm.py bios.asm

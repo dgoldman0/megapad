@@ -255,7 +255,7 @@ closure is difficult, the PHY can operate at sys_clk/2 (50 MHz).
 ### 9.1  Lint (Verilator 5.020)
 
 ```bash
-verilator --lint-only -Wall -Ifpga/rtl fpga/rtl/mp64_soc.v
+verilator --lint-only -Wall -Irtl/pkg rtl/soc/mp64_top.v
 ```
 
 **Status:** ✅ 0 errors, 120 benign warnings (unused params from shared defs, incomplete case defaults, dual-port multi-driven pattern).
@@ -286,20 +286,20 @@ verilator --lint-only -Wall -Ifpga/rtl fpga/rtl/mp64_soc.v
 **Status:** ✅ **~180 tests passing**
 
 ```bash
-cd fpga/sim
+cd rtl/sim
 # CPU smoke tests
-iverilog -g2012 -DSIMULATION -I../rtl -o tb_cpu_smoke.vvp \
-    ../rtl/mp64_cpu.v tb_cpu_smoke.v
+iverilog -g2012 -DSIMULATION -I../pkg -o tb_cpu_smoke.vvp \
+    ../core/mp64_cpu.v tb_cpu_smoke.v
 vvp tb_cpu_smoke.vvp
 
 # Memory tests
-iverilog -g2012 -DSIMULATION -I../rtl -o tb_memory.vvp \
-    ../rtl/mp64_memory.v tb_memory.v
+iverilog -g2012 -DSIMULATION -I../pkg -o tb_memory.vvp \
+    ../mem/mp64_memory.v tb_memory.v
 vvp tb_memory.vvp
 
 # Tile engine tests
-iverilog -g2012 -DSIMULATION -I../rtl -o tb_tile.vvp \
-    ../rtl/mp64_tile.v tb_tile.v
+iverilog -g2012 -DSIMULATION -I../pkg -o tb_tile.vvp \
+    ../gpu/mp64_tile.v tb_tile.v
 vvp tb_tile.vvp
 ```
 
@@ -317,13 +317,13 @@ vvp tb_tile.vvp
 ### 9.4  Full SoC Simulation
 
 ```bash
-cd fpga/sim
+cd rtl/sim
 # Generate hex files for simulation
 python gen_hex.py
 
 # Run SoC testbench (with BIOS loaded)
-iverilog -g2012 -DSIMULATION -I../rtl -o tb_soc.vvp \
-    ../rtl/*.v tb_mp64_soc.v
+iverilog -g2012 -DSIMULATION -I../pkg -o tb_soc.vvp \
+    ../core/*.v ../mem/*.v ../bus/*.v ../soc/*.v ../periph/*.v ../crypto/*.v ../gpu/*.v ../prim/*.v tb_mp64_soc.v
 vvp tb_soc.vvp
 gtkwave tb_mp64_soc.vcd
 ```

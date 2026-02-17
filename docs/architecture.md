@@ -259,7 +259,7 @@ The tile engine extends beyond the base TALU/TMUL/TRED/TSYS with:
   FP32 accumulation for DOT/SUM/SUMSQ
 
 All extended tile operations are implemented in both the emulator
-(`megapad64.py`) and RTL (`fpga/rtl/mp64_tile.v`, `mp64_fp16_alu.v`),
+(`megapad64.py`) and RTL (`rtl/gpu/mp64_tile.v`, `rtl/gpu/mp64_fp16_alu.v`),
 with 53 tile testbench tests passing.
 
 ### Crypto Accelerators (MMIO)
@@ -604,5 +604,5 @@ DMA, and reliability specifications.
 | Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
 | Tests | `test_system.py` | 14,751 | 1,007 integration tests (40 classes) |
 | Tests | `test_networking.py` | 860 | 38 real-network tests (8 classes) |
-| FPGA RTL | `fpga/rtl/` | 13,367 | 23 Verilog modules (CPU, tile, FP16, crypto, PQC, SoC) |
-| FPGA tests | `fpga/sim/` | 8,677 | 18 testbenches (~180 hardware tests) |
+| RTL | `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides |
+| RTL tests | `rtl/sim/` | ~11,100 | 28 testbenches (~414 hardware assertions) |

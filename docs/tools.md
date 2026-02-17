@@ -479,25 +479,14 @@ that cover every layer of the system.
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
 make accel                                                 # build C++ extension
-make test-accel                                            # ~23 s, all 1,068 tests
+make test                                                  # full suite, background
+make test-status                                           # check progress
 
-# Full suite with CPython (works out of the box, ~40 min)
-python -m pytest test_system.py test_megapad64.py -v --timeout=30
+# Run a specific test class
+make test-one K=TestKDOS
 
-# Just KDOS tests
-python -m pytest test_system.py -k "TestKDOS" --timeout=30
-
-# Just BIOS tests
-python -m pytest test_system.py -k "TestBios" --timeout=30
-
-# CPU unit tests only
-python -m pytest test_megapad64.py -v
-
-# A specific test
-python -m pytest test_system.py -k "test_buffer_create" -v
-
-# With short tracebacks
-python -m pytest test_system.py --tb=short --timeout=30
+# Run a specific test
+make test-one K=test_buffer_create
 ```
 
 ### Fast Tests with C++ Accelerator (recommended)

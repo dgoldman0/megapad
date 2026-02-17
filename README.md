@@ -248,10 +248,13 @@ make setup-pypy                    # one-time
 make test                          # ~24 min
 
 # CPython fallback (no setup required)
-python -m pytest test_system.py test_megapad64.py -v --timeout=30  # ~40 min
+make test                              # background, ~40 min on CPython
 ```
 
-All 1,068 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+> **Note:** Always use `make test` — never run `python -m pytest` directly.
+> The `conftest.py` guard will block raw pytest invocations.
+
+All 1,259 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking (simulated +
 real TAP), crypto, post-quantum crypto, and extended tile engine.
 
@@ -293,8 +296,8 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
 | `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `fpga/rtl/` | 13,367 | 23 Verilog modules (CPU, tile, FP16 ALU, SoC, crypto, PQC) |
-| `fpga/sim/` | 8,677 | 18 Verilog testbenches (~180 hardware tests) |
+| `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
+| `rtl/sim/` | ~11,100 | 28 Verilog testbenches (~414 hardware assertions) |
 
 ---
 

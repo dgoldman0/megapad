@@ -6,7 +6,7 @@
 **Depends on:** Base tile engine (mp64_tile.v), ISA v2.1, quad-core SoC
 
 > All features below are implemented in `megapad64.py` (emulator),
-> `fpga/rtl/mp64_tile.v` (RTL), and the BIOS (265 dictionary words),
+> `rtl/gpu/mp64_tile.v` (RTL), and the BIOS (265 dictionary words),
 > with 754 passing tests unless marked ☐ (not yet implemented).
 
 ---
