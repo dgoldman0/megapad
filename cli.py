@@ -697,6 +697,14 @@ class MegapadCLI(cmd.Cmd):
 #  Console mode — raw terminal ↔ UART
 # ---------------------------------------------------------------------------
 
+# Batch size: when the display thread handles keyboard input we can
+# afford larger batches (fewer Python→C++ transitions, less poll
+# overhead).  Without display, keep batches small so stdin latency
+# stays low.
+_BATCH_DISPLAY = 500_000
+_BATCH_DEFAULT = 100_000
+
+
 def run_console(sys_emu: MegapadSystem) -> bool:
     """Run the system with the host terminal wired directly to the UART.
 
@@ -730,13 +738,15 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
     old_settings = termios.tcgetattr(fd)
 
     try:
+        batch = (_BATCH_DISPLAY
+                 if sys_emu.uart._tx_listeners else _BATCH_DEFAULT)
         tty.setraw(fd)
         while True:
             # --- Run CPU in a batch until idle / halt ---------------
             if not sys_emu.cpu.halted and not (
                     sys_emu.cpu.idle and not sys_emu.uart.has_rx_data):
                 try:
-                    sys_emu.run_batch(100_000)
+                    sys_emu.run_batch(batch)
                 except HaltError:
                     return False
 

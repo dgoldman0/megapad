@@ -263,13 +263,21 @@ class VirtualTerminal:
                 self.cursor_visible = False
 
     def render(self, pygame_module, font, cell_w: int, cell_h: int,
-               show_cursor: bool = True) -> 'pygame.Surface':
-        """Render the terminal grid to a pygame surface."""
+               show_cursor: bool = True,
+               _cache: dict | None = None) -> 'pygame.Surface':
+        """Render the terminal grid to a pygame surface.
+
+        Pass a dict as *_cache* across calls to enable glyph caching
+        (maps (char, fg_index) -> pre-rendered Surface).  The cache is
+        populated lazily and typically stays small (~200 entries).
+        """
         with self._lock:
             surf_w = self.cols * cell_w
             surf_h = self.rows * cell_h
             surface = pygame_module.Surface((surf_w, surf_h))
             surface.fill(self.COLORS[0])
+
+            cache = _cache if _cache is not None else {}
 
             for y in range(self.rows):
                 for x in range(self.cols):
@@ -281,7 +289,12 @@ class VirtualTerminal:
                             surface, self.COLORS[bg],
                             (px, py, cell_w, cell_h))
                     if ch != ' ':
-                        glyph = font.render(ch, False, self.COLORS[fg])
+                        key = (ch, fg)
+                        glyph = cache.get(key)
+                        if glyph is None:
+                            glyph = font.render(
+                                ch, False, self.COLORS[fg])
+                            cache[key] = glyph
                         surface.blit(glyph, (px, py))
 
             # Draw cursor
@@ -386,6 +399,13 @@ class FramebufferDisplay:
         fb_surface = pygame.Surface((320, 240))
         last_w, last_h, last_mode = 0, 0, -1
 
+        # Glyph cache for terminal rendering (huge speedup)
+        glyph_cache: dict = {}
+
+        # Cached terminal surface — reused when nothing changed
+        term_surf_cached = None
+        last_cursor_blink = True
+
         # Cursor blink state
         cursor_blink = True
         last_blink = pygame.time.get_ticks()
@@ -450,10 +470,17 @@ class FramebufferDisplay:
                                            win_h - tab_h)
 
                 if self.active_tab == self.TAB_TERMINAL:
-                    # Render virtual terminal
-                    term_surf = self.term.render(
-                        pygame, term_font, cell_w, cell_h,
-                        show_cursor=cursor_blink)
+                    # Render virtual terminal (skip if clean + same blink)
+                    need_render = (self.term._dirty
+                                   or cursor_blink != last_cursor_blink
+                                   or term_surf_cached is None)
+                    if need_render:
+                        term_surf_cached = self.term.render(
+                            pygame, term_font, cell_w, cell_h,
+                            show_cursor=cursor_blink,
+                            _cache=glyph_cache)
+                        last_cursor_blink = cursor_blink
+                    term_surf = term_surf_cached
                     # Center it in the content area
                     tx = (content_rect.width - term_surf.get_width()) // 2
                     ty = (content_rect.height - term_surf.get_height()) // 2
