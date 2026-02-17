@@ -4425,7 +4425,7 @@ CREATE WVEC  WVEC-SIZE CELLS ALLOT
 
 : TUI-FLAG-2  ( flag true-a true-n false-a false-n addr len -- )
     ."    " TYPE ."  : "
-    2>R IF 2R> 2DROP 2 FG ELSE 2R> ROT DROP ROT DROP DIM THEN
+    2>R ROT IF 2R> 2DROP 2 FG ELSE 2R> ROT DROP ROT DROP DIM THEN
     TYPE RESET-COLOR CR ;
 
 : TUI-HBAR  ( -- )  HBAR ;
