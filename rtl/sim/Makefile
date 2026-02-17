@@ -22,7 +22,8 @@ PRIM_SRC = $(PRIM)/mp64_sram_sp.v \
            $(PRIM)/mp64_sram_dp.v \
            $(PRIM)/mp64_rom.v \
            $(PRIM)/mp64_clkgate.v \
-           $(PRIM)/mp64_rst_sync.v
+           $(PRIM)/mp64_rst_sync.v \
+           $(PRIM)/mp64_mul.v
 
 # Core sources (Phase 3)
 CORE_SRC = $(CORE)/mp64_alu.v \
@@ -32,7 +33,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
            $(CORE)/mp64_cluster.v
 
 .PHONY: all clean phase1 phase2 phase3 \
-        sram_sp sram_dp rom clkgate rst_sync platform_sim \
+        sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu icache cpu_smoke cluster
 
@@ -42,7 +43,7 @@ all: phase1 phase2 phase3
 	@echo " All testbenches complete"
 	@echo "============================================"
 
-phase1: sram_sp sram_dp rom clkgate rst_sync platform_sim
+phase1: sram_sp sram_dp rom clkgate rst_sync platform_sim mul
 	@echo ""
 	@echo "--- Phase 1 complete ---"
 
@@ -91,6 +92,13 @@ platform_sim: tb_platform_sim.vvp
 
 tb_platform_sim.vvp: tb_platform_sim.v $(PLAT)/mp64_platform_sim.v \
                      $(SOC)/mp64_top.v $(PRIM)/mp64_rst_sync.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- 64-bit multiplier ---
+mul: tb_mul.vvp
+	$(VVP) $<
+
+tb_mul.vvp: tb_mul.v $(PRIM)/mp64_mul.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Clean ---
@@ -149,7 +157,9 @@ cpu_smoke: tb_cpu_smoke.vvp
 	$(VVP) $<
 
 tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_alu.v \
-                  $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v
+                  $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
+                  $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
+                  $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Cluster (4 micro-cores + shared MUL/DIV) ---
@@ -157,5 +167,5 @@ cluster: tb_cluster.vvp
 	$(VVP) $<
 
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
-                $(CORE)/mp64_alu.v
+                $(CORE)/mp64_alu.v $(PRIM)/mp64_mul.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^

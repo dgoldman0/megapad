@@ -10,7 +10,7 @@
 //   - 8-bit flags: [S I G P V N C Z]
 //   - 8-bit D accumulator, Q flip-flop, T register (1802 heritage)
 //   - 16 MEMALU ops on D via M(R(X))
-//   - Hardware MUL/DIV (inline, 1-cycle structural via `*`)
+//   - Hardware MUL (via mp64_mul wrapper, 4-cycle), iterative DIV (64-cycle)
 //   - Vectored interrupts (IVT in memory), privilege levels, MPU
 //   - I-cache interface with prefetch buffer (2-stage pipeline)
 //   - Tile/MEX engine dispatch
@@ -207,6 +207,35 @@ module mp64_cpu #(
     reg [63:0] effective_addr;
     reg [3:0]  mem_sub;
     reg [127:0] mul_result;
+    reg        mul_start_r;
+    reg        mul_is_signed_r;
+    reg [63:0] mul_op_a, mul_op_b;
+
+    // Iterative divider state
+    reg        div_active;
+    reg        div_signed_op;
+    reg [63:0] div_dividend, div_divisor;
+    reg [63:0] div_quotient, div_remainder;
+    reg [6:0]  div_cycle;
+    reg        div_done_r;
+    reg [3:0]  div_op_nib;       // which MULDIV sub-op (4–7)
+
+    // mp64_mul instance
+    wire [127:0] mul_u_result;
+    wire         mul_u_done;
+    wire         mul_u_busy;
+
+    mp64_mul #(.LATENCY(4)) u_mul (
+        .clk       (clk),
+        .rst       (rst),
+        .start     (mul_start_r),
+        .is_signed (mul_is_signed_r),
+        .a         (mul_op_a),
+        .b         (mul_op_b),
+        .result    (mul_u_result),
+        .done      (mul_u_done),
+        .busy      (mul_u_busy)
+    );
     reg [7:0]  memalu_byte;
     reg [3:0]  memalu_sub;
     reg [2:0]  io_port;
@@ -272,6 +301,19 @@ module mp64_cpu #(
             alu_b  <= 64'd0;
 
             mul_result <= 128'd0;
+            mul_start_r     <= 1'b0;
+            mul_is_signed_r <= 1'b0;
+            mul_op_a        <= 64'd0;
+            mul_op_b        <= 64'd0;
+            div_active   <= 1'b0;
+            div_signed_op<= 1'b0;
+            div_dividend <= 64'd0;
+            div_divisor  <= 64'd0;
+            div_quotient <= 64'd0;
+            div_remainder<= 64'd0;
+            div_cycle    <= 7'd0;
+            div_done_r   <= 1'b0;
+            div_op_nib   <= 4'd0;
 
             perf_cycles  <= 64'd0;
             perf_stalls  <= 64'd0;
@@ -813,55 +855,98 @@ module mp64_cpu #(
                     ext_active <= 1'b0;
                     dst_reg <= ibuf[1][7:4];
                     src_reg <= ibuf[1][3:0];
+                    div_done_r <= 1'b0;
                     case (nib)
-                        4'h0: begin
-                            mul_result <= $signed(R[ibuf[1][7:4]]) * $signed(R[ibuf[1][3:0]]);
+                        4'h0: begin // SMUL low
+                            mul_op_a <= R[ibuf[1][7:4]];
+                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_is_signed_r <= 1'b1;
+                            mul_start_r <= 1'b1;
                             cpu_state <= CPU_MULDIV;
                         end
-                        4'h1: begin
-                            mul_result <= $signed(R[ibuf[1][7:4]]) * $signed(R[ibuf[1][3:0]]);
+                        4'h1: begin // SMUL high
+                            mul_op_a <= R[ibuf[1][7:4]];
+                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_is_signed_r <= 1'b1;
+                            mul_start_r <= 1'b1;
                             mem_sub <= 4'h1; cpu_state <= CPU_MULDIV;
                         end
-                        4'h2: begin
-                            mul_result <= R[ibuf[1][7:4]] * R[ibuf[1][3:0]];
+                        4'h2: begin // UMUL low
+                            mul_op_a <= R[ibuf[1][7:4]];
+                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_is_signed_r <= 1'b0;
+                            mul_start_r <= 1'b1;
                             cpu_state <= CPU_MULDIV;
                         end
-                        4'h3: begin
-                            mul_result <= R[ibuf[1][7:4]] * R[ibuf[1][3:0]];
+                        4'h3: begin // UMUL high
+                            mul_op_a <= R[ibuf[1][7:4]];
+                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_is_signed_r <= 1'b0;
+                            mul_start_r <= 1'b1;
                             mem_sub <= 4'h1; cpu_state <= CPU_MULDIV;
                         end
-                        4'h4: begin // DIV
+                        4'h4: begin // DIV (signed)
                             if (R[ibuf[1][3:0]] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
-                                R[ibuf[1][7:4]] <= $signed(R[ibuf[1][7:4]]) / $signed(R[ibuf[1][3:0]]);
-                                R[0] <= $signed(R[ibuf[1][7:4]]) % $signed(R[ibuf[1][3:0]]);
-                                cpu_state <= CPU_MULDIV;
+                                div_signed_op <= 1'b1;
+                                div_dividend  <= R[ibuf[1][7:4]][63]
+                                    ? (~R[ibuf[1][7:4]] + 64'd1) : R[ibuf[1][7:4]];
+                                div_divisor   <= R[ibuf[1][3:0]][63]
+                                    ? (~R[ibuf[1][3:0]] + 64'd1) : R[ibuf[1][3:0]];
+                                div_quotient  <= 64'd0;
+                                div_remainder <= 64'd0;
+                                div_cycle     <= 7'd0;
+                                div_active    <= 1'b1;
+                                div_op_nib    <= 4'h4;
+                                cpu_state     <= CPU_MULDIV;
                             end
                         end
                         4'h5: begin // UDIV
                             if (R[ibuf[1][3:0]] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
-                                R[0] <= R[ibuf[1][7:4]] % R[ibuf[1][3:0]];
-                                R[ibuf[1][7:4]] <= R[ibuf[1][7:4]] / R[ibuf[1][3:0]];
-                                cpu_state <= CPU_MULDIV;
+                                div_signed_op <= 1'b0;
+                                div_dividend  <= R[ibuf[1][7:4]];
+                                div_divisor   <= R[ibuf[1][3:0]];
+                                div_quotient  <= 64'd0;
+                                div_remainder <= 64'd0;
+                                div_cycle     <= 7'd0;
+                                div_active    <= 1'b1;
+                                div_op_nib    <= 4'h5;
+                                cpu_state     <= CPU_MULDIV;
                             end
                         end
-                        4'h6: begin // MOD
+                        4'h6: begin // MOD (signed)
                             if (R[ibuf[1][3:0]] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
-                                R[ibuf[1][7:4]] <= $signed(R[ibuf[1][7:4]]) % $signed(R[ibuf[1][3:0]]);
-                                cpu_state <= CPU_MULDIV;
+                                div_signed_op <= 1'b1;
+                                div_dividend  <= R[ibuf[1][7:4]][63]
+                                    ? (~R[ibuf[1][7:4]] + 64'd1) : R[ibuf[1][7:4]];
+                                div_divisor   <= R[ibuf[1][3:0]][63]
+                                    ? (~R[ibuf[1][3:0]] + 64'd1) : R[ibuf[1][3:0]];
+                                div_quotient  <= 64'd0;
+                                div_remainder <= 64'd0;
+                                div_cycle     <= 7'd0;
+                                div_active    <= 1'b1;
+                                div_op_nib    <= 4'h6;
+                                cpu_state     <= CPU_MULDIV;
                             end
                         end
                         4'h7: begin // UMOD
                             if (R[ibuf[1][3:0]] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
-                                R[ibuf[1][7:4]] <= R[ibuf[1][7:4]] % R[ibuf[1][3:0]];
-                                cpu_state <= CPU_MULDIV;
+                                div_signed_op <= 1'b0;
+                                div_dividend  <= R[ibuf[1][7:4]];
+                                div_divisor   <= R[ibuf[1][3:0]];
+                                div_quotient  <= 64'd0;
+                                div_remainder <= 64'd0;
+                                div_cycle     <= 7'd0;
+                                div_active    <= 1'b1;
+                                div_op_nib    <= 4'h7;
+                                cpu_state     <= CPU_MULDIV;
                             end
                         end
                         default: cpu_state <= CPU_FETCH;
@@ -1236,17 +1321,73 @@ module mp64_cpu #(
             end
 
             // ============================================================
-            // MULDIV: writeback
+            // MULDIV: wait for multiplier or divider, then writeback
             // ============================================================
             CPU_MULDIV: begin
-                if (mem_sub == 4'h1)
-                    R[dst_reg] <= mul_result[127:64];
-                else if (nib <= 4'h3)
-                    R[dst_reg] <= mul_result[63:0];
-                flags[0] <= (R[dst_reg] == 64'd0);
-                flags[2] <= R[dst_reg][63];
-                mem_sub <= 4'd0;
-                cpu_state <= CPU_FETCH;
+                // Deassert start after one cycle
+                mul_start_r <= 1'b0;
+
+                // --- Iterative divider: 1-bit restoring, 64 cycles ---
+                if (div_active) begin
+                    if (div_cycle <= 7'd63) begin
+                        div_remainder <= {div_remainder[62:0],
+                                         div_dividend[63 - div_cycle[5:0]]};
+                        if ({div_remainder[62:0],
+                             div_dividend[63 - div_cycle[5:0]]} >= div_divisor)
+                        begin
+                            div_remainder <= {div_remainder[62:0],
+                                div_dividend[63 - div_cycle[5:0]]} - div_divisor;
+                            div_quotient[63 - div_cycle[5:0]] <= 1'b1;
+                        end
+                        div_cycle <= div_cycle + 7'd1;
+                    end else begin
+                        // Division complete — apply sign correction and write back
+                        div_active <= 1'b0;
+                        div_done_r <= 1'b1;
+                        case (div_op_nib)
+                            4'h4: begin // DIV (signed): Rd=quotient, R0=remainder
+                                if (div_signed_op && (mul_op_a[63] ^ mul_op_b[63]))
+                                    R[dst_reg] <= ~div_quotient + 64'd1;
+                                else
+                                    R[dst_reg] <= div_quotient;
+                                if (div_signed_op && mul_op_a[63])
+                                    R[0] <= ~div_remainder + 64'd1;
+                                else
+                                    R[0] <= div_remainder;
+                            end
+                            4'h5: begin // UDIV: Rd=quotient, R0=remainder
+                                R[dst_reg] <= div_quotient;
+                                R[0]       <= div_remainder;
+                            end
+                            4'h6: begin // MOD (signed): Rd=remainder
+                                if (div_signed_op && mul_op_a[63])
+                                    R[dst_reg] <= ~div_remainder + 64'd1;
+                                else
+                                    R[dst_reg] <= div_remainder;
+                            end
+                            4'h7: begin // UMOD: Rd=remainder
+                                R[dst_reg] <= div_remainder;
+                            end
+                        endcase
+                        flags[0] <= (div_quotient == 64'd0);
+                        flags[2] <= div_quotient[63];
+                        mem_sub  <= 4'd0;
+                        cpu_state <= CPU_FETCH;
+                    end
+                end
+
+                // --- Multiply: wait for mp64_mul done ---
+                else if (mul_u_done) begin
+                    mul_result <= mul_u_result;
+                    if (mem_sub == 4'h1)
+                        R[dst_reg] <= mul_u_result[127:64];
+                    else
+                        R[dst_reg] <= mul_u_result[63:0];
+                    flags[0] <= (mul_u_result[63:0] == 64'd0);
+                    flags[2] <= mul_u_result[63];
+                    mem_sub  <= 4'd0;
+                    cpu_state <= CPU_FETCH;
+                end
             end
 
             // ============================================================

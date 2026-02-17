@@ -362,7 +362,7 @@ module mp64_cluster #(
     // ====================================================================
     // Shared MUL/DIV Unit
     // ====================================================================
-    // MUL: uses Verilog * (maps to DSP48), 4-cycle latency model.
+    // MUL: via mp64_mul wrapper (portable, 4-cycle latency).
     // DIV: iterative 1-bit restoring divider, 64-cycle latency.
 
     localparam MUL_IDLE    = 2'd0;
@@ -380,6 +380,24 @@ module mp64_cluster #(
     // Division registers
     reg [63:0]  div_quotient, div_remainder;
     reg [63:0]  div_dividend, div_divisor;
+
+    // mp64_mul instance
+    reg         cl_mul_start;
+    wire [127:0] cl_mul_result;
+    wire         cl_mul_done;
+    wire         cl_mul_busy;
+
+    mp64_mul #(.LATENCY(4)) u_cl_mul (
+        .clk       (clk),
+        .rst       (cl_rst),
+        .start     (cl_mul_start),
+        .is_signed (mul_signed_op),
+        .a         (mul_a_reg),
+        .b         (mul_b_reg),
+        .result    (cl_mul_result),
+        .done      (cl_mul_done),
+        .busy      (cl_mul_busy)
+    );
 
     // MUL arbiter: round-robin (no modulo)
     reg [ARB_BITS-1:0] mul_next;
@@ -422,6 +440,7 @@ module mp64_cluster #(
             div_remainder  <= 64'd0;
             div_dividend   <= 64'd0;
             div_divisor    <= 64'd0;
+            cl_mul_start   <= 1'b0;
         end else begin
             mul_done_reg <= 1'b0;
 
@@ -438,11 +457,13 @@ module mp64_cluster #(
                             4'h0, 4'h1: begin
                                 mul_is_div    <= 1'b0;
                                 mul_signed_op <= 1'b1;
+                                cl_mul_start  <= 1'b1;
                                 mul_state     <= MUL_COMPUTE;
                             end
                             4'h2, 4'h3: begin
                                 mul_is_div    <= 1'b0;
                                 mul_signed_op <= 1'b0;
+                                cl_mul_start  <= 1'b1;
                                 mul_state     <= MUL_COMPUTE;
                             end
                             4'h4, 4'h6: begin
@@ -470,17 +491,12 @@ module mp64_cluster #(
 
                 MUL_COMPUTE: begin
                     mul_cycle <= mul_cycle + 7'd1;
+                    cl_mul_start <= 1'b0;  // deassert after 1 cycle
 
                     if (!mul_is_div) begin
-                        // Multiplication (Verilog * → DSP48 in synthesis)
-                        if (mul_cycle == 7'd0) begin
-                            if (mul_signed_op)
-                                mul_accum <= $signed(mul_a_reg) * $signed(mul_b_reg);
-                            else
-                                mul_accum <= mul_a_reg * mul_b_reg;
-                        end
-                        if (mul_cycle >= 7'd3) begin
-                            mul_result_reg <= mul_accum;
+                        // Wait for mp64_mul done
+                        if (cl_mul_done) begin
+                            mul_result_reg <= cl_mul_result;
                             mul_done_reg   <= 1'b1;
                             mul_last       <= mul_grant;
                             mul_state      <= MUL_IDLE;
