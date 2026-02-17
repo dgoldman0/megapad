@@ -317,23 +317,13 @@ class FramebufferDisplay:
         self.active_tab = self.TAB_TERMINAL
         self.term = VirtualTerminal(TERM_COLS, TERM_ROWS)
 
-        # Hook UART TX so every byte also goes to the virtual terminal
-        self._orig_uart_tx = None
-
     # -- public API -------------------------------------------------------
 
     def start(self):
         """Start the display thread.  Returns once the window is open."""
-        # Hook UART TX to also feed the virtual terminal
-        self._orig_uart_tx = self.sys.uart.on_tx
-        orig = self._orig_uart_tx
-
-        def _tee_tx(b):
-            self.term.write(b)
-            if orig is not None:
-                orig(b)
-
-        self.sys.uart.on_tx = _tee_tx
+        # Register as a TX listener so every byte also feeds the vterm.
+        # This coexists with on_tx (set by run_console for stdout).
+        self.sys.uart._tx_listeners.append(self.term.write)
 
         self._stop_event.clear()
         self._started.clear()
@@ -348,6 +338,11 @@ class FramebufferDisplay:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        # Remove TX listener
+        try:
+            self.sys.uart._tx_listeners.remove(self.term.write)
+        except ValueError:
+            pass
 
     @property
     def running(self) -> bool:
@@ -363,8 +358,9 @@ class FramebufferDisplay:
         pygame.init()
         pygame.display.set_caption(self.title)
 
-        # Monospace font for virtual terminal
-        term_font = pygame.font.SysFont("monospace", 14)
+        # Monospace font for virtual terminal — scale with display scale
+        term_font_size = max(12, 14 * self.scale)
+        term_font = pygame.font.SysFont("monospace", term_font_size)
         # Measure cell size from font
         test = term_font.render("M", False, (255, 255, 255))
         cell_w = test.get_width()
@@ -373,16 +369,18 @@ class FramebufferDisplay:
         # Compute window dimensions from terminal size
         term_pixel_w = self.term.cols * cell_w
         term_pixel_h = self.term.rows * cell_h
-        content_w = max(term_pixel_w, 320 * self.scale)
-        content_h = max(term_pixel_h, 240 * self.scale)
+        tab_h = max(TAB_HEIGHT, term_font_size + 10)
+        content_w = term_pixel_w
+        content_h = term_pixel_h
         win_w = content_w
-        win_h = content_h + TAB_HEIGHT
+        win_h = content_h + tab_h
 
         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
         clock = pygame.time.Clock()
 
-        # Tab bar font
-        tab_font = pygame.font.SysFont("sans", 14, bold=True)
+        # Tab bar font (scales with terminal font)
+        tab_font_size = max(12, term_font_size - 2)
+        tab_font = pygame.font.SysFont("sans", tab_font_size, bold=True)
 
         # Framebuffer surface (will be resized when FB dimensions change)
         fb_surface = pygame.Surface((320, 240))
@@ -430,7 +428,7 @@ class FramebufferDisplay:
                     elif event.type == pygame.MOUSEBUTTONDOWN:
                         # Check tab bar clicks
                         mx, my = event.pos
-                        if my < TAB_HEIGHT:
+                        if my < tab_h:
                             if mx < win_w // 2:
                                 self.active_tab = self.TAB_TERMINAL
                             else:
@@ -445,11 +443,11 @@ class FramebufferDisplay:
                 screen.fill((32, 32, 40))
 
                 # ── Draw tab bar ──────────────────────────────────
-                self._draw_tabs(pygame, screen, tab_font, win_w)
+                self._draw_tabs(pygame, screen, tab_font, win_w, tab_h)
 
                 # ── Draw content area ─────────────────────────────
-                content_rect = pygame.Rect(0, TAB_HEIGHT, win_w,
-                                           win_h - TAB_HEIGHT)
+                content_rect = pygame.Rect(0, tab_h, win_w,
+                                           win_h - tab_h)
 
                 if self.active_tab == self.TAB_TERMINAL:
                     # Render virtual terminal
@@ -511,7 +509,8 @@ class FramebufferDisplay:
         finally:
             pygame.quit()
 
-    def _draw_tabs(self, pygame, screen, font, win_w: int):
+    def _draw_tabs(self, pygame, screen, font, win_w: int,
+                    tab_h: int = TAB_HEIGHT):
         """Draw the tab bar at the top of the window."""
         tab_w = win_w // 2
         tabs = [
@@ -523,18 +522,18 @@ class FramebufferDisplay:
             active = (self.active_tab == tab_id)
             bg = (50, 50, 65) if active else (30, 30, 38)
             fg = (220, 220, 240) if active else (110, 110, 130)
-            pygame.draw.rect(screen, bg, (x, 0, tab_w, TAB_HEIGHT))
+            pygame.draw.rect(screen, bg, (x, 0, tab_w, tab_h))
             if active:
                 # Active tab indicator line
                 pygame.draw.rect(screen, (80, 140, 255),
-                                 (x, TAB_HEIGHT - 2, tab_w, 2))
+                                 (x, tab_h - 2, tab_w, 2))
             text = font.render(label, True, fg)
             tx = x + (tab_w - text.get_width()) // 2
-            ty = (TAB_HEIGHT - text.get_height()) // 2
+            ty = (tab_h - text.get_height()) // 2
             screen.blit(text, (tx, ty))
         # Separator line
         pygame.draw.line(screen, (60, 60, 75),
-                         (tab_w, 0), (tab_w, TAB_HEIGHT - 1))
+                         (tab_w, 0), (tab_w, tab_h - 1))
 
     def _resolve_fb_mem(self, base_addr: int):
         """Return (buffer, offset) for the given framebuffer base address.

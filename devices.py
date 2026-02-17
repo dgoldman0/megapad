@@ -102,6 +102,7 @@ class UART(Device):
 
         # Callbacks
         self.on_tx: Optional[callable] = None  # called with byte when CPU writes TX
+        self._tx_listeners: list = []          # additional TX listeners (display, etc.)
 
     def read8(self, offset: int) -> int:
         if offset == 0x00:     # TX_DATA — reading it is undefined, return 0
@@ -129,6 +130,8 @@ class UART(Device):
             self.tx_buffer.append(value)
             if self.on_tx:
                 self.on_tx(value)
+            for fn in self._tx_listeners:
+                fn(value)
         elif offset == 0x03:
             self.control = value
         elif offset == 0x04:
