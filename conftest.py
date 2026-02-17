@@ -1,16 +1,15 @@
 """
 Pytest configuration for Megapad-64 test suite.
 
-Always use the Makefile targets — they build the C++ accelerator
-and use the correct Python interpreter:
+Always use the Makefile targets — they build the C++ accelerator,
+run tests in the background, and provide a live dashboard:
 
     make test               # background + live dashboard (DEFAULT)
-    make test-one K=X       # single test/class with accel
-    make test-fg            # foreground C++ accel + xdist
+    make test-one K=X       # single test/class + monitoring
+    make test-quick         # quick BIOS+CPU smoke test
     make test-status        # show progress
 
-Running `python -m pytest` directly will fail unless you set
-MP64_RAW_PYTEST=1 (you shouldn't need to).
+Running `python -m pytest` directly will fail.  No exceptions.
 """
 
 import json
@@ -30,8 +29,8 @@ def pytest_configure(config):
 
     # --- Guard against raw `python -m pytest` without Make ---
     # All Makefile targets set MP64_VIA_MAKE=1.  Direct invocation
-    # is blocked unless MP64_RAW_PYTEST=1 is explicitly set.
-    if not os.environ.get("MP64_VIA_MAKE") and not os.environ.get("MP64_RAW_PYTEST"):
+    # is unconditionally blocked — no escape hatch.
+    if not os.environ.get("MP64_VIA_MAKE"):
         msg = (
             "\n"
             "═══════════════════════════════════════════════════════\n"
@@ -40,12 +39,8 @@ def pytest_configure(config):
             "  Use the Makefile targets instead:\n"
             "\n"
             "    make test               # background + dashboard (~1 min)\n"
-            "    make test-one K=TestFoo  # single test, foreground\n"
-            "    make test-fg             # full suite, foreground\n"
-            "    make test-seq            # sequential, for debugging\n"
-            "\n"
-            "  Override (you shouldn't need to):\n"
-            "    MP64_RAW_PYTEST=1 python -m pytest ...\n"
+            "    make test-one K=TestFoo  # single test/class + monitoring\n"
+            "    make test-quick          # quick BIOS+CPU smoke test\n"
             "═══════════════════════════════════════════════════════\n"
         )
         pytest.exit(msg, returncode=1)

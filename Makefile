@@ -14,29 +14,18 @@
 #   make test-watch     Auto-refresh dashboard every 5s
 #   make test-failures  Show only failures
 #   make test-kill      Kill stuck background run
-#
-# Foreground (for debugging / CI):
-#   make test-fg        C++ accel + 8 xdist workers, foreground
-#   make test-seq       C++ accel sequential          (~3 min)
-#   make test-one-fg K=X Single test/class, foreground
 #   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
-#
-# Fallback targets (non-accelerated):
-#   make test-pypy      PyPy + 8 workers (no C++ accel)
-#   make test-cpython   CPython fallback (~40 min, no accel)
 #
 # Real-network tests (requires TAP — see test_networking.py):
 #   make test-net       All real-net tests against TAP device
 #   make test-net K=X   Subset of real-net tests
 #
+# All targets run in the background.  Use `make test-status` or
+# `make test-watch` to monitor progress.
+#
 # conftest.py writes live status to /tmp/megapad_test_status.json.
 # test_monitor.py reads it and renders the dashboard.
-#
-# PyPy setup (one-time):
-#   make setup-pypy
 
-PYPY     := .pypy/bin/pypy3
-CPYTHON  := python
 VENV_PY  := .venv/bin/python
 PYTEST   := -m pytest test_system.py test_megapad64.py test_networking.py
 PYTEST_SIM := -m pytest test_system.py test_megapad64.py test_networking.py -m "not realnet"
@@ -50,11 +39,6 @@ accel:
 accel-clean:
 	rm -rf build/ _mp64_accel*.so
 
-# --- Accelerated test run: CPython + C++ extension ---
-.PHONY: test-accel
-test-accel: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST)
-
 # --- Benchmark: compare Python vs C++ ---
 .PHONY: bench
 bench: accel
@@ -64,34 +48,23 @@ bench: accel
 .PHONY: test
 test: test-bg
 
-# --- Foreground: C++ accel + xdist ---
-.PHONY: test-fg
-test-fg: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -n $(WORKERS)
-
-# --- Sequential (C++ accel, no xdist overhead, good for debugging) ---
-.PHONY: test-seq
-test-seq: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM)
-
-# --- PyPy fallback (no C++ accel, JIT instead) ---
-.PHONY: test-pypy
-test-pypy: check-pypy
-	MP64_VIA_MAKE=1 $(PYPY) $(PYTEST) -n $(WORKERS)
-
-# --- CPython fallback ---
-.PHONY: test-cpython
-test-cpython:
-	MP64_VIA_MAKE=1 $(CPYTHON) $(PYTEST)
-
 # --- Quick smoke test: BIOS + CPU only ---
 .PHONY: test-quick
 test-quick: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short
+	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
+		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
+		exit 1; \
+	fi
+	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
+	@echo "Starting quick smoke test in background..."
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short \
+		> /tmp/megapad_test_output.txt 2>&1 & \
+		echo "$$!" > /tmp/megapad_test_pid.txt
+	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
+	@echo "Monitor: make test-status  |  make test-watch"
 
 # --- Single test (usage: make test-one K=TestFoo) ---
 # Runs in background with monitoring, like `make test`.
-# Use `make test-one-fg K=TestFoo` for foreground.
 .PHONY: test-one
 test-one: accel
 	@if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi
@@ -106,11 +79,6 @@ test-one: accel
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
 	@echo "Monitor: make test-status  |  make test-watch"
-
-# --- Single test foreground (usage: make test-one-fg K=TestFoo) ---
-.PHONY: test-one-fg
-test-one-fg: accel
-	MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "$(K)" --tb=long -v
 
 # --- Background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
@@ -141,8 +109,17 @@ test-bg: accel
 #        make test-net K=TestRealNetARP
 .PHONY: test-net
 test-net: accel
-	@echo "Running real-network tests (TAP: $${MP64_TAP:-mp64tap0})..."
-	MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_networking.py -v --tb=long $(if $(K),-k "$(K)",)
+	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
+		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
+		exit 1; \
+	fi
+	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
+	@echo "Starting real-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
+		> /tmp/megapad_test_output.txt 2>&1 & \
+		echo "$$!" > /tmp/megapad_test_pid.txt
+	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
+	@echo "Monitor: make test-status  |  make test-watch"
 
 # --- Show live test status ---
 .PHONY: test-status
@@ -179,30 +156,8 @@ test-kill:
 # --- Run the interactive emulator ---
 .PHONY: run disk
 run:
-	$(CPYTHON) cli.py --bios bios.asm --forth kdos.f
+	$(VENV_PY) cli.py --bios bios.asm --forth kdos.f
 
 disk:
-	$(CPYTHON) diskutil.py sample
+	$(VENV_PY) diskutil.py sample
 
-# --- PyPy setup ---
-.PHONY: setup-pypy
-setup-pypy:
-	@if [ ! -f $(PYPY) ]; then \
-		echo "Downloading PyPy 3.10 ..."; \
-		curl -sL https://downloads.python.org/pypy/pypy3.10-v7.3.17-linux64.tar.bz2 | tar xj -C /tmp; \
-		mkdir -p .pypy; \
-		cp -r /tmp/pypy3.10-v7.3.17-linux64/* .pypy/; \
-		rm -rf /tmp/pypy3.10-v7.3.17-linux64; \
-		$(PYPY) -m ensurepip -q; \
-		$(PYPY) -m pip install pytest pytest-xdist -q; \
-		echo "PyPy installed at .pypy/"; \
-	else \
-		echo "PyPy already installed."; \
-	fi
-
-.PHONY: check-pypy
-check-pypy:
-	@if [ ! -f $(PYPY) ]; then \
-		echo "ERROR: PyPy not found. Run 'make setup-pypy' first."; \
-		exit 1; \
-	fi
