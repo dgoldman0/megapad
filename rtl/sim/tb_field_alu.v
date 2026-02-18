@@ -364,6 +364,52 @@ module tb_field_alu;
         check(result, (PRIME_P256 + 256'd1) >> 1, "P256 FINV(2)=(p+1)/2");
 
         // ================================================================
+        // Custom prime tests (prime_sel = 3, LOAD_PRIME)
+        // Use small prime p=65537 for easy verification
+        // ================================================================
+        // Load custom prime: A=65537, B=0 (p_inv not used in sim model)
+        write_operand_a(256'd65537);
+        write_operand_b(256'd0);
+        issue_cmd(4'd10, 1'b1, 1'b0, 2'd0);  // LOAD_PRIME
+        wait_done;
+
+        // Set prime_sel=3
+        set_prime(2'd3);
+
+        // --- Test 24: Custom FMUL (100 × 200) mod 65537 = 20000 mod 65537 ---
+        write_operand_a(256'd100);
+        write_operand_b(256'd200);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
+        wait_done;
+        read_result(result);
+        check(result, 256'd20000, "CUSTOM FMUL(100,200)=20000");
+
+        // --- Test 25: Custom FMUL overflow: 300 × 300 = 90000 mod 65537 = 24926 ---
+        write_operand_a(256'd300);
+        write_operand_b(256'd300);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        // 90000 mod 65537 = 90000 - 65537 = 24463
+        check(result, 256'd24463, "CUSTOM FMUL(300,300)=24463");
+
+        // --- Test 26: Custom FADD (65536 + 3) mod 65537 = 2 ---
+        write_operand_a(256'd65536);
+        write_operand_b(256'd3);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd2, "CUSTOM FADD(65536,3)=2");
+
+        // --- Test 27: Custom FINV — inv(2) × 2 mod 65537 = 1 ---
+        // inv(2) mod 65537 = 2^(65537-2) mod 65537 = 32769
+        write_operand_a(256'd2);
+        issue_cmd(4'd5, 1'b1, 1'b0, 2'd0);  // FINV
+        wait_done;
+        read_result(result);
+        check(result, 256'd32769, "CUSTOM FINV(2)=32769");
+
+        // ================================================================
         $display("");
         $display("=== Results: %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count == 0)

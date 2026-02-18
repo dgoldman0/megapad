@@ -855,16 +855,23 @@ CREATE X25519-BASE  32 ALLOT
 \ CMD address = MMIO_BASE + 0x0880
 0xFFFFFF0000000880 CONSTANT _FIELD-CMD-ADDR
 
-: PRIME-25519  ( -- )   0 _FIELD-CMD-ADDR C! ;    \ prime_sel=0
-: PRIME-SECP   ( -- )  64 _FIELD-CMD-ADDR C! ;    \ prime_sel=1 (1<<6)
-: PRIME-P256   ( -- ) 128 _FIELD-CMD-ADDR C! ;    \ prime_sel=2 (2<<6)
-
-\ Aliases for readability
+\ Aliases for readability (must precede LOAD-PRIME which uses them)
 : FIELD-A!      X25519-SCALAR! ;
 : FIELD-B!      X25519-POINT! ;
 : FIELD-WAIT    X25519-WAIT ;
 : FIELD-STATUS@ X25519-STATUS@ ;
 : FIELD-RESULT@ X25519-RESULT@ ;
+
+: PRIME-25519  ( -- )   0 _FIELD-CMD-ADDR C! ;    \ prime_sel=0
+: PRIME-SECP   ( -- )  64 _FIELD-CMD-ADDR C! ;    \ prime_sel=1 (1<<6)
+: PRIME-P256   ( -- ) 128 _FIELD-CMD-ADDR C! ;    \ prime_sel=2 (2<<6)
+: PRIME-CUSTOM ( -- ) 192 _FIELD-CMD-ADDR C! ;    \ prime_sel=3 (3<<6)
+
+\ LOAD-PRIME ( p-addr pinv-addr -- )  Latch custom prime + p_inv.
+: LOAD-PRIME ( p pinv -- )
+    SWAP FIELD-A! FIELD-B!
+    FMODE-LOAD-PRIME FIELD-CMD!
+    FIELD-WAIT ;
 
 \ Scratch buffers for field ops (32 bytes each)
 CREATE _FA  32 ALLOT

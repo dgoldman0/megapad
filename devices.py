@@ -2019,6 +2019,8 @@ class FieldALUDevice(Device):
         self._busy = False
         self._done = False
         self._prime_sel = 0               # 0=25519, 1=secp256k1
+        self._custom_p = 0                # custom prime (LOAD_PRIME)
+        self._mont_p_inv = 0              # -p^(-1) mod 2^256 (future REDC)
 
     # --- helpers ---
 
@@ -2087,6 +2089,8 @@ class FieldALUDevice(Device):
         # Select prime based on prime_sel (X25519 always uses Curve25519)
         if self._prime_sel < len(self._PRIMES):
             p = self._PRIMES[self._prime_sel]
+        elif self._prime_sel == 3 and self._custom_p > 1:
+            p = self._custom_p
         else:
             p = self._P
         a = self._get_a()
@@ -2115,6 +2119,10 @@ class FieldALUDevice(Device):
             lo = wide & ((1 << 256) - 1)
             hi = wide >> 256
             self._set_result(lo, hi)
+        elif mode == FIELD_MODE_LOAD_PRIME:
+            self._custom_p = a
+            self._mont_p_inv = b
+            self._set_result(0)
         else:
             # Unknown mode — just mark done with zero result
             self._set_result(0)

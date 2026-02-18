@@ -135,6 +135,12 @@ module mp64_field_alu (
     reg [1:0]  prime_sel;             // 0=25519, 1=secp256k1, 2=P-256, 3=custom
 
     // ========================================================================
+    // Custom prime registers (latched by LOAD_PRIME, mode 10)
+    // ========================================================================
+    reg [255:0] custom_p;             // user-supplied prime
+    reg [255:0] mont_p_inv;           // -p^(-1) mod 2^256 (for future REDC)
+
+    // ========================================================================
     // I/O registers
     // ========================================================================
     reg [255:0] operand_a;            // scalar (mode 0) / operand A
@@ -312,6 +318,7 @@ module mp64_field_alu (
     function [255:0] field_add_sel;
         input [255:0] a, b;
         input [1:0] sel;
+        input [255:0] cp;        // custom prime for sel=3
         reg [256:0] sum;
         reg [255:0] p;
         begin
@@ -319,7 +326,7 @@ module mp64_field_alu (
                 2'd0:    p = PRIME;
                 2'd1:    p = PRIME_SECP;
                 2'd2:    p = PRIME_P256;
-                default: p = PRIME;      // placeholder for custom
+                2'd3:    p = cp;
             endcase
             sum = {1'b0, a} + {1'b0, b};
             if (sum >= {1'b0, p})
@@ -332,13 +339,14 @@ module mp64_field_alu (
     function [255:0] field_sub_sel;
         input [255:0] a, b;
         input [1:0] sel;
+        input [255:0] cp;
         reg [255:0] p;
         begin
             case (sel)
                 2'd0:    p = PRIME;
                 2'd1:    p = PRIME_SECP;
                 2'd2:    p = PRIME_P256;
-                default: p = PRIME;
+                2'd3:    p = cp;
             endcase
             if (a >= b)
                 field_sub_sel = a - b;
@@ -350,6 +358,7 @@ module mp64_field_alu (
     function [255:0] field_mul_sel;
         input [255:0] a, b;
         input [1:0] sel;
+        input [255:0] cp;
         reg [511:0] prod;
         begin
             prod = a * b;
@@ -357,7 +366,7 @@ module mp64_field_alu (
                 2'd0:    field_mul_sel = field_reduce(prod);
                 2'd1:    field_mul_sel = field_reduce_secp(prod);
                 2'd2:    field_mul_sel = field_reduce_p256(prod);
-                default: field_mul_sel = field_reduce(prod);
+                2'd3:    field_mul_sel = prod % {256'd0, cp};
             endcase
         end
     endfunction
@@ -380,6 +389,8 @@ module mp64_field_alu (
             mode_reg     <= 4'd0;
             result_sel   <= 1'b0;
             prime_sel    <= 2'd0;
+            custom_p     <= 256'd0;
+            mont_p_inv   <= 256'd0;
             swap_bit     <= 1'b0;
             bit_idx      <= 8'd0;
             ladder_phase <= 4'd0;
@@ -431,6 +442,7 @@ module mp64_field_alu (
                                         case (prime_sel)
                                             2'd1:    pow_exp <= P_MINUS_2_SECP;
                                             2'd2:    pow_exp <= P_MINUS_2_P256;
+                                            2'd3:    pow_exp <= custom_p - 256'd2;
                                             default: pow_exp <= P_MINUS_2;
                                         endcase
                                         pow_step  <= 9'd0;
@@ -468,13 +480,17 @@ module mp64_field_alu (
                 S_COMPUTE: begin
                     result_hi <= 256'd0;
                     case (mode_reg)
-                        MODE_FADD: result_lo <= field_add_sel(operand_a, operand_b, prime_sel);
-                        MODE_FSUB: result_lo <= field_sub_sel(operand_a, operand_b, prime_sel);
-                        MODE_FMUL: result_lo <= field_mul_sel(operand_a, operand_b, prime_sel);
-                        MODE_FSQR: result_lo <= field_mul_sel(operand_a, operand_a, prime_sel);
+                        MODE_FADD: result_lo <= field_add_sel(operand_a, operand_b, prime_sel, custom_p);
+                        MODE_FSUB: result_lo <= field_sub_sel(operand_a, operand_b, prime_sel, custom_p);
+                        MODE_FMUL: result_lo <= field_mul_sel(operand_a, operand_b, prime_sel, custom_p);
+                        MODE_FSQR: result_lo <= field_mul_sel(operand_a, operand_a, prime_sel, custom_p);
                         MODE_MUL_RAW: begin
                             result_lo <= (operand_a * operand_b);
                             result_hi <= (operand_a * operand_b) >> 256;
+                        end
+                        MODE_LOAD_PRIME: begin
+                            custom_p   <= operand_a;
+                            mont_p_inv <= operand_b;
                         end
                         default: result_lo <= 256'd0;
                     endcase
@@ -581,12 +597,12 @@ module mp64_field_alu (
                 S_POWER: begin
                     case (pow_phase)
                         2'd0: begin
-                            pow_acc <= field_mul_sel(pow_acc, pow_acc, eff_prime);
+                            pow_acc <= field_mul_sel(pow_acc, pow_acc, eff_prime, custom_p);
                             pow_phase <= 2'd1;
                         end
                         2'd1: begin
                             if (pow_exp[255 - pow_step[7:0]])
-                                pow_acc <= field_mul_sel(pow_acc, pow_base, eff_prime);
+                                pow_acc <= field_mul_sel(pow_acc, pow_base, eff_prime, custom_p);
                             pow_phase <= 2'd2;
                         end
                         2'd2: begin

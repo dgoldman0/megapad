@@ -7969,6 +7969,83 @@ class TestFieldALUP256(_KDOSTestBase):
         self.assertIn("R1=255 ", text)
 
 
+class TestFieldALUCustom(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — custom prime via LOAD_PRIME (prime_sel=3)."""
+
+    # Use small prime p=65537 for easy hand-verification.
+
+    def _load_small_int(self, name, value):
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        for i in range(8):
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _setup_custom_prime(self, prime=65537):
+        """Load a custom prime and select prime_sel=3."""
+        lines = self._load_small_int("tv-p", prime)
+        lines.extend(self._load_small_int("tv-pinv", 0))
+        lines.extend([
+            "CREATE tv-a 32 ALLOT",
+            "CREATE tv-b 32 ALLOT",
+            "CREATE tv-r 32 ALLOT",
+            "tv-a 32 0 FILL",
+            "tv-b 32 0 FILL",
+            "tv-p tv-pinv LOAD-PRIME",
+            "PRIME-CUSTOM",
+        ])
+        return lines
+
+    def _read_result_u64(self):
+        return [
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+            '."  R2=" tv-r 2 + C@ .',
+            '."  R3=" tv-r 3 + C@ .',
+        ]
+
+    def test_custom_fmul_small(self):
+        """FMUL under custom prime 65537: 100 * 200 = 20000."""
+        setup = self._setup_custom_prime()
+        # Load a=100, b=200
+        setup.append("100 tv-a C!")
+        setup.append("200 tv-b C!")
+        setup.extend(["tv-a tv-b tv-r FMUL"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 20000 = 0x4E20 → byte0=0x20=32, byte1=0x4E=78
+        self.assertIn("R0=32 ", text)
+        self.assertIn("R1=78 ", text)
+
+    def test_custom_fmul_reduce(self):
+        """FMUL under custom prime 65537: 300 * 300 = 90000 mod 65537 = 24463."""
+        setup = self._setup_custom_prime()
+        # Load a=300 (0x012C), b=300
+        setup.extend(["44 tv-a C!", "1 tv-a 1 + C!"])   # 300 = 0x012C
+        setup.extend(["44 tv-b C!", "1 tv-b 1 + C!"])
+        setup.extend(["tv-a tv-b tv-r FMUL"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 24463 = 0x5F8F → byte0=0x8F=143, byte1=0x5F=95
+        self.assertIn("R0=143 ", text)
+        self.assertIn("R1=95 ", text)
+
+    def test_custom_finv_roundtrip(self):
+        """FINV roundtrip under custom prime: a * inv(a) = 1 mod 65537."""
+        setup = self._setup_custom_prime()
+        setup.append("42 tv-a C!")
+        setup.extend([
+            "tv-a tv-r FINV",
+            "tv-a tv-r tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+
 class TestNTT(_KDOSTestBase):
     """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
 
