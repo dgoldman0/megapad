@@ -890,8 +890,10 @@ def main():
                         default=None, metavar="IFNAME",
                         help="Attach NIC to a Linux TAP device for real L2 "
                              "networking (default: mp64tap0)")
-    parser.add_argument("--cores", type=int, default=1, choices=[1, 2, 3, 4],
-                        help="Number of CPU cores (default: 1)")
+    parser.add_argument("--cores", type=int, default=1,
+                        help="Number of full CPU cores (default: 1)")
+    parser.add_argument("--clusters", type=int, default=0,
+                        help="Number of micro-core clusters, 4 cores each (default: 0, max: 3)")
     parser.add_argument("--display", action="store_true",
                         help="Open a pygame window showing the framebuffer")
     parser.add_argument("--scale", type=int, default=2, metavar="N",
@@ -936,6 +938,7 @@ def main():
         nic_peer_port=args.nic_peer_port,
         nic_backend=nic_backend,
         num_cores=args.cores,
+        num_clusters=args.clusters,
         ext_mem_size=args.extmem * (1 << 20),
     )
 

@@ -5033,14 +5033,10 @@ VARIABLE _SBIT
 ' SCR-BUF-LIST       ' LBL-BLIST   1 ADD-SUBSCREEN
 ' SCR-BUF-STATS      ' LBL-BSTATS  1 ADD-SUBSCREEN
 
-\ -- Main TUI entry point --
-: SCREENS  ( -- )
-    1 SCREEN-ID !
+\ -- TUI event loop (factored for reuse) --
+: SCREEN-LOOP  ( -- )
     1 SCREEN-RUN !
-    -1 SCR-SEL !  0 SCR-MAX !
-    0 SUBSCREEN-ID !
     CYCLES REFRESH-LAST !
-    RENDER-SCREEN
     BEGIN
         KEY? IF KEY HANDLE-KEY THEN
         AUTO-REFRESH @ IF
@@ -5053,6 +5049,18 @@ VARIABLE _SBIT
     0= UNTIL
     PAGE
     ."  Returned to REPL."  CR ;
+
+\ -- Main TUI entry point --
+: SCREENS  ( -- )
+    1 SCREEN-ID !
+    -1 SCR-SEL !  0 SCR-MAX !
+    0 SUBSCREEN-ID !
+    RENDER-SCREEN
+    SCREEN-LOOP ;
+
+\ -- Enter TUI at screen n  (e.g. 9 SCREEN → [8]Core) --
+: SCREEN  ( n -- )
+    SWITCH-SCREEN  SCREEN-LOOP ;
 
 \ =====================================================================
 \  §10  Data Ports — NIC-Based External Data Ingestion
@@ -9354,7 +9362,7 @@ CR HRULE
 ."   KDOS v1.1 — Kernel Dashboard OS" CR
 HRULE
 ."  Type HELP for commands, HELP <word> for details."  CR
-."  Type SCREENS for interactive TUI."  CR
+."  Type SCREENS for interactive TUI (or N SCREEN for screen N)."  CR
 ."  Type TOPICS or LESSONS for documentation."  CR
 NCORES 1 > IF
     ."   Multicore: " NCORES . ."  cores available" CR

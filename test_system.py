@@ -9213,11 +9213,18 @@ class TestKDOSHardening(_KDOSTestBase):
         text = self._run_kdos_fast(["8 SWITCH-SCREEN"])
         self.assertIn("Stor", text)
 
+    def test_screen_cores_render(self):
+        """Screen 9 (Core) renders core info."""
+        text = self._run_kdos_fast(["9 SWITCH-SCREEN"])
+        self.assertIn("Core", text)
+        self.assertIn("core", text.lower())
+
     def test_screen_header_tabs(self):
-        """Screen header shows all 8 tab labels."""
+        """Screen header shows all 9 tab labels."""
         text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
         for label in ["[0]Home", "[1]Bufs", "[2]Kern", "[3]Pipe",
-                       "[4]Task", "[5]Help", "[6]Docs", "[7]Stor"]:
+                       "[4]Task", "[5]Help", "[6]Docs", "[7]Stor",
+                       "[8]Core"]:
             self.assertIn(label, text)
 
     def test_screen_footer_keys(self):
@@ -9225,6 +9232,16 @@ class TestKDOSHardening(_KDOSTestBase):
         text = self._run_kdos_fast(["1 SWITCH-SCREEN"])
         self.assertIn("[q] Quit", text)
         self.assertIn("[r] Refresh", text)
+
+    def test_screen_word_defined(self):
+        """SCREEN word exists and renders (TUI entry at screen N)."""
+        text = self._run_kdos_fast(["' SCREEN DROP .\" OK\" "])
+        self.assertIn("OK", text)
+
+    def test_screen_loop_word_defined(self):
+        """SCREEN-LOOP word exists (factored TUI event loop)."""
+        text = self._run_kdos_fast(["' SCREEN-LOOP DROP .\" OK\" "])
+        self.assertIn("OK", text)
 
     # -- Disk-only boot e2e --
 
