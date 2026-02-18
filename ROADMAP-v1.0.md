@@ -467,6 +467,9 @@ document that will be folded into proper docs as each item ships.
     dedicated fast-reduction circuits per prime, plus a generic
     Montgomery reduction path for arbitrary 256-bit primes.  Add
     constant-time primitives (FCMOV, FCEQ) required for real ECC.
+    Detailed RTL architecture, register map, reducer sketches, resource
+    estimates, and implementation order in
+    [`docs/IDEAS-scratchpad.md` §2](docs/IDEAS-scratchpad.md).
     - 40a. `PRIME_SEL` register + prime table (4 entries)
     - 40b. Dedicated reduction: secp256k1 sparse subtract
     - 40c. Dedicated reduction: P-256 NIST special form

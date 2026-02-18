@@ -429,19 +429,315 @@ the user's own assessment).
 
 ### Emulator Implementation
 
-- `FieldALUDevice._execute()`: add `PRIME_SEL` register, table of
+- `FieldALUDevice._execute()`: add `prime_sel` register, table of
   primes, route FMUL/FSQR through the selected prime's reduction.
 - Montgomery helpers: `_mont_REDC()`, `_mont_mul()`, precompute on
   `CUSTOM_P` write.
 - `FCMOV` and `FCEQ` modes: trivial in Python.
+- Add `_custom_p` and `_mont_p_inv` 256-bit internal registers.
+- FINV/FPOW use the selected prime for exponent ($p-2$ changes per
+  prime, so store a `p_minus_2` table for primes 0–2; Montgomery prime
+  uses the stored `custom_p - 2`).
 
-### RTL Implementation
+### RTL Implementation — Detailed Design
 
-- `mp64_field_alu.v`: add `prime_sel[1:0]` register, mux between
-  reduction circuits.  Add `custom_p` 256-bit register.
-- New reduction modules: `mp64_field_reduce_secp.v`,
-  `mp64_field_reduce_p256.v`, `mp64_field_reduce_mont.v`.
-- `FCMOV`/`FCEQ` wired in the COMPUTE state (1 cycle each).
+#### Key Insight: Shared Multiplier, Pluggable Reducers
+
+The 256×256→512-bit multiplier is the most expensive resource (~165
+DSP48, ~28K gate-equivalents).  It is **shared across all primes** —
+only the post-multiply **reduction** changes.  Each dedicated reducer
+is a few hundred LUTs.  The Montgomery reducer reuses the same
+multiplier for its REDC steps (multi-cycle).
+
+```
+                      ┌──────────────────┐
+      operand_a ────→ │                  │
+                      │  256×256 → 512   │─── raw_product[511:0]
+      operand_b ────→ │  Multiplier      │
+                      │  (~165 DSPs)     │
+                      └──────────────────┘
+                                │
+                      ┌─────────▼─────────┐
+                      │ Reducer MUX        │
+                      │ (prime_sel[1:0])   │
+                      │                    │
+                      │ 0: ×38 fold        │ ← Curve25519
+                      │ 1: ×(2³²+977)     │ ← secp256k1
+                      │ 2: NIST P-256      │ ← P-256
+                      │ 3: Montgomery REDC │ ← generic
+                      └────────────────────┘
+                                │
+                          result[255:0]
+```
+
+#### MMIO: Zero Window Expansion (Backward Compatible)
+
+The current MMIO window is 72 bytes (0x00–0x47).  Rather than
+expanding it (NTT starts at 0x8C0, only 56 bytes away), pack
+`prime_sel` into unused CMD bits:
+
+```
+CMD register (64-bit write at offset 0x3F):
+  bit  0:      go
+  bits [4:1]:  mode (0–9, was 0–7)
+  bit  5:      result_sel
+  bits [7:6]:  prime_sel (0–3)  ← NEW
+```
+
+This is **backward compatible** — old code writes 0 to bits [7:6],
+which selects prime 0 (Curve25519 = current behavior).  Every CMD
+write latches `prime_sel`; it persists until the next CMD write.
+
+For custom primes (PRIME_SEL=3), add two new modes using the
+existing operand registers:
+
+| Mode | Name | Cycles | Description |
+|------|------|--------|-------------|
+|  8 | FCMOV       | 1  | `cond ? A : RESULT_LO` (constant-time) |
+|  9 | FCEQ        | 1  | `A == B ? 1 : 0` (constant-time) |
+| 10 | LOAD_PRIME  | 1  | `custom_p ← A`, `mont_p_inv ← B` |
+
+LOAD_PRIME sequence (software):
+```forth
+my-prime   FIELD-A!       \ write p to operand A (4 × 64-bit writes)
+my-p-inv   FIELD-B!       \ write -p⁻¹ mod 2²⁵⁶ to operand B
+10 1 OR    FIELD-CMD!     \ mode=10, go=1 → latches internal regs
+\ Then set prime_sel=3 for subsequent ops:
+3 6 LSHIFT FIELD-CMD!     \ prime_sel=3, go=0 (just latches selector)
+```
+
+Internal registers added (only): `custom_p[255:0]`,
+`mont_p_inv[255:0]` — 512 FFs.  No MMIO window growth.
+
+#### Reduction Circuits
+
+**Prime 0 — Curve25519** ($2^{255}-19$): Existing `field_reduce`.
+$2^{256} \equiv 38 \pmod{p}$, so: `lo + hi × 38`.  One iteration +
+conditional subtract.  ~200 LUTs.  **No change.**
+
+**Prime 1 — secp256k1** ($2^{256} - 2^{32} - 977$):
+$2^{256} \equiv 2^{32} + 977 \pmod{p}$.  Reduction:
+```
+lo  = product[255:0]
+hi  = product[511:256]
+sum = lo + (hi << 32) + hi × 977
+```
+`hi × 977` is cheap: `977 = 1024 - 47 = (hi << 10) - (hi << 5) - (hi << 4) + hi`.
+Or just `hi * 10'h3D1` — Vivado will optimize this to shifts+adds
+(977 has weight 6).  The result may overshoot p by at most 1;
+one conditional subtract suffices.  ~200 LUTs.
+
+```verilog
+function [255:0] field_reduce_secp;
+    input [511:0] x;
+    reg [255:0] lo, hi;
+    reg [288:0] partial;       // slightly wider for carry
+    reg [256:0] r;
+    begin
+        lo = x[255:0];
+        hi = x[511:256];
+        partial = {1'b0, lo} + ({1'b0, hi} << 32) + hi * 977;
+        // fold again if partial overflows 256 bits
+        r = partial[255:0] + partial[288:256] * (2**32 + 977);
+        if (r >= {1'b0, PRIME_SECP})
+            r = r - {1'b0, PRIME_SECP};
+        field_reduce_secp = r[255:0];
+    end
+endfunction
+```
+
+**Prime 2 — NIST P-256** ($2^{256} - 2^{224} + 2^{192} + 2^{96} - 1$):
+FIPS 186-4 §D.2 defines reduction via 32-bit word additions.
+Decompose the 512-bit product into sixteen 32-bit words
+$c_{15}\dots c_0$, form specific 256-bit sums $s_1\dots s_4$ and
+differences $d_1\dots d_4$, compute $r = s_1 + 2s_2 + 2s_3 + s_4 - d_1 - d_2 - d_3 - d_4 \pmod{p}$.
+
+Each $s_i$/$d_i$ is a wiring-only composition of the 32-bit words —
+no multiplications, just additions.  ~400 LUTs for the adder tree +
+conditional subtract.
+
+This is the most wiring-heavy reducer but still cheap in LUTs.
+See NIST SP 800-186 §A.5.5 for the exact word-assignment table.
+
+**Prime 3 — Montgomery REDC** (generic):
+For arbitrary 256-bit primes.  Given product $T = a \times b$ (512 bits)
+and precomputed $p' = -p^{-1} \bmod 2^{256}$:
+
+```
+Phase 0: T = a × b                    (1 cycle, existing multiplier)
+Phase 1: m = T[255:0] × p'            (1 cycle, reuse multiplier)
+          → only need low 256 bits
+Phase 2: mp = m × p                   (1 cycle, reuse multiplier)
+Phase 3: r = (T + mp) >> 256          (shift + conditional subtract)
+          if r ≥ p: r -= p
+```
+
+Total: **4 cycles** per FMUL/FSQR (vs 1 for dedicated primes).
+FINV/FPOW: 4× slower per step → ~3K cycles for FINV.
+
+**RTL implementation:** Add a `S_REDC` state with 3 sub-phases.
+The multiplier inputs (`mul_a`, `mul_b`) are muxed between the
+normal operands and the REDC temporaries:
+
+```verilog
+// Multiplier input mux
+wire [255:0] mul_a = (redc_phase == 1) ? redc_t_lo  :
+                     (redc_phase == 2) ? redc_m     :
+                                         operand_a;
+wire [255:0] mul_b = (redc_phase == 1) ? mont_p_inv :
+                     (redc_phase == 2) ? custom_p   :
+                                         operand_b;
+wire [511:0] mul_result = mul_a * mul_b;
+```
+
+New state: `S_REDC` (3 phases) replaces the single-cycle
+`S_COMPUTE` path when `prime_sel == 3` and mode is FMUL/FSQR.
+
+#### FCMOV and FCEQ — Constant-Time Operations
+
+Wired in `S_COMPUTE`, 1 cycle each, independent of `prime_sel`:
+
+```verilog
+MODE_FCMOV: begin
+    // cond = operand_b[0]; result = cond ? operand_a : result_lo
+    // Constant-time: mask = {256{operand_b[0]}}
+    result_lo <= (operand_a & {256{operand_b[0]}}) |
+                 (result_lo & ~{256{operand_b[0]}});
+end
+MODE_FCEQ: begin
+    // result = (a == b) ? 1 : 0, constant-time
+    // XOR all bits, OR-reduce, invert
+    result_lo <= (|(operand_a ^ operand_b)) ? 256'd0 : 256'd1;
+end
+```
+
+Strictly speaking, `FCEQ` above uses a conditional — but in hardware,
+the `|` reduce and `?:` are all combinational (no branch predictor),
+so this is inherently constant-time.  The XOR-then-OR-reduce pattern
+compiles to a balanced OR-tree (~8 LUT levels for 256 bits).
+
+#### Resource Cost Estimate
+
+| Component | LUTs | FFs | DSPs |
+|-----------|------|-----|------|
+| Existing field ALU | ~3000 | ~4800 | 165 |
+| secp256k1 reducer | +200 | — | — |
+| P-256 NIST reducer | +400 | — | — |
+| Montgomery REDC FSM | +300 | +40 | — |
+| custom_p + mont_p_inv regs | — | +512 | — |
+| FCMOV (256-bit mux) | +256 | — | — |
+| FCEQ (XOR + OR-tree) | +100 | — | — |
+| prime_sel mux + control | +50 | +10 | — |
+| **Total increase** | **+1300** | **+562** | **+0** |
+| **New total** | **~4300** | **~5362** | **165** |
+
+Roughly **+30% LUTs, +12% FFs, 0% DSPs**.  The multiplier (the
+expensive part) is fully reused.  On a Kintex-7 325T this is trivial.
+
+#### File Structure Decision
+
+Keep everything in `mp64_field_alu.v`.  The reducers are Verilog
+`function` blocks (pure combinational, ~30-50 lines each).  Total file
+size goes from 489 → ~750-800 lines — manageable.  Splitting into
+separate `mp64_field_reduce_*.v` files adds `include` complexity for
+minimal gain.
+
+If it grows beyond ~1000 lines, split the reducers into a separate
+`mp64_field_reduce.vh` include file (functions only, no module).
+
+#### FINV/FPOW with Non-Default Primes
+
+The existing `S_POWER` state (binary square-and-multiply) calls
+`field_mul(pow_acc, pow_acc)` and `field_mul(pow_acc, pow_base)`.
+These use the hardcoded Curve25519 `field_reduce`.  For multi-prime:
+
+1. Replace `field_mul` calls in S_POWER with a **`field_mul_sel`
+   function** that dispatches to the selected reducer:
+   ```verilog
+   function [255:0] field_mul_sel;
+       input [255:0] a, b;
+       input [1:0] sel;
+       reg [511:0] prod;
+       begin
+           prod = a * b;
+           case (sel)
+               2'd0: field_mul_sel = field_reduce_25519(prod);
+               2'd1: field_mul_sel = field_reduce_secp(prod);
+               2'd2: field_mul_sel = field_reduce_p256(prod);
+               2'd3: field_mul_sel = 256'd0;  // handled by S_REDC path
+           endcase
+       end
+   endfunction
+   ```
+
+2. For `prime_sel == 3` (Montgomery), `S_POWER` cannot use the
+   combinational path.  Instead, each square/multiply step goes
+   through `S_REDC` (3 extra cycles), making FINV ~3K cycles.
+   The FSM needs a `return_state` register so `S_REDC` knows where
+   to return after completing the reduction.
+
+3. **FINV exponent per prime:**
+   - Prime 0: $p-2 = 2^{255}-21$ (existing `P_MINUS_2` constant)
+   - Prime 1: secp256k1 $p-2$ (256-bit constant, hardcoded)
+   - Prime 2: P-256 $p-2$ (256-bit constant, hardcoded)
+   - Prime 3: `custom_p - 2` (computed at runtime — subtract 2 from
+     the stored `custom_p` register, combinational)
+
+#### Testbench Strategy
+
+Add to `rtl/sim/tb_field_alu.v`:
+- **secp256k1:** Known ECDSA test vectors (Bitcoin wiki / SEC 2).
+  FMUL, FSQR, FINV with secp256k1 prime.
+- **P-256:** NIST CAVP test vectors (ECDH_Prime, KAS_ECC).
+  FMUL, FSQR, FINV with P-256 prime.
+- **Montgomery:** Test with a small prime (e.g., 65537) where manual
+  verification is easy, then with a 256-bit prime.
+- **FCMOV:** Verify both branches (cond=0, cond=1), check no
+  timing difference (same cycle count regardless of condition).
+- **FCEQ:** Equal pair → 1, unequal pair → 0, near-miss (differ
+  in one bit).
+- **Cross-prime:** Switch prime_sel mid-session, verify no state
+  leakage between primes.
+- **LOAD_PRIME:** Write custom_p + p_inv, verify subsequent FMUL
+  uses them correctly.
+
+Target: ~15-20 new assertions, bringing tb_field_alu.v from 11 to
+~26-30 hardware tests.
+
+#### Emulator Test Strategy
+
+Add `TestFieldALUMultiPrime` class to `test_system.py`:
+- secp256k1: FADD, FSUB, FMUL, FSQR, FINV (5 tests)
+- P-256: FADD, FSUB, FMUL, FSQR, FINV (5 tests)
+- Montgomery/custom: FMUL, FINV with a known prime (2 tests)
+- FCMOV: cond=0, cond=1 (2 tests)
+- FCEQ: equal, unequal (2 tests)
+- Prime switching: alternate between primes (1 test)
+- Backward compat: existing Curve25519 ops still work (1 test)
+Total: ~18 tests.
+
+#### BIOS/KDOS Words
+
+BIOS:
+- `PRIME-SEL!` — write prime_sel bits [7:6] of CMD (no go)
+
+KDOS §1.10 additions:
+- `PRIME-SECP` — `( -- )` set prime to secp256k1
+- `PRIME-P256` — `( -- )` set prime to P-256
+- `PRIME-25519` — `( -- )` set prime to Curve25519
+- `PRIME-CUSTOM ( p p' -- )` — load custom prime + p_inv
+- `FCMOV ( a cond -- r )` — constant-time conditional move
+- `FCEQ ( a b -- flag )` — constant-time equality
+
+#### Implementation Order
+
+Recommended sub-commit sequence:
+1. **40a–40b:** PRIME_SEL + secp256k1 reducer (RTL + emulator + tests)
+2. **40c:** P-256 NIST reducer (RTL + emulator + tests)
+3. **40d:** Montgomery REDC path + LOAD_PRIME (RTL + emulator + tests)
+4. **40e–40f:** FCMOV + FCEQ (RTL + emulator + tests)
+5. **40i:** BIOS/KDOS words
+6. **40j:** Cross-prime + backward compat tests
 
 ---
 
