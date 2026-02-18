@@ -96,6 +96,10 @@ module mp64_field_alu (
     localparam [255:0] PRIME_SECP     = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F;
     localparam [255:0] P_MINUS_2_SECP = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2D;
 
+    // NIST P-256: p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+    localparam [255:0] PRIME_P256     = 256'hFFFFFFFF_00000001_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFF;
+    localparam [255:0] P_MINUS_2_P256 = 256'hFFFFFFFF_00000001_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFD;
+
     // Mode encoding
     localparam [3:0] MODE_X25519      = 4'd0,
                      MODE_FADD        = 4'd1,
@@ -254,6 +258,54 @@ module mp64_field_alu (
     endfunction
 
     // ========================================================================
+    // NIST P-256 reduction: FIPS 186-4 §D.2 word-based
+    // ========================================================================
+
+    function [255:0] field_reduce_p256;
+        input [511:0] x;
+        reg [31:0] c [0:15];
+        reg [255:0] s1, s2, s3, s4, s5, d1, d2, d3, d4;
+        reg [263:0] pos, neg;
+        reg [264:0] adj;
+        integer i;
+        begin
+            // Extract sixteen 32-bit words
+            for (i = 0; i < 16; i = i + 1)
+                c[i] = x[i*32 +: 32];
+
+            // FIPS 186-4 §D.2 terms (MSW..LSW)
+            s1 = {c[7],  c[6],  c[5],  c[4],  c[3],  c[2],  c[1],  c[0]};
+            s2 = {c[15], c[14], c[13], c[12], c[11], 32'd0, 32'd0, 32'd0};
+            s3 = {32'd0, c[15], c[14], c[13], c[12], 32'd0, 32'd0, 32'd0};
+            s4 = {c[15], c[14], 32'd0, 32'd0, 32'd0, c[10], c[9],  c[8]};
+            s5 = {c[8],  c[13], c[15], c[14], c[13], c[11], c[10], c[9]};
+            d1 = {c[10], c[8],  32'd0, 32'd0, 32'd0, c[13], c[12], c[11]};
+            d2 = {c[11], c[9],  32'd0, 32'd0, c[15], c[14], c[13], c[12]};
+            d3 = {c[12], 32'd0, c[10], c[9],  c[8],  c[15], c[14], c[13]};
+            d4 = {c[13], 32'd0, c[11], c[10], c[9],  32'd0, c[15], c[14]};
+
+            // Positive: s1 + 2*s2 + 2*s3 + s4 + s5
+            pos = s1 + s2 + s2 + s3 + s3 + s4 + s5;
+            // Negative: d1 + d2 + d3 + d4
+            neg = d1 + d2 + d3 + d4;
+
+            // Add 5*p to ensure non-negative result
+            adj = {1'b0, pos}
+                + {9'd0, PRIME_P256} + {9'd0, PRIME_P256}
+                + {9'd0, PRIME_P256} + {9'd0, PRIME_P256}
+                + {9'd0, PRIME_P256}
+                - {1'b0, neg};
+
+            // Reduce mod p (bounded: at most 12 subtracts)
+            for (i = 0; i < 16; i = i + 1)
+                if (adj >= {9'd0, PRIME_P256})
+                    adj = adj - {9'd0, PRIME_P256};
+
+            field_reduce_p256 = adj[255:0];
+        end
+    endfunction
+
+    // ========================================================================
     // Prime-parameterized dispatch functions
     // ========================================================================
 
@@ -266,7 +318,8 @@ module mp64_field_alu (
             case (sel)
                 2'd0:    p = PRIME;
                 2'd1:    p = PRIME_SECP;
-                default: p = PRIME;      // placeholder for P-256/custom
+                2'd2:    p = PRIME_P256;
+                default: p = PRIME;      // placeholder for custom
             endcase
             sum = {1'b0, a} + {1'b0, b};
             if (sum >= {1'b0, p})
@@ -284,6 +337,7 @@ module mp64_field_alu (
             case (sel)
                 2'd0:    p = PRIME;
                 2'd1:    p = PRIME_SECP;
+                2'd2:    p = PRIME_P256;
                 default: p = PRIME;
             endcase
             if (a >= b)
@@ -302,6 +356,7 @@ module mp64_field_alu (
             case (sel)
                 2'd0:    field_mul_sel = field_reduce(prod);
                 2'd1:    field_mul_sel = field_reduce_secp(prod);
+                2'd2:    field_mul_sel = field_reduce_p256(prod);
                 default: field_mul_sel = field_reduce(prod);
             endcase
         end
@@ -375,6 +430,7 @@ module mp64_field_alu (
                                         pow_base  <= operand_a;
                                         case (prime_sel)
                                             2'd1:    pow_exp <= P_MINUS_2_SECP;
+                                            2'd2:    pow_exp <= P_MINUS_2_P256;
                                             default: pow_exp <= P_MINUS_2;
                                         endcase
                                         pow_step  <= 9'd0;

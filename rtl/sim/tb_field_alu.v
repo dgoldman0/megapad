@@ -155,6 +155,7 @@ module tb_field_alu;
 
     localparam [255:0] PRIME = 256'h7FFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFED;
     localparam [255:0] PRIME_SECP = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F;
+    localparam [255:0] PRIME_P256 = 256'hFFFFFFFF_00000001_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFF;
 
     initial begin
         $dumpfile("tb_field_alu.vcd");
@@ -317,6 +318,50 @@ module tb_field_alu;
         wait_done;
         read_result(result);
         check(result, PRIME - 256'd2, "25519 FSUB(3,5) after SECP");
+
+        // ================================================================
+        // P-256 tests (prime_sel = 2)
+        // ================================================================
+        set_prime(2'd2);
+
+        // --- Test 19: P-256 FADD (3 + 5) = 8 ---
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd8, "P256 FADD(3,5)=8");
+
+        // --- Test 20: P-256 FSUB wraparound (3 - 5) mod p_256 = p_256 - 2 ---
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd2, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, PRIME_P256 - 256'd2, "P256 FSUB(3,5)=p-2");
+
+        // --- Test 21: P-256 FMUL (7 × 11) = 77 ---
+        write_operand_a(256'd7);
+        write_operand_b(256'd11);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd77, "P256 FMUL(7,11)=77");
+
+        // --- Test 22: P-256 FMUL with reduction (p-1)*2 = p-2 ---
+        write_operand_a(PRIME_P256 - 256'd1);
+        write_operand_b(256'd2);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, PRIME_P256 - 256'd2, "P256 FMUL(p-1,2)=p-2");
+
+        // --- Test 23: P-256 FINV — inv(2) = (p+1)/2 ---
+        write_operand_a(256'd2);
+        issue_cmd(4'd5, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, (PRIME_P256 + 256'd1) >> 1, "P256 FINV(2)=(p+1)/2");
 
         // ================================================================
         $display("");

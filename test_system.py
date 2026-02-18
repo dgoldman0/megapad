@@ -7897,6 +7897,78 @@ class TestFieldALUSecp256k1(_KDOSTestBase):
         self.assertIn("R1=255 ", text)
 
 
+class TestFieldALUP256(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — NIST P-256 prime (prime_sel=2)."""
+
+    # p_256 = 2^256 - 2^224 + 2^192 + 2^96 - 1
+    # = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+
+    def _load_small_int(self, name, value):
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        for i in range(8):
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _setup_ab(self, a=42, b=17):
+        lines = self._load_small_int("tv-a", a)
+        lines.extend(self._load_small_int("tv-b", b))
+        lines.append("CREATE tv-r  32 ALLOT")
+        return lines
+
+    def _read_result_u64(self):
+        return [
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+            '."  R2=" tv-r 2 + C@ .',
+            '."  R3=" tv-r 3 + C@ .',
+        ]
+
+    def test_p256_fadd_small(self):
+        """FADD under P-256: 42 + 17 = 59."""
+        setup = self._setup_ab(42, 17)
+        setup.extend(["PRIME-P256", "tv-a tv-b tv-r FADD"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=59 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_p256_fmul_small(self):
+        """FMUL under P-256: 42 * 17 = 714."""
+        setup = self._setup_ab(42, 17)
+        setup.extend(["PRIME-P256", "tv-a tv-b tv-r FMUL"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("R0=202 ", text)
+        self.assertIn("R1=2 ", text)
+
+    def test_p256_finv_roundtrip(self):
+        """FINV roundtrip under P-256: a * inv(a) = 1."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-P256",
+            "tv-a tv-r FINV",
+            "tv-a tv-r tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_p256_fsub_wraparound(self):
+        """FSUB wraparound under P-256: (3 - 5) mod p_256 = p_256 - 2."""
+        setup = self._setup_ab(3, 5)
+        setup.extend(["PRIME-P256", "tv-a tv-b tv-r FSUB"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # p_256 - 2 low bytes: 0x...FFFFFFFD → byte0=0xFD=253, byte1=0xFF=255
+        self.assertIn("R0=253 ", text)
+        self.assertIn("R1=255 ", text)
+
+
 class TestNTT(_KDOSTestBase):
     """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
 

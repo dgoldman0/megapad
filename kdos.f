@@ -857,6 +857,7 @@ CREATE X25519-BASE  32 ALLOT
 
 : PRIME-25519  ( -- )   0 _FIELD-CMD-ADDR C! ;    \ prime_sel=0
 : PRIME-SECP   ( -- )  64 _FIELD-CMD-ADDR C! ;    \ prime_sel=1 (1<<6)
+: PRIME-P256   ( -- ) 128 _FIELD-CMD-ADDR C! ;    \ prime_sel=2 (2<<6)
 
 \ Aliases for readability
 : FIELD-A!      X25519-SCALAR! ;
