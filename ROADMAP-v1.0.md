@@ -140,15 +140,20 @@ Remaining work: application-level features (items 25–30).
 - test_networking.py: 38 real-network tests (NIC backends, TAP,
   ARP, ICMP, UDP, TCP) across 8 test classes
 
-### RTL — ✅ DONE (full ISA + extended tile + multicore + PQC)
+### RTL — ✅ DONE (full ISA + extended tile + multicore + PQC + SoC)
 
-30 portable Verilog modules in `rtl/` + 12 target overrides (Xilinx-7 + ASIC stubs),
-28 testbenches, ~414 hardware assertions passing.
-~25,000 lines RTL + ~11,100 lines testbench.
+31 portable Verilog modules in `rtl/` + 12 target overrides (Xilinx-7 + ASIC stubs),
+29 testbenches, ~419 hardware assertions passing.
+~26,300 lines RTL + ~11,300 lines testbench.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
-- ✅ mp64_soc.v — 16-core heterogeneous SoC top-level (bus arbiter, MMIO, IPI wiring,
-  TRNG, Field ALU, NTT, KEM, micro-cluster gating)
+- ✅ mp64_soc.v — Full SoC integration (903 lines): 4 CPU cores + I-caches,
+  3 micro-clusters, bus arbiter, 4-bank memory, ext-mem controller,
+  tile engine, MMIO decoder (12 peripherals), BIOS hex init, NIC PHY,
+  SysInfo register.  All 19 module ports verified (0 mismatches).
+  SoC smoke test: 5/5 PASS.
+- ✅ mp64_top.v — Parameterized top-level instantiating mp64_soc with
+  CLOCK_HZ, NUM_CORES, NUM_CLUSTERS, MEM_DEPTH passthrough
 - ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
 - ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
@@ -166,6 +171,26 @@ Remaining work: application-level features (items 25–30).
   via NTT engine + SHA-3 + TRNG (15 HW tests)
 - ✅ mp64_memory.v, mp64_timer.v, mp64_uart.v, mp64_disk.v, mp64_nic.v, mp64_extmem.v
 - ✅ Kintex-7 325T target (Genesys 2); est. ~145K–185K LUTs, ~420–620 DSPs
+
+### FPGA Synthesis — 🔄 IN PROGRESS
+
+SoC integration + Yosys synthesis pipeline established.
+
+- ✅ SRAM decomposition: 512-bit dp/sp RAM → 8×64-bit BRAM slices
+  for Yosys inference (`mp64_sram_dp_xilinx7.v`, `mp64_sram_sp_xilinx7.v`).
+  Memory subsystem synthesizes to 1,024 RAMB36E1.
+- ✅ BIOS hex generation: `fpga/gen_bios_hex.py` → `fpga/bios.hex`
+  (3,795 × 64-bit words for Bank 0 SRAM init)
+- ✅ ASIC dp stub port fix: `mp64_sram_dp_asic.v` asymmetric interface
+- ✅ NIC async reset fix: `data_window` register block converted to
+  sync reset to avoid Yosys PROC_ARST error on unpacked arrays
+  (30/30 NIC tests pass, RX/TX FSMs unchanged)
+- ✅ IVerilog clean compile of full SoC (28 source files, 0 warnings)
+- ✅ Yosys SoC synth script (`fpga/synth_yosys_soc.tcl`, NIC blackboxed)
+- ☐ Full Yosys synthesis completion (field_alu 256-bit reduction is
+  bottleneck; PROC_MUX pass generates enormous mux trees for
+  `field_reduce_p256`/`field_reduce_secp` combinational logic)
+- ☐ Vivado/nextpnr place & route for timing closure
 
 ### Extended TPU — ✅ IMPLEMENTED
 
@@ -456,7 +481,9 @@ document that will be folded into proper docs as each item ships.
     - 39a. ✅ `mp64_cpu_common.vh` — shared decoder, ALU, FSM states
     - 39b. ✅ `mp64_cpu_micro.v` — shift-add mul, no tile/cache/BIST
     - 39c. ✅ `mp64_cpu.v` refactored to use common core
-    - 39d. ☐ Parameterize `mp64_top.v` for mixed major+micro configs
+    - 39d. ✅ Parameterize `mp64_top.v` for mixed major+micro configs
+           (`mp64_soc.v` created with NUM_CORES/NUM_CLUSTERS params,
+           `mp64_top.v` now instantiates mp64_soc with passthrough)
     - 39e. ✅ Bus arbiter: weighted round-robin with per-port QoS CSRs
     - 39f. ✅ Emulator: `MicroCluster` + `num_clusters` in `MegapadSystem`
     - 39g. ☐ `CSR_CORE_TYPE` (0=major, 1=micro) — not yet wired
@@ -573,7 +600,8 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `Makefile` | 190 | ✅ Build, test, & accel targets |
 | `conftest.py` | 197 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `rtl/` | ~25,000 | ✅ 30 portable Verilog modules + 12 target overrides |
-| `rtl/sim/` | ~11,100 | ✅ 28 testbenches (~414 HW assertions) |
+| `rtl/` | ~26,300 | ✅ 31 portable Verilog modules + 12 target overrides |
+| `rtl/sim/` | ~11,300 | ✅ 29 testbenches (~419 HW assertions) |
+| `fpga/` | — | ✅ Synthesis scripts, BIOS hex, SoC synth pipeline |
 | `docs/` | 10 files | ✅ Written |
 | `README.md` | 350 | ✅ Current |
