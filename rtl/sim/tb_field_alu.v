@@ -516,6 +516,73 @@ module tb_field_alu;
         check(result, {1'b0, {255{1'b1}}} - 256'd20, "FMAC (p-1)*2 mod p = p-2");
 
         // ================================================================
+        // Tests 36-39: Cross-prime switching + backward compat
+        // ================================================================
+
+        // --- Test 36: Switch to secp256k1, compute, switch back to 25519 ---
+        set_prime(2'd1);  // secp256k1
+        write_operand_a(256'd7);
+        write_operand_b(256'd11);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
+        wait_done;
+        read_result(result);
+        check(result, 256'd77, "cross: SECP FMUL(7,11)=77");
+
+        // Switch to P-256
+        set_prime(2'd2);
+        write_operand_a(256'd13);
+        write_operand_b(256'd17);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd221, "cross: P256 FMUL(13,17)=221");
+
+        // Switch back to Curve25519/default
+        set_prime(2'd0);
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD
+        wait_done;
+        read_result(result);
+        check(result, 256'd8, "cross: 25519 FADD(3,5)=8 after switch");
+
+        // --- Test 37: X25519 backward compat after prime switching ---
+        // X25519 mode always uses Curve25519 regardless of prime_sel
+        set_prime(2'd1);  // secp256k1 selected, shouldn't matter
+        write_operand_a(256'd42);  // some scalar (will be clamped)
+        write_operand_b(256'd9);     // basepoint
+        issue_cmd(4'd0, 1'b1, 1'b0, 2'd0);  // X25519
+        wait_done;
+        read_result(result);
+        // Just verify it completed (non-zero result) — exact value
+        // depends on clamped scalar, but must not be 0 or 9
+        if (result == 256'd0 || result == 256'd9)
+            $display("  [FAIL] Test 37: X25519 compat after prime switch");
+        else begin
+            $display("  [PASS] Test 37: X25519 compat after prime switch");
+            pass_count = pass_count + 1;
+        end
+
+        // --- Test 38: FCEQ near-miss (differ in one bit) ---
+        set_prime(2'd0);
+        write_operand_a(256'd255);
+        write_operand_b(256'd127);  // differ in bit 7
+        issue_cmd(4'd9, 1'b1, 1'b0, 2'd0);  // FCEQ
+        wait_done;
+        read_result(result);
+        check(result, 256'd0, "FCEQ near-miss → 0");
+
+        // --- Test 39: Custom prime, switch to 25519, back to custom ---
+        // Verify custom_p survives prime_sel switching
+        set_prime(2'd3);  // custom (p=65537 still loaded from test 24)
+        write_operand_a(256'd100);
+        write_operand_b(256'd200);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd20000, "custom survives switch back");
+
+        // ================================================================
         $display("");
         $display("=== Results: %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count == 0)

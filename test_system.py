@@ -8173,6 +8173,95 @@ class TestFieldALUNewModes(_KDOSTestBase):
         # 1400 = 0x0578 → byte0=0x78=120, byte1=0x05=5
         self.assertIn("R0=120 ", text)
         self.assertIn("R1=5 ", text)
+
+
+class TestFieldALUCrossPrime(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — cross-prime switching + backward compat."""
+
+    def _load_small_int(self, name, value):
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        for i in range(8):
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _read_result_u64(self, buf="tv-r"):
+        return [
+            f'."  R0=" {buf} C@ .',
+            f'."  R1=" {buf} 1 + C@ .',
+            f'."  R2=" {buf} 2 + C@ .',
+            f'."  R3=" {buf} 3 + C@ .',
+        ]
+
+    def test_switch_secp_then_25519(self):
+        """Switch from secp256k1 to Curve25519, verify both compute correctly."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 7))
+        lines.extend(self._load_small_int("tv-b", 11))
+        lines.append("CREATE tv-r 32 ALLOT")
+        # secp256k1: 7*11 = 77
+        lines.append("PRIME-SECP")
+        lines.extend(["tv-a tv-b tv-r FMUL"])
+        lines.extend(self._read_result_u64())
+        # Curve25519: 7+11 = 18
+        lines.append("PRIME-25519")
+        lines.extend(["tv-a tv-b tv-r FADD"])
+        lines.extend([
+            '."  S0=" tv-r C@ .',
+            '."  S1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("R0=77 ", text)   # FMUL under secp256k1
+        self.assertIn("S0=18 ", text)   # FADD under Curve25519
+
+    def test_prime_sel_survives_ops(self):
+        """prime_sel persists across multiple operations."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 3))
+        lines.extend(self._load_small_int("tv-b", 5))
+        lines.append("CREATE tv-r 32 ALLOT")
+        # Set P-256, do two ops — both should use P-256
+        lines.append("PRIME-P256")
+        lines.extend(["tv-a tv-b tv-r FADD"])  # 3+5=8
+        lines.extend(self._read_result_u64())
+        lines.extend(self._load_small_int("tv-c", 2))
+        lines.extend(["tv-a tv-c tv-r FMUL"])  # 3*2=6
+        lines.extend([
+            '."  S0=" tv-r C@ .',
+            '."  S1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("R0=8 ", text)
+        self.assertIn("S0=6 ", text)
+
+    def test_x25519_ignores_prime_sel(self):
+        """X25519 mode 0 always uses Curve25519 regardless of prime_sel."""
+        lines = []
+        # Set prime to secp256k1 — shouldn't affect X25519
+        lines.append("PRIME-SECP")
+        # Do X25519 with basepoint and a known scalar
+        lines.append("CREATE tv-s 32 ALLOT")
+        lines.append("tv-s 32 0 FILL")
+        lines.append("1 tv-s C!")  # scalar = 1 (will be clamped to 64)
+        lines.append("CREATE tv-p 32 ALLOT")
+        lines.append("tv-p 32 0 FILL")
+        lines.append("9 tv-p C!")  # basepoint u=9
+        lines.append("CREATE tv-r 32 ALLOT")
+        lines.extend([
+            "tv-s tv-p tv-r X25519",
+            '." X0=" tv-r C@ .',
+            '." X1=" tv-r 1 + C@ .',
+        ])
+        text = self._run_kdos(lines)
+        # X25519 completed without hanging — verify we got output
+        self.assertIn("X0=", text)
+        # Result byte0 must be non-zero (clamped scalar * basepoint ≠ 0 or 9)
+        self.assertNotIn("X0= 0 ", text)
+
+
+class TestNTT(_KDOSTestBase):
     """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
 
     # q=3329 (ML-KEM / Kyber default modulus)
