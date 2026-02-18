@@ -2119,10 +2119,31 @@ class FieldALUDevice(Device):
             lo = wide & ((1 << 256) - 1)
             hi = wide >> 256
             self._set_result(lo, hi)
+        elif mode == FIELD_MODE_FCMOV:
+            # Constant-time conditional move: cond ? a : result_lo
+            cond = b & 1
+            prev = int.from_bytes(bytes(self._result_lo), 'little')
+            self._set_result(a if cond else prev)
+        elif mode == FIELD_MODE_FCEQ:
+            # Constant-time equality: (a == b) ? 1 : 0
+            self._set_result(1 if a == b else 0)
         elif mode == FIELD_MODE_LOAD_PRIME:
             self._custom_p = a
             self._mont_p_inv = b
             self._set_result(0)
+        elif mode == FIELD_MODE_FMAC:
+            # Field multiply-accumulate: result += a*b mod p
+            prev = int.from_bytes(bytes(self._result_lo), 'little')
+            self._set_result(((a * b) % p + prev) % p)
+        elif mode == FIELD_MODE_MUL_ADD_RAW:
+            # Raw multiply-accumulate (no field reduction)
+            prev_lo = int.from_bytes(bytes(self._result_lo), 'little')
+            prev_hi = int.from_bytes(bytes(self._result_hi), 'little')
+            prev = (prev_hi << 256) | prev_lo
+            wide = prev + a * b
+            lo = wide & ((1 << 256) - 1)
+            hi = (wide >> 256) & ((1 << 256) - 1)
+            self._set_result(lo, hi)
         else:
             # Unknown mode — just mark done with zero result
             self._set_result(0)

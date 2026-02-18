@@ -475,7 +475,7 @@ module mp64_field_alu (
             case (state)
 
                 // ------------------------------------------------------------
-                // S_COMPUTE — single-cycle operations (modes 1-4, 7)
+                // S_COMPUTE — single-cycle operations (modes 1-4, 7-12)
                 // ------------------------------------------------------------
                 S_COMPUTE: begin
                     result_hi <= 256'd0;
@@ -488,9 +488,32 @@ module mp64_field_alu (
                             result_lo <= (operand_a * operand_b);
                             result_hi <= (operand_a * operand_b) >> 256;
                         end
+                        MODE_FCMOV: begin
+                            // Constant-time conditional move:
+                            //   cond = operand_b[0]
+                            //   result = cond ? operand_a : result_lo
+                            result_lo <= (operand_a & {256{operand_b[0]}}) |
+                                         (result_lo & ~{256{operand_b[0]}});
+                        end
+                        MODE_FCEQ: begin
+                            // Constant-time equality test:
+                            //   result = (a == b) ? 1 : 0
+                            result_lo <= (|(operand_a ^ operand_b)) ? 256'd0 : 256'd1;
+                        end
                         MODE_LOAD_PRIME: begin
                             custom_p   <= operand_a;
                             mont_p_inv <= operand_b;
+                        end
+                        MODE_FMAC: begin
+                            // Field multiply-accumulate: result = (a*b + result) mod p
+                            result_lo <= field_add_sel(
+                                field_mul_sel(operand_a, operand_b, prime_sel, custom_p),
+                                result_lo, prime_sel, custom_p);
+                        end
+                        MODE_MUL_ADD_RAW: begin
+                            // Raw multiply-accumulate (no field reduction)
+                            {result_hi, result_lo} <= {result_hi, result_lo}
+                                                    + operand_a * operand_b;
                         end
                         default: result_lo <= 256'd0;
                     endcase

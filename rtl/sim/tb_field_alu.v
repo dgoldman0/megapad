@@ -410,6 +410,112 @@ module tb_field_alu;
         check(result, 256'd32769, "CUSTOM FINV(2)=32769");
 
         // ================================================================
+        // Tests 28-35: FCMOV, FCEQ, FMAC, MUL_ADD_RAW (new modes 8-12)
+        // ================================================================
+        // Switch back to Curve25519 for these tests
+        set_prime(2'd0);
+
+        // --- Test 28: FCMOV cond=1 → result = operand_a ---
+        // Pre-load result_lo = 42 via FADD(42, 0)
+        write_operand_a(256'd42);
+        write_operand_b(256'd0);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD → result_lo = 42
+        wait_done;
+        // Now FCMOV: a=99, cond=1 → result = 99
+        write_operand_a(256'd99);
+        write_operand_b(256'd1);
+        issue_cmd(4'd8, 1'b1, 1'b0, 2'd0);  // FCMOV
+        wait_done;
+        read_result(result);
+        check(result, 256'd99, "FCMOV cond=1 → a");
+
+        // --- Test 29: FCMOV cond=0 → result unchanged ---
+        // result_lo is 99 from previous test
+        write_operand_a(256'd77);
+        write_operand_b(256'd0);
+        issue_cmd(4'd8, 1'b1, 1'b0, 2'd0);  // FCMOV
+        wait_done;
+        read_result(result);
+        check(result, 256'd99, "FCMOV cond=0 → old");
+
+        // --- Test 30: FCEQ equal → 1 ---
+        write_operand_a(256'd12345);
+        write_operand_b(256'd12345);
+        issue_cmd(4'd9, 1'b1, 1'b0, 2'd0);  // FCEQ
+        wait_done;
+        read_result(result);
+        check(result, 256'd1, "FCEQ equal → 1");
+
+        // --- Test 31: FCEQ not equal → 0 ---
+        write_operand_a(256'd12345);
+        write_operand_b(256'd12346);
+        issue_cmd(4'd9, 1'b1, 1'b0, 2'd0);  // FCEQ
+        wait_done;
+        read_result(result);
+        check(result, 256'd0, "FCEQ not-equal → 0");
+
+        // --- Test 32: FMAC accumulate: (3*5) + (7*11) = 15 + 77 = 92 ---
+        // First, zero result via FADD(0,0)
+        write_operand_a(256'd0);
+        write_operand_b(256'd0);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD → result_lo = 0
+        wait_done;
+        // FMAC: result += 3*5 = 15
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd11, 1'b1, 1'b0, 2'd0); // FMAC
+        wait_done;
+        // FMAC: result += 7*11 = 77; total = 92
+        write_operand_a(256'd7);
+        write_operand_b(256'd11);
+        issue_cmd(4'd11, 1'b1, 1'b0, 2'd0); // FMAC
+        wait_done;
+        read_result(result);
+        check(result, 256'd92, "FMAC 3*5+7*11=92");
+
+        // --- Test 33: MUL_ADD_RAW accumulate: 10*20 + 30*40 = 200+1200 = 1400 ---
+        // Zero result via MUL_RAW(0,0)
+        write_operand_a(256'd0);
+        write_operand_b(256'd0);
+        issue_cmd(4'd7, 1'b1, 1'b0, 2'd0);  // MUL_RAW → result = 0
+        wait_done;
+        // MUL_ADD_RAW: result += 10*20 = 200
+        write_operand_a(256'd10);
+        write_operand_b(256'd20);
+        issue_cmd(4'd12, 1'b1, 1'b0, 2'd0); // MUL_ADD_RAW
+        wait_done;
+        // MUL_ADD_RAW: result += 30*40 = 1200; total = 1400
+        write_operand_a(256'd30);
+        write_operand_b(256'd40);
+        issue_cmd(4'd12, 1'b1, 1'b0, 2'd0); // MUL_ADD_RAW
+        wait_done;
+        read_result(result);
+        check(result, 256'd1400, "MUL_ADD_RAW 10*20+30*40=1400");
+
+        // --- Test 34: FCEQ with zero values ---
+        write_operand_a(256'd0);
+        write_operand_b(256'd0);
+        issue_cmd(4'd9, 1'b1, 1'b0, 2'd0);  // FCEQ
+        wait_done;
+        read_result(result);
+        check(result, 256'd1, "FCEQ 0==0 → 1");
+
+        // --- Test 35: FMAC with reduction (Curve25519) ---
+        // p = 2^255 - 19; do FMAC with large values that reduce
+        // Start from 0
+        write_operand_a(256'd0);
+        write_operand_b(256'd0);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD → result_lo = 0
+        wait_done;
+        // FMAC: result += (p-1)*2 mod p = p-2
+        write_operand_a({1'b0, {255{1'b1}}} - 256'd19);  // p-1
+        write_operand_b(256'd2);
+        issue_cmd(4'd11, 1'b1, 1'b0, 2'd0); // FMAC
+        wait_done;
+        read_result(result);
+        check(result, {1'b0, {255{1'b1}}} - 256'd20, "FMAC (p-1)*2 mod p = p-2");
+
+        // ================================================================
         $display("");
         $display("=== Results: %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count == 0)

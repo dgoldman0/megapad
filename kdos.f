@@ -947,6 +947,49 @@ CREATE _FRH 32 ALLOT
     R> FIELD-RESULT@
     R> FIELD-RESULT-HI@ ;
 
+\ FCMOV ( a-addr cond-addr -- )  Constant-time conditional move.
+\   If cond[0]=1, result_lo <- a; else result_lo unchanged.
+\   Result stays in device register (no copy-out).
+: FCMOV ( a cond -- )
+    SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-CMOV FIELD-CMD!
+    FIELD-WAIT ;
+
+\ FCEQ ( a-addr b-addr result-addr -- )  Constant-time equality test.
+\   result = (a == b) ? 1 : 0.
+: FCEQ ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-CEQ FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMAC ( a-addr b-addr result-addr -- )
+\   Field multiply-accumulate: result += a*b mod p.
+\   Accumulates into device's result_lo register, then copies out.
+: FMAC ( a b r -- )
+    >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-MAC FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@ ;
+
+\ FMUL-ADD-RAW ( a-addr b-addr rlo-addr rhi-addr -- )
+\   Raw 512-bit multiply-accumulate (no field reduction).
+\   Accumulates into device's {result_hi, result_lo}, then copies out.
+: FMUL-ADD-RAW ( a b rlo rhi -- )
+    >R >R SWAP
+    FIELD-A!
+    FIELD-B!
+    FMODE-MAC-RAW FIELD-CMD!
+    FIELD-WAIT
+    R> FIELD-RESULT@
+    R> FIELD-RESULT-HI@ ;
+
 \ .FIELD-STATUS ( -- )  Print human-readable field ALU status.
 : .FIELD-STATUS
     FIELD-STATUS@

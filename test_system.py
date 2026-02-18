@@ -8046,7 +8046,133 @@ class TestFieldALUCustom(_KDOSTestBase):
         self.assertIn("R1=0 ", text)
 
 
-class TestNTT(_KDOSTestBase):
+class TestFieldALUNewModes(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — FCMOV, FCEQ, FMAC, MUL-ADD-RAW (modes 8-12)."""
+
+    def _load_small_int(self, name, value):
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        for i in range(8):
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _read_result_u64(self, buf="tv-r"):
+        return [
+            f'."  R0=" {buf} C@ .',
+            f'."  R1=" {buf} 1 + C@ .',
+            f'."  R2=" {buf} 2 + C@ .',
+            f'."  R3=" {buf} 3 + C@ .',
+        ]
+
+    def test_fcmov_select(self):
+        """FCMOV: cond=1 selects operand_a, cond=0 keeps result_lo."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 42))
+        lines.extend(self._load_small_int("tv-b", 0))
+        lines.append("CREATE tv-r 32 ALLOT")
+        lines.append("CREATE tv-c 32 ALLOT")
+        # First: FMUL(42, 1) = 42 → pre-load result_lo = 42
+        lines.extend(self._load_small_int("tv-one", 1))
+        lines.extend(["tv-a tv-one tv-r FMUL"])
+        # FCMOV cond=1, a=99 → result = 99
+        lines.extend(self._load_small_int("tv-new", 99))
+        lines.append("1 tv-c C!")  # cond = 1
+        lines.extend(["tv-new tv-c FCMOV"])
+        # Read result (FCMOV result stays in device register, read via FIELD-RESULT@)
+        lines.extend(["tv-r FIELD-RESULT@"])
+        lines.extend(self._read_result_u64())
+        text = self._run_kdos(lines)
+        self.assertIn("R0=99 ", text)
+
+    def test_fcmov_keep(self):
+        """FCMOV with cond=0 preserves previous result_lo."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 42))
+        lines.extend(self._load_small_int("tv-b", 0))
+        lines.append("CREATE tv-r 32 ALLOT")
+        lines.append("CREATE tv-c 32 ALLOT")
+        lines.extend(self._load_small_int("tv-one", 1))
+        # Pre-load result = 42
+        lines.extend(["tv-a tv-one tv-r FMUL"])
+        # FCMOV cond=0, a=99 → result stays 42
+        lines.extend(self._load_small_int("tv-new", 99))
+        lines.append("tv-c 32 0 FILL")  # cond = 0
+        lines.extend(["tv-new tv-c FCMOV"])
+        lines.extend(["tv-r FIELD-RESULT@"])
+        lines.extend(self._read_result_u64())
+        text = self._run_kdos(lines)
+        self.assertIn("R0=42 ", text)
+
+    def test_fceq_equal(self):
+        """FCEQ: equal values → 1."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 12345))
+        lines.extend(self._load_small_int("tv-b", 12345))
+        lines.append("CREATE tv-r 32 ALLOT")
+        lines.extend(["tv-a tv-b tv-r FCEQ"])
+        lines.extend(self._read_result_u64())
+        text = self._run_kdos(lines)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fceq_not_equal(self):
+        """FCEQ: different values → 0."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 12345))
+        lines.extend(self._load_small_int("tv-b", 12346))
+        lines.append("CREATE tv-r 32 ALLOT")
+        lines.extend(["tv-a tv-b tv-r FCEQ"])
+        lines.extend(self._read_result_u64())
+        text = self._run_kdos(lines)
+        self.assertIn("R0=0 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_fmac_accumulate(self):
+        """FMAC: 3*5 + 7*11 = 92."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 0))
+        lines.extend(self._load_small_int("tv-b", 0))
+        lines.append("CREATE tv-r 32 ALLOT")
+        # Zero result: FADD(0,0) → result_lo=0
+        lines.extend(["tv-a tv-b tv-r FADD"])
+        # FMAC: result += 3*5 = 15
+        lines.extend(self._load_small_int("tv-m1", 3))
+        lines.extend(self._load_small_int("tv-m2", 5))
+        lines.extend(["tv-m1 tv-m2 tv-r FMAC"])
+        # FMAC: result += 7*11 = 77; total = 92
+        lines.extend(self._load_small_int("tv-m3", 7))
+        lines.extend(self._load_small_int("tv-m4", 11))
+        lines.extend(["tv-m3 tv-m4 tv-r FMAC"])
+        lines.extend(self._read_result_u64())
+        text = self._run_kdos(lines)
+        # 92 = 0x5C
+        self.assertIn("R0=92 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_mul_add_raw_accumulate(self):
+        """MUL_ADD_RAW: 10*20 + 30*40 = 1400."""
+        lines = []
+        lines.extend(self._load_small_int("tv-a", 0))
+        lines.extend(self._load_small_int("tv-b", 0))
+        lines.append("CREATE tv-rlo 32 ALLOT")
+        lines.append("CREATE tv-rhi 32 ALLOT")
+        # Zero result: FMUL-RAW(0,0)
+        lines.extend(["tv-a tv-b tv-rlo tv-rhi FMUL-RAW"])
+        # MUL_ADD_RAW: result += 10*20 = 200
+        lines.extend(self._load_small_int("tv-m1", 10))
+        lines.extend(self._load_small_int("tv-m2", 20))
+        lines.extend(["tv-m1 tv-m2 tv-rlo tv-rhi FMUL-ADD-RAW"])
+        # MUL_ADD_RAW: result += 30*40 = 1200; total = 1400
+        lines.extend(self._load_small_int("tv-m3", 30))
+        lines.extend(self._load_small_int("tv-m4", 40))
+        lines.extend(["tv-m3 tv-m4 tv-rlo tv-rhi FMUL-ADD-RAW"])
+        lines.extend(self._read_result_u64("tv-rlo"))
+        text = self._run_kdos(lines)
+        # 1400 = 0x0578 → byte0=0x78=120, byte1=0x05=5
+        self.assertIn("R0=120 ", text)
+        self.assertIn("R1=5 ", text)
     """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
 
     # q=3329 (ML-KEM / Kyber default modulus)
