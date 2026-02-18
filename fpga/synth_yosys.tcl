@@ -5,44 +5,18 @@
 # Open-source synthesis sanity check targeting Xilinx 7-series.
 # Reports LUT/FF/BRAM/DSP utilisation for the logic fabric.
 #
-# Notes:
-#   - mp64_memory is blackboxed (1 MiB array maps to BRAM; Yosys 0.33
-#     cannot infer 512-bit-wide block RAMs and tries to flatten).
-#   - mp64_synth_top is skipped (IBUFDS/MMCME2_BASE/BUFG are Vivado-only).
-#   - Top module is mp64_soc; BRAM usage is estimated separately below.
+# The Xilinx-7 target wrappers decompose 512-bit SRAM primitives into
+# 8 × 64-bit BRAM slices that Yosys can infer as RAMB36E1 / RAMB18E1.
 #
-# Usage:  cd fpga && yosys -s synth_yosys.tcl
+# Top module: mp64_memory (the primary RAM consumer; validates that the
+# decomposed SRAM blocks map correctly to BRAM).  The full SoC top
+# (mp64_soc) is not yet integrated.
+#
+# Usage:  cd megapad-64 && yosys -s fpga/synth_yosys.tcl
 #
 
-# ---- Blackbox stubs for memory-heavy modules (map to BRAM) ------------------
+# ---- NIC blackbox (deep FIFOs — not relevant for RAM testing) ---------------
 read_verilog -sv <<EOT
-(* blackbox *)
-module mp64_memory (
-    input         clk,
-    input         rst_n,
-    input         cpu_req,
-    input  [63:0] cpu_addr,
-    input  [63:0] cpu_wdata,
-    input         cpu_wen,
-    input  [1:0]  cpu_size,
-    output [63:0] cpu_rdata,
-    output        cpu_ack,
-    input         tile_req,
-    input  [19:0] tile_addr,
-    input         tile_wen,
-    input  [511:0] tile_wdata,
-    output [511:0] tile_rdata,
-    output        tile_ack,
-    output        ext_req,
-    output [63:0] ext_addr,
-    output [63:0] ext_wdata,
-    output        ext_wen,
-    output [1:0]  ext_size,
-    input  [63:0] ext_rdata,
-    input         ext_ack
-);
-endmodule
-
 (* blackbox *)
 module mp64_nic (
     input         clk,
@@ -69,60 +43,46 @@ module mp64_nic (
     input         phy_link_up
 );
 endmodule
-
-(* blackbox *)
-module mp64_icache (
-    input         clk,
-    input         rst_n,
-    input  [63:0] fetch_addr,
-    input         fetch_valid,
-    output [63:0] fetch_data,
-    output        fetch_hit,
-    output        fetch_stall,
-    output        bus_valid,
-    output [63:0] bus_addr,
-    input  [63:0] bus_rdata,
-    input         bus_ready,
-    output        bus_wen,
-    output [1:0]  bus_size,
-    input         inv_all,
-    input         inv_line,
-    input  [63:0] inv_addr,
-    output [63:0] stat_hits,
-    output [63:0] stat_misses
-);
-endmodule
 EOT
 
-# ---- Read RTL (everything except blackboxed modules & synth wrapper) --------
+# ---- Package / include files ------------------------------------------------
 read_verilog -sv -DSIMULATION=0 \
-    rtl/mp64_defs.vh      \
-    rtl/mp64_soc.v        \
-    rtl/mp64_cpu.v        \
-    rtl/mp64_bus.v        \
-    rtl/mp64_extmem.v     \
-    rtl/mp64_uart.v       \
-    rtl/mp64_timer.v      \
-    rtl/mp64_disk.v       \
-    rtl/mp64_tile.v       \
-    rtl/mp64_mailbox.v    \
-    rtl/mp64_fp16_alu.v   \
-    rtl/mp64_aes.v        \
-    rtl/mp64_sha3.v       \
-    rtl/mp64_crc.v
+    rtl/pkg/mp64_defs.vh       \
+    rtl/pkg/mp64_pkg.vh        \
+    rtl/pkg/mp64_cpu_common.vh
+
+# ---- Xilinx-7 target primitives (override portable prim/) -------------------
+# These wrappers decompose wide memories into narrow BRAM-friendly slices.
+read_verilog -sv \
+    rtl/target/xilinx7/mp64_sram_dp_xilinx7.v \
+    rtl/target/xilinx7/mp64_sram_sp_xilinx7.v \
+    rtl/target/xilinx7/mp64_clkgate_xilinx7.v \
+    rtl/target/xilinx7/mp64_mul_xilinx7.v     \
+    rtl/target/xilinx7/mp64_pll_xilinx7.v
+
+# ---- Primitive helpers (not overridden by target) ----------------------------
+# (mp64_rom and mp64_rst_sync omitted — not needed for mp64_memory target)
+
+# ---- Memory subsystem (primary synthesis target) ----------------------------
+read_verilog -sv -Irtl/pkg \
+    rtl/mem/mp64_memory.v      \
+    rtl/mem/mp64_extmem.v
 
 # ---- Synthesise for Xilinx 7-series ----------------------------------------
-synth_xilinx -top mp64_soc -family xc7 -edif build/mp64_synth.edif
+log ===================================================================
+log  Synthesis target: mp64_memory
+log ===================================================================
+
+synth_xilinx -top mp64_memory -family xc7 -edif fpga/build/mp64_synth.edif
 
 # ---- Write utilisation report -----------------------------------------------
-tee -o build/yosys_stats.txt stat -tech xilinx
+tee -o fpga/build/yosys_stats.txt stat -tech xilinx
 
 log ===================================================================
-log BRAM estimate (blackboxed modules — maps directly to BRAM):
-log   Main memory:  16384 x 512-bit  = 256 RAMB36 (1 MiB TDP)
-log   I-cache (x4): 2 x 256 x 64-bit data + 256 x 8-bit tags per core
-log                  = (4+1) x 4 = 20 RAMB18 = 10 RAMB36
-log   NIC buffers:  2 x 1500 x 8-bit + 96 x 8-bit = 4 RAMB18 = 2 RAMB36
-log   Total BRAM:   ~268 RAMB36 of 445 (K325T) = 60%
+log BRAM estimate (mp64_memory — 4 banks × 16384 × 512-bit):
+log   Per bank:  8 slices × 16384×64-bit = 8 × 32 RAMB36 = 256 RAMB36
+log   4 banks:   1024 RAMB36 total  (4 MiB TDP)
+log   K325T has 445 RAMB36 — full design requires a larger FPGA
+log     or reduced bank count / bank depth.
 log ===================================================================
-log Synthesis complete. See build/yosys_stats.txt for resource utilisation.
+log Synthesis complete.  See fpga/build/yosys_stats.txt for details.
