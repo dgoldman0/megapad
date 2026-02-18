@@ -4622,7 +4622,7 @@ INSTALL-TUI
 : .CORE-ROW  ( i -- )
     DUP .N ."   "
     DUP COREID = IF
-        3 FG ." RUNNING" RESET-COLOR ."  (self)"
+        DROP 3 FG ." RUNNING" RESET-COLOR ."  (self)"
     ELSE
         CORE-STATUS IF 2 FG ." BUSY" RESET-COLOR
         ELSE DIM ." IDLE" RESET-COLOR THEN

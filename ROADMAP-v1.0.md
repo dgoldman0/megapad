@@ -446,21 +446,18 @@ and adds post-quantum cryptographic primitives.
     All 661 `."` strings in KDOS and 348 in tests were mechanically
     updated to add an explicit leading space, preserving exact output.
 
-43. ☐ **Display: screen 8 exits to RPL** — switching to virtual screen 8
-    (the terminal/console screen) causes the system to jump back to the
-    Forth RPL instead of entering KDOS interactive mode.  Likely the
-    screen-8 handler exits to the outer interpreter rather than looping
-    back into the KDOS command loop.  Investigate `SCREEN!` / screen-
-    change dispatch in KDOS and ensure screen 8 is treated as a re-entry
-    point into the interactive session, not a terminal condition.
+43. ✅ **Display: screen 8 exits to RPL** — DONE.  Factored `SCREENS`
+    into `SCREEN-LOOP` (reusable TUI event loop) + `SCREEN ( n -- )`
+    (enters TUI at any screen, including 8).  Root cause: `SWITCH-SCREEN`
+    only rendered but never entered the event loop, so control fell back
+    to the Forth REPL.  Now both `SCREENS` and `N SCREEN` share
+    `SCREEN-LOOP`.  3 new tests added to `TestKDOSHardening`.
 
-44. ☐ **CLI: add `--clusters` flag, uncap `--cores`** — `cli.py` is
-    missing a `--clusters N` option to expose `MegapadSystem`'s
-    `num_clusters` parameter (0–3 micro-core clusters, 4 micro-cores
-    each).  Also `--cores` is artificially capped at `choices=[1,2,3,4]`
-    which should be removed or raised to the architectural maximum.
-    Audit remaining `MegapadSystem.__init__` parameters against CLI args
-    to catch any other gaps.
+44. ✅ **CLI: add `--clusters` flag, uncap `--cores`** — DONE.  Removed
+    `choices=[1,2,3,4]` cap from `--cores`, added `--clusters CLUSTERS`
+    argument (type=int, default=0, max 3), wired `num_clusters` through
+    to `MegapadSystem`.  `test_screen_header_tabs` updated to verify
+    `[8]Core` tab.
 
 ---
 
