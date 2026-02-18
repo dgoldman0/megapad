@@ -73,40 +73,50 @@ module mp64_top #(
     `include "mp64_pkg.vh"
 
     // ========================================================================
-    // SoC instance (Phase 7 — placeholder stub)
+    // SoC instance
     // ========================================================================
-    // The full mp64_soc will be built in later phases.  For Phase 1 we
-    // verify that the top-level compiles and the parameter interface is
-    // correct.  A minimal stub drives safe defaults on all outputs.
 
-    // UART
-    assign uart_txd     = 1'b1;   // idle high
+    mp64_soc #(
+        .CLOCK_HZ          (CLOCK_HZ),
+        .NUM_CORES          (NUM_CORES),
+        .NUM_CLUSTERS       (NUM_CLUSTERS),
+        .CORES_PER_CLUSTER  (CORES_PER_CLUSTER),
+        .MEM_DEPTH          (MEM_DEPTH)
+    ) u_soc (
+        .sys_clk       (clk),
+        .sys_rst_n     (rst_n),
 
-    // SD Card
-    assign sd_sck       = 1'b0;
-    assign sd_mosi      = 1'b0;
-    assign sd_cs_n      = 1'b1;   // deselected
+        // UART
+        .uart_rxd      (uart_rxd),
+        .uart_txd      (uart_txd),
 
-    // External memory
-    assign phy_req      = 1'b0;
-    assign phy_addr     = 64'd0;
-    assign phy_wen      = 1'b0;
-    assign phy_wdata    = 64'd0;
-    assign phy_burst_len= 8'd0;
+        // External memory PHY
+        .phy_req       (phy_req),
+        .phy_addr      (phy_addr),
+        .phy_wen       (phy_wen),
+        .phy_wdata     (phy_wdata),
+        .phy_burst_len (phy_burst_len),
+        .phy_rdata     (phy_rdata),
+        .phy_rvalid    (phy_rvalid),
+        .phy_ready     (phy_ready),
 
-    // NIC
-    assign nic_tx_valid = 1'b0;
-    assign nic_tx_data  = 8'd0;
-    assign nic_rx_ready = 1'b0;
+        // SD Card
+        .sd_sck        (sd_sck),
+        .sd_mosi       (sd_mosi),
+        .sd_miso       (sd_miso),
+        .sd_cs_n       (sd_cs_n),
 
-    // Debug LEDs — show reset state
-    reg [7:0] led_r;
-    always @(posedge clk) begin
-        if (!rst_n)
-            led_r <= 8'h00;
-        else
-            led_r <= 8'hA5;   // heartbeat pattern
-    end
-    assign debug_leds = led_r;
+        // NIC PHY
+        .nic_tx_valid  (nic_tx_valid),
+        .nic_tx_data   (nic_tx_data),
+        .nic_tx_ready  (nic_tx_ready),
+        .nic_rx_valid  (nic_rx_valid),
+        .nic_rx_data   (nic_rx_data),
+        .nic_rx_ready  (nic_rx_ready),
+        .nic_link_up   (nic_link_up),
+
+        // Debug
+        .debug_leds    (debug_leds)
+    );
 
 endmodule
