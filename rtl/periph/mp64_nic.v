@@ -243,7 +243,7 @@ module mp64_nic (
     // ========================================================================
     // Register read/write
     // ========================================================================
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             dma_base   <= 64'd0;
             frame_len  <= 16'd0;
