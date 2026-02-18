@@ -462,28 +462,26 @@ document that will be folded into proper docs as each item ships.
     - 39g. ☐ `CSR_CORE_TYPE` (0=major, 1=micro) — not yet wired
     - 39h. ✅ Tests: `TestMicroCluster` — 16 tests passing
 
-40. ☐ **Multi-prime Field ALU** — make the modulus programmable across
-    a small set of primes ($2^{255}-19$, secp256k1, P-256) with
-    dedicated fast-reduction circuits per prime, plus a generic
-    Montgomery reduction path for arbitrary 256-bit primes.  Add
-    constant-time primitives (FCMOV, FCEQ) required for real ECC.
-    Detailed RTL architecture, register map, reducer sketches, resource
-    estimates, and implementation order in
-    [`docs/IDEAS-scratchpad.md` §2](docs/IDEAS-scratchpad.md).
-    - 40a. `PRIME_SEL` register + prime table (4 entries)
-    - 40b. Dedicated reduction: secp256k1 sparse subtract
-    - 40c. Dedicated reduction: P-256 NIST special form
-    - 40d. Generic Montgomery reduction path (`PRIME_SEL=3`)
-    - 40e. Mode 8: `FCMOV` (constant-time conditional move)
-    - 40f. Mode 9: `FCEQ` (constant-time equality comparison)
-    - 40g. Mode 11: `FMAC` (field multiply-accumulate, 0 new DSPs)
-    - 40h. Mode 12: `MUL_ADD_RAW` (raw multiply-accumulate for bignum)
-    - 40i. Emulator: multi-prime + Montgomery in `FieldALUDevice`
-    - 40j. RTL: reduction functions in `mp64_field_alu.v`
-    - 40k. BIOS/KDOS: `PRIME-SEL!`, `FCMOV`, `FCEQ`, `FMAC`,
-           `MUL-ADD-RAW`, short aliases `F+` `F-` `F*`
-    - 40l. Tests: `TestFieldALUMultiPrime` — secp256k1, P-256,
-           Montgomery, constant-time ops, FMAC, MUL-ADD-RAW
+40. ✅ **Multi-prime Field ALU** — DONE (commits 86f9dd5–b450bd7).
+    Modulus programmable across 4 primes: Curve25519 ($2^{255}-19$),
+    secp256k1, P-256, custom 256-bit.  Dedicated fast reducers per
+    prime (×38 fold, sparse subtract, FIPS 186-4 §D.2 word-based),
+    plus Verilog `%` simulation path for custom primes (REDC FSM
+    reserved for synthesis).  Modes 8–12: FCMOV, FCEQ, LOAD_PRIME,
+    FMAC, MUL_ADD_RAW.  41 RTL tests, 39 emulator field ALU tests.
+    - 40a. ✅ `PRIME_SEL` register + prime table (CMD bits [7:6])
+    - 40b. ✅ Dedicated reduction: secp256k1 ×(2³²+977) fold
+    - 40c. ✅ Dedicated reduction: P-256 NIST FIPS 186-4 §D.2
+    - 40d. ✅ Custom prime via LOAD_PRIME (mode 10, `PRIME_SEL=3`)
+    - 40e. ✅ Mode 8: `FCMOV` (constant-time 256-bit mux)
+    - 40f. ✅ Mode 9: `FCEQ` (constant-time XOR-OR-reduce equality)
+    - 40g. ✅ Mode 11: `FMAC` (field multiply-accumulate, 0 new DSPs)
+    - 40h. ✅ Mode 12: `MUL_ADD_RAW` (raw 512-bit accumulate)
+    - 40i. ✅ Emulator: multi-prime + custom in `FieldALUDevice`
+    - 40j. ✅ RTL: `mp64_field_alu.v` (~710 lines, was 489)
+    - 40k. ✅ BIOS/KDOS: `PRIME-SECP`, `PRIME-P256`, `PRIME-CUSTOM`,
+           `LOAD-PRIME`, `FCMOV`, `FCEQ`, `FMAC`, `FMUL-ADD-RAW`
+    - 40l. ✅ Tests: cross-prime switching, backward compat, near-miss
 
 41. ✅ **Memory model redesign** — DONE.  Expanded from 1 MiB
     monolithic to 4-bank architecture with differentiated bandwidth.
@@ -536,14 +534,12 @@ Layer 4  Items 25–30, 45  Application-Level
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
-Layer 6  Items 39–42  Architecture & Portability
-                      (micro-core ✅, multi-prime Field ALU ☐,
+Layer 6  Items 39–42  Architecture & Portability ✅ DONE
+                      (micro-core ✅, multi-prime Field ALU ✅,
                       banked memory ✅, tech-agnostic RTL ✅)
 ```
 
-Layer 6 status: 3 of 4 items done.  Remaining: **Item 40** (multi-prime
-Field ALU — `PRIME_SEL`, secp256k1/P-256 reduction, Montgomery path,
-constant-time ops).
+Layer 6 status: **4 of 4 items done.**  ✅ COMPLETE.
 
 Each item is committed individually with its own test class and run via
 `make test-one K=TestClassName` + `make test-status`.  Layer 2 is
