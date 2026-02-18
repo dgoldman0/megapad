@@ -870,6 +870,7 @@ module mp64_soc #(
                 4'h1: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};
                 4'h2: mmio_rdata_mux = {56'd0, NUM_CLUSTERS[7:0]};
                 4'h3: mmio_rdata_mux = CLOCK_HZ;
+                4'h4: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};   // NUM_FULL
                 default: mmio_rdata_mux = 64'd0;
             endcase
             mmio_ack_mux = 1'b1;

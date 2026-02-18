@@ -451,6 +451,7 @@ class Storage(Device):
 #   0x30  INT_MEM_TOTAL — total internal memory in bytes
 #   0x38  EXT_MEM_BASE — external memory base address
 #   0x40  EXT_MEM_SIZE — external memory size in bytes
+#   0x48  NUM_FULL     — number of full (major) cores
 
 # Board ID + version packed as 64-bit LE value:
 #   bytes 0-1: version (minor=1, then 0x00)
@@ -463,6 +464,7 @@ class SystemInfo(Device):
 
     def __init__(self, bank0_size: int = 1 << 20,
                  num_cores: int = 1,
+                 num_full_cores: int | None = None,
                  hbw_base: int = 0xFFD0_0000,
                  hbw_size: int = 3 * (1 << 20),
                  int_mem_total: int = 4 * (1 << 20),
@@ -472,12 +474,13 @@ class SystemInfo(Device):
                  has_nic: bool = False,
                  ext_mem_base: int = 0,
                  ext_mem_size: int = 0):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x48)
+        super().__init__("SysInfo", SYSINFO_BASE, 0x50)
         if mem_size_kib is not None and bank0_size == (1 << 20):
             # Legacy caller: convert KiB → bytes
             bank0_size = mem_size_kib * 1024
         self.bank0_size = bank0_size
         self.num_cores = num_cores
+        self.num_full_cores = num_full_cores if num_full_cores is not None else num_cores
         self.cluster_en = 0
         self.hbw_base = hbw_base
         self.hbw_size = hbw_size
@@ -499,10 +502,11 @@ class SystemInfo(Device):
             0x30: self.int_mem_total,
             0x38: self.ext_mem_base,
             0x40: self.ext_mem_size,
+            0x48: self.num_full_cores,
         }
 
     def read8(self, offset: int) -> int:
-        if offset < 0 or offset >= 0x48:
+        if offset < 0 or offset >= 0x50:
             return 0
         reg_base = offset & ~0x07            # align down to 8
         byte_idx = offset & 0x07

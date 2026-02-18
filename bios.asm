@@ -8752,20 +8752,23 @@ w_ext_mem_size:
     str r14, r0
     ret.l
 
-; N-FULL ( -- n )  number of full (major) cores (always 4)
+; N-FULL ( -- n )  number of full (major) cores (from SysInfo)
 w_n_full:
-    ldi r0, 4
+    ldi64 r11, 0xFFFF_FF00_0000_0348    ; SysInfo + 0x48 = NUM_FULL
+    ldn r0, r11
     subi r14, 8
     str r14, r0
     ret.l
 
-; MICRO? ( id -- flag )  true if core id is a micro-core (>= 4)
+; MICRO? ( id -- flag )  true if core id is a micro-core (id >= N-FULL)
 w_micro_q:
     ldn r0, r14                         ; R0 = core id
-    cmpi r0, 4                          ; compare with MICRO_ID_BASE
+    ldi64 r11, 0xFFFF_FF00_0000_0348    ; SysInfo + 0x48 = NUM_FULL
+    ldn r1, r11                         ; R1 = n_full_cores
+    cmp r0, r1                          ; compare id with n_full
     ldi r1, 0
-    lbrcc micro_q_no                    ; if id < 4, not micro
-    ldi r1, -1                          ; id >= 4 → true
+    lbrcc micro_q_no                    ; if id < n_full, not micro
+    ldi r1, -1                          ; id >= n_full → true
 micro_q_no:
     str r14, r1                         ; replace TOS
     ret.l

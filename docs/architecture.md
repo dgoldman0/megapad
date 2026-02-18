@@ -198,11 +198,14 @@ Static board identification and core-topology registers.
 | STORAGE_PRESENT | `+0x08` | 0 or 1 | Is a disk attached? |
 | UART_PRESENT | `+0x09` | 1 | Always present |
 | NIC_PRESENT | `+0x0A` | 0 or 1 | Is a NIC attached? |
-| N_CORES | `+0x10` | 1–4 | Number of full CPU cores |
+| N_CORES | `+0x10` | 1–16 | Total core count (full + micro) |
 | N_CLUSTERS | `+0x18` | 0–3 | Number of micro-core clusters |
 | HBW_BASE | `+0x20` | 0xFFD00000 | HBW math RAM base address |
 | HBW_SIZE | `+0x28` | 0x300000 | HBW math RAM size (3 MiB) |
 | CLUSTER_EN | `+0x30` | bitmask | Per-cluster enable bits (R/W) |
+| EXT_MEM_BASE | `+0x38` | varies | External memory base address |
+| EXT_MEM_SIZE | `+0x40` | varies | External memory size in bytes |
+| NUM_FULL | `+0x48` | 1–16 | Number of full (major) cores |
 
 ---
 

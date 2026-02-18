@@ -296,7 +296,7 @@ class MegapadSystem:
         # Create micro-core clusters
         self.clusters: list[MicroCluster] = []
         for c in range(num_clusters):
-            id_base = MICRO_ID_BASE + c * MICRO_PER_CLUSTER
+            id_base = num_cores + c * MICRO_PER_CLUSTER
             cluster = MicroCluster(
                 cluster_id=c, id_base=id_base,
                 n=MICRO_PER_CLUSTER,
@@ -328,6 +328,7 @@ class MegapadSystem:
         self.sysinfo = SystemInfo(
             bank0_size=ram_size,
             num_cores=self.num_cores,
+            num_full_cores=self.num_full_cores,
             hbw_base=HBW_BASE,
             hbw_size=hbw_size,
             int_mem_total=ram_size + hbw_size,

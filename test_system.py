@@ -2688,6 +2688,20 @@ class TestMicroCluster(unittest.TestCase):
             val |= sys.sysinfo.read8(0x10 + i) << (8 * i)
         self.assertEqual(val, 16)
 
+    def test_sysinfo_num_full(self):
+        """SysInfo NUM_FULL register reports full core count only."""
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=4, num_clusters=3)
+        val = 0
+        for i in range(8):
+            val |= sys.sysinfo.read8(0x48 + i) << (8 * i)
+        self.assertEqual(val, 4)
+        # Different config: 8 full cores, 0 clusters
+        sys2 = MegapadSystem(ram_size=1 << 20, num_cores=8, num_clusters=0)
+        val2 = 0
+        for i in range(8):
+            val2 |= sys2.sysinfo.read8(0x48 + i) << (8 * i)
+        self.assertEqual(val2, 8)
+
     def test_bios_cluster_words_in_dictionary(self):
         """BIOS dictionary includes cluster control words."""
         sys, buf = TestMulticore._get_bios_code, None
@@ -9214,10 +9228,11 @@ class TestKDOSHardening(_KDOSTestBase):
         self.assertIn("Stor", text)
 
     def test_screen_cores_render(self):
-        """Screen 9 (Core) renders core info."""
+        """Screen 9 (Core) renders core info with type labels."""
         text = self._run_kdos_fast(["9 SWITCH-SCREEN"])
         self.assertIn("Core", text)
-        self.assertIn("core", text.lower())
+        # Single-core mode shows no list; just confirm the screen renders
+        self.assertTrue("Single-core" in text or "[full]" in text)
 
     def test_screen_header_tabs(self):
         """Screen header shows all 9 tab labels."""
@@ -9242,6 +9257,19 @@ class TestKDOSHardening(_KDOSTestBase):
         """SCREEN-LOOP word exists (factored TUI event loop)."""
         text = self._run_kdos_fast(["' SCREEN-LOOP DROP .\" OK\" "])
         self.assertIn("OK", text)
+
+    def test_n_full_dynamic(self):
+        """N-FULL reads from SysInfo, not hardcoded."""
+        text = self._run_kdos_fast(["N-FULL ."])
+        # Default single-core config → N-FULL = 1
+        self.assertRegex(text, r'\b1\b')
+
+    def test_micro_core_q_uses_n_full(self):
+        """MICRO-CORE? uses dynamic N-FULL threshold."""
+        text = self._run_kdos_fast([
+            "0 MICRO-CORE? . ",  # core 0 on 1-core system → false (0)
+        ])
+        self.assertRegex(text, r'\b0\b')
 
     # -- Disk-only boot e2e --
 

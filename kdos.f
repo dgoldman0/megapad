@@ -117,15 +117,19 @@ VARIABLE PN-LEN
 : MEM-SIZE  ( -- u )
     0xFFFFFF0000000308 @ ;        \ SysInfo + 0x08 = bank0_size (bytes)
 
-\ -- Core-type identification --
-4 CONSTANT MICRO-ID-BASE      \ first micro-core ID
-4 CONSTANT N-FULL-CORES       \ number of full (major) cores
+\ -- Core-type identification (dynamic, reads from SysInfo) --
+\ N-FULL is a BIOS word that reads SysInfo + 0x48 = NUM_FULL_CORES.
+\ MICRO-CORE? and FULL-CORE? use it so the threshold adapts to any
+\ configuration (e.g. 16 full + 3 clusters).
 
 \ MICRO-CORE? ( id -- flag )  true if core id is a micro-core
-: MICRO-CORE?  ( id -- flag )  MICRO-ID-BASE >= ;
+: MICRO-CORE?  ( id -- flag )  N-FULL >= ;
 
 \ FULL-CORE? ( id -- flag )  true if core id is a full core
-: FULL-CORE?   ( id -- flag )  MICRO-ID-BASE < ;
+: FULL-CORE?   ( id -- flag )  N-FULL < ;
+
+\ Legacy alias (matches BIOS N-FULL)
+: N-FULL-CORES  ( -- n )  N-FULL ;
 
 \ -- Heap state --
 VARIABLE HEAP-BASE    0 HEAP-BASE !
@@ -4621,6 +4625,7 @@ INSTALL-TUI
 
 : .CORE-ROW  ( i -- )
     DUP .N ."   "
+    DUP MICRO-CORE? IF DIM ." [mu] " RESET-COLOR ELSE ." [full] " THEN
     DUP COREID = IF
         DROP 3 FG ." RUNNING" RESET-COLOR ."  (self)"
     ELSE

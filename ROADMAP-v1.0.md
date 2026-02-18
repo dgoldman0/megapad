@@ -446,12 +446,19 @@ and adds post-quantum cryptographic primitives.
     All 661 `."` strings in KDOS and 348 in tests were mechanically
     updated to add an explicit leading space, preserving exact output.
 
-43. ✅ **Display: screen 8 exits to RPL** — DONE.  Factored `SCREENS`
-    into `SCREEN-LOOP` (reusable TUI event loop) + `SCREEN ( n -- )`
-    (enters TUI at any screen, including 8).  Root cause: `SWITCH-SCREEN`
-    only rendered but never entered the event loop, so control fell back
-    to the Forth REPL.  Now both `SCREENS` and `N SCREEN` share
-    `SCREEN-LOOP`.  3 new tests added to `TestKDOSHardening`.
+43. ✅ **Display: screen 8 exits to RPL** — DONE.  Root cause: stack
+    imbalance in `.CORE-ROW` — IF branch (core == self) never consumed `i`,
+    leaked value corrupted `TUI-LIST` loop causing `EXECUTE` to jump to
+    address 0x0000 (BIOS boot entry), wiping stacks and re-entering RPL.
+    Fix: `DROP` in IF branch.  Only triggered with `--cores > 1` because
+    `.CORE-ROW` is only called when `NCORES > 1`.
+
+    Also factored `SCREENS` into `SCREEN-LOOP` + `SCREEN ( n -- )`;
+    added `[full]`/`[mu]` type labels to `.CORE-ROW`; made core-type
+    detection fully dynamic via new SysInfo `NUM_FULL` register at offset
+    `0x48` — BIOS `N-FULL` and `MICRO?` now read from SysInfo instead of
+    hardcoding threshold to 4.  KDOS `MICRO-CORE?` / `FULL-CORE?` use
+    `N-FULL` so they adapt to any core configuration.
 
 44. ✅ **CLI: add `--clusters` flag, uncap `--cores`** — DONE.  Removed
     `choices=[1,2,3,4]` cap from `--cores`, added `--clusters CLUSTERS`
