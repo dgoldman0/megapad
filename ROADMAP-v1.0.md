@@ -403,6 +403,22 @@ and adds post-quantum cryptographic primitives.
     All 661 `."` strings in KDOS and 348 in tests were mechanically
     updated to add an explicit leading space, preserving exact output.
 
+43. ☐ **Display: screen 8 exits to RPL** — switching to virtual screen 8
+    (the terminal/console screen) causes the system to jump back to the
+    Forth RPL instead of entering KDOS interactive mode.  Likely the
+    screen-8 handler exits to the outer interpreter rather than looping
+    back into the KDOS command loop.  Investigate `SCREEN!` / screen-
+    change dispatch in KDOS and ensure screen 8 is treated as a re-entry
+    point into the interactive session, not a terminal condition.
+
+44. ☐ **CLI: add `--clusters` flag, uncap `--cores`** — `cli.py` is
+    missing a `--clusters N` option to expose `MegapadSystem`'s
+    `num_clusters` parameter (0–3 micro-core clusters, 4 micro-cores
+    each).  Also `--cores` is artificially capped at `choices=[1,2,3,4]`
+    which should be removed or raised to the architectural maximum.
+    Audit remaining `MegapadSystem.__init__` parameters against CLI args
+    to catch any other gaps.
+
 ---
 
 ### Layer 6: Architecture & Portability (Items 39–42)
@@ -412,23 +428,21 @@ questions, and implementation sketches are in
 [`docs/IDEAS-scratchpad.md`](docs/IDEAS-scratchpad.md) — a living
 document that will be folded into proper docs as each item ships.
 
-39. ☐ **Micro-core CPU variant (MP64µ)** — a stripped-down core that
-    is base-ISA-compatible but removes the 64-bit hardware multiplier
-    (shift-add instead, 0 DSPs), I-cache, tile engine, FP16 ALU,
-    BIST, and most perf counters.  Requires factoring the shared
-    decoder/ALU/flags/branch/interrupt logic into `mp64_cpu_common.v`,
-    building `mp64_cpu_micro.v` on top, and refactoring the existing
-    `mp64_cpu.v` to also use the common core.  Bus arbiter generalized
-    to `NUM_MAJOR_CORES + NUM_MICRO_CORES` with per-type default QoS
-    weights.  Emulator gains a `micro=True` CPU flag.
-    - 39a. Factor `mp64_cpu_common.v` (shared decoder, ALU, FSM)
-    - 39b. `mp64_cpu_micro.v` (shift-add mul, no tile/cache/BIST)
-    - 39c. Refactor `mp64_cpu.v` to use common core
-    - 39d. Parameterize `mp64_soc.v` for mixed major+micro configs
-    - 39e. Generalize bus arbiter for N cores with type-aware QoS
-    - 39f. Emulator: micro-core mode + mixed-core `MegapadSystem`
-    - 39g. Add `CSR_CORE_TYPE` (0=major, 1=micro) for KDOS scheduler
-    - 39h. Tests: `TestMicroCore` — base ISA ops, MEX faults, slow mul
+39. ✅ **Micro-core CPU variant (MP64µ)** — DONE. Stripped-down core:
+    no 64-bit hardware multiplier (shift-add, 0 DSPs), no I-cache,
+    tile engine, FP16 ALU, or BIST.  Shared decoder/ALU/flags/branch
+    factored into `mp64_cpu_common.vh`, `mp64_cpu.v` refactored to
+    use it.  Emulator has `MicroCluster` class with scratchpad, barrier,
+    MPU, cluster enable/disable gating.  Bus arbiter has per-port
+    QoS weights.
+    - 39a. ✅ `mp64_cpu_common.vh` — shared decoder, ALU, FSM states
+    - 39b. ✅ `mp64_cpu_micro.v` — shift-add mul, no tile/cache/BIST
+    - 39c. ✅ `mp64_cpu.v` refactored to use common core
+    - 39d. ☐ Parameterize `mp64_top.v` for mixed major+micro configs
+    - 39e. ✅ Bus arbiter: weighted round-robin with per-port QoS CSRs
+    - 39f. ✅ Emulator: `MicroCluster` + `num_clusters` in `MegapadSystem`
+    - 39g. ☐ `CSR_CORE_TYPE` (0=major, 1=micro) — not yet wired
+    - 39h. ✅ Tests: `TestMicroCluster` — 16 tests passing
 
 40. ☐ **Multi-prime Field ALU** — make the modulus programmable across
     a small set of primes ($2^{255}-19$, secp256k1, P-256) with
@@ -447,25 +461,25 @@ document that will be folded into proper docs as each item ships.
     - 40j. Tests: `TestFieldALUMultiPrime` — secp256k1, P-256,
            Montgomery, constant-time ops
 
-41. ☐ **Memory model redesign** — expand from 1 MiB monolithic to a
-    banked architecture with differentiated bandwidth tiers.  Default
-    4 MiB: Bank 0 (1 MiB, regular BW at 0x0 — BIOS/OS/stacks) +
-    Banks 1–3 (1 MiB each, high BW, dual-port for tile engine, pinned
-    to the top of the internal address space).  High-BW banks keep
-    fixed addresses so external regular-BW memory fills the gap.
-    Last 256 MiB of address space guarded (unmapped, faults) to
-    protect MMIO.  Hard QoS: per-bank bandwidth allocation, bank
-    affinity CSRs per core.
-    - 41a. `mp64_memory_bank.v` — parameterized single-bank module
-    - 41b. `mp64_memory_subsys.v` — 4-bank instantiation, address
-           decoder, tile port arbiter across banks, ext-mem forwarding
-    - 41c. Update `mp64_defs.vh` — `INT_MEM_BYTES=4M`, `NUM_BANKS`,
-           `HBW_BASE_ADDR`, `GUARD_BASE`
-    - 41d. Bus arbiter: bank-aware routing, per-bank QoS
-    - 41e. Emulator: banked memory model in `system.py`
-    - 41f. BIOS/KDOS: `HBW-BASE`, `BANK@`, `HBW-ALLOC`, `BANK-COPY`
-    - 41g. SysInfo: report bank count, sizes, HBW base
-    - 41h. Tests: `TestBankedMemory` — bank routing, QoS, guard faults
+41. ✅ **Memory model redesign** — DONE.  Expanded from 1 MiB
+    monolithic to 4-bank architecture with differentiated bandwidth.
+    Bank 0 (1 MiB, system at 0x0) + Banks 1–3 (1 MiB each, HBW at
+    0xFFD0_0000–0xFFFF_FFFF).  External memory fills the gap.
+    RTL: `mp64_memory.v` has 4-bank address decode, per-bank tile
+    port arbitration, ext-mem forwarding.  Emulator: `system.py` has
+    `_hbw_mem`, `HBW_BASE`/`HBW_SIZE`.  KDOS: bump allocator
+    (`HBW-ALLOT`, `HBW-BUFFER`, `HBW-RESET`).  SysInfo reports bank
+    sizes.  RTL testbench covers HBW bank read/write + cross-bank
+    concurrent access.
+    - 41a. ✅ 4-bank memory in `rtl/mem/mp64_memory.v` (Bank 0 + HBW 1–3)
+    - 41b. ✅ Bank address decode, tile port arbiter, ext-mem forwarding
+    - 41c. ✅ `mp64_pkg.vh` — `INT_MEM_BYTES=4M`, bank parameters
+    - 41d. ✅ Bus arbiter: per-port QoS weights + bandwidth limiting
+    - 41e. ✅ Emulator: HBW memory model in `system.py`
+    - 41f. ✅ BIOS: `HBW-BASE`, `HBW-SIZE`; KDOS: `HBW-ALLOT`,
+           `HBW-BUFFER`, `HBW-RESET`, `HBW-FREE`, `HBW-TALIGN`
+    - 41g. ✅ SysInfo: `BANK0_SIZE`, `HBW_BASE`, `HBW_SIZE`, total mem
+    - 41h. ✅ Tests: `TestHBWMemory` (emulator) + tb_memory.v HBW tests
 
 42. ✅ **Technology-agnostic RTL** — DONE (commits 50320a5, 6221469).
     Moved all FPGA/ASIC-specific primitives behind clean wrappers;
@@ -498,16 +512,13 @@ Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
 Layer 6  Items 39–42  Architecture & Portability
-                      (micro-core variant, multi-prime Field ALU,
-                      banked memory model, tech-agnostic RTL)
+                      (micro-core ✅, multi-prime Field ALU ☐,
+                      banked memory ✅, tech-agnostic RTL ✅)
 ```
 
-Suggested Layer 6 ordering: **42 → 41 → 40 → 39** — abstraction
-layer first (clean foundation), then memory redesign (on top of
-clean primitives), then Field ALU (self-contained), and finally
-micro-core (most complex, benefits from all prior work).  Alternatively
-**40 → 42 → 41 → 39** for an early visible win (multi-prime ALU is
-fully independent and immediately useful).
+Layer 6 status: 3 of 4 items done.  Remaining: **Item 40** (multi-prime
+Field ALU — `PRIME_SEL`, secp256k1/P-256 reduction, Montgomery path,
+constant-time ops).
 
 Each item is committed individually with its own test class and run via
 `make test-one K=TestClassName` + `make test-status`.  Layer 2 is
