@@ -809,9 +809,12 @@ CREATE X25519-BASE  32 ALLOT
     THEN THEN THEN ;
 
 \ =====================================================================
-\  §1.10  Field ALU — GF(2^255-19) Coprocessor + Raw 256x256 Multiply
+\  §1.10  Field ALU — Multi-Prime Coprocessor + Raw 256x256 Multiply
 \ =====================================================================
-\  Hardware-accelerated field arithmetic over GF(p), p = 2^255 - 19.
+\  Hardware-accelerated field arithmetic.  Supports multiple primes via
+\  PRIME-SECP / PRIME-25519 words (CMD bits [7:6] select the modulus).
+\  Default prime is Curve25519 (2^255-19).  X25519 (mode 0) always uses
+\  Curve25519 regardless of prime_sel.
 \  Shares the same MMIO base as X25519 (0x0840).
 \
 \  BIOS primitives used:
@@ -842,6 +845,18 @@ CREATE X25519-BASE  32 ALLOT
 5 CONSTANT FMODE-INV
 6 CONSTANT FMODE-POW
 7 CONSTANT FMODE-RAW
+8 CONSTANT FMODE-CMOV
+9 CONSTANT FMODE-CEQ
+10 CONSTANT FMODE-LOAD-PRIME
+11 CONSTANT FMODE-MAC
+12 CONSTANT FMODE-MAC-RAW
+
+\ Prime selection — write CMD byte with go=0, prime_sel in bits [7:6].
+\ CMD address = MMIO_BASE + 0x0880
+0xFFFFFF0000000880 CONSTANT _FIELD-CMD-ADDR
+
+: PRIME-25519  ( -- )   0 _FIELD-CMD-ADDR C! ;    \ prime_sel=0
+: PRIME-SECP   ( -- )  64 _FIELD-CMD-ADDR C! ;    \ prime_sel=1 (1<<6)
 
 \ Aliases for readability
 : FIELD-A!      X25519-SCALAR! ;

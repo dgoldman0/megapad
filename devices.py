@@ -1977,22 +1977,36 @@ class TRNGDevice(Device):
 #     0x28..0x47  RESULT_HI  — 256-bit high half (MUL_RAW only, else 0)
 
 # Field ALU mode constants
-FIELD_MODE_X25519  = 0
-FIELD_MODE_FADD    = 1
-FIELD_MODE_FSUB    = 2
-FIELD_MODE_FMUL    = 3
-FIELD_MODE_FSQR    = 4
-FIELD_MODE_FINV    = 5
-FIELD_MODE_FPOW    = 6
-FIELD_MODE_MUL_RAW = 7
+FIELD_MODE_X25519      = 0
+FIELD_MODE_FADD        = 1
+FIELD_MODE_FSUB        = 2
+FIELD_MODE_FMUL        = 3
+FIELD_MODE_FSQR        = 4
+FIELD_MODE_FINV        = 5
+FIELD_MODE_FPOW        = 6
+FIELD_MODE_MUL_RAW     = 7
+FIELD_MODE_FCMOV       = 8
+FIELD_MODE_FCEQ        = 9
+FIELD_MODE_LOAD_PRIME  = 10
+FIELD_MODE_FMAC        = 11
+FIELD_MODE_MUL_ADD_RAW = 12
 
 class FieldALUDevice(Device):
-    """GF(2²⁵⁵−19) field ALU + raw 256×256 multiplier.
+    """Multi-prime field ALU + raw 256×256 multiplier.
 
-    Backward-compatible: mode 0 = X25519 scalar multiply (RFC 7748).
+    Supports multiple primes via prime_sel (CMD bits [7:6]):
+      0 = Curve25519  (2^255 - 19)
+      1 = secp256k1   (2^256 - 2^32 - 977)
+      2 = P-256       (reserved)
+      3 = Custom       (reserved)
+
+    Backward-compatible: mode 0 = X25519 scalar multiply (RFC 7748),
+    always uses Curve25519 regardless of prime_sel.
     """
 
     _P = (1 << 255) - 19
+    _P_SECP = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+    _PRIMES = [_P, _P_SECP]
     _A24 = 121665            # (486662 - 2) / 4, per RFC 7748 §5
 
     def __init__(self):
@@ -2003,6 +2017,7 @@ class FieldALUDevice(Device):
         self._result_hi = bytearray(32)   # only populated by MUL_RAW
         self._busy = False
         self._done = False
+        self._prime_sel = 0               # 0=25519, 1=secp256k1
 
     # --- helpers ---
 
@@ -2068,11 +2083,16 @@ class FieldALUDevice(Device):
     # --- dispatch ---
 
     def _execute(self, mode: int):
-        p = self._P
+        # Select prime based on prime_sel (X25519 always uses Curve25519)
+        if self._prime_sel < len(self._PRIMES):
+            p = self._PRIMES[self._prime_sel]
+        else:
+            p = self._P
         a = self._get_a()
         b = self._get_b()
 
         if mode == FIELD_MODE_X25519:
+            # X25519 always uses Curve25519 regardless of prime_sel
             k = self._clamp(self._operand_a)
             u = self._decode_u(self._operand_b)
             r = self._x25519(k, u)
@@ -2121,6 +2141,9 @@ class FieldALUDevice(Device):
                 self._busy = True
                 self._done = False
                 self._execute(mode)
+            else:
+                # No go — latch prime_sel from bits [7:6]
+                self._prime_sel = (value >> 6) & 0x3
 
 
 # ---------------------------------------------------------------------------

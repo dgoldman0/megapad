@@ -86,10 +86,18 @@ module tb_field_alu;
         end
     endtask
 
-    // Issue CMD: mode in bits [4:1], go in bit [0], result_sel in bit [5]
-    task issue_cmd(input [3:0] mode, input go, input result_sel);
+    // Issue CMD: mode in bits [4:1], go in bit [0], result_sel in bit [5],
+    //            prime_sel in bits [7:6]
+    task issue_cmd(input [3:0] mode, input go, input result_sel, input [1:0] prime_sel);
         begin
-            write64(6'h3F, {58'd0, result_sel, mode, go});
+            write64(6'h3F, {56'd0, prime_sel, result_sel, mode, go});
+        end
+    endtask
+
+    // Set prime_sel without go (latches prime_sel for subsequent ops)
+    task set_prime(input [1:0] prime_sel);
+        begin
+            issue_cmd(4'd0, 1'b0, 1'b0, prime_sel);
         end
     endtask
 
@@ -146,6 +154,7 @@ module tb_field_alu;
     reg [63:0]  status;
 
     localparam [255:0] PRIME = 256'h7FFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFED;
+    localparam [255:0] PRIME_SECP = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F;
 
     initial begin
         $dumpfile("tb_field_alu.vcd");
@@ -162,7 +171,7 @@ module tb_field_alu;
         // --- Test 1: FADD (3 + 5) = 8 ---
         write_operand_a(256'd3);
         write_operand_b(256'd5);
-        issue_cmd(4'd1, 1'b1, 1'b0);  // mode=FADD, go
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // mode=FADD, go, prime=25519
         wait_done;
         read_result(result);
         check(result, 256'd8, "FADD(3,5)=8");
@@ -170,7 +179,7 @@ module tb_field_alu;
         // --- Test 2: FSUB (5 - 3) = 2 ---
         write_operand_a(256'd5);
         write_operand_b(256'd3);
-        issue_cmd(4'd2, 1'b1, 1'b0);  // FSUB
+        issue_cmd(4'd2, 1'b1, 1'b0, 2'd0);  // FSUB
         wait_done;
         read_result(result);
         check(result, 256'd2, "FSUB(5,3)=2");
@@ -178,7 +187,7 @@ module tb_field_alu;
         // --- Test 3: FSUB wraparound (3 - 5) mod p = p - 2 ---
         write_operand_a(256'd3);
         write_operand_b(256'd5);
-        issue_cmd(4'd2, 1'b1, 1'b0);
+        issue_cmd(4'd2, 1'b1, 1'b0, 2'd0);
         wait_done;
         read_result(result);
         check(result, PRIME - 256'd2, "FSUB(3,5)=p-2");
@@ -186,14 +195,14 @@ module tb_field_alu;
         // --- Test 4: FMUL (7 × 11) = 77 ---
         write_operand_a(256'd7);
         write_operand_b(256'd11);
-        issue_cmd(4'd3, 1'b1, 1'b0);  // FMUL
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
         wait_done;
         read_result(result);
         check(result, 256'd77, "FMUL(7,11)=77");
 
         // --- Test 5: FSQR (9²) = 81 ---
         write_operand_a(256'd9);
-        issue_cmd(4'd4, 1'b1, 1'b0);  // FSQR
+        issue_cmd(4'd4, 1'b1, 1'b0, 2'd0);  // FSQR
         wait_done;
         read_result(result);
         check(result, 256'd81, "FSQR(9)=81");
@@ -201,7 +210,7 @@ module tb_field_alu;
         // --- Test 6: FINV — compute 2⁻¹ mod p ---
         // p = 2²⁵⁵ − 19, so 2⁻¹ = (p+1)/2
         write_operand_a(256'd2);
-        issue_cmd(4'd5, 1'b1, 1'b0);  // FINV
+        issue_cmd(4'd5, 1'b1, 1'b0, 2'd0);  // FINV
         wait_done;
         read_result(result);
         check(result, (PRIME + 256'd1) >> 1, "FINV(2)=(p+1)/2");
@@ -209,20 +218,20 @@ module tb_field_alu;
         // --- Test 7: MUL_RAW — small values, verify low half ---
         write_operand_a(256'd100);
         write_operand_b(256'd200);
-        issue_cmd(4'd7, 1'b1, 1'b0);  // MUL_RAW
+        issue_cmd(4'd7, 1'b1, 1'b0, 2'd0);  // MUL_RAW
         wait_done;
         read_result(result);  // reads LO (result_sel=0)
         check(result, 256'd20000, "MUL_RAW(100,200) LO=20000");
 
         // Read HI half (should be 0 for small operands)
-        issue_cmd(4'd0, 1'b0, 1'b1);  // set result_sel=1, no go
+        issue_cmd(4'd0, 1'b0, 1'b1, 2'd0);  // set result_sel=1, no go
         @(posedge clk); @(posedge clk);
         read_result(result);
         check(result, 256'd0, "MUL_RAW(100,200) HI=0");
 
         // --- Test 8: Status — verify idle→busy→done ---
         // Already done, just verify status reads done
-        issue_cmd(4'd0, 1'b0, 1'b0);  // reset result_sel
+        issue_cmd(4'd0, 1'b0, 1'b0, 2'd0);  // reset result_sel
         @(posedge clk);
         read64(6'h00, status);
         check({192'd0, status}, {192'd0, 62'd0, 2'b10}, "STATUS=done(2)");
@@ -230,7 +239,7 @@ module tb_field_alu;
         // --- Test 9: FPOW — 2^10 mod p = 1024 ---
         write_operand_a(256'd2);
         write_operand_b(256'd10);
-        issue_cmd(4'd6, 1'b1, 1'b0);  // FPOW
+        issue_cmd(4'd6, 1'b1, 1'b0, 2'd0);  // FPOW
         wait_done;
         read_result(result);
         check(result, 256'd1024, "FPOW(2,10)=1024");
@@ -238,11 +247,76 @@ module tb_field_alu;
         // --- Test 10: FMUL identity — a × 1 = a (a < p) ---
         write_operand_a(256'h1EADBEEF_CAFEBABE_12345678_9ABCDEF0_DEADBEEF_CAFEBABE_12345678_9ABCDEF0);
         write_operand_b(256'd1);
-        issue_cmd(4'd3, 1'b1, 1'b0);  // FMUL
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
         wait_done;
         read_result(result);
         check(result, 256'h1EADBEEF_CAFEBABE_12345678_9ABCDEF0_DEADBEEF_CAFEBABE_12345678_9ABCDEF0,
               "FMUL(x,1)=x");
+
+        // ================================================================
+        // secp256k1 tests (prime_sel = 1)
+        // ================================================================
+
+        // Set prime to secp256k1
+        set_prime(2'd1);
+
+        // --- Test 11: secp256k1 FADD (3 + 5) = 8 ---
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // go (prime_sel already latched)
+        wait_done;
+        read_result(result);
+        check(result, 256'd8, "SECP FADD(3,5)=8");
+
+        // --- Test 12: secp256k1 FSUB wraparound (3 - 5) mod p_secp = p_secp - 2 ---
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd2, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, PRIME_SECP - 256'd2, "SECP FSUB(3,5)=p-2");
+
+        // --- Test 13: secp256k1 FMUL (7 × 11) = 77 ---
+        write_operand_a(256'd7);
+        write_operand_b(256'd11);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd77, "SECP FMUL(7,11)=77");
+
+        // --- Test 14: secp256k1 FSQR (9²) = 81 ---
+        write_operand_a(256'd9);
+        issue_cmd(4'd4, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, 256'd81, "SECP FSQR(9)=81");
+
+        // --- Test 15: secp256k1 FMUL that requires reduction ---
+        // (p_secp - 1) × 2 mod p_secp = p_secp - 2
+        write_operand_a(PRIME_SECP - 256'd1);
+        write_operand_b(256'd2);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);
+        wait_done;
+        read_result(result);
+        check(result, PRIME_SECP - 256'd2, "SECP FMUL(p-1,2)=p-2");
+
+        // --- Test 16: secp256k1 FINV — inv(2) × 2 = 1 ---
+        write_operand_a(256'd2);
+        issue_cmd(4'd5, 1'b1, 1'b0, 2'd0);  // FINV
+        wait_done;
+        read_result(result);
+        // Verify: result × 2 mod p_secp = 1
+        // inv(2) = (p_secp + 1) / 2
+        check(result, (PRIME_SECP + 256'd1) >> 1, "SECP FINV(2)=(p+1)/2");
+
+        // --- Test 17: Switch back to Curve25519 — verify no leakage ---
+        set_prime(2'd0);
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd2, 1'b1, 1'b0, 2'd0);  // FSUB
+        wait_done;
+        read_result(result);
+        check(result, PRIME - 256'd2, "25519 FSUB(3,5) after SECP");
 
         // ================================================================
         $display("");

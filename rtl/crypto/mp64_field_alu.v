@@ -1,16 +1,24 @@
 // ============================================================================
-// mp64_field_alu.v — General GF(2²⁵⁵−19) Field ALU + Raw Multiplier
+// mp64_field_alu.v — Multi-Prime Field ALU + Raw Multiplier
 // ============================================================================
 //
 // Supersedes mp64_x25519.v.  Mode 0 is backward-compatible X25519 scalar
 // multiplication (RFC 7748).  Modes 1–7 expose field primitives and a raw
-// 256×256→512-bit multiplier to software.
+// 256×256→512-bit multiplier.  Modes 8–12 add constant-time ops, Montgomery
+// loading, and multiply-accumulate.
+//
+// Multi-prime support: prime_sel[1:0] (CMD bits [7:6]) selects the
+// modulus for field operations.  X25519 (mode 0) always uses Curve25519.
+//   0 = Curve25519  (2^255 - 19)        — fast ×38 fold reducer
+//   1 = secp256k1   (2^256 - 2^32 - 977) — ×(2^32+977) fold reducer
+//   2 = P-256       (NIST)               — NIST special form (reserved)
+//   3 = Custom      (Montgomery REDC)    — generic (reserved)
 //
 // Target: Kintex-7 / Artix-7.
-// Resource estimate (mode 0 unchanged from X25519):
+// Resource estimate:
 //   ~165 DSP48E1 slices  (shared 256×256 multiplier, operand-muxed)
-//   ~4800 flip-flops     (state + temporaries + result_hi)
-//   ~3K LUTs             (field_add/sub combinational logic)
+//   ~5400 flip-flops     (state + temporaries + prime regs)
+//   ~4500 LUTs           (field_add/sub + reducers)
 //
 // Cycle counts per mode:
 //   0  X25519     ≈ 4335  (255 ladder + 255×3 inversion + overhead)
@@ -21,6 +29,11 @@
 //   5  FINV       ≈ 767   (Fermat a^(p−2))
 //   6  FPOW       ≈ 767   (a^b mod p, binary method)
 //   7  MUL_RAW    1       (256×256→512 no reduction)
+//   8  FCMOV      1       (constant-time conditional move) [reserved]
+//   9  FCEQ       1       (constant-time equality test)    [reserved]
+//  10  LOAD_PRIME 1       (latch custom prime + p_inv)     [reserved]
+//  11  FMAC       1       (field multiply-accumulate)      [reserved]
+//  12  MUL_ADD_RAW 1      (raw multiply-accumulate)        [reserved]
 //
 // MMIO base: 0x840 (64-byte block, addr[5:0]).
 //
@@ -36,8 +49,9 @@
 //   0x38  OPERAND_B[255:192]     (addr[2:0]==0)
 //   0x3F  CMD                    (addr[2:0]!=0)
 //         wdata[0]   = go        1 = start computation
-//         wdata[4:1] = mode      0–7, see above
+//         wdata[4:1] = mode      0–12, see above
 //         wdata[5]   = result_sel  0=LO half, 1=HI half (MUL_RAW)
+//         wdata[7:6] = prime_sel   0–3, latched on go=0 writes only
 //
 //   ── Read (64-bit) ──────────────────────────────────────────────
 //   0x00  STATUS   {62'd0, done, busy}
@@ -50,6 +64,9 @@
 //   result_sel defaults to 0 (LO) after every operation.
 //   To read RESULT_HI after MUL_RAW: write CMD with go=0, result_sel=1,
 //   then read 0x08–0x20 again.
+//
+//   prime_sel is latched only on CMD writes with go=0 (backward compatible:
+//   old code writes go=1 with bits [7:6]=0, which does not change prime_sel).
 //
 // ============================================================================
 
@@ -75,32 +92,43 @@ module mp64_field_alu (
     localparam [255:0] A24       = 256'd121665;
     localparam [255:0] P_MINUS_2 = 256'h7FFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFEB;
 
+    // secp256k1: p = 2^256 - 2^32 - 977
+    localparam [255:0] PRIME_SECP     = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2F;
+    localparam [255:0] P_MINUS_2_SECP = 256'hFFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_FFFFFC2D;
+
     // Mode encoding
-    localparam [3:0] MODE_X25519  = 4'd0,
-                     MODE_FADD    = 4'd1,
-                     MODE_FSUB    = 4'd2,
-                     MODE_FMUL    = 4'd3,
-                     MODE_FSQR    = 4'd4,
-                     MODE_FINV    = 4'd5,
-                     MODE_FPOW    = 4'd6,
-                     MODE_MUL_RAW = 4'd7;
+    localparam [3:0] MODE_X25519      = 4'd0,
+                     MODE_FADD        = 4'd1,
+                     MODE_FSUB        = 4'd2,
+                     MODE_FMUL        = 4'd3,
+                     MODE_FSQR        = 4'd4,
+                     MODE_FINV        = 4'd5,
+                     MODE_FPOW        = 4'd6,
+                     MODE_MUL_RAW     = 4'd7,
+                     MODE_FCMOV       = 4'd8,
+                     MODE_FCEQ        = 4'd9,
+                     MODE_LOAD_PRIME  = 4'd10,
+                     MODE_FMAC        = 4'd11,
+                     MODE_MUL_ADD_RAW = 4'd12;
 
     // ========================================================================
     // State machine
     // ========================================================================
-    localparam S_IDLE       = 3'd0,
-               S_CLAMP      = 3'd1,
-               S_LADDER     = 3'd2,
-               S_FINAL_SWAP = 3'd3,
-               S_POWER      = 3'd4,   // shared: X25519 invert / FINV / FPOW
-               S_FINAL_MUL  = 3'd5,   // X25519 final: X2 · Z2⁻¹
-               S_DONE       = 3'd6,
-               S_COMPUTE    = 3'd7;   // single-cycle modes 1-4, 7
+    localparam [3:0] S_IDLE       = 4'd0,
+                     S_CLAMP      = 4'd1,
+                     S_LADDER     = 4'd2,
+                     S_FINAL_SWAP = 4'd3,
+                     S_POWER      = 4'd4,   // shared: X25519 invert / FINV / FPOW
+                     S_FINAL_MUL  = 4'd5,   // X25519 final: X2 · Z2⁻¹
+                     S_DONE       = 4'd6,
+                     S_COMPUTE    = 4'd7,   // single-cycle modes 1-4, 7-12
+                     S_REDC       = 4'd8;   // Montgomery reduction (reserved)
 
-    reg [2:0]  state;
+    reg [3:0]  state;
     reg        busy, done;
     reg [3:0]  mode_reg;
     reg        result_sel;            // 0 = LO, 1 = HI
+    reg [1:0]  prime_sel;             // 0=25519, 1=secp256k1, 2=P-256, 3=custom
 
     // ========================================================================
     // I/O registers
@@ -203,6 +231,86 @@ module mp64_field_alu (
     endfunction
 
     // ========================================================================
+    // secp256k1 reduction: 2^256 ≡ 2^32 + 977 (mod p)
+    // ========================================================================
+
+    function [255:0] field_reduce_secp;
+        input [511:0] x;
+        reg [289:0] hi_times_c;
+        reg [289:0] fold1;
+        reg [256:0] ov_times_c;
+        reg [256:0] fold2;
+        begin
+            // First fold: lo + hi × (2^32 + 977)
+            hi_times_c = x[511:256] * 290'd4294968273;
+            fold1 = {34'd0, x[255:0]} + hi_times_c;
+            // Second fold on overflow bits
+            ov_times_c = fold1[289:256] * 257'd4294968273;
+            fold2 = {1'b0, fold1[255:0]} + ov_times_c;
+            if (fold2 >= {1'b0, PRIME_SECP})
+                fold2 = fold2 - {1'b0, PRIME_SECP};
+            field_reduce_secp = fold2[255:0];
+        end
+    endfunction
+
+    // ========================================================================
+    // Prime-parameterized dispatch functions
+    // ========================================================================
+
+    function [255:0] field_add_sel;
+        input [255:0] a, b;
+        input [1:0] sel;
+        reg [256:0] sum;
+        reg [255:0] p;
+        begin
+            case (sel)
+                2'd0:    p = PRIME;
+                2'd1:    p = PRIME_SECP;
+                default: p = PRIME;      // placeholder for P-256/custom
+            endcase
+            sum = {1'b0, a} + {1'b0, b};
+            if (sum >= {1'b0, p})
+                field_add_sel = sum - {1'b0, p};
+            else
+                field_add_sel = sum[255:0];
+        end
+    endfunction
+
+    function [255:0] field_sub_sel;
+        input [255:0] a, b;
+        input [1:0] sel;
+        reg [255:0] p;
+        begin
+            case (sel)
+                2'd0:    p = PRIME;
+                2'd1:    p = PRIME_SECP;
+                default: p = PRIME;
+            endcase
+            if (a >= b)
+                field_sub_sel = a - b;
+            else
+                field_sub_sel = p - (b - a);
+        end
+    endfunction
+
+    function [255:0] field_mul_sel;
+        input [255:0] a, b;
+        input [1:0] sel;
+        reg [511:0] prod;
+        begin
+            prod = a * b;
+            case (sel)
+                2'd0:    field_mul_sel = field_reduce(prod);
+                2'd1:    field_mul_sel = field_reduce_secp(prod);
+                default: field_mul_sel = field_reduce(prod);
+            endcase
+        end
+    endfunction
+
+    // Effective prime: X25519 (mode 0) always uses Curve25519 prime
+    wire [1:0] eff_prime = (mode_reg == MODE_X25519) ? 2'd0 : prime_sel;
+
+    // ========================================================================
     // Main sequential logic
     // ========================================================================
     always @(posedge clk or negedge rst_n) begin
@@ -216,6 +324,7 @@ module mp64_field_alu (
             done         <= 1'b0;
             mode_reg     <= 4'd0;
             result_sel   <= 1'b0;
+            prime_sel    <= 2'd0;
             swap_bit     <= 1'b0;
             bit_idx      <= 8'd0;
             ladder_phase <= 4'd0;
@@ -256,11 +365,18 @@ module mp64_field_alu (
                                     MODE_FSUB,
                                     MODE_FMUL,
                                     MODE_FSQR,
-                                    MODE_MUL_RAW: state <= S_COMPUTE;
+                                    MODE_MUL_RAW,
+                                    MODE_FCMOV,
+                                    MODE_FCEQ,
+                                    MODE_FMAC,
+                                    MODE_MUL_ADD_RAW: state <= S_COMPUTE;
                                     MODE_FINV: begin
                                         pow_acc   <= 256'd1;
                                         pow_base  <= operand_a;
-                                        pow_exp   <= P_MINUS_2;
+                                        case (prime_sel)
+                                            2'd1:    pow_exp <= P_MINUS_2_SECP;
+                                            default: pow_exp <= P_MINUS_2;
+                                        endcase
                                         pow_step  <= 9'd0;
                                         pow_phase <= 2'd0;
                                         state     <= S_POWER;
@@ -276,8 +392,9 @@ module mp64_field_alu (
                                     default: state <= S_COMPUTE;
                                 endcase
                             end else if (!wdata[0]) begin
-                                // No go — just update result_sel
+                                // No go — update result_sel and prime_sel
                                 result_sel <= wdata[5];
+                                prime_sel  <= wdata[7:6];
                             end
                         end
                     end
@@ -295,10 +412,10 @@ module mp64_field_alu (
                 S_COMPUTE: begin
                     result_hi <= 256'd0;
                     case (mode_reg)
-                        MODE_FADD: result_lo <= field_add(operand_a, operand_b);
-                        MODE_FSUB: result_lo <= field_sub(operand_a, operand_b);
-                        MODE_FMUL: result_lo <= field_mul(operand_a, operand_b);
-                        MODE_FSQR: result_lo <= field_mul(operand_a, operand_a);
+                        MODE_FADD: result_lo <= field_add_sel(operand_a, operand_b, prime_sel);
+                        MODE_FSUB: result_lo <= field_sub_sel(operand_a, operand_b, prime_sel);
+                        MODE_FMUL: result_lo <= field_mul_sel(operand_a, operand_b, prime_sel);
+                        MODE_FSQR: result_lo <= field_mul_sel(operand_a, operand_a, prime_sel);
                         MODE_MUL_RAW: begin
                             result_lo <= (operand_a * operand_b);
                             result_hi <= (operand_a * operand_b) >> 256;
@@ -408,16 +525,16 @@ module mp64_field_alu (
                 S_POWER: begin
                     case (pow_phase)
                         2'd0: begin
-                            pow_acc <= field_mul(pow_acc, pow_acc);
+                            pow_acc <= field_mul_sel(pow_acc, pow_acc, eff_prime);
                             pow_phase <= 2'd1;
                         end
                         2'd1: begin
-                            if (pow_exp[254 - pow_step[7:0]])
-                                pow_acc <= field_mul(pow_acc, pow_base);
+                            if (pow_exp[255 - pow_step[7:0]])
+                                pow_acc <= field_mul_sel(pow_acc, pow_base, eff_prime);
                             pow_phase <= 2'd2;
                         end
                         2'd2: begin
-                            if (pow_step == 9'd254) begin
+                            if (pow_step == 9'd255) begin
                                 // Exponentiation complete
                                 if (mode_reg == MODE_X25519)
                                     state <= S_FINAL_MUL;

@@ -7765,6 +7765,138 @@ class TestFieldALU(_KDOSTestBase):
         self.assertIn("R1=0 ", text)
 
 
+class TestFieldALUSecp256k1(_KDOSTestBase):
+    """Tests for §1.10 Field ALU — secp256k1 prime (prime_sel=1)."""
+
+    # p_secp = 2^256 - 2^32 - 977
+    # = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+    def _load_small_int(self, name, value):
+        """Generate Forth code to store a small int as 32 LE bytes."""
+        lines = [f"CREATE {name} 32 ALLOT"]
+        lines.append(f"{name} 32 0 FILL")
+        for i in range(8):
+            b = (value >> (i * 8)) & 0xFF
+            if b != 0:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _load_256bit(self, name, value):
+        """Generate Forth code to store a 256-bit int as 32 LE bytes."""
+        lines = [f"CREATE {name} 32 ALLOT"]
+        for i in range(32):
+            b = (value >> (i * 8)) & 0xFF
+            lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _setup_ab(self, a=42, b=17):
+        lines = self._load_small_int("tv-a", a)
+        lines.extend(self._load_small_int("tv-b", b))
+        lines.append("CREATE tv-r  32 ALLOT")
+        lines.append("CREATE tv-rh 32 ALLOT")
+        return lines
+
+    def _read_result_u64(self):
+        return [
+            '."  R0=" tv-r C@ .',
+            '."  R1=" tv-r 1 + C@ .',
+            '."  R2=" tv-r 2 + C@ .',
+            '."  R3=" tv-r 3 + C@ .',
+        ]
+
+    def test_secp_fadd_small(self):
+        """FADD under secp256k1: 42 + 17 = 59."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-b tv-r FADD",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=59 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_secp_fsub_small(self):
+        """FSUB under secp256k1: 42 - 17 = 25."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-b tv-r FSUB",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=25 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_secp_fmul_small(self):
+        """FMUL under secp256k1: 42 * 17 = 714."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-b tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 714 = 0x2CA → byte0=202, byte1=2
+        self.assertIn("R0=202 ", text)
+        self.assertIn("R1=2 ", text)
+
+    def test_secp_fsqr_small(self):
+        """FSQR under secp256k1: 42^2 = 1764."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-r FSQR",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # 1764 = 0x6E4 → byte0=228, byte1=6
+        self.assertIn("R0=228 ", text)
+        self.assertIn("R1=6 ", text)
+
+    def test_secp_finv_roundtrip(self):
+        """FINV roundtrip under secp256k1: a * inv(a) = 1."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-r FINV",
+            "tv-a tv-r tv-r FMUL",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=1 ", text)
+        self.assertIn("R1=0 ", text)
+
+    def test_secp_fsub_wraparound(self):
+        """FSUB wraparound under secp256k1: (3 - 5) mod p_secp = p_secp - 2."""
+        # p_secp - 2 LE bytes: byte0 = 0x2D, byte1 = 0xFC, ...
+        setup = self._setup_ab(3, 5)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-b tv-r FSUB",
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # p_secp - 2 low bytes: 0x...FFFFFC2D → byte0=0x2D=45, byte1=0xFC=252
+        self.assertIn("R0=45 ", text)
+        self.assertIn("R1=252 ", text)
+
+    def test_secp_then_25519(self):
+        """Switch from secp256k1 back to Curve25519 — no leakage."""
+        setup = self._setup_ab(3, 5)
+        setup.extend([
+            "PRIME-SECP",
+            "tv-a tv-b tv-r FSUB",   # secp256k1 result
+            "PRIME-25519",
+            "tv-a tv-b tv-r FSUB",   # Curve25519 result
+        ])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        # p_25519 - 2 low bytes: 0x...FFFFFFEB → byte0=0xEB=235, byte1=0xFF=255
+        self.assertIn("R0=235 ", text)
+        self.assertIn("R1=255 ", text)
+
+
 class TestNTT(_KDOSTestBase):
     """Tests for §1.11 NTT Engine — 256-point Number Theoretic Transform."""
 
