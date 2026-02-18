@@ -303,7 +303,7 @@ and adds post-quantum cryptographic primitives.
     - 34b. ✅ RTL: RESULT_HI read register, MMIO at 0x0880.
     - 34c. ✅ Emulator: `FieldALUDevice` in devices.py, backward-compatible.
     - 34d. ✅ BIOS words: 13 new words (FADD–FIELD-WAIT).
-    - 34e. ✅ KDOS §1.10: F+ F- F* wrappers, BIG-MUL-LIMB.
+    - 34e. ✅ KDOS §1.10: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW.
     - 34f. ✅ Tests: TestFieldALU (15 tests).
 
 35. ✅ **NTT Engine** — 256-point NTT/INTT, configurable modulus
@@ -476,11 +476,14 @@ document that will be folded into proper docs as each item ships.
     - 40d. Generic Montgomery reduction path (`PRIME_SEL=3`)
     - 40e. Mode 8: `FCMOV` (constant-time conditional move)
     - 40f. Mode 9: `FCEQ` (constant-time equality comparison)
-    - 40g. Emulator: multi-prime + Montgomery in `FieldALUDevice`
-    - 40h. RTL: `mp64_field_reduce_*.v` modules + mux
-    - 40i. BIOS/KDOS: `PRIME-SEL!`, `FCMOV`, `FCEQ` words
-    - 40j. Tests: `TestFieldALUMultiPrime` — secp256k1, P-256,
-           Montgomery, constant-time ops
+    - 40g. Mode 11: `FMAC` (field multiply-accumulate, 0 new DSPs)
+    - 40h. Mode 12: `MUL_ADD_RAW` (raw multiply-accumulate for bignum)
+    - 40i. Emulator: multi-prime + Montgomery in `FieldALUDevice`
+    - 40j. RTL: reduction functions in `mp64_field_alu.v`
+    - 40k. BIOS/KDOS: `PRIME-SEL!`, `FCMOV`, `FCEQ`, `FMAC`,
+           `MUL-ADD-RAW`, short aliases `F+` `F-` `F*`
+    - 40l. Tests: `TestFieldALUMultiPrime` — secp256k1, P-256,
+           Montgomery, constant-time ops, FMAC, MUL-ADD-RAW
 
 41. ✅ **Memory model redesign** — DONE.  Expanded from 1 MiB
     monolithic to 4-bank architecture with differentiated bandwidth.

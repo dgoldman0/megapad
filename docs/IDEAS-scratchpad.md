@@ -409,14 +409,37 @@ Required for side-channel resistance in real cryptographic use:
 
 **New modes summary:**
 
-| Mode | Name | Description |
-|------|------|-------------|
-| 8 | FCMOV | Conditional move: `cond ? A : RESULT_LO` |
-| 9 | FCEQ | Constant-time equality: `A == B ? 1 : 0` |
+| Mode | Name | Cycles | Description |
+|------|------|--------|-------------|
+| 8 | FCMOV | 1 | Constant-time conditional move: `OPERAND_B[0] ? A : RESULT_LO` |
+| 9 | FCEQ | 1 | Constant-time equality: `A == B ? 1 : 0` |
+| 10 | LOAD_PRIME | 1 | Latch `custom_p ← A`, `mont_p_inv ← B` |
+| 11 | FMAC | 1 | Field multiply-accumulate: `RESULT_LO = (RESULT_LO + A×B) mod p` |
+| 12 | MUL_ADD_RAW | 1 | Raw multiply-accumulate: `RESULT_HI:RESULT_LO += A×B` (no reduction) |
+
+#### Piggybacking Off the Shared Multiplier
+
+Modes 11–12 are essentially free in DSPs — the 165-DSP multiplier is
+already there and shared.  The only additional logic is:
+
+- **FMAC (mode 11):** One 257-bit adder before the reduction mux
+  (add `result_lo` to the raw product, then reduce).  Saves one
+  FADD + operand write per step in ECC point arithmetic chains.
+  Ed25519 extended-coordinates point addition chains ~10 field muls
+  interleaved with field adds; FMAC folds the add into the mul.
+  Critical for performant Ed25519 signatures and secp256k1 ECDSA.
+
+- **MUL_ADD_RAW (mode 12):** One 513-bit adder on the unreduced
+  product.  For software big-number arithmetic: build 512/768/1024-bit
+  products from 256-bit limbs without reading results back between
+  partial-product steps.  Also useful for RSA modular exponentiation
+  if ever needed (combine with Montgomery at the software level).
+
+Both add ~200 LUTs combined, 0 DSPs, 0 extra FFs.
 
 ### What This Unlocks
 
-With these three improvements, the Field ALU becomes usable for:
+With these improvements, the Field ALU becomes usable for:
 
 - **Ed25519 signatures** (extended twisted Edwards, needs constant-time
   point addition over $2^{255}-19$)
@@ -496,6 +519,8 @@ existing operand registers:
 |  8 | FCMOV       | 1  | `cond ? A : RESULT_LO` (constant-time) |
 |  9 | FCEQ        | 1  | `A == B ? 1 : 0` (constant-time) |
 | 10 | LOAD_PRIME  | 1  | `custom_p ← A`, `mont_p_inv ← B` |
+| 11 | FMAC        | 1  | `RESULT_LO += A×B mod p` (multiply-accumulate) |
+| 12 | MUL_ADD_RAW | 1  | `RESULT_HI:LO += A×B` (raw accumulate) |
 
 LOAD_PRIME sequence (software):
 ```forth
@@ -609,7 +634,24 @@ MODE_FCEQ: begin
     // XOR all bits, OR-reduce, invert
     result_lo <= (|(operand_a ^ operand_b)) ? 256'd0 : 256'd1;
 end
+MODE_FMAC: begin
+    // field multiply-accumulate: result += a*b mod p
+    // Pre-add result_lo to the raw product, then reduce
+    result_lo <= field_reduce_sel(
+        operand_a * operand_b + {256'd0, result_lo}, prime_sel);
+end
+MODE_MUL_ADD_RAW: begin
+    // raw multiply-accumulate (no field reduction)
+    {result_hi, result_lo} <= {result_hi, result_lo}
+                            + operand_a * operand_b;
+end
 ```
+
+Note: FMAC's pre-addition of `result_lo` to the 512-bit product
+before reduction is mathematically correct: $(r + a \times b) \bmod p$.
+The 512-bit product can overflow to 513 bits after the add, but each
+reducer already handles up to 512-bit inputs and the extra carry bit
+just means one more conditional subtract — negligible.
 
 Strictly speaking, `FCEQ` above uses a conditional — but in hardware,
 the `|` reduce and `?:` are all combinational (no branch predictor),
@@ -627,9 +669,11 @@ compiles to a balanced OR-tree (~8 LUT levels for 256 bits).
 | custom_p + mont_p_inv regs | — | +512 | — |
 | FCMOV (256-bit mux) | +256 | — | — |
 | FCEQ (XOR + OR-tree) | +100 | — | — |
+| FMAC (257-bit pre-add) | +130 | — | — |
+| MUL_ADD_RAW (513-bit add) | +70 | — | — |
 | prime_sel mux + control | +50 | +10 | — |
-| **Total increase** | **+1300** | **+562** | **+0** |
-| **New total** | **~4300** | **~5362** | **165** |
+| **Total increase** | **+1500** | **+562** | **+0** |
+| **New total** | **~4500** | **~5362** | **165** |
 
 Roughly **+30% LUTs, +12% FFs, 0% DSPs**.  The multiplier (the
 expensive part) is fully reused.  On a Kintex-7 325T this is trivial.
@@ -638,7 +682,7 @@ expensive part) is fully reused.  On a Kintex-7 325T this is trivial.
 
 Keep everything in `mp64_field_alu.v`.  The reducers are Verilog
 `function` blocks (pure combinational, ~30-50 lines each).  Total file
-size goes from 489 → ~750-800 lines — manageable.  Splitting into
+size goes from 489 → ~800-850 lines — manageable.  Splitting into
 separate `mp64_field_reduce_*.v` files adds `include` complexity for
 minimal gain.
 
@@ -700,9 +744,12 @@ Add to `rtl/sim/tb_field_alu.v`:
   leakage between primes.
 - **LOAD_PRIME:** Write custom_p + p_inv, verify subsequent FMUL
   uses them correctly.
+- **FMAC:** Accumulate 3 known products, compare against reference.
+- **MUL_ADD_RAW:** Two partial products accumulated, verify 512-bit
+  result matches schoolbook.
 
-Target: ~15-20 new assertions, bringing tb_field_alu.v from 11 to
-~26-30 hardware tests.
+Target: ~18-22 new assertions, bringing tb_field_alu.v from 11 to
+~29-33 hardware tests.
 
 #### Emulator Test Strategy
 
@@ -712,9 +759,11 @@ Add `TestFieldALUMultiPrime` class to `test_system.py`:
 - Montgomery/custom: FMUL, FINV with a known prime (2 tests)
 - FCMOV: cond=0, cond=1 (2 tests)
 - FCEQ: equal, unequal (2 tests)
+- FMAC: accumulate 3 products, verify sum (1 test)
+- MUL_ADD_RAW: multi-limb accumulate, verify 512-bit result (1 test)
 - Prime switching: alternate between primes (1 test)
 - Backward compat: existing Curve25519 ops still work (1 test)
-Total: ~18 tests.
+Total: ~20 tests.
 
 #### BIOS/KDOS Words
 
@@ -728,6 +777,8 @@ KDOS §1.10 additions:
 - `PRIME-CUSTOM ( p p' -- )` — load custom prime + p_inv
 - `FCMOV ( a cond -- r )` — constant-time conditional move
 - `FCEQ ( a b -- flag )` — constant-time equality
+- `FMAC ( a b -- )` — `RESULT += A×B mod p` (multiply-accumulate)
+- `MUL-ADD-RAW ( a b -- )` — `RESULT += A×B` (raw, no reduction)
 
 #### Implementation Order
 
@@ -736,8 +787,9 @@ Recommended sub-commit sequence:
 2. **40c:** P-256 NIST reducer (RTL + emulator + tests)
 3. **40d:** Montgomery REDC path + LOAD_PRIME (RTL + emulator + tests)
 4. **40e–40f:** FCMOV + FCEQ (RTL + emulator + tests)
-5. **40i:** BIOS/KDOS words
-6. **40j:** Cross-prime + backward compat tests
+5. **40g:** FMAC + MUL_ADD_RAW (RTL + emulator + tests)
+6. **40i:** BIOS/KDOS words
+7. **40j:** Cross-prime + backward compat tests
 
 ---
 
