@@ -291,6 +291,8 @@ class MegapadSystem:
             cpu.mem = self._shared_mem
             if hbw_size > 0 and hasattr(cpu, 'attach_hbw'):
                 cpu.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
+            if ext_mem_size > 0 and hasattr(cpu, 'attach_ext_mem'):
+                cpu.attach_ext_mem(self._ext_mem, EXT_MEM_BASE, ext_mem_size)
             self.cores.append(cpu)
 
         # Create micro-core clusters
@@ -309,6 +311,8 @@ class MegapadSystem:
             for mc in cluster.cores:
                 if hbw_size > 0 and hasattr(mc, 'attach_hbw'):
                     mc.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
+                if ext_mem_size > 0 and hasattr(mc, 'attach_ext_mem'):
+                    mc.attach_ext_mem(self._ext_mem, EXT_MEM_BASE, ext_mem_size)
                 self.cores.append(mc)
 
         # Convenience alias: self.cpu always refers to core 0

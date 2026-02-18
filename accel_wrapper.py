@@ -136,6 +136,11 @@ if ACCEL_AVAILABLE:
             self._hbw_buf = buf  # prevent GC
             self._cs.attach_hbw_mem(buf, base, size)
 
+        def attach_ext_mem(self, buf: bytearray, base: int, size: int):
+            """Attach external memory (HyperRAM/SDRAM) buffer to C++ state."""
+            self._ext_mem_buf = buf  # prevent GC
+            self._cs.attach_ext_mem(buf, base, size)
+
         # ── Register access ──────────────────────────────────
 
         @property

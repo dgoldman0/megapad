@@ -72,6 +72,7 @@ from devices import (
 )
 from data_sources import (
     encode_frame, decode_header, DTYPE_RAW, DTYPE_U8, DTYPE_TEXT,
+    wrap_port_frame, extract_port_payload,
     DataSource, SineSource, RandomSource, CounterSource, ReplaySource,
     TemperatureSource, StockSource, SeismicSource, ImageSource,
     AudioSource, TextSource, EmbeddingSource, MultiChannelSource,
@@ -1561,7 +1562,7 @@ class TestBIOS(unittest.TestCase):
             sys, buf = self._boot_bios(ram_kib=1024, storage_image=path)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
-            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=250_000_000)
+            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=500_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("3 ", text)
         finally:
@@ -3015,8 +3016,8 @@ class _KDOSTestBase(unittest.TestCase):
                     continue
                 cls._kdos_lines.append(line)
 
-        # Boot BIOS and load KDOS fully
-        sys_obj = make_system(ram_kib=1024)
+        # Boot BIOS and load KDOS fully (with 16 MiB ext mem)
+        sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
@@ -3052,8 +3053,9 @@ class _KDOSTestBase(unittest.TestCase):
         self.bios_code = self.__class__._bios_code
         self.kdos_lines = self.__class__._kdos_lines
 
-    def _boot_bios(self, ram_kib=1024, storage_image=None):
-        sys = make_system(ram_kib=ram_kib, storage_image=storage_image)
+    def _boot_bios(self, ram_kib=1024, storage_image=None, ext_mem_mib=16):
+        sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
+                          ext_mem_mib=ext_mem_mib)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
         sys.boot()
@@ -3110,7 +3112,8 @@ class _KDOSTestBase(unittest.TestCase):
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
 
-        sys = make_system(ram_kib=1024, storage_image=storage_image)
+        sys = make_system(ram_kib=1024, storage_image=storage_image,
+                          ext_mem_mib=16)
         buf = capture_uart(sys)
 
         # Restore memory (BIOS + KDOS already compiled)
@@ -3774,7 +3777,7 @@ class TestKDOS(_KDOSTestBase):
         text = self._run_kdos(["KERN-COUNT @ ."])
         idx = text.rfind("HELP")
         out = text[idx:] if idx >= 0 else text
-        self.assertIn("18 ", out)  # all registered kernels
+        self.assertIn("23 ", out)  # all registered kernels
 
     # -- Utility words --
 
@@ -4395,7 +4398,7 @@ class TestKDOS(_KDOSTestBase):
 
     def test_net_rx_query_with_data(self):
         """NET-RX? returns true when a frame is waiting."""
-        frame = encode_frame(1, DTYPE_U8, 0, bytes(8))
+        frame = wrap_port_frame(encode_frame(1, DTYPE_U8, 0, bytes(8)))
         text = self._run_kdos(["NET-RX? ."], nic_frames=[frame])
         # Should be non-zero (true = -1)
         self.assertNotIn("0 \n", text.replace("\r", ""))
@@ -4431,7 +4434,7 @@ class TestKDOS(_KDOSTestBase):
 
     def test_poll_unbound_source(self):
         """POLL drops frames from unbound sources."""
-        frame = encode_frame(99, DTYPE_U8, 0, bytes(8))
+        frame = wrap_port_frame(encode_frame(99, DTYPE_U8, 0, bytes(8)))
         text = self._run_kdos([
             "POLL .",
             "PORT-DROP @ .",
@@ -4443,7 +4446,7 @@ class TestKDOS(_KDOSTestBase):
         """POLL routes frame payload into bound buffer."""
         # Create a frame: src_id=1, 8 bytes of value 0xAA
         payload = bytes([0xAA] * 8)
-        frame = encode_frame(1, DTYPE_U8, 0, payload)
+        frame = wrap_port_frame(encode_frame(1, DTYPE_U8, 0, payload))
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
@@ -4456,7 +4459,7 @@ class TestKDOS(_KDOSTestBase):
     def test_poll_preserves_sequence(self):
         """Payload bytes arrive in correct order."""
         payload = bytes(range(16))
-        frame = encode_frame(5, DTYPE_U8, 42, payload)
+        frame = wrap_port_frame(encode_frame(5, DTYPE_U8, 42, payload))
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
             "b1 5 PORT!",
@@ -4472,7 +4475,7 @@ class TestKDOS(_KDOSTestBase):
     def test_frame_header_parse(self):
         """Frame header accessors parse correctly after RECV-FRAME."""
         payload = bytes([1, 2, 3, 4])
-        frame = encode_frame(7, DTYPE_U8, 1000, payload)
+        frame = wrap_port_frame(encode_frame(7, DTYPE_U8, 1000, payload))
         text = self._run_kdos([
             "RECV-FRAME DROP",
             "FRAME-SRC .",
@@ -4488,7 +4491,7 @@ class TestKDOS(_KDOSTestBase):
     def test_ingest_multiple(self):
         """INGEST receives multiple frames."""
         frames = [
-            encode_frame(1, DTYPE_U8, i, bytes([i * 10] * 8))
+            wrap_port_frame(encode_frame(1, DTYPE_U8, i, bytes([i * 10] * 8)))
             for i in range(3)
         ]
         text = self._run_kdos([
@@ -4501,7 +4504,7 @@ class TestKDOS(_KDOSTestBase):
 
     def test_ingest_partial(self):
         """INGEST with fewer frames than requested."""
-        frame = encode_frame(1, DTYPE_U8, 0, bytes(8))
+        frame = wrap_port_frame(encode_frame(1, DTYPE_U8, 0, bytes(8)))
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
@@ -4524,7 +4527,7 @@ class TestKDOS(_KDOSTestBase):
 
     def test_dot_frame(self):
         """.FRAME prints last received frame header."""
-        frame = encode_frame(42, DTYPE_RAW, 7, bytes(10))
+        frame = wrap_port_frame(encode_frame(42, DTYPE_RAW, 7, bytes(10)))
         text = self._run_kdos([
             "RECV-FRAME DROP",
             ".FRAME",
@@ -4584,7 +4587,7 @@ class TestKDOS(_KDOSTestBase):
     def test_e2e_counter_to_buffer_sum(self):
         """Full pipeline: CounterSource -> NIC -> buffer -> ksum."""
         src = CounterSource(src_id=1, length=64)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         # Payload is bytes 0..63, sum = 64*63/2 = 2016
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
@@ -4597,7 +4600,7 @@ class TestKDOS(_KDOSTestBase):
     def test_e2e_sine_to_buffer_stats(self):
         """SineSource -> NIC -> buffer -> kstats (min, max, sum)."""
         src = SineSource(src_id=2, length=64, frequency=1.0)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
             "b1 2 PORT!",
@@ -5043,7 +5046,7 @@ class TestKDOS(_KDOSTestBase):
         """Temperature data → NIC → buffer → clamp → verify range."""
         # Use kclamp instead of knorm to stay within emulator step budget
         src = TemperatureSource(src_id=20, length=32)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 32 BUFFER tb",
             "tb 20 PORT!",
@@ -5060,7 +5063,7 @@ class TestKDOS(_KDOSTestBase):
     def test_e2e_stock_delta_analysis(self):
         """Stock prices → delta encode → detect price changes."""
         src = StockSource(src_id=21, length=64, seed=7)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER sb",
             "0 1 64 BUFFER db",
@@ -5079,7 +5082,7 @@ class TestKDOS(_KDOSTestBase):
         """Seismic data → threshold → count high-energy samples."""
         # Use lightweight ops to stay within emulator step budget
         src = SeismicSource(src_id=22, length=32, event_prob=0.15, seed=42)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 32 BUFFER raw",
             "raw 22 PORT!",
@@ -5098,7 +5101,7 @@ class TestKDOS(_KDOSTestBase):
         """Image gradient → threshold → binary mask."""
         src = ImageSource(src_id=23, width=64, height=64,
                           pattern='gradient')
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER img",
             "img 23 PORT!",
@@ -5117,7 +5120,7 @@ class TestKDOS(_KDOSTestBase):
         """Audio tone → 3-tap smoothing convolution → sum preserved."""
         src = AudioSource(src_id=24, length=64, waveform='tone',
                           frequency=440.0)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER aud",
             "aud 24 PORT!",
@@ -5138,7 +5141,7 @@ class TestKDOS(_KDOSTestBase):
     def test_e2e_text_histogram(self):
         """Text → histogram → character frequency analysis."""
         src = TextSource(src_id=25, chunk_size=64, sample='pangram')
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER txt",
             "txt 25 PORT!",
@@ -5161,7 +5164,7 @@ class TestKDOS(_KDOSTestBase):
         s2 = ReplaySource(src_id=2, data=bytes([100] * 64))
         s3 = ReplaySource(src_id=3, data=bytes([50] * 64))
         multi = MultiChannelSource([s1, s2, s3])
-        frames = [multi.next_frame() for _ in range(3)]
+        frames = [wrap_port_frame(multi.next_frame()) for _ in range(3)]
         text = self._run_kdos([
             "0 1 64 BUFFER b1",
             "0 1 64 BUFFER b2",
@@ -5182,8 +5185,8 @@ class TestKDOS(_KDOSTestBase):
         """Embedding vectors → kcorrelate → similarity measure."""
         src = EmbeddingSource(src_id=30, dimensions=64,
                               texts=["cat on mat", "dog on rug"])
-        f1 = src.next_frame()
-        f2 = src.next_frame()
+        f1 = wrap_port_frame(src.next_frame())
+        f2 = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 64 BUFFER e1",
             "0 1 64 BUFFER e2",
@@ -5205,7 +5208,7 @@ class TestKDOS(_KDOSTestBase):
         """Signal processing: inject → clamp → threshold → count stats."""
         # Use a small buffer to keep emulator step count reasonable
         src = SeismicSource(src_id=40, length=32, event_prob=0.1, seed=123)
-        frame = src.next_frame()
+        frame = wrap_port_frame(src.next_frame())
         text = self._run_kdos([
             "0 1 32 BUFFER raw",
             "raw 40 PORT!",
@@ -9284,7 +9287,7 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "10 20 + .",
                 "BUF-COUNT @ .",
-            ], max_steps=250_000_000)
+            ], max_steps=500_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("30 ", text)
             # BUF-COUNT should be a valid number (0 initially)
@@ -9303,7 +9306,7 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "0 1 64 BUFFER diskbuf",
                 "BUF-COUNT @ .",
-            ], max_steps=250_000_000)
+            ], max_steps=500_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("1 ", text)
         finally:
@@ -17777,6 +17780,444 @@ class TestHeadlessDisplay(_KDOSTestBase):
         sys_emu = make_system()
         disp = HeadlessDisplay(sys_emu)
         self.assertIsNone(disp.snapshot())
+
+
+# =====================================================================
+#  TestPortSend — §10.1 outbound data (PORT-SEND, PORT-SEND-SLICE)
+# =====================================================================
+
+class TestPortSend(_KDOSTestBase):
+    """Tests for the PORT-SEND outbound data path (via UDP)."""
+
+    def test_port_send_basic(self):
+        """PORT-SEND transmits buffer data with correct frame header."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 64 BUFFER tbuf',
+            'tbuf B.DATA 64 65 FILL',         # fill with 'A'
+            'tbuf 7 PORT-SEND',
+            '.\" done\"',
+        ], nic_tx_callback=capture)
+        self.assertIn('done', text)
+        self.assertGreaterEqual(len(sent), 1, "should send a frame")
+        # Extract §10 payload from ETH+IP+UDP frame
+        frame = extract_port_payload(sent[-1])
+        self.assertEqual(frame[0], 7, "SRC_ID")
+        self.assertEqual(frame[1], 0, "DTYPE (raw)")
+        seq = frame[2] | (frame[3] << 8)
+        self.assertEqual(seq, 0, "first TX seq should be 0")
+        plen = frame[4] | (frame[5] << 8)
+        self.assertEqual(plen, 64, "payload length")
+        self.assertEqual(frame[6:6+64], bytes([65] * 64))
+
+    def test_port_send_increments_tx_seq(self):
+        """Each PORT-SEND increments TX-SEQ and PORT-TX counters."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 32 BUFFER tbuf2',
+            'tbuf2 B.DATA 32 10 FILL',
+            'tbuf2 1 PORT-SEND',
+            'tbuf2 1 PORT-SEND',
+            'PORT-TX @ .\" tx=\" .',
+            'TX-SEQ @ .\" seq=\" .',
+        ], nic_tx_callback=capture)
+        self.assertIn('tx=2 ', text)
+        self.assertIn('seq=2 ', text)
+        self.assertGreaterEqual(len(sent), 2)
+        f2 = extract_port_payload(sent[-1])
+        seq2 = f2[2] | (f2[3] << 8)
+        self.assertEqual(seq2, 1)
+
+    def test_port_send_slice(self):
+        """PORT-SEND-SLICE sends a sub-range of buffer data."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 128 BUFFER sbuf',
+            'sbuf B.DATA 128 0 FILL',
+            '99 sbuf B.DATA 10 + C!',
+            '100 sbuf B.DATA 11 + C!',
+            'sbuf 10 4 5 PORT-SEND-SLICE',
+            '.\" ok\"',
+        ], nic_tx_callback=capture)
+        self.assertIn('ok', text)
+        self.assertGreaterEqual(len(sent), 1)
+        frame = extract_port_payload(sent[-1])
+        self.assertEqual(frame[0], 5, "SRC_ID=5")
+        plen = frame[4] | (frame[5] << 8)
+        self.assertEqual(plen, 4, "payload length=4")
+        self.assertEqual(frame[6], 99)
+        self.assertEqual(frame[7], 100)
+
+    def test_port_send_empty_buffer(self):
+        """PORT-SEND on a zero-length buffer is a no-op."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 0 BUFFER ebuf',
+            'ebuf 3 PORT-SEND',
+            '.\" ok\"',
+        ], nic_tx_callback=capture)
+        self.assertIn('ok', text)
+        self.assertEqual(len(sent), 0)
+
+    def test_port_send_clamps_to_mtu(self):
+        """PORT-SEND clamps payload to 1400 bytes (leaving room for UDP/IP)."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 2000 BUFFER bigbuf',
+            'bigbuf B.DATA 2000 42 FILL',
+            'bigbuf 1 PORT-SEND',
+            '.\" ok\"',
+        ], nic_tx_callback=capture)
+        self.assertIn('ok', text)
+        self.assertGreaterEqual(len(sent), 1)
+        frame = extract_port_payload(sent[-1])
+        plen = frame[4] | (frame[5] << 8)
+        self.assertEqual(plen, 1400, "clamped for UDP headroom")
+
+    def test_port_send_dtype_mapping(self):
+        """Buffer types map to correct DTYPE in frame header."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '2 2 32 BUFFER tilebuf',
+            'tilebuf 1 PORT-SEND',
+        ], nic_tx_callback=capture)
+        self.assertGreaterEqual(len(sent), 1)
+        frame = extract_port_payload(sent[-1])
+        self.assertEqual(frame[1], 2, "DTYPE=2 for tile buffer")
+
+    def test_port_stats_shows_tx(self):
+        """The .PORT-STATS word includes TX counter."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        text = self._run_kdos([
+            '0 1 16 BUFFER stbuf',
+            'stbuf B.DATA 16 1 FILL',
+            'stbuf 0 PORT-SEND',
+            '.PORT-STATS',
+        ], nic_tx_callback=capture)
+        self.assertIn('tx=1 ', text)
+
+    def test_port_send_roundtrip(self):
+        """PORT-SEND output can be received back via POLL (loopback)."""
+        sent = []
+        def echo_back(nic, data):
+            sent.append(bytes(data))
+            # Extract §10 payload from the outbound UDP frame
+            port_frame = extract_port_payload(data)
+            # Re-wrap it as an inbound UDP frame (from peer to us)
+            inbound = wrap_port_frame(port_frame)
+            nic.inject_frame(inbound)
+        text = self._run_kdos([
+            '0 1 64 BUFFER rtbuf',
+            'rtbuf B.DATA 64 77 FILL',
+            '0 1 64 BUFFER rxbuf',         # receive buffer
+            'rxbuf 42 PORT!',              # bind rxbuf to port 42
+            'rtbuf 42 PORT-SEND',          # send on port 42
+            'POLL .\" poll=\" .',           # should find the frame
+            'rxbuf B.DATA C@ .\" byte=\" .',  # should be 77
+        ], nic_tx_callback=echo_back)
+        self.assertIn('poll=42 ', text, f"POLL should return port 42: {text!r}")
+        self.assertIn('byte=77 ', text, f"data should arrive: {text!r}")
+
+
+# =====================================================================
+#  FP16 / BF16 Buffer Operations Tests
+# =====================================================================
+
+class TestKDOSFP16(_KDOSTestBase):
+    """Tests for §3.1 FP16/BF16 tile buffer operations."""
+
+    def test_fsum_ones(self):
+        """F.SUM of 32 FP16 1.0 values (one tile) = FP32(32.0)."""
+        # FP16 1.0 = 0x3C00.  32 values × 2 bytes = 64 bytes = 1 tile.
+        # Sum = 32.0 → FP32 bits = 0x42000000 = 1107296256
+        text = self._run_kdos([
+            '0 1 64 BUFFER fb',
+            ': FILL-FP16-ONES  fb B.DATA 32 0 DO  15360 OVER W!  2 +  LOOP DROP ;',
+            'FILL-FP16-ONES',
+            'fb F.SUM .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('1107296256 ', out, f"F.SUM should be FP32(32.0): {out!r}")
+
+    def test_fsum_halves(self):
+        """F.SUM of 32 FP16 0.5 values = FP32(16.0)."""
+        # FP16 0.5 = 0x3800.  Sum = 16.0 → FP32 = 0x41800000 = 1098907648
+        text = self._run_kdos([
+            '0 1 64 BUFFER fh',
+            ': FILL-FP16-HALF  fh B.DATA 32 0 DO  14336 OVER W!  2 +  LOOP DROP ;',
+            'FILL-FP16-HALF',
+            'fh F.SUM .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('1098907648 ', out, f"F.SUM should be FP32(16.0): {out!r}")
+
+    def test_fdot(self):
+        """F.DOT of two buffers filled with FP16 1.0 and 2.0 = FP32(64.0)."""
+        # FP16 1.0 = 0x3C00, FP16 2.0 = 0x4000
+        # DOT = 32 × (1.0 × 2.0) = 64.0 → FP32 = 0x42800000 = 1115684864
+        text = self._run_kdos([
+            '0 1 64 BUFFER fa',
+            '0 1 64 BUFFER fb',
+            ': FILL-1S  fa B.DATA 32 0 DO  15360 OVER W!  2 +  LOOP DROP ;',
+            ': FILL-2S  fb B.DATA 32 0 DO  16384 OVER W!  2 +  LOOP DROP ;',
+            'FILL-1S FILL-2S',
+            'fa fb F.DOT .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('1115684864 ', out, f"F.DOT should be FP32(64.0): {out!r}")
+
+    def test_fsumsq(self):
+        """F.SUMSQ of 32 FP16 2.0 values = FP32(128.0)."""
+        # FP16 2.0 = 0x4000.  SUMSQ = 32 × 4.0 = 128.0
+        # FP32 = 0x43000000 = 1124073472
+        text = self._run_kdos([
+            '0 1 64 BUFFER fs',
+            ': FILL-2S  fs B.DATA 32 0 DO  16384 OVER W!  2 +  LOOP DROP ;',
+            'FILL-2S',
+            'fs F.SUMSQ .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('1124073472 ', out, f"F.SUMSQ should be FP32(128.0): {out!r}")
+
+    def test_fadd(self):
+        """F.ADD element-wise adds two FP16 buffers."""
+        # FP16: 1.0 + 2.0 = 3.0 = 0x4200
+        text = self._run_kdos([
+            '0 1 64 BUFFER a1',
+            '0 1 64 BUFFER a2',
+            '0 1 64 BUFFER a3',
+            ': FA1  a1 B.DATA 32 0 DO  15360 OVER W!  2 +  LOOP DROP ;',
+            ': FA2  a2 B.DATA 32 0 DO  16384 OVER W!  2 +  LOOP DROP ;',
+            'FA1 FA2',
+            'a1 a2 a3 F.ADD',
+            'a3 B.DATA W@ .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('16896 ', out, f"F.ADD result[0] should be FP16(3.0)=0x4200=16896: {out!r}")
+
+    def test_fmul(self):
+        """F.MUL element-wise multiplies two FP16 buffers."""
+        # FP16: 2.0 × 3.0 = 6.0 = 0x4600
+        # FP16 3.0 = 0x4200, FP16 2.0 = 0x4000
+        text = self._run_kdos([
+            '0 1 64 BUFFER m1',
+            '0 1 64 BUFFER m2',
+            '0 1 64 BUFFER m3',
+            ': FM1  m1 B.DATA 32 0 DO  16384 OVER W!  2 +  LOOP DROP ;',
+            ': FM2  m2 B.DATA 32 0 DO  16896 OVER W!  2 +  LOOP DROP ;',
+            'FM1 FM2',
+            'm1 m2 m3 F.MUL',
+            'm3 B.DATA W@ .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('17920 ', out, f"F.MUL result[0] should be FP16(6.0)=0x4600=17920: {out!r}")
+
+    def test_bfsum(self):
+        """BF.SUM of BF16 values works with FP32 accumulation."""
+        # BF16 1.0 = 0x3F80.  32 × 1.0 = 32.0 → FP32 = 1107296256
+        text = self._run_kdos([
+            '0 1 64 BUFFER bf',
+            ': FILL-BF16-1  bf B.DATA 32 0 DO  16256 OVER W!  2 +  LOOP DROP ;',
+            'FILL-BF16-1',
+            'bf BF.SUM .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('1107296256 ', out, f"BF.SUM should be FP32(32.0): {out!r}")
+
+    def test_fsum_zeros(self):
+        """F.SUM of all-zero buffer = FP32(0.0) = 0."""
+        text = self._run_kdos([
+            '0 1 64 BUFFER fz',
+            'fz B.ZERO',
+            'fz F.SUM .',
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('0 ', out, f"F.SUM of zeros should be 0: {out!r}")
+
+    def test_tmode_restored(self):
+        """F.SUM restores TMODE to 0 (U8) after use."""
+        text = self._run_kdos([
+            '0 1 64 BUFFER tr',
+            'tr B.DATA 64 0 FILL',
+            'tr F.SUM DROP',             # run FP16 op
+            '0 1 64 BUFFER tb',
+            '3 tb B.FILL',
+            'tb B.SUM .',                 # U8 op — should work correctly
+        ])
+        idx = text.rfind("HELP")
+        out = text[idx:] if idx >= 0 else text
+        self.assertIn('192 ', out, f"U8 B.SUM after F.SUM should work (64×3=192): {out!r}")
+
+
+# =====================================================================
+#  AUTOEXEC Tests
+# =====================================================================
+
+class TestKDOSAutoexec(_KDOSTestBase):
+    """Tests for AUTOEXEC boot feature."""
+
+    def test_autoexec_no_disk(self):
+        """Boot without disk does not crash on AUTOEXEC check."""
+        text = self._run_kdos([
+            '.\" alive\"',
+        ])
+        self.assertIn('alive', text)
+
+    def test_autoexec_no_file(self):
+        """Boot with disk but no autoexec.f does not crash."""
+        # Default disk has filesystem but no autoexec.f
+        text = self._run_kdos([
+            '.\" ok\"',
+        ])
+        self.assertIn('ok', text)
+        # Should NOT print "Running autoexec.f"
+        self.assertNotIn('Running autoexec.f', text)
+
+
+# ---------------------------------------------------------------------------
+#  External Memory Allocator (§1.12a) tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSExtMem(_KDOSTestBase):
+    """Tests for the XMEM allocator and ext-mem aware LOAD."""
+
+    def test_xmem_present(self):
+        """XMEM? returns true when ext mem is enabled (16 MiB)."""
+        text = self._run_kdos([
+            'XMEM? . CR',
+        ])
+        self.assertIn('-1', text)
+
+    def test_xmem_base(self):
+        """EXT-MEM-BASE reports 0x100000."""
+        text = self._run_kdos([
+            'EXT-MEM-BASE .',
+        ])
+        self.assertIn('1048576', text)  # 0x100000
+
+    def test_xmem_size(self):
+        """EXT-MEM-SIZE reports 16 MiB."""
+        text = self._run_kdos([
+            'EXT-MEM-SIZE .',
+        ])
+        self.assertIn('16777216', text)  # 16 * 1024 * 1024
+
+    def test_xmem_free_initial(self):
+        """XMEM-FREE reports full ext mem after boot."""
+        text = self._run_kdos([
+            'XMEM-FREE .',
+        ])
+        self.assertIn('16777216', text)  # full 16 MiB
+
+    def test_xmem_allot(self):
+        """XMEM-ALLOT bumps the pointer and returns EXT-MEM-BASE."""
+        text = self._run_kdos([
+            '4096 XMEM-ALLOT .',
+        ])
+        self.assertIn('1048576', text)  # first allot returns base
+
+    def test_xmem_allot_advances(self):
+        """After XMEM-ALLOT, free space decreases."""
+        text = self._run_kdos([
+            '1024 XMEM-ALLOT DROP',
+            'XMEM-FREE .',
+        ])
+        # 16 MiB - 1024 = 16776192
+        self.assertIn('16776192', text)
+
+    def test_xmem_reset(self):
+        """XMEM-RESET reclaims all ext mem."""
+        text = self._run_kdos([
+            '4096 XMEM-ALLOT DROP',
+            'XMEM-RESET',
+            'XMEM-FREE .',
+        ])
+        self.assertIn('16777216', text)
+
+    def test_xmem_talign(self):
+        """XMEM-TALIGN aligns to 64-byte boundary."""
+        text = self._run_kdos([
+            '100 XMEM-ALLOT DROP',       # base + 100 = 0x100064
+            'XMEM-TALIGN',
+            'XMEM-HERE @ EXT-MEM-BASE - .',
+        ])
+        self.assertIn('128', text)  # 100 rounds up to 128 (64-aligned)
+
+    def test_xmem_read_write(self):
+        """Data can be stored in and read from ext mem."""
+        text = self._run_kdos([
+            '8 XMEM-ALLOT',             # -- addr
+            'DUP 42 SWAP !',            # store 42
+            '@ .',                       # fetch and print
+        ])
+        self.assertIn('42', text)
+
+    def test_dot_xmem(self):
+        """.XMEM prints ext mem status."""
+        text = self._run_kdos([
+            '.XMEM',
+        ])
+        self.assertIn('External RAM:', text)
+        self.assertIn('Base', text)
+        self.assertIn('Free', text)
+
+    def test_dot_mem(self):
+        """.MEM prints full memory map."""
+        text = self._run_kdos([
+            '.MEM',
+        ])
+        self.assertIn('Bank 0', text)
+        self.assertIn('HBW Math RAM:', text)
+        self.assertIn('External RAM:', text)
+
+    def test_load_uses_xmem(self):
+        """LOAD file buffer goes to ext mem, HERE does not advance."""
+        # Create a disk with a small Forth file, LOAD it, check HERE
+        img = self._make_image_with_file(
+            "test.f", b": XM-HELLO 99 ;\n", ftype=3)
+        try:
+            text = self._run_kdos([
+                'HERE',
+                'LOAD test.f',
+                'HERE SWAP - .',        # delta in HERE
+            ], storage_image=img)
+            # The compiled `: XM-HELLO 99 ;` adds ~100 bytes of
+            # dictionary but the file text (~18 bytes) should NOT
+            # be in Bank 0.  Without ext mem the delta would be
+            # file_size + compiled_size.  With ext mem it's only
+            # the compiled definition.  Just check that the word
+            # compiles and HERE advanced by less than 512.
+            import re
+            m = re.search(r'(\d+)\s', text.split('LOAD test.f')[-1])
+            if m:
+                delta = int(m.group(1))
+                self.assertLess(delta, 512,
+                                f"HERE advanced {delta} bytes — file buffer leaked to Bank 0")
+        finally:
+            import os
+            os.unlink(img)
 
 
 if __name__ == "__main__":

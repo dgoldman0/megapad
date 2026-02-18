@@ -142,6 +142,11 @@ struct CPUState {
     uint8_t* hbw_mem;
     uint64_t hbw_base;
     uint64_t hbw_size;
+
+    // External memory (HyperRAM / SDRAM)
+    uint8_t* ext_mem;
+    uint64_t ext_mem_base;
+    uint64_t ext_mem_size;
 };
 
 // ---------------------------------------------------------------------------
@@ -991,6 +996,9 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
         return s.hbw_mem[addr - s.hbw_base];
     }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+        return s.ext_mem[addr - s.ext_mem_base];
+    }
     return mem_read8(s, addr);
 }
 
@@ -1007,6 +1015,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         mpu_check(s, addr);
     } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
         s.hbw_mem[addr - s.hbw_base] = val;
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+        s.ext_mem[addr - s.ext_mem_base] = val;
         return;
     }
     mem_write8(s, addr, val);
@@ -1148,6 +1160,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         return 1;
     }
 
+    uint64_t pc_start = pc(s);  // save so we can rewind for MEX_FALLBACK
     uint8_t byte0 = fetch8(s);
     int f = (byte0 >> 4) & 0xF;
     int n = byte0 & 0xF;
@@ -1795,16 +1808,13 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
     }
 
     case 0xE: {  // MEX
-        // Rewind fetch: we consumed funct_byte inside step_one,
-        // but exec_mex_integer does its own fetch8. So rewind PC by 1
-        // (for the funct_byte) — actually, exec_mex_integer calls fetch8
-        // itself, so we DON'T rewind. But we need to undo our family
-        // fetch. Actually we already consumed byte0 which had f=0xE.
-        // exec_mex_integer will fetch the funct_byte itself. So this
-        // is okay — we just call it.
         int rc = exec_mex_integer(s, n);
         if (rc < 0) {
-            // Need Python fallback — throw special exception
+            // FP tile op — rewind PC to the start of the instruction
+            // (including any EXT prefix) so the Python fallback can
+            // re-fetch and execute the entire instruction correctly.
+            pc(s) = pc_start;
+            s.ext_modifier = -1;
             throw std::runtime_error("MEX_FALLBACK");
         }
         cycles += rc;
@@ -1979,6 +1989,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def_readwrite("hbw_base", &CPUState::hbw_base)
         .def_readwrite("hbw_size", &CPUState::hbw_size)
+        // External memory attachment
+        .def("attach_ext_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            py::buffer_info info = buf.request(true);  // writable
+            s.ext_mem = static_cast<uint8_t*>(info.ptr);
+            s.ext_mem_base = base;
+            s.ext_mem_size = size;
+        })
+        .def_readwrite("ext_mem_base", &CPUState::ext_mem_base)
+        .def_readwrite("ext_mem_size", &CPUState::ext_mem_size)
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })

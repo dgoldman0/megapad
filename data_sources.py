@@ -40,6 +40,13 @@ DTYPE_CMD   = 5
 FRAME_HDR_SIZE = 6
 MAX_PAYLOAD    = 1494   # 1500 MTU - 6 header
 
+# Default MACs and IPs for emulator data-port frames
+NIC_MAC  = bytes([0x02, 0x4D, 0x50, 0x36, 0x34, 0x00])
+PEER_MAC = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01])
+NIC_IP   = (10, 0, 0, 1)    # KDOS default IP (set in §14)
+PEER_IP  = (10, 0, 0, 2)    # sender IP
+PORT_UDP = 9000              # well-known UDP port for data ports
+
 
 # ---- Frame encoding / decoding ----
 
@@ -61,6 +68,68 @@ def decode_header(frame: bytes) -> dict:
     return {'src_id': src_id, 'dtype': dtype, 'seq': seq,
             'payload_len': plen,
             'payload': frame[6:6 + plen]}
+
+
+def wrap_port_frame(payload: bytes, *,
+                    dst_mac: bytes = NIC_MAC,
+                    src_mac: bytes = PEER_MAC,
+                    src_ip: tuple = PEER_IP,
+                    dst_ip: tuple = NIC_IP,
+                    sport: int = PORT_UDP,
+                    dport: int = PORT_UDP) -> bytes:
+    """Wrap raw §10 frame bytes in ETH+IP+UDP envelope for NIC injection.
+
+    The payload is typically the output of encode_frame(). The resulting
+    bytes can be passed to system.nic.inject_frame().
+    """
+    # UDP header
+    udp_len = 8 + len(payload)
+    udp_hdr = bytearray(8)
+    struct.pack_into('>HHH', udp_hdr, 0, sport, dport, udp_len)
+    # UDP checksum (with pseudo-header)
+    pseudo = bytes(src_ip) + bytes(dst_ip) + b'\x00\x11'
+    pseudo += struct.pack('>H', udp_len)
+    ck_data = pseudo + bytes(udp_hdr) + bytes(payload)
+    if len(ck_data) % 2:
+        ck_data += b'\x00'
+    s = 0
+    for i in range(0, len(ck_data), 2):
+        s += (ck_data[i] << 8) | ck_data[i + 1]
+    while s > 0xFFFF:
+        s = (s & 0xFFFF) + (s >> 16)
+    cksum = (~s) & 0xFFFF
+    if cksum == 0:
+        cksum = 0xFFFF
+    struct.pack_into('>H', udp_hdr, 6, cksum)
+    ip_payload = bytes(udp_hdr) + bytes(payload)
+    # IP header
+    total_len = 20 + len(ip_payload)
+    ip_hdr = bytearray(20)
+    ip_hdr[0] = 0x45
+    struct.pack_into('>H', ip_hdr, 2, total_len)
+    ip_hdr[6] = 0x40          # DF
+    ip_hdr[8] = 64             # TTL
+    ip_hdr[9] = 17             # UDP
+    ip_hdr[12:16] = bytes(src_ip)
+    ip_hdr[16:20] = bytes(dst_ip)
+    s = 0
+    for i in range(0, 20, 2):
+        s += (ip_hdr[i] << 8) | ip_hdr[i + 1]
+    while s > 0xFFFF:
+        s = (s & 0xFFFF) + (s >> 16)
+    cksum = (~s) & 0xFFFF
+    struct.pack_into('>H', ip_hdr, 10, cksum)
+    # Ethernet frame
+    eth = bytes(dst_mac) + bytes(src_mac) + b'\x08\x00'
+    return eth + bytes(ip_hdr) + ip_payload
+
+
+def extract_port_payload(frame: bytes) -> bytes:
+    """Extract the §10 frame (header + data) from a captured ETH+IP+UDP frame.
+
+    Assumes standard 14-byte ETH + 20-byte IP (no options) + 8-byte UDP = 42.
+    """
+    return frame[42:]
 
 
 # ---- Base class ----
@@ -205,17 +274,21 @@ class CSVSource(DataSource):
 # ---- Injection helpers ----
 
 def inject(system, source: DataSource, count: int = 1):
-    """Inject *count* frames from *source* into system NIC rx queue."""
+    """Inject *count* frames from *source* into system NIC rx queue.
+
+    Frames are wrapped in ETH+IP+UDP (port 9000) so they are received
+    through the §16 network stack and dispatched to §10 data ports.
+    """
     for _ in range(count):
         frame = source.next_frame()
-        system.nic.inject_frame(frame)
+        system.nic.inject_frame(wrap_port_frame(frame))
 
 
 def inject_raw(system, src_id: int, payload: bytes,
                dtype: int = DTYPE_U8, seq: int = 0):
-    """Inject a single hand-crafted frame."""
+    """Inject a single hand-crafted frame (wrapped in UDP)."""
     frame = encode_frame(src_id, dtype, seq, payload)
-    system.nic.inject_frame(frame)
+    system.nic.inject_frame(wrap_port_frame(frame))
 
 
 def send_udp(source: DataSource, host: str, port: int,
@@ -691,7 +764,7 @@ class MultiChannelSource:
         return src.next_frame()
 
     def inject(self, system, count: int = 1):
-        """Inject count frames (round-robin across sources)."""
+        """Inject count frames (round-robin across sources, wrapped in UDP)."""
         for _ in range(count):
             frame = self.next_frame()
-            system.nic.inject_frame(frame)
+            system.nic.inject_frame(wrap_port_frame(frame))

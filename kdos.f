@@ -1345,6 +1345,75 @@ VARIABLE HBW-LIMIT   0 HBW-LIMIT !
 HBW-INIT      \ initialise at load time
 
 \ =====================================================================
+\  §1.12a  External Memory Allocator
+\ =====================================================================
+\
+\  Bump allocator for external RAM (HyperRAM / SDRAM) starting at
+\  EXT-MEM-BASE (typically 0x0010_0000, right after 1 MiB Bank 0).
+\  Modelled after the HBW allocator (§1.12).
+\
+\  On systems without external memory (EXT-MEM-SIZE = 0) all words
+\  degrade gracefully: XMEM? returns false, XMEM-ALLOT aborts,
+\  XMEM-FREE returns 0.
+\
+\  XMEM?        ( -- flag )     true if external memory is present
+\  XMEM-INIT    ( -- )          initialise ext mem allocator
+\  XMEM-ALLOT   ( u -- addr )   allocate u bytes, return start addr
+\  XMEM-TALIGN  ( -- )          align XMEM-HERE to 64-byte tile boundary
+\  XMEM-RESET   ( -- )          reclaim all ext mem
+\  XMEM-FREE    ( -- u )        bytes remaining in ext mem
+\  .XMEM        ( -- )          display ext mem status
+
+VARIABLE XMEM-HERE   0 XMEM-HERE !
+VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
+
+\ XMEM? ( -- flag )  true if external memory hardware reports non-zero size
+: XMEM?  ( -- flag )
+    EXT-MEM-SIZE 0> ;
+
+\ XMEM-INIT ( -- )  read base/size from SysInfo, set up pointers
+: XMEM-INIT  ( -- )
+    XMEM? IF
+        EXT-MEM-BASE XMEM-HERE !
+        EXT-MEM-BASE EXT-MEM-SIZE + XMEM-LIMIT !
+    ELSE
+        0 XMEM-HERE !  0 XMEM-LIMIT !
+    THEN ;
+
+\ XMEM-ALLOT ( u -- addr )  bump-allocate u bytes from ext mem
+: XMEM-ALLOT  ( u -- addr )
+    XMEM? 0= ABORT" No external memory"
+    XMEM-HERE @ SWAP
+    OVER + DUP XMEM-LIMIT @ > ABORT" Ext mem overflow"
+    XMEM-HERE ! ;
+
+\ XMEM-TALIGN ( -- )  align XMEM-HERE up to 64-byte boundary
+: XMEM-TALIGN  ( -- )
+    XMEM-HERE @  63 + -64 AND  XMEM-HERE ! ;
+
+\ XMEM-RESET ( -- )  reclaim all external memory (bulk free)
+: XMEM-RESET  ( -- )
+    XMEM? IF EXT-MEM-BASE XMEM-HERE ! THEN ;
+
+\ XMEM-FREE ( -- u )  bytes remaining in ext mem
+: XMEM-FREE  ( -- u )
+    XMEM? IF XMEM-LIMIT @ XMEM-HERE @ - ELSE 0 THEN ;
+
+\ .XMEM ( -- )  display external memory status
+: .XMEM  ( -- )
+    ."  External RAM:" CR
+    XMEM? IF
+        ."    Base  = " EXT-MEM-BASE . CR
+        ."    Size  = " EXT-MEM-SIZE . ."  bytes" CR
+        ."    Used  = " XMEM-HERE @ EXT-MEM-BASE - . ."  bytes" CR
+        ."    Free  = " XMEM-FREE . ."  bytes" CR
+    ELSE
+        ."    (not present)" CR
+    THEN ;
+
+XMEM-INIT      \ initialise at load time
+
+\ =====================================================================
 \  §2  Buffer Subsystem
 \ =====================================================================
 \
@@ -1404,6 +1473,27 @@ VARIABLE BDESC
     HBW-TALIGN                \ align HBW pointer
     HBW-HERE @ BDESC @ 24 + ! \ +24 data_addr = HBW-HERE
     HBW-ALLOT DROP            \ advance HBW-HERE past data region
+    \ register
+    BUF-COUNT @ 16 < IF
+        BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
+        BUF-COUNT @ 1+ BUF-COUNT !
+    THEN
+    BDESC @ CONSTANT ;
+
+\ XBUFFER ( type width length "name" -- )
+\   Like BUFFER, but allocates the data region in external memory.
+\   Descriptor stays in Bank 0 (dictionary); data in ext mem.
+\   Requires external memory (XMEM? must be true).
+: XBUFFER
+    HERE BDESC !              \ descriptor in dictionary
+    ROT ,                     \ +0  store type
+    SWAP ,                    \ +8  store width
+    DUP ,                     \ +16 store length
+    BDESC @ B.WIDTH *         \ total data bytes
+    0 ,                       \ +24 reserve cell for data_addr
+    XMEM-TALIGN               \ align ext mem pointer
+    XMEM-HERE @ BDESC @ 24 + ! \ +24 data_addr = XMEM-HERE
+    XMEM-ALLOT DROP           \ advance XMEM-HERE past data region
     \ register
     BUF-COUNT @ 16 < IF
         BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
@@ -1571,6 +1661,113 @@ VARIABLE BTMP-NTILES
         1+
     LOOP
     2DROP ;
+
+\ =====================================================================
+\  §3.1  FP16 / BF16 Buffer Operations
+\ =====================================================================
+\
+\  Half-precision (FP16) and bfloat16 (BF16) operations for ML and
+\  signal processing.  Data is packed 32 elements per 64-byte tile.
+\  Reductions (SUM, DOT, SUMSQ) use FP32 accumulation to avoid
+\  catastrophic precision loss.
+\
+\  Users store raw half-float bit patterns in buffers.  The tile
+\  engine interprets them according to TMODE.  To create an FP16
+\  buffer with 32 elements: `0 1 64 BUFFER myfp16`
+\  (64 bytes = 32 × 2-byte FP16 values = 1 tile)
+
+\ -- F.SUM ( desc -- n )  FP16 sum reduction with FP32 accumulation --
+: F.SUM  ( desc -- n )
+    FP16-MODE
+    2 TCTRL!                  \ ACC_ZERO
+    DUP B.DATA
+    SWAP B.TILES
+    0 DO
+        DUP TSRC0!  TSUM
+        1 TCTRL!              \ ACC_ACC
+        64 +
+    LOOP
+    DROP ACC@
+    0 TMODE! ;                \ restore default
+
+\ -- F.DOT ( src1 src2 -- n )  FP16 dot product with FP32 accum --
+: F.DOT  ( src1 src2 -- n )
+    FP16-MODE
+    2 TCTRL!                  \ ACC_ZERO
+    SWAP DUP B.DATA SWAP B.TILES
+    ROT B.DATA                ( a1 ntiles a2 )
+    SWAP                      ( a1 a2 ntiles )
+    0 DO
+        OVER TSRC0!
+        DUP  TSRC1!
+        TDOT
+        1 TCTRL!              \ ACC_ACC
+        SWAP 64 + SWAP 64 +
+    LOOP
+    2DROP ACC@
+    0 TMODE! ;
+
+\ -- F.SUMSQ ( desc -- n )  FP16 sum of squares, FP32 accum --
+: F.SUMSQ  ( desc -- n )
+    FP16-MODE
+    2 TCTRL!
+    DUP B.DATA
+    SWAP B.TILES
+    0 DO
+        DUP TSRC0!  TSUMSQ
+        1 TCTRL!
+        64 +
+    LOOP
+    DROP ACC@
+    0 TMODE! ;
+
+\ -- F.ADD ( src1 src2 dst -- )  FP16 element-wise add --
+: F.ADD  ( src1 src2 dst -- )
+    FP16-MODE
+    ROT DUP B.TILES BTMP-NTILES !
+    B.DATA ROT B.DATA ROT B.DATA
+    BTMP-NTILES @
+    0 DO
+        2 PICK TSRC0!  OVER TSRC1!  DUP TDST!  TADD
+        ROT 64 + -ROT  SWAP 64 + SWAP  64 +
+    LOOP
+    DROP 2DROP
+    0 TMODE! ;
+
+\ -- F.MUL ( src1 src2 dst -- )  FP16 element-wise multiply --
+: F.MUL  ( src1 src2 dst -- )
+    FP16-MODE
+    ROT DUP B.TILES BTMP-NTILES !
+    B.DATA ROT B.DATA ROT B.DATA
+    BTMP-NTILES @
+    0 DO
+        2 PICK TSRC0!  OVER TSRC1!  DUP TDST!  TMUL
+        ROT 64 + -ROT  SWAP 64 + SWAP  64 +
+    LOOP
+    DROP 2DROP
+    0 TMODE! ;
+
+\ -- BF.SUM ( desc -- n )  BF16 sum with FP32 accum --
+: BF.SUM  ( desc -- n )
+    BF16-MODE
+    2 TCTRL!
+    DUP B.DATA SWAP B.TILES
+    0 DO  DUP TSRC0!  TSUM  1 TCTRL!  64 +  LOOP
+    DROP ACC@
+    0 TMODE! ;
+
+\ -- BF.DOT ( src1 src2 -- n )  BF16 dot product, FP32 accum --
+: BF.DOT  ( src1 src2 -- n )
+    BF16-MODE
+    2 TCTRL!
+    SWAP DUP B.DATA SWAP B.TILES
+    ROT B.DATA SWAP
+    0 DO
+        OVER TSRC0!  DUP TSRC1!  TDOT
+        1 TCTRL!  SWAP 64 + SWAP 64 +
+    LOOP
+    2DROP ACC@
+    0 TMODE! ;
 
 \ =====================================================================
 \  §4  Kernel Registry
@@ -1940,6 +2137,28 @@ VARIABLE KCOUNT-N
     LOOP 2DROP
     KCOUNT-N @ ;
 1 0 1 0 KERNEL kcount-desc
+
+\ --- FP16 kernels ---
+
+\ kfsum: FP16 sum reduction → stack
+: kfsum  ( buf -- n )  F.SUM ;
+1 0 1 1 KERNEL kfsum-desc
+
+\ kfdot: FP16 dot product of two buffers → stack
+: kfdot  ( a b -- n )  F.DOT ;
+2 0 1 1 KERNEL kfdot-desc
+
+\ kfsumsq: FP16 sum of squares → stack
+: kfsumsq  ( buf -- n )  F.SUMSQ ;
+1 0 1 1 KERNEL kfsumsq-desc
+
+\ kfadd: FP16 element-wise add → dst
+: kfadd  ( src1 src2 dst -- )  F.ADD ;
+2 1 3 1 KERNEL kfadd-desc
+
+\ kfmul: FP16 element-wise multiply → dst
+: kfmul  ( src1 src2 dst -- )  F.MUL ;
+2 1 3 1 KERNEL kfmul-desc
 
 \ =====================================================================
 \  §6  Pipeline Engine
@@ -2792,11 +3011,16 @@ VARIABLE _LD-SP
     _LD-SAVE
     LD-SZ !                              ( de )
     DUP 16 + W@ SWAP DE.COUNT           ( start count )
-    \ Read file data into HERE, then advance HERE past it
-    \ so that EVALUATE'd code (BUFFER, KERNEL, BL WORD, etc.)
-    \ cannot overwrite the file data.
-    HERE LD-BUF !
-    LD-SZ @ ALLOT                        ( start count )
+    \ Read file data into a buffer.  If external memory is present
+    \ use it — file text is only needed during EVALUATE and keeping
+    \ it out of Bank 0 relieves dictionary / stack pressure.
+    \ When no ext mem, fall back to HERE + ALLOT (original path).
+    XMEM? IF
+        LD-SZ @ XMEM-ALLOT LD-BUF !     ( start count )
+    ELSE
+        HERE LD-BUF !
+        LD-SZ @ ALLOT                    ( start count )
+    THEN
     \ Read sectors directly into buffer
     OVER DISK-SEC!
     LD-BUF @ DISK-DMA!
@@ -2816,18 +3040,32 @@ VARIABLE _LD-SP
 \  1802-heritage families (MEMALU, IO, SEP, SEX) and protected CSR
 \  writes are blocked — those trigger IVEC_PRIV_FAULT.
 \
-\  MPU is configured to [0, MEM-SIZE) so user code can access all
-\  system RAM (needed for dictionary lookup by EVALUATE) but HBW
-\  access is blocked unconditionally for user mode.  For tighter
+\  MPU is configured to [0, EXT-MEM-END) so user code can access
+\  Bank 0 (needed for dictionary lookup by EVALUATE) AND external
+\  RAM (where user programs / data live).  HBW access is blocked
+\  unconditionally for user mode (RTL hard-wired).  For tighter
 \  sandboxing (e.g. running pre-compiled code with its own stack),
 \  set MPU-BASE!/MPU-LIMIT! to a narrower window before ENTER-USER.
 \
 \  LOAD / FSLOAD remain supervisor-mode for OS modules and drivers.
 
-: APP-EVAL  ( addr u -- )
-    0 MPU-BASE!  MEM-SIZE MPU-LIMIT!
-    ENTER-USER EVALUATE SYS-EXIT
+\ _APP-MPU-ON ( -- )  set MPU window to cover Bank 0 + ext mem
+: _APP-MPU-ON  ( -- )
+    0 MPU-BASE!
+    XMEM? IF
+        EXT-MEM-BASE EXT-MEM-SIZE + MPU-LIMIT!
+    ELSE
+        MEM-SIZE MPU-LIMIT!
+    THEN ;
+
+\ _APP-MPU-OFF ( -- )  disable MPU (supervisor mode)
+: _APP-MPU-OFF  ( -- )
     0 MPU-BASE!  0 MPU-LIMIT! ;
+
+: APP-EVAL  ( addr u -- )
+    _APP-MPU-ON
+    ENTER-USER EVALUATE SYS-EXIT
+    _APP-MPU-OFF ;
 
 : APP-LOAD  ( "filename" -- )
     FS-ENSURE
@@ -2841,15 +3079,20 @@ VARIABLE _LD-SP
         2DROP ."  Empty file" CR EXIT
     THEN LD-SZ !
     DUP 16 + W@ SWAP DE.COUNT
-    HERE LD-BUF !
-    LD-SZ @ ALLOT
+    \ File buffer in ext mem when available — user data belongs there.
+    XMEM? IF
+        LD-SZ @ XMEM-ALLOT LD-BUF !
+    ELSE
+        HERE LD-BUF !
+        LD-SZ @ ALLOT
+    THEN
     OVER DISK-SEC!
     LD-BUF @ DISK-DMA!
     DUP DISK-N!
     DISK-READ
     2DROP
-    \ Configure MPU and enter user mode, evaluate line by line, exit
-    0 MPU-BASE!  MEM-SIZE MPU-LIMIT!
+    \ Configure MPU (Bank 0 + ext mem visible) and enter user mode
+    _APP-MPU-ON
     ENTER-USER
     LD-BUF @
     LD-SZ @
@@ -2877,7 +3120,7 @@ VARIABLE _LD-SP
     REPEAT
     2DROP
     SYS-EXIT
-    0 MPU-BASE!  0 MPU-LIMIT! ;
+    _APP-MPU-OFF ;
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
@@ -5068,21 +5311,22 @@ VARIABLE _SBIT
     SWITCH-SCREEN  SCREEN-LOOP ;
 
 \ =====================================================================
-\  §10  Data Ports — NIC-Based External Data Ingestion
+\  §10  Data Ports — Structures and Binding
 \ =====================================================================
 \
-\  Frame protocol (6-byte header + payload, fits NIC MTU of 1500):
+\  Frame protocol (6-byte header + payload, rides inside UDP on port 9000):
 \    +0  u8   SRC_ID       source identifier (0-255)
 \    +1  u8   DTYPE        data type (0=raw 1=u8 2=u16 3=u64 4=text 5=cmd)
 \    +2  u16  SEQ          sequence number (LE)
 \    +4  u16  PAYLOAD_LEN  payload byte count (LE)
 \    +6  ...  PAYLOAD      data bytes
 \
-\  Data flows in via NIC (emulated or real UDP), gets routed to buffers.
-\  Same Forth code works on real hardware — just swap the NIC.
+\  This section defines data structures and port binding only.
+\  Transport words (POLL, INGEST, PORT-SEND) are in §10.1 after §16
+\  so they can use the proper UDP network stack.
 \
 \  Python side: data_sources.py provides SineSource, CounterSource, etc.
-\  that inject frames via system.nic.inject_frame() or UDP.
+\  that inject frames wrapped in ETH+IP+UDP via system.nic.inject_frame().
 
 \ -- Constants --
 6 CONSTANT /FRAME-HDR
@@ -5112,37 +5356,14 @@ VARIABLE ROUTE-BUF
 
 \ -- NIC convenience (defined early, before §9 TUI) --
 
-\ -- Frame header accessors (valid after NET-RECV into FRAME-BUF) --
+\ -- Frame header accessors (valid after POLL/RECV-FRAME fills FRAME-BUF) --
 : FRAME-SRC   ( -- id )    FRAME-BUF C@ ;
 : FRAME-TYPE  ( -- type )  FRAME-BUF 1 + C@ ;
 : FRAME-SEQ   ( -- seq )   FRAME-BUF 2 + C@  FRAME-BUF 3 + C@ 256 * + ;
 : FRAME-LEN   ( -- len )   FRAME-BUF 4 + C@  FRAME-BUF 5 + C@ 256 * + ;
 : FRAME-DATA  ( -- addr )  FRAME-BUF /FRAME-HDR + ;
 
-\ -- Receive one frame into FRAME-BUF, return raw byte count --
-: RECV-FRAME  ( -- len )   FRAME-BUF NET-RECV ;
-
-\ -- Route: receive frame, copy payload to bound buffer, return src_id --
-: ROUTE-FRAME  ( -- id|-1 )
-    NET-RX? 0= IF -1 EXIT THEN
-    RECV-FRAME DUP 0= IF DROP -1 EXIT THEN
-    DROP  \ discard raw length — we parse the header
-    FRAME-SRC PORT@ DUP 0= IF
-        DROP  1 PORT-DROP +!  -1
-    ELSE
-        ROUTE-BUF !
-        FRAME-DATA  ROUTE-BUF @ B.DATA
-        FRAME-LEN  ROUTE-BUF @ B.BYTES  MIN
-        CMOVE
-        1 PORT-RX +!
-        FRAME-SRC
-    THEN ;
-
-\ -- High-level words --
-: POLL    ( -- id|-1 )       ROUTE-FRAME ;
-: INGEST  ( n -- received )
-    0 SWAP   \ ( count n )
-    0 DO POLL -1 <> IF 1 + THEN LOOP ;
+\ -- (RECV-FRAME, ROUTE-FRAME, POLL, INGEST defined in §10.1 after §16) --
 
 \ -- Debug: print last received frame header --
 : .FRAME  ( -- )
@@ -5183,8 +5404,11 @@ VARIABLE ROUTE-BUF
 
 \ -- Memory usage bar --
 : .MEM  ( -- )
-    ."   Memory:" CR
-    ."     HERE  = " HERE . CR ;
+    ."   Bank 0 (System RAM):" CR
+    ."     HERE  = " HERE . CR
+    ."     Free  = " SP@ HERE - . ."  bytes (to data stack)" CR
+    .HBW
+    .XMEM ;
 
 \ -- Dashboard --
 : DASHBOARD ( -- )
@@ -9332,8 +9556,13 @@ CREATE _MOD-VAL  1 ALLOT
     _LD-SAVE
     LD-SZ !
     DUP 16 + W@ SWAP DE.COUNT
-    HERE LD-BUF !
-    LD-SZ @ ALLOT
+    \ File buffer in ext mem when available (see §1.12a)
+    XMEM? IF
+        LD-SZ @ XMEM-ALLOT LD-BUF !
+    ELSE
+        HERE LD-BUF !
+        LD-SZ @ ALLOT
+    THEN
     OVER DISK-SEC!
     LD-BUF @ DISK-DMA!
     DUP DISK-N!
@@ -9360,6 +9589,148 @@ CREATE _MOD-VAL  1 ALLOT
     _MOD-HT HT-COUNT . ."  module(s)" CR ;
 
 \ =====================================================================
+\  §10.1  Data Port Transport — UDP-Based Send/Receive
+\ =====================================================================
+\
+\  Data ports ride on the §16 network stack via UDP port 9000.
+\  Inbound: UDP frames on port 9000 are dispatched to _PORT-RX-HANDLER,
+\           which copies the §10 payload into FRAME-BUF and routes to
+\           the bound buffer via the port table.
+\  Outbound: PORT-SEND wraps buffer data in a §10 frame header and
+\            sends via UDP-SEND to PORT-DST-IP on port 9000.
+\
+\  PORT-INIT must be called at boot (done in §14 Startup).
+
+\ -- Transport constants --
+9000 CONSTANT PORT-UDP       \ well-known UDP port for data ports
+
+\ -- Outbound destination (configurable, default 10.0.0.2) --
+CREATE PORT-DST-IP  4 ALLOT
+CREATE _PORT-BCAST-MAC  6 ALLOT
+_PORT-BCAST-MAC 6 255 FILL   \ default: broadcast MAC
+
+\ -- TX stats and buffer --
+VARIABLE PORT-TX        0 PORT-TX !
+VARIABLE TX-SEQ         0 TX-SEQ !
+VARIABLE TX-FRAME-BUF   1499 ALLOT
+
+\ -- Build 6-byte frame header in TX-FRAME-BUF --
+VARIABLE _PBH-ID
+VARIABLE _PBH-DT
+VARIABLE _PBH-LEN
+: _PORT-BUILD-HDR  ( id dtype paylen -- )
+    _PBH-LEN !  _PBH-DT !  _PBH-ID !
+    _PBH-ID @ TX-FRAME-BUF C!
+    _PBH-DT @ TX-FRAME-BUF 1+ C!
+    TX-SEQ @ DUP 255 AND TX-FRAME-BUF 2 + C!
+    8 RSHIFT TX-FRAME-BUF 3 + C!
+    _PBH-LEN @ DUP 255 AND TX-FRAME-BUF 4 + C!
+    8 RSHIFT TX-FRAME-BUF 5 + C! ;
+
+\ -- Map buffer type -> frame DTYPE --
+: _PORT-BUF-DTYPE  ( buf -- dtype )
+    B.TYPE
+    CASE
+        0 OF 0 ENDOF
+        1 OF 1 ENDOF
+        2 OF 2 ENDOF
+        3 OF 0 ENDOF
+        SWAP DROP 0 SWAP
+    ENDCASE ;
+
+\ -- PORT-SEND ( buf id -- )  send buffer data via UDP --
+VARIABLE _PS-BUF
+VARIABLE _PS-ID
+: PORT-SEND  ( buf id -- )
+    _PS-ID !  _PS-BUF !
+    _PS-BUF @ B.BYTES 1400 MIN   \ leave room for UDP+IP+ETH headers
+    DUP 0= IF DROP EXIT THEN
+    >R
+    _PS-ID @  _PS-BUF @ _PORT-BUF-DTYPE  R@  _PORT-BUILD-HDR
+    _PS-BUF @ B.DATA  TX-FRAME-BUF /FRAME-HDR +  R@ CMOVE
+    PORT-DST-IP PORT-UDP PORT-UDP
+    TX-FRAME-BUF  R> /FRAME-HDR +
+    UDP-SEND DROP
+    1 PORT-TX +!
+    1 TX-SEQ +! ;
+
+\ -- PORT-SEND-SLICE ( buf off len id -- )  send sub-range via UDP --
+VARIABLE _PSS-BUF
+VARIABLE _PSS-OFF
+VARIABLE _PSS-LEN
+VARIABLE _PSS-ID
+: PORT-SEND-SLICE  ( buf off len id -- )
+    _PSS-ID !  _PSS-LEN !  _PSS-OFF !  _PSS-BUF !
+    _PSS-LEN @ 1400 MIN  _PSS-LEN !
+    _PSS-LEN @ 0= IF EXIT THEN
+    \ Clamp offset + len to buffer bounds
+    _PSS-OFF @ _PSS-LEN @ +  _PSS-BUF @ B.BYTES > IF
+        _PSS-BUF @ B.BYTES _PSS-OFF @ -  0 MAX  _PSS-LEN !
+    THEN
+    _PSS-LEN @ 0= IF EXIT THEN
+    _PSS-ID @  _PSS-BUF @ _PORT-BUF-DTYPE  _PSS-LEN @  _PORT-BUILD-HDR
+    _PSS-BUF @ B.DATA _PSS-OFF @ +
+    TX-FRAME-BUF /FRAME-HDR +  _PSS-LEN @ CMOVE
+    PORT-DST-IP PORT-UDP PORT-UDP
+    TX-FRAME-BUF  _PSS-LEN @ /FRAME-HDR +
+    UDP-SEND DROP
+    1 PORT-TX +!
+    1 TX-SEQ +! ;
+
+\ -- PORT-DST-SET ( b0 b1 b2 b3 -- )  change outbound destination IP --
+: PORT-DST-SET  ( b0 b1 b2 b3 -- )  PORT-DST-IP IP! ;
+
+\ -- Inbound reception via UDP-DISPATCH handler --
+VARIABLE _POLL-RESULT   -1 _POLL-RESULT !
+
+: _PORT-RX-HANDLER  ( src-ip sport data dlen -- )
+    >R >R DROP DROP        \ R: dlen data ; drop src-ip sport
+    R> FRAME-BUF R> CMOVE  \ copy §10 frame into FRAME-BUF
+    FRAME-SRC PORT@ DUP 0= IF
+        DROP 1 PORT-DROP +!  -1 _POLL-RESULT !
+    ELSE
+        ROUTE-BUF !
+        FRAME-DATA  ROUTE-BUF @ B.DATA
+        FRAME-LEN  ROUTE-BUF @ B.BYTES  MIN
+        CMOVE
+        1 PORT-RX +!
+        FRAME-SRC _POLL-RESULT !
+    THEN ;
+
+\ -- RECV-FRAME ( -- flag )  receive one §10 frame from UDP --
+: RECV-FRAME  ( -- flag )
+    -1 _POLL-RESULT !
+    UDP-DISPATCH DROP
+    _POLL-RESULT @ -1 <> ;
+
+\ -- ROUTE-FRAME ( -- id|-1 )  receive and route one frame --
+: ROUTE-FRAME  ( -- id|-1 )
+    -1 _POLL-RESULT !
+    UDP-DISPATCH DROP
+    _POLL-RESULT @ ;
+
+\ -- POLL ( -- id|-1 )  receive and route one data port frame --
+: POLL  ( -- id|-1 )  ROUTE-FRAME ;
+
+\ -- INGEST ( n -- received )  poll for up to n frames --
+: INGEST  ( n -- received )
+    0 SWAP
+    0 DO POLL -1 <> IF 1 + THEN LOOP ;
+
+\ -- .PORT-STATS ( -- )  port stats including TX counter --
+: .PORT-STATS  ( -- )
+    ."  ports=" PORT-COUNT @ .
+    ."  rx=" PORT-RX @ .
+    ."  tx=" PORT-TX @ .
+    ."  drop=" PORT-DROP @ . ;
+
+\ -- PORT-INIT ( -- )  bind UDP port and seed ARP for default dest --
+: PORT-INIT  ( -- )
+    10 0 0 2 PORT-DST-IP IP!
+    PORT-DST-IP _PORT-BCAST-MAC ARP-INSERT
+    PORT-UDP ['] _PORT-RX-HANDLER UDP-PORT-BIND DROP ;
+
+\ =====================================================================
 \  §14  Startup
 \ =====================================================================
 
@@ -9374,5 +9745,17 @@ NCORES 1 > IF
     ."   Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work."  CR
 THEN
 MAC-INIT
+10 0 0 1 IP-SET
+PORT-INIT
 DISK? IF FS-LOAD THEN
+
+\ -- AUTOEXEC: run autoexec.f if present on disk --
+FS-OK @ IF
+    S" autoexec.f" DROP NAMEBUF 10 CMOVE
+    NAMEBUF 10 + 6 0 FILL
+    FIND-BY-NAME -1 <> IF
+        ."  Running autoexec.f..." CR
+        LOAD autoexec.f
+    THEN
+THEN
 CR
