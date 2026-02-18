@@ -357,26 +357,44 @@ and adds post-quantum cryptographic primitives.
     transmit buffer data
 26. ☐ **FP16 tile mode** — expose `FP16-MODE` for ML/signal processing
     workloads
-27. ☐ **QoS** — bus bandwidth allocation per core
+27. ✅ **QoS** — per-port bus bandwidth weights implemented in
+    `mp64_bus.v` (weighted round-robin, `qos_weight[]`, `qos_bwlimit[]`
+    CSRs); absorbed into Items 39/41.
 28. ☐ **Editor** — simple line/screen editor for writing Forth on-device
 29. ☐ **Scripting** — `AUTOEXEC` file loaded at boot, cron-like
     scheduled tasks
 30. ☐ **Remote REPL** — UART or TCP-based remote Forth session
 
+45. ☐ **SCROLL** — Socket Client for Remote Object Retrieval Over
+    Links.  Multi-protocol resource fetcher: given a URL, resolve,
+    connect, transfer, and deliver the payload to a KDOS buffer, the
+    disk, or directly to the evaluator.  Protocols: HTTP/1.1 (TCP),
+    TFTP (UDP), Gopher; HTTPS piggybacks the existing `TLS-CONNECT`.
+    Effectively a `curl(1)` for KDOS — and crucially enables network
+    package loading: `" http://server/pkg.f" SCROLL-LOAD` fetches
+    Forth source and EVALUATEs it, enabling over-LAN firmware update,
+    remote doc browsing, and package distribution.  **High priority.**
+    - 45a. KDOS §18 SCROLL core: URL parser + protocol dispatch
+           (`http://`, `gopher://`, `tftp://`)
+    - 45b. HTTP/1.1 client: `GET /path HTTP/1.1` over TCP, response
+           header parse, chunked / Content-Length body
+    - 45c. TFTP client: RRQ, DATA/ACK loop, timeout + retry (UDP)
+    - 45d. Gopher client: type-0 (text) + type-1 (menu) selector fetch
+    - 45e. `SCROLL-GET ( url -- buf len )` — fetch to RAM buffer
+    - 45f. `SCROLL-SAVE ( url file -- )` — fetch and write to MP64FS
+    - 45g. `SCROLL-LOAD ( url -- )` — fetch Forth source, EVALUATE
+           (chain-load: remote packages, firmware, config)
+    - 45h. Emulator: mock HTTP + TFTP loopback fixture in conftest.py
+    - 45i. Tests: `TestSCROLL` — HTTP GET, TFTP RRQ, Gopher,
+           SCROLL-LOAD evaluate round-trip
+
 ---
 
 ### Known Issues / Investigation
 
-31. ☐ **CLI boot performance** — interactive `cli.py --bios bios.asm
-    --storage sample.img` takes noticeably longer to reach the KDOS
-    prompt than the equivalent test-suite boot (which processes the same
-    KDOS source in seconds via C++ accel).  Investigate whether the CLI
-    is actually engaging the C++ accelerator, whether the TAP backend
-    poll loop is throttling throughput, or whether the interactive UART
-    injection path is the bottleneck.  Also, even after building image,
-    it appers that certain words are missing (out of date KDOS somehow)?
-    Goal: CLI boot should feel
-    instant (~2–3 s) with the C++ accel built.
+31. ✅ **CLI boot performance** — FIXED.  C++ accelerator is properly
+    engaged in the CLI path; boot to KDOS prompt is ~2–3 s with accel
+    built.  Stale-KDOS issue resolved (image rebuild via `make disk`).
 
 32. ✅ **Real-world networking hardening** — comprehensive edge-case,
     stress, and robustness testing for the full networking stack:
@@ -506,8 +524,9 @@ Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → I
                       DHCP ✅ → DNS ✅ → TCP ✅ → TLS 1.3 ✅ → Socket API ✅) ✅ DONE
 Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
-Layer 4  Items 25–30  Application-Level (net send, FP16, QoS, editor,
-                      scripting, remote REPL)
+Layer 4  Items 25–30, 45  Application-Level
+                      (net send ☐, FP16 ☐, QoS ✅, editor ☐,
+                      scripting ☐, remote REPL ☐, SCROLL ☐ ← HIGH)
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
