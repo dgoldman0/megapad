@@ -1,7 +1,7 @@
 """
 Pytest configuration for Megapad-64 test suite.
 
-Always use the Makefile targets — they build the C++ accelerator,
+ALWAYS use the Makefile targets — they build the C++ accelerator,
 run tests in the background, and provide a live dashboard:
 
     make test               # background + live dashboard (DEFAULT)

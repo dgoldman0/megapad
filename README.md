@@ -204,6 +204,27 @@ python cli.py --bios bios.asm --forth kdos.f
 .pypy/bin/pypy3 cli.py --bios bios.asm --storage sample.img
 ```
 
+### Headless Mode (TCP Terminal Server)
+
+Run the emulator as a background service with remote access via TCP:
+
+```bash
+# Start headless server (default port 6464)
+python cli.py --bios bios.asm --storage sample.img --headless
+
+# Start on a custom port
+python cli.py --bios bios.asm --storage sample.img --headless --headless-port 7777
+
+# Connect with the built-in client
+python cli.py --connect localhost:6464
+
+# Or connect with nc / telnet
+nc localhost 6464
+```
+
+The headless server writes status to `/tmp/megapad_headless.json` (PID + port)
+for discoverability.  Multiple clients can connect simultaneously.
+
 You'll see the KDOS banner and land at the Forth REPL:
 
 ```
@@ -251,10 +272,9 @@ make test                          # ~24 min
 make test                              # background, ~40 min on CPython
 ```
 
-> **Note:** Always use `make test` — never run `python -m pytest` directly.
-> The `conftest.py` guard will block raw pytest invocations.
+> **Note:** Always run tests via the Makefile (`make test`, `make test-one`, etc.).
 
-All 1,259 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+All 1,336 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking (simulated +
 real TAP), crypto, post-quantum crypto, and extended tile engine.
 
@@ -283,19 +303,19 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `bios.asm` | 11,158 | Forth BIOS in assembly (291 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
 | `kdos.f` | 8,296 | KDOS v1.1 operating system in Forth (653 colon defs, §1–§17) |
-| `cli.py` | 1,012 | CLI, boot modes, interactive debug monitor |
+| `cli.py` | 1,350 | CLI, boot modes, headless TCP server, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
 | `devices.py` | 2,314 | 14 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
-| `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `test_system.py` | 14,751 | 1,007 integration tests (40 classes, incl. multicore, tile, crypto, FS, PQC) |
-| `test_networking.py` | 860 | 38 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
+| `tests/test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
+| `tests/test_system.py` | 18,867 | 1,336 integration tests (40+ classes, incl. multicore, tile, crypto, FS, PQC) |
+| `tests/test_networking.py` | 1,169 | 47 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP, TCP, DNS) |
 | `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
-| `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
+| `tests/conftest.py` | 176 | Test fixtures, snapshot caching, live status reporting |
 | `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
 | `rtl/sim/` | ~11,100 | 28 Verilog testbenches (~414 hardware assertions) |
 

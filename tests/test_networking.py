@@ -79,8 +79,9 @@ except ImportError:
 from asm import assemble
 from system import MegapadSystem
 
-BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
-KDOS_PATH = os.path.join(os.path.dirname(__file__), "kdos.f")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIOS_PATH = os.path.join(PROJECT_ROOT, "bios.asm")
+KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
 
 
 # ---------------------------------------------------------------------------
