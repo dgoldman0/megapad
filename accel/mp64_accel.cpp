@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <unistd.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
@@ -1851,12 +1852,23 @@ struct RunResult {
     int stop_reason;  // 0=max_steps, 1=halt, 2=idle
 };
 
+static constexpr int GIL_YIELD_INTERVAL = 5000;
+
 static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) {
     RunResult result = {0, 0, 0};
 
     for (int i = 0; i < max_steps; i++) {
         if (s.halted) { result.stop_reason = 1; break; }
         if (s.idle) { result.stop_reason = 2; break; }
+
+        // Periodically yield the GIL so background threads (e.g. TAP
+        // NIC receive) can push data into Python-level queues.
+        // The usleep gives the OS scheduler time to run the waiting
+        // thread and re-acquire the GIL while we're sleeping.
+        if (i > 0 && (i % GIL_YIELD_INTERVAL) == 0) {
+            py::gil_scoped_release release;
+            usleep(50);  // 50µs — enough for thread switch
+        }
 
         try {
             int cycles = step_one(s, cb);

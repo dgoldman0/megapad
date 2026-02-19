@@ -466,6 +466,19 @@ and adds post-quantum cryptographic primitives.
     to `MegapadSystem`.  `test_screen_header_tabs` updated to verify
     `[8]Core` tab.
 
+45. ☐ **Emulator timing robustness** — The emulated CPU has no
+    wall-clock time model; network polling loops (ARP, PING, DHCP, DNS,
+    TCP) currently use a busy-wait `NET-IDLE` word (200× `NET-RX?`
+    polls) to yield enough real time for TAP replies to arrive.  This is
+    fragile: too few iterations → timeouts on slow hosts; too many →
+    tests hit `max_steps`.  A proper fix would be one of:
+    - A `MS` word backed by a wall-clock timer (e.g. `CYCLES`-based
+      with a known cycles-per-µs ratio, or a new MMIO real-time clock).
+    - IDL-based sleep with NIC RX as a wake source (partially
+      implemented in system.py but breaks test harness assumptions).
+    - A hybrid: IDL with a timer-IRQ deadline so the CPU wakes on
+      whichever comes first (NIC RX or timeout expiry).
+
 ---
 
 ### Layer 6: Architecture & Portability (Items 39–42)

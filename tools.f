@@ -73,8 +73,8 @@ VARIABLE ED-ALLOC   0 ED-ALLOC !
 : ED-SET-LINE  ( addr len n -- )
     DUP ED-BLANK
     ED-LINE                    ( addr len dest )
-    ROT ROT                    ( dest addr len )
-    ED-LINELEN MIN             ( dest addr len' )
+    SWAP                       ( addr dest len )
+    ED-LINELEN MIN             ( addr dest len' )
     CMOVE ;
 
 \ -- Print a single line with line number --
@@ -93,16 +93,18 @@ VARIABLE ED-ALLOC   0 ED-ALLOC !
 \ -- Parse rest of input line (for Insert / Replace) --
 CREATE ED-PARSE-BUF 80 ALLOT
 VARIABLE ED-PL
+VARIABLE _EP-SRC    \ SOURCE base addr
+VARIABLE _EP-SLEN   \ SOURCE length
 : ED-PARSE-REST  ( -- addr len )
-    0 ED-PL !
-    BEGIN
-        >IN @ #TIB @ <
-    WHILE
-        TIB >IN @ + C@
-        ED-PARSE-BUF ED-PL @ + C!
-        ED-PL @ 1+ DUP 80 < IF ED-PL ! ELSE DROP THEN
-        1 >IN +!
-    REPEAT
+    SOURCE _EP-SLEN ! _EP-SRC !
+    _EP-SLEN @ >IN @ - DUP 0> 0= IF
+        DROP ED-PARSE-BUF 0 EXIT   \ nothing left
+    THEN
+    DUP 80 > IF DROP 80 THEN       \ clamp
+    DUP ED-PL !
+    _EP-SRC @ >IN @ +              \ start addr in source
+    ED-PARSE-BUF ED-PL @ CMOVE     \ copy to parse buf
+    _EP-SLEN @ >IN !               \ advance >IN past everything
     ED-PARSE-BUF ED-PL @ ;
 
 \ -- Ed commands --
@@ -157,15 +159,14 @@ VARIABLE ED-SAVE-SZ
         LOOP                              ( here lineaddr truelen )
         DUP 0 > IF
             ROT 2DUP + >R
-            -ROT CMOVE
+            SWAP CMOVE
             R>
             10 OVER C! 1+                 \ append LF
-            ED-SAVE-SZ @ + 1+ ED-SAVE-SZ !
         ELSE
             2DROP
         THEN
     LOOP
-    DROP
+    HERE - ED-SAVE-SZ !
     \ Write to disk
     DUP DE.SEC DISK-SEC!
     HERE DISK-DMA!
@@ -177,6 +178,38 @@ VARIABLE ED-SAVE-SZ
     ."  Saved " ED-SAVE-SZ @ . ."  bytes" CR ;
 
 \ -- Load file into editor buffer --
+VARIABLE _EL-POS    \ current byte offset into loaded data
+VARIABLE _EL-SIZE   \ total bytes loaded
+VARIABLE _EL-BASE   \ base address of loaded data (HERE)
+VARIABLE _EL-LLEN   \ current line length
+VARIABLE _EL-GOT    \ found LF flag
+
+: _EL-SCAN-LINE  ( -- )
+    \ Scan one line starting at _EL-POS, set _EL-LLEN. Stops at LF or 80 chars.
+    0 _EL-LLEN !  0 _EL-GOT !
+    BEGIN
+        _EL-GOT @ 0=
+        _EL-POS @ _EL-LLEN @ + _EL-SIZE @ < AND
+        _EL-LLEN @ ED-LINELEN < AND
+    WHILE
+        _EL-BASE @ _EL-POS @ + _EL-LLEN @ + C@
+        10 = IF 1 _EL-GOT ! ELSE 1 _EL-LLEN +! THEN
+    REPEAT ;
+
+: _EL-COPY-LINE  ( -- )
+    \ Copy scanned line into ED buffer and advance position.
+    _EL-LLEN @ 0> IF
+        _EL-BASE @ _EL-POS @ +
+        _EL-LLEN @
+        ED-NLINES @ ED-SET-LINE
+        ED-NLINES @ 1+ ED-NLINES !
+    ELSE
+        ED-NLINES @ ED-BLANK
+        ED-NLINES @ 1+ ED-NLINES !
+    THEN
+    _EL-LLEN @ _EL-POS +!
+    _EL-GOT @ IF 1 _EL-POS +! THEN ;  \ skip the LF
+
 : ED-LOAD  ( -- )
     ED-ENSURE-BUF
     0 ED-NLINES !  0 ED-CUR !  0 ED-DIRTY !
@@ -193,40 +226,16 @@ VARIABLE ED-SAVE-SZ
     DUP DE.COUNT DISK-N!
     DISK-READ
     DROP                              ( used )
-    \ Parse lines from HERE
-    HERE SWAP                          ( addr remaining )
+    _EL-SIZE !
+    HERE _EL-BASE !
+    0 _EL-POS !
     BEGIN
-        DUP 0> ED-NLINES @ ED-MAXLINES < AND
+        _EL-POS @ _EL-SIZE @ <
+        ED-NLINES @ ED-MAXLINES < AND
     WHILE
-        OVER                           ( addr rem linestart )
-        2 PICK                         ( addr rem linestart rem )
-        0                              ( addr rem linestart rem linelen )
-        BEGIN
-            OVER 0>
-            OVER ED-LINELEN < AND
-        WHILE
-            2 PICK OVER + C@
-            10 = IF                    \ LF = end of line
-                1+                     \ count the LF
-                LEAVE
-            THEN
-            1+
-            SWAP 1- SWAP
-        REPEAT                         ( addr rem linestart consumed linelen )
-        DROP                           ( addr rem linestart consumed )
-        \ Copy line to ED buffer
-        DUP 0> IF
-            2DUP OVER + 1- C@ 10 = IF 1- THEN   \ strip LF
-            ED-NLINES @ ED-SET-LINE
-            ED-NLINES @ 1+ ED-NLINES !
-        ELSE
-            DROP
-        THEN
-        SWAP DROP                      ( addr rem consumed )
-        ROT OVER + -ROT               ( addr' rem consumed )
-        -
+        _EL-SCAN-LINE
+        _EL-COPY-LINE
     REPEAT
-    2DROP
     ."  Loaded " ED-NLINES @ . ."  lines" CR ;
 
 \ -- Editor help --
@@ -363,7 +372,7 @@ VARIABLE _UP-URL              \ URL base addr
     2DROP -1 ;
 
 : URL-PARSE  ( addr len -- ior )
-    _UP-END !  DUP _UP-URL !  0 _UP-POS !
+    _UP-END !  _UP-URL !  0 _UP-POS !
     80 _SC-PORT !                           \ default HTTP port
     _SC-HOST 64 0 FILL
     _SC-PATH 256 0 FILL
@@ -450,17 +459,14 @@ VARIABLE _UP-URL              \ URL base addr
 
 : _SC-RESOLVE  ( -- ior )
     \ Try parsing hostname as dotted-quad first
-    _SC-HOST _SC-HOST-LEN @
     \ Simple check: if first char is digit, try IP parse
     _SC-HOST C@ DUP 48 >= SWAP 57 <= AND IF
         \ Quick dotted-quad parse: 4 octets separated by '.'
-        0 0 0                              ( o1 o2 o3 )
         0                                  ( accum )
         _SC-HOST-LEN @ 0 DO
             _SC-HOST I + C@ DUP 46 = IF    \ '.'
-                DROP
-                SWAP                       \ push accum, shift
-                0
+                DROP                       \ drop dot char
+                0                          \ new accum on top, old below
             ELSE
                 48 -  SWAP 10 * +
             THEN
@@ -659,6 +665,7 @@ VARIABLE _TFTP-DONE
 \  Type-0 (text) Gopher: connect, send selector + CRLF, read response.
 
 VARIABLE _GO-TCB
+CREATE _GO-CRLF 2 ALLOT   13 _GO-CRLF C!  10 _GO-CRLF 1+ C!
 : GOPHER-GET  ( -- ior )
     _SC-IP @ _SC-PORT @ 12346 TCP-CONNECT
     DUP 0= IF ."  Gopher connect failed" CR -1 EXIT THEN
@@ -666,7 +673,7 @@ VARIABLE _GO-TCB
     100 0 DO _GO-TCB @ TCP-POLL LOOP
     \ Send selector + CRLF
     _SC-PATH _SC-PATH-LEN @ _GO-TCB @ -ROT TCP-SEND DROP
-    S\" \r\n" _GO-TCB @ -ROT TCP-SEND DROP
+    _GO-CRLF 2 _GO-TCB @ -ROT TCP-SEND DROP
     \ Receive
     0 SCROLL-LEN !
     200 0 DO
@@ -703,18 +710,34 @@ VARIABLE _GO-TCB
 
 \ ── Public API ──────────────────────────────────────────────────────
 
-\ SCROLL-GET ( addr len -- buf len | 0 )
-\   Fetch URL into SCROLL-BUF.  Returns buf addr + length, or 0 on error.
-: SCROLL-GET  ( addr len -- buf len | 0 )
-    URL-PARSE 0<> IF
-        ."  URL parse error" CR 0 EXIT
-    THEN
-    _SC-FETCH 0<> IF 0 EXIT THEN
-    SCROLL-BUF SCROLL-LEN @ ;
+\ -- Scratch buffer for URL input from command line --
+CREATE _SC-URL-BUF 256 ALLOT
+VARIABLE _SC-URL-LEN
 
-\ SCROLL-SAVE ( addr len "filename" -- )
+\ _SC-PARSE-URL ( "url" -- addr len )
+\   Parse next whitespace-delimited word as a URL string.
+: _SC-PARSE-URL  ( "url" -- addr len )
+    BL WORD DUP C@ DUP 0= IF 2DROP 0 0 EXIT THEN
+    _SC-URL-LEN !
+    1+                              ( src )
+    _SC-URL-BUF _SC-URL-LEN @      ( src dst len )
+    CMOVE
+    _SC-URL-BUF _SC-URL-LEN @ ;
+
+\ SCROLL-GET ( "url" -- )
+\   Fetch URL into SCROLL-BUF and print result size.
+: SCROLL-GET  ( "url" -- )
+    _SC-PARSE-URL DUP 0= IF 2DROP ."  Usage: SCROLL-GET url" CR EXIT THEN
+    URL-PARSE 0<> IF
+        ."  URL parse error" CR EXIT
+    THEN
+    _SC-FETCH 0<> IF ."  Fetch failed" CR EXIT THEN
+    ."  OK, " SCROLL-LEN @ . ."  bytes in SCROLL-BUF" CR ;
+
+\ SCROLL-SAVE ( "url" "filename" -- )
 \   Fetch URL and write content to MP64FS file.
-: SCROLL-SAVE  ( addr len "filename" -- )
+: SCROLL-SAVE  ( "url" "filename" -- )
+    _SC-PARSE-URL DUP 0= IF 2DROP ."  Usage: SCROLL-SAVE url file" CR EXIT THEN
     URL-PARSE 0<> IF ."  URL parse error" CR EXIT THEN
     _SC-FETCH 0<> IF ."  Fetch failed" CR EXIT THEN
     \ Save SCROLL-BUF to named file
@@ -731,15 +754,17 @@ VARIABLE _GO-TCB
     FS-SYNC
     ."  Saved " SCROLL-LEN @ . ."  bytes" CR ;
 
-\ SCROLL-LOAD ( addr len -- )
+\ SCROLL-LOAD ( "url" -- )
 \   Fetch Forth source from URL and EVALUATE it.
-: SCROLL-LOAD  ( addr len -- )
+: SCROLL-LOAD  ( "url" -- )
+    _SC-PARSE-URL DUP 0= IF 2DROP ."  Usage: SCROLL-LOAD url" CR EXIT THEN
     URL-PARSE 0<> IF ."  URL parse error" CR EXIT THEN
     _SC-FETCH 0<> IF ."  Fetch failed" CR EXIT THEN
     SCROLL-BUF SCROLL-LEN @ EVALUATE ;
 
-\ -- Convenience: string-literal versions --
-\ Usage:  S" http://10.0.0.2/pkg.f" SCROLL-LOAD
-\         S" tftp://10.0.0.2/data.bin" SCROLL-GET
+\ -- Usage examples --
+\   SCROLL-GET http://10.64.0.1/page.txt
+\   SCROLL-SAVE http://10.64.0.1/data.bin myfile
+\   SCROLL-LOAD http://10.64.0.1/pkg.f
 
 ."  tools.f loaded: ED SCROLL-GET SCROLL-SAVE SCROLL-LOAD" CR

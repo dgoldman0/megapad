@@ -744,7 +744,8 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
         while True:
             # --- Run CPU in a batch until idle / halt ---------------
             if not sys_emu.cpu.halted and not (
-                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data):
+                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data
+                    and not sys_emu.nic.rx_queue):
                 try:
                     sys_emu.run_batch(batch)
                 except HaltError:
@@ -763,6 +764,10 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
                     return False
                 if ch:
                     sys_emu.uart.inject_input(ch)
+            elif sys_emu.cpu.idle:
+                # Wake CPU so Forth polling loops (DHCP, ARP, PING)
+                # can advance their timeout counters.
+                sys_emu.cpu.idle = False
     except KeyboardInterrupt:
         return False
     finally:
@@ -783,7 +788,8 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
         while True:
             # --- Run CPU until idle / halt -------------------------
             if not sys_emu.cpu.halted and not (
-                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data):
+                    sys_emu.cpu.idle and not sys_emu.uart.has_rx_data
+                    and not sys_emu.nic.rx_queue):
                 try:
                     sys_emu.run_batch(100_000)
                 except HaltError:
@@ -792,14 +798,19 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             if sys_emu.cpu.halted:
                 return False
 
-            if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data:
-                # --- Read from pipe (blocking, one byte) -----------
-                ch = os.read(fd, 1)
-                if not ch:                     # EOF
-                    return False
-                if ch == b'\x1d':              # Ctrl+]
-                    return True
-                sys_emu.uart.inject_input(ch)
+            if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data and not sys_emu.nic.rx_queue:
+                # Brief pause then wake CPU so Forth polling loops advance
+                import time as _time
+                _time.sleep(0.02)
+                sys_emu.cpu.idle = False
+                # Try to read from pipe (non-blocking via select)
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    ch = os.read(fd, 1)
+                    if not ch:                     # EOF
+                        return False
+                    if ch == b'\x1d':              # Ctrl+]
+                        return True
+                    sys_emu.uart.inject_input(ch)
     except (KeyboardInterrupt, OSError):
         return False
     finally:

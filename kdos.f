@@ -5985,12 +5985,22 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
     DUP ETH-RX-LEN !               \ save length
     DUP 0<> IF 1 ETH-RX-COUNT +! THEN ;
 
+\ -- NET-IDLE: yield to host for network I/O --
+\   Burns CPU cycles in a busy loop to give the emulator's host-side
+\   TAP thread real wall-clock time to deliver inbound frames.
+\   Compiles the IDL machine instruction (opcode 0x00) inline,
+\   which suspends the CPU until an interrupt or NIC-RX event
+\   wakes it.  The emulator's run_batch returns on IDL, giving
+\   the host loop a chance to sleep and let TAP frames arrive.
+: NET-IDLE  ( -- )  [ 0 C, ] ;
+
 \ -- ETH-RECV-WAIT: blocking receive with timeout (in attempts) --
 \   ( max-attempts -- len | 0 )
 : ETH-RECV-WAIT  ( n -- len )
     0 DO
         ETH-RECV DUP 0<> IF UNLOOP EXIT THEN
         DROP
+        NET-IDLE
     LOOP
     0 ;
 
@@ -6630,11 +6640,10 @@ PING-PAY 8 65 FILL                   \ fill with 'A'
             2DROP
         ELSE
             DROP                       \ drop extra 0
+            NET-IDLE
         THEN
     LOOP
     0 ;                                \ timeout
-
-\ -- PING: send N echo requests to an IP address --
 \   ( ip-addr count -- )
 \   Prints summary: bytes, seq, RTT in cycles.
 VARIABLE _PING-T0
@@ -7211,6 +7220,7 @@ CREATE DHCP-MASK-OFFER  4 ALLOT
             DROP DROP         \ drop 2 of 3 zeros from failure
         THEN
         DROP                  \ drop src-ip (or last 0)
+        NET-IDLE
     LOOP
     DROP                      \ drop expected-type
     0 ;
@@ -7409,6 +7419,7 @@ VARIABLE _DNR-DLEN
             DROP DROP                \ drop udp-buf(0) and udp-len(0)
         THEN
         DROP                         \ drop src-ip / 0
+        NET-IDLE
     LOOP
     0 ;
 
@@ -8159,7 +8170,7 @@ VARIABLE _TPL-LEN
 \ -- TCP-POLL-WAIT: blocking TCP poll with timeout --
 \   ( max-attempts -- )
 : TCP-POLL-WAIT  ( n -- )
-    0 DO TCP-POLL LOOP ;
+    0 DO TCP-POLL NET-IDLE LOOP ;
 
 \ =====================================================================
 \  §16.8  TLS 1.3 Record Layer
@@ -9063,7 +9074,7 @@ VARIABLE _TLSC-CTYPE
 \    SOCKET     ( type -- sd | -1 )   type: 0=TCP, 1=TLS
 \    BIND       ( sd port -- ior )
 \    LISTEN     ( sd -- ior )
-\    ACCEPT     ( sd -- new-sd | -1 )
+\    SOCK-ACCEPT ( sd -- new-sd | -1 )
 \    CONNECT    ( sd rip rport -- ior )
 \    SEND       ( sd addr len -- actual )
 \    RECV       ( sd addr maxlen -- actual )
@@ -9125,13 +9136,13 @@ VARIABLE _SLSN-SD
     0
 ;
 
-\ --- ACCEPT ( sd -- new-sd | -1 ) ---
+\ --- SOCK-ACCEPT ( sd -- new-sd | -1 ) ---
 \ Poll for incoming connection on a listening socket.
 \ Returns a new socket descriptor for the accepted connection.
 VARIABLE _SACC-SD
 VARIABLE _SACC-TCB
 
-: ACCEPT ( sd -- new-sd | -1 )
+: SOCK-ACCEPT ( sd -- new-sd | -1 )
     _SACC-SD !
     _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
     \ Check if the listening TCB has transitioned to ESTABLISHED
@@ -9745,17 +9756,23 @@ NCORES 1 > IF
     ."   Use CORE-RUN, BARRIER, P.RUN-PAR for parallel work."  CR
 THEN
 MAC-INIT
-10 0 0 1 IP-SET
+10 64 0 2 IP-SET
 PORT-INIT
 DISK? IF FS-LOAD THEN
 
 \ -- AUTOEXEC: run autoexec.f if present on disk --
-FS-OK @ IF
-    S" autoexec.f" DROP NAMEBUF 10 CMOVE
+\ Must use a colon definition because FSLOAD evaluates each line
+\ independently — multi-line IF/THEN does not gate execution.
+CREATE _AUTOEXEC-NAME
+  97 C, 117 C, 116 C, 111 C, 101 C, 120 C, 101 C, 99 C, 46 C, 102 C,
+
+: _AUTOEXEC-RUN  ( -- )
+    FS-OK @ 0= IF EXIT THEN
+    _AUTOEXEC-NAME NAMEBUF 10 CMOVE
     NAMEBUF 10 + 6 0 FILL
-    FIND-BY-NAME -1 <> IF
-        ."  Running autoexec.f..." CR
-        LOAD autoexec.f
-    THEN
-THEN
+    FIND-BY-NAME -1 = IF EXIT THEN
+    ."  Running autoexec.f..." CR
+    _MOD-LOAD-BODY ;
+
+_AUTOEXEC-RUN
 CR

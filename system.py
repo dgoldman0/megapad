@@ -703,11 +703,13 @@ class MegapadSystem:
             if cpu.idle and cpu.irq_ipi and cpu.flag_i:
                 cpu.idle = False
 
-            # Wake core 0 from idle on UART RX or timer IRQ
+            # Wake core 0 from idle on UART RX or timer IRQ or NIC RX
             if cpu.idle and cpu.core_id == 0:
                 if self.uart.has_rx_data:
                     cpu.idle = False
                 elif self.timer.irq_pending and cpu.flag_i:
+                    cpu.idle = False
+                elif self.nic.rx_queue:
                     cpu.idle = False
 
             if cpu.halted or cpu.idle:
@@ -787,6 +789,8 @@ class MegapadSystem:
                 if self.uart.has_rx_data:
                     cpu.idle = False
                 elif self.timer.irq_pending and cpu.flag_i:
+                    cpu.idle = False
+                elif self.nic.rx_queue:
                     cpu.idle = False
 
         if self.all_halted or self.all_idle_or_halted:

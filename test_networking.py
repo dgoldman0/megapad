@@ -348,12 +348,16 @@ class _RealNetBase(unittest.TestCase):
             ip_lines.append(f"{gw[0]} {gw[1]} {gw[2]} {gw[3]} GW-IP IP!")
             # Set netmask 255.255.255.0
             ip_lines.append("255 255 255 0 NET-MASK IP!")
+            # Set DNS server
+            ip_lines.append("8 8 8 8 DNS-SERVER-IP IP!")
 
         all_lines = ip_lines + extra_lines
         payload = "\n".join(all_lines) + "\nBYE\n"
         data = payload.encode()
         pos = 0
         steps = 0
+        idle_polls = 0           # count consecutive idle-with-no-data polls
+        max_idle_polls = 50      # allow TAP frames time to arrive
 
         try:
             while steps < max_steps:
@@ -364,9 +368,22 @@ class _RealNetBase(unittest.TestCase):
                         chunk = _next_line_chunk(data, pos)
                         sys.uart.inject_input(chunk)
                         pos += len(chunk)
+                        idle_polls = 0
+                    elif sys.nic.rx_queue:
+                        # NIC has pending frames — wake CPU and continue
+                        sys.cpu.idle = False
+                        idle_polls = 0
+                    elif idle_polls < max_idle_polls:
+                        # Wait briefly for TAP frames to arrive,
+                        # then wake CPU so Forth polling loops advance.
+                        idle_polls += 1
+                        time.sleep(0.02)
+                        sys.cpu.idle = False
+                        continue
                     else:
                         break
                     continue
+                idle_polls = 0
                 batch = sys.run_batch(min(100_000, max_steps - steps))
                 steps += max(batch, 1)
         finally:
@@ -828,13 +845,11 @@ class TestRealNetHardening(_RealNetBase):
     def test_ping_ip_outbound(self):
         """PING-IP word should send a real ICMP echo to the gateway."""
         text = self._run_kdos_tap([
-            'S" 10.64.0.1" PING-IP',
+            '10 64 0 1 2 PING-IP',
         ], max_steps=300_000_000)
-        # PING-IP prints either "reply" or "timeout"
-        self.assertTrue(
-            "reply" in text.lower() or "timeout" in text.lower()
-            or "sent" in text.lower(),
-            f"PING-IP should produce output, got: {text[-200:]}")
+        # PING-IP prints "N sent, M received"
+        self.assertIn("sent", text.lower(),
+                      f"PING-IP should print sent count, got: {text[-300:]}")
 
     def test_rapid_arp_poll_100(self):
         """100 consecutive ARP-POLL calls should not crash or hang."""
@@ -957,6 +972,110 @@ class TestRealNetHardening(_RealNetBase):
             "TPOLL50 .\"  TPOLL-OK\"",
         ], max_steps=200_000_000)
         self.assertIn("TPOLL-OK", text)
+
+
+# ---------------------------------------------------------------------------
+#  End-to-end TAP networking tests — real replies required
+# ---------------------------------------------------------------------------
+
+@_skip_no_tap
+@pytest.mark.realnet
+class TestRealNetEndToEnd(_RealNetBase):
+    """End-to-end networking tests that require real replies.
+
+    These are the definitive tests: they boot KDOS with IP config,
+    exercise PING-IP and DNS-RESOLVE over a real TAP device, and
+    assert that actual replies come back — not just "no crash".
+    """
+
+    def test_ping_gateway_receives_replies(self):
+        """PING the gateway (host side of TAP) and verify replies come back.
+
+        The Linux kernel always responds to ICMP echo requests sent to
+        10.64.0.1 (the host address on the TAP interface).  This test
+        sends 3 pings and asserts that at least 1 reply is received.
+        """
+        text = self._run_kdos_tap([
+            '10 64 0 1 3 PING-IP',
+        ], max_steps=500_000_000)
+        # PING-IP prints: "N sent, M received"
+        self.assertIn("sent", text.lower(),
+                      f"PING-IP should have run. Output: {text[-400:]}")
+        # Assert at least one reply was received
+        self.assertRegex(
+            text, r'[1-9]\d*\s+received',
+            f"Expected at least 1 ping reply from gateway. Output:\n{text[-500:]}")
+
+    def test_ping_gateway_reply_lines(self):
+        """PING should print 'Reply seq=' lines for each received reply."""
+        text = self._run_kdos_tap([
+            '10 64 0 1 2 PING-IP',
+        ], max_steps=500_000_000)
+        self.assertIn("Reply seq=", text,
+                      f"Expected 'Reply seq=' in ping output. Got:\n{text[-500:]}")
+
+    def test_arp_resolve_gateway_succeeds(self):
+        """ARP-RESOLVE for the gateway must return a non-zero MAC address."""
+        text = self._run_kdos_tap([
+            "GW-IP IP@ ARP-RESOLVE",
+            "DUP 0<> IF",
+            "  .\"  ARP-RESOLVED \"",
+            "  C@ .\"  byte0=\" .",
+            "ELSE",
+            "  .\"  ARP-FAILED \"",
+            "  DROP",
+            "THEN",
+        ], max_steps=200_000_000)
+        self.assertIn("ARP-RESOLVED", text,
+                      f"ARP-RESOLVE should succeed for gateway. Got:\n{text[-400:]}")
+
+    def test_dns_resolve_google(self):
+        """DNS-RESOLVE for google.com should return a valid IP address.
+
+        Requires: TAP with internet access (IP forwarding + NAT).
+        If DNS fails, the test provides a diagnostic skip.
+        """
+        text = self._run_kdos_tap([
+            'S" google.com" DNS-RESOLVE',
+            "DUP 0<> IF",
+            "  .\"  DNS-OK ip=\" DUP .IP",
+            "ELSE",
+            "  .\"  DNS-FAIL \"",
+            "THEN",
+            "DROP",
+        ], max_steps=500_000_000)
+        if "DNS-FAIL" in text:
+            # Might not have internet — skip rather than fail
+            self.skipTest(
+                "DNS resolution failed — TAP may not have internet access. "
+                "Ensure: sysctl net.ipv4.ip_forward=1 and "
+                "iptables -t nat -A POSTROUTING -s 10.64.0.0/24 "
+                "! -o mp64tap0 -j MASQUERADE")
+        self.assertIn("DNS-OK", text,
+                      f"DNS-RESOLVE should succeed. Got:\n{text[-400:]}")
+
+    def test_scroll_get_produces_output(self):
+        """SCROLL-GET http://... should fetch real HTTP content.
+
+        Requires: TAP with internet access.
+        """
+        text = self._run_kdos_tap([
+            'SCROLL-GET http://example.com',
+        ], max_steps=500_000_000)
+        if "DNS/IP resolve failed" in text or "DNS-FAIL" in text:
+            self.skipTest("DNS not available over TAP")
+        if "TCP connect failed" in text:
+            self.skipTest("TCP connection failed — may not have internet")
+        # If we got past DNS + TCP, there should be some HTTP content
+        # example.com returns a simple HTML page
+        got_content = (
+            "Example Domain" in text
+            or "HTTP" in text
+            or "<html" in text.lower()
+            or "200" in text
+        )
+        self.assertTrue(got_content,
+                        f"Expected HTTP content from example.com. Got:\n{text[-600:]}")
 
 
 # ---------------------------------------------------------------------------

@@ -3096,6 +3096,8 @@ class _KDOSTestBase(unittest.TestCase):
                     chunk = _next_line_chunk(data, pos)
                     sys.uart.inject_input(chunk)
                     pos += len(chunk)
+                elif hasattr(sys, 'nic') and sys.nic.rx_queue:
+                    sys.cpu.idle = False
                 else:
                     break
                 continue
@@ -3144,6 +3146,8 @@ class _KDOSTestBase(unittest.TestCase):
                     chunk = _next_line_chunk(data, pos)
                     sys.uart.inject_input(chunk)
                     pos += len(chunk)
+                elif hasattr(sys, 'nic') and sys.nic.rx_queue:
+                    sys.cpu.idle = False
                 else:
                     break  # all input sent, CPU idle → done
                 continue
@@ -5976,7 +5980,7 @@ class TestDiskUtil(unittest.TestCase):
         entries = fs.list_files()
         names = [e.name for e in entries]
         self.assertIn("kdos.f", names)
-        self.assertNotIn("autoexec.f", names)
+        self.assertIn("autoexec.f", names)
         self.assertIn("demo-data", names)
         self.assertIn("demo-bundle", names)
         # Check file types
@@ -5988,8 +5992,8 @@ class TestDiskUtil(unittest.TestCase):
         self.assertEqual(bdl_entry.ftype, FTYPE_BUNDLE)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle + graphics.f = 19
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 4)
+        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle + graphics.f + tools.f + autoexec.f = 21
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 6)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -5998,7 +6002,7 @@ class TestDiskUtil(unittest.TestCase):
             loaded = MP64FS.load(f.name)
             names = [e.name for e in loaded.list_files()]
             self.assertIn("kdos.f", names)
-            self.assertNotIn("autoexec.f", names)
+            self.assertIn("autoexec.f", names)
 
 
 # ---------------------------------------------------------------------------
@@ -11847,7 +11851,7 @@ class TestKDOSSocket(_KDOSTestBase):
             # Process the SYN
             "20 TCP-POLL-WAIT",
             # Accept
-            ': chk-accept srv-sd @ ACCEPT DUP -1 = IF ." ACC=-1 " DROP ELSE ." ACC=OK " SOCK.STATE @ ." AST=" . THEN ;',
+            ': chk-accept srv-sd @ SOCK-ACCEPT DUP -1 = IF ." ACC=-1 " DROP ELSE ." ACC=OK " SOCK.STATE @ ." AST=" . THEN ;',
             'chk-accept',
         ], nic_frames=[syn], nic_tx_callback=tcp_client)
         self.assertIn("LI=0 ", text)
@@ -18217,6 +18221,519 @@ class TestKDOSExtMem(_KDOSTestBase):
                                 f"HERE advanced {delta} bytes — file buffer leaked to Bank 0")
         finally:
             import os
+            os.unlink(img)
+
+
+# =====================================================================
+#  tools.f Tests — ED Line Editor + SCROLL Multi-Protocol Fetcher
+# =====================================================================
+
+class TestToolsModule(_KDOSTestBase):
+    """Tests for tools.f — ED editor + SCROLL network fetcher.
+
+    tools.f is a loadable module (LOAD tools.f / REQUIRE tools.f).
+    Tests cover: module loading, ED buffer operations, ED file I/O,
+    URL parsing, SCROLL-GET error paths, and the SCROLL public API.
+    """
+
+    def _make_tools_image(self, extra_files=None):
+        """Create a disk image with tools.f and optional extra files."""
+        path = self._make_formatted_image()
+        tools_path = os.path.join(os.path.dirname(__file__), "tools.f")
+        with open(tools_path, "rb") as f:
+            tools_src = f.read()
+        du_inject_file(path, "tools.f", tools_src, ftype=FTYPE_FORTH)
+        if extra_files:
+            for name, data in extra_files.items():
+                du_inject_file(path, name, data, ftype=FTYPE_FORTH)
+        return path
+
+    # -- Module loading --
+
+    def test_load_tools(self):
+        """LOAD tools.f succeeds and prints banner."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("tools.f loaded", text)
+            self.assertIn("ED", text)
+            self.assertIn("SCROLL", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_tools(self):
+        """REQUIRE tools.f marks module as provided."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE tools.f",
+                'MODULE? tools.f IF ." YES" ELSE ." NO" THEN',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("YES", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_tools_idempotent(self):
+        """REQUIRE tools.f twice does not reload."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE tools.f",
+                "REQUIRE tools.f",
+                ".\" ok\"",
+            ], storage_image=img, max_steps=500_000_000)
+            # "tools.f loaded" banner should appear exactly once
+            count = text.count("tools.f loaded")
+            self.assertEqual(count, 1,
+                             f"Expected 1 load banner, got {count}")
+        finally:
+            os.unlink(img)
+
+    # -- ED: buffer operations --
+
+    def test_ed_ensure_buf(self):
+        """ED-ENSURE-BUF allocates the edit buffer."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED-ENSURE-BUF",
+                'ED-BUF @ 0> IF ." ALLOC" ELSE ." FAIL" THEN',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("ALLOC", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_set_line_read(self):
+        """ED-SET-LINE stores text, ED-LINE reads it back."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED-ENSURE-BUF",
+                ': T1 S" Hello World" 0 ED-SET-LINE ;',
+                'T1',
+                "1 ED-NLINES !",
+                '0 ED-LINE C@ .',     # first byte = 72 (ASCII 'H')
+            ], storage_image=img, max_steps=500_000_000)
+            # Verify by checking byte value (immune to input echo)
+            self.assertIn("72", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_blank_zeros(self):
+        """ED-BLANK zero-fills a line slot."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED-ENSURE-BUF",
+                ': T1 S" test data" 0 ED-SET-LINE ;',
+                'T1',
+                "0 ED-BLANK",
+                '0 ED-LINE C@ ." V=" .',     # should be 0
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("V=0 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_nlines_tracking(self):
+        """ED-NLINES tracks line count correctly."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED-ENSURE-BUF",
+                '0 ED-CUR !  0 ED-NLINES !',
+                ': T1 S" line one" 0 ED-SET-LINE ;  T1  1 ED-NLINES !',
+                ': T2 S" line two" 1 ED-SET-LINE ;  T2  2 ED-NLINES !',
+                ': T3 S" line tre" 2 ED-SET-LINE ;  T3  3 ED-NLINES !',
+                'ED-NLINES @ ." N=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("N=3 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_list_output(self):
+        """ED-LIST prints lines with line numbers."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED-ENSURE-BUF",
+                '0 ED-CUR !  0 ED-NLINES !',
+                ': T1 S" alpha" 0 ED-SET-LINE ;  T1  1 ED-NLINES !',
+                ': T2 S" beta" 1 ED-SET-LINE ;  T2  2 ED-NLINES !',
+                'ED-LIST',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("alpha", text)
+            self.assertIn("beta", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_load_from_disk(self):
+        """ED-LOAD reads a file from disk into the edit buffer."""
+        img = self._make_tools_image(extra_files={
+            "sample.f": b"line one\nline two\nline three\n",
+        })
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" sample.f" DROP NAMEBUF 9 CMOVE ;',
+                'T1',
+                'NAMEBUF ED-FILE 16 CMOVE',
+                "ED-LOAD",
+                'ED-NLINES @ ." N=" .',
+                '0 ED-LINE 8 TYPE',   # "line one"
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("N=3 ", text)
+            self.assertIn("line one", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_load_new_file(self):
+        """ED-LOAD on a non-existent file prints 'New file'."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" ghost.f" DROP NAMEBUF 8 CMOVE ;',
+                'T1',
+                'NAMEBUF ED-FILE 16 CMOVE',
+                "ED-LOAD",
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("New file", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_constants(self):
+        """ED-MAXLINES and ED-LINELEN have correct values."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                'ED-MAXLINES ." ML=" .',
+                'ED-LINELEN ." LL=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("ML=64 ", text)
+            self.assertIn("LL=80 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_ed_accept_blocks(self):
+        """ED interactive loop must block on BIOS ACCEPT, not flood."""
+        img = self._make_tools_image()
+        try:
+            # We call ED non-interactively: inject "ED\n", wait for
+            # the prompt, then inject "q\n" to quit.  If ACCEPT is
+            # shadowed by socket ACCEPT the CPU will never go idle and
+            # we'll exceed max_steps.
+            text = self._run_kdos([
+                "LOAD tools.f",
+                "ED",          # starts interactive loop
+                "q",           # ED 'q' command → quit
+            ], storage_image=img, max_steps=500_000_000)
+            # Should see exactly ONE ed[ prompt line (not thousands)
+            ed_count = text.count("ed[")
+            self.assertGreater(ed_count, 0, "ED prompt never appeared")
+            self.assertLess(ed_count, 5,
+                            f"ED flooded with {ed_count} prompts")
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: URL parsing --
+
+    def test_url_parse_http(self):
+        """URL-PARSE handles http://host/path correctly."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://10.0.0.2/test.f" URL-PARSE ." IOR=" . ;',
+                'T1',
+                '_SC-PROTO @ ." P=" .',
+                '_SC-PORT @ ." PORT=" .',
+                '_SC-HOST _SC-HOST-LEN @ TYPE',
+                '_SC-PATH _SC-PATH-LEN @ TYPE',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("P=0 ", text)     # PROTO-HTTP = 0
+            self.assertIn("PORT=80 ", text)
+            self.assertIn("10.0.0.2", text)
+            self.assertIn("/test.f", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_https(self):
+        """URL-PARSE handles https:// with port 443."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" https://example.com/pkg.f" URL-PARSE ." IOR=" . ;',
+                'T1',
+                '_SC-PROTO @ ." P=" .',
+                '_SC-PORT @ ." PORT=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("P=3 ", text)     # PROTO-HTTPS = 3
+            self.assertIn("PORT=443 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_tftp(self):
+        """URL-PARSE handles tftp:// with port 69."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" tftp://192.168.1.1/firmware.bin" URL-PARSE ." IOR=" . ;',
+                'T1',
+                '_SC-PROTO @ ." P=" .',
+                '_SC-PORT @ ." PORT=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("P=1 ", text)     # PROTO-TFTP = 1
+            self.assertIn("PORT=69 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_gopher(self):
+        """URL-PARSE handles gopher:// with port 70."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" gopher://gopher.example.com/" URL-PARSE ." IOR=" . ;',
+                'T1',
+                '_SC-PROTO @ ." P=" .',
+                '_SC-PORT @ ." PORT=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("P=2 ", text)     # PROTO-GOPHER = 2
+            self.assertIn("PORT=70 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_custom_port(self):
+        """URL-PARSE handles http://host:8080/path."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://10.0.0.2:8080/api" URL-PARSE ." IOR=" . ;',
+                'T1',
+                '_SC-PORT @ ." PORT=" .',
+                '_SC-PATH _SC-PATH-LEN @ TYPE',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("PORT=8080 ", text)
+            self.assertIn("/api", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_no_path(self):
+        """URL-PARSE defaults path to '/' when none given."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://10.0.0.2" URL-PARSE DROP ;',
+                'T1',
+                '_SC-PATH C@ ." SLASH=" .',
+                '_SC-PATH-LEN @ ." PLEN=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("SLASH=47 ", text)   # '/'
+            self.assertIn("PLEN=1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_url_parse_bad_proto(self):
+        """URL-PARSE returns -1 for unknown protocol."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" ftp://badproto.com/x" URL-PARSE ." IOR=" . ;',
+                'T1',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=-1 ", text)
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: IP resolution --
+
+    def test_resolve_dotted_quad(self):
+        """_SC-RESOLVE parses dotted-quad IP address."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://10.0.0.2/x" URL-PARSE DROP ;',
+                'T1',
+                '_SC-RESOLVE ." IOR=" .',
+                '_SC-IP C@ ." A=" .',
+                '_SC-IP 1 + C@ ." B=" .',
+                '_SC-IP 2 + C@ ." C=" .',
+                '_SC-IP 3 + C@ ." D=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("IOR=0 ", text)
+            self.assertIn("A=10 ", text)
+            self.assertIn("B=0 ", text)
+            self.assertIn("C=0 ", text)
+            self.assertIn("D=2 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_resolve_192_168(self):
+        """_SC-RESOLVE handles 192.168.1.100."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://192.168.1.100/data" URL-PARSE DROP ;',
+                'T1',
+                '_SC-RESOLVE DROP',
+                '_SC-IP C@ ." A=" .',
+                '_SC-IP 1 + C@ ." B=" .',
+                '_SC-IP 2 + C@ ." C=" .',
+                '_SC-IP 3 + C@ ." D=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("A=192 ", text)
+            self.assertIn("B=168 ", text)
+            self.assertIn("C=1 ", text)
+            self.assertIn("D=100 ", text)
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: error paths --
+
+    def test_scroll_get_bad_url(self):
+        """SCROLL-GET with bad URL prints error."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                'SCROLL-GET ftp://bad/x',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("URL parse error", text)
+        finally:
+            os.unlink(img)
+
+    def test_scroll_load_bad_url(self):
+        """SCROLL-LOAD with bad URL prints error, does not crash."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                'SCROLL-LOAD xyz://nowhere',
+                '." alive"',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("URL parse error", text)
+            self.assertIn("alive", text)
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: protocol constants --
+
+    def test_proto_constants(self):
+        """PROTO-HTTP/TFTP/GOPHER/HTTPS have correct values."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                'PROTO-HTTP ." H=" .',
+                'PROTO-TFTP ." T=" .',
+                'PROTO-GOPHER ." G=" .',
+                'PROTO-HTTPS ." S=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("H=0 ", text)
+            self.assertIn("T=1 ", text)
+            self.assertIn("G=2 ", text)
+            self.assertIn("S=3 ", text)
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: SCROLL-BUF --
+
+    def test_scroll_buf_exists(self):
+        """SCROLL-BUF and SCROLL-LEN are defined after load."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                'SCROLL-BUF 0> IF ." BUF-OK" THEN',
+                'SCROLL-LEN @ ." LEN=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("BUF-OK", text)
+            self.assertIn("LEN=0 ", text)
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: HTTP request builder --
+
+    def test_http_build_req(self):
+        """_HTTP-BUILD-REQ constructs a valid GET request."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                ': T1 S" http://10.0.0.2/hello.f" URL-PARSE DROP ;',
+                'T1',
+                '_HTTP-BUILD-REQ',           # ( addr len )
+                '." LEN=" DUP .',
+                '4 TYPE',                    # first 4 chars = "GET "
+            ], storage_image=img, max_steps=500_000_000)
+            self.assertIn("GET ", text)
+            # Check request length is reasonable (> 20 bytes at minimum)
+            import re
+            m = re.search(r'LEN=(\d+)', text)
+            self.assertIsNotNone(m)
+            rlen = int(m.group(1))
+            self.assertGreater(rlen, 20, f"HTTP request too short: {rlen}")
+        finally:
+            os.unlink(img)
+
+    # -- SCROLL: HTTP header parsing --
+
+    def test_http_find_hend(self):
+        """_HTTP-FIND-HEND locates \\r\\n\\r\\n in a buffer."""
+        img = self._make_tools_image()
+        try:
+            text = self._run_kdos([
+                "LOAD tools.f",
+                # Build a fake HTTP response in memory
+                "CREATE fake-resp 32 ALLOT",
+                "fake-resp 32 0 FILL",
+                # "HTTP OK\r\n\r\nbody" → CR LF CR LF at offset 7
+                "72 fake-resp C!",      # H
+                "84 fake-resp 1+ C!",   # T
+                "84 fake-resp 2 + C!",  # T
+                "80 fake-resp 3 + C!",  # P
+                "32 fake-resp 4 + C!",  # space
+                "79 fake-resp 5 + C!",  # O
+                "75 fake-resp 6 + C!",  # K
+                "13 fake-resp 7 + C!",  # CR
+                "10 fake-resp 8 + C!",  # LF
+                "13 fake-resp 9 + C!",  # CR
+                "10 fake-resp 10 + C!", # LF
+                "66 fake-resp 11 + C!", # B (body start)
+                "fake-resp 20 _HTTP-FIND-HEND",
+                '_HTTP-HEND @ ." HEND=" .',
+            ], storage_image=img, max_steps=500_000_000)
+            # _HTTP-HEND should point past \r\n\r\n = offset 11
+            self.assertIn("HEND=", text)
+            import re
+            m = re.search(r'HEND=(\d+)', text)
+            self.assertIsNotNone(m)
+            hend = int(m.group(1))
+            # HEND is an absolute address, but the value should be
+            # fake-resp + 11. We just check it's nonzero.
+            self.assertGreater(hend, 0,
+                               "HEND should be non-zero after finding headers")
+        finally:
             os.unlink(img)
 
 

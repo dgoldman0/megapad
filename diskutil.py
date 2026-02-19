@@ -1038,11 +1038,23 @@ def build_sample_image(path: str | Path | None = None,
     ).encode("ascii")
     fs.inject_file("demo-bundle", demo_bundle, ftype=FTYPE_BUNDLE)
 
-    # Inject graphics module (Forth, loadable via REQUIRE graphics.f)
+    # Inject graphics module (Forth, loadable via LOAD graphics.f)
     gfx_path = Path(__file__).parent / "graphics.f"
     if gfx_path.exists():
         gfx_src = gfx_path.read_bytes()
         fs.inject_file("graphics.f", gfx_src, ftype=FTYPE_FORTH)
+
+    # Inject tools module (Forth, loadable via LOAD tools.f)
+    tools_path = Path(__file__).parent / "tools.f"
+    if tools_path.exists():
+        tools_src = tools_path.read_bytes()
+        fs.inject_file("tools.f", tools_src, ftype=FTYPE_FORTH)
+
+    # Inject autoexec boot script (runs automatically at startup)
+    autoexec_path = Path(__file__).parent / "autoexec.f"
+    if autoexec_path.exists():
+        autoexec_src = autoexec_path.read_bytes()
+        fs.inject_file("autoexec.f", autoexec_src, ftype=FTYPE_FORTH)
 
     if path is not None:
         fs.save(path)
