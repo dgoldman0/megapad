@@ -624,13 +624,13 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
     DUP 0= IF ."  TCP connect failed" CR -1 EXIT THEN
     _HG-TCB !
     \ Wait for connection — poll until established or timeout
-    200 0 DO  _HG-TCB @ TCP-POLL  LOOP
+    200 0 DO  TCP-POLL  LOOP
     \ Send request
     _HTTP-BUILD-REQ _HG-TCB @ -ROT TCP-SEND DROP
     \ Receive response — 500 iterations, bail after 10 consecutive empties
     0 SCROLL-LEN !  0 _HG-EMPTY !
     500 0 DO
-        _HG-TCB @ TCP-POLL
+        TCP-POLL
         SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN   \ buffer full
         _HG-TCB @
         SCROLL-BUF SCROLL-LEN @ +
@@ -653,10 +653,12 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
     _HTTP-HEND @ 0= IF
         ."  No HTTP header end found" CR -1 EXIT
     THEN
+    \ Convert absolute _HTTP-HEND address to offset from SCROLL-BUF
+    _HTTP-HEND @ SCROLL-BUF -  _HTTP-HEND !
     SCROLL-BUF _HTTP-HEND @ _HTTP-PARSE-CLEN
     \ Move body to start of SCROLL-BUF
-    _HTTP-HEND @ SCROLL-BUF +        ( body-start )
-    SCROLL-LEN @ _HTTP-HEND @ -      ( body-start body-len )
+    SCROLL-BUF _HTTP-HEND @ +         ( body-start )
+    SCROLL-LEN @ _HTTP-HEND @ -       ( body-start body-len )
     _HTTP-CLEN @ -1 <> IF
         _HTTP-CLEN @ MIN
     THEN
@@ -680,7 +682,7 @@ VARIABLE _HGS-EMPTY
     \ Receive response
     0 SCROLL-LEN !  0 _HGS-EMPTY !
     500 0 DO
-        _HGS-CTX @ TLS-CTX.TCB @ TCP-POLL
+        TCP-POLL
         SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN
         _HGS-CTX @
         SCROLL-BUF SCROLL-LEN @ +
@@ -706,8 +708,10 @@ VARIABLE _HGS-EMPTY
     _HTTP-HEND @ 0= IF
         ."  No HTTP header end found" CR -1 EXIT
     THEN
+    \ Convert absolute _HTTP-HEND address to offset from SCROLL-BUF
+    _HTTP-HEND @ SCROLL-BUF -  _HTTP-HEND !
     SCROLL-BUF _HTTP-HEND @ _HTTP-PARSE-CLEN
-    _HTTP-HEND @ SCROLL-BUF +
+    SCROLL-BUF _HTTP-HEND @ +
     SCROLL-LEN @ _HTTP-HEND @ -
     _HTTP-CLEN @ -1 <> IF
         _HTTP-CLEN @ MIN
@@ -732,13 +736,13 @@ VARIABLE _FTP-LLEN
     0 _FTP-LLEN !
     100 0 DO
         _FTP-TLS @ 0= IF
-            _FTP-TCB @ TCP-POLL
+            TCP-POLL
             _FTP-TCB @
             _FTP-LINEBUF _FTP-LLEN @ +
             256 _FTP-LLEN @ -
             TCP-RECV
         ELSE
-            _FTP-TLS @ TLS-CTX.TCB @ TCP-POLL
+            TCP-POLL
             _FTP-TLS @
             _FTP-LINEBUF _FTP-LLEN @ +
             256 _FTP-LLEN @ -
@@ -771,7 +775,7 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     _SC-IP @ _SC-PORT @ 12347 TCP-CONNECT
     DUP 0= IF ."  FTP connect failed" CR -1 EXIT THEN
     _FTP-TCB !  0 _FTP-TLS !
-    200 0 DO _FTP-TCB @ TCP-POLL LOOP
+    200 0 DO TCP-POLL LOOP
     _FTP-RECV-LINE              \ read banner
     \ For FTPS, upgrade to TLS now
     _SC-PROTO @ PROTO-FTPS = IF
@@ -797,7 +801,7 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     \ Read data from data channel
     0 SCROLL-LEN !
     200 0 DO
-        _FTP-TCB @ TCP-POLL
+        TCP-POLL
         _FTP-TCB @
         SCROLL-BUF SCROLL-LEN @ +
         SCROLL-BUFSZ SCROLL-LEN @ -
@@ -871,14 +875,14 @@ CREATE _GO-CRLF 2 ALLOT   13 _GO-CRLF C!  10 _GO-CRLF 1+ C!
     _SC-IP @ _SC-PORT @ 12346 TCP-CONNECT
     DUP 0= IF ."  Gopher connect failed" CR -1 EXIT THEN
     _GO-TCB !
-    100 0 DO _GO-TCB @ TCP-POLL LOOP
+    100 0 DO TCP-POLL LOOP
     \ Send selector + CRLF
     _SC-PATH _SC-PATH-LEN @ _GO-TCB @ -ROT TCP-SEND DROP
     _GO-CRLF 2 _GO-TCB @ -ROT TCP-SEND DROP
     \ Receive
     0 SCROLL-LEN !
     200 0 DO
-        _GO-TCB @ TCP-POLL
+        TCP-POLL
         _GO-TCB @
         SCROLL-BUF SCROLL-LEN @ +
         4096 SCROLL-LEN @ -
