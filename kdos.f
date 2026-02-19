@@ -8496,7 +8496,7 @@ CREATE TLS-REC-HDR     5 ALLOT        \ 5-byte TLS record header (AAD)
 CREATE TLS-PAD-BUF    16 ALLOT        \ plaintext padding to 16B boundary
 CREATE TLS-INNER-BUF 1500 ALLOT       \ inner plaintext + content type byte
 CREATE TLS-CIPHER-BUF 1520 ALLOT      \ ciphertext output
-CREATE TLS-PLAIN-BUF  1500 ALLOT      \ decrypted plaintext scratch
+CREATE TLS-PLAIN-BUF  8192 ALLOT      \ decrypted plaintext scratch
 
 \ --- TLS Nonce Construction ---
 \ TLS-BUILD-NONCE ( iv seq out -- )
@@ -9200,7 +9200,7 @@ VARIABLE _THC-REC
 \  TLS-CLOSE      ( ctx -- )
 
 CREATE TLS-SEND-REC 1600 ALLOT
-CREATE TLS-RECV-REC 1600 ALLOT
+CREATE TLS-RECV-REC 8192 ALLOT
 
 \ --- TLS-SEND-DATA ---
 \ Encrypt plaintext as app_data record and send via TCP.
@@ -9231,13 +9231,14 @@ VARIABLE _TRD-RLEN
 : TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
-    \ Try to receive raw TCP data
-    _TRD-CTX @ TLS-CTX.TCB @  TLS-RECV-REC 1600  TCP-RECV
+    \ Read one complete TLS record using the framing layer
+    _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD
     DUP 0= IF EXIT THEN
     _TRD-RLEN !
     \ Decrypt
     _TRD-CTX @  TLS-RECV-REC  _TRD-RLEN @  TLS-PLAIN-BUF
     TLS-DECRYPT-RECORD
+    _TRD-RLEN @ TLS-RBUF-CONSUME
     \ Stack: ctype plen  (or -1 0)
     DUP 0= IF 2DROP -1 EXIT THEN \ decrypt failed
     SWAP TLS-CT-APP-DATA <> IF DROP -1 EXIT THEN \ not app data
@@ -9292,6 +9293,81 @@ CREATE TLS-ALERT-BUF 2 ALLOT
         THEN
     LOOP 0 ;
 
+\ -- TLS record reassembly --
+\   Real servers send multiple TLS records in one TCP segment
+\   (e.g. ServerHello + CCS + encrypted HS in one burst).
+\   We must split the byte stream into individual records using
+\   the 5-byte TLS record header (type[1] version[2] length[2]).
+
+VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
+
+\ TLS-RBUF-FILL ( tcb need -- flag )
+\   Ensure TLS-RECV-REC has at least 'need' bytes.
+\   Returns -1 on success, 0 on timeout.
+: TLS-RBUF-FILL ( tcb need -- flag )
+    200 0 DO
+        TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
+        OVER                                  \ tcb
+        TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
+        8192 TLS-RBUF-LEN @ -                 \ maxlen = bufsz - got
+        TCP-RECV
+        DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
+        TCP-POLL NET-IDLE
+    LOOP
+    2DROP 0 ;
+
+\ TLS-RBUF-CONSUME ( n -- )
+\   Remove the first n bytes, shift remainder to front.
+: TLS-RBUF-CONSUME ( n -- )
+    DUP TLS-RBUF-LEN @ >= IF
+        DROP 0 TLS-RBUF-LEN !
+    ELSE
+        TLS-RECV-REC OVER +          \ src = buf + n
+        TLS-RECV-REC                 \ dst = buf
+        TLS-RBUF-LEN @ 2 PICK -     \ remaining = total - n
+        CMOVE
+        NEGATE TLS-RBUF-LEN +!
+    THEN ;
+
+\ TLS-READ-RECORD ( tcb -- rlen | 0 )
+\   Read exactly one complete TLS record into TLS-RECV-REC.
+\   Returns total record length (5 + body_len) or 0 on failure.
+: TLS-READ-RECORD ( tcb -- rlen | 0 )
+    \ Read at least 5 bytes (TLS record header)
+    DUP 5 TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN
+    \ Extract total record size = 5 + body_len
+    TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
+    \ Sanity check
+    DUP 8192 > IF 2DROP 0 EXIT THEN
+    \ Fill to complete record
+    SWAP OVER TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
+
+\ -- Process multiple HS messages from one decrypted record --
+\   A single encrypted record may contain EncryptedExtensions,
+\   Certificate, CertificateVerify, and Finished concatenated.
+VARIABLE _TPMS-CTX
+VARIABLE _TPMS-PTR
+VARIABLE _TPMS-REM
+
+: TLS-PROCESS-HS-MSGS ( ctx plain plen -- flag )
+    _TPMS-REM !  _TPMS-PTR !  _TPMS-CTX !
+    BEGIN
+        _TPMS-REM @ 4 >=
+    WHILE
+        \ Message length = type(1) + len(3) + body
+        _TPMS-PTR @ 1+ C@ 16 LSHIFT
+        _TPMS-PTR @ 2 + C@ 8 LSHIFT OR
+        _TPMS-PTR @ 3 + C@ OR
+        4 +   \ total message size including 4-byte header
+        DUP _TPMS-REM @ > IF DROP -1 EXIT THEN
+        \ Process this single HS message
+        _TPMS-CTX @  _TPMS-PTR @  2 PICK  TLS-PROCESS-HS-MSG
+        0<> IF DROP -1 EXIT THEN
+        \ Advance pointer, reduce remainder
+        DUP _TPMS-PTR +!
+        NEGATE _TPMS-REM +!
+    REPEAT 0 ;
+
 \ -- TLS-CONNECT --
 VARIABLE _TLSC-CTX
 VARIABLE _TLSC-TCB
@@ -9315,39 +9391,47 @@ VARIABLE _TLSC-CTYPE
     \ 4. Build+send ClientHello
     _TLSC-CTX @ TLS-BUILD-CLIENT-HELLO
     _TLSC-TCB @ ROT ROT TCP-SEND DROP
+    \ 5. Init reassembly buffer & wait for ServerHello
+    0 TLS-RBUF-LEN !
     20 TCP-POLL-WAIT
-    \ 5. Receive ServerHello (plaintext)
-    _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+    \ 6. Read ServerHello record (one complete TLS record)
+    _TLSC-TCB @ TLS-READ-RECORD
     DUP 0= IF DROP 0 EXIT THEN
     _TLSC-RLEN !
+    \ Check outer type = handshake (22)
+    TLS-RECV-REC C@ TLS-CT-HANDSHAKE <> IF 0 EXIT THEN
     \ Parse SH: skip 5-byte TLS record header
     _TLSC-CTX @  TLS-RECV-REC 5 +  _TLSC-RLEN @ 5 -
     TLS-PROCESS-HS-MSG 0<> IF 0 EXIT THEN
-    \ 6. Receive encrypted handshake messages
-    \ (EncryptedExtensions, optionally Cert/CertVerify, server Finished)
-    20 TCP-POLL-WAIT
+    _TLSC-RLEN @ TLS-RBUF-CONSUME
+    \ 7. Receive encrypted handshake messages
+    \ (CCS, EncryptedExtensions, Cert, CertVerify, server Finished)
     BEGIN
         _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-WAIT-FINISHED <
     WHILE
-        _TLSC-TCB @ TLS-RECV-REC 1600 TCP-RECV
+        10 TCP-POLL-WAIT
+        _TLSC-TCB @ TLS-READ-RECORD
         DUP 0= IF DROP 0 EXIT THEN
         _TLSC-RLEN !
-        \ Decrypt record
-        _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
-        TLS-DECRYPT-RECORD
-        DUP 0= IF 2DROP 0 EXIT THEN
-        _TLSC-CTYPE !
-        _TLSC-CTYPE @ TLS-CT-CCS = IF DROP
+        \ Skip CCS records (plaintext, type 20) without decrypting
+        TLS-RECV-REC C@ TLS-CT-CCS = IF
+            _TLSC-RLEN @ TLS-RBUF-CONSUME
         ELSE
-            _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSG
+            \ Decrypt record
+            _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
+            TLS-DECRYPT-RECORD
+            _TLSC-RLEN @ TLS-RBUF-CONSUME
+            DUP 0= IF 2DROP 0 EXIT THEN
+            \ Stack: ctype plen — process all HS messages in plaintext
+            DROP  \ drop inner content type
+            _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSGS
             0<> IF 0 EXIT THEN
         THEN
-        10 TCP-POLL-WAIT
     REPEAT
-    \ 7. Send client Finished + install app keys
+    \ 8. Send client Finished + install app keys
     _TLSC-CTX @  TLS-SEND-REC  TLS-HANDSHAKE-COMPLETE
     _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
-    \ 8. Return context
+    \ 9. Return context
     _TLSC-CTX @
 ;
 
