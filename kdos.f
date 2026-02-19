@@ -1391,9 +1391,14 @@ VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
 : XMEM-TALIGN  ( -- )
     XMEM-HERE @  63 + -64 AND  XMEM-HERE ! ;
 
+VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
+
 \ XMEM-RESET ( -- )  reclaim all external memory (bulk free)
+\   Respects XMEM-FLOOR — will not reset below the userland zone.
 : XMEM-RESET  ( -- )
-    XMEM? IF EXT-MEM-BASE XMEM-HERE ! THEN ;
+    XMEM? IF
+        XMEM-FLOOR @ ?DUP IF XMEM-HERE ! ELSE EXT-MEM-BASE XMEM-HERE ! THEN
+    THEN ;
 
 \ XMEM-FREE ( -- u )  bytes remaining in ext mem
 : XMEM-FREE  ( -- u )
@@ -1412,6 +1417,99 @@ VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
     THEN ;
 
 XMEM-INIT      \ initialise at load time
+
+\ =====================================================================
+\  §1.15  Userland Memory Isolation
+\ =====================================================================
+\
+\  Provides separate dictionary space for user-loaded modules
+\  (tools.f, user scripts) in external RAM, protecting the kernel
+\  dictionary in system RAM from overflow.
+\
+\  When ENTER-USERLAND is called, the Forth dictionary pointer (HERE)
+\  is redirected to external memory.  All subsequent CREATE, ALLOT,
+\  : definitions, VARIABLEs, etc. compile into the userland zone.
+\  System words remain in Bank 0 and are still accessible.
+\
+\  Memory layout when userland is active (ext mem present):
+\
+\    System RAM (Bank 0, 1 MiB):
+\      0x00000 .. dict_free   BIOS code + dictionary
+\      dict_free .. ~0x7F000  KDOS dictionary + system heap
+\      0x80000 .. 0xFFFFF     Stacks (data + return)
+\
+\    External RAM (e.g. 16 MiB at 0x100000):
+\      0x100000 .. +U-ZONE    Userland dictionary (HERE when ULAND=1)
+\      +U-ZONE  .. end        XMEM general allocator
+\
+\  Words:
+\    ULAND           ( -- addr )  flag variable: 0=system, 1=userland
+\    ENTER-USERLAND  ( -- )       switch HERE to userland zone
+\    LEAVE-USERLAND  ( -- )       switch HERE back to system dict
+\    .USERLAND       ( -- )       display userland status
+
+1048576 CONSTANT U-ZONE-SIZE   \ 1 MiB reserved for userland dictionary
+
+VARIABLE ULAND          0 ULAND !
+VARIABLE SYS-HERE-SAVE  0 SYS-HERE-SAVE !
+VARIABLE U-DICT-HERE    0 U-DICT-HERE !
+VARIABLE U-DICT-BASE    0 U-DICT-BASE !
+VARIABLE U-INIT-DONE    0 U-INIT-DONE !
+
+\ USERLAND-INIT ( -- )  Partition ext mem: [0..U-ZONE) = userland,
+\   [U-ZONE..end) = XMEM.  Called lazily on first ENTER-USERLAND.
+\   No-op if ext mem is absent or already initialised.
+: USERLAND-INIT  ( -- )
+    U-INIT-DONE @ IF EXIT THEN
+    XMEM? 0= IF EXIT THEN
+    \ Start userland dict ABOVE any prior XMEM allocations (e.g. file
+    \ buffers for graphics.f / autoexec.f that _MOD-LOAD-BODY placed
+    \ via XMEM-ALLOT).  Cell-align for safe @ / ! access.
+    XMEM-HERE @ 7 + -8 AND  DUP U-DICT-BASE ! U-DICT-HERE !
+    \ Push XMEM allocator past the userland zone
+    U-DICT-BASE @ U-ZONE-SIZE +  DUP XMEM-HERE ! XMEM-FLOOR !
+    1 U-INIT-DONE ! ;
+
+\ ENTER-USERLAND ( -- )  Save system HERE, redirect to userland dict.
+: ENTER-USERLAND  ( -- )
+    XMEM? 0= IF ." No ext mem -- userland disabled" CR EXIT THEN
+    ULAND @ IF EXIT THEN             \ already in userland
+    U-INIT-DONE @ 0= IF USERLAND-INIT THEN
+    HERE SYS-HERE-SAVE !             \ save system dict pointer
+    U-DICT-HERE @ HERE - ALLOT       \ HERE <- userland dict pointer
+    1 ULAND ! ;
+
+\ LEAVE-USERLAND ( -- )  Save userland HERE, restore system dict.
+: LEAVE-USERLAND  ( -- )
+    ULAND @ 0= IF EXIT THEN          \ not in userland
+    HERE U-DICT-HERE !               \ save userland dict pointer
+    SYS-HERE-SAVE @ HERE - ALLOT     \ HERE <- system dict pointer
+    0 ULAND ! ;
+
+\ U-HERE ( -- addr )  Current userland dictionary pointer.
+: U-HERE  ( -- addr )
+    ULAND @ IF HERE ELSE U-DICT-HERE @ THEN ;
+
+\ U-USED ( -- u )  Bytes used in userland dictionary.
+: U-USED  ( -- u )
+    ULAND @ IF HERE ELSE U-DICT-HERE @ THEN
+    U-DICT-BASE @ - ;
+
+\ U-FREE ( -- u )  Bytes remaining in userland dictionary zone.
+: U-FREE  ( -- u )
+    U-ZONE-SIZE U-USED - ;
+
+\ .USERLAND ( -- )  Display userland status.
+: .USERLAND  ( -- )
+    ." Userland:" CR
+    XMEM? IF
+        ."   Mode  = " ULAND @ IF ." ACTIVE" ELSE ." system" THEN CR
+        ."   Base  = " U-DICT-BASE @ . CR
+        ."   Used  = " U-USED . ." bytes" CR
+        ."   Free  = " U-FREE . ." bytes" CR
+    ELSE
+        ."   (no ext mem -- userland disabled)" CR
+    THEN ;
 
 \ =====================================================================
 \  §2  Buffer Subsystem
@@ -9762,6 +9860,12 @@ MAC-INIT
 10 64 0 2 IP-SET
 PORT-INIT
 DISK? IF FS-LOAD THEN
+
+\ Force system heap initialisation before userland can confuse HEAP-SETUP.
+\ ALLOCATE 16 bytes to trigger lazy HEAP-SETUP, then FREE immediately.
+\ This ensures the system heap is ready and HEAP-INIT=1, so any later
+\ ALLOCATE calls (even from userland code) use the system heap safely.
+16 ALLOCATE DROP FREE
 
 \ -- AUTOEXEC: run autoexec.f if present on disk --
 \ Must use a colon definition because FSLOAD evaluates each line
