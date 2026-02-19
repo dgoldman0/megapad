@@ -960,15 +960,16 @@ class SpinlockDevice(Device):
 
 
 # ---------------------------------------------------------------------------
-#  AES-256-GCM Accelerator
+#  AES-GCM Accelerator (AES-128 / AES-256)
 # ---------------------------------------------------------------------------
 # Register map (offsets from AES_BASE = 0x0700):
-#   0x00..0x1F  AES_KEY    (W)   — 256-bit key (32 bytes LE)
+#   0x00..0x1F  AES_KEY    (W)   — 256-bit key (32 bytes LE) / 128-bit in lo 16
 #   0x20..0x2B  AES_IV     (W)   — 96-bit IV/nonce (12 bytes LE)
 #   0x30..0x33  AES_AAD_LEN(W)   — AAD length in bytes (32-bit LE)
 #   0x34..0x37  AES_DATA_LEN(W)  — Plaintext/ciphertext length (32-bit LE)
 #   0x38        AES_CMD    (W)   — 0=encrypt, 1=decrypt
 #   0x39        AES_STATUS (R)   — 0=idle, 1=busy, 2=done, 3=auth-fail
+#   0x3A        AES_KEY_MODE(W)  — 0=AES-256 (default), 1=AES-128
 #   0x40..0x4F  AES_DIN    (W)   — 128-bit data input (16 bytes LE)
 #   0x50..0x5F  AES_DOUT   (R)   — 128-bit data output (16 bytes LE)
 #   0x60..0x6F  AES_TAG    (R/W) — 128-bit GCM authentication tag
@@ -1004,6 +1005,26 @@ _AES_SBOX = bytes([
 _AES_RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
 
 
+def _aes128_key_expand(key_bytes: bytes) -> list[bytes]:
+    """Expand 16-byte key into 11 round keys (each 16 bytes)."""
+    assert len(key_bytes) == 16
+    nk, nr = 4, 10
+    w = []
+    for i in range(nk):
+        w.append(key_bytes[4*i:4*i+4])
+    for i in range(nk, 4 * (nr + 1)):
+        t = bytearray(w[i-1])
+        if i % nk == 0:
+            t = bytearray([_AES_SBOX[t[1]], _AES_SBOX[t[2]],
+                           _AES_SBOX[t[3]], _AES_SBOX[t[0]]])
+            t[0] ^= _AES_RCON[i // nk - 1]
+        w.append(bytes(a ^ b for a, b in zip(w[i - nk], t)))
+    rkeys = []
+    for r in range(nr + 1):
+        rkeys.append(b''.join(w[4*r:4*r+4]))
+    return rkeys
+
+
 def _aes256_key_expand(key_bytes: bytes) -> list[bytes]:
     """Expand 32-byte key into 15 round keys (each 16 bytes)."""
     assert len(key_bytes) == 32
@@ -1027,10 +1048,11 @@ def _aes256_key_expand(key_bytes: bytes) -> list[bytes]:
 
 
 def _aes_encrypt_block(block: bytes, rkeys: list[bytes]) -> bytes:
-    """Encrypt a single 16-byte block with AES-256."""
+    """Encrypt a single 16-byte block with AES (128 or 256, auto-detected)."""
     assert len(block) == 16
+    nr = len(rkeys) - 1  # 10 for AES-128, 14 for AES-256
     s = bytearray(a ^ b for a, b in zip(block, rkeys[0]))
-    for r in range(1, 14):
+    for r in range(1, nr):
         # SubBytes
         s = bytearray(_AES_SBOX[b] for b in s)
         # ShiftRows
@@ -1059,7 +1081,7 @@ def _aes_encrypt_block(block: bytes, rkeys: list[bytes]) -> bytes:
         s[8], s[13], s[2], s[7],
         s[12], s[1], s[6], s[11],
     ])
-    return bytes(a ^ b for a, b in zip(s, rkeys[14]))
+    return bytes(a ^ b for a, b in zip(s, rkeys[nr]))
 
 
 def _gm2(v):
@@ -1105,7 +1127,7 @@ def _inc32(counter: bytearray):
 
 
 class AESDevice(Device):
-    """AES-256-GCM hardware accelerator."""
+    """AES-GCM hardware accelerator (AES-128 and AES-256)."""
 
     def __init__(self):
         super().__init__("AES", AES_BASE, 0x70)
@@ -1118,6 +1140,7 @@ class AESDevice(Device):
         self.data_len = 0
         self.cmd = 0          # 0=encrypt, 1=decrypt
         self.status = 0       # 0=idle, 2=done, 3=auth-fail
+        self.key_mode = 0     # 0=AES-256, 1=AES-128
         self.din = bytearray(16)
         self.dout = bytearray(16)
         self.tag = bytearray(16)
@@ -1134,6 +1157,8 @@ class AESDevice(Device):
     def read8(self, offset: int) -> int:
         if 0x39 <= offset < 0x3A:
             return self.status
+        elif offset == 0x3A:
+            return self.key_mode
         elif 0x50 <= offset < 0x60:
             return self.dout[offset - 0x50]
         elif 0x60 <= offset < 0x70:
@@ -1158,6 +1183,8 @@ class AESDevice(Device):
             # CMD — triggers key expansion and GCM init
             self.cmd = value & 1
             self._start_gcm()
+        elif offset == 0x3A:
+            self.key_mode = value & 1
         elif 0x40 <= offset < 0x50:
             idx = offset - 0x40
             self.din[idx] = value
@@ -1170,7 +1197,12 @@ class AESDevice(Device):
 
     def _start_gcm(self):
         """Initialize GCM state: expand key, compute H, set up counter."""
-        self._rkeys = _aes256_key_expand(bytes(self.key))
+        if self.key_mode == 1:
+            # AES-128: use lower 16 bytes of key register
+            self._rkeys = _aes128_key_expand(bytes(self.key[:16]))
+        else:
+            # AES-256: full 32-byte key
+            self._rkeys = _aes256_key_expand(bytes(self.key))
         # H = AES_K(0^128)
         h_bytes = _aes_encrypt_block(b'\x00' * 16, self._rkeys)
         self._h = _bytes_to_int128(h_bytes)

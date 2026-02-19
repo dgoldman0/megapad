@@ -1,16 +1,18 @@
 // ============================================================================
-// mp64_aes.v — AES-256-GCM Accelerator
+// mp64_aes.v — AES-128/256-GCM Accelerator
 // ============================================================================
 //
-// Pipelined AES-256 encryption/decryption with GCM authentication.
+// Pipelined AES-128/256 encryption/decryption with GCM authentication.
 // MMIO base: 0x700 (64 bytes).
 //
 // Features:
-//   - 256-bit key, 96-bit IV, 128-bit blocks
+//   - 128 or 256-bit key (selected via KEY_MODE register at 0x3A)
+//   - 96-bit IV, 128-bit blocks
 //   - Encrypt and decrypt modes
 //   - GHASH for GCM authentication tag
 //   - Interrupt on block completion
-//   - 1 block per ~14 cycles (14 AES-256 rounds, sequential)
+//   - AES-256: 1 block per ~14 cycles (14 rounds)
+//   - AES-128: 1 block per ~10 cycles (10 rounds)
 //
 
 `include "mp64_pkg.vh"
@@ -225,6 +227,9 @@ module mp64_aes (
                 4'd4:  rcon = 8'h10;
                 4'd5:  rcon = 8'h20;
                 4'd6:  rcon = 8'h40;
+                4'd7:  rcon = 8'h80;
+                4'd8:  rcon = 8'h1b;
+                4'd9:  rcon = 8'h36;
                 default: rcon = 8'h00;
             endcase
         end
@@ -233,14 +238,21 @@ module mp64_aes (
     // ========================================================================
     // Configuration Registers
     // ========================================================================
-    reg [255:0] key;           // 256-bit key
+    reg [255:0] key;           // 256-bit key (128-bit uses upper 128)
     reg [95:0]  iv;            // 96-bit IV
     reg [31:0]  aad_len;       // AAD length in bytes
     reg [31:0]  data_len;      // Data length in bytes
     reg         cmd_encrypt;   // 0=encrypt, 1=decrypt
+    reg         key_mode;      // 0=AES-256 (default), 1=AES-128
     reg [127:0] data_in;       // 128-bit input block
     reg [127:0] data_out;      // 128-bit output block
     reg [127:0] tag;           // 128-bit GCM tag
+
+    // Derived: number of rounds and round keys
+    wire [3:0]  nr;            // 10 for AES-128, 14 for AES-256
+    assign nr = key_mode ? 4'd10 : 4'd14;
+    wire [3:0]  num_rk;        // 11 for AES-128, 15 for AES-256
+    assign num_rk = key_mode ? 4'd11 : 4'd15;
 
     // Status
     reg         busy;
@@ -251,12 +263,12 @@ module mp64_aes (
     always @(*) status = {5'd0, auth_fail, done, busy};
 
     // ========================================================================
-    // AES-256 Key Expansion (on-the-fly, sequential)
+    // AES Key Expansion (on-the-fly, sequential)
     // ========================================================================
-    // AES-256 needs 15 round keys (rounds 0-14). We compute them on-the-fly.
+    // AES-256 needs 15 round keys, AES-128 needs 11.
     reg [127:0] round_key;     // Current round key
     reg [255:0] exp_key;       // Key expansion state (full 256-bit)
-    reg [3:0]   round_cnt;     // 0..14
+    reg [3:0]   round_cnt;     // 0..nr
 
     // One round of key expansion
     function [31:0] sub_word;
@@ -422,14 +434,14 @@ module mp64_aes (
     reg [3:0]   key_round;     // Key expansion round index
     reg [127:0] enc_block;     // Encrypted counter block (XOR with plaintext)
 
-    // Round key storage for AES-256 (15 round keys, 128 bits each)
+    // Round key storage (15 max for AES-256, 11 used for AES-128)
     reg [127:0] rk [0:14];
     reg [3:0]   rk_gen_cnt;    // Round key generation counter
 
     // ========================================================================
-    // Key Schedule — generate all 15 round keys up front
+    // Key Schedule — generate round keys up front
     // ========================================================================
-    reg [31:0] w [0:7];        // Initial 8 key words
+    reg [31:0] w [0:7];        // Initial key words (8 for AES-256, 4 for AES-128)
     reg [3:0]  ks_step;
     reg [31:0] ks_temp;
 
@@ -456,6 +468,7 @@ module mp64_aes (
             aad_len      <= 32'd0;
             data_len     <= 32'd0;
             cmd_encrypt  <= 1'b0;
+            key_mode     <= 1'b0;
             data_in      <= 128'd0;
             state_blk    <= 128'd0;
             for (rk_rst_i = 0; rk_rst_i < 15; rk_rst_i = rk_rst_i + 1)
@@ -477,70 +490,104 @@ module mp64_aes (
                 end
 
                 // ====================================================
-                // KEY_EXPAND — generate 15 round keys from 256-bit key
+                // KEY_EXPAND — generate round keys from key
+                // Supports both AES-128 (11 rkeys) and AES-256 (15)
                 // ====================================================
                 AES_KEY_EXPAND: begin
                     if (rk_gen_cnt == 4'd0) begin
-                        // Initialize W[0..7] from key
-                        w[0] <= key[255:224]; w[1] <= key[223:192];
-                        w[2] <= key[191:160]; w[3] <= key[159:128];
-                        w[4] <= key[127:96];  w[5] <= key[95:64];
-                        w[6] <= key[63:32];   w[7] <= key[31:0];
-                        rk[0] <= key[255:128]; // First round key = first 128 bits
-                        rk[1] <= key[127:0];   // Second round key = last 128 bits
-                        rk_gen_cnt <= 4'd2;
+                        if (key_mode) begin
+                            // AES-128: key is in key[255:128] (upper 128 bits)
+                            w[0] <= key[255:224]; w[1] <= key[223:192];
+                            w[2] <= key[191:160]; w[3] <= key[159:128];
+                            rk[0] <= key[255:128];
+                            rk_gen_cnt <= 4'd1;
+                        end else begin
+                            // AES-256: full 256-bit key
+                            w[0] <= key[255:224]; w[1] <= key[223:192];
+                            w[2] <= key[191:160]; w[3] <= key[159:128];
+                            w[4] <= key[127:96];  w[5] <= key[95:64];
+                            w[6] <= key[63:32];   w[7] <= key[31:0];
+                            rk[0] <= key[255:128];
+                            rk[1] <= key[127:0];
+                            rk_gen_cnt <= 4'd2;
+                        end
                         ks_step <= 4'd0;
-                    end else if (rk_gen_cnt <= 4'd14) begin
-                        // Generate next round key
-                        case (ks_step)
-                            4'd0: begin
-                                if (rk_gen_cnt[0] == 0) begin
-                                    // Even round: SubWord(RotWord(w[7])) ^ rcon
-                                    ks_temp <= sub_word(rot_word(w[7])) ^ {rcon(rk_gen_cnt[3:1] - 1), 24'd0};
-                                end else begin
-                                    // Odd round: SubWord(w[7])
-                                    ks_temp <= sub_word(w[3]);
+                    end else if (rk_gen_cnt < num_rk) begin
+                        if (key_mode) begin
+                            // ---- AES-128 key schedule ----
+                            // Each round: SubWord(RotWord(w[3])) ^ rcon, then XOR chain
+                            case (ks_step)
+                                4'd0: begin
+                                    ks_temp <= sub_word(rot_word(w[3])) ^
+                                              {rcon(rk_gen_cnt - 1), 24'd0};
+                                    ks_step <= 4'd1;
                                 end
-                                ks_step <= 4'd1;
-                            end
-                            4'd1: begin
-                                if (rk_gen_cnt[0] == 0) begin
+                                4'd1: begin
                                     w[0] <= w[0] ^ ks_temp;
                                     w[1] <= w[1] ^ (w[0] ^ ks_temp);
                                     w[2] <= w[2] ^ w[1] ^ (w[0] ^ ks_temp);
                                     w[3] <= w[3] ^ w[2] ^ w[1] ^ (w[0] ^ ks_temp);
-                                end else begin
-                                    w[4] <= w[4] ^ ks_temp;
-                                    w[5] <= w[5] ^ (w[4] ^ ks_temp);
-                                    w[6] <= w[6] ^ w[5] ^ (w[4] ^ ks_temp);
-                                    w[7] <= w[7] ^ w[6] ^ w[5] ^ (w[4] ^ ks_temp);
+                                    ks_step <= 4'd2;
                                 end
-                                ks_step <= 4'd2;
-                            end
-                            4'd2: begin
-                                if (rk_gen_cnt[0] == 0) begin
+                                4'd2: begin
                                     rk[rk_gen_cnt] <= {w[0] ^ ks_temp,
                                                        w[1] ^ (w[0] ^ ks_temp),
                                                        w[2] ^ w[1] ^ (w[0] ^ ks_temp),
                                                        w[3] ^ w[2] ^ w[1] ^ (w[0] ^ ks_temp)};
-                                end else begin
-                                    rk[rk_gen_cnt] <= {w[4] ^ ks_temp,
-                                                       w[5] ^ (w[4] ^ ks_temp),
-                                                       w[6] ^ w[5] ^ (w[4] ^ ks_temp),
-                                                       w[7] ^ w[6] ^ w[5] ^ (w[4] ^ ks_temp)};
+                                    rk_gen_cnt <= rk_gen_cnt + 1;
+                                    ks_step <= 4'd0;
                                 end
-                                rk_gen_cnt <= rk_gen_cnt + 1;
-                                ks_step <= 4'd0;
-                            end
-                            default: ks_step <= 4'd0;
-                        endcase
+                                default: ks_step <= 4'd0;
+                            endcase
+                        end else begin
+                            // ---- AES-256 key schedule ----
+                            case (ks_step)
+                                4'd0: begin
+                                    if (rk_gen_cnt[0] == 0) begin
+                                        ks_temp <= sub_word(rot_word(w[7])) ^
+                                                  {rcon(rk_gen_cnt[3:1] - 1), 24'd0};
+                                    end else begin
+                                        ks_temp <= sub_word(w[3]);
+                                    end
+                                    ks_step <= 4'd1;
+                                end
+                                4'd1: begin
+                                    if (rk_gen_cnt[0] == 0) begin
+                                        w[0] <= w[0] ^ ks_temp;
+                                        w[1] <= w[1] ^ (w[0] ^ ks_temp);
+                                        w[2] <= w[2] ^ w[1] ^ (w[0] ^ ks_temp);
+                                        w[3] <= w[3] ^ w[2] ^ w[1] ^ (w[0] ^ ks_temp);
+                                    end else begin
+                                        w[4] <= w[4] ^ ks_temp;
+                                        w[5] <= w[5] ^ (w[4] ^ ks_temp);
+                                        w[6] <= w[6] ^ w[5] ^ (w[4] ^ ks_temp);
+                                        w[7] <= w[7] ^ w[6] ^ w[5] ^ (w[4] ^ ks_temp);
+                                    end
+                                    ks_step <= 4'd2;
+                                end
+                                4'd2: begin
+                                    if (rk_gen_cnt[0] == 0) begin
+                                        rk[rk_gen_cnt] <= {w[0] ^ ks_temp,
+                                                           w[1] ^ (w[0] ^ ks_temp),
+                                                           w[2] ^ w[1] ^ (w[0] ^ ks_temp),
+                                                           w[3] ^ w[2] ^ w[1] ^ (w[0] ^ ks_temp)};
+                                    end else begin
+                                        rk[rk_gen_cnt] <= {w[4] ^ ks_temp,
+                                                           w[5] ^ (w[4] ^ ks_temp),
+                                                           w[6] ^ w[5] ^ (w[4] ^ ks_temp),
+                                                           w[7] ^ w[6] ^ w[5] ^ (w[4] ^ ks_temp)};
+                                    end
+                                    rk_gen_cnt <= rk_gen_cnt + 1;
+                                    ks_step <= 4'd0;
+                                end
+                                default: ks_step <= 4'd0;
+                            endcase
+                        end
                     end else begin
                         // All round keys generated. Compute H = AES_K(0).
                         state_blk <= 128'd0;
                         round_cnt <= 4'd0;
                         aes_state <= AES_ROUND;
-                        // After computing H, we'll store it in ghash_h
-                        // and then set up CTR mode
                     end
                 end
 
@@ -552,47 +599,43 @@ module mp64_aes (
                         // Initial AddRoundKey
                         state_blk <= state_blk ^ rk[0];
                         round_cnt <= 4'd1;
-                    end else if (round_cnt < 4'd14) begin
-                        // Rounds 1-13: SubBytes → ShiftRows → MixColumns → AddRoundKey
+                    end else if (round_cnt < nr) begin
+                        // Rounds 1..(nr-1): SubBytes → ShiftRows → MixColumns → AddRoundKey
                         if (!cmd_encrypt && ghash_h != 128'd0) begin
-                            // Decrypt: InvShiftRows → InvSubBytes → AddRoundKey → InvMixColumns
                             state_blk <= inv_mix_columns(
                                 add_round_key(
                                     inv_sub_bytes(inv_shift_rows(state_blk)),
                                     rk[round_cnt]));
                         end else begin
-                            // Encrypt (or H computation)
                             state_blk <= add_round_key(
                                 mix_columns(shift_rows(sub_bytes(state_blk))),
                                 rk[round_cnt]);
                         end
                         round_cnt <= round_cnt + 1;
                     end else begin
-                        // Round 14 (final): no MixColumns
+                        // Final round (nr): no MixColumns
                         if (!cmd_encrypt && ghash_h != 128'd0) begin
                             state_blk <= add_round_key(
                                 inv_sub_bytes(inv_shift_rows(state_blk)),
-                                rk[14]);
+                                rk[nr]);
                         end else begin
                             state_blk <= add_round_key(
                                 shift_rows(sub_bytes(state_blk)),
-                                rk[14]);
+                                rk[nr]);
                         end
 
                         if (ghash_h == 128'd0) begin
                             // First encryption was for H computation
-                            ghash_h <= state_blk ^ rk[14]; // will be set next cycle
-                            // Now set up CTR block: IV || counter=1
+                            ghash_h <= state_blk ^ rk[nr];
                             ctr_blk <= {iv, 32'd1};
                             ctr_val <= 32'd1;
-                            // Initialize GHASH accumulator
                             ghash_acc <= 128'd0;
                             done <= 1'b1;
                             busy <= 1'b0;
                             aes_state <= AES_IDLE;
                         end else begin
                             // Block encryption/decryption complete
-                            enc_block <= state_blk ^ rk[14]; // next cycle
+                            enc_block <= state_blk ^ rk[nr];
                             aes_state <= AES_DONE;
                         end
                     end
@@ -696,6 +739,8 @@ module mp64_aes (
                         end
                     end
                     // Tag writes (for decrypt verification)
+                    // Key mode register
+                    7'h3a: key_mode <= wdata[0];
                     7'h60: tag[127:96] <= wdata[31:0];
                     7'h64: tag[95:64]  <= wdata[31:0];
                     7'h68: tag[63:32]  <= wdata[31:0];
@@ -716,6 +761,7 @@ module mp64_aes (
             if (!wen) begin
                 case (addr)
                     7'h39:   rdata <= {56'd0, status};
+                    7'h3a:   rdata <= {63'd0, key_mode};
                     7'h50:   rdata <= {32'd0, data_out[127:96]};
                     7'h54:   rdata <= {32'd0, data_out[95:64]};
                     7'h58:   rdata <= {32'd0, data_out[63:32]};

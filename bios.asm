@@ -7887,6 +7887,14 @@ w_aes_status_fetch:
     str r14, r0
     ret.l
 
+; AES-KEY-MODE! ( n -- )  Set key mode: 0=AES-256, 1=AES-128.
+w_aes_key_mode_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_073A   ; AES_KEY_MODE
+    st.b r11, r0
+    ret.l
+
 ; AES-DIN! ( addr -- )  Write 16-byte block from memory to AES_DIN.
 w_aes_din_store:
     ldn r9, r14
@@ -11009,9 +11017,18 @@ d_aes_status_fetch:
     call.l r11
     ret.l
 
+; === AES-KEY-MODE! ===
+d_aes_key_mode_store:
+    .dq d_aes_status_fetch
+    .db 13
+    .ascii "AES-KEY-MODE!"
+    ldi64 r11, w_aes_key_mode_store
+    call.l r11
+    ret.l
+
 ; === AES-DIN! ===
 d_aes_din_store:
-    .dq d_aes_status_fetch
+    .dq d_aes_key_mode_store
     .db 8
     .ascii "AES-DIN!"
     ldi64 r11, w_aes_din_store

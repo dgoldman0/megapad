@@ -684,6 +684,9 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
 VARIABLE _HGS-CTX
 VARIABLE _HGS-EMPTY
 : HTTPS-GET  ( -- ior )
+    \ Set SNI hostname from URL parser state
+    _SC-HOST-LEN @ 63 MIN DUP TLS-SNI-LEN !
+    _SC-HOST TLS-SNI-HOST ROT CMOVE
     _SC-IP @ _SC-PORT @ 12345 TLS-CONNECT
     DUP 0= IF ."  TLS connect failed" CR -1 EXIT THEN
     _HGS-CTX !
