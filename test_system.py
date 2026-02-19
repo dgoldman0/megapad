@@ -18737,6 +18737,101 @@ class TestToolsModule(_KDOSTestBase):
             os.unlink(img)
 
 
+class TestKDOSUserland(_KDOSTestBase):
+    """Tests for §1.15 Userland Memory Isolation."""
+
+    def test_enter_userland(self):
+        """ENTER-USERLAND sets ULAND flag to 1."""
+        text = self._run_kdos(['ENTER-USERLAND  30000 ULAND @ + .'])
+        self.assertIn('30001', text)
+
+    def test_leave_userland(self):
+        """LEAVE-USERLAND clears ULAND flag."""
+        text = self._run_kdos([
+            'ENTER-USERLAND LEAVE-USERLAND',
+            '98765 ULAND @ + .',
+        ])
+        self.assertIn('98765', text)
+
+    def test_here_restored_after_leave(self):
+        """HERE is restored to its system value after LEAVE-USERLAND."""
+        text = self._run_kdos([
+            'HERE',
+            'ENTER-USERLAND LEAVE-USERLAND',
+            ': HCHK  HERE = IF 55551 ELSE 44441 THEN . ; HCHK',
+        ])
+        self.assertIn('55551', text)
+
+    def test_userland_here_in_extmem(self):
+        """After ENTER-USERLAND, HERE equals EXT-MEM-BASE."""
+        text = self._run_kdos(['ENTER-USERLAND  HERE .'])
+        self.assertIn('1048576', text)
+
+    def test_create_in_userland(self):
+        """CREATE in userland allocates data body in ext mem."""
+        text = self._run_kdos([
+            'ENTER-USERLAND',
+            'CREATE UTBUF 256 ALLOT',
+            ': UCHK  UTBUF 1048576 >= IF 77771 ELSE 66661 THEN . ; UCHK',
+        ])
+        self.assertIn('77771', text)
+
+    def test_system_words_from_userland(self):
+        """System words remain accessible from userland code."""
+        text = self._run_kdos(['ENTER-USERLAND  12345 6789 + .'])
+        self.assertIn('19134', text)
+
+    def test_allocate_in_userland(self):
+        """ALLOCATE still works in userland (uses system heap)."""
+        text = self._run_kdos([
+            'ENTER-USERLAND',
+            '64 ALLOCATE SWAP DROP 56781 + .',
+        ])
+        self.assertIn('56781', text)
+
+    def test_dot_userland(self):
+        """.USERLAND prints status header."""
+        text = self._run_kdos(['.USERLAND'])
+        self.assertIn('Userland:', text)
+
+    def test_dot_userland_active(self):
+        """.USERLAND shows ACTIVE when in userland."""
+        text = self._run_kdos(['ENTER-USERLAND .USERLAND'])
+        self.assertIn('ACTIVE', text)
+
+    def test_xmem_floor_protects(self):
+        """XMEM-RESET respects the userland zone floor."""
+        text = self._run_kdos([
+            'ENTER-USERLAND LEAVE-USERLAND',
+            '4096 XMEM-ALLOT DROP XMEM-RESET',
+            'XMEM-HERE @ .',
+        ])
+        self.assertIn('2097152', text)
+
+    def test_u_used(self):
+        """U-USED reports bytes used in userland dictionary."""
+        text = self._run_kdos(['ENTER-USERLAND  333 ALLOT  10000 U-USED + .'])
+        self.assertIn('10333', text)
+
+    def test_u_free(self):
+        """U-FREE reports bytes remaining in userland zone."""
+        text = self._run_kdos(['ENTER-USERLAND  333 ALLOT  U-FREE .'])
+        self.assertIn('1048243', text)  # 1048576 - 333
+
+    def test_enter_idempotent(self):
+        """Calling ENTER-USERLAND twice is safe (no-op)."""
+        text = self._run_kdos([
+            'ENTER-USERLAND ENTER-USERLAND',
+            '30000 ULAND @ + .',
+        ])
+        self.assertIn('30001', text)
+
+    def test_leave_without_enter(self):
+        """LEAVE-USERLAND when not in userland is safe (no-op)."""
+        text = self._run_kdos(['LEAVE-USERLAND  87654 ULAND @ + .'])
+        self.assertIn('87654', text)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Megapad-64 System Integration Tests")

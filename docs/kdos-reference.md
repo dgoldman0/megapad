@@ -33,6 +33,7 @@ variables/constants/creates** — roughly 1,058 named entities in total across
    - [§1.11 NTT Engine](#111-ntt-engine)
    - [§1.12 ML-KEM-512 (Kyber)](#112-ml-kem-512-kyber)
    - [§1.13 Hybrid PQ Key Exchange](#113-hybrid-pq-key-exchange)
+   - [§1.15 Userland Memory Isolation](#115-userland-memory-isolation)
 2. [§2 Buffer Subsystem](#2-buffer-subsystem)
 3. [§3 Tile-Aware Buffer Operations](#3-tile-aware-buffer-operations)
 4. [§4 Kernel Registry](#4-kernel-registry)
@@ -261,6 +262,44 @@ a single 32-byte hybrid shared secret.
 | `PQ-EXCHANGE-INIT` | `( peer-x25519 peer-pk ct ss -- )` | Initiator side: X25519 ECDH + ML-KEM encaps → hybrid SS. |
 | `PQ-EXCHANGE-RESP` | `( peer-x25519 ct ss -- )` | Responder side: X25519 ECDH + ML-KEM decaps → hybrid SS. |
 | `PQ-DERIVE` | `( x-ss k-ss out -- )` | Derive 32-byte hybrid key from X25519 SS + Kyber SS via HKDF. |
+
+---
+
+### §1.15 Userland Memory Isolation
+
+Provides separate dictionary space in external RAM for user-loaded modules
+(tools.f, user scripts), protecting the kernel dictionary in system RAM
+from overflow.  When `ENTER-USERLAND` is called, the Forth dictionary
+pointer (`HERE`) is redirected to external memory.  All subsequent
+`CREATE`, `ALLOT`, `:` definitions, `VARIABLE`s, etc. compile into the
+userland zone.  System words remain accessible.
+
+**Memory layout (ext mem present):**
+
+| Region | Address Range | Contents |
+|--------|--------------|----------|
+| System RAM | `0x00000 .. HERE` | BIOS + KDOS dictionary |
+| System heap | `HERE+4K .. 0x7F000` | `ALLOCATE` / `FREE` blocks |
+| Stacks | `0x80000 .. 0xFFFFF` | Data stack + return stack |
+| Userland dict | `EXT-MEM-BASE+N .. +U-ZONE-SIZE` | User word definitions + data |
+| XMEM general | `+U-ZONE-SIZE .. end` | `XMEM-ALLOT` bump allocator |
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `ENTER-USERLAND` | `( -- )` | Save system HERE, redirect to userland dictionary zone. |
+| `LEAVE-USERLAND` | `( -- )` | Save userland HERE, restore system dictionary pointer. |
+| `ULAND` | `( -- addr )` | Variable: 0 = system mode, 1 = userland mode. |
+| `U-HERE` | `( -- addr )` | Current userland dictionary pointer (even when in system mode). |
+| `U-USED` | `( -- u )` | Bytes used in the userland dictionary. |
+| `U-FREE` | `( -- u )` | Bytes remaining in the userland zone. |
+| `.USERLAND` | `( -- )` | Display userland memory status. |
+| `U-ZONE-SIZE` | `( -- u )` | Constant: 1 MiB (size of the userland dictionary zone). |
+
+> **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
+> `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`
+> and the current `HERE` after execution; since `ENTER-USERLAND` moves `HERE`
+> to ext mem, this clear loop would wipe system RAM.  Wrap the call in a
+> colon definition instead: `: _GO  XMEM? IF ENTER-USERLAND THEN ; _GO`.
 
 ---
 

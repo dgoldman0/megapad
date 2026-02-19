@@ -1,12 +1,12 @@
 \ autoexec.f — Megapad-64 boot script
 \ Loaded automatically by KDOS at startup if present on disk.
-\ Sets up default modules and network.
+\ Loads system modules, sets up networking, then switches to userland
+\ for user-facing modules.
 
 PROVIDED autoexec.f
 
-\ ── Load extension modules ────────────────────────────────────────────
+\ ── Load system modules ───────────────────────────────────────────────
 REQUIRE graphics.f
-REQUIRE tools.f
 
 \ ── Network auto-configuration ────────────────────────────────────────
 \ NET-STATUS bit 2 = link up, bit 7 = NIC present.
@@ -32,4 +32,16 @@ REQUIRE tools.f
     THEN ;
 
 AUTOEXEC-NET
+
+\ ── Load user modules ─────────────────────────────────────────────────
+REQUIRE tools.f
+
+\ ── Switch to userland ────────────────────────────────────────────────
+\ After all modules are loaded, switch to userland so interactive
+\ definitions from the REPL go to ext mem.
+\ NOTE: Must wrap in a : definition — interpret-mode IF compiles temp
+\ code at HERE and clears up to var_here afterward.  ENTER-USERLAND
+\ changes HERE, which would make the clear loop wipe system RAM.
+: _ENTER-UL  XMEM? IF ENTER-USERLAND THEN ;
+_ENTER-UL
 

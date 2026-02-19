@@ -909,8 +909,8 @@ def main():
                         help="Open a pygame window showing the framebuffer")
     parser.add_argument("--scale", type=int, default=2, metavar="N",
                         help="Pixel scale factor for display window (default: 2)")
-    parser.add_argument("--extmem", type=int, default=0, metavar="MiB",
-                        help="External memory size in MiB (default: 0, e.g. 4 or 8)")
+    parser.add_argument("--extmem", type=int, default=16, metavar="MiB",
+                        help="External memory size in MiB (default: 16, set 0 to disable)")
     args = parser.parse_args()
 
     # ---- Assemble-only mode -------------------------------------------
