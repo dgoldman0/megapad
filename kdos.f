@@ -519,8 +519,10 @@ CREATE AES-TAG-BUF 16 ALLOT
 \   TLS 1.3 requires AAD (the 5-byte record header) be authenticated
 \   but not encrypted.  These words extend AES-ENCRYPT/DECRYPT with AAD.
 CREATE AES-AAD-PAD 16 ALLOT           \ zero-padded AAD block
+CREATE AES-PARTIAL-PAD 16 ALLOT       \ zero-padded partial final block
 VARIABLE _AEAD-AAD
 VARIABLE _AEAD-AADLEN
+VARIABLE _AEAD-REM
 
 : AES-ENCRYPT-AEAD ( key iv aad aadlen src dst dlen -- tag-addr )
     >R >R >R            \ R: dlen dst src.  Stack: key iv aad aadlen
@@ -536,7 +538,8 @@ VARIABLE _AEAD-AADLEN
     AES-AAD-PAD 16 0 FILL
     _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
     AES-AAD-PAD AES-DIN!
-    \ Feed data blocks
+    \ Feed complete 16-byte data blocks
+    DUP 15 AND _AEAD-REM !
     DUP 4 RSHIFT         \ src dst dlen nblocks
     >R DROP               \ src dst   R: nblocks
     R> 0 DO
@@ -544,6 +547,14 @@ VARIABLE _AEAD-AADLEN
         DUP AES-DOUT@
         SWAP 16 + SWAP 16 +
     LOOP
+    \ Handle partial final block (non-16-aligned data)
+    _AEAD-REM @ 0> IF
+        AES-PARTIAL-PAD 16 0 FILL
+        OVER AES-PARTIAL-PAD _AEAD-REM @ CMOVE
+        AES-PARTIAL-PAD AES-DIN!
+        AES-PARTIAL-PAD AES-DOUT@
+        AES-PARTIAL-PAD OVER _AEAD-REM @ CMOVE
+    THEN
     2DROP
     AES-TAG-BUF AES-TAG@
     AES-TAG-BUF
@@ -564,7 +575,8 @@ VARIABLE _AEAD-AADLEN
     AES-AAD-PAD 16 0 FILL
     _AEAD-AAD @ AES-AAD-PAD _AEAD-AADLEN @ CMOVE
     AES-AAD-PAD AES-DIN!
-    \ Feed data blocks
+    \ Feed complete 16-byte data blocks
+    DUP 15 AND _AEAD-REM !
     DUP 4 RSHIFT
     >R DROP
     R> 0 DO
@@ -572,6 +584,14 @@ VARIABLE _AEAD-AADLEN
         DUP AES-DOUT@
         SWAP 16 + SWAP 16 +
     LOOP
+    \ Handle partial final block (non-16-aligned data)
+    _AEAD-REM @ 0> IF
+        AES-PARTIAL-PAD 16 0 FILL
+        OVER AES-PARTIAL-PAD _AEAD-REM @ CMOVE
+        AES-PARTIAL-PAD AES-DIN!
+        AES-PARTIAL-PAD AES-DOUT@
+        AES-PARTIAL-PAD OVER _AEAD-REM @ CMOVE
+    THEN
     2DROP
     AES-STATUS@ 3 = IF -1 ELSE 0 THEN
 ;
@@ -8672,7 +8692,7 @@ VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x13
 
 \ --- Scratch Buffers for Handshake ---
 CREATE TLS-HKDF-LABEL  64 ALLOT
-CREATE TLS-HS-TRANSCRIPT 1024 ALLOT
+CREATE TLS-HS-TRANSCRIPT 16384 ALLOT
 VARIABLE TLS-HS-TR-LEN
 CREATE TLS-CH-BUF 256 ALLOT
 CREATE TLS-HS-HASH 32 ALLOT
@@ -8770,7 +8790,7 @@ VARIABLE _TTA-LEN
 
 : TLS-TR-APPEND ( addr len -- )
     _TTA-LEN !  _TTA-SRC !
-    _TTA-LEN @ TLS-HS-TR-LEN @ + 1024 > IF EXIT THEN
+    _TTA-LEN @ TLS-HS-TR-LEN @ + 16384 > IF EXIT THEN
     _TTA-SRC @ TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ + _TTA-LEN @ CMOVE
     _TTA-LEN @ TLS-HS-TR-LEN @ + TLS-HS-TR-LEN !
 ;
@@ -9278,7 +9298,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
     8192 TLS-RBUF-LEN @ -
     TCP-RECV
     DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
-    TLS-RBUF-LEN @ >= IF DROP -1 ELSE DROP 0 THEN ;
+    TLS-RBUF-LEN @ OVER >= IF 2DROP -1 ELSE 2DROP 0 THEN ;
 
 : TLS-READ-RECORD-NB ( tcb -- rlen | 0 )
     DUP 5 TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN
@@ -9307,7 +9327,7 @@ VARIABLE _TRD-RLEN
     _TRD-RLEN @ TLS-RBUF-CONSUME
     \ Stack: ctype plen  (or -1 0)
     DUP 0= IF 2DROP -1 EXIT THEN \ decrypt failed
-    SWAP TLS-CT-APP-DATA <> IF DROP -1 EXIT THEN \ not app data
+    SWAP TLS-CT-APP-DATA <> IF DROP 0 EXIT THEN \ not app data — skip, retry
     \ Copy min(plen, maxlen) to destination
     _TRD-MAXLEN @ MIN
     TLS-PLAIN-BUF _TRD-DST @ ROT DUP >R CMOVE

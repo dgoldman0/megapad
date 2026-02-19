@@ -1236,14 +1236,29 @@ class AESDevice(Device):
             _inc32(self._counter)
             keystream = _aes_encrypt_block(bytes(self._counter), self._rkeys)
             out = bytearray(a ^ b for a, b in zip(block, keystream))
-            self.dout = out
             self._data_processed += 16
+
+            # For partial final block, only the first 'remaining' bytes
+            # are valid ciphertext; the rest must be zero for GHASH.
+            remaining = self.data_len - (self._data_processed - 16)
+            if remaining < 16:
+                # Mask output: only keep valid ciphertext bytes
+                for i in range(remaining, 16):
+                    out[i] = 0
+            self.dout = out
 
             # GHASH: encrypt feeds ciphertext, decrypt feeds ciphertext (=input)
             if self.cmd == 0:
                 self._ghash_update(bytes(out))   # encrypt: hash ciphertext
             else:
-                self._ghash_update(block)        # decrypt: hash ciphertext (=input)
+                # For partial decrypt, zero-pad the input for GHASH
+                if remaining < 16:
+                    ghash_block = bytearray(block)
+                    for i in range(remaining, 16):
+                        ghash_block[i] = 0
+                    self._ghash_update(bytes(ghash_block))
+                else:
+                    self._ghash_update(block)        # decrypt: hash ciphertext (=input)
 
             # Check if all data processed → compute tag
             if self._data_processed >= self.data_len:

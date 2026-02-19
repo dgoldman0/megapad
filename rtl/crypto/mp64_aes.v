@@ -433,6 +433,7 @@ module mp64_aes (
     reg         key_exp_phase; // 0 = first half key schedule, 1 = second half
     reg [3:0]   key_round;     // Key expansion round index
     reg [127:0] enc_block;     // Encrypted counter block (XOR with plaintext)
+    reg [31:0]  data_processed; // Bytes processed so far (for partial-block mask)
 
     // Round key storage (15 max for AES-256, 11 used for AES-128)
     reg [127:0] rk [0:14];
@@ -444,6 +445,23 @@ module mp64_aes (
     reg [31:0] w [0:7];        // Initial key words (8 for AES-256, 4 for AES-128)
     reg [3:0]  ks_step;
     reg [31:0] ks_temp;
+
+    // ========================================================================
+    // Partial-block masking for GCM
+    // ========================================================================
+    // When data_len is not a multiple of 16, the final block must be
+    // zero-padded for both GHASH and output.  gcm_remaining gives the
+    // number of valid bytes in the current block.
+    wire [31:0]  gcm_remaining  = data_len - data_processed;
+    wire         gcm_is_partial = (gcm_remaining != 32'd0) && (gcm_remaining < 32'd16);
+    wire [127:0] gcm_byte_mask;
+    genvar gi;
+    generate
+        for (gi = 0; gi < 16; gi = gi + 1) begin : gen_partial_mask
+            assign gcm_byte_mask[gi*8 +: 8] =
+                (gi < gcm_remaining[3:0]) ? 8'hFF : 8'h00;
+        end
+    endgenerate
 
     // ========================================================================
     // Main Sequential Logic
@@ -467,6 +485,7 @@ module mp64_aes (
             iv           <= 96'd0;
             aad_len      <= 32'd0;
             data_len     <= 32'd0;
+            data_processed <= 32'd0;
             cmd_encrypt  <= 1'b0;
             key_mode     <= 1'b0;
             data_in      <= 128'd0;
@@ -646,11 +665,20 @@ module mp64_aes (
                 // ====================================================
                 AES_DONE: begin
                     // CTR mode: output = plaintext XOR AES_K(counter)
-                    data_out <= data_in ^ enc_block;
-                    // For GHASH: accumulate ciphertext
-                    // If encrypting: ciphertext = data_in ^ enc_block
-                    // If decrypting: ciphertext = data_in (input is ciphertext)
-                    ghash_acc <= ghash_acc ^ (cmd_encrypt ? data_in : (data_in ^ enc_block));
+                    // For partial final block (data_len not 16-aligned),
+                    // zero-pad unused trailing bytes in both output and
+                    // GHASH input so the GCM tag is correct.
+                    if (gcm_is_partial) begin
+                        data_out  <= (data_in ^ enc_block) & gcm_byte_mask;
+                        ghash_acc <= ghash_acc ^
+                            (cmd_encrypt ? (data_in & gcm_byte_mask)
+                                         : ((data_in ^ enc_block) & gcm_byte_mask));
+                    end else begin
+                        data_out <= data_in ^ enc_block;
+                        ghash_acc <= ghash_acc ^
+                            (cmd_encrypt ? data_in : (data_in ^ enc_block));
+                    end
+                    data_processed <= data_processed + 32'd16;
 
                     // Start GHASH multiply
                     ghash_z <= 128'd0;
@@ -719,6 +747,7 @@ module mp64_aes (
                         auth_fail <= 1'b0;
                         ghash_h <= 128'd0;
                         ghash_acc <= 128'd0;
+                        data_processed <= 32'd0;
                         rk_gen_cnt <= 4'd0;
                         ks_step <= 4'd0;
                         aes_state <= AES_KEY_EXPAND;
