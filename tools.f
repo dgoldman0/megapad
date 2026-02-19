@@ -586,7 +586,7 @@ VARIABLE _HTTP-HEND
     0 _HTTP-HEND !
     OVER + SWAP                 ( end start )
     BEGIN
-        2DUP 3 - >              \ need at least 4 bytes for \r\n\r\n
+        2DUP 3 + >              \ need at least 4 bytes for \r\n\r\n
     WHILE
         \ Check \r\n\r\n first
         DUP     C@ 13 =
@@ -595,24 +595,24 @@ VARIABLE _HTTP-HEND
         OVER 3 + C@ 10 = AND
         IF
             4 + _HTTP-HEND !
-            2DROP EXIT
+            DROP EXIT
         THEN
         \ Check \n\n  (bare LF — some servers omit CR)
         DUP     C@ 10 =
         OVER 1+ C@ 10 = AND
         IF
             2 + _HTTP-HEND !
-            2DROP EXIT
+            DROP EXIT
         THEN
         1+
     REPEAT
     \ Final \n\n check for the last 2 bytes
-    2DUP 1 - > IF
+    2DUP 1 + > IF
         DUP     C@ 10 =
         OVER 1+ C@ 10 = AND
         IF
             2 + _HTTP-HEND !
-            2DROP EXIT
+            DROP EXIT
         THEN
     THEN
     2DROP ;
