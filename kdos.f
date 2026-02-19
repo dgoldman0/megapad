@@ -9220,6 +9220,72 @@ VARIABLE _TSD-LEN
     DUP 0> IF DROP _TSD-LEN @ ELSE DROP 0 THEN
 ;
 
+\ -- TLS record reassembly --
+\   Real servers send multiple TLS records in one TCP segment
+\   (e.g. ServerHello + CCS + encrypted HS in one burst).
+\   We must split the byte stream into individual records using
+\   the 5-byte TLS record header (type[1] version[2] length[2]).
+
+VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
+
+\ TLS-RBUF-FILL ( tcb need -- flag )
+\   Ensure TLS-RECV-REC has at least 'need' bytes.
+\   Returns -1 on success, 0 on timeout.
+: TLS-RBUF-FILL ( tcb need -- flag )
+    200 0 DO
+        TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
+        OVER                                  \ tcb
+        TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
+        8192 TLS-RBUF-LEN @ -                 \ maxlen = bufsz - got
+        TCP-RECV
+        DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
+        TCP-POLL NET-IDLE
+    LOOP
+    2DROP 0 ;
+
+\ TLS-RBUF-CONSUME ( n -- )
+\   Remove the first n bytes, shift remainder to front.
+: TLS-RBUF-CONSUME ( n -- )
+    DUP TLS-RBUF-LEN @ >= IF
+        DROP 0 TLS-RBUF-LEN !
+    ELSE
+        TLS-RECV-REC OVER +          \ src = buf + n
+        TLS-RECV-REC                 \ dst = buf
+        TLS-RBUF-LEN @ 2 PICK -     \ remaining = total - n
+        CMOVE
+        NEGATE TLS-RBUF-LEN +!
+    THEN ;
+
+\ TLS-READ-RECORD ( tcb -- rlen | 0 )
+\   Read exactly one complete TLS record into TLS-RECV-REC.
+\   Returns total record length (5 + body_len) or 0 on failure.
+: TLS-READ-RECORD ( tcb -- rlen | 0 )
+    \ Read at least 5 bytes (TLS record header)
+    DUP 5 TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN
+    \ Extract total record size = 5 + body_len
+    TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
+    \ Sanity check
+    DUP 8192 > IF 2DROP 0 EXIT THEN
+    \ Fill to complete record
+    SWAP OVER TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
+
+\ --- Non-blocking variants for application-data path ---
+\ Single TCP-RECV attempt, no NET-IDLE loop.  Caller polls.
+: TLS-RBUF-FILL-NB ( tcb need -- flag )
+    TLS-RBUF-LEN @ OVER >= IF 2DROP -1 EXIT THEN
+    OVER
+    TLS-RECV-REC TLS-RBUF-LEN @ +
+    8192 TLS-RBUF-LEN @ -
+    TCP-RECV
+    DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
+    TLS-RBUF-LEN @ >= IF DROP -1 ELSE DROP 0 THEN ;
+
+: TLS-READ-RECORD-NB ( tcb -- rlen | 0 )
+    DUP 5 TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN
+    TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
+    DUP 8192 > IF 2DROP 0 EXIT THEN
+    SWAP OVER TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN ;
+
 \ --- TLS-RECV-DATA ---
 \ Receive TCP data, decrypt, and return plaintext.
 \ Returns actual bytes received, or -1 on decryption error, or 0 if nothing.
@@ -9231,8 +9297,8 @@ VARIABLE _TRD-RLEN
 : TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
-    \ Read one complete TLS record using the framing layer
-    _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD
+    \ Non-blocking record read — caller polls via TCP-POLL NET-IDLE
+    _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD-NB
     DUP 0= IF EXIT THEN
     _TRD-RLEN !
     \ Decrypt
@@ -9293,55 +9359,6 @@ CREATE TLS-ALERT-BUF 2 ALLOT
         THEN
     LOOP 0 ;
 
-\ -- TLS record reassembly --
-\   Real servers send multiple TLS records in one TCP segment
-\   (e.g. ServerHello + CCS + encrypted HS in one burst).
-\   We must split the byte stream into individual records using
-\   the 5-byte TLS record header (type[1] version[2] length[2]).
-
-VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
-
-\ TLS-RBUF-FILL ( tcb need -- flag )
-\   Ensure TLS-RECV-REC has at least 'need' bytes.
-\   Returns -1 on success, 0 on timeout.
-: TLS-RBUF-FILL ( tcb need -- flag )
-    200 0 DO
-        TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
-        OVER                                  \ tcb
-        TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
-        8192 TLS-RBUF-LEN @ -                 \ maxlen = bufsz - got
-        TCP-RECV
-        DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
-        TCP-POLL NET-IDLE
-    LOOP
-    2DROP 0 ;
-
-\ TLS-RBUF-CONSUME ( n -- )
-\   Remove the first n bytes, shift remainder to front.
-: TLS-RBUF-CONSUME ( n -- )
-    DUP TLS-RBUF-LEN @ >= IF
-        DROP 0 TLS-RBUF-LEN !
-    ELSE
-        TLS-RECV-REC OVER +          \ src = buf + n
-        TLS-RECV-REC                 \ dst = buf
-        TLS-RBUF-LEN @ 2 PICK -     \ remaining = total - n
-        CMOVE
-        NEGATE TLS-RBUF-LEN +!
-    THEN ;
-
-\ TLS-READ-RECORD ( tcb -- rlen | 0 )
-\   Read exactly one complete TLS record into TLS-RECV-REC.
-\   Returns total record length (5 + body_len) or 0 on failure.
-: TLS-READ-RECORD ( tcb -- rlen | 0 )
-    \ Read at least 5 bytes (TLS record header)
-    DUP 5 TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN
-    \ Extract total record size = 5 + body_len
-    TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
-    \ Sanity check
-    DUP 8192 > IF 2DROP 0 EXIT THEN
-    \ Fill to complete record
-    SWAP OVER TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
-
 \ -- Process multiple HS messages from one decrypted record --
 \   A single encrypted record may contain EncryptedExtensions,
 \   Certificate, CertificateVerify, and Finished concatenated.
@@ -9381,7 +9398,7 @@ VARIABLE _TLSC-CTYPE
     _TLSC-CTX !
     _TLSC-CTX @ /TLS-CTX 0 FILL
     \ 2. TCP connect
-    R> R> R> ROT SWAP ROT TCP-CONNECT
+    R> R> R> TCP-CONNECT
     DUP 0= IF _TLSC-CTX @ DROP EXIT THEN
     _TLSC-TCB !
     _TLSC-TCB @ _TLSC-CTX @ TLS-CTX.TCB !
@@ -9423,7 +9440,7 @@ VARIABLE _TLSC-CTYPE
             _TLSC-RLEN @ TLS-RBUF-CONSUME
             DUP 0= IF 2DROP 0 EXIT THEN
             \ Stack: ctype plen — process all HS messages in plaintext
-            DROP  \ drop inner content type
+            SWAP DROP  \ drop ctype, keep plen
             _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSGS
             0<> IF 0 EXIT THEN
         THEN
