@@ -895,7 +895,7 @@ CREATE _GO-CRLF 2 ALLOT   13 _GO-CRLF C!  10 _GO-CRLF 1+ C!
         TCP-POLL NET-IDLE
         _GO-TCB @
         SCROLL-BUF SCROLL-LEN @ +
-        4096 SCROLL-LEN @ -
+        SCROLL-BUFSZ SCROLL-LEN @ -
         TCP-RECV
         DUP 0> IF
             SCROLL-LEN +!
