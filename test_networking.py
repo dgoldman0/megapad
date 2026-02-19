@@ -576,17 +576,9 @@ class TestRealNetUDP(_RealNetBase):
         time.sleep(0.1)  # let the socket bind
 
         text = self._run_kdos_tap([
-            # Send a known payload via UDP
-            f'S" HELLO-MP64" DROP',  # c-addr
-            f'10 ',                  # length = 10 bytes
-            f'{port} ',              # dest port
-            f'9999 ',                # source port
-            f'GW-IP IP@ ',           # dest IP
-            f'ROT ROT',              # reorder: dst-ip dport sport payload paylen
-            # Actually we need: ( dst-ip dport sport payload paylen -- ior )
-            # UDP-SEND signature: ( dst-ip dport sport payload paylen -- ior )
-            # Let's be explicit:
-            f'GW-IP IP@ {port} 9999 S" HELLO-MP64" UDP-SEND .',
+            # S" is compile-only, so wrap in a colon definition
+            f': DO-UDP-SEND GW-IP IP@ {port} 9999 S" HELLO-MP64" UDP-SEND . ;',
+            'DO-UDP-SEND',
         ], max_steps=300_000_000)
 
         t.join(timeout=12.0)
@@ -908,7 +900,7 @@ class TestRealNetHardening(_RealNetBase):
         time.sleep(0.1)
 
         text = self._run_kdos_tap([
-            'GW-IP IP@ 7778 8888 S" HARDENING-OK" UDP-SEND .',
+            ': DO-UDP GW-IP IP@ 7778 8888 S" HARDENING-OK" UDP-SEND . ; DO-UDP',
         ], max_steps=300_000_000)
 
         t.join(timeout=12.0)
@@ -927,7 +919,7 @@ class TestRealNetHardening(_RealNetBase):
             "10 0 DO PING-POLL LOOP",
             ".\"  PING-OK\"",
             # Step 3: UDP send
-            'GW-IP IP@ 9999 8888 S" SEQ-TEST" UDP-SEND DROP',
+            ': DO-SEQ-UDP GW-IP IP@ 9999 8888 S" SEQ-TEST" UDP-SEND DROP ; DO-SEQ-UDP',
             ".\"  SEQ-OK\"",
         ], max_steps=300_000_000)
         # At minimum, all three stages should complete
@@ -1036,13 +1028,12 @@ class TestRealNetEndToEnd(_RealNetBase):
         If DNS fails, the test provides a diagnostic skip.
         """
         text = self._run_kdos_tap([
-            'S" google.com" DNS-RESOLVE',
+            'DNS-LOOKUP google.com',
             "DUP 0<> IF",
-            "  .\"  DNS-OK ip=\" DUP .IP",
+            "  .\"  DNS-OK ip=\" .IP",
             "ELSE",
             "  .\"  DNS-FAIL \"",
             "THEN",
-            "DROP",
         ], max_steps=500_000_000)
         if "DNS-FAIL" in text:
             # Might not have internet — skip rather than fail
@@ -1052,7 +1043,7 @@ class TestRealNetEndToEnd(_RealNetBase):
                 "iptables -t nat -A POSTROUTING -s 10.64.0.0/24 "
                 "! -o mp64tap0 -j MASQUERADE")
         self.assertIn("DNS-OK", text,
-                      f"DNS-RESOLVE should succeed. Got:\n{text[-400:]}")
+                      f"DNS-LOOKUP should succeed. Got:\n{text[-400:]}")
 
     def test_scroll_get_produces_output(self):
         """SCROLL-GET http://... should fetch real HTTP content.
@@ -1076,6 +1067,60 @@ class TestRealNetEndToEnd(_RealNetBase):
         )
         self.assertTrue(got_content,
                         f"Expected HTTP content from example.com. Got:\n{text[-600:]}")
+
+    def test_scroll_get_https(self):
+        """SCROLL-GET https://... should fetch content over TLS 1.3.
+
+        Requires: TAP with internet access.
+        """
+        text = self._run_kdos_tap([
+            'SCROLL-GET https://example.com',
+        ], max_steps=800_000_000)
+        if "DNS/IP resolve failed" in text or "DNS-FAIL" in text:
+            self.skipTest("DNS not available over TAP")
+        if "TLS connect failed" in text:
+            self.skipTest("TLS connection failed — may not have internet")
+        if "TCP connect failed" in text:
+            self.skipTest("TCP connection failed — may not have internet")
+        got_content = (
+            "Example Domain" in text
+            or "HTTP" in text
+            or "<html" in text.lower()
+            or "200" in text
+            or "bytes in SCROLL-BUF" in text
+        )
+        self.assertTrue(got_content,
+                        f"Expected HTTPS content from example.com. Got:\n{text[-600:]}")
+
+    def test_url_parse_https_port(self):
+        """URL-PARSE should set port 443 for https:// URLs."""
+        text = self._run_kdos_tap([
+            'S" https://example.com/foo" URL-PARSE DROP',
+            '_SC-PROTO @ . _SC-PORT @ .',
+        ], max_steps=50_000_000, setup_ip=False)
+        # PROTO-HTTPS = 3, port = 443
+        self.assertIn("3", text)
+        self.assertIn("443", text)
+
+    def test_url_parse_ftp(self):
+        """URL-PARSE should handle ftp:// and ftps:// protocols."""
+        text = self._run_kdos_tap([
+            'S" ftp://ftp.example.com/pub/file.txt" URL-PARSE DROP',
+            '_SC-PROTO @ . _SC-PORT @ .',
+        ], max_steps=50_000_000, setup_ip=False)
+        # PROTO-FTP = 4, port = 21
+        self.assertIn("4", text)
+        self.assertIn("21", text)
+
+    def test_url_parse_ftps(self):
+        """URL-PARSE should set port 990 for ftps:// URLs."""
+        text = self._run_kdos_tap([
+            'S" ftps://secure.example.com/data" URL-PARSE DROP',
+            '_SC-PROTO @ . _SC-PORT @ .',
+        ], max_steps=50_000_000, setup_ip=False)
+        # PROTO-FTPS = 5, port = 990
+        self.assertIn("5", text)
+        self.assertIn("990", text)
 
 
 # ---------------------------------------------------------------------------

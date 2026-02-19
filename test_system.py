@@ -18556,7 +18556,7 @@ class TestToolsModule(_KDOSTestBase):
         try:
             text = self._run_kdos([
                 "LOAD tools.f",
-                ': T1 S" ftp://badproto.com/x" URL-PARSE ." IOR=" . ;',
+                ': T1 S" xyz://badproto.com/x" URL-PARSE ." IOR=" . ;',
                 'T1',
             ], storage_image=img, max_steps=500_000_000)
             self.assertIn("IOR=-1 ", text)
@@ -18616,7 +18616,7 @@ class TestToolsModule(_KDOSTestBase):
         try:
             text = self._run_kdos([
                 "LOAD tools.f",
-                'SCROLL-GET ftp://bad/x',
+                'SCROLL-GET xyz://bad/x',
             ], storage_image=img, max_steps=500_000_000)
             self.assertIn("URL parse error", text)
         finally:

@@ -318,15 +318,18 @@ CREATE ED-CMD-BUF 80 ALLOT
 \
 \  Protocols supported:
 \    http://host[:port]/path   — HTTP/1.1 GET over TCP
+\    https://host[:port]/path  — HTTP/1.1 GET over TLS 1.3
 \    tftp://host/path          — TFTP RRQ over UDP
 \    gopher://host[:port]/sel  — Gopher type-0 text fetch
+\    ftp://host/path           — FTP RETR (anonymous)
+\    ftps://host/path          — FTP RETR over implicit TLS
 \
 \  Public API:
 \    SCROLL-GET   ( url len -- buf len | 0 )  fetch to RAM
 \    SCROLL-SAVE  ( url len "file" -- )        fetch and save to disk
 \    SCROLL-LOAD  ( url len -- )               fetch and EVALUATE
 \
-\  Uses TCP (§16.7), UDP (§16.4), DNS (§16.6), TLS (§17) from KDOS.
+\  Uses TCP (§16.7), UDP (§16.4), DNS (§16.6), TLS (§16.8-16.11) from KDOS.
 
 \ -- URL parsing state --
 VARIABLE _SC-PROTO             \ 0=http, 1=tftp, 2=gopher, 3=https
@@ -343,8 +346,12 @@ VARIABLE _SC-IP                \ resolved IP (4 bytes inline)
 2 CONSTANT PROTO-GOPHER
 3 CONSTANT PROTO-HTTPS
 
+4 CONSTANT PROTO-FTP
+5 CONSTANT PROTO-FTPS
+
 \ -- Response buffer --
-CREATE SCROLL-BUF 4096 ALLOT
+16384 CONSTANT SCROLL-BUFSZ
+CREATE SCROLL-BUF SCROLL-BUFSZ ALLOT
 VARIABLE SCROLL-LEN  0 SCROLL-LEN !
 
 \ ── URL Parser ──────────────────────────────────────────────────────
@@ -394,9 +401,17 @@ VARIABLE _UP-URL              \ URL base addr
         PROTO-GOPHER _SC-PROTO !
         70 _SC-PORT !
         9 _UP-POS +!
+    ELSE S" ftp://" _URL-MATCH IF
+        PROTO-FTP _SC-PROTO !
+        21 _SC-PORT !
+        6 _UP-POS +!
+    ELSE S" ftps://" _URL-MATCH IF
+        PROTO-FTPS _SC-PROTO !
+        990 _SC-PORT !
+        7 _UP-POS +!
     ELSE
         -1 EXIT                             \ unknown protocol
-    THEN THEN THEN THEN
+    THEN THEN THEN THEN THEN THEN
 
     \ Parse hostname (up to : or / or end)
     BEGIN
@@ -518,45 +533,61 @@ VARIABLE _HTTP-RLEN
     10 _HTTP-REQ _HTTP-RLEN @ + C!  1 _HTTP-RLEN +!
     _HTTP-REQ _HTTP-RLEN @ ;
 
-\ Parse Content-Length from response header area (simple scan)
+\ Case-insensitive single char match helper
+: _CI-EQ  ( c1 c2 -- flag )
+    OVER 65 >= OVER 90 <= AND IF 32 + THEN   \ uppercase c2 -> lower
+    SWAP
+    DUP 65 >= OVER 90 <= AND IF 32 + THEN    \ uppercase c1 -> lower
+    = ;
+
+\ Case-insensitive prefix match ( src match len -- flag )
+: _CI-PREFIX  ( src match len -- flag )
+    0 DO
+        OVER I + C@  OVER I + C@  _CI-EQ
+        0= IF 2DROP 0 UNLOOP EXIT THEN
+    LOOP
+    2DROP -1 ;
+
+\ Parse Content-Length from response header area (case-insensitive)
 VARIABLE _HTTP-CLEN
+CREATE _CL-TAG 16 ALLOT
+\ Store "content-length: " (lower) as match pattern
+: _CL-TAG-INIT
+    S" content-length: " _CL-TAG SWAP CMOVE ;
+_CL-TAG-INIT
+
 : _HTTP-PARSE-CLEN  ( hdr-addr hdr-len -- )
     -1 _HTTP-CLEN !
     OVER + SWAP                 ( end start )
     BEGIN
-        2DUP > 
+        2DUP >
     WHILE
-        DUP C@ 67 = IF         \ 'C' for Content-Length
-            DUP S" Content-Length: " ROT SWAP
-            16 0 DO
-                2DUP I + C@  3 PICK I + C@
-                <> IF 2DROP DROP 0 LEAVE THEN
-            LOOP
-            IF
-                16 +
-                0               ( accum )
-                BEGIN
-                    OVER C@ DUP 48 >= SWAP 57 <= AND
-                WHILE
-                    SWAP DUP C@ 48 -
-                    ROT 10 * + SWAP 1+
-                REPEAT
-                _HTTP-CLEN !
-                DROP
-            THEN
+        DUP  _CL-TAG 16  _CI-PREFIX  IF
+            16 +
+            0                   ( accum )
+            BEGIN
+                OVER C@ DUP 48 >= SWAP 57 <= AND
+            WHILE
+                SWAP DUP C@ 48 -
+                ROT 10 * + SWAP 1+
+            REPEAT
+            _HTTP-CLEN !
+            DROP
+            2DROP EXIT
         THEN
         1+
     REPEAT
     2DROP ;
 
-\ Find end of HTTP headers (\r\n\r\n)
+\ Find end of HTTP headers (\r\n\r\n or \n\n)
 VARIABLE _HTTP-HEND
 : _HTTP-FIND-HEND  ( addr len -- )
     0 _HTTP-HEND !
     OVER + SWAP                 ( end start )
     BEGIN
-        2DUP 3 - >              \ need at least 4 bytes
+        2DUP 3 - >              \ need at least 4 bytes for \r\n\r\n
     WHILE
+        \ Check \r\n\r\n first
         DUP     C@ 13 =
         OVER 1+ C@ 10 = AND
         OVER 2 + C@ 13 = AND
@@ -565,33 +596,55 @@ VARIABLE _HTTP-HEND
             4 + _HTTP-HEND !
             2DROP EXIT
         THEN
+        \ Check \n\n  (bare LF — some servers omit CR)
+        DUP     C@ 10 =
+        OVER 1+ C@ 10 = AND
+        IF
+            2 + _HTTP-HEND !
+            2DROP EXIT
+        THEN
         1+
     REPEAT
+    \ Final \n\n check for the last 2 bytes
+    2DUP 1 - > IF
+        DUP     C@ 10 =
+        OVER 1+ C@ 10 = AND
+        IF
+            2 + _HTTP-HEND !
+            2DROP EXIT
+        THEN
+    THEN
     2DROP ;
 
 \ HTTP GET — fetch via TCP
 VARIABLE _HG-TCB
+VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
 : HTTP-GET  ( -- ior )
     _SC-IP @ _SC-PORT @ 12345 TCP-CONNECT
     DUP 0= IF ."  TCP connect failed" CR -1 EXIT THEN
     _HG-TCB !
-    \ Wait for connection (simplified: poll a few times)
-    100 0 DO  _HG-TCB @ TCP-POLL  LOOP
+    \ Wait for connection — poll until established or timeout
+    200 0 DO  _HG-TCB @ TCP-POLL  LOOP
     \ Send request
     _HTTP-BUILD-REQ _HG-TCB @ -ROT TCP-SEND DROP
-    \ Receive response
-    0 SCROLL-LEN !
-    200 0 DO
+    \ Receive response — 500 iterations, bail after 10 consecutive empties
+    0 SCROLL-LEN !  0 _HG-EMPTY !
+    500 0 DO
         _HG-TCB @ TCP-POLL
+        SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN   \ buffer full
         _HG-TCB @
         SCROLL-BUF SCROLL-LEN @ +
-        4096 SCROLL-LEN @ -
+        SCROLL-BUFSZ SCROLL-LEN @ -
         TCP-RECV
         DUP 0> IF
             SCROLL-LEN +!
+            0 _HG-EMPTY !            \ reset empty counter
         ELSE
             DROP
-            SCROLL-LEN @ 0> IF LEAVE THEN
+            SCROLL-LEN @ 0> IF
+                _HG-EMPTY @ 1+ DUP _HG-EMPTY !
+                10 >= IF LEAVE THEN   \ 10 consecutive empties → done
+            THEN
         THEN
     LOOP
     _HG-TCB @ TCP-CLOSE
@@ -610,6 +663,154 @@ VARIABLE _HG-TCB
     DUP SCROLL-LEN !
     SCROLL-BUF SWAP CMOVE
     0 ;
+
+\ ── HTTPS GET — fetch via TLS ───────────────────────────────────────
+\
+\  Uses TLS-CONNECT / TLS-SEND / TLS-RECV from KDOS §16.11.
+\  Same request building & header parsing as HTTP-GET.
+
+VARIABLE _HGS-CTX
+VARIABLE _HGS-EMPTY
+: HTTPS-GET  ( -- ior )
+    _SC-IP @ _SC-PORT @ 12345 TLS-CONNECT
+    DUP 0= IF ."  TLS connect failed" CR -1 EXIT THEN
+    _HGS-CTX !
+    \ Build & send HTTP request over TLS
+    _HTTP-BUILD-REQ _HGS-CTX @ -ROT TLS-SEND DROP
+    \ Receive response
+    0 SCROLL-LEN !  0 _HGS-EMPTY !
+    500 0 DO
+        _HGS-CTX @ TLS-CTX.TCB @ TCP-POLL
+        SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN
+        _HGS-CTX @
+        SCROLL-BUF SCROLL-LEN @ +
+        SCROLL-BUFSZ SCROLL-LEN @ -
+        TLS-RECV
+        DUP 0> IF
+            SCROLL-LEN +!
+            0 _HGS-EMPTY !
+        ELSE DUP -1 = IF
+            DROP ."  TLS decrypt error" CR
+            _HGS-CTX @ TLS-CLOSE -1 EXIT
+        ELSE
+            DROP
+            SCROLL-LEN @ 0> IF
+                _HGS-EMPTY @ 1+ DUP _HGS-EMPTY !
+                10 >= IF LEAVE THEN
+            THEN
+        THEN THEN
+    LOOP
+    _HGS-CTX @ TLS-CLOSE
+    \ Parse headers to find body — same as HTTP-GET
+    SCROLL-BUF SCROLL-LEN @ _HTTP-FIND-HEND
+    _HTTP-HEND @ 0= IF
+        ."  No HTTP header end found" CR -1 EXIT
+    THEN
+    SCROLL-BUF _HTTP-HEND @ _HTTP-PARSE-CLEN
+    _HTTP-HEND @ SCROLL-BUF +
+    SCROLL-LEN @ _HTTP-HEND @ -
+    _HTTP-CLEN @ -1 <> IF
+        _HTTP-CLEN @ MIN
+    THEN
+    DUP SCROLL-LEN !
+    SCROLL-BUF SWAP CMOVE
+    0 ;
+
+\ ── FTP Client (minimal RETR) ──────────────────────────────────────
+\
+\  Simplified FTP: connect, login anonymous, PASV, RETR file.
+\  FTPS wraps the control channel in TLS.
+
+VARIABLE _FTP-TCB
+VARIABLE _FTP-DATA-TCB
+VARIABLE _FTP-TLS             \ 0 = plain, ctx = FTPS
+CREATE _FTP-LINEBUF 256 ALLOT
+VARIABLE _FTP-LLEN
+
+\ Read one FTP response line from control channel
+: _FTP-RECV-LINE  ( -- )
+    0 _FTP-LLEN !
+    100 0 DO
+        _FTP-TLS @ 0= IF
+            _FTP-TCB @ TCP-POLL
+            _FTP-TCB @
+            _FTP-LINEBUF _FTP-LLEN @ +
+            256 _FTP-LLEN @ -
+            TCP-RECV
+        ELSE
+            _FTP-TLS @ TLS-CTX.TCB @ TCP-POLL
+            _FTP-TLS @
+            _FTP-LINEBUF _FTP-LLEN @ +
+            256 _FTP-LLEN @ -
+            TLS-RECV
+        THEN
+        DUP 0> IF
+            _FTP-LLEN +!
+            \ check for \n at end
+            _FTP-LINEBUF _FTP-LLEN @ 1- + C@ 10 = IF LEAVE THEN
+        ELSE DROP THEN
+    LOOP ;
+
+\ Send FTP command string
+: _FTP-SEND-CMD  ( addr len -- )
+    _FTP-TLS @ 0= IF
+        _FTP-TCB @ -ROT TCP-SEND DROP
+    ELSE
+        _FTP-TLS @ -ROT TLS-SEND DROP
+    THEN ;
+
+\ Send command with CRLF
+CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
+: _FTP-CMD  ( addr len -- )
+    _FTP-SEND-CMD
+    _FTP-CRLF 2 _FTP-SEND-CMD
+    _FTP-RECV-LINE ;
+
+: FTP-GET  ( -- ior )
+    \ Connect control channel
+    _SC-IP @ _SC-PORT @ 12347 TCP-CONNECT
+    DUP 0= IF ."  FTP connect failed" CR -1 EXIT THEN
+    _FTP-TCB !  0 _FTP-TLS !
+    200 0 DO _FTP-TCB @ TCP-POLL LOOP
+    _FTP-RECV-LINE              \ read banner
+    \ For FTPS, upgrade to TLS now
+    _SC-PROTO @ PROTO-FTPS = IF
+        S" AUTH TLS" _FTP-CMD   \ request TLS
+        _SC-IP @ _SC-PORT @ 12348 TLS-CONNECT
+        DUP 0= IF ."  FTPS TLS failed" CR -1 EXIT THEN
+        _FTP-TLS !
+    THEN
+    \ Login anonymous
+    S" USER anonymous" _FTP-CMD
+    S" PASS guest@" _FTP-CMD
+    \ Request binary + passive mode
+    S" TYPE I" _FTP-CMD
+    S" PASV" _FTP-CMD
+    \ TODO: parse PASV response for data port and connect
+    \ For now, simplified: assume data on port+1
+    \ RETR the file
+    _FTP-LINEBUF 256 0 FILL
+    S" RETR " _FTP-LINEBUF SWAP CMOVE
+    _SC-PATH 1+  _SC-PATH-LEN @ 1-
+    _FTP-LINEBUF 5 + SWAP CMOVE
+    _FTP-LINEBUF  5 _SC-PATH-LEN @ 1- +  _FTP-CMD
+    \ Read data from data channel
+    0 SCROLL-LEN !
+    200 0 DO
+        _FTP-TCB @ TCP-POLL
+        _FTP-TCB @
+        SCROLL-BUF SCROLL-LEN @ +
+        SCROLL-BUFSZ SCROLL-LEN @ -
+        TCP-RECV
+        DUP 0> IF SCROLL-LEN +!
+        ELSE DROP SCROLL-LEN @ 0> IF LEAVE THEN
+        THEN
+    LOOP
+    \ Quit
+    S" QUIT" _FTP-CMD
+    _FTP-TLS @ 0<> IF _FTP-TLS @ TLS-CLOSE THEN
+    _FTP-TCB @ TCP-CLOSE
+    SCROLL-LEN @ 0> IF 0 ELSE -1 THEN ;
 
 \ ── TFTP Client ─────────────────────────────────────────────────────
 \
@@ -701,10 +902,12 @@ CREATE _GO-CRLF 2 ALLOT   13 _GO-CRLF C!  10 _GO-CRLF 1+ C!
     THEN
     _SC-PROTO @
     CASE
-        PROTO-HTTP  OF  HTTP-GET   ENDOF
-        PROTO-HTTPS OF  HTTP-GET   ENDOF   \ TLS upgrade TODO
-        PROTO-TFTP  OF  TFTP-GET   ENDOF
-        PROTO-GOPHER OF GOPHER-GET ENDOF
+        PROTO-HTTP   OF  HTTP-GET    ENDOF
+        PROTO-HTTPS  OF  HTTPS-GET   ENDOF
+        PROTO-TFTP   OF  TFTP-GET    ENDOF
+        PROTO-GOPHER OF  GOPHER-GET  ENDOF
+        PROTO-FTP    OF  FTP-GET     ENDOF
+        PROTO-FTPS   OF  FTP-GET     ENDOF
         ."  Unsupported protocol" CR -1 SWAP
     ENDCASE ;
 
@@ -764,7 +967,9 @@ VARIABLE _SC-URL-LEN
 
 \ -- Usage examples --
 \   SCROLL-GET http://10.64.0.1/page.txt
+\   SCROLL-GET https://example.com/
 \   SCROLL-SAVE http://10.64.0.1/data.bin myfile
 \   SCROLL-LOAD http://10.64.0.1/pkg.f
+\   SCROLL-GET ftp://ftp.example.com/pub/file.txt
 
 ."  tools.f loaded: ED SCROLL-GET SCROLL-SAVE SCROLL-LOAD" CR

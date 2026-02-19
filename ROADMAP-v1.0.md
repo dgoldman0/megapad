@@ -479,6 +479,53 @@ and adds post-quantum cryptographic primitives.
     - A hybrid: IDL with a timer-IRQ deadline so the CPU wakes on
       whichever comes first (NIC RX or timeout expiry).
 
+46. ☐ **USB controller** — Add a USB host/device peripheral to the
+    system.  MMIO slot at `0x0B00` (1,280 bytes free from `0xB00` to
+    `0xFFF`).  Recommended phased approach:
+
+    **Phase 1 — Emulator + BIOS + KDOS (USB 2.0 software model):**
+    - `devices.py`: `USBDevice` class (~200-300 lines) with register
+      file (control, status, endpoint buffers, DMA), backed by host
+      `/dev/bus/usb` passthrough or virtual mass-storage device.
+    - `bios.asm`: ~10-15 words (USB-INIT, USB-STATUS, USB-XFER,
+      USB-EP-READ, USB-EP-WRITE, USB-SET-ADDR, USB-DESC@, etc.)
+      following the existing `ldi64 r11, MMIO; ldn/str` pattern.
+    - `kdos.f`: USB enumeration (SET_ADDRESS, GET_DESCRIPTOR,
+      SET_CONFIGURATION), mass-storage class driver (SCSI over
+      bulk-only transport), optional HID driver.
+    - Estimated effort: ~1 week.
+
+    **Phase 2 — RTL USB 2.0 (ULPI PHY):**
+    - `rtl/periph/mp64_usb.v`: USB 2.0 controller with ULPI
+      interface (~8K-12K LUTs).  No GTX transceivers needed —
+      uses regular I/O pins via a $15 ULPI PHY Pmod (USB3300).
+    - SoC wiring: `mmio_sel_usb = (bus_mmio_addr[11:8] == 4'hB)`,
+      add to read-data mux in `mp64_soc.v`.
+    - Genesys 2: route ULPI signals to Pmod JA/JB headers in XDC.
+    - Testbench: `tb_usb.v` with enumeration + bulk transfer tests.
+    - Estimated effort: ~2-3 weeks.
+
+    **Phase 3 — RTL USB 3.0 SuperSpeed (optional, bigger FPGA):**
+    - Requires GTX transceiver (5 Gbps SERDES, 8b/10b) + PIPE
+      interface (~5K-10K additional LUTs) + FMC daughter card with
+      USB 3.0 PHY (TUSB1310 or similar).
+    - **BRAM budget is the blocker:** K7-325T has 890 RAMB36E1 but
+      the 4-bank memory alone needs 1,024.  USB 3.0 endpoint FIFOs
+      add ~4-8 more.  Requires either halving RAM to 2 banks (512 KiB)
+      or targeting VU095 / Artix UltraScale+.
+    - Software stack is identical to USB 2.0 — USB 3.0 is backward-
+      compatible at the protocol level.
+    - Estimated effort: ~4-6 weeks (including PHY bring-up).
+
+    Resource budget (Kintex-7 325T):
+    ```
+    Resource   Available   Current est.     USB 2.0    USB 3.0
+    LUTs       203,800     145K-185K        +8-12K     +20-35K
+    DSPs       840         420-620          +0         +0
+    BRAM36     890         1,024 (over!)    +2-4       +4-8
+    GTX        16          0                +0         +1
+    ```
+
 ---
 
 ### Layer 6: Architecture & Portability (Items 39–42)
@@ -572,9 +619,10 @@ Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → I
                       DHCP ✅ → DNS ✅ → TCP ✅ → TLS 1.3 ✅ → Socket API ✅) ✅ DONE
 Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
-Layer 4  Items 25–30, 45  Application-Level
+Layer 4  Items 25–30, 45–46  Application-Level
                       (net send ☐, FP16 ☐, QoS ✅, editor ☐,
-                      scripting ☐, remote REPL ☐, SCROLL ☐ ← HIGH)
+                      scripting ☐, remote REPL ☐, SCROLL ☐,
+                      USB ☐ ← NEW)
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)

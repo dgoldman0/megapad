@@ -1254,7 +1254,8 @@ DNS → TCP → TLS 1.3.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `DNS-RESOLVE` | `( c-addr len -- ip )` | Resolve hostname to IP via DNS A-record query. |
+| `DNS-RESOLVE` | `( c-addr len -- ip \| 0 )` | Resolve hostname to IP via DNS A-record query. |
+| `DNS-LOOKUP` | `( "name" -- ip \| 0 )` | Parse domain from input, resolve via DNS. |
 
 ### §16.7 TCP
 

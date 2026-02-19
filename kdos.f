@@ -7423,6 +7423,9 @@ VARIABLE _DNR-DLEN
     LOOP
     0 ;
 
+\ DNS-LOOKUP ( "name" -- ip | 0 )  Parse domain from input, resolve via DNS.
+: DNS-LOOKUP  BL WORD COUNT DNS-RESOLVE ;
+
 \ =====================================================================
 \  §16.7  TCP — Transmission Control Protocol (RFC 793/9293)
 \ =====================================================================
