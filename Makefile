@@ -25,8 +25,8 @@
 
 VENV_PY  := .venv/bin/python
 PYTEST   := -m pytest tests/
-PYTEST_SIM := -m pytest tests/ -m "not realnet"
 WORKERS  := 8
+PYTEST_ARGS := -n $(WORKERS) --dist loadgroup --tb=long
 
 # --- C++ accelerator ---
 .PHONY: accel accel-clean
@@ -54,7 +54,7 @@ test-quick: accel
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
 	@echo "Starting quick smoke test in background..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short \
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short \
 		> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
@@ -71,7 +71,7 @@ test-one: accel
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
 	@echo "Starting tests in background (K=$(K))..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -n $(WORKERS) --tb=long -v -k "$(K)" \
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n $(WORKERS) --dist loadgroup --tb=long -v -k "$(K)" \
 		> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
@@ -90,11 +90,11 @@ test-bg: accel
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
 	@echo "Starting tests in background (C++ accel)..."
 	@if [ -n "$(K)" ]; then \
-		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -n $(WORKERS) --tb=long -k "$(K)" \
+		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) -k "$(K)" \
 			> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt; \
 	else \
-		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST_SIM) -n $(WORKERS) --tb=long \
+		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) \
 			> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt; \
 	fi

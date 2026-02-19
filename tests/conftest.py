@@ -21,6 +21,19 @@ import pytest
 STATUS_FILE = "/tmp/megapad_test_status.json"
 
 
+def pytest_collection_modifyitems(items):
+    """Force all realnet tests into a single xdist worker group.
+
+    Class-level @pytest.mark.xdist_group on unittest.TestCase subclasses
+    doesn't always propagate to individual items for xdist's loadgroup
+    scheduler.  Explicitly stamp every realnet item here.
+    """
+    for item in items:
+        if item.get_closest_marker("realnet"):
+            if not item.get_closest_marker("xdist_group"):
+                item.add_marker(pytest.mark.xdist_group("tap"))
+
+
 def pytest_configure(config):
     """Register plugins, markers, and enforce Makefile usage."""
     # Register custom markers
@@ -69,6 +82,7 @@ class LiveTestMonitor:
         self.errors = 0
         self.running = {}          # worker -> test nodeid
         self.failures = []         # list of {test, duration, message}
+        self.skipped_tests = []    # list of {test, reason}
         self.completed_tests = []  # last N completed test names
         self.last_activity = time.time()
         self.finished = False
@@ -95,6 +109,7 @@ class LiveTestMonitor:
             "running": dict(self.running),
             "idle_s": round(time.time() - self.last_activity, 1),
             "failures": self.failures[-20:],  # last 20 failures
+            "skipped_tests": self.skipped_tests[-20:],
             "recent_completed": self.completed_tests[-self._max_completed_history:],
             "finished": self.finished,
             "exit_code": self.exit_code,
@@ -151,7 +166,37 @@ class LiveTestMonitor:
                 })
             elif report.skipped:
                 self.skipped += 1
+                reason = ""
+                if hasattr(report, "longrepr") and report.longrepr:
+                    # longrepr is (file, line, reason) tuple for skips
+                    if isinstance(report.longrepr, tuple) and len(report.longrepr) >= 3:
+                        reason = str(report.longrepr[2])
+                    else:
+                        reason = _truncate(str(report.longrepr), 200)
+                self.skipped_tests.append({
+                    "test": report.nodeid,
+                    "reason": reason,
+                })
             self.completed_tests.append(report.nodeid)
+            self._write_status()
+
+        elif report.when == "setup" and report.skipped:
+            # Decorator-based skips (@pytest.mark.skip, @pytest.mark.skipif,
+            # _skip_no_tap, etc.) fire during setup, not call.
+            self.skipped += 1
+            reason = ""
+            if hasattr(report, "longrepr") and report.longrepr:
+                if isinstance(report.longrepr, tuple) and len(report.longrepr) >= 3:
+                    reason = str(report.longrepr[2])
+                else:
+                    reason = _truncate(str(report.longrepr), 200)
+            self.skipped_tests.append({
+                "test": report.nodeid,
+                "reason": reason,
+            })
+            worker = getattr(report, "node", None)
+            wid = worker.gateway.id if worker else "main"
+            self.running.pop(wid, None)
             self._write_status()
 
         elif report.when == "setup" and report.failed:

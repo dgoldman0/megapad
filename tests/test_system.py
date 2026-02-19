@@ -11307,6 +11307,36 @@ class TestKDOSTLSRecord(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("DF=-1 ", text)      # auth FAIL
 
+    def test_aes_aead_partial_block_roundtrip(self):
+        """AES-ENCRYPT/DECRYPT-AEAD with non-16-aligned data length."""
+        lines = self._TLS_CTX_SETUP + [
+            # Plaintext = 25 bytes (not a multiple of 16)
+            "CREATE pt-buf 25 ALLOT  pt-buf 25 66 FILL",  # 'B'
+            "CREATE ct-buf 32 ALLOT  ct-buf 32 0 FILL",
+            "CREATE rt-buf 32 ALLOT  rt-buf 32 0 FILL",
+            "CREATE aad-buf 5 ALLOT",
+            "23 aad-buf C!  3 aad-buf 1 + C!  3 aad-buf 2 + C!",
+            "0 aad-buf 3 + C!  25 aad-buf 4 + C!",
+            "CREATE iv-buf 12 ALLOT",
+            ": init-iv 12 0 DO I iv-buf I + C! LOOP ; init-iv",
+            # Encrypt 25 bytes
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  pt-buf ct-buf 25",
+            "AES-ENCRYPT-AEAD",
+            "VARIABLE tag-save  tag-save !",
+            # Decrypt 25 bytes
+            "test-ctx @ TLS-CTX.WR-KEY  iv-buf  aad-buf 5  ct-buf rt-buf 25",
+            "tag-save @ AES-DECRYPT-AEAD",
+            '." DF=" .',
+            '." RT0=" rt-buf C@ .',
+            '." RT16=" rt-buf 16 + C@ .',
+            '." RT24=" rt-buf 24 + C@ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("DF=0 ", text)       # auth OK
+        self.assertIn("RT0=66 ", text)     # 'B'
+        self.assertIn("RT16=66 ", text)    # 'B' (17th byte, in partial block)
+        self.assertIn("RT24=66 ", text)    # 'B' (25th byte, last byte)
+
     def test_tls_encrypt_record_header(self):
         """TLS-ENCRYPT-RECORD produces correct 5-byte TLS header."""
         lines = self._TLS_CTX_SETUP + [

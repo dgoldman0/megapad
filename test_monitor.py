@@ -130,6 +130,19 @@ def display(status, *, show_failures_only=False):
                 for line in msg.split("\n")[:3]:
                     print(f"      {DIM}{line}{RESET}")
 
+    # Skipped tests
+    skipped_tests = status.get("skipped_tests", [])
+    if skipped_tests and not show_failures_only:
+        print(f"\n  {YELLOW}{BOLD}Skipped:{RESET}")
+        for entry in skipped_tests:
+            test = _short_nodeid(entry["test"])
+            reason = entry.get("reason", "")
+            if reason:
+                print(f"    {YELLOW}○{RESET} {test}")
+                print(f"      {DIM}{reason}{RESET}")
+            else:
+                print(f"    {YELLOW}○{RESET} {test}")
+
     # Recent completed
     recent = status.get("recent_completed", [])
     if recent and not show_failures_only and not status["finished"]:

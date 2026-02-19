@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import socket
 import struct
+import tempfile
 import threading
 import time
 import unittest
@@ -77,11 +78,15 @@ except ImportError:
     from megapad64 import Megapad64, HaltError, TrapError, u64
 
 from asm import assemble
+from diskutil import format_image, inject_file, FTYPE_FORTH
 from system import MegapadSystem
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIOS_PATH = os.path.join(PROJECT_ROOT, "bios.asm")
 KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
+TOOLS_PATH = os.path.join(PROJECT_ROOT, "tools.f")
+AUTOEXEC_PATH = os.path.join(PROJECT_ROOT, "autoexec.f")
+GRAPHICS_PATH = os.path.join(PROJECT_ROOT, "graphics.f")
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +124,6 @@ def _next_line_chunk(data: bytes, pos: int) -> bytes:
 def _load_bios():
     with open(BIOS_PATH) as f:
         return assemble(f.read())
-
-
-def _load_kdos_lines():
-    with open(KDOS_PATH) as f:
-        lines = []
-        for line in f.read().splitlines():
-            s = line.strip()
-            if not s or s.startswith('\\'):
-                continue
-            lines.append(line)
-        return lines
 
 
 # ── Ethernet frame construction helpers (host-side) ──
@@ -252,8 +246,8 @@ class _RealNetBase(unittest.TestCase):
     """
 
     _bios_code: bytes = None
-    _kdos_lines: list[str] = None
     _kdos_snapshot = None
+    _disk_image_path: str = None
 
     @classmethod
     def _save_cpu_state(cls, cpu):
@@ -285,31 +279,47 @@ class _RealNetBase(unittest.TestCase):
             setattr(cpu, k, state[k])
 
     @classmethod
+    def _build_disk_image(cls) -> str:
+        """Build a disk image with kdos.f, autoexec.f, graphics.f, tools.f.
+
+        kdos.f is injected first so the BIOS auto-boots it (BIOS loads
+        the first FTYPE_FORTH file it finds in the directory).
+        """
+        path = os.path.join(tempfile.gettempdir(), 'mp64_realnet_test.img')
+        format_image(path)
+        for fpath in (KDOS_PATH, AUTOEXEC_PATH, GRAPHICS_PATH, TOOLS_PATH):
+            with open(fpath, 'rb') as f:
+                inject_file(path, os.path.basename(fpath), f.read(),
+                            ftype=FTYPE_FORTH)
+        return path
+
+    @classmethod
     def _ensure_snapshot(cls):
         if cls._kdos_snapshot is not None:
             return
         cls._bios_code = _load_bios()
-        cls._kdos_lines = _load_kdos_lines()
-        # Boot BIOS + KDOS with a plain loopback NIC (no TAP during snapshot)
-        sys_obj = MegapadSystem(ram_size=1024 * 1024)
+        cls._disk_image_path = cls._build_disk_image()
+
+        # Boot from disk — BIOS auto-loads kdos.f, then KDOS runs
+        # _AUTOEXEC-RUN which loads autoexec.f → graphics.f → tools.f.
+        # Disable NIC link so AUTOEXEC-NET skips DHCP during snapshot.
+        sys_obj = MegapadSystem(ram_size=1024 * 1024,
+                                storage_image=cls._disk_image_path,
+                                ext_mem_size=16 * (1 << 20))
+        sys_obj.nic.link_up = False
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
-        payload = "\n".join(cls._kdos_lines) + "\n"
-        data = payload.encode()
-        pos = 0
-        for _ in range(500_000_000):
+
+        max_steps = 1_000_000_000
+        total = 0
+        while total < max_steps:
             if sys_obj.cpu.halted:
                 break
-            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                if pos < len(data):
-                    chunk = _next_line_chunk(data, pos)
-                    sys_obj.uart.inject_input(chunk)
-                    pos += len(chunk)
-                else:
-                    break
-                continue
-            sys_obj.run_batch(min(100_000, 500_000_000))
+            if sys_obj.cpu.idle:
+                break          # Sitting in QUIT loop — fully booted
+            batch = sys_obj.run_batch(min(100_000, max_steps - total))
+            total += max(batch, 1)
 
         cls._kdos_snapshot = (
             bytes(sys_obj.cpu.mem),
@@ -330,7 +340,9 @@ class _RealNetBase(unittest.TestCase):
         """
         mem_bytes, cpu_state = self.__class__._kdos_snapshot
         backend = TAPBackend(tap_name=_TAP_NAME)
-        sys = MegapadSystem(ram_size=1024 * 1024, nic_backend=backend)
+        sys = MegapadSystem(ram_size=1024 * 1024, nic_backend=backend,
+                            storage_image=self.__class__._disk_image_path,
+                            ext_mem_size=16 * (1 << 20))
         buf = capture_uart(sys)
 
         # Restore memory
@@ -358,35 +370,43 @@ class _RealNetBase(unittest.TestCase):
         pos = 0
         steps = 0
         idle_polls = 0           # count consecutive idle-with-no-data polls
-        max_idle_polls = 50      # allow TAP frames time to arrive
+        max_idle_polls = 200     # 200 × 20ms = 4s idle timeout per gap
 
         try:
             while steps < max_steps:
                 if sys.cpu.halted:
                     break
-                if sys.cpu.idle and not sys.uart.has_rx_data:
-                    if pos < len(data):
-                        chunk = _next_line_chunk(data, pos)
-                        sys.uart.inject_input(chunk)
-                        pos += len(chunk)
-                        idle_polls = 0
-                    elif sys.nic.rx_queue:
-                        # NIC has pending frames — wake CPU and continue
+
+                # --- Inject UART data whenever the buffer is empty ---
+                # The Forth REPL busy-polls the UART (KEY), so it won't
+                # go idle while waiting for input.  We must feed data
+                # regardless of CPU state — exactly as stdin does in CLI.
+                if not sys.uart.has_rx_data and pos < len(data):
+                    chunk = _next_line_chunk(data, pos)
+                    sys.uart.inject_input(chunk)
+                    pos += len(chunk)
+                    if sys.cpu.idle:
                         sys.cpu.idle = False
-                        idle_polls = 0
-                    elif idle_polls < max_idle_polls:
-                        # Wait briefly for TAP frames to arrive,
-                        # then wake CPU so Forth polling loops advance.
-                        idle_polls += 1
-                        time.sleep(0.02)
-                        sys.cpu.idle = False
-                        continue
-                    else:
-                        break
+                    idle_polls = 0
+
+                # --- Run CPU if it has work to do ---
+                if not (sys.cpu.idle
+                        and not sys.uart.has_rx_data
+                        and not sys.nic.rx_queue):
+                    batch = sys.run_batch(min(100_000, max_steps - steps))
+                    steps += max(batch, 1)
+                    idle_polls = 0
                     continue
-                idle_polls = 0
-                batch = sys.run_batch(min(100_000, max_steps - steps))
-                steps += max(batch, 1)
+
+                # CPU is idle, no UART data, no NIC frames — brief
+                # sleep to let TAP thread deliver frames, then wake CPU
+                # so Forth polling loops (NET-IDLE) can advance.
+                if idle_polls < max_idle_polls:
+                    idle_polls += 1
+                    time.sleep(0.02)
+                    sys.cpu.idle = False
+                else:
+                    break
         finally:
             # Clean shutdown of TAP backend — must always run to release fd
             sys.nic.stop()
@@ -410,6 +430,7 @@ class _RealNetBase(unittest.TestCase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetBIOS(_RealNetBase):
     """Test BIOS networking primitives against a real TAP device."""
 
@@ -430,6 +451,7 @@ class TestRealNetBIOS(_RealNetBase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetARP(_RealNetBase):
     """Test the KDOS ARP stack against real TAP networking.
 
@@ -494,6 +516,7 @@ class TestRealNetARP(_RealNetBase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetICMP(_RealNetBase):
     """Test ICMP (ping) against real TAP networking."""
 
@@ -545,6 +568,7 @@ class TestRealNetICMP(_RealNetBase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetUDP(_RealNetBase):
     """Test UDP send/receive against real TAP networking."""
 
@@ -631,6 +655,7 @@ class TestRealNetUDP(_RealNetBase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetIntegration(_RealNetBase):
     """End-to-end integration tests with real networking."""
 
@@ -832,6 +857,7 @@ class TestNICBackends(unittest.TestCase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetHardening(_RealNetBase):
     """Stress and robustness tests that exercise the full stack over TAP."""
 
@@ -973,6 +999,7 @@ class TestRealNetHardening(_RealNetBase):
 
 @_skip_no_tap
 @pytest.mark.realnet
+@pytest.mark.xdist_group("tap")
 class TestRealNetEndToEnd(_RealNetBase):
     """End-to-end networking tests that require real replies.
 
@@ -1001,8 +1028,10 @@ class TestRealNetEndToEnd(_RealNetBase):
 
     def test_ping_gateway_reply_lines(self):
         """PING should print 'Reply seq=' lines for each received reply."""
+        # Need enough pings for ARP to resolve first (seq=0 triggers ARP,
+        # seq=1 may timeout while ARP reply is in flight).
         text = self._run_kdos_tap([
-            '10 64 0 1 2 PING-IP',
+            '10 64 0 1 5 PING-IP',
         ], max_steps=500_000_000)
         self.assertIn("Reply seq=", text,
                       f"Expected 'Reply seq=' in ping output. Got:\n{text[-500:]}")
@@ -1093,10 +1122,47 @@ class TestRealNetEndToEnd(_RealNetBase):
         self.assertTrue(got_content,
                         f"Expected HTTPS content from example.com. Got:\n{text[-600:]}")
 
+    def test_tls_connect_diagnostic(self):
+        """Diagnostic: TLS-CONNECT with breadcrumbs at each stage.
+
+        Prints markers so we can see exactly where the TLS handshake
+        stalls when test_scroll_get_https fails.
+        """
+        # S" is compile-only — wrap everything in a colon definition
+        text = self._run_kdos_tap([
+            ': DO-TLS-DIAG',
+            '  S" example.com" DNS-RESOLVE DUP 0= IF',
+            '    ." [DNS-FAIL]" CR EXIT',
+            '  THEN',
+            '  ." [DNS-OK] " DUP . CR',
+            '  11 TLS-SNI-LEN !',
+            '  S" example.com" TLS-SNI-HOST SWAP CMOVE',
+            '  ." [TLS-CONNECT] " CR',
+            '  443 12345 TLS-CONNECT',
+            '  DUP 0= IF',
+            '    ." [TLS-FAIL]" CR EXIT',
+            '  THEN',
+            '  ." [TLS-OK] ctx=" DUP . CR',
+            '  TLS-CLOSE',
+            ';',
+            'DO-TLS-DIAG',
+        ], max_steps=800_000_000)
+        if "DNS-FAIL" in text:
+            self.skipTest("DNS not available over TAP")
+        self.assertIn("[TLS-CONNECT]", text,
+                      f"Should reach TLS-CONNECT. Got:\n{text[-500:]}")
+        # If we got [TLS-OK] or [TLS-FAIL], TLS-CONNECT at least returned
+        tls_returned = "[TLS-OK]" in text or "[TLS-FAIL]" in text
+        self.assertTrue(tls_returned,
+                        f"TLS-CONNECT hung (no result). Got:\n{text[-500:]}")
+        self.assertIn("[TLS-OK]", text,
+                      f"TLS-CONNECT failed. Got:\n{text[-500:]}")
+
     def test_url_parse_https_port(self):
         """URL-PARSE should set port 443 for https:// URLs."""
+        # S" is compile-only — wrap in a colon definition
         text = self._run_kdos_tap([
-            'S" https://example.com/foo" URL-PARSE DROP',
+            ': DO-PARSE S" https://example.com/foo" URL-PARSE DROP ; DO-PARSE',
             '_SC-PROTO @ . _SC-PORT @ .',
         ], max_steps=50_000_000, setup_ip=False)
         # PROTO-HTTPS = 3, port = 443
@@ -1105,8 +1171,9 @@ class TestRealNetEndToEnd(_RealNetBase):
 
     def test_url_parse_ftp(self):
         """URL-PARSE should handle ftp:// and ftps:// protocols."""
+        # S" is compile-only — wrap in a colon definition
         text = self._run_kdos_tap([
-            'S" ftp://ftp.example.com/pub/file.txt" URL-PARSE DROP',
+            ': DO-PARSE S" ftp://ftp.example.com/pub/file.txt" URL-PARSE DROP ; DO-PARSE',
             '_SC-PROTO @ . _SC-PORT @ .',
         ], max_steps=50_000_000, setup_ip=False)
         # PROTO-FTP = 4, port = 21
@@ -1115,8 +1182,9 @@ class TestRealNetEndToEnd(_RealNetBase):
 
     def test_url_parse_ftps(self):
         """URL-PARSE should set port 990 for ftps:// URLs."""
+        # S" is compile-only — wrap in a colon definition
         text = self._run_kdos_tap([
-            'S" ftps://secure.example.com/data" URL-PARSE DROP',
+            ': DO-PARSE S" ftps://secure.example.com/data" URL-PARSE DROP ; DO-PARSE',
             '_SC-PROTO @ . _SC-PORT @ .',
         ], max_steps=50_000_000, setup_ip=False)
         # PROTO-FTPS = 5, port = 990
