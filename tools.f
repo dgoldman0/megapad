@@ -535,9 +535,9 @@ VARIABLE _HTTP-RLEN
 
 \ Case-insensitive single char match helper
 : _CI-EQ  ( c1 c2 -- flag )
-    OVER 65 >= OVER 90 <= AND IF 32 + THEN   \ uppercase c2 -> lower
+    DUP 65 >= OVER 90 <= AND IF 32 + THEN    \ lowercase c2 if A-Z
     SWAP
-    DUP 65 >= OVER 90 <= AND IF 32 + THEN    \ uppercase c1 -> lower
+    DUP 65 >= OVER 90 <= AND IF 32 + THEN    \ lowercase c1 if A-Z
     = ;
 
 \ Case-insensitive prefix match ( src match len -- flag )
@@ -556,6 +556,8 @@ CREATE _CL-TAG 16 ALLOT
     S" content-length: " _CL-TAG SWAP CMOVE ;
 _CL-TAG-INIT
 
+VARIABLE _CL-PTR              \ digit scan pointer
+VARIABLE _CL-ACC              \ digit accumulator
 : _HTTP-PARSE-CLEN  ( hdr-addr hdr-len -- )
     -1 _HTTP-CLEN !
     OVER + SWAP                 ( end start )
@@ -563,17 +565,16 @@ _CL-TAG-INIT
         2DUP >
     WHILE
         DUP  _CL-TAG 16  _CI-PREFIX  IF
-            16 +
-            0                   ( accum )
+            16 + _CL-PTR !      ( end )
+            0 _CL-ACC !
             BEGIN
-                OVER C@ DUP 48 >= SWAP 57 <= AND
+                _CL-PTR @ C@ DUP 48 >= SWAP 57 <= AND
             WHILE
-                SWAP DUP C@ 48 -
-                ROT 10 * + SWAP 1+
+                _CL-PTR @ C@ 48 -  _CL-ACC @ 10 * +  _CL-ACC !
+                _CL-PTR @ 1+ _CL-PTR !
             REPEAT
-            _HTTP-CLEN !
-            DROP
-            2DROP EXIT
+            _CL-ACC @ _HTTP-CLEN !
+            DROP EXIT
         THEN
         1+
     REPEAT
@@ -624,13 +625,22 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
     DUP 0= IF ."  TCP connect failed" CR -1 EXIT THEN
     _HG-TCB !
     \ Wait for connection — poll until established or timeout
-    200 0 DO  TCP-POLL  LOOP
+    200 0 DO  TCP-POLL NET-IDLE  LOOP
+    \ Check we actually reached ESTABLISHED
+    _HG-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF
+        ."  TCP handshake timeout" CR
+        _HG-TCB @ TCP-CLOSE -1 EXIT
+    THEN
     \ Send request
-    _HTTP-BUILD-REQ _HG-TCB @ -ROT TCP-SEND DROP
+    _HTTP-BUILD-REQ _HG-TCB @ -ROT TCP-SEND
+    0= IF
+        ."  TCP send failed" CR
+        _HG-TCB @ TCP-CLOSE -1 EXIT
+    THEN
     \ Receive response — 500 iterations, bail after 10 consecutive empties
     0 SCROLL-LEN !  0 _HG-EMPTY !
     500 0 DO
-        TCP-POLL
+        TCP-POLL NET-IDLE
         SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN   \ buffer full
         _HG-TCB @
         SCROLL-BUF SCROLL-LEN @ +
@@ -682,7 +692,7 @@ VARIABLE _HGS-EMPTY
     \ Receive response
     0 SCROLL-LEN !  0 _HGS-EMPTY !
     500 0 DO
-        TCP-POLL
+        TCP-POLL NET-IDLE
         SCROLL-LEN @ SCROLL-BUFSZ >= IF LEAVE THEN
         _HGS-CTX @
         SCROLL-BUF SCROLL-LEN @ +
@@ -736,13 +746,13 @@ VARIABLE _FTP-LLEN
     0 _FTP-LLEN !
     100 0 DO
         _FTP-TLS @ 0= IF
-            TCP-POLL
+            TCP-POLL NET-IDLE
             _FTP-TCB @
             _FTP-LINEBUF _FTP-LLEN @ +
             256 _FTP-LLEN @ -
             TCP-RECV
         ELSE
-            TCP-POLL
+            TCP-POLL NET-IDLE
             _FTP-TLS @
             _FTP-LINEBUF _FTP-LLEN @ +
             256 _FTP-LLEN @ -
@@ -775,7 +785,7 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     _SC-IP @ _SC-PORT @ 12347 TCP-CONNECT
     DUP 0= IF ."  FTP connect failed" CR -1 EXIT THEN
     _FTP-TCB !  0 _FTP-TLS !
-    200 0 DO TCP-POLL LOOP
+    200 0 DO TCP-POLL NET-IDLE LOOP
     _FTP-RECV-LINE              \ read banner
     \ For FTPS, upgrade to TLS now
     _SC-PROTO @ PROTO-FTPS = IF
@@ -801,7 +811,7 @@ CREATE _FTP-CRLF 2 ALLOT  13 _FTP-CRLF C!  10 _FTP-CRLF 1+ C!
     \ Read data from data channel
     0 SCROLL-LEN !
     200 0 DO
-        TCP-POLL
+        TCP-POLL NET-IDLE
         _FTP-TCB @
         SCROLL-BUF SCROLL-LEN @ +
         SCROLL-BUFSZ SCROLL-LEN @ -
@@ -875,14 +885,14 @@ CREATE _GO-CRLF 2 ALLOT   13 _GO-CRLF C!  10 _GO-CRLF 1+ C!
     _SC-IP @ _SC-PORT @ 12346 TCP-CONNECT
     DUP 0= IF ."  Gopher connect failed" CR -1 EXIT THEN
     _GO-TCB !
-    100 0 DO TCP-POLL LOOP
+    100 0 DO TCP-POLL NET-IDLE LOOP
     \ Send selector + CRLF
     _SC-PATH _SC-PATH-LEN @ _GO-TCB @ -ROT TCP-SEND DROP
     _GO-CRLF 2 _GO-TCB @ -ROT TCP-SEND DROP
     \ Receive
     0 SCROLL-LEN !
     200 0 DO
-        TCP-POLL
+        TCP-POLL NET-IDLE
         _GO-TCB @
         SCROLL-BUF SCROLL-LEN @ +
         4096 SCROLL-LEN @ -

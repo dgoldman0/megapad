@@ -20,6 +20,10 @@
 #   make test-net       All real-net tests against TAP device
 #   make test-net K=X   Subset of real-net tests
 #
+# Live integration tests (full emulator, piped I/O):
+#   make test-live      Boot + core Forth tests (no TAP needed)
+#   make test-live-net  All live tests including network
+#
 # All targets run in the background.  Use `make test-status` or
 # `make test-watch` to monitor progress.
 #
@@ -120,6 +124,19 @@ test-net: accel
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
 	@echo "Monitor: make test-status  |  make test-watch"
+
+# --- Live integration tests (full emulator via pipes) ---
+# These spawn cli.py, pipe commands in, read output, and check behaviour.
+# Much slower than unit tests but catch real user-facing bugs.
+.PHONY: test-live test-live-net
+test-live: accel disk
+	@echo "Running live integration tests (no network)..."
+	env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_live.py -v --tb=long -x \
+		-k "not Network"
+
+test-live-net: accel disk
+	@echo "Running live integration tests (with TAP networking)..."
+	env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_live.py -v --tb=long -x
 
 # --- Show live test status ---
 .PHONY: test-status
