@@ -694,6 +694,264 @@ class MegapadCLI(cmd.Cmd):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+#  Headless TCP terminal server
+# ---------------------------------------------------------------------------
+
+_HEADLESS_PORT = 6464
+_HEADLESS_STATUS = "/tmp/megapad_headless.json"
+_HEADLESS_BATCH = 100_000
+
+
+class HeadlessServer:
+    """TCP terminal server — run the emulator headless with remote access.
+
+    Boots the emulator, runs the CPU loop in a background thread, and
+    serves UART I/O over a TCP socket.  Multiple clients can connect
+    simultaneously; all see TX output and any can send input.
+
+    Status info (PID, port) is written to /tmp/megapad_headless.json
+    so ``--connect`` can auto-discover a running instance.
+    """
+
+    def __init__(self, sys_emu: MegapadSystem, port: int = _HEADLESS_PORT):
+        self.sys_emu = sys_emu
+        self.port = port
+        self.clients: list = []            # connected client sockets
+        self._lock = __import__("threading").Lock()
+        self.running = False
+
+    # -- public API -------------------------------------------------------
+
+    def serve_forever(self):
+        """Start the CPU thread and block on the accept loop."""
+        import threading, signal, json, socket as _socket
+
+        self.running = True
+
+        # Wire UART TX → broadcast to all connected clients
+        self.sys_emu.uart.on_tx = self._broadcast_byte
+
+        # CPU loop in background thread
+        self._cpu_thread = threading.Thread(
+            target=self._cpu_loop, daemon=True, name="cpu-loop")
+        self._cpu_thread.start()
+
+        # TCP server
+        self._srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        self._srv.bind(("0.0.0.0", self.port))
+        self._srv.listen(8)
+        self._srv.settimeout(1.0)     # so we can check self.running
+
+        # Write status file
+        status = {"pid": os.getpid(), "port": self.port}
+        with open(_HEADLESS_STATUS, "w") as f:
+            json.dump(status, f)
+
+        # Handle SIGTERM / SIGINT gracefully
+        def _shutdown(sig, frame):
+            self.running = False
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
+
+        print(f"[headless] Listening on 0.0.0.0:{self.port}  "
+              f"(PID {os.getpid()})")
+        print(f"[headless] Connect with:  python cli.py --connect "
+              f"localhost:{self.port}")
+        print(f"[headless] Or plain:      nc localhost {self.port}")
+        print(f"[headless] Status file:   {_HEADLESS_STATUS}")
+        print(f"[headless] Ctrl+C to stop.")
+
+        try:
+            while self.running:
+                try:
+                    sock, addr = self._srv.accept()
+                except OSError:
+                    continue          # timeout — just re-check self.running
+                print(f"[headless] Client connected: {addr[0]}:{addr[1]}")
+                t = threading.Thread(
+                    target=self._client_handler, args=(sock, addr),
+                    daemon=True, name=f"client-{addr[0]}:{addr[1]}")
+                t.start()
+        finally:
+            self._cleanup()
+
+    # -- internals --------------------------------------------------------
+
+    def _cpu_loop(self):
+        """Run the CPU continuously in a background thread."""
+        import time as _time
+        while self.running:
+            cpu = self.sys_emu.cpu
+            if cpu.halted:
+                _time.sleep(0.05)
+                continue
+            if (cpu.idle and not self.sys_emu.uart.has_rx_data
+                    and not self.sys_emu.nic.rx_queue):
+                _time.sleep(0.02)
+                cpu.idle = False
+                continue
+            try:
+                self.sys_emu.run_batch(_HEADLESS_BATCH)
+            except HaltError:
+                print("[headless] CPU halted.")
+                break
+            except Exception as e:
+                print(f"[headless] CPU error: {e}")
+                break
+
+    def _broadcast_byte(self, b: int):
+        """Send one TX byte to every connected client."""
+        data = bytes([b])
+        with self._lock:
+            dead: list = []
+            for sock in self.clients:
+                try:
+                    sock.sendall(data)
+                except Exception:
+                    dead.append(sock)
+            for sock in dead:
+                self.clients.remove(sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def _client_handler(self, sock, addr):
+        """Handle one TCP client — read → UART RX, UART TX → write."""
+        import time as _time
+        banner = (
+            f"\r\n========================================\r\n"
+            f"  Megapad-64 Headless Console\r\n"
+            f"  Client: {addr[0]}:{addr[1]}\r\n"
+            f"  RAM: {self.sys_emu.ram_size // 1024} KiB  "
+            f"Cores: {self.sys_emu.num_cores}\r\n"
+            f"  Ctrl+] to disconnect\r\n"
+            f"========================================\r\n\r\n"
+        )
+        with self._lock:
+            self.clients.append(sock)
+        try:
+            sock.sendall(banner.encode("utf-8"))
+            sock.settimeout(0.5)
+            while self.running:
+                try:
+                    data = sock.recv(4096)
+                except OSError:
+                    continue   # timeout — just loop
+                if not data:
+                    break
+                for byte in data:
+                    if byte == 0x1D:   # Ctrl+]
+                        sock.sendall(
+                            b"\r\n=== Disconnected ===\r\n")
+                        return
+                    self.sys_emu.uart.inject_input(bytes([byte]))
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                if sock in self.clients:
+                    self.clients.remove(sock)
+            try:
+                sock.close()
+            except Exception:
+                pass
+            print(f"[headless] Client disconnected: {addr[0]}:{addr[1]}")
+
+    def _cleanup(self):
+        """Shut down server and all clients."""
+        self.running = False
+        with self._lock:
+            for sock in self.clients:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            self.clients.clear()
+        try:
+            self._srv.close()
+        except Exception:
+            pass
+        # Remove status file
+        try:
+            os.unlink(_HEADLESS_STATUS)
+        except FileNotFoundError:
+            pass
+        print("[headless] Server stopped.")
+
+
+def headless_connect(host: str, port: int):
+    """Connect to a running headless instance as a raw terminal client.
+
+    Wires stdin → TCP socket → emulator UART RX and
+    emulator UART TX → TCP socket → stdout.
+    Uses raw terminal mode for a real interactive experience.
+    """
+    import socket as _socket, select
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        sock.connect((host, port))
+    except ConnectionRefusedError:
+        print(f"ERROR: Cannot connect to {host}:{port} — "
+              f"is the headless server running?", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Connected to {host}:{port}.  Ctrl+] to disconnect.")
+
+    is_tty = os.isatty(sys.stdin.fileno())
+    out_fd = sys.stdout.fileno()
+
+    if is_tty:
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            _connect_loop(sock, fd, out_fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            print()   # clean newline
+    else:
+        fd = sys.stdin.fileno()
+        _connect_loop(sock, fd, out_fd)
+
+    sock.close()
+
+
+def _connect_loop(sock, in_fd: int, out_fd: int):
+    """Raw select loop: stdin ↔ TCP socket."""
+    import select
+    sock.setblocking(False)
+    try:
+        while True:
+            readable, _, _ = select.select([sock, in_fd], [], [], 0.1)
+            for r in readable:
+                if r is sock:
+                    try:
+                        data = sock.recv(4096)
+                    except BlockingIOError:
+                        continue
+                    if not data:
+                        os.write(out_fd, b"\r\n=== Server closed ===\r\n")
+                        return
+                    os.write(out_fd, data)
+                else:
+                    ch = os.read(in_fd, 1)
+                    if not ch:
+                        return
+                    if ch == b'\x1d':    # Ctrl+]
+                        return
+                    sock.sendall(ch)
+    except (KeyboardInterrupt, OSError):
+        pass
+
+
+# ---------------------------------------------------------------------------
 #  Console mode — raw terminal ↔ UART
 # ---------------------------------------------------------------------------
 
@@ -876,6 +1134,10 @@ def main():
                "  python cli.py --bios bios.asm --storage disk.img\n"
                "  python cli.py --ram 1024 --storage disk.img\n"
                "  python cli.py --load program.bin@0x100 --run\n"
+               "\n"
+               "Headless mode (TCP terminal server):\n"
+               "  python cli.py --bios bios.asm --storage disk.img --headless\n"
+               "  python cli.py --connect localhost:6464\n"
     )
     parser.add_argument("--ram", type=int, default=1024,
                         help="RAM size in KiB (default: 1024)")
@@ -911,7 +1173,30 @@ def main():
                         help="Pixel scale factor for display window (default: 2)")
     parser.add_argument("--extmem", type=int, default=16, metavar="MiB",
                         help="External memory size in MiB (default: 16, set 0 to disable)")
+
+    # Headless mode
+    parser.add_argument("--headless", action="store_true",
+                        help="Run headless with a TCP terminal server "
+                             "(connect with --connect or nc/telnet)")
+    parser.add_argument("--headless-port", type=int, default=_HEADLESS_PORT,
+                        metavar="PORT",
+                        help=f"TCP port for headless server (default: {_HEADLESS_PORT})")
+    parser.add_argument("--connect", type=str, default=None,
+                        metavar="[HOST:]PORT",
+                        help="Connect to a running headless instance "
+                             "(e.g. localhost:6464)")
     args = parser.parse_args()
+
+    # ---- Connect-only mode (no emulator needed) -----------------------
+    if args.connect:
+        spec = args.connect
+        if ":" in spec:
+            h, p = spec.rsplit(":", 1)
+            host, port = (h or "localhost"), int(p)
+        else:
+            host, port = "localhost", int(spec)
+        headless_connect(host, port)
+        return
 
     # ---- Assemble-only mode -------------------------------------------
     if args.assemble:
@@ -1006,6 +1291,14 @@ def main():
         # Inject Forth source files through UART before interactive console
         if args.forth:
             _inject_forth_files(sys_emu, args.forth)
+
+        # ---- Headless mode: TCP server instead of interactive console --
+        if args.headless:
+            server = HeadlessServer(sys_emu, port=args.headless_port)
+            server.serve_forever()
+            if display is not None:
+                display.stop()
+            return
 
         while True:
             wants_monitor = run_console(sys_emu)

@@ -1,11 +1,8 @@
 # Megapad-64 — Build & Test
 # ==========================
 #
-# The C++ accelerator (~50× faster than CPython, ~10× faster than PyPy)
+# The C++ accelerator (~50x faster than CPython, ~10x faster than PyPy)
 # is the DEFAULT test backend.  All targets auto-build it.
-#
-# NEVER run `python -m pytest` directly — conftest.py will block it.
-# Always use these Makefile targets.
 #
 #   make test           Background + live dashboard   (DEFAULT, ~1 min)
 #   make test K=X       Background subset
@@ -16,23 +13,19 @@
 #   make test-kill      Kill stuck background run
 #   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
 #
-# Real-network tests (requires TAP — see test_networking.py):
+# Real-network tests (requires TAP — see tests/test_networking.py):
 #   make test-net       All real-net tests against TAP device
 #   make test-net K=X   Subset of real-net tests
 #
-# Live integration tests (full emulator, piped I/O):
-#   make test-live      Boot + core Forth tests (no TAP needed)
-#   make test-live-net  All live tests including network
+# All background targets use `make test-status` / `make test-watch`
+# to monitor progress.
 #
-# All targets run in the background.  Use `make test-status` or
-# `make test-watch` to monitor progress.
-#
-# conftest.py writes live status to /tmp/megapad_test_status.json.
+# tests/conftest.py writes live status to /tmp/megapad_test_status.json.
 # test_monitor.py reads it and renders the dashboard.
 
 VENV_PY  := .venv/bin/python
-PYTEST   := -m pytest test_system.py test_megapad64.py test_networking.py
-PYTEST_SIM := -m pytest test_system.py test_megapad64.py test_networking.py -m "not realnet"
+PYTEST   := -m pytest tests/
+PYTEST_SIM := -m pytest tests/ -m "not realnet"
 WORKERS  := 8
 
 # --- C++ accelerator ---
@@ -119,24 +112,11 @@ test-net: accel
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
 	@echo "Starting real-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
 		> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
 	@echo "Monitor: make test-status  |  make test-watch"
-
-# --- Live integration tests (full emulator via pipes) ---
-# These spawn cli.py, pipe commands in, read output, and check behaviour.
-# Much slower than unit tests but catch real user-facing bugs.
-.PHONY: test-live test-live-net
-test-live: accel disk
-	@echo "Running live integration tests (no network)..."
-	env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_live.py -v --tb=long -x \
-		-k "not Network"
-
-test-live-net: accel disk
-	@echo "Running live integration tests (with TAP networking)..."
-	env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest test_live.py -v --tb=long -x
 
 # --- Show live test status ---
 .PHONY: test-status

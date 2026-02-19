@@ -5,7 +5,7 @@ Integration tests for the Megapad-64 system emulator.
 Tests the full stack: CPU + Devices + MMIO + BIOS + CLI integration.
 
 The C++ accelerator is the default backend (~50× faster than CPython).
-Running `python -m pytest` directly will fail — use the Makefile.
+All tests must be run via the Makefile.
 
 ═══════════════════════════════════════════════════════════════
   TEST WORKFLOW — READ THIS BEFORE RUNNING TESTS
@@ -31,11 +31,6 @@ Running `python -m pytest` directly will fail — use the Makefile.
     test_monitor.py script reads that file and renders a dashboard
     with progress bar, ETA, per-worker activity, failure details,
     and hang detection (warns if no progress for >2 min).
-
-  NEVER:
-    - Run `python -m pytest` directly (no accel, will be blocked)
-    - Pipe test output through tail/grep (use test-status instead)
-    - Redirect to file and wait (use test-bg + test-status instead)
 
   When developing new tests:
     1. Write tests, then: make test-one K=TestNewClass
@@ -93,7 +88,8 @@ from diskutil import (
 #  Helpers
 # ---------------------------------------------------------------------------
 
-BIOS_PATH = os.path.join(os.path.dirname(__file__), "bios.asm")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIOS_PATH = os.path.join(PROJECT_ROOT, "bios.asm")
 
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,
@@ -2949,7 +2945,7 @@ class TestAssemblerBranchRange(unittest.TestCase):
 #  KDOS tests
 # ---------------------------------------------------------------------------
 
-KDOS_PATH = os.path.join(os.path.dirname(__file__), "kdos.f")
+KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
 
 
 class _KDOSTestBase(unittest.TestCase):
@@ -17508,7 +17504,7 @@ class TestKDOSGraphicsModule(_KDOSTestBase):
     def _make_gfx_image(self):
         """Create a formatted image with graphics.f injected."""
         path = self._make_formatted_image()
-        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        gfx_path = os.path.join(PROJECT_ROOT, "graphics.f")
         with open(gfx_path, "rb") as f:
             gfx_src = f.read()
         du_inject_file(path, "graphics.f", gfx_src, ftype=FTYPE_FORTH)
@@ -17741,7 +17737,7 @@ class TestHeadlessDisplay(_KDOSTestBase):
         """HeadlessDisplay captures FB pixel data via HBW memory."""
         from display import HeadlessDisplay, HBW_BASE
         img = self._make_formatted_image()
-        gfx_path = os.path.join(os.path.dirname(__file__), "graphics.f")
+        gfx_path = os.path.join(PROJECT_ROOT, "graphics.f")
         with open(gfx_path, "rb") as f:
             du_inject_file(img, "graphics.f", f.read(), ftype=FTYPE_FORTH)
         try:
@@ -18239,7 +18235,7 @@ class TestToolsModule(_KDOSTestBase):
     def _make_tools_image(self, extra_files=None):
         """Create a disk image with tools.f and optional extra files."""
         path = self._make_formatted_image()
-        tools_path = os.path.join(os.path.dirname(__file__), "tools.f")
+        tools_path = os.path.join(PROJECT_ROOT, "tools.f")
         with open(tools_path, "rb") as f:
             tools_src = f.read()
         du_inject_file(path, "tools.f", tools_src, ftype=FTYPE_FORTH)

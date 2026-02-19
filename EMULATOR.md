@@ -542,8 +542,7 @@ There are no `push64`/`pop64` instructions.  Manual stack operations use
 
 ## Running Tests
 
-All tests are run via the Makefile — never invoke `python -m pytest`
-directly (conftest.py blocks it).
+All tests are run via the Makefile.
 
 ```bash
 # C++ accelerator (recommended — 63× faster than PyPy)
@@ -600,6 +599,36 @@ RAM: 00100000 bytes
 > BYE
 Bye!
 ```
+
+---
+
+## Headless Mode (TCP Terminal Server)
+
+The emulator can run as a headless TCP server, allowing remote access
+to the Forth REPL without a local terminal.  The CPU runs in a background
+thread; UART I/O is served over TCP.
+
+```bash
+# Start the headless server (default port 6464)
+python cli.py --bios bios.asm --storage sample.img --headless
+
+# Custom port
+python cli.py --bios bios.asm --storage sample.img --headless --headless-port 7777
+
+# Connect with built-in client
+python cli.py --connect localhost:6464
+
+# Or plain nc / telnet
+nc localhost 6464
+```
+
+Server status (PID + port) is written to `/tmp/megapad_headless.json`.
+Multiple clients can connect simultaneously; all see TX output and any
+can send input.  Ctrl+] disconnects a client session.
+
+This is the recommended way to interact with the emulator for production
+testing, CI pipelines, or any scenario where the emulator should persist
+across multiple interactive sessions.
 
 ---
 
