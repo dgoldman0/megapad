@@ -214,7 +214,7 @@ crypto: tb_crypto.vvp
 	$(VVP) $<
 
 tb_crypto.vvp: tb_crypto.v $(PERIPH)/mp64_crc.v \
-               $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_aes.v
+               $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_sha256.v $(CRYPTO)/mp64_aes.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- NTT ---

@@ -8110,6 +8110,91 @@ w_sha3_dout_fetch:
     ret.l
 
 ; =====================================================================
+;  SHA-256 Hardware Accelerator
+; =====================================================================
+; SHA256 base = 0xFFFF_FF00_0000_0940
+;   CMD    +0x00 (W)  1=INIT, 3=FINAL
+;   STATUS +0x08 (R)  bit0=busy, bit1=done
+;   DIN    +0x10 (W)  byte input (auto-compresses at 64 bytes)
+;   DOUT   +0x18..+0x37 (R)  32-byte hash output (big-endian)
+
+; SHA256-INIT ( -- )  Initialize SHA-256 state.
+w_sha256_init:
+    ldi64 r7, 0xFFFF_FF00_0000_0940   ; SHA256_CMD
+    ldi r0, 1                          ; CMD_INIT=1
+    st.b r7, r0
+    ret.l
+
+; SHA256-UPDATE ( addr len -- )  Feed len bytes to SHA-256 absorber.
+w_sha256_update:
+    ldn r12, r14            ; r12 = len
+    addi r14, 8
+    ldn r9, r14             ; r9 = addr
+    addi r14, 8
+    cmpi r12, 0
+    breq .sha256_update_done
+    ldi64 r7, 0xFFFF_FF00_0000_0950   ; SHA256_DIN
+    ldi r11, 0              ; counter = 0
+.sha256_update_loop:
+    mov r13, r9
+    add r13, r11            ; src + counter
+    ld.b r0, r13            ; load byte from RAM
+    st.b r7, r0             ; write to DIN
+    addi r11, 1
+    cmp r11, r12            ; counter < len?
+    brcc .sha256_update_loop
+.sha256_update_done:
+    ret.l
+
+; SHA256-FINAL ( addr -- )  Finalize hash, copy 32 bytes to addr.
+w_sha256_final:
+    ldn r9, r14             ; r9 = dest addr
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0940   ; SHA256_CMD
+    ldi r0, 3                          ; CMD_FINAL=3
+    st.b r7, r0             ; CMD=finalize
+    ; Read 32 bytes from DOUT (offset 0x18)
+    ldi64 r7, 0xFFFF_FF00_0000_0958   ; SHA256_DOUT base
+    ldi r12, 0
+.sha256_final_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11            ; read from DOUT
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0            ; store to RAM
+    addi r12, 1
+    cmpi r12, 32
+    brcc .sha256_final_loop
+    ret.l
+
+; SHA256-STATUS@ ( -- n )  Read SHA-256 status register.
+w_sha256_status_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0948  ; SHA256_STATUS
+    ld.b r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SHA256-DOUT@ ( addr -- )  Read 32 bytes from SHA-256 DOUT to memory.
+w_sha256_dout_fetch:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0958   ; SHA256_DOUT base
+    ldi r12, 0
+.sha256_dout_loop:
+    mov r11, r7
+    add r11, r12
+    ld.b r0, r11
+    mov r13, r9
+    add r13, r12
+    st.b r13, r0
+    addi r12, 1
+    cmpi r12, 32
+    brcc .sha256_dout_loop
+    ret.l
+
+; =====================================================================
 ;  True Random Number Generator (TRNG)
 ; =====================================================================
 ; TRNG base = 0xFFFF_FF00_0000_0800
@@ -11041,9 +11126,54 @@ d_sha3_dout_fetch:
     call.l r11
     ret.l
 
+; === SHA256-INIT ===
+d_sha256_init:
+    .dq d_sha3_dout_fetch
+    .db 11
+    .ascii "SHA256-INIT"
+    ldi64 r11, w_sha256_init
+    call.l r11
+    ret.l
+
+; === SHA256-UPDATE ===
+d_sha256_update:
+    .dq d_sha256_init
+    .db 13
+    .ascii "SHA256-UPDATE"
+    ldi64 r11, w_sha256_update
+    call.l r11
+    ret.l
+
+; === SHA256-FINAL ===
+d_sha256_final:
+    .dq d_sha256_update
+    .db 12
+    .ascii "SHA256-FINAL"
+    ldi64 r11, w_sha256_final
+    call.l r11
+    ret.l
+
+; === SHA256-STATUS@ ===
+d_sha256_status_fetch:
+    .dq d_sha256_final
+    .db 14
+    .ascii "SHA256-STATUS@"
+    ldi64 r11, w_sha256_status_fetch
+    call.l r11
+    ret.l
+
+; === SHA256-DOUT@ ===
+d_sha256_dout_fetch:
+    .dq d_sha256_status_fetch
+    .db 12
+    .ascii "SHA256-DOUT@"
+    ldi64 r11, w_sha256_dout_fetch
+    call.l r11
+    ret.l
+
 ; === RANDOM ===
 d_random:
-    .dq d_sha3_dout_fetch
+    .dq d_sha256_dout_fetch
     .db 6
     .ascii "RANDOM"
     ldi64 r11, w_random

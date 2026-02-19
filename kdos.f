@@ -676,6 +676,13 @@ CREATE SHA3-BUF 64 ALLOT
 \ HASH ( addr len hash-addr -- )  Alias for SHA3.
 : HASH  SHA3 ;
 
+\ SHA256 ( addr len out -- )  SHA-256 hash wrapper.
+: SHA256  ( addr len out -- )
+    >R
+    SHA256-INIT
+    SHA256-UPDATE
+    R> SHA256-FINAL ;
+
 \ --- HMAC-SHA3-256 ---
 \ HMAC(K,m) = SHA3((K ^ opad) || SHA3((K ^ ipad) || m))
 \ SHA3-256 rate (block size) = 136 bytes
@@ -1234,6 +1241,113 @@ VARIABLE _HKDF-COUNTER
         \ Next iteration
         HKDF-HASHLEN _HKDF-TPREV-LEN !
         _HKDF-COUNTER @ 1+ _HKDF-COUNTER !
+    REPEAT
+;
+
+\ =====================================================================
+\  §1.9b  HMAC-SHA256 / HKDF-SHA256 (for standard TLS 1.3)
+\ =====================================================================
+\  Same HMAC/HKDF constructions as §1.7/§1.9, but using SHA-256 instead
+\  of SHA3-256.  SHA-256 block size = 64 bytes, output = 32 bytes.
+\
+\  HMAC-SHA256 ( key klen msg mlen out -- )
+\  HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- )
+\  HKDF-SHA256-EXPAND  ( prk info ilen len out -- )
+
+64 CONSTANT HMAC256-BLKSZ
+
+CREATE HMAC256-IPAD 64 ALLOT
+CREATE HMAC256-OPAD 64 ALLOT
+CREATE HMAC256-INNER 32 ALLOT
+VARIABLE _HMAC256-PAD-PTR
+VARIABLE _HMAC256-XBYTE
+VARIABLE _HMAC256-OUT
+
+: HMAC256-PAD ( key-addr key-len pad-addr xor-byte -- )
+    _HMAC256-XBYTE !
+    _HMAC256-PAD-PTR !
+    _HMAC256-PAD-PTR @ HMAC256-BLKSZ 0 FILL
+    0 DO
+        DUP I + C@
+        _HMAC256-PAD-PTR @ I + C!
+    LOOP DROP
+    HMAC256-BLKSZ 0 DO
+        _HMAC256-PAD-PTR @ I + C@
+        _HMAC256-XBYTE @ XOR
+        _HMAC256-PAD-PTR @ I + C!
+    LOOP
+;
+
+: HMAC-SHA256 ( key-addr key-len msg-addr msg-len out-addr -- )
+    _HMAC256-OUT !
+    >R >R
+    2DUP HMAC256-IPAD 54 HMAC256-PAD
+    HMAC256-OPAD 92 HMAC256-PAD
+    \ Inner hash: SHA256(ipad || message)
+    SHA256-INIT
+    HMAC256-IPAD HMAC256-BLKSZ SHA256-UPDATE
+    R> R> SHA256-UPDATE
+    HMAC256-INNER SHA256-FINAL
+    \ Outer hash: SHA256(opad || inner)
+    SHA256-INIT
+    HMAC256-OPAD HMAC256-BLKSZ SHA256-UPDATE
+    HMAC256-INNER 32 SHA256-UPDATE
+    _HMAC256-OUT @ SHA256-FINAL
+;
+
+\ Scratch buffers for HKDF-SHA256
+CREATE _HKDF256-ZERO-SALT  32 ALLOT
+_HKDF256-ZERO-SALT 32 0 FILL
+CREATE _HKDF256-T       32 ALLOT
+CREATE _HKDF256-BLOCK  200 ALLOT
+VARIABLE _HKDF256-PRK-PTR
+VARIABLE _HKDF256-INFO-PTR
+VARIABLE _HKDF256-INFO-LEN
+VARIABLE _HKDF256-OUT-PTR
+VARIABLE _HKDF256-REMAIN
+VARIABLE _HKDF256-TPREV-LEN
+VARIABLE _HKDF256-COUNTER
+
+: HKDF-SHA256-EXTRACT ( salt slen ikm ilen out -- )
+    >R
+    2SWAP
+    DUP 0= IF
+        2DROP _HKDF256-ZERO-SALT 32
+    THEN
+    2SWAP
+    R>
+    HMAC-SHA256
+;
+
+: HKDF-SHA256-EXPAND ( prk info ilen len out -- )
+    _HKDF256-OUT-PTR !
+    _HKDF256-REMAIN !
+    _HKDF256-INFO-LEN !
+    _HKDF256-INFO-PTR !
+    _HKDF256-PRK-PTR !
+    0 _HKDF256-TPREV-LEN !
+    1 _HKDF256-COUNTER !
+    BEGIN _HKDF256-REMAIN @ 0> WHILE
+        _HKDF256-TPREV-LEN @ 0> IF
+            _HKDF256-T _HKDF256-BLOCK _HKDF256-TPREV-LEN @ CMOVE
+        THEN
+        _HKDF256-INFO-PTR @
+        _HKDF256-BLOCK _HKDF256-TPREV-LEN @ +
+        _HKDF256-INFO-LEN @ CMOVE
+        _HKDF256-COUNTER @
+        _HKDF256-BLOCK _HKDF256-TPREV-LEN @ + _HKDF256-INFO-LEN @ + C!
+        _HKDF256-TPREV-LEN @ _HKDF256-INFO-LEN @ + 1+
+        >R
+        _HKDF256-PRK-PTR @ 32
+        _HKDF256-BLOCK R>
+        _HKDF256-T HMAC-SHA256
+        _HKDF256-REMAIN @ 32 MIN
+        _HKDF256-T _HKDF256-OUT-PTR @ ROT CMOVE
+        _HKDF256-REMAIN @ 32 MIN
+        DUP _HKDF256-OUT-PTR @ + _HKDF256-OUT-PTR !
+        _HKDF256-REMAIN @ SWAP - _HKDF256-REMAIN !
+        32 _HKDF256-TPREV-LEN !
+        _HKDF256-COUNTER @ 1+ _HKDF256-COUNTER !
     REPEAT
 ;
 

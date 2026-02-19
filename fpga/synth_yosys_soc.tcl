@@ -88,6 +88,7 @@ read_verilog -sv -Irtl/pkg \
 read_verilog -sv -Irtl/pkg \
     rtl/crypto/mp64_aes.v      \
     rtl/crypto/mp64_sha3.v     \
+    rtl/crypto/mp64_sha256.v   \
     rtl/crypto/mp64_field_alu.v \
     rtl/crypto/mp64_ntt.v      \
     rtl/crypto/mp64_kem.v

@@ -44,6 +44,7 @@ CRC_BASE     = 0x07C0
 AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
+SHA256_BASE  = 0x0940
 X25519_BASE  = 0x0840
 NTT_BASE     = 0x08C0
 KEM_BASE     = 0x0900
@@ -1429,6 +1430,133 @@ class SHA3Device(Device):
         )
         self._squeezed = self._stream_pos + 64
         self.status = 2
+
+
+# ---------------------------------------------------------------------------
+#  SHA-256 Accelerator
+# ---------------------------------------------------------------------------
+# Register map (offsets from SHA256_BASE = 0x0940):
+#   0x00        SHA256_CMD     (W)   — 1=INIT, 3=FINAL
+#   0x08        SHA256_STATUS  (R)   — bit0=busy, bit1=done
+#   0x10        SHA256_DIN     (W)   — byte input (auto-compresses at 64 bytes)
+#   0x18..0x37  SHA256_DOUT    (R)   — 32-byte hash output (big-endian)
+
+import struct as _struct
+
+# SHA-256 constants K[0..63]
+_SHA256_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]
+
+_SHA256_IV = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+]
+
+def _rotr32(x: int, n: int) -> int:
+    return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+def _sha256_compress(H: list[int], block: bytes) -> list[int]:
+    """SHA-256 compression function. block = 64 bytes."""
+    M32 = 0xFFFFFFFF
+    # Parse block into 16 big-endian 32-bit words
+    W = list(_struct.unpack('>16I', block))
+    # Expand to 64 words
+    for i in range(16, 64):
+        s0 = _rotr32(W[i-15], 7) ^ _rotr32(W[i-15], 18) ^ (W[i-15] >> 3)
+        s1 = _rotr32(W[i-2], 17) ^ _rotr32(W[i-2], 19)  ^ (W[i-2] >> 10)
+        W.append((W[i-16] + s0 + W[i-7] + s1) & M32)
+    a, b, c, d, e, f, g, h = H
+    for i in range(64):
+        S1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25)
+        ch = (e & f) ^ (~e & g) & M32
+        temp1 = (h + S1 + ch + _SHA256_K[i] + W[i]) & M32
+        S0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22)
+        mj = (a & b) ^ (a & c) ^ (b & c)
+        temp2 = (S0 + mj) & M32
+        h = g; g = f; f = e
+        e = (d + temp1) & M32
+        d = c; c = b; b = a
+        a = (temp1 + temp2) & M32
+    return [(H[i] + v) & M32 for i, v in enumerate([a, b, c, d, e, f, g, h])]
+
+
+class SHA256Device(Device):
+    """SHA-256 hardware accelerator (matches FPGA mp64_sha256.v).
+
+    Register map (offsets from SHA256_BASE = 0x0940):
+      0x00  CMD      (W)  1=INIT, 3=FINAL
+      0x08  STATUS   (R)  bit 0=busy, bit 1=done
+      0x10  DIN      (W)  byte input (auto-compresses at 64-byte boundary)
+      0x18..0x37  DOUT (R) 32-byte hash output (big-endian)
+    """
+
+    def __init__(self):
+        super().__init__("SHA256", SHA256_BASE, 0x40)
+        self._reset()
+
+    def _reset(self):
+        self.H = list(_SHA256_IV)
+        self.buf = bytearray()
+        self.msg_len = 0      # total bytes fed
+        self.status = 0       # bit0=busy, bit1=done
+        self.digest = bytearray(32)
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x08:
+            return self.status
+        if 0x18 <= offset < 0x38:
+            return self.digest[offset - 0x18]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x00:  # CMD
+            if value == 1:    # INIT
+                self._reset()
+            elif value == 3:  # FINAL
+                self._finalize()
+        elif offset == 0x10:  # DIN — feed byte
+            self.buf.append(value)
+            self.msg_len += 1
+            if len(self.buf) == 64:
+                self.H = _sha256_compress(self.H, bytes(self.buf))
+                self.buf = bytearray()
+
+    def _finalize(self):
+        """SHA-256 padding and final compression."""
+        bit_len = self.msg_len * 8
+        # Append 0x80
+        self.buf.append(0x80)
+        # Pad to 56 mod 64 (leave 8 bytes for length)
+        while len(self.buf) % 64 != 56:
+            self.buf.append(0x00)
+        # Append 64-bit big-endian bit length
+        self.buf.extend(bit_len.to_bytes(8, 'big'))
+        # Compress remaining blocks (1 or 2)
+        while len(self.buf) >= 64:
+            self.H = _sha256_compress(self.H, bytes(self.buf[:64]))
+            self.buf = self.buf[64:]
+        # Build digest (big-endian)
+        self.digest = bytearray()
+        for w in self.H:
+            self.digest.extend(w.to_bytes(4, 'big'))
+        self.status = 2  # done
 
 
 # ---------------------------------------------------------------------------

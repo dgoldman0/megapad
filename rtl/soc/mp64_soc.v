@@ -611,6 +611,7 @@ module mp64_soc #(
     wire mmio_sel_crc    = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b0111110);// 0x7C0-0x7DF
     wire mmio_sel_trng   = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b1000000);// 0x800-0x81F
     wire mmio_sel_field  = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100001);// 0x840-0x87F
+    wire mmio_sel_sha256 = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100101);// 0x940-0x97F
     wire mmio_sel_ntt    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100011);// 0x8C0-0x8FF
     wire mmio_sel_kem    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100100);// 0x900-0x93F
 
@@ -771,6 +772,22 @@ module mp64_soc #(
         .irq   (sha3_irq)
     );
 
+    wire [63:0] sha256_rdata;
+    wire        sha256_ack;
+    wire        sha256_irq;
+
+    mp64_sha256 u_sha256 (
+        .clk   (sys_clk),
+        .rst_n (sys_rst_n),
+        .req   (mmio_sel_sha256),
+        .addr  (bus_mmio_addr[5:0]),
+        .wdata (bus_mmio_wdata),
+        .wen   (bus_mmio_wen),
+        .rdata (sha256_rdata),
+        .ack   (sha256_ack),
+        .irq   (sha256_irq)
+    );
+
     wire [63:0] crc_rdata;
     wire        crc_ack;
     wire        crc_irq;
@@ -879,6 +896,7 @@ module mp64_soc #(
         // 64-bit crypto peripherals
         if (mmio_sel_aes)     begin mmio_rdata_mux = aes_rdata;   mmio_ack_mux = aes_ack;   end
         if (mmio_sel_sha3)    begin mmio_rdata_mux = sha3_rdata;  mmio_ack_mux = sha3_ack;  end
+        if (mmio_sel_sha256)  begin mmio_rdata_mux = sha256_rdata; mmio_ack_mux = sha256_ack; end
         if (mmio_sel_crc)     begin mmio_rdata_mux = crc_rdata;   mmio_ack_mux = crc_ack;   end
         if (mmio_sel_trng)    begin mmio_rdata_mux = trng_rdata;  mmio_ack_mux = trng_ack;  end
         if (mmio_sel_field)   begin mmio_rdata_mux = field_rdata; mmio_ack_mux = field_ack; end
