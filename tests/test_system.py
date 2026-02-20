@@ -7302,6 +7302,61 @@ class TestKDOSSHAKE(_KDOSTestBase):
         self.assertIn("H2=115 ", text)
         self.assertIn("H3=204 ", text)
 
+    def test_sha3_512_full_64_bytes(self):
+        """SHA3-512('abc') — verify bytes 32-35 and 60-63 of the 64-byte digest."""
+        # Full SHA3-512("abc") = b751850b...10e116e9...4eec53f0
+        # Bytes 32-35: 0x10=16, 0xe1=225, 0x16=22, 0xe9=233
+        # Bytes 60-63: 0x4e=78, 0xec=236, 0x53=83, 0xf0=240
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT",
+            "1 SHA3-MODE!",
+            "SHA3-INIT",
+            "msg 3 SHA3-UPDATE",
+            "h-buf SHA3-FINAL",
+            '."  B32=" h-buf 32 + C@ .',
+            '."  B33=" h-buf 33 + C@ .',
+            '."  B34=" h-buf 34 + C@ .',
+            '."  B35=" h-buf 35 + C@ .',
+            '."  B60=" h-buf 60 + C@ .',
+            '."  B61=" h-buf 61 + C@ .',
+            '."  B62=" h-buf 62 + C@ .',
+            '."  B63=" h-buf 63 + C@ .',
+            "0 SHA3-MODE!",
+        ])
+        self.assertIn("B32=16 ", text)
+        self.assertIn("B33=225 ", text)
+        self.assertIn("B34=22 ", text)
+        self.assertIn("B35=233 ", text)
+        self.assertIn("B60=78 ", text)
+        self.assertIn("B61=236 ", text)
+        self.assertIn("B62=83 ", text)
+        self.assertIn("B63=240 ", text)
+
+    def test_sha3_512_convenience_word(self):
+        """SHA3-512 convenience word produces correct digest for 'abc'."""
+        text = self._run_kdos([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT",
+            "msg 3 h-buf SHA3-512",
+            '."  H0=" h-buf C@ .',
+            '."  H1=" h-buf 1 + C@ .',
+            '."  H2=" h-buf 2 + C@ .',
+            '."  H3=" h-buf 3 + C@ .',
+            '."  B32=" h-buf 32 + C@ .',
+            '."  B63=" h-buf 63 + C@ .',
+        ])
+        # First 4 bytes of SHA3-512("abc")
+        self.assertIn("H0=183 ", text)
+        self.assertIn("H1=81 ", text)
+        self.assertIn("H2=133 ", text)
+        self.assertIn("H3=11 ", text)
+        # Byte 32 and byte 63
+        self.assertIn("B32=16 ", text)
+        self.assertIn("B63=240 ", text)
+
     def test_shake128_abc(self):
         """SHAKE128('abc', 32) first 4 bytes = 88, 129, 9, 45."""
         text = self._run_kdos([

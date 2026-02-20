@@ -303,7 +303,7 @@ VARIABLE HANDLER   0 HANDLER !
 \ =====================================================================
 \
 \  The BIOS provides six CRC primitives that talk directly to the
-\  hardware CRC accelerator (MMIO at +0x07C0):
+\  hardware CRC accelerator (MMIO at +0x0980):
 \    CRC-POLY!  ( n -- )       0=CRC32, 1=CRC32C, 2=CRC64
 \    CRC-INIT!  ( n -- )       initial CRC value
 \    CRC-FEED   ( n -- )       feed 8 bytes (LE 64-bit cell)
@@ -614,11 +614,22 @@ VARIABLE _AEAD-REM
 
 CREATE SHA3-BUF 64 ALLOT
 
+\ SHA3 ( addr len out -- )  SHA3-256 hash (32 bytes output).
 : SHA3
     >R
     SHA3-INIT
     SHA3-UPDATE
     R> SHA3-FINAL ;
+
+\ SHA3-512 ( addr len out -- )  SHA3-512 hash (64 bytes output).
+\   Sets mode to SHA3-512, hashes, copies 64 bytes, restores SHA3-256 mode.
+: SHA3-512  ( addr len out -- )
+    >R
+    SHA3-512-MODE SHA3-MODE!
+    SHA3-INIT
+    SHA3-UPDATE
+    R> SHA3-FINAL
+    SHA3-256-MODE SHA3-MODE! ;
 
 : SHAKE128  ( addr len out outlen -- )
     >R >R

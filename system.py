@@ -377,6 +377,8 @@ class MegapadSystem:
         _py_nic = self.nic
         _be = nic_backend
         for cpu in self.cores:
+            if not hasattr(cpu, '_cs'):
+                continue  # micro-cores lack C++ state
             cs = cpu._cs
             cs.nic_init(bytes(self.nic.mac))
             cs.nic_sync_mem_ptrs()

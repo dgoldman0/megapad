@@ -1213,7 +1213,7 @@ struct CryptoDevices {
     static constexpr uint32_t AES_BASE    = 0x0700;
     static constexpr uint32_t AES_END     = 0x0770;
     static constexpr uint32_t SHA3_BASE   = 0x0780;
-    static constexpr uint32_t SHA3_END    = 0x07C0;
+    static constexpr uint32_t SHA3_END    = 0x07D0; // expanded for SHA3-512 (64-byte DOUT at 0x10-0x4F)
     static constexpr uint32_t FIELD_BASE  = 0x0840;
     static constexpr uint32_t FIELD_END   = 0x0888;
     static constexpr uint32_t SHA256_BASE = 0x0940;

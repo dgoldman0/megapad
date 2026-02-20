@@ -2,22 +2,23 @@
 // mp64_sha3.v — SHA-3 / SHAKE Accelerator (Keccak-f[1600])
 // ============================================================================
 //
-// MMIO base: 0x780 (64 bytes).
+// MMIO base: 0x780 (96 bytes).
 //
 // Modes:
-//   0 = SHA3-256 (rate=1088 bits = 136 bytes, output=256 bits)
-//   1 = SHA3-512 (rate=576  bits = 72  bytes, output=512 bits)
+//   0 = SHA3-256 (rate=1088 bits = 136 bytes, output=256 bits = 32 bytes)
+//   1 = SHA3-512 (rate=576  bits = 72  bytes, output=512 bits = 64 bytes)
 //   2 = SHAKE128 (rate=1344 bits = 168 bytes, extendable)
 //   3 = SHAKE256 (rate=1088 bits = 136 bytes, extendable)
 //
+// Byte-level register map (matching C++ accelerator / BIOS):
+//   0x00  CMD    (W)   1=INIT, 2=ABSORB, 3=FINAL, 4=SQUEEZE, 5=SQUEEZE_NEXT
+//   0x01  STATUS (R)   0=idle, 2=done
+//   0x02  CTRL   (RW)  mode[1:0]
+//   0x08  DIN    (W)   byte input; auto-XOR into Keccak state at din_ptr
+//   0x10..0x4F  DOUT (R)  digest[0..63] — extracted from state after finalize
+//
 // Keccak-f[1600]: 25 lanes × 64 bits = 1600-bit state
 //   24 rounds, 1 round per cycle → 24 cycles per permutation
-//
-// Interface:
-//   Write data words to DIN. After rate-many bytes, CMD=ABSORB triggers
-//   Keccak-f permutation (~24 cycles). When done, STATUS.done=1.
-//   CMD=SQUEEZE reads output via DOUT.
-//   CMD=INIT resets state. CMD=FINAL pads + permutes.
 //
 
 `include "mp64_pkg.vh"
@@ -26,9 +27,9 @@ module mp64_sha3 (
     input  wire        clk,
     input  wire        rst_n,
 
-    // MMIO interface
+    // MMIO interface (byte-addressed within 96-byte window)
     input  wire        req,
-    input  wire [5:0]  addr,       // offset within SHA block
+    input  wire [6:0]  addr,       // byte offset within SHA3 block (0x00-0x5F)
     input  wire [63:0] wdata,
     input  wire        wen,
     output reg  [63:0] rdata,
@@ -58,9 +59,8 @@ module mp64_sha3 (
     reg [7:0]  rate_bytes;     // Rate in bytes for current mode
     reg [7:0]  din_ptr;        // Byte pointer into rate region
 
-    // Data in/out buffers (64-bit access)
-    reg [63:0] din_reg;
-    reg [63:0] dout_reg;
+    // Digest buffer — filled from state after finalize/squeeze
+    reg [7:0]  digest [0:63]; // up to 64 bytes (SHA3-512)
 
     // ========================================================================
     // Keccak Round Constants
@@ -201,6 +201,7 @@ module mp64_sha3 (
     localparam [1:0] S_IDLE    = 2'd0;
     localparam [1:0] S_PERMUTE = 2'd1;
     localparam [1:0] S_PAD     = 2'd2;
+    localparam [1:0] S_EXTRACT = 2'd3;
 
     reg [1:0] sha_state;
     reg       do_final;    // Set when CMD_FINAL: pad first, then permute
@@ -220,6 +221,8 @@ module mp64_sha3 (
             do_final   <= 1'b0;
             for (ki = 0; ki < 25; ki = ki + 1)
                 state[ki] <= 64'd0;
+            for (ki = 0; ki < 64; ki = ki + 1)
+                digest[ki] <= 8'd0;
         end else begin
             irq <= 1'b0;
 
@@ -286,23 +289,42 @@ module mp64_sha3 (
                             done <= 1'b1;
                             irq <= 1'b1;
                             din_ptr <= 8'd0;
-                            sha_state <= S_IDLE;
+                            sha_state <= S_EXTRACT;
                         end else begin
                             round_cnt <= round_cnt + 5'd1;
                         end
                     end
                 end
 
+                // Extract digest bytes from state lanes (little-endian)
+                S_EXTRACT: begin
+                    begin : extract_block
+                        integer ei;
+                        for (ei = 0; ei < 8; ei = ei + 1) begin
+                            // Lane 0..7 → digest[0..63]
+                            digest[ei*8 + 0] <= state[ei][ 7: 0];
+                            digest[ei*8 + 1] <= state[ei][15: 8];
+                            digest[ei*8 + 2] <= state[ei][23:16];
+                            digest[ei*8 + 3] <= state[ei][31:24];
+                            digest[ei*8 + 4] <= state[ei][39:32];
+                            digest[ei*8 + 5] <= state[ei][47:40];
+                            digest[ei*8 + 6] <= state[ei][55:48];
+                            digest[ei*8 + 7] <= state[ei][63:56];
+                        end
+                    end
+                    sha_state <= S_IDLE;
+                end
+
                 default: sha_state <= S_IDLE;
             endcase
 
             // ============================================================
-            // Register writes from MMIO
+            // Register writes from MMIO (byte-addressed)
             // ============================================================
             if (req && wen) begin
                 case (addr)
-                    // CMD register
-                    6'h00: begin
+                    // CMD register (offset 0x00) — byte write
+                    7'h00: begin
                         case (wdata[2:0])
                             CMD_INIT: begin
                                 // Reset state
@@ -339,22 +361,25 @@ module mp64_sha3 (
                         endcase
                     end
 
-                    // DIN register — XOR data into state at rate position
-                    6'h10: begin
-                        if (din_ptr < rate_bytes) begin : din_write_block
-                            reg [4:0] lane;
-                            lane = din_ptr[7:3];
-                            state[lane] <= state[lane] ^ wdata;
-                            din_ptr <= din_ptr + 8'd8;
-                        end
+                    // CTRL register (offset 0x02) — mode select
+                    7'h02: begin
+                        mode <= wdata[1:0];
                     end
 
-                    // RATE register (override)
-                    6'h20: ; // Read-only, derived from mode
-
-                    // CTRL register (mode select)
-                    6'h28: begin
-                        mode <= wdata[1:0];
+                    // DIN register (offset 0x08) — byte input
+                    // XOR byte into correct position within Keccak state
+                    7'h08: begin
+                        if (din_ptr < rate_bytes) begin : din_byte_block
+                            reg [4:0] lane;
+                            reg [2:0] bpos;
+                            reg [63:0] byte_xor;
+                            lane = din_ptr[7:3];
+                            bpos = din_ptr[2:0];
+                            byte_xor = 64'd0;
+                            byte_xor[bpos*8 +: 8] = wdata[7:0];
+                            state[lane] <= state[lane] ^ byte_xor;
+                            din_ptr <= din_ptr + 8'd1;
+                        end
                     end
 
                     default: ;
@@ -364,28 +389,25 @@ module mp64_sha3 (
     end
 
     // ========================================================================
-    // Register reads
+    // Register reads (byte-addressed)
     // ========================================================================
     always @(posedge clk) begin
         ack <= 1'b0;
         if (req) begin
             ack <= 1'b1;
             if (!wen) begin
-                case (addr)
-                    6'h08: rdata <= {62'd0, done, busy};  // STATUS
-                    // DOUT — read state lanes sequentially
-                    6'h18: begin
-                        if (din_ptr < rate_bytes) begin
-                            rdata <= state[din_ptr[7:3]];
-                            din_ptr <= din_ptr + 8'd8;
-                        end else begin
-                            rdata <= 64'd0;
-                        end
-                    end
-                    6'h20: rdata <= {56'd0, rate_bytes};   // RATE
-                    6'h28: rdata <= {62'd0, mode};         // CTRL
-                    default: rdata <= 64'd0;
-                endcase
+                if (addr == 7'h01) begin
+                    // STATUS (offset 0x01): {done, busy}
+                    rdata <= {62'd0, done, busy};
+                end else if (addr == 7'h02) begin
+                    // CTRL (offset 0x02): mode
+                    rdata <= {62'd0, mode};
+                end else if (addr >= 7'h10 && addr < 7'h50) begin
+                    // DOUT (offset 0x10..0x4F): digest bytes
+                    rdata <= {56'd0, digest[addr[5:0] - 6'h10]};
+                end else begin
+                    rdata <= 64'd0;
+                end
             end else begin
                 rdata <= 64'd0;
             end

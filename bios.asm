@@ -43,7 +43,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
-;    CRC    0xFFFF_FF00_0000_07C0   POLY=+0 INIT=+8 DIN=+10 RESULT=+18 CTRL=+20
+;    CRC    0xFFFF_FF00_0000_0980   POLY=+0 INIT=+8 DIN=+10 RESULT=+18 CTRL=+20
 ;
 ;  Multicore CSRs
 ;  ----
@@ -7754,9 +7754,9 @@ w_perf_reset:
     ret.l
 
 ; =====================================================================
-;  CRC Engine — MMIO at 0xFFFF_FF00_0000_07C0
+;  CRC Engine — MMIO at 0xFFFF_FF00_0000_0980
 ; =====================================================================
-; CRC base   = 0xFFFF_FF00_0000_07C0
+; CRC base   = 0xFFFF_FF00_0000_0980
 ;   POLY  +0x00 (W)  polynomial select: 0=CRC32, 1=CRC32C, 2=CRC64
 ;   INIT  +0x08 (W)  initial CRC value (64-bit LE)
 ;   DIN   +0x10 (W)  data input (8 bytes, processes on full write)
@@ -7767,7 +7767,7 @@ w_perf_reset:
 w_crc_poly_store:
     ldn r0, r14
     addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_07C0    ; CRC_POLY
+    ldi64 r11, 0xFFFF_FF00_0000_0980    ; CRC_POLY
     str r11, r0
     ret.l
 
@@ -7775,7 +7775,7 @@ w_crc_poly_store:
 w_crc_init_store:
     ldn r0, r14
     addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_07C8    ; CRC_INIT
+    ldi64 r11, 0xFFFF_FF00_0000_0988    ; CRC_INIT
     str r11, r0
     ret.l
 
@@ -7783,13 +7783,13 @@ w_crc_init_store:
 w_crc_feed:
     ldn r0, r14
     addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_07D0    ; CRC_DIN
+    ldi64 r11, 0xFFFF_FF00_0000_0990    ; CRC_DIN
     str r11, r0
     ret.l
 
 ; CRC@ ( -- n )  read current CRC result
 w_crc_fetch:
-    ldi64 r11, 0xFFFF_FF00_0000_07D8    ; CRC_RESULT
+    ldi64 r11, 0xFFFF_FF00_0000_0998    ; CRC_RESULT
     ldn r0, r11
     subi r14, 8
     str r14, r0
@@ -7798,14 +7798,14 @@ w_crc_fetch:
 ; CRC-RESET ( -- )  reset CRC to init value
 w_crc_reset:
     ldi r0, 0
-    ldi64 r11, 0xFFFF_FF00_0000_07E0    ; CRC_CTRL = 0 (reset)
+    ldi64 r11, 0xFFFF_FF00_0000_09A0    ; CRC_CTRL = 0 (reset)
     str r11, r0
     ret.l
 
 ; CRC-FINAL ( -- )  finalize CRC (XOR-out)
 w_crc_final:
     ldi r0, 1
-    ldi64 r11, 0xFFFF_FF00_0000_07E0    ; CRC_CTRL = 1 (finalize)
+    ldi64 r11, 0xFFFF_FF00_0000_09A0    ; CRC_CTRL = 1 (finalize)
     str r11, r0
     ret.l
 
@@ -8009,14 +8009,23 @@ w_sha3_update:
 .sha3_update_done:
     ret.l
 
-; SHA3-FINAL ( addr -- )  Finalize hash, copy 32 bytes to addr.
+; SHA3-FINAL ( addr -- )  Finalize hash, copy output bytes to addr.
+;   Mode-aware: copies 32 bytes for SHA3-256, 64 bytes for SHA3-512.
 w_sha3_final:
     ldn r9, r14             ; r9 = dest addr
     addi r14, 8
     ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
     ldi r0, 3                          ; CMD_FINAL=3
     st.b r7, r0             ; CMD=finalize
-    ; Read 32 bytes from DOUT (offset 0x10)
+    ; Determine output length from mode register
+    ldi64 r7, 0xFFFF_FF00_0000_0782   ; SHA3_CTRL (mode)
+    ld.b r1, r7             ; r1 = mode
+    cmpi r1, 1              ; mode 1 = SHA3-512?
+    ldi r10, 32             ; default 32 bytes
+    brne .sha3_final_setup
+    ldi r10, 64             ; SHA3-512: 64 bytes
+.sha3_final_setup:
+    ; Read r10 bytes from DOUT (offset 0x10)
     ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
     ldi r12, 0
 .sha3_final_loop:
@@ -8027,7 +8036,7 @@ w_sha3_final:
     add r13, r12
     st.b r13, r0            ; store to RAM
     addi r12, 1
-    cmpi r12, 32
+    cmp r12, r10
     brcc .sha3_final_loop
     ret.l
 
@@ -8103,11 +8112,20 @@ w_sha3_squeeze_next:
     st.b r11, r0
     ret.l
 
-; SHA3-DOUT@ ( addr -- )  Read 32 bytes from DOUT register to memory.
+; SHA3-DOUT@ ( addr -- )  Read hash output bytes from DOUT register to memory.
+;   Mode-aware: copies 32 bytes for SHA3-256, 64 bytes for SHA3-512.
 ;   Does not trigger any command — just copies current DOUT contents.
 w_sha3_dout_fetch:
     ldn r9, r14
     addi r14, 8
+    ; Determine output length from mode register
+    ldi64 r7, 0xFFFF_FF00_0000_0782   ; SHA3_CTRL (mode)
+    ld.b r1, r7             ; r1 = mode
+    cmpi r1, 1              ; mode 1 = SHA3-512?
+    ldi r10, 32             ; default 32 bytes
+    brne .sha3_dout_setup
+    ldi r10, 64             ; SHA3-512: 64 bytes
+.sha3_dout_setup:
     ldi64 r7, 0xFFFF_FF00_0000_0790   ; SHA3_DOUT base
     ldi r12, 0
 .sha3_dout_loop:
@@ -8118,7 +8136,7 @@ w_sha3_dout_fetch:
     add r13, r12
     st.b r13, r0
     addi r12, 1
-    cmpi r12, 32
+    cmp r12, r10
     brcc .sha3_dout_loop
     ret.l
 

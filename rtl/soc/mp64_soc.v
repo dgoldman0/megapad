@@ -607,8 +607,9 @@ module mp64_soc #(
     wire mmio_sel_mbox   = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h5
                                          || bus_mmio_addr[11:8] == 4'h6);// 0x500-0x6FF
     wire mmio_sel_aes    = bus_mmio_req && (bus_mmio_addr[11:7] == 5'b01110); // 0x700-0x77F
-    wire mmio_sel_sha3   = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b011110);// 0x780-0x7BF
-    wire mmio_sel_crc    = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b0111110);// 0x7C0-0x7DF
+    wire mmio_sel_sha3   = bus_mmio_req && (bus_mmio_addr[11:7] == 5'b01111)
+                                         && (bus_mmio_addr[6:5] != 2'b11);// 0x780-0x7DF (96 bytes)
+    wire mmio_sel_crc    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100110);// 0x980-0x9BF
     wire mmio_sel_trng   = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b1000000);// 0x800-0x81F
     wire mmio_sel_field  = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100001);// 0x840-0x87F
     wire mmio_sel_sha256 = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100101);// 0x940-0x97F
@@ -764,7 +765,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_sha3),
-        .addr  (bus_mmio_addr[5:0]),
+        .addr  (bus_mmio_addr[6:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (sha3_rdata),

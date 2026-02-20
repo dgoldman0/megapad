@@ -40,7 +40,7 @@ SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
-CRC_BASE     = 0x07C0
+CRC_BASE     = 0x0980
 AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
@@ -968,7 +968,7 @@ class SpinlockDevice(Device):
 # ---------------------------------------------------------------------------
 #  SHA-3 Accelerator — REMOVED (implemented in C++: accel/mp64_crypto.h)
 # ---------------------------------------------------------------------------
-# See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07C0.
+# See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07D0.
 
 
 # ---------------------------------------------------------------------------
