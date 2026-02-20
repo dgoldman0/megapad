@@ -15,6 +15,9 @@
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 
+#include "mp64_crypto.h"
+#include "mp64_nic.h"
+
 namespace py = pybind11;
 
 // ---------------------------------------------------------------------------
@@ -148,6 +151,15 @@ struct CPUState {
     uint8_t* ext_mem;
     uint64_t ext_mem_base;
     uint64_t ext_mem_size;
+
+    // C++ native crypto devices (bypass Python MMIO callbacks)
+    CryptoDevices crypto;
+
+    // C++ native NIC device (bypass Python MMIO for networking)
+    NICDevice nic;
+
+    // C++ native TRNG device (bypass Python MMIO for random bytes)
+    TRNGDevice trng;
 };
 
 // ---------------------------------------------------------------------------
@@ -992,7 +1004,15 @@ static inline void mpu_check(CPUState& s, uint64_t addr) {
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
-        return cb.mmio_read8(addr);  // MMIO always allowed
+        // Try C++ devices first (no Python callback needed)
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.nic.handles(mmio_off))
+            return s.nic.read8(mmio_off);
+        if (s.trng.handles(mmio_off))
+            return s.trng.read8(mmio_off);
+        if (s.crypto.handles(mmio_off))
+            return s.crypto.read8(mmio_off);
+        return cb.mmio_read8(addr);  // fallback to Python for other devices
     }
     if (s.priv_level) {
         // User mode: block HBW entirely, check MPU for RAM
@@ -1012,7 +1032,21 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
 
 static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint8_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
-        cb.mmio_write8(addr, val);  // MMIO always allowed
+        // Try C++ devices first
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.nic.handles(mmio_off)) {
+            s.nic.write8(mmio_off, val);
+            return;
+        }
+        if (s.trng.handles(mmio_off)) {
+            s.trng.write8(mmio_off, val);
+            return;
+        }
+        if (s.crypto.handles(mmio_off)) {
+            s.crypto.write8(mmio_off, val);
+            return;
+        }
+        cb.mmio_write8(addr, val);  // fallback to Python for other devices
         return;
     }
     if (s.priv_level) {
@@ -1035,6 +1069,25 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
 // Wider MMIO/HBW-aware reads/writes
 static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.nic.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.nic.read8(mmio_off + i) << (8*i);
+            return v;
+        }
+        if (s.trng.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.trng.read8(mmio_off + i) << (8*i);
+            return v;
+        }
+        if (s.crypto.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.crypto.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1060,6 +1113,22 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
 
 static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint64_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.nic.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.nic.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (s.trng.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.trng.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (s.crypto.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -1082,6 +1151,9 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
 
 static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.crypto.handles(mmio_off))
+            return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
@@ -1104,6 +1176,12 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
 
 static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint16_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.crypto.handles(mmio_off)) {
+            s.crypto.write8(mmio_off, val & 0xFF);
+            s.crypto.write8(mmio_off+1, (val >> 8) & 0xFF);
+            return;
+        }
         cb.mmio_write8(addr, val & 0xFF);
         cb.mmio_write8(addr+1, (val >> 8) & 0xFF);
         return;
@@ -1126,6 +1204,13 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
 
 static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.crypto.handles(mmio_off)) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.crypto.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint32_t v = 0;
         for (int i = 0; i < 4; i++)
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1151,6 +1236,12 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
 
 static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint32_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
+        uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (s.crypto.handles(mmio_off)) {
+            for (int i = 0; i < 4; i++)
+                s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 4; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -2047,6 +2138,118 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })
+        // Crypto devices — initialize C++ native crypto accelerators
+        .def("init_crypto", [](CPUState& s) {
+            s.crypto.init();
+        })
+        .def("disable_crypto", [](CPUState& s) {
+            s.crypto.enabled = false;
+        })
+        .def("crypto_enabled", [](const CPUState& s) {
+            return s.crypto.enabled;
+        })
+        // Sync crypto state from Python devices (for save/restore)
+        .def("crypto_aes_reset", [](CPUState& s) { s.crypto.aes.reset(); })
+        .def("crypto_sha256_reset", [](CPUState& s) { s.crypto.sha256.reset(); })
+        .def("crypto_sha3_reset", [](CPUState& s) { s.crypto.sha3.reset(); s.crypto.sha3.mode = 0; })
+        .def("crypto_field_reset", [](CPUState& s) { s.crypto.field_alu.reset(); })
+        // Direct crypto MMIO access (for testing / Python-side access)
+        .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.crypto.read8(mmio_off);
+        })
+        .def("crypto_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.crypto.write8(mmio_off, val);
+        })
+        // ── NIC device ────────────────────────────────────────
+        .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
+            std::string mac_str = mac_bytes;
+            uint8_t mac[6] = {};
+            size_t n = std::min(mac_str.size(), (size_t)6);
+            std::memcpy(mac, mac_str.data(), n);
+            s.nic.init(mac);
+            // Wire memory pointers from CPUState
+            s.nic.attach_mem_ptrs(
+                s.mem, s.mem_size,
+                s.hbw_mem, s.hbw_base, s.hbw_size,
+                s.ext_mem, s.ext_mem_base, s.ext_mem_size
+            );
+        })
+        .def("nic_sync_mem_ptrs", [](CPUState& s) {
+            // Re-sync memory pointers after attach_ext_mem / attach_hbw_mem
+            s.nic.attach_mem_ptrs(
+                s.mem, s.mem_size,
+                s.hbw_mem, s.hbw_base, s.hbw_size,
+                s.ext_mem, s.ext_mem_base, s.ext_mem_size
+            );
+        })
+        .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
+            // tx_callback: called from C++ when NIC sends a frame
+            // cb receives (bytes,) and returns bool
+            s.nic.tx_callback = [cb](const uint8_t* data, size_t len) -> bool {
+                py::gil_scoped_acquire gil;
+                try {
+                    py::bytes frame(reinterpret_cast<const char*>(data), len);
+                    py::object result = cb(frame);
+                    if (result.is_none()) return true;
+                    return result.cast<bool>();
+                } catch (...) {
+                    return false;
+                }
+            };
+        })
+        .def("nic_inject_frame", [](CPUState& s, py::bytes frame) {
+            std::string data = frame;
+            s.nic.inject_frame(
+                reinterpret_cast<const uint8_t*>(data.data()), data.size()
+            );
+        })
+        .def("nic_has_rx", [](CPUState& s) -> bool {
+            return s.nic.has_rx();
+        })
+        .def("nic_rx_queue_size", [](CPUState& s) -> size_t {
+            return s.nic.rx_queue_size();
+        })
+        .def("nic_tx_queue_size", [](const CPUState& s) -> size_t {
+            return s.nic.tx_queue_size();
+        })
+        .def("nic_drain_one_tx", [](CPUState& s) -> py::bytes {
+            auto frame = s.nic.drain_one_tx();
+            return py::bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
+        })
+        .def("nic_set_link_up", [](CPUState& s, bool up) {
+            s.nic.link_up = up;
+        })
+        .def("nic_enabled", [](const CPUState& s) -> bool {
+            return s.nic.enabled;
+        })
+        .def("nic_disable", [](CPUState& s) {
+            s.nic.enabled = false;
+        })
+        .def("nic_reset", [](CPUState& s) {
+            s.nic.reset_state();
+        })
+        .def("nic_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.nic.read8(mmio_off);
+        })
+        .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.nic.write8(mmio_off, val);
+        })
+        .def("nic_get_tx_count", [](const CPUState& s) -> uint16_t {
+            return s.nic.tx_count;
+        })
+        .def("nic_get_rx_count", [](const CPUState& s) -> uint16_t {
+            return s.nic.rx_count;
+        })
+        // ── TRNG device ───────────────────────────────────────
+        .def("init_trng", [](CPUState& s) {
+            s.trng.init();
+        })
+        .def("trng_enabled", [](const CPUState& s) -> bool {
+            return s.trng.enabled;
+        })
+        .def("disable_trng", [](CPUState& s) {
+            s.trng.enabled = false;
+        })
         ;
 
     // Expose RunResult

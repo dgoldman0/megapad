@@ -542,7 +542,7 @@ VARIABLE _AEAD-REM
     DUP 15 AND _AEAD-REM !
     DUP 4 RSHIFT         \ src dst dlen nblocks
     >R DROP               \ src dst   R: nblocks
-    R> 0 DO
+    R> 0 ?DO
         OVER AES-DIN!
         DUP AES-DOUT@
         SWAP 16 + SWAP 16 +
@@ -579,7 +579,7 @@ VARIABLE _AEAD-REM
     DUP 15 AND _AEAD-REM !
     DUP 4 RSHIFT
     >R DROP
-    R> 0 DO
+    R> 0 ?DO
         OVER AES-DIN!
         DUP AES-DOUT@
         SWAP 16 + SWAP 16 +
@@ -1551,6 +1551,19 @@ VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
     THEN ;
 
 XMEM-INIT      \ initialise at load time
+
+\ XBUF ( size "name" -- )  Allocate a data buffer, preferring ext mem.
+\   When ext mem is present, the buffer lives in XMEM (saving system
+\   dictionary space); otherwise falls back to a normal CREATE/ALLOT.
+\   Either way, executing "name" pushes the buffer's start address.
+\   Also advances XMEM-FLOOR to protect kernel allocations from XMEM-RESET.
+: XBUF  ( size "name" -- )
+    XMEM? IF
+        XMEM-ALLOT CONSTANT
+        XMEM-HERE @ XMEM-FLOOR !
+    ELSE
+        CREATE ALLOT
+    THEN ;
 
 \ =====================================================================
 \  §1.15  Userland Memory Isolation
@@ -8514,9 +8527,9 @@ TLS-CTXS /TLS-CTX TLS-MAX-CTX * 0 FILL
 CREATE TLS-NONCE-BUF  12 ALLOT        \ constructed per-record nonce
 CREATE TLS-REC-HDR     5 ALLOT        \ 5-byte TLS record header (AAD)
 CREATE TLS-PAD-BUF    16 ALLOT        \ plaintext padding to 16B boundary
-CREATE TLS-INNER-BUF 1500 ALLOT       \ inner plaintext + content type byte
-CREATE TLS-CIPHER-BUF 1520 ALLOT      \ ciphertext output
-CREATE TLS-PLAIN-BUF  8192 ALLOT      \ decrypted plaintext scratch
+1500 XBUF TLS-INNER-BUF             \ inner plaintext + content type byte
+1520 XBUF TLS-CIPHER-BUF            \ ciphertext output
+8192 XBUF TLS-PLAIN-BUF             \ decrypted plaintext scratch
 
 \ --- TLS Nonce Construction ---
 \ TLS-BUILD-NONCE ( iv seq out -- )
@@ -8544,27 +8557,23 @@ CREATE TLS-PLAIN-BUF  8192 ALLOT      \ decrypted plaintext scratch
 \ TLS-ENCRYPT-RECORD ( ctx content-type plaintext plen rec-buf -- rec-len )
 \   Builds a TLS 1.3 encrypted record:
 \     rec-buf = [type=23 | ver=0x0303 | length(BE16)] ++ ciphertext ++ tag
-\   The inner plaintext = plaintext || content_type_byte, padded to 16B.
-\   Returns total record length (5 + padded_inner + 16).
+\   The inner plaintext = plaintext || content_type_byte (no padding).
+\   AES-GCM handles non-16-aligned plaintext via partial final block.
+\   Returns total record length (5 + plen + 1 + 16).
 VARIABLE _TER-CTX
 VARIABLE _TER-CTYPE
 VARIABLE _TER-PT
 VARIABLE _TER-PLEN
 VARIABLE _TER-REC
-VARIABLE _TER-PADLEN
+VARIABLE _TER-ILEN    \ inner length = plen + 1 (data + content_type)
 
 : TLS-ENCRYPT-RECORD ( ctx ctype pt plen rec -- reclen )
     _TER-REC !  _TER-PLEN !  _TER-PT !
     _TER-CTYPE !  _TER-CTX !
-    \ 1. Build inner plaintext: data || content_type, pad to 16B
+    \ 1. Build inner plaintext: data || content_type (exact, no padding)
     _TER-PT @ TLS-INNER-BUF _TER-PLEN @ CMOVE
     _TER-CTYPE @ TLS-INNER-BUF _TER-PLEN @ + C!
-    _TER-PLEN @ 1+ 15 + -16 AND _TER-PADLEN !
-    \ Zero-pad remainder
-    _TER-PLEN @ 1+ _TER-PADLEN @ < IF
-        TLS-INNER-BUF _TER-PLEN @ 1+ +
-        _TER-PADLEN @ _TER-PLEN @ 1+ - 0 FILL
-    THEN
+    _TER-PLEN @ 1+ _TER-ILEN !
     \ 2. Build nonce from write IV + write seq
     _TER-CTX @ TLS-CTX.WR-IV
     _TER-CTX @ TLS-CTX.WR-SEQ @
@@ -8572,7 +8581,7 @@ VARIABLE _TER-PADLEN
     \ 3. Build AAD (5-byte record header)
     TLS-CT-APP-DATA TLS-REC-HDR C!
     3 TLS-REC-HDR 1 + C!   3 TLS-REC-HDR 2 + C!
-    _TER-PADLEN @ 16 +
+    _TER-ILEN @ 16 +
     DUP 8 RSHIFT TLS-REC-HDR 3 + C!
     255 AND      TLS-REC-HDR 4 + C!
     \ 4. Copy header to rec-buf
@@ -8580,14 +8589,14 @@ VARIABLE _TER-PADLEN
     \ 5. Encrypt with AAD
     _TER-CTX @ TLS-CTX.WR-KEY  TLS-NONCE-BUF
     TLS-REC-HDR 5
-    TLS-INNER-BUF  _TER-REC @ 5 +  _TER-PADLEN @
+    TLS-INNER-BUF  _TER-REC @ 5 +  _TER-ILEN @
     AES-ENCRYPT-AEAD DROP
     \ 6. Copy tag after ciphertext
-    AES-TAG-BUF  _TER-REC @ 5 + _TER-PADLEN @ +  16 CMOVE
+    AES-TAG-BUF  _TER-REC @ 5 + _TER-ILEN @ +  16 CMOVE
     \ 7. Increment write sequence number
     _TER-CTX @ TLS-CTX.WR-SEQ DUP @ 1+ SWAP !
     \ 8. Return total record length
-    _TER-PADLEN @ 5 + 16 +
+    _TER-ILEN @ 5 + 16 +
 ;
 
 \ --- TLS Record Decryption ---
@@ -8619,7 +8628,7 @@ VARIABLE _TDR-CLEN
     _TDR-CLEN @                                      \ cipher_len
     _TDR-REC @ 5 + _TDR-CLEN @ +                     \ tag address
     AES-DECRYPT-AEAD                                  \ → flag (0=ok, -1=fail)
-    0<> IF -1 0 EXIT THEN                             \ auth failure
+    0<> IF -1 0 EXIT THEN
     \ 3. Increment read sequence number
     _TDR-CTX @ TLS-CTX.RD-SEQ DUP @ 1+ SWAP !
     \ 4. Extract inner content type = last non-zero byte of plaintext
@@ -8692,7 +8701,7 @@ VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x13
 
 \ --- Scratch Buffers for Handshake ---
 CREATE TLS-HKDF-LABEL  64 ALLOT
-CREATE TLS-HS-TRANSCRIPT 16384 ALLOT
+16384 XBUF TLS-HS-TRANSCRIPT
 VARIABLE TLS-HS-TR-LEN
 CREATE TLS-CH-BUF 256 ALLOT
 CREATE TLS-HS-HASH 32 ALLOT
@@ -9219,8 +9228,8 @@ VARIABLE _THC-REC
 \  TLS-SEND-ALERT ( ctx level desc -- )
 \  TLS-CLOSE      ( ctx -- )
 
-CREATE TLS-SEND-REC 1600 ALLOT
-CREATE TLS-RECV-REC 8192 ALLOT
+1600 XBUF TLS-SEND-REC
+8192 XBUF TLS-RECV-REC
 
 \ --- TLS-SEND-DATA ---
 \ Encrypt plaintext as app_data record and send via TCP.
@@ -9252,7 +9261,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
 \   Ensure TLS-RECV-REC has at least 'need' bytes.
 \   Returns -1 on success, 0 on timeout.
 : TLS-RBUF-FILL ( tcb need -- flag )
-    200 0 DO
+    2000 0 DO
         TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
         OVER                                  \ tcb
         TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
@@ -9271,7 +9280,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
     ELSE
         TLS-RECV-REC OVER +          \ src = buf + n
         TLS-RECV-REC                 \ dst = buf
-        TLS-RBUF-LEN @ 2 PICK -     \ remaining = total - n
+        TLS-RBUF-LEN @ 3 PICK -     \ remaining = total - n
         CMOVE
         NEGATE TLS-RBUF-LEN +!
     THEN ;
@@ -9337,13 +9346,15 @@ VARIABLE _TRD-RLEN
 \ --- TLS-SEND-ALERT ---
 \ Send a TLS alert (e.g., close_notify = level=1, desc=0).
 CREATE TLS-ALERT-BUF 2 ALLOT
+VARIABLE _TSA-CTX
 
 : TLS-SEND-ALERT ( ctx level desc -- )
     TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
-    TLS-CT-ALERT  TLS-ALERT-BUF  2
+    _TSA-CTX !
+    _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
     \ Send via TCP
-    SWAP TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
+    _TSA-CTX @ TLS-CTX.TCB @  TLS-SEND-REC  ROT  TCP-SEND DROP
 ;
 
 \ --- TLS-CLOSE ---
@@ -9351,8 +9362,8 @@ CREATE TLS-ALERT-BUF 2 ALLOT
 : TLS-CLOSE ( ctx -- )
     DUP TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF DROP EXIT THEN
     DUP 1 0 TLS-SEND-ALERT                   \ close_notify
-    DUP TLSS-CLOSING SWAP TLS-CTX.STATE !
-    TLS-CTX.TCB @ TCP-CLOSE
+    DUP TLS-CTX.TCB @ TCP-CLOSE
+    TLSS-NONE SWAP TLS-CTX.STATE !
 ;
 
 \ =====================================================================
@@ -9430,7 +9441,7 @@ VARIABLE _TLSC-CTYPE
     _TLSC-TCB @ ROT ROT TCP-SEND DROP
     \ 5. Init reassembly buffer & wait for ServerHello
     0 TLS-RBUF-LEN !
-    20 TCP-POLL-WAIT
+    100 TCP-POLL-WAIT
     \ 6. Read ServerHello record (one complete TLS record)
     _TLSC-TCB @ TLS-READ-RECORD
     DUP 0= IF DROP 0 EXIT THEN
@@ -9439,14 +9450,14 @@ VARIABLE _TLSC-CTYPE
     TLS-RECV-REC C@ TLS-CT-HANDSHAKE <> IF 0 EXIT THEN
     \ Parse SH: skip 5-byte TLS record header
     _TLSC-CTX @  TLS-RECV-REC 5 +  _TLSC-RLEN @ 5 -
-    TLS-PROCESS-HS-MSG 0<> IF 0 EXIT THEN
+    TLS-PROCESS-HS-MSG DUP 0<> IF DROP 0 EXIT THEN DROP
     _TLSC-RLEN @ TLS-RBUF-CONSUME
     \ 7. Receive encrypted handshake messages
     \ (CCS, EncryptedExtensions, Cert, CertVerify, server Finished)
     BEGIN
         _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-WAIT-FINISHED <
     WHILE
-        10 TCP-POLL-WAIT
+        100 TCP-POLL-WAIT
         _TLSC-TCB @ TLS-READ-RECORD
         DUP 0= IF DROP 0 EXIT THEN
         _TLSC-RLEN !
@@ -9462,7 +9473,7 @@ VARIABLE _TLSC-CTYPE
             \ Stack: ctype plen — process all HS messages in plaintext
             SWAP DROP  \ drop ctype, keep plen
             _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSGS
-            0<> IF 0 EXIT THEN
+            DUP 0<> IF DROP 0 EXIT THEN DROP
         THEN
     REPEAT
     \ 8. Send client Finished + install app keys

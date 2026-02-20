@@ -46,7 +46,7 @@ import sys
 import tempfile
 import unittest
 
-from megapad64 import Megapad64, HaltError
+from accel_wrapper import Megapad64, HaltError
 from megapad64 import (
     Megapad64Micro, TrapError, IVEC_ILLEGAL_OP, IVEC_PRIV_FAULT,
     NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
@@ -2427,7 +2427,7 @@ class TestMulticore(unittest.TestCase):
             # Send MARKER's XT to core 1
             "' MARKER 1 WAKE-CORE",
             # Wait a bit for core 1 to execute
-            "1000 0 DO LOOP",
+            ": DELAY 1000 0 DO LOOP ; DELAY",
             # Read back the marker
             "48879 C@ .",
         ])
@@ -2439,7 +2439,7 @@ class TestMulticore(unittest.TestCase):
         text = self._run_forth(sys, buf, [
             ": MARKER  42 48879 C! ;",
             "' MARKER 1 WAKE-CORE",
-            "2000 0 DO LOOP",
+            ": DELAY 2000 0 DO LOOP ; DELAY",
         ])
         # Give core 1 more time to finish and re-idle after BYE halts core 0
         for _ in range(50_000):
@@ -2469,7 +2469,7 @@ class TestMulticore(unittest.TestCase):
             "' M1 1 WAKE-CORE",
             "' M2 2 WAKE-CORE",
             "' M3 3 WAKE-CORE",
-            "2000 0 DO LOOP",
+            ": DELAY 2000 0 DO LOOP ; DELAY",
             "48864 C@ .",
             "48865 C@ .",
             "48866 C@ .",
@@ -3095,7 +3095,7 @@ class _KDOSTestBase(unittest.TestCase):
                     chunk = _next_line_chunk(data, pos)
                     sys.uart.inject_input(chunk)
                     pos += len(chunk)
-                elif hasattr(sys, 'nic') and sys.nic.rx_queue:
+                elif sys._any_nic_rx():
                     sys.cpu.idle = False
                 else:
                     break
@@ -3145,7 +3145,7 @@ class _KDOSTestBase(unittest.TestCase):
                     chunk = _next_line_chunk(data, pos)
                     sys.uart.inject_input(chunk)
                     pos += len(chunk)
-                elif hasattr(sys, 'nic') and sys.nic.rx_queue:
+                elif hasattr(sys, 'nic') and sys._any_nic_rx():
                     sys.cpu.idle = False
                 else:
                     break  # all input sent, CPU idle → done
@@ -7702,14 +7702,14 @@ class TestKDOSX25519(_KDOSTestBase):
             "X25519-KEYGEN",
             "CREATE alice-pub 32 ALLOT",
             "CREATE alice-priv 32 ALLOT",
-            "32 0 DO X25519-PUB I + C@ alice-pub I + C! LOOP",
-            "32 0 DO X25519-PRIV I + C@ alice-priv I + C! LOOP",
+            "X25519-PUB alice-pub 32 CMOVE",
+            "X25519-PRIV alice-priv 32 CMOVE",
             # Bob keygen
             "X25519-KEYGEN",
             "CREATE bob-pub 32 ALLOT",
             "CREATE bob-priv 32 ALLOT",
-            "32 0 DO X25519-PUB I + C@ bob-pub I + C! LOOP",
-            "32 0 DO X25519-PRIV I + C@ bob-priv I + C! LOOP",
+            "X25519-PUB bob-pub 32 CMOVE",
+            "X25519-PRIV bob-priv 32 CMOVE",
             # Alice computes shared secret = alice_priv * bob_pub
             "CREATE shared-a 32 ALLOT",
             "alice-priv bob-pub shared-a X25519",
@@ -7741,7 +7741,7 @@ class TestKDOSX25519(_KDOSTestBase):
             # Generate keypair
             "X25519-KEYGEN",
             "CREATE my-pub 32 ALLOT",
-            "32 0 DO X25519-PUB I + C@ my-pub I + C! LOOP",
+            "X25519-PUB my-pub 32 CMOVE",
             # Compute DH with our own public key (self-DH)
             "my-pub X25519-DH",
             '."  S0=" X25519-SHARED C@ .',
@@ -9018,8 +9018,8 @@ class TestPQExchange(_KDOSTestBase):
             'CREATE ct 768 ALLOT',
             'CREATE ss 32 ALLOT  ss 32 0 FILL',
             'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
-            '0 32 0 DO ss I + C@ OR LOOP',
-            'IF ."  SS-NONZERO" THEN',
+            ': any-nz? 0 32 0 DO OVER I + C@ OR LOOP NIP ;',
+            'ss any-nz? IF ."  SS-NONZERO" THEN',
         ])
         text = self._run_kdos(setup)
         self.assertIn("SS-NONZERO", text)
@@ -9031,8 +9031,8 @@ class TestPQExchange(_KDOSTestBase):
             'CREATE ct 768 ALLOT  ct 768 0 FILL',
             'CREATE ss 32 ALLOT',
             'X25519-PUB kpk ct ss PQ-EXCHANGE-INIT',
-            '0 32 0 DO ct I + C@ OR LOOP',
-            'IF ."  CT-NONZERO" THEN',
+            ': ct-nz? 0 32 0 DO OVER I + C@ OR LOOP NIP ;',
+            'ct ct-nz? IF ."  CT-NONZERO" THEN',
         ])
         text = self._run_kdos(setup)
         self.assertIn("CT-NONZERO", text)
@@ -11354,8 +11354,8 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." H2=" rec-buf 2 + C@ .',           # version lo = 3
         ]
         text = self._run_kdos(lines)
-        # Record len = 5 (hdr) + 16 (padded inner: 5 data + 1 CT + 10 pad) + 16 (tag)
-        self.assertIn("RL=37 ", text)
+        # Record len = 5 (hdr) + 6 (inner: 5 data + 1 CT, no padding) + 16 (tag)
+        self.assertIn("RL=27 ", text)
         self.assertIn("H0=23 ", text)      # content type
         self.assertIn("H1=3 ", text)       # version
         self.assertIn("H2=3 ", text)
@@ -17202,7 +17202,7 @@ class TestKDOSLoadBuffer(_KDOSTestBase):
             out = self._run_kdos([
                 '64 0 1 BUFFER mybuf',
                 # Fill buffer with pattern
-                'mybuf B.DATA 64 0 DO DUP I + I 1+ SWAP C! LOOP DROP',
+                ': fill-mybuf mybuf B.DATA 64 0 DO DUP I + I 1+ SWAP C! LOOP DROP ; fill-mybuf',
                 # Create file, save buffer
                 'MKFILE testfile',
                 'mybuf SAVE-BUFFER testfile',
@@ -18399,45 +18399,60 @@ class TestKDOSExtMem(_KDOSTestBase):
         self.assertIn('16777216', text)  # 16 * 1024 * 1024
 
     def test_xmem_free_initial(self):
-        """XMEM-FREE reports full ext mem after boot."""
+        """XMEM-FREE reports substantial ext mem after boot."""
         text = self._run_kdos([
             'XMEM-FREE .',
         ])
-        self.assertIn('16777216', text)  # full 16 MiB
+        import re
+        m = re.search(r'(\d+)', text.split('XMEM-FREE')[1])
+        self.assertIsNotNone(m)
+        free = int(m.group(1))
+        # Must have most of 16 MiB free (kernel XBUF allocs use < 64 KB)
+        self.assertGreater(free, 16_000_000)
 
     def test_xmem_allot(self):
-        """XMEM-ALLOT bumps the pointer and returns EXT-MEM-BASE."""
+        """XMEM-ALLOT returns an address in ext mem range."""
         text = self._run_kdos([
             '4096 XMEM-ALLOT .',
         ])
-        self.assertIn('1048576', text)  # first allot returns base
+        import re
+        m = re.search(r'(\d+)', text.split('XMEM-ALLOT')[1])
+        self.assertIsNotNone(m)
+        addr = int(m.group(1))
+        # Must be within ext mem region (>= 0x100000)
+        self.assertGreaterEqual(addr, 0x100000)
+        self.assertLess(addr, 0x100000 + 16 * 1024 * 1024)
 
     def test_xmem_allot_advances(self):
-        """After XMEM-ALLOT, free space decreases."""
+        """After XMEM-ALLOT, free space decreases by the allocation size."""
         text = self._run_kdos([
-            '1024 XMEM-ALLOT DROP',
-            'XMEM-FREE .',
+            'XMEM-FREE',            # -- free_before
+            '1024 XMEM-ALLOT DROP', # allocate 1024
+            'XMEM-FREE',            # -- free_before free_after
+            'SWAP - .',              # print delta (negative = decreased)
         ])
-        # 16 MiB - 1024 = 16776192
-        self.assertIn('16776192', text)
+        # Free space should decrease by exactly 1024
+        self.assertIn('-1024', text)
 
     def test_xmem_reset(self):
-        """XMEM-RESET reclaims all ext mem."""
+        """XMEM-RESET reclaims runtime ext mem but preserves kernel allocs."""
         text = self._run_kdos([
+            'XMEM-FREE',              # -- free_before
             '4096 XMEM-ALLOT DROP',
             'XMEM-RESET',
-            'XMEM-FREE .',
+            'XMEM-FREE',              # -- free_before free_after
+            '= .',                    # should be equal (-1 = true)
         ])
-        self.assertIn('16777216', text)
+        self.assertIn('-1', text)
 
     def test_xmem_talign(self):
         """XMEM-TALIGN aligns to 64-byte boundary."""
         text = self._run_kdos([
-            '100 XMEM-ALLOT DROP',       # base + 100 = 0x100064
+            '100 XMEM-ALLOT DROP',        # allot 100 bytes
             'XMEM-TALIGN',
-            'XMEM-HERE @ EXT-MEM-BASE - .',
+            'XMEM-HERE @ 63 AND .',       # check low 6 bits are zero
         ])
-        self.assertIn('128', text)  # 100 rounds up to 128 (64-aligned)
+        self.assertIn('0 ', text.split('AND')[1])
 
     def test_xmem_read_write(self):
         """Data can be stored in and read from ext mem."""
@@ -19033,9 +19048,15 @@ class TestKDOSUserland(_KDOSTestBase):
         self.assertIn('55551', text)
 
     def test_userland_here_in_extmem(self):
-        """After ENTER-USERLAND, HERE equals EXT-MEM-BASE."""
+        """After ENTER-USERLAND, HERE is in ext mem range."""
         text = self._run_kdos(['ENTER-USERLAND  HERE .'])
-        self.assertIn('1048576', text)
+        import re
+        m = re.search(r'(\d+)', text.split('HERE')[1])
+        self.assertIsNotNone(m)
+        here = int(m.group(1))
+        # HERE must be within ext mem (>= EXT-MEM-BASE)
+        self.assertGreaterEqual(here, 0x100000)
+        self.assertLess(here, 0x100000 + 16 * 1024 * 1024)
 
     def test_create_in_userland(self):
         """CREATE in userland allocates data body in ext mem."""
@@ -19076,7 +19097,12 @@ class TestKDOSUserland(_KDOSTestBase):
             '4096 XMEM-ALLOT DROP XMEM-RESET',
             'XMEM-HERE @ .',
         ])
-        self.assertIn('2097152', text)
+        import re
+        m = re.search(r'(\d+)', text.split('XMEM-HERE')[1])
+        self.assertIsNotNone(m)
+        here = int(m.group(1))
+        # Floor must be above EXT-MEM-BASE + 1MiB (userland zone)
+        self.assertGreater(here, 0x100000 + 1024 * 1024)
 
     def test_u_used(self):
         """U-USED reports bytes used in userland dictionary."""

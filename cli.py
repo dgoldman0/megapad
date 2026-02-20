@@ -28,7 +28,7 @@ import shlex
 import traceback
 from typing import Optional
 
-from megapad64 import Megapad64, HaltError, TrapError, u64, s64
+from accel_wrapper import Megapad64, HaltError, TrapError, u64, s64
 from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
 from devices import (
@@ -627,8 +627,8 @@ class MegapadCLI(cmd.Cmd):
         if sub == 'status':
             link = 'up' if n.link_up else 'down'
             print(f"  NIC: link={link}  mac={n.mac.hex(':')}")
-            print(f"  TX: {n.tx_count} frames sent   RX: {n.rx_count} received")
-            print(f"  RX queue: {len(n.rx_queue)} frames pending")
+            print(f"  TX: {n.tx_count} frames sent   RX: {self.sys.cores[0]._cs.nic_get_rx_count()} received")
+            print(f"  RX queue: {self.sys.cores[0]._cs.nic_rx_queue_size()} frames pending")
             print(f"  Backend: {n.backend_name}")
             if n.backend and hasattr(n.backend, 'stats'):
                 for k, v in n.backend.stats().items():
@@ -649,16 +649,15 @@ class MegapadCLI(cmd.Cmd):
                 return
             try:
                 data = bytes(int(x, 16) for x in parts[1].split())
-                n.frame_len = len(data)
-                # Write to data port buffer and send
-                n._data_buf = bytearray(data)
-                n._data_pos = 0
-                n._execute_cmd(0x01)
-                print(f"  Sent {len(data)}-byte frame.")
+                if n.backend:
+                    n.backend.send(data)
+                    print(f"  Sent {len(data)}-byte frame via backend.")
+                else:
+                    print("  Error: no NIC backend configured.")
             except ValueError:
                 print("  Error: invalid hex bytes.")
         elif sub == 'reset':
-            n._execute_cmd(0x04)
+            self.sys.cores[0]._cs.nic_reset()
             print("  NIC reset.")
         else:
             print("Usage: nic [status|inject|send|reset]")
@@ -787,7 +786,7 @@ class HeadlessServer:
                 _time.sleep(0.05)
                 continue
             if (cpu.idle and not self.sys_emu.uart.has_rx_data
-                    and not self.sys_emu.nic.rx_queue):
+                    and not self.sys_emu._any_nic_rx()):
                 _time.sleep(0.02)
                 cpu.idle = False
                 continue
@@ -1003,7 +1002,7 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             # --- Run CPU in a batch until idle / halt ---------------
             if not sys_emu.cpu.halted and not (
                     sys_emu.cpu.idle and not sys_emu.uart.has_rx_data
-                    and not sys_emu.nic.rx_queue):
+                    and not sys_emu._any_nic_rx()):
                 try:
                     sys_emu.run_batch(batch)
                 except HaltError:
@@ -1047,7 +1046,7 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             # --- Run CPU until idle / halt -------------------------
             if not sys_emu.cpu.halted and not (
                     sys_emu.cpu.idle and not sys_emu.uart.has_rx_data
-                    and not sys_emu.nic.rx_queue):
+                    and not sys_emu._any_nic_rx()):
                 try:
                     sys_emu.run_batch(100_000)
                 except HaltError:
@@ -1056,7 +1055,7 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             if sys_emu.cpu.halted:
                 return False
 
-            if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data and not sys_emu.nic.rx_queue:
+            if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data and not sys_emu._any_nic_rx():
                 # Brief pause then wake CPU so Forth polling loops advance
                 import time as _time
                 _time.sleep(0.02)

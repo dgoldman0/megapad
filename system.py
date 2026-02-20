@@ -17,10 +17,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
-try:
-    from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
-except ImportError:
-    from megapad64 import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
+from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
 from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
@@ -29,11 +26,11 @@ from megapad64 import (
 )
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
-    MailboxDevice, SpinlockDevice, CRCDevice, AESDevice, SHA3Device, SHA256Device,
-    TRNGDevice, FieldALUDevice, NTTDevice, KemDevice, FramebufferDevice,
+    MailboxDevice, SpinlockDevice, CRCDevice,
+    NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
-    MBOX_BASE, SPINLOCK_BASE, CRC_BASE, AES_BASE, SHA3_BASE, SHA256_BASE,
-    TRNG_BASE, X25519_BASE, NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
+    MBOX_BASE, SPINLOCK_BASE, CRC_BASE,
+    NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
 )
 
 # ---------------------------------------------------------------------------
@@ -344,28 +341,26 @@ class MegapadSystem:
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.spinlock = SpinlockDevice()
         self.crc = CRCDevice()
-        self.aes = AESDevice()
-        self.sha3 = SHA3Device()
-        self.sha256 = SHA256Device()
-        self.trng = TRNGDevice()
-        self.x25519 = FieldALUDevice()
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         self.fb = FramebufferDevice()
+
+        # AES, SHA3, SHA256, FieldALU, NIC, and TRNG are all handled
+        # natively by the C++ accelerator — no Python device instances
+        # needed.  NIC MMIO (0x0400) does ~15K–35K accesses per TLS
+        # handshake; keeping it in C++ is critical for HTTPS perf.
+        # The Python NetworkDevice remains only as a facade for backend
+        # lifecycle, inject_frame(), and status display.
 
         self.bus.register(self.uart)
         self.bus.register(self.timer)
         self.bus.register(self.storage)
         self.bus.register(self.sysinfo)
-        self.bus.register(self.nic)
+        # NIC: NOT registered — C++ handles all MMIO
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
         self.bus.register(self.crc)
-        self.bus.register(self.aes)
-        self.bus.register(self.sha3)
-        self.bus.register(self.sha256)
-        self.bus.register(self.trng)
-        self.bus.register(self.x25519)
+        # TRNG: NOT registered — C++ handles all MMIO
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
         self.bus.register(self.fb)
@@ -374,9 +369,40 @@ class MegapadSystem:
         self.storage._mem_read = self._raw_mem_read
         self.storage._mem_write = self._raw_mem_write
 
-        # Wire NIC DMA to shared memory
-        self.nic._mem_read = self._raw_mem_read
-        self.nic._mem_write = self._raw_mem_write
+        # ── C++ NIC + TRNG ───────────────────────────────────
+        # All NIC and TRNG MMIO is handled in C++ (no bus registration).
+        # DMA goes directly through CPUState memory pointers.
+        # TX calls back to Python once per frame (backend.send).
+        self._nic_backend = nic_backend
+        _py_nic = self.nic
+        _be = nic_backend
+        for cpu in self.cores:
+            cs = cpu._cs
+            cs.nic_init(bytes(self.nic.mac))
+            cs.nic_sync_mem_ptrs()
+            cs.nic_set_link_up(self.nic.link_up)
+            # TX callback: mirror to Python facade + send via backend
+            def _tx_cb(frame: bytes, py_nic=_py_nic, be=_be) -> bool:
+                py_nic.tx_queue.append(frame)
+                py_nic.tx_count = (py_nic.tx_count + 1) & 0xFFFF
+                if py_nic.on_tx_frame:
+                    py_nic.on_tx_frame(frame)
+                if be is not None:
+                    return be.send(frame)
+                return True
+            cs.nic_set_tx_callback(_tx_cb)
+            cs.init_trng()
+
+        # Wire backend RX → C++ NIC queue
+        cpu0_cs = self.cores[0]._cs
+        if nic_backend is not None:
+            nic_backend.on_rx_frame = lambda frame, _cs=cpu0_cs: _cs.nic_inject_frame(frame)
+
+        # Patch inject_frame so test & CLI injections reach C++ queue
+        _orig_inject = self.nic.inject_frame
+        def _dual_inject(data: bytes, _orig=_orig_inject, _cs=cpu0_cs):
+            _cs.nic_inject_frame(data)
+        self.nic.inject_frame = _dual_inject
 
         # Wire mailbox IPI delivery
         self.mailbox.on_ipi = self._deliver_ipi
@@ -614,6 +640,10 @@ class MegapadSystem:
     #  Raw memory helpers (bypass MMIO, for DMA)
     # -----------------------------------------------------------------
 
+    def _any_nic_rx(self) -> bool:
+        """Check if C++ NIC has RX data available."""
+        return self.cores[0]._cs.nic_has_rx()
+
     def _raw_mem_read(self, addr: int) -> int:
         addr = u64(addr)
         if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
@@ -711,7 +741,7 @@ class MegapadSystem:
                     cpu.idle = False
                 elif self.timer.irq_pending and cpu.flag_i:
                     cpu.idle = False
-                elif self.nic.rx_queue:
+                elif self._any_nic_rx():
                     cpu.idle = False
 
             if cpu.halted or cpu.idle:
@@ -768,18 +798,15 @@ class MegapadSystem:
         return total
 
     def run_batch(self, n: int = 100_000) -> int:
-        """Execute up to *n* instructions using C++ batch mode when available.
+        """Execute up to *n* instructions via C++ batch mode.
 
-        For single-core systems with the C++ accelerator this runs the
-        entire inner loop in C++ (``cpu.run_steps``), calling back to
-        Python only for the rare MMIO access.
+        For single-core systems this runs the entire inner loop in
+        C++ (``cpu.run_steps``), calling back to Python only for
+        the rare MMIO access.
 
-        For multicore systems with the accelerator, each active core
-        runs a chunk of steps in C++ per round, with device ticking
-        and IRQ delivery between rounds.
-
-        Falls back to per-step execution when the accelerator is not
-        loaded.
+        For multicore systems, each active core runs a chunk of
+        steps in C++ per round, with device ticking and IRQ delivery
+        between rounds.
 
         Returns the number of steps actually executed.
         """
@@ -792,7 +819,7 @@ class MegapadSystem:
                     cpu.idle = False
                 elif self.timer.irq_pending and cpu.flag_i:
                     cpu.idle = False
-                elif self.nic.rx_queue:
+                elif self._any_nic_rx():
                     cpu.idle = False
 
         if self.all_halted or self.all_idle_or_halted:
@@ -800,8 +827,7 @@ class MegapadSystem:
 
         # ---------- C++ fast path (single active core) ----------
         cpu = self.cores[0]
-        if (hasattr(cpu, '_accel_backend')
-                and not cpu.halted and not cpu.idle
+        if (not cpu.halted and not cpu.idle
                 and all(c.idle or c.halted for c in self.cores[1:])):
             try:
                 steps, reason = cpu.run_steps(n)
@@ -827,8 +853,7 @@ class MegapadSystem:
         # ---------- C++ multicore path ----------
         # Run each active core for a chunk via C++ run_steps, with
         # device ticking and IRQ delivery between rounds.
-        has_accel = hasattr(self.cores[0], '_accel_backend')
-        if has_accel and self.num_cores > 1:
+        if self.num_cores > 1:
             CHUNK = 1000  # steps per core per round
             total = 0
             remaining = n
@@ -871,7 +896,7 @@ class MegapadSystem:
                     break
             return max(total, 1)
 
-        # ---------- Pure-Python fallback ----------
+        # ---------- Single core fallback (shouldn't reach here) ----------
         total = 0
         for _ in range(n):
             if self.all_halted:
@@ -955,8 +980,8 @@ class MegapadSystem:
                       f"image={self.storage.image_path or 'N/A'}")
         lines.append(f"  NIC: {'link up' if self.nic.link_up else 'link down'} "
                       f"mac={self.nic.mac.hex(':')} "
-                      f"tx={self.nic.tx_count} rx={self.nic.rx_count} "
-                      f"rxq={len(self.nic.rx_queue)} "
+                      f"tx={self.nic.tx_count} rx={self.cores[0]._cs.nic_get_rx_count()} "
+                      f"rxq={self.cores[0]._cs.nic_rx_queue_size()} "
                       f"backend={self.nic.backend_name}")
         if self.num_cores > 1:
             lines.append(f"  Mailbox: cores={self.num_cores} "

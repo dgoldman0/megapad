@@ -194,7 +194,7 @@ def run_with_tap(snapshot, commands, label="test", max_steps=800_000_000):
                     sys_obj.uart.inject_input(chunk)
                     pos += len(chunk)
                     idle_polls = 0
-                elif sys_obj.nic.rx_queue:
+                elif sys_obj._any_nic_rx():
                     idle_polls = 0
                 elif idle_polls < max_idle_polls:
                     idle_polls += 1

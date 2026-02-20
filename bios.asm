@@ -2141,8 +2141,13 @@ compile_ret:
 
 w_colon:
     ; Check dictionary space: HERE + 1024 < R14 (data stack pointer)
+    ; but only when HERE is in Bank 0 (system dict).  When KDOS
+    ; ENTER-USERLAND moves HERE into ext mem (>= ram_size), the
+    ; userland zone limit is managed by KDOS, not by this guard.
     ldi64 r11, var_here
     ldn r11, r11
+    cmp r2, r11                ; ram_size vs HERE
+    brle w_colon_space_ok      ; HERE >= ram_size → ext mem, skip guard
     addi r11, 1024             ; HERE + safety margin
     cmp r11, r14
     brle w_colon_space_ok

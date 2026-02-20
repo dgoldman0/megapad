@@ -691,7 +691,7 @@ VARIABLE _HGS-EMPTY
     DUP 0= IF ."  TLS connect failed" CR -1 EXIT THEN
     _HGS-CTX !
     \ Build & send HTTP request over TLS
-    _HTTP-BUILD-REQ _HGS-CTX @ -ROT TLS-SEND DROP
+    _HTTP-BUILD-REQ  _HGS-CTX @ -ROT TLS-SEND DROP
     \ Receive response
     0 SCROLL-LEN !  0 _HGS-EMPTY !
     500 0 DO
@@ -948,9 +948,7 @@ VARIABLE _SC-URL-LEN
 \   Fetch URL into SCROLL-BUF and print result size.
 : SCROLL-GET  ( "url" -- )
     _SC-PARSE-URL DUP 0= IF 2DROP ."  Usage: SCROLL-GET url" CR EXIT THEN
-    URL-PARSE 0<> IF
-        ."  URL parse error" CR EXIT
-    THEN
+    URL-PARSE 0<> IF ."  URL parse error" CR EXIT THEN
     _SC-FETCH 0<> IF ."  Fetch failed" CR EXIT THEN
     ."  OK, " SCROLL-LEN @ . ."  bytes in SCROLL-BUF" CR ;
 

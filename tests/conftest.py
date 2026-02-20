@@ -27,11 +27,15 @@ def pytest_collection_modifyitems(items):
     Class-level @pytest.mark.xdist_group on unittest.TestCase subclasses
     doesn't always propagate to individual items for xdist's loadgroup
     scheduler.  Explicitly stamp every realnet item here.
+
+    We must ALWAYS add the marker at the item level — the old guard
+    ``if not item.get_closest_marker("xdist_group")`` would find the
+    inherited class-level marker via scope traversal and skip adding,
+    but xdist's loadgroup scheduler only sees item-level markers.
     """
     for item in items:
         if item.get_closest_marker("realnet"):
-            if not item.get_closest_marker("xdist_group"):
-                item.add_marker(pytest.mark.xdist_group("tap"))
+            item.add_marker(pytest.mark.xdist_group("tap"))
 
 
 def pytest_configure(config):
@@ -134,6 +138,7 @@ class LiveTestMonitor:
         self.total -= len(items)
         self._write_status()
 
+    @pytest.hookimpl(optionalhook=True)
     def pytest_xdist_node_collection_finished(self, node, ids):
         """xdist: controller receives each worker's collected test ids.
         Use the first worker's count (all workers collect the same set)."""
