@@ -7,9 +7,9 @@ versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
 TUI dashboard.
 
 This reference documents every word defined in KDOS, organized by the
-sections of `kdos.f`.  There are **653 colon definitions** and **405
-variables/constants/creates** — roughly 1,058 named entities in total across
-8,296 lines of Forth.
+sections of `kdos.f`.  There are **871 colon definitions** and **490
+variables/constants/creates** — roughly 1,361 named entities in total across
+10,225 lines of Forth.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -24,8 +24,9 @@ variables/constants/creates** — roughly 1,058 named entities in total across
    - [§1.2 Exception Handling](#12-exception-handling)
    - [§1.3 CRC Integration](#13-crc-integration)
    - [§1.4 Hardware Diagnostics](#14-hardware-diagnostics)
-   - [§1.5 AES-256-GCM Encryption](#15-aes-256-gcm-encryption)
+   - [§1.5 AES-256/128-GCM Encryption](#15-aes-256128-gcm-encryption)
    - [§1.6 SHA-3 Hashing](#16-sha-3-hashing)
+   - [§1.6a SHA-256 Hashing](#16a-sha-256-hashing)
    - [§1.7 Unified Crypto Words](#17-unified-crypto-words)
    - [§1.8 X25519 ECDH](#18-x25519-ecdh)
    - [§1.9 HKDF Key Derivation](#19-hkdf-key-derivation)
@@ -135,26 +136,44 @@ Live test monitor and diagnostic words.
 
 ---
 
-### §1.5 AES-256-GCM Encryption
+### §1.5 AES-256/128-GCM Encryption
 
-High-level AES-256-GCM words built on the BIOS AES accelerator.
+High-level AES-GCM words built on the BIOS AES accelerator. Supports both
+AES-256 (default) and AES-128 (via `AES-KEY-MODE!`).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `AES-ENCRYPT` | `( key iv src dst len -- tag-addr )` | Encrypt *len* bytes from *src* to *dst*.  Returns address of 16-byte GCM tag. |
 | `AES-DECRYPT` | `( key iv src dst len tag -- flag )` | Decrypt and verify.  Returns 0 if auth OK, -1 if auth failed. |
 | `AES-ENCRYPT-BLK` | `( src dst -- )` | Process one 16-byte block (key/IV/CMD must already be set). |
+| `AES-ENCRYPT-AEAD` | `( key iv aad aadlen src dst dlen -- tag-addr )` | Full AEAD encrypt with additional authenticated data (AAD). |
+| `AES-DECRYPT-AEAD` | `( key iv aad aadlen src dst dlen tag -- flag )` | Full AEAD decrypt + verify with AAD.  Handles partial blocks correctly. |
 | `.AES-STATUS` | `( -- )` | Print human-readable AES status. |
 
 ---
 
 ### §1.6 SHA-3 Hashing
 
-SHA3-256 (Keccak) convenience word built on the BIOS SHA3 accelerator.
+SHA-3 (Keccak) convenience words built on the BIOS SHA3 accelerator.
+Supports SHA3-256 and SHA3-512 via mode selection.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `SHA3` | `( addr len out -- )` | Compute SHA3-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
+| `SHA3-512` | `( addr len out -- )` | Compute SHA3-512 hash of *len* bytes at *addr*, write 64-byte digest to *out*. Sets mode via `SHA3-MODE!`, uses multi-squeeze for 64-byte digest. |
+
+---
+
+### §1.6a SHA-256 Hashing
+
+SHA-256 (SHA-2) convenience words built on the BIOS SHA-256 hardware
+accelerator.  Used by the TLS 1.3 cipher suite 0x1301
+(TLS_AES_128_GCM_SHA256) and HKDF-SHA256 key derivation.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA256` | `( addr len out -- )` | Compute SHA-256 hash of *len* bytes at *addr*, write 32-byte digest to *out*. |
+| `HMAC-SHA256` | `( key-addr key-len msg-addr msg-len out-addr -- )` | Compute HMAC-SHA256.  Used internally by HKDF-SHA256 and TLS 1.3 key schedule. |
 
 ---
 
@@ -187,12 +206,15 @@ in mode 0 (X25519 scalar multiplication).
 
 ### §1.9 HKDF Key Derivation
 
-HMAC-based Key Derivation Function (RFC 5869) using SHA3-HMAC.
+HMAC-based Key Derivation Function (RFC 5869).  Two families: SHA3-HMAC
+(for cipher suite 0xFF01) and SHA-256 HMAC (for cipher suite 0x1301).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `HKDF-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract: PRK = HMAC(salt, IKM).  32-byte output. |
-| `HKDF-EXPAND` | `( prk info ilen len out -- )` | Expand: OKM = HMAC(PRK, info \|\| counter).  Up to 255×32 bytes. |
+| `HKDF-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract (SHA3-HMAC): PRK = HMAC(salt, IKM).  32-byte output. |
+| `HKDF-EXPAND` | `( prk info ilen len out -- )` | Expand (SHA3-HMAC): OKM = HMAC(PRK, info \|\| counter).  Up to 255×32 bytes. |
+| `HKDF-SHA256-EXTRACT` | `( salt slen ikm ilen out -- )` | Extract (SHA-256): PRK = HMAC-SHA256(salt, IKM).  32-byte output. |
+| `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- )` | Expand (SHA-256): OKM = HMAC-SHA256(PRK, info \|\| counter).  Up to 255×32 bytes. |
 
 ---
 
@@ -1313,14 +1335,32 @@ control, and retransmit.
 
 ### §16.8–§16.11 TLS 1.3
 
-Full TLS 1.3 implementation using AES-256-GCM and SHA-3 HMAC.
+Full TLS 1.3 implementation with **dual-mode cipher suite** support:
+- **0xFF01** — AES-256-GCM + SHA3-256 (custom, default)
+- **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446)
+
+Includes record-layer framing with reassembly buffers, multi-message
+handshake processing, SNI (Server Name Indication), and Change Cipher
+Spec tolerance.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TLS-CONNECT` | `( ip port -- tls )` | TLS handshake over TCP: ClientHello → key schedule → Finished. |
+| `TLS-CONNECT` | `( ip port -- tls )` | TLS handshake over TCP: ClientHello → key schedule → Finished.  Auto-selects cipher suite. |
 | `TLS-SEND` | `( tls buf len -- )` | Encrypt and send application data. |
 | `TLS-RECV` | `( tls buf maxlen -- len )` | Receive and decrypt application data. |
-| `TLS-CLOSE` | `( tls -- )` | Send close_notify and tear down connection. |
+| `TLS-CLOSE` | `( tls -- )` | Send `close_notify` alert and tear down connection. |
+| `TLS-SEND-ALERT` | `( ctx level desc -- )` | Send a TLS alert (e.g., 2 0 for `close_notify`). |
+| `TLS-READ-RECORD` | `( tcb -- rlen \| 0 )` | Read and parse one TLS record from the reassembly buffer. |
+| `TLS-READ-RECORD-NB` | `( tcb -- rlen \| 0 )` | Non-blocking variant of `TLS-READ-RECORD`. |
+| `TLS-PROCESS-HS-MSG` | `( ctx msg mlen -- flag )` | Process a single handshake message. |
+| `TLS-PROCESS-HS-MSGS` | `( ctx plain plen -- flag )` | Process multiple handshake messages from one record. |
+| `TLS-RBUF-FILL` | `( tcb need -- flag )` | Fill reassembly buffer with at least *need* bytes (blocking). |
+| `TLS-RBUF-FILL-NB` | `( tcb need -- flag )` | Non-blocking fill variant.  Returns false if no data available. |
+| `TLS-RBUF-CONSUME` | `( n -- )` | Consume *n* bytes from the reassembly buffer head. |
+| `TLS-RECV-DATA` | `( ctx addr maxlen -- actual \| -1 )` | High-level receive: handles record reassembly + decryption. |
+
+**Variables:** `TLS-SNI-HOST` (64-byte buffer for SNI hostname),
+`TLS-SNI-LEN` (current SNI length).
 
 ---
 

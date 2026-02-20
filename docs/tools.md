@@ -40,6 +40,9 @@ python cli.py [flags]
 | `--nic-peer` | PORT | NIC+1 | UDP peer port for NIC communication. |
 | `--nic-tap` | IFNAME | mp64tap0 | Wire NIC to a Linux TAP device for real L2 networking. Requires a pre-created TAP interface (see below). |
 | `--cores` | N | 1 | Number of CPU cores (1–4 for multicore SoC). |
+| `--extmem` | MiB | 16 | External memory size in mebibytes. |
+| `--headless` | — | off | Headless mode — no curses display, enables TCP terminal server on port 6464. |
+| `--connect` | HOST:PORT | — | Connect a remote terminal to a headless instance. |
 
 ### Boot Modes
 
@@ -402,12 +405,15 @@ fs.save("myimage.img")
 | `custom-kernel` | Tutorial | Writing custom kernels |
 | `demo-data` | Data | 256-byte test data file |
 | `demo-bundle` | Bundle | Demo pipeline bundle (load with `BUNDLE-LOAD`) |
+| `autoexec.f` | Forth | Boot script — runs automatically after KDOS loads; chains `graphics.f` and `tools.f` |
+| `graphics.f` | Forth | Framebuffer / tile-engine graphics module |
+| `tools.f` | Forth | Network tools: HTTP/HTTPS/FTP/FTPS/Gopher client, DNS-LOOKUP |
 
 ---
 
 ## Test Suite
 
-The project has a comprehensive test suite with **1,068 passing tests**
+The project has a comprehensive test suite with **1,387 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -415,8 +421,8 @@ that cover every layer of the system.
 | File | Tests | What It Covers |
 |------|-------|----------------|
 | `test_megapad64.py` | 23 | CPU instruction set — all 16 families, integration tests (Fibonacci, subroutines, stack) |
-| `test_system.py` | 1,007 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto, PQC, network stack |
-| `test_networking.py` | 38 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, TCP, IP stack integration |
+| `test_system.py` | 1,316 | Everything else — devices, MMIO, BIOS words, KDOS features, assembler, diskutil, filesystem, multicore, hardening, crypto, PQC, network stack, privilege, framebuffer, ext mem, userland |
+| `test_networking.py` | 48 | Real networking — NIC backends (loopback, UDP, TAP), BIOS NIC words over TAP, ARP, ICMP, UDP, TCP, IP stack integration, hardening, end-to-end |
 
 ### Test Classes in `test_system.py`
 
@@ -456,10 +462,34 @@ that cover every layer of the system.
 | `TestKDOSTLSAppData` | TLS 1.3 application data: TLS-SEND, TLS-RECV, TLS-CLOSE |
 | `TestKDOSSocket` | Socket API: SOCKET, BIND, LISTEN, ACCEPT, CONNECT, SEND, RECV, CLOSE |
 | `TestFieldALU` | Field ALU: FADD–FPOW, MUL_RAW, edge cases, X25519 compatibility |
+| `TestFieldALUSecp256k1` | Field ALU with secp256k1 prime |
+| `TestFieldALUP256` | Field ALU with P-256 prime |
+| `TestFieldALUCustom` | Field ALU custom modulus operations |
+| `TestFieldALUNewModes` | Field ALU advanced modes (MONTMUL, MONTRED, etc.) |
+| `TestFieldALUCrossPrime` | Field ALU cross-prime correctness checks |
 | `TestNTT` | NTT engine: forward/inverse round-trip, pointwise ops, both moduli |
 | `TestMLKEM` | ML-KEM-512: KeyGen, Encaps, Decaps, known-answer vectors |
 | `TestPQExchange` | Hybrid PQ exchange: X25519 + ML-KEM + HKDF derivation |
 | `TestNetHardening` | Network hardening: truncated headers, bad checksums, floods, stress |
+| `TestPrivilege` | Privilege levels: user-mode traps, supervisor MMIO access |
+| `TestMPU` | Memory protection unit: region config, access checks |
+| `TestClusterMPU` | Cluster-level MPU: per-core isolation |
+| `TestAppLoad` | Application loading: ELF-like binary load + relocate |
+| `TestKDOSComparison` | Extended Forth comparison words |
+| `TestKDOSLoadBuffer` | LOAD-BUFFER multi-sector Forth source loading |
+| `TestKDOSSocketReady` | Socket readiness polling |
+| `TestKDOSRing` | Ring buffer data structure |
+| `TestKDOSHashTable` | Hash table: insert, lookup, delete, rehash |
+| `TestKDOSFramebuffer` | Framebuffer MMIO: pixel write, scroll, clear |
+| `TestKDOSModuleSystem` | Module system: LOAD, MODULE/END-MODULE, import |
+| `TestKDOSGraphicsModule` | Graphics module: sprites, tiles, palette |
+| `TestHeadlessDisplay` | Headless display: TCP terminal server mode |
+| `TestPortSend` | Data port send/recv, cross-task communication |
+| `TestKDOSFP16` | FP16/bfloat16 tile arithmetic |
+| `TestKDOSAutoexec` | autoexec.f boot chain (auto-loads tools.f, graphics.f) |
+| `TestKDOSExtMem` | External memory: alloc, read/write, userland dictionary |
+| `TestToolsModule` | tools.f: HTTP, HTTPS, FTP, Gopher, DNS-LOOKUP |
+| `TestKDOSUserland` | Userland memory isolation: per-process dictionary, HERE/ALLOT |
 
 ### Test Classes in `test_networking.py`
 
@@ -473,6 +503,8 @@ that cover every layer of the system.
 | `TestRealNetUDP` | UDP send to host, UDP receive from host |
 | `TestRealNetIntegration` | Full IP stack init, status display, backend stats tracking |
 | `TestRealNetTCP` | TCP over TAP: SYN/ACK, data transfer, FIN close |
+| `TestRealNetHardening` | Network hardening over TAP: malformed frames, floods, MTU edge cases |
+| `TestRealNetEndToEnd` | End-to-end: ARP + ICMP + UDP + TCP full-stack over TAP |
 
 ### Running Tests
 
@@ -499,7 +531,7 @@ back to pure Python.
 ```bash
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                   # build the C++ extension
-make test-accel              # ~23 s for all 1,068 tests
+make test-accel              # ~23 s for all 1,387 tests
 make bench                   # raw CPU speed comparison
 ```
 
@@ -546,22 +578,25 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | ~2,541 | CPU + tile engine emulator |
+| `megapad64.py` | ~2,868 | CPU + tile engine emulator |
 | `accel/mp64_accel.cpp` | ~1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | ~829 | Drop-in wrapper for C++ CPU core |
-| `system.py` | ~610 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
-| `cli.py` | ~1,012 | CLI, boot modes, debug monitor |
+| `system.py` | ~994 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
+| `cli.py` | ~1,347 | CLI, boot modes, debug monitor, headless terminal server |
 | `asm.py` | ~788 | Two-pass assembler (with listing output) |
-| `devices.py` | ~2,314 | 14 MMIO devices (UART, Timer, Storage, SysInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM) |
+| `devices.py` | ~1,875 | 14 MMIO devices (UART, Timer, Storage, SysInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA-256, TRNG, FieldALU, NTT, KEM, Framebuffer) |
 | `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
-| `diskutil.py` | ~1,039 | MP64FS disk utility and image builder |
-| `bios.asm` | ~11,158 | Forth BIOS (291 dictionary words, crypto, PQC, hardened, multicore) |
+| `diskutil.py` | ~1,162 | MP64FS disk utility and image builder |
+| `bios.asm` | ~12,162 | Forth BIOS (346 dictionary words, crypto, PQC, SHA-256, hardened, multicore) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | ~8,296 | KDOS v1.1 operating system (653 colon defs, §1–§17, multicore, crypto, network, PQC) |
+| `kdos.f` | ~10,225 | KDOS v1.1 (871 colon defs, §1–§17, multicore, crypto, network, PQC, TLS dual-mode) |
+| `tools.f` | ~990 | Network tools (HTTP/HTTPS/FTP/Gopher client, DNS-LOOKUP) |
+| `graphics.f` | ~150 | Framebuffer / tile-engine graphics module |
+| `autoexec.f` | ~20 | Boot chain script (auto-loads graphics.f + tools.f) |
 | `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
-| `test_system.py` | ~14,751 | Integration test suite (1,007 tests, 40 classes) |
-| `test_networking.py` | ~860 | Real-networking tests (38 tests, 8 classes) |
+| `test_system.py` | ~19,216 | Integration test suite (1,316 tests, 69 classes) |
+| `test_networking.py` | ~1,239 | Real-networking tests (48 tests, 9 classes) |
 | `setup_accel.py` | ~35 | pybind11 build configuration |
 | `bench_accel.py` | ~139 | C++ vs Python speed comparison |
 | `Makefile` | 190 | Build, test, & accel targets |

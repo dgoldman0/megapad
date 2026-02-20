@@ -248,14 +248,15 @@ These are **MMIO-mapped coprocessors**, not tile engine extensions. They
 share the MMIO bus alongside the existing UART, timer, etc. The CPU feeds
 them data via MMIO register writes and reads results back.
 
-### 4.1 AES-256-GCM
+### 4.1 AES-256/128-GCM
 
-A hardware AES block supporting AES-256 encryption/decryption in GCM
-(Galois/Counter Mode) for authenticated encryption.
+A hardware AES block supporting AES-256 and AES-128 encryption/decryption
+in GCM (Galois/Counter Mode) for authenticated encryption. The key size
+is selected via the `AES_KEY_MODE` register.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| `AES_KEY[0..7]` | 0x700 | W | 256-bit key (8 × 32-bit writes) |
+| `AES_KEY[0..7]` | 0x700 | W | 256-bit key (8 × 32-bit writes; for AES-128 only first 4 used) |
 | `AES_IV[0..2]` | 0x720 | W | 96-bit IV/nonce |
 | `AES_AAD_LEN` | 0x730 | W | Additional authenticated data length |
 | `AES_DATA_LEN` | 0x734 | W | Plaintext/ciphertext length |
@@ -264,6 +265,7 @@ A hardware AES block supporting AES-256 encryption/decryption in GCM
 | `AES_DIN` | 0x740 | W | 128-bit data input (4 × 32-bit writes) |
 | `AES_DOUT` | 0x750 | R | 128-bit data output |
 | `AES_TAG[0..3]` | 0x760 | R/W | 128-bit GCM authentication tag |
+| `AES_KEY_MODE` | 0x770 | W | Key size: 0 = AES-256 (default), 1 = AES-128 |
 
 **Data flow**: Software writes key, IV, then streams 16-byte blocks via
 AES_DIN. The hardware computes AES rounds and GHASH in parallel. When
@@ -272,7 +274,12 @@ expected tag first, then stream ciphertext — AES_STATUS reports
 auth-fail if the tag doesn't match.
 
 **Performance target**: 1 block (16 bytes) per 11 cycles (pipelined
-AES-256 round function) + 1 cycle GHASH.
+AES-256 round function, 9 cycles for AES-128) + 1 cycle GHASH.
+
+**AES-128 mode**: Write 1 to `AES_KEY_MODE` before loading the key.
+The hardware uses a 10-round key schedule instead of 14. Only the
+first 4 key registers (`AES_KEY[0..3]`) are used. Used by TLS 1.3
+cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
 
 **Interrupt**: `IRQX_AES` (vector 12) fires when a block is done, for
 interrupt-driven streaming.
@@ -309,14 +316,34 @@ Lightweight CRC accelerator for data integrity. Supports:
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| `CRC_POLY` | 0x7C0 | W | Polynomial select (0=CRC32, 1=CRC32C, 2=CRC64) |
-| `CRC_INIT` | 0x7C4 | W | Initial CRC value |
-| `CRC_DIN` | 0x7C8 | W | 64-bit data input (processes 8 bytes/cycle) |
-| `CRC_RESULT` | 0x7D0 | R | Current CRC value |
-| `CRC_CTRL` | 0x7D8 | W | 0=reset, 1=finalize (XOR-out) |
+| `CRC_POLY` | 0x980 | W | Polynomial select (0=CRC32, 1=CRC32C, 2=CRC64) |
+| `CRC_INIT` | 0x984 | W | Initial CRC value |
+| `CRC_DIN` | 0x988 | W | 64-bit data input (processes 8 bytes/cycle) |
+| `CRC_RESULT` | 0x990 | R | Current CRC value |
+| `CRC_CTRL` | 0x998 | W | 0=reset, 1=finalize (XOR-out) |
 
 **Performance**: 8 bytes per cycle using an 8-byte-wide lookup table
 or Sarwate algorithm. For a 512-byte disk sector: 64 cycles.
+
+### 4.4 SHA-256 (SHA-2) Accelerator
+
+Hardware SHA-256 accelerator for TLS 1.3 cipher suite 0x1301
+(TLS_AES_128_GCM_SHA256) and HMAC/HKDF key derivation.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| `SHA256_CMD` | 0x940 | W | 1=init, 2=update, 3=finalize |
+| `SHA256_STATUS` | 0x948 | R | Bit 0: busy, Bit 1: done |
+| `SHA256_DIN` | 0x950 | W | 64-bit data input (8 bytes at a time) |
+| `SHA256_DOUT[0..3]` | 0x958 | R | 256-bit digest output (4 × 64-bit reads) |
+
+**Data flow**: Write 1 to `SHA256_CMD` to initialize. Feed message
+data via `SHA256_DIN` with cmd=2 (update). Write 3 to finalize and
+read the 32-byte digest from `SHA256_DOUT`. The hardware handles
+padding and Merkle-Damgård strengthening internally.
+
+**Performance target**: 64-byte block in ~64 cycles (1 round/cycle,
+64 rounds per block).
 
 ---
 
@@ -478,10 +505,15 @@ Additions to the existing MMIO map:
 | 0x400 | 128B | NIC (existing) |
 | 0x500 | 256B | Mailbox (existing) |
 | 0x600 | 256B | Spinlocks (existing) |
-| **0x700** | **64B** | **AES-256-GCM** |
-| **0x780** | **64B** | **SHA-3/SHAKE** |
-| **0x7C0** | **32B** | **CRC32/CRC64** |
-| **0x7E0** | **16B** | **QoS global config** |
+| **0x700** | **128B** | **AES-256/128-GCM** |
+| **0x780** | **96B** | **SHA-3/SHAKE** (96 bytes) |
+| **0x800** | **16B** | **TRNG** |
+| **0x880** | **64B** | **Field ALU** |
+| **0x8C0** | **64B** | **NTT Engine** |
+| **0x900** | **64B** | **KEM (ML-KEM-512)** |
+| **0x940** | **64B** | **SHA-256** |
+| **0x980** | **32B** | **CRC32/CRC64** |
+| **0xA00** | **256B** | **Framebuffer** |
 
 ### CSR Address Map (Extended)
 

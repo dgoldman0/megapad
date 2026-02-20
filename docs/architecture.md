@@ -53,14 +53,16 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0400     │  NIC                 │ │
     │   0x0500     │  Mailbox (IPI)       │ │
     │   0x0600     │  Spinlock            │ │
-    │   0x0700     │  AES-256-GCM         │ │
+    │   0x0700     │  AES-256/128-GCM     │ │
     │   0x0780     │  SHA-3 / SHAKE       │ │
-    │   0x07C0     │  CRC32 / CRC64       │ │
     │   0x07E0     │  QoS Config          │ │
     │   0x0800     │  TRNG                │ │
     │   0x0840     │  Field ALU (GF(p))   │ │
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
+    │   0x0940     │  SHA-256             │ │
+    │   0x0980     │  CRC32 / CRC64       │ │
+    │   0x0A00     │  Framebuffer         │ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -82,6 +84,7 @@ MMIO devices live at the top of the address space.
 | *(varies)* | Free space between HERE and SP |
 | ← SP | Data stack grows downward from top of Bank 0 |
 | `RAM_SIZE` | Top of Bank 0 (default 0x0010_0000 = 1 MiB) |
+| `0x0010_0000`+ | **External Memory** — up to 16 MiB (userland dictionary + XMEM allocator) |
 | `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 
 The BIOS sets `HERE` just past its own code.  As KDOS loads (via FSLOAD),
@@ -103,14 +106,16 @@ device occupies a small range:
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
-| **AES-256-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator |
-| **SHA-3/SHAKE** | `+0x0780` | 64 bytes | Keccak hash / XOF accelerator |
-| **CRC32/CRC64** | `+0x07C0` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
+| **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
+| **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Keccak hash / XOF accelerator (SHA3-256, SHA3-512, SHAKE) |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 | **TRNG** | `+0x0800` | 64 bytes | Hardware true random number generator |
 | **Field ALU** | `+0x0840` | 128 bytes | GF(2²⁵⁵−19) coprocessor (8 modes, supersedes X25519) |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
+| **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |
+| **CRC32/CRC64** | `+0x0980` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
+| **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).
@@ -269,8 +274,9 @@ with 53 tile testbench tests passing.
 
 | Block | Performance | Use Case |
 |-------|-------------|----------|
-| AES-256-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
-| SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing, key derivation, XOF |
+| AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
+| SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
+| SHA-256 | 64 bytes / 64 cycles | Standard TLS 1.3 (0x1301), HMAC-SHA256, HKDF |
 | CRC32/CRC64 | 8 bytes / cycle | Data integrity for disk sectors and network frames |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519) |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
@@ -350,6 +356,27 @@ polynomial arithmetic.
 `KEM-ENCAPS`, `KEM-DECAPS`, `KEM-STATUS@`.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
 `KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
+
+### SHA-256 (SHA-2 Hash Accelerator)
+
+A SHA-256 accelerator at MMIO base `+0x0940`, needed for standard TLS 1.3
+cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| CMD | `+0x00` | W | Write 1 to init, 2 to finalize |
+| STATUS | `+0x08` | R | **bit 0:** busy, **bit 1:** done |
+| DIN | `+0x10` | W | 64-bit data input (byte streaming) |
+| DOUT | `+0x18`–`+0x37` | R | 32-byte digest output |
+
+Full 64-round SHA-256 compression with K constants, Σ/σ/Ch/Maj functions,
+16-entry W message schedule with on-the-fly expansion, and automatic
+padding (single and two-block paths).
+
+**BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
+`SHA256-STATUS@`, `SHA256-DOUT@`.
+**KDOS words:** `SHA256`, `HMAC-SHA256`, `HKDF-SHA256-EXTRACT`,
+`HKDF-SHA256-EXPAND`.
 
 ### TRNG (True Random Number Generator)
 
@@ -489,7 +516,7 @@ the correct default for pre-privilege firmware.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.1  (kdos.f, 8,296 lines)              │
+│  KDOS v1.1  (kdos.f, 10,225 lines)             │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -503,14 +530,14 @@ the correct default for pre-privilege firmware.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 11,158 lines)           │
-│  Subroutine-threaded Forth, 291 dictionary words│
-│  Disk I/O, FSLOAD, UART, timer, tile engine     │
+│  BIOS v1.0  (bios.asm, 12,162 lines)            │
+│  Subroutine-threaded Forth, 346 dictionary words │
+│  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
 │  4× CPU, RAM+BIST, UART, Timer, Storage, NIC,  │
-│  Tile Engine+FP16, AES, SHA-3, CRC, DMA, QoS,  │
-│  TRNG, Field ALU, NTT Engine, KEM (ML-KEM-512) │
+│  Tile Engine+FP16, AES, SHA-3, SHA-256, CRC,    │
+│  DMA, QoS, TRNG, Field ALU, NTT, KEM, FB       │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -528,9 +555,11 @@ The full boot process from power-on to the KDOS REPL:
    - Reads its data sectors into a RAM buffer
    - EVALUATEs each line via FSLOAD
 5. **KDOS loads** — the Forth file (typically `kdos.f`) causes:
-   - All 2,972 lines of KDOS to be read from disk
+   - All sections of KDOS to be read from disk
    - Each line is EVALUATE'd, compiling definitions into the dictionary
-   - §14 startup code runs: prints banner, loads filesystem (`FS-LOAD`)
+   - §14 startup code runs: prints banner, loads filesystem (`FS-LOAD`),
+     initializes heap, loads `autoexec.f` (which chains `graphics.f`
+     and `tools.f`), runs DHCP, enters userland memory isolation
 6. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
 
 **If no disk:** BIOS skips step 4, drops directly into the bare Forth
@@ -596,16 +625,17 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 2,541 | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | 610 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 2,314 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM |
-| BIOS | `bios.asm` | 11,158 | Forth interpreter, boot, multicore, 291 dictionary words |
-| OS | `kdos.f` | 8,296 | Buffers, kernels, TUI, FS, crypto, networking, PQC, multicore |
+| CPU emulator | `megapad64.py` | 2,868 | Full ISA + extended tile engine implementation |
+| System glue | `system.py` | 994 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 1,875 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer |
+| BIOS | `bios.asm` | 12,162 | Forth interpreter, boot, multicore, 346 dictionary words |
+| OS | `kdos.f` | 10,225 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
+| Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
 | Assembler | `asm.py` | 788 | Two-pass macro assembler |
-| CLI/Monitor | `cli.py` | 995 | Debug, inspect, boot |
-| Disk tools | `diskutil.py` | 1,039 | Build/manage disk images |
+| CLI/Monitor | `cli.py` | 1,347 | Debug, inspect, boot, headless TCP server |
+| Disk tools | `diskutil.py` | 1,162 | Build/manage disk images |
 | Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| Tests | `test_system.py` | 14,751 | 1,007 integration tests (40 classes) |
-| Tests | `test_networking.py` | 860 | 38 real-network tests (8 classes) |
+| Tests | `test_system.py` | 19,216 | 1,316 integration tests (69 classes) |
+| Tests | `test_networking.py` | 1,239 | 48 real-network tests (8 classes) |
 | RTL | `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides |
 | RTL tests | `rtl/sim/` | ~11,100 | 28 testbenches (~414 hardware assertions) |
