@@ -5058,13 +5058,20 @@ w_timer_ack:
 w_ms_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B00   ; RTC UPTIME (+0)
     ld.b r1, r11                        ; byte 0 (triggers latch)
-    ldn.b r2, r11, 1
-    ldn.b r3, r11, 2
-    ldn.b r4, r11, 3
-    ldn.b r5, r11, 4
-    ldn.b r6, r11, 5
-    ldn.b r7, r11, 6
-    ldn.b r0, r11, 7
+    addi r11, 1
+    ld.b r2, r11                        ; byte 1
+    addi r11, 1
+    ld.b r3, r11                        ; byte 2
+    addi r11, 1
+    ld.b r4, r11                        ; byte 3
+    addi r11, 1
+    ld.b r5, r11                        ; byte 4
+    addi r11, 1
+    ld.b r6, r11                        ; byte 5
+    addi r11, 1
+    ld.b r7, r11                        ; byte 6
+    addi r11, 1
+    ld.b r0, r11                        ; byte 7
     ; Assemble 64-bit value: r1 = result
     lsli r2, 8
     or r1, r2
@@ -5073,16 +5080,16 @@ w_ms_fetch:
     lsli r4, 24
     or r1, r4
     ldi64 r9, 32
-    lsl r5, r9
+    shl r5, r9
     or r1, r5
     ldi64 r9, 40
-    lsl r6, r9
+    shl r6, r9
     or r1, r6
     ldi64 r9, 48
-    lsl r7, r9
+    shl r7, r9
     or r1, r7
     ldi64 r9, 56
-    lsl r0, r9
+    shl r0, r9
     or r1, r0
     ; Push result
     subi r14, 8
@@ -5095,13 +5102,20 @@ w_ms_fetch:
 w_epoch_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B08   ; RTC EPOCH (+8)
     ld.b r1, r11                        ; byte 0 (triggers latch)
-    ldn.b r2, r11, 1
-    ldn.b r3, r11, 2
-    ldn.b r4, r11, 3
-    ldn.b r5, r11, 4
-    ldn.b r6, r11, 5
-    ldn.b r7, r11, 6
-    ldn.b r0, r11, 7
+    addi r11, 1
+    ld.b r2, r11                        ; byte 1
+    addi r11, 1
+    ld.b r3, r11                        ; byte 2
+    addi r11, 1
+    ld.b r4, r11                        ; byte 3
+    addi r11, 1
+    ld.b r5, r11                        ; byte 4
+    addi r11, 1
+    ld.b r6, r11                        ; byte 5
+    addi r11, 1
+    ld.b r7, r11                        ; byte 6
+    addi r11, 1
+    ld.b r0, r11                        ; byte 7
     ; Assemble 64-bit value: r1 = result
     lsli r2, 8
     or r1, r2
@@ -5110,16 +5124,16 @@ w_epoch_fetch:
     lsli r4, 24
     or r1, r4
     ldi64 r9, 32
-    lsl r5, r9
+    shl r5, r9
     or r1, r5
     ldi64 r9, 40
-    lsl r6, r9
+    shl r6, r9
     or r1, r6
     ldi64 r9, 48
-    lsl r7, r9
+    shl r7, r9
     or r1, r7
     ldi64 r9, 56
-    lsl r0, r9
+    shl r0, r9
     or r1, r0
     ; Push result
     subi r14, 8
@@ -5131,15 +5145,22 @@ w_epoch_fetch:
 w_rtc_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B10   ; RTC calendar base (+0x10)
     ld.b r1, r11                        ; SEC (+10)
-    ldn.b r2, r11, 1                    ; MIN (+11)
-    ldn.b r3, r11, 2                    ; HOUR (+12)
-    ldn.b r4, r11, 3                    ; DAY (+13)
-    ldn.b r5, r11, 4                    ; MON (+14)
-    ldn.b r6, r11, 5                    ; YEAR_LO (+15)
-    ldn.b r7, r11, 6                    ; YEAR_HI (+16)
+    addi r11, 1
+    ld.b r2, r11                        ; MIN (+11)
+    addi r11, 1
+    ld.b r3, r11                        ; HOUR (+12)
+    addi r11, 1
+    ld.b r4, r11                        ; DAY (+13)
+    addi r11, 1
+    ld.b r5, r11                        ; MON (+14)
+    addi r11, 1
+    ld.b r6, r11                        ; YEAR_LO (+15)
+    addi r11, 1
+    ld.b r7, r11                        ; YEAR_HI (+16)
     lsli r7, 8
     or r6, r7                           ; year = (hi<<8)|lo
-    ldn.b r7, r11, 7                    ; DOW (+17)
+    addi r11, 1
+    ld.b r7, r11                        ; DOW (+17)
     ; Push: sec min hour day mon year dow (TOS=dow)
     subi r14, 8
     str r14, r1                         ; sec
