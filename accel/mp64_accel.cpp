@@ -275,8 +275,15 @@ static inline uint64_t& rx(CPUState& s) { return s.regs[s.xsel]; }
 static inline uint64_t& sp(CPUState& s) { return s.regs[s.spsel]; }
 
 static inline uint8_t fetch8(CPUState& s) {
-    uint8_t v = mem_read8(s, pc(s));
-    pc(s)++;
+    uint64_t a = pc(s);
+    uint8_t v;
+    if (__builtin_expect(s.ext_mem != nullptr && a >= s.ext_mem_base
+                         && a < s.ext_mem_base + s.ext_mem_size, 0)) {
+        v = s.ext_mem[a - s.ext_mem_base];
+    } else {
+        v = s.mem[a % s.mem_size];
+    }
+    pc(s) = a + 1;
     return v;
 }
 
@@ -1043,6 +1050,11 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 8);
         return v;
     }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 8 <= s.ext_mem_base + s.ext_mem_size) {
+        uint64_t v;
+        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 8);
+        return v;
+    }
     return mem_read64(s, addr);
 }
 
@@ -1059,6 +1071,10 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
         mpu_check(s, addr);
     } else if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 8);
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 8 <= s.ext_mem_base + s.ext_mem_size) {
+        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 8);
         return;
     }
     mem_write64(s, addr, val);
@@ -1078,6 +1094,11 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 2);
         return v;
     }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
+        uint16_t v;
+        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 2);
+        return v;
+    }
     return mem_read16(s, addr);
 }
 
@@ -1094,6 +1115,10 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         mpu_check(s, addr);
     } else if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 2);
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
+        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 2);
         return;
     }
     mem_write16(s, addr, val);
@@ -1116,6 +1141,11 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 4);
         return v;
     }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 4 <= s.ext_mem_base + s.ext_mem_size) {
+        uint32_t v;
+        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 4);
+        return v;
+    }
     return mem_read32(s, addr);
 }
 
@@ -1132,6 +1162,10 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         mpu_check(s, addr);
     } else if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 4);
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 4 <= s.ext_mem_base + s.ext_mem_size) {
+        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 4);
         return;
     }
     mem_write32(s, addr, val);
