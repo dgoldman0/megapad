@@ -389,6 +389,18 @@ Each entry is a linked list node:
 | 203 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
 | 204 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
 
+### RTC / System Clock (7 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 347 | `MS@` | `( -- ms )` | | Read 64-bit monotonic uptime in ms (reads UPTIME +0x0B00, byte 0 latches) |
+| 348 | `EPOCH@` | `( -- ms )` | | Read 64-bit epoch ms since Unix epoch (reads EPOCH +0x0B08, byte 0 latches) |
+| 349 | `RTC@` | `( -- sec min hour day mon year dow )` | | Read all seven calendar fields onto the stack |
+| 350 | `RTC!` | `( sec min hour day mon year -- )` | | Set calendar (writes SEC–YEAR_HI at +0x10–+0x16) |
+| 351 | `RTC-CTRL!` | `( ctrl -- )` | | Write RTC CTRL byte (bit0=run, bit1=alarm IRQ enable) at +0x18 |
+| 352 | `RTC-ALARM!` | `( sec min hour -- )` | | Set alarm time (writes ALARM_S/M/H at +0x1A–+0x1C) |
+| 353 | `RTC-ACK` | `( -- )` | | Clear alarm flag (write 0x01 to STATUS at +0x19) |
+
 ### Multicore (11 words)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -595,6 +607,7 @@ Each entry is a linked list node:
 | NIC | 4 |
 | Disk / Storage | 6 |
 | Timer & Interrupts | 6 |
+| RTC / System Clock | 7 |
 | Multicore | 11 |
 | Performance Counters | 5 |
 | CRC Engine | 6 |
@@ -611,7 +624,7 @@ Each entry is a linked list node:
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
-| **Total** | **346** |
+| **Total** | **353** |
 
 ### All Immediate Words (33)
 
@@ -641,7 +654,8 @@ UCHAR → .ZSTR → L! → L@ → W! → W@ → OFF → U> → U< → <= → >= 
 2SWAP → 2OVER → LATEST → WORD → FALSE → TRUE → BL → -ROT → CMOVE →
 2* → +! → CELL+ → CELLS → MAX → MIN → ?DUP → 0<> → <> → 0> → S" →
 CREATE → IMMEDIATE → LITERAL → ] → [ → STATE → AGAIN → +LOOP → UNLOOP →
-J → R@ → R> → >R → EXIT → ( → \ → ISR! → DI! → EI! → TIMER-ACK →
+J → R@ → R> → >R → EXIT → ( → \ → ISR! → DI! → EI! → RTC-ACK →
+RTC-ALARM! → RTC-CTRL! → RTC! → EPOCH@ → MS@ → RTC@ → TIMER-ACK →
 TIMER-CTRL! → TIMER! → DISK-WRITE → DISK-READ → DISK-N! → DISK-DMA! →
 DISK-SEC! → DISK@ → NET-MAC@ → NET-RECV → NET-SEND → NET-STATUS →
 ACCEPT → ." → SPACES → SPACE → TYPE → CONSTANT → VARIABLE → I → LOOP →
@@ -676,6 +690,7 @@ TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 | `0xFFFF_FF00_0000_0940` | SHA-256 | CMD=+0, STATUS=+8, DIN=+10, DOUT=+18..+37 |
 | `0xFFFF_FF00_0000_0980` | CRC Engine | POLY=+0, INIT=+8, DIN=+10, RESULT=+18, CTRL=+20 |
+| `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
 
 ### Memory Layout
 

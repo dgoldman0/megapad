@@ -40,6 +40,7 @@
 ;  ----
 ;    UART   0xFFFF_FF00_0000_0000   TX=+0 RX=+1 STATUS=+2
 ;    Timer  0xFFFF_FF00_0000_0100   COUNT=+0..+3 CTRL=+8
+;    RTC    0xFFFF_FF00_0000_0B00   UPTIME=+0..7 EPOCH=+8..F SEC=+10 MIN=+11 HOUR=+12 CTRL=+18
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
@@ -5036,6 +5037,181 @@ w_timer_ctrl_store:
 ; TIMER-ACK ( -- )  acknowledge timer interrupt (write-1-to-clear STATUS)
 w_timer_ack:
     ldi64 r11, 0xFFFF_FF00_0000_0109   ; STATUS
+    ldi r1, 0x01
+    st.b r11, r1
+    ret.l
+
+; =====================================================================
+;  RTC (Real-Time Clock / System Clock) Words
+; =====================================================================
+
+; MS@ ( -- ms-u64 )
+;   Read 64-bit monotonic uptime in milliseconds.
+;   Reading byte 0 latches the full 64-bit value.
+w_ms_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0B00   ; RTC UPTIME (+0)
+    ld.b r1, r11                        ; byte 0 (triggers latch)
+    ldn.b r2, r11, 1
+    ldn.b r3, r11, 2
+    ldn.b r4, r11, 3
+    ldn.b r5, r11, 4
+    ldn.b r6, r11, 5
+    ldn.b r7, r11, 6
+    ldn.b r0, r11, 7
+    ; Assemble 64-bit value: r1 = result
+    lsli r2, 8
+    or r1, r2
+    lsli r3, 16
+    or r1, r3
+    lsli r4, 24
+    or r1, r4
+    ldi64 r9, 32
+    lsl r5, r9
+    or r1, r5
+    ldi64 r9, 40
+    lsl r6, r9
+    or r1, r6
+    ldi64 r9, 48
+    lsl r7, r9
+    or r1, r7
+    ldi64 r9, 56
+    lsl r0, r9
+    or r1, r0
+    ; Push result
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; EPOCH@ ( -- epoch-ms-u64 )
+;   Read 64-bit epoch ms (ms since Unix epoch).
+;   Reading byte 8 latches the full 64-bit value.
+w_epoch_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0B08   ; RTC EPOCH (+8)
+    ld.b r1, r11                        ; byte 0 (triggers latch)
+    ldn.b r2, r11, 1
+    ldn.b r3, r11, 2
+    ldn.b r4, r11, 3
+    ldn.b r5, r11, 4
+    ldn.b r6, r11, 5
+    ldn.b r7, r11, 6
+    ldn.b r0, r11, 7
+    ; Assemble 64-bit value: r1 = result
+    lsli r2, 8
+    or r1, r2
+    lsli r3, 16
+    or r1, r3
+    lsli r4, 24
+    or r1, r4
+    ldi64 r9, 32
+    lsl r5, r9
+    or r1, r5
+    ldi64 r9, 40
+    lsl r6, r9
+    or r1, r6
+    ldi64 r9, 48
+    lsl r7, r9
+    or r1, r7
+    ldi64 r9, 56
+    lsl r0, r9
+    or r1, r0
+    ; Push result
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; RTC@ ( -- sec min hour day mon year dow )
+;   Read all seven RTC calendar fields onto the data stack.
+w_rtc_fetch:
+    ldi64 r11, 0xFFFF_FF00_0000_0B10   ; RTC calendar base (+0x10)
+    ld.b r1, r11                        ; SEC (+10)
+    ldn.b r2, r11, 1                    ; MIN (+11)
+    ldn.b r3, r11, 2                    ; HOUR (+12)
+    ldn.b r4, r11, 3                    ; DAY (+13)
+    ldn.b r5, r11, 4                    ; MON (+14)
+    ldn.b r6, r11, 5                    ; YEAR_LO (+15)
+    ldn.b r7, r11, 6                    ; YEAR_HI (+16)
+    lsli r7, 8
+    or r6, r7                           ; year = (hi<<8)|lo
+    ldn.b r7, r11, 7                    ; DOW (+17)
+    ; Push: sec min hour day mon year dow (TOS=dow)
+    subi r14, 8
+    str r14, r1                         ; sec
+    subi r14, 8
+    str r14, r2                         ; min
+    subi r14, 8
+    str r14, r3                         ; hour
+    subi r14, 8
+    str r14, r4                         ; day
+    subi r14, 8
+    str r14, r5                         ; mon
+    subi r14, 8
+    str r14, r6                         ; year
+    subi r14, 8
+    str r14, r7                         ; dow
+    ret.l
+
+; RTC! ( sec min hour day mon year -- )
+;   Set the RTC calendar fields from the stack.
+w_rtc_store:
+    ldi64 r11, 0xFFFF_FF00_0000_0B10   ; RTC calendar base (+0x10)
+    ldn r6, r14                         ; year
+    addi r14, 8
+    ldn r5, r14                         ; mon
+    addi r14, 8
+    ldn r4, r14                         ; day
+    addi r14, 8
+    ldn r3, r14                         ; hour
+    addi r14, 8
+    ldn r2, r14                         ; min
+    addi r14, 8
+    ldn r1, r14                         ; sec
+    addi r14, 8
+    st.b r11, r1                        ; SEC (+10)
+    addi r11, 1
+    st.b r11, r2                        ; MIN (+11)
+    addi r11, 1
+    st.b r11, r3                        ; HOUR (+12)
+    addi r11, 1
+    st.b r11, r4                        ; DAY (+13)
+    addi r11, 1
+    st.b r11, r5                        ; MON (+14)
+    addi r11, 1
+    ; Write year as two bytes
+    mov r7, r6
+    st.b r11, r7                        ; YEAR_LO (+15)
+    addi r11, 1
+    lsri r7, 8
+    st.b r11, r7                        ; YEAR_HI (+16)
+    ret.l
+
+; RTC-CTRL! ( ctrl -- )  write RTC CTRL register
+;   bit 0: run, bit 1: alarm IRQ enable
+w_rtc_ctrl_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0B18   ; RTC CTRL (+18)
+    st.b r11, r1
+    ret.l
+
+; RTC-ALARM! ( sec min hour -- )  set alarm time
+w_rtc_alarm_store:
+    ldi64 r11, 0xFFFF_FF00_0000_0B1A   ; RTC ALARM_SEC (+1A)
+    ldn r3, r14                         ; hour
+    addi r14, 8
+    ldn r2, r14                         ; min
+    addi r14, 8
+    ldn r1, r14                         ; sec
+    addi r14, 8
+    st.b r11, r1                        ; ALARM_SEC (+1A)
+    addi r11, 1
+    st.b r11, r2                        ; ALARM_MIN (+1B)
+    addi r11, 1
+    st.b r11, r3                        ; ALARM_HOR (+1C)
+    ret.l
+
+; RTC-ACK ( -- )  clear RTC alarm flag (write-1-to-clear STATUS bit 0)
+w_rtc_ack:
+    ldi64 r11, 0xFFFF_FF00_0000_0B19   ; RTC STATUS (+19)
     ldi r1, 0x01
     st.b r11, r1
     ret.l
@@ -10089,9 +10265,72 @@ d_timer_ack:
     call.l r11
     ret.l
 
+; === RTC@ ===
+d_rtc_fetch:
+    .dq d_timer_ack
+    .db 4
+    .ascii "RTC@"
+    ldi64 r11, w_rtc_fetch
+    call.l r11
+    ret.l
+
+; === MS@ ===
+d_ms_fetch:
+    .dq d_rtc_fetch
+    .db 3
+    .ascii "MS@"
+    ldi64 r11, w_ms_fetch
+    call.l r11
+    ret.l
+
+; === EPOCH@ ===
+d_epoch_fetch:
+    .dq d_ms_fetch
+    .db 6
+    .ascii "EPOCH@"
+    ldi64 r11, w_epoch_fetch
+    call.l r11
+    ret.l
+
+; === RTC! ===
+d_rtc_store:
+    .dq d_epoch_fetch
+    .db 4
+    .ascii "RTC!"
+    ldi64 r11, w_rtc_store
+    call.l r11
+    ret.l
+
+; === RTC-CTRL! ===
+d_rtc_ctrl_store:
+    .dq d_rtc_store
+    .db 9
+    .ascii "RTC-CTRL!"
+    ldi64 r11, w_rtc_ctrl_store
+    call.l r11
+    ret.l
+
+; === RTC-ALARM! ===
+d_rtc_alarm_store:
+    .dq d_rtc_ctrl_store
+    .db 10
+    .ascii "RTC-ALARM!"
+    ldi64 r11, w_rtc_alarm_store
+    call.l r11
+    ret.l
+
+; === RTC-ACK ===
+d_rtc_ack:
+    .dq d_rtc_alarm_store
+    .db 7
+    .ascii "RTC-ACK"
+    ldi64 r11, w_rtc_ack
+    call.l r11
+    ret.l
+
 ; === EI! ===
 d_ei:
-    .dq d_timer_ack
+    .dq d_rtc_ack
     .db 3
     .ascii "EI!"
     ldi64 r11, w_ei

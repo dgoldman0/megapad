@@ -615,6 +615,7 @@ module mp64_soc #(
     wire mmio_sel_sha256 = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100101);// 0x940-0x97F
     wire mmio_sel_ntt    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100011);// 0x8C0-0x8FF
     wire mmio_sel_kem    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100100);// 0x900-0x93F
+    wire mmio_sel_rtc    = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b1011000); // 0xB00-0xB1F
 
     // SysInfo — read-only system information (0x300)
     wire mmio_sel_sysinfo = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h3);
@@ -861,6 +862,23 @@ module mp64_soc #(
         .ack   (kem_ack)
     );
 
+    // RTC
+    wire [7:0]  rtc_rdata_raw;
+    wire        rtc_ack;
+    wire        irq_rtc_w;
+
+    mp64_rtc u_rtc (
+        .clk   (sys_clk),
+        .rst_n (sys_rst_n),
+        .req   (mmio_sel_rtc),
+        .addr  (bus_mmio_addr[4:0]),
+        .wdata (bus_mmio_wdata[7:0]),
+        .wen   (bus_mmio_wen),
+        .rdata (rtc_rdata_raw),
+        .ack   (rtc_ack),
+        .irq   (irq_rtc_w)
+    );
+
     // ========================================================================
     // MMIO Read Data & Ack Mux
     // ========================================================================
@@ -903,6 +921,7 @@ module mp64_soc #(
         if (mmio_sel_field)   begin mmio_rdata_mux = field_rdata; mmio_ack_mux = field_ack; end
         if (mmio_sel_ntt)     begin mmio_rdata_mux = ntt_rdata;   mmio_ack_mux = ntt_ack;   end
         if (mmio_sel_kem)     begin mmio_rdata_mux = kem_rdata;   mmio_ack_mux = kem_ack;   end
+        if (mmio_sel_rtc)     begin mmio_rdata_mux = {56'd0, rtc_rdata_raw}; mmio_ack_mux = rtc_ack; end
     end
 
     assign bus_mmio_rdata = mmio_rdata_mux;

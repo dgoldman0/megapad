@@ -130,6 +130,7 @@ parameter [11:0] AES_BASE     = 12'h700; // AES-256-GCM accelerator
 parameter [11:0] SHA_BASE     = 12'h780; // SHA-3/SHAKE accelerator
 parameter [11:0] SHA256_BASE  = 12'h940; // SHA-256 accelerator
 parameter [11:0] CRC_BASE     = 12'h980; // CRC32/CRC64 accelerator
+parameter [11:0] RTC_BASE     = 12'hB00; // Real-time clock
 parameter [11:0] QOS_BASE     = 12'h7E0; // QoS global config
 parameter [11:0] X25519_BASE  = 12'h840; // X25519 ECDH accelerator
 parameter [11:0] FIELD_ALU_BASE = 12'h840; // Field ALU (supersedes X25519)
@@ -147,6 +148,23 @@ parameter [3:0] TIMER_COUNT  = 4'h0;  // +0..+3 (32-bit)
 parameter [3:0] TIMER_CMP    = 4'h4;  // +4..+7 (32-bit)
 parameter [3:0] TIMER_CTRL   = 4'h8;
 parameter [3:0] TIMER_STATUS = 4'h9;
+
+// RTC registers (offsets from RTC_BASE, 32-byte block)
+parameter [4:0] RTC_UPTIME   = 5'h00;  // +0..+7: 64-bit uptime ms (R, latched)
+parameter [4:0] RTC_EPOCH    = 5'h08;  // +8..+F: 64-bit epoch ms  (RW, latched)
+parameter [4:0] RTC_SEC      = 5'h10;  // seconds (0-59)
+parameter [4:0] RTC_MIN      = 5'h11;  // minutes (0-59)
+parameter [4:0] RTC_HOUR     = 5'h12;  // hours   (0-23)
+parameter [4:0] RTC_DAY      = 5'h13;  // day     (1-31)
+parameter [4:0] RTC_MON      = 5'h14;  // month   (1-12)
+parameter [4:0] RTC_YEAR_LO  = 5'h15;  // year low byte
+parameter [4:0] RTC_YEAR_HI  = 5'h16;  // year high byte
+parameter [4:0] RTC_DOW      = 5'h17;  // day of week (0=Sun)
+parameter [4:0] RTC_CTRL     = 5'h18;  // bit0=run, bit1=alarm_irq_en
+parameter [4:0] RTC_STATUS   = 5'h19;  // bit0=alarm(W1C), bit1=1Hz(W1C), bit2=1ms(W1C)
+parameter [4:0] RTC_ALARM_S  = 5'h1A;  // alarm seconds
+parameter [4:0] RTC_ALARM_M  = 5'h1B;  // alarm minutes
+parameter [4:0] RTC_ALARM_H  = 5'h1C;  // alarm hours
 
 // Storage registers
 parameter [3:0] DISK_CMD     = 4'h0;
@@ -400,6 +418,7 @@ parameter [3:0] IRQX_AES     = 4'd12;
 parameter [3:0] IRQX_SHA     = 4'd13;
 parameter [3:0] IRQX_DMA     = 4'd14;
 parameter [3:0] IRQX_PRIV    = 4'd15;    // Privilege violation
+parameter [4:0] IRQX_RTC     = 5'd16;    // RTC alarm
 
 // AES-256-GCM register offsets (from AES_BASE)
 parameter [6:0] AES_KEY0     = 7'h00;  // ..0x1F: 256-bit key (8×32)

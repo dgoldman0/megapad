@@ -63,6 +63,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0940     │  SHA-256             │ │
     │   0x0980     │  CRC32 / CRC64       │ │
     │   0x0A00     │  Framebuffer         │ │
+    │   0x0B00     │  RTC / System Clock  │ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -116,6 +117,7 @@ device occupies a small range:
 | **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |
 | **CRC32/CRC64** | `+0x0980` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
+| **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).
@@ -161,6 +163,43 @@ interrupt.
 KDOS uses this for **preemptive scheduling** — `PREEMPT-ON` configures a
 50,000-cycle timer with auto-reload, and `YIELD?` checks the preemption
 flag set by the timer handler.
+
+---
+
+## RTC / System Clock
+
+A combined system clock peripheral providing:
+- **64-bit monotonic uptime** counter in milliseconds since boot (read-only, free-running)
+- **64-bit epoch** counter in milliseconds since the Unix epoch (read/write, settable)
+- **Calendar** registers (second, minute, hour, day, month, year, day-of-week)
+- **Alarm** interrupt on hour:minute:second match
+
+Both 64-bit counters increment every millisecond (prescaled from the 100 MHz system clock).
+Reading byte 0 of UPTIME (+0x00) or byte 0 of EPOCH (+0x08) **latches** the full 64-bit
+value so that software can safely read the remaining bytes without tearing.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| UPTIME | `+0x00`–`+0x07` | R | 64-bit ms since boot.  Read +0x00 to latch. |
+| EPOCH | `+0x08`–`+0x0F` | RW | 64-bit ms since Unix epoch.  Read +0x08 to latch; write byte-by-byte to set. |
+| SEC | `+0x10` | RW | Seconds (0–59) |
+| MIN | `+0x11` | RW | Minutes (0–59) |
+| HOUR | `+0x12` | RW | Hours (0–23) |
+| DAY | `+0x13` | RW | Day of month (1–31) |
+| MON | `+0x14` | RW | Month (1–12) |
+| YEAR_LO | `+0x15` | RW | Year low byte |
+| YEAR_HI | `+0x16` | RW | Year high byte |
+| DOW | `+0x17` | RW | Day of week (0=Sun … 6=Sat) |
+| CTRL | `+0x18` | RW | **bit 0:** run/stop.  **bit 1:** alarm IRQ enable. |
+| STATUS | `+0x19` | RW | **bit 0:** alarm flag (W1C).  **bit 1:** 1 Hz tick (W1C).  **bit 2:** 1 ms tick (W1C). |
+| ALARM_S | `+0x1A` | RW | Alarm seconds |
+| ALARM_M | `+0x1B` | RW | Alarm minutes |
+| ALARM_H | `+0x1C` | RW | Alarm hours |
+
+**BIOS words:** `MS@` (uptime ms), `EPOCH@` (epoch ms), `RTC@` (read calendar),
+`RTC!` (set calendar), `RTC-CTRL!`, `RTC-ALARM!`, `RTC-ACK` (clear alarm flag).
+
+IRQ vector: `IVEC_RTC` (16).
 
 ---
 
@@ -600,6 +639,7 @@ interrupt or trap fires:
 | `IVEC_BUS_FAULT` (5) | BIOS | Catches accesses beyond memory bounds; prints fault address and aborts |
 | `IVEC_TIMER` (7) | KDOS scheduler | Sets `PREEMPT-FLAG` for cooperative preemption |
 | `IVEC_DIV_ZERO` (4) | Hardware | Traps on division by zero |
+| `IVEC_RTC` (16) | Application | Fires on alarm match; cleared by writing 0x01 to STATUS (+0x19) |
 
 ---
 
@@ -627,7 +667,7 @@ DMA, and reliability specifications.
 |-----------|------|-------|------|
 | CPU emulator | `megapad64.py` | 2,868 | Full ISA + extended tile engine implementation |
 | System glue | `system.py` | 994 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 1,875 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer |
+| Devices | `devices.py` | ~2,000 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
 | BIOS | `bios.asm` | 12,162 | Forth interpreter, boot, multicore, 346 dictionary words |
 | OS | `kdos.f` | 10,225 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
 | Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |

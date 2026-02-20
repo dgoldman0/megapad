@@ -26,6 +26,8 @@ from megapad64 import (
 )
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
+    MailboxDevice, SpinlockDevice, CRCDevice, NTTDevice, KemDevice,
+    FramebufferDevice, RTC,
     MailboxDevice, SpinlockDevice, CRCDevice,
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
@@ -344,6 +346,7 @@ class MegapadSystem:
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         self.fb = FramebufferDevice()
+        self.rtc = RTC()
 
         # AES, SHA3, SHA256, FieldALU, NIC, and TRNG are all handled
         # natively by the C++ accelerator — no Python device instances
@@ -364,6 +367,7 @@ class MegapadSystem:
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
         self.bus.register(self.fb)
+        self.bus.register(self.rtc)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

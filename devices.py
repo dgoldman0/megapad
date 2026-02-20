@@ -49,6 +49,7 @@ X25519_BASE  = 0x0840
 NTT_BASE     = 0x08C0
 KEM_BASE     = 0x0900
 FB_BASE      = 0x0A00
+RTC_BASE     = 0x0B00
 
 
 # ---------------------------------------------------------------------------
@@ -1827,8 +1828,188 @@ class FramebufferDevice(Device):
     @property
     def frame_bytes(self) -> int:
         """Total bytes in the framebuffer (stride × height)."""
-        return self.stride * self.height
+# ---------------------------------------------------------------------------
+#  Real-Time Clock / System Clock
+# ---------------------------------------------------------------------------
+# Register map (offsets from RTC_BASE, 32-byte block):
+#   0x00-0x07  UPTIME   (R)   64-bit ms since boot (latched on read of +0)
+#   0x08-0x0F  EPOCH    (RW)  64-bit ms since Unix epoch (latched on read of +8)
+#   0x10       SEC      (RW)  seconds  (0-59)
+#   0x11       MIN      (RW)  minutes  (0-59)
+#   0x12       HOUR     (RW)  hours    (0-23)
+#   0x13       DAY      (RW)  day      (1-31)
+#   0x14       MON      (RW)  month    (1-12)
+#   0x15       YEAR_LO  (RW)  year low byte
+#   0x16       YEAR_HI  (RW)  year high byte
+#   0x17       DOW      (RW)  day of week (0=Sun, 6=Sat)
+#   0x18       CTRL     (RW)  bit 0: run, bit 1: alarm IRQ enable
+#   0x19       STATUS   (RW)  bit 0: alarm (W1C), bit 1: 1 Hz (W1C), bit 2: 1 ms (W1C)
+#   0x1A       ALARM_S  (RW)  alarm seconds
+#   0x1B       ALARM_M  (RW)  alarm minutes
+#   0x1C       ALARM_H  (RW)  alarm hours
 
+import time as _time
+from datetime import datetime as _datetime
+
+_DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+def _is_leap(y: int) -> bool:
+    return y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+
+def _dim(m: int, y: int) -> int:
+    if m == 2 and _is_leap(y):
+        return 29
+    return _DAYS_IN_MONTH[m] if 1 <= m <= 12 else 31
+
+
+class RTC(Device):
+    """Combined system clock: ms uptime + epoch + calendar + alarm.
+
+    On construction, initialises epoch_ms from the host wall-clock.
+    The emulator calls tick() once per step; the RTC internally
+    prescales to 1 ms using the nominal 100 MHz clock rate.
+    """
+
+    CLOCK_HZ = 100_000_000   # must match RTL CLOCK_HZ
+    MS_DIVISOR = CLOCK_HZ // 1000  # cycles per ms
+
+    def __init__(self):
+        super().__init__("RTC", RTC_BASE, 0x20)  # 32 bytes
+        now = _datetime.now()
+        self.uptime_ms: int  = 0
+        self.epoch_ms: int   = int(_time.time() * 1000) & ((1 << 64) - 1)
+        self.sec: int   = now.second
+        self.min: int   = now.minute
+        self.hour: int  = now.hour
+        self.day: int   = now.day
+        self.mon: int   = now.month
+        self.year: int  = now.year
+        self.dow: int   = (now.weekday() + 1) % 7  # Python Mon=0, we want Sun=0
+        self.ctrl: int  = 0x01  # running by default
+        self.status: int = 0
+        self.alarm_sec: int = 0
+        self.alarm_min: int = 0
+        self.alarm_hour: int = 0
+        self.irq_pending: bool = False
+        self._ms_prescaler: int = 0   # cycles -> ms
+        self._sec_prescaler: int = 0  # ms -> sec
+        # Latch registers
+        self._uptime_latch: int = 0
+        self._epoch_latch: int = 0
+
+    # --- MMIO reads ---
+    def read8(self, offset: int) -> int:
+        # Uptime ms (latched: reading byte 0 snapshots)
+        if offset == 0x00:
+            self._uptime_latch = self.uptime_ms
+            return self.uptime_ms & 0xFF
+        if 0x01 <= offset <= 0x07:
+            return (self._uptime_latch >> (8 * offset)) & 0xFF
+        # Epoch ms (latched: reading byte 8 snapshots)
+        if offset == 0x08:
+            self._epoch_latch = self.epoch_ms
+            return self.epoch_ms & 0xFF
+        if 0x09 <= offset <= 0x0F:
+            return (self._epoch_latch >> (8 * (offset - 0x08))) & 0xFF
+        # Calendar
+        if offset == 0x10: return self.sec & 0x3F
+        if offset == 0x11: return self.min & 0x3F
+        if offset == 0x12: return self.hour & 0x1F
+        if offset == 0x13: return self.day & 0x1F
+        if offset == 0x14: return self.mon & 0x0F
+        if offset == 0x15: return self.year & 0xFF
+        if offset == 0x16: return (self.year >> 8) & 0xFF
+        if offset == 0x17: return self.dow & 0x07
+        # Control / status / alarm
+        if offset == 0x18: return self.ctrl
+        if offset == 0x19: return self.status
+        if offset == 0x1A: return self.alarm_sec & 0x3F
+        if offset == 0x1B: return self.alarm_min & 0x3F
+        if offset == 0x1C: return self.alarm_hour & 0x1F
+        return 0
+
+    # --- MMIO writes ---
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        # Epoch ms (byte-addressed write)
+        if 0x08 <= offset <= 0x0F:
+            shift = 8 * (offset - 0x08)
+            mask = 0xFF << shift
+            self.epoch_ms = (self.epoch_ms & ~mask) | (value << shift)
+            self.epoch_ms &= (1 << 64) - 1
+            return
+        # Calendar
+        if   offset == 0x10: self.sec  = value & 0x3F
+        elif offset == 0x11: self.min  = value & 0x3F
+        elif offset == 0x12: self.hour = value & 0x1F
+        elif offset == 0x13: self.day  = value & 0x1F
+        elif offset == 0x14: self.mon  = value & 0x0F
+        elif offset == 0x15: self.year = (self.year & 0xFF00) | value
+        elif offset == 0x16: self.year = (self.year & 0x00FF) | (value << 8)
+        elif offset == 0x17: self.dow  = value & 0x07
+        elif offset == 0x18: self.ctrl = value
+        elif offset == 0x19:
+            # Write-1-to-clear
+            self.status &= ~value
+            if not (self.status & 1):
+                self.irq_pending = False
+        elif offset == 0x1A: self.alarm_sec  = value & 0x3F
+        elif offset == 0x1B: self.alarm_min  = value & 0x3F
+        elif offset == 0x1C: self.alarm_hour = value & 0x1F
+
+    # --- Free-running tick (called from system step) ---
+    def tick(self, cycles: int):
+        if not (self.ctrl & 1) or cycles == 0:
+            return
+        self._ms_prescaler += cycles
+        while self._ms_prescaler >= self.MS_DIVISOR:
+            self._ms_prescaler -= self.MS_DIVISOR
+            self._advance_one_ms()
+
+    def _advance_one_ms(self):
+        """Advance the ms counters (and calendar every 1000 ms)."""
+        self.uptime_ms = (self.uptime_ms + 1) & ((1 << 64) - 1)
+        self.epoch_ms  = (self.epoch_ms  + 1) & ((1 << 64) - 1)
+        self.status |= 0x04  # 1 ms tick flag
+
+        self._sec_prescaler += 1
+        if self._sec_prescaler >= 1000:
+            self._sec_prescaler = 0
+            self._advance_one_second()
+
+    def _advance_one_second(self):
+        """Advance the calendar by one second."""
+        self.status |= 0x02  # 1 Hz tick flag
+        if self.sec < 59:
+            self.sec += 1
+        else:
+            self.sec = 0
+            if self.min < 59:
+                self.min += 1
+            else:
+                self.min = 0
+                if self.hour < 23:
+                    self.hour += 1
+                else:
+                    self.hour = 0
+                    self.dow = (self.dow + 1) % 7
+                    dim = _dim(self.mon, self.year)
+                    if self.day < dim:
+                        self.day += 1
+                    else:
+                        self.day = 1
+                        if self.mon < 12:
+                            self.mon += 1
+                        else:
+                            self.mon = 1
+                            self.year += 1
+        # Alarm check
+        if (self.sec == self.alarm_sec and
+            self.min == self.alarm_min and
+            self.hour == self.alarm_hour):
+            self.status |= 0x01
+            if self.ctrl & 2:
+                self.irq_pending = True
 
 # ---------------------------------------------------------------------------
 #  Device Bus — routes MMIO accesses to the correct device
