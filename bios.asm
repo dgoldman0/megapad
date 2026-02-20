@@ -134,30 +134,34 @@ boot:
     andi r1, 0x80
     lbreq no_autoboot
 
-    ; Read directory sectors 2-5 into buffer at R2/2
+    ; Read directory sectors 2-13 into buffer at R2/2
     mov r9, r2
     lsri r9, 1
     ldi r1, 2                 ; start sector
-    ldi r12, 4                ; 4 sectors = 2048 bytes = 64 entries
+    ldi r12, 12               ; 12 sectors = 6144 bytes = 128 entries
     subi r15, 8
     str r15, r9               ; save buf_addr on RSP
     ldi64 r11, disk_read_sectors
     call.l r11
 
-    ; Scan directory for first Forth-type file (type == 3 at offset +24)
+    ; Scan directory for first Forth-type file (type == 3 at offset +32)
     ldn r9, r15               ; buf_addr
     ldi r0, 0                 ; entry index
 autoboot_scan:
-    cmpi r0, 64
+    cmpi r0, 128
     lbreq autoboot_not_found
 
+    ; entry_addr = buf + index * 48
     mov r13, r0
-    lsli r13, 5               ; entry_addr = buf + index * 32
+    lsli r13, 5               ; index * 32
+    mov r10, r0
+    lsli r10, 4               ; index * 16
+    add r13, r10              ; index * 48
     add r13, r9
 
-    ; Check type byte at offset +24
+    ; Check type byte at offset +32
     mov r11, r13
-    addi r11, 24
+    addi r11, 32
     ld.b r7, r11
     cmpi r7, 3                ; FTYPE_FORTH
     breq autoboot_found
@@ -196,10 +200,10 @@ autoboot_found:
     st.b r11, r7
     inc r11
 
-    ; Copy entry name (up to 15 chars, stop at null)
+    ; Copy entry name (up to 23 chars, stop at null)
     ldi r1, 0                 ; name index
 autoboot_copy_name:
-    cmpi r1, 15
+    cmpi r1, 23
     breq autoboot_name_done
     mov r10, r13
     add r10, r1
@@ -4738,27 +4742,30 @@ w_fsload:
     andi r1, 0x80
     lbreq w_fsload_no_disk
 
-    ; ---- Read directory sectors 2-5 (2048 bytes) into buffer ----
+    ; ---- Read directory sectors 2-13 (6144 bytes) into buffer ----
     mov r9, r2
     lsri r9, 1                ; buffer = R2 / 2
     subi r15, 8
     str r15, r9               ; [RSP+0]=buf_addr
     ldi r1, 2                 ; start sector = 2
-    ldi r12, 4                ; 4 sectors
+    ldi r12, 12               ; 12 sectors
     ldi64 r11, disk_read_sectors
     call.l r11
 
-    ; ---- Scan 64 directory entries for name match ----
+    ; ---- Scan 128 directory entries for name match ----
     ldn r9, r15               ; buf_addr
     ldi r0, 0                 ; entry index
 
 w_fsload_scan:
-    cmpi r0, 64
+    cmpi r0, 128
     lbreq w_fsload_not_found
 
-    ; entry_addr = buf + index * 32
+    ; entry_addr = buf + index * 48
     mov r13, r0
     lsli r13, 5               ; * 32
+    mov r10, r0
+    lsli r10, 4               ; * 16
+    add r13, r10              ; * 48
     add r13, r9               ; R13 = entry address
 
     ; Skip empty entries (first byte = 0)
@@ -4766,7 +4773,7 @@ w_fsload_scan:
     cmpi r7, 0
     breq w_fsload_next
 
-    ; Compare parsed name with directory entry name (up to 16 bytes)
+    ; Compare parsed name with directory entry name (up to 24 bytes)
     ; R13 = entry name, name_addr at [RSP+16], name_len at [RSP+8]
     mov r11, r15
     addi r11, 8
@@ -4791,7 +4798,7 @@ w_fsload_cmp:
 
 w_fsload_cmp_tail:
     ; Matched all name_len bytes — verify remaining entry name bytes are 0
-    cmpi r1, 15
+    cmpi r1, 23
     brgt w_fsload_found
     mov r11, r13
     add r11, r1
@@ -4808,16 +4815,16 @@ w_fsload_next:
 
 w_fsload_found:
     ; R13 = matching directory entry address
-    ; Extract start_sector (u16 LE at +16)
+    ; Extract start_sector (u16 LE at +24)
     mov r11, r13
-    addi r11, 16
+    addi r11, 24
     ld.b r1, r11              ; lo
     inc r11
     ld.b r7, r11              ; hi
     lsli r7, 8
     or r1, r7                 ; R1 = start_sector
 
-    ; Extract sector_count (u16 LE at +18)
+    ; Extract sector_count (u16 LE at +26)
     inc r11
     ld.b r12, r11             ; lo
     inc r11
@@ -4825,7 +4832,7 @@ w_fsload_found:
     lsli r7, 8
     or r12, r7                ; R12 = sector_count
 
-    ; Extract used_bytes (u32 LE at +20)
+    ; Extract used_bytes (u32 LE at +28)
     inc r11
     ld.b r13, r11             ; byte 0
     inc r11

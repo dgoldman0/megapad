@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **346** dictionary words defined in `bios.asm`.
+Complete catalog of all **353** dictionary words defined in `bios.asm`.
 
 ---
 

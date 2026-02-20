@@ -5802,9 +5802,9 @@ class TestDiskUtil(unittest.TestCase):
             self.assertTrue(info["formatted"])
             self.assertEqual(info["version"], 1)
             self.assertEqual(info["total_sectors"], 2048)
-            self.assertEqual(info["data_start"], 6)
+            self.assertEqual(info["data_start"], 14)
             self.assertEqual(info["files"], 0)
-            self.assertEqual(info["free_sectors"], 2042)
+            self.assertEqual(info["free_sectors"], 2034)
 
     def test_diskutil_inject_read(self):
         """inject_file + read_file round-trips data."""
@@ -5836,7 +5836,7 @@ class TestDiskUtil(unittest.TestCase):
             du_delete_file(f.name, "temp")
             self.assertEqual(len(du_list_files(f.name)), 0)
             fs2 = MP64FS.load(f.name)
-            self.assertEqual(fs2._count_free(), 2042)
+            self.assertEqual(fs2._count_free(), 2034)
 
     def test_diskutil_duplicate_name(self):
         """inject_file raises on duplicate name."""
@@ -5865,23 +5865,25 @@ class TestDiskUtil(unittest.TestCase):
             self.assertEqual(entries[0].sector_count, 4)
 
     def test_diskutil_many_files(self):
-        """Can create up to 64 files."""
+        """Can create up to 128 files."""
         with tempfile.NamedTemporaryFile(suffix=".img") as f:
             format_image(f.name)
-            for i in range(64):
-                du_inject_file(f.name, f"f{i:02d}", bytes([i]), ftype=1)
-            self.assertEqual(len(du_list_files(f.name)), 64)
+            for i in range(128):
+                du_inject_file(f.name, f"f{i:03d}", bytes([i % 256]), ftype=1)
+            self.assertEqual(len(du_list_files(f.name)), 128)
             with self.assertRaises(RuntimeError):
                 du_inject_file(f.name, "overflow", b"x", ftype=1)
 
     def test_bitmap_alloc_multiple(self):
         """Allocating multiple files uses contiguous sectors correctly."""
         with tempfile.NamedTemporaryFile(suffix=".img") as f:
-            fs = format_image(f.name)
+            format_image(f.name)
             du_inject_file(f.name, "a", b"x" * 1024, ftype=1)
             du_inject_file(f.name, "b", b"y" * 1024, ftype=1)
             fs2 = MP64FS.load(f.name)
             entries = fs2.list_files()
+            # First file starts at DATA_START (14), second immediately after
+            self.assertEqual(entries[0].start_sector, 14)
             self.assertEqual(entries[0].start_sector + entries[0].sector_count,
                              entries[1].start_sector)
 

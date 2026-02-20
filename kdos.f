@@ -53,16 +53,16 @@
 : SAMESTR?  ( a1 a2 maxlen -- flag )
     DUP >R SWAP R> COMPARE 0= IF -1 ELSE 0 THEN ;
 
-\ NAMEBUF -- 16-byte scratch for file name parsing
-VARIABLE NAMEBUF  15 ALLOT
+\ NAMEBUF -- 24-byte scratch for file name parsing
+VARIABLE NAMEBUF  23 ALLOT
 
 \ PARSE-NAME ( "name" -- )
 \   Parse next whitespace-delimited word, copy into NAMEBUF, null-terminate.
 VARIABLE PN-LEN
 
 : PARSE-NAME  ( "name" -- )
-    NAMEBUF 16 0 FILL
-    BL WORD DUP C@ 15 MIN PN-LEN !   ( waddr )
+    NAMEBUF 24 0 FILL
+    BL WORD DUP C@ 23 MIN PN-LEN !   ( waddr )
     1+                                 ( src )
     NAMEBUF PN-LEN @                   ( src dst len )
     CMOVE ;
@@ -2746,17 +2746,23 @@ VARIABLE FR-LEN
 \  Disk layout (1 MiB = 2048 x 512-byte sectors):
 \    Sector 0       Superblock (magic "MP64", version, geometry)
 \    Sector 1       Allocation bitmap (2048 bits = 256 bytes)
-\    Sectors 2-5    Directory (64 entries x 32 bytes)
-\    Sectors 6+     Data area (2042 sectors ~ 1 MB usable)
+\    Sectors 2-13   Directory (128 entries x 48 bytes)
+\    Sectors 14+    Data area (2034 sectors ~ 1 MB usable)
 \
-\  Directory entry (32 bytes):
-\    +0   name[16]       null-terminated (max 15 chars)
-\    +16  start_sec[2]   u16 LE
-\    +18  sec_count[2]   u16 LE
-\    +20  used_bytes[4]  u32 LE
-\    +24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
-\    +25  flags[1]       bit0=readonly bit1=system
-\    +26  reserved[6]
+\  Directory entry (48 bytes):
+\    +0   name[24]       null-terminated (max 23 chars)
+\    +24  start_sector[2] u16 LE
+\    +26  sec_count[2]   u16 LE
+\    +28  used_bytes[4]  u32 LE
+\    +32  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
+\                        6=tut 7=bundle 8=dir 9=stream 10=link
+\    +33  flags[1]       bit0=readonly bit1=system bit2=encrypted bit3=append
+\    +34  parent[1]      parent dir slot (0xFF=root)
+\    +35  reserved[1]
+\    +36  mtime[4]       u32 seconds since boot
+\    +40  data_crc32[4]  u32 CRC-32
+\    +44  ext1_start[2]  u16 LE second extent start
+\    +46  ext1_count[2]  u16 LE second extent sector count
 \
 \  File descriptor layout (created by OPEN):
 \    +0   start_sector   (cell)
@@ -2764,18 +2770,23 @@ VARIABLE FR-LEN
 \    +16  used_bytes      (cell)
 \    +24  cursor          (cell)
 \    +32  dir_slot        (cell) — index into directory cache
+\    +40  ext1_start      (cell) — second extent start
+\    +48  ext1_count      (cell) — second extent count
 
 \ -- Constants --
-6   CONSTANT FS-DATA-START
-64  CONSTANT FS-MAX-FILES
-32  CONSTANT FS-ENTRY-SIZE
+14  CONSTANT FS-DATA-START
+128 CONSTANT FS-MAX-FILES
+48  CONSTANT FS-ENTRY-SIZE
 
 \ -- RAM caches (loaded from disk by FS-LOAD) --
 VARIABLE FS-SUPER  SECTOR 1- ALLOT            \ 512 bytes — superblock
 VARIABLE FS-BMAP   SECTOR 1- ALLOT            \ 512 bytes — bitmap
-VARIABLE FS-DIR    SECTOR 4 * 1- ALLOT        \ 2048 bytes — directory
+VARIABLE FS-DIR    SECTOR 12 * 1- ALLOT       \ 6144 bytes — directory
 
 VARIABLE FS-OK     0 FS-OK !
+
+\ -- Current working directory (parent slot, 0xFF = root) --
+VARIABLE CWD   255 CWD !
 
 \ ── Bitmap operations ────────────────────────────────────────────────
 
@@ -2833,11 +2844,16 @@ VARIABLE FF-LEN
 : DIRENT  ( n -- addr )  FS-ENTRY-SIZE * FS-DIR + ;
 
 \ Directory entry field readers
-: DE.SEC    ( de -- u16 )   16 + W@ ;
-: DE.COUNT  ( de -- u16 )   18 + W@ ;
-: DE.USED   ( de -- u32 )   20 + L@ ;
-: DE.TYPE   ( de -- u8 )    24 + C@ ;
-: DE.FLAGS  ( de -- u8 )    25 + C@ ;
+: DE.SEC    ( de -- u16 )   24 + W@ ;
+: DE.COUNT  ( de -- u16 )   26 + W@ ;
+: DE.USED   ( de -- u32 )   28 + L@ ;
+: DE.TYPE   ( de -- u8 )    32 + C@ ;
+: DE.FLAGS  ( de -- u8 )    33 + C@ ;
+: DE.PARENT ( de -- u8 )    34 + C@ ;
+: DE.MTIME  ( de -- u32 )   36 + L@ ;
+: DE.CRC    ( de -- u32 )   40 + L@ ;
+: DE.EXT1-SEC   ( de -- u16 ) 44 + W@ ;
+: DE.EXT1-CNT   ( de -- u16 ) 46 + W@ ;
 
 \ FIND-FREE-SLOT ( -- slot | -1 ) first empty directory slot
 
@@ -2866,8 +2882,8 @@ VARIABLE FF-LEN
     THEN
     \ Read bitmap (sector 1)
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-READ
-    \ Read directory (sectors 2-5)
-    2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-READ
+    \ Read directory (sectors 2-13)
+    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-READ
     -1 FS-OK !
     ."  MP64FS loaded" CR ;
 
@@ -2875,7 +2891,7 @@ VARIABLE FF-LEN
 : FS-SYNC  ( -- )
     FS-OK @ 0= IF ."  FS not loaded" CR EXIT THEN
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
-    2 DISK-SEC!  FS-DIR  DISK-DMA!  4 DISK-N!  DISK-WRITE ;
+    2 DISK-SEC!  FS-DIR  DISK-DMA!  12 DISK-N!  DISK-WRITE ;
 
 \ FS-ENSURE ( -- ) auto-load if not yet loaded
 : FS-ENSURE  ( -- )
@@ -2895,34 +2911,40 @@ VARIABLE FF-LEN
     54 FS-SUPER 2 + C!              \ '6'
     52 FS-SUPER 3 + C!              \ '4'
     1    FS-SUPER 4  + W!           \ version
-    2048 FS-SUPER 6  + W!           \ total sectors
-    1    FS-SUPER 8  + W!           \ bitmap start
-    1    FS-SUPER 10 + W!           \ bitmap sectors
-    2    FS-SUPER 12 + W!           \ dir start
-    4    FS-SUPER 14 + W!           \ dir sectors
-    6    FS-SUPER 16 + W!           \ data start
+    2048 FS-SUPER 6  + L!           \ total sectors (u32)
+    1    FS-SUPER 10 + W!           \ bitmap start
+    1    FS-SUPER 12 + W!           \ bitmap sectors
+    2    FS-SUPER 14 + W!           \ dir start
+    12   FS-SUPER 16 + W!           \ dir sectors
+    14   FS-SUPER 18 + W!           \ data start
+    128  FS-SUPER 20 + C!           \ max files
+    48   FS-SUPER 21 + C!           \ entry size
     0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-WRITE
-    \ Initialise bitmap — mark sectors 0-5 (metadata) as allocated
+    \ Initialise bitmap — mark sectors 0-13 (metadata) as allocated
     FS-BMAP SECTOR 0 FILL
     FS-DATA-START 0 DO I BIT-SET LOOP
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
     \ Zero directory
-    FS-DIR SECTOR 4 * 0 FILL
-    2 DISK-SEC!  FS-DIR DISK-DMA!  4 DISK-N!  DISK-WRITE
+    FS-DIR SECTOR 12 * 0 FILL
+    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-WRITE
     -1 FS-OK !
+    255 CWD !
     ."  MP64FS formatted" CR ;
 
 \ ── .FTYPE — print file type name ───────────────────────────────────
 
 : .FTYPE  ( type -- )
-    DUP 0 = IF DROP ."  free"  EXIT THEN
-    DUP 1 = IF DROP ."  raw"   EXIT THEN
-    DUP 2 = IF DROP ."  text"  EXIT THEN
-    DUP 3 = IF DROP ."  forth" EXIT THEN
-    DUP 4 = IF DROP ."  doc"   EXIT THEN
-    DUP 5 = IF DROP ."  data"  EXIT THEN
-    DUP 6 = IF DROP ."  tut"   EXIT THEN
-    DUP 7 = IF DROP ."  bdl"   EXIT THEN
+    DUP 0 = IF DROP ."  free"   EXIT THEN
+    DUP 1 = IF DROP ."  raw"    EXIT THEN
+    DUP 2 = IF DROP ."  text"   EXIT THEN
+    DUP 3 = IF DROP ."  forth"  EXIT THEN
+    DUP 4 = IF DROP ."  doc"    EXIT THEN
+    DUP 5 = IF DROP ."  data"   EXIT THEN
+    DUP 6 = IF DROP ."  tut"    EXIT THEN
+    DUP 7 = IF DROP ."  bdl"    EXIT THEN
+    DUP 8 = IF DROP ."  dir"    EXIT THEN
+    DUP 9 = IF DROP ."  stream" EXIT THEN
+    DUP 10 = IF DROP ."  link"  EXIT THEN
     ."  ?" . ;
 
 \ ── DIR — list files ─────────────────────────────────────────────────
@@ -2934,11 +2956,14 @@ VARIABLE FF-LEN
     0
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
-            1+
-            ."   " I DIRENT .ZSTR
-            ."    " I DIRENT DE.USED . ."  B"
-            ."    " I DIRENT DE.TYPE .FTYPE
-            CR
+            I DIRENT DE.PARENT CWD @ = IF
+                1+
+                ."   " I DIRENT .ZSTR
+                I DIRENT DE.TYPE 8 = IF ."  /"  THEN
+                ."    " I DIRENT DE.USED . ."  B"
+                ."    " I DIRENT DE.TYPE .FTYPE
+                CR
+            THEN
         THEN
     LOOP
     DUP . ."  file(s), "
@@ -2953,16 +2978,19 @@ VARIABLE FF-LEN
 : CATALOG  ( -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    ."  Name             Bytes     Secs  Type" CR
+    ."  Name                     Bytes     Secs  Type  Flg" CR
     0
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
-            1+
-            ."   " I DIRENT .ZSTR
-            ."   " I DIRENT DE.USED .
-            ."   " I DIRENT DE.COUNT .
-            ."   " I DIRENT DE.TYPE .
-            CR
+            I DIRENT DE.PARENT CWD @ = IF
+                1+
+                ."   " I DIRENT .ZSTR
+                ."   " I DIRENT DE.USED .
+                ."   " I DIRENT DE.COUNT .
+                ."   " I DIRENT DE.TYPE .
+                ."   " I DIRENT DE.FLAGS .
+                CR
+            THEN
         THEN
     LOOP
     ."  (" . ."  files, "
@@ -2972,15 +3000,18 @@ VARIABLE FF-LEN
     . ."  free sectors)" CR ;
 
 \ ── FIND-BY-NAME — shared directory lookup ───────────────────────────
-\ Searches directory for an entry whose first 16 bytes match NAMEBUF.
+\ Searches directory for an entry whose first 24 bytes match NAMEBUF
+\ and whose parent matches CWD.
 \ Returns slot index or -1 if not found.  Caller must call PARSE-NAME first.
 
 : FIND-BY-NAME  ( -- slot | -1 )
     -1
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
-            I DIRENT NAMEBUF 16 SAMESTR? IF
-                DROP I LEAVE
+            I DIRENT DE.PARENT CWD @ = IF
+                I DIRENT NAMEBUF 24 SAMESTR? IF
+                    DROP I LEAVE
+                THEN
             THEN
         THEN
     LOOP ;
@@ -3014,11 +3045,14 @@ VARIABLE MK-START
     \ Build directory entry
     MK-SLOT @ DIRENT                 ( de )
     DUP FS-ENTRY-SIZE 0 FILL        \ zero slot
-    DUP NAMEBUF SWAP 16 CMOVE       \ copy name
-    DUP MK-START @ SWAP 16 + W!     \ start sector
-    DUP MK-NSEC  @ SWAP 18 + W!     \ sector count
-    DUP 0          SWAP 20 + L!     \ used_bytes = 0
-    MK-TYPE  @ SWAP 24 + C!         \ type
+    DUP NAMEBUF SWAP 24 CMOVE       \ copy name (24 bytes)
+    DUP MK-START @ SWAP 24 + W!     \ start sector
+    DUP MK-NSEC  @ SWAP 26 + W!     \ sector count
+    DUP 0          SWAP 28 + L!     \ used_bytes = 0
+    DUP MK-TYPE  @ SWAP 32 + C!     \ type
+    DUP CWD @     SWAP 34 + C!     \ parent = CWD
+    DUP TICKS@    SWAP 36 + L!     \ mtime = current time
+    DROP
     FS-SYNC
     ."  Created: " NAMEBUF .ZSTR
     ."  (" MK-NSEC @ . ."  sectors at " MK-START @ . ."  )" CR ;
@@ -3035,12 +3069,19 @@ VARIABLE RM-SLOT
     RM-SLOT @ -1 = IF
         ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
-    \ Free bitmap sectors
+    \ Free bitmap sectors (primary extent)
     RM-SLOT @ DIRENT DE.COUNT
     RM-SLOT @ DIRENT DE.SEC
     SWAP 0 DO                        ( start )
         DUP I + BIT-CLR
     LOOP DROP
+    \ Free second extent if present
+    RM-SLOT @ DIRENT DE.EXT1-CNT DUP 0<> IF
+        RM-SLOT @ DIRENT DE.EXT1-SEC
+        SWAP 0 DO
+            DUP I + BIT-CLR
+        LOOP DROP
+    ELSE DROP THEN
     \ Clear directory entry
     RM-SLOT @ DIRENT FS-ENTRY-SIZE 0 FILL
     FS-SYNC
@@ -3066,8 +3107,8 @@ VARIABLE RN-SLOT
         ."  Name taken: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Overwrite name in directory entry
-    RN-SLOT @ DIRENT 16 0 FILL       \ zero old name
-    NAMEBUF RN-SLOT @ DIRENT 16 CMOVE
+    RN-SLOT @ DIRENT 24 0 FILL       \ zero old name
+    NAMEBUF RN-SLOT @ DIRENT 24 CMOVE
     FS-SYNC
     ."  Renamed to: " NAMEBUF .ZSTR CR ;
 
@@ -3140,7 +3181,7 @@ VARIABLE SB-DESC
     DISK-WRITE
     \ Update used_bytes in directory
     SB-DESC @ B.LEN
-    SB-SLOT @ DIRENT 20 + L!
+    SB-SLOT @ DIRENT 28 + L!
     FS-SYNC
     ."  Saved " SB-DESC @ B.LEN . ."  bytes to " NAMEBUF .ZSTR CR ;
 
@@ -3163,7 +3204,7 @@ VARIABLE LB-DESC
     LB-DESC @ B.DATA DISK-DMA!
     LB-SLOT @ DIRENT DE.COUNT DISK-N!
     DISK-READ
-    ."  Loaded " LB-SLOT @ DIRENT 20 + L@ . ."  bytes from " NAMEBUF .ZSTR CR ;
+    ."  Loaded " LB-SLOT @ DIRENT 28 + L@ . ."  bytes from " NAMEBUF .ZSTR CR ;
 
 \ ── OPEN — open a file by name ───────────────────────────────────────
 
@@ -3177,13 +3218,15 @@ VARIABLE OP-SLOT
     OP-SLOT @ -1 = IF
         ."  Not found: " NAMEBUF .ZSTR CR 0 EXIT
     THEN
-    \ Create file descriptor in dictionary (5 cells = 40 bytes)
+    \ Create file descriptor in dictionary (7 cells = 56 bytes)
     HERE
     OP-SLOT @ DIRENT DE.SEC   ,      \ +0  start_sector
     OP-SLOT @ DIRENT DE.COUNT ,      \ +8  max_sectors
     OP-SLOT @ DIRENT DE.USED  ,      \ +16 used_bytes
     0 ,                               \ +24 cursor = 0
     OP-SLOT @ ,                       \ +32 dir_slot
+    OP-SLOT @ DIRENT DE.EXT1-SEC ,   \ +40 ext1_start
+    OP-SLOT @ DIRENT DE.EXT1-CNT ,   \ +48 ext1_count
     ;
 
 \ F.SLOT ( fdesc -- n ) directory slot index (for OPEN'd files)
@@ -3193,7 +3236,7 @@ VARIABLE OP-SLOT
 : FFLUSH  ( fdesc -- )
     FS-OK @ 0= IF DROP ."  FS not loaded" CR EXIT THEN
     DUP F.USED
-    OVER F.SLOT DIRENT 20 + L!      \ update used_bytes in dir cache
+    OVER F.SLOT DIRENT 28 + L!      \ update used_bytes in dir cache
     DROP
     FS-SYNC ;
 
@@ -3266,7 +3309,7 @@ VARIABLE _LD-SP
     \ Save outer walker state before modifying variables (nesting).
     _LD-SAVE
     LD-SZ !                              ( de )
-    DUP 16 + W@ SWAP DE.COUNT           ( start count )
+    DUP 24 + W@ SWAP DE.COUNT           ( start count )
     \ Read file data into a buffer.  If external memory is present
     \ use it — file text is only needed during EVALUATE and keeping
     \ it out of Bank 0 relieves dictionary / stack pressure.
@@ -3334,7 +3377,7 @@ VARIABLE _LD-SP
     DUP DE.USED DUP 0= IF
         2DROP ."  Empty file" CR EXIT
     THEN LD-SZ !
-    DUP 16 + W@ SWAP DE.COUNT
+    DUP 24 + W@ SWAP DE.COUNT
     \ File buffer in ext mem when available — user data belongs there.
     XMEM? IF
         LD-SZ @ XMEM-ALLOT LD-BUF !
@@ -3441,19 +3484,19 @@ VARIABLE _FE-BUF2                 \ buffer 2
 
 \ ENCRYPTED? ( fdesc -- flag )  True if file has encrypted flag set.
 : ENCRYPTED?
-    F.SLOT DIRENT 25 + C@
+    F.SLOT DIRENT 33 + C@
     F-ENC-FLAG AND 0<>
 ;
 
 \ _FE-SET-ENC ( fdesc -- )  Set encrypted flag in FS-DIR cache.
 : _FE-SET-ENC
-    F.SLOT DIRENT 25 +
+    F.SLOT DIRENT 33 +
     DUP C@ F-ENC-FLAG OR SWAP C!
 ;
 
 \ _FE-CLR-ENC ( fdesc -- )  Clear encrypted flag in FS-DIR cache.
 : _FE-CLR-ENC
-    F.SLOT DIRENT 25 +
+    F.SLOT DIRENT 33 +
     DUP C@ F-ENC-FLAG INVERT AND SWAP C!
 ;
 
@@ -3499,7 +3542,7 @@ VARIABLE _FE-BUF2                 \ buffer 2
     DISK-WRITE
     \ Set encrypted flag and sync directory
     _FE-DESC @ _FE-SET-ENC
-    _FE-USED @ _FE-DESC @ F.SLOT DIRENT 20 + L!
+    _FE-USED @ _FE-DESC @ F.SLOT DIRENT 28 + L!
     FS-SYNC
     \ Free buffers
     _FE-BUF1 @ FREE
@@ -3544,13 +3587,109 @@ VARIABLE _FE-BUF2                 \ buffer 2
         DISK-WRITE
         \ Clear encrypted flag, sync
         _FE-DESC @ _FE-CLR-ENC
-        _FE-USED @ _FE-DESC @ F.SLOT DIRENT 20 + L!
+        _FE-USED @ _FE-DESC @ F.SLOT DIRENT 28 + L!
         FS-SYNC
     THEN
     \ Free buffers
     _FE-BUF1 @ FREE
     _FE-BUF2 @ FREE
 ;
+
+\ =====================================================================
+\  §7.6.2  Subdirectory Navigation
+\ =====================================================================
+\  Parent-byte subdirectory model — each directory entry has a 1-byte
+\  parent field (slot index 0-127, or 255 for root).
+
+\ PWD ( -- ) print current working directory path
+: PWD  ( -- )
+    CWD @ 255 = IF ."  /" CR EXIT THEN
+    \ Walk parent chain, collect up to 8 levels
+    CREATE _PWD-STK 64 ALLOT
+    0  CWD @                             ( depth slot )
+    BEGIN DUP 255 <> WHILE
+        SWAP DUP 8 < IF
+            2DUP CELLS _PWD-STK + !      \ save slot
+            1+
+        THEN SWAP
+        DIRENT DE.PARENT
+    REPEAT DROP                          ( depth )
+    ."  /"
+    DUP 0 DO
+        DUP 1- I - CELLS _PWD-STK + @   ( slot )
+        DIRENT .ZSTR
+        47 EMIT                          \ '/'
+    LOOP DROP CR ;
+
+\ CD ( "name" -- ) change current directory
+: CD  ( "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    PARSE-NAME
+    \ Handle ".." — go to parent of CWD
+    NAMEBUF C@ 46 = NAMEBUF 1+ C@ 46 = AND NAMEBUF 2 + C@ 0= AND IF
+        CWD @ 255 = IF EXIT THEN        \ already at root
+        CWD @ DIRENT DE.PARENT CWD !
+        EXIT
+    THEN
+    \ Handle "/" — go to root
+    NAMEBUF C@ 47 = NAMEBUF 1+ C@ 0= AND IF
+        255 CWD ! EXIT
+    THEN
+    \ Look up directory entry in CWD
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DUP DIRENT DE.TYPE 8 <> IF
+        DROP ."  Not a directory: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    CWD ! ;
+
+\ MKDIR ( "name" -- ) create a subdirectory entry
+: MKDIR  ( "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME -1 <> IF
+        ."  Already exists: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    FIND-FREE-SLOT DUP -1 = IF
+        DROP ."  Directory full" CR EXIT
+    THEN                                 ( slot )
+    DIRENT                               ( de )
+    DUP FS-ENTRY-SIZE 0 FILL
+    DUP NAMEBUF SWAP 24 CMOVE           \ name
+    DUP 8 SWAP 32 + C!                  \ type = FTYPE_DIR
+    DUP CWD @ SWAP 34 + C!              \ parent = CWD
+    TICKS@ SWAP 36 + L!                 \ mtime
+    FS-SYNC
+    ."  Created dir: " NAMEBUF .ZSTR CR ;
+
+\ RMDIR ( "name" -- ) remove an empty subdirectory
+: RMDIR  ( "name" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN                                 ( slot )
+    DUP DIRENT DE.TYPE 8 <> IF
+        DROP ."  Not a directory" CR EXIT
+    THEN
+    \ Check directory is empty (no children with this parent)
+    DUP
+    FS-MAX-FILES 0 DO
+        I DIRENT C@ 0<> IF
+            I DIRENT DE.PARENT OVER = IF
+                DROP ."  Directory not empty" CR
+                UNLOOP EXIT
+            THEN
+        THEN
+    LOOP DROP
+    \ Clear entry
+    DIRENT FS-ENTRY-SIZE 0 FILL
+    FS-SYNC
+    ."  Removed dir: " NAMEBUF .ZSTR CR ;
 
 \ =====================================================================
 \  §7.7  Documentation Browser
@@ -3651,11 +3790,13 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 : OPEN-BY-SLOT  ( slot -- fdesc | 0 )
     DUP DIRENT C@ 0= IF DROP 0 EXIT THEN
     HERE SWAP                             ( here slot )
-    DUP DIRENT DE.SEC   ,                 \ +0  start_sector
-    DUP DIRENT DE.COUNT ,                 \ +8  max_sectors
-    DUP DIRENT DE.USED  ,                 \ +16 used_bytes
+    DUP DIRENT DE.SEC       ,             \ +0  start_sector
+    DUP DIRENT DE.COUNT     ,             \ +8  max_sectors
+    DUP DIRENT DE.USED      ,             \ +16 used_bytes
     0 ,                                    \ +24 cursor = 0
-    ,                                      \ +32 dir_slot (consumes slot)
+    DUP ,                                  \ +32 dir_slot
+    DUP DIRENT DE.EXT1-SEC  ,             \ +40 ext1_start
+    DIRENT DE.EXT1-CNT      ,             \ +48 ext1_count
     ;
 
 \ DESCRIBE ( "word" -- )  look up a word in the documentation
@@ -3670,7 +3811,7 @@ VARIABLE DOC-LINES              \ newline counter for pagination
     FS-MAX-FILES 0 DO
         I DIRENT C@ 0<> IF
             I DIRENT DE.TYPE FTYPE-DOC = IF
-                I DIRENT NAMEBUF 16 SAMESTR? IF
+                I DIRENT NAMEBUF 24 SAMESTR? IF
                     DROP I LEAVE
                 THEN
             THEN
@@ -10007,7 +10148,7 @@ CREATE _MOD-VAL  1 ALLOT
     THEN
     _LD-SAVE
     LD-SZ !
-    DUP 16 + W@ SWAP DE.COUNT
+    DUP 24 + W@ SWAP DE.COUNT
     \ File buffer in ext mem when available (see §1.12a)
     XMEM? IF
         LD-SZ @ XMEM-ALLOT LD-BUF !

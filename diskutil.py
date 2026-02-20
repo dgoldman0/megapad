@@ -41,8 +41,10 @@ from __future__ import annotations
 import os
 import struct
 import sys
+import time
+import zlib
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -54,43 +56,58 @@ FS_VERSION = 1
 BMAP_START = 1
 BMAP_SECTORS = 1
 DIR_START = 2
-DIR_SECTORS = 4
-DATA_START = 6
+DIR_SECTORS = 12
+DATA_START = 14
 
-DIR_ENTRY_SIZE = 32
-MAX_NAME_LEN = 15
-ENTRIES_PER_SECTOR = SECTOR_SIZE // DIR_ENTRY_SIZE   # 16
-MAX_FILES = DIR_SECTORS * ENTRIES_PER_SECTOR          # 64
+DIR_ENTRY_SIZE = 48
+MAX_NAME_LEN = 23
+MAX_FILES = 128
+
+PARENT_ROOT = 0xFF
 
 # File types
-FTYPE_FREE  = 0
-FTYPE_RAW   = 1
-FTYPE_TEXT  = 2
-FTYPE_FORTH = 3
-FTYPE_DOC   = 4
-FTYPE_DATA  = 5
-
-FTYPE_TUT   = 6
+FTYPE_FREE   = 0
+FTYPE_RAW    = 1
+FTYPE_TEXT   = 2
+FTYPE_FORTH  = 3
+FTYPE_DOC    = 4
+FTYPE_DATA   = 5
+FTYPE_TUT    = 6
 FTYPE_BUNDLE = 7
+FTYPE_DIR    = 8
+FTYPE_STREAM = 9
+FTYPE_LINK   = 10
 
 FTYPE_NAMES = {
     FTYPE_FREE: "free", FTYPE_RAW: "raw", FTYPE_TEXT: "text",
     FTYPE_FORTH: "forth", FTYPE_DOC: "doc", FTYPE_DATA: "data",
     FTYPE_TUT: "tutorial", FTYPE_BUNDLE: "bundle",
+    FTYPE_DIR: "dir", FTYPE_STREAM: "stream", FTYPE_LINK: "link",
 }
+
+# Flag bits
+FLAG_READONLY  = 0x01
+FLAG_SYSTEM    = 0x02
+FLAG_ENCRYPTED = 0x04
+FLAG_APPEND    = 0x08
 
 
 # ── Data classes ───────────────────────────────────────────────────────
 
 @dataclass
 class DirEntry:
-    """One directory entry."""
+    """One 48-byte directory entry."""
     name: str
     start_sector: int
     sector_count: int
     used_bytes: int
     ftype: int
     flags: int
+    parent: int = PARENT_ROOT
+    mtime: int = 0
+    data_crc32: int = 0
+    ext1_start: int = 0
+    ext1_count: int = 0
 
     @property
     def type_name(self) -> str:
@@ -98,11 +115,29 @@ class DirEntry:
 
     @property
     def readonly(self) -> bool:
-        return bool(self.flags & 1)
+        return bool(self.flags & FLAG_READONLY)
 
     @property
     def system(self) -> bool:
-        return bool(self.flags & 2)
+        return bool(self.flags & FLAG_SYSTEM)
+
+    @property
+    def encrypted(self) -> bool:
+        return bool(self.flags & FLAG_ENCRYPTED)
+
+    @property
+    def append_only(self) -> bool:
+        return bool(self.flags & FLAG_APPEND)
+
+    @property
+    def total_sectors(self) -> int:
+        """Primary + secondary extent sectors."""
+        return self.sector_count + self.ext1_count
+
+    @property
+    def capacity(self) -> int:
+        """Total byte capacity across both extents."""
+        return self.total_sectors * SECTOR_SIZE
 
 
 # ── Low-level helpers ──────────────────────────────────────────────────
@@ -113,35 +148,56 @@ def _sectors_needed(nbytes: int) -> int:
 
 
 def _read_entry(data: bytes, offset: int) -> DirEntry | None:
-    """Parse a 32-byte directory entry.  Returns None if slot is free."""
+    """Parse a 48-byte directory entry.  Returns None if slot is free."""
     raw = data[offset : offset + DIR_ENTRY_SIZE]
     if raw[0] == 0:
         return None
-    name = raw[0:16].split(b"\x00", 1)[0].decode("ascii", errors="replace")
-    start = struct.unpack_from("<H", raw, 16)[0]
-    count = struct.unpack_from("<H", raw, 18)[0]
-    used  = struct.unpack_from("<I", raw, 20)[0]
-    ftype = raw[24]
-    flags = raw[25]
-    return DirEntry(name, start, count, used, ftype, flags)
+    name = raw[0:24].split(b"\x00", 1)[0].decode("ascii", errors="replace")
+    start      = struct.unpack_from("<H", raw, 24)[0]
+    count      = struct.unpack_from("<H", raw, 26)[0]
+    used       = struct.unpack_from("<I", raw, 28)[0]
+    ftype      = raw[32]
+    flags      = raw[33]
+    parent     = raw[34]
+    mtime      = struct.unpack_from("<I", raw, 36)[0]
+    data_crc   = struct.unpack_from("<I", raw, 40)[0]
+    ext1_start = struct.unpack_from("<H", raw, 44)[0]
+    ext1_count = struct.unpack_from("<H", raw, 46)[0]
+    return DirEntry(name, start, count, used, ftype, flags,
+                    parent, mtime, data_crc, ext1_start, ext1_count)
 
 
 def _write_entry(buf: bytearray, offset: int, entry: DirEntry):
-    """Serialise a DirEntry into 32 bytes at *offset* in *buf*."""
+    """Serialise a DirEntry into 48 bytes at *offset* in *buf*."""
     # Zero the slot first
     buf[offset : offset + DIR_ENTRY_SIZE] = b"\x00" * DIR_ENTRY_SIZE
     name_bytes = entry.name.encode("ascii")[:MAX_NAME_LEN]
     buf[offset : offset + len(name_bytes)] = name_bytes
-    struct.pack_into("<H", buf, offset + 16, entry.start_sector)
-    struct.pack_into("<H", buf, offset + 18, entry.sector_count)
-    struct.pack_into("<I", buf, offset + 20, entry.used_bytes)
-    buf[offset + 24] = entry.ftype
-    buf[offset + 25] = entry.flags
+    struct.pack_into("<H", buf, offset + 24, entry.start_sector)
+    struct.pack_into("<H", buf, offset + 26, entry.sector_count)
+    struct.pack_into("<I", buf, offset + 28, entry.used_bytes)
+    buf[offset + 32] = entry.ftype
+    buf[offset + 33] = entry.flags
+    buf[offset + 34] = entry.parent
+    struct.pack_into("<I", buf, offset + 36, entry.mtime)
+    struct.pack_into("<I", buf, offset + 40, entry.data_crc32)
+    struct.pack_into("<H", buf, offset + 44, entry.ext1_start)
+    struct.pack_into("<H", buf, offset + 46, entry.ext1_count)
 
 
 def _clear_entry(buf: bytearray, offset: int):
-    """Zero a 32-byte directory slot."""
+    """Zero a 48-byte directory slot."""
     buf[offset : offset + DIR_ENTRY_SIZE] = b"\x00" * DIR_ENTRY_SIZE
+
+
+def _compute_crc32(data: bytes) -> int:
+    """CRC32 of *data* as unsigned 32-bit value."""
+    return zlib.crc32(data) & 0xFFFFFFFF
+
+
+def _epoch_seconds() -> int:
+    """Current Unix epoch in seconds (u32)."""
+    return int(time.time()) & 0xFFFFFFFF
 
 
 # ── Bitmap helpers ─────────────────────────────────────────────────────
@@ -210,12 +266,14 @@ class MP64FS:
         sb = bytearray(SECTOR_SIZE)
         sb[0:4] = MAGIC
         struct.pack_into("<H", sb, 4, FS_VERSION)
-        struct.pack_into("<H", sb, 6, self.total)
-        struct.pack_into("<H", sb, 8, BMAP_START)
-        struct.pack_into("<H", sb, 10, BMAP_SECTORS)
-        struct.pack_into("<H", sb, 12, DIR_START)
-        struct.pack_into("<H", sb, 14, DIR_SECTORS)
-        struct.pack_into("<H", sb, 16, DATA_START)
+        struct.pack_into("<I", sb, 6, self.total)       # u32 total_sectors
+        struct.pack_into("<H", sb, 10, BMAP_START)
+        struct.pack_into("<H", sb, 12, BMAP_SECTORS)
+        struct.pack_into("<H", sb, 14, DIR_START)
+        struct.pack_into("<H", sb, 16, DIR_SECTORS)
+        struct.pack_into("<H", sb, 18, DATA_START)
+        sb[20] = MAX_FILES                               # u8 max_files
+        sb[21] = DIR_ENTRY_SIZE                          # u8 entry_size
         self.img[0:SECTOR_SIZE] = sb
 
     def _verify_magic(self) -> bool:
@@ -260,14 +318,17 @@ class MP64FS:
         self.img[:] = b"\x00" * len(self.img)
         self._write_superblock()
 
-        # Mark metadata sectors (0-5) as allocated in bitmap
+        # Mark metadata sectors (0-13) as allocated in bitmap
         bmap = self._bmap
         for s in range(DATA_START):
             _bitmap_set(bmap, s)
         self._flush_bmap(bmap)
 
-    def list_files(self) -> list[DirEntry]:
-        """Return all non-free directory entries."""
+    def list_files(self, parent: int = None) -> list[DirEntry]:
+        """Return all non-free directory entries.
+
+        If *parent* is given, filter to entries with that parent index.
+        """
         if not self._verify_magic():
             return []
         dirdata = self._dir_data
@@ -275,87 +336,366 @@ class MP64FS:
         for i in range(MAX_FILES):
             e = _read_entry(dirdata, i * DIR_ENTRY_SIZE)
             if e is not None:
+                if parent is not None and e.parent != parent:
+                    continue
                 entries.append(e)
         return entries
 
-    def find_file(self, name: str) -> tuple[int, DirEntry] | None:
-        """Find file by name.  Returns (slot_index, entry) or None."""
+    def find_file(self, name: str, parent: int = PARENT_ROOT
+                  ) -> tuple[int, DirEntry] | None:
+        """Find file by name within a parent directory.
+
+        Returns (slot_index, entry) or None.
+        """
         dirdata = self._dir_data
         for i in range(MAX_FILES):
             e = _read_entry(dirdata, i * DIR_ENTRY_SIZE)
-            if e is not None and e.name == name:
+            if e is not None and e.name == name and e.parent == parent:
                 return (i, e)
         return None
 
-    def inject_file(self, name: str, data: bytes | bytearray,
-                    ftype: int = FTYPE_RAW,
-                    flags: int = 0) -> DirEntry:
-        """Write a named file into the image.  Allocates sectors."""
-        if not self._verify_magic():
-            raise RuntimeError("Image not formatted (bad magic)")
-        if len(name) > MAX_NAME_LEN:
-            raise ValueError(f"Name too long: {name!r} (max {MAX_NAME_LEN})")
-        if self.find_file(name) is not None:
-            raise FileExistsError(f"File already exists: {name!r}")
-
-        nsectors = _sectors_needed(len(data)) if data else 1
-        bmap = self._bmap
-        start = _bitmap_find_free(bmap, nsectors, self.total)
-        if start is None:
-            raise RuntimeError(f"No space for {nsectors} contiguous sectors")
-
-        # Allocate
-        for s in range(start, start + nsectors):
-            _bitmap_set(bmap, s)
-        self._flush_bmap(bmap)
-
-        # Write data
-        off = start * SECTOR_SIZE
-        padded = bytearray(data) + b"\x00" * (nsectors * SECTOR_SIZE - len(data))
-        self.img[off : off + nsectors * SECTOR_SIZE] = padded
-
-        # Create directory entry in first free slot
-        dirdata = self._dir_data
-        slot = None
+    def _find_first_free_slot(self, dirdata: bytearray) -> int | None:
+        """Return the index of the first free directory slot, or None."""
         for i in range(MAX_FILES):
             if dirdata[i * DIR_ENTRY_SIZE] == 0:
-                slot = i
-                break
-        if slot is None:
-            raise RuntimeError("Directory full (64 files)")
+                return i
+        return None
 
-        entry = DirEntry(name, start, nsectors, len(data), ftype, flags)
+    def _alloc_sectors(self, bmap: bytearray, nsectors: int
+                       ) -> tuple[int, int, int, int]:
+        """Allocate up to two extents totalling *nsectors*.
+
+        Returns (start, count, ext1_start, ext1_count).
+        Raises RuntimeError if allocation fails.
+        """
+        # Try single extent first
+        start = _bitmap_find_free(bmap, nsectors, self.total)
+        if start is not None:
+            return (start, nsectors, 0, 0)
+
+        # Fall back to two-extent allocation — find largest free run
+        best_start, best_len = 0, 0
+        run_start, run_len = DATA_START, 0
+        for s in range(DATA_START, self.total):
+            if _bitmap_get(bmap, s):
+                if run_len > best_len:
+                    best_start, best_len = run_start, run_len
+                run_start = s + 1
+                run_len = 0
+            else:
+                if run_len == 0:
+                    run_start = s
+                run_len += 1
+        if run_len > best_len:
+            best_start, best_len = run_start, run_len
+
+        if best_len == 0:
+            raise RuntimeError(f"No space for {nsectors} sectors")
+
+        primary = min(best_len, nsectors)
+        remainder = nsectors - primary
+
+        if remainder == 0:
+            return (best_start, primary, 0, 0)
+
+        # Mark primary extent temporarily to find second run
+        for s in range(best_start, best_start + primary):
+            _bitmap_set(bmap, s)
+        ext1 = _bitmap_find_free(bmap, remainder, self.total)
+        # Unmark (caller will mark properly)
+        for s in range(best_start, best_start + primary):
+            _bitmap_clear(bmap, s)
+
+        if ext1 is None:
+            raise RuntimeError(
+                f"No space for {nsectors} sectors (need {remainder} more)")
+
+        return (best_start, primary, ext1, remainder)
+
+    def _write_file_data(self, data: bytes | bytearray,
+                         start: int, count: int,
+                         ext1_start: int, ext1_count: int):
+        """Write file content across up to two extents."""
+        primary_bytes = count * SECTOR_SIZE
+        # Primary extent
+        chunk1 = data[:primary_bytes]
+        padded1 = bytearray(chunk1) + b"\x00" * (primary_bytes - len(chunk1))
+        off1 = start * SECTOR_SIZE
+        self.img[off1 : off1 + primary_bytes] = padded1
+
+        # Secondary extent (if any)
+        if ext1_count > 0 and len(data) > primary_bytes:
+            ext_bytes = ext1_count * SECTOR_SIZE
+            chunk2 = data[primary_bytes:]
+            padded2 = bytearray(chunk2) + b"\x00" * (ext_bytes - len(chunk2))
+            off2 = ext1_start * SECTOR_SIZE
+            self.img[off2 : off2 + ext_bytes] = padded2
+
+    def _read_file_data(self, entry: DirEntry) -> bytes:
+        """Read file content across up to two extents."""
+        used = entry.used_bytes
+        if used == 0:
+            return b""
+        primary_cap = entry.sector_count * SECTOR_SIZE
+        off1 = entry.start_sector * SECTOR_SIZE
+
+        if used <= primary_cap:
+            return bytes(self.img[off1 : off1 + used])
+
+        # Spans into secondary extent
+        part1 = bytes(self.img[off1 : off1 + primary_cap])
+        remain = used - primary_cap
+        off2 = entry.ext1_start * SECTOR_SIZE
+        part2 = bytes(self.img[off2 : off2 + remain])
+        return part1 + part2
+
+    def resolve_path(self, path: str) -> int:
+        """Resolve a directory path string to a parent index.
+
+        Returns the directory entry index, or PARENT_ROOT for '/'.
+        Raises FileNotFoundError if any component is missing.
+        """
+        if not path or path == "/":
+            return PARENT_ROOT
+
+        parts = [p for p in path.strip("/").split("/") if p]
+        current = PARENT_ROOT
+        for part in parts:
+            result = self.find_file(part, parent=current)
+            if result is None or result[1].ftype != FTYPE_DIR:
+                raise FileNotFoundError(
+                    f"Directory not found: {part!r} in path {path!r}")
+            current = result[0]
+        return current
+
+    def mkdir(self, path: str) -> DirEntry:
+        """Create a directory.  *path* may include parent components.
+
+        E.g., mkdir("/tools/crypto") creates "crypto" inside "tools".
+        "tools" must already exist.
+        """
+        if not self._verify_magic():
+            raise RuntimeError("Image not formatted (bad magic)")
+
+        parts = [p for p in path.strip("/").split("/") if p]
+        if not parts:
+            raise ValueError("Empty directory name")
+
+        dir_name = parts[-1]
+        parent_path = "/".join(parts[:-1])
+        parent = self.resolve_path(parent_path) if parent_path else PARENT_ROOT
+
+        if len(dir_name) > MAX_NAME_LEN:
+            raise ValueError(f"Name too long: {dir_name!r}")
+        if self.find_file(dir_name, parent=parent) is not None:
+            raise FileExistsError(f"Already exists: {dir_name!r}")
+
+        dirdata = self._dir_data
+        slot = self._find_first_free_slot(dirdata)
+        if slot is None:
+            raise RuntimeError("Directory full (128 entries)")
+
+        entry = DirEntry(
+            name=dir_name, start_sector=0, sector_count=0,
+            used_bytes=0, ftype=FTYPE_DIR, flags=0,
+            parent=parent, mtime=_epoch_seconds(),
+        )
         _write_entry(dirdata, slot * DIR_ENTRY_SIZE, entry)
         self._flush_dir(dirdata)
         return entry
 
-    def read_file(self, name: str) -> bytes:
-        """Read file contents by name."""
-        result = self.find_file(name)
+    def inject_file(self, name: str, data: bytes | bytearray,
+                    ftype: int = FTYPE_RAW, flags: int = 0,
+                    path: str = "/") -> DirEntry:
+        """Write a named file into the image.  Allocates sectors.
+
+        *path* specifies the parent directory (default: root).
+        """
+        if not self._verify_magic():
+            raise RuntimeError("Image not formatted (bad magic)")
+        if len(name) > MAX_NAME_LEN:
+            raise ValueError(f"Name too long: {name!r} (max {MAX_NAME_LEN})")
+
+        parent = self.resolve_path(path)
+
+        if self.find_file(name, parent=parent) is not None:
+            raise FileExistsError(f"File already exists: {name!r}")
+
+        nsectors = _sectors_needed(len(data)) if data else 1
+        bmap = self._bmap
+        start, count, ext1_start, ext1_count = self._alloc_sectors(
+            bmap, nsectors)
+
+        # Mark sectors allocated
+        for s in range(start, start + count):
+            _bitmap_set(bmap, s)
+        for s in range(ext1_start, ext1_start + ext1_count):
+            _bitmap_set(bmap, s)
+        self._flush_bmap(bmap)
+
+        # Write data across extents
+        self._write_file_data(data, start, count, ext1_start, ext1_count)
+
+        # CRC32 of content
+        crc = _compute_crc32(data) if data else 0
+
+        # Create directory entry
+        dirdata = self._dir_data
+        slot = self._find_first_free_slot(dirdata)
+        if slot is None:
+            raise RuntimeError("Directory full (128 entries)")
+
+        entry = DirEntry(
+            name=name, start_sector=start, sector_count=count,
+            used_bytes=len(data), ftype=ftype, flags=flags,
+            parent=parent, mtime=_epoch_seconds(),
+            data_crc32=crc, ext1_start=ext1_start, ext1_count=ext1_count,
+        )
+        _write_entry(dirdata, slot * DIR_ENTRY_SIZE, entry)
+        self._flush_dir(dirdata)
+        return entry
+
+    def read_file(self, name: str, parent: int = PARENT_ROOT) -> bytes:
+        """Read file contents by name within *parent* directory."""
+        result = self.find_file(name, parent=parent)
         if result is None:
             raise FileNotFoundError(f"File not found: {name!r}")
         _, entry = result
-        off = entry.start_sector * SECTOR_SIZE
-        return bytes(self.img[off : off + entry.used_bytes])
+        return self._read_file_data(entry)
 
-    def delete_file(self, name: str):
+    def delete_file(self, name: str, parent: int = PARENT_ROOT):
         """Delete a file: free its sectors and directory entry."""
-        result = self.find_file(name)
+        result = self.find_file(name, parent=parent)
         if result is None:
             raise FileNotFoundError(f"File not found: {name!r}")
         slot, entry = result
 
-        # Free sectors in bitmap
+        # For directories, check that they're empty
+        if entry.ftype == FTYPE_DIR:
+            children = self.list_files(parent=slot)
+            if children:
+                raise RuntimeError(
+                    f"Directory not empty: {name!r} ({len(children)} entries)")
+
+        # Free sectors in bitmap (both extents)
         bmap = self._bmap
         for s in range(entry.start_sector,
                        entry.start_sector + entry.sector_count):
             _bitmap_clear(bmap, s)
+        if entry.ext1_count > 0:
+            for s in range(entry.ext1_start,
+                           entry.ext1_start + entry.ext1_count):
+                _bitmap_clear(bmap, s)
         self._flush_bmap(bmap)
 
         # Clear directory slot
         dirdata = self._dir_data
         _clear_entry(dirdata, slot * DIR_ENTRY_SIZE)
         self._flush_dir(dirdata)
+
+    def mkstream(self, name: str, sectors: int = 4,
+                 parent: int = PARENT_ROOT) -> DirEntry:
+        """Create a stream file (circular ring buffer)."""
+        return self.inject_file(
+            name, b"\x00" * (sectors * SECTOR_SIZE),
+            ftype=FTYPE_STREAM,
+            flags=FLAG_APPEND,
+            path="/" if parent == PARENT_ROOT else self._parent_to_path(parent),
+        )
+
+    def mklink(self, name: str, target: str,
+               parent: int = PARENT_ROOT) -> DirEntry:
+        """Create a symbolic link pointing to *target*."""
+        target_bytes = target.encode("ascii") + b"\x00"
+        return self.inject_file(
+            name, target_bytes, ftype=FTYPE_LINK, flags=0,
+            path="/" if parent == PARENT_ROOT else self._parent_to_path(parent),
+        )
+
+    def check(self) -> list[str]:
+        """Verify CRC32 of all files.  Returns list of error messages."""
+        errors = []
+        dirdata = self._dir_data
+        for i in range(MAX_FILES):
+            e = _read_entry(dirdata, i * DIR_ENTRY_SIZE)
+            if e is None or e.ftype in (FTYPE_FREE, FTYPE_DIR):
+                continue
+            data = self._read_file_data(e)
+            computed = _compute_crc32(data)
+            if computed != e.data_crc32:
+                errors.append(
+                    f"Entry {i} {e.name!r} CRC MISMATCH: "
+                    f"stored=0x{e.data_crc32:08X} computed=0x{computed:08X}")
+        return errors
+
+    def compact(self) -> int:
+        """Defragment: pack all files into contiguous single extents.
+        Returns the number of files moved."""
+        if not self._verify_magic():
+            raise RuntimeError("Image not formatted")
+
+        dirdata = self._dir_data
+
+        # Collect live non-directory entries with their slot indices
+        live: list[tuple[int, DirEntry, bytes]] = []
+        for i in range(MAX_FILES):
+            e = _read_entry(dirdata, i * DIR_ENTRY_SIZE)
+            if e is None or e.ftype in (FTYPE_FREE, FTYPE_DIR):
+                continue
+            data = self._read_file_data(e)
+            live.append((i, e, data))
+
+        # Sort by primary start sector
+        live.sort(key=lambda t: t[1].start_sector)
+
+        # Rebuild bitmap — clear all data sectors
+        bmap = self._bmap
+        for s in range(DATA_START, self.total):
+            _bitmap_clear(bmap, s)
+
+        # Re-pack each file into a single contiguous run
+        moved = 0
+        next_sector = DATA_START
+        for slot_idx, entry, data in live:
+            nsectors = _sectors_needed(len(data)) if data else 1
+            start = next_sector
+            if start != entry.start_sector or entry.ext1_count > 0:
+                moved += 1
+            # Mark allocated
+            for s in range(start, start + nsectors):
+                _bitmap_set(bmap, s)
+            # Write data (single extent)
+            padded = bytearray(data) + b"\x00" * (
+                nsectors * SECTOR_SIZE - len(data))
+            off = start * SECTOR_SIZE
+            self.img[off : off + nsectors * SECTOR_SIZE] = padded
+            # Update entry
+            entry.start_sector = start
+            entry.sector_count = nsectors
+            entry.ext1_start = 0
+            entry.ext1_count = 0
+            entry.data_crc32 = _compute_crc32(data)
+            _write_entry(dirdata, slot_idx * DIR_ENTRY_SIZE, entry)
+            next_sector = start + nsectors
+
+        self._flush_bmap(bmap)
+        self._flush_dir(dirdata)
+        return moved
+
+    def _parent_to_path(self, parent_idx: int) -> str:
+        """Convert a parent index to a path string (for internal use)."""
+        if parent_idx == PARENT_ROOT:
+            return "/"
+        parts = []
+        idx = parent_idx
+        dirdata = self._dir_data
+        while idx != PARENT_ROOT:
+            e = _read_entry(dirdata, idx * DIR_ENTRY_SIZE)
+            if e is None:
+                break
+            parts.append(e.name)
+            idx = e.parent
+        return "/" + "/".join(reversed(parts))
 
     def info(self) -> dict:
         """Return superblock metadata."""
@@ -364,8 +704,10 @@ class MP64FS:
         return {
             "formatted": True,
             "version": struct.unpack_from("<H", self.img, 4)[0],
-            "total_sectors": struct.unpack_from("<H", self.img, 6)[0],
-            "data_start": struct.unpack_from("<H", self.img, 16)[0],
+            "total_sectors": struct.unpack_from("<I", self.img, 6)[0],
+            "data_start": struct.unpack_from("<H", self.img, 18)[0],
+            "max_files": self.img[20],
+            "entry_size": self.img[21],
             "files": len(self.list_files()),
             "free_sectors": self._count_free(),
         }
@@ -402,28 +744,29 @@ def format_image(path: str | Path, total_sectors: int = DEFAULT_TOTAL_SECTORS):
 
 
 def inject_file(path: str | Path, name: str, data: bytes | bytearray,
-                ftype: int = FTYPE_RAW, flags: int = 0) -> DirEntry:
+                ftype: int = FTYPE_RAW, flags: int = 0,
+                fs_path: str = "/") -> DirEntry:
     """Open an existing image and inject a named file."""
     fs = MP64FS.load(path)
-    entry = fs.inject_file(name, data, ftype, flags)
+    entry = fs.inject_file(name, data, ftype, flags, path=fs_path)
     fs.save(path)
     return entry
 
 
-def read_file(path: str | Path, name: str) -> bytes:
+def read_file(path: str | Path, name: str, parent: int = PARENT_ROOT) -> bytes:
     """Open an existing image and read a named file."""
-    return MP64FS.load(path).read_file(name)
+    return MP64FS.load(path).read_file(name, parent=parent)
 
 
-def list_files(path: str | Path) -> list[DirEntry]:
+def list_files(path: str | Path, parent: int | None = None) -> list[DirEntry]:
     """Open an existing image and list all files."""
-    return MP64FS.load(path).list_files()
+    return MP64FS.load(path).list_files(parent=parent)
 
 
-def delete_file(path: str | Path, name: str):
+def delete_file(path: str | Path, name: str, parent: int = PARENT_ROOT):
     """Open an existing image and delete a named file."""
     fs = MP64FS.load(path)
-    fs.delete_file(name)
+    fs.delete_file(name, parent=parent)
     fs.save(path)
 
 
@@ -599,10 +942,16 @@ STORAGE SCREEN
   It shows a DIR listing and disk usage info.
 
 DISK LAYOUT
-  Sector 0     Superblock (magic MP64)
-  Sector 1     Allocation bitmap
-  Sectors 2-5  Directory (64 entries)
-  Sectors 6+   Data area (~1 MB usable)
+  Sector 0       Superblock (magic MP64)
+  Sector 1       Allocation bitmap
+  Sectors 2-13   Directory (128 entries, 48 B each)
+  Sectors 14+    Data area (~1 MB usable)
+
+SUBDIRECTORIES
+  MKDIR subdir             Create a subdirectory
+  CD subdir                Change into it
+  CD ..                    Go up one level
+  PWD                      Print current path
 """,
 
     "scheduler": """\
@@ -1099,6 +1448,8 @@ def main():
     p_inj.add_argument("-t", "--type", default="raw",
                        choices=list(FTYPE_NAMES.values()),
                        help="File type (default: raw)")
+    p_inj.add_argument("-p", "--path", default="/",
+                       help="Directory path (default: /)")
 
     # cat — read a file from an image
     p_cat = sub.add_parser("cat", help="Read a file from an image")
@@ -1109,6 +1460,27 @@ def main():
     p_rm = sub.add_parser("rm", help="Delete a file from an image")
     p_rm.add_argument("image", help="Disk image path")
     p_rm.add_argument("name", help="File name to delete")
+    p_rm.add_argument("-p", "--path", default="/",
+                       help="Directory path (default: /)")
+
+    # mkdir — create a subdirectory
+    p_mkdir = sub.add_parser("mkdir", help="Create a subdirectory")
+    p_mkdir.add_argument("image", help="Disk image path")
+    p_mkdir.add_argument("name", help="Directory name")
+    p_mkdir.add_argument("-p", "--path", default="/",
+                          help="Parent path (default: /)")
+
+    # check — verify CRC integrity of all files
+    p_chk = sub.add_parser("check", help="Verify CRC integrity")
+    p_chk.add_argument("image", help="Disk image path")
+
+    # compact — defragment the disk
+    p_compact = sub.add_parser("compact", help="Defragment disk")
+    p_compact.add_argument("image", help="Disk image path")
+
+    # info — show superblock details
+    p_info = sub.add_parser("info", help="Show superblock info")
+    p_info.add_argument("image", help="Disk image path")
 
     args = parser.parse_args()
 
@@ -1133,12 +1505,13 @@ def main():
         if not entries:
             print("(empty)")
             return
-        print(f"{'Name':<16} {'Type':<8} {'Size':>8}  {'Sectors':>7}  Flags")
-        print("-" * 56)
+        print(f"{'Name':<24} {'Type':<8} {'Size':>8}  {'Sectors':>7}  {'Parent':>6}  Flags")
+        print("-" * 72)
         for e in entries:
             tname = FTYPE_NAMES.get(e.ftype, f"?{e.ftype}")
-            print(f"{e.name:<16} {tname:<8} {e.used_bytes:>8}  {e.sector_count:>7}  "
-                  f"0x{e.flags:02x}")
+            par = "root" if e.parent == PARENT_ROOT else str(e.parent)
+            print(f"{e.name:<24} {tname:<8} {e.used_bytes:>8}  {e.sector_count:>7}  "
+                  f"{par:>6}  0x{e.flags:02x}")
 
     elif args.cmd == "inject":
         name = args.name or os.path.basename(args.file)
@@ -1146,7 +1519,8 @@ def main():
         ftype = ftype_rev[args.type]
         with open(args.file, "rb") as f:
             data = f.read()
-        inject_file(args.image, name, data, ftype=ftype)
+        fs_path = getattr(args, "path", "/")
+        inject_file(args.image, name, data, ftype=ftype, fs_path=fs_path)
         print(f"Injected '{name}' ({len(data)} bytes, type={args.type})")
 
     elif args.cmd == "cat":
@@ -1154,8 +1528,40 @@ def main():
         sys.stdout.buffer.write(data)
 
     elif args.cmd == "rm":
-        delete_file(args.image, args.name)
+        fs = MP64FS.load(args.image)
+        parent = fs.resolve_path(args.path)
+        fs.delete_file(args.name, parent=parent)
+        fs.save(args.image)
         print(f"Deleted '{args.name}'")
+
+    elif args.cmd == "mkdir":
+        fs = MP64FS.load(args.image)
+        parent = fs.resolve_path(args.path)
+        fs.mkdir(args.name, parent=parent)
+        fs.save(args.image)
+        print(f"Created directory '{args.name}'")
+
+    elif args.cmd == "check":
+        fs = MP64FS.load(args.image)
+        errors = fs.check()
+        if errors:
+            for err in errors:
+                print(f"  ERROR: {err}")
+            print(f"{len(errors)} error(s) found")
+        else:
+            print("All files OK")
+
+    elif args.cmd == "compact":
+        fs = MP64FS.load(args.image)
+        moved = fs.compact()
+        fs.save(args.image)
+        print(f"Compacted: {moved} file(s) moved")
+
+    elif args.cmd == "info":
+        fs = MP64FS.load(args.image)
+        info = fs.info()
+        for k, v in info.items():
+            print(f"  {k}: {v}")
 
 
 if __name__ == "__main__":
