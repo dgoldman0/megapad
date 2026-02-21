@@ -8212,6 +8212,9 @@ VARIABLE _TRPOP-ACTUAL
         _TRPOP-TCB @ TCB.RX-HEAD !
     LOOP
     _TRPOP-ACTUAL @ NEGATE _TRPOP-TCB @ TCB.RX-COUNT +!
+    \ Recalculate receive window and send window-update ACK (RFC 793)
+    /TCP-RXBUF _TRPOP-TCB @ TCB.RX-COUNT @ - _TRPOP-TCB @ TCB.RCV-WND !
+    _TRPOP-TCB @ TCP-ACK TCP-SEND-CTL DROP
     _TRPOP-ACTUAL @ ;
 
 \ =====================================================================
