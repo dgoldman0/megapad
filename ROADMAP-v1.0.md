@@ -603,7 +603,7 @@ and adds post-quantum cryptographic primitives.
     Total: ~1 day of focused work.  Each phase is independently
     shippable.
 
-48. ☐ **Arena allocator** — Region-aware scoped allocation for scratch
+48. ✅ **Arena allocator** — Region-aware scoped allocation for scratch
     memory.  Eliminates manual per-object `FREE` for short-lived data
     (file parsing, tile undo, packet assembly, task-local scratch).
     Unique property: arenas can target any of Megapad-64's three memory
@@ -611,35 +611,39 @@ and adds post-quantum cryptographic primitives.
     Full design: [`docs/arenas.md`](docs/arenas.md).
 
     **Phase 1 — Heap-backed MVP (~30 lines, ~8 tests):**
-    - 48a. ☐ Arena descriptor (4 cells: base, size, ptr, source).
+    - 48a. ✅ Arena descriptor (4 cells: base, size, ptr, source).
            `ARENA-NEW ( size source -- arena ior )` allocates backing
            region via `ALLOCATE`, builds descriptor in dictionary.
-    - 48b. ☐ `ARENA-ALLOT ( arena u -- addr )` bump-allocate with
+    - 48b. ✅ `ARENA-ALLOT ( arena u -- addr )` bump-allocate with
            8-byte alignment.  Aborts on overflow.  `ARENA-ALLOT?`
            variant returns ior instead.
-    - 48c. ☐ `ARENA-RESET ( arena -- )` rewind ptr to base (O(1) bulk
+    - 48c. ✅ `ARENA-RESET ( arena -- )` rewind ptr to base (O(1) bulk
            reclaim).  `ARENA-DESTROY ( arena -- )` frees backing block
            and zeroes descriptor.
-    - 48d. ☐ `ARENA-FREE`, `ARENA-USED`, `.ARENA` diagnostics.
+    - 48d. ✅ `ARENA-FREE`, `ARENA-USED`, `.ARENA` diagnostics.
+           (commit `20a0f4d`, 13 tests)
 
     **Phase 2 — Multi-source + snapshots (~20 lines, ~6 tests):**
-    - 48e. ☐ XMEM and HBW backing for `ARENA-NEW` / `ARENA-DESTROY`.
-           Same API, dispatches to the appropriate region allocator.
-    - 48f. ☐ `ARENA-SNAP ( arena -- snap )` save bump pointer.
+    - 48e. ✅ XMEM and HBW backing for `ARENA-NEW` / `ARENA-DESTROY`.
+           Same API, dispatches via `(AR-ALLOC-BACKING)` / `(AR-FREE-BACKING)`.
+    - 48f. ✅ `ARENA-SNAP ( arena -- snap )` save bump pointer.
            `ARENA-ROLLBACK ( arena snap -- )` rewind to snapshot.
-           Enables transactional scratch (try work, rollback on error).
+           `ARENA-SNAP-DROP ( snap -- )` no-op for API symmetry.
+           (commit `e512e4f`, 10 new tests, 23 total)
 
     **Phase 3 — Scoped arena stack (~15 lines, ~4 tests):**
-    - 48g. ☐ `ARENA-PUSH ( arena -- )` / `ARENA-POP ( -- )` manage
+    - 48g. ✅ `ARENA-PUSH ( arena -- )` / `ARENA-POP ( -- )` manage
            a 4-deep "current arena" stack.  `AALLOT ( u -- addr )`
            allocates from the top arena.  Enables region-agnostic
            library code.
+           (commit `dad4d3a`, 5 new tests, 28 total)
 
     **Phase 4 — Arena-scoped buffers (~20 lines, ~4 tests):**
-    - 48h. ☐ `ARENA-BUFFER ( type width length arena "name" -- )`
+    - 48h. ✅ `ARENA-BUFFER ( type width length arena "name" -- )`
            creates a buffer whose descriptor + data live in the arena.
            `ARENA-DESTROY` auto-unregisters arena-scoped buffers from
-           the buffer linked list.  `BUFFERS` shows `[arena]` tag.
+           the buffer linked list via `(AR-UNREG-BUFS)`.
+           (commit `7d7faa6`, 5 new tests, 33 total)
 
     Estimated effort: Phase 1 = ~1 hour, Phase 2 = ~1.5 hours,
     Phase 3 = ~1 hour, Phase 4 = ~1.5 hours.  Total: ~5 hours.
