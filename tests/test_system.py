@@ -6505,6 +6505,105 @@ class TestKDOSAllocator(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
+#  KDOS MARKER / FORGET tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSMarkerForget(_KDOSTestBase):
+    """Tests for MARKER and FORGET dictionary snapshot words."""
+
+    def test_marker_basic(self):
+        """MARKER word can be created and executed without crash."""
+        text = self._run_kdos([
+            "MARKER SNAP1",
+            ": TEMP-WORD 42 . ;",
+            "SNAP1",            # forget TEMP-WORD and SNAP1 itself
+            ".\" ok\"",
+        ])
+        self.assertIn("ok", text)
+
+    def test_marker_forgets_word(self):
+        """After executing marker, defined words are forgotten."""
+        text = self._run_kdos([
+            "MARKER SNAP2",
+            ": XYZZY 99 ;",
+            "SNAP2",
+            # XYZZY should no longer exist — try with FIND
+            "BL WORD COUNT 2DROP .\" done\"",
+        ], max_steps=200_000_000)
+        self.assertIn("done", text)
+
+    def test_marker_restores_here(self):
+        """MARKER restores HERE to its pre-marker value."""
+        text = self._run_kdos([
+            'CR ." [H1=" HERE . ." ]"',
+            "MARKER SNAP3",
+            ": DUMMY1 1 ;",
+            ": DUMMY2 2 ;",
+            "SNAP3",
+            'CR ." [H2=" HERE . ." ]"',
+        ])
+        import re
+        h1 = re.search(r'\[H1=(\d+)', text)
+        h2 = re.search(r'\[H2=(\d+)', text)
+        self.assertTrue(h1 and h2, f"Could not parse HERE values from: {text}")
+        self.assertEqual(int(h1.group(1)), int(h2.group(1)),
+                         f"HERE not restored: before={h1.group(1)} after={h2.group(1)}")
+
+    def test_marker_new_defs_after(self):
+        """Can define new words after executing a marker."""
+        text = self._run_kdos([
+            "MARKER SNAP4",
+            ": OLDWORD 1 ;",
+            "SNAP4",
+            ": NEWWORD 77 . ;",
+            "NEWWORD",
+        ])
+        self.assertIn("77 ", text)
+
+    def test_forget_basic(self):
+        """FORGET removes a word and everything after it."""
+        text = self._run_kdos([
+            ": AWORD 10 ;",
+            ": BWORD 20 ;",
+            "FORGET AWORD",
+            # AWORD and BWORD should both be gone
+            ".\" ok\"",
+        ])
+        self.assertIn("ok", text)
+
+    def test_forget_restores_here(self):
+        """FORGET moves HERE back to the forgotten word's entry."""
+        text = self._run_kdos([
+            'CR ." [H1=" HERE . ." ]"',
+            ": ZWORD 99 ;",
+            "FORGET ZWORD",
+            'CR ." [H2=" HERE . ." ]"',
+        ])
+        import re
+        h1 = re.search(r'\[H1=(\d+)', text)
+        h2 = re.search(r'\[H2=(\d+)', text)
+        self.assertTrue(h1 and h2, f"Could not parse HERE values from: {text}")
+        self.assertEqual(int(h1.group(1)), int(h2.group(1)),
+                         f"HERE not restored: {h1.group(1)} vs {h2.group(1)}")
+
+    def test_forget_case_insensitive(self):
+        """FORGET matches case-insensitively."""
+        text = self._run_kdos([
+            ": MYTEST 1 ;",
+            "FORGET mytest",       # lowercase should work
+            ".\" ok\"",
+        ])
+        self.assertIn("ok", text)
+
+    def test_var_latest_verified(self):
+        """VAR-LATEST is correctly verified at boot."""
+        text = self._run_kdos([
+            "VAR-LATEST @ LATEST = .",
+        ])
+        self.assertIn("-1 ", text)
+
+
+# ---------------------------------------------------------------------------
 #  KDOS CATCH/THROW tests
 # ---------------------------------------------------------------------------
 

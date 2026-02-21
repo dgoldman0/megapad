@@ -318,6 +318,80 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     ."   largest=" HEAP-LARGEST . CR ;
 
 \ =====================================================================
+\  §1.1a  Dictionary Snapshots — MARKER / FORGET
+\ =====================================================================
+\
+\  MARKER creates a named word that, when executed, forgets
+\  everything defined after it (restores HERE and LATEST).
+\
+\  FORGET parses a word name and forgets everything from that
+\  word onward (including the named word itself).
+\
+\  Implementation: var_latest is at STATE + 24 (adjacent BIOS
+\  variables: state(+0), base(+8), here(+16), latest(+24)).
+\  Verified at load time.
+\
+
+\ VAR-LATEST — verified address of the BIOS var_latest variable
+\ BIOS layout: var_state(+0) var_base(+8) var_here(+16) var_latest(+24)
+STATE 24 +  DUP @  LATEST <>
+    IF ." VAR-LATEST offset mismatch" CR ABORT THEN
+CONSTANT VAR-LATEST
+
+\ LATEST! ( entry -- )  set the dictionary head pointer
+: LATEST!  ( entry -- )  VAR-LATEST ! ;
+
+\ MARKER ( "name" -- )
+\   Create a checkpoint word.  Executing it later forgets everything
+\   defined after (and including) the marker itself.
+: MARKER  ( "name" -- )
+    HERE LATEST            ( save-here save-latest )
+    CREATE , ,             ( ; data+0=save-latest  data+8=save-here )
+    DOES>
+        DUP @ SWAP 8 + @  ( save-latest save-here )
+        HERE - ALLOT       ( save-latest ; HERE restored )
+        LATEST!            ( ; LATEST restored )
+    ;
+
+\ (ENTRY>NAME) ( entry -- addr len )  inline name accessor
+\   Dictionary header: [link:8][flags+len:1][name:N]
+: (ENTRY>NAME)  ( entry -- addr len )
+    DUP 8 + C@ 127 AND  SWAP 9 + SWAP ;
+
+VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
+
+\ FORGET ( "name" -- )
+\   Forget a word and everything defined after it.
+\   Case-insensitive match (same as the outer interpreter).
+: FORGET  ( "name" -- )
+    BL WORD COUNT                    ( c-addr u )
+    DUP 0= ABORT" Usage: FORGET <name>"
+    FG-L !  FG-A !
+    LATEST                           ( entry )
+    BEGIN
+        DUP 0= ABORT" FORGET: not found"
+        DUP (ENTRY>NAME)             ( entry ea el )
+        FG-L @ OVER <> IF
+            \ Lengths differ — skip
+            2DROP
+        ELSE
+            \ Compare chars case-insensitively
+            TRUE SWAP 0 DO           ( entry ea flag )
+                OVER I + C@ UCHAR
+                FG-A @ I + C@ UCHAR
+                <> IF  DROP FALSE LEAVE  THEN
+            LOOP                     ( entry ea flag )
+            SWAP DROP                ( entry flag )
+            IF
+                DUP @ LATEST!        ( entry ; LATEST = entry.link )
+                HERE - ALLOT         ( ; HERE = entry addr )
+                EXIT
+            THEN
+        THEN
+        @                            ( next-entry )
+    AGAIN ;
+
+\ =====================================================================
 \  §1.2  Exception Handling — CATCH / THROW
 \ =====================================================================
 \
