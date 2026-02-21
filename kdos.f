@@ -198,9 +198,41 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
         A-CURR @ @ A-CURR !
     AGAIN ;
 
+\ (COALESCE) ( -- )
+\   After FREE inserts a block into the free list (address in A-CURR),
+\   merge with adjacent neighbours.
+\   Forward: if block_end == block.next, absorb successor.
+\   Backward: if prev_end == block, absorb block into predecessor.
+: (COALESCE)  ( -- )
+    \ -- Forward merge: block with its successor --
+    A-CURR @ @ ?DUP IF                           ( next )
+        A-CURR @ DUP 8 + @ + /ALLOC-HDR +       ( next block-end )
+        OVER = IF                                ( next )
+            \ block.size += /ALLOC-HDR + next.size
+            A-CURR @ 8 + @  /ALLOC-HDR +         ( next old+hdr )
+            OVER 8 + @ +                         ( next new-sz )
+            A-CURR @ 8 + !                       ( next )
+            \ block.next = next.next
+            @ A-CURR @ !                         ( )
+        ELSE  DROP
+        THEN
+    THEN
+    \ -- Backward merge: predecessor with block --
+    A-PREV @ ?DUP IF                             ( prev )
+        DUP DUP 8 + @ + /ALLOC-HDR +            ( prev prev-end )
+        A-CURR @ = IF                            ( prev )
+            \ prev.size += /ALLOC-HDR + block.size
+            A-CURR @ 8 + @  /ALLOC-HDR +         ( prev blk+hdr )
+            OVER 8 + @ +  OVER 8 + !             ( prev )
+            \ prev.next = block.next
+            A-CURR @ @  SWAP !                    ( )
+        ELSE  DROP
+        THEN
+    THEN ;
+
 \ FREE ( addr -- )
 \   Return a previously allocated block to the free list.
-\   Inserts in address-sorted order (for future coalescing).
+\   Inserts in address-sorted order and coalesces adjacent blocks.
 : FREE  ( addr -- )
     DUP 0= IF DROP EXIT THEN
     /ALLOC-HDR -   ( block )
@@ -208,17 +240,19 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     BEGIN
         A-CURR @ 0= IF
             \ End of list — append here
-            0 OVER !                                \ block.next = 0
-            A-PREV @ 0= IF  HEAP-FREE !
-            ELSE  A-PREV @ !  THEN
-            EXIT
+            A-CURR !                                \ A-CURR = block
+            0 A-CURR @ !                            \ block.next = 0
+            A-PREV @ 0= IF  A-CURR @ HEAP-FREE !
+            ELSE  A-CURR @ A-PREV @ !  THEN
+            (COALESCE) EXIT
         THEN
         A-CURR @ OVER > IF
             \ Insert before curr
-            A-CURR @ OVER !                         \ block.next = curr
-            A-PREV @ 0= IF  HEAP-FREE !
-            ELSE  A-PREV @ !  THEN
-            EXIT
+            A-CURR @ OVER !                         \ block.next = old-curr
+            A-CURR !                                \ A-CURR = block
+            A-PREV @ 0= IF  A-CURR @ HEAP-FREE !
+            ELSE  A-CURR @ A-PREV @ !  THEN
+            (COALESCE) EXIT
         THEN
         \ Advance
         A-CURR @ A-PREV !
@@ -250,11 +284,38 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     REPEAT
     DROP ;
 
+\ HEAP-FRAG ( -- n )
+\   Count the number of free blocks.  Fragmentation = n - 1 when n > 0.
+\   A perfectly defragmented heap has 1 free block (frag = 0).
+: HEAP-FRAG  ( -- n )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    0 HEAP-FREE @
+    BEGIN
+        DUP 0<> WHILE
+        SWAP 1+ SWAP   ( count+1 curr )
+        @               ( count+1 next )
+    REPEAT
+    DROP ;
+
+\ HEAP-LARGEST ( -- u )
+\   Return the size of the largest contiguous free block.
+: HEAP-LARGEST  ( -- u )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    0 HEAP-FREE @
+    BEGIN
+        DUP 0<> WHILE
+        DUP 8 + @  ROT MAX SWAP   ( max' curr )
+        @                          ( max' next )
+    REPEAT
+    DROP ;
+
 \ .HEAP ( -- ) show heap summary
 : .HEAP  ( -- )
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
     ."  Heap: base=" HEAP-BASE @ .
-    ."   free=" HEAP-FREE-BYTES . ."  bytes" CR ;
+    ."   free=" HEAP-FREE-BYTES . ."  bytes"
+    ."   blocks=" HEAP-FRAG .
+    ."   largest=" HEAP-LARGEST . CR ;
 
 \ =====================================================================
 \  §1.2  Exception Handling — CATCH / THROW

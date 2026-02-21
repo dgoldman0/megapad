@@ -6424,6 +6424,85 @@ class TestKDOSAllocator(_KDOSTestBase):
         # Should print -1 (true) if address was reused
         self.assertIn("-1 ", text)
 
+    # -- Coalescing / fragmentation diagnostics ----------------------------
+
+    def test_heap_frag_pristine(self):
+        """Pristine heap should have exactly 1 free block."""
+        text = self._run_kdos(["HEAP-FRAG ."])
+        self.assertIn("1 ", text)
+
+    def test_heap_frag_fragmented(self):
+        """Alloc A,B,C — free A and C — two separate free regions."""
+        text = self._run_kdos([
+            "VARIABLE A1  VARIABLE A2  VARIABLE A3",
+            "64 ALLOCATE DROP A1 !",
+            "64 ALLOCATE DROP A2 !",
+            "64 ALLOCATE DROP A3 !",
+            "A1 @ FREE",       # free A (non-adjacent to tail)
+            "A3 @ FREE",       # free C (coalesces with tail)
+            "HEAP-FRAG .",
+        ])
+        # A is isolated, C+tail merged → 2 free blocks
+        self.assertIn("2 ", text)
+
+    def test_coalesce_all_freed(self):
+        """Free all three blocks — should coalesce back to 1."""
+        text = self._run_kdos([
+            "VARIABLE A1  VARIABLE A2  VARIABLE A3",
+            "64 ALLOCATE DROP A1 !",
+            "64 ALLOCATE DROP A2 !",
+            "64 ALLOCATE DROP A3 !",
+            "A1 @ FREE",
+            "A3 @ FREE",
+            "A2 @ FREE",       # fills the gap, coalesces everything
+            "HEAP-FRAG .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_coalesce_forward_merge(self):
+        """Freeing a block adjacent to its successor merges them."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",   # allocate then immediately free
+            "FREE",
+            "HEAP-FRAG .",        # should merge back with tail → 1
+        ])
+        self.assertIn("1 ", text)
+
+    def test_coalesce_enables_large_alloc(self):
+        """After coalescing, can allocate the combined space."""
+        text = self._run_kdos([
+            "VARIABLE A1  VARIABLE A2",
+            "128 ALLOCATE DROP A1 !",
+            "128 ALLOCATE DROP A2 !",
+            "A2 @ FREE",
+            "A1 @ FREE",         # A coalesces with B+tail
+            # Now allocate 256 — only possible if A+B coalesced
+            "256 ALLOCATE . DROP",  # print ior (0 = success)
+        ])
+        self.assertIn("0 ", text)
+
+    def test_heap_largest_pristine(self):
+        """HEAP-LARGEST on fresh heap equals HEAP-FREE-BYTES."""
+        text = self._run_kdos([
+            "HEAP-LARGEST . HEAP-FREE-BYTES .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        # Both should be the same positive value
+        self.assertTrue(len(nums) >= 2, f"Expected 2 numbers, got {nums}")
+        self.assertEqual(nums[-2], nums[-1],
+                         f"HEAP-LARGEST ({nums[-2]}) != HEAP-FREE-BYTES ({nums[-1]})")
+
+    def test_heap_largest_after_frag(self):
+        """HEAP-LARGEST returns the tail block size when A is small."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",         # chew off 80 bytes (64+hdr)
+            "FREE",                      # give it back (coalesces)
+            "HEAP-LARGEST . HEAP-FREE-BYTES .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(len(nums) >= 2)
+        self.assertEqual(nums[-2], nums[-1])
+
 
 # ---------------------------------------------------------------------------
 #  KDOS CATCH/THROW tests

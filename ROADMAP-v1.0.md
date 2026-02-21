@@ -526,6 +526,83 @@ and adds post-quantum cryptographic primitives.
     GTX        16          0                +0         +1
     ```
 
+47. ☐ **Memory management hardening** — Incremental improvements to
+    the existing allocator + memory subsystem.  No architectural
+    rewrites; each sub-item is a self-contained change with its own
+    tests.  Goal: make long-running sessions stable, reduce
+    fragmentation, add visibility, and prepare for eventual GC.
+
+    **Phase 1 — Heap coalescing (high priority):**
+    - 47a. ☐ Add adjacent-block coalescing to `FREE` in KDOS §1.1.
+           After inserting the freed block into the address-sorted
+           free list, check forward: if `block + /ALLOC-HDR +
+           block.size == next`, merge by absorbing next's header +
+           size into block.  Check backward: if `prev + /ALLOC-HDR
+           + prev.size == block`, merge block into prev.  ~15 lines
+           of Forth.  Add `TestKDOSAllocatorCoalesce` (alloc A B C,
+           free B, free A, verify single merged block; alloc/free
+           interleave stress test with `HEAP-FREE-BYTES` invariant).
+    - 47b. ☐ Add `HEAP-FRAG` ( -- n ) word: walk free list, count
+           number of free blocks.  Fragmentation = n − 1 when n > 0.
+           Useful for diagnostics and tests.
+
+    **Phase 2 — Dictionary reclamation (medium priority):**
+    - 47c. ☐ Implement `MARKER` (ANS Forth TOOLS EXT).  `MARKER xxx`
+           saves HERE + LATEST (dict head) at define time.  Executing
+           `xxx` later restores both, effectively forgetting
+           everything defined after it.  ~20 lines.  This covers the
+           most common "load module → use → unload" pattern without
+           needing GC.  Works in both system and userland dict zones.
+    - 47d. ☐ Implement `FORGET` as a thin wrapper: parse next word,
+           find its XT, walk dict to find corresponding HERE value,
+           reset.  Simpler than `MARKER` but less safe (can corrupt
+           if interleaved definitions exist).  Mark as "use MARKER
+           instead" in help.
+
+    **Phase 3 — Runtime safety (medium priority):**
+    - 47e. ☐ Add heap/stack collision guard.  In `ALLOCATE`, after
+           finding a block, verify its end address is below the
+           current stack pointer minus a 4 KiB guard zone.  On
+           violation, return OOM rather than silently corrupting.
+           In the scheduler's `YIELD`, check `SP@ HEAP-BASE @ <`
+           as a cheap stack-overflow canary; if tripped, print
+           warning and halt the task.
+    - 47f. ☐ Add `HEAP-CHECK` ( -- flag ) word: walk the free list
+           validating that each block's next pointer is within
+           `[HEAP-BASE, stack-guard)` and that sizes are positive.
+           Returns true if the heap is consistent.  Useful for
+           `.DIAG` and post-crash forensics.
+
+    **Phase 4 — Allocator improvements (low priority):**
+    - 47g. ☐ Scale the buffer registry: replace the 16-slot
+           `BUF-TABLE` array with a linked-list threaded through
+           each descriptor's header.  Add a `B.NEXT` field (or reuse
+           the type cell's upper bits).  `BUFFERS` walks the list.
+           No hard cap.
+    - 47h. ☐ Add `RESIZE` in-place growth: before alloc+copy, check
+           if the block is followed by a free block large enough to
+           absorb the growth.  If so, merge and adjust size in place.
+           Depends on 47a (coalescing) being done first.
+
+    **Phase 5 — Unified visibility (low priority):**
+    - 47i. ☐ Add `.MEM` word that prints a unified memory report
+           across all regions:
+           ```
+           Bank 0:  1,048,576 total   dict 24,320   heap free 498,712   stack used ~2,048
+           HBW:     3,145,728 total   used 131,072   free 3,014,656
+           Ext mem: 16,777,216 total  uland 45,056   xmem free 15,683,584
+           Buffers: 7 registered (3 Bank0, 2 HBW, 2 ext)
+           Heap: 3 free blocks, largest 498,200 bytes  (frag=2)
+           ```
+           Combines `.HEAP`, `.HBW`, `.XMEM`, `.USERLAND`, `BUFFERS`
+           into one snapshot.  Helpful for interactive debugging
+           and the TUI dashboard (screen 0).
+
+    Estimated effort: Phase 1 = ~1 hour, Phase 2 = ~2 hours,
+    Phase 3 = ~2 hours, Phase 4 = ~2 hours, Phase 5 = ~1 hour.
+    Total: ~1 day of focused work.  Each phase is independently
+    shippable.
+
 ---
 
 ### Layer 6: Architecture & Portability (Items 39–42)
@@ -619,10 +696,10 @@ Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → I
                       DHCP ✅ → DNS ✅ → TCP ✅ → TLS 1.3 ✅ → Socket API ✅) ✅ DONE
 Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
-Layer 4  Items 25–30, 45–46  Application-Level
+Layer 4  Items 25–30, 45–47  Application-Level
                       (net send ☐, FP16 ☐, QoS ✅, editor ☐,
                       scripting ☐, remote REPL ☐, SCROLL ☐,
-                      USB ☐ ← NEW)
+                      USB ☐, mem hardening ☐ ← NEW)
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
