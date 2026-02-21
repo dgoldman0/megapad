@@ -493,6 +493,103 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
     AGAIN ;
 
 \ =====================================================================
+\  §1.1b  Arena Allocator
+\ =====================================================================
+\
+\  Region-aware scoped allocation for scratch memory.
+\  An arena is a pre-allocated region with O(1) bump allocation
+\  and O(1) bulk deallocation.  No per-object headers or free list.
+\
+\  Arena descriptor (4 cells = 32 bytes, in dictionary):
+\    +0   base     start of data region
+\    +8   size     total capacity in bytes
+\    +16  ptr      current bump pointer
+\    +24  source   0 = Bank 0 heap
+\
+\  Full design: docs/arenas.md
+
+\ -- Source constants --
+0 CONSTANT A-HEAP    \ arena backed by Bank 0 heap
+
+\ -- Field accessors --
+: A.BASE    ( arena -- addr )  ;           \ +0
+: A.SIZE    ( arena -- addr )  8 + ;       \ +8
+: A.PTR     ( arena -- addr )  16 + ;      \ +16
+: A.SOURCE  ( arena -- addr )  24 + ;      \ +24
+
+\ -- Scratch variables --
+VARIABLE AR-SZ     \ requested size
+VARIABLE AR-SRC    \ source id
+VARIABLE AR-BLK    \ backing block address
+
+\ ARENA-NEW ( size source -- arena ior )
+\   Allocate a backing region, build descriptor in dictionary.
+\   Currently only source 0 (A-HEAP) is supported.
+: ARENA-NEW  ( size source -- arena ior )
+    OVER 0= IF  2DROP 0 -1 EXIT  THEN      \ zero size → fail
+    DUP 0 <> IF  2DROP 0 -1 EXIT  THEN     \ non-heap → fail (Phase 2)
+    AR-SRC !  AR-SZ !
+    AR-SZ @ ALLOCATE IF
+        DROP 0 -1 EXIT                      \ heap alloc failed
+    THEN
+    AR-BLK !
+    HERE                                     ( arena )
+    AR-BLK @ ,                               \ +0  base
+    AR-SZ @ ,                                \ +8  size
+    AR-BLK @ ,                               \ +16 ptr = base (empty)
+    AR-SRC @ ,                               \ +24 source
+    0 ;                                      ( arena 0 )
+
+\ ARENA-USED ( arena -- u )  bytes consumed
+: ARENA-USED  ( arena -- u )
+    DUP A.PTR @  SWAP A.BASE @ - ;
+
+\ ARENA-FREE ( arena -- u )  bytes remaining
+: ARENA-FREE  ( arena -- u )
+    DUP A.SIZE @  SWAP ARENA-USED - ;
+
+\ ARENA-ALLOT ( arena u -- addr )
+\   Bump-allocate u bytes (8-byte aligned).  Aborts on overflow.
+: ARENA-ALLOT  ( arena u -- addr )
+    7 + -8 AND                               ( arena u-aligned )
+    OVER ARENA-FREE OVER < ABORT" arena full"
+    OVER A.PTR @                             ( arena u addr )
+    -ROT                                     ( addr arena u )
+    OVER A.PTR @ +  SWAP A.PTR ! ;           ( addr )
+
+\ ARENA-ALLOT? ( arena u -- addr ior )
+\   Like ARENA-ALLOT but returns ior instead of aborting.
+: ARENA-ALLOT?  ( arena u -- addr ior )
+    7 + -8 AND                               ( arena u-aligned )
+    OVER ARENA-FREE OVER < IF
+        2DROP 0 -1 EXIT                      \ overflow
+    THEN
+    OVER A.PTR @                             ( arena u addr )
+    -ROT                                     ( addr arena u )
+    OVER A.PTR @ +  SWAP A.PTR !             ( addr )
+    0 ;
+
+\ ARENA-RESET ( arena -- )
+\   Rewind ptr to base.  All allocations logically freed.  O(1).
+: ARENA-RESET  ( arena -- )
+    DUP A.BASE @  SWAP A.PTR ! ;
+
+\ ARENA-DESTROY ( arena -- )
+\   Free the backing region and zero the descriptor.
+: ARENA-DESTROY  ( arena -- )
+    DUP A.BASE @ FREE                        \ free backing block
+    0 OVER !  0 OVER 8 + !                   \ zero base, size
+    0 OVER 16 + !  0 SWAP 24 + ! ;           \ zero ptr, source
+
+\ .ARENA ( arena -- )  print arena status
+: .ARENA  ( arena -- )
+    ." Arena: base=" DUP A.BASE @ .
+    ."  size=" DUP A.SIZE @ .
+    ."  used=" DUP ARENA-USED .
+    ."  free=" DUP ARENA-FREE .
+    ."  src=" A.SOURCE @ . CR ;
+
+\ =====================================================================
 \  §1.2  Exception Handling — CATCH / THROW
 \ =====================================================================
 \

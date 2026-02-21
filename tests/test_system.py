@@ -6824,6 +6824,172 @@ class TestKDOSAllocator(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
+#  KDOS Arena Allocator tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSArena(_KDOSTestBase):
+    """Tests for the arena allocator (§1.1b)."""
+
+    def test_arena_new_basic(self):
+        """ARENA-NEW returns a valid arena descriptor and ior=0."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW . .",   # print ior then arena addr
+        ])
+        self.assertIn("0 ", text)  # ior = 0
+
+    def test_arena_new_zero_size_fails(self):
+        """ARENA-NEW with size 0 fails (ior=-1)."""
+        text = self._run_kdos([
+            "0 A-HEAP ARENA-NEW . DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_arena_allot_and_read(self):
+        """ARENA-ALLOT returns usable memory."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW DROP",       # arena on stack
+            "DUP 64 ARENA-ALLOT",               # allot 64 bytes
+            "42 OVER !  @ .",                    # write 42, read back
+        ])
+        self.assertIn("42 ", text)
+
+    def test_arena_used_free_accounting(self):
+        """ARENA-USED and ARENA-FREE track correctly."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW DROP",
+            'DUP ARENA-USED CR ." [U1=" . ." ]"',
+            'DUP ARENA-FREE CR ." [F1=" . ." ]"',
+            "DUP 64 ARENA-ALLOT DROP",
+            'DUP ARENA-USED CR ." [U2=" . ." ]"',
+            'ARENA-FREE CR ." [F2=" . ." ]"',
+        ])
+        import re
+        u1 = re.search(r'\[U1=(\d+)', text)
+        f1 = re.search(r'\[F1=(\d+)', text)
+        u2 = re.search(r'\[U2=(\d+)', text)
+        f2 = re.search(r'\[F2=(\d+)', text)
+        self.assertTrue(u1 and f1 and u2 and f2,
+                        f"Could not parse arena stats from: {text}")
+        self.assertEqual(int(u1.group(1)), 0)
+        self.assertEqual(int(f1.group(1)), 1024)
+        self.assertTrue(int(u2.group(1)) >= 64)   # at least 64 (may be aligned)
+        self.assertTrue(int(f2.group(1)) <= 960)   # at most 960
+
+    def test_arena_reset(self):
+        """ARENA-RESET rewinds used to 0."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW DROP",
+            "DUP 128 ARENA-ALLOT DROP",
+            "DUP ARENA-RESET",
+            'ARENA-USED CR ." [U=" . ." ]"',
+        ])
+        import re
+        m = re.search(r'\[U=(\d+)', text)
+        self.assertTrue(m, f"Could not parse ARENA-USED from: {text}")
+        self.assertEqual(int(m.group(1)), 0)
+
+    def test_arena_reset_and_reuse(self):
+        """After ARENA-RESET, can allot again from the start."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW DROP",
+            "DUP 64 ARENA-ALLOT 99 SWAP !",   # write 99
+            "DUP ARENA-RESET",
+            "DUP 64 ARENA-ALLOT 77 SWAP !",   # reuse — write 77
+            "DUP ARENA-RESET",
+            "DUP 64 ARENA-ALLOT @ .",         # read back — should be 77
+            "DROP",
+        ])
+        self.assertIn("77 ", text)
+
+    def test_arena_destroy(self):
+        """ARENA-DESTROY zeroes the descriptor and frees heap memory."""
+        text = self._run_kdos([
+            "VARIABLE AR",
+            "1024 A-HEAP ARENA-NEW DROP AR !",
+            "AR @ ARENA-DESTROY",
+            "AR @ @ .",              # base should be 0
+            "AR @ 8 + @ .",          # size should be 0
+        ])
+        # Both should print 0
+        lines = [l.strip() for l in text.split('\n') if l.strip().startswith('0 ')]
+        self.assertTrue(len(lines) >= 2,
+                        f"Expected two 0s after destroy, got: {text}")
+
+    def test_arena_allot_overflow_aborts(self):
+        """ARENA-ALLOT aborts when arena is full."""
+        text = self._run_kdos([
+            "64 A-HEAP ARENA-NEW DROP",
+            "DUP 128 ARENA-ALLOT DROP",        # too big — should abort
+        ], max_steps=200_000_000)
+        self.assertIn("arena full", text)
+
+    def test_arena_allot_ior_overflow(self):
+        """ARENA-ALLOT? returns ior=-1 on overflow instead of aborting."""
+        text = self._run_kdos([
+            "64 A-HEAP ARENA-NEW DROP",
+            "128 ARENA-ALLOT? . DROP",         # ior should be -1
+            '.\" still-alive"',
+        ])
+        self.assertIn("-1 ", text)
+        self.assertIn("still-alive", text)
+
+    def test_arena_allot_ior_success(self):
+        """ARENA-ALLOT? returns ior=0 on success."""
+        text = self._run_kdos([
+            "256 A-HEAP ARENA-NEW DROP",
+            "32 ARENA-ALLOT? . DROP",
+            '.\" ok"',
+        ])
+        self.assertIn("0 ", text)
+
+    def test_arena_multiple_allots(self):
+        """Multiple ARENA-ALLOT calls return distinct addresses."""
+        text = self._run_kdos([
+            "1024 A-HEAP ARENA-NEW DROP",
+            'DUP 64 ARENA-ALLOT CR ." [A1=" . ." ]"',
+            'DUP 64 ARENA-ALLOT CR ." [A2=" . ." ]"',
+            '64 ARENA-ALLOT CR ." [A3=" . ." ]"',
+        ])
+        import re
+        a1 = re.search(r'\[A1=(\d+)', text)
+        a2 = re.search(r'\[A2=(\d+)', text)
+        a3 = re.search(r'\[A3=(\d+)', text)
+        self.assertTrue(a1 and a2 and a3,
+                        f"Could not parse addresses from: {text}")
+        addrs = [int(a1.group(1)), int(a2.group(1)), int(a3.group(1))]
+        self.assertEqual(len(set(addrs)), 3,
+                         f"Expected 3 distinct addrs, got {addrs}")
+
+    def test_dot_arena(self):
+        """.ARENA prints arena status."""
+        text = self._run_kdos([
+            "512 A-HEAP ARENA-NEW DROP",
+            ".ARENA",
+        ])
+        self.assertIn("Arena:", text)
+        self.assertIn("base=", text)
+        self.assertIn("size=", text)
+        self.assertIn("used=", text)
+        self.assertIn("free=", text)
+
+    def test_arena_heap_reclaimed(self):
+        """After ARENA-DESTROY, heap free bytes are restored."""
+        text = self._run_kdos([
+            'CR ." [F1=" HEAP-FREE-BYTES . ." ]"',
+            "4096 A-HEAP ARENA-NEW DROP",
+            "ARENA-DESTROY",
+            'CR ." [F2=" HEAP-FREE-BYTES . ." ]"',
+        ])
+        import re
+        f1 = re.search(r'\[F1=(\d+)', text)
+        f2 = re.search(r'\[F2=(\d+)', text)
+        self.assertTrue(f1 and f2,
+                        f"Could not parse free bytes from: {text}")
+        self.assertEqual(int(f1.group(1)), int(f2.group(1)),
+                         f"Heap not reclaimed: {f1.group(1)} → {f2.group(1)}")
+
+
+# ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
 # ---------------------------------------------------------------------------
 
