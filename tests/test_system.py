@@ -6608,6 +6608,18 @@ class TestKDOSAllocator(_KDOSTestBase):
         self.assertIn("Buffers", text)
         self.assertIn("buf", text)  # B.INFO prints [buf ...]
 
+    # -- .MEM unified report test -----------------------------------------
+
+    def test_dot_mem_unified_report(self):
+        """.MEM prints unified memory report with all subsystem sections."""
+        text = self._run_kdos([".MEM"])
+        self.assertIn("Bank 0", text)
+        self.assertIn("HERE", text)
+        self.assertIn("Heap", text)
+        self.assertIn("HBW", text)
+        self.assertIn("Stack depth", text)
+        self.assertIn("Buffers", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests

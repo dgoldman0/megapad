@@ -6050,13 +6050,16 @@ VARIABLE ROUTE-BUF
 : HRULE  ( -- )  60 0 DO 45 EMIT LOOP CR ;
 : THIN-RULE  ( -- )  40 0 DO 46 EMIT LOOP CR ;
 
-\ -- Memory usage bar --
+\ -- Unified memory report --
 : .MEM  ( -- )
     ."   Bank 0 (System RAM):" CR
     ."     HERE  = " HERE . CR
     ."     Free  = " SP@ HERE - . ."  bytes (to data stack)" CR
+    .HEAP
     .HBW
-    .XMEM ;
+    .XMEM
+    ."   Buffers: " BUF-COUNT @ . CR
+    ."   Stack depth: " DEPTH . CR ;
 
 \ -- Dashboard --
 : DASHBOARD ( -- )
