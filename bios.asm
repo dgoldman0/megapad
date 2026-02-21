@@ -5061,7 +5061,7 @@ w_ms_fetch:
     addi r11, 1
     ld.b r2, r11                        ; byte 1
     addi r11, 1
-    ld.b r3, r11                        ; byte 2
+    ld.b r8, r11                        ; byte 2
     addi r11, 1
     ld.b r4, r11                        ; byte 3
     addi r11, 1
@@ -5075,8 +5075,8 @@ w_ms_fetch:
     ; Assemble 64-bit value: r1 = result
     lsli r2, 8
     or r1, r2
-    lsli r3, 16
-    or r1, r3
+    lsli r8, 16
+    or r1, r8
     lsli r4, 24
     or r1, r4
     ldi64 r9, 32
@@ -5105,7 +5105,7 @@ w_epoch_fetch:
     addi r11, 1
     ld.b r2, r11                        ; byte 1
     addi r11, 1
-    ld.b r3, r11                        ; byte 2
+    ld.b r8, r11                        ; byte 2
     addi r11, 1
     ld.b r4, r11                        ; byte 3
     addi r11, 1
@@ -5119,8 +5119,8 @@ w_epoch_fetch:
     ; Assemble 64-bit value: r1 = result
     lsli r2, 8
     or r1, r2
-    lsli r3, 16
-    or r1, r3
+    lsli r8, 16
+    or r1, r8
     lsli r4, 24
     or r1, r4
     ldi64 r9, 32
@@ -5148,7 +5148,7 @@ w_rtc_fetch:
     addi r11, 1
     ld.b r2, r11                        ; MIN (+11)
     addi r11, 1
-    ld.b r3, r11                        ; HOUR (+12)
+    ld.b r8, r11                        ; HOUR (+12)
     addi r11, 1
     ld.b r4, r11                        ; DAY (+13)
     addi r11, 1
@@ -5167,7 +5167,7 @@ w_rtc_fetch:
     subi r14, 8
     str r14, r2                         ; min
     subi r14, 8
-    str r14, r3                         ; hour
+    str r14, r8                         ; hour
     subi r14, 8
     str r14, r4                         ; day
     subi r14, 8
@@ -5188,7 +5188,7 @@ w_rtc_store:
     addi r14, 8
     ldn r4, r14                         ; day
     addi r14, 8
-    ldn r3, r14                         ; hour
+    ldn r8, r14                         ; hour
     addi r14, 8
     ldn r2, r14                         ; min
     addi r14, 8
@@ -5198,7 +5198,7 @@ w_rtc_store:
     addi r11, 1
     st.b r11, r2                        ; MIN (+11)
     addi r11, 1
-    st.b r11, r3                        ; HOUR (+12)
+    st.b r11, r8                        ; HOUR (+12)
     addi r11, 1
     st.b r11, r4                        ; DAY (+13)
     addi r11, 1

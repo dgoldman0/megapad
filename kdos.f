@@ -3016,6 +3016,9 @@ VARIABLE FF-LEN
         THEN
     LOOP ;
 
+\ ── TICKS@ — epoch seconds for mtime ─────────────────────────────────
+: TICKS@  ( -- u32 )  EPOCH@ 1000 / ;
+
 \ ── MKFILE — create a new file ───────────────────────────────────────
 
 VARIABLE MK-NSEC
@@ -3602,10 +3605,10 @@ VARIABLE _FE-BUF2                 \ buffer 2
 \  parent field (slot index 0-127, or 255 for root).
 
 \ PWD ( -- ) print current working directory path
+CREATE _PWD-STK 64 ALLOT
 : PWD  ( -- )
     CWD @ 255 = IF ."  /" CR EXIT THEN
     \ Walk parent chain, collect up to 8 levels
-    CREATE _PWD-STK 64 ALLOT
     0  CWD @                             ( depth slot )
     BEGIN DUP 255 <> WHILE
         SWAP DUP 8 < IF
