@@ -269,17 +269,86 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     AGAIN ;
 
 \ RESIZE ( a1 u -- a2 ior )
-\   Resize an allocated block.  Simple: alloc new, copy, free old.
+\   Resize an allocated block.
+\   1) If shrinking or same size: update size in place, split if worthwhile.
+\   2) If growing and the next free block is adjacent + big enough: merge.
+\   3) Otherwise: alloc new, copy, free old.
 \   On failure returns original address and non-zero ior.
+
+VARIABLE R-BLK     \ block header address
+VARIABLE R-OLD     \ old usable size
+VARIABLE R-NEW     \ new requested size (rounded)
+
+\ (TRY-GROW) ( -- flag )
+\   Attempt in-place growth of R-BLK from R-OLD to R-NEW.
+\   If the free block immediately after our block is big enough,
+\   absorb it and return TRUE.  Otherwise return FALSE.
+: (TRY-GROW)  ( -- flag )
+    R-BLK @ /ALLOC-HDR + R-OLD @ +    ( block-end )
+    0 A-PREV !   HEAP-FREE @ A-CURR !
+    BEGIN
+        A-CURR @ 0= IF  DROP FALSE EXIT  THEN
+        A-CURR @ OVER = IF
+            \ Found adjacent free block — check size
+            DROP
+            A-CURR @ 8 + @  /ALLOC-HDR +   ( avail )
+            R-NEW @ R-OLD @ -              ( avail need )
+            2DUP >= IF
+                \ Enough — absorb the free block
+                2DROP
+                A-CURR @ @  (LINK-PREV!)
+                \ block.size = old + header + free.size
+                R-OLD @ /ALLOC-HDR + A-CURR @ 8 + @ +
+                R-BLK @ 8 + !
+                \ Split off leftover if worthwhile
+                R-BLK @ 8 + @  R-NEW @ -   ( leftover )
+                DUP /ALLOC-HDR 16 + >= IF
+                    R-NEW @ R-BLK @ 8 + !  \ block.size = new
+                    R-BLK @ /ALLOC-HDR + R-NEW @ +  ( leftover remnant )
+                    0 OVER !                \ remnant.next = 0
+                    SWAP /ALLOC-HDR - OVER 8 + !  \ remnant.size
+                    /ALLOC-HDR + FREE       \ free the remnant
+                ELSE DROP
+                THEN
+                TRUE EXIT
+            ELSE  2DROP FALSE EXIT
+            THEN
+        THEN
+        A-CURR @ A-PREV !
+        A-CURR @ @ A-CURR !
+    AGAIN ;
+
 : RESIZE  ( a1 u -- a2 ior )
-    DUP ALLOCATE               ( a1 u a2 ior )
-    IF  2DROP DROP -1 EXIT  THEN
-    \ Success: ( a1 u a2 ) — copy u bytes from a1 to a2, free a1
-    A-CURR !                   \ stash a2
-    A-SIZE !                   \ stash u
-    DUP A-CURR @ A-SIZE @ CMOVE   \ copy u bytes from a1 to a2
-    FREE                           \ free a1
-    A-CURR @ 0 ;               \ return ( a2 0 )
+    \ Round new size
+    DUP 0= IF  2DROP 0 -1 EXIT  THEN
+    7 + -8 AND  DUP 16 < IF DROP 16 THEN
+    R-NEW !
+    DUP /ALLOC-HDR -  R-BLK !            \ block = a1 - header
+    R-BLK @ 8 + @  R-OLD !               \ old size
+    \ --- Case 1: shrinking or same size ---
+    R-NEW @ R-OLD @ <= IF
+        R-OLD @ R-NEW @ - DUP /ALLOC-HDR 16 + >= IF
+            \ Worth splitting: create a free remnant
+            R-NEW @ R-BLK @ 8 + !        \ block.size = new
+            R-BLK @ /ALLOC-HDR + R-NEW @ +  ( leftover remnant )
+            0 OVER !                       \ remnant.next = 0
+            SWAP /ALLOC-HDR - OVER 8 + !   \ remnant.size = leftover-hdr
+            /ALLOC-HDR + FREE              \ free the remnant
+        ELSE DROP
+        THEN
+        0  EXIT                            \ return ( a1 0 )
+    THEN
+    \ --- Case 2: try in-place growth ---
+    (TRY-GROW) IF
+        0  EXIT                            \ return ( a1 0 )
+    THEN
+    \ --- Case 3: fallback alloc+copy+free ---
+    R-NEW @ ALLOCATE                       ( a1 a2 ior )
+    IF  DROP -1 EXIT  THEN                 ( a1 a2 )
+    A-CURR !                               \ save a2
+    DUP A-CURR @ R-OLD @ CMOVE            ( a1 ; CMOVE src=a1 dst=a2 cnt=old )
+    FREE                                   ( ; free old )
+    A-CURR @ 0 ;                           \ ( a2 0 )
 
 \ HEAP-FREE-BYTES ( -- u )
 \   Walk the free list summing available bytes.
@@ -1849,10 +1918,29 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 \  Usage:  0 1 1024 BUFFER my-raw-buf
 \          ( type=raw  width=1  length=1024 )
 
-\ -- Registry (up to 16 buffers) --
+\ -- Registry (linked list — no slot limit) --
 VARIABLE BUF-COUNT
 0 BUF-COUNT !
-VARIABLE BUF-TABLE  15 CELLS ALLOT
+VARIABLE BUF-HEAD     0 BUF-HEAD !   \ head of buffer linked list
+
+\ (BUF-REG) ( desc -- )  register a descriptor in the linked list.
+\   Allocates a 16-byte link node in the dictionary:
+\     link+0 = desc addr, link+8 = old head.
+: (BUF-REG)  ( desc -- )
+    HERE SWAP         ( link-addr desc )
+    ,                 ( link-addr ; link+0 = desc )
+    BUF-HEAD @ ,      ( link-addr ; link+8 = old head )
+    BUF-HEAD !        ( ; head = link-addr )
+    1 BUF-COUNT +! ;
+
+\ BUF-NTH ( n -- desc )  Return descriptor of nth registered buffer
+\   (0-based).  Walks the linked list from BUF-HEAD.
+: BUF-NTH  ( n -- desc )
+    BUF-HEAD @          ( n node )
+    SWAP 0 ?DO          ( node )
+        8 + @           ( next-node )
+    LOOP
+    @                   ( desc ) ;
 
 \ -- Field accessors --
 : B.TYPE   ( desc -- type )     @ ;
@@ -1877,10 +1965,7 @@ VARIABLE BDESC
     HERE BDESC @ 24 + !       \ +24 store data_addr = HERE
     ALLOT                     \ advance HERE past data region
     \ register
-    BUF-COUNT @ 16 < IF
-        BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
-        BUF-COUNT @ 1+ BUF-COUNT !
-    THEN
+    BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
 
 \ HBW-BUFFER ( type width length "name" -- )
@@ -1897,10 +1982,7 @@ VARIABLE BDESC
     HBW-HERE @ BDESC @ 24 + ! \ +24 data_addr = HBW-HERE
     HBW-ALLOT DROP            \ advance HBW-HERE past data region
     \ register
-    BUF-COUNT @ 16 < IF
-        BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
-        BUF-COUNT @ 1+ BUF-COUNT !
-    THEN
+    BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
 
 \ XBUFFER ( type width length "name" -- )
@@ -1918,10 +2000,7 @@ VARIABLE BDESC
     XMEM-HERE @ BDESC @ 24 + ! \ +24 data_addr = XMEM-HERE
     XMEM-ALLOT DROP           \ advance XMEM-HERE past data region
     \ register
-    BUF-COUNT @ 16 < IF
-        BDESC @  BUF-COUNT @ CELLS BUF-TABLE + !
-        BUF-COUNT @ 1+ BUF-COUNT !
-    THEN
+    BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
 
 \ -- Derived queries --
@@ -1954,12 +2033,14 @@ VARIABLE BDESC
 \ -- List all registered buffers --
 : BUFFERS  ( -- )
     ."  --- Buffers (" BUF-COUNT @ . ."  ) ---" CR
-    BUF-COUNT @ DUP IF
-        0 DO
-            I . ."  : "
-            I CELLS BUF-TABLE + @ B.INFO
-        LOOP
-    ELSE DROP THEN ;
+    0 BUF-HEAD @
+    BEGIN DUP WHILE
+        SWAP DUP . ."  : " SWAP        ( idx link )
+        DUP @ B.INFO                     \ link+0 = desc addr
+        SWAP 1+ SWAP
+        8 + @                            \ link+8 = next link
+    REPEAT
+    2DROP ;
 
 \ =====================================================================
 \  §3  Tile-Aware Buffer Operations
@@ -5387,7 +5468,7 @@ INSTALL-TUI
 
 : .BUF-ROW  ( i -- )
     DUP .N ."   "
-    CELLS BUF-TABLE + @
+    BUF-NTH
     DUP B.TYPE .BTYPE
     ."  w=" DUP B.WIDTH .N
     ."  n=" DUP B.LEN .N
@@ -5395,7 +5476,7 @@ INSTALL-TUI
     ."  @" B.DATA .N ;
 
 : .BUF-DETAIL  ( -- )
-    SCR-SEL @ CELLS BUF-TABLE + @
+    SCR-SEL @ BUF-NTH
     DUP B.INFO B.PREVIEW ;
 
 : .KERN-ROW  ( i -- )
@@ -5640,7 +5721,7 @@ INSTALL-TUI
 : .HOME-MEM-BUFS  ( -- )
     BUF-COUNT @ 0 DO
         ."      " I .N ."  "
-        I CELLS BUF-TABLE + @ DUP B.WIDTH .N ." x" B.LEN .N CR
+        I BUF-NTH DUP B.WIDTH .N ." x" B.LEN .N CR
     LOOP ;
 
 : SCR-HOME-MEMORY  ( -- )
@@ -5677,7 +5758,7 @@ VARIABLE _SBIT
     BUF-COUNT @ 0= IF EXIT THEN
     0 _SRAW !  0 _SREC !  0 _STIL !  0 _SBIT !
     BUF-COUNT @ 0 DO
-        I CELLS BUF-TABLE + @ B.TYPE
+        I BUF-NTH B.TYPE
         DUP 0 = IF 1 _SRAW +! THEN
         DUP 1 = IF 1 _SREC +! THEN
         DUP 2 = IF 1 _STIL +! THEN

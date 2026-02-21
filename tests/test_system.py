@@ -6536,6 +6536,78 @@ class TestKDOSAllocator(_KDOSTestBase):
         ])
         self.assertIn("-1 ", text)
 
+    # -- In-place RESIZE tests --------------------------------------------
+
+    def test_resize_shrink_preserves_data(self):
+        """RESIZE to smaller size keeps data, returns same addr."""
+        text = self._run_kdos([
+            "VARIABLE P",
+            "128 ALLOCATE DROP DUP P !",
+            "DUP 77 SWAP !",          # write 77
+            "64 RESIZE DROP",          # shrink
+            "DUP P @ = .",            # same addr? -1 = true
+            "@ .",                     # data preserved?
+        ])
+        self.assertIn("-1 ", text)  # same address
+        self.assertIn("77 ", text)  # data preserved
+
+    def test_resize_grow_preserves_data(self):
+        """RESIZE to larger size copies data to new block."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",
+            "DUP 42 SWAP !",
+            "256 RESIZE DROP",
+            "@ .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_resize_same_size(self):
+        """RESIZE to same size returns same addr, ior=0."""
+        text = self._run_kdos([
+            "VARIABLE P",
+            "64 ALLOCATE DROP DUP P !",
+            "64 RESIZE . P @ = .",     # prints ior (0), then compares addr' with original
+        ])
+        self.assertIn("0 ", text)
+        self.assertIn("-1 ", text)
+
+    # -- Buffer registry linked-list tests --------------------------------
+
+    def test_buffer_registry_no_limit(self):
+        """Buffer registry accepts >16 buffers (no slot limit)."""
+        text = self._run_kdos([
+            # Create 17 buffers
+            "0 1 8 BUFFER tb0",
+            "0 1 8 BUFFER tb1",
+            "0 1 8 BUFFER tb2",
+            "0 1 8 BUFFER tb3",
+            "0 1 8 BUFFER tb4",
+            "0 1 8 BUFFER tb5",
+            "0 1 8 BUFFER tb6",
+            "0 1 8 BUFFER tb7",
+            "0 1 8 BUFFER tb8",
+            "0 1 8 BUFFER tb9",
+            "0 1 8 BUFFER tb10",
+            "0 1 8 BUFFER tb11",
+            "0 1 8 BUFFER tb12",
+            "0 1 8 BUFFER tb13",
+            "0 1 8 BUFFER tb14",
+            "0 1 8 BUFFER tb15",
+            "0 1 8 BUFFER tb16",  # 17th — would fail with old 16-slot
+            "BUF-COUNT @ .",
+        ])
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        # BUF-COUNT should include the KDOS demo bufs + our 17
+        # Just assert it's >= 17
+        self.assertTrue(any(n >= 17 for n in nums),
+                        f"Expected BUF-COUNT >= 17, got {nums}")
+
+    def test_buffers_lists_all(self):
+        """BUFFERS lists registered buffers from linked list."""
+        text = self._run_kdos(["BUFFERS"])
+        self.assertIn("Buffers", text)
+        self.assertIn("buf", text)  # B.INFO prints [buf ...]
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
