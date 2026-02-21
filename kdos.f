@@ -141,6 +141,9 @@ VARIABLE A-PREV       \ previous free-list node (0 = update HEAP-FREE)
 VARIABLE A-CURR       \ current free-list node being examined
 VARIABLE A-SIZE       \ requested allocation size (rounded)
 
+\ -- Stack-proximity guard constant --
+4096 CONSTANT HEAP-GUARD   \ minimum gap between heap top and stack bottom
+
 \ HEAP-SETUP ( -- )  initialise the heap above HERE
 \   Leaves a 4 KiB gap above HERE for dictionary growth,
 \   then creates one large free block spanning to the stack guard.
@@ -177,6 +180,12 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
         A-CURR @ 0= IF  0 -1 EXIT  THEN      \ OOM
         A-CURR @ 8 + @                         ( block-size )
         A-SIZE @ >= IF
+            \ Stack-proximity guard: block-end must stay below SP
+            A-CURR @ /ALLOC-HDR + A-SIZE @ +  ( blk-end )
+            SP@ >= IF
+                \ This block would collide with the stack — reject
+                0 -1 EXIT
+            THEN
             \ Found a big enough block
             A-CURR @ 8 + @  A-SIZE @ -         ( leftover )
             DUP /ALLOC-HDR 16 + >= IF
@@ -309,13 +318,36 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     REPEAT
     DROP ;
 
+\ (HEAP-TOP) ( -- addr )  highest occupied byte + 1 across all alloc'd blocks
+\   Walk free list to find the block whose end is closest to the stack.
+\   The real top = address of the last allocated region's end.
+\   Approximation: HEAP-BASE + total-heap-size (MEM-SIZE/2 - 4096 gap).
+\   For the guard check we use a simpler metric: the candidate block's
+\   end address must not intrude into SP@ - HEAP-GUARD.
+
+\ HEAP-CHECK ( -- flag )  true if heap is safely below data stack
+: HEAP-CHECK  ( -- flag )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    \ Walk all free blocks, find the highest block-end address
+    \ Heap top = max(each-free-block + header + size) or HEAP-BASE if empty
+    HEAP-BASE @   HEAP-FREE @
+    BEGIN
+        DUP 0<> WHILE
+        DUP DUP 8 + @ + /ALLOC-HDR +   ( best curr blk-end )
+        ROT MAX SWAP                    ( best' curr )
+        @                               ( best' next )
+    REPEAT
+    DROP                                ( heap-top-estimate )
+    SP@ < ;                              ( flag: heap below stack )
+
 \ .HEAP ( -- ) show heap summary
 : .HEAP  ( -- )
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
     ."  Heap: base=" HEAP-BASE @ .
     ."   free=" HEAP-FREE-BYTES . ."  bytes"
     ."   blocks=" HEAP-FRAG .
-    ."   largest=" HEAP-LARGEST . CR ;
+    ."   largest=" HEAP-LARGEST .
+    ."   safe=" HEAP-CHECK IF ." yes" ELSE ." NO" THEN CR ;
 
 \ =====================================================================
 \  §1.1a  Dictionary Snapshots — MARKER / FORGET

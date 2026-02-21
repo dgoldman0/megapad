@@ -6503,6 +6503,39 @@ class TestKDOSAllocator(_KDOSTestBase):
         self.assertTrue(len(nums) >= 2)
         self.assertEqual(nums[-2], nums[-1])
 
+    # -- Heap guard / HEAP-CHECK tests ------------------------------------
+
+    def test_heap_check_safe(self):
+        """HEAP-CHECK returns true on a normal heap."""
+        text = self._run_kdos(["HEAP-CHECK ."])
+        self.assertIn("-1 ", text)
+
+    def test_heap_guard_constant(self):
+        """HEAP-GUARD constant equals 4096."""
+        text = self._run_kdos(["HEAP-GUARD ."])
+        self.assertIn("4096 ", text)
+
+    def test_heap_info_shows_safe(self):
+        """.HEAP now includes a safe= field."""
+        text = self._run_kdos([".HEAP"])
+        self.assertIn("safe=", text)
+        self.assertIn("yes", text)
+
+    def test_allocate_huge_fails(self):
+        """Allocating more than available fails cleanly (ior=-1)."""
+        text = self._run_kdos([
+            "999999999 ALLOCATE . DROP",  # print ior, discard addr
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_heap_check_after_alloc(self):
+        """HEAP-CHECK still true after moderate allocation."""
+        text = self._run_kdos([
+            "1024 ALLOCATE DROP FREE",
+            "HEAP-CHECK .",
+        ])
+        self.assertIn("-1 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
