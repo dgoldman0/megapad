@@ -5055,39 +5055,40 @@ w_timer_ack:
 ; MS@ ( -- ms-u64 )
 ;   Read 64-bit monotonic uptime in milliseconds.
 ;   Reading byte 0 latches the full 64-bit value.
+;   Uses ONLY scratch registers: R0 (byte), R1 (accum), R9 (shift), R11 (addr).
 w_ms_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B00   ; RTC UPTIME (+0)
-    ld.b r1, r11                        ; byte 0 (triggers latch)
+    ld.b r1, r11                        ; byte 0 → R1 (triggers latch)
     addi r11, 1
-    ld.b r2, r11                        ; byte 1
+    ld.b r0, r11                        ; byte 1
+    lsli r0, 8
+    or r1, r0
     addi r11, 1
-    ld.b r8, r11                        ; byte 2
+    ld.b r0, r11                        ; byte 2
+    lsli r0, 16
+    or r1, r0
     addi r11, 1
-    ld.b r4, r11                        ; byte 3
+    ld.b r0, r11                        ; byte 3
+    ldi r9, 24
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r5, r11                        ; byte 4
+    ld.b r0, r11                        ; byte 4
+    ldi64 r9, 32
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r6, r11                        ; byte 5
+    ld.b r0, r11                        ; byte 5
+    ldi64 r9, 40
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r7, r11                        ; byte 6
+    ld.b r0, r11                        ; byte 6
+    ldi64 r9, 48
+    shl r0, r9
+    or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 7
-    ; Assemble 64-bit value: r1 = result
-    lsli r2, 8
-    or r1, r2
-    lsli r8, 16
-    or r1, r8
-    lsli r4, 24
-    or r1, r4
-    ldi64 r9, 32
-    shl r5, r9
-    or r1, r5
-    ldi64 r9, 40
-    shl r6, r9
-    or r1, r6
-    ldi64 r9, 48
-    shl r7, r9
-    or r1, r7
     ldi64 r9, 56
     shl r0, r9
     or r1, r0
@@ -5099,39 +5100,40 @@ w_ms_fetch:
 ; EPOCH@ ( -- epoch-ms-u64 )
 ;   Read 64-bit epoch ms (ms since Unix epoch).
 ;   Reading byte 8 latches the full 64-bit value.
+;   Uses ONLY scratch registers: R0 (byte), R1 (accum), R9 (shift), R11 (addr).
 w_epoch_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B08   ; RTC EPOCH (+8)
-    ld.b r1, r11                        ; byte 0 (triggers latch)
+    ld.b r1, r11                        ; byte 0 → R1 (triggers latch)
     addi r11, 1
-    ld.b r2, r11                        ; byte 1
+    ld.b r0, r11                        ; byte 1
+    lsli r0, 8
+    or r1, r0
     addi r11, 1
-    ld.b r8, r11                        ; byte 2
+    ld.b r0, r11                        ; byte 2
+    lsli r0, 16
+    or r1, r0
     addi r11, 1
-    ld.b r4, r11                        ; byte 3
+    ld.b r0, r11                        ; byte 3
+    ldi r9, 24
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r5, r11                        ; byte 4
+    ld.b r0, r11                        ; byte 4
+    ldi64 r9, 32
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r6, r11                        ; byte 5
+    ld.b r0, r11                        ; byte 5
+    ldi64 r9, 40
+    shl r0, r9
+    or r1, r0
     addi r11, 1
-    ld.b r7, r11                        ; byte 6
+    ld.b r0, r11                        ; byte 6
+    ldi64 r9, 48
+    shl r0, r9
+    or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 7
-    ; Assemble 64-bit value: r1 = result
-    lsli r2, 8
-    or r1, r2
-    lsli r8, 16
-    or r1, r8
-    lsli r4, 24
-    or r1, r4
-    ldi64 r9, 32
-    shl r5, r9
-    or r1, r5
-    ldi64 r9, 40
-    shl r6, r9
-    or r1, r6
-    ldi64 r9, 48
-    shl r7, r9
-    or r1, r7
     ldi64 r9, 56
     shl r0, r9
     or r1, r0
@@ -5142,74 +5144,78 @@ w_epoch_fetch:
 
 ; RTC@ ( -- sec min hour day mon year dow )
 ;   Read all seven RTC calendar fields onto the data stack.
+;   Uses ONLY scratch registers: R0, R1, R11 (addr).
+;   Reads each field and pushes it immediately.
 w_rtc_fetch:
     ldi64 r11, 0xFFFF_FF00_0000_0B10   ; RTC calendar base (+0x10)
     ld.b r1, r11                        ; SEC (+10)
-    addi r11, 1
-    ld.b r2, r11                        ; MIN (+11)
-    addi r11, 1
-    ld.b r8, r11                        ; HOUR (+12)
-    addi r11, 1
-    ld.b r4, r11                        ; DAY (+13)
-    addi r11, 1
-    ld.b r5, r11                        ; MON (+14)
-    addi r11, 1
-    ld.b r6, r11                        ; YEAR_LO (+15)
-    addi r11, 1
-    ld.b r7, r11                        ; YEAR_HI (+16)
-    lsli r7, 8
-    or r6, r7                           ; year = (hi<<8)|lo
-    addi r11, 1
-    ld.b r7, r11                        ; DOW (+17)
-    ; Push: sec min hour day mon year dow (TOS=dow)
     subi r14, 8
-    str r14, r1                         ; sec
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; MIN (+11)
     subi r14, 8
-    str r14, r2                         ; min
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; HOUR (+12)
     subi r14, 8
-    str r14, r8                         ; hour
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; DAY (+13)
     subi r14, 8
-    str r14, r4                         ; day
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; MON (+14)
     subi r14, 8
-    str r14, r5                         ; mon
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; YEAR_LO (+15)
+    addi r11, 1
+    ld.b r0, r11                        ; YEAR_HI (+16)
+    lsli r0, 8
+    or r1, r0                           ; year = (hi<<8)|lo
     subi r14, 8
-    str r14, r6                         ; year
+    str r14, r1
+    addi r11, 1
+    ld.b r1, r11                        ; DOW (+17)
     subi r14, 8
-    str r14, r7                         ; dow
+    str r14, r1
     ret.l
 
 ; RTC! ( sec min hour day mon year -- )
 ;   Set the RTC calendar fields from the stack.
+;   Uses ONLY scratch registers: R0, R1, R7, R9, R12, R13, R11 (addr).
 w_rtc_store:
     ldi64 r11, 0xFFFF_FF00_0000_0B10   ; RTC calendar base (+0x10)
-    ldn r6, r14                         ; year
+    ; Pop all 6 values into scratch registers (TOS=year, deepest=sec)
+    ldn r7, r14                         ; year
     addi r14, 8
-    ldn r5, r14                         ; mon
+    ldn r13, r14                        ; mon
     addi r14, 8
-    ldn r4, r14                         ; day
+    ldn r12, r14                        ; day
     addi r14, 8
-    ldn r8, r14                         ; hour
+    ldn r9, r14                         ; hour
     addi r14, 8
-    ldn r2, r14                         ; min
+    ldn r0, r14                         ; min
     addi r14, 8
     ldn r1, r14                         ; sec
     addi r14, 8
+    ; Write in register order to MMIO
     st.b r11, r1                        ; SEC (+10)
     addi r11, 1
-    st.b r11, r2                        ; MIN (+11)
+    st.b r11, r0                        ; MIN (+11)
     addi r11, 1
-    st.b r11, r8                        ; HOUR (+12)
+    st.b r11, r9                        ; HOUR (+12)
     addi r11, 1
-    st.b r11, r4                        ; DAY (+13)
+    st.b r11, r12                       ; DAY (+13)
     addi r11, 1
-    st.b r11, r5                        ; MON (+14)
+    st.b r11, r13                       ; MON (+14)
     addi r11, 1
     ; Write year as two bytes
-    mov r7, r6
-    st.b r11, r7                        ; YEAR_LO (+15)
+    mov r0, r7
+    st.b r11, r0                        ; YEAR_LO (+15)
     addi r11, 1
-    lsri r7, 8
-    st.b r11, r7                        ; YEAR_HI (+16)
+    lsri r0, 8
+    st.b r11, r0                        ; YEAR_HI (+16)
     ret.l
 
 ; RTC-CTRL! ( ctrl -- )  write RTC CTRL register
