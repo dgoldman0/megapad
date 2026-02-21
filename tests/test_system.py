@@ -6988,6 +6988,163 @@ class TestKDOSArena(_KDOSTestBase):
         self.assertEqual(int(f1.group(1)), int(f2.group(1)),
                          f"Heap not reclaimed: {f1.group(1)} → {f2.group(1)}")
 
+    # -- Phase 2: Multi-source arenas --
+
+    def test_arena_xmem_create(self):
+        """ARENA-NEW with A-XMEM should succeed and report source 1."""
+        text = self._run_kdos([
+            '4096 A-XMEM ARENA-NEW',
+            'CR ." [IOR=" . ." ]"',
+            'CR ." [SRC=" DUP A.SOURCE @ . ." ]"',
+            'CR ." [SZ=" DUP A.SIZE @ . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[IOR=0', text, f"XMEM arena create failed: {text}")
+        self.assertIn('[SRC=1', text, f"Wrong source: {text}")
+        self.assertIn('[SZ=4096', text, f"Wrong size: {text}")
+
+    def test_arena_hbw_create(self):
+        """ARENA-NEW with A-HBW should succeed and report source 2."""
+        text = self._run_kdos([
+            '8192 A-HBW ARENA-NEW',
+            'CR ." [IOR=" . ." ]"',
+            'CR ." [SRC=" DUP A.SOURCE @ . ." ]"',
+            'CR ." [SZ=" DUP A.SIZE @ . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[IOR=0', text, f"HBW arena create failed: {text}")
+        self.assertIn('[SRC=2', text, f"Wrong source: {text}")
+        self.assertIn('[SZ=8192', text, f"Wrong size: {text}")
+
+    def test_arena_xmem_allot_and_write(self):
+        """Allocate from XMEM arena, write, read back."""
+        text = self._run_kdos([
+            '4096 A-XMEM ARENA-NEW DROP',
+            'DUP 64 ARENA-ALLOT',      # allot 64 bytes
+            '12345 OVER !',            # write a value
+            'CR ." [V=" @ . ." ]"',    # read back
+            'CR ." [USED=" DUP ARENA-USED . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[V=12345', text, f"Read-back failed: {text}")
+        self.assertIn('[USED=64', text, f"Wrong used: {text}")
+
+    def test_arena_hbw_allot_and_write(self):
+        """Allocate from HBW arena, write, read back."""
+        text = self._run_kdos([
+            '4096 A-HBW ARENA-NEW DROP',
+            'DUP 8 ARENA-ALLOT',       # allot 8 bytes
+            '99999 OVER !',            # write a value
+            'CR ." [V=" @ . ." ]"',    # read back
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[V=99999', text, f"Read-back failed: {text}")
+
+    def test_arena_xmem_destroy_zeroes_descriptor(self):
+        """After ARENA-DESTROY, XMEM arena descriptor is zeroed."""
+        text = self._run_kdos([
+            '2048 A-XMEM ARENA-NEW DROP',
+            'ARENA-DESTROY',
+            # Re-read the descriptor base through HERE-based pointer
+            # just stored arena addr.  The destroy already zeroed it,
+            # so re-read the same addr.  We'll use a variable.
+        ])
+        # Just verify it doesn't crash.  Further check below:
+        text2 = self._run_kdos([
+            'VARIABLE MY-AR',
+            '2048 A-XMEM ARENA-NEW DROP MY-AR !',
+            'MY-AR @ ARENA-DESTROY',
+            'CR ." [B=" MY-AR @ @ . ." ]"',   # base should be 0
+        ])
+        self.assertIn('[B=0', text2, f"Descriptor not zeroed: {text2}")
+
+    # -- Phase 2: Snapshots --
+
+    def test_arena_snap_rollback_basic(self):
+        """ARENA-SNAP / ARENA-ROLLBACK rewinds bump pointer."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP 100 ARENA-ALLOT DROP',          # allot 100 (aligned to 104)
+            'CR ." [U1=" DUP ARENA-USED . ." ]"',
+            'DUP ARENA-SNAP',                     # save snapshot
+            'OVER 200 ARENA-ALLOT DROP',          # allot 200 more
+            'CR ." [U2=" OVER ARENA-USED . ." ]"',
+            'OVER SWAP ARENA-ROLLBACK',           # rollback
+            'CR ." [U3=" DUP ARENA-USED . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        import re
+        u1 = re.search(r'\[U1=(\d+)', text)
+        u2 = re.search(r'\[U2=(\d+)', text)
+        u3 = re.search(r'\[U3=(\d+)', text)
+        self.assertTrue(u1 and u2 and u3, f"Parse failed: {text}")
+        self.assertEqual(int(u1.group(1)), int(u3.group(1)),
+                         f"Rollback didn't restore: {text}")
+        self.assertGreater(int(u2.group(1)), int(u1.group(1)),
+                           f"Second allot didn't increase used: {text}")
+
+    def test_arena_snap_nested(self):
+        """Nested snapshots each rollback to their own point."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP 64 ARENA-ALLOT DROP',
+            'DUP ARENA-SNAP',                    # snap1
+            'OVER 64 ARENA-ALLOT DROP',
+            'OVER ARENA-SNAP',                   # snap2
+            '2 PICK 64 ARENA-ALLOT DROP',
+            'CR ." [U=" 2 PICK ARENA-USED . ." ]"',  # should be 192 (3*64)
+            '2 PICK SWAP ARENA-ROLLBACK',        # rollback to snap2
+            'CR ." [V=" OVER ARENA-USED . ." ]"', # should be 128
+            'OVER SWAP ARENA-ROLLBACK',           # rollback to snap1
+            'CR ." [W=" DUP ARENA-USED . ." ]"',  # should be 64
+            'ARENA-DESTROY',
+        ])
+        import re
+        u = re.search(r'\[U=(\d+)', text)
+        v = re.search(r'\[V=(\d+)', text)
+        w = re.search(r'\[W=(\d+)', text)
+        self.assertTrue(u and v and w, f"Parse failed: {text}")
+        self.assertEqual(int(u.group(1)), 192, f"Expected 192: {text}")
+        self.assertEqual(int(v.group(1)), 128, f"Expected 128: {text}")
+        self.assertEqual(int(w.group(1)), 64, f"Expected 64: {text}")
+
+    def test_arena_snap_drop_noop(self):
+        """ARENA-SNAP-DROP simply drops the value without error."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP ARENA-SNAP',
+            'ARENA-SNAP-DROP',
+            'CR ." [OK]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[OK]', text, f"SNAP-DROP failed: {text}")
+
+    def test_arena_xmem_snap_rollback(self):
+        """Snapshots work on XMEM-backed arenas too."""
+        text = self._run_kdos([
+            '4096 A-XMEM ARENA-NEW DROP',
+            'DUP 256 ARENA-ALLOT DROP',
+            'DUP ARENA-SNAP',
+            'OVER 256 ARENA-ALLOT DROP',
+            'CR ." [BEFORE=" OVER ARENA-USED . ." ]"',
+            'OVER SWAP ARENA-ROLLBACK',
+            'CR ." [AFTER=" DUP ARENA-USED . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[BEFORE=512', text, f"Pre-rollback wrong: {text}")
+        self.assertIn('[AFTER=256', text, f"Post-rollback wrong: {text}")
+
+    def test_arena_source_constants(self):
+        """A-HEAP, A-XMEM, A-HBW have correct values."""
+        text = self._run_kdos([
+            'CR ." [H=" A-HEAP . ." ]"',
+            'CR ." [X=" A-XMEM . ." ]"',
+            'CR ." [B=" A-HBW . ." ]"',
+        ])
+        self.assertIn('[H=0', text, f"A-HEAP wrong: {text}")
+        self.assertIn('[X=1', text, f"A-XMEM wrong: {text}")
+        self.assertIn('[B=2', text, f"A-HBW wrong: {text}")
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
