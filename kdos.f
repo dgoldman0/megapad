@@ -2208,6 +2208,68 @@ VARIABLE BDESC
     2DROP ;
 
 \ =====================================================================
+\  §2.1  Arena–Buffer Integration
+\ =====================================================================
+\
+\  Extends the arena allocator with buffer support.
+\  Must come after §2 so BUF-HEAD / BUF-COUNT are available.
+
+VARIABLE AB-AR      \ scratch: arena address
+VARIABLE AB-DESC    \ scratch: descriptor address
+
+\ (AR-UNREG-BUFS) ( base limit -- )
+\   Walk BUF-HEAD linked list.  Unlink every node whose descriptor
+\   address falls in [base, limit).  O(n) in registered buffers.
+: (AR-UNREG-BUFS)  ( base limit -- )
+    BUF-HEAD      ( base limit pp )      \ pp = pointer-to-pointer
+    BEGIN  DUP @ 0<>  WHILE              ( base limit pp )
+        DUP @                            ( base limit pp node )
+        DUP @                            ( base limit pp node desc )
+        4 PICK OVER > 0=                 ( base limit pp node desc base<=desc )
+        SWAP 4 PICK <                    ( base limit pp node base<=desc desc<lim )
+        AND IF
+            \ unlink: *pp = node.next
+            8 + @  OVER !               ( base limit pp )
+            -1 BUF-COUNT +!
+        ELSE
+            \ keep: advance pp = &(node.next)
+            NIP 8 +                     ( base limit pp' )
+        THEN
+    REPEAT
+    DROP 2DROP ;
+
+\ Redefine ARENA-DESTROY to also unregister arena-scoped buffers.
+: ARENA-DESTROY  ( arena -- )
+    DUP A.BASE @  OVER A.SIZE @ OVER + ( arena base limit )
+    (AR-UNREG-BUFS)                     ( arena )
+    DUP A.BASE @  OVER A.SOURCE @      ( arena addr source )
+    (AR-FREE-BACKING)                   ( arena )
+    0 OVER !  0 OVER 8 + !             \ zero base, size
+    0 OVER 16 + !  0 SWAP 24 + ! ;     \ zero ptr, source
+
+\ ARENA-BUFFER ( type width length arena "name" -- )
+\   Like BUFFER, but both descriptor and data are arena-allocated.
+\   Registered in BUF-HEAD; auto-unregistered by ARENA-DESTROY.
+: ARENA-BUFFER  ( type width length arena "name" -- )
+    AB-AR !                              ( type width length )
+    AB-AR @ 32 ARENA-ALLOT AB-DESC !     ( type width length )
+    \ Store length at +16
+    DUP AB-DESC @ 16 + !                ( type width length )
+    \ data-bytes = length * width
+    OVER *                               ( type width data-bytes )
+    \ Store width at +8
+    SWAP AB-DESC @ 8 + !                 ( type data-bytes )
+    \ Store type at +0
+    SWAP AB-DESC @ !                     ( data-bytes )
+    \ Allocate data from arena (8-byte aligned)
+    7 + -8 AND
+    AB-AR @ SWAP ARENA-ALLOT             ( data-addr )
+    AB-DESC @ 24 + !                     ( )
+    \ Register in buffer list and define constant
+    AB-DESC @ (BUF-REG)
+    AB-DESC @ CONSTANT ;
+
+\ =====================================================================
 \  §3  Tile-Aware Buffer Operations
 \ =====================================================================
 \

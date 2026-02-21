@@ -7210,6 +7210,103 @@ class TestKDOSArena(_KDOSTestBase):
         ])
         self.assertIn('[D=4', text, f"Depth wrong: {text}")
 
+    # -- Phase 4: Arena-scoped buffers --
+
+    def test_arena_buffer_create(self):
+        """ARENA-BUFFER creates a buffer inside the arena."""
+        text = self._run_kdos([
+            'VARIABLE MY-AR',
+            '4096 A-HEAP ARENA-NEW DROP MY-AR !',
+            '0 1 128 MY-AR @ ARENA-BUFFER test-buf',
+            'CR ." [T=" test-buf B.TYPE . ." ]"',
+            'CR ." [W=" test-buf B.WIDTH . ." ]"',
+            'CR ." [L=" test-buf B.LEN . ." ]"',
+            'CR ." [D=" test-buf B.DATA . ." ]"',
+            'CR ." [BC=" BUF-COUNT @ . ." ]"',
+            'MY-AR @ ARENA-DESTROY',
+        ])
+        self.assertIn('[T=0', text, f"Type wrong: {text}")
+        self.assertIn('[W=1', text, f"Width wrong: {text}")
+        self.assertIn('[L=128', text, f"Length wrong: {text}")
+        # data addr should be non-zero
+        import re
+        d = re.search(r'\[D=(\d+)', text)
+        self.assertTrue(d and int(d.group(1)) > 0,
+                        f"Data addr should be >0: {text}")
+
+    def test_arena_buffer_write_read(self):
+        """Write to and read from an arena-scoped buffer."""
+        text = self._run_kdos([
+            'VARIABLE MY-AR',
+            '4096 A-HEAP ARENA-NEW DROP MY-AR !',
+            '0 8 16 MY-AR @ ARENA-BUFFER arr',
+            '42 arr B.DATA !',
+            '99 arr B.DATA 8 + !',
+            'CR ." [V0=" arr B.DATA @ . ." ]"',
+            'CR ." [V1=" arr B.DATA 8 + @ . ." ]"',
+            'MY-AR @ ARENA-DESTROY',
+        ])
+        self.assertIn('[V0=42', text, f"V0 wrong: {text}")
+        self.assertIn('[V1=99', text, f"V1 wrong: {text}")
+
+    def test_arena_buffer_unreg_on_destroy(self):
+        """ARENA-DESTROY unregisters arena-scoped buffers from BUF list."""
+        text = self._run_kdos([
+            'VARIABLE MY-AR',
+            'CR ." [BC0=" BUF-COUNT @ . ." ]"',
+            '4096 A-HEAP ARENA-NEW DROP MY-AR !',
+            '0 1 64 MY-AR @ ARENA-BUFFER tmp-buf',
+            'CR ." [BC1=" BUF-COUNT @ . ." ]"',
+            'MY-AR @ ARENA-DESTROY',
+            'CR ." [BC2=" BUF-COUNT @ . ." ]"',
+        ])
+        import re
+        bc0 = re.search(r'\[BC0=(\d+)', text)
+        bc1 = re.search(r'\[BC1=(\d+)', text)
+        bc2 = re.search(r'\[BC2=(\d+)', text)
+        self.assertTrue(bc0 and bc1 and bc2, f"Parse failed: {text}")
+        self.assertEqual(int(bc1.group(1)), int(bc0.group(1)) + 1,
+                         f"Buffer not registered: {text}")
+        self.assertEqual(int(bc2.group(1)), int(bc0.group(1)),
+                         f"Buffer not unregistered on destroy: {text}")
+
+    def test_arena_buffer_multiple_unreg(self):
+        """Multiple arena buffers are all unregistered on destroy."""
+        text = self._run_kdos([
+            'VARIABLE MY-AR',
+            'CR ." [BC0=" BUF-COUNT @ . ." ]"',
+            '8192 A-HEAP ARENA-NEW DROP MY-AR !',
+            '0 1 32 MY-AR @ ARENA-BUFFER b1',
+            '0 1 32 MY-AR @ ARENA-BUFFER b2',
+            '0 1 32 MY-AR @ ARENA-BUFFER b3',
+            'CR ." [BC1=" BUF-COUNT @ . ." ]"',
+            'MY-AR @ ARENA-DESTROY',
+            'CR ." [BC2=" BUF-COUNT @ . ." ]"',
+        ])
+        import re
+        bc0 = re.search(r'\[BC0=(\d+)', text)
+        bc1 = re.search(r'\[BC1=(\d+)', text)
+        bc2 = re.search(r'\[BC2=(\d+)', text)
+        self.assertTrue(bc0 and bc1 and bc2, f"Parse failed: {text}")
+        self.assertEqual(int(bc1.group(1)), int(bc0.group(1)) + 3,
+                         f"3 buffers not registered: {text}")
+        self.assertEqual(int(bc2.group(1)), int(bc0.group(1)),
+                         f"Buffers not unregistered: {text}")
+
+    def test_arena_buffer_xmem(self):
+        """ARENA-BUFFER works with XMEM-backed arenas."""
+        text = self._run_kdos([
+            'VARIABLE MY-AR',
+            '8192 A-XMEM ARENA-NEW DROP MY-AR !',
+            '0 8 64 MY-AR @ ARENA-BUFFER xbuf',
+            'CR ." [L=" xbuf B.LEN . ." ]"',
+            '12345 xbuf B.DATA !',
+            'CR ." [V=" xbuf B.DATA @ . ." ]"',
+            'MY-AR @ ARENA-DESTROY',
+        ])
+        self.assertIn('[L=64', text, f"Length wrong: {text}")
+        self.assertIn('[V=12345', text, f"Read-back wrong: {text}")
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
