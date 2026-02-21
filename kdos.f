@@ -2034,6 +2034,32 @@ VARIABLE AR-BLK    \ backing block address
 : ARENA-SNAP-DROP  ( snap -- )
     DROP ;
 
+\ -- Scoped arena stack: implicit "current arena" for polymorphic code --
+
+4 CONSTANT ARENA-STK-DEPTH       \ max nesting depth
+CREATE ARENA-STK  ARENA-STK-DEPTH 8 * ALLOT
+VARIABLE ARENA-SP   0 ARENA-SP !  \ stack pointer (0 = empty)
+
+\ CURRENT-ARENA ( -- arena )  return the arena on top of stack
+: CURRENT-ARENA  ( -- arena )
+    ARENA-SP @ 0= ABORT" no current arena"
+    ARENA-STK  ARENA-SP @ 1- 8 * + @ ;
+
+\ ARENA-PUSH ( arena -- )  push arena onto the scoped stack
+: ARENA-PUSH  ( arena -- )
+    ARENA-SP @ ARENA-STK-DEPTH >= ABORT" arena stack full"
+    ARENA-STK  ARENA-SP @ 8 * + !
+    1 ARENA-SP +! ;
+
+\ ARENA-POP ( -- )  pop the current arena from the scoped stack
+: ARENA-POP  ( -- )
+    ARENA-SP @ 0= ABORT" arena stack underflow"
+    -1 ARENA-SP +! ;
+
+\ AALLOT ( u -- addr )  allocate from current arena
+: AALLOT  ( u -- addr )
+    CURRENT-ARENA SWAP ARENA-ALLOT ;
+
 \ .ARENA ( arena -- )  print arena status
 : .ARENA  ( arena -- )
     ." Arena: base=" DUP A.BASE @ .

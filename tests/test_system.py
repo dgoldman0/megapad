@@ -7145,6 +7145,71 @@ class TestKDOSArena(_KDOSTestBase):
         self.assertIn('[X=1', text, f"A-XMEM wrong: {text}")
         self.assertIn('[B=2', text, f"A-HBW wrong: {text}")
 
+    # -- Phase 3: Scoped arena stack --
+
+    def test_arena_push_pop_basic(self):
+        """ARENA-PUSH / ARENA-POP manages the current arena."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP ARENA-PUSH',
+            'CR ." [CUR=" CURRENT-ARENA A.SIZE @ . ." ]"',
+            'ARENA-POP',
+            'CR ." [OK]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[CUR=4096', text, f"Wrong current: {text}")
+        self.assertIn('[OK]', text, f"Pop failed: {text}")
+
+    def test_aallot_uses_current_arena(self):
+        """AALLOT allocates from the pushed arena."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP ARENA-PUSH',
+            '64 AALLOT DROP',
+            'CR ." [U=" CURRENT-ARENA ARENA-USED . ." ]"',
+            'ARENA-POP',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[U=64', text, f"AALLOT wrong: {text}")
+
+    def test_arena_push_nested(self):
+        """Nested ARENA-PUSH switches current arena correctly."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',    # arena1
+            '2048 A-HEAP ARENA-NEW DROP',    # arena2
+            'OVER ARENA-PUSH',               # push arena1
+            '64 AALLOT DROP',                # allot in arena1
+            'DUP ARENA-PUSH',                # push arena2
+            '128 AALLOT DROP',               # allot in arena2
+            'CR ." [A2=" CURRENT-ARENA ARENA-USED . ." ]"',
+            'ARENA-POP',                     # back to arena1
+            'CR ." [A1=" CURRENT-ARENA ARENA-USED . ." ]"',
+            'ARENA-POP',
+            'ARENA-DESTROY ARENA-DESTROY',
+        ])
+        self.assertIn('[A2=128', text, f"Arena2 wrong: {text}")
+        self.assertIn('[A1=64', text, f"Arena1 wrong: {text}")
+
+    def test_arena_polymorphic_word(self):
+        """Allocation-polymorphic word works with different arenas."""
+        text = self._run_kdos([
+            ': MY-ALLOC 8 AALLOT ;',
+            '4096 A-HEAP ARENA-NEW DROP',
+            'DUP ARENA-PUSH',
+            'MY-ALLOC 42 SWAP !',
+            'ARENA-POP',
+            'CR ." [U=" DUP ARENA-USED . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[U=8', text, f"Polymorphic alloc wrong: {text}")
+
+    def test_arena_stack_depth_constant(self):
+        """ARENA-STK-DEPTH is 4."""
+        text = self._run_kdos([
+            'CR ." [D=" ARENA-STK-DEPTH . ." ]"',
+        ])
+        self.assertIn('[D=4', text, f"Depth wrong: {text}")
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
