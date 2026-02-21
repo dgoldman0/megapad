@@ -649,6 +649,23 @@ and adds post-quantum cryptographic primitives.
     Phase 3 = ~1 hour, Phase 4 = ~1.5 hours.  Total: ~5 hours.
     Each phase is independently shippable.
 
+49. ✅ **STC compiler hardening** — Runtime checks for silent
+    corruption bugs in the STC (subroutine-threaded) Forth compiler.
+    - 49a. ✅ `check_branch16` subroutine: validates that branch
+           offsets fit in 16-bit signed range (−32768..+32767) before
+           emitting LBR-family instructions.  Aborts with "Branch
+           offset overflow" instead of silently truncating.
+           Uses R0 as scratch (saved/restored via return stack R15).
+           Called from 10 control-flow words: `IF/THEN`, `ELSE`,
+           `BEGIN/UNTIL`, `BEGIN/WHILE/REPEAT`, `BEGIN/AGAIN`,
+           `DO/LOOP`, `DO/+LOOP`, `CASE/OF/ENDOF/ENDCASE`.
+    - 49b. ✅ LEAVE overflow check: aborts with "Too many LEAVEs
+           (max 8)" instead of silently skipping the LEAVE when the
+           leave-fixup table is full.
+    - 12 new tests in `TestKDOSCompilerChecks` covering all control
+      flow words plus overflow abort paths.
+      (commit `dd6e945`)
+
 ---
 
 ### Layer 6: Architecture & Portability (Items 39–42)
@@ -742,10 +759,11 @@ Layer 2  Items  9–18  Network Stack (Ethernet ✅ → ARP ✅ → IP ✅ → I
                       DHCP ✅ → DNS ✅ → TCP ✅ → TLS 1.3 ✅ → Socket API ✅) ✅ DONE
 Layer 3  Items 19–24  Multi-Core OS ✅ DONE (run queues, work stealing, affinity,
                       preemption, IPI, locks)
-Layer 4  Items 25–30, 45–47  Application-Level
+Layer 4  Items 25–30, 45–49  Application-Level
                       (net send ☐, FP16 ☐, QoS ✅, editor ☐,
                       scripting ☐, remote REPL ☐, SCROLL ☐,
-                      USB ☐, mem hardening ✅, arenas ☐ ← NEW)
+                      USB ☐, mem hardening ✅, arenas ✅,
+                      STC compiler hardening ✅)
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto ✅ DONE
                       (Field ALU, NTT engine, SHA-3 SHAKE streaming,
                       ML-KEM-512, Hybrid PQ key exchange)
@@ -769,7 +787,7 @@ continuous progress, reviewable diffs, and a working system at every step.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `bios.asm` | 11,158 | ✅ 291 dictionary entries |
+| `bios.asm` | 12,510 | ✅ 291 dictionary entries |
 | `kdos.f` | 8,296 | ✅ 653 colon defs, 405 vars/constants, §1–§17 |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `accel/mp64_accel.cpp` | 1,930 | ✅ C++ CPU core (pybind11, 63× speedup) |
@@ -781,7 +799,7 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `nic_backends.py` | 399 | ✅ Pluggable NIC backends (Loopback, UDP, TAP) |
 | `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |
-| `test_system.py` | 14,751 | 1,007 test methods (40 classes) ✅ |
+| `test_system.py` | 20,320 | 1,019 test methods (41 classes) ✅ |
 | `test_networking.py` | 860 | 38 real-network tests (8 classes) ✅ |
 | `setup_accel.py` | 35 | ✅ pybind11 build configuration |
 | `bench_accel.py` | 139 | ✅ C++ vs Python speed comparison |
