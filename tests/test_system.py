@@ -10452,6 +10452,126 @@ class TestKDOSCrypto(_KDOSTestBase):
         self.assertIn("VD=-1 ", text)
 
 
+class TestKDOSCompilerChecks(_KDOSTestBase):
+    """Tests for STC compiler overflow checks (branch range + LEAVE limit)."""
+
+    # -- Control flow regression (ensure range checks don't break normal code) --
+
+    def test_if_then_true(self):
+        """IF/THEN: true branch executes body."""
+        text = self._run_kdos_fast([
+            ": CK-IF IF 42 THEN ; 1 CK-IF .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_if_then_false(self):
+        """IF/THEN: false branch skips body."""
+        text = self._run_kdos_fast([
+            ': CK-IF2 IF ." YES" THEN ;',
+            '0 CK-IF2',
+        ])
+        # "YES" appears in the definition echo; check the call output only
+        call_output = text.split("0 CK-IF2")[-1]
+        self.assertNotIn("YES", call_output)
+
+    def test_if_else_then(self):
+        """IF/ELSE/THEN: selects correct branch."""
+        text = self._run_kdos_fast([
+            ": CK-IET IF 10 ELSE 20 THEN ;",
+            "1 CK-IET . 0 CK-IET .",
+        ])
+        self.assertIn("10 ", text)
+        self.assertIn("20 ", text)
+
+    def test_begin_until(self):
+        """BEGIN/UNTIL: loop counts correctly."""
+        text = self._run_kdos_fast([
+            ": CK-BU 0 BEGIN 1+ DUP 5 = UNTIL ; CK-BU .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_begin_while_repeat(self):
+        """BEGIN/WHILE/REPEAT: loop counts correctly."""
+        text = self._run_kdos_fast([
+            ": CK-BWR 0 BEGIN DUP 5 < WHILE 1+ REPEAT ; CK-BWR .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_begin_again(self):
+        """BEGIN/AGAIN: infinite loop with EXIT."""
+        text = self._run_kdos_fast([
+            ": CK-BA 0 BEGIN 1+ DUP 5 = IF EXIT THEN AGAIN ; CK-BA .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_do_loop(self):
+        """DO/LOOP: loop counts correctly."""
+        text = self._run_kdos_fast([
+            ": CK-DL 0 5 0 DO 1+ LOOP ; CK-DL .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_do_plus_loop(self):
+        """DO/+LOOP: loop with step 2."""
+        text = self._run_kdos_fast([
+            ": CK-DPL 0 6 0 DO 1+ 2 +LOOP ; CK-DPL .",
+        ])
+        self.assertIn("3 ", text)
+
+    def test_leave(self):
+        """LEAVE: exits loop early."""
+        text = self._run_kdos_fast([
+            ": CK-LV 0 10 0 DO I 3 = IF LEAVE THEN 1+ LOOP ; CK-LV .",
+        ])
+        self.assertIn("3 ", text)
+
+    def test_nested_if(self):
+        """Nested IF/THEN works correctly."""
+        text = self._run_kdos_fast([
+            ": CK-NIF DUP 0> IF DUP 5 < IF 1 ELSE 2 THEN ELSE 3 THEN ;",
+            "3 CK-NIF . -1 CK-NIF . 7 CK-NIF .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("3 ", text)
+        self.assertIn("2 ", text)
+
+    # -- LEAVE overflow detection --
+
+    def test_leave_overflow_aborts(self):
+        """More than 8 LEAVEs in one loop aborts compilation."""
+        text = self._run_kdos_fast([
+            ": CK-LVOF 10 0 DO"
+            " I 0 = IF LEAVE THEN"
+            " I 1 = IF LEAVE THEN"
+            " I 2 = IF LEAVE THEN"
+            " I 3 = IF LEAVE THEN"
+            " I 4 = IF LEAVE THEN"
+            " I 5 = IF LEAVE THEN"
+            " I 6 = IF LEAVE THEN"
+            " I 7 = IF LEAVE THEN"
+            " I 8 = IF LEAVE THEN"
+            " LOOP ;",
+        ])
+        self.assertIn("Too many LEAVEs", text)
+
+    def test_leave_exactly_8_ok(self):
+        """Exactly 8 LEAVEs in one loop compiles fine."""
+        text = self._run_kdos_fast([
+            ": CK-LV8 10 0 DO"
+            " I 0 = IF LEAVE THEN"
+            " I 1 = IF LEAVE THEN"
+            " I 2 = IF LEAVE THEN"
+            " I 3 = IF LEAVE THEN"
+            " I 4 = IF LEAVE THEN"
+            " I 5 = IF LEAVE THEN"
+            " I 6 = IF LEAVE THEN"
+            " I 7 = IF LEAVE THEN"
+            " LOOP ;",
+        ])
+        self.assertNotIn("Too many LEAVEs", text)
+        self.assertNotIn("?", text)
+
+
 class TestKDOSHardening(_KDOSTestBase):
     """Phase 3.2 tests: SCREENS TUI rendering and disk-only boot."""
 

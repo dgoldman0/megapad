@@ -2255,6 +2255,43 @@ w_semicolon:
     ret.l
 
 ; =====================================================================
+;  Branch range check — shared by all control-flow words
+; =====================================================================
+; check_branch16 — abort if R1 (signed 64-bit offset) doesn't fit
+;   in a signed 16-bit field (−32768 .. +32767).
+;   Clobbers R11 only; saves/restores R0 on return stack.
+;   MUST NOT touch R3 (PC via PSEL), R8 (UART base),
+;   R9, R13 (used by some callers).
+check_branch16:
+    ; Check R1 >= -32768 AND R1 <= 32767.
+    ; Add 0x8000 and check < 0x10000.
+    ; Clobbers R11 only.  Saves/restores R0 on return stack.
+    ; MUST NOT touch R3 (= PC via PSEL), R8 (UART base),
+    ;   R9, R13 (used by some callers), or R15 other than push/pop.
+    subi r15, 8
+    str r15, r0               ; save R0
+    mov r0, r1
+    ldi64 r11, 32768
+    add r0, r11               ; r0 = offset + 32768
+    ldi64 r11, 65536
+    cmp r0, r11
+    brcc check_branch16_ok    ; C=0: r0 < 65536 → in range
+    ; OUT OF RANGE — restore R0, then abort
+    ldn r0, r15
+    addi r15, 8
+    ldi64 r10, str_branch_overflow
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11
+    ; unreachable
+check_branch16_ok:
+    ldn r0, r15
+    addi r15, 8
+check_branch16_done:
+    ret.l                     ; in range — return normally
+
+; =====================================================================
 ;  Control Flow (all IMMEDIATE)
 ; =====================================================================
 
@@ -2384,6 +2421,9 @@ w_else:
     mov r1, r0
     sub r1, r9                ; r1 = target - fixup_addr
     subi r1, 2                ; r1 = target - (fixup_addr + 2)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
     ; Patch the 16-bit offset (big-endian: high byte first)
     mov r7, r1
     lsri r7, 8
@@ -2407,6 +2447,9 @@ w_then:
     mov r1, r0
     sub r1, r9                ; r1 = target - fixup_addr
     subi r1, 2                ; r1 = target - (fixup_addr + 2)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
     ; Patch 16-bit big-endian offset
     mov r7, r1
     lsri r7, 8
@@ -2506,6 +2549,9 @@ w_until:
     mov r1, r9
     sub r1, r0
     subi r1, 3                ; offset = target - (HERE + 3)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
     ; Compile lbreq (0x41) + 16-bit big-endian offset
     ldi r7, 0x41
     st.b r0, r7
@@ -2594,6 +2640,9 @@ w_repeat:
     mov r1, r9
     sub r1, r0
     subi r1, 2                ; offset = begin-addr - (R0 + 2) = begin-addr - (opcode+3)
+    ; Range check (backward branch)
+    ldi64 r11, check_branch16
+    call.l r11
     ; store 16-bit big-endian offset
     mov r7, r1
     lsri r7, 8
@@ -2611,6 +2660,9 @@ w_repeat:
     mov r1, r0
     sub r1, r13
     subi r1, 2                ; offset = target - (fixup_addr + 2)
+    ; Range check (forward branch)
+    ldi64 r11, check_branch16
+    call.l r11
     ; Patch big-endian: high byte first
     mov r7, r1
     lsri r7, 8
@@ -2724,6 +2776,9 @@ w_endcase_loop:
     mov r1, r0
     sub r1, r9                ; r1 = HERE - fixup_addr
     subi r1, 2                ; r1 = HERE - (fixup_addr + 2)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
     ; Patch big-endian offset
     mov r7, r1
     lsri r7, 8
@@ -3056,6 +3111,9 @@ w_loop:
     mov r1, r9
     sub r1, r0
     subi r1, 2                ; offset = target - (R0 + 2) = target - (opcode+3)
+    ; Range check (backward branch to loop-top)
+    ldi64 r11, check_branch16
+    call.l r11
     ; Write big-endian: high byte first, then low byte
     mov r7, r1
     lsri r7, 8
@@ -3374,6 +3432,9 @@ w_plus_loop:
     mov r1, r9
     sub r1, r0
     subi r1, 2                ; offset = target - (opcode_addr+3)
+    ; Range check (backward branch to loop-top)
+    ldi64 r11, check_branch16
+    call.l r11
     mov r7, r1
     lsri r7, 8
     st.b r0, r7               ; high byte
@@ -3436,6 +3497,9 @@ w_again:
     mov r1, r9
     sub r1, r0
     subi r1, 2                ; offset = target - (lbr_addr + 3)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
     mov r7, r1
     lsri r7, 8
     st.b r0, r7               ; high byte
@@ -5852,9 +5916,17 @@ w_leave:
     ; Store fixup in var_leave_fixups[leave_count]
     ldi64 r11, var_leave_count
     ldn r1, r11               ; count
-    ; count < 8 check
+    ; count < 8 check — abort if full (was silent, now fatal)
     cmpi r1, 8
-    brcs w_leave_done          ; C=1 means count >= 8, skip
+    brcc w_leave_ok            ; C=0 means count < 8, proceed
+    ; Too many LEAVEs — abort compilation
+    ldi64 r10, str_leave_overflow
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11
+    ; unreachable
+w_leave_ok:
     ; fixups[count] = fixup_addr (R13)
     mov r9, r1
     lsli r9, 3                ; count * 8
@@ -5864,7 +5936,6 @@ w_leave:
     ; leave_count++
     inc r1
     str r11, r1               ; update var_leave_count
-w_leave_done:
     ret.l
 
 ; 2/ ( n -- n/2 ) arithmetic shift right by 1
@@ -12389,6 +12460,10 @@ str_busfault:
     .asciiz "\n*** BUS FAULT @ "
 str_privfault:
     .asciiz "\n*** PRIVILEGE FAULT @ "
+str_branch_overflow:
+    .asciiz "Branch offset overflow\n"
+str_leave_overflow:
+    .asciiz "Too many LEAVEs (max 8)\n"
 
 ; =====================================================================
 ;  IVT (Interrupt Vector Table)
