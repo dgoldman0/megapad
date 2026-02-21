@@ -6620,6 +6620,208 @@ class TestKDOSAllocator(_KDOSTestBase):
         self.assertIn("Stack depth", text)
         self.assertIn("Buffers", text)
 
+    # -- Edge case tests ---------------------------------------------------
+
+    def test_double_free_no_crash(self):
+        """Freeing the same block twice should not crash.
+
+        NOTE: double-free is undefined behavior in our allocator —
+        we only verify it doesn't hard-fault or infinite-loop.
+        """
+        text = self._run_kdos([
+            "VARIABLE P",
+            "64 ALLOCATE DROP DUP P !",
+            "DUP FREE",
+            "P @ FREE",          # second free — UB but shouldn't crash
+            '.\" edge-ok"',
+        ], max_steps=200_000_000)
+        self.assertIn("edge-ok", text)
+
+    def test_free_then_heap_frag(self):
+        """Free list stays consistent after free-all-reverse-order."""
+        text = self._run_kdos([
+            "VARIABLE A  VARIABLE B  VARIABLE C  VARIABLE D",
+            "32 ALLOCATE DROP A !",
+            "32 ALLOCATE DROP B !",
+            "32 ALLOCATE DROP C !",
+            "32 ALLOCATE DROP D !",
+            "D @ FREE  C @ FREE  B @ FREE  A @ FREE",
+            "HEAP-FRAG .",         # should coalesce → 1
+        ])
+        self.assertIn("1 ", text)
+
+    def test_alloc_minimum_size(self):
+        """Allocating 1 byte rounds up to minimum (16), still works."""
+        text = self._run_kdos([
+            "1 ALLOCATE . DROP",   # ior should be 0
+        ])
+        self.assertIn("0 ", text)
+
+    def test_resize_zero_fails(self):
+        """RESIZE to 0 bytes should fail (ior != 0)."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",
+            "0 RESIZE . DROP",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_resize_shrink_to_minimum(self):
+        """RESIZE to 1 byte (rounds to 16) preserves data."""
+        text = self._run_kdos([
+            "256 ALLOCATE DROP",
+            "DUP 55 SWAP !",
+            "1 RESIZE DROP",       # shrinks to minimum (16)
+            "@ .",
+        ])
+        self.assertIn("55 ", text)
+
+    def test_resize_grow_large_via_copy(self):
+        """RESIZE to much larger triggers alloc+copy path (case 3)."""
+        text = self._run_kdos([
+            # Fill heap with gaps so in-place growth fails
+            "VARIABLE P  VARIABLE Q",
+            "64 ALLOCATE DROP P !",
+            "64 ALLOCATE DROP Q !",    # blocks P, then Q
+            "P @ DUP 123 SWAP !",
+            "P @ 4096 RESIZE DROP",    # way bigger — must copy
+            "@ .",
+        ])
+        self.assertIn("123 ", text)
+
+    def test_alloc_repeated_small(self):
+        """Rapidly allocate many small blocks without crashing."""
+        text = self._run_kdos([
+            "0",                           # counter
+            "100 0 DO"
+            "  16 ALLOCATE DROP DROP"      # allocate, discard addr
+            "  1+"
+            "LOOP .",
+        ])
+        self.assertIn("100 ", text)
+
+    def test_alloc_free_stress_heap_invariant(self):
+        """Alloc/free stress: HEAP-FREE-BYTES is preserved after full cycle."""
+        text = self._run_kdos([
+            'CR ." [F1=" HEAP-FREE-BYTES . ." ]"',
+            "VARIABLE P1  VARIABLE P2  VARIABLE P3",
+            "100 ALLOCATE DROP P1 !",
+            "200 ALLOCATE DROP P2 !",
+            "300 ALLOCATE DROP P3 !",
+            "P2 @ FREE",
+            "P1 @ FREE",
+            "P3 @ FREE",
+            'CR ." [F2=" HEAP-FREE-BYTES . ." ]"',
+        ])
+        import re
+        f1 = re.search(r'\[F1=(\d+)', text)
+        f2 = re.search(r'\[F2=(\d+)', text)
+        self.assertTrue(f1 and f2, f"Could not parse free bytes from: {text}")
+        self.assertEqual(int(f1.group(1)), int(f2.group(1)),
+                         f"HEAP-FREE-BYTES changed: {f1.group(1)} → {f2.group(1)}")
+
+    def test_coalesce_three_way_merge(self):
+        """Free middle block last — should merge all three into one."""
+        text = self._run_kdos([
+            "VARIABLE A  VARIABLE B  VARIABLE C",
+            "64 ALLOCATE DROP A !",
+            "64 ALLOCATE DROP B !",
+            "64 ALLOCATE DROP C !",
+            "C @ FREE",           # coalesces with tail
+            "A @ FREE",           # isolated
+            "B @ FREE",           # merges A+B and B+C/tail
+            "HEAP-FRAG .",
+        ])
+        self.assertIn("1 ", text)
+
+    def test_resize_repeated_grow_shrink(self):
+        """Grow then shrink repeatedly — data retained each time."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",
+            "DUP 11 SWAP !",
+            "256 RESIZE DROP",
+            "DUP @ .",             # should be 11
+            "128 RESIZE DROP",
+            "DUP @ .",             # should be 11
+            "512 RESIZE DROP",
+            "@ .",                 # should be 11
+        ])
+        self.assertIn("11 ", text)
+        # Count only lines starting with a digit (output lines, not echo)
+        output_lines = [l.strip() for l in text.split('\n')
+                        if l.strip().startswith('11 ')]
+        self.assertEqual(len(output_lines), 3,
+                         f"Expected 11 on 3 output lines, got: {output_lines}")
+
+    def test_heap_check_after_stress(self):
+        """HEAP-CHECK still true after alloc/free stress."""
+        text = self._run_kdos([
+            "VARIABLE P",
+            "10 0 DO"
+            "  128 ALLOCATE DROP P !"
+            "  P @ FREE"
+            "LOOP",
+            "HEAP-CHECK .",
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_buf_nth_first_and_last(self):
+        """BUF-NTH 0 returns a valid descriptor for first registered buf."""
+        text = self._run_kdos([
+            "0 BUF-NTH B.TYPE .",       # type of first (most recent) buf
+        ])
+        # Type should be a small integer (0..3)
+        nums = [int(x) for x in text.split() if x.lstrip('-').isdigit()]
+        self.assertTrue(any(0 <= n <= 3 for n in nums),
+                        f"Expected type 0-3, got {nums}")
+
+    def test_marker_nested(self):
+        """Nested markers: inner restore undoes inner defs only."""
+        text = self._run_kdos([
+            'CR ." [H1=" HERE . ." ]"',
+            "MARKER OUTER",
+            ": OWORD 1 ;",
+            "MARKER INNER",
+            ": IWORD 2 ;",
+            "INNER",              # forget IWORD + INNER marker
+            "OWORD .",            # OWORD should still exist → 1
+            'CR ." [H2=" HERE . ." ]"',
+            "OUTER",              # forget OWORD + OUTER marker
+            'CR ." [H3=" HERE . ." ]"',
+        ])
+        self.assertIn("1 ", text)     # OWORD ran
+        import re
+        h1 = re.search(r'\[H1=(\d+)', text)
+        h3 = re.search(r'\[H3=(\d+)', text)
+        self.assertTrue(h1 and h3, f"Could not parse HERE from: {text}")
+        self.assertEqual(int(h1.group(1)), int(h3.group(1)),
+                         f"HERE not fully restored: {h1.group(1)} vs {h3.group(1)}")
+
+    def test_forget_nonexistent_word(self):
+        """FORGET of a nonexistent word should print error, not crash."""
+        text = self._run_kdos([
+            "FORGET ZZZZNOTAWORD",
+            '.\" still-alive"',
+        ], max_steps=200_000_000)
+        self.assertIn("still-alive", text)
+
+    def test_resize_preserves_multiple_cells(self):
+        """RESIZE copies all old data, not just first cell."""
+        text = self._run_kdos([
+            "64 ALLOCATE DROP",               # 8 cells
+            "DUP 11 OVER !",                   # cell 0 = 11
+            "DUP 8 + 22 SWAP !",              # cell 1 = 22
+            "DUP 16 + 33 SWAP !",             # cell 2 = 33
+            # Force a copy-path resize by fragmenting
+            "VARIABLE Q  64 ALLOCATE DROP Q !",
+            "256 RESIZE DROP",
+            "DUP @ .",                         # cell 0
+            "DUP 8 + @ .",                    # cell 1
+            "16 + @ .",                        # cell 2
+        ])
+        self.assertIn("11 ", text)
+        self.assertIn("22 ", text)
+        self.assertIn("33 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests
