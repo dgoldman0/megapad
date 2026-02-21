@@ -148,8 +148,8 @@ boot:
     ldn r9, r15               ; buf_addr
     ldi r0, 0                 ; entry index
 autoboot_scan:
-    cmpi r0, 128
-    lbreq autoboot_not_found
+    cmpi r0, 127
+    lbrgt autoboot_not_found  ; >= 128 entries scanned
 
     ; entry_addr = buf + index * 48
     mov r13, r0
@@ -4757,8 +4757,8 @@ w_fsload:
     ldi r0, 0                 ; entry index
 
 w_fsload_scan:
-    cmpi r0, 128
-    lbreq w_fsload_not_found
+    cmpi r0, 127
+    lbrgt w_fsload_not_found  ; >= 128 entries scanned
 
     ; entry_addr = buf + index * 48
     mov r13, r0
