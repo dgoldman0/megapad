@@ -5388,6 +5388,7 @@ CREATE SCR-XT      MAX-SCREENS CELLS ALLOT    \ render xt per screen
 CREATE SCR-LBL-XT  MAX-SCREENS CELLS ALLOT    \ label-print xt
 CREATE SCR-FLAGS   MAX-SCREENS CELLS ALLOT    \ bit 0 = selectable
 CREATE SCR-KEY-XT  MAX-SCREENS CELLS ALLOT    \ per-screen key handler (0=none)
+CREATE SCR-ACT-XT  MAX-SCREENS CELLS ALLOT    \ per-screen activate xt (0=none)
 
 CREATE SUB-XT      MAX-SCREENS MAX-SUBS * CELLS ALLOT
 CREATE SUB-LBL-XT  MAX-SCREENS MAX-SUBS * CELLS ALLOT
@@ -5488,12 +5489,16 @@ VARIABLE _ASUB-I
     R@ CELLS SCR-LBL-XT + !
     R@ CELLS SCR-XT + !
     0 R@ CELLS SCR-KEY-XT + !
+    0 R@ CELLS SCR-ACT-XT + !
     0 R@ CELLS SUB-COUNTS + !
     NSCREENS @ 1+ NSCREENS !
     R> ;
 
 : SET-SCREEN-KEYS  ( xt screen-id -- )
     CELLS SCR-KEY-XT + ! ;
+
+: SET-SCREEN-ACT  ( xt screen-id -- )
+    CELLS SCR-ACT-XT + ! ;
 
 : ADD-SUBSCREEN  ( xt-render xt-label parent-id -- )
     _ASUB-P !
@@ -5574,10 +5579,10 @@ VARIABLE _ASUB-I
 \    W.CUSTOM    ( xt -- )                 Escape hatch: call xt directly
 
 \ ── Renderer vector table ─────────────────────────────────────────
-\ 14 entries — each holds an xt dispatched by the corresponding W.xxx.
+\ 15 entries — each holds an xt dispatched by the corresponding W.xxx.
 \ Default = TUI renderer.  Swap for web/HTML by replacing all entries.
 
-14 CONSTANT WVEC-SIZE
+15 CONSTANT WVEC-SIZE
 CREATE WVEC  WVEC-SIZE CELLS ALLOT
  0 CONSTANT WV-TITLE      1 CONSTANT WV-SECTION
  2 CONSTANT WV-LINE       3 CONSTANT WV-KV
@@ -5586,6 +5591,7 @@ CREATE WVEC  WVEC-SIZE CELLS ALLOT
  8 CONSTANT WV-GAP        9 CONSTANT WV-LIST
 10 CONSTANT WV-DETAIL    11 CONSTANT WV-HINT
 12 CONSTANT WV-CUSTOM    13 CONSTANT WV-NONE
+14 CONSTANT WV-INPUT
 
 : WV@  ( idx -- xt )  CELLS WVEC + @ ;
 : WV!  ( xt idx -- )  CELLS WVEC + ! ;
@@ -5638,6 +5644,51 @@ CREATE WVEC  WVEC-SIZE CELLS ALLOT
 
 : TUI-CUSTOM  ( xt -- )  EXECUTE ;
 
+\ W.INPUT ( buf maxlen prompt-addr prompt-len -- actual-len )
+\   Display prompt, read a line of text into buf (max maxlen chars).
+\   Handles printable ASCII (32-126), Backspace (8/127), Enter (13)
+\   to confirm, Escape (27) to cancel (returns 0).  Arrow keys and
+\   other CSI escape sequences are consumed harmlessly.
+\   Buffer is always null-terminated on exit.
+
+: TUI-INPUT  ( buf maxlen prompt-addr prompt-len -- actual-len )
+    TYPE                                \ print prompt
+    0                                   ( buf maxlen pos )
+    BEGIN
+        KEY                             ( buf maxlen pos c )
+        DUP 13 = IF DROP               \ Enter -> confirm
+            2 PICK OVER + 0 SWAP C!    \ null-terminate buf[pos]
+            NIP NIP EXIT               ( pos )
+        THEN
+        DUP 27 = IF DROP               \ ESC byte received
+            KEY? IF                     \ sequence follows -> consume it
+                KEY DUP 91 = IF         \ CSI '[' prefix
+                    DROP
+                    BEGIN KEY DUP 64 >= OVER 126 <= AND UNTIL
+                    DROP                \ consume until final byte 64-126
+                ELSE DROP THEN          \ non-CSI: consumed one extra byte
+            ELSE                        \ bare Esc -> cancel
+                2 PICK 0 SWAP C!        \ null-terminate buf[0]
+                DROP 2DROP 0 EXIT       ( 0 )
+            THEN
+        ELSE
+        DUP 8 = OVER 127 = OR IF       \ Backspace (BS=8, DEL=127)
+            DROP
+            DUP 0> IF
+                1-  8 EMIT 32 EMIT 8 EMIT  \ erase previous char
+            THEN
+        ELSE
+        DUP 32 >= OVER 126 <= AND IF    \ printable ASCII only (32..126)
+            2 PICK 2 PICK > IF          \ pos < maxlen?
+                DUP EMIT                ( buf maxlen pos c )
+                3 PICK 2 PICK + C!      \ buf[pos] = c
+                1+
+            ELSE DROP THEN
+        ELSE
+            DROP                        \ ignore control chars / non-ASCII
+        THEN THEN THEN
+    AGAIN ;
+
 \ ── Install TUI renderer ──────────────────────────────────────────
 : INSTALL-TUI  ( -- )
     ['] TUI-TITLE    WV-TITLE   WV!
@@ -5652,7 +5703,8 @@ CREATE WVEC  WVEC-SIZE CELLS ALLOT
     ['] TUI-LIST     WV-LIST    WV!
     ['] TUI-DETAIL   WV-DETAIL  WV!
     ['] TUI-HINT     WV-HINT    WV!
-    ['] TUI-CUSTOM   WV-CUSTOM  WV! ;
+    ['] TUI-CUSTOM   WV-CUSTOM  WV!
+    ['] TUI-INPUT    WV-INPUT   WV! ;
 INSTALL-TUI
 
 \ ── Public widget API (dispatch through WVEC) ─────────────────────
@@ -5669,6 +5721,7 @@ INSTALL-TUI
 : W.DETAIL   ( count xt -- )                           WV-DETAIL  WV@ EXECUTE ;
 : W.HINT     ( addr len -- )                           WV-HINT    WV@ EXECUTE ;
 : W.CUSTOM   ( xt -- )                                 WV-CUSTOM  WV@ EXECUTE ;
+: W.INPUT    ( buf maxlen prompt-addr prompt-len -- len ) WV-INPUT   WV@ EXECUTE ;
 
 \ ── Title with dynamic count suffix ──────────────────────────────
 \ Convenience: "Label (N)" — used by many list screens.
@@ -6048,27 +6101,42 @@ VARIABLE _SBIT
 
 \ ---- Screen-specific key handlers ----
 
-: TASK-KEYS  ( c -- )
+: TASK-KEYS  ( c -- consumed )
     DUP 107 = IF DROP                         \ 'k' = kill task
         SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
             CELLS TASK-TABLE + @ KILL
             RENDER-SCREEN
-        ELSE DROP THEN EXIT
+        ELSE DROP THEN -1 EXIT
     THEN
     DUP 115 = IF DROP                         \ 's' = restart task
         SCR-SEL @ DUP -1 <> OVER TASK-COUNT @ < AND IF
             CELLS TASK-TABLE + @ RESTART
             RENDER-SCREEN
-        ELSE DROP THEN EXIT
+        ELSE DROP THEN -1 EXIT
     THEN
-    DROP ;
+    DROP 0 ;
+
+\ -- Per-screen key dispatch (returns consumed flag) --
+: CALL-SCREEN-KEY  ( c -- c consumed )
+    SCREEN-ID @ 1- CELLS SCR-KEY-XT + @ DUP 0<> IF
+        OVER SWAP EXECUTE   \ xt receives char, leaves consumed flag
+    ELSE
+        DROP 0              \ no handler -> not consumed
+    THEN ;
 
 \ -- Activate selected item --
 : DO-SELECT  ( -- )
-    SCREEN-ID @ 7 = IF SCR-SEL @ SHOW-NTH-DOC THEN ;
+    SCREEN-ID @ 1- CELLS SCR-ACT-XT + @ DUP 0<> IF
+        EXECUTE
+    ELSE
+        DROP
+        SCREEN-ID @ 7 = IF SCR-SEL @ SHOW-NTH-DOC THEN   \ legacy fallback
+    THEN ;
 
 \ -- Event loop: poll KEY?, dispatch on keypress (registry-based) --
 : HANDLE-KEY  ( c -- )
+    \ Per-screen custom key handler (priority: checked first)
+    CALL-SCREEN-KEY IF DROP EXIT THEN
     \ Digit keys 0-9: switch to screen 1-10 (key '0'=48...'9'=57)
     DUP 48 >= OVER 57 <= AND IF
         DUP 48 - DUP NSCREENS @ < IF
@@ -6125,10 +6193,6 @@ VARIABLE _SBIT
             THEN
         THEN EXIT
     THEN
-    \ Per-screen custom key handler (from registry)
-    SCREEN-ID @ 1- CELLS SCR-KEY-XT + @ DUP 0<> IF
-        EXECUTE EXIT
-    ELSE DROP THEN
     DROP ;
 
 \ -- §9.10  Screen registration --
