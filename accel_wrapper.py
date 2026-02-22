@@ -139,6 +139,11 @@ class Megapad64:
         self._ext_mem_buf = buf  # prevent GC
         self._cs.attach_ext_mem(buf, base, size)
 
+    def attach_vram(self, buf: bytearray, base: int, size: int):
+        """Attach dedicated VRAM buffer to C++ state."""
+        self._vram_buf = buf  # prevent GC
+        self._cs.attach_vram(buf, base, size)
+
     # ── Register access ──────────────────────────────────
 
     @property

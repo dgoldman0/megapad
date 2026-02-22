@@ -152,6 +152,11 @@ struct CPUState {
     uint64_t ext_mem_base;
     uint64_t ext_mem_size;
 
+    // Dedicated VRAM (framebuffer pixel memory)
+    uint8_t* vram_mem;
+    uint64_t vram_base;
+    uint64_t vram_size;
+
     // C++ native crypto devices (bypass Python MMIO callbacks)
     CryptoDevices crypto;
 
@@ -1027,6 +1032,9 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
         return s.ext_mem[addr - s.ext_mem_base];
     }
+    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+        return s.vram_mem[addr - s.vram_base];
+    }
     return mem_read8(s, addr);
 }
 
@@ -1061,6 +1069,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
     }
     if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
         s.ext_mem[addr - s.ext_mem_base] = val;
+        return;
+    }
+    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+        s.vram_mem[addr - s.vram_base] = val;
         return;
     }
     mem_write8(s, addr, val);
@@ -1108,6 +1120,11 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 8);
         return v;
     }
+    if (s.vram_mem && addr >= s.vram_base && addr + 8 <= s.vram_base + s.vram_size) {
+        uint64_t v;
+        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 8);
+        return v;
+    }
     return mem_read64(s, addr);
 }
 
@@ -1146,6 +1163,10 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 8);
         return;
     }
+    if (s.vram_mem && addr >= s.vram_base && addr + 8 <= s.vram_base + s.vram_size) {
+        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 8);
+        return;
+    }
     mem_write64(s, addr, val);
 }
 
@@ -1169,6 +1190,11 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
     if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
         uint16_t v;
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 2);
+        return v;
+    }
+    if (s.vram_mem && addr >= s.vram_base && addr + 2 <= s.vram_base + s.vram_size) {
+        uint16_t v;
+        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 2);
         return v;
     }
     return mem_read16(s, addr);
@@ -1197,6 +1223,10 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
     }
     if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 2);
+        return;
+    }
+    if (s.vram_mem && addr >= s.vram_base && addr + 2 <= s.vram_base + s.vram_size) {
+        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 2);
         return;
     }
     mem_write16(s, addr, val);
@@ -1231,6 +1261,11 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 4);
         return v;
     }
+    if (s.vram_mem && addr >= s.vram_base && addr + 4 <= s.vram_base + s.vram_size) {
+        uint32_t v;
+        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 4);
+        return v;
+    }
     return mem_read32(s, addr);
 }
 
@@ -1257,6 +1292,10 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
     }
     if (s.ext_mem && addr >= s.ext_mem_base && addr + 4 <= s.ext_mem_base + s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 4);
+        return;
+    }
+    if (s.vram_mem && addr >= s.vram_base && addr + 4 <= s.vram_base + s.vram_size) {
+        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 4);
         return;
     }
     mem_write32(s, addr, val);
@@ -2135,6 +2174,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def_readwrite("ext_mem_base", &CPUState::ext_mem_base)
         .def_readwrite("ext_mem_size", &CPUState::ext_mem_size)
+        // VRAM memory attachment
+        .def("attach_vram", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            py::buffer_info info = buf.request(true);  // writable
+            s.vram_mem = static_cast<uint8_t*>(info.ptr);
+            s.vram_base = base;
+            s.vram_size = size;
+        })
+        .def_readwrite("vram_base", &CPUState::vram_base)
+        .def_readwrite("vram_size", &CPUState::vram_size)
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })
