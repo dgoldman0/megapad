@@ -5510,6 +5510,64 @@ VARIABLE _ASUB-I
 : SET-SCREEN-ACT  ( xt screen-id -- )
     CELLS SCR-ACT-XT + ! ;
 
+\ UNREGISTER-SCREEN ( id -- )
+\   Remove screen at 0-based index 'id'.  Shifts all entries above
+\   id down by one and decrements NSCREENS.  Adjusts SCREEN-ID and
+\   SCR-SEL if the current screen was removed or its index shifted.
+\   No-op if id is out of range.
+VARIABLE _UNR-I
+VARIABLE _UNR-N
+
+: (SHIFT-ARRAY)  ( base id n -- )
+    \ Shift cells base[id+1..n-1] down into base[id..n-2].
+    SWAP                              ( base n id )
+    BEGIN DUP 1+ 2 PICK < WHILE      ( base n id -- while id+1 < n )
+        2 PICK OVER 1+ CELLS + @     ( base n id val[id+1] )
+        3 PICK 2 PICK CELLS + !      ( base[id] = val[id+1] )
+        1+
+    REPEAT
+    2DROP DROP ;
+
+: (SHIFT-SUB-ARRAYS)  ( id n -- )
+    \ Shift sub-screen tables: each screen owns MAX-SUBS slots.
+    SWAP                              ( n id )
+    BEGIN DUP 1+ 2 PICK < WHILE
+        \ SUB-XT: copy MAX-SUBS cells from (id+1)*MAX-SUBS → id*MAX-SUBS
+        DUP 1+ MAX-SUBS * CELLS SUB-XT +
+        OVER   MAX-SUBS * CELLS SUB-XT +
+        MAX-SUBS CELLS CMOVE
+        \ SUB-LBL-XT: same
+        DUP 1+ MAX-SUBS * CELLS SUB-LBL-XT +
+        OVER   MAX-SUBS * CELLS SUB-LBL-XT +
+        MAX-SUBS CELLS CMOVE
+        1+
+    REPEAT
+    2DROP ;
+
+: UNREGISTER-SCREEN  ( id -- )
+    DUP 0< OVER NSCREENS @ >= OR IF DROP EXIT THEN
+    _UNR-I !  NSCREENS @ _UNR-N !
+    \ Shift each per-screen array down
+    SCR-XT     _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    SCR-LBL-XT _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    SCR-FLAGS  _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    SCR-KEY-XT _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    SCR-ACT-XT _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    SUB-COUNTS _UNR-I @ _UNR-N @ (SHIFT-ARRAY)
+    _UNR-I @ _UNR-N @ (SHIFT-SUB-ARRAYS)
+    \ Decrement count
+    _UNR-N @ 1- NSCREENS !
+    \ Fix SCREEN-ID if needed
+    SCREEN-ID @ 1- _UNR-I @ = IF
+        \ Current screen was removed — fall back to 1
+        1 SCREEN-ID !  -1 SCR-SEL !  0 SCR-MAX !
+    ELSE
+        SCREEN-ID @ 1- _UNR-I @ > IF
+            \ Current screen's index shifted down
+            SCREEN-ID @ 1- SCREEN-ID !
+        THEN
+    THEN ;
+
 : ADD-SUBSCREEN  ( xt-render xt-label parent-id -- )
     _ASUB-P !
     _ASUB-P @ CELLS SUB-COUNTS + @ _ASUB-I !

@@ -4497,6 +4497,60 @@ class TestKDOS(_KDOSTestBase):
         self.assertIn("Bufs", text)
         self.assertIn("Core", text)
 
+    # -- Screen hardening: unregistration (§1) --
+
+    def test_unregister_screen_decrements(self):
+        """UNREGISTER-SCREEN removes a screen and decrements NSCREENS."""
+        text = self._run_kdos([
+            "NSCREENS @ .",            # 9
+            "8 UNREGISTER-SCREEN",     # remove last (Core, index 8)
+            "NSCREENS @ .",            # 8
+        ])
+        self.assertIn("9 ", text)
+        self.assertIn("8 ", text)
+
+    def test_unregister_screen_shifts_labels(self):
+        """Removing a middle screen shifts subsequent labels down."""
+        text = self._run_kdos([
+            "0 UNREGISTER-SCREEN",     # remove Home (index 0)
+            "1 SCREEN-ID !",
+            "SCREEN-HEADER",
+        ])
+        # Home should be gone; Bufs should now be [0]
+        self.assertNotIn("Home", text)
+        self.assertIn("Bufs", text)
+
+    def test_unregister_screen_adjusts_screen_id(self):
+        """SCREEN-ID adjusts when current screen shifts down."""
+        text = self._run_kdos([
+            "5 SCREEN-ID !",           # viewing screen 5 (index 4 = Task)
+            "0 UNREGISTER-SCREEN",     # remove index 0 → Task shifts to 4
+            "SCREEN-ID @ .",           # should be 4 now (shifted down)
+        ])
+        self.assertIn("4 ", text)
+
+    def test_unregister_current_screen_resets(self):
+        """Removing the current screen resets SCREEN-ID to 1."""
+        text = self._run_kdos([
+            "3 SCREEN-ID !",           # viewing screen 3 (index 2 = Kern)
+            "2 UNREGISTER-SCREEN",     # remove index 2 (current)
+            "SCREEN-ID @ .",           # should reset to 1
+        ])
+        self.assertIn("1 ", text)
+
+    def test_unregister_out_of_range_noop(self):
+        """Out-of-range UNREGISTER-SCREEN is a no-op."""
+        text = self._run_kdos([
+            "NSCREENS @ .",
+            "99 UNREGISTER-SCREEN",
+            "NSCREENS @ .",
+            "-1 UNREGISTER-SCREEN",
+            "NSCREENS @ .",
+        ])
+        # All three counts should be 9
+        nums = [s for s in text.split() if s.strip() == "9"]
+        self.assertGreaterEqual(len(nums), 3)
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):
