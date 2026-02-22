@@ -90,6 +90,7 @@ def save_cpu_state(cpu):
 
 
 def restore_cpu_state(cpu, state):
+    cpu.pc = state['pc']
     cpu.regs[:] = state['regs']
     for k in ('psel', 'xsel', 'spsel',
                'flag_z', 'flag_c', 'flag_n', 'flag_v',

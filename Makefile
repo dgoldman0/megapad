@@ -13,9 +13,9 @@
 #   make test-kill      Kill stuck background run
 #   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
 #
-# Real-network tests (requires TAP — see tests/test_networking.py):
-#   make test-net       All real-net tests against TAP device
-#   make test-net K=X   Subset of real-net tests
+# Real-network tests (requires TAP — see tests/test_live_net.py):
+#   make test-net       All live-net tests against TAP device
+#   make test-net K=X   Subset of live-net tests
 #
 # All background targets use `make test-status` / `make test-watch`
 # to monitor progress.
@@ -102,8 +102,8 @@ test-bg: accel
 	@echo "Monitor: make test-status  |  make test-watch"
 
 # --- Real-network tests (requires TAP device) ---
-# Usage: make test-net          (all real-net tests)
-#        make test-net K=TestRealNetARP
+# Usage: make test-net              (all live-net tests)
+#        make test-net K=TestLiveARP (subset)
 .PHONY: test-net
 test-net: accel
 	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
@@ -111,8 +111,8 @@ test-net: accel
 		exit 1; \
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting real-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
+	@echo "Starting live-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_live_net.py tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
 		> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
