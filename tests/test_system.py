@@ -20394,6 +20394,177 @@ class TestKDOSScreenActivate(_KDOSTestBase):
         self.assertIn("-1", text)
 
 
+class TestKDOSHandleKeyPriority(_KDOSTestBase):
+    """Tests for HANDLE-KEY priority + CALL-SCREEN-KEY + TASK-KEYS consumed flag."""
+
+    # ─── CALL-SCREEN-KEY ───
+
+    def test_call_screen_key_no_handler(self):
+        """CALL-SCREEN-KEY returns 0 consumed and preserves char when no handler."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",              # Home: no key handler
+            "42 CALL-SCREEN-KEY . .",      # push consumed, then char
+        ])
+        # Stack after: ( 42 0 ) — consumed=0 on top, then char=42
+        self.assertIn("0 ", text)    # consumed = 0
+        self.assertIn("42 ", text)   # char preserved
+
+    def test_call_screen_key_consumed(self):
+        """CALL-SCREEN-KEY calls handler and returns consumed flag."""
+        text = self._run_kdos([
+            ": always-eat ( c -- consumed ) DROP -1 ;",
+            "' always-eat 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !",
+            "42 CALL-SCREEN-KEY . .",
+        ])
+        self.assertIn("-1", text)   # consumed = -1
+
+    def test_call_screen_key_not_consumed(self):
+        """CALL-SCREEN-KEY handler can return 0 (not consumed)."""
+        text = self._run_kdos([
+            ": never-eat ( c -- consumed ) DROP 0 ;",
+            "' never-eat 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !",
+            "42 CALL-SCREEN-KEY . .",
+        ])
+        self.assertIn("0 ", text)   # consumed = 0
+        self.assertIn("42 ", text)  # char still there
+
+    # ─── HANDLE-KEY priority: per-screen checked BEFORE global ───
+
+    def test_handler_intercepts_refresh(self):
+        """Per-screen handler can intercept 'r' (114) before global refresh."""
+        text = self._run_kdos([
+            "VARIABLE GOT-R  0 GOT-R !",
+            ": my-keys ( c -- consumed )",
+            "    DUP 114 = IF DROP -1 GOT-R ! -1 EXIT THEN",
+            "    DROP 0 ;",
+            "' my-keys 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !  1 SCREEN-RUN !",
+            "114 HANDLE-KEY",             # 'r' — normally refresh
+            "GOT-R @ .",
+        ])
+        self.assertIn("-1", text)  # handler caught 'r'
+
+    def test_handler_intercepts_quit(self):
+        """Per-screen handler can intercept 'q' (113) before global quit."""
+        text = self._run_kdos([
+            ": my-keys ( c -- consumed )",
+            "    DUP 113 = IF DROP -1 EXIT THEN",
+            "    DROP 0 ;",
+            "' my-keys 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !  1 SCREEN-RUN !",
+            "113 HANDLE-KEY",             # 'q' — normally quit
+            "SCREEN-RUN @ .",
+        ])
+        self.assertIn("-1", text)  # SCREEN-RUN still -1, quit was intercepted
+
+    def test_handler_intercepts_select_n(self):
+        """Per-screen handler can intercept 'n' (110) before global select-next."""
+        text = self._run_kdos([
+            "VARIABLE GOT-N  0 GOT-N !",
+            ": my-keys ( c -- consumed )",
+            "    DUP 110 = IF DROP -1 GOT-N ! -1 EXIT THEN",
+            "    DROP 0 ;",
+            "' my-keys 1 SET-SCREEN-KEYS",  # index 1 = Bufs
+            "0 1 64 BUFFER ntest",
+            "2 SWITCH-SCREEN",
+            "0 SCR-SEL !",
+            "110 HANDLE-KEY",             # 'n' — normally next item
+            "GOT-N @ .",
+            "SCR-SEL @ .",                # should still be 0 (not advanced)
+        ])
+        self.assertIn("-1", text)  # handler caught 'n'
+        # SCR-SEL should still be 0 since 'n' was consumed
+        nums = [s.strip() for s in text.split() if s.strip().lstrip('-').isdigit()]
+        self.assertEqual(nums[-1], "0")
+
+    def test_fallthrough_to_global(self):
+        """Handler returns 0 → global key handling proceeds normally."""
+        text = self._run_kdos([
+            ": my-keys ( c -- consumed ) DROP 0 ;",
+            "' my-keys 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !  1 SCREEN-RUN !",
+            "113 HANDLE-KEY",             # 'q' — handler returns 0
+            "SCREEN-RUN @ .",
+        ])
+        self.assertIn("0 ", text)  # global 'q' handler set run to 0
+
+    def test_fallthrough_screen_switch(self):
+        """Handler returns 0 → digit key still switches screen."""
+        text = self._run_kdos([
+            ": my-keys ( c -- consumed ) DROP 0 ;",
+            "' my-keys 0 SET-SCREEN-KEYS",
+            "1 SCREEN-ID !  1 SCREEN-RUN !",
+            "52 HANDLE-KEY",              # '4' — switch to screen 5
+            "SCREEN-ID @ .",
+        ])
+        self.assertIn("5 ", text)
+
+    def test_no_handler_global_works(self):
+        """Without per-screen handler, global keys work as before."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !  1 SCREEN-RUN !",
+            "113 HANDLE-KEY",             # 'q'
+            "SCREEN-RUN @ .",
+        ])
+        self.assertIn("0 ", text)
+
+    # ─── TASK-KEYS consumed flag ───
+
+    def test_task_keys_k_consumed(self):
+        """TASK-KEYS returns -1 (consumed) for 'k' key."""
+        text = self._run_kdos([
+            ": nop-t ;",
+            "' nop-t 0 TASK tt",
+            "5 SWITCH-SCREEN",
+            "0 SCR-SEL !",
+            "107 TASK-KEYS .",            # 'k' = kill
+        ])
+        self.assertIn("-1", text)
+
+    def test_task_keys_s_consumed(self):
+        """TASK-KEYS returns -1 (consumed) for 's' key."""
+        text = self._run_kdos([
+            ": nop-t2 ;",
+            "' nop-t2 0 TASK tt2",
+            "tt2 KILL",                   # make it DONE so restart works
+            "5 SWITCH-SCREEN",
+            "0 SCR-SEL !",
+            "115 TASK-KEYS .",            # 's' = restart
+        ])
+        self.assertIn("-1", text)
+
+    def test_task_keys_unrecognized_not_consumed(self):
+        """TASK-KEYS returns 0 for unrecognized keys."""
+        text = self._run_kdos([
+            "120 TASK-KEYS .",            # 'x' — unrecognized
+        ])
+        self.assertIn("0 ", text)
+
+    def test_task_screen_k_via_handle_key(self):
+        """'k' on Tasks screen via HANDLE-KEY kills task (priority dispatch)."""
+        text = self._run_kdos([
+            ": nop3 ;",
+            "' nop3 0 TASK hkt",
+            "5 SWITCH-SCREEN",            # Tasks (index 4)
+            "0 SCR-SEL !",
+            "107 HANDLE-KEY",             # 'k' via priority dispatch
+            "hkt T.STATUS .",
+        ])
+        self.assertIn("4 ", text)  # status 4 = DONE
+
+    def test_task_screen_unhandled_falls_through(self):
+        """Unhandled key on Tasks screen falls through to global."""
+        text = self._run_kdos([
+            "5 SWITCH-SCREEN",
+            "1 SCREEN-RUN !",
+            "113 HANDLE-KEY",             # 'q' — TASK-KEYS returns 0
+            "SCREEN-RUN @ .",
+        ])
+        self.assertIn("0 ", text)  # global 'q' handler fired
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Megapad-64 System Integration Tests")
