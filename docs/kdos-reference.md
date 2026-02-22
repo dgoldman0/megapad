@@ -877,6 +877,14 @@ The SCREENS system is a full-screen terminal UI built on **ANSI escape
 sequences**.  It provides a tabbed dashboard with 9 screens showing system
 status in real time.
 
+> **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
+> the `SCR-*` arrays) lives in shared dictionary memory and is **not
+> thread-safe**.  `REGISTER-SCREEN`, `SWITCH-SCREEN`, `RENDER-SCREEN`, and
+> `HANDLE-KEY` must only be called from the main core (core 0).  Background
+> tasks on secondary cores that need to register or modify screens should
+> send a request via the mailbox (IPI) and let the main-core event loop
+> service it between iterations.
+
 ### Starting the TUI
 
 ```forth

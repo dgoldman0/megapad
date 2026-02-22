@@ -5379,6 +5379,14 @@ VARIABLE PORT-DROP      0 PORT-DROP !
 \  Each screen can own subscreens, navigated with [ and ].
 \  Keys: 0-9/a-f switch, n/p select, [/] sub-switch, Enter activate, A auto, r/q.
 \
+\  THREADING RULE: All screen state (NSCREENS, SCREEN-ID, SCR-SEL,
+\  SCR-* arrays) lives in shared dictionary memory and is NOT
+\  thread-safe.  REGISTER-SCREEN, SWITCH-SCREEN, RENDER-SCREEN,
+\  and HANDLE-KEY must only be called from the main core (core 0).
+\  Background tasks on secondary cores that need to register or
+\  modify screens should send a request via the mailbox (IPI) and
+\  let the main-core event loop service it between iterations.
+\
 
 \ -- §9.1  Screen & subscreen registry tables --
 16 CONSTANT MAX-SCREENS
