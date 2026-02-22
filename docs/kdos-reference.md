@@ -895,9 +895,35 @@ SCREENS     \ enters the interactive dashboard
 
 | Key | Action |
 |-----|--------|
-| `1` – `9` | Switch to screen 1–9 |
+| `0`–`9` | Switch to screen 0–9 |
+| `a`–`f` | Switch to screen 10–15 (when registered) |
+| `n` / `p` | Select next / previous item on selectable screens |
+| `[` / `]` | Switch to previous / next subscreen |
+| `Enter` / `Space` | Activate the selected item |
 | `r` | Refresh the current screen |
+| `A` | Toggle auto-refresh (5 M cycles interval) |
 | `q` | Quit back to the Forth REPL |
+
+### Key Priority Chain
+
+When a key is pressed, `HANDLE-KEY` dispatches it in this order:
+
+1. **Per-screen handler** via `SCR-KEY-XT` — the screen's custom key
+   handler runs first.  If it returns a non-zero "consumed" flag, no
+   further dispatch occurs.
+2. **Screen switching** — digit keys `0`–`9` and hex keys `a`–`f` switch
+   to the corresponding screen (if registered).
+3. **Global bindings** — `q`, `r`, `A`, `[`, `]`, `n`, `p`, `Enter`,
+   `Space`.
+
+Per-screen handlers can intercept any key, including digits.  To claim a
+key, return a non-zero flag from the handler xt.  Unclaimed keys fall
+through to the global dispatch.
+
+> **Note:** With 16 screens registered, keys `a`–`f` are consumed by
+> screen switching.  If your screen needs those keys, install a
+> per-screen handler via `SET-SCREEN-KEYS` and return a consumed flag
+> for the keys you claim.
 
 ### The 9 Screens
 
