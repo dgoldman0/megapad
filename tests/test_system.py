@@ -957,6 +957,7 @@ class TestBIOS(unittest.TestCase):
     def _save_cpu_state(cls, cpu):
         """Capture all CPU register/flag state for snapshot."""
         return {
+            'pc': cpu.pc,
             'regs': list(cpu.regs),
             'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
             'flag_z': cpu.flag_z, 'flag_c': cpu.flag_c,
@@ -974,6 +975,7 @@ class TestBIOS(unittest.TestCase):
     @classmethod
     def _restore_cpu_state(cls, cpu, state):
         """Restore CPU register/flag state from snapshot."""
+        cpu.pc = state['pc']
         cpu.regs[:] = state['regs']
         for k in ('psel', 'xsel', 'spsel',
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',
@@ -2969,6 +2971,7 @@ class _KDOSTestBase(unittest.TestCase):
     def _save_cpu_state(cls, cpu):
         """Capture all CPU register/flag state for snapshot."""
         return {
+            'pc': cpu.pc,
             'regs': list(cpu.regs),
             'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
             'flag_z': cpu.flag_z, 'flag_c': cpu.flag_c,
@@ -2989,6 +2992,7 @@ class _KDOSTestBase(unittest.TestCase):
     @classmethod
     def _restore_cpu_state(cls, cpu, state):
         """Restore CPU register/flag state from snapshot."""
+        cpu.pc = state['pc']
         cpu.regs[:] = state['regs']
         for k in ('psel', 'xsel', 'spsel',
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',
@@ -10781,7 +10785,7 @@ class TestKDOSFilesystem(_KDOSTestBase):
             self.assertIn("free sectors", text)
             self.assertIn("bytes", text)
             self.assertIn("1 ", text)  # 1 file
-            self.assertIn("64 ", text)  # 64 max
+            self.assertIn("128 ", text)  # 128 max
         finally:
             os.unlink(path)
 
@@ -11324,7 +11328,7 @@ class TestKDOSMulticore(unittest.TestCase):
                 cls._kdos_lines.append(line)
 
         # Boot 4-core BIOS and load KDOS on core 0
-        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
@@ -11364,7 +11368,7 @@ class TestKDOSMulticore(unittest.TestCase):
         """Restore 4-core KDOS from snapshot, run extra_lines, return output."""
         mem_bytes, cpu0_state, core_states = self.__class__._mc_snapshot
 
-        sys = make_system(ram_kib=1024, num_cores=4)
+        sys = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
         buf = capture_uart(sys)
 
         # Restore shared memory
@@ -11406,7 +11410,7 @@ class TestKDOSMulticore(unittest.TestCase):
             lines = [l for l in f.read().splitlines()
                      if l.strip() and not l.strip().startswith('\\')]
 
-        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, code)
         sys_obj.boot()

@@ -1828,6 +1828,8 @@ class FramebufferDevice(Device):
     @property
     def frame_bytes(self) -> int:
         """Total bytes in the framebuffer (stride × height)."""
+        return self.stride * self.height
+
 # ---------------------------------------------------------------------------
 #  Real-Time Clock / System Clock
 # ---------------------------------------------------------------------------

@@ -19,3 +19,4 @@ build/
 # Disk images
 *.img
 bios.rom
+tmp/

@@ -368,15 +368,21 @@ def tap_available(tap_name: str = "mp64tap0") -> bool:
 
     Returns True if /dev/net/tun exists and the TAP interface is
     accessible by the current user.  Does not leave any fd open.
+
+    Uses a retry loop because TUNSETIFF returns EBUSY when another
+    process already holds the TAP fd (e.g. concurrent pytest-xdist
+    workers all probing at import time).
     """
     if not os.path.exists("/dev/net/tun"):
         return False
-    try:
-        fd = TAPBackend._open_tap(tap_name)
-        os.close(fd)
-        return True
-    except OSError:
-        return False
+    for _ in range(5):
+        try:
+            fd = TAPBackend._open_tap(tap_name)
+            os.close(fd)
+            return True
+        except OSError:
+            time.sleep(0.1)
+    return False
 
 
 def setup_tap(tap_name: str = "mp64tap0",

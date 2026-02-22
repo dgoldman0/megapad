@@ -389,6 +389,7 @@ def {_attr}(self, v):
                 return self._step_python_fallback()
             elif msg.startswith("TRAP:"):
                 self._handle_trap(msg)
+                return 1
             else:
                 raise
 
@@ -419,7 +420,7 @@ def {_attr}(self, v):
             return  # RESET is not a trap
         else:
             ivec = IVEC_ILLEGAL_OP
-        raise TrapError(ivec, msg)
+        self._trap(ivec)
 
     def _step_python_fallback(self):
         """Fall back to pure-Python step() for complex instructions.

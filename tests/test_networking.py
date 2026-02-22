@@ -266,6 +266,7 @@ class _RealNetBase(unittest.TestCase):
 
     @classmethod
     def _restore_cpu_state(cls, cpu, state):
+        cpu.pc = state['pc']
         cpu.regs[:] = state['regs']
         for k in ('psel', 'xsel', 'spsel',
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',

@@ -9865,7 +9865,7 @@ VARIABLE _THC-REC
 \  TLS-CLOSE      ( ctx -- )
 
 1600 XBUF TLS-SEND-REC
-8192 XBUF TLS-RECV-REC
+16896 XBUF TLS-RECV-REC
 
 \ --- TLS-SEND-DATA ---
 \ Encrypt plaintext as app_data record and send via TCP.
@@ -9901,7 +9901,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
         TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
         OVER                                  \ tcb
         TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
-        8192 TLS-RBUF-LEN @ -                 \ maxlen = bufsz - got
+        16896 TLS-RBUF-LEN @ -                \ maxlen = bufsz - got
         TCP-RECV
         DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
         TCP-POLL NET-IDLE
@@ -9930,7 +9930,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
     \ Extract total record size = 5 + body_len
     TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
     \ Sanity check
-    DUP 8192 > IF 2DROP 0 EXIT THEN
+    DUP 16896 > IF 2DROP 0 EXIT THEN
     \ Fill to complete record
     SWAP OVER TLS-RBUF-FILL 0= IF DROP 0 EXIT THEN ;
 
@@ -9940,7 +9940,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
     TLS-RBUF-LEN @ OVER >= IF 2DROP -1 EXIT THEN
     OVER
     TLS-RECV-REC TLS-RBUF-LEN @ +
-    8192 TLS-RBUF-LEN @ -
+    16896 TLS-RBUF-LEN @ -
     TCP-RECV
     DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
     TLS-RBUF-LEN @ OVER >= IF 2DROP -1 ELSE 2DROP 0 THEN ;
@@ -9948,7 +9948,7 @@ VARIABLE TLS-RBUF-LEN   \ bytes accumulated in TLS-RECV-REC
 : TLS-READ-RECORD-NB ( tcb -- rlen | 0 )
     DUP 5 TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN
     TLS-RECV-REC 3 + C@ 8 LSHIFT  TLS-RECV-REC 4 + C@ OR  5 +
-    DUP 8192 > IF 2DROP 0 EXIT THEN
+    DUP 16896 > IF 2DROP 0 EXIT THEN
     SWAP OVER TLS-RBUF-FILL-NB 0= IF DROP 0 EXIT THEN ;
 
 \ --- TLS-RECV-DATA ---
