@@ -4375,6 +4375,64 @@ class TestKDOS(_KDOSTestBase):
         self.assertIn("-1", text)   # true for 2 and 5
         self.assertIn("0", text)    # false for 1
 
+    # -- Screen hardening: CATCH around EXECUTE --
+
+    def test_render_screen_catch_protects_loop(self):
+        """A buggy screen render word doesn't kill the event loop."""
+        text = self._run_kdos([
+            ": buggy-render  -1 THROW ;",      # Forth-level exception
+            ": lbl-buggy  .\" Bug\" ;",
+            "' buggy-render ' lbl-buggy 0 REGISTER-SCREEN DROP",
+            "NSCREENS @ SWITCH-SCREEN",        # switch to the buggy screen
+            "SCREEN-RUN @ .",                  # event loop should still be alive
+        ])
+        self.assertIn("screen error", text)
+        # SCREEN-RUN should still be 1 (loop not killed)
+        self.assertIn("1 ", text)
+
+    def test_screen_header_catch_bad_label(self):
+        """A crashing label xt shows '?' instead of killing header."""
+        text = self._run_kdos([
+            ": bad-lbl  -1 THROW ;",
+            ": ok-render  .\" ok\" ;",
+            "' ok-render ' bad-lbl 0 REGISTER-SCREEN DROP",
+            "SCREEN-HEADER",
+        ])
+        # Should still render KDOS header without crash
+        self.assertIn("KDOS v1.1", text)
+        # The bad label slot should show "?" fallback
+        self.assertIn("?", text)
+
+    def test_call_screen_key_catch(self):
+        """A crashing per-screen key handler doesn't kill dispatch."""
+        text = self._run_kdos([
+            ": bad-key  -1 THROW ;",
+            ": ok-render  .\" ok\" ;",
+            ": ok-lbl  .\" OK\" ;",
+            "' ok-render ' ok-lbl 0 REGISTER-SCREEN",
+            "' bad-key OVER SET-SCREEN-KEYS",
+            "1+ SCREEN-ID !",
+            "1 SCREEN-RUN !",
+            "42 HANDLE-KEY",  # triggers bad-key handler through CALL-SCREEN-KEY
+            "SCREEN-RUN @ .",
+        ])
+        # Event loop should still be running
+        self.assertIn("1 ", text)
+
+    def test_do_select_catch(self):
+        """A crashing activate xt shows error instead of aborting."""
+        text = self._run_kdos([
+            ": bad-act  -1 THROW ;",
+            ": ok-render  .\" ok\" ;",
+            ": ok-lbl  .\" OK\" ;",
+            "' ok-render ' ok-lbl 1 REGISTER-SCREEN",
+            "' bad-act OVER SET-SCREEN-ACT",
+            "1+ SCREEN-ID !",
+            "0 SCR-SEL !",
+            "DO-SELECT",
+        ])
+        self.assertIn("action error", text)
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):

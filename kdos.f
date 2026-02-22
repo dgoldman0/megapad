@@ -5526,7 +5526,9 @@ VARIABLE _ASUB-I
     NSCREENS @ 0 DO
         SCREEN-ID @ I 1+ = IF REVERSE THEN
         ."  [" I .HEXDIG ." ]"
-        I CELLS SCR-LBL-XT + @ EXECUTE
+        I CELLS SCR-LBL-XT + @ DUP 0<> IF
+            ['] EXECUTE CATCH IF ." ?" THEN
+        ELSE DROP ." ?" THEN
         ."  " RESET-COLOR
     LOOP
     CR HBAR ;
@@ -5538,7 +5540,9 @@ VARIABLE _ASUB-I
     0 DO
         SUBSCREEN-ID @ I = IF BOLD THEN
         ." ["
-        SCREEN-ID @ 1- MAX-SUBS * I + CELLS SUB-LBL-XT + @ EXECUTE
+        SCREEN-ID @ 1- MAX-SUBS * I + CELLS SUB-LBL-XT + @ DUP 0<> IF
+            ['] EXECUTE CATCH IF ." ?" THEN
+        ELSE DROP ." ?" THEN
         ." ] "
         RESET-COLOR DIM
     LOOP
@@ -6083,10 +6087,18 @@ VARIABLE _SBIT
     DUP CELLS SUB-COUNTS + @ DUP 0> IF
         DROP SUB-TABS                           \ show sub-tab bar
         SCREEN-ID @ 1- MAX-SUBS * SUBSCREEN-ID @ +
-        CELLS SUB-XT + @ EXECUTE                \ render active sub
+        CELLS SUB-XT + @ DUP 0<> IF
+            ['] EXECUTE CATCH IF
+                RESET-COLOR CR ." [screen error]" CR
+            THEN
+        ELSE DROP ." [no renderer]" CR THEN
     ELSE
         DROP
-        CELLS SCR-XT + @ EXECUTE                \ render main screen
+        CELLS SCR-XT + @ DUP 0<> IF
+            ['] EXECUTE CATCH IF
+                RESET-COLOR CR ." [screen error]" CR
+            THEN
+        ELSE DROP ." [no renderer]" CR THEN
     THEN
     CR SCREEN-FOOTER ;
 
@@ -6119,7 +6131,7 @@ VARIABLE _SBIT
 \ -- Per-screen key dispatch (returns consumed flag) --
 : CALL-SCREEN-KEY  ( c -- c consumed )
     SCREEN-ID @ 1- CELLS SCR-KEY-XT + @ DUP 0<> IF
-        OVER SWAP EXECUTE   \ xt receives char, leaves consumed flag
+        OVER SWAP ['] EXECUTE CATCH IF DROP 0 THEN
     ELSE
         DROP 0              \ no handler -> not consumed
     THEN ;
@@ -6127,7 +6139,9 @@ VARIABLE _SBIT
 \ -- Activate selected item --
 : DO-SELECT  ( -- )
     SCREEN-ID @ 1- CELLS SCR-ACT-XT + @ DUP 0<> IF
-        EXECUTE
+        ['] EXECUTE CATCH IF
+            RESET-COLOR CR ." [action error]" CR
+        THEN
     ELSE
         DROP
         SCREEN-ID @ 7 = IF SCR-SEL @ SHOW-NTH-DOC THEN   \ legacy fallback
