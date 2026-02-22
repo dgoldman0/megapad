@@ -4551,6 +4551,25 @@ class TestKDOS(_KDOSTestBase):
         nums = [s for s in text.split() if s.strip() == "9"]
         self.assertGreaterEqual(len(nums), 3)
 
+    # -- Screen hardening: SCR-SEL reset on register (§7) --
+
+    def test_register_screen_resets_sel_if_current(self):
+        """REGISTER-SCREEN resets SCR-SEL/SCR-MAX when registering at current."""
+        text = self._run_kdos([
+            # Set up: viewing slot 9 (NSCREENS=9, so next = 9)
+            "NSCREENS @ 1+ SCREEN-ID !",   # SCREEN-ID = 10
+            # Set stale state
+            "42 SCR-SEL !  99 SCR-MAX !",
+            # Register at slot 9 (selectable)
+            ": sr  .\" x\" ;",
+            ": sl  .\" X\" ;",
+            "' sr ' sl 1 REGISTER-SCREEN DROP",
+            # SCR-SEL should be reset to 0 (selectable), SCR-MAX = 0
+            "SCR-SEL @ .",
+            "SCR-MAX @ .",
+        ])
+        self.assertIn("0 ", text)  # SCR-SEL reset to 0, SCR-MAX reset to 0
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):

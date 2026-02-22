@@ -5502,6 +5502,12 @@ VARIABLE _ASUB-I
     0 R@ CELLS SCR-ACT-XT + !
     0 R@ CELLS SUB-COUNTS + !
     NSCREENS @ 1+ NSCREENS !
+    \ Reset selection state if we happen to be viewing this slot
+    SCREEN-ID @ 1- R@ = IF
+        R@ CELLS SCR-FLAGS + @ 1 AND
+        IF 0 ELSE -1 THEN SCR-SEL !
+        0 SCR-MAX !
+    THEN
     R> ;
 
 : SET-SCREEN-KEYS  ( xt screen-id -- )
