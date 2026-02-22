@@ -5536,9 +5536,11 @@ VARIABLE _ASUB-I
     NSCREENS @ 0 DO
         SCREEN-ID @ I 1+ = IF REVERSE THEN
         ."  [" I .HEXDIG ." ]"
-        I CELLS SCR-LBL-XT + @ DUP 0<> IF
-            ['] EXECUTE CATCH IF ." ?" THEN
-        ELSE DROP ." ?" THEN
+        NSCREENS @ 10 <= IF                       \ show labels only when ≤10
+            I CELLS SCR-LBL-XT + @ DUP 0<> IF
+                ['] EXECUTE CATCH IF ." ?" THEN
+            ELSE DROP ." ?" THEN
+        THEN
         ."  " RESET-COLOR
     LOOP
     CR HBAR ;

@@ -4466,6 +4466,37 @@ class TestKDOS(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("survived", text)
 
+    # -- Screen hardening: tab bar overflow (§5) --
+
+    def test_tab_bar_truncates_labels_above_10(self):
+        """Labels are omitted from header tabs when NSCREENS > 10."""
+        # Register 2 more (9 + 2 = 11)
+        lines = []
+        for i in range(2):
+            lines.append(f": scr-t{i}  .\" t\" ;")
+            lines.append(f": lbl-t{i}  .\" Tab{i}\" ;")
+            lines.append(f"' scr-t{i} ' lbl-t{i} 0 REGISTER-SCREEN DROP")
+        lines.append("1 SCREEN-ID !")
+        lines.append("SCREEN-HEADER")
+        text = self._run_kdos(lines)
+        # Header should have hex digits but NOT the label text
+        self.assertIn("[0]", text)
+        self.assertIn("[A]", text)   # hex for 10
+        # Labels like "Home", "Bufs" should NOT appear (truncated)
+        self.assertNotIn("Home", text)
+        self.assertNotIn("Bufs", text)
+
+    def test_tab_bar_shows_labels_at_9(self):
+        """With 9 screens (default), labels are shown in header."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",
+            "SCREEN-HEADER",
+        ])
+        # Default 9 screens → labels should appear
+        self.assertIn("Home", text)
+        self.assertIn("Bufs", text)
+        self.assertIn("Core", text)
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):
