@@ -20291,6 +20291,109 @@ class TestKDOSUserland(_KDOSTestBase):
         self.assertIn('87654', text)
 
 
+class TestKDOSScreenActivate(_KDOSTestBase):
+    """Tests for SCR-ACT-XT — per-screen activate handler."""
+
+    def test_scr_act_xt_array_exists(self):
+        """SCR-ACT-XT array is defined and addressable."""
+        text = self._run_kdos(["SCR-ACT-XT ."])
+        nums = [s for s in text.split() if s.strip().isdigit()]
+        self.assertTrue(len(nums) > 0, "SCR-ACT-XT should print an address")
+
+    def test_set_screen_act_stores_xt(self):
+        """SET-SCREEN-ACT stores an xt in the SCR-ACT-XT table."""
+        text = self._run_kdos([
+            ": my-act ;",
+            "' my-act 0 SET-SCREEN-ACT",
+            "0 CELLS SCR-ACT-XT + @ ' my-act = .",
+        ])
+        self.assertIn("-1", text)  # true: xt matches
+
+    def test_scr_act_xt_default_zero(self):
+        """SCR-ACT-XT entries default to 0 (no handler)."""
+        text = self._run_kdos([
+            "0 CELLS SCR-ACT-XT + @ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_do_select_calls_custom_handler(self):
+        """DO-SELECT calls custom activate handler when set."""
+        text = self._run_kdos([
+            "VARIABLE ACT-FLAG  0 ACT-FLAG !",
+            ": my-act -1 ACT-FLAG ! ;",
+            "' my-act 0 SET-SCREEN-ACT",
+            "1 SCREEN-ID !",             # SCREEN-ID 1 = index 0
+            "1 SCR-SEL !",
+            "DO-SELECT",
+            "ACT-FLAG @ .",
+        ])
+        self.assertIn("-1", text)  # handler was called
+
+    def test_do_select_legacy_fallback_screen7(self):
+        """DO-SELECT falls back to SHOW-NTH-DOC on screen 7 (Docs)."""
+        # Screen 7 (1-based) = index 6 = Docs. Without custom handler,
+        # DO-SELECT should try SHOW-NTH-DOC, which exits silently
+        # without a filesystem. Verify no crash.
+        text = self._run_kdos([
+            "7 SCREEN-ID !",
+            "-1 SCR-SEL !",
+            "DO-SELECT",
+            "42 .",    # confirm we survived
+        ])
+        self.assertIn("42 ", text)
+
+    def test_do_select_no_handler_no_legacy(self):
+        """DO-SELECT is a no-op on screens without handler (not Docs)."""
+        text = self._run_kdos([
+            "1 SCREEN-ID !",             # Home, no act handler
+            "DO-SELECT",
+            "99 .",
+        ])
+        self.assertIn("99 ", text)  # passed through safely
+
+    def test_do_select_custom_overrides_legacy(self):
+        """Custom handler on Docs screen overrides legacy fallback."""
+        text = self._run_kdos([
+            "VARIABLE CUSTOM-CALLED  0 CUSTOM-CALLED !",
+            ": my-docs-act -1 CUSTOM-CALLED ! ;",
+            "' my-docs-act 6 SET-SCREEN-ACT",  # index 6 = Docs
+            "7 SCREEN-ID !",
+            "0 SCR-SEL !",
+            "DO-SELECT",
+            "CUSTOM-CALLED @ .",
+        ])
+        self.assertIn("-1", text)  # custom handler was used, not legacy
+
+    def test_register_screen_inits_act_xt_zero(self):
+        """REGISTER-SCREEN initializes SCR-ACT-XT to 0 for new screen."""
+        text = self._run_kdos([
+            ": my-scr ;",
+            ": my-lbl .\" Test\" ;",
+            "' my-scr ' my-lbl 0 REGISTER-SCREEN",
+            "CELLS SCR-ACT-XT + @ .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_enter_activates_via_scr_act(self):
+        """Enter key in HANDLE-KEY calls DO-SELECT which uses SCR-ACT-XT."""
+        text = self._run_kdos([
+            "VARIABLE ACT-HIT  0 ACT-HIT !",
+            ": my-act -1 ACT-HIT ! ;",
+            "' my-act 0 SET-SCREEN-ACT",
+            "1 SCREEN-ID !",
+            "1 SCREEN-RUN !",
+            # Make screen selectable for Enter to work — screen 0 (Home)
+            # is flags=0 (non-selectable). Use screen 2 (Bufs, selectable)
+            "' my-act 1 SET-SCREEN-ACT",   # index 1 = Bufs
+            "0 1 64 BUFFER act-b",          # ensure buffers exist
+            "2 SWITCH-SCREEN",
+            "0 SCR-SEL !",
+            "13 HANDLE-KEY",               # Enter
+            "ACT-HIT @ .",
+        ])
+        self.assertIn("-1", text)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Megapad-64 System Integration Tests")
