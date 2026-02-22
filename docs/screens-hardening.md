@@ -1,6 +1,6 @@
 # KDOS Screen System — Hardening Plan
 
-Status: **proposed**
+Status: **implemented** (§1–§7; §8 deferred — enhancements, not bugs)
 Covers: KDOS v1.1 screen registry, tab bar, key dispatch, WVEC widgets
 
 ---
@@ -179,14 +179,14 @@ for its spec.  Listed here for completeness.
 
 ## Priority Order
 
-| # | Item | Severity | Effort |
-|---|------|----------|--------|
-| 1 | CATCH around EXECUTE (§3) | High | Small |
-| 2 | ABORT → checked return (§2) | High | Small |
-| 3 | Document main-core-only (§4 short-term) | Medium | Tiny |
-| 4 | Tab bar overflow (§5) | Medium | Medium |
-| 5 | Unregistration (§1) | Medium | Medium |
-| 6 | Key namespace docs (§6) | Low | Tiny |
-| 7 | SCR-SEL reset (§7) | Low | Small |
-| 8 | W.INPUT enhancements (§8) | Low | Large |
-| 9 | Spinlock for multicore (§4 long-term) | Low | Medium |
+| # | Item | Severity | Effort | Status |
+|---|------|----------|--------|--------|
+| 1 | CATCH around EXECUTE (§3) | High | Small | **Done** |
+| 2 | ABORT → checked return (§2) | High | Small | **Done** |
+| 3 | Document main-core-only (§4 short-term) | Medium | Tiny | **Done** |
+| 4 | Tab bar overflow (§5) | Medium | Medium | **Done** |
+| 5 | Unregistration (§1) | Medium | Medium | **Done** |
+| 6 | Key namespace docs (§6) | Low | Tiny | **Done** |
+| 7 | SCR-SEL reset (§7) | Low | Small | **Done** |
+| 8 | W.INPUT enhancements (§8) | Low | Large | Deferred |
+| 9 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
