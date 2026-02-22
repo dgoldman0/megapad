@@ -45,10 +45,12 @@ EXT_MEM_BASE = 0x0010_0000
 # Virtual terminal defaults
 TERM_COLS = 80
 TERM_ROWS = 30
-TAB_HEIGHT = 28          # pixels for tab bar
 CURSOR_BLINK_MS = 530    # cursor blink interval
-MENU_HEIGHT = 24         # pixels for menu bar
-STATUS_HEIGHT = 22       # pixels for status bar
+
+# Base (unscaled) chrome sizes — multiplied by ui_scale in FramebufferDisplay
+_BASE_MENU_HEIGHT = 24
+_BASE_TAB_HEIGHT = 28
+_BASE_STATUS_HEIGHT = 22
 
 # ── Color Palette ─────────────────────────────────────────────────────
 
@@ -385,20 +387,21 @@ class MenuBar:
             self._rects.append((x, w))
             x += w + 2
 
-    def draw(self, pygame_module, screen, font, win_w: int):
+    def draw(self, pygame_module, screen, font, win_w: int, menu_h: int = 24):
         """Draw the menu bar and any open dropdown."""
+        self._menu_h = menu_h
         # Background
         pygame_module.draw.rect(screen, Theme.MENU_BG,
-                                (0, 0, win_w, MENU_HEIGHT))
+                                (0, 0, win_w, menu_h))
 
         # Menu titles
         for i, (m, (x, w)) in enumerate(zip(self.menus, self._rects)):
             active = (i == self.active_menu)
             bg = Theme.MENU_HI_BG if active else Theme.MENU_BG
             fg = Theme.MENU_HI_FG if active else Theme.MENU_FG
-            pygame_module.draw.rect(screen, bg, (x, 0, w, MENU_HEIGHT))
+            pygame_module.draw.rect(screen, bg, (x, 0, w, menu_h))
             text = font.render(f" {m.title} ", True, fg)
-            ty = (MENU_HEIGHT - text.get_height()) // 2
+            ty = (menu_h - text.get_height()) // 2
             screen.blit(text, (x, ty))
 
         # Draw dropdown if active
@@ -409,16 +412,17 @@ class MenuBar:
         menu = self.menus[self.active_menu]
         x, _w = self._rects[self.active_menu]
         items = menu.items
+        menu_h = getattr(self, '_menu_h', 24)
 
         # Calculate dropdown dimensions
         item_h = font.get_linesize() + 8
-        dd_w = 240
+        dd_w = max(240, font.size("Save Snapshot...    Ctrl+S")[0] + 40)
         dd_h = 0
         for item in items:
             dd_h += 1 if item.separator else item_h
 
         # Draw dropdown background + shadow
-        dd_y = MENU_HEIGHT
+        dd_y = menu_h
         # Shadow
         pygame_module.draw.rect(screen, (15, 15, 20),
                                 (x + 3, dd_y + 3, dd_w, dd_h))
@@ -456,10 +460,11 @@ class MenuBar:
 
             iy += item_h
 
-    def handle_click(self, mx: int, my: int) -> Optional[callable]:
+    def handle_click(self, mx: int, my: int, font=None) -> Optional[callable]:
         """Handle a mouse click. Returns a callback if a menu item was clicked."""
+        menu_h = getattr(self, '_menu_h', 24)
         # Click on menu title?
-        if my < MENU_HEIGHT:
+        if my < menu_h:
             for i, (x, w) in enumerate(self._rects):
                 if x <= mx < x + w:
                     if self.active_menu == i:
@@ -474,22 +479,20 @@ class MenuBar:
         if self.active_menu >= 0:
             menu = self.menus[self.active_menu]
             x, _w = self._rects[self.active_menu]
-            dd_w = 240
-            item_h = 24  # approximate; recalculated below
+            dd_w = max(240, font.size("Save Snapshot...    Ctrl+S")[0] + 40) if font else 240
+            item_h = (font.get_linesize() + 8) if font else 24
 
-            # Recalculate actual item height from font
-            iy = MENU_HEIGHT
+            iy = menu_h
             for item in menu.items:
                 if item.separator:
                     iy += 1
                     continue
-                item_h_actual = 24
-                if x <= mx < x + dd_w and iy <= my < iy + item_h_actual:
+                if x <= mx < x + dd_w and iy <= my < iy + item_h:
                     self.active_menu = -1
                     if item.enabled and item.callback:
                         return item.callback
                     return None
-                iy += item_h_actual
+                iy += item_h
 
             self.active_menu = -1
         return None
@@ -646,15 +649,17 @@ class StatusBar:
         self.message = msg
         self.message_time = time.time() + duration
 
-    def draw(self, pygame_module, screen, font, win_w: int, win_h: int):
-        y = win_h - STATUS_HEIGHT
+    def draw(self, pygame_module, screen, font, win_w: int, win_h: int, 
+             status_h: int = 22):
+        y = win_h - status_h
         pygame_module.draw.rect(screen, Theme.STATUS_BG,
-                                (0, y, win_w, STATUS_HEIGHT))
+                                (0, y, win_w, status_h))
         pygame_module.draw.line(screen, Theme.MENU_SEP,
                                 (0, y), (win_w, y))
 
         x_off = 8
-        ty = y + (STATUS_HEIGHT - font.get_linesize()) // 2
+
+        ty = y + (status_h - font.get_linesize()) // 2
 
         # Paused indicator
         if self.paused:
@@ -702,9 +707,9 @@ class StatusBar:
 class DebugPanel:
     """Register / disassembly / memory view panel."""
 
-    def __init__(self):
+    def __init__(self, ui_scale: int = 1):
         self.visible = False
-        self.width = 380
+        self.width = int(380 * max(1, ui_scale * 0.75))
 
     def draw(self, pygame_module, screen, font, mono_font,
              sys_emu: "MegapadSystem", x: int, y: int, w: int, h: int):
@@ -1025,10 +1030,12 @@ class FramebufferDisplay:
     TAB_GRAPHICS = 1
 
     def __init__(self, sys_emu: "MegapadSystem", scale: int = 2,
-                 title: str = "Megapad-64"):
+                 title: str = "Megapad-64",
+                 on_close: Optional[callable] = None):
         self.sys = sys_emu
         self.scale = max(1, scale)
         self.title = title
+        self.on_close = on_close  # called when window is closed
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._started = threading.Event()
@@ -1036,11 +1043,16 @@ class FramebufferDisplay:
         self.active_tab = self.TAB_TERMINAL
         self.term = VirtualTerminal(TERM_COLS, TERM_ROWS)
         self.status = StatusBar()
-        self.debug = DebugPanel()
+        self.debug = DebugPanel(ui_scale=self.scale)
         self._paused = False
         self._last_cycles = 0
         self._last_time = 0.0
         self._pending_action: Optional[str] = None
+        # Compute scaled chrome sizes
+        self._ui_scale = max(1.0, self.scale * 0.6)
+        self._menu_h = int(_BASE_MENU_HEIGHT * self._ui_scale)
+        self._tab_h = int(_BASE_TAB_HEIGHT * self._ui_scale)
+        self._status_h = int(_BASE_STATUS_HEIGHT * self._ui_scale)
 
     # -- public API -------------------------------------------------------
 
@@ -1135,21 +1147,26 @@ class FramebufferDisplay:
         pygame.key.set_repeat(400, 35)  # 400ms delay, then repeat every 35ms
         pygame.display.set_caption(self.title)
 
-        # Fonts
+        # Fonts — scale UI text with the display scale
         term_font_size = max(12, 14 * self.scale)
         term_font = pygame.font.SysFont("monospace", term_font_size)
         test = term_font.render("M", False, (255, 255, 255))
         cell_w = test.get_width()
         cell_h = term_font.get_linesize()
 
-        ui_font_size = max(12, 13)
+        ui_font_size = max(12, int(13 * self._ui_scale))
         ui_font = pygame.font.SysFont("sans", ui_font_size)
-        mono_font = pygame.font.SysFont("monospace", max(11, 12))
+        mono_font_size = max(11, int(12 * self._ui_scale))
+        mono_font = pygame.font.SysFont("monospace", mono_font_size)
+
+        menu_h = self._menu_h
+        tab_h = self._tab_h
+        status_h = self._status_h
 
         # Window dimensions
         term_pixel_w = self.term.cols * cell_w
         term_pixel_h = self.term.rows * cell_h
-        chrome_h = MENU_HEIGHT + TAB_HEIGHT + STATUS_HEIGHT
+        chrome_h = menu_h + tab_h + status_h
         content_w = term_pixel_w
         win_w = content_w + (self.debug.width if self.debug.visible else 0)
         win_h = term_pixel_h + chrome_h
@@ -1285,11 +1302,11 @@ class FramebufferDisplay:
 
                     elif event.type == pygame.MOUSEBUTTONDOWN:
                         mx, my = event.pos
-                        if my < MENU_HEIGHT or menubar.is_open():
-                            cb = menubar.handle_click(mx, my)
+                        if my < menu_h or menubar.is_open():
+                            cb = menubar.handle_click(mx, my, font=ui_font)
                             if cb:
                                 cb()
-                        elif MENU_HEIGHT <= my < MENU_HEIGHT + TAB_HEIGHT:
+                        elif menu_h <= my < menu_h + tab_h:
                             debug_w = self.debug.width if self.debug.visible else 0
                             tab_w = (win_w - debug_w) // 2
                             if mx < tab_w:
@@ -1333,13 +1350,13 @@ class FramebufferDisplay:
 
                 debug_w = self.debug.width if self.debug.visible else 0
                 content_area_w = win_w - debug_w
-                tab_y = MENU_HEIGHT
-                content_y = MENU_HEIGHT + TAB_HEIGHT
+                tab_y = menu_h
+                content_y = menu_h + tab_h
                 content_h = win_h - chrome_h
 
                 # ── Tab bar ───────────────────────────────────
                 self._draw_tabs(pygame, screen, ui_font,
-                                content_area_w, TAB_HEIGHT, tab_y)
+                                content_area_w, tab_h, tab_y)
 
                 # ── Content area ──────────────────────────────
                 content_rect = pygame.Rect(0, content_y,
@@ -1408,10 +1425,11 @@ class FramebufferDisplay:
                                     debug_w, content_h)
 
                 # ── Menu bar (drawn last, on top) ─────────────
-                menubar.draw(pygame, screen, ui_font, win_w)
+                menubar.draw(pygame, screen, ui_font, win_w, menu_h)
 
                 # ── Status bar ────────────────────────────────
-                self.status.draw(pygame, screen, ui_font, win_w, win_h)
+                self.status.draw(pygame, screen, ui_font, win_w, win_h,
+                                 status_h)
 
                 pygame.display.flip()
                 clock.tick(self.fps)
@@ -1422,6 +1440,9 @@ class FramebufferDisplay:
             traceback.print_exc()
         finally:
             pygame.quit()
+            # Fire the on_close callback (e.g. to exit the CLI process)
+            if self.on_close:
+                self.on_close()
 
     def _draw_tabs(self, pygame, screen, font, area_w: int,
                     tab_h: int, y: int):

@@ -1307,7 +1307,12 @@ def main():
         if args.display:
             try:
                 from display import FramebufferDisplay
-                display = FramebufferDisplay(sys_emu, scale=args.scale)
+                def _on_display_close():
+                    """Window closed — terminate the whole process."""
+                    print("\n[display] Window closed.")
+                    os._exit(0)
+                display = FramebufferDisplay(sys_emu, scale=args.scale,
+                                             on_close=_on_display_close)
                 display.start()
                 print("[display] Framebuffer window opened "
                       f"(scale={args.scale}x)")
