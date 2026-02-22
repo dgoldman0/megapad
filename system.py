@@ -56,6 +56,12 @@ HBW_END    = HBW_BASE + HBW_SIZE    # exclusive
 # Fills the gap between Bank 0 top and HBW base.
 EXT_MEM_BASE = 0x0010_0000          # right after 1 MiB Bank 0
 
+# Dedicated VRAM aperture — sits just below HBW in the 32-bit map.
+# On FPGA this maps to a separate SRAM port or second HyperRAM chip.
+# Default 4 MiB: enough for double-buffered 1280×720 RGBA8888.
+VRAM_BASE         = 0xFF00_0000
+VRAM_DEFAULT_SIZE = 4 * (1 << 20)    # 4 MiB
+
 # Boot vector: on reset, PC (R3) is loaded with this address.
 # BIOS is expected to be loaded here.
 BOOT_VECTOR = 0x0000_0000_0000_0000
@@ -260,12 +266,14 @@ class MegapadSystem:
                  num_cores: int = 1,
                  num_clusters: int = 0,
                  hbw_size: int = HBW_SIZE,
-                 ext_mem_size: int = 0):
+                 ext_mem_size: int = 0,
+                 vram_size: int = VRAM_DEFAULT_SIZE):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
         self.hbw_size = hbw_size          # Banks 1–3 (HBW math RAM)
         self.ext_mem_size = ext_mem_size  # External memory (HyperRAM/SDRAM)
+        self.vram_size = vram_size        # Dedicated VRAM
 
         # Total core count matches RTL NUM_ALL_CORES
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
@@ -281,6 +289,11 @@ class MegapadSystem:
         self._ext_mem = bytearray(ext_mem_size) if ext_mem_size > 0 else bytearray()
         self.ext_mem_base = EXT_MEM_BASE if ext_mem_size > 0 else 0
         self.ext_mem_end = (EXT_MEM_BASE + ext_mem_size) if ext_mem_size > 0 else 0
+
+        # Dedicated VRAM (separate from HBW and system RAM)
+        self._vram_mem = bytearray(vram_size) if vram_size > 0 else bytearray()
+        self.vram_base = VRAM_BASE if vram_size > 0 else 0
+        self.vram_end = (VRAM_BASE + vram_size) if vram_size > 0 else 0
 
         # Create full CPU cores
         self.cores: list[Megapad64] = []
@@ -339,6 +352,8 @@ class MegapadSystem:
             has_nic=True,
             ext_mem_base=self.ext_mem_base,
             ext_mem_size=ext_mem_size,
+            vram_base=self.vram_base,
+            vram_size=vram_size,
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.spinlock = SpinlockDevice()
@@ -518,6 +533,10 @@ class MegapadSystem:
         ext_mem_size = self.ext_mem_size
         ext_mem_base = self.ext_mem_base
         ext_mem_end = self.ext_mem_end
+        vram_mem = self._vram_mem
+        vram_size = self.vram_size
+        vram_base = self.vram_base
+        vram_end = self.vram_end
 
         # Scratchpad interception for micro-cores
         cluster = getattr(cpu, '_cluster', None)
@@ -559,6 +578,8 @@ class MegapadSystem:
                             cluster.cl_priv_level = 0  # drop to S-mode
                         raise TrapError(IVEC_PRIV_FAULT,
                                         f"MPU violation @ {addr:#018x}")
+            if vram_size > 0 and vram_base <= addr < vram_end:
+                return vram_mem[addr - vram_base]
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 return hbw_mem[addr - HBW_BASE]
             if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
@@ -593,6 +614,9 @@ class MegapadSystem:
                             cluster.cl_priv_level = 0  # drop to S-mode
                         raise TrapError(IVEC_PRIV_FAULT,
                                         f"MPU violation @ {addr:#018x}")
+            if vram_size > 0 and vram_base <= addr < vram_end:
+                vram_mem[addr - vram_base] = val & 0xFF
+                return
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
                 hbw_mem[addr - HBW_BASE] = val & 0xFF
                 return
@@ -652,6 +676,8 @@ class MegapadSystem:
 
     def _raw_mem_read(self, addr: int) -> int:
         addr = u64(addr)
+        if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
+            return self._vram_mem[addr - self.vram_base]
         if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
             return self._hbw_mem[addr - HBW_BASE]
         if self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
@@ -660,7 +686,9 @@ class MegapadSystem:
 
     def _raw_mem_write(self, addr: int, val: int):
         addr = u64(addr)
-        if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+        if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
+            self._vram_mem[addr - self.vram_base] = val & 0xFF
+        elif self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
             self._hbw_mem[addr - HBW_BASE] = val & 0xFF
         elif self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
             self._ext_mem[addr - self.ext_mem_base] = val & 0xFF

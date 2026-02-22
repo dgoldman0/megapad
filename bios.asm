@@ -7549,7 +7549,7 @@ w_fb_status_fetch:
     ret.l
 
 ; FB-SETUP ( width height mode -- )  Configure framebuffer in one call.
-;   Sets base to HBW Bank 3 (0xFFE0_0000), sets width/height/stride/mode,
+;   Sets base to dedicated VRAM (0xFF00_0000), sets width/height/stride/mode,
 ;   does NOT enable — caller must use FB-ENABLE separately.
 ;   Uses ONLY scratch regs: R0, R1, R7, R9, R11, R12, R13.
 ;   Sub-words clobber R0, R7, R9, R11, R12.  R1 and R13 survive calls.
@@ -7566,8 +7566,8 @@ w_fb_setup:
     ; Stash height on data stack
     subi r14, 8
     str r14, r9              ; [DSP+0] = height
-    ; 1) FB_BASE = 0xFFE0_0000
-    ldi64 r9, 0xFFE00000
+    ; 1) FB_BASE = 0xFF00_0000  (dedicated VRAM)
+    ldi64 r9, 0xFF000000
     subi r14, 8
     str r14, r9              ; push base for w_fb_base_store
     ldi64 r11, w_fb_base_store
@@ -9144,6 +9144,22 @@ w_ext_mem_base:
 ; EXT-MEM-SIZE ( -- u )  read external memory size in bytes from SysInfo
 w_ext_mem_size:
     ldi64 r11, 0xFFFF_FF00_0000_0340    ; SysInfo + 0x40 = EXT_MEM_SIZE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; VRAM-BASE ( -- addr )  read dedicated VRAM base address from SysInfo
+w_vram_base:
+    ldi64 r11, 0xFFFF_FF00_0000_0350    ; SysInfo + 0x50 = VRAM_BASE
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; VRAM-SIZE ( -- u )  read dedicated VRAM size in bytes from SysInfo
+w_vram_size:
+    ldi64 r11, 0xFFFF_FF00_0000_0358    ; SysInfo + 0x58 = VRAM_SIZE
     ldn r0, r11
     subi r14, 8
     str r14, r0
@@ -12079,9 +12095,27 @@ d_ext_mem_size:
     call.l r11
     ret.l
 
+; === VRAM-BASE ( -- addr ) ===
+d_vram_base:
+    .dq d_ext_mem_size
+    .db 9
+    .ascii "VRAM-BASE"
+    ldi64 r11, w_vram_base
+    call.l r11
+    ret.l
+
+; === VRAM-SIZE ( -- u ) ===
+d_vram_size:
+    .dq d_vram_base
+    .db 9
+    .ascii "VRAM-SIZE"
+    ldi64 r11, w_vram_size
+    call.l r11
+    ret.l
+
 ; === N-FULL ( -- n ) ===
 d_n_full:
-    .dq d_ext_mem_size
+    .dq d_vram_size
     .db 6
     .ascii "N-FULL"
     ldi64 r11, w_n_full

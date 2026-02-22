@@ -53,12 +53,14 @@ VARIABLE GFX-DH          \ drawing height
     \ Compute stride = width * bpp
     OVER GFX-BPP @ * DUP GFX-STR !     \ save stride  ( w h stride )
     DROP                                ( w h )
-    \ Set FB base: prefer external memory, fall back to HBW Bank 3
-    EXT-MEM-SIZE 0 > IF
+    \ Set FB base: prefer dedicated VRAM, fall back to ext mem, then HBW
+    VRAM-SIZE 0 > IF
+        VRAM-BASE
+    ELSE EXT-MEM-SIZE 0 > IF
         EXT-MEM-BASE
     ELSE
         HBW-BASE 0x200000 +
-    THEN
+    THEN THEN
     DUP GFX-FB !                        ( w h fb )
     FB-BASE!                            ( w h )
     SWAP DUP FB-WIDTH!                  ( h w )

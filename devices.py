@@ -454,6 +454,8 @@ class Storage(Device):
 #   0x38  EXT_MEM_BASE — external memory base address
 #   0x40  EXT_MEM_SIZE — external memory size in bytes
 #   0x48  NUM_FULL     — number of full (major) cores
+#   0x50  VRAM_BASE    — dedicated VRAM base address
+#   0x58  VRAM_SIZE    — dedicated VRAM size in bytes
 
 # Board ID + version packed as 64-bit LE value:
 #   bytes 0-1: version (minor=1, then 0x00)
@@ -475,8 +477,10 @@ class SystemInfo(Device):
                  has_storage: bool = False,
                  has_nic: bool = False,
                  ext_mem_base: int = 0,
-                 ext_mem_size: int = 0):
-        super().__init__("SysInfo", SYSINFO_BASE, 0x50)
+                 ext_mem_size: int = 0,
+                 vram_base: int = 0,
+                 vram_size: int = 0):
+        super().__init__("SysInfo", SYSINFO_BASE, 0x60)  # extended to 96 bytes
         if mem_size_kib is not None and bank0_size == (1 << 20):
             # Legacy caller: convert KiB → bytes
             bank0_size = mem_size_kib * 1024
@@ -489,6 +493,8 @@ class SystemInfo(Device):
         self.int_mem_total = int_mem_total
         self.ext_mem_base = ext_mem_base
         self.ext_mem_size = ext_mem_size
+        self.vram_base = vram_base
+        self.vram_size = vram_size
         # Legacy flags (kept for backward compat, not in RTL)
         self.has_storage = has_storage
         self.has_nic = has_nic
@@ -505,10 +511,12 @@ class SystemInfo(Device):
             0x38: self.ext_mem_base,
             0x40: self.ext_mem_size,
             0x48: self.num_full_cores,
+            0x50: self.vram_base,
+            0x58: self.vram_size,
         }
 
     def read8(self, offset: int) -> int:
-        if offset < 0 or offset >= 0x50:
+        if offset < 0 or offset >= 0x60:
             return 0
         reg_base = offset & ~0x07            # align down to 8
         byte_idx = offset & 0x07

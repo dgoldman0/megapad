@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 # Memory map constants (must match system.py)
 HBW_BASE = 0xFFD0_0000
 EXT_MEM_BASE = 0x0010_0000
+VRAM_BASE = 0xFF00_0000
 
 # Virtual terminal defaults
 TERM_COLS = 80
@@ -1470,6 +1471,12 @@ class FramebufferDisplay:
 
     def _resolve_fb_mem(self, base_addr: int):
         """Return (buffer, offset) for framebuffer base address."""
+        # Check VRAM first (dedicated graphics memory)
+        if self.sys.vram_size > 0:
+            vram_base = self.sys.vram_base
+            vram_end = self.sys.vram_end
+            if vram_base <= base_addr < vram_end:
+                return self.sys._vram_mem, base_addr - vram_base
         if self.sys.ext_mem_size > 0:
             ext_base = self.sys.ext_mem_base
             ext_end = self.sys.ext_mem_end
@@ -1563,6 +1570,12 @@ class HeadlessDisplay:
         pass
 
     def _resolve_fb_mem(self, base_addr: int):
+        # Check VRAM first (dedicated graphics memory)
+        if self.sys.vram_size > 0:
+            vram_base = self.sys.vram_base
+            vram_end = self.sys.vram_end
+            if vram_base <= base_addr < vram_end:
+                return self.sys._vram_mem, base_addr - vram_base
         if self.sys.ext_mem_size > 0:
             ext_base = self.sys.ext_mem_base
             ext_end = self.sys.ext_mem_end
