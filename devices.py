@@ -1962,6 +1962,75 @@ class CppFramebufferProxy(Device):
     def frame_bytes(self) -> int:
         return self.stride * self.height
 
+
+class CppTimerProxy(Device):
+    """Thin proxy delegating Timer state to the C++ TimerDevice.
+
+    Provides the same attribute interface as the Python ``Timer`` class
+    so that ``system.py`` (IRQ checks, debug display) works unchanged.
+    All MMIO is handled in C++; this proxy exists so the Python side can
+    read/write configuration properties (counter, compare, control, …).
+    """
+
+    def __init__(self, cs):
+        super().__init__("Timer", TIMER_BASE, 0x10)
+        self._cs = cs
+        cs.timer_init()
+
+    # -- Configuration properties (r/w) --------------------------------
+
+    @property
+    def counter(self) -> int:
+        return self._cs.timer_counter
+
+    @counter.setter
+    def counter(self, v: int):
+        self._cs.timer_counter = v
+
+    @property
+    def compare(self) -> int:
+        return self._cs.timer_compare
+
+    @compare.setter
+    def compare(self, v: int):
+        self._cs.timer_compare = v
+
+    @property
+    def control(self) -> int:
+        return self._cs.timer_control
+
+    @control.setter
+    def control(self, v: int):
+        self._cs.timer_control = v
+
+    @property
+    def status(self) -> int:
+        return self._cs.timer_status
+
+    @status.setter
+    def status(self, v: int):
+        self._cs.timer_status = v
+
+    @property
+    def irq_pending(self) -> bool:
+        return self._cs.timer_irq_pending
+
+    @irq_pending.setter
+    def irq_pending(self, v: bool):
+        self._cs.timer_irq_pending = v
+
+    # -- MMIO pass-through (for tests that call read8/write8 directly) --
+
+    def read8(self, offset: int) -> int:
+        return self._cs.timer_read8(TIMER_BASE + offset)
+
+    def write8(self, offset: int, value: int):
+        self._cs.timer_write8(TIMER_BASE + offset, value & 0xFF)
+
+    def tick(self, cycles: int):
+        self._cs.timer_tick(cycles)
+
+
 # ---------------------------------------------------------------------------
 #  Real-Time Clock / System Clock
 # ---------------------------------------------------------------------------

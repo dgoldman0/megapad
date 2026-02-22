@@ -27,7 +27,7 @@ from megapad64 import (
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, NTTDevice, KemDevice,
-    FramebufferDevice, CppFramebufferProxy, RTC,
+    FramebufferDevice, CppFramebufferProxy, CppTimerProxy, RTC,
     MailboxDevice, SpinlockDevice, CRCDevice,
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
@@ -338,7 +338,8 @@ class MegapadSystem:
         self.bus = DeviceBus()
 
         self.uart = UART()
-        self.timer = Timer()
+        # Timer is now handled natively by C++ accelerator — use proxy
+        self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
@@ -376,6 +377,7 @@ class MegapadSystem:
         # lifecycle, inject_frame(), and status display.
 
         self.bus.register(self.uart)
+        # Timer: C++ handles all MMIO; proxy tick is called via bus.
         self.bus.register(self.timer)
         self.bus.register(self.storage)
         self.bus.register(self.sysinfo)
@@ -421,6 +423,7 @@ class MegapadSystem:
             cs.nic_set_tx_callback(_tx_cb)
             cs.init_trng()
             cs.fb_init()  # FB MMIO handled in C++ on all cores
+            cs.timer_init()  # Timer MMIO handled in C++ on all cores
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs

@@ -18,6 +18,7 @@
 #include "mp64_crypto.h"
 #include "mp64_fb.h"
 #include "mp64_nic.h"
+#include "mp64_timer.h"
 
 namespace py = pybind11;
 
@@ -169,6 +170,9 @@ struct CPUState {
 
     // C++ native framebuffer device (bypass Python MMIO for FB registers)
     FramebufferDevice fb;
+
+    // C++ native timer device (bypass Python MMIO for timer polling)
+    TimerDevice timer;
 };
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1027,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.crypto.read8(mmio_off);
         if (s.fb.handles(mmio_off))
             return s.fb.read8(mmio_off);
+        if (s.timer.handles(mmio_off))
+            return s.timer.read8(mmio_off);
         return cb.mmio_read8(addr);  // fallback to Python for other devices
     }
     if (s.priv_level) {
@@ -1062,6 +1068,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         }
         if (s.fb.handles(mmio_off)) {
             s.fb.write8(mmio_off, val);
+            return;
+        }
+        if (s.timer.handles(mmio_off)) {
+            s.timer.write8(mmio_off, val);
             return;
         }
         cb.mmio_write8(addr, val);  // fallback to Python for other devices
@@ -1116,6 +1126,12 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.fb.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (s.timer.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.timer.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1167,6 +1183,11 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
+        if (s.timer.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -1198,6 +1219,8 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
             return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
         if (s.fb.handles(mmio_off))
             return s.fb.read8(mmio_off) | ((uint16_t)s.fb.read8(mmio_off+1) << 8);
+        if (s.timer.handles(mmio_off))
+            return s.timer.read8(mmio_off) | ((uint16_t)s.timer.read8(mmio_off+1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
@@ -1234,6 +1257,11 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.fb.handles(mmio_off)) {
             s.fb.write8(mmio_off, val & 0xFF);
             s.fb.write8(mmio_off+1, (val >> 8) & 0xFF);
+            return;
+        }
+        if (s.timer.handles(mmio_off)) {
+            s.timer.write8(mmio_off, val & 0xFF);
+            s.timer.write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
         cb.mmio_write8(addr, val & 0xFF);
@@ -1275,6 +1303,12 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.fb.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (s.timer.handles(mmio_off)) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.timer.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint32_t v = 0;
         for (int i = 0; i < 4; i++)
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1314,6 +1348,11 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.fb.handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (s.timer.handles(mmio_off)) {
+            for (int i = 0; i < 4; i++)
+                s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         for (int i = 0; i < 4; i++)
@@ -2394,6 +2433,40 @@ PYBIND11_MODULE(_mp64_accel, m) {
             if (idx >= 0 && idx < 256)
                 s.fb.palette[idx] = rgb & 0x00FFFFFF;
         })
+        // ── Timer device ──────────────────────────────────────
+        .def("timer_init", [](CPUState& s) {
+            s.timer.init();
+        })
+        .def("timer_enabled", [](const CPUState& s) -> bool {
+            return s.timer.enabled;
+        })
+        .def("timer_disable", [](CPUState& s) {
+            s.timer.enabled = false;
+        })
+        .def("timer_tick", [](CPUState& s, uint32_t cycles) {
+            s.timer.tick(cycles);
+        })
+        .def("timer_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.timer.read8(mmio_off);
+        })
+        .def("timer_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.timer.write8(mmio_off, val);
+        })
+        .def_property("timer_irq_pending",
+            [](const CPUState& s) -> bool { return s.timer.irq_pending; },
+            [](CPUState& s, bool v) { s.timer.irq_pending = v; })
+        .def_property("timer_counter",
+            [](const CPUState& s) -> uint32_t { return s.timer.counter; },
+            [](CPUState& s, uint32_t v) { s.timer.counter = v; })
+        .def_property("timer_compare",
+            [](const CPUState& s) -> uint32_t { return s.timer.compare; },
+            [](CPUState& s, uint32_t v) { s.timer.compare = v; })
+        .def_property("timer_control",
+            [](const CPUState& s) -> uint8_t { return s.timer.control; },
+            [](CPUState& s, uint8_t v) { s.timer.control = v; })
+        .def_property("timer_status",
+            [](const CPUState& s) -> uint8_t { return s.timer.status; },
+            [](CPUState& s, uint8_t v) { s.timer.status = v; })
         ;
 
     // Expose RunResult
