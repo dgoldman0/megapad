@@ -1132,6 +1132,7 @@ class FramebufferDisplay:
 
         fb = self.sys.fb
         pygame.init()
+        pygame.key.set_repeat(400, 35)  # 400ms delay, then repeat every 35ms
         pygame.display.set_caption(self.title)
 
         # Fonts
