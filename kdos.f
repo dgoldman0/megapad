@@ -3733,7 +3733,8 @@ VARIABLE LD-CUR
 VARIABLE LD-LEN
 
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
-CREATE _LD-STK 128 ALLOT    \ 4 vars * 8 bytes * 4 nesting levels
+\ Includes CWD so relative-path loads restore the working directory.
+CREATE _LD-STK 200 ALLOT    \ 5 vars * 8 bytes * 5 nesting levels
 VARIABLE _LD-SP
 0 _LD-SP !
 
@@ -3741,13 +3742,99 @@ VARIABLE _LD-SP
     LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
     LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
     LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    CWD  @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
 
 : _LD-RESTORE  ( -- )
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ CWD  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
+
+\ ── Relative-path resolution for LOAD / REQUIRE ─────────────────────
+\  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
+\  Each intermediate component adjusts CWD (".." goes to parent,
+\  anything else CDs into a subdirectory).  The final component
+\  (the filename) is left in NAMEBUF for FIND-BY-NAME.  CWD is
+\  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
+\  loads always return to the caller's working directory.
+
+CREATE _RP-PATH 24 ALLOT     \ copy of full path from NAMEBUF
+CREATE _RP-COMP 24 ALLOT     \ current component being processed
+VARIABLE _RP-I                \ scan position within _RP-PATH
+
+\ _HAS-SLASH? ( -- flag )  True if NAMEBUF contains a '/' character.
+: _HAS-SLASH?  ( -- flag )
+    FALSE
+    24 0 DO
+        NAMEBUF I + C@ DUP 0= IF DROP LEAVE THEN
+        47 = IF DROP TRUE LEAVE THEN
+    LOOP ;
+
+\ _RP-NEXT-SEP ( -- pos )  Index of next '/' or NUL from _RP-I.
+: _RP-NEXT-SEP  ( -- pos )
+    _RP-I @
+    BEGIN
+        DUP 24 < IF
+            _RP-PATH OVER + C@ DUP 0= SWAP 47 = OR
+            IF TRUE ELSE 1+ FALSE THEN
+        ELSE TRUE THEN
+    UNTIL ;
+
+\ _RP-IS-DOTDOT? ( -- flag )  True if _RP-COMP is "..\0".
+: _RP-IS-DOTDOT?  ( -- flag )
+    _RP-COMP     C@ 46 =
+    _RP-COMP 1+  C@ 46 = AND
+    _RP-COMP 2 + C@ 0=  AND ;
+
+\ _RP-CD-COMP ( -- ok? )  CD into directory named in _RP-COMP.
+: _RP-CD-COMP  ( -- ok? )
+    NAMEBUF 24 0 FILL
+    _RP-COMP NAMEBUF 24 CMOVE
+    FIND-BY-NAME DUP -1 = IF DROP FALSE EXIT THEN
+    DUP DIRENT DE.TYPE 8 <> IF DROP FALSE EXIT THEN
+    CWD ! TRUE ;
+
+\ _RESOLVE-PATH ( -- )
+\   If NAMEBUF contains '/', walk directory components adjusting CWD
+\   and leave the final filename in NAMEBUF.  No-op for plain names.
+: _RESOLVE-PATH  ( -- )
+    _HAS-SLASH? 0= IF EXIT THEN
+    \ Handle leading '/' — absolute path, start from root
+    NAMEBUF C@ 47 = IF 255 CWD ! THEN
+    NAMEBUF _RP-PATH 24 CMOVE
+    \ Skip leading '/' if present
+    _RP-PATH C@ 47 = IF 1 ELSE 0 THEN  _RP-I !
+    BEGIN
+        _RP-NEXT-SEP                     ( end )
+        \ What character terminated the scan?
+        DUP 24 < IF _RP-PATH OVER + C@ ELSE 0 THEN
+        47 = IF
+            \ '/' found — extract directory component [_RP-I, end)
+            _RP-COMP 24 0 FILL
+            DUP _RP-I @ -                ( end len )
+            _RP-PATH _RP-I @ + _RP-COMP ROT CMOVE  ( end )
+            1+ _RP-I !                   \ advance past '/'
+            \ Process component
+            _RP-IS-DOTDOT? IF
+                CWD @ 255 <> IF CWD @ DIRENT DE.PARENT CWD ! THEN
+            ELSE
+                _RP-CD-COMP 0= IF
+                    ."  Path component not found: "
+                    _RP-COMP .ZSTR CR EXIT
+                THEN
+            THEN
+            FALSE                        \ continue loop
+        ELSE
+            \ NUL or end of buffer — remainder is the filename
+            NAMEBUF 24 0 FILL
+            DUP _RP-I @ - DUP 0> IF
+                _RP-PATH _RP-I @ + NAMEBUF ROT CMOVE
+            ELSE DROP THEN
+            DROP TRUE                    \ done
+        THEN
+    UNTIL ;
 
 \ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
 \   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
@@ -3779,16 +3866,19 @@ VARIABLE _LD-SP
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     PARSE-NAME
+    \ Save walker state (including CWD) before resolving path.
+    _LD-SAVE
+    _RESOLVE-PATH
     FIND-BY-NAME DUP -1 = IF
-        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
+        DROP ."  Not found: " NAMEBUF .ZSTR CR
+        _LD-RESTORE EXIT
     THEN
     DIRENT                               ( de )
     \ Open by slot
     DUP DE.USED DUP 0= IF
-        2DROP ."  Empty file" CR EXIT
+        2DROP ."  Empty file" CR
+        _LD-RESTORE EXIT
     THEN
-    \ Save outer walker state before modifying variables (nesting).
-    _LD-SAVE
     LD-SZ !                              ( de )
     DUP 24 + W@ SWAP DE.COUNT           ( start count )
     \ Read file data into a buffer.  If external memory is present
@@ -10777,6 +10867,8 @@ CREATE _MOD-VAL  1 ALLOT
 
 \ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
 \   This is the core of LOAD without the PARSE-NAME call.
+\   CWD must already point to the target directory (set by
+\   _RESOLVE-PATH when the REQUIRE argument contains '/').
 : _MOD-LOAD-BODY  ( -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
@@ -10806,11 +10898,20 @@ CREATE _MOD-VAL  1 ALLOT
     _LD-RESTORE ;
 
 \ REQUIRE ( "name" -- )  Load a module if not already loaded.
+\   Accepts relative paths: REQUIRE ../lib/util.f
+\   Path components adjust CWD; the final name is looked up in
+\   the resolved directory.  CWD is restored after loading.
 : REQUIRE  ( "name" -- )
     PARSE-NAME
     _MOD-LOADED? IF EXIT THEN
     _MOD-MARK
-    _MOD-LOAD-BODY ;
+    FS-ENSURE                  \ load FS before path resolution
+    CWD @ >R                   \ save CWD (return stack is safe
+                               \ here — _MOD-LOAD-BODY uses its
+                               \ own _LD-SAVE/_LD-RESTORE pair)
+    _RESOLVE-PATH
+    _MOD-LOAD-BODY
+    R> CWD ! ;                 \ restore caller's CWD
 
 \ _MOD-SHOW ( key-addr val-addr -- )  Print one module name.
 : _MOD-SHOW  ( key-addr val-addr -- )

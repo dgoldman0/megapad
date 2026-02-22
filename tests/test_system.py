@@ -19129,6 +19129,66 @@ class TestKDOSModuleSystem(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    def test_require_relative_parent(self):
+        """REQUIRE ../sibling/file.f resolves across directories."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+        fs.mkdir("libA")
+        fs.mkdir("libB")
+        fs.inject_file("helper.f", b"PROVIDED helper.f\n: HELPER-OK 42 ;\n",
+                        ftype=FTYPE_FORTH, path="/libB")
+        # app.f lives in /libA and requires ../libB/helper.f
+        fs.inject_file("app.f",
+                        b"PROVIDED app.f\nREQUIRE ../libB/helper.f\n"
+                        b": APP-OK HELPER-OK 2* ;\n",
+                        ftype=FTYPE_FORTH, path="/libA")
+        fs.save(path)
+        try:
+            text = self._run_kdos([
+                "CD libA",
+                "REQUIRE app.f",
+                "APP-OK .",
+            ], storage_image=path)
+            self.assertIn("84 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_require_subdir(self):
+        """REQUIRE lib/mod.f resolves into a subdirectory."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+        fs.mkdir("lib")
+        fs.inject_file("mod.f", b"PROVIDED mod.f\n: MOD-VAL 7 ;\n",
+                        ftype=FTYPE_FORTH, path="/lib")
+        fs.save(path)
+        try:
+            text = self._run_kdos([
+                "REQUIRE lib/mod.f",
+                "MOD-VAL .",
+            ], storage_image=path)
+            self.assertIn("7 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_load_relative_path(self):
+        """LOAD ../other/script.f resolves the relative path."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+        fs.mkdir("src")
+        fs.mkdir("data")
+        fs.inject_file("vals.f", b": DATA-V 55 ;\n",
+                        ftype=FTYPE_FORTH, path="/data")
+        fs.save(path)
+        try:
+            text = self._run_kdos([
+                "CD src",
+                "LOAD ../data/vals.f",
+                "DATA-V .",
+            ], storage_image=path)
+            self.assertIn("55 ", text)
+        finally:
+            os.unlink(path)
+
 
 class TestKDOSGraphicsModule(_KDOSTestBase):
     """Tests for graphics.f — framebuffer graphics module."""
