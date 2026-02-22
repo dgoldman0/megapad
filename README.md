@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,095 tests.
+— all running inside a Python emulator and verified by 1,539 tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -25,14 +25,14 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 300+ Forth dictionary words, 11,329 lines ASM, ~26 KB binary |
-| **KDOS** | v1.1 — 670+ colon definitions + 430+ variables/constants, 8,667 lines Forth |
+| **BIOS** | 353 Forth dictionary words, 12,544 lines ASM, ~28 KB binary |
+| **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,004 lines Forth |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 2,671+849 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (1,978 lines) — 63× speedup over PyPy |
-| **Tests** | 1,095 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
+| **Tests** | 1,539 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **Devices** | 14 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| **Devices** | 17 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
 | **FPGA RTL** | 27 Verilog modules + 18 testbenches (~180 HW tests), Genesys 2 + VU095 targets |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
@@ -123,7 +123,7 @@ TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
 arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
 INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
 key encapsulation via NTT+SHA3+TRNG), SystemInfo (CPUID, memory size),
-Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  14 device
+Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  17 device
 classes, all memory-mapped at `0xFFFF_FF00+`.
 
 ---
@@ -134,20 +134,20 @@ classes, all memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (8,296 lines)     │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (11,004 lines)    │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore, network,
 │  Network Stack · TLS 1.3       │    TLS 1.3, sockets, PQC
 ├─────────────────────────────────┤
-│    BIOS v1.0 (11,158 lines)    │  ← Subroutine-threaded Forth,
-│  291 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (12,544 lines)    │  ← Subroutine-threaded Forth,
+│  353 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-291 dictionary words covering arithmetic, logic, stack manipulation,
+353 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
@@ -300,12 +300,12 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
 | `system.py` | 610 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 11,158 | Forth BIOS in assembly (291 words, multicore, crypto, hardened) |
+| `bios.asm` | 12,544 | Forth BIOS in assembly (353 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 8,296 | KDOS v1.1 operating system in Forth (653 colon defs, §1–§17) |
+| `kdos.f` | 11,004 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
 | `cli.py` | 1,350 | CLI, boot modes, headless TCP server, interactive debug monitor |
 | `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 2,314 | 14 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| `devices.py` | 2,066 | 17 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
@@ -328,8 +328,8 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 291 entries by category) |
-| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 653 definitions by section, §1–§17) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 353 entries by category) |
+| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 923 definitions by section, §1–§17) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |

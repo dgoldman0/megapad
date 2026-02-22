@@ -89,7 +89,7 @@ with optional SDL2 display in the emulator.
   - Vsync counter increment via tick()
   - Mode validation
   - FB_STATUS reflects enable state
-  - Pixel data read-back via HBW RAM
+  - Pixel data read-back via VRAM
 
 ### Commit 3: BIOS framebuffer words
 

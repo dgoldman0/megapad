@@ -299,7 +299,7 @@ See the ISA Reference for the full instruction list.
 ## Disk Utility
 
 `diskutil.py` creates and manages **MP64FS** disk images — 1 MiB
-flat filesystems with a superblock, allocation bitmap, and 64-entry
+flat filesystems with a superblock, allocation bitmap, and 128-entry
 directory.  See the Filesystem Specification for the on-disk format.
 
 ### Command-Line Subcommands
@@ -584,7 +584,7 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `system.py` | ~994 | Quad-core SoC integration (CPUs + devices + memory map + mailbox + spinlock + `run_batch()`) |
 | `cli.py` | ~1,347 | CLI, boot modes, debug monitor, headless terminal server |
 | `asm.py` | ~788 | Two-pass assembler (with listing output) |
-| `devices.py` | ~1,875 | 14 MMIO devices (UART, Timer, Storage, SysInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA-256, TRNG, FieldALU, NTT, KEM, Framebuffer) |
+| `devices.py` | ~1,875 | 17 MMIO devices (UART, Timer, Storage, SysInfo, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA-256, TRNG, FieldALU, NTT, KEM, Framebuffer) |
 | `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,162 | MP64FS disk utility and image builder |

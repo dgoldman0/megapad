@@ -5,11 +5,11 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (300 dict entries, 11,329 lines ASM),
-KDOS v1.1 (8,667 lines, 670+ colon defs, 430+ vars/constants), Emulator
+**Current state (Feb 2026):** BIOS (353 dict entries, 12,544 lines ASM),
+KDOS v1.1 (11,004 lines, 923 colon defs, 707 vars/constants), Emulator
 (2,671 lines + 849-line 16-core heterogeneous SoC + 1,978-line C++ accelerator),
 FPGA RTL (27 Verilog modules + 18 testbenches, ~180 HW tests),
-devices.py (2,348 lines, 14 device classes), 1,095 test methods passing
+devices.py (2,066 lines, 17 device classes), 1,539 test methods passing
 (CPython + C++).  Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
@@ -34,7 +34,7 @@ Remaining work: application-level features (items 25–30).
 
 ### BIOS v1.0 — ✅ DONE
 
-291 dictionary entries, 11,329 lines ASM, ~26 KB binary.
+353 dictionary entries, 12,544 lines ASM, ~26 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,
@@ -80,7 +80,7 @@ Remaining work: application-level features (items 25–30).
 
 ### KDOS v1.1 — ✅ DONE (core + multicore + crypto + network + PQC)
 
-653 colon definitions + 405 variables/constants/creates, 8,667 lines.
+923 colon definitions + 707 variables/constants/creates, 11,004 lines.
 
 19 sections:
 - §1 Utility words (§1.1–§1.13: buffer, AES, SHA3, TRNG, X25519, HKDF,
@@ -100,7 +100,7 @@ Remaining work: application-level features (items 25–30).
 
 ### Filesystem — ✅ DONE
 
-- ✅ MP64FS: superblock, bitmap, 64-entry directory, data sectors
+- ✅ MP64FS: superblock, bitmap, 128-entry directory, data sectors
 - ✅ diskutil.py: build_image, build_sample_image, inject/read/delete/list
 - ✅ sample.img: KDOS + 10 docs + 5 tutorials + demo-data + demo-bundle (18 files)
 - ✅ KDOS words: DIR, CATALOG, CAT, RENAME, FS-FREE, SAVE-BUFFER, LOAD,
@@ -116,9 +116,9 @@ Remaining work: application-level features (items 25–30).
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,348 lines, 14 device classes)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,066 lines, 17 device classes)
 
-### Test Suite — ✅ 1,095 tests
+### Test Suite — ✅ 1,539 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
@@ -788,14 +788,14 @@ continuous progress, reviewable diffs, and a working system at every step.
 | File | Lines | Status |
 |------|-------|--------|
 | `bios.asm` | 12,510 | ✅ 291 dictionary entries |
-| `kdos.f` | 8,296 | ✅ 653 colon defs, 405 vars/constants, §1–§17 |
+| `kdos.f` | 11,004 | ✅ 923 colon defs, 707 vars/constants, §1–§17 |
 | `megapad64.py` | 2,541 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `accel/mp64_accel.cpp` | 1,930 | ✅ C++ CPU core (pybind11, 63× speedup) |
 | `accel_wrapper.py` | 830 | ✅ Drop-in wrapper for C++ CPU core |
 | `system.py` | 610 | ✅ Quad-core SoC + TRNG + `run_batch()` C++ fast path |
 | `cli.py` | 1,012 | ✅ Interactive monitor/debugger |
 | `asm.py` | 788 | ✅ Two-pass assembler |
-| `devices.py` | 2,314 | ✅ 14 devices: AES, SHA3, TRNG, CRC, Field ALU, NTT, KEM, + 7 more |
+| `devices.py` | 2,066 | ✅ 17 devices: AES, SHA3, TRNG, CRC, Field ALU, NTT, KEM, + 7 more |
 | `nic_backends.py` | 399 | ✅ Pluggable NIC backends (Loopback, UDP, TAP) |
 | `diskutil.py` | 1,039 | ✅ MP64FS tooling |
 | `test_megapad64.py` | 2,193 | 23 tests ✅ |

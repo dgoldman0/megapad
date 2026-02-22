@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **291 entries** —
+This document catalogs every word in the BIOS dictionary — **353 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.

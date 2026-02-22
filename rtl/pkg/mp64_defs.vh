@@ -101,10 +101,23 @@ parameter [31:0] EXT_MEM_MAX = HBW_BASE_ADDR;  // ext fills 0x100000..HBW_BASE-1
 parameter EXT_BURST_LEN   = 8;             // 8-beat burst (64 bytes = 1 tile)
 
 // ----------------------------------------------------------------------------
+// Dedicated VRAM (framebuffer pixel memory)
+// ----------------------------------------------------------------------------
+// VRAM occupies a fixed 4 MiB window between ext mem and HBW.
+// On FPGA this maps to a separate SRAM port or second HyperRAM chip.
+// In the emulator it is a dedicated buffer; in RTL it routes through
+// the external memory controller (same PHY, different address range).
+parameter [31:0] VRAM_BASE_ADDR  = 32'hFF00_0000;
+parameter [31:0] VRAM_DEFAULT_SIZE = 32'h0040_0000;  // 4 MiB
+// Enough for double-buffered 1280×720 RGBA8888 (3.5 MiB) or
+// double-buffered 1024×768 RGB565 (3 MiB).
+
+// ----------------------------------------------------------------------------
 // Address map (32-bit physical, 64-bit virtual)
 // ----------------------------------------------------------------------------
 // Bank 0:    0x0000_0000 – 0x000F_FFFF  (1 MiB system BRAM, CPU-only)
-// External:  0x0010_0000 – 0xFFCF_FFFF  (up to ~4 GiB, HyperRAM/SDRAM)
+// External:  0x0010_0000 – 0xFEFF_FFFF  (up to ~4 GiB, HyperRAM/SDRAM)
+// VRAM:      0xFF00_0000 – 0xFF3F_FFFF  (4 MiB dedicated framebuffer)
 // Bank 1:    0xFFD0_0000 – 0xFFDF_FFFF  (1 MiB HBW, dual-port)
 // Bank 2:    0xFFE0_0000 – 0xFFEF_FFFF  (1 MiB HBW, dual-port)
 // Bank 3:    0xFFF0_0000 – 0xFFFF_FFFF  (1 MiB HBW, dual-port)
@@ -112,6 +125,7 @@ parameter EXT_BURST_LEN   = 8;             // 8-beat burst (64 bytes = 1 tile)
 //
 // MMIO detection: addr[63:32] == 0xFFFF_FF00 → MMIO
 // HBW detection:  addr[63:32] == 0 && addr[31:20] >= 12'hFFD → HBW internal
+// VRAM detection: addr[63:32] == 0 && addr[31:22] == 10'h3FC → VRAM
 // Bank 0:         addr[63:20] == 0 → system BRAM
 // Otherwise:      external memory
 

@@ -32,6 +32,7 @@ module mp64_soc #(
     parameter NUM_CLUSTERS      = 3,
     parameter CORES_PER_CLUSTER = 4,
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
+    parameter EXT_MEM_SIZE_PARAM = 0,         // ext mem bytes; 0 = auto (EXT_MEM_MAX-0x100000)
     parameter BIOS_INIT_FILE    = "rom.hex"
 )(
     input  wire        sys_clk,
@@ -150,8 +151,16 @@ module mp64_soc #(
     wire        irq_timer_w;
     wire [NUM_CORES-1:0] ipi_out;
 
-    // Memory size visible to CPU
-    localparam [63:0] MEM_SIZE_BYTES = MEM_DEPTH * 512 / 8 * 4;  // 4 banks
+    // ---- SysInfo localparams (match emulator devices.py register map) ----
+    localparam [63:0] MEM_SIZE_BYTES  = MEM_DEPTH * 512 / 8 * 4;  // 4 banks total
+    localparam [63:0] BANK0_SIZE      = MEM_DEPTH * 512 / 8;      // 1 bank (system RAM)
+    localparam [63:0] NUM_ALL_CORES   = NUM_CORES + NUM_CLUSTERS * CORES_PER_CLUSTER;
+    localparam [63:0] HBW_SIZE_BYTES  = 3 * BANK0_SIZE;           // 3 HBW banks
+    localparam [31:0] EXT_MEM_BASE    = 32'h0010_0000;            // ext mem start
+    localparam [63:0] EXT_MEM_SIZE    = (EXT_MEM_SIZE_PARAM != 0)
+                                        ? EXT_MEM_SIZE_PARAM
+                                        : (EXT_MEM_MAX - 32'h0010_0000);
+    reg [63:0] sysinfo_cluster_en;  // R/W at SysInfo offset 0x18
 
     genvar ci;
     generate
@@ -880,6 +889,16 @@ module mp64_soc #(
     );
 
     // ========================================================================
+    // SysInfo writable register: cluster enable mask (offset 0x18)
+    // ========================================================================
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n)
+            sysinfo_cluster_en <= {64{1'b1}};  // all clusters enabled at reset
+        else if (mmio_sel_sysinfo && bus_mmio_wen && bus_mmio_addr[6:3] == 4'h3)
+            sysinfo_cluster_en <= bus_mmio_wdata;
+    end
+
+    // ========================================================================
     // MMIO Read Data & Ack Mux
     // ========================================================================
     // The bus expects a single mmio_rdata/mmio_ack response.
@@ -899,14 +918,33 @@ module mp64_soc #(
         if (mmio_sel_nic)     begin mmio_rdata_mux = {56'd0, nic_rdata_raw};   mmio_ack_mux = nic_ack;   end
         if (mmio_sel_mbox)    begin mmio_rdata_mux = {56'd0, mbox_rdata_raw};  mmio_ack_mux = mbox_ack;  end
 
-        // SysInfo (read-only)
+// SysInfo (64-bit aligned register map, matches emulator devices.py)
+        //   0x00  BOARD_ID_VER  — "MP64" + version 2.1
+        //   0x08  BANK0_SIZE    — Bank 0 (system RAM) size in bytes
+        //   0x10  NUM_CORES     — total core count (full + micro)
+        //   0x18  CLUSTER_EN    — per-cluster enable mask (R/W)
+        //   0x20  HBW_BASE      — HBW math RAM base address
+        //   0x28  HBW_SIZE      — HBW region size in bytes
+        //   0x30  INT_MEM_TOTAL — total internal memory in bytes
+        //   0x38  EXT_MEM_BASE  — external memory base address
+        //   0x40  EXT_MEM_SIZE  — external memory size in bytes
+        //   0x48  NUM_FULL      — number of full (major) cores
+        //   0x50  VRAM_BASE     — dedicated VRAM base address
+        //   0x58  VRAM_SIZE     — dedicated VRAM size in bytes
         if (mmio_sel_sysinfo) begin
-            case (bus_mmio_addr[3:0])
-                4'h0: mmio_rdata_mux = MEM_SIZE_BYTES;
-                4'h1: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};
-                4'h2: mmio_rdata_mux = {56'd0, NUM_CLUSTERS[7:0]};
-                4'h3: mmio_rdata_mux = CLOCK_HZ;
-                4'h4: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};   // NUM_FULL
+            case (bus_mmio_addr[6:3])  // 64-bit aligned: offset >> 3
+                4'h0: mmio_rdata_mux = 64'h4D50_3634_0002_0001;  // BOARD_ID_VER
+                4'h1: mmio_rdata_mux = BANK0_SIZE;               // 0x08
+                4'h2: mmio_rdata_mux = NUM_ALL_CORES;            // 0x10
+                4'h3: mmio_rdata_mux = sysinfo_cluster_en;       // 0x18 (R/W)
+                4'h4: mmio_rdata_mux = {32'd0, HBW_BASE_ADDR};  // 0x20
+                4'h5: mmio_rdata_mux = HBW_SIZE_BYTES;           // 0x28
+                4'h6: mmio_rdata_mux = MEM_SIZE_BYTES;           // 0x30
+                4'h7: mmio_rdata_mux = {32'd0, EXT_MEM_BASE};   // 0x38
+                4'h8: mmio_rdata_mux = EXT_MEM_SIZE;             // 0x40
+                4'h9: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};  // 0x48 NUM_FULL
+                4'hA: mmio_rdata_mux = {32'd0, VRAM_BASE_ADDR};  // 0x50
+                4'hB: mmio_rdata_mux = {32'd0, VRAM_DEFAULT_SIZE}; // 0x58
                 default: mmio_rdata_mux = 64'd0;
             endcase
             mmio_ack_mux = 1'b1;

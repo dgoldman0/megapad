@@ -3,7 +3,7 @@
 **Date:** 2026-02-21  
 **Branch:** `main`  
 **HEAD:** `095a7bc`  
-**Status:** 1,387 tests passing (3 `TestPrivilege` tests expected-fail — C++ accel trap path).
+**Status:** 1,539 tests passing (3 `TestPrivilege` tests expected-fail — C++ accel trap path).
 
 ---
 
@@ -59,7 +59,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|
-| BIOS | `bios.asm` → `bios.rom` | 12,162 (346 words) |
+| BIOS | `bios.asm` → `bios.rom` | 12,544 (353 words) |
 | KDOS | `kdos.f` | 10,225 (871 colon + 490 var = 1,361 entities) |
 | Tools | `tools.f` | 990 |
 | CPU emulator | `megapad64.py` | 2,868 |
@@ -71,7 +71,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 |       | `tests/test_networking.py` | 1,239 (48 tests, 9 classes) |
 |       | `tests/test_megapad64.py` | 2,193 (23 tests) |
 
-**Total tests: 1,387**
+**Total tests: 1,539**
 
 ## 4. MMIO address map (crypto region)
 
@@ -80,7 +80,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 | 0x0700 | AES-256/128-GCM |
 | 0x0780 | SHA-3/SHAKE (96 bytes) |
 | 0x0800 | TRNG |
-| 0x0880 | Field ALU |
+| 0x0840 | Field ALU |
 | 0x08C0 | NTT Engine |
 | 0x0900 | KEM (ML-KEM-512) |
 | 0x0940 | SHA-256 |
@@ -90,7 +90,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 ## 5. How to run things
 
 ```bash
-make test             # all 1,387 tests (~23s with C++ accel)
+make test             # all 1,539 tests (~23s with C++ accel)
 make test-one K=X     # single class/test
 make test-status      # check progress
 make test-net         # networking tests (requires TAP)

@@ -501,19 +501,21 @@ Additions to the existing MMIO map:
 | 0x000 | 16B | UART (existing) |
 | 0x100 | 16B | Timer (existing) |
 | 0x200 | 16B | Disk (existing) |
-| 0x300 | 16B | SysInfo (existing) |
+| 0x300 | 96B | SysInfo (12 × 64-bit regs) |
 | 0x400 | 128B | NIC (existing) |
-| 0x500 | 256B | Mailbox (existing) |
-| 0x600 | 256B | Spinlocks (existing) |
-| **0x700** | **128B** | **AES-256/128-GCM** |
-| **0x780** | **96B** | **SHA-3/SHAKE** (96 bytes) |
-| **0x800** | **16B** | **TRNG** |
-| **0x880** | **64B** | **Field ALU** |
+| 0x500 | 16B | Mailbox (existing) |
+| 0x600 | 64B | Spinlocks (existing) |
+| **0x700** | **64B** | **AES-256/128-GCM** |
+| **0x780** | **96B** | **SHA-3/SHAKE** |
+| **0x7E0** | **16B** | **QoS Config** |
+| **0x800** | **64B** | **TRNG** |
+| **0x840** | **128B** | **Field ALU** (GF(2²⁵⁵−19)) |
 | **0x8C0** | **64B** | **NTT Engine** |
 | **0x900** | **64B** | **KEM (ML-KEM-512)** |
-| **0x940** | **64B** | **SHA-256** |
+| **0x940** | **32B** | **SHA-256** |
 | **0x980** | **32B** | **CRC32/CRC64** |
-| **0xA00** | **256B** | **Framebuffer** |
+| **0xA00** | **64B** | **Framebuffer** |
+| **0xB00** | **32B** | **RTC / System Clock** |
 
 ### CSR Address Map (Extended)
 

@@ -618,7 +618,7 @@ names.  See `docs/filesystem.md` for the full on-disk format specification.
 
 - **Superblock** (sector 0) — magic number `"MP64"`, version, geometry
 - **Bitmap** (sector 1) — 2048-bit allocation map, one bit per sector
-- **Directory** (sectors 2–5) — 64 entries × 32 bytes each
+- **Directory** (sectors 2–13) — 128 entries × 48 bytes each
 - **Data area** (sectors 6–2047) — ~1 MB of usable file storage
 
 ### File Type Codes

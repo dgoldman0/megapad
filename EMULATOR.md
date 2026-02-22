@@ -11,7 +11,7 @@ and an interactive CLI monitor/debugger.
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
 > (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512), optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
-> UDP, TAP), full TCP/IP network stack through TLS 1.3, and 1,095 tests
+> UDP, TAP), full TCP/IP network stack through TLS 1.3, and 1,539 tests
 > passing.
 
 ---
@@ -96,7 +96,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │       MegapadSystem — 16-core heterogeneous SoC          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py  (2,314 lines)│  │
+│  │  megapad64.py │    │       devices.py  (2,066 lines)│  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
@@ -120,7 +120,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (11,329 lines) — Forth BIOS v1.0, 300 words
+    bios.asm  (12,544 lines) — Forth BIOS v1.0, 353 words
     bios.rom  (~26 KB)       — precompiled binary
 ```
 
@@ -132,11 +132,11 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `accel/mp64_accel.cpp` | 1,978 | C++ CPU core (pybind11) — 63× speedup over PyPy for test suite |
 | `accel_wrapper.py` | 840 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 788 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 2,348 | 14 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM |
+| `devices.py` | 2,066 | 17 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM |
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
 | `system.py` | 849 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,012 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 11,329 | Forth BIOS v1.0 — subroutine-threaded interpreter, 300 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache) |
+| `bios.asm` | 12,544 | Forth BIOS v1.0 — subroutine-threaded interpreter, 353 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
 | `test_system.py` | 15,243 | System integration tests — 1,043 tests (42 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile) |
 | `test_networking.py` | 860 | Real-networking tests — 38 tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
@@ -152,23 +152,39 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 ## Memory Map
 
+### RAM Regions
+
 | Address Range | Size | Description |
 |---|---|---|
-| `0x0000_0000` – top of RAM | Configurable | RAM (default 1 MiB = 0x100000) |
-| `0xFFFF_FF00_0000_0000` + `0x0000` | 256 B | UART (serial console) |
-| `0xFFFF_FF00_0000_0000` + `0x0100` | 256 B | Timer |
-| `0xFFFF_FF00_0000_0000` + `0x0200` | 256 B | Storage controller |
-| `0xFFFF_FF00_0000_0000` + `0x0300` | 256 B | System info |
-| `0xFFFF_FF00_0000_0000` + `0x0400` | 128 B | NIC (Network Interface) |
-| `0xFFFF_FF00_0000_0000` + `0x0500` | 256 B | Mailbox (inter-core IPI) |
-| `0xFFFF_FF00_0000_0000` + `0x0600` | 256 B | Spinlock (hardware mutexes) |
-| `0xFFFF_FF00_0000_0000` + `0x0700` | 128 B | AES-256-GCM (authenticated encryption) |
-| `0xFFFF_FF00_0000_0000` + `0x0780` | 64 B | SHA-3/SHAKE (hashing, key derivation) |
-| `0xFFFF_FF00_0000_0000` + `0x07C0` | 64 B | CRC Engine (CRC32/CRC32C/CRC64) |
-| `0xFFFF_FF00_0000_0000` + `0x0800` | 64 B | TRNG (hardware CSPRNG) |
-| `0xFFFF_FF00_0000_0000` + `0x0880` | 128 B | Field ALU (GF(2²⁵⁵−19) arithmetic + MUL_RAW) |
-| `0xFFFF_FF00_0000_0000` + `0x08C0` | 128 B | NTT Engine (256-point NTT/INTT, configurable q) |
-| `0xFFFF_FF00_0000_0000` + `0x0940` | 128 B | KEM Engine (ML-KEM-512 key encapsulation) |
+| `0x0000_0000` – `0x000F_FFFF` | 1 MiB | **Bank 0** — System RAM (BIOS + Forth dictionary) |
+| `0x0010_0000` – `0xFEFF_FFFF` | up to ~4 GiB | **External Memory** — HyperRAM/SDRAM (userland + XMEM) |
+| `0xFF00_0000` – `0xFF3F_FFFF` | 4 MiB | **VRAM** — Dedicated framebuffer (double-buffered 1280×720 RGBA) |
+| `0xFFD0_0000` – `0xFFFF_FFFF` | 3 MiB | **Banks 1–3** — HBW math RAM (tile/SIMD working buffers) |
+
+### MMIO Peripherals
+
+All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
+
+| Offset | Size | Peripheral |
+|---|---|---|
+| `+0x0000` | 16 B | UART (serial console) |
+| `+0x0100` | 16 B | Timer |
+| `+0x0200` | 16 B | Storage controller |
+| `+0x0300` | 96 B | System Info (board ID, topology, VRAM) |
+| `+0x0400` | 128 B | NIC (Network Interface) |
+| `+0x0500` | 16 B | Mailbox (inter-core IPI) |
+| `+0x0600` | 64 B | Spinlock (hardware mutexes) |
+| `+0x0700` | 64 B | AES-256/128-GCM (authenticated encryption) |
+| `+0x0780` | 96 B | SHA-3/SHAKE (hashing, key derivation) |
+| `+0x07E0` | 16 B | QoS Config (bus arbitration weights) |
+| `+0x0800` | 64 B | TRNG (hardware CSPRNG) |
+| `+0x0840` | 128 B | Field ALU (GF(2²⁵⁵−19) arithmetic) |
+| `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
+| `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
+| `+0x0940` | 32 B | SHA-256 (SHA-2 hash) |
+| `+0x0980` | 32 B | CRC32/CRC64 |
+| `+0x0A00` | 64 B | Framebuffer controller |
+| `+0x0B00` | 32 B | RTC / System Clock |
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -234,22 +250,30 @@ Sector-based block device backed by a host file.  Sector size is 512 bytes.
 
 ### System Info
 
-Read-only board identification.
+Board identification and core-topology registers (12 × 64-bit aligned,
+96 bytes).  All read-only except CLUSTER_EN.
 
 | Offset | Name | Description |
 |---|---|---|
-| `+0x00`–`+0x03` | BOARD_ID | `"MP64"` (ASCII) |
-| `+0x04` | VERSION | Board revision |
-| `+0x05`–`+0x06` | MEM_SIZE | RAM size in KiB (LE 16-bit) |
-| `+0x07` | FEATURES | bit 0: UART, bit 1: storage present |
-| `+0x08` | STORAGE | `1` if storage attached, else `0` |
+| `+0x00` | BOARD_ID_VER | `0x4D503634_00020001` (“MP64” + v2.1) |
+| `+0x08` | BANK0_SIZE | Bank 0 system RAM size in bytes |
+| `+0x10` | NUM_CORES | Total core count (full + micro) |
+| `+0x18` | CLUSTER_EN | Per-cluster enable mask (R/W) |
+| `+0x20` | HBW_BASE | HBW math RAM base address |
+| `+0x28` | HBW_SIZE | HBW region size in bytes |
+| `+0x30` | INT_MEM_TOTAL | Total internal memory (all banks) |
+| `+0x38` | EXT_MEM_BASE | External memory base address |
+| `+0x40` | EXT_MEM_SIZE | External memory size in bytes |
+| `+0x48` | NUM_FULL | Number of full (major) cores |
+| `+0x50` | VRAM_BASE | Dedicated VRAM base address |
+| `+0x58` | VRAM_SIZE | Dedicated VRAM size in bytes |
 
 ---
 
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (11,329 lines, ~26 KB).  It boots from address 0 and
+Megapad-64 assembly (12,544 lines, ~28 KB).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -292,7 +316,7 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (291)
+### Built-in words (353)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -571,7 +595,7 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 291 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 353 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch, network stack,
 TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC

@@ -98,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (291 words, ~11,158 lines):
+**BIOS v1.0** (353 words, ~12,544 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -117,7 +117,7 @@ PORTS                          \ List all port bindings
 - **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
 - **CRC-32**: CRC-RESET, CRC-FEED, CRC-RESULT, CRC-DMA
 
-**KDOS v1.1** (~8,296 lines Forth, 653 colon defs, 405 vars/constants):
+**KDOS v1.1** (~11,004 lines Forth, 923 colon defs, 707 vars/constants):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -265,7 +265,7 @@ persistent user data.
 ```
 Sector 0:      Superblock (magic "MP64", version, geometry)
 Sector 1:      Allocation bitmap (256 bytes = 2048 bits)
-Sectors 2-5:   Directory (64 entries × 32 bytes each)
+Sectors 2-13:  Directory (128 entries × 48 bytes each)
 Sectors 6+:    Data area (2042 sectors ≈ 1 MB usable)
 ```
 
@@ -484,7 +484,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 291 words, ~11,158 lines) is the **permanent,
+The BIOS Forth (v1.0, 353 words, ~12,544 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -492,7 +492,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 291 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 353 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

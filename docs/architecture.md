@@ -86,6 +86,7 @@ MMIO devices live at the top of the address space.
 | ← SP | Data stack grows downward from top of Bank 0 |
 | `RAM_SIZE` | Top of Bank 0 (default 0x0010_0000 = 1 MiB) |
 | `0x0010_0000`+ | **External Memory** — up to 16 MiB (userland dictionary + XMEM allocator) |
+| `0xFF00_0000`–`0xFF3F_FFFF` | **VRAM** — 4 MiB dedicated framebuffer (double-buffered 1280×720 RGBA) |
 | `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 
 The BIOS sets `HERE` just past its own code.  As KDOS loads (via FSLOAD),
@@ -103,7 +104,7 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 16 bytes | Sector-based disk controller |
-| **System Info** | `+0x0300` | 56 bytes | Board ID, config, core topology, HBW, cluster enable |
+| **System Info** | `+0x0300` | 96 bytes | Board ID, config, core topology, HBW, VRAM, cluster enable |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | Hardware spinlocks (16 locks, 4 bytes each) |
@@ -229,27 +230,25 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 
 ---
 
-## System Info (Read-Only)
+## System Info
 
-Static board identification and core-topology registers.
+Board identification and core-topology registers (12 × 64-bit aligned,
+96 bytes total).  All registers are read-only except CLUSTER_EN.
 
-| Register | Offset | Value | Description |
-|----------|--------|-------|-------------|
-| BOARD_ID | `+0x00`–`+0x03` | `"MP64"` | Board identifier string |
-| VERSION_MAJ | `+0x04` | 1 | Major hardware version |
-| VERSION_MIN | `+0x05` | 0 | Minor hardware version |
-| MEM_SIZE | `+0x06`–`+0x07` | varies | Total RAM in KiB (16-bit LE) |
-| STORAGE_PRESENT | `+0x08` | 0 or 1 | Is a disk attached? |
-| UART_PRESENT | `+0x09` | 1 | Always present |
-| NIC_PRESENT | `+0x0A` | 0 or 1 | Is a NIC attached? |
-| N_CORES | `+0x10` | 1–16 | Total core count (full + micro) |
-| N_CLUSTERS | `+0x18` | 0–3 | Number of micro-core clusters |
-| HBW_BASE | `+0x20` | 0xFFD00000 | HBW math RAM base address |
-| HBW_SIZE | `+0x28` | 0x300000 | HBW math RAM size (3 MiB) |
-| CLUSTER_EN | `+0x30` | bitmask | Per-cluster enable bits (R/W) |
-| EXT_MEM_BASE | `+0x38` | varies | External memory base address |
-| EXT_MEM_SIZE | `+0x40` | varies | External memory size in bytes |
-| NUM_FULL | `+0x48` | 1–16 | Number of full (major) cores |
+| Register | Offset | Width | Default | Description |
+|----------|--------|-------|---------|-------------|
+| BOARD_ID_VER | `+0x00` | 64-bit | `0x4D503634_00020001` | `"MP64"` + version 2.1 |
+| BANK0_SIZE | `+0x08` | 64-bit | 1 MiB | Bank 0 system RAM size in bytes |
+| NUM_CORES | `+0x10` | 64-bit | varies | Total core count (full + micro) |
+| CLUSTER_EN | `+0x18` | 64-bit | all-ones | Per-cluster enable mask (R/W) |
+| HBW_BASE | `+0x20` | 64-bit | `0xFFD0_0000` | HBW math RAM base address |
+| HBW_SIZE | `+0x28` | 64-bit | 3 MiB | HBW region size in bytes |
+| INT_MEM_TOTAL | `+0x30` | 64-bit | 4 MiB | Total internal memory (all banks) |
+| EXT_MEM_BASE | `+0x38` | 64-bit | `0x0010_0000` | External memory base address |
+| EXT_MEM_SIZE | `+0x40` | 64-bit | varies | External memory size in bytes |
+| NUM_FULL | `+0x48` | 64-bit | varies | Number of full (major) cores |
+| VRAM_BASE | `+0x50` | 64-bit | `0xFF00_0000` | Dedicated VRAM base address |
+| VRAM_SIZE | `+0x58` | 64-bit | 4 MiB | Dedicated VRAM size in bytes |
 
 ---
 

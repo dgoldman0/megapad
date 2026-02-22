@@ -5,6 +5,7 @@
 // 4-bank architecture, 4 MiB total internal BRAM.
 //
 //   Bank 0 (1 MiB):  System at 0x0000_0000 – 0x000F_FFFF.
+//   VRAM   (4 MiB):  FB     at 0xFF00_0000 – 0xFF3F_FFFF  (→ ext mem PHY).
 //   Bank 1 (1 MiB):  HBW    at 0xFFD0_0000 – 0xFFDF_FFFF.
 //   Bank 2 (1 MiB):  HBW    at 0xFFE0_0000 – 0xFFEF_FFFF.
 //   Bank 3 (1 MiB):  HBW    at 0xFFF0_0000 – 0xFFFF_FFFF.
