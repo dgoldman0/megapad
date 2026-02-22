@@ -662,6 +662,36 @@ class MegapadCLI(cmd.Cmd):
         else:
             print("Usage: nic [status|inject|send|reset]")
 
+    # -- Snapshots --
+
+    def do_save(self, arg):
+        """Save a system snapshot: save [filename]
+        Default filename: snapshot.mp64"""
+        from display import save_snapshot
+        path = arg.strip() if arg.strip() else "snapshot.mp64"
+        if not path.endswith('.mp64'):
+            path += '.mp64'
+        try:
+            save_snapshot(self.sys, path)
+            print(f"  Snapshot saved to {path}")
+        except Exception as e:
+            print(f"  Error saving snapshot: {e}")
+
+    def do_restore(self, arg):
+        """Load a system snapshot: restore <filename>
+        Restores CPU, memory, and device state."""
+        from display import load_snapshot
+        path = arg.strip() if arg.strip() else "snapshot.mp64"
+        if not os.path.exists(path):
+            print(f"  File not found: {path}")
+            return
+        ok = load_snapshot(self.sys, path)
+        if ok:
+            print(f"  Snapshot restored from {path}")
+        else:
+            print(f"  Failed to restore snapshot from {path}")
+    do_load_snapshot = do_restore
+
     # -- Misc --
 
     def do_cycles(self, arg):

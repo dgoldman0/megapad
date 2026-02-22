@@ -1,16 +1,17 @@
 """
-Megapad-64 Framebuffer Display
-================================
-Reads the FramebufferDevice configuration and pixel data from the
-emulator — either external memory or HBW — and renders them in a
-pygame window.  Runs in a background thread so it doesn't block the
-UART console loop.
+Megapad-64 GUI Display
+========================
+Full-featured emulator GUI built on pygame.
 
-The window has two tabs:
-  [Terminal]  — virtual VT100-style console mirroring UART output
-  [Graphics]  — live view of the hardware framebuffer
-
-Press F1/F2 or click the tab buttons to switch.
+Features:
+  - Menu bar: File (Load/Save snapshot, Quit), Machine (Reset, Pause/Resume),
+    View (Terminal / Graphics / Debug)
+  - Tab bar for Terminal (VT100) and Graphics (framebuffer) views
+  - Debug panel: registers, flags, disassembly, memory view
+  - Status bar: cycles, speed (MIPS), core state, FPS
+  - Keyboard pass-through to UART
+  - Snapshot save / load (JSON + binary memory)
+  - Window resizing
 
 Usage (programmatic):
     from display import FramebufferDisplay
@@ -25,11 +26,14 @@ Usage (CLI):
 
 from __future__ import annotations
 
+import json
+import os
+import struct
 import threading
 import time
-import struct
+import zlib
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from system import MegapadSystem
@@ -41,8 +45,46 @@ EXT_MEM_BASE = 0x0010_0000
 # Virtual terminal defaults
 TERM_COLS = 80
 TERM_ROWS = 30
-TAB_HEIGHT = 24          # pixels for tab bar
+TAB_HEIGHT = 28          # pixels for tab bar
 CURSOR_BLINK_MS = 530    # cursor blink interval
+MENU_HEIGHT = 24         # pixels for menu bar
+STATUS_HEIGHT = 22       # pixels for status bar
+
+# ── Color Palette ─────────────────────────────────────────────────────
+
+class Theme:
+    """GUI color theme."""
+    BG          = (24, 24, 32)
+    MENU_BG     = (36, 36, 48)
+    MENU_FG     = (200, 200, 210)
+    MENU_HI_BG  = (60, 90, 160)
+    MENU_HI_FG  = (255, 255, 255)
+    MENU_SEP    = (55, 55, 70)
+    TAB_BG      = (30, 30, 38)
+    TAB_ACTIVE  = (50, 50, 65)
+    TAB_FG      = (110, 110, 130)
+    TAB_ACTIVE_FG = (220, 220, 240)
+    TAB_ACCENT  = (80, 140, 255)
+    STATUS_BG   = (36, 36, 48)
+    STATUS_FG   = (140, 140, 160)
+    STATUS_OK   = (80, 200, 120)
+    STATUS_WARN = (220, 180, 60)
+    STATUS_ERR  = (220, 80, 80)
+    DROPDOWN_BG = (42, 42, 56)
+    DROPDOWN_FG = (200, 200, 210)
+    DROPDOWN_HI = (60, 90, 160)
+    DROPDOWN_BORDER = (70, 70, 90)
+    DEBUG_BG    = (28, 28, 36)
+    DEBUG_LABEL = (100, 140, 200)
+    DEBUG_VALUE = (200, 200, 220)
+    DEBUG_ADDR  = (120, 180, 120)
+    DEBUG_HEX   = (180, 180, 200)
+    DEBUG_ASCII = (140, 140, 160)
+    DEBUG_PC    = (255, 220, 80)
+    DIALOG_BG   = (40, 40, 52)
+    DIALOG_FG   = (200, 200, 220)
+    DIALOG_BTN  = (60, 100, 180)
+    DIALOG_BTN_FG = (255, 255, 255)
 
 
 # ── Virtual Terminal ──────────────────────────────────────────────────
@@ -265,12 +307,7 @@ class VirtualTerminal:
     def render(self, pygame_module, font, cell_w: int, cell_h: int,
                show_cursor: bool = True,
                _cache: dict | None = None) -> 'pygame.Surface':
-        """Render the terminal grid to a pygame surface.
-
-        Pass a dict as *_cache* across calls to enable glyph caching
-        (maps (char, fg_index) -> pre-rendered Surface).  The cache is
-        populated lazily and typically stays small (~200 entries).
-        """
+        """Render the terminal grid to a pygame surface."""
         with self._lock:
             surf_w = self.cols * cell_w
             surf_h = self.rows * cell_h
@@ -309,10 +346,679 @@ class VirtualTerminal:
         return surface
 
 
-class FramebufferDisplay:
-    """Background-threaded pygame display for the Megapad-64 framebuffer.
+# ── Menu System ───────────────────────────────────────────────────────
 
-    Shows two tabs: Terminal (VT100 console) and Graphics (hardware FB).
+
+class MenuItem:
+    """A single menu item (label + optional shortcut + callback)."""
+    def __init__(self, label: str, callback: callable = None,
+                 shortcut: str = "", separator: bool = False,
+                 enabled: bool = True, checked: bool = False):
+        self.label = label
+        self.callback = callback
+        self.shortcut = shortcut
+        self.separator = separator
+        self.enabled = enabled
+        self.checked = checked
+
+
+class Menu:
+    """A single dropdown menu (e.g. "File")."""
+    def __init__(self, title: str, items: list[MenuItem]):
+        self.title = title
+        self.items = items
+
+
+class MenuBar:
+    """Top-level menu bar with dropdown menus."""
+    def __init__(self, menus: list[Menu]):
+        self.menus = menus
+        self.active_menu: int = -1  # index of open dropdown, -1 = none
+        self._rects: list = []  # (x, w) for each top-level label
+
+    def layout(self, pygame_module, font, win_w: int):
+        """Compute positions for each menu title."""
+        self._rects = []
+        x = 8
+        for m in self.menus:
+            w = font.size(f" {m.title} ")[0]
+            self._rects.append((x, w))
+            x += w + 2
+
+    def draw(self, pygame_module, screen, font, win_w: int):
+        """Draw the menu bar and any open dropdown."""
+        # Background
+        pygame_module.draw.rect(screen, Theme.MENU_BG,
+                                (0, 0, win_w, MENU_HEIGHT))
+
+        # Menu titles
+        for i, (m, (x, w)) in enumerate(zip(self.menus, self._rects)):
+            active = (i == self.active_menu)
+            bg = Theme.MENU_HI_BG if active else Theme.MENU_BG
+            fg = Theme.MENU_HI_FG if active else Theme.MENU_FG
+            pygame_module.draw.rect(screen, bg, (x, 0, w, MENU_HEIGHT))
+            text = font.render(f" {m.title} ", True, fg)
+            ty = (MENU_HEIGHT - text.get_height()) // 2
+            screen.blit(text, (x, ty))
+
+        # Draw dropdown if active
+        if self.active_menu >= 0:
+            self._draw_dropdown(pygame_module, screen, font)
+
+    def _draw_dropdown(self, pygame_module, screen, font):
+        menu = self.menus[self.active_menu]
+        x, _w = self._rects[self.active_menu]
+        items = menu.items
+
+        # Calculate dropdown dimensions
+        item_h = font.get_linesize() + 8
+        dd_w = 240
+        dd_h = 0
+        for item in items:
+            dd_h += 1 if item.separator else item_h
+
+        # Draw dropdown background + shadow
+        dd_y = MENU_HEIGHT
+        # Shadow
+        pygame_module.draw.rect(screen, (15, 15, 20),
+                                (x + 3, dd_y + 3, dd_w, dd_h))
+        pygame_module.draw.rect(screen, Theme.DROPDOWN_BG,
+                                (x, dd_y, dd_w, dd_h))
+        pygame_module.draw.rect(screen, Theme.DROPDOWN_BORDER,
+                                (x, dd_y, dd_w, dd_h), 1)
+
+        # Draw items
+        iy = dd_y
+        for _idx, item in enumerate(items):
+            if item.separator:
+                pygame_module.draw.line(screen, Theme.MENU_SEP,
+                                        (x + 8, iy), (x + dd_w - 8, iy))
+                iy += 1
+                continue
+
+            # Highlight on hover
+            mouse_pos = pygame_module.mouse.get_pos()
+            rect = pygame_module.Rect(x + 1, iy, dd_w - 2, item_h)
+            hover = rect.collidepoint(mouse_pos)
+            if hover and item.enabled:
+                pygame_module.draw.rect(screen, Theme.DROPDOWN_HI, rect)
+
+            fg = Theme.DROPDOWN_FG if item.enabled else Theme.MENU_SEP
+            # Check mark
+            prefix = "\u2713 " if item.checked else "  "
+            text = font.render(prefix + item.label, True, fg)
+            screen.blit(text, (x + 8, iy + 4))
+
+            # Shortcut
+            if item.shortcut:
+                sc = font.render(item.shortcut, True, Theme.MENU_SEP)
+                screen.blit(sc, (x + dd_w - sc.get_width() - 10, iy + 4))
+
+            iy += item_h
+
+    def handle_click(self, mx: int, my: int) -> Optional[callable]:
+        """Handle a mouse click. Returns a callback if a menu item was clicked."""
+        # Click on menu title?
+        if my < MENU_HEIGHT:
+            for i, (x, w) in enumerate(self._rects):
+                if x <= mx < x + w:
+                    if self.active_menu == i:
+                        self.active_menu = -1  # toggle off
+                    else:
+                        self.active_menu = i
+                    return None
+            self.active_menu = -1
+            return None
+
+        # Click on dropdown item?
+        if self.active_menu >= 0:
+            menu = self.menus[self.active_menu]
+            x, _w = self._rects[self.active_menu]
+            dd_w = 240
+            item_h = 24  # approximate; recalculated below
+
+            # Recalculate actual item height from font
+            iy = MENU_HEIGHT
+            for item in menu.items:
+                if item.separator:
+                    iy += 1
+                    continue
+                item_h_actual = 24
+                if x <= mx < x + dd_w and iy <= my < iy + item_h_actual:
+                    self.active_menu = -1
+                    if item.enabled and item.callback:
+                        return item.callback
+                    return None
+                iy += item_h_actual
+
+            self.active_menu = -1
+        return None
+
+    def is_open(self) -> bool:
+        return self.active_menu >= 0
+
+
+# ── File Dialogs (simple pygame-based) ────────────────────────────────
+
+
+class SimpleDialog:
+    """Minimal modal dialog drawn in pygame."""
+
+    @staticmethod
+    def file_save(pygame_module, screen, font, default_name: str = "snapshot.mp64") -> Optional[str]:
+        """Show a simple save-file dialog. Returns filename or None."""
+        return SimpleDialog._file_dialog(pygame_module, screen, font,
+                                          "Save Snapshot", default_name, save=True)
+
+    @staticmethod
+    def file_open(pygame_module, screen, font, default_name: str = "") -> Optional[str]:
+        """Show a simple open-file dialog. Returns filename or None."""
+        return SimpleDialog._file_dialog(pygame_module, screen, font,
+                                          "Load Snapshot", default_name, save=False)
+
+    @staticmethod
+    def _file_dialog(pygame_module, screen, font, title: str,
+                      default: str, save: bool) -> Optional[str]:
+        """Internal: draw a simple text-input dialog."""
+        import pygame
+
+        clock = pygame.time.Clock()
+        text = default
+        cursor_vis = True
+        cursor_timer = 0
+        win_w, win_h = screen.get_size()
+        dw, dh = min(500, win_w - 40), 150
+        dx = (win_w - dw) // 2
+        dy = (win_h - dh) // 2
+
+        # List existing .mp64 files in CWD for reference
+        try:
+            existing = sorted(f for f in os.listdir('.') if f.endswith('.mp64'))
+        except OSError:
+            existing = []
+        list_font = pygame.font.SysFont("monospace", 12)
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        return None
+                    elif event.key == pygame.K_RETURN:
+                        return text if text.strip() else None
+                    elif event.key == pygame.K_BACKSPACE:
+                        text = text[:-1]
+                    elif event.unicode and len(text) < 80:
+                        text += event.unicode
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    mx, my = event.pos
+                    cancel_rect = pygame.Rect(dx + dw - 180, dy + dh - 40, 80, 28)
+                    ok_rect = pygame.Rect(dx + dw - 90, dy + dh - 40, 80, 28)
+                    if cancel_rect.collidepoint(mx, my):
+                        return None
+                    if ok_rect.collidepoint(mx, my):
+                        return text if text.strip() else None
+                    # Click on file list?
+                    list_y = dy + dh + 8
+                    for i, fn in enumerate(existing[:8]):
+                        fy = list_y + i * 16
+                        if dx <= mx < dx + dw and fy <= my < fy + 16:
+                            text = fn
+
+            cursor_timer += clock.get_rawtime()
+            if cursor_timer >= 400:
+                cursor_vis = not cursor_vis
+                cursor_timer = 0
+
+            # Semi-transparent overlay
+            overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 140))
+            screen.blit(overlay, (0, 0))
+
+            # Dialog box
+            pygame.draw.rect(screen, Theme.DIALOG_BG,
+                             (dx, dy, dw, dh), border_radius=8)
+            pygame.draw.rect(screen, Theme.DROPDOWN_BORDER,
+                             (dx, dy, dw, dh), 1, border_radius=8)
+
+            # Title
+            t = font.render(title, True, Theme.DIALOG_FG)
+            screen.blit(t, (dx + 14, dy + 12))
+
+            # Text input box
+            input_rect = pygame.Rect(dx + 14, dy + 44, dw - 28, 28)
+            pygame.draw.rect(screen, (20, 20, 28), input_rect, border_radius=4)
+            pygame.draw.rect(screen, Theme.TAB_ACCENT, input_rect, 1, border_radius=4)
+            disp_text = text + ("\u2588" if cursor_vis else " ")
+            it = font.render(disp_text, True, Theme.DIALOG_FG)
+            screen.blit(it, (input_rect.x + 6, input_rect.y + 5))
+
+            # Hint
+            action = "Save" if save else "Load"
+            hint = font.render(f"Enter filename, press Enter to {action.lower()} or Esc to cancel",
+                               True, Theme.STATUS_FG)
+            screen.blit(hint, (dx + 14, dy + 80))
+
+            # Buttons
+            cancel_rect = pygame.Rect(dx + dw - 180, dy + dh - 40, 80, 28)
+            ok_rect = pygame.Rect(dx + dw - 90, dy + dh - 40, 80, 28)
+
+            pygame.draw.rect(screen, Theme.MENU_SEP, cancel_rect, border_radius=4)
+            ct = font.render("Cancel", True, Theme.DIALOG_FG)
+            screen.blit(ct, (cancel_rect.x + (80 - ct.get_width()) // 2,
+                             cancel_rect.y + 5))
+
+            pygame.draw.rect(screen, Theme.DIALOG_BTN, ok_rect, border_radius=4)
+            ot = font.render(action, True, Theme.DIALOG_BTN_FG)
+            screen.blit(ot, (ok_rect.x + (80 - ot.get_width()) // 2,
+                             ok_rect.y + 5))
+
+            # File list (below dialog)
+            if existing:
+                list_y = dy + dh + 8
+                lbl = list_font.render("Existing snapshots (click to select):", True, Theme.STATUS_FG)
+                screen.blit(lbl, (dx + 4, list_y - 16))
+                for i, fn in enumerate(existing[:8]):
+                    ft = list_font.render(f"  {fn}", True, Theme.DEBUG_ADDR)
+                    screen.blit(ft, (dx + 4, list_y + i * 16))
+
+            pygame.display.flip()
+            clock.tick(30)
+
+
+# ── Status Bar ────────────────────────────────────────────────────────
+
+
+class StatusBar:
+    """Bottom status bar showing system metrics."""
+
+    def __init__(self):
+        self.cycles = 0
+        self.mips = 0.0
+        self.fps = 0.0
+        self.core_states: list[str] = []
+        self.message = ""
+        self.message_time = 0.0
+        self.paused = False
+
+    def set_message(self, msg: str, duration: float = 3.0):
+        self.message = msg
+        self.message_time = time.time() + duration
+
+    def draw(self, pygame_module, screen, font, win_w: int, win_h: int):
+        y = win_h - STATUS_HEIGHT
+        pygame_module.draw.rect(screen, Theme.STATUS_BG,
+                                (0, y, win_w, STATUS_HEIGHT))
+        pygame_module.draw.line(screen, Theme.MENU_SEP,
+                                (0, y), (win_w, y))
+
+        x_off = 8
+        ty = y + (STATUS_HEIGHT - font.get_linesize()) // 2
+
+        # Paused indicator
+        if self.paused:
+            pt = font.render(" PAUSED ", True, Theme.DIALOG_BTN_FG, Theme.STATUS_WARN)
+            screen.blit(pt, (x_off, ty))
+            x_off += pt.get_width() + 8
+
+        # Core state indicators
+        for i, state in enumerate(self.core_states[:4]):
+            color = Theme.STATUS_OK if state == "run" else (
+                Theme.STATUS_WARN if state == "idle" else Theme.STATUS_ERR)
+            ct = font.render(f"C{i}:{state}", True, color)
+            screen.blit(ct, (x_off, ty))
+            x_off += ct.get_width() + 8
+
+        # Separator
+        sep_t = font.render("|", True, Theme.MENU_SEP)
+        screen.blit(sep_t, (x_off, ty))
+        x_off += sep_t.get_width() + 6
+
+        # Cycles
+        cyc_t = font.render(f"Cycles: {self.cycles:,}", True, Theme.STATUS_FG)
+        screen.blit(cyc_t, (x_off, ty))
+        x_off += cyc_t.get_width() + 8
+
+        # MIPS
+        if self.mips > 0:
+            mips_t = font.render(f"{self.mips:.1f} MIPS", True,
+                                 Theme.STATUS_OK if self.mips > 1 else Theme.STATUS_FG)
+            screen.blit(mips_t, (x_off, ty))
+
+        # Right side: message + FPS
+        right_parts = []
+        if time.time() < self.message_time:
+            right_parts.append(self.message)
+        right_parts.append(f"FPS: {self.fps:.0f}")
+        right_text = "  |  ".join(right_parts)
+        rt = font.render(right_text, True, Theme.STATUS_FG)
+        screen.blit(rt, (win_w - rt.get_width() - 8, ty))
+
+
+# ── Debug Panel ───────────────────────────────────────────────────────
+
+
+class DebugPanel:
+    """Register / disassembly / memory view panel."""
+
+    def __init__(self):
+        self.visible = False
+        self.width = 380
+
+    def draw(self, pygame_module, screen, font, mono_font,
+             sys_emu: "MegapadSystem", x: int, y: int, w: int, h: int):
+        """Draw the debug panel."""
+        if not self.visible:
+            return
+
+        pygame_module.draw.rect(screen, Theme.DEBUG_BG, (x, y, w, h))
+        pygame_module.draw.line(screen, Theme.MENU_SEP, (x, y), (x, y + h))
+
+        cpu = sys_emu.cpu
+        cy = y + 4
+        line_h = mono_font.get_linesize()
+        pad = x + 8
+
+        # Section: Registers
+        lbl = font.render("REGISTERS", True, Theme.DEBUG_LABEL)
+        screen.blit(lbl, (pad, cy))
+        cy += line_h + 2
+
+        for i in range(16):
+            if cy + line_h > y + h - 4:
+                break
+            val = cpu.regs[i]
+            tag = ""
+            if i == cpu.psel:
+                tag = " <PC"
+            if i == cpu.xsel:
+                tag += " <X"
+            if i == cpu.spsel:
+                tag += " <SP"
+            color = Theme.DEBUG_PC if i == cpu.psel else Theme.DEBUG_VALUE
+            rt = mono_font.render(f"R{i:<2d}= {val:#018x}{tag}", True, color)
+            screen.blit(rt, (pad, cy))
+            cy += line_h
+
+        cy += 4
+        if cy + line_h * 4 > y + h:
+            return
+
+        # Section: Flags
+        flags = f"Z={cpu.flag_z} C={cpu.flag_c} N={cpu.flag_n} V={cpu.flag_v}"
+        flags2 = f"P={cpu.flag_p} G={cpu.flag_g} I={cpu.flag_i} S={cpu.flag_s}"
+        ft = mono_font.render(flags, True, Theme.DEBUG_VALUE)
+        screen.blit(ft, (pad, cy))
+        cy += line_h
+        ft2 = mono_font.render(flags2, True, Theme.DEBUG_VALUE)
+        screen.blit(ft2, (pad, cy))
+        cy += line_h
+
+        # D, Q, Priv
+        misc = f"D={cpu.d_reg:#04x}  Q={cpu.q_out}  Priv={cpu.priv_level}"
+        mt = mono_font.render(misc, True, Theme.DEBUG_VALUE)
+        screen.blit(mt, (pad, cy))
+        cy += line_h + 6
+
+        if cy + line_h * 8 > y + h:
+            return
+
+        # Section: Disassembly around PC
+        lbl2 = font.render("DISASSEMBLY", True, Theme.DEBUG_LABEL)
+        screen.blit(lbl2, (pad, cy))
+        cy += line_h + 2
+
+        try:
+            from cli import disasm_one
+            pc_val = cpu.pc
+            addr = max(0, pc_val - 10)
+            for _ in range(14):
+                if cy + line_h > y + h - 4 or addr >= cpu.mem_size:
+                    break
+                try:
+                    text_str, size = disasm_one(cpu.mem, addr, cpu.mem_size)
+                except Exception:
+                    text_str, size = "???", 1
+
+                is_pc = (addr == pc_val)
+                prefix = "\u25b6" if is_pc else " "
+                color = Theme.DEBUG_PC if is_pc else Theme.DEBUG_HEX
+                line = f"{prefix}{addr:06x}: {text_str}"
+                dt = mono_font.render(line, True, color)
+                screen.blit(dt, (pad, cy))
+                cy += line_h
+                addr += size
+        except ImportError:
+            pass
+
+        cy += 6
+        if cy + line_h * 4 > y + h:
+            return
+
+        # Section: Memory around SP
+        lbl3 = font.render("STACK (top 8)", True, Theme.DEBUG_LABEL)
+        screen.blit(lbl3, (pad, cy))
+        cy += line_h + 2
+
+        sp_val = cpu.sp if hasattr(cpu, 'sp') else 0
+        for i in range(min(8, (y + h - cy) // line_h)):
+            a = (sp_val + i * 8) % cpu.mem_size
+            if a + 8 <= cpu.mem_size:
+                val = int.from_bytes(cpu.mem[a:a+8], 'little')
+            else:
+                val = 0
+            prefix = "\u25b6" if i == 0 else " "
+            line = f"{prefix}{a:06x}: {val:#018x}"
+            st = mono_font.render(line, True, Theme.DEBUG_ADDR)
+            screen.blit(st, (pad, cy))
+            cy += line_h
+
+
+# ── Snapshot (save/load) ──────────────────────────────────────────────
+
+
+def save_snapshot(sys_emu: "MegapadSystem", path: str):
+    """Save a complete system snapshot to disk.
+
+    Format: "MP64SNAP" magic + lengths + JSON metadata + zlib-compressed memory.
+    File extension: .mp64
+    """
+    cpu = sys_emu.cpu
+
+    # CPU state
+    state = {
+        "version": 1,
+        "ram_size": sys_emu.ram_size,
+        "hbw_size": sys_emu.hbw_size,
+        "ext_mem_size": sys_emu.ext_mem_size,
+        "num_cores": sys_emu.num_full_cores,
+        "num_clusters": sys_emu.num_clusters,
+        "cores": [],
+        "timer": {
+            "counter": sys_emu.timer.counter,
+            "compare": sys_emu.timer.compare,
+            "control": sys_emu.timer.control,
+            "prescaler": sys_emu.timer.prescaler,
+        },
+        "uart": {
+            "control": sys_emu.uart.control,
+            "rx_buffer": list(sys_emu.uart.rx_buffer),
+        },
+        "storage": {
+            "image_path": sys_emu.storage.image_path,
+        },
+        "fb": {
+            "enable": sys_emu.fb.enable,
+            "width": sys_emu.fb.width,
+            "height": sys_emu.fb.height,
+            "mode": sys_emu.fb.mode,
+            "fb_base": sys_emu.fb.fb_base,
+            "stride": sys_emu.fb.stride,
+        },
+    }
+
+    # Per-core state
+    for i, core in enumerate(sys_emu.cores[:sys_emu.num_full_cores]):
+        cs = {
+            "core_id": core.core_id,
+            "regs": list(core.regs),
+            "psel": core.psel,
+            "xsel": core.xsel,
+            "spsel": core.spsel,
+            "flag_z": core.flag_z, "flag_c": core.flag_c,
+            "flag_n": core.flag_n, "flag_v": core.flag_v,
+            "flag_p": core.flag_p, "flag_g": core.flag_g,
+            "flag_i": core.flag_i, "flag_s": core.flag_s,
+            "d_reg": core.d_reg, "q_out": core.q_out, "t_reg": core.t_reg,
+            "ivt_base": core.ivt_base, "ivec_id": core.ivec_id,
+            "priv_level": core.priv_level,
+            "mpu_base": core.mpu_base, "mpu_limit": core.mpu_limit,
+            "halted": core.halted, "idle": core.idle,
+            "cycle_count": core.cycle_count,
+            "sb": core.sb, "sr": core.sr, "sc": core.sc, "sw": core.sw,
+            "tmode": core.tmode, "tctrl": core.tctrl,
+            "tsrc0": core.tsrc0, "tsrc1": core.tsrc1, "tdst": core.tdst,
+            "acc": list(core.acc),
+            "tstride_r": core.tstride_r,
+            "ttile_h": core.ttile_h, "ttile_w": core.ttile_w,
+        }
+        state["cores"].append(cs)
+
+    # Write: JSON header + compressed memory blobs
+    meta_bytes = json.dumps(state, indent=2).encode('utf-8')
+    ram_compressed = zlib.compress(bytes(sys_emu._shared_mem), level=6)
+    hbw_compressed = zlib.compress(bytes(sys_emu._hbw_mem), level=6) if sys_emu.hbw_size > 0 else b''
+    ext_compressed = zlib.compress(bytes(sys_emu._ext_mem), level=6) if sys_emu.ext_mem_size > 0 else b''
+
+    with open(path, 'wb') as f:
+        f.write(b'MP64SNAP')
+        f.write(struct.pack('<IIII',
+                            len(meta_bytes),
+                            len(ram_compressed),
+                            len(hbw_compressed),
+                            len(ext_compressed)))
+        f.write(meta_bytes)
+        f.write(ram_compressed)
+        f.write(hbw_compressed)
+        f.write(ext_compressed)
+
+
+def load_snapshot(sys_emu: "MegapadSystem", path: str) -> bool:
+    """Load a system snapshot from disk. Returns True on success."""
+    try:
+        with open(path, 'rb') as f:
+            magic = f.read(8)
+            if magic != b'MP64SNAP':
+                print(f"[snapshot] Invalid file: bad magic")
+                return False
+
+            meta_len, ram_len, hbw_len, ext_len = struct.unpack('<IIII', f.read(16))
+            meta_bytes = f.read(meta_len)
+            ram_compressed = f.read(ram_len)
+            hbw_compressed = f.read(hbw_len) if hbw_len > 0 else b''
+            ext_compressed = f.read(ext_len) if ext_len > 0 else b''
+
+        state = json.loads(meta_bytes.decode('utf-8'))
+
+        # Restore RAM
+        ram_data = zlib.decompress(ram_compressed)
+        if len(ram_data) <= len(sys_emu._shared_mem):
+            sys_emu._shared_mem[:len(ram_data)] = ram_data
+
+        # Restore HBW
+        if hbw_compressed and sys_emu.hbw_size > 0:
+            hbw_data = zlib.decompress(hbw_compressed)
+            if len(hbw_data) <= len(sys_emu._hbw_mem):
+                sys_emu._hbw_mem[:len(hbw_data)] = hbw_data
+
+        # Restore ext mem
+        if ext_compressed and sys_emu.ext_mem_size > 0:
+            ext_data = zlib.decompress(ext_compressed)
+            if len(ext_data) <= len(sys_emu._ext_mem):
+                sys_emu._ext_mem[:len(ext_data)] = ext_data
+
+        # Restore per-core state
+        for cs_data in state.get("cores", []):
+            core_id = cs_data["core_id"]
+            if core_id < len(sys_emu.cores):
+                core = sys_emu.cores[core_id]
+                for i, v in enumerate(cs_data["regs"]):
+                    core.regs[i] = v
+                core.psel = cs_data["psel"]
+                core.xsel = cs_data["xsel"]
+                core.spsel = cs_data["spsel"]
+                core.flag_z = cs_data["flag_z"]
+                core.flag_c = cs_data["flag_c"]
+                core.flag_n = cs_data["flag_n"]
+                core.flag_v = cs_data["flag_v"]
+                core.flag_p = cs_data["flag_p"]
+                core.flag_g = cs_data["flag_g"]
+                core.flag_i = cs_data["flag_i"]
+                core.flag_s = cs_data["flag_s"]
+                core.d_reg = cs_data["d_reg"]
+                core.q_out = cs_data["q_out"]
+                core.t_reg = cs_data["t_reg"]
+                core.ivt_base = cs_data["ivt_base"]
+                core.ivec_id = cs_data["ivec_id"]
+                core.priv_level = cs_data["priv_level"]
+                core.mpu_base = cs_data["mpu_base"]
+                core.mpu_limit = cs_data["mpu_limit"]
+                core.halted = cs_data["halted"]
+                core.idle = cs_data["idle"]
+                core.cycle_count = cs_data["cycle_count"]
+                core.sb = cs_data["sb"]
+                core.sr = cs_data["sr"]
+                core.sc = cs_data["sc"]
+                core.sw = cs_data["sw"]
+                core.tmode = cs_data["tmode"]
+                core.tctrl = cs_data["tctrl"]
+                core.tsrc0 = cs_data["tsrc0"]
+                core.tsrc1 = cs_data["tsrc1"]
+                core.tdst = cs_data["tdst"]
+                for j, v in enumerate(cs_data.get("acc", [])):
+                    core.acc[j] = v
+                core.tstride_r = cs_data.get("tstride_r", 0)
+                core.ttile_h = cs_data.get("ttile_h", 8)
+                core.ttile_w = cs_data.get("ttile_w", 8)
+
+        # Restore timer
+        timer_data = state.get("timer", {})
+        sys_emu.timer.counter = timer_data.get("counter", 0)
+        sys_emu.timer.compare = timer_data.get("compare", 0)
+        sys_emu.timer.control = timer_data.get("control", 0)
+        sys_emu.timer.prescaler = timer_data.get("prescaler", 0)
+
+        # Restore FB config
+        fb_data = state.get("fb", {})
+        sys_emu.fb.enable = fb_data.get("enable", 0)
+        sys_emu.fb.width = fb_data.get("width", 320)
+        sys_emu.fb.height = fb_data.get("height", 240)
+        sys_emu.fb.mode = fb_data.get("mode", 0)
+        sys_emu.fb.fb_base = fb_data.get("fb_base", 0)
+        sys_emu.fb.stride = fb_data.get("stride", 320)
+
+        sys_emu._booted = True
+        return True
+
+    except Exception as e:
+        print(f"[snapshot] Error loading {path}: {e}")
+        return False
+
+
+# ── Main Display ──────────────────────────────────────────────────────
+
+
+class FramebufferDisplay:
+    """Full GUI display for the Megapad-64 emulator.
+
+    Features:
+      - Menu bar (File, Machine, View)
+      - Tab bar (Terminal, Graphics)
+      - Optional debug panel (registers, disassembly, stack)
+      - Status bar (cycles, MIPS, FPS, core states)
+      - Keyboard input -> UART
+      - Snapshot save/load
     """
 
     TAB_TERMINAL = 0
@@ -329,13 +1035,17 @@ class FramebufferDisplay:
         self.fps = 30
         self.active_tab = self.TAB_TERMINAL
         self.term = VirtualTerminal(TERM_COLS, TERM_ROWS)
+        self.status = StatusBar()
+        self.debug = DebugPanel()
+        self._paused = False
+        self._last_cycles = 0
+        self._last_time = 0.0
+        self._pending_action: Optional[str] = None
 
     # -- public API -------------------------------------------------------
 
     def start(self):
         """Start the display thread.  Returns once the window is open."""
-        # Register as a TX listener so every byte also feeds the vterm.
-        # This coexists with on_tx (set by run_console for stdout).
         self.sys.uart._tx_listeners.append(self.term.write)
 
         self._stop_event.clear()
@@ -351,7 +1061,6 @@ class FramebufferDisplay:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
-        # Remove TX listener
         try:
             self.sys.uart._tx_listeners.remove(self.term.write)
         except ValueError:
@@ -361,7 +1070,61 @@ class FramebufferDisplay:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    # -- Menu callbacks ---------------------------------------------------
+
+    def _cb_save_snapshot(self):
+        self._pending_action = "save_snapshot"
+
+    def _cb_load_snapshot(self):
+        self._pending_action = "load_snapshot"
+
+    def _cb_quit(self):
+        self._stop_event.set()
+
+    def _cb_reset(self):
+        self.sys.boot()
+        self.status.set_message("System reset")
+
+    def _cb_pause(self):
+        self._paused = not self._paused
+        self.status.set_message("Paused" if self._paused else "Resumed")
+
+    def _cb_toggle_debug(self):
+        self.debug.visible = not self.debug.visible
+
+    def _cb_tab_terminal(self):
+        self.active_tab = self.TAB_TERMINAL
+
+    def _cb_tab_graphics(self):
+        self.active_tab = self.TAB_GRAPHICS
+
     # -- internals --------------------------------------------------------
+
+    def _build_menus(self) -> MenuBar:
+        return MenuBar([
+            Menu("File", [
+                MenuItem("Save Snapshot...", self._cb_save_snapshot, "Ctrl+S"),
+                MenuItem("Load Snapshot...", self._cb_load_snapshot, "Ctrl+O"),
+                MenuItem("", separator=True),
+                MenuItem("Quit", self._cb_quit, "Ctrl+Q"),
+            ]),
+            Menu("Machine", [
+                MenuItem("Reset", self._cb_reset, "Ctrl+R"),
+                MenuItem("Pause / Resume", self._cb_pause, "F5"),
+                MenuItem("", separator=True),
+                MenuItem("Step (1 instruction)", lambda: None, "F10"),
+            ]),
+            Menu("View", [
+                MenuItem("Terminal", self._cb_tab_terminal, "F1"),
+                MenuItem("Graphics", self._cb_tab_graphics, "F2"),
+                MenuItem("", separator=True),
+                MenuItem("Debug Panel", self._cb_toggle_debug, "F3"),
+            ]),
+        ])
 
     def _run(self):
         """Main display loop (runs in background thread)."""
@@ -371,63 +1134,124 @@ class FramebufferDisplay:
         pygame.init()
         pygame.display.set_caption(self.title)
 
-        # Monospace font for virtual terminal — scale with display scale
+        # Fonts
         term_font_size = max(12, 14 * self.scale)
         term_font = pygame.font.SysFont("monospace", term_font_size)
-        # Measure cell size from font
         test = term_font.render("M", False, (255, 255, 255))
         cell_w = test.get_width()
         cell_h = term_font.get_linesize()
 
-        # Compute window dimensions from terminal size
+        ui_font_size = max(12, 13)
+        ui_font = pygame.font.SysFont("sans", ui_font_size)
+        mono_font = pygame.font.SysFont("monospace", max(11, 12))
+
+        # Window dimensions
         term_pixel_w = self.term.cols * cell_w
         term_pixel_h = self.term.rows * cell_h
-        tab_h = max(TAB_HEIGHT, term_font_size + 10)
+        chrome_h = MENU_HEIGHT + TAB_HEIGHT + STATUS_HEIGHT
         content_w = term_pixel_w
-        content_h = term_pixel_h
-        win_w = content_w
-        win_h = content_h + tab_h
+        win_w = content_w + (self.debug.width if self.debug.visible else 0)
+        win_h = term_pixel_h + chrome_h
 
         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
         clock = pygame.time.Clock()
 
-        # Tab bar font (scales with terminal font)
-        tab_font_size = max(12, term_font_size - 2)
-        tab_font = pygame.font.SysFont("sans", tab_font_size, bold=True)
+        # Build menus
+        menubar = self._build_menus()
+        menubar.layout(pygame, ui_font, win_w)
 
-        # Framebuffer surface (will be resized when FB dimensions change)
+        # Framebuffer surface
         fb_surface = pygame.Surface((320, 240))
         last_w, last_h, last_mode = 0, 0, -1
 
-        # Glyph cache for terminal rendering (huge speedup)
+        # Glyph cache
         glyph_cache: dict = {}
-
-        # Cached terminal surface — reused when nothing changed
         term_surf_cached = None
         last_cursor_blink = True
 
-        # Cursor blink state
+        # Cursor blink
         cursor_blink = True
         last_blink = pygame.time.get_ticks()
+
+        # MIPS tracking
+        self._last_cycles = self.sys.cpu.cycle_count
+        self._last_time = time.time()
 
         self._started.set()
 
         try:
             while not self._stop_event.is_set():
-                # Handle pygame events
+                # ── Handle pending cross-thread actions ───────
+                if self._pending_action == "save_snapshot":
+                    self._pending_action = None
+                    path = SimpleDialog.file_save(pygame, screen, ui_font,
+                                                   "snapshot.mp64")
+                    if path:
+                        try:
+                            save_snapshot(self.sys, path)
+                            self.status.set_message(f"Saved: {path}")
+                        except Exception as e:
+                            self.status.set_message(f"Save failed: {e}")
+
+                elif self._pending_action == "load_snapshot":
+                    self._pending_action = None
+                    path = SimpleDialog.file_open(pygame, screen, ui_font,
+                                                    "snapshot.mp64")
+                    if path and os.path.exists(path):
+                        ok = load_snapshot(self.sys, path)
+                        if ok:
+                            self.status.set_message(f"Loaded: {path}")
+                        else:
+                            self.status.set_message(f"Load failed: {path}")
+                    elif path:
+                        self.status.set_message(f"File not found: {path}")
+
+                # ── Handle pygame events ──────────────────────
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self._stop_event.set()
                         return
+                    elif event.type == pygame.VIDEORESIZE:
+                        win_w, win_h = event.w, event.h
+                        screen = pygame.display.set_mode((win_w, win_h),
+                                                          pygame.RESIZABLE)
+                        menubar.layout(pygame, ui_font, win_w)
                     elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
+                        mods = pygame.key.get_mods()
+                        ctrl = mods & pygame.KMOD_CTRL
+
+                        if ctrl and event.key == pygame.K_q:
                             self._stop_event.set()
                             return
+                        elif ctrl and event.key == pygame.K_s:
+                            self._cb_save_snapshot()
+                        elif ctrl and event.key == pygame.K_o:
+                            self._cb_load_snapshot()
+                        elif ctrl and event.key == pygame.K_r:
+                            self._cb_reset()
                         elif event.key == pygame.K_F1:
                             self.active_tab = self.TAB_TERMINAL
+                            menubar.active_menu = -1
                         elif event.key == pygame.K_F2:
                             self.active_tab = self.TAB_GRAPHICS
-                        else:
+                            menubar.active_menu = -1
+                        elif event.key == pygame.K_F3:
+                            self._cb_toggle_debug()
+                            debug_w = self.debug.width if self.debug.visible else 0
+                            new_w = content_w + debug_w
+                            win_w = new_w
+                            screen = pygame.display.set_mode(
+                                (win_w, win_h), pygame.RESIZABLE)
+                            menubar.layout(pygame, ui_font, win_w)
+                        elif event.key == pygame.K_F5:
+                            self._cb_pause()
+                        elif event.key == pygame.K_F10:
+                            try:
+                                self.sys.step()
+                                self.status.set_message("Stepped 1 instruction")
+                            except Exception:
+                                pass
+                        elif not menubar.is_open():
                             # Forward keys to UART
                             if event.unicode and ord(event.unicode) < 128:
                                 ch = event.unicode.encode('ascii', 'ignore')
@@ -445,32 +1269,82 @@ class FramebufferDisplay:
                                 self.sys.uart.inject_input(b'\x1b[C')
                             elif event.key == pygame.K_LEFT:
                                 self.sys.uart.inject_input(b'\x1b[D')
+                            elif event.key == pygame.K_TAB:
+                                self.sys.uart.inject_input(b'\x09')
+                            elif event.key == pygame.K_DELETE:
+                                self.sys.uart.inject_input(b'\x7f')
+                            elif event.key == pygame.K_HOME:
+                                self.sys.uart.inject_input(b'\x1b[H')
+                            elif event.key == pygame.K_END:
+                                self.sys.uart.inject_input(b'\x1b[F')
+                            elif event.key == pygame.K_PAGEUP:
+                                self.sys.uart.inject_input(b'\x1b[5~')
+                            elif event.key == pygame.K_PAGEDOWN:
+                                self.sys.uart.inject_input(b'\x1b[6~')
+
                     elif event.type == pygame.MOUSEBUTTONDOWN:
-                        # Check tab bar clicks
                         mx, my = event.pos
-                        if my < tab_h:
-                            if mx < win_w // 2:
+                        if my < MENU_HEIGHT or menubar.is_open():
+                            cb = menubar.handle_click(mx, my)
+                            if cb:
+                                cb()
+                        elif MENU_HEIGHT <= my < MENU_HEIGHT + TAB_HEIGHT:
+                            debug_w = self.debug.width if self.debug.visible else 0
+                            tab_w = (win_w - debug_w) // 2
+                            if mx < tab_w:
                                 self.active_tab = self.TAB_TERMINAL
-                            else:
+                            elif mx < tab_w * 2:
                                 self.active_tab = self.TAB_GRAPHICS
 
+                # ── Update status metrics ─────────────────────
+                now = time.time()
+                if now - self._last_time >= 1.0:
+                    current_cycles = self.sys.cpu.cycle_count
+                    delta = current_cycles - self._last_cycles
+                    elapsed = now - self._last_time
+                    self.status.mips = (delta / elapsed) / 1e6 if elapsed > 0 else 0
+                    self._last_cycles = current_cycles
+                    self._last_time = now
+
+                self.status.cycles = self.sys.cpu.cycle_count
+                self.status.fps = clock.get_fps()
+                self.status.paused = self._paused
+
+                # Core states
+                states = []
+                for core in self.sys.cores[:4]:
+                    if core.halted:
+                        states.append("halt")
+                    elif core.idle:
+                        states.append("idle")
+                    else:
+                        states.append("run")
+                self.status.core_states = states
+
                 # Cursor blink
-                now = pygame.time.get_ticks()
-                if now - last_blink >= CURSOR_BLINK_MS:
+                tick_now = pygame.time.get_ticks()
+                if tick_now - last_blink >= CURSOR_BLINK_MS:
                     cursor_blink = not cursor_blink
-                    last_blink = now
+                    last_blink = tick_now
 
-                screen.fill((32, 32, 40))
+                # ── Render ────────────────────────────────────
+                screen.fill(Theme.BG)
 
-                # ── Draw tab bar ──────────────────────────────────
-                self._draw_tabs(pygame, screen, tab_font, win_w, tab_h)
+                debug_w = self.debug.width if self.debug.visible else 0
+                content_area_w = win_w - debug_w
+                tab_y = MENU_HEIGHT
+                content_y = MENU_HEIGHT + TAB_HEIGHT
+                content_h = win_h - chrome_h
 
-                # ── Draw content area ─────────────────────────────
-                content_rect = pygame.Rect(0, tab_h, win_w,
-                                           win_h - tab_h)
+                # ── Tab bar ───────────────────────────────────
+                self._draw_tabs(pygame, screen, ui_font,
+                                content_area_w, TAB_HEIGHT, tab_y)
+
+                # ── Content area ──────────────────────────────
+                content_rect = pygame.Rect(0, content_y,
+                                           content_area_w, content_h)
 
                 if self.active_tab == self.TAB_TERMINAL:
-                    # Render virtual terminal (skip if clean + same blink)
                     need_render = (self.term._dirty
                                    or cursor_blink != last_cursor_blink
                                    or term_surf_cached is None)
@@ -481,7 +1355,6 @@ class FramebufferDisplay:
                             _cache=glyph_cache)
                         last_cursor_blink = cursor_blink
                     term_surf = term_surf_cached
-                    # Center it in the content area
                     tx = (content_rect.width - term_surf.get_width()) // 2
                     ty = (content_rect.height - term_surf.get_height()) // 2
                     screen.blit(term_surf,
@@ -490,8 +1363,8 @@ class FramebufferDisplay:
 
                 elif self.active_tab == self.TAB_GRAPHICS:
                     if not (fb.enable & 1):
-                        label = tab_font.render(
-                            "Framebuffer disabled  —  use GFX-INIT",
+                        label = ui_font.render(
+                            "Framebuffer disabled  \u2014  use GFX-INIT",
                             True, (100, 100, 120))
                         screen.blit(label,
                                     (content_rect.x + 10,
@@ -506,7 +1379,6 @@ class FramebufferDisplay:
 
                             self._render_fb(fb, fb_surface, w, h, mode)
 
-                            # Scale to fit content area
                             sw = content_rect.width
                             sh = content_rect.height
                             aspect = w / h
@@ -524,22 +1396,36 @@ class FramebufferDisplay:
                                         (content_rect.x + ox,
                                          content_rect.y + oy))
 
-                            # Tick vsync
                             fb.vsync_count += 1
                             fb.vblank = True
+
+                # ── Debug panel ───────────────────────────────
+                if self.debug.visible:
+                    self.debug.draw(pygame, screen, ui_font, mono_font,
+                                    self.sys,
+                                    content_area_w, content_y,
+                                    debug_w, content_h)
+
+                # ── Menu bar (drawn last, on top) ─────────────
+                menubar.draw(pygame, screen, ui_font, win_w)
+
+                # ── Status bar ────────────────────────────────
+                self.status.draw(pygame, screen, ui_font, win_w, win_h)
 
                 pygame.display.flip()
                 clock.tick(self.fps)
 
         except Exception as e:
+            import traceback
             print(f"\n[display] error: {e}")
+            traceback.print_exc()
         finally:
             pygame.quit()
 
-    def _draw_tabs(self, pygame, screen, font, win_w: int,
-                    tab_h: int = TAB_HEIGHT):
-        """Draw the tab bar at the top of the window."""
-        tab_w = win_w // 2
+    def _draw_tabs(self, pygame, screen, font, area_w: int,
+                    tab_h: int, y: int):
+        """Draw the tab bar."""
+        tab_w = area_w // 2
         tabs = [
             ("Terminal [F1]", self.TAB_TERMINAL),
             ("Graphics [F2]", self.TAB_GRAPHICS),
@@ -547,34 +1433,26 @@ class FramebufferDisplay:
         for i, (label, tab_id) in enumerate(tabs):
             x = i * tab_w
             active = (self.active_tab == tab_id)
-            bg = (50, 50, 65) if active else (30, 30, 38)
-            fg = (220, 220, 240) if active else (110, 110, 130)
-            pygame.draw.rect(screen, bg, (x, 0, tab_w, tab_h))
+            bg = Theme.TAB_ACTIVE if active else Theme.TAB_BG
+            fg = Theme.TAB_ACTIVE_FG if active else Theme.TAB_FG
+            pygame.draw.rect(screen, bg, (x, y, tab_w, tab_h))
             if active:
-                # Active tab indicator line
-                pygame.draw.rect(screen, (80, 140, 255),
-                                 (x, tab_h - 2, tab_w, 2))
+                pygame.draw.rect(screen, Theme.TAB_ACCENT,
+                                 (x, y + tab_h - 2, tab_w, 2))
             text = font.render(label, True, fg)
             tx = x + (tab_w - text.get_width()) // 2
-            ty = (tab_h - text.get_height()) // 2
-            screen.blit(text, (tx, ty))
-        # Separator line
+            ty_off = (tab_h - text.get_height()) // 2
+            screen.blit(text, (tx, y + ty_off))
         pygame.draw.line(screen, (60, 60, 75),
-                         (tab_w, 0), (tab_w, tab_h - 1))
+                         (tab_w, y), (tab_w, y + tab_h - 1))
 
     def _resolve_fb_mem(self, base_addr: int):
-        """Return (buffer, offset) for the given framebuffer base address.
-
-        Checks external memory first, then HBW.  Returns (None, 0) if
-        the address doesn't fall in either region.
-        """
-        # External memory?
+        """Return (buffer, offset) for framebuffer base address."""
         if self.sys.ext_mem_size > 0:
             ext_base = self.sys.ext_mem_base
             ext_end = self.sys.ext_mem_end
             if ext_base <= base_addr < ext_end:
                 return self.sys._ext_mem, base_addr - ext_base
-        # HBW?
         if base_addr >= HBW_BASE:
             off = base_addr - HBW_BASE
             if off < len(self.sys._hbw_mem):
@@ -582,7 +1460,7 @@ class FramebufferDisplay:
         return None, 0
 
     def _render_fb(self, fb, surface, w: int, h: int, mode: int):
-        """Read pixel data from ext mem or HBW and paint onto a pygame Surface."""
+        """Read pixel data and paint onto a pygame Surface."""
         import pygame
         import numpy as np
 
@@ -593,60 +1471,60 @@ class FramebufferDisplay:
             return
 
         if mode == 0:
-            # 8-bit indexed color — fast path via numpy
-            pal = fb.palette  # list of 0x00RRGGBB ints
-            # Build palette lookup table (256 × 3 uint8)
+            # 8-bit indexed color
+            pal = fb.palette
             pal_lut = np.zeros((256, 3), dtype=np.uint8)
             for i in range(256):
                 rgb = pal[i]
                 pal_lut[i, 0] = (rgb >> 16) & 0xFF
                 pal_lut[i, 1] = (rgb >> 8) & 0xFF
                 pal_lut[i, 2] = rgb & 0xFF
-            # Read raw index bytes for entire frame
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
-            for y in range(h):
-                row_off = mem_off + y * stride
+            for y_row in range(h):
+                row_off = mem_off + y_row * stride
                 end = row_off + w
                 if end > len(mem):
                     break
                 row = np.frombuffer(mem, dtype=np.uint8,
                                     count=w, offset=row_off)
-                pixels_rgb[:, y, :] = pal_lut[row]
+                pixels_rgb[:, y_row, :] = pal_lut[row]
             pygame.surfarray.blit_array(surface, pixels_rgb)
 
         elif mode == 1:
-            # RGB565 — fast path via numpy
+            # RGB565
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
-            for y in range(h):
-                row_off = mem_off + y * stride
+            for y_row in range(h):
+                row_off = mem_off + y_row * stride
                 end = row_off + w * 2
                 if end > len(mem):
                     break
                 raw = np.frombuffer(mem, dtype=np.uint16,
                                     count=w, offset=row_off)
-                pixels_rgb[:, y, 0] = ((raw >> 11) & 0x1F).astype(np.uint8) << 3
-                pixels_rgb[:, y, 1] = ((raw >> 5) & 0x3F).astype(np.uint8) << 2
-                pixels_rgb[:, y, 2] = (raw & 0x1F).astype(np.uint8) << 3
+                pixels_rgb[:, y_row, 0] = ((raw >> 11) & 0x1F).astype(np.uint8) << 3
+                pixels_rgb[:, y_row, 1] = ((raw >> 5) & 0x3F).astype(np.uint8) << 2
+                pixels_rgb[:, y_row, 2] = (raw & 0x1F).astype(np.uint8) << 3
             pygame.surfarray.blit_array(surface, pixels_rgb)
 
         elif mode == 3:
-            # RGBA8888 — fast path via numpy
+            # RGBA8888
             pixels_rgb = np.zeros((w, h, 3), dtype=np.uint8)
-            for y in range(h):
-                row_off = mem_off + y * stride
+            for y_row in range(h):
+                row_off = mem_off + y_row * stride
                 end = row_off + w * 4
                 if end > len(mem):
                     break
                 raw = np.frombuffer(mem, dtype=np.uint8,
                                     count=w * 4, offset=row_off).reshape(w, 4)
-                pixels_rgb[:, y, 0] = raw[:, 0]
-                pixels_rgb[:, y, 1] = raw[:, 1]
-                pixels_rgb[:, y, 2] = raw[:, 2]
+                pixels_rgb[:, y_row, 0] = raw[:, 0]
+                pixels_rgb[:, y_row, 1] = raw[:, 1]
+                pixels_rgb[:, y_row, 2] = raw[:, 2]
             pygame.surfarray.blit_array(surface, pixels_rgb)
 
         else:
-            # Unsupported mode — fill gray
             surface.fill((64, 64, 64))
+
+
+# ── Headless Display (testing) ──────────────────────────────────────
 
 
 class HeadlessDisplay:
@@ -663,7 +1541,6 @@ class HeadlessDisplay:
         pass
 
     def _resolve_fb_mem(self, base_addr: int):
-        """Return (buffer, offset) — same logic as FramebufferDisplay."""
         if self.sys.ext_mem_size > 0:
             ext_base = self.sys.ext_mem_base
             ext_end = self.sys.ext_mem_end
@@ -676,7 +1553,6 @@ class HeadlessDisplay:
         return None, 0
 
     def snapshot(self) -> bytes | None:
-        """Capture current FB pixel data as raw bytes."""
         fb = self.sys.fb
         if not (fb.enable & 1):
             return None
