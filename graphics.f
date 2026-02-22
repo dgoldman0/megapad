@@ -112,7 +112,7 @@ VARIABLE GFX-DH          \ drawing height
 
 : GFX-SYNC  ( -- )
     FB-VSYNC@ 1+                        ( target )
-    BEGIN DUP FB-VSYNC@ <= WHILE REPEAT  ( -- wait until counter advances )
+    BEGIN DUP FB-VSYNC@ <= WHILE IDLE REPEAT  ( -- yield until vsync advances )
     DROP FB-VSYNC-ACK ;
 
 \ -- Pixel operations -------------------------------------------------
