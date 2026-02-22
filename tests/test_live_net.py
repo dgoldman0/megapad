@@ -188,7 +188,7 @@ def _restore_cpu_state(cpu, state: dict):
 #  Module-level snapshot — shared by ALL test classes
 # ---------------------------------------------------------------------------
 
-_snapshot = None            # (mem_bytes, cpu_state, disk_image_path)
+_snapshot = None            # (mem_bytes, cpu_state, disk_image_path, ext_mem_bytes)
 _snapshot_lock = threading.Lock()
 
 
@@ -233,16 +233,30 @@ def _ensure_snapshot():
             storage_image=disk_path,
             ext_mem_size=16 * (1 << 20),    # 16 MiB XMEM for XBUF
         )
-        sys_obj.nic.link_up = False         # prevent autoexec DHCP
+        # Disable link-up on BOTH Python and C++ NIC so autoexec.f
+        # skips DHCP entirely (NET-STATUS bit 2 = 0).
+        sys_obj.nic.link_up = False
+        for cpu in sys_obj.cores:
+            if hasattr(cpu, '_cs'):
+                cpu._cs.nic_set_link_up(False)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, bios_code)
         sys_obj.boot()
 
+        # Run until the Forth QUIT prompt ("> ") appears, indicating
+        # the full boot (BIOS → KDOS → autoexec → tools) is done and
+        # the interpreter is waiting for user input.  Do NOT break on
+        # the first idle — DHCP / NET-IDLE may idle mid-boot.
         max_steps = 1_000_000_000
         total = 0
         while total < max_steps:
-            if sys_obj.cpu.halted or sys_obj.cpu.idle:
+            if sys_obj.cpu.halted:
                 break
+            if sys_obj.cpu.idle:
+                text = uart_text(buf)
+                if text.rstrip().endswith(">"):
+                    break           # sitting in QUIT loop — fully booted
+                sys_obj.cpu.idle = False     # wake and continue
             batch = sys_obj.run_batch(min(100_000, max_steps - total))
             total += max(batch, 1)
 
@@ -250,6 +264,7 @@ def _ensure_snapshot():
             bytes(sys_obj.cpu.mem),
             _save_cpu_state(sys_obj.cpu),
             disk_path,
+            bytes(sys_obj._ext_mem),   # ext mem has userland dictionary
         )
 
 
@@ -329,7 +344,7 @@ class LiveNetBase(unittest.TestCase):
         from nic_backends import TAPBackend
         from system import MegapadSystem
 
-        mem_bytes, cpu_state, disk_path = _snapshot
+        mem_bytes, cpu_state, disk_path, ext_mem_bytes = _snapshot
 
         with TAPLock():
             backend = TAPBackend(tap_name=_TAP_NAME)
@@ -341,8 +356,9 @@ class LiveNetBase(unittest.TestCase):
             )
             buf = capture_uart(sys)
 
-            # Restore snapshot
+            # Restore snapshot (RAM + ext mem / userland dictionary)
             sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+            sys._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
             _restore_cpu_state(sys.cpu, cpu_state)
 
             # Prepare commands
@@ -368,31 +384,35 @@ class LiveNetBase(unittest.TestCase):
                     if sys.cpu.halted:
                         break
 
-                    # Feed UART data when buffer is empty
+                    # Idle handling — the CPU executed an IDL
+                    # instruction (NET-IDLE).  Sleep briefly to yield
+                    # the GIL so the TAP RX thread can deliver frames,
+                    # then wake the CPU.  Do NOT feed more UART data
+                    # while idle: the CPU may be inside ARP-RESOLVE /
+                    # DNS-RESOLVE waiting for NIC frames; injecting
+                    # the next command line would wake it prematurely
+                    # from NET-IDLE without an ARP reply ready.
+                    if sys.cpu.idle:
+                        if idle_polls < max_idle_polls:
+                            idle_polls += 1
+                            time.sleep(0.02)
+                            sys.cpu.idle = False
+                            continue
+                        else:
+                            break
+
+                    # Feed UART data when buffer is empty AND CPU is
+                    # running (not idle).  This ensures commands that
+                    # go idle waiting for network I/O aren't disturbed
+                    # by premature injection of the next input line.
                     if not sys.uart.has_rx_data and pos < len(payload):
                         chunk = _next_line_chunk(payload, pos)
                         sys.uart.inject_input(chunk)
                         pos += len(chunk)
-                        if sys.cpu.idle:
-                            sys.cpu.idle = False
-                        idle_polls = 0
 
-                    # Run CPU if it has work
-                    if not (sys.cpu.idle
-                            and not sys.uart.has_rx_data
-                            and not sys._any_nic_rx()):
-                        batch = sys.run_batch(min(100_000, max_steps - steps))
-                        steps += max(batch, 1)
-                        idle_polls = 0
-                        continue
-
-                    # Idle — sleep to yield GIL to TAP RX thread
-                    if idle_polls < max_idle_polls:
-                        idle_polls += 1
-                        time.sleep(0.02)
-                        sys.cpu.idle = False
-                    else:
-                        break
+                    batch = sys.run_batch(min(100_000, max_steps - steps))
+                    steps += max(batch, 1)
+                    idle_polls = 0
             finally:
                 sys.nic.stop()
 
@@ -418,9 +438,17 @@ class TestLiveBIOS(LiveNetBase):
     """BIOS networking primitives over a real TAP."""
 
     def test_net_status_link_up(self):
-        """NET-STATUS should report link-up + present (0x84 = 132)."""
+        """NET-STATUS should report link-up + present (bits 7,2 set)."""
         text = self._run(["NET-STATUS ."], setup_ip=False)
-        self.assertIn("132 ", text)
+        # Extract the printed number; TAP may deliver frames before
+        # this runs, setting the RX-available bit (bit 1), so accept
+        # any value with bits 7 (0x80=present) and 2 (0x04=link) set.
+        import re
+        m = re.search(r'(\d+)\s', text)
+        self.assertIsNotNone(m, f"no number in UART output: {text!r}")
+        val = int(m.group(1))
+        self.assertTrue(val & 0x84 == 0x84,
+                        f"NET-STATUS={val:#x}, expected bits 7+2 set")
 
     def test_net_mac_readable(self):
         """NET-MAC@ first byte should be 0x02."""
@@ -437,14 +465,14 @@ class TestLiveARP(LiveNetBase):
 
     def test_arp_resolve_gateway(self):
         text = self._run([
-            "GW-IP IP@ ARP-RESOLVE",
+            "GW-IP ARP-RESOLVE",
             'DUP 0<> IF .\"  ARP-OK \" C@ . ELSE .\"  ARP-FAIL \" DROP THEN',
         ], max_steps=200_000_000)
         self.assertIn("ARP-OK", text)
 
     def test_arp_table_populated(self):
         text = self._run([
-            "GW-IP IP@ ARP-RESOLVE DROP",
+            "GW-IP ARP-RESOLVE DROP",
             "ARP-TABLE ARP-SLOTS /ARP-ENT * DUMP",
         ], max_steps=200_000_000)
         self.assertNotIn("ARP-FAIL", text)
@@ -465,18 +493,11 @@ class TestLiveICMP(LiveNetBase):
 
     def test_ping_host(self):
         text = self._run([
-            "GW-IP IP@ ARP-RESOLVE",
-            'DUP 0= IF ." NO-ARP" DROP',
-            "ELSE DROP",
-            "  GW-IP IP@ 0 0 ICMP-BUILD-ECHO-REQ",
-            '  1 IP-PROTO-ICMP GW-IP IP@ ROT ROT IP-SEND ." PING-SENT"',
-            "  20 0 DO IP-RECV DUP 0<> IF",
-            '    ." IP-GOT" 2DROP LEAVE ELSE 2DROP THEN LOOP',
-            "THEN",
-        ], max_steps=300_000_000)
-        if "NO-ARP" in text:
-            self.skipTest("ARP resolution failed")
-        self.assertIn("PING-SENT", text)
+            'GW-IP ARP-RESOLVE DUP 0= IF DROP ELSE DROP 10 64 0 1 2 PING-IP THEN',
+        ], max_steps=300_000_000, idle_timeout_s=6.0)
+        if "sent" not in text.lower():
+            self.skipTest("ARP resolution failed (no ping replies)")
+        self.assertIn("received", text.lower())
 
     def test_respond_to_ping(self):
         text = self._run([
@@ -537,8 +558,8 @@ class TestLiveUDP(LiveNetBase):
         t.start()
 
         text = self._run([
-            "100 0 DO UDP-RECV DUP 0<> IF",
-            '  ." UDP-GOT" DROP 2DROP LEAVE ELSE DROP 2DROP THEN LOOP',
+            ": _URCV 100 0 DO UDP-RECV DUP 0<> IF .\" UDP-GOT\" DROP 2DROP LEAVE ELSE DROP 2DROP THEN LOOP ;",
+            "_URCV",
         ], max_steps=400_000_000)
         t.join(timeout=15.0)
         self.assertNotIn("ABORT", text)
@@ -654,10 +675,10 @@ class TestLiveHardening(LiveNetBase):
 
     def test_arp_then_icmp_then_udp_sequence(self):
         text = self._run([
-            "GW-IP IP@ ARP-RESOLVE",
+            "GW-IP ARP-RESOLVE",
             'DUP 0<> IF ." ARP-OK" DROP ELSE ." ARP-FAIL" DROP THEN',
             ': PPOLL 10 0 DO PING-POLL LOOP ; PPOLL ." PING-OK"',
-            ': DO-SEQ GW-IP IP@ 9999 8888 S" SEQ-TEST" UDP-SEND DROP ; DO-SEQ ." SEQ-OK"',
+            ': DO-SEQ GW-IP 9999 8888 S" SEQ-TEST" UDP-SEND DROP ; DO-SEQ ." SEQ-OK"',
         ], max_steps=300_000_000)
         self.assertIn("PING-OK", text)
         self.assertIn("SEQ-OK", text)
@@ -716,7 +737,7 @@ class TestLiveEndToEnd(LiveNetBase):
 
     def test_arp_resolve_gateway_succeeds(self):
         text = self._run([
-            "GW-IP IP@ ARP-RESOLVE",
+            "GW-IP ARP-RESOLVE",
             'DUP 0<> IF ." ARP-RESOLVED" C@ ." byte0=" . '
             'ELSE ." ARP-FAILED" DROP THEN',
         ], max_steps=200_000_000)
@@ -737,8 +758,10 @@ class TestLiveEndToEnd(LiveNetBase):
         ], max_steps=500_000_000, idle_timeout_s=10.0)
         if "DNS/IP resolve failed" in text or "DNS-FAIL" in text:
             self.skipTest("DNS not available over TAP")
-        if "TCP connect failed" in text:
+        if "TCP connect failed" in text or "TCP handshake timeout" in text:
             self.skipTest("TCP connection failed")
+        if "Fetch failed" in text:
+            self.skipTest("Fetch failed — network not reachable")
         got = any(s in text for s in
                   ("Example Domain", "HTTP", "200", "bytes in SCROLL-BUF"))
         self.assertTrue(got, f"No HTTP content.\n{text[-600:]}")
@@ -749,7 +772,10 @@ class TestLiveEndToEnd(LiveNetBase):
         ], max_steps=800_000_000, idle_timeout_s=15.0)
         if "DNS/IP resolve failed" in text or "DNS-FAIL" in text:
             self.skipTest("DNS not available over TAP")
-        if "TLS connect failed" in text or "TCP connect failed" in text:
+        if any(msg in text for msg in (
+            "TLS connect failed", "TCP connect failed",
+            "TCP handshake timeout", "Fetch failed",
+        )):
             self.skipTest("TLS/TCP connection failed")
         got = any(s in text for s in
                   ("Example Domain", "HTTP", "200",
