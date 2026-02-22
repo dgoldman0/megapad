@@ -2083,6 +2083,9 @@ VARIABLE ARENA-SP   0 ARENA-SP !  \ stack pointer (0 = empty)
 \  Usage:  0 1 1024 BUFFER my-raw-buf
 \          ( type=raw  width=1  length=1024 )
 
+\ -- Useful general helper --  \
+: IDLE  ( -- )  [ 0 C, ] ;  \ IDL opcode — yield CPU until next interrupt
+
 \ -- Registry (linked list — no slot limit) --
 VARIABLE BUF-COUNT
 0 BUF-COUNT !
