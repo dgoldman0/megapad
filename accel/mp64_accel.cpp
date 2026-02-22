@@ -16,6 +16,7 @@
 #include <pybind11/functional.h>
 
 #include "mp64_crypto.h"
+#include "mp64_fb.h"
 #include "mp64_nic.h"
 
 namespace py = pybind11;
@@ -165,6 +166,9 @@ struct CPUState {
 
     // C++ native TRNG device (bypass Python MMIO for random bytes)
     TRNGDevice trng;
+
+    // C++ native framebuffer device (bypass Python MMIO for FB registers)
+    FramebufferDevice fb;
 };
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1021,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.trng.read8(mmio_off);
         if (s.crypto.handles(mmio_off))
             return s.crypto.read8(mmio_off);
+        if (s.fb.handles(mmio_off))
+            return s.fb.read8(mmio_off);
         return cb.mmio_read8(addr);  // fallback to Python for other devices
     }
     if (s.priv_level) {
@@ -1052,6 +1058,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         }
         if (s.crypto.handles(mmio_off)) {
             s.crypto.write8(mmio_off, val);
+            return;
+        }
+        if (s.fb.handles(mmio_off)) {
+            s.fb.write8(mmio_off, val);
             return;
         }
         cb.mmio_write8(addr, val);  // fallback to Python for other devices
@@ -1100,6 +1110,12 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.crypto.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (s.fb.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.fb.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1146,6 +1162,11 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
+        if (s.fb.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -1175,6 +1196,8 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto.handles(mmio_off))
             return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
+        if (s.fb.handles(mmio_off))
+            return s.fb.read8(mmio_off) | ((uint16_t)s.fb.read8(mmio_off+1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
@@ -1208,6 +1231,11 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.crypto.write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
+        if (s.fb.handles(mmio_off)) {
+            s.fb.write8(mmio_off, val & 0xFF);
+            s.fb.write8(mmio_off+1, (val >> 8) & 0xFF);
+            return;
+        }
         cb.mmio_write8(addr, val & 0xFF);
         cb.mmio_write8(addr+1, (val >> 8) & 0xFF);
         return;
@@ -1239,6 +1267,12 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
                 v |= (uint32_t)s.crypto.read8(mmio_off + i) << (8*i);
+            return v;
+        }
+        if (s.fb.handles(mmio_off)) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.fb.read8(mmio_off + i) << (8*i);
             return v;
         }
         uint32_t v = 0;
@@ -1275,6 +1309,11 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.crypto.handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (s.fb.handles(mmio_off)) {
+            for (int i = 0; i < 4; i++)
+                s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         for (int i = 0; i < 4; i++)
@@ -2297,6 +2336,63 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("disable_trng", [](CPUState& s) {
             s.trng.enabled = false;
+        })
+        // ── Framebuffer device ────────────────────────────────
+        .def("fb_init", [](CPUState& s) {
+            s.fb.init();
+        })
+        .def("fb_enabled", [](const CPUState& s) -> bool {
+            return s.fb.enabled;
+        })
+        .def("fb_disable", [](CPUState& s) {
+            s.fb.enabled = false;
+        })
+        .def("fb_tick", [](CPUState& s, uint32_t cycles) {
+            s.fb.tick(cycles);
+        })
+        .def("fb_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.fb.read8(mmio_off);
+        })
+        .def("fb_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.fb.write8(mmio_off, val);
+        })
+        .def("fb_irq_pending", [](const CPUState& s) -> bool {
+            return s.fb.irq_pending();
+        })
+        // FB properties for display thread access
+        .def_property("fb_base_addr",
+            [](const CPUState& s) -> uint64_t { return s.fb.fb_base; },
+            [](CPUState& s, uint64_t v) { s.fb.fb_base = v; })
+        .def_property("fb_width",
+            [](const CPUState& s) -> uint32_t { return s.fb.width; },
+            [](CPUState& s, uint32_t v) { s.fb.width = v; })
+        .def_property("fb_height",
+            [](const CPUState& s) -> uint32_t { return s.fb.height; },
+            [](CPUState& s, uint32_t v) { s.fb.height = v; })
+        .def_property("fb_stride",
+            [](const CPUState& s) -> uint32_t { return s.fb.stride; },
+            [](CPUState& s, uint32_t v) { s.fb.stride = v; })
+        .def_property("fb_mode",
+            [](const CPUState& s) -> uint8_t { return s.fb.mode; },
+            [](CPUState& s, uint8_t v) { s.fb.mode = v; })
+        .def_property("fb_enable",
+            [](const CPUState& s) -> uint8_t { return s.fb.enable; },
+            [](CPUState& s, uint8_t v) { s.fb.enable = v; })
+        .def_property("fb_vsync_count",
+            [](const CPUState& s) -> uint32_t { return s.fb.vsync_count; },
+            [](CPUState& s, uint32_t v) { s.fb.vsync_count = v; })
+        .def_property("fb_vblank",
+            [](const CPUState& s) -> bool { return s.fb.vblank; },
+            [](CPUState& s, bool v) { s.fb.vblank = v; })
+        .def_property("fb_cycles_per_frame",
+            [](const CPUState& s) -> uint32_t { return s.fb.cycles_per_frame; },
+            [](CPUState& s, uint32_t v) { s.fb.cycles_per_frame = v; })
+        .def("fb_get_palette", [](const CPUState& s) -> std::vector<uint32_t> {
+            return std::vector<uint32_t>(s.fb.palette.begin(), s.fb.palette.end());
+        })
+        .def("fb_set_palette_entry", [](CPUState& s, int idx, uint32_t rgb) {
+            if (idx >= 0 && idx < 256)
+                s.fb.palette[idx] = rgb & 0x00FFFFFF;
         })
         ;
 

@@ -1838,6 +1838,130 @@ class FramebufferDevice(Device):
         """Total bytes in the framebuffer (stride × height)."""
         return self.stride * self.height
 
+
+class CppFramebufferProxy(Device):
+    """Thin proxy that delegates FB state to the C++ FramebufferDevice.
+
+    Provides the exact same attribute interface as FramebufferDevice so
+    that display.py and system.py work unchanged.  All MMIO is handled
+    in C++; this proxy only exists so the Python side can read/write
+    configuration properties (fb_base, width, vsync_count, palette, …).
+
+    The ``_cs`` attribute is the CPUState (C++ pybind11 object) whose
+    ``fb_*`` properties map directly to the C++ FramebufferDevice struct.
+    """
+
+    def __init__(self, cs):
+        super().__init__("Framebuffer", FB_BASE, 0x50)
+        self._cs = cs  # CPUState with fb_* properties
+        # Initialize C++ side
+        cs.fb_init()
+
+    # -- Configuration properties (r/w) --------------------------------
+
+    @property
+    def fb_base(self) -> int:
+        return self._cs.fb_base_addr
+
+    @fb_base.setter
+    def fb_base(self, v: int):
+        self._cs.fb_base_addr = v
+
+    @property
+    def width(self) -> int:
+        return self._cs.fb_width
+
+    @width.setter
+    def width(self, v: int):
+        self._cs.fb_width = v
+
+    @property
+    def height(self) -> int:
+        return self._cs.fb_height
+
+    @height.setter
+    def height(self, v: int):
+        self._cs.fb_height = v
+
+    @property
+    def stride(self) -> int:
+        return self._cs.fb_stride
+
+    @stride.setter
+    def stride(self, v: int):
+        self._cs.fb_stride = v
+
+    @property
+    def mode(self) -> int:
+        return self._cs.fb_mode
+
+    @mode.setter
+    def mode(self, v: int):
+        self._cs.fb_mode = v
+
+    @property
+    def enable(self) -> int:
+        return self._cs.fb_enable
+
+    @enable.setter
+    def enable(self, v: int):
+        self._cs.fb_enable = v
+
+    @property
+    def vsync_count(self) -> int:
+        return self._cs.fb_vsync_count
+
+    @vsync_count.setter
+    def vsync_count(self, v: int):
+        self._cs.fb_vsync_count = v
+
+    @property
+    def vblank(self) -> bool:
+        return self._cs.fb_vblank
+
+    @vblank.setter
+    def vblank(self, v: bool):
+        self._cs.fb_vblank = v
+
+    @property
+    def cycles_per_frame(self) -> int:
+        return self._cs.fb_cycles_per_frame
+
+    @cycles_per_frame.setter
+    def cycles_per_frame(self, v: int):
+        self._cs.fb_cycles_per_frame = v
+
+    @property
+    def palette(self) -> list[int]:
+        return self._cs.fb_get_palette()
+
+    @palette.setter
+    def palette(self, pal: list[int]):
+        for i, v in enumerate(pal):
+            self._cs.fb_set_palette_entry(i, v)
+
+    # -- MMIO pass-through (for tests that call read8/write8 directly) --
+
+    def read8(self, offset: int) -> int:
+        return self._cs.fb_read8(FB_BASE + offset)
+
+    def write8(self, offset: int, value: int):
+        self._cs.fb_write8(FB_BASE + offset, value & 0xFF)
+
+    def tick(self, cycles: int):
+        self._cs.fb_tick(cycles)
+
+    def bpp(self) -> int:
+        return FB_BPP.get(self.mode, 1)
+
+    @property
+    def irq_pending(self) -> bool:
+        return self._cs.fb_irq_pending()
+
+    @property
+    def frame_bytes(self) -> int:
+        return self.stride * self.height
+
 # ---------------------------------------------------------------------------
 #  Real-Time Clock / System Clock
 # ---------------------------------------------------------------------------

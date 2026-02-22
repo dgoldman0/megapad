@@ -27,7 +27,7 @@ from megapad64 import (
 from devices import (
     MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, NTTDevice, KemDevice,
-    FramebufferDevice, RTC,
+    FramebufferDevice, CppFramebufferProxy, RTC,
     MailboxDevice, SpinlockDevice, CRCDevice,
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
@@ -364,10 +364,11 @@ class MegapadSystem:
         self.crc = CRCDevice()
         self.ntt = NTTDevice()
         self.kem = KemDevice()
-        self.fb = FramebufferDevice()
+        # FB is now handled natively by C++ accelerator — use proxy
+        self.fb = CppFramebufferProxy(self.cores[0]._cs)
         self.rtc = RTC()
 
-        # AES, SHA3, SHA256, FieldALU, NIC, and TRNG are all handled
+        # AES, SHA3, SHA256, FieldALU, NIC, TRNG, and FB are all handled
         # natively by the C++ accelerator — no Python device instances
         # needed.  NIC MMIO (0x0400) does ~15K–35K accesses per TLS
         # handshake; keeping it in C++ is critical for HTTPS perf.
@@ -385,6 +386,8 @@ class MegapadSystem:
         # TRNG: NOT registered — C++ handles all MMIO
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
+        # FB: NOT registered — C++ handles all MMIO; proxy tick is
+        # called explicitly via bus since it's still a Device subclass.
         self.bus.register(self.fb)
         self.bus.register(self.rtc)
 
@@ -417,6 +420,7 @@ class MegapadSystem:
                 return True
             cs.nic_set_tx_callback(_tx_cb)
             cs.init_trng()
+            cs.fb_init()  # FB MMIO handled in C++ on all cores
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs
