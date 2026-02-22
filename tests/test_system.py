@@ -4433,6 +4433,39 @@ class TestKDOS(_KDOSTestBase):
         ])
         self.assertIn("action error", text)
 
+    # -- Screen hardening: checked returns (§2) --
+
+    def test_register_screen_full_returns_neg1(self):
+        """REGISTER-SCREEN returns -1 when table is full, no ABORT."""
+        # Register 7 more screens (9 already registered → 16 = MAX)
+        lines = []
+        for i in range(7):
+            lines.append(f": scr-x{i}  .\" x\" ;")
+            lines.append(f": lbl-x{i}  .\" X\" ;")
+            lines.append(f"' scr-x{i} ' lbl-x{i} 0 REGISTER-SCREEN DROP")
+        # 17th should fail gracefully
+        lines.append(": scr-over  .\" over\" ;")
+        lines.append(": lbl-over  .\" OV\" ;")
+        lines.append("' scr-over ' lbl-over 0 REGISTER-SCREEN .")
+        text = self._run_kdos(lines)
+        self.assertIn("-1 ", text)
+
+    def test_add_subscreen_full_no_abort(self):
+        """ADD-SUBSCREEN silently ignores when sub table is full."""
+        # Fill all 8 sub slots for screen 0
+        lines = []
+        for i in range(8):
+            lines.append(f": sub-r{i}  .\" s\" ;")
+            lines.append(f": sub-l{i}  .\" S\" ;")
+            lines.append(f"' sub-r{i} ' sub-l{i} 0 ADD-SUBSCREEN")
+        # 9th should silently fail (no ABORT)
+        lines.append(": sub-over  .\" over\" ;")
+        lines.append(": lbl-over  .\" OV\" ;")
+        lines.append("' sub-over ' lbl-over 0 ADD-SUBSCREEN")
+        lines.append(".\" survived\" CR")
+        text = self._run_kdos(lines)
+        self.assertIn("survived", text)
+
     # -- Utility words: +! and CMOVE --
 
     def test_plus_store(self):

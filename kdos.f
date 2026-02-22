@@ -5482,8 +5482,10 @@ VARIABLE DOC-TUT-COUNT
 VARIABLE _ASUB-P
 VARIABLE _ASUB-I
 
-: REGISTER-SCREEN  ( xt-render xt-label flags -- id )
-    NSCREENS @ DUP MAX-SCREENS >= ABORT" screen table full"
+: REGISTER-SCREEN  ( xt-render xt-label flags -- id | -1 )
+    NSCREENS @ DUP MAX-SCREENS >= IF
+        DROP 2DROP DROP -1 EXIT       \ table full → return -1
+    THEN
     >R
     R@ CELLS SCR-FLAGS + !
     R@ CELLS SCR-LBL-XT + !
@@ -5503,7 +5505,7 @@ VARIABLE _ASUB-I
 : ADD-SUBSCREEN  ( xt-render xt-label parent-id -- )
     _ASUB-P !
     _ASUB-P @ CELLS SUB-COUNTS + @ _ASUB-I !
-    _ASUB-I @ MAX-SUBS >= ABORT" sub table full"
+    _ASUB-I @ MAX-SUBS >= IF 2DROP EXIT THEN   \ sub table full → silently ignore
     _ASUB-P @ MAX-SUBS * _ASUB-I @ + CELLS SUB-LBL-XT +
     !
     _ASUB-P @ MAX-SUBS * _ASUB-I @ + CELLS SUB-XT +
