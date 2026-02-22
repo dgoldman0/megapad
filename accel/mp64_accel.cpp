@@ -2094,23 +2094,16 @@ struct RunResult {
     int stop_reason;  // 0=max_steps, 1=halt, 2=idle
 };
 
-static constexpr int GIL_YIELD_INTERVAL = 5000;
-
 static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) {
+    // GIL is released by the caller (pybind11 binding).  All Python
+    // callbacks in StepCallbacks reacquire it as needed.  This lets
+    // background threads (display, NIC RX) run freely while the CPU
+    // inner loop executes pure C++.
     RunResult result = {0, 0, 0};
 
     for (int i = 0; i < max_steps; i++) {
         if (s.halted) { result.stop_reason = 1; break; }
         if (s.idle) { result.stop_reason = 2; break; }
-
-        // Periodically yield the GIL so background threads (e.g. TAP
-        // NIC receive) can push data into Python-level queues.
-        // The usleep gives the OS scheduler time to run the waiting
-        // thread and re-acquire the GIL while we're sleeping.
-        if (i > 0 && (i % GIL_YIELD_INTERVAL) == 0) {
-            py::gil_scoped_release release;
-            usleep(50);  // 50µs — enough for thread switch
-        }
 
         try {
             int cycles = step_one(s, cb);
@@ -2517,6 +2510,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
     );
 
     // Batch run function (main acceleration entry point)
+    //
+    // The GIL is released for the entire batch so that background
+    // Python threads (display, NIC RX) can run concurrently with
+    // instruction execution.  Each Python callback reacquires the
+    // GIL only for the duration of the callback.
     m.def("run_steps", [](CPUState& s,
                            py::function mmio_read8,
                            py::function mmio_write8,
@@ -2530,22 +2528,27 @@ PYBIND11_MODULE(_mp64_accel, m) {
         cb.mmio_end = mmio_end;
         cb.has_mmio = true;
         cb.mmio_read8 = [&](uint64_t addr) -> uint8_t {
+            py::gil_scoped_acquire acq;
             return mmio_read8(addr).cast<uint8_t>();
         };
         cb.mmio_write8 = [&](uint64_t addr, uint8_t val) {
+            py::gil_scoped_acquire acq;
             mmio_write8(addr, val);
         };
         cb.on_output = [&](int port, int val) {
+            py::gil_scoped_acquire acq;
             on_output(port, val);
         };
         if (!csr_read_override.is_none()) {
             auto fn = csr_read_override.cast<py::function>();
             cb.csr_read_override = [fn](int addr) -> uint64_t {
+                py::gil_scoped_acquire acq;
                 py::object result = fn(addr);
                 if (result.is_none()) return (uint64_t)-1;
                 return result.cast<uint64_t>();
             };
         }
+        py::gil_scoped_release release;
         return run_steps(s, cb, max_steps);
     },
     py::arg("state"),
