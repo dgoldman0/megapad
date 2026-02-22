@@ -1311,9 +1311,13 @@ def main():
             try:
                 from display import FramebufferDisplay
                 def _on_display_close():
-                    """Window closed — terminate the whole process."""
+                    """Window closed — signal halt so the console loop exits cleanly.
+
+                    Setting cpu.halted lets _console_raw()'s finally block run,
+                    which restores the terminal from raw mode before we exit.
+                    """
                     print("\n[display] Window closed.")
-                    os._exit(0)
+                    sys_emu.cpu.halted = True
                 display = FramebufferDisplay(sys_emu, scale=args.scale,
                                              on_close=_on_display_close)
                 display.start()
