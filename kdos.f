@@ -2316,8 +2316,9 @@ VARIABLE AB-DESC    \ scratch: descriptor address
 : ARENA-DESTROY  ( arena -- )
     DUP A.BASE @  OVER A.SIZE @ OVER + ( arena base limit )
     (AR-UNREG-BUFS)                     ( arena )
-    DUP A.BASE @  OVER A.SOURCE @      ( arena addr source )
-    (AR-FREE-BACKING)                   ( arena )
+    DUP A.BASE @  OVER A.SIZE @  ROT DUP >R A.SOURCE @
+    (AR-FREE-BACKING)
+    R>
     0 OVER !  0 OVER 8 + !             \ zero base, size
     0 OVER 16 + !  0 SWAP 24 + ! ;     \ zero ptr, source
 

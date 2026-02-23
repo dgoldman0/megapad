@@ -7639,11 +7639,11 @@ class TestKDOSArena(_KDOSTestBase):
         """ARENA-NEW-AT in a loop does not leak dictionary space."""
         text = self._run_kdos([
             'CREATE MY-DESC 32 ALLOT',
-            'CR ." [H0=" HERE . ." ]"',
             ': LOOP-AT  10 0 DO'
             '  MY-DESC 256 A-HEAP ARENA-NEW-AT DROP'
             '  MY-DESC ARENA-DESTROY'
             ' LOOP ;',
+            'CR ." [H0=" HERE . ." ]"',
             'LOOP-AT',
             'CR ." [H1=" HERE . ." ]"',
         ])
