@@ -131,9 +131,9 @@ region is retained for reuse.
 ```forth
 ARENA-DESTROY ( arena -- )
 ```
-Free the arena's backing region (via `FREE`, `HBW-RESET`, or
-`XMEM-RESET` depending on source) and zero the descriptor.  After
-this call, the descriptor is inert (all fields zero).
+Free the arena's backing region (via `FREE` for heap, the XMEM
+free-list for XMEM, or abandonment for HBW) and zero the descriptor.
+After this call, the descriptor is inert (all fields zero).
 
 ```forth
 ARENA-FREE    ( arena -- u )
@@ -153,18 +153,18 @@ Print arena status: base, size, used, free, source name.
 ### 4.2 Convenience constants
 
 ```forth
-0 CONSTANT HEAP   \ source = Bank 0 heap
-1 CONSTANT XMEM   \ source = external RAM (already used, but overloaded here)
-2 CONSTANT HBW    \ source = HBW math RAM
+0 CONSTANT A-HEAP    \ source = Bank 0 heap
+1 CONSTANT A-XMEM    \ source = external RAM
+2 CONSTANT A-HBW     \ source = HBW math RAM
 ```
 
-These already exist implicitly; the constants make `ARENA-NEW` calls
-self-documenting:
+The `A-` prefix avoids collision with `XMEM-ALLOT`, `HBW-ALLOT`, etc.
+The constants make `ARENA-NEW` calls self-documenting:
 
 ```forth
-4096 HEAP ARENA-NEW CONSTANT my-scratch
-65536 XMEM ARENA-NEW CONSTANT file-arena
-1024 HBW ARENA-NEW CONSTANT tile-scratch
+4096 A-HEAP ARENA-NEW CONSTANT my-scratch
+65536 A-XMEM ARENA-NEW CONSTANT file-arena
+1024 A-HBW ARENA-NEW CONSTANT tile-scratch
 ```
 
 ### 4.3 Snapshots (Phase 2)
@@ -260,7 +260,7 @@ them.
 
 ```forth
 \ Create a tile buffer in XMEM scratch
-65536 XMEM ARENA-NEW CONSTANT map-arena
+65536 A-XMEM ARENA-NEW CONSTANT map-arena
 2 8 4096 map-arena ARENA-BUFFER tile-data
 
 \ Use tile-data normally — B.SUM, B.FILL, tile ops all work
@@ -283,9 +283,9 @@ three behind a single API:
 
 | Source | Backing | Best for | Perf |
 |--------|---------|----------|------|
-| `HEAP` (0) | `ALLOCATE` / `FREE` | General scratch, parse trees | CPU-fast |
-| `XMEM` (1) | `XMEM-ALLOT` region | Large files, datasets, maps | Large, moderate latency |
-| `HBW` (2) | `HBW-ALLOT` region | Tile engine buffers, SIMD ops | Tile-width bandwidth |
+| `A-HEAP` (0) | `ALLOCATE` / `FREE` | General scratch, parse trees | CPU-fast |
+| `A-XMEM` (1) | `XMEM-ALLOT` region | Large files, datasets, maps | Large, moderate latency |
+| `A-HBW` (2) | `HBW-ALLOT` region | Tile engine buffers, SIMD ops | Tile-width bandwidth |
 
 `ARENA-NEW` dispatches to the appropriate allocator based on `source`.
 `ARENA-DESTROY` dispatches to the appropriate deallocator.  User code
@@ -321,7 +321,7 @@ eliminates heap contention in multi-core workloads:
 
 ```forth
 \ In task setup (runs on assigned core):
-4096 HEAP ARENA-NEW CONSTANT my-arena
+4096 A-HEAP ARENA-NEW CONSTANT my-arena
 
 \ In task body:
 my-arena 256 ARENA-ALLOT   ( scratch-addr )
@@ -395,7 +395,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 ```forth
 \ Read a config file into scratch, parse it, discard
 : LOAD-CONFIG  ( -- )
-    8192 HEAP ARENA-NEW ABORT" arena fail"
+    8192 A-HEAP ARENA-NEW ABORT" arena fail"
     DUP                              ( arena arena )
     DUP 4096 ARENA-ALLOT             ( arena arena buf )
     S" config.f" READ-FILE           ( arena arena )
@@ -406,7 +406,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 ### Tile map undo
 
 ```forth
-65536 XMEM ARENA-NEW CONSTANT undo-arena
+65536 A-XMEM ARENA-NEW CONSTANT undo-arena
 
 : TRY-BRUSH  ( x y tile -- )
     undo-arena ARENA-SNAP            ( x y tile snap )
@@ -422,7 +422,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 
 ```forth
 : MY-TASK  ( -- )
-    2048 HEAP ARENA-NEW DROP         ( arena )
+    2048 A-HEAP ARENA-NEW DROP         ( arena )
     DUP ARENA-PUSH
     ( ... use AALLOT freely — all scratch is arena-local ... )
     ARENA-POP
