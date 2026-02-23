@@ -444,6 +444,18 @@ def {_attr}(self, v):
         fb.mem_write64 = self.mem_write64
         fb.on_output = self.on_output
 
+        # Forward extended memory regions so _read_tile/_write_tile resolve
+        # VRAM/HBW/ext_mem addresses instead of falling through to Bank 0.
+        hbw = getattr(self, '_hbw_buf', None)
+        if hbw is not None:
+            fb.attach_hbw(hbw, self._cs.hbw_base, self._cs.hbw_size)
+        ext = getattr(self, '_ext_mem_buf', None)
+        if ext is not None:
+            fb.attach_ext_mem(ext, self._cs.ext_mem_base, self._cs.ext_mem_size)
+        vram = getattr(self, '_vram_buf', None)
+        if vram is not None:
+            fb.attach_vram(vram, self._cs.vram_base, self._cs.vram_size)
+
         cycles = fb.step()
 
         # Sync back Python → C++
