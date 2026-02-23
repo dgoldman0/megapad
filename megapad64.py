@@ -441,9 +441,87 @@ class Megapad64:
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
 
+        # Extended memory regions (attached by system.py)
+        self._vram_mem: Optional[bytearray] = None
+        self._vram_base: int = 0
+        self._vram_size: int = 0
+        self._hbw_mem: Optional[bytearray] = None
+        self._hbw_base: int = 0
+        self._hbw_size: int = 0
+        self._ext_mem: Optional[bytearray] = None
+        self._ext_mem_base: int = 0
+        self._ext_mem_size: int = 0
+
         # Callbacks
         self.on_output: Optional[callable] = None  # called with (port, value)
         self.on_halt: Optional[callable] = None
+
+    # -- Extended memory attach (called by system.py) --
+
+    def attach_hbw(self, buf: bytearray, base: int, size: int):
+        """Attach HBW math RAM buffer."""
+        self._hbw_mem = buf
+        self._hbw_base = base
+        self._hbw_size = size
+
+    def attach_ext_mem(self, buf: bytearray, base: int, size: int):
+        """Attach external memory (HyperRAM/SDRAM) buffer."""
+        self._ext_mem = buf
+        self._ext_mem_base = base
+        self._ext_mem_size = size
+
+    def attach_vram(self, buf: bytearray, base: int, size: int):
+        """Attach dedicated VRAM buffer."""
+        self._vram_mem = buf
+        self._vram_base = base
+        self._vram_size = size
+
+    # -- Tile memory helpers (unified address resolution) --
+
+    def _read_tile(self, addr: int) -> bytearray:
+        """Read a 64-byte tile from unified address space."""
+        a = u64(addr)
+        if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
+            off = a - self._vram_base
+            if off + 64 <= self._vram_size:
+                return bytearray(self._vram_mem[off:off+64])
+            return bytearray(64)
+        if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
+            off = a - self._ext_mem_base
+            if off + 64 <= self._ext_mem_size:
+                return bytearray(self._ext_mem[off:off+64])
+            return bytearray(64)
+        if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
+            off = a - self._hbw_base
+            if off + 64 <= self._hbw_size:
+                return bytearray(self._hbw_mem[off:off+64])
+            return bytearray(64)
+        a = a % self.mem_size
+        if a + 64 <= self.mem_size:
+            return bytearray(self.mem[a:a+64])
+        return bytearray(64)
+
+    def _write_tile(self, addr: int, data: bytearray):
+        """Write a 64-byte tile to unified address space."""
+        a = u64(addr)
+        if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
+            off = a - self._vram_base
+            if off + 64 <= self._vram_size:
+                self._vram_mem[off:off+64] = data[:64]
+            return
+        if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
+            off = a - self._ext_mem_base
+            if off + 64 <= self._ext_mem_size:
+                self._ext_mem[off:off+64] = data[:64]
+            return
+        if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
+            off = a - self._hbw_base
+            if off + 64 <= self._hbw_size:
+                self._hbw_mem[off:off+64] = data[:64]
+            return
+        a = a % self.mem_size
+        if a + 64 <= self.mem_size:
+            self.mem[a:a+64] = data[:64]
 
     # -- Property shortcuts --
 
@@ -988,13 +1066,8 @@ class Megapad64:
         num_lanes = 64 // elem_bytes
         signed = (self.tmode >> 4) & 1
 
-        def read_tile(addr):
-            a = u64(addr) % self.mem_size
-            return bytearray(self.mem[a:a+64]) if a+64 <= self.mem_size else bytearray(64)
-        def write_tile(addr, data):
-            a = u64(addr) % self.mem_size
-            if a + 64 <= self.mem_size:
-                self.mem[a:a+64] = data[:64]
+        read_tile = self._read_tile
+        write_tile = self._write_tile
         def tile_get_elem(tile, lane, eb):
             off = lane * eb
             v = 0
@@ -1741,14 +1814,8 @@ class Megapad64:
         signed = (self.tmode >> 4) & 1
 
         # Load source tiles as byte arrays
-        def read_tile(addr):
-            a = u64(addr) % self.mem_size
-            return bytearray(self.mem[a:a+64]) if a+64 <= self.mem_size else bytearray(64)
-
-        def write_tile(addr, data):
-            a = u64(addr) % self.mem_size
-            if a + 64 <= self.mem_size:
-                self.mem[a:a+64] = data[:64]
+        read_tile = self._read_tile
+        write_tile = self._write_tile
 
         def tile_get_elem(tile, lane, eb):
             off = lane * eb

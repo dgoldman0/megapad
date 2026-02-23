@@ -593,6 +593,59 @@ static inline int64_t to_signed_eb(uint64_t v, int eb) {
 }
 
 // ---------------------------------------------------------------------------
+//  Unified tile memory access (64-byte reads/writes with address decoding)
+// ---------------------------------------------------------------------------
+
+static inline void tile_read_64bytes(CPUState& s, uint64_t addr, uint8_t* out) {
+    if (s.vram_mem && addr >= s.vram_base && addr + 64 <= s.vram_base + s.vram_size) {
+        std::memcpy(out, s.vram_mem + (addr - s.vram_base), 64);
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 64 <= s.ext_mem_base + s.ext_mem_size) {
+        std::memcpy(out, s.ext_mem + (addr - s.ext_mem_base), 64);
+        return;
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 64 <= s.hbw_base + s.hbw_size) {
+        std::memcpy(out, s.hbw_mem + (addr - s.hbw_base), 64);
+        return;
+    }
+    uint64_t a = addr % s.mem_size;
+    if (a + 64 <= s.mem_size)
+        std::memcpy(out, s.mem + a, 64);
+    else
+        std::memset(out, 0, 64);
+}
+
+static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const uint8_t* data) {
+    if (s.vram_mem && addr >= s.vram_base && addr + 64 <= s.vram_base + s.vram_size) {
+        std::memcpy(s.vram_mem + (addr - s.vram_base), data, 64);
+        return;
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr + 64 <= s.ext_mem_base + s.ext_mem_size) {
+        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), data, 64);
+        return;
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr + 64 <= s.hbw_base + s.hbw_size) {
+        std::memcpy(s.hbw_mem + (addr - s.hbw_base), data, 64);
+        return;
+    }
+    uint64_t a = addr % s.mem_size;
+    if (a + 64 <= s.mem_size)
+        std::memcpy(s.mem + a, data, 64);
+}
+
+static inline void tile_zero_64bytes(CPUState& s, uint64_t addr) {
+    static const uint8_t zeros[64] = {0};
+    tile_write_64bytes(s, addr, zeros);
+}
+
+static inline void tile_fill_64bytes(CPUState& s, uint64_t addr, uint8_t fill) {
+    uint8_t buf[64];
+    std::memset(buf, fill, 64);
+    tile_write_64bytes(s, addr, buf);
+}
+
+// ---------------------------------------------------------------------------
 //  Integer MEX core — handles TALU, TMUL, TRED, TSYS for integer types
 //  Returns -1 if we need Python fallback (FP types, LOAD2D/STORE2D, etc.)
 // ---------------------------------------------------------------------------
@@ -618,18 +671,10 @@ static int exec_mex_integer(CPUState& s, int n) {
 
     // Read source tiles
     uint8_t src_a[64], src_b[64], dst[64];
-    uint64_t a_addr = s.tsrc0 % s.mem_size;
-    if (a_addr + 64 <= s.mem_size)
-        std::memcpy(src_a, s.mem + a_addr, 64);
-    else
-        std::memset(src_a, 0, 64);
+    tile_read_64bytes(s, s.tsrc0, src_a);
 
     if (ss == 0x0) {  // tile-tile
-        uint64_t b_addr = s.tsrc1 % s.mem_size;
-        if (b_addr + 64 <= s.mem_size)
-            std::memcpy(src_b, s.mem + b_addr, 64);
-        else
-            std::memset(src_b, 0, 64);
+        tile_read_64bytes(s, s.tsrc1, src_b);
     } else if (ss == 0x1) {  // broadcast
         uint64_t bval = (broadcast_reg >= 0) ? s.regs[broadcast_reg] : 0;
         uint64_t mask = (elem_bytes < 8) ? ((1ULL << (elem_bytes*8)) - 1) : MASK64;
@@ -641,16 +686,8 @@ static int exec_mex_integer(CPUState& s, int n) {
         std::memset(src_a, funct_byte, 64);
         funct = 0;
     } else {  // ss == 3, in-place
-        uint64_t d_addr = s.tdst % s.mem_size;
-        if (d_addr + 64 <= s.mem_size)
-            std::memcpy(src_a, s.mem + d_addr, 64);
-        else
-            std::memset(src_a, 0, 64);
-        uint64_t b_addr = s.tsrc0 % s.mem_size;
-        if (b_addr + 64 <= s.mem_size)
-            std::memcpy(src_b, s.mem + b_addr, 64);
-        else
-            std::memset(src_b, 0, 64);
+        tile_read_64bytes(s, s.tdst, src_a);
+        tile_read_64bytes(s, s.tsrc0, src_b);
     }
 
     std::memset(dst, 0, 64);
@@ -689,9 +726,7 @@ static int exec_mex_integer(CPUState& s, int n) {
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        uint64_t d_addr = s.tdst % s.mem_size;
-        if (d_addr + 64 <= s.mem_size)
-            std::memcpy(s.mem + d_addr, dst, 64);
+        tile_write_64bytes(s, s.tdst, dst);
         return 1;
     }
 
@@ -774,9 +809,7 @@ static int exec_mex_integer(CPUState& s, int n) {
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }
-        uint64_t d_addr = s.tdst % s.mem_size;
-        if (d_addr + 64 <= s.mem_size)
-            std::memcpy(s.mem + d_addr, dst, 64);
+        tile_write_64bytes(s, s.tdst, dst);
         return 0;
     }
 
@@ -793,9 +826,7 @@ static int exec_mex_integer(CPUState& s, int n) {
                     r = (ea * eb_val) & mask;
                 tile_set_elem(dst, lane, elem_bytes, r);
             }
-            uint64_t d_addr = s.tdst % s.mem_size;
-            if (d_addr + 64 <= s.mem_size)
-                std::memcpy(s.mem + d_addr, dst, 64);
+            tile_write_64bytes(s, s.tdst, dst);
             return 0;
         }
         if (funct == 1 || funct == 4) {  // DOT, DOTACC
@@ -944,39 +975,29 @@ static int exec_mex_integer(CPUState& s, int n) {
                 for (int r = 0; r < 8; r++)
                     for (int c = 0; c < 8; c++)
                         dst[c * 8 + r] = src_a[r * 8 + c];
-                uint64_t d_addr = s.tdst % s.mem_size;
-                if (d_addr + 64 <= s.mem_size)
-                    std::memcpy(s.mem + d_addr, dst, 64);
+                tile_write_64bytes(s, s.tdst, dst);
                 return 1;
             }
             case 1: {  // ZERO
-                uint64_t d_addr = s.tdst % s.mem_size;
-                if (d_addr + 64 <= s.mem_size)
-                    std::memset(s.mem + d_addr, 0, 64);
+                tile_zero_64bytes(s, s.tdst);
                 return 0;
             }
             case 2: {  // LOADC (cursor load from SB+SR*SW+SC)
                 uint64_t base = s.sb + s.sr * s.sw + s.sc;
-                base %= s.mem_size;
-                if (base + 64 <= s.mem_size) {
-                    uint64_t d_addr = s.tdst % s.mem_size;
-                    if (d_addr + 64 <= s.mem_size)
-                        std::memcpy(s.mem + d_addr, s.mem + base, 64);
-                }
+                uint8_t tmp[64];
+                tile_read_64bytes(s, base, tmp);
+                tile_write_64bytes(s, s.tdst, tmp);
                 return 0;
             }
             case 3: {  // MOVBANK (move tile from dst to src0)
-                uint64_t s_addr = s.tsrc0 % s.mem_size;
-                uint64_t d_addr = s.tdst % s.mem_size;
-                if (s_addr + 64 <= s.mem_size && d_addr + 64 <= s.mem_size)
-                    std::memcpy(s.mem + s_addr, s.mem + d_addr, 64);
+                uint8_t tmp[64];
+                tile_read_64bytes(s, s.tdst, tmp);
+                tile_write_64bytes(s, s.tsrc0, tmp);
                 return 0;
             }
             case 4: {  // FILL  (fill dst tile with byte from src_b lane 0)
                 uint8_t fill_byte = src_b[0];
-                uint64_t d_addr = s.tdst % s.mem_size;
-                if (d_addr + 64 <= s.mem_size)
-                    std::memset(s.mem + d_addr, fill_byte, 64);
+                tile_fill_64bytes(s, s.tdst, fill_byte);
                 return 0;
             }
             default:
