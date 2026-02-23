@@ -57,7 +57,7 @@ fragmentation within the arena.
 
 ## 3. Data Structure
 
-Arena descriptor: 4 cells (32 bytes), allocated in the dictionary.
+Arena descriptor: 4 cells (32 bytes).
 
 ```
 +0   base     Start of the arena's data region
@@ -66,9 +66,17 @@ Arena descriptor: 4 cells (32 bytes), allocated in the dictionary.
 +24  source   Backing store: 0 = Bank 0 heap, 1 = XMEM, 2 = HBW
 ```
 
-The descriptor itself lives in the dictionary (via `HERE`/`,`), so it
-persists until `MARKER`/`FORGET` reclaims it.  The backing data region
-lives in the selected memory store.
+The descriptor can live in one of two places:
+
+- **Dictionary** (`ARENA-NEW`): the descriptor is compiled at `HERE`
+  via `,`.  It persists until `MARKER`/`FORGET` reclaims it.  Simple
+  and appropriate for long-lived arenas.
+
+- **User-provided address** (`ARENA-NEW-AT`): the caller supplies a
+  32-byte buffer (e.g. `CREATE … 32 ALLOT`, a `VARIABLE` cluster, or
+  a region in another arena).  No dictionary space is consumed.  Use
+  this for temporary arenas created/destroyed in a loop to avoid a
+  slow dictionary leak.
 
 ---
 
@@ -82,6 +90,24 @@ ARENA-NEW     ( size source -- arena ior )
 Allocate a backing region of `size` bytes from the specified memory
 source (0=heap, 1=XMEM, 2=HBW).  Build a descriptor in the dictionary.
 Returns descriptor address and 0 on success, or 0 and -1 on failure.
+
+**Note:** the 32-byte descriptor is permanently committed to the
+dictionary.  For temporary arenas created/destroyed in a loop, use
+`ARENA-NEW-AT` instead.
+
+```forth
+ARENA-NEW-AT  ( desc size source -- ior )
+```
+Like `ARENA-NEW` but writes the descriptor at `desc` (a user-provided
+32-byte aligned buffer) instead of consuming dictionary space.  Returns
+0 on success, -1 on failure.  Example:
+
+```forth
+CREATE MY-DESC 32 ALLOT
+MY-DESC 4096 A-HEAP ARENA-NEW-AT ABORT" arena fail"
+\ ... use MY-DESC as the arena (ARENA-ALLOT, ARENA-RESET, etc.) ...
+MY-DESC ARENA-DESTROY
+```
 
 ```forth
 ARENA-ALLOT   ( arena u -- addr )
@@ -268,25 +294,23 @@ above the arena is region-agnostic.
 ### XMEM and HBW backing: implementation note
 
 The heap (`ALLOCATE`/`FREE`) supports individual block freeing.
-HBW and XMEM are bump allocators with only bulk-reset semantics
-(`HBW-RESET`, `XMEM-RESET`).  This creates a subtlety:
+HBW is a bump allocator with only bulk-reset semantics (`HBW-RESET`).
+XMEM now supports individual block reclaim via a free-list.
 
 - **HEAP-backed arenas:** `ARENA-DESTROY` calls `FREE` on the backing
   block.  Works perfectly — the heap reclaims exactly that region.
 
-- **XMEM-backed arenas:** `ARENA-DESTROY` cannot free just the arena's
-  region because `XMEM-ALLOT` is a bump allocator.  However, arenas
-  are typically the *only* dynamic XMEM consumers (kernel modules use
-  `XMEM-FLOOR` to protect their allocations).  Strategy: track active
-  XMEM arena count; when the last one is destroyed, call `XMEM-RESET`.
-  Otherwise, the backing memory is abandoned until bulk reset.
+- **XMEM-backed arenas:** `ARENA-DESTROY` returns the backing block
+  to the XMEM free-list via `XMEM-FREE-BLOCK`.  Subsequent
+  `XMEM-ALLOT` calls check the free-list (first-fit) before falling
+  back to bump allocation.  This means XMEM-backed arenas can be
+  repeatedly created and destroyed without leaking memory.
+  `XMEM-RESET` clears the free-list along with the bump pointer.
 
-- **HBW-backed arenas:** Same situation as XMEM.  In practice, HBW
-  arenas are short-lived (tile operation scratch) and HBW is large
-  (3 MiB), so abandoned slivers are tolerable.
-
-**Phase 1 implementation:** heap-backed only.  XMEM/HBW variants in
-Phase 2, with explicit documentation of the reclaim limitations.
+- **HBW-backed arenas:** HBW remains a pure bump allocator.  In
+  practice, HBW arenas are short-lived (tile operation scratch) and
+  HBW is large (3 MiB), so abandoned slivers are tolerable.  A
+  free-list could be added later if needed.
 
 ---
 

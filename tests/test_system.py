@@ -7503,8 +7503,157 @@ class TestKDOSArena(_KDOSTestBase):
             'CR ." [V=" xbuf B.DATA @ . ." ]"',
             'MY-AR @ ARENA-DESTROY',
         ])
-        self.assertIn('[L=64', text, f"Length wrong: {text}")
         self.assertIn('[V=12345', text, f"Read-back wrong: {text}")
+        self.assertIn('[L=64', text, f"Length wrong: {text}")
+
+    # -- Fix: XMEM free-list reclaim --
+
+    def test_xmem_arena_reclaim(self):
+        """ARENA-DESTROY returns XMEM backing to the free-list for reuse."""
+        text = self._run_kdos([
+            # Record XMEM free before
+            'CR ." [F1=" XMEM-FREE . ." ]"',
+            # Create and destroy an XMEM arena
+            '4096 A-XMEM ARENA-NEW DROP',
+            'ARENA-DESTROY',
+            # XMEM free should be restored (block on free-list)
+            'CR ." [F2=" XMEM-FREE . ." ]"',
+            # Allocate again — should reuse the freed block
+            '4096 A-XMEM ARENA-NEW DROP',
+            'CR ." [F3=" XMEM-FREE . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        import re
+        f1 = re.search(r'\[F1=(\d+)', text)
+        f2 = re.search(r'\[F2=(\d+)', text)
+        f3 = re.search(r'\[F3=(\d+)', text)
+        self.assertTrue(f1 and f2 and f3,
+                        f"Could not parse XMEM-FREE from: {text}")
+        # After destroy, XMEM-FREE should stay the same as before
+        # (bump pointer unchanged, but the block is on the free-list).
+        # The second ARENA-NEW should find it on the free-list, so
+        # XMEM-FREE (bump-based) should equal F2.
+        self.assertEqual(int(f2.group(1)), int(f3.group(1)),
+                         f"Free-list block not reused: F2={f2.group(1)} F3={f3.group(1)}")
+
+    def test_xmem_arena_reclaim_loop(self):
+        """Repeatedly creating/destroying XMEM arenas doesn't leak."""
+        text = self._run_kdos([
+            'CR ." [F0=" XMEM-FREE . ." ]"',
+            # Create and destroy 10 times in a loop
+            ': LOOP-TEST  10 0 DO'
+            '  512 A-XMEM ARENA-NEW DROP ARENA-DESTROY'
+            ' LOOP ;',
+            'LOOP-TEST',
+            'CR ." [F1=" XMEM-FREE . ." ]"',
+        ])
+        import re
+        f0 = re.search(r'\[F0=(\d+)', text)
+        f1 = re.search(r'\[F1=(\d+)', text)
+        self.assertTrue(f0 and f1,
+                        f"Could not parse XMEM-FREE from: {text}")
+        # After 10 create/destroy cycles the bump pointer may have
+        # advanced by one block (512 bytes) because the first allot
+        # bumps and all subsequent ones reuse the free-list entry.
+        # The key invariant: NOT 10*512 = 5120 bytes lost.
+        leak = int(f0.group(1)) - int(f1.group(1))
+        self.assertLessEqual(leak, 512,
+                             f"XMEM leak across 10 cycles: {leak} bytes")
+
+    # -- Fix: ARENA-NEW-AT (user-placed descriptors) --
+
+    def test_arena_new_at_basic(self):
+        """ARENA-NEW-AT writes descriptor at user-provided address."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',         # 32 bytes for descriptor
+            'MY-DESC 1024 A-HEAP ARENA-NEW-AT',
+            'CR ." [IOR=" . ." ]"',
+            'CR ." [BASE=" MY-DESC @ . ." ]"',
+            'CR ." [SIZE=" MY-DESC 8 + @ . ." ]"',
+            'CR ." [SRC=" MY-DESC 24 + @ . ." ]"',
+            'MY-DESC ARENA-DESTROY',
+        ])
+        self.assertIn('[IOR=0', text, f"ARENA-NEW-AT failed: {text}")
+        import re
+        base = re.search(r'\[BASE=(\d+)', text)
+        self.assertTrue(base and int(base.group(1)) > 0,
+                        f"Base should be >0: {text}")
+        self.assertIn('[SIZE=1024', text, f"Size wrong: {text}")
+        self.assertIn('[SRC=0', text, f"Source wrong: {text}")
+
+    def test_arena_new_at_no_dictionary_leak(self):
+        """ARENA-NEW-AT does not advance HERE."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',
+            'CR ." [H1=" HERE . ." ]"',
+            'MY-DESC 2048 A-HEAP ARENA-NEW-AT DROP',
+            'CR ." [H2=" HERE . ." ]"',
+            'MY-DESC ARENA-DESTROY',
+        ])
+        import re
+        h1 = re.search(r'\[H1=(\d+)', text)
+        h2 = re.search(r'\[H2=(\d+)', text)
+        self.assertTrue(h1 and h2,
+                        f"Could not parse HERE from: {text}")
+        self.assertEqual(int(h1.group(1)), int(h2.group(1)),
+                         f"HERE advanced — dictionary leak: {h1.group(1)} → {h2.group(1)}")
+
+    def test_arena_new_at_allot_and_use(self):
+        """Arena created via ARENA-NEW-AT is fully functional."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',
+            'MY-DESC 1024 A-HEAP ARENA-NEW-AT DROP',
+            'MY-DESC 64 ARENA-ALLOT 42 SWAP !',
+            'CR ." [USED=" MY-DESC ARENA-USED . ." ]"',
+            'MY-DESC ARENA-RESET',
+            'CR ." [AFTER=" MY-DESC ARENA-USED . ." ]"',
+            'MY-DESC ARENA-DESTROY',
+        ])
+        self.assertIn('[USED=64', text, f"Used wrong: {text}")
+        self.assertIn('[AFTER=0', text, f"Reset failed: {text}")
+
+    def test_arena_new_at_xmem(self):
+        """ARENA-NEW-AT works with XMEM source."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',
+            'MY-DESC 4096 A-XMEM ARENA-NEW-AT',
+            'CR ." [IOR=" . ." ]"',
+            'CR ." [SRC=" MY-DESC 24 + @ . ." ]"',
+            'MY-DESC 128 ARENA-ALLOT 12345 SWAP !',
+            'MY-DESC ARENA-RESET',
+            'MY-DESC ARENA-DESTROY',
+        ])
+        self.assertIn('[IOR=0', text, f"ARENA-NEW-AT XMEM failed: {text}")
+        self.assertIn('[SRC=1', text, f"Source wrong: {text}")
+
+    def test_arena_new_at_zero_size_fails(self):
+        """ARENA-NEW-AT with size 0 fails."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',
+            'MY-DESC 0 A-HEAP ARENA-NEW-AT',
+            'CR ." [IOR=" . ." ]"',
+        ])
+        self.assertIn('[IOR=-1', text, f"Should fail: {text}")
+
+    def test_arena_new_at_loop(self):
+        """ARENA-NEW-AT in a loop does not leak dictionary space."""
+        text = self._run_kdos([
+            'CREATE MY-DESC 32 ALLOT',
+            'CR ." [H0=" HERE . ." ]"',
+            ': LOOP-AT  10 0 DO'
+            '  MY-DESC 256 A-HEAP ARENA-NEW-AT DROP'
+            '  MY-DESC ARENA-DESTROY'
+            ' LOOP ;',
+            'LOOP-AT',
+            'CR ." [H1=" HERE . ." ]"',
+        ])
+        import re
+        h0 = re.search(r'\[H0=(\d+)', text)
+        h1 = re.search(r'\[H1=(\d+)', text)
+        self.assertTrue(h0 and h1,
+                        f"Could not parse HERE from: {text}")
+        self.assertEqual(int(h0.group(1)), int(h1.group(1)),
+                         f"Dictionary leaked: {h0.group(1)} → {h1.group(1)}")
 
 
 # ---------------------------------------------------------------------------

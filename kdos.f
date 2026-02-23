@@ -1748,6 +1748,42 @@ HBW-INIT      \ initialise at load time
 VARIABLE XMEM-HERE   0 XMEM-HERE !
 VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
 
+\ -- XMEM free-list for individual block reclaim --
+\   Each freed block stores at its address:
+\     +0  size   (bytes)
+\     +8  next   (ptr to next free block, or 0)
+\   Minimum recyclable block: 16 bytes (2 cells).
+VARIABLE XMEM-FL     0 XMEM-FL !    \ free-list head (0 = empty)
+VARIABLE FL-PREV                     \ search scratch
+VARIABLE FL-CURR                     \ search scratch
+
+\ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
+: XMEM-FREE-BLOCK  ( addr size -- )
+    OVER !                            \ addr+0 = size
+    XMEM-FL @ OVER 8 + !             \ addr+8 = old head
+    XMEM-FL ! ;                       \ head = addr
+
+\ (XMEM-FL-FIND) ( u -- addr true | false )
+\   First-fit search of the XMEM free-list.
+\   On success, unlinks the block and returns its address.
+: (XMEM-FL-FIND)  ( u -- addr true | false )
+    0 FL-PREV !   XMEM-FL @ FL-CURR !
+    BEGIN FL-CURR @ WHILE
+        FL-CURR @ @  OVER >= IF           \ curr.size >= u ?
+            \ unlink: prev.next = curr.next
+            FL-CURR @ 8 + @               ( u next )
+            FL-PREV @ 0= IF
+                XMEM-FL !                  ( u ; head = next )
+            ELSE
+                FL-PREV @ 8 + !            ( u ; prev.next = next )
+            THEN
+            DROP FL-CURR @ TRUE EXIT
+        THEN
+        FL-CURR @ FL-PREV !
+        FL-CURR @ 8 + @ FL-CURR !
+    REPEAT
+    DROP FALSE ;
+
 \ XMEM? ( -- flag )  true if external memory hardware reports non-zero size
 : XMEM?  ( -- flag )
     EXT-MEM-SIZE 0> ;
@@ -1761,9 +1797,13 @@ VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
         0 XMEM-HERE !  0 XMEM-LIMIT !
     THEN ;
 
-\ XMEM-ALLOT ( u -- addr )  bump-allocate u bytes from ext mem
+\ XMEM-ALLOT ( u -- addr )  allocate u bytes from ext mem
+\   Tries the free-list first (first-fit), then falls back to bump.
 : XMEM-ALLOT  ( u -- addr )
     XMEM? 0= ABORT" No external memory"
+    DUP (XMEM-FL-FIND) IF              \ found a recycled block
+        NIP EXIT
+    THEN
     XMEM-HERE @ SWAP
     OVER + DUP XMEM-LIMIT @ > ABORT" Ext mem overflow"
     XMEM-HERE ! ;
@@ -1776,9 +1816,11 @@ VARIABLE XMEM-FLOOR  0 XMEM-FLOOR !
 
 \ XMEM-RESET ( -- )  reclaim all external memory (bulk free)
 \   Respects XMEM-FLOOR — will not reset below the userland zone.
+\   Also clears the free-list (all blocks return to the bump region).
 : XMEM-RESET  ( -- )
     XMEM? IF
         XMEM-FLOOR @ ?DUP IF XMEM-HERE ! ELSE EXT-MEM-BASE XMEM-HERE ! THEN
+        0 XMEM-FL !
     THEN ;
 
 \ XMEM-FREE ( -- u )  bytes remaining in ext mem
@@ -1950,15 +1992,21 @@ VARIABLE AR-BLK    \ backing block address
     THEN
     DROP 0 -1 ;    \ unknown source
 
-\ (AR-FREE-BACKING) ( addr source -- )
+\ (AR-FREE-BACKING) ( addr size source -- )
 \   Free the backing block.  Heap blocks are individually freed;
-\   XMEM/HBW are bump allocators — memory is abandoned until bulk reset.
-: (AR-FREE-BACKING)  ( addr source -- )
-    0 = IF FREE ELSE DROP THEN ;
+\   XMEM blocks are returned to the XMEM free-list for reuse.
+\   HBW blocks are still abandoned until HBW-RESET.
+: (AR-FREE-BACKING)  ( addr size source -- )
+    DUP 0 = IF  DROP DROP FREE EXIT  THEN
+    1 = IF  XMEM-FREE-BLOCK EXIT  THEN
+    2DROP ;    \ HBW — abandoned (short-lived, 3 MiB region)
 
 \ ARENA-NEW ( size source -- arena ior )
 \   Allocate a backing region, build descriptor in dictionary.
 \   Sources: 0=A-HEAP, 1=A-XMEM, 2=A-HBW.
+\   NOTE: the 32-byte descriptor is permanently committed to the
+\   dictionary.  For temporary arenas created/destroyed in a loop,
+\   use ARENA-NEW-AT with a pre-allocated descriptor address.
 : ARENA-NEW  ( size source -- arena ior )
     OVER 0= IF  2DROP 0 -1 EXIT  THEN      \ zero size → fail
     AR-SRC !  AR-SZ !
@@ -1972,6 +2020,26 @@ VARIABLE AR-BLK    \ backing block address
     AR-BLK @ ,                               \ +16 ptr = base (empty)
     AR-SRC @ ,                               \ +24 source
     0 ;                                      ( arena 0 )
+
+\ ARENA-NEW-AT ( desc size source -- ior )
+\   Like ARENA-NEW but writes the 32-byte descriptor at a user-provided
+\   address instead of consuming dictionary space.  Useful for temporary
+\   arenas created/destroyed in a loop — avoids the slow dictionary leak.
+\   'desc' must point to >= 32 bytes of writable, cell-aligned storage
+\   (e.g. a CREATE/ALLOT block, a VARIABLE cluster, or an arena-allotted
+\   region in another arena).
+: ARENA-NEW-AT  ( desc size source -- ior )
+    OVER 0= IF  DROP 2DROP -1 EXIT  THEN     \ zero size → fail
+    AR-SRC !  AR-SZ !                         ( desc )
+    AR-SZ @ AR-SRC @ (AR-ALLOC-BACKING) IF   ( desc 0 )
+        2DROP -1 EXIT                         \ alloc failed
+    THEN
+    AR-BLK !                                  ( desc )
+    AR-BLK @ OVER !                           \ +0  base
+    AR-SZ @  OVER 8 + !                       \ +8  size
+    AR-BLK @ OVER 16 + !                      \ +16 ptr = base
+    AR-SRC @ SWAP 24 + !                      \ +24 source
+    0 ;                                       ( 0 )
 
 \ ARENA-USED ( arena -- u )  bytes consumed
 : ARENA-USED  ( arena -- u )
@@ -2008,11 +2076,14 @@ VARIABLE AR-BLK    \ backing block address
     DUP A.BASE @  SWAP A.PTR ! ;
 
 \ ARENA-DESTROY ( arena -- )
-\   Free the backing region (heap only) and zero the descriptor.
-\   XMEM/HBW backing is abandoned until bulk reset.
+\   Free the backing region and zero the descriptor.
+\   Heap blocks are individually freed via FREE.
+\   XMEM blocks are returned to the XMEM free-list for reuse.
+\   HBW blocks are abandoned until HBW-RESET.
 : ARENA-DESTROY  ( arena -- )
-    DUP A.BASE @  OVER A.SOURCE @            ( arena addr source )
+    DUP A.BASE @  OVER A.SIZE @  ROT DUP >R A.SOURCE @
     (AR-FREE-BACKING)
+    R>
     0 OVER !  0 OVER 8 + !                   \ zero base, size
     0 OVER 16 + !  0 SWAP 24 + ! ;           \ zero ptr, source
 
