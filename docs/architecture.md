@@ -85,7 +85,7 @@ MMIO devices live at the top of the address space.
 | *(varies)* | Free space between HERE and SP |
 | ← SP | Data stack grows downward from top of Bank 0 |
 | `RAM_SIZE` | Top of Bank 0 (default 0x0010_0000 = 1 MiB) |
-| `0x0010_0000`+ | **External Memory** — up to 16 MiB (userland dictionary + XMEM allocator) |
+| `0x0010_0000`+ | **External Memory** — up to ~4 GiB (userland dictionary + XMEM allocator; emulator default 16 MiB via `--extmem`) |
 | `0xFF00_0000`–`0xFF3F_FFFF` | **VRAM** — 4 MiB dedicated framebuffer (double-buffered 1280×720 RGBA) |
 | `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 

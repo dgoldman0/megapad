@@ -26,10 +26,10 @@ different bus with different characteristics:
    └─ return stack
  0x000F_FFFF
 
- 0x0010_0000          External RAM   ≤16 MiB  HyperRAM/SDRAM  6+ cycles
-   ├─ Userland dictionary (1 MiB zone)
+ 0x0010_0000          External RAM   up to    HyperRAM/SDRAM  6+ cycles
+   ├─ Userland dictionary (1 MiB zone)   ~4 GiB
    └─ XMEM allocator region
- 0x00FF_FFFF+ (configurable)
+ 0xFEFF_FFFF (hardware max, before VRAM/HBW)
 
  0xFF00_0000          VRAM            4 MiB   Dedicated FB  varies
  0xFF3F_FFFF
