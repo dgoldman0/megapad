@@ -1493,6 +1493,17 @@ class FramebufferDisplay:
         import pygame
         import numpy as np
 
+        # Fast path: C++ pixel conversion (no GIL, no per-pixel Python)
+        if hasattr(fb, '_cs') and hasattr(fb._cs, 'render_fb_rgb'):
+            result = fb._cs.render_fb_rgb()
+            if result is not None:
+                pixels_rgb = np.asarray(result)
+                if pixels_rgb.shape == (w, h, 3):
+                    pygame.surfarray.blit_array(surface, pixels_rgb)
+                    return
+            # Fall through to Python path if C++ returned None
+            # (e.g. fb_base points to unmapped memory)
+
         base_addr = fb.fb_base
         stride = fb.stride
         mem, mem_off = self._resolve_fb_mem(base_addr)

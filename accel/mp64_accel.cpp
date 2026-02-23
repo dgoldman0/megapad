@@ -14,6 +14,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
+#include <pybind11/numpy.h>
 
 #include "mp64_crypto.h"
 #include "mp64_fb.h"
@@ -2425,6 +2426,107 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("fb_set_palette_entry", [](CPUState& s, int idx, uint32_t rgb) {
             if (idx >= 0 && idx < 256)
                 s.fb.palette[idx] = rgb & 0x00FFFFFF;
+        })
+        // ── Framebuffer render (C++ pixel conversion) ─────────
+        //
+        // Converts VRAM pixel data into an RGB888 numpy array suitable
+        // for pygame.surfarray.blit_array().  Returns shape (w, h, 3)
+        // with dtype uint8.  Runs without GIL for maximum throughput.
+        //
+        // Modes: 0 = 8-bit indexed (palette lookup)
+        //        1 = RGB565
+        //        3 = RGBA8888 (alpha discarded)
+        //
+        // Returns None if the framebuffer base address doesn't map to
+        // any attached memory region.
+        .def("render_fb_rgb", [](CPUState& s) -> py::object {
+            uint32_t w = s.fb.width;
+            uint32_t h = s.fb.height;
+            uint32_t stride = s.fb.stride;
+            uint8_t  mode = s.fb.mode;
+            uint64_t base = s.fb.fb_base;
+
+            if (w == 0 || h == 0 || w > 4096 || h > 4096)
+                return py::none();
+
+            // Resolve base address to a memory pointer
+            const uint8_t* src = nullptr;
+            uint64_t mem_size = 0;
+            uint64_t mem_off = 0;
+
+            if (s.vram_mem && base >= s.vram_base
+                && base < s.vram_base + s.vram_size) {
+                src = s.vram_mem;
+                mem_off = base - s.vram_base;
+                mem_size = s.vram_size;
+            } else if (s.ext_mem && base >= s.ext_mem_base
+                       && base < s.ext_mem_base + s.ext_mem_size) {
+                src = s.ext_mem;
+                mem_off = base - s.ext_mem_base;
+                mem_size = s.ext_mem_size;
+            } else if (s.hbw_mem && base >= s.hbw_base
+                       && base < s.hbw_base + s.hbw_size) {
+                src = s.hbw_mem;
+                mem_off = base - s.hbw_base;
+                mem_size = s.hbw_size;
+            }
+            if (!src)
+                return py::none();
+
+            // Allocate output: shape (w, h, 3) for pygame surfarray
+            auto result = py::array_t<uint8_t>({(int)w, (int)h, 3});
+            auto buf = result.mutable_unchecked<3>();
+
+            // Release GIL for the pixel conversion loop
+            {
+                py::gil_scoped_release release;
+
+                if (mode == 0) {
+                    // 8-bit indexed — palette lookup
+                    const auto& pal = s.fb.palette;
+                    for (uint32_t y = 0; y < h; y++) {
+                        uint64_t row_off = mem_off + (uint64_t)y * stride;
+                        if (row_off + w > mem_size) break;
+                        const uint8_t* row = src + row_off;
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint32_t rgb = pal[row[x]];
+                            buf(x, y, 0) = (rgb >> 16) & 0xFF;
+                            buf(x, y, 1) = (rgb >>  8) & 0xFF;
+                            buf(x, y, 2) =  rgb        & 0xFF;
+                        }
+                    }
+                } else if (mode == 1) {
+                    // RGB565
+                    for (uint32_t y = 0; y < h; y++) {
+                        uint64_t row_off = mem_off + (uint64_t)y * stride;
+                        if (row_off + (uint64_t)w * 2 > mem_size) break;
+                        const uint16_t* row =
+                            reinterpret_cast<const uint16_t*>(src + row_off);
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint16_t px = row[x];
+                            buf(x, y, 0) = ((px >> 11) & 0x1F) << 3;
+                            buf(x, y, 1) = ((px >>  5) & 0x3F) << 2;
+                            buf(x, y, 2) = ( px        & 0x1F) << 3;
+                        }
+                    }
+                } else if (mode == 3) {
+                    // RGBA8888 — drop alpha
+                    for (uint32_t y = 0; y < h; y++) {
+                        uint64_t row_off = mem_off + (uint64_t)y * stride;
+                        if (row_off + (uint64_t)w * 4 > mem_size) break;
+                        const uint8_t* row = src + row_off;
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint32_t off4 = x * 4;
+                            buf(x, y, 0) = row[off4 + 0];
+                            buf(x, y, 1) = row[off4 + 1];
+                            buf(x, y, 2) = row[off4 + 2];
+                        }
+                    }
+                }
+                // Unknown mode: array stays zero-filled (gray/black)
+            }
+
+            return result;
         })
         // ── Timer device ──────────────────────────────────────
         .def("timer_init", [](CPUState& s) {
