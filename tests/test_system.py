@@ -7655,6 +7655,25 @@ class TestKDOSArena(_KDOSTestBase):
         self.assertEqual(int(h0.group(1)), int(h1.group(1)),
                          f"Dictionary leaked: {h0.group(1)} → {h1.group(1)}")
 
+    # -- Multicore safety guard --
+
+    def test_core0_guard_passes_on_core0(self):
+        """?CORE0 does not abort when called from core 0."""
+        text = self._run_kdos([
+            '?CORE0',
+            '.\" ok"',
+        ])
+        self.assertIn("ok", text)
+
+    def test_allocate_works_on_core0(self):
+        """ALLOCATE succeeds on core 0 (guard passes silently)."""
+        text = self._run_kdos([
+            '64 ALLOCATE',
+            'CR ." [IOR=" . ." ]"',
+            'FREE',
+        ])
+        self.assertIn('[IOR=0', text, f"ALLOCATE failed on core 0: {text}")
+
 
 # ---------------------------------------------------------------------------
 #  KDOS MARKER / FORGET tests

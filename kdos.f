@@ -166,10 +166,21 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 : (LINK-PREV!)  ( addr -- )
     A-PREV @ 0= IF  HEAP-FREE !  ELSE  A-PREV @ !  THEN ;
 
+\ -- Multicore safety guard --
+\   Words that use shared scratch VARIABLEs (A-PREV, A-CURR, AR-SZ,
+\   FL-PREV, etc.) are unsafe under concurrent execution.  ?CORE0
+\   aborts if called from a secondary core, catching accidental
+\   concurrent access at the point of call rather than allowing
+\   silent corruption.  See §8.1 for the concurrency contract.
+: ?CORE0  ( -- )
+    COREID 0<> ABORT" core-0 only: use ARENA-ALLOT on secondary cores" ;
+
 \ ALLOCATE ( u -- addr ior )
 \   Allocate u bytes.  Returns address and 0 on success,
 \   or 0 and -1 on failure.  First-fit search.
+\   Core-0 only — uses shared scratch variables.
 : ALLOCATE  ( u -- addr ior )
+    ?CORE0
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
     DUP 0= IF DROP 0 -1 EXIT THEN
     \ Round up to 8-byte alignment, minimum 16
@@ -242,7 +253,9 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 \ FREE ( addr -- )
 \   Return a previously allocated block to the free list.
 \   Inserts in address-sorted order and coalesces adjacent blocks.
+\   Core-0 only — uses shared scratch variables.
 : FREE  ( addr -- )
+    ?CORE0
     DUP 0= IF DROP EXIT THEN
     /ALLOC-HDR -   ( block )
     0 A-PREV !   HEAP-FREE @ A-CURR !
@@ -318,7 +331,9 @@ VARIABLE R-NEW     \ new requested size (rounded)
         A-CURR @ @ A-CURR !
     AGAIN ;
 
+\ Core-0 only — uses shared scratch variables.
 : RESIZE  ( a1 u -- a2 ior )
+    ?CORE0
     \ Round new size
     DUP 0= IF  2DROP 0 -1 EXIT  THEN
     7 + -8 AND  DUP 16 < IF DROP 16 THEN
@@ -2007,7 +2022,9 @@ VARIABLE AR-BLK    \ backing block address
 \   NOTE: the 32-byte descriptor is permanently committed to the
 \   dictionary.  For temporary arenas created/destroyed in a loop,
 \   use ARENA-NEW-AT with a pre-allocated descriptor address.
+\ Core-0 only — uses shared scratch variables (AR-SZ, AR-SRC, AR-BLK).
 : ARENA-NEW  ( size source -- arena ior )
+    ?CORE0
     OVER 0= IF  2DROP 0 -1 EXIT  THEN      \ zero size → fail
     AR-SRC !  AR-SZ !
     AR-SZ @ AR-SRC @ (AR-ALLOC-BACKING) IF
@@ -2028,7 +2045,9 @@ VARIABLE AR-BLK    \ backing block address
 \   'desc' must point to >= 32 bytes of writable, cell-aligned storage
 \   (e.g. a CREATE/ALLOT block, a VARIABLE cluster, or an arena-allotted
 \   region in another arena).
+\ Core-0 only — uses shared scratch variables (AR-SZ, AR-SRC, AR-BLK).
 : ARENA-NEW-AT  ( desc size source -- ior )
+    ?CORE0
     OVER 0= IF  DROP 2DROP -1 EXIT  THEN     \ zero size → fail
     AR-SRC !  AR-SZ !                         ( desc )
     AR-SZ @ AR-SRC @ (AR-ALLOC-BACKING) IF   ( desc 0 )
@@ -2080,7 +2099,9 @@ VARIABLE AR-BLK    \ backing block address
 \   Heap blocks are individually freed via FREE.
 \   XMEM blocks are returned to the XMEM free-list for reuse.
 \   HBW blocks are abandoned until HBW-RESET.
+\   Core-0 only — calls (AR-FREE-BACKING) which uses shared state.
 : ARENA-DESTROY  ( arena -- )
+    ?CORE0
     DUP A.BASE @  OVER A.SIZE @  ROT DUP >R A.SOURCE @
     (AR-FREE-BACKING)
     R>
@@ -2313,7 +2334,9 @@ VARIABLE AB-DESC    \ scratch: descriptor address
     DROP 2DROP ;
 
 \ Redefine ARENA-DESTROY to also unregister arena-scoped buffers.
+\   Core-0 only — calls (AR-FREE-BACKING) which uses shared state.
 : ARENA-DESTROY  ( arena -- )
+    ?CORE0
     DUP A.BASE @  OVER A.SIZE @ OVER + ( arena base limit )
     (AR-UNREG-BUFS)                     ( arena )
     DUP A.BASE @  OVER A.SIZE @  ROT DUP >R A.SOURCE @
@@ -4802,6 +4825,33 @@ VARIABLE PREEMPT-ENABLED
 \
 \  Uses BIOS words: COREID NCORES WAKE-CORE CORE-STATUS SPIN@ SPIN!
 \                   IPI-SEND IPI-STATUS MBOX! MBOX@
+\
+\  --- Multicore Concurrency Contract ---
+\
+\  All dictionary, heap, and arena-management words use shared
+\  scratch VARIABLEs (A-PREV, A-CURR, AR-SZ, FL-PREV, etc.) that
+\  are NOT safe under concurrent execution.  The following words
+\  enforce core-0 only access via ?CORE0:
+\
+\    ALLOCATE  FREE  RESIZE   (heap — shared free-list + scratch)
+\    ARENA-NEW  ARENA-NEW-AT  (arena setup — AR-SZ, AR-SRC, AR-BLK)
+\    ARENA-DESTROY            (calls FREE or XMEM-FREE-BLOCK)
+\
+\  Secondary cores dispatched via CORE-RUN should ONLY use:
+\
+\    ARENA-ALLOT / ARENA-ALLOT?  (pure stack + one arena-local ptr)
+\    ARENA-FREE / ARENA-USED     (read-only)
+\    ARENA-SNAP / ARENA-ROLLBACK (single pointer write)
+\    AALLOT                      (via CURRENT-ARENA — push before dispatch)
+\    Direct memory access (@ ! C@ C! MOVE FILL etc.)
+\
+\  Pattern: core 0 creates arenas and allocates at setup time,
+\  dispatches self-contained XTs that only bump-allocate from
+\  pre-created per-core arenas, then collects results after BARRIER.
+\
+\  Per-core arenas eliminate contention entirely — each core only
+\  touches its own bump pointer.  Inter-core results pass through
+\  the mailbox (MBOX! / MBOX@); scratch stays local.
 
 \ -- CORE-RUN ( xt core -- )  dispatch XT to secondary core --
 \   Validates the core number, then sends via WAKE-CORE.
