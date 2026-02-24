@@ -1563,7 +1563,8 @@ class TestBIOS(unittest.TestCase):
                                           ext_mem_mib=4)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
-            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=500_000_000)
+            # 800M steps: KDOS boot + DHCP timeout + autoexec.f need ~600M.
+            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=800_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("3 ", text)
         finally:
@@ -11046,10 +11047,11 @@ class TestKDOSHardening(_KDOSTestBase):
             fs.save(path)
         try:
             sys, buf = self._boot_bios(storage_image=path)
+            # 800M steps: KDOS boot + DHCP timeout + autoexec.f need ~600M.
             text = self._run_forth(sys, buf, [
                 "10 20 + .",
                 "BUF-COUNT @ .",
-            ], max_steps=500_000_000)
+            ], max_steps=800_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("30 ", text)
             # BUF-COUNT should be a valid number (0 initially)

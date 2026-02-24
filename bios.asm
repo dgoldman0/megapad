@@ -244,6 +244,16 @@ no_autoboot:
 forth_quit:
     ; Reset RSP to top of RAM each time
     mov r15, r2
+    ; Restore HERE if a temp IF block was active (prevent dict leak)
+    ldi64 r11, var_interp_if_depth
+    ldn r0, r11
+    cmpi r0, 0
+    breq forth_quit_no_restore
+    ldi64 r11, var_interp_if_start
+    ldn r0, r11
+    ldi64 r11, var_here
+    str r11, r0
+forth_quit_no_restore:
     ; Reset interpret-mode IF depth
     ldi r0, 0
     ldi64 r11, var_interp_if_depth
@@ -355,6 +365,16 @@ interp_undefined:
     ldi64 r10, str_undefined
     ldi64 r11, print_str
     call.l r11
+    ; Restore HERE if we were in a temp IF block (prevent dict leak)
+    ldi64 r11, var_interp_if_depth
+    ldn r0, r11
+    cmpi r0, 0
+    breq interp_undef_no_restore
+    ldi64 r11, var_interp_if_start
+    ldn r0, r11
+    ldi64 r11, var_here
+    str r11, r0
+interp_undef_no_restore:
     ; Reset STATE to interpret mode (recover from compile-mode errors)
     ldi r1, 0
     ldi64 r11, var_state
@@ -378,6 +398,11 @@ interp_line_done:
     call.l r11
     lbr quit_loop
 interp_no_underflow:
+    ; Only print " ok" in interpret mode (STATE=0)
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    lbrne quit_loop            ; STATE=1 → compiling, suppress ok
     ldi64 r11, do_print_ok
     call.l r11
     lbr quit_loop

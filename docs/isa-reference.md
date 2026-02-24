@@ -182,15 +182,15 @@ offset byte.
 ## Family 0x4 — LBR (Long Branch)
 
 Three-byte instructions: opcode + 16-bit **signed** relative offset
-(little-endian).  Range: −32,768 to +32,767 bytes.
+(big-endian).  Range: −32,768 to +32,767 bytes.
 
 Same condition codes as BR, just with a larger range:
 
 | Encoding | Mnemonic | Condition |
 |----------|----------|-----------|
-| `40 lo hi` | **LBR off16** | Always |
-| `41 lo hi` | **LBR.EQ off16** | Z = 1 |
-| `42 lo hi` | **LBR.NE off16** | Z = 0 |
+| `40 hi lo` | **LBR off16** | Always |
+| `41 hi lo` | **LBR.EQ off16** | Z = 1 |
+| `42 hi lo` | **LBR.NE off16** | Z = 0 |
 | ... | ... | (same pattern as BR) |
 
 ---
