@@ -106,18 +106,21 @@ with optional SDL2 display in the emulator.
 
 ### Commit 4: KDOS module system (`REQUIRE`)
 
-- `kdos.f` §20: Module system (~50 lines)
-  - `MOD-LOADED` — 64-bit bitmap (one bit per FS directory slot)
-  - `REQUIRE` ( "filename" -- ) — parse name, check bitmap, skip if
-    loaded, otherwise `LOAD` and set bit
-  - `PROVIDED` ( "filename" -- ) — mark a module as already loaded
-    without loading it (for built-in subsystems)
-  - `MODULES` — list all loaded modules with their FS slot numbers
-  - `MODULE?` ( "filename" -- flag ) — check if module is loaded
+- `kdos.f` §20: Module system (~60 lines)
+  - `_MOD-HT` — hash table (16-byte key, 1-byte value, 32 slots)
+  - `PROVIDED` ( "name" -- ) — sole duplicate-load guard; if name
+    is already registered, rolls back HERE/LATEST and aborts the
+    current file walk; otherwise registers the name and continues.
+    Safe even when not the first line — partial definitions are undone.
+  - `REQUIRE` ( "filename" -- ) — resolve path and LOAD the file;
+    the file's own PROVIDED handles deduplication.
+    Accepts relative paths (../lib/util.f).
+  - `MODULES` — list all loaded modules
+  - `MODULE?` ( "name" -- flag ) — check if module is loaded
 - `diskutil.py`: Ensure Forth module files use `FTYPE_FORTH` (3)
 - Tests: `TestModuleSystem` in `test_system.py`
   - Load once, REQUIRE twice (idempotent — no double-define errors)
-  - PROVIDED marks without loading
+  - PROVIDED guards against duplicate loading (with rollback)
   - MODULE? query
   - Not-found error handling
   - MODULES listing

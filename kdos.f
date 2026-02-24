@@ -3827,20 +3827,35 @@ VARIABLE LD-SZ
 VARIABLE LD-CUR
 VARIABLE LD-LEN
 
+\ PROVIDED abort support: when PROVIDED detects a duplicate module
+\ it rolls back HERE/LATEST (undoing any partial definitions from
+\ lines that executed before PROVIDED) and sets _LD-ABORT so
+\ _LD-WALK stops processing further lines.
+VARIABLE _LD-ABORT          \ flag: 1 = abort remaining lines
+VARIABLE _LD-HERE-SNAP      \ HERE snapshot at start of _LD-WALK
+VARIABLE _LD-LATEST-SNAP    \ LATEST snapshot at start of _LD-WALK
+0 _LD-ABORT !
+
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
 \ Includes CWD so relative-path loads restore the working directory.
-CREATE _LD-STK 200 ALLOT    \ 5 vars * 8 bytes * 5 nesting levels
+CREATE _LD-STK 320 ALLOT    \ 8 vars * 8 bytes * 5 nesting levels
 VARIABLE _LD-SP
 0 _LD-SP !
 
 : _LD-SAVE  ( -- )
-    LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    CWD  @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+    LD-BUF         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-SZ          @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-CUR         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-LEN         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    CWD            @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    _LD-ABORT      @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    _LD-HERE-SNAP  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    _LD-LATEST-SNAP @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
 
 : _LD-RESTORE  ( -- )
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-LATEST-SNAP !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-HERE-SNAP  !
+    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-ABORT      !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ CWD  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
@@ -3935,9 +3950,13 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
 \   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
 \   clean across EVALUATE calls so compile-time control-flow items
 \   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
+\   Snapshots HERE/LATEST so PROVIDED can roll back partial defs.
 : _LD-WALK  ( -- )
+    0 _LD-ABORT !
+    HERE   _LD-HERE-SNAP   !
+    LATEST _LD-LATEST-SNAP !
     LD-BUF @ LD-CUR !
-    BEGIN LD-SZ @ 0> WHILE
+    BEGIN LD-SZ @ 0> _LD-ABORT @ 0= AND WHILE
         \ Find length of current line (up to newline or end)
         LD-SZ @                          ( rem )
         0                                ( rem i )
@@ -10956,13 +10975,26 @@ VARIABLE _HTE-HT
 \  §20  Module System
 \ =====================================================================
 \
-\  REQUIRE / PROVIDED prevent duplicate loading of Forth source files.
-\  Each module should call  PROVIDED <name>  at the top to register
-\  itself.  REQUIRE <name>  checks the registry; if already loaded it
-\  is a no-op, otherwise it LOADs the file and marks it loaded.
+\  PROVIDED is the single guard against duplicate module loading.
 \
-\  Uses a hash table (§19) for O(1) lookup.  16-byte key = filename
-\  (zero-padded, matching NAMEBUF layout), 1-byte value.
+\  Each module file contains a  PROVIDED <name>  line (anywhere in the
+\  file, though early is best).  When executed:
+\
+\    • First time: registers <name> in a hash table and continues.
+\    • Already registered: rolls back any definitions that were
+\      created since _LD-WALK began (restores HERE / LATEST to their
+\      pre-walk snapshots) and sets _LD-ABORT so _LD-WALK stops
+\      processing remaining lines.  This is safe even when PROVIDED
+\      is not the very first line — partial definitions are undone.
+\
+\  REQUIRE simply LOADs the file; the file's own PROVIDED handles
+\  the guard.  Because the hash key is always the canonical name the
+\  *file itself* declares (not the path the caller used), different
+\  paths to the same file (e.g. "../utils/string.f" vs "string.f")
+\  share the same key and the guard works correctly.
+\
+\  Uses a hash table (§19) for O(1) lookup.  16-byte key = module
+\  name (zero-padded, matching NAMEBUF layout), 1-byte value.
 
 16 1 32 HASHTABLE _MOD-HT
 
@@ -10978,10 +11010,21 @@ CREATE _MOD-VAL  1 ALLOT
 : _MOD-LOADED?  ( -- flag )
     NAMEBUF _MOD-HT HT-GET 0<> ;
 
-\ PROVIDED ( "name" -- )  Register a module as loaded.
-\   Typically called at the top of a module file.
+\ PROVIDED ( "name" -- )  Module-load guard.
+\   If <name> is already registered, roll back HERE/LATEST to
+\   the snapshot taken at the start of _LD-WALK (undoing any
+\   partial definitions) and set _LD-ABORT to stop the walker.
+\   If <name> is new, register it and continue normally.
 : PROVIDED  ( "name" -- )
-    PARSE-NAME  _MOD-MARK ;
+    PARSE-NAME
+    _MOD-LOADED? IF
+        \ Duplicate — undo partial defs and abort walk
+        _LD-HERE-SNAP @ HERE - ALLOT    \ restore HERE
+        _LD-LATEST-SNAP @ LATEST!       \ restore LATEST
+        1 _LD-ABORT !
+    ELSE
+        _MOD-MARK
+    THEN ;
 
 \ MODULE? ( "name" -- flag )  Test if a module is already loaded.
 : MODULE?  ( "name" -- flag )
@@ -11019,14 +11062,14 @@ CREATE _MOD-VAL  1 ALLOT
     _LD-WALK
     _LD-RESTORE ;
 
-\ REQUIRE ( "name" -- )  Load a module if not already loaded.
+\ REQUIRE ( "name" -- )  Load a module file.
+\   The file's own PROVIDED line is the sole guard against duplicate
+\   loading.  REQUIRE just resolves the path and loads the file.
 \   Accepts relative paths: REQUIRE ../lib/util.f
 \   Path components adjust CWD; the final name is looked up in
 \   the resolved directory.  CWD is restored after loading.
 : REQUIRE  ( "name" -- )
     PARSE-NAME
-    _MOD-LOADED? IF EXIT THEN
-    _MOD-MARK
     FS-ENSURE                  \ load FS before path resolution
     CWD @ >R                   \ save CWD (return stack is safe
                                \ here — _MOD-LOAD-BODY uses its
