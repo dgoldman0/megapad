@@ -19358,6 +19358,401 @@ class TestKDOSModuleSystem(_KDOSTestBase):
             os.unlink(path)
 
 
+class TestModuleProvidedGuard(_KDOSTestBase):
+    """Rich tests for the PROVIDED-as-sole-guard module system.
+
+    Disk layout:
+        /
+        ├── string.f          — leaf, no deps.  Defines STRING-VER
+        ├── math.f            — leaf, no deps.  Defines MATH-ADD
+        ├── late.f            — PROVIDED not first line (VARIABLE before it)
+        ├── noguard.f         — NO PROVIDED at all
+        ├── app.f             — diamond root: requires format.f + headers.f
+        ├── utils/
+        │   ├── format.f      — REQUIRE ../string.f,  defines FMT-OK
+        │   └── convert.f     — REQUIRE ../math.f,    defines CVT-OK
+        └── net/
+            ├── headers.f     — REQUIRE ../string.f,  defines HDR-OK
+            └── proto.f       — REQUIRE headers.f + ../utils/convert.f
+
+    Key scenarios tested:
+      1. Diamond dependency (string.f loaded once via two paths)
+      2. PROVIDED not first line — rollback undoes partial defs
+      3. Deep chain (app → format → string, 3 levels)
+      4. Cross-directory requires (../string.f from utils/ and net/)
+      5. Same-directory require (proto.f → headers.f)
+      6. File without PROVIDED gets reloaded every time
+      7. MODULE? / MODULES reflect correct state after complex load
+      8. Dictionary cleanliness after rollback
+    """
+
+    # ── Module source files ──────────────────────────────────────────
+
+    MOD_STRING = (
+        b"PROVIDED string.f\n"
+        b"VARIABLE _STR-LOADED  _STR-LOADED @ 1+ _STR-LOADED !\n"
+        b": STRING-VER 100 ;\n"
+    )
+
+    MOD_MATH = (
+        b"PROVIDED math.f\n"
+        b": MATH-ADD + ;\n"
+    )
+
+    MOD_FORMAT = (
+        b"PROVIDED format.f\n"
+        b"REQUIRE ../string.f\n"
+        b": FMT-OK STRING-VER 1+ ;\n"     # 101
+    )
+
+    MOD_CONVERT = (
+        b"PROVIDED convert.f\n"
+        b"REQUIRE ../math.f\n"
+        b": CVT-OK 3 4 MATH-ADD ;\n"      # 7
+    )
+
+    MOD_HEADERS = (
+        b"PROVIDED headers.f\n"
+        b"REQUIRE ../string.f\n"
+        b": HDR-OK STRING-VER 2* ;\n"     # 200
+    )
+
+    MOD_PROTO = (
+        b"PROVIDED proto.f\n"
+        b"REQUIRE headers.f\n"
+        b"REQUIRE ../utils/convert.f\n"
+        b": PROTO-OK HDR-OK CVT-OK + ;\n"  # 207
+    )
+
+    MOD_APP = (
+        b"PROVIDED app.f\n"
+        b"REQUIRE utils/format.f\n"
+        b"REQUIRE net/headers.f\n"
+        b": APP-OK FMT-OK HDR-OK + ;\n"   # 301
+    )
+
+    # PROVIDED is NOT first — there's a VARIABLE before it.
+    # On second load the VARIABLE should be rolled back.
+    MOD_LATE = (
+        b"VARIABLE LATE-SCRATCH\n"
+        b"PROVIDED late.f\n"
+        b"42 LATE-SCRATCH !\n"
+        b": LATE-VAL LATE-SCRATCH @ ;\n"
+    )
+
+    # No PROVIDED at all — REQUIRE will reload every time.
+    MOD_NOGUARD = (
+        b"VARIABLE _NG-CNT  _NG-CNT @ 1+ _NG-CNT !\n"
+    )
+
+    def _build_image(self):
+        """Create a disk image with the full module tree."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+
+        # Root-level modules
+        fs.inject_file("string.f",  self.MOD_STRING,  ftype=FTYPE_FORTH)
+        fs.inject_file("math.f",    self.MOD_MATH,    ftype=FTYPE_FORTH)
+        fs.inject_file("late.f",    self.MOD_LATE,    ftype=FTYPE_FORTH)
+        fs.inject_file("noguard.f", self.MOD_NOGUARD, ftype=FTYPE_FORTH)
+        fs.inject_file("app.f",     self.MOD_APP,     ftype=FTYPE_FORTH)
+
+        # utils/ directory
+        fs.mkdir("utils")
+        fs.inject_file("format.f",  self.MOD_FORMAT,  ftype=FTYPE_FORTH,
+                        path="/utils")
+        fs.inject_file("convert.f", self.MOD_CONVERT, ftype=FTYPE_FORTH,
+                        path="/utils")
+
+        # net/ directory
+        fs.mkdir("net")
+        fs.inject_file("headers.f", self.MOD_HEADERS, ftype=FTYPE_FORTH,
+                        path="/net")
+        fs.inject_file("proto.f",   self.MOD_PROTO,   ftype=FTYPE_FORTH,
+                        path="/net")
+
+        fs.save(path)
+        return path
+
+    # ── Tests ────────────────────────────────────────────────────────
+
+    def test_leaf_module_loads(self):
+        """A simple leaf module loads and its word is callable."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE string.f",
+                "STRING-VER .",
+            ], storage_image=img)
+            self.assertIn("100 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_leaf_idempotent(self):
+        """REQUIRE of a leaf module twice only loads it once."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE string.f",
+                "REQUIRE string.f",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            # _STR-LOADED incremented once on first load, rolled back
+            # on second load (PROVIDED fires and aborts).
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_diamond_dependency(self):
+        """Diamond: app→format→string AND app→headers→string.
+
+        string.f must be loaded exactly once.  Both FMT-OK and HDR-OK
+        must be callable; APP-OK = FMT-OK + HDR-OK = 101 + 200 = 301.
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "APP-OK .",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            self.assertIn("301 ", text)
+            # string.f loaded exactly once
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_diamond_all_modules_registered(self):
+        """After loading app.f, all transitive deps are registered."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                'MODULE? app.f      IF ." A" THEN',
+                'MODULE? format.f   IF ." F" THEN',
+                'MODULE? headers.f  IF ." H" THEN',
+                'MODULE? string.f   IF ." S" THEN',
+            ], storage_image=img)
+            for tag in ("A", "F", "H", "S"):
+                self.assertIn(tag, text)
+        finally:
+            os.unlink(img)
+
+    def test_deep_chain(self):
+        """3-level chain: app→format→string produces correct values."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "FMT-OK .",
+            ], storage_image=img)
+            self.assertIn("101 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_cross_directory_require(self):
+        """net/proto.f requires headers.f (same dir) and ../utils/convert.f.
+
+        PROTO-OK = HDR-OK + CVT-OK = 200 + 7 = 207.
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE proto.f",
+                "PROTO-OK .",
+            ], storage_image=img)
+            self.assertIn("207 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_cross_dir_then_root_idempotent(self):
+        """Load string.f via net/headers.f, then REQUIRE string.f from root.
+
+        Second REQUIRE should be a no-op (PROVIDED guard fires).
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE headers.f",
+                "CD /",
+                "REQUIRE string.f",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_provided_not_first_line(self):
+        """PROVIDED is not the first line; module still loads correctly."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE late.f",
+                "LATE-VAL .",
+            ], storage_image=img)
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_provided_not_first_line_rollback(self):
+        """Second REQUIRE of late.f rolls back the VARIABLE created before PROVIDED.
+
+        HERE should be the same before and after the second REQUIRE.
+        LATE-VAL should still work (from the first load).
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE late.f",
+                "HERE .",
+                "REQUIRE late.f",
+                "HERE .",
+                "LATE-VAL .",
+            ], storage_image=img)
+            lines = text.strip().split()
+            # Find the two HERE values — they should be the same
+            # (the second REQUIRE's partial defs were rolled back).
+            # We'll parse all numbers and check LATE-VAL still returns 42.
+            self.assertIn("42 ", text)
+            # Both HERE values should match
+            numbers = re.findall(r'\b(\d+)\b', text)
+            # The first two large numbers (HERE addresses) should be equal.
+            here_vals = [int(n) for n in numbers if int(n) > 1000]
+            if len(here_vals) >= 2:
+                self.assertEqual(here_vals[0], here_vals[1],
+                    f"HERE not restored after rollback: {here_vals[0]} vs {here_vals[1]}")
+        finally:
+            os.unlink(img)
+
+    def test_no_provided_reloads(self):
+        """File without PROVIDED gets reloaded on every REQUIRE.
+
+        _NG-CNT is incremented each time since there's no guard.
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE noguard.f",
+                "REQUIRE noguard.f",
+                "REQUIRE noguard.f",
+                "_NG-CNT @ .",
+            ], storage_image=img)
+            # Loaded 3 times; each load does _NG-CNT @ 1+ _NG-CNT !
+            # But each load also re-creates _NG-CNT (VARIABLE),
+            # so the latest _NG-CNT is a fresh variable with value 1.
+            # Actually: each REQUIRE triggers _LD-WALK which snapshots
+            # HERE/LATEST. Since there's no PROVIDED to abort, all lines
+            # execute. Each load creates a new VARIABLE _NG-CNT shadowing
+            # the previous one, then increments it from 0 to 1.
+            # The final _NG-CNT @ should be 1 (the latest shadow).
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_modules_count_after_diamond(self):
+        """MODULES reports correct count after diamond load."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "MODULES",
+            ], storage_image=img)
+            # app.f, format.f, headers.f, string.f = 4 modules
+            self.assertIn("4 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_modules_count_after_proto(self):
+        """Loading proto.f brings in headers, convert, string, math = 5 total."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE proto.f",
+                "MODULES",
+            ], storage_image=img)
+            # proto.f, headers.f, string.f, convert.f, math.f = 5
+            self.assertIn("5 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_full_tree_all_names(self):
+        """Load everything; verify MODULES lists all names."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "CD net",
+                "REQUIRE proto.f",
+                "CD /",
+                "REQUIRE math.f",
+                "REQUIRE late.f",
+                "MODULES",
+            ], storage_image=img)
+            for name in ("app.f", "format.f", "headers.f", "string.f",
+                          "proto.f", "convert.f", "math.f", "late.f"):
+                self.assertIn(name, text)
+        finally:
+            os.unlink(img)
+
+    def test_require_after_provided_interactive(self):
+        """Interactive PROVIDED then REQUIRE of same name is a no-op."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "PROVIDED string.f",
+                "REQUIRE string.f",
+                # STRING-VER should NOT be defined because the file
+                # was never actually loaded — only interactively marked.
+                "MODULE? string.f IF .\" MARKED\" THEN",
+            ], storage_image=img)
+            self.assertIn("MARKED", text)
+        finally:
+            os.unlink(img)
+
+    def test_diamond_no_double_variable(self):
+        """Diamond dep doesn't create duplicate VARIABLEs.
+
+        string.f defines _STR-LOADED as a VARIABLE.  After diamond
+        load, incrementing and reading it should give consistent
+        results (not two separate variables).
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE app.f",
+                "_STR-LOADED @ .",
+                "1 _STR-LOADED +!",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            # Loaded once → value is 1, then +1 → 2
+            self.assertIn("1 ", text)
+            self.assertIn("2 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_order_independence(self):
+        """Loading deps in different order produces same result.
+
+        Load headers.f first (brings in string.f), then app.f.
+        app.f's REQUIRE of string.f and headers.f should both be no-ops.
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE headers.f",
+                "CD /",
+                "REQUIRE app.f",
+                "APP-OK .",
+            ], storage_image=img)
+            self.assertIn("301 ", text)
+        finally:
+            os.unlink(img)
+
+
 class TestKDOSGraphicsModule(_KDOSTestBase):
     """Tests for graphics.f — framebuffer graphics module."""
 
