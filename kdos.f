@@ -3827,35 +3827,20 @@ VARIABLE LD-SZ
 VARIABLE LD-CUR
 VARIABLE LD-LEN
 
-\ PROVIDED abort support: when PROVIDED detects a duplicate module
-\ it rolls back HERE/LATEST (undoing any partial definitions from
-\ lines that executed before PROVIDED) and sets _LD-ABORT so
-\ _LD-WALK stops processing further lines.
-VARIABLE _LD-ABORT          \ flag: 1 = abort remaining lines
-VARIABLE _LD-HERE-SNAP      \ HERE snapshot at start of _LD-WALK
-VARIABLE _LD-LATEST-SNAP    \ LATEST snapshot at start of _LD-WALK
-0 _LD-ABORT !
-
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
 \ Includes CWD so relative-path loads restore the working directory.
-CREATE _LD-STK 320 ALLOT    \ 8 vars * 8 bytes * 5 nesting levels
+CREATE _LD-STK 200 ALLOT    \ 5 vars * 8 bytes * 5 nesting levels
 VARIABLE _LD-SP
 0 _LD-SP !
 
 : _LD-SAVE  ( -- )
-    LD-BUF         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-SZ          @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-CUR         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    LD-LEN         @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    CWD            @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    _LD-ABORT      @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    _LD-HERE-SNAP  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
-    _LD-LATEST-SNAP @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
+    LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    LD-LEN @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
+    CWD  @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
 
 : _LD-RESTORE  ( -- )
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-LATEST-SNAP !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-HERE-SNAP  !
-    -8 _LD-SP +!  _LD-SP @ _LD-STK + @ _LD-ABORT      !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ CWD  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
@@ -3950,13 +3935,9 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
 \   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
 \   clean across EVALUATE calls so compile-time control-flow items
 \   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
-\   Snapshots HERE/LATEST so PROVIDED can roll back partial defs.
 : _LD-WALK  ( -- )
-    0 _LD-ABORT !
-    HERE   _LD-HERE-SNAP   !
-    LATEST _LD-LATEST-SNAP !
     LD-BUF @ LD-CUR !
-    BEGIN LD-SZ @ 0> _LD-ABORT @ 0= AND WHILE
+    BEGIN LD-SZ @ 0> WHILE
         \ Find length of current line (up to newline or end)
         LD-SZ @                          ( rem )
         0                                ( rem i )
@@ -10975,23 +10956,19 @@ VARIABLE _HTE-HT
 \  §20  Module System
 \ =====================================================================
 \
-\  PROVIDED is the single guard against duplicate module loading.
+\  Pre-scan guard: before executing any line of a loaded file,
+\  _MOD-PRESCAN scans the raw file buffer for a line beginning with
+\  "PROVIDED".  If found, the module name is extracted and checked
+\  against the hash table.  If already loaded, _MOD-LOAD-BODY skips
+\  _LD-WALK entirely — zero lines are executed, zero side effects.
 \
-\  Each module file contains a  PROVIDED <name>  line (anywhere in the
-\  file, though early is best).  When executed:
+\  PROVIDED itself (when executed during _LD-WALK) simply registers
+\  the module name in the hash table.  It is a plain marker now; all
+\  guard logic lives in the pre-scan.
 \
-\    • First time: registers <name> in a hash table and continues.
-\    • Already registered: rolls back any definitions that were
-\      created since _LD-WALK began (restores HERE / LATEST to their
-\      pre-walk snapshots) and sets _LD-ABORT so _LD-WALK stops
-\      processing remaining lines.  This is safe even when PROVIDED
-\      is not the very first line — partial definitions are undone.
-\
-\  REQUIRE simply LOADs the file; the file's own PROVIDED handles
-\  the guard.  Because the hash key is always the canonical name the
-\  *file itself* declares (not the path the caller used), different
-\  paths to the same file (e.g. "../utils/string.f" vs "string.f")
-\  share the same key and the guard works correctly.
+\  Because the hash key is always the canonical name declared by the
+\  file's own PROVIDED line (not the caller's REQUIRE path), different
+\  paths to the same file share the same key.
 \
 \  Uses a hash table (§19) for O(1) lookup.  16-byte key = module
 \  name (zero-padded, matching NAMEBUF layout), 1-byte value.
@@ -11010,21 +10987,132 @@ CREATE _MOD-VAL  1 ALLOT
 : _MOD-LOADED?  ( -- flag )
     NAMEBUF _MOD-HT HT-GET 0<> ;
 
-\ PROVIDED ( "name" -- )  Module-load guard.
-\   If <name> is already registered, roll back HERE/LATEST to
-\   the snapshot taken at the start of _LD-WALK (undoing any
-\   partial definitions) and set _LD-ABORT to stop the walker.
-\   If <name> is new, register it and continue normally.
+\ ── Pre-scan for PROVIDED ────────────────────────────────────────────
+\  _MOD-PRESCAN scans the file buffer (LD-BUF / LD-SZ) line by line
+\  looking for a line whose first non-whitespace token is "PROVIDED".
+\  Comment lines (starting with '\') are skipped.
+\  If found, the module name (the next whitespace-delimited word) is
+\  copied into NAMEBUF and the word returns TRUE.
+\  If no PROVIDED line exists, returns FALSE.  NAMEBUF is unchanged.
+
+CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
+80 _PS-TAG     C!         \ P
+82 _PS-TAG 1+  C!         \ R
+79 _PS-TAG 2 + C!         \ O
+86 _PS-TAG 3 + C!         \ V
+73 _PS-TAG 4 + C!         \ I
+68 _PS-TAG 5 + C!         \ D
+69 _PS-TAG 6 + C!         \ E
+68 _PS-TAG 7 + C!         \ D
+ 0 _PS-TAG 8 + C!         \ NUL
+
+CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
+
+\ _PS-MATCH8? ( addr -- flag )  True if addr points to "PROVIDED"
+\   (exactly 8 chars, case-sensitive).
+: _PS-MATCH8?  ( addr -- flag )
+    TRUE 8 0 DO
+        OVER I + C@ _PS-TAG I + C@ <> IF
+            DROP FALSE LEAVE
+        THEN
+    LOOP NIP ;
+
+\ _PS-SKIP-WS ( addr rem -- addr' rem' )  Skip spaces/tabs.
+: _PS-SKIP-WS  ( addr rem -- addr' rem' )
+    BEGIN
+        DUP 0> IF
+            OVER C@ DUP 32 = SWAP 9 = OR
+        ELSE FALSE THEN
+    WHILE
+        1- SWAP 1+ SWAP
+    REPEAT ;
+
+\ _PS-TOKEN-LEN ( addr rem -- len )  Length of next non-WS token.
+: _PS-TOKEN-LEN  ( addr rem -- len )
+    0                                ( addr rem len )
+    BEGIN
+        OVER 0> IF
+            2 PICK OVER + C@ DUP 32 > SWAP 127 < AND   ( ... printable? )
+        ELSE FALSE THEN
+    WHILE
+        1+ SWAP 1- SWAP
+    REPEAT
+    NIP NIP ;
+
+\ _MOD-PRESCAN ( -- flag )  Scan LD-BUF/LD-SZ for PROVIDED line.
+\   On TRUE: module name is in NAMEBUF (ready for _MOD-LOADED?).
+\   On FALSE: no PROVIDED found; NAMEBUF is unchanged.
+: _MOD-PRESCAN  ( -- flag )
+    LD-BUF @ LD-SZ @                    ( ptr rem )
+    BEGIN DUP 0> WHILE
+        \ Find end of current line (newline or end of buffer)
+        2DUP                             ( ptr rem ptr rem )
+        0                                ( ptr rem ptr rem i )
+        BEGIN
+            DUP 2 PICK < IF
+                2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+            ELSE TRUE THEN
+        UNTIL                            ( ptr rem ptr rem linelen )
+        NIP NIP                          ( ptr rem linelen )
+        \ Process this line: skip leading whitespace
+        >R 2DUP R>                       ( ptr rem ptr rem linelen )
+        DROP                             ( ptr rem lineptr linerem )
+        _PS-SKIP-WS                      ( ptr rem lp' lr' )
+        \ Skip comment lines (first non-ws char is '\')
+        DUP 0> IF
+            OVER C@ 92 = IF             \ backslash
+                2DROP                    ( ptr rem )
+            ELSE
+                \ Check if first token is "PROVIDED" (8 chars)
+                2DUP _PS-TOKEN-LEN       ( ptr rem lp lr toklen )
+                8 = IF
+                    OVER _PS-MATCH8? IF  ( ptr rem lp lr )
+                        \ Found! Extract module name after "PROVIDED "
+                        8 - SWAP 8 + SWAP  ( ptr rem name-area-ptr nar )
+                        _PS-SKIP-WS        ( ptr rem np nr )
+                        2DUP _PS-TOKEN-LEN ( ptr rem np nr namelen )
+                        DUP 0= IF
+                            \ PROVIDED with no argument — ignore
+                            DROP 2DROP     ( ptr rem )
+                        ELSE
+                            \ Copy name into NAMEBUF
+                            NAMEBUF 24 0 FILL
+                            23 MIN         ( ptr rem np nr namelen' )
+                            NIP            ( ptr rem np namelen' )
+                            NAMEBUF SWAP CMOVE  ( ptr rem )
+                            2DROP TRUE EXIT
+                        THEN
+                    ELSE
+                        2DROP              ( ptr rem )
+                    THEN
+                ELSE
+                    DROP 2DROP             ( ptr rem )
+                THEN
+            THEN
+        ELSE
+            2DROP                          ( ptr rem )
+        THEN
+        \ Advance past line + newline
+        2DUP                               ( ptr rem ptr rem )
+        0                                  ( ptr rem ptr rem i )
+        BEGIN
+            DUP 2 PICK < IF
+                2 PICK OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+            ELSE TRUE THEN
+        UNTIL                              ( ptr rem ptr rem linelen )
+        NIP NIP                            ( ptr rem linelen )
+        1+ DUP >R
+        NEGATE +                           ( ptr rem' )
+        SWAP R> + SWAP                     ( ptr' rem' )
+    REPEAT
+    2DROP FALSE ;
+
+\ PROVIDED ( "name" -- )  Register a module as loaded.
+\   Simply marks the name in the hash table.  The pre-scan in
+\   _MOD-LOAD-BODY handles the actual duplicate-load guard;
+\   this word just does the registration when executed normally.
 : PROVIDED  ( "name" -- )
-    PARSE-NAME
-    _MOD-LOADED? IF
-        \ Duplicate — undo partial defs and abort walk
-        _LD-HERE-SNAP @ HERE - ALLOT    \ restore HERE
-        _LD-LATEST-SNAP @ LATEST!       \ restore LATEST
-        1 _LD-ABORT !
-    ELSE
-        _MOD-MARK
-    THEN ;
+    PARSE-NAME  _MOD-MARK ;
 
 \ MODULE? ( "name" -- flag )  Test if a module is already loaded.
 : MODULE?  ( "name" -- flag )
@@ -11034,6 +11122,8 @@ CREATE _MOD-VAL  1 ALLOT
 \   This is the core of LOAD without the PARSE-NAME call.
 \   CWD must already point to the target directory (set by
 \   _RESOLVE-PATH when the REQUIRE argument contains '/').
+\   After reading the file, pre-scans for PROVIDED.  If the module
+\   is already loaded, skips execution entirely (zero side effects).
 : _MOD-LOAD-BODY  ( -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
@@ -11059,6 +11149,25 @@ CREATE _MOD-VAL  1 ALLOT
     DUP DISK-N!
     DISK-READ
     2DROP
+    \ Pre-scan: look for PROVIDED before executing anything.
+    \ Save/restore NAMEBUF across prescan (NAMEBUF holds the
+    \ filename we just loaded; prescan overwrites it with the
+    \ PROVIDED argument if found).
+    NAMEBUF _PS-NBSAVE 24 CMOVE         \ save NAMEBUF
+    _MOD-PRESCAN IF
+        \ PROVIDED line found — check if already loaded
+        _MOD-LOADED? IF
+            \ Already loaded — skip execution entirely
+            _PS-NBSAVE NAMEBUF 24 CMOVE  \ restore NAMEBUF
+            _LD-RESTORE EXIT
+        THEN
+        \ First time — restore NAMEBUF; _LD-WALK will execute
+        \ PROVIDED which registers the name.
+        _PS-NBSAVE NAMEBUF 24 CMOVE
+    ELSE
+        \ No PROVIDED found — restore NAMEBUF; load unconditionally
+        _PS-NBSAVE NAMEBUF 24 CMOVE
+    THEN
     _LD-WALK
     _LD-RESTORE ;
 

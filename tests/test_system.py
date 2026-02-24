@@ -19359,7 +19359,12 @@ class TestKDOSModuleSystem(_KDOSTestBase):
 
 
 class TestModuleProvidedGuard(_KDOSTestBase):
-    """Rich tests for the PROVIDED-as-sole-guard module system.
+    """Rich tests for the pre-scan PROVIDED guard module system.
+
+    The pre-scan reads the file buffer before executing any line,
+    looking for a PROVIDED statement.  If found and the module is
+    already loaded, _LD-WALK is skipped entirely — zero lines
+    execute, zero side effects, zero dictionary pollution.
 
     Disk layout:
         /
@@ -19367,6 +19372,9 @@ class TestModuleProvidedGuard(_KDOSTestBase):
         ├── math.f            — leaf, no deps.  Defines MATH-ADD
         ├── late.f            — PROVIDED not first line (VARIABLE before it)
         ├── noguard.f         — NO PROVIDED at all
+        ├── commented.f       — comment before PROVIDED (\\ header line)
+        ├── indented.f        — PROVIDED with leading spaces
+        ├── fakeprov.f        — PROVIDED inside a comment (should NOT match)
         ├── app.f             — diamond root: requires format.f + headers.f
         ├── utils/
         │   ├── format.f      — REQUIRE ../string.f,  defines FMT-OK
@@ -19377,13 +19385,17 @@ class TestModuleProvidedGuard(_KDOSTestBase):
 
     Key scenarios tested:
       1. Diamond dependency (string.f loaded once via two paths)
-      2. PROVIDED not first line — rollback undoes partial defs
+      2. PROVIDED not first line — pre-scan finds it, zero execution on dup
       3. Deep chain (app → format → string, 3 levels)
       4. Cross-directory requires (../string.f from utils/ and net/)
       5. Same-directory require (proto.f → headers.f)
       6. File without PROVIDED gets reloaded every time
       7. MODULE? / MODULES reflect correct state after complex load
-      8. Dictionary cleanliness after rollback
+      8. Zero side effects on duplicate (HERE unchanged, no VARIABLEs)
+      9. Comment lines before PROVIDED are skipped by prescan
+     10. Leading whitespace before PROVIDED is handled
+     11. PROVIDED inside a comment line does NOT trigger the guard
+     12. Order independence across different load paths
     """
 
     # ── Module source files ──────────────────────────────────────────
@@ -19432,7 +19444,7 @@ class TestModuleProvidedGuard(_KDOSTestBase):
     )
 
     # PROVIDED is NOT first — there's a VARIABLE before it.
-    # On second load the VARIABLE should be rolled back.
+    # Pre-scan finds PROVIDED on line 2; on dup, nothing executes.
     MOD_LATE = (
         b"VARIABLE LATE-SCRATCH\n"
         b"PROVIDED late.f\n"
@@ -19445,17 +19457,41 @@ class TestModuleProvidedGuard(_KDOSTestBase):
         b"VARIABLE _NG-CNT  _NG-CNT @ 1+ _NG-CNT !\n"
     )
 
+    # Comment lines before PROVIDED — prescan should skip them.
+    MOD_COMMENTED = (
+        b"\\ commented.f -- a module with header comments\n"
+        b"\\ Author: test\n"
+        b"PROVIDED commented.f\n"
+        b": CMT-OK 77 ;\n"
+    )
+
+    # PROVIDED with leading whitespace — prescan skips whitespace.
+    MOD_INDENTED = (
+        b"  PROVIDED indented.f\n"
+        b": IND-OK 88 ;\n"
+    )
+
+    # PROVIDED inside a comment line — should NOT be detected.
+    # This file has no real PROVIDED, so no guard.
+    MOD_FAKEPROV = (
+        b"\\ This file uses PROVIDED fakeprov.f as documentation only\n"
+        b"VARIABLE _FP-CNT  _FP-CNT @ 1+ _FP-CNT !\n"
+    )
+
     def _build_image(self):
         """Create a disk image with the full module tree."""
         path = self._make_formatted_image()
         fs = MP64FS.load(path)
 
         # Root-level modules
-        fs.inject_file("string.f",  self.MOD_STRING,  ftype=FTYPE_FORTH)
-        fs.inject_file("math.f",    self.MOD_MATH,    ftype=FTYPE_FORTH)
-        fs.inject_file("late.f",    self.MOD_LATE,    ftype=FTYPE_FORTH)
-        fs.inject_file("noguard.f", self.MOD_NOGUARD, ftype=FTYPE_FORTH)
-        fs.inject_file("app.f",     self.MOD_APP,     ftype=FTYPE_FORTH)
+        fs.inject_file("string.f",    self.MOD_STRING,    ftype=FTYPE_FORTH)
+        fs.inject_file("math.f",      self.MOD_MATH,      ftype=FTYPE_FORTH)
+        fs.inject_file("late.f",      self.MOD_LATE,      ftype=FTYPE_FORTH)
+        fs.inject_file("noguard.f",   self.MOD_NOGUARD,   ftype=FTYPE_FORTH)
+        fs.inject_file("app.f",       self.MOD_APP,       ftype=FTYPE_FORTH)
+        fs.inject_file("commented.f", self.MOD_COMMENTED, ftype=FTYPE_FORTH)
+        fs.inject_file("indented.f",  self.MOD_INDENTED,  ftype=FTYPE_FORTH)
+        fs.inject_file("fakeprov.f",  self.MOD_FAKEPROV,  ftype=FTYPE_FORTH)
 
         # utils/ directory
         fs.mkdir("utils")
@@ -19497,9 +19533,28 @@ class TestModuleProvidedGuard(_KDOSTestBase):
                 "REQUIRE string.f",
                 "_STR-LOADED @ .",
             ], storage_image=img)
-            # _STR-LOADED incremented once on first load, rolled back
-            # on second load (PROVIDED fires and aborts).
+            # Pre-scan catches PROVIDED on second REQUIRE; zero lines
+            # execute, so _STR-LOADED stays at 1.
             self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_leaf_idempotent_zero_side_effects(self):
+        """Second REQUIRE produces zero side effects — HERE unchanged."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE string.f",
+                "HERE .",
+                "REQUIRE string.f",
+                "HERE .",
+            ], storage_image=img)
+            numbers = re.findall(r'\b(\d+)\b', text)
+            here_vals = [int(n) for n in numbers if int(n) > 1000]
+            self.assertGreaterEqual(len(here_vals), 2,
+                f"Expected two HERE values, got: {here_vals}")
+            self.assertEqual(here_vals[0], here_vals[1],
+                f"HERE changed on dup REQUIRE: {here_vals[0]} vs {here_vals[1]}")
         finally:
             os.unlink(img)
 
@@ -19569,7 +19624,7 @@ class TestModuleProvidedGuard(_KDOSTestBase):
     def test_cross_dir_then_root_idempotent(self):
         """Load string.f via net/headers.f, then REQUIRE string.f from root.
 
-        Second REQUIRE should be a no-op (PROVIDED guard fires).
+        Second REQUIRE should be a no-op (pre-scan catches PROVIDED).
         """
         img = self._build_image()
         try:
@@ -19596,11 +19651,12 @@ class TestModuleProvidedGuard(_KDOSTestBase):
         finally:
             os.unlink(img)
 
-    def test_provided_not_first_line_rollback(self):
-        """Second REQUIRE of late.f rolls back the VARIABLE created before PROVIDED.
+    def test_provided_not_first_line_zero_side_effects(self):
+        """Second REQUIRE of late.f has zero side effects.
 
-        HERE should be the same before and after the second REQUIRE.
-        LATE-VAL should still work (from the first load).
+        Pre-scan finds PROVIDED on line 2.  Since it's already loaded,
+        _LD-WALK is skipped entirely.  The VARIABLE on line 1 is never
+        executed.  HERE must be unchanged.
         """
         img = self._build_image()
         try:
@@ -19611,18 +19667,15 @@ class TestModuleProvidedGuard(_KDOSTestBase):
                 "HERE .",
                 "LATE-VAL .",
             ], storage_image=img)
-            lines = text.strip().split()
-            # Find the two HERE values — they should be the same
-            # (the second REQUIRE's partial defs were rolled back).
-            # We'll parse all numbers and check LATE-VAL still returns 42.
             self.assertIn("42 ", text)
-            # Both HERE values should match
+            # Both HERE values must be identical — zero execution on dup
             numbers = re.findall(r'\b(\d+)\b', text)
-            # The first two large numbers (HERE addresses) should be equal.
             here_vals = [int(n) for n in numbers if int(n) > 1000]
-            if len(here_vals) >= 2:
-                self.assertEqual(here_vals[0], here_vals[1],
-                    f"HERE not restored after rollback: {here_vals[0]} vs {here_vals[1]}")
+            self.assertGreaterEqual(len(here_vals), 2,
+                f"Expected two HERE values, got: {here_vals}")
+            self.assertEqual(here_vals[0], here_vals[1],
+                f"HERE changed on dup REQUIRE (late.f): "
+                f"{here_vals[0]} vs {here_vals[1]}")
         finally:
             os.unlink(img)
 
@@ -19639,15 +19692,97 @@ class TestModuleProvidedGuard(_KDOSTestBase):
                 "REQUIRE noguard.f",
                 "_NG-CNT @ .",
             ], storage_image=img)
-            # Loaded 3 times; each load does _NG-CNT @ 1+ _NG-CNT !
-            # But each load also re-creates _NG-CNT (VARIABLE),
-            # so the latest _NG-CNT is a fresh variable with value 1.
-            # Actually: each REQUIRE triggers _LD-WALK which snapshots
-            # HERE/LATEST. Since there's no PROVIDED to abort, all lines
-            # execute. Each load creates a new VARIABLE _NG-CNT shadowing
-            # the previous one, then increments it from 0 to 1.
+            # Loaded 3 times; each load re-creates VARIABLE _NG-CNT
+            # (shadowing previous), then increments from 0 to 1.
             # The final _NG-CNT @ should be 1 (the latest shadow).
             self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_comment_before_provided(self):
+        """Prescan skips comment lines and finds PROVIDED below them."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE commented.f",
+                "CMT-OK .",
+            ], storage_image=img)
+            self.assertIn("77 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_comment_before_provided_idempotent(self):
+        """Prescan skips comments, finds PROVIDED; dup is zero-execution."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE commented.f",
+                "HERE .",
+                "REQUIRE commented.f",
+                "HERE .",
+                "CMT-OK .",
+            ], storage_image=img)
+            self.assertIn("77 ", text)
+            numbers = re.findall(r'\b(\d+)\b', text)
+            here_vals = [int(n) for n in numbers if int(n) > 1000]
+            self.assertGreaterEqual(len(here_vals), 2)
+            self.assertEqual(here_vals[0], here_vals[1],
+                f"HERE changed on dup REQUIRE (commented.f): "
+                f"{here_vals[0]} vs {here_vals[1]}")
+        finally:
+            os.unlink(img)
+
+    def test_indented_provided(self):
+        """Prescan handles leading whitespace before PROVIDED."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE indented.f",
+                "IND-OK .",
+            ], storage_image=img)
+            self.assertIn("88 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_indented_provided_idempotent(self):
+        """Indented PROVIDED: dup REQUIRE has zero side effects."""
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE indented.f",
+                "HERE .",
+                "REQUIRE indented.f",
+                "HERE .",
+            ], storage_image=img)
+            numbers = re.findall(r'\b(\d+)\b', text)
+            here_vals = [int(n) for n in numbers if int(n) > 1000]
+            self.assertGreaterEqual(len(here_vals), 2)
+            self.assertEqual(here_vals[0], here_vals[1],
+                f"HERE changed on dup REQUIRE (indented.f): "
+                f"{here_vals[0]} vs {here_vals[1]}")
+        finally:
+            os.unlink(img)
+
+    def test_provided_in_comment_not_guard(self):
+        """PROVIDED inside a comment line does NOT act as a guard.
+
+        fakeprov.f has '\\ ... PROVIDED fakeprov.f ...' in a comment
+        but no actual PROVIDED call.  It should reload every time.
+        """
+        img = self._build_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE fakeprov.f",
+                "REQUIRE fakeprov.f",
+                "_FP-CNT @ .",
+            ], storage_image=img)
+            # No guard → reloaded twice, each time re-creating VARIABLE
+            # and incrementing from 0 to 1. Latest shadow has value 1.
+            self.assertIn("1 ", text)
+            # Crucially, it was NOT treated as already-loaded.
+            # If prescan incorrectly matched the comment, the second
+            # REQUIRE would be skipped and _FP-CNT would not exist.
+            self.assertNotIn("not found", text.lower())
         finally:
             os.unlink(img)
 
@@ -19698,7 +19833,7 @@ class TestModuleProvidedGuard(_KDOSTestBase):
             os.unlink(img)
 
     def test_require_after_provided_interactive(self):
-        """Interactive PROVIDED then REQUIRE of same name is a no-op."""
+        """Interactive PROVIDED then REQUIRE of same name is no-op."""
         img = self._build_image()
         try:
             text = self._run_kdos([

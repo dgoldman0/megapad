@@ -106,24 +106,25 @@ with optional SDL2 display in the emulator.
 
 ### Commit 4: KDOS module system (`REQUIRE`)
 
-- `kdos.f` §20: Module system (~60 lines)
+- `kdos.f` §20: Module system (~120 lines)
   - `_MOD-HT` — hash table (16-byte key, 1-byte value, 32 slots)
-  - `PROVIDED` ( "name" -- ) — sole duplicate-load guard; if name
-    is already registered, rolls back HERE/LATEST and aborts the
-    current file walk; otherwise registers the name and continues.
-    Safe even when not the first line — partial definitions are undone.
-  - `REQUIRE` ( "filename" -- ) — resolve path and LOAD the file;
-    the file's own PROVIDED handles deduplication.
-    Accepts relative paths (../lib/util.f).
+  - `_MOD-PRESCAN` — scans file buffer for a PROVIDED line *before*
+    executing anything.  Skips comment lines and leading whitespace.
+    If found and name already in hash → skip `_LD-WALK` entirely
+    (zero lines execute, zero side effects, zero dictionary pollution).
+  - `PROVIDED` ( "name" -- ) — registers module name in hash table.
+    Pre-scan handles the guard; PROVIDED is just a plain marker.
+  - `REQUIRE` ( "filename" -- ) — resolve path, LOAD file, pre-scan
+    guards against duplicate loading.  Accepts relative paths.
   - `MODULES` — list all loaded modules
   - `MODULE?` ( "name" -- flag ) — check if module is loaded
 - `diskutil.py`: Ensure Forth module files use `FTYPE_FORTH` (3)
-- Tests: `TestModuleSystem` in `test_system.py`
-  - Load once, REQUIRE twice (idempotent — no double-define errors)
-  - PROVIDED guards against duplicate loading (with rollback)
-  - MODULE? query
-  - Not-found error handling
-  - MODULES listing
+- Tests: `TestModuleSystem` + `TestModuleProvidedGuard` in `test_system.py`
+  - Diamond dependencies, deep chains, cross-directory REQUIRE
+  - Zero side effects on duplicate (HERE unchanged)
+  - Comment lines / leading whitespace before PROVIDED
+  - PROVIDED inside comment doesn't trigger guard
+  - MODULE? query, MODULES listing, order independence
 
 ### Commit 5: KDOS graphics module (graphics.f)
 
