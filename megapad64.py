@@ -1259,6 +1259,7 @@ class Megapad64:
         self.pc = handler
         self.flag_i = 0       # mask interrupts
         self.priv_level = 0   # escalate to supervisor
+        self.idle = False     # interrupt wakes CPU from idle
 
     # =====================================================================
     #  STEP — the core decode/execute loop

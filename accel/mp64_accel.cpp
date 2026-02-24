@@ -526,6 +526,7 @@ static void do_trap(CPUState& s, int ivec_id) {
     push64(s, pc(s));
     s.flag_i = 0;
     s.priv_level = 0;  // escalate to supervisor
+    s.idle = false;     // interrupt wakes CPU from idle
     s.ivec_id = ivec_id;
     uint64_t handler = mem_read64(s, s.ivt_base + ivec_id * 8);
     pc(s) = handler;

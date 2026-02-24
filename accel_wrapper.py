@@ -529,6 +529,7 @@ def {_attr}(self, v):
         self.push64(self.pc)
         self.flag_i = 0
         self.priv_level = 0  # escalate to supervisor
+        self.idle = False     # interrupt wakes CPU from idle
         self.ivec_id = ivec_id
         handler = self.mem_read64(self.ivt_base + ivec_id * 8)
         self.pc = handler
