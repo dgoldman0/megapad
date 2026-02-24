@@ -11086,7 +11086,7 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
                         2DROP              ( ptr rem )
                     THEN
                 ELSE
-                    DROP 2DROP             ( ptr rem )
+                    2DROP                  ( ptr rem )
                 THEN
             THEN
         ELSE
@@ -11161,8 +11161,10 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
             _PS-NBSAVE NAMEBUF 24 CMOVE  \ restore NAMEBUF
             _LD-RESTORE EXIT
         THEN
-        \ First time — restore NAMEBUF; _LD-WALK will execute
-        \ PROVIDED which registers the name.
+        \ First time — pre-register NOW so that any mutual
+        \ REQUIRE during _LD-WALK sees us as already loaded.
+        \ NAMEBUF still holds the PROVIDED name from prescan.
+        _MOD-MARK
         _PS-NBSAVE NAMEBUF 24 CMOVE
     ELSE
         \ No PROVIDED found — restore NAMEBUF; load unconditionally

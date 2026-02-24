@@ -19897,6 +19897,807 @@ class TestModuleProvidedGuard(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    # ── Aggressive path-walk edge cases ──────────────────────────────
+
+    # Additional module for deep nesting: utils/sub/deep.f
+    MOD_DEEP = (
+        b"PROVIDED deep.f\n"
+        b"REQUIRE ../../string.f\n"
+        b": DEEP-OK STRING-VER 10 + ;\n"  # 110
+    )
+
+    # Module that uses back-and-forth path (navigate dir then ..)
+    MOD_ZIGZAG = (
+        b"PROVIDED zigzag.f\n"
+        b"REQUIRE utils/../string.f\n"
+        b": ZIG-OK STRING-VER 5 + ;\n"    # 105
+    )
+
+    # Module that uses absolute path from a subdirectory
+    MOD_ABSREQ = (
+        b"PROVIDED absreq.f\n"
+        b"REQUIRE /utils/format.f\n"
+        b": ABS-OK FMT-OK 3 + ;\n"        # 104
+    )
+
+    # Module that uses complex multi-hop cross-dir:
+    #   from net/ →  ../utils/convert.f  (up to root, into utils/)
+    # plus a back-and-forth:  ../net/../string.f  (up, into net, up, find string)
+    MOD_CROSSHOP = (
+        b"PROVIDED crosshop.f\n"
+        b"REQUIRE ../utils/convert.f\n"
+        b"REQUIRE ../net/../string.f\n"
+        b": XH-OK CVT-OK STRING-VER + ;\n"  # 7 + 100 = 107
+    )
+
+    def _build_deep_image(self):
+        """Extend the standard image with deeper directory nesting."""
+        path = self._build_image()
+        fs = MP64FS.load(path)
+
+        # Create utils/sub/ directory and inject deep.f
+        fs.mkdir("utils/sub")
+        fs.inject_file("deep.f", self.MOD_DEEP, ftype=FTYPE_FORTH,
+                        path="/utils/sub")
+
+        # Inject zigzag.f at root (uses utils/../string.f)
+        fs.inject_file("zigzag.f", self.MOD_ZIGZAG, ftype=FTYPE_FORTH)
+
+        # Inject absreq.f inside net/ (uses /utils/format.f — absolute)
+        fs.inject_file("absreq.f", self.MOD_ABSREQ, ftype=FTYPE_FORTH,
+                        path="/net")
+
+        # Inject crosshop.f inside net/ (complex cross-dir paths)
+        fs.inject_file("crosshop.f", self.MOD_CROSSHOP, ftype=FTYPE_FORTH,
+                        path="/net")
+
+        fs.save(path)
+        return path
+
+    def test_double_parent_resolve(self):
+        """utils/sub/deep.f requires ../../string.f (two levels up).
+
+        DEEP-OK = STRING-VER + 10 = 110.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD utils",
+                "CD sub",
+                "REQUIRE deep.f",
+                "DEEP-OK .",
+            ], storage_image=img)
+            self.assertIn("110 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_double_parent_idempotent(self):
+        """string.f loaded via ../../ path is the same as /string.f."""
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD utils",
+                "CD sub",
+                "REQUIRE deep.f",
+                "CD /",
+                "REQUIRE string.f",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            # string.f loaded once via ../../string.f, second REQUIRE
+            # from root is prescan-skipped.
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_back_and_forth_path(self):
+        """REQUIRE utils/../string.f navigates into utils/ then back out.
+
+        ZIG-OK = STRING-VER + 5 = 105.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE zigzag.f",
+                "ZIG-OK .",
+            ], storage_image=img)
+            self.assertIn("105 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_back_and_forth_idempotent(self):
+        """string.f loaded via utils/../ is same as direct load."""
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE zigzag.f",
+                "REQUIRE string.f",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            # string.f via utils/../string.f, then direct REQUIRE
+            # skipped by prescan.
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_absolute_path_from_subdir(self):
+        """net/absreq.f uses REQUIRE /utils/format.f (absolute path).
+
+        ABS-OK = FMT-OK + 3 = 101 + 3 = 104.
+        format.f also pulls in string.f via ../string.f.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE absreq.f",
+                "ABS-OK .",
+            ], storage_image=img)
+            self.assertIn("104 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_absolute_path_idempotent(self):
+        """format.f loaded via absolute path is same as relative."""
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE absreq.f",
+                "CD /",
+                "CD utils",
+                "REQUIRE format.f",
+                "REQUIRE ../string.f",
+                "_STR-LOADED @ .",
+                'MODULE? format.f IF ." FMT" THEN',
+            ], storage_image=img)
+            # format.f + string.f already loaded via absolute path;
+            # re-require from utils/ should be no-ops.
+            self.assertIn("1 ", text)
+            self.assertIn("FMT", text)
+        finally:
+            os.unlink(img)
+
+    def test_complex_crossdir_hop(self):
+        """net/crosshop.f does ../utils/convert.f and ../net/../string.f.
+
+        The second path is a wild zigzag: up to root, into net, back
+        up to root, then find string.f.
+        XH-OK = CVT-OK + STRING-VER = 7 + 100 = 107.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE crosshop.f",
+                "XH-OK .",
+            ], storage_image=img)
+            self.assertIn("107 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_complex_crossdir_all_registered(self):
+        """After crosshop load, all transitive deps are registered."""
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD net",
+                "REQUIRE crosshop.f",
+                'MODULE? crosshop.f IF ." X" THEN',
+                'MODULE? convert.f  IF ." C" THEN',
+                'MODULE? math.f     IF ." M" THEN',
+                'MODULE? string.f   IF ." S" THEN',
+                "MODULES",
+            ], storage_image=img)
+            for tag in ("X", "C", "M", "S"):
+                self.assertIn(tag, text)
+            self.assertIn("4 ", text)  # 4 modules total
+        finally:
+            os.unlink(img)
+
+    def test_deep_then_diamond_idempotent(self):
+        """Load deep.f (pulls string.f via ../../), then app.f (diamond).
+
+        string.f must not reload; all words must work.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                "CD utils",
+                "CD sub",
+                "REQUIRE deep.f",
+                "CD /",
+                "REQUIRE app.f",
+                "DEEP-OK .",
+                "APP-OK .",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            self.assertIn("110 ", text)  # DEEP-OK
+            self.assertIn("301 ", text)  # APP-OK
+            self.assertIn("1 ", text)    # string.f loaded once
+        finally:
+            os.unlink(img)
+
+    def test_all_paths_converge(self):
+        """Load string.f from 4 different paths: direct, ../, ../../,
+        utils/../, /utils/../.  It must be loaded exactly once.
+        """
+        img = self._build_deep_image()
+        try:
+            text = self._run_kdos([
+                # Path 1: direct
+                "REQUIRE string.f",
+                # Path 2: from utils/ via ../string.f
+                "CD utils",
+                "REQUIRE format.f",
+                # Path 3: from utils/sub/ via ../../string.f
+                "CD sub",
+                "REQUIRE deep.f",
+                # Path 4: back-and-forth utils/../string.f
+                "CD /",
+                "REQUIRE zigzag.f",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    # ── Sibling-directory triple-require scenario ────────────────────
+    # Reproduces: a file in app/ doing three ../sibling/ requires.
+
+    MOD_HTTP = (
+        b"PROVIDED http.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": HTTP-OK STRING-VER 50 + ;\n"   # 150
+    )
+
+    MOD_JSON = (
+        b"PROVIDED json.f\n"
+        b"REQUIRE string.f\n"
+        b": JSON-OK STRING-VER 20 + ;\n"   # 120
+    )
+
+    # app/main.f — requires from 3 sibling dirs via ../
+    MOD_MAIN = (
+        b"PROVIDED main.f\n"
+        b"REQUIRE ../net/http.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b"REQUIRE ../utils/json.f\n"
+        b": MAIN-OK HTTP-OK JSON-OK + ;\n"  # 150 + 120 = 270
+    )
+
+    def _build_sibling_image(self):
+        """Disk with app/, net/, utils/ — sibling directory requires."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+
+        # /utils/string.f (shared leaf)
+        fs.mkdir("utils")
+        fs.inject_file("string.f", self.MOD_STRING, ftype=FTYPE_FORTH,
+                        path="/utils")
+
+        # /utils/json.f (depends on ../utils/string.f — same dir actually)
+        fs.inject_file("json.f", self.MOD_JSON, ftype=FTYPE_FORTH,
+                        path="/utils")
+
+        # /net/http.f (depends on ../utils/string.f)
+        fs.mkdir("net")
+        fs.inject_file("http.f", self.MOD_HTTP, ftype=FTYPE_FORTH,
+                        path="/net")
+
+        # /app/main.f (depends on ../net/http.f, ../utils/string.f,
+        #              ../utils/json.f)
+        fs.mkdir("app")
+        fs.inject_file("main.f", self.MOD_MAIN, ftype=FTYPE_FORTH,
+                        path="/app")
+
+        fs.save(path)
+        return path
+
+    def test_sibling_triple_require(self):
+        """app/main.f does REQUIRE ../net/http.f, ../utils/string.f,
+        ../utils/json.f.  All three cross into sibling directories.
+
+        MAIN-OK = HTTP-OK + JSON-OK = 150 + 120 = 270.
+        string.f must load exactly once (diamond via http.f and main.f).
+        """
+        img = self._build_sibling_image()
+        try:
+            text = self._run_kdos([
+                "CD app",
+                "REQUIRE main.f",
+                "MAIN-OK .",
+                "_STR-LOADED @ .",
+            ], storage_image=img)
+            self.assertIn("270 ", text)
+            self.assertIn("1 ", text)  # string.f loaded once
+        finally:
+            os.unlink(img)
+
+    def test_sibling_cwd_restored(self):
+        """After loading app/main.f (which traverses net/, utils/),
+        CWD is back to app/.  Verify with PWD.
+        """
+        img = self._build_sibling_image()
+        try:
+            text = self._run_kdos([
+                "CD app",
+                "REQUIRE main.f",
+                "PWD",
+            ], storage_image=img)
+            self.assertIn("/app/", text)
+        finally:
+            os.unlink(img)
+
+    def test_sibling_all_modules_registered(self):
+        """After app/main.f, all 4 modules are in the hash table."""
+        img = self._build_sibling_image()
+        try:
+            text = self._run_kdos([
+                "CD app",
+                "REQUIRE main.f",
+                'MODULE? main.f   IF ." M" THEN',
+                'MODULE? http.f   IF ." H" THEN',
+                'MODULE? string.f IF ." S" THEN',
+                'MODULE? json.f   IF ." J" THEN',
+                "MODULES",
+            ], storage_image=img)
+            for tag in ("M", "H", "S", "J"):
+                self.assertIn(tag, text)
+            self.assertIn("4 ", text)
+        finally:
+            os.unlink(img)
+
+    # ── Large multi-directory project (atproto-like) ─────────────────
+    # Reproduces a real project structure:
+    #   /utils/string.f  /utils/json.f  /utils/datetime.f
+    #   /net/url.f  /net/headers.f  /net/base64.f  /net/http.f  /net/uri.f
+    #   /atproto/xrpc.f  /atproto/session.f  /atproto/aturi.f  /atproto/repo.f
+    #   /bsky.f  (root, requires all of the above)
+    #
+    # xrpc.f does:
+    #   REQUIRE ../net/http.f
+    #   REQUIRE ../utils/string.f
+    #   REQUIRE ../utils/json.f
+    #
+    # This tests deep cross-directory nesting with many sequential
+    # REQUIREs from a single root file.
+
+    # Leaf modules in /utils/
+    MOD_U_STRING = (
+        b"PROVIDED string.f\n"
+        b"VARIABLE _USTR-CNT  _USTR-CNT @ 1+ _USTR-CNT !\n"
+        b": U-STR 10 ;\n"
+    )
+    MOD_U_JSON = (
+        b"PROVIDED json.f\n"
+        b"REQUIRE string.f\n"
+        b": U-JSON U-STR 1+ ;\n"          # 11
+    )
+    MOD_U_DATETIME = (
+        b"PROVIDED datetime.f\n"
+        b": U-DT 12 ;\n"
+    )
+
+    # Leaf modules in /net/
+    MOD_N_URL = (
+        b"PROVIDED url.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": N-URL U-STR 20 + ;\n"         # 30
+    )
+    MOD_N_HEADERS = (
+        b"PROVIDED headers2.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": N-HDR U-STR 21 + ;\n"         # 31
+    )
+    MOD_N_BASE64 = (
+        b"PROVIDED base64.f\n"
+        b": N-B64 13 ;\n"
+    )
+    MOD_N_HTTP = (
+        b"PROVIDED http2.f\n"
+        b"REQUIRE url.f\n"
+        b"REQUIRE headers.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": N-HTTP N-URL N-HDR + ;\n"     # 30 + 31 = 61
+    )
+    MOD_N_URI = (
+        b"PROVIDED uri.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": N-URI U-STR 22 + ;\n"         # 32
+    )
+
+    # Modules in /atproto/ — these do ../net/ and ../utils/ requires
+    MOD_A_XRPC = (
+        b"PROVIDED xrpc.f\n"
+        b"REQUIRE ../net/http.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b"REQUIRE ../utils/json.f\n"
+        b": A-XRPC N-HTTP U-JSON + ;\n"   # 61 + 11 = 72
+    )
+    MOD_A_SESSION = (
+        b"PROVIDED session.f\n"
+        b"REQUIRE xrpc.f\n"
+        b"REQUIRE ../utils/json.f\n"
+        b": A-SESS A-XRPC 1+ ;\n"         # 73
+    )
+    MOD_A_ATURI = (
+        b"PROVIDED aturi.f\n"
+        b"REQUIRE ../net/uri.f\n"
+        b"REQUIRE ../utils/string.f\n"
+        b": A-ATURI N-URI U-STR + ;\n"    # 32 + 10 = 42
+    )
+    MOD_A_REPO = (
+        b"PROVIDED repo.f\n"
+        b"REQUIRE xrpc.f\n"
+        b"REQUIRE ../utils/json.f\n"
+        b": A-REPO A-XRPC 2 + ;\n"        # 74
+    )
+
+    # Root file: /bsky.f — 12 sequential REQUIREs
+    MOD_BSKY = (
+        b"PROVIDED bsky.f\n"
+        b"REQUIRE utils/string.f\n"
+        b"REQUIRE utils/json.f\n"
+        b"REQUIRE utils/datetime.f\n"
+        b"REQUIRE net/url.f\n"
+        b"REQUIRE net/headers.f\n"
+        b"REQUIRE net/base64.f\n"
+        b"REQUIRE net/http.f\n"
+        b"REQUIRE net/uri.f\n"
+        b"REQUIRE atproto/xrpc.f\n"
+        b"REQUIRE atproto/session.f\n"
+        b"REQUIRE atproto/aturi.f\n"
+        b"REQUIRE atproto/repo.f\n"
+        b": BSKY-OK A-XRPC A-SESS + A-ATURI + A-REPO + ;\n"
+        # 72 + 73 + 42 + 74 = 261
+    )
+
+    def _build_atproto_image(self):
+        """Build disk with full atproto-like project structure."""
+        path = self._make_formatted_image()
+        fs = MP64FS.load(path)
+
+        # /utils/
+        fs.mkdir("utils")
+        fs.inject_file("string.f",   self.MOD_U_STRING,   ftype=FTYPE_FORTH,
+                        path="/utils")
+        fs.inject_file("json.f",     self.MOD_U_JSON,     ftype=FTYPE_FORTH,
+                        path="/utils")
+        fs.inject_file("datetime.f", self.MOD_U_DATETIME, ftype=FTYPE_FORTH,
+                        path="/utils")
+
+        # /net/
+        fs.mkdir("net")
+        fs.inject_file("url.f",     self.MOD_N_URL,     ftype=FTYPE_FORTH,
+                        path="/net")
+        fs.inject_file("headers.f", self.MOD_N_HEADERS, ftype=FTYPE_FORTH,
+                        path="/net")
+        fs.inject_file("base64.f",  self.MOD_N_BASE64,  ftype=FTYPE_FORTH,
+                        path="/net")
+        fs.inject_file("http.f",    self.MOD_N_HTTP,    ftype=FTYPE_FORTH,
+                        path="/net")
+        fs.inject_file("uri.f",     self.MOD_N_URI,     ftype=FTYPE_FORTH,
+                        path="/net")
+
+        # /atproto/
+        fs.mkdir("atproto")
+        fs.inject_file("xrpc.f",    self.MOD_A_XRPC,    ftype=FTYPE_FORTH,
+                        path="/atproto")
+        fs.inject_file("session.f", self.MOD_A_SESSION,  ftype=FTYPE_FORTH,
+                        path="/atproto")
+        fs.inject_file("aturi.f",   self.MOD_A_ATURI,   ftype=FTYPE_FORTH,
+                        path="/atproto")
+        fs.inject_file("repo.f",    self.MOD_A_REPO,    ftype=FTYPE_FORTH,
+                        path="/atproto")
+
+        # Root
+        fs.inject_file("bsky.f",    self.MOD_BSKY,      ftype=FTYPE_FORTH)
+
+        fs.save(path)
+        return path
+
+    def test_atproto_full_load(self):
+        """Load bsky.f (12 sequential REQUIREs across 3 subdirs).
+
+        BSKY-OK = A-XRPC + A-SESS + A-ATURI + A-REPO
+                = 72 + 73 + 42 + 74 = 261.
+        string.f must be loaded exactly once despite being required
+        from many different paths.
+        """
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE bsky.f",
+                "BSKY-OK .",
+                "_USTR-CNT @ .",
+            ], storage_image=img)
+            self.assertIn("261 ", text)
+            self.assertIn("1 ", text)  # string.f loaded once
+        finally:
+            os.unlink(img)
+
+    def test_atproto_xrpc_cross_dir(self):
+        """Load xrpc.f directly from atproto/ — it does
+        REQUIRE ../net/http.f, ../utils/string.f, ../utils/json.f.
+        """
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "CD atproto",
+                "REQUIRE xrpc.f",
+                "A-XRPC .",
+            ], storage_image=img)
+            self.assertIn("72 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_atproto_cwd_stable(self):
+        """After loading bsky.f from root, CWD is still root."""
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE bsky.f",
+                "PWD",
+            ], storage_image=img)
+            # PWD from root prints " /"
+            self.assertIn("/", text)
+            # Should NOT be in a subdirectory
+            self.assertNotIn("/utils/", text)
+            self.assertNotIn("/net/", text)
+            self.assertNotIn("/atproto/", text)
+        finally:
+            os.unlink(img)
+
+    def test_atproto_all_modules_registered(self):
+        """All 12 modules are registered after loading bsky.f."""
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE bsky.f",
+                "MODULES",
+            ], storage_image=img)
+            # 12 modules: bsky, string, json, datetime, url, headers2,
+            # base64, http2, uri, xrpc, session, aturi, repo
+            # Note: PROVIDED names are what matter, not filenames
+            for mod in ("bsky.f", "string.f", "json.f", "datetime.f",
+                        "url.f", "base64.f", "uri.f",
+                        "xrpc.f", "session.f", "aturi.f", "repo.f"):
+                self.assertIn(mod, text)
+        finally:
+            os.unlink(img)
+
+    def test_atproto_from_userland(self):
+        """Load the full atproto tree from userland dictionary mode.
+
+        ENTER-USERLAND switches HERE to the userland zone in ext mem.
+        All definitions from REQUIRE'd files go into userland dict.
+        """
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "ENTER-USERLAND",
+                "REQUIRE bsky.f",
+                "BSKY-OK .",
+                "_USTR-CNT @ .",
+                "MODULES",
+            ], storage_image=img)
+            self.assertIn("261 ", text)
+            self.assertIn("1 ", text)  # string.f loaded once
+            for mod in ("bsky.f", "xrpc.f", "string.f"):
+                self.assertIn(mod, text)
+        finally:
+            os.unlink(img)
+
+    def test_atproto_xrpc_from_userland(self):
+        """Load xrpc.f from atproto/ in userland mode — cross-dir requires."""
+        img = self._build_atproto_image()
+        try:
+            text = self._run_kdos([
+                "ENTER-USERLAND",
+                "CD atproto",
+                "REQUIRE xrpc.f",
+                "A-XRPC .",
+                "_USTR-CNT @ .",
+            ], storage_image=img)
+            self.assertIn("72 ", text)
+            self.assertIn("1 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_atproto_app_load(self):
+        """APP-LOAD a file that does REQUIRE with cross-dir paths."""
+        # Create a loader file that REQUIREs bsky.f and prints results
+        img = self._build_atproto_image()
+        fs = MP64FS.load(img)
+        loader = (
+            b"REQUIRE bsky.f\n"
+            b"BSKY-OK .\n"
+        )
+        fs.inject_file("loader.f", loader, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "APP-LOAD loader.f",
+                "BSKY-OK .",
+            ], storage_image=img)
+            self.assertIn("261 ", text)
+        finally:
+            os.unlink(img)
+
+    # ── Mutual-require (pre-registration) tests ─────────────────────
+
+    # Two files that mutually REQUIRE each other.
+    # REQUIRE appears BEFORE PROVIDED — the deadly pattern.
+    MOD_MUTUAL_A = (
+        b"REQUIRE b.f\n"
+        b"PROVIDED a.f\n"
+        b": A-VAL B-VAL 1+ ;\n"   # uses B-VAL from b.f
+    )
+    MOD_MUTUAL_B = (
+        b"REQUIRE a.f\n"
+        b"PROVIDED b.f\n"
+        b": B-VAL 100 ;\n"
+    )
+
+    # Variant: PROVIDED first (should also work fine)
+    MOD_MUTUAL_C = (
+        b"PROVIDED c.f\n"
+        b"REQUIRE d.f\n"
+        b": C-VAL D-VAL 1+ ;\n"
+    )
+    MOD_MUTUAL_D = (
+        b"PROVIDED d.f\n"
+        b"REQUIRE c.f\n"
+        b": D-VAL 200 ;\n"
+    )
+
+    # Three-way cycle: e → f → g → e
+    MOD_CYCLE_E = (
+        b"REQUIRE f.f\n"
+        b"PROVIDED e.f\n"
+        b": E-VAL F-VAL 1+ ;\n"
+    )
+    MOD_CYCLE_F = (
+        b"REQUIRE g.f\n"
+        b"PROVIDED f.f\n"
+        b": F-VAL G-VAL 1+ ;\n"
+    )
+    MOD_CYCLE_G = (
+        b"REQUIRE e.f\n"
+        b"PROVIDED g.f\n"
+        b": G-VAL 50 ;\n"
+    )
+
+    def _build_mutual_image(self):
+        """Disk image with mutually-requiring modules."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.inject_file("a.f", self.MOD_MUTUAL_A, ftype=FTYPE_FORTH)
+        fs.inject_file("b.f", self.MOD_MUTUAL_B, ftype=FTYPE_FORTH)
+        fs.inject_file("c.f", self.MOD_MUTUAL_C, ftype=FTYPE_FORTH)
+        fs.inject_file("d.f", self.MOD_MUTUAL_D, ftype=FTYPE_FORTH)
+        fs.inject_file("e.f", self.MOD_CYCLE_E, ftype=FTYPE_FORTH)
+        fs.inject_file("f.f", self.MOD_CYCLE_F, ftype=FTYPE_FORTH)
+        fs.inject_file("g.f", self.MOD_CYCLE_G, ftype=FTYPE_FORTH)
+        fs.save(img)
+        return img
+
+    def test_mutual_require_no_infinite_loop(self):
+        """Mutual REQUIRE where REQUIRE precedes PROVIDED doesn't loop."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE a.f",
+                "A-VAL .",
+            ], storage_image=img)
+            self.assertIn("101 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_mutual_require_both_registered(self):
+        """Both modules are registered after mutual REQUIRE."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE a.f",
+                "MODULE? a.f IF .\" A-LOADED\" THEN",
+                "MODULE? b.f IF .\" B-LOADED\" THEN",
+            ], storage_image=img)
+            self.assertIn("A-LOADED", text)
+            self.assertIn("B-LOADED", text)
+        finally:
+            os.unlink(img)
+
+    def test_mutual_require_idempotent(self):
+        """Requiring either side again is a no-op."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE a.f",
+                "REQUIRE b.f",
+                "REQUIRE a.f",
+                "A-VAL .",
+                "B-VAL .",
+            ], storage_image=img)
+            self.assertIn("101 ", text)
+            self.assertIn("100 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_mutual_require_provided_first(self):
+        """Mutual REQUIRE with PROVIDED-first also works."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE c.f",
+                "C-VAL .",
+                "D-VAL .",
+            ], storage_image=img)
+            self.assertIn("201 ", text)
+            self.assertIn("200 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_three_way_cycle(self):
+        """Three-module cycle: e→f→g→e terminates and defines all words."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE e.f",
+                "E-VAL .",
+                "F-VAL .",
+                "G-VAL .",
+            ], storage_image=img)
+            self.assertIn("52 ", text)   # G-VAL=50, F-VAL=51, E-VAL=52
+            self.assertIn("51 ", text)
+            self.assertIn("50 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_three_way_cycle_all_registered(self):
+        """All three modules registered after cycle resolution."""
+        img = self._build_mutual_image()
+        try:
+            text = self._run_kdos([
+                "REQUIRE e.f",
+                "MODULE? e.f IF .\" E-OK\" THEN",
+                "MODULE? f.f IF .\" F-OK\" THEN",
+                "MODULE? g.f IF .\" G-OK\" THEN",
+            ], storage_image=img)
+            self.assertIn("E-OK", text)
+            self.assertIn("F-OK", text)
+            self.assertIn("G-OK", text)
+        finally:
+            os.unlink(img)
+
+    def test_mutual_require_cross_dir(self):
+        """Mutual REQUIRE across directories with .. paths."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.mkdir("libx")
+        fs.mkdir("liby")
+        mod_x = (
+            b"REQUIRE ../liby/y.f\n"
+            b"PROVIDED x.f\n"
+            b": X-VAL Y-VAL 10 + ;\n"
+        )
+        mod_y = (
+            b"REQUIRE ../libx/x.f\n"
+            b"PROVIDED y.f\n"
+            b": Y-VAL 7 ;\n"
+        )
+        fs.inject_file("x.f", mod_x, ftype=FTYPE_FORTH, path="/libx")
+        fs.inject_file("y.f", mod_y, ftype=FTYPE_FORTH, path="/liby")
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "REQUIRE libx/x.f",
+                "X-VAL .",
+            ], storage_image=img)
+            self.assertIn("17 ", text)
+        finally:
+            os.unlink(img)
+
 
 class TestKDOSGraphicsModule(_KDOSTestBase):
     """Tests for graphics.f — framebuffer graphics module."""
