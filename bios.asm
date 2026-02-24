@@ -4329,6 +4329,7 @@ w_backslash:
     ret.l
 
 ; ( (paren comment, IMMEDIATE) — skip until matching )
+;   Supports nested parens: ( outer ( inner ) still comment ) works.
 ;   Works in both interpret and compile modes.
 w_paren:
     ldi64 r9, tib_buffer
@@ -4336,15 +4337,24 @@ w_paren:
     ldn r13, r11              ; R13 = >IN
     ldi64 r11, var_tib_len
     ldn r12, r11              ; R12 = TIB-LEN
+    ldi r0, 1                 ; depth = 1 (the opening paren already consumed)
 w_paren_scan:
     cmp r13, r12
-    breq w_paren_done         ; hit end of line without )
+    breq w_paren_done         ; hit end of line without matching )
     mov r11, r9
     add r11, r13
     ld.b r1, r11
     inc r13
+    cmpi r1, 0x28             ; '(' — nested open
+    brne w_paren_not_open
+    addi r0, 1                ; depth++
+    br w_paren_scan
+w_paren_not_open:
     cmpi r1, 0x29             ; ')'
     brne w_paren_scan
+    subi r0, 1                ; depth--
+    cmpi r0, 0
+    brne w_paren_scan         ; still nested, keep scanning
 w_paren_done:
     ldi64 r11, var_to_in
     str r11, r13              ; update >IN past the )

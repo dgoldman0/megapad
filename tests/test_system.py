@@ -3518,6 +3518,14 @@ class TestKDOS(_KDOSTestBase):
         ])
         self.assertIn("99 ", text)
 
+    def test_paren_comment_nested(self):
+        """Nested paren comments are handled correctly."""
+        text = self._run_kdos([
+            "42 ( outer ( inner ) still comment ) .",
+        ])
+        self.assertIn("42 ", text)
+        self.assertNotIn("???", text)
+
     # -- BIOS tile words --
 
     def test_acc_fetch(self):
