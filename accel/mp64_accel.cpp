@@ -2,12 +2,14 @@
  * mp64_accel.cpp — C++ accelerated core for Megapad-64 emulator
  *
  * Replaces the Python step() loop with a tight C++ implementation.
- * MMIO accesses and tile-engine FP operations call back to Python.
+ * MMIO accesses call back to Python; tile-engine FP operations are now
+ * handled natively in C++ (FP16/BF16 TALU, TMUL, TRED).
  *
  * Build: see setup_accel.py (pybind11 extension module)
  */
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <unistd.h>
@@ -568,7 +570,125 @@ static int next_instruction_size(CPUState& s) {
 }
 
 // ---------------------------------------------------------------------------
-//  Tile helpers for integer MEX
+//  FP16 / BF16 conversion helpers (matches megapad64.py _fp16_to_float etc.)
+// ---------------------------------------------------------------------------
+
+static inline float fp16_to_float(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t frac = h & 0x3FF;
+    if (exp == 0) {
+        if (frac == 0) {
+            // ±0
+            uint32_t bits = sign << 31;
+            float f; std::memcpy(&f, &bits, 4); return f;
+        }
+        // Subnormal → normalise
+        float val = ldexpf((float)frac / 1024.0f, -14);
+        return sign ? -val : val;
+    }
+    if (exp == 0x1F) {
+        if (frac == 0) {
+            uint32_t bits = (sign << 31) | 0x7F800000u;
+            float f; std::memcpy(&f, &bits, 4); return f;  // ±inf
+        }
+        uint32_t bits = (sign << 31) | 0x7FC00000u;  // qNaN
+        float f; std::memcpy(&f, &bits, 4); return f;
+    }
+    float val = ldexpf(1.0f + (float)frac / 1024.0f, (int)exp - 15);
+    return sign ? -val : val;
+}
+
+static inline uint16_t float_to_fp16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    uint32_t sign   = (bits >> 31) & 1;
+    uint32_t exp32  = (bits >> 23) & 0xFF;
+    uint32_t frac32 = bits & 0x7FFFFF;
+
+    // NaN
+    if (exp32 == 0xFF && frac32 != 0)
+        return 0x7E00;  // qNaN
+    // Inf
+    if (exp32 == 0xFF)
+        return (uint16_t)((sign << 15) | 0x7C00);
+    // Zero
+    if (exp32 == 0 && frac32 == 0)
+        return (uint16_t)(sign << 15);
+
+    int new_exp = (int)exp32 - 127 + 15;
+    if (new_exp >= 0x1F)
+        return (uint16_t)((sign << 15) | 0x7C00);  // overflow → ±inf
+    if (new_exp <= 0) {
+        if (new_exp < -10)
+            return (uint16_t)(sign << 15);  // underflow → ±0
+        // Subnormal
+        frac32 |= 0x800000;
+        int shift = 1 - new_exp;
+        uint32_t round_bit = (frac32 >> (12 + shift)) & 1;
+        uint32_t sticky    = (frac32 & ((1u << (12 + shift)) - 1)) ? 1 : 0;
+        uint32_t result    = frac32 >> (13 + shift);
+        if (round_bit && (sticky || (result & 1)))
+            result++;
+        return (uint16_t)((sign << 15) | (result & 0x3FF));
+    }
+    // Normal: round mantissa from 23 bits to 10 bits
+    uint32_t round_bit = (frac32 >> 12) & 1;
+    uint32_t sticky    = (frac32 & 0xFFF) ? 1 : 0;
+    uint32_t frac16    = frac32 >> 13;
+    if (round_bit && (sticky || (frac16 & 1))) {
+        frac16++;
+        if (frac16 >= 0x400) {
+            frac16 = 0;
+            new_exp++;
+            if (new_exp >= 0x1F)
+                return (uint16_t)((sign << 15) | 0x7C00);
+        }
+    }
+    return (uint16_t)((sign << 15) | (new_exp << 10) | (frac16 & 0x3FF));
+}
+
+static inline float bf16_to_float(uint16_t b) {
+    uint32_t bits32 = (uint32_t)b << 16;
+    float f; std::memcpy(&f, &bits32, 4); return f;
+}
+
+static inline uint16_t float_to_bf16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    uint32_t round_bit = (bits >> 15) & 1;
+    uint32_t sticky    = (bits & 0x7FFF) ? 1 : 0;
+    uint32_t result    = bits >> 16;
+    if (round_bit && (sticky || (result & 1)))
+        result++;
+    return (uint16_t)(result & 0xFFFF);
+}
+
+static inline float fp_decode(uint16_t raw, int ew) {
+    return (ew == EW_FP16) ? fp16_to_float(raw) : bf16_to_float(raw);
+}
+
+static inline uint16_t fp_encode(float val, int ew) {
+    return (ew == EW_FP16) ? float_to_fp16(val) : float_to_bf16(val);
+}
+
+static inline bool fp_is_nan(uint16_t raw, int ew) {
+    if (ew == EW_FP16)
+        return ((raw >> 10) & 0x1F) == 0x1F && (raw & 0x3FF) != 0;
+    else  // BF16
+        return ((raw >> 7) & 0xFF) == 0xFF && (raw & 0x7F) != 0;
+}
+
+static inline uint32_t fp32_to_bits(float f) {
+    uint32_t b; std::memcpy(&b, &f, 4); return b;
+}
+
+static inline float bits_to_fp32(uint32_t b) {
+    float f; std::memcpy(&f, &b, 4); return f;
+}
+
+// ---------------------------------------------------------------------------
+//  Tile helpers for MEX
 // ---------------------------------------------------------------------------
 
 static inline uint64_t tile_get_elem(const uint8_t* tile, int lane, int eb) {
@@ -646,11 +766,11 @@ static inline void tile_fill_64bytes(CPUState& s, uint64_t addr, uint8_t fill) {
 }
 
 // ---------------------------------------------------------------------------
-//  Integer MEX core — handles TALU, TMUL, TRED, TSYS for integer types
-//  Returns -1 if we need Python fallback (FP types, LOAD2D/STORE2D, etc.)
+//  MEX core — handles TALU, TMUL, TRED, TSYS for all element types
+//  Returns -1 only for unimplemented ops (LOAD2D/STORE2D etc.)
 // ---------------------------------------------------------------------------
 
-static int exec_mex_integer(CPUState& s, int n) {
+static int exec_mex(CPUState& s, int n) {
     int ss = (n >> 2) & 0x3;
     int op = n & 0x3;
 
@@ -663,9 +783,8 @@ static int exec_mex_integer(CPUState& s, int n) {
 
     int ew_bits = s.tmode & 0x7;
     bool is_fp = ew_bits >= EW_FP16;
-    if (is_fp) return -1;  // fallback to Python for FP
 
-    int elem_bytes = 1 << ew_bits;
+    int elem_bytes = is_fp ? 2 : (1 << ew_bits);
     int num_lanes = 64 / elem_bytes;
     bool is_signed = (s.tmode >> 4) & 1;
 
@@ -730,7 +849,53 @@ static int exec_mex_integer(CPUState& s, int n) {
         return 1;
     }
 
-    if (op == 0x0) {  // TALU (integer)
+    if (op == 0x0) {  // TALU
+        if (is_fp) {
+            // ---- Floating-point TALU ----
+            uint16_t qnan = (ew_bits == EW_FP16) ? 0x7E00 : 0x7FC0;
+            for (int lane = 0; lane < num_lanes; lane++) {
+                uint16_t ea  = (uint16_t)tile_get_elem(src_a, lane, 2);
+                uint16_t eb_val = (uint16_t)tile_get_elem(src_b, lane, 2);
+                uint16_t r = 0;
+                switch (funct) {
+                    case 2: r = ea & eb_val; break;  // AND — bitwise
+                    case 3: r = ea | eb_val; break;  // OR
+                    case 4: r = ea ^ eb_val; break;  // XOR
+                    case 7: r = ea & 0x7FFF; break;  // ABS — clear sign bit
+                    case 5: {  // MIN — NaN-propagating
+                        if (fp_is_nan(ea, ew_bits) || fp_is_nan(eb_val, ew_bits))
+                            r = qnan;
+                        else {
+                            float fa = fp_decode(ea, ew_bits);
+                            float fb = fp_decode(eb_val, ew_bits);
+                            r = fp_encode(fa < fb ? fa : fb, ew_bits);
+                        }
+                        break;
+                    }
+                    case 6: {  // MAX — NaN-propagating
+                        if (fp_is_nan(ea, ew_bits) || fp_is_nan(eb_val, ew_bits))
+                            r = qnan;
+                        else {
+                            float fa = fp_decode(ea, ew_bits);
+                            float fb = fp_decode(eb_val, ew_bits);
+                            r = fp_encode(fa > fb ? fa : fb, ew_bits);
+                        }
+                        break;
+                    }
+                    default: {  // ADD (0) / SUB (1)
+                        float fa = fp_decode(ea, ew_bits);
+                        float fb = fp_decode(eb_val, ew_bits);
+                        r = fp_encode(funct == 0 ? fa + fb : fa - fb, ew_bits);
+                        break;
+                    }
+                }
+                tile_set_elem(dst, lane, 2, r);
+            }
+            tile_write_64bytes(s, s.tdst, dst);
+            return 0;
+        }
+
+        // ---- Integer TALU ----
         bool saturate = (s.tmode >> 5) & 1;
         for (int lane = 0; lane < num_lanes; lane++) {
             uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
@@ -814,6 +979,102 @@ static int exec_mex_integer(CPUState& s, int n) {
     }
 
     if (op == 0x1) {  // TMUL
+        if (is_fp) {
+            // ---- Floating-point TMUL ----
+            if (funct == 0) {  // MUL
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    tile_set_elem(dst, lane, 2, fp_encode(fa * fb, ew_bits));
+                }
+                tile_write_64bytes(s, s.tdst, dst);
+                return 1;
+            }
+            if (funct == 1) {  // DOT — FP16/BF16 → FP32 accumulate
+                if (s.tctrl & 0x2) {
+                    s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                    s.tctrl &= ~0x2ULL;
+                }
+                float total = 0.0f;
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    total += fa * fb;
+                }
+                if (s.tctrl & 0x1)  // ACC_ACC
+                    total += bits_to_fp32((uint32_t)s.acc[0]);
+                s.acc[0] = fp32_to_bits(total);
+                s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                s.flag_z = (total == 0.0f) ? 1 : 0;
+                return 3;
+            }
+            if (funct == 2) {  // WMUL — fp16/bf16 → fp32 widening multiply
+                uint8_t dst0[64], dst1[64];
+                std::memset(dst0, 0, 64);
+                std::memset(dst1, 0, 64);
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    uint32_t fp32bits = fp32_to_bits(fa * fb);
+                    if (lane < 16)
+                        tile_set_elem(dst0, lane, 4, fp32bits);
+                    else
+                        tile_set_elem(dst1, lane - 16, 4, fp32bits);
+                }
+                tile_write_64bytes(s, s.tdst, dst0);
+                tile_write_64bytes(s, s.tdst + 64, dst1);
+                return 2;
+            }
+            if (funct == 3) {  // MAC — fp mul-accumulate: dst += a*b
+                uint8_t existing[64];
+                tile_read_64bytes(s, s.tdst, existing);
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    float fc = fp_decode((uint16_t)tile_get_elem(existing, lane, 2), ew_bits);
+                    tile_set_elem(dst, lane, 2, fp_encode(fc + fa * fb, ew_bits));
+                }
+                tile_write_64bytes(s, s.tdst, dst);
+                return 2;
+            }
+            if (funct == 4) {  // FMA — dst = a*b + dst
+                uint8_t existing[64];
+                tile_read_64bytes(s, s.tdst, existing);
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    float fc = fp_decode((uint16_t)tile_get_elem(existing, lane, 2), ew_bits);
+                    tile_set_elem(dst, lane, 2, fp_encode(fa * fb + fc, ew_bits));
+                }
+                tile_write_64bytes(s, s.tdst, dst);
+                return 2;
+            }
+            if (funct == 5) {  // DOTACC — 4-way chunked dot, FP32 accumulate
+                int chunk_size = num_lanes / 4;
+                if (s.tctrl & 0x2) {
+                    s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                    s.tctrl &= ~0x2ULL;
+                }
+                for (int k = 0; k < 4; k++) {
+                    float dot = 0.0f;
+                    for (int lane = 0; lane < chunk_size; lane++) {
+                        int idx = k * chunk_size + lane;
+                        float fa = fp_decode((uint16_t)tile_get_elem(src_a, idx, 2), ew_bits);
+                        float fb = fp_decode((uint16_t)tile_get_elem(src_b, idx, 2), ew_bits);
+                        dot += fa * fb;
+                    }
+                    if (s.tctrl & 0x1)  // ACC_ACC
+                        dot += bits_to_fp32((uint32_t)s.acc[k]);
+                    s.acc[k] = fp32_to_bits(dot);
+                }
+                s.flag_z = (s.acc[0] == 0 && s.acc[1] == 0 &&
+                            s.acc[2] == 0 && s.acc[3] == 0) ? 1 : 0;
+                return 3;
+            }
+            return 1;  // unknown FP TMUL funct
+        }
+
+        // ---- Integer TMUL ----
         if (funct == 0) {  // MUL (element-wise)
             for (int lane = 0; lane < num_lanes; lane++) {
                 uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
@@ -857,14 +1118,95 @@ static int exec_mex_integer(CPUState& s, int n) {
     }
 
     if (op == 0x2) {  // TRED (reductions)
-        uint64_t result = 0;
-
         // Handle ACC_ZERO (TCTRL bit 1): clear accumulator, one-shot
         if (s.tctrl & 0x2) {
             s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
             s.tctrl &= ~0x2;  // clear the one-shot bit
         }
         bool acc_acc = (s.tctrl & 0x1) != 0;  // ACC_ACC is bit 0
+
+        if (is_fp) {
+            // ---- Floating-point TRED ----
+            // Decode all lanes
+            float fp_vals[32] = {0};
+            for (int lane = 0; lane < num_lanes; lane++)
+                fp_vals[lane] = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+
+            if (funct == 0) {  // SUM — FP32 accumulate
+                float total = 0.0f;
+                for (int lane = 0; lane < num_lanes; lane++)
+                    total += fp_vals[lane];
+                if (acc_acc)
+                    total += bits_to_fp32((uint32_t)s.acc[0]);
+                s.acc[0] = fp32_to_bits(total);
+                s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                s.flag_z = (total == 0.0f) ? 1 : 0;
+                return 0;
+            }
+            if (funct == 1) {  // MIN
+                float best = fp_vals[0];
+                for (int lane = 1; lane < num_lanes; lane++) {
+                    if (!std::isnan(fp_vals[lane]) && (std::isnan(best) || fp_vals[lane] < best))
+                        best = fp_vals[lane];
+                }
+                s.acc[0] = fp32_to_bits(best);
+                s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                return 0;
+            }
+            if (funct == 2) {  // MAX
+                float best = fp_vals[0];
+                for (int lane = 1; lane < num_lanes; lane++) {
+                    if (!std::isnan(fp_vals[lane]) && (std::isnan(best) || fp_vals[lane] > best))
+                        best = fp_vals[lane];
+                }
+                s.acc[0] = fp32_to_bits(best);
+                s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                return 0;
+            }
+            if (funct == 5) {  // SUMSQ — FP32 accumulate
+                float total = 0.0f;
+                for (int lane = 0; lane < num_lanes; lane++)
+                    total += fp_vals[lane] * fp_vals[lane];
+                if (acc_acc)
+                    total += bits_to_fp32((uint32_t)s.acc[0]);
+                s.acc[0] = fp32_to_bits(total);
+                s.acc[1] = s.acc[2] = s.acc[3] = 0;
+                s.flag_z = (total == 0.0f) ? 1 : 0;
+                return 0;
+            }
+            if (funct == 6) {  // MINIDX
+                int best_idx = 0;
+                float best_val = fp_vals[0];
+                for (int i = 1; i < num_lanes; i++) {
+                    if (!std::isnan(fp_vals[i]) && (std::isnan(best_val) || fp_vals[i] < best_val)) {
+                        best_val = fp_vals[i];
+                        best_idx = i;
+                    }
+                }
+                s.acc[0] = (uint64_t)best_idx;
+                s.acc[1] = fp32_to_bits(best_val);
+                s.acc[2] = s.acc[3] = 0;
+                return 0;
+            }
+            if (funct == 7) {  // MAXIDX
+                int best_idx = 0;
+                float best_val = fp_vals[0];
+                for (int i = 1; i < num_lanes; i++) {
+                    if (!std::isnan(fp_vals[i]) && (std::isnan(best_val) || fp_vals[i] > best_val)) {
+                        best_val = fp_vals[i];
+                        best_idx = i;
+                    }
+                }
+                s.acc[0] = (uint64_t)best_idx;
+                s.acc[1] = fp32_to_bits(best_val);
+                s.acc[2] = s.acc[3] = 0;
+                return 0;
+            }
+            // POPCNT, L1 on FP bits — fall through to integer path
+        }
+
+        // ---- Integer TRED ----
+        uint64_t result = 0;
 
         switch (funct) {
             case 0: {  // SUM
@@ -2073,7 +2415,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
     }
 
     case 0xE: {  // MEX
-        int rc = exec_mex_integer(s, n);
+        int rc = exec_mex(s, n);
         if (rc < 0) {
             // FP tile op — rewind PC to the start of the instruction
             // (including any EXT prefix) so the Python fallback can

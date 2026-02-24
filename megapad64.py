@@ -1100,58 +1100,133 @@ class Megapad64:
         dst = bytearray(64)
 
         if op == 0:  # TALU
-            mask = (1 << (elem_bytes * 8)) - 1
-            for lane in range(num_lanes):
-                ea = tile_get_elem(src_a, lane, elem_bytes)
-                eb_val = tile_get_elem(src_b, lane, elem_bytes)
-                if funct == 0:  # ADD
-                    r = (ea + eb_val) & mask
-                elif funct == 1:  # SUB
-                    r = (ea - eb_val) & mask
-                else:
-                    r = 0
-                tile_set_elem(dst, lane, elem_bytes, r)
-            write_tile(self.tdst, dst)
-
-        elif op == 1:  # TMUL
-            if funct == 0:  # MUL
+            if is_fp:
+                # ---- Floating-point TALU (self-test) ----
+                for lane in range(num_lanes):
+                    ea = tile_get_elem(src_a, lane, elem_bytes)
+                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                    if funct == 0:  # ADD
+                        fa = _fp_decode(ea, ew_bits)
+                        fb = _fp_decode(eb_val, ew_bits)
+                        r = _fp_encode(fa + fb, ew_bits)
+                    elif funct == 1:  # SUB
+                        fa = _fp_decode(ea, ew_bits)
+                        fb = _fp_decode(eb_val, ew_bits)
+                        r = _fp_encode(fa - fb, ew_bits)
+                    elif funct == 2:  # AND — bitwise
+                        r = ea & eb_val
+                    elif funct == 3:  # OR — bitwise
+                        r = ea | eb_val
+                    elif funct == 4:  # XOR — bitwise
+                        r = ea ^ eb_val
+                    elif funct == 7:  # ABS — clear sign bit
+                        r = ea & 0x7FFF
+                    elif funct == 5:  # MIN
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(min(fa, fb), ew_bits)
+                    elif funct == 6:  # MAX
+                        if _fp_is_nan(ea, ew_bits) or _fp_is_nan(eb_val, ew_bits):
+                            r = 0x7E00 if ew_bits == EW_FP16 else 0x7FC0
+                        else:
+                            fa = _fp_decode(ea, ew_bits)
+                            fb = _fp_decode(eb_val, ew_bits)
+                            r = _fp_encode(max(fa, fb), ew_bits)
+                    else:
+                        r = 0
+                    tile_set_elem(dst, lane, elem_bytes, r)
+                write_tile(self.tdst, dst)
+            else:
+                # ---- Integer TALU (self-test) ----
                 mask = (1 << (elem_bytes * 8)) - 1
                 for lane in range(num_lanes):
                     ea = tile_get_elem(src_a, lane, elem_bytes)
                     eb_val = tile_get_elem(src_b, lane, elem_bytes)
-                    if signed:
-                        r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                    if funct == 0:  # ADD
+                        r = (ea + eb_val) & mask
+                    elif funct == 1:  # SUB
+                        r = (ea - eb_val) & mask
                     else:
-                        r = (ea * eb_val) & mask
+                        r = 0
                     tile_set_elem(dst, lane, elem_bytes, r)
                 write_tile(self.tdst, dst)
-            elif funct == 1:  # DOT
-                total = 0
-                for lane in range(num_lanes):
-                    ea = tile_get_elem(src_a, lane, elem_bytes)
-                    eb_val = tile_get_elem(src_b, lane, elem_bytes)
-                    if signed:
-                        total += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
-                    else:
-                        total += ea * eb_val
-                self.acc[0] = total & MASK64
-                self.acc[1] = (total >> 64) & MASK64
+
+        elif op == 1:  # TMUL
+            if is_fp:
+                # ---- Floating-point TMUL (self-test) ----
+                if funct == 0:  # MUL
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        tile_set_elem(dst, lane, elem_bytes, _fp_encode(fa * fb, ew_bits))
+                    write_tile(self.tdst, dst)
+                elif funct == 1:  # DOT — FP → FP32 accumulate
+                    total = 0.0
+                    for lane in range(num_lanes):
+                        fa = _fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                        fb = _fp_decode(tile_get_elem(src_b, lane, elem_bytes), ew_bits)
+                        total += float(fa) * float(fb)
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0
+            else:
+                # ---- Integer TMUL (self-test) ----
+                if funct == 0:  # MUL
+                    mask = (1 << (elem_bytes * 8)) - 1
+                    for lane in range(num_lanes):
+                        ea = tile_get_elem(src_a, lane, elem_bytes)
+                        eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                        if signed:
+                            r = (to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)) & mask
+                        else:
+                            r = (ea * eb_val) & mask
+                        tile_set_elem(dst, lane, elem_bytes, r)
+                    write_tile(self.tdst, dst)
+                elif funct == 1:  # DOT
+                    total = 0
+                    for lane in range(num_lanes):
+                        ea = tile_get_elem(src_a, lane, elem_bytes)
+                        eb_val = tile_get_elem(src_b, lane, elem_bytes)
+                        if signed:
+                            total += to_signed(ea, elem_bytes) * to_signed(eb_val, elem_bytes)
+                        else:
+                            total += ea * eb_val
+                    self.acc[0] = total & MASK64
+                    self.acc[1] = (total >> 64) & MASK64
 
         elif op == 2:  # TRED
-            values = [tile_get_elem(src_a, lane, elem_bytes) for lane in range(num_lanes)]
-            if signed:
-                values_s = [to_signed(v, elem_bytes) for v in values]
+            if is_fp:
+                # ---- Floating-point TRED (self-test) ----
+                fp_vals = [_fp_decode(tile_get_elem(src_a, lane, elem_bytes), ew_bits)
+                           for lane in range(num_lanes)]
+                if funct == 0:  # SUM
+                    total = sum(float(v) for v in fp_vals)
+                    self.acc[0] = _fp32_to_bits(total)
+                    self.acc[1] = 0
+                elif funct == 1:  # MIN
+                    self.acc[0] = _fp32_to_bits(min(fp_vals))
+                    self.acc[1] = 0
+                elif funct == 2:  # MAX
+                    self.acc[0] = _fp32_to_bits(max(fp_vals))
+                    self.acc[1] = 0
             else:
-                values_s = values
-            result = 0
-            if funct == 0:  # SUM
-                result = sum(values_s)
-            elif funct == 1:  # MIN
-                result = min(values_s)
-            elif funct == 2:  # MAX
-                result = max(values_s)
-            self.acc[0] = result & MASK64
-            self.acc[1] = (result >> 64) & MASK64
+                # ---- Integer TRED (self-test) ----
+                values = [tile_get_elem(src_a, lane, elem_bytes) for lane in range(num_lanes)]
+                if signed:
+                    values_s = [to_signed(v, elem_bytes) for v in values]
+                else:
+                    values_s = values
+                result = 0
+                if funct == 0:  # SUM
+                    result = sum(values_s)
+                elif funct == 1:  # MIN
+                    result = min(values_s)
+                elif funct == 2:  # MAX
+                    result = max(values_s)
+                self.acc[0] = result & MASK64
+                self.acc[1] = (result >> 64) & MASK64
 
     @property
     def _ipi_pending_mask(self) -> int:
