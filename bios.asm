@@ -2820,6 +2820,16 @@ w_endcase_done:
 ;   Compiles: move limit and index to return stack
 ;   Pushes HERE as loop target
 w_do:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_do_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_do_ok:
     ; Compile at runtime:
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
     ;   addi r14, 8                               = 62 E0 08
@@ -2908,6 +2918,16 @@ w_do:
 ;   Same as DO but compiles a forward branch when limit == index.
 ;   Uses LEAVE fixup mechanism so LOOP resolves the skip.
 w_qdo:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_qdo_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_qdo_ok:
     ; Compile the DO preamble: pop limit & index, push to RSP
     ;   ldn r1, r14       ; index (TOS)          = 50 1E
     ;   addi r14, 8                               = 62 E0 08
@@ -3050,6 +3070,16 @@ w_qdo_done:
 ;   Compiles: increment index on RSP, compare to limit, branch back if not done
 ;   Then: clean up RSP (drop limit & index)
 w_loop:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_loop_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_loop_ok:
     ; Compile at runtime:
     ;   ldn r1, r15       ; index from RSP
     ;   addi r1, 1        ; increment (INC would also work but let's use ADDI for clarity)
@@ -3347,6 +3377,16 @@ w_j:
 ;   Emits: addi r15, 16  (62 F0 10)
 ;   Total = 3 bytes
 w_unloop:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_unloop_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_unloop_ok:
     ldi r1, 0x62
     ldi64 r11, compile_byte
     call.l r11
@@ -3373,6 +3413,16 @@ w_unloop:
 ;     lbrne <loop-top>  ; branch if not equal           42 XX XX
 ;     addi r15, 16      ; drop both from RSP            62 F0 10
 w_plus_loop:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_plus_loop_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_plus_loop_ok:
     ; ldn r7, r14 = 50 7E
     ldi r1, 0x50
     ldi64 r11, compile_byte
@@ -5923,6 +5973,16 @@ w_abq_resolve_skip:
 ;   Stores fixup address in var_leave_fixups[leave_count].
 ;   LOOP/+LOOP resolves all fixups after their own code.
 w_leave:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_leave_compile
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_leave_compile:
     ; Compile: addi r15, 16  -- unloop (drop limit+index from RSP)
     ; Encoding: 0x62 0xF0 0x10
     ldi r1, 0x62
@@ -12513,6 +12573,8 @@ str_line_prefix:
     .asciiz "  line "
 str_colon_space:
     .asciiz ": "
+str_compile_only:
+    .asciiz "compile-only word\n"
 str_stack_underflow:
     .asciiz "Stack underflow\n"
 str_eval_depth:
