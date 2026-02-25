@@ -3799,10 +3799,64 @@ w_create_err:
     call.l r11
     ret.l
 
-; S" (IMMEDIATE) — compile string literal, at runtime pushes (addr len)
+; S" (IMMEDIATE) — string literal, works in both interpret and compile mode
+;   Interpret mode: copies string to transient squote_buf, pushes (addr len)
+;   Compile mode:   embeds the string and compiles a call to push it at runtime
 ;   Compiles: ldi64 r11, squote_runtime; call.l r11; <string bytes> <null>
 ;   Runtime: push addr+len of string to data stack
 w_squote:
+    ; Check STATE — interpret vs compile
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_squote_compile
+
+    ; ---- Interpret mode: copy string to squote_buf, push (addr len) ----
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; >IN
+    inc r13                   ; skip delimiter space
+    ldi64 r9, tib_buffer
+    ldi64 r10, squote_buf     ; R10 = destination buffer
+    ldi r12, 0                ; R12 = length counter
+sq_interp_loop:
+    ldi64 r11, var_tib_len
+    ldn r7, r11
+    cmp r13, r7
+    breq sq_interp_done       ; hit EOL without closing quote
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    inc r13
+    cmpi r1, 0x22             ; '"'
+    breq sq_interp_done
+    ; copy byte to squote_buf
+    mov r11, r10
+    add r11, r12
+    st.b r11, r1
+    inc r12
+    ; clamp at 255 to avoid overrun
+    cmpi r12, 255
+    breq sq_interp_done
+    br sq_interp_loop
+sq_interp_done:
+    ; null-terminate the buffer
+    mov r11, r10
+    add r11, r12
+    ldi r1, 0
+    st.b r11, r1
+    ; push addr
+    subi r14, 8
+    str r14, r10
+    ; push len
+    subi r14, 8
+    str r14, r12
+    ; update >IN
+    ldi64 r11, var_to_in
+    str r11, r13
+    ret.l
+
+w_squote_compile:
+    ; ---- Compile mode (original behaviour) ----
     ; Compile call to runtime helper
     ldi64 r1, squote_runtime
     ldi64 r11, compile_call
@@ -12616,6 +12670,27 @@ ivt_table:
     .dq 0                            ; [13] reserved
     .dq 0                            ; [14] reserved
     .dq priv_fault_handler           ; [15] PRIVILEGE FAULT
+
+; =====================================================================
+;  S" interpret-mode transient buffer — 256 bytes
+; =====================================================================
+squote_buf:
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
 ; =====================================================================
 ;  TIB (Text Input Buffer) — 256 bytes
