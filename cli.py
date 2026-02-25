@@ -728,7 +728,7 @@ class MegapadCLI(cmd.Cmd):
 
 _HEADLESS_PORT = 6464
 _HEADLESS_STATUS = "/tmp/megapad_headless.json"
-_HEADLESS_BATCH = 100_000
+_HEADLESS_BATCH = 1_000_000
 
 
 class HeadlessServer:
@@ -817,7 +817,9 @@ class HeadlessServer:
                 continue
             if (cpu.idle and not self.sys_emu.uart.has_rx_data
                     and not self.sys_emu._any_nic_rx()):
-                _time.sleep(0.02)
+                _time.sleep(0.002)        # 2ms — short enough for NIC frames
+                # Tick bus so timer/RTC advance through idle gaps
+                self.sys_emu.bus.tick(200_000)   # ~2ms at 100 MHz
                 cpu.idle = False
                 continue
             try:
@@ -988,8 +990,8 @@ def _connect_loop(sock, in_fd: int, out_fd: int):
 # afford larger batches (fewer Python→C++ transitions, less poll
 # overhead).  Without display, keep batches small so stdin latency
 # stays low.
-_BATCH_DISPLAY = 500_000
-_BATCH_DEFAULT = 100_000
+_BATCH_DISPLAY = 2_000_000
+_BATCH_DEFAULT = 500_000
 
 
 def run_console(sys_emu: MegapadSystem) -> bool:
@@ -1042,7 +1044,14 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
                 return False
 
             # --- Poll stdin (non-blocking) -------------------------
-            timeout = 0.0 if not sys_emu.cpu.idle else 0.02
+            # Use minimal sleep when NIC has pending frames (network
+            # polling loops should not stall 20ms per IDL cycle).
+            if not sys_emu.cpu.idle:
+                timeout = 0.0
+            elif sys_emu._any_nic_rx():
+                timeout = 0.001          # 1ms — fast network turnaround
+            else:
+                timeout = 0.02           # 20ms — normal keyboard wait
             if select.select([sys.stdin], [], [], timeout)[0]:
                 ch = os.read(fd, 1)
                 if ch == b'\x1d':          # Ctrl+]
@@ -1054,6 +1063,10 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             elif sys_emu.cpu.idle:
                 # Wake CPU so Forth polling loops (DHCP, ARP, PING)
                 # can advance their timeout counters.
+                # Tick bus so timer/RTC advance through idle gaps.
+                cycles_slept = int(timeout * 100_000_000)  # 100 MHz nominal
+                if cycles_slept > 0:
+                    sys_emu.bus.tick(cycles_slept)
                 sys_emu.cpu.idle = False
     except KeyboardInterrupt:
         return False
@@ -1088,7 +1101,9 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data and not sys_emu._any_nic_rx():
                 # Brief pause then wake CPU so Forth polling loops advance
                 import time as _time
-                _time.sleep(0.02)
+                _time.sleep(0.002)        # 2ms — short enough for NIC frames
+                # Tick bus so timer/RTC advance through idle gaps
+                sys_emu.bus.tick(200_000)  # ~2ms at 100 MHz
                 sys_emu.cpu.idle = False
                 # Try to read from pipe (non-blocking via select)
                 if select.select([sys.stdin], [], [], 0)[0]:
