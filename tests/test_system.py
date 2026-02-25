@@ -990,11 +990,14 @@ class TestBIOS(unittest.TestCase):
         """Build the BIOS-booted snapshot once (class-level)."""
         if cls._bios_snapshot is not None:
             return
+        cls._bios_labels = {}
         with open(BIOS_PATH) as f:
-            cls._bios_code_cache = assemble(f.read())
+            cls._bios_code_cache = assemble(f.read(),
+                                            labels_out=cls._bios_labels)
 
         sys_obj = make_system(ram_kib=256)
         sys_obj.load_binary(0, cls._bios_code_cache)
+        cls._register_accel_hooks(sys_obj)
         sys_obj.boot()
         # Run until BIOS reaches idle (waiting for UART input)
         for _ in range(2_000_000):
@@ -1013,6 +1016,15 @@ class TestBIOS(unittest.TestCase):
         self.__class__._ensure_bios_snapshot()
         self.bios_code = self.__class__._bios_code_cache
 
+    @classmethod
+    def _register_accel_hooks(cls, sys_obj):
+        """Register C++ accelerator hooks for BIOS graphics words."""
+        labels = getattr(cls, '_bios_labels', {})
+        if labels and hasattr(sys_obj.cpu, 'register_accel_hook'):
+            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2)]:
+                if name in labels:
+                    sys_obj.cpu.register_accel_hook(labels[name], hook_id)
+
     def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0):
         # Fast path: restore from snapshot (default 256K, no storage)
         if (ram_kib == 256 and storage_image is None
@@ -1024,6 +1036,7 @@ class TestBIOS(unittest.TestCase):
                           ext_mem_mib=ext_mem_mib)
         buf = capture_uart(sys)
         sys.load_binary(0, self.bios_code)
+        self._register_accel_hooks(sys)
         sys.boot()
         return sys, buf
 
@@ -1034,6 +1047,7 @@ class TestBIOS(unittest.TestCase):
         buf = capture_uart(sys)
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
         self._restore_cpu_state(sys.cpu, cpu_state)
+        self._register_accel_hooks(sys)
         return sys, buf
 
     def _run_forth(self, sys, buf, input_lines: list[str],

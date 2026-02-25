@@ -144,6 +144,10 @@ class Megapad64:
         self._vram_buf = buf  # prevent GC
         self._cs.attach_vram(buf, base, size)
 
+    def register_accel_hook(self, addr: int, hook_id: int):
+        """Register a CALL.L intercept for a BIOS word address."""
+        self._cs.register_accel_hook(addr, hook_id)
+
     # ── Register access ──────────────────────────────────
 
     @property

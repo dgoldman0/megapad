@@ -176,6 +176,21 @@ struct CPUState {
 
     // C++ native timer device (bypass Python MMIO for timer polling)
     TimerDevice timer;
+
+    // Accelerator hooks — intercept CALL.L to known BIOS word addresses
+    static constexpr int MAX_ACCEL_HOOKS = 8;
+    struct AccelHookEntry {
+        uint64_t addr;
+        int      id;    // 1=RECT_FILL, 2=BLIT_GLYPH
+    };
+    AccelHookEntry accel_hooks[MAX_ACCEL_HOOKS];
+    int accel_hook_count = 0;
+
+    void register_accel_hook(uint64_t addr, int hook_id) {
+        if (accel_hook_count < MAX_ACCEL_HOOKS) {
+            accel_hooks[accel_hook_count++] = {addr, hook_id};
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -301,6 +316,108 @@ static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
 static inline uint64_t& pc(CPUState& s) { return s.regs[s.psel]; }
 static inline uint64_t& rx(CPUState& s) { return s.regs[s.xsel]; }
 static inline uint64_t& sp(CPUState& s) { return s.regs[s.spsel]; }
+
+// ---------------------------------------------------------------------------
+//  Accelerator hook lookup + native implementations
+// ---------------------------------------------------------------------------
+
+static inline int find_accel_hook(CPUState& s, uint64_t target) {
+    for (int i = 0; i < s.accel_hook_count; i++) {
+        if (s.accel_hooks[i].addr == target) return s.accel_hooks[i].id;
+    }
+    return 0;
+}
+
+// Pop one cell from data stack (r14) — direct memory read
+static inline uint64_t pop_data(CPUState& s) {
+    uint64_t val;
+    std::memcpy(&val, s.mem + (s.regs[14] % s.mem_size), 8);
+    s.regs[14] += 8;
+    return val;
+}
+
+// Resolve guest address to host write pointer (VRAM, ext_mem, HBW, or main RAM)
+static inline uint8_t* resolve_write_ptr(CPUState& s, uint64_t addr) {
+    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size)
+        return s.vram_mem + (addr - s.vram_base);
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+        return s.ext_mem + (addr - s.ext_mem_base);
+    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size)
+        return s.hbw_mem + (addr - s.hbw_base);
+    if (addr < s.mem_size)
+        return s.mem + addr;
+    return nullptr;
+}
+
+// Fast read for non-MMIO memory (font data is in main RAM or ext_mem)
+static inline uint8_t read8_fast(CPUState& s, uint64_t addr) {
+    if (addr < s.mem_size) return s.mem[addr];
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+        return s.ext_mem[addr - s.ext_mem_base];
+    return 0;
+}
+
+// RECT-FILL ( addr stride w h color16 -- )
+static int accel_rect_fill(CPUState& s) {
+    uint16_t color16 = (uint16_t)pop_data(s);
+    int64_t  h       = (int64_t)pop_data(s);
+    int64_t  w       = (int64_t)pop_data(s);
+    int64_t  stride  = (int64_t)pop_data(s);
+    uint64_t addr    = pop_data(s);
+
+    if (w <= 0 || h <= 0) return 1;
+
+    for (int64_t row = 0; row < h; row++) {
+        uint8_t* dst = resolve_write_ptr(s, addr);
+        if (dst) {
+            uint16_t* px = reinterpret_cast<uint16_t*>(dst);
+            for (int64_t col = 0; col < w; col++)
+                px[col] = color16;
+        }
+        addr += stride;
+    }
+    return (int)(5 * w * h + 10);  // simulated cycle cost
+}
+
+// BLIT-GLYPH ( glyph-addr pixel-addr stride fg16 -- )
+static int accel_blit_glyph(CPUState& s) {
+    uint16_t fg16       = (uint16_t)pop_data(s);
+    int64_t  stride     = (int64_t)pop_data(s);
+    uint64_t pixel_addr = pop_data(s);
+    uint64_t glyph_addr = pop_data(s);
+
+    if (glyph_addr == 0) return 1;
+
+    // Read 8 font bytes from guest memory
+    uint8_t font_rows[8];
+    for (int i = 0; i < 8; i++)
+        font_rows[i] = read8_fast(s, glyph_addr + i);
+
+    // Blit 8x8 glyph — only foreground (set) bits written
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = font_rows[row];
+        if (bits) {  // skip empty rows entirely
+            uint8_t* dst = resolve_write_ptr(s, pixel_addr);
+            if (dst) {
+                uint16_t* px = reinterpret_cast<uint16_t*>(dst);
+                for (int col = 0; col < 8; col++) {
+                    if (bits & 0x80) px[col] = fg16;
+                    bits <<= 1;
+                }
+            }
+        }
+        pixel_addr += stride;
+    }
+    return 120;  // simulated cycle cost
+}
+
+static int execute_accel_hook(CPUState& s, int hook_id) {
+    switch (hook_id) {
+        case 1: return accel_rect_fill(s);
+        case 2: return accel_blit_glyph(s);
+        default: return 0;
+    }
+}
 
 static inline uint8_t fetch8(CPUState& s) {
     uint64_t a = pc(s);
@@ -1842,9 +1959,18 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             case 0xD: {  // CALL.L
                 uint8_t b1 = fetch8(s);
                 int rn = b1 & 0xF;
+                uint64_t target = s.regs[rn];
+                // Check accelerator hooks BEFORE pushing return address
+                int hook = find_accel_hook(s, target);
+                if (hook) {
+                    // Don't push return addr — we skip the word entirely.
+                    // PC stays where it is (after the CALL.L instruction).
+                    cycles += execute_accel_hook(s, hook);
+                    break;
+                }
                 uint64_t ret_addr = pc(s);
                 sys_push64(s, cb, ret_addr);
-                pc(s) = s.regs[rn];
+                pc(s) = target;
                 cycles++;
                 break;
             }
@@ -2926,6 +3052,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("timer_status",
             [](const CPUState& s) -> uint8_t { return s.timer.status; },
             [](CPUState& s, uint8_t v) { s.timer.status = v; })
+        // ── Accelerator hooks ─────────────────────────────────
+        .def("register_accel_hook", &CPUState::register_accel_hook)
+        .def_readonly("accel_hook_count", &CPUState::accel_hook_count)
         ;
 
     // Expose RunResult

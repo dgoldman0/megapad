@@ -142,12 +142,14 @@ class AsmError(Exception):
         super().__init__(f"Line {line}: {msg}")
 
 
-def assemble(source: str, base_addr: int = 0, listing: bool = False) -> bytearray:
+def assemble(source: str, base_addr: int = 0, listing: bool = False,
+             labels_out: dict | None = None) -> bytearray:
     """
     Two-pass assembler.
     Pass 1: collect labels, compute instruction sizes.
     Pass 2: emit bytecode with resolved addresses.
     If listing=True, print an address/hex/source listing to stdout.
+    If labels_out is not None, it is updated with {label: address} mappings.
     """
 
     lines = source.split("\n")
@@ -358,6 +360,8 @@ def assemble(source: str, base_addr: int = 0, listing: bool = False) -> bytearra
             for lbl in addr_labels[addr]:
                 print(f"                    {lbl}:")
 
+    if labels_out is not None:
+        labels_out.update(labels)
     return code
 
 
