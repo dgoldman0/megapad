@@ -1021,7 +1021,7 @@ class TestBIOS(unittest.TestCase):
         """Register C++ accelerator hooks for BIOS graphics words."""
         labels = getattr(cls, '_bios_labels', {})
         if labels and hasattr(sys_obj.cpu, 'register_accel_hook'):
-            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_blit_string', 3)]:
+            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2)]:
                 if name in labels:
                     sys_obj.cpu.register_accel_hook(labels[name], hook_id)
 
@@ -1283,41 +1283,6 @@ class TestBIOS(unittest.TestCase):
             "77 .",
         ])
         self.assertIn("77 ", text)
-
-    def test_blit_string(self):
-        """BLIT-STRING renders a string of glyphs to the framebuffer."""
-        sys, buf = self._boot_bios()
-        text = self._run_forth(sys, buf, [
-            # Font at 0x10000. Char 'A' (0x41) at offset (0x41-0x20)*8 = 264.
-            # 'A' glyph: row 0 = 0xFF (all set), rows 1-7 = 0x00
-            "0xFF 0x10108 C!",
-            # Char 'B' (0x42) at offset (0x42-0x20)*8 = 272.
-            # 'B' glyph: row 0 = 0xFF, rows 1-7 = 0x00
-            "0xFF 0x10110 C!",
-            # String \"AB\" at 0x11000
-            "65 0x11000 C!  66 0x11001 C!",
-            # BLIT-STRING: c-addr len pixel-addr stride fg16 font-base
-            "0x11000 2 0x20000 32 0x07E0 0x10000 BLIT-STRING",
-            # Char 'A' row 0: first pixel at pixel-addr
-            "0x20000 W@ .",
-            # Char 'B' row 0: first pixel at pixel-addr + 16
-            "0x20010 W@ .",
-            # Row 1 of char 'A': should be 0 (font row 1 = 0x00)
-            "0x20020 W@ .",
-        ])
-        # 0x07E0 = 2016 (green)
-        self.assertIn("2016 ", text)
-        # Row 1 untouched
-        self.assertIn("0 ", text)
-
-    def test_blit_string_zero_len(self):
-        """BLIT-STRING with len=0 is a no-op."""
-        sys, buf = self._boot_bios()
-        text = self._run_forth(sys, buf, [
-            "0x11000 0 0x20000 32 0xFFFF 0x10000 BLIT-STRING",
-            "88 .",
-        ])
-        self.assertIn("88 ", text)
 
     # -- I/O --
 

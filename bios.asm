@@ -1757,123 +1757,6 @@ w_blit_glyph:
 .bg_done:
     ret.l
 
-; BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
-;   Render a string of 8×8 glyphs to the framebuffer.
-;   Only foreground (set) bits are written; background is transparent.
-;   c-addr     = address of ASCII text bytes.
-;   len        = number of characters to render.
-;   pixel-addr = VRAM address of top-left pixel of first glyph.
-;   stride     = bytes per framebuffer row.
-;   fg16       = RGB565 foreground color.
-;   font-base  = address of font data (glyph 0x20 at offset 0, 8 bytes each).
-w_blit_string:
-    ; Save R2 (ram_size — must be preserved)
-    subi r15, 8
-    str r15, r2
-    ; Pop 6 args from data stack (R14)
-    ldn r7, r14               ; font-base
-    addi r14, 8
-    ldn r1, r14               ; fg16
-    addi r14, 8
-    ldn r0, r14               ; stride
-    addi r14, 8
-    ldn r9, r14               ; pixel-addr
-    addi r14, 8
-    ldn r13, r14              ; len
-    addi r14, 8
-    ldn r11, r14              ; c-addr
-    addi r14, 8
-    ; Check len > 0
-    cmpi r13, 0
-    lbreq .bstr_ret
-    ; Save outer-loop state to RSP (survives inner glyph blit)
-    ;   [RSP+0]  = pixel-addr
-    ;   [RSP+8]  = len
-    ;   [RSP+16] = c-addr
-    ;   [RSP+24] = font-base
-    ;   [RSP+32] = saved R2
-    subi r15, 8
-    str r15, r7               ; font-base
-    subi r15, 8
-    str r15, r11              ; c-addr
-    subi r15, 8
-    str r15, r13              ; len
-    subi r15, 8
-    str r15, r9               ; pixel-addr
-.bstr_char:
-    ; ---- Load per-char values from RSP ----
-    ldn r9, r15               ; pixel-addr from [RSP+0]
-    mov r12, r15
-    addi r12, 16
-    ldn r11, r12              ; c-addr from [RSP+16]
-    ; Load character byte
-    ld.b r7, r11
-    ; Clamp ch < 0x20 to space
-    cmpi r7, 0x20
-    brcs .bstr_no_clamp
-    ldi r7, 0x20
-.bstr_no_clamp:
-    subi r7, 0x20             ; ch - 32
-    lsli r7, 3                ; * 8 = font offset
-    ; Load font-base from [RSP+24]
-    mov r12, r15
-    addi r12, 24
-    ldn r12, r12              ; font-base
-    add r7, r12               ; glyph-addr = font-base + (ch-32)*8
-    mov r11, r7               ; R11 = glyph-addr
-    ; ---- Inner 8×8 glyph blit (same register layout as w_blit_glyph) ----
-    ; R0=stride, R1=fg16, R9=pixel-addr, R11=glyph-addr
-    ldi r13, 8                ; row counter
-.bstr_row:
-    cmpi r13, 0
-    breq .bstr_next_char
-    ld.b r7, r11              ; font row byte
-    inc r11
-    mov r12, r9               ; pixel ptr for this row
-    ldi r10, 8                ; col counter
-.bstr_col:
-    cmpi r10, 0
-    breq .bstr_next_row
-    mov r2, r7
-    andi r2, 0x80             ; test MSB
-    breq .bstr_skip
-    st.h r12, r1              ; write fg16
-.bstr_skip:
-    lsli r7, 1
-    addi r12, 2
-    dec r10
-    br .bstr_col
-.bstr_next_row:
-    add r9, r0                ; pixel-addr += stride
-    dec r13
-    br .bstr_row
-.bstr_next_char:
-    ; Update pixel-addr: += 16 (8 pixels × 2 bytes)
-    ldn r9, r15               ; reload pixel-addr
-    addi r9, 16
-    str r15, r9               ; save updated pixel-addr
-    ; Update c-addr: += 1
-    mov r12, r15
-    addi r12, 16
-    ldn r11, r12              ; c-addr
-    inc r11
-    str r12, r11              ; save updated c-addr
-    ; Update len: -= 1
-    mov r12, r15
-    addi r12, 8
-    ldn r13, r12              ; len
-    dec r13
-    str r12, r13              ; save updated len
-    cmpi r13, 0
-    brne .bstr_char
-    ; Pop RSP frame (4 × 8 = 32 bytes)
-    addi r15, 32
-.bstr_ret:
-    ; Restore R2
-    ldn r2, r15
-    addi r15, 8
-    ret.l
-
 ; =====================================================================
 ;  Forth Words — Tile Engine
 ; =====================================================================
@@ -10082,18 +9965,9 @@ d_blit_glyph:
     call.l r11
     ret.l
 
-; === BLIT-STRING ===
-d_blit_string:
-    .dq d_blit_glyph
-    .db 11
-    .ascii "BLIT-STRING"
-    ldi64 r11, w_blit_string
-    call.l r11
-    ret.l
-
 ; === TI ===
 d_ti:
-    .dq d_blit_string
+    .dq d_blit_glyph
     .db 2
     .ascii "TI"
     ldi64 r11, w_ti

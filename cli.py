@@ -1319,7 +1319,7 @@ def main():
 
     # Register C++ accelerator hooks for BIOS graphics words
     if bios_loaded and bios_labels and hasattr(sys_emu.cpu, 'register_accel_hook'):
-        _accel_hooks = [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_blit_string', 3)]
+        _accel_hooks = [('w_rect_fill', 1), ('w_blit_glyph', 2)]
         for name, hook_id in _accel_hooks:
             if name in bios_labels:
                 sys_emu.cpu.register_accel_hook(bios_labels[name], hook_id)
