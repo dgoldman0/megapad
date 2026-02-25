@@ -145,12 +145,20 @@ VARIABLE GFX-DH          \ drawing height
 \ are safe to call from GFX-RECT / GFX-BOX (which use GFX-D* vars).
 
 : GFX-HLINE  ( color x y len -- )
-    0 DO                                ( color x y )
-        2 PICK 2 PICK 2 PICK           ( color x y color x y )
-        GFX-PIXEL!                      ( color x y )
-        SWAP 1+ SWAP                    \ x++
-    LOOP
-    DROP 2DROP ;
+    GFX-BPP @ 2 = IF                    \ Fast path for 16bpp
+        >R                              ( color x y  R: len )
+        GFX-ADDR                        ( color addr )
+        R>                              ( color addr len )
+        ROT                             ( addr len color )
+        WFILL
+    ELSE
+        0 DO                            ( color x y )
+            2 PICK 2 PICK 2 PICK       ( color x y color x y )
+            GFX-PIXEL!                  ( color x y )
+            SWAP 1+ SWAP               \ x++
+        LOOP
+        DROP 2DROP
+    THEN ;
 
 : GFX-VLINE  ( color x y len -- )
     0 DO                                ( color x y )

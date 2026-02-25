@@ -1193,6 +1193,25 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["0x2000 16 0xCC FILL", "0x2000 16 DUMP"])
         self.assertIn("CC", text)
 
+    def test_wfill(self):
+        """WFILL writes 16-bit words; verify via W@ reads."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0x3000 8 0xBEEF WFILL",        # fill 8 halfwords at 0x3000
+            "0x3000 W@ .",                    # first word
+            "0x300E W@ .",                    # last word (0x3000 + 7*2)
+        ])
+        self.assertIn("48879 ", text)         # 0xBEEF = 48879
+
+    def test_wfill_zero_count(self):
+        """WFILL with n=0 is a no-op — must not crash."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0x3000 0 0x1234 WFILL",
+            "42 .",                           # prove interpreter still alive
+        ])
+        self.assertIn("42 ", text)
+
     # -- I/O --
 
     def test_emit(self):

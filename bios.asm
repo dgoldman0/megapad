@@ -1652,6 +1652,24 @@ fl_loop:
 fl_done:
     ret.l
 
+; WFILL ( addr n word -- ) fill n halfwords (16-bit) at addr\n;   Tight inner loop: st.h / addi / dec / cmpi / brne = 4-5 insns per pixel\n;   vs ~10 for the Forth DO W! 2+ LOOP pattern.
+w_wfill:
+    ldn r7, r14               ; word value
+    addi r14, 8
+    ldn r12, r14              ; n (word count)
+    addi r14, 8
+    ldn r9, r14               ; addr
+    addi r14, 8
+wfl_loop:
+    cmpi r12, 0
+    breq wfl_done
+    st.h r9, r7               ; store halfword
+    addi r9, 2                 ; next word address
+    dec r12                    ; count--
+    br wfl_loop
+wfl_done:
+    ret.l
+
 ; =====================================================================
 ;  Forth Words — Tile Engine
 ; =====================================================================
@@ -9833,9 +9851,18 @@ d_fill:
     call.l r11
     ret.l
 
+; === WFILL ===
+d_wfill:
+    .dq d_fill
+    .db 5
+    .ascii "WFILL"
+    ldi64 r11, w_wfill
+    call.l r11
+    ret.l
+
 ; === TI ===
 d_ti:
-    .dq d_fill
+    .dq d_wfill
     .db 2
     .ascii "TI"
     ldi64 r11, w_ti
