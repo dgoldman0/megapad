@@ -4494,6 +4494,49 @@ class TestKDOS(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("survived", text)
 
+    def test_arrow_key_subscreen_right(self):
+        """Right arrow (ESC [ C) advances subscreen via HANDLE-KEY."""
+        # Inject ESC [ C as raw UART bytes, then call HANDLE-KEY for each.
+        # Since HANDLE-KEY(27) internally reads KEY? / KEY for the CSI
+        # sequence, we pre-load the remaining bytes into the UART first.
+        text = self._run_kdos([
+            "1 SWITCH-SCREEN",          # Home (has subscreens)
+            "0 SUBSCREEN-ID !",
+            # Push '[' and 'C' into UART RX buffer, then pass ESC to HANDLE-KEY
+            "91 0xFFFF_FF00_0000_0001 C!",   # inject '[' into UART RX
+            "67 0xFFFF_FF00_0000_0001 C!",   # inject 'C' into UART RX
+            "27 HANDLE-KEY",                  # ESC → reads '[' 'C' → right
+            "SUBSCREEN-ID @ .",               # should be 1
+        ])
+        self.assertIn("1 ", text)
+
+    def test_arrow_key_subscreen_left_wraps(self):
+        """Left arrow (ESC [ D) from subscreen 0 wraps to last."""
+        text = self._run_kdos([
+            "1 SWITCH-SCREEN",
+            "0 SUBSCREEN-ID !",
+            "91 0xFFFF_FF00_0000_0001 C!",
+            "68 0xFFFF_FF00_0000_0001 C!",
+            "27 HANDLE-KEY",
+            "SUBSCREEN-ID @ .",
+        ])
+        # Should have wrapped to last subscreen (>0)
+        nums = [int(s) for s in text.split() if s.strip().lstrip('-').isdigit()]
+        wrapped = [n for n in nums if n > 0]
+        self.assertTrue(len(wrapped) > 0, "Left arrow should wrap to last subscreen")
+
+    def test_arrow_up_ignored(self):
+        """Up arrow (ESC [ A) does not change subscreen."""
+        text = self._run_kdos([
+            "1 SWITCH-SCREEN",
+            "0 SUBSCREEN-ID !",
+            "91 0xFFFF_FF00_0000_0001 C!",
+            "65 0xFFFF_FF00_0000_0001 C!",
+            "27 HANDLE-KEY",
+            "SUBSCREEN-ID @ .",
+        ])
+        self.assertIn("0 ", text)
+
     # -- Screen hardening: tab bar overflow (§5) --
 
     def test_tab_bar_truncates_labels_above_10(self):

@@ -6445,6 +6445,31 @@ VARIABLE _SBIT
 
 \ -- Event loop: poll KEY?, dispatch on keypress (registry-based) --
 : HANDLE-KEY  ( c -- )
+    \ ESC sequence: consume CSI arrow keys for subscreen navigation
+    DUP 27 = IF DROP                               \ ESC (0x1B)
+        KEY? IF
+            KEY DUP 91 = IF                        \ '[' = CSI prefix
+                DROP KEY                           \ read direction byte
+                DUP 68 = IF DROP                   \ Left arrow → prev sub
+                    SCREEN-SUBS 0> IF
+                        SUBSCREEN-ID @ 1- DUP 0< IF
+                            DROP SCREEN-SUBS 1-
+                        THEN SUBSCREEN-ID !
+                        RENDER-SCREEN
+                    THEN EXIT
+                THEN
+                DUP 67 = IF DROP                   \ Right arrow → next sub
+                    SCREEN-SUBS 0> IF
+                        SUBSCREEN-ID @ 1+ DUP SCREEN-SUBS >= IF
+                            DROP 0
+                        THEN SUBSCREEN-ID !
+                        RENDER-SCREEN
+                    THEN EXIT
+                THEN
+                DROP EXIT                          \ Up/Down/other: ignore
+            ELSE DROP THEN                         \ non-CSI: consume & ignore
+        THEN EXIT                                  \ bare ESC: ignore
+    THEN
     \ Per-screen custom key handler (priority: checked first)
     CALL-SCREEN-KEY IF DROP EXIT THEN
     \ Digit keys 0-9: switch to screen 1-10 (key '0'=48...'9'=57)
