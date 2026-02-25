@@ -9167,7 +9167,9 @@ VARIABLE _TI-DATA
     100 R@ TCB.RTO-VALUE !                 \ ~1s at 100 ticks
     TCPS-SYN-RCVD R@ TCB.STATE !
     \ Send SYN+ACK
-    R> TCP-SYN TCP-ACK OR TCP-SEND-CTL DROP ;
+    R@ TCP-SYN TCP-ACK OR TCP-SEND-CTL DROP
+    \ SYN consumes 1 seq number — advance SND-NXT past it
+    R@ TCB.ISS @ 1+ R> TCB.SND-NXT ! ;
 
 \ -- TCP-INPUT-SYN-SENT: handle segment in SYN-SENT state --
 \   Expecting SYN+ACK from peer (active open).
