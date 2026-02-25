@@ -1021,7 +1021,7 @@ class TestBIOS(unittest.TestCase):
         """Register C++ accelerator hooks for BIOS graphics words."""
         labels = getattr(cls, '_bios_labels', {})
         if labels and hasattr(sys_obj.cpu, 'register_accel_hook'):
-            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2)]:
+            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_vram_copy', 3)]:
                 if name in labels:
                     sys_obj.cpu.register_accel_hook(labels[name], hook_id)
 
@@ -1283,6 +1283,53 @@ class TestBIOS(unittest.TestCase):
             "77 .",
         ])
         self.assertIn("77 ", text)
+
+    def test_vram_copy(self):
+        """VRAM-COPY copies a w×h rectangle from src to dst."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            # Write a known pattern: 2 bytes wide, 2 rows, stride=4
+            "0xAA 0x10000 C!  0xBB 0x10001 C!",  # row 0
+            "0xCC 0x10004 C!  0xDD 0x10005 C!",  # row 1 (stride=4)
+            # Copy to 0x20000
+            "0x10000 0x20000 4 2 2 VRAM-COPY",
+            # Read back
+            "0x20000 C@ .",  # should be 0xAA = 170
+            "0x20001 C@ .",  # should be 0xBB = 187
+            "0x20004 C@ .",  # should be 0xCC = 204
+            "0x20005 C@ .",  # should be 0xDD = 221
+        ])
+        self.assertIn("170 ", text)
+        self.assertIn("187 ", text)
+        self.assertIn("204 ", text)
+        self.assertIn("221 ", text)
+
+    def test_vram_copy_zero(self):
+        """VRAM-COPY with w=0 or h=0 is a no-op."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0x10000 0x20000 16 0 5 VRAM-COPY",  # w=0
+            "0x10000 0x20000 16 5 0 VRAM-COPY",  # h=0
+            "42 .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_vram_copy_overlap(self):
+        """VRAM-COPY handles overlapping dst > src (scroll-up pattern)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            # Fill 3 rows: row0=0x11, row1=0x22, row2=0x33, stride=4, w=2
+            "0x11 0x10000 C!  0x11 0x10001 C!",
+            "0x22 0x10004 C!  0x22 0x10005 C!",
+            "0x33 0x10008 C!  0x33 0x10009 C!",
+            # Copy row1+row2 (src=0x10004) over row0+row1 (dst=0x10000)
+            # This is dst < src → forward copy, should work fine
+            "0x10004 0x10000 4 2 2 VRAM-COPY",
+            "0x10000 C@ .",  # was 0x11, now should be 0x22 = 34
+            "0x10004 C@ .",  # was 0x22, now should be 0x33 = 51
+        ])
+        self.assertIn("34 ", text)
+        self.assertIn("51 ", text)
 
     # -- I/O --
 

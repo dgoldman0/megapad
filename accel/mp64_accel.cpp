@@ -411,10 +411,45 @@ static int accel_blit_glyph(CPUState& s) {
     return 120;  // simulated cycle cost
 }
 
+// VRAM-COPY ( src dst stride w h -- )
+// Copy a w×h byte rectangle within VRAM.  Overlap-safe (memmove per row).
+static int accel_vram_copy(CPUState& s) {
+    int64_t  h      = (int64_t)pop_data(s);
+    int64_t  w      = (int64_t)pop_data(s);
+    int64_t  stride = (int64_t)pop_data(s);
+    uint64_t dst    = pop_data(s);
+    uint64_t src    = pop_data(s);
+
+    if (w <= 0 || h <= 0) return 1;
+    if (src == dst) return 1;
+
+    // Determine copy direction for overlap safety
+    bool backward = dst > src;
+    uint64_t src_row = backward ? src + (uint64_t)(h - 1) * (uint64_t)stride : src;
+    uint64_t dst_row = backward ? dst + (uint64_t)(h - 1) * (uint64_t)stride : dst;
+
+    for (int64_t row = 0; row < h; row++) {
+        uint8_t* sp = resolve_write_ptr(s, src_row);
+        uint8_t* dp = resolve_write_ptr(s, dst_row);
+        if (sp && dp) {
+            std::memmove(dp, sp, (size_t)w);
+        }
+        if (backward) {
+            src_row -= stride;
+            dst_row -= stride;
+        } else {
+            src_row += stride;
+            dst_row += stride;
+        }
+    }
+    return (int)(3 * w * h + 10);  // simulated cycle cost
+}
+
 static int execute_accel_hook(CPUState& s, int hook_id) {
     switch (hook_id) {
         case 1: return accel_rect_fill(s);
         case 2: return accel_blit_glyph(s);
+        case 3: return accel_vram_copy(s);
         default: return 0;
     }
 }

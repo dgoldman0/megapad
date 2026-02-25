@@ -1757,6 +1757,97 @@ w_blit_glyph:
 .bg_done:
     ret.l
 
+; VRAM-COPY ( src dst stride w h -- )
+;   Copy a w×h byte rectangle within VRAM.
+;   Handles overlapping regions: if dst > src, copies bottom-to-top
+;   (scroll-safe).  w is width in bytes, h is height in rows.
+;
+;   Register allocation:
+;     R0 = src row pointer
+;     R1 = dst row pointer
+;     R7 = stride
+;     R9 = width (saved for reload each row)
+;     R10 = height (row counter, counted down)
+;     R11 = byte counter for inner loop
+;     R12 = temp data (byte being copied)
+;     R13 = inner copy pointer (src)
+;     Uses R2 temporarily — saved/restored on RSP.
+w_vram_copy:
+    ; Save R2 (ram_size — must be preserved)
+    subi r15, 8
+    str r15, r2
+    ldn r10, r14              ; h
+    addi r14, 8
+    ldn r9, r14               ; w (bytes)
+    addi r14, 8
+    ldn r7, r14               ; stride
+    addi r14, 8
+    ldn r1, r14               ; dst
+    addi r14, 8
+    ldn r0, r14               ; src
+    addi r14, 8
+    ; Early-out: h==0 or w==0
+    cmpi r10, 0
+    lbreq .vc_ret
+    cmpi r9, 0
+    lbreq .vc_ret
+    ; Overlap check: if dst > src, copy bottom-to-top
+    cmp r1, r0
+    lbrcs .vc_forward         ; dst < src → forward safe
+    lbreq .vc_ret             ; dst == src → no-op
+    ; Backward: advance src and dst to last row
+    ;   offset = (h - 1) * stride
+    mov r2, r10
+    dec r2
+    mul r2, r2, r7            ; r2 = (h-1) * stride
+    add r0, r2                ; src += offset
+    add r1, r2                ; dst += offset
+.vc_backward:
+    cmpi r10, 0
+    lbreq .vc_ret
+    mov r13, r0               ; src row ptr
+    mov r12, r1               ; dst row ptr (reuse r12 temporarily)
+    mov r11, r9               ; byte counter = w
+.vc_brow:
+    cmpi r11, 0
+    breq .vc_bnext
+    ld.b r2, r13              ; read byte from src
+    st.b r12, r2              ; write byte to dst
+    inc r13
+    inc r12
+    dec r11
+    br .vc_brow
+.vc_bnext:
+    sub r0, r7                ; src -= stride (move up one row)
+    sub r1, r7                ; dst -= stride
+    dec r10
+    br .vc_backward
+.vc_forward:
+    cmpi r10, 0
+    lbreq .vc_ret
+    mov r13, r0               ; src row ptr
+    mov r12, r1               ; dst row ptr
+    mov r11, r9               ; byte counter = w
+.vc_frow:
+    cmpi r11, 0
+    breq .vc_fnext
+    ld.b r2, r13              ; read byte
+    st.b r12, r2              ; write byte
+    inc r13
+    inc r12
+    dec r11
+    br .vc_frow
+.vc_fnext:
+    add r0, r7                ; src += stride
+    add r1, r7                ; dst += stride
+    dec r10
+    br .vc_forward
+.vc_ret:
+    ; Restore R2
+    ldn r2, r15
+    addi r15, 8
+    ret.l
+
 ; =====================================================================
 ;  Forth Words — Tile Engine
 ; =====================================================================
@@ -9965,9 +10056,18 @@ d_blit_glyph:
     call.l r11
     ret.l
 
+; === VRAM-COPY ===
+d_vram_copy:
+    .dq d_blit_glyph
+    .db 9
+    .ascii "VRAM-COPY"
+    ldi64 r11, w_vram_copy
+    call.l r11
+    ret.l
+
 ; === TI ===
 d_ti:
-    .dq d_blit_glyph
+    .dq d_vram_copy
     .db 2
     .ascii "TI"
     ldi64 r11, w_ti
