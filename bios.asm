@@ -1757,6 +1757,122 @@ w_blit_glyph:
 .bg_done:
     ret.l
 
+; BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
+;   Render a string of 8×8 glyphs to the framebuffer.
+;   Foreground-only (transparent background). Chars < 0x20 clamped
+;   to space (0x20). Each glyph advances pixel-addr by 16 (8 pixels
+;   × 2 bytes per RGB565 pixel).
+;
+;   Register allocation:
+;     R0 = stride
+;     R1 = fg16
+;     R7 = font row byte / bit-test temp
+;     R9 = pixel-addr (current glyph origin)
+;     R10 = column counter (inner)
+;     R11 = glyph-addr (current char's font data)
+;     R12 = pixel pointer (inner row)
+;     R13 = row counter (inner)
+;     Uses R2 as andi bit-test temp — saved/restored on RSP.
+;     Outer-loop state (pixel-addr, len, c-addr, font-base) held on RSP.
+w_blit_string:
+    ; Save R2 (ram_size — must be preserved)
+    subi r15, 8
+    str r15, r2
+    ldn r11, r14              ; font-base
+    addi r14, 8
+    ldn r1, r14               ; fg16
+    addi r14, 8
+    ldn r0, r14               ; stride
+    addi r14, 8
+    ldn r9, r14               ; pixel-addr
+    addi r14, 8
+    ldn r13, r14              ; len
+    addi r14, 8
+    ldn r7, r14               ; c-addr
+    addi r14, 8
+    ; Early-out: len==0
+    cmpi r13, 0
+    lbreq .bstr_ret
+    ; Push outer-loop state onto RSP: font-base, c-addr, len, pixel-addr
+    subi r15, 8
+    str r15, r11              ; font-base
+    subi r15, 8
+    str r15, r7               ; c-addr
+    subi r15, 8
+    str r15, r13              ; len
+    subi r15, 8
+    str r15, r9               ; pixel-addr
+.bstr_char:
+    ; Reload outer state from RSP
+    ldn r9, r15               ; pixel-addr
+    ldn r13, r15, 8           ; len
+    cmpi r13, 0
+    lbreq .bstr_pop
+    ldn r7, r15, 16           ; c-addr
+    ldn r11, r15, 24          ; font-base
+    ; Load character byte
+    ld.b r10, r7              ; char = *c-addr
+    inc r7                    ; c-addr++
+    ; Save updated c-addr to RSP frame [R15+16]
+    mov r2, r15
+    addi r2, 16
+    str r2, r7
+    ; Clamp char < 0x20 to space
+    cmpi r10, 0x20
+    brcc .bstr_noclamp        ; carry clear = r10 >= 0x20, skip clamp
+    ldi r10, 0x20
+.bstr_noclamp:
+    ; glyph-addr = font-base + (char - 0x20) * 8
+    subi r10, 0x20
+    lsli r10, 3               ; * 8
+    add r11, r10              ; r11 = font_base + offset
+    ; Blit 8×8 glyph (same as w_blit_glyph inner loop)
+    ldi r13, 8                ; row counter
+.bstr_grow:
+    cmpi r13, 0
+    breq .bstr_gnext
+    ld.b r7, r11              ; load font row byte
+    inc r11
+    mov r12, r9               ; pixel pointer for this row
+    ldi r10, 8                ; column counter
+.bstr_gcol:
+    cmpi r10, 0
+    breq .bstr_grnext
+    mov r2, r7                ; copy to temp
+    andi r2, 0x80             ; test MSB
+    breq .bstr_gskip
+    st.h r12, r1              ; write fg pixel
+.bstr_gskip:
+    lsli r7, 1
+    addi r12, 2
+    dec r10
+    br .bstr_gcol
+.bstr_grnext:
+    add r9, r0                ; pixel-addr += stride
+    dec r13
+    br .bstr_grow
+.bstr_gnext:
+    ; Advance pixel-addr: reload original row origin, add 16
+    ldn r9, r15               ; pixel-addr (row 0 of this glyph)
+    addi r9, 16               ; next glyph column (8 pixels × 2 bytes)
+    str r15, r9               ; save updated pixel-addr
+    ; Decrement len
+    ldn r13, r15, 8           ; len
+    dec r13
+    ; Save updated len to RSP frame [R15+8]
+    mov r2, r15
+    addi r2, 8
+    str r2, r13               ; save updated len
+    br .bstr_char
+.bstr_pop:
+    ; Pop RSP frame (4 cells)
+    addi r15, 32
+.bstr_ret:
+    ; Restore R2
+    ldn r2, r15
+    addi r15, 8
+    ret.l
+
 ; VRAM-COPY ( src dst stride w h -- )
 ;   Copy a w×h byte rectangle within VRAM.
 ;   Handles overlapping regions: if dst > src, copies bottom-to-top
@@ -10056,9 +10172,18 @@ d_blit_glyph:
     call.l r11
     ret.l
 
+; === BLIT-STRING ===
+d_blit_string:
+    .dq d_blit_glyph
+    .db 11
+    .ascii "BLIT-STRING"
+    ldi64 r11, w_blit_string
+    call.l r11
+    ret.l
+
 ; === VRAM-COPY ===
 d_vram_copy:
-    .dq d_blit_glyph
+    .dq d_blit_string
     .db 9
     .ascii "VRAM-COPY"
     ldi64 r11, w_vram_copy

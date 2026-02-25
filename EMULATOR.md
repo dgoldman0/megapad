@@ -605,6 +605,49 @@ and real-network tests against a Linux TAP device (ARP, ICMP, UDP, TCP).
 
 ---
 
+## HLE Graphics Acceleration
+
+The C++ accelerator provides **High-Level Emulation (HLE)** for
+performance-sensitive BIOS graphics words.  This is the same technique
+used by game console emulators (PCSX2, Dolphin, RPCS3): when the CPU
+calls a known BIOS function, the emulator intercepts the `CALL.L`
+instruction and runs a native C++ implementation instead of interpreting
+the assembly instruction-by-instruction.
+
+**Key points:**
+
+- HLE traps are **emulator-only** — they have no hardware equivalent.
+  The BIOS assembly implementations are the ground truth; the C++
+  versions must produce identical results.
+- No MMIO registers, no device state, no RTL module.  The traps operate
+  directly on the emulator's RAM buffer.
+- If the C++ accelerator is not loaded, the BIOS assembly runs
+  unmodified — correctness is never dependent on HLE.
+
+### Mechanism
+
+During BIOS assembly, `cli.py` records the entry address of each
+HLE-eligible word.  At runtime, when the CPU executes `CALL.L Rn`, the
+C++ core checks the target address against the hook table.  On a match
+it runs the native implementation and skips the normal push/jump — the
+caller sees an instant return with the correct stack effects.
+
+### Current hooks
+
+| Hook | BIOS word | Stack effect | Description |
+|------|-----------|--------------|-------------|
+| 1 | `RECT-FILL` | `( pixel-addr w h stride fg16 -- )` | Fill a w×h rectangle with a 16-bit colour |
+| 2 | `BLIT-GLYPH` | `( glyph-addr pixel-addr stride fg16 -- )` | Render an 8×8 1-bpp glyph with foreground colour |
+| 3 | `VRAM-COPY` | `( src dst stride w h -- )` | Copy a w×h byte rectangle between VRAM regions |
+| 4 | `BLIT-STRING` | `( c-addr len pixel-addr stride fg16 font-base -- )` | Render a string of 8×8 glyphs, advancing 16 bytes/char |
+
+All four words have full assembly implementations in `bios.asm` that
+pass the test suite without the C++ accelerator.  The HLE versions
+provide a ~100× speedup for framebuffer-intensive operations during
+emulated execution.
+
+---
+
 ## Example: Scripted Test via Pipe
 
 ```bash

@@ -1021,7 +1021,7 @@ class TestBIOS(unittest.TestCase):
         """Register C++ accelerator hooks for BIOS graphics words."""
         labels = getattr(cls, '_bios_labels', {})
         if labels and hasattr(sys_obj.cpu, 'register_accel_hook'):
-            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_vram_copy', 3)]:
+            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_vram_copy', 3), ('w_blit_string', 4)]:
                 if name in labels:
                     sys_obj.cpu.register_accel_hook(labels[name], hook_id)
 
@@ -1330,6 +1330,40 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("34 ", text)
         self.assertIn("51 ", text)
+
+    def test_blit_string(self):
+        """BLIT-STRING renders multiple chars at ascending pixel offsets."""
+        sys, buf = self._boot_bios()
+        # Font base at 0x30000.  Char offset = (c - 0x20) * 8.
+        # 'A' = 0x41 → offset 0x108, 'B' = 0x42 → offset 0x110
+        # Place 0xFF in row 0 of each glyph so pixels appear.
+        text = self._run_forth(sys, buf, [
+            # Store 2-char string "AB" at 0x10000
+            "65 0x10000 C!  66 0x10001 C!",
+            # Write glyph data for 'A' at 0x30108 and 'B' at 0x30110
+            "0xFF 0x30108 C!",   # 'A' row 0 – all bits set
+            "0xFF 0x30110 C!",   # 'B' row 0 – all bits set
+            # BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
+            "0x10000 2 0x20000 64 0x07E0 0x30000 BLIT-STRING",
+            # Char 'A' glyph row 0 should have green pixels at 0x20000
+            # Char 'B' starts at 0x20000 + 16 = 0x20010
+            "0x20000 W@ .",
+            "0x20010 W@ .",
+        ])
+        # Both glyphs should have produced foreground pixels (0x07E0 = 2016)
+        self.assertIn("2016", text, f"Char A glyph missing pixels: {text}")
+        # Count occurrences – both chars should produce the same fg colour
+        self.assertEqual(text.count("2016"), 2,
+                         f"Expected 2 pixel outputs, got: {text}")
+
+    def test_blit_string_zero_len(self):
+        """BLIT-STRING with len=0 is a no-op."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0x10000 0 0x20000 64 0xFFFF 0x30000 BLIT-STRING",
+            "88 .",
+        ])
+        self.assertIn("88 ", text)
 
     # -- I/O --
 
