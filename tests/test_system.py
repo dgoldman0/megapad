@@ -13663,7 +13663,11 @@ class TestKDOSTLSAppData(_KDOSTestBase):
             '." SM=" SOCK-MAX .',
         ])
         self.assertIn("SZ=32 ", text)
-        self.assertIn("SM=8 ", text)
+        # SOCK-MAX is dynamic (2× /TCP-MAX-CONN); just verify it's ≥ 8
+        import re
+        m = re.search(r'SM=(\d+)', text)
+        self.assertIsNotNone(m, f"SOCK-MAX not found in: {text}")
+        self.assertGreaterEqual(int(m.group(1)), 8)
 
 
 # ---------------------------------------------------------------------------
@@ -13678,10 +13682,10 @@ class TestKDOSSocket(_KDOSTestBase):
         text = self._run_kdos([
             'SOCK-TYPE-TCP SOCKET',
             '." ADDR=" DUP .',
-            '." TBL=" SOCK-TABLE .',
+            '." TBL=" SOCK-TABLE @ .',
             'SOCK.STATE @ ." ST=" .',
         ])
-        # SOCKET returns address of first slot = SOCK-TABLE
+        # SOCKET returns address of first slot = SOCK-TABLE @
         lines = text.replace('\r', '')
         import re
         m_addr = re.search(r'ADDR=(\d+)', lines)
@@ -13749,11 +13753,18 @@ class TestKDOSSocket(_KDOSTestBase):
             " 1 alloc-ct +! THEN LOOP ;",
             "alloc-all",
             '." AC=" alloc-ct @ .',
+            '." SM=" SOCK-MAX .',
             ': chk-ovf SOCK-TYPE-TCP SOCKET ." OVF=" . ;',
             'chk-ovf',
         ]
         text = self._run_kdos(lines)
-        self.assertIn("AC=8 ", text)
+        # AC should equal SOCK-MAX (dynamic)
+        import re
+        m_ac = re.search(r'AC=(\d+)', text)
+        m_sm = re.search(r'SM=(\d+)', text)
+        self.assertIsNotNone(m_ac, f"AC not found: {text}")
+        self.assertIsNotNone(m_sm, f"SM not found: {text}")
+        self.assertEqual(m_ac.group(1), m_sm.group(1))
         self.assertIn("OVF=-1 ", text)
 
     def test_socket_tcp_connect_roundtrip(self):
@@ -16475,16 +16486,15 @@ class TestKDOSNetStack(_KDOSTestBase):
         nums = re.findall(r'\n\s*(\d+)\s+ok', text)
         self.assertTrue(len(nums) >= 1, f"no alloc output: {text}")
         idx = int(nums[-1])
-        self.assertIn(idx, [0, 1, 2, 3])
+        self.assertTrue(0 <= idx < 64, f"TCB index out of range: {idx}")
 
     def test_tcb_alloc_exhaustion(self):
         """TCB-ALLOC should return -1 when all slots are in use."""
         text = self._run_kdos([
-            # Set all 4 TCBs to non-CLOSED state
-            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
-            "TCPS-LISTEN 1 TCB-N TCB.STATE !",
-            "TCPS-LISTEN 2 TCB-N TCB.STATE !",
-            "TCPS-LISTEN 3 TCB-N TCB.STATE !",
+            # Set all TCBs to non-CLOSED state (dynamic count)
+            ": fill-tcbs /TCP-MAX-CONN 0 DO"
+            "  TCPS-LISTEN I TCB-N TCB.STATE ! LOOP ;",
+            "fill-tcbs",
             "TCB-ALLOC .",
         ])
         self.assertIn("-1 ", text)

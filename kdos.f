@@ -8719,7 +8719,7 @@ VARIABLE _DNR-DLEN
 
 \ -- TCP constants --
 20 CONSTANT /TCP-HDR              \ minimum TCP header (no options)
-4  CONSTANT /TCP-MAX-CONN         \ max simultaneous connections
+4  VALUE /TCP-MAX-CONN            \ max simultaneous connections (set by NET-TABLES-INIT)
 1460 CONSTANT TCP-MSS             \ Max Segment Size (1500-20-20)
 4096 CONSTANT /TCP-RXBUF          \ per-connection RX ring buffer
 1460 CONSTANT /TCP-TXBUF          \ per-connection TX buffer (1 MSS)
@@ -8800,12 +8800,26 @@ VARIABLE _DNR-DLEN
 : TCB.SSTHRESH    ( tcb -- addr ) 5708 + ;
 : TCB.DUP-ACKS    ( tcb -- addr ) 5716 + ;
 
-\ -- TCB table (4 connections) --
-CREATE TCP-TCBS  /TCB /TCP-MAX-CONN * ALLOT
-TCP-TCBS /TCB /TCP-MAX-CONN * 0 FILL
+\ -- TCB table (dynamic, XMEM-backed) --
+\   Sized by NET-TABLES-INIT based on available XMEM.
+\   Each TCB is 5728 bytes; the table grows to fill up to 25% of XMEM
+\   (capped at 64 connections, floor of 4).
+VARIABLE TCP-TCBS   0 TCP-TCBS !
 
-\ -- TCB-N: get TCB pointer for connection index 0..3 --
-: TCB-N  ( n -- tcb )  /TCB * TCP-TCBS + ;
+: TCP-TCBS-SETUP  ( -- )
+    /TCB /TCP-MAX-CONN *             ( size )
+    XMEM? IF
+        XMEM-ALLOT                    ( addr — in ext RAM )
+    ELSE
+        HERE OVER ALLOT               ( addr — in Bank 0 )
+    THEN
+    DUP TCP-TCBS !
+    /TCB /TCP-MAX-CONN * 0 FILL ;
+
+\ (deferred to NET-TABLES-INIT below)
+
+\ -- TCB-N: get TCB pointer for connection index 0..N-1 --
+: TCB-N  ( n -- tcb )  /TCB * TCP-TCBS @ + ;
 
 \ -- TCB-INIT: initialise a TCB to CLOSED --
 : TCB-INIT  ( tcb -- )
@@ -8816,7 +8830,7 @@ TCP-TCBS /TCB /TCP-MAX-CONN * 0 FILL
 : TCP-INIT-ALL  ( -- )
     /TCP-MAX-CONN 0 DO I TCB-N TCB-INIT LOOP ;
 
-TCP-INIT-ALL    \ initialize at load time
+\ (deferred to NET-TABLES-INIT)
 
 \ -- TCB-ALLOC: find a free (CLOSED) TCB, return index or -1 --
 : TCB-ALLOC  ( -- idx | -1 )
@@ -9510,7 +9524,7 @@ VARIABLE _TPL-LEN
 \  Total: 552 bytes
 
 552 CONSTANT /TLS-CTX
-4 CONSTANT TLS-MAX-CTX
+4  VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
 : TLS-CTX.TCB         ( ctx -- addr )  8 +  ;
@@ -9535,12 +9549,20 @@ VARIABLE _TPL-LEN
 : TLS-CTX.S-AP-TRAFFIC ( ctx -- addr ) 488 + ;
 : TLS-CTX.PSK          ( ctx -- addr ) 520 + ;
 
-CREATE TLS-CTXS  /TLS-CTX TLS-MAX-CTX * ALLOT
-TLS-CTXS /TLS-CTX TLS-MAX-CTX * 0 FILL
+\ -- TLS context table (dynamic, XMEM-backed) --
+VARIABLE TLS-CTXS   0 TLS-CTXS !
 
-\ TLS-CTX@ ( idx -- ctx-addr )  Get context by index (0..3).
+: TLS-CTXS-SETUP  ( -- )
+    /TLS-CTX TLS-MAX-CTX *
+    XMEM? IF XMEM-ALLOT ELSE HERE OVER ALLOT THEN
+    DUP TLS-CTXS !
+    /TLS-CTX TLS-MAX-CTX * 0 FILL ;
+
+\ (deferred to NET-TABLES-INIT below)
+
+\ TLS-CTX@ ( idx -- ctx-addr )  Get context by index (0..N-1).
 : TLS-CTX@ ( idx -- ctx )
-    /TLS-CTX * TLS-CTXS + ;
+    /TLS-CTX * TLS-CTXS @ + ;
 
 \ --- TLS State Constants ---
 0 CONSTANT TLSS-NONE
@@ -10528,7 +10550,7 @@ VARIABLE _TLSC-CTYPE
 \
 \  BSD-style socket abstraction over TCP and TLS.
 \
-\  Socket descriptor table: 8 slots.
+\  Socket descriptor table: 2× /TCP-MAX-CONN slots (dynamic).
 \  Each socket is 32 bytes:
 \    +0   STATE      8    0=FREE 1=TCP 2=TLS 3=LISTENING 4=ACCEPTED
 \    +8   TCB/CTX    8    TCB pointer (TCP) or TLS-CTX pointer (TLS)
@@ -10547,7 +10569,7 @@ VARIABLE _TLSC-CTYPE
 
 \ --- Socket Constants ---
 32 CONSTANT /SOCK
-8  CONSTANT SOCK-MAX
+8  VALUE SOCK-MAX                 \ set by NET-TABLES-INIT (2× /TCP-MAX-CONN)
 
 0 CONSTANT SOCKST-FREE
 1 CONSTANT SOCKST-TCP
@@ -10558,11 +10580,53 @@ VARIABLE _TLSC-CTYPE
 0 CONSTANT SOCK-TYPE-TCP
 1 CONSTANT SOCK-TYPE-TLS
 
-\ --- Socket Descriptor Table ---
-CREATE SOCK-TABLE  /SOCK SOCK-MAX * ALLOT
-SOCK-TABLE /SOCK SOCK-MAX * 0 FILL
+\ --- Socket Descriptor Table (dynamic, XMEM-backed) ---
+VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 
-: SOCK-N ( n -- addr )  /SOCK * SOCK-TABLE + ;
+: SOCK-TABLE-SETUP  ( -- )
+    /SOCK SOCK-MAX *
+    XMEM? IF XMEM-ALLOT ELSE HERE OVER ALLOT THEN
+    DUP SOCK-TABLE !
+    /SOCK SOCK-MAX * 0 FILL ;
+
+\ (deferred to NET-TABLES-INIT below)
+
+\ =====================================================================
+\  NET-TABLES-INIT — compute connection limits from available XMEM
+\ =====================================================================
+\  Sizes /TCP-MAX-CONN dynamically so the network stack uses as much
+\  XMEM as is available (up to 64 connections).  Without XMEM the
+\  tables fall back to Bank 0 with a conservative floor of 4.
+\
+\  Budget: we reserve up to 25% of XMEM for networking tables.
+\    Per-connection cost ≈ /TCB + /TLS-CTX + 2×/SOCK ≈ 6344 bytes
+\
+\  Called once at load time.  Safe to call again (idempotent if
+\  tables haven't been used yet).
+
+: NET-TABLES-INIT  ( -- )
+    XMEM? IF
+        XMEM-FREE                      ( avail )
+        4 /                            ( 25% of XMEM )
+        /TCB /TLS-CTX + /SOCK 2 * + /  ( max-conns we can afford )
+        64 MIN  4 MAX                  ( clamp 4..64 )
+    ELSE
+        4                              ( no XMEM: conservative )
+    THEN
+    DUP  TO /TCP-MAX-CONN
+    DUP  TO TLS-MAX-CTX
+    2 *  TO SOCK-MAX                   ( 2× connections for listeners )
+    TCP-TCBS-SETUP
+    TLS-CTXS-SETUP
+    SOCK-TABLE-SETUP
+    TCP-INIT-ALL
+    \ Protect network tables from XMEM-RESET
+    XMEM? IF XMEM-HERE @ XMEM-FLOOR ! THEN
+;
+
+NET-TABLES-INIT
+
+: SOCK-N ( n -- addr )  /SOCK * SOCK-TABLE @ + ;
 : SOCK.STATE      ( sd -- addr )           ;
 : SOCK.HANDLE     ( sd -- addr )   8  + ;
 : SOCK.LOCAL-PORT ( sd -- addr )   16 + ;
