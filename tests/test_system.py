@@ -20698,6 +20698,155 @@ class TestModuleProvidedGuard(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    # ── Deep nesting tests (>5 levels, the old limit) ────────────────
+
+    def test_nesting_8_levels_deep(self):
+        """REQUIRE chain 8 levels deep succeeds (was fatal at >5)."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        # Build chain: d1.f → d2.f → … → d8.f
+        # Each file REQUIREs the next, defines a word adding 1.
+        for i in range(1, 9):
+            if i < 8:
+                src = (
+                    f"REQUIRE d{i+1}.f\n"
+                    f"PROVIDED d{i}.f\n"
+                    f": D{i}-VAL D{i+1}-VAL 1+ ;\n"
+                ).encode()
+            else:
+                # Leaf
+                src = (
+                    f"PROVIDED d{i}.f\n"
+                    f": D{i}-VAL 100 ;\n"
+                ).encode()
+            fs.inject_file(f"d{i}.f", src, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "REQUIRE d1.f",
+                "D1-VAL .",
+            ], storage_image=img)
+            # 100 + 7 increments = 107
+            self.assertIn("107 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_nesting_12_levels_deep(self):
+        """REQUIRE chain 12 levels deep succeeds."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        for i in range(1, 13):
+            if i < 12:
+                src = (
+                    f"REQUIRE e{i+1}.f\n"
+                    f"PROVIDED e{i}.f\n"
+                    f": E{i}-VAL E{i+1}-VAL 1+ ;\n"
+                ).encode()
+            else:
+                src = (
+                    f"PROVIDED e{i}.f\n"
+                    f": E{i}-VAL 500 ;\n"
+                ).encode()
+            fs.inject_file(f"e{i}.f", src, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "REQUIRE e1.f",
+                "E1-VAL .",
+            ], storage_image=img)
+            # 500 + 11 increments = 511
+            self.assertIn("511 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_nesting_overflow_aborts(self):
+        """REQUIRE chain >16 levels deep triggers ABORT, not corruption."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        # Build chain 18 deep to exceed the 16-level limit
+        for i in range(1, 19):
+            if i < 18:
+                src = (
+                    f"REQUIRE z{i+1}.f\n"
+                    f"PROVIDED z{i}.f\n"
+                    f": Z{i}-VAL 1 ;\n"
+                ).encode()
+            else:
+                src = (
+                    f"PROVIDED z{i}.f\n"
+                    f": Z{i}-VAL 1 ;\n"
+                ).encode()
+            fs.inject_file(f"z{i}.f", src, ftype=FTYPE_FORTH)
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "REQUIRE z1.f",
+            ], storage_image=img)
+            # Should get the ABORT message, not silent corruption
+            self.assertIn("nested too deep", text)
+        finally:
+            os.unlink(img)
+
+    def test_nesting_6_levels_with_subdirs(self):
+        """6-level chain across directories — the exact scenario that
+        triggered the original bug (autoexec→kalki-font→font/cache→
+        font/raster→../math/bezier→fp16-ext→fp16)."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.mkdir("font")
+        fs.mkdir("math")
+
+        # Level 1: autoexec.f → REQUIRE kalki.f
+        fs.inject_file("autoexec.f", (
+            b"REQUIRE kalki.f\n"
+            b"PROVIDED autoexec.f\n"
+            b": AUTO-OK KALKI-OK ;\n"
+        ), ftype=FTYPE_FORTH)
+
+        # Level 2: kalki.f → REQUIRE font/cache.f
+        fs.inject_file("kalki.f", (
+            b"REQUIRE font/cache.f\n"
+            b"PROVIDED kalki.f\n"
+            b": KALKI-OK CACHE-OK ;\n"
+        ), ftype=FTYPE_FORTH)
+
+        # Level 3: font/cache.f → REQUIRE raster.f (same dir)
+        fs.inject_file("cache.f", (
+            b"REQUIRE raster.f\n"
+            b"PROVIDED cache.f\n"
+            b": CACHE-OK RASTER-OK ;\n"
+        ), ftype=FTYPE_FORTH, path="/font")
+
+        # Level 4: font/raster.f → REQUIRE ../math/bezier.f
+        fs.inject_file("raster.f", (
+            b"REQUIRE ../math/bezier.f\n"
+            b"PROVIDED raster.f\n"
+            b": RASTER-OK BEZIER-OK ;\n"
+        ), ftype=FTYPE_FORTH, path="/font")
+
+        # Level 5: math/bezier.f → REQUIRE fp16.f (same dir)
+        fs.inject_file("bezier.f", (
+            b"REQUIRE fp16.f\n"
+            b"PROVIDED bezier.f\n"
+            b": BEZIER-OK FP16-OK ;\n"
+        ), ftype=FTYPE_FORTH, path="/math")
+
+        # Level 6: math/fp16.f (leaf)
+        fs.inject_file("fp16.f", (
+            b"PROVIDED fp16.f\n"
+            b": FP16-OK 42 ;\n"
+        ), ftype=FTYPE_FORTH, path="/math")
+
+        fs.save(img)
+        try:
+            text = self._run_kdos([
+                "REQUIRE autoexec.f",
+                "AUTO-OK .",
+            ], storage_image=img)
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(img)
+
 
 class TestKDOSGraphicsModule(_KDOSTestBase):
     """Tests for graphics.f — framebuffer graphics module."""

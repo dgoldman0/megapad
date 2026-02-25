@@ -3829,11 +3829,15 @@ VARIABLE LD-LEN
 
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
 \ Includes CWD so relative-path loads restore the working directory.
-CREATE _LD-STK 200 ALLOT    \ 5 vars * 8 bytes * 5 nesting levels
+\ Frame = 5 vars × 8 bytes = 40 bytes.  16 levels → 640 bytes.
+40 CONSTANT _LD-FRAME
+16 CONSTANT _LD-MAXLVL
+CREATE _LD-STK _LD-FRAME _LD-MAXLVL * ALLOT
 VARIABLE _LD-SP
 0 _LD-SP !
 
 : _LD-SAVE  ( -- )
+    _LD-SP @ _LD-FRAME _LD-MAXLVL * >= ABORT" REQUIRE nested too deep"
     LD-BUF @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
     LD-SZ  @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
     LD-CUR @ _LD-SP @ _LD-STK + !  8 _LD-SP +!
@@ -3841,6 +3845,7 @@ VARIABLE _LD-SP
     CWD  @ _LD-SP @ _LD-STK + !  8 _LD-SP +! ;
 
 : _LD-RESTORE  ( -- )
+    _LD-SP @ 0= ABORT" REQUIRE nesting underflow"
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ CWD  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-LEN !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
