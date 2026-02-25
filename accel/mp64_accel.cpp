@@ -411,10 +411,52 @@ static int accel_blit_glyph(CPUState& s) {
     return 120;  // simulated cycle cost
 }
 
+// BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
+static int accel_blit_string(CPUState& s) {
+    uint64_t font_base  = pop_data(s);
+    uint16_t fg16       = (uint16_t)pop_data(s);
+    int64_t  stride     = (int64_t)pop_data(s);
+    uint64_t pixel_addr = pop_data(s);
+    int64_t  len        = (int64_t)pop_data(s);
+    uint64_t c_addr     = pop_data(s);
+
+    if (len <= 0) return 1;
+
+    for (int64_t i = 0; i < len; i++) {
+        uint8_t ch = read8_fast(s, c_addr + i);
+        if (ch < 32) ch = 32;  // safety clamp
+        uint64_t glyph_addr = font_base + (uint64_t)(ch - 32) * 8;
+
+        // Read 8 font bytes
+        uint8_t font_rows[8];
+        for (int r = 0; r < 8; r++)
+            font_rows[r] = read8_fast(s, glyph_addr + r);
+
+        // Blit 8x8 glyph — foreground only (transparent BG)
+        uint64_t dst_row = pixel_addr + i * 16;  // 8 px * 2 bytes
+        for (int row = 0; row < 8; row++) {
+            uint8_t bits = font_rows[row];
+            if (bits) {
+                uint8_t* dst = resolve_write_ptr(s, dst_row);
+                if (dst) {
+                    uint16_t* px = reinterpret_cast<uint16_t*>(dst);
+                    for (int col = 0; col < 8; col++) {
+                        if (bits & 0x80) px[col] = fg16;
+                        bits <<= 1;
+                    }
+                }
+            }
+            dst_row += stride;
+        }
+    }
+    return (int)(len * 120 + 10);  // simulated cycles
+}
+
 static int execute_accel_hook(CPUState& s, int hook_id) {
     switch (hook_id) {
         case 1: return accel_rect_fill(s);
         case 2: return accel_blit_glyph(s);
+        case 3: return accel_blit_string(s);
         default: return 0;
     }
 }
