@@ -1670,6 +1670,93 @@ wfl_loop:
 wfl_done:
     ret.l
 
+; RECT-FILL ( addr stride w h color16 -- )
+;   Fill a w×h pixel rectangle at addr with RGB565 color16.
+;   addr = pre-computed top-left pixel address.
+;   stride = bytes per framebuffer row.
+;   Inner loop does st.h per pixel; outer loop advances by stride.
+w_rect_fill:
+    ldn r1, r14               ; color16
+    addi r14, 8
+    ldn r13, r14              ; h (row count)
+    addi r14, 8
+    ldn r11, r14              ; w (pixels per row)
+    addi r14, 8
+    ldn r0, r14               ; stride (bytes per row)
+    addi r14, 8
+    ldn r9, r14               ; addr (top-left pixel)
+    addi r14, 8
+.rf_row:
+    cmpi r13, 0
+    breq .rf_done
+    mov r7, r9                 ; row pointer
+    mov r12, r11               ; column counter = w
+.rf_col:
+    cmpi r12, 0
+    breq .rf_next
+    st.h r7, r1                ; write pixel
+    addi r7, 2
+    dec r12
+    br .rf_col
+.rf_next:
+    add r9, r0                 ; addr += stride
+    dec r13
+    br .rf_row
+.rf_done:
+    ret.l
+
+; BLIT-GLYPH ( glyph-addr pixel-addr stride fg16 -- )
+;   Render an 8×8 bitmap glyph to the framebuffer.
+;   Only foreground (set) bits are written; background is transparent.
+;   glyph-addr = address of 8 bytes of font bitmap (MSB = leftmost).
+;   pixel-addr = pre-computed top-left pixel address.
+;   stride = bytes per framebuffer row.
+;   fg16 = RGB565 foreground color.
+w_blit_glyph:
+    ; Save R2 (ram_size — must be preserved)
+    subi r15, 8
+    str r15, r2
+    ldn r1, r14               ; fg16
+    addi r14, 8
+    ldn r0, r14               ; stride
+    addi r14, 8
+    ldn r9, r14               ; pixel-addr
+    addi r14, 8
+    ldn r11, r14              ; glyph-addr
+    addi r14, 8
+    cmpi r11, 0
+    breq .bg_ret
+    ldi r13, 8                 ; row counter
+.bg_row:
+    cmpi r13, 0
+    breq .bg_ret
+    ld.b r7, r11               ; load font row byte
+    inc r11                    ; next font byte
+    mov r12, r9                ; pixel pointer for this row
+    ldi r10, 8                 ; column counter
+.bg_col:
+    cmpi r10, 0
+    breq .bg_next
+    mov r2, r7                 ; copy row byte to temp
+    andi r2, 0x80              ; test MSB
+    breq .bg_skip
+    st.h r12, r1               ; write fg pixel
+.bg_skip:
+    lsli r7, 1                 ; shift row byte left
+    addi r12, 2                ; next pixel column
+    dec r10
+    br .bg_col
+.bg_next:
+    add r9, r0                 ; pixel-addr += stride
+    dec r13
+    br .bg_row
+.bg_ret:
+    ; Restore R2
+    ldn r2, r15
+    addi r15, 8
+.bg_done:
+    ret.l
+
 ; =====================================================================
 ;  Forth Words — Tile Engine
 ; =====================================================================
@@ -9860,9 +9947,27 @@ d_wfill:
     call.l r11
     ret.l
 
+; === RECT-FILL ===
+d_rect_fill:
+    .dq d_wfill
+    .db 9
+    .ascii "RECT-FILL"
+    ldi64 r11, w_rect_fill
+    call.l r11
+    ret.l
+
+; === BLIT-GLYPH ===
+d_blit_glyph:
+    .dq d_rect_fill
+    .db 10
+    .ascii "BLIT-GLYPH"
+    ldi64 r11, w_blit_glyph
+    call.l r11
+    ret.l
+
 ; === TI ===
 d_ti:
-    .dq d_wfill
+    .dq d_blit_glyph
     .db 2
     .ascii "TI"
     ldi64 r11, w_ti

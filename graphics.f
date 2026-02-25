@@ -171,10 +171,20 @@ VARIABLE GFX-DH          \ drawing height
 \ -- Rectangles -------------------------------------------------------
 
 : GFX-RECT  ( color x y w h -- )
-    GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
-    GFX-DH @ 0 DO
-        GFX-DC @ GFX-DX @ GFX-DY @ I + GFX-DW @ GFX-HLINE
-    LOOP ;
+    GFX-BPP @ 2 = IF                    \ Fast path for 16bpp: RECT-FILL
+        GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
+        GFX-DX @ GFX-DY @ GFX-ADDR     ( addr )
+        GFX-STR @                       ( addr stride )
+        GFX-DW @                        ( addr stride w )
+        GFX-DH @                        ( addr stride w h )
+        GFX-DC @                        ( addr stride w h color16 )
+        RECT-FILL
+    ELSE
+        GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
+        GFX-DH @ 0 DO
+            GFX-DC @ GFX-DX @ GFX-DY @ I + GFX-DW @ GFX-HLINE
+        LOOP
+    THEN ;
 
 : GFX-BOX  ( color x y w h -- )
     GFX-DH ! GFX-DW ! GFX-DY ! GFX-DX ! GFX-DC !
@@ -333,21 +343,31 @@ CREATE GFX-FONT
     32 - 8 * GFX-FONT + ;
 
 : GFX-CHAR  ( char x y color -- )
-    GFX-CLR !                           ( char x y )
-    8 0 DO                              ( char x y )
-        \ Get font row byte
-        2 PICK GFX-GLYPH I + C@        ( char x y rowbits )
-        8 0 DO                          ( char x y rowbits )
-            DUP 0x80 AND IF
-                GFX-CLR @ 3 PICK I +   ( ... color x+i )
-                3 PICK J +              ( ... color x+i y+j )
-                GFX-PIXEL!
-            THEN
-            1 LSHIFT                    ( shift left )
+    GFX-BPP @ 2 = IF                    \ Fast path for 16bpp: BLIT-GLYPH
+        >R                              ( char x y  R: fg16 )
+        GFX-ADDR                        ( char pixel-addr  R: fg16 )
+        SWAP GFX-GLYPH                  ( pixel-addr glyph-addr )
+        SWAP                            ( glyph-addr pixel-addr )
+        GFX-STR @                       ( glyph-addr pixel-addr stride )
+        R>                              ( glyph-addr pixel-addr stride fg16 )
+        BLIT-GLYPH
+    ELSE
+        GFX-CLR !                       ( char x y )
+        8 0 DO                          ( char x y )
+            \ Get font row byte
+            2 PICK GFX-GLYPH I + C@    ( char x y rowbits )
+            8 0 DO                      ( char x y rowbits )
+                DUP 0x80 AND IF
+                    GFX-CLR @ 3 PICK I + ( ... color x+i )
+                    3 PICK J +          ( ... color x+i y+j )
+                    GFX-PIXEL!
+                THEN
+                1 LSHIFT                ( shift left )
+            LOOP
+            DROP                        ( char x y )
         LOOP
-        DROP                            ( char x y )
-    LOOP
-    DROP 2DROP ;
+        DROP 2DROP
+    THEN ;
 
 : GFX-TYPE  ( addr len color -- )
     GFX-CLR !                           ( addr len )

@@ -1212,6 +1212,64 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("42 ", text)
 
+    def test_rect_fill(self):
+        """RECT-FILL writes a w×h block of 16-bit pixels."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            # Fill 4×3 rectangle at 0x10000, stride=8 bytes (4 pixels * 2)
+            # Use addresses above BIOS ROM (~0x8100) to avoid corruption.
+            "0x10000 8 4 3 0xF800 RECT-FILL",  # red RGB565
+            # Check first pixel of each row
+            "0x10000 W@ .",                    # row 0
+            "0x10008 W@ .",                    # row 1 (0x10000 + stride 8)
+            "0x10010 W@ .",                    # row 2 (0x10000 + stride 16)
+        ])
+        # 0xF800 = 63488
+        self.assertIn("63488 ", text)
+
+    def test_rect_fill_zero_dims(self):
+        """RECT-FILL with w=0 or h=0 is a no-op."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0x10000 16 0 5 0xFFFF RECT-FILL",  # w=0
+            "0x10000 16 5 0 0xFFFF RECT-FILL",  # h=0
+            "99 .",
+        ])
+        self.assertIn("99 ", text)
+
+    def test_blit_glyph(self):
+        """BLIT-GLYPH renders foreground pixels from a font bitmap."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            # Store an 8-byte glyph pattern at 0x10000
+            # (addresses above BIOS ROM ~0x8100 to avoid corruption)
+            # Row 0: 0xFF (all 8 bits set)
+            # Rows 1-7: 0x00
+            "0xFF 0x10000 C!",
+            "0x00 0x10001 C!  0x00 0x10002 C!  0x00 0x10003 C!",
+            "0x00 0x10004 C!  0x00 0x10005 C!  0x00 0x10006 C!  0x00 0x10007 C!",
+            # Blit to pixel address 0x20000, stride=16, fg=0x07E0 (green)
+            "0x10000 0x20000 16 0x07E0 BLIT-GLYPH",
+            # Row 0 should have green pixels (all 8 set)
+            "0x20000 W@ .",                    # first pixel of row 0
+            "0x2000E W@ .",                    # last pixel of row 0 (col 7)
+            # Row 1 should be untouched (transparent)
+            "0x20010 W@ .",                    # first pixel of row 1
+        ])
+        # 0x07E0 = 2016 (green)
+        self.assertIn("2016 ", text)
+        # Row 1 should be 0 (untouched memory)
+        self.assertIn("0 ", text)
+
+    def test_blit_glyph_null(self):
+        """BLIT-GLYPH with glyph-addr=0 is a no-op."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0 0x20000 16 0xFFFF BLIT-GLYPH",
+            "77 .",
+        ])
+        self.assertIn("77 ", text)
+
     # -- I/O --
 
     def test_emit(self):
