@@ -110,7 +110,15 @@ VARIABLE PN-LEN
 \    DSP ↓  (data stack grows down)
 \
 
-16 CONSTANT /ALLOC-HDR
+24 CONSTANT /ALLOC-HDR
+0xA110CA7EDEADBEEF CONSTANT ALLOC-MAGIC
+
+\ ?DICT-ROOM ( u -- )
+\   Abort if HERE + u would reach within 256 bytes of SP.
+\   Use before large ALLOT or CREATE sequences in Forth code
+\   to catch dictionary overflow before it corrupts the stack.
+: ?DICT-ROOM  ( u -- )
+    HERE + 256 +  SP@ >= ABORT" dictionary overflow" ;
 
 \ MEM-SIZE ( -- u )  total RAM in bytes
 \   Reads bank0_size (64-bit, in bytes) from SysInfo register at offset 0x08.
@@ -158,6 +166,7 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     \ Write header for the single free block
     0 HEAP-BASE @ !              \ next = 0 (end of list)
     HEAP-BASE @ 8 + !            \ size = available
+    0 HEAP-BASE @ 16 + !         \ magic = 0 (free)
     HEAP-BASE @ HEAP-FREE !      \ free list head
     1 HEAP-INIT ! ;
 
@@ -205,12 +214,14 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
                 A-CURR @ @ OVER !                  \ new-blk.next = curr.next
                 SWAP /ALLOC-HDR - OVER 8 + !       \ new-blk.size = leftover-hdr
                 A-SIZE @ A-CURR @ 8 + !            \ curr.size = requested
+                0 OVER 16 + !                       \ new-blk.magic = 0 (free)
                 (LINK-PREV!)                        \ prev → new-blk
             ELSE
                 \ Use whole block — unlink from free list
                 DROP
                 A-CURR @ @  (LINK-PREV!)            \ prev → curr.next
             THEN
+            ALLOC-MAGIC A-CURR @ 16 + !              \ stamp allocated canary
             A-CURR @ /ALLOC-HDR +  0  EXIT          \ return user addr + success
         THEN
         \ Block too small — advance
@@ -258,6 +269,8 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
     ?CORE0
     DUP 0= IF DROP EXIT THEN
     /ALLOC-HDR -   ( block )
+    DUP 16 + @ ALLOC-MAGIC <> ABORT" FREE: invalid or double-free"
+    0 OVER 16 + !                                   \ clear canary
     0 A-PREV !   HEAP-FREE @ A-CURR !
     BEGIN
         A-CURR @ 0= IF
@@ -320,6 +333,7 @@ VARIABLE R-NEW     \ new requested size (rounded)
                     R-BLK @ /ALLOC-HDR + R-NEW @ +  ( leftover remnant )
                     0 OVER !                \ remnant.next = 0
                     SWAP /ALLOC-HDR - OVER 8 + !  \ remnant.size
+                    ALLOC-MAGIC OVER 16 + ! \ stamp so FREE accepts it
                     /ALLOC-HDR + FREE       \ free the remnant
                 ELSE DROP
                 THEN
@@ -348,6 +362,7 @@ VARIABLE R-NEW     \ new requested size (rounded)
             R-BLK @ /ALLOC-HDR + R-NEW @ +  ( leftover remnant )
             0 OVER !                       \ remnant.next = 0
             SWAP /ALLOC-HDR - OVER 8 + !   \ remnant.size = leftover-hdr
+            ALLOC-MAGIC OVER 16 + !        \ stamp so FREE accepts it
             /ALLOC-HDR + FREE              \ free the remnant
         ELSE DROP
         THEN

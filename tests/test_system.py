@@ -7045,20 +7045,29 @@ class TestKDOSAllocator(_KDOSTestBase):
 
     # -- Edge case tests ---------------------------------------------------
 
-    def test_double_free_no_crash(self):
-        """Freeing the same block twice should not crash.
+    def test_double_free_detected(self):
+        """Freeing the same block twice aborts with clear message.
 
-        NOTE: double-free is undefined behavior in our allocator —
-        we only verify it doesn't hard-fault or infinite-loop.
+        Phase 2 hardening: FREE validates a magic canary in the
+        allocation header.  Double-free clears the canary on the
+        first FREE, so the second FREE sees a mismatch and aborts.
         """
         text = self._run_kdos([
             "VARIABLE P",
             "64 ALLOCATE DROP DUP P !",
             "DUP FREE",
-            "P @ FREE",          # second free — UB but shouldn't crash
-            '.\" edge-ok"',
+            "P @ FREE",          # second free — should abort
+            '.\" should-not-reach"',
         ], max_steps=200_000_000)
-        self.assertIn("edge-ok", text)
+        self.assertIn("FREE: invalid or double-free", text)
+
+    def test_free_invalid_addr_detected(self):
+        """FREE on a never-allocated address aborts cleanly."""
+        text = self._run_kdos([
+            "HEAP-INIT @ 0= IF HEAP-SETUP THEN",
+            "HEAP-BASE @ 1024 + FREE",   # address inside heap but never allocated
+        ], max_steps=200_000_000)
+        self.assertIn("FREE: invalid or double-free", text)
 
     def test_free_then_heap_frag(self):
         """Free list stays consistent after free-all-reverse-order."""
@@ -7897,6 +7906,41 @@ class TestKDOSArena(_KDOSTestBase):
             'FREE',
         ])
         self.assertIn('[IOR=0', text, f"ALLOCATE failed on core 0: {text}")
+
+    # -- Phase 1 hardening: dictionary overflow guard ---------------------
+
+    def test_dict_room_guard_ok(self):
+        """?DICT-ROOM with small size does not abort."""
+        text = self._run_kdos([
+            '64 ?DICT-ROOM',
+            '.\" guard-ok"',
+        ])
+        self.assertIn("guard-ok", text)
+
+    def test_dict_room_guard_overflow(self):
+        """?DICT-ROOM with huge size aborts with message."""
+        text = self._run_kdos([
+            '999999999 ?DICT-ROOM',
+        ], max_steps=200_000_000)
+        self.assertIn("dictionary overflow", text)
+
+    def test_allot_overflow_aborts(self):
+        """ALLOT with huge size aborts instead of corrupting stack."""
+        text = self._run_kdos([
+            'VARIABLE CANARY  42 CANARY !',
+            '999999 ALLOT',
+            'CANARY @ .',         # after abort+REPL restart, canary intact
+        ], max_steps=200_000_000)
+        self.assertIn("dictionary overflow", text)
+        self.assertIn("42 ", text)  # stack/dict not corrupted
+
+    def test_allot_normal_still_works(self):
+        """Normal ALLOT (small size) still works after guard is in place."""
+        text = self._run_kdos([
+            'CREATE TBUF 64 ALLOT',
+            'TBUF 42 SWAP !  TBUF @ .',
+        ])
+        self.assertIn("42 ", text)
 
 
 # ---------------------------------------------------------------------------

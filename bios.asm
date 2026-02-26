@@ -1408,16 +1408,42 @@ w_here:
     ret.l
 
 ; ALLOT ( n -- )
+;   Advances HERE by n bytes.  Aborts if the new HERE would
+;   reach within 256 bytes of the data stack pointer (R14).
+;   Guard skipped when current HERE is in ext mem (userland zone).
+;   Uses R1 for margin check (already consumed from stack).
+;   MUST NOT touch R3 (= PC via PSEL).
 w_allot:
-    ldn r1, r14
+    ldn r1, r14               ; R1 = n
     addi r14, 8
     ldi64 r11, var_here
-    ldn r0, r11
-    add r0, r1
+    ldn r0, r11               ; R0 = HERE (current)
+    ; --- dictionary overflow guard (check BEFORE advancing) ---
+    cmp r2, r0                ; ram_size vs current HERE
+    brle .allot_extmem         ; current HERE >= ram_size → ext mem, skip
+    add r0, r1                ; R0 = HERE + n
+    mov r1, r0
+    addi r1, 256              ; R1 = HERE + n + 256
+    cmp r1, r14               ; vs SP
+    brgt .allot_overflow
+    str r11, r0               ; update var_here
+    ret.l
+.allot_extmem:
+    add r0, r1                ; ext mem — no guard needed
     str r11, r0
     ret.l
+.allot_overflow:
+    ldi64 r10, str_dict_overflow
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11
+    halt
 
 ; , ( x -- ) store cell at HERE, advance HERE by 8
+;   No inline guard — : already checks 1024-byte margin before
+;   compilation starts.  The Forth-level ?DICT-ROOM word covers
+;   any non-compilation use of , that might overflow.
 w_comma:
     ldn r1, r14
     addi r14, 8
@@ -12992,6 +13018,8 @@ str_eval_depth:
     .asciiz "EVALUATE depth limit exceeded\n"
 str_dict_full:
     .asciiz "Dictionary full\n"
+str_dict_overflow:
+    .asciiz "dictionary overflow\n"
 
 str_fsload_no_disk:
     .asciiz "FSLOAD: no disk\n"
