@@ -54,10 +54,12 @@ MAGIC = b"MP64"
 FS_VERSION = 1
 
 BMAP_START = 1
-BMAP_SECTORS = 1
-DIR_START = 2
+BMAP_SECTORS = 1          # default for ≤4096 sectors; computed per image
+DIR_START = 2             # default; BMAP_START + bmap_sectors
 DIR_SECTORS = 12
-DATA_START = 14
+DATA_START = 14           # default; dir_start + DIR_SECTORS
+
+BITS_PER_BMAP_SECTOR = SECTOR_SIZE * 8   # 4096
 
 DIR_ENTRY_SIZE = 48
 MAX_NAME_LEN = 23
@@ -141,6 +143,14 @@ class DirEntry:
 
 
 # ── Low-level helpers ──────────────────────────────────────────────────
+
+def _compute_geometry(total_sectors: int) -> tuple[int, int, int]:
+    """Return (bmap_sectors, dir_start, data_start) for *total_sectors*."""
+    bmap_secs = (total_sectors + BITS_PER_BMAP_SECTOR - 1) // BITS_PER_BMAP_SECTOR
+    dir_start = BMAP_START + bmap_secs
+    data_start = dir_start + DIR_SECTORS
+    return bmap_secs, dir_start, data_start
+
 
 def _sectors_needed(nbytes: int) -> int:
     """Number of 512-byte sectors needed to hold *nbytes*."""
@@ -253,6 +263,11 @@ class MP64FS:
         else:
             self.img = bytearray(total_sectors * SECTOR_SIZE)
         self.total = len(self.img) // SECTOR_SIZE
+        # Default geometry; overridden by _read_geometry() for loaded images
+        self.bmap_sectors, self.dir_start, self.data_start = (
+            _compute_geometry(self.total))
+        if data is not None:
+            self._read_geometry()
 
     # ── sector I/O ─────────────────────────────────────────────────
 
@@ -268,16 +283,25 @@ class MP64FS:
         struct.pack_into("<H", sb, 4, FS_VERSION)
         struct.pack_into("<I", sb, 6, self.total)       # u32 total_sectors
         struct.pack_into("<H", sb, 10, BMAP_START)
-        struct.pack_into("<H", sb, 12, BMAP_SECTORS)
-        struct.pack_into("<H", sb, 14, DIR_START)
+        struct.pack_into("<H", sb, 12, self.bmap_sectors)
+        struct.pack_into("<H", sb, 14, self.dir_start)
         struct.pack_into("<H", sb, 16, DIR_SECTORS)
-        struct.pack_into("<H", sb, 18, DATA_START)
+        struct.pack_into("<H", sb, 18, self.data_start)
         sb[20] = MAX_FILES                               # u8 max_files
         sb[21] = DIR_ENTRY_SIZE                          # u8 entry_size
         self.img[0:SECTOR_SIZE] = sb
 
     def _verify_magic(self) -> bool:
         return self.img[0:4] == MAGIC
+
+    def _read_geometry(self):
+        """Read geometry fields from the in-memory superblock."""
+        if not self._verify_magic():
+            return
+        self.total = struct.unpack_from("<I", self.img, 6)[0]
+        self.bmap_sectors = struct.unpack_from("<H", self.img, 12)[0]
+        self.dir_start = struct.unpack_from("<H", self.img, 14)[0]
+        self.data_start = struct.unpack_from("<H", self.img, 18)[0]
 
     # ── bitmap ─────────────────────────────────────────────────────
 
@@ -288,17 +312,19 @@ class MP64FS:
     @property
     def _bmap(self) -> bytearray:
         off = self._bmap_offset
-        return bytearray(self.img[off : off + SECTOR_SIZE])
+        size = self.bmap_sectors * SECTOR_SIZE
+        return bytearray(self.img[off : off + size])
 
     def _flush_bmap(self, bmap: bytearray):
         off = self._bmap_offset
-        self.img[off : off + SECTOR_SIZE] = bmap[:SECTOR_SIZE]
+        size = self.bmap_sectors * SECTOR_SIZE
+        self.img[off : off + size] = bmap[:size]
 
     # ── directory ──────────────────────────────────────────────────
 
     @property
     def _dir_offset(self) -> int:
-        return DIR_START * SECTOR_SIZE
+        return self.dir_start * SECTOR_SIZE
 
     @property
     def _dir_data(self) -> bytearray:
@@ -316,11 +342,13 @@ class MP64FS:
     def format(self):
         """Initialise a fresh MP64FS on this image."""
         self.img[:] = b"\x00" * len(self.img)
+        self.bmap_sectors, self.dir_start, self.data_start = (
+            _compute_geometry(self.total))
         self._write_superblock()
 
-        # Mark metadata sectors (0-13) as allocated in bitmap
+        # Mark metadata sectors as allocated in bitmap
         bmap = self._bmap
-        for s in range(DATA_START):
+        for s in range(self.data_start):
             _bitmap_set(bmap, s)
         self._flush_bmap(bmap)
 
@@ -368,15 +396,24 @@ class MP64FS:
         Returns (start, count, ext1_start, ext1_count).
         Raises RuntimeError if allocation fails.
         """
+        # Count total free for diagnostics
+        total_free = sum(1 for s in range(self.data_start, self.total)
+                         if not _bitmap_get(bmap, s))
+
+        if total_free < nsectors:
+            raise RuntimeError(
+                f"No space: need {nsectors} sectors, only {total_free} free")
+
         # Try single extent first
-        start = _bitmap_find_free(bmap, nsectors, self.total)
+        start = _bitmap_find_free(bmap, nsectors, self.total,
+                                  self.data_start)
         if start is not None:
             return (start, nsectors, 0, 0)
 
         # Fall back to two-extent allocation — find largest free run
         best_start, best_len = 0, 0
-        run_start, run_len = DATA_START, 0
-        for s in range(DATA_START, self.total):
+        run_start, run_len = self.data_start, 0
+        for s in range(self.data_start, self.total):
             if _bitmap_get(bmap, s):
                 if run_len > best_len:
                     best_start, best_len = run_start, run_len
@@ -390,7 +427,9 @@ class MP64FS:
             best_start, best_len = run_start, run_len
 
         if best_len == 0:
-            raise RuntimeError(f"No space for {nsectors} sectors")
+            raise RuntimeError(
+                f"No space: need {nsectors} sectors, {total_free} free "
+                f"(0 contiguous)")
 
         primary = min(best_len, nsectors)
         remainder = nsectors - primary
@@ -401,14 +440,17 @@ class MP64FS:
         # Mark primary extent temporarily to find second run
         for s in range(best_start, best_start + primary):
             _bitmap_set(bmap, s)
-        ext1 = _bitmap_find_free(bmap, remainder, self.total)
+        ext1 = _bitmap_find_free(bmap, remainder, self.total,
+                                 self.data_start)
         # Unmark (caller will mark properly)
         for s in range(best_start, best_start + primary):
             _bitmap_clear(bmap, s)
 
         if ext1 is None:
             raise RuntimeError(
-                f"No space for {nsectors} sectors (need {remainder} more)")
+                f"Cannot allocate {nsectors} sectors in 2 extents "
+                f"({total_free} free, largest run: {best_len}); "
+                f"try compact or use a larger image")
 
         return (best_start, primary, ext1, remainder)
 
@@ -650,12 +692,12 @@ class MP64FS:
 
         # Rebuild bitmap — clear all data sectors
         bmap = self._bmap
-        for s in range(DATA_START, self.total):
+        for s in range(self.data_start, self.total):
             _bitmap_clear(bmap, s)
 
         # Re-pack each file into a single contiguous run
         moved = 0
-        next_sector = DATA_START
+        next_sector = self.data_start
         for slot_idx, entry, data in live:
             nsectors = _sectors_needed(len(data)) if data else 1
             start = next_sector
@@ -704,21 +746,38 @@ class MP64FS:
         return {
             "formatted": True,
             "version": struct.unpack_from("<H", self.img, 4)[0],
-            "total_sectors": struct.unpack_from("<I", self.img, 6)[0],
-            "data_start": struct.unpack_from("<H", self.img, 18)[0],
+            "total_sectors": self.total,
+            "bmap_sectors": self.bmap_sectors,
+            "dir_start": self.dir_start,
+            "data_start": self.data_start,
             "max_files": self.img[20],
             "entry_size": self.img[21],
             "files": len(self.list_files()),
             "free_sectors": self._count_free(),
+            "largest_free_run": self.largest_free_run(),
         }
 
     def _count_free(self) -> int:
         bmap = self._bmap
         free = 0
-        for s in range(DATA_START, self.total):
+        for s in range(self.data_start, self.total):
             if not _bitmap_get(bmap, s):
                 free += 1
         return free
+
+    def largest_free_run(self) -> int:
+        """Return the length of the largest contiguous free run."""
+        bmap = self._bmap
+        best = 0
+        run = 0
+        for s in range(self.data_start, self.total):
+            if not _bitmap_get(bmap, s):
+                run += 1
+                if run > best:
+                    best = run
+            else:
+                run = 0
+        return best
 
     # ── serialisation ──────────────────────────────────────────────
 
@@ -730,7 +789,8 @@ class MP64FS:
     def load(cls, path: str | Path) -> "MP64FS":
         """Load an image from file."""
         data = bytearray(Path(path).read_bytes())
-        return cls(data)
+        fs = cls(data)
+        return fs
 
 
 # ── Convenience functions ──────────────────────────────────────────────
