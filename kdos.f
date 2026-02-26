@@ -448,6 +448,41 @@ VARIABLE R-NEW     \ new requested size (rounded)
     ."   largest=" HEAP-LARGEST .
     ."   safe=" HEAP-CHECK IF ." yes" ELSE ." NO" THEN CR ;
 
+\ HEAP-VERIFY ( -- flag )
+\   Walk the free list and verify structural integrity:
+\   1. Each block address >= HEAP-BASE
+\   2. Blocks are in ascending address order
+\   3. Free blocks have magic = 0 (not allocated)
+\   Returns TRUE if heap is consistent, FALSE if corruption detected.
+: HEAP-VERIFY  ( -- flag )
+    HEAP-INIT @ 0= IF HEAP-SETUP THEN
+    TRUE                              ( ok )
+    0                                 ( ok prev )
+    HEAP-FREE @                       ( ok prev curr )
+    BEGIN DUP WHILE
+        \ bounds: block must be >= HEAP-BASE
+        DUP HEAP-BASE @ < IF
+            ." heap: block below base" CR
+            ROT DROP FALSE -ROT
+        THEN
+        \ address ordering (skip for first block where prev=0)
+        OVER 0<> IF
+            OVER OVER >= IF
+                ." heap: blocks out of order" CR
+                ROT DROP FALSE -ROT
+            THEN
+        THEN
+        \ magic must be 0 for free blocks
+        DUP 16 + @ 0<> IF
+            ." heap: free block has non-zero magic" CR
+            ROT DROP FALSE -ROT
+        THEN
+        \ advance: prev=curr, curr=curr.next
+        SWAP DROP DUP             ( ok curr curr )
+        @                         ( ok prev' curr' )
+    REPEAT
+    2DROP ;
+
 \ =====================================================================
 \  §1.1a  Dictionary Snapshots — MARKER / FORGET
 \ =====================================================================
@@ -1733,6 +1768,14 @@ VARIABLE HBW-LIMIT   0 HBW-LIMIT !
     HBW-HERE !                        \ update pointer
     ;                                 \ leave addr on stack
 
+\ HBW-ALLOT? ( u -- addr ior )  like HBW-ALLOT but returns ior
+: HBW-ALLOT?  ( u -- addr ior )
+    HBW-HERE @ SWAP
+    OVER + DUP HBW-LIMIT @ > IF
+        2DROP 0 -1 EXIT              \ overflow → (0, -1)
+    THEN
+    HBW-HERE ! 0 ;                   \ success  → (addr, 0)
+
 \ HBW-TALIGN ( -- )  align HBW-HERE up to 64-byte boundary
 : HBW-TALIGN  ( -- )
     HBW-HERE @  63 + -64 AND  HBW-HERE ! ;
@@ -1788,7 +1831,12 @@ VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
 
 \ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
+\   Validates that addr falls within [EXT-MEM-BASE, XMEM-LIMIT),
+\   addr+size does not exceed XMEM-LIMIT, and size >= 16.
 : XMEM-FREE-BLOCK  ( addr size -- )
+    DUP 16 < ABORT" XMEM-FREE: block too small"
+    OVER EXT-MEM-BASE < ABORT" XMEM-FREE: addr below base"
+    2DUP + XMEM-LIMIT @ > ABORT" XMEM-FREE: exceeds limit"
     OVER !                            \ addr+0 = size
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
     XMEM-FL ! ;                       \ head = addr
@@ -1837,6 +1885,16 @@ VARIABLE FL-CURR                     \ search scratch
     XMEM-HERE @ SWAP
     OVER + DUP XMEM-LIMIT @ > ABORT" Ext mem overflow"
     XMEM-HERE ! ;
+
+\ XMEM-ALLOT? ( u -- addr ior )  like XMEM-ALLOT but returns ior
+: XMEM-ALLOT?  ( u -- addr ior )
+    XMEM? 0= IF DROP 0 -1 EXIT THEN
+    DUP (XMEM-FL-FIND) IF NIP 0 EXIT THEN
+    XMEM-HERE @ SWAP
+    OVER + DUP XMEM-LIMIT @ > IF
+        2DROP 0 -1 EXIT
+    THEN
+    XMEM-HERE ! 0 ;
 
 \ XMEM-TALIGN ( -- )  align XMEM-HERE up to 64-byte boundary
 : XMEM-TALIGN  ( -- )
@@ -2011,15 +2069,11 @@ VARIABLE AR-BLK    \ backing block address
 
 \ (AR-ALLOC-BACKING) ( size source -- addr ior )
 \   Dispatch to the correct region allocator.
+\   Uses ?-variants so all paths return ior uniformly.
 : (AR-ALLOC-BACKING)  ( size source -- addr ior )
     DUP 0 = IF  DROP ALLOCATE EXIT  THEN
-    DUP 1 = IF
-        DROP XMEM? 0= IF DROP 0 -1 EXIT THEN
-        XMEM-ALLOT 0 EXIT
-    THEN
-    2 = IF
-        HBW-ALLOT 0 EXIT
-    THEN
+    DUP 1 = IF  DROP XMEM-ALLOT? EXIT  THEN
+    2 = IF  HBW-ALLOT? EXIT  THEN
     DROP 0 -1 ;    \ unknown source
 
 \ (AR-FREE-BACKING) ( addr size source -- )
@@ -2084,8 +2138,10 @@ VARIABLE AR-BLK    \ backing block address
     DUP A.SIZE @  SWAP ARENA-USED - ;
 
 \ ARENA-ALLOT ( arena u -- addr )
-\   Bump-allocate u bytes (8-byte aligned).  Aborts on overflow.
+\   Bump-allocate u bytes (8-byte aligned).  Aborts on overflow
+\   or if the arena has been destroyed.
 : ARENA-ALLOT  ( arena u -- addr )
+    OVER A.BASE @ 0= ABORT" arena destroyed"
     7 + -8 AND                               ( arena u-aligned )
     OVER ARENA-FREE OVER < ABORT" arena full"
     OVER A.PTR @                             ( arena u addr )
@@ -2095,6 +2151,7 @@ VARIABLE AR-BLK    \ backing block address
 \ ARENA-ALLOT? ( arena u -- addr ior )
 \   Like ARENA-ALLOT but returns ior instead of aborting.
 : ARENA-ALLOT?  ( arena u -- addr ior )
+    OVER A.BASE @ 0= IF  2DROP 0 -1 EXIT  THEN  \ destroyed
     7 + -8 AND                               ( arena u-aligned )
     OVER ARENA-FREE OVER < IF
         2DROP 0 -1 EXIT                      \ overflow
@@ -2133,7 +2190,14 @@ VARIABLE AR-BLK    \ backing block address
 \ ARENA-ROLLBACK ( arena snap -- )
 \   Restore the bump pointer to a previous snapshot.
 \   Everything allocated after the snapshot is logically freed.
+\   Validates that snap falls within [base, base+size].
 : ARENA-ROLLBACK  ( arena snap -- )
+    OVER A.BASE @                        ( arena snap base )
+    OVER SWAP                            ( arena snap snap base )
+    < ABORT" rollback: snap below base"  ( arena snap )
+    OVER DUP A.BASE @ SWAP A.SIZE @ +   ( arena snap limit )
+    OVER SWAP                            ( arena snap snap limit )
+    > ABORT" rollback: snap above limit" ( arena snap )
     SWAP A.PTR ! ;
 
 \ ARENA-SNAP-DROP ( snap -- )
@@ -6701,6 +6765,19 @@ VARIABLE ROUTE-BUF
     .XMEM
     ."   Buffers: " BUF-COUNT @ . CR
     ."   Stack depth: " DEPTH . CR ;
+
+\ MEM-REPORT ( -- )
+\   Unified memory status with heap integrity check.
+: MEM-REPORT  ( -- )
+    CR ." === Memory Report ===" CR
+    .HEAP
+    .HBW
+    .XMEM
+    ."  Dict: HERE=" HERE .
+    ."  SP=" SP@ .
+    ."  gap=" SP@ HERE - . ."  bytes" CR
+    ."  Heap integrity: "
+    HEAP-VERIFY IF ." OK" ELSE ." CORRUPT" THEN CR ;
 
 \ -- Dashboard --
 : DASHBOARD ( -- )

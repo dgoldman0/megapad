@@ -6707,12 +6707,15 @@ class TestBIOSHardening(unittest.TestCase):
         # With 256 KiB RAM, DSP starts at 128 KiB (131072).
         # BIOS binary is ~20KB, so HERE starts around 20600.
         # ALLOT 120000 pushes HERE to ~140600.
-        # w_colon checks HERE + 1024 > DSP → 141624 > 131072 → full.
+        # Phase 1 hardening: w_allot now checks HERE+n+256 > SP
+        # and aborts with "dictionary overflow" before advancing.
         fill_lines = []
         fill_lines.append("120000 ALLOT")
         fill_lines.append(": FULL 1 ;")
         text = self._run_forth(sys, buf, fill_lines, max_steps=5_000_000)
-        self.assertIn("Dictionary full", text)
+        self.assertTrue(
+            "dictionary overflow" in text or "Dictionary full" in text,
+            f"Expected dictionary guard message, got: {text}")
 
 
 # ---------------------------------------------------------------------------
@@ -7925,10 +7928,12 @@ class TestKDOSArena(_KDOSTestBase):
         self.assertIn("dictionary overflow", text)
 
     def test_allot_overflow_aborts(self):
-        """ALLOT with huge size aborts instead of corrupting stack."""
+        """ALLOT with size that overflows into stack aborts."""
+        # With 1MiB RAM, SP starts at ~524K.  HERE after KDOS is ~200K.
+        # 400000 keeps target within bank 0 (< 1MiB) but exceeds SP.
         text = self._run_kdos([
             'VARIABLE CANARY  42 CANARY !',
-            '999999 ALLOT',
+            '400000 ALLOT',
             'CANARY @ .',         # after abort+REPL restart, canary intact
         ], max_steps=200_000_000)
         self.assertIn("dictionary overflow", text)
@@ -7941,6 +7946,111 @@ class TestKDOSArena(_KDOSTestBase):
             'TBUF 42 SWAP !  TBUF @ .',
         ])
         self.assertIn("42 ", text)
+
+    # -- Phase 4 hardening: arena safety ----------------------------------
+
+    def test_arena_rollback_valid(self):
+        """ARENA-ROLLBACK with a valid snap succeeds."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',     # -- arena
+            'DUP DUP ARENA-SNAP',             # -- arena arena snap0
+            'OVER 128 ARENA-ALLOT DROP',      # alloc 128, -- arena arena snap0
+            'ARENA-ROLLBACK',                 # -- arena
+            'ARENA-USED .',
+        ])
+        self.assertIn('0 ', text)
+        self.assertIn('0 ', text)
+
+    def test_arena_rollback_below_base_aborts(self):
+        """ARENA-ROLLBACK rejects a snap below the arena base."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',     # -- arena
+            '100 ARENA-ROLLBACK',             # 100 is below arena base
+        ])
+        self.assertIn('rollback: snap below base', text)
+
+    def test_arena_rollback_above_limit_aborts(self):
+        """ARENA-ROLLBACK rejects a snap above base+size."""
+        text = self._run_kdos([
+            '4096 A-HEAP ARENA-NEW DROP',     # -- arena
+            'DUP A.BASE @ 999999 +',         # snap way above limit
+            'ARENA-ROLLBACK',
+        ])
+        self.assertIn('rollback: snap above limit', text)
+
+    def test_arena_allot_after_destroy_aborts(self):
+        """ARENA-ALLOT after ARENA-DESTROY aborts with clear message."""
+        text = self._run_kdos([
+            'VARIABLE AR',
+            '4096 A-HEAP ARENA-NEW AR !  DROP',
+            'AR @ ARENA-DESTROY',
+            'AR @ 64 ARENA-ALLOT',
+        ])
+        self.assertIn('arena destroyed', text)
+
+    def test_arena_allot_q_after_destroy_returns_ior(self):
+        """ARENA-ALLOT? after ARENA-DESTROY returns non-zero ior."""
+        text = self._run_kdos([
+            'VARIABLE AR',
+            '4096 A-HEAP ARENA-NEW AR !  DROP',
+            'AR @ ARENA-DESTROY',
+            'AR @ 64 ARENA-ALLOT? . DROP',
+        ])
+        # ior should be -1 (truthy/non-zero)
+        self.assertIn('-1', text)
+
+    def test_xmem_allot_q_success(self):
+        """XMEM-ALLOT? returns 0 ior on success."""
+        text = self._run_kdos([
+            '1024 XMEM-ALLOT? . DROP',
+        ])
+        self.assertIn('0 ', text)
+
+    def test_hbw_allot_q_success(self):
+        """HBW-ALLOT? returns 0 ior on success."""
+        text = self._run_kdos([
+            '1024 HBW-ALLOT? . DROP',
+        ])
+        self.assertIn('0 ', text)
+
+    def test_arena_new_xmem_ior(self):
+        """ARENA-NEW with A-XMEM returns ior=0 on success."""
+        text = self._run_kdos([
+            '4096 A-XMEM ARENA-NEW',
+            'CR ." [IOR=" . ." ]"',
+            'ARENA-DESTROY',
+        ])
+        self.assertIn('[IOR=0', text)
+
+    # -- Phase 5 hardening: diagnostic tooling ----------------------------
+
+    def test_heap_verify_clean(self):
+        """HEAP-VERIFY returns TRUE on a clean heap."""
+        text = self._run_kdos([
+            'HEAP-VERIFY . CR',
+        ])
+        self.assertIn('-1', text)  # TRUE = -1
+
+    def test_heap_verify_after_alloc_free(self):
+        """HEAP-VERIFY returns TRUE after alloc+free cycle."""
+        text = self._run_kdos([
+            '128 ALLOCATE DROP',
+            '256 ALLOCATE DROP',
+            'FREE',                     # free the 256 block
+            'HEAP-VERIFY . CR',
+        ])
+        self.assertIn('-1', text)
+
+    def test_mem_report(self):
+        """MEM-REPORT prints unified status with integrity check."""
+        text = self._run_kdos([
+            'MEM-REPORT',
+        ])
+        self.assertIn('Memory Report', text)
+        self.assertIn('Heap:', text)
+        self.assertIn('Dict:', text)
+        self.assertIn('Heap integrity:', text)
+        self.assertIn('OK', text)
 
 
 # ---------------------------------------------------------------------------
@@ -21852,6 +21962,45 @@ class TestKDOSExtMem(_KDOSTestBase):
         finally:
             import os
             os.unlink(img)
+
+    # -- XMEM-FREE-BLOCK bounds validation (Phase 3 hardening) --
+
+    def test_xmem_free_block_too_small(self):
+        """XMEM-FREE-BLOCK rejects blocks smaller than 16 bytes."""
+        text = self._run_kdos([
+            '8 XMEM-ALLOT',             # get a valid ext-mem addr
+            '8 XMEM-FREE-BLOCK',        # try to free with size=8 (< 16)
+        ])
+        self.assertIn('XMEM-FREE: block too small', text)
+
+    def test_xmem_free_block_below_base(self):
+        """XMEM-FREE-BLOCK rejects addresses below EXT-MEM-BASE."""
+        text = self._run_kdos([
+            '4096 64 XMEM-FREE-BLOCK',  # 4096 is in Bank 0
+        ])
+        self.assertIn('XMEM-FREE: addr below base', text)
+
+    def test_xmem_free_block_exceeds_limit(self):
+        """XMEM-FREE-BLOCK rejects blocks that exceed XMEM-LIMIT."""
+        text = self._run_kdos([
+            # Allocate a small block to get a valid addr, then free
+            # with a huge size that overflows the limit.
+            '64 XMEM-ALLOT',
+            '999999999 XMEM-FREE-BLOCK',
+        ])
+        self.assertIn('XMEM-FREE: exceeds limit', text)
+
+    def test_xmem_free_block_normal(self):
+        """XMEM-FREE-BLOCK succeeds for a valid block (no abort)."""
+        text = self._run_kdos([
+            'XMEM-FREE .',                 # free before
+            '1024 XMEM-ALLOT',             # -- addr
+            '1024 XMEM-FREE-BLOCK',        # free it back
+            'XMEM-FREE .',                 # free after
+            '." done"',
+        ])
+        self.assertIn('done', text)
+        self.assertNotIn('XMEM-FREE:', text)  # no abort message
 
 
 # =====================================================================

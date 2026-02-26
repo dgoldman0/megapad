@@ -1421,11 +1421,16 @@ w_allot:
     ; --- dictionary overflow guard (check BEFORE advancing) ---
     cmp r2, r0                ; ram_size vs current HERE
     brle .allot_extmem         ; current HERE >= ram_size → ext mem, skip
-    add r0, r1                ; R0 = HERE + n
-    mov r1, r0
-    addi r1, 256              ; R1 = HERE + n + 256
+    ; HERE is in bank 0 — compute target
+    add r0, r1                ; R0 = HERE + n (target)
+    cmp r2, r0                ; ram_size vs target
+    brle .allot_store          ; target >= ram_size → crossing to ext mem, OK
+    ; Still in bank 0 — check SP guard
+    mov r1, r0                ; R1 = target
+    addi r1, 256              ; R1 = target + 256
     cmp r1, r14               ; vs SP
     brgt .allot_overflow
+.allot_store:
     str r11, r0               ; update var_here
     ret.l
 .allot_extmem:
