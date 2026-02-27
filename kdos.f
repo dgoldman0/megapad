@@ -3352,9 +3352,12 @@ VARIABLE FW-LEN
 
 \ FREAD ( addr len fdesc -- actual ) read up to len bytes at cursor
 \   Returns actual bytes read.  Advances cursor.
+\   NOTE: hardware SEC_COUNT register is 8-bit (max 255 sectors per
+\   DMA command), so large reads are split into 255-sector batches.
 VARIABLE FR-FD
 VARIABLE FR-ADDR
 VARIABLE FR-LEN
+VARIABLE FR-SEC     \ remaining sectors to read
 
 : FREAD  ( addr len fdesc -- actual )
     FR-FD !  FR-LEN !  FR-ADDR !
@@ -3362,15 +3365,21 @@ VARIABLE FR-LEN
     FR-FD @ F.USED FR-FD @ F.CURSOR -
     FR-LEN @ MIN FR-LEN !
     FR-LEN @ 0= IF 0 EXIT THEN
-    \ Set up DMA read
-    FR-FD @ F.CURSOR SECTOR /
-    FR-FD @ F.START + DISK-SEC!
-    FR-ADDR @ DISK-DMA!
-    FR-LEN @ SECTOR 1- + SECTOR / DISK-N!
-    DISK-READ
-    \ Advance cursor
-    FR-FD @ F.CURSOR FR-LEN @ +
-    FR-FD @ 24 + !
+    \ Total sectors needed
+    FR-LEN @ SECTOR 1- + SECTOR / FR-SEC !
+    \ Multi-batch DMA loop (max 255 sectors per hardware command)
+    BEGIN FR-SEC @ 0> WHILE
+        FR-FD @ F.CURSOR SECTOR /
+        FR-FD @ F.START + DISK-SEC!
+        FR-ADDR @ DISK-DMA!
+        FR-SEC @ 255 MIN DUP DISK-N!
+        DISK-READ
+        \ Advance by batch-size sectors
+        DUP SECTOR * FR-ADDR +!
+        DUP SECTOR * FR-FD @ F.CURSOR +
+        FR-FD @ 24 + !         \ update cursor
+        FR-SEC @ SWAP - FR-SEC !
+    REPEAT
     FR-LEN @ ;
 
 \ F.INFO ( fdesc -- ) print file descriptor
@@ -3426,18 +3435,13 @@ VARIABLE FR-LEN
 \    +48  ext1_count      (cell) — second extent count
 
 \ -- Constants --
+14  CONSTANT FS-DATA-START
 128 CONSTANT FS-MAX-FILES
 48  CONSTANT FS-ENTRY-SIZE
 
-\ -- Dynamic geometry (read from superblock by FS-LOAD) --
-VARIABLE FS-DSTART  14 FS-DSTART !     \ data-area start sector
-VARIABLE FS-BMAP-N   1 FS-BMAP-N !     \ bitmap sector count
-VARIABLE FS-TSECS 2048 FS-TSECS !      \ total sectors on disk
-VARIABLE FS-DIRSTART  2 FS-DIRSTART !  \ directory start sector
-
 \ -- RAM caches (loaded from disk by FS-LOAD) --
 VARIABLE FS-SUPER  SECTOR 1- ALLOT            \ 512 bytes — superblock
-VARIABLE FS-BMAP   SECTOR 4 * 1- ALLOT        \ 2048 bytes — bitmap (up to 4 sectors)
+VARIABLE FS-BMAP   SECTOR 1- ALLOT            \ 512 bytes — bitmap
 VARIABLE FS-DIR    SECTOR 12 * 1- ALLOT       \ 6144 bytes — directory
 
 VARIABLE FS-OK     0 FS-OK !
@@ -3479,10 +3483,10 @@ VARIABLE FF-LEN
 
 : FIND-FREE  ( count -- sector | -1 )
     FF-NEED !
-    FS-DSTART @ FF-START !
+    FS-DATA-START FF-START !
     0 FF-LEN !
     -1                                 \ result on stack
-    FS-TSECS @ FS-DSTART @ DO
+    2048 FS-DATA-START DO
         I BIT-FREE? IF
             FF-LEN @ 0= IF I FF-START ! THEN
             1 FF-LEN +!
@@ -3537,22 +3541,18 @@ VARIABLE FF-LEN
     IF
         ."  Not an MP64FS disk" CR EXIT
     THEN
-    \ Read bitmap (bmap_sectors from superblock)
-    FS-SUPER 12 + W@ FS-BMAP-N !
-    FS-SUPER 6  + L@ FS-TSECS !
-    FS-SUPER 14 + W@ FS-DIRSTART !
-    FS-SUPER 18 + W@ FS-DSTART !
-    1 DISK-SEC!  FS-BMAP DISK-DMA!  FS-BMAP-N @ DISK-N!  DISK-READ
-    \ Read directory
-    FS-DIRSTART @ DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-READ
+    \ Read bitmap (sector 1)
+    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-READ
+    \ Read directory (sectors 2-13)
+    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-READ
     -1 FS-OK !
     ."  MP64FS loaded" CR ;
 
 \ FS-SYNC ( -- ) write bitmap + directory back to disk
 : FS-SYNC  ( -- )
     FS-OK @ 0= IF ."  FS not loaded" CR EXIT THEN
-    1 DISK-SEC!  FS-BMAP DISK-DMA!  FS-BMAP-N @ DISK-N!  DISK-WRITE
-    FS-DIRSTART @ DISK-SEC!  FS-DIR  DISK-DMA!  12 DISK-N!  DISK-WRITE ;
+    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
+    2 DISK-SEC!  FS-DIR  DISK-DMA!  12 DISK-N!  DISK-WRITE ;
 
 \ FS-ENSURE ( -- ) auto-load if not yet loaded
 : FS-ENSURE  ( -- )
@@ -3581,15 +3581,13 @@ VARIABLE FF-LEN
     128  FS-SUPER 20 + C!           \ max files
     48   FS-SUPER 21 + C!           \ entry size
     0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-WRITE
-    \ Update geometry variables
-    1 FS-BMAP-N !  2 FS-DIRSTART !  14 FS-DSTART !  2048 FS-TSECS !
-    \ Initialise bitmap — mark metadata sectors as allocated
+    \ Initialise bitmap — mark sectors 0-13 (metadata) as allocated
     FS-BMAP SECTOR 0 FILL
-    FS-DSTART @ 0 DO I BIT-SET LOOP
+    FS-DATA-START 0 DO I BIT-SET LOOP
     1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
     \ Zero directory
     FS-DIR SECTOR 12 * 0 FILL
-    FS-DIRSTART @ DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-WRITE
+    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-WRITE
     -1 FS-OK !
     255 CWD !
     ."  MP64FS formatted" CR ;
@@ -3630,7 +3628,7 @@ VARIABLE FF-LEN
         THEN
     LOOP
     DUP . ."  file(s), "
-    0  FS-TSECS @ FS-DSTART @ DO
+    0  2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DUP . ."  free sectors ("
@@ -3657,7 +3655,7 @@ VARIABLE FF-LEN
         THEN
     LOOP
     ."  (" . ."  files, "
-    0 FS-TSECS @ FS-DSTART @ DO
+    0 2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     . ."  free sectors)" CR ;
@@ -3706,7 +3704,7 @@ VARIABLE MK-START
     MK-START @ -1 = IF
         ."  No space: need " MK-NSEC @ .
         ."  sectors, "
-        0 FS-TSECS @ FS-DSTART @ DO
+        0 2048 FS-DATA-START DO
             I BIT-FREE? IF 1+ THEN
         LOOP
         . ."  free" CR EXIT
@@ -3822,7 +3820,7 @@ VARIABLE LF-RUN
 
 : FS-LARGEST-FREE  ( -- n )
     0 LF-BEST !  0 LF-RUN !
-    FS-TSECS @ FS-DSTART @ DO
+    2048 FS-DATA-START DO
         I BIT-FREE? IF
             1 LF-RUN +!
             LF-RUN @ LF-BEST @ > IF LF-RUN @ LF-BEST ! THEN
@@ -3838,7 +3836,7 @@ VARIABLE LF-RUN
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     0   \ free sector count
-    FS-TSECS @ FS-DSTART @ DO
+    2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DUP . ."  free sectors ("
@@ -6371,7 +6369,7 @@ INSTALL-TUI
     STOR-N @ SCR-MAX !
     STOR-N @ 0= IF S" (empty)" W.LINE THEN
     W.GAP
-    0  FS-TSECS @ FS-DSTART @ DO
+    0  2048 FS-DATA-START DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DIM ."   " .N ."  free sectors" RESET-COLOR CR
