@@ -10083,6 +10083,87 @@ class TestFieldALUCustom(_KDOSTestBase):
         self.assertIn("R1=0 ", text)
 
 
+class TestFieldALUMontgomery(_KDOSTestBase):
+    """Tests for Montgomery REDC via FieldALU (custom prime with non-zero pinv).
+
+    Uses p=251, R=2^{256}.
+    pinv = -p^{-1} mod R = 0x34041465FDF5CD0105197F7D73404146
+                            5FDF5CD0105197F7D734041465FDF5CD
+    R^{-1} mod 251 = 51.
+    FMUL with prime_sel=3 and pinv loaded does REDC(a*b) = a*b * R^{-1} mod p.
+    """
+
+    PRIME = 251
+    # pinv = -251^{-1} mod 2^{256}  (32 LE bytes)
+    PINV_BYTES = bytes.fromhex(
+        "CD" "F5" "FD" "65" "14" "04" "34" "D7"
+        "F7" "97" "51" "10" "D0" "5C" "DF" "5F"
+        "46" "41" "40" "73" "7D" "7F" "19" "05"
+        "01" "CD" "F5" "FD" "65" "14" "04" "34"
+    )
+
+    def _load_bytes(self, name: str, data: bytes):
+        """Create a 32-byte buffer and fill it."""
+        lines = [f"CREATE {name} 32 ALLOT", f"{name} 32 0 FILL"]
+        for i, b in enumerate(data):
+            if b:
+                lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _load_small_int(self, name: str, value: int):
+        data = value.to_bytes(32, "little")
+        return self._load_bytes(name, data)
+
+    def _read_result_u64(self, buf="tv-r"):
+        return [
+            f'."  R0=" {buf} C@ .',
+            f'."  R1=" {buf} 1 + C@ .',
+        ]
+
+    def _setup_mont(self):
+        lines = self._load_small_int("tv-p", self.PRIME)
+        lines.extend(self._load_bytes("tv-pinv", self.PINV_BYTES))
+        lines.extend([
+            "CREATE tv-a 32 ALLOT", "CREATE tv-b 32 ALLOT",
+            "CREATE tv-r 32 ALLOT",
+            "tv-a 32 0 FILL", "tv-b 32 0 FILL",
+            "tv-p tv-pinv LOAD-PRIME",
+            "PRIME-CUSTOM",
+        ])
+        return lines
+
+    def test_redc_fmul_basic(self):
+        """FMUL with pinv: REDC(100*200) = 20000 * 51 mod 251 = 187."""
+        setup = self._setup_mont()
+        setup.append("100 tv-a C!")
+        setup.append("200 tv-b C!")
+        setup.extend(["tv-a tv-b tv-r FMUL"])
+        setup.extend(self._read_result_u64())
+        text = self._run_kdos(setup)
+        self.assertIn("R0=187 ", text)  # 187 = 0xBB
+
+    def test_redc_round_trip(self):
+        """Montgomery round-trip: toMont → MontMul → fromMont = 77."""
+        # aR = 7*R mod 251 = 197;  bR = 11*R mod 251 = 202
+        # MontMul(197, 202) = 159;  REDC(159, 1) = 77
+        setup = self._setup_mont()
+        setup.append("197 tv-a C!")
+        setup.append("202 tv-b C!")
+        setup.extend(["tv-a tv-b tv-r FMUL"])
+        # Read intermediate = 159
+        setup.extend(self._read_result_u64())
+        # Convert back: FMUL(159, 1)
+        setup.append("159 tv-a C!")
+        setup.append("1 tv-b C!")
+        setup.extend(["tv-a tv-b tv-r FMUL"])
+        setup.extend([
+            '."  FINAL=" tv-r C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=159 ", text)   # intermediate
+        self.assertIn("FINAL=77 ", text)  # final = 77
+
+
 class TestFieldALUNewModes(_KDOSTestBase):
     """Tests for §1.10 Field ALU — FCMOV, FCEQ, FMAC, MUL-ADD-RAW (modes 8-12)."""
 

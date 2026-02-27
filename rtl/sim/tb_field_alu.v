@@ -583,6 +583,83 @@ module tb_field_alu;
         check(result, 256'd20000, "custom survives switch back");
 
         // ================================================================
+        // Tests 40-45: Montgomery REDC (prime_sel=3 with non-zero pinv)
+        //
+        // Use p=251, R=2^256, pinv = -p^{-1} mod R.
+        // R^{-1} mod 251 = 51.
+        // FMUL with pinv loaded → REDC(a*b) = a*b * R^{-1} mod p.
+        // ================================================================
+
+        // Load custom prime p=251 with proper pinv
+        write_operand_a(256'd251);
+        write_operand_b(256'h34041465FDF5CD0105197F7D734041465FDF5CD0105197F7D734041465FDF5CD);
+        issue_cmd(4'd10, 1'b1, 1'b0, 2'd0);  // LOAD_PRIME
+        wait_done;
+        set_prime(2'd3);
+
+        // --- Test 40: REDC FMUL: REDC(100*200) = 20000 * 51 mod 251 = 187 ---
+        write_operand_a(256'd100);
+        write_operand_b(256'd200);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
+        wait_done;
+        read_result(result);
+        check(result, 256'd187, "REDC FMUL(100,200)=187");
+
+        // --- Test 41: REDC FSQR: REDC(123^2) = 15129 * 51 mod 251 = 5 ---
+        write_operand_a(256'd123);
+        issue_cmd(4'd4, 1'b1, 1'b0, 2'd0);  // FSQR
+        wait_done;
+        read_result(result);
+        check(result, 256'd5, "REDC FSQR(123)=5");
+
+        // --- Test 42: REDC round-trip (Montgomery domain) ---
+        // aR = 7*R mod 251 = 197;  bR = 11*R mod 251 = 202
+        // MontMul(aR, bR) = 77*R mod 251 = 159
+        write_operand_a(256'd197);
+        write_operand_b(256'd202);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
+        wait_done;
+        read_result(result);
+        check(result, 256'd159, "REDC roundtrip MontMul=159");
+
+        // --- Test 43: REDC convert back: REDC(159, 1) = 77 ---
+        write_operand_a(256'd159);
+        write_operand_b(256'd1);
+        issue_cmd(4'd3, 1'b1, 1'b0, 2'd0);  // FMUL
+        wait_done;
+        read_result(result);
+        check(result, 256'd77, "REDC convert back=77");
+
+        // --- Test 44: REDC FMAC accumulate ---
+        // Zero accumulator
+        write_operand_a(256'd0);
+        write_operand_b(256'd0);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD → result_lo=0
+        wait_done;
+        // FMAC: acc += REDC(3*5=15) = 15*51 mod 251 = 12
+        write_operand_a(256'd3);
+        write_operand_b(256'd5);
+        issue_cmd(4'd11, 1'b1, 1'b0, 2'd0);  // FMAC
+        wait_done;
+        // FMAC: acc += REDC(7*11=77) = 77*51 mod 251 = 162; total = (12+162) mod 251 = 174
+        write_operand_a(256'd7);
+        write_operand_b(256'd11);
+        issue_cmd(4'd11, 1'b1, 1'b0, 2'd0);  // FMAC
+        wait_done;
+        read_result(result);
+        check(result, 256'd174, "REDC FMAC 3*5+7*11=174");
+
+        // --- Test 45: Verify FADD/FSUB still work normally with REDC prime ---
+        // FADD is NOT Montgomery-reduced (just modular add), so should
+        // give (200 + 100) mod 251 = 49
+        write_operand_a(256'd200);
+        write_operand_b(256'd100);
+        issue_cmd(4'd1, 1'b1, 1'b0, 2'd0);  // FADD
+        wait_done;
+        read_result(result);
+        check(result, 256'd49, "REDC prime FADD still normal");
+
+        // ================================================================
         $display("");
         $display("=== Results: %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count == 0)

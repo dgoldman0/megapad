@@ -12,7 +12,7 @@
 //   0 = Curve25519  (2^255 - 19)        — fast ×38 fold reducer
 //   1 = secp256k1   (2^256 - 2^32 - 977) — ×(2^32+977) fold reducer
 //   2 = P-256       (NIST)               — NIST special form (reserved)
-//   3 = Custom      (Montgomery REDC)    — generic (reserved)
+//   3 = Custom      (Montgomery REDC)    — generic
 //
 // Target: Kintex-7 / Artix-7.
 // Resource estimate:
@@ -29,11 +29,20 @@
 //   5  FINV       ≈ 767   (Fermat a^(p−2))
 //   6  FPOW       ≈ 767   (a^b mod p, binary method)
 //   7  MUL_RAW    1       (256×256→512 no reduction)
-//   8  FCMOV      1       (constant-time conditional move) [reserved]
-//   9  FCEQ       1       (constant-time equality test)    [reserved]
-//  10  LOAD_PRIME 1       (latch custom prime + p_inv)     [reserved]
-//  11  FMAC       1       (field multiply-accumulate)      [reserved]
-//  12  MUL_ADD_RAW 1      (raw multiply-accumulate)        [reserved]
+//   8  FCMOV      1       (constant-time conditional move)
+//   9  FCEQ       1       (constant-time equality test)
+//  10  LOAD_PRIME 1       (latch custom prime + p_inv)
+//  11  FMAC       1       (field multiply-accumulate)
+//  12  MUL_ADD_RAW 1      (raw multiply-accumulate)
+//
+// Montgomery REDC (prime_sel=3 for FMUL/FSQR/FMAC):
+//   FMUL/FSQR/FMAC with prime_sel=3 use a 4-cycle Montgomery
+//   reduction pipeline instead of the single-cycle generic modulo.
+//   REDC(T) where T = a*b:  m = T_lo * pinv  (low 256 bits)
+//                           t = (T + m*p) >> 256
+//                           if t >= p: t -= p
+//   This computes a*b*R^{-1} mod p where R = 2^{256}.
+//   Caller manages Montgomery form (convert via mulR2, etc.).
 //
 // MMIO base: 0x840 (64-byte block, addr[5:0]).
 //
@@ -126,7 +135,7 @@ module mp64_field_alu (
                      S_FINAL_MUL  = 4'd5,   // X25519 final: X2 · Z2⁻¹
                      S_DONE       = 4'd6,
                      S_COMPUTE    = 4'd7,   // single-cycle modes 1-4, 7-12
-                     S_REDC       = 4'd8;   // Montgomery reduction (reserved)
+                     S_REDC       = 4'd8;   // Montgomery REDC (4-phase pipeline)
 
     reg [3:0]  state;
     reg        busy, done;
@@ -138,7 +147,7 @@ module mp64_field_alu (
     // Custom prime registers (latched by LOAD_PRIME, mode 10)
     // ========================================================================
     reg [255:0] custom_p;             // user-supplied prime
-    reg [255:0] mont_p_inv;           // -p^(-1) mod 2^256 (for future REDC)
+    reg [255:0] mont_p_inv;           // -p^(-1) mod 2^256 for Montgomery REDC
 
     // ========================================================================
     // I/O registers
@@ -163,6 +172,15 @@ module mp64_field_alu (
     reg [255:0] rT;
 
     reg [3:0]   ladder_phase;
+
+    // ========================================================================
+    // Montgomery REDC pipeline state
+    // ========================================================================
+    reg [1:0]   redc_phase;           // 0–3 pipeline phase
+    reg [511:0] redc_T;               // full product a*b
+    reg [255:0] redc_m;               // m = T_lo * pinv (low 256 bits)
+    reg [511:0] redc_mp;              // m * p (512-bit)
+    reg         redc_is_mac;          // true if FMAC accumulate needed
 
     // ========================================================================
     // Exponentiation state (modes 0, 5, 6)
@@ -366,7 +384,7 @@ module mp64_field_alu (
                 2'd0:    field_mul_sel = field_reduce(prod);
                 2'd1:    field_mul_sel = field_reduce_secp(prod);
                 2'd2:    field_mul_sel = field_reduce_p256(prod);
-                2'd3:    field_mul_sel = prod % {256'd0, cp};
+                2'd3:    field_mul_sel = prod % {256'd0, cp};  // fallback for single-cycle path; REDC used at runtime
             endcase
         end
     endfunction
@@ -399,6 +417,8 @@ module mp64_field_alu (
             rC <= 0; rD <= 0; rDA <= 0; rCB <= 0; rT <= 0;
             pow_acc  <= 0; pow_base <= 0; pow_exp <= 0;
             pow_step <= 0; pow_phase <= 0;
+            redc_phase  <= 0; redc_T <= 0; redc_m <= 0;
+            redc_mp <= 0; redc_is_mac <= 0;
         end else begin
 
             // ================================================================
@@ -429,13 +449,40 @@ module mp64_field_alu (
                                     MODE_X25519: state <= S_CLAMP;
                                     MODE_FADD,
                                     MODE_FSUB,
-                                    MODE_FMUL,
-                                    MODE_FSQR,
                                     MODE_MUL_RAW,
                                     MODE_FCMOV,
                                     MODE_FCEQ,
-                                    MODE_FMAC,
                                     MODE_MUL_ADD_RAW: state <= S_COMPUTE;
+                                    MODE_FMUL: begin
+                                        // Route to REDC pipeline when custom prime + pinv loaded
+                                        if (prime_sel == 2'd3 && mont_p_inv != 256'd0) begin
+                                            redc_T       <= operand_a * operand_b;
+                                            redc_phase   <= 2'd0;
+                                            redc_is_mac  <= 1'b0;
+                                            state        <= S_REDC;
+                                        end else
+                                            state <= S_COMPUTE;
+                                    end
+                                    MODE_FSQR: begin
+                                        if (prime_sel == 2'd3 && mont_p_inv != 256'd0) begin
+                                            redc_T       <= operand_a * operand_a;
+                                            redc_phase   <= 2'd0;
+                                            redc_is_mac  <= 1'b0;
+                                            state        <= S_REDC;
+                                        end else
+                                            state <= S_COMPUTE;
+                                    end
+                                    MODE_FMAC: begin
+                                        if (prime_sel == 2'd3 && mont_p_inv != 256'd0) begin
+                                            redc_T       <= operand_a * operand_b;
+                                            redc_phase   <= 2'd0;
+                                            redc_is_mac  <= 1'b1;
+                                            result_hi    <= result_lo;  // save accumulator
+                                            state        <= S_REDC;
+                                        end else
+                                            state <= S_COMPUTE;
+                                    end
+                                    MODE_LOAD_PRIME: state <= S_COMPUTE;
                                     MODE_FINV: begin
                                         pow_acc   <= 256'd1;
                                         pow_base  <= operand_a;
@@ -659,6 +706,62 @@ module mp64_field_alu (
                     busy  <= 1'b0;
                     done  <= 1'b1;
                     state <= S_DONE;
+                end
+
+                // ------------------------------------------------------------
+                // S_REDC — Montgomery REDC pipeline (prime_sel=3)
+                //
+                // 4 phases:
+                //   Phase 0: (entry) redc_T already loaded with a*b
+                //            Compute m = T_lo * mont_p_inv (low 256 bits)
+                //   Phase 1: Compute redc_mp = m * custom_p (512-bit)
+                //   Phase 2: Compute t = (T + mp) >> 256
+                //            Conditional subtract if t >= custom_p
+                //   Phase 3: For FMAC, add previous result_lo; else done
+                // ------------------------------------------------------------
+                S_REDC: begin
+                    case (redc_phase)
+                        2'd0: begin
+                            // m = (T[255:0] * mont_p_inv) [255:0]
+                            redc_m <= (redc_T[255:0] * mont_p_inv);
+                            redc_phase <= 2'd1;
+                        end
+                        2'd1: begin
+                            // mp = m * custom_p (full 512-bit product)
+                            redc_mp <= redc_m * custom_p;
+                            redc_phase <= 2'd2;
+                        end
+                        2'd2: begin
+                            // t = (T + mp) >> 256 — upper 256 bits
+                            begin : redc_final
+                                reg [512:0] sum;
+                                reg [256:0] t;
+                                sum = {1'b0, redc_T} + {1'b0, redc_mp};
+                                t   = sum[512:256];
+                                if (t >= {1'b0, custom_p})
+                                    t = t - {1'b0, custom_p};
+                                result_lo <= t[255:0];
+                                result_hi <= 256'd0;
+                            end
+                            if (redc_is_mac)
+                                redc_phase <= 2'd3;
+                            else begin
+                                busy  <= 1'b0;
+                                done  <= 1'b1;
+                                state <= S_DONE;
+                            end
+                        end
+                        2'd3: begin
+                            // FMAC accumulate: add saved result_hi (old accumulator)
+                            // to the REDC output now in result_lo
+                            result_lo <= field_add_sel(result_lo, result_hi,
+                                                      prime_sel, custom_p);
+                            result_hi <= 256'd0;
+                            busy  <= 1'b0;
+                            done  <= 1'b1;
+                            state <= S_DONE;
+                        end
+                    endcase
                 end
 
                 // S_DONE — idle until next CMD

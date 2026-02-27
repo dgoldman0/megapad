@@ -914,6 +914,74 @@ static BigNum bn_sqrmod(const BigNum& a, const BigNum& p) {
     return bn_mulmod(a, a, p);
 }
 
+// =========================================================================
+//  Montgomery REDC:  T * R^{-1} mod p   where R = 2^{256}
+//
+//  pinv = -p^{-1} mod R  (256-bit, precomputed by caller)
+//
+//  Algorithm:
+//    m  = T_lo * pinv           (keep low 256 bits only)
+//    mp = m * p                 (512-bit product)
+//    t  = (T + mp) >> 256       (upper half of 513-bit sum)
+//    if t >= p: t -= p
+//    return t
+// =========================================================================
+
+static BigNum bn_mont_redc(const BigNum& T_lo, const BigNum& T_hi,
+                           const BigNum& p, const BigNum& pinv) {
+    // m = T_lo * pinv  (low 256 bits)
+    BigNum m_lo, m_hi;
+    BigNum::mul_wide(T_lo, pinv, m_lo, m_hi);
+    // m is just the low 256 bits = m_lo
+
+    // mp = m_lo * p (full 512-bit)
+    BigNum mp_lo, mp_hi;
+    BigNum::mul_wide(m_lo, p, mp_lo, mp_hi);
+
+    // T + mp  (full 512-bit addition, tracking carry out of 512 bits)
+    // Pack T and mp into full 512-bit BigNums [limbs 0-3=lo, 4-7=hi]
+    BigNum T_full, mp_full;
+    for (int i = 0; i < 4; i++) {
+        T_full.w[i]     = T_lo.w[i];
+        T_full.w[i + 4] = T_hi.w[i];
+        mp_full.w[i]     = mp_lo.w[i];
+        mp_full.w[i + 4] = mp_hi.w[i];
+    }
+
+    // Add with explicit carry tracking
+    BigNum sum;
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        __uint128_t s = (__uint128_t)T_full.w[i] + mp_full.w[i] + carry;
+        sum.w[i] = (uint64_t)s;
+        carry = (uint64_t)(s >> 64);
+    }
+
+    // t = (T + mp) >> 256 = {carry, sum.w[7..4]}
+    BigNum t;
+    t.w[0] = sum.w[4];  t.w[1] = sum.w[5];
+    t.w[2] = sum.w[6];  t.w[3] = sum.w[7];
+    t.w[4] = carry;     // bit 256 of the shifted result
+
+    if (t >= p)
+        t = t.sub(p);
+    return t;
+}
+
+// Montgomery multiply: a * b * R^{-1} mod p
+static BigNum bn_mont_mulmod(const BigNum& a, const BigNum& b,
+                             const BigNum& p, const BigNum& pinv) {
+    BigNum lo, hi;
+    BigNum::mul_wide(a, b, lo, hi);
+    return bn_mont_redc(lo, hi, p, pinv);
+}
+
+// Montgomery square: a^2 * R^{-1} mod p
+static BigNum bn_mont_sqrmod(const BigNum& a,
+                             const BigNum& p, const BigNum& pinv) {
+    return bn_mont_mulmod(a, a, p, pinv);
+}
+
 static BigNum bn_powmod(const BigNum& base, const BigNum& exp, const BigNum& p) {
     BigNum result;
     result.w[0] = 1;
@@ -1051,6 +1119,7 @@ struct CryptoFieldALU {
     bool done;
     int prime_sel;
     BigNum custom_p;
+    BigNum mont_p_inv;   // -p^{-1} mod 2^{256} for Montgomery REDC
 
     static const BigNum PRIMES[3];
 
@@ -1062,6 +1131,8 @@ struct CryptoFieldALU {
         busy = false;
         done = false;
         prime_sel = 0;
+        custom_p = BigNum();
+        mont_p_inv = BigNum();
     }
 
     BigNum get_prime() const {
@@ -1095,10 +1166,16 @@ struct CryptoFieldALU {
                 set_result(bn_submod(a, b, p));
                 break;
             case 3:  // FMUL
-                set_result(bn_mulmod(a, b, p));
+                if (prime_sel == 3 && !mont_p_inv.is_zero())
+                    set_result(bn_mont_mulmod(a, b, p, mont_p_inv));
+                else
+                    set_result(bn_mulmod(a, b, p));
                 break;
             case 4:  // FSQR
-                set_result(bn_sqrmod(a, p));
+                if (prime_sel == 3 && !mont_p_inv.is_zero())
+                    set_result(bn_mont_sqrmod(a, p, mont_p_inv));
+                else
+                    set_result(bn_sqrmod(a, p));
                 break;
             case 5:  // FINV
                 set_result(bn_invmod(a, p));
@@ -1127,13 +1204,18 @@ struct CryptoFieldALU {
             }
             case 10: {  // LOAD_PRIME
                 custom_p = a;
+                mont_p_inv = b;  // -p^{-1} mod 2^{256}
                 BigNum zero;
                 set_result(zero);
                 break;
             }
             case 11: {  // FMAC: (a*b mod p + prev_result) mod p
                 BigNum prev = BigNum::from_le_bytes(result_lo);
-                BigNum ab = bn_mulmod(a, b, p);
+                BigNum ab;
+                if (prime_sel == 3 && !mont_p_inv.is_zero())
+                    ab = bn_mont_mulmod(a, b, p, mont_p_inv);
+                else
+                    ab = bn_mulmod(a, b, p);
                 set_result(bn_addmod(ab, prev, p));
                 break;
             }
