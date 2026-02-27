@@ -13513,8 +13513,8 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." V1=" ch-addr @ 2 + C@ .',
             '." HT=" ch-addr @ 5 + C@ .',
         ]
-        text = self._run_kdos(lines)
-        self.assertIn("LEN=155 ", text)
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("LEN=993 ", text)
         self.assertIn("CT=22 ", text)     # ContentType=handshake
         self.assertIn("V0=3 ", text)      # 0x0301
         self.assertIn("V1=1 ", text)
@@ -13532,7 +13532,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." CS2=" TLS-CH-BUF 80 + C@ .',      # 0xFF
             '." CS3=" TLS-CH-BUF 81 + C@ .',      # 0x01
         ]
-        text = self._run_kdos(lines)
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("SL=4 ", text)       # 4 bytes = 2 suites
         self.assertIn("CS0=19 ", text)     # 0x13
         self.assertIn("CS1=1 ", text)      # 0x01 (standard)
@@ -13540,32 +13540,31 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         self.assertIn("CS3=1 ", text)      # 0x01 (private)
 
     def test_build_ch_extensions(self):
-        """ClientHello contains correct extension types."""
-        # Extensions now start at offset 86 (was 84):
-        # supported_versions = offset 86 [type_hi, type_lo=43]
-        # key_share = +7 bytes later
-        # sig_algos, groups ... variable but checked via type byte
+        """ClientHello contains correct extension types and length."""
+        # extensions_len = 907 = 0x038B → high byte = 3, low byte = 139
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." EH=" TLS-CH-BUF 84 + C@ .',           # extensions_len high
             '." EL=" TLS-CH-BUF 85 + C@ .',           # extensions_len low
             '." SV=" TLS-CH-BUF 87 + C@ .',           # supported_versions type low
         ]
-        text = self._run_kdos(lines)
-        self.assertIn("EL=69 ", text)    # 7+42+12+8 = 69
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("EH=3 ", text)     # high byte of 907
+        self.assertIn("EL=139 ", text)   # low byte of 907 (0x8B)
         self.assertIn("SV=43 ", text)    # 0x2B
 
     def test_build_ch_transcript_length(self):
-        """After building CH, transcript contains 150 bytes."""
+        """After building CH, transcript contains 988 bytes."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
             '." TL=" TLS-HS-TR-LEN @ .',
         ]
-        text = self._run_kdos(lines)
-        self.assertIn("TL=150 ", text)
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("TL=988 ", text)
 
     def test_parse_sh_extracts_pubkey(self):
         """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
@@ -13726,9 +13725,167 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." ST=" test-ctx @ TLS-CTX.STATE @ .',
             '." HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
         ]
-        text = self._run_kdos(lines)
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("ST=1 ", text)       # TLSS-HANDSHAKE
         self.assertIn("HS=1 ", text)       # TLSH-CLIENT-HELLO-SENT
+
+    def test_build_ch_hybrid_key_share_group(self):
+        """ClientHello key_share first entry is hybrid PQ group (0x6399)."""
+        # key_share ext starts at offset 93 (86+7 for supported_versions)
+        # ext_type(2) + ext_len(2) + entries_len(2) = 6 bytes header
+        # first entry group at offset 93+6 = 99
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "0 TLS-SNI-LEN !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." G0=" TLS-CH-BUF 99 + C@ .',       # group high = 0x63 = 99
+            '." G1=" TLS-CH-BUF 100 + C@ .',      # group low  = 0x99 = 153
+            '." KH=" TLS-CH-BUF 101 + C@ .',      # key_len high = 3
+            '." KL=" TLS-CH-BUF 102 + C@ .',      # key_len low  = 64 (0x40)
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("G0=99 ", text)      # 0x63
+        self.assertIn("G1=153 ", text)     # 0x99
+        self.assertIn("KH=3 ", text)       # 832 = 0x0340
+        self.assertIn("KL=64 ", text)
+
+    def test_build_ch_supported_groups_has_hybrid(self):
+        """ClientHello supported_groups lists hybrid PQ (0x6399) first."""
+        # sig_algos (12B) follows key_share; groups (10B) follows sig_algos.
+        # key_share starts at 93, is 878B → sig_algos at 93+878 = 971
+        # sig_algos is 12B → groups at 971+12 = 983
+        # groups ext: type(2) + ext_len(2) + list_len(2) + group1(2) + group2(2)
+        # first group at offset 983+6 = 989
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "0 TLS-SNI-LEN !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." SG0=" TLS-CH-BUF 989 + C@ .',     # hybrid high = 99
+            '." SG1=" TLS-CH-BUF 990 + C@ .',     # hybrid low  = 153
+            '." SG2=" TLS-CH-BUF 991 + C@ .',     # x25519 high = 0
+            '." SG3=" TLS-CH-BUF 992 + C@ .',     # x25519 low  = 29
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("SG0=99 ", text)
+        self.assertIn("SG1=153 ", text)
+        self.assertIn("SG2=0 ", text)
+        self.assertIn("SG3=29 ", text)
+
+    def test_parse_sh_hybrid_group(self):
+        """TLS-PARSE-SERVER-HELLO accepts hybrid PQ key_share (0x6399)."""
+        # Build crafted SH with hybrid group:
+        # key_data = x25519_pub(32) || kyber_ct(768) = 800 bytes
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 900 ALLOT",
+            "sh-buf 900 0 FILL",
+            # Handshake header
+            "2 sh-buf C!",
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!",
+            # hs_len = 4 + 2 + 32 + 1 + 2 + 1 + 2 + ext_len
+            # body = version(2)+random(32)+sid_len(1)+cipher(2)+comp(1)+ext_len_field(2)+ext
+            # ext = versions(6) + key_share(4+800=804) = 810
+            # body = 2+32+0+2+1+2+810 = 849 ... let me compute properly
+            # sid_len=0, cipher=0xFF01, comp=0
+            # ext: supported_versions(6B) + key_share(808B) = 814
+            # body_len = 2+32+0+1+2+1+2+814 = 854
+            # Actually: version(2) + random(32) + sid_len(1=0) + cipher(2) + comp(1=0) +
+            #   ext_len_field(2) + extensions
+            # = 2+32+1+2+1+2+ext = 40+ext
+            # ext = versions_ext(6B) + key_share_ext
+            # versions_ext = type(2)+len(2)+data(2) = 6
+            # key_share = type(2)+ext_len(2)+group(2)+key_len(2)+data(800) = 808
+            # ext = 6+808 = 814
+            # body_len = 40+814 = 854
+
+            # hs_len(3 bytes) = 854
+            "3 sh-buf 2 + C!  86 sh-buf 3 + C!",  # 854 = 0x0356 → 3, 86
+            # version 0x0303
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",
+            # random = 0 (already)
+            # sid_len = 0
+            "0 sh-buf 38 + C!",
+            # cipher = 0xFF01
+            "255 sh-buf 39 + C!  1 sh-buf 40 + C!",
+            # comp = 0
+            "0 sh-buf 41 + C!",
+            # ext_len = 814 = 0x032E
+            "3 sh-buf 42 + C!  46 sh-buf 43 + C!",
+            # supported_versions (6B)
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",   # type=0x002B
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",    # len=2
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",    # 0x0304
+            # key_share (808B)
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",   # type=0x0033
+            "3 sh-buf 52 + C!  36 sh-buf 53 + C!",   # ext_len=804 (0x0324)
+            "99 sh-buf 54 + C!  153 sh-buf 55 + C!", # group=0x6399
+            "3 sh-buf 56 + C!  32 sh-buf 57 + C!",   # key_len=800 (0x0320)
+            # key_data[0..31] = X25519 pubkey (66..97)
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            # key_data[32..799] = Kyber CT (fill with 0xAA)
+            ": fill-ct 768 0 DO 170 sh-buf 90 + I + C! LOOP ; fill-ct",
+            # Parse — total msg bytes = 4 + 854 = 858
+            "test-ctx @  sh-buf 858  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+            '." GRP=" TLS-HS-GROUP @ .',
+            '." PK0=" test-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
+            '." CT0=" TLS-HS-KYBER-CT C@ .',
+            '." CT767=" TLS-HS-KYBER-CT 767 + C@ .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("F=0 ", text)          # success
+        self.assertIn("GRP=25497 ", text)    # TLS-GROUP-HYBRID-PQ
+        self.assertIn("PK0=66 ", text)       # first X25519 pubkey byte
+        self.assertIn("CT0=170 ", text)      # first CT byte (0xAA)
+        self.assertIn("CT767=170 ", text)    # last CT byte
+
+    def test_parse_sh_unknown_group_rejected(self):
+        """ServerHello with unrecognized key_share group is rejected."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 96 ALLOT",
+            "sh-buf 96 0 FILL",
+            "2 sh-buf C!",
+            "0 sh-buf 1 + C!  0 sh-buf 2 + C!  86 sh-buf 3 + C!",
+            "3 sh-buf 4 + C!  3 sh-buf 5 + C!",
+            "0 sh-buf 38 + C!",
+            "255 sh-buf 39 + C!  1 sh-buf 40 + C!",
+            "0 sh-buf 41 + C!",
+            "0 sh-buf 42 + C!  46 sh-buf 43 + C!",
+            "0 sh-buf 44 + C!  43 sh-buf 45 + C!",
+            "0 sh-buf 46 + C!  2 sh-buf 47 + C!",
+            "3 sh-buf 48 + C!  4 sh-buf 49 + C!",
+            "0 sh-buf 50 + C!  51 sh-buf 51 + C!",
+            "0 sh-buf 52 + C!  36 sh-buf 53 + C!",
+            # Unknown group 0x00FF
+            "0 sh-buf 54 + C!  255 sh-buf 55 + C!",
+            "0 sh-buf 56 + C!  32 sh-buf 57 + C!",
+            ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
+            "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
+            '." F=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("F=-1 ", text)
+
+    def test_hybrid_group_constants(self):
+        """Hybrid PQ group constants have correct values."""
+        text = self._run_kdos([
+            '." X=" TLS-GROUP-X25519 .',
+            '." H=" TLS-GROUP-HYBRID-PQ .',
+        ])
+        self.assertIn("X=29 ", text)       # 0x001D
+        self.assertIn("H=25497 ", text)    # 0x6399
+
+    def test_hs_group_default_after_ch(self):
+        """TLS-HS-GROUP defaults to x25519 after ClientHello."""
+        lines = [
+            "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
+            "0 TLS-SNI-LEN !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
+            '." G=" TLS-HS-GROUP @ .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("G=29 ", text)       # TLS-GROUP-X25519 default
 
 
 # ---------------------------------------------------------------------------

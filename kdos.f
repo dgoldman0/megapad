@@ -9862,6 +9862,18 @@ VARIABLE _TDR-CLEN
 4865  CONSTANT TLS-SUITE-AES128-SHA256   \ 0x1301 standard
 65281 CONSTANT TLS-SUITE-X25519-SHA3     \ 0xFF01 private
 
+\ --- Named Groups for key_share ---
+29    CONSTANT TLS-GROUP-X25519       \ 0x001D
+25497 CONSTANT TLS-GROUP-HYBRID-PQ   \ 0x6399 X25519+ML-KEM-512
+
+\ --- Hybrid PQ Handshake Scratch Buffers ---
+\  Shared across connections (only one handshake at a time).
+VARIABLE TLS-HS-GROUP                   \ negotiated key_share group
+CREATE TLS-HS-KYBER-SEED 64 ALLOT      \ seed for Kyber keygen
+CREATE TLS-HS-KYBER-PK  800 ALLOT      \ our ephemeral Kyber public key
+CREATE TLS-HS-KYBER-SK  1632 ALLOT     \ our ephemeral Kyber secret key
+CREATE TLS-HS-KYBER-CT  768 ALLOT      \ peer Kyber ciphertext (from SH)
+
 \ --- Dual-Mode Crypto Dispatch ---
 VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x1301)
 
@@ -9890,7 +9902,7 @@ VARIABLE TLS-USE-SHA256   \ 0 = SHA3/AES-256 (0xFF01), 1 = SHA-256/AES-128 (0x13
 CREATE TLS-HKDF-LABEL  64 ALLOT
 16384 XBUF TLS-HS-TRANSCRIPT
 VARIABLE TLS-HS-TR-LEN
-CREATE TLS-CH-BUF 256 ALLOT
+1280 XBUF TLS-CH-BUF             \ enlarged for hybrid PQ key_share
 CREATE TLS-HS-HASH 32 ALLOT
 CREATE TLS-TEMP-SECRET 32 ALLOT
 CREATE TLS-TEMP-SECRET2 32 ALLOT
@@ -10104,8 +10116,9 @@ VARIABLE _TKSA-CTX
 \ --- ClientHello Builder ---
 \ TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
 \   Build ClientHello with dual cipher suites (0x1301 + 0xFF01),
+\   dual key_share entries (hybrid PQ 0x6399 + x25519 0x001D),
 \   optional SNI extension, expanded signature_algorithms.
-\   Generates X25519 ephemeral keypair, stores in context.
+\   Generates X25519 + Kyber ephemeral keypairs, stores in context/scratch.
 \   Appends handshake message to transcript.
 \   Returns buffer address and total length.
 
@@ -10123,13 +10136,16 @@ VARIABLE _TBCH-POS
     _TBCH-CTX !
     TLS-TR-RESET
     0 _TBCH-POS !
-    \ Generate ephemeral keypair
+    \ Generate ephemeral keypairs (X25519 + Kyber)
     X25519-KEYGEN
     X25519-PRIV _TBCH-CTX @ TLS-CTX.MY-PRIVKEY 32 CMOVE
     X25519-PUB  _TBCH-CTX @ TLS-CTX.MY-PUBKEY  32 CMOVE
+    64 0 DO RANDOM8 TLS-HS-KYBER-SEED I + C! LOOP
+    TLS-HS-KYBER-SEED TLS-HS-KYBER-PK TLS-HS-KYBER-SK KYBER-KEYGEN
+    TLS-GROUP-X25519 TLS-HS-GROUP !   \ default until server picks
     \ --- Compute extension lengths ---
-    \ sig_algos ext: 12B.  versions: 7B.  key_share: 42B.  groups: 8B.
-    69  \ base extensions length
+    \ versions: 7B.  key_share: 878B.  sig_algos: 12B.  groups: 10B.
+    907  \ base extensions length (7+878+12+10)
     TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN   \ +SNI ext
     >R  \ R: ext_len
     \ --- [0] TLS Record Header (5 bytes) ---
@@ -10174,10 +10190,20 @@ VARIABLE _TBCH-POS
     0 _TBCH-C!  3  _TBCH-C!                       \ ext_len = 3
     2 _TBCH-C!                                     \ versions_len = 2
     3 _TBCH-C!  4  _TBCH-C!                       \ 0x0304 (TLS 1.3)
-    \ 3. key_share (0x0033): 42 bytes
+    \ 3. key_share (0x0033): 878 bytes (hybrid PQ + x25519)
     0 _TBCH-C!  51 _TBCH-C!                       \ type = 0x0033
-    0 _TBCH-C!  38 _TBCH-C!                       \ ext_len = 38
-    0 _TBCH-C!  36 _TBCH-C!                       \ entries_len = 36
+    3 _TBCH-C!  106 _TBCH-C!                      \ ext_len = 874 (0x036A)
+    3 _TBCH-C!  104 _TBCH-C!                      \ entries_len = 872 (0x0368)
+    \ Entry 1: hybrid PQ (group=0x6399, key=X25519_pub||Kyber_PK = 832B)
+    99 _TBCH-C!  153 _TBCH-C!                     \ group = 0x6399
+    3 _TBCH-C!  64 _TBCH-C!                       \ key_len = 832 (0x0340)
+    _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ X25519 pubkey (32B)
+    TLS-CH-BUF _TBCH-POS @ + 32 CMOVE
+    32 _TBCH-POS +!
+    TLS-HS-KYBER-PK                                \ Kyber PK (800B)
+    TLS-CH-BUF _TBCH-POS @ + 800 CMOVE
+    800 _TBCH-POS +!
+    \ Entry 2: x25519 (group=0x001D, key=32B)
     0 _TBCH-C!  29 _TBCH-C!                       \ group = x25519 (0x001D)
     0 _TBCH-C!  32 _TBCH-C!                       \ key_len = 32
     _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ copy public key
@@ -10190,10 +10216,11 @@ VARIABLE _TBCH-POS
     4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
     8 _TBCH-C!  4  _TBCH-C!                       \ RSA-PSS-SHA256   (0x0804)
     8 _TBCH-C!  7  _TBCH-C!                       \ ed25519           (0x0807)
-    \ 5. supported_groups (0x000A): 8 bytes
+    \ 5. supported_groups (0x000A): 10 bytes
     0 _TBCH-C!  10 _TBCH-C!                       \ type = 0x000A
-    0 _TBCH-C!  4  _TBCH-C!                       \ ext_len = 4
-    0 _TBCH-C!  2  _TBCH-C!                       \ list_len = 2
+    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
+    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 groups)
+    99 _TBCH-C!  153 _TBCH-C!                     \ hybrid PQ (0x6399)
     0 _TBCH-C!  29 _TBCH-C!                       \ x25519 (0x001D)
     \ Set handshake state
     TLSS-HANDSHAKE _TBCH-CTX @ TLS-CTX.STATE !
@@ -10264,9 +10291,19 @@ VARIABLE _TPSH-SUITE
         _TPSH-ETYPE @ 51 = IF
             _TPSH-MSG @ _TPSH-POS @ + C@ 8 LSHIFT
             _TPSH-MSG @ _TPSH-POS @ 1+ + C@ OR
-            29 <> IF -1 _TPSH-OK ! THEN
-            _TPSH-MSG @ _TPSH-POS @ 4 + +
-            _TPSH-CTX @ TLS-CTX.PEER-PUBKEY 32 CMOVE
+            DUP TLS-HS-GROUP !
+            DUP TLS-GROUP-X25519 = IF
+                DROP
+                _TPSH-MSG @ _TPSH-POS @ 4 + +
+                _TPSH-CTX @ TLS-CTX.PEER-PUBKEY 32 CMOVE
+            ELSE TLS-GROUP-HYBRID-PQ = IF
+                \ Hybrid: key_data = X25519_pub(32) || Kyber_CT(768)
+                _TPSH-MSG @ _TPSH-POS @ 4 + +
+                DUP _TPSH-CTX @ TLS-CTX.PEER-PUBKEY 32 CMOVE
+                32 + TLS-HS-KYBER-CT 768 CMOVE
+            ELSE
+                -1 _TPSH-OK !
+            THEN THEN
         THEN
         \ supported_versions (0x002B = 43)
         _TPSH-ETYPE @ 43 = IF
@@ -10348,10 +10385,22 @@ VARIABLE _TPHM-TYPE
         DUP 0<> IF EXIT THEN DROP
         \ Append SH to transcript
         _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
-        \ Compute shared secret via X25519
-        _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE
-        _TPHM-CTX @ TLS-CTX.PEER-PUBKEY X25519-DH
-        X25519-SHARED _TPHM-CTX @ TLS-CTX.SHARED 32 CMOVE
+        \ Compute shared secret — dispatch by negotiated group
+        TLS-HS-GROUP @ TLS-GROUP-HYBRID-PQ = IF
+            \ Hybrid PQ: X25519 DH + Kyber decaps + HKDF combine
+            _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE
+            _TPHM-CTX @ TLS-CTX.PEER-PUBKEY X25519-DH
+            X25519-SHARED _PQ-SS-X 32 CMOVE
+            TLS-HS-KYBER-CT TLS-HS-KYBER-SK _PQ-SS-K KYBER-DECAPS
+            _PQ-SS-X _PQ-CAT 32 CMOVE
+            _PQ-SS-K _PQ-CAT 32 + 32 CMOVE
+            _TPHM-CTX @ TLS-CTX.SHARED PQ-DERIVE
+        ELSE
+            \ Plain X25519
+            _TPHM-CTX @ TLS-CTX.MY-PRIVKEY X25519-PRIV 32 CMOVE
+            _TPHM-CTX @ TLS-CTX.PEER-PUBKEY X25519-DH
+            X25519-SHARED _TPHM-CTX @ TLS-CTX.SHARED 32 CMOVE
+        THEN
         \ Key schedule phase 1
         _TPHM-CTX @ TLS-KS-HANDSHAKE
         TLSH-SERVER-HELLO-RCVD _TPHM-CTX @ TLS-CTX.HS-STATE !
