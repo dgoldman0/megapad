@@ -12449,7 +12449,7 @@ d_tstride_r_fetch:
     .ascii "TSTRIDE-R@"
     csrr r0, 0x40
     subi r14, 8
-    str r0, r14
+    str r14, r0
     ret.l
 
 ; === TTILE-H! ( n -- ) ===
