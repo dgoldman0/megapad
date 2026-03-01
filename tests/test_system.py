@@ -2430,6 +2430,188 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ['WORDS'])
         self.assertIn(">NUMBER", text)
 
+    # -- Conditional Compilation: [IF] [ELSE] [THEN] [DEFINED] [UNDEFINED] --
+
+    def test_cond_if_true_branch(self):
+        """[IF] with true flag executes the body."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF] 42 R ! [THEN]',
+            'R @ .',
+        ])
+        self.assertIn("42 ", text)
+
+    def test_cond_if_false_skips(self):
+        """[IF] with false flag skips the body."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF] 99 R ! [THEN]',
+            'R @ .',
+        ])
+        # R should still be 0 — the 99 R ! was skipped
+        self.assertIn("0  ok", text)
+
+    def test_cond_if_else_true(self):
+        """[IF] true takes IF branch, skips ELSE branch."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF] 10 R ! [ELSE] 20 R ! [THEN]',
+            'R @ .',
+        ])
+        self.assertIn("10  ok", text)
+
+    def test_cond_if_else_false(self):
+        """[IF] false skips IF branch, takes ELSE branch."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF] 10 R ! [ELSE] 20 R ! [THEN]',
+            'R @ .',
+        ])
+        self.assertIn("20  ok", text)
+
+    def test_cond_if_nested_true_false(self):
+        """Nested [IF] blocks are handled correctly."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF]',
+            '  0 [IF] 11 R ! [ELSE] 22 R ! [THEN]',
+            '[THEN]',
+            'R @ .',
+        ])
+        # Outer true, inner false → ELSE branch sets R to 22
+        self.assertIn("22  ok", text)
+
+    def test_cond_if_nested_false_skip(self):
+        """Outer false [IF] skips nested [IF]..[THEN] entirely."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 [IF] 11 R ! [THEN]',
+            '  22 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        # Everything inside outer [IF] was skipped, R stays 0
+        self.assertIn("0  ok", text)
+
+    def test_defined_known_word(self):
+        """[DEFINED] finds a known built-in word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '[DEFINED] DUP [IF] 100 R ! [THEN]',
+            'R @ .',
+        ])
+        self.assertIn("100  ok", text)
+
+    def test_defined_unknown_word(self):
+        """[DEFINED] returns false for an unknown word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '[DEFINED] XYZZY-NOEXIST [IF] 100 R ! [THEN]',
+            'R @ .',
+        ])
+        # XYZZY-NOEXIST not found → [IF] skips → R stays 0
+        self.assertIn("0  ok", text)
+
+    def test_undefined_known_word(self):
+        """[UNDEFINED] returns false for a known word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '[UNDEFINED] DUP [IF] 100 R ! [THEN]',
+            'R @ .',
+        ])
+        # DUP exists → [UNDEFINED] returns false → [IF] skips → R stays 0
+        self.assertIn("0  ok", text)
+
+    def test_undefined_missing_word(self):
+        """[UNDEFINED] returns true for missing word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '[UNDEFINED] XYZZY-NOEXIST [IF] 100 R ! [THEN]',
+            'R @ .',
+        ])
+        self.assertIn("100  ok", text)
+
+    def test_cond_compile_definition(self):
+        """Conditionally compile a colon definition."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '[DEFINED] DUP [IF]',
+            '  : MY-DOUBLE  DUP + ;',
+            '[THEN]',
+            '21 MY-DOUBLE .',
+        ])
+        self.assertIn("42 ", text)
+
+    def test_cond_skip_definition(self):
+        """Skipped branch doesn't define a word."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '[UNDEFINED] DUP [IF]',
+            '  : GHOST-WORD 999 ;',
+            '[THEN]',
+            'VARIABLE R  0 R !',
+            '[DEFINED] GHOST-WORD [IF] 1 R ! [THEN]',
+            'R @ .',
+        ])
+        # GHOST-WORD should not exist, so [DEFINED] returns false, R stays 0
+        self.assertIn("0  ok", text)
+
+    def test_cond_else_definition(self):
+        """[ELSE] branch defines words when [IF] is false."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '[DEFINED] XYZZY-NOEXIST [IF]',
+            '  : GREET  111 . ;',
+            '[ELSE]',
+            '  : GREET  222 . ;',
+            '[THEN]',
+            'GREET',
+        ])
+        # GREET should print 222 (ELSE branch), confirmed by "222  ok"
+        self.assertIn("222  ok", text)
+
+    def test_cond_if_multiline_skip(self):
+        """[IF] false correctly skips across multiple input lines."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 R !',
+            '  2 R !',
+            '  3 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        # All assignments skipped, R stays 0
+        self.assertIn("0  ok", text)
+
+    def test_cond_then_is_noop(self):
+        """[THEN] alone is a harmless no-op."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '42 . [THEN] 43 .',
+        ])
+        self.assertIn("42 ", text)
+        self.assertIn("43 ", text)
+
+    def test_cond_words_in_dictionary(self):
+        """New conditional compilation words appear in WORDS."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ['WORDS'])
+        for word in ['[IF]', '[ELSE]', '[THEN]', '[DEFINED]', '[UNDEFINED]']:
+            self.assertIn(word, text)
+
 
 # ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)

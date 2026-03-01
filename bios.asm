@@ -7217,6 +7217,239 @@ postpone_helper:
     call.l r11
     ret.l
 
+; =====================================================================
+;  Conditional Compilation — [IF] [ELSE] [THEN] [DEFINED] [UNDEFINED]
+; =====================================================================
+;
+;  ANS Forth TOOLS EXT conditional-compilation words.
+;
+;  [IF]   ( flag -- )  If flag is false, skip input until matching
+;                        [ELSE] or [THEN].  Nesting is tracked.
+;  [ELSE] ( -- )        If currently executing, skip to [THEN].
+;                        If reached while skipping, handled by [IF].
+;  [THEN] ( -- )        No-op when executing; terminates a skip block.
+;  [DEFINED] <name> ( -- flag )  True if <name> is found in the dictionary.
+;  [UNDEFINED] <name> ( -- flag )  True if <name> is NOT found.
+;
+;  Usage example:
+;    [DEFINED] TILES [IF]
+;      : DRAW  ... tile-engine drawing ... ;
+;    [ELSE]
+;      : DRAW  ... software fallback ... ;
+;    [THEN]
+;
+;    1 CONSTANT HAS-NIC
+;    HAS-NIC [IF]
+;      : NET-INIT  ... initialise NIC ... ;
+;    [THEN]
+
+; [DEFINED] <name> ( -- flag )
+;   Parse next word, search dictionary.  Push -1 if found, 0 otherwise.
+w_defined:
+    ldi64 r11, parse_word
+    call.l r11
+    ; R9=word addr, R12=length
+    cmpi r12, 0
+    breq w_defined_false      ; no name → false
+    ldi64 r11, find_word
+    call.l r11
+    ; R9 = entry (0 = not found)
+    cmpi r9, 0
+    breq w_defined_false
+    ; Found
+    ldi r1, 0
+    dec r1                    ; -1 (TRUE)
+    subi r14, 8
+    str r14, r1
+    ret.l
+w_defined_false:
+    ldi r1, 0
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; [UNDEFINED] <name> ( -- flag )
+;   Parse next word, search dictionary.  Push -1 if NOT found, 0 otherwise.
+w_undefined:
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    breq w_undef_true         ; no name → treat as undefined
+    ldi64 r11, find_word
+    call.l r11
+    cmpi r9, 0
+    breq w_undef_true
+    ; Found → not undefined
+    ldi r1, 0
+    subi r14, 8
+    str r14, r1
+    ret.l
+w_undef_true:
+    ldi r1, 0
+    dec r1                    ; -1 (TRUE)
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; [IF] ( flag -- )  IMMEDIATE
+;   If TOS is non-zero, continue executing normally.
+;   If TOS is zero, skip input tokens until a matching [ELSE] or [THEN],
+;   correctly handling nested [IF]…[THEN] blocks.
+w_cond_if:
+    ldn r1, r14
+    addi r14, 8               ; pop flag
+    cmpi r1, 0
+    lbrne w_cond_if_true
+    ; Flag is false — enter skip mode.
+    ; We need to scan tokens until we find a matching [ELSE] or [THEN],
+    ; counting nested [IF] depths.
+    ldi r10, 1                ; depth = 1  (we are inside one [IF])
+w_cond_skip_loop:
+    ldi64 r11, parse_word
+    call.l r11
+    ; R9=word addr, R12=length  (0 = end of line)
+    cmpi r12, 0
+    lbreq w_cond_skip_eol
+    ; Check for [IF] (4 chars)
+    cmpi r12, 4
+    brne w_cond_skip_not_if
+    ldi64 r11, str_cond_if
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    brne w_cond_skip_not_if
+    ; Nested [IF] — increment depth
+    addi r10, 1
+    lbr w_cond_skip_loop
+w_cond_skip_not_if:
+    ; Check for [ELSE] (6 chars)
+    cmpi r12, 6
+    brne w_cond_skip_not_else
+    ldi64 r11, str_cond_else
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    brne w_cond_skip_not_else
+    ; [ELSE] at depth 1 → stop skipping (execute the ELSE branch)
+    cmpi r10, 1
+    lbrne w_cond_skip_loop     ; deeper nesting, keep skipping
+    ; Matched — done skipping
+    ret.l
+w_cond_skip_not_else:
+    ; Check for [THEN] (6 chars)
+    cmpi r12, 6
+    lbrne w_cond_skip_loop     ; not a keyword we care about
+    ldi64 r11, str_cond_then
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    lbrne w_cond_skip_loop
+    ; [THEN] — decrement depth
+    subi r10, 1
+    cmpi r10, 0
+    lbrne w_cond_skip_loop     ; still nested
+    ; depth==0 — done skipping
+    ret.l
+w_cond_skip_eol:
+    ; End of line while skipping — read another line and continue
+    ldi64 r11, read_line
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_to_in
+    str r11, r1               ; >IN = 0
+    lbr w_cond_skip_loop
+w_cond_if_true:
+    ; Flag is true — just continue (tokens execute normally)
+    ret.l
+
+; [ELSE] ( -- )  IMMEDIATE
+;   When reached during normal execution (i.e. the [IF] branch was taken),
+;   skip everything until matching [THEN].
+w_cond_else:
+    ldi r10, 1                ; depth = 1
+w_cond_else_skip:
+    ldi64 r11, parse_word
+    call.l r11
+    cmpi r12, 0
+    lbreq w_cond_else_eol
+    ; Check for [IF] (4 chars)
+    cmpi r12, 4
+    brne w_cond_else_not_if
+    ldi64 r11, str_cond_if
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    brne w_cond_else_not_if
+    addi r10, 1
+    lbr w_cond_else_skip
+w_cond_else_not_if:
+    ; Check for [THEN] (6 chars)
+    cmpi r12, 6
+    lbrne w_cond_else_skip
+    ldi64 r11, str_cond_then
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    lbrne w_cond_else_skip
+    subi r10, 1
+    cmpi r10, 0
+    lbrne w_cond_else_skip
+    ret.l
+w_cond_else_eol:
+    ldi64 r11, read_line
+    call.l r11
+    ldi r1, 0
+    ldi64 r11, var_to_in
+    str r11, r1
+    lbr w_cond_else_skip
+
+; [THEN] ( -- )  IMMEDIATE
+;   No-op — just a marker.  The skipping logic in [IF]/[ELSE] handles it.
+w_cond_then:
+    ret.l
+
+; --- helper: case-insensitive compare R9(len R12) vs string at R11 ---
+;   Returns R0 = 1 if match, 0 if not.
+;   Clobbers R0, R1, R7, R13 is used as call target so save/restore.
+cond_str_cmp:
+    ldi r1, 0                 ; index
+cond_cmp_loop:
+    cmp r1, r12
+    breq cond_cmp_hit
+    ; char from parsed word
+    mov r0, r9
+    add r0, r1
+    ld.b r0, r0
+    ; to upper
+    cmpi r0, 0x61
+    brcc cond_eu1
+    cmpi r0, 0x7B
+    brcs cond_eu1
+    subi r0, 0x20
+cond_eu1:
+    ; char from reference string
+    mov r7, r11
+    add r7, r1
+    ld.b r7, r7
+    cmp r0, r7
+    brne cond_cmp_miss
+    inc r1
+    br cond_cmp_loop
+cond_cmp_hit:
+    ldi r0, 1
+    ret.l
+cond_cmp_miss:
+    ldi r0, 0
+    ret.l
+
+; Reference strings for keyword matching (uppercase, no null needed)
+str_cond_if:
+    .ascii "[IF]"
+str_cond_else:
+    .ascii "[ELSE]"
+str_cond_then:
+    .ascii "[THEN]"
+
 ; 2>R (IMMEDIATE) — compile inline: pop two from data stack, push to return stack
 ;   Emits:  ldn r1, r14      (50 1E)     — x2 (top)
 ;           addi r14, 8      (62 E0 08)
@@ -12930,12 +13163,57 @@ d_fb_status_fetch:
     ret.l
 
 ; === FB-SETUP ( width height mode -- ) ===
-latest_entry:
 d_fb_setup:
     .dq d_fb_status_fetch
     .db 8
     .ascii "FB-SETUP"
     ldi64 r11, w_fb_setup
+    call.l r11
+    ret.l
+
+; === [DEFINED] (IMMEDIATE) ===
+d_defined:
+    .dq d_fb_setup
+    .db 0x89                  ; IMMEDIATE | len 9
+    .ascii "[DEFINED]"
+    ldi64 r11, w_defined
+    call.l r11
+    ret.l
+
+; === [UNDEFINED] (IMMEDIATE) ===
+d_undefined:
+    .dq d_defined
+    .db 0x8B                  ; IMMEDIATE | len 11
+    .ascii "[UNDEFINED]"
+    ldi64 r11, w_undefined
+    call.l r11
+    ret.l
+
+; === [IF] (IMMEDIATE) ===
+d_cond_if:
+    .dq d_undefined
+    .db 0x84                  ; IMMEDIATE | len 4
+    .ascii "[IF]"
+    ldi64 r11, w_cond_if
+    call.l r11
+    ret.l
+
+; === [ELSE] (IMMEDIATE) ===
+d_cond_else:
+    .dq d_cond_if
+    .db 0x86                  ; IMMEDIATE | len 6
+    .ascii "[ELSE]"
+    ldi64 r11, w_cond_else
+    call.l r11
+    ret.l
+
+; === [THEN] (IMMEDIATE) ===
+latest_entry:
+d_cond_then:
+    .dq d_cond_else
+    .db 0x86                  ; IMMEDIATE | len 6
+    .ascii "[THEN]"
+    ldi64 r11, w_cond_then
     call.l r11
     ret.l
 
