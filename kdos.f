@@ -375,10 +375,10 @@ VARIABLE R-NEW     \ new requested size (rounded)
     \ --- Case 3: fallback alloc+copy+free ---
     R-NEW @ ALLOCATE                       ( a1 a2 ior )
     IF  DROP -1 EXIT  THEN                 ( a1 a2 )
-    A-CURR !                               \ save a2
-    DUP A-CURR @ R-OLD @ CMOVE            ( a1 ; CMOVE src=a1 dst=a2 cnt=old )
-    FREE                                   ( ; free old )
-    A-CURR @ 0 ;                           \ ( a2 0 )
+    R-BLK !                                \ repurpose R-BLK to save a2
+    DUP R-BLK @ R-OLD @ CMOVE             ( a1 ; CMOVE src=a1 dst=a2 cnt=old )
+    FREE                                   ( ; free old — clobbers A-CURR )
+    R-BLK @ 0 ;                            \ ( a2 0 )
 
 \ HEAP-FREE-BYTES ( -- u )
 \   Walk the free list summing available bytes.

@@ -7439,6 +7439,138 @@ class TestKDOSAllocator(_KDOSTestBase):
         self.assertIn("22 ", text)
         self.assertIn("33 ", text)
 
+    # -- RESIZE Case 3 regression (A-CURR clobber fix) --------------------
+
+    def test_resize_case3_returns_valid_addr(self):
+        """RESIZE fallback path returns a usable address (not A-CURR garbage).
+
+        Regression: RESIZE Case 3 stored the new address in A-CURR,
+        but FREE (which is called on the old block) clobbers A-CURR
+        during its free-list walk.  The fix stores the address in R-BLK
+        instead.  This test verifies the returned address is writable
+        and readable — a clobbered pointer would likely fault or return
+        wrong data.
+        """
+        text = self._run_kdos([
+            # Force Case 3: put a blocker between P and the free tail
+            # so (TRY-GROW) fails and RESIZE must alloc+copy+free.
+            "VARIABLE P  VARIABLE BLOCKER",
+            "64 ALLOCATE DROP P !",
+            "64 ALLOCATE DROP BLOCKER !",   # sits right after P
+            # Write a pattern into P's block
+            "P @ 0xDEAD SWAP !",
+            # Resize P to much larger — can't grow in-place
+            "P @ 4096 RESIZE DROP",          # ( new-addr )
+            # Verify data was copied
+            'DUP @ CR ." [V=" . ." ]"',
+            # Write a new value at the returned address to prove it's valid
+            "42 OVER !",
+            'CR ." [W=" @ . ." ]"',
+            # Clean up
+            "FREE  BLOCKER @ FREE",
+        ])
+        self.assertIn("[V=57005", text,   # 0xDEAD = 57005
+                       f"Data not preserved after RESIZE Case 3: {text}")
+        self.assertIn("[W=42", text,
+                       f"Returned address not writable: {text}")
+
+    def test_resize_case3_heap_consistent(self):
+        """After RESIZE Case 3, heap free-list is still intact.
+
+        Verifies that HEAP-VERIFY and HEAP-FRAG still work after the
+        alloc+copy+free path — the free-list must not be corrupted.
+        """
+        text = self._run_kdos([
+            "VARIABLE P  VARIABLE Q",
+            "64 ALLOCATE DROP P !",
+            "64 ALLOCATE DROP Q !",
+            "P @ 2048 RESIZE DROP P !",    # force copy path
+            "Q @ FREE",
+            "P @ FREE",
+            'CR ." [V=" HEAP-VERIFY . ." ]"',
+            'CR ." [F=" HEAP-FRAG . ." ]"',
+        ])
+        self.assertIn("[V=-1", text,   # HEAP-VERIFY returns true
+                       f"Heap corrupted after RESIZE Case 3: {text}")
+        self.assertIn("[F=1", text,    # everything coalesced back to 1
+                       f"Heap fragmented after RESIZE Case 3: {text}")
+
+    def test_resize_case3_preserves_all_data(self):
+        """RESIZE Case 3 copies ALL old data, multi-cell verification."""
+        text = self._run_kdos([
+            "VARIABLE P  VARIABLE BLOCKER",
+            "64 ALLOCATE DROP P !",
+            "64 ALLOCATE DROP BLOCKER !",
+            # Write 8 cells (64 bytes)
+            "P @ DUP 11 OVER ! 8 +",
+            "DUP 22 OVER ! 8 +",
+            "DUP 33 OVER ! 8 +",
+            "DUP 44 OVER ! 8 +",
+            "DUP 55 OVER ! 8 +",
+            "DUP 66 OVER ! 8 +",
+            "DUP 77 OVER ! 8 +",
+            "88 SWAP !",
+            # Force copy path
+            "P @ 4096 RESIZE DROP P !",
+            # Read back all 8 cells
+            'P @ DUP @ CR ." [C0=" . ." ]" 8 +',
+            'DUP @ CR ." [C1=" . ." ]" 8 +',
+            'DUP @ CR ." [C2=" . ." ]" 8 +',
+            'DUP @ CR ." [C3=" . ." ]" 8 +',
+            'DUP @ CR ." [C4=" . ." ]" 8 +',
+            'DUP @ CR ." [C5=" . ." ]" 8 +',
+            'DUP @ CR ." [C6=" . ." ]" 8 +',
+            '@ CR ." [C7=" . ." ]"',
+            "P @ FREE  BLOCKER @ FREE",
+        ])
+        for i, val in enumerate([11, 22, 33, 44, 55, 66, 77, 88]):
+            self.assertIn(f"[C{i}={val}", text,
+                          f"Cell {i} not preserved: {text}")
+
+    def test_resize_case3_free_bytes_restored(self):
+        """After RESIZE Case 3 + free-all, heap free bytes restored."""
+        text = self._run_kdos([
+            'CR ." [F1=" HEAP-FREE-BYTES . ." ]"',
+            "VARIABLE P  VARIABLE Q",
+            "128 ALLOCATE DROP P !",
+            "128 ALLOCATE DROP Q !",
+            "P @ 2048 RESIZE DROP P !",
+            "Q @ FREE",
+            "P @ FREE",
+            'CR ." [F2=" HEAP-FREE-BYTES . ." ]"',
+        ])
+        import re
+        f1 = re.search(r'\[F1=(\d+)', text)
+        f2 = re.search(r'\[F2=(\d+)', text)
+        self.assertTrue(f1 and f2, f"Could not parse: {text}")
+        self.assertEqual(int(f1.group(1)), int(f2.group(1)),
+                         f"Heap leaked: {f1.group(1)} → {f2.group(1)}")
+
+    def test_resize_case3_repeated(self):
+        """Repeated RESIZE through copy path doesn't corrupt heap."""
+        text = self._run_kdos([
+            "VARIABLE P  VARIABLE BLOCKER",
+            "32 ALLOCATE DROP P !",
+            "32 ALLOCATE DROP BLOCKER !",
+            "P @ 7 SWAP !",
+            # Resize 5 times through copy path (each time blocker prevents in-place)
+            "P @ 256 RESIZE DROP P !",
+            "32 ALLOCATE DROP BLOCKER @ FREE BLOCKER !",
+            "P @ 512 RESIZE DROP P !",
+            "32 ALLOCATE DROP BLOCKER @ FREE BLOCKER !",
+            "P @ 1024 RESIZE DROP P !",
+            "32 ALLOCATE DROP BLOCKER @ FREE BLOCKER !",
+            "P @ 2048 RESIZE DROP P !",
+            "32 ALLOCATE DROP BLOCKER @ FREE BLOCKER !",
+            "P @ 4096 RESIZE DROP P !",
+            # Original data still there
+            'P @ @ CR ." [V=" . ." ]"',
+            "BLOCKER @ FREE  P @ FREE",
+            'CR ." [OK=" HEAP-VERIFY . ." ]"',
+        ])
+        self.assertIn("[V=7", text, f"Data lost after repeated resize: {text}")
+        self.assertIn("[OK=-1", text, f"Heap corrupt after repeated resize: {text}")
+
 
 # ---------------------------------------------------------------------------
 #  KDOS Arena Allocator tests
