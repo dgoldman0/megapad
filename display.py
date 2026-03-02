@@ -33,7 +33,10 @@ import threading
 import time
 import zlib
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+from diskutil import MP64FS, FTYPE_NAMES, FTYPE_FREE, FTYPE_DIR
 
 if TYPE_CHECKING:
     from system import MegapadSystem
@@ -502,45 +505,117 @@ class MenuBar:
         return self.active_menu >= 0
 
 
-# ── File Dialogs (simple pygame-based) ────────────────────────────────
+# ── File Dialogs (native OS via tkinter) ──────────────────────────────
+
+def _tk_dialog(func, **kwargs) -> Optional[str]:
+    """Run a tkinter file dialog on a hidden root window.
+
+    Works safely alongside pygame — the Tk root is created, used once,
+    then destroyed.  Returns the selected path or None.
+    """
+    import tkinter as tk
+    root = tk.Tk()
+    root.withdraw()            # hide the Tk root window
+    root.attributes("-topmost", True)   # appear above pygame
+    root.update()              #  ensure it's mapped before the dialog
+    result = func(**kwargs)
+    root.destroy()
+    return result if result else None
 
 
 class SimpleDialog:
-    """Minimal modal dialog drawn in pygame."""
+    """File / directory pickers using the native OS dialog (tkinter)."""
 
     @staticmethod
-    def file_save(pygame_module, screen, font, default_name: str = "snapshot.mp64") -> Optional[str]:
-        """Show a simple save-file dialog. Returns filename or None."""
-        return SimpleDialog._file_dialog(pygame_module, screen, font,
-                                          "Save Snapshot", default_name, save=True)
+    def file_save(pygame_module, screen, font,
+                  default_name: str = "snapshot.mp64") -> Optional[str]:
+        """Native Save-File dialog.  Returns path or None."""
+        from tkinter import filedialog
+        return _tk_dialog(
+            filedialog.asksaveasfilename,
+            title="Save Snapshot",
+            initialfile=default_name,
+            defaultextension=".mp64",
+            filetypes=[("Megapad-64 Snapshot", "*.mp64"), ("All Files", "*.*")],
+        )
 
     @staticmethod
-    def file_open(pygame_module, screen, font, default_name: str = "") -> Optional[str]:
-        """Show a simple open-file dialog. Returns filename or None."""
-        return SimpleDialog._file_dialog(pygame_module, screen, font,
-                                          "Load Snapshot", default_name, save=False)
+    def file_open(pygame_module, screen, font,
+                  default_name: str = "") -> Optional[str]:
+        """Native Open-File dialog.  Returns path or None."""
+        from tkinter import filedialog
+        return _tk_dialog(
+            filedialog.askopenfilename,
+            title="Load Snapshot",
+            filetypes=[("Megapad-64 Snapshot", "*.mp64"), ("All Files", "*.*")],
+        )
 
     @staticmethod
-    def _file_dialog(pygame_module, screen, font, title: str,
-                      default: str, save: bool) -> Optional[str]:
-        """Internal: draw a simple text-input dialog."""
+    def disk_swap(pygame_module, screen, font,
+                  current_path: str = "") -> Optional[str]:
+        """Native Open-File dialog for picking a disk image."""
+        from tkinter import filedialog
+        import os
+        init_dir = os.path.dirname(current_path) if current_path else "."
+        return _tk_dialog(
+            filedialog.askopenfilename,
+            title="Swap Disk Image",
+            initialdir=init_dir,
+            filetypes=[("Disk Images", "*.img"), ("All Files", "*.*")],
+        )
+
+    @staticmethod
+    def pick_directory(pygame_module, screen, font,
+                       default: str = "extracted",
+                       title: str = "Choose Destination Folder") -> Optional[str]:
+        """Native directory picker."""
+        from tkinter import filedialog
+        return _tk_dialog(
+            filedialog.askdirectory,
+            title=title,
+            initialdir=default,
+            mustexist=False,
+        )
+
+    # -- Disk file browser (list / extract) --------------------------------
+
+    @staticmethod
+    def disk_browser(pygame_module, screen, font,
+                     fs: MP64FS) -> Optional[list[str]]:
+        """Show a scrollable list of files on the disk image.
+
+        Returns a list of filenames the user chose to extract, or None.
+        """
         import pygame
 
         clock = pygame.time.Clock()
-        text = default
-        cursor_vis = True
-        cursor_timer = 0
         win_w, win_h = screen.get_size()
-        dw, dh = min(500, win_w - 40), 150
-        dx = (win_w - dw) // 2
-        dy = (win_h - dh) // 2
 
-        # List existing .mp64 files in CWD for reference
-        try:
-            existing = sorted(f for f in os.listdir('.') if f.endswith('.mp64'))
-        except OSError:
-            existing = []
-        list_font = pygame.font.SysFont("monospace", 12)
+        entries = fs.list_files()
+        items: list[dict] = []
+        for e in entries:
+            if e.ftype == FTYPE_FREE:
+                continue
+            items.append({
+                "name": e.name,
+                "type": FTYPE_NAMES.get(e.ftype, f"?{e.ftype}"),
+                "size": e.used_bytes,
+                "sectors": e.total_sectors,
+                "selected": False,
+                "is_dir": e.ftype == FTYPE_DIR,
+            })
+
+        scroll = 0
+        row_h = font.get_linesize() + 6
+        dw = min(600, win_w - 40)
+        max_visible = min(len(items), (win_h - 200) // row_h)
+        max_visible = max(4, max_visible)
+        dh = 80 + max_visible * row_h + 50
+        dx = (win_w - dw) // 2
+        dy = max(10, (win_h - dh) // 2)
+        header_h = 40
+
+        sel_all = False
 
         while True:
             for event in pygame.event.get():
@@ -550,82 +625,139 @@ class SimpleDialog:
                     if event.key == pygame.K_ESCAPE:
                         return None
                     elif event.key == pygame.K_RETURN:
-                        return text if text.strip() else None
-                    elif event.key == pygame.K_BACKSPACE:
-                        text = text[:-1]
-                    elif event.unicode and len(text) < 80:
-                        text += event.unicode
+                        chosen = [it["name"] for it in items if it["selected"]]
+                        return chosen if chosen else None
+                    elif event.key == pygame.K_a and (
+                            pygame.key.get_mods() & pygame.KMOD_CTRL):
+                        sel_all = not sel_all
+                        for it in items:
+                            if not it["is_dir"]:
+                                it["selected"] = sel_all
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     mx, my = event.pos
-                    cancel_rect = pygame.Rect(dx + dw - 180, dy + dh - 40, 80, 28)
-                    ok_rect = pygame.Rect(dx + dw - 90, dy + dh - 40, 80, 28)
+                    # Scroll
+                    if event.button == 4:  # wheel up
+                        scroll = max(0, scroll - 1)
+                        continue
+                    elif event.button == 5:  # wheel down
+                        scroll = min(max(0, len(items) - max_visible),
+                                     scroll + 1)
+                        continue
+
+                    # Cancel / Extract buttons
+                    cancel_rect = pygame.Rect(dx + dw - 200, dy + dh - 42,
+                                              90, 28)
+                    extract_rect = pygame.Rect(dx + dw - 100, dy + dh - 42,
+                                               90, 28)
                     if cancel_rect.collidepoint(mx, my):
                         return None
-                    if ok_rect.collidepoint(mx, my):
-                        return text if text.strip() else None
-                    # Click on file list?
-                    list_y = dy + dh + 8
-                    for i, fn in enumerate(existing[:8]):
-                        fy = list_y + i * 16
-                        if dx <= mx < dx + dw and fy <= my < fy + 16:
-                            text = fn
+                    if extract_rect.collidepoint(mx, my):
+                        chosen = [it["name"] for it in items
+                                  if it["selected"]]
+                        return chosen if chosen else None
 
-            cursor_timer += clock.get_rawtime()
-            if cursor_timer >= 400:
-                cursor_vis = not cursor_vis
-                cursor_timer = 0
+                    # Row click → toggle selection
+                    list_y = dy + header_h + row_h  # after column header
+                    for vi in range(max_visible):
+                        idx = scroll + vi
+                        if idx >= len(items):
+                            break
+                        ry = list_y + vi * row_h
+                        if dx <= mx < dx + dw and ry <= my < ry + row_h:
+                            if not items[idx]["is_dir"]:
+                                items[idx]["selected"] = not items[idx]["selected"]
 
-            # Semi-transparent overlay
+            # ── Draw ──────────────────────────────────
             overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 140))
             screen.blit(overlay, (0, 0))
 
-            # Dialog box
             pygame.draw.rect(screen, Theme.DIALOG_BG,
                              (dx, dy, dw, dh), border_radius=8)
             pygame.draw.rect(screen, Theme.DROPDOWN_BORDER,
                              (dx, dy, dw, dh), 1, border_radius=8)
 
             # Title
+            n_sel = sum(1 for it in items if it["selected"])
+            title = f"Disk Contents  ({len(items)} files"
+            if n_sel:
+                title += f", {n_sel} selected"
+            title += ")"
             t = font.render(title, True, Theme.DIALOG_FG)
-            screen.blit(t, (dx + 14, dy + 12))
+            screen.blit(t, (dx + 14, dy + 10))
 
-            # Text input box
-            input_rect = pygame.Rect(dx + 14, dy + 44, dw - 28, 28)
-            pygame.draw.rect(screen, (20, 20, 28), input_rect, border_radius=4)
-            pygame.draw.rect(screen, Theme.TAB_ACCENT, input_rect, 1, border_radius=4)
-            disp_text = text + ("\u2588" if cursor_vis else " ")
-            it = font.render(disp_text, True, Theme.DIALOG_FG)
-            screen.blit(it, (input_rect.x + 6, input_rect.y + 5))
+            # Column headers
+            col_y = dy + header_h
+            hdr = font.render(
+                f"{'':>3} {'Name':<24} {'Type':<8} {'Size':>8}  {'Sec':>5}",
+                True, Theme.DEBUG_LABEL)
+            screen.blit(hdr, (dx + 10, col_y))
+            pygame.draw.line(screen, Theme.MENU_SEP,
+                             (dx + 8, col_y + row_h - 2),
+                             (dx + dw - 8, col_y + row_h - 2))
 
-            # Hint
-            action = "Save" if save else "Load"
-            hint = font.render(f"Enter filename, press Enter to {action.lower()} or Esc to cancel",
-                               True, Theme.STATUS_FG)
-            screen.blit(hint, (dx + 14, dy + 80))
+            # Rows
+            list_y = col_y + row_h
+            for vi in range(max_visible):
+                idx = scroll + vi
+                if idx >= len(items):
+                    break
+                it = items[idx]
+                ry = list_y + vi * row_h
+                # Highlight selected
+                if it["selected"]:
+                    pygame.draw.rect(screen, (40, 70, 120),
+                                     (dx + 4, ry, dw - 8, row_h),
+                                     border_radius=3)
+                # Hover
+                mouse_pos = pygame.mouse.get_pos()
+                row_rect = pygame.Rect(dx + 4, ry, dw - 8, row_h)
+                if row_rect.collidepoint(mouse_pos):
+                    pygame.draw.rect(screen, (50, 50, 70),
+                                     row_rect, 1, border_radius=3)
+
+                chk = "\u2713" if it["selected"] else " "
+                is_dir = "[dir]" if it["is_dir"] else ""
+                line = (f" {chk}  {it['name']:<24} "
+                        f"{it['type']:<8} {it['size']:>8}  "
+                        f"{it['sectors']:>5}  {is_dir}")
+                fg = Theme.DEBUG_ADDR if it["is_dir"] else Theme.DIALOG_FG
+                rt = font.render(line, True, fg)
+                screen.blit(rt, (dx + 10, ry + 2))
+
+            # Scroll indicator
+            if len(items) > max_visible:
+                bar_h = max(10, int(dh * max_visible / len(items)))
+                bar_y = dy + header_h + int(
+                    (dh - header_h - 50) * scroll /
+                    max(1, len(items) - max_visible))
+                pygame.draw.rect(screen, Theme.MENU_SEP,
+                                 (dx + dw - 10, bar_y, 6, bar_h),
+                                 border_radius=3)
 
             # Buttons
-            cancel_rect = pygame.Rect(dx + dw - 180, dy + dh - 40, 80, 28)
-            ok_rect = pygame.Rect(dx + dw - 90, dy + dh - 40, 80, 28)
+            cancel_rect = pygame.Rect(dx + dw - 200, dy + dh - 42, 90, 28)
+            extract_rect = pygame.Rect(dx + dw - 100, dy + dh - 42, 90, 28)
 
-            pygame.draw.rect(screen, Theme.MENU_SEP, cancel_rect, border_radius=4)
+            pygame.draw.rect(screen, Theme.MENU_SEP, cancel_rect,
+                             border_radius=4)
             ct = font.render("Cancel", True, Theme.DIALOG_FG)
-            screen.blit(ct, (cancel_rect.x + (80 - ct.get_width()) // 2,
+            screen.blit(ct, (cancel_rect.x + (90 - ct.get_width()) // 2,
                              cancel_rect.y + 5))
 
-            pygame.draw.rect(screen, Theme.DIALOG_BTN, ok_rect, border_radius=4)
-            ot = font.render(action, True, Theme.DIALOG_BTN_FG)
-            screen.blit(ot, (ok_rect.x + (80 - ot.get_width()) // 2,
-                             ok_rect.y + 5))
+            btn_col = Theme.DIALOG_BTN if n_sel else Theme.MENU_SEP
+            pygame.draw.rect(screen, btn_col, extract_rect,
+                             border_radius=4)
+            et = font.render("Extract", True, Theme.DIALOG_BTN_FG)
+            screen.blit(et, (extract_rect.x + (90 - et.get_width()) // 2,
+                             extract_rect.y + 5))
 
-            # File list (below dialog)
-            if existing:
-                list_y = dy + dh + 8
-                lbl = list_font.render("Existing snapshots (click to select):", True, Theme.STATUS_FG)
-                screen.blit(lbl, (dx + 4, list_y - 16))
-                for i, fn in enumerate(existing[:8]):
-                    ft = list_font.render(f"  {fn}", True, Theme.DEBUG_ADDR)
-                    screen.blit(ft, (dx + 4, list_y + i * 16))
+            # Hint
+            hint = font.render(
+                "Click rows to select, Ctrl+A toggle all, "
+                "Enter=extract, Esc=cancel",
+                True, Theme.STATUS_FG)
+            screen.blit(hint, (dx + 14, dy + dh - 18))
 
             pygame.display.flip()
             clock.tick(30)
@@ -1115,6 +1247,24 @@ class FramebufferDisplay:
     def _cb_tab_graphics(self):
         self.active_tab = self.TAB_GRAPHICS
 
+    # -- Disk callbacks ---------------------------------------------------
+
+    def _cb_disk_swap(self):
+        self._pending_action = "disk_swap"
+
+    def _cb_disk_browse(self):
+        self._pending_action = "disk_browse"
+
+    def _cb_disk_extract_all(self):
+        self._pending_action = "disk_extract_all"
+
+    def _cb_disk_info(self):
+        self._pending_action = "disk_info"
+
+    def _cb_disk_save(self):
+        self.sys.storage.save_image()
+        self.status.set_message("Disk image saved")
+
     # -- internals --------------------------------------------------------
 
     def _build_menus(self) -> MenuBar:
@@ -1136,6 +1286,14 @@ class FramebufferDisplay:
                 MenuItem("Graphics", self._cb_tab_graphics, "F2"),
                 MenuItem("", separator=True),
                 MenuItem("Debug Panel", self._cb_toggle_debug, "F3"),
+            ]),
+            Menu("Disk", [
+                MenuItem("Swap Image...", self._cb_disk_swap, "Ctrl+D"),
+                MenuItem("Browse / Extract...", self._cb_disk_browse, "Ctrl+E"),
+                MenuItem("Extract All...", self._cb_disk_extract_all),
+                MenuItem("", separator=True),
+                MenuItem("Disk Info", self._cb_disk_info),
+                MenuItem("Save Image", self._cb_disk_save),
             ]),
         ])
 
@@ -1225,6 +1383,96 @@ class FramebufferDisplay:
                     elif path:
                         self.status.set_message(f"File not found: {path}")
 
+                elif self._pending_action == "disk_swap":
+                    self._pending_action = None
+                    cur = self.sys.storage.image_path or ""
+                    new_path = SimpleDialog.disk_swap(
+                        pygame, screen, ui_font, cur)
+                    if new_path:
+                        try:
+                            old = self.sys.storage.image_path or "(none)"
+                            self.sys.storage.swap_image(new_path)
+                            self.sys.sysinfo.has_storage = True
+                            self.status.set_message(
+                                f"Swapped: {old} \u2192 {new_path}")
+                        except Exception as e:
+                            self.status.set_message(f"Swap failed: {e}")
+
+                elif self._pending_action == "disk_browse":
+                    self._pending_action = None
+                    if not self.sys.storage._image_data:
+                        self.status.set_message("No disk image attached")
+                    else:
+                        fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        chosen = SimpleDialog.disk_browser(
+                            pygame, screen, ui_font, fs)
+                        if chosen:
+                            dest_str = SimpleDialog.pick_directory(
+                                pygame, screen, ui_font,
+                                default="extracted",
+                                title="Extract Selected Files To")
+                            if dest_str is None:
+                                continue
+                            dest = Path(dest_str)
+                            dest.mkdir(parents=True, exist_ok=True)
+                            count = 0
+                            for name in chosen:
+                                try:
+                                    data = fs.read_file(name)
+                                    data = data.rstrip(b"\x00")
+                                    (dest / name).write_bytes(data)
+                                    count += 1
+                                except Exception:
+                                    pass
+                            self.status.set_message(
+                                f"Extracted {count} file(s) \u2192 {dest}/")
+
+                elif self._pending_action == "disk_extract_all":
+                    self._pending_action = None
+                    if not self.sys.storage._image_data:
+                        self.status.set_message("No disk image attached")
+                    else:
+                        fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        dest_str = SimpleDialog.pick_directory(
+                            pygame, screen, ui_font,
+                            default="extracted",
+                            title="Extract All Files To")
+                        if dest_str is None:
+                            continue
+                        dest = Path(dest_str)
+                        dest.mkdir(parents=True, exist_ok=True)
+                        count = 0
+                        for e in fs.list_files():
+                            if e.ftype in (FTYPE_FREE, FTYPE_DIR):
+                                continue
+                            try:
+                                data = fs.read_file(e.name, parent=e.parent)
+                                data = data.rstrip(b"\x00")
+                                (dest / e.name).write_bytes(data)
+                                count += 1
+                            except Exception:
+                                pass
+                        self.status.set_message(
+                            f"Extracted all ({count} files) \u2192 {dest}/")
+
+                elif self._pending_action == "disk_info":
+                    self._pending_action = None
+                    s = self.sys.storage
+                    if not s._image_data:
+                        self.status.set_message("No disk image attached")
+                    else:
+                        fs = MP64FS(bytearray(s._image_data))
+                        meta = fs.info()
+                        if meta.get("formatted"):
+                            self.status.set_message(
+                                f"Disk: {s.image_path}  "
+                                f"{meta['files']} files  "
+                                f"{meta['free_sectors']} free sectors")
+                        else:
+                            self.status.set_message(
+                                f"Disk: {s.image_path}  "
+                                f"({s.total_sectors} sectors, unformatted)")
+
                 # ── Handle pygame events ──────────────────────
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
@@ -1246,6 +1494,10 @@ class FramebufferDisplay:
                             self._cb_save_snapshot()
                         elif ctrl and event.key == pygame.K_o:
                             self._cb_load_snapshot()
+                        elif ctrl and event.key == pygame.K_d:
+                            self._cb_disk_swap()
+                        elif ctrl and event.key == pygame.K_e:
+                            self._cb_disk_browse()
                         elif ctrl and event.key == pygame.K_r:
                             self._cb_reset()
                         elif event.key == pygame.K_F1:

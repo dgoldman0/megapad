@@ -339,6 +339,34 @@ class Storage(Device):
             with open(self.image_path, "wb") as f:
                 f.write(self._image_data)
 
+    def swap_image(self, new_path: str, *, save_current: bool = True):
+        """Hot-swap to a different disk image.
+
+        Flushes the current image (unless *save_current* is False),
+        then loads *new_path*.  If *new_path* does not exist a fresh
+        empty image is created.
+        """
+        if save_current:
+            self.save_image()
+        self.data_port_buf = bytearray()
+        self.data_port_pos = 0
+        self.sector_num = 0
+        self.dma_addr = 0
+        self.sec_count = 1
+        self.busy = False
+        self.error = False
+        self.load_image(new_path)
+
+    def detach_image(self, *, save: bool = True):
+        """Detach the current disk image."""
+        if save:
+            self.save_image()
+        self._image_data = bytearray()
+        self.image_path = None
+        self.status = 0
+        self.data_port_buf = bytearray()
+        self.data_port_pos = 0
+
     @property
     def total_sectors(self) -> int:
         return len(self._image_data) // SECTOR_SIZE if self._image_data else 0

@@ -213,6 +213,96 @@ class TestStorage(unittest.TestCase):
         stor = Storage()
         self.assertFalse(stor.status & 0x80)
 
+    def test_swap_image(self):
+        """swap_image() saves the old image and loads the new one."""
+        import tempfile, struct
+        from diskutil import MP64FS
+        # Create two temp images
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f1:
+            path1 = f1.name
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f2:
+            path2 = f2.name
+        try:
+            os.unlink(path1)
+            os.unlink(path2)
+            # Format image A with a marker
+            fs1 = MP64FS(total_sectors=64)
+            fs1.format()
+            fs1.inject_file("hello.txt", b"image-A-data", ftype=2)
+            fs1.save(path1)
+            # Format image B with a different marker
+            fs2 = MP64FS(total_sectors=64)
+            fs2.format()
+            fs2.inject_file("world.txt", b"image-B-data", ftype=2)
+            fs2.save(path2)
+
+            stor = Storage(path1)
+            self.assertTrue(stor.status & 0x80)
+            # Confirm image A is loaded
+            live_fs = MP64FS(bytearray(stor._image_data))
+            names = {e.name for e in live_fs.list_files()}
+            self.assertIn("hello.txt", names)
+
+            # Swap to image B
+            stor.swap_image(path2)
+            self.assertTrue(stor.status & 0x80)
+            self.assertEqual(stor.image_path, path2)
+            live_fs = MP64FS(bytearray(stor._image_data))
+            names = {e.name for e in live_fs.list_files()}
+            self.assertIn("world.txt", names)
+            self.assertNotIn("hello.txt", names)
+
+            # swap resets device state
+            self.assertEqual(stor.sector_num, 0)
+            self.assertEqual(stor.dma_addr, 0)
+            self.assertFalse(stor.error)
+        finally:
+            for p in (path1, path2):
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_detach_image(self):
+        """detach_image() clears the image and saves it first."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            stor = Storage()
+            stor.load_image(path)
+            self.assertTrue(stor.status & 0x80)
+            stor.detach_image(save=True)
+            self.assertFalse(stor.status & 0x80)
+            self.assertIsNone(stor.image_path)
+            self.assertEqual(len(stor._image_data), 0)
+            # File should exist on disk (was saved)
+            self.assertTrue(os.path.exists(path))
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_extract_file_from_image(self):
+        """Files can be read from a live Storage image via MP64FS."""
+        import tempfile
+        from diskutil import MP64FS
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            fs = MP64FS(total_sectors=64)
+            fs.format()
+            payload = b"Hello from inside the image!\\n"
+            fs.inject_file("greeting.txt", payload, ftype=2)
+            fs.save(path)
+
+            stor = Storage(path)
+            live_fs = MP64FS(bytearray(stor._image_data))
+            data = live_fs.read_file("greeting.txt")
+            self.assertEqual(data.rstrip(b"\\x00"), payload)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
 
 class TestDeviceBus(unittest.TestCase):
     def test_route_uart(self):

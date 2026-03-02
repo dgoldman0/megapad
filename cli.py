@@ -28,6 +28,8 @@ import shlex
 import traceback
 from typing import Optional
 
+from pathlib import Path
+
 from accel_wrapper import Megapad64, HaltError, TrapError, u64, s64
 from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START
@@ -35,6 +37,7 @@ from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, MBOX_BASE, SPINLOCK_BASE, SECTOR_SIZE,
 )
+from diskutil import MP64FS, FTYPE_NAMES
 
 # ---------------------------------------------------------------------------
 #  Disassembler (basic — enough for debugging)
@@ -320,38 +323,180 @@ class MegapadCLI(cmd.Cmd):
 
     # -- Storage --
 
+    def _require_storage(self) -> bool:
+        """Print an error and return False if no disk image is attached."""
+        if not self.sys.storage._image_data:
+            print("No disk image attached.  Use: storage attach <image>")
+            return False
+        return True
+
+    def _get_fs(self) -> MP64FS | None:
+        """Return an MP64FS view of the live disk image, or None."""
+        if not self._require_storage():
+            return None
+        return MP64FS(bytearray(self.sys.storage._image_data))
+
     def do_storage(self, arg):
         """Storage commands:
           storage attach <image_file>   — attach/create a disk image
-          storage detach                — detach current image
+          storage detach                — detach current image (saves first)
+          storage swap <image_file>     — save current & switch to a new image
           storage info                  — show storage status
-          storage save                  — flush image to disk"""
+          storage save                  — flush image to disk
+          storage ls   [path]           — list files in the disk image
+          storage cat  <name> [path]    — print a text file from the image
+          storage extract <name> [dest] [path] — extract a file to host FS
+          storage extractall [dest_dir] — extract every file to host dir"""
         parts = shlex.split(arg)
         if not parts:
-            print("Usage: storage attach|detach|info|save [args]")
+            print("Usage: storage attach|detach|swap|info|save"
+                  "|ls|cat|extract|extractall [args]")
             return
         sub = parts[0].lower()
+
+        # -- attach ---------------------------------------------------------
         if sub == "attach":
             if len(parts) < 2:
                 print("Usage: storage attach <image_file>")
                 return
             self.sys.storage.load_image(parts[1])
             self.sys.sysinfo.has_storage = True
-            print(f"Storage attached: {parts[1]} ({self.sys.storage.total_sectors} sectors)")
+            print(f"Storage attached: {parts[1]} "
+                  f"({self.sys.storage.total_sectors} sectors)")
+
+        # -- detach ---------------------------------------------------------
         elif sub == "detach":
-            self.sys.storage._image_data = bytearray()
-            self.sys.storage.image_path = None
-            self.sys.storage.status = 0
+            self.sys.storage.detach_image(save=True)
             self.sys.sysinfo.has_storage = False
-            print("Storage detached.")
+            print("Storage saved and detached.")
+
+        # -- swap -----------------------------------------------------------
+        elif sub == "swap":
+            if len(parts) < 2:
+                print("Usage: storage swap <image_file>")
+                return
+            old = self.sys.storage.image_path or "(none)"
+            self.sys.storage.swap_image(parts[1])
+            self.sys.sysinfo.has_storage = True
+            print(f"Swapped: {old} → {parts[1]} "
+                  f"({self.sys.storage.total_sectors} sectors)")
+
+        # -- info -----------------------------------------------------------
         elif sub == "info":
             s = self.sys.storage
-            print(f"  Image: {s.image_path or 'none'}")
-            print(f"  Sectors: {s.total_sectors}  ({s.total_sectors * SECTOR_SIZE} bytes)")
+            print(f"  Image:   {s.image_path or 'none'}")
+            print(f"  Sectors: {s.total_sectors}  "
+                  f"({s.total_sectors * SECTOR_SIZE} bytes)")
             print(f"  Present: {'yes' if s.status & 0x80 else 'no'}")
+            fs = self._get_fs()
+            if fs:
+                meta = fs.info()
+                if meta.get("formatted"):
+                    print(f"  FS ver:  {meta['version']}  "
+                          f"files={meta['files']}  "
+                          f"free={meta['free_sectors']} sectors")
+
+        # -- save -----------------------------------------------------------
         elif sub == "save":
             self.sys.storage.save_image()
             print("Storage image saved.")
+
+        # -- ls -------------------------------------------------------------
+        elif sub == "ls":
+            fs = self._get_fs()
+            if not fs:
+                return
+            fs_path = parts[1] if len(parts) > 1 else "/"
+            try:
+                parent = fs.resolve_path(fs_path)
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                return
+            entries = fs.list_files(parent=parent)
+            if not entries:
+                print("(no files)")
+                return
+            print(f"{'Name':<24} {'Type':<8} {'Size':>8}  {'Sectors':>7}")
+            print("-" * 50)
+            for e in entries:
+                tname = FTYPE_NAMES.get(e.ftype, f"?{e.ftype}")
+                flags = ""
+                if e.readonly:  flags += "R"
+                if e.system:    flags += "S"
+                if e.encrypted: flags += "E"
+                print(f"{e.name:<24} {tname:<8} {e.used_bytes:>8}  "
+                      f"{e.total_sectors:>7}  {flags}")
+
+        # -- cat ------------------------------------------------------------
+        elif sub == "cat":
+            if len(parts) < 2:
+                print("Usage: storage cat <filename> [fs_path]")
+                return
+            fs = self._get_fs()
+            if not fs:
+                return
+            name = parts[1]
+            fs_path = parts[2] if len(parts) > 2 else "/"
+            try:
+                parent = fs.resolve_path(fs_path)
+                data = fs.read_file(name, parent=parent)
+                text = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+                print(text)
+            except FileNotFoundError:
+                print(f"File not found: {name!r}")
+            except Exception as e:
+                print(f"Error: {e}")
+
+        # -- extract --------------------------------------------------------
+        elif sub == "extract":
+            if len(parts) < 2:
+                print("Usage: storage extract <filename> [host_dest] [fs_path]")
+                return
+            fs = self._get_fs()
+            if not fs:
+                return
+            name = parts[1]
+            host_dest = parts[2] if len(parts) > 2 else name
+            fs_path = parts[3] if len(parts) > 3 else "/"
+            try:
+                parent = fs.resolve_path(fs_path)
+                data = fs.read_file(name, parent=parent)
+                # Strip trailing NUL padding
+                data = data.rstrip(b"\x00")
+                dest = Path(host_dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                print(f"Extracted {name!r} → {dest}  ({len(data)} bytes)")
+            except FileNotFoundError:
+                print(f"File not found: {name!r}")
+            except Exception as e:
+                print(f"Error: {e}")
+
+        # -- extractall -----------------------------------------------------
+        elif sub == "extractall":
+            fs = self._get_fs()
+            if not fs:
+                return
+            dest_dir = Path(parts[1]) if len(parts) > 1 else Path(".")
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            entries = fs.list_files()
+            count = 0
+            for e in entries:
+                if e.ftype == 0:     # free
+                    continue
+                if e.ftype == 8:     # directory — create on host
+                    (dest_dir / e.name).mkdir(exist_ok=True)
+                    continue
+                try:
+                    data = fs.read_file(e.name, parent=e.parent)
+                    data = data.rstrip(b"\x00")
+                    out = dest_dir / e.name
+                    out.write_bytes(data)
+                    count += 1
+                except Exception as exc:
+                    print(f"  Warning: skipping {e.name!r}: {exc}")
+            print(f"Extracted {count} file(s) to {dest_dir}/")
+
         else:
             print(f"Unknown storage command: {sub}")
 
