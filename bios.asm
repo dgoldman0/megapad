@@ -306,12 +306,8 @@ interp_loop:
     andi r0, 0x80
     brne interp_execute       ; IMMEDIATE → execute even in compile mode
 
-    ; Not IMMEDIATE — compile a call to this word
-    ldi64 r11, entry_to_code
-    call.l r11
-    ; R9 = code pointer — compile ldi64 r11,<addr>; call.l r11
-    mov r1, r9
-    ldi64 r11, compile_call
+    ; Not IMMEDIATE — JIT inline or compile call
+    ldi64 r11, jit_compile_word
     call.l r11
     lbr interp_loop
 
@@ -342,9 +338,8 @@ interp_try_number:
     cmpi r11, 0
     breq interp_push_number
 
-    ; Compiling — emit literal push: ldi64 r1,<val>; subi r14,8; str r14,r1
-    ; compile_literal handles this
-    ldi64 r11, compile_literal
+    ; Compiling — JIT compact literal or full compile_literal
+    ldi64 r11, jit_compile_literal
     call.l r11
     lbr interp_loop
 
@@ -2505,6 +2500,403 @@ compile_ret:
     inc r0
     str r11, r0
     ret.l
+
+; =====================================================================
+;  JIT Compiler — inline primitives & compact literals
+; =====================================================================
+;  When JIT is enabled (var_jit_enabled = 1), the compiler:
+;    1. Inlines small primitives (DUP, DROP, +, @, etc.) instead of
+;       emitting a 13-byte ldi64+call.l sequence per word reference.
+;    2. Uses compact literal encodings for values 0–255 (8 bytes
+;       instead of 16) and TRUE/-1 (9 bytes instead of 16).
+;
+;  JIT-ON / JIT-OFF toggle at runtime.  JIT-STATS reports counters.
+;  The inline table maps dictionary entry addresses to pre-assembled
+;  native instruction sequences — the word body sans ret.l.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+;  jit_compile_word — inline primitive or fall back to compile_call
+;  Input:  R9 = dictionary entry pointer (from find_word)
+;  Clobbers: R0, R1, R7, R11, R12, R13
+; ---------------------------------------------------------------------
+jit_compile_word:
+    ; Check JIT enabled
+    ldi64 r11, var_jit_enabled
+    ldn r11, r11
+    cmpi r11, 0
+    lbreq jit_cw_fallback
+
+    ; Save entry pointer on return stack
+    subi r15, 8
+    str r15, r9
+
+    ; Scan inline table for matching entry address
+    ldi64 r13, jit_inline_table
+jit_cw_scan:
+    ldn r0, r13                       ; 8-byte table entry address
+    cmpi r0, 0
+    lbreq jit_cw_not_found            ; sentinel → not in table
+    cmp r0, r9
+    lbreq jit_cw_found
+    ; Skip past this entry: +8 (addr) + 1 (len) + body_len
+    addi r13, 8
+    ld.b r7, r13                      ; body length
+    addi r13, 1
+    add r13, r7
+    lbr jit_cw_scan
+
+jit_cw_found:
+    addi r13, 8                       ; past address
+    ld.b r12, r13                     ; R12 = body length
+    addi r13, 1                       ; R13 → body bytes
+
+    ; Copy body bytes to HERE
+    ldi64 r11, var_here
+    ldn r0, r11                       ; R0 = HERE
+    ldi r7, 0
+jit_cw_copy:
+    cmp r7, r12
+    lbreq jit_cw_done
+    mov r1, r13
+    add r1, r7
+    ld.b r1, r1                       ; byte from inline table
+    mov r11, r0
+    add r11, r7
+    st.b r11, r1                      ; store at HERE + offset
+    inc r7
+    lbr jit_cw_copy
+
+jit_cw_done:
+    ; Advance HERE
+    add r0, r12
+    ldi64 r11, var_here
+    str r11, r0
+    ; Stats: inlines++
+    ldi64 r11, var_jit_inlines
+    ldn r1, r11
+    inc r1
+    str r11, r1
+    ; bytes_saved += (13 - body_length)
+    ldi r1, 13
+    sub r1, r12
+    ldi64 r11, var_jit_bytes_saved
+    ldn r0, r11
+    add r0, r1
+    str r11, r0
+    ; Restore R9 and return
+    ldn r9, r15
+    addi r15, 8
+    ret.l
+
+jit_cw_not_found:
+    ldn r9, r15
+    addi r15, 8
+jit_cw_fallback:
+    ; Normal path: entry_to_code → compile_call
+    ldi64 r11, entry_to_code
+    call.l r11
+    mov r1, r9
+    ldi64 r11, compile_call
+    call.l r11
+    ret.l
+
+; ---------------------------------------------------------------------
+;  jit_compile_literal — compact encoding for small values
+;  Input:  R1 = value to push
+;  Clobbers: R0, R7, R11
+; ---------------------------------------------------------------------
+jit_compile_literal:
+    ldi64 r11, var_jit_enabled
+    ldn r11, r11
+    cmpi r11, 0
+    lbreq jit_cl_full
+
+    ; Check 0 ≤ value ≤ 255  (unsigned 8-bit)
+    mov r0, r1
+    lsri r0, 8
+    cmpi r0, 0
+    lbrne jit_cl_neg
+
+    ; --- Compact: ldi r1, imm8 + push = 8 bytes (saves 8) ---
+    ldi64 r11, var_here
+    ldn r0, r11                       ; R0 = HERE
+    ; ldi r1, imm8:  60 10 XX
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    st.b r0, r1                       ; imm8 value
+    inc r0
+    ; subi r14, 8:  67 E0 08
+    ldi r7, 0x67
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x08
+    st.b r0, r7
+    inc r0
+    ; str r14, r1:  54 E1
+    ldi r7, 0x54
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE1
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; Stats: saved 8 bytes
+    ldi64 r11, var_jit_bytes_saved
+    ldn r0, r11
+    addi r0, 8
+    str r11, r0
+    ret.l
+
+jit_cl_neg:
+    ; Check for -1 (TRUE flag, 0xFFFFFFFFFFFFFFFF)
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF
+    cmp r1, r0
+    lbrne jit_cl_full
+
+    ; --- TRUE: ldi r1,0; dec r1; push = 9 bytes (saves 7) ---
+    ldi64 r11, var_here
+    ldn r0, r11                       ; R0 = HERE
+    ; ldi r1, 0:  60 10 00
+    ldi r7, 0x60
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x10
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x00
+    st.b r0, r7
+    inc r0
+    ; dec r1:  21
+    ldi r7, 0x21
+    st.b r0, r7
+    inc r0
+    ; subi r14, 8:  67 E0 08
+    ldi r7, 0x67
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE0
+    st.b r0, r7
+    inc r0
+    ldi r7, 0x08
+    st.b r0, r7
+    inc r0
+    ; str r14, r1:  54 E1
+    ldi r7, 0x54
+    st.b r0, r7
+    inc r0
+    ldi r7, 0xE1
+    st.b r0, r7
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; Stats: saved 7 bytes
+    ldi64 r11, var_jit_bytes_saved
+    ldn r0, r11
+    addi r0, 7
+    str r11, r0
+    ret.l
+
+jit_cl_full:
+    ; Fall back to standard 16-byte compile_literal
+    ldi64 r11, compile_literal
+    call.l r11
+    ret.l
+
+; ---------------------------------------------------------------------
+;  JIT control word implementations
+; ---------------------------------------------------------------------
+w_jit_on:
+    ldi r1, 1
+    ldi64 r11, var_jit_enabled
+    str r11, r1
+    ret.l
+
+w_jit_off:
+    ldi r1, 0
+    ldi64 r11, var_jit_enabled
+    str r11, r1
+    ret.l
+
+w_jit_reset:
+    ldi r1, 0
+    ldi64 r11, var_jit_inlines
+    str r11, r1
+    ldi64 r11, var_jit_bytes_saved
+    str r11, r1
+    ret.l
+
+w_jit_stats:
+    ldi64 r10, str_jit_hdr
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, var_jit_inlines
+    ldn r1, r11
+    ldi64 r11, print_hex32
+    call.l r11
+    ldi64 r10, str_jit_mid
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, var_jit_bytes_saved
+    ldn r1, r11
+    ldi64 r11, print_hex32
+    call.l r11
+    ldi64 r10, str_jit_tail
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+; ---------------------------------------------------------------------
+;  JIT Inline Table
+;  Format: [entry_addr : 8][body_len : 1][body_bytes : N]
+;  Terminated by entry_addr = 0.
+;  Words sorted smallest body first — most profitable inlines hit early.
+; ---------------------------------------------------------------------
+jit_inline_table:
+    ; --- DROP ( a -- )  3 bytes ---
+    .dq d_drop
+    .db 3
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+
+    ; --- 2DROP ( a b -- )  3 bytes ---
+    .dq d_2drop
+    .db 3
+    .db 0x62, 0xE0, 0x10                  ; addi r14, 16
+
+    ; --- @ ( addr -- val )  6 bytes ---
+    .dq d_fetch
+    .db 6
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x50, 0x01                         ; ldn r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- CELLS ( n -- n*8 )  6 bytes ---
+    .dq d_cells
+    .db 6
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x68, 0x13                         ; lsli r1, 3
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- NEGATE ( n -- -n )  6 bytes ---
+    .dq d_negate
+    .db 6
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x7A, 0x11                         ; neg r1, r1
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- INVERT ( a -- ~a )  6 bytes ---
+    .dq d_invert
+    .db 6
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x79, 0x11                         ; not r1, r1
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- DUP ( a -- a a )  7 bytes ---
+    .dq d_dup
+    .db 7
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x67, 0xE0, 0x08                  ; subi r14, 8
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- NIP ( a b -- b )  7 bytes ---
+    .dq d_nip
+    .db 7
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- CELL+ ( a -- a+8 )  7 bytes ---
+    .dq d_cell_plus
+    .db 7
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0x10, 0x08                  ; addi r1, 8
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- + ( a b -- a+b )  11 bytes ---
+    .dq d_plus
+    .db 11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x70, 0x01                         ; add r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- - ( a b -- a-b )  11 bytes ---
+    .dq d_minus
+    .db 11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x72, 0x01                         ; sub r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- AND ( a b -- a&b )  11 bytes ---
+    .dq d_and
+    .db 11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x74, 0x01                         ; and r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- OR ( a b -- a|b )  11 bytes ---
+    .dq d_or
+    .db 11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x75, 0x01                         ; or r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- XOR ( a b -- a^b )  11 bytes ---
+    .dq d_xor
+    .db 11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x76, 0x01                         ; xor r0, r1
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- OVER ( a b -- a b a )  12 bytes ---
+    .dq d_over
+    .db 12
+    .db 0x78, 0xBE                         ; mov r11, r14
+    .db 0x62, 0xB0, 0x08                  ; addi r11, 8
+    .db 0x50, 0x1B                         ; ldn r1, r11
+    .db 0x67, 0xE0, 0x08                  ; subi r14, 8
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- ! ( val addr -- )  12 bytes ---
+    .dq d_store
+    .db 12
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x50, 0x0E                         ; ldn r0, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x54, 0x10                         ; str r1, r0
+
+    ; --- SWAP ( a b -- b a )  13 bytes ---
+    .dq d_swap
+    .db 13
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x78, 0xBE                         ; mov r11, r14
+    .db 0x62, 0xB0, 0x08                  ; addi r11, 8
+    .db 0x50, 0x0B                         ; ldn r0, r11
+    .db 0x54, 0xE0                         ; str r14, r0
+    .db 0x54, 0xB1                         ; str r11, r1
+
+    ; --- Sentinel ---
+    .dq 0
 
 ; =====================================================================
 ;  : (colon) — begin a new word definition
@@ -6636,11 +7028,8 @@ w_eval_loop:
     mov r0, r1
     andi r0, 0x80
     brne w_eval_exec           ; IMMEDIATE -> execute
-    ; Compile call to word
-    ldi64 r11, entry_to_code
-    call.l r11
-    mov r1, r9
-    ldi64 r11, compile_call
+    ; JIT: inline or compile call
+    ldi64 r11, jit_compile_word
     call.l r11
     lbr w_eval_loop
 w_eval_exec:
@@ -6662,8 +7051,8 @@ w_eval_try_num:
     ldn r11, r11
     cmpi r11, 0
     breq w_eval_push_num
-    ; Compiling -- compile literal
-    ldi64 r11, compile_literal
+    ; JIT: compact literal or full compile_literal
+    ldi64 r11, jit_compile_literal
     call.l r11
     lbr w_eval_loop
 w_eval_push_num:
@@ -13208,12 +13597,48 @@ d_cond_else:
     ret.l
 
 ; === [THEN] (IMMEDIATE) ===
-latest_entry:
 d_cond_then:
     .dq d_cond_else
     .db 0x86                  ; IMMEDIATE | len 6
     .ascii "[THEN]"
     ldi64 r11, w_cond_then
+    call.l r11
+    ret.l
+
+; === JIT-ON ===
+d_jit_on:
+    .dq d_cond_then
+    .db 6
+    .ascii "JIT-ON"
+    ldi64 r11, w_jit_on
+    call.l r11
+    ret.l
+
+; === JIT-OFF ===
+d_jit_off:
+    .dq d_jit_on
+    .db 7
+    .ascii "JIT-OFF"
+    ldi64 r11, w_jit_off
+    call.l r11
+    ret.l
+
+; === JIT-STATS ===
+d_jit_stats:
+    .dq d_jit_off
+    .db 9
+    .ascii "JIT-STATS"
+    ldi64 r11, w_jit_stats
+    call.l r11
+    ret.l
+
+; === JIT-RESET ===
+latest_entry:
+d_jit_reset:
+    .dq d_jit_stats
+    .db 9
+    .ascii "JIT-RESET"
+    ldi64 r11, w_jit_reset
     call.l r11
     ret.l
 
@@ -13256,6 +13681,14 @@ var_leave_count:
     .dq 0
 var_leave_fixups:
     .dq 0, 0, 0, 0, 0, 0, 0, 0   ; up to 8 LEAVEs per loop level
+
+; JIT compiler state
+var_jit_enabled:
+    .dq 0                             ; 0 = off (default), enable with JIT-ON
+var_jit_inlines:
+    .dq 0                             ; count of inlined words
+var_jit_bytes_saved:
+    .dq 0                             ; total bytes saved by inlining
 
 ; =====================================================================
 ;  String Constants
@@ -13317,6 +13750,13 @@ str_branch_overflow:
     .asciiz "Branch offset overflow\n"
 str_leave_overflow:
     .asciiz "Too many LEAVEs (max 8)\n"
+
+str_jit_hdr:
+    .asciiz "JIT: 0x"
+str_jit_mid:
+    .asciiz " inlines, 0x"
+str_jit_tail:
+    .asciiz " bytes saved\n"
 
 ; =====================================================================
 ;  IVT (Interrupt Vector Table)

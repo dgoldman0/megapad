@@ -301,6 +301,32 @@ Each entry is a linked list node:
 | 140 | `\` | `( -- )` | ✓ | Line comment: set `>IN` = TIB length (skip rest of line) |
 | 141 | `(` | `( -- )` | ✓ | Block comment: skip characters until matching `)` |
 
+### JIT Compiler (4 words)
+
+The BIOS includes an optional compile-time JIT that inlines native code
+for 17 common primitives instead of emitting `call.l` instructions, and
+uses compact literal encodings for small constants.  JIT is **off by
+default**; enable it with `JIT-ON` before compiling performance-critical
+code.
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 150 | `JIT-ON` | `( -- )` | | Enable JIT inline compilation |
+| 151 | `JIT-OFF` | `( -- )` | | Disable JIT inline compilation |
+| 152 | `JIT-STATS` | `( -- )` | | Print JIT statistics: number of inlines and bytes saved |
+| 153 | `JIT-RESET` | `( -- )` | | Reset JIT counters to zero |
+
+**Inlined primitives (17):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
+`+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
+
+**Compact literal encoding:** Literals 0–255 use an 8-byte `ldi8`
+sequence instead of the 16-byte `ldi64` + push.  The constant `-1`
+(`TRUE`) uses a 9-byte `ldi64 r0, -1` + push.
+
+**Typical speedup:** 1.4×–2.1× on primitive-heavy loops (benchmarked
+with `bench_jit_prims.py`).  Compilation overhead during KDOS load is
++0.7% (~2M extra steps out of 310M).
+
 ### Miscellaneous / System (9 words)
 
 | # | Word | Stack Effect | Imm | Description |

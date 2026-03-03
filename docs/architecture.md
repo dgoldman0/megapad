@@ -579,6 +579,37 @@ the correct default for pre-privilege firmware.
 └─────────────────────────────────────────────────┘
 ```
 
+### JIT Compiler
+
+The BIOS Forth compiler includes an optional **compile-time JIT** that
+replaces `call.l` / `ret.l` pairs with inlined native machine code for
+17 common primitives.  This is a *code-size* and *runtime* optimisation:
+each inlined primitive saves the 13-byte call overhead and eliminates
+the call/ret cycle cost at execution time.
+
+**How it works:**
+
+1. When `JIT-ON` has been executed, every word reference compiled by the
+   outer interpreter or `EVALUATE` passes through `jit_compile_word`.
+2. The compiler scans a 17-entry inline table (`jit_inline_table`) that
+   maps dictionary entry addresses to pre-assembled native byte
+   sequences (3–13 bytes each).
+3. If a match is found, the native bytes are copied directly into the
+   definition being compiled.  Otherwise, a normal `call.l` is emitted.
+4. Literals pass through `jit_compile_literal`, which emits compact
+   8-byte sequences for values 0–255 and a 9-byte sequence for −1
+   (`TRUE`), instead of the standard 16-byte `ldi64` + push.
+
+**Inlined primitives:** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
+`+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
+
+**Performance:** 1.4×–2.1× speedup on primitive-heavy tight loops.
+Compilation overhead during a full KDOS load is negligible (+0.7%).
+
+JIT is **off by default** and does not affect words compiled before
+`JIT-ON` is executed.  Use `JIT-STATS` to see how many primitives were
+inlined and how many bytes were saved.
+
 ### Boot Sequence
 
 The full boot process from power-on to the KDOS REPL:
