@@ -3398,6 +3398,66 @@ class TestAssemblerBranchRange(unittest.TestCase):
 KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
 
 
+# ── Module-level KDOS snapshot cache ─────────────────────────────────
+# Shared across ALL _KDOSTestBase subclasses so the expensive BIOS
+# assemble + KDOS interpret happens exactly once per test session
+# instead of once per subclass (~50× saving).
+_kdos_shared_snapshot = None   # (mem_bytes, cpu_state)
+_kdos_shared_bios_code = None
+_kdos_shared_lines = None
+
+
+def _build_kdos_snapshot():
+    """Build the KDOS snapshot once (module-level)."""
+    global _kdos_shared_snapshot, _kdos_shared_bios_code, _kdos_shared_lines
+    if _kdos_shared_snapshot is not None:
+        return
+
+    with open(BIOS_PATH) as f:
+        _kdos_shared_bios_code = assemble(f.read())
+
+    kdos_lines = []
+    with open(KDOS_PATH) as f:
+        for line in f.read().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('\\'):
+                continue
+            kdos_lines.append(line)
+    _kdos_shared_lines = kdos_lines
+
+    # Boot BIOS and load KDOS fully (with 16 MiB ext mem)
+    sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
+    buf = capture_uart(sys_obj)
+    sys_obj.load_binary(0, _kdos_shared_bios_code)
+    sys_obj.boot()
+
+    payload = "\n".join(kdos_lines) + "\n"
+    data = payload.encode()
+    pos = 0
+    max_steps = 400_000_000
+    total = 0
+
+    while total < max_steps:
+        if sys_obj.cpu.halted:
+            break
+        if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+            if pos < len(data):
+                chunk = _next_line_chunk(data, pos)
+                sys_obj.uart.inject_input(chunk)
+                pos += len(chunk)
+            else:
+                break
+            continue
+        batch = sys_obj.run_batch(min(100_000, max_steps - total))
+        total += max(batch, 1)
+
+    # Save snapshot: raw memory + CPU state
+    _kdos_shared_snapshot = (
+        bytes(sys_obj.cpu.mem),       # immutable copy of RAM
+        _KDOSTestBase._save_cpu_state(sys_obj.cpu),
+    )
+
+
 class _KDOSTestBase(unittest.TestCase):
     """Base class for KDOS tests — provides snapshot, helpers, and _run_kdos.
 
@@ -3406,14 +3466,8 @@ class _KDOSTestBase(unittest.TestCase):
     TestKDOS.  Pytest ignores classes whose name starts with underscore.
     """
 
-    # Class-level cache: snapshot of system state after KDOS loads.
-    # Avoids re-interpreting all ~1000 Forth lines for each test.
-    _kdos_snapshot = None   # (mem_bytes, cpu_state)
-    _bios_code = None
-    _kdos_lines = None
-
-    @classmethod
-    def _save_cpu_state(cls, cpu):
+    @staticmethod
+    def _save_cpu_state(cpu):
         """Capture all CPU register/flag state for snapshot."""
         return {
             'pc': cpu.pc,
@@ -3434,8 +3488,8 @@ class _KDOSTestBase(unittest.TestCase):
             'mpu_limit': getattr(cpu, 'mpu_limit', 0),
         }
 
-    @classmethod
-    def _restore_cpu_state(cls, cpu, state):
+    @staticmethod
+    def _restore_cpu_state(cpu, state):
         """Restore CPU register/flag state from snapshot."""
         cpu.pc = state['pc']
         cpu.regs[:] = state['regs']
@@ -3450,56 +3504,13 @@ class _KDOSTestBase(unittest.TestCase):
 
     @classmethod
     def _ensure_snapshot(cls):
-        """Build the KDOS snapshot once (class-level)."""
-        if cls._kdos_snapshot is not None:
-            return
-
-        with open(BIOS_PATH) as f:
-            cls._bios_code = assemble(f.read())
-        with open(KDOS_PATH) as f:
-            cls._kdos_lines = []
-            for line in f.read().splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith('\\'):
-                    continue
-                cls._kdos_lines.append(line)
-
-        # Boot BIOS and load KDOS fully (with 16 MiB ext mem)
-        sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
-        buf = capture_uart(sys_obj)
-        sys_obj.load_binary(0, cls._bios_code)
-        sys_obj.boot()
-
-        payload = "\n".join(cls._kdos_lines) + "\n"
-        data = payload.encode()
-        pos = 0
-        max_steps = 400_000_000
-        total = 0
-
-        while total < max_steps:
-            if sys_obj.cpu.halted:
-                break
-            if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
-                if pos < len(data):
-                    chunk = _next_line_chunk(data, pos)
-                    sys_obj.uart.inject_input(chunk)
-                    pos += len(chunk)
-                else:
-                    break
-                continue
-            batch = sys_obj.run_batch(min(100_000, max_steps - total))
-            total += max(batch, 1)
-
-        # Save snapshot: raw memory + CPU state
-        cls._kdos_snapshot = (
-            bytes(sys_obj.cpu.mem),       # immutable copy of RAM
-            cls._save_cpu_state(sys_obj.cpu),
-        )
+        """Ensure the shared KDOS snapshot is built (once per session)."""
+        _build_kdos_snapshot()
 
     def setUp(self):
-        self.__class__._ensure_snapshot()
-        self.bios_code = self.__class__._bios_code
-        self.kdos_lines = self.__class__._kdos_lines
+        self._ensure_snapshot()
+        self.bios_code = _kdos_shared_bios_code
+        self.kdos_lines = _kdos_shared_lines
 
     def _boot_bios(self, ram_kib=1024, storage_image=None, ext_mem_mib=16):
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
@@ -3517,7 +3528,7 @@ class _KDOSTestBase(unittest.TestCase):
         """Load KDOS then execute extra_lines, return UART output."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
-        if self.__class__._kdos_snapshot is not None:
+        if _kdos_shared_snapshot is not None:
             return self._run_kdos_fast(extra_lines,
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
@@ -3560,7 +3571,7 @@ class _KDOSTestBase(unittest.TestCase):
                        storage_image=None,
                        nic_tx_callback=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
-        mem_bytes, cpu_state = self.__class__._kdos_snapshot
+        mem_bytes, cpu_state = _kdos_shared_snapshot
 
         sys = make_system(ram_kib=1024, storage_image=storage_image,
                           ext_mem_mib=16)
@@ -22115,7 +22126,7 @@ class TestHeadlessDisplay(_KDOSTestBase):
             # Use the fast path which constructs a MegapadSystem internally.
             # We need access to the system object, so call _run_kdos_fast
             # the same way _run_kdos does, but capture the system.
-            mem_bytes, cpu_state = self.__class__._kdos_snapshot
+            mem_bytes, cpu_state = _kdos_shared_snapshot
             sys_emu = make_system(ram_kib=1024, storage_image=img)
             buf = capture_uart(sys_emu)
             sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes

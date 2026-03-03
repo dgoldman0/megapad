@@ -100,7 +100,7 @@ Each entry is a linked list node:
 
 ## Word Catalog by Category
 
-### Stack Manipulation (16 words)
+### Stack Manipulation (17 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -115,11 +115,12 @@ Each entry is a linked list node:
 | 9 | `2DROP` | `( a b -- )` | | Drop top pair |
 | 10 | `DEPTH` | `( -- n )` | | Number of items on data stack |
 | 11 | `PICK` | `( n -- x )` | | Copy n-th stack item (0-based) |
-| 12 | `-ROT` | `( a b c -- c a b )` | | Reverse rotate (ROT ROT) |
-| 13 | `?DUP` | `( x -- x x \| 0 )` | | Duplicate if nonzero |
-| 14 | `2OVER` | `( a b c d -- a b c d a b )` | | Copy second pair to top |
-| 15 | `2SWAP` | `( a b c d -- c d a b )` | | Swap top two pairs |
-| 16 | `2ROT` | `( a b c d e f -- c d e f a b )` | | Rotate third pair to top |
+| 12 | `ROLL` | `( xu ... x0 u -- xu-1 ... x0 xu )` | | Remove u-th item, place on top (0=nop, 1=SWAP, 2=ROT) |
+| 13 | `-ROT` | `( a b c -- c a b )` | | Reverse rotate (ROT ROT) |
+| 14 | `?DUP` | `( x -- x x \| 0 )` | | Duplicate if nonzero |
+| 15 | `2OVER` | `( a b c d -- a b c d a b )` | | Copy second pair to top |
+| 16 | `2SWAP` | `( a b c d -- c d a b )` | | Swap top two pairs |
+| 17 | `2ROT` | `( a b c d e f -- c d e f a b )` | | Rotate third pair to top |
 
 ### Arithmetic (16 words)
 
@@ -715,7 +716,7 @@ TMODE! → TDST! → TSRC1! → TSRC0! → TFILL → TVIEW → TI → FILL → D
 BYE → WORDS → BASE → DECIMAL → HEX → .S → U. → . → CR → KEY? → KEY →
 EMIT → C, → , → ALLOT → HERE → C! → C@ → ! → @ → 0< → 0= → > → < →
 = → RSHIFT → LSHIFT → INVERT → XOR → OR → AND → 1- → 1+ → ABS →
-NEGATE → /MOD → MOD → / → * → - → + → PICK → DEPTH → 2DROP → 2DUP →
+NEGATE → /MOD → MOD → / → * → - → + → ROLL → PICK → DEPTH → 2DROP → 2DUP →
 TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 ```
 

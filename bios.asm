@@ -1104,6 +1104,35 @@ w_pick:
     str r14, r1
     ret.l
 
+; ROLL ( xu xu-1 ... x0 u -- xu-1 ... x0 xu )
+;   Remove the u-th stack item and place it on top.
+;   0 ROLL = no-op, 1 ROLL = SWAP, 2 ROLL = ROT.
+w_roll:
+    ldn r1, r14               ; R1 = u
+    addi r14, 8               ; pop u
+    cmpi r1, 0
+    breq w_roll_done           ; 0 ROLL = no-op
+    ; R11 = address of xu on the stack: r14 + u*8
+    mov r7, r1
+    lsli r7, 3                ; R7 = u * 8
+    mov r11, r14
+    add r11, r7               ; R11 → xu
+    ldn r0, r11               ; R0 = xu (the item to bring to top)
+    ; Shift items down: slot[i+1] ← slot[i], for i = u-1 .. 0
+w_roll_shift:
+    mov r12, r11
+    subi r12, 8               ; R12 → slot above
+    ldn r13, r12              ; load upper slot
+    str r11, r13              ; store into current slot
+    mov r11, r12
+    dec r1
+    cmpi r1, 0
+    brne w_roll_shift
+    ; Store saved xu on TOS
+    str r14, r0
+w_roll_done:
+    ret.l
+
 ; =====================================================================
 ;  Forth Words — Arithmetic
 ; =====================================================================
@@ -10746,9 +10775,18 @@ d_pick:
     call.l r11
     ret.l
 
+; === ROLL ===
+d_roll:
+    .dq d_pick
+    .db 4
+    .ascii "ROLL"
+    ldi64 r11, w_roll
+    call.l r11
+    ret.l
+
 ; === + ===
 d_plus:
-    .dq d_pick
+    .dq d_roll
     .db 1
     .ascii "+"
     ldi64 r11, w_plus
