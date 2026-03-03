@@ -587,28 +587,58 @@ replaces `call.l` / `ret.l` pairs with inlined native machine code for
 each inlined primitive saves the 13-byte call overhead and eliminates
 the call/ret cycle cost at execution time.
 
+Beyond simple primitive inlining, the JIT performs two additional
+optimisations via a one-entry peephole lookback buffer:
+
+- **Literal folding** — a small literal followed by an ALU word
+  (`+`, `-`, `AND`, `OR`, `XOR`) is fused into a single immediate
+  instruction (e.g. `3 +` → `addi r1, 3`), producing 7 bytes instead
+  of 19.
+- **Bigram peephole** — consecutive inlined primitives are checked
+  against a 6-entry bigram table and replaced with fused sequences
+  that eliminate redundant loads and stores (e.g. `DUP +` → `add r1,r1`,
+  `DUP DROP` / `SWAP SWAP` → no-op).
+
 **How it works:**
 
 1. When `JIT-ON` has been executed, every word reference compiled by the
    outer interpreter or `EVALUATE` passes through `jit_compile_word`.
-2. The compiler scans a 17-entry inline table (`jit_inline_table`) that
+2. Before inlining the current word, `jit_compile_word` checks the
+   peephole state (`var_jit_last_type/value/here`).  If the previous
+   emission was a literal (type 1) and the current word is a foldable
+   ALU op, the literal is rewound and a fused immediate sequence is
+   emitted via `jit_emit_lit_fold`.  If the previous emission was an
+   inlined primitive (type 2), the bigram table (`jit_bigram_table`) is
+   scanned for a matching pair; on hit, the previous primitive's code
+   is rewound and the fused body is emitted.
+3. The compiler scans a 17-entry inline table (`jit_inline_table`) that
    maps dictionary entry addresses to pre-assembled native byte
    sequences (3–13 bytes each).
-3. If a match is found, the native bytes are copied directly into the
+4. If a match is found, the native bytes are copied directly into the
    definition being compiled.  Otherwise, a normal `call.l` is emitted.
-4. Literals pass through `jit_compile_literal`, which emits compact
+5. After inlining, the peephole state is updated so the next compilation
+   step can check for further fusions.
+6. Literals pass through `jit_compile_literal`, which emits compact
    8-byte sequences for values 0–255 and a 9-byte sequence for −1
    (`TRUE`), instead of the standard 16-byte `ldi64` + push.
+7. When an IMMEDIATE word executes during compilation (`;`, `IF`, `DO`,
+   etc.), the peephole state is flushed to prevent stale matches.
 
-**Inlined primitives:** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
+**Inlined primitives (17):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
 
+**Bigram patterns (6):** `DUP +`, `SWAP DROP`, `DUP @`, `OVER +`,
+`DUP DROP`, `SWAP SWAP`
+
 **Performance:** 1.4×–2.1× speedup on primitive-heavy tight loops.
-Compilation overhead during a full KDOS load is negligible (+0.7%).
+Compilation overhead during a full KDOS load is negligible (+0.8%).
+A typical KDOS load fires ~512 literal folds, ~38 bigram peepholes,
+and ~5100 primitive inlines, saving ~50 KB of compiled code.
 
 JIT is **off by default** and does not affect words compiled before
 `JIT-ON` is executed.  Use `JIT-STATS` to see how many primitives were
-inlined and how many bytes were saved.
+inlined, how many folds and peepholes fired, and how many bytes were
+saved.
 
 ### Boot Sequence
 

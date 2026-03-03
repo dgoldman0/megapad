@@ -304,8 +304,10 @@ Each entry is a linked list node:
 ### JIT Compiler (4 words)
 
 The BIOS includes an optional compile-time JIT that inlines native code
-for 17 common primitives instead of emitting `call.l` instructions, and
-uses compact literal encodings for small constants.  JIT is **off by
+for 17 common primitives instead of emitting `call.l` instructions,
+uses compact literal encodings for small constants, folds small-literal
++ ALU sequences into single immediate instructions, and fuses common
+two-primitive bigrams into optimised native sequences.  JIT is **off by
 default**; enable it with `JIT-ON` before compiling performance-critical
 code.
 
@@ -313,8 +315,8 @@ code.
 |---|------|-------------|-----|-------------|
 | 150 | `JIT-ON` | `( -- )` | | Enable JIT inline compilation |
 | 151 | `JIT-OFF` | `( -- )` | | Disable JIT inline compilation |
-| 152 | `JIT-STATS` | `( -- )` | | Print JIT statistics: number of inlines and bytes saved |
-| 153 | `JIT-RESET` | `( -- )` | | Reset JIT counters to zero |
+| 152 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
+| 153 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
 
 **Inlined primitives (17):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
@@ -323,9 +325,28 @@ code.
 sequence instead of the 16-byte `ldi64` + push.  The constant `-1`
 (`TRUE`) uses a 9-byte `ldi64 r0, -1` + push.
 
+**Literal folding:** When a small literal (0–127 for `+`/`-`, 0–255
+for `AND`/`OR`/`XOR`) is followed by an ALU word, the pair is fused
+into a single 7-byte immediate instruction (e.g. `3 +` → `addi`).
+Saves 22 bytes per folded pair vs unoptimised compilation.
+
+**Peephole bigrams (6 patterns):** Consecutive inlined primitives are
+checked against a bigram table and replaced with fused native sequences:
+
+| Pattern | Effect | Fused bytes |
+|---------|--------|-------------|
+| `DUP +` | double TOS | 6 |
+| `SWAP DROP` | NIP | 7 |
+| `DUP @` | copy + fetch | 9 |
+| `OVER +` | add NOS to TOS | 13 |
+| `DUP DROP` | nop | 0 |
+| `SWAP SWAP` | nop | 0 |
+
 **Typical speedup:** 1.4×–2.1× on primitive-heavy loops (benchmarked
 with `bench_jit_prims.py`).  Compilation overhead during KDOS load is
-+0.7% (~2M extra steps out of 310M).
++0.8% (~2.5M extra steps out of 310M).  KDOS load fires ~512 literal
+folds, ~38 peephole bigrams, and ~5100 primitive inlines, saving ~50 KB
+of compiled code.
 
 ### Miscellaneous / System (9 words)
 

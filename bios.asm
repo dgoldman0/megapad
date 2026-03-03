@@ -304,13 +304,18 @@ interp_loop:
     ; STATE=1 → compiling.  Check IMMEDIATE flag (bit 7)
     mov r0, r1
     andi r0, 0x80
-    brne interp_execute       ; IMMEDIATE → execute even in compile mode
+    brne interp_exec_jit_flush ; IMMEDIATE → flush peephole + execute
 
     ; Not IMMEDIATE — JIT inline or compile call
     ldi64 r11, jit_compile_word
     call.l r11
     lbr interp_loop
 
+interp_exec_jit_flush:
+    ; Clear peephole state — IMMEDIATE word may emit code at HERE
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
 interp_execute:
     ; Compute code field address and execute
     ldi64 r11, entry_to_code
@@ -2517,6 +2522,7 @@ compile_ret:
 
 ; ---------------------------------------------------------------------
 ;  jit_compile_word — inline primitive or fall back to compile_call
+;  With peephole: checks for literal folds and bigram fusions.
 ;  Input:  R9 = dictionary entry pointer (from find_word)
 ;  Clobbers: R0, R1, R7, R11, R12, R13
 ; ---------------------------------------------------------------------
@@ -2526,6 +2532,173 @@ jit_compile_word:
     ldn r11, r11
     cmpi r11, 0
     lbreq jit_cw_fallback
+
+    ; === PEEPHOLE FUSION CHECK ===
+    ldi64 r11, var_jit_last_type
+    ldn r0, r11
+    cmpi r0, 0
+    lbreq jit_cw_no_peep         ; type=0: nothing pending
+    cmpi r0, 1
+    lbreq jit_cw_lit_check       ; type=1: literal pending
+    lbr jit_cw_bg_check          ; type=2: primitive pending
+
+    ; --- Literal fold: lit(N) followed by ALU op ---
+jit_cw_lit_check:
+    ldi64 r0, d_plus
+    cmp r9, r0
+    lbreq jit_cw_fold_plus
+    ldi64 r0, d_minus
+    cmp r9, r0
+    lbreq jit_cw_fold_minus
+    ldi64 r0, d_and
+    cmp r9, r0
+    lbreq jit_cw_fold_and
+    ldi64 r0, d_or
+    cmp r9, r0
+    lbreq jit_cw_fold_or
+    ldi64 r0, d_xor
+    cmp r9, r0
+    lbreq jit_cw_fold_xor
+    lbr jit_cw_no_peep            ; not foldable
+
+jit_cw_fold_plus:
+    ldi64 r11, var_jit_last_value
+    ldn r1, r11
+    ldi r0, 128
+    cmp r1, r0
+    lbrcs jit_cw_no_peep          ; r1 >= 128: can't ADDI
+    ldi r7, 0x62                  ; ADDI opcode
+    lbr jit_emit_lit_fold
+
+jit_cw_fold_minus:
+    ldi64 r11, var_jit_last_value
+    ldn r1, r11
+    ldi r0, 128
+    cmp r1, r0
+    lbrcs jit_cw_no_peep          ; r1 >= 128: can't SUBI
+    ldi r7, 0x67                  ; SUBI opcode
+    lbr jit_emit_lit_fold
+
+jit_cw_fold_and:
+    ldi64 r11, var_jit_last_value
+    ldn r1, r11                   ; 0-255 always fits ANDI
+    ldi r7, 0x63
+    lbr jit_emit_lit_fold
+
+jit_cw_fold_or:
+    ldi64 r11, var_jit_last_value
+    ldn r1, r11
+    ldi r7, 0x64
+    lbr jit_emit_lit_fold
+
+jit_cw_fold_xor:
+    ldi64 r11, var_jit_last_value
+    ldn r1, r11
+    ldi r7, 0x65
+    lbr jit_emit_lit_fold
+
+    ; --- Bigram check: prim(A) followed by prim(B) ---
+jit_cw_bg_check:
+    ldi64 r11, var_jit_last_value
+    ldn r12, r11                  ; R12 = previous entry addr
+    ; Save R9 on return stack
+    subi r15, 8
+    str r15, r9
+    ldi64 r13, jit_bigram_table
+jit_bg_scan:
+    ldn r0, r13                   ; first entry in pair
+    cmpi r0, 0
+    lbreq jit_bg_not_found        ; sentinel
+    cmp r0, r12
+    lbrne jit_bg_skip
+    ; First matches — check second
+    addi r13, 8
+    ldn r0, r13
+    cmp r0, r9
+    lbreq jit_bg_found
+    ; Second doesn't match
+    addi r13, 8
+    ld.b r7, r13                  ; body length
+    addi r13, 1
+    add r13, r7
+    lbr jit_bg_scan
+jit_bg_skip:
+    addi r13, 8                   ; skip first entry
+    addi r13, 8                   ; skip second entry
+    ld.b r7, r13                  ; body length
+    addi r13, 1
+    add r13, r7                   ; skip body
+    lbr jit_bg_scan
+
+jit_bg_not_found:
+    ldn r9, r15
+    addi r15, 8
+    lbr jit_cw_no_peep
+
+jit_bg_found:
+    addi r13, 8                   ; skip second entry addr
+    ld.b r12, r13                 ; R12 = fused body length
+    addi r13, 1                   ; R13 → fused body bytes
+    ; Compute bytes_saved adjustment:
+    ;   prev emitted = current_HERE - last_here
+    ;   adjustment = 13 + prev_emitted - fused_body
+    ldi64 r11, var_here
+    ldn r7, r11                   ; R7 = current HERE
+    ldi64 r11, var_jit_last_here
+    ldn r0, r11                   ; R0 = rewound HERE (pre-prev)
+    sub r7, r0                    ; R7 = prev body size
+    addi r7, 13                   ; + 13 (compile_call for current)
+    sub r7, r12                   ; - fused body size
+    ldi64 r11, var_jit_bytes_saved
+    ldn r1, r11
+    add r1, r7
+    str r11, r1
+    ; Copy fused body to rewound HERE (R0 = rewind point)
+    cmpi r12, 0
+    lbreq jit_bg_nop              ; zero-byte pairs (DUP DROP, SWAP SWAP)
+    ldi r7, 0
+jit_bg_copy:
+    cmp r7, r12
+    lbreq jit_bg_done
+    mov r1, r13
+    add r1, r7
+    ld.b r1, r1
+    mov r11, r0
+    add r11, r7
+    st.b r11, r1
+    inc r7
+    lbr jit_bg_copy
+jit_bg_done:
+    add r0, r12
+jit_bg_nop:
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; Stats: peepholes++
+    ldi64 r11, var_jit_peepholes
+    ldn r1, r11
+    inc r1
+    str r11, r1
+    ; Clear peephole state
+    ldi r1, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r1
+    ; Restore R9
+    ldn r9, r15
+    addi r15, 8
+    ret.l
+
+    ; === NORMAL INLINE FLOW ===
+jit_cw_no_peep:
+    ; Clear pending peephole state
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
+    ; Save pre-emit HERE for future peephole check
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi64 r11, var_jit_last_here
+    str r11, r0
 
     ; Save entry pointer on return stack
     subi r15, 8
@@ -2584,8 +2757,14 @@ jit_cw_done:
     ldn r0, r11
     add r0, r1
     str r11, r0
+    ; Set peephole state: type=2 (inlined prim), value=entry addr
+    ldn r9, r15                       ; peek entry ptr from return stack
+    ldi r1, 2
+    ldi64 r11, var_jit_last_type
+    str r11, r1
+    ldi64 r11, var_jit_last_value
+    str r11, r9
     ; Restore R9 and return
-    ldn r9, r15
     addi r15, 8
     ret.l
 
@@ -2593,12 +2772,67 @@ jit_cw_not_found:
     ldn r9, r15
     addi r15, 8
 jit_cw_fallback:
+    ; Clear peephole state (non-inlinable word)
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
     ; Normal path: entry_to_code → compile_call
     ldi64 r11, entry_to_code
     call.l r11
     mov r1, r9
     ldi64 r11, compile_call
     call.l r11
+    ret.l
+
+; ---------------------------------------------------------------------
+;  jit_emit_lit_fold — emit fused lit + ALU (7 bytes)
+;  Input:  R7 = immediate opcode (ADDI=0x62/SUBI=0x67/ANDI=0x63/
+;          ORI=0x64/XORI=0x65), R1 = immediate value
+;  Clobbers: R0, R1, R7, R11
+; ---------------------------------------------------------------------
+jit_emit_lit_fold:
+    ; Rewind HERE to before the literal
+    ldi64 r11, var_jit_last_here
+    ldn r0, r11                   ; R0 = rewound HERE
+    ; Emit: ldn r1, r14 → 50 1E
+    ldi r11, 0x50
+    st.b r0, r11
+    inc r0
+    ldi r11, 0x1E
+    st.b r0, r11
+    inc r0
+    ; Emit: <op> r1, imm → XX 10 NN
+    st.b r0, r7                   ; opcode byte
+    inc r0
+    ldi r11, 0x10                 ; register: R1
+    st.b r0, r11
+    inc r0
+    st.b r0, r1                   ; immediate value
+    inc r0
+    ; Emit: str r14, r1 → 54 E1
+    ldi r11, 0x54
+    st.b r0, r11
+    inc r0
+    ldi r11, 0xE1
+    st.b r0, r11
+    inc r0
+    ; Update HERE
+    ldi64 r11, var_here
+    str r11, r0
+    ; bytes_saved: compact lit saved 8, fold total saves 29-7=22, net +14
+    ldi64 r11, var_jit_bytes_saved
+    ldn r0, r11
+    addi r0, 14
+    str r11, r0
+    ; Stats: folds++
+    ldi64 r11, var_jit_folds
+    ldn r0, r11
+    inc r0
+    str r11, r0
+    ; Clear peephole state
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
     ret.l
 
 ; ---------------------------------------------------------------------
@@ -2611,6 +2845,12 @@ jit_compile_literal:
     ldn r11, r11
     cmpi r11, 0
     lbreq jit_cl_full
+
+    ; Save pre-emit HERE for potential peephole rewind
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi64 r11, var_jit_last_here
+    str r11, r0
 
     ; Check 0 ≤ value ≤ 255  (unsigned 8-bit)
     mov r0, r1
@@ -2655,6 +2895,12 @@ jit_compile_literal:
     ldn r0, r11
     addi r0, 8
     str r11, r0
+    ; Set peephole state: type=1 (literal), value=R1
+    ldi r0, 1
+    ldi64 r11, var_jit_last_type
+    str r11, r0
+    ldi64 r11, var_jit_last_value
+    str r11, r1
     ret.l
 
 jit_cl_neg:
@@ -2705,9 +2951,17 @@ jit_cl_neg:
     ldn r0, r11
     addi r0, 7
     str r11, r0
+    ; Clear peephole state (TRUE/-1 not foldable)
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
     ret.l
 
 jit_cl_full:
+    ; Clear peephole state (large literal not foldable)
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
     ; Fall back to standard 16-byte compile_literal
     ldi64 r11, compile_literal
     call.l r11
@@ -2734,6 +2988,12 @@ w_jit_reset:
     str r11, r1
     ldi64 r11, var_jit_bytes_saved
     str r11, r1
+    ldi64 r11, var_jit_folds
+    str r11, r1
+    ldi64 r11, var_jit_peepholes
+    str r11, r1
+    ldi64 r11, var_jit_last_type
+    str r11, r1
     ret.l
 
 w_jit_stats:
@@ -2744,7 +3004,21 @@ w_jit_stats:
     ldn r1, r11
     ldi64 r11, print_hex32
     call.l r11
-    ldi64 r10, str_jit_mid
+    ldi64 r10, str_jit_mid1
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, var_jit_folds
+    ldn r1, r11
+    ldi64 r11, print_hex32
+    call.l r11
+    ldi64 r10, str_jit_mid2
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, var_jit_peepholes
+    ldn r1, r11
+    ldi64 r11, print_hex32
+    call.l r11
+    ldi64 r10, str_jit_mid3
     ldi64 r11, print_str
     call.l r11
     ldi64 r11, var_jit_bytes_saved
@@ -2894,6 +3168,62 @@ jit_inline_table:
     .db 0x50, 0x0B                         ; ldn r0, r11
     .db 0x54, 0xE0                         ; str r14, r0
     .db 0x54, 0xB1                         ; str r11, r1
+
+    ; --- Sentinel ---
+    .dq 0
+
+; ---------------------------------------------------------------------
+;  JIT Bigram Table
+;  Format: [entry1:8][entry2:8][body_len:1][body:N]
+;  Terminated by entry1 = 0.
+;  Peephole pairs sorted by most profitable first.
+; ---------------------------------------------------------------------
+jit_bigram_table:
+    ; --- DUP + → double TOS  (6 bytes, saves 12) ---
+    .dq d_dup
+    .dq d_plus
+    .db 6
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x70, 0x11                         ; add r1, r1
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- SWAP DROP → NIP  (7 bytes, saves 9) ---
+    .dq d_swap
+    .dq d_drop
+    .db 7
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0xE0, 0x08                  ; addi r14, 8
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- DUP @ → copy + fetch  (9 bytes, saves 4) ---
+    .dq d_dup
+    .dq d_fetch
+    .db 9
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x50, 0x01                         ; ldn r0, r1
+    .db 0x67, 0xE0, 0x08                  ; subi r14, 8
+    .db 0x54, 0xE0                         ; str r14, r0
+
+    ; --- OVER + → add NOS to TOS  (13 bytes, saves 10) ---
+    .dq d_over
+    .dq d_plus
+    .db 13
+    .db 0x78, 0xBE                         ; mov r11, r14
+    .db 0x62, 0xB0, 0x08                  ; addi r11, 8
+    .db 0x50, 0x0B                         ; ldn r0, r11
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x70, 0x10                         ; add r1, r0
+    .db 0x54, 0xE1                         ; str r14, r1
+
+    ; --- DUP DROP → nop  (0 bytes, saves 10) ---
+    .dq d_dup
+    .dq d_drop
+    .db 0
+
+    ; --- SWAP SWAP → nop  (0 bytes, saves 26) ---
+    .dq d_swap
+    .dq d_swap
+    .db 0
 
     ; --- Sentinel ---
     .dq 0
@@ -7027,11 +7357,16 @@ w_eval_loop:
     ; Compiling -- check IMMEDIATE
     mov r0, r1
     andi r0, 0x80
-    brne w_eval_exec           ; IMMEDIATE -> execute
+    brne w_eval_exec_jit_flush ; IMMEDIATE -> flush + execute
     ; JIT: inline or compile call
     ldi64 r11, jit_compile_word
     call.l r11
     lbr w_eval_loop
+w_eval_exec_jit_flush:
+    ; Clear peephole state
+    ldi r0, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r0
 w_eval_exec:
     ldi64 r11, entry_to_code
     call.l r11
@@ -13689,6 +14024,16 @@ var_jit_inlines:
     .dq 0                             ; count of inlined words
 var_jit_bytes_saved:
     .dq 0                             ; total bytes saved by inlining
+var_jit_folds:
+    .dq 0                             ; count of literal folds
+var_jit_peepholes:
+    .dq 0                             ; count of bigram peepholes
+var_jit_last_type:
+    .dq 0                             ; peephole state: 0=none 1=lit 2=prim
+var_jit_last_value:
+    .dq 0                             ; literal value or entry addr
+var_jit_last_here:
+    .dq 0                             ; HERE before last emission
 
 ; =====================================================================
 ;  String Constants
@@ -13753,8 +14098,12 @@ str_leave_overflow:
 
 str_jit_hdr:
     .asciiz "JIT: 0x"
-str_jit_mid:
+str_jit_mid1:
     .asciiz " inlines, 0x"
+str_jit_mid2:
+    .asciiz " folds, 0x"
+str_jit_mid3:
+    .asciiz " peepholes, 0x"
 str_jit_tail:
     .asciiz " bytes saved\n"
 
