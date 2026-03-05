@@ -3235,6 +3235,13 @@ jit_inline_table:
     .db 0x62, 0xE0, 0x08                  ; addi r14, 8
     .db 0x54, 0x10                         ; str r1, r0
 
+    ; --- >BODY ( xt -- addr )  7 bytes ---
+    .dq d_to_body
+    .db 7
+    .db 0x50, 0x1E                         ; ldn r1, r14
+    .db 0x62, 0x10, 0x1E                  ; addi r1, 30
+    .db 0x54, 0xE1                         ; str r14, r1
+
     ; --- SWAP ( a b -- b a )  13 bytes ---
     .dq d_swap
     .db 13
