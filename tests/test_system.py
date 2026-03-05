@@ -1720,6 +1720,7 @@ class TestBIOS(unittest.TestCase):
         for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
                      "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
+                     "DISK-FLUSH",
                      "TIMER!", "EI!", "DI!", "ISR!", "KEY?"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
@@ -1769,6 +1770,34 @@ class TestBIOS(unittest.TestCase):
                 "dbuf C@ .",
             ])
             self.assertIn("170 ", text)  # 0xAA = 170
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_flush_persists_to_host(self):
+        """DISK-FLUSH (cmd 0xFF) saves in-memory image to host file."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            # Write 0xBB into sector 0 then flush to host
+            self._run_forth(sys, buf, [
+                "VARIABLE fbuf  512 ALLOT",
+                "0xBB fbuf C!",
+                "0 DISK-SEC!",
+                "fbuf DISK-DMA!",
+                "1 DISK-N!",
+                "DISK-WRITE",
+                "DISK-FLUSH",
+            ])
+            # The host file must now exist and contain 0xBB at offset 0
+            self.assertTrue(os.path.exists(path),
+                            "DISK-FLUSH did not create host file")
+            with open(path, "rb") as fh:
+                data = fh.read(1)
+            self.assertEqual(data[0], 0xBB,
+                             "Flushed image byte mismatch")
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -12408,6 +12437,86 @@ class TestKDOSFilesystem(_KDOSTestBase):
         self.assertIn("SAVE-BUFFER", text)
         self.assertIn("BDL-BEGIN", text)
         self.assertIn("BUNDLE-LOAD", text)
+
+    # -- FD pool / FCLOSE / DEFER OPEN tests --
+
+    def test_open_returns_nonzero_fdesc(self):
+        """OPEN returns a non-zero fdesc from the FD pool."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "hello", b"data", ftype=2)
+        try:
+            text = self._run_kdos([
+                "OPEN hello DUP . CR",
+            ], storage_image=path)
+            # fdesc should be a non-zero address printed before CR
+            # Extract the number before the last CR
+            nums = [w for w in text.split() if w.isdigit()]
+            self.assertTrue(any(int(n) != 0 for n in nums),
+                            f"OPEN returned 0 or no output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_fclose_releases_slot(self):
+        """FCLOSE releases pool slot; OPEN can reuse it."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "hello", b"data", ftype=2)
+        try:
+            text = self._run_kdos([
+                # Open, capture addr, close, re-open — second must succeed
+                "OPEN hello FCLOSE",
+                "OPEN hello DUP . CR",
+            ], storage_image=path)
+            nums = [w for w in text.split() if w.isdigit()]
+            self.assertTrue(any(int(n) != 0 for n in nums),
+                            f"Re-OPEN after FCLOSE failed: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_fclose_zero_is_noop(self):
+        """FCLOSE of 0 does nothing (no crash)."""
+        text = self._run_kdos_fast(["0 FCLOSE"])
+        # Should not crash — any output without an error is fine
+        self.assertNotIn("rror", text.split("0 FCLOSE")[-1]
+                         if "0 FCLOSE" in text else text)
+
+    def test_fd_pool_exhaustion(self):
+        """Opening more than FD-MAX files reports no free slots."""
+        path = self._make_formatted_image()
+        # inject one file — we'll open it many times without closing
+        du_inject_file(path, "f", b"x", ftype=2)
+        try:
+            # Open the same file 17 times (pool has 16 slots)
+            opens = ["OPEN f"] * 17
+            text = self._run_kdos(opens, storage_image=path)
+            self.assertIn("No free FD", text)
+        finally:
+            os.unlink(path)
+
+    def test_defer_open_interception(self):
+        """IS OPEN can redirect OPEN to a custom word (DEFER mechanism)."""
+        text = self._run_kdos_fast([
+            # Define a custom word that just prints a marker
+            ': MY-OPEN  ." [HOOK] " ;',
+            "' MY-OPEN IS OPEN",
+            # Call OPEN — should hit our hook, not the real (OPEN)
+            "OPEN",
+        ])
+        self.assertIn("[HOOK]", text)
+
+    def test_doc_still_works_with_fclose(self):
+        """DOC opens and closes cleanly (regression)."""
+        path = self._make_formatted_image()
+        du_inject_file(path, "myfile", b"some data here", ftype=4)
+        try:
+            text = self._run_kdos([
+                "DOC myfile",
+            ], storage_image=path)
+            # DOC should display the file content (or at least not crash)
+            # If file not recognized as doc type, it may print something else
+            # Key thing: no crash and no "No free FD" leak
+            self.assertNotIn("No free FD", text)
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------

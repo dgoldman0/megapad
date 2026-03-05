@@ -2336,6 +2336,25 @@ tick_fail:
     str r14, r0
     ret.l
 
+; ['] ( "name" -- ) IMMEDIATE — compile-time: parse word, compile its XT as literal
+;   Equivalent to: ' name LITERAL
+w_bracket_tick:
+    ldi64 r11, w_tick         ; reuse ' to parse and look up
+    call.l r11
+    ldn r1, r14               ; pop XT from stack
+    addi r14, 8
+    ldi64 r11, compile_literal ; compile it as a literal into current definition
+    call.l r11
+    ret.l
+
+; >BODY ( xt -- addr ) data-field address of a CREATEd word
+;   CREATE's trampoline is 30 bytes, so data field = xt + 30.
+w_to_body:
+    ldn r0, r14
+    addi r0, 30
+    str r14, r0
+    ret.l
+
 ; =====================================================================
 ;  Compilation Helpers
 ; =====================================================================
@@ -11636,9 +11655,27 @@ d_tick:
     call.l r11
     ret.l
 
+; === ['] (bracket-tick, IMMEDIATE) ===
+d_bracket_tick:
+    .dq d_tick
+    .db 0x83
+    .ascii "[']"
+    ldi64 r11, w_bracket_tick
+    call.l r11
+    ret.l
+
+; === >BODY ===
+d_to_body:
+    .dq d_bracket_tick
+    .db 5
+    .ascii ">BODY"
+    ldi64 r11, w_to_body
+    call.l r11
+    ret.l
+
 ; === : (colon) ===
 d_colon:
-    .dq d_tick
+    .dq d_to_body
     .db 1
     .ascii ":"
     ldi64 r11, w_colon

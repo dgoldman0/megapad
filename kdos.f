@@ -3370,7 +3370,11 @@ VARIABLE FR-SEC     \ remaining sectors to read
 
 : FREAD  ( addr len fdesc -- actual )
     FR-FD !  FR-LEN !  FR-ADDR !
-    \ Clamp len to available bytes
+    \ Guard: cursor already at or past file end → return 0
+    \ (MIN is unsigned; without this guard the subtraction below
+    \  wraps to a huge value and FREAD loops forever.)
+    FR-FD @ F.CURSOR  FR-FD @ F.USED  < 0= IF 0 EXIT THEN
+    \ Clamp len to available bytes (safe: cursor < used)
     FR-FD @ F.USED FR-FD @ F.CURSOR -
     FR-LEN @ MIN FR-LEN !
     FR-LEN @ 0= IF 0 EXIT THEN
@@ -3972,7 +3976,7 @@ VARIABLE OP-SLOT
     FD-ALLOC DUP 0= IF
         ."  No free FD slots" CR EXIT
     THEN
-    OP-SLOT @ FD-FILL ;
+    DUP OP-SLOT @ FD-FILL ;
 
 DEFER OPEN
 ' (OPEN) IS OPEN
@@ -4636,7 +4640,7 @@ VARIABLE DOC-LINES              \ newline counter for pagination
     FD-ALLOC DUP 0= IF
         ."  No free FD slots" CR NIP EXIT
     THEN
-    SWAP FD-FILL ;
+    DUP ROT FD-FILL ;
 
 \ DESCRIBE ( "word" -- )  look up a word in the documentation
 \   Tries to open a doc file matching the name.  If no exact match,
