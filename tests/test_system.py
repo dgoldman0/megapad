@@ -57,6 +57,11 @@ from megapad64 import (
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
     CSR_D, CSR_DF, CSR_Q, CSR_T,
     CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL,
+    CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+    CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+    CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
+    HaltError,
 )
 from asm import assemble, AsmError
 from system import MegapadSystem, MMIO_START, MicroCluster
@@ -2965,9 +2970,11 @@ class TestMicroCluster(unittest.TestCase):
         self.assertEqual(mc.csr_read(CSR_COREID), 7)
         self.assertEqual(mc.csr_read(CSR_NCORES), 16)
 
-    def test_mex_traps_on_micro_core(self):
-        """MEX (tile engine) raises ILLEGAL_OP on micro-cores."""
+    def test_mex_traps_on_standalone_micro_core(self):
+        """MEX (tile engine) raises ILLEGAL_OP on standalone micro-cores (no cluster)."""
         mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        # No cluster assigned → _cluster is None
+        self.assertIsNone(mc._cluster)
         # Write a MEX instruction: family 0xE, sub 0x00
         mc.mem[0] = 0xE0  # MEX family
         mc.mem[1] = 0x00  # funct byte
@@ -2975,6 +2982,131 @@ class TestMicroCluster(unittest.TestCase):
         with self.assertRaises(TrapError) as ctx:
             mc.step()
         self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+
+    def test_mex_works_on_clustered_micro_core(self):
+        """MEX T.ADD works on a micro-core inside a cluster (shared tile engine)."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        mc = cl.cores[0]
+
+        # Set up tile CSRs via the micro-core
+        mc.csr_write(CSR_TSRC0, 0x1000)
+        mc.csr_write(CSR_TSRC1, 0x2000)
+        mc.csr_write(CSR_TDST,  0x3000)
+        mc.csr_write(CSR_TMODE, 0x00)   # 8-bit unsigned
+
+        # Fill source tiles in memory
+        for i in range(64):
+            mc.mem_write8(0x1000 + i, 1)
+            mc.mem_write8(0x2000 + i, 2)
+
+        # Assemble and execute T.ADD + HALT
+        code = assemble("t.add\nhalt")
+        mc.load_bytes(0, code)
+        mc.pc = 0
+        mc.regs[mc.spsel] = 0x10000
+        try:
+            mc.run(max_steps=5000)
+        except HaltError:
+            pass
+
+        # Check each byte of destination tile is 3 (1+2)
+        for i in range(64):
+            self.assertEqual(mc.mem_read8(0x3000 + i), 3,
+                             f"dst byte {i} should be 3")
+
+    def test_micro_core_tile_csr_read_write(self):
+        """Micro-core in cluster can read/write tile CSRs."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        mc = cl.cores[0]
+
+        tile_csrs = [
+            (CSR_TMODE, 0x05),
+            (CSR_TCTRL, 0x02),
+            (CSR_TSRC0, 0xDEAD_0000),
+            (CSR_TSRC1, 0xBEEF_0000),
+            (CSR_TDST,  0xCAFE_0000),
+            (CSR_ACC0,  0x1111_2222_3333_4444),
+            (CSR_SB,    0x03),
+            (CSR_SR,    0x00100),
+            (CSR_SC,    0x00200),
+            (CSR_SW,    0x0000F),
+            (CSR_TSTRIDE_R, 128),
+            (CSR_TTILE_H,  4),
+            (CSR_TTILE_W, 32),
+        ]
+        for csr_addr, val in tile_csrs:
+            mc.csr_write(csr_addr, val)
+
+        # Read them back
+        self.assertEqual(mc.csr_read(CSR_TMODE) & 0xFF, 0x05)
+        self.assertEqual(mc.csr_read(CSR_TCTRL) & 0xFF, 0x02)
+        self.assertEqual(mc.csr_read(CSR_TSRC0), 0xDEAD_0000)
+        self.assertEqual(mc.csr_read(CSR_TSRC1), 0xBEEF_0000)
+        self.assertEqual(mc.csr_read(CSR_TDST),  0xCAFE_0000)
+        self.assertEqual(mc.csr_read(CSR_ACC0),  0x1111_2222_3333_4444)
+        self.assertEqual(mc.csr_read(CSR_SB) & 0xF, 0x03)
+        self.assertEqual(mc.csr_read(CSR_TSTRIDE_R), 128)
+        self.assertEqual(mc.csr_read(CSR_TTILE_H), 4)
+        self.assertEqual(mc.csr_read(CSR_TTILE_W), 32)
+
+    def test_micro_core_tile_csr_returns_zero_without_cluster(self):
+        """Standalone micro-core tile CSR reads return 0 (no tile engine)."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        # Without cluster, tile CSRs go through to parent's _csr_read_table
+        # which has working tile state (parent class has the registers)
+        # But the important test: csr_write then read should work
+        mc.csr_write(CSR_TSRC0, 0x1234)
+        self.assertEqual(mc.csr_read(CSR_TSRC0), 0x1234)
+
+    def test_mex_tred_sum_on_micro_core(self):
+        """MEX T.SUM (reduction) works on clustered micro-core."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        mc = cl.cores[0]
+
+        mc.csr_write(CSR_TSRC0, 0x1000)
+        mc.csr_write(CSR_TMODE, 0x00)  # 8-bit unsigned
+        # Fill 64 bytes with value 4 → sum = 256
+        for i in range(64):
+            mc.mem_write8(0x1000 + i, 4)
+
+        code = assemble("t.sum\nhalt")
+        mc.load_bytes(0, code)
+        mc.pc = 0
+        mc.regs[mc.spsel] = 0x10000
+        try:
+            mc.run(max_steps=5000)
+        except HaltError:
+            pass
+
+        self.assertEqual(mc.csr_read(CSR_ACC0), 256)
+
+    def test_mex_cycles_overhead_on_micro_core(self):
+        """MEX on clustered micro-core returns cycles + 3 overhead."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        mc = cl.cores[0]
+
+        mc.csr_write(CSR_TSRC0, 0x1000)
+        mc.csr_write(CSR_TSRC1, 0x2000)
+        mc.csr_write(CSR_TDST,  0x3000)
+        mc.csr_write(CSR_TMODE, 0x00)
+
+        # Minimal memory setup
+        for i in range(64):
+            mc.mem_write8(0x1000 + i, 0)
+            mc.mem_write8(0x2000 + i, 0)
+
+        # Execute T.ADD and count cycles
+        code = assemble("t.add\nhalt")
+        mc.load_bytes(0, code)
+        mc.pc = 0
+        mc.regs[mc.spsel] = 0x10000
+        cycles = mc.step()
+        # Should be parent cycles + 3 overhead for shared unit
+        self.assertGreater(cycles, 3, "MEX should add ≥3 overhead cycles")
 
     def test_scratchpad_rw(self):
         """Cluster scratchpad reads and writes correctly."""

@@ -168,12 +168,13 @@ tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_alu.v \
                   $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Cluster (4 micro-cores + shared MUL/DIV) ---
+# --- Cluster (4 micro-cores + shared MUL/DIV + shared tile engine) ---
 cluster: tb_cluster.vvp
 	$(VVP) $<
 
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
-                $(CORE)/mp64_alu.v $(PRIM)/mp64_mul.v
+                $(CORE)/mp64_alu.v $(PRIM)/mp64_mul.v \
+                $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Micro-core standalone (2 expected failures without full cluster) ---

@@ -7,6 +7,7 @@
 //   3. Scratchpad write/read via magic address
 //   4. MUL via shared multiplier
 //   5. Verify all 4 micro-cores reach HALT
+//   6. MEX T.ADD via shared tile engine
 //
 `timescale 1ns / 1ps
 
@@ -92,6 +93,31 @@ module tb_cluster;
     // ====================================================================
     localparam N = 4;
 
+    // Tile memory port model (256 tiles × 512 bits = 16 KiB)
+    wire        tile_req;
+    wire [31:0] tile_addr;
+    wire        tile_wen;
+    wire [511:0] tile_wdata;
+    reg  [511:0] tile_rdata;
+    reg          tile_ack;
+    reg  [511:0] tile_mem_model [0:255];
+
+    // External tile port (unused — stub)
+    wire        ext_tile_req;
+    wire [63:0] ext_tile_addr;
+    wire        ext_tile_wen;
+    wire [511:0] ext_tile_wdata;
+
+    always @(posedge clk) begin
+        tile_ack <= 1'b0;
+        if (tile_req) begin
+            if (tile_wen)
+                tile_mem_model[tile_addr[13:6]] <= tile_wdata;
+            tile_rdata <= tile_mem_model[tile_addr[13:6]];
+            tile_ack   <= 1'b1;
+        end
+    end
+
     mp64_cluster #(
         .N              (N),
         .CLUSTER_ID_BASE(8'd4)
@@ -110,7 +136,22 @@ module tb_cluster;
 
         .irq_timer  ({N{1'b0}}),
         .irq_ipi    ({N{1'b0}}),
-        .ef_flags   (4'b0000)
+        .ef_flags   (4'b0000),
+
+        // Tile memory ports
+        .tile_req   (tile_req),
+        .tile_addr  (tile_addr),
+        .tile_wen   (tile_wen),
+        .tile_wdata (tile_wdata),
+        .tile_rdata (tile_rdata),
+        .tile_ack   (tile_ack),
+
+        .ext_tile_req  (ext_tile_req),
+        .ext_tile_addr (ext_tile_addr),
+        .ext_tile_wen  (ext_tile_wen),
+        .ext_tile_wdata(ext_tile_wdata),
+        .ext_tile_rdata(512'd0),
+        .ext_tile_ack  (1'b0)
     );
 
     // ====================================================================
@@ -373,6 +414,170 @@ module tb_cluster;
         end else
             pass_count = pass_count + 1;
 
+        // -----------------------------------------------------------------
+        // Test 8: MEX T.ADD on micro-core 0 via shared tile engine
+        //
+        // Fill tile_mem_model[0] (addr 0x0000) with all 0x01 = src0
+        // Fill tile_mem_model[1] (addr 0x0040) with all 0x02 = src1
+        // Set TSRC0  = 0x0000
+        //     TSRC1  = 0x0040
+        //     TDST   = 0x0080   (tile_mem_model[2])
+        //     TMODE  = 0x00     (8-bit unsigned)
+        // Execute T.ADD → dst should be all 0x03
+        //
+        // Instruction encoding (from ISA):
+        //   CSRW  CSR_TMODE,  R4  →  D8+r  addr  (D8 = CSRW R0)
+        //   CSRW  CSR_TSRC0,  R4  →  DC    16
+        //   ...
+        //   T.ADD             →  E0 00
+        //   HALT              →  02
+        //
+        // Program:
+        //   LDI R4, 0       ; TMODE = 0x00
+        //   CSRW 0x14, R4   ; CSR_TMODE = R4
+        //   LDI R4, 0       ; TSRC0 address = 0
+        //   CSRW 0x16, R4   ; CSR_TSRC0
+        //   LDI R4, 64      ; TSRC1 address = 0x0040
+        //   CSRW 0x17, R4   ; CSR_TSRC1
+        //   LDI R4, 128     ; TDST  address = 0x0080
+        //   CSRW 0x18, R4   ; CSR_TDST
+        //   T.ADD            ; E0 00
+        //   HALT             ; 02
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        // Pre-fill tile memory: tile at addr 0 = all 0x01, tile at addr 64 = all 0x02
+        begin : tile_fill
+            integer ti;
+            for (ti = 0; ti < 256; ti = ti + 1) tile_mem_model[ti] = 512'd0;
+            // Tile 0 (offset 0x0000): all bytes = 0x01
+            tile_mem_model[0] = {64{8'h01}};
+            // Tile 1 (offset 0x0040): all bytes = 0x02
+            tile_mem_model[1] = {64{8'h02}};
+        end
+
+        // LDI R4, 0
+        mem[0]  = 8'h60; mem[1]  = 8'h40; mem[2]  = 8'h00;
+        // CSRW CSR_TMODE(0x14), R4
+        mem[3]  = 8'hDC; mem[4]  = 8'h14;
+        // LDI R4, 0
+        mem[5]  = 8'h60; mem[6]  = 8'h40; mem[7]  = 8'h00;
+        // CSRW CSR_TSRC0(0x16), R4
+        mem[8]  = 8'hDC; mem[9]  = 8'h16;
+        // LDI R4, 64
+        mem[10] = 8'h60; mem[11] = 8'h40; mem[12] = 8'h40;
+        // CSRW CSR_TSRC1(0x17), R4
+        mem[13] = 8'hDC; mem[14] = 8'h17;
+        // LDI R4, 128
+        mem[15] = 8'h60; mem[16] = 8'h40; mem[17] = 8'h80;
+        // CSRW CSR_TDST(0x18), R4
+        mem[18] = 8'hDC; mem[19] = 8'h18;
+        // T.ADD (MEX family 0xE, n=0, funct=0)
+        mem[20] = 8'hE0; mem[21] = 8'h00;
+        // HALT
+        mem[22] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(50000);
+        check_mc0_state("MEX T.ADD: mc0 halted", CPU_HALT);
+        // Check that tile_mem_model[2] (dst at 0x0080) = all 0x03
+        if (tile_mem_model[2] === {64{8'h03}}) begin
+            pass_count = pass_count + 1;
+        end else begin
+            $display("FAIL [MEX T.ADD dst]: got=%h expected=%h",
+                     tile_mem_model[2], {64{8'h03}});
+            fail_count = fail_count + 1;
+        end
+
+        // -----------------------------------------------------------------
+        // Test 9: CSRR tile CSR readback on micro-core 0
+        // After test 8, CSR_TDST should still be 128 (0x80).
+        //   CSRR R1, CSR_TDST (0x18)  →  D1 18
+        //   HALT                       →  02
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0]  = 8'hD1; mem[1]  = 8'h18;    // CSRR R1, CSR_TDST
+        mem[2]  = 8'h02;                       // HALT
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(5000);
+        // Note: after reset the tile CSRs are cleared, so tdst=0
+        // Instead verify that micro-core can write+read tile CSRs:
+        // Rewrite as: CSRW CSR_TDST=0x42, CSRR R1, CSR_TDST, HALT
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        // LDI R4, 0x42
+        mem[0]  = 8'h60; mem[1]  = 8'h40; mem[2]  = 8'h42;
+        // CSRW CSR_TDST(0x18), R4
+        mem[3]  = 8'hDC; mem[4]  = 8'h18;
+        // CSRR R1, CSR_TDST(0x18)
+        mem[5]  = 8'hD1; mem[6]  = 8'h18;
+        // HALT
+        mem[7]  = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(5000);
+        check64("tile CSR w/r mc0", uut.mc[0].u_micro.R[1], 64'h42);
+
+        // -----------------------------------------------------------------
+        // Test 10: Two micro-cores both issue T.ADD (contention test)
+        // mc0 and mc1 run the same T.ADD program but can't both use the
+        // shared tile engine simultaneously. The arbiter should serialise.
+        // If both complete and halt, the arbiter is working.
+        // (We just check both reach HALT — functional correctness was
+        //  already verified in test 8.)
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+        tile_mem_model[0] = {64{8'h05}};
+        tile_mem_model[1] = {64{8'h03}};
+
+        // Same program as test 8 (shorter: reuse the TMODE=0 from reset)
+        // LDI R4, 0;  CSRW TMODE, R4
+        mem[0]  = 8'h60; mem[1]  = 8'h40; mem[2]  = 8'h00;
+        mem[3]  = 8'hDC; mem[4]  = 8'h14;
+        // LDI R4, 0;  CSRW TSRC0, R4
+        mem[5]  = 8'h60; mem[6]  = 8'h40; mem[7]  = 8'h00;
+        mem[8]  = 8'hDC; mem[9]  = 8'h16;
+        // LDI R4, 64; CSRW TSRC1, R4
+        mem[10] = 8'h60; mem[11] = 8'h40; mem[12] = 8'h40;
+        mem[13] = 8'hDC; mem[14] = 8'h17;
+        // LDI R4, 128; CSRW TDST, R4
+        mem[15] = 8'h60; mem[16] = 8'h40; mem[17] = 8'h80;
+        mem[18] = 8'hDC; mem[19] = 8'h18;
+        // T.ADD
+        mem[20] = 8'hE0; mem[21] = 8'h00;
+        // HALT
+        mem[22] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(100000);
+        check_mc0_state("contention: mc0 halted", CPU_HALT);
+        check_mc1_state("contention: mc1 halted", CPU_HALT);
+        check_mc2_state("contention: mc2 halted", CPU_HALT);
+        check_mc3_state("contention: mc3 halted", CPU_HALT);
+        // The destination tile should be 0x05 + 0x03 = 0x08
+        // (last core to write wins, but values are the same)
+        if (tile_mem_model[2] === {64{8'h08}}) begin
+            pass_count = pass_count + 1;
+        end else begin
+            $display("FAIL [contention T.ADD dst]: got=%h expected=%h",
+                     tile_mem_model[2], {64{8'h08}});
+            fail_count = fail_count + 1;
+        end
+
         // =================================================================
         $display("===========================================");
         if (fail_count == 0)
@@ -385,7 +590,7 @@ module tb_cluster;
 
     // Timeout watchdog
     initial begin
-        #2000000;
+        #10000000;
         $display("TIMEOUT: tb_cluster");
         $finish;
     end

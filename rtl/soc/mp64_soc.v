@@ -271,6 +271,22 @@ module mp64_soc #(
     wire [63:0] cluster_bus_rdata [0:NUM_CLUSTERS-1];
     wire        cluster_bus_ready [0:NUM_CLUSTERS-1];
 
+    // Per-cluster tile memory ports (from shared tile engines)
+    wire        cluster_tile_req    [0:NUM_CLUSTERS-1];
+    wire [31:0] cluster_tile_addr   [0:NUM_CLUSTERS-1];
+    wire        cluster_tile_wen    [0:NUM_CLUSTERS-1];
+    wire [511:0]cluster_tile_wdata  [0:NUM_CLUSTERS-1];
+    wire [511:0]cluster_tile_rdata  [0:NUM_CLUSTERS-1];
+    wire        cluster_tile_ack    [0:NUM_CLUSTERS-1];
+
+    // Per-cluster ext tile memory ports
+    wire        cluster_ext_tile_req   [0:NUM_CLUSTERS-1];
+    wire [63:0] cluster_ext_tile_addr  [0:NUM_CLUSTERS-1];
+    wire        cluster_ext_tile_wen   [0:NUM_CLUSTERS-1];
+    wire [511:0]cluster_ext_tile_wdata [0:NUM_CLUSTERS-1];
+    wire [511:0]cluster_ext_tile_rdata [0:NUM_CLUSTERS-1];
+    wire        cluster_ext_tile_ack   [0:NUM_CLUSTERS-1];
+
     genvar ki;
     generate
         for (ki = 0; ki < NUM_CLUSTERS; ki = ki + 1) begin : g_cluster
@@ -292,7 +308,22 @@ module mp64_soc #(
 
                 .irq_timer   ({CORES_PER_CLUSTER{irq_timer_w}}),
                 .irq_ipi     ({CORES_PER_CLUSTER{1'b0}}),
-                .ef_flags    (4'b0000)
+                .ef_flags    (4'b0000),
+
+                // Tile memory ports
+                .tile_req    (cluster_tile_req[ki]),
+                .tile_addr   (cluster_tile_addr[ki]),
+                .tile_wen    (cluster_tile_wen[ki]),
+                .tile_wdata  (cluster_tile_wdata[ki]),
+                .tile_rdata  (cluster_tile_rdata[ki]),
+                .tile_ack    (cluster_tile_ack[ki]),
+
+                .ext_tile_req  (cluster_ext_tile_req[ki]),
+                .ext_tile_addr (cluster_ext_tile_addr[ki]),
+                .ext_tile_wen  (cluster_ext_tile_wen[ki]),
+                .ext_tile_wdata(cluster_ext_tile_wdata[ki]),
+                .ext_tile_rdata(cluster_ext_tile_rdata[ki]),
+                .ext_tile_ack  (cluster_ext_tile_ack[ki])
             );
         end
     endgenerate
@@ -563,7 +594,143 @@ module mp64_soc #(
     assign extmem_phy_ack   = phy_rvalid;
 
     // ========================================================================
-    // Tile Engine (connected to core 0 CSR/MEX, memory tile port)
+    // Tile Memory Port Arbiter
+    // ========================================================================
+    // Muxes (1 + NUM_CLUSTERS) tile engines onto the single memory subsystem
+    // tile port and ext tile port.  Sources: core 0 tile engine + 3 clusters.
+    // Simple priority: core 0 > cluster 0 > cluster 1 > cluster 2.
+
+    // Core 0 tile engine wires (internal)
+    wire        c0_tile_req;
+    wire [31:0] c0_tile_addr;
+    wire        c0_tile_wen;
+    wire [511:0]c0_tile_wdata;
+    wire        c0_ext_tile_req;
+    wire [63:0] c0_ext_tile_addr;
+    wire        c0_ext_tile_wen;
+    wire [511:0]c0_ext_tile_wdata;
+
+    // Tile memory arbiter state
+    localparam TILE_ARB_PORTS = 1 + NUM_CLUSTERS; // 4 total
+    localparam TILE_ARB_BITS  = 2;                // ceil(log2(4))
+    reg  [TILE_ARB_BITS-1:0] tile_arb_grant;
+    reg                      tile_arb_busy;
+    reg                      tile_arb_ext;   // 0=internal, 1=external
+
+    always @(posedge clk) begin
+        if (rst_h) begin
+            tile_arb_grant <= {TILE_ARB_BITS{1'b0}};
+            tile_arb_busy  <= 1'b0;
+            tile_arb_ext   <= 1'b0;
+        end else begin
+            if (tile_arb_busy) begin
+                // Wait for ack from the active port
+                if (!tile_arb_ext && tile_mem_ack)
+                    tile_arb_busy <= 1'b0;
+                else if (tile_arb_ext && ext_tile_ack)
+                    tile_arb_busy <= 1'b0;
+            end else begin
+                // Priority scan: core 0 first, then clusters
+                if (c0_tile_req) begin
+                    tile_arb_grant <= 2'd0;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b0;
+                end else if (c0_ext_tile_req) begin
+                    tile_arb_grant <= 2'd0;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b1;
+                end else if (cluster_tile_req[0]) begin
+                    tile_arb_grant <= 2'd1;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b0;
+                end else if (cluster_ext_tile_req[0]) begin
+                    tile_arb_grant <= 2'd1;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b1;
+                end else if (NUM_CLUSTERS > 1 && cluster_tile_req[1]) begin
+                    tile_arb_grant <= 2'd2;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b0;
+                end else if (NUM_CLUSTERS > 1 && cluster_ext_tile_req[1]) begin
+                    tile_arb_grant <= 2'd2;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b1;
+                end else if (NUM_CLUSTERS > 2 && cluster_tile_req[2]) begin
+                    tile_arb_grant <= 2'd3;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b0;
+                end else if (NUM_CLUSTERS > 2 && cluster_ext_tile_req[2]) begin
+                    tile_arb_grant <= 2'd3;
+                    tile_arb_busy  <= 1'b1;
+                    tile_arb_ext   <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Mux tile memory request to the memory subsystem
+    assign tile_mem_req   = tile_arb_busy && !tile_arb_ext ? (
+        (tile_arb_grant == 2'd0) ? c0_tile_req :
+        (tile_arb_grant == 2'd1) ? cluster_tile_req[0] :
+        (tile_arb_grant == 2'd2) ? cluster_tile_req[1] :
+                                   cluster_tile_req[2]
+    ) : 1'b0;
+
+    assign tile_mem_addr  = (tile_arb_grant == 2'd0) ? c0_tile_addr :
+                            (tile_arb_grant == 2'd1) ? cluster_tile_addr[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_tile_addr[1] :
+                                                       cluster_tile_addr[2];
+
+    assign tile_mem_wen   = (tile_arb_grant == 2'd0) ? c0_tile_wen :
+                            (tile_arb_grant == 2'd1) ? cluster_tile_wen[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_tile_wen[1] :
+                                                       cluster_tile_wen[2];
+
+    assign tile_mem_wdata = (tile_arb_grant == 2'd0) ? c0_tile_wdata :
+                            (tile_arb_grant == 2'd1) ? cluster_tile_wdata[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_tile_wdata[1] :
+                                                       cluster_tile_wdata[2];
+
+    // Broadcast tile_rdata and ack to all (only granted source uses it)
+    assign cluster_tile_rdata[0] = tile_mem_rdata;
+    assign cluster_tile_ack[0]   = tile_arb_busy && !tile_arb_ext && (tile_arb_grant == 2'd1) && tile_mem_ack;
+    assign cluster_tile_rdata[1] = tile_mem_rdata;
+    assign cluster_tile_ack[1]   = tile_arb_busy && !tile_arb_ext && (tile_arb_grant == 2'd2) && tile_mem_ack;
+    assign cluster_tile_rdata[2] = tile_mem_rdata;
+    assign cluster_tile_ack[2]   = tile_arb_busy && !tile_arb_ext && (tile_arb_grant == 2'd3) && tile_mem_ack;
+
+    // Mux ext tile memory
+    assign ext_tile_req   = tile_arb_busy && tile_arb_ext ? (
+        (tile_arb_grant == 2'd0) ? c0_ext_tile_req :
+        (tile_arb_grant == 2'd1) ? cluster_ext_tile_req[0] :
+        (tile_arb_grant == 2'd2) ? cluster_ext_tile_req[1] :
+                                   cluster_ext_tile_req[2]
+    ) : 1'b0;
+
+    assign ext_tile_addr  = (tile_arb_grant == 2'd0) ? c0_ext_tile_addr :
+                            (tile_arb_grant == 2'd1) ? cluster_ext_tile_addr[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_ext_tile_addr[1] :
+                                                       cluster_ext_tile_addr[2];
+
+    assign ext_tile_wen   = (tile_arb_grant == 2'd0) ? c0_ext_tile_wen :
+                            (tile_arb_grant == 2'd1) ? cluster_ext_tile_wen[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_ext_tile_wen[1] :
+                                                       cluster_ext_tile_wen[2];
+
+    assign ext_tile_wdata = (tile_arb_grant == 2'd0) ? c0_ext_tile_wdata :
+                            (tile_arb_grant == 2'd1) ? cluster_ext_tile_wdata[0] :
+                            (tile_arb_grant == 2'd2) ? cluster_ext_tile_wdata[1] :
+                                                       cluster_ext_tile_wdata[2];
+
+    assign cluster_ext_tile_rdata[0] = ext_tile_rdata;
+    assign cluster_ext_tile_ack[0]   = tile_arb_busy && tile_arb_ext && (tile_arb_grant == 2'd1) && ext_tile_ack;
+    assign cluster_ext_tile_rdata[1] = ext_tile_rdata;
+    assign cluster_ext_tile_ack[1]   = tile_arb_busy && tile_arb_ext && (tile_arb_grant == 2'd2) && ext_tile_ack;
+    assign cluster_ext_tile_rdata[2] = ext_tile_rdata;
+    assign cluster_ext_tile_ack[2]   = tile_arb_busy && tile_arb_ext && (tile_arb_grant == 2'd3) && ext_tile_ack;
+
+    // ========================================================================
+    // Tile Engine — Core 0 (connected to core 0 CSR/MEX, tile arb port 0)
     // ========================================================================
     mp64_tile u_tile (
         .clk       (sys_clk),
@@ -585,21 +752,21 @@ module mp64_soc #(
         .mex_done      (core_mex_done[0]),
         .mex_busy      (core_mex_busy[0]),
 
-        // Internal tile memory port → memory subsystem
-        .tile_req      (tile_mem_req),
-        .tile_addr     (tile_mem_addr),
-        .tile_wen      (tile_mem_wen),
-        .tile_wdata    (tile_mem_wdata),
+        // Internal tile memory port → tile arbiter port 0
+        .tile_req      (c0_tile_req),
+        .tile_addr     (c0_tile_addr),
+        .tile_wen      (c0_tile_wen),
+        .tile_wdata    (c0_tile_wdata),
         .tile_rdata    (tile_mem_rdata),
-        .tile_ack      (tile_mem_ack),
+        .tile_ack      (tile_arb_busy && !tile_arb_ext && (tile_arb_grant == 2'd0) && tile_mem_ack),
 
-        // External tile port → extmem
-        .ext_tile_req  (ext_tile_req),
-        .ext_tile_addr (ext_tile_addr),
-        .ext_tile_wen  (ext_tile_wen),
-        .ext_tile_wdata(ext_tile_wdata),
+        // External tile port → tile arbiter port 0
+        .ext_tile_req  (c0_ext_tile_req),
+        .ext_tile_addr (c0_ext_tile_addr),
+        .ext_tile_wen  (c0_ext_tile_wen),
+        .ext_tile_wdata(c0_ext_tile_wdata),
         .ext_tile_rdata(ext_tile_rdata),
-        .ext_tile_ack  (ext_tile_ack)
+        .ext_tile_ack  (tile_arb_busy && tile_arb_ext && (tile_arb_grant == 2'd0) && ext_tile_ack)
     );
 
     // ========================================================================

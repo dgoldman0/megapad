@@ -2849,6 +2849,10 @@ class Megapad64Micro(Megapad64):
     no D accumulator, no Q flip-flop, no T register, no SCRT calling
     convention (MARK/SAV/RET/DIS), no port I/O.
 
+    SHARED resources via cluster:
+    - MUL/DIV unit (round-robin arbitrated)
+    - Tile/MEX engine (round-robin arbitrated)
+
     SEP and SEX ARE available on micro-cores (zero area cost — they
     only update the psel/xsel pointer, which micro-cores already have).
     """
@@ -2885,13 +2889,22 @@ class Megapad64Micro(Megapad64):
         raise TrapError(IVEC_ILLEGAL_OP,
                         "Port I/O (family 0x9) not available on micro-core")
 
-    # -- MEX (tile engine) — not available on micro-cores --
+    # -- MEX (tile engine) — shared via cluster tile engine --
 
     def _exec_mex(self, n: int) -> int:
-        """Tile/MEX is not present on micro-cores — trap as illegal opcode."""
-        self.fetch8()  # consume the funct byte
-        raise TrapError(IVEC_ILLEGAL_OP,
-                        "MEX (tile engine) not available on micro-core")
+        """Tile/MEX uses the cluster's shared tile engine.
+
+        If not inside a cluster, traps as illegal opcode (matching
+        RTL behaviour without a tile engine).
+        """
+        if self._cluster is None:
+            self.fetch8()  # consume the funct byte
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            "MEX (tile engine) not available on standalone micro-core")
+        # Delegate to parent class — cluster shared tile engine is modelled
+        # as immediate (no cycle-accurate contention in emulator).
+        cycles = super()._exec_mex(n)
+        return cycles + 3  # shared unit arbitration overhead
 
     # -- SYS family: trap 1802-heritage sub-ops --
 
@@ -2942,6 +2955,12 @@ class Megapad64Micro(Megapad64):
                     CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_MEGAPAD_SZ,
                     CSR_PERF_CYCLES, CSR_PERF_CTRL):
             return super().csr_read(addr)
+        # Tile engine CSRs — forwarded to shared tile engine via parent
+        if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+                    CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+                    CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W):
+            return super().csr_read(addr)
         if addr == CSR_CPUID:
             return CPUID_MICRO
         # D/DF/Q/T CSRs — not present, always return 0
@@ -2977,6 +2996,12 @@ class Megapad64Micro(Megapad64):
                     CSR_IVT_BASE, CSR_IE, CSR_PRIV,
                     CSR_IVEC_ID, CSR_PERF_CTRL,
                     CSR_MBOX, CSR_IPIACK):
+            return super().csr_write(addr, val)
+        # Tile engine CSRs — forwarded to shared tile engine via parent
+        if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+                    CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+                    CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W):
             return super().csr_write(addr, val)
         # D/DF/Q/T CSR writes — silently ignored
         if addr in (CSR_D, CSR_DF, CSR_Q, CSR_T):

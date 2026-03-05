@@ -4,6 +4,7 @@
 //
 // Wraps N micro-cores (default 4) with shared resources:
 //   - 64×64→128 multiplier + iterative 64-bit divider
+//   - Shared tile/MEX engine (round-robin arbitrated)
 //   - 1 KiB dual-port scratchpad (128 × 64-bit)
 //   - Hardware barrier register with auto-clear
 //   - Internal round-robin bus arbiter (one external bus port)
@@ -45,7 +46,23 @@ module mp64_cluster #(
     input  wire [N-1:0] irq_ipi,
 
     // === External flags (shared to all micro-cores) ===
-    input  wire [3:0]  ef_flags
+    input  wire [3:0]  ef_flags,
+
+    // === Tile memory port (512-bit, to SoC memory subsystem) ===
+    output wire        tile_req,
+    output wire [31:0] tile_addr,
+    output wire        tile_wen,
+    output wire [511:0]tile_wdata,
+    input  wire [511:0]tile_rdata,
+    input  wire        tile_ack,
+
+    // === External tile memory port (for tiles in external RAM) ===
+    output wire        ext_tile_req,
+    output wire [63:0] ext_tile_addr,
+    output wire        ext_tile_wen,
+    output wire [511:0]ext_tile_wdata,
+    input  wire [511:0]ext_tile_rdata,
+    input  wire        ext_tile_ack
 );
 
     // ====================================================================
@@ -85,8 +102,27 @@ module mp64_cluster #(
     wire [N*64-1:0]     mc_cl_csr_wdata;
     reg  [N*64-1:0]     mc_cl_csr_rdata;
 
-    // Forward-declare MUL grant (used in generate block)
+    // Per-micro-core MEX/tile wires
+    wire [N-1:0]        mc_mex_req;
+    wire [N*2-1:0]      mc_mex_ss;
+    wire [N*2-1:0]      mc_mex_op;
+    wire [N*3-1:0]      mc_mex_funct;
+    wire [N*64-1:0]     mc_mex_gpr_val;
+    wire [N*8-1:0]      mc_mex_imm8;
+    wire [N*4-1:0]      mc_mex_ext_mod;
+    wire [N-1:0]        mc_mex_ext_active;
+    reg                 mex_done_reg;
+    reg                 mex_busy_reg;
+
+    // Per-micro-core tile CSR wires
+    wire [N-1:0]        mc_tile_csr_wen;
+    wire [N*8-1:0]      mc_tile_csr_addr;
+    wire [N*64-1:0]     mc_tile_csr_wdata;
+    reg  [N*64-1:0]     mc_tile_csr_rdata;
+
+    // Forward-declare MUL and MEX grants (used in generate block)
     reg  [ARB_BITS-1:0] mul_grant;
+    reg  [ARB_BITS-1:0] mex_grant;
 
     // ====================================================================
     // Cluster-shared state
@@ -143,6 +179,22 @@ module mp64_cluster #(
                 .mul_b      (mc_mul_b  [gi*64 +: 64]),
                 .mul_result (mul_result_reg),
                 .mul_done   (mul_done_reg && (mul_grant == gi[ARB_BITS-1:0])),
+
+                .mex_req       (mc_mex_req[gi]),
+                .mex_ss        (mc_mex_ss       [gi*2  +: 2]),
+                .mex_op        (mc_mex_op       [gi*2  +: 2]),
+                .mex_funct     (mc_mex_funct    [gi*3  +: 3]),
+                .mex_gpr_val   (mc_mex_gpr_val  [gi*64 +: 64]),
+                .mex_imm8      (mc_mex_imm8     [gi*8  +: 8]),
+                .mex_ext_mod   (mc_mex_ext_mod  [gi*4  +: 4]),
+                .mex_ext_active(mc_mex_ext_active[gi]),
+                .mex_done      (mex_done_reg && (mex_grant == gi[ARB_BITS-1:0])),
+                .mex_busy      (mex_busy_reg && (mex_grant != gi[ARB_BITS-1:0])),
+
+                .tile_csr_wen  (mc_tile_csr_wen  [gi]),
+                .tile_csr_addr (mc_tile_csr_addr [gi*8  +: 8]),
+                .tile_csr_wdata(mc_tile_csr_wdata[gi*64 +: 64]),
+                .tile_csr_rdata(mc_tile_csr_rdata[gi*64 +: 64]),
 
                 .cl_csr_addr  (mc_cl_csr_addr [gi*8  +: 8]),
                 .cl_csr_wen   (mc_cl_csr_wen  [gi]),
@@ -663,5 +715,201 @@ module mp64_cluster #(
             endcase
         end
     end
+
+    // ====================================================================
+    // Shared Tile Engine + MEX Arbiter
+    // ====================================================================
+    // One mp64_tile instance shared among N micro-cores, round-robin
+    // arbitrated — exactly like the shared MUL/DIV unit.
+    //
+    // Flow:
+    //   1. Micro-core asserts mex_req with MEX fields, enters CPU_MEX_WAIT
+    //   2. MEX arbiter grants one core, drives tile engine CSR/MEX signals
+    //   3. Tile engine processes op (4–8 cycles), asserts mex_done
+    //   4. Arbiter routes mex_done back to the granted core
+    //   5. Core returns to CPU_FETCH
+    //
+    // Tile CSR writes: any core can write tile CSRs at any time (each
+    // core has its own CSR namespace in the tile engine, muxed by grant).
+    // In practice the ISA serialises CSR writes before MEX dispatch, so
+    // the arbiter need only forward CSR writes from the MEX-granted core
+    // while an op is in flight.  When idle, writes are accepted from
+    // any core (last writer wins — software must coordinate).
+
+    // MEX arbiter state
+    localparam MEX_IDLE    = 2'd0;
+    localparam MEX_ACTIVE  = 2'd1;
+
+    reg [1:0]           mex_state;
+    reg [ARB_BITS-1:0]  mex_last;
+
+    // Tile engine wires — from arbiter to tile engine instance
+    reg         te_csr_wen;
+    reg  [7:0]  te_csr_addr;
+    reg  [63:0] te_csr_wdata;
+    wire [63:0] te_csr_rdata;
+
+    reg         te_mex_valid;
+    reg  [1:0]  te_mex_ss;
+    reg  [1:0]  te_mex_op;
+    reg  [2:0]  te_mex_funct;
+    reg  [63:0] te_mex_gpr_val;
+    reg  [7:0]  te_mex_imm8;
+    reg  [3:0]  te_mex_ext_mod;
+    reg         te_mex_ext_active;
+    wire        te_mex_done;
+    wire        te_mex_busy;
+
+    // MEX arbiter: round-robin next selection (same pattern as MUL)
+    reg [ARB_BITS-1:0] mex_next;
+    reg                mex_any;
+
+    always @(*) begin
+        mex_next = mex_last;
+        mex_any  = 1'b0;
+        for (mi = 1; mi <= N; mi = mi + 1) begin : mex_rr_scan
+            mex_cand = {1'b0, mex_last} + mi[ARB_BITS:0];
+            if (mex_cand >= N_VAL)
+                mex_cand = mex_cand - N_VAL;
+            if (!mex_any && mc_mex_req[mex_cand[ARB_BITS-1:0]]) begin
+                mex_next = mex_cand[ARB_BITS-1:0];
+                mex_any  = 1'b1;
+            end
+        end
+    end
+
+    reg [ARB_BITS:0] mex_cand;   // temporary for round-robin scan
+
+    // CSR write forwarding: when idle, accept from any core (last wins);
+    // when active, only from the granted core.
+    // The addr is always forwarded from any core for combinational reads.
+    always @(*) begin
+        te_csr_wen   = 1'b0;
+        te_csr_addr  = 8'd0;
+        te_csr_wdata = 64'd0;
+        // Priority: granted core during active op, else any writer
+        if (mex_state == MEX_ACTIVE) begin
+            te_csr_wen   = mc_tile_csr_wen[mex_grant];
+            te_csr_addr  = mc_tile_csr_addr [mex_grant*8  +: 8];
+            te_csr_wdata = mc_tile_csr_wdata[mex_grant*64 +: 64];
+        end else begin
+            for (mi = 0; mi < N; mi = mi + 1) begin
+                if (mc_tile_csr_wen[mi]) begin
+                    te_csr_wen   = 1'b1;
+                    te_csr_addr  = mc_tile_csr_addr [mi*8  +: 8];
+                    te_csr_wdata = mc_tile_csr_wdata[mi*64 +: 64];
+                end
+            end
+            // When no core is writing, still forward addr for CSR reads.
+            // Any core presenting a non-zero addr wins (last-writer-wins);
+            // this is fine since simultaneous reads from different cores
+            // targeting different CSR addrs is a don't-care scenario.
+            if (!te_csr_wen) begin
+                for (mi = 0; mi < N; mi = mi + 1) begin
+                    if (mc_tile_csr_addr[mi*8 +: 8] != 8'd0)
+                        te_csr_addr = mc_tile_csr_addr[mi*8 +: 8];
+                end
+            end
+        end
+    end
+
+    // CSR read mux: each micro-core gets tile CSR rdata from the shared
+    // tile engine based on its own tile_csr_addr (combinational).
+    // Since there's only one tile engine, all cores see the same state.
+    generate
+        for (gi = 0; gi < N; gi = gi + 1) begin : tile_csr_rd
+            always @(*) begin
+                mc_tile_csr_rdata[gi*64 +: 64] = te_csr_rdata;
+            end
+        end
+    endgenerate
+
+    // MEX arbiter FSM
+    always @(posedge clk) begin
+        if (cl_rst) begin
+            mex_state      <= MEX_IDLE;
+            mex_grant      <= {ARB_BITS{1'b0}};
+            mex_last       <= {ARB_BITS{1'b0}};
+            mex_done_reg   <= 1'b0;
+            mex_busy_reg   <= 1'b0;
+            te_mex_valid   <= 1'b0;
+        end else begin
+            mex_done_reg <= 1'b0;
+
+            case (mex_state)
+                MEX_IDLE: begin
+                    mex_busy_reg <= 1'b0;
+                    te_mex_valid <= 1'b0;
+                    if (mex_any) begin
+                        mex_grant       <= mex_next;
+                        mex_busy_reg    <= 1'b1;
+                        te_mex_valid    <= 1'b1;
+                        te_mex_ss       <= mc_mex_ss       [mex_next*2  +: 2];
+                        te_mex_op       <= mc_mex_op       [mex_next*2  +: 2];
+                        te_mex_funct    <= mc_mex_funct    [mex_next*3  +: 3];
+                        te_mex_gpr_val  <= mc_mex_gpr_val  [mex_next*64 +: 64];
+                        te_mex_imm8     <= mc_mex_imm8     [mex_next*8  +: 8];
+                        te_mex_ext_mod  <= mc_mex_ext_mod  [mex_next*4  +: 4];
+                        te_mex_ext_active<= mc_mex_ext_active[mex_next];
+                        mex_state       <= MEX_ACTIVE;
+                    end
+                end
+
+                MEX_ACTIVE: begin
+                    te_mex_valid <= 1'b0;  // only pulse for 1 cycle
+                    if (te_mex_done) begin
+                        mex_done_reg <= 1'b1;
+                        mex_busy_reg <= 1'b0;
+                        mex_last     <= mex_grant;
+                        mex_state    <= MEX_IDLE;
+                    end
+                end
+
+                default: mex_state <= MEX_IDLE;
+            endcase
+        end
+    end
+
+    // ====================================================================
+    // Shared Tile Engine Instance
+    // ====================================================================
+    mp64_tile u_tile (
+        .clk           (clk),
+        .rst_n         (~cl_rst),
+
+        // CSR interface (from MEX arbiter)
+        .csr_wen       (te_csr_wen),
+        .csr_addr      (te_csr_addr),
+        .csr_wdata     (te_csr_wdata),
+        .csr_rdata     (te_csr_rdata),
+
+        // MEX dispatch (from MEX arbiter)
+        .mex_valid     (te_mex_valid),
+        .mex_ss        (te_mex_ss),
+        .mex_op        (te_mex_op),
+        .mex_funct     (te_mex_funct),
+        .mex_gpr_val   (te_mex_gpr_val),
+        .mex_imm8      (te_mex_imm8),
+        .mex_ext_mod   (te_mex_ext_mod),
+        .mex_ext_active(te_mex_ext_active),
+        .mex_done      (te_mex_done),
+        .mex_busy      (te_mex_busy),
+
+        // Internal tile memory port (→ SoC memory subsystem)
+        .tile_req      (tile_req),
+        .tile_addr     (tile_addr),
+        .tile_wen      (tile_wen),
+        .tile_wdata    (tile_wdata),
+        .tile_rdata    (tile_rdata),
+        .tile_ack      (tile_ack),
+
+        // External tile memory port (→ SoC ext-mem)
+        .ext_tile_req  (ext_tile_req),
+        .ext_tile_addr (ext_tile_addr),
+        .ext_tile_wen  (ext_tile_wen),
+        .ext_tile_wdata(ext_tile_wdata),
+        .ext_tile_rdata(ext_tile_rdata),
+        .ext_tile_ack  (ext_tile_ack)
+    );
 
 endmodule

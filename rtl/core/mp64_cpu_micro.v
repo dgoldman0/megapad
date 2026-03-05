@@ -9,7 +9,6 @@
 //
 // Compared to the major core (mp64_cpu.v):
 //   REMOVED — I-cache (fetches byte-by-byte from bus)
-//   REMOVED — Tile/MEX engine (FAM_MEX → ILLEGAL_OP trap)
 //   REMOVED — 1802-heritage D, Q, T registers
 //   REMOVED — Family 0x8 MEMALU (D-register ops) → ILLEGAL_OP
 //   REMOVED — Family 0x9 IO (port input/output) → ILLEGAL_OP
@@ -18,6 +17,7 @@
 //   REMOVED — Per-core privilege/MPU (cluster-shared)
 //   REMOVED — Per-core BIST (cluster controller handles this)
 //   REMOVED — DMA ring CSRs, I-cache CSRs, tile self-test
+//   SHARED  — Tile/MEX engine via cluster (round-robin arbitrated)
 //   SHARED  — MUL/DIV via cluster (always)
 //   SHARED  — IVT base (cluster-level, input wire)
 //   SHARED  — Privilege level + MPU (cluster-level)
@@ -63,6 +63,24 @@ module mp64_cpu_micro (
     output reg  [63:0] mul_b,
     input  wire [127:0] mul_result,
     input  wire        mul_done,
+
+    // === Shared Tile/MEX interface (to cluster tile arbiter) ===
+    output reg         mex_req,       // request tile engine access
+    output reg  [1:0]  mex_ss,        // source selector
+    output reg  [1:0]  mex_op,        // operation class
+    output reg  [2:0]  mex_funct,     // sub-function
+    output reg  [63:0] mex_gpr_val,   // GPR value (broadcast mode)
+    output reg  [7:0]  mex_imm8,      // immediate (splat mode)
+    output reg  [3:0]  mex_ext_mod,   // EXT prefix modifier
+    output reg         mex_ext_active,// EXT prefix active
+    input  wire        mex_done,      // tile op complete (from arbiter)
+    input  wire        mex_busy,      // tile engine busy (stall)
+
+    // === Shared Tile CSR interface (to cluster tile engine) ===
+    output reg         tile_csr_wen,
+    output reg  [7:0]  tile_csr_addr,
+    output reg  [63:0] tile_csr_wdata,
+    input  wire [63:0] tile_csr_rdata,
 
     // === Cluster CSR interface (to cluster controller) ===
     // Used for: BIST, barrier, cluster priv/MPU/IVT
@@ -138,6 +156,9 @@ module mp64_cpu_micro (
     // Combinational CSR address — cluster muxes rdata on this
     always @(*) cl_csr_addr = ibuf[1];
 
+    // Combinational tile CSR address — cluster tile engine muxes rdata
+    always @(*) tile_csr_addr = ibuf[1];
+
     // ====================================================================
     // Interrupt pending
     // ====================================================================
@@ -170,6 +191,8 @@ module mp64_cpu_micro (
             cpu_state     <= CPU_FETCH;
             bus_valid     <= 1'b0;
             cl_csr_wen    <= 1'b0;
+            tile_csr_wen  <= 1'b0;
+            mex_req       <= 1'b0;
             ext_active    <= 1'b0;
             ext_mod       <= 4'd0;
             fetch_pending <= 1'b0;
@@ -196,6 +219,18 @@ module mp64_cpu_micro (
             mul_a   <= 64'd0;
             mul_b   <= 64'd0;
 
+            mex_req        <= 1'b0;
+            mex_ss         <= 2'd0;
+            mex_op         <= 2'd0;
+            mex_funct      <= 3'd0;
+            mex_gpr_val    <= 64'd0;
+            mex_imm8       <= 8'd0;
+            mex_ext_mod    <= 4'd0;
+            mex_ext_active <= 1'b0;
+            tile_csr_wen   <= 1'b0;
+            tile_csr_addr  <= 8'd0;
+            tile_csr_wdata <= 64'd0;
+
             cl_csr_wen   <= 1'b0;
             cl_csr_wdata <= 64'd0;
 
@@ -208,8 +243,9 @@ module mp64_cpu_micro (
             R[12] <= 64'd0; R[13] <= 64'd0; R[14] <= 64'd0; R[15] <= 64'd0;
 
         end else begin
-            bus_valid  <= 1'b0;
-            cl_csr_wen <= 1'b0;
+            bus_valid    <= 1'b0;
+            cl_csr_wen   <= 1'b0;
+            tile_csr_wen <= 1'b0;
 
             if (perf_enable)
                 perf_cycles <= perf_cycles + 64'd1;
@@ -587,6 +623,15 @@ module mp64_cpu_micro (
                             end
                             // D/Q/T CSRs: silently ignored (stripped)
                             CSR_D, CSR_DF, CSR_QREG, CSR_TREG: ;
+                            // Tile CSRs: forward to cluster-shared tile engine
+                            CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                            CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+                            CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W: begin
+                                tile_csr_wen   <= 1'b1;
+                                tile_csr_addr  <= ibuf[1];
+                                tile_csr_wdata <= R[nib[2:0]];
+                            end
                             // Cluster CSRs: forward to cluster controller
                             CSR_BIST_CMD, CSR_BIST_STATUS,
                             CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
@@ -597,7 +642,6 @@ module mp64_cpu_micro (
                                 cl_csr_wdata <= R[nib[2:0]];
                             end
                             // IVT base is cluster-shared — write goes to cluster
-                            // cl_csr_addr is ibuf[1]=CSR_IVTBASE; cluster maps it
                             CSR_IVTBASE: begin
                                 cl_csr_wen   <= 1'b1;
                                 cl_csr_wdata <= R[nib[2:0]];
@@ -626,6 +670,12 @@ module mp64_cpu_micro (
                             CSR_CPUID:       R[nib[2:0]] <= 64'h4D50_3634_0001_4D43; // "MP64" v1 "MC"
                             CSR_PERF_CYCLES: R[nib[2:0]] <= perf_cycles;
                             CSR_PERF_CTRL:   R[nib[2:0]] <= {63'd0, perf_enable};
+                            // Tile CSR reads: forwarded to cluster tile engine
+                            CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
+                            CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
+                            CSR_SB, CSR_SR, CSR_SC, CSR_SW,
+                            CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W:
+                                R[nib[2:0]] <= tile_csr_rdata;
                             // Cluster CSR reads: forwarded
                             CSR_BIST_CMD, CSR_BIST_STATUS,
                             CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
@@ -639,16 +689,19 @@ module mp64_cpu_micro (
                 end
 
                 // --------------------------------------------------------
-                // MEX (0xE) — not on micro-core → ILLEGAL_OP
+                // MEX (0xE) — dispatch to cluster-shared tile engine
                 // --------------------------------------------------------
                 else if (fam == FAM_MEX) begin
-                    ext_active <= 1'b0;
-                    R[spsel] <= R[spsel] - 64'd8;
-                    effective_addr <= R[spsel] - 64'd8;
-                    mem_data <= R[psel]; flags[6] <= 1'b0;
-                    ivec_id  <= IRQX_ILLEGAL_OP;
-                    post_action <= POST_IRQ_VEC;
-                    bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
+                    mex_req        <= 1'b1;
+                    mex_ss         <= ibuf[0][3:2];
+                    mex_op         <= ibuf[0][1:0];
+                    mex_funct      <= ibuf[1][2:0];
+                    mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
+                    mex_imm8       <= ibuf[2];
+                    mex_ext_mod    <= ext_mod;
+                    mex_ext_active <= ext_active;
+                    ext_active     <= 1'b0;
+                    cpu_state      <= CPU_MEX_WAIT;
                 end
 
                 // --------------------------------------------------------
@@ -792,6 +845,16 @@ module mp64_cpu_micro (
                     cpu_state <= CPU_FETCH;
                 end else begin
                     bus_valid <= 1'b1;
+                end
+            end
+
+            // ============================================================
+            // MEX_WAIT: wait for shared cluster tile engine
+            // ============================================================
+            CPU_MEX_WAIT: begin
+                if (mex_done) begin
+                    mex_req   <= 1'b0;
+                    cpu_state <= CPU_FETCH;
                 end
             end
 
