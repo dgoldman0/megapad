@@ -1055,12 +1055,17 @@ Stack & diagnostics.
 
 The startup section runs automatically when KDOS loads.  It:
 
-1. Prints the banner: **"KDOS v1.1 — Kernel Dashboard OS"**
-2. Prints usage hints: `HELP`, `SCREENS`, `TOPICS`/`LESSONS`
-3. If a disk is attached (`DISK?`), automatically loads the filesystem
+1. Enables **JIT compilation** (`JIT-ON`) for bulk KDOS load — saves ~49 KiB
+   of dictionary space by inlining call sequences
+2. Compiles all KDOS subsystems (§1–§19)
+3. Prints the banner: **"KDOS v1.1 — Kernel Dashboard OS"**
+4. Prints usage hints: `HELP`, `SCREENS`, `TOPICS`/`LESSONS`
+5. If a disk is attached (`DISK?`), automatically loads the filesystem
    (`FS-LOAD`) so DIR, CAT, LOAD, etc. work immediately
+6. Runs `autoexec.f` if present on disk
+7. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
 
-No user-callable words are defined here — it's purely the boot sequence.
+Users can re-enable JIT for their own code with `JIT-ON`.
 
 ---
 

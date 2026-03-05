@@ -32,6 +32,10 @@
 \   18. Ring Buffers    — RING, RING-PUSH, RING-POP, RING-PEEK
 \   19. Hash Tables     — HASHTABLE, HT-PUT, HT-GET, HT-DEL, HT-EACH
 
+\ Enable JIT compilation for bulk KDOS load (saves ~49 KiB dictionary).
+\ Turned off at the end of this file so interactive use is non-JIT.
+JIT-ON
+
 \ =====================================================================
 \  §1  Utility Words
 \ =====================================================================
@@ -11705,4 +11709,7 @@ CREATE _AUTOEXEC-NAME
     _MOD-LOAD-BODY ;
 
 _AUTOEXEC-RUN
+
+\ JIT served its purpose — disable for interactive use.
+JIT-OFF
 CR
