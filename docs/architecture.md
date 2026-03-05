@@ -10,40 +10,40 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    Megapad-64 CPU (×16 cores)              │
-│  4 full cores       ┌──────────────────┐  ┌───────────┐ │
-│  16 × 64-bit GPRs    │   Tile Engine    │  │ Perf Ctrs │ │
+│                    Megapad-64 CPU (×16 cores)             │
+│  4 full cores         ┌──────────────────┐  ┌───────────┐ │
+│  16 × 64-bit GPRs     │   Tile Engine    │  │ Perf Ctrs │ │
 │  4 KiB I-Cache        │  (MEX extension) │  │ (4 × 64b) │ │
 │  8-bit Flags          │  FP16 / bf16     │  └───────────┘ │
 │  256-bit Accumulator  │  DMA queue       │                │
 │  Perf counters        └──────────────────┘                │
-│  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV  │
-│    + tile/MEX engine, 1 KiB scratchpad, HW barrier)        │
+│  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV │
+│    + tile/MEX engine, 1 KiB scratchpad, HW barrier)       │
 └───────────────┬───────────────────────────────────────────┘
                 │  64-bit data bus (weighted round-robin QoS)
     ┌───────────┴───────────────────────────┐
     │            Memory Map                  │
     │                                        │
-    │  0x0000_0000 ┌──────────────────────┐ │
-    │              │     Bank 0 (System)    │ │
-    │              │   (1 MiB BRAM + BIST)  │ │
-    │              │                       │ │
-    │              │  BIOS code + dict     │ │
-    │              │  KDOS Forth dict      │ │
-    │              │  Buffers & data       │ │
-    │              │  FS cache (3 KB)      │ │
-    │              │  Task stacks (2 KB)   │ │
-    │              │         ↓ HERE        │ │
-    │              │         ...           │ │
-    │              │         ↑ SP          │ │
-    │              │  Data stack (grows ↓) │ │
-    │              │  Return stack         │ │
+    │  0x0000_0000 ┌──────────────────────┐  │
+    │              │     Bank 0 (System)  │  │
+    │              │   (1 MiB BRAM + BIST)│  │
+    │              │                      │ │
+    │              │  BIOS code + dict    │ │
+    │              │  KDOS Forth dict     │ │
+    │              │  Buffers & data      │ │
+    │              │  FS cache (3 KB)     │ │
+    │              │  Task stacks (2 KB)  │ │
+    │              │         ↓ HERE       │ │
+    │              │         ...          │ │
+    │              │         ↑ SP         │ │
+    │              │  Data stack (grows ↓)│ │
+    │              │  Return stack        │ │
     │  0x000F_FFFF └──────────────────────┘ │
-    │              ...                       │
+    │              ...                      │
     │  0xFFD0_0000 ┌──────────────────────┐ │
-    │              │  Banks 1–3 (HBW Math)  │ │
-    │              │   3 MiB, high-BW      │ │
-    │              │   tile/SIMD working    │ │
+    │              │  Banks 1–3 (HBW Math)│ │
+    │              │   3 MiB, high-BW     │ │
+    │              │   tile/SIMD working  │ │
     │  0xFFFF_FFFF └──────────────────────┘ │
     │  FFFF_FF00+  ┌──────────────────────┐ │
     │   0x0000     │  UART                │ │
