@@ -120,7 +120,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (12,544 lines) — Forth BIOS v1.0, 353 words
+    bios.asm  (14,353 lines) — Forth BIOS v1.0, 355 words
     bios.rom  (~26 KB)       — precompiled binary
 ```
 
@@ -136,7 +136,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
 | `system.py` | 849 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,012 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 12,544 | Forth BIOS v1.0 — subroutine-threaded interpreter, 353 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache) |
+| `bios.asm` | 14,353 | Forth BIOS v1.0 — subroutine-threaded interpreter, 355 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
 | `test_system.py` | 15,243 | System integration tests — 1,043 tests (42 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile) |
 | `test_networking.py` | 860 | Real-networking tests — 38 tests (NIC backends, TAP, ARP, ICMP, UDP, TCP) |
@@ -273,7 +273,7 @@ Board identification and core-topology registers (12 × 64-bit aligned,
 ## BIOS — Forth REPL (v1.0)
 
 The BIOS is a **subroutine-threaded Forth interpreter** written entirely in
-Megapad-64 assembly (12,544 lines, ~28 KB).  It boots from address 0 and
+Megapad-64 assembly (14,353 lines, ~28 KB).  It boots from address 0 and
 provides an interactive REPL over UART.
 
 ### Boot sequence
@@ -316,7 +316,7 @@ buffer), then tokenises and interprets:
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 
-### Built-in words (353)
+### Built-in words (355)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -595,7 +595,7 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 353 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 355 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch, network stack,
 TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC

@@ -59,7 +59,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|
-| BIOS | `bios.asm` → `bios.rom` | 12,544 (353 words) |
+| BIOS | `bios.asm` → `bios.rom` | 14,353 (355 words) |
 | KDOS | `kdos.f` | 10,225 (871 colon + 490 var = 1,361 entities) |
 | Tools | `tools.f` | 990 |
 | CPU emulator | `megapad64.py` | 2,868 |

@@ -5,7 +5,7 @@ OS, filesystem, interactive TUI, crypto stack, full network stack,
 multicore OS, and comprehensive documentation — that feels complete and
 cohesive as a v1.0 release.
 
-**Current state (Feb 2026):** BIOS (353 dict entries, 12,544 lines ASM),
+**Current state (Feb 2026):** BIOS (355 dict entries, 14,353 lines ASM),
 KDOS v1.1 (11,004 lines, 923 colon defs, 707 vars/constants), Emulator
 (2,671 lines + 849-line 16-core heterogeneous SoC + 1,978-line C++ accelerator),
 FPGA RTL (27 Verilog modules + 18 testbenches, ~180 HW tests),
@@ -35,7 +35,7 @@ Remaining work: application-level features (items 25–30).
 
 ### BIOS v1.0 — ✅ DONE
 
-353 dictionary entries, 12,544 lines ASM, ~26 KB binary.
+355 dictionary entries, 14,353 lines ASM, ~28 KB binary.
 
 - ✅ Full subroutine-threaded Forth: arithmetic, logic, stack, memory,
   control flow (IF/ELSE/THEN, BEGIN/UNTIL/WHILE/REPEAT, DO/LOOP/+LOOP,

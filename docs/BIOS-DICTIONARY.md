@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **353** dictionary words defined in `bios.asm`.
+Complete catalog of all **355** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -250,7 +250,7 @@ Each entry is a linked list node:
 | 108 | `LEAVE` | `( -- )` | ✓ | Compile UNLOOP + forward branch (resolved by LOOP/+LOOP) |
 | 109 | `UNLOOP` | `( -- )` | ✓ | Compile `addi R15, 16` to drop loop control parameters from RSP |
 
-### Compilation & Defining (19 words)
+### Compilation & Defining (21 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -272,40 +272,42 @@ Each entry is a linked list node:
 | 125 | `RECURSE` | `( -- )` | ✓ | Compile call to current definition (uses LATEST → entry_to_code) |
 | 126 | `EXECUTE` | `( xt -- )` | | Call execution token (code field address) |
 | 127 | `'` | `( "name" -- xt )` | | Parse next word, find in dictionary, push its code field address (0 if not found) |
-| 128 | `FIND` | `( c-addr -- c-addr 0 \| xt 1 \| xt -1 )` | | ANS FIND: search dictionary for counted string. Returns xt+1 if immediate, xt+-1 if normal, c-addr+0 if not found |
+| 128 | `[']` | `( "name" -- )` | ✓ | Compile-time: parse next word, compile its XT as a literal. Equivalent to `' name LITERAL` |
+| 129 | `>BODY` | `( xt -- addr )` | | Data-field address of a CREATEd word. CREATE's trampoline is 30 bytes, so addr = xt + 30 |
+| 130 | `FIND` | `( c-addr -- c-addr 0 \| xt 1 \| xt -1 )` | | ANS FIND: search dictionary for counted string. Returns xt+1 if immediate, xt+-1 if normal, c-addr+0 if not found |
 
 ### Return Stack (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 129 | `>R` | `( x -- )` `R:( -- x )` | ✓ | Compile inline: pop data stack, push return stack (10 bytes) |
-| 130 | `R>` | `( -- x )` `R:( x -- )` | ✓ | Compile inline: pop return stack, push data stack (10 bytes) |
-| 131 | `R@` | `( -- x )` `R:( x -- x )` | ✓ | Compile inline: copy RSP top to data stack (7 bytes) |
-| 132 | `2>R` | `( x1 x2 -- )` `R:( -- x1 x2 )` | ✓ | Compile inline: move pair to return stack (20 bytes) |
-| 133 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
-| 134 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
+| 131 | `>R` | `( x -- )` `R:( -- x )` | ✓ | Compile inline: pop data stack, push return stack (10 bytes) |
+| 132 | `R>` | `( -- x )` `R:( x -- )` | ✓ | Compile inline: pop return stack, push data stack (10 bytes) |
+| 133 | `R@` | `( -- x )` `R:( x -- x )` | ✓ | Compile inline: copy RSP top to data stack (7 bytes) |
+| 134 | `2>R` | `( x1 x2 -- )` `R:( -- x1 x2 )` | ✓ | Compile inline: move pair to return stack (20 bytes) |
+| 135 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
+| 136 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
 
 ### Input Source & Interpreter (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 135 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
-| 136 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
-| 137 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source (saves/restores TIB state on RSP) |
-| 138 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
-| 139 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
+| 137 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
+| 138 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
+| 139 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source (saves/restores TIB state on RSP) |
+| 140 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
+| 141 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
 
 ### Comments (2 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 140 | `\` | `( -- )` | ✓ | Line comment: set `>IN` = TIB length (skip rest of line) |
-| 141 | `(` | `( -- )` | ✓ | Block comment: skip characters until matching `)` |
+| 142 | `\` | `( -- )` | ✓ | Line comment: set `>IN` = TIB length (skip rest of line) |
+| 143 | `(` | `( -- )` | ✓ | Block comment: skip characters until matching `)` |
 
 ### JIT Compiler (4 words)
 
 The BIOS includes an optional compile-time JIT that inlines native code
-for 17 common primitives instead of emitting `call.l` instructions,
+for 18 common primitives instead of emitting `call.l` instructions,
 uses compact literal encodings for small constants, folds small-literal
 + ALU sequences into single immediate instructions, and fuses common
 two-primitive bigrams into optimised native sequences.  JIT is **off by
@@ -319,8 +321,9 @@ code.
 | 152 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
 | 153 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
 
-**Inlined primitives (17):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
+**Inlined primitives (18):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
+`>BODY`
 
 **Compact literal encoding:** Literals 0–255 use an 8-byte `ldi8`
 sequence instead of the 16-byte `ldi64` + push.  The constant `-1`
@@ -647,7 +650,7 @@ of compiled code.
 | I/O & Display | 17 |
 | String & Parsing | 8 |
 | Control Flow | 15 |
-| Compilation & Defining | 19 |
+| Compilation & Defining | 21 |
 | Return Stack | 6 |
 | Input Source & Interpreter | 5 |
 | Comments | 2 |
@@ -673,11 +676,11 @@ of compiled code.
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
-| **Total** | **353** |
+| **Total** | **355** |
 
-### All Immediate Words (33)
+### All Immediate Words (34)
 
-`;` `IF` `ELSE` `THEN` `BEGIN` `UNTIL` `WHILE` `REPEAT` `DO` `LOOP` `+LOOP` `AGAIN` `LEAVE` `UNLOOP` `EXIT` `>R` `R>` `R@` `2>R` `2R>` `2R@` `[` `LITERAL` `S"` `."` `\` `(` `TO` `POSTPONE` `RECURSE` `[CHAR]` `ABORT"` `DOES>`
+`;` `IF` `ELSE` `THEN` `BEGIN` `UNTIL` `WHILE` `REPEAT` `DO` `LOOP` `+LOOP` `AGAIN` `LEAVE` `UNLOOP` `EXIT` `>R` `R>` `R@` `2>R` `2R>` `2R@` `[` `LITERAL` `S"` `."` `\` `(` `TO` `POSTPONE` `RECURSE` `[CHAR]` `ABORT"` `DOES>` `[']`
 
 ### Dictionary Chain Order (link chain: last → first)
 

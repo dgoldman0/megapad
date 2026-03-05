@@ -25,7 +25,7 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 353 Forth dictionary words, 12,544 lines ASM, ~28 KB binary |
+| **BIOS** | 355 Forth dictionary words, 14,353 lines ASM, ~28 KB binary |
 | **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,004 lines Forth |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 2,671+849 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (1,978 lines) — 63× speedup over PyPy |
@@ -139,15 +139,15 @@ classes, all memory-mapped at `0xFFFF_FF00+`.
 │  Scheduler · Filesystem · TUI   │    data ports, multicore, network,
 │  Network Stack · TLS 1.3       │    TLS 1.3, sockets, PQC
 ├─────────────────────────────────┤
-│    BIOS v1.0 (12,544 lines)    │  ← Subroutine-threaded Forth,
-│  353 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (14,353 lines)    │  ← Subroutine-threaded Forth,
+│  355 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-353 dictionary words covering arithmetic, logic, stack manipulation,
+355 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
@@ -300,7 +300,7 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
 | `system.py` | 610 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 12,544 | Forth BIOS in assembly (353 words, multicore, crypto, hardened) |
+| `bios.asm` | 14,353 | Forth BIOS in assembly (355 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
 | `kdos.f` | 11,004 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
 | `cli.py` | 1,350 | CLI, boot modes, headless TCP server, interactive debug monitor |
@@ -328,7 +328,7 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 353 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 355 entries by category) |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 923 definitions by section, §1–§17) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |

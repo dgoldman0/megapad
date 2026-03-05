@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **353 entries** —
+This document catalogs every word in the BIOS dictionary — **355 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -312,7 +312,7 @@ execute at compile time to lay down branch instructions).
 
 ---
 
-## Compilation & Defining Words (19 words)
+## Compilation & Defining Words (21 words)
 
 These words create new dictionary entries or control the compiler.
 
@@ -351,6 +351,8 @@ These words create new dictionary entries or control the compiler.
 | `]` | `( -- )` | Switch to compile state. |
 | `RECURSE` | `( -- )` | Compile a recursive call to the word currently being defined.  Immediate. |
 | `'` | `( "name" -- xt )` | Find *name* in the dictionary and push its execution token. |
+| `[']` | `( "name" -- )` | Compile-time: parse next word, compile its XT as a literal.  Equivalent to `' name LITERAL`.  Immediate. |
+| `>BODY` | `( xt -- addr )` | Data-field address of a CREATEd word (xt + 30). |
 | `EXECUTE` | `( xt -- )` | Call the word whose execution token is on the stack. |
 | `FIND` | `( c-addr -- xt flag \| c-addr 0 )` | Search the dictionary for a counted string.  Returns the xt and a flag (+1 immediate, −1 normal) or 0 if not found. |
 | `STATE` | `( -- addr )` | Address of the compiler state variable (0 = interpreting, non-zero = compiling). |

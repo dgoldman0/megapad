@@ -98,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (353 words, ~12,544 lines):
+**BIOS v1.0** (355 words, ~14,353 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -486,7 +486,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 353 words, ~12,544 lines) is the **permanent,
+The BIOS Forth (v1.0, 355 words, ~14,353 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -494,7 +494,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 353 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 355 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

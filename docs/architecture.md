@@ -567,8 +567,8 @@ the correct default for pre-privilege firmware.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 12,162 lines)            │
-│  Subroutine-threaded Forth, 346 dictionary words │
+│  BIOS v1.0  (bios.asm, 14,353 lines)            │
+│  Subroutine-threaded Forth, 355 dictionary words │
 │  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
@@ -582,7 +582,7 @@ the correct default for pre-privilege firmware.
 
 The BIOS Forth compiler includes an optional **compile-time JIT** that
 replaces `call.l` / `ret.l` pairs with inlined native machine code for
-17 common primitives.  This is a *code-size* and *runtime* optimisation:
+18 common primitives.  This is a *code-size* and *runtime* optimisation:
 each inlined primitive saves the 13-byte call overhead and eliminates
 the call/ret cycle cost at execution time.
 
@@ -610,7 +610,7 @@ optimisations via a one-entry peephole lookback buffer:
    inlined primitive (type 2), the bigram table (`jit_bigram_table`) is
    scanned for a matching pair; on hit, the previous primitive's code
    is rewound and the fused body is emitted.
-3. The compiler scans a 17-entry inline table (`jit_inline_table`) that
+3. The compiler scans an 18-entry inline table (`jit_inline_table`) that
    maps dictionary entry addresses to pre-assembled native byte
    sequences (3–13 bytes each).
 4. If a match is found, the native bytes are copied directly into the
@@ -623,8 +623,9 @@ optimisations via a one-entry peephole lookback buffer:
 7. When an IMMEDIATE word executes during compilation (`;`, `IF`, `DO`,
    etc.), the peephole state is flushed to prevent stale matches.
 
-**Inlined primitives (17):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
+**Inlined primitives (18):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
+`>BODY`
 
 **Bigram patterns (6):** `DUP +`, `SWAP DROP`, `DUP @`, `OVER +`,
 `DUP DROP`, `SWAP SWAP`
@@ -727,7 +728,7 @@ DMA, and reliability specifications.
 | CPU emulator | `megapad64.py` | 2,868 | Full ISA + extended tile engine implementation |
 | System glue | `system.py` | 994 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
 | Devices | `devices.py` | ~2,000 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
-| BIOS | `bios.asm` | 12,162 | Forth interpreter, boot, multicore, 346 dictionary words |
+| BIOS | `bios.asm` | 14,353 | Forth interpreter, boot, multicore, 355 dictionary words |
 | OS | `kdos.f` | 10,225 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
 | Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
 | Assembler | `asm.py` | 788 | Two-pass macro assembler |
