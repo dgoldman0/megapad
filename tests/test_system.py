@@ -2707,6 +2707,135 @@ class TestBIOS(unittest.TestCase):
         for word in ['[IF]', '[ELSE]', '[THEN]', '[DEFINED]', '[UNDEFINED]']:
             self.assertIn(word, text)
 
+    # ------------------------------------------------------------------
+    #  Relocation tracking
+    # ------------------------------------------------------------------
+
+    def test_reloc_vars_exist(self):
+        """_RELOC-ACTIVE, _RELOC-COUNT, _RELOC-BUF are visible and default 0."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'CR ." [RA=" _RELOC-ACTIVE @ . ." ]"',
+            'CR ." [RC=" _RELOC-COUNT  @ . ." ]"',
+            'CR ." [RB=" _RELOC-BUF    @ . ." ]"',
+        ])
+        import re
+        ra = re.search(r'\[RA=(\d+)', text)
+        rc = re.search(r'\[RC=(\d+)', text)
+        rb = re.search(r'\[RB=(\d+)', text)
+        self.assertTrue(ra and rc and rb, f"Could not parse reloc vars: {text}")
+        self.assertEqual(int(ra.group(1)), 0)
+        self.assertEqual(int(rc.group(1)), 0)
+        self.assertEqual(int(rb.group(1)), 0)
+
+    def test_reloc_inactive_by_default(self):
+        """Compiling with tracking OFF records nothing."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "0 _RELOC-COUNT !",
+            ": TNOP DUP DROP ;",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+        ])
+        import re
+        rc = re.search(r'\[RC=(\d+)', text)
+        self.assertTrue(rc, f"Could not parse: {text}")
+        self.assertEqual(int(rc.group(1)), 0)
+
+    def test_reloc_tracks_compile_call(self):
+        """Colon def with word refs records relocs via compile_call."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            ": TREL DUP DROP + ;",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+        ])
+        import re
+        rc = re.search(r'\[RC=(\d+)', text)
+        self.assertTrue(rc, f"Could not parse: {text}")
+        count = int(rc.group(1))
+        self.assertEqual(count, 3, "DUP DROP + should produce 3 relocs")
+
+    def test_reloc_no_literal_tracking(self):
+        """Numeric literals do NOT generate relocation entries."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            ": TLIT 42 100 ;",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+        ])
+        import re
+        rc = re.search(r'\[RC=(\d+)', text)
+        self.assertTrue(rc, f"Could not parse: {text}")
+        self.assertEqual(int(rc.group(1)), 0,
+                         "Numeric literals should not generate relocs")
+
+    def test_reloc_tracks_variable(self):
+        """VARIABLE records a reloc for the data-field LDI64."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            "VARIABLE XTMP",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+        ])
+        import re
+        rc = re.search(r'\[RC=(\d+)', text)
+        self.assertTrue(rc, f"Could not parse: {text}")
+        self.assertEqual(int(rc.group(1)), 1,
+                         "VARIABLE should record exactly 1 reloc")
+
+    def test_reloc_tracks_create(self):
+        """CREATE records a reloc for the data-field LDI64."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            "CREATE YTMP",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+        ])
+        import re
+        rc = re.search(r'\[RC=(\d+)', text)
+        self.assertTrue(rc, f"Could not parse: {text}")
+        self.assertEqual(int(rc.group(1)), 1,
+                         "CREATE should record exactly 1 reloc")
+
+    def test_reloc_buf_contents_valid(self):
+        """Recorded reloc offsets point into dictionary space."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'CR ." [H1=" HERE . ." ]"',
+            "HERE _RELOC-BUF ! 1024 ALLOT",
+            'CR ." [H2=" HERE . ." ]"',
+            "1 _RELOC-ACTIVE ! 0 _RELOC-COUNT !",
+            ": TBUF DUP ;",
+            "0 _RELOC-ACTIVE !",
+            'CR ." [RC=" _RELOC-COUNT @ . ." ]"',
+            'CR ." [R0=" _RELOC-BUF @ @ . ." ]"',
+            'CR ." [H3=" HERE . ." ]"',
+        ])
+        import re
+        h2 = re.search(r'\[H2=(\d+)', text)
+        rc = re.search(r'\[RC=(\d+)', text)
+        r0 = re.search(r'\[R0=(\d+)', text)
+        h3 = re.search(r'\[H3=(\d+)', text)
+        self.assertTrue(h2 and rc and r0 and h3, f"Parse failed: {text}")
+        count = int(rc.group(1))
+        self.assertEqual(count, 1, ": TBUF DUP ; should record 1 reloc")
+        reloc_addr = int(r0.group(1))
+        here_after_allot = int(h2.group(1))
+        here_end = int(h3.group(1))
+        self.assertGreaterEqual(reloc_addr, here_after_allot,
+                                f"Reloc {reloc_addr} >= compile region start")
+        self.assertLess(reloc_addr, here_end,
+                        f"Reloc {reloc_addr} < compile region end")
+
 
 # ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)

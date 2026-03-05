@@ -2421,6 +2421,34 @@ compile_call:
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
+    ; --- reloc tracking: immediate offset = old_HERE + 3 = R0 - 10 ---
+    mov r1, r0
+    subi r1, 10
+    ldi64 r11, reloc_record
+    call.l r11
+    ret.l
+
+; reloc_record: if relocation tracking is active, record an immediate offset.
+;   R1 = byte address of the 64-bit immediate.
+;   Clobbers: R0, R7, R11.
+reloc_record:
+    ldi64 r11, var_reloc_active
+    ldn r7, r11
+    cmpi r7, 0
+    breq reloc_record_skip
+    ; Store R1 at buf[count], increment count
+    ldi64 r11, var_reloc_buf
+    ldn r0, r11               ; R0 = buf base
+    ldi64 r11, var_reloc_count
+    ldn r7, r11               ; R7 = count
+    mov r11, r7
+    lsli r11, 3               ; count * 8
+    add r0, r11               ; R0 = &buf[count]
+    str r0, r1                ; buf[count] = offset
+    inc r7
+    ldi64 r11, var_reloc_count
+    str r11, r7               ; write back
+reloc_record_skip:
     ret.l
 
 ; compile_literal: emit code to push R1 value onto data stack at HERE.
@@ -4776,6 +4804,7 @@ w_create_copy:
     ldi r12, 0x10
     st.b r0, r12
     inc r0
+    mov r13, r0               ; save imm offset for reloc tracking
     ; 8 bytes of data_addr (R9)
     st.b r0, r9
     inc r0
@@ -4886,6 +4915,10 @@ w_create_copy:
     ; Update LATEST
     ldi64 r11, var_latest
     str r11, r1
+    ; --- reloc tracking ---
+    mov r1, r13
+    ldi64 r11, reloc_record
+    call.l r11
     ret.l
 w_create_err:
     ldi64 r10, str_no_name
@@ -5330,6 +5363,7 @@ w_var_name_done:
     ldi r7, 0x10
     st.b r0, r7
     inc r0
+    mov r9, r0                ; save imm offset for reloc tracking
     ; 8 bytes of data_addr (R1) LE
     st.b r0, r1
     inc r0
@@ -5412,6 +5446,10 @@ w_var_name_done:
     str r11, r0
     ldi64 r11, var_latest
     str r11, r13
+    ; --- reloc tracking ---
+    mov r1, r9
+    ldi64 r11, reloc_record
+    call.l r11
     ret.l
 
 ; CONSTANT ( n "name" -- )
@@ -8573,6 +8611,12 @@ does_runtime:
     ; ret.l: 0E
     ldi r7, 0x0E
     st.b r0, r7
+
+    ; --- reloc tracking: immediate is at code_start + 19 ---
+    mov r1, r9
+    addi r1, 19
+    ldi64 r11, reloc_record
+    call.l r11
 
     ; Return from the defining word (does_runtime was called, so just ret.l)
     ; The ret.l we return to is the one we're pointing at (R10), which exits
@@ -14006,13 +14050,43 @@ d_jit_stats:
     ret.l
 
 ; === JIT-RESET ===
-latest_entry:
 d_jit_reset:
     .dq d_jit_stats
     .db 9
     .ascii "JIT-RESET"
     ldi64 r11, w_jit_reset
     call.l r11
+    ret.l
+
+; === _RELOC-ACTIVE ===
+d_reloc_active:
+    .dq d_jit_reset
+    .db 13
+    .ascii "_RELOC-ACTIVE"
+    ldi64 r1, var_reloc_active
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; === _RELOC-COUNT ===
+d_reloc_count:
+    .dq d_reloc_active
+    .db 12
+    .ascii "_RELOC-COUNT"
+    ldi64 r1, var_reloc_count
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; === _RELOC-BUF ===
+latest_entry:
+d_reloc_buf:
+    .dq d_reloc_count
+    .db 10
+    .ascii "_RELOC-BUF"
+    ldi64 r1, var_reloc_buf
+    subi r14, 8
+    str r14, r1
     ret.l
 
 ; =====================================================================
@@ -14072,6 +14146,14 @@ var_jit_last_value:
     .dq 0                             ; literal value or entry addr
 var_jit_last_here:
     .dq 0                             ; HERE before last emission
+
+; Relocation tracking — records byte offsets of address-carrying LDI64 immediates
+var_reloc_active:
+    .dq 0                             ; 0 = off, nonzero = tracking active
+var_reloc_count:
+    .dq 0                             ; number of reloc entries recorded
+var_reloc_buf:
+    .dq 0                             ; pointer to user-allocated relocation buffer
 
 ; =====================================================================
 ;  String Constants
