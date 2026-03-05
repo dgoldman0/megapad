@@ -2345,6 +2345,11 @@ w_bracket_tick:
     addi r14, 8
     ldi64 r11, compile_literal ; compile it as a literal into current definition
     call.l r11
+    ; --- reloc tracking: record the XT literal's 8-byte immediate ---
+    mov r1, r0
+    subi r1, 13               ; R0 = new HERE; immediate at HERE-13
+    ldi64 r11, reloc_record
+    call.l r11
     ret.l
 
 ; >BODY ( xt -- addr ) data-field address of a CREATEd word
@@ -5051,6 +5056,11 @@ sq_done:
 
 ; squote_runtime: called at runtime.  Return address on RSP = string address.
 ;   Scan to null, compute length, push (addr len), patch return past string.
+; --- dictionary header so binimg can resolve compile_call references ---
+d_squote_runtime:
+    .dq d_reloc_buf
+    .db 4
+    .ascii "(S\")"
 squote_runtime:
     ldn r10, r15              ; R10 = string start
     mov r9, r10               ; R9 = scan pointer
@@ -8555,6 +8565,12 @@ w_does:
 ;   to the byte after "call does_runtime", which is a ret.l. So:
 ;     does_body = return_addr + 1
 ;   Patches LATEST (the most recently CREATEd word) trampoline at offset 16.
+; --- dictionary header so binimg can resolve compile_call references ---
+latest_entry:
+d_does_runtime:
+    .dq d_squote_runtime
+    .db 7
+    .ascii "(DOES>)"
 does_runtime:
     ; Get return address from RSP (the call.l pushed it)
     ldn r10, r15              ; R10 = return address (points to ret.l)
@@ -14139,7 +14155,6 @@ d_reloc_count:
     ret.l
 
 ; === _RELOC-BUF ===
-latest_entry:
 d_reloc_buf:
     .dq d_reloc_count
     .db 10

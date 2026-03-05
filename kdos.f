@@ -86,9 +86,8 @@ VARIABLE PN-LEN
 : ASSERT  ( flag -- )
     0= ABORT" Assertion failed" ;
 
-\ ['] ( "name" -- )  compile-time: parse next word, compile its XT as literal
-\   Equivalent to: ' name LITERAL
-: ['] ' POSTPONE LITERAL ; IMMEDIATE
+\ ['] — use BIOS primitive (includes reloc_record for binimg support)
+
 
 \ .DEPTH ( -- )  show current stack depth
 : .DEPTH  ( -- )  ."  [" DEPTH . ."  deep]" ;
