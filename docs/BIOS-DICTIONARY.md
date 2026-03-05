@@ -425,6 +425,7 @@ of compiled code.
 | 196 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
 | 197 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
 | 198 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
+| 199 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
 
 ### Timer & Interrupts (6 words)
 
@@ -704,7 +705,7 @@ UCHAR → .ZSTR → L! → L@ → W! → W@ → OFF → U> → U< → <= → >= 
 CREATE → IMMEDIATE → LITERAL → ] → [ → STATE → AGAIN → +LOOP → UNLOOP →
 J → R@ → R> → >R → EXIT → ( → \ → ISR! → DI! → EI! → RTC-ACK →
 RTC-ALARM! → RTC-CTRL! → RTC! → EPOCH@ → MS@ → RTC@ → TIMER-ACK →
-TIMER-CTRL! → TIMER! → DISK-WRITE → DISK-READ → DISK-N! → DISK-DMA! →
+TIMER-CTRL! → TIMER! → DISK-FLUSH → DISK-WRITE → DISK-READ → DISK-N! → DISK-DMA! →
 DISK-SEC! → DISK@ → NET-MAC@ → NET-RECV → NET-SEND → NET-STATUS →
 ACCEPT → ." → SPACES → SPACE → TYPE → CONSTANT → VARIABLE → I → LOOP →
 DO → REPEAT → WHILE → UNTIL → BEGIN → THEN → ELSE → IF → ; → : → ' →

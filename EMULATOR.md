@@ -420,7 +420,7 @@ buffer), then tokenises and interprets:
 `KEM-STATUS@` `KEM-PK@` `KEM-CT@`
 
 **Disk / Storage**
-`DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE`
+`DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE` `DISK-FLUSH`
 
 **Timer & Interrupts**
 `TIMER!` `TIMER-CTRL!` `TIMER-ACK` `EI!` `DI!` `ISR!`

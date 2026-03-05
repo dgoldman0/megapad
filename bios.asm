@@ -5957,6 +5957,13 @@ w_disk_write:
     st.b r11, r1
     ret.l
 
+; DISK-FLUSH ( -- )  flush in-memory image to host file (cmd 0xFF)
+w_disk_flush:
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r1, 0xFF
+    st.b r11, r1
+    ret.l
+
 ; =====================================================================
 ;  FSLOAD — load and evaluate a file from MP64FS disk
 ; =====================================================================
@@ -11935,9 +11942,18 @@ d_disk_write:
     call.l r11
     ret.l
 
+; === DISK-FLUSH ===
+d_disk_flush:
+    .dq d_disk_write
+    .db 10
+    .ascii "DISK-FLUSH"
+    ldi64 r11, w_disk_flush
+    call.l r11
+    ret.l
+
 ; === TIMER! ===
 d_timer_store:
-    .dq d_disk_write
+    .dq d_disk_flush
     .db 6
     .ascii "TIMER!"
     ldi64 r11, w_timer_store

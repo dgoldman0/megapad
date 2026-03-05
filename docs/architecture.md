@@ -226,7 +226,7 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 5. Data appears in RAM at DMA_ADDR
 
 **BIOS words:** `DISK-SEC!`, `DISK-DMA!`, `DISK-N!`, `DISK-READ`,
-`DISK-WRITE`, `DISK@` (read status).
+`DISK-WRITE`, `DISK-FLUSH`, `DISK@` (read status).
 
 ---
 

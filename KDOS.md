@@ -718,6 +718,7 @@ Six new BIOS words expose the storage device (at MMIO offset 0x0200):
 | `DISK-N!` | ( n -- ) | Set sector count |
 | `DISK-READ` | ( -- ) | Issue read command: disk → RAM via DMA |
 | `DISK-WRITE` | ( -- ) | Issue write command: RAM → disk via DMA |
+| `DISK-FLUSH` | ( -- ) | Flush in-memory image to host file (cmd 0xFF) |
 
 The storage device uses 512-byte sectors and DMA transfers.
 

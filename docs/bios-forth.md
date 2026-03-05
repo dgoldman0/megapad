@@ -391,6 +391,7 @@ These words talk directly to the storage controller MMIO registers.
 | `DISK-N!` | `( n -- )` | Set the number of sectors to transfer. |
 | `DISK-READ` | `( -- )` | Issue a read command.  Transfers sector(s) from disk to RAM at the DMA address. |
 | `DISK-WRITE` | `( -- )` | Issue a write command.  Transfers sector(s) from RAM to disk. |
+| `DISK-FLUSH` | `( -- )` | Flush the in-memory disk image to the host file (command 0xFF).  No-op on real hardware. |
 
 **Example — reading sector 10 into a buffer:**
 ```forth
