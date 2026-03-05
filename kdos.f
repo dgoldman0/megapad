@@ -49,6 +49,11 @@ JIT-ON
 : .R  ( just use . for now )
     DROP . ;
 
+\ DEFER ( "name" -- ) create a deferred word (default = ABORT)
+\ IS   ( xt "name" -- ) set the action of a deferred word
+: DEFER  ( "name" -- )  CREATE ['] ABORT ,  DOES> @ EXECUTE ;
+: IS     ( xt "name" -- )  ' >BODY ! ;
+
 \ -- String utilities (needed by MP64FS file system) --
 
 \ SAMESTR? ( addr1 addr2 maxlen -- flag )
@@ -3429,7 +3434,7 @@ VARIABLE FR-SEC     \ remaining sectors to read
 \    +44  ext1_start[2]  u16 LE second extent start
 \    +46  ext1_count[2]  u16 LE second extent sector count
 \
-\  File descriptor layout (created by OPEN):
+\  File descriptor layout (allocated from FD pool, freed by FCLOSE):
 \    +0   start_sector   (cell)
 \    +8   max_sectors     (cell)
 \    +16  used_bytes      (cell)
@@ -3437,6 +3442,7 @@ VARIABLE FR-SEC     \ remaining sectors to read
 \    +32  dir_slot        (cell) — index into directory cache
 \    +40  ext1_start      (cell) — second extent start
 \    +48  ext1_count      (cell) — second extent count
+\  Pool slot has an in_use flag at fdesc - 8.
 
 \ -- Constants --
 14  CONSTANT FS-DATA-START
@@ -3899,11 +3905,63 @@ VARIABLE LB-DESC
     DISK-READ
     ."  Loaded " LB-SLOT @ DIRENT 28 + L@ . ."  bytes from " NAMEBUF .ZSTR CR ;
 
+\ ── FD Pool — fixed pool of reusable file descriptors ────────────────
+\
+\  16 slots × 72 bytes = 1,152 bytes, allocated once at boot.
+\  Slot layout (9 cells):
+\    +0  in_use   (cell)  0=free, -1=in-use
+\    +8  start_sec (cell)  — fdesc offset +0
+\    +16 max_sec   (cell)  — fdesc offset +8
+\    +24 used_bytes (cell) — fdesc offset +16
+\    +32 cursor    (cell)  — fdesc offset +24
+\    +40 dir_slot  (cell)  — fdesc offset +32
+\    +48 ext1_start(cell)  — fdesc offset +40
+\    +56 ext1_count(cell)  — fdesc offset +48
+\    +64 reserved  (cell)  — padding
+\  The returned fdesc points to +8, so existing field accessors
+\  (F.START +0, F.MAX +8, etc.) remain unchanged.
+
+16 CONSTANT FD-MAX
+72 CONSTANT FD-SLOT-SZ
+CREATE FD-POOL  FD-MAX FD-SLOT-SZ * ALLOT
+FD-POOL FD-MAX FD-SLOT-SZ * 0 FILL          \ zero the pool
+
+\ FD-SLOT ( n -- addr )  address of pool slot n  (0..15)
+: FD-SLOT  ( n -- addr )  FD-SLOT-SZ * FD-POOL + ;
+
+\ FD-ALLOC ( -- fdesc | 0 )  allocate a pool slot, return fdesc or 0
+: FD-ALLOC  ( -- fdesc | 0 )
+    FD-MAX 0 DO
+        I FD-SLOT @ 0= IF          \ in_use == 0?
+            -1 I FD-SLOT !          \ mark in-use
+            I FD-SLOT 8 +           \ fdesc = slot + 8
+            UNLOOP EXIT
+        THEN
+    LOOP
+    0 ;                              \ pool exhausted
+
+\ FCLOSE ( fdesc -- )  release file descriptor back to pool
+: FCLOSE  ( fdesc -- )
+    DUP 0= IF DROP EXIT THEN
+    8 -                              \ back to slot header
+    0 SWAP ! ;                       \ clear in_use flag
+
+\ FD-FILL ( fdesc slot -- )  populate fdesc fields from dir slot
+: FD-FILL  ( fdesc slot -- )
+    >R
+    R@ DIRENT DE.SEC       OVER !          \ +0 start_sector
+    R@ DIRENT DE.COUNT     OVER 8 + !     \ +8 max_sectors
+    R@ DIRENT DE.USED      OVER 16 + !    \ +16 used_bytes
+    0                      OVER 24 + !    \ +24 cursor = 0
+    R@                     OVER 32 + !    \ +32 dir_slot
+    R@ DIRENT DE.EXT1-SEC  OVER 40 + !    \ +40 ext1_start
+    R> DIRENT DE.EXT1-CNT  SWAP 48 + ! ;  \ +48 ext1_count
+
 \ ── OPEN — open a file by name ───────────────────────────────────────
 
 VARIABLE OP-SLOT
 
-: OPEN  ( "name" -- fdesc | 0 )
+: (OPEN)  ( "name" -- fdesc | 0 )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR 0 EXIT THEN
     PARSE-NAME
@@ -3911,16 +3969,13 @@ VARIABLE OP-SLOT
     OP-SLOT @ -1 = IF
         ."  Not found: " NAMEBUF .ZSTR CR 0 EXIT
     THEN
-    \ Create file descriptor in dictionary (7 cells = 56 bytes)
-    HERE
-    OP-SLOT @ DIRENT DE.SEC   ,      \ +0  start_sector
-    OP-SLOT @ DIRENT DE.COUNT ,      \ +8  max_sectors
-    OP-SLOT @ DIRENT DE.USED  ,      \ +16 used_bytes
-    0 ,                               \ +24 cursor = 0
-    OP-SLOT @ ,                       \ +32 dir_slot
-    OP-SLOT @ DIRENT DE.EXT1-SEC ,   \ +40 ext1_start
-    OP-SLOT @ DIRENT DE.EXT1-CNT ,   \ +48 ext1_count
-    ;
+    FD-ALLOC DUP 0= IF
+        ."  No free FD slots" CR EXIT
+    THEN
+    OP-SLOT @ FD-FILL ;
+
+DEFER OPEN
+' (OPEN) IS OPEN
 
 \ F.SLOT ( fdesc -- n ) directory slot index (for OPEN'd files)
 : F.SLOT  ( fdesc -- n )  32 + @ ;
@@ -4566,26 +4621,22 @@ VARIABLE DOC-LINES              \ newline counter for pagination
 \ DOC ( "name" -- )  page through a documentation file
 : DOC  ( "name" -- )
     OPEN DUP 0= IF EXIT THEN
-    CR SHOW-FILE CR ;
+    DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ TUTORIAL ( "name" -- )  walk through a tutorial file
 : TUTORIAL  ( "name" -- )
     OPEN DUP 0= IF EXIT THEN
-    CR SHOW-FILE CR ;
+    DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ OPEN-BY-SLOT ( slot -- fdesc | 0 )  open a file by directory slot
 \   Like OPEN but takes a slot index instead of parsing a name.
+\   Uses the FD pool; caller should FCLOSE when done.
 : OPEN-BY-SLOT  ( slot -- fdesc | 0 )
     DUP DIRENT C@ 0= IF DROP 0 EXIT THEN
-    HERE SWAP                             ( here slot )
-    DUP DIRENT DE.SEC       ,             \ +0  start_sector
-    DUP DIRENT DE.COUNT     ,             \ +8  max_sectors
-    DUP DIRENT DE.USED      ,             \ +16 used_bytes
-    0 ,                                    \ +24 cursor = 0
-    DUP ,                                  \ +32 dir_slot
-    DUP DIRENT DE.EXT1-SEC  ,             \ +40 ext1_start
-    DIRENT DE.EXT1-CNT      ,             \ +48 ext1_count
-    ;
+    FD-ALLOC DUP 0= IF
+        ."  No free FD slots" CR NIP EXIT
+    THEN
+    SWAP FD-FILL ;
 
 \ DESCRIBE ( "word" -- )  look up a word in the documentation
 \   Tries to open a doc file matching the name.  If no exact match,
@@ -4612,7 +4663,7 @@ VARIABLE DOC-LINES              \ newline counter for pagination
         EXIT
     THEN
     OPEN-BY-SLOT DUP 0= IF EXIT THEN
-    CR SHOW-FILE CR ;
+    DUP >R CR SHOW-FILE CR R> FCLOSE ;
 
 \ =====================================================================
 \  §7.8  Dictionary Search — WORDS-LIKE, APROPOS
@@ -5806,7 +5857,7 @@ VARIABLE DOC-SEL-FOUND
             I DIRENT DE.TYPE DUP FTYPE-DOC = SWAP FTYPE-TUT = OR IF
                 DOC-SEL-FOUND @ DOC-SEL-N @ = IF
                     I OPEN-BY-SLOT DUP 0<> IF
-                        PAGE SHOW-FILE
+                        DUP >R PAGE SHOW-FILE R> FCLOSE
                         CR DIM ."   Press any key to return..."  RESET-COLOR
                         KEY DROP
                     ELSE DROP THEN

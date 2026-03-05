@@ -145,7 +145,9 @@ PORTS                          \ List all port bindings
 - **String utilities**: .ZSTR, SAMESTR?, NAMEBUF, PARSE-NAME (from input stream via WORD)
 - **Comparison operators**: >=, <= (defined atop BIOS < and >)
 - **MP64FS file system**: Named on-disk files with bitmap allocation and directory
-- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE, RMFILE, OPEN, FFLUSH
+- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE, RMFILE, OPEN, FCLOSE, FFLUSH
+- **FD pool**: 16-slot fixed pool (1,152 bytes) — OPEN and OPEN-BY-SLOT allocate from pool, FCLOSE reclaims
+- **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
 - **Refactored file I/O**: FWRITE/FREAD with cursor advancement and used_bytes tracking
 - **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
@@ -304,8 +306,8 @@ New Forth words (§7.7, ~120 lines):
 - `TUTORIAL` ( "name" -- ): open and display tutorial file
 - `DESCRIBE` ( "word" -- ): search directory for matching doc, display or suggest TOPICS
 - `TOPICS` / `LESSONS`: list all doc/tutorial files from FS directory
-- `OPEN-BY-SLOT` ( slot -- fdesc | 0 ): open file by directory slot index
-- `SHOW-FILE` ( fdesc -- ): read and display entire file via FREAD
+- `OPEN-BY-SLOT` ( slot -- fdesc | 0 ): open file by directory slot index (uses FD pool; caller should FCLOSE)
+- `SHOW-FILE` ( fdesc -- ): read and display entire file via FREAD (caller should FCLOSE)
 - `.DOC-CHUNK` ( addr len -- ): paginated display (20-line pages, KEY to continue)
 - SCR-DOCS: screen 7 — documentation browser listing topics and tutorials
 
@@ -741,13 +743,17 @@ set up DMA address / sector / count, and issue a single DMA transfer.
 
 A file is a contiguous region of sectors with a cursor for sequential I/O.
 
-**File descriptor** (4 cells = 32 bytes):
+**File descriptor** (allocated from 16-slot FD pool, freed by `FCLOSE`):
 ```forth
   +0   start_sector   first sector on disk
   +8   max_sectors    allocated size in sectors
   +16  used_bytes     bytes actually written
   +24  cursor         current read/write position (byte offset)
+  +32  dir_slot       directory slot index (OPEN'd files)
+  +40  ext1_start     second extent start sector
+  +48  ext1_count     second extent sector count
 ```
+Pool slot has an `in_use` flag at `fdesc - 8`.
 
 **Usage**:
 ```forth
@@ -761,6 +767,7 @@ FILES                         \ List all registered files
 
 **Implemented operations**:
 - `FILE ( start max "name" -- )` — create and register a file descriptor
+- `FCLOSE ( fdesc -- )` — release file descriptor back to FD pool
 - `FWRITE ( addr len fdesc -- )` — write bytes at cursor position
 - `FREAD ( addr len fdesc -- actual )` — read bytes, return actual count
 - `FSEEK ( pos fdesc -- )` — set cursor to absolute position

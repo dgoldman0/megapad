@@ -71,6 +71,8 @@ Small general-purpose helpers used throughout KDOS.
 | `NEEDS` | `( n -- )` | Stack safety guard — aborts with an error message if the data stack currently has fewer than *n* items.  Useful at the start of words that need a specific number of arguments. |
 | `ASSERT` | `( flag -- )` | Abort with "Assertion failed" if the flag is false (zero).  Useful in tests and sanity checks. |
 | `.DEPTH` | `( -- )` | Print the current stack depth in brackets, e.g., `[3 deep]`.  Handy for debugging stack issues. |
+| `DEFER` | `( "name" -- )` | Create a deferred word whose action can be changed at run-time.  Defaults to `ABORT`.  Set the action with `IS`. |
+| `IS` | `( xt "name" -- )` | Set the action of a deferred word.  E.g. `' my-open IS OPEN`. |
 
 **Variables:** `NAMEBUF` (16-byte name scratch buffer), `PN-LEN` (parsed name length).
 
@@ -584,13 +586,23 @@ sector, not by name.  Up to **8 files** can be open.
 
 ### File Descriptor Layout
 
+File descriptors are allocated from a fixed pool of 16 slots (1,152 bytes
+total, allocated once at boot).  Each slot is 72 bytes; the returned
+`fdesc` pointer starts at offset +8, so field accessors are unchanged.
+Use `FCLOSE` to release a descriptor back to the pool when done.
+
 ```
+Pool slot layout:
 Offset   Field          Meaning
 ───────  ─────────────  ─────────────────────────────────────
+−8       in_use         0 = free, −1 = in-use  (pool internal)
 +0       start_sector   First sector on disk
 +8       max_sectors    Allocated capacity in sectors
 +16      used_bytes     How many bytes have been written
 +24      cursor         Current read/write byte offset
++32      dir_slot       Directory slot index  (OPEN'd files)
++40      ext1_start     Second extent start sector
++48      ext1_count     Second extent sector count
 ```
 
 ### Words
@@ -651,7 +663,8 @@ names.  See `docs/filesystem.md` for the full on-disk format specification.
 | `CAT` | `( "name" -- )` | Print a file's contents to the terminal (reads sectors into memory, emits bytes). |
 | `FS-FREE` | `( -- )` | Report disk free space: free sectors, bytes, and file count. |
 | `SAVE-BUFFER` | `( buf "name" -- )` | Save a KDOS buffer's data to a named file on disk (file must already exist).  Updates `used_bytes` in the directory. |
-| `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor for `FREAD`/`FWRITE` access.  Returns 0 if not found. |
+| `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor from the FD pool for `FREAD`/`FWRITE` access.  Returns 0 if not found.  `OPEN` is a `DEFER` word — override with `' my-open IS OPEN` (e.g. for a VFS layer). |
+| `FCLOSE` | `( fdesc -- )` | Release a file descriptor back to the FD pool.  No-op if `fdesc` is 0. |
 | `LOAD` | `( "filename" -- )` | Open a Forth source file from disk, read it into memory, and EVALUATE each line.  This is how KDOS extensions and scripts are loaded. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
 
@@ -690,7 +703,8 @@ On-disk layout of an encrypted file:
 CREATE my-key 32 ALLOT   my-key 32 0 FILL   my-key FS-KEY!
 OPEN secret              \ -- fdesc
 DUP ENCRYPTED? .         \ 0 (not encrypted)
-FENCRYPT .                \ 0 (success)
+DUP FENCRYPT .           \ 0 (success)
+FCLOSE                   \ release FD back to pool
 ```
 
 ---
@@ -704,11 +718,11 @@ disk.  Files with type=4 (doc) and type=6 (tutorial) are browsable.
 |------|-------------|-------------|
 | `TOPICS` | `( -- )` | List all documentation files on disk (type=doc). |
 | `LESSONS` | `( -- )` | List all tutorial files on disk (type=tutorial). |
-| `DOC` | `( "name" -- )` | Open and page through a documentation file, pausing every 20 lines with a "--- more ---" prompt. |
-| `TUTORIAL` | `( "name" -- )` | Open and walk through a tutorial file (same pagination as DOC). |
-| `DESCRIBE` | `( "word" -- )` | Search for a documentation file matching the given word name.  If found, displays it.  If not, suggests using `TOPICS`. |
-| `SHOW-FILE` | `( fdesc -- )` | Low-level: page through an open file descriptor with pagination. |
-| `OPEN-BY-SLOT` | `( slot -- fdesc \| 0 )` | Open a file by its directory slot index (for internal use). |
+| `DOC` | `( "name" -- )` | Open and page through a documentation file, pausing every 20 lines with a "--- more ---" prompt.  Automatically closes the FD when done. |
+| `TUTORIAL` | `( "name" -- )` | Open and walk through a tutorial file (same pagination as DOC).  Automatically closes the FD when done. |
+| `DESCRIBE` | `( "word" -- )` | Search for a documentation file matching the given word name.  If found, displays it (closes FD after).  If not, suggests using `TOPICS`. |
+| `SHOW-FILE` | `( fdesc -- )` | Low-level: page through an open file descriptor with pagination.  Caller is responsible for `FCLOSE`. |
+| `OPEN-BY-SLOT` | `( slot -- fdesc \| 0 )` | Open a file by its directory slot index.  Uses the FD pool; caller should `FCLOSE` when done. |
 
 **Example:**
 ```forth

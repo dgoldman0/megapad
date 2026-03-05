@@ -599,7 +599,8 @@ present.
 | `FS-LOAD` | Load superblock + bitmap + directory into RAM |
 | `FS-SYNC` | Write RAM cache back to disk |
 | `FS-ENSURE` | Auto-load FS if not yet loaded |
-| `OPEN name` | Open a file, return a file descriptor for FREAD/FWRITE |
+| `OPEN name` | Open a file, return a file descriptor from the FD pool for FREAD/FWRITE.  `OPEN` is a `DEFER` word (see §1). |
+| `FCLOSE fdesc` | Release a file descriptor back to the FD pool |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
 | `FIND-BY-NAME` | Search directory for a name within the current directory |
 
@@ -615,4 +616,5 @@ present.
 Encryption operates at the sector level: each sector is encrypted as
 a separate AES-256-GCM block with a unique IV derived from sector
 index.  The authentication tag is stored alongside the ciphertext.
-A file must be `OPEN`ed before encrypting/decrypting.
+A file must be `OPEN`ed before encrypting/decrypting.  Remember to
+`FCLOSE` the descriptor when done.
