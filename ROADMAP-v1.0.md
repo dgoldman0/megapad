@@ -21,8 +21,9 @@ crypto (items 34–38) are done.  Crypto enhanced with hardware TRNG,
 SHAKE XOF support, Field ALU (general GF(p) coprocessor), NTT engine,
 and ML-KEM-512 with hybrid PQ key exchange.  Real-network testing
 infrastructure added (TAP device backends, 38 integration tests).
-TCP fully implemented (4 TCB slots, 3-way handshake, sliding window,
-congestion control, retransmit, graceful close, 32 tests).  TLS 1.3
+TCP fully implemented (16–256 dynamic TCB slots with TIME_WAIT reaper,
+3-way handshake, sliding window, congestion control, retransmit, graceful
+close, 37 tests).  TLS 1.3
 fully implemented (HKDF, record layer, handshake, app data).  Socket
 API done (8 words, TCP+UDP).  Post-quantum: ML-KEM-512 keygen/encaps/
 decaps + hybrid X25519+ML-KEM exchange with HKDF key derivation.

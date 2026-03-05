@@ -8837,15 +8837,16 @@ VARIABLE _DNR-DLEN
 \ (slow start + congestion avoidance), and graceful teardown.
 \
 \ Design:
-\   - 4 TCB (Transmission Control Block) slots
+\   - 16–256 TCB (Transmission Control Block) slots (dynamic, XMEM-scaled)
 \   - Each TCB owns a 1460-byte TX ring and 4096-byte RX ring
+\   - TIME_WAIT reaper (60 s 2×MSL) with scavenge-on-alloc
 \   - Retransmit timer per TCB (RTO = 1s initial, doubles on timeout)
 \   - ISN via RANDOM32 for security
 \   - MSS = 1460 (Ethernet MTU − IP − TCP headers)
 
 \ -- TCP constants --
 20 CONSTANT /TCP-HDR              \ minimum TCP header (no options)
-4  VALUE /TCP-MAX-CONN            \ max simultaneous connections (set by NET-TABLES-INIT)
+16 VALUE /TCP-MAX-CONN            \ max simultaneous connections (set by NET-TABLES-INIT)
 1460 CONSTANT TCP-MSS             \ Max Segment Size (1500-20-20)
 4096 CONSTANT /TCP-RXBUF          \ per-connection RX ring buffer
 1460 CONSTANT /TCP-TXBUF          \ per-connection TX buffer (1 MSS)
@@ -8929,7 +8930,7 @@ VARIABLE _DNR-DLEN
 \ -- TCB table (dynamic, XMEM-backed) --
 \   Sized by NET-TABLES-INIT based on available XMEM.
 \   Each TCB is 5728 bytes; the table grows to fill up to 25% of XMEM
-\   (capped at 64 connections, floor of 4).
+\   (capped at 256 connections, floor of 16).
 VARIABLE TCP-TCBS   0 TCP-TCBS !
 
 : TCP-TCBS-SETUP  ( -- )
@@ -8958,8 +8959,58 @@ VARIABLE TCP-TCBS   0 TCP-TCBS !
 
 \ (deferred to NET-TABLES-INIT)
 
+\ -- TCB-USAGE: count active (non-CLOSED) TCBs --
+: TCB-USAGE  ( -- used total )
+    0                                  ( count )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N TCB.STATE @ TCPS-CLOSED <> IF 1+ THEN
+    LOOP
+    /TCP-MAX-CONN ;                    ( used total )
+
+\ -- TIME_WAIT reaper constants --
+\ 2×MSL = 60 000 ms (RFC 793 recommends 2 min, we use 60 s)
+60000 CONSTANT TCP-2MSL
+
+\ -- TCB-REAP-TW: reclaim expired TIME_WAIT TCBs --
+\   Uses RTO-TIMER field to store the EPOCH@ timestamp when the
+\   TCB entered TIME_WAIT.  If (now − stamp) ≥ TCP-2MSL, reclaim.
+: TCB-REAP-TW  ( -- )
+    EPOCH@                             ( now )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.STATE @ TCPS-TIME-WAIT = IF
+            DUP TCB.RTO-TIMER @        ( now tcb stamp )
+            2 PICK SWAP -              ( now tcb elapsed )
+            TCP-2MSL >= IF
+                TCB-INIT               ( now -- reclaimed )
+            ELSE
+                DROP                   ( now )
+            THEN
+        ELSE
+            DROP                       ( now )
+        THEN
+    LOOP
+    DROP ;                             ( -- )
+
+\ -- TCB-FLUSH-TIMEWAIT: force-reclaim all TIME_WAIT TCBs (test helper) --
+: TCB-FLUSH-TIMEWAIT  ( -- )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N DUP TCB.STATE @ TCPS-TIME-WAIT = IF
+            TCB-INIT
+        ELSE
+            DROP
+        THEN
+    LOOP ;
+
 \ -- TCB-ALLOC: find a free (CLOSED) TCB, return index or -1 --
+\   On failure, runs the TIME_WAIT reaper once and retries.
 : TCB-ALLOC  ( -- idx | -1 )
+    /TCP-MAX-CONN 0 DO
+        I TCB-N TCB.STATE @ TCPS-CLOSED = IF
+            I UNLOOP EXIT
+        THEN
+    LOOP
+    \ No free slot — reap expired TIME_WAIT and retry
+    TCB-REAP-TW
     /TCP-MAX-CONN 0 DO
         I TCB-N TCB.STATE @ TCPS-CLOSED = IF
             I UNLOOP EXIT
@@ -9380,9 +9431,10 @@ VARIABLE _TI-DATA
                 TCPS-FIN-WAIT-2 R@ TCB.STATE !
             THEN
         THEN
-        \ Handle CLOSING → TIME-WAIT
+        \ Handle CLOSING → TIME-WAIT (stamp entry time for reaper)
         R@ TCB.STATE @ TCPS-CLOSING = IF
             TCPS-TIME-WAIT R@ TCB.STATE !
+            EPOCH@ R@ TCB.RTO-TIMER !
         THEN
         \ Handle LAST-ACK → CLOSED
         R@ TCB.STATE @ TCPS-LAST-ACK = IF
@@ -9427,6 +9479,7 @@ VARIABLE _TI-DATA
                 ENDOF
                 TCPS-FIN-WAIT-2 OF
                     TCPS-TIME-WAIT R@ TCB.STATE !
+                    EPOCH@ R@ TCB.RTO-TIMER !
                     R@ TCP-ACK TCP-SEND-CTL DROP
                 ENDOF
             ENDCASE
@@ -9652,7 +9705,7 @@ VARIABLE _TPL-LEN
 \  Total: 552 bytes
 
 552 CONSTANT /TLS-CTX
-4  VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
+16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
 : TLS-CTX.TCB         ( ctx -- addr )  8 +  ;
@@ -10746,7 +10799,7 @@ VARIABLE _TLSC-CTYPE
 
 \ --- Socket Constants ---
 32 CONSTANT /SOCK
-8  VALUE SOCK-MAX                 \ set by NET-TABLES-INIT (2× /TCP-MAX-CONN)
+32 VALUE SOCK-MAX                 \ set by NET-TABLES-INIT (2× /TCP-MAX-CONN)
 
 0 CONSTANT SOCKST-FREE
 1 CONSTANT SOCKST-TCP
@@ -10772,8 +10825,8 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \  NET-TABLES-INIT — compute connection limits from available XMEM
 \ =====================================================================
 \  Sizes /TCP-MAX-CONN dynamically so the network stack uses as much
-\  XMEM as is available (up to 64 connections).  Without XMEM the
-\  tables fall back to Bank 0 with a conservative floor of 4.
+\  XMEM as is available (up to 256 connections).  Without XMEM the
+\  tables fall back to Bank 0 with a conservative floor of 16.
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
 \    Per-connection cost ≈ /TCB + /TLS-CTX + 2×/SOCK ≈ 6344 bytes
@@ -10786,9 +10839,9 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
         XMEM-FREE                      ( avail )
         4 /                            ( 25% of XMEM )
         /TCB /TLS-CTX + /SOCK 2 * + /  ( max-conns we can afford )
-        64 MIN  4 MAX                  ( clamp 4..64 )
+        256 MIN  16 MAX                ( clamp 16..256 )
     ELSE
-        4                              ( no XMEM: conservative )
+        16                             ( no XMEM: conservative )
     THEN
     DUP  TO /TCP-MAX-CONN
     DUP  TO TLS-MAX-CTX

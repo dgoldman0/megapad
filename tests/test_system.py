@@ -17319,9 +17319,14 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("20 ", text)
 
     def test_tcp_max_conn(self):
-        """/TCP-MAX-CONN should be 4."""
+        """/TCP-MAX-CONN should be >= 16 (dynamic, floor 16, cap 256)."""
         text = self._run_kdos(["/TCP-MAX-CONN ."])
-        self.assertIn("4 ", text)
+        import re
+        m = re.search(r'(\d+)\s+ok', text)
+        self.assertIsNotNone(m, f"no output: {text}")
+        val = int(m.group(1))
+        self.assertGreaterEqual(val, 16)
+        self.assertLessEqual(val, 256)
 
     def test_tcp_mss(self):
         """TCP-MSS should be 1460."""
@@ -17477,6 +17482,72 @@ class TestKDOSNetStack(_KDOSTestBase):
             "8080 TCB-FIND-LPORT .",
         ])
         self.assertIn("0 ", text)
+
+    # -- 16.7b2: TCB-USAGE / TCB-REAPER / TCB-FLUSH-TIMEWAIT --
+
+    def test_tcb_usage_all_closed(self):
+        """TCB-USAGE should report 0 used when all slots are CLOSED."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            'TCB-USAGE .\" t=\" . .\" u=\" .',
+        ])
+        self.assertIn("u=0 ", text)
+        # total should be >= 16 (new floor)
+        import re
+        m = re.search(r't=(\d+)', text)
+        self.assertIsNotNone(m, f"no total: {text}")
+        self.assertGreaterEqual(int(m.group(1)), 16)
+
+    def test_tcb_usage_some_active(self):
+        """TCB-USAGE should count non-CLOSED TCBs."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "TCPS-LISTEN 1 TCB-N TCB.STATE !",
+            "TCPS-TIME-WAIT 2 TCB-N TCB.STATE !",
+            'TCB-USAGE .\" t=\" . .\" u=\" .',
+        ])
+        self.assertIn("u=3 ", text)
+
+    def test_tcb_flush_timewait(self):
+        """TCB-FLUSH-TIMEWAIT should reclaim all TIME_WAIT TCBs."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-TIME-WAIT 0 TCB-N TCB.STATE !",
+            "TCPS-TIME-WAIT 1 TCB-N TCB.STATE !",
+            "TCPS-ESTABLISHED 2 TCB-N TCB.STATE !",
+            "TCB-FLUSH-TIMEWAIT",
+            "0 TCB-N TCB.STATE @ .\" s0=\" .",
+            "1 TCB-N TCB.STATE @ .\" s1=\" .",
+            "2 TCB-N TCB.STATE @ .\" s2=\" .",
+        ])
+        self.assertIn("s0=0 ", text)   # was TIME_WAIT → now CLOSED
+        self.assertIn("s1=0 ", text)   # was TIME_WAIT → now CLOSED
+        self.assertIn("s2=4 ", text)   # ESTABLISHED untouched
+
+    def test_tcb_alloc_scavenges_timewait(self):
+        """TCB-ALLOC should reap expired TIME_WAIT before returning -1."""
+        text = self._run_kdos([
+            # Fill all slots with TIME_WAIT, set old timestamp
+            ": fill-tw /TCP-MAX-CONN 0 DO"
+            "  TCPS-TIME-WAIT I TCB-N TCB.STATE !"
+            "  0 I TCB-N TCB.RTO-TIMER !"  # stamp = 0 (ancient)
+            " LOOP ;",
+            "fill-tw",
+            # EPOCH@ should be >> 60000, so all are expired
+            "TCB-ALLOC .\" a=\" .",
+        ])
+        # Should have scavenged and found a free slot
+        import re
+        m = re.search(r'a=(-?\d+)', text)
+        self.assertIsNotNone(m, f"no alloc output: {text}")
+        idx = int(m.group(1))
+        self.assertGreaterEqual(idx, 0, f"scavenge failed: {text}")
+
+    def test_tcp_2msl_constant(self):
+        """TCP-2MSL should be 60000 ms."""
+        text = self._run_kdos(["TCP-2MSL ."])
+        self.assertIn("60000 ", text)
 
     # -- 16.7c: NW32! / NW32@ --
 
@@ -22647,8 +22718,8 @@ class TestKDOSExtMem(_KDOSTestBase):
         m = re.search(r'(\d+)', text.split('XMEM-FREE')[1])
         self.assertIsNotNone(m)
         free = int(m.group(1))
-        # Must have most of 16 MiB free (kernel XBUF allocs use < 64 KB)
-        self.assertGreater(free, 16_000_000)
+        # Must have most of 16 MiB free (network tables use up to ~2 MB)
+        self.assertGreater(free, 14_000_000)
 
     def test_xmem_allot(self):
         """XMEM-ALLOT returns an address in ext mem range."""

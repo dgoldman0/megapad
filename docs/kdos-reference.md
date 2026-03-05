@@ -1354,8 +1354,9 @@ DNS → TCP → TLS 1.3.
 
 ### §16.7 TCP
 
-Full TCP with 4 TCB slots, 3-way handshake, sliding window, congestion
-control, and retransmit.
+Full TCP with 16–256 TCB slots (dynamic, scaled to 25% of XMEM), 3-way
+handshake, sliding window, congestion control, retransmit, and TIME_WAIT
+reaper (60 s 2×MSL) with automatic scavenge-on-alloc.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -1366,6 +1367,10 @@ control, and retransmit.
 | `TCP-CLOSE` | `( tcb -- )` | Graceful close: FIN → FIN-ACK → TIME_WAIT. |
 | `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
+| `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
+| `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s). |
+| `TCB-FLUSH-TIMEWAIT` | `( -- )` | Force-reclaim all TIME_WAIT TCBs (test/debug). |
+| `TCP-2MSL` | `( -- ms )` | TIME_WAIT duration constant (60 000 ms). |
 
 ### §16.8–§16.11 TLS 1.3
 
