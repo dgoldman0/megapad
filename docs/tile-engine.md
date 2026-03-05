@@ -5,6 +5,13 @@ the CPU.  It processes data in **tiles** — 64-byte aligned memory regions —
 and can perform element-wise arithmetic, dot products, reductions, and
 utility operations across 8 to 64 lanes simultaneously.
 
+Each of the 4 full cores has a dedicated tile engine instance.  The 3
+micro-core clusters each have a **shared** tile engine, round-robin
+arbitrated across the cluster's 4 micro-cores (+3 cycle overhead per
+dispatch).  From a software perspective, all 16 cores can issue the
+same MEX instructions — micro-cores simply stall if the shared engine
+is busy.
+
 This guide covers:
 - What a tile is and how the engine thinks about data
 - The tile CSR registers that control everything

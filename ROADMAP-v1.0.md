@@ -677,13 +677,14 @@ document that will be folded into proper docs as each item ships.
 
 39. ✅ **Micro-core CPU variant (MP64µ)** — DONE. Stripped-down core:
     no 64-bit hardware multiplier (shift-add, 0 DSPs), no I-cache,
-    tile engine, FP16 ALU, or BIST.  Shared decoder/ALU/flags/branch
-    factored into `mp64_cpu_common.vh`, `mp64_cpu.v` refactored to
-    use it.  Emulator has `MicroCluster` class with scratchpad, barrier,
-    MPU, cluster enable/disable gating.  Bus arbiter has per-port
-    QoS weights.
+    FP16 ALU, or BIST.  Tile/MEX access via shared cluster engine
+    (round-robin arbitrated, +3 cycle overhead).  Shared
+    decoder/ALU/flags/branch factored into `mp64_cpu_common.vh`,
+    `mp64_cpu.v` refactored to use it.  Emulator has `MicroCluster`
+    class with scratchpad, barrier, MPU, cluster enable/disable
+    gating.  Bus arbiter has per-port QoS weights.
     - 39a. ✅ `mp64_cpu_common.vh` — shared decoder, ALU, FSM states
-    - 39b. ✅ `mp64_cpu_micro.v` — shift-add mul, no tile/cache/BIST
+    - 39b. ✅ `mp64_cpu_micro.v` — shift-add mul, no cache/BIST (tile via cluster MEX)
     - 39c. ✅ `mp64_cpu.v` refactored to use common core
     - 39d. ✅ Parameterize `mp64_top.v` for mixed major+micro configs
            (`mp64_soc.v` created with NUM_CORES/NUM_CLUSTERS params,

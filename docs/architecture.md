@@ -17,8 +17,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 │  8-bit Flags          │  FP16 / bf16     │  └───────────┘ │
 │  256-bit Accumulator  │  DMA queue       │                │
 │  Perf counters        └──────────────────┘                │
-│  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV, │
-│    1 KiB scratchpad, HW barrier per cluster)               │
+│  + 3 micro-clusters (4 scalar μ-cores ea., shared MUL/DIV  │
+│    + tile/MEX engine, 1 KiB scratchpad, HW barrier)        │
 └───────────────┬───────────────────────────────────────────┘
                 │  64-bit data bus (weighted round-robin QoS)
     ┌───────────┴───────────────────────────┐
@@ -445,25 +445,24 @@ backed by `os.urandom()`.
 ### Micro-Core Architecture
 
 Each micro-cluster contains 4 scalar micro-cores sharing a MUL/DIV unit,
-1 KiB scratchpad, and a hardware barrier.  Micro-cores run the same
-64-bit native ISA as full cores **minus** all CDP1802-heritage features:
+a tile/MEX engine (round-robin arbitrated, +3 cycle overhead), 1 KiB
+scratchpad, and a hardware barrier.  Micro-cores run the same 64-bit
+native ISA as full cores **minus** the CDP1802-heritage features:
 
 | Stripped Feature | Families / Sub-ops | Rationale |
 |------------------|--------------------|-----------|
 | D accumulator, Q flip-flop, T register | State | Saves ~17 FFs per core |
 | MEMALU (LDX, OR.X, ADD.X, …) | Family 0x8 | All operate on D + M(R(X)) |
 | Port I/O (OUT/INP) | Family 0x9 | 1802-style 7-port I/O |
-| SEP (set PC register) | Family 0xA | PSEL fixed at 3 |
-| SEX (set data pointer register) | Family 0xB | XSEL fixed at 2 |
 | GLO / GHI / PLO / PHI | Family 0x6 sub 0xC–0xF | D ↔ GPR byte transfer |
 | RET / DIS / MARK / SAV / SEQ / REQ | Family 0x0 sub 0x5–0xA | 1802 SCRT + Q |
-| Tile engine (MEX) | Family 0xE | Full-core only |
 
 All stripped opcodes trap as `ILLEGAL_OP` (interrupt vector 0x01).
 CSR reads to D/DF/Q/T return 0; writes are silently ignored.
 
 Micro-cores **retain**: INC, DEC, branch, long-branch, MEM (load/store),
-IMM (arithmetic immediates), ALU, CSR (reduced set), and CALL.L / RET.L.
+IMM (arithmetic immediates), ALU, MUL/DIV (shared), tile/MEX (shared),
+SEP, SEX, CSR (reduced set), and CALL.L / RET.L.
 
 Estimated area savings: ~300 FFs / ~200 LUTs per micro-core vs a full core.
 

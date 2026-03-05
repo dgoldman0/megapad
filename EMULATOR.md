@@ -114,8 +114,8 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │                      │ └───────────┘ └───┘ └───┘ │  │
 │                      └────────────────────────────┘  │
 │                                                          │
-│  3 × MicroCluster (4 μ-cores ea., scalar-only, shared    │
-│    MUL/DIV, 1K scratchpad, HW barrier)                   │
+│  3 × MicroCluster (4 μ-cores ea., shared MUL/DIV +       │
+│    tile/MEX engine, 1K scratchpad, HW barrier)            │
 │                                                          │
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘

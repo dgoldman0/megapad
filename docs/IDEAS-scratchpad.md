@@ -23,9 +23,11 @@ base instruction level but dramatically smaller, targeting:
   4 BRAM36 each.  Micro-cores fetch directly from the bus (stalls more,
   but saves significant BRAM).  Alternative: a shared 2 KiB I-cache
   across a micro-core cluster.
-- **No tile engine** — no MEX instructions, no tile CSRs, no 512-bit
-  port.  Micro-cores are scalar-only.  They can still *read/write*
-  tile memory as byte/word data, they just can't issue tile operations.
+- **~~No tile engine~~** — ✅ DONE: each cluster now has a shared
+  tile/MEX engine (round-robin arbitrated, +3 cycle overhead).
+  Micro-cores issue the same MEX instructions as full cores; the
+  cluster serialises access.  Standalone micro-cores (no cluster)
+  still trap MEX as `ILLEGAL_OP`.
 - **No FP16/BF16 ALU** — no `mp64_fp16_alu.v` instance.
 - **No BIST controller** — memory BIST stays on the main core(s).
 - **No performance counters** — or a minimal 1-counter (cycles only).
@@ -56,7 +58,7 @@ be factored into a common RTL module or `include` file:
 | Multiplier | 64×64→128, 1 cycle, ~16 DSP (~28K GE) | ❌ Illegal-op trap (0 DSP, 0 GE) |
 | Divider | Iterative shift-subtract, 64 cycles (~4K GE) | ❌ Illegal-op trap |
 | I-Cache | 4 KiB per core (~40K GE SRAM+tags) | None (shared 1–2 KiB cluster cache) |
-| Tile engine | Full MEX + DMA + FP16 | ❌ Not present |
+| Tile engine | Full MEX + DMA + FP16 | ✅ Shared per-cluster (RR arb, +3 cyc) |
 | BIST | March C−, checkerboard, addr | ❌ Not present |
 | Perf counters | 4 × 64-bit | 1 × 64-bit (cycles only) |
 | GPRs | 16 × 64-bit | 16 × 64-bit (same — keep ISA compat simple) |
@@ -261,7 +263,7 @@ dominate die area on silicon.
 | Booth-Wallace 64×64→128 MUL | **~28K GE** | 0 | **2× entire micro core** |
 | Iterative 64-bit divider | ~4K GE | 0 | Shift-subtract, 64 cycles |
 | I-cache 4 KiB SRAM + tags | **~40K GE** | 0 | **3× entire micro core** |
-| Tile / MEX / FP16 dispatch | ~8K GE | 0 | Ports + CSRs + mux |
+| Tile / MEX / FP16 dispatch | ~8K GE | shared (~8K per cluster) | Ports + CSRs + mux + arbiter |
 | BIST controller | ~3K GE | 0 | March-C, checkerboard, addr |
 | **Full total** | **~100K GE** | **~13K GE** | **~8:1** |
 
