@@ -219,94 +219,194 @@ gain.
 
 ---
 
-### Phase 3 — JIT Compiler: SEP-Aware Code Generation ⏭ DEFERRED
+### Phase 3 — Hybrid STC with SEP NEXT/EXIT (Option B) ⏳ PENDING
 
-> **Status:** Skipped after deep analysis.  The existing JIT inline
-> table (17 entries, 3–13 bytes each) and bigram fusion table (6
-> fusions) are fundamentally incompatible with an ITC threading model.
-> Pure ITC (flat 8-byte XT tables) would make small primitives *worse*
-> (DROP: 3 → 8 bytes), destroy peephole literal folding, and kill
-> bigram fusion — a net regression for code density.
+> **Status:** Design finalised.  Awaiting extended register file
+> (R16–R31) from ISA team and emulator support before implementation.
 >
-> Alternatives considered:
-> - **Option B (Hybrid 9-byte call):** `sep r7` + inline 8-byte XT.
->   Modest 4-byte savings per non-inlined call, JIT preserved.
-> - **Option C (Return-only hook):** Zero code-size change, enables
->   tracing/profiling/task-switch hooks via `sep r7` at word exit.
-> - **Option D (ldi32 shorter encoding):** ISA-level change for same
->   4-byte savings, no threading model change.
+> **History:** Originally deferred because the only free register (R7)
+> would have to serve as both NEXT (call dispatch) and EXIT (return
+> dispatch), and there was no way to distinguish the two roles without
+> a runtime flag check that kills performance.  The ISA team's decision
+> to add 16 extended registers (R16–R31) eliminates this blocker:
+> R16 = NEXT, R17 = EXIT — two dedicated handlers, no ambiguity.
 >
-> May be revisited if Option B or C proves valuable for profiling or
-> if an `ldi32` instruction is added to the ISA.
+> **Options considered and rejected:**
+> - **Option A (Pure ITC):** Destroys JIT inline table, peephole
+>   fusion, and bigram fusion.  Net code-size regression.  Dead.
+> - **Option C (Return-only hook):** Zero savings — strictly inferior
+>   to B now that R16/R17 are available.
+> - **Option D (ldi32 shorter encoding):** Same 4-byte savings but no
+>   dispatch hooks.  Worth revisiting independently if `ldi32` is
+>   cheap in the ISA.
 
-**Goal:** Make the JIT compiler emit SEP-friendly code for compiled
-Forth words, reducing compiled code size.
+**Goal:** Shrink non-inlined compiled calls from 13 → 9 bytes while
+preserving the JIT inline table, peephole optimizer, and bigram fusion
+entirely.
 
-#### 3a — `compile_call` SEP variant
+#### Design — Hybrid STC with R16 (NEXT) and R17 (EXIT)
 
-Currently `compile_call` emits 13 bytes per non-inlineable word:
+The key insight: with two dedicated registers, `sep r16` always means
+"call through an inline XT" and `sep r17` always means "return from a
+word."  No flags, no ambiguity.
+
+**Register allocation (extended bank):**
+
+| Register | Role | Handler code |
+|----------|------|------|
+| R16 | NEXT | Read 8-byte XT from caller's frozen R3, advance R3 past XT, push R3 as return addr on RSP, `sep` to target |
+| R17 | EXIT | Pop return addr from RSP into R3, `sep r3` to resume caller |
+
+**NEXT handler (R16):**
+```asm
+forth_next:                     ; R16 is PC here
+    ; R3 froze at the byte after `sep r16` — pointing at the inline XT
+    ldn  r11, r3                ; fetch 8-byte XT from R3's frozen position
+    addi r3, 8                  ; advance R3 past the inline XT
+    subi r15, 8                 ; push return address (R3) onto RSP
+    str  r15, r3
+    mov  r3, r11                ; R3 ← target XT
+    sep  r3                     ; dispatch to target word
+    br   forth_next             ; re-entry trampoline
+```
+
+**EXIT handler (R17):**
+```asm
+forth_exit:                     ; R17 is PC here
+    ldn  r3, r15                ; pop return address from RSP
+    addi r15, 8
+    sep  r3                     ; resume caller
+    br   forth_exit             ; re-entry trampoline
+```
+
+**Compiled call site (non-inlined word):**
+```
+A0 10                         ; sep r16              (1 byte)
+<8 bytes LE addr>             ; inline XT            (8 bytes)
+                              ; total: 9 bytes (was 13)
+```
+
+**Compiled return (`;`):**
+```
+A0 11                         ; sep r17              (1 byte, was ret.l = 1 byte)
+```
+
+#### What stays the same
+
+- **JIT inline table:** All 17 entries emit raw instruction bytes
+  directly — no call/return involved.  Completely untouched.
+- **Peephole optimizer:** Literal folding, compact literals, TRUE/FALSE
+  — all emit raw bytes.  Untouched.
+- **Bigram fusion:** DUP+, SWAP OVER, etc. — raw byte sequences.
+  Untouched.
+- **Interpreted execution:** The outer interpreter continues using
+  `call.l`/`ret.l` for dictionary dispatch.  SEP NEXT/EXIT is only
+  for JIT-compiled code paths.
+
+#### What changes
+
+| Component | Current | After Phase 3 |
+|-----------|---------|---------------|
+| `compile_call` | 13 bytes: `ldi64 r11, <addr>; call.l r11` | 9 bytes: `sep r16` + 8-byte inline XT |
+| `compile_ret` (`;`) | 1 byte: `ret.l` (0x0E) | 1 byte: `sep r17` (0xA011) — **wait, see note** |
+| `bytes_saved` baseline | 13 bytes | 9 bytes (recalibrate `jit_compile_word`) |
+| Boot init | — | `ldi64 r16, forth_next; ldi64 r17, forth_exit` |
+| Secondary cores | — | Same R16/R17 init (per-core register file, no interference) |
+
+> **Encoding note:** If `sep r16` is a 2-byte instruction (0xA0 +
+> extended register nibble), then `compile_ret` emitting `sep r17` is
+> also 2 bytes — a +1 byte regression vs `ret.l`.  Confirm the ISA
+> encoding for extended registers before implementation.  If `sep` in
+> the extended range is 2 bytes, the return overhead is 2 bytes instead
+> of 1, and the call overhead is 10 bytes instead of 9.  The savings
+> per call drop from 4 to 3 bytes — still worthwhile.
+
+#### Savings analysis
+
+| Metric | Current (STC) | Hybrid B (1-byte sep) | Hybrid B (2-byte sep) |
+|--------|--------------|----------------------|----------------------|
+| Non-inlined call | 13 bytes | 9 bytes (-4) | 10 bytes (-3) |
+| Word return | 1 byte | 1 byte (=) | 2 bytes (+1) |
+| Inlined primitive | 3–13 bytes | unchanged | unchanged |
+| Peephole literal | 7 bytes | unchanged | unchanged |
+| Bigram fusion | 6 bytes | unchanged | unchanged |
+| Stack traffic/call | 2 × 8 bytes (push+pop) | 2 × 8 bytes (RSP in NEXT/EXIT) | same |
+| Cycles per dispatch | 4 (call+ret) | ~8 (NEXT handler) + 1 (sep) | same |
+
+For a typical 200-word compilation with ~60% inlined, ~80 non-inlined
+calls: **240–320 bytes saved**.  All inlined paths are untouched.
+
+The cycle cost of the NEXT handler (~5–6 instructions) is higher than
+hardware `call.l`, so this is a **code density optimisation**, not a
+speed optimisation.  The programmable dispatch points are the real win:
+R16 and R17 can be instrumented for tracing, profiling, and
+task-switch hooks with zero changes to compiled word bodies.
+
+#### 3a — `compile_call` changes
+
+`compile_call` currently emits 13 bytes:
 ```
 F0 60 B0 <8 bytes LE>    ; ldi64 r11, <addr>   (11 bytes)
 0D 0B                     ; call.l r11            (2 bytes)
 ```
 
-With SEP dispatch for compiled code, a possible alternative uses a
-**dedicated dispatch register** (say R7, currently scratch):
-
-```asm
-; Compiled word body ends with:
-    sep  r7                   ; 1 byte — yield to NEXT
+After Phase 3 it emits 9 (or 10) bytes:
+```
+A0 10                     ; sep r16                (1 or 2 bytes)
+<8 bytes LE addr>         ; inline XT              (8 bytes)
 ```
 
-Where R7 runs a tiny "NEXT" dispatcher:
-```asm
-forth_next:
-    ; R7 is PC here.  Threaded code IP is in some register (R9?).
-    ldn r11, r9              ; fetch next XT from thread
-    addi r9, 8               ; advance IP
-    mov r3, r11              ; set R3 = word entry
-    sep  r3                  ; execute it (PSEL ← 3)
-    br   forth_next          ; re-entry for next SEP R7
-```
-
-**This is a fundamental threading model change** — shifting from
-subroutine-threaded to something closer to indirect-threaded with SEP
-as the dispatch mechanism.  The savings are significant:
-
-| Metric | Current (STC) | SEP NEXT |
-|--------|--------------|----------|
-| Word call overhead | 13 bytes | 1 byte (`sep r7`) |
-| Return overhead | 1 byte (`ret.l`) | 1 byte (`sep r7`) |
-| Cycles per dispatch | 4 (call+ret) | 2 (sep+sep) + NEXT overhead |
-| Stack traffic per word | 2 × 8 bytes | 0 |
-| JIT `bytes_saved` metric | improved | dramatically improved |
-
-**Key design decisions:**
-- Which register becomes IP (instruction pointer for threaded code)?
-  R9 is currently "word pointer" — a natural fit.
-- Does this coexist with the current STC model or replace it?
-  **Coexist:** JIT-compiled code uses SEP NEXT; interpreted execution
-  and non-JIT colon defs keep `call.l`/`ret.l`.
-- How does `compile_ret` change?  It emits `sep r7` (1 byte) instead
-  of `ret.l` (1 byte) — same size but different semantics.
+The `reloc_record` for the 8-byte address is still needed — same
+complexity as today, just at a different offset.
 
 #### 3b — JIT inline table awareness
 
 The `jit_inline_table` entries are raw instruction bytes that get copied
 to HERE.  These don't need to change — inlined primitives don't call or
-return.  But the **fallback path** (`jit_cw_fallback`) and the
-`compile_ret` emitted by `;` (semicolon) would emit SEP-based sequences
-instead.
+return.  But the **fallback path** (`jit_cw_fallback`) emits the new
+`sep r16` + XT sequence, and `compile_ret` emitted by `;` (semicolon)
+emits `sep r17` instead of `ret.l`.
 
 #### 3c — `bytes_saved` recalibration
 
 The JIT's `bytes_saved` metric currently assumes `compile_call` emits
-13 bytes.  If the SEP NEXT dispatcher changes the non-inlined baseline,
-the savings calculation in `jit_compile_word` (line `addi r7, 13`) and
-`jit_cw_done` (`ldi r1, 13; sub r1, r12`) needs updating.
+13 bytes.  The baseline shifts to 9 (or 10) bytes.  Update:
+- `jit_compile_word` (line `addi r7, 13`) → `addi r7, 9`
+- `jit_cw_done` (`ldi r1, 13; sub r1, r12`) → `ldi r1, 9; ...`
 
-**Estimated effort:** ~2 days.  This is the most architecturally
-significant phase — it changes how compiled Forth words execute.
+The inline table `bytes_saved` per entry shrinks (smaller baseline to
+beat) but all entries that currently save > 4 bytes remain positive.
+Entries saving exactly 1–3 bytes (if any) might go negative and should
+be re-evaluated.
+
+#### 3d — Dispatch hooks (bonus)
+
+Because all non-inlined calls and returns flow through R16/R17, these
+become natural instrumentation points:
+
+- **Tracing:** R16's handler can log the XT being dispatched to a
+  circular buffer before jumping.  R17's handler can log return
+  addresses.  Enable/disable via a flag word (`SEP-TRACE ON/OFF`).
+- **Profiling:** R16 increments a per-word call counter.  R17 reads
+  `PERF-CYCLES@` to accumulate per-word cycle counts.
+- **Task switching:** R17 checks a yield flag on every word return
+  and context-switches if set — cooperative preemption at word
+  granularity with zero compiled-code changes.
+
+These hooks cost nothing when disabled (the flag check is a single
+`ldn` + `breq` skip in the handler).  This replaces the need for a
+separate Phase 4f trace unit.
+
+#### Prerequisites
+
+1. **ISA team:** Extended register file (R16–R31) implemented in RTL
+2. **Emulator team:** `SEP Rn` for n ≥ 16 implemented in `megapad64.py`
+3. **Confirm encoding:** `sep r16` instruction size (1 byte or 2 bytes)
+   determines exact savings
+
+**Estimated effort:** ~2 days once prerequisites land.  This is the
+most architecturally significant remaining phase — it changes how
+compiled Forth words dispatch.
 
 ---
 
@@ -684,9 +784,9 @@ STXI substitution is volume work with low per-site risk.
 
 ---
 
-### Phase 8 — Cooperative Multitasking via SEP (PAUSE)
+### Phase 8 — Cooperative Multitasking via SEP (PAUSE) ✅ DONE
 
-**Goal:** Implement a zero-overhead cooperative yield primitive using
+**Goal:** Implement zero-overhead cooperative multitasking using
 SEP to flip between task contexts.
 
 Classic 1802 Forth used SEP as the context-switch mechanism: each task
@@ -694,26 +794,94 @@ has a dedicated register holding its continuation address.  `SEP Rn`
 switches to task N in 1 cycle with zero memory traffic — no context
 save, no stack switch, no scheduler.
 
-#### Design
+#### Current implementation (2-task model)
 
-Reserve two registers for a simple two-task model:
+The production BIOS implements a 2-task model:
 
 ```
 R3  = Task 0 PC (the REPL / main Forth loop)
 R13 = Task 1 PC (a background worker)
 ```
 
-A `PAUSE` word is trivially:
+PAUSE saves Task 0's DSP/RSP, loads Task 1's context, and does
+`SEP R13`.  TASK-YIELD (Task 1 → Task 0) is `sep r3; ret.l` — 2
+instructions.  This is fully operational with BACKGROUND, TASK-STOP,
+and TASK-STATUS dictionary words.
+
+#### Planned upgrade: 4-task round-robin (pending R16–R31)
+
+With the extended register file, the cooperative multitasker expands
+from 2 to 4 tasks using dedicated PC registers:
+
+| Register | Task | Purpose |
+|----------|------|------|
+| R3 | Task 0 | REPL / main Forth loop — always active, non-negotiable |
+| R13 | Task 1 | NIC — packet polling, TCP retransmit timers, ARP refresh |
+| R18 | Task 2 | Crypto — KEM decapsulation, SHA-3 bulk hashing, long-running ops |
+| R19 | Task 3 | User background — display refresh, disk prefetch, general `BACKGROUND` slot |
+
+**Why 4 and not more:**
+- Each task needs its own DSP zone (~256 bytes) and RSP zone (~256
+  bytes).  4 tasks × 512 bytes = 2 KB.  Trivial.
+- Round-robin scan overhead: ~2 cycles per inactive slot skipped.
+  Worst case (3 empty): 6 extra cycles.  Typical (2–3 active): 0–2
+  extra cycles.  Less than a single `call.l`.
+- At 5–6 tasks you're fragmenting stack zones for diminishing returns
+  and should use KDOS's software scheduler instead.
+- The 2-task model forced NIC, crypto, and user code to compete for
+  one slot.  4 slots eliminates that contention entirely.
+
+**Round-robin PAUSE design:**
 ```asm
 w_pause:
-    sep  r13                ; switch to Task 1
-    ; when Task 1 does SEP R3, we resume here
-    sep  r3                 ; re-enter from trampoline
-    br   w_pause
+    ; ---- Save current task context (DSP, RSP) ----
+    ; (same save sequence as today's 2-task PAUSE)
+    ...
+    ; ---- Advance to next active slot ----
+    ldi64 r11, var_task_index
+    ldn  r1, r11                ; current task index (0–3)
+.next_slot:
+    addi r1, 1
+    andi r1, 3                  ; mod 4
+    ; Load task_pc[r1] — array of 4 PC slots
+    ldi64 r11, var_task_pcs
+    mov  r0, r1
+    lsli r0, 3                  ; ×8 byte offset
+    add  r11, r0
+    ldn  r13, r11               ; r13 = task_pcs[r1]
+    cmpi r13, 0
+    breq .next_slot             ; skip inactive slots
+    ; ---- Store new task index ----
+    ldi64 r11, var_task_index
+    str  r11, r1
+    ; ---- Load target task context (DSP, RSP) ----
+    ...
+    ; ---- SEP to target task's PC register ----
+    ; Map index → register: 0→R3, 1→R13, 2→R18, 3→R19
+    ; (dispatch table or small branch tree)
+    ...
 ```
 
-Task 1's code does its work, then `SEP R3` to yield back.  Each
-context switch is 1 byte, 1 cycle.
+The scan loop is bounded — at most 3 iterations (can't skip all 4,
+since at least Task 0 is always active).  The context save/restore
+sequence (~16 instructions) is identical to today's 2-task model.
+
+**TASK-YIELD** becomes task-generic — any task (1, 2, or 3) does
+`sep r3` to yield back to the dispatcher, which advances to the
+next active slot.
+
+**New dictionary words:**
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BACKGROUND` | `( xt -- )` | Start xt as Task 1 (unchanged) |
+| `BACKGROUND2` | `( xt -- )` | Start xt as Task 2 (crypto/general slot) |
+| `BACKGROUND3` | `( xt -- )` | Start xt as Task 3 (user slot) |
+| `TASK-STOP` | `( n -- )` | Stop task n (1–3); 0 is invalid |
+| `TASK-STATUS` | `( n -- flag )` | Return active flag for task n |
+
+Or, unify to `n BACKGROUND` where n selects the slot (0 = error,
+1–3 = task slots).  API decision deferred to implementation.
 
 #### Integration with existing infrastructure
 
@@ -723,12 +891,12 @@ context switch is 1 byte, 1 cycle.
 - KDOS's timer-based preemption continues to work alongside this.
   `PAUSE` is an explicit yield point; the timer ISR is the involuntary
   one.
-- For more than 2 tasks, a round-robin dispatcher at a known register
-  cycles through a table of task PCs.  This costs more registers but
-  scales to 4-5 lightweight tasks on core 0.
+- The 4-task model uses R18/R19 from the extended bank — no conflict
+  with R16/R17 (Phase 3 NEXT/EXIT).
 
-**Estimated effort:** ~4 hours for the basic two-task model.  Extending
-to N tasks adds ~1 day.
+**Estimated effort:** Current 2-task model: ✅ done.  Upgrade to 4-task
+round-robin: ~1 day once R16–R31 land (the extra slots are mechanical;
+the round-robin scan is the only new logic).
 
 ---
 
@@ -848,12 +1016,12 @@ full 1802 restoration leads.
 | **0** | Audit + test harness | 1 day | None | Foundation | ✅ Done |
 | **1** | R4/R5/R6 leaf SEP | 2 hours | Low | Medium — proves concept, removes stack traffic for leaf I/O | ✅ Done |
 | **2** | `print_str` coroutine | 4 hours | Medium | Low — high churn, modest gain | ⏭ Skip |
-| **3** | JIT SEP-NEXT codegen | 2 days | Medium | High — transforms compiled code density | ⏭ Deferred — ITC destroys JIT inline table |
+| **3** | Hybrid STC: SEP NEXT/EXIT (R16/R17) | 2 days | Medium | High — 3–4 bytes/call, dispatch hooks for tracing/profiling | ⏳ Pending — awaiting extended register file (R16–R31) |
 | **4** | Q semaphore | 30 min | None | Niche — useful for multicore debug | ✅ Done |
 | **5** | Secondary core SEP | 1 hour | Low | Medium — smaller stack zones | ✅ Done |
 | **6** | Full SCRT | 3 days | High | Low unless 1802 compat is a goal | ⏭ Skip |
 | **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan.  16 routines converted to `STXI`/`STXD.D` chains. | ✅ Done |
-| **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0 | ✅ Done |
+| **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0.  2-task model done; 4-task round-robin (R18/R19) pending extended registers. | ✅ Done (2-task); ⏳ 4-task pending |
 | **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional | ✅ Done |
 | **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains | ☐ Not started |
 
@@ -861,10 +1029,13 @@ full 1802 restoration leads.
 The SEP dispatch infrastructure, Q semaphore, STXI byte processing,
 cooperative multitasking, and fault diagnostics are all in production.
 
-**Deferred:** Phase 3 (JIT SEP-NEXT) — deep analysis showed that ITC
-threading destroys the JIT inline table and peephole/bigram fusion,
-making it a net regression.  The existing STC+JIT model is superior
-for this architecture.
+**Pending:** Phase 3 (Hybrid STC with R16/R17) — Option B design
+finalised.  Pure ITC (Option A) was rejected as a net regression.
+The original R7-only approach was blocked by the NEXT/EXIT ambiguity
+problem (one register, two roles, no way to distinguish without a
+runtime flag).  The ISA team's extended register file (R16–R31)
+eliminates this: R16 = NEXT, R17 = EXIT, clean separation.
+Awaiting emulator + RTL support for R16–R31 before implementation.
 
 **Skipped:** Phases 2, 6 — low value relative to churn.
 
@@ -885,15 +1056,21 @@ requires RTL changes.
   R4   → emit (call.l)    R4   → emit (SEP)        R4   → emit (SEP)
   R5   → key  (call.l)    R5   → key  (SEP)        R5   → key  (SEP)
   R6   → hex_byte         R6   → hex_byte (SEP)    R6   → hex_byte (SEP+D)
-  R7   scratch             R7   scratch              R7   → NEXT (SEP, Phase 3)
+  R7   scratch             R7   scratch              R7   scratch
   R8   UART base           R8   UART base            R8   UART base
-  R9   word pointer        R9   word pointer         R9   IP (threaded, Phase 3)
+  R9   word pointer        R9   word pointer         R9   word pointer
   R10  string pointer      R10  string pointer       R10  string pointer
   R11  scratch / temp      R11  scratch / temp       R11  scratch / temp
   R12  scratch / counter   R12  scratch / counter    R12  scratch / counter
   R13  scratch / temp      R13  scratch / temp       R13  Task 1 PC (Phase 8)
   R14  DSP                 R14  DSP                  R14  DSP
   R15  RSP                 R15  RSP                  R15  RSP
+  ---  (extended bank, Phase 3)  ---                  ---
+  R16  —                   —                         → NEXT (SEP, Phase 3)
+  R17  —                   —                         → EXIT (SEP, Phase 3)
+  R18  —                   —                         Task 2 PC (Phase 8, 4-task)
+  R19  —                   —                         Task 3 PC (Phase 8, 4-task)
+  R20–R31  —               —                         available / scratch
 ```
 
 ---

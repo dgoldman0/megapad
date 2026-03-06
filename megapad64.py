@@ -358,7 +358,7 @@ class Megapad64:
         # 1802-heritage special registers
         self.d_reg: int = 0   # 8-bit D accumulator
         self.q_out: int = 0   # Q flip-flop
-        self.t_reg: int = 0   # T register (saved XSEL|PSEL)
+        self.t_reg: int = 0   # T register (saved XSEL|PSEL, 16-bit for 5-bit selectors)
 
         # Privilege level: 0 = supervisor, 1 = user
         self.priv_level: int = 0
@@ -452,6 +452,25 @@ class Megapad64:
         # Callbacks
         self.on_output: Optional[callable] = None  # called with (port, value)
         self.on_halt: Optional[callable] = None
+
+    # REX prefix helpers — extract register extension bits from _ext_modifier
+    @property
+    def _rex_s(self) -> int:
+        """REX source high bit (ext_mod bit 0)."""
+        m = self._ext_modifier
+        return (m & 1) if m >= 1 and m <= 5 else 0
+
+    @property
+    def _rex_d(self) -> int:
+        """REX dest high bit (ext_mod bit 1)."""
+        m = self._ext_modifier
+        return ((m >> 1) & 1) if m >= 1 and m <= 5 else 0
+
+    @property
+    def _rex_n(self) -> int:
+        """REX nibble high bit (ext_mod bit 2)."""
+        m = self._ext_modifier
+        return ((m >> 2) & 1) if m >= 1 and m <= 5 else 0
 
     # -- Extended memory attach (called by system.py) --
 
@@ -784,14 +803,14 @@ class Megapad64:
         val = u64(val)
         dispatch = {
             CSR_FLAGS:    lambda v: self.flags_unpack(v & 0xFF),
-            CSR_PSEL:     lambda v: setattr(self, 'psel',  v & 0xF),
-            CSR_XSEL:     lambda v: setattr(self, 'xsel',  v & 0xF),
-            CSR_SPSEL:    lambda v: setattr(self, 'spsel', v & 0xF),
+            CSR_PSEL:     lambda v: setattr(self, 'psel',  v & 0x1F),
+            CSR_XSEL:     lambda v: setattr(self, 'xsel',  v & 0x1F),
+            CSR_SPSEL:    lambda v: setattr(self, 'spsel', v & 0x1F),
             CSR_IVT_BASE: lambda v: setattr(self, 'ivt_base', v),
             CSR_D:        lambda v: setattr(self, 'd_reg', v & 0xFF),
             CSR_DF:       lambda v: setattr(self, 'flag_c', v & 1),
             CSR_Q:        lambda v: setattr(self, 'q_out',  v & 1),
-            CSR_T:        lambda v: setattr(self, 't_reg',  v & 0xFF),
+            CSR_T:        lambda v: setattr(self, 't_reg',  v & 0xFFFF),
             CSR_IE:       lambda v: setattr(self, 'flag_i', v & 1),
             CSR_PRIV:     lambda v: setattr(self, 'priv_level', v & 1),
             CSR_MPU_BASE: lambda v: setattr(self, 'mpu_base', v),
@@ -1346,25 +1365,25 @@ class Megapad64:
             # bit 8 was priv_level — ignored (user mode stripped)
             return 1
         elif n == 0x5:  # RET (1802: pop XSEL|PSEL, IE←1)
-            t = self.pop64() & 0xFF
-            self.xsel = (t >> 4) & 0xF
-            self.psel = t & 0xF
+            t = self.pop64() & 0xFFFF
+            self.xsel = (t >> 8) & 0x1F
+            self.psel = t & 0x1F
             self.flag_i = 1
             return 1
         elif n == 0x6:  # DIS (pop XSEL|PSEL, IE←0)
-            t = self.pop64() & 0xFF
-            self.xsel = (t >> 4) & 0xF
-            self.psel = t & 0xF
+            t = self.pop64() & 0xFFFF
+            self.xsel = (t >> 8) & 0x1F
+            self.psel = t & 0x1F
             self.flag_i = 0
             return 1
         elif n == 0x7:  # MARK
-            t = ((self.xsel & 0xF) << 4) | (self.psel & 0xF)
+            t = ((self.xsel & 0x1F) << 8) | (self.psel & 0x1F)
             self.t_reg = t
             self.push64(t)
             self.xsel = self.psel  # PSEL → XSEL
             return 1
-        elif n == 0x8:  # SAV — store T → M(R(X))
-            self.mem_write8(self.rx, self.t_reg)
+        elif n == 0x8:  # SAV — store T → M(R(X)) as 16-bit
+            self.mem_write16(self.rx, self.t_reg)
             return 0
         elif n == 0x9:  # SEQ — Q ← 1
             self.q_out = 1
@@ -1380,7 +1399,7 @@ class Megapad64:
             return 0
         elif n == 0xD:  # CALL.L Rn (2 bytes)
             byte1 = self.fetch8()
-            rn = byte1 & 0xF
+            rn = (byte1 & 0xF) | (self._rex_s << 4)
             ret_addr = self.pc  # address after CALL.L
             self.push64(ret_addr)
             self.pc = self.regs[rn]
@@ -1434,8 +1453,8 @@ class Megapad64:
     # -- 0x5: MEM (scalar load/store) --
     def _exec_mem(self, sub: int) -> int:
         byte1 = self.fetch8()
-        rd = (byte1 >> 4) & 0xF
-        rs = byte1 & 0xF
+        rd = ((byte1 >> 4) & 0xF) | (self._rex_d << 4)
+        rs = (byte1 & 0xF) | (self._rex_s << 4)
 
         if sub == 0x0:    # LDN Rd, Rn (64-bit load via R(N))
             addr = self.regs[rs]
@@ -1495,7 +1514,7 @@ class Megapad64:
         if sub <= 0xB or sub in (0xC, 0xD, 0xE, 0xF):
             # These have a register byte then possibly immediate
             byte1 = self.fetch8()
-            rn = (byte1 >> 4) & 0xF
+            rn = ((byte1 >> 4) & 0xF) | (self._rex_d << 4)
 
         if sub == 0x0:    # LDI Rn, imm8 (or imm64 with EXT)
             if self._ext_modifier == 0:  # EXT.IMM64
@@ -1584,8 +1603,8 @@ class Megapad64:
     # -- 0x7: ALU --
     def _exec_alu(self, sub: int) -> int:
         byte1 = self.fetch8()
-        rd = (byte1 >> 4) & 0xF
-        rs = byte1 & 0xF
+        rd = ((byte1 >> 4) & 0xF) | (self._rex_d << 4)
+        rs = (byte1 & 0xF) | (self._rex_s << 4)
         a = self.regs[rd]
         b = self.regs[rs]
 
@@ -1769,8 +1788,8 @@ class Megapad64:
     # -- 0xC: MUL/DIV --
     def _exec_muldiv(self, sub: int) -> int:
         byte1 = self.fetch8()
-        rd = (byte1 >> 4) & 0xF
-        rs = byte1 & 0xF
+        rd = ((byte1 >> 4) & 0xF) | (self._rex_d << 4)
+        rs = (byte1 & 0xF) | (self._rex_s << 4)
         a = self.regs[rd]
         b = self.regs[rs]
 
@@ -2653,7 +2672,7 @@ class Megapad64:
 
     # -- Reset helper --
     def _reset_state(self):
-        self.regs = [0] * 16
+        self.regs = [0] * 32
         self.psel = 3
         self.xsel = 2
         self.spsel = 15

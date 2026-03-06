@@ -264,6 +264,11 @@ parameter [2:0] TMUL_DOTACC = 3'd5;
 
 // EXT prefix modifier values
 parameter [3:0] EXT_IMM64  = 4'd0;   // 64-bit immediate
+parameter [3:0] EXT_REX_S  = 4'd1;   // REX: Rs[4] = 1
+parameter [3:0] EXT_REX_D  = 4'd2;   // REX: Rd[4] = 1
+parameter [3:0] EXT_REX_DS = 4'd3;   // REX: Rs[4]=1, Rd[4]=1
+parameter [3:0] EXT_REX_N  = 4'd4;   // REX: nib[4] = 1
+parameter [3:0] EXT_REX_ND = 4'd5;   // REX: nib[4]=1, Rd[4]=1
 parameter [3:0] EXT_SKIP   = 4'd6;   // Conditional skip
 parameter [3:0] EXT_ETALU  = 4'd8;   // Extended tile ALU
 

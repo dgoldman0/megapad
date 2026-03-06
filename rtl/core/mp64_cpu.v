@@ -96,8 +96,8 @@ module mp64_cpu #(
     // ====================================================================
     // Register file
     // ====================================================================
-    reg [63:0] R [0:15];
-    reg [3:0]  psel, xsel, spsel;     // PC / X / SP selectors
+    reg [63:0] R [0:31];
+    reg [4:0]  psel, xsel, spsel;     // PC / X / SP selectors (5-bit for 32 regs)
     reg [7:0]  flags;                 // [S I G P V N C Z]
 
     wire [63:0] PC = R[psel];
@@ -107,7 +107,7 @@ module mp64_cpu #(
     // 1802 heritage
     reg [7:0]  D;                     // 8-bit accumulator
     reg        Q;                     // Q flip-flop
-    reg [7:0]  T;                     // saved X|P on MARK
+    reg [15:0] T;                     // saved X|P on MARK (widened for 5-bit selectors)
 
     // IVT / trap
     reg [63:0] ivt_base;
@@ -158,6 +158,15 @@ module mp64_cpu #(
     wire [3:0] fam = ibuf[0][7:4];
     wire [3:0] nib = ibuf[0][3:0];
 
+    // REX extension bits — active only when ext_active and ext_mod in REX range
+    wire rex_s = ext_active & ext_mod[0];   // source high bit
+    wire rex_d = ext_active & ext_mod[1];   // dest high bit
+    wire rex_n = ext_active & ext_mod[2];   // nibble high bit
+
+    wire [4:0] nib5 = {rex_n, nib};
+    wire [4:0] dst5 = {rex_d, ibuf[1][7:4]};
+    wire [4:0] src5 = {rex_s, ibuf[1][3:0]};
+
     // ====================================================================
     // CPU FSM — extra state for BIST
     // ====================================================================
@@ -203,7 +212,7 @@ module mp64_cpu #(
     // Multi-cycle temporaries
     // ====================================================================
     reg [63:0] mem_data;
-    reg [3:0]  dst_reg, src_reg;
+    reg [4:0]  dst_reg, src_reg;
     reg [63:0] effective_addr;
     reg [3:0]  mem_sub;
     reg [127:0] mul_result;
@@ -275,9 +284,9 @@ module mp64_cpu #(
             icache_inv_addr<= 64'd0;
             icache_req     <= 1'b0;
 
-            psel   <= 4'd3;
-            xsel   <= 4'd2;
-            spsel  <= 4'd15;
+            psel   <= 5'd3;
+            xsel   <= 5'd2;
+            spsel  <= 5'd15;
             flags  <= 8'h40;          // I=1
 
             ivt_base   <= 64'd0;
@@ -288,7 +297,7 @@ module mp64_cpu #(
             mpu_limit  <= 64'd0;
             D          <= 8'd0;
             Q          <= 1'b0;
-            T          <= 8'd0;
+            T          <= 16'd0;
 
             post_action <= POST_NONE;
             mem_sub     <= 4'd0;
@@ -346,6 +355,10 @@ module mp64_cpu #(
             R[4]  <= 64'd0; R[5]  <= 64'd0; R[6]  <= 64'd0; R[7]  <= 64'd0;
             R[8]  <= 64'd0; R[9]  <= 64'd0; R[10] <= 64'd0; R[11] <= 64'd0;
             R[12] <= 64'd0; R[13] <= 64'd0; R[14] <= 64'd0; R[15] <= 64'd0;
+            R[16] <= 64'd0; R[17] <= 64'd0; R[18] <= 64'd0; R[19] <= 64'd0;
+            R[20] <= 64'd0; R[21] <= 64'd0; R[22] <= 64'd0; R[23] <= 64'd0;
+            R[24] <= 64'd0; R[25] <= 64'd0; R[26] <= 64'd0; R[27] <= 64'd0;
+            R[28] <= 64'd0; R[29] <= 64'd0; R[30] <= 64'd0; R[31] <= 64'd0;
 
         end else begin
             bus_valid      <= 1'b0;
@@ -512,14 +525,18 @@ module mp64_cpu #(
                         4'h2: cpu_state <= CPU_HALT;           // HALT
 
                         4'h3: begin // RESET
-                            psel <= 4'd3; xsel <= 4'd2; spsel <= 4'd15;
+                            psel <= 5'd3; xsel <= 5'd2; spsel <= 5'd15;
                             flags <= 8'h40; priv_level <= 1'b0;
-                            D <= 8'd0; Q <= 1'b0; T <= 8'd0;
+                            D <= 8'd0; Q <= 1'b0; T <= 16'd0;
                             ivt_base <= 64'd0; ivec_id <= 8'd0;
                             R[0] <= 64'd0; R[1] <= 64'd0; R[2] <= 64'd0; R[3] <= 64'd0;
                             R[4] <= 64'd0; R[5] <= 64'd0; R[6] <= 64'd0; R[7] <= 64'd0;
                             R[8] <= 64'd0; R[9] <= 64'd0; R[10]<= 64'd0; R[11]<= 64'd0;
                             R[12]<= 64'd0; R[13]<= 64'd0; R[14]<= 64'd0; R[15]<= 64'd0;
+                            R[16]<= 64'd0; R[17]<= 64'd0; R[18]<= 64'd0; R[19]<= 64'd0;
+                            R[20]<= 64'd0; R[21]<= 64'd0; R[22]<= 64'd0; R[23]<= 64'd0;
+                            R[24]<= 64'd0; R[25]<= 64'd0; R[26]<= 64'd0; R[27]<= 64'd0;
+                            R[28]<= 64'd0; R[29]<= 64'd0; R[30]<= 64'd0; R[31]<= 64'd0;
                             cpu_state <= CPU_FETCH;
                         end
 
@@ -534,7 +551,7 @@ module mp64_cpu #(
                         4'h5: begin // RET (1802)
                             effective_addr <= R[spsel];
                             R[spsel] <= R[spsel] + 64'd8;
-                            dst_reg  <= 4'd0;
+                            dst_reg  <= 5'd0;
                             mem_sub  <= 4'h5;
                             cpu_state <= CPU_MEM_READ;
                         end
@@ -542,24 +559,24 @@ module mp64_cpu #(
                         4'h6: begin // DIS
                             effective_addr <= R[spsel];
                             R[spsel] <= R[spsel] + 64'd8;
-                            dst_reg  <= 4'd0;
+                            dst_reg  <= 5'd0;
                             mem_sub  <= 4'hB;
                             cpu_state <= CPU_MEM_READ;
                         end
 
                         4'h7: begin // MARK
-                            T <= {xsel, psel};
+                            T <= {3'b0, xsel, 3'b0, psel};
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= {56'd0, xsel, psel};
+                            mem_data <= {48'd0, 3'b0, xsel, 3'b0, psel};
                             xsel <= psel;
                             cpu_state <= CPU_MEM_WRITE;
                         end
 
                         4'h8: begin // SAV
                             effective_addr <= R[xsel];
-                            mem_data <= {56'd0, T};
-                            bus_size <= BUS_BYTE;
+                            mem_data <= {48'd0, T};
+                            bus_size <= BUS_HALF;
                             cpu_state <= CPU_MEM_WRITE;
                         end
 
@@ -572,8 +589,8 @@ module mp64_cpu #(
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
                             mem_data <= R[psel] + {60'd0, ibuf_need};
-                            R[psel]  <= R[ibuf[1][3:0]];
-                            fetch_pc <= R[ibuf[1][3:0]];
+                            R[psel]  <= R[src5];
+                            fetch_pc <= R[src5];
                             bus_size <= BUS_DWORD;
                             cpu_state <= CPU_MEM_WRITE;
                         end
@@ -605,7 +622,7 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_INC) begin
                     ext_active <= 1'b0;
-                    R[nib] <= R[nib] + 64'd1;
+                    R[nib5] <= R[nib5] + 64'd1;
                     cpu_state <= CPU_FETCH;
                 end
 
@@ -614,7 +631,7 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_DEC) begin
                     ext_active <= 1'b0;
-                    R[nib] <= R[nib] - 64'd1;
+                    R[nib5] <= R[nib5] - 64'd1;
                     cpu_state <= CPU_FETCH;
                 end
 
@@ -660,27 +677,27 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_MEM) begin
                     ext_active <= 1'b0;
-                    dst_reg <= ibuf[1][7:4];
-                    src_reg <= ibuf[1][3:0];
+                    dst_reg <= dst5;
+                    src_reg <= src5;
                     mem_sub <= nib;
                     case (nib)
-                        4'h0: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
-                        4'h1: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
+                        4'h0: begin effective_addr<=R[src5]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
+                        4'h1: begin effective_addr<=R[src5]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
                         4'h2: begin effective_addr<=R[xsel];         bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
                         4'h3: begin effective_addr<=R[xsel];         bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_READ; end
-                        4'h4: begin effective_addr<=R[ibuf[1][7:4]]; mem_data<=R[ibuf[1][3:0]]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE; end
-                        4'h5: begin effective_addr<=R[xsel]; mem_data<=R[ibuf[1][7:4]]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE; end
-                        4'h6: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_BYTE;  cpu_state<=CPU_MEM_READ; end
-                        4'h7: begin effective_addr<=R[ibuf[1][7:4]]; mem_data<={56'd0,R[ibuf[1][3:0]][7:0]}; bus_size<=BUS_BYTE; cpu_state<=CPU_MEM_WRITE; end
-                        4'h8: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_HALF;  cpu_state<=CPU_MEM_READ; end
-                        4'h9: begin effective_addr<=R[ibuf[1][7:4]]; mem_data<={48'd0,R[ibuf[1][3:0]][15:0]}; bus_size<=BUS_HALF; cpu_state<=CPU_MEM_WRITE; end
-                        4'hA: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_WORD;  cpu_state<=CPU_MEM_READ; end
-                        4'hB: begin effective_addr<=R[ibuf[1][7:4]]; mem_data<={32'd0,R[ibuf[1][3:0]][31:0]}; bus_size<=BUS_WORD; cpu_state<=CPU_MEM_WRITE; end
-                        4'hC: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_BYTE;  cpu_state<=CPU_MEM_READ; end
-                        4'hD: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_HALF;  cpu_state<=CPU_MEM_READ; end
-                        4'hE: begin effective_addr<=R[ibuf[1][3:0]]; bus_size<=BUS_WORD;  cpu_state<=CPU_MEM_READ; end
+                        4'h4: begin effective_addr<=R[dst5]; mem_data<=R[src5]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE; end
+                        4'h5: begin effective_addr<=R[xsel]; mem_data<=R[dst5]; bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE; end
+                        4'h6: begin effective_addr<=R[src5]; bus_size<=BUS_BYTE;  cpu_state<=CPU_MEM_READ; end
+                        4'h7: begin effective_addr<=R[dst5]; mem_data<={56'd0,R[src5][7:0]}; bus_size<=BUS_BYTE; cpu_state<=CPU_MEM_WRITE; end
+                        4'h8: begin effective_addr<=R[src5]; bus_size<=BUS_HALF;  cpu_state<=CPU_MEM_READ; end
+                        4'h9: begin effective_addr<=R[dst5]; mem_data<={48'd0,R[src5][15:0]}; bus_size<=BUS_HALF; cpu_state<=CPU_MEM_WRITE; end
+                        4'hA: begin effective_addr<=R[src5]; bus_size<=BUS_WORD;  cpu_state<=CPU_MEM_READ; end
+                        4'hB: begin effective_addr<=R[dst5]; mem_data<={32'd0,R[src5][31:0]}; bus_size<=BUS_WORD; cpu_state<=CPU_MEM_WRITE; end
+                        4'hC: begin effective_addr<=R[src5]; bus_size<=BUS_BYTE;  cpu_state<=CPU_MEM_READ; end
+                        4'hD: begin effective_addr<=R[src5]; bus_size<=BUS_HALF;  cpu_state<=CPU_MEM_READ; end
+                        4'hE: begin effective_addr<=R[src5]; bus_size<=BUS_WORD;  cpu_state<=CPU_MEM_READ; end
                         4'hF: begin
-                            effective_addr <= R[ibuf[1][3:0]] + ({{56{ibuf[2][7]}}, ibuf[2]} << 3);
+                            effective_addr <= R[src5] + ({{56{ibuf[2][7]}}, ibuf[2]} << 3);
                             bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_READ;
                         end
                     endcase
@@ -690,36 +707,36 @@ module mp64_cpu #(
                 // IMM (0x6) — 16 sub-ops
                 // --------------------------------------------------------
                 else if (fam == FAM_IMM) begin
-                    dst_reg <= ibuf[1][7:4];
+                    dst_reg <= dst5;
                     if (ext_active && ext_mod == EXT_IMM64) begin
-                        R[ibuf[1][7:4]] <= {ibuf[9], ibuf[8], ibuf[7], ibuf[6],
+                        R[dst5] <= {ibuf[9], ibuf[8], ibuf[7], ibuf[6],
                                              ibuf[5], ibuf[4], ibuf[3], ibuf[2]};
                         ext_active <= 1'b0;
                         cpu_state  <= CPU_FETCH;
                     end else begin
                         ext_active <= 1'b0;
                         case (nib)
-                            4'h0: begin R[ibuf[1][7:4]] <= {56'd0, ibuf[2]}; cpu_state <= CPU_FETCH; end
-                            4'h1: begin R[ibuf[1][7:4]][63:48] <= {ibuf[3], ibuf[2]}; cpu_state <= CPU_FETCH; end
-                            4'h2: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_ADD; cpu_state<=CPU_EXECUTE; end
-                            4'h3: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_AND; cpu_state<=CPU_EXECUTE; end
-                            4'h4: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_OR;  cpu_state<=CPU_EXECUTE; end
-                            4'h5: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_XOR; cpu_state<=CPU_EXECUTE; end
-                            4'h6: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_CMP; cpu_state<=CPU_EXECUTE; end
-                            4'h7: begin alu_a<=R[ibuf[1][7:4]]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_SUB; cpu_state<=CPU_EXECUTE; end
-                            4'h8: begin R[ibuf[1][7:4]] <= R[ibuf[1][7:4]] << ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
-                            4'h9: begin R[ibuf[1][7:4]] <= R[ibuf[1][7:4]] >> ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
-                            4'hA: begin R[ibuf[1][7:4]] <= $signed(R[ibuf[1][7:4]]) >>> ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
+                            4'h0: begin R[dst5] <= {56'd0, ibuf[2]}; cpu_state <= CPU_FETCH; end
+                            4'h1: begin R[dst5][63:48] <= {ibuf[3], ibuf[2]}; cpu_state <= CPU_FETCH; end
+                            4'h2: begin alu_a<=R[dst5]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_ADD; cpu_state<=CPU_EXECUTE; end
+                            4'h3: begin alu_a<=R[dst5]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_AND; cpu_state<=CPU_EXECUTE; end
+                            4'h4: begin alu_a<=R[dst5]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_OR;  cpu_state<=CPU_EXECUTE; end
+                            4'h5: begin alu_a<=R[dst5]; alu_b<={56'd0,ibuf[2]}; alu_op<=ALU_XOR; cpu_state<=CPU_EXECUTE; end
+                            4'h6: begin alu_a<=R[dst5]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_CMP; cpu_state<=CPU_EXECUTE; end
+                            4'h7: begin alu_a<=R[dst5]; alu_b<={{56{ibuf[2][7]}},ibuf[2]}; alu_op<=ALU_SUB; cpu_state<=CPU_EXECUTE; end
+                            4'h8: begin R[dst5] <= R[dst5] << ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
+                            4'h9: begin R[dst5] <= R[dst5] >> ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
+                            4'hA: begin R[dst5] <= $signed(R[dst5]) >>> ibuf[1][3:0]; cpu_state <= CPU_FETCH; end
                             4'hB: begin
                                 if (ibuf[1][3:0] != 0)
-                                    R[ibuf[1][7:4]] <= (R[ibuf[1][7:4]] << ibuf[1][3:0])
-                                                     | (R[ibuf[1][7:4]] >> (4'd0 - ibuf[1][3:0]));
+                                    R[dst5] <= (R[dst5] << ibuf[1][3:0])
+                                                     | (R[dst5] >> (4'd0 - ibuf[1][3:0]));
                                 cpu_state <= CPU_FETCH;
                             end
-                            4'hC: begin D <= R[ibuf[1][7:4]][7:0];  cpu_state <= CPU_FETCH; end
-                            4'hD: begin D <= R[ibuf[1][7:4]][15:8]; cpu_state <= CPU_FETCH; end
-                            4'hE: begin R[ibuf[1][7:4]][7:0]  <= D; cpu_state <= CPU_FETCH; end
-                            4'hF: begin R[ibuf[1][7:4]][15:8] <= D; cpu_state <= CPU_FETCH; end
+                            4'hC: begin D <= R[dst5][7:0];  cpu_state <= CPU_FETCH; end
+                            4'hD: begin D <= R[dst5][15:8]; cpu_state <= CPU_FETCH; end
+                            4'hE: begin R[dst5][7:0]  <= D; cpu_state <= CPU_FETCH; end
+                            4'hF: begin R[dst5][15:8] <= D; cpu_state <= CPU_FETCH; end
                         endcase
                     end
                 end
@@ -729,10 +746,10 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_ALU) begin
                     ext_active <= 1'b0;
-                    dst_reg <= ibuf[1][7:4];
-                    src_reg <= ibuf[1][3:0];
-                    alu_a   <= R[ibuf[1][7:4]];
-                    alu_b   <= R[ibuf[1][3:0]];
+                    dst_reg <= dst5;
+                    src_reg <= src5;
+                    alu_a   <= R[dst5];
+                    alu_b   <= R[src5];
                     case (nib)
                         4'h0: alu_op <= ALU_ADD;  4'h1: alu_op <= ALU_ADC;
                         4'h2: alu_op <= ALU_SUB;  4'h3: alu_op <= ALU_SBB;
@@ -812,7 +829,7 @@ module mp64_cpu #(
                         io_port <= nib[2:0]; io_is_inp <= 1'b1;
                         effective_addr <= {MP64_MMIO_HI, 20'd0, nib[2:0], 9'd0};
                         bus_size <= BUS_BYTE; cpu_state <= CPU_MEM_READ;
-                        dst_reg <= 4'd0; mem_sub <= 4'hF;
+                        dst_reg <= 5'd0; mem_sub <= 4'hF;
                     end else
                         cpu_state <= CPU_FETCH;
                 end
@@ -822,7 +839,7 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_SEP) begin
                     ext_active <= 1'b0;
-                    psel <= nib; fetch_pc <= R[nib];
+                    psel <= nib5; fetch_pc <= R[nib5];
                     cpu_state <= CPU_FETCH;
                 end
 
@@ -831,7 +848,7 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_SEX) begin
                     ext_active <= 1'b0;
-                    xsel <= nib; cpu_state <= CPU_FETCH;
+                    xsel <= nib5; cpu_state <= CPU_FETCH;
                 end
 
                 // --------------------------------------------------------
@@ -839,47 +856,47 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_MULDIV) begin
                     ext_active <= 1'b0;
-                    dst_reg <= ibuf[1][7:4];
-                    src_reg <= ibuf[1][3:0];
+                    dst_reg <= dst5;
+                    src_reg <= src5;
                     div_done_r <= 1'b0;
                     case (nib)
                         4'h0: begin // SMUL low
-                            mul_op_a <= R[ibuf[1][7:4]];
-                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_op_a <= R[dst5];
+                            mul_op_b <= R[src5];
                             mul_is_signed_r <= 1'b1;
                             mul_start_r <= 1'b1;
                             cpu_state <= CPU_MULDIV;
                         end
                         4'h1: begin // SMUL high
-                            mul_op_a <= R[ibuf[1][7:4]];
-                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_op_a <= R[dst5];
+                            mul_op_b <= R[src5];
                             mul_is_signed_r <= 1'b1;
                             mul_start_r <= 1'b1;
                             mem_sub <= 4'h1; cpu_state <= CPU_MULDIV;
                         end
                         4'h2: begin // UMUL low
-                            mul_op_a <= R[ibuf[1][7:4]];
-                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_op_a <= R[dst5];
+                            mul_op_b <= R[src5];
                             mul_is_signed_r <= 1'b0;
                             mul_start_r <= 1'b1;
                             cpu_state <= CPU_MULDIV;
                         end
                         4'h3: begin // UMUL high
-                            mul_op_a <= R[ibuf[1][7:4]];
-                            mul_op_b <= R[ibuf[1][3:0]];
+                            mul_op_a <= R[dst5];
+                            mul_op_b <= R[src5];
                             mul_is_signed_r <= 1'b0;
                             mul_start_r <= 1'b1;
                             mem_sub <= 4'h1; cpu_state <= CPU_MULDIV;
                         end
                         4'h4: begin // DIV (signed)
-                            if (R[ibuf[1][3:0]] == 64'd0) begin
+                            if (R[src5] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b1;
-                                div_dividend  <= R[ibuf[1][7:4]][63]
-                                    ? (~R[ibuf[1][7:4]] + 64'd1) : R[ibuf[1][7:4]];
-                                div_divisor   <= R[ibuf[1][3:0]][63]
-                                    ? (~R[ibuf[1][3:0]] + 64'd1) : R[ibuf[1][3:0]];
+                                div_dividend  <= R[dst5][63]
+                                    ? (~R[dst5] + 64'd1) : R[dst5];
+                                div_divisor   <= R[src5][63]
+                                    ? (~R[src5] + 64'd1) : R[src5];
                                 div_quotient  <= 64'd0;
                                 div_remainder <= 64'd0;
                                 div_cycle     <= 7'd0;
@@ -889,12 +906,12 @@ module mp64_cpu #(
                             end
                         end
                         4'h5: begin // UDIV
-                            if (R[ibuf[1][3:0]] == 64'd0) begin
+                            if (R[src5] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b0;
-                                div_dividend  <= R[ibuf[1][7:4]];
-                                div_divisor   <= R[ibuf[1][3:0]];
+                                div_dividend  <= R[dst5];
+                                div_divisor   <= R[src5];
                                 div_quotient  <= 64'd0;
                                 div_remainder <= 64'd0;
                                 div_cycle     <= 7'd0;
@@ -904,14 +921,14 @@ module mp64_cpu #(
                             end
                         end
                         4'h6: begin // MOD (signed)
-                            if (R[ibuf[1][3:0]] == 64'd0) begin
+                            if (R[src5] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b1;
-                                div_dividend  <= R[ibuf[1][7:4]][63]
-                                    ? (~R[ibuf[1][7:4]] + 64'd1) : R[ibuf[1][7:4]];
-                                div_divisor   <= R[ibuf[1][3:0]][63]
-                                    ? (~R[ibuf[1][3:0]] + 64'd1) : R[ibuf[1][3:0]];
+                                div_dividend  <= R[dst5][63]
+                                    ? (~R[dst5] + 64'd1) : R[dst5];
+                                div_divisor   <= R[src5][63]
+                                    ? (~R[src5] + 64'd1) : R[src5];
                                 div_quotient  <= 64'd0;
                                 div_remainder <= 64'd0;
                                 div_cycle     <= 7'd0;
@@ -921,12 +938,12 @@ module mp64_cpu #(
                             end
                         end
                         4'h7: begin // UMOD
-                            if (R[ibuf[1][3:0]] == 64'd0) begin
+                            if (R[src5] == 64'd0) begin
                                 ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b0;
-                                div_dividend  <= R[ibuf[1][7:4]];
-                                div_divisor   <= R[ibuf[1][3:0]];
+                                div_dividend  <= R[dst5];
+                                div_divisor   <= R[src5];
                                 div_quotient  <= 64'd0;
                                 div_remainder <= 64'd0;
                                 div_cycle     <= 7'd0;
@@ -952,14 +969,14 @@ module mp64_cpu #(
                         csr_wdata <= R[nib[2:0]];
                         case (ibuf[1])
                             CSR_FLAGS:    flags    <= R[nib[2:0]][7:0];
-                            CSR_PSEL:     psel     <= R[nib[2:0]][3:0];
-                            CSR_XSEL:     xsel     <= R[nib[2:0]][3:0];
-                            CSR_SPSEL:    spsel    <= R[nib[2:0]][3:0];
+                            CSR_PSEL:     psel     <= R[nib[2:0]][4:0];
+                            CSR_XSEL:     xsel     <= R[nib[2:0]][4:0];
+                            CSR_SPSEL:    spsel    <= R[nib[2:0]][4:0];
                             CSR_IVTBASE:  ivt_base <= R[nib[2:0]];
                             CSR_D:        D        <= R[nib[2:0]][7:0];
                             CSR_DF:       flags[1] <= R[nib[2:0]][0];
                             CSR_QREG:     Q        <= R[nib[2:0]][0];
-                            CSR_TREG:     T        <= R[nib[2:0]][7:0];
+                            CSR_TREG:     T        <= R[nib[2:0]][15:0];
                             CSR_IE:       flags[6] <= R[nib[2:0]][0];
                             CSR_PRIV:     priv_level <= R[nib[2:0]][0];  // inert — no enforcement
                             CSR_MPU_BASE: mpu_base   <= R[nib[2:0]];
@@ -1007,14 +1024,14 @@ module mp64_cpu #(
                         // CSRR
                         case (ibuf[1])
                             CSR_FLAGS:       R[nib[2:0]] <= {56'd0, flags};
-                            CSR_PSEL:        R[nib[2:0]] <= {60'd0, psel};
-                            CSR_XSEL:        R[nib[2:0]] <= {60'd0, xsel};
-                            CSR_SPSEL:       R[nib[2:0]] <= {60'd0, spsel};
+                            CSR_PSEL:        R[nib[2:0]] <= {59'd0, psel};
+                            CSR_XSEL:        R[nib[2:0]] <= {59'd0, xsel};
+                            CSR_SPSEL:       R[nib[2:0]] <= {59'd0, spsel};
                             CSR_IVTBASE:     R[nib[2:0]] <= ivt_base;
                             CSR_D:           R[nib[2:0]] <= {56'd0, D};
                             CSR_DF:          R[nib[2:0]] <= {63'd0, flags[1]};
                             CSR_QREG:        R[nib[2:0]] <= {63'd0, Q};
-                            CSR_TREG:        R[nib[2:0]] <= {56'd0, T};
+                            CSR_TREG:        R[nib[2:0]] <= {48'd0, T};
                             CSR_IE:          R[nib[2:0]] <= {63'd0, flags[6]};
                             CSR_PRIV:        R[nib[2:0]] <= {63'd0, priv_level};
                             CSR_MPU_BASE:    R[nib[2:0]] <= mpu_base;
@@ -1117,17 +1134,17 @@ module mp64_cpu #(
                                 end
                             end
                             4'h5: begin // 1802 RET
-                                T <= bus_rdata[7:0];
-                                xsel <= bus_rdata[7:4]; psel <= bus_rdata[3:0];
+                                T <= bus_rdata[15:0];
+                                xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
                                 flags[6] <= 1'b1;
-                                fetch_pc <= R[bus_rdata[3:0]];
+                                fetch_pc <= R[bus_rdata[4:0]];
                                 cpu_state <= CPU_FETCH;
                             end
                             4'hB: begin // DIS
-                                T <= bus_rdata[7:0];
-                                xsel <= bus_rdata[7:4]; psel <= bus_rdata[3:0];
+                                T <= bus_rdata[15:0];
+                                xsel <= bus_rdata[12:8]; psel <= bus_rdata[4:0];
                                 flags[6] <= 1'b0;
-                                fetch_pc <= R[bus_rdata[3:0]];
+                                fetch_pc <= R[bus_rdata[4:0]];
                                 cpu_state <= CPU_FETCH;
                             end
                             default: begin

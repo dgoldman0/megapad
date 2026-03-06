@@ -1,6 +1,6 @@
 # Megapad-64 Instruction Set Reference
 
-The Megapad-64 is a **64-bit, little-endian** processor with 16
+The Megapad-64 is a **64-bit, little-endian** processor with 32
 general-purpose registers, a rich flag set, and a built-in SIMD tile
 engine.  Its heritage traces to the RCA CDP1802, but it extends that
 architecture enormously with 64-bit registers, hardware multiply/divide,
@@ -18,21 +18,28 @@ every register, every encoding.
 
 | Property | Value |
 |----------|-------|
-| Registers | 16 × 64-bit GPRs (R0–R15) |
+| Registers | 32 × 64-bit GPRs (R0–R31) |
 | Word size | 64-bit |
 | Endianness | Little-endian |
 | PC | `R[PSEL]` — default PSEL=3, so PC = R3 |
 | Data pointer | `R[XSEL]` — default XSEL=2, so R(X) = R2 |
 | Stack pointer | `R[SPSEL]` — default SPSEL=15, so SP = R15 |
+| PSEL / XSEL / SPSEL | 5-bit selectors (0–31) |
 | D accumulator | 8-bit legacy accumulator (1802 heritage) |
 | Q flip-flop | 1-bit output latch |
-| T register | 8-bit saved `XSEL‖PSEL` (for MARK/RET) |
+| T register | 16-bit saved `{0,XSEL[4:0],0,PSEL[4:0]}` (for MARK/RET) |
 | Flags | 8-bit packed `[S I G P V N C Z]` |
 | Tile engine | 64-byte tiles, 256-bit accumulator, SIMD lanes, FP16/BF16 |
 
 The indirection through `PSEL`, `XSEL`, and `SPSEL` means any GPR can
 serve as the program counter, data pointer, or stack pointer.  In practice,
 the BIOS sets PSEL=3, XSEL=2, SPSEL=15 and never changes them.
+
+> **Register banks:** R0–R15 are addressable in a single instruction byte
+> (register index fits in a 4-bit nibble).  R16–R31 require a 1-byte
+> **REX prefix** (see Family 0xF) which supplies the 5th register bit.
+> Old binaries using only R0–R15 are **fully binary-compatible** — no
+> REX prefix means 4-bit indices behave exactly as before.
 
 ---
 
@@ -80,26 +87,37 @@ Byte 1:  [Rd:4][Rs:4]
          Rs = source register (lower nibble)
 ```
 
+When preceded by a **REX prefix** (Family 0xF, values F1–F5), the 4-bit
+indices are extended to 5 bits:
+
+```
+Without REX:  Rd = ibuf[1][7:4],  Rs = ibuf[1][3:0]       → R0–R15
+With REX:     Rd = {rex_d, ibuf[1][7:4]},                  → R0–R31
+              Rs = {rex_s, ibuf[1][3:0]}                   → R0–R31
+```
+
+The instruction size increases by 1 byte when a REX prefix is present.
+
 ### Instruction Size Summary
 
 | Family | Name | Typical Size | Notes |
 |--------|------|-------------|-------|
 | `0x0` | SYS | 1 byte | CALL.L = 2 bytes |
-| `0x1` | INC | 1 byte | Register in low nibble |
-| `0x2` | DEC | 1 byte | Register in low nibble |
+| `0x1` | INC | 1 byte | Register in low nibble (+1 with REX) |
+| `0x2` | DEC | 1 byte | Register in low nibble (+1 with REX) |
 | `0x3` | BR | 2 bytes | + 1 signed offset byte |
 | `0x4` | LBR | 3 bytes | + 2 signed offset bytes |
-| `0x5` | MEM | 2 bytes | LD.D = 3 bytes (has offset) |
-| `0x6` | IMM | 2–4 bytes | LDI w/ EXT.IMM64 = 10 bytes |
-| `0x7` | ALU | 2 bytes | |
+| `0x5` | MEM | 2 bytes | LD.D = 3 bytes (has offset); +1 with REX |
+| `0x6` | IMM | 2–4 bytes | LDI w/ EXT.IMM64 = 10 bytes; +1 with REX |
+| `0x7` | ALU | 2 bytes | +1 with REX |
 | `0x8` | MEMALU | 1 byte | 1802-compatible D ops |
 | `0x9` | I/O | 1 byte | 1802-style port I/O |
-| `0xA` | SEP | 1 byte | Set PC register |
-| `0xB` | SEX | 1 byte | Set data pointer register |
-| `0xC` | MULDIV | 2 bytes | +3 extra cycles |
+| `0xA` | SEP | 1 byte | Set PC register (+1 with REX.N for R16+) |
+| `0xB` | SEX | 1 byte | Set data pointer register (+1 with REX.N for R16+) |
+| `0xC` | MULDIV | 2 bytes | +3 extra cycles; +1 with REX |
 | `0xD` | CSR | 2 bytes | CSR read/write |
 | `0xE` | MEX | 2–3 bytes | Tile engine ops |
-| `0xF` | EXT | 1 byte | Prefix modifier for next insn |
+| `0xF` | EXT | 1 byte | Prefix modifier for next insn (incl. REX) |
 
 > **Micro-core restrictions:** Families 0x8 (MEMALU) and 0x9 (port I/O),
 > SYS sub-ops 0x5–0xA (RET/DIS/MARK/SAV/SEQ/REQ), and IMM sub-ops
@@ -123,15 +141,15 @@ Single-byte system operations (except CALL.L which is 2 bytes).
 | `02` | **HALT** | 1 | Stop the CPU permanently. |
 | `03` | **RESET** | 1 | Full CPU state reset (all registers zeroed, PSEL=3, etc.). |
 | `04` | **RTI** | 2 | Return from interrupt: pop PC, pop FLAGS+PRIV (restores IE and privilege level). |
-| `05` | **RET** | 2 | 1802-style return: pop T byte, restore XSEL and PSEL, enable interrupts.  **Supervisor-only.** |
+| `05` | **RET** | 2 | 1802-style return: pop 16-bit T from stack, restore `XSEL ← T[12:8]`, `PSEL ← T[4:0]`, IE ← 1.  **Supervisor-only.** |
 | `06` | **DIS** | 2 | Same as RET but disables interrupts (IE ← 0).  **Supervisor-only.** |
-| `07` | **MARK** | 2 | Save XSEL‖PSEL into T; push T; set XSEL ← PSEL.  **Supervisor-only.** |
-| `08` | **SAV** | 1 | Store T register to memory at R(X): `M(R(X)) ← T`.  **Supervisor-only.** |
+| `07` | **MARK** | 2 | `T ← {3'b0, XSEL[4:0], 3'b0, PSEL[4:0]}`; push T (16 bits in 64-bit word); `XSEL ← PSEL`.  **Supervisor-only.** |
+| `08` | **SAV** | 1 | Store T register as 16-bit half-word to `M(R(X))`.  **Supervisor-only.** |
 | `09` | **SEQ** | 1 | Set Q flip-flop to 1.  **Supervisor-only.** |
 | `0A` | **REQ** | 1 | Reset Q flip-flop to 0.  **Supervisor-only.** |
 | `0B` | **EI** | 1 | Enable interrupts (I flag ← 1). |
 | `0C` | **DI** | 1 | Disable interrupts (I flag ← 0). |
-| `0D nn` | **CALL.L Rn** | 2 | Long call: push PC; PC ← R[n].  2 bytes: opcode + register byte. |
+| `0D nn` | **CALL.L Rn** | 2 | Long call: push PC; PC ← R[n].  2 bytes: opcode + register byte.  With REX.S prefix, n extends to 5 bits (R0–R31). |
 | `0E` | **RET.L** | 2 | Long return: PC ← pop from stack. |
 | `0F` | **TRAP** | 3 | Software trap — saves FLAGS+PRIV, escalates to supervisor, enters `IVEC_SW_TRAP` handler. |
 
@@ -144,6 +162,7 @@ Single-byte system operations (except CALL.L which is 2 bytes).
 | `1n` | **INC Rn** | 1 | `R[n] ← R[n] + 1` — increment any register by 1. |
 
 The register index is encoded in the low nibble.  `INC R5` = `0x15`.
+For R16–R31, a **REX.N** prefix (F4) supplies bit 4: `INC R20` = `F4 14`.
 
 ---
 
@@ -152,6 +171,8 @@ The register index is encoded in the low nibble.  `INC R5` = `0x15`.
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
 | `2n` | **DEC Rn** | 1 | `R[n] ← R[n] − 1` — decrement any register by 1. |
+
+For R16–R31, a **REX.N** prefix (F4) supplies bit 4: `DEC R18` = `F4 22`.
 
 ---
 
@@ -343,6 +364,9 @@ each 4 bits wide.
 |--------|----------|--------|-------------|
 | `An` | **SEP Rn** | 1 | `PSEL ← n` — PC is now R[n].  Used for 1802-style subroutine dispatch. |
 
+For R16–R31, a **REX.N** prefix (F4) extends the nibble to 5 bits:
+`SEP R16` = `F4 A0`, `SEP R17` = `F4 A1`, etc.
+
 ---
 
 ## Family 0xB — SEX (Set Data Pointer)
@@ -352,6 +376,9 @@ each 4 bits wide.
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
 | `Bn` | **SEX Rn** | 1 | `XSEL ← n` — R(X) is now R[n]. |
+
+For R16–R31, a **REX.N** prefix (F4) extends the nibble to 5 bits:
+`SEX R20` = `F4 B4`.
 
 ---
 
@@ -492,10 +519,34 @@ value is stored and consumed by the following instruction.
 | Opcode | Name | Effect |
 |--------|------|--------|
 | `F0` | **EXT.IMM64** | Next LDI loads a full 64-bit immediate (8 LE bytes) instead of 8-bit. |
+| `F1` | **REX.S** | Set Rs[4]=1 for next instruction (source register → R16–R31). |
+| `F2` | **REX.D** | Set Rd[4]=1 for next instruction (dest register → R16–R31). |
+| `F3` | **REX.DS** | Set both Rs[4]=1 and Rd[4]=1 (both operands in R16–R31). |
+| `F4` | **REX.N** | Set nib[4]=1 for next instruction (INC/DEC/SEP/SEX → R16–R31). |
+| `F5` | **REX.ND** | Set nib[4]=1 and Rd[4]=1 (nibble + dest in R16–R31). |
 | `F6` | **EXT.SKIP** | Next BR becomes a SKIP: if condition is true, skip the following instruction entirely (advance PC past it). |
+| `F8` | **EXT.ETALU** | Extended tile ALU sub-functions for the next MEX instruction. |
 | `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
+
+### REX Prefix Details
+
+The REX prefix (F1–F5) extends 4-bit register fields to 5 bits, enabling
+access to R16–R31.  The modifier value is stored in `ext_mod[3:0]` and
+the low 3 bits encode which register fields get the high bit:
+
+| ext_mod bit | Field extended | Families affected |
+|-------------|----------------|-------------------|
+| bit 0 (Rs) | `ibuf[1][3:0]` → 5-bit source | MEM, ALU, MULDIV, CALL.L |
+| bit 1 (Rd) | `ibuf[1][7:4]` → 5-bit dest | MEM, ALU, MULDIV, IMM |
+| bit 2 (nib) | `ibuf[0][3:0]` → 5-bit nibble | INC, DEC, SEP, SEX |
+
+**Constraints:**
+- REX + LDI64 is **illegal** for R16–R31 targets (the EXT.IMM64 prefix
+  already occupies the modifier slot; assembler raises an error).
+- REX bits that don't apply to a given instruction are silently ignored.
+- Instructions using only R0–R15 never need a REX prefix.
 
 ### SKIP Pseudo-Instruction
 
@@ -544,14 +595,14 @@ low nibble of the opcode byte.
 | Addr | Name | Width | R/W | Description |
 |------|------|-------|-----|-------------|
 | `0x00` | **FLAGS** | 8 | RW | Packed flags register (see Flags section) |
-| `0x01` | **PSEL** | 4 | RW | Program counter register selector |
-| `0x02` | **XSEL** | 4 | RW | Data pointer register selector |
-| `0x03` | **SPSEL** | 4 | RW | Stack pointer register selector |
+| `0x01` | **PSEL** | 5 | RW | Program counter register selector (0–31) |
+| `0x02` | **XSEL** | 5 | RW | Data pointer register selector (0–31) |
+| `0x03` | **SPSEL** | 5 | RW | Stack pointer register selector (0–31) |
 | `0x04` | **IVT_BASE** | 64 | RW | Interrupt vector table base address |
 | `0x05` | **D** | 8 | RW | 1802 D accumulator |
 | `0x06` | **DF** | 1 | RW | DF flag (alias for Carry) |
 | `0x07` | **Q** | 1 | RW | Q flip-flop |
-| `0x08` | **T** | 8 | RW | T register (saved XSEL‖PSEL) |
+| `0x08` | **T** | 16 | RW | T register: `{3'b0, XSEL[4:0], 3'b0, PSEL[4:0]}` |
 | `0x09` | **IE** | 1 | RW | Interrupt enable (alias for I flag) |
 | `0x0A` | **PRIV** | 1 | RW | Privilege level: 0=supervisor, 1=user.  Write is **supervisor-only**. |
 | `0x0B` | **MPU_BASE** | 64 | RW | MPU base address (inclusive).  Write is **supervisor-only**. |
@@ -675,10 +726,10 @@ When an interrupt or trap fires:
 
 On CPU reset:
 
-1. All 16 GPRs set to 0
+1. All 32 GPRs set to 0
 2. `PSEL ← 3` (PC = R3), `XSEL ← 2`, `SPSEL ← 15`
 3. All flags cleared
-4. D = 0, Q = 0, T = 0
+4. D = 0, Q = 0, T = 0 (16-bit)
 5. Tile CSRs reset (SB=SR=SC=0, SW=1, TMODE=TCTRL=0)
 6. ACC[0–3] = 0
 7. IVT_BASE = 0

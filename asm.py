@@ -76,11 +76,11 @@ MULDIV_SUB = {
 # ---------------------------------------------------------------------------
 
 def _parse_reg(tok: str) -> int:
-    """Parse 'R0'-'R15' or 'r0'-'r15'. Returns register index."""
+    """Parse 'R0'-'R31' or 'r0'-'r31'. Returns register index."""
     tok = tok.strip().lower()
     if tok.startswith("r") and tok[1:].isdigit():
         n = int(tok[1:])
-        if 0 <= n <= 15:
+        if 0 <= n <= 31:
             return n
     raise ValueError(f"Invalid register: {tok!r}")
 
@@ -96,6 +96,24 @@ def _parse_imm(tok: str) -> int:
 def _split_ops(rest: str) -> list[str]:
     """Split operand string by comma, trimming whitespace."""
     return [s.strip() for s in rest.split(",") if s.strip()]
+
+# Regex matching R16-R31 (case insensitive)
+_HIGH_REG_RE = re.compile(r'\b[Rr](1[6-9]|2\d|3[01])\b')
+
+def _has_high_reg(text: str) -> bool:
+    """Return True if the instruction text references any register R16-R31."""
+    return bool(_HIGH_REG_RE.search(text))
+
+def _rex_byte(rd: int = 0, rs: int = 0, rn: int = 0) -> int | None:
+    """Compute REX prefix byte from full 5-bit register indices.
+
+    Returns 0xF0|ext_mod if any high bit is set, else None.
+    Bit mapping:  ext_mod[0]=rs[4], ext_mod[1]=rd[4], ext_mod[2]=rn[4].
+    """
+    ext_mod = ((rn >> 4) & 1) << 2 | ((rd >> 4) & 1) << 1 | ((rs >> 4) & 1)
+    if ext_mod == 0:
+        return None
+    return 0xF0 | ext_mod
 
 
 def _parse_string(lineno: int, text: str) -> bytes:
@@ -373,17 +391,18 @@ def _instruction_size(lineno: int, text: str) -> int:
     """Compute the byte size of one assembly instruction."""
     mnem, rest = _split_mnemonic(text)
     mnem_lower = mnem.lower()
+    hi = _has_high_reg(rest)  # +1 byte REX prefix when R16+ used
 
     # -- SYS family (0x0) --
     if mnem_lower in ("idl", "nop", "halt", "reset", "rti", "ret", "dis",
                       "mark", "sav", "seq", "req", "ei", "di", "ret.l", "trap"):
         return 1
     if mnem_lower == "call.l":
-        return 2  # 0x0D + reg byte
+        return 2 + (1 if hi else 0)  # 0x0D + reg byte + optional REX
 
     # -- INC / DEC --
-    if mnem_lower == "inc": return 1
-    if mnem_lower == "dec": return 1
+    if mnem_lower == "inc": return 1 + (1 if hi else 0)
+    if mnem_lower == "dec": return 1 + (1 if hi else 0)
 
     # -- SKIP (conditional skip next instruction) --
     if mnem_lower.startswith("skip"):
@@ -400,26 +419,28 @@ def _instruction_size(lineno: int, text: str) -> int:
     # -- MEM --
     if mnem_lower in MEM_SUB:
         if mnem_lower == "ld.d":
-            return 3  # opcode + reg-byte + offset
-        return 2
+            return 3 + (1 if hi else 0)  # opcode + reg-byte + offset
+        return 2 + (1 if hi else 0)
 
     # -- IMM --
     if mnem_lower == "ldi":
-        return 3  # opcode + reg + imm8 (default; imm64 via EXT prefix adds more)
+        return 3 + (1 if hi else 0)  # opcode + reg + imm8
     if mnem_lower == "ldi64":
+        if hi:
+            raise AsmError(lineno, "LDI64 cannot target R16-R31 (EXT slot conflict)")
         return 11  # EXT prefix (1) + opcode (1) + reg (1) + imm64 (8)
     if mnem_lower == "lhi":
-        return 4  # opcode + reg + imm16_lo + imm16_hi
+        return 4 + (1 if hi else 0)  # opcode + reg + imm16_lo + imm16_hi
     if mnem_lower in ("addi", "andi", "ori", "xori", "cmpi", "subi"):
-        return 3  # opcode + reg + imm8
+        return 3 + (1 if hi else 0)  # opcode + reg + imm8
     if mnem_lower in ("lsli", "lsri", "asri", "roli"):
-        return 2  # opcode + (Rn|imm4)
+        return 2 + (1 if hi else 0)  # opcode + (Rn|imm4)
     if mnem_lower in ("glo", "ghi", "plo", "phi"):
-        return 2  # opcode + reg
+        return 2 + (1 if hi else 0)  # opcode + reg
 
     # -- ALU --
     if mnem_lower in ALU_SUB:
-        return 2
+        return 2 + (1 if hi else 0)
 
     # -- MEMALU --
     if mnem_lower in MEMALU_SUB:
@@ -430,12 +451,12 @@ def _instruction_size(lineno: int, text: str) -> int:
         return 1
 
     # -- SEP / SEX --
-    if mnem_lower == "sep": return 1
-    if mnem_lower == "sex": return 1
+    if mnem_lower == "sep": return 1 + (1 if hi else 0)
+    if mnem_lower == "sex": return 1 + (1 if hi else 0)
 
     # -- MUL/DIV --
     if mnem_lower in MULDIV_SUB:
-        return 2
+        return 2 + (1 if hi else 0)
 
     # -- CSR --
     if mnem_lower in ("csrr", "csrw"):
@@ -512,6 +533,9 @@ def _emit_instruction(lineno: int, text: str, pc: int,
 
     if mnem_lower == "call.l":
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rs=rn)  # CALL.L uses rex_s path
+        if rex is not None:
+            out.append(rex)
         out.append(0x0D)
         out.append(rn & 0xF)
         return out
@@ -519,10 +543,16 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     # ---- INC / DEC ----
     if mnem_lower == "inc":
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rn=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0x10 | (rn & 0xF))
         return out
     if mnem_lower == "dec":
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rn=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0x20 | (rn & 0xF))
         return out
 
@@ -573,23 +603,32 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     # ---- MEM family (0x5S) ----
     if mnem_lower in MEM_SUB:
         sub = MEM_SUB[mnem_lower]
-        out.append(0x50 | sub)
         if mnem_lower == "ld.d":
             rd = _parse_reg(ops[0])
             rn = _parse_reg(ops[1])
             off = _parse_imm(ops[2]) if len(ops) > 2 else 0
-            out.append((rd << 4) | (rn & 0xF))
+            rex = _rex_byte(rd=rd, rs=rn)
+            if rex is not None:
+                out.append(rex)
+            out.append(0x50 | sub)
+            out.append(((rd & 0xF) << 4) | (rn & 0xF))
             out.append(off & 0xFF)
         else:
             rd = _parse_reg(ops[0])
             rs = _parse_reg(ops[1]) if len(ops) > 1 else 0
-            out.append((rd << 4) | (rs & 0xF))
+            rex = _rex_byte(rd=rd, rs=rs)
+            if rex is not None:
+                out.append(rex)
+            out.append(0x50 | sub)
+            out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
 
     # ---- IMM family (0x6S) ----
     if mnem_lower == "ldi64":
         # EXT.IMM64: prefix 0xF0 + 0x60 + Rn + 8 bytes LE
         rn = _parse_reg(ops[0])
+        if rn >= 16:
+            raise AsmError(lineno, "LDI64 cannot target R16-R31 (EXT slot conflict)")
         imm = _resolve_imm_or_label(ops[1], labels, pc, 64)
         out.append(0xF0)  # EXT prefix, modifier=0
         out.append(0x60)  # LDI sub-op
@@ -601,16 +640,22 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     if mnem_lower == "ldi":
         rn = _parse_reg(ops[0])
         imm = _resolve_imm_or_label(ops[1], labels, pc, 8)
+        rex = _rex_byte(rd=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0x60)
-        out.append((rn << 4) & 0xF0)
+        out.append((rn & 0xF) << 4)
         out.append(imm & 0xFF)
         return out
 
     if mnem_lower == "lhi":
         rn = _parse_reg(ops[0])
         imm = _parse_imm(ops[1]) & 0xFFFF
+        rex = _rex_byte(rd=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0x61)
-        out.append((rn << 4) & 0xF0)
+        out.append((rn & 0xF) << 4)
         out.append(imm & 0xFF)
         out.append((imm >> 8) & 0xFF)
         return out
@@ -622,8 +667,11 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     if mnem_lower in imm_arith:
         rn = _parse_reg(ops[0])
         imm = _parse_imm(ops[1])
+        rex = _rex_byte(rd=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(imm_arith[mnem_lower])
-        out.append((rn << 4) & 0xF0)
+        out.append((rn & 0xF) << 4)
         out.append(imm & 0xFF)
         return out
 
@@ -631,6 +679,9 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     if mnem_lower in imm_shift:
         rn = _parse_reg(ops[0])
         imm4 = _parse_imm(ops[1]) & 0xF
+        rex = _rex_byte(rd=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(imm_shift[mnem_lower])
         out.append(((rn & 0xF) << 4) | (imm4 & 0xF))
         return out
@@ -638,8 +689,11 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     dlo_hi = {"glo": 0x6C, "ghi": 0x6D, "plo": 0x6E, "phi": 0x6F}
     if mnem_lower in dlo_hi:
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rd=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(dlo_hi[mnem_lower])
-        out.append((rn << 4) & 0xF0)
+        out.append((rn & 0xF) << 4)
         return out
 
     # ---- ALU family (0x7S) ----
@@ -647,6 +701,9 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         sub = ALU_SUB[mnem_lower]
         rd = _parse_reg(ops[0])
         rs = _parse_reg(ops[1])
+        rex = _rex_byte(rd=rd, rs=rs)
+        if rex is not None:
+            out.append(rex)
         out.append(0x70 | sub)
         out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
@@ -674,10 +731,16 @@ def _emit_instruction(lineno: int, text: str, pc: int,
     # ---- SEP / SEX ----
     if mnem_lower == "sep":
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rn=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0xA0 | (rn & 0xF))
         return out
     if mnem_lower == "sex":
         rn = _parse_reg(ops[0])
+        rex = _rex_byte(rn=rn)
+        if rex is not None:
+            out.append(rex)
         out.append(0xB0 | (rn & 0xF))
         return out
 
@@ -686,6 +749,9 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         sub = MULDIV_SUB[mnem_lower]
         rd = _parse_reg(ops[0])
         rs = _parse_reg(ops[1])
+        rex = _rex_byte(rd=rd, rs=rs)
+        if rex is not None:
+            out.append(rex)
         out.append(0xC0 | sub)
         out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
