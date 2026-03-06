@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **360** dictionary words defined in `bios.asm`.
+Complete catalog of all **363** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -636,15 +636,18 @@ of compiled code.
 | 306 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
 | 307 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
-### Cooperative Multitasking (5 words)
+### Cooperative Multitasking (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 308 | `PAUSE` | `( -- )` | | Yield to Task 1 via `SEP R13`; resumes when Task 1 yields back |
-| 309 | `TASK-YIELD` | `( -- )` | | Yield from Task 1 back to Task 0 via `SEP R3` |
+| 308 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
+| 309 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R3` |
 | 310 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
 | 311 | `TASK-STOP` | `( -- )` | | Stop Task 1, reset to idle sentinel |
 | 312 | `TASK-STATUS` | `( -- n )` | | Return task status (0=idle, 1=running) |
+| 313 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
+| 314 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
+| 315 | `TASK-COUNT` | `( -- n )` | | Return number of task slots (currently 4) |
 
 ---
 
@@ -686,8 +689,8 @@ of compiled code.
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
-| Cooperative Multitasking | 5 |
-| **Total** | **360** |
+| Cooperative Multitasking | 8 |
+| **Total** | **363** |
 
 ### All Immediate Words (34)
 
@@ -696,7 +699,7 @@ of compiled code.
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
-TASK-STATUS → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
+TASK-COUNT → BACKGROUND3 → BACKGROUND2 → TASK-STATUS → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
 CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
 SHA256-DOUT@ → SHA256-STATUS@ → SHA256-FINAL → SHA256-UPDATE → SHA256-INIT →
 SHA3-SQUEEZE-NEXT → SHA3-SQUEEZE → SHA3-MODE@ → SHA3-MODE! →
@@ -784,5 +787,8 @@ ram_size ↓             Return stack (R15 grows downward)
 | R11 | Scratch / temp |
 | R12 | Scratch / counter |
 | R13 | Scratch / temp |
+| R14 | **DSP** — Data stack pointer (grows downward) |
+| R15 | **RSP** — Return/call stack pointer (grows downward) |
+| R20 | Task trampoline PC (cooperative multitasking; `SEP R20` switches) |
 | R14 | **DSP** — Data stack pointer (grows downward) |
 | R15 | **RSP** — Return/call stack pointer (grows downward) |

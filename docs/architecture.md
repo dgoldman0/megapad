@@ -12,7 +12,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
 ┌───────────────────────────────────────────────────────────┐
 │                    Megapad-64 CPU (×16 cores)             │
 │  4 full cores         ┌──────────────────┐  ┌───────────┐ │
-│  16 × 64-bit GPRs     │   Tile Engine    │  │ Perf Ctrs │ │
+│  32 × 64-bit GPRs     │   Tile Engine    │  │ Perf Ctrs │ │
 │  4 KiB I-Cache        │  (MEX extension) │  │ (4 × 64b) │ │
 │  8-bit Flags          │  FP16 / bf16     │  └───────────┘ │
 │  256-bit Accumulator  │  DMA queue       │                │
@@ -675,13 +675,14 @@ instructions:
 
 A lightweight cooperative multitasker was added to the BIOS:
 
-- **R13** is reserved as the Task 1 program counter
-- `SEP R13` switches execution to Task 1; `SEP R4` returns to Task 0
+- **R20** (REX-extended) is the task trampoline register
+- `SEP R20` round-robin yields across up to 4 task slots
 - Each task has independent data and return stacks
-- A `task1_cleanup` sentinel catches premature task exit
+- A `task_cleanup` sentinel catches premature task exit
 
-Five new dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
-**TASK-STOP**, **TASK-STATUS**.
+Eight dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
+**TASK-STOP**, **TASK-STATUS**, **BACKGROUND2**, **BACKGROUND3**,
+**TASK-COUNT**.
 
 #### T-Register Fault Diagnostics (Phase 9)
 

@@ -1951,7 +1951,7 @@ class TestBIOS(unittest.TestCase):
     def test_task_status_no_task(self):
         """TASK? returns 0 when no background task is running."""
         sys, buf = self._boot_bios()
-        text = self._run_forth(sys, buf, ["TASK? ."])
+        text = self._run_forth(sys, buf, ["1 TASK? ."])
         self.assertIn("0 ", text)
 
     def test_pause_noop_without_task(self):
@@ -1970,9 +1970,9 @@ class TestBIOS(unittest.TestCase):
             "VARIABLE result",
             ": BG-WORK  42 result ! ;",
             "' BG-WORK BACKGROUND",
-            "TASK? .",
+            "1 TASK? .",
             "PAUSE",
-            "TASK? .",
+            "1 TASK? .",
             "result @ .",
         ])
         # Before PAUSE: task is queued (TASK? → 1)
@@ -2005,8 +2005,8 @@ class TestBIOS(unittest.TestCase):
             "' BG-INF BACKGROUND",
             "PAUSE",
             "PAUSE",
-            "TASK-STOP",
-            "TASK? .",
+            "1 TASK-STOP",
+            "1 TASK? .",
             "bg-count @ .",
         ])
         # After 2 PAUSEs, counter = 2. TASK-STOP kills it.
@@ -2039,12 +2039,108 @@ class TestBIOS(unittest.TestCase):
             "PAUSE PAUSE",
             "' BG2 BACKGROUND",
             "PAUSE PAUSE",
-            "TASK-STOP",
+            "1 TASK-STOP",
             "r1 @ .",
             "r2 @ .",
         ])
         # BG1 runs for 2 PAUSEs → r1=2.  Then BG2 replaces it for 2 more → r2=2.
         self.assertIn("2 ", text)
+
+    def test_background2_slot(self):
+        """BACKGROUND2 runs a task in slot 2 independently of slot 1."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE s2-val",
+            ": BG2-WORK  99 s2-val ! ;",
+            "' BG2-WORK BACKGROUND2",
+            "2 TASK? .",
+            "PAUSE",
+            "2 TASK? .",
+            "s2-val @ .",
+        ])
+        self.assertIn("1 ", text)   # active before PAUSE
+        self.assertIn("0 ", text)   # done after PAUSE
+        self.assertIn("99 ", text)
+
+    def test_background3_slot(self):
+        """BACKGROUND3 runs a task in slot 3."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE s3-val",
+            ": BG3-WORK  77 s3-val ! ;",
+            "' BG3-WORK BACKGROUND3",
+            "3 TASK? .",
+            "PAUSE",
+            "3 TASK? .",
+            "s3-val @ .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("0 ", text)
+        self.assertIn("77 ", text)
+
+    def test_multi_slot_round_robin(self):
+        """PAUSE round-robins through active slots 1, 2, 3."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE c1  VARIABLE c2  VARIABLE c3",
+            ": T1  BEGIN  c1 @ 1 + c1 !  TASK-YIELD  AGAIN ;",
+            ": T2  BEGIN  c2 @ 1 + c2 !  TASK-YIELD  AGAIN ;",
+            ": T3  BEGIN  c3 @ 1 + c3 !  TASK-YIELD  AGAIN ;",
+            "' T1 BACKGROUND",
+            "' T2 BACKGROUND2",
+            "' T3 BACKGROUND3",
+            # 9 PAUSEs: round-robin across 3 tasks → each runs 3 times
+            "9 0 DO PAUSE LOOP",
+            "1 TASK-STOP  2 TASK-STOP  3 TASK-STOP",
+            "c1 @ .",
+            "c2 @ .",
+            "c3 @ .",
+        ])
+        self.assertIn("3 ", text)   # each counter = 3
+
+    def test_task_count(self):
+        """TASK-COUNT returns number of active background tasks."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "TASK-COUNT .",
+            ": NOOP-BG  TASK-YIELD ;",
+            "' NOOP-BG BACKGROUND",
+            "TASK-COUNT .",
+            "' NOOP-BG BACKGROUND2",
+            "TASK-COUNT .",
+            "1 TASK-STOP  2 TASK-STOP",
+            "TASK-COUNT .",
+        ])
+        # TASK-COUNT outputs: 0, 1, 2, 0
+        # (echoed "1 TASK-STOP 2 TASK-STOP" inserts extra digits)
+        nums = [int(w) for w in text.split() if w.isdigit()]
+        self.assertEqual(nums[0], 0, f"First TASK-COUNT should be 0, got {nums}")
+        self.assertEqual(nums[1], 1, f"Second TASK-COUNT should be 1, got {nums}")
+        self.assertEqual(nums[2], 2, f"Third TASK-COUNT should be 2, got {nums}")
+        self.assertEqual(nums[-1], 0, f"Final TASK-COUNT should be 0, got {nums}")
+
+    def test_slots_independent_stop(self):
+        """Stopping one slot doesn't affect others."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE a  VARIABLE b",
+            ": TA  BEGIN  a @ 1 + a !  TASK-YIELD  AGAIN ;",
+            ": TB  BEGIN  b @ 1 + b !  TASK-YIELD  AGAIN ;",
+            "' TA BACKGROUND",
+            "' TB BACKGROUND2",
+            "PAUSE PAUSE",
+            "1 TASK-STOP",
+            "PAUSE PAUSE",
+            "2 TASK-STOP",
+            "a @ .",
+            "b @ .",
+        ])
+        # Round-robin: 2 PAUSEs across 2 slots → each runs 1 time.
+        # After stopping slot 1: 2 PAUSEs with 1 slot → slot 2 runs 2 more.
+        # Total: a=1, b=3
+        nums = [int(w) for w in text.split() if w.isdigit()]
+        self.assertEqual(nums[-2], 1, f"a should be 1, got {nums}")   # a
+        self.assertEqual(nums[-1], 3, f"b should be 3, got {nums}")   # b
 
     # -- Phase 9: SEP diagnostic words --
 

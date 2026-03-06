@@ -542,7 +542,7 @@ def {_attr}(self, v):
 
     def _reset_state(self):
         """Reinitialize all CPU state (called by system.py boot)."""
-        for i in range(16):
+        for i in range(32):
             self._cs.set_reg(i, 0)
         self._cs.psel = 3
         self._cs.xsel = 2
@@ -601,7 +601,7 @@ def {_attr}(self, v):
 
     def dump_regs(self) -> str:
         lines = []
-        for i in range(16):
+        for i in range(32):
             tag = ""
             if i == self.psel: tag += " <PC"
             if i == self.xsel: tag += " <X"
@@ -623,16 +623,16 @@ class _RegProxy:
     def __init__(self, cs): self._cs = cs
     def __getitem__(self, i):
         if isinstance(i, slice):
-            return [self._cs.get_reg(j) for j in range(*i.indices(16))]
-        return self._cs.get_reg(i & 0xF)
+            return [self._cs.get_reg(j) for j in range(*i.indices(32))]
+        return self._cs.get_reg(i & 0x1F)
     def __setitem__(self, i, v):
         if isinstance(i, slice):
-            for j, val in zip(range(*i.indices(16)), v):
+            for j, val in zip(range(*i.indices(32)), v):
                 self._cs.set_reg(j, u64(val))
         else:
-            self._cs.set_reg(i & 0xF, u64(v))
-    def __len__(self): return 16
-    def __iter__(self): return (self._cs.get_reg(i) for i in range(16))
+            self._cs.set_reg(i & 0x1F, u64(v))
+    def __len__(self): return 32
+    def __iter__(self): return (self._cs.get_reg(i) for i in range(32))
     def __repr__(self): return repr(list(self))
 
 class _AccProxy:
@@ -665,7 +665,7 @@ class _PortInProxy:
 
 def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     """Copy C++ CPUState → Python Megapad64 for fallback execution."""
-    for i in range(16):
+    for i in range(32):
         py_cpu.regs[i] = cs.get_reg(i)
     py_cpu.psel = cs.psel
     py_cpu.xsel = cs.xsel
@@ -722,7 +722,7 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
 
 def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     """Copy Python Megapad64 state → C++ CPUState after fallback."""
-    for i in range(16):
+    for i in range(32):
         cs.set_reg(i, u64(py_cpu.regs[i]))
     cs.psel = py_cpu.psel
     cs.xsel = py_cpu.xsel

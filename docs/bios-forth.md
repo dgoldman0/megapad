@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **360 entries** —
+This document catalogs every word in the BIOS dictionary — **363 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -763,19 +763,23 @@ SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
 
 ---
 
-## Cooperative Multitasking (5 words)
+## Cooperative Multitasking (8 words)
 
-Lightweight two-task cooperative multitasker.  R13 holds the Task 1 PC;
-`SEP R13` switches to Task 1, `SEP R4` returns to Task 0.  Each task
-has independent data and return stacks.
+Lightweight four-task cooperative multitasker.  R20 (REX-extended) holds
+the task trampoline PC; `SEP R20` round-robin yields across active task
+slots, `SEP R3` returns to Task 0.  Each task has independent data and
+return stacks.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PAUSE` | `( -- )` | Yield control to Task 1 (or back to Task 0 if called from Task 1). |
-| `TASK-YIELD` | `( -- )` | Yield from Task 1 back to Task 0 via `SEP R3`. |
+| `PAUSE` | `( -- )` | Round-robin yield across all 4 task slots via `SEP R20`. |
+| `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R3`. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
 | `TASK-STOP` | `( -- )` | Stop Task 1, reset to idle sentinel. |
 | `TASK-STATUS` | `( -- n )` | Return 0 if Task 1 is idle, 1 if running. |
+| `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
+| `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
+| `TASK-COUNT` | `( -- n )` | Return number of task slots (currently 4). |
 
 ---
 

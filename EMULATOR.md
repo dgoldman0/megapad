@@ -12,7 +12,8 @@ and an interactive CLI monitor/debugger.
 > (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512), optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
 > UDP, TAP), full TCP/IP network stack through TLS 1.3, cooperative
-> multitasking (PAUSE/TASK-YIELD/BACKGROUND), and 1,687 tests passing.
+> multitasking (4-task PAUSE/BACKGROUND/BACKGROUND2/BACKGROUND3), and
+> 1,692 tests passing.
 
 ---
 
@@ -98,7 +99,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │  ┌──────────────┐    ┌────────────────────────────┐  │
 │  │  megapad64.py │    │       devices.py  (2,287 lines)│  │
 │  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
-│  │  16 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
+│  │  32 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
 │  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
 │  │  tile engine  │    │ │ SysInfo │ │Mailbox│  NIC   │  │
@@ -120,7 +121,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  (788 lines)  — two-pass assembler        │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  (14,524 lines) — Forth BIOS v1.0, 360 words
+    bios.asm  (14,524 lines) — Forth BIOS v1.0, 363 words
     bios.rom  (~26 KB)       — precompiled binary
 ```
 
@@ -128,7 +129,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | 3,002 | CPU core — 16×64-bit GPRs, all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
+| `megapad64.py` | 3,022 | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
 | `accel/mp64_accel.cpp` | 3,229 | C++ CPU core (pybind11) — 63× speedup over PyPy, SEP dispatch fast path, STXI/STXD.D |
 | `accel_wrapper.py` | 840 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 792 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
@@ -136,7 +137,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
 | `system.py` | 991 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,557 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | 14,524 | Forth BIOS v1.0 — subroutine-threaded interpreter, 360 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache, cooperative multitasking) |
+| `bios.asm` | 14,524 | Forth BIOS v1.0 — subroutine-threaded interpreter, 363 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache, cooperative multitasking) |
 | `test_megapad64.py` | 2,193 | CPU + tile engine test suite — 23 tests |
 | `test_system.py` | 24,033 | System integration tests — 1,592 tests (74 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile) |
 | `test_networking.py` | 187 | Real-networking tests — 13 tests |
@@ -314,11 +315,12 @@ buffer), then tokenises and interprets:
 | R7 | scratch |
 | R8 | UART base address (`0xFFFF_FF00_0000_0000`) |
 | R9–R12 | scratch / temp |
-| R13 | Task 1 PC (cooperative multitasking; `SEP R13` switches) |
+| R13 | Scratch / temp |
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
+| R20 | Task trampoline PC (cooperative multitasking; `SEP R20` switches) |
 
-### Built-in words (360)
+### Built-in words (363)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -432,7 +434,7 @@ buffer), then tokenises and interprets:
 `MBOX!` `MBOX@` `SPIN@` `SPIN!` `WAKE-CORE` `CORE-STATUS`
 
 **Cooperative Multitasking**
-`PAUSE` `TASK-YIELD` `BACKGROUND` `TASK-STOP` `TASK-STATUS`
+`PAUSE` `TASK-YIELD` `BACKGROUND` `TASK-STOP` `TASK-STATUS` `BACKGROUND2` `BACKGROUND3` `TASK-COUNT`
 
 ### Dictionary structure
 
@@ -492,7 +494,7 @@ monitor is still available for debugging.
 
 | Command | Description |
 |---|---|
-| `regs` | All 16 registers + PC, SP, D, flags |
+| `regs` | All 32 registers + PC, SP, D, flags |
 | `flags` | CPU flags: Z, C, N, V, P, G, I, S |
 | `dump <addr> [len]` | Hex dump (default 256 bytes) |
 | `disasm [addr] [count]` | Disassemble from addr (default PC) |

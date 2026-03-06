@@ -337,8 +337,8 @@ class Megapad64:
         self.num_cores: int = num_cores
         self.irq_ipi: bool = False  # pending IPI from mailbox
 
-        # 16 × 64-bit GPRs
-        self.regs: list[int] = [0] * 16
+        # 32 × 64-bit GPRs (R0-R15 base, R16-R31 via REX prefix)
+        self.regs: list[int] = [0] * 32
 
         # Designators (1802 heritage)
         self.psel: int = 3   # which GPR is PC  — default R3 (1802: P)
@@ -1777,12 +1777,12 @@ class Megapad64:
 
     # -- 0xA: SEP Rn --
     def _exec_sep(self, n: int) -> int:
-        self.psel = n
+        self.psel = n | (self._rex_n << 4)
         return 0
 
     # -- 0xB: SEX Rn --
     def _exec_sex(self, n: int) -> int:
-        self.xsel = n
+        self.xsel = n | (self._rex_n << 4)
         return 0
 
     # -- 0xC: MUL/DIV --

@@ -76,7 +76,7 @@ enum EW { EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16 };
 // ---------------------------------------------------------------------------
 
 struct CPUState {
-    uint64_t regs[16];      // GP registers
+    uint64_t regs[32];      // GP registers (R0-R15 base, R16-R31 via REX)
     uint8_t  psel;          // PC register index
     uint8_t  xsel;          // X register index
     uint8_t  spsel;         // SP register index
@@ -215,6 +215,12 @@ static inline uint8_t parity8(uint64_t val) {
     b ^= b >> 1;
     return (b & 1) ^ 1;
 }
+
+// REX prefix helpers — extract register extension bits from ext_modifier.
+// ext_modifier values 1-5 are REX prefixes; 0 is EXT.IMM64, 6 is SKIP, -1 is none.
+static inline int rex_s(int m) { return (m >= 1 && m <= 5) ? (m & 1) : 0; }
+static inline int rex_d(int m) { return (m >= 1 && m <= 5) ? ((m >> 1) & 1) : 0; }
+static inline int rex_n(int m) { return (m >= 1 && m <= 5) ? ((m >> 2) & 1) : 0; }
 
 // ---------------------------------------------------------------------------
 //  Trap signaling
@@ -2037,7 +2043,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             case 0xC: s.flag_i = 0; break;  // DI
             case 0xD: {  // CALL.L
                 uint8_t b1 = fetch8(s);
-                int rn = b1 & 0xF;
+                int rn = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
                 uint64_t target = s.regs[rn];
                 // Check accelerator hooks BEFORE pushing return address
                 int hook = find_accel_hook(s, target);
@@ -2065,13 +2071,17 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         break;
     }
 
-    case 0x1:  // INC Rn
-        s.regs[n]++;
+    case 0x1: {  // INC Rn
+        int rn_inc = n | (rex_n(s.ext_modifier) << 4);
+        s.regs[rn_inc]++;
         break;
+    }
 
-    case 0x2:  // DEC Rn
-        s.regs[n]--;
+    case 0x2: {  // DEC Rn
+        int rn_dec = n | (rex_n(s.ext_modifier) << 4);
+        s.regs[rn_dec]--;
         break;
+    }
 
     case 0x3: {  // BR (short branch) / SKIP
         if (s.ext_modifier == 6) {  // SKIP mode
@@ -2104,8 +2114,8 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     case 0x5: {  // MEM
         uint8_t b1 = fetch8(s);
-        int rd = (b1 >> 4) & 0xF;
-        int rs = b1 & 0xF;
+        int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
+        int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
         switch (n) {
             case 0x0:   // LDN
                 s.regs[rd] = sys_read64(s, cb, s.regs[rs]);
@@ -2168,7 +2178,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     case 0x6: {  // IMM
         uint8_t b1 = fetch8(s);
-        int rn = (b1 >> 4) & 0xF;
+        int rn = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
         switch (n) {
             case 0x0: {  // LDI
                 if (s.ext_modifier == 0) {  // EXT.IMM64
@@ -2274,8 +2284,8 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     case 0x7: {  // ALU
         uint8_t b1 = fetch8(s);
-        int rd = (b1 >> 4) & 0xF;
-        int rs = b1 & 0xF;
+        int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
+        int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
         uint64_t a = s.regs[rd];
         uint64_t b = s.regs[rs];
         switch (n) {
@@ -2511,18 +2521,18 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     case 0xA:  // SEP Rn
         if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-        s.psel = n;
+        s.psel = n | (rex_n(s.ext_modifier) << 4);
         break;
 
     case 0xB:  // SEX Rn
         if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-        s.xsel = n;
+        s.xsel = n | (rex_n(s.ext_modifier) << 4);
         break;
 
     case 0xC: {  // MULDIV
         uint8_t b1 = fetch8(s);
-        int rd = (b1 >> 4) & 0xF;
-        int rs = b1 & 0xF;
+        int rd = ((b1 >> 4) & 0xF) | (rex_d(s.ext_modifier) << 4);
+        int rs = (b1 & 0xF) | (rex_s(s.ext_modifier) << 4);
         uint64_t a = s.regs[rd];
         uint64_t b = s.regs[rs];
         switch (n) {
@@ -2775,8 +2785,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("num_cores", &CPUState::num_cores)
         .def_readwrite("mem_size", &CPUState::mem_size)
         // Register access
-        .def("get_reg", [](const CPUState& s, int i) { return s.regs[i & 0xF]; })
-        .def("set_reg", [](CPUState& s, int i, uint64_t v) { s.regs[i & 0xF] = v; })
+        .def("get_reg", [](const CPUState& s, int i) { return s.regs[i & 0x1F]; })
+        .def("set_reg", [](CPUState& s, int i, uint64_t v) { s.regs[i & 0x1F] = v; })
         // Accumulator access
         .def("get_acc", [](const CPUState& s, int i) { return s.acc[i & 3]; })
         .def("set_acc", [](CPUState& s, int i, uint64_t v) { s.acc[i & 3] = v; })

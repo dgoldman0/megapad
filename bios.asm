@@ -25,7 +25,8 @@
 ;    R10 = string pointer for print_str
 ;    R11 = scratch / temp
 ;    R12 = scratch / counter
-;    R13 = scratch / temp / Task 1 PC (Phase 8, saved to memory between PAUSEs)
+;    R13 = scratch / temp
+;    R20 = task trampoline PC (Phase 8, SEP target for cooperative multitasking)
 ;    R14 = DSP (data stack pointer, grows downward)
 ;    R15 = RSP (return/call stack, grows downward)
 ;
@@ -5040,7 +5041,7 @@ sq_done:
 ;   Scan to null, compute length, push (addr len), patch return past string.
 ; --- dictionary header so binimg can resolve compile_call references ---
 d_squote_runtime:
-    .dq d_task_status
+    .dq d_task_count
     .db 4
     .ascii "(S\")"
 squote_runtime:
@@ -9101,116 +9102,250 @@ w_fb_setup:
 ;  Cooperative Multitasking  [Phase 8]
 ; =====================================================================
 ;
-; Zero-overhead cooperative yield using SEP R13 to switch between
-; Task 0 (the REPL / main Forth loop) and a single background task.
+; 4-task round-robin cooperative multitasking using SEP R20.
 ;
-; Task 0 calls PAUSE to yield a timeslice to Task 1.  Task 1 calls
-; TASK-YIELD to give control back.  The actual context switch is SEP — 1
-; byte, 1 cycle, zero memory traffic.  The wrapper saves/restores
-; DSP (R14) and RSP (R15) so each task has independent stacks.
+; Task 0 (R3) is the REPL — always active.  Tasks 1–3 are background
+; slots.  R20 is the dedicated SEP trampoline register: PAUSE loads
+; the next active task's PC into R20 from var_task_pcs[], then SEP R20.
+; Any background task yields back via SEP R3 (which freezes R20).
 ;
-; R13 is used as Task 1's PC register during the SEP switch.  Between
-; PAUSE calls, R13 is free for scratch use — the saved continuation
-; lives in var_task1_pc.
+; R20 is a REX-extended register (R16-R31) chosen specifically to avoid
+; conflicts with R13 and other low registers used as scratch throughout
+; the BIOS.
+;
+; Each task has independent DSP/RSP stored in var_task_dsps[]/var_task_rsps[].
+; Task 0's DSP is pushed onto its own RSP before switching;
+; var_task0_rsp holds Task 0's RSP during the switch.
+;
+; Round-robin scan: PAUSE checks slots 1, 2, 3 in order starting from
+; the slot after the last-run task.  At most 3 iterations (bounded).
+; Cost: ~2 cycles per inactive slot skipped.
 ;
 ; Unlike the IPI-based CORE-DISPATCH (preemptive, cross-core), this is
 ; cooperative, same-core — complementary mechanisms.
 
-; PAUSE ( -- )  yield to background task (no-op if none active)
+; PAUSE ( -- )  yield to next active background task (no-op if none active)
 w_pause:
-    ldi64 r11, var_task1_pc
-    ldn r13, r11
-    cmpi r13, 0
-    breq .pause_nop
+    ; ---- Find next active task (round-robin scan) ----
+    ldi64 r11, var_task_index
+    ldn r7, r11                 ; r7 = last-run task index
+    ldi r12, 3                  ; r12 = attempts remaining
+.pause_scan:
+    addi r7, 1
+    cmpi r7, 4
+    brne .pause_idx_ok
+    ldi r7, 1                  ; wrap: 4 → 1
+.pause_idx_ok:
+    ; Load var_task_pcs[r7] — base + r7*8
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    ldn r20, r11                ; r20 = task_pcs[r7]
+    cmpi r20, 0
+    brne .pause_found           ; found an active task
+    subi r12, 1
+    cmpi r12, 0
+    brgt .pause_scan            ; try next slot
+    ; No active tasks — return as NOP
+    ret.l
+
+.pause_found:
+    ; ---- Record which task we're switching to ----
+    ldi64 r11, var_task_index
+    str r11, r7                 ; save current task index
 
     ; ---- Save Task 0 DSP on its own return stack ----
     subi r15, 8
     str r15, r14
-    ; ---- Save Task 0 RSP to memory (after push, so pop works) ----
+    ; ---- Save Task 0 RSP to memory ----
     ldi64 r11, var_task0_rsp
     str r11, r15
 
-    ; ---- Load Task 1 context ----
-    ldi64 r11, var_task1_dsp
+    ; ---- Load target task context ----
+    ; DSP: var_task_dsps[r7]
+    ldi64 r11, var_task_dsps
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldn r14, r11
-    ldi64 r11, var_task1_rsp
+    ; RSP: var_task_rsps[r7]
+    ldi64 r11, var_task_rsps
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldn r15, r11
 
     ; ---- SEP switch: 1 cycle, 0 memory ----
-    sep  r13                    ; Task 1 runs; R3 freezes
+    sep  r20                    ; target task runs; R3 freezes
 
-    ; ---- Back from Task 1 (it did SEP R3) ----
-    ; If task1_cleanup already zeroed var_task1_pc, skip the save
-    ; (otherwise we'd overwrite the zero with R13's frozen address).
-    ldi64 r11, var_task1_pc
+    ; ---- Back from task (it did SEP R3) ----
+    ; Reload task index (we're back in Task 0 context now)
+    ldi64 r11, var_task_index
+    ldn r7, r11                 ; r7 = the task that just yielded
+
+    ; Check if cleanup already zeroed the task's PC
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldn r1, r11
     cmpi r1, 0
-    breq .task1_done
-    ; R13 = Task 1's frozen continuation — save full context
-    str r11, r13
-    ldi64 r11, var_task1_dsp
-    str r11, r14
-    ldi64 r11, var_task1_rsp
-    str r11, r15
-.task1_done:
+    breq .pause_task_done
+    ; Task is still active — save its full context
+    ; PC: R20 = frozen continuation
+    str r11, r20                ; var_task_pcs[r7] = R20
+    ; DSP
+    ldi64 r11, var_task_dsps
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    str r11, r14                ; var_task_dsps[r7] = R14
+    ; RSP
+    ldi64 r11, var_task_rsps
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    str r11, r15                ; var_task_rsps[r7] = R15
+.pause_task_done:
 
     ; ---- Restore Task 0 ----
     ldi64 r11, var_task0_rsp
     ldn r15, r11
     ldn r14, r15              ; pop saved DSP
     addi r15, 8
-.pause_nop:
     ret.l
 
-; TASK-YIELD ( -- )  yield from background task back to Task 0
-;   Called by Task 1 via call.l (dictionary dispatch).  The SEP R3
-;   freezes R13 at the ret.l; next PAUSE resumes there, ret.l returns
-;   to the caller inside Task 1.
+; TASK-YIELD ( -- )  yield from any background task back to Task 0
+;   Called by Tasks 1–3 via call.l (dictionary dispatch).  The SEP R3
+;   freezes R20 at the ret.l; next PAUSE resumes there, ret.l returns
+;   to the caller inside the background task.
 w_task_yield:
-    sep  r3                     ; yield to Task 0 (R13 freezes at ret.l)
+    sep  r3                     ; yield to Task 0 (R20 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
 
-; BACKGROUND ( xt -- )  start a background task
-;   Sets Task 1's PC to the xt, initialises fresh stacks.
-;   If a task is already running, it is silently replaced.
+; task_setup_slot: shared helper — set up a background task in slot r7
+;   Entry: r1 = xt, r7 = slot index (1–3)
+;   Uses: r0, r1, r7, r11, r12
+task_setup_slot:
+    ; Store PC: var_task_pcs[r7] = xt
+    ldi64 r11, var_task_pcs
+    mov r0, r7
+    lsli r0, 3
+    add r11, r0
+    str r11, r1
+
+    ; Look up dstack_top and rstack_top from table
+    ldi64 r11, task_slot_dstack_tops
+    mov r0, r7
+    subi r0, 1                  ; slots 1–3 → index 0–2
+    lsli r0, 3
+    add r11, r0
+    ldn r12, r11                ; r12 = dstack_top for this slot
+
+    ; Store DSP: var_task_dsps[r7] = dstack_top
+    ldi64 r11, var_task_dsps
+    mov r0, r7
+    lsli r0, 3
+    add r11, r0
+    str r11, r12
+
+    ; Look up rstack_top
+    ldi64 r11, task_slot_rstack_tops
+    mov r0, r7
+    subi r0, 1
+    lsli r0, 3
+    add r11, r0
+    ldn r12, r11                ; r12 = rstack_top for this slot
+
+    ; Push cleanup sentinel onto task's RSP
+    subi r12, 8
+    ldi64 r0, task_cleanup
+    str r12, r0
+
+    ; Store RSP: var_task_rsps[r7] = rstack_top - 8
+    ldi64 r11, var_task_rsps
+    mov r0, r7
+    lsli r0, 3
+    add r11, r0
+    str r11, r12
+    ret.l
+
+; Stack top address tables for slots 1–3
+task_slot_dstack_tops:
+    .dq task1_dstack_top
+    .dq task2_dstack_top
+    .dq task3_dstack_top
+task_slot_rstack_tops:
+    .dq task1_rstack_top
+    .dq task2_rstack_top
+    .dq task3_rstack_top
+
+; BACKGROUND ( xt -- )  start xt as Task 1 (slot 1)
 w_background:
     ldn r1, r14               ; xt
     addi r14, 8
-    ; Set Task 1 PC
-    ldi64 r11, var_task1_pc
-    str r11, r1
-    ; Initialise Task 1 DSP (top of dedicated data stack, grows down)
-    ldi64 r1, task1_dstack_top
-    ldi64 r11, var_task1_dsp
-    str r11, r1
-    ; Initialise Task 1 RSP with cleanup sentinel
-    ldi64 r1, task1_rstack_top
-    subi r1, 8
-    ldi64 r7, task1_cleanup
-    str r1, r7                ; push sentinel onto Task 1's RSP
-    ldi64 r11, var_task1_rsp
-    str r11, r1
+    ldi r7, 1
+    ldi64 r11, task_setup_slot
+    call.l r11
     ret.l
 
-; task1_cleanup: sentinel — runs when a background task's word returns
-;   Clears var_task1_pc and yields back to Task 0 permanently.
-task1_cleanup:
+; BACKGROUND2 ( xt -- )  start xt as Task 2 (slot 2)
+w_background2:
+    ldn r1, r14
+    addi r14, 8
+    ldi r7, 2
+    ldi64 r11, task_setup_slot
+    call.l r11
+    ret.l
+
+; BACKGROUND3 ( xt -- )  start xt as Task 3 (slot 3)
+w_background3:
+    ldn r1, r14
+    addi r14, 8
+    ldi r7, 3
+    ldi64 r11, task_setup_slot
+    call.l r11
+    ret.l
+
+; task_cleanup: sentinel — runs when a background task's word returns
+;   Clears var_task_pcs[current_task] and yields back to Task 0.
+task_cleanup:
+    ; Load current task index
+    ldi64 r11, var_task_index
+    ldn r7, r11
+    ; Zero var_task_pcs[r7]
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldi r1, 0
-    ldi64 r11, var_task1_pc
     str r11, r1
     sep  r3                     ; final yield back to Task 0
-    br   task1_cleanup          ; unreachable but safe re-entry
+    br   task_cleanup           ; unreachable but safe re-entry
 
-; TASK-STOP ( -- )  cancel background task
+; TASK-STOP ( n -- )  cancel background task in slot n (1–3)
 w_task_stop:
+    ldn r7, r14               ; n = slot index
+    addi r14, 8
+    ; Zero var_task_pcs[r7]
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldi r1, 0
-    ldi64 r11, var_task1_pc
     str r11, r1
     ret.l
 
-; TASK? ( -- flag )  is a background task active?
+; TASK? ( n -- flag )  is background task n active? (1–3)
 w_task_status:
-    ldi64 r11, var_task1_pc
+    ldn r7, r14               ; n = slot index
+    addi r14, 8
+    ; Load var_task_pcs[r7]
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
     ldn r1, r11
     cmpi r1, 0
     breq .ts_zero
@@ -9218,6 +9353,27 @@ w_task_status:
 .ts_zero:
     subi r14, 8
     str r14, r1
+    ret.l
+
+; TASK-COUNT ( -- n )  count of active background tasks
+w_task_count:
+    ldi r7, 0                  ; counter
+    ldi r12, 1                 ; slot index
+.tc_loop:
+    ldi64 r11, var_task_pcs
+    mov r1, r12
+    lsli r1, 3
+    add r11, r1
+    ldn r1, r11
+    cmpi r1, 0
+    breq .tc_skip
+    addi r7, 1
+.tc_skip:
+    addi r12, 1
+    cmpi r12, 4
+    brne .tc_loop
+    subi r14, 8
+    str r14, r7
     ret.l
 
 ; =====================================================================
@@ -14290,6 +14446,33 @@ d_task_status:
     call.l r11
     ret.l
 
+; === BACKGROUND2 ===
+d_background2:
+    .dq d_task_status
+    .db 11
+    .ascii "BACKGROUND2"
+    ldi64 r11, w_background2
+    call.l r11
+    ret.l
+
+; === BACKGROUND3 ===
+d_background3:
+    .dq d_background2
+    .db 11
+    .ascii "BACKGROUND3"
+    ldi64 r11, w_background3
+    call.l r11
+    ret.l
+
+; === TASK-COUNT ===
+d_task_count:
+    .dq d_background3
+    .db 10
+    .ascii "TASK-COUNT"
+    ldi64 r11, w_task_count
+    call.l r11
+    ret.l
+
 ; =====================================================================
 ;  Forth Variables
 ; =====================================================================
@@ -14357,30 +14540,73 @@ var_reloc_buf:
     .dq 0                             ; pointer to user-allocated relocation buffer
 
 ; Cooperative multitasking state  [Phase 8]
-var_task1_pc:
-    .dq 0                             ; Task 1 continuation (0 = no task)
-var_task1_dsp:
-    .dq 0                             ; Task 1 saved DSP
-var_task1_rsp:
-    .dq 0                             ; Task 1 saved RSP
+; 4-task model: Task 0 = REPL (R3), Tasks 1–3 = background slots.
+; R13 is reused as the SEP trampoline register for all background tasks.
+; PAUSE loads the next active task's PC into R13, then SEP R13.
+var_task_index:
+    .dq 0                             ; current task index (0–3)
+; Task PC array — slot 0 is unused (Task 0 = R3, always active)
+var_task_pcs:
+    .dq 0                             ; [0] placeholder (Task 0 uses R3)
+    .dq 0                             ; [1] Task 1 continuation (0 = idle)
+    .dq 0                             ; [2] Task 2 continuation (0 = idle)
+    .dq 0                             ; [3] Task 3 continuation (0 = idle)
+; Task DSP array — slot 0 unused
+var_task_dsps:
+    .dq 0                             ; [0] placeholder
+    .dq 0                             ; [1] Task 1 saved DSP
+    .dq 0                             ; [2] Task 2 saved DSP
+    .dq 0                             ; [3] Task 3 saved DSP
+; Task RSP array — slot 0 unused
+var_task_rsps:
+    .dq 0                             ; [0] placeholder
+    .dq 0                             ; [1] Task 1 saved RSP
+    .dq 0                             ; [2] Task 2 saved RSP
+    .dq 0                             ; [3] Task 3 saved RSP
 var_task0_rsp:
     .dq 0                             ; Task 0 saved RSP (during PAUSE)
 
 ; Task 1 dedicated stacks — 256 bytes each (32 cells)
-; Data stack grows down from task1_dstack_top
 task1_dstack:
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
 task1_dstack_top:
-; Return stack grows down from task1_rstack_top
 task1_rstack:
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
     .dq 0, 0, 0, 0, 0, 0, 0, 0
 task1_rstack_top:
+
+; Task 2 dedicated stacks — 256 bytes each (32 cells)
+task2_dstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task2_dstack_top:
+task2_rstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task2_rstack_top:
+
+; Task 3 dedicated stacks — 256 bytes each (32 cells)
+task3_dstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task3_dstack_top:
+task3_rstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task3_rstack_top:
 
 ; =====================================================================
 ;  String Constants
