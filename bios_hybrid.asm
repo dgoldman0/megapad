@@ -535,6 +535,67 @@ print_space:
     ret.l
 
 ; =====================================================================
+;  MMIO Byte-Serialization Helpers  [Phase 7]
+; =====================================================================
+;
+; Shared routines for writing multi-byte values to ascending MMIO
+; offsets in little-endian byte order.  Replaces the copy-pasted
+; mov/lsri/st.b/inc chains in NIC, disk, and framebuffer words.
+;
+; The 1802 MEMALU family (0x8) has no "store D to memory" instruction,
+; so we cannot use pure D-accumulator byte output here.  Instead we
+; use a rolling-shift through R7: copy once, then lsri+st.b per byte.
+; GLO/GHI don't help for writes (ghi+plo+st.b = 6 bytes vs lsri+st.b
+; = 4 bytes).  The win is deduplication + eliminating cascading shifts.
+
+; write_mmio_addr8_le: write R1[31:0] as 4 LE bytes + 4 zero bytes
+;   Entry: R0 = MMIO destination, R1 = source value (low 32 bits used)
+;   Exit:  R0 points at last byte written (advanced by 7 from entry)
+;   Preserves: R1
+;   Clobbers: R7
+write_mmio_addr8_le:
+    mov  r7, r1
+    st.b r0, r7              ; byte 0: R1[7:0]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 1: R1[15:8]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 2: R1[23:16]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 3: R1[31:24]
+    inc  r0
+    ldi  r7, 0
+    st.b r0, r7              ; byte 4: 0
+    inc  r0
+    st.b r0, r7              ; byte 5: 0
+    inc  r0
+    st.b r0, r7              ; byte 6: 0
+    inc  r0
+    st.b r0, r7              ; byte 7: 0
+    ret.l
+
+; write_mmio_u32_le: write R1[31:0] as 4 LE bytes
+;   Entry: R0 = MMIO destination, R1 = source value
+;   Exit:  R0 points at last byte written (advanced by 3 from entry)
+;   Preserves: R1
+;   Clobbers: R7
+write_mmio_u32_le:
+    mov  r7, r1
+    st.b r0, r7              ; byte 0: R1[7:0]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 1: R1[15:8]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 2: R1[23:16]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 3: R1[31:24]
+    ret.l
+
+; =====================================================================
 ;  Line Input
 ; =====================================================================
 
@@ -5783,36 +5844,13 @@ w_net_send:
     ldn r9, r14               ; addr
     addi r14, 8
     ldi64 r11, 0xFFFF_FF00_0000_0400
-    ; Write DMA addr (8 bytes at offset 0x02)
+    ; Write DMA addr (8 bytes LE at offset 0x02) [Phase 7: dedup helper]
     mov r0, r11
     addi r0, 2
     mov r1, r9
-    ; Write 8 bytes of addr LE
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    ldi r7, 0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldi64 r11, 0xFFFF_FF00_0000_0400  ; reload NIC base
     ; Write frame length (16-bit at offset 0x0A)
     mov r0, r11
     addi r0, 0x0A
@@ -5841,35 +5879,13 @@ w_net_recv:
     andi r7, 0x02
     cmpi r7, 0
     breq w_net_recv_none
-    ; Write DMA addr
+    ; Write DMA addr (8 bytes LE at offset 0x02) [Phase 7: dedup helper]
     mov r0, r11
     addi r0, 2
     mov r1, r9
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    ldi r7, 0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldi64 r11, 0xFFFF_FF00_0000_0400  ; reload NIC base
     ; RECV command
     ldi r1, 0x02
     st.b r11, r1
@@ -6026,52 +6042,19 @@ disk_read_next_batch:
     brle disk_rd_clamp_ok
     ldi r12, 255              ; clamp to hardware max
 disk_rd_clamp_ok:
-    ; --- Set sector number (4 bytes LE) ---
-    ldi64 r11, 0xFFFF_FF00_0000_0202
-    mov r7, r1
-    st.b r11, r7
-    inc r11
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    ; --- Set DMA address (8 bytes LE, upper 4 = 0) ---
-    ldi64 r11, 0xFFFF_FF00_0000_0206
-    mov r7, r9
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    ldi r7, 0
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
+    ; --- Set sector number (4 bytes LE) [Phase 7: dedup helper] ---
+    ldi64 r0, 0xFFFF_FF00_0000_0202
+    ldi64 r11, write_mmio_u32_le
+    call.l r11
+    ; --- Set DMA address (8 bytes LE, upper 4 = 0) [Phase 7: dedup helper] ---
+    subi r15, 8
+    str r15, r1               ; save sector number on RSP
+    ldi64 r0, 0xFFFF_FF00_0000_0206
+    mov r1, r9                ; pass DMA addr
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldn r1, r15               ; restore sector number
+    addi r15, 8
     ; --- Set sector count (1 byte) ---
     ldi64 r11, 0xFFFF_FF00_0000_020E
     st.b r11, r12

@@ -1866,6 +1866,86 @@ class TestBIOS(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    # -- Phase 7 edge cases: MMIO byte-serialization helpers --
+
+    def test_disk_read_sector_zero_addr(self):
+        """disk_read_sectors works with DMA addr at bottom of RAM."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            # Write a known pattern to sector 0, then read to a low addr
+            text = self._run_forth(sys, buf, [
+                "VARIABLE dbuf  512 ALLOT",
+                "0x42 dbuf C!",
+                "0 DISK-SEC!  dbuf DISK-DMA!  1 DISK-N!  DISK-WRITE",
+                "0 dbuf C!",    # clear
+                "DISK-READ",    # re-read
+                "dbuf C@ .",
+            ])
+            self.assertIn("66 ", text)  # 0x42 = 66
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_read_high_sector_number(self):
+        """disk_read_sectors serialises sector numbers > 255 correctly."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            # Write to sector 300 (> 255, exercises byte-2 of sector num)
+            text = self._run_forth(sys, buf, [
+                "VARIABLE dbuf  512 ALLOT",
+                "0xAB dbuf C!",
+                "300 DISK-SEC!  dbuf DISK-DMA!  1 DISK-N!  DISK-WRITE",
+                "0 dbuf C!",
+                "DISK-READ",
+                "dbuf C@ .",
+            ])
+            self.assertIn("171 ", text)  # 0xAB = 171
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_multibatch_preserves_regs(self):
+        """Multi-batch disk reads (>255 sectors) don't corrupt R8/UART."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path)
+            # Read 300 sectors = 2 batches (255 + 45).
+            # After the read, EMIT (via R8/UART) must still work.
+            text = self._run_forth(sys, buf, [
+                "VARIABLE dbuf  153600 ALLOT",   # 300*512
+                "0 DISK-SEC!  dbuf DISK-DMA!  300 DISK-N!  DISK-READ",
+                ".\" ok-after-multi\"",
+            ])
+            self.assertIn("ok-after-multi", text)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_disk_status_after_disk_read(self):
+        """DISK@ still works after a disk read (R8 not clobbered)."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+        try:
+            os.unlink(path)
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "VARIABLE dbuf  512 ALLOT",
+                "0 DISK-SEC!  dbuf DISK-DMA!  1 DISK-N!  DISK-READ",
+                "DISK@ .",
+            ])
+            self.assertIn("128 ", text)  # bit7 = present
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
     # -- Timer words --
 
     def test_timer_store(self):
