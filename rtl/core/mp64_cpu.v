@@ -114,8 +114,8 @@ module mp64_cpu #(
     reg [7:0]  ivec_id;
     reg [63:0] trap_addr;
 
-    // Privilege / MPU
-    reg        priv_level;            // 0=supervisor, 1=user
+    // Privilege / MPU  (priv_level retained as inert CSR — no enforcement)
+    reg        priv_level;            // 0=supervisor, 1=user (NOT ENFORCED)
     reg [63:0] mpu_base, mpu_limit;
 
     // Performance counters
@@ -749,17 +749,8 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_MEMALU) begin
                     ext_active <= 1'b0;
-                    if (priv_level) begin
-                        // Privilege trap
-                        R[spsel] <= R[spsel] - 64'd8;
-                        effective_addr <= R[spsel] - 64'd8;
-                        mem_data <= R[psel]; flags[6] <= 1'b0;
-                        priv_level <= 1'b0; ivec_id <= {4'd0, IRQX_PRIV};
-                        post_action <= POST_IRQ_VEC;
-                        bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
-                    end else begin
-                        memalu_sub <= nib;
-                        case (nib)
+                    memalu_sub <= nib;
+                    case (nib)
                             4'hE: begin R[xsel] <= R[xsel]+64'd1; cpu_state<=CPU_FETCH; end // IRX
                             4'h6: begin // SHR.D
                                 flags[1] <= D[0]; D <= {1'b0, D[7:1]};
@@ -787,7 +778,6 @@ module mp64_cpu #(
                                 cpu_state <= CPU_MEMALU_RD;
                             end
                         endcase
-                    end
                 end
 
                 // --------------------------------------------------------
@@ -795,26 +785,18 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_IO) begin
                     ext_active <= 1'b0;
-                    if (priv_level) begin
-                        R[spsel] <= R[spsel]-64'd8; effective_addr <= R[spsel]-64'd8;
-                        mem_data <= R[psel]; flags[6] <= 1'b0;
-                        priv_level <= 1'b0; ivec_id <= {4'd0, IRQX_PRIV};
-                        post_action <= POST_IRQ_VEC;
-                        bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
-                    end else begin
-                        if (nib >= 4'd1 && nib <= 4'd7) begin
-                            io_port <= nib[2:0]; io_is_inp <= 1'b0;
-                            effective_addr <= R[xsel]; bus_size <= BUS_BYTE;
-                            cpu_state <= CPU_MEMALU_RD;
-                            memalu_sub <= 4'hF;
-                        end else if (nib >= 4'd9) begin
-                            io_port <= nib[2:0]; io_is_inp <= 1'b1;
-                            effective_addr <= {MP64_MMIO_HI, 20'd0, nib[2:0], 9'd0};
-                            bus_size <= BUS_BYTE; cpu_state <= CPU_MEM_READ;
-                            dst_reg <= 4'd0; mem_sub <= 4'hF;
-                        end else
-                            cpu_state <= CPU_FETCH;
-                    end
+                    if (nib >= 4'd1 && nib <= 4'd7) begin
+                        io_port <= nib[2:0]; io_is_inp <= 1'b0;
+                        effective_addr <= R[xsel]; bus_size <= BUS_BYTE;
+                        cpu_state <= CPU_MEMALU_RD;
+                        memalu_sub <= 4'hF;
+                    end else if (nib >= 4'd9) begin
+                        io_port <= nib[2:0]; io_is_inp <= 1'b1;
+                        effective_addr <= {MP64_MMIO_HI, 20'd0, nib[2:0], 9'd0};
+                        bus_size <= BUS_BYTE; cpu_state <= CPU_MEM_READ;
+                        dst_reg <= 4'd0; mem_sub <= 4'hF;
+                    end else
+                        cpu_state <= CPU_FETCH;
                 end
 
                 // --------------------------------------------------------
@@ -822,15 +804,8 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_SEP) begin
                     ext_active <= 1'b0;
-                    if (priv_level) begin
-                        R[spsel]<=R[spsel]-64'd8; effective_addr<=R[spsel]-64'd8;
-                        mem_data<=R[psel]; flags[6]<=1'b0; priv_level<=1'b0;
-                        ivec_id<={4'd0,IRQX_PRIV}; post_action<=POST_IRQ_VEC;
-                        bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE;
-                    end else begin
-                        psel <= nib; fetch_pc <= R[nib];
-                        cpu_state <= CPU_FETCH;
-                    end
+                    psel <= nib; fetch_pc <= R[nib];
+                    cpu_state <= CPU_FETCH;
                 end
 
                 // --------------------------------------------------------
@@ -838,14 +813,7 @@ module mp64_cpu #(
                 // --------------------------------------------------------
                 else if (fam == FAM_SEX) begin
                     ext_active <= 1'b0;
-                    if (priv_level) begin
-                        R[spsel]<=R[spsel]-64'd8; effective_addr<=R[spsel]-64'd8;
-                        mem_data<=R[psel]; flags[6]<=1'b0; priv_level<=1'b0;
-                        ivec_id<={4'd0,IRQX_PRIV}; post_action<=POST_IRQ_VEC;
-                        bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE;
-                    end else begin
-                        xsel <= nib; cpu_state <= CPU_FETCH;
-                    end
+                    xsel <= nib; cpu_state <= CPU_FETCH;
                 end
 
                 // --------------------------------------------------------
@@ -975,9 +943,9 @@ module mp64_cpu #(
                             CSR_QREG:     Q        <= R[nib[2:0]][0];
                             CSR_TREG:     T        <= R[nib[2:0]][7:0];
                             CSR_IE:       flags[6] <= R[nib[2:0]][0];
-                            CSR_PRIV:     if (!priv_level) priv_level <= R[nib[2:0]][0];
-                            CSR_MPU_BASE: if (!priv_level) mpu_base  <= R[nib[2:0]];
-                            CSR_MPU_LIMIT:if (!priv_level) mpu_limit <= R[nib[2:0]];
+                            CSR_PRIV:     priv_level <= R[nib[2:0]][0];  // inert — no enforcement
+                            CSR_MPU_BASE: mpu_base   <= R[nib[2:0]];
+                            CSR_MPU_LIMIT:mpu_limit  <= R[nib[2:0]];
                             CSR_IVEC_ID:  ivec_id  <= R[nib[2:0]][7:0];
                             CSR_PERF_CTRL: begin
                                 perf_enable <= R[nib[2:0]][0];

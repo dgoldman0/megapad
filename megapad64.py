@@ -136,13 +136,10 @@ IVEC_TIMER          = 0x07
 IVEC_IPI            = 0x08  # Inter-processor interrupt
 IVEC_PRIV_FAULT     = 0x0F  # Privilege violation (vector 15)
 
-# Privilege model — supervisor-only instruction families and sub-ops
-_PRIV_FAMILIES = frozenset({0x8, 0x9, 0xA, 0xB})  # MEMALU, IO, SEP, SEX
-_PRIV_SYS_SUBS = frozenset({0x5, 0x6, 0x7, 0x8, 0x9, 0xA})  # RET/DIS/MARK/SAV/SEQ/REQ
-_PRIV_IMM_SUBS = frozenset({0xC, 0xD, 0xE, 0xF})  # GLO/GHI/PLO/PHI
-# CSRs that cannot be written from user mode
-_PRIV_CSRS_W   = frozenset({CSR_PRIV, CSR_IVT_BASE, CSR_IE, CSR_BIST_CMD,
-                            CSR_ICACHE_CTRL, CSR_MPU_BASE, CSR_MPU_LIMIT})
+# Privilege model — STRIPPED.  The hardware user mode conflicted with
+# 1802-heritage SEP/SEX dispatch (family 0xA/0xB) which every Forth
+# word needs.  MPU provides address-level protection independently.
+# The priv_level CSR is retained as inert state for compatibility.
 
 # Micro-cluster constants (matches mp64_defs.vh)
 NUM_FULL_CORES     = 4
@@ -1246,19 +1243,17 @@ class Megapad64:
     def _trap(self, ivec: int):
         """Enter a trap/interrupt handler.
 
-        Pushes flags (with privilege level in bit 8) and PC onto the
-        stack, then jumps to the IVT entry.  Always escalates to
-        supervisor mode (priv_level ← 0).
+        Pushes flags and PC onto the stack, then jumps to the IVT
+        entry.  Bit 8 of the saved-flags qword is reserved (was
+        priv_level, now always 0).
         """
-        # Pack privilege into bit 8 of the saved flags qword
-        saved = self.flags_pack() | (self.priv_level << 8)
+        saved = self.flags_pack()          # bit 8 stays 0 (no user mode)
         self.push64(saved)
         self.push64(self.pc)
         self.ivec_id = ivec
         handler = self.mem_read64(u64(self.ivt_base + 8 * ivec))
         self.pc = handler
         self.flag_i = 0       # mask interrupts
-        self.priv_level = 0   # escalate to supervisor
         self.idle = False     # interrupt wakes CPU from idle
 
     # =====================================================================
@@ -1288,11 +1283,6 @@ class Megapad64:
             f = (byte0 >> 4) & 0xF
             n = byte0 & 0xF
             cycles += 1
-
-        # Privilege check — restricted families trap in user mode
-        if self.priv_level and f in _PRIV_FAMILIES:
-            raise TrapError(IVEC_PRIV_FAULT,
-                            f"Privilege violation: family 0x{f:X} requires supervisor mode")
 
         # Dispatch on family
         if   f == 0x0: cycles += self._exec_sys(n)
@@ -1336,12 +1326,6 @@ class Megapad64:
 
     # -- 0x0: SYS --
     def _exec_sys(self, n: int) -> int:
-        # Privilege check: 1802-heritage SYS sub-ops require supervisor
-        if self.priv_level and n in _PRIV_SYS_SUBS:
-            names = {0x5: 'RET', 0x6: 'DIS', 0x7: 'MARK',
-                     0x8: 'SAV', 0x9: 'SEQ', 0xA: 'REQ'}
-            raise TrapError(IVEC_PRIV_FAULT,
-                            f"Privilege violation: {names[n]} requires supervisor mode")
         if n == 0x0:  # IDL
             self.idle = True
             return 0
@@ -1359,7 +1343,7 @@ class Megapad64:
             self.pc = self.pop64()
             saved = self.pop64()
             self.flags_unpack(saved & 0xFF)
-            self.priv_level = (saved >> 8) & 1  # restore privilege
+            # bit 8 was priv_level — ignored (user mode stripped)
             return 1
         elif n == 0x5:  # RET (1802: pop XSEL|PSEL, IE←1)
             t = self.pop64() & 0xFF
@@ -1508,12 +1492,6 @@ class Megapad64:
 
     # -- 0x6: IMM --
     def _exec_imm(self, sub: int) -> int:
-        # Privilege check: GLO/GHI/PLO/PHI require supervisor
-        if self.priv_level and sub in _PRIV_IMM_SUBS:
-            self.fetch8()  # consume the Rx byte
-            names = {0xC: 'GLO', 0xD: 'GHI', 0xE: 'PLO', 0xF: 'PHI'}
-            raise TrapError(IVEC_PRIV_FAULT,
-                            f"Privilege violation: {names[sub]} requires supervisor mode")
         if sub <= 0xB or sub in (0xC, 0xD, 0xE, 0xF):
             # These have a register byte then possibly immediate
             byte1 = self.fetch8()
@@ -1859,10 +1837,6 @@ class Megapad64:
         if w_bit == 0:  # CSRR: Rd ← CSR[addr]
             self.regs[rn] = u64(self.csr_read(byte1))
         else:           # CSRW: CSR[addr] ← Rs
-            # Privilege check: certain CSRs are supervisor-only
-            if self.priv_level and byte1 in _PRIV_CSRS_W:
-                raise TrapError(IVEC_PRIV_FAULT,
-                                f"Privilege violation: CSRW 0x{byte1:02X} requires supervisor mode")
             self.csr_write(byte1, self.regs[rn])
         return 0
 

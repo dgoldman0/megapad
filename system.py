@@ -178,16 +178,15 @@ class MicroCluster:
             ok = self._bist_spad()
             self.bist_status = 2 if ok else 3
             return
-        # Cluster MPU CSRs — only writable from supervisor mode
-        if self.cl_priv_level == 0:
-            if addr == CSR_CL_PRIV:
-                self.cl_priv_level = val & 1
-            elif addr == CSR_CL_MPU_BASE:
-                self.cl_mpu_base = val & ((1 << 64) - 1)
-            elif addr == CSR_CL_MPU_LIMIT:
-                self.cl_mpu_limit = val & ((1 << 64) - 1)
-            elif addr == CSR_CL_IVTBASE:
-                self.cl_ivt_base = val & ((1 << 64) - 1)
+        # Cluster CSRs — writable unconditionally (user mode stripped)
+        if addr == CSR_CL_PRIV:
+            self.cl_priv_level = val & 1
+        elif addr == CSR_CL_MPU_BASE:
+            self.cl_mpu_base = val & ((1 << 64) - 1)
+        elif addr == CSR_CL_MPU_LIMIT:
+            self.cl_mpu_limit = val & ((1 << 64) - 1)
+        elif addr == CSR_CL_IVTBASE:
+            self.cl_ivt_base = val & ((1 << 64) - 1)
 
     def _bist_spad(self) -> bool:
         """March C- test on scratchpad memory."""
@@ -552,16 +551,7 @@ class MegapadSystem:
         # Scratchpad interception for micro-cores
         cluster = getattr(cpu, '_cluster', None)
 
-        # For micro-cores in a cluster, MPU is enforced at cluster level.
-        # For full cores, MPU is per-core.
-        if cluster:
-            _priv = lambda: cluster.cl_priv_level
-            _mpu_base = lambda: cluster.cl_mpu_base
-            _mpu_limit = lambda: cluster.cl_mpu_limit
-        else:
-            _priv = lambda: cpu.priv_level
-            _mpu_base = lambda: cpu.mpu_base
-            _mpu_limit = lambda: cpu.mpu_limit
+        # MPU / privilege enforcement removed (user mode stripped).
 
         def patched_read8(addr: int) -> int:
             addr = u64(addr)
@@ -571,24 +561,6 @@ class MegapadSystem:
                 return bus.read8(offset)
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 return cluster.spad_read8(addr & 0xFFFF_FFFF)
-            # MPU / privilege check for non-MMIO accesses
-            if _priv():
-                # User mode: block HBW entirely
-                if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
-                    cpu.trap_addr = addr
-                    if cluster:
-                        cluster.cl_priv_level = 0  # drop to S-mode
-                    raise TrapError(IVEC_PRIV_FAULT,
-                                    f"User read from HBW @ {addr:#018x}")
-                # Check MPU window for RAM
-                mpu_b, mpu_l = _mpu_base(), _mpu_limit()
-                if mpu_l > mpu_b:
-                    if addr < mpu_b or addr >= mpu_l:
-                        cpu.trap_addr = addr
-                        if cluster:
-                            cluster.cl_priv_level = 0  # drop to S-mode
-                        raise TrapError(IVEC_PRIV_FAULT,
-                                        f"MPU violation @ {addr:#018x}")
             if vram_size > 0 and vram_base <= addr < vram_end:
                 return vram_mem[addr - vram_base]
             if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
@@ -607,24 +579,6 @@ class MegapadSystem:
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 cluster.spad_write8(addr & 0xFFFF_FFFF, val)
                 return
-            # MPU / privilege check for non-MMIO accesses
-            if _priv():
-                # User mode: block HBW entirely
-                if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
-                    cpu.trap_addr = addr
-                    if cluster:
-                        cluster.cl_priv_level = 0  # drop to S-mode
-                    raise TrapError(IVEC_PRIV_FAULT,
-                                    f"User write to HBW @ {addr:#018x}")
-                # Check MPU window for RAM
-                mpu_b, mpu_l = _mpu_base(), _mpu_limit()
-                if mpu_l > mpu_b:
-                    if addr < mpu_b or addr >= mpu_l:
-                        cpu.trap_addr = addr
-                        if cluster:
-                            cluster.cl_priv_level = 0  # drop to S-mode
-                        raise TrapError(IVEC_PRIV_FAULT,
-                                        f"MPU violation @ {addr:#018x}")
             if vram_size > 0 and vram_base <= addr < vram_end:
                 vram_mem[addr - vram_base] = val & 0xFF
                 return

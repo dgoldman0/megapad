@@ -127,7 +127,7 @@ module mp64_cluster #(
     // ====================================================================
     // Cluster-shared state
     // ====================================================================
-    reg         cl_priv_level;     // 0 = supervisor, 1 = user
+    reg         cl_priv_level;     // 0=S, 1=U (inert — no enforcement)
     reg [63:0]  cl_mpu_base;
     reg [63:0]  cl_mpu_limit;
     reg [63:0]  cl_ivt_base;
@@ -384,26 +384,19 @@ module mp64_cluster #(
 
             // ---------------------------------------------------------
             // Cluster CSR writes (from any micro-core)
+            //   priv_level retained as inert CSR — no enforcement
             // ---------------------------------------------------------
             for (mi = 0; mi < N; mi = mi + 1) begin
                 if (mc_cl_csr_wen[mi]) begin
                     case (mc_cl_csr_addr[mi*8 +: 8])
-                        CSR_CL_PRIV: begin
-                            if (!cl_priv_level)
-                                cl_priv_level <= mc_cl_csr_wdata[mi*64];
-                        end
-                        CSR_CL_MPU_BASE: begin
-                            if (!cl_priv_level)
-                                cl_mpu_base <= mc_cl_csr_wdata[mi*64 +: 64];
-                        end
-                        CSR_CL_MPU_LIMIT: begin
-                            if (!cl_priv_level)
-                                cl_mpu_limit <= mc_cl_csr_wdata[mi*64 +: 64];
-                        end
-                        CSR_IVTBASE, CSR_CL_IVTBASE: begin
-                            if (!cl_priv_level)
-                                cl_ivt_base <= mc_cl_csr_wdata[mi*64 +: 64];
-                        end
+                        CSR_CL_PRIV:
+                            cl_priv_level <= mc_cl_csr_wdata[mi*64];
+                        CSR_CL_MPU_BASE:
+                            cl_mpu_base <= mc_cl_csr_wdata[mi*64 +: 64];
+                        CSR_CL_MPU_LIMIT:
+                            cl_mpu_limit <= mc_cl_csr_wdata[mi*64 +: 64];
+                        CSR_IVTBASE, CSR_CL_IVTBASE:
+                            cl_ivt_base <= mc_cl_csr_wdata[mi*64 +: 64];
                         default: ;
                     endcase
                 end

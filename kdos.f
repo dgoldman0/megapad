@@ -4175,24 +4175,15 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
     _LD-WALK
     _LD-RESTORE ;
 
-\ ── User-Mode Application Loading ───────────────────────────────────
-\  APP-EVAL evaluates a string in user mode.  ENTER-USER drops the
-\  privilege level to 1 (user); EVALUATE runs the code; SYS-EXIT
-\  fires a TRAP syscall that returns to supervisor mode.
+\ ── Application Loading ──────────────────────────────────────────────
+\  APP-EVAL evaluates a string.  ENTER-USER / SYS-EXIT are retained
+\  as no-ops for API compatibility (hardware user mode was removed
+\  because it conflicted with 1802-heritage SEP/SEX dispatch).
 \
-\  User code can call all standard Forth words (EMIT, KEY, +, IF, :,
-\  VARIABLE, etc.) because those use unrestricted instructions.  Only
-\  1802-heritage families (MEMALU, IO, SEP, SEX) and protected CSR
-\  writes are blocked — those trigger IVEC_PRIV_FAULT.
+\  MPU setup (_APP-MPU-ON / _APP-MPU-OFF) is retained but currently
+\  inert since MPU is gated on priv_level which is always 0.
 \
-\  MPU is configured to [0, EXT-MEM-END) so user code can access
-\  Bank 0 (needed for dictionary lookup by EVALUATE) AND external
-\  RAM (where user programs / data live).  HBW access is blocked
-\  unconditionally for user mode (RTL hard-wired).  For tighter
-\  sandboxing (e.g. running pre-compiled code with its own stack),
-\  set MPU-BASE!/MPU-LIMIT! to a narrower window before ENTER-USER.
-\
-\  LOAD / FSLOAD remain supervisor-mode for OS modules and drivers.
+\  LOAD / FSLOAD remain for OS modules and drivers.
 
 \ _APP-MPU-ON ( -- )  set MPU window to cover Bank 0 + ext mem
 : _APP-MPU-ON  ( -- )

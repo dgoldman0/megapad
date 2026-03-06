@@ -25,7 +25,7 @@
 ;    R10 = string pointer for print_str
 ;    R11 = scratch / temp
 ;    R12 = scratch / counter
-;    R13 = scratch / temp
+;    R13 = scratch / temp / Task 1 PC (Phase 8, saved to memory between PAUSEs)
 ;    R14 = DSP (data stack pointer, grows downward)
 ;    R15 = RSP (return/call stack, grows downward)
 ;
@@ -266,9 +266,9 @@ quit_loop:
     cmpi r11, 0
     brne quit_no_prompt
     ldi r1, 0x3E
-    call.l r4
+    sep  r4
     ldi r1, 0x20
-    call.l r4
+    sep  r4
 quit_no_prompt:
 
     ; Read a line into TIB
@@ -411,12 +411,15 @@ interp_no_underflow:
 ;  I/O Primitives
 ; =====================================================================
 
-; emit_char: write byte R1 to UART
+; emit_char: write byte R1 to UART  [SEP dispatch — Phase 1, Q sem — Phase 4]
 emit_char:
+    seq                         ; Q ← 1 (UART busy)
     st.b r8, r1
-    ret.l
+    req                         ; Q ← 0 (UART idle)
+    sep  r3                     ; return via register switch
+    br   emit_char              ; re-entry trampoline
 
-; key_char: blocking read -> R1
+; key_char: blocking read -> R1  [SEP dispatch — Phase 1]
 key_char:
     ldi64 r13, 0xFFFF_FF00_0000_0002
 kc_poll:
@@ -429,7 +432,8 @@ kc_poll:
 kc_ready:
     ldi64 r13, 0xFFFF_FF00_0000_0001
     ld.b r1, r13
-    ret.l
+    sep  r3                     ; return via register switch
+    br   key_char               ; re-entry trampoline
 
 ; print_str: null-terminated string at R10, \n → \r\n
 print_str:
@@ -456,7 +460,7 @@ print_counted:
     mov r13, r12
 pcnt_loop:
     ld.b r1, r11
-    call.l r4
+    sep  r4
     inc r11
     dec r13
     cmpi r13, 0
@@ -464,7 +468,8 @@ pcnt_loop:
 pcnt_done:
     ret.l
 
-; print_hex_byte: R1 low byte -> two hex chars
+; print_hex_byte: R1 low byte -> two hex chars  [SEP dispatch — Phase 1]
+; Note: already uses st.b r8 directly (no call to R4), so SEP-safe.
 print_hex_byte:
     mov r0, r1
     lsri r1, 4
@@ -483,7 +488,8 @@ phb_h:
     addi r1, 7
 phb_l:
     st.b r8, r1
-    ret.l
+    sep  r3                     ; return via register switch
+    br   print_hex_byte         ; re-entry trampoline
 
 ; print_hex32: R1 low 32 bits -> 8 hex chars
 print_hex32:
@@ -492,19 +498,19 @@ print_hex32:
     lsri r1, 8
     lsri r1, 8
     andi r1, 0xFF
-    call.l r6
+    sep  r6
     mov r1, r7
     lsri r1, 8
     lsri r1, 8
     andi r1, 0xFF
-    call.l r6
+    sep  r6
     mov r1, r7
     lsri r1, 8
     andi r1, 0xFF
-    call.l r6
+    sep  r6
     mov r1, r7
     andi r1, 0xFF
-    call.l r6
+    sep  r6
     ret.l
 
 ; print_crlf
@@ -525,7 +531,68 @@ do_print_ok:
 ; print_space
 print_space:
     ldi r1, 0x20
-    call.l r4
+    sep  r4
+    ret.l
+
+; =====================================================================
+;  MMIO Byte-Serialization Helpers  [Phase 7]
+; =====================================================================
+;
+; Shared routines for writing multi-byte values to ascending MMIO
+; offsets in little-endian byte order.  Replaces the copy-pasted
+; mov/lsri/st.b/inc chains in NIC, disk, and framebuffer words.
+;
+; The 1802 MEMALU family (0x8) has no "store D to memory" instruction,
+; so we cannot use pure D-accumulator byte output here.  Instead we
+; use a rolling-shift through R7: copy once, then lsri+st.b per byte.
+; GLO/GHI don't help for writes (ghi+plo+st.b = 6 bytes vs lsri+st.b
+; = 4 bytes).  The win is deduplication + eliminating cascading shifts.
+
+; write_mmio_addr8_le: write R1[31:0] as 4 LE bytes + 4 zero bytes
+;   Entry: R0 = MMIO destination, R1 = source value (low 32 bits used)
+;   Exit:  R0 points at last byte written (advanced by 7 from entry)
+;   Preserves: R1
+;   Clobbers: R7
+write_mmio_addr8_le:
+    mov  r7, r1
+    st.b r0, r7              ; byte 0: R1[7:0]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 1: R1[15:8]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 2: R1[23:16]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 3: R1[31:24]
+    inc  r0
+    ldi  r7, 0
+    st.b r0, r7              ; byte 4: 0
+    inc  r0
+    st.b r0, r7              ; byte 5: 0
+    inc  r0
+    st.b r0, r7              ; byte 6: 0
+    inc  r0
+    st.b r0, r7              ; byte 7: 0
+    ret.l
+
+; write_mmio_u32_le: write R1[31:0] as 4 LE bytes
+;   Entry: R0 = MMIO destination, R1 = source value
+;   Exit:  R0 points at last byte written (advanced by 3 from entry)
+;   Preserves: R1
+;   Clobbers: R7
+write_mmio_u32_le:
+    mov  r7, r1
+    st.b r0, r7              ; byte 0: R1[7:0]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 1: R1[15:8]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 2: R1[23:16]
+    inc  r0
+    lsri r7, 8
+    st.b r0, r7              ; byte 3: R1[31:24]
     ret.l
 
 ; =====================================================================
@@ -538,7 +605,7 @@ read_line:
     ldi64 r9, tib_buffer
     ldi r12, 0
 rl_loop:
-    call.l r5                 ; key_char -> R1
+    sep  r5                 ; key_char -> R1
     ; CR / LF → done
     cmpi r1, 0x0D
     breq rl_done
@@ -559,18 +626,18 @@ rl_loop:
     add r13, r12
     st.b r13, r1
     inc r12
-    call.l r4                 ; echo
+    sep  r4                 ; echo
     br rl_loop
 rl_bs:
     cmpi r12, 0
     breq rl_loop
     dec r12
     ldi r1, 0x08
-    call.l r4
+    sep  r4
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     ldi r1, 0x08
-    call.l r4
+    sep  r4
     br rl_loop
 rl_done:
     ldi64 r11, print_crlf
@@ -904,7 +971,7 @@ print_number:
     breq pnum_pos
     ; Negative
     ldi r1, 0x2D
-    call.l r4
+    sep  r4
     neg r13, r13
 pnum_pos:
     mov r1, r13
@@ -938,7 +1005,7 @@ pu_emit:
     breq pu_done
     ldn r1, r14
     addi r14, 8
-    call.l r4
+    sep  r4
     dec r12
     br pu_emit
 pu_done:
@@ -1507,12 +1574,12 @@ w_ccomma:
 w_emit:
     ldn r1, r14
     addi r14, 8
-    call.l r4
+    sep  r4
     ret.l
 
 ; KEY ( -- c )
 w_key:
-    call.l r5
+    sep  r5
     subi r14, 8
     str r14, r1
     ret.l
@@ -1561,7 +1628,7 @@ w_udot:
 w_dotS:
     ; <depth> items from bottom to top
     ldi r1, 0x3C
-    call.l r4
+    sep  r4
     ; depth
     mov r1, r2
     lsri r1, 1
@@ -1670,9 +1737,9 @@ dm_outer:
     ldi64 r11, print_hex32
     call.l r11
     ldi r1, 0x3A
-    call.l r4
+    sep  r4
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     ldi r13, 16
 dm_inner:
     cmpi r12, 0
@@ -1680,9 +1747,9 @@ dm_inner:
     cmpi r13, 0
     breq dm_nl
     ld.b r1, r9
-    call.l r6
+    sep  r6
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     inc r9
     dec r12
     dec r13
@@ -2034,12 +2101,12 @@ w_ti:
     ldi64 r11, print_str
     call.l r11
     csrr r1, 0x14
-    call.l r6
+    sep  r6
     ldi64 r10, str_ti_ctrl
     ldi64 r11, print_str
     call.l r11
     csrr r1, 0x15
-    call.l r6
+    sep  r6
     ldi64 r11, print_crlf
     call.l r11
     ldi64 r10, str_ti_src0
@@ -2069,17 +2136,17 @@ w_ti:
     ldi64 r11, print_hex32
     call.l r11
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     csrr r1, 0x1A
     ldi64 r11, print_hex32
     call.l r11
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     csrr r1, 0x1B
     ldi64 r11, print_hex32
     call.l r11
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     csrr r1, 0x1C
     ldi64 r11, print_hex32
     call.l r11
@@ -2096,9 +2163,9 @@ tv_o:
     ldi r12, 16
 tv_i:
     ld.b r1, r9
-    call.l r6
+    sep  r6
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     inc r9
     dec r12
     cmpi r12, 0
@@ -5058,7 +5125,7 @@ sq_done:
 ;   Scan to null, compute length, push (addr len), patch return past string.
 ; --- dictionary header so binimg can resolve compile_call references ---
 d_squote_runtime:
-    .dq d_reloc_buf
+    .dq d_task_status
     .db 4
     .ascii "(S\")"
 squote_runtime:
@@ -5564,7 +5631,7 @@ w_type_loop:
     cmpi r12, 0
     breq w_type_done
     ld.b r1, r9
-    call.l r4
+    sep  r4
     inc r9
     dec r12
     br w_type_loop
@@ -5574,7 +5641,7 @@ w_type_done:
 ; SPACE ( -- ) emit a space
 w_space:
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     ret.l
 
 ; SPACES ( n -- ) emit n spaces
@@ -5585,7 +5652,7 @@ w_spaces_loop:
     cmpi r12, 0
     breq w_spaces_done
     ldi r1, 0x20
-    call.l r4
+    sep  r4
     dec r12
     br w_spaces_loop
 w_spaces_done:
@@ -5663,7 +5730,7 @@ dq_interp_loop:
     inc r13
     cmpi r1, 0x22             ; '"'
     breq dq_interp_done
-    call.l r4                 ; emit_char
+    sep  r4                 ; emit_char
     br dq_interp_loop
 dq_interp_done:
     ldi64 r11, var_to_in
@@ -5738,7 +5805,7 @@ w_accept:
 w_accept_loop:
     cmp r13, r12
     breq w_accept_done
-    call.l r5                 ; key -> R1
+    sep  r5                 ; key -> R1
     cmpi r1, 0x0D
     breq w_accept_done
     cmpi r1, 0x0A
@@ -5747,7 +5814,7 @@ w_accept_loop:
     add r7, r13
     st.b r7, r1
     inc r13
-    call.l r4                 ; echo
+    sep  r4                 ; echo
     br w_accept_loop
 w_accept_done:
     ldi64 r11, print_crlf
@@ -5777,36 +5844,13 @@ w_net_send:
     ldn r9, r14               ; addr
     addi r14, 8
     ldi64 r11, 0xFFFF_FF00_0000_0400
-    ; Write DMA addr (8 bytes at offset 0x02)
+    ; Write DMA addr (8 bytes LE at offset 0x02) [Phase 7: dedup helper]
     mov r0, r11
     addi r0, 2
     mov r1, r9
-    ; Write 8 bytes of addr LE
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    ldi r7, 0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldi64 r11, 0xFFFF_FF00_0000_0400  ; reload NIC base
     ; Write frame length (16-bit at offset 0x0A)
     mov r0, r11
     addi r0, 0x0A
@@ -5835,35 +5879,13 @@ w_net_recv:
     andi r7, 0x02
     cmpi r7, 0
     breq w_net_recv_none
-    ; Write DMA addr
+    ; Write DMA addr (8 bytes LE at offset 0x02) [Phase 7: dedup helper]
     mov r0, r11
     addi r0, 2
     mov r1, r9
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    ldi r7, 0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
-    inc r0
-    st.b r0, r7
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldi64 r11, 0xFFFF_FF00_0000_0400  ; reload NIC base
     ; RECV command
     ldi r1, 0x02
     st.b r11, r1
@@ -6020,52 +6042,19 @@ disk_read_next_batch:
     brle disk_rd_clamp_ok
     ldi r12, 255              ; clamp to hardware max
 disk_rd_clamp_ok:
-    ; --- Set sector number (4 bytes LE) ---
-    ldi64 r11, 0xFFFF_FF00_0000_0202
-    mov r7, r1
-    st.b r11, r7
-    inc r11
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    ; --- Set DMA address (8 bytes LE, upper 4 = 0) ---
-    ldi64 r11, 0xFFFF_FF00_0000_0206
-    mov r7, r9
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r9
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    ldi r7, 0
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
+    ; --- Set sector number (4 bytes LE) [Phase 7: dedup helper] ---
+    ldi64 r0, 0xFFFF_FF00_0000_0202
+    ldi64 r11, write_mmio_u32_le
+    call.l r11
+    ; --- Set DMA address (8 bytes LE, upper 4 = 0) [Phase 7: dedup helper] ---
+    subi r15, 8
+    str r15, r1               ; save sector number on RSP
+    ldi64 r0, 0xFFFF_FF00_0000_0206
+    mov r1, r9                ; pass DMA addr
+    ldi64 r11, write_mmio_addr8_le
+    call.l r11
+    ldn r1, r15               ; restore sector number
+    addi r15, 8
     ; --- Set sector count (1 byte) ---
     ldi64 r11, 0xFFFF_FF00_0000_020E
     st.b r11, r12
@@ -6896,7 +6885,7 @@ w_zstr_loop:
     ld.b r1, r9
     cmpi r1, 0
     breq w_zstr_done
-    call.l r4                 ; emit char (R4 = emit_char)
+    sep  r4                 ; emit char (R4 = emit_char)
     inc r9
     br w_zstr_loop
 w_zstr_done:
@@ -8777,20 +8766,54 @@ w_quit:
 ;  Bus Fault Handler
 ; =====================================================================
 bus_fault_handler:
+    ; ---- Phase 9: capture diagnostics into stack before any calls ----
+    ; Push order: addr (top), PSEL, T (bottom).  Print order: addr, PSEL, T.
+    csrr r0, 0x08               ; T register
+    subi r15, 8
+    str r15, r0
+    csrr r0, 0x01               ; faulting PSEL
+    subi r15, 8
+    str r15, r0
+    csrr r0, 0x25               ; fault address
+    subi r15, 8
+    str r15, r0
+    ; Stack: [SP+0]=addr, [SP+8]=PSEL, [SP+16]=T
+    ; Reset PSEL to R3 in case fault hit during SEP R4/R5/R6
+    ldi r1, 3
+    csrw 0x01, r1
+    ; Re-initialise I/O dispatch
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
-    csrr r0, 0x25
+    ; Print: "\n*** BUS FAULT @ "
     ldi64 r10, str_busfault
     ldi64 r11, print_str
     call.l r11
-    mov r1, r0
+    ; Pop and print fault address
+    ldn r1, r15
+    addi r15, 8
     ldi64 r11, print_hex32
     call.l r11
+    ; Print " SEP="
+    ldi64 r10, str_fault_sep
+    ldi64 r11, print_str
+    call.l r11
+    ; Pop and print PSEL
+    ldn r1, r15
+    addi r15, 8
+    sep r6
+    ; Print " T="
+    ldi64 r10, str_fault_t
+    ldi64 r11, print_str
+    call.l r11
+    ; Pop and print T register
+    ldn r1, r15
+    addi r15, 8
+    sep r6
     ldi64 r11, print_crlf
     call.l r11
-    ; Resume REPL
+    ; Resume REPL — also skip the 16 bytes _trap() pushed (PC + flags)
     addi r15, 16
     ldi64 r11, quit_loop
     call.l r11
@@ -8825,20 +8848,52 @@ sw_trap_handler:
 ;  Privilege Fault Handler
 ; =====================================================================
 priv_fault_handler:
+    ; ---- Phase 9: capture diagnostics into stack before any calls ----
+    csrr r0, 0x08               ; T register
+    subi r15, 8
+    str r15, r0
+    csrr r0, 0x01               ; faulting PSEL
+    subi r15, 8
+    str r15, r0
+    csrr r0, 0x25               ; fault address
+    subi r15, 8
+    str r15, r0
+    ; Stack: [SP+0]=addr, [SP+8]=PSEL, [SP+16]=T
+    ldi r1, 3
+    csrw 0x01, r1               ; PSEL ← R3 (safe)
+    ; Re-initialise I/O dispatch
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
-    csrr r0, 0x25                    ; CSR_TRAP_ADDR
+    ; Print: "\n*** PRIVILEGE FAULT @ "
     ldi64 r10, str_privfault
     ldi64 r11, print_str
     call.l r11
-    mov r1, r0
+    ; Pop and print fault address
+    ldn r1, r15
+    addi r15, 8
     ldi64 r11, print_hex32
     call.l r11
+    ; Print " SEP="
+    ldi64 r10, str_fault_sep
+    ldi64 r11, print_str
+    call.l r11
+    ; Pop and print PSEL
+    ldn r1, r15
+    addi r15, 8
+    sep r6
+    ; Print " T="
+    ldi64 r10, str_fault_t
+    ldi64 r11, print_str
+    call.l r11
+    ; Pop and print T register
+    ldn r1, r15
+    addi r15, 8
+    sep r6
     ldi64 r11, print_crlf
     call.l r11
-    ; Resume REPL (in supervisor mode — RTI from trap already escalated)
+    ; Resume REPL — skip the 16 bytes _trap() pushed
     addi r15, 16
     ldi64 r11, quit_loop
     call.l r11
@@ -8848,16 +8903,12 @@ priv_fault_handler:
 ;  User-Mode Transition Words
 ; =====================================================================
 
-; ENTER-USER — drop from supervisor to user mode (CSR_PRIV ← 1)
+; ENTER-USER — no-op (hardware user mode removed)
 w_enter_user:
-    ldi r1, 1
-    csrw 0x0A, r1
     ret.l
 
-; SYS-EXIT — fire TRAP with syscall 0 to return to supervisor mode
+; SYS-EXIT — no-op (hardware user mode removed)
 w_sys_exit:
-    ldi r1, 0
-    trap
     ret.l
 
 ; PRIV@ — push current privilege level (0=supervisor, 1=user)
@@ -8935,6 +8986,41 @@ w_cl_mpu_limit_fetch:
     csrr r0, 0x6F
     subi r14, 8
     str r14, r0
+    ret.l
+
+; =====================================================================
+;  SEP Diagnostic Words  (Phase 9)
+; =====================================================================
+
+; SEP-PSEL@ ( -- n )  push current PSEL (which register is PC)
+w_sep_psel_fetch:
+    csrr r0, 0x01
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SEP-XSEL@ ( -- n )  push current XSEL (which register is X)
+w_sep_xsel_fetch:
+    csrr r0, 0x02
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SEP-T@ ( -- n )  push T register (last MARK snapshot: XSEL||PSEL)
+w_sep_t_fetch:
+    csrr r0, 0x08
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; SEP-SNAP ( -- )  snapshot XSEL||PSEL into T register (safe, no push)
+;   Unlike raw MARK, this does not push T or modify XSEL.
+w_sep_snap:
+    csrr r0, 0x02               ; XSEL
+    lsli r0, 4
+    csrr r1, 0x01               ; PSEL
+    or r0, r1
+    csrw 0x08, r0               ; T ← XSEL||PSEL
     ret.l
 
 ; =====================================================================
@@ -9180,6 +9266,129 @@ w_fb_setup:
     ret.l
 
 ; =====================================================================
+;  Cooperative Multitasking  [Phase 8]
+; =====================================================================
+;
+; Zero-overhead cooperative yield using SEP R13 to switch between
+; Task 0 (the REPL / main Forth loop) and a single background task.
+;
+; Task 0 calls PAUSE to yield a timeslice to Task 1.  Task 1 calls
+; YIELD to give control back.  The actual context switch is SEP — 1
+; byte, 1 cycle, zero memory traffic.  The wrapper saves/restores
+; DSP (R14) and RSP (R15) so each task has independent stacks.
+;
+; R13 is used as Task 1's PC register during the SEP switch.  Between
+; PAUSE calls, R13 is free for scratch use — the saved continuation
+; lives in var_task1_pc.
+;
+; Unlike the IPI-based CORE-DISPATCH (preemptive, cross-core), this is
+; cooperative, same-core — complementary mechanisms.
+
+; PAUSE ( -- )  yield to background task (no-op if none active)
+w_pause:
+    ldi64 r11, var_task1_pc
+    ldn r13, r11
+    cmpi r13, 0
+    breq .pause_nop
+
+    ; ---- Save Task 0 DSP on its own return stack ----
+    subi r15, 8
+    str r15, r14
+    ; ---- Save Task 0 RSP to memory (after push, so pop works) ----
+    ldi64 r11, var_task0_rsp
+    str r11, r15
+
+    ; ---- Load Task 1 context ----
+    ldi64 r11, var_task1_dsp
+    ldn r14, r11
+    ldi64 r11, var_task1_rsp
+    ldn r15, r11
+
+    ; ---- SEP switch: 1 cycle, 0 memory ----
+    sep  r13                    ; Task 1 runs; R3 freezes
+
+    ; ---- Back from Task 1 (it did SEP R3) ----
+    ; If task1_cleanup already zeroed var_task1_pc, skip the save
+    ; (otherwise we'd overwrite the zero with R13's frozen address).
+    ldi64 r11, var_task1_pc
+    ldn r1, r11
+    cmpi r1, 0
+    breq .task1_done
+    ; R13 = Task 1's frozen continuation — save full context
+    str r11, r13
+    ldi64 r11, var_task1_dsp
+    str r11, r14
+    ldi64 r11, var_task1_rsp
+    str r11, r15
+.task1_done:
+
+    ; ---- Restore Task 0 ----
+    ldi64 r11, var_task0_rsp
+    ldn r15, r11
+    ldn r14, r15              ; pop saved DSP
+    addi r15, 8
+.pause_nop:
+    ret.l
+
+; YIELD ( -- )  yield from background task back to Task 0
+;   Called by Task 1 via call.l (dictionary dispatch).  The SEP R3
+;   freezes R13 at the ret.l; next PAUSE resumes there, ret.l returns
+;   to the caller inside Task 1.
+w_yield:
+    sep  r3                     ; yield to Task 0 (R13 freezes at ret.l)
+    ret.l                       ; resumes here on next PAUSE; returns to caller
+
+; BACKGROUND ( xt -- )  start a background task
+;   Sets Task 1's PC to the xt, initialises fresh stacks.
+;   If a task is already running, it is silently replaced.
+w_background:
+    ldn r1, r14               ; xt
+    addi r14, 8
+    ; Set Task 1 PC
+    ldi64 r11, var_task1_pc
+    str r11, r1
+    ; Initialise Task 1 DSP (top of dedicated data stack, grows down)
+    ldi64 r1, task1_dstack_top
+    ldi64 r11, var_task1_dsp
+    str r11, r1
+    ; Initialise Task 1 RSP with cleanup sentinel
+    ldi64 r1, task1_rstack_top
+    subi r1, 8
+    ldi64 r7, task1_cleanup
+    str r1, r7                ; push sentinel onto Task 1's RSP
+    ldi64 r11, var_task1_rsp
+    str r11, r1
+    ret.l
+
+; task1_cleanup: sentinel — runs when a background task's word returns
+;   Clears var_task1_pc and yields back to Task 0 permanently.
+task1_cleanup:
+    ldi r1, 0
+    ldi64 r11, var_task1_pc
+    str r11, r1
+    sep  r3                     ; final yield back to Task 0
+    br   task1_cleanup          ; unreachable but safe re-entry
+
+; TASK-STOP ( -- )  cancel background task
+w_task_stop:
+    ldi r1, 0
+    ldi64 r11, var_task1_pc
+    str r11, r1
+    ret.l
+
+; TASK? ( -- flag )  is a background task active?
+w_task_status:
+    ldi64 r11, var_task1_pc
+    ldn r1, r11
+    cmpi r1, 0
+    breq .ts_zero
+    ldi r1, 1
+.ts_zero:
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; =====================================================================
 ;  Multicore — Secondary Core Entry, IPI Handler, Worker Loop
 ; =====================================================================
 ;
@@ -9218,6 +9427,10 @@ secondary_core_entry:
     sub r14, r11
 
     ; ---- Set up UART base and subroutine pointers (for any I/O) ----
+    ; [Phase 5] R4/R5/R6 point to SEP-dispatched routines. Each core
+    ; has its own register file, so sep r4 on core N uses core N's R4.
+    ; After the first sep r3 return, R4 freezes at the br trampoline;
+    ; subsequent sep r4 calls re-enter correctly via the branch.
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
@@ -13936,9 +14149,45 @@ d_cl_mpu_limit_fetch:
     call.l r11
     ret.l
 
+; === SEP-PSEL@ ( -- n ) ===  [Phase 9]
+d_sep_psel_fetch:
+    .dq d_cl_mpu_limit_fetch
+    .db 9
+    .ascii "SEP-PSEL@"
+    ldi64 r11, w_sep_psel_fetch
+    call.l r11
+    ret.l
+
+; === SEP-XSEL@ ( -- n ) ===  [Phase 9]
+d_sep_xsel_fetch:
+    .dq d_sep_psel_fetch
+    .db 9
+    .ascii "SEP-XSEL@"
+    ldi64 r11, w_sep_xsel_fetch
+    call.l r11
+    ret.l
+
+; === SEP-T@ ( -- n ) ===  [Phase 9]
+d_sep_t_fetch:
+    .dq d_sep_xsel_fetch
+    .db 6
+    .ascii "SEP-T@"
+    ldi64 r11, w_sep_t_fetch
+    call.l r11
+    ret.l
+
+; === SEP-SNAP ( -- ) ===  [Phase 9]
+d_sep_snap:
+    .dq d_sep_t_fetch
+    .db 8
+    .ascii "SEP-SNAP"
+    ldi64 r11, w_sep_snap
+    call.l r11
+    ret.l
+
 ; === FB-BASE! ( addr -- ) ===
 d_fb_base_store:
-    .dq d_cl_mpu_limit_fetch
+    .dq d_sep_snap
     .db 8
     .ascii "FB-BASE!"
     ldi64 r11, w_fb_base_store
@@ -14164,6 +14413,51 @@ d_reloc_buf:
     str r14, r1
     ret.l
 
+; === PAUSE ===
+d_pause:
+    .dq d_reloc_buf
+    .db 5
+    .ascii "PAUSE"
+    ldi64 r11, w_pause
+    call.l r11
+    ret.l
+
+; === YIELD ===
+d_yield:
+    .dq d_pause
+    .db 5
+    .ascii "YIELD"
+    ldi64 r11, w_yield
+    call.l r11
+    ret.l
+
+; === BACKGROUND ===
+d_background:
+    .dq d_yield
+    .db 10
+    .ascii "BACKGROUND"
+    ldi64 r11, w_background
+    call.l r11
+    ret.l
+
+; === TASK-STOP ===
+d_task_stop:
+    .dq d_background
+    .db 9
+    .ascii "TASK-STOP"
+    ldi64 r11, w_task_stop
+    call.l r11
+    ret.l
+
+; === TASK? ===
+d_task_status:
+    .dq d_task_stop
+    .db 5
+    .ascii "TASK?"
+    ldi64 r11, w_task_status
+    call.l r11
+    ret.l
+
 ; =====================================================================
 ;  Forth Variables
 ; =====================================================================
@@ -14230,6 +14524,32 @@ var_reloc_count:
 var_reloc_buf:
     .dq 0                             ; pointer to user-allocated relocation buffer
 
+; Cooperative multitasking state  [Phase 8]
+var_task1_pc:
+    .dq 0                             ; Task 1 continuation (0 = no task)
+var_task1_dsp:
+    .dq 0                             ; Task 1 saved DSP
+var_task1_rsp:
+    .dq 0                             ; Task 1 saved RSP
+var_task0_rsp:
+    .dq 0                             ; Task 0 saved RSP (during PAUSE)
+
+; Task 1 dedicated stacks — 256 bytes each (32 cells)
+; Data stack grows down from task1_dstack_top
+task1_dstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task1_dstack_top:
+; Return stack grows down from task1_rstack_top
+task1_rstack:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+task1_rstack_top:
+
 ; =====================================================================
 ;  String Constants
 ; =====================================================================
@@ -14286,6 +14606,10 @@ str_busfault:
     .asciiz "\n*** BUS FAULT @ "
 str_privfault:
     .asciiz "\n*** PRIVILEGE FAULT @ "
+str_fault_sep:
+    .asciiz " SEP="
+str_fault_t:
+    .asciiz " T="
 str_branch_overflow:
     .asciiz "Branch offset overflow\n"
 str_leave_overflow:

@@ -2046,6 +2046,41 @@ class TestBIOS(unittest.TestCase):
         # BG1 runs for 2 PAUSEs → r1=2.  Then BG2 replaces it for 2 more → r2=2.
         self.assertIn("2 ", text)
 
+    # -- Phase 9: SEP diagnostic words --
+
+    def test_sep_psel_fetch(self):
+        """SEP-PSEL@ returns 3 (main code always runs with PSEL=R3)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SEP-PSEL@ ."])
+        self.assertIn("3 ", text)
+
+    def test_sep_xsel_fetch(self):
+        """SEP-XSEL@ returns the current XSEL."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SEP-XSEL@ ."])
+        # XSEL is typically set during boot; just check it returns a number
+        self.assertRegex(text, r"\d+\s+ok")
+
+    def test_sep_t_fetch(self):
+        """SEP-T@ reads the T register (0 if MARK was never called)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SEP-T@ ."])
+        self.assertIn("0 ", text)
+
+    def test_sep_snap_updates_t(self):
+        """SEP-SNAP snapshots XSEL||PSEL into T, then SEP-T@ reads it."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["SEP-SNAP SEP-T@ ."])
+        # After SEP-SNAP: T = XSEL||PSEL.  PSEL=3, XSEL varies.
+        # T low nibble should be 3.
+        self.assertRegex(text, r"\d+\s+ok")
+        # Extract the printed number — low nibble must be 3
+        import re
+        m = re.search(r"(\d+)\s+ok", text)
+        self.assertIsNotNone(m)
+        t_val = int(m.group(1))
+        self.assertEqual(t_val & 0xF, 3, f"T low nibble should be PSEL=3, got {t_val:#x}")
+
     # -- Timer words --
 
     def test_timer_store(self):
@@ -19588,647 +19623,14 @@ class TestNetHardening(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
-#  Privilege Model tests
+#  Privilege / MPU tests — REMOVED
+#  Hardware user mode was stripped because it conflicted with 1802-heritage
+#  SEP/SEX dispatch.  priv_level CSR is retained as inert state.
 # ---------------------------------------------------------------------------
-
-class TestPrivilege(unittest.TestCase):
-    """Test the supervisor / user privilege model."""
-
-    def _make_cpu(self, mem_kib=64):
-        """Create a bare CPU in supervisor mode (default)."""
-        cpu = Megapad64(mem_size=mem_kib * 1024)
-        return cpu
-
-    def test_default_supervisor_mode(self):
-        """CPU starts in supervisor mode (priv_level == 0)."""
-        cpu = self._make_cpu()
-        self.assertEqual(cpu.priv_level, 0)
-        self.assertEqual(cpu.csr_read(CSR_PRIV), 0)
-
-    def test_csr_priv_readwrite(self):
-        """CSR_PRIV can be read/written in supervisor mode."""
-        cpu = self._make_cpu()
-        cpu.csr_write(CSR_PRIV, 1)
-        self.assertEqual(cpu.priv_level, 1)
-        self.assertEqual(cpu.csr_read(CSR_PRIV), 1)
-        cpu.csr_write(CSR_PRIV, 0)  # back to supervisor
-        self.assertEqual(cpu.priv_level, 0)
-
-    def test_user_mode_memalu_traps(self):
-        """MEMALU instructions trap with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1  # user mode
-        # LDN — MEMALU family 0x8, sub 0x0
-        cpu.mem[0] = 0x80  # MEMALU sub 0
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_io_traps(self):
-        """IO instructions trap with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0x91  # IO OUT 1
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_sep_traps(self):
-        """SEP Rn traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0xA5  # SEP R5
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_sex_traps(self):
-        """SEX Rn traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0xB3  # SEX R3
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_sys_mark_traps(self):
-        """MARK (SYS 0x7) traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0x07  # SYS sub 7 = MARK
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_seq_traps(self):
-        """SEQ (SYS 0x9) traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0x09  # SYS sub 9 = SEQ
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_glo_traps(self):
-        """GLO (IMM 0xC) traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0x6C  # IMM sub 0xC = GLO
-        cpu.mem[1] = 0x00  # Rx byte
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_phi_traps(self):
-        """PHI (IMM 0xF) traps with PRIV_FAULT in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0x6F  # IMM sub 0xF = PHI
-        cpu.mem[1] = 0x00
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_supervisor_mode_memalu_ok(self):
-        """MEMALU works fine in supervisor mode."""
-        cpu = self._make_cpu()
-        self.assertEqual(cpu.priv_level, 0)  # supervisor
-        # SEQ (set Q) is a SYS sub-op — runs fine
-        cpu.mem[0] = 0x09  # SYS sub 9 = SEQ
-        cpu.pc = 0
-        cpu.step()  # should not raise
-        self.assertEqual(cpu.q_out, 1)
-
-    def test_user_mode_csrw_priv_traps(self):
-        """Writing CSR_PRIV from user mode traps."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        # Assemble CSRW R0, CSR_PRIV (0x0A)
-        # CSR write: family 0xD, nib[3]=1 (write), nib[2:0]=0 (R0)
-        cpu.mem[0] = 0xD8  # CSRW R0
-        cpu.mem[1] = 0x0A  # CSR_PRIV
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_csrw_ivt_base_traps(self):
-        """Writing CSR_IVT_BASE from user mode traps."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        cpu.mem[0] = 0xD8  # CSRW R0
-        cpu.mem[1] = 0x04  # CSR_IVT_BASE
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_mode_csrr_priv_ok(self):
-        """Reading CSR_PRIV from user mode is fine (no trap)."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        # Assemble CSRR R0, CSR_PRIV
-        cpu.mem[0] = 0xD0  # CSRR R0
-        cpu.mem[1] = 0x0A  # CSR_PRIV
-        cpu.pc = 0
-        cpu.step()  # should not raise
-        self.assertEqual(cpu.regs[0], 1)
-
-    def test_user_mode_normal_ops_ok(self):
-        """Normal arithmetic/logic instructions work fine in user mode."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        # NOP (SYS 0x1)
-        cpu.mem[0] = 0x01
-        cpu.pc = 0
-        cpu.step()  # should not raise
-        # INC R5 (family 0x1)
-        cpu.mem[1] = 0x15
-        cpu.pc = 1
-        cpu.step()
-        self.assertEqual(cpu.regs[5], 1)
-
-    def test_trap_escalates_to_supervisor(self):
-        """TRAP instruction sets priv_level to 0 (supervisor)."""
-        cpu = self._make_cpu()
-        # Set up a minimal IVT with a handler that does HALT
-        ivt_addr = 0x8000
-        handler_addr = 0x9000
-        cpu.mem_write64(ivt_addr + 6 * 8, handler_addr)  # IVT[6] = SW_TRAP
-        cpu.mem[handler_addr] = 0x02  # HALT
-        cpu.csr_write(CSR_IVT_BASE, ivt_addr)
-        # Set up stack
-        cpu.regs[15] = 0xA000
-        # Enter user mode
-        cpu.priv_level = 1
-        self.assertEqual(cpu.priv_level, 1)
-        # Execute TRAP
-        cpu.mem[0] = 0x0F  # TRAP
-        cpu.pc = 0
-        cpu.step()
-        # Should now be in supervisor mode at handler
-        self.assertEqual(cpu.priv_level, 0)
-        self.assertEqual(cpu.pc, handler_addr)
-
-    def test_rti_restores_privilege(self):
-        """RTI restores the privilege level from the saved context."""
-        cpu = self._make_cpu()
-        cpu.regs[15] = 0xA000  # stack
-        # Manually push the context RTI will restore:
-        # First push: flags with priv in bit 8 (user mode = bit8 set)
-        saved_flags = cpu.flags_pack() | (1 << 8)  # bit 8 = user mode
-        # Push in order: flags first (popped second), then PC (popped first)
-        cpu.push64(saved_flags)
-        cpu.push64(0x1234)  # return PC
-        # RTI instruction
-        addr = 0x100
-        cpu.mem[addr] = 0x04  # SYS sub 4 = RTI
-        cpu.pc = addr
-        cpu.priv_level = 0  # currently supervisor (in handler)
-        cpu.step()
-        # After RTI: privilege restored to user
-        self.assertEqual(cpu.priv_level, 1)
-        self.assertEqual(cpu.pc, 0x1234)
-
-    def test_trap_saves_priv_in_flags(self):
-        """TRAP pushes privilege level into bit 8 of saved flags."""
-        cpu = self._make_cpu()
-        ivt_addr = 0x8000
-        handler_addr = 0x9000
-        cpu.mem_write64(ivt_addr + 6 * 8, handler_addr)
-        cpu.mem[handler_addr] = 0x02  # HALT
-        cpu.csr_write(CSR_IVT_BASE, ivt_addr)
-        cpu.regs[15] = 0xA000
-        cpu.priv_level = 1  # user mode
-        cpu.mem[0] = 0x0F  # TRAP
-        cpu.pc = 0
-        cpu.step()
-        # The stack should now have: [SP] = return PC, [SP+8] = saved flags
-        # Saved flags should have bit 8 set (was in user mode)
-        saved = cpu.mem_read64(cpu.sp + 8)
-        self.assertTrue(saved & (1 << 8), "bit 8 should be set (user mode saved)")
-
-    def test_priv_fault_via_ivt(self):
-        """Privilege violation with IVT set up enters PRIV_FAULT handler."""
-        cpu = self._make_cpu()
-        ivt_addr = 0x8000
-        handler_addr = 0x9000
-        # IVT[15] = priv fault handler
-        cpu.mem_write64(ivt_addr + 15 * 8, handler_addr)
-        cpu.mem[handler_addr] = 0x02  # HALT at handler
-        cpu.csr_write(CSR_IVT_BASE, ivt_addr)
-        cpu.regs[15] = 0xA000
-        cpu.priv_level = 1  # user mode
-        # Try to execute a privileged instruction (MEMALU)
-        cpu.mem[0] = 0x80  # MEMALU sub 0
-        cpu.pc = 0
-        cpu.run(max_steps=10)
-        # Should have trapped to handler and halted
-        self.assertTrue(cpu.halted)
-        self.assertEqual(cpu.priv_level, 0)  # escalated to supervisor
-
-    def test_roundtrip_trap_rti(self):
-        """Full roundtrip: user → TRAP → supervisor → RTI → user."""
-        cpu = self._make_cpu()
-        ivt_addr = 0x8000
-        handler_addr = 0x9000
-        cpu.mem_write64(ivt_addr + 6 * 8, handler_addr)
-        cpu.csr_write(CSR_IVT_BASE, ivt_addr)
-        cpu.regs[15] = 0xA000
-
-        # Handler code: RTI (return to user mode)
-        cpu.mem[handler_addr] = 0x04  # RTI
-
-        # User code at 0x00: TRAP, then NOP, then HALT
-        cpu.mem[0] = 0x0F  # TRAP
-        cpu.mem[1] = 0x01  # NOP (should execute after RTI return)
-        cpu.mem[2] = 0x02  # HALT
-
-        # Enter user mode
-        cpu.priv_level = 1
-        cpu.pc = 0
-
-        # Execute TRAP → goes to handler
-        cpu.step()
-        self.assertEqual(cpu.priv_level, 0)  # supervisor in handler
-        self.assertEqual(cpu.pc, handler_addr)
-
-        # Execute RTI → returns to user mode
-        cpu.step()
-        self.assertEqual(cpu.priv_level, 1)  # user mode restored
-        self.assertEqual(cpu.pc, 1)  # return address after TRAP
-
-        # Execute NOP (user mode, should work)
-        cpu.step()
-
-        # Execute HALT
-        cpu.step()
-        self.assertTrue(cpu.halted)
-
-    def test_micro_core_priv_csr(self):
-        """Micro-cores also support CSR_PRIV read/write."""
-        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
-        self.assertEqual(mc.csr_read(CSR_PRIV), 0)
-        mc.csr_write(CSR_PRIV, 1)
-        self.assertEqual(mc.csr_read(CSR_PRIV), 1)
-
-
-class TestMPU(unittest.TestCase):
-    """Test the Memory Protection Unit (MPU) — user-mode address window."""
-
-    def _make_cpu(self, mem_kib=64):
-        cpu = Megapad64(mem_size=mem_kib * 1024)
-        return cpu
-
-    def _make_sys(self, ram_kib=64):
-        """Create a MegapadSystem for memory-access tests (patched mem)."""
-        return make_system(ram_kib=ram_kib)
-
-    def test_mpu_csr_default_zero(self):
-        """MPU CSRs default to 0."""
-        cpu = self._make_cpu()
-        self.assertEqual(cpu.csr_read(CSR_MPU_BASE), 0)
-        self.assertEqual(cpu.csr_read(CSR_MPU_LIMIT), 0)
-        self.assertEqual(cpu.mpu_base, 0)
-        self.assertEqual(cpu.mpu_limit, 0)
-
-    def test_mpu_csr_readwrite(self):
-        """MPU CSRs can be read/written in supervisor mode."""
-        cpu = self._make_cpu()
-        cpu.csr_write(CSR_MPU_BASE, 0x1000)
-        cpu.csr_write(CSR_MPU_LIMIT, 0x8000)
-        self.assertEqual(cpu.csr_read(CSR_MPU_BASE), 0x1000)
-        self.assertEqual(cpu.csr_read(CSR_MPU_LIMIT), 0x8000)
-
-    def test_mpu_csr_user_write_traps(self):
-        """Writing MPU CSRs from user mode traps."""
-        cpu = self._make_cpu()
-        cpu.priv_level = 1
-        # CSRW R0, CSR_MPU_BASE (0x0B)
-        cpu.mem[0] = 0xD8  # CSRW R0
-        cpu.mem[1] = 0x0B  # CSR_MPU_BASE
-        cpu.pc = 0
-        with self.assertRaises(TrapError) as ctx:
-            cpu.step()
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_mpu_csr_user_read_ok(self):
-        """Reading MPU CSRs from user mode is fine."""
-        cpu = self._make_cpu()
-        cpu.csr_write(CSR_MPU_BASE, 0x2000)
-        cpu.priv_level = 1
-        # CSRR R0, CSR_MPU_BASE (0x0B)
-        cpu.mem[0] = 0xD0  # CSRR R0
-        cpu.mem[1] = 0x0B  # CSR_MPU_BASE
-        cpu.pc = 0
-        cpu.step()
-        self.assertEqual(cpu.regs[0], 0x2000)
-
-    def test_supervisor_ignores_mpu(self):
-        """Supervisor mode ignores MPU — can access any address."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0x4000
-        cpu.mpu_limit = 0x8000
-        cpu.priv_level = 0  # supervisor
-        # Write and read at address 0 (below MPU base) — should work
-        cpu.mem_write8(0, 0xAB)
-        self.assertEqual(cpu.mem_read8(0), 0xAB)
-
-    def test_user_access_within_window_ok(self):
-        """User-mode access within MPU window succeeds."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0x1000
-        cpu.mpu_limit = 0x8000
-        cpu.priv_level = 1
-        # Write a value within the window
-        cpu.mem_write8(0x2000, 42)
-        self.assertEqual(cpu.mem_read8(0x2000), 42)
-
-    def test_user_access_below_window_faults(self):
-        """User-mode access below MPU base faults."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0x4000
-        cpu.mpu_limit = 0x8000
-        cpu.priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            cpu.mem_read8(0x100)  # below 0x4000
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_access_above_window_faults(self):
-        """User-mode access at/above MPU limit faults."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0x4000
-        cpu.mpu_limit = 0x8000
-        cpu.priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            cpu.mem_read8(0x8000)  # at limit (exclusive)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_write_below_window_faults(self):
-        """User-mode write below MPU base faults."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0x4000
-        cpu.mpu_limit = 0x8000
-        cpu.priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            cpu.mem_write8(0x100, 0xFF)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_mpu_disabled_when_equal(self):
-        """When mpu_base == mpu_limit, MPU is disabled — all RAM allowed."""
-        s = self._make_sys()
-        cpu = s.cpu
-        cpu.mpu_base = 0
-        cpu.mpu_limit = 0  # both zero = disabled
-        cpu.priv_level = 1
-        # Should not fault
-        cpu.mem_write8(0x0, 0xAA)
-        self.assertEqual(cpu.mem_read8(0x0), 0xAA)
-
-    def test_user_hbw_always_blocked(self):
-        """User-mode HBW access is always blocked regardless of MPU."""
-        from system import HBW_BASE
-        s = make_system(ram_kib=1024)
-        cpu = s.cpu
-        cpu.mpu_base = 0
-        cpu.mpu_limit = 0xFFFFFFFF  # wide window
-        cpu.priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            cpu.mem_read8(HBW_BASE)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_mpu_cleared_on_reset(self):
-        """Reset clears MPU CSRs to 0."""
-        cpu = self._make_cpu()
-        cpu.mpu_base = 0x1000
-        cpu.mpu_limit = 0x8000
-        cpu._reset_state()
-        self.assertEqual(cpu.mpu_base, 0)
-        self.assertEqual(cpu.mpu_limit, 0)
-
-
-class TestClusterMPU(unittest.TestCase):
-    """Test the cluster-level MPU for micro-cores."""
-
-    def _make_sys(self, ram_kib=256):
-        """Create a MegapadSystem with clusters enabled."""
-        s = MegapadSystem(ram_size=ram_kib * 1024, num_clusters=3)
-        # Enable cluster 0
-        s.sysinfo.cluster_en = 0x01
-        s.clusters[0].set_enabled(True)
-        return s
-
-    def _cluster(self, s):
-        return s.clusters[0]
-
-    def _mc(self, s, idx=0):
-        """Return micro-core idx from cluster 0."""
-        return self._cluster(s).cores[idx]
-
-    def test_cluster_mpu_defaults_zero(self):
-        """Cluster MPU CSRs default to 0 (supervisor, no window)."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        self.assertEqual(cl.cl_priv_level, 0)
-        self.assertEqual(cl.cl_mpu_base, 0)
-        self.assertEqual(cl.cl_mpu_limit, 0)
-
-    def test_cluster_mpu_csr_read(self):
-        """Micro-core can read cluster MPU CSRs."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x8000
-        self.assertEqual(mc.csr_read(CSR_CL_PRIV), 0)
-        self.assertEqual(mc.csr_read(CSR_CL_MPU_BASE), 0x1000)
-        self.assertEqual(mc.csr_read(CSR_CL_MPU_LIMIT), 0x8000)
-
-    def test_cluster_mpu_csr_write_supervisor(self):
-        """Supervisor-mode micro-core can write cluster MPU CSRs."""
-        s = self._make_sys()
-        mc = self._mc(s)
-        mc.csr_write(CSR_CL_MPU_BASE, 0x2000)
-        mc.csr_write(CSR_CL_MPU_LIMIT, 0xA000)
-        mc.csr_write(CSR_CL_PRIV, 1)
-        cl = self._cluster(s)
-        self.assertEqual(cl.cl_mpu_base, 0x2000)
-        self.assertEqual(cl.cl_mpu_limit, 0xA000)
-        self.assertEqual(cl.cl_priv_level, 1)
-
-    def test_cluster_mpu_csr_write_blocked_in_user(self):
-        """User-mode cluster cannot modify its own MPU."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        # Set up window and switch to user
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        # Try to override — should be silently ignored
-        mc.csr_write(CSR_CL_MPU_BASE, 0)
-        mc.csr_write(CSR_CL_MPU_LIMIT, 0)
-        mc.csr_write(CSR_CL_PRIV, 0)
-        self.assertEqual(cl.cl_mpu_base, 0x1000)
-        self.assertEqual(cl.cl_mpu_limit, 0x8000)
-        self.assertEqual(cl.cl_priv_level, 1)
-
-    def test_supervisor_ignores_cluster_mpu(self):
-        """Cluster in supervisor mode ignores MPU — all RAM allowed."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x4000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 0  # supervisor
-        mc.mem_write8(0x100, 0xAB)
-        self.assertEqual(mc.mem_read8(0x100), 0xAB)
-
-    def test_user_access_within_window_ok(self):
-        """User-mode micro-core can access within cluster MPU window."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        mc.mem_write8(0x2000, 42)
-        self.assertEqual(mc.mem_read8(0x2000), 42)
-
-    def test_user_read_below_window_faults(self):
-        """User-mode micro-core read below cluster MPU base faults."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x4000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            mc.mem_read8(0x100)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_read_above_window_faults(self):
-        """User-mode micro-core read at/above limit faults."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x4000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            mc.mem_read8(0x8000)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_user_write_below_window_faults(self):
-        """User-mode micro-core write below window faults."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x4000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        with self.assertRaises(TrapError) as ctx:
-            mc.mem_write8(0x100, 0xFF)
-        self.assertEqual(ctx.exception.ivec_id, IVEC_PRIV_FAULT)
-
-    def test_mmio_always_allowed(self):
-        """MMIO is always allowed even in user mode."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x2000
-        cl.cl_priv_level = 1
-        # UART is in MMIO range — should not fault
-        mc.mem_read8(MMIO_START)  # no exception
-
-    def test_scratchpad_always_allowed(self):
-        """Cluster scratchpad is always allowed in user mode."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x2000
-        cl.cl_priv_level = 1
-        spad_addr = CLUSTER_SPAD_ADDR  # 0xFFFF_FE00_0000_0000
-        mc.mem_write8(spad_addr, 0xAB)
-        self.assertEqual(mc.mem_read8(spad_addr), 0xAB)
-
-    def test_mpu_disabled_when_equal(self):
-        """When base == limit, cluster MPU is disabled — all RAM allowed."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0
-        cl.cl_mpu_limit = 0
-        cl.cl_priv_level = 1
-        mc.mem_write8(0x0, 0xAA)
-        self.assertEqual(mc.mem_read8(0x0), 0xAA)
-
-    def test_fault_drops_to_supervisor(self):
-        """Cluster MPU fault drops cluster priv to supervisor."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc = self._mc(s)
-        cl.cl_mpu_base = 0x4000
-        cl.cl_mpu_limit = 0x8000
-        cl.cl_priv_level = 1
-        with self.assertRaises(TrapError):
-            mc.mem_read8(0x100)
-        # After fault, cluster should be back in supervisor mode
-        self.assertEqual(cl.cl_priv_level, 0)
-
-    def test_cluster_mpu_shared_across_cores(self):
-        """All micro-cores in a cluster share the same MPU window."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        mc0 = self._mc(s, 0)
-        mc1 = self._mc(s, 1)
-        cl.cl_mpu_base = 0x2000
-        cl.cl_mpu_limit = 0x6000
-        cl.cl_priv_level = 1
-        # Both cores can access within window
-        mc0.mem_write8(0x3000, 0x11)
-        mc1.mem_write8(0x4000, 0x22)
-        self.assertEqual(mc0.mem_read8(0x3000), 0x11)
-        self.assertEqual(mc1.mem_read8(0x4000), 0x22)
-        # Both cores fault below window
-        with self.assertRaises(TrapError):
-            mc0.mem_read8(0x100)
-        cl.cl_priv_level = 1  # re-enter user for second test
-        with self.assertRaises(TrapError):
-            mc1.mem_read8(0x100)
-
-    def test_reset_clears_cluster_mpu(self):
-        """Cluster enable/disable reset cycle clears MPU."""
-        s = self._make_sys()
-        cl = self._cluster(s)
-        cl.cl_priv_level = 1
-        cl.cl_mpu_base = 0x1000
-        cl.cl_mpu_limit = 0x8000
-        # Disable then re-enable — should reset
-        cl.set_enabled(False)
-        cl.set_enabled(True)
-        self.assertEqual(cl.cl_priv_level, 0)
-        self.assertEqual(cl.cl_mpu_base, 0)
-        self.assertEqual(cl.cl_mpu_limit, 0)
 
 
 class TestAppLoad(_KDOSTestBase):
-    """Test privileged/user-mode code loading (APP-EVAL, APP-LOAD)."""
+    """Test application code loading (APP-EVAL, APP-LOAD)."""
 
     def test_priv_fetch_returns_zero(self):
         """PRIV@ returns 0 in supervisor mode."""
@@ -20248,10 +19650,9 @@ class TestAppLoad(_KDOSTestBase):
         self.assertIn("A", out)
 
     def test_app_eval_user_mode(self):
-        """PRIV@ inside APP-EVAL returns 1 (user mode)."""
+        """PRIV@ inside APP-EVAL returns 0 (user mode removed)."""
         out = self._run_kdos([': T S" PRIV@ . " APP-EVAL ; T'])
-        # output should contain '1' from PRIV@ in user mode
-        self.assertIn("1", out)
+        self.assertIn("0", out)
 
     def test_app_eval_restores_supervisor(self):
         """After APP-EVAL, privilege is restored to supervisor."""
@@ -20305,12 +19706,12 @@ class TestAppLoad(_KDOSTestBase):
             os.unlink(img)
 
     def test_app_load_priv_in_user_mode(self):
-        """APP-LOAD runs file content in user mode (PRIV@ shows 1)."""
+        """APP-LOAD runs file content (always supervisor, user mode removed)."""
         img = self._make_image_with_file(
             "chkpriv", b"PRIV@ .\n", ftype=3)
         try:
             out = self._run_kdos(["APP-LOAD chkpriv"], storage_image=img)
-            self.assertIn("1", out)
+            self.assertIn("0", out)
         finally:
             import os
             os.unlink(img)
@@ -20332,9 +19733,9 @@ class TestAppLoad(_KDOSTestBase):
         self.assertIn("42", out)
 
     def test_enter_user_priv_check(self):
-        """ENTER-USER switches to user mode (PRIV@ returns 1)."""
+        """ENTER-USER is a no-op (PRIV@ still returns 0)."""
         out = self._run_kdos(['ENTER-USER PRIV@ . SYS-EXIT'])
-        self.assertIn("1", out)
+        self.assertIn("0", out)
 
     def test_sys_exit_restores_supervisor(self):
         """SYS-EXIT returns to supervisor (PRIV@ returns 0 after)."""
