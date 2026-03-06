@@ -1865,11 +1865,11 @@ w_blit_string:
 .bstr_char:
     ; Reload outer state from RSP
     ldn r9, r15               ; pixel-addr
-    ldn r13, r15, 8           ; len
+    ld.d r13, r15, 1          ; len          (R15 + 1×8)
     cmpi r13, 0
     lbreq .bstr_pop
-    ldn r7, r15, 16           ; c-addr
-    ldn r11, r15, 24          ; font-base
+    ld.d r7, r15, 2           ; c-addr       (R15 + 2×8)
+    ld.d r11, r15, 3          ; font-base    (R15 + 3×8)
     ; Load character byte
     ld.b r10, r7              ; char = *c-addr
     inc r7                    ; c-addr++
@@ -1879,7 +1879,7 @@ w_blit_string:
     str r2, r7
     ; Clamp char < 0x20 to space
     cmpi r10, 0x20
-    brcc .bstr_noclamp        ; carry clear = r10 >= 0x20, skip clamp
+    brcs .bstr_noclamp        ; carry set = r10 >= 0x20, skip clamp
     ldi r10, 0x20
 .bstr_noclamp:
     ; glyph-addr = font-base + (char - 0x20) * 8
@@ -1917,7 +1917,7 @@ w_blit_string:
     addi r9, 16               ; next glyph column (8 pixels × 2 bytes)
     str r15, r9               ; save updated pixel-addr
     ; Decrement len
-    ldn r13, r15, 8           ; len
+    ld.d r13, r15, 1          ; len          (R15 + 1×8)
     dec r13
     ; Save updated len to RSP frame [R15+8]
     mov r2, r15
