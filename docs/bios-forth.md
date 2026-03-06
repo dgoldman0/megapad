@@ -775,11 +775,11 @@ return stacks.
 | `PAUSE` | `( -- )` | Round-robin yield across all 4 task slots via `SEP R20`. |
 | `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R3`. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
-| `TASK-STOP` | `( -- )` | Stop Task 1, reset to idle sentinel. |
-| `TASK-STATUS` | `( -- n )` | Return 0 if Task 1 is idle, 1 if running. |
+| `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. |
+| `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |
 | `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
-| `TASK-COUNT` | `( -- n )` | Return number of task slots (currently 4). |
+| `TASK-COUNT` | `( -- n )` | Count active background tasks (0–3). |
 
 ---
 
