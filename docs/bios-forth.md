@@ -779,7 +779,7 @@ return stacks.
 | `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |
 | `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
-| `TASK-COUNT` | `( -- n )` | Count active background tasks (0–3). |
+| `#TASKS` | `( -- n )` | Count active background tasks (0–3). |
 
 ---
 

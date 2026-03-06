@@ -9355,7 +9355,7 @@ w_task_status:
     str r14, r1
     ret.l
 
-; TASK-COUNT ( -- n )  count of active background tasks
+; #TASKS ( -- n )  count of active background tasks
 w_task_count:
     ldi r7, 0                  ; counter
     ldi r12, 1                 ; slot index
@@ -14464,11 +14464,11 @@ d_background3:
     call.l r11
     ret.l
 
-; === TASK-COUNT ===
+; === #TASKS ===
 d_task_count:
     .dq d_background3
-    .db 10
-    .ascii "TASK-COUNT"
+    .db 6
+    .ascii "#TASKS"
     ldi64 r11, w_task_count
     call.l r11
     ret.l

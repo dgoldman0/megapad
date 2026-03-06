@@ -647,7 +647,7 @@ of compiled code.
 | 312 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
 | 313 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
 | 314 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
-| 315 | `TASK-COUNT` | `( -- n )` | | Count active background tasks (0–3) |
+| 315 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
 
 ---
 
@@ -699,7 +699,7 @@ of compiled code.
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
-TASK-COUNT → BACKGROUND3 → BACKGROUND2 → TASK? → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
+#TASKS → BACKGROUND3 → BACKGROUND2 → TASK? → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
 CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
 SHA256-DOUT@ → SHA256-STATUS@ → SHA256-FINAL → SHA256-UPDATE → SHA256-INIT →
 SHA3-SQUEEZE-NEXT → SHA3-SQUEEZE → SHA3-MODE@ → SHA3-MODE! →

@@ -682,7 +682,7 @@ A lightweight cooperative multitasker was added to the BIOS:
 
 Eight dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
 **TASK-STOP**, **TASK?**, **BACKGROUND2**, **BACKGROUND3**,
-**TASK-COUNT**.
+**#TASKS**.
 
 #### T-Register Fault Diagnostics (Phase 9)
 

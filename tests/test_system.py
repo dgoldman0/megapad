@@ -2099,25 +2099,25 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("3 ", text)   # each counter = 3
 
     def test_task_count(self):
-        """TASK-COUNT returns number of active background tasks."""
+        """#TASKS returns number of active background tasks."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            "TASK-COUNT .",
+            "#TASKS .",
             ": NOOP-BG  TASK-YIELD ;",
             "' NOOP-BG BACKGROUND",
-            "TASK-COUNT .",
+            "#TASKS .",
             "' NOOP-BG BACKGROUND2",
-            "TASK-COUNT .",
+            "#TASKS .",
             "1 TASK-STOP  2 TASK-STOP",
-            "TASK-COUNT .",
+            "#TASKS .",
         ])
-        # TASK-COUNT outputs: 0, 1, 2, 0
+        # #TASKS outputs: 0, 1, 2, 0
         # (echoed "1 TASK-STOP 2 TASK-STOP" inserts extra digits)
         nums = [int(w) for w in text.split() if w.isdigit()]
-        self.assertEqual(nums[0], 0, f"First TASK-COUNT should be 0, got {nums}")
-        self.assertEqual(nums[1], 1, f"Second TASK-COUNT should be 1, got {nums}")
-        self.assertEqual(nums[2], 2, f"Third TASK-COUNT should be 2, got {nums}")
-        self.assertEqual(nums[-1], 0, f"Final TASK-COUNT should be 0, got {nums}")
+        self.assertEqual(nums[0], 0, f"First #TASKS should be 0, got {nums}")
+        self.assertEqual(nums[1], 1, f"Second #TASKS should be 1, got {nums}")
+        self.assertEqual(nums[2], 2, f"Third #TASKS should be 2, got {nums}")
+        self.assertEqual(nums[-1], 0, f"Final #TASKS should be 0, got {nums}")
 
     def test_slots_independent_stop(self):
         """Stopping one slot doesn't affect others."""

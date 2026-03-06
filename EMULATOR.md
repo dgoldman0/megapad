@@ -434,7 +434,7 @@ buffer), then tokenises and interprets:
 `MBOX!` `MBOX@` `SPIN@` `SPIN!` `WAKE-CORE` `CORE-STATUS`
 
 **Cooperative Multitasking**
-`PAUSE` `TASK-YIELD` `BACKGROUND` `TASK-STOP` `TASK?` `BACKGROUND2` `BACKGROUND3` `TASK-COUNT`
+`PAUSE` `TASK-YIELD` `BACKGROUND` `TASK-STOP` `TASK?` `BACKGROUND2` `BACKGROUND3` `#TASKS`
 
 ### Dictionary structure
 
