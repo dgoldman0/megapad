@@ -297,13 +297,26 @@ CDP1802 instruction set.
 | `86` | **SHR.D** | 1 | `C ← D[0]; D ← D >> 1` |
 | `87` | **SM.X** | 1 | `D ← D − M(R(X)); C ← 1 if no borrow` |
 | `88` | **ADC.X** | 1 | `D ← M(R(X)) + D + C; C ← carry` |
-| `89` | **SDB.X** | 1 | `D ← M(R(X)) − D − !C; C ← 1 if no borrow` |
+| `89` | **STXI** | 1 | `M(R(X)) ← D[7:0]; R(X) ← R(X) + 1` (store byte, post-increment) |
 | `8A` | **SHRC.D** | 1 | Shift right through carry: `old_C → D[7]; D[0] → C` |
-| `8B` | **SMB.X** | 1 | `D ← D − M(R(X)) − !C; C ← 1 if no borrow` |
+| `8B` | **STXD.D** | 1 | `M(R(X)) ← D[7:0]; R(X) ← R(X) - 1` (store byte, post-decrement) |
 | `8C` | **SHL.D** | 1 | `C ← D[7]; D ← D << 1` |
 | `8D` | **SHLC.D** | 1 | Shift left through carry: `old_C → D[0]; D[7] → C` |
 | `8E` | **IRX** | 1 | `R(X) ← R(X) + 1` (increment data pointer) |
 | `8F` | **LDXA** | 1 | `D ← M(R(X)); R(X) ← R(X) + 1` (load and advance) |
+
+**STXI / STXD.D** are pure byte-width stores with auto-increment/decrement.
+Unlike all other MEMALU ops (which are read-modify-write through D), these
+are write-only: they store D\[7:0\] to `M(R(X))` and adjust R(X) by ±1.
+They are decoded at the MEMALU decode stage and bypass the `CPU_MEMALU_RD`
+state entirely, going straight to `CPU_MEM_WRITE`.
+
+> **History:** Opcodes `89` and `8B` formerly encoded SDB.X and SMB.X
+> (subtract-with-borrow variants from the CDP1802).  These had zero usage
+> in any BIOS or KDOS code and were replaced with STXI/STXD.D.
+> The LDXA bug (opcode `8F` silently triggering IO OUT due to a
+> `memalu_sub == 0xF` collision) was fixed simultaneously by adding
+> a dedicated `io_out_active` flag.
 
 ---
 

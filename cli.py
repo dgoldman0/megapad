@@ -69,8 +69,8 @@ ALU_NAMES = {
 
 MEMALU_NAMES = {
     0: "LDX", 1: "OR.X", 2: "AND.X", 3: "XOR.X", 4: "ADD.X", 5: "SD.X",
-    6: "SHR.D", 7: "SM.X", 8: "ADC.X", 9: "SDB.X", 0xA: "SHRC.D",
-    0xB: "SMB.X", 0xC: "SHL.D", 0xD: "SHLC.D", 0xE: "IRX", 0xF: "LDXA.D",
+    6: "SHR.D", 7: "SM.X", 8: "ADC.X", 9: "STXI", 0xA: "SHRC.D",
+    0xB: "STXD.D", 0xC: "SHL.D", 0xD: "SHLC.D", 0xE: "IRX", 0xF: "LDXA.D",
 }
 
 IMM_NAMES = {

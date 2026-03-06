@@ -240,6 +240,7 @@ module mp64_cpu #(
     reg [3:0]  memalu_sub;
     reg [2:0]  io_port;
     reg        io_is_inp;
+    reg        io_out_active;
     reg [2:0]  post_action;
 
     // MPU check (combinational)
@@ -295,6 +296,7 @@ module mp64_cpu #(
             memalu_byte <= 8'd0;
             io_port     <= 3'd0;
             io_is_inp   <= 1'b0;
+            io_out_active <= 1'b0;
 
             alu_op <= 4'd0;
             alu_a  <= 64'd0;
@@ -750,6 +752,7 @@ module mp64_cpu #(
                 else if (fam == FAM_MEMALU) begin
                     ext_active <= 1'b0;
                     memalu_sub <= nib;
+                    io_out_active <= 1'b0;
                     case (nib)
                             4'hE: begin R[xsel] <= R[xsel]+64'd1; cpu_state<=CPU_FETCH; end // IRX
                             4'h6: begin // SHR.D
@@ -761,6 +764,20 @@ module mp64_cpu #(
                                 flags[1] <= D[0]; D <= {flags[1], D[7:1]};
                                 flags[0] <= ({flags[1], D[7:1]} == 8'd0);
                                 cpu_state <= CPU_FETCH;
+                            end
+                            4'h9: begin // STXI — M(R(X)) ← D, R(X) ← R(X)+1
+                                effective_addr <= R[xsel];
+                                mem_data <= {56'd0, D};
+                                bus_size <= BUS_BYTE;
+                                R[xsel] <= R[xsel] + 64'd1;
+                                cpu_state <= CPU_MEM_WRITE;
+                            end
+                            4'hB: begin // STXD.D — M(R(X)) ← D, R(X) ← R(X)-1
+                                effective_addr <= R[xsel];
+                                mem_data <= {56'd0, D};
+                                bus_size <= BUS_BYTE;
+                                R[xsel] <= R[xsel] - 64'd1;
+                                cpu_state <= CPU_MEM_WRITE;
                             end
                             4'hC: begin // SHL.D
                                 flags[1] <= D[7]; D <= {D[6:0], 1'b0};
@@ -790,6 +807,7 @@ module mp64_cpu #(
                         effective_addr <= R[xsel]; bus_size <= BUS_BYTE;
                         cpu_state <= CPU_MEMALU_RD;
                         memalu_sub <= 4'hF;
+                        io_out_active <= 1'b1;
                     end else if (nib >= 4'd9) begin
                         io_port <= nib[2:0]; io_is_inp <= 1'b1;
                         effective_addr <= {MP64_MMIO_HI, 20'd0, nib[2:0], 9'd0};
@@ -1228,8 +1246,9 @@ module mp64_cpu #(
                 if (bus_ready) begin
                     bus_valid <= 1'b0;
                     memalu_byte <= bus_rdata[7:0];
-                    if (memalu_sub == 4'hF) begin
+                    if (io_out_active) begin
                         // IO OUT
+                        io_out_active <= 1'b0;
                         D <= bus_rdata[7:0];
                         effective_addr <= {MP64_MMIO_HI, 20'd0, io_port, 9'd0};
                         mem_data <= {56'd0, bus_rdata[7:0]};

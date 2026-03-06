@@ -1401,6 +1401,85 @@ module tb_opcodes;
         check64("icache after re-enable", uut.R[4], 64'd1);
 
         // ================================================================
+        // TEST 73: MEMALU — STXI (M(R(X)) ← D, R(X)++)
+        // ================================================================
+        $display("\n=== TEST 73: MEMALU STXI ===");
+        clear_mem;
+        // R2 (X) = 0x500
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'h05;   // LDI R2, 5
+        mem[3] = 8'h68; mem[4] = 8'h28;                    // LSLI R2, 8
+        // Load D = 0x42 via CSRW
+        mem[5] = 8'h60; mem[6] = 8'h00; mem[7] = 8'h42;   // LDI R0, 0x42
+        mem[8] = 8'hD8; mem[9] = 8'h05;                    // CSRW CSR_D, R0
+        // STXI → M(0x500) = 0x42, R2 = 0x501
+        mem[10] = 8'h89;                                    // STXI
+        mem[11] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("M[0x500] after STXI", {56'd0, mem[13'h500]}, 64'h42);
+        check64("R2 after STXI (post-inc)", uut.R[2], 64'h501);
+
+        // ================================================================
+        // TEST 74: MEMALU — STXD.D (M(R(X)) ← D, R(X)--)
+        // ================================================================
+        $display("\n=== TEST 74: MEMALU STXD.D ===");
+        clear_mem;
+        // R2 (X) = 0x600
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'h06;   // LDI R2, 6
+        mem[3] = 8'h68; mem[4] = 8'h28;                    // LSLI R2, 8
+        // Load D = 0xBE via CSRW
+        mem[5] = 8'h60; mem[6] = 8'h00; mem[7] = 8'hBE;   // LDI R0, 0xBE
+        mem[8] = 8'hD8; mem[9] = 8'h05;                    // CSRW CSR_D, R0
+        // STXD.D → M(0x600) = 0xBE, R2 = 0x5FF
+        mem[10] = 8'h8B;                                    // STXD.D
+        mem[11] = 8'h02;                                    // HALT
+        load_and_run(400);
+        check64("M[0x600] after STXD.D", {56'd0, mem[13'h600]}, 64'hBE);
+        check64("R2 after STXD.D (post-dec)", uut.R[2], 64'h5FF);
+
+        // ================================================================
+        // TEST 75: STXI multi-byte — 3-byte sequential store
+        // ================================================================
+        $display("\n=== TEST 75: STXI multi-byte sequential ===");
+        clear_mem;
+        // R2 (X) = 0x700
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'h07;   // LDI R2, 7
+        mem[3] = 8'h68; mem[4] = 8'h28;                    // LSLI R2, 8
+        // Store 3 bytes: 0x11, 0x22, 0x33
+        mem[5] = 8'h60; mem[6] = 8'h00; mem[7] = 8'h11;   // LDI R0, 0x11
+        mem[8] = 8'hD8; mem[9] = 8'h05;                    // CSRW CSR_D, R0
+        mem[10] = 8'h89;                                    // STXI
+        mem[11] = 8'h60; mem[12] = 8'h00; mem[13] = 8'h22; // LDI R0, 0x22
+        mem[14] = 8'hD8; mem[15] = 8'h05;                  // CSRW CSR_D, R0
+        mem[16] = 8'h89;                                    // STXI
+        mem[17] = 8'h60; mem[18] = 8'h00; mem[19] = 8'h33; // LDI R0, 0x33
+        mem[20] = 8'hD8; mem[21] = 8'h05;                  // CSRW CSR_D, R0
+        mem[22] = 8'h89;                                    // STXI
+        mem[23] = 8'h02;                                    // HALT
+        load_and_run(800);
+        check64("M[0x700] = 0x11", {56'd0, mem[13'h700]}, 64'h11);
+        check64("M[0x701] = 0x22", {56'd0, mem[13'h701]}, 64'h22);
+        check64("M[0x702] = 0x33", {56'd0, mem[13'h702]}, 64'h33);
+        check64("R2 after 3x STXI", uut.R[2], 64'h703);
+
+        // ================================================================
+        // TEST 76: LDXA fix — must NOT trigger IO OUT
+        // Verifies the io_out_active fix: LDXA (0x8F) should load
+        // D from M(R(X)) and post-increment R(X), not do IO OUT.
+        // ================================================================
+        $display("\n=== TEST 76: LDXA fix (no IO OUT) ===");
+        clear_mem;
+        mem[13'h300] = 8'h77;
+        // R2 (X) = 0x300
+        mem[0] = 8'h60; mem[1] = 8'h20; mem[2] = 8'h03;   // LDI R2, 3
+        mem[3] = 8'h68; mem[4] = 8'h28;                    // LSLI R2, 8
+        // LDXA → D = M(0x300) = 0x77, R2 = 0x301
+        mem[5] = 8'h8F;                                     // LDXA
+        mem[6] = 8'h02;                                     // HALT
+        load_and_run(400);
+        check64("D after LDXA (fixed)", {56'd0, uut.D}, 64'h77);
+        check64("R2 after LDXA (fixed)", uut.R[2], 64'h301);
+
+        // ================================================================
         // DONE
         // ================================================================
         $display("\n========================================");

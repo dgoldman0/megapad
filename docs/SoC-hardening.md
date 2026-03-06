@@ -77,6 +77,137 @@ more.  Not a resource concern on any target.
 
 ---
 
+## 0. STXI / STXD.D Instructions + IO OUT Bug Fix
+
+**Priority: CRITICAL — do first, everything else depends on byte-store primitives**
+**Topology: CPU-internal (no MMIO, no bus, zero-overhead ISA change)**
+**Status: DONE** — RTL, emulator, assembler, and smoke tests completed.
+
+### Problem
+
+The ISA has no byte-width auto-increment store.  Every byte serialisation
+in the BIOS is a 2-instruction / 3-byte sequence: `st.b rN, rS; inc rN`.
+The Forth compiler alone has ~194 static instances and ~12 hot loops using
+this pattern.  Every compiled word, every literal, every control-flow
+structure, every CMOVE/FILL/MOVE, every MMIO DMA setup pays the tax.
+
+Additionally, there is **a latent bug**: MEMALU sub-op 0xF is
+double-booked.  IO OUT (FAM_IO, nib 1..7) sets `memalu_sub <= 4'hF`
+then enters `CPU_MEMALU_RD`.  LDXA (opcode 0x8F) does the same.
+In `CPU_MEMALU_RD` the `if (memalu_sub == 4'hF)` guard fires first
+and runs the IO OUT path — LDXA is **dead code** that silently
+executes IO OUT to whichever `io_port` was left over from the last
+IO instruction.
+
+### New instructions
+
+| Mnemonic | Encoding | Semantics                              | Pipeline    |
+|----------|----------|----------------------------------------|-------------|
+| STXI     | 0x89     | `M(R(X)) ← D[7:0]; R(X) ← R(X) + 1`  | 1-cycle decode → CPU_MEM_WRITE |
+| STXD.D   | 0x8B     | `M(R(X)) ← D[7:0]; R(X) ← R(X) - 1`  | 1-cycle decode → CPU_MEM_WRITE |
+
+Both are 1-byte instructions in the MEMALU family (0x8).
+They replace SDB.X (0x89) and SMB.X (0x8B) — subtract-with-borrow
+variants that have **zero usage** anywhere in the BIOS or KDOS.
+(The two 0x89/0x8B bytes in bios.asm are dictionary header data, not
+instructions.)
+
+### Why decode-time bypass
+
+STXI/STXD.D are **pure writes** — they don't read M(R(X)) first.
+Every other MEMALU op is read-modify-write (load from M(R(X)), operate,
+put result in D).  Forcing a write-only op through the MEMALU_RD
+pipeline would waste a bus cycle on a dummy read.
+
+Instead, intercept at decode time (same level as IRX, SHR.D, SHL.D
+which already get special-cased before the `default` arm) and jump
+straight to `CPU_MEM_WRITE`:
+
+```verilog
+// In MEMALU decode, before the default:
+4'h9: begin  // STXI — M(R(X)) ← D, R(X) ← R(X)+1
+    effective_addr <= R[xsel];
+    mem_data       <= {56'd0, D};
+    bus_size       <= BUS_BYTE;
+    R[xsel]        <= R[xsel] + 64'd1;
+    cpu_state      <= CPU_MEM_WRITE;
+end
+4'hB: begin  // STXD.D — M(R(X)) ← D, R(X) ← R(X)-1
+    effective_addr <= R[xsel];
+    mem_data       <= {56'd0, D};
+    bus_size       <= BUS_BYTE;
+    R[xsel]        <= R[xsel] - 64'd1;
+    cpu_state      <= CPU_MEM_WRITE;
+end
+```
+
+Post-increment / post-decrement: `effective_addr` latches the old R(X)
+before the ±1 update, matching 1802 convention (STXD was always
+post-decrement).
+
+### IO OUT bug fix (simultaneous)
+
+Add a 1-bit `io_out_active` register.  In the FAM_IO decode for
+nib 1..7, set `io_out_active <= 1'b1` instead of relying on
+`memalu_sub == 4'hF`.  In `CPU_MEMALU_RD`, check `io_out_active`
+instead.  Clear it in all other MEMALU entry paths.
+
+This restores LDXA (0x8F) to correct operation: load M(R(X)) into D
+and post-increment R(X), without accidentally triggering IO OUT.
+
+### RTL implementation notes
+
+- **Files touched:** `mp64_cpu.v` only
+- **New registers:** 1 bit (`io_out_active`)
+- **New decode cases:** 2 arms in the MEMALU `case(nib)` block
+  (identical structure to existing IRX at 4'hE)
+- **Changed condition:** `CPU_MEMALU_RD` guard from
+  `memalu_sub == 4'hF` to `io_out_active`
+- **SDB.X / SMB.X cases** in `CPU_MEMALU_RD` become unreachable but
+  can be left as-is or removed — no functional impact either way
+- **Zero new FSM states**, zero pipeline changes, zero timing impact
+- **Instruction length:** already 1 byte (MEMALU family), no change
+  to `instr_len` logic
+
+### Emulator implementation notes
+
+- Add two cases in the MEMALU dispatch:
+  `0x9: mem[R[X]] = D & 0xFF; R[X] += 1`
+  `0xB: mem[R[X]] = D & 0xFF; R[X] -= 1`
+- Fix the IO OUT path to check a dedicated flag instead of
+  `memalu_sub == 0xF`
+
+### Assembler implementation notes
+
+- Add `stxi` and `stxd.d` mnemonics mapping to 0x89 and 0x8B
+- Remove `sdb.x` and `smb.x` mnemonics (or alias them to the new ops
+  with a deprecation warning)
+
+### BIOS impact audit
+
+*Full site inventory and conversion plan in
+[sep-dispatch-roadmap.md](sep-dispatch-roadmap.md), Phase 7.*
+
+**~194 static `st.b + inc` pairs** and **~12 hot loops** across 38+
+sites become single STXI instructions.  Highlights:
+
+| Site | Pairs saved | Frequency |
+|------|-------------|----------|
+| `compile_call` (13-byte code emission) | 13 | every non-inline word |
+| `compile_literal` (16-byte emission) | 16 | every literal |
+| CREATE / VARIABLE trampolines | ~52 | every definition |
+| JIT compact/TRUE literal + lit_fold | 24 | peephole optimizer |
+| Control flow (IF/ELSE/LOOP/UNTIL/WHILE/REPEAT/OF) | 42 across 14 routines | every control word |
+| `write_mmio_addr8_le` | 7 | every NIC/disk DMA |
+| CMOVE / FILL / MOVE / VSCROLL loops | 1 per iteration | core Forth words, hot loops |
+| `compile_byte` / `compile_ret` / `C,` | 3 | very frequently |
+| Autoboot prefix build + name copy | 7 + N | once at boot |
+
+STXD.D: 1 site — MOVE backward copy loop.  Low count but validates
+the instruction exists for stack-grow-down and reverse-fill patterns.
+
+---
+
 ## 1. SHA-256/512 Dual-Mode Upgrade
 
 **Priority: high — next crypto task**  
@@ -419,7 +550,137 @@ dispatch in `megapad64.py`.  Expose via a virtual MMIO read.
 
 ---
 
-## 5. MMIO Map After Changes
+## 5. Port I/O Bridge (1802 OUT/INP → MMIO)
+
+**Priority: high — collapses DMA byte-serialization to OUT chains**  
+**Topology: shared (pure SoC-fabric routing, no per-core state)**
+
+*Cross-ref: SEP dispatch roadmap Phase 10.*
+
+### Motivation
+
+The BIOS 1802 heritage includes family 0x9 port I/O (`OUT 1`–`OUT 7`,
+`INP 1`–`INP 7`).  The CPU already decodes these and generates bus
+transactions — `OUT n` reads `M(R(X))`, auto-increments R(X), and
+writes the byte to address `{MP64_MMIO_HI, 20'b0, port[2:0], 9'b0}`.
+But nothing in the SoC fabric routes those addresses to useful
+peripherals, so the instructions are dead silicon.
+
+A port bridge maps each port number to a specific MMIO register, so
+`OUT n` writes a byte directly to a peripheral with auto-increment —
+the most compact possible byte-serial I/O.
+
+### Why it fits here
+
+The CPU-side decode already exists in `mp64_cpu.v` (the `io_port`,
+`io_is_inp` registers, and the `effective_addr` computation at the
+`CPU_MEMALU_RD` state).  The only missing piece is SoC-fabric routing:
+a small address-remap table that translates the port-derived address
+into the actual MMIO target register.
+
+This is the same class of work as the other SoC-hardening items
+(MMIO decode, bus fabric tweaks) — not a CPU change.
+
+### Proposed port map
+
+| Port | Target peripheral | Target register | Use |
+|------|-------------------|-----------------|-----|
+| 1    | UART              | TX data         | Character output |
+| 2    | NIC               | DMA addr byte   | Byte-serial address write |
+| 3    | Disk              | DMA addr byte   | Byte-serial address write |
+| 4    | CRC               | Data input      | Stream bytes into CRC |
+| 5    | SHA (current)     | DIN             | Stream bytes into hash |
+| 6    | Framebuffer       | DMA cmd byte    | Blit/DMA setup |
+| 7    | *(configurable)*  | Via remap CSR   | User-defined |
+
+Port 7 as configurable (via a small CSR) allows future peripherals
+or soft-peripherals without another RTL change.
+
+### What it enables (BIOS impact)
+
+DMA address serialization — currently ~30 instructions per 64-bit
+address write — collapses to:
+
+```asm
+    sex  r9            ; R(X) = source of address bytes
+    out  2             ; byte 0 → NIC DMA addr
+    out  2             ; byte 1
+    out  2             ; byte 2
+    out  2             ; byte 3
+    out  2             ; byte 4
+    out  2             ; byte 5
+    out  2             ; byte 6
+    out  2             ; byte 7
+```
+
+8 bytes, 8 cycles, zero register pressure, auto-increment.  Benefits
+NIC send/recv, disk read/write, framebuffer DMA, CRC — every
+DMA-capable peripheral.
+
+UART emit becomes 3 instructions total:
+```asm
+    sex  r10           ; R(X) = string pointer
+    out  1             ; char to UART, auto-inc
+    out  1             ; next char
+```
+
+### Current CPU address generation
+
+`mp64_cpu.v` already computes: `effective_addr <= {MP64_MMIO_HI, 20'd0, io_port[2:0], 9'd0}`
+
+This means port N generates address `0xFFFF_FF00_0000_0000 + N×0x200`.
+In the SoC fabric (which decodes `bus_mmio_addr[11:0]`), this maps to
+offset `N×0x200`: port 1 → 0x200, port 2 → 0x400, etc.
+
+The port address currently hits existing peripherals by coincidence
+(port 1 → 0x200 = Disk, port 2 → 0x400 = NIC) but targets the
+*base* of each peripheral, not the specific DMA byte-input register.
+
+### RTL implementation notes
+
+Two options, both small:
+
+**Option A — Address remap table in SoC fabric (~50 LUTs):**
+Add a small combinational remap in `mp64_soc.v` between the bus
+arbiter output and the MMIO peripheral decode.  When the address
+matches the port-I/O pattern (`addr[11:9] != 0` and the access came
+from a port-I/O bus transaction), substitute the target register
+address from a 7-entry lookup table.
+
+```verilog
+// Port bridge remap (combinational)
+wire is_port_io = (bus_mmio_addr[11:9] != 3'b000) && port_io_flag;
+wire [11:0] remapped_addr = is_port_io ? port_remap[bus_mmio_addr[11:9]]
+                                       : bus_mmio_addr;
+```
+
+The `port_io_flag` can be a sideband signal from the CPU (already
+available — the CPU knows when it's executing an OUT/INP).
+
+**Option B — Change the CPU's effective_addr formula:**
+Instead of `{MMIO_HI, 20'd0, io_port, 9'd0}`, compute the actual
+target address directly in the CPU based on a small CSR-loaded remap
+table.  More flexible but slightly changes `mp64_cpu.v`.
+
+**Recommendation:** Option A.  It keeps the CPU unchanged (port I/O
+generates the same addresses it always has) and pushes the remap into
+the SoC fabric where the other MMIO decode logic already lives.
+~50 LUTs, zero pipeline impact.
+
+### Emulator implementation notes
+
+- `megapad64.py` already decodes OUT/INP family (0x9).  Add a
+  `port_map` dict mapping port number → (device, register_offset).
+- OUT N: read `memory[R[xsel]]`, increment R[xsel], write byte to
+  `port_map[N].device` at the configured register offset.
+- INP N: read byte from `port_map[N].device`, store to `memory[R[xsel]]`,
+  write byte to D register.
+- Default map mirrors the RTL port table above.
+- Configurable port 7: writable via a virtual CSR or MMIO register.
+
+---
+
+## 6. MMIO Map After Changes
 
 Proposed layout with SHA-256/512 widened and CRC relocated:
 
@@ -435,7 +696,8 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0x780–0x7DF   | 96 B   | SHA-3               | existing   |
 | 0x800–0x81F   | 32 B   | TRNG                | existing   |
 | 0x840–0x87F   | 64 B   | Field ALU           | existing   |
-| 0x880–0x8BF   | 64 B   | *(free)*            |            |
+| 0x880–0x89F   | 32 B   | **Port I/O remap CSR** | **new**    |
+| 0x8A0–0x8BF   | 32 B   | *(free)*            |            |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
 | 0x940–0x9BF   | 128 B  | **SHA-256/384/512** | **widened** |
@@ -456,6 +718,12 @@ The trace readout portal (0xA20) is a small shared MMIO window that
 lets a debugger select a core ID and drain that core's per-core trace
 ring buffer over the main bus.  The actual trace capture hardware lives
 per-core inside each cluster.
+
+The port I/O remap CSR (0x880) holds the 7-entry address translation
+table for `OUT 1`–`OUT 7` / `INP 1`–`INP 7`.  Each entry is a 12-bit
+MMIO target address.  Written once at boot by the BIOS.  The remap
+logic itself is combinational in the SoC fabric — the CSR just stores
+the table.
 
 Plenty of room for future shared accelerators without touching the
 upper half of the address space.

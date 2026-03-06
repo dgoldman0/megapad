@@ -1714,25 +1714,17 @@ class Megapad64:
             self.flag_c = 1 if result > 0xFF else 0
             self.d_reg = result & 0xFF
             self.flag_z = 1 if self.d_reg == 0 else 0
-        elif sub == 0x9:  # SDB.X — D ← M(R(X)) - D - !C
-            m = self.mem_read8(self.rx)
-            borrow = 1 - self.flag_c
-            result = m - self.d_reg - borrow
-            self.flag_c = 1 if result >= 0 else 0
-            self.d_reg = result & 0xFF
-            self.flag_z = 1 if self.d_reg == 0 else 0
+        elif sub == 0x9:  # STXI — M(R(X)) ← D, R(X) ← R(X)+1
+            self.mem_write8(self.rx, self.d_reg & 0xFF)
+            self.rx = u64(self.rx + 1)
         elif sub == 0xA:  # SHRC.D — shift D right through carry
             old_c = self.flag_c
             self.flag_c = self.d_reg & 1
             self.d_reg = ((old_c << 7) | (self.d_reg >> 1)) & 0xFF
             self.flag_z = 1 if self.d_reg == 0 else 0
-        elif sub == 0xB:  # SMB.X — D ← D - M(R(X)) - !C
-            m = self.mem_read8(self.rx)
-            borrow = 1 - self.flag_c
-            result = self.d_reg - m - borrow
-            self.flag_c = 1 if result >= 0 else 0
-            self.d_reg = result & 0xFF
-            self.flag_z = 1 if self.d_reg == 0 else 0
+        elif sub == 0xB:  # STXD.D — M(R(X)) ← D, R(X) ← R(X)-1
+            self.mem_write8(self.rx, self.d_reg & 0xFF)
+            self.rx = u64(self.rx - 1)
         elif sub == 0xC:  # SHL.D — shift D left
             self.flag_c = (self.d_reg >> 7) & 1
             self.d_reg = (self.d_reg << 1) & 0xFF

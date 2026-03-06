@@ -60,7 +60,7 @@ plus 2 memory accesses (push + pop on R15).
 
 | Benefit | Impact |
 |---------|--------|
-| **SEX + D for bulk MMIO byte-serialization** | The dominant production hot path.  NIC, disk, and framebuffer all write 64-bit DMA addresses as 8 individual `st.b` calls through 64-bit shift chains (~16 instructions).  `SEX Rn` + `SHR.D` + `STXD`/`IRX` compresses this to ~8 single-byte instructions with auto-increment — 50% fewer instructions, 50% fewer bytes, zero 64-bit register pressure. |
+| **SEX + D for bulk MMIO byte-serialization** | The dominant production hot path.  NIC, disk, and framebuffer all write 64-bit DMA addresses as 8 individual `st.b` calls through 64-bit shift chains (~16 instructions).  With the new `STXI` instruction (0x89), each `st.b + inc` pair collapses to a single byte.  Combined with `SEX Rn` + `SHR.D` + `STXI`, this compresses DMA serialization further — fewer instructions, fewer bytes, zero 64-bit register pressure. |
 | **SEX + LDXA for packet/header parsing** | Any future IP/UDP stack above the NIC words will parse headers byte-by-byte.  `SEX Rn; LDXA; LDXA; LDXA...` is 1 byte per field read with auto-increment vs. 6 bytes (`ld.b` + `cmpi` + `inc`) today. |
 | **SEP for zero-traffic dispatch** | SEP is register-only; no push/pop to R15.  Matters for leaf I/O routines called in tight loops and for cooperative task switching. |
 | **Deterministic 1-cycle timing** | `call.l` timing varies if R15 targets slow memory.  SEP is always 1 cycle.  Critical for FPGA bring-up and cycle-counted delays. |
@@ -396,6 +396,47 @@ family — `LDXA`, `AND.X`, `ADD.X`, `SHR.D`, etc. — sits unused.
 MMIO DMA byte-serialization pattern it targets appears in every
 DMA-capable peripheral: NIC, disk, framebuffer, and CRC.
 
+#### STXI / STXD.D Site Inventory
+
+**Prerequisite completed:** `STXI` (0x89) and `STXD.D` (0x8B) are
+implemented in RTL, emulator, and assembler (see SoC-hardening §0).
+Each replaces the 2-instruction / 3-byte `st.b + inc` (or `st.b + dec`)
+sequence with a single 1-byte instruction.
+
+**~194 static `st.b + inc` pairs** and **~12 hot loops** across 38+
+sites become single STXI instructions.  Full inventory:
+
+| Site | Pairs saved | Frequency | Sub-phase |
+|------|-------------|-----------|-----------|
+| `compile_call` (13-byte code emission) | 13 | every non-inline word | 7e |
+| `compile_literal` (16-byte emission) | 16 | every literal | 7e |
+| CREATE / VARIABLE trampolines | ~52 | every definition | 7e |
+| JIT compact/TRUE literal + lit_fold | 24 | peephole optimizer | 7e |
+| Control flow (IF/ELSE/LOOP/UNTIL/WHILE/REPEAT/OF) | 42 across 14 routines | every control word | 7e |
+| `write_mmio_addr8_le` | 7 | every NIC/disk DMA | 7a |
+| `write_mmio_u16` / `write_mmio_u32` | 2–4 per call | NIC len, disk sector | 7b |
+| CMOVE / FILL / MOVE / VSCROLL loops | 1 per iteration | core Forth words, hot loops | 7e |
+| `compile_byte` / `compile_ret` / `C,` | 3 | very frequently | 7e |
+| Autoboot prefix build + name copy | 7 + N | once at boot | 7e |
+| Dictionary scanning (`find_word`, `parse_word`) | — (LDXA) | every word lookup | 7d |
+
+**STXD.D:** 1 site — MOVE backward copy loop.  Low count but validates
+the instruction exists for stack-grow-down and reverse-fill patterns.
+
+**Two tiers of work:**
+
+- **Tier 1 (§7a–7d):** Architectural transformations using `SEX Rn` +
+  D accumulator + `GLO`/`GHI`/`SHR.D`/`LDXA` — the byte-serial I/O
+  and scanning patterns that motivated this phase.
+- **Tier 2 (§7e):** Mechanical STXI substitution — find every
+  `st.b Rx, Ry; inc Rx` pair and replace with `stxi`.  No `SEX`
+  needed, no architectural change, just smaller and faster code.
+  ~153 static sites, dominated by compiler emit paths.
+
+Tier 2 is lower risk and higher volume; Tier 1 is higher ROI per site
+but requires care with `SEX`/`SEX R2` save-restore.  Both tiers can
+proceed in parallel.
+
 #### 7a — MMIO DMA Address Serialization (Primary Target)
 
 Every DMA-capable peripheral requires writing a 64-bit address as 8
@@ -550,9 +591,69 @@ and cycle savings are significant.
 **Constraint:** `SEX` and all MEMALU ops are supervisor-only.  This is
 fine for the BIOS but means user-mode Forth words can't use it.
 
-**Estimated effort:** ~2 days.  The MMIO helpers are small but touch
-6+ call sites across NIC, disk, and framebuffer subsystems.  Dictionary
-scanning touches `find_word` and `parse_word` (~100 lines).
+#### 7e — Mechanical STXI Substitution (Tier 2)
+
+Every `st.b Rx, Ry; inc Rx` pair in the BIOS where Rx is the
+destination pointer becomes a single `stxi`.  No `SEX` change needed —
+STXI writes `D[7:0]` to `M(R(X))` and increments R(X), but the value
+in D must be set first.  For code-emission sites, the pattern is:
+
+```asm
+; CURRENT — compile_call emits a byte:
+    ldi.d 0xE0              ; D ← opcode
+    st.b r0, r1             ; M(R0) ← byte from R1 (wrong — actually from a register)
+    inc  r0                 ; R0++
+```
+
+After reading the actual emit pattern more carefully, the BIOS emit
+sites use `st.b Rdst, Rsrc; inc Rdst` where Rdst is the dictionary
+pointer (HERE).  The STXI replacement requires:
+
+1. `SEX Rdst` — point R(X) at HERE
+2. `LDI.D <byte>` — load the byte into D
+3. `STXI` — store D[7:0] to M(R(X)), R(X)++
+
+For **single-byte emits** (e.g., `compile_ret`, `C,`), this is a wash
+(3 instructions vs 3).  The win comes from **multi-byte sequences**
+where the `SEX` is amortized:
+
+```asm
+; compile_call — 13 bytes to emit, current cost: 26 instructions (13× st.b+inc)
+; With STXI: SEX + 13× (LDI.D + STXI) + SEX R2 = 28 instructions
+;   BUT each instruction is 1–2 bytes vs 2–3, saving ~15 bytes of code.
+;   And STXI is 1 cycle vs st.b(1)+inc(1) = 2 cycles per byte.
+```
+
+**Primary sites for Tier 2 conversion:**
+
+| Routine | Bytes emitted | Current insns | After STXI | Cycle savings |
+|---------|---------------|---------------|------------|---------------|
+| `compile_call` | 13 | 26 (×`st.b+inc`) | 28 (SEX + 13×LDI.D+STXI + SEX R2) | 13 cycles (1 per byte) |
+| `compile_literal` | 16 | 32 | 34 | 16 cycles |
+| `CREATE` trampoline | ~26 | ~52 | ~54 | ~26 cycles |
+| `VARIABLE` trampoline | ~26 | ~52 | ~54 | ~26 cycles |
+| Control flow words | 3–6 each | 6–12 each | 8–14 each | 3–6 cycles each |
+| `CMOVE` inner loop | 1/iter | 2/iter | 1/iter | 1 cycle/iter |
+| `FILL` inner loop | 1/iter | 2/iter | 1/iter | 1 cycle/iter |
+| `MOVE` fwd loop | 1/iter | 2/iter | 1/iter | 1 cycle/iter |
+| `MOVE` bwd loop | 1/iter | 2/iter (st.b+dec) | 1/iter (STXD.D) | 1 cycle/iter |
+
+The hot loops (CMOVE/FILL/MOVE) are the highest-value targets: the
+per-iteration saving is small but the iteration count can be thousands.
+The compiler emit sites save code size more than cycles (the `SEX`
+preamble/postamble eats the instruction-count savings, but byte-count
+shrinks and the per-byte cycle count halves).
+
+**Strategy:** Convert CMOVE/FILL/MOVE loops first (highest cycle
+impact, lowest risk — single `st.b+inc` → `stxi` inside a loop body).
+Then convert compiler emit paths in order of frequency:
+`compile_call` → `compile_literal` → control flow → CREATE/VARIABLE.
+
+**Estimated effort:** ~3 days total for Phase 7.  Tier 1 (§7a–7d) ~2
+days; Tier 2 (§7e) ~1 day.  The MMIO helpers are small but touch 6+
+call sites across NIC, disk, and framebuffer subsystems.  Dictionary
+scanning touches `find_word` and `parse_word` (~100 lines).  Mechanical
+STXI substitution is volume work with low per-site risk.
 
 ---
 
@@ -724,7 +825,7 @@ full 1802 restoration leads.
 | **4** | Q semaphore | 30 min | None | Niche — useful for multicore debug |
 | **5** | Secondary core SEP | 1 hour | Low | Medium — smaller stack zones |
 | **6** | Full SCRT | 3 days | High | Low unless 1802 compat is a goal |
-| **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan |
+| **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan.  Now even more powerful with `STXI`/`STXD.D` (store-byte with auto-increment/decrement) available. |
 | **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0 |
 | **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional |
 | **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains |
