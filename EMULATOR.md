@@ -12,7 +12,7 @@ and an interactive CLI monitor/debugger.
 > (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512), optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
 > UDP, TAP), full TCP/IP network stack through TLS 1.3, cooperative
-> multitasking (PAUSE/YIELD/BACKGROUND), and 1,687 tests passing.
+> multitasking (PAUSE/TASK-YIELD/BACKGROUND), and 1,687 tests passing.
 
 ---
 
@@ -432,7 +432,7 @@ buffer), then tokenises and interprets:
 `MBOX!` `MBOX@` `SPIN@` `SPIN!` `WAKE-CORE` `CORE-STATUS`
 
 **Cooperative Multitasking**
-`PAUSE` `YIELD` `BACKGROUND` `TASK-STOP` `TASK-STATUS`
+`PAUSE` `TASK-YIELD` `BACKGROUND` `TASK-STOP` `TASK-STATUS`
 
 ### Dictionary structure
 

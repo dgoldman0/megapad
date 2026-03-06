@@ -9105,7 +9105,7 @@ w_fb_setup:
 ; Task 0 (the REPL / main Forth loop) and a single background task.
 ;
 ; Task 0 calls PAUSE to yield a timeslice to Task 1.  Task 1 calls
-; YIELD to give control back.  The actual context switch is SEP — 1
+; TASK-YIELD to give control back.  The actual context switch is SEP — 1
 ; byte, 1 cycle, zero memory traffic.  The wrapper saves/restores
 ; DSP (R14) and RSP (R15) so each task has independent stacks.
 ;
@@ -9162,11 +9162,11 @@ w_pause:
 .pause_nop:
     ret.l
 
-; YIELD ( -- )  yield from background task back to Task 0
+; TASK-YIELD ( -- )  yield from background task back to Task 0
 ;   Called by Task 1 via call.l (dictionary dispatch).  The SEP R3
 ;   freezes R13 at the ret.l; next PAUSE resumes there, ret.l returns
 ;   to the caller inside Task 1.
-w_yield:
+w_task_yield:
     sep  r3                     ; yield to Task 0 (R13 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
 
@@ -14254,18 +14254,18 @@ d_pause:
     call.l r11
     ret.l
 
-; === YIELD ===
-d_yield:
+; === TASK-YIELD ===
+d_task_yield:
     .dq d_pause
-    .db 5
-    .ascii "YIELD"
-    ldi64 r11, w_yield
+    .db 10
+    .ascii "TASK-YIELD"
+    ldi64 r11, w_task_yield
     call.l r11
     ret.l
 
 ; === BACKGROUND ===
 d_background:
-    .dq d_yield
+    .dq d_task_yield
     .db 10
     .ascii "BACKGROUND"
     ldi64 r11, w_background

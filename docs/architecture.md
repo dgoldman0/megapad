@@ -680,7 +680,7 @@ A lightweight cooperative multitasker was added to the BIOS:
 - Each task has independent data and return stacks
 - A `task1_cleanup` sentinel catches premature task exit
 
-Five new dictionary words: **PAUSE**, **YIELD**, **BACKGROUND**,
+Five new dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
 **TASK-STOP**, **TASK-STATUS**.
 
 #### T-Register Fault Diagnostics (Phase 9)

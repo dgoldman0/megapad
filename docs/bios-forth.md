@@ -772,7 +772,7 @@ has independent data and return stacks.
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `PAUSE` | `( -- )` | Yield control to Task 1 (or back to Task 0 if called from Task 1). |
-| `YIELD` | `( -- )` | Alias for PAUSE — yields in the opposite direction. |
+| `TASK-YIELD` | `( -- )` | Yield from Task 1 back to Task 0 via `SEP R3`. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
 | `TASK-STOP` | `( -- )` | Stop Task 1, reset to idle sentinel. |
 | `TASK-STATUS` | `( -- n )` | Return 0 if Task 1 is idle, 1 if running. |

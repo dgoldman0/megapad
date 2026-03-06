@@ -1946,7 +1946,7 @@ class TestBIOS(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
-    # -- Phase 8: Cooperative multitasking (PAUSE/YIELD/BACKGROUND) --
+    # -- Phase 8: Cooperative multitasking (PAUSE/TASK-YIELD/BACKGROUND) --
 
     def test_task_status_no_task(self):
         """TASK? returns 0 when no background task is running."""
@@ -1982,17 +1982,17 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("0 ", text)   # TASK? after PAUSE
         self.assertIn("42 ", text)  # result from BG-WORK
 
-    def test_background_yield_roundtrip(self):
-        """YIELD in background task correctly suspends and resumes."""
+    def test_background_task_yield_roundtrip(self):
+        """TASK-YIELD in background task correctly suspends and resumes."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             "VARIABLE bg-counter",
-            ": BG-LOOP  0 bg-counter !  5 0 DO  bg-counter @ 1 + bg-counter !  YIELD  LOOP ;",
+            ": BG-LOOP  0 bg-counter !  5 0 DO  bg-counter @ 1 + bg-counter !  TASK-YIELD  LOOP ;",
             "' BG-LOOP BACKGROUND",
             "6 0 DO PAUSE LOOP",
             "bg-counter @ .",
         ])
-        # BG-LOOP increments counter 5 times, yielding after each.
+        # BG-LOOP increments counter 5 times, TASK-YIELDing after each.
         # 6 PAUSEs ensure all 5 iterations complete + 1 extra (nop after task exits).
         self.assertIn("5 ", text)
 
@@ -2001,7 +2001,7 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             "VARIABLE bg-count",
-            ": BG-INF  BEGIN  bg-count @ 1 + bg-count !  YIELD  AGAIN ;",
+            ": BG-INF  BEGIN  bg-count @ 1 + bg-count !  TASK-YIELD  AGAIN ;",
             "' BG-INF BACKGROUND",
             "PAUSE",
             "PAUSE",
@@ -2017,7 +2017,7 @@ class TestBIOS(unittest.TestCase):
         """PAUSE does not corrupt the foreground data stack."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            ": BG-NOP  YIELD ;",
+            ": BG-NOP  TASK-YIELD ;",
             "' BG-NOP BACKGROUND",
             "111 222 333",
             "PAUSE",
@@ -2033,8 +2033,8 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             "VARIABLE r1  VARIABLE r2",
-            ": BG1  BEGIN  r1 @ 1 + r1 !  YIELD  AGAIN ;",
-            ": BG2  BEGIN  r2 @ 1 + r2 !  YIELD  AGAIN ;",
+            ": BG1  BEGIN  r1 @ 1 + r1 !  TASK-YIELD  AGAIN ;",
+            ": BG2  BEGIN  r2 @ 1 + r2 !  TASK-YIELD  AGAIN ;",
             "' BG1 BACKGROUND",
             "PAUSE PAUSE",
             "' BG2 BACKGROUND",
