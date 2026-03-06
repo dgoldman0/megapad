@@ -411,9 +411,11 @@ interp_no_underflow:
 ;  I/O Primitives
 ; =====================================================================
 
-; emit_char: write byte R1 to UART  [SEP dispatch — Phase 1]
+; emit_char: write byte R1 to UART  [SEP dispatch — Phase 1, Q sem — Phase 4]
 emit_char:
+    seq                         ; Q ← 1 (UART busy)
     st.b r8, r1
+    req                         ; Q ← 0 (UART idle)
     sep  r3                     ; return via register switch
     br   emit_char              ; re-entry trampoline
 
@@ -9222,6 +9224,10 @@ secondary_core_entry:
     sub r14, r11
 
     ; ---- Set up UART base and subroutine pointers (for any I/O) ----
+    ; [Phase 5] R4/R5/R6 point to SEP-dispatched routines. Each core
+    ; has its own register file, so sep r4 on core N uses core N's R4.
+    ; After the first sep r3 return, R4 freezes at the br trampoline;
+    ; subsequent sep r4 calls re-enter correctly via the branch.
     ldi64 r8, 0xFFFF_FF00_0000_0000
     ldi64 r4, emit_char
     ldi64 r5, key_char
