@@ -94,7 +94,7 @@ from diskutil import (
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIOS_PATH = os.path.join(PROJECT_ROOT, "bios.asm")
+BIOS_PATH = os.environ.get("MP64_BIOS", os.path.join(PROJECT_ROOT, "bios.asm"))
 
 
 def make_system(ram_kib: int = 1024, storage_image: str = None,

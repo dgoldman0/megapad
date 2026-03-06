@@ -63,7 +63,7 @@ _LOCK_PATH = os.path.join(tempfile.gettempdir(), "mp64_tap.lock")
 
 # Paths — resolved relative to the project root (one level up from tests/)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BIOS_PATH     = os.path.join(_PROJECT_ROOT, "bios.asm")
+_BIOS_PATH     = os.environ.get("MP64_BIOS", os.path.join(_PROJECT_ROOT, "bios.asm"))
 _KDOS_PATH     = os.path.join(_PROJECT_ROOT, "kdos.f")
 _TOOLS_PATH    = os.path.join(_PROJECT_ROOT, "tools.f")
 _AUTOEXEC_PATH = os.path.join(_PROJECT_ROOT, "autoexec.f")
