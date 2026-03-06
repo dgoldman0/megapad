@@ -413,7 +413,7 @@ fs.save("myimage.img")
 
 ## Test Suite
 
-The project has a comprehensive test suite with **1,387 passing tests**
+The project has a comprehensive test suite with **1,687 passing tests**
 that cover every layer of the system.
 
 ### Test Files
@@ -531,7 +531,7 @@ back to pure Python.
 ```bash
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                   # build the C++ extension
-make test-accel              # ~23 s for all 1,387 tests
+make test-accel              # ~23 s for all 1,687 tests
 make bench                   # raw CPU speed comparison
 ```
 
@@ -588,7 +588,7 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `nic_backends.py` | ~399 | Pluggable NIC backends (Loopback, UDP tunnel, Linux TAP) |
 | `data_sources.py` | ~697 | Simulated data sources for NIC |
 | `diskutil.py` | ~1,162 | MP64FS disk utility and image builder |
-| `bios.asm` | ~12,162 | Forth BIOS (346 dictionary words, crypto, PQC, SHA-256, hardened, multicore) |
+| `bios.asm` | ~14,524 | Forth BIOS (360 dictionary words, crypto, PQC, SHA-256, hardened, multicore) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
 | `kdos.f` | ~10,225 | KDOS v1.1 (871 colon defs, §1–§17, multicore, crypto, network, PQC, TLS dual-mode) |
 | `tools.f` | ~990 | Network tools (HTTP/HTTPS/FTP/Gopher client, DNS-LOOKUP) |

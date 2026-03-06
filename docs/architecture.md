@@ -567,8 +567,8 @@ the correct default for pre-privilege firmware.
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 14,353 lines)            │
-│  Subroutine-threaded Forth, 355 dictionary words │
+│  BIOS v1.0  (bios.asm, 14,524 lines)            │
+│  Subroutine-threaded Forth, 360 dictionary words │
 │  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
@@ -639,6 +639,57 @@ JIT is **off by default** and does not affect words compiled before
 `JIT-ON` is executed.  Use `JIT-STATS` to see how many primitives were
 inlined, how many folds and peepholes fired, and how many bytes were
 saved.
+
+### 1802 Heritage Restoration
+
+Several phases of recent work restored authentic CDP 1802 idioms to the
+BIOS while improving performance and adding new capabilities.
+
+#### SEP Dispatch (Phases 0–2, 4–5)
+
+The BIOS threading model was migrated from a single ITC `NEXT` routine
+to **SEP-based subroutine dispatch**:
+
+- **R4** — `NEXT` (advance IP, fetch CFA, branch to it)
+- **R5** — `ENTER` (push return address, enter a colon definition)
+- **R6** — `EXIT` (pop return address, resume caller)
+
+Each of these is a dedicated PC register switched with `SEP Rn`.  This
+eliminates a `LBR` indirection on every Forth word dispatch, saving 3
+machine cycles per call.  The C++ accelerator (`mp64_accel.cpp`)
+recognises the `SEP R4/R5/R6` pattern and fast-paths it.
+
+#### STXI Byte-Processing (Phase 7)
+
+The new **STXI** instruction (opcode 0x89 — store via RX and increment)
+and **STXD.D** (opcode 0x8B — store via RX and decrement with D) were
+added to the ISA (RTL, emulator, assembler, and C++ accel).  16 BIOS
+routines were converted from `STR RX / INC RX` pairs to single `STXI`
+instructions:
+
+`TYPE`, `S>NUMBER`, `NUMBER-PARSE`, `CMOVE`, `CMOVE>`, `FILL`, `PLACE`,
+`+PLACE`, `COMPARE`, `SEARCH`, `CAPITALIZE`, `S-UPPER`, `DIGIT>CHAR`,
+`UD/MOD-DIGIT`, `DUMP-ROW`, `FS-READ-SECTORS`
+
+#### Cooperative Multitasking (Phase 8)
+
+A lightweight cooperative multitasker was added to the BIOS:
+
+- **R13** is reserved as the Task 1 program counter
+- `SEP R13` switches execution to Task 1; `SEP R4` returns to Task 0
+- Each task has independent data and return stacks
+- A `task1_cleanup` sentinel catches premature task exit
+
+Five new dictionary words: **PAUSE**, **YIELD**, **BACKGROUND**,
+**TASK-STOP**, **TASK-STATUS**.
+
+#### T-Register Fault Diagnostics (Phase 9)
+
+The bus-fault handler now captures and displays the **T register**
+(pre-interrupt X/P state), giving the programmer visibility into which
+register pair was active when a fault occurred.  The MMIO routing in
+`system.py` was also deduplicated (Phase 7 prep) to reduce dispatch
+overhead.
 
 ### Boot Sequence
 
@@ -725,17 +776,19 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | 2,868 | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | 994 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | ~2,000 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
-| BIOS | `bios.asm` | 14,353 | Forth interpreter, boot, multicore, 355 dictionary words |
-| OS | `kdos.f` | 10,225 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
+| CPU emulator | `megapad64.py` | 3,002 | Full ISA + extended tile engine implementation |
+| System glue | `system.py` | 991 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
+| Devices | `devices.py` | 2,287 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
+| BIOS | `bios.asm` | 14,524 | Forth interpreter, boot, multicore, 360 dictionary words |
+| OS | `kdos.f` | 11,760 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
 | Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
-| Assembler | `asm.py` | 788 | Two-pass macro assembler |
-| CLI/Monitor | `cli.py` | 1,347 | Debug, inspect, boot, headless TCP server |
+| Assembler | `asm.py` | 792 | Two-pass macro assembler |
+| CLI/Monitor | `cli.py` | 1,557 | Debug, inspect, boot, headless TCP server |
 | Disk tools | `diskutil.py` | 1,162 | Build/manage disk images |
 | Tests | `test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| Tests | `test_system.py` | 19,216 | 1,316 integration tests (69 classes) |
-| Tests | `test_networking.py` | 1,239 | 48 real-network tests (8 classes) |
+| Tests | `test_system.py` | 24,033 | 1,592 integration tests (74 classes) |
+| Tests | `test_networking.py` | 187 | 13 real-network tests |
+| Tests | `test_fs_hardening.py` | — | 27 filesystem hardening tests |
+| C++ accel | `mp64_accel.cpp` | 3,229 | Hot-path accelerator (NEXT/ALU/mem/STXI) |
 | RTL | `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides |
 | RTL tests | `rtl/sim/` | ~11,100 | 28 testbenches (~414 hardware assertions) |

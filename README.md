@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,539 tests.
+— all running inside a Python emulator and verified by 1,687 tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -25,11 +25,11 @@ interactively.
 
 | Component | Stats |
 |-----------|-------|
-| **BIOS** | 355 Forth dictionary words, 14,353 lines ASM, ~28 KB binary |
-| **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,004 lines Forth |
-| **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 2,671+849 lines Python |
-| **C++ Accelerator** | Optional pybind11 CPU core (1,978 lines) — 63× speedup over PyPy |
-| **Tests** | 1,539 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
+| **BIOS** | 360 Forth dictionary words, 14,524 lines ASM, ~28 KB binary |
+| **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,760 lines Forth |
+| **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
+| **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
+| **Tests** | 1,687 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **Devices** | 17 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
@@ -134,20 +134,20 @@ classes, all memory-mapped at `0xFFFF_FF00+`.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (11,004 lines)    │  ← Buffers, kernels, pipelines,
+│    KDOS v1.1 (11,760 lines)    │  ← Buffers, kernels, pipelines,
 │  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
 │  Scheduler · Filesystem · TUI   │    data ports, multicore, network,
 │  Network Stack · TLS 1.3       │    TLS 1.3, sockets, PQC
 ├─────────────────────────────────┤
-│    BIOS v1.0 (14,353 lines)    │  ← Subroutine-threaded Forth,
-│  355 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│    BIOS v1.0 (14,524 lines)    │  ← Subroutine-threaded Forth,
+│  360 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-355 dictionary words covering arithmetic, logic, stack manipulation,
+360 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
@@ -262,7 +262,7 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 # C++ accelerator (recommended — 63× faster than PyPy)
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 1,068 tests
+make test-accel                    # ~23 s, all 1,687 tests
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy                    # one-time
@@ -296,22 +296,22 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | 2,541 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
-| `accel/mp64_accel.cpp` | 1,930 | C++ CPU core (pybind11) — 63× speedup |
+| `megapad64.py` | 3,002 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
+| `accel/mp64_accel.cpp` | 3,229 | C++ CPU core (pybind11) — 63× speedup |
 | `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 610 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 14,353 | Forth BIOS in assembly (355 words, multicore, crypto, hardened) |
+| `system.py` | 991 | Quad-core SoC integration + `run_batch()` C++ fast path |
+| `bios.asm` | 14,524 | Forth BIOS in assembly (360 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 11,004 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
-| `cli.py` | 1,350 | CLI, boot modes, headless TCP server, interactive debug monitor |
-| `asm.py` | 788 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 2,066 | 17 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| `kdos.f` | 11,760 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
+| `cli.py` | 1,557 | CLI, boot modes, headless TCP server, interactive debug monitor |
+| `asm.py` | 792 | Two-pass assembler with SKIP and listing output |
+| `devices.py` | 2,287 | 17 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
 | `tests/test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `tests/test_system.py` | 18,867 | 1,336 integration tests (40+ classes, incl. multicore, tile, crypto, FS, PQC) |
-| `tests/test_networking.py` | 1,169 | 47 real-networking tests (NIC backends, TAP, ARP, ICMP, UDP, TCP, DNS) |
+| `tests/test_system.py` | 24,033 | 1,592 integration tests (74 classes, incl. multicore, tile, crypto, FS, PQC) |
+| `tests/test_networking.py` | 187 | 13 real-networking tests |
 | `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
@@ -328,7 +328,7 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 355 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 360 entries by category) |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 923 definitions by section, §1–§17) |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |

@@ -5,7 +5,7 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **355 entries** —
+This document catalogs every word in the BIOS dictionary — **360 entries** —
 organized by functional category.  Each entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
@@ -760,6 +760,22 @@ SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
 | `KEM-STATUS@` | `( -- status )` | Read engine status. |
 | `KEM-PK@` | `( addr -- )` | Read public key to addr. |
 | `KEM-CT@` | `( addr -- )` | Read ciphertext to addr. |
+
+---
+
+## Cooperative Multitasking (5 words)
+
+Lightweight two-task cooperative multitasker.  R13 holds the Task 1 PC;
+`SEP R13` switches to Task 1, `SEP R4` returns to Task 0.  Each task
+has independent data and return stacks.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PAUSE` | `( -- )` | Yield control to Task 1 (or back to Task 0 if called from Task 1). |
+| `YIELD` | `( -- )` | Alias for PAUSE — yields in the opposite direction. |
+| `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
+| `TASK-STOP` | `( -- )` | Stop Task 1, reset to idle sentinel. |
+| `TASK-STATUS` | `( -- n )` | Return 0 if Task 1 is idle, 1 if running. |
 
 ---
 

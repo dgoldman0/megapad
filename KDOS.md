@@ -18,7 +18,7 @@ python cli.py --bios bios.asm --storage sample.img
 # Development mode (UART injection, no filesystem)
 python cli.py --bios bios.asm --forth kdos.f
 
-# Full test suite (1,258+ tests)
+# Full test suite (1,687 tests)
 make test                    # runs in background
 make test-status             # check progress
 
@@ -98,7 +98,7 @@ PORTS                          \ List all port bindings
 
 ### ✅ Completed (v0.9c)
 
-**BIOS v1.0** (355 words, ~14,353 lines):
+**BIOS v1.0** (360 words, ~14,524 lines):
 - Complete Forth system with colon compiler, conditionals, loops
 - **v0.5 additions**: EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
   CREATE, IMMEDIATE, STATE, [, ], LITERAL, 0>, <>, 0<>, ?DUP,
@@ -168,7 +168,7 @@ PORTS                          \ List all port bindings
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
 
-**Tests**: 1,068+ passing
+**Tests**: 1,687 passing
 - 1,007 test_system.py (40 classes: KDOS, BIOS, multicore, crypto, PQC, network, FS, devices)
 - 23 test_megapad64.py (CPU + tile engine)
 - 38 test_networking.py (NIC backends, TAP, ARP, ICMP, UDP, TCP)
@@ -486,7 +486,7 @@ Flat address space.  Default 1 MiB RAM, configurable up to 64 MiB via
 
 ## 4. BIOS Forth: The Permanent Nucleus
 
-The BIOS Forth (v1.0, 355 words, ~14,353 lines) is the **permanent,
+The BIOS Forth (v1.0, 360 words, ~14,524 lines) is the **permanent,
 extensible nucleus** — not replaced, but extended by KDOS.
 
 ### 4.1 Current State (v1.0)
@@ -494,7 +494,7 @@ extensible nucleus** — not replaced, but extended by KDOS.
 The BIOS provides:
 
 * Subroutine-threaded Forth interpreter with outer interpreter loop
-* 355 built-in words: stack ops, arithmetic, logic, comparison, memory,
+* 360 built-in words: stack ops, arithmetic, logic, comparison, memory,
   I/O, hex/decimal modes, FILL, DUMP, WORDS, BYE
 * **Colon compiler**: `:` `;` for defining new words
 * **Conditionals**: IF/THEN/ELSE

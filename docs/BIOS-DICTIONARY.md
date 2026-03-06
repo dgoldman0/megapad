@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **355** dictionary words defined in `bios.asm`.
+Complete catalog of all **360** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -636,6 +636,16 @@ of compiled code.
 | 306 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
 | 307 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
+### Cooperative Multitasking (5 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 308 | `PAUSE` | `( -- )` | | Yield to Task 1 via `SEP R13`; resumes when Task 1 yields back |
+| 309 | `YIELD` | `( -- )` | | Alias for PAUSE (Task 1 → Task 0 direction) |
+| 310 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
+| 311 | `TASK-STOP` | `( -- )` | | Stop Task 1, reset to idle sentinel |
+| 312 | `TASK-STATUS` | `( -- n )` | | Return task status (0=idle, 1=running) |
+
 ---
 
 ## Summary Statistics
@@ -676,7 +686,8 @@ of compiled code.
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
-| **Total** | **355** |
+| Cooperative Multitasking | 5 |
+| **Total** | **360** |
 
 ### All Immediate Words (34)
 
@@ -685,6 +696,7 @@ of compiled code.
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
+TASK-STATUS → TASK-STOP → BACKGROUND → YIELD → PAUSE →
 CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
 SHA256-DOUT@ → SHA256-STATUS@ → SHA256-FINAL → SHA256-UPDATE → SHA256-INIT →
 SHA3-SQUEEZE-NEXT → SHA3-SQUEEZE → SHA3-MODE@ → SHA3-MODE! →

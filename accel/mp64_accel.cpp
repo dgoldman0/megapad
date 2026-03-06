@@ -914,15 +914,15 @@ static inline int64_t to_signed_eb(uint64_t v, int eb) {
 // ---------------------------------------------------------------------------
 
 static inline void tile_read_64bytes(CPUState& s, uint64_t addr, uint8_t* out) {
-    if (s.vram_mem && addr >= s.vram_base && addr + 64 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 64 <= s.vram_size) {
         std::memcpy(out, s.vram_mem + (addr - s.vram_base), 64);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 64 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 64 <= s.ext_mem_size) {
         std::memcpy(out, s.ext_mem + (addr - s.ext_mem_base), 64);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 64 <= s.hbw_base + s.hbw_size) {
+    if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 64 <= s.hbw_size) {
         std::memcpy(out, s.hbw_mem + (addr - s.hbw_base), 64);
         return;
     }
@@ -934,15 +934,15 @@ static inline void tile_read_64bytes(CPUState& s, uint64_t addr, uint8_t* out) {
 }
 
 static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const uint8_t* data) {
-    if (s.vram_mem && addr >= s.vram_base && addr + 64 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 64 <= s.vram_size) {
         std::memcpy(s.vram_mem + (addr - s.vram_base), data, 64);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 64 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 64 <= s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), data, 64);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr + 64 <= s.hbw_base + s.hbw_size) {
+    if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 64 <= s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), data, 64);
         return;
     }
@@ -1703,17 +1703,17 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 8 <= s.hbw_size) {
         uint64_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 8);
         return v;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 8 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 8 <= s.ext_mem_size) {
         uint64_t v;
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 8);
         return v;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 8 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 8 <= s.vram_size) {
         uint64_t v;
         std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 8);
         return v;
@@ -1758,15 +1758,15 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 8 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 8 <= s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 8);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 8 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 8 <= s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 8);
         return;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 8 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 8 <= s.vram_size) {
         std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 8);
         return;
     }
@@ -1789,17 +1789,17 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 2 <= s.hbw_size) {
         uint16_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 2);
         return v;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 2 <= s.ext_mem_size) {
         uint16_t v;
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 2);
         return v;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 2 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 2 <= s.vram_size) {
         uint16_t v;
         std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 2);
         return v;
@@ -1834,15 +1834,15 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 2 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 2 <= s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 2);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 2 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 2 <= s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 2);
         return;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 2 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 2 <= s.vram_size) {
         std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 2);
         return;
     }
@@ -1880,17 +1880,17 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 4 <= s.hbw_size) {
         uint32_t v;
         std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 4);
         return v;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 4 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 4 <= s.ext_mem_size) {
         uint32_t v;
         std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 4);
         return v;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 4 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 4 <= s.vram_size) {
         uint32_t v;
         std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 4);
         return v;
@@ -1925,15 +1925,15 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr + 4 <= s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 4 <= s.hbw_size) {
         std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 4);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr + 4 <= s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 4 <= s.ext_mem_size) {
         std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 4);
         return;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr + 4 <= s.vram_base + s.vram_size) {
+    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 4 <= s.vram_size) {
         std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 4);
         return;
     }
@@ -2451,13 +2451,9 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 s.flag_z = s.d_reg == 0;
                 break;
             }
-            case 0x9: {  // SDB.X
-                m = sys_read8(s, cb, rx(s));
-                int borrow = 1 - s.flag_c;
-                int result = m - s.d_reg - borrow;
-                s.flag_c = result >= 0;
-                s.d_reg = result & 0xFF;
-                s.flag_z = s.d_reg == 0;
+            case 0x9: {  // STXI — M(R(X)) ← D[7:0]; R(X)++
+                sys_write8(s, cb, rx(s), s.d_reg & 0xFF);
+                rx(s)++;
                 break;
             }
             case 0xA: {  // SHRC.D
@@ -2467,13 +2463,9 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 s.flag_z = s.d_reg == 0;
                 break;
             }
-            case 0xB: {  // SMB.X
-                m = sys_read8(s, cb, rx(s));
-                int borrow = 1 - s.flag_c;
-                int result = s.d_reg - m - borrow;
-                s.flag_c = result >= 0;
-                s.d_reg = result & 0xFF;
-                s.flag_z = s.d_reg == 0;
+            case 0xB: {  // STXD.D — M(R(X)) ← D[7:0]; R(X)--
+                sys_write8(s, cb, rx(s), s.d_reg & 0xFF);
+                rx(s)--;
                 break;
             }
             case 0xC: {  // SHL.D

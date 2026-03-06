@@ -343,7 +343,7 @@ Type `help` at the `MP64>` prompt for the full command list.
 
 ## Running the Test Suite
 
-The project has a comprehensive test suite (1,258+ tests):
+The project has a comprehensive test suite (1,687 tests):
 
 ```bash
 # Full test suite (background — runs via conftest guard)
@@ -382,7 +382,7 @@ PyPy also speeds up interactive use of the emulator:
 
 | Topic | Document |
 |-------|----------|
-| All 265 BIOS Forth words | [docs/bios-forth.md](bios-forth.md) |
+| All 360 BIOS Forth words | [docs/bios-forth.md](bios-forth.md) |
 | All 430+ KDOS definitions | [docs/kdos-reference.md](kdos-reference.md) |
 | CPU instruction set | [docs/isa-reference.md](isa-reference.md) |
 | System architecture & memory map | [docs/architecture.md](architecture.md) |

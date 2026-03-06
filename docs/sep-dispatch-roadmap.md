@@ -219,7 +219,25 @@ gain.
 
 ---
 
-### Phase 3 — JIT Compiler: SEP-Aware Code Generation
+### Phase 3 — JIT Compiler: SEP-Aware Code Generation ⏭ DEFERRED
+
+> **Status:** Skipped after deep analysis.  The existing JIT inline
+> table (17 entries, 3–13 bytes each) and bigram fusion table (6
+> fusions) are fundamentally incompatible with an ITC threading model.
+> Pure ITC (flat 8-byte XT tables) would make small primitives *worse*
+> (DROP: 3 → 8 bytes), destroy peephole literal folding, and kill
+> bigram fusion — a net regression for code density.
+>
+> Alternatives considered:
+> - **Option B (Hybrid 9-byte call):** `sep r7` + inline 8-byte XT.
+>   Modest 4-byte savings per non-inlined call, JIT preserved.
+> - **Option C (Return-only hook):** Zero code-size change, enables
+>   tracing/profiling/task-switch hooks via `sep r7` at word exit.
+> - **Option D (ldi32 shorter encoding):** ISA-level change for same
+>   4-byte savings, no threading model change.
+>
+> May be revisited if Option B or C proves valuable for profiling or
+> if an `ldi32` instruction is added to the ISA.
 
 **Goal:** Make the JIT compiler emit SEP-friendly code for compiled
 Forth words, reducing compiled code size.
@@ -383,7 +401,16 @@ alone, Phase 1 + Phase 3 give better results with less complexity.
 
 ---
 
-### Phase 7 — SEX + D Accumulator for Byte Processing
+### Phase 7 — SEX + D Accumulator for Byte Processing ✅ DONE
+
+> **Status:** Complete.  16 routines converted to `sex` + `glo`/`ghi` +
+> `stxi`/`stxd.d` chains: FILL, TFILL, CMOVE, MOVE (bwd + fwd),
+> write_mmio_addr8_le, write_mmio_u32_le, w_disk_sec_store,
+> w_disk_dma_store, compile_call, compile_literal, w_create,
+> w_var_name_done, w_val_name_done, does_runtime, w_lstore.
+> 4 bugs found and fixed (C++ missing STXI opcode, dead code in
+> w_move_fwd, lsri imm4 overflow, VRAM bounds overflow in C++).
+> All tests passing: 1687/1690 (3 skipped = DNS/network).
 
 **Goal:** Use `SEX Rn` to set the data pointer, then exploit the MEMALU
 family (0x8) and D accumulator for byte-level operations that currently
@@ -816,32 +843,30 @@ full 1802 restoration leads.
 
 ## Phase Summary
 
-| Phase | Scope | Effort | Risk | Value |
-|-------|-------|--------|------|-------|
-| **0** | Audit + test harness | 1 day | None | Foundation |
-| **1** | R4/R5/R6 leaf SEP | 2 hours | Low | Medium — proves concept, removes stack traffic for leaf I/O |
-| **2** | `print_str` coroutine | 4 hours | Medium | Low — high churn, modest gain |
-| **3** | JIT SEP-NEXT codegen | 2 days | Medium | High — transforms compiled code density |
-| **4** | Q semaphore | 30 min | None | Niche — useful for multicore debug |
-| **5** | Secondary core SEP | 1 hour | Low | Medium — smaller stack zones |
-| **6** | Full SCRT | 3 days | High | Low unless 1802 compat is a goal |
-| **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan.  Now even more powerful with `STXI`/`STXD.D` (store-byte with auto-increment/decrement) available. |
-| **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0 |
-| **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional |
-| **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains |
+| Phase | Scope | Effort | Risk | Value | Status |
+|-------|-------|--------|------|-------|--------|
+| **0** | Audit + test harness | 1 day | None | Foundation | ✅ Done |
+| **1** | R4/R5/R6 leaf SEP | 2 hours | Low | Medium — proves concept, removes stack traffic for leaf I/O | ✅ Done |
+| **2** | `print_str` coroutine | 4 hours | Medium | Low — high churn, modest gain | ⏭ Skip |
+| **3** | JIT SEP-NEXT codegen | 2 days | Medium | High — transforms compiled code density | ⏭ Deferred — ITC destroys JIT inline table |
+| **4** | Q semaphore | 30 min | None | Niche — useful for multicore debug | ✅ Done |
+| **5** | Secondary core SEP | 1 hour | Low | Medium — smaller stack zones | ✅ Done |
+| **6** | Full SCRT | 3 days | High | Low unless 1802 compat is a goal | ⏭ Skip |
+| **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan.  16 routines converted to `STXI`/`STXD.D` chains. | ✅ Done |
+| **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0 | ✅ Done |
+| **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional | ✅ Done |
+| **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains | ☐ Not started |
 
-**Recommended minimum:** Phases 0 + 1 + 4 + 5 (~1.5 days, low risk,
-proves the SEP concept end-to-end).
+**Completed:** Phases 0, 1, 4, 5, 7, 8, 9 — all done and tested.
+The SEP dispatch infrastructure, Q semaphore, STXI byte processing,
+cooperative multitasking, and fault diagnostics are all in production.
 
-**Recommended core:** Add **Phase 7** first — it has the highest
-production ROI.  The shared `write_mmio_addr` helper alone touches
-every DMA peripheral.  Then Phase 3 for the JIT.  (~5 days total,
-activates both the register-dispatch *and* data-flow halves of the
-1802 heritage.)
+**Deferred:** Phase 3 (JIT SEP-NEXT) — deep analysis showed that ITC
+threading destroys the JIT inline table and peephole/bigram fusion,
+making it a net regression.  The existing STC+JIT model is superior
+for this architecture.
 
-**Recommended full:** All of the above plus Phase 8 for cooperative
-multitasking (~6 days total, transforms the BIOS into something
-architecturally distinctive — no other modern Forth does this).
+**Skipped:** Phases 2, 6 — low value relative to churn.
 
 **North star:** Phase 10 completes the 1802 restoration at the hardware
 level, making DMA address writes as simple as `OUT n` chains, but

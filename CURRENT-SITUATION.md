@@ -1,51 +1,67 @@
 # Megapad-64 — Current Situation
 
-**Date:** 2026-02-21  
+**Date:** 2026-03-06  
 **Branch:** `main`  
-**HEAD:** `095a7bc`  
-**Status:** 1,539 tests passing (3 `TestPrivilege` tests expected-fail — C++ accel trap path).
+**HEAD:** `f88b5be` (+ uncommitted Phase 7 STXI conversion)  
+**Status:** 1,687 tests passing, 3 skipped (DNS/network).
 
 ---
 
-## 1. Recent changes (last 2 days, 16 commits)
+## 1. Recent changes
 
-### Crypto hardware
+### SEP dispatch & 1802 heritage restoration (Phases 0–9)
 
-- **SHA3-512** — full RTL + emulator + BIOS + KDOS support.  Byte-level
-  registers, 7-bit addressing, 64-byte digest via multi-squeeze.
-- **SHA-256 accelerator** — new hardware block at MMIO 0x0940.  RTL
-  (`mp64_sha256.v`), emulator device, 5 BIOS words, KDOS `SHA256` /
-  `HMAC-SHA256` / `HKDF-SHA256-EXTRACT` / `HKDF-SHA256-EXPAND`.
-- **AES-128 mode** — `AES-KEY-MODE!` selects 128-bit key (10-round
-  schedule vs 14).  Used by TLS cipher suite 0x1301.
-- **CRC relocation** — moved from 0x7C0 → 0x0980 across all layers
-  (RTL, emulator, BIOS, C++ accel, Forth) to make room for SHA-256/KEM.
-- **AES-GCM partial block masking** — fixed last-block encryption to
-  AND the keystream mask for sub-16-byte blocks.
+- **Phase 0 — Audit & test harness** — baseline measurements, SEP smoke
+  tests added.
+- **Phase 1 — SEP leaf I/O** — R4 (`emit_char`), R5 (`key_char`),
+  R6 (`print_hex_byte`) converted from `call.l`/`ret.l` to SEP dispatch.
+  ~54 call sites updated.  Zero stack traffic for the most frequent BIOS
+  calls.
+- **Phase 4 — Q semaphore** — `SEQ`/`REQ` in `emit_char` as UART-busy
+  signal, testable via `BR.BQ`/`BR.BNQ`.
+- **Phase 5 — Secondary core SEP** — verified per-core register files
+  make SEP I/O safe across all 4 full cores.
+- **Phase 7 — STXI byte processing** — 16 routines converted to
+  `sex` + `glo`/`ghi` + `stxi`/`stxd.d` chains: FILL, TFILL, CMOVE,
+  MOVE (bwd + fwd), `write_mmio_addr8_le`, `write_mmio_u32_le`,
+  `w_disk_sec_store`, `w_disk_dma_store`, `compile_call`,
+  `compile_literal`, `w_create`, `w_var_name_done`, `w_val_name_done`,
+  `does_runtime`, `w_lstore`.  4 bugs found and fixed (C++ missing STXI
+  opcode, dead code in `w_move_fwd`, `lsri` imm4 overflow, VRAM bounds
+  overflow in C++ tile memory access).
+- **Phase 8 — Cooperative multitasking** — `PAUSE`, `YIELD`,
+  `BACKGROUND`, `TASK-STOP`, `TASK-STATUS` words.  SEP-based two-task
+  model on core 0 with independent stacks.  1 cycle / 0 memory context
+  switch via `sep r13`.
+- **Phase 9 — Fault diagnostics** — T-register inspection in bus-fault
+  and privilege-fault handlers.  Reports which SEP context was active
+  when a fault occurred.
+- **Phase 3 — DEFERRED** — deep analysis showed ITC threading destroys
+  JIT inline table (17 entries, 3–13B) and bigram fusion (6 entries).
+  Net regression for code density.  Skipped.
 
-### TLS 1.3
+### ISA additions
 
-- **Dual-mode cipher suites** — 0xFF01 (AES-256-GCM + SHA3-256) and
-  0x1301 (AES-128-GCM + SHA-256, RFC 8446 standard).
-- **Record framing** — reassembly buffers (`TLS-RBUF-*`), proper
-  multi-message handshake processing, CCS tolerance.
-- **SNI** — `TLS-SNI-HOST` / `TLS-SNI-LEN` for Server Name Indication.
+- **STXI** (0x89) — `M(R(X)) ← D[7:0]; R(X)++`.  Replaces `st.b + inc` pairs.
+- **STXD.D** (0x8B) — `M(R(X)) ← D[7:0]; R(X)--`.  Replaces `st.b + dec` pairs.
+- Both implemented in RTL, Python emulator, C++ accelerator, and assembler.
 
-### Network tools (tools.f)
+### C++ accelerator
 
-- **HTTP/HTTPS client** with TLS, chunked transfer, content-length.
-- **FTP/FTPS** active-mode client, TLS upgrade for FTPS.
-- **Gopher** client.
-- **DNS-LOOKUP** convenience word.
+- STXI/STXD.D opcodes implemented (replaced SDB.X/SMB.X which were unused).
+- VRAM bounds overflow fixed in all tile memory access functions
+  (`tile_read_64bytes`, `tile_write_64bytes`, `sys_read*`, `sys_write*`).
+  Changed `addr + N <= base + size` to `(addr - base) + N <= size` to
+  prevent 64-bit overflow near top of address space.
 
-### System
+### Earlier (prior to Phase work)
 
-- **Userland memory isolation** — per-process dictionary in ext mem.
-- **Headless mode** — `--headless` TCP terminal server on port 6464.
-- **Ext mem** — `--extmem` flag (default 16 MiB), C++ accel routing fix.
-- **Micro-cluster fix** — `_cluster_dispatch` writes code to correct region.
-- **NET-IDLE** — `IDL` instruction + GIL yield in all protocol loops.
-- **autoexec.f → graphics.f → tools.f** boot chain.
+- **Crypto**: SHA3-512, SHA-256 accelerator, AES-128 mode, CRC
+  relocation (0x7C0 → 0x0980), AES-GCM partial block masking.
+- **TLS 1.3**: Dual cipher suites (0xFF01, 0x1301), record framing, SNI.
+- **Network tools**: HTTP/HTTPS, FTP/FTPS, Gopher, DNS-LOOKUP.
+- **System**: Userland memory isolation, headless mode, ext mem,
+  micro-cluster fix, NET-IDLE, autoexec.f boot chain.
 
 ## 2. What's known-broken
 
@@ -55,23 +71,29 @@ The C++ accelerator raises `TrapError` directly instead of dispatching
 through the IVT.  Pure-Python mode passes all 3.  Low priority — the
 privilege enforcement itself works; only the trap *delivery path* differs.
 
+### Skipped tests (3)
+
+DNS/network tests requiring live internet are skipped in CI.
+
 ## 3. Architecture at a glance
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|
-| BIOS | `bios.asm` → `bios.rom` | 14,353 (355 words) |
-| KDOS | `kdos.f` | 10,225 (871 colon + 490 var = 1,361 entities) |
+| BIOS | `bios.asm` → `bios.rom` | 14,524 (360 words) |
+| KDOS | `kdos.f` | 11,760 |
 | Tools | `tools.f` | 990 |
-| CPU emulator | `megapad64.py` | 2,868 |
-| SoC | `system.py` | 994 |
-| Devices | `devices.py` | 1,875 |
-| CLI | `cli.py` | 1,347 |
-| C++ accel | `accel/mp64_accel.cpp` | ~1,930 |
-| Tests | `tests/test_system.py` | 19,216 (1,316 tests, 69 classes) |
-|       | `tests/test_networking.py` | 1,239 (48 tests, 9 classes) |
+| CPU emulator | `megapad64.py` | 3,002 |
+| SoC | `system.py` | 991 |
+| Devices | `devices.py` | 2,287 |
+| CLI | `cli.py` | 1,557 |
+| C++ accel | `accel/mp64_accel.cpp` | 3,229 |
+| Assembler | `asm.py` | 792 |
+| Tests | `tests/test_system.py` | 24,033 (1,592 tests, 74 classes) |
+|       | `tests/test_networking.py` | 187 (13 tests) |
 |       | `tests/test_megapad64.py` | 2,193 (23 tests) |
+|       | `tests/test_fs_hardening.py` | (27 tests) |
 
-**Total tests: 1,539**
+**Total tests: 1,687** (3 skipped)
 
 ## 4. MMIO address map (crypto region)
 
@@ -90,7 +112,7 @@ privilege enforcement itself works; only the trap *delivery path* differs.
 ## 5. How to run things
 
 ```bash
-make test             # all 1,539 tests (~23s with C++ accel)
+make test             # all 1,687 tests (~23s with C++ accel)
 make test-one K=X     # single class/test
 make test-status      # check progress
 make test-net         # networking tests (requires TAP)

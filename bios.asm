@@ -554,26 +554,25 @@ print_space:
 ;   Preserves: R1
 ;   Clobbers: R7
 write_mmio_addr8_le:
+    sex  r0                   ; R(X) = MMIO destination
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
     mov  r7, r1
-    st.b r0, r7              ; byte 0: R1[7:0]
-    inc  r0
     lsri r7, 8
-    st.b r0, r7              ; byte 1: R1[15:8]
-    inc  r0
     lsri r7, 8
-    st.b r0, r7              ; byte 2: R1[23:16]
-    inc  r0
-    lsri r7, 8
-    st.b r0, r7              ; byte 3: R1[31:24]
-    inc  r0
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
     ldi  r7, 0
-    st.b r0, r7              ; byte 4: 0
-    inc  r0
-    st.b r0, r7              ; byte 5: 0
-    inc  r0
-    st.b r0, r7              ; byte 6: 0
-    inc  r0
-    st.b r0, r7              ; byte 7: 0
+    glo  r7                   ; D ← 0
+    stxi                      ; byte 4
+    stxi                      ; byte 5
+    stxi                      ; byte 6
+    stxi                      ; byte 7
+    sex  r2                   ; restore XSEL
     ret.l
 
 ; write_mmio_u32_le: write R1[31:0] as 4 LE bytes
@@ -582,17 +581,19 @@ write_mmio_addr8_le:
 ;   Preserves: R1
 ;   Clobbers: R7
 write_mmio_u32_le:
+    sex  r0                   ; R(X) = MMIO destination
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
     mov  r7, r1
-    st.b r0, r7              ; byte 0: R1[7:0]
-    inc  r0
     lsri r7, 8
-    st.b r0, r7              ; byte 1: R1[15:8]
-    inc  r0
     lsri r7, 8
-    st.b r0, r7              ; byte 2: R1[23:16]
-    inc  r0
-    lsri r7, 8
-    st.b r0, r7              ; byte 3: R1[31:24]
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
+    sex  r2                   ; restore XSEL
     ret.l
 
 ; =====================================================================
@@ -1769,14 +1770,16 @@ w_fill:
     addi r14, 8
     ldn r9, r14               ; addr
     addi r14, 8
+    glo r7                    ; D ← fill byte
+    sex r9                    ; R(X) = destination
 fl_loop:
     cmpi r12, 0
     breq fl_done
-    st.b r9, r7
-    inc r9
+    stxi                      ; M(R9) ← D; R9++
     dec r12
     br fl_loop
 fl_done:
+    sex r2                    ; restore XSEL
     ret.l
 
 ; WFILL ( addr n word -- ) fill n halfwords (16-bit) at addr\n;   Tight inner loop: st.h / addi / dec / cmpi / brne = 4-5 insns per pixel\n;   vs ~10 for the Forth DO W! 2+ LOOP pattern.
@@ -2184,12 +2187,14 @@ w_tfill:
     ldn r9, r14
     addi r14, 8
     ldi r12, 64
+    glo r7                    ; D ← fill byte
+    sex r9                    ; R(X) = destination
 tf_lp:
-    st.b r9, r7
-    inc r9
+    stxi                      ; M(R9) ← D; R9++
     dec r12
     cmpi r12, 0
     brne tf_lp
+    sex r2                    ; restore XSEL
     ret.l
 
 ; TSRC0! ( addr -- )
@@ -2438,77 +2443,51 @@ w_to_body:
 compile_call:
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    sex r0                    ; R(X) = HERE for STXI chain
     ; EXT prefix: 0xF0
     ldi r7, 0xF0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; LDI opcode: 0x60
     ldi r7, 0x60
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; Register byte: 0xB0 (r11 << 4)
     ldi r7, 0xB0
-    st.b r0, r7
-    inc r0
-    ; 8 bytes of address (little-endian)
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo r7
+    stxi
+    ; 8 bytes of address (little-endian) via GLO/GHI
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
+    stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
+    stxi                      ; byte 5
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
+    glo  r7                   ; D ← R1[55:48]
+    stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
+    stxi                      ; byte 7
     ; CALL.L r11: 0x0D 0x0B
     ldi r7, 0x0D
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x0B
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
+    sex r2                    ; restore XSEL
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
@@ -2551,85 +2530,59 @@ reloc_record_skip:
 compile_literal:
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
+    sex r0                    ; R(X) = HERE for STXI chain
     ; ldi64 r1: 0xF0 0x60 0x10
     ldi r7, 0xF0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x60
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x10
-    st.b r0, r7
-    inc r0
-    ; 8 bytes of value (LE)
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo r7
+    stxi
+    ; 8 bytes of value (little-endian) via GLO/GHI
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
+    stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
+    stxi                      ; byte 5
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
+    glo  r7                   ; D ← R1[55:48]
+    stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
+    stxi                      ; byte 7
     ; subi r14, 8: 0x67 0xE0 0x08
     ldi r7, 0x67
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x08
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; str r14, r1: 0x54 0xE1
     ldi r7, 0x54
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE1
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
+    sex r2                    ; restore XSEL
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
@@ -4893,118 +4846,80 @@ w_create_copy:
     addi r9, 30               ; data_addr (where data field will start)
 
     ; ldi64 r1, <data_addr>: F0 60 10 + 8 bytes LE
+    sex  r0                   ; R(X) = HERE for STXI chain
     ldi r12, 0xF0
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ldi r12, 0x60
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ldi r12, 0x10
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     mov r13, r0               ; save imm offset for reloc tracking
-    ; 8 bytes of data_addr (R9)
-    st.b r0, r9
-    inc r0
-    mov r12, r9
-    lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
+    ; 8 bytes of data_addr (R9) via GLO/GHI
+    glo  r9                   ; D ← R9[7:0]
+    stxi                      ; byte 0
+    ghi  r9                   ; D ← R9[15:8]
+    stxi                      ; byte 1
+    mov  r12, r9
     lsri r12, 8
     lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
+    glo  r12                  ; D ← R9[23:16]
+    stxi                      ; byte 2
+    ghi  r12                  ; D ← R9[31:24]
+    stxi                      ; byte 3
     lsri r12, 8
     lsri r12, 8
-    lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
-    lsri r12, 8
-    lsri r12, 8
+    glo  r12                  ; D ← R9[39:32]
+    stxi                      ; byte 4
+    ghi  r12                  ; D ← R9[47:40]
+    stxi                      ; byte 5
     lsri r12, 8
     lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    st.b r0, r12
-    inc r0
-    mov r12, r9
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    lsri r12, 8
-    st.b r0, r12
-    inc r0
+    glo  r12                  ; D ← R9[55:48]
+    stxi                      ; byte 6
+    ghi  r12                  ; D ← R9[63:56]
+    stxi                      ; byte 7
     ; subi r14, 8: 67 E0 08
     ldi r12, 0x67
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ldi r12, 0xE0
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ldi r12, 0x08
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ; str r14, r1: 54 E1
     ldi r12, 0x54
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ldi r12, 0xE1
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
     ; ret.l: 0E
     ldi r12, 0x0E
-    st.b r0, r12
-    inc r0
+    glo r12
+    stxi
 
     ; DOES> slot: 13 bytes of zero padding (will be patched by DOES>)
     ldi r12, 0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
-    st.b r0, r12
-    inc r0
+    glo r12                   ; D ← 0
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    stxi
+    sex  r2                   ; restore XSEL
 
     ; Update HERE (points to data field)
     ldi64 r11, var_here
@@ -5289,15 +5204,17 @@ w_cmove:
     addi r14, 8
     cmpi r12, 0
     breq w_cmove_done
+    sex r7                    ; R(X) = destination
 w_cmove_loop:
-    ld.b r1, r9
-    st.b r7, r1
+    ld.b r1, r9               ; load from source
+    glo r1                    ; D ← byte
+    stxi                      ; M(R7) ← D; R7++
     inc r9
-    inc r7
     dec r12
     cmpi r12, 0
     brne w_cmove_loop
 w_cmove_done:
+    sex r2                    ; restore XSEL
     ret.l
 
 ; -ROT ( a b c -- c a b )
@@ -5457,89 +5374,63 @@ w_var_name_done:
 
     ; Save R0 (code start), emit ldi64 r1 for data addr
     ; ldi64 r1: 0xF0 0x60 0x10
+    sex  r0                   ; R(X) = HERE for STXI chain
     ldi r7, 0xF0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x60
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x10
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     mov r9, r0                ; save imm offset for reloc tracking
-    ; 8 bytes of data_addr (R1) LE
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    ; 8 bytes of data_addr (R1) via GLO/GHI
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
+    stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
+    stxi                      ; byte 5
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
+    glo  r7                   ; D ← R1[55:48]
+    stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
+    stxi                      ; byte 7
     ; subi r14, 8: 0x67 0xE0 0x08
     ldi r7, 0x67
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x08
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; str r14, r1: 0x54 0xE1
     ldi r7, 0x54
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE1
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; ret.l: 0x0E
     ldi r7, 0x0E
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
+    sex  r2                   ; restore XSEL
     ; Now R0 = data cell address. Initialize to 0.
     ldi r1, 0
     str r0, r1
@@ -5939,23 +5830,20 @@ w_disk_sec_store:
     ldn r1, r14
     addi r14, 8
     ldi64 r11, 0xFFFF_FF00_0000_0202
-    ; Write 4 bytes LE
-    mov r7, r1
-    st.b r11, r7
-    inc r11
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
+    ; Write 4 bytes LE via STXI
+    sex  r11                  ; R(X) = disk MMIO offset
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
+    sex  r2                   ; restore XSEL
     ret.l
 
 ; DISK-DMA! ( addr -- )  set DMA address (64-bit)
@@ -5963,34 +5851,27 @@ w_disk_dma_store:
     ldn r1, r14
     addi r14, 8
     ldi64 r11, 0xFFFF_FF00_0000_0206
-    ; Write 8 bytes LE
-    mov r7, r1
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
+    ; Write 8 bytes LE via STXI
+    sex  r11                  ; R(X) = disk MMIO offset
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    st.b r11, r7
-    inc r11
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r11, r7
-    inc r11
-    ; Upper 4 bytes = 0 (we're in normal RAM, not MMIO)
-    ldi r7, 0
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
-    inc r11
-    st.b r11, r7
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
+    ; Upper 4 bytes = 0
+    ldi  r7, 0
+    glo  r7                   ; D ← 0
+    stxi                      ; byte 4
+    stxi                      ; byte 5
+    stxi                      ; byte 6
+    stxi                      ; byte 7
+    sex  r2                   ; restore XSEL
     ret.l
 
 ; DISK-N! ( count -- )  set sector count
@@ -6859,22 +6740,19 @@ w_lstore:
     addi r14, 8
     ldn r7, r14               ; value
     addi r14, 8
-    st.b r1, r7               ; byte 0
-    mov r0, r7
-    lsri r0, 8
-    inc r1
-    st.b r1, r0               ; byte 1
-    mov r0, r7
-    lsri r0, 8
-    lsri r0, 8
-    inc r1
-    st.b r1, r0               ; byte 2
-    mov r0, r7
+    sex  r1                   ; R(X) = addr for STXI chain
+    glo  r7                   ; D ← R7[7:0]
+    stxi                      ; byte 0
+    ghi  r7                   ; D ← R7[15:8]
+    stxi                      ; byte 1
+    mov  r0, r7
     lsri r0, 8
     lsri r0, 8
-    lsri r0, 8
-    inc r1
-    st.b r1, r0               ; byte 3
+    glo  r0                   ; D ← R7[23:16]
+    stxi                      ; byte 2
+    ghi  r0                   ; D ← R7[31:24]
+    stxi                      ; byte 3
+    sex  r2                   ; restore XSEL
     ret.l
 
 ; .ZSTR ( addr -- ) print null-terminated string
@@ -7294,24 +7172,29 @@ w_move:
     mov r1, r7
     add r1, r12
     dec r1                    ; dst end
+    sex r1                    ; R(X) = destination (descending)
 w_move_bwd:
-    ld.b r11, r0
-    st.b r1, r11
+    ld.b r11, r0              ; load from source end
+    glo r11                   ; D ← byte
+    stxd.d                    ; M(R1) ← D; R1--
     dec r0
-    dec r1
     dec r12
     cmpi r12, 0
     brne w_move_bwd
+    sex r2                    ; restore XSEL
     ret.l
 w_move_fwd:
-    ld.b r11, r9
-    st.b r7, r11
+    sex r7                    ; R(X) = destination (ascending)
+w_move_fwd_loop:
+    ld.b r11, r9              ; load from source
+    glo r11                   ; D ← byte
+    stxi                      ; M(R7) ← D; R7++
     inc r9
-    inc r7
     dec r12
     cmpi r12, 0
-    brne w_move_fwd
+    brne w_move_fwd_loop
 w_move_done:
+    sex r2                    ; restore XSEL
     ret.l
 
 ; WITHIN ( n lo hi -- flag ) ANS: true if (n-lo) u< (hi-lo)
@@ -7690,95 +7573,69 @@ w_val_name_done:
     addi r1, 19
 
     ; ldi64 r1, <data_addr>: F0 60 10 + 8 bytes LE
+    sex  r0                   ; R(X) = HERE for STXI chain
     ldi r7, 0xF0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x60
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x10
-    st.b r0, r7
-    inc r0
-    ; 8 bytes of data_addr (R1) LE
-    st.b r0, r1
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo r7
+    stxi
+    ; 8 bytes of data_addr (R1) via GLO/GHI
+    glo  r1                   ; D ← R1[7:0]
+    stxi                      ; byte 0
+    ghi  r1                   ; D ← R1[15:8]
+    stxi                      ; byte 1
+    mov  r7, r1
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
+    glo  r7                   ; D ← R1[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R1[31:24]
+    stxi                      ; byte 3
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
+    stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
+    stxi                      ; byte 5
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r1
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
+    glo  r7                   ; D ← R1[55:48]
+    stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
+    stxi                      ; byte 7
     ; ldn r1, r1: 50 11
     ldi r7, 0x50
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x11
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; subi r14, 8: 67 E0 08
     ldi r7, 0x67
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x08
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; str r14, r1: 54 E1
     ldi r7, 0x54
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xE1
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; ret.l: 0E
     ldi r7, 0x0E
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
+    sex  r2                   ; restore XSEL
     ; Now R0 = data cell address. Initialize to x (R10).
     str r0, r10
     addi r0, 8
@@ -8578,77 +8435,52 @@ does_runtime:
     ; offset 16: ldi64 r11, <does_body> = F0 60 B0 + 8 bytes LE
     mov r0, r9
     addi r0, 16
+    sex  r0                   ; R(X) = patch destination for STXI chain
     ldi r7, 0xF0
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x60
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0xB0
-    st.b r0, r7
-    inc r0
-    ; 8 bytes of does_body addr (R13) LE
-    st.b r0, r13
-    inc r0
-    mov r7, r13
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
+    glo r7
+    stxi
+    ; 8 bytes of does_body addr (R13) via GLO/GHI
+    glo  r13                  ; D ← R13[7:0]
+    stxi                      ; byte 0
+    ghi  r13                  ; D ← R13[15:8]
+    stxi                      ; byte 1
+    mov  r7, r13
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
+    glo  r7                   ; D ← R13[23:16]
+    stxi                      ; byte 2
+    ghi  r7                   ; D ← R13[31:24]
+    stxi                      ; byte 3
     lsri r7, 8
     lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
-    lsri r7, 8
-    lsri r7, 8
+    glo  r7                   ; D ← R13[39:32]
+    stxi                      ; byte 4
+    ghi  r7                   ; D ← R13[47:40]
+    stxi                      ; byte 5
     lsri r7, 8
     lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
-    mov r7, r13
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    lsri r7, 8
-    st.b r0, r7
-    inc r0
+    glo  r7                   ; D ← R13[55:48]
+    stxi                      ; byte 6
+    ghi  r7                   ; D ← R13[63:56]
+    stxi                      ; byte 7
     ; call.l r11: 0D 0B
     ldi r7, 0x0D
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ldi r7, 0x0B
-    st.b r0, r7
-    inc r0
+    glo r7
+    stxi
     ; ret.l: 0E
     ldi r7, 0x0E
-    st.b r0, r7
+    glo r7
+    stxi
+    sex  r2                   ; restore XSEL
 
     ; --- reloc tracking: immediate is at code_start + 19 ---
     mov r1, r9
