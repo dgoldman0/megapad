@@ -1946,6 +1946,106 @@ class TestBIOS(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    # -- Phase 8: Cooperative multitasking (PAUSE/YIELD/BACKGROUND) --
+
+    def test_task_status_no_task(self):
+        """TASK? returns 0 when no background task is running."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, ["TASK? ."])
+        self.assertIn("0 ", text)
+
+    def test_pause_noop_without_task(self):
+        """PAUSE is a silent no-op when no background task exists."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "PAUSE",
+            ".\" ok-pause\"",
+        ])
+        self.assertIn("ok-pause", text)
+
+    def test_background_oneshot(self):
+        """BACKGROUND runs a one-shot word that returns, then TASK? → 0."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE result",
+            ": BG-WORK  42 result ! ;",
+            "' BG-WORK BACKGROUND",
+            "TASK? .",
+            "PAUSE",
+            "TASK? .",
+            "result @ .",
+        ])
+        # Before PAUSE: task is queued (TASK? → 1)
+        # After PAUSE: task ran and returned (cleanup sentinel fires),
+        # TASK? → 0, result = 42
+        self.assertIn("1 ", text)   # TASK? before PAUSE
+        self.assertIn("0 ", text)   # TASK? after PAUSE
+        self.assertIn("42 ", text)  # result from BG-WORK
+
+    def test_background_yield_roundtrip(self):
+        """YIELD in background task correctly suspends and resumes."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE bg-counter",
+            ": BG-LOOP  0 bg-counter !  5 0 DO  bg-counter @ 1 + bg-counter !  YIELD  LOOP ;",
+            "' BG-LOOP BACKGROUND",
+            "6 0 DO PAUSE LOOP",
+            "bg-counter @ .",
+        ])
+        # BG-LOOP increments counter 5 times, yielding after each.
+        # 6 PAUSEs ensure all 5 iterations complete + 1 extra (nop after task exits).
+        self.assertIn("5 ", text)
+
+    def test_task_stop_cancels_task(self):
+        """TASK-STOP prevents further execution of background task."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE bg-count",
+            ": BG-INF  BEGIN  bg-count @ 1 + bg-count !  YIELD  AGAIN ;",
+            "' BG-INF BACKGROUND",
+            "PAUSE",
+            "PAUSE",
+            "TASK-STOP",
+            "TASK? .",
+            "bg-count @ .",
+        ])
+        # After 2 PAUSEs, counter = 2. TASK-STOP kills it.
+        self.assertIn("0 ", text)   # TASK? after TASK-STOP
+        self.assertIn("2 ", text)   # bg-count
+
+    def test_pause_preserves_data_stack(self):
+        """PAUSE does not corrupt the foreground data stack."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": BG-NOP  YIELD ;",
+            "' BG-NOP BACKGROUND",
+            "111 222 333",
+            "PAUSE",
+            ". . .",
+        ])
+        # Stack should be: 333 222 111 (printed in LIFO order by .)
+        self.assertIn("333 ", text)
+        self.assertIn("222 ", text)
+        self.assertIn("111 ", text)
+
+    def test_background_replaces_existing(self):
+        """Starting a new BACKGROUND replaces any running task."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE r1  VARIABLE r2",
+            ": BG1  BEGIN  r1 @ 1 + r1 !  YIELD  AGAIN ;",
+            ": BG2  BEGIN  r2 @ 1 + r2 !  YIELD  AGAIN ;",
+            "' BG1 BACKGROUND",
+            "PAUSE PAUSE",
+            "' BG2 BACKGROUND",
+            "PAUSE PAUSE",
+            "TASK-STOP",
+            "r1 @ .",
+            "r2 @ .",
+        ])
+        # BG1 runs for 2 PAUSEs → r1=2.  Then BG2 replaces it for 2 more → r2=2.
+        self.assertIn("2 ", text)
+
     # -- Timer words --
 
     def test_timer_store(self):
