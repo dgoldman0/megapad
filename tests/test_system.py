@@ -2690,6 +2690,33 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("1 ", text)
 
+    def test_compare_shorter_prefix(self):
+        """COMPARE with s1 shorter but equal prefix → -1."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" AB" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_compare_longer_prefix(self):
+        """COMPARE with s1 longer but equal prefix → 1."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" ABCD" S" ABC" COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("1 ", text)
+
+    def test_compare_empty(self):
+        """COMPARE two empty strings → 0."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': TEST  S" " S" " COMPARE . ;',
+            'TEST'
+        ])
+        self.assertIn("0 ", text)
+
     def test_char(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ["CHAR A ."])

@@ -7488,38 +7488,36 @@ w_eval_depth_err:
 w_compare:
     ldn r12, r14              ; u2
     addi r14, 8
-    ldn r7, r14               ; addr2
+    ldn r7, r14               ; addr2 → Rs
     addi r14, 8
     ldn r13, r14              ; u1
     addi r14, 8
-    ldn r9, r14               ; addr1
-    ; R9=addr1, R13=u1, R7=addr2, R12=u2
-    ldi r0, 0                 ; index
-w_cmp_loop:
-    cmp r0, r13
-    breq w_cmp_s1end
-    cmp r0, r12
-    breq w_cmp_s2end
-    mov r1, r9
-    add r1, r0
-    ld.b r1, r1               ; s1[i]
-    mov r11, r7
-    add r11, r0
-    ld.b r11, r11             ; s2[i]
-    cmp r1, r11
-    brcc w_cmp_lt              ; C=0 -> s1[i] < s2[i] unsigned
-    brgt w_cmp_gt              ; G=1 -> s1[i] > s2[i] unsigned
-    inc r0
-    br w_cmp_loop
-w_cmp_s1end:
-    cmp r0, r12
+    ldn r9, r14               ; addr1 → Rd
+    ; R9=addr1 (Rd), R7=addr2 (Rs), R13=u1, R12=u2
+    ; min(u1, u2) → R0
+    cmp r13, r12
+    brgt w_cmp_u2min
+    mov r0, r13               ; u1 <= u2 → min = u1
+    br w_cmp_do
+w_cmp_u2min:
+    mov r0, r12               ; u1 > u2 → min = u2
+w_cmp_do:
+    ; BCOMP: compare R0 bytes at Rd=R9 vs Rs=R7
+    bcomp r9, r7              ; EXT.STRING: block compare
+    brne w_cmp_mismatch        ; Z=0 → mismatch within prefix
+    ; Prefix equal — compare lengths
+    cmp r13, r12
     breq w_cmp_eq
+    brcc w_cmp_lt              ; C=0 → u1 < u2
+    br w_cmp_gt                ; u1 > u2
+w_cmp_mismatch:
+    ; G=1 → Rd[i] > Rs[i] → addr1[i] > addr2[i] → return 1
+    brgt w_cmp_gt
 w_cmp_lt:
     ldi r1, 0
     dec r1                    ; -1
     str r14, r1
     ret.l
-w_cmp_s2end:
 w_cmp_gt:
     ldi r1, 1
     str r14, r1
