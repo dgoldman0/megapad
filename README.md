@@ -20,8 +20,13 @@ on-disk documentation, and explore a 7-screen TUI dashboard — all
 interactively.
 
 ---
+## Status
 
-## Current Status: v1.0 (Multicore + PQC)
+Assume everything is rough draft, both in this project and in the megapad project. 
+
+Feel free top drop by and discuss this project in the Tinkerers Guild channel of the Barayin-Adamah server: https://discord.gg/AnrXxhs3b2
+
+## Current Version (ish): v1.0 (Multicore + PQC)
 
 | Component | Stats |
 |-----------|-------|
