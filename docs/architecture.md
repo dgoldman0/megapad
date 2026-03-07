@@ -581,10 +581,11 @@ the correct default for pre-privilege firmware.
 ### JIT Compiler
 
 The BIOS Forth compiler includes an optional **compile-time JIT** that
-replaces `call.l` / `ret.l` pairs with inlined native machine code for
-18 common primitives.  This is a *code-size* and *runtime* optimisation:
-each inlined primitive saves the 13-byte call overhead and eliminates
-the call/ret cycle cost at execution time.
+replaces `sep r16` + inline-XT call sequences with inlined native
+machine code for 18 common primitives.  This is a *code-size* and
+*runtime* optimisation: each inlined primitive saves the 10-byte STC
+call overhead and eliminates the call/return cycle cost at execution
+time.
 
 Beyond simple primitive inlining, the JIT performs two additional
 optimisations via a one-entry peephole lookback buffer:

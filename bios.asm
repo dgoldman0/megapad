@@ -85,6 +85,13 @@ boot:
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
 
+    ; Phase 3: JIT NEXT/EXIT dispatch registers
+    ; (ldi64 can't target R16+ — EXT prefix conflict; use mov)
+    ldi64 r11, forth_next
+    mov   r16, r11
+    ldi64 r11, forth_exit
+    mov   r17, r11
+
     ; Enable timer
     ldi64 r11, 0xFFFF_FF00_0000_0108
     ldi r1, 0x01
@@ -2437,27 +2444,58 @@ w_to_body:
 ;  Compilation Helpers
 ; =====================================================================
 
-; compile_call: emit "ldi64 r11, <addr>; call.l r11" at HERE.
-;   R1 = target address.  Advances HERE by 13 bytes.
-;   ldi64 r11,val = 0xF0 0x60 0xB0 <8 bytes LE>  = 11 bytes
-;   call.l r11    = 0x0D 0x0B                      = 2 bytes
+; =====================================================================
+;  Phase 3 — SEP NEXT/EXIT Dispatch Handlers (R16, R17)
+; =====================================================================
+;  R16 = NEXT: dispatch a JIT-compiled call via inline XT
+;  R17 = EXIT: return from a JIT-compiled word via RSP pop
+;
+;  Compiled call site (10 bytes):   sep r16 (F4 A0) + 8-byte LE XT
+;  Compiled return (2 bytes):       sep r17 (F4 A1)
+;
+;  When sep r16 executes, R3 freezes at the byte after the 2-byte
+;  instruction — i.e. the first byte of the inline 8-byte XT.
+;  NEXT reads the XT, advances R3 past it (return address), pushes
+;  R3 onto RSP, then dispatches to the target via sep r3.
+;
+;  EXIT pops RSP into R3 and does sep r3 to resume the caller.
+;
+;  Both handlers end with a `br` trampoline so subsequent sep r16/r17
+;  invocations re-enter correctly (R16/R17 freeze at the br).
+; =====================================================================
+
+forth_next:                           ; R16 is PC here
+    ldn  r11, r3                      ; fetch 8-byte XT from R3
+    addi r3, 8                        ; advance R3 past the inline XT
+    subi r15, 8
+    str  r15, r3                      ; push return address onto RSP
+    mov  r3, r11                      ; R3 ← target word code
+    sep  r3                           ; dispatch to target
+    br   forth_next                   ; re-entry trampoline
+
+forth_exit:                           ; R17 is PC here
+    ldn  r3, r15                      ; pop return address from RSP
+    addi r15, 8
+    sep  r3                           ; resume caller
+    br   forth_exit                   ; re-entry trampoline
+
+; compile_call: emit "sep r16; <XT>" at HERE  (Phase 3 hybrid STC).
+;   R1 = target address.  Advances HERE by 10 bytes.
+;   sep r16       = 0xF4 0xA0                      = 2 bytes (REX + SEP)
+;   <8 bytes LE>  = inline XT                       = 8 bytes
 compile_call:
     ldi64 r11, var_here
     ldn r0, r11               ; R0 = HERE
     sex r0                    ; R(X) = HERE for STXI chain
-    ; EXT prefix: 0xF0
-    ldi r7, 0xF0
+    ; REX prefix for R16: 0xF4
+    ldi r7, 0xF4
     glo r7
     stxi
-    ; LDI opcode: 0x60
-    ldi r7, 0x60
+    ; SEP opcode, lower nibble 0 (R16 & 0xF): 0xA0
+    ldi r7, 0xA0
     glo r7
     stxi
-    ; Register byte: 0xB0 (r11 << 4)
-    ldi r7, 0xB0
-    glo r7
-    stxi
-    ; 8 bytes of address (little-endian) via GLO/GHI
+    ; 8 bytes of target address (little-endian) via GLO/GHI
     glo  r1                   ; D ← R1[7:0]
     stxi                      ; byte 0
     ghi  r1                   ; D ← R1[15:8]
@@ -2481,20 +2519,13 @@ compile_call:
     stxi                      ; byte 6
     ghi  r7                   ; D ← R1[63:56]
     stxi                      ; byte 7
-    ; CALL.L r11: 0x0D 0x0B
-    ldi r7, 0x0D
-    glo r7
-    stxi
-    ldi r7, 0x0B
-    glo r7
-    stxi
     sex r2                    ; restore XSEL
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
-    ; --- reloc tracking: immediate offset = old_HERE + 3 = R0 - 10 ---
+    ; --- reloc tracking: immediate offset = old_HERE + 2 = R0 - 8 ---
     mov r1, r0
-    subi r1, 10
+    subi r1, 8
     ldi64 r11, reloc_record
     call.l r11
     ret.l
@@ -2598,13 +2629,20 @@ compile_byte:
     str r11, r0
     ret.l
 
-; compile_ret: emit ret.l (0x0E) at HERE.
+; compile_ret: emit sep r17 (F4 A1) at HERE  (Phase 3 EXIT dispatch).
+;   Advances HERE by 2 bytes.
 compile_ret:
-    ldi r1, 0x0E
     ldi64 r11, var_here
     ldn r0, r11
-    st.b r0, r1
-    inc r0
+    sex r0                    ; R(X) = HERE for STXI chain
+    ldi r7, 0xF4
+    glo r7
+    stxi                      ; REX prefix
+    ldi r7, 0xA1
+    glo r7
+    stxi                      ; SEP R17
+    sex r2                    ; restore XSEL
+    ldi64 r11, var_here
     str r11, r0
     ret.l
 
@@ -2613,7 +2651,7 @@ compile_ret:
 ; =====================================================================
 ;  When JIT is enabled (var_jit_enabled = 1), the compiler:
 ;    1. Inlines small primitives (DUP, DROP, +, @, etc.) instead of
-;       emitting a 13-byte ldi64+call.l sequence per word reference.
+;       emitting a 10-byte sep-r16+XT sequence per word reference.
 ;    2. Uses compact literal encodings for values 0–255 (8 bytes
 ;       instead of 16) and TRUE/-1 (9 bytes instead of 16).
 ;
@@ -2743,13 +2781,13 @@ jit_bg_found:
     addi r13, 1                   ; R13 → fused body bytes
     ; Compute bytes_saved adjustment:
     ;   prev emitted = current_HERE - last_here
-    ;   adjustment = 13 + prev_emitted - fused_body
+    ;   adjustment = 10 + prev_emitted - fused_body
     ldi64 r11, var_here
     ldn r7, r11                   ; R7 = current HERE
     ldi64 r11, var_jit_last_here
     ldn r0, r11                   ; R0 = rewound HERE (pre-prev)
     sub r7, r0                    ; R7 = prev body size
-    addi r7, 13                   ; + 13 (compile_call for current)
+    addi r7, 10                   ; + 10 (compile_call for current)
     sub r7, r12                   ; - fused body size
     ldi64 r11, var_jit_bytes_saved
     ldn r1, r11
@@ -2852,8 +2890,8 @@ jit_cw_done:
     ldn r1, r11
     inc r1
     str r11, r1
-    ; bytes_saved += (13 - body_length)
-    ldi r1, 13
+    ; bytes_saved += (10 - body_length)  [Phase 3: compile_call = 10]
+    ldi r1, 10
     sub r1, r12
     ldi64 r11, var_jit_bytes_saved
     ldn r0, r11
@@ -2921,10 +2959,11 @@ jit_emit_lit_fold:
     ; Update HERE
     ldi64 r11, var_here
     str r11, r0
-    ; bytes_saved: compact lit saved 8, fold total saves 29-7=22, net +14
+    ; bytes_saved: compact lit saved 8, fold total saves 26-7=19, net +11
+    ;   (Phase 3: no-JIT = compile_literal(16) + compile_call(10) = 26)
     ldi64 r11, var_jit_bytes_saved
     ldn r0, r11
-    addi r0, 14
+    addi r0, 11
     str r11, r0
     ; Stats: folds++
     ldi64 r11, var_jit_folds
@@ -8409,8 +8448,9 @@ w_does:
 
 ; does_runtime: runtime helper for DOES>
 ;   Called when the defining word executes. The return address on RSP points
-;   to the byte after "call does_runtime", which is a ret.l. So:
-;     does_body = return_addr + 1
+;   to the byte after the compile_call to does_runtime, which is the
+;   compile_ret bytes (sep r17 = F4 A1, 2 bytes).  So:
+;     does_body = return_addr + 2
 ;   Patches LATEST (the most recently CREATEd word) trampoline at offset 16.
 ; --- dictionary header so binimg can resolve compile_call references ---
 latest_entry:
@@ -8421,9 +8461,9 @@ d_does_runtime:
 does_runtime:
     ; Get return address from RSP (the call.l pushed it)
     ldn r10, r15              ; R10 = return address (points to ret.l)
-    ; does_body = R10 + 1 (skip the ret.l)
+    ; does_body = R10 + 2 (skip the sep r17 = F4 A1, Phase 3)
     mov r13, r10
-    addi r13, 1               ; R13 = does_body address
+    addi r13, 2               ; R13 = does_body address
 
     ; Get LATEST entry → code addr
     ldi64 r11, var_latest
@@ -9105,9 +9145,15 @@ w_fb_setup:
 ; 4-task round-robin cooperative multitasking using SEP R20.
 ;
 ; Task 0 (R3) is the REPL — always active.  Tasks 1–3 are background
-; slots.  R20 is the dedicated SEP trampoline register: PAUSE loads
-; the next active task's PC into R20 from var_task_pcs[], then SEP R20.
-; Any background task yields back via SEP R3 (which freezes R20).
+; slots.  All tasks run with PSEL=3 (so the NEXT handler R16 can read
+; inline XTs from R3).  R20 is the yield handler register: background
+; tasks do SEP R20 to yield, which freezes R3 (task continuation) and
+; jumps to the yield handler in PAUSE.
+;
+; PAUSE dispatches a task by overwriting R3 (the active PC) with the
+; task's saved continuation: "mov r3, r1" is an unconditional jump
+; that keeps PSEL=3.  The yield handler (pause_yield_handler) saves
+; the frozen R3 as the task's continuation and restores Task 0.
 ;
 ; R20 is a REX-extended register (R16-R31) chosen specifically to avoid
 ; conflicts with R13 and other low registers used as scratch throughout
@@ -9141,8 +9187,8 @@ w_pause:
     mov r1, r7
     lsli r1, 3
     add r11, r1
-    ldn r20, r11                ; r20 = task_pcs[r7]
-    cmpi r20, 0
+    ldn r1, r11                 ; r1 = task_pcs[r7]
+    cmpi r1, 0
     brne .pause_found           ; found an active task
     subi r12, 1
     cmpi r12, 0
@@ -9176,13 +9222,26 @@ w_pause:
     add r11, r1
     ldn r15, r11
 
-    ; ---- SEP switch: 1 cycle, 0 memory ----
-    sep  r20                    ; target task runs; R3 freezes
+    ; ---- Phase 3: Dispatch via R3 so NEXT handler (R16) works ----
+    ; Set R20 = yield handler (task yields back via sep r20)
+    ldi64 r11, pause_yield_handler
+    mov r20, r11
+    ; Re-load task PC into R1
+    ldi64 r11, var_task_pcs
+    mov r1, r7
+    lsli r1, 3
+    add r11, r1
+    ldn r1, r11                 ; R1 = task's saved continuation
+    ; Jump: overwrite R3 (the active PC, PSEL=3).
+    ; Next instruction fetched is from the task's code.
+    mov r3, r1
+    ; (unreachable — execution transferred to task)
 
-    ; ---- Back from task (it did SEP R3) ----
-    ; Reload task index (we're back in Task 0 context now)
+; ---- Yield handler: task did "sep r20", R3 frozen = task continuation ----
+pause_yield_handler:
+    ; Reload task index
     ldi64 r11, var_task_index
-    ldn r7, r11                 ; r7 = the task that just yielded
+    ldn r7, r11
 
     ; Check if cleanup already zeroed the task's PC
     ldi64 r11, var_task_pcs
@@ -9193,8 +9252,8 @@ w_pause:
     cmpi r1, 0
     breq .pause_task_done
     ; Task is still active — save its full context
-    ; PC: R20 = frozen continuation
-    str r11, r20                ; var_task_pcs[r7] = R20
+    ; PC: R3 = frozen continuation (task ran with PSEL=3)
+    str r11, r3                 ; var_task_pcs[r7] = R3
     ; DSP
     ldi64 r11, var_task_dsps
     mov r1, r7
@@ -9214,14 +9273,18 @@ w_pause:
     ldn r15, r11
     ldn r14, r15              ; pop saved DSP
     addi r15, 8
-    ret.l
+    ; Pop Task 0's return address into R3 and resume (PSEL ← 3)
+    ldn r3, r15
+    addi r15, 8
+    sep r3                    ; PSEL←3, R20 freezes, Task 0 resumes
+    br pause_yield_handler    ; re-entry trampoline
 
 ; TASK-YIELD ( -- )  yield from any background task back to Task 0
-;   Called by Tasks 1–3 via call.l (dictionary dispatch).  The SEP R3
-;   freezes R20 at the ret.l; next PAUSE resumes there, ret.l returns
-;   to the caller inside the background task.
+;   Called by Tasks 1–3 via call.l (dictionary dispatch).  The SEP R20
+;   freezes R3 at the ret.l; next PAUSE resumes there (via mov r3),
+;   ret.l returns to the caller inside the background task.
 w_task_yield:
-    sep  r3                     ; yield to Task 0 (R20 freezes at ret.l)
+    sep  r20                    ; yield to PAUSE handler (R3 freezes at ret.l)
     ret.l                       ; resumes here on next PAUSE; returns to caller
 
 ; task_setup_slot: shared helper — set up a background task in slot r7
@@ -9321,7 +9384,7 @@ task_cleanup:
     add r11, r1
     ldi r1, 0
     str r11, r1
-    sep  r3                     ; final yield back to Task 0
+    sep  r20                    ; final yield back to PAUSE handler
     br   task_cleanup           ; unreachable but safe re-entry
 
 ; TASK-STOP ( n -- )  cancel background task in slot n (1–3)
@@ -9423,6 +9486,12 @@ secondary_core_entry:
     ldi64 r4, emit_char
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
+
+    ; Phase 3: JIT NEXT/EXIT dispatch registers
+    ldi64 r11, forth_next
+    mov   r16, r11
+    ldi64 r11, forth_exit
+    mov   r17, r11
 
     ; ---- Install IVT (same table as core 0 — shared) ----
     ldi64 r0, ivt_table
@@ -14541,8 +14610,8 @@ var_reloc_buf:
 
 ; Cooperative multitasking state  [Phase 8]
 ; 4-task model: Task 0 = REPL (R3), Tasks 1–3 = background slots.
-; R13 is reused as the SEP trampoline register for all background tasks.
-; PAUSE loads the next active task's PC into R13, then SEP R13.
+; All tasks run with PSEL=3 (required by Phase 3 NEXT handler).
+; PAUSE dispatches via "mov r3, <task_pc>" and tasks yield via "sep r20".
 var_task_index:
     .dq 0                             ; current task index (0–3)
 ; Task PC array — slot 0 is unused (Task 0 = R3, always active)

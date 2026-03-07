@@ -318,7 +318,9 @@ buffer), then tokenises and interprets:
 | R13 | Scratch / temp |
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
-| R20 | Task trampoline PC (cooperative multitasking; `SEP R20` switches) |
+| R16 | NEXT handler (`sep r16` = fetch inline XT, advance IP, branch) |
+| R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
+| R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
 ### Built-in words (363)
 

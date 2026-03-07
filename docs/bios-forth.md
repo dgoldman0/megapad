@@ -773,7 +773,7 @@ return stacks.
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `PAUSE` | `( -- )` | Round-robin yield across all 4 task slots via `SEP R20`. |
-| `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R3`. |
+| `TASK-YIELD` | `( -- )` | Yield from the current background task back to Task 0 via `SEP R20`. |
 | `BACKGROUND` | `( xt -- )` | Set xt as the Task 1 body and start it running. |
 | `TASK-STOP` | `( n -- )` | Stop background task in slot n (1–3), reset to idle. |
 | `TASK?` | `( n -- flag )` | Return 0 if task slot n (1–3) is idle, 1 if running. |

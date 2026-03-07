@@ -219,10 +219,13 @@ gain.
 
 ---
 
-### Phase 3 — Hybrid STC with SEP NEXT/EXIT (Option B) ⏳ PENDING
+### Phase 3 — Hybrid STC with SEP NEXT/EXIT (Option B) ✅ DONE
 
-> **Status:** Design finalised.  Awaiting extended register file
-> (R16–R31) from ISA team and emulator support before implementation.
+> **Status:** Implemented.  compile_call emits 10 bytes (sep r16 + XT),
+> compile_ret emits 2 bytes (sep r17).  R16 = NEXT handler, R17 = EXIT
+> handler.  Both initialised at boot for core 0 and secondary cores.
+> JIT inline table, peephole, and bigram fusion untouched.
+> bytes_saved baseline recalibrated from 13 → 10.
 >
 > **History:** Originally deferred because the only free register (R7)
 > would have to serve as both NEXT (call dispatch) and EXIT (return
@@ -313,13 +316,15 @@ A0 11                         ; sep r17              (1 byte, was ret.l = 1 byte
 | Boot init | — | `ldi64 r16, forth_next; ldi64 r17, forth_exit` |
 | Secondary cores | — | Same R16/R17 init (per-core register file, no interference) |
 
-> **Encoding note:** If `sep r16` is a 2-byte instruction (0xA0 +
-> extended register nibble), then `compile_ret` emitting `sep r17` is
-> also 2 bytes — a +1 byte regression vs `ret.l`.  Confirm the ISA
-> encoding for extended registers before implementation.  If `sep` in
-> the extended range is 2 bytes, the return overhead is 2 bytes instead
-> of 1, and the call overhead is 10 bytes instead of 9.  The savings
-> per call drop from 4 to 3 bytes — still worthwhile.
+> **Encoding note:** `sep r16` is 2 bytes (REX 0xF4 + 0xA0).
+> `compile_ret` emitting `sep r17` is also 2 bytes — a +1 byte
+> regression vs `ret.l`.  Call overhead is 10 bytes, savings = 3
+> bytes/call — still worthwhile.  Confirmed in implementation.
+>
+> **ldi64 limitation:** `ldi64` already uses the 0xF0 EXT prefix for
+> its own encoding, so `ldi64 r16, ...` is unrepresentable (double
+> prefix conflict).  Boot init uses `ldi64 r11, addr; mov r16, r11`
+> instead — 2 extra instructions, executed once at boot.
 
 #### Savings analysis
 
@@ -1016,7 +1021,7 @@ full 1802 restoration leads.
 | **0** | Audit + test harness | 1 day | None | Foundation | ✅ Done |
 | **1** | R4/R5/R6 leaf SEP | 2 hours | Low | Medium — proves concept, removes stack traffic for leaf I/O | ✅ Done |
 | **2** | `print_str` coroutine | 4 hours | Medium | Low — high churn, modest gain | ⏭ Skip |
-| **3** | Hybrid STC: SEP NEXT/EXIT (R16/R17) | 2 days | Medium | High — 3–4 bytes/call, dispatch hooks for tracing/profiling | ⏳ Pending — awaiting extended register file (R16–R31) |
+| **3** | Hybrid STC: SEP NEXT/EXIT (R16/R17) | 2 days | Medium | High — 3 bytes/call saved, dispatch hooks for tracing/profiling | ✅ Done |
 | **4** | Q semaphore | 30 min | None | Niche — useful for multicore debug | ✅ Done |
 | **5** | Secondary core SEP | 1 hour | Low | Medium — smaller stack zones | ✅ Done |
 | **6** | Full SCRT | 3 days | High | Low unless 1802 compat is a goal | ⏭ Skip |
@@ -1025,17 +1030,19 @@ full 1802 restoration leads.
 | **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional | ✅ Done |
 | **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains | ☐ Not started |
 
-**Completed:** Phases 0, 1, 4, 5, 7, 8, 9 — all done and tested.
-The SEP dispatch infrastructure, Q semaphore, STXI byte processing,
-cooperative multitasking, and fault diagnostics are all in production.
+**Completed:** Phases 0, 1, 3, 4, 5, 7, 8, 9 — all done and tested.
+The SEP dispatch infrastructure, Q semaphore, hybrid STC JIT (R16/R17),
+STXI byte processing, cooperative multitasking, and fault diagnostics
+are all in production.
 
-**Pending:** Phase 3 (Hybrid STC with R16/R17) — Option B design
-finalised.  Pure ITC (Option A) was rejected as a net regression.
-The original R7-only approach was blocked by the NEXT/EXIT ambiguity
-problem (one register, two roles, no way to distinguish without a
-runtime flag).  The ISA team's extended register file (R16–R31)
-eliminates this: R16 = NEXT, R17 = EXIT, clean separation.
-Awaiting emulator + RTL support for R16–R31 before implementation.
+**Phase 3 details:** compile_call shrunk from 13 → 10 bytes
+(sep r16 + 8-byte inline XT).  compile_ret changed from 1 byte (ret.l)
+to 2 bytes (sep r17).  NEXT handler at R16 reads the inline XT,
+pushes the return address onto RSP, and dispatches via sep r3.
+EXIT handler at R17 pops RSP into R3 and resumes.  JIT inline table,
+peephole optimizer, and bigram fusion are completely unchanged.
+bytes_saved baseline recalibrated from 13 to 10.  does_runtime
+updated to skip 2-byte compile_ret.  All 1697 tests passing.
 
 **Skipped:** Phases 2, 6 — low value relative to churn.
 

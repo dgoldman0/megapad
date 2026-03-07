@@ -255,14 +255,14 @@ Each entry is a linked list node:
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 110 | `:` | `( "name" -- )` | | Begin colon definition: create header at HERE, set STATE=1 |
-| 111 | `;` | `( -- )` | ✓ | End definition: compile `ret.l`, set STATE=0 |
-| 112 | `EXIT` | `( -- )` | ✓ | Compile early return (`ret.l`) within a definition |
+| 111 | `;` | `( -- )` | ✓ | End definition: compile `sep r17` (EXIT handler), set STATE=0 |
+| 112 | `EXIT` | `( -- )` | ✓ | Compile early return (`sep r17`) within a definition |
 | 113 | `VARIABLE` | `( "name" -- )` | | Create word that pushes address of an 8-byte data cell (initialized to 0) |
 | 114 | `CONSTANT` | `( n "name" -- )` | | Create word that pushes n |
 | 115 | `VALUE` | `( x "name" -- )` | | Create word that pushes *contents* of its data cell (19-byte trampoline with `ldn` indirection) |
 | 116 | `TO` | `( x "name" -- )` | ✓ | Store x into VALUE's data cell. State-smart: interpret → store directly; compile → emit inline store code |
 | 117 | `CREATE` | `( "name" -- )` | | Create word with 30-byte trampoline (runtime pushes data-field addr). Includes 13-byte DOES> slot of zeroes |
-| 118 | `DOES>` | `( -- )` | ✓ | Compile `call does_runtime` + `ret.l`. At runtime, patches latest CREATE'd word's trampoline offset 16–29 with jump to DOES> body |
+| 118 | `DOES>` | `( -- )` | ✓ | Compile `call does_runtime` + `sep r17`. At runtime, patches latest CREATE'd word's trampoline offset 16–29 with jump to DOES> body |
 | 119 | `IMMEDIATE` | `( -- )` | | Set IMMEDIATE flag (bit 7 of flags byte) on most recent word |
 | 120 | `STATE` | `( -- addr )` | | Push address of STATE variable |
 | 121 | `[` | `( -- )` | ✓ | Switch to interpret mode (STATE=0) |
@@ -641,7 +641,7 @@ of compiled code.
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 308 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
-| 309 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R3` |
+| 309 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
 | 310 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
 | 311 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
 | 312 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
@@ -789,6 +789,6 @@ ram_size ↓             Return stack (R15 grows downward)
 | R13 | Scratch / temp |
 | R14 | **DSP** — Data stack pointer (grows downward) |
 | R15 | **RSP** — Return/call stack pointer (grows downward) |
-| R20 | Task trampoline PC (cooperative multitasking; `SEP R20` switches) |
-| R14 | **DSP** — Data stack pointer (grows downward) |
-| R15 | **RSP** — Return/call stack pointer (grows downward) |
+| R16 | **NEXT** handler (`sep r16` = fetch inline XT, advance IP, branch) |
+| R17 | **EXIT** handler (`sep r17` = pop return address from RSP, branch) |
+| R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |

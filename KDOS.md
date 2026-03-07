@@ -244,7 +244,7 @@ building higher-level features.
 |---|---|
 | **Return stack** | `>R` `R>` `R@` (IMMEDIATE — compile inline) |
 | **Loop** | `J` (outer index), `UNLOOP` (IMMEDIATE), `+LOOP` (IMMEDIATE) |
-| **Control** | `EXIT` (IMMEDIATE — compile ret.l), `AGAIN` (IMMEDIATE) |
+| **Control** | `EXIT` (IMMEDIATE — compile `sep r17`), `AGAIN` (IMMEDIATE) |
 | **Metaprogramming** | `STATE` `[` `]` `LITERAL` `IMMEDIATE` `CREATE` `S"` |
 | **Comparison** | `0>` `<>` `0<>` `?DUP` |
 | **Arithmetic** | `MIN` `MAX` `CELLS` `CELL+` `+!` `2*` |
@@ -428,7 +428,7 @@ primitives available today:
 * 16 × 64-bit general-purpose registers (R0–R15)
 * Full 16-family ISA: ALU, MEM, BRANCH, MULDIV, CSR, MEX (tile), etc.
 * Flags: Z, C, N, V, P, G, I, S
-* Subroutine calls via CALL.L / RET.L (return-stack based)
+* Subroutine calls via CALL.L / RET.L; compiled Forth uses SEP R16/R17 (hybrid STC)
 * Trap/IVT mechanism for fault handling
 
 ### 3.2 Tile Engine (MEX)
