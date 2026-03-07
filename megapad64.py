@@ -391,6 +391,13 @@ class Megapad64:
         self.port_out: list[int] = [0] * 8  # port 0 unused, 1-7
         self.port_in:  list[int] = [0] * 8
 
+        # Port I/O bridge — maps port N to a 12-bit MMIO offset.
+        # OUT N writes the byte to MMIO_START + port_map[N].
+        # INP N reads the byte from MMIO_START + port_map[N].
+        # 0 = disabled (legacy port_out/port_in behavior only).
+        from devices import DEFAULT_PORT_MAP
+        self.port_map: dict[int, int] = dict(DEFAULT_PORT_MAP)
+
         # State
         self.halted: bool = False
         self.idle: bool   = False
@@ -2016,16 +2023,26 @@ class Megapad64:
         return 0
 
     # -- 0x9: I/O --
+    MMIO_START = 0xFFFF_FF00_0000_0000
+
     def _exec_io(self, n: int) -> int:
         if 1 <= n <= 7:      # OUT N
             val = self.mem_read8(self.rx)
             self.port_out[n] = val & 0xFF
             self.rx = u64(self.rx + 1)
+            # Port bridge → route byte to MMIO device
+            mmio_off = self.port_map.get(n, 0xFFFF)
+            if mmio_off < 0x1000:
+                self.mem_write8(u64(self.MMIO_START + mmio_off), val & 0xFF)
             if self.on_output:
                 self.on_output(n, val)
         elif 9 <= n <= 15:   # INP (N-8)
             port = n - 8
-            val = self.port_in[port] & 0xFF
+            mmio_off = self.port_map.get(port, 0xFFFF)
+            if mmio_off < 0x1000:
+                val = self.mem_read8(u64(self.MMIO_START + mmio_off)) & 0xFF
+            else:
+                val = self.port_in[port] & 0xFF
             self.mem_write8(self.rx, val)
             self.d_reg = val
         return 0

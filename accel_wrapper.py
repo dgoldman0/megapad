@@ -108,6 +108,14 @@ class Megapad64:
         # Initialize C++ crypto devices (AES, SHA-256, SHA-3, FieldALU)
         self._cs.init_crypto()
 
+        # Port I/O bridge remap table (mirrors Python megapad64.Megapad64)
+        from devices import DEFAULT_PORT_MAP
+        self.port_map: dict[int, int] = dict(DEFAULT_PORT_MAP)
+
+        # Sync default port bridge map to C++
+        for port in range(1, 8):
+            self._cs.set_port_map(port, self.port_map.get(port, 0))
+
         # Fields that only exist on the Python side
         self.irq_ipi: bool = False
         self.on_output: Optional[callable] = None

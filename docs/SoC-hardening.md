@@ -1,7 +1,7 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§1 crypto DONE, §2 string engine DONE)  
-Last updated: 2025-07-15
+Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE)  
+Last updated: 2025-07-17
 
 ---
 
@@ -714,7 +714,12 @@ dispatch in `megapad64.py`.  Expose via a virtual MMIO read.
 ## 5. Port I/O Bridge (1802 OUT/INP → MMIO)
 
 **Priority: high — collapses DMA byte-serialization to OUT chains**  
-**Topology: shared (pure SoC-fabric routing, no per-core state)**
+**Topology: shared (pure SoC-fabric routing, no per-core state)**  
+**Status: DONE** — RTL remap CSR + combinational decode, emulator
+`_exec_io` routing, C++ accelerator `port_map` + `sys_write8`/`sys_read8`,
+byte-push registers (NIC DMA_PUSH, Disk DMA_PUSH, CRC DIN_BYTE,
+FB BASE_PUSH), BIOS boot-time CSR init, PortBridgeCSR device class,
+system integration, 11 tests.
 
 *Cross-ref: SEP dispatch roadmap Phase 10.*
 

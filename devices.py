@@ -50,6 +50,20 @@ NTT_BASE     = 0x08C0
 KEM_BASE     = 0x0900
 FB_BASE      = 0x0A00
 RTC_BASE     = 0x0B00
+PORT_BRIDGE_BASE = 0x0880
+
+# Default port-I/O bridge map — port N → 12-bit MMIO offset.
+# OUT N writes the byte to the mapped MMIO register;
+# INP N reads the byte from it.
+DEFAULT_PORT_MAP: dict[int, int] = {
+    1: UART_BASE    + 0x00,   # UART TX_DATA  (single byte)
+    2: NIC_BASE     + 0x18,   # NIC  DMA_PUSH (new byte-push reg)
+    3: STORAGE_BASE + 0x10,   # Disk DMA_PUSH (new byte-push reg)
+    4: CRC_BASE     + 0x28,   # CRC  DIN_BYTE (new single-byte input)
+    5: SHA256_BASE  + 0x10,   # SHA  DIN      (existing streaming byte)
+    6: FB_BASE      + 0x0C,   # FB   BASE_PUSH(new byte-push reg)
+    7: 0,                     # configurable — 0 = disabled
+}
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +304,7 @@ class Timer(Device):
 #   0x0D  DMA_ADDR_7 (RW)
 #   0x0E  SEC_COUNT  (RW) — number of sectors to transfer (1-255)
 #   0x0F  DATA       (RW) — byte-at-a-time data port (alternative to DMA)
+#   0x10  DMA_PUSH   (W)  — byte-push: writes accumulate LE into DMA_ADDR
 
 SECTOR_SIZE = 512
 
@@ -297,12 +312,13 @@ class Storage(Device):
     """Block device backed by a host file."""
 
     def __init__(self, image_path: Optional[str] = None):
-        super().__init__("Storage", STORAGE_BASE, 0x10)
+        super().__init__("Storage", STORAGE_BASE, 0x18)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
         self.sector_num: int = 0
         self.dma_addr: int = 0
         self.sec_count: int = 1
+        self._dma_push_ctr: int = 0   # byte-push counter (0-7)
         self.status: int = 0  # bit 7 = present
         self.busy: bool = False
         self.error: bool = False
@@ -432,9 +448,14 @@ class Storage(Device):
             self.sec_count = value if value else 1
         elif offset == 0x0F:  # DATA port write
             self.data_port_buf.append(value)
+        elif offset == 0x10:  # DMA_PUSH — byte-serial address write
+            shift = 8 * self._dma_push_ctr
+            self.dma_addr = (self.dma_addr & ~(0xFF << shift)) | (value << shift)
+            self._dma_push_ctr = (self._dma_push_ctr + 1) & 7
 
     def _execute_cmd(self, cmd: int):
         self.error = False
+        self._dma_push_ctr = 0  # reset byte-push on any command
         if cmd == 0x01:       # READ → DMA
             data = self.read_sectors(self.sector_num, self.sec_count)
             if self._mem_write:
@@ -617,6 +638,7 @@ class NetworkDevice(Device):
         self.error: bool = False
         self.link_up: bool = True
         self.tx_count: int = 0
+        self._dma_push_ctr: int = 0   # byte-push counter (0-7)
         self.rx_count: int = 0
 
         # Frame buffers
@@ -789,9 +811,14 @@ class NetworkDevice(Device):
             self.irq_status &= ~value
         elif 0x20 <= offset <= 0x7F:  # DATA port write
             self._data_buf.append(value)
+        elif offset == 0x18:    # DMA_PUSH — byte-serial address write
+            shift = 8 * self._dma_push_ctr
+            self.dma_addr = (self.dma_addr & ~(0xFF << shift)) | (value << shift)
+            self._dma_push_ctr = (self._dma_push_ctr + 1) & 7
 
     def _execute_cmd(self, cmd: int):
         self.error = False
+        self._dma_push_ctr = 0  # reset byte-push on any command
         if cmd == 0x01:         # SEND — transmit frame
             frame = self._read_tx_frame()
             if frame:
@@ -1421,7 +1448,7 @@ class CRCDevice(Device):
     """Hardware CRC accelerator supporting CRC32, CRC32C, and CRC64-ECMA."""
 
     def __init__(self):
-        super().__init__("CRC", CRC_BASE, 0x28)
+        super().__init__("CRC", CRC_BASE, 0x30)
         self.poly_sel = 0       # 0=CRC32, 1=CRC32C, 2=CRC64
         self.init_val = 0xFFFFFFFF
         self.crc = 0xFFFFFFFF
@@ -1490,6 +1517,8 @@ class CRCDevice(Device):
                 elif value == 1:
                     # Finalize: XOR with all-ones mask
                     self.crc ^= self._mask()
+        elif offset == 0x28:  # DIN_BYTE — single-byte CRC input
+            self._feed_byte(value & 0xFF)
 
 
 # ---------------------------------------------------------------------------
@@ -1729,6 +1758,8 @@ class FramebufferDevice(Device):
         self.vsync_count: int = 0       # frame counter
         self.pal_idx: int = 0           # current palette write index
         self.palette: list[int] = [0] * 256  # 24-bit 0x00RRGGBB entries
+        self._base_push_ctr: int = 0   # byte-push counter for BASE_PUSH
+        self._base_push_buf: int = 0   # accumulator
         self.vblank: bool = False       # toggled by tick()
 
         # Byte assembly buffers for multi-byte LE writes
@@ -1802,6 +1833,15 @@ class FramebufferDevice(Device):
             self._height_buf[idx] = value
             if idx == 3:
                 self.height = int.from_bytes(self._height_buf, 'little')
+            return
+        # FB_BASE_PUSH — byte-serial base address write (offset 0x0C)
+        if offset == 0x0C:
+            shift = 8 * self._base_push_ctr
+            self._base_push_buf = (self._base_push_buf & ~(0xFF << shift)) | (value << shift)
+            self._base_push_ctr = (self._base_push_ctr + 1) & 7
+            if self._base_push_ctr == 0:   # wrapped → commit
+                self.fb_base = self._base_push_buf
+                self._base_push_buf = 0
             return
         # FB_STRIDE — 4-byte LE
         if 0x18 <= offset < 0x1C:
@@ -2241,6 +2281,84 @@ class RTC(Device):
             self.status |= 0x01
             if self.ctrl & 2:
                 self.irq_pending = True
+
+# ---------------------------------------------------------------------------
+#  Port I/O Bridge CSR — remap table for OUT/INP → MMIO routing
+# ---------------------------------------------------------------------------
+# Register map (offsets from PORT_BRIDGE_BASE = 0x0880):
+#   0x00  PORT1_TARGET (RW) — 16-bit LE, low 12 bits = MMIO target offset
+#   0x02  PORT2_TARGET (RW)
+#   0x04  PORT3_TARGET (RW)
+#   0x06  PORT4_TARGET (RW)
+#   0x08  PORT5_TARGET (RW)
+#   0x0A  PORT6_TARGET (RW)
+#   0x0C  PORT7_TARGET (RW)
+#   0x0E  BRIDGE_CTRL  (RW) — bit 0..6: per-port enable
+
+class PortBridgeCSR(Device):
+    """Holds the 7-entry port-I/O → MMIO remap table.
+
+    When a table entry is written, all attached CPUs' ``port_map``
+    dictionaries are updated so that subsequent OUT/INP instructions
+    route to the new MMIO target.
+    """
+
+    def __init__(self):
+        super().__init__("PortBridge", PORT_BRIDGE_BASE, 0x20)
+        # Internal table: port 1-7 → 12-bit MMIO offset (0 = disabled)
+        self._table: list[int] = [
+            DEFAULT_PORT_MAP.get(i, 0) for i in range(8)
+        ]
+        self._ctrl: int = 0x3F  # ports 1-6 enabled, port 7 disabled
+        self._cpus: list = []   # references set by system.py
+
+    def attach_cpu(self, cpu):
+        """Register a CPU whose port_map should be updated on CSR writes."""
+        self._cpus.append(cpu)
+        self._sync_cpu(cpu)
+
+    def _sync_cpu(self, cpu):
+        """Push current remap table to one CPU."""
+        for port in range(1, 8):
+            if self._ctrl & (1 << (port - 1)):
+                cpu.port_map[port] = self._table[port] & 0xFFF
+            else:
+                cpu.port_map[port] = 0xFFFF  # disabled sentinel
+        # Also sync to C++ accelerator state if present
+        cs = getattr(cpu, '_cs', None)
+        if cs is not None:
+            for port in range(1, 8):
+                cs.set_port_map(port, cpu.port_map[port])
+
+    def _sync_all(self):
+        for cpu in self._cpus:
+            self._sync_cpu(cpu)
+
+    def read8(self, offset: int) -> int:
+        if offset < 0x0E and (offset & 1) == 0:
+            port = (offset >> 1) + 1
+            return self._table[port] & 0xFF
+        if offset < 0x0E and (offset & 1) == 1:
+            port = (offset >> 1) + 1
+            return (self._table[port] >> 8) & 0x0F  # 12-bit
+        if offset == 0x0E:
+            return self._ctrl & 0x7F
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset < 0x0E and (offset & 1) == 0:
+            port = (offset >> 1) + 1
+            self._table[port] = (self._table[port] & 0xFF00) | value
+            self._sync_all()
+        elif offset < 0x0E and (offset & 1) == 1:
+            port = (offset >> 1) + 1
+            self._table[port] = (self._table[port] & 0x00FF) | ((value & 0x0F) << 8)
+            self._sync_all()
+        elif offset == 0x0E:
+            self._ctrl = value & 0x7F
+            self._sync_all()
+
 
 # ---------------------------------------------------------------------------
 #  Device Bus — routes MMIO accesses to the correct device

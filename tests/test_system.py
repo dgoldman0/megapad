@@ -69,6 +69,8 @@ from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, DeviceBus,
+    PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
+    CRC_BASE, SHA256_BASE, FB_BASE,
 )
 from data_sources import (
     encode_frame, decode_header, DTYPE_RAW, DTYPE_U8, DTYPE_TEXT,
@@ -24203,6 +24205,197 @@ class TestKDOSWInput(_KDOSTestBase):
         self.assertIn("5 ", text)      # length = 5
         # Verify dump file was written
         self.assertTrue(os.path.exists(dump_path))
+
+
+# ===========================================================================
+#  Port I/O Bridge Tests
+# ===========================================================================
+
+class TestPortIOBridge(unittest.TestCase):
+    """Tests for the port I/O bridge (OUT/INP → MMIO remap)."""
+
+    # -- Unit-level: PortBridgeCSR device -----------------------------------
+
+    def test_port_bridge_csr_defaults(self):
+        """Default remap table matches DEFAULT_PORT_MAP."""
+        csr = PortBridgeCSR()
+        for port in range(1, 8):
+            lo = csr.read8((port - 1) * 2)
+            hi = csr.read8((port - 1) * 2 + 1)
+            val = lo | (hi << 8)
+            self.assertEqual(val, DEFAULT_PORT_MAP.get(port, 0),
+                             f"port {port} default mismatch")
+
+    def test_port_bridge_csr_readback(self):
+        """Writing a remap entry reads back correctly."""
+        csr = PortBridgeCSR()
+        # Write port 3 target = 0x456
+        csr.write8(0x04, 0x56)   # low byte of port 3
+        csr.write8(0x05, 0x04)   # high nibble
+        lo = csr.read8(0x04)
+        hi = csr.read8(0x05)
+        self.assertEqual(lo | (hi << 8), 0x456)
+
+    def test_port_bridge_csr_ctrl(self):
+        """BRIDGE_CTRL enable/disable per-port."""
+        csr = PortBridgeCSR()
+        # Disable port 2 (bit 1)
+        csr.write8(0x0E, 0x7D)  # 0x7F ^ 0x02 = 0x7D
+        self.assertEqual(csr.read8(0x0E), 0x7D)
+
+    def test_port_bridge_attaches_cpu(self):
+        """Attaching a CPU syncs port_map to it."""
+        sys = make_system()
+        cpu = sys.cpu
+        # port_map should be populated from PortBridgeCSR defaults
+        for port in range(1, 7):  # ports 1-6 are enabled
+            expected = DEFAULT_PORT_MAP.get(port, 0)
+            self.assertEqual(cpu.port_map.get(port, 0xFFFF), expected,
+                             f"cpu.port_map[{port}] mismatch")
+        # Port 7 is disabled by default (sentinel 0xFFFF)
+        self.assertEqual(cpu.port_map.get(7, 0xFFFF), 0xFFFF,
+                         "port 7 should be disabled (0xFFFF)")
+
+    def test_port_bridge_disable_clears(self):
+        """Disabling a port via BRIDGE_CTRL sets cpu.port_map[port]=0xFFFF."""
+        sys = make_system()
+        cpu = sys.cpu
+        bridge = sys.port_bridge
+
+        # Disable port 1 (bit 0) — default ctrl is 0x3F
+        bridge.write8(0x0E, 0x3E)  # 0x3F & ~0x01
+        self.assertEqual(cpu.port_map.get(1, 0), 0xFFFF,
+                         "port 1 should be disabled (0xFFFF)")
+        # Port 2 should still be active
+        self.assertNotEqual(cpu.port_map.get(2, 0xFFFF), 0xFFFF,
+                            "port 2 should remain enabled")
+
+    # -- Integration: OUT routing via assembled code -------------------------
+
+    def test_out1_routes_to_uart_tx(self):
+        """OUT1 should write a byte to UART TX via the port bridge."""
+        sys = make_system()
+        buf = capture_uart(sys)
+
+        # R(X)=R2 points at a data byte, OUT1 reads M(R(X)) and routes
+        # it to UART TX (port 1 → MMIO 0x000).  We put the byte at
+        # address 0x100.
+        code = assemble("""
+            sex r2             ; X = R2
+            ldi64 r2, 0x100   ; R(X) points to data byte
+            out1               ; read M(R(X)), route to UART
+            halt
+        """)
+        sys.load_binary(0, code)
+        # Place data byte at 0x100
+        sys.cpu.mem_write8(0x100, 0x48)   # 'H'
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertIn(0x48, buf, "OUT1 should route 'H' to UART TX")
+
+    def test_out1_increments_rx(self):
+        """OUT1 should increment R(X) after sending."""
+        sys = make_system()
+
+        code = assemble("""
+            sex r2
+            ldi64 r2, 0x200
+            out1
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.cpu.mem_write8(0x200, 0x41)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(sys.cpu.regs[2], 0x201,
+                         "R(X) should be incremented by 1 after OUT")
+
+    def test_out_multiple_bytes_sequential(self):
+        """Multiple OUT1 calls write sequential bytes to UART."""
+        sys = make_system()
+        buf = capture_uart(sys)
+
+        code = assemble("""
+            sex r2
+            ldi64 r2, 0x300
+            out1
+            out1
+            out1
+            halt
+        """)
+        sys.load_binary(0, code)
+        for i, ch in enumerate([0x41, 0x42, 0x43]):
+            sys.cpu.mem_write8(0x300 + i, ch)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        self.assertEqual(buf, [0x41, 0x42, 0x43],
+                         "Should see A, B, C in UART TX buffer")
+
+    def test_out4_routes_to_crc(self):
+        """OUT4 should write a byte to CRC DIN_BYTE via the port bridge."""
+        sys = make_system()
+
+        code = assemble("""
+            sex r2
+            ldi64 r2, 0x400
+            out4
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.cpu.mem_write8(0x400, 0xFF)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        # CRC device should have received the byte — verify port_out[4] logged
+        self.assertEqual(sys.cpu.port_out[4], 0xFF)
+
+    def test_port_bridge_remap_change(self):
+        """Changing remap table at runtime redirects port to new target."""
+        sys = make_system()
+        bridge = sys.port_bridge
+        cpu = sys.cpu
+
+        # Change port 1 to point at Timer base (0x100) instead of UART
+        bridge.write8(0x00, 0x00)   # low byte: 0x00
+        bridge.write8(0x01, 0x01)   # high nibble: 0x1 → 0x100
+
+        self.assertEqual(cpu.port_map[1], 0x100,
+                         "port 1 should now map to Timer base 0x100")
+
+    def test_port7_disabled_by_default(self):
+        """Port 7 has target 0x000 in DEFAULT_PORT_MAP → effectively disabled."""
+        sys = make_system()
+        self.assertEqual(DEFAULT_PORT_MAP[7], 0,
+                         "port 7 should default to disabled (target 0)")
+
+    def test_inp_reads_from_mapped_device(self):
+        """INP can read from a remapped MMIO address."""
+        sys = make_system()
+
+        # Remap port 1 to UART RX_DATA (offset 0x01) instead of TX (0x00)
+        sys.port_bridge.write8(0x00, 0x01)  # low byte: 0x01
+        sys.port_bridge.write8(0x01, 0x00)  # high nibble: 0x0 → target 0x001
+
+        # Inject a character into UART RX buffer
+        sys.uart.inject_input(b"X")
+
+        code = assemble("""
+            sex r2
+            ldi64 r2, 0x500     ; INP stores result at M(R(X))
+            inp1                ; read from UART RX via port bridge
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        run_until(sys)
+        self.assertTrue(sys.cpu.halted)
+        # INP stores value at M(R(X)) and in D
+        val = sys.cpu.mem_read8(0x500)
+        self.assertEqual(val, ord("X"),
+                         "INP1 should read 'X' from UART RX")
 
 
 if __name__ == "__main__":

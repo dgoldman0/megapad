@@ -108,6 +108,10 @@ struct CPUState {
     uint8_t  port_out[8];
     uint8_t  port_in[8];
 
+    // Port I/O bridge remap table — port_map[1..7] = 12-bit MMIO offset
+    // 0xFFFF = disabled (legacy port_out/port_in only)
+    uint32_t port_map[8];
+
     // State
     bool halted;
     bool idle;
@@ -2520,11 +2524,24 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             uint8_t val = sys_read8(s, cb, rx(s));
             s.port_out[n] = val;
             rx(s)++;
+            // Port bridge → route byte to MMIO device
+            uint32_t mmio_off = s.port_map[n];
+            if (mmio_off < 0x1000 && cb.has_mmio) {
+                uint64_t mmio_addr = cb.mmio_start + mmio_off;
+                sys_write8(s, cb, mmio_addr, val);
+            }
             if (cb.on_output)
                 cb.on_output(n, val);
         } else if (n >= 9 && n <= 15) {  // INP
             int port = n - 8;
-            uint8_t val = s.port_in[port];
+            uint8_t val;
+            uint32_t mmio_off = s.port_map[port];
+            if (mmio_off < 0x1000 && cb.has_mmio) {
+                uint64_t mmio_addr = cb.mmio_start + mmio_off;
+                val = sys_read8(s, cb, mmio_addr);
+            } else {
+                val = s.port_in[port];
+            }
             sys_write8(s, cb, rx(s), val);
             s.d_reg = val;
         }
@@ -2746,7 +2763,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
 
     // Expose CPUState
     py::class_<CPUState>(m, "CPUState")
-        .def(py::init<>())
+        .def(py::init([]() {
+            auto s = std::make_unique<CPUState>();
+            // Default port_map entries to disabled (0xFFFF sentinel)
+            for (int i = 0; i < 8; i++) s->port_map[i] = 0xFFFF;
+            return s;
+        }))
         .def_readwrite("psel", &CPUState::psel)
         .def_readwrite("xsel", &CPUState::xsel)
         .def_readwrite("spsel", &CPUState::spsel)
@@ -2809,6 +2831,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Port access
         .def("get_port_out", [](const CPUState& s, int i) { return s.port_out[i & 7]; })
         .def("set_port_in", [](CPUState& s, int i, uint8_t v) { s.port_in[i & 7] = v; })
+        // Port bridge remap table
+        .def("get_port_map", [](const CPUState& s, int i) -> uint32_t { return s.port_map[i & 7]; })
+        .def("set_port_map", [](CPUState& s, int i, uint32_t v) { s.port_map[i & 7] = v; })
         // Memory attachment
         .def("attach_mem", [](CPUState& s, py::buffer buf, uint64_t size) {
             py::buffer_info info = buf.request(true);  // writable

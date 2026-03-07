@@ -9,7 +9,7 @@ cohesive as a v1.0 release.
 KDOS v1.1 (11,004 lines, 923 colon defs, 707 vars/constants), Emulator
 (2,671 lines + 849-line 16-core heterogeneous SoC + 1,978-line C++ accelerator),
 FPGA RTL (27 Verilog modules + 18 testbenches, ~180 HW tests),
-devices.py (2,066 lines, 17 device classes), 1,539 test methods passing
+devices.py (2,405 lines, 18 device classes), 1,717 test methods passing
 (CPython + C++).  Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
@@ -117,9 +117,9 @@ Remaining work: application-level features (items 25–30).
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM (2,066 lines, 17 device classes)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, Port I/O Bridge (2,405 lines, 18 device classes)
 
-### Test Suite — ✅ 1,539 tests
+### Test Suite — ✅ 1,717 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8

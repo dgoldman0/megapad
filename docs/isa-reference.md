@@ -354,6 +354,23 @@ each 4 bits wide.
 | `91`–`97` | **OUT 1–7** | 1 | `port_out[n] ← M(R(X)); R(X) += 1` |
 | `99`–`9F` | **INP 1–7** | 1 | `D ← port_in[n−8]; M(R(X)) ← D` |
 
+**Port I/O Bridge:** Ports are not hard-wired to specific peripherals.
+Instead, a configurable remap CSR block at MMIO `+0x0880` maps each
+port number (1–7) to an arbitrary MMIO device register offset.  The
+BIOS initialises the default mapping at boot:
+
+| Port | Default Target | MMIO Offset | Use |
+|------|---------------|-------------|-----|
+| 1 | UART TX | `+0x0000` | Character output |
+| 2 | NIC DMA push | `+0x0418` | Byte-serial NIC address write |
+| 3 | Disk DMA push | `+0x0210` | Byte-serial disk address write |
+| 4 | CRC data | `+0x0988` | Stream bytes into CRC engine |
+| 5 | FB base push | `+0x0A0C` | Framebuffer base address write |
+| 6 | SHA-256 data | `+0x0948` | Stream bytes into SHA-256 |
+| 7 | *(disabled)* | — | Available for user assignment |
+
+See `SoC-hardening.md` §5 for the full remap CSR register layout.
+
 ---
 
 ## Family 0xA — SEP (Set Program Counter)

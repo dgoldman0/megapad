@@ -38,6 +38,7 @@ module mp64_bus #(
     input  wire [N_PORTS*64-1:0]   cpu_wdata,
     input  wire [N_PORTS-1:0]      cpu_wen,
     input  wire [N_PORTS*2-1:0]    cpu_size,
+    input  wire [N_PORTS-1:0]      cpu_port_io,  // port I/O sideband per port
     output reg  [N_PORTS*64-1:0]   cpu_rdata,
     output reg  [N_PORTS-1:0]      cpu_ready,
 
@@ -56,6 +57,7 @@ module mp64_bus #(
     output reg  [63:0] mmio_wdata,
     output reg         mmio_wen,
     output reg  [1:0]  mmio_size,
+    output reg         mmio_port_io,  // port I/O sideband (from winning CPU)
     input  wire [63:0] mmio_rdata,
     input  wire        mmio_ack,
 
@@ -86,6 +88,7 @@ module mp64_bus #(
     wire [63:0] core_addr  [0:N_PORTS-1];
     wire [63:0] core_wdata [0:N_PORTS-1];
     wire [1:0]  core_size  [0:N_PORTS-1];
+    wire        core_pio   [0:N_PORTS-1];
 
     genvar gi;
     generate
@@ -93,6 +96,7 @@ module mp64_bus #(
             assign core_addr[gi]  = cpu_addr [gi*64 +: 64];
             assign core_wdata[gi] = cpu_wdata[gi*64 +: 64];
             assign core_size[gi]  = cpu_size [gi*2  +: 2];
+            assign core_pio[gi]   = cpu_port_io[gi];
         end
     endgenerate
 
@@ -230,6 +234,7 @@ module mp64_bus #(
             mmio_wdata    <= 64'd0;
             mmio_wen      <= 1'b0;
             mmio_size     <= 2'd0;
+            mmio_port_io  <= 1'b0;
         end else begin
             // Default: clear ready pulses each cycle
             cpu_ready <= {N_PORTS{1'b0}};
@@ -256,12 +261,13 @@ module mp64_bus #(
                             weight_remain <= qos_weight[next_grant] - 8'd1;
 
                         if (is_mmio) begin
-                            mmio_req   <= 1'b1;
-                            mmio_addr  <= core_addr[next_grant][11:0];
-                            mmio_wdata <= core_wdata[next_grant];
-                            mmio_wen   <= cpu_wen[next_grant];
-                            mmio_size  <= core_size[next_grant];
-                            arb_state  <= ARB_MMIO_RESP;
+                            mmio_req      <= 1'b1;
+                            mmio_addr     <= core_addr[next_grant][11:0];
+                            mmio_wdata    <= core_wdata[next_grant];
+                            mmio_wen      <= cpu_wen[next_grant];
+                            mmio_size     <= core_size[next_grant];
+                            mmio_port_io  <= core_pio[next_grant];
+                            arb_state     <= ARB_MMIO_RESP;
                         end else begin
                             mem_req   <= 1'b1;
                             mem_addr  <= core_addr[next_grant];

@@ -44,6 +44,10 @@ struct FramebufferDevice {
     uint8_t  vsync_buf[4];
     uint8_t  pal_data_buf[4];
 
+    // Byte-push for fb_base (via port I/O bridge)
+    uint8_t  base_push_ctr;
+    uint64_t base_push_buf;
+
     // --- Active flag ---
     bool     enabled;       // false = bypass, fall through to Python
 
@@ -75,6 +79,8 @@ struct FramebufferDevice {
         std::memset(stride_buf, 0, sizeof(stride_buf));
         std::memset(vsync_buf, 0, sizeof(vsync_buf));
         std::memset(pal_data_buf, 0, sizeof(pal_data_buf));
+        base_push_ctr = 0;
+        base_push_buf = 0;
 
         // Default palette: grayscale ramp
         for (int i = 0; i < 256; i++)
@@ -166,6 +172,18 @@ struct FramebufferDevice {
                 for (int i = 0; i < 4; i++)
                     v |= (uint32_t)height_buf[i] << (8 * i);
                 height = v;
+            }
+            return;
+        }
+        // FB_BASE_PUSH — byte-serial base address write (0x0C)
+        if (off == 0x0C) {
+            int shift = 8 * base_push_ctr;
+            uint64_t mask = (uint64_t)0xFF << shift;
+            base_push_buf = (base_push_buf & ~mask) | ((uint64_t)value << shift);
+            base_push_ctr = (base_push_ctr + 1) & 7;
+            if (base_push_ctr == 0) {   // wrapped → commit
+                fb_base = base_push_buf;
+                base_push_buf = 0;
             }
             return;
         }

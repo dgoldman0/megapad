@@ -113,6 +113,7 @@ device occupies a small range:
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 | **TRNG** | `+0x0800` | 64 bytes | Hardware true random number generator |
 | **Field ALU** | `+0x0840` | 128 bytes | GF(2²⁵⁵−19) coprocessor (8 modes, supersedes X25519) |
+| **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |

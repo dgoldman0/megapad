@@ -97,6 +97,42 @@ boot:
     ldi r1, 0x01
     st.b r11, r1
 
+    ; ---- Port I/O Bridge CSR init (MMIO 0x0880) ----
+    ; Write 7 remap entries + enable bridge.
+    ; Layout: +0x00 port1, +0x02 port2, … +0x0C port7, +0x0E CTRL
+    ldi64 r11, 0xFFFF_FF00_0000_0880
+
+    ldi  r1, 0x000              ; port 1 → UART TX (0x000)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x418              ; port 2 → NIC DMA_PUSH (0x418)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x210              ; port 3 → Disk DMA_PUSH (0x210)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x9A8              ; port 4 → CRC DIN_BYTE (0x9A8)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x950              ; port 5 → SHA256 DIN (0x950)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0xA0C              ; port 6 → FB BASE_PUSH (0xA0C)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x000              ; port 7 → disabled (0)
+    st.h r11, r1
+    addi r11, 2
+
+    ldi  r1, 0x01               ; BRIDGE_CTRL: enable=1
+    st.h r11, r1
+
     ; Install IVT for bus-fault
     ldi64 r0, ivt_table
     csrw 0x04, r0
@@ -845,6 +881,51 @@ fw_next:
 
 fw_miss:
     ldi r9, 0
+    ret.l
+
+; =====================================================================
+;  dict_cache_seed — update DFIND cache after creating a new entry
+; =====================================================================
+;  Input:  R1 = new entry address (entry+0 = link, +8 = flags+len, +9 = name)
+;  Action: builds uppercase counted-string in dict_pad from the entry's
+;          own name field, then DINS R0←R1, R13←dict_pad so that subsequent
+;          DFIND lookups return the *latest* binding (prevents stale-cache
+;          bugs when a new definition shadows an existing one).
+;  Clobbers: R0, R7, R9, R11, R12, R13.   Preserves: R1, R14, R15.
+
+dict_cache_seed:
+    ; Read name length from entry+8 (lower 7 bits)
+    mov r11, r1
+    addi r11, 8
+    ld.b r7, r11
+    andi r7, 0x7F              ; pure name length
+    ; Build dict_pad[0..N]
+    ldi64 r11, dict_pad
+    st.b r11, r7               ; dict_pad[0] = count
+    ldi r0, 0                  ; index
+dcs_up:
+    cmp r0, r7
+    breq dcs_dins
+    mov r9, r1
+    addi r9, 9                 ; entry name start
+    add r9, r0
+    ld.b r12, r9               ; source char
+    cmpi r12, 0x61
+    brcc dcs_noup
+    cmpi r12, 0x7B
+    brcs dcs_noup
+    subi r12, 0x20
+dcs_noup:
+    mov r9, r11
+    inc r9
+    add r9, r0
+    st.b r9, r12               ; dict_pad[1+i] = uppercased char
+    inc r0
+    br dcs_up
+dcs_dins:
+    mov r0, r1                 ; R0 = entry addr
+    ldi64 r13, dict_pad
+    dins r0, r13               ; cache: name → latest entry
     ret.l
 
 ; =====================================================================
@@ -3496,6 +3577,11 @@ w_colon_name_done:
     ldi64 r11, var_latest
     str r11, r0
 
+    ; ---- DFIND cache: seed new entry (R0 → R1) ----
+    mov r1, r0
+    ldi64 r11, dict_cache_seed
+    call.l r11
+
     ; Drop temps from data stack (entry addr, name len, name addr)
     addi r14, 24
 
@@ -5003,6 +5089,15 @@ w_create_copy:
     ; Update LATEST
     ldi64 r11, var_latest
     str r11, r1
+
+    ; ---- DFIND cache: seed new entry (R1 = entry start) ----
+    subi r15, 8
+    str r15, r13              ; save reloc imm-offset
+    ldi64 r11, dict_cache_seed
+    call.l r11
+    ldn r13, r15
+    addi r15, 8
+
     ; --- reloc tracking ---
     mov r1, r13
     ldi64 r11, reloc_record
@@ -5514,6 +5609,16 @@ w_var_name_done:
     str r11, r0
     ldi64 r11, var_latest
     str r11, r13
+
+    ; ---- DFIND cache: seed new entry (R13 = entry start → R1) ----
+    mov r1, r13               ; dict_cache_seed takes R1
+    subi r15, 8
+    str r15, r9               ; save reloc imm-offset
+    ldi64 r11, dict_cache_seed
+    call.l r11
+    ldn r9, r15
+    addi r15, 8
+
     ; --- reloc tracking ---
     mov r1, r9
     ldi64 r11, reloc_record
@@ -5580,6 +5685,9 @@ w_const_name_done:
     addi r14, 8
     ldi64 r11, var_latest
     str r11, r1
+    ; ---- DFIND cache: seed new entry (R1 = entry start) ----
+    ldi64 r11, dict_cache_seed
+    call.l r11
     ret.l
 
 ; =====================================================================
@@ -7694,6 +7802,10 @@ w_val_name_done:
     str r11, r0
     ldi64 r11, var_latest
     str r11, r13
+    ; ---- DFIND cache: seed new entry (R13 = entry start → R1) ----
+    mov r1, r13
+    ldi64 r11, dict_cache_seed
+    call.l r11
     ret.l
 
 ; TO ( x "name" -- )  [IMMEDIATE]

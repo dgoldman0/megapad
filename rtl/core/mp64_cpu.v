@@ -54,6 +54,7 @@ module mp64_cpu #(
     output reg  [63:0] bus_wdata,
     output reg         bus_wen,
     output reg  [1:0]  bus_size,
+    output reg         bus_port_io,  // asserted during OUT/INP memory cycles
     input  wire [63:0] bus_rdata,
     input  wire        bus_ready,
 
@@ -388,6 +389,7 @@ module mp64_cpu #(
             io_port     <= 3'd0;
             io_is_inp   <= 1'b0;
             io_out_active <= 1'b0;
+            bus_port_io   <= 1'b0;
 
             string_start_r <= 1'b0;
             string_op_r    <= 4'd0;
@@ -454,6 +456,7 @@ module mp64_cpu #(
 
         end else begin
             bus_valid      <= 1'b0;
+            bus_port_io    <= 1'b0;
             csr_wen        <= 1'b0;
             mex_valid      <= 1'b0;
             icache_inv_all <= 1'b0;
@@ -943,6 +946,7 @@ module mp64_cpu #(
                         io_port <= nib[2:0]; io_is_inp <= 1'b1;
                         effective_addr <= {MP64_MMIO_HI, 20'd0, nib[2:0], 9'd0};
                         bus_size <= BUS_BYTE; cpu_state <= CPU_MEM_READ;
+                        bus_port_io <= 1'b1;  // sideband for SoC remap
                         dst_reg <= 5'd0; mem_sub <= 4'hF;
                     end else
                         cpu_state <= CPU_FETCH;
@@ -1378,12 +1382,13 @@ module mp64_cpu #(
                     bus_valid <= 1'b0;
                     memalu_byte <= bus_rdata[7:0];
                     if (io_out_active) begin
-                        // IO OUT
+                        // IO OUT — write byte to MMIO port address
                         io_out_active <= 1'b0;
                         D <= bus_rdata[7:0];
                         effective_addr <= {MP64_MMIO_HI, 20'd0, io_port, 9'd0};
                         mem_data <= {56'd0, bus_rdata[7:0]};
                         bus_size <= BUS_BYTE;
+                        bus_port_io <= 1'b1;  // sideband for SoC remap
                         R[xsel] <= R[xsel] + 64'd1;
                         cpu_state <= CPU_MEM_WRITE;
                         mem_sub <= 4'd0;

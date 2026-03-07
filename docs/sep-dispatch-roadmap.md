@@ -1028,12 +1028,12 @@ full 1802 restoration leads.
 | **7** | SEX + D byte processing | 2 days | Medium | **Highest** — compresses NIC/disk/FB DMA serialization by ~50%, activates MEMALU, tightens dict scan.  16 routines converted to `STXI`/`STXD.D` chains. | ✅ Done |
 | **8** | Cooperative PAUSE | 4 hours | Low | Medium — zero-cost green threads on core 0.  2-task model done; 4-task round-robin (R18/R19) pending extended registers. | ✅ Done (2-task); ⏳ 4-task pending |
 | **9** | MARK/SAV fault diagnostics | 2 hours | None | Low — debug aid, optional | ✅ Done |
-| **10** | Port I/O bridge | 3 days | High | Aspirational — requires RTL; collapses DMA writes to OUT chains | ☐ Not started |
+| **10** | Port I/O bridge | 3 days | High | Collapses DMA writes to OUT chains via remap CSR at 0x880 | ✅ Done |
 
-**Completed:** Phases 0, 1, 3, 4, 5, 7, 8, 9 — all done and tested.
+**Completed:** Phases 0, 1, 3, 4, 5, 7, 8, 9, 10 — all done and tested.
 The SEP dispatch infrastructure, Q semaphore, hybrid STC JIT (R16/R17),
-STXI byte processing, cooperative multitasking, and fault diagnostics
-are all in production.
+STXI byte processing, cooperative multitasking, fault diagnostics, and
+port I/O bridge are all in production.
 
 **Phase 3 details:** compile_call shrunk from 13 → 10 bytes
 (sep r16 + 8-byte inline XT).  compile_ret changed from 1 byte (ret.l)
@@ -1046,9 +1046,10 @@ updated to skip 2-byte compile_ret.  All 1697 tests passing.
 
 **Skipped:** Phases 2, 6 — low value relative to churn.
 
-**North star:** Phase 10 completes the 1802 restoration at the hardware
-level, making DMA address writes as simple as `OUT n` chains, but
-requires RTL changes.
+**North star achieved:** Phase 10 completed the 1802 restoration at
+the hardware level.  OUT/INP instructions now route through a
+configurable remap CSR (MMIO 0x880–0x88F) to arbitrary MMIO device
+registers, collapsing DMA address writes to `OUT n` chains.
 
 ---
 

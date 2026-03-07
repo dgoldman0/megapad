@@ -33,6 +33,7 @@ from devices import (
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
     MBOX_BASE, SPINLOCK_BASE, CRC_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
+    PortBridgeCSR,
 )
 
 # ---------------------------------------------------------------------------
@@ -380,7 +381,11 @@ class MegapadSystem:
         self.bus.register(self.timer)
         self.bus.register(self.storage)
         self.bus.register(self.sysinfo)
-        # NIC: NOT registered — C++ handles all MMIO
+        # NIC: registered on the bus so that Python-fallback paths
+        # (e.g. EXT.STRING CMOVE reading MMIO) can reach the NIC.
+        # The C++ fast path checks s.nic first, so this is never hit
+        # during normal batch execution — zero performance impact.
+        self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
         self.bus.register(self.crc)
@@ -391,6 +396,12 @@ class MegapadSystem:
         # called explicitly via bus since it's still a Device subclass.
         self.bus.register(self.fb)
         self.bus.register(self.rtc)
+
+        # Port I/O bridge CSR — remap table for OUT/INP → MMIO routing
+        self.port_bridge = PortBridgeCSR()
+        self.bus.register(self.port_bridge)
+        for cpu in self.cores:
+            self.port_bridge.attach_cpu(cpu)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

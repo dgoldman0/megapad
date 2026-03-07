@@ -105,6 +105,7 @@ module mp64_soc #(
     wire [1:0]  core_bus_size  [0:NUM_CORES-1];
     wire        core_bus_valid [0:NUM_CORES-1];
     wire        core_bus_wen   [0:NUM_CORES-1];
+    wire        core_bus_port_io [0:NUM_CORES-1];
     wire [63:0] core_bus_rdata [0:NUM_CORES-1];
     wire        core_bus_ready [0:NUM_CORES-1];
 
@@ -191,6 +192,7 @@ module mp64_soc #(
                 .bus_wdata       (core_bus_wdata[ci]),
                 .bus_wen         (core_bus_wen[ci]),
                 .bus_size        (core_bus_size[ci]),
+                .bus_port_io     (core_bus_port_io[ci]),
                 .bus_rdata       (core_bus_rdata[ci]),
                 .bus_ready       (core_bus_ready[ci]),
 
@@ -354,6 +356,7 @@ module mp64_soc #(
     wire [1:0]  muxed_size  [0:NUM_CORES-1];
     wire        muxed_valid [0:NUM_CORES-1];
     wire        muxed_wen   [0:NUM_CORES-1];
+    wire        muxed_port_io [0:NUM_CORES-1];
 
     genvar mi;
     generate
@@ -369,6 +372,9 @@ module mp64_soc #(
                                                       : core_bus_wen[mi];
             assign muxed_size[mi]  = ic_bus_valid[mi] ? ic_bus_size[mi]
                                                       : core_bus_size[mi];
+            // I-cache refills are never port I/O
+            assign muxed_port_io[mi] = ic_bus_valid[mi] ? 1'b0
+                                                        : core_bus_port_io[mi];
 
             // Demux response back to CPU or I-cache
             wire bus_resp_ready;
@@ -388,6 +394,7 @@ module mp64_soc #(
     wire [N_BUS_PORTS*64-1:0] bus_cpu_wdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_wen;
     wire [N_BUS_PORTS*2-1:0]  bus_cpu_size;
+    wire [N_BUS_PORTS-1:0]    bus_cpu_port_io;
     wire [N_BUS_PORTS*64-1:0] bus_cpu_rdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_ready;
 
@@ -400,6 +407,7 @@ module mp64_soc #(
             assign bus_cpu_wdata[pi*64 +: 64]  = muxed_wdata[pi];
             assign bus_cpu_wen  [pi]           = muxed_wen[pi];
             assign bus_cpu_size [pi*2  +: 2]   = muxed_size[pi];
+            assign bus_cpu_port_io[pi]         = muxed_port_io[pi];
         end
 
         // Ports [NUM_CORES..N_BUS_PORTS-1]: clusters
@@ -410,6 +418,7 @@ module mp64_soc #(
             assign bus_cpu_wdata[P*64 +: 64]  = cluster_bus_wdata[pi];
             assign bus_cpu_wen  [P]           = cluster_bus_wen[pi];
             assign bus_cpu_size [P*2  +: 2]   = cluster_bus_size[pi];
+            assign bus_cpu_port_io[P]          = 1'b0;
         end
     endgenerate
 
@@ -444,6 +453,8 @@ module mp64_soc #(
     wire [63:0] bus_mmio_rdata;
     wire        bus_mmio_ack;
 
+    wire        bus_mmio_port_io;
+
     mp64_bus #(
         .N_PORTS   (N_BUS_PORTS),
         .PORT_BITS (PORT_BITS)
@@ -456,6 +467,7 @@ module mp64_soc #(
         .cpu_wdata (bus_cpu_wdata),
         .cpu_wen   (bus_cpu_wen),
         .cpu_size  (bus_cpu_size),
+        .cpu_port_io(bus_cpu_port_io),
         .cpu_rdata (bus_cpu_rdata),
         .cpu_ready (bus_cpu_ready),
 
@@ -472,6 +484,7 @@ module mp64_soc #(
         .mmio_wdata (bus_mmio_wdata),
         .mmio_wen   (bus_mmio_wen),
         .mmio_size  (bus_mmio_size),
+        .mmio_port_io(bus_mmio_port_io),
         .mmio_rdata (bus_mmio_rdata),
         .mmio_ack   (bus_mmio_ack),
 
@@ -770,31 +783,120 @@ module mp64_soc #(
     );
 
     // ========================================================================
+    // ========================================================================
+    // Port I/O Bridge — Remap CSR and Combinational Address Translation
+    // ========================================================================
+    // Remap table: 7 entries (ports 1-7), each holding a 12-bit target
+    // MMIO address.  When an OUT/INP bus transaction arrives with the
+    // bus_mmio_port_io sideband asserted and the bridge is enabled, the
+    // raw MMIO address (which encodes the port number in addr[11:9]) is
+    // replaced by the remap entry before peripheral decode.
+    //
+    // CSR at MMIO 0x880-0x88F (16 bytes):
+    //   +0x00  PORT1_REMAP   (bits [11:0] = target MMIO address)
+    //   +0x02  PORT2_REMAP
+    //   +0x04  PORT3_REMAP
+    //   +0x06  PORT4_REMAP
+    //   +0x08  PORT5_REMAP
+    //   +0x0A  PORT6_REMAP
+    //   +0x0C  PORT7_REMAP
+    //   +0x0E  BRIDGE_CTRL   (bit 0 = enable)
+    // -----------------------------------------------------------------------
+
+    reg [11:0] port_remap_1, port_remap_2, port_remap_3, port_remap_4,
+               port_remap_5, port_remap_6, port_remap_7;
+    reg        port_bridge_en;
+
+    wire mmio_sel_port_bridge = bus_mmio_req && !bus_mmio_port_io
+                              && (bus_mmio_addr[11:4] == 8'h88);  // 0x880-0x88F
+
+    // CSR write
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            port_remap_1   <= 12'd0;
+            port_remap_2   <= 12'd0;
+            port_remap_3   <= 12'd0;
+            port_remap_4   <= 12'd0;
+            port_remap_5   <= 12'd0;
+            port_remap_6   <= 12'd0;
+            port_remap_7   <= 12'd0;
+            port_bridge_en <= 1'b0;
+        end else if (mmio_sel_port_bridge && bus_mmio_wen) begin
+            case (bus_mmio_addr[3:1])
+                3'd0: port_remap_1   <= bus_mmio_wdata[11:0];
+                3'd1: port_remap_2   <= bus_mmio_wdata[11:0];
+                3'd2: port_remap_3   <= bus_mmio_wdata[11:0];
+                3'd3: port_remap_4   <= bus_mmio_wdata[11:0];
+                3'd4: port_remap_5   <= bus_mmio_wdata[11:0];
+                3'd5: port_remap_6   <= bus_mmio_wdata[11:0];
+                3'd6: port_remap_7   <= bus_mmio_wdata[11:0];
+                3'd7: port_bridge_en <= bus_mmio_wdata[0];
+                default: ;
+            endcase
+        end
+    end
+
+    // CSR read
+    reg [63:0] port_bridge_rdata;
+    always @(*) begin
+        port_bridge_rdata = 64'd0;
+        case (bus_mmio_addr[3:1])
+            3'd0: port_bridge_rdata[11:0] = port_remap_1;
+            3'd1: port_bridge_rdata[11:0] = port_remap_2;
+            3'd2: port_bridge_rdata[11:0] = port_remap_3;
+            3'd3: port_bridge_rdata[11:0] = port_remap_4;
+            3'd4: port_bridge_rdata[11:0] = port_remap_5;
+            3'd5: port_bridge_rdata[11:0] = port_remap_6;
+            3'd6: port_bridge_rdata[11:0] = port_remap_7;
+            3'd7: port_bridge_rdata[0]    = port_bridge_en;
+            default: ;
+        endcase
+    end
+
+    // Combinational remap: select remap target based on port number
+    reg [11:0] port_remap_sel;
+    always @(*) begin
+        case (bus_mmio_addr[11:9])
+            3'd1: port_remap_sel = port_remap_1;
+            3'd2: port_remap_sel = port_remap_2;
+            3'd3: port_remap_sel = port_remap_3;
+            3'd4: port_remap_sel = port_remap_4;
+            3'd5: port_remap_sel = port_remap_5;
+            3'd6: port_remap_sel = port_remap_6;
+            3'd7: port_remap_sel = port_remap_7;
+            default: port_remap_sel = 12'd0;
+        endcase
+    end
+
+    wire [11:0] mmio_addr_eff = (bus_mmio_port_io && port_bridge_en
+                                 && |bus_mmio_addr[11:9])
+                              ? port_remap_sel : bus_mmio_addr;
+
     // MMIO Peripheral Decoder
     // ========================================================================
     // The bus arbiter presents a single mmio port with 12-bit address.
     // We decode the upper bits to select peripherals.
 
-    // Peripheral select signals
-    wire mmio_sel_uart   = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h0); // 0x000
-    wire mmio_sel_timer  = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h1); // 0x100
-    wire mmio_sel_disk   = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h2); // 0x200
-    wire mmio_sel_nic    = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h4); // 0x400
-    wire mmio_sel_mbox   = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h5
-                                         || bus_mmio_addr[11:8] == 4'h6);// 0x500-0x6FF
-    wire mmio_sel_aes    = bus_mmio_req && (bus_mmio_addr[11:7] == 5'b01110); // 0x700-0x77F
-    wire mmio_sel_sha3   = bus_mmio_req && (bus_mmio_addr[11:7] == 5'b01111)
-                                         && (bus_mmio_addr[6:5] != 2'b11);// 0x780-0x7DF (96 bytes)
-    wire mmio_sel_crc    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100110);// 0x980-0x9BF
-    wire mmio_sel_trng   = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b1000000);// 0x800-0x81F
-    wire mmio_sel_field  = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100001);// 0x840-0x87F
-    wire mmio_sel_sha256 = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100101);// 0x940-0x97F
-    wire mmio_sel_ntt    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100011);// 0x8C0-0x8FF
-    wire mmio_sel_kem    = bus_mmio_req && (bus_mmio_addr[11:6] == 6'b100100);// 0x900-0x93F
-    wire mmio_sel_rtc    = bus_mmio_req && (bus_mmio_addr[11:5] == 7'b1011000); // 0xB00-0xB1F
+    // Peripheral select signals (use remapped address for port I/O)
+    wire mmio_sel_uart   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h0); // 0x000
+    wire mmio_sel_timer  = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h1); // 0x100
+    wire mmio_sel_disk   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h2); // 0x200
+    wire mmio_sel_nic    = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h4); // 0x400
+    wire mmio_sel_mbox   = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h5
+                                         || mmio_addr_eff[11:8] == 4'h6);// 0x500-0x6FF
+    wire mmio_sel_aes    = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01110); // 0x700-0x77F
+    wire mmio_sel_sha3   = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01111)
+                                         && (mmio_addr_eff[6:5] != 2'b11);// 0x780-0x7DF (96 bytes)
+    wire mmio_sel_crc    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100110);// 0x980-0x9BF
+    wire mmio_sel_trng   = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1000000);// 0x800-0x81F
+    wire mmio_sel_field  = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100001);// 0x840-0x87F
+    wire mmio_sel_sha256 = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100101);// 0x940-0x97F
+    wire mmio_sel_ntt    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100011);// 0x8C0-0x8FF
+    wire mmio_sel_kem    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100100);// 0x900-0x93F
+    wire mmio_sel_rtc    = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1011000); // 0xB00-0xB1F
 
     // SysInfo — read-only system information (0x300)
-    wire mmio_sel_sysinfo = bus_mmio_req && (bus_mmio_addr[11:8] == 4'h3);
+    wire mmio_sel_sysinfo = bus_mmio_req && (mmio_addr_eff[11:8] == 4'h3);
 
     // ---- Peripheral instances -----------------------------------------------
 
@@ -809,7 +911,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_uart),
-        .addr  (bus_mmio_addr[3:0]),
+        .addr  (mmio_addr_eff[3:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (uart_rdata_raw),
@@ -827,7 +929,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_timer),
-        .addr  (bus_mmio_addr[3:0]),
+        .addr  (mmio_addr_eff[3:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (timer_rdata_raw),
@@ -847,7 +949,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_disk),
-        .addr  (bus_mmio_addr[3:0]),
+        .addr  (mmio_addr_eff[3:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (disk_rdata_raw),
@@ -872,7 +974,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_nic),
-        .addr  (bus_mmio_addr[6:0]),
+        .addr  (mmio_addr_eff[6:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (nic_rdata_raw),
@@ -903,7 +1005,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_mbox),
-        .addr  (bus_mmio_addr[11:0]),
+        .addr  (mmio_addr_eff[11:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (mbox_rdata_raw),
@@ -926,7 +1028,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_aes),
-        .addr  (bus_mmio_addr[6:0]),
+        .addr  (mmio_addr_eff[6:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (aes_rdata),
@@ -942,7 +1044,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_sha3),
-        .addr  (bus_mmio_addr[6:0]),
+        .addr  (mmio_addr_eff[6:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (sha3_rdata),
@@ -958,7 +1060,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_sha256),
-        .addr  (bus_mmio_addr[5:0]),
+        .addr  (mmio_addr_eff[5:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (sha256_rdata),
@@ -974,7 +1076,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_crc),
-        .addr  (bus_mmio_addr[4:0]),
+        .addr  (mmio_addr_eff[4:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (crc_rdata),
@@ -989,7 +1091,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_trng),
-        .addr  (bus_mmio_addr[4:0]),
+        .addr  (mmio_addr_eff[4:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (trng_rdata),
@@ -1003,7 +1105,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_field),
-        .addr  (bus_mmio_addr[5:0]),
+        .addr  (mmio_addr_eff[5:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (field_rdata),
@@ -1017,7 +1119,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_ntt),
-        .addr  (bus_mmio_addr[5:0]),
+        .addr  (mmio_addr_eff[5:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (ntt_rdata),
@@ -1031,7 +1133,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_kem),
-        .addr  (bus_mmio_addr[5:0]),
+        .addr  (mmio_addr_eff[5:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (kem_rdata),
@@ -1047,7 +1149,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_rtc),
-        .addr  (bus_mmio_addr[4:0]),
+        .addr  (mmio_addr_eff[4:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (rtc_rdata_raw),
@@ -1061,7 +1163,7 @@ module mp64_soc #(
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n)
             sysinfo_cluster_en <= {64{1'b1}};  // all clusters enabled at reset
-        else if (mmio_sel_sysinfo && bus_mmio_wen && bus_mmio_addr[6:3] == 4'h3)
+        else if (mmio_sel_sysinfo && bus_mmio_wen && mmio_addr_eff[6:3] == 4'h3)
             sysinfo_cluster_en <= bus_mmio_wdata;
     end
 
@@ -1099,7 +1201,7 @@ module mp64_soc #(
         //   0x50  VRAM_BASE     — dedicated VRAM base address
         //   0x58  VRAM_SIZE     — dedicated VRAM size in bytes
         if (mmio_sel_sysinfo) begin
-            case (bus_mmio_addr[6:3])  // 64-bit aligned: offset >> 3
+            case (mmio_addr_eff[6:3])  // 64-bit aligned: offset >> 3
                 4'h0: mmio_rdata_mux = 64'h4D50_3634_0002_0001;  // BOARD_ID_VER
                 4'h1: mmio_rdata_mux = BANK0_SIZE;               // 0x08
                 4'h2: mmio_rdata_mux = NUM_ALL_CORES;            // 0x10
@@ -1127,6 +1229,7 @@ module mp64_soc #(
         if (mmio_sel_ntt)     begin mmio_rdata_mux = ntt_rdata;   mmio_ack_mux = ntt_ack;   end
         if (mmio_sel_kem)     begin mmio_rdata_mux = kem_rdata;   mmio_ack_mux = kem_ack;   end
         if (mmio_sel_rtc)     begin mmio_rdata_mux = {56'd0, rtc_rdata_raw}; mmio_ack_mux = rtc_ack; end
+        if (mmio_sel_port_bridge) begin mmio_rdata_mux = port_bridge_rdata; mmio_ack_mux = 1'b1; end
     end
 
     assign bus_mmio_rdata = mmio_rdata_mux;

@@ -35,6 +35,7 @@ struct NICDevice {
     uint16_t tx_count;
     uint16_t rx_count;
     bool     enabled;
+    uint8_t  dma_push_ctr;   // byte-push counter for DMA_PUSH (0-7)
 
     // Data port buffer (byte-at-a-time alternative to DMA)
     std::vector<uint8_t> data_buf;
@@ -81,6 +82,7 @@ struct NICDevice {
         tx_count = 0;
         rx_count = 0;
         enabled = true;
+        dma_push_ctr = 0;
 
         data_buf.clear();
         data_pos = 0;
@@ -215,6 +217,13 @@ struct NICDevice {
             case 0x0D:  // IRQ_STATUS (write-1-to-clear)
                 irq_status &= ~val;
                 break;
+            case 0x18: {  // DMA_PUSH — byte-serial address write
+                int shift = 8 * dma_push_ctr;
+                uint64_t mask = (uint64_t)0xFF << shift;
+                dma_addr = (dma_addr & ~mask) | ((uint64_t)val << shift);
+                dma_push_ctr = (dma_push_ctr + 1) & 7;
+                break;
+            }
             default:
                 if (off >= 0x20 && off <= 0x7F) {
                     // DATA port write
@@ -230,6 +239,7 @@ struct NICDevice {
 
     void execute_cmd(uint8_t cmd) {
         error = false;
+        dma_push_ctr = 0;  // reset byte-push on any command
         switch (cmd) {
             case 0x01:  // SEND
                 do_send();

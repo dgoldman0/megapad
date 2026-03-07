@@ -4,7 +4,7 @@
 
 Megapad-64 is a complete computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and verified by 1,687 tests.
+— all running inside a Python emulator and verified by 1,717 tests.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -29,10 +29,10 @@ interactively.
 | **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,760 lines Forth |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
-| **Tests** | 1,687 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
+| **Tests** | 1,717 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **Devices** | 17 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| **Devices** | 18 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, Mailbox, Spinlock, SysInfo, Port I/O Bridge |
 | **FPGA RTL** | 27 Verilog modules + 18 testbenches (~180 HW tests), Genesys 2 + VU095 targets |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
@@ -262,7 +262,7 @@ SCREENS                           \ Launch 9-screen TUI dashboard
 # C++ accelerator (recommended — 63× faster than PyPy)
 python -m venv .venv && .venv/bin/pip install pybind11 pytest pytest-xdist
 make accel                         # build C++ extension
-make test-accel                    # ~23 s, all 1,687 tests
+make test-accel                    # ~23 s, all 1,717 tests
 
 # PyPy + xdist (no C++ compiler needed)
 make setup-pypy                    # one-time
@@ -274,7 +274,7 @@ make test                              # background, ~40 min on CPython
 
 > **Note:** Always run tests via the Makefile (`make test`, `make test-one`, etc.).
 
-All 1,336 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
+All 1,717 tests should pass, covering the CPU, BIOS, KDOS, filesystem,
 assembler, disk utility, devices, multicore, networking (simulated +
 real TAP), crypto, post-quantum crypto, and extended tile engine.
 
@@ -296,21 +296,21 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `megapad64.py` | 3,002 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
-| `accel/mp64_accel.cpp` | 3,229 | C++ CPU core (pybind11) — 63× speedup |
-| `accel_wrapper.py` | 830 | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | 991 | Quad-core SoC integration + `run_batch()` C++ fast path |
-| `bios.asm` | 14,524 | Forth BIOS in assembly (360 words, multicore, crypto, hardened) |
+| `megapad64.py` | 3,315 | CPU + tile engine emulator (incl. extended ops, FP16/BF16) |
+| `accel/mp64_accel.cpp` | 3,280 | C++ CPU core (pybind11) — 63× speedup |
+| `accel_wrapper.py` | 897 | Drop-in Python wrapper for the C++ CPU core |
+| `system.py` | 1,002 | Quad-core SoC integration + `run_batch()` C++ fast path |
+| `bios.asm` | 14,957 | Forth BIOS in assembly (363 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
 | `kdos.f` | 11,760 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
 | `cli.py` | 1,557 | CLI, boot modes, headless TCP server, interactive debug monitor |
-| `asm.py` | 792 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 2,287 | 17 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo |
+| `asm.py` | 909 | Two-pass assembler with SKIP and listing output |
+| `devices.py` | 2,405 | 18 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, Mailbox, Spinlock, SysInfo, Port I/O Bridge |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
-| `tests/test_megapad64.py` | 2,193 | 23 CPU + tile engine tests |
-| `tests/test_system.py` | 24,033 | 1,592 integration tests (74 classes, incl. multicore, tile, crypto, FS, PQC) |
+| `tests/test_megapad64.py` | 2,647 | 25 CPU + tile engine tests |
+| `tests/test_system.py` | 24,431 | 1,617 integration tests (75 classes, incl. multicore, tile, crypto, FS, PQC, port I/O bridge) |
 | `tests/test_networking.py` | 187 | 13 real-networking tests |
 | `Makefile` | 190 | Build, test, & accel targets (PyPy + xdist + C++ accel) |
 | `setup_accel.py` | 35 | pybind11 build configuration |
