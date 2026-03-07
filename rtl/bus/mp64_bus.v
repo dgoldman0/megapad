@@ -65,7 +65,10 @@ module mp64_bus #(
     input  wire        qos_csr_wen,
     input  wire [7:0]  qos_csr_addr,
     input  wire [63:0] qos_csr_wdata,
-    output reg  [63:0] qos_csr_rdata
+    output reg  [63:0] qos_csr_rdata,
+
+    // === Bus-error (sticky, per-port) ===
+    output reg  [N_PORTS-1:0] bus_err
 );
 
     `include "mp64_pkg.vh"
@@ -77,10 +80,21 @@ module mp64_bus #(
     localparam [1:0] ARB_MEM_WAIT  = 2'd1;
     localparam [1:0] ARB_MMIO_RESP = 2'd2;
 
+    // Timeout limits — configurable at synthesis
+    localparam MMIO_TIMEOUT_BITS = 6;  // 63 cycles
+    localparam MEM_TIMEOUT_BITS  = 8;  // 255 cycles
+
     reg [1:0]           arb_state;
     reg [PORT_BITS-1:0] grant;
     reg [PORT_BITS-1:0] last_grant;
     reg                 served_last;
+
+    // ACK-timeout counters
+    reg [MMIO_TIMEOUT_BITS-1:0] mmio_timeout;
+    reg [MEM_TIMEOUT_BITS-1:0]  mem_timeout;
+
+    // Sticky bus-error latch (per port) — cleared by CSR write or reset
+    reg [N_PORTS-1:0] bus_err_sticky;
 
     // ========================================================================
     // Unpack per-port signals
@@ -117,8 +131,9 @@ module mp64_bus #(
                 qos_bwlimit[qi] <= 16'd0;
                 qos_bw_cnt[qi]  <= 16'd0;
             end
-            epoch_timer   <= 16'd0;
-            qos_csr_rdata <= 64'd0;
+            epoch_timer    <= 16'd0;
+            qos_csr_rdata  <= 64'd0;
+            bus_err_sticky <= {N_PORTS{1'b0}};
         end else begin
             // Epoch timer — reset BW counters every 65536 cycles
             epoch_timer <= epoch_timer + 16'd1;
@@ -140,6 +155,10 @@ module mp64_bus #(
                         for (qi = 0; qi < N_PORTS && qi < 4; qi = qi + 1)
                             qos_bwlimit[qi] <= qos_csr_wdata[qi*16 +: 16];
                     end
+                    CSR_BUS_ERR: begin
+                        // Write-1-to-clear: clear the bits that are written as 1
+                        bus_err_sticky <= bus_err_sticky & ~qos_csr_wdata[N_PORTS-1:0];
+                    end
                     default: ;
                 endcase
             end
@@ -156,6 +175,7 @@ module mp64_bus #(
                 case (qos_csr_addr)
                     CSR_QOS_WEIGHT:  qos_csr_rdata <= w_pack;
                     CSR_QOS_BWLIMIT: qos_csr_rdata <= bw_pack;
+                    CSR_BUS_ERR:     qos_csr_rdata <= {{(64-N_PORTS){1'b0}}, bus_err_sticky};
                     default:         qos_csr_rdata <= 64'd0;
                 endcase
             end
@@ -235,7 +255,12 @@ module mp64_bus #(
             mmio_wen      <= 1'b0;
             mmio_size     <= 2'd0;
             mmio_port_io  <= 1'b0;
+            mmio_timeout  <= {MMIO_TIMEOUT_BITS{1'b0}};
+            mem_timeout   <= {MEM_TIMEOUT_BITS{1'b0}};
+            bus_err       <= {N_PORTS{1'b0}};
         end else begin
+            // Default: clear bus_err pulses each cycle
+            bus_err <= {N_PORTS{1'b0}};
             // Default: clear ready pulses each cycle
             cpu_ready <= {N_PORTS{1'b0}};
 
@@ -283,6 +308,8 @@ module mp64_bus #(
 
                 // ====================================================
                 // MMIO_RESP — peripheral responds in 1 cycle
+                //   Timeout: if no mmio_ack within 2^MMIO_TIMEOUT_BITS-1
+                //   cycles, return sentinel + fire bus_err for the port.
                 // ====================================================
                 ARB_MMIO_RESP: begin
                     if (mmio_ack) begin
@@ -292,12 +319,28 @@ module mp64_bus #(
                         mmio_req                  <= 1'b0;
                         served_last               <= 1'b1;
                         qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
+                        mmio_timeout              <= {MMIO_TIMEOUT_BITS{1'b0}};
                         arb_state                 <= ARB_IDLE;
+                    end else if (&mmio_timeout) begin
+                        // Timeout — return sentinel, signal error
+                        cpu_rdata[grant*64 +: 64] <= 64'hDEAD_DEAD_DEAD_DEAD;
+                        cpu_ready[grant]          <= 1'b1;
+                        bus_err[grant]            <= 1'b1;
+                        bus_err_sticky[grant]     <= 1'b1;
+                        last_grant                <= grant;
+                        mmio_req                  <= 1'b0;
+                        served_last               <= 1'b1;
+                        mmio_timeout              <= {MMIO_TIMEOUT_BITS{1'b0}};
+                        arb_state                 <= ARB_IDLE;
+                    end else begin
+                        mmio_timeout <= mmio_timeout + 1;
                     end
                 end
 
                 // ====================================================
                 // MEM_WAIT — hold mem_req until memory acks
+                //   Timeout: if no mem_ack within 2^MEM_TIMEOUT_BITS-1
+                //   cycles, return sentinel + fire bus_err for the port.
                 // ====================================================
                 ARB_MEM_WAIT: begin
                     if (mem_ack) begin
@@ -307,7 +350,21 @@ module mp64_bus #(
                         mem_req                   <= 1'b0;
                         served_last               <= 1'b1;
                         qos_bw_cnt[grant]         <= qos_bw_cnt[grant] + 16'd1;
+                        mem_timeout               <= {MEM_TIMEOUT_BITS{1'b0}};
                         arb_state                 <= ARB_IDLE;
+                    end else if (&mem_timeout) begin
+                        // Timeout — return sentinel, signal error
+                        cpu_rdata[grant*64 +: 64] <= 64'hDEAD_DEAD_DEAD_DEAD;
+                        cpu_ready[grant]          <= 1'b1;
+                        bus_err[grant]            <= 1'b1;
+                        bus_err_sticky[grant]     <= 1'b1;
+                        last_grant                <= grant;
+                        mem_req                   <= 1'b0;
+                        served_last               <= 1'b1;
+                        mem_timeout               <= {MEM_TIMEOUT_BITS{1'b0}};
+                        arb_state                 <= ARB_IDLE;
+                    end else begin
+                        mem_timeout <= mem_timeout + 1;
                     end
                 end
 

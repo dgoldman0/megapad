@@ -1,9 +1,8 @@
 # Megapad-64 — Current Situation
 
-**Date:** 2026-03-06  
+**Date:** 2026-03-07  
 **Branch:** `main`  
-**HEAD:** `f88b5be` (+ uncommitted Phase 7 STXI conversion)  
-**Status:** 1,687 tests passing, 3 skipped (DNS/network).
+**Status:** 1,731 tests passing, 3 skipped (DNS/network).
 
 ---
 
@@ -54,6 +53,20 @@
   Changed `addr + N <= base + size` to `(addr - base) + N <= size` to
   prevent 64-bit overflow near top of address space.
 
+### WOTS+ Chain Accelerator & Bus Timeout (2026-03-07)
+
+- **WOTS+ Chain Accelerator** (MMIO 0x8A0, 32 bytes) — Hardware chain
+  sequencer wrapping SHA3/SHAKE.  DMA-read context from RAM, iterates
+  SHAKE-256 internally, returns 16-byte result.  Emulator device class
+  (`WotsChainAccelerator`) + 8 integration tests.
+- **Bus arbiter MMIO/MEM timeout** — RTL: 6-bit MMIO (63 cycles) and
+  8-bit MEM (255 cycles) watchdog counters in `mp64_bus.v`.  Timeout
+  returns sentinel `0xDEAD_DEAD_DEAD_DEAD`, asserts `bus_err` pulse +
+  sticky latch, fires `IRQX_BUS` interrupt.  W1C `CSR_BUS_ERR` (0x5A).
+  Emulator: `BusError` exception on unmapped MMIO, caught by SoC layer
+  and converted to `TrapError(IVEC_BUS_FAULT)`.  6 Python tests.
+  RTL testbench: 38/38 pass (tests 8–9 cover MMIO/MEM timeout).
+
 ### Earlier (prior to Phase work)
 
 - **Crypto**: SHA3-512, SHA-256 accelerator, AES-128 mode, CRC
@@ -83,17 +96,17 @@ DNS/network tests requiring live internet are skipped in CI.
 | KDOS | `kdos.f` | 11,760 |
 | Tools | `tools.f` | 990 |
 | CPU emulator | `megapad64.py` | 3,002 |
-| SoC | `system.py` | 991 |
-| Devices | `devices.py` | 2,287 |
+| SoC | `system.py` | 1,018 |
+| Devices | `devices.py` | 2,542 |
 | CLI | `cli.py` | 1,557 |
-| C++ accel | `accel/mp64_accel.cpp` | 3,229 |
-| Assembler | `asm.py` | 792 |
-| Tests | `tests/test_system.py` | 24,033 (1,592 tests, 74 classes) |
+| C++ accel | `accel/mp64_accel.cpp` | 3,295 |
+| Assembler | `asm.py` | 909 |
+| Tests | `tests/test_system.py` | 24,761 (1,634 tests, 77 classes) |
 |       | `tests/test_networking.py` | 187 (13 tests) |
-|       | `tests/test_megapad64.py` | 2,193 (23 tests) |
+|       | `tests/test_megapad64.py` | 2,647 (25 tests) |
 |       | `tests/test_fs_hardening.py` | (27 tests) |
 
-**Total tests: 1,687** (3 skipped)
+**Total tests: 1,731** (3 skipped)
 
 ## 4. MMIO address map (crypto region)
 
@@ -107,12 +120,13 @@ DNS/network tests requiring live internet are skipped in CI.
 | 0x0900 | KEM (ML-KEM-512) |
 | 0x0940 | SHA-256 |
 | 0x0980 | CRC32/CRC64 |
+| 0x08A0 | WOTS+ Chain Accelerator (32 bytes) |
 | 0x0A00 | Framebuffer |
 
 ## 5. How to run things
 
 ```bash
-make test             # all 1,687 tests (~23s with C++ accel)
+make test             # all 1,731 tests (~23s with C++ accel)
 make test-one K=X     # single class/test
 make test-status      # check progress
 make test-net         # networking tests (requires TAP)

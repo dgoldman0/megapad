@@ -217,6 +217,7 @@ module mp64_soc #(
                 .irq_uart        (irq_uart_w),
                 .irq_nic         (irq_nic_w),
                 .irq_ipi         (ipi_out[ci]),
+                .irq_bus         (bus_err_w[ci]),
 
                 // Info
                 .mem_size_bytes  (MEM_SIZE_BYTES),
@@ -455,6 +456,8 @@ module mp64_soc #(
 
     wire        bus_mmio_port_io;
 
+    wire [N_BUS_PORTS-1:0] bus_err_w;    // per-port bus-error (sticky)
+
     mp64_bus #(
         .N_PORTS   (N_BUS_PORTS),
         .PORT_BITS (PORT_BITS)
@@ -491,7 +494,9 @@ module mp64_soc #(
         .qos_csr_wen   (1'b0),
         .qos_csr_addr  (8'd0),
         .qos_csr_wdata (64'd0),
-        .qos_csr_rdata ()
+        .qos_csr_rdata (),
+
+        .bus_err    (bus_err_w)
     );
 
     // ========================================================================

@@ -17,7 +17,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
-from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT
+from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT, IVEC_BUS_FAULT
 from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
@@ -25,7 +25,7 @@ from megapad64 import (
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
 )
 from devices import (
-    MMIO_BASE, DeviceBus, UART, Timer, Storage, SystemInfo, NetworkDevice,
+    MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, CRCDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, RTC,
     MailboxDevice, SpinlockDevice, CRCDevice,
@@ -575,7 +575,12 @@ class MegapadSystem:
             if MMIO_START <= addr < MMIO_END:
                 bus.requester_id = core_id
                 offset = addr - MMIO_START
-                return bus.read8(offset)
+                try:
+                    return bus.read8(offset)
+                except BusError:
+                    cpu.trap_addr = addr
+                    raise TrapError(IVEC_BUS_FAULT,
+                                    f"Bus timeout @ {addr:#018x}")
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 return cluster.spad_read8(addr & 0xFFFF_FFFF)
             if vram_size > 0 and vram_base <= addr < vram_end:
@@ -591,7 +596,12 @@ class MegapadSystem:
             if MMIO_START <= addr < MMIO_END:
                 bus.requester_id = core_id
                 offset = addr - MMIO_START
-                bus.write8(offset, val)
+                try:
+                    bus.write8(offset, val)
+                except BusError:
+                    cpu.trap_addr = addr
+                    raise TrapError(IVEC_BUS_FAULT,
+                                    f"Bus timeout @ {addr:#018x}")
                 return
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 cluster.spad_write8(addr & 0xFFFF_FFFF, val)

@@ -715,7 +715,7 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 | 2 | `IVEC_ILLEGAL_OP` | Illegal Opcode | Undefined instruction, double EXT |
 | 3 | `IVEC_ALIGN_FAULT` | Alignment Fault | Misaligned memory access |
 | 4 | `IVEC_DIV_ZERO` | Division by Zero | DIV/UDIV/MOD/UMOD with Rs=0 |
-| 5 | `IVEC_BUS_FAULT` | Bus Fault | Access beyond RAM/MMIO bounds |
+| 5 | `IVEC_BUS_FAULT` | Bus Fault | Access beyond RAM/MMIO bounds, or unmapped MMIO offset (bus timeout — sentinel `0xDEAD_DEAD_DEAD_DEAD`) |
 | 6 | `IVEC_SW_TRAP` | Software Trap | TRAP instruction |
 | 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1) |
 | 8 | `IVEC_UART` | UART | UART RX data available (when IE=1 and UART IRQ enabled) |

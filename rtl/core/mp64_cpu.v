@@ -80,6 +80,7 @@ module mp64_cpu #(
     input  wire        irq_uart,
     input  wire        irq_nic,
     input  wire        irq_ipi,
+    input  wire        irq_bus,
 
     // === I-cache statistics (from icache module) ===
     input  wire [63:0] icache_stat_hits,
@@ -186,6 +187,7 @@ module mp64_cpu #(
         irq_vector  = 4'd0;
         if (flags[6]) begin           // I flag
             if      (irq_ipi)   begin irq_pending = 1'b1; irq_vector = IRQX_IPI;             end
+            else if (irq_bus)   begin irq_pending = 1'b1; irq_vector = IRQX_BUS;             end
             else if (irq_timer) begin irq_pending = 1'b1; irq_vector = {1'b0, IRQ_TIMER};    end
             else if (irq_uart)  begin irq_pending = 1'b1; irq_vector = IRQX_UART;            end
             else if (irq_nic)   begin irq_pending = 1'b1; irq_vector = IRQX_NIC;             end

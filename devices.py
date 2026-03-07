@@ -68,6 +68,24 @@ DEFAULT_PORT_MAP: dict[int, int] = {
 
 
 # ---------------------------------------------------------------------------
+#  Bus-error exception (raised on unmapped MMIO access — mirrors RTL bus_err)
+# ---------------------------------------------------------------------------
+
+class BusError(Exception):
+    """Raised when the device bus receives an access with no matching device.
+
+    In the RTL, this corresponds to the bus arbiter timing out because no
+    peripheral asserts mmio_ack.  The bus returns a sentinel
+    (0xDEAD_DEAD_DEAD_DEAD) and fires bus_err to the requesting core.
+    """
+    def __init__(self, offset: int, write: bool = False):
+        op = "write" if write else "read"
+        super().__init__(f"Bus timeout: {op} @ MMIO offset {offset:#06x}")
+        self.offset = offset
+        self.write = write
+
+
+# ---------------------------------------------------------------------------
 #  Device base class
 # ---------------------------------------------------------------------------
 
@@ -2509,13 +2527,15 @@ class DeviceBus:
         if dev:
             self._set_requester(dev)
             return dev.read8(local)
-        return 0xFF  # open bus
+        raise BusError(mmio_offset, write=False)
 
     def write8(self, mmio_offset: int, value: int):
         dev, local = self.find_device(mmio_offset)
         if dev:
             self._set_requester(dev)
             dev.write8(local, value)
+            return
+        raise BusError(mmio_offset, write=True)
 
     def tick(self, cycles: int):
         for dev in self.devices:

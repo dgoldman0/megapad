@@ -278,6 +278,7 @@ localparam [7:0] CSR_DMA_CTRL      = 8'h55;
 // QoS CSRs
 localparam [7:0] CSR_QOS_WEIGHT    = 8'h58;
 localparam [7:0] CSR_QOS_BWLIMIT   = 8'h59;
+localparam [7:0] CSR_BUS_ERR       = 8'h5A;   // bus-error sticky (W1C per port)
 
 // Memory BIST CSRs
 localparam [7:0] CSR_BIST_CMD       = 8'h60;
@@ -431,6 +432,7 @@ localparam [2:0] IRQ_TIMER  = 3'd7;
 localparam [7:0] IRQX_ILLEGAL_OP = 8'd4;
 localparam [7:0] IRQX_SW_TRAP    = 8'd6;
 
+localparam [3:0] IRQX_BUS   = 4'd5;    // bus-error timeout trap
 localparam [3:0] IRQX_IPI   = 4'd8;
 localparam [3:0] IRQX_UART  = 4'd9;
 localparam [3:0] IRQX_NIC   = 4'd10;

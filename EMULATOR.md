@@ -9,11 +9,12 @@ and an interactive CLI monitor/debugger.
 > a 16-core heterogeneous SoC (4 full cores + 3×4 micro-clusters) with
 > 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile engine
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
-> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512), optional
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512, WOTS+ Chain
+> Accel), optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
 > UDP, TAP), full TCP/IP network stack through TLS 1.3, cooperative
 > multitasking (4-task PAUSE/BACKGROUND/BACKGROUND2/BACKGROUND3), and
-> 1,692 tests passing.
+> 1,731 tests passing.
 
 ---
 
@@ -133,21 +134,21 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `accel/mp64_accel.cpp` | 3,280 | C++ CPU core (pybind11) — 63× speedup over PyPy, SEP dispatch fast path, STXI/STXD.D |
 | `accel_wrapper.py` | 897 | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
 | `asm.py` | 909 | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | 2,405 | 18 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, Port I/O Bridge |
+| `devices.py` | 2,542 | 19 peripherals — UART, Timer, Storage, SysInfo, NIC, Mailbox (IPI), Spinlock, CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, WOTS+ Chain Accel, Port I/O Bridge |
 | `nic_backends.py` | 399 | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | 1,002 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `system.py` | 1,018 | 16-core heterogeneous SoC — 4 full cores + 3×4 micro-clusters, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | 1,557 | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
 | `bios.asm` | 14,957 | Forth BIOS v1.0 — subroutine-threaded interpreter, 363 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile, I-cache, cooperative multitasking) |
 | `test_megapad64.py` | 2,647 | CPU + tile engine test suite — 25 tests |
-| `test_system.py` | 24,431 | System integration tests — 1,617 tests (75 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge) |
+| `test_system.py` | 24,761 | System integration tests — 1,634 tests (77 classes: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge, bus timeout) |
 | `test_networking.py` | 187 | Real-networking tests — 13 tests |
 | `test_fs_hardening.py` | — | Filesystem hardening tests — 27 tests |
 | `setup_accel.py` | 35 | pybind11 build configuration for C++ extension |
 | `bench_accel.py` | 139 | C++ vs Python speed comparison script |
 | `Makefile` | 190 | Build, test, & accel targets — PyPy + xdist + C++ accelerator |
 | `conftest.py` | 197 | Test fixtures, snapshot caching, live status reporting |
-| `rtl/` | ~25,000 | 30 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
-| `rtl/sim/` | ~11,100 | 28 Verilog testbenches (~414 hardware assertions) |
+| `rtl/` | ~16,200 | 36 portable Verilog modules + 12 target overrides (Xilinx-7 + ASIC stubs) |
+| `rtl/sim/` | ~13,200 | 32 Verilog testbenches (~430 hardware assertions) |
 | **Total** | **~60,000** | |
 
 ---
@@ -186,12 +187,15 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
 | `+0x0940` | 32 B | SHA-256 (SHA-2 hash) |
 | `+0x0980` | 32 B | CRC32/CRC64 |
+| `+0x08A0` | 32 B | WOTS+ Chain Accelerator (SPHINCS+ hash chain sequencer) |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
-else hits RAM.
+else hits RAM.  Accesses to unmapped MMIO offsets raise `BusError`, which
+the SoC layer converts to `TrapError(IVEC_BUS_FAULT)` — matching the RTL
+bus arbiter timeout behaviour.
 
 ### BIOS memory layout (runtime)
 

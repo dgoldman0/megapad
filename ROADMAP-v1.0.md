@@ -8,8 +8,8 @@ cohesive as a v1.0 release.
 **Current state (Feb 2026):** BIOS (355 dict entries, 14,353 lines ASM),
 KDOS v1.1 (11,004 lines, 923 colon defs, 707 vars/constants), Emulator
 (2,671 lines + 849-line 16-core heterogeneous SoC + 1,978-line C++ accelerator),
-FPGA RTL (27 Verilog modules + 18 testbenches, ~180 HW tests),
-devices.py (2,405 lines, 18 device classes), 1,717 test methods passing
+FPGA RTL (36 Verilog modules + 32 testbenches + 12 target overrides, ~430 HW tests),
+devices.py (2,542 lines, 19 device classes), 1,731 test methods passing
 (CPython + C++).  Branch: `main`.
 
 Core subsystems — BIOS Forth, KDOS kernel, filesystem, tile engine,
@@ -117,9 +117,9 @@ Remaining work: application-level features (items 25–30).
 - ✅ asm.py: Two-pass assembler (788 lines), SKIP instruction
 - ✅ cli.py: Interactive monitor/debugger (995 lines)
 - ✅ diskutil.py: Filesystem tooling (1,039 lines)
-- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, Port I/O Bridge (2,405 lines, 18 device classes)
+- ✅ devices.py: MMIO peripherals — CRC, AES-256-GCM, SHA3/SHAKE, TRNG, Field ALU, NTT, KEM, WOTS+ Chain Accel, Port I/O Bridge (2,542 lines, 19 device classes)
 
-### Test Suite — ✅ 1,717 tests
+### Test Suite — ✅ 1,731 tests
 
 - TestBIOS: 128, TestBIOSHardening: 12, TestMulticore: 17
 - TestKDOS: 229, TestKDOSAllocator: 13, TestKDOSExceptions: 8
@@ -137,15 +137,16 @@ Remaining work: application-level features (items 25–30).
 - TestDiskUtil: 19, TestAssemblerBranchRange: 11
 - TestNIC: 11, TestSystemMMIO: 3, TestUART: 3, TestStorage: 2,
   TestTimer: 1, TestDeviceBus: 2
+- TestWotsChainAccel: 8, TestBusTimeout: 6
 - test_megapad64.py: 23 CPU + tile tests
 - test_networking.py: 38 real-network tests (NIC backends, TAP,
   ARP, ICMP, UDP, TCP) across 8 test classes
 
 ### RTL — ✅ DONE (full ISA + extended tile + multicore + PQC + SoC)
 
-31 portable Verilog modules in `rtl/` + 12 target overrides (Xilinx-7 + ASIC stubs),
-29 testbenches, ~419 hardware assertions passing.
-~26,300 lines RTL + ~11,300 lines testbench.
+36 portable Verilog modules in `rtl/` + 12 target overrides (Xilinx-7 + ASIC stubs),
+32 testbenches, ~430 hardware assertions passing.
+~16,200 lines RTL + ~13,200 lines testbench.
 
 - ✅ mp64_cpu.v — Full ISA + 2-stage pipeline (IF+DEX) with I-cache interface
 - ✅ mp64_soc.v — Full SoC integration (903 lines): 4 CPU cores + I-caches,
@@ -155,7 +156,8 @@ Remaining work: application-level features (items 25–30).
   SoC smoke test: 5/5 PASS.
 - ✅ mp64_top.v — Parameterized top-level instantiating mp64_soc with
   CLOCK_HZ, NUM_CORES, NUM_CLUSTERS, MEM_DEPTH passthrough
-- ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS
+- ✅ mp64_bus.v — Round-robin bus arbiter with per-core QoS, MMIO/MEM ACK
+  timeout (63/255 cycles), bus_err sticky latch, CSR_BUS_ERR W1C, IRQX_BUS
 - ✅ mp64_mailbox.v — Inter-core mailbox + spinlocks (CSR + MMIO dual-path)
 - ✅ mp64_tile.v — Full tile engine (TALU, TMUL, TRED, TSYS + extended ops,
   saturating, rounding, SHUFFLE, PACK, UNPACK, RROT, VSHR, VSHL, VCLZ,
@@ -808,8 +810,8 @@ continuous progress, reviewable diffs, and a working system at every step.
 | `Makefile` | 190 | ✅ Build, test, & accel targets |
 | `conftest.py` | 197 | ✅ Test fixtures, snapshot caching, live status |
 | `sample.img` | — | Built by diskutil.py ✅ |
-| `rtl/` | ~26,300 | ✅ 31 portable Verilog modules + 12 target overrides |
-| `rtl/sim/` | ~11,300 | ✅ 29 testbenches (~419 HW assertions) |
+| `rtl/` | ~16,200 | ✅ 36 portable Verilog modules + 12 target overrides |
+| `rtl/sim/` | ~13,200 | ✅ 32 testbenches (~430 HW assertions) |
 | `fpga/` | — | ✅ Synthesis scripts, BIOS hex, SoC synth pipeline |
 | `docs/` | 10 files | ✅ Written |
 | `README.md` | 350 | ✅ Current |

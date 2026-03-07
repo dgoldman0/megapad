@@ -37,8 +37,10 @@ module tb_bus_arbiter;
     reg  [N_PORTS*64-1:0]   cpu_wdata;
     reg  [N_PORTS-1:0]      cpu_wen;
     reg  [N_PORTS*2-1:0]    cpu_size;
+    reg  [N_PORTS-1:0]      cpu_port_io;
     wire [N_PORTS*64-1:0]   cpu_rdata;
     wire [N_PORTS-1:0]      cpu_ready;
+    wire [N_PORTS-1:0]      bus_err;
 
     wire        mem_req;
     wire [63:0] mem_addr;
@@ -103,6 +105,7 @@ module tb_bus_arbiter;
         .cpu_wdata     (cpu_wdata),
         .cpu_wen       (cpu_wen),
         .cpu_size      (cpu_size),
+        .cpu_port_io   (cpu_port_io),
         .cpu_rdata     (cpu_rdata),
         .cpu_ready     (cpu_ready),
         .mem_req       (mem_req),
@@ -122,7 +125,8 @@ module tb_bus_arbiter;
         .qos_csr_wen   (qos_csr_wen),
         .qos_csr_addr  (qos_csr_addr),
         .qos_csr_wdata (qos_csr_wdata),
-        .qos_csr_rdata (qos_csr_rdata)
+        .qos_csr_rdata (qos_csr_rdata),
+        .bus_err       (bus_err)
     );
 
     // ========================================================================
@@ -137,6 +141,7 @@ module tb_bus_arbiter;
             cpu_wdata     <= {(N_PORTS*64){1'b0}};
             cpu_wen       <= {N_PORTS{1'b0}};
             cpu_size      <= {(N_PORTS*2){1'b0}};
+            cpu_port_io   <= {N_PORTS{1'b0}};
             mem_rdata     <= 64'd0;
             mem_ack       <= 1'b0;
             mmio_rdata    <= 64'd0;
@@ -488,6 +493,112 @@ module tb_bus_arbiter;
         @(negedge clk);
         clear_req(2);
         clear_req(3);
+        @(negedge clk);
+
+        // ---- Test 8: MMIO timeout (no ack → sentinel + bus_err) ----
+        $display("--- Test 8: MMIO timeout ---");
+        reset;
+        @(negedge clk);
+        drive_req(0, 64'hFFFF_FF00_0000_0100, 64'd0, 1'b0, 2'd3);
+
+        // Wait for mmio_req to assert
+        begin : blk_t8a
+            integer wd;
+            wd = 0;
+            while (!mmio_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T8 mmio_req asserted", mmio_req == 1'b1);
+
+        // Do NOT assert mmio_ack — let it timeout
+        // Wait for cpu_ready (should fire after 63 cycles)
+        begin : blk_t8b
+            integer wd;
+            wd = 0;
+            while (!cpu_ready[0] && wd < 200) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T8 cpu_ready after timeout",   cpu_ready[0] == 1'b1);
+        check("T8 sentinel rdata",            cpu_rdata[0*64 +: 64] == 64'hDEAD_DEAD_DEAD_DEAD);
+        check("T8 bus_err[0] asserted",       bus_err[0] == 1'b1);
+        // Verify sticky latch via CSR read
+        @(negedge clk);
+        qos_csr_addr <= 8'h5A;  // CSR_BUS_ERR
+        @(posedge clk); #1;
+        @(posedge clk); #1;
+        check("T8 sticky bit set",            qos_csr_rdata[0] == 1'b1);
+        // Write-1-to-clear the sticky bit
+        @(negedge clk);
+        qos_csr_wen   <= 1'b1;
+        qos_csr_addr  <= 8'h5A;
+        qos_csr_wdata <= 64'h0000_0000_0000_0001;
+        @(negedge clk);
+        qos_csr_wen   <= 1'b0;
+        @(posedge clk); #1;
+        @(posedge clk); #1;
+        check("T8 sticky cleared by W1C",     qos_csr_rdata[0] == 1'b0);
+
+        @(negedge clk);
+        clear_req(0);
+        @(negedge clk);
+
+        // ---- Test 9: MEM timeout (no ack → sentinel + bus_err) ----
+        $display("--- Test 9: MEM timeout ---");
+        reset;
+        @(negedge clk);
+        drive_req(1, 64'h0000_0800, 64'd0, 1'b0, 2'd3);
+
+        // Wait for mem_req to assert
+        begin : blk_t9a
+            integer wd;
+            wd = 0;
+            while (!mem_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T9 mem_req asserted", mem_req == 1'b1);
+
+        // Do NOT assert mem_ack — let it timeout
+        // Wait for cpu_ready (should fire after 255 cycles)
+        begin : blk_t9b
+            integer wd;
+            wd = 0;
+            while (!cpu_ready[1] && wd < 500) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T9 cpu_ready after timeout",   cpu_ready[1] == 1'b1);
+        check("T9 sentinel rdata",            cpu_rdata[1*64 +: 64] == 64'hDEAD_DEAD_DEAD_DEAD);
+        check("T9 bus_err[1] asserted",       bus_err[1] == 1'b1);
+        // Verify bus returns to IDLE (can serve another request)
+        @(negedge clk);
+        clear_req(1);
+        @(negedge clk);
+        drive_req(2, 64'h0000_0900, 64'd0, 1'b0, 2'd3);
+        begin : blk_t9c
+            integer wd;
+            wd = 0;
+            while (!mem_req && wd < 20) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        check("T9 bus recovers for new req",  mem_req == 1'b1);
+        @(negedge clk);
+        mem_rdata <= 64'hBEEF;
+        mem_ack   <= 1'b1;
+        @(negedge clk);
+        mem_ack   <= 1'b0;
+        wait_ready(2);
+        check("T9 recovery data correct",     cpu_rdata[2*64 +: 64] == 64'hBEEF);
+        @(negedge clk);
+        clear_req(2);
         @(negedge clk);
 
         // ================================================================

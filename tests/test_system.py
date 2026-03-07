@@ -49,6 +49,7 @@ import unittest
 from accel_wrapper import Megapad64, HaltError
 from megapad64 import (
     Megapad64Micro, TrapError, IVEC_ILLEGAL_OP, IVEC_PRIV_FAULT,
+    IVEC_BUS_FAULT,
     NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
     CSR_COREID, CSR_NCORES, CSR_CPUID, CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
@@ -68,7 +69,7 @@ from system import MegapadSystem, MMIO_START, MicroCluster
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
-    NetworkDevice, DeviceBus,
+    NetworkDevice, DeviceBus, BusError,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     CRC_BASE, SHA256_BASE, FB_BASE,
     WOTS_BASE, WotsChainAccel,
@@ -24612,6 +24613,119 @@ class TestPortIOBridge(unittest.TestCase):
         val = sys.cpu.mem_read8(0x500)
         self.assertEqual(val, ord("X"),
                          "INP1 should read 'X' from UART RX")
+
+
+class TestBusTimeout(unittest.TestCase):
+    """Tests for bus-error / timeout behaviour (§6b hardening).
+
+    RTL: bus arbiter returns 0xDEAD_DEAD_DEAD_DEAD sentinel + bus_err
+         when no peripheral asserts ack within the timeout window.
+    Emulator: DeviceBus raises BusError, system.py converts to
+              TrapError(IVEC_BUS_FAULT).
+    """
+
+    # -- Unit level: DeviceBus raises BusError on unmapped access ----------
+
+    def test_unmapped_read_raises_bus_error(self):
+        """read8() on an offset with no registered device → BusError."""
+        bus = DeviceBus()
+        bus.register(UART())        # only UART registered
+        with self.assertRaises(BusError) as ctx:
+            bus.read8(0xFFFF)       # way outside any device
+        self.assertEqual(ctx.exception.offset, 0xFFFF)
+        self.assertFalse(ctx.exception.write)
+
+    def test_unmapped_write_raises_bus_error(self):
+        """write8() on an offset with no registered device → BusError."""
+        bus = DeviceBus()
+        bus.register(UART())
+        with self.assertRaises(BusError) as ctx:
+            bus.write8(0xFFFF, 0x42)
+        self.assertEqual(ctx.exception.offset, 0xFFFF)
+        self.assertTrue(ctx.exception.write)
+
+    def test_mapped_device_no_error(self):
+        """Accesses within a registered device range must not raise."""
+        bus = DeviceBus()
+        bus.register(UART())
+        # UART TX data register at offset 0 within UART_BASE
+        bus.write8(UART_BASE, 0x41)       # should not raise
+        val = bus.read8(UART_BASE + 0x01) # UART status reg
+        self.assertIsInstance(val, int)
+
+    # -- Integration level: CPU MMIO access → TrapError --------------------
+
+    def test_cpu_unmapped_mmio_read_traps(self):
+        """CPU reading an unmapped MMIO address raises TrapError(BUS_FAULT)
+        when no IVT is configured (propagates to caller)."""
+        sys = make_system()
+        # Pick an MMIO address with no device behind it
+        unmapped_addr = MMIO_BASE + 0xFFFF
+        code = assemble(f"""
+            ldi64 r1, {unmapped_addr}
+            ld.b r4, r1      ; read unmapped MMIO → bus fault
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        with self.assertRaises(TrapError) as ctx:
+            run_until(sys)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_BUS_FAULT)
+
+    def test_cpu_unmapped_mmio_write_traps(self):
+        """CPU writing an unmapped MMIO address raises TrapError(BUS_FAULT)."""
+        sys = make_system()
+        unmapped_addr = MMIO_BASE + 0xFFFF
+        code = assemble(f"""
+            ldi64 r1, {unmapped_addr}
+            ldi r2, 0x42
+            st.b r1, r2      ; write unmapped MMIO → bus fault
+            halt
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        with self.assertRaises(TrapError) as ctx:
+            run_until(sys)
+        self.assertEqual(ctx.exception.ivec_id, IVEC_BUS_FAULT)
+
+    def test_cpu_trap_handler_entered_on_bus_fault(self):
+        """With IVT configured, unmapped MMIO access invokes _trap() instead
+        of propagating the TrapError exception to the caller."""
+        sys = make_system()
+        IVT_ADDR     = 0x3000
+        HANDLER_ADDR = 0x4000   # just needs to be a valid address
+
+        # Build IVT in memory: 8 bytes per vector, IVEC_BUS_FAULT = 5
+        for vec in range(16):
+            addr_val = HANDLER_ADDR if vec == IVEC_BUS_FAULT else 0
+            for i in range(8):
+                sys.cpu.mem_write8(IVT_ADDR + vec * 8 + i,
+                                   (addr_val >> (8 * i)) & 0xFF)
+        # Put a HALT (0x00 = IDL) at the handler so the CPU stops
+        sys.cpu.mem_write8(HANDLER_ADDR, 0x00)
+
+        unmapped_addr = MMIO_BASE + 0xFFFF
+        code = assemble(f"""
+            ldi64 r1, {unmapped_addr}
+            ld.b r4, r1            ; triggers bus fault → _trap(5)
+            halt                   ; should not reach here
+        """)
+        sys.load_binary(0, code)
+        sys.boot()
+        # Configure IVT AFTER boot (boot resets state)
+        sys.cpu.ivt_base = IVT_ADDR
+        sys.cpu.flag_i = 1
+
+        # Key assertion: no TrapError propagates (it's caught by system.step)
+        # The CPU should not crash — it should end up idle or in the handler
+        for _ in range(20):
+            sys.step()
+            if sys.cpu.halted or sys.cpu.idle:
+                break
+
+        # _trap() clears the I flag upon entry
+        self.assertEqual(sys.cpu.flag_i, 0,
+                         "I flag should be cleared by trap entry")
 
 
 if __name__ == "__main__":

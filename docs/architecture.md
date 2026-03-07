@@ -118,11 +118,16 @@ device occupies a small range:
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |
 | **CRC32/CRC64** | `+0x0980` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
+| **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
-(vector `IVEC_BUS_FAULT`).
+(vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter enforces
+MMIO/MEM ACK timeouts (63/255 cycles); on timeout it returns sentinel
+data (`0xDEAD_DEAD_DEAD_DEAD`), asserts `bus_err`, and fires `IRQX_BUS`.
+In the emulator, unmapped MMIO offsets raise `BusError`, which the SoC
+layer converts to `TrapError(IVEC_BUS_FAULT)`.
 
 ---
 
@@ -750,7 +755,7 @@ interrupt or trap fires:
 
 | Vector | Used By | Purpose |
 |--------|---------|---------|
-| `IVEC_BUS_FAULT` (5) | BIOS | Catches accesses beyond memory bounds; prints fault address and aborts |
+| `IVEC_BUS_FAULT` (5) | BIOS | Catches accesses beyond memory bounds or unmapped MMIO offsets (bus timeout); prints fault address and aborts |
 | `IVEC_TIMER` (7) | KDOS scheduler | Sets `PREEMPT-FLAG` for cooperative preemption |
 | `IVEC_DIV_ZERO` (4) | Hardware | Traps on division by zero |
 | `IVEC_RTC` (16) | Application | Fires on alarm match; cleared by writing 0x01 to STATUS (+0x19) |

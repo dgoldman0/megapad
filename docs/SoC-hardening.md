@@ -1,7 +1,7 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE)  
-Last updated: 2025-07-17
+Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, bus timeout DONE)  
+Last updated: 2026-03-07
 
 ---
 
@@ -850,7 +850,7 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 **Priority: high — dominant bottleneck in SPHINCS+ post-quantum signing**
 **Topology: shared (wraps the existing SHA3/SHAKE engine)**
-**Status: ☐ Not started**
+**Status: ✅ DONE (emulator + RTL spec + 8 Python tests + 38/38 RTL tests)**
 **Origin: Akashic blockchain team request (2026-03-07)**
 
 ### 7.1  Problem Statement
@@ -1220,6 +1220,57 @@ the table.
 
 Plenty of room for future shared accelerators without touching the
 upper half of the address space.
+
+---
+
+## 9. Bus Arbiter MMIO/MEM ACK Timeout — ✅ DONE
+
+**Status: ✅ Implemented in RTL + emulator, fully tested (2026-03-07)**
+
+### Problem
+
+The bus arbiter (`mp64_bus.v`) waited for `mmio_ack` / `mem_ack`
+indefinitely.  Any peripheral that failed to ACK — hardware bug,
+unmapped address, or a gated peripheral (e.g. SHA3 locked by WOTS) —
+caused a total system hang across all cores.
+
+### RTL Solution
+
+Two watchdog counters in `mp64_bus.v`:
+
+| Domain | Counter | Timeout | Sentinel |
+|--------|---------|---------|----------|
+| MMIO   | 6-bit   | 63 cycles  | `0xDEAD_DEAD_DEAD_DEAD` |
+| MEM    | 8-bit   | 255 cycles | `0xDEAD_DEAD_DEAD_DEAD` |
+
+On timeout:
+1. Bus returns sentinel data and asserts `bus_ack` to unblock the
+   requesting core.
+2. `bus_err` pulse fires (active for 1 cycle per timeout event).
+3. `bus_err_sticky` latch set — persists until cleared via W1C write
+   to `CSR_BUS_ERR` (address `0x5A`).
+4. `IRQX_BUS` (priority 5: IPI > **bus** > timer > uart > nic) fires
+   on each core receiving the timeout.
+
+Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
+`mp64_cpu.v` (`irq_bus` input), `mp64_soc.v` (wiring).
+
+### Emulator Solution
+
+- `devices.py`: `BusError` exception class; `DeviceBus.read8()` /
+  `write8()` raise `BusError` on unmapped MMIO offsets (was: silent
+  0xFF / drop).
+- `system.py`: `_patched_read8()` / `_patched_write8()` catch
+  `BusError` and convert to `TrapError(IVEC_BUS_FAULT)`.
+
+### Tests
+
+- **RTL:** `tb_bus_arbiter.v` — tests 8 (MMIO timeout) and 9
+  (MEM timeout).  Verify sentinel data, bus_err pulse, sticky latch
+  set, W1C clear, bus recovery.  38/38 total tests passing.
+- **Python (TestBusTimeout, 6 tests):** unmapped read/write raises
+  `BusError`, mapped device no error, CPU MMIO read/write traps to
+  `IVEC_BUS_FAULT`, trap handler entry (flag_i cleared).
 
 ---
 
