@@ -88,7 +88,7 @@ struct CPUState {
     // 1802 legacy
     uint8_t  d_reg;
     uint8_t  q_out;
-    uint8_t  t_reg;
+    uint16_t t_reg;          // T packs {XSEL[4:0]<<8 | PSEL[4:0]} — needs 10+ bits
 
     // Tile CSRs
     uint64_t sb, sr, sc, sw;
@@ -668,14 +668,14 @@ static uint64_t csr_read(CPUState& s, int addr) {
 static void csr_write(CPUState& s, int addr, uint64_t val) {
     switch (addr) {
         case CSR_FLAGS:     flags_unpack(s, val & 0xFF); break;
-        case CSR_PSEL:      s.psel = val & 0xF; break;
-        case CSR_XSEL:      s.xsel = val & 0xF; break;
-        case CSR_SPSEL:     s.spsel = val & 0xF; break;
+        case CSR_PSEL:      s.psel = val & 0x1F; break;
+        case CSR_XSEL:      s.xsel = val & 0x1F; break;
+        case CSR_SPSEL:     s.spsel = val & 0x1F; break;
         case CSR_IVT_BASE:  s.ivt_base = val; break;
         case CSR_D:         s.d_reg = val & 0xFF; break;
         case CSR_DF:        s.flag_c = val & 1; break;
         case CSR_Q:         s.q_out = val & 1; break;
-        case CSR_T:         s.t_reg = val & 0xFF; break;
+        case CSR_T:         s.t_reg = val & 0xFFFF; break;
         case CSR_IE:        s.flag_i = val & 1; break;
         case CSR_PRIV:      s.priv_level = val & 1; break;
         case CSR_MPU_BASE:  s.mpu_base = val; break;
@@ -2004,34 +2004,34 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             }
             case 0x5: {  // RET
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-                uint64_t t = sys_pop64(s, cb) & 0xFF;
-                s.xsel = (t >> 4) & 0xF;
-                s.psel = t & 0xF;
+                uint64_t t = sys_pop64(s, cb) & 0xFFFF;
+                s.xsel = (t >> 8) & 0x1F;
+                s.psel = t & 0x1F;
                 s.flag_i = 1;
                 cycles++;
                 break;
             }
             case 0x6: {  // DIS
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-                uint64_t t = sys_pop64(s, cb) & 0xFF;
-                s.xsel = (t >> 4) & 0xF;
-                s.psel = t & 0xF;
+                uint64_t t = sys_pop64(s, cb) & 0xFFFF;
+                s.xsel = (t >> 8) & 0x1F;
+                s.psel = t & 0x1F;
                 s.flag_i = 0;
                 cycles++;
                 break;
             }
             case 0x7: {  // MARK
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-                uint8_t t = ((s.xsel & 0xF) << 4) | (s.psel & 0xF);
+                uint16_t t = ((s.xsel & 0x1F) << 8) | (s.psel & 0x1F);
                 s.t_reg = t;
                 sys_push64(s, cb, t);
                 s.xsel = s.psel;
                 cycles++;
                 break;
             }
-            case 0x8:  // SAV
+            case 0x8:  // SAV — store T as 16-bit to M(R(X))
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
-                sys_write8(s, cb, rx(s), s.t_reg);
+                sys_write16(s, cb, rx(s), s.t_reg);
                 break;
             case 0x9:  // SEQ
                 if (s.priv_level) throw std::runtime_error("TRAP:PRIV_FAULT");
