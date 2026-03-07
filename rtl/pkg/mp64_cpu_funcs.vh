@@ -83,7 +83,9 @@ function [3:0] instr_len;
             FAM_MULDIV: instr_len = 4'd2;
             FAM_CSR:    instr_len = 4'd2;
             FAM_MEX:    instr_len = (byte0[3:2] == 2'd1) ? 4'd3 : 4'd2;
-            FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3 : 4'd1;
+            FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3  // EXT.STRING
+                                  : (byte0[3:0] == 4'hA) ? 4'd3  // EXT.DICT
+                                  : 4'd1;
             default:    instr_len = 4'd1;
         endcase
     end

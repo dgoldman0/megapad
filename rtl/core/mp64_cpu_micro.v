@@ -134,7 +134,7 @@ module mp64_cpu_micro (
     // ====================================================================
     // CPU FSM
     // ====================================================================
-    reg [3:0]  cpu_state;
+    reg [4:0]  cpu_state;
 
     // ====================================================================
     // ALU instance (one per micro-core — combinational, cheap)
@@ -308,8 +308,8 @@ module mp64_cpu_micro (
                 // EXT prefix (0xF)
                 // --------------------------------------------------------
                 if (fam == FAM_EXT) begin
-                    if (nib == EXT_STRING) begin
-                        // EXT.STRING not available on micro-cores → ILLEGAL_OP
+                    if (nib == EXT_STRING || nib == EXT_DICT) begin
+                        // EXT.STRING / EXT.DICT not available on micro-cores → ILLEGAL_OP
                         R[spsel] <= R[spsel] - 64'd8;
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];

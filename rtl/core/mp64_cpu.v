@@ -170,9 +170,9 @@ module mp64_cpu #(
     // ====================================================================
     // CPU FSM — extra state for BIST
     // ====================================================================
-    localparam CPU_BIST = 4'd8;       // reuse FETCH_MORE slot (BIST is major only)
+    localparam CPU_BIST = 5'd8;       // reuse FETCH_MORE slot (BIST is major only)
 
-    reg [3:0] cpu_state;
+    reg [4:0] cpu_state;
 
     // ====================================================================
     // Interrupt pending
@@ -289,6 +289,51 @@ module mp64_cpu #(
         .bus_rdata (bus_rdata)
     );
 
+    // Dict engine state
+    reg        dict_start_r;
+    reg [3:0]  dict_op_r;
+    reg [4:0]  dict_dst_reg;
+    reg [4:0]  dict_src_reg;
+
+    // Dict engine wires
+    wire        dict_done;
+    wire [63:0] dict_xt_out;
+    wire        dict_flag_z, dict_flag_v;
+    wire        dict_bus_req, dict_bus_wr;
+    wire [63:0] dict_bus_addr, dict_bus_wdata;
+
+    mp64_dict u_dict (
+        .clk        (clk),
+        .rst        (rst),
+        .start      (dict_start_r),
+        .op         (dict_op_r),
+        .name_addr  (R[dict_src_reg]),
+        .xt_in      (R[dict_dst_reg]),
+        .done       (dict_done),
+        .xt_out     (dict_xt_out),
+        .flag_z     (dict_flag_z),
+        .flag_v     (dict_flag_v),
+        .bus_req    (dict_bus_req),
+        .bus_wr     (dict_bus_wr),
+        .bus_addr   (dict_bus_addr),
+        .bus_wdata  (dict_bus_wdata),
+        .bus_ack    (bus_ready),
+        .bus_rdata  (bus_rdata),
+        // Broadcast — tie off for single-core; SoC wires in multi-core
+        .bcast_valid(),
+        .bcast_hash (),
+        .bcast_name_len(),
+        .bcast_name (),
+        .bcast_xt   (),
+        .bcast_ack  (1'b1),
+        .snoop_valid(1'b0),
+        .snoop_hash (32'd0),
+        .snoop_name_len(5'd0),
+        .snoop_name (248'd0),
+        .snoop_xt   (64'd0),
+        .snoop_ack  ()
+    );
+
     // MPU check (combinational)
     wire mpu_enabled = priv_level && (mpu_limit > mpu_base);
     wire addr_is_hbw = (effective_addr[63:32] == 32'd0)
@@ -348,6 +393,11 @@ module mp64_cpu #(
             string_op_r    <= 4'd0;
             string_dst_reg <= 5'd0;
             string_src_reg <= 5'd0;
+
+            dict_start_r   <= 1'b0;
+            dict_op_r      <= 4'd0;
+            dict_dst_reg   <= 5'd0;
+            dict_src_reg   <= 5'd0;
 
             alu_op <= 4'd0;
             alu_a  <= 64'd0;
@@ -561,6 +611,16 @@ module mp64_cpu #(
                         string_start_r <= 1'b1;
                         ext_active     <= 1'b0;
                         cpu_state      <= CPU_STRING;
+                    end else if (nib == EXT_DICT) begin
+                        // EXT.DICT — 3-byte instruction (2 for DCLR)
+                        //   ibuf[1] = sub-op (00–03)
+                        //   ibuf[2] = [Rd:4][Rs:4]  (ignored for DCLR)
+                        dict_op_r      <= ibuf[1][3:0];
+                        dict_dst_reg   <= {rex_d, ibuf[2][7:4]};
+                        dict_src_reg   <= {rex_s, ibuf[2][3:0]};
+                        dict_start_r   <= 1'b1;
+                        ext_active     <= 1'b0;
+                        cpu_state      <= CPU_DICT;
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -1598,6 +1658,29 @@ module mp64_cpu #(
                         flags[0] <= str_flag_z;  // Z
                         flags[5] <= str_flag_g;  // G
                     end
+                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
+            // DICT: EXT.DICT engine stall — forward bus, await done
+            // ============================================================
+            CPU_DICT: begin
+                dict_start_r <= 1'b0;
+                // Forward dict engine bus to CPU bus outputs
+                bus_valid <= dict_bus_req;
+                bus_addr  <= dict_bus_addr;
+                bus_wdata <= dict_bus_wdata;
+                bus_wen   <= dict_bus_wr;
+                bus_size  <= BUS_BYTE;
+
+                if (dict_done) begin
+                    // Writeback: Rd ← XT result for DFIND
+                    if (dict_op_r == 4'h00)
+                        R[dict_dst_reg] <= dict_xt_out;
+                    // Flags
+                    flags[0] <= dict_flag_z;  // Z = found / success
+                    flags[3] <= dict_flag_v;  // V = overflow (DINS)
                     cpu_state <= CPU_FETCH;
                 end
             end

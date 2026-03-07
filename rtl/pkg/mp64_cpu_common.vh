@@ -18,24 +18,25 @@
 //
 
 // ========================================================================
-// CPU FSM states (4-bit, shared encoding across all core variants)
+// CPU FSM states (5-bit, shared encoding across all core variants)
 // ========================================================================
-localparam CPU_FETCH      = 4'd0;
-localparam CPU_DECODE     = 4'd1;
-localparam CPU_EXECUTE    = 4'd2;
-localparam CPU_MEM_READ   = 4'd3;
-localparam CPU_MEM_WRITE  = 4'd4;
-localparam CPU_MEX_WAIT   = 4'd5;   // major core only
-localparam CPU_IRQ        = 4'd6;
-localparam CPU_HALT       = 4'd7;
-localparam CPU_FETCH_MORE = 4'd8;
-localparam CPU_MULDIV     = 4'd9;   // major core only
-localparam CPU_MEM_READ2  = 4'd10;  // RTI flags pop
-localparam CPU_IRQ_PUSH   = 4'd11;  // push flags in IRQ sequence
-localparam CPU_IRQ_LOAD   = 4'd12;  // load IVT vector from memory
-localparam CPU_MEMALU_RD  = 4'd13;  // MEMALU: reading M(R(X))
-localparam CPU_STRING     = 4'd14;  // EXT.STRING engine stall
-localparam CPU_SKIP       = 4'd15;  // SKIP: fetch next byte for length
+localparam CPU_FETCH      = 5'd0;
+localparam CPU_DECODE     = 5'd1;
+localparam CPU_EXECUTE    = 5'd2;
+localparam CPU_MEM_READ   = 5'd3;
+localparam CPU_MEM_WRITE  = 5'd4;
+localparam CPU_MEX_WAIT   = 5'd5;   // major core only
+localparam CPU_IRQ        = 5'd6;
+localparam CPU_HALT       = 5'd7;
+localparam CPU_FETCH_MORE = 5'd8;
+localparam CPU_MULDIV     = 5'd9;   // major core only
+localparam CPU_MEM_READ2  = 5'd10;  // RTI flags pop
+localparam CPU_IRQ_PUSH   = 5'd11;  // push flags in IRQ sequence
+localparam CPU_IRQ_LOAD   = 5'd12;  // load IVT vector from memory
+localparam CPU_MEMALU_RD  = 5'd13;  // MEMALU: reading M(R(X))
+localparam CPU_STRING     = 5'd14;  // EXT.STRING engine stall
+localparam CPU_SKIP       = 5'd15;  // SKIP: fetch next byte for length
+localparam CPU_DICT       = 5'd16;  // EXT.DICT engine stall
 
 // ========================================================================
 // ALU operation codes (4-bit, shared between mp64_alu and CPU FSMs)
@@ -136,7 +137,9 @@ function [3:0] instr_len;
             FAM_MULDIV: instr_len = 4'd2;
             FAM_CSR:    instr_len = 4'd2;                         // opcode + CSR addr
             FAM_MEX:    instr_len = (byte0[3:2] == 2'd1) ? 4'd3 : 4'd2;
-            FAM_EXT:    instr_len = 4'd1;
+            FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3  // EXT.STRING
+                                  : (byte0[3:0] == 4'hA) ? 4'd3  // EXT.DICT
+                                  : 4'd1;
             default:    instr_len = 4'd1;
         endcase
     end

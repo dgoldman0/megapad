@@ -900,8 +900,8 @@ F5  REX.ND          nibble + dest hi              [committed]
 F6  EXT.SKIP        (pre-existing)
 F7  —               (free — reserved)
 F8  EXT.ETALU       (pre-existing)
-F9  EXT.STRING      block-move/fill/compare       [planned, §2]
-FA  EXT.DICT        dictionary search             [planned, §3]
+F9  EXT.STRING      block-move/fill/compare       [committed, §2]
+FA  EXT.DICT        dictionary search             [committed, §3]
 FB  —               (free)
 FC  —               (free)
 FD  —               (free)
@@ -909,7 +909,7 @@ FE  —               (free)
 FF  —               (free)
 ```
 
-**Budget:** 3 pre-existing + 5 REX + 2 planned = 10 used, **6 free**.
+**Budget:** 3 pre-existing + 5 REX + 2 committed = 10 used, **6 free**.
 
 ---
 

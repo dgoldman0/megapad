@@ -438,6 +438,14 @@ class Megapad64:
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
 
+        # EXT.DICT hardware dictionary hash table (behavioural model)
+        # 64 sets × 4 ways.  Each entry:
+        #   (valid, hash32, name_len, name_bytes, xt)
+        self._dict_table: list[list[tuple[bool, int, int, bytes, int]]] = [
+            [(False, 0, 0, b"", 0) for _ in range(4)]
+            for _ in range(64)
+        ]
+
         # Extended memory regions (attached by system.py)
         self._vram_mem: Optional[bytearray] = None
         self._vram_base: int = 0
@@ -1364,6 +1372,114 @@ class Megapad64:
         self.regs[0] = 0
         return cycles
 
+    # ================================================================
+    # EXT.DICT (FA) — Hardware dictionary search engine
+    # ================================================================
+
+    @staticmethod
+    def _fnv1a_32(data: bytes) -> int:
+        """FNV-1a 32-bit hash, matching RTL implementation."""
+        h = 0x811C9DC5
+        for b in data:
+            h = ((h ^ b) * 0x01000193) & 0xFFFF_FFFF
+        return h
+
+    def _exec_dict(self) -> int:
+        """Execute EXT.DICT (FA) instruction.
+
+        Encoding: FA <sub-op> <reg-byte>
+        Sub-ops: 00=DFIND, 01=DINS, 02=DDEL, 03=DCLR
+        reg-byte: [Rd:4][Rs:4]  (REX extends to R16-R31)
+        """
+        sub_op = self.fetch8()
+        reg_byte = self.fetch8()
+        rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+        rs = (self._rex_s << 4) | (reg_byte & 0xF)
+
+        if sub_op == 0x00:
+            return self._dict_find(rd, rs)
+        elif sub_op == 0x01:
+            return self._dict_insert(rd, rs)
+        elif sub_op == 0x02:
+            return self._dict_delete(rd, rs)
+        elif sub_op == 0x03:
+            return self._dict_clear()
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.DICT sub-op {sub_op:#x} reserved")
+
+    def _dict_read_name(self, addr: int) -> tuple[bytes, int]:
+        """Read a counted-string from memory, return (name_bytes, cycles)."""
+        nlen = self.mem_read8(addr) & 0x1F  # 5-bit, max 31
+        name = bytes(self.mem_read8(u64(addr + 1 + i)) for i in range(nlen))
+        return name, 2 + nlen  # 1 for len byte + nlen name bytes + 1 hash
+
+    def _dict_find(self, rd: int, rs: int) -> int:
+        """DFIND: lookup counted-string at R[rs]; R[rd] ← XT if found."""
+        addr = self.regs[rs]
+        name, cycles = self._dict_read_name(addr)
+        h = self._fnv1a_32(name)
+        set_idx = h & 0x3F
+        for valid, way_h, way_nlen, way_name, way_xt in self._dict_table[set_idx]:
+            if valid and way_h == h and way_nlen == len(name) and way_name == name:
+                self.regs[rd] = way_xt & MASK64
+                self.flag_z = 1
+                self.flag_v = 0
+                return cycles
+        self.regs[rd] = 0
+        self.flag_z = 0
+        self.flag_v = 0
+        return cycles
+
+    def _dict_insert(self, rd: int, rs: int) -> int:
+        """DINS: insert name at R[rs] with XT from R[rd]."""
+        addr = self.regs[rs]
+        xt = self.regs[rd]
+        name, cycles = self._dict_read_name(addr)
+        h = self._fnv1a_32(name)
+        set_idx = h & 0x3F
+        ways = self._dict_table[set_idx]
+        # Update existing match
+        for i, (valid, way_h, way_nlen, way_name, _) in enumerate(ways):
+            if valid and way_h == h and way_nlen == len(name) and way_name == name:
+                ways[i] = (True, h, len(name), name, xt & MASK64)
+                self.flag_z = 1
+                self.flag_v = 0
+                return cycles
+        # Insert into first empty way
+        for i, (valid, *_rest) in enumerate(ways):
+            if not valid:
+                ways[i] = (True, h, len(name), name, xt & MASK64)
+                self.flag_z = 1
+                self.flag_v = 0
+                return cycles
+        # Set full — overflow
+        self.flag_z = 0
+        self.flag_v = 1
+        return cycles
+
+    def _dict_delete(self, rd: int, rs: int) -> int:
+        """DDEL: delete entry matching name at R[rs]."""
+        addr = self.regs[rs]
+        name, cycles = self._dict_read_name(addr)
+        h = self._fnv1a_32(name)
+        set_idx = h & 0x3F
+        ways = self._dict_table[set_idx]
+        for i, (valid, way_h, way_nlen, way_name, _) in enumerate(ways):
+            if valid and way_h == h and way_nlen == len(name) and way_name == name:
+                ways[i] = (False, 0, 0, b"", 0)
+                self.flag_z = 1
+                return cycles
+        self.flag_z = 0
+        return cycles
+
+    def _dict_clear(self) -> int:
+        """DCLR: clear entire hash table."""
+        for s in range(64):
+            for w in range(4):
+                self._dict_table[s][w] = (False, 0, 0, b"", 0)
+        return 66  # ~64 cycles for bulk clear
+
     # -- Trap entry --
 
     def _trap(self, ivec: int):
@@ -1411,6 +1527,14 @@ class Megapad64:
                 if self.perf_enable:
                     self.perf_cycles += cycles
                 return cycles
+            if n == 0xA:
+                # EXT.DICT — self-contained 3-byte instruction
+                cycles += self._exec_dict()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
             self._ext_modifier = n
             # Re-fetch the actual instruction
             byte0 = self.fetch8()
@@ -1420,6 +1544,14 @@ class Megapad64:
             # REX + F9: second byte is also 0xF family
             if f == 0xF and n == 0x9:
                 cycles += self._exec_string()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
+            # REX + FA: second byte is also 0xF family
+            if f == 0xF and n == 0xA:
+                cycles += self._exec_dict()
                 self._ext_modifier = -1
                 self.cycle_count += cycles
                 if self.perf_enable:
@@ -2844,11 +2976,15 @@ class Megapad64:
         if f == 0xF:
             if n == 0x9:  # EXT.STRING: self-contained 3-byte
                 return 3
+            if n == 0xA:  # EXT.DICT: self-contained 3-byte
+                return 3
             b1 = self.mem_read8(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
             if f2 == 0xF and n2 == 0x9:  # REX + F9
                 return 4  # REX byte + F9 + sub-op + reg-byte
+            if f2 == 0xF and n2 == 0xA:  # REX + FA
+                return 4  # REX byte + FA + sub-op + reg-byte
             return 1 + self._family_size(f2, n2, u64(self.pc + 1))
         return self._family_size(f, n, self.pc)
 
@@ -3007,6 +3143,13 @@ class Megapad64Micro(Megapad64):
         self.fetch8()  # consume reg-byte
         raise TrapError(IVEC_ILLEGAL_OP,
                         "EXT.STRING (F9) not available on micro-core")
+
+    def _exec_dict(self) -> int:
+        """EXT.DICT not available on micro-cores."""
+        self.fetch8()  # consume sub-op
+        self.fetch8()  # consume reg-byte
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "EXT.DICT (FA) not available on micro-core")
 
     # -- MEX (tile engine) — shared via cluster tile engine --
 

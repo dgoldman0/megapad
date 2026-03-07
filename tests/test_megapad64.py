@@ -2356,8 +2356,245 @@ def test_ext_string():
 
 
 # =========================================================================
-#  Runner
+#  EXT.DICT (FA) — hardware dictionary cache
 # =========================================================================
+
+def test_ext_dict():
+    """EXT.DICT (prefix FA) — DFIND, DINS, DDEL, DCLR."""
+    print("\n== EXT.DICT (FA) ==")
+
+    # --- DINS + DFIND: insert then find ---
+    # Seed counted-string "ABC" at 0x80: [3, 'A', 'B', 'C']
+    cpu1 = Megapad64()
+    for i, b in enumerate([3, 0x41, 0x42, 0x43]):
+        cpu1.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80          ; Rs = counted-string "ABC"
+        ldi64 r0, 0xDEADBEEF  ; Rd = XT value
+        dins r0, r9
+        ldi r1, 0             ; clear R1 for DFIND result
+        dfind r1, r9          ; R1 ← XT if found
+        halt
+    """)
+    cpu1.load_bytes(0, code)
+    cpu1.pc = 0
+    cpu1.regs[cpu1.spsel] = 0x10000
+    try:
+        cpu1.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DINS+DFIND hit: R1 = XT",
+          cpu1.regs[1] == 0xDEADBEEF,
+          f"R1={cpu1.regs[1]:#x}")
+    check("DINS+DFIND hit: flag_z = 1", cpu1.flag_z == 1)
+
+    # --- DFIND miss: search for name not in cache ---
+    cpu2 = Megapad64()
+    for i, b in enumerate([3, 0x58, 0x59, 0x5A]):   # "XYZ"
+        cpu2.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80          ; Rs = counted-string "XYZ"
+        dfind r0, r9          ; R0 ← 0 on miss
+        halt
+    """)
+    cpu2.load_bytes(0, code)
+    cpu2.pc = 0
+    cpu2.regs[cpu2.spsel] = 0x10000
+    try:
+        cpu2.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DFIND miss: R0 = 0", cpu2.regs[0] == 0, f"R0={cpu2.regs[0]:#x}")
+    check("DFIND miss: flag_z = 0", cpu2.flag_z == 0)
+
+    # --- DINS update: overwrite XT for existing name ---
+    cpu3 = Megapad64()
+    for i, b in enumerate([2, 0x48, 0x49]):   # "HI"
+        cpu3.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80          ; Rs = "HI"
+        ldi64 r0, 0x1111
+        dins r0, r9           ; insert XT=0x1111
+        ldi64 r0, 0x2222
+        dins r0, r9           ; update XT=0x2222
+        ldi r1, 0
+        dfind r1, r9          ; R1 should be 0x2222
+        halt
+    """)
+    cpu3.load_bytes(0, code)
+    cpu3.pc = 0
+    cpu3.regs[cpu3.spsel] = 0x10000
+    try:
+        cpu3.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DINS update: R1 = updated XT",
+          cpu3.regs[1] == 0x2222,
+          f"R1={cpu3.regs[1]:#x}")
+
+    # --- DDEL: delete entry then DFIND misses ---
+    cpu4 = Megapad64()
+    for i, b in enumerate([3, 0x44, 0x45, 0x4C]):   # "DEL"
+        cpu4.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80          ; Rs = "DEL"
+        ldi64 r0, 0xCAFE
+        dins r0, r9           ; insert
+        ddel r0, r9           ; delete
+        ldi r1, 0
+        dfind r1, r9          ; should miss
+        halt
+    """)
+    cpu4.load_bytes(0, code)
+    cpu4.pc = 0
+    cpu4.regs[cpu4.spsel] = 0x10000
+    try:
+        cpu4.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DDEL+DFIND miss: R1 = 0",
+          cpu4.regs[1] == 0, f"R1={cpu4.regs[1]:#x}")
+    check("DDEL+DFIND miss: flag_z = 0", cpu4.flag_z == 0)
+
+    # --- DCLR: clear all entries ---
+    cpu5 = Megapad64()
+    for i, b in enumerate([2, 0x41, 0x42]):   # "AB"
+        cpu5.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80          ; Rs = "AB"
+        ldi64 r0, 0xBBBB
+        dins r0, r9           ; insert
+        dclr                  ; clear everything
+        ldi r1, 0
+        dfind r1, r9          ; should miss
+        halt
+    """)
+    cpu5.load_bytes(0, code)
+    cpu5.pc = 0
+    cpu5.regs[cpu5.spsel] = 0x10000
+    try:
+        cpu5.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DCLR+DFIND miss: R1 = 0",
+          cpu5.regs[1] == 0, f"R1={cpu5.regs[1]:#x}")
+    check("DCLR+DFIND miss: flag_z = 0", cpu5.flag_z == 0)
+
+    # --- DDEL non-existent: flag_z = 0 ---
+    cpu6 = Megapad64()
+    for i, b in enumerate([2, 0x4E, 0x4F]):   # "NO"
+        cpu6.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80
+        ddel r0, r9           ; delete non-existent
+        halt
+    """)
+    cpu6.load_bytes(0, code)
+    cpu6.pc = 0
+    cpu6.regs[cpu6.spsel] = 0x10000
+    try:
+        cpu6.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("DDEL non-existent: flag_z = 0", cpu6.flag_z == 0)
+
+    # --- Multi-entry: insert 3, find each ---
+    cpu7 = Megapad64()
+    # "AA" at 0x80, "BB" at 0x90, "CC" at 0xA0
+    cpu7.mem_write8(0x80, 2); cpu7.mem_write8(0x81, 0x41); cpu7.mem_write8(0x82, 0x41)
+    cpu7.mem_write8(0x90, 2); cpu7.mem_write8(0x91, 0x42); cpu7.mem_write8(0x92, 0x42)
+    cpu7.mem_write8(0xA0, 2); cpu7.mem_write8(0xA1, 0x43); cpu7.mem_write8(0xA2, 0x43)
+    code = assemble("""
+        ldi r9, 0x80
+        ldi64 r0, 0x1000
+        dins r0, r9           ; "AA" → 0x1000
+        ldi r9, 0x90
+        ldi64 r0, 0x2000
+        dins r0, r9           ; "BB" → 0x2000
+        ldi r9, 0xA0
+        ldi64 r0, 0x3000
+        dins r0, r9           ; "CC" → 0x3000
+        ; look up each
+        ldi r9, 0x80
+        dfind r1, r9          ; R1 ← 0x1000
+        ldi r9, 0x90
+        dfind r2, r9          ; R2 ← 0x2000
+        ldi r9, 0xA0
+        dfind r4, r9          ; R4 ← 0x3000 (R3=PC, avoid!)
+        halt
+    """)
+    cpu7.load_bytes(0, code)
+    cpu7.pc = 0
+    cpu7.regs[cpu7.spsel] = 0x10000
+    try:
+        cpu7.run(max_steps=10000)
+    except HaltError:
+        pass
+    check("Multi DFIND: AA → 0x1000",
+          cpu7.regs[1] == 0x1000, f"R1={cpu7.regs[1]:#x}")
+    check("Multi DFIND: BB → 0x2000",
+          cpu7.regs[2] == 0x2000, f"R2={cpu7.regs[2]:#x}")
+    check("Multi DFIND: CC → 0x3000",
+          cpu7.regs[4] == 0x3000, f"R4={cpu7.regs[4]:#x}")
+
+    # --- DDEL selective: delete one, others survive ---
+    cpu8 = Megapad64()
+    cpu8.mem_write8(0x80, 1); cpu8.mem_write8(0x81, 0x50)   # "P"
+    cpu8.mem_write8(0x90, 1); cpu8.mem_write8(0x91, 0x51)   # "Q"
+    code = assemble("""
+        ldi r9, 0x80
+        ldi64 r0, 0xAAAA
+        dins r0, r9           ; "P" → 0xAAAA
+        ldi r9, 0x90
+        ldi64 r0, 0xBBBB
+        dins r0, r9           ; "Q" → 0xBBBB
+        ; delete P
+        ldi r9, 0x80
+        ddel r0, r9
+        ; verify P gone
+        ldi r1, 0
+        dfind r1, r9          ; should miss
+        ; verify Q still there
+        ldi r9, 0x90
+        dfind r2, r9          ; R2 ← 0xBBBB
+        halt
+    """)
+    cpu8.load_bytes(0, code)
+    cpu8.pc = 0
+    cpu8.regs[cpu8.spsel] = 0x10000
+    try:
+        cpu8.run(max_steps=10000)
+    except HaltError:
+        pass
+    check("DDEL selective: P gone (R1=0)",
+          cpu8.regs[1] == 0, f"R1={cpu8.regs[1]:#x}")
+    check("DDEL selective: Q alive (R2=0xBBBB)",
+          cpu8.regs[2] == 0xBBBB, f"R2={cpu8.regs[2]:#x}")
+
+    # --- Long name: 20-byte name ---
+    cpu9 = Megapad64()
+    name = b"ABCDEFGHIJKLMNOPQRST"  # 20 chars
+    cpu9.mem_write8(0x80, len(name))
+    for i, b in enumerate(name):
+        cpu9.mem_write8(0x81 + i, b)
+    code = assemble("""
+        ldi r9, 0x80
+        ldi64 r0, 0xFACE
+        dins r0, r9           ; insert 20-byte name
+        ldi r1, 0
+        dfind r1, r9          ; find it
+        halt
+    """)
+    cpu9.load_bytes(0, code)
+    cpu9.pc = 0
+    cpu9.regs[cpu9.spsel] = 0x10000
+    try:
+        cpu9.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("Long name (20 bytes): R1 = 0xFACE",
+          cpu9.regs[1] == 0xFACE, f"R1={cpu9.regs[1]:#x}")
+    check("Long name (20 bytes): flag_z = 1", cpu9.flag_z == 1)
 
 def main():
     global PASS, FAIL
@@ -2386,6 +2623,7 @@ def main():
         test_tile_kernels,
         test_ext_prefix,
         test_ext_string,
+        test_ext_dict,
         test_fibonacci,
         test_subroutine,
         test_stack_ops,

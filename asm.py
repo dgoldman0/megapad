@@ -77,6 +77,11 @@ STRING_SUB = {
     "bcomp":  0x03, "bsrch":  0x04,
 }
 
+# EXT.DICT sub-op map (prefix FA)
+DICT_SUB = {
+    "dfind": 0x00, "dins": 0x01, "ddel": 0x02, "dclr": 0x03,
+}
+
 # ---------------------------------------------------------------------------
 #  Parser helpers
 # ---------------------------------------------------------------------------
@@ -472,6 +477,10 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower in STRING_SUB:
         return 3 + (1 if hi else 0)  # [REX] + F9 + sub-op + reg-byte
 
+    # -- EXT.DICT (FA) --
+    if mnem_lower in DICT_SUB:
+        return 3 + (1 if hi else 0)  # [REX] + FA + sub-op + reg-byte
+
     # -- MEX --
     if mnem_lower.startswith("t."):
         sub_name = mnem_lower[2:]
@@ -795,6 +804,25 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         out.append(0xF9)           # EXT.STRING prefix
         out.append(sub)            # sub-op
         out.append(((rd & 0xF) << 4) | (rs & 0xF))
+        return out
+
+    # ---- EXT.DICT (0xFA) ----
+    if mnem_lower in DICT_SUB:
+        sub = DICT_SUB[mnem_lower]
+        if mnem_lower == "dclr":
+            # DCLR takes no operands; emit FA 03 00
+            out.append(0xFA)
+            out.append(sub)
+            out.append(0x00)
+        else:
+            rd = _parse_reg(ops[0])
+            rs = _parse_reg(ops[1])
+            rex = _rex_byte(rd=rd, rs=rs)
+            if rex is not None:
+                out.append(rex)
+            out.append(0xFA)       # EXT.DICT prefix
+            out.append(sub)        # sub-op
+            out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
 
     # ---- MEX tile ops (0xE) ----

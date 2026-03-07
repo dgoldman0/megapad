@@ -96,28 +96,30 @@ localparam [3:0] EXT_REX_ND = 4'd5;     // REX: nib[4]=1, Rd[4]=1
 localparam [3:0] EXT_SKIP   = 4'd6;     // Conditional skip
 localparam [3:0] EXT_ETALU  = 4'd8;     // Extended tile ALU
 localparam [3:0] EXT_STRING = 4'd9;     // EXT.STRING Forth string engine
+localparam [3:0] EXT_DICT   = 4'hA;     // EXT.DICT Forth dictionary engine
 
 // ============================================================================
 // §3 — ALU & CPU FSM Shared Encodings
 // ============================================================================
 
-// --- CPU FSM states (4-bit) ---
-localparam [3:0] CPU_FETCH      = 4'd0;
-localparam [3:0] CPU_DECODE     = 4'd1;
-localparam [3:0] CPU_EXECUTE    = 4'd2;
-localparam [3:0] CPU_MEM_READ   = 4'd3;
-localparam [3:0] CPU_MEM_WRITE  = 4'd4;
-localparam [3:0] CPU_MEX_WAIT   = 4'd5;  // major core only
-localparam [3:0] CPU_IRQ        = 4'd6;
-localparam [3:0] CPU_HALT       = 4'd7;
-localparam [3:0] CPU_FETCH_MORE = 4'd8;
-localparam [3:0] CPU_MULDIV     = 4'd9;  // major core only
-localparam [3:0] CPU_MEM_READ2  = 4'd10; // RTI flags pop
-localparam [3:0] CPU_IRQ_PUSH   = 4'd11; // push flags in IRQ sequence
-localparam [3:0] CPU_IRQ_LOAD   = 4'd12; // load IVT vector from memory
-localparam [3:0] CPU_MEMALU_RD  = 4'd13; // MEMALU: reading M(R(X))
-localparam [3:0] CPU_STRING     = 4'd14; // EXT.STRING engine stall
-localparam [3:0] CPU_SKIP       = 4'd15; // SKIP: fetch next for length
+// --- CPU FSM states (5-bit) ---
+localparam [4:0] CPU_FETCH      = 5'd0;
+localparam [4:0] CPU_DECODE     = 5'd1;
+localparam [4:0] CPU_EXECUTE    = 5'd2;
+localparam [4:0] CPU_MEM_READ   = 5'd3;
+localparam [4:0] CPU_MEM_WRITE  = 5'd4;
+localparam [4:0] CPU_MEX_WAIT   = 5'd5;  // major core only
+localparam [4:0] CPU_IRQ        = 5'd6;
+localparam [4:0] CPU_HALT       = 5'd7;
+localparam [4:0] CPU_FETCH_MORE = 5'd8;
+localparam [4:0] CPU_MULDIV     = 5'd9;  // major core only
+localparam [4:0] CPU_MEM_READ2  = 5'd10; // RTI flags pop
+localparam [4:0] CPU_IRQ_PUSH   = 5'd11; // push flags in IRQ sequence
+localparam [4:0] CPU_IRQ_LOAD   = 5'd12; // load IVT vector from memory
+localparam [4:0] CPU_MEMALU_RD  = 5'd13; // MEMALU: reading M(R(X))
+localparam [4:0] CPU_STRING     = 5'd14; // EXT.STRING engine stall
+localparam [4:0] CPU_SKIP       = 5'd15; // SKIP: fetch next for length
+localparam [4:0] CPU_DICT       = 5'd16; // EXT.DICT engine stall
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;

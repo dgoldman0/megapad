@@ -723,12 +723,56 @@ pw_end:
     ret.l
 
 ; =====================================================================
-;  Dictionary Lookup
+;  Dictionary Lookup  (with EXT.DICT / DFIND hardware fast-path)
 ; =====================================================================
 
 ; find_word: search dictionary for word at R9 (len R12).
 ;   Returns R9=entry (0=not found), R1=flags byte.
+;
+;   Fast path:  Build an uppercase counted-string in dict_pad, then
+;   DFIND into the hardware 4-way set-associative cache.  If hit,
+;   return immediately.  On miss fall through to the traditional
+;   linked-list walk and DINS the result so subsequent lookups hit.
+
 find_word:
+    ; ---- build uppercase counted-string in dict_pad ----
+    ldi64 r11, dict_pad
+    st.b r11, r12             ; dict_pad[0] = name length
+    ldi r0, 0                 ; copy index
+fw_build:
+    cmp r0, r12
+    breq fw_dfind
+    mov r1, r9
+    add r1, r0
+    ld.b r7, r1               ; source char
+    ; to upper
+    cmpi r7, 0x61
+    brcc fw_bu_skip
+    cmpi r7, 0x7B
+    brcs fw_bu_skip
+    subi r7, 0x20
+fw_bu_skip:
+    mov r1, r11
+    inc r1
+    add r1, r0
+    st.b r1, r7               ; dict_pad[1+i] = uppercased char
+    inc r0
+    br fw_build
+
+fw_dfind:
+    ; DFIND: R0 ← cached entry addr if hit, Z=1
+    ldi64 r13, dict_pad
+    dfind r0, r13
+    brne fw_slow               ; Z=0 → cache miss, linked-list search
+    ; ---- cache hit ----
+    mov r9, r0                 ; R9 = entry address
+    mov r11, r9
+    addi r11, 8
+    ld.b r1, r11              ; R1 = flags byte
+    ret.l
+
+fw_slow:
+    ; ---- slow path: linked-list traversal ----
     ldi64 r11, var_latest
     ldn r13, r11              ; current entry
 
@@ -788,6 +832,11 @@ fw_hit:
     mov r11, r13
     addi r11, 8
     ld.b r1, r11              ; flags byte
+    ; ---- populate dict cache (miss-then-find) ----
+    ; dict_pad still holds the uppercase counted-string from above
+    mov r0, r9                ; R0 = entry addr (stored as XT)
+    ldi64 r13, dict_pad
+    dins r0, r13              ; cache: uppercase_name → entry_addr
     ret.l
 
 fw_next:
@@ -14807,6 +14856,13 @@ tib_buffer:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+
+; =====================================================================
+;  dict_pad — 32-byte scratch for DFIND/DINS counted-strings
+; =====================================================================
+dict_pad:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
