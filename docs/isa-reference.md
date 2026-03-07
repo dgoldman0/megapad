@@ -526,6 +526,7 @@ value is stored and consumed by the following instruction.
 | `F5` | **REX.ND** | Set nib[4]=1 and Rd[4]=1 (nibble + dest in R16–R31). |
 | `F6` | **EXT.SKIP** | Next BR becomes a SKIP: if condition is true, skip the following instruction entirely (advance PC past it). |
 | `F8` | **EXT.ETALU** | Extended tile ALU sub-functions for the next MEX instruction. |
+| `F9 ss DR` | **EXT.STRING** | Forth-aware string engine (3-byte self-contained). See below. |
 | `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
@@ -561,6 +562,37 @@ ADDI R4, 1         ; this runs only if R4 ≠ 0
 ```
 
 SKIP is 2 bytes: `F6` prefix + `3c` (BR family with condition code).
+
+### EXT.STRING — Forth-Aware String Engine (F9)
+
+Self-contained 3-byte instruction for block memory operations commonly
+used in Forth (CMOVE, CMOVE>, FILL, COMPARE, SEARCH).
+
+**Encoding:** `F9 <sub-op> <reg-byte>`
+
+- `F9` — EXT.STRING prefix (family 0xF, nibble 9)
+- `<sub-op>` — operation selector (1 byte)
+- `<reg-byte>` — `[Rd:4][Rs:4]` register pair
+
+With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
+
+| Sub-op | Mnemonic | Operation |
+|--------|----------|-----------|
+| `0x00` | **CMOVE** Rd, Rs | Forward block copy: copy R0 bytes from M[Rs] → M[Rd]. Advances both pointers; R0 ← 0. |
+| `0x01` | **CMOVE>** Rd, Rs | Backward block copy: same as CMOVE but copies high-to-low (safe for overlapping dst > src). |
+| `0x02` | **BFILL** Rd, Rn | Fill Rn bytes at M[Rd] with D[7:0]. Rd advances; Rn ← 0. |
+| `0x03` | **BCOMP** Rd, Rs | Compare R0 bytes at M[Rd] vs M[Rs]. Sets Z=1 if equal, Z=0,G=(dst>src) at first mismatch. R0 ← remaining count. |
+| `0x04` | **BSRCH** Rd, Rs | Search R0 bytes at M[Rd] for D[7:0]. Z=1 if found; Rs ← offset of match; Rd → match address. |
+
+**Register conventions:**
+- R0 is the implicit length register for CMOVE, CMOVE>, BCOMP, BSRCH.
+- BFILL uses the Rs-field register as its length (Rn).
+- D[7:0] (the 1802-heritage D accumulator) supplies the fill/search byte.
+- All operations advance Rd (and Rs for copy/compare) by the number of bytes processed.
+
+**Cycle counts:** CMOVE/CMOVE> = 2N+2, BFILL = N+2, BCOMP = up to 2N+2, BSRCH = up to N+2.
+
+**Micro-cores:** EXT.STRING traps to IVEC_ILLEGAL_OP on micro-cores (they lack the string FSM).
 
 ---
 

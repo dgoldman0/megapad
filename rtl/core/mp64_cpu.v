@@ -252,6 +252,43 @@ module mp64_cpu #(
     reg        io_out_active;
     reg [2:0]  post_action;
 
+    // String engine state
+    reg        string_start_r;
+    reg [3:0]  string_op_r;
+    reg [4:0]  string_dst_reg;
+    reg [4:0]  string_src_reg;
+
+    // String engine wires
+    wire        str_done;
+    wire [63:0] str_out_src, str_out_dst, str_out_len, str_out_result;
+    wire        str_flag_z, str_flag_g;
+    wire        str_bus_req, str_bus_wr;
+    wire [63:0] str_bus_addr, str_bus_wdata;
+
+    mp64_string u_string (
+        .clk       (clk),
+        .rst       (rst),
+        .start     (string_start_r),
+        .op        (string_op_r),
+        .src_addr  (R[string_src_reg]),
+        .dst_addr  (R[string_dst_reg]),
+        .length    ((string_op_r == 4'h02) ? R[string_src_reg] : R[0]),
+        .fill_byte (D),
+        .done      (str_done),
+        .out_src   (str_out_src),
+        .out_dst   (str_out_dst),
+        .out_len   (str_out_len),
+        .out_result(str_out_result),
+        .flag_z    (str_flag_z),
+        .flag_g    (str_flag_g),
+        .bus_req   (str_bus_req),
+        .bus_wr    (str_bus_wr),
+        .bus_addr  (str_bus_addr),
+        .bus_wdata (str_bus_wdata),
+        .bus_ack   (bus_ready),
+        .bus_rdata (bus_rdata)
+    );
+
     // MPU check (combinational)
     wire mpu_enabled = priv_level && (mpu_limit > mpu_base);
     wire addr_is_hbw = (effective_addr[63:32] == 32'd0)
@@ -306,6 +343,11 @@ module mp64_cpu #(
             io_port     <= 3'd0;
             io_is_inp   <= 1'b0;
             io_out_active <= 1'b0;
+
+            string_start_r <= 1'b0;
+            string_op_r    <= 4'd0;
+            string_dst_reg <= 5'd0;
+            string_src_reg <= 5'd0;
 
             alu_op <= 4'd0;
             alu_a  <= 64'd0;
@@ -509,9 +551,21 @@ module mp64_cpu #(
                 // EXT prefix (0xF)
                 // --------------------------------------------------------
                 if (fam == FAM_EXT) begin
-                    ext_active <= 1'b1;
-                    ext_mod    <= nib;
-                    cpu_state  <= CPU_FETCH;
+                    if (nib == EXT_STRING) begin
+                        // EXT.STRING — 3-byte self-contained instruction
+                        //   ibuf[1] = sub-op (00–04)
+                        //   ibuf[2] = [Rd:4][Rs:4]
+                        string_op_r    <= ibuf[1][3:0];
+                        string_dst_reg <= {rex_d, ibuf[2][7:4]};
+                        string_src_reg <= {rex_s, ibuf[2][3:0]};
+                        string_start_r <= 1'b1;
+                        ext_active     <= 1'b0;
+                        cpu_state      <= CPU_STRING;
+                    end else begin
+                        ext_active <= 1'b1;
+                        ext_mod    <= nib;
+                        cpu_state  <= CPU_FETCH;
+                    end
                 end
 
                 // --------------------------------------------------------
@@ -1511,6 +1565,40 @@ module mp64_cpu #(
                             bist_status <= 2'd2; bist_running <= 1'b0; cpu_state <= CPU_FETCH;
                         end
                     endcase
+                end
+            end
+
+            // ============================================================
+            // STRING: EXT.STRING engine stall — forward bus, await done
+            // ============================================================
+            CPU_STRING: begin
+                string_start_r <= 1'b0;
+                // Forward string engine bus to CPU bus outputs
+                bus_valid <= str_bus_req;
+                bus_addr  <= str_bus_addr;
+                bus_wdata <= str_bus_wdata;
+                bus_wen   <= str_bus_wr;
+                bus_size  <= BUS_BYTE;
+
+                if (str_done) begin
+                    // Writeback: Rd
+                    R[string_dst_reg] <= str_out_dst;
+                    // Writeback: Rs (depends on sub-op)
+                    if (string_op_r == 4'h02)        // BFILL: Rs was count
+                        R[string_src_reg] <= str_out_len;
+                    else if (string_op_r == 4'h04)   // BSRCH: Rs ← offset
+                        R[string_src_reg] <= str_out_result;
+                    else                              // CMOVE/CMOVE>/BCOMP
+                        R[string_src_reg] <= str_out_src;
+                    // Writeback: R0 (length) for non-BFILL ops
+                    if (string_op_r != 4'h02)
+                        R[0] <= str_out_len;
+                    // Flags: update Z/G for BCOMP and BSRCH
+                    if (string_op_r == 4'h03 || string_op_r == 4'h04) begin
+                        flags[0] <= str_flag_z;  // Z
+                        flags[5] <= str_flag_g;  // G
+                    end
+                    cpu_state <= CPU_FETCH;
                 end
             end
 

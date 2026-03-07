@@ -308,9 +308,21 @@ module mp64_cpu_micro (
                 // EXT prefix (0xF)
                 // --------------------------------------------------------
                 if (fam == FAM_EXT) begin
-                    ext_active <= 1'b1;
-                    ext_mod    <= nib;
-                    cpu_state  <= CPU_FETCH;
+                    if (nib == EXT_STRING) begin
+                        // EXT.STRING not available on micro-cores → ILLEGAL_OP
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        mem_data <= R[psel];
+                        flags[6] <= 1'b0;
+                        ivec_id  <= IRQX_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        cpu_state <= CPU_MEM_WRITE;
+                    end else begin
+                        ext_active <= 1'b1;
+                        ext_mod    <= nib;
+                        cpu_state  <= CPU_FETCH;
+                    end
                 end
 
                 // --------------------------------------------------------

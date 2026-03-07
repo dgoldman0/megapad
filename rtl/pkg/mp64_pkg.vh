@@ -95,6 +95,7 @@ localparam [3:0] EXT_REX_N  = 4'd4;     // REX: nib[4] = 1
 localparam [3:0] EXT_REX_ND = 4'd5;     // REX: nib[4]=1, Rd[4]=1
 localparam [3:0] EXT_SKIP   = 4'd6;     // Conditional skip
 localparam [3:0] EXT_ETALU  = 4'd8;     // Extended tile ALU
+localparam [3:0] EXT_STRING = 4'd9;     // EXT.STRING Forth string engine
 
 // ============================================================================
 // §3 — ALU & CPU FSM Shared Encodings
@@ -115,7 +116,7 @@ localparam [3:0] CPU_MEM_READ2  = 4'd10; // RTI flags pop
 localparam [3:0] CPU_IRQ_PUSH   = 4'd11; // push flags in IRQ sequence
 localparam [3:0] CPU_IRQ_LOAD   = 4'd12; // load IVT vector from memory
 localparam [3:0] CPU_MEMALU_RD  = 4'd13; // MEMALU: reading M(R(X))
-localparam [3:0] CPU_MEMALU_WB  = 4'd14; // reserved
+localparam [3:0] CPU_STRING     = 4'd14; // EXT.STRING engine stall
 localparam [3:0] CPU_SKIP       = 4'd15; // SKIP: fetch next for length
 
 // --- ALU operation codes (4-bit) ---

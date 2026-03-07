@@ -34,7 +34,7 @@ localparam CPU_MEM_READ2  = 4'd10;  // RTI flags pop
 localparam CPU_IRQ_PUSH   = 4'd11;  // push flags in IRQ sequence
 localparam CPU_IRQ_LOAD   = 4'd12;  // load IVT vector from memory
 localparam CPU_MEMALU_RD  = 4'd13;  // MEMALU: reading M(R(X))
-localparam CPU_MEMALU_WB  = 4'd14;  // reserved (unused in current FSMs)
+localparam CPU_STRING     = 4'd14;  // EXT.STRING engine stall
 localparam CPU_SKIP       = 4'd15;  // SKIP: fetch next byte for length
 
 // ========================================================================

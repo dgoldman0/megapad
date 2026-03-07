@@ -1257,6 +1257,113 @@ class Megapad64:
         """Override in system to clear IPI pending bit."""
         pass
 
+    # -- EXT.STRING (prefix F9) --
+
+    def _exec_string(self) -> int:
+        """Execute EXT.STRING (F9) instruction.
+
+        Encoding: F9 <sub-op> <reg-byte>
+        Sub-ops: 00=CMOVE, 01=CMOVE>, 02=BFILL, 03=BCOMP, 04=BSRCH
+        reg-byte: [Rd:4][Rs:4]  (REX extends to R16-R31)
+        """
+        sub_op = self.fetch8()
+        reg_byte = self.fetch8()
+        rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+        rs = (self._rex_s << 4) | (reg_byte & 0xF)
+
+        if sub_op == 0x00:
+            return self._string_cmove(rd, rs, forward=True)
+        elif sub_op == 0x01:
+            return self._string_cmove(rd, rs, forward=False)
+        elif sub_op == 0x02:
+            return self._string_bfill(rd, rn=rs)
+        elif sub_op == 0x03:
+            return self._string_bcomp(rd, rs)
+        elif sub_op == 0x04:
+            return self._string_bsrch(rd, rs)
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.STRING sub-op {sub_op:#x} reserved")
+
+    def _string_cmove(self, rd: int, rs: int, forward: bool) -> int:
+        """CMOVE / CMOVE> — block byte copy."""
+        src = self.regs[rs]
+        dst = self.regs[rd]
+        ln = self.regs[0] & MASK64
+        if ln > 0:
+            if forward:
+                for i in range(ln):
+                    b = self.mem_read8(u64(src + i))
+                    self.mem_write8(u64(dst + i), b)
+            else:
+                for i in range(ln - 1, -1, -1):
+                    b = self.mem_read8(u64(src + i))
+                    self.mem_write8(u64(dst + i), b)
+        self.regs[rs] = u64(src + ln)
+        self.regs[rd] = u64(dst + ln)
+        self.regs[0] = 0
+        return ln + 2  # N reads + N writes + setup + done
+
+    def _string_bfill(self, rd: int, rn: int) -> int:
+        """BFILL — fill block with D[7:0]."""
+        dst = self.regs[rd]
+        ln = self.regs[rn] & MASK64
+        fb = self.d_reg & 0xFF
+        for i in range(ln):
+            self.mem_write8(u64(dst + i), fb)
+        self.regs[rd] = u64(dst + ln)
+        self.regs[rn] = 0
+        return ln + 2
+
+    def _string_bcomp(self, rd: int, rs: int) -> int:
+        """BCOMP — block byte compare."""
+        src = self.regs[rs]
+        dst = self.regs[rd]
+        ln = self.regs[0] & MASK64
+        cycles = 2
+        remaining = ln
+        for i in range(ln):
+            sb = self.mem_read8(u64(src + i))
+            db = self.mem_read8(u64(dst + i))
+            cycles += 1
+            remaining -= 1
+            if sb != db:
+                self.flag_z = 0
+                self.flag_g = 1 if db > sb else 0
+                self.regs[rs] = u64(src + i)
+                self.regs[rd] = u64(dst + i)
+                self.regs[0] = u64(remaining + 1)
+                return cycles
+        # All bytes matched
+        self.flag_z = 1
+        self.flag_g = 0
+        self.regs[rs] = u64(src + ln)
+        self.regs[rd] = u64(dst + ln)
+        self.regs[0] = 0
+        return cycles
+
+    def _string_bsrch(self, rd: int, rs: int) -> int:
+        """BSRCH — search for D[7:0] in block at Rd."""
+        dst = self.regs[rd]
+        ln = self.regs[0] & MASK64
+        needle = self.d_reg & 0xFF
+        cycles = 2
+        for i in range(ln):
+            b = self.mem_read8(u64(dst + i))
+            cycles += 1
+            if b == needle:
+                self.flag_z = 1
+                self.regs[rs] = u64(i)           # offset
+                self.regs[rd] = u64(dst + i)
+                self.regs[0] = u64(ln - i)
+                return cycles
+        # Not found
+        self.flag_z = 0
+        self.regs[rs] = u64(ln)
+        self.regs[rd] = u64(dst + ln)
+        self.regs[0] = 0
+        return cycles
+
     # -- Trap entry --
 
     def _trap(self, ivec: int):
@@ -1296,12 +1403,28 @@ class Megapad64:
 
         # Check for EXT prefix
         if f == 0xF:
+            if n == 0x9:
+                # EXT.STRING — self-contained 3-byte instruction
+                cycles += self._exec_string()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
             self._ext_modifier = n
             # Re-fetch the actual instruction
             byte0 = self.fetch8()
             f = (byte0 >> 4) & 0xF
             n = byte0 & 0xF
             cycles += 1
+            # REX + F9: second byte is also 0xF family
+            if f == 0xF and n == 0x9:
+                cycles += self._exec_string()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
 
         # Dispatch on family
         if   f == 0x0: cycles += self._exec_sys(n)
@@ -2719,9 +2842,13 @@ class Megapad64:
         n = b0 & 0xF
         # EXT prefix: 1 byte + size of following instruction
         if f == 0xF:
+            if n == 0x9:  # EXT.STRING: self-contained 3-byte
+                return 3
             b1 = self.mem_read8(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
+            if f2 == 0xF and n2 == 0x9:  # REX + F9
+                return 4  # REX byte + F9 + sub-op + reg-byte
             return 1 + self._family_size(f2, n2, u64(self.pc + 1))
         return self._family_size(f, n, self.pc)
 
@@ -2873,6 +3000,13 @@ class Megapad64Micro(Megapad64):
         """Port I/O (1802-style) not present on micro-cores."""
         raise TrapError(IVEC_ILLEGAL_OP,
                         "Port I/O (family 0x9) not available on micro-core")
+
+    def _exec_string(self) -> int:
+        """EXT.STRING not available on micro-cores."""
+        self.fetch8()  # consume sub-op
+        self.fetch8()  # consume reg-byte
+        raise TrapError(IVEC_ILLEGAL_OP,
+                        "EXT.STRING (F9) not available on micro-core")
 
     # -- MEX (tile engine) — shared via cluster tile engine --
 

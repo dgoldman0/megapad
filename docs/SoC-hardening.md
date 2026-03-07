@@ -1,7 +1,7 @@
 # SoC Hardening Roadmap
 
-Status: planning  
-Last updated: 2026-03-06
+Status: in-progress (§1 crypto DONE, §2 string engine DONE)  
+Last updated: 2025-07-15
 
 ---
 
@@ -313,7 +313,9 @@ needed; at one-round-per-cycle this is usually fine at 100 MHz.
 ## 2. Forth-Aware String Engine — ISA Extension (EXT.STRING, prefix F9)
 
 **Priority: high — directly accelerates core Forth workloads**  
-**Topology: CPU-internal (tightly-coupled sub-module, like MUL/DIV)**
+**Topology: CPU-internal (tightly-coupled sub-module, like MUL/DIV)**  
+**Status: DONE** — RTL (`mp64_string.v`), emulator, assembler, BIOS
+(CMOVE, CMOVE>, FILL, TFILL), and 65 tests (39 RTL + 26 emulator) all passing.
 
 Block-move/fill/compare instructions that understand Forth `CMOVE`,
 `CMOVE>`, `FILL`, `COMPARE`, `SEARCH` semantics natively — encoded as

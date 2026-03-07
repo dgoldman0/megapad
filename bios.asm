@@ -1774,20 +1774,12 @@ dm_done:
 w_fill:
     ldn r7, r14               ; byte
     addi r14, 8
-    ldn r12, r14              ; n
+    ldn r12, r14              ; n → Rn (length for bfill)
     addi r14, 8
-    ldn r9, r14               ; addr
+    ldn r9, r14               ; addr → Rd
     addi r14, 8
     glo r7                    ; D ← fill byte
-    sex r9                    ; R(X) = destination
-fl_loop:
-    cmpi r12, 0
-    breq fl_done
-    stxi                      ; M(R9) ← D; R9++
-    dec r12
-    br fl_loop
-fl_done:
-    sex r2                    ; restore XSEL
+    bfill r9, r12             ; EXT.STRING: fill R12 bytes at R9 with D[7:0]
     ret.l
 
 ; WFILL ( addr n word -- ) fill n halfwords (16-bit) at addr\n;   Tight inner loop: st.h / addi / dec / cmpi / brne = 4-5 insns per pixel\n;   vs ~10 for the Forth DO W! 2+ LOOP pattern.
@@ -2196,13 +2188,7 @@ w_tfill:
     addi r14, 8
     ldi r12, 64
     glo r7                    ; D ← fill byte
-    sex r9                    ; R(X) = destination
-tf_lp:
-    stxi                      ; M(R9) ← D; R9++
-    dec r12
-    cmpi r12, 0
-    brne tf_lp
-    sex r2                    ; restore XSEL
+    bfill r9, r12             ; EXT.STRING: fill 64 bytes at R9 with D[7:0]
     ret.l
 
 ; TSRC0! ( addr -- )
@@ -5234,27 +5220,26 @@ w_two_star:
     str r14, r1
     ret.l
 
-; CMOVE ( src dst u -- ) copy u bytes from src to dst
+; CMOVE ( src dst u -- ) copy u bytes from src to dst (forward)
 w_cmove:
-    ldn r12, r14              ; u (count)
+    ldn r0, r14               ; u → R0 (implicit length)
     addi r14, 8
-    ldn r7, r14               ; dst
+    ldn r7, r14               ; dst → Rd
     addi r14, 8
-    ldn r9, r14               ; src
+    ldn r9, r14               ; src → Rs
     addi r14, 8
-    cmpi r12, 0
-    breq w_cmove_done
-    sex r7                    ; R(X) = destination
-w_cmove_loop:
-    ld.b r1, r9               ; load from source
-    glo r1                    ; D ← byte
-    stxi                      ; M(R7) ← D; R7++
-    inc r9
-    dec r12
-    cmpi r12, 0
-    brne w_cmove_loop
-w_cmove_done:
-    sex r2                    ; restore XSEL
+    cmove r7, r9              ; EXT.STRING: forward block copy
+    ret.l
+
+; CMOVE> ( src dst u -- ) copy u bytes, high-to-low (backward)
+w_cmove_up:
+    ldn r0, r14               ; u → R0 (implicit length)
+    addi r14, 8
+    ldn r7, r14               ; dst → Rd
+    addi r14, 8
+    ldn r9, r14               ; src → Rs
+    addi r14, 8
+    cmove> r7, r9             ; EXT.STRING: backward block copy
     ret.l
 
 ; -ROT ( a b c -- c a b )
@@ -12654,9 +12639,18 @@ d_cmove:
     call.l r11
     ret.l
 
+; === CMOVE> ===
+d_cmove_up:
+    .dq d_cmove
+    .db 6
+    .ascii "CMOVE>"
+    ldi64 r11, w_cmove_up
+    call.l r11
+    ret.l
+
 ; === -ROT ===
 d_neg_rot:
-    .dq d_cmove
+    .dq d_cmove_up
     .db 4
     .ascii "-ROT"
     ldi64 r11, w_neg_rot

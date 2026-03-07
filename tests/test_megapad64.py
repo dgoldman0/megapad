@@ -2140,6 +2140,221 @@ def test_1802_heritage():
     check("1802 SEP pattern: halted at return point", cpu.halted)
 
 
+def test_ext_string():
+    """EXT.STRING (prefix F9) — CMOVE, CMOVE>, BFILL, BCOMP, BSRCH."""
+    print("\n== EXT.STRING (F9) ==")
+
+    # --- CMOVE: copy 4 bytes forward ---
+    cpu2 = Megapad64()
+    for i, b in enumerate([0xAA, 0xBB, 0xCC, 0xDD]):
+        cpu2.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80
+        ldi r7, 0xC0
+        ldi r0, 4
+        cmove r7, r9
+        halt
+    """)
+    cpu2.load_bytes(0, code)
+    cpu2.pc = 0
+    cpu2.regs[cpu2.spsel] = 0x10000
+    try:
+        cpu2.run(max_steps=5000)
+    except HaltError:
+        pass
+    d0 = cpu2.mem_read8(0xC0)
+    d1 = cpu2.mem_read8(0xC1)
+    d2 = cpu2.mem_read8(0xC2)
+    d3 = cpu2.mem_read8(0xC3)
+    check("CMOVE 4 bytes: data copied",
+          (d0, d1, d2, d3) == (0xAA, 0xBB, 0xCC, 0xDD),
+          f"got {(d0, d1, d2, d3)}")
+    check("CMOVE 4 bytes: R0 = 0 after", cpu2.regs[0] == 0,
+          f"R0={cpu2.regs[0]}")
+    check("CMOVE 4 bytes: Rd advanced", cpu2.regs[7] == 0xC4,
+          f"R7={cpu2.regs[7]:#x}")
+    check("CMOVE 4 bytes: Rs advanced", cpu2.regs[9] == 0x84,
+          f"R9={cpu2.regs[9]:#x}")
+
+    # --- CMOVE zero-length ---
+    cpu3 = Megapad64()
+    code = assemble("""
+        ldi r9, 0x80
+        ldi r7, 0xC0
+        ldi r0, 0
+        cmove r7, r9
+        halt
+    """)
+    cpu3.load_bytes(0, code)
+    cpu3.pc = 0
+    cpu3.regs[cpu3.spsel] = 0x10000
+    try:
+        cpu3.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("CMOVE zero-length: R0 = 0", cpu3.regs[0] == 0)
+    check("CMOVE zero-length: Rd unchanged", cpu3.regs[7] == 0xC0,
+          f"R7={cpu3.regs[7]:#x}")
+    check("CMOVE zero-length: Rs unchanged", cpu3.regs[9] == 0x80,
+          f"R9={cpu3.regs[9]:#x}")
+
+    # --- CMOVE> (backward copy, overlapping) ---
+    cpu4 = Megapad64()
+    for i, b in enumerate([0x11, 0x22, 0x33, 0x44]):
+        cpu4.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r9, 0x80
+        ldi r7, 0x82
+        ldi r0, 4
+        cmove> r7, r9
+        halt
+    """)
+    cpu4.load_bytes(0, code)
+    cpu4.pc = 0
+    cpu4.regs[cpu4.spsel] = 0x10000
+    try:
+        cpu4.run(max_steps=5000)
+    except HaltError:
+        pass
+    # Backward copy: src=0x80, dst=0x82, len=4
+    # i=3: M[0x85] = M[0x83] = 0x44
+    # i=2: M[0x84] = M[0x82] = 0x33
+    # i=1: M[0x83] = M[0x81] = 0x22
+    # i=0: M[0x82] = M[0x80] = 0x11
+    check("CMOVE> backward: byte 0", cpu4.mem_read8(0x82) == 0x11,
+          f"got {cpu4.mem_read8(0x82):#x}")
+    check("CMOVE> backward: byte 1", cpu4.mem_read8(0x83) == 0x22,
+          f"got {cpu4.mem_read8(0x83):#x}")
+    check("CMOVE> backward: byte 2", cpu4.mem_read8(0x84) == 0x33,
+          f"got {cpu4.mem_read8(0x84):#x}")
+    check("CMOVE> backward: byte 3", cpu4.mem_read8(0x85) == 0x44,
+          f"got {cpu4.mem_read8(0x85):#x}")
+
+    # --- BFILL: fill 4 bytes ---
+    cpu5 = Megapad64()
+    code = assemble("""
+        ldi r9, 0x80
+        ldi r12, 4
+        ldi r1, 0x55
+        glo r1
+        bfill r9, r12
+        halt
+    """)
+    cpu5.load_bytes(0, code)
+    cpu5.pc = 0
+    cpu5.regs[cpu5.spsel] = 0x10000
+    try:
+        cpu5.run(max_steps=5000)
+    except HaltError:
+        pass
+    fb = [cpu5.mem_read8(0x80 + i) for i in range(4)]
+    check("BFILL 4 bytes: all 0x55", fb == [0x55, 0x55, 0x55, 0x55],
+          f"got {fb}")
+    check("BFILL 4 bytes: Rd advanced", cpu5.regs[9] == 0x84,
+          f"R9={cpu5.regs[9]:#x}")
+    check("BFILL 4 bytes: Rn = 0", cpu5.regs[12] == 0)
+
+    # --- BCOMP: equal blocks ---
+    cpu6 = Megapad64()
+    for i, b in enumerate([0x10, 0x20, 0x30]):
+        cpu6.mem_write8(0x80 + i, b)
+        cpu6.mem_write8(0xC0 + i, b)
+    code = assemble("""
+        ldi r7, 0xC0
+        ldi r9, 0x80
+        ldi r0, 3
+        bcomp r7, r9
+        halt
+    """)
+    cpu6.load_bytes(0, code)
+    cpu6.pc = 0
+    cpu6.regs[cpu6.spsel] = 0x10000
+    try:
+        cpu6.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("BCOMP equal: flag_z = 1", cpu6.flag_z == 1)
+    check("BCOMP equal: R0 = 0", cpu6.regs[0] == 0)
+
+    # --- BCOMP: unequal ---
+    cpu7 = Megapad64()
+    for i, b in enumerate([0x10, 0x20, 0x30]):
+        cpu7.mem_write8(0x80 + i, b)
+    cpu7.mem_write8(0xC0, 0x10)
+    cpu7.mem_write8(0xC1, 0xFF)   # mismatch at index 1
+    cpu7.mem_write8(0xC2, 0x30)
+    code = assemble("""
+        ldi r7, 0xC0
+        ldi r9, 0x80
+        ldi r0, 3
+        bcomp r7, r9
+        halt
+    """)
+    cpu7.load_bytes(0, code)
+    cpu7.pc = 0
+    cpu7.regs[cpu7.spsel] = 0x10000
+    try:
+        cpu7.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("BCOMP unequal: flag_z = 0", cpu7.flag_z == 0)
+    check("BCOMP unequal: R0 = remaining",
+          cpu7.regs[0] == 2, f"R0={cpu7.regs[0]}")
+    # flag_g: dst=0xFF > src=0x20, so flag_g=1
+    check("BCOMP unequal: flag_g = 1 (dst > src)", cpu7.flag_g == 1)
+
+    # --- BSRCH: found ---
+    cpu8 = Megapad64()
+    for i, b in enumerate([0x10, 0x20, 0x42, 0x30]):
+        cpu8.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r7, 0x80
+        ldi r9, 0
+        ldi r0, 4
+        ldi r1, 0x42
+        glo r1
+        bsrch r7, r9
+        halt
+    """)
+    cpu8.load_bytes(0, code)
+    cpu8.pc = 0
+    cpu8.regs[cpu8.spsel] = 0x10000
+    try:
+        cpu8.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("BSRCH found: flag_z = 1", cpu8.flag_z == 1)
+    check("BSRCH found: Rs = offset 2",
+          cpu8.regs[9] == 2, f"R9={cpu8.regs[9]}")
+    check("BSRCH found: Rd points to match",
+          cpu8.regs[7] == 0x82, f"R7={cpu8.regs[7]:#x}")
+
+    # --- BSRCH: not found ---
+    cpu9 = Megapad64()
+    for i, b in enumerate([0x10, 0x20, 0x30]):
+        cpu9.mem_write8(0x80 + i, b)
+    code = assemble("""
+        ldi r7, 0x80
+        ldi r9, 0
+        ldi r0, 3
+        ldi r1, 0xFF
+        glo r1
+        bsrch r7, r9
+        halt
+    """)
+    cpu9.load_bytes(0, code)
+    cpu9.pc = 0
+    cpu9.regs[cpu9.spsel] = 0x10000
+    try:
+        cpu9.run(max_steps=5000)
+    except HaltError:
+        pass
+    check("BSRCH not found: flag_z = 0", cpu9.flag_z == 0)
+    check("BSRCH not found: R0 = 0", cpu9.regs[0] == 0)
+    check("BSRCH not found: Rs = len",
+          cpu9.regs[9] == 3, f"R9={cpu9.regs[9]}")
+
+
 # =========================================================================
 #  Runner
 # =========================================================================
@@ -2170,6 +2385,7 @@ def main():
         test_tile_fp,
         test_tile_kernels,
         test_ext_prefix,
+        test_ext_string,
         test_fibonacci,
         test_subroutine,
         test_stack_ops,

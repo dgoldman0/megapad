@@ -71,6 +71,12 @@ MULDIV_SUB = {
     "div":  0x4, "udiv":  0x5, "mod":   0x6, "umod":  0x7,
 }
 
+# EXT.STRING sub-op map (prefix F9)
+STRING_SUB = {
+    "cmove":  0x00, "cmove>": 0x01, "bfill":  0x02,
+    "bcomp":  0x03, "bsrch":  0x04,
+}
+
 # ---------------------------------------------------------------------------
 #  Parser helpers
 # ---------------------------------------------------------------------------
@@ -462,6 +468,10 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower in ("csrr", "csrw"):
         return 2
 
+    # -- EXT.STRING (F9) --
+    if mnem_lower in STRING_SUB:
+        return 3 + (1 if hi else 0)  # [REX] + F9 + sub-op + reg-byte
+
     # -- MEX --
     if mnem_lower.startswith("t."):
         sub_name = mnem_lower[2:]
@@ -772,6 +782,19 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         n_nibble = 0x8 | (rn & 0x7)
         out.append(0xD0 | n_nibble)
         out.append(csr_addr & 0xFF)
+        return out
+
+    # ---- EXT.STRING (0xF9) ----
+    if mnem_lower in STRING_SUB:
+        sub = STRING_SUB[mnem_lower]
+        rd = _parse_reg(ops[0])
+        rs = _parse_reg(ops[1])
+        rex = _rex_byte(rd=rd, rs=rs)
+        if rex is not None:
+            out.append(rex)
+        out.append(0xF9)           # EXT.STRING prefix
+        out.append(sub)            # sub-op
+        out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
 
     # ---- MEX tile ops (0xE) ----

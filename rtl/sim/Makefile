@@ -140,7 +140,7 @@ tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
 # Phase 3: CPU Core, Micro-Core & Cluster
 # ==========================================================================
 
-phase3: alu icache cpu_smoke cluster cpu_micro opcodes
+phase3: alu icache cpu_smoke cluster cpu_micro opcodes string
 	@echo ""
 	@echo "--- Phase 3 complete ---"
 
@@ -162,7 +162,8 @@ tb_icache.vvp: tb_icache.v $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v
 cpu_smoke: tb_cpu_smoke.vvp
 	$(VVP) $<
 
-tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_alu.v \
+tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+                  $(CORE)/mp64_alu.v \
                   $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                   $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                   $(MEM)/mp64_memory.v
@@ -188,10 +189,21 @@ tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v
 opcodes: tb_opcodes.vvp
 	$(VVP) $<
 
-tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_alu.v \
+tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+                $(CORE)/mp64_alu.v \
                 $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                 $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                 $(MEM)/mp64_memory.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- EXT.STRING engine (Forth string ops, prefix F9) ---
+string: tb_string.vvp
+	$(VVP) $<
+
+tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+               $(CORE)/mp64_alu.v $(CORE)/mp64_icache.v \
+               $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
+               $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================
