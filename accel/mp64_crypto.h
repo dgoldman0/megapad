@@ -1281,6 +1281,167 @@ const BigNum CryptoFieldALU::PRIMES[3] = {
 
 
 // =========================================================================
+//  WOTS+ Chain Accelerator
+// =========================================================================
+//
+//  Computes an entire WOTS+ hash chain in C++, iterating SHAKE-256
+//  internally.  Eliminates per-step CPU/Python round-trips.
+//
+//  MMIO register map (32 bytes at offset 0x8A0):
+//    +0x00  WOTS_SEED   (W, 32b)  RAM address of PK.seed
+//    +0x04  WOTS_ADRS   (W, 32b)  RAM address of ADRS
+//    +0x08  WOTS_INPUT  (W, 32b)  RAM address of chain input
+//    +0x0C  WOTS_STEPS  (W, 8b)   Chain length (1–15)
+//    +0x0D  WOTS_START  (W, 8b)   Start step index (0–14)
+//    +0x0E  WOTS_GO     (W, 8b)   Trigger | WOTS_STATUS (R) 0/1/2
+//    +0x0F  WOTS_CYCLES (R, 8b)   Cycle count of last chain (÷64)
+//    +0x10  WOTS_DOUT   (R, 16B)  Result bytes
+//
+
+struct WotsChain {
+    // Configuration (written by CPU)
+    uint32_t seed_addr;
+    uint32_t adrs_addr;
+    uint32_t input_addr;
+    uint8_t  steps;       // 1–15
+    uint8_t  start_step;  // 0–14
+    uint8_t  status;      // 0=idle, 1=busy, 2=done
+    uint16_t last_cycles; // profiling
+
+    // Output
+    uint8_t dout[16];
+
+    // Memory pointer (set by CPUState init, points to main RAM)
+    uint8_t* mem;
+    uint32_t mem_size;
+
+    // SHA3 engine pointer (shared with CryptoDevices)
+    CryptoSHA3* sha3;
+
+    void reset() {
+        seed_addr = 0;
+        adrs_addr = 0;
+        input_addr = 0;
+        steps = 0;
+        start_step = 0;
+        status = 0;
+        last_cycles = 0;
+        std::memset(dout, 0, 16);
+    }
+
+    void execute() {
+        if (!mem || !sha3 || steps == 0 || steps > 15) {
+            status = 0;
+            return;
+        }
+
+        status = 1;
+
+        // DMA read: load seed (16B), adrs (32B), input (16B)
+        uint8_t seed[16], adrs[32], buf[16];
+        for (int i = 0; i < 16; i++)
+            seed[i] = mem[(seed_addr + i) % mem_size];
+        for (int i = 0; i < 32; i++)
+            adrs[i] = mem[(adrs_addr + i) % mem_size];
+        for (int i = 0; i < 16; i++)
+            buf[i] = mem[(input_addr + i) % mem_size];
+
+        // Iterate chain: steps times starting at start_step
+        for (int s = 0; s < steps; s++) {
+            int step_idx = start_step + s;
+
+            // Mutate ADRS hash field (bytes 28..31, big-endian)
+            adrs[28] = 0;
+            adrs[29] = 0;
+            adrs[30] = (uint8_t)((step_idx >> 8) & 0xFF);
+            adrs[31] = (uint8_t)(step_idx & 0xFF);
+
+            // SHAKE-256 (mode 3): absorb seed ‖ adrs ‖ buf, squeeze 16 bytes
+            sha3->reset();
+            sha3->mode = 3;  // SHAKE-256
+
+            // Absorb seed (16 bytes)
+            for (int i = 0; i < 16; i++) {
+                sha3->buf[sha3->buf_len++] = seed[i];
+                if (sha3->buf_len == sha3->rate())
+                    sha3->absorb_block();
+            }
+
+            // Absorb ADRS (32 bytes)
+            for (int i = 0; i < 32; i++) {
+                sha3->buf[sha3->buf_len++] = adrs[i];
+                if (sha3->buf_len == sha3->rate())
+                    sha3->absorb_block();
+            }
+
+            // Absorb buf (16 bytes) = previous output or initial input
+            for (int i = 0; i < 16; i++) {
+                sha3->buf[sha3->buf_len++] = buf[i];
+                if (sha3->buf_len == sha3->rate())
+                    sha3->absorb_block();
+            }
+
+            // Finalize and squeeze
+            sha3->finalize();
+
+            // Extract first 16 bytes into buf for next iteration
+            for (int i = 0; i < 16; i++)
+                buf[i] = sha3->digest[i];
+        }
+
+        // Latch result
+        std::memcpy(dout, buf, 16);
+        last_cycles = (uint16_t)(64 + steps * 530);
+        status = 2;
+    }
+
+    static constexpr uint32_t BASE = 0x08A0;
+    static constexpr uint32_t END  = 0x08C0;
+
+    bool handles(uint32_t mmio_offset) const {
+        return mmio_offset >= BASE && mmio_offset < END;
+    }
+
+    uint8_t read8(uint32_t mmio_offset) const {
+        uint32_t off = mmio_offset - BASE;
+        switch (off) {
+            case 0x0E: return status;
+            case 0x0F: return (uint8_t)(last_cycles >> 6); // ÷64
+            default:
+                if (off >= 0x10 && off <= 0x1F)
+                    return dout[off - 0x10];
+                return 0;
+        }
+    }
+
+    void write8(uint32_t mmio_offset, uint8_t value) {
+        uint32_t off = mmio_offset - BASE;
+        switch (off) {
+            case 0x00: seed_addr = (seed_addr & 0xFFFFFF00u) | value; break;
+            case 0x01: seed_addr = (seed_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
+            case 0x02: seed_addr = (seed_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
+            case 0x03: seed_addr = (seed_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
+            case 0x04: adrs_addr = (adrs_addr & 0xFFFFFF00u) | value; break;
+            case 0x05: adrs_addr = (adrs_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
+            case 0x06: adrs_addr = (adrs_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
+            case 0x07: adrs_addr = (adrs_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
+            case 0x08: input_addr = (input_addr & 0xFFFFFF00u) | value; break;
+            case 0x09: input_addr = (input_addr & 0xFFFF00FFu) | ((uint32_t)value << 8); break;
+            case 0x0A: input_addr = (input_addr & 0xFF00FFFFu) | ((uint32_t)value << 16); break;
+            case 0x0B: input_addr = (input_addr & 0x00FFFFFFu) | ((uint32_t)value << 24); break;
+            case 0x0C: steps = value & 0x0F; break;
+            case 0x0D: start_step = value & 0x0F; break;
+            case 0x0E:
+                // GO — execute chain immediately (synchronous in emulator)
+                execute();
+                break;
+            default: break;
+        }
+    }
+};
+
+
+// =========================================================================
 //  Combined crypto device dispatcher
 // =========================================================================
 
@@ -1289,6 +1450,7 @@ struct CryptoDevices {
     CryptoSHA256 sha256;
     CryptoSHA3 sha3;
     CryptoFieldALU field_alu;
+    WotsChain wots;
     bool enabled;
 
     // MMIO offset ranges (relative to MMIO_START)
@@ -1298,6 +1460,8 @@ struct CryptoDevices {
     static constexpr uint32_t SHA3_END    = 0x07D0; // expanded for SHA3-512 (64-byte DOUT at 0x10-0x4F)
     static constexpr uint32_t FIELD_BASE  = 0x0840;
     static constexpr uint32_t FIELD_END   = 0x0888;
+    static constexpr uint32_t WOTS_BASE   = 0x08A0;
+    static constexpr uint32_t WOTS_END    = 0x08C0;
     static constexpr uint32_t SHA256_BASE = 0x0940;
     static constexpr uint32_t SHA256_END  = 0x0980;
 
@@ -1307,6 +1471,8 @@ struct CryptoDevices {
         sha3.reset();
         sha3.mode = 0;
         field_alu.reset();
+        wots.reset();
+        wots.sha3 = &sha3;  // WOTS wraps the existing SHA3 engine
         enabled = true;
     }
 
@@ -1316,6 +1482,7 @@ struct CryptoDevices {
         if (mmio_offset >= AES_BASE && mmio_offset < AES_END) return true;
         if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END) return true;
         if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END) return true;
+        if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END) return true;
         if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END) return true;
         return false;
     }
@@ -1327,6 +1494,8 @@ struct CryptoDevices {
             return sha3.read8(mmio_offset - SHA3_BASE);
         if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END)
             return field_alu.read8(mmio_offset - FIELD_BASE);
+        if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
+            return wots.read8(mmio_offset);
         if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END)
             return sha256.read8(mmio_offset - SHA256_BASE);
         return 0xFF;
@@ -1339,6 +1508,8 @@ struct CryptoDevices {
             sha3.write8(mmio_offset - SHA3_BASE, value);
         else if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END)
             field_alu.write8(mmio_offset - FIELD_BASE, value);
+        else if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
+            wots.write8(mmio_offset, value);
         else if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END)
             sha256.write8(mmio_offset - SHA256_BASE, value);
     }

@@ -10929,6 +10929,122 @@ w_kem_status:
     ret.l
 
 ; =====================================================================
+;  WOTS+ Chain Hardware Accelerator
+; =====================================================================
+; WOTS base = 0xFFFF_FF00_0000_08A0
+;   SEED_ADDR  +0x00..+0x03 (W)  32-bit RAM address of seed (16 bytes)
+;   ADRS_ADDR  +0x04..+0x07 (W)  32-bit RAM address of ADRS (32 bytes)
+;   INPUT_ADDR +0x08..+0x0B (W)  32-bit RAM address of input (16 bytes)
+;   STEPS      +0x0C (W)  chain length (1..15)
+;   START      +0x0D (W)  starting step index (0..15)
+;   GO/STATUS  +0x0E (W=trigger, R: 0=idle,1=busy,2=done)
+;   CYCLES     +0x0F (R)  estimated cycle count >> 6
+;   DOUT       +0x10..+0x1F (R)  16-byte chain output
+
+; WOTS-CHAIN-HW ( seed-addr adrs-addr input-addr steps start -- )
+;   Programs the WOTS+ chain accelerator, triggers execution,
+;   polls for completion, then copies DOUT back to input-addr.
+w_wots_chain_hw:
+    ; Pop: ( seed-addr adrs-addr input-addr steps start -- )
+    ldn r0, r14             ; r0 = start
+    addi r14, 8
+    ldn r1, r14             ; r1 = steps
+    addi r14, 8
+    ldn r9, r14             ; r9 = input-addr
+    addi r14, 8
+    ldn r10, r14            ; r10 = adrs-addr
+    addi r14, 8
+    ldn r12, r14            ; r12 = seed-addr
+    addi r14, 8
+
+    ; Preserve input-addr for writeback after chain completes
+    mov r11, r9             ; r11 = input-addr (safe copy)
+
+    ; WOTS MMIO base
+    ldi64 r7, 0xFFFF_FF00_0000_08A0
+
+    ; --- Write seed_addr LE to +0x00..+0x03 ---
+    mov r13, r7
+    st.b r13, r12
+    lsri r12, 8
+    addi r13, 1
+    st.b r13, r12
+    lsri r12, 8
+    addi r13, 1
+    st.b r13, r12
+    lsri r12, 8
+    addi r13, 1
+    st.b r13, r12
+
+    ; --- Write adrs_addr LE to +0x04..+0x07 ---
+    mov r13, r7
+    addi r13, 4
+    st.b r13, r10
+    lsri r10, 8
+    addi r13, 1
+    st.b r13, r10
+    lsri r10, 8
+    addi r13, 1
+    st.b r13, r10
+    lsri r10, 8
+    addi r13, 1
+    st.b r13, r10
+
+    ; --- Write input_addr LE to +0x08..+0x0B ---
+    mov r13, r7
+    addi r13, 8
+    st.b r13, r9
+    lsri r9, 8
+    addi r13, 1
+    st.b r13, r9
+    lsri r9, 8
+    addi r13, 1
+    st.b r13, r9
+    lsri r9, 8
+    addi r13, 1
+    st.b r13, r9
+
+    ; Restore input-addr from safe copy
+    mov r9, r11
+
+    ; --- Write steps to +0x0C ---
+    mov r13, r7
+    addi r13, 0x0C
+    st.b r13, r1
+
+    ; --- Write start to +0x0D ---
+    addi r13, 1
+    st.b r13, r0
+
+    ; --- Write GO (any value) to +0x0E — triggers execution ---
+    addi r13, 1
+    ldi r0, 1
+    st.b r13, r0
+
+    ; --- Poll status at +0x0E until == 2 (done) ---
+.wots_poll:
+    ld.b r0, r13
+    cmpi r0, 2
+    brne .wots_poll
+
+    ; --- Copy DOUT[0..15] to RAM[input_addr] ---
+    mov r13, r7
+    addi r13, 0x10            ; r13 = DOUT register base
+    ldi r12, 0
+.wots_copy:
+    mov r10, r13
+    add r10, r12
+    ld.b r0, r10              ; DOUT[i]
+    mov r10, r9
+    add r10, r12
+    st.b r10, r0              ; RAM[input_addr+i] = DOUT[i]
+    addi r12, 1
+    cmpi r12, 16
+    brcc .wots_copy
+
+    ret.l
+
+; =====================================================================
 ;  Memory BIST — CSR 0x60..0x63
 ; =====================================================================
 
@@ -13876,9 +13992,18 @@ d_kem_status:
     call.l r11
     ret.l
 
+; === WOTS-CHAIN-HW ===
+d_wots_chain_hw:
+    .dq d_kem_status
+    .db 13
+    .ascii "WOTS-CHAIN-HW"
+    ldi64 r11, w_wots_chain_hw
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_kem_status
+    .dq d_wots_chain_hw
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full

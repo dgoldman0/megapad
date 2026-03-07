@@ -51,6 +51,7 @@ KEM_BASE     = 0x0900
 FB_BASE      = 0x0A00
 RTC_BASE     = 0x0B00
 PORT_BRIDGE_BASE = 0x0880
+WOTS_BASE    = 0x08A0
 
 # Default port-I/O bridge map — port N → 12-bit MMIO offset.
 # OUT N writes the byte to the mapped MMIO register;
@@ -2358,6 +2359,122 @@ class PortBridgeCSR(Device):
         elif offset == 0x0E:
             self._ctrl = value & 0x7F
             self._sync_all()
+
+
+# ---------------------------------------------------------------------------
+#  WOTS+ Chain Accelerator — hardware-speed WOTS+ hash chains
+# ---------------------------------------------------------------------------
+# Register map (offsets from WOTS_BASE = 0x08A0):
+#   +0x00  WOTS_SEED   (W, 32b)  RAM address of PK.seed (16 bytes)
+#   +0x04  WOTS_ADRS   (W, 32b)  RAM address of ADRS (32 bytes)
+#   +0x08  WOTS_INPUT  (W, 32b)  RAM address of chain input (16 bytes)
+#   +0x0C  WOTS_STEPS  (W, 8b)   Chain length (1–15)
+#   +0x0D  WOTS_START  (W, 8b)   Start step index (0–14)
+#   +0x0E  WOTS_GO     (W, 8b)   Trigger chain / WOTS_STATUS (R) 0/1/2
+#   +0x0F  WOTS_CYCLES (R, 8b)   Cycle count of last chain (÷64)
+#   +0x10  WOTS_DOUT   (R, 16B)  Result bytes [0..15]
+
+import hashlib as _hashlib_wots  # local alias to avoid shadowing
+
+class WotsChainAccel(Device):
+    """WOTS+ chain accelerator — computes multi-step SHAKE-256 chains
+    in hardware, eliminating per-step CPU/Forth dispatch overhead.
+
+    Uses DMA reads to fetch context from RAM and iterates SHAKE-256
+    internally.  Result is readable from MMIO DOUT registers.
+    """
+
+    def __init__(self):
+        super().__init__("WotsChain", WOTS_BASE, 0x20)
+        self._seed_addr: int = 0
+        self._adrs_addr: int = 0
+        self._input_addr: int = 0
+        self._steps: int = 0
+        self._start: int = 0
+        self._status: int = 0     # 0=idle, 1=busy, 2=done
+        self._last_cycles: int = 0
+        self._dout = bytearray(16)
+        self._mem: bytearray | None = None  # set by system.py
+
+    def attach_mem(self, mem: bytearray):
+        """Give the WOTS accelerator direct read access to main RAM."""
+        self._mem = mem
+
+    def _execute(self):
+        """Run the WOTS+ chain (synchronous in emulator)."""
+        if self._mem is None or self._steps == 0 or self._steps > 15:
+            self._status = 0
+            return
+
+        self._status = 1
+        mem = self._mem
+        ms = len(mem)
+
+        # DMA read: seed (16B), adrs (32B), input (16B)
+        seed = bytes(mem[(self._seed_addr + i) % ms] for i in range(16))
+        adrs = bytearray(mem[(self._adrs_addr + i) % ms] for i in range(32))
+        buf = bytearray(mem[(self._input_addr + i) % ms] for i in range(16))
+
+        # Iterate chain
+        for s in range(self._steps):
+            step_idx = self._start + s
+
+            # Mutate ADRS hash field (bytes 28..31, big-endian)
+            adrs[28] = 0
+            adrs[29] = 0
+            adrs[30] = (step_idx >> 8) & 0xFF
+            adrs[31] = step_idx & 0xFF
+
+            # SHAKE-256: absorb seed ‖ adrs ‖ buf, squeeze 16 bytes
+            h = _hashlib_wots.shake_256(seed + bytes(adrs) + bytes(buf))
+            buf = bytearray(h.digest(16))
+
+        self._dout = buf
+        self._last_cycles = 64 + self._steps * 530
+        self._status = 2
+
+    def read8(self, offset: int) -> int:
+        if offset == 0x0E:
+            return self._status
+        if offset == 0x0F:
+            return (self._last_cycles >> 6) & 0xFF
+        if 0x10 <= offset <= 0x1F:
+            return self._dout[offset - 0x10]
+        return 0
+
+    def write8(self, offset: int, value: int):
+        value &= 0xFF
+        if offset == 0x00:
+            self._seed_addr = (self._seed_addr & 0xFFFFFF00) | value
+        elif offset == 0x01:
+            self._seed_addr = (self._seed_addr & 0xFFFF00FF) | (value << 8)
+        elif offset == 0x02:
+            self._seed_addr = (self._seed_addr & 0xFF00FFFF) | (value << 16)
+        elif offset == 0x03:
+            self._seed_addr = (self._seed_addr & 0x00FFFFFF) | (value << 24)
+        elif offset == 0x04:
+            self._adrs_addr = (self._adrs_addr & 0xFFFFFF00) | value
+        elif offset == 0x05:
+            self._adrs_addr = (self._adrs_addr & 0xFFFF00FF) | (value << 8)
+        elif offset == 0x06:
+            self._adrs_addr = (self._adrs_addr & 0xFF00FFFF) | (value << 16)
+        elif offset == 0x07:
+            self._adrs_addr = (self._adrs_addr & 0x00FFFFFF) | (value << 24)
+        elif offset == 0x08:
+            self._input_addr = (self._input_addr & 0xFFFFFF00) | value
+        elif offset == 0x09:
+            self._input_addr = (self._input_addr & 0xFFFF00FF) | (value << 8)
+        elif offset == 0x0A:
+            self._input_addr = (self._input_addr & 0xFF00FFFF) | (value << 16)
+        elif offset == 0x0B:
+            self._input_addr = (self._input_addr & 0x00FFFFFF) | (value << 24)
+        elif offset == 0x0C:
+            self._steps = value & 0x0F
+        elif offset == 0x0D:
+            self._start = value & 0x0F
+        elif offset == 0x0E:
+            # GO — execute chain immediately (synchronous in emulator)
+            self._execute()
 
 
 # ---------------------------------------------------------------------------

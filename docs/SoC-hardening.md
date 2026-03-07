@@ -846,7 +846,334 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 ---
 
-## 6. MMIO Map After Changes
+## 7. WOTS+ Chain Accelerator (DMA-read, MMIO 0x8A0)
+
+**Priority: high — dominant bottleneck in SPHINCS+ post-quantum signing**
+**Topology: shared (wraps the existing SHA3/SHAKE engine)**
+**Status: ☐ Not started**
+**Origin: Akashic blockchain team request (2026-03-07)**
+
+### 7.1  Problem Statement
+
+SPHINCS+-SHAKE-128s signing is dominated by WOTS+ hash chains.  Each
+chain iterates the T₁ tweakable-hash function 15 times sequentially,
+where each step's 16-byte output feeds the next step's input:
+
+```
+step 0:  out₀ = SHAKE-256(PK.seed ‖ ADRS(hash=0) ‖ sk)       [16 B]
+step 1:  out₁ = SHAKE-256(PK.seed ‖ ADRS(hash=1) ‖ out₀)     [16 B]
+  ...
+step 14: out₁₄ = SHAKE-256(PK.seed ‖ ADRS(hash=14) ‖ out₁₃)  [16 B]
+```
+
+A single SPX-SIGN performs **~2.2 million** SHAKE-256 calls, nearly
+all inside WOTS chains (34 chains × 15 steps per WOTS instance,
+~4,000 WOTS instances per signature).
+
+Profiled cost per hash on the current STC emulator: **~2,818 cycles**,
+of which only **~500 cycles (18%)** are actual Keccak-f[1600].  The
+remaining **82% is Forth dispatch overhead**: per-hash ADRS mutation,
+6 separate MMIO transactions (MODE!, INIT, UPDATE×3, FINAL), stack
+juggling, CMOVE.  Total measured: ~4.7 billion cycles per SPX-SIGN.
+
+### 7.2  Solution: Hardware Chain Sequencer
+
+A small FSM that wraps the existing SHA3/SHAKE MMIO engine with a
+counter and feedback loop.  The CPU programs context pointers once,
+triggers the chain, and reads back a 16-byte result.  The sequencer
+performs all intermediate SHAKE-256 calls internally — no CPU
+instructions per step, no Forth dispatch, no MMIO round-trips.
+
+**Key design decision: DMA read channel, no bus master.**
+
+The accelerator needs to read 64 bytes of context from RAM at setup
+time (16 B PK.seed + 32 B ADRS + 16 B input).  Rather than requiring
+the CPU to copy this data into MMIO scratchpad registers, the
+accelerator issues targeted read requests through a dedicated DMA read
+port on the bus.  This port is:
+
+- **Read-only** — no write channel to RAM.  Output stays in MMIO
+  registers; the CPU reads it back via normal MMIO loads.
+- **Bounded** — exactly 64 bytes per chain invocation, lowest bus
+  priority, completes in ~64 cycles (negligible vs ~7,500 cycles of
+  Keccak computation).
+- **Not a bus master** — no arbitration for bus ownership, no
+  cache coherency, no snoop.  The bus arbiter grants single-byte
+  reads at lowest priority; CPU stalls only if both access the bus
+  in the same cycle.
+
+This avoids the full bus-master complexity that would be needed for
+a coherent crypto core, while eliminating the ~30-instruction CPU
+overhead of copying context into scratchpad registers.
+
+### 7.3  MMIO Register Map (0x8A0–0x8BF, 32 bytes)
+
+| Offset | Name          | R/W | Width | Description                           |
+|--------|---------------|-----|-------|---------------------------------------|
+| +0x00  | WOTS_SEED     | W   | 32b   | RAM address of PK.seed (16 bytes)     |
+| +0x04  | WOTS_ADRS     | W   | 32b   | RAM address of ADRS (32 bytes)        |
+| +0x08  | WOTS_INPUT    | W   | 32b   | RAM address of input (16 bytes)       |
+| +0x0C  | WOTS_STEPS    | W   | 8b    | Chain length (1–15); steps to iterate |
+| +0x0D  | WOTS_START    | W   | 8b    | Start step index (0–14)               |
+| +0x0E  | WOTS_GO       | W   | 8b    | Write any value → begin chain         |
+| +0x0E  | WOTS_STATUS   | R   | 8b    | 0=idle, 1=busy, 2=done               |
+| +0x0F  | WOTS_CYCLES   | R   | 8b    | Cycle count of last chain (÷64)       |
+| +0x10  | WOTS_DOUT[0]  | R   | 8b    | Result byte 0                         |
+| …      | …             | R   | 8b    | …                                     |
+| +0x1F  | WOTS_DOUT[15] | R   | 8b    | Result byte 15                        |
+
+Total: 32 bytes.  Fits in the free slot at 0x8A0–0x8BF.
+
+### 7.4  Operation Sequence
+
+1. **CPU writes context pointers** (3 MMIO stores):
+   ```
+   pkseed_addr → WOTS_SEED
+   adrs_addr   → WOTS_ADRS
+   input_addr  → WOTS_INPUT
+   ```
+
+2. **CPU writes chain parameters** (2 byte stores):
+   ```
+   steps → WOTS_STEPS    (e.g. 15 for a full chain)
+   start → WOTS_START    (e.g. 0)
+   ```
+
+3. **CPU writes WOTS_GO** — hardware begins:
+   ```
+   seed[16] ← DMA_READ(WOTS_SEED, 16)
+   adrs[32] ← DMA_READ(WOTS_ADRS, 32)
+   buf[16]  ← DMA_READ(WOTS_INPUT, 16)
+   for i = 0 to WOTS_STEPS-1:
+       adrs[28..31] ← (WOTS_START + i) as big-endian u32
+       SHAKE-256.init(mode=3)      // SHAKE-256
+       SHAKE-256.absorb(seed, 16)
+       SHAKE-256.absorb(adrs, 32)
+       SHAKE-256.absorb(buf, 16)
+       SHAKE-256.finalize()
+       buf ← SHAKE-256.squeeze(16)
+   WOTS_DOUT[0..15] ← buf
+   WOTS_STATUS ← 2 (done)
+   ```
+
+4. **CPU reads WOTS_DOUT[0..15]** (16 MMIO byte reads, or 2 × 64-bit
+   aligned reads if the bus supports it).  No polling loop — the chain
+   completes in a deterministic number of cycles that the CPU can
+   count, or use an interrupt (see §7.8).
+
+### 7.5  Cycle Budget
+
+| Phase               | Cycles  | Notes                            |
+|---------------------|---------|----------------------------------|
+| DMA read setup      | ~64     | 64 bytes @ 1 byte/cycle          |
+| Per-step Keccak     | ~500    | 24 rounds of Keccak-f[1600]      |
+| Per-step absorb/pad | ~20     | XOR + padding                    |
+| Per-step squeeze    | ~10     | Extract 16 bytes from state      |
+| **Per step total**  | **~530** |                                  |
+| **15-step chain**   | **~8,014** | 64 + 15 × 530                |
+| **Current software** | **~42,275** | Measured on STC emulator     |
+| **Speedup**         | **5.3×** | Per chain                       |
+
+### 7.6  End-to-End Impact
+
+| Operation     | Current (cycles) | With HW Chain | Speedup |
+|---------------|-----------------|---------------|---------|
+| WOTS-PK-GEN  | 1.53M           | ~358K         | 4.3×    |
+| SPX-KEYGEN    | 591M            | ~184M         | 3.2×    |
+| SPX-SIGN      | ~4,727M         | ~1,470M       | 3.2×    |
+
+The 3.2× is less than the per-chain 5.3× because not all SHAKE calls
+are in WOTS chains — FORS tree hashing, XMSS compression, and PRF
+calls still use the regular SHA3 MMIO path.
+
+### 7.7  RTL Design — `mp64_wots.v`
+
+New sub-module, instantiated in `mp64_soc.v` alongside existing
+peripherals.  Connects to the SHA3 engine's internal ports (not the
+MMIO bus — direct wiring to `CryptoSHA3`'s absorb/squeeze interface).
+
+#### FSM States
+
+```
+IDLE → DMA_SEED → DMA_ADRS → DMA_INPUT → STEP_ABSORB → STEP_KECCAK
+     → STEP_SQUEEZE → STEP_CHECK → DONE → IDLE
+```
+
+| State        | Description                                        |
+|--------------|----------------------------------------------------|
+| IDLE         | Waiting for WOTS_GO write                          |
+| DMA_SEED     | Read 16 bytes from RAM into `seed_reg[127:0]`      |
+| DMA_ADRS     | Read 32 bytes from RAM into `adrs_reg[255:0]`      |
+| DMA_INPUT    | Read 16 bytes from RAM into `buf_reg[127:0]`       |
+| STEP_ABSORB  | Feed seed + adrs + buf (64 B) into SHAKE-256       |
+| STEP_KECCAK  | Wait for Keccak-f[1600] to complete                |
+| STEP_SQUEEZE | Extract 16 bytes from SHAKE state into buf_reg     |
+| STEP_CHECK   | Increment step counter; if done → DONE, else loop  |
+| DONE         | Latch buf_reg into WOTS_DOUT; set status=2         |
+
+#### Internal Registers
+
+```verilog
+reg [127:0] seed_reg;      // PK.seed (16 bytes, loaded once)
+reg [255:0] adrs_reg;      // ADRS (32 bytes, hash field mutated)
+reg [127:0] buf_reg;       // Chain buffer (16 bytes, fed back)
+reg [127:0] dout_reg;      // Output latch (readable via MMIO)
+reg [3:0]   step_count;    // Current step (0–14)
+reg [3:0]   step_limit;    // WOTS_STEPS
+reg [3:0]   step_start;    // WOTS_START
+reg [1:0]   status;        // 0=idle, 1=busy, 2=done
+```
+
+#### DMA Read Port
+
+```verilog
+output reg        dma_req,
+output reg [31:0] dma_addr,
+input  wire [7:0] dma_rdata,
+input  wire       dma_ack
+```
+
+The bus arbiter grants `dma_ack` when no CPU access is in flight.
+The accelerator reads one byte per granted cycle.  64 bytes total
+at startup; no reads during Keccak computation.
+
+#### SHA3 Engine Interface
+
+The WOTS accelerator drives the existing SHA3 engine directly — not
+through the MMIO bus.  Internal port signals:
+
+```verilog
+output reg        sha3_start,     // pulse to begin absorb/squeeze
+output reg [7:0]  sha3_din,       // data byte to absorb
+output reg        sha3_din_valid,
+output reg        sha3_finalize,  // trigger padding + final permutation
+input  wire [7:0] sha3_dout,      // squeezed output byte
+input  wire       sha3_dout_valid,
+input  wire       sha3_ready      // engine idle
+```
+
+During WOTS chain execution, the WOTS FSM has exclusive access to
+the SHA3 engine.  The MMIO bus decode for SHA3 (0x780–0x7CF) returns
+`busy` if the WOTS accelerator is active.  This is a simple mux
+controlled by `wots_active`:
+
+```verilog
+assign sha3_mmio_blocked = (wots_status != 2'b00);
+```
+
+#### Area Estimate
+
+| Component          | LUTs  | FFs  | BRAM |
+|--------------------|-------|------|------|
+| FSM + control      | ~40   | ~20  | 0    |
+| seed_reg (128b)    | 0     | 128  | 0    |
+| adrs_reg (256b)    | 0     | 256  | 0    |
+| buf_reg (128b)     | 0     | 128  | 0    |
+| dout_reg (128b)    | 0     | 128  | 0    |
+| step counter (4b)  | ~5    | 4    | 0    |
+| ADRS mutator       | ~20   | 0    | 0    |
+| DMA addr counter   | ~15   | 32   | 0    |
+| **Total**          | **~80** | **~696** | **0** |
+
+Negligible vs the SHA3 engine itself (~2,000+ LUTs for Keccak).
+
+### 7.8  Interrupt vs Polling
+
+The chain completes in a deterministic number of cycles:
+`64 + WOTS_STEPS × 530`.  For a typical 15-step chain, that's ~8,014
+cycles.  Two options:
+
+1. **Deterministic delay:** CPU executes ~8,000 cycles of other work
+   (e.g., prepare the next chain's ADRS) then reads WOTS_DOUT.
+   No polling, no interrupt.  Requires careful Forth scheduling.
+
+2. **Interrupt on done:** The WOTS engine asserts a wire when
+   `status` transitions to `2 (done)`.  Routed to a new IVT slot.
+   The ISR reads WOTS_DOUT and signals the Forth task.
+   Simpler software, ~50 cycle interrupt overhead.
+
+**Recommendation:** Start with deterministic delay in the BIOS word.
+Add interrupt support later if the Akashic team needs to overlap
+chains with other computation.
+
+### 7.9  Forth Interface (BIOS word)
+
+```
+WOTS-CHAIN-HW ( seed adrs input steps start -- )
+```
+
+Stores 5 parameters into MMIO registers, writes WOTS_GO, delays
+for the deterministic cycle count, then copies 16 bytes from
+WOTS_DOUT back to the input buffer (in-place update for chain
+callers).
+
+```forth
+: WOTS-CHAIN-HW  ( seed adrs input steps start -- )
+    WOTS_START C!                  \ byte store
+    WOTS_STEPS C!                  \ byte store
+    WOTS_INPUT !                   \ 32-bit store
+    WOTS_ADRS  !                   \ 32-bit store
+    WOTS_SEED  !                   \ 32-bit store
+    1 WOTS_GO C!                   \ trigger
+    \ Deterministic wait: 64 + steps × 530 cycles
+    \ For now, simple poll (emulator will make this instant)
+    BEGIN WOTS_STATUS C@ 2 = UNTIL
+;
+```
+
+The Akashic team replaces their `_SPX-CHAIN` Forth word body with
+a call to `WOTS-CHAIN-HW`, feature-detected via an MMIO probe of
+`WOTS_STATUS` (reads 0 if present, 0xFF if absent).
+
+### 7.10  Emulator Implementation
+
+#### C++ (mp64_crypto.h)
+
+New `WotsChain` struct alongside `CryptoSHA3`.  On `GO` write:
+1. Read 64 bytes from CPU memory via `mem_read8()` (direct — no bus
+   arbitration needed in emulator).
+2. Loop `steps` times, calling `CryptoSHA3::reset()`, feeding bytes
+   via `write8(0x08, ...)`, calling `finalize()`, reading digest.
+3. Latch 16-byte result into `dout[16]`.
+4. Add `64 + steps × 530` to cycle counter for accurate profiling.
+
+All computation stays in C++ — zero Python callbacks.  This is the
+entire point: the WOTS accelerator eliminates the 9.6M Python
+round-trips that make SPHINCS+ signing slow in the emulator.
+
+#### Python fallback (devices.py)
+
+`WotsChainAccel` MMIO device with the same register interface.
+Uses the existing Python `SHA3Device` internally.  Only used when
+the C++ accelerator is not available.
+
+#### Integration
+
+- `mp64_accel.cpp`: add `WotsChain` to `CPUState`, handle MMIO
+  offsets 0x8A0–0x8BF in `sys_read8`/`sys_write8`.
+- `system.py`: create `WotsChainAccel`, register on bus.
+- `accel_wrapper.py`: sync `WotsChain` state (seed/adrs/input
+  pointers only — result is read from C++ state).
+
+### 7.11  Future: Parallel SHAKE Engines
+
+The 34 chains within a single WOTS-PK-GEN are independent.  A future
+enhancement instantiates 2–4 SHAKE-256 engines behind the same
+sequencer FSM, computing 2–4 chains simultaneously:
+
+| Engines | WOTS-PK-GEN | SPX-SIGN @ 200 MHz | Extra LUTs |
+|---------|-------------|---------------------|------------|
+| 1       | ~358K       | 7.3s                | ~80        |
+| 2       | ~190K       | ~3.9s               | ~2,100     |
+| 4       | ~105K       | ~2.1s               | ~6,200     |
+
+This is out of scope for v1,but the single-engine design is
+structured to allow it: the DMA read port, MMIO registers, and FSM
+all generalise to N engines with a round-robin scheduler.
+
+---
+
+## 8. MMIO Map After Changes
 
 Proposed layout with SHA-256/512 widened and CRC relocated:
 
@@ -863,7 +1190,7 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0x800–0x81F   | 32 B   | TRNG                | existing   |
 | 0x840–0x87F   | 64 B   | Field ALU           | existing   |
 | 0x880–0x89F   | 32 B   | **Port I/O remap CSR** | **new**    |
-| 0x8A0–0x8BF   | 32 B   | *(free)*            |            |
+| 0x8A0–0x8BF   | 32 B   | **WOTS+ Chain Accel** | **new (§7)** |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
 | 0x940–0x9BF   | 128 B  | **SHA-256/384/512** | **widened** |

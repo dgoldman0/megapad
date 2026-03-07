@@ -34,6 +34,7 @@ from devices import (
     MBOX_BASE, SPINLOCK_BASE, CRC_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
     PortBridgeCSR,
+    WotsChainAccel,
 )
 
 # ---------------------------------------------------------------------------
@@ -402,6 +403,11 @@ class MegapadSystem:
         self.bus.register(self.port_bridge)
         for cpu in self.cores:
             self.port_bridge.attach_cpu(cpu)
+
+        # WOTS+ chain accelerator — DMA reads from RAM, wraps SHA3
+        self.wots = WotsChainAccel()
+        self.wots.attach_mem(self._shared_mem)
+        self.bus.register(self.wots)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read

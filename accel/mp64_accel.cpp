@@ -2839,6 +2839,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::buffer_info info = buf.request(true);  // writable
             s.mem = static_cast<uint8_t*>(info.ptr);
             s.mem_size = size;
+            // WOTS chain accelerator needs direct memory access (DMA read)
+            s.crypto.wots.mem = s.mem;
+            s.crypto.wots.mem_size = (uint32_t)size;
         })
         // HBW memory attachment
         .def("attach_hbw_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
@@ -2873,6 +2876,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Crypto devices — initialize C++ native crypto accelerators
         .def("init_crypto", [](CPUState& s) {
             s.crypto.init();
+            // Ensure WOTS chain has current memory pointer
+            s.crypto.wots.mem = s.mem;
+            s.crypto.wots.mem_size = (uint32_t)s.mem_size;
         })
         .def("disable_crypto", [](CPUState& s) {
             s.crypto.enabled = false;
@@ -2885,6 +2891,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("crypto_sha256_reset", [](CPUState& s) { s.crypto.sha256.reset(); })
         .def("crypto_sha3_reset", [](CPUState& s) { s.crypto.sha3.reset(); s.crypto.sha3.mode = 0; })
         .def("crypto_field_reset", [](CPUState& s) { s.crypto.field_alu.reset(); })
+        .def("crypto_wots_reset", [](CPUState& s) {
+            s.crypto.wots.reset();
+            s.crypto.wots.sha3 = &s.crypto.sha3;
+            s.crypto.wots.mem = s.mem;
+            s.crypto.wots.mem_size = (uint32_t)s.mem_size;
+        })
+        .def("crypto_wots_status", [](const CPUState& s) -> uint8_t {
+            return s.crypto.wots.status;
+        })
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
             return s.crypto.read8(mmio_off);

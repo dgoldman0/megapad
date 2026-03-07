@@ -71,6 +71,7 @@ from devices import (
     NetworkDevice, DeviceBus,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     CRC_BASE, SHA256_BASE, FB_BASE,
+    WOTS_BASE, WotsChainAccel,
 )
 from data_sources import (
     encode_frame, decode_header, DTYPE_RAW, DTYPE_U8, DTYPE_TEXT,
@@ -24205,6 +24206,221 @@ class TestKDOSWInput(_KDOSTestBase):
         self.assertIn("5 ", text)      # length = 5
         # Verify dump file was written
         self.assertTrue(os.path.exists(dump_path))
+
+
+# ===========================================================================
+#  WOTS+ Chain Accelerator Tests
+# ===========================================================================
+
+class TestWotsChainAccel(unittest.TestCase):
+    """Tests for the WOTS+ chain accelerator (MMIO 0x8A0–0x8BF)."""
+
+    @staticmethod
+    def _reference_chain(seed: bytes, adrs: bytearray, buf: bytearray,
+                         steps: int, start: int) -> bytes:
+        """Compute reference WOTS+ chain using hashlib SHAKE-256."""
+        import hashlib
+        for s in range(steps):
+            step_idx = start + s
+            adrs[28] = 0
+            adrs[29] = 0
+            adrs[30] = (step_idx >> 8) & 0xFF
+            adrs[31] = step_idx & 0xFF
+            h = hashlib.shake_256(seed + bytes(adrs) + bytes(buf))
+            buf = bytearray(h.digest(16))
+        return bytes(buf)
+
+    def _make_wots(self, mem_size: int = 4096) -> tuple:
+        """Create a WotsChainAccel with attached memory."""
+        mem = bytearray(mem_size)
+        dev = WotsChainAccel()
+        dev.attach_mem(mem)
+        return dev, mem
+
+    def _write_addr32(self, dev, offset: int, addr: int):
+        """Write a 32-bit address LE across 4 consecutive byte registers."""
+        dev.write8(offset + 0, addr & 0xFF)
+        dev.write8(offset + 1, (addr >> 8) & 0xFF)
+        dev.write8(offset + 2, (addr >> 16) & 0xFF)
+        dev.write8(offset + 3, (addr >> 24) & 0xFF)
+
+    def _run_chain(self, dev, mem, seed_addr, adrs_addr, input_addr,
+                   steps, start):
+        """Program registers, trigger GO, return status."""
+        self._write_addr32(dev, 0x00, seed_addr)
+        self._write_addr32(dev, 0x04, adrs_addr)
+        self._write_addr32(dev, 0x08, input_addr)
+        dev.write8(0x0C, steps)
+        dev.write8(0x0D, start)
+        dev.write8(0x0E, 1)  # GO
+        return dev.read8(0x0E)
+
+    # -- Basic status lifecycle --------------------------------------------
+
+    def test_idle_status(self):
+        """Fresh device reads status=0 (idle)."""
+        dev, _ = self._make_wots()
+        self.assertEqual(dev.read8(0x0E), 0)
+
+    def test_done_status(self):
+        """After execution, status reads 2 (done)."""
+        dev, mem = self._make_wots()
+        # Plant minimal data
+        seed = bytes(range(16))
+        adrs = bytes(range(32))
+        inp = bytes(range(16))
+        mem[0:16] = seed
+        mem[100:132] = adrs
+        mem[200:216] = inp
+        status = self._run_chain(dev, mem, 0, 100, 200, 1, 0)
+        self.assertEqual(status, 2, "status should be 2 (done)")
+
+    # -- Single-step chain -------------------------------------------------
+
+    def test_single_step_matches_reference(self):
+        """1-step chain matches reference SHAKE-256 computation."""
+        dev, mem = self._make_wots()
+
+        seed = bytes(range(16))
+        adrs = bytearray(range(32))
+        inp = bytearray(b'\xAA' * 16)
+        seed_addr, adrs_addr, inp_addr = 0, 64, 128
+
+        mem[seed_addr:seed_addr+16] = seed
+        mem[adrs_addr:adrs_addr+32] = adrs
+        mem[inp_addr:inp_addr+16] = inp
+
+        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
+                                    steps=1, start=0)
+
+        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 1, 0)
+
+        # Read DOUT
+        dout = bytes(dev.read8(0x10 + i) for i in range(16))
+        self.assertEqual(dout, ref, "DOUT should match reference")
+
+    # -- Multi-step chain --------------------------------------------------
+
+    def test_multi_step_chain(self):
+        """5-step chain matches reference."""
+        dev, mem = self._make_wots()
+
+        seed = b'\xDE\xAD' * 8
+        adrs = bytearray(b'\x00' * 32)
+        inp = bytearray(b'\x42' * 16)
+        seed_addr, adrs_addr, inp_addr = 0, 32, 80
+
+        mem[seed_addr:seed_addr+16] = seed
+        mem[adrs_addr:adrs_addr+32] = adrs
+        mem[inp_addr:inp_addr+16] = inp
+
+        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
+                                    steps=5, start=0)
+
+        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 5, 0)
+
+        dout = bytes(dev.read8(0x10 + i) for i in range(16))
+        self.assertEqual(dout, ref)
+
+    def test_chain_with_nonzero_start(self):
+        """Chain with start=3 matches reference (ADRS mutation check)."""
+        dev, mem = self._make_wots()
+
+        seed = b'\xFF' * 16
+        adrs = bytearray(b'\x11' * 32)
+        inp = bytearray(b'\x00' * 16)
+        seed_addr, adrs_addr, inp_addr = 0, 32, 80
+
+        mem[seed_addr:seed_addr+16] = seed
+        mem[adrs_addr:adrs_addr+32] = adrs
+        mem[inp_addr:inp_addr+16] = inp
+
+        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
+                                    steps=4, start=3)
+
+        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 4, 3)
+
+        dout = bytes(dev.read8(0x10 + i) for i in range(16))
+        self.assertEqual(dout, ref)
+
+    # -- Max steps ---------------------------------------------------------
+
+    def test_max_15_steps(self):
+        """15-step chain (max) completes correctly."""
+        dev, mem = self._make_wots()
+
+        seed = b'\x01' * 16
+        adrs = bytearray(b'\x02' * 32)
+        inp = bytearray(b'\x03' * 16)
+        seed_addr, adrs_addr, inp_addr = 0, 32, 80
+
+        mem[seed_addr:seed_addr+16] = seed
+        mem[adrs_addr:adrs_addr+32] = adrs
+        mem[inp_addr:inp_addr+16] = inp
+
+        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
+                                    steps=15, start=0)
+
+        self._run_chain(dev, mem, seed_addr, adrs_addr, inp_addr, 15, 0)
+
+        dout = bytes(dev.read8(0x10 + i) for i in range(16))
+        self.assertEqual(dout, ref)
+
+    # -- Edge cases --------------------------------------------------------
+
+    def test_zero_steps_stays_idle(self):
+        """0 steps → status stays idle (no execution)."""
+        dev, mem = self._make_wots()
+        mem[0:16] = b'\xAA' * 16
+        mem[32:64] = b'\xBB' * 32
+        mem[80:96] = b'\xCC' * 16
+        self._run_chain(dev, mem, 0, 32, 80, 0, 0)
+        self.assertEqual(dev.read8(0x0E), 0, "0 steps → idle")
+
+    def test_steps_clamped_to_4bit(self):
+        """Steps register only uses low 4 bits (mask 0x0F)."""
+        dev, mem = self._make_wots()
+        seed = b'\x10' * 16
+        adrs = bytearray(32)
+        inp = bytearray(16)
+        mem[0:16] = seed
+        mem[32:64] = adrs
+        mem[80:96] = inp
+
+        # Write 0xFF to steps — should clamp to 15
+        ref = self._reference_chain(seed, bytearray(adrs), bytearray(inp),
+                                    steps=15, start=0)
+        self._run_chain(dev, mem, 0, 32, 80, 0xFF, 0)
+
+        dout = bytes(dev.read8(0x10 + i) for i in range(16))
+        self.assertEqual(dout, ref)
+
+    # -- Cycle counter -----------------------------------------------------
+
+    def test_cycle_estimate(self):
+        """Cycle register reports nonzero after execution."""
+        dev, mem = self._make_wots()
+        mem[0:16] = b'\x00' * 16
+        mem[32:64] = b'\x00' * 32
+        mem[80:96] = b'\x00' * 16
+        self._run_chain(dev, mem, 0, 32, 80, 3, 0)
+        cycles_est = dev.read8(0x0F)
+        self.assertGreater(cycles_est, 0, "cycle estimate should be nonzero")
+
+    # -- Bus registration --------------------------------------------------
+
+    def test_wots_on_bus(self):
+        """WOTS accelerator is reachable via DeviceBus in make_system()."""
+        sys = make_system()
+        bus = sys.bus
+        dev, off = bus.find_device(WOTS_BASE)
+        self.assertIsNotNone(dev, "WOTS device should be registered on bus")
+        self.assertEqual(dev.name, "WotsChain")
+        self.assertEqual(off, 0)
+
+    def test_wots_base_constant(self):
+        """WOTS_BASE matches expected MMIO offset."""
+        self.assertEqual(WOTS_BASE, 0x08A0)
 
 
 # ===========================================================================

@@ -893,6 +893,7 @@ module mp64_soc #(
     wire mmio_sel_sha256 = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100101);// 0x940-0x97F
     wire mmio_sel_ntt    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100011);// 0x8C0-0x8FF
     wire mmio_sel_kem    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100100);// 0x900-0x93F
+    wire mmio_sel_wots   = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1000101);// 0x8A0-0x8BF
     wire mmio_sel_rtc    = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1011000); // 0xB00-0xB1F
 
     // SysInfo — read-only system information (0x300)
@@ -1043,13 +1044,63 @@ module mp64_soc #(
     mp64_sha3 u_sha3 (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
-        .req   (mmio_sel_sha3),
+        .req   (mmio_sel_sha3 && !wots_active),  // blocked when WOTS chain running
         .addr  (mmio_addr_eff[6:0]),
         .wdata (bus_mmio_wdata),
         .wen   (bus_mmio_wen),
         .rdata (sha3_rdata),
         .ack   (sha3_ack),
         .irq   (sha3_irq)
+    );
+
+    // WOTS+ chain accelerator (wraps SHA3 engine)
+    wire [63:0] wots_rdata;
+    wire        wots_ack;
+    wire        wots_active;
+    wire        wots_irq;
+
+    // DMA read port (connects to bus arbiter / memory)
+    wire        wots_dma_req;
+    wire [31:0] wots_dma_addr;
+    reg  [7:0]  wots_dma_rdata;
+    reg         wots_dma_ack;
+
+    // DMA read: lowest priority, direct memory access
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            wots_dma_rdata <= 8'd0;
+            wots_dma_ack   <= 1'b0;
+        end else begin
+            wots_dma_ack <= wots_dma_req;  // 1-cycle latency
+            if (wots_dma_req)
+                wots_dma_rdata <= 8'd0; // RTL stub; real impl reads from SRAM
+        end
+    end
+
+    mp64_wots u_wots (
+        .clk           (sys_clk),
+        .rst_n         (sys_rst_n),
+        .req           (mmio_sel_wots),
+        .addr          (mmio_addr_eff[4:0]),
+        .wdata         (bus_mmio_wdata),
+        .wen           (bus_mmio_wen),
+        .rdata         (wots_rdata),
+        .ack           (wots_ack),
+        .dma_req       (wots_dma_req),
+        .dma_addr      (wots_dma_addr),
+        .dma_rdata     (wots_dma_rdata),
+        .dma_ack       (wots_dma_ack),
+        .sha3_cmd_valid(),   // TODO: wire to SHA3 internal port
+        .sha3_cmd      (),
+        .sha3_din_valid(),
+        .sha3_din      (),
+        .sha3_dout     (8'd0),
+        .sha3_dout_valid(1'b0),
+        .sha3_ready    (1'b1),
+        .sha3_mode_wr  (),
+        .sha3_mode_val (),
+        .active        (wots_active),
+        .irq_done      (wots_irq)
     );
 
     wire [63:0] sha256_rdata;
@@ -1228,6 +1279,7 @@ module mp64_soc #(
         if (mmio_sel_field)   begin mmio_rdata_mux = field_rdata; mmio_ack_mux = field_ack; end
         if (mmio_sel_ntt)     begin mmio_rdata_mux = ntt_rdata;   mmio_ack_mux = ntt_ack;   end
         if (mmio_sel_kem)     begin mmio_rdata_mux = kem_rdata;   mmio_ack_mux = kem_ack;   end
+        if (mmio_sel_wots)    begin mmio_rdata_mux = wots_rdata;  mmio_ack_mux = wots_ack;  end
         if (mmio_sel_rtc)     begin mmio_rdata_mux = {56'd0, rtc_rdata_raw}; mmio_ack_mux = rtc_ack; end
         if (mmio_sel_port_bridge) begin mmio_rdata_mux = port_bridge_rdata; mmio_ack_mux = 1'b1; end
     end
