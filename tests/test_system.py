@@ -13364,7 +13364,7 @@ class TestKDOSMulticore(unittest.TestCase):
             lines = [l for l in f.read().splitlines()
                      if l.strip() and not l.strip().startswith('\\')]
 
-        sys_obj = make_system(ram_kib=1024, num_cores=4)
+        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, code)
         sys_obj.boot()
@@ -17932,9 +17932,9 @@ class TestKDOSNetStack(_KDOSTestBase):
     # -- 16.7b: TCB data structure --
 
     def test_tcb_size(self):
-        """/TCB should be 5728."""
+        """/TCB should be 5816."""
         text = self._run_kdos(["/TCB ."])
-        self.assertIn("5728 ", text)
+        self.assertIn("5816 ", text)
 
     def test_tcb_n_indexing(self):
         """TCB-N should return different addresses for different indices."""
@@ -17943,7 +17943,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "1 TCB-N .\"  b=\" .",
             "1 TCB-N 0 TCB-N - .\"  diff=\" .",
         ])
-        self.assertIn("diff=5728 ", text)
+        self.assertIn("diff=5816 ", text)
 
     def test_tcb_init_sets_closed(self):
         """TCB-INIT should set state to TCPS-CLOSED (0)."""
@@ -18031,6 +18031,85 @@ class TestKDOSNetStack(_KDOSTestBase):
             "8080 TCB-FIND-LPORT .",
         ])
         self.assertIn("0 ", text)
+
+    # -- 16.7b1c: Accept queue --
+
+    def test_aq_constants(self):
+        """/AQ-CAP should be 8."""
+        text = self._run_kdos(["/AQ-CAP ."])
+        self.assertIn("8 ", text)
+
+    def test_aq_push_pop(self):
+        """AQ-PUSH then AQ-POP should round-trip a TCB pointer."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            # Set up TCB 0 as a listener
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "8080 0 TCB-N TCB.LOCAL-PORT !",
+            # Push TCB 1's address into TCB 0's accept queue
+            '1 TCB-N 0 TCB-N AQ-PUSH ." PU=" .',
+            '0 TCB-N TCB.AQ-COUNT @ ." CNT=" .',
+            # Pop it back
+            '0 TCB-N AQ-POP ." PO=" .',
+            '1 TCB-N ." EXP=" .',
+        ])
+        self.assertIn("PU=-1 ", text)   # push success
+        self.assertIn("CNT=1 ", text)
+        # PO value should equal EXP value (1 TCB-N address)
+        import re
+        m_po = re.search(r'PO=(\d+)', text)
+        m_exp = re.search(r'EXP=(\d+)', text)
+        self.assertIsNotNone(m_po)
+        self.assertIsNotNone(m_exp)
+        self.assertEqual(m_po.group(1), m_exp.group(1))
+
+    def test_aq_pop_empty(self):
+        """AQ-POP on empty queue should return 0."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "0 TCB-N AQ-POP .",
+        ])
+        self.assertIn("0 ", text)
+
+    def test_aq_full_rejects(self):
+        """AQ-PUSH should return 0 (failure) when queue is full."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            # Fill 8 slots (using TCB 1's address repeatedly)
+            ": fill-aq 8 0 DO 1 TCB-N 0 TCB-N AQ-PUSH DROP LOOP ;",
+            "fill-aq",
+            '0 TCB-N TCB.AQ-COUNT @ ." CNT=" .',
+            # 9th push should fail
+            '1 TCB-N 0 TCB-N AQ-PUSH ." OVER=" .',
+        ])
+        self.assertIn("CNT=8 ", text)
+        self.assertIn("OVER=0 ", text)  # push rejected
+
+    def test_listener_stays_listening(self):
+        """After SYN processing, the listener TCB should remain in LISTEN."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 1]
+        my_ip = [192, 168, 1, 100]
+
+        syn = TestKDOSNetStack._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            50000, 8080, 3000, 0, 0x02, 8192)
+
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            "TCP-INIT-ALL",
+            "CREATE PMAC 6 ALLOT 170 PMAC C! 187 PMAC 1+ C! 204 PMAC 2 + C!"
+            " 221 PMAC 3 + C! 238 PMAC 4 + C! 1 PMAC 5 + C!",
+            "CREATE PIP 4 ALLOT 10 PIP C! 0 PIP 1+ C! 0 PIP 2 + C!"
+            " 1 PIP 3 + C!",
+            "PIP PMAC ARP-INSERT",
+            "8080 TCP-LISTEN VARIABLE ltcb ltcb !",
+            "20 TCP-POLL-WAIT",
+            'ltcb @ TCB.STATE @ ." LST=" .',
+        ], nic_frames=[syn])
+        self.assertIn("LST=1 ", text)     # TCPS-LISTEN = 1
 
     # -- 16.7b2: TCB-USAGE / TCB-REAPER / TCB-FLUSH-TIMEWAIT --
 
@@ -18349,10 +18428,13 @@ class TestKDOSNetStack(_KDOSTestBase):
             "VARIABLE _HP-TCB  DUP _HP-TCB !",
             # Poll — processes the SYN, sends SYN+ACK, callback sends ACK
             "10 TCP-POLL-WAIT",
-            "_HP-TCB @ TCB.STATE @ .\"  st=\" .",
+            # Listener stays in LISTEN; accepted conn is in accept queue
+            "_HP-TCB @ TCB.STATE @ .\"  lst=\" .",
+            "_HP-TCB @ AQ-POP DUP 0<> IF TCB.STATE @ .\"  st=\" . ELSE .\"  st=none \" THEN",
         ], nic_frames=[syn_frame], nic_tx_callback=tcp_peer_passive)
         self.assertIn("listen=-1 ", text)
-        self.assertIn("st=4 ", text)  # TCPS-ESTABLISHED = 4
+        self.assertIn("lst=1 ", text)   # listener stays TCPS-LISTEN
+        self.assertIn("st=4 ", text)    # accepted TCB is TCPS-ESTABLISHED
 
     # -- 16.7i: TCP data transfer --
 

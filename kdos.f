@@ -8305,8 +8305,8 @@ VARIABLE _UDS-SPORT
     _UDS-SPORT @ _UDS-DPORT @ R> R>    \ ( sport dport payload paylen )
     UDP-BUILD                           \ ( buf udp-len )
     \ Fill checksum
-    2DUP                                \ ( buf len buf len )
-    MY-IP _UDS-DST @ ROT ROT           \ ( buf len src dst buf len )
+    2DUP >R >R                          \ save buf/len on R
+    MY-IP _UDS-DST @ R> R>             \ ( buf len src dst buf len )
     UDP-FILL-CKSUM                      \ ( buf len )
     \ Send via IP
     >R >R
@@ -8948,8 +8948,12 @@ VARIABLE _DNR-DLEN
 \ +5700  CWND        1 cell    congestion window (bytes)
 \ +5708  SSTHRESH    1 cell    slow-start threshold
 \ +5716  DUP-ACKS    1 cell    duplicate ACK counter
-\ +5724  (pad to 5728)
-5728 CONSTANT /TCB               \ size of one TCB
+\ +5724  AQ-HEAD     1 cell    accept-queue read index (listeners only)
+\ +5732  AQ-TAIL     1 cell    accept-queue write index
+\ +5740  AQ-COUNT    1 cell    accept-queue entries queued
+\ +5748  AQ-SLOTS    64 bytes  8 TCB-pointer slots (8×8)
+\ +5812  (pad to 5816)
+5816 CONSTANT /TCB               \ size of one TCB
 
 \ -- TCB field accessors (add to TCB base) --
 : TCB.STATE       ( tcb -- addr )          ;
@@ -8975,6 +8979,41 @@ VARIABLE _DNR-DLEN
 : TCB.CWND        ( tcb -- addr ) 5700 + ;
 : TCB.SSTHRESH    ( tcb -- addr ) 5708 + ;
 : TCB.DUP-ACKS    ( tcb -- addr ) 5716 + ;
+: TCB.AQ-HEAD     ( tcb -- addr ) 5724 + ;
+: TCB.AQ-TAIL     ( tcb -- addr ) 5732 + ;
+: TCB.AQ-COUNT    ( tcb -- addr ) 5740 + ;
+: TCB.AQ-SLOTS    ( tcb -- addr ) 5748 + ;
+
+\ -- Accept-queue constants --
+8 CONSTANT /AQ-CAP                \ max completed connections per listener
+
+\ -- AQ-FULL? ( tcb -- flag ) --
+: AQ-FULL?  ( tcb -- flag )  TCB.AQ-COUNT @ /AQ-CAP >= ;
+
+\ -- AQ-PUSH: enqueue a completed TCB pointer into listener's accept queue --
+\   ( new-tcb listener-tcb -- flag )  flag: -1 ok, 0 full
+: AQ-PUSH  ( new-tcb listener -- flag )
+    DUP AQ-FULL? IF 2DROP 0 EXIT THEN
+    >R
+    \ slot-addr = AQ-SLOTS + tail × 8
+    R@ TCB.AQ-TAIL @ 8 * R@ TCB.AQ-SLOTS +  !
+    \ tail = (tail + 1) % /AQ-CAP
+    R@ TCB.AQ-TAIL @ 1+ /AQ-CAP MOD R@ TCB.AQ-TAIL !
+    \ count++
+    1 R> TCB.AQ-COUNT +!
+    -1 ;
+
+\ -- AQ-POP: dequeue oldest completed TCB pointer --
+\   ( listener-tcb -- new-tcb | 0 )  0 means empty
+: AQ-POP  ( listener -- tcb | 0 )
+    DUP TCB.AQ-COUNT @ 0= IF DROP 0 EXIT THEN
+    >R
+    \ slot-addr = AQ-SLOTS + head × 8
+    R@ TCB.AQ-HEAD @ 8 * R@ TCB.AQ-SLOTS +  @
+    \ head = (head + 1) % /AQ-CAP
+    R@ TCB.AQ-HEAD @ 1+ /AQ-CAP MOD R@ TCB.AQ-HEAD !
+    \ count--
+    -1 R> TCB.AQ-COUNT +! ;
 
 \ -- TCB table (dynamic, XMEM-backed) --
 \   Sized by NET-TABLES-INIT based on available XMEM.
@@ -9372,13 +9411,23 @@ VARIABLE _TI-DATA
 \ Helper: SEQ> (strictly greater)
 : SEQ>  ( a b -- flag )  SWAP SEQ< ;
 
-\ -- TCP-INPUT-LISTEN: handle segment in LISTEN state --
-\   Only SYN is valid; allocate a new TCB for the connection.
+\ -- TCP-INPUT-LISTEN: handle SYN on a listening TCB --
+\   Allocates a FRESH TCB for the new connection.  The listener
+\   stays in LISTEN state so no SYNs are lost between accept calls.
+\   ( listener-tcb -- )
 : TCP-INPUT-LISTEN  ( tcb -- )
     \ If not SYN, ignore
     _TI-FLAGS @ TCP-SYN AND 0= IF DROP EXIT THEN
-    \ Set up connection in this TCB
-    DUP >R
+    \ Check accept-queue capacity before allocating
+    DUP AQ-FULL? IF DROP EXIT THEN
+    \ Allocate a fresh TCB for this connection
+    TCB-ALLOC DUP -1 = IF DROP DROP EXIT THEN
+    TCB-N >R                               ( listener  R: new-tcb )
+    R@ /TCB 0 FILL
+    \ Copy listener's local port to new TCB
+    DUP TCB.LOCAL-PORT @ R@ TCB.LOCAL-PORT !
+    DROP                                   ( R: new-tcb )
+    \ Set up connection state in the new TCB
     _TI-HDR @ IP-H.SRC R@ TCB.REMOTE-IP 4 CMOVE
     _TI-SPORT @ R@ TCB.REMOTE-PORT !
     _TI-SEQ @ 1+ R@ TCB.RCV-NXT !         \ SYN consumes 1 seq
@@ -9440,6 +9489,9 @@ VARIABLE _TI-DATA
         R@ TCB.STATE @ TCPS-SYN-RCVD = IF
             \ Transition to ESTABLISHED
             TCPS-ESTABLISHED R@ TCB.STATE !
+            \ Enqueue into listener's accept queue (if any)
+            R@ TCB.LOCAL-PORT @ TCB-FIND-LPORT
+            DUP 0<> IF  R@ SWAP AQ-PUSH DROP  ELSE  DROP  THEN
         THEN
         \ Update SND-UNA if ACK advances it
         _TI-ACK @ R@ TCB.SND-UNA @ SEQ>= IF
@@ -9616,10 +9668,12 @@ VARIABLE _TC-LPORT
 
 \ -- TCP-LISTEN: passive open (server) --
 \   ( local-port -- tcb | 0 )
+\   Initialises the accept queue (head=0, tail=0, count=0) so
+\   completed connections can be enqueued by TCP-INPUT-ESTABLISHED-ETC.
 : TCP-LISTEN  ( lport -- tcb | 0 )
     TCB-ALLOC DUP -1 = IF 2DROP 0 EXIT THEN
     TCB-N >R
-    R@ /TCB 0 FILL
+    R@ /TCB 0 FILL                     \ zeroes everything incl. AQ-*
     R@ TCB.LOCAL-PORT !
     /TCP-RXBUF R@ TCB.RCV-WND !
     TCP-MSS R@ TCB.CWND !
@@ -9671,7 +9725,11 @@ VARIABLE _TSND-LEN
             DUP TCP-FIN TCP-ACK OR TCP-SEND-CTL DROP
             1 SWAP TCB.SND-NXT +!    \ FIN consumes 1 seq number
         ENDOF
-        TCPS-LISTEN OF  TCB-INIT  ENDOF
+        TCPS-LISTEN OF
+            \ Drain accept queue — close any pending TCBs
+            BEGIN DUP AQ-POP DUP 0<> WHILE TCB-INIT REPEAT DROP
+            TCB-INIT
+        ENDOF
         TCPS-SYN-SENT OF  TCB-INIT  ENDOF
         \ other states: just reset
         SWAP TCB-INIT
@@ -10878,7 +10936,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
 \  tables fall back to Bank 0 with a conservative floor of 16.
 \
 \  Budget: we reserve up to 25% of XMEM for networking tables.
-\    Per-connection cost ≈ /TCB + /TLS-CTX + 2×/SOCK ≈ 6344 bytes
+\    Per-connection cost ≈ /TCB + /TLS-CTX + 2×/SOCK ≈ 6432 bytes
 \
 \  Called once at load time.  Safe to call again (idempotent if
 \  tables haven't been used yet).
@@ -10890,7 +10948,7 @@ VARIABLE SOCK-TABLE   0 SOCK-TABLE !
         /TCB /TLS-CTX + /SOCK 2 * + /  ( max-conns we can afford )
         256 MIN  16 MAX                ( clamp 16..256 )
     ELSE
-        16                             ( no XMEM: conservative )
+        8                              ( no XMEM: very conservative )
     THEN
     DUP  TO /TCP-MAX-CONN
     DUP  TO TLS-MAX-CTX
@@ -10945,28 +11003,25 @@ VARIABLE _SLSN-SD
 ;
 
 \ --- SOCK-ACCEPT ( sd -- new-sd | -1 ) ---
-\ Poll for incoming connection on a listening socket.
-\ Returns a new socket descriptor for the accepted connection.
+\ Dequeue a completed connection from the listener's accept queue.
+\ The listener TCB stays in LISTEN — no re-open needed.
 VARIABLE _SACC-SD
 VARIABLE _SACC-TCB
 
 : SOCK-ACCEPT ( sd -- new-sd | -1 )
     _SACC-SD !
     _SACC-SD @ SOCK.STATE @ SOCKST-LISTENING <> IF -1 EXIT THEN
-    \ Check if the listening TCB has transitioned to ESTABLISHED
-    _SACC-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED <> IF -1 EXIT THEN
-    _SACC-SD @ SOCK.HANDLE @ _SACC-TCB !
+    \ Dequeue from the listener's accept queue
+    _SACC-SD @ SOCK.HANDLE @ AQ-POP
+    DUP 0= IF DROP -1 EXIT THEN
+    _SACC-TCB !
     \ Allocate new socket for the accepted connection
-    _SACC-SD @ SOCK.FLAGS @ 1 AND SOCKET   \ same type (TCP/TLS)
+    _SACC-SD @ SOCK.FLAGS @ 1 AND SOCKET
     DUP -1 = IF EXIT THEN
     DUP >R
     _SACC-TCB @ R@ SOCK.HANDLE !
     SOCKST-ACCEPTED R@ SOCK.STATE !
     _SACC-SD @ SOCK.LOCAL-PORT @ R@ SOCK.LOCAL-PORT !
-    \ Re-open listener for next connection
-    _SACC-SD @ SOCK.LOCAL-PORT @ TCP-LISTEN
-    DUP 0<> IF _SACC-SD @ SOCK.HANDLE ! THEN
-    DROP
     R>
 ;
 

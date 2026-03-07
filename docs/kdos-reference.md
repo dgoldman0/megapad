@@ -1377,19 +1377,27 @@ Full TCP with 16–256 TCB slots (dynamic, scaled to 25% of XMEM), 3-way
 handshake, sliding window, congestion control, retransmit, and TIME_WAIT
 reaper (60 s 2×MSL) with automatic scavenge-on-alloc.
 
+Each listener TCB has an embedded **accept queue** (8 slots).  Incoming
+SYNs allocate a fresh TCB — the listener stays in LISTEN and never
+misses a connection.  Completed handshakes are enqueued and dequeued
+by `SOCK-ACCEPT`.
+
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TCP-CONNECT` | `( ip port -- tcb )` | Active open: SYN → SYN-ACK → ACK.  Returns TCB handle. |
-| `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN. |
+| `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN.  Initialises accept queue. |
 | `TCP-SEND` | `( tcb buf len -- )` | Send data on an established connection. |
 | `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
-| `TCP-CLOSE` | `( tcb -- )` | Graceful close: FIN → FIN-ACK → TIME_WAIT. |
+| `TCP-CLOSE` | `( tcb -- )` | Graceful close: FIN → FIN-ACK → TIME_WAIT.  Drains accept queue for listeners. |
 | `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
 | `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
 | `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s). |
 | `TCB-FLUSH-TIMEWAIT` | `( -- )` | Force-reclaim all TIME_WAIT TCBs (test/debug). |
 | `TCP-2MSL` | `( -- ms )` | TIME_WAIT duration constant (60 000 ms). |
+| `/AQ-CAP` | `( -- n )` | Accept-queue capacity per listener (8). |
+| `AQ-PUSH` | `( new-tcb listener -- flag )` | Enqueue completed TCB; -1 ok, 0 full. |
+| `AQ-POP` | `( listener -- tcb \| 0 )` | Dequeue oldest completed TCB; 0 if empty. |
 
 ### §16.8–§16.11 TLS 1.3
 
@@ -1431,7 +1439,7 @@ Unified socket interface over TCP and UDP (§17 in `kdos.f`).
 | `SOCKET` | `( proto -- sd )` | Create socket descriptor.  *proto*: 6 = TCP, 17 = UDP. |
 | `BIND` | `( sd port -- )` | Bind socket to local port. |
 | `LISTEN` | `( sd -- )` | Mark socket as listening (TCP only). |
-| `ACCEPT` | `( sd -- sd' )` | Accept incoming connection, return new socket. |
+| `ACCEPT` | `( sd -- sd' )` | Dequeue completed connection from listener's accept queue.  Returns new socket or -1. |
 | `CONNECT` | `( sd ip port -- )` | Connect to remote host (TCP) or set default destination (UDP). |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
