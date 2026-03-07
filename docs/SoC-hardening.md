@@ -1,6 +1,6 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, bus timeout DONE)  
+Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE)  
 Last updated: 2026-03-07
 
 ---
@@ -418,6 +418,25 @@ et al. (already required for the no-hardware case).
 - Update GPRs in-place to match post-transfer state.
 - Micro-core flag: raise `ILLEGAL_OP` trap if `self.is_micro`.
 
+### C++ accelerator gap (audit 2026-03-07)
+
+**The C++ accelerator (`mp64_accel.cpp`) does NOT implement EXT.STRING
+natively.**  When opcode `0xF9` is encountered, the C++ fast-path
+rewinds PC and throws `EXT_ISA_FALLBACK`.  `accel_wrapper.py` catches
+this and executes the instruction via `_step_python_fallback()` — i.e.
+the Python CPU emulator handles every EXT.STRING instruction even when
+the C++ accelerator is active.
+
+This is a **correctness non-issue** (tests pass, behavior identical)
+but a **performance gap** — every CMOVE/CMOVE>/BFILL/BCOMP/BSRCH
+drops out of the ~63× C++ hot loop back to Python speed.
+
+**TODO for SoC hardening team:** Implement EXT.STRING sub-ops natively
+in `mp64_accel.cpp`.  The Python behavioral model in `megapad64.py`
+(opcode 0xF9 dispatch) is the reference.  The RTL spec above defines
+the exact semantics.  Remove the `EXT_ISA_FALLBACK` throw for `n==0x9`
+once all sub-ops are handled.
+
 ---
 
 ## 3. Forth Dictionary Search Engine — ISA Extension (EXT.DICT, prefix FA)
@@ -552,6 +571,39 @@ if needed, they use software linked-list FIND.
 - Micro-core flag: raise `ILLEGAL_OP` trap if `self.is_micro`.
 - Single instance per emulated CPU is fine (no contention in
   single-threaded Python).
+
+### C++ accelerator gap (audit 2026-03-07)
+
+**The C++ accelerator (`mp64_accel.cpp`) does NOT implement EXT.DICT
+natively.**  When opcode `0xFA` is encountered, the C++ fast-path
+rewinds PC and throws `EXT_ISA_FALLBACK`.  `accel_wrapper.py` catches
+this and executes the instruction via `_step_python_fallback()` — the
+Python CPU emulator handles every DFIND/DINS/DDEL/DCLR even when the
+C++ accelerator is active.
+
+This is a **correctness non-issue** (all 7 test_ext_dict sub-tests
+pass via the fallback) but a **significant performance gap** — DFIND
+is called on every word lookup in the Forth outer interpreter, making
+it the single hottest fallback path.  Every interpretation cycle drops
+from C++ speed back to Python.
+
+**Implementation status across layers:**
+
+| Layer | Status | Notes |
+|-------|--------|-------|
+| RTL (`mp64_dict.v`) | ✅ Complete | 490 lines, 4-way SA, FNV-1a, BRAM |
+| Python emulator (`megapad64.py`) | ✅ Complete | 64×4 hash table, FNV-1a 32-bit |
+| C++ accelerator (`mp64_accel.cpp`) | ❌ **Missing** | Throws `EXT_ISA_FALLBACK` |
+| Tests (`test_megapad64.py::test_ext_dict`) | ✅ Complete | 7 sub-tests, all via Python fallback |
+| BIOS usage | ✅ Active | `find_word` → DFIND fast path; DINS on cache miss |
+
+**TODO for SoC hardening team:** Port the EXT.DICT logic into
+`mp64_accel.cpp`.  The Python behavioral model
+(`megapad64.py` lines 1383–1535: `_exec_dict`, `_dict_find`,
+`_dict_insert`, `_dict_delete`, `_dict_clear`) is the reference.
+Need a C++ hash table (64-set × 4-way, FNV-1a 32-bit),
+mirroring `_fnv1a_32` and `_dict_table`.  Remove the
+`EXT_ISA_FALLBACK` throw for `n==0xA` once all sub-ops are handled.
 
 ---
 
@@ -1271,6 +1323,76 @@ Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
 - **Python (TestBusTimeout, 6 tests):** unmapped read/write raises
   `BusError`, mapped device no error, CPU MMIO read/write traps to
   `IVEC_BUS_FAULT`, trap handler entry (flag_i cleared).
+
+---
+
+## 10. BIOS SHA3/WOTS Lock Guards + Diagnostic Words — ✅ DONE
+
+**Status: ✅ Implemented in C++ accel + BIOS + tests (2026-03-07)**
+
+### Problem
+
+After the WOTS+ chain accelerator (§7) was added, the SHA3 coprocessor
+can be locked while a WOTS chain is in progress.  If the BIOS `SHA3-INIT`
+word ran during this window it would access a gated peripheral and either
+hang (RTL) or bus-fault (emulator).  Similarly, `WOTS-CHAIN-HW` could
+interfere if SHA3 was already busy from another caller.  There was no
+firmware-level visibility into bus errors or accelerator status.
+
+### Changes
+
+#### C++ accelerator (`accel/mp64_crypto.h`)
+
+`CryptoDevices::read8` now injects **bit 2** (`ext_locked`) into the
+SHA3 STATUS register (offset 0x01 from SHA3\_BASE) whenever
+`wots.status != 0`.  This matches the RTL `sha3_mmio_blocked` signal
+so firmware sees a consistent lock indicator in both emulator and
+hardware.
+
+#### BIOS (`bios.asm`)
+
+**New words:**
+
+| Word | Behaviour |
+|------|-----------|
+| `SHA3-LOCKED?` | Read SHA3 STATUS bit 2 → Forth flag (0 / -1) |
+| `WOTS-STATUS@` | Read WOTS+0x0E STATUS register (0=idle, 1=busy, 2=done) |
+| `BUS-ERR@`     | CSRR 0x5A → push sticky bus-error latch |
+| `BUS-ERR-CLR`  | Pop mask, CSRW 0x5A (W1C clear) |
+
+**Lock guards:**
+
+- `SHA3-INIT`: checks SHA3 STATUS bit 2 (ext\_locked); if set, prints
+  `"SHA3 locked by WOTS\n"` and aborts without touching the device.
+- `WOTS-CHAIN-HW`: checks SHA3 STATUS bit 1 (busy); if set, drops 5
+  stack arguments and prints `"SHA3 busy — WOTS aborted\n"`.
+
+**Bus fault handler upgrade:**
+
+`bus_fault_handler` now appends `" ERR="` followed by the hex value
+of `CSR_BUS_ERR` (0x5A) to its output, giving immediate visibility
+into the sticky bus-error latch on any trap.
+
+#### Dictionary entries
+
+Four new entries chained after `d_wots_chain_hw`:
+`d_sha3_locked` → `d_wots_status` → `d_bus_err_fetch` → `d_bus_err_clr`
+→ `d_bist_full` (previously linked directly from `d_wots_chain_hw`).
+
+### Tests (`tests/test_system.py` — `TestSHA3LockAndBusErr`, 8 tests)
+
+| Test | Checks |
+|------|--------|
+| `test_sha3_ext_locked_when_wots_idle` | ext\_locked = 0 when WOTS idle |
+| `test_sha3_ext_locked_after_wots` | ext\_locked = 1 when WOTS status ≠ 0 |
+| `test_sha3_ext_locked_via_cpu_mmio` | MMIO read of SHA3 STATUS bit 2 via CPU |
+| `test_wots_status_idle` | WOTS STATUS = 0 on init |
+| `test_wots_status_done` | WOTS STATUS = 2 after chain completes |
+| `test_bus_err_csr_read` | CSRR 0x5A returns 0 (no bus errors) |
+| `test_bus_err_csr_write` | CSRW 0x5A (W1C) doesn't crash the CPU |
+| `test_python_wots_status_lifecycle` | Python WotsChainAccel status 0 → 2 |
+
+All 1,739 tests passing (3 skipped — network).
 
 ---
 

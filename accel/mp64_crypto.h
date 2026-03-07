@@ -1490,8 +1490,14 @@ struct CryptoDevices {
     uint8_t read8(uint32_t mmio_offset) {
         if (mmio_offset >= AES_BASE && mmio_offset < AES_END)
             return aes.read8(mmio_offset - AES_BASE);
-        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END)
-            return sha3.read8(mmio_offset - SHA3_BASE);
+        if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END) {
+            uint8_t val = sha3.read8(mmio_offset - SHA3_BASE);
+            // §6a: STATUS register (offset +0x01) bit 2 = ext_locked
+            // (WOTS chain active — SHA3 engine is exclusively held)
+            if ((mmio_offset - SHA3_BASE) == 0x01 && wots.status != 0)
+                val |= 0x04;   // bit 2 = ext_locked
+            return val;
+        }
         if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END)
             return field_alu.read8(mmio_offset - FIELD_BASE);
         if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)

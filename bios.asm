@@ -8806,6 +8806,12 @@ bus_fault_handler:
     ldn r1, r15
     addi r15, 8
     sep r6
+    ; Print " ERR=" + CSR_BUS_ERR sticky latch (§6c diagnostic)
+    ldi64 r10, str_fault_buserr
+    ldi64 r11, print_str
+    call.l r11
+    csrr r1, 0x5A               ; CSR_BUS_ERR sticky latch
+    sep r6                       ; print low byte (port bitmap)
     ldi64 r11, print_crlf
     call.l r11
     ; Resume REPL — also skip the 16 bytes _trap() pushed (PC + flags)
@@ -10226,7 +10232,19 @@ w_aes_tag_store:
 ;   DOUT   +0x10 (R)  32-byte hash output
 
 ; SHA3-INIT ( -- )  Initialize SHA3 state (current mode).
+;   §6c guard: aborts if SHA3 is locked by WOTS accelerator.
 w_sha3_init:
+    ; Check ext_locked (bit 2 of SHA3 STATUS)
+    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+    ld.b r0, r11
+    andi r0, 0x04
+    breq .sha3_init_ok
+    ; SHA3 locked by WOTS — print warning and return
+    ldi64 r10, str_sha3_locked
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+.sha3_init_ok:
     ldi64 r7, 0xFFFF_FF00_0000_0780   ; SHA3_CMD
     ldi r0, 1                          ; CMD_INIT=1
     st.b r7, r0
@@ -10944,7 +10962,21 @@ w_kem_status:
 ; WOTS-CHAIN-HW ( seed-addr adrs-addr input-addr steps start -- )
 ;   Programs the WOTS+ chain accelerator, triggers execution,
 ;   polls for completion, then copies DOUT back to input-addr.
+;   §6c guard: checks SHA3 STATUS bit 1 (busy) — if SHA3 is mid-operation,
+;   WOTS would clobber its state.  Drops all 5 args and prints error.
 w_wots_chain_hw:
+    ; Guard: check SHA3 not busy (status bit 1)
+    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+    ld.b r0, r11
+    andi r0, 0x02                      ; bit 1 = busy
+    breq .wots_guard_ok
+    ; SHA3 busy — drop 5 stack args and print warning
+    addi r14, 40                       ; 5 × 8 bytes
+    ldi64 r10, str_sha3_busy
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+.wots_guard_ok:
     ; Pop: ( seed-addr adrs-addr input-addr steps start -- )
     ldn r0, r14             ; r0 = start
     addi r14, 8
@@ -11042,6 +11074,53 @@ w_wots_chain_hw:
     cmpi r12, 16
     brcc .wots_copy
 
+    ret.l
+
+; =====================================================================
+;  WOTS / SHA3 Lock Check Words  (§6c hardening)
+; =====================================================================
+
+; SHA3-LOCKED? ( -- flag )  True if SHA3 engine is held by WOTS accelerator.
+;   Reads SHA3 STATUS register (+0x01); bit 2 = ext_locked.
+w_sha3_locked:
+    ldi64 r11, 0xFFFF_FF00_0000_0781  ; SHA3_STATUS
+    ld.b r0, r11
+    andi r0, 0x04                      ; isolate bit 2 (ext_locked)
+    ; Normalise to Forth flag: 0 or -1
+    cmpi r0, 0
+    breq .sha3_locked_no
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF   ; TRUE
+    br .sha3_locked_push
+.sha3_locked_no:
+    ldi r0, 0                          ; FALSE
+.sha3_locked_push:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; WOTS-STATUS@ ( -- n )  Read WOTS accelerator status register.
+;   0=idle, 1=busy, 2=done.
+w_wots_status:
+    ldi64 r7, 0xFFFF_FF00_0000_08AE   ; WOTS_BASE + 0x0E (STATUS)
+    ld.b r0, r7
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BUS-ERR@ ( -- n )  Read bus-error sticky latch (CSR 0x5A).
+;   Each bit corresponds to one bus port.  Nonzero = timeout occurred.
+w_bus_err_fetch:
+    csrr r0, 0x5A
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; BUS-ERR-CLR ( mask -- )  Write-1-to-clear bus-error sticky bits.
+;   e.g. -1 BUS-ERR-CLR  clears all latched errors.
+w_bus_err_clr:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x5A, r0
     ret.l
 
 ; =====================================================================
@@ -14001,9 +14080,45 @@ d_wots_chain_hw:
     call.l r11
     ret.l
 
+; === SHA3-LOCKED? ===
+d_sha3_locked:
+    .dq d_wots_chain_hw
+    .db 12
+    .ascii "SHA3-LOCKED?"
+    ldi64 r11, w_sha3_locked
+    call.l r11
+    ret.l
+
+; === WOTS-STATUS@ ===
+d_wots_status:
+    .dq d_sha3_locked
+    .db 12
+    .ascii "WOTS-STATUS@"
+    ldi64 r11, w_wots_status
+    call.l r11
+    ret.l
+
+; === BUS-ERR@ ===
+d_bus_err_fetch:
+    .dq d_wots_status
+    .db 8
+    .ascii "BUS-ERR@"
+    ldi64 r11, w_bus_err_fetch
+    call.l r11
+    ret.l
+
+; === BUS-ERR-CLR ===
+d_bus_err_clr:
+    .dq d_bus_err_fetch
+    .db 11
+    .ascii "BUS-ERR-CLR"
+    ldi64 r11, w_bus_err_clr
+    call.l r11
+    ret.l
+
 ; === BIST-FULL ===
 d_bist_full:
-    .dq d_wots_chain_hw
+    .dq d_bus_err_clr
     .db 9
     .ascii "BIST-FULL"
     ldi64 r11, w_bist_full
@@ -14993,6 +15108,12 @@ str_fault_sep:
     .asciiz " SEP="
 str_fault_t:
     .asciiz " T="
+str_fault_buserr:
+    .asciiz " ERR="
+str_sha3_locked:
+    .asciiz "SHA3 locked by WOTS\n"
+str_sha3_busy:
+    .asciiz "SHA3 busy — WOTS aborted\n"
 str_branch_overflow:
     .asciiz "Branch offset overflow\n"
 str_leave_overflow:
