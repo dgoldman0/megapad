@@ -315,7 +315,18 @@ needed; at one-round-per-cycle this is usually fine at 100 MHz.
 **Priority: high — directly accelerates core Forth workloads**  
 **Topology: CPU-internal (tightly-coupled sub-module, like MUL/DIV)**  
 **Status: DONE** — RTL (`mp64_string.v`), emulator, assembler, BIOS
-(CMOVE, CMOVE>, FILL, TFILL), and 65 tests (39 RTL + 26 emulator) all passing.
+(CMOVE, CMOVE>, FILL, TFILL, MOVE), and 65 tests (39 RTL + 26 emulator) all passing.
+
+**BIOS adoption status:**
+
+| Forth word | HW sub-op | Status |
+|------------|-----------|--------|
+| CMOVE      | CMOVE (00)| ✅ uses `cmove` |
+| CMOVE>     | CMOVE> (01)| ✅ uses `cmove>` |
+| FILL       | BFILL (02)| ✅ uses `bfill` |
+| MOVE       | CMOVE/CMOVE> | ✅ uses `cmove`/`cmove>` with overlap detection |
+| COMPARE    | BCOMP (03)| ⬜ **TODO** — still byte-loop; needs `min(u1,u2)` prefix logic before BCOMP, then length tie-break |
+| SEARCH     | BSRCH (04)| ⬜ **TODO** — not yet exposed as BIOS word |
 
 Block-move/fill/compare instructions that understand Forth `CMOVE`,
 `CMOVE>`, `FILL`, `COMPARE`, `SEARCH` semantics natively — encoded as

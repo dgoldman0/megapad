@@ -394,7 +394,7 @@ def {_attr}(self, v):
                 if self.on_halt:
                     self.on_halt()
                 raise HaltError("CPU halted")
-            elif msg == "MEX_FALLBACK":
+            elif msg == "MEX_FALLBACK" or msg == "EXT_ISA_FALLBACK":
                 return self._step_python_fallback()
             elif msg.startswith("TRAP:"):
                 self._handle_trap(msg)
@@ -503,7 +503,7 @@ def {_attr}(self, v):
             msg = str(e)
             if msg == "HALT":
                 return 0, 1
-            elif msg == "MEX_FALLBACK":
+            elif msg == "MEX_FALLBACK" or msg == "EXT_ISA_FALLBACK":
                 # Single-step fallback then resume
                 self._step_python_fallback()
                 return 1, 0

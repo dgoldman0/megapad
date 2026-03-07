@@ -1978,11 +1978,23 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     // EXT prefix
     if (f == 0xF) {
+        // EXT.STRING (F9) and EXT.DICT (FA) are self-contained multi-byte
+        // instructions, NOT prefix modifiers.  Fall back to Python.
+        if (n == 0x9 || n == 0xA) {
+            pc(s) = pc_start;  // rewind past the fetched byte
+            throw std::runtime_error("EXT_ISA_FALLBACK");
+        }
         s.ext_modifier = n;
         byte0 = fetch8(s);
         f = (byte0 >> 4) & 0xF;
         n = byte0 & 0xF;
         cycles++;
+        // REX + EXT.STRING / EXT.DICT — also fall back to Python
+        if (f == 0xF && (n == 0x9 || n == 0xA)) {
+            pc(s) = pc_start;
+            s.ext_modifier = -1;
+            throw std::runtime_error("EXT_ISA_FALLBACK");
+        }
         if (f == 0xF)
             throw std::runtime_error("TRAP:ILLEGAL_OP:Double EXT prefix");
     }
@@ -2711,6 +2723,10 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
                 // byte0 (1) + funct_byte (1) + maybe broadcast_reg (1) = 2 or 3 bytes
                 // This is tricky. Instead, use a different approach:
                 // throw to Python which handles it
+                throw;
+            } else if (what == "EXT_ISA_FALLBACK") {
+                // EXT.STRING (F9) or EXT.DICT (FA) — PC already rewound.
+                // Return to Python to execute this instruction.
                 throw;
             } else {
                 throw;

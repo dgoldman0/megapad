@@ -7224,12 +7224,14 @@ w_count:
 w_move:
     ldn r12, r14              ; u
     addi r14, 8
-    ldn r7, r14               ; dst
+    ldn r7, r14               ; dst → Rd
     addi r14, 8
-    ldn r9, r14               ; src
+    ldn r9, r14               ; src → Rs
     addi r14, 8
     cmpi r12, 0
     breq w_move_done
+    ; Transfer length into R0 (implicit for CMOVE/CMOVE>)
+    mov r0, r12
     ; If dst <= src: forward copy is safe
     cmp r7, r9
     breq w_move_done           ; same addresses, nothing to do
@@ -7240,35 +7242,11 @@ w_move:
     cmp r7, r11
     brcs w_move_fwd            ; C=1 -> dst >= src+u -> no overlap
     ; Backward copy (overlap: src < dst < src+u)
-    mov r0, r9
-    add r0, r12
-    dec r0                    ; src end
-    mov r1, r7
-    add r1, r12
-    dec r1                    ; dst end
-    sex r1                    ; R(X) = destination (descending)
-w_move_bwd:
-    ld.b r11, r0              ; load from source end
-    glo r11                   ; D ← byte
-    stxd.d                    ; M(R1) ← D; R1--
-    dec r0
-    dec r12
-    cmpi r12, 0
-    brne w_move_bwd
-    sex r2                    ; restore XSEL
+    cmove> r7, r9             ; EXT.STRING: backward block copy
     ret.l
 w_move_fwd:
-    sex r7                    ; R(X) = destination (ascending)
-w_move_fwd_loop:
-    ld.b r11, r9              ; load from source
-    glo r11                   ; D ← byte
-    stxi                      ; M(R7) ← D; R7++
-    inc r9
-    dec r12
-    cmpi r12, 0
-    brne w_move_fwd_loop
+    cmove r7, r9              ; EXT.STRING: forward block copy
 w_move_done:
-    sex r2                    ; restore XSEL
     ret.l
 
 ; WITHIN ( n lo hi -- flag ) ANS: true if (n-lo) u< (hi-lo)
