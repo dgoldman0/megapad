@@ -6919,6 +6919,90 @@ class TestKDOS(_KDOSTestBase):
         finally:
             os.unlink(path)
 
+    def test_ftruncate_shrinks_file(self):
+        """FTRUNCATE reduces used_bytes and clamps cursor."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                "wbuf 512 65 FILL",
+                "DUP wbuf 512 ROT FWRITE",
+                # used=512, cursor=512
+                '." SZ1=" DUP FSIZE . ." CUR1=" DUP F.CURSOR . CR',
+                # Truncate to 100 — cursor should clamp to 100
+                "100 OVER FTRUNCATE",
+                '." SZ2=" DUP FSIZE . ." CUR2=" DUP F.CURSOR . CR',
+                # FREAD from current cursor (100) should return 0
+                "VARIABLE rbuf 512 ALLOT",
+                'DUP rbuf 10 ROT FREAD ." RD=" . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"SZ1=\s*512\b",  f"output: {text!r}")
+            self.assertRegex(text, r"CUR1=\s*512\b",  f"output: {text!r}")
+            self.assertRegex(text, r"SZ2=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"CUR2=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"RD=\s*0\b",     f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_ftruncate_clamps_to_capacity(self):
+        """FTRUNCATE clamps to max_sectors * 512."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                # Truncate to 999999 — should clamp to 8*512=4096
+                "999999 OVER FTRUNCATE",
+                '." SZ=" DUP FSIZE . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"SZ=\s*4096\b",  f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_ftruncate_preserves_cursor_when_within(self):
+        """FTRUNCATE keeps cursor unchanged when within new size."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                "wbuf 512 65 FILL",
+                "DUP wbuf 512 ROT FWRITE",
+                # Seek to 50, truncate to 200 — cursor should stay at 50
+                "50 OVER FSEEK",
+                "200 OVER FTRUNCATE",
+                '." SZ=" DUP FSIZE . ." CUR=" DUP F.CURSOR . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"SZ=\s*200\b",   f"output: {text!r}")
+            self.assertRegex(text, r"CUR=\s*50\b",   f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_ftruncate_to_zero(self):
+        """FTRUNCATE to 0 empties the file."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 512 ALLOT",
+                "wbuf 100 65 FILL",
+                "DUP wbuf 100 ROT FWRITE",
+                "0 OVER FTRUNCATE",
+                '." SZ=" DUP FSIZE . ." CUR=" DUP F.CURSOR . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"SZ=\s*0\b",   f"output: {text!r}")
+            self.assertRegex(text, r"CUR=\s*0\b",  f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
     def test_help_shows_mp64fs(self):
         """HELP text includes MP64FS documentation."""
         text = self._run_kdos_fast(["HELP"])
@@ -6929,6 +7013,7 @@ class TestKDOS(_KDOSTestBase):
         self.assertIn("RMFILE", text)
         self.assertIn("OPEN", text)
         self.assertIn("FFLUSH", text)
+        self.assertIn("FTRUNCATE", text)
 
     # ------------------------------------------------------------------
     #  Documentation browser (v0.9c / v0.9d)

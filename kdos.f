@@ -3332,6 +3332,15 @@ VARIABLE FDESC
 \ FSIZE ( fdesc -- n ) return used bytes
 : FSIZE  ( fdesc -- n )  F.USED ;
 
+\ FTRUNCATE ( n fdesc -- ) set used_bytes to n, clamp to capacity
+\   Resets cursor to min(cursor, n).  Does NOT zero freed bytes.
+VARIABLE FT-N
+: FTRUNCATE  ( n fdesc -- )
+    SWAP  OVER F.MAX SECTOR *  MIN  FT-N !  ( fdesc )
+    FT-N @  OVER 16 + !               \ used_bytes = n'
+    DUP F.CURSOR  FT-N @  MIN         ( fdesc cursor' )
+    SWAP 24 + ! ;                      \ cursor = min(old_cursor, n')
+
 \ FWRITE ( addr len fdesc -- ) write len bytes from addr at cursor
 \   Handles byte-unaligned cursors via read-modify-write with FSCRATCH.
 \   Head/tail partial sectors are read into FSCRATCH, patched, and
@@ -7113,6 +7122,7 @@ VARIABLE HW-CSTR    15 ALLOT    \ counted string for FIND
     ."     addr len f FREAD       Read bytes (advances cursor)" CR
     ."     pos f FSEEK            Set file cursor" CR
     ."     f FREWIND              Reset cursor to 0" CR
+    ."     n f FTRUNCATE          Set file size (clamps cursor)" CR
     ."     f FSIZE / f F.INFO     File size / info" CR
     ."     FILES                  List legacy files" CR
     CR ."   SCHEDULER WORDS:" CR

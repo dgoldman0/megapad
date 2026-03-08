@@ -613,6 +613,7 @@ Offset   Field          Meaning
 | `FSEEK` | `( pos fdesc -- )` | Set the cursor to byte position *pos*. |
 | `FREWIND` | `( fdesc -- )` | Reset cursor to 0 (start of file). |
 | `FSIZE` | `( fdesc -- n )` | Return the used byte count. |
+| `FTRUNCATE` | `( n fdesc -- )` | Set used bytes to *n* (clamped to capacity).  Adjusts cursor if past new size.  Does not zero freed bytes. |
 | `FWRITE` | `( addr len fdesc -- )` | Write *len* bytes from *addr* at the current cursor.  Advances cursor.  Bounds-checked against capacity. |
 | `FREAD` | `( addr len fdesc -- actual )` | Read up to *len* bytes at cursor into *addr*.  Returns actual bytes read.  Clamps to available data. |
 | `F.INFO` | `( fdesc -- )` | Print file descriptor summary. |
