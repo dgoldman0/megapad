@@ -61,7 +61,8 @@ test-quick: accel
 	@echo "Monitor: make test-status  |  make test-watch"
 
 # --- Single test (usage: make test-one K=TestFoo) ---
-# Runs in background with monitoring, like `make test`.
+# Runs sequentially (-n 1) to avoid spawning 8 workers that each
+# independently rebuild the KDOS snapshot for a small test subset.
 .PHONY: test-one
 test-one: accel
 	@if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi
@@ -71,7 +72,7 @@ test-one: accel
 	fi
 	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
 	@echo "Starting tests in background (K=$(K))..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n $(WORKERS) --dist loadgroup --tb=long -v -k "$(K)" \
+	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n 1 --dist loadgroup --tb=long -v -k "$(K)" \
 		> /tmp/megapad_test_output.txt 2>&1 & \
 		echo "$$!" > /tmp/megapad_test_pid.txt
 	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
