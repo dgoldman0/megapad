@@ -2356,6 +2356,130 @@ def test_ext_string():
 
 
 # =========================================================================
+#  String instructions targeting XMEM (regression for region-aware decode)
+# =========================================================================
+
+def test_string_xmem():
+    """BFILL / CMOVE into XMEM — verifies region-aware mem_write8."""
+    print("\n== String instructions → XMEM ==")
+
+    EXT_BASE = 0x0010_0000   # matches system.py EXT_MEM_BASE
+    EXT_SIZE = 64 * 1024     # 64 KiB is enough for the test
+
+    # --- BFILL into XMEM ---
+    cpu1 = Megapad64()
+    xmem = bytearray(EXT_SIZE)
+    cpu1.attach_ext_mem(xmem, EXT_BASE, EXT_SIZE)
+    # Target address: EXT_BASE + 0x100
+    dst_addr = EXT_BASE + 0x100
+    fill_len = 8
+    code = assemble(f"""
+        ldi64 r9, {dst_addr}
+        ldi r12, {fill_len}
+        ldi r1, 0xAB
+        glo r1
+        bfill r9, r12
+        halt
+    """)
+    cpu1.load_bytes(0, code)
+    cpu1.pc = 0
+    cpu1.regs[cpu1.spsel] = 0x10000
+    try:
+        cpu1.run(max_steps=5000)
+    except HaltError:
+        pass
+
+    # Verify bytes landed in the ext_mem buffer, not wrapping into Bank 0
+    xmem_slice = list(xmem[0x100:0x100 + fill_len])
+    expected = [0xAB] * fill_len
+    check("BFILL→XMEM: data in ext_mem buffer",
+          xmem_slice == expected,
+          f"got {[hex(b) for b in xmem_slice]}")
+    check("BFILL→XMEM: Rd advanced",
+          cpu1.regs[9] == dst_addr + fill_len,
+          f"R9={cpu1.regs[9]:#x}")
+    check("BFILL→XMEM: Rn consumed", cpu1.regs[12] == 0)
+    # Bank 0 at the wrapped offset must NOT have the fill byte
+    wrapped_offset = (dst_addr + 0x100) % cpu1.mem_size
+    bank0_byte = cpu1.mem[wrapped_offset]
+    check("BFILL→XMEM: Bank 0 not corrupted",
+          bank0_byte != 0xAB,
+          f"Bank0[{wrapped_offset:#x}] = {bank0_byte:#x}")
+
+    # --- CMOVE from Bank 0 into XMEM ---
+    cpu2 = Megapad64()
+    xmem2 = bytearray(EXT_SIZE)
+    cpu2.attach_ext_mem(xmem2, EXT_BASE, EXT_SIZE)
+    # Plant source data at 0x200 in Bank 0
+    src_data = [0x11, 0x22, 0x33, 0x44]
+    for i, b in enumerate(src_data):
+        cpu2.mem_write8(0x200 + i, b)
+    dst_addr2 = EXT_BASE + 0x80
+    code2 = assemble(f"""
+        ldi64 r7, {dst_addr2}
+        ldi64 r9, 0x200
+        ldi r0, {len(src_data)}
+        cmove r7, r9
+        halt
+    """)
+    cpu2.load_bytes(0, code2)
+    cpu2.pc = 0
+    cpu2.regs[cpu2.spsel] = 0x10000
+    try:
+        cpu2.run(max_steps=5000)
+    except HaltError:
+        pass
+
+    copied = list(xmem2[0x80:0x80 + len(src_data)])
+    check("CMOVE Bank0→XMEM: data copied",
+          copied == src_data,
+          f"got {[hex(b) for b in copied]}")
+    check("CMOVE Bank0→XMEM: R0 consumed", cpu2.regs[0] == 0)
+
+    # --- CMOVE from XMEM back to Bank 0 ---
+    cpu3 = Megapad64()
+    xmem3 = bytearray(EXT_SIZE)
+    cpu3.attach_ext_mem(xmem3, EXT_BASE, EXT_SIZE)
+    # Plant source data in XMEM
+    for i, b in enumerate([0xDE, 0xAD, 0xBE, 0xEF]):
+        xmem3[0x40 + i] = b
+    src_addr3 = EXT_BASE + 0x40
+    code3 = assemble(f"""
+        ldi64 r7, 0x300
+        ldi64 r9, {src_addr3}
+        ldi r0, 4
+        cmove r7, r9
+        halt
+    """)
+    cpu3.load_bytes(0, code3)
+    cpu3.pc = 0
+    cpu3.regs[cpu3.spsel] = 0x10000
+    try:
+        cpu3.run(max_steps=5000)
+    except HaltError:
+        pass
+
+    bank0_copied = [cpu3.mem_read8(0x300 + i) for i in range(4)]
+    check("CMOVE XMEM→Bank0: data copied",
+          bank0_copied == [0xDE, 0xAD, 0xBE, 0xEF],
+          f"got {[hex(b) for b in bank0_copied]}")
+
+    # --- Scalar load/store into XMEM (non-string) ---
+    cpu4 = Megapad64()
+    xmem4 = bytearray(EXT_SIZE)
+    cpu4.attach_ext_mem(xmem4, EXT_BASE, EXT_SIZE)
+    cpu4.mem_write8(EXT_BASE + 10, 0x77)
+    check("Scalar write8→XMEM",
+          xmem4[10] == 0x77, f"got {xmem4[10]:#x}")
+    check("Scalar read8←XMEM",
+          cpu4.mem_read8(EXT_BASE + 10) == 0x77)
+    cpu4.mem_write64(EXT_BASE + 0x20, 0xCAFEBABEDEADBEEF)
+    check("Scalar read64←XMEM",
+          cpu4.mem_read64(EXT_BASE + 0x20) == 0xCAFEBABEDEADBEEF,
+          f"got {cpu4.mem_read64(EXT_BASE + 0x20):#x}")
+
+
+# =========================================================================
 #  EXT.DICT (FA) — hardware dictionary cache
 # =========================================================================
 
@@ -2623,6 +2747,7 @@ def main():
         test_tile_kernels,
         test_ext_prefix,
         test_ext_string,
+        test_string_xmem,
         test_ext_dict,
         test_fibonacci,
         test_subroutine,

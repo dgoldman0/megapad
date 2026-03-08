@@ -244,81 +244,105 @@ enum StepResult {
 };
 
 // ---------------------------------------------------------------------------
-//  Memory access — inlined, direct pointer arithmetic
+//  Memory access — region-aware (VRAM, XMEM, HBW, Bank 0)
 // ---------------------------------------------------------------------------
+//
+// resolve_mem() maps a unified 64-bit address to a host pointer + region size,
+// matching the RTL address decode in mp64_memory.v.  All scalar accessors
+// route through it so that string instructions (BFILL, BCOPY) and ordinary
+// load/stores work correctly across every memory aperture.
+//
+
+struct MemRegion {
+    uint8_t* buf;
+    uint64_t off;
+    uint64_t size;
+};
+
+static inline MemRegion resolve_mem(CPUState& s, uint64_t addr) {
+    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size)
+        return {s.vram_mem, addr - s.vram_base, s.vram_size};
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+        return {s.ext_mem, addr - s.ext_mem_base, s.ext_mem_size};
+    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size)
+        return {s.hbw_mem, addr - s.hbw_base, s.hbw_size};
+    return {s.mem, addr % s.mem_size, s.mem_size};
+}
 
 static inline uint8_t mem_read8(CPUState& s, uint64_t addr) {
-    return s.mem[addr % s.mem_size];
+    auto r = resolve_mem(s, addr);
+    return r.buf[r.off];
 }
 
 static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
-    s.mem[addr % s.mem_size] = val;
+    auto r = resolve_mem(s, addr);
+    r.buf[r.off] = val;
 }
 
 static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
-    uint64_t a = addr % s.mem_size;
+    auto r = resolve_mem(s, addr);
     uint16_t v;
-    if (__builtin_expect(a + 2 <= s.mem_size, 1))
-        std::memcpy(&v, s.mem + a, 2);
+    if (__builtin_expect(r.off + 2 <= r.size, 1))
+        std::memcpy(&v, r.buf + r.off, 2);
     else {
-        v = s.mem[a] | (uint16_t(s.mem[(a+1) % s.mem_size]) << 8);
+        v = r.buf[r.off] | (uint16_t(r.buf[(r.off+1) % r.size]) << 8);
     }
     return v;
 }
 
 static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
-    uint64_t a = addr % s.mem_size;
-    if (__builtin_expect(a + 2 <= s.mem_size, 1))
-        std::memcpy(s.mem + a, &val, 2);
+    auto r = resolve_mem(s, addr);
+    if (__builtin_expect(r.off + 2 <= r.size, 1))
+        std::memcpy(r.buf + r.off, &val, 2);
     else {
-        s.mem[a] = val & 0xFF;
-        s.mem[(a+1) % s.mem_size] = (val >> 8) & 0xFF;
+        r.buf[r.off] = val & 0xFF;
+        r.buf[(r.off+1) % r.size] = (val >> 8) & 0xFF;
     }
 }
 
 static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
-    uint64_t a = addr % s.mem_size;
+    auto r = resolve_mem(s, addr);
     uint32_t v;
-    if (__builtin_expect(a + 4 <= s.mem_size, 1))
-        std::memcpy(&v, s.mem + a, 4);
+    if (__builtin_expect(r.off + 4 <= r.size, 1))
+        std::memcpy(&v, r.buf + r.off, 4);
     else {
         v = 0;
         for (int i = 0; i < 4; i++)
-            v |= uint32_t(s.mem[(a+i) % s.mem_size]) << (8*i);
+            v |= uint32_t(r.buf[(r.off+i) % r.size]) << (8*i);
     }
     return v;
 }
 
 static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
-    uint64_t a = addr % s.mem_size;
-    if (__builtin_expect(a + 4 <= s.mem_size, 1))
-        std::memcpy(s.mem + a, &val, 4);
+    auto r = resolve_mem(s, addr);
+    if (__builtin_expect(r.off + 4 <= r.size, 1))
+        std::memcpy(r.buf + r.off, &val, 4);
     else {
         for (int i = 0; i < 4; i++)
-            s.mem[(a+i) % s.mem_size] = (val >> (8*i)) & 0xFF;
+            r.buf[(r.off+i) % r.size] = (val >> (8*i)) & 0xFF;
     }
 }
 
 static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
-    uint64_t a = addr % s.mem_size;
+    auto r = resolve_mem(s, addr);
     uint64_t v;
-    if (__builtin_expect(a + 8 <= s.mem_size, 1))
-        std::memcpy(&v, s.mem + a, 8);
+    if (__builtin_expect(r.off + 8 <= r.size, 1))
+        std::memcpy(&v, r.buf + r.off, 8);
     else {
         v = 0;
         for (int i = 0; i < 8; i++)
-            v |= uint64_t(s.mem[(a+i) % s.mem_size]) << (8*i);
+            v |= uint64_t(r.buf[(r.off+i) % r.size]) << (8*i);
     }
     return v;
 }
 
 static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
-    uint64_t a = addr % s.mem_size;
-    if (__builtin_expect(a + 8 <= s.mem_size, 1))
-        std::memcpy(s.mem + a, &val, 8);
+    auto r = resolve_mem(s, addr);
+    if (__builtin_expect(r.off + 8 <= r.size, 1))
+        std::memcpy(r.buf + r.off, &val, 8);
     else {
         for (int i = 0; i < 8; i++)
-            s.mem[(a+i) % s.mem_size] = (val >> (8*i)) & 0xFF;
+            r.buf[(r.off+i) % r.size] = (val >> (8*i)) & 0xFF;
     }
 }
 

@@ -608,6 +608,23 @@ class Megapad64:
 
     # -- Memory access --
 
+    def _resolve_addr(self, addr: int) -> tuple:
+        """Resolve a unified address to (buffer, offset, buf_size).
+
+        Checks VRAM, XMEM, and HBW apertures before falling back to
+        Bank 0 (system RAM).  Mirrors the RTL address decode in
+        mp64_memory.v so that string instructions and scalar
+        load/stores route correctly to all memory regions.
+        """
+        a = u64(addr)
+        if self._vram_mem and self._vram_base <= a < self._vram_base + self._vram_size:
+            return self._vram_mem, a - self._vram_base, self._vram_size
+        if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
+            return self._ext_mem, a - self._ext_mem_base, self._ext_mem_size
+        if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
+            return self._hbw_mem, a - self._hbw_base, self._hbw_size
+        return self.mem, a % self.mem_size, self.mem_size
+
     def _check_addr(self, addr: int, size: int = 1):
         addr = u64(addr)
         if addr + size > self.mem_size:
@@ -615,45 +632,45 @@ class Megapad64:
             raise TrapError(IVEC_BUS_FAULT, f"Bus fault @ {addr:#018x}")
 
     def mem_read8(self, addr: int) -> int:
-        addr = u64(addr) % self.mem_size
-        return self.mem[addr]
+        buf, off, _ = self._resolve_addr(addr)
+        return buf[off]
 
     def mem_write8(self, addr: int, val: int):
-        addr = u64(addr) % self.mem_size
-        self.mem[addr] = val & 0xFF
+        buf, off, _ = self._resolve_addr(addr)
+        buf[off] = val & 0xFF
 
     def mem_read16(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
-        return self.mem[a] | (self.mem[(a+1) % self.mem_size] << 8)
+        buf, off, sz = self._resolve_addr(addr)
+        return buf[off] | (buf[(off+1) % sz] << 8)
 
     def mem_write16(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
-        self.mem[a]                        = val & 0xFF
-        self.mem[(a+1) % self.mem_size]    = (val >> 8) & 0xFF
+        buf, off, sz = self._resolve_addr(addr)
+        buf[off]            = val & 0xFF
+        buf[(off+1) % sz]   = (val >> 8) & 0xFF
 
     def mem_read32(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
+        buf, off, sz = self._resolve_addr(addr)
         v = 0
         for i in range(4):
-            v |= self.mem[(a+i) % self.mem_size] << (8*i)
+            v |= buf[(off+i) % sz] << (8*i)
         return v
 
     def mem_write32(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
+        buf, off, sz = self._resolve_addr(addr)
         for i in range(4):
-            self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
+            buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
 
     def mem_read64(self, addr: int) -> int:
-        a = u64(addr) % self.mem_size
+        buf, off, sz = self._resolve_addr(addr)
         v = 0
         for i in range(8):
-            v |= self.mem[(a+i) % self.mem_size] << (8*i)
+            v |= buf[(off+i) % sz] << (8*i)
         return v
 
     def mem_write64(self, addr: int, val: int):
-        a = u64(addr) % self.mem_size
+        buf, off, sz = self._resolve_addr(addr)
         for i in range(8):
-            self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
+            buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
 
     # -- Stack helpers --
 
