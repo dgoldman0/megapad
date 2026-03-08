@@ -1987,6 +1987,125 @@ static inline uint64_t sys_pop64(CPUState& s, const StepCallbacks& cb) {
 }
 
 // ---------------------------------------------------------------------------
+//  EXT.STRING (F9) — native C++ implementation
+// ---------------------------------------------------------------------------
+//  Sub-ops: 00=CMOVE, 01=CMOVE>, 02=BFILL, 03=BCOMP, 04=BSRCH
+//  Encoding: F9 <sub-op> <reg-byte[Rd:4][Rs:4]>
+//  REX extends Rd/Rs to R16-R31 via ext_modifier set before entry.
+
+static int exec_string(CPUState& s, const StepCallbacks& cb) {
+    uint8_t sub_op   = fetch8(s);
+    uint8_t reg_byte = fetch8(s);
+    int rd = (rex_d(s.ext_modifier) << 4) | ((reg_byte >> 4) & 0xF);
+    int rs = (rex_s(s.ext_modifier) << 4) | (reg_byte & 0xF);
+
+    switch (sub_op) {
+
+    case 0x00: // CMOVE — forward byte copy, len in R0
+    case 0x01: // CMOVE> — backward byte copy, len in R0
+    {
+        uint64_t src = s.regs[rs];
+        uint64_t dst = s.regs[rd];
+        uint64_t ln  = s.regs[0];
+        if (ln > 0) {
+            if (sub_op == 0x00) {
+                for (uint64_t i = 0; i < ln; i++)
+                    sys_write8(s, cb, dst + i, sys_read8(s, cb, src + i));
+            } else {
+                for (uint64_t i = ln; i-- > 0; )
+                    sys_write8(s, cb, dst + i, sys_read8(s, cb, src + i));
+            }
+        }
+        s.regs[rs] = src + ln;
+        s.regs[rd] = dst + ln;
+        s.regs[0]  = 0;
+        return (int)ln + 2;
+    }
+
+    case 0x02: // BFILL — fill block with D[7:0], len in Rs
+    {
+        uint64_t dst = s.regs[rd];
+        uint64_t ln  = s.regs[rs];
+        uint8_t  fb  = s.d_reg;
+        // Fast path: memset when entirely within one RAM region (not MMIO)
+        bool in_mmio = cb.has_mmio && dst >= cb.mmio_start && dst < cb.mmio_end;
+        if (!in_mmio) {
+            auto r = resolve_mem(s, dst);
+            if (r.buf && r.off + ln <= r.size) {
+                std::memset(r.buf + r.off, fb, (size_t)ln);
+                s.regs[rd] = dst + ln;
+                s.regs[rs] = 0;
+                return (int)ln + 2;
+            }
+        }
+        for (uint64_t i = 0; i < ln; i++)
+            sys_write8(s, cb, dst + i, fb);
+        s.regs[rd] = dst + ln;
+        s.regs[rs] = 0;
+        return (int)ln + 2;
+    }
+
+    case 0x03: // BCOMP — byte compare, len in R0
+    {
+        uint64_t src = s.regs[rs];
+        uint64_t dst = s.regs[rd];
+        uint64_t ln  = s.regs[0];
+        int cycles = 2;
+        uint64_t remaining = ln;
+        for (uint64_t i = 0; i < ln; i++) {
+            uint8_t sb = sys_read8(s, cb, src + i);
+            uint8_t db = sys_read8(s, cb, dst + i);
+            cycles++;
+            remaining--;
+            if (sb != db) {
+                s.flag_z = 0;
+                s.flag_g = (db > sb) ? 1 : 0;
+                s.regs[rs] = src + i;
+                s.regs[rd] = dst + i;
+                s.regs[0]  = remaining + 1;
+                return cycles;
+            }
+        }
+        // All equal
+        s.flag_z = 1;
+        s.flag_g = 0;
+        s.regs[rs] = src + ln;
+        s.regs[rd] = dst + ln;
+        s.regs[0]  = 0;
+        return cycles;
+    }
+
+    case 0x04: // BSRCH — search for D[7:0] in block at Rd, len in R0
+    {
+        uint64_t dst    = s.regs[rd];
+        uint64_t ln     = s.regs[0];
+        uint8_t  needle = s.d_reg;
+        int cycles = 2;
+        for (uint64_t i = 0; i < ln; i++) {
+            uint8_t b = sys_read8(s, cb, dst + i);
+            cycles++;
+            if (b == needle) {
+                s.flag_z = 1;  // found
+                s.regs[rs] = i;          // offset
+                s.regs[rd] = dst + i;
+                s.regs[0]  = ln - i;
+                return cycles;
+            }
+        }
+        // Not found
+        s.flag_z = 0;
+        s.regs[rs] = ln;
+        s.regs[rd] = dst + ln;
+        s.regs[0]  = 0;
+        return cycles;
+    }
+
+    default:
+        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.STRING reserved sub-op");
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  The main step function
 // ---------------------------------------------------------------------------
 
@@ -2006,10 +2125,16 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 
     // EXT prefix
     if (f == 0xF) {
-        // EXT.STRING (F9) and EXT.DICT (FA) are self-contained multi-byte
-        // instructions, NOT prefix modifiers.  Fall back to Python.
-        if (n == 0x9 || n == 0xA) {
-            pc(s) = pc_start;  // rewind past the fetched byte
+        // EXT.STRING (F9) — execute natively
+        if (n == 0x9) {
+            cycles += exec_string(s, cb);
+            s.ext_modifier = -1;
+            s.cycle_count += cycles;
+            return cycles;
+        }
+        // EXT.DICT (FA) — still falls back to Python
+        if (n == 0xA) {
+            pc(s) = pc_start;
             throw std::runtime_error("EXT_ISA_FALLBACK");
         }
         s.ext_modifier = n;
@@ -2017,8 +2142,15 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         f = (byte0 >> 4) & 0xF;
         n = byte0 & 0xF;
         cycles++;
-        // REX + EXT.STRING / EXT.DICT — also fall back to Python
-        if (f == 0xF && (n == 0x9 || n == 0xA)) {
+        // REX + EXT.STRING — execute natively with REX bits active
+        if (f == 0xF && n == 0x9) {
+            cycles += exec_string(s, cb);
+            s.ext_modifier = -1;
+            s.cycle_count += cycles;
+            return cycles;
+        }
+        // REX + EXT.DICT — still falls back to Python
+        if (f == 0xF && n == 0xA) {
             pc(s) = pc_start;
             s.ext_modifier = -1;
             throw std::runtime_error("EXT_ISA_FALLBACK");
