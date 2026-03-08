@@ -3333,10 +3333,54 @@ VARIABLE FDESC
 : FSIZE  ( fdesc -- n )  F.USED ;
 
 \ FWRITE ( addr len fdesc -- ) write len bytes from addr at cursor
-\   Uses variables for clean stack management.  Advances cursor.
+\   Handles byte-unaligned cursors via read-modify-write with FSCRATCH.
+\   Head/tail partial sectors are read into FSCRATCH, patched, and
+\   written back.  Full middle sectors DMA directly from user buffer.
+\   Advances cursor by len.  Updates used_bytes.
 VARIABLE FW-FD
 VARIABLE FW-ADDR
 VARIABLE FW-LEN
+VARIABLE FW-REM     \ remaining bytes to write
+VARIABLE FW-POS     \ current byte position in file
+
+\ FW-DISK-SEC ( -- sec ) absolute disk sector for current FW-POS
+: FW-DISK-SEC  FW-POS @ SECTOR / FW-FD @ F.START + ;
+
+VARIABLE FW-CHUNK   \ temp: byte count for head copy
+\ FW-HEAD ( -- ) read-modify-write leading partial sector
+: FW-HEAD  ( -- )
+    FW-POS @ SECTOR MOD  DUP 0= IF DROP EXIT THEN  ( off )
+    FW-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    SECTOR OVER -  FW-REM @ MIN  FW-CHUNK !  ( off )
+    FW-ADDR @  SWAP FSCRATCH +  FW-CHUNK @  CMOVE
+    FW-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-WRITE
+    FW-CHUNK @ DUP FW-ADDR +!  DUP FW-POS +!  NEGATE FW-REM +! ;
+
+\ FW-FULL ( -- ) DMA full sectors directly from user buffer
+: FW-FULL  ( -- )
+    FW-REM @ SECTOR /  ( n-full )
+    BEGIN DUP 0> WHILE
+        FW-DISK-SEC DISK-SEC!
+        FW-ADDR @ DISK-DMA!
+        DUP 255 MIN  ( n-full batch )
+        DUP DISK-N!  DISK-WRITE
+        DUP SECTOR *
+        DUP FW-ADDR +!
+        DUP FW-POS +!
+        NEGATE FW-REM +!
+        -
+    REPEAT DROP ;
+
+\ FW-TAIL ( -- ) read-modify-write trailing partial sector
+: FW-TAIL  ( -- )
+    FW-REM @ 0= IF EXIT THEN
+    FW-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FW-ADDR @  FSCRATCH  FW-REM @  CMOVE
+    FW-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-WRITE ;
 
 : FWRITE  ( addr len fdesc -- )
     FW-FD !  FW-LEN !  FW-ADDR !
@@ -3345,13 +3389,11 @@ VARIABLE FW-LEN
     FW-FD @ F.MAX SECTOR * > IF
         ."  FWRITE: out of space" CR EXIT
     THEN
-    \ Set up DMA: sector = cursor/512 + start_sector
-    FW-FD @ F.CURSOR SECTOR /
-    FW-FD @ F.START + DISK-SEC!
-    FW-ADDR @ DISK-DMA!
-    FW-LEN @ SECTOR 1- + SECTOR / DISK-N!
-    DISK-WRITE
-    \ Advance cursor
+    FW-LEN @ 0= IF EXIT THEN
+    FW-FD @ F.CURSOR FW-POS !
+    FW-LEN @ FW-REM !
+    FW-HEAD  FW-FULL  FW-TAIL
+    \ Advance cursor by len
     FW-FD @ F.CURSOR FW-LEN @ +
     FW-FD @ 24 + !
     \ Update used_bytes = max(used, cursor)
@@ -3359,13 +3401,50 @@ VARIABLE FW-LEN
     FW-FD @ 16 + ! ;
 
 \ FREAD ( addr len fdesc -- actual ) read up to len bytes at cursor
-\   Returns actual bytes read.  Advances cursor.
-\   NOTE: hardware SEC_COUNT register is 8-bit (max 255 sectors per
-\   DMA command), so large reads are split into 255-sector batches.
+\   Handles byte-unaligned cursors via FSCRATCH for partial sectors.
+\   Head/tail partial sectors are read into FSCRATCH and the relevant
+\   bytes copied to the user buffer.  Full middle sectors DMA directly.
+\   Advances cursor by actual bytes read.
 VARIABLE FR-FD
 VARIABLE FR-ADDR
 VARIABLE FR-LEN
-VARIABLE FR-SEC     \ remaining sectors to read
+VARIABLE FR-REM     \ remaining bytes to read
+VARIABLE FR-POS     \ current byte position in file
+
+\ FR-DISK-SEC ( -- sec ) absolute disk sector for current FR-POS
+: FR-DISK-SEC  FR-POS @ SECTOR / FR-FD @ F.START + ;
+
+\ FR-HEAD ( -- ) copy leading partial sector via scratch buffer
+VARIABLE FR-CHUNK   \ temp: byte count for head copy
+: FR-HEAD  ( -- )
+    FR-POS @ SECTOR MOD  DUP 0= IF DROP EXIT THEN  ( off )
+    FR-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    SECTOR OVER -  FR-REM @ MIN  FR-CHUNK !  ( off )
+    FSCRATCH +  FR-ADDR @  FR-CHUNK @  CMOVE
+    FR-CHUNK @ DUP FR-ADDR +!  DUP FR-POS +!  NEGATE FR-REM +! ;
+
+\ FR-FULL ( -- ) DMA full sectors directly into user buffer
+: FR-FULL  ( -- )
+    FR-REM @ SECTOR /  ( n-full )
+    BEGIN DUP 0> WHILE
+        FR-DISK-SEC DISK-SEC!
+        FR-ADDR @ DISK-DMA!
+        DUP 255 MIN  ( n-full batch )
+        DUP DISK-N!  DISK-READ
+        DUP SECTOR *
+        DUP FR-ADDR +!
+        DUP FR-POS +!
+        NEGATE FR-REM +!
+        -
+    REPEAT DROP ;
+
+\ FR-TAIL ( -- ) copy trailing partial sector via scratch buffer
+: FR-TAIL  ( -- )
+    FR-REM @ 0= IF EXIT THEN
+    FR-DISK-SEC DISK-SEC!
+    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FSCRATCH  FR-ADDR @  FR-REM @  CMOVE ;
 
 : FREAD  ( addr len fdesc -- actual )
     FR-FD !  FR-LEN !  FR-ADDR !
@@ -3377,21 +3456,12 @@ VARIABLE FR-SEC     \ remaining sectors to read
     FR-FD @ F.USED FR-FD @ F.CURSOR -
     FR-LEN @ MIN FR-LEN !
     FR-LEN @ 0= IF 0 EXIT THEN
-    \ Total sectors needed
-    FR-LEN @ SECTOR 1- + SECTOR / FR-SEC !
-    \ Multi-batch DMA loop (max 255 sectors per hardware command)
-    BEGIN FR-SEC @ 0> WHILE
-        FR-FD @ F.CURSOR SECTOR /
-        FR-FD @ F.START + DISK-SEC!
-        FR-ADDR @ DISK-DMA!
-        FR-SEC @ 255 MIN DUP DISK-N!
-        DISK-READ
-        \ Advance by batch-size sectors
-        DUP SECTOR * FR-ADDR +!
-        DUP SECTOR * FR-FD @ F.CURSOR +
-        FR-FD @ 24 + !         \ update cursor
-        FR-SEC @ SWAP - FR-SEC !
-    REPEAT
+    FR-FD @ F.CURSOR FR-POS !
+    FR-LEN @ FR-REM !
+    FR-HEAD  FR-FULL  FR-TAIL
+    \ Advance cursor by actual bytes read
+    FR-FD @ F.CURSOR FR-LEN @ +
+    FR-FD @ 24 + !
     FR-LEN @ ;
 
 \ F.INFO ( fdesc -- ) print file descriptor
@@ -3943,11 +4013,15 @@ FD-POOL FD-MAX FD-SLOT-SZ * 0 FILL          \ zero the pool
     LOOP
     0 ;                              \ pool exhausted
 
-\ FCLOSE ( fdesc -- )  release file descriptor back to pool
-: FCLOSE  ( fdesc -- )
+\ FCLOSE ( fdesc -- )  release FD back to pool
+\   Initially a simple free; redefined after FFLUSH to auto-flush.
+: (FCLOSE-NOFS)  ( fdesc -- )
     DUP 0= IF DROP EXIT THEN
     8 -                              \ back to slot header
     0 SWAP ! ;                       \ clear in_use flag
+
+DEFER FCLOSE
+' (FCLOSE-NOFS) IS FCLOSE
 
 \ FD-FILL ( fdesc slot -- )  populate fdesc fields from dir slot
 : FD-FILL  ( fdesc slot -- )
@@ -3990,6 +4064,14 @@ DEFER OPEN
     OVER F.SLOT DIRENT 28 + L!      \ update used_bytes in dir cache
     DROP
     FS-SYNC ;
+
+\ Now that FFLUSH exists, upgrade FCLOSE to auto-flush.
+: (FCLOSE)  ( fdesc -- )
+    DUP 0= IF DROP EXIT THEN
+    FS-OK @ IF DUP FFLUSH THEN      \ persist used_bytes before release
+    8 -                              \ back to slot header
+    0 SWAP ! ;                       \ clear in_use flag
+' (FCLOSE) IS FCLOSE
 
 \ ── LOAD — load and execute a Forth source file ─────────────────────
 \ LOAD ( "filename" -- ) open a file by name, read it, EVALUATE it

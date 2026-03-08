@@ -6767,15 +6767,16 @@ class TestKDOS(_KDOSTestBase):
                 "OPEN testfile",
                 "VARIABLE wbuf 512 ALLOT",
                 ": fill-wbuf 170 wbuf C! 170 wbuf 1+ C! ; fill-wbuf",
-                "wbuf 2 OVER FWRITE",
-                "DROP",
+                "DUP wbuf 2 ROT FWRITE",
+                "FCLOSE",
                 "OPEN testfile",
                 "VARIABLE rbuf 512 ALLOT",
-                "rbuf 2 OVER FREAD .",
-                "rbuf C@ .",
+                'DUP rbuf 2 ROT FREAD  ." ACT=" . CR',
+                'rbuf C@ ." B0=" . CR',
+                "FCLOSE",
             ], storage_image=path)
-            self.assertIn("2 ", text)
-            self.assertIn("170 ", text)
+            self.assertRegex(text, r"ACT=\s*2\b")
+            self.assertRegex(text, r"B0=\s*170\b")
         finally:
             os.unlink(path)
 
@@ -6818,6 +6819,103 @@ class TestKDOS(_KDOSTestBase):
                 "FFLUSH",
             ], storage_image=path)
             self.assertNotIn("not loaded", text)
+        finally:
+            os.unlink(path)
+
+    def test_fread_byte_cursor(self):
+        """FREAD advances cursor by bytes, not sectors."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 1024 ALLOT",
+                ": fill-seq 512 0 DO I 255 AND wbuf I + C! LOOP ; fill-seq",
+                "DUP wbuf 512 ROT FWRITE",
+                "FCLOSE",
+                # Re-open, read 100 bytes twice
+                "OPEN testfile",
+                "VARIABLE rbuf 1024 ALLOT",
+                'DUP rbuf 100 ROT FREAD  ." RD1=" . CR',
+                '." CUR1=" DUP F.CURSOR . CR',
+                'DUP rbuf 100 ROT FREAD  ." RD2=" . CR',
+                '." CUR2=" DUP F.CURSOR . CR',
+                '." B0=" rbuf C@ . ." B1=" rbuf 1+ C@ . ." B99=" rbuf 99 + C@ . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"RD1=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"CUR1=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"RD2=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"CUR2=\s*200\b",  f"output: {text!r}")
+            # Second read should overwrite rbuf with bytes 100..199
+            self.assertRegex(text, r"B0=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B1=\s*101\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B99=\s*199\b",  f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_fread_cross_sector(self):
+        """FREAD correctly reads across a sector boundary."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                # Write 1024 bytes (2 sectors) of sequential data
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 1024 ALLOT",
+                ": fill-seq 1024 0 DO I 255 AND wbuf I + C! LOOP ; fill-seq",
+                "DUP wbuf 1024 ROT FWRITE",
+                "FCLOSE",
+                # Re-open, seek to 500, read 100 (crosses 512 boundary)
+                "OPEN testfile",
+                "VARIABLE rbuf 1024 ALLOT",
+                "500 OVER FSEEK",
+                'DUP rbuf 100 ROT FREAD  ." ACT=" . CR',
+                'rbuf C@                    ." B500=" . CR',
+                'rbuf 12 + C@               ." B512=" . CR',
+                'rbuf 99 + C@               ." B599=" . CR',
+                'DUP F.CURSOR               ." CUR=" . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"ACT=\s*100\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B500=\s*244\b", f"output: {text!r}")
+            self.assertRegex(text, r"B512=\s*0\b",   f"output: {text!r}")
+            self.assertRegex(text, r"B599=\s*87\b",  f"output: {text!r}")
+            self.assertRegex(text, r"CUR=\s*600\b",  f"output: {text!r}")
+        finally:
+            os.unlink(path)
+
+    def test_fwrite_unaligned(self):
+        """FWRITE at unaligned cursor does correct read-modify-write."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                # Write 512 bytes of 'A' (65)
+                "8 1 MKFILE testfile",
+                "OPEN testfile",
+                "VARIABLE wbuf 1024 ALLOT",
+                "wbuf 512 65 FILL",
+                "DUP wbuf 512 ROT FWRITE",
+                # Seek to 500, write 24 bytes of 'B' (66)
+                "500 OVER FSEEK",
+                "wbuf 24 66 FILL",
+                "DUP wbuf 24 ROT FWRITE",
+                '." WCUR=" DUP F.CURSOR . CR',
+                "FCLOSE",
+                # Re-open and read everything
+                "OPEN testfile",
+                "VARIABLE rbuf 1024 ALLOT",
+                'DUP rbuf 600 ROT FREAD  ." ACT=" . CR',
+                'rbuf 499 + C@              ." B499=" . CR',
+                'rbuf 500 + C@              ." B500=" . CR',
+                'rbuf 523 + C@              ." B523=" . CR',
+                "FCLOSE",
+            ], storage_image=path)
+            self.assertRegex(text, r"WCUR=\s*524\b", f"output: {text!r}")
+            self.assertRegex(text, r"ACT=\s*524\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B499=\s*65\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B500=\s*66\b",  f"output: {text!r}")
+            self.assertRegex(text, r"B523=\s*66\b",  f"output: {text!r}")
         finally:
             os.unlink(path)
 
