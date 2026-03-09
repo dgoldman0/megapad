@@ -2120,12 +2120,47 @@ class Megapad64:
             if b == 0:
                 raise TrapError(IVEC_DIV_ZERO, "Divide by zero")
             self.regs[rd] = a % b
+        # ---- Bitfield ALU (sub-ops 0x8–0xF) ----
+        elif sub == 0x8:  # POPCNT
+            self.regs[rd] = bin(b).count('1')
+        elif sub == 0x9:  # CLZ
+            self.regs[rd] = (64 - b.bit_length()) if b else 64
+        elif sub == 0xA:  # CTZ
+            self.regs[rd] = ((b & -b).bit_length() - 1) if b else 64
+        elif sub == 0xB:  # BITREV
+            self.regs[rd] = int(f'{b:064b}'[::-1], 2)
+        elif sub == 0xC:  # BEXT (pext)
+            src, mask, result, i = a, b, 0, 0
+            while mask:
+                lsb = mask & (-mask)
+                if src & lsb:
+                    result |= (1 << i)
+                mask &= mask - 1
+                i += 1
+            self.regs[rd] = u64(result)
+        elif sub == 0xD:  # BDEP (pdep)
+            src, mask, result, i = b, a, 0, 0
+            while mask:
+                lsb = mask & (-mask)
+                if src & (1 << i):
+                    result |= lsb
+                mask &= mask - 1
+                i += 1
+            self.regs[rd] = u64(result)
+        elif sub == 0xE:  # RORI (3-byte: CE [Rd:4][0000] [imm8])
+            imm = self.fetch8()
+            shift = imm & 63
+            v = a
+            r = ((v >> shift) | (v << (64 - shift))) & MASK64 if shift else v
+            self.regs[rd] = r
+        elif sub == 0xF:  # BSWAP
+            self.regs[rd] = int.from_bytes(b.to_bytes(8, 'little'), 'big')
 
-        # Flag updates for MUL/DIV
+        # Flag updates
         r = self.regs[rd]
         self.flag_z = 1 if r == 0 else 0
         self.flag_n = (r >> 63) & 1
-        return 3  # micro-coded, extra cycles
+        return 3 if sub <= 0x7 else 0  # mul/div extra cycles only
 
     # -- 0xD: CSR --
     def _exec_csr(self, n: int) -> int:
@@ -3046,7 +3081,8 @@ class Megapad64:
         if f == 0x9:  return 1  # I/O
         if f == 0xA:  return 1  # SEP
         if f == 0xB:  return 1  # SEX
-        if f == 0xC:  return 2  # MUL/DIV
+        if f == 0xC:  # MUL/DIV / Bitfield ALU
+            return 3 if n == 0xE else 2  # RORI is 3 bytes
         if f == 0xD:  return 2  # CSR
         if f == 0xE:  # MEX — 2 bytes + optional broadcast reg or RROT ctrl
             ss = (n >> 2) & 0x3
@@ -3224,14 +3260,25 @@ class Megapad64Micro(Megapad64):
                             f"{names[sub]} (D-register) not available on micro-core")
         return super()._exec_imm(sub)
 
-    # -- MUL/DIV — delegated to cluster shared unit --
+    # -- MUL/DIV / Bitfield ALU — delegated to cluster shared unit or local --
 
     def _exec_muldiv(self, sub: int) -> int:
         """MUL/DIV uses the cluster's shared multiplier.
+        Bitfield Tier 1 (POPCNT, CLZ, CTZ, BITREV) is local to the
+        micro-core.  Tier 2 (BEXT, BDEP, RORI, BSWAP) is gated out
+        on micro-cores.
 
-        If not inside a cluster, traps as illegal opcode (matching
-        RTL behaviour when IN_CLUSTER=0).
+        If not inside a cluster, MUL/DIV traps as illegal opcode
+        (matching RTL behaviour when IN_CLUSTER=0).
         """
+        if sub >= 0xC and sub <= 0xF:  # Tier 2 bitfield — gated out
+            self.fetch8()  # consume operand byte
+            if sub == 0xE:
+                self.fetch8()  # RORI has extra imm byte
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            "Bitfield Tier 2 not available on micro-core")
+        if sub >= 0x8:  # Tier 1 bitfield — local, no cluster needed
+            return super()._exec_muldiv(sub)
         if self._cluster is None:
             self.fetch8()  # consume operand byte
             raise TrapError(IVEC_ILLEGAL_OP,

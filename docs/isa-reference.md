@@ -114,7 +114,7 @@ The instruction size increases by 1 byte when a REX prefix is present.
 | `0x9` | I/O | 1 byte | 1802-style port I/O |
 | `0xA` | SEP | 1 byte | Set PC register (+1 with REX.N for R16+) |
 | `0xB` | SEX | 1 byte | Set data pointer register (+1 with REX.N for R16+) |
-| `0xC` | MULDIV | 2 bytes | +3 extra cycles; +1 with REX |
+| `0xC` | MULDIV / Bitfield | 2–3 bytes | MUL/DIV +3 cycles; bitfield +0; RORI is 3 bytes; +1 with REX |
 | `0xD` | CSR | 2 bytes | CSR read/write |
 | `0xE` | MEX | 2–3 bytes | Tile engine ops |
 | `0xF` | EXT | 1 byte | Prefix modifier for next insn (incl. REX) |
@@ -399,11 +399,19 @@ For R16–R31, a **REX.N** prefix (F4) extends the nibble to 5 bits:
 
 ---
 
-## Family 0xC — MULDIV (Multiply / Divide)
+## Family 0xC — MULDIV / Bitfield ALU
 
-Two-byte instructions: opcode + `[Rd:4][Rs:4]`.  All take **4 cycles**.
+Two-byte instructions: opcode + `[Rd:4][Rs:4]`.  Sub-ops 0–7 (MUL/DIV)
+take **4 cycles** and use the shared multiplier on micro-cores.  Sub-ops
+8–F (bitfield) take **1 cycle** and are local to each core.
+
 Division stores the remainder in **R0**.  Division by zero triggers
 `IVEC_DIV_ZERO`.
+
+**RORI** (sub-op 0xE) is the sole 3-byte form: `CE [Rd:4][0000] [imm8]`.
+The bottom 6 bits of the immediate are the rotation amount (0–63).
+
+### Multiply / Divide (sub-ops 0x0–0x7)
 
 | Opcode | Mnemonic | Description |
 |--------|----------|-------------|
@@ -415,6 +423,23 @@ Division stores the remainder in **R0**.  Division by zero triggers
 | `C5 DR` | **UDIV Rd, Rs** | Unsigned divide: `Rd ← Rd / Rs; R0 ← Rd % Rs` |
 | `C6 DR` | **MOD Rd, Rs** | Signed modulo: `Rd ← Rd mod Rs` |
 | `C7 DR` | **UMOD Rd, Rs** | Unsigned modulo: `Rd ← Rd mod Rs` |
+
+### Bitfield ALU (sub-ops 0x8–0xF)
+
+| Opcode | Mnemonic | Description |
+|--------|----------|-------------|
+| `C8 DR` | **POPCNT Rd, Rs** | Population count: `Rd ← popcount(Rs)` |
+| `C9 DR` | **CLZ Rd, Rs** | Count leading zeros: `Rd ← clz(Rs)` (0 → 64) |
+| `CA DR` | **CTZ Rd, Rs** | Count trailing zeros: `Rd ← ctz(Rs)` (0 → 64) |
+| `CB DR` | **BITREV Rd, Rs** | Bit reverse: `Rd ← reverse64(Rs)` |
+| `CC DR` | **BEXT Rd, Rs** | Bit extract (pext): `Rd ← pext(Rd, Rs)` gather bits at mask positions |
+| `CD DR` | **BDEP Rd, Rs** | Bit deposit (pdep): `Rd ← pdep(Rs, Rd)` scatter bits to mask positions |
+| `CE D0 II` | **RORI Rd, imm** | Rotate right immediate: `Rd ← rotr(Rd, imm[5:0])` |
+| `CF DR` | **BSWAP Rd, Rs** | Byte-swap: `Rd ← endian_reverse(Rs)` |
+
+Micro-core availability: Tier 1 (POPCNT, CLZ, CTZ, BITREV) is local.
+Tier 2 (BEXT, BDEP, RORI, BSWAP) is gated out on micro-cores (~100 LUTs
+saved).
 
 ---
 

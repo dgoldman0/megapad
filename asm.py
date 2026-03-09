@@ -69,6 +69,9 @@ MEM_SUB = {
 MULDIV_SUB = {
     "mul":  0x0, "mulh":  0x1, "umul":  0x2, "umulh": 0x3,
     "div":  0x4, "udiv":  0x5, "mod":   0x6, "umod":  0x7,
+    # Bitfield ALU (sub-ops 0x8–0xF)
+    "popcnt": 0x8, "clz": 0x9, "ctz": 0xA, "bitrev": 0xB,
+    "bext": 0xC, "bdep": 0xD, "rori": 0xE, "bswap": 0xF,
 }
 
 # EXT.STRING sub-op map (prefix F9)
@@ -465,8 +468,11 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower == "sep": return 1 + (1 if hi else 0)
     if mnem_lower == "sex": return 1 + (1 if hi else 0)
 
-    # -- MUL/DIV --
+    # -- MUL/DIV / Bitfield ALU --
     if mnem_lower in MULDIV_SUB:
+        sub = MULDIV_SUB[mnem_lower]
+        if sub == 0xE:  # RORI: 3-byte encoding
+            return 3 + (1 if hi else 0)
         return 2 + (1 if hi else 0)
 
     # -- CSR --
@@ -763,9 +769,19 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         out.append(0xB0 | (rn & 0xF))
         return out
 
-    # ---- MUL/DIV (0xCS) ----
+    # ---- MUL/DIV / Bitfield ALU (0xCS) ----
     if mnem_lower in MULDIV_SUB:
         sub = MULDIV_SUB[mnem_lower]
+        if sub == 0xE:  # RORI Rd, imm — 3-byte encoding
+            rd = _parse_reg(ops[0])
+            imm = _parse_imm(ops[1])
+            rex = _rex_byte(rd=rd)
+            if rex is not None:
+                out.append(rex)
+            out.append(0xC0 | sub)
+            out.append(((rd & 0xF) << 4))
+            out.append(imm & 0xFF)
+            return out
         rd = _parse_reg(ops[0])
         rs = _parse_reg(ops[1])
         rex = _rex_byte(rd=rd, rs=rs)

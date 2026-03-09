@@ -497,6 +497,192 @@ def test_muldiv():
         check("UDIV by zero → trap", e.ivec_id == 0x04)
 
 
+def test_bitfield_alu():
+    """Family 0xC sub-ops 0x8–0xF: Bitfield ALU"""
+    print("\n== Bitfield ALU (0xC8–0xCF) ==")
+
+    # --- POPCNT ---
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0xFF
+        popcnt r1, r2
+        halt
+    """)
+    check("POPCNT 0xFF = 8", cpu.regs[1] == 8)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0
+        popcnt r1, r2
+        halt
+    """)
+    check("POPCNT 0 = 0", cpu.regs[1] == 0)
+    check("POPCNT 0 sets Z", cpu.flag_z == 1)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 1
+        popcnt r1, r2
+        halt
+    """)
+    check("POPCNT 1 = 1", cpu.regs[1] == 1)
+
+    # --- CLZ ---
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 1
+        clz r1, r2
+        halt
+    """)
+    check("CLZ 1 = 63", cpu.regs[1] == 63)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0x80
+        clz r1, r2
+        halt
+    """)
+    check("CLZ 0x80 = 56", cpu.regs[1] == 56)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0
+        clz r1, r2
+        halt
+    """)
+    check("CLZ 0 = 64", cpu.regs[1] == 64)
+
+    # --- CTZ ---
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0x80
+        ctz r1, r2
+        halt
+    """)
+    check("CTZ 0x80 = 7", cpu.regs[1] == 7)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 1
+        ctz r1, r2
+        halt
+    """)
+    check("CTZ 1 = 0", cpu.regs[1] == 0)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0
+        ctz r1, r2
+        halt
+    """)
+    check("CTZ 0 = 64", cpu.regs[1] == 64)
+
+    # --- BITREV ---
+    # Bit-reverse of 1 on 64-bit → MSB set → 0x8000_0000_0000_0000
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 1
+        bitrev r1, r2
+        halt
+    """)
+    check("BITREV 1 = 0x8000...", cpu.regs[1] == 0x8000_0000_0000_0000)
+    check("BITREV 1 sets N", cpu.flag_n == 1)
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0xFF
+        bitrev r1, r2
+        halt
+    """)
+    check("BITREV 0xFF = 0xFF00...", cpu.regs[1] == 0xFF00_0000_0000_0000)
+
+    # --- BEXT (pext) ---
+    # Extract bits 0,2,4,6 from 0xAA=10101010 → 0b1111=0xF
+    cpu, _ = run_asm("""
+        ldi r1, 0xAA
+        ldi r2, 0x55
+        bext r1, r2
+        halt
+    """)
+    check("BEXT 0xAA mask 0x55 = 0", cpu.regs[1] == 0,
+          f"got {cpu.regs[1]:#x}")
+
+    # Extract bits 1,3,5,7 from 0xAA → 0b1111=0xF
+    cpu, _ = run_asm("""
+        ldi r1, 0xAA
+        ldi r2, 0xAA
+        bext r1, r2
+        halt
+    """)
+    check("BEXT 0xAA mask 0xAA = 0xF", cpu.regs[1] == 0xF,
+          f"got {cpu.regs[1]:#x}")
+
+    # --- BDEP (pdep) ---
+    # Deposit 0xF into mask 0xAA → bits 1,3,5,7 set → 0xAA
+    cpu, _ = run_asm("""
+        ldi r1, 0xAA
+        ldi r2, 0xF
+        bdep r1, r2
+        halt
+    """)
+    check("BDEP mask 0xAA src 0xF = 0xAA", cpu.regs[1] == 0xAA,
+          f"got {cpu.regs[1]:#x}")
+
+    # --- RORI ---
+    cpu, _ = run_asm("""
+        ldi r1, 1
+        rori r1, 1
+        halt
+    """)
+    check("RORI 1 by 1 = MSB set", cpu.regs[1] == 0x8000_0000_0000_0000,
+          f"got {cpu.regs[1]:#x}")
+
+    cpu, _ = run_asm("""
+        ldi r1, 0x80
+        rori r1, 4
+        halt
+    """)
+    check("RORI 0x80 by 4 = 8", cpu.regs[1] == 8,
+          f"got {cpu.regs[1]:#x}")
+
+    cpu, _ = run_asm("""
+        ldi r1, 42
+        rori r1, 0
+        halt
+    """)
+    check("RORI by 0 = identity", cpu.regs[1] == 42)
+
+    # --- BSWAP ---
+    # 0x01 stored as a 64-bit value → byte-swap → 0x0100_0000_0000_0000
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 1
+        bswap r1, r2
+        halt
+    """)
+    check("BSWAP 1 = 0x0100...", cpu.regs[1] == 0x0100_0000_0000_0000,
+          f"got {cpu.regs[1]:#x}")
+
+    cpu, _ = run_asm("""
+        ldi r1, 0
+        ldi r2, 0
+        bswap r1, r2
+        halt
+    """)
+    check("BSWAP 0 = 0", cpu.regs[1] == 0)
+    check("BSWAP 0 sets Z", cpu.flag_z == 1)
+
+    # Round-trip: BSWAP(BSWAP(x)) = x
+    cpu, _ = run_asm("""
+        ldi r1, 0xAB
+        ldi r2, 0xAB
+        bswap r1, r2
+        bswap r1, r1
+        halt
+    """)
+    check("BSWAP round-trip = identity", cpu.regs[1] == 0xAB)
+
+
 def test_csr():
     """Family 0xD: CSR read/write"""
     print("\n== CSR (0xD) ==")
@@ -2738,6 +2924,7 @@ def main():
         test_io,
         test_sep_sex,
         test_muldiv,
+        test_bitfield_alu,
         test_csr,
         test_mex,
         test_vshr_vshl,

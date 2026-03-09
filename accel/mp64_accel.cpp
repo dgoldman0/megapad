@@ -809,7 +809,10 @@ static int next_instruction_size(CPUState& s) {
         case 0x8: return 1;  // MEMALU
         case 0x9: return 1;  // I/O
         case 0xA: case 0xB: return 1;  // SEP, SEX
-        case 0xC: return 2;  // MULDIV
+        case 0xC: {
+            int sub = peek & 0xF;
+            return (sub == 0xE) ? 3 : 2;  // MULDIV; RORI is 3 bytes
+        }
         case 0xD: return 2;  // CSR
         case 0xE: return 2;  // MEX
         case 0xF: return 1;  // EXT prefix (shouldn't reach here)
@@ -2924,13 +2927,68 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 s.regs[rd] = a % b;
                 break;
             }
+            // ---- Bitfield ALU (sub-ops 0x8–0xF) ----
+            case 0x8: {  // POPCNT
+                s.regs[rd] = __builtin_popcountll(b);
+                break;
+            }
+            case 0x9: {  // CLZ
+                s.regs[rd] = b ? __builtin_clzll(b) : 64;
+                break;
+            }
+            case 0xA: {  // CTZ
+                s.regs[rd] = b ? __builtin_ctzll(b) : 64;
+                break;
+            }
+            case 0xB: {  // BITREV
+                uint64_t v = b;
+                v = ((v >> 1)  & 0x5555555555555555ULL) | ((v & 0x5555555555555555ULL) << 1);
+                v = ((v >> 2)  & 0x3333333333333333ULL) | ((v & 0x3333333333333333ULL) << 2);
+                v = ((v >> 4)  & 0x0F0F0F0F0F0F0F0FULL) | ((v & 0x0F0F0F0F0F0F0F0FULL) << 4);
+                v = __builtin_bswap64(v);
+                s.regs[rd] = v;
+                break;
+            }
+            case 0xC: {  // BEXT (pext)
+                // Rd ← pext(Rs, Rd): extract bits from a at positions set in b
+                uint64_t src = a, mask = b, result = 0;
+                for (int i = 0; mask; i++) {
+                    uint64_t lsb = mask & (-mask);
+                    if (src & lsb) result |= (1ULL << i);
+                    mask &= mask - 1;
+                }
+                s.regs[rd] = result;
+                break;
+            }
+            case 0xD: {  // BDEP (pdep)
+                // Rd ← pdep(Rs, Rd): deposit bits from b into positions set in a
+                uint64_t src = b, mask = a, result = 0;
+                for (int i = 0; mask; i++) {
+                    uint64_t lsb = mask & (-mask);
+                    if (src & (1ULL << i)) result |= lsb;
+                    mask &= mask - 1;
+                }
+                s.regs[rd] = result;
+                break;
+            }
+            case 0xE: {  // RORI (3-byte: CE [Rd:4][0000] [imm8])
+                uint8_t imm = fetch8(s);
+                int shift = imm & 63;
+                uint64_t r = shift ? ((a >> shift) | (a << (64 - shift))) : a;
+                s.regs[rd] = r;
+                break;
+            }
+            case 0xF: {  // BSWAP
+                s.regs[rd] = __builtin_bswap64(b);
+                break;
+            }
         }
         {
             uint64_t r = s.regs[rd];
             s.flag_z = (r == 0) ? 1 : 0;
             s.flag_n = (r >> 63) & 1;
         }
-        cycles += 3;
+        if (n <= 0x7) cycles += 3;  // mul/div extra cycles only
         break;
     }
 

@@ -1504,6 +1504,117 @@ w_rshift:
     str r14, r0
     ret.l
 
+; =====================================================================
+;  Forth Words — Bitfield ALU
+; =====================================================================
+
+; POPCNT ( x -- n )  population count
+w_popcnt:
+    ldn r1, r14
+    popcnt r0, r1
+    str r14, r0
+    ret.l
+
+; CLZ ( x -- n )  count leading zeros
+w_clz:
+    ldn r1, r14
+    clz r0, r1
+    str r14, r0
+    ret.l
+
+; CTZ ( x -- n )  count trailing zeros
+w_ctz:
+    ldn r1, r14
+    ctz r0, r1
+    str r14, r0
+    ret.l
+
+; BITREV ( x -- x' )  reverse all 64 bits
+w_bitrev:
+    ldn r1, r14
+    bitrev r0, r1
+    str r14, r0
+    ret.l
+
+; BSWAP ( x -- x' )  byte-swap (endian reverse)
+w_bswap:
+    ldn r1, r14
+    bswap r0, r1
+    str r14, r0
+    ret.l
+
+; NTOH ( x -- x' )  network-to-host 64-bit byte order
+w_ntoh:
+    ldn r1, r14
+    bswap r0, r1
+    str r14, r0
+    ret.l
+
+; NTOH32 ( x -- x' )  network-to-host 32-bit
+w_ntoh32:
+    ldn r1, r14
+    bswap r0, r1
+    ldi r7, 32
+    shr r0, r7
+    str r14, r0
+    ret.l
+
+; NTOH16 ( x -- x' )  network-to-host 16-bit
+w_ntoh16:
+    ldn r1, r14
+    bswap r0, r1
+    ldi r7, 48
+    shr r0, r7
+    str r14, r0
+    ret.l
+
+; POOL-ALLOC ( bitmap -- bitmap' index )
+;   Find lowest free (0) bit via CTZ(~bitmap), set it, push updated bitmap
+;   and index.  Aborts if bitmap = all ones (pool full).
+w_pool_alloc:
+    ldn r0, r14               ; bitmap
+    not r1, r0                ; free-mask = ~bitmap
+    cmpi r1, 0
+    breq w_pool_alloc_full
+    ctz r7, r1                ; index = CTZ(free-mask)
+    ldi r1, 1
+    shl r1, r7                ; bit = 1 << index
+    or r0, r1                 ; bitmap' = bitmap | bit
+    str r14, r0               ; overwrite TOS with bitmap'
+    subi r14, 8
+    str r14, r7               ; push index
+    ret.l
+w_pool_alloc_full:
+    ldi64 r10, pool_full_msg
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11                ; ABORT — clear stacks, return to REPL
+    ret.l
+pool_full_msg:
+    .ascii "pool full"
+    .db 0
+
+; POOL-FREE ( bitmap index -- bitmap' )
+;   Clear bit at index, return updated bitmap.
+w_pool_free:
+    ldn r7, r14               ; index
+    addi r14, 8
+    ldn r0, r14               ; bitmap
+    ldi r1, 1
+    shl r1, r7                ; bit = 1 << index
+    not r1, r1                ; mask = ~bit
+    and r0, r1                ; bitmap' = bitmap & ~bit
+    str r14, r0
+    ret.l
+
+; POOL-COUNT ( bitmap -- n )  count allocated slots
+w_pool_count:
+    ldn r1, r14
+    popcnt r0, r1
+    str r14, r0
+    ret.l
+
 ; = ( a b -- flag )  TRUE = -1
 w_equal:
     ldn r1, r14
@@ -11617,9 +11728,135 @@ d_rshift:
     call.l r11
     ret.l
 
+; === POPCNT ===
+d_popcnt:
+    .dq d_rshift
+    .db 6
+    .ascii "POPCNT"
+    ldi64 r11, w_popcnt
+    call.l r11
+    ret.l
+
+; === CLZ ===
+d_clz:
+    .dq d_popcnt
+    .db 3
+    .ascii "CLZ"
+    ldi64 r11, w_clz
+    call.l r11
+    ret.l
+
+; === CTZ ===
+d_ctz:
+    .dq d_clz
+    .db 3
+    .ascii "CTZ"
+    ldi64 r11, w_ctz
+    call.l r11
+    ret.l
+
+; === BITREV ===
+d_bitrev:
+    .dq d_ctz
+    .db 6
+    .ascii "BITREV"
+    ldi64 r11, w_bitrev
+    call.l r11
+    ret.l
+
+; === BSWAP ===
+d_bswap:
+    .dq d_bitrev
+    .db 5
+    .ascii "BSWAP"
+    ldi64 r11, w_bswap
+    call.l r11
+    ret.l
+
+; === NTOH ===
+d_ntoh:
+    .dq d_bswap
+    .db 4
+    .ascii "NTOH"
+    ldi64 r11, w_ntoh
+    call.l r11
+    ret.l
+
+; === HTON ===
+d_hton:
+    .dq d_ntoh
+    .db 4
+    .ascii "HTON"
+    ldi64 r11, w_ntoh
+    call.l r11
+    ret.l
+
+; === NTOH32 ===
+d_ntoh32:
+    .dq d_hton
+    .db 6
+    .ascii "NTOH32"
+    ldi64 r11, w_ntoh32
+    call.l r11
+    ret.l
+
+; === HTON32 ===
+d_hton32:
+    .dq d_ntoh32
+    .db 6
+    .ascii "HTON32"
+    ldi64 r11, w_ntoh32
+    call.l r11
+    ret.l
+
+; === NTOH16 ===
+d_ntoh16:
+    .dq d_hton32
+    .db 6
+    .ascii "NTOH16"
+    ldi64 r11, w_ntoh16
+    call.l r11
+    ret.l
+
+; === HTON16 ===
+d_hton16:
+    .dq d_ntoh16
+    .db 6
+    .ascii "HTON16"
+    ldi64 r11, w_ntoh16
+    call.l r11
+    ret.l
+
+; === POOL-ALLOC ===
+d_pool_alloc:
+    .dq d_hton16
+    .db 10
+    .ascii "POOL-ALLOC"
+    ldi64 r11, w_pool_alloc
+    call.l r11
+    ret.l
+
+; === POOL-FREE ===
+d_pool_free:
+    .dq d_pool_alloc
+    .db 9
+    .ascii "POOL-FREE"
+    ldi64 r11, w_pool_free
+    call.l r11
+    ret.l
+
+; === POOL-COUNT ===
+d_pool_count:
+    .dq d_pool_free
+    .db 10
+    .ascii "POOL-COUNT"
+    ldi64 r11, w_pool_count
+    call.l r11
+    ret.l
+
 ; === = ===
 d_equal:
-    .dq d_rshift
+    .dq d_pool_count
     .db 1
     .ascii "="
     ldi64 r11, w_equal

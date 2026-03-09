@@ -143,7 +143,7 @@ Each entry is a linked list node:
 | 31 | `CELLS` | `( n -- n*8 )` | | Convert cell count to byte offset (cell = 8 bytes) |
 | 32 | `CELL+` | `( a -- a+8 )` | | Advance address by one cell (8 bytes) |
 
-### Logic & Bitwise (6 words)
+### Logic & Bitwise (11 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -153,24 +153,29 @@ Each entry is a linked list node:
 | 36 | `INVERT` | `( a -- ~a )` | | Bitwise NOT (one's complement) |
 | 37 | `LSHIFT` | `( a n -- a<<n )` | | Left shift |
 | 38 | `RSHIFT` | `( a n -- a>>n )` | | Right shift (logical) |
+| 39 | `POPCNT` | `( x -- n )` | | Population count (number of set bits). Uses bitfield ALU POPCNT instruction. |
+| 40 | `CLZ` | `( x -- n )` | | Count leading zeros (0 → 64). Uses bitfield ALU CLZ instruction. |
+| 41 | `CTZ` | `( x -- n )` | | Count trailing zeros (0 → 64). Uses bitfield ALU CTZ instruction. |
+| 42 | `BITREV` | `( x -- x' )` | | Reverse all 64 bits. Uses bitfield ALU BITREV instruction. |
+| 43 | `BSWAP` | `( x -- x' )` | | Byte-swap (endian reverse). Uses bitfield ALU BSWAP instruction. |
 
 ### Comparison (13 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 39 | `=` | `( a b -- flag )` | | True (-1) if equal |
-| 40 | `<` | `( a b -- flag )` | | Signed less-than |
-| 41 | `>` | `( a b -- flag )` | | Signed greater-than |
-| 42 | `0=` | `( n -- flag )` | | True if zero |
-| 43 | `0<` | `( n -- flag )` | | True if negative (sign bit set) |
-| 44 | `0>` | `( n -- flag )` | | True if positive nonzero |
-| 45 | `<>` | `( a b -- flag )` | | True if not equal |
-| 46 | `0<>` | `( n -- flag )` | | True if nonzero |
-| 47 | `>=` | `( a b -- flag )` | | Signed greater-or-equal |
-| 48 | `<=` | `( a b -- flag )` | | Signed less-or-equal |
-| 49 | `U<` | `( a b -- flag )` | | Unsigned less-than |
-| 50 | `U>` | `( a b -- flag )` | | Unsigned greater-than |
-| 51 | `WITHIN` | `( n lo hi -- flag )` | | True if `(n-lo) u< (hi-lo)` (ANS) |
+| 44 | `=` | `( a b -- flag )` | | True (-1) if equal |
+| 45 | `<` | `( a b -- flag )` | | Signed less-than |
+| 46 | `>` | `( a b -- flag )` | | Signed greater-than |
+| 47 | `0=` | `( n -- flag )` | | True if zero |
+| 48 | `0<` | `( n -- flag )` | | True if negative (sign bit set) |
+| 49 | `0>` | `( n -- flag )` | | True if positive nonzero |
+| 50 | `<>` | `( a b -- flag )` | | True if not equal |
+| 51 | `0<>` | `( n -- flag )` | | True if nonzero |
+| 52 | `>=` | `( a b -- flag )` | | Signed greater-or-equal |
+| 53 | `<=` | `( a b -- flag )` | | Signed less-or-equal |
+| 54 | `U<` | `( a b -- flag )` | | Unsigned less-than |
+| 55 | `U>` | `( a b -- flag )` | | Unsigned greater-than |
+| 56 | `WITHIN` | `( n lo hi -- flag )` | | True if `(n-lo) u< (hi-lo)` (ANS) |
 
 ### Memory (18 words)
 
@@ -409,7 +414,7 @@ of compiled code.
 | 187 | `ACC3@` | `( -- n )` | | Read tile accumulator ACC3 (CSR 0x1C) |
 | 188 | `CYCLES` | `( -- n )` | | Read 32-bit hardware timer counter (MMIO +0x0100) |
 
-### NIC — Network Interface (4 words)
+### NIC — Network Interface (10 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -417,18 +422,32 @@ of compiled code.
 | 190 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
 | 191 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
 | 192 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
+| 193 | `NTOH` | `( x -- x' )` | | Network-to-host 64-bit byte order. Uses BSWAP instruction. |
+| 194 | `HTON` | `( x -- x' )` | | Host-to-network 64-bit byte order. Alias of NTOH (self-inverse). |
+| 195 | `NTOH32` | `( x -- x' )` | | Network-to-host 32-bit: BSWAP + 32 RSHIFT. |
+| 196 | `HTON32` | `( x -- x' )` | | Host-to-network 32-bit. Alias of NTOH32. |
+| 197 | `NTOH16` | `( x -- x' )` | | Network-to-host 16-bit: BSWAP + 48 RSHIFT. |
+| 198 | `HTON16` | `( x -- x' )` | | Host-to-network 16-bit. Alias of NTOH16. |
+
+### Pool Allocator (3 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 199 | `POOL-ALLOC` | `( bitmap -- bitmap' index )` | | Allocate lowest free slot. Uses CTZ(~bitmap). Aborts if pool full. |
+| 200 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
+| 201 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
 ### Disk / Storage (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 193 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
-| 194 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
-| 195 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
-| 196 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
-| 197 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
-| 198 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
-| 199 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
+| 202 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
+| 203 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
+| 204 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
+| 205 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
+| 206 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
+| 207 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
+| 208 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
 
 ### Timer & Interrupts (6 words)
 
