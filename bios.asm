@@ -332,6 +332,11 @@ interp_loop:
     cmpi r12, 0
     lbreq interp_line_done
 
+    ; Any token starting with '\' is a line comment (\foo, \\, \n etc.)
+    ld.b r0, r9
+    cmpi r0, 0x5C             ; '\'
+    lbreq interp_line_done
+
     ; Look up in dictionary
     ldi64 r11, find_word
     call.l r11
@@ -7485,6 +7490,10 @@ w_eval_loop:
     ldi64 r11, parse_word
     call.l r11
     cmpi r12, 0
+    lbreq w_eval_done
+    ; Any token starting with '\' is a line comment (\foo, \\, \n etc.)
+    ld.b r0, r9
+    cmpi r0, 0x5C             ; '\'
     lbreq w_eval_done
     ; Look up word
     ldi64 r11, find_word
