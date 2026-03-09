@@ -579,6 +579,8 @@ def {_attr}(self, v):
         self._cs.mpu_base = 0
         self._cs.mpu_limit = 0
         self._cs.ext_modifier = -1
+        # Clear dictionary cache
+        self._cs.dict_clear()
 
     # -- Run (high-level loop) --
 

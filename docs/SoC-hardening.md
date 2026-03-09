@@ -1,7 +1,7 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§1 crypto DONE, §2 string engine DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE)  
-Last updated: 2026-03-07
+Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; §4e bitfield spec'd; Appendix B crypto ISA spec'd — 38/58 items done)  
+Last updated: 2026-03-09
 
 ---
 
@@ -25,11 +25,17 @@ Chip configurations vary (core count, cluster count, micro-cores per
 cluster are all parameters).  The topology rules below apply regardless
 of the specific config.
 
-**Rule of thumb:** if an accelerator is long-running and one-owner-at-a-time
-(crypto engines, compression), sharing is fine — software mutex via
-mailbox.  If it's high-frequency and called from every thread on every
-Forth word (string ops, dictionary search), sharing creates serialisation
-on the hottest paths and the accelerator needs replication.
+**Rule of thumb — updated:** Crypto primitives that map naturally to the
+core's existing register model (CRC, SHA-2, field arithmetic) belong
+**in the core as ISA instructions** (see Appendix B, EXT.CRYPTO prefix FB).
+The bus round-trip and serialisation cost of sharing is unacceptable when
+multiple cores run parallel TLS or signature verification.  Accelerators
+with large private state that doesn't fit core registers (SHA-3/Keccak
+1600-bit state, AES key schedule, NTT polynomial arrays) or multi-phase
+protocols (KEM) stay **shared MMIO** — software mutex via mailbox.
+High-frequency per-word operations (string ops, dictionary search) are
+ISA extensions in the core (see §2, §3).  Compression/decompression
+and pattern matching are shared — long-running, one owner at a time.
 
 ### Uniform cluster wrapping
 
@@ -68,12 +74,15 @@ Not a resource concern on any target.
 
 | Category           | Topology               | Rationale                            |
 |--------------------|------------------------|--------------------------------------|
-| Crypto (SHA/AES/Field/NTT/KEM) | Shared (1 instance) | Long-running, one owner at a time |
-| TRNG, CRC, RTC     | Shared                 | Stateless or rarely contested        |
-| String engine       | **ISA extension (EXT.STRING F9)** | 2–3 byte instruction; bus setup ≫ transfer |
-| Dictionary search   | **ISA extension (EXT.DICT FA)** | 2–4 cycle FIND; bus latency kills it |
+| CRC32/CRC64        | **Per-core ISA (EXT.CRYPTO FB)** | 1-cycle combinational; bus latency dominates |
+| SHA-256/384/512    | **Per-core ISA (EXT.CRYPTO FB)** | 64–80 round compute; parallel TLS needs per-core |
+| Field ALU (multi-prime) | **Per-core ISA (EXT.CRYPTO FB)** | Inner-loop field ops; 3-cycle bus overhead per op is 4× compute |
+| AES-256-GCM, SHA-3/SHAKE, NTT, KEM, WOTS+ | Shared (1 instance) | Large state / multi-phase protocols |
+| TRNG, RTC          | Shared                 | Singular noise source / global clock |
+| String engine       | **Per-core ISA (EXT.STRING F9)** | 2–3 byte instruction; bus setup ≫ transfer |
+| Dictionary search   | **Per-core ISA (EXT.DICT FA)** | 2–4 cycle FIND; bus latency kills it |
 | Debug/trace unit    | **Per-core**           | Meaningless if interleaved           |
-| Bitfield ops        | **ISA extension, not MMIO** | Single-cycle; bus latency kills it |
+| Bitfield ops        | **Per-core ISA (C8–CF)** | Single-cycle; bus latency kills it |
 
 ---
 
@@ -211,7 +220,15 @@ the instruction exists for stack-grow-down and reverse-fill patterns.
 ## 1. SHA-256/512 Dual-Mode Upgrade
 
 **Priority: high — next crypto task**  
-**Topology: shared (1 instance)**
+**Topology: per-core ISA (EXT.CRYPTO FB, Appendix B)**
+
+> **Note:** This section was originally written for a shared MMIO
+> implementation.  Per the Appendix B decision, the unified SHA-2 engine
+> moves into each full core as ISA instructions (SHA.INIT, SHA.ROUND,
+> SHA.FINAL, etc.).  The RTL/emulator notes below describe the datapath
+> design, which is the same regardless of whether the unit is reached via
+> MMIO or ISA decode — only the control interface changes.  The MMIO
+> shared instance may be retained temporarily for micro-core access.
 
 ### Current state
 
@@ -287,6 +304,8 @@ needed; at one-round-per-cycle this is usually fine at 100 MHz.
 
 ### RTL implementation notes
 
+The datapath design is the same whether accessed via MMIO or ISA decode:
+
 - Copy `mp64_sha256.v` → rename module to `mp64_sha2` (covers 256/384/512).
 - All `[31:0]` regs → `[63:0]`.  In mode==0, INIT zeroes upper bits; the
   existing round logic just operates on 64-bit words (upper bits stay 0).
@@ -294,11 +313,33 @@ needed; at one-round-per-cycle this is usually fine at 100 MHz.
   only entries 0–63 are used (round_cnt never reaches 64+).
 - Σ/σ mux: `wire [5:0] S0_r0 = (mode==0) ? 6'd2 : 6'd28;` etc.
   Feed into a single `rotr64` function.
+
+For ISA integration (per Appendix B):
+
+- Instantiate `mp64_sha2` inside `mp64_cpu.v` (tightly coupled, like
+  the string engine and multiplier).
+- Control interface: CPU decode triggers `sha_start` on SHA.ROUND/SHA.FINAL;
+  SHA sub-module reads W from tile memory via CPU internal port.
+- State (H[0..7]) maps to ACC0–ACC3; mode CSR at 0x82.
+- No MMIO bus involvement for full cores.
+
+For MMIO fallback (micro-cores, transition period):
+
 - `addr` port widens from `[5:0]` to `[6:0]`.
 - SoC decode change: `addr[11:7] == 5'b10010` (0x940–0x9BF).
 - Move CRC decode to `addr[11:5] == 7'b1010000` (0xA00–0xA1F).
 
 ### Emulator implementation notes
+
+For ISA path (full cores, target implementation per Appendix B):
+
+- New dispatch case in `megapad64.py` for EXT.CRYPTO (FB) sub-ops
+  0x10–0x1F.  Uses `hashlib.sha256()` / `hashlib.sha384()` /
+  `hashlib.sha512()` internally.
+- State in ACC0–ACC3; message block in tile memory at TSRC0.
+- See Appendix B §B.4 for the full instruction set.
+
+For MMIO fallback (micro-cores, transition):
 
 - `devices.py` SHA256Device class: add `mode` register, branch on mode
   for `hashlib.sha256()` vs `hashlib.sha384()` vs `hashlib.sha512()`.
@@ -418,24 +459,12 @@ et al. (already required for the no-hardware case).
 - Update GPRs in-place to match post-transfer state.
 - Micro-core flag: raise `ILLEGAL_OP` trap if `self.is_micro`.
 
-### C++ accelerator gap (audit 2026-03-07)
+### C++ accelerator — DONE (2026-03-09)
 
-**The C++ accelerator (`mp64_accel.cpp`) does NOT implement EXT.STRING
-natively.**  When opcode `0xF9` is encountered, the C++ fast-path
-rewinds PC and throws `EXT_ISA_FALLBACK`.  `accel_wrapper.py` catches
-this and executes the instruction via `_step_python_fallback()` — i.e.
-the Python CPU emulator handles every EXT.STRING instruction even when
-the C++ accelerator is active.
-
-This is a **correctness non-issue** (tests pass, behavior identical)
-but a **performance gap** — every CMOVE/CMOVE>/BFILL/BCOMP/BSRCH
-drops out of the ~63× C++ hot loop back to Python speed.
-
-**TODO for SoC hardening team:** Implement EXT.STRING sub-ops natively
-in `mp64_accel.cpp`.  The Python behavioral model in `megapad64.py`
-(opcode 0xF9 dispatch) is the reference.  The RTL spec above defines
-the exact semantics.  Remove the `EXT_ISA_FALLBACK` throw for `n==0x9`
-once all sub-ops are handled.
+All five EXT.STRING sub-ops (CMOVE, CMOVE>, BFILL, BCOMP, BSRCH)
+execute natively in `mp64_accel.cpp::exec_string()`.  BFILL has a
+`memset` fast-path when the target is contiguous RAM (not MMIO).
+No Python fallback needed.  1715/1715 tests pass.
 
 ---
 
@@ -572,20 +601,13 @@ if needed, they use software linked-list FIND.
 - Single instance per emulated CPU is fine (no contention in
   single-threaded Python).
 
-### C++ accelerator gap (audit 2026-03-07)
+### C++ accelerator — DONE (2026-03-09)
 
-**The C++ accelerator (`mp64_accel.cpp`) does NOT implement EXT.DICT
-natively.**  When opcode `0xFA` is encountered, the C++ fast-path
-rewinds PC and throws `EXT_ISA_FALLBACK`.  `accel_wrapper.py` catches
-this and executes the instruction via `_step_python_fallback()` — the
-Python CPU emulator handles every DFIND/DINS/DDEL/DCLR even when the
-C++ accelerator is active.
-
-This is a **correctness non-issue** (all 7 test_ext_dict sub-tests
-pass via the fallback) but a **significant performance gap** — DFIND
-is called on every word lookup in the Forth outer interpreter, making
-it the single hottest fallback path.  Every interpretation cycle drops
-from C++ speed back to Python.
+All four EXT.DICT sub-ops (DFIND, DINS, DDEL, DCLR) execute natively
+in `mp64_accel.cpp::exec_dict()`.  The C++ `CPUState` carries the
+64×4 hash table (`DictEntry dict_table[64][4]`) with inline FNV-1a
+hashing — no Python fallback needed.  `accel_wrapper.py::_reset_state()`
+calls `dict_clear()`.  1715/1715 tests pass.
 
 **Implementation status across layers:**
 
@@ -593,23 +615,17 @@ from C++ speed back to Python.
 |-------|--------|-------|
 | RTL (`mp64_dict.v`) | ✅ Complete | 490 lines, 4-way SA, FNV-1a, BRAM |
 | Python emulator (`megapad64.py`) | ✅ Complete | 64×4 hash table, FNV-1a 32-bit |
-| C++ accelerator (`mp64_accel.cpp`) | ❌ **Missing** | Throws `EXT_ISA_FALLBACK` |
-| Tests (`test_megapad64.py::test_ext_dict`) | ✅ Complete | 7 sub-tests, all via Python fallback |
+| C++ accelerator (`mp64_accel.cpp`) | ✅ **Complete** | Native 64×4 hash table, FNV-1a 32-bit |
+| Tests (`test_megapad64.py::test_ext_dict`) | ✅ Complete | 7 sub-tests, native C++ path |
 | BIOS usage | ✅ Active | `find_word` → DFIND fast path; DINS on cache miss |
-
-**TODO for SoC hardening team:** Port the EXT.DICT logic into
-`mp64_accel.cpp`.  The Python behavioral model
-(`megapad64.py` lines 1383–1535: `_exec_dict`, `_dict_find`,
-`_dict_insert`, `_dict_delete`, `_dict_clear`) is the reference.
-Need a C++ hash table (64-set × 4-way, FNV-1a 32-bit),
-mirroring `_fnv1a_32` and `_dict_table`.  Remove the
-`EXT_ISA_FALLBACK` throw for `n==0xA` once all sub-ops are handled.
 
 ---
 
-## 4. Other Interesting Accelerator Ideas
+## 4. Other Accelerator Ideas & Committed ISA Extensions
 
-Lower priority, but worth keeping on the radar.
+§4e (Bitfield ALU) is a **committed ISA extension** with full encoding
+in Appendix A.4 — it is not speculative.  The remaining items (4a–4d,
+4f) are lower-priority ideas worth keeping on the radar.
 
 ### 4a. Crypto Pipeline Orchestrator (~32 bytes MMIO, shared)
 
@@ -657,12 +673,16 @@ butterflies at wire speed.  Useful if audio or radio becomes a target.
 accumulator + control FSM.
 **Emulator:** NumPy `convolve()` or manual MAC loop.
 
-### 4e. Bitfield Accelerator — ALU extension (no EXT prefix, zero EXT slots)
+### 4e. Bitfield ALU — Committed ISA Extension (Family 0xC, sub-ops C8–CF)
 
-Single-cycle bit-manipulation operations added as new ALU sub-ops in
-`mp64_alu.v`.  **Not MMIO** — single-cycle operations don't survive
-the bus round-trip.  **Not an EXT prefix** — these are regular ALU
-function codes, encoded within the existing ALU family (0x7).
+**Status: ISA encoding committed (Appendix A.4); implementation pending**  
+**Topology: per-core ISA (MULDIV family 0xC, 1-cycle combinational)**
+
+Single-cycle bit-manipulation operations encoded as sub-ops C8–CF in
+the MULDIV family.  **Not MMIO** — single-cycle operations don't
+survive the bus round-trip.  Wired into `mp64_alu.v` combinational
+logic; 1-cycle execution (no stall, unlike MUL/DIV's 4 cycles).
+See Appendix A.4 for the complete encoding spec.
 
 Tiny footprint, big payoff for memory allocators, graphics blitters,
 crypto, and Forth internals (dictionary hashing, bitmap free-lists).
@@ -1240,14 +1260,14 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0x700–0x77F   | 128 B  | AES                 | existing   |
 | 0x780–0x7DF   | 96 B   | SHA-3               | existing   |
 | 0x800–0x81F   | 32 B   | TRNG                | existing   |
-| 0x840–0x87F   | 64 B   | Field ALU           | existing   |
+| 0x840–0x87F   | 64 B   | Field ALU           | **→ per-core ISA (Appendix B)** |
 | 0x880–0x89F   | 32 B   | **Port I/O remap CSR** | **new**    |
 | 0x8A0–0x8BF   | 32 B   | **WOTS+ Chain Accel** | **new (§7)** |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
-| 0x940–0x9BF   | 128 B  | **SHA-256/384/512** | **widened** |
+| 0x940–0x9BF   | 128 B  | **SHA-256/384/512** | **→ per-core ISA (Appendix B)** |
 | 0x9C0–0x9FF   | 64 B   | *(free)*            |            |
-| 0xA00–0xA1F   | 32 B   | **CRC (relocated)** | **moved**  |
+| 0xA00–0xA1F   | 32 B   | **CRC (relocated)** | **→ per-core ISA (Appendix B)** |
 | 0xA20–0xA7F   | 96 B   | **Trace readout portal** | **new** |
 | 0xA80–0xAFF   | 128 B  | *(free — future)*   |            |
 | 0xB00–0xB1F   | 32 B   | RTC                 | existing   |
@@ -1256,8 +1276,17 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 The string engine (§2) and dictionary search engine (§3) are **ISA
 extensions** (EXT.STRING F9, EXT.DICT FA) — they live inside each CPU
 as tightly-coupled sub-modules, like the multiplier.  They are not on
-the MMIO bus at all and require no cluster wrapper ports.  The main
-MMIO map only carries shared peripherals.
+the MMIO bus at all and require no cluster wrapper ports.
+
+**Crypto migration (Appendix B):** CRC, SHA-256/384/512, and Field ALU
+are moving from shared MMIO to per-core ISA instructions (EXT.CRYPTO
+FB).  Their MMIO slots (0x840, 0x940, 0xA00) may be retained
+temporarily for micro-core access or freed entirely once migration is
+complete — see Appendix B §B.9 for the phased plan.
+
+The main MMIO map carries only shared peripherals (AES, SHA-3, NTT,
+KEM, WOTS+, TRNG, RTC) plus bus infrastructure (mailbox, spinlocks,
+port remap, trace portal).
 
 The trace readout portal (0xA20) is a small shared MMIO window that
 lets a debugger select a core ID and drain that core's per-core trace
@@ -1418,14 +1447,14 @@ F7  —               (free — reserved)
 F8  EXT.ETALU       (pre-existing)
 F9  EXT.STRING      block-move/fill/compare       [committed, §2]
 FA  EXT.DICT        dictionary search             [committed, §3]
-FB  —               (free)
+FB  EXT.CRYPTO      per-core crypto ops           [proposed, Appendix B]
 FC  —               (free)
 FD  —               (free)
 FE  —               (free)
 FF  —               (free)
 ```
 
-**Budget:** 3 pre-existing + 5 REX + 2 committed = 10 used, **6 free**.
+**Budget:** 3 pre-existing + 5 REX + 2 committed + 1 proposed = 11 used, **5 free**.
 
 ---
 
@@ -1721,3 +1750,683 @@ elif nib == 0xF:                                                     # RORI
 
 *(Pseudocode — actual implementation will use proper masking,
 REX-extended register indices, and flag updates.)*
+
+---
+
+## Appendix B — Core-Integrated Crypto ISA Extension (EXT.CRYPTO, prefix FB)
+
+> **Status:** Pre-implementation design.  NOT in `isa-reference.md` yet.
+> Encodings may change.  Move to ISA doc only after emulator + RTL
+> implementation is committed and tested.
+
+### B.0  Rationale: Why Move Crypto Into the Core
+
+Five crypto primitives currently live as shared MMIO peripherals: CRC,
+SHA-256, SHA-384, SHA-512, and the Field ALU (GF(2²⁵⁵−19) / multi-prime).
+Moving them into per-core ISA instructions eliminates:
+
+1. **Bus round-trip overhead** — MMIO writes cost 1 cycle bus request +
+   1 cycle bus grant + 1 cycle device ack = 3 cycles minimum per register
+   write.  A SHA-256 block requires ~16 data writes + 2 control writes =
+   ~54 cycles of MMIO overhead on top of the 64-cycle compression.
+2. **Bus contention** — shared peripherals serialise all 4 cores.  Under
+   parallel TLS handshakes, this is a bottleneck.
+3. **Software complexity** — spinlock/mailbox acquire-release around every
+   crypto call, which also blocks other cores.
+
+**What stays MMIO (shared):** AES-256-GCM, SHA-3/SHAKE, NTT, KEM, WOTS+
+chain accelerator, TRNG.  These have state footprints (1600-bit Keccak state,
+AES key schedule, NTT polynomial arrays) or algorithmic structures
+(multi-phase KEM protocol) that don't map cleanly to core registers.
+
+**Micro-cores:** All EXT.CRYPTO instructions trap as `ILLEGAL_OP`.
+Micro-cores continue to use MMIO paths (or don't do crypto at all).
+
+**Per-core area cost:**
+
+| Unit | Gates/core | LUTs (est., 7-series) |
+|------|-----------|----------------------|
+| CRC32/CRC64 | ~2,500 | ~40 |
+| SHA-2 unified (256/384/512) | ~30,000 | ~500 |
+| Field ALU (multi-prime) | ~45,000 | ~750 + DSP48 |
+| Decode delta | ~3,000 | ~50 |
+| **Total per core** | **~80,500** | **~1,340 + DSP48** |
+| **× 4 full cores** | **~322,000** | **~5,360 + DSP48** |
+
+For comparison: ARM's Crypto Extension adds ~50K gates/core (AES+SHA
+only).  The Field ALU is the largest single unit (~45K) but it already
+exists — we're moving it, not creating it.  The shared MMIO register
+interfaces (~3K gates each) are eliminated.  Net SoC delta is modest.
+
+---
+
+### B.1  EXT Prefix Slot Map (Updated)
+
+```
+F0  EXT.IMM64      (pre-existing)
+F1  REX.S           source reg high bit           [committed]
+F2  REX.D           dest reg high bit             [committed]
+F3  REX.DS          both src + dest hi            [committed]
+F4  REX.N           nibble reg high bit           [committed]
+F5  REX.ND          nibble + dest hi              [committed]
+F6  EXT.SKIP        (pre-existing)
+F7  —               (free — reserved)
+F8  EXT.ETALU       (pre-existing)
+F9  EXT.STRING      block-move/fill/compare       [committed, §2]
+FA  EXT.DICT        dictionary search             [committed, §3]
+FB  EXT.CRYPTO      per-core crypto ops           [proposed, Appendix B]
+FC  —               (free)
+FD  —               (free)
+FE  —               (free)
+FF  —               (free)
+```
+
+**Budget:** 3 pre-existing + 5 REX + 2 committed + **1 proposed** = 11 used, **5 free**.
+
+---
+
+### B.2  Encoding: EXT.CRYPTO (prefix FB)
+
+Two- or three-byte instructions: `FB <sub-op>` or `FB <sub-op> <arg>`.
+
+The sub-op byte is divided into groups:
+
+```
+sub-op [7:4] = crypto unit:
+    0x0_  CRC
+    0x1_  SHA-2 (unified 256/384/512)
+    0x2_  Field ALU
+    0x3_–0xF_  reserved (future: AES-round, etc.)
+
+sub-op [3:0] = operation within unit
+```
+
+---
+
+### B.3  CRC Instructions (sub-ops 0x00–0x0F)
+
+CRC state is a new per-core 64-bit CSR: **CRC_ACC** at CSR address
+**0x80**.  This replaces the entire MMIO CRC device for cores that
+have the crypto ISA extension.
+
+| Encoding | Mnemonic | Bytes | Cycles | Description |
+|----------|----------|-------|--------|-------------|
+| `FB 00` | **CRC.INIT** | 2 | 1 | `CRC_ACC ← 0xFFFF_FFFF` (CRC32 init).  Clears state. |
+| `FB 01 DR` | **CRC.B Rd, Rs** | 3 | 1 | Feed byte: `CRC_ACC ← crc_step(CRC_ACC, R[s][7:0])`.  Rd ← `CRC_ACC` (updated value). |
+| `FB 02 DR` | **CRC.Q Rd, Rs** | 3 | 1 | Feed 8 bytes: `CRC_ACC ← crc_step×8(CRC_ACC, R[s][63:0])`.  Rd ← `CRC_ACC`. |
+| `FB 03 DR` | **CRC.FIN Rd, Rs** | 3 | 1 | Finalize: `Rd ← CRC_ACC ^ mask`.  (mask = `0xFFFF_FFFF` for CRC32/C, all-ones for CRC64). |
+| `FB 04 imm8` | **CRC.MODE imm8** | 3 | 1 | Set polynomial: `imm8[1:0]`: 0=CRC32, 1=CRC32C, 2=CRC64-ECMA.  Latches polynomial for subsequent CRC ops. |
+| `FB 05`–`0F` | *(reserved)* | | | |
+
+**CRC_MODE** is a 2-bit per-core register (alongside CRC_ACC).  Default
+after reset: mode=0 (CRC32), CRC_ACC=0xFFFFFFFF.
+
+**Pipeline:** Pure combinational.  CRC.B uses an 8-bit lookup table
+(~40 LUTs).  CRC.Q uses an 8-byte-wide parallel CRC circuit (~300 LUTs).
+No stalling — result available same cycle.
+
+**New CSRs:**
+
+| CSR Addr | Name | Width | R/W | Description |
+|----------|------|-------|-----|-------------|
+| `0x80` | **CRC_ACC** | 64 | RW | Running CRC accumulator |
+| `0x81` | **CRC_MODE** | 2 | RW | Polynomial select (0/1/2) |
+
+**Flags:** None modified.
+
+**Example — CRC32 of a 512-byte sector:**
+
+```asm
+CRC.MODE  0           ; FB 04 00 — select CRC32
+CRC.INIT              ; FB 00    — init to 0xFFFFFFFF
+; R4 = src address, R5 = 64 (iterations for 512 bytes / 8 bytes each)
+.loop:
+    LDN  R6, R4       ; load 8 bytes
+    CRC.Q R6, R6      ; FB 02 66 — feed 8 bytes, result in R6
+    ADDI R4, 8
+    DEC  R5
+    BR.NE .loop
+CRC.FIN R0, R0        ; FB 03 00 — finalize into R0
+; R0 = CRC32 of sector
+```
+
+64 iterations × 1 cycle = 64 cycles for 512 bytes (vs ~118 cycles
+via MMIO: 64 × ~1.85 cycles/write including bus overhead).
+
+---
+
+### B.4  SHA-2 Instructions (sub-ops 0x10–0x1F)
+
+#### State mapping
+
+SHA-2 working state is 8 words (a–h).  For SHA-256 these are 32-bit;
+for SHA-384/512 they are 64-bit.  State maps to the **256-bit
+accumulator** (ACC0–ACC3) plus **R16–R19** (4 GPRs):
+
+| Register | SHA-256 | SHA-512/384 |
+|----------|---------|-------------|
+| ACC0 | `{h, g, f, e}` (4 × 32-bit packed) | `{b, a}` (2 × 64-bit) |
+| ACC1 | `{d, c, b, a}` (4 × 32-bit packed) | `{d, c}` (2 × 64-bit) |
+| ACC2 | *(unused, zeroed)* | `{f, e}` (2 × 64-bit) |
+| ACC3 | *(unused, zeroed)* | `{h, g}` (2 × 64-bit) |
+
+SHA-256 packs all 8 × 32-bit working variables into ACC0–ACC1 (256
+bits).  SHA-512 uses the full 4 × 64-bit = 256 bits across ACC0–ACC3,
+with the upper 4 working variables (e–h) in ACC2–ACC3.
+
+#### Message schedule
+
+The 16-word message schedule W[0..15] lives in **tile memory** at the
+address given by TSRC0 CSR.  For SHA-256 this is 64 bytes (one tile).
+For SHA-512 this is 128 bytes (two tiles, TSRC0 and TSRC0+64).
+
+The CPU's SHA-2 unit reads W entries from tile memory during round
+execution — no separate load step needed.
+
+#### Instructions
+
+| Encoding | Mnemonic | Bytes | Cycles | Description |
+|----------|----------|-------|--------|-------------|
+| `FB 10 imm8` | **SHA.INIT imm8** | 3 | 2 | Init hash state: `imm8[1:0]` selects mode (0=SHA-256, 1=SHA-384, 2=SHA-512).  Loads FIPS 180-4 IV into ACC0–ACC3.  Sets internal mode register. |
+| `FB 11` | **SHA.ROUND** | 2 | 64/80 | Execute full compression: run 64 rounds (SHA-256) or 80 rounds (SHA-384/512) over message block at M[TSRC0].  Updates ACC0–ACC3 with intermediate hash.  Includes W schedule expansion. |
+| `FB 12` | **SHA.PAD** | 2 | 2–3 | Apply FIPS 180-4 padding to partial block at M[TSRC0].  R0 = byte count in current block.  Writes pad bytes + 64/128-bit length to tile memory.  If two-block pad needed, sets C flag (caller must SHA.ROUND the first block, then SHA.ROUND the pad block). |
+| `FB 13 DR` | **SHA.DIN Rd, Rs** | 3 | 1 | Append R[s][7:0] to message buffer at M[TSRC0 + R0].  R0 incremented.  If R0 reaches block size (64 or 128), auto-triggers SHA.ROUND and resets R0=0. |
+| `FB 14 DR` | **SHA.DOUT Rd, Rs** | 3 | 1 | Read digest word: `Rd ← ACC_word[R[s] & 7]`.  Index 0–7 selects working variable a–h (i.e. the accumulated hash, big-endian word order). |
+| `FB 15` | **SHA.FINAL** | 2 | 66–83 | Convenience: SHA.PAD + SHA.ROUND (+ second SHA.ROUND if two-block pad).  On completion, ACC0–ACC3 hold the final digest.  R0 preserved from before call. |
+| `FB 16`–`1F` | *(reserved)* | | | Future: HMAC helpers, etc. |
+
+**New CSRs:**
+
+| CSR Addr | Name | Width | R/W | Description |
+|----------|------|-------|-----|-------------|
+| `0x82` | **SHA_MODE** | 2 | RW | 0=SHA-256, 1=SHA-384, 2=SHA-512 |
+| `0x83` | **SHA_MSGLEN** | 128 | RW | Total message length in bits (for padding).  Two 64-bit CSR reads/writes (0x83 = low, 0x84 = high). |
+| `0x84` | **SHA_MSGLEN_HI** | 64 | RW | Upper 64 bits of message length |
+
+**Pipeline:** CPU enters `CPU_SHA` stall state on SHA.ROUND / SHA.FINAL.
+The SHA sub-module reads W entries from tile memory via the CPU's
+internal memory port (no bus contention — tile memory is per-core BRAM).
+At 1 round/cycle: SHA-256 = 64 cycles, SHA-512 = 80 cycles.
+
+**Flags:**
+- SHA.PAD: C=1 if two-block pad required (message must be compressed
+  before final pad block).
+- SHA.ROUND: Z=1 when complete (always, as confirmation).
+- SHA.INIT/DOUT/DIN: no flags modified.
+
+**Example — SHA-256 of a 512-byte buffer:**
+
+```asm
+SHA.INIT 0             ; FB 10 00 — SHA-256 mode, load IV
+; R4 = source address, R5 = 8 (blocks = 512/64)
+.loop:
+    ; Copy 64 bytes from M[R4] to tile at TSRC0
+    ; (use CMOVE or tile LOADC)
+    SHA.ROUND          ; FB 11 — 64 rounds, updates ACC
+    ADDI R4, 64
+    DEC  R5
+    BR.NE .loop
+SHA.FINAL              ; FB 15 — pad + final round(s)
+SHA.DOUT R0, R0        ; FB 14 00 — read word 0 of digest
+; ACC0–ACC1 hold the full 32-byte digest
+```
+
+8 blocks × 64 cycles + ~68 cycles (final) = ~580 cycles for 512 bytes.
+Via MMIO: 512 byte-writes × ~3 cycles + 64 round-cycles + control
+overhead ≈ ~1,600 cycles.  **~2.8× speedup.**
+
+---
+
+### B.5  Field ALU Instructions (sub-ops 0x20–0x2F)
+
+#### State mapping
+
+All Field ALU operands and results are 256-bit.  They map to:
+
+- **Operand A:** ACC0–ACC3 (write ACC CSRs before issuing instruction)
+- **Operand B:** Tile memory at M[TSRC0] (32 bytes, low half of tile)
+- **Result:** Written back to ACC0–ACC3
+
+For `MUL_RAW` (256×256→512-bit), the high 256 bits go to M[TDST]
+(32 bytes).
+
+#### Instructions
+
+| Encoding | Mnemonic | Bytes | Cycles | Description |
+|----------|----------|-------|--------|-------------|
+| `FB 20` | **GF.ADD** | 2 | 1 | `ACC ← (ACC + M[TSRC0]) mod p` |
+| `FB 21` | **GF.SUB** | 2 | 1 | `ACC ← (ACC − M[TSRC0]) mod p` |
+| `FB 22` | **GF.MUL** | 2 | 1–4 | `ACC ← (ACC × M[TSRC0]) mod p`.  1 cycle for built-in primes, 4 for custom (Montgomery REDC). |
+| `FB 23` | **GF.SQR** | 2 | 1–4 | `ACC ← ACC² mod p` |
+| `FB 24` | **GF.INV** | 2 | ~767 | `ACC ← ACC^(p−2) mod p` (Fermat's little theorem) |
+| `FB 25` | **GF.POW** | 2 | ~767 | `ACC ← ACC^(M[TSRC0]) mod p` (binary method, exponent from tile) |
+| `FB 26` | **GF.MULR** | 2 | 1 | Raw 256×256→512: `{M[TDST], ACC} ← ACC × M[TSRC0]` (no reduction) |
+| `FB 27` | **GF.MAC** | 2 | 1–4 | `ACC ← (ACC_prev + operand_a × M[TSRC0]) mod p`.  Uses internally latched previous ACC for accumulate. |
+| `FB 28` | **GF.MACR** | 2 | 1 | Raw MAC: `{M[TDST], ACC} ← prev_512 + ACC × M[TSRC0]` |
+| `FB 29` | **GF.CMOV Rd** | 3 | 1 | Constant-time conditional move: if `R[d] != 0`, ACC ← M[TSRC0]; else ACC unchanged.  No flags, no branch — constant-time for side-channel resistance. |
+| `FB 2A` | **GF.CEQ** | 2 | 1 | Constant-time equality: Z=1 if ACC == M[TSRC0], Z=0 otherwise.  Constant-time (no early-exit). |
+| `FB 2B imm8` | **GF.PRIME imm8** | 3 | 1 | Select prime: `imm8[1:0]` = 0: Curve25519 (2²⁵⁵−19), 1: secp256k1, 2: P-256 (NIST), 3: custom.  Latches reduction mode. |
+| `FB 2C` | **GF.LDPRIME** | 2 | 1 | Load custom prime: `p ← ACC`, `p_inv ← M[TSRC0]`.  For Montgomery REDC with `prime_sel=3`. |
+| `FB 2D` | **GF.X25519** | 2 | ~4335 | Full X25519 scalar multiply (RFC 7748): scalar from ACC, u-coordinate from M[TSRC0].  Result → ACC.  Forces `prime_sel=0` internally. |
+| `FB 2E`–`2F` | *(reserved)* | | | |
+
+**New CSRs:**
+
+| CSR Addr | Name | Width | R/W | Description |
+|----------|------|-------|-----|-------------|
+| `0x85` | **GF_PRIME_SEL** | 2 | RW | Active prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
+
+**Pipeline:** Single-cycle ops (GF.ADD/SUB/MUL with built-in primes) are
+combinational — no stall.  Multi-cycle ops (GF.INV, GF.POW, GF.X25519,
+GF.MUL with custom prime) enter `CPU_GFALU` stall state.  The sub-module
+reads operand B from tile memory via the CPU's internal port (same
+mechanism as SHA.ROUND).
+
+**Flags:**
+- GF.CEQ: Z flag (constant-time).
+- All others: no flags modified (crypto operations should not leak
+  information through flags).
+
+**Example — X25519 key exchange:**
+
+```asm
+; R0 = pointer to 32-byte private key
+; R1 = pointer to 32-byte peer public key (u-coordinate)
+; Load scalar into ACC0–ACC3
+LDN R4, R0         ; load 8 bytes
+CSRW ACC0, R4
+ADDI R0, 8
+LDN R4, R0
+CSRW ACC1, R4
+ADDI R0, 8
+LDN R4, R0
+CSRW ACC2, R4
+ADDI R0, 8
+LDN R4, R0
+CSRW ACC3, R4
+; Set TSRC0 to peer public key
+CSRW TSRC0, R1
+; Execute X25519
+GF.X25519           ; FB 2D — ~4335 cycles
+; Result in ACC0–ACC3 (32-byte shared secret)
+CSRR R4, ACC0
+STR  R8, R4        ; store to output buffer
+; ... store ACC1–ACC3 similarly
+```
+
+~4,335 cycles total.  Via MMIO: same compute + ~56 cycles MMIO overhead
+(8 writes operand_a + 8 writes operand_b + 1 write CMD + 8 reads result +
+polling) ≈ ~4,391 cycles.  Modest savings for X25519 itself (compute-
+dominated), but GF.MUL/GF.ADD in inner loops of Ed25519 signature
+verification save ~3 cycles per operation — significant across hundreds
+of field ops per signature.
+
+---
+
+### B.6  Complete EXT.CRYPTO Sub-Op Map
+
+| Range | Unit | Count | Status |
+|-------|------|-------|--------|
+| `0x00–0x0F` | CRC32/CRC64 | 5 used, 11 reserved | Proposed |
+| `0x10–0x1F` | SHA-2 (256/384/512) | 7 used, 9 reserved | Proposed |
+| `0x20–0x2F` | Field ALU (multi-prime) | 14 used, 2 reserved | Proposed |
+| `0x30–0xFF` | *(free — 208 slots)* | | Future |
+
+**Total new instructions: 26** (5 CRC + 7 SHA-2 + 14 Field ALU).
+
+---
+
+### B.7  New CSR Summary
+
+| CSR Addr | Name | Width | R/W | Description |
+|----------|------|-------|-----|-------------|
+| `0x80` | CRC_ACC | 64 | RW | Running CRC accumulator |
+| `0x81` | CRC_MODE | 2 | RW | Polynomial select |
+| `0x82` | SHA_MODE | 2 | RW | SHA-2 algorithm select |
+| `0x83` | SHA_MSGLEN | 64 | RW | Message length (low) |
+| `0x84` | SHA_MSGLEN_HI | 64 | RW | Message length (high) |
+| `0x85` | GF_PRIME_SEL | 2 | RW | Active field prime |
+
+CSR range 0x80–0x8F reserved for crypto.  6 used, 10 free.
+
+---
+
+### B.8  Instruction Length Summary (Crypto Additions)
+
+| Instruction | Encoding | Bytes | +REX |
+|-------------|----------|-------|------|
+| CRC.INIT | FB 00 | 2 | — |
+| CRC.B | FB 01 DR | 3 | 4 |
+| CRC.Q | FB 02 DR | 3 | 4 |
+| CRC.FIN | FB 03 DR | 3 | 4 |
+| CRC.MODE | FB 04 imm8 | 3 | — |
+| SHA.INIT | FB 10 imm8 | 3 | — |
+| SHA.ROUND | FB 11 | 2 | — |
+| SHA.PAD | FB 12 | 2 | — |
+| SHA.DIN | FB 13 DR | 3 | 4 |
+| SHA.DOUT | FB 14 DR | 3 | 4 |
+| SHA.FINAL | FB 15 | 2 | — |
+| GF.ADD | FB 20 | 2 | — |
+| GF.SUB | FB 21 | 2 | — |
+| GF.MUL | FB 22 | 2 | — |
+| GF.SQR | FB 23 | 2 | — |
+| GF.INV | FB 24 | 2 | — |
+| GF.POW | FB 25 | 2 | — |
+| GF.MULR | FB 26 | 2 | — |
+| GF.MAC | FB 27 | 2 | — |
+| GF.MACR | FB 28 | 2 | — |
+| GF.CMOV | FB 29 DR | 3 | 4 |
+| GF.CEQ | FB 2A | 2 | — |
+| GF.PRIME | FB 2B imm8 | 3 | — |
+| GF.LDPRIME | FB 2C | 2 | — |
+| GF.X25519 | FB 2D | 2 | — |
+
+Most crypto instructions are 2-byte (prefix + sub-op), with no register
+operand — they implicitly use ACC and tile memory.  This is deliberate:
+crypto operations are high-latency and operate on wide data, so the
+2-register-nibble encoding space isn't useful.  Data is staged via
+CSR writes and tile loads.
+
+---
+
+### B.9  MMIO Migration Plan
+
+When the ISA extension is implemented, the shared MMIO peripherals for
+CRC, SHA-256, and Field ALU become **redundant for full cores**.  The
+migration is:
+
+| Phase | Action |
+|-------|--------|
+| **1 — Coexistence** | Both MMIO and ISA paths exist.  BIOS crypto words detect core type (full vs micro) and dispatch accordingly.  Full cores use ISA; micro-cores use MMIO (via bus). |
+| **2 — MMIO deprecation** | Once all crypto BIOS words use ISA on full cores, the shared MMIO instances are only needed for micro-cores (if they do crypto at all).  If they don't, the MMIO blocks can be removed entirely. |
+| **3 — Area recovery** | Removing shared CRC + SHA-256 + Field ALU MMIO blocks saves ~8K gates + MMIO bus decode logic.  This partially offsets the per-core replication cost. |
+
+**MMIO addresses freed:**
+
+| Range | Former Peripheral | New Status |
+|-------|-------------------|------------|
+| 0x840–0x87F | Field ALU | Free (or retained for micro-core access) |
+| 0x940–0x9BF | SHA-256/384/512 | Free (or retained for micro-core access) |
+| 0xA00–0xA1F | CRC | Free (or retained for micro-core access) |
+
+The WOTS+ chain accelerator (§7, MMIO 0x8A0) remains shared — it's a
+DMA-driven sequencer that chains SHA-3 rounds, not something that maps
+to a core instruction.
+
+---
+
+### B.10  Topology Table (Updated)
+
+| Category | Current | Proposed | Rationale |
+|----------|---------|----------|-----------|
+| CRC32/CRC64 | Shared MMIO (1 instance) | **Per-core ISA (EXT.CRYPTO)** | 1-cycle combinational; bus latency dominates |
+| SHA-256/384/512 | Shared MMIO (1 instance) | **Per-core ISA (EXT.CRYPTO)** | 64–80 round compute; parallel TLS needs per-core |
+| Field ALU | Shared MMIO (1 instance) | **Per-core ISA (EXT.CRYPTO)** | Inner-loop field ops in Ed25519/X25519; 3-cycle bus overhead per op is 4× the compute |
+| AES-256-GCM | Shared MMIO | Shared MMIO | Large key schedule; AES-NI style would need 240-byte state per core |
+| SHA-3/SHAKE | Shared MMIO | Shared MMIO | 1600-bit Keccak state doesn't fit core registers |
+| NTT | Shared MMIO | Shared MMIO | Polynomial array in dedicated BRAM |
+| KEM | Shared MMIO | Shared MMIO | Multi-phase protocol atop NTT + SHA-3 |
+| WOTS+ chain | Shared MMIO | Shared MMIO | DMA sequencer chaining SHA-3 |
+| TRNG | Shared MMIO | Shared MMIO | Noise source is inherently singular |
+| String engine | Per-core ISA (F9) | Per-core ISA (F9) | No change |
+| Dict search | Per-core ISA (FA) | Per-core ISA (FA) | No change |
+| Bitfield ops | Per-core ISA (C8–CF) | Per-core ISA (C8–CF) | No change |
+
+---
+
+### B.11  Emulator Dispatch Reference (Crypto)
+
+```python
+# --- EXT.CRYPTO (FB) ---
+# ibuf[0]=FB, ibuf[1]=sub_op, ibuf[2]=DR (if 3-byte)
+elif ext_op == 0xFB:
+    sub = ibuf[1]
+    unit = (sub >> 4) & 0xF
+    op   = sub & 0xF
+
+    if unit == 0x0:  # --- CRC ---
+        if op == 0x0:    # CRC.INIT
+            crc_acc = 0xFFFFFFFF if crc_mode < 2 else 0xFFFFFFFFFFFFFFFF
+        elif op == 0x1:  # CRC.B
+            rd, rs = decode_DR(ibuf[2])
+            crc_acc = crc_update_byte(crc_acc, R[rs] & 0xFF, crc_mode)
+            R[rd] = crc_acc
+        elif op == 0x2:  # CRC.Q
+            rd, rs = decode_DR(ibuf[2])
+            for i in range(8):
+                crc_acc = crc_update_byte(crc_acc, (R[rs] >> (i*8)) & 0xFF, crc_mode)
+            R[rd] = crc_acc
+        elif op == 0x3:  # CRC.FIN
+            rd, rs = decode_DR(ibuf[2])
+            mask = 0xFFFFFFFF if crc_mode < 2 else 0xFFFFFFFFFFFFFFFF
+            R[rd] = crc_acc ^ mask
+        elif op == 0x4:  # CRC.MODE
+            crc_mode = ibuf[2] & 0x03
+
+    elif unit == 0x1:  # --- SHA-2 ---
+        if op == 0x0:    # SHA.INIT
+            sha_mode = ibuf[2] & 0x03
+            load_sha_iv(sha_mode)   # → ACC0–ACC3
+            sha_msglen = 0
+        elif op == 0x1:  # SHA.ROUND
+            W = read_tile_as_words(TSRC0, sha_mode)
+            sha_compress(ACC, W, sha_mode)  # 64 or 80 rounds
+        elif op == 0x2:  # SHA.PAD
+            sha_pad(TSRC0, R[0], sha_msglen, sha_mode)
+        elif op == 0x5:  # SHA.FINAL
+            sha_pad_and_compress(TSRC0, R[0], sha_msglen, sha_mode)
+        # ... SHA.DIN, SHA.DOUT similarly
+
+    elif unit == 0x2:  # --- Field ALU ---
+        B = read_256bit_from_tile(TSRC0)
+        A = (ACC3 << 192) | (ACC2 << 128) | (ACC1 << 64) | ACC0
+        if op == 0x0:    # GF.ADD
+            store_acc(field_add(A, B, prime))
+        elif op == 0x1:  # GF.SUB
+            store_acc(field_sub(A, B, prime))
+        elif op == 0x2:  # GF.MUL
+            store_acc(field_mul(A, B, prime))
+        elif op == 0x3:  # GF.SQR
+            store_acc(field_mul(A, A, prime))
+        elif op == 0x4:  # GF.INV
+            store_acc(field_inv(A, prime))
+        elif op == 0x5:  # GF.POW
+            store_acc(field_pow(A, B, prime))
+        elif op == 0x6:  # GF.MULR
+            result_512 = A * B
+            store_acc(result_512 & MASK256)
+            write_256bit_to_tile(TDST, result_512 >> 256)
+        elif op == 0xD:  # GF.X25519
+            store_acc(x25519(A, B))
+        # ... etc.
+```
+
+*(Pseudocode — actual implementation will use proper 256-bit arithmetic,
+REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
+
+---
+
+### B.12  Open Questions
+
+1. **SHA-2 W schedule location:** This spec uses TSRC0 (tile memory)
+   for the message block.  Alternative: use a dedicated 128-byte
+   internal buffer (avoids tying up a tile slot during hashing).
+   **Recommendation:** TSRC0 — it's already there, doesn't need new
+   BRAM, and hashing rarely coincides with tile compute.  If it does,
+   caller saves/restores TSRC0.
+
+2. **CRC.Q byte order:** Should CRC.Q process R[s] bytes in LE order
+   (byte 0 = bits 7:0 first) or memory order?  **Recommendation:** LE
+   (native word order) — matches `LDN` which loads LE from memory.
+   Software that needs big-endian CRC can BSWAP first.
+
+3. **Field ALU DSP48 sharing:** Each core gets its own 256×256
+   multiplier, which is the biggest resource cost (~40 DSP48 per core,
+   ~160 total for 4 cores).  Alternative: share a single multiplier
+   with round-robin access (saves ~120 DSP48 but adds 3-cycle latency
+   per field op and serialises cores).  **Recommendation:** Per-core —
+   the whole point of moving into the core is avoiding contention.
+   If DSP48 budget is tight, the multiplier can be time-shared within
+   a single core (the SHA unit doesn't need it simultaneously).
+
+4. **AES-round instruction (future):** AES has the largest state
+   (key schedule) but a single AES round instruction (`AESENC`,
+   `AESDEC`, like x86 AES-NI) operating on a 128-bit state in
+   ACC0–ACC1 with a round key from tile memory is feasible.  This
+   would allow software-scheduled AES with ~14 AESENC instructions
+   per block.  Deferred to a future appendix — the key schedule
+   management adds software complexity.
+
+5. **Interrupt behaviour during long operations:** GF.INV (~767
+   cycles), GF.X25519 (~4335 cycles) — should these be interruptible?
+   **Recommendation:** No.  These are the same order of magnitude as
+   a SHA-3 Keccak-f (24 cycles × many absorbs) and the existing MMIO
+   peripherals aren't interruptible either.  If preemption is needed,
+   software breaks the operation into smaller field ops.
+
+---
+
+## Checklist — SoC Hardening Status
+
+### §0 — STXI / STXD.D Instructions + IO OUT Bug Fix
+
+- [x] ISA encoding designed (opcodes 89, 8B)
+- [x] RTL implemented (`mp64_cpu.v` decode bypass)
+- [x] Emulator implemented (`megapad64.py`)
+- [x] Assembler support (`asm.py`)
+- [x] IO OUT bug fixed (LDXA opcode 8F collision)
+- [x] Smoke tests passing
+
+### §1 — SHA-256/384/512 Unified Engine (→ per-core ISA, Appendix B)
+
+- [x] Spec complete (modes, datapath design, area estimate)
+- [ ] RTL: unified `mp64_sha2` datapath (64-bit, 80-round, mode mux)
+- [ ] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module
+- [ ] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15)
+- [ ] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x)
+- [ ] BIOS: crypto words updated to use ISA path (full cores)
+- [ ] MMIO fallback for micro-cores (if needed)
+- [ ] Tests
+
+### §2 — Forth-Aware String Engine (EXT.STRING, prefix F9)
+
+- [x] ISA encoding designed (F9 00–04)
+- [x] RTL implemented (`mp64_string.v`)
+- [x] Emulator implemented (`megapad64.py`)
+- [x] Assembler support
+- [x] BIOS words using hardware: CMOVE, CMOVE>, FILL, MOVE, COMPARE
+- [x] Tests passing
+- [x] C++ accelerator (`mp64_accel.cpp`) — native `exec_string()` (2026-03-09)
+
+### §3 — Forth Dictionary Search Engine (EXT.DICT, prefix FA)
+
+- [x] ISA encoding designed (FA 00–03)
+- [x] RTL implemented (`mp64_dict.v`, 490 lines, 4-way SA, FNV-1a)
+- [x] Emulator implemented (`megapad64.py`, Python dict fallback)
+- [x] BIOS using hardware: `find_word` → DFIND fast path, DINS on miss
+- [x] Tests passing (7 sub-tests)
+- [x] C++ accelerator (`mp64_accel.cpp`) — native `exec_dict()` + dict_table (2026-03-09)
+
+### §4 — Other Accelerator Ideas
+
+**Committed (4e — Bitfield ALU, per-core ISA, C8–CF):**
+
+- [x] 4e. Bitfield ALU — ISA encoding designed (Appendix A.4)
+- [ ] 4e. Bitfield ALU — RTL implementation
+- [ ] 4e. Bitfield ALU — emulator implementation
+- [ ] 4e. Bitfield ALU — C++ accelerator
+- [ ] 4e. Bitfield ALU — tests
+
+**Ideas (not yet committed):**
+
+- [ ] 4a. Crypto Pipeline Orchestrator — idea only
+- [ ] 4b. Hardware Compress/Decompress (Deflate) — idea only
+- [ ] 4c. Pattern Matching / Regex NFA Engine — idea only
+- [ ] 4d. Fixed-Point DSP / FIR Filter — idea only
+- [ ] 4f. Stack-Machine Debug / Trace Unit — idea only
+
+### §5 — Port I/O Bridge (1802 OUT/INP → MMIO)
+
+- [x] Spec complete (7-port remap CSR at 0x880)
+- [x] RTL remap CSR + combinational decode
+- [x] Emulator implemented
+- [x] BIOS port map configured (ports 1–6 assigned)
+- [x] Tests passing
+
+### §7 — WOTS+ Chain Accelerator (MMIO 0x8A0)
+
+- [x] Spec complete (MMIO register map, FSM, cycle budget)
+- [x] RTL spec (`mp64_wots.v`)
+- [x] Emulator implemented
+- [x] BIOS Forth words (WOTS-CHAIN, WOTS-STATUS@)
+- [x] Python tests (8 tests)
+- [x] RTL tests (38/38)
+
+### §8 — MMIO Map
+
+- [x] Map documented and updated
+- [x] Crypto ISA migration annotated (Field ALU, SHA-2, CRC → per-core)
+
+### §9 — Bus Arbiter MMIO/MEM ACK Timeout
+
+- [x] RTL implemented (watchdog counter, `0xDEAD_DEAD` sentinel)
+- [x] Emulator implemented
+- [x] Tests passing
+
+### §10 — BIOS SHA3/WOTS Lock Guards + Diagnostic Words
+
+- [x] C++ accelerator lock/unlock guards
+- [x] BIOS diagnostic words (SHA3-STATUS@, WOTS-STATUS@, etc.)
+- [x] Tests passing (8 tests)
+
+### Appendix A — Pre-Implementation ISA Details
+
+- [x] A.1: EXT prefix slot map (F9, FA, FB allocated)
+- [x] A.2: EXT.STRING encoding spec (F9 00–04)
+- [x] A.3: EXT.DICT encoding spec (FA 00–03)
+- [x] A.4: Bitfield ALU encoding spec (C8–CF)
+- [x] A.5: Complete Family 0xC map
+- [x] A.6: Instruction length summary
+- [x] A.7: Emulator dispatch pseudocode
+
+### Appendix B — Core-Integrated Crypto ISA Extension (EXT.CRYPTO, prefix FB)
+
+- [x] B.0: Rationale + per-core area budget
+- [x] B.1: EXT prefix slot map updated (FB assigned)
+- [x] B.2: Encoding scheme (sub-op high/low nibble split)
+- [x] B.3: CRC ISA spec (5 instructions, 2 new CSRs)
+- [x] B.4: SHA-2 ISA spec (7 instructions, 3 new CSRs)
+- [x] B.5: Field ALU ISA spec (14 instructions, 1 new CSR)
+- [x] B.6: Sub-op map (26 total instructions)
+- [x] B.7: New CSR summary (0x80–0x85)
+- [x] B.8: Instruction length summary
+- [x] B.9: MMIO migration plan (3 phases)
+- [x] B.10: Topology table updated
+- [x] B.11: Emulator dispatch pseudocode
+- [x] B.12: Open questions documented
+- [ ] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
+- [ ] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x)
+- [ ] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x)
+- [ ] RTL: per-core CRC datapath
+- [ ] RTL: per-core SHA-2 datapath
+- [ ] RTL: per-core Field ALU datapath
+- [ ] RTL: instruction decode for FB prefix
+- [ ] C++ accelerator: EXT.CRYPTO dispatch
+- [ ] BIOS: crypto words updated to use ISA path (full cores)
+- [ ] BIOS: fallback to MMIO for micro-cores
+- [ ] MMIO shared instances: deprecation / removal
+- [ ] Tests: CRC ISA
+- [ ] Tests: SHA-2 ISA
+- [ ] Tests: Field ALU ISA
+
+### Overall Progress
+
+| Category | Done | Remaining |
+|----------|------|-----------|
+| Spec / design | 12 | 0 |
+| RTL | 6 | 7 |
+| Emulator (Python) | 5 | 4 |
+| C++ accelerator | 2 | 4 |
+| BIOS | 5 | 3 |
+| Tests | 6 | 4 |
+| **Total** | **36** | **22** |

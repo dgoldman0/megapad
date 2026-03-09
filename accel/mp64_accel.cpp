@@ -143,6 +143,23 @@ struct CPUState {
     // EXT prefix
     int ext_modifier;   // -1 = none
 
+    // EXT.DICT hardware dictionary cache (64 sets × 4 ways)
+    static constexpr int DICT_SETS = 64;
+    static constexpr int DICT_WAYS = 4;
+    static constexpr int DICT_MAX_NAME = 31;
+    struct DictEntry {
+        bool     valid;
+        uint32_t hash;
+        uint8_t  name_len;
+        uint8_t  name[31];  // max 31 bytes (5-bit length)
+        uint64_t xt;
+    };
+    DictEntry dict_table[64][4];  // zero-initialized by default
+
+    void dict_clear_all() {
+        std::memset(dict_table, 0, sizeof(dict_table));
+    }
+
     // Core identity
     uint8_t  core_id;
     uint8_t  num_cores;
@@ -2106,6 +2123,140 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
 }
 
 // ---------------------------------------------------------------------------
+//  EXT.DICT (FA) — native C++ implementation
+// ---------------------------------------------------------------------------
+//  Sub-ops: 00=DFIND, 01=DINS, 02=DDEL, 03=DCLR
+//  Encoding: FA <sub-op> <reg-byte[Rd:4][Rs:4]>
+//  REX extends Rd/Rs to R16-R31 via ext_modifier set before entry.
+//
+//  Hash table: 64 sets × 4 ways, FNV-1a 32-bit hash.
+//  Name is a counted string in memory: 1 byte len (5-bit) + len name bytes.
+
+static inline uint32_t fnv1a_32(const uint8_t* data, size_t len) {
+    uint32_t h = 0x811C9DC5u;
+    for (size_t i = 0; i < len; i++)
+        h = (h ^ data[i]) * 0x01000193u;
+    return h;
+}
+
+// Read a counted-string from guest memory.  Returns name length and cycles.
+static inline int dict_read_name(CPUState& s, const StepCallbacks& cb,
+                                  uint64_t addr, uint8_t* out_name,
+                                  uint8_t& out_len, uint32_t& out_hash) {
+    uint8_t raw_len = sys_read8(s, cb, addr) & 0x1F;  // 5-bit, max 31
+    out_len = raw_len;
+    for (int i = 0; i < raw_len; i++)
+        out_name[i] = sys_read8(s, cb, addr + 1 + i);
+    out_hash = fnv1a_32(out_name, raw_len);
+    return 2 + raw_len;  // 1 len byte + N name bytes + 1 hash cycle
+}
+
+static int exec_dict(CPUState& s, const StepCallbacks& cb) {
+    uint8_t sub_op   = fetch8(s);
+    uint8_t reg_byte = fetch8(s);
+    int rd = (rex_d(s.ext_modifier) << 4) | ((reg_byte >> 4) & 0xF);
+    int rs = (rex_s(s.ext_modifier) << 4) | (reg_byte & 0xF);
+
+    switch (sub_op) {
+
+    case 0x00: { // DFIND — lookup counted-string at R[rs]; R[rd] ← XT if found
+        uint64_t addr = s.regs[rs];
+        uint8_t name[31];
+        uint8_t nlen;
+        uint32_t h;
+        int cycles = dict_read_name(s, cb, addr, name, nlen, h);
+        int set_idx = h & 0x3F;
+        for (int w = 0; w < CPUState::DICT_WAYS; w++) {
+            auto& e = s.dict_table[set_idx][w];
+            if (e.valid && e.hash == h && e.name_len == nlen
+                && std::memcmp(e.name, name, nlen) == 0) {
+                s.regs[rd] = e.xt;
+                s.flag_z = 1;
+                s.flag_v = 0;
+                return cycles;
+            }
+        }
+        s.regs[rd] = 0;
+        s.flag_z = 0;
+        s.flag_v = 0;
+        return cycles;
+    }
+
+    case 0x01: { // DINS — insert name at R[rs] with XT from R[rd]
+        uint64_t addr = s.regs[rs];
+        uint64_t xt   = s.regs[rd];
+        uint8_t name[31];
+        uint8_t nlen;
+        uint32_t h;
+        int cycles = dict_read_name(s, cb, addr, name, nlen, h);
+        int set_idx = h & 0x3F;
+        auto* ways = s.dict_table[set_idx];
+        // Update existing match
+        for (int w = 0; w < CPUState::DICT_WAYS; w++) {
+            auto& e = ways[w];
+            if (e.valid && e.hash == h && e.name_len == nlen
+                && std::memcmp(e.name, name, nlen) == 0) {
+                e.xt = xt;
+                s.flag_z = 1;
+                s.flag_v = 0;
+                return cycles;
+            }
+        }
+        // Insert into first empty way
+        for (int w = 0; w < CPUState::DICT_WAYS; w++) {
+            auto& e = ways[w];
+            if (!e.valid) {
+                e.valid = true;
+                e.hash = h;
+                e.name_len = nlen;
+                std::memcpy(e.name, name, nlen);
+                e.xt = xt;
+                s.flag_z = 1;
+                s.flag_v = 0;
+                return cycles;
+            }
+        }
+        // Set full — overflow
+        s.flag_z = 0;
+        s.flag_v = 1;
+        return cycles;
+    }
+
+    case 0x02: { // DDEL — delete entry matching name at R[rs]
+        uint64_t addr = s.regs[rs];
+        uint8_t name[31];
+        uint8_t nlen;
+        uint32_t h;
+        int cycles = dict_read_name(s, cb, addr, name, nlen, h);
+        int set_idx = h & 0x3F;
+        auto* ways = s.dict_table[set_idx];
+        for (int w = 0; w < CPUState::DICT_WAYS; w++) {
+            auto& e = ways[w];
+            if (e.valid && e.hash == h && e.name_len == nlen
+                && std::memcmp(e.name, name, nlen) == 0) {
+                e.valid = false;
+                e.hash = 0;
+                e.name_len = 0;
+                e.xt = 0;
+                s.flag_z = 1;
+                return cycles;
+            }
+        }
+        s.flag_z = 0;
+        return cycles;
+    }
+
+    case 0x03: { // DCLR — clear entire hash table
+        s.dict_clear_all();
+        return 66;  // ~64 cycles for bulk clear
+    }
+
+    default:
+        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.DICT reserved sub-op");
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  The main step function
 // ---------------------------------------------------------------------------
 
@@ -2132,10 +2283,12 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             s.cycle_count += cycles;
             return cycles;
         }
-        // EXT.DICT (FA) — still falls back to Python
+        // EXT.DICT (FA) — execute natively
         if (n == 0xA) {
-            pc(s) = pc_start;
-            throw std::runtime_error("EXT_ISA_FALLBACK");
+            cycles += exec_dict(s, cb);
+            s.ext_modifier = -1;
+            s.cycle_count += cycles;
+            return cycles;
         }
         s.ext_modifier = n;
         byte0 = fetch8(s);
@@ -2149,11 +2302,12 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             s.cycle_count += cycles;
             return cycles;
         }
-        // REX + EXT.DICT — still falls back to Python
+        // REX + EXT.DICT — execute natively with REX bits active
         if (f == 0xF && n == 0xA) {
-            pc(s) = pc_start;
+            cycles += exec_dict(s, cb);
             s.ext_modifier = -1;
-            throw std::runtime_error("EXT_ISA_FALLBACK");
+            s.cycle_count += cycles;
+            return cycles;
         }
         if (f == 0xF)
             throw std::runtime_error("TRAP:ILLEGAL_OP:Double EXT prefix");
@@ -2898,7 +3052,7 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
                 // throw to Python which handles it
                 throw;
             } else if (what == "EXT_ISA_FALLBACK") {
-                // EXT.STRING (F9) or EXT.DICT (FA) — PC already rewound.
+                // Unhandled EXT ISA op — PC already rewound.
                 // Return to Python to execute this instruction.
                 throw;
             } else {
@@ -2923,6 +3077,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
             auto s = std::make_unique<CPUState>();
             // Default port_map entries to disabled (0xFFFF sentinel)
             for (int i = 0; i < 8; i++) s->port_map[i] = 0xFFFF;
+            // Zero-init dictionary cache
+            s->dict_clear_all();
             return s;
         }))
         .def_readwrite("psel", &CPUState::psel)
@@ -3348,6 +3504,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // ── Accelerator hooks ─────────────────────────────────
         .def("register_accel_hook", &CPUState::register_accel_hook)
         .def_readonly("accel_hook_count", &CPUState::accel_hook_count)
+        // ── Dictionary cache ──────────────────────────────────
+        .def("dict_clear", &CPUState::dict_clear_all)
         ;
 
     // Expose RunResult
