@@ -2415,9 +2415,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 ### §1 — SHA-256/384/512 Unified Engine (→ per-core ISA, Appendix B)
 
 - [x] Spec complete (modes, datapath design, area estimate)
-- [ ] RTL: unified `mp64_sha2` datapath (64-bit, 80-round, mode mux)
-- [ ] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module
-- [ ] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15)
+- [x] RTL: per-core `mp64_sha2_isa` datapath (SHA-256 mode, 64-round) (2026-03-10)
+- [x] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module (2026-03-10)
+- [x] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15) (2026-03-10)
+- [x] RTL: testbench `tb_sha2_isa.v` — 7/7 NIST vectors passing (2026-03-10)
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [x] BIOS: crypto words updated to use ISA path (full cores) (2026-03-10)
 - [ ] MMIO fallback for micro-cores (if needed)
@@ -2528,7 +2529,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [ ] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x)
 - [x] RTL: per-core CRC datapath
-- [ ] RTL: per-core SHA-2 datapath
+- [x] RTL: per-core SHA-2 datapath (mp64_sha2_isa.v + tb, 7/7 NIST) (2026-03-10)
 - [ ] RTL: per-core Field ALU datapath
 - [x] RTL: instruction decode for FB prefix
 - [x] C++ accelerator: EXT.CRYPTO dispatch

@@ -168,7 +168,7 @@ module mp64_sha2_isa (
     // Combinational round computation
     // ========================================================================
     // Current W value for the round
-    wire [31:0] w_cur = W[round_cnt[3:0]];
+    wire [31:0] w_cur_raw = W[round_cnt[3:0]];
 
     // Message schedule expansion: σ1(W[i-2]) + W[i-7] + σ0(W[i-15]) + W[i-16]
     wire [31:0] w_new = small_sigma1(W[(round_cnt[3:0] + 4'd14) & 4'hF]) +
@@ -176,9 +176,13 @@ module mp64_sha2_isa (
                         small_sigma0(W[(round_cnt[3:0] + 4'd1)  & 4'hF]) +
                         W[round_cnt[3:0]];
 
+    // For rounds 0–15, use the original message word.
+    // For rounds 16–63, use the freshly computed expansion (w_new).
+    wire [31:0] w_eff = (round_cnt >= 7'd16) ? w_new : w_cur_raw;
+
     // Round function: T1, T2
     wire [31:0] T1 = wh + big_sigma1(we) + ch(we, wf, wg)
-                   + K(round_cnt[5:0]) + w_cur;
+                   + K(round_cnt[5:0]) + w_eff;
     wire [31:0] T2 = big_sigma0(wa) + maj(wa, wb, wc);
 
     // ========================================================================
