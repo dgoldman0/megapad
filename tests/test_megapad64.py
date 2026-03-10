@@ -2229,6 +2229,191 @@ def test_ext_prefix():
     check("LDI64 R1: full 64-bit immediate", cpu.regs[1] == 0x0102030405060708)
 
 
+def test_crc_isa():
+    """EXT.CRYPTO CRC ISA instructions (FB 00–04)"""
+    print("\n== EXT.CRYPTO CRC ISA (FB 0x) ==")
+
+    # --- CRC.INIT (FB 00) — default mode 0 = CRC32 ---
+    cpu, _ = run_asm("""
+        crc.init
+        halt
+    """)
+    check("CRC.INIT: CRC_ACC = 0xFFFFFFFF", cpu.crc_acc == 0xFFFFFFFF)
+
+    # --- CRC.MODE (FB 04) — select CRC32C ---
+    cpu, _ = run_asm("""
+        crc.mode 1
+        crc.init
+        halt
+    """)
+    check("CRC.MODE 1 + CRC.INIT: CRC_ACC = 0xFFFFFFFF",
+          cpu.crc_acc == 0xFFFFFFFF)
+    check("CRC.MODE 1: crc_mode = 1", cpu.crc_mode == 1)
+
+    # --- CRC.MODE 2 (CRC64) ---
+    cpu, _ = run_asm("""
+        crc.mode 2
+        crc.init
+        halt
+    """)
+    check("CRC.MODE 2 + CRC.INIT: CRC_ACC = 0xFFFFFFFFFFFFFFFF",
+          cpu.crc_acc == 0xFFFFFFFFFFFFFFFF)
+
+    # --- CRC.B (FB 01) — feed one byte (CRC32 mode) ---
+    # CRC32 of single byte 0x00 with init 0xFFFFFFFF
+    # This is pure algorithmic — feed 0x00, get intermediate result
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi r2, 0x00
+        crc.b r1, r2
+        halt
+    """)
+    # Verify R1 = CRC_ACC (both should match)
+    check("CRC.B 0x00: R1 == CRC_ACC", cpu.regs[1] == cpu.crc_acc)
+    # CRC32 of 0x00 with init 0xFFFFFFFF should be a specific value
+    # MSB-first: init=0xFFFFFFFF, XOR 0x00 into top byte → 0xFFFFFFFF
+    # Then 8 shifts: MSB is always 1 for the first 8 iterations
+    # Let's compute: 0xFFFFFFFF with poly 0x04C11DB7
+    # After processing byte 0x00: acc = shift(0xFFFFFFFF) 8 times
+    expected_crc32_0x00 = 0xFFFFFFFF
+    acc = expected_crc32_0x00
+    acc ^= 0x00 << 24  # XOR into top byte — no change since 0x00
+    for _ in range(8):
+        if acc & 0x80000000:
+            acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+        else:
+            acc = (acc << 1) & 0xFFFFFFFF
+    check(f"CRC.B 0x00 result = {acc:#010x}", cpu.regs[1] == acc)
+
+    # --- CRC.B multiple bytes: CRC32 of "A" (0x41) ---
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi r2, 0x41
+        crc.b r1, r2
+        crc.fin r0, r0
+        halt
+    """)
+    # Compute expected CRC32 of single byte 0x41
+    acc = 0xFFFFFFFF
+    acc ^= 0x41 << 24
+    for _ in range(8):
+        if acc & 0x80000000:
+            acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+        else:
+            acc = (acc << 1) & 0xFFFFFFFF
+    expected_final = acc ^ 0xFFFFFFFF
+    check(f"CRC.FIN of 'A' = {expected_final:#010x}",
+          cpu.regs[0] == expected_final,
+          f"got {cpu.regs[0]:#010x}")
+
+    # --- CRC.Q (FB 02) — feed 8 bytes at once ---
+    # Feed 8 zero bytes
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi r2, 0
+        crc.q r1, r2
+        halt
+    """)
+    # Verify against feeding 8 individual 0x00 bytes
+    acc = 0xFFFFFFFF
+    for _ in range(8):
+        acc ^= 0x00 << 24
+        for _ in range(8):
+            if acc & 0x80000000:
+                acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+            else:
+                acc = (acc << 1) & 0xFFFFFFFF
+    check(f"CRC.Q 8×0x00 = {acc:#010x}", cpu.regs[1] == acc,
+          f"got {cpu.regs[1]:#010x}")
+
+    # --- CRC.Q with known data ---
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi64 r2, 0x0102030405060708
+        crc.q r1, r2
+        crc.fin r0, r0
+        halt
+    """)
+    # CRC.Q processes bytes in LE order: byte0=0x08, byte1=0x07, ..., byte7=0x01
+    acc = 0xFFFFFFFF
+    val = 0x0102030405060708
+    for i in range(8):
+        b = (val >> (i * 8)) & 0xFF
+        acc ^= b << 24
+        for _ in range(8):
+            if acc & 0x80000000:
+                acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+            else:
+                acc = (acc << 1) & 0xFFFFFFFF
+    expected_final = acc ^ 0xFFFFFFFF
+    check(f"CRC.Q of 0x0102030405060708 (LE) = {expected_final:#010x}",
+          cpu.regs[0] == expected_final,
+          f"got {cpu.regs[0]:#010x}")
+
+    # --- CRC32C mode (mode 1) ---
+    cpu, _ = run_asm("""
+        crc.mode 1
+        crc.init
+        ldi r2, 0x41
+        crc.b r1, r2
+        crc.fin r0, r0
+        halt
+    """)
+    # CRC32C of 'A' (0x41) with polynomial 0x1EDC6F41
+    acc = 0xFFFFFFFF
+    acc ^= 0x41 << 24
+    for _ in range(8):
+        if acc & 0x80000000:
+            acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x1EDC6F41
+        else:
+            acc = (acc << 1) & 0xFFFFFFFF
+    expected_final = acc ^ 0xFFFFFFFF
+    check(f"CRC32C of 'A' = {expected_final:#010x}",
+          cpu.regs[0] == expected_final,
+          f"got {cpu.regs[0]:#010x}")
+
+    # --- CRC64 mode (mode 2) ---
+    cpu, _ = run_asm("""
+        crc.mode 2
+        crc.init
+        ldi r2, 0x41
+        crc.b r1, r2
+        crc.fin r0, r0
+        halt
+    """)
+    # CRC64 ECMA of 'A' (0x41) with polynomial 0x42F0E1EBA9EA3693
+    acc = 0xFFFFFFFFFFFFFFFF
+    acc ^= 0x41 << 56
+    for _ in range(8):
+        if acc & (1 << 63):
+            acc = ((acc << 1) & 0xFFFFFFFFFFFFFFFF) ^ 0x42F0E1EBA9EA3693
+        else:
+            acc = (acc << 1) & 0xFFFFFFFFFFFFFFFF
+    expected_final = acc ^ 0xFFFFFFFFFFFFFFFF
+    check(f"CRC64 of 'A' = {expected_final:#018x}",
+          cpu.regs[0] == expected_final,
+          f"got {cpu.regs[0]:#018x}")
+
+    # --- CSR read/write for CRC_ACC and CRC_MODE ---
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi r2, 0x41
+        crc.b r1, r2
+        csrr r5, 0x80
+        csrr r6, 0x81
+        halt
+    """)
+    check("CSR read CRC_ACC (0x80) matches CRC.B result",
+          cpu.regs[5] == cpu.regs[1],
+          f"CSR={cpu.regs[5]:#x} vs R1={cpu.regs[1]:#x}")
+    check("CSR read CRC_MODE (0x81) = 0", cpu.regs[6] == 0)
+
+
 def test_fibonacci():
     """Integration: compute fibonacci(10) = 55"""
     print("\n== Integration: Fibonacci ==")
@@ -2936,6 +3121,7 @@ def main():
         test_ext_string,
         test_string_xmem,
         test_ext_dict,
+        test_crc_isa,
         test_fibonacci,
         test_subroutine,
         test_stack_ops,

@@ -232,6 +232,34 @@ module mp64_cpu #(
     );
 
     // ====================================================================
+    // CRC ISA instance (per-core, combinational)
+    // ====================================================================
+    reg  [3:0]  crypto_unit_r, crypto_op_r;
+    reg  [4:0]  crypto_rd_r, crypto_rs_r;
+    reg  [7:0]  crypto_imm_r;
+    reg         crypto_active;
+    reg  [63:0] crc_acc;
+    reg  [1:0]  crc_mode;
+
+    wire [63:0] crc_acc_out, crc_result;
+    wire [1:0]  crc_mode_out;
+    wire        crc_acc_we, crc_mode_we, crc_rd_we;
+
+    mp64_crc_isa u_crc_isa (
+        .op          (crypto_op_r),
+        .rs_val      (R[crypto_rs_r]),
+        .imm8        (crypto_imm_r),
+        .crc_acc_in  (crc_acc),
+        .crc_mode_in (crc_mode),
+        .crc_acc_out (crc_acc_out),
+        .crc_mode_out(crc_mode_out),
+        .result      (crc_result),
+        .acc_we      (crc_acc_we),
+        .mode_we     (crc_mode_we),
+        .rd_we       (crc_rd_we)
+    );
+
+    // ====================================================================
     // Multi-cycle temporaries
     // ====================================================================
     reg [63:0] mem_data;
@@ -432,6 +460,15 @@ module mp64_cpu #(
             bf_b      <= 64'd0;
             bf_imm    <= 6'd0;
             bf_active <= 1'b0;
+
+            crypto_unit_r  <= 4'd0;
+            crypto_op_r    <= 4'd0;
+            crypto_rd_r    <= 5'd0;
+            crypto_rs_r    <= 5'd0;
+            crypto_imm_r   <= 8'd0;
+            crypto_active  <= 1'b0;
+            crc_acc        <= 64'hFFFF_FFFF;
+            crc_mode       <= 2'd0;
 
             mul_result <= 128'd0;
             mul_start_r     <= 1'b0;
@@ -653,6 +690,18 @@ module mp64_cpu #(
                         dict_start_r   <= 1'b1;
                         ext_active     <= 1'b0;
                         cpu_state      <= CPU_DICT;
+                    end else if (nib == EXT_CRYPTO) begin
+                        // EXT.CRYPTO — 2 or 3-byte instruction
+                        //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
+                        //   ibuf[2] = DR or imm8 (3-byte ops only)
+                        crypto_unit_r  <= ibuf[1][7:4];
+                        crypto_op_r    <= ibuf[1][3:0];
+                        crypto_rd_r    <= {rex_d, ibuf[2][7:4]};
+                        crypto_rs_r    <= {rex_s, ibuf[2][3:0]};
+                        crypto_imm_r   <= ibuf[2];
+                        crypto_active  <= 1'b1;
+                        ext_active     <= 1'b0;
+                        cpu_state      <= CPU_EXECUTE;
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -1185,6 +1234,8 @@ module mp64_cpu #(
                                     tile_st_cnt <= 6'd32;
                                 end
                             end
+                            CSR_CRC_ACC:  crc_acc  <= R[nib[2:0]];
+                            CSR_CRC_MODE: crc_mode <= R[nib[2:0]][1:0];
                             CSR_ICACHE_CTRL: begin
                                 icache_enabled <= R[nib[2:0]][0];
                                 if (R[nib[2:0]][1]) icache_inv_all <= 1'b1;
@@ -1243,6 +1294,8 @@ module mp64_cpu #(
                             CSR_DMA_TAIL:    R[nib[2:0]] <= dma_tail;
                             CSR_DMA_STATUS:  R[nib[2:0]] <= dma_status;
                             CSR_DMA_CTRL:    R[nib[2:0]] <= dma_ctrl;
+                            CSR_CRC_ACC:     R[nib[2:0]] <= crc_acc;
+                            CSR_CRC_MODE:    R[nib[2:0]] <= {62'd0, crc_mode};
                             default:         R[nib[2:0]] <= csr_rdata;
                         endcase
                     end
@@ -1277,7 +1330,16 @@ module mp64_cpu #(
             // EXECUTE: ALU / Bitfield writeback
             // ============================================================
             CPU_EXECUTE: begin
-                if (bf_active) begin
+                if (crypto_active) begin
+                    // CRC / crypto writeback
+                    if (crypto_unit_r == 4'd0) begin
+                        if (crc_acc_we)  crc_acc  <= crc_acc_out;
+                        if (crc_mode_we) crc_mode <= crc_mode_out;
+                        if (crc_rd_we)   R[crypto_rd_r] <= crc_result;
+                    end
+                    // SHA-2 / Field ALU stubs — will trap as NOP until implemented
+                    crypto_active <= 1'b0;
+                end else if (bf_active) begin
                     R[dst_reg] <= bf_result;
                     flags[0]   <= bf_flag_z;   // Z
                     flags[2]   <= bf_flag_n;   // N

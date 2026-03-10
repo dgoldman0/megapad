@@ -333,8 +333,8 @@ module mp64_cpu_micro (
                 // EXT prefix (0xF)
                 // --------------------------------------------------------
                 if (fam == FAM_EXT) begin
-                    if (nib == EXT_STRING || nib == EXT_DICT) begin
-                        // EXT.STRING / EXT.DICT not available on micro-cores → ILLEGAL_OP
+                    if (nib == EXT_STRING || nib == EXT_DICT || nib == EXT_CRYPTO) begin
+                        // EXT.STRING / EXT.DICT / EXT.CRYPTO not available on micro-cores → ILLEGAL_OP
                         R[spsel] <= R[spsel] - 64'd8;
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];

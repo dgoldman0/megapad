@@ -1,6 +1,6 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA spec'd — 43/58 items done)  
+Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC vertical slice DONE — 49/58 items done)  
 Last updated: 2026-03-09
 
 ---
@@ -2516,18 +2516,18 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] B.10: Topology table updated
 - [x] B.11: Emulator dispatch pseudocode
 - [x] B.12: Open questions documented
-- [ ] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
+- [x] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
 - [ ] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x)
 - [ ] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x)
-- [ ] RTL: per-core CRC datapath
+- [x] RTL: per-core CRC datapath
 - [ ] RTL: per-core SHA-2 datapath
 - [ ] RTL: per-core Field ALU datapath
-- [ ] RTL: instruction decode for FB prefix
-- [ ] C++ accelerator: EXT.CRYPTO dispatch
+- [x] RTL: instruction decode for FB prefix
+- [x] C++ accelerator: EXT.CRYPTO dispatch
 - [ ] BIOS: crypto words updated to use ISA path (full cores)
 - [ ] BIOS: fallback to MMIO for micro-cores
 - [ ] MMIO shared instances: deprecation / removal
-- [ ] Tests: CRC ISA
+- [x] Tests: CRC ISA
 - [ ] Tests: SHA-2 ISA
 - [ ] Tests: Field ALU ISA
 
@@ -2536,9 +2536,9 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 | Category | Done | Remaining |
 |----------|------|-----------|
 | Spec / design | 12 | 0 |
-| RTL | 6 | 7 |
-| Emulator (Python) | 5 | 4 |
-| C++ accelerator | 2 | 4 |
+| RTL | 9 | 4 |
+| Emulator (Python) | 6 | 3 |
+| C++ accelerator | 3 | 3 |
 | BIOS | 5 | 3 |
-| Tests | 6 | 4 |
-| **Total** | **36** | **22** |
+| Tests | 7 | 3 |
+| **Total** | **42** | **16** |

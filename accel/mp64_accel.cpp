@@ -59,6 +59,8 @@ enum CSR {
     CSR_PERF_CYCLES=0x68, CSR_PERF_STALLS=0x69,
     CSR_PERF_TILEOPS=0x6A, CSR_PERF_EXTMEM=0x6B, CSR_PERF_CTRL=0x6C,
     CSR_ICACHE_CTRL=0x70, CSR_ICACHE_HITS=0x71, CSR_ICACHE_MISSES=0x72,
+    // EXT.CRYPTO CSRs (Appendix B)
+    CSR_CRC_ACC=0x80, CSR_CRC_MODE=0x81,
 };
 
 // IVEC IDs
@@ -159,6 +161,10 @@ struct CPUState {
     void dict_clear_all() {
         std::memset(dict_table, 0, sizeof(dict_table));
     }
+
+    // EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
+    uint64_t crc_acc;   // 64-bit CRC accumulator
+    uint8_t  crc_mode;  // 0=CRC32, 1=CRC32C, 2=CRC64
 
     // Core identity
     uint8_t  core_id;
@@ -706,6 +712,8 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_ICACHE_CTRL: return s.icache_enabled;
         case CSR_ICACHE_HITS: return s.icache_hits;
         case CSR_ICACHE_MISSES:return s.icache_misses;
+        case CSR_CRC_ACC:     return s.crc_acc;
+        case CSR_CRC_MODE:    return s.crc_mode;
         default: return 0;
     }
 }
@@ -759,6 +767,8 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             s.icache_enabled = val & 1;
             if (val & 2) { s.icache_hits = 0; s.icache_misses = 0; s.icache_enabled = 1; }
             break;
+        case CSR_CRC_ACC:  s.crc_acc = val; break;
+        case CSR_CRC_MODE: s.crc_mode = val & 0x03; break;
         default: break;
     }
 }
@@ -2260,6 +2270,107 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
 }
 
 // ---------------------------------------------------------------------------
+//  EXT.CRYPTO (prefix FB) — per-core crypto ISA instructions
+// ---------------------------------------------------------------------------
+
+// CRC polynomials (normal / MSB-first form)
+static constexpr uint32_t CRC32_POLY   = 0x04C11DB7u;
+static constexpr uint32_t CRC32C_POLY  = 0x1EDC6F41u;
+static constexpr uint64_t CRC64_POLY   = 0x42F0E1EBA9EA3693ull;
+
+static inline uint32_t crc_byte_32(uint32_t acc, uint8_t b, uint32_t poly) {
+    acc ^= (uint32_t)b << 24;
+    for (int i = 0; i < 8; i++) {
+        if (acc & 0x80000000u)
+            acc = (acc << 1) ^ poly;
+        else
+            acc <<= 1;
+    }
+    return acc;
+}
+
+static inline uint64_t crc_byte_64(uint64_t acc, uint8_t b, uint64_t poly) {
+    acc ^= (uint64_t)b << 56;
+    for (int i = 0; i < 8; i++) {
+        if (acc & 0x8000000000000000ull)
+            acc = (acc << 1) ^ poly;
+        else
+            acc <<= 1;
+    }
+    return acc;
+}
+
+static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
+    uint8_t sub_op = fetch8(s);
+    int unit = (sub_op >> 4) & 0xF;
+    int op   = sub_op & 0xF;
+
+    if (unit == 0x0) {
+        // --- CRC unit ---
+        bool is64 = (s.crc_mode >= 2);
+        uint32_t poly32 = (s.crc_mode == 1) ? CRC32C_POLY : CRC32_POLY;
+
+        switch (op) {
+        case 0x0: { // CRC.INIT
+            s.crc_acc = is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
+            return 1;
+        }
+        case 0x1: { // CRC.B Rd, Rs — feed one byte
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
+            uint8_t b = (uint8_t)(s.regs[rs] & 0xFF);
+            if (is64)
+                s.crc_acc = crc_byte_64(s.crc_acc, b, CRC64_POLY);
+            else
+                s.crc_acc = crc_byte_32((uint32_t)s.crc_acc, b, poly32);
+            s.regs[rd] = s.crc_acc;
+            return 1;
+        }
+        case 0x2: { // CRC.Q Rd, Rs — feed 8 bytes (LE order)
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
+            uint64_t val = s.regs[rs];
+            if (is64) {
+                uint64_t acc = s.crc_acc;
+                for (int i = 0; i < 8; i++)
+                    acc = crc_byte_64(acc, (uint8_t)(val >> (i * 8)), CRC64_POLY);
+                s.crc_acc = acc;
+            } else {
+                uint32_t acc = (uint32_t)s.crc_acc;
+                for (int i = 0; i < 8; i++)
+                    acc = crc_byte_32(acc, (uint8_t)(val >> (i * 8)), poly32);
+                s.crc_acc = acc;
+            }
+            s.regs[rd] = s.crc_acc;
+            return 1;
+        }
+        case 0x3: { // CRC.FIN Rd, Rs — finalize
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            uint64_t mask = is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
+            s.regs[rd] = s.crc_acc ^ mask;
+            return 1;
+        }
+        case 0x4: { // CRC.MODE imm8
+            uint8_t imm = fetch8(s);
+            s.crc_mode = imm & 0x03;
+            return 1;
+        }
+        default:
+            throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO CRC reserved sub-op");
+        }
+    } else if (unit == 0x1) {
+        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO SHA-2 not yet implemented");
+    } else if (unit == 0x2) {
+        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO Field ALU not yet implemented");
+    } else {
+        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO reserved unit");
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  The main step function
 // ---------------------------------------------------------------------------
 
@@ -2293,6 +2404,13 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             s.cycle_count += cycles;
             return cycles;
         }
+        // EXT.CRYPTO (FB) — execute natively
+        if (n == 0xB) {
+            cycles += exec_crypto(s, cb);
+            s.ext_modifier = -1;
+            s.cycle_count += cycles;
+            return cycles;
+        }
         s.ext_modifier = n;
         byte0 = fetch8(s);
         f = (byte0 >> 4) & 0xF;
@@ -2308,6 +2426,13 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         // REX + EXT.DICT — execute natively with REX bits active
         if (f == 0xF && n == 0xA) {
             cycles += exec_dict(s, cb);
+            s.ext_modifier = -1;
+            s.cycle_count += cycles;
+            return cycles;
+        }
+        // REX + EXT.CRYPTO — execute natively with REX bits active
+        if (f == 0xF && n == 0xB) {
+            cycles += exec_crypto(s, cb);
             s.ext_modifier = -1;
             s.cycle_count += cycles;
             return cycles;
@@ -3137,6 +3262,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             for (int i = 0; i < 8; i++) s->port_map[i] = 0xFFFF;
             // Zero-init dictionary cache
             s->dict_clear_all();
+            // CRC state defaults
+            s->crc_acc = 0xFFFFFFFF;
+            s->crc_mode = 0;
             return s;
         }))
         .def_readwrite("psel", &CPUState::psel)
@@ -3189,6 +3317,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("mpu_base", &CPUState::mpu_base)
         .def_readwrite("mpu_limit", &CPUState::mpu_limit)
         .def_readwrite("ext_modifier", &CPUState::ext_modifier)
+        .def_readwrite("crc_acc", &CPUState::crc_acc)
+        .def_readwrite("crc_mode", &CPUState::crc_mode)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
         .def_readwrite("mem_size", &CPUState::mem_size)

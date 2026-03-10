@@ -85,6 +85,21 @@ DICT_SUB = {
     "dfind": 0x00, "dins": 0x01, "ddel": 0x02, "dclr": 0x03,
 }
 
+# EXT.CRYPTO sub-op map (prefix FB)
+# CRC sub-ops (0x00–0x0F)
+CRYPTO_CRC_SUB = {
+    "crc.init": 0x00, "crc.b": 0x01, "crc.q": 0x02,
+    "crc.fin": 0x03, "crc.mode": 0x04,
+}
+# All EXT.CRYPTO mnemonics that take Rd, Rs operands (3-byte: FB sub DR)
+CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin"}
+# All EXT.CRYPTO mnemonics that take imm8 operand (3-byte: FB sub imm8)
+CRYPTO_IMM_OPS = {"crc.mode"}
+# All EXT.CRYPTO mnemonics with no operand (2-byte: FB sub)
+CRYPTO_BARE_OPS = {"crc.init"}
+# Combined
+CRYPTO_SUB = {**CRYPTO_CRC_SUB}
+
 # ---------------------------------------------------------------------------
 #  Parser helpers
 # ---------------------------------------------------------------------------
@@ -487,6 +502,15 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower in DICT_SUB:
         return 3 + (1 if hi else 0)  # [REX] + FA + sub-op + reg-byte
 
+    # -- EXT.CRYPTO (FB) --
+    if mnem_lower in CRYPTO_SUB:
+        if mnem_lower in CRYPTO_BARE_OPS:
+            return 2  # FB + sub-op (no REX for bare ops)
+        elif mnem_lower in CRYPTO_IMM_OPS:
+            return 3  # FB + sub-op + imm8 (no REX)
+        else:  # CRYPTO_REG_OPS
+            return 3 + (1 if hi else 0)  # [REX] + FB + sub-op + DR
+
     # -- MEX --
     if mnem_lower.startswith("t."):
         sub_name = mnem_lower[2:]
@@ -838,6 +862,31 @@ def _emit_instruction(lineno: int, text: str, pc: int,
                 out.append(rex)
             out.append(0xFA)       # EXT.DICT prefix
             out.append(sub)        # sub-op
+            out.append(((rd & 0xF) << 4) | (rs & 0xF))
+        return out
+
+    # ---- EXT.CRYPTO (0xFB) ----
+    if mnem_lower in CRYPTO_SUB:
+        sub = CRYPTO_SUB[mnem_lower]
+        if mnem_lower in CRYPTO_BARE_OPS:
+            # 2-byte: FB sub (no operands)
+            out.append(0xFB)
+            out.append(sub)
+        elif mnem_lower in CRYPTO_IMM_OPS:
+            # 3-byte: FB sub imm8
+            imm = _parse_imm(ops[0])
+            out.append(0xFB)
+            out.append(sub)
+            out.append(imm & 0xFF)
+        else:
+            # 3-byte with regs: [REX] FB sub DR
+            rd = _parse_reg(ops[0])
+            rs = _parse_reg(ops[1])
+            rex = _rex_byte(rd=rd, rs=rs)
+            if rex is not None:
+                out.append(rex)
+            out.append(0xFB)
+            out.append(sub)
             out.append(((rd & 0xF) << 4) | (rs & 0xF))
         return out
 

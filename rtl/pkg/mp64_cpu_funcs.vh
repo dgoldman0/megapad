@@ -85,6 +85,7 @@ function [3:0] instr_len;
             FAM_MEX:    instr_len = (byte0[3:2] == 2'd1) ? 4'd3 : 4'd2;
             FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3  // EXT.STRING
                                   : (byte0[3:0] == 4'hA) ? 4'd3  // EXT.DICT
+                                  : (byte0[3:0] == 4'hB) ? 4'd3  // EXT.CRYPTO (max 3)
                                   : 4'd1;
             default:    instr_len = 4'd1;
         endcase

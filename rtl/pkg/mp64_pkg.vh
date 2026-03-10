@@ -97,6 +97,7 @@ localparam [3:0] EXT_SKIP   = 4'd6;     // Conditional skip
 localparam [3:0] EXT_ETALU  = 4'd8;     // Extended tile ALU
 localparam [3:0] EXT_STRING = 4'd9;     // EXT.STRING Forth string engine
 localparam [3:0] EXT_DICT   = 4'hA;     // EXT.DICT Forth dictionary engine
+localparam [3:0] EXT_CRYPTO = 4'hB;     // EXT.CRYPTO per-core crypto ISA
 
 // ============================================================================
 // §3 — ALU & CPU FSM Shared Encodings
@@ -120,6 +121,7 @@ localparam [4:0] CPU_MEMALU_RD  = 5'd13; // MEMALU: reading M(R(X))
 localparam [4:0] CPU_STRING     = 5'd14; // EXT.STRING engine stall
 localparam [4:0] CPU_SKIP       = 5'd15; // SKIP: fetch next for length
 localparam [4:0] CPU_DICT       = 5'd16; // EXT.DICT engine stall
+localparam [4:0] CPU_CRYPTO     = 5'd17; // EXT.CRYPTO stall (multi-cycle ops)
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;
@@ -148,6 +150,17 @@ localparam [2:0] BF_BEXT   = 3'd4;   // Tier 2
 localparam [2:0] BF_BDEP   = 3'd5;   // Tier 2
 localparam [2:0] BF_RORI   = 3'd6;   // Tier 2
 localparam [2:0] BF_BSWAP  = 3'd7;   // Tier 2
+
+// --- EXT.CRYPTO CRC sub-op codes (within CRC unit, sub_op[3:0]) ---
+localparam [3:0] ISA_CRC_INIT  = 4'd0;
+localparam [3:0] ISA_CRC_B     = 4'd1;
+localparam [3:0] ISA_CRC_Q     = 4'd2;
+localparam [3:0] ISA_CRC_FIN   = 4'd3;
+localparam [3:0] ISA_CRC_MODEX = 4'd4;   // CRC.MODE (name avoids collision)
+
+// --- EXT.CRYPTO CSR addresses ---
+localparam [7:0] CSR_CRC_ACC  = 8'h80;
+localparam [7:0] CSR_CRC_MODE = 8'h81;
 
 // --- Post-action codes (multi-cycle ops) ---
 localparam [2:0] POST_NONE     = 3'd0;

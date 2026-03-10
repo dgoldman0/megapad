@@ -37,12 +37,13 @@ CORE_SRC = $(CORE)/mp64_alu.v \
            $(CORE)/mp64_string.v \
            $(CORE)/mp64_dict.v \
            $(CORE)/mp64_cpu_micro.v \
-           $(CORE)/mp64_cluster.v
+           $(CORE)/mp64_cluster.v \
+           $(CRYPTO)/mp64_crc_isa.v
 
 .PHONY: all clean phase1 phase2 phase3 phase4 phase5 \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
-        alu bitfield icache cpu_smoke cluster \
+        alu bitfield icache cpu_smoke cluster crc_isa \
         peripherals crypto ntt field_alu kem nic mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke
 
@@ -143,7 +144,7 @@ tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
 # Phase 3: CPU Core, Micro-Core & Cluster
 # ==========================================================================
 
-phase3: alu bitfield icache cpu_smoke cluster cpu_micro opcodes string dict
+phase3: alu bitfield crc_isa icache cpu_smoke cluster cpu_micro opcodes string dict
 	@echo ""
 	@echo "--- Phase 3 complete ---"
 
@@ -161,6 +162,13 @@ bitfield: tb_bitfield.vvp
 tb_bitfield.vvp: tb_bitfield.v $(CORE)/mp64_bitfield.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
+# --- CRC ISA engine ---
+crc_isa: tb_crc_isa.vvp
+	$(VVP) $<
+
+tb_crc_isa.vvp: tb_crc_isa.v $(CRYPTO)/mp64_crc_isa.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
 # --- I-cache ---
 icache: tb_icache.vvp
 	$(VVP) $<
@@ -174,7 +182,7 @@ cpu_smoke: tb_cpu_smoke.vvp
 
 tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                   $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
-                  $(CORE)/mp64_bitfield.v \
+                  $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
                   $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                   $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                   $(MEM)/mp64_memory.v
@@ -203,7 +211,7 @@ opcodes: tb_opcodes.vvp
 
 tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                 $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
-                $(CORE)/mp64_bitfield.v \
+                $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
                 $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                 $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                 $(MEM)/mp64_memory.v
@@ -215,7 +223,8 @@ string: tb_string.vvp
 
 tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
-               $(CORE)/mp64_bitfield.v $(CORE)/mp64_icache.v \
+               $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
+               $(CORE)/mp64_icache.v \
                $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
@@ -226,7 +235,8 @@ dict: tb_dict.vvp
 
 tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
              $(CORE)/mp64_string.v $(CORE)/mp64_alu.v \
-             $(CORE)/mp64_bitfield.v $(CORE)/mp64_icache.v \
+             $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
+             $(CORE)/mp64_icache.v \
              $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
              $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
@@ -327,6 +337,7 @@ multicore_smoke: tb_multicore_smoke.vvp
 tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
                         $(CORE)/mp64_dict.v $(CORE)/mp64_string.v \
                         $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v \
+                        $(CRYPTO)/mp64_crc_isa.v \
                         $(CORE)/mp64_icache.v \
                         $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \

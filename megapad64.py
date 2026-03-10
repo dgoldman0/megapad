@@ -114,6 +114,10 @@ CSR_DMA_CTRL       = 0x55   # DMA control (bit1=reset)
 CSR_QOS_WEIGHT     = 0x58   # Bus arbiter priority weight
 CSR_QOS_BWLIMIT    = 0x59   # Bandwidth limit
 
+# EXT.CRYPTO CSRs (Appendix B)
+CSR_CRC_ACC       = 0x80   # RW: 64-bit running CRC accumulator
+CSR_CRC_MODE      = 0x81   # RW: polynomial select (0=CRC32, 1=CRC32C, 2=CRC64)
+
 # I-Cache CSRs (§12.2)
 CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
 CSR_ICACHE_HITS   = 0x71   # R: hit counter
@@ -444,6 +448,10 @@ class Megapad64:
 
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
+
+        # EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
+        self.crc_acc: int  = 0xFFFF_FFFF  # CRC accumulator
+        self.crc_mode: int = 0            # 0=CRC32, 1=CRC32C, 2=CRC64
 
         # EXT.DICT hardware dictionary hash table (behavioural model)
         # 64 sets × 4 ways.  Each entry:
@@ -825,6 +833,9 @@ class Megapad64:
             CSR_DMA_CTRL:       lambda: self.dma_ctrl,
             CSR_QOS_WEIGHT:     lambda: self.qos_weight,
             CSR_QOS_BWLIMIT:    lambda: self.qos_bwlimit,
+            # EXT.CRYPTO CSRs (Appendix B)
+            CSR_CRC_ACC:        lambda: self.crc_acc,
+            CSR_CRC_MODE:       lambda: self.crc_mode,
         }
         fn = m.get(addr)
         if fn is None:
@@ -880,6 +891,9 @@ class Megapad64:
             CSR_DMA_CTRL:      lambda v: self._dma_ctrl_write(v),
             CSR_QOS_WEIGHT:    lambda v: setattr(self, 'qos_weight', v),
             CSR_QOS_BWLIMIT:   lambda v: setattr(self, 'qos_bwlimit', v),
+            # EXT.CRYPTO CSRs (Appendix B)
+            CSR_CRC_ACC:       lambda v: setattr(self, 'crc_acc', v & 0xFFFF_FFFF_FFFF_FFFF),
+            CSR_CRC_MODE:      lambda v: setattr(self, 'crc_mode', v & 0x03),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -1504,6 +1518,108 @@ class Megapad64:
                 self._dict_table[s][w] = (False, 0, 0, b"", 0)
         return 66  # ~64 cycles for bulk clear
 
+    # -- EXT.CRYPTO (prefix FB) --
+
+    # CRC polynomials (normal / MSB-first form, matching RTL mp64_crc.v)
+    _CRC_POLYS = {
+        0: (0x04C11DB7, 32),          # CRC32 IEEE 802.3
+        1: (0x1EDC6F41, 32),          # CRC32C (Castagnoli)
+        2: (0x42F0E1EBA9EA3693, 64),  # CRC64 ECMA-182
+    }
+
+    @staticmethod
+    def _crc_update_byte(acc: int, byte: int, poly: int, width: int) -> int:
+        """Process one byte through the CRC, MSB-first (matching RTL)."""
+        if width == 64:
+            acc ^= byte << 56
+            for _ in range(8):
+                if acc & (1 << 63):
+                    acc = ((acc << 1) & 0xFFFF_FFFF_FFFF_FFFF) ^ poly
+                else:
+                    acc = (acc << 1) & 0xFFFF_FFFF_FFFF_FFFF
+        else:  # width == 32
+            acc ^= byte << 24
+            for _ in range(8):
+                if acc & (1 << 31):
+                    acc = ((acc << 1) & 0xFFFF_FFFF) ^ poly
+                else:
+                    acc = (acc << 1) & 0xFFFF_FFFF
+        return acc
+
+    def _exec_crypto(self) -> int:
+        """Execute EXT.CRYPTO (FB) instruction.
+
+        Encoding: FB <sub-op> [DR | imm8]
+        sub-op[7:4] = unit: 0=CRC, 1=SHA-2, 2=Field ALU
+        sub-op[3:0] = operation within unit
+        """
+        sub_op = self.fetch8()
+        unit = (sub_op >> 4) & 0xF
+        op = sub_op & 0xF
+
+        if unit == 0x0:
+            return self._exec_crc(op)
+        elif unit == 0x1:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO SHA-2 (FB 1x) not yet implemented")
+        elif unit == 0x2:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO Field ALU (FB 2x) not yet implemented")
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO unit {unit:#x} reserved")
+
+    def _exec_crc(self, op: int) -> int:
+        """CRC sub-ops (FB 00–0F).
+        CRC_ACC (CSR 0x80) and CRC_MODE (CSR 0x81) are per-core state."""
+        poly_info = self._CRC_POLYS.get(self.crc_mode, self._CRC_POLYS[0])
+        poly, width = poly_info
+
+        if op == 0x0:  # CRC.INIT
+            if self.crc_mode >= 2:
+                self.crc_acc = 0xFFFF_FFFF_FFFF_FFFF
+            else:
+                self.crc_acc = 0xFFFF_FFFF
+            return 1
+
+        elif op == 0x1:  # CRC.B Rd, Rs — feed one byte
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            rs = (self._rex_s << 4) | (reg_byte & 0xF)
+            b = self.regs[rs] & 0xFF
+            self.crc_acc = self._crc_update_byte(self.crc_acc, b, poly, width)
+            self.regs[rd] = self.crc_acc & MASK64
+            return 1
+
+        elif op == 0x2:  # CRC.Q Rd, Rs — feed 8 bytes (LE order)
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            rs = (self._rex_s << 4) | (reg_byte & 0xF)
+            val = self.regs[rs]
+            acc = self.crc_acc
+            for i in range(8):
+                b = (val >> (i * 8)) & 0xFF
+                acc = self._crc_update_byte(acc, b, poly, width)
+            self.crc_acc = acc
+            self.regs[rd] = acc & MASK64
+            return 1
+
+        elif op == 0x3:  # CRC.FIN Rd, Rs — finalize
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            mask = 0xFFFF_FFFF_FFFF_FFFF if self.crc_mode >= 2 else 0xFFFF_FFFF
+            self.regs[rd] = (self.crc_acc ^ mask) & MASK64
+            return 1
+
+        elif op == 0x4:  # CRC.MODE imm8
+            imm8 = self.fetch8()
+            self.crc_mode = imm8 & 0x03
+            return 1
+
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO CRC sub-op {op:#x} reserved")
+
     # -- Trap entry --
 
     def _trap(self, ivec: int):
@@ -1559,6 +1675,14 @@ class Megapad64:
                 if self.perf_enable:
                     self.perf_cycles += cycles
                 return cycles
+            if n == 0xB:
+                # EXT.CRYPTO — self-contained 2-or-3-byte instruction
+                cycles += self._exec_crypto()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
             self._ext_modifier = n
             # Re-fetch the actual instruction
             byte0 = self.fetch8()
@@ -1576,6 +1700,14 @@ class Megapad64:
             # REX + FA: second byte is also 0xF family
             if f == 0xF and n == 0xA:
                 cycles += self._exec_dict()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
+            # REX + FB: EXT.CRYPTO with REX prefix
+            if f == 0xF and n == 0xB:
+                cycles += self._exec_crypto()
                 self._ext_modifier = -1
                 self.cycle_count += cycles
                 if self.perf_enable:
