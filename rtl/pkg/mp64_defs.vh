@@ -143,7 +143,7 @@ parameter [11:0] SPINLOCK_BASE = 12'h600; // Hardware spinlocks
 parameter [11:0] AES_BASE     = 12'h700; // AES-256-GCM accelerator
 parameter [11:0] SHA_BASE     = 12'h780; // SHA-3/SHAKE accelerator
 parameter [11:0] SHA256_BASE  = 12'h940; // SHA-256 accelerator
-parameter [11:0] CRC_BASE     = 12'h980; // CRC32/CRC64 accelerator
+// CRC_BASE removed — CRC is now ISA-only (cluster-shared)
 parameter [11:0] RTC_BASE     = 12'hB00; // Real-time clock
 parameter [11:0] QOS_BASE     = 12'h7E0; // QoS global config
 parameter [11:0] X25519_BASE  = 12'h840; // X25519 ECDH accelerator
@@ -458,12 +458,7 @@ parameter [5:0] SHA_DOUT     = 6'h20;  // 64-bit hash out
 parameter [5:0] SHA_RATE     = 6'h28;  // read-only rate
 parameter [5:0] SHA_CTRL     = 6'h29;
 
-// CRC register offsets (from CRC_BASE)
-parameter [4:0] CRC_POLY     = 5'h00;
-parameter [4:0] CRC_INIT     = 5'h04;
-parameter [4:0] CRC_DIN      = 5'h08;
-parameter [4:0] CRC_RESULT   = 5'h10;
-parameter [4:0] CRC_CTRL     = 5'h18;
+// CRC register offsets removed — CRC is now ISA-only (see mp64_crc_isa.v)
 
 // X25519 register offsets (from X25519_BASE)
 // Write: 0x00..0x18 = scalar (4×64), 0x20..0x38 = point (4×64), 0x3F = CMD

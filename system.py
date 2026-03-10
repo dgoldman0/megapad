@@ -26,12 +26,12 @@ from megapad64 import (
 )
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
-    MailboxDevice, SpinlockDevice, CRCDevice, NTTDevice, KemDevice,
+    MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, RTC,
-    MailboxDevice, SpinlockDevice, CRCDevice,
+    MailboxDevice, SpinlockDevice,
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
-    MBOX_BASE, SPINLOCK_BASE, CRC_BASE,
+    MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
     PortBridgeCSR,
     WotsChainAccel,
@@ -363,7 +363,6 @@ class MegapadSystem:
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
         self.spinlock = SpinlockDevice()
-        self.crc = CRCDevice()
         self.ntt = NTTDevice()
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
@@ -389,7 +388,7 @@ class MegapadSystem:
         self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
-        self.bus.register(self.crc)
+        # CRC: no longer MMIO — now ISA-only (per-core / cluster-shared)
         # TRNG: NOT registered — C++ handles all MMIO
         self.bus.register(self.ntt)
         self.bus.register(self.kem)

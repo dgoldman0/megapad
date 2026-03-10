@@ -892,7 +892,7 @@ module mp64_soc #(
     wire mmio_sel_aes    = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01110); // 0x700-0x77F
     wire mmio_sel_sha3   = bus_mmio_req && (mmio_addr_eff[11:7] == 5'b01111)
                                          && (mmio_addr_eff[6:5] != 2'b11);// 0x780-0x7DF (96 bytes)
-    wire mmio_sel_crc    = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100110);// 0x980-0x9BF
+    // CRC MMIO removed — CRC is now per-core ISA (EXT.CRYPTO) / cluster-shared
     wire mmio_sel_trng   = bus_mmio_req && (mmio_addr_eff[11:5] == 7'b1000000);// 0x800-0x81F
     wire mmio_sel_field  = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100001);// 0x840-0x87F
     wire mmio_sel_sha256 = bus_mmio_req && (mmio_addr_eff[11:6] == 6'b100101);// 0x940-0x97F
@@ -1124,21 +1124,7 @@ module mp64_soc #(
         .irq   (sha256_irq)
     );
 
-    wire [63:0] crc_rdata;
-    wire        crc_ack;
-    wire        crc_irq;
-
-    mp64_crc u_crc (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .req   (mmio_sel_crc),
-        .addr  (mmio_addr_eff[4:0]),
-        .wdata (bus_mmio_wdata),
-        .wen   (bus_mmio_wen),
-        .rdata (crc_rdata),
-        .ack   (crc_ack),
-        .irq   (crc_irq)
-    );
+    // CRC MMIO removed — CRC is now ISA-only (per-core / cluster-shared)
 
     wire [63:0] trng_rdata;
     wire        trng_ack;
@@ -1279,7 +1265,6 @@ module mp64_soc #(
         if (mmio_sel_aes)     begin mmio_rdata_mux = aes_rdata;   mmio_ack_mux = aes_ack;   end
         if (mmio_sel_sha3)    begin mmio_rdata_mux = sha3_rdata;  mmio_ack_mux = sha3_ack;  end
         if (mmio_sel_sha256)  begin mmio_rdata_mux = sha256_rdata; mmio_ack_mux = sha256_ack; end
-        if (mmio_sel_crc)     begin mmio_rdata_mux = crc_rdata;   mmio_ack_mux = crc_ack;   end
         if (mmio_sel_trng)    begin mmio_rdata_mux = trng_rdata;  mmio_ack_mux = trng_ack;  end
         if (mmio_sel_field)   begin mmio_rdata_mux = field_rdata; mmio_ack_mux = field_ack; end
         if (mmio_sel_ntt)     begin mmio_rdata_mux = ntt_rdata;   mmio_ack_mux = ntt_ack;   end

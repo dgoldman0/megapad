@@ -382,7 +382,7 @@ localparam [11:0] MBOX_BASE       = 12'h500;
 localparam [11:0] SPINLOCK_BASE   = 12'h600;
 localparam [11:0] AES_BASE        = 12'h700;
 localparam [11:0] SHA_BASE        = 12'h780;
-localparam [11:0] CRC_BASE        = 12'h7C0;
+// CRC_BASE removed — CRC is now ISA-only (cluster-shared)
 localparam [11:0] QOS_BASE        = 12'h7E0;
 localparam [11:0] FIELD_ALU_BASE  = 12'h840;
 localparam [11:0] NTT_BASE        = 12'h8C0;

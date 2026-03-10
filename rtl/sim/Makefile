@@ -257,11 +257,11 @@ tb_peripherals.vvp: tb_peripherals.v $(PERIPH)/mp64_timer.v \
                     $(PERIPH)/mp64_uart.v $(PERIPH)/mp64_disk.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
-# --- Crypto (CRC, SHA-3, AES) ---
+# --- Crypto (SHA-3, AES) ---
 crypto: tb_crypto.vvp
 	$(VVP) $<
 
-tb_crypto.vvp: tb_crypto.v $(PERIPH)/mp64_crc.v \
+tb_crypto.vvp: tb_crypto.v \
                $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_sha256.v $(CRYPTO)/mp64_aes.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 

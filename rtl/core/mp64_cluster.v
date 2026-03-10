@@ -120,9 +120,19 @@ module mp64_cluster #(
     wire [N*64-1:0]     mc_tile_csr_wdata;
     reg  [N*64-1:0]     mc_tile_csr_rdata;
 
-    // Forward-declare MUL and MEX grants (used in generate block)
+    // Per-micro-core CRC wires
+    wire [N-1:0]        mc_crc_req;
+    wire [N*4-1:0]      mc_crc_op;
+    wire [N*64-1:0]     mc_crc_rs_val;
+    wire [N*8-1:0]      mc_crc_imm8;
+    reg  [63:0]         crc_result_reg;
+    reg                 crc_done_reg;
+    reg                 crc_rd_we_reg;
+
+    // Forward-declare MUL, MEX, and CRC grants (used in generate block)
     reg  [ARB_BITS-1:0] mul_grant;
     reg  [ARB_BITS-1:0] mex_grant;
+    reg  [ARB_BITS-1:0] crc_grant;
 
     // ====================================================================
     // Cluster-shared state
@@ -131,6 +141,8 @@ module mp64_cluster #(
     reg [63:0]  cl_mpu_base;
     reg [63:0]  cl_mpu_limit;
     reg [63:0]  cl_ivt_base;
+    reg [63:0]  cl_crc_acc;        // cluster-shared CRC accumulator
+    reg [1:0]   cl_crc_mode;       // cluster-shared CRC mode (0/1/2)
 
     // ====================================================================
     // Unpack per-micro-core address/wdata/size for indexing
@@ -179,6 +191,14 @@ module mp64_cluster #(
                 .mul_b      (mc_mul_b  [gi*64 +: 64]),
                 .mul_result (mul_result_reg),
                 .mul_done   (mul_done_reg && (mul_grant == gi[ARB_BITS-1:0])),
+
+                .crc_req    (mc_crc_req[gi]),
+                .crc_op     (mc_crc_op [gi*4  +: 4]),
+                .crc_rs_val (mc_crc_rs_val[gi*64 +: 64]),
+                .crc_imm8   (mc_crc_imm8 [gi*8  +: 8]),
+                .crc_result (crc_result_reg),
+                .crc_done   (crc_done_reg && (crc_grant == gi[ARB_BITS-1:0])),
+                .crc_rd_we_in(crc_rd_we_reg && (crc_grant == gi[ARB_BITS-1:0])),
 
                 .mex_req       (mc_mex_req[gi]),
                 .mex_ss        (mc_mex_ss       [gi*2  +: 2]),
@@ -239,6 +259,8 @@ module mp64_cluster #(
                     CSR_IVTBASE:       mc_cl_csr_rdata[gi*64 +: 64] = cl_ivt_base;
                     CSR_BARRIER_ARRIVE:mc_cl_csr_rdata[gi*64 +: 64] = {{(64-N){1'b0}}, barrier_arrive};
                     CSR_BARRIER_STATUS:mc_cl_csr_rdata[gi*64 +: 64] = {{(63-N){1'b0}}, barrier_done, barrier_arrive};
+                    CSR_CRC_ACC:       mc_cl_csr_rdata[gi*64 +: 64] = cl_crc_acc;
+                    CSR_CRC_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {62'd0, cl_crc_mode};
                     default:           mc_cl_csr_rdata[gi*64 +: 64] = 64'd0;
                 endcase
             end
@@ -334,6 +356,8 @@ module mp64_cluster #(
             cl_mpu_base   <= 64'd0;
             cl_mpu_limit  <= 64'd0;
             cl_ivt_base   <= 64'd0;
+            cl_crc_acc    <= 64'h0000_0000_FFFF_FFFF;
+            cl_crc_mode   <= 2'd0;
         end else begin
             mc_bus_ready <= {N{1'b0}};
             mc_mpu_fault <= {N{1'b0}};
@@ -397,6 +421,10 @@ module mp64_cluster #(
                             cl_mpu_limit <= mc_cl_csr_wdata[mi*64 +: 64];
                         CSR_IVTBASE, CSR_CL_IVTBASE:
                             cl_ivt_base <= mc_cl_csr_wdata[mi*64 +: 64];
+                        CSR_CRC_ACC:
+                            cl_crc_acc <= mc_cl_csr_wdata[mi*64 +: 64];
+                        CSR_CRC_MODE:
+                            cl_crc_mode <= mc_cl_csr_wdata[mi*64 +: 2];
                         default: ;
                     endcase
                 end
@@ -581,6 +609,137 @@ module mp64_cluster #(
                 end
 
                 default: mul_state <= MUL_IDLE;
+            endcase
+        end
+    end
+
+    // ====================================================================
+    // Shared CRC ISA Engine + Hardware Lock Arbiter
+    // ====================================================================
+    // One mp64_crc_isa instance shared among N micro-cores.
+    // Unlike MUL (stateless), CRC is stateful: the accumulator persists
+    // across calls.  A hardware lock protects multi-instruction CRC
+    // sequences:
+    //   CRC.INIT acquires the lock (sets crc_locked, records owner).
+    //   CRC.FIN  releases the lock.
+    //   While locked, only the lock owner can execute CRC ops.
+    //   Other cores' crc_req stalls (they stay in CPU_CRYPTO).
+    //
+    // If no lock is held, round-robin arbitration picks the next requester.
+
+    localparam CRC_IDLE   = 2'd0;
+    localparam CRC_ACTIVE = 2'd1;
+
+    reg [1:0]           crc_state;
+    reg [ARB_BITS-1:0]  crc_last;
+    reg                 crc_locked;
+    reg [ARB_BITS-1:0]  crc_lock_owner;
+
+    // CRC ISA engine instance (combinational — result in same cycle)
+    wire [3:0]  crc_isa_op;
+    wire [63:0] crc_isa_rs_val;
+    wire [7:0]  crc_isa_imm8;
+    wire [63:0] crc_isa_acc_out;
+    wire [1:0]  crc_isa_mode_out;
+    wire [63:0] crc_isa_result;
+    wire        crc_isa_acc_we;
+    wire        crc_isa_mode_we;
+    wire        crc_isa_rd_we;
+
+    mp64_crc_isa u_cl_crc (
+        .op          (crc_isa_op),
+        .rs_val      (crc_isa_rs_val),
+        .imm8        (crc_isa_imm8),
+        .crc_acc_in  (cl_crc_acc),
+        .crc_mode_in (cl_crc_mode),
+        .crc_acc_out (crc_isa_acc_out),
+        .crc_mode_out(crc_isa_mode_out),
+        .result      (crc_isa_result),
+        .acc_we      (crc_isa_acc_we),
+        .mode_we     (crc_isa_mode_we),
+        .rd_we       (crc_isa_rd_we)
+    );
+
+    // CRC arbiter: round-robin (same pattern as MUL), respecting lock
+    reg [ARB_BITS-1:0] crc_next;
+    reg                crc_any;
+    reg [ARB_BITS:0]   crc_cand;
+
+    always @(*) begin
+        crc_next = crc_last;
+        crc_any  = 1'b0;
+        if (crc_locked) begin
+            // Only the lock owner may proceed
+            if (mc_crc_req[crc_lock_owner]) begin
+                crc_next = crc_lock_owner;
+                crc_any  = 1'b1;
+            end
+        end else begin
+            for (mi = 1; mi <= N; mi = mi + 1) begin
+                crc_cand = {1'b0, crc_last} + mi[ARB_BITS:0];
+                if (crc_cand >= N_VAL)
+                    crc_cand = crc_cand - N_VAL;
+                if (!crc_any && mc_crc_req[crc_cand[ARB_BITS-1:0]]) begin
+                    crc_next = crc_cand[ARB_BITS-1:0];
+                    crc_any  = 1'b1;
+                end
+            end
+        end
+    end
+
+    // Mux granted core's signals to the CRC ISA engine
+    assign crc_isa_op     = mc_crc_op    [crc_next*4  +: 4];
+    assign crc_isa_rs_val = mc_crc_rs_val[crc_next*64 +: 64];
+    assign crc_isa_imm8   = mc_crc_imm8  [crc_next*8  +: 8];
+
+    // CRC arbiter FSM
+    always @(posedge clk) begin
+        if (cl_rst) begin
+            crc_state      <= CRC_IDLE;
+            crc_grant      <= {ARB_BITS{1'b0}};
+            crc_last       <= {ARB_BITS{1'b0}};
+            crc_done_reg   <= 1'b0;
+            crc_rd_we_reg  <= 1'b0;
+            crc_result_reg <= 64'd0;
+            crc_locked     <= 1'b0;
+            crc_lock_owner <= {ARB_BITS{1'b0}};
+        end else begin
+            crc_done_reg  <= 1'b0;
+            crc_rd_we_reg <= 1'b0;
+
+            case (crc_state)
+                CRC_IDLE: begin
+                    if (crc_any) begin
+                        crc_grant <= crc_next;
+                        crc_state <= CRC_ACTIVE;
+                    end
+                end
+
+                CRC_ACTIVE: begin
+                    // CRC ISA engine is combinational — result ready now
+                    crc_result_reg <= crc_isa_result;
+                    crc_done_reg   <= 1'b1;
+                    crc_rd_we_reg  <= crc_isa_rd_we;
+
+                    // Update shared CRC state
+                    if (crc_isa_acc_we)  cl_crc_acc  <= crc_isa_acc_out;
+                    if (crc_isa_mode_we) cl_crc_mode <= crc_isa_mode_out;
+
+                    // Hardware lock management
+                    if (crc_isa_op == ISA_CRC_INIT) begin
+                        // CRC.INIT: acquire lock
+                        crc_locked     <= 1'b1;
+                        crc_lock_owner <= crc_grant;
+                    end else if (crc_isa_op == ISA_CRC_FIN) begin
+                        // CRC.FIN: release lock
+                        crc_locked <= 1'b0;
+                    end
+
+                    crc_last  <= crc_grant;
+                    crc_state <= CRC_IDLE;
+                end
+
+                default: crc_state <= CRC_IDLE;
             endcase
         end
     end

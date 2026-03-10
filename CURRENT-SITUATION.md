@@ -70,7 +70,7 @@
 ### Earlier (prior to Phase work)
 
 - **Crypto**: SHA3-512, SHA-256 accelerator, AES-128 mode, CRC
-  relocation (0x7C0 → 0x0980), AES-GCM partial block masking.
+  ISA migration (MMIO removed), AES-GCM partial block masking.
 - **TLS 1.3**: Dual cipher suites (0xFF01, 0x1301), record framing, SNI.
 - **Network tools**: HTTP/HTTPS, FTP/FTPS, Gopher, DNS-LOOKUP.
 - **System**: Userland memory isolation, headless mode, ext mem,
@@ -119,7 +119,7 @@ DNS/network tests requiring live internet are skipped in CI.
 | 0x08C0 | NTT Engine |
 | 0x0900 | KEM (ML-KEM-512) |
 | 0x0940 | SHA-256 |
-| 0x0980 | CRC32/CRC64 |
+| ~~0x0980~~ | ~~CRC32/CRC64~~ *(removed — now ISA-only)* |
 | 0x08A0 | WOTS+ Chain Accelerator (32 bytes) |
 | 0x0A00 | Framebuffer |
 

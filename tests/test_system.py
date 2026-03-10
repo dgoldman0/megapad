@@ -71,7 +71,7 @@ from devices import (
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, DeviceBus, BusError,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
-    CRC_BASE, SHA256_BASE, FB_BASE,
+    SHA256_BASE, FB_BASE,
     WOTS_BASE, WotsChainAccel,
 )
 from data_sources import (

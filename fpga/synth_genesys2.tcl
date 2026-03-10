@@ -46,7 +46,6 @@ set rtl_files [list \
     ${RTL_DIR}/mp64_fp16_alu.v   \
     ${RTL_DIR}/mp64_aes.v        \
     ${RTL_DIR}/mp64_sha3.v       \
-    ${RTL_DIR}/mp64_crc.v        \
 ]
 
 foreach f $rtl_files {

@@ -61,7 +61,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0940     │  SHA-256             │ │
-    │   0x0980     │  CRC32 / CRC64       │ │
+    │              │  (CRC removed—ISA)  │ │
     │   0x0A00     │  Framebuffer         │ │
     │   0x0B00     │  RTC / System Clock  │ │
     │              └──────────────────────┘ │
@@ -117,7 +117,7 @@ device occupies a small range:
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |
-| **CRC32/CRC64** | `+0x0980` | 32 bytes | Fast CRC computation (8 bytes/cycle) |
+| ~~**CRC32/CRC64**~~ | ~~`+0x0980`~~ | — | *Removed — CRC is now per-core ISA (EXT.CRYPTO FB) + cluster-shared* |
 | **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
@@ -321,7 +321,7 @@ with 53 tile testbench tests passing.
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
 | SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
 | SHA-256 | 64 bytes / 64 cycles | Standard TLS 1.3 (0x1301), HMAC-SHA256, HKDF |
-| CRC32/CRC64 | 8 bytes / cycle | Data integrity for disk sectors and network frames |
+| CRC32/CRC64 | 8 bytes / cycle | Data integrity (per-core ISA + cluster-shared, no MMIO) |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519) |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
@@ -579,8 +579,9 @@ the correct default for pre-privilege firmware.
 ├─────────────────────────────────────────────────┤
 │  Megapad-64 Hardware                            │
 │  4× CPU, RAM+BIST, UART, Timer, Storage, NIC,  │
-│  Tile Engine+FP16, AES, SHA-3, SHA-256, CRC,    │
-│  DMA, QoS, TRNG, Field ALU, NTT, KEM, FB       │
+│  Tile Engine+FP16, AES, SHA-3, SHA-256,          │
+│  DMA, QoS, TRNG, Field ALU, NTT, KEM, FB         │
+│  CRC: per-core ISA + cluster-shared (no MMIO)     │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -786,7 +787,7 @@ DMA, and reliability specifications.
 |-----------|------|-------|------|
 | CPU emulator | `megapad64.py` | 3,002 | Full ISA + extended tile engine implementation |
 | System glue | `system.py` | 991 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
-| Devices | `devices.py` | 2,287 | UART, Timer, Storage, NIC, Mailbox, Spinlock, CRC, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
+| Devices | `devices.py` | 2,287 | UART, Timer, Storage, NIC, Mailbox, Spinlock, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
 | BIOS | `bios.asm` | 14,524 | Forth interpreter, boot, multicore, 360 dictionary words |
 | OS | `kdos.f` | 11,760 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
 | Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |

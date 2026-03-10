@@ -1,23 +1,21 @@
 // ============================================================================
-// tb_crypto.v — CRC, SHA-3, and AES Accelerator Unit Tests
+// tb_crypto.v — SHA-3 and AES Accelerator Unit Tests
 // ============================================================================
 //
+// CRC tests moved to tb_crc_isa.v (ISA-based CRC engine).
+//
 // Tests:
-//   CRC:
-//     1. CRC32-IEEE of "123456789" (0x313233...39) → 0xCBF43926
-//     2. CRC32C (Castagnoli) of "123456789" → 0xE3069283
-//     3. CRC64-ECMA of "123456789" → 0x6C40DF5F0B497347
-//     4. Multi-word streaming CRC
-//     5. Reset via CTRL bit 2
-//     6. IRQ generation
 //   SHA-3:
-//     7. SHA3-256 empty input (NIST KAT: a7ffc6f8...)
-//     8. SHA3-256 of 8-byte message
-//     9. Mode switch (SHA3-512)
+//     1. SHA3-256 empty input
+//     2. SHA3-256 determinism
+//     3. SHA3-256 of 8-byte data
+//     4. SHA3-512 mode
+//     5. SHA-3 rate register
 //   AES:
-//    10. AES-256 ECB encrypt (NIST FIPS 197 Appendix C.3 test vector)
-//    11. Status register busy→done transitions
-//    12. DOUT readback after encryption
+//     6. AES-256 key expansion + encrypt
+//     7. AES-256 encrypt block
+//     8. AES status transitions
+//     9. AES re-encrypt different data
 //
 
 `timescale 1ns / 1ps
@@ -39,23 +37,6 @@ module tb_crypto;
     localparam [2:0] CMD_ABSORB  = 3'd2;
     localparam [2:0] CMD_FINAL   = 3'd3;
     localparam [2:0] CMD_SQUEEZE = 3'd4;
-
-    // ========================================================================
-    // CRC DUT
-    // ========================================================================
-    reg         crc_req;
-    reg  [4:0]  crc_addr;
-    reg  [63:0] crc_wdata;
-    reg         crc_wen;
-    wire [63:0] crc_rdata;
-    wire        crc_ack;
-    wire        crc_irq;
-
-    mp64_crc u_crc (
-        .clk(clk), .rst_n(rst_n),
-        .req(crc_req), .addr(crc_addr), .wdata(crc_wdata), .wen(crc_wen),
-        .rdata(crc_rdata), .ack(crc_ack), .irq(crc_irq)
-    );
 
     // ========================================================================
     // SHA-3 DUT
@@ -94,26 +75,6 @@ module tb_crypto;
     // ========================================================================
     // Helper tasks
     // ========================================================================
-    task crc_write(input [4:0] a, input [63:0] d);
-        begin
-            @(posedge clk);
-            crc_req  <= 1'b1; crc_addr <= a; crc_wdata <= d; crc_wen <= 1'b1;
-            @(posedge clk);
-            crc_req  <= 1'b0; crc_wen  <= 1'b0;
-        end
-    endtask
-
-    task crc_read(input [4:0] a, output [63:0] d);
-        begin
-            @(posedge clk);
-            crc_req  <= 1'b1; crc_addr <= a; crc_wen <= 1'b0;
-            @(posedge clk);
-            crc_req  <= 1'b0;
-            @(posedge clk);  // wait for registered rdata to settle
-            d = crc_rdata;
-        end
-    endtask
-
     task sha_write(input [5:0] a, input [63:0] d);
         begin
             @(posedge clk);
@@ -209,7 +170,6 @@ module tb_crypto;
 
         // Init signals
         rst_n = 0;
-        crc_req = 0; crc_addr = 0; crc_wdata = 0; crc_wen = 0;
         sha_req = 0; sha_addr = 0; sha_wdata = 0; sha_wen = 0;
         aes_req = 0; aes_addr = 0; aes_wdata = 0; aes_wen = 0;
 
@@ -219,147 +179,11 @@ module tb_crypto;
         repeat(2) @(posedge clk);
 
         // ================================================================
-        // CRC TESTS
-        // ================================================================
-
-        // === TEST 1: CRC32-IEEE of "123456789" ===
-        test_num = 1;
-        $display("\n=== TEST %0d: CRC32-IEEE of \"123456789\" ===", test_num);
-        // Default poly is 0x04C11DB7, default init is 0xFFFFFFFF
-        // "123456789" = 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39
-        // Feed as big-endian 64-bit word: 0x3132333435363738, then 0x39 + padding
-        // But CRC processes bytes MSB-first from the 64-bit word.
-        // First 8 bytes: "12345678" = 0x31_32_33_34_35_36_37_38
-        crc_write(5'h10, 64'h3132333435363738);
-        // 9th byte: "9" = 0x39, needs special handling
-        // CRC processes full 64-bit words but we only want 1 more byte.
-        // Feed 0x39_00_00_00_00_00_00_00 and accept the result includes extra zeros.
-        // For a proper test, let's just check the streaming interface works.
-        // Actually the CRC unit does 8 bytes per write, no partial support.
-        // Let's test with a known 8-byte payload instead.
-
-        // Reset CRC to init
-        crc_write(5'h18, 64'h0000000000000004);  // bit2=reset
-        @(posedge clk);
-
-        // Feed 8 bytes: 0x0102030405060708
-        crc_write(5'h10, 64'h0102030405060708);
-        // Read result
-        crc_read(5'h10, rd);
-        // Verify it's non-zero (we computed CRC of these bytes)
-        begin
-            if (rd[31:0] !== 32'd0 && rd[31:0] !== 32'hFFFFFFFF) begin
-                $display("  PASS: CRC32 of 8-byte payload is non-trivial = %08h", rd[31:0]);
-                pass_count = pass_count + 1;
-            end else begin
-                $display("  FAIL: CRC32 result is trivially zero or all-F");
-                fail_count = fail_count + 1;
-            end
-        end
-
-        // === TEST 2: CRC32 streaming — feed two words, verify accumulation ===
-        test_num = 2;
-        $display("\n=== TEST %0d: CRC32 streaming accumulation ===", test_num);
-        // Reset
-        crc_write(5'h08, 64'h00000000FFFFFFFF);  // set init = FFFFFFFF
-        @(posedge clk);
-
-        // Feed word 1
-        crc_write(5'h10, 64'hAAAAAAAABBBBBBBB);
-        crc_read(5'h10, rd);
-        begin
-            reg [63:0] crc_after_word1;
-            crc_after_word1 = rd;
-
-            // Feed word 2
-            crc_write(5'h10, 64'hCCCCCCCCDDDDDDDD);
-            crc_read(5'h10, rd);
-
-            // CRC should be different after second word
-            if (rd !== crc_after_word1) begin
-                $display("  PASS: CRC accumulates across words (%08h -> %08h)",
-                         crc_after_word1[31:0], rd[31:0]);
-                pass_count = pass_count + 1;
-            end else begin
-                $display("  FAIL: CRC unchanged after second word");
-                fail_count = fail_count + 1;
-            end
-        end
-
-        // === TEST 3: CRC CTRL reset ===
-        test_num = 3;
-        $display("\n=== TEST %0d: CRC CTRL reset to init ===", test_num);
-        // Write data to change CRC
-        crc_write(5'h10, 64'h1111111111111111);
-        crc_read(5'h10, rd);
-        begin
-            reg [63:0] pre_reset_val;
-            pre_reset_val = rd;
-            // Reset via CTRL bit 2
-            crc_write(5'h18, 64'h0000000000000004);
-            crc_read(5'h10, rd);
-            check("CRC reset to init", rd[31:0], 32'hFFFFFFFF);
-        end
-
-        // === TEST 4: CRC64 mode ===
-        test_num = 4;
-        $display("\n=== TEST %0d: CRC64-ECMA mode ===", test_num);
-        // Set CRC64 polynomial
-        crc_write(5'h00, 64'h42F0E1EBA9EA3693);
-        // Set init to all-Fs and enable CRC64
-        crc_write(5'h08, 64'hFFFFFFFFFFFFFFFF);
-        // Set CTRL: crc64_mode=1
-        crc_write(5'h18, 64'h0000000000000001);
-        @(posedge clk);
-        // Feed data
-        crc_write(5'h10, 64'h0102030405060708);
-        crc_read(5'h10, rd);
-        // Verify 64-bit result is non-trivial
-        begin
-            if (rd !== 64'd0 && rd !== 64'hFFFFFFFFFFFFFFFF) begin
-                $display("  PASS: CRC64 result is non-trivial = %016h", rd);
-                pass_count = pass_count + 1;
-            end else begin
-                $display("  FAIL: CRC64 result is trivially zero or all-F");
-                fail_count = fail_count + 1;
-            end
-        end
-
-        // === TEST 5: CRC IRQ generation ===
-        test_num = 5;
-        $display("\n=== TEST %0d: CRC IRQ generation ===", test_num);
-        // Reset to CRC32 mode, enable IRQ
-        crc_write(5'h00, 64'h0000000004C11DB7);  // CRC32 poly
-        crc_write(5'h08, 64'h00000000FFFFFFFF);   // init
-        crc_write(5'h18, 64'h0000000000000002);   // irq_en=1, crc64=0
-        @(posedge clk);
-        // Feed data — should trigger IRQ
-        crc_write(5'h10, 64'hDEADBEEFCAFEBABE);
-        // IRQ is a single-cycle pulse; check we saw it
-        begin
-            if (crc_irq) begin
-                $display("  PASS: CRC IRQ fired on data write");
-                pass_count = pass_count + 1;
-            end else begin
-                $display("  PASS: CRC IRQ is pulse (may have been cleared) — checking done flag");
-                crc_read(5'h18, rd);
-                // done bit is rd[0] in {61'd0, crc64_mode, irq_en, done}
-                check("CRC done flag", rd[0], 1'b1);
-            end
-        end
-
-        // === TEST 6: CRC register readback ===
-        test_num = 6;
-        $display("\n=== TEST %0d: CRC register readback ===", test_num);
-        crc_read(5'h00, rd);
-        check32("POLY readback", rd[31:0], 32'h04C11DB7);
-
-        // ================================================================
         // SHA-3 TESTS
         // ================================================================
 
-        // === TEST 7: SHA3-256 empty input ===
-        test_num = 7;
+        // === TEST 1: SHA3-256 empty input ===
+        test_num = 1;
         $display("\n=== TEST %0d: SHA3-256 empty input (NIST KAT) ===", test_num);
         // Set mode to SHA3-256
         sha_write(6'h28, 64'd0);  // mode=0 (SHA3-256)
@@ -404,8 +228,8 @@ module tb_crypto;
             end
         end
 
-        // === TEST 8: SHA3-256 determinism — same input → same output ===
-        test_num = 8;
+        // === TEST 2: SHA3-256 determinism — same input → same output ===
+        test_num = 2;
         $display("\n=== TEST %0d: SHA3-256 determinism ===", test_num);
         // Hash the same empty message again
         sha_write(6'h28, 64'd0);   // SHA3-256
@@ -439,8 +263,8 @@ module tb_crypto;
             end
         end
 
-        // === TEST 9: SHA3-256 of 8-byte data != empty hash ===
-        test_num = 9;
+        // === TEST 3: SHA3-256 of 8-byte data != empty hash ===
+        test_num = 3;
         $display("\n=== TEST %0d: SHA3-256 of 8-byte data ===", test_num);
         sha_write(6'h28, 64'd0);   // SHA3-256
         sha_write(6'h00, {61'd0, CMD_INIT});
@@ -463,8 +287,8 @@ module tb_crypto;
             end
         end
 
-        // === TEST 10: SHA3-512 mode ===
-        test_num = 10;
+        // === TEST 4: SHA3-512 mode ===
+        test_num = 4;
         $display("\n=== TEST %0d: SHA3-512 mode empty hash ===", test_num);
         sha_write(6'h28, 64'd1);   // mode=1 (SHA3-512)
         sha_write(6'h00, {61'd0, CMD_INIT});
@@ -484,8 +308,8 @@ module tb_crypto;
             end
         end
 
-        // === TEST 11: SHA-3 rate register ===
-        test_num = 11;
+        // === TEST 5: SHA-3 rate register ===
+        test_num = 5;
         $display("\n=== TEST %0d: SHA-3 rate register ===", test_num);
         // SHA3-256: rate=136
         sha_write(6'h28, 64'd0);
@@ -501,8 +325,8 @@ module tb_crypto;
         // AES TESTS
         // ================================================================
 
-        // === TEST 12: AES-256 key expansion + encryption ===
-        test_num = 12;
+        // === TEST 6: AES-256 key expansion + encryption ===
+        test_num = 6;
         $display("\n=== TEST %0d: AES-256 key expansion + encrypt ===", test_num);
         // NIST FIPS 197 Appendix C.3 AES-256 test vector:
         // Key:  000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -533,8 +357,8 @@ module tb_crypto;
         check("AES key expand done", rd[1], 1'b1);
         check("AES not busy", rd[0], 1'b0);
 
-        // === TEST 13: AES-256 encrypt one block ===
-        test_num = 13;
+        // === TEST 7: AES-256 encrypt one block ===
+        test_num = 7;
         $display("\n=== TEST %0d: AES-256 encrypt block ===", test_num);
         // Write plaintext: 00112233445566778899aabbccddeeff
         aes_write(7'h40, 64'h00112233);  // DIN[127:96]
@@ -566,16 +390,16 @@ module tb_crypto;
             end
         end
 
-        // === TEST 14: AES status transitions ===
-        test_num = 14;
+        // === TEST 8: AES status transitions ===
+        test_num = 8;
         $display("\n=== TEST %0d: AES status transitions ===", test_num);
         // After successful operation, status should show done=1, busy=0
         aes_read(7'h39, rd);
         check("AES status done", rd[1], 1'b1);
         check("AES status not busy", rd[0], 1'b0);
 
-        // === TEST 15: AES re-encrypt same key, different data ===
-        test_num = 15;
+        // === TEST 9: AES re-encrypt same key, different data ===
+        test_num = 9;
         $display("\n=== TEST %0d: AES re-encrypt different data ===", test_num);
         begin
             reg [31:0] first_out0;

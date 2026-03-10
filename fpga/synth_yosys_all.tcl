@@ -76,7 +76,6 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_timer.v    \
     rtl/periph/mp64_disk.v     \
     rtl/periph/mp64_mailbox.v  \
-    rtl/periph/mp64_crc.v      \
     rtl/periph/mp64_trng.v     \
     rtl/crypto/mp64_aes.v      \
     rtl/crypto/mp64_sha3.v     \

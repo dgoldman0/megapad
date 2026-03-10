@@ -56,7 +56,7 @@ FPGA bitstream).  The project is functionally a complete system.
 | Crypto | 7 | sha3, sha256, aes, field_alu, ntt, kem, wots |
 | Memory | 2 | memory (4-bank), extmem |
 | Bus | 1 | bus (arbiter + QoS + timeout) |
-| Peripherals | 8 | uart, timer, disk, nic, crc, trng, rtc, mailbox |
+| Peripherals | 7 | uart, timer, disk, nic, trng, rtc, mailbox (crc removed—now ISA) |
 | GPU | 1 | tile (64-lane SIMD) |
 | SoC | 2 | soc, top |
 | Primitives | 7 | sram_sp, sram_dp, mul, pll, clkgate, rst_sync, rom |

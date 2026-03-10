@@ -3302,6 +3302,7 @@ class Megapad64Micro(Megapad64):
     SHARED resources via cluster:
     - MUL/DIV unit (round-robin arbitrated)
     - Tile/MEX engine (round-robin arbitrated)
+    - CRC engine (hardware-lock arbitrated; INIT acquires, FIN releases)
 
     SEP and SEX ARE available on micro-cores (zero area cost — they
     only update the psel/xsel pointer, which micro-cores already have).

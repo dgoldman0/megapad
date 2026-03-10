@@ -45,7 +45,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
-;    CRC    0xFFFF_FF00_0000_0980   POLY=+0 INIT=+8 DIN=+10 RESULT=+18 CTRL=+20
+;    CRC    ISA-only (EXT.CRYPTO FB 00-04; no MMIO)
 ;
 ;  Multicore CSRs
 ;  ----
@@ -114,7 +114,7 @@ boot:
     st.h r11, r1
     addi r11, 2
 
-    ldi  r1, 0x9A8              ; port 4 → CRC DIN_BYTE (0x9A8)
+    ldi  r1, 0                 ; port 4 → disabled (CRC is now ISA-only)
     st.h r11, r1
     addi r11, 2
 
@@ -10124,59 +10124,54 @@ w_perf_reset:
     ret.l
 
 ; =====================================================================
-;  CRC Engine — MMIO at 0xFFFF_FF00_0000_0980
+;  CRC Engine — ISA instructions (EXT.CRYPTO FB 00-04)
 ; =====================================================================
-; CRC base   = 0xFFFF_FF00_0000_0980
-;   POLY  +0x00 (W)  polynomial select: 0=CRC32, 1=CRC32C, 2=CRC64
-;   INIT  +0x08 (W)  initial CRC value (64-bit LE)
-;   DIN   +0x10 (W)  data input (8 bytes, processes on full write)
-;   RESULT+0x18 (R)  current CRC value (64-bit LE)
-;   CTRL  +0x20 (W)  0=reset to init, 1=finalize (XOR-out)
+; CRC is now per-core / cluster-shared via ISA instructions.
+; No MMIO peripheral.  State lives in CSR 0x80 (CRC_ACC), 0x81 (CRC_MODE).
+;
+;   CRC.INIT          — reset accumulator to all-ones (mode-dependent)
+;   CRC.B   Rd, Rs    — feed 1 byte from Rs[7:0], result → Rd
+;   CRC.Q   Rd, Rs    — feed 8 bytes from Rs (LE order), result → Rd
+;   CRC.FIN Rd, Rs    — finalize (XOR-out), result → Rd (Rs ignored)
+;   CRC.MODE imm8     — select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
 
 ; CRC-POLY! ( n -- )  set polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
 w_crc_poly_store:
     ldn r0, r14
     addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_0980    ; CRC_POLY
-    str r11, r0
+    csrw 0x81, r0                       ; CSR_CRC_MODE
     ret.l
 
-; CRC-INIT! ( n -- )  set initial CRC value
+; CRC-INIT! ( n -- )  initialise CRC (value is ignored; always all-ones)
 w_crc_init_store:
-    ldn r0, r14
-    addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_0988    ; CRC_INIT
-    str r11, r0
+    addi r14, 8                         ; drop the stack arg (not used)
+    crc.init
     ret.l
 
-; CRC-FEED ( n -- )  feed 8 bytes of data
+; CRC-FEED ( n -- )  feed 8 bytes of data from TOS
 w_crc_feed:
     ldn r0, r14
     addi r14, 8
-    ldi64 r11, 0xFFFF_FF00_0000_0990    ; CRC_DIN
-    str r11, r0
+    crc.q r0, r0                        ; feed 8 bytes, discard intermediate
     ret.l
 
-; CRC@ ( -- n )  read current CRC result
+; CRC@ ( -- n )  read current CRC accumulator (raw, not finalized)
 w_crc_fetch:
-    ldi64 r11, 0xFFFF_FF00_0000_0998    ; CRC_RESULT
-    ldn r0, r11
+    csrr r0, 0x80                       ; CSR_CRC_ACC
     subi r14, 8
     str r14, r0
     ret.l
 
-; CRC-RESET ( -- )  reset CRC to init value
+; CRC-RESET ( -- )  reset CRC accumulator to all-ones
 w_crc_reset:
-    ldi r0, 0
-    ldi64 r11, 0xFFFF_FF00_0000_09A0    ; CRC_CTRL = 0 (reset)
-    str r11, r0
+    crc.init
     ret.l
 
-; CRC-FINAL ( -- )  finalize CRC (XOR-out)
+; CRC-FINAL ( -- )  finalize CRC (XOR-out), push result
 w_crc_final:
-    ldi r0, 1
-    ldi64 r11, 0xFFFF_FF00_0000_09A0    ; CRC_CTRL = 1 (finalize)
-    str r11, r0
+    crc.fin r0, r0                      ; finalized result → r0
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; =====================================================================

@@ -64,6 +64,15 @@ module mp64_cpu_micro (
     input  wire [127:0] mul_result,
     input  wire        mul_done,
 
+    // === Shared CRC interface (to cluster CRC arbiter) ===
+    output reg         crc_req,
+    output reg  [3:0]  crc_op,
+    output reg  [63:0] crc_rs_val,
+    output reg  [7:0]  crc_imm8,
+    input  wire [63:0] crc_result,
+    input  wire        crc_done,
+    input  wire        crc_rd_we_in,  // 1 = write crc_result to R[dst_reg]
+
     // === Shared Tile/MEX interface (to cluster tile arbiter) ===
     output reg         mex_req,       // request tile engine access
     output reg  [1:0]  mex_ss,        // source selector
@@ -243,6 +252,11 @@ module mp64_cpu_micro (
             mul_a   <= 64'd0;
             mul_b   <= 64'd0;
 
+            crc_req    <= 1'b0;
+            crc_op     <= 4'd0;
+            crc_rs_val <= 64'd0;
+            crc_imm8   <= 8'd0;
+
             mex_req        <= 1'b0;
             mex_ss         <= 2'd0;
             mex_op         <= 2'd0;
@@ -333,8 +347,8 @@ module mp64_cpu_micro (
                 // EXT prefix (0xF)
                 // --------------------------------------------------------
                 if (fam == FAM_EXT) begin
-                    if (nib == EXT_STRING || nib == EXT_DICT || nib == EXT_CRYPTO) begin
-                        // EXT.STRING / EXT.DICT / EXT.CRYPTO not available on micro-cores → ILLEGAL_OP
+                    if (nib == EXT_STRING || nib == EXT_DICT) begin
+                        // EXT.STRING / EXT.DICT not available on micro-cores → ILLEGAL_OP
                         R[spsel] <= R[spsel] - 64'd8;
                         effective_addr <= R[spsel] - 64'd8;
                         mem_data <= R[psel];
@@ -343,6 +357,29 @@ module mp64_cpu_micro (
                         post_action <= POST_IRQ_VEC;
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;
+                    end else if (nib == EXT_CRYPTO) begin
+                        // EXT.CRYPTO — dispatch to cluster-shared CRC
+                        //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
+                        //   ibuf[2] = DR or imm8 (3-byte ops only)
+                        if (ibuf[1][7:4] != 4'd0) begin
+                            // Only CRC unit (0) supported on micro-cores
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            ivec_id  <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
+                            crc_req    <= 1'b1;
+                            crc_op     <= ibuf[1][3:0];
+                            crc_rs_val <= R[ibuf[2][3:0]];
+                            crc_imm8   <= ibuf[2];
+                            dst_reg    <= ibuf[2][7:4];
+                            ext_active <= 1'b0;
+                            cpu_state  <= CPU_CRYPTO;
+                        end
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -687,7 +724,8 @@ module mp64_cpu_micro (
                             CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
                             CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
                             CSR_CL_IVTBASE,
-                            CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS: begin
+                            CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
+                            CSR_CRC_ACC, CSR_CRC_MODE: begin
                                 cl_csr_wen   <= 1'b1;
                                 cl_csr_wdata <= R[nib[2:0]];
                             end
@@ -732,6 +770,9 @@ module mp64_cpu_micro (
                             CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
                             CSR_CL_IVTBASE,
                             CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS:
+                                R[nib[2:0]] <= cl_csr_rdata;
+                            // CRC CSRs: forwarded to cluster
+                            CSR_CRC_ACC, CSR_CRC_MODE:
                                 R[nib[2:0]] <= cl_csr_rdata;
                             default: R[nib[2:0]] <= 64'd0;
                         endcase
@@ -911,6 +952,18 @@ module mp64_cpu_micro (
             CPU_MEX_WAIT: begin
                 if (mex_done) begin
                     mex_req   <= 1'b0;
+                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
+            // CRYPTO: wait for shared cluster CRC result
+            // ============================================================
+            CPU_CRYPTO: begin
+                if (crc_done) begin
+                    crc_req <= 1'b0;
+                    if (crc_rd_we_in)
+                        R[dst_reg] <= crc_result;
                     cpu_state <= CPU_FETCH;
                 end
             end

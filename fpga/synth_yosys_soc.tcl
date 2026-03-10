@@ -81,7 +81,6 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_timer.v    \
     rtl/periph/mp64_disk.v     \
     rtl/periph/mp64_mailbox.v  \
-    rtl/periph/mp64_crc.v      \
     rtl/periph/mp64_trng.v
 
 # ---- Crypto accelerators ----------------------------------------------------
