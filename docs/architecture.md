@@ -61,7 +61,6 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0940     │  SHA-256             │ │
-    │              │  (CRC removed—ISA)  │ │
     │   0x0A00     │  Framebuffer         │ │
     │   0x0B00     │  RTC / System Clock  │ │
     │              └──────────────────────┘ │

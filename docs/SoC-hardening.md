@@ -2533,8 +2533,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] RTL: instruction decode for FB prefix
 - [x] C++ accelerator: EXT.CRYPTO dispatch
 - [ ] BIOS: crypto words updated to use ISA path (full cores)
-- [ ] BIOS: fallback to MMIO for micro-cores
-- [ ] MMIO shared instances: deprecation / removal
+- [ ] MMIO shared instances: removal
 - [x] Tests: CRC ISA
 - [ ] Tests: SHA-2 ISA
 - [ ] Tests: Field ALU ISA
