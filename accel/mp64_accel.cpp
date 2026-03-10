@@ -62,6 +62,7 @@ enum CSR {
     // EXT.CRYPTO CSRs (Appendix B)
     CSR_CRC_ACC=0x80, CSR_CRC_MODE=0x81,
     CSR_SHA_MODE=0x82, CSR_SHA_MSGLEN=0x83, CSR_SHA_MSGLEN_HI=0x84,
+    CSR_GF_PRIME_SEL=0x85,
 };
 
 // IVEC IDs
@@ -171,6 +172,13 @@ struct CPUState {
     uint8_t  sha_mode;       // 0=SHA-256, 1=SHA-384, 2=SHA-512
     uint64_t sha_msglen_lo;  // total message length in bits (low 64)
     uint64_t sha_msglen_hi;  // total message length in bits (high 64)
+
+    // EXT.CRYPTO Field ALU per-core state (Appendix B, §B.5)
+    uint8_t  gf_prime_sel;   // 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom
+    BigNum   gf_custom_p;    // 256-bit custom prime
+    BigNum   gf_mont_pinv;   // -p^{-1} mod 2^{256}
+    BigNum   gf_prev_lo;     // previous result (low 256)
+    BigNum   gf_prev_hi;     // previous result (high 256, for MACR)
 
     // Core identity
     uint8_t  core_id;
@@ -723,6 +731,7 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_SHA_MODE:    return s.sha_mode;
         case CSR_SHA_MSGLEN:  return s.sha_msglen_lo;
         case CSR_SHA_MSGLEN_HI: return s.sha_msglen_hi;
+        case CSR_GF_PRIME_SEL:return s.gf_prime_sel;
         default: return 0;
     }
 }
@@ -781,6 +790,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_SHA_MODE: s.sha_mode = val & 0x03; break;
         case CSR_SHA_MSGLEN: s.sha_msglen_lo = val; break;
         case CSR_SHA_MSGLEN_HI: s.sha_msglen_hi = val; break;
+        case CSR_GF_PRIME_SEL:  s.gf_prime_sel = val & 0x03; break;
         default: break;
     }
 }
@@ -2512,6 +2522,69 @@ static bool sha_write_pad(CPUState& s) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+//  Field ALU ISA helpers (§B.5)
+// ---------------------------------------------------------------------------
+
+static const BigNum GF_BUILTIN_PRIMES[3] = {
+    make_curve25519_p(),
+    make_secp256k1_p(),
+    make_p256_p(),
+};
+
+static BigNum gf_get_prime(const CPUState& s) {
+    if (s.gf_prime_sel < 3) return GF_BUILTIN_PRIMES[s.gf_prime_sel];
+    if (s.gf_prime_sel == 3 && !s.gf_custom_p.is_zero()) return s.gf_custom_p;
+    return GF_BUILTIN_PRIMES[0];
+}
+
+static bool gf_is_mont(const CPUState& s) {
+    return s.gf_prime_sel == 3 && !s.gf_mont_pinv.is_zero();
+}
+
+static BigNum gf_acc_to_bignum(const CPUState& s) {
+    BigNum r;
+    r.w[0] = s.acc[0]; r.w[1] = s.acc[1];
+    r.w[2] = s.acc[2]; r.w[3] = s.acc[3];
+    return r;
+}
+
+static void gf_bignum_to_acc(CPUState& s, const BigNum& v) {
+    s.acc[0] = v.w[0]; s.acc[1] = v.w[1];
+    s.acc[2] = v.w[2]; s.acc[3] = v.w[3];
+}
+
+static BigNum gf_read_tile_b(CPUState& s) {
+    uint8_t buf[32];
+    uint64_t base = s.tsrc0;
+    for (int i = 0; i < 32; i++) buf[i] = mem_read8(s, base + i);
+    return BigNum::from_le_bytes(buf);
+}
+
+static void gf_write_tile_dst(CPUState& s, const BigNum& v) {
+    uint8_t buf[32];
+    v.to_le_bytes(buf);
+    uint64_t base = s.tdst;
+    for (int i = 0; i < 32; i++) mem_write8(s, base + i, buf[i]);
+}
+
+static BigNum gf_mulmod_sel(const CPUState& s, const BigNum& a, const BigNum& b, const BigNum& p) {
+    if (gf_is_mont(s)) return bn_mont_mulmod(a, b, p, s.gf_mont_pinv);
+    return bn_mulmod(a, b, p);
+}
+
+static BigNum gf_sqrmod_sel(const CPUState& s, const BigNum& a, const BigNum& p) {
+    if (gf_is_mont(s)) return bn_mont_sqrmod(a, p, s.gf_mont_pinv);
+    return bn_sqrmod(a, p);
+}
+
+static int exec_field(CPUState& s) {
+    // Called with op = sub_op & 0xF already extracted by caller
+    // We re-read the op from the caller's context — but actually,
+    // let's take it as a parameter.
+    return 0; // placeholder, see exec_crypto dispatch below
+}
+
 static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
     uint8_t sub_op = fetch8(s);
     int unit = (sub_op >> 4) & 0xF;
@@ -2659,7 +2732,137 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO SHA-2 reserved sub-op");
         }
     } else if (unit == 0x2) {
-        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO Field ALU not yet implemented");
+        // --- Field ALU unit (§B.5) ---
+        BigNum p = gf_get_prime(s);
+        switch (op) {
+        case 0x0: { // GF.ADD
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum r = bn_addmod(a, b, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return 1;
+        }
+        case 0x1: { // GF.SUB
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum r = bn_submod(a, b, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return 1;
+        }
+        case 0x2: { // GF.MUL
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum r = gf_mulmod_sel(s, a, b, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return gf_is_mont(s) ? 4 : 1;
+        }
+        case 0x3: { // GF.SQR
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum r = gf_sqrmod_sel(s, a, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return gf_is_mont(s) ? 4 : 1;
+        }
+        case 0x4: { // GF.INV
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum r = bn_invmod(a, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return 767;
+        }
+        case 0x5: { // GF.POW
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum e = gf_read_tile_b(s);
+            BigNum r = bn_powmod(a, e, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return 767;
+        }
+        case 0x6: { // GF.MULR — raw 256×256→512
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum lo, hi;
+            BigNum::mul_wide(a, b, lo, hi);
+            gf_bignum_to_acc(s, lo);
+            gf_write_tile_dst(s, hi);
+            s.gf_prev_lo = lo;
+            s.gf_prev_hi = hi;
+            return 1;
+        }
+        case 0x7: { // GF.MAC — (ACC * B + prev) mod p
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum ab = gf_mulmod_sel(s, a, b, p);
+            BigNum r = bn_addmod(ab, s.gf_prev_lo, p);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return gf_is_mont(s) ? 4 : 1;
+        }
+        case 0x8: { // GF.MACR — raw: prev_512 + ACC * B
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum mul_lo, mul_hi;
+            BigNum::mul_wide(a, b, mul_lo, mul_hi);
+            BigNum sum_lo = s.gf_prev_lo.add(mul_lo);
+            BigNum sum_hi = s.gf_prev_hi.add(mul_hi);
+            if (sum_lo < s.gf_prev_lo) {
+                BigNum one; one.w[0] = 1;
+                sum_hi = sum_hi.add(one);
+            }
+            gf_bignum_to_acc(s, sum_lo);
+            gf_write_tile_dst(s, sum_hi);
+            s.gf_prev_lo = sum_lo;
+            s.gf_prev_hi = sum_hi;
+            return 1;
+        }
+        case 0x9: { // GF.CMOV Rd
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            bool cond = s.regs[rd] != 0;
+            BigNum b = gf_read_tile_b(s);
+            if (cond) {
+                gf_bignum_to_acc(s, b);
+                s.gf_prev_lo = b;
+            }
+            return 1;
+        }
+        case 0xA: { // GF.CEQ — constant-time equality
+            BigNum a = gf_acc_to_bignum(s);
+            BigNum b = gf_read_tile_b(s);
+            BigNum eq;
+            eq.w[0] = (a == b) ? 1 : 0;
+            gf_bignum_to_acc(s, eq);
+            s.gf_prev_lo = eq;
+            s.flag_z = (a == b) ? 1 : 0;
+            return 1;
+        }
+        case 0xB: { // GF.PRIME imm8
+            uint8_t imm = fetch8(s);
+            s.gf_prime_sel = imm & 0x03;
+            return 1;
+        }
+        case 0xC: { // GF.LDPRIME
+            s.gf_custom_p = gf_acc_to_bignum(s);
+            s.gf_mont_pinv = gf_read_tile_b(s);
+            return 1;
+        }
+        case 0xD: { // GF.X25519
+            BigNum scalar = gf_acc_to_bignum(s);
+            BigNum u_coord = gf_read_tile_b(s);
+            uint8_t scalar_bytes[32], u_bytes[32];
+            scalar.to_le_bytes(scalar_bytes);
+            u_coord.to_le_bytes(u_bytes);
+            BigNum r = x25519_scalar_mul(scalar_bytes, u_bytes, GF_BUILTIN_PRIMES[0]);
+            gf_bignum_to_acc(s, r);
+            s.gf_prev_lo = r;
+            return 4335;
+        }
+        default:
+            throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO Field ALU reserved sub-op");
+        }
     } else {
         throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO reserved unit");
     }
@@ -3560,6 +3763,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
             // CRC state defaults
             s->crc_acc = 0xFFFFFFFF;
             s->crc_mode = 0;
+            // Field ALU state defaults
+            s->gf_prime_sel = 0;
+            s->gf_custom_p = BigNum();
+            s->gf_mont_pinv = BigNum();
+            s->gf_prev_lo = BigNum();
+            s->gf_prev_hi = BigNum();
             return s;
         }))
         .def_readwrite("psel", &CPUState::psel)
@@ -3617,6 +3826,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("sha_mode", &CPUState::sha_mode)
         .def_readwrite("sha_msglen_lo", &CPUState::sha_msglen_lo)
         .def_readwrite("sha_msglen_hi", &CPUState::sha_msglen_hi)
+        .def_readwrite("gf_prime_sel", &CPUState::gf_prime_sel)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
         .def_readwrite("mem_size", &CPUState::mem_size)

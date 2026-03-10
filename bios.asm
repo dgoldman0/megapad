@@ -10813,6 +10813,279 @@ w_field_result_hi_fetch:
     ret.l
 
 ; =====================================================================
+;  Field ALU — ISA instructions (EXT.CRYPTO FB 20-2D)
+; =====================================================================
+; Field arithmetic is now per-core via ISA instructions.
+; State lives in tile accumulators (ACC0-ACC3, 256-bit LE) and CSRs:
+;   CSR 0x85 = GF_PRIME_SEL (0=Curve25519, 1=secp256k1, 2=P-256, 3=custom)
+;   CSR 0x16 = TSRC0  (operand B address, 32 bytes)
+;   CSR 0x18 = TDST   (result_hi address for raw multiply)
+;
+; Operand A  → ACC0-ACC3 (loaded by _gf_load_acc / GF-A!)
+; Operand B  → 32 bytes at M[TSRC0]
+; Result     → ACC0-ACC3 (stored by _gf_store_acc / GF-R@)
+; Result_hi  → 32 bytes at M[TDST] (gf.mulr / gf.macr only)
+
+; Internal: load 32 bytes from [r10] into ACC0-ACC3 (little-endian).
+; Clobbers: r0.  Advances r10 by 24 (points at last 8-byte chunk base).
+_gf_load_acc:
+    ldn r0, r10
+    csrw 0x19, r0           ; ACC0 = bytes [0..7]
+    addi r10, 8
+    ldn r0, r10
+    csrw 0x1A, r0           ; ACC1 = bytes [8..15]
+    addi r10, 8
+    ldn r0, r10
+    csrw 0x1B, r0           ; ACC2 = bytes [16..23]
+    addi r10, 8
+    ldn r0, r10
+    csrw 0x1C, r0           ; ACC3 = bytes [24..31]
+    ret.l
+
+; Internal: store ACC0-ACC3 to 32 bytes at [r10] (little-endian).
+; Clobbers: r0.  Advances r10 by 24.
+_gf_store_acc:
+    csrr r0, 0x19
+    str r10, r0             ; bytes [0..7]  = ACC0
+    addi r10, 8
+    csrr r0, 0x1A
+    str r10, r0             ; bytes [8..15]  = ACC1
+    addi r10, 8
+    csrr r0, 0x1B
+    str r10, r0             ; bytes [16..23] = ACC2
+    addi r10, 8
+    csrr r0, 0x1C
+    str r10, r0             ; bytes [24..31] = ACC3
+    ret.l
+
+; GF-A! ( addr -- )  Load 32 bytes from addr into ACC0-ACC3.
+w_gf_a_store:
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11
+    ret.l
+
+; GF-R@ ( addr -- )  Store ACC0-ACC3 into 32 bytes at addr.
+w_gf_r_fetch:
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; GF-PRIME ( n -- )  Set prime: 0=25519, 1=secp256k1, 2=P-256, 3=custom.
+w_gf_prime:
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x85, r0           ; CSR_GF_PRIME_SEL
+    ret.l
+
+; LOAD-PRIME ( p-addr pinv-addr -- )  Latch custom prime + Montgomery p_inv.
+w_load_prime_isa:
+    ldn r7, r14              ; r7 = pinv addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = p addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = p  (clobbers r0, r10)
+    csrw 0x16, r7            ; TSRC0 = pinv
+    gf.ldprime               ; custom_p ← ACC, p_inv ← M[TSRC0]
+    ret.l
+
+; --- Binary field ops: ( a b r -- ) ---
+; Pattern: load a→ACC, TSRC0=b, execute, store ACC→r.
+; NOTE: CSR instructions only encode 3 register bits → use r0-r7 only.
+;       Safe scratch for CSR: r0, r1, r7.  r2=ram_size, r3=PC, r4-r6=reserved.
+
+; FADD ( a b r -- )  (a + b) mod p
+w_fadd:
+    ldn r1, r14              ; r1 = result addr
+    addi r14, 8
+    ldn r7, r14              ; r7 = b addr  (CSR-safe scratch)
+    addi r14, 8
+    ldn r10, r14             ; r10 = a addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = a  (clobbers r0, r10)
+    csrw 0x16, r7            ; TSRC0 = b
+    gf.add
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11               ; [r] = ACC
+    ret.l
+
+; FSUB ( a b r -- )  (a - b) mod p
+w_fsub:
+    ldn r1, r14
+    addi r14, 8
+    ldn r7, r14
+    addi r14, 8
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11
+    csrw 0x16, r7
+    gf.sub
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; FMUL ( a b r -- )  (a * b) mod p
+w_fmul:
+    ldn r1, r14
+    addi r14, 8
+    ldn r7, r14
+    addi r14, 8
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11
+    csrw 0x16, r7
+    gf.mul
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; --- Unary field ops: ( a r -- ) ---
+
+; FSQR ( a r -- )  a^2 mod p
+w_fsqr:
+    ldn r1, r14              ; r1 = result addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = a addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = a
+    gf.sqr
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; FINV ( a r -- )  a^(p-2) mod p  (Fermat inversion)
+w_finv:
+    ldn r1, r14
+    addi r14, 8
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11
+    gf.inv
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; FPOW ( base exp r -- )  base^exp mod p
+w_fpow:
+    ldn r1, r14              ; r1 = result addr
+    addi r14, 8
+    ldn r7, r14              ; r7 = exp addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = base addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = base
+    csrw 0x16, r7            ; TSRC0 = exp
+    gf.pow
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; --- Raw multiply: ( a b rlo rhi -- ) ---
+
+; FMUL-RAW ( a b rlo rhi -- )  Raw 256×256 → 512-bit product.
+w_fmul_raw:
+    ldn r0, r14              ; r0 = rhi addr  (use r0 for early CSR write)
+    addi r14, 8
+    csrw 0x18, r0            ; TDST = rhi  (set before _gf_load_acc clobbers r0)
+    ldn r1, r14              ; r1 = rlo addr
+    addi r14, 8
+    ldn r7, r14              ; r7 = b addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = a addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = a  (clobbers r0, r10)
+    csrw 0x16, r7            ; TSRC0 = b
+    gf.mulr                  ; ACC = lo, M[TDST] = hi
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11               ; [rlo] = ACC
+    ret.l
+
+; FCMOV ( a cond -- )  Constant-time conditional move.
+; If cond[0] != 0: ACC ← 32 bytes from a-addr.
+w_fcmov:
+    ldn r7, r14              ; r7 = cond addr
+    addi r14, 8
+    ldn r0, r14              ; r0 = a addr
+    addi r14, 8
+    csrw 0x16, r0            ; TSRC0 = a  (set before loading cond byte)
+    ld.b r0, r7              ; r0 = cond[0]
+    gf.cmov r0, r0           ; if r0 != 0: ACC ← M[TSRC0]
+    ret.l
+
+; FCEQ ( a b r -- )  Constant-time field equality test.
+; result = 1 if a == b, else 0  (as 256-bit value in result buffer).
+w_fceq:
+    ldn r1, r14              ; r1 = result addr
+    addi r14, 8
+    ldn r7, r14              ; r7 = b addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = a addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = a
+    csrw 0x16, r7            ; TSRC0 = b
+    gf.ceq                   ; ACC = (a == b) ? 1 : 0
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; FMAC ( a b r -- )  (a*b + prev_result) mod p.
+w_fmac:
+    ldn r1, r14
+    addi r14, 8
+    ldn r7, r14
+    addi r14, 8
+    ldn r10, r14
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11
+    csrw 0x16, r7
+    gf.mac
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11
+    ret.l
+
+; FMUL-ADD-RAW ( a b rlo rhi -- )  Raw 512-bit multiply-accumulate.
+w_fmul_add_raw:
+    ldn r0, r14              ; r0 = rhi addr  (early CSR write)
+    addi r14, 8
+    csrw 0x18, r0            ; TDST = rhi
+    ldn r1, r14              ; r1 = rlo addr
+    addi r14, 8
+    ldn r7, r14              ; r7 = b addr
+    addi r14, 8
+    ldn r10, r14             ; r10 = a addr
+    addi r14, 8
+    ldi64 r11, _gf_load_acc
+    call.l r11               ; ACC = a  (clobbers r0, r10)
+    csrw 0x16, r7            ; TSRC0 = b
+    gf.macr                  ; {M[TDST],ACC} = prev_512 + ACC×M[TSRC0]
+    mov r10, r1
+    ldi64 r11, _gf_store_acc
+    call.l r11               ; [rlo] = ACC
+    ret.l
+
+; =====================================================================
 ;  NTT Engine — 256-point Number Theoretic Transform accelerator
 ; =====================================================================
 ; MMIO base 0x8C0 → 0xFFFF_FF00_0000_08C0
@@ -14183,9 +14456,144 @@ d_field_result_hi_fetch:
     call.l r11
     ret.l
 
+; === GF-A! ===
+d_gf_a_store:
+    .dq d_field_result_hi_fetch
+    .db 5
+    .ascii "GF-A!"
+    ldi64 r11, w_gf_a_store
+    call.l r11
+    ret.l
+
+; === GF-R@ ===
+d_gf_r_fetch:
+    .dq d_gf_a_store
+    .db 5
+    .ascii "GF-R@"
+    ldi64 r11, w_gf_r_fetch
+    call.l r11
+    ret.l
+
+; === GF-PRIME ===
+d_gf_prime:
+    .dq d_gf_r_fetch
+    .db 8
+    .ascii "GF-PRIME"
+    ldi64 r11, w_gf_prime
+    call.l r11
+    ret.l
+
+; === LOAD-PRIME ===
+d_load_prime:
+    .dq d_gf_prime
+    .db 10
+    .ascii "LOAD-PRIME"
+    ldi64 r11, w_load_prime_isa
+    call.l r11
+    ret.l
+
+; === FADD ===
+d_fadd:
+    .dq d_load_prime
+    .db 4
+    .ascii "FADD"
+    ldi64 r11, w_fadd
+    call.l r11
+    ret.l
+
+; === FSUB ===
+d_fsub:
+    .dq d_fadd
+    .db 4
+    .ascii "FSUB"
+    ldi64 r11, w_fsub
+    call.l r11
+    ret.l
+
+; === FMUL ===
+d_fmul:
+    .dq d_fsub
+    .db 4
+    .ascii "FMUL"
+    ldi64 r11, w_fmul
+    call.l r11
+    ret.l
+
+; === FSQR ===
+d_fsqr:
+    .dq d_fmul
+    .db 4
+    .ascii "FSQR"
+    ldi64 r11, w_fsqr
+    call.l r11
+    ret.l
+
+; === FINV ===
+d_finv:
+    .dq d_fsqr
+    .db 4
+    .ascii "FINV"
+    ldi64 r11, w_finv
+    call.l r11
+    ret.l
+
+; === FPOW ===
+d_fpow:
+    .dq d_finv
+    .db 4
+    .ascii "FPOW"
+    ldi64 r11, w_fpow
+    call.l r11
+    ret.l
+
+; === FMUL-RAW ===
+d_fmul_raw:
+    .dq d_fpow
+    .db 8
+    .ascii "FMUL-RAW"
+    ldi64 r11, w_fmul_raw
+    call.l r11
+    ret.l
+
+; === FCMOV ===
+d_fcmov:
+    .dq d_fmul_raw
+    .db 5
+    .ascii "FCMOV"
+    ldi64 r11, w_fcmov
+    call.l r11
+    ret.l
+
+; === FCEQ ===
+d_fceq:
+    .dq d_fcmov
+    .db 4
+    .ascii "FCEQ"
+    ldi64 r11, w_fceq
+    call.l r11
+    ret.l
+
+; === FMAC ===
+d_fmac:
+    .dq d_fceq
+    .db 4
+    .ascii "FMAC"
+    ldi64 r11, w_fmac
+    call.l r11
+    ret.l
+
+; === FMUL-ADD-RAW ===
+d_fmul_add_raw:
+    .dq d_fmac
+    .db 12
+    .ascii "FMUL-ADD-RAW"
+    ldi64 r11, w_fmul_add_raw
+    call.l r11
+    ret.l
+
 ; === NTT-SETQ ===
 d_ntt_setq:
-    .dq d_field_result_hi_fetch
+    .dq d_fmul_add_raw
     .db 8
     .ascii "NTT-SETQ"
     ldi64 r11, w_ntt_setq

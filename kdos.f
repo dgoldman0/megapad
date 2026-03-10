@@ -1162,32 +1162,31 @@ CREATE X25519-BASE  32 ALLOT
 \ =====================================================================
 \  §1.10  Field ALU — Multi-Prime Coprocessor + Raw 256x256 Multiply
 \ =====================================================================
-\  Hardware-accelerated field arithmetic.  Supports multiple primes via
-\  PRIME-SECP / PRIME-25519 words (CMD bits [7:6] select the modulus).
-\  Default prime is Curve25519 (2^255-19).  X25519 (mode 0) always uses
-\  Curve25519 regardless of prime_sel.
-\  Shares the same MMIO base as X25519 (0x0840).
+\  Hardware-accelerated field arithmetic via per-core ISA instructions
+\  (EXT.CRYPTO FB 20-2D).  Supports multiple primes via GF-PRIME /
+\  PRIME-SECP / PRIME-25519 words.  Default prime is Curve25519.
 \
-\  BIOS primitives used:
-\    X25519-SCALAR! ( addr -- )   = FIELD-A! (write operand A, 32 bytes)
-\    X25519-POINT!  ( addr -- )   = FIELD-B! (write operand B, 32 bytes)
-\    FIELD-CMD!     ( mode -- )   Start computation with given mode
-\    X25519-WAIT    ( -- )        = FIELD-WAIT
-\    X25519-STATUS@ ( -- n )      = FIELD-STATUS@
-\    X25519-RESULT@ ( addr -- )   = FIELD-RESULT@ (read result_lo)
-\    FIELD-RESULT-HI@ ( addr -- ) Read result_hi (MUL_RAW only)
+\  BIOS primitives (ISA-based, per-core):
+\    GF-A!       ( addr -- )    Load 32 bytes → ACC0-ACC3
+\    GF-R@       ( addr -- )    Store ACC0-ACC3 → 32 bytes
+\    GF-PRIME    ( n -- )       Set prime: 0=25519, 1=secp, 2=P256, 3=custom
+\    LOAD-PRIME  ( p pinv -- )  Latch custom prime + Montgomery p_inv
+\    FADD        ( a b r -- )   (a + b) mod p
+\    FSUB        ( a b r -- )   (a - b) mod p
+\    FMUL        ( a b r -- )   (a * b) mod p
+\    FSQR        ( a r -- )     a^2 mod p
+\    FINV        ( a r -- )     a^(p-2) mod p
+\    FPOW        ( a e r -- )   a^e mod p
+\    FMUL-RAW    ( a b rlo rhi -- )  256×256 → 512 raw
+\    FCMOV       ( a cond -- )  Constant-time conditional move
+\    FCEQ        ( a b r -- )   Constant-time equality test
+\    FMAC        ( a b r -- )   (a*b + prev) mod p
+\    FMUL-ADD-RAW ( a b rlo rhi -- ) Raw 512-bit MAC
 \
-\  Modes:
-\    0 = X25519 (legacy scalar multiply)
-\    1 = FADD  (a+b) mod p
-\    2 = FSUB  (a-b) mod p
-\    3 = FMUL  (a*b) mod p
-\    4 = FSQR  (a^2) mod p
-\    5 = FINV  a^(p-2) mod p
-\    6 = FPOW  a^b mod p
-\    7 = MUL_RAW  256x256 -> 512-bit product (no reduction)
+\  Legacy MMIO plumbing (kept for backward compatibility):
+\    FIELD-A!  FIELD-B!  FIELD-CMD!  FIELD-WAIT  FIELD-RESULT@
 
-\ Mode constants
+\ Mode constants (MMIO legacy — kept for backward compatibility)
 0 CONSTANT FMODE-X25519
 1 CONSTANT FMODE-ADD
 2 CONSTANT FMODE-SUB
@@ -1202,27 +1201,20 @@ CREATE X25519-BASE  32 ALLOT
 11 CONSTANT FMODE-MAC
 12 CONSTANT FMODE-MAC-RAW
 
-\ Prime selection — write CMD byte with go=0, prime_sel in bits [7:6].
-\ CMD address = MMIO_BASE + 0x0880
+\ MMIO plumbing — kept for backward compatibility with legacy code
 0xFFFFFF0000000880 CONSTANT _FIELD-CMD-ADDR
 
-\ Aliases for readability (must precede LOAD-PRIME which uses them)
 : FIELD-A!      X25519-SCALAR! ;
 : FIELD-B!      X25519-POINT! ;
 : FIELD-WAIT    X25519-WAIT ;
 : FIELD-STATUS@ X25519-STATUS@ ;
 : FIELD-RESULT@ X25519-RESULT@ ;
 
-: PRIME-25519  ( -- )   0 _FIELD-CMD-ADDR C! ;    \ prime_sel=0
-: PRIME-SECP   ( -- )  64 _FIELD-CMD-ADDR C! ;    \ prime_sel=1 (1<<6)
-: PRIME-P256   ( -- ) 128 _FIELD-CMD-ADDR C! ;    \ prime_sel=2 (2<<6)
-: PRIME-CUSTOM ( -- ) 192 _FIELD-CMD-ADDR C! ;    \ prime_sel=3 (3<<6)
-
-\ LOAD-PRIME ( p-addr pinv-addr -- )  Latch custom prime + p_inv.
-: LOAD-PRIME ( p pinv -- )
-    SWAP FIELD-A! FIELD-B!
-    FMODE-LOAD-PRIME FIELD-CMD!
-    FIELD-WAIT ;
+\ Prime selection — now uses per-core ISA via GF-PRIME
+: PRIME-25519  ( -- ) 0 GF-PRIME ;
+: PRIME-SECP   ( -- ) 1 GF-PRIME ;
+: PRIME-P256   ( -- ) 2 GF-PRIME ;
+: PRIME-CUSTOM ( -- ) 3 GF-PRIME ;
 
 \ Scratch buffers for field ops (32 bytes each)
 CREATE _FA  32 ALLOT
@@ -1230,116 +1222,9 @@ CREATE _FB  32 ALLOT
 CREATE _FR  32 ALLOT
 CREATE _FRH 32 ALLOT
 
-\ ------------------------------------------------------------------
-\ Core field operations — all take/return 32-byte buffer addresses
-\ ------------------------------------------------------------------
-
-\ FADD ( a-addr b-addr result-addr -- )  (a+b) mod p
-: FADD ( a b r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-ADD FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FSUB ( a-addr b-addr result-addr -- )  (a-b) mod p
-: FSUB ( a b r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-SUB FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FMUL ( a-addr b-addr result-addr -- )  (a*b) mod p
-: FMUL ( a b r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-MUL FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FSQR ( a-addr result-addr -- )  a^2 mod p
-: FSQR ( a r -- )
-    >R
-    FIELD-A!
-    FMODE-SQR FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FINV ( a-addr result-addr -- )  a^(p-2) mod p  (Fermat inversion)
-: FINV ( a r -- )
-    >R
-    FIELD-A!
-    FMODE-INV FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FPOW ( base-addr exp-addr result-addr -- )  base^exp mod p
-: FPOW ( a e r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-POW FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FMUL-RAW ( a-addr b-addr rlo-addr rhi-addr -- )
-\   Raw 256x256 -> 512-bit product.  No modular reduction.
-\   Result split: low 256 bits in rlo, high 256 bits in rhi.
-: FMUL-RAW ( a b rlo rhi -- )
-    >R >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-RAW FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@
-    R> FIELD-RESULT-HI@ ;
-
-\ FCMOV ( a-addr cond-addr -- )  Constant-time conditional move.
-\   If cond[0]=1, result_lo <- a; else result_lo unchanged.
-\   Result stays in device register (no copy-out).
-: FCMOV ( a cond -- )
-    SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-CMOV FIELD-CMD!
-    FIELD-WAIT ;
-
-\ FCEQ ( a-addr b-addr result-addr -- )  Constant-time equality test.
-\   result = (a == b) ? 1 : 0.
-: FCEQ ( a b r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-CEQ FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FMAC ( a-addr b-addr result-addr -- )
-\   Field multiply-accumulate: result += a*b mod p.
-\   Accumulates into device's result_lo register, then copies out.
-: FMAC ( a b r -- )
-    >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-MAC FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@ ;
-
-\ FMUL-ADD-RAW ( a-addr b-addr rlo-addr rhi-addr -- )
-\   Raw 512-bit multiply-accumulate (no field reduction).
-\   Accumulates into device's {result_hi, result_lo}, then copies out.
-: FMUL-ADD-RAW ( a b rlo rhi -- )
-    >R >R SWAP
-    FIELD-A!
-    FIELD-B!
-    FMODE-MAC-RAW FIELD-CMD!
-    FIELD-WAIT
-    R> FIELD-RESULT@
-    R> FIELD-RESULT-HI@ ;
+\ FADD/FSUB/FMUL/FSQR/FINV/FPOW/FMUL-RAW/FCMOV/FCEQ/FMAC/
+\ FMUL-ADD-RAW/LOAD-PRIME are now BIOS dictionary primitives
+\ (ISA-based assembly in bios.asm).  No Forth definitions needed.
 
 \ .FIELD-STATUS ( -- )  Print human-readable field ALU status.
 : .FIELD-STATUS

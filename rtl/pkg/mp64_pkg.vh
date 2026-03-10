@@ -124,6 +124,7 @@ localparam [4:0] CPU_DICT       = 5'd16; // EXT.DICT engine stall
 localparam [4:0] CPU_CRYPTO     = 5'd17; // EXT.CRYPTO stall (multi-cycle ops)
 localparam [4:0] CPU_SHA_LOAD   = 5'd18; // SHA-2: loading W from tile memory
 localparam [4:0] CPU_SHA_WAIT   = 5'd19; // SHA-2: waiting for compression engine
+localparam [4:0] CPU_GF_WAIT    = 5'd20; // Field ALU: waiting for GF engine
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;

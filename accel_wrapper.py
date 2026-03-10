@@ -735,6 +735,7 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.sha_mode = cs.sha_mode
     py_cpu.sha_msglen_lo = cs.sha_msglen_lo
     py_cpu.sha_msglen_hi = cs.sha_msglen_hi
+    py_cpu.gf_prime_sel = cs.gf_prime_sel
 
 def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     """Copy Python Megapad64 state → C++ CPUState after fallback."""
@@ -798,6 +799,7 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.sha_mode = py_cpu.sha_mode
     cs.sha_msglen_lo = py_cpu.sha_msglen_lo
     cs.sha_msglen_hi = py_cpu.sha_msglen_hi
+    cs.gf_prime_sel = py_cpu.gf_prime_sel
 
 # ── CSR access (Python-side, matching megapad64.py) ──────
 

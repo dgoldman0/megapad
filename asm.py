@@ -96,14 +96,27 @@ CRYPTO_SHA_SUB = {
     "sha.init": 0x10, "sha.round": 0x11, "sha.pad": 0x12,
     "sha.din": 0x13, "sha.dout": 0x14, "sha.final": 0x15,
 }
+# Field ALU sub-ops (0x20–0x2F)
+CRYPTO_GF_SUB = {
+    "gf.add": 0x20, "gf.sub": 0x21, "gf.mul": 0x22, "gf.sqr": 0x23,
+    "gf.inv": 0x24, "gf.pow": 0x25, "gf.mulr": 0x26,
+    "gf.mac": 0x27, "gf.macr": 0x28, "gf.cmov": 0x29,
+    "gf.ceq": 0x2A, "gf.prime": 0x2B, "gf.ldprime": 0x2C,
+    "gf.x25519": 0x2D,
+}
 # All EXT.CRYPTO mnemonics that take Rd, Rs operands (3-byte: FB sub DR)
-CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "sha.din", "sha.dout"}
+CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "sha.din", "sha.dout",
+                  "gf.cmov"}
 # All EXT.CRYPTO mnemonics that take imm8 operand (3-byte: FB sub imm8)
-CRYPTO_IMM_OPS = {"crc.mode", "sha.init"}
+CRYPTO_IMM_OPS = {"crc.mode", "sha.init", "gf.prime"}
 # All EXT.CRYPTO mnemonics with no operand (2-byte: FB sub)
-CRYPTO_BARE_OPS = {"crc.init", "sha.round", "sha.pad", "sha.final"}
+CRYPTO_BARE_OPS = {"crc.init", "sha.round", "sha.pad", "sha.final",
+                   "gf.add", "gf.sub", "gf.mul", "gf.sqr",
+                   "gf.inv", "gf.pow", "gf.mulr",
+                   "gf.mac", "gf.macr", "gf.ceq", "gf.ldprime",
+                   "gf.x25519"}
 # Combined
-CRYPTO_SUB = {**CRYPTO_CRC_SUB, **CRYPTO_SHA_SUB}
+CRYPTO_SUB = {**CRYPTO_CRC_SUB, **CRYPTO_SHA_SUB, **CRYPTO_GF_SUB}
 
 # ---------------------------------------------------------------------------
 #  Parser helpers

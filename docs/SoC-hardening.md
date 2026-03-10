@@ -1,6 +1,6 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC full migration DONE (MMIO removed) — 50/58 items done)  
+Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC full migration DONE (MMIO removed), Field ALU ISA DONE (emulator + RTL + tests) — 53/58 items done)  
 Last updated: 2026-03-09
 
 ---
@@ -2527,10 +2527,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] B.12: Open questions documented
 - [x] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
-- [ ] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x)
+- [x] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x) (2026-03-11)
 - [x] RTL: per-core CRC datapath
 - [x] RTL: per-core SHA-2 datapath (mp64_sha2_isa.v + tb, 7/7 NIST) (2026-03-10)
-- [ ] RTL: per-core Field ALU datapath
+- [x] RTL: per-core Field ALU datapath (mp64_field_alu_isa.v + tb, 33/33) (2026-03-11)
 - [x] RTL: instruction decode for FB prefix
 - [x] C++ accelerator: EXT.CRYPTO dispatch
 - [x] C++ accelerator: SHA-2 sub-ops (sha.init/din/dout/final) (2026-03-10)
@@ -2538,16 +2538,16 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [ ] MMIO shared instances: removal
 - [x] Tests: CRC ISA
 - [x] Tests: SHA-2 ISA (2026-03-10)
-- [ ] Tests: Field ALU ISA
+- [x] Tests: Field ALU ISA (Python 47/47, RTL 33/33) (2026-03-11)
 
 ### Overall Progress
 
 | Category | Done | Remaining |
 |----------|------|-----------|
 | Spec / design | 12 | 0 |
-| RTL | 9 | 4 |
-| Emulator (Python) | 7 | 2 |
+| RTL | 10 | 3 |
+| Emulator (Python) | 8 | 1 |
 | C++ accelerator | 4 | 2 |
 | BIOS | 6 | 2 |
-| Tests | 8 | 2 |
-| **Total** | **42** | **16** |
+| Tests | 9 | 1 |
+| **Total** | **45** | **13** |

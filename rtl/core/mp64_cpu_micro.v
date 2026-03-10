@@ -82,6 +82,19 @@ module mp64_cpu_micro (
     input  wire        sha_done,
     input  wire        sha_rd_we_in,  // 1 = write sha_result to R[dst_reg]
 
+    // === Shared Field ALU ISA interface (to cluster GF arbiter) ===
+    output reg         gf_req,
+    output reg  [3:0]  gf_op,
+    output reg  [63:0] gf_rd_val,     // R[Rd] value for GF.CMOV condition
+    output reg  [7:0]  gf_imm8,
+    input  wire [255:0] gf_acc_out,    // updated ACC from GF engine
+    input  wire        gf_acc_we,
+    input  wire [1:0]  gf_prime_sel_out,
+    input  wire        gf_prime_sel_we,
+    input  wire        gf_flag_z,
+    input  wire        gf_flag_z_we,
+    input  wire        gf_done,
+
     // === Shared Tile/MEX interface (to cluster tile arbiter) ===
     output reg         mex_req,       // request tile engine access
     output reg  [1:0]  mex_ss,        // source selector
@@ -267,6 +280,10 @@ module mp64_cpu_micro (
             crc_imm8   <= 8'd0;
 
             sha_req    <= 1'b0;
+            gf_req     <= 1'b0;
+            gf_op      <= 4'd0;
+            gf_rd_val  <= 64'd0;
+            gf_imm8    <= 8'd0;
             sha_op     <= 4'd0;
             sha_rs_val <= 64'd0;
             sha_imm8   <= 8'd0;
@@ -1002,6 +1019,21 @@ module mp64_cpu_micro (
                     sha_req <= 1'b0;
                     if (sha_rd_we_in)
                         R[dst_reg] <= sha_result;
+                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
+            // GF_WAIT: wait for field ALU ISA engine
+            // ============================================================
+            CPU_GF_WAIT: begin
+                if (gf_done) begin
+                    gf_req <= 1'b0;
+                    // ACC writeback handled by cluster (gf_acc_we)
+                    // Prime selection writeback
+                    // Flag writeback (GF.CEQ → Z flag)
+                    if (gf_flag_z_we)
+                        flags[0] <= gf_flag_z;
                     cpu_state <= CPU_FETCH;
                 end
             end

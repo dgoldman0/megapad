@@ -120,6 +120,7 @@ CSR_CRC_MODE      = 0x81   # RW: polynomial select (0=CRC32, 1=CRC32C, 2=CRC64)
 CSR_SHA_MODE      = 0x82   # RW: 0=SHA-256, 1=SHA-384, 2=SHA-512
 CSR_SHA_MSGLEN    = 0x83   # RW: total message length in bits (low 64)
 CSR_SHA_MSGLEN_HI = 0x84   # RW: total message length in bits (high 64)
+CSR_GF_PRIME_SEL  = 0x85   # RW: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom
 
 # I-Cache CSRs (§12.2)
 CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
@@ -448,6 +449,109 @@ def _sha512_compress(H: list[int], block: bytes) -> list[int]:
     return [(H[i] + v) & _M64 for i, v in enumerate((a, b, c, d, e, f, g, h))]
 
 # ---------------------------------------------------------------------------
+#  Field ALU module-level helpers & constants (multi-prime GF arithmetic)
+# ---------------------------------------------------------------------------
+
+_M256 = (1 << 256) - 1
+_M512 = (1 << 512) - 1
+
+# Built-in primes (matching RTL and C++ implementation)
+_GF_PRIMES = [
+    (1 << 255) - 19,                                           # Curve25519
+    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F,  # secp256k1
+    0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF,  # NIST P-256
+]
+
+def _gf_get_prime(sel: int, custom_p: int) -> int:
+    """Return the active prime for the given selection."""
+    if sel < 3:
+        return _GF_PRIMES[sel]
+    if sel == 3 and custom_p != 0:
+        return custom_p
+    return _GF_PRIMES[0]  # fallback
+
+def _gf_addmod(a: int, b: int, p: int) -> int:
+    return (a + b) % p
+
+def _gf_submod(a: int, b: int, p: int) -> int:
+    return (a - b) % p
+
+def _gf_mulmod(a: int, b: int, p: int) -> int:
+    return (a * b) % p
+
+def _gf_sqrmod(a: int, p: int) -> int:
+    return (a * a) % p
+
+def _gf_invmod(a: int, p: int) -> int:
+    """Fermat inversion: a^(p-2) mod p."""
+    return pow(a, p - 2, p)
+
+def _gf_powmod(a: int, e: int, p: int) -> int:
+    return pow(a, e, p)
+
+def _gf_mont_mulmod(a: int, b: int, p: int, p_inv: int) -> int:
+    """Montgomery multiplication: (a * b * R^{-1}) mod p, where R = 2^256."""
+    t = a * b
+    m = ((t & _M256) * p_inv) & _M256
+    u = (t + m * p) >> 256
+    if u >= p:
+        u -= p
+    return u
+
+def _gf_mont_sqrmod(a: int, p: int, p_inv: int) -> int:
+    return _gf_mont_mulmod(a, a, p, p_inv)
+
+def _x25519_scalar_mul(scalar_bytes: bytes, u_bytes: bytes) -> int:
+    """RFC 7748 X25519 scalar multiplication.  Returns 256-bit result."""
+    p = _GF_PRIMES[0]  # 2^255 - 19
+
+    # Decode scalar with clamping (RFC 7748 §5)
+    k = int.from_bytes(scalar_bytes, 'little')
+    k &= ~7                          # clear low 3 bits
+    k &= ~(1 << 255)                 # clear bit 255
+    k |= (1 << 254)                  # set bit 254
+
+    # Decode u-coordinate
+    u = int.from_bytes(u_bytes, 'little')
+    u &= (1 << 255) - 1              # clear top bit
+
+    # Montgomery ladder
+    x_1 = u
+    x_2, z_2 = 1, 0
+    x_3, z_3 = u, 1
+    swap = 0
+
+    for t in range(254, -1, -1):
+        k_t = (k >> t) & 1
+        swap ^= k_t
+        # constant-time conditional swap
+        if swap:
+            x_2, x_3 = x_3, x_2
+            z_2, z_3 = z_3, z_2
+        swap = k_t
+
+        A  = (x_2 + z_2) % p
+        AA = (A * A) % p
+        B  = (x_2 - z_2) % p
+        BB = (B * B) % p
+        E  = (AA - BB) % p
+        C  = (x_3 + z_3) % p
+        D  = (x_3 - z_3) % p
+        DA = (D * A) % p
+        CB = (C * B) % p
+        x_3 = pow(DA + CB, 2, p)
+        z_3 = (x_1 * pow(DA - CB, 2, p)) % p
+        x_2 = (AA * BB) % p
+        a24 = 121666
+        z_2 = (E * (AA + a24 * E)) % p
+
+    if swap:
+        x_2, x_3 = x_3, x_2
+        z_2, z_3 = z_3, z_2
+
+    return (x_2 * pow(z_2, p - 2, p)) % p
+
+# ---------------------------------------------------------------------------
 #  CPU
 # ---------------------------------------------------------------------------
 
@@ -593,6 +697,13 @@ class Megapad64:
         self.sha_mode: int      = 0   # 0=SHA-256, 1=SHA-384, 2=SHA-512
         self.sha_msglen_lo: int = 0   # message length in bits (low 64)
         self.sha_msglen_hi: int = 0   # message length in bits (high 64)
+
+        # EXT.CRYPTO Field ALU per-core state (Appendix B, §B.5)
+        self.gf_prime_sel: int = 0     # 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom
+        self.gf_custom_p:  int = 0     # 256-bit custom prime
+        self.gf_mont_pinv: int = 0     # -p^{-1} mod 2^{256} for Montgomery REDC
+        self.gf_prev_lo:   int = 0     # 256-bit previous result (low)  for FCMOV/FMAC/MACR
+        self.gf_prev_hi:   int = 0     # 256-bit previous result (high) for MACR
 
         # EXT.DICT hardware dictionary hash table (behavioural model)
         # 64 sets × 4 ways.  Each entry:
@@ -980,6 +1091,7 @@ class Megapad64:
             CSR_SHA_MODE:       lambda: self.sha_mode,
             CSR_SHA_MSGLEN:     lambda: self.sha_msglen_lo,
             CSR_SHA_MSGLEN_HI:  lambda: self.sha_msglen_hi,
+            CSR_GF_PRIME_SEL:   lambda: self.gf_prime_sel,
         }
         fn = m.get(addr)
         if fn is None:
@@ -1041,6 +1153,7 @@ class Megapad64:
             CSR_SHA_MODE:      lambda v: setattr(self, 'sha_mode', v & 0x03),
             CSR_SHA_MSGLEN:    lambda v: setattr(self, 'sha_msglen_lo', v & MASK64),
             CSR_SHA_MSGLEN_HI: lambda v: setattr(self, 'sha_msglen_hi', v & MASK64),
+            CSR_GF_PRIME_SEL:  lambda v: setattr(self, 'gf_prime_sel', v & 0x03),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -1709,8 +1822,7 @@ class Megapad64:
         elif unit == 0x1:
             return self._exec_sha(op)
         elif unit == 0x2:
-            raise TrapError(IVEC_ILLEGAL_OP,
-                            f"EXT.CRYPTO Field ALU (FB 2x) not yet implemented")
+            return self._exec_field(op)
         else:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO unit {unit:#x} reserved")
@@ -1942,6 +2054,192 @@ class Megapad64:
         else:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO SHA-2 sub-op {op:#x} reserved")
+
+    # ------------------------------------------------------------------
+    #  EXT.CRYPTO Field ALU ISA  (sub-ops FB 20–2F, §B.5)
+    # ------------------------------------------------------------------
+
+    def _gf_acc_to_int(self) -> int:
+        """Pack ACC0-ACC3 into a 256-bit little-endian integer."""
+        return (self.acc[0]
+                | (self.acc[1] << 64)
+                | (self.acc[2] << 128)
+                | (self.acc[3] << 192))
+
+    def _gf_int_to_acc(self, v: int):
+        """Unpack a 256-bit integer back into ACC0-ACC3."""
+        v &= _M256
+        self.acc[0] = v & MASK64
+        self.acc[1] = (v >> 64) & MASK64
+        self.acc[2] = (v >> 128) & MASK64
+        self.acc[3] = (v >> 192) & MASK64
+
+    def _gf_read_tile_b(self) -> int:
+        """Read 32 bytes from M[TSRC0] as a 256-bit little-endian integer."""
+        base = u64(self.tsrc0)
+        val = 0
+        for i in range(32):
+            val |= self.mem_read8(base + i) << (i * 8)
+        return val
+
+    def _gf_write_tile_dst(self, v: int):
+        """Write 32 bytes to M[TDST] as little-endian."""
+        base = u64(self.tdst)
+        v &= _M256
+        for i in range(32):
+            self.mem_write8(base + i, (v >> (i * 8)) & 0xFF)
+
+    def _gf_prime(self) -> int:
+        return _gf_get_prime(self.gf_prime_sel, self.gf_custom_p)
+
+    def _gf_is_mont(self) -> bool:
+        return self.gf_prime_sel == 3 and self.gf_mont_pinv != 0
+
+    def _gf_mulmod_sel(self, a: int, b: int, p: int) -> int:
+        """Multiply with Montgomery REDC when custom prime + p_inv set."""
+        if self._gf_is_mont():
+            return _gf_mont_mulmod(a, b, p, self.gf_mont_pinv)
+        return _gf_mulmod(a, b, p)
+
+    def _gf_sqrmod_sel(self, a: int, p: int) -> int:
+        if self._gf_is_mont():
+            return _gf_mont_sqrmod(a, p, self.gf_mont_pinv)
+        return _gf_sqrmod(a, p)
+
+    def _exec_field(self, op: int) -> int:
+        """Field ALU sub-ops (FB 20–2F).
+
+        All 256-bit operands:
+          A = ACC0-ACC3
+          B = M[TSRC0] (32 bytes, little-endian)
+        Result → ACC0-ACC3 (and optionally M[TDST] for high half).
+        """
+        p = self._gf_prime()
+
+        if op == 0x0:  # GF.ADD
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            r = _gf_addmod(a, b, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 1
+
+        elif op == 0x1:  # GF.SUB
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            r = _gf_submod(a, b, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 1
+
+        elif op == 0x2:  # GF.MUL
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            r = self._gf_mulmod_sel(a, b, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 4 if self._gf_is_mont() else 1
+
+        elif op == 0x3:  # GF.SQR
+            a = self._gf_acc_to_int()
+            r = self._gf_sqrmod_sel(a, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 4 if self._gf_is_mont() else 1
+
+        elif op == 0x4:  # GF.INV  (~767 cycles)
+            a = self._gf_acc_to_int()
+            r = _gf_invmod(a, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 767
+
+        elif op == 0x5:  # GF.POW  (~767 cycles)
+            a = self._gf_acc_to_int()
+            e = self._gf_read_tile_b()
+            r = _gf_powmod(a, e, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 767
+
+        elif op == 0x6:  # GF.MULR — raw 256×256→512
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            product = a * b
+            lo = product & _M256
+            hi = (product >> 256) & _M256
+            self._gf_int_to_acc(lo)
+            self._gf_write_tile_dst(hi)
+            self.gf_prev_lo = lo
+            self.gf_prev_hi = hi
+            return 1
+
+        elif op == 0x7:  # GF.MAC — (ACC * B + prev) mod p
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            ab = self._gf_mulmod_sel(a, b, p)
+            r = _gf_addmod(ab, self.gf_prev_lo, p)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 4 if self._gf_is_mont() else 1
+
+        elif op == 0x8:  # GF.MACR — raw: prev_512 + ACC * B
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            mul_lo, mul_hi = a * b & _M256, (a * b >> 256) & _M256
+            prev = self.gf_prev_lo | (self.gf_prev_hi << 256)
+            total = prev + a * b
+            lo = total & _M256
+            hi = (total >> 256) & _M256
+            self._gf_int_to_acc(lo)
+            self._gf_write_tile_dst(hi)
+            self.gf_prev_lo = lo
+            self.gf_prev_hi = hi
+            return 1
+
+        elif op == 0x9:  # GF.CMOV Rd — conditional move
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            cond = self.regs[rd] != 0
+            b = self._gf_read_tile_b()
+            if cond:
+                self._gf_int_to_acc(b)
+                self.gf_prev_lo = b
+            # else ACC unchanged (constant-time in hardware)
+            return 1
+
+        elif op == 0xA:  # GF.CEQ — constant-time equality
+            a = self._gf_acc_to_int()
+            b = self._gf_read_tile_b()
+            eq = 1 if a == b else 0
+            self._gf_int_to_acc(eq)
+            self.gf_prev_lo = eq
+            self.flag_z = (a == b)
+            return 1
+
+        elif op == 0xB:  # GF.PRIME imm8
+            imm8 = self.fetch8()
+            self.gf_prime_sel = imm8 & 0x03
+            return 1
+
+        elif op == 0xC:  # GF.LDPRIME — load custom prime
+            self.gf_custom_p = self._gf_acc_to_int()
+            self.gf_mont_pinv = self._gf_read_tile_b()
+            return 1
+
+        elif op == 0xD:  # GF.X25519 (~4335 cycles)
+            scalar = self._gf_acc_to_int()
+            u_coord = self._gf_read_tile_b()
+            scalar_bytes = scalar.to_bytes(32, 'little')
+            u_bytes = u_coord.to_bytes(32, 'little')
+            r = _x25519_scalar_mul(scalar_bytes, u_bytes)
+            self._gf_int_to_acc(r)
+            self.gf_prev_lo = r
+            return 4335
+
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO Field ALU sub-op {op:#x} reserved")
 
     # -- Trap entry --
 

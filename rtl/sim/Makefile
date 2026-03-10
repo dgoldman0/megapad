@@ -39,12 +39,13 @@ CORE_SRC = $(CORE)/mp64_alu.v \
            $(CORE)/mp64_cpu_micro.v \
            $(CORE)/mp64_cluster.v \
            $(CRYPTO)/mp64_crc_isa.v \
-           $(CRYPTO)/mp64_sha2_isa.v
+           $(CRYPTO)/mp64_sha2_isa.v \
+           $(CRYPTO)/mp64_field_alu_isa.v
 
 .PHONY: all clean phase1 phase2 phase3 phase4 phase5 \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
-        alu bitfield icache cpu_smoke cluster crc_isa sha2_isa \
+        alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals crypto ntt field_alu kem nic mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke
 
@@ -145,7 +146,7 @@ tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
 # Phase 3: CPU Core, Micro-Core & Cluster
 # ==========================================================================
 
-phase3: alu bitfield crc_isa sha2_isa icache cpu_smoke cluster cpu_micro opcodes string dict
+phase3: alu bitfield crc_isa sha2_isa field_alu_isa icache cpu_smoke cluster cpu_micro opcodes string dict
 	@echo ""
 	@echo "--- Phase 3 complete ---"
 
@@ -175,6 +176,13 @@ sha2_isa: tb_sha2_isa.vvp
 	$(VVP) $<
 
 tb_sha2_isa.vvp: tb_sha2_isa.v $(CRYPTO)/mp64_sha2_isa.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Field ALU ISA engine ---
+field_alu_isa: tb_field_alu_isa.vvp
+	$(VVP) $<
+
+tb_field_alu_isa.vvp: tb_field_alu_isa.v $(CRYPTO)/mp64_field_alu_isa.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- I-cache ---

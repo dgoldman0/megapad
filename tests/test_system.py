@@ -10961,14 +10961,15 @@ class TestFieldALU(_KDOSTestBase):
         self.assertIn("ST=0 ", text)
 
     def test_field_status_done(self):
-        """FIELD-STATUS@ returns 2 after computation."""
+        """ISA field ops complete synchronously — FIELD-STATUS@ stays 0 (idle)."""
         setup = self._setup_ab(42, 17)
         setup.extend([
             "tv-a tv-b tv-r FADD",
             '."  ST=" FIELD-STATUS@ .',
         ])
         text = self._run_kdos(setup)
-        self.assertIn("ST=2 ", text)
+        # ISA ops don't touch the MMIO status register
+        self.assertIn("ST=0 ", text)
 
     def test_field_status_display(self):
         """.FIELD-STATUS prints human-readable status."""
@@ -11428,8 +11429,8 @@ class TestFieldALUNewModes(_KDOSTestBase):
         lines.extend(self._load_small_int("tv-new", 99))
         lines.append("1 tv-c C!")  # cond = 1
         lines.extend(["tv-new tv-c FCMOV"])
-        # Read result (FCMOV result stays in device register, read via FIELD-RESULT@)
-        lines.extend(["tv-r FIELD-RESULT@"])
+        # Read result from ISA ACC registers via GF-R@
+        lines.extend(["tv-r GF-R@"])
         lines.extend(self._read_result_u64())
         text = self._run_kdos(lines)
         self.assertIn("R0=99 ", text)
@@ -11448,7 +11449,8 @@ class TestFieldALUNewModes(_KDOSTestBase):
         lines.extend(self._load_small_int("tv-new", 99))
         lines.append("tv-c 32 0 FILL")  # cond = 0
         lines.extend(["tv-new tv-c FCMOV"])
-        lines.extend(["tv-r FIELD-RESULT@"])
+        # Read result from ISA ACC registers via GF-R@
+        lines.extend(["tv-r GF-R@"])
         lines.extend(self._read_result_u64())
         text = self._run_kdos(lines)
         self.assertIn("R0=42 ", text)
