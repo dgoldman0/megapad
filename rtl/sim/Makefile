@@ -31,6 +31,7 @@ PRIM_SRC = $(PRIM)/mp64_sram_sp.v \
 
 # Core sources (Phase 3)
 CORE_SRC = $(CORE)/mp64_alu.v \
+           $(CORE)/mp64_bitfield.v \
            $(CORE)/mp64_icache.v \
            $(CORE)/mp64_cpu.v \
            $(CORE)/mp64_string.v \
@@ -41,7 +42,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
 .PHONY: all clean phase1 phase2 phase3 phase4 phase5 \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
-        alu icache cpu_smoke cluster \
+        alu bitfield icache cpu_smoke cluster \
         peripherals crypto ntt field_alu kem nic mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke
 
@@ -142,7 +143,7 @@ tb_extmem.vvp: tb_extmem.v $(MEM)/mp64_extmem.v
 # Phase 3: CPU Core, Micro-Core & Cluster
 # ==========================================================================
 
-phase3: alu icache cpu_smoke cluster cpu_micro opcodes string dict
+phase3: alu bitfield icache cpu_smoke cluster cpu_micro opcodes string dict
 	@echo ""
 	@echo "--- Phase 3 complete ---"
 
@@ -151,6 +152,13 @@ alu: tb_alu.vvp
 	$(VVP) $<
 
 tb_alu.vvp: tb_alu.v $(CORE)/mp64_alu.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Bitfield ALU ---
+bitfield: tb_bitfield.vvp
+	$(VVP) $<
+
+tb_bitfield.vvp: tb_bitfield.v $(CORE)/mp64_bitfield.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- I-cache ---
@@ -166,6 +174,7 @@ cpu_smoke: tb_cpu_smoke.vvp
 
 tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                   $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
+                  $(CORE)/mp64_bitfield.v \
                   $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                   $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                   $(MEM)/mp64_memory.v
@@ -176,7 +185,7 @@ cluster: tb_cluster.vvp
 	$(VVP) $<
 
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
-                $(CORE)/mp64_alu.v $(PRIM)/mp64_mul.v \
+                $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
                 $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
@@ -184,7 +193,8 @@ tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
 cpu_micro: tb_cpu_micro.vvp
 	-$(VVP) $<
 
-tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v
+tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v \
+                  $(CORE)/mp64_bitfield.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Comprehensive opcode tests ---
@@ -193,6 +203,7 @@ opcodes: tb_opcodes.vvp
 
 tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
                 $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
+                $(CORE)/mp64_bitfield.v \
                 $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
                 $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
                 $(MEM)/mp64_memory.v
@@ -203,7 +214,8 @@ string: tb_string.vvp
 	$(VVP) $<
 
 tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
-               $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v $(CORE)/mp64_icache.v \
+               $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
+               $(CORE)/mp64_bitfield.v $(CORE)/mp64_icache.v \
                $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
@@ -213,7 +225,8 @@ dict: tb_dict.vvp
 	$(VVP) $<
 
 tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
-             $(CORE)/mp64_string.v $(CORE)/mp64_alu.v $(CORE)/mp64_icache.v \
+             $(CORE)/mp64_string.v $(CORE)/mp64_alu.v \
+             $(CORE)/mp64_bitfield.v $(CORE)/mp64_icache.v \
              $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
              $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
@@ -313,7 +326,8 @@ multicore_smoke: tb_multicore_smoke.vvp
 
 tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
                         $(CORE)/mp64_dict.v $(CORE)/mp64_string.v \
-                        $(CORE)/mp64_alu.v $(CORE)/mp64_icache.v \
+                        $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v \
+                        $(CORE)/mp64_icache.v \
                         $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \
                         $(BUS)/mp64_bus.v

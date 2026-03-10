@@ -1,6 +1,6 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA spec'd — 42/58 items done)  
+Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA spec'd — 43/58 items done)  
 Last updated: 2026-03-09
 
 ---
@@ -675,7 +675,7 @@ accumulator + control FSM.
 
 ### 4e. Bitfield ALU — DONE (Family 0xC, sub-ops C8–CF) (2026-03-09)
 
-**Status: DONE — C++ accelerator, Python emulator, assembler, BIOS words, tests, micro-core tiering**  
+**Status: DONE — C++ accelerator, Python emulator, RTL (`mp64_bitfield.v`), assembler, BIOS words, tests, micro-core tiering**  
 **Topology: per-core ISA (MULDIV family 0xC, 1-cycle combinational)**
 
 Single-cycle bit-manipulation operations encoded as sub-ops C8–CF in
@@ -2436,10 +2436,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 ### §4 — Other Accelerator Ideas
 
-**DONE (4e — Bitfield ALU, per-core ISA, C8–CF):** (2026-03-09)
+**DONE (4e — Bitfield ALU, per-core ISA, C8–CF + RTL):** (2026-03-09)
 
 - [x] 4e. Bitfield ALU — ISA encoding designed (Appendix A.4)
-- [x] 4e. Bitfield ALU — RTL implementation (spec only — Verilog TBD)
+- [x] 4e. Bitfield ALU — RTL implemented (`mp64_bitfield.v`, Tier 1/2 generate, 49/49 assertions)
 - [x] 4e. Bitfield ALU — emulator implementation (`megapad64.py _exec_muldiv` sub 0x8–0xF)
 - [x] 4e. Bitfield ALU — C++ accelerator (`mp64_accel.cpp` case 0x8–0xF with __builtin intrinsics)
 - [x] 4e. Bitfield ALU — tests (`test_bitfield_alu` — POPCNT/CLZ/CTZ/BITREV/BEXT/BDEP/RORI/BSWAP)
@@ -2447,6 +2447,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] 4e. Bitfield ALU — BIOS words (POPCNT/CLZ/CTZ/BITREV/BSWAP/NTOH/HTON/NTOH32/HTON32/NTOH16/HTON16/POOL-ALLOC/POOL-FREE/POOL-COUNT)
 - [x] 4e. Bitfield ALU — ISA reference updated (isa-reference.md Family 0xC)
 - [x] 4e. Bitfield ALU — micro-core Tier 1/2 gating (Tier 1 local, Tier 2 traps)
+- [x] 4e. Bitfield ALU — CPU integration (`mp64_cpu.v` + `mp64_cpu_micro.v` bf_active path)
 
 **Ideas (not yet committed):**
 

@@ -139,6 +139,16 @@ localparam [3:0] ALU_SBB = 4'd13;
 localparam [3:0] ALU_ROL = 4'd14;
 localparam [3:0] ALU_ROR = 4'd15;
 
+// --- Bitfield ALU operation codes (3-bit, MULDIV sub 0x8–0xF) ---
+localparam [2:0] BF_POPCNT = 3'd0;
+localparam [2:0] BF_CLZ    = 3'd1;
+localparam [2:0] BF_CTZ    = 3'd2;
+localparam [2:0] BF_BITREV = 3'd3;
+localparam [2:0] BF_BEXT   = 3'd4;   // Tier 2
+localparam [2:0] BF_BDEP   = 3'd5;   // Tier 2
+localparam [2:0] BF_RORI   = 3'd6;   // Tier 2
+localparam [2:0] BF_BSWAP  = 3'd7;   // Tier 2
+
 // --- Post-action codes (multi-cycle ops) ---
 localparam [2:0] POST_NONE     = 3'd0;
 localparam [2:0] POST_RTI_POP2 = 3'd1;  // after popping PC, pop flags

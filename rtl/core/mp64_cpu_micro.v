@@ -153,6 +153,25 @@ module mp64_cpu_micro (
         .flags_out(alu_flags_out)
     );
 
+    // ====================================================================
+    // Bitfield ALU instance (Tier 1 only — micro-core)
+    // ====================================================================
+    reg  [2:0]  bf_op;
+    reg  [63:0] bf_a, bf_b;
+    wire [63:0] bf_result;
+    wire        bf_flag_z, bf_flag_n;
+    reg         bf_active;
+
+    mp64_bitfield #(.ENABLE_TIER2(0)) u_bitfield (
+        .op     (bf_op),
+        .a      (bf_a),
+        .b      (bf_b),
+        .imm    (6'd0),         // RORI not available on micro-cores
+        .result (bf_result),
+        .flag_z (bf_flag_z),
+        .flag_n (bf_flag_n)
+    );
+
     // Combinational CSR address — cluster muxes rdata on this
     always @(*) cl_csr_addr = ibuf[1];
 
@@ -213,6 +232,11 @@ module mp64_cpu_micro (
             alu_op <= 4'd0;
             alu_a  <= 64'd0;
             alu_b  <= 64'd0;
+
+            bf_op     <= 3'd0;
+            bf_a      <= 64'd0;
+            bf_b      <= 64'd0;
+            bf_active <= 1'b0;
 
             mul_req <= 1'b0;
             mul_op  <= 4'd0;
@@ -303,6 +327,7 @@ module mp64_cpu_micro (
                 ibuf_len    <= 4'd0;
                 ibuf_need   <= 4'd1;
                 post_action <= POST_NONE;
+                bf_active   <= 1'b0;
 
                 // --------------------------------------------------------
                 // EXT prefix (0xF)
@@ -594,22 +619,35 @@ module mp64_cpu_micro (
                 end
 
                 // --------------------------------------------------------
-                // MULDIV (0xC) — always via cluster shared unit
+                // MULDIV (0xC) — MUL/DIV via cluster; bitfield Tier 1 local
                 // --------------------------------------------------------
                 else if (fam == FAM_MULDIV) begin
                     ext_active <= 1'b0;
                     dst_reg <= ibuf[1][7:4];
                     src_reg <= ibuf[1][3:0];
-                    // Divide-by-zero check for DIV/UDIV/MOD/UMOD
-                    if (nib >= 4'h4 && R[ibuf[1][3:0]] == 64'd0) begin
+                    if (nib <= 4'h7) begin
+                        // MUL/DIV sub-ops 0–7 → cluster shared unit
+                        if (nib >= 4'h4 && R[ibuf[1][3:0]] == 64'd0) begin
+                            ivec_id   <= IRQX_ILLEGAL_OP;
+                            cpu_state <= CPU_IRQ;
+                        end else begin
+                            mul_req <= 1'b1;
+                            mul_op  <= nib;
+                            mul_a   <= R[ibuf[1][7:4]];
+                            mul_b   <= R[ibuf[1][3:0]];
+                            cpu_state <= CPU_MULDIV;
+                        end
+                    end else if (nib <= 4'hB) begin
+                        // Tier 1 bitfield (0x8–0xB): POPCNT/CLZ/CTZ/BITREV — local
+                        bf_op <= nib[2:0];   // 0x8→0, 0x9→1, 0xA→2, 0xB→3
+                        bf_a  <= R[ibuf[1][7:4]];
+                        bf_b  <= R[ibuf[1][3:0]];
+                        bf_active <= 1'b1;
+                        cpu_state <= CPU_EXECUTE;
+                    end else begin
+                        // Tier 2 bitfield (0xC–0xF): BEXT/BDEP/RORI/BSWAP → ILLEGAL_OP
                         ivec_id   <= IRQX_ILLEGAL_OP;
                         cpu_state <= CPU_IRQ;
-                    end else begin
-                        mul_req <= 1'b1;
-                        mul_op  <= nib;
-                        mul_a   <= R[ibuf[1][7:4]];
-                        mul_b   <= R[ibuf[1][3:0]];
-                        cpu_state <= CPU_MULDIV;
                     end
                 end
 
@@ -726,12 +764,19 @@ module mp64_cpu_micro (
             end
 
             // ============================================================
-            // EXECUTE: ALU writeback
+            // EXECUTE: ALU / Bitfield writeback
             // ============================================================
             CPU_EXECUTE: begin
-                if (alu_op != ALU_CMP)
-                    R[dst_reg] <= alu_result;
-                flags <= alu_flags_out;
+                if (bf_active) begin
+                    R[dst_reg] <= bf_result;
+                    flags[0]   <= bf_flag_z;   // Z
+                    flags[2]   <= bf_flag_n;   // N
+                    bf_active  <= 1'b0;
+                end else begin
+                    if (alu_op != ALU_CMP)
+                        R[dst_reg] <= alu_result;
+                    flags <= alu_flags_out;
+                end
                 cpu_state <= CPU_FETCH;
             end
 

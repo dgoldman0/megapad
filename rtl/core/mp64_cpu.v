@@ -212,6 +212,26 @@ module mp64_cpu #(
     );
 
     // ====================================================================
+    // Bitfield ALU instance (Tier 2 enabled — major core)
+    // ====================================================================
+    reg  [2:0]  bf_op;
+    reg  [63:0] bf_a, bf_b;
+    reg  [5:0]  bf_imm;
+    wire [63:0] bf_result;
+    wire        bf_flag_z, bf_flag_n;
+    reg         bf_active;  // set during DECODE, checked in EXECUTE
+
+    mp64_bitfield #(.ENABLE_TIER2(1)) u_bitfield (
+        .op     (bf_op),
+        .a      (bf_a),
+        .b      (bf_b),
+        .imm    (bf_imm),
+        .result (bf_result),
+        .flag_z (bf_flag_z),
+        .flag_n (bf_flag_n)
+    );
+
+    // ====================================================================
     // Multi-cycle temporaries
     // ====================================================================
     reg [63:0] mem_data;
@@ -407,6 +427,12 @@ module mp64_cpu #(
             alu_a  <= 64'd0;
             alu_b  <= 64'd0;
 
+            bf_op     <= 3'd0;
+            bf_a      <= 64'd0;
+            bf_b      <= 64'd0;
+            bf_imm    <= 6'd0;
+            bf_active <= 1'b0;
+
             mul_result <= 128'd0;
             mul_start_r     <= 1'b0;
             mul_is_signed_r <= 1'b0;
@@ -601,6 +627,7 @@ module mp64_cpu #(
                 fetch_pc   <= R[psel] + {60'd0, ibuf_need};
                 icache_req <= 1'b0;
                 post_action <= POST_NONE;
+                bf_active   <= 1'b0;
 
                 // --------------------------------------------------------
                 // EXT prefix (0xF)
@@ -1072,6 +1099,41 @@ module mp64_cpu #(
                                 cpu_state     <= CPU_MULDIV;
                             end
                         end
+                        // ------------------------------------------------
+                        // Bitfield ALU — sub-ops 0x8–0xF (single-cycle)
+                        // ------------------------------------------------
+                        4'h8: begin // POPCNT — D ← popcount(Rs)
+                            bf_op <= BF_POPCNT; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'h9: begin // CLZ — D ← clz(Rs)
+                            bf_op <= BF_CLZ; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hA: begin // CTZ — D ← ctz(Rs)
+                            bf_op <= BF_CTZ; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hB: begin // BITREV — D ← bitrev(Rs)
+                            bf_op <= BF_BITREV; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hC: begin // BEXT — D ← pext(Rs, Rd)
+                            bf_op <= BF_BEXT; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hD: begin // BDEP — D ← pdep(Rd, Rs)
+                            bf_op <= BF_BDEP; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hE: begin // RORI — D ← rotr(Rd, imm6)
+                            bf_op <= BF_RORI; bf_a <= R[dst5]; bf_b <= 64'd0; bf_imm <= ibuf[2][5:0];
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
+                        4'hF: begin // BSWAP — D ← bswap(Rs)
+                            bf_op <= BF_BSWAP; bf_a <= R[dst5]; bf_b <= R[src5]; bf_imm <= 6'd0;
+                            bf_active <= 1'b1; dst_reg <= dst5; cpu_state <= CPU_EXECUTE;
+                        end
                         default: cpu_state <= CPU_FETCH;
                     endcase
                 end
@@ -1212,12 +1274,19 @@ module mp64_cpu #(
             end
 
             // ============================================================
-            // EXECUTE: ALU writeback
+            // EXECUTE: ALU / Bitfield writeback
             // ============================================================
             CPU_EXECUTE: begin
-                if (alu_op != ALU_CMP)
-                    R[dst_reg] <= alu_result;
-                flags <= alu_flags_out;
+                if (bf_active) begin
+                    R[dst_reg] <= bf_result;
+                    flags[0]   <= bf_flag_z;   // Z
+                    flags[2]   <= bf_flag_n;   // N
+                    bf_active  <= 1'b0;
+                end else begin
+                    if (alu_op != ALU_CMP)
+                        R[dst_reg] <= alu_result;
+                    flags <= alu_flags_out;
+                end
                 cpu_state <= CPU_FETCH;
             end
 

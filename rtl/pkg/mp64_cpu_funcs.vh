@@ -80,7 +80,7 @@ function [3:0] instr_len;
             FAM_IO:     instr_len = 4'd1;
             FAM_SEP:    instr_len = 4'd1;
             FAM_SEX:    instr_len = 4'd1;
-            FAM_MULDIV: instr_len = 4'd2;
+            FAM_MULDIV: instr_len = (byte0[3:0] == 4'hE) ? 4'd3 : 4'd2;  // RORI = 3 bytes
             FAM_CSR:    instr_len = 4'd2;
             FAM_MEX:    instr_len = (byte0[3:2] == 2'd1) ? 4'd3 : 4'd2;
             FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3  // EXT.STRING
