@@ -117,6 +117,9 @@ CSR_QOS_BWLIMIT    = 0x59   # Bandwidth limit
 # EXT.CRYPTO CSRs (Appendix B)
 CSR_CRC_ACC       = 0x80   # RW: 64-bit running CRC accumulator
 CSR_CRC_MODE      = 0x81   # RW: polynomial select (0=CRC32, 1=CRC32C, 2=CRC64)
+CSR_SHA_MODE      = 0x82   # RW: 0=SHA-256, 1=SHA-384, 2=SHA-512
+CSR_SHA_MSGLEN    = 0x83   # RW: total message length in bits (low 64)
+CSR_SHA_MSGLEN_HI = 0x84   # RW: total message length in bits (high 64)
 
 # I-Cache CSRs (§12.2)
 CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enabled
@@ -312,6 +315,139 @@ def zero_extend(val: int, bits: int) -> int:
     return val & ((1 << bits) - 1)
 
 # ---------------------------------------------------------------------------
+#  SHA-2 module-level helpers & constants (FIPS 180-4)
+# ---------------------------------------------------------------------------
+
+_M32 = 0xFFFF_FFFF
+_M64 = 0xFFFF_FFFF_FFFF_FFFF
+
+def _rotr32(x: int, n: int) -> int:
+    """32-bit right rotate."""
+    return ((x >> n) | (x << (32 - n))) & _M32
+
+def _rotr64(x: int, n: int) -> int:
+    """64-bit right rotate."""
+    return ((x >> n) | (x << (64 - n))) & _M64
+
+# SHA-256 round constants (§4.2.2)
+_K256 = (
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+)
+
+# SHA-512 round constants (§4.2.3)
+_K512 = (
+    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+)
+
+# SHA-256 initial hash values (§5.3.3)
+_SHA256_IV = (
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+)
+
+# SHA-384 initial hash values (§5.3.4)
+_SHA384_IV = (
+    0xcbbb9d5dc1059ed8, 0x629a292a367cd507,
+    0x9159015a3070dd17, 0x152fecd8f70e5939,
+    0x67332667ffc00b31, 0x8eb44a8768581511,
+    0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4,
+)
+
+# SHA-512 initial hash values (§5.3.5)
+_SHA512_IV = (
+    0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
+    0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+    0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+    0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+)
+
+def _sha256_compress(H: list[int], block: bytes) -> list[int]:
+    """SHA-256 compression function over one 64-byte block.
+
+    H: list of 8 × 32-bit state words [a..h].
+    block: 64 bytes (big-endian message block).
+    Returns updated H list.
+    """
+    # Parse block into 16 big-endian 32-bit words
+    W = list(struct.unpack('>16I', block))
+    # Message schedule expansion (§6.2.2 step 1)
+    for t in range(16, 64):
+        s0 = _rotr32(W[t-15], 7) ^ _rotr32(W[t-15], 18) ^ (W[t-15] >> 3)
+        s1 = _rotr32(W[t-2], 17) ^ _rotr32(W[t-2], 19)  ^ (W[t-2] >> 10)
+        W.append((W[t-16] + s0 + W[t-7] + s1) & _M32)
+    # Initialize working variables
+    a, b, c, d, e, f, g, h = H
+    # 64 rounds (§6.2.2 step 3)
+    for t in range(64):
+        S1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25)
+        ch = (e & f) ^ ((~e) & g) & _M32
+        temp1 = (h + S1 + ch + _K256[t] + W[t]) & _M32
+        S0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22)
+        maj = (a & b) ^ (a & c) ^ (b & c)
+        temp2 = (S0 + maj) & _M32
+        h, g, f, e, d, c, b, a = g, f, e, (d + temp1) & _M32, c, b, a, (temp1 + temp2) & _M32
+    # Add compressed chunk to hash (§6.2.2 step 4)
+    return [(H[i] + v) & _M32 for i, v in enumerate((a, b, c, d, e, f, g, h))]
+
+
+def _sha512_compress(H: list[int], block: bytes) -> list[int]:
+    """SHA-512 compression function over one 128-byte block.
+
+    H: list of 8 × 64-bit state words [a..h].
+    block: 128 bytes (big-endian message block).
+    Returns updated H list.
+    """
+    W = list(struct.unpack('>16Q', block))
+    for t in range(16, 80):
+        s0 = _rotr64(W[t-15], 1) ^ _rotr64(W[t-15], 8)  ^ (W[t-15] >> 7)
+        s1 = _rotr64(W[t-2], 19) ^ _rotr64(W[t-2], 61)  ^ (W[t-2] >> 6)
+        W.append((W[t-16] + s0 + W[t-7] + s1) & _M64)
+    a, b, c, d, e, f, g, h = H
+    for t in range(80):
+        S1 = _rotr64(e, 14) ^ _rotr64(e, 18) ^ _rotr64(e, 41)
+        ch = (e & f) ^ ((~e) & g) & _M64
+        temp1 = (h + S1 + ch + _K512[t] + W[t]) & _M64
+        S0 = _rotr64(a, 28) ^ _rotr64(a, 34) ^ _rotr64(a, 39)
+        maj = (a & b) ^ (a & c) ^ (b & c)
+        temp2 = (S0 + maj) & _M64
+        h, g, f, e, d, c, b, a = g, f, e, (d + temp1) & _M64, c, b, a, (temp1 + temp2) & _M64
+    return [(H[i] + v) & _M64 for i, v in enumerate((a, b, c, d, e, f, g, h))]
+
+# ---------------------------------------------------------------------------
 #  CPU
 # ---------------------------------------------------------------------------
 
@@ -452,6 +588,11 @@ class Megapad64:
         # EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
         self.crc_acc: int  = 0xFFFF_FFFF  # CRC accumulator
         self.crc_mode: int = 0            # 0=CRC32, 1=CRC32C, 2=CRC64
+
+        # EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
+        self.sha_mode: int      = 0   # 0=SHA-256, 1=SHA-384, 2=SHA-512
+        self.sha_msglen_lo: int = 0   # message length in bits (low 64)
+        self.sha_msglen_hi: int = 0   # message length in bits (high 64)
 
         # EXT.DICT hardware dictionary hash table (behavioural model)
         # 64 sets × 4 ways.  Each entry:
@@ -836,6 +977,9 @@ class Megapad64:
             # EXT.CRYPTO CSRs (Appendix B)
             CSR_CRC_ACC:        lambda: self.crc_acc,
             CSR_CRC_MODE:       lambda: self.crc_mode,
+            CSR_SHA_MODE:       lambda: self.sha_mode,
+            CSR_SHA_MSGLEN:     lambda: self.sha_msglen_lo,
+            CSR_SHA_MSGLEN_HI:  lambda: self.sha_msglen_hi,
         }
         fn = m.get(addr)
         if fn is None:
@@ -894,6 +1038,9 @@ class Megapad64:
             # EXT.CRYPTO CSRs (Appendix B)
             CSR_CRC_ACC:       lambda v: setattr(self, 'crc_acc', v & 0xFFFF_FFFF_FFFF_FFFF),
             CSR_CRC_MODE:      lambda v: setattr(self, 'crc_mode', v & 0x03),
+            CSR_SHA_MODE:      lambda v: setattr(self, 'sha_mode', v & 0x03),
+            CSR_SHA_MSGLEN:    lambda v: setattr(self, 'sha_msglen_lo', v & MASK64),
+            CSR_SHA_MSGLEN_HI: lambda v: setattr(self, 'sha_msglen_hi', v & MASK64),
         }
         fn = dispatch.get(addr)
         if fn:
@@ -1560,8 +1707,7 @@ class Megapad64:
         if unit == 0x0:
             return self._exec_crc(op)
         elif unit == 0x1:
-            raise TrapError(IVEC_ILLEGAL_OP,
-                            f"EXT.CRYPTO SHA-2 (FB 1x) not yet implemented")
+            return self._exec_sha(op)
         elif unit == 0x2:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO Field ALU (FB 2x) not yet implemented")
@@ -1619,6 +1765,183 @@ class Megapad64:
         else:
             raise TrapError(IVEC_ILLEGAL_OP,
                             f"EXT.CRYPTO CRC sub-op {op:#x} reserved")
+
+    # ------------------------------------------------------------------
+    #  EXT.CRYPTO SHA-2 ISA  (sub-ops FB 10–1F, §B.4)
+    # ------------------------------------------------------------------
+
+    def _sha_unpack_state(self) -> list[int]:
+        """Unpack 8 hash words H[0..7] from ACC0-ACC3 (+ R16-R19 for 512)."""
+        if self.sha_mode == 0:  # SHA-256: 2 × 32-bit per ACC
+            return [
+                (self.acc[0] >> 32) & _M32, self.acc[0] & _M32,
+                (self.acc[1] >> 32) & _M32, self.acc[1] & _M32,
+                (self.acc[2] >> 32) & _M32, self.acc[2] & _M32,
+                (self.acc[3] >> 32) & _M32, self.acc[3] & _M32,
+            ]
+        else:  # SHA-384 / SHA-512: 64-bit per slot
+            return [
+                self.acc[0], self.acc[1], self.acc[2], self.acc[3],
+                self.regs[16], self.regs[17], self.regs[18], self.regs[19],
+            ]
+
+    def _sha_pack_state(self, H: list[int]):
+        """Pack 8 hash words back into ACC0-ACC3 (+ R16-R19 for 512)."""
+        if self.sha_mode == 0:  # SHA-256
+            self.acc[0] = ((H[0] & _M32) << 32) | (H[1] & _M32)
+            self.acc[1] = ((H[2] & _M32) << 32) | (H[3] & _M32)
+            self.acc[2] = ((H[4] & _M32) << 32) | (H[5] & _M32)
+            self.acc[3] = ((H[6] & _M32) << 32) | (H[7] & _M32)
+        else:
+            self.acc[0], self.acc[1] = H[0], H[1]
+            self.acc[2], self.acc[3] = H[2], H[3]
+            self.regs[16], self.regs[17] = H[4], H[5]
+            self.regs[18], self.regs[19] = H[6], H[7]
+
+    def _sha_block_size(self) -> int:
+        return 128 if self.sha_mode >= 1 else 64
+
+    def _sha_read_block(self) -> bytes:
+        """Read one message block from tile memory at TSRC0."""
+        bsz = self._sha_block_size()
+        base = u64(self.tsrc0)
+        buf, off, sz = self._resolve_addr(base)
+        return bytes(buf[off:off + bsz])
+
+    def _sha_compress(self) -> int:
+        """Run SHA-2 compression on the block currently at M[TSRC0].
+        Returns cycle count."""
+        H = self._sha_unpack_state()
+        block = self._sha_read_block()
+        if self.sha_mode == 0:
+            H = _sha256_compress(H, block)
+            cycles = 64
+        else:
+            H = _sha512_compress(H, block)
+            cycles = 80
+        self._sha_pack_state(H)
+        self.flag_z = True
+        return cycles
+
+    def _sha_write_pad(self) -> bool:
+        """Apply FIPS 180-4 padding at M[TSRC0].  R0 = byte pos in block.
+        Returns True if a two-block pad is needed (C flag)."""
+        bsz = self._sha_block_size()
+        lsz = 16 if self.sha_mode >= 1 else 8  # length field size
+        pos = int(self.regs[0] & MASK64) % bsz
+        base = u64(self.tsrc0)
+
+        # 0x80 byte
+        self.mem_write8(base + pos, 0x80)
+        pos += 1
+
+        two_blocks = pos > (bsz - lsz)
+
+        if two_blocks:
+            # fill rest of block with zeros
+            while pos < bsz:
+                self.mem_write8(base + pos, 0x00)
+                pos += 1
+            self.flag_c = True
+            return True
+        else:
+            # zero-fill up to length field
+            while pos < bsz - lsz:
+                self.mem_write8(base + pos, 0x00)
+                pos += 1
+            # write big-endian length
+            lo, hi = self.sha_msglen_lo, self.sha_msglen_hi
+            if self.sha_mode >= 1:  # 128-bit length
+                for i in range(8):
+                    self.mem_write8(base + bsz - 16 + i,
+                                   (hi >> (56 - i * 8)) & 0xFF)
+            for i in range(8):
+                self.mem_write8(base + bsz - 8 + i,
+                               (lo >> (56 - i * 8)) & 0xFF)
+            self.flag_c = False
+            return False
+
+    def _exec_sha(self, op: int) -> int:
+        """SHA-2 sub-ops (FB 10–1F)."""
+
+        if op == 0x0:  # SHA.INIT imm8
+            imm8 = self.fetch8()
+            mode = imm8 & 0x03
+            self.sha_mode = mode
+            self.sha_msglen_lo = 0
+            self.sha_msglen_hi = 0
+            if mode == 0:
+                self._sha_pack_state(list(_SHA256_IV))
+            elif mode == 1:
+                self._sha_pack_state(list(_SHA384_IV))
+            else:
+                self._sha_pack_state(list(_SHA512_IV))
+            return 2
+
+        elif op == 0x1:  # SHA.ROUND
+            return self._sha_compress()
+
+        elif op == 0x2:  # SHA.PAD
+            self._sha_write_pad()
+            return 3
+
+        elif op == 0x3:  # SHA.DIN Rd, Rs
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            rs = (self._rex_s << 4) | (reg_byte & 0xF)
+            byte_val = self.regs[rs] & 0xFF
+            base = u64(self.tsrc0)
+            r0 = int(self.regs[0] & MASK64)
+            self.mem_write8(base + r0, byte_val)
+            r0 += 1
+            # track total message length
+            self.sha_msglen_lo = (self.sha_msglen_lo + 8) & MASK64
+            if self.sha_msglen_lo < 8:  # overflow
+                self.sha_msglen_hi = (self.sha_msglen_hi + 1) & MASK64
+            # auto-round when block is full
+            bsz = self._sha_block_size()
+            cycles = 1
+            if r0 >= bsz:
+                cycles += self._sha_compress()
+                r0 = 0
+            self.regs[0] = u64(r0)
+            self.regs[rd] = u64(r0)
+            return cycles
+
+        elif op == 0x4:  # SHA.DOUT Rd, Rs
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            rs = (self._rex_s << 4) | (reg_byte & 0xF)
+            idx = int(self.regs[rs]) & 0x7
+            H = self._sha_unpack_state()
+            self.regs[rd] = H[idx] & MASK64
+            return 1
+
+        elif op == 0x5:  # SHA.FINAL
+            two_blocks = self._sha_write_pad()
+            cycles = 3
+            if two_blocks:
+                cycles += self._sha_compress()
+                # write second pad block (all zeros + length)
+                bsz = self._sha_block_size()
+                lsz = 16 if self.sha_mode >= 1 else 8
+                base = u64(self.tsrc0)
+                for i in range(bsz - lsz):
+                    self.mem_write8(base + i, 0x00)
+                lo, hi = self.sha_msglen_lo, self.sha_msglen_hi
+                if self.sha_mode >= 1:
+                    for i in range(8):
+                        self.mem_write8(base + bsz - 16 + i,
+                                       (hi >> (56 - i * 8)) & 0xFF)
+                for i in range(8):
+                    self.mem_write8(base + bsz - 8 + i,
+                                   (lo >> (56 - i * 8)) & 0xFF)
+            cycles += self._sha_compress()
+            return cycles
+
+        else:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO SHA-2 sub-op {op:#x} reserved")
 
     # -- Trap entry --
 

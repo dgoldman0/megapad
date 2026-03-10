@@ -134,7 +134,7 @@ Full L2–L7 network stack, bottom-up:
 Per `docs/SoC-hardening.md`:
 
 - §0 ✅ **STXI/STXD.D instructions** + IO OUT bug fix
-- §1 ✅ **SHA-256/512 dual-mode upgrade**
+- §1 ✅ **SHA-256 ISA migration** — spec + emulator + BIOS + C++ accel + tests done; RTL datapath deferred to RTL phase
 - §2 ✅ **EXT.STRING engine** — ISA extension (prefix F9), 5 sub-ops (CMOVE, CMOVE>, BFILL, BCOMP, BSRCH)
 - §3 ✅ **EXT.DICT engine** — ISA extension (prefix FA), 4 sub-ops (DFIND, DINS, DDEL, DCLR)
 - §5 ✅ **Port I/O bridge** — 1802 OUT/INP → MMIO remap, byte-serial DMA

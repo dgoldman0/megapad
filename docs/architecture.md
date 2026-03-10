@@ -115,8 +115,8 @@ device occupies a small range:
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
-| **SHA-256** | `+0x0940` | 32 bytes | SHA-256 (SHA-2) hash accelerator |
-| ~~**CRC32/CRC64**~~ | ~~`+0x0980`~~ | — | *Removed — CRC is now per-core ISA (EXT.CRYPTO FB) + cluster-shared* |
+| ~~**SHA-256**~~ | ~~`+0x0940`~~ | — | *Removed — SHA-256 is now per-core ISA (EXT.CRYPTO FB)* |
+| ~~**CRC32/CRC64**~~ | ~~`+0x0980`~~ | — | *Removed — CRC is now per-core ISA (EXT.CRYPTO FB)* |
 | **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
@@ -313,14 +313,14 @@ All extended tile operations are implemented in both the emulator
 (`megapad64.py`) and RTL (`rtl/gpu/mp64_tile.v`, `rtl/gpu/mp64_fp16_alu.v`),
 with 53 tile testbench tests passing.
 
-### Crypto Accelerators (MMIO)
+### Crypto Accelerators
 
 | Block | Performance | Use Case |
 |-------|-------------|----------|
 | AES-256/128-GCM | 16 bytes / 12 cycles | Authenticated encryption for storage and network |
 | SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
-| SHA-256 | 64 bytes / 64 cycles | Standard TLS 1.3 (0x1301), HMAC-SHA256, HKDF |
-| CRC32/CRC64 | 8 bytes / cycle | Data integrity (per-core ISA + cluster-shared, no MMIO) |
+| SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
+| CRC32/CRC64 | 8 bytes / cycle | Data integrity (per-core ISA, no MMIO) |
 | Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519) |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
@@ -400,21 +400,20 @@ polynomial arithmetic.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
 `KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
 
-### SHA-256 (SHA-2 Hash Accelerator)
+### SHA-256 (SHA-2 — Per-Core ISA)
 
-A SHA-256 accelerator at MMIO base `+0x0940`, needed for standard TLS 1.3
-cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
+SHA-256 hashing is implemented as per-core ISA instructions via the
+EXT.CRYPTO prefix (`FB`), not MMIO.  Each core has its own independent
+SHA-2 engine with state held in crypto CSRs (0x82–0x84).
 
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| CMD | `+0x00` | W | Write 1 to init, 2 to finalize |
-| STATUS | `+0x08` | R | **bit 0:** busy, **bit 1:** done |
-| DIN | `+0x10` | W | 64-bit data input (byte streaming) |
-| DOUT | `+0x18`–`+0x37` | R | 32-byte digest output |
+**Instructions:** `sha.init`, `sha.din`, `sha.final`, `sha.dout`
+(see `docs/isa-reference.md` § EXT.CRYPTO for full encoding).
 
-Full 64-round SHA-256 compression with K constants, Σ/σ/Ch/Maj functions,
-16-entry W message schedule with on-the-fly expansion, and automatic
-padding (single and two-block paths).
+The engine implements full FIPS-180-4 SHA-256 compression with K
+constants, Σ/σ/Ch/Maj functions, 16-entry W message schedule with
+on-the-fly expansion, and automatic padding.  A 64-byte block buffer
+in RAM (pointed to by TSRC0 CSR) accumulates input bytes; compression
+runs automatically when the buffer fills or on `sha.final`.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
 `SHA256-STATUS@`, `SHA256-DOUT@`.

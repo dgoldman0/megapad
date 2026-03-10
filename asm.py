@@ -91,14 +91,19 @@ CRYPTO_CRC_SUB = {
     "crc.init": 0x00, "crc.b": 0x01, "crc.q": 0x02,
     "crc.fin": 0x03, "crc.mode": 0x04,
 }
+# SHA-2 sub-ops (0x10–0x1F)
+CRYPTO_SHA_SUB = {
+    "sha.init": 0x10, "sha.round": 0x11, "sha.pad": 0x12,
+    "sha.din": 0x13, "sha.dout": 0x14, "sha.final": 0x15,
+}
 # All EXT.CRYPTO mnemonics that take Rd, Rs operands (3-byte: FB sub DR)
-CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin"}
+CRYPTO_REG_OPS = {"crc.b", "crc.q", "crc.fin", "sha.din", "sha.dout"}
 # All EXT.CRYPTO mnemonics that take imm8 operand (3-byte: FB sub imm8)
-CRYPTO_IMM_OPS = {"crc.mode"}
+CRYPTO_IMM_OPS = {"crc.mode", "sha.init"}
 # All EXT.CRYPTO mnemonics with no operand (2-byte: FB sub)
-CRYPTO_BARE_OPS = {"crc.init"}
+CRYPTO_BARE_OPS = {"crc.init", "sha.round", "sha.pad", "sha.final"}
 # Combined
-CRYPTO_SUB = {**CRYPTO_CRC_SUB}
+CRYPTO_SUB = {**CRYPTO_CRC_SUB, **CRYPTO_SHA_SUB}
 
 # ---------------------------------------------------------------------------
 #  Parser helpers

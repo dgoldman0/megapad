@@ -364,10 +364,11 @@ BIOS initialises the default mapping at boot:
 | 1 | UART TX | `+0x0000` | Character output |
 | 2 | NIC DMA push | `+0x0418` | Byte-serial NIC address write |
 | 3 | Disk DMA push | `+0x0210` | Byte-serial disk address write |
-| 4 | CRC data | `+0x0988` | Stream bytes into CRC engine |
-| 5 | FB base push | `+0x0A0C` | Framebuffer base address write |
-| 6 | SHA-256 data | `+0x0948` | Stream bytes into SHA-256 |
-| 7 | *(disabled)* | — | Available for user assignment |
+| 6 | FB base push | `+0x0A0C` | Framebuffer base address write |
+
+Ports 4, 5, and 7 are unmapped (written to 0 at boot).  CRC and SHA-256
+are per-core ISA instructions (EXT.CRYPTO family, `FB` prefix) and no
+longer use the port I/O bridge.
 
 See `SoC-hardening.md` §5 for the full remap CSR register layout.
 
@@ -569,6 +570,8 @@ value is stored and consumed by the following instruction.
 | `F6` | **EXT.SKIP** | Next BR becomes a SKIP: if condition is true, skip the following instruction entirely (advance PC past it). |
 | `F8` | **EXT.ETALU** | Extended tile ALU sub-functions for the next MEX instruction. |
 | `F9 ss DR` | **EXT.STRING** | Forth-aware string engine (3-byte self-contained). See below. |
+| `FA ss DR` | **EXT.DICT** | Dictionary search engine (3-byte self-contained). See below. |
+| `FB ss DR` | **EXT.CRYPTO** | Per-core crypto ISA (3-byte self-contained). See below. |
 | `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
@@ -635,6 +638,70 @@ With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 **Cycle counts:** CMOVE/CMOVE> = 2N+2, BFILL = N+2, BCOMP = up to 2N+2, BSRCH = up to N+2.
 
 **Micro-cores:** EXT.STRING traps to IVEC_ILLEGAL_OP on micro-cores (they lack the string FSM).
+
+### EXT.DICT — Dictionary Search Engine (FA)
+
+Self-contained 3-byte instruction for Forth dictionary search.
+
+**Encoding:** `FA <sub-op> <reg-byte>`
+
+Details TBD — the dictionary search engine accelerates FIND and
+vocabulary traversal.  See `docs/architecture.md` for the high-level
+description.
+
+### EXT.CRYPTO — Per-Core Crypto ISA (FB)
+
+Self-contained 3-byte instruction for CRC and SHA-2 operations.
+All crypto state is **per-core** (no MMIO shared bus contention).
+
+**Encoding:** `FB <sub-op> <reg-byte>`
+
+- `FB` — EXT.CRYPTO prefix (family 0xF, nibble B)
+- `<sub-op>` — operation selector (1 byte)
+- `<reg-byte>` — `[Rd:4][Rs:4]` register pair
+
+With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
+
+#### CRC Sub-Operations (sub-op 0x00–0x04)
+
+| Sub-op | Mnemonic | Operation |
+|--------|----------|-----------|
+| `0x00` | **CRC.INIT** | Reset CRC accumulator to all-ones (CSR 0x80). |
+| `0x01` | **CRC.POLY Rd** | Set polynomial mode from Rd (CSR 0x81: 0=CRC32, 1=CRC32C, 2=CRC64). |
+| `0x02` | *(reserved)* | |
+| `0x03` | **CRC.DIN Rd** | Feed byte Rd[7:0] into the CRC engine. |
+| `0x04` | **CRC.FIN Rd, Rs** | Finalise CRC: Rd ← final CRC value (XOR mask applied). |
+
+Read the running CRC accumulator at any time via `CSRR R0, 0x80`.
+
+#### SHA-2 Sub-Operations (sub-op 0x10–0x15)
+
+| Sub-op | Mnemonic | Operation |
+|--------|----------|-----------|
+| `0x10` | **SHA.INIT** imm8 | Initialise SHA-2 engine. imm8 selects mode: 0=SHA-256, 1=SHA-384, 2=SHA-512. Resets hash state, block buffer, and message length. |
+| `0x11` | **SHA.POLY** | *(reserved for future polynomial config)* |
+| `0x12` | *(reserved)* | |
+| `0x13` | **SHA.DIN Rd** | Feed byte Rd[7:0] into the SHA block buffer. Auto-compresses when 64 bytes accumulated. |
+| `0x14` | **SHA.DOUT Rd, Rs** | Read 8 bytes of digest: Rd ← digest word at index Rs (0–3 for SHA-256, 0–7 for SHA-512). |
+| `0x15` | **SHA.FINAL** | Apply FIPS-180 padding and run final compression. After this, use SHA.DOUT to read the digest. |
+
+**SHA block buffer:** The engine uses TSRC0 (CSR 0x16) as a pointer to a
+64-byte scratch buffer in RAM, and R0 as the current block offset counter.
+The BIOS sets TSRC0 to `sha_blk_buf` (a 64-byte BSS region) before use.
+
+**SHA CSRs:**
+
+| CSR | Name | Description |
+|-----|------|-------------|
+| `0x82` | SHA_MODE | 0=SHA-256, 1=SHA-384, 2=SHA-512 |
+| `0x83` | SHA_MSGLEN | Message length in bits (low 64) |
+| `0x84` | SHA_MSGLEN_HI | Message length in bits (high 64, SHA-512 only) |
+
+**Cycle counts:** CRC.DIN = 1 cycle. SHA.DIN = 1 cycle (+ ~64 cycles when
+a full block triggers compression). SHA.FINAL = ~64 cycles. SHA.DOUT = 1 cycle.
+
+**Micro-cores:** EXT.CRYPTO is available on all core types (crypto FSM is
+lightweight enough to include everywhere).
 
 ---
 
@@ -725,6 +792,13 @@ low nibble of the opcode byte.
 | `0x70` | **ICACHE_CTRL** | 64 | RW | Bit 0: enable, Bit 1: invalidate all (auto-clear) |
 | `0x71` | **ICACHE_HITS** | 64 | R | I-cache hit counter (since last invalidate) |
 | `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
+| | | | | |
+| `0x80` | **CRC_ACC** | 64 | RW | CRC accumulator (read via `crc@` / `csrr r0, 0x80`) |
+| `0x81` | **CRC_MODE** | 8 | RW | CRC polynomial mode: 0=CRC32, 1=CRC32C, 2=CRC64 |
+| `0x82` | **SHA_MODE** | 8 | RW | SHA-2 mode: 0=SHA-256, 1=SHA-384, 2=SHA-512 |
+| `0x83` | **SHA_MSGLEN** | 64 | RW | SHA-2 message length (low 64 bits, for padding) |
+| `0x84` | **SHA_MSGLEN_HI** | 64 | RW | SHA-2 message length (high 64 bits, SHA-512 only) |
+| `0x85` | **GF_PRIME_SEL** | 8 | RW | Field ALU prime selector (0–3) |
 
 ---
 

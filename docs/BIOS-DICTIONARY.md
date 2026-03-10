@@ -498,16 +498,16 @@ of compiled code.
 | 219 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
 | 220 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
 
-### CRC Engine (6 words)
+### CRC Engine (6 words) — ISA-native (EXT.CRYPTO `FB`)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 221 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (MMIO 0x980) |
-| 222 | `CRC-INIT!` | `( n -- )` | | Set initial CRC value (MMIO 0x988) |
-| 223 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (MMIO 0x990) |
-| 224 | `CRC@` | `( -- n )` | | Read current CRC result (MMIO 0x998) |
-| 225 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (CTRL ← 0) |
-| 226 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (CTRL ← 1) |
+| 221 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (`crc.poly`) |
+| 222 | `CRC-INIT!` | `( n -- )` | | Reset CRC accumulator (`crc.init`) |
+| 223 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (`crc.din`) |
+| 224 | `CRC@` | `( -- n )` | | Read current CRC result (CSR 0x80 CRC_ACC) |
+| 225 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (`crc.init`) |
+| 226 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (`crc.fin`, result → CSR 0x80) |
 
 ### Memory BIST (5 words)
 
@@ -584,15 +584,15 @@ of compiled code.
 | 265 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
 | 266 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
 
-### SHA-256 Engine (5 words)
+### SHA-256 Engine (5 words) — ISA-native (EXT.CRYPTO `FB`)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 267 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (MMIO 0x940) |
-| 268 | `SHA256-UPDATE` | `( addr len -- )` | | Feed data bytes into SHA-256 absorber (MMIO 0x950) |
-| 269 | `SHA256-FINAL` | `( addr -- )` | | Finalize hash, copy 32-byte digest to addr |
-| 270 | `SHA256-STATUS@` | `( -- status )` | | Read SHA-256 status (MMIO 0x948) |
-| 271 | `SHA256-DOUT@` | `( addr -- )` | | Read 32 bytes from SHA-256 DOUT to addr |
+| 267 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (`sha.init 0`) |
+| 268 | `SHA256-UPDATE` | `( addr len -- )` | | Feed data bytes into SHA-256 block buffer (`sha.din`) |
+| 269 | `SHA256-FINAL` | `( addr -- )` | | Finalize hash (`sha.final` + `sha.dout`), copy 32-byte digest to addr |
+| 270 | `SHA256-STATUS@` | `( -- status )` | | Always returns 0 (engine is synchronous, always ready) |
+| 271 | `SHA256-DOUT@` | `( addr -- )` | | Read 32 bytes of digest via `sha.dout` to addr |
 
 ### CRC DMA (4 words)
 
@@ -774,8 +774,8 @@ TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 | `0xFFFF_FF00_0000_0880` | Field ALU | OP_A=+0..+1F, OP_B=+20..+3F, CMD=+40, STATUS=+41, RESULT=+48..+67, RESULT_HI=+68..+87 |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
-| `0xFFFF_FF00_0000_0940` | SHA-256 | CMD=+0, STATUS=+8, DIN=+10, DOUT=+18..+37 |
-| `0xFFFF_FF00_0000_0980` | CRC Engine | POLY=+0, INIT=+8, DIN=+10, RESULT=+18, CTRL=+20 |
+| `0xFFFF_FF00_0000_0940` | ~~SHA-256~~ | Removed — now per-core ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`) |
+| `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now per-core ISA (`crc.init`/`crc.poly`/`crc.din`/`crc.fin`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
 
 ### Memory Layout
@@ -804,6 +804,7 @@ ram_size ↓             Return stack (R15 grows downward)
 | R9 | Scratch / word pointer |
 | R10 | String pointer for `print_str` |
 | R11 | Scratch / temp |
+| R18 | SHA shift-amount scratch (set to 32 for `shr` in digest output) |
 | R12 | Scratch / counter |
 | R13 | Scratch / temp |
 | R14 | **DSP** — Data stack pointer (grows downward) |

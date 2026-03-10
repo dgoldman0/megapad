@@ -46,6 +46,7 @@
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
 ;    CRC    ISA-only (EXT.CRYPTO FB 00-04; no MMIO)
+;    SHA256 ISA-only (EXT.CRYPTO FB 10-15; no MMIO)
 ;
 ;  Multicore CSRs
 ;  ----
@@ -118,7 +119,7 @@ boot:
     st.h r11, r1
     addi r11, 2
 
-    ldi  r1, 0x950              ; port 5 → SHA256 DIN (0x950)
+    ldi  r1, 0                  ; port 5 → disabled (SHA256 is now ISA-only)
     st.h r11, r1
     addi r11, 2
 
@@ -10167,11 +10168,14 @@ w_crc_reset:
     crc.init
     ret.l
 
-; CRC-FINAL ( -- )  finalize CRC (XOR-out), push result
+; CRC-FINAL ( -- )  finalize CRC (XOR-out), store result in CRC_ACC CSR.
+;   Old MMIO CRC-FINAL was ( -- ) — it finalized the peripheral but did
+;   not push.  CRC@ then read back the finalized result.
+;   ISA CRC.FIN only writes Rd; it does NOT update crc_acc CSR.
+;   We must write back so CRC@ returns the finalized value.
 w_crc_final:
-    crc.fin r0, r0                      ; finalized result → r0
-    subi r14, 8
-    str r14, r0
+    crc.fin r0, r0                      ; r0 = crc_acc ^ mask (finalized)
+    csrw 0x80, r0                       ; CSR_CRC_ACC ← finalized value
     ret.l
 
 ; =====================================================================
@@ -10518,19 +10522,32 @@ w_sha3_dout_fetch:
     ret.l
 
 ; =====================================================================
-;  SHA-256 Hardware Accelerator
+;  SHA-256 Engine — ISA instructions (EXT.CRYPTO FB 10-15)
 ; =====================================================================
-; SHA256 base = 0xFFFF_FF00_0000_0940
-;   CMD    +0x00 (W)  1=INIT, 3=FINAL
-;   STATUS +0x08 (R)  bit0=busy, bit1=done
-;   DIN    +0x10 (W)  byte input (auto-compresses at 64 bytes)
-;   DOUT   +0x18..+0x37 (R)  32-byte hash output (big-endian)
+; SHA-256 is now per-core via ISA instructions.  No MMIO peripheral.
+; State lives in tile accumulators (acc[0..3]) and CSRs:
+;   CSR 0x82 = SHA_MODE   (0=SHA-256, 1=SHA-384, 2=SHA-512)
+;   CSR 0x83 = SHA_MSGLEN  (message length low 64 bits)
+;   CSR 0x84 = SHA_MSGLEN_HI (message length high 64 bits)
+;
+;   SHA.INIT  imm8  — load IV for mode imm8[1:0]
+;   SHA.ROUND        — one compression round (explicit)
+;   SHA.PAD          — write FIPS-180 padding
+;   SHA.DIN   Rd, Rs — write Rs[7:0] to block buffer at R0 offset
+;   SHA.DOUT  Rd, Rs — read hash word Rs[2:0] → Rd (32-bit)
+;   SHA.FINAL        — auto-pad + final compress
+;
+; Block buffer lives at sha_blk_buf (64 bytes, addressed via TSRC0 CSR).
+; R0 = block offset counter (auto-managed by SHA.DIN, saved between calls).
 
 ; SHA256-INIT ( -- )  Initialize SHA-256 state.
 w_sha256_init:
-    ldi64 r7, 0xFFFF_FF00_0000_0940   ; SHA256_CMD
-    ldi r0, 1                          ; CMD_INIT=1
-    st.b r7, r0
+    sha.init 0                         ; SHA-256 mode, load IV into accumulators
+    ldi64 r7, sha_blk_buf
+    csrw 0x16, r7                      ; TSRC0 = block buffer address
+    ldi r0, 0                          ; R0 = 0 (block offset counter)
+    ldi64 r7, sha_blk_off
+    str r7, r0                         ; save block offset = 0
     ret.l
 
 ; SHA256-UPDATE ( addr len -- )  Feed len bytes to SHA-256 absorber.
@@ -10541,16 +10558,23 @@ w_sha256_update:
     addi r14, 8
     cmpi r12, 0
     breq .sha256_update_done
-    ldi64 r7, 0xFFFF_FF00_0000_0950   ; SHA256_DIN
-    ldi r11, 0              ; counter = 0
+    ; Restore SHA block state
+    ldi64 r7, sha_blk_off
+    ldn r0, r7              ; R0 = saved block offset
+    ldi64 r7, sha_blk_buf
+    csrw 0x16, r7           ; TSRC0 = block buffer
+    ldi r11, 0              ; byte counter = 0
 .sha256_update_loop:
     mov r13, r9
     add r13, r11            ; src + counter
-    ld.b r0, r13            ; load byte from RAM
-    st.b r7, r0             ; write to DIN
+    ld.b r1, r13            ; load byte from RAM
+    sha.din r0, r1          ; feed byte; R0 auto-increments, auto-compresses
     addi r11, 1
     cmp r11, r12            ; counter < len?
     brcc .sha256_update_loop
+    ; Save SHA block state
+    ldi64 r7, sha_blk_off
+    str r7, r0              ; save block offset
 .sha256_update_done:
     ret.l
 
@@ -10558,47 +10582,47 @@ w_sha256_update:
 w_sha256_final:
     ldn r9, r14             ; r9 = dest addr
     addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0940   ; SHA256_CMD
-    ldi r0, 3                          ; CMD_FINAL=3
-    st.b r7, r0             ; CMD=finalize
-    ; Read 32 bytes from DOUT (offset 0x18)
-    ldi64 r7, 0xFFFF_FF00_0000_0958   ; SHA256_DOUT base
-    ldi r12, 0
+    ; Restore SHA block state
+    ldi64 r7, sha_blk_off
+    ldn r0, r7              ; R0 = saved block offset
+    ldi64 r7, sha_blk_buf
+    csrw 0x16, r7           ; TSRC0 = block buffer
+    sha.final               ; FIPS-180 padding + final compress
+    ; Read 8 × 32-bit hash words, write as big-endian bytes
+    ldi r18, 32             ; shift amount (R18 = free extended reg)
+    ldi r1, 0               ; word index = 0
 .sha256_final_loop:
-    mov r11, r7
-    add r11, r12
-    ld.b r0, r11            ; read from DOUT
-    mov r13, r9
-    add r13, r12
-    st.b r13, r0            ; store to RAM
-    addi r12, 1
-    cmpi r12, 32
+    sha.dout r7, r1         ; r7 = H[r1] (32-bit word)  [R2=ram_size, don't clobber!]
+    bswap r7, r7            ; byte-reverse 64-bit
+    shr r7, r18             ; shift right 32 → LE bytes = BE order
+    st.w r9, r7             ; store 4 bytes (LE → correct BE order)
+    addi r9, 4
+    addi r1, 1
+    cmpi r1, 8
     brcc .sha256_final_loop
     ret.l
 
-; SHA256-STATUS@ ( -- n )  Read SHA-256 status register.
+; SHA256-STATUS@ ( -- n )  Read SHA-256 status (always 0 for ISA engine).
 w_sha256_status_fetch:
-    ldi64 r11, 0xFFFF_FF00_0000_0948  ; SHA256_STATUS
-    ld.b r0, r11
+    ldi r0, 0
     subi r14, 8
     str r14, r0
     ret.l
 
-; SHA256-DOUT@ ( addr -- )  Read 32 bytes from SHA-256 DOUT to memory.
+; SHA256-DOUT@ ( addr -- )  Read 32 bytes from SHA-256 hash state to memory.
 w_sha256_dout_fetch:
     ldn r9, r14
     addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0958   ; SHA256_DOUT base
-    ldi r12, 0
+    ldi r18, 32             ; shift amount (R18 = free extended reg)
+    ldi r1, 0
 .sha256_dout_loop:
-    mov r11, r7
-    add r11, r12
-    ld.b r0, r11
-    mov r13, r9
-    add r13, r12
-    st.b r13, r0
-    addi r12, 1
-    cmpi r12, 32
+    sha.dout r7, r1         ; [R2=ram_size, don't clobber!]
+    bswap r7, r7
+    shr r7, r18
+    st.w r9, r7
+    addi r9, 4
+    addi r1, 1
+    cmpi r1, 8
     brcc .sha256_dout_loop
     ret.l
 
@@ -15433,6 +15457,19 @@ tib_buffer:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+
+; =====================================================================
+;  sha_blk_buf — 64-byte block buffer for SHA-256 ISA engine (TSRC0 target)
+; =====================================================================
+sha_blk_buf:
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+
+; sha_blk_off — saved R0 block offset (persists across Forth word calls)
+sha_blk_off:
+    .dq 0
 
 ; =====================================================================
 ;  dict_pad — 32-byte scratch for DFIND/DINS counted-strings

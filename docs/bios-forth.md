@@ -583,7 +583,9 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 ## CRC Engine (6 words)
 
-MMIO-based CRC computation supporting CRC32, CRC32C, and CRC64 polynomials.
+Per-core CRC computation via ISA instructions (EXT.CRYPTO `FB` prefix).
+Supports CRC32, CRC32C, and CRC64 polynomials.  CRC state lives in
+CSR 0x80 (CRC_ACC) and CSR 0x81 (CRC_MODE).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -667,6 +669,23 @@ at `0xFFFF_FF00_0000_0700`.
 | `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
 | `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
 | `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+
+---
+
+## SHA-256 Engine (5 words)
+
+Per-core SHA-256 hashing via ISA instructions (EXT.CRYPTO `FB` prefix).
+The engine uses a 64-byte block buffer in RAM (pointed to by TSRC0 CSR)
+and compresses automatically when the buffer fills.  Digest is read
+word-by-word via `sha.dout`.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `SHA256-INIT` | `( -- )` | Initialize SHA-256 state (`sha.init 0`). |
+| `SHA256-UPDATE` | `( addr len -- )` | Feed data bytes into SHA-256 block buffer. |
+| `SHA256-FINAL` | `( addr -- )` | Pad, compress, and copy 32-byte digest to addr. |
+| `SHA256-STATUS@` | `( -- 0 )` | Always 0 — engine is synchronous. |
+| `SHA256-DOUT@` | `( addr -- )` | Read 32 bytes of digest to addr. |
 
 ---
 

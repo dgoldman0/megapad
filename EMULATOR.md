@@ -185,11 +185,15 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
 | `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
-| `+0x0940` | 32 B | SHA-256 (SHA-2 hash) |
-| `+0x0980` | 32 B | CRC32/CRC64 |
 | `+0x08A0` | 32 B | WOTS+ Chain Accelerator (SPHINCS+ hash chain sequencer) |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
+
+> **Per-core crypto ISA (no MMIO):** CRC32/CRC64 and SHA-256 are
+> implemented as per-core ISA instructions (EXT.CRYPTO `FB` prefix)
+> with state in CSRs 0x80–0x85.  They do **not** appear in the MMIO
+> map.  See `docs/isa-reference.md` § EXT.CRYPTO for the instruction
+> encoding.
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -385,8 +389,11 @@ buffer), then tokenises and interprets:
 **Performance counters**
 `PERF-CYCLES` `PERF-STALLS` `PERF-TILEOPS` `PERF-EXTMEM` `PERF-RESET`
 
-**CRC engine**
+**CRC engine (ISA-native, EXT.CRYPTO)**
 `CRC-POLY!` `CRC-INIT!` `CRC-FEED` `CRC@` `CRC-RESET` `CRC-FINAL`
+
+**SHA-256 engine (ISA-native, EXT.CRYPTO)**
+`SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-STATUS@` `SHA256-DOUT@`
 
 **Memory BIST**
 `BIST-FULL` `BIST-QUICK` `BIST-STATUS` `BIST-FAIL-ADDR` `BIST-FAIL-DATA`

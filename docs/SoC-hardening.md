@@ -2418,10 +2418,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [ ] RTL: unified `mp64_sha2` datapath (64-bit, 80-round, mode mux)
 - [ ] RTL: integrate into `mp64_cpu.v` as tightly-coupled sub-module
 - [ ] RTL: ISA decode for SHA.INIT / SHA.ROUND / SHA.FINAL (FB 10–15)
-- [ ] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x)
-- [ ] BIOS: crypto words updated to use ISA path (full cores)
+- [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
+- [x] BIOS: crypto words updated to use ISA path (full cores) (2026-03-10)
 - [ ] MMIO fallback for micro-cores (if needed)
-- [ ] Tests
+- [x] Tests (2026-03-10, 1717 passed / 35 skipped / 0 failures)
 
 ### §2 — Forth-Aware String Engine (EXT.STRING, prefix F9)
 
@@ -2525,17 +2525,18 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] B.11: Emulator dispatch pseudocode
 - [x] B.12: Open questions documented
 - [x] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
-- [ ] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x)
+- [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [ ] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x)
 - [x] RTL: per-core CRC datapath
 - [ ] RTL: per-core SHA-2 datapath
 - [ ] RTL: per-core Field ALU datapath
 - [x] RTL: instruction decode for FB prefix
 - [x] C++ accelerator: EXT.CRYPTO dispatch
-- [ ] BIOS: crypto words updated to use ISA path (full cores)
+- [x] C++ accelerator: SHA-2 sub-ops (sha.init/din/dout/final) (2026-03-10)
+- [x] BIOS: crypto words updated to use ISA path (CRC + SHA-2) (2026-03-10)
 - [ ] MMIO shared instances: removal
 - [x] Tests: CRC ISA
-- [ ] Tests: SHA-2 ISA
+- [x] Tests: SHA-2 ISA (2026-03-10)
 - [ ] Tests: Field ALU ISA
 
 ### Overall Progress
@@ -2544,8 +2545,8 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 |----------|------|-----------|
 | Spec / design | 12 | 0 |
 | RTL | 9 | 4 |
-| Emulator (Python) | 6 | 3 |
-| C++ accelerator | 3 | 3 |
-| BIOS | 5 | 3 |
-| Tests | 7 | 3 |
+| Emulator (Python) | 7 | 2 |
+| C++ accelerator | 4 | 2 |
+| BIOS | 6 | 2 |
+| Tests | 8 | 2 |
 | **Total** | **42** | **16** |

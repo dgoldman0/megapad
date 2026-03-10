@@ -122,6 +122,8 @@ localparam [4:0] CPU_STRING     = 5'd14; // EXT.STRING engine stall
 localparam [4:0] CPU_SKIP       = 5'd15; // SKIP: fetch next for length
 localparam [4:0] CPU_DICT       = 5'd16; // EXT.DICT engine stall
 localparam [4:0] CPU_CRYPTO     = 5'd17; // EXT.CRYPTO stall (multi-cycle ops)
+localparam [4:0] CPU_SHA_LOAD   = 5'd18; // SHA-2: loading W from tile memory
+localparam [4:0] CPU_SHA_WAIT   = 5'd19; // SHA-2: waiting for compression engine
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;
@@ -158,9 +160,20 @@ localparam [3:0] ISA_CRC_Q     = 4'd2;
 localparam [3:0] ISA_CRC_FIN   = 4'd3;
 localparam [3:0] ISA_CRC_MODEX = 4'd4;   // CRC.MODE (name avoids collision)
 
+// --- EXT.CRYPTO SHA-2 sub-op codes (within SHA unit, sub_op[3:0]) ---
+localparam [3:0] ISA_SHA_INIT  = 4'd0;   // SHA.INIT imm8
+localparam [3:0] ISA_SHA_ROUND = 4'd1;   // SHA.ROUND
+localparam [3:0] ISA_SHA_PAD   = 4'd2;   // SHA.PAD
+localparam [3:0] ISA_SHA_DIN   = 4'd3;   // SHA.DIN Rd, Rs
+localparam [3:0] ISA_SHA_DOUT  = 4'd4;   // SHA.DOUT Rd, Rs
+localparam [3:0] ISA_SHA_FINAL = 4'd5;   // SHA.FINAL
+
 // --- EXT.CRYPTO CSR addresses ---
 localparam [7:0] CSR_CRC_ACC  = 8'h80;
 localparam [7:0] CSR_CRC_MODE = 8'h81;
+localparam [7:0] CSR_SHA_MODE      = 8'h82;  // 2-bit: 0=SHA-256, 1=SHA-384, 2=SHA-512
+localparam [7:0] CSR_SHA_MSGLEN    = 8'h83;  // Message length in bits (low 64)
+localparam [7:0] CSR_SHA_MSGLEN_HI = 8'h84;  // Message length in bits (high 64)
 
 // --- Post-action codes (multi-cycle ops) ---
 localparam [2:0] POST_NONE     = 3'd0;

@@ -61,6 +61,7 @@ enum CSR {
     CSR_ICACHE_CTRL=0x70, CSR_ICACHE_HITS=0x71, CSR_ICACHE_MISSES=0x72,
     // EXT.CRYPTO CSRs (Appendix B)
     CSR_CRC_ACC=0x80, CSR_CRC_MODE=0x81,
+    CSR_SHA_MODE=0x82, CSR_SHA_MSGLEN=0x83, CSR_SHA_MSGLEN_HI=0x84,
 };
 
 // IVEC IDs
@@ -165,6 +166,11 @@ struct CPUState {
     // EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
     uint64_t crc_acc;   // 64-bit CRC accumulator
     uint8_t  crc_mode;  // 0=CRC32, 1=CRC32C, 2=CRC64
+
+    // EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
+    uint8_t  sha_mode;       // 0=SHA-256, 1=SHA-384, 2=SHA-512
+    uint64_t sha_msglen_lo;  // total message length in bits (low 64)
+    uint64_t sha_msglen_hi;  // total message length in bits (high 64)
 
     // Core identity
     uint8_t  core_id;
@@ -714,6 +720,9 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_ICACHE_MISSES:return s.icache_misses;
         case CSR_CRC_ACC:     return s.crc_acc;
         case CSR_CRC_MODE:    return s.crc_mode;
+        case CSR_SHA_MODE:    return s.sha_mode;
+        case CSR_SHA_MSGLEN:  return s.sha_msglen_lo;
+        case CSR_SHA_MSGLEN_HI: return s.sha_msglen_hi;
         default: return 0;
     }
 }
@@ -769,6 +778,9 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             break;
         case CSR_CRC_ACC:  s.crc_acc = val; break;
         case CSR_CRC_MODE: s.crc_mode = val & 0x03; break;
+        case CSR_SHA_MODE: s.sha_mode = val & 0x03; break;
+        case CSR_SHA_MSGLEN: s.sha_msglen_lo = val; break;
+        case CSR_SHA_MSGLEN_HI: s.sha_msglen_hi = val; break;
         default: break;
     }
 }
@@ -2300,6 +2312,206 @@ static inline uint64_t crc_byte_64(uint64_t acc, uint8_t b, uint64_t poly) {
     return acc;
 }
 
+// ---------------------------------------------------------------------------
+//  SHA-256 / SHA-512 helpers
+// ---------------------------------------------------------------------------
+
+// SHA-256 / SHA-512 helpers (rotr32 from mp64_crypto.h)
+// ---------------------------------------------------------------------------
+
+static inline uint64_t rotr64(uint64_t x, int n) { return (x >> n) | (x << (64 - n)); }
+
+static constexpr uint32_t ISA_SHA256_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+};
+
+static constexpr uint64_t ISA_SHA512_K[80] = {
+    0x428a2f98d728ae22ull,0x7137449123ef65cdull,0xb5c0fbcfec4d3b2full,0xe9b5dba58189dbbcull,
+    0x3956c25bf348b538ull,0x59f111f1b605d019ull,0x923f82a4af194f9bull,0xab1c5ed5da6d8118ull,
+    0xd807aa98a3030242ull,0x12835b0145706fbeull,0x243185be4ee4b28cull,0x550c7dc3d5ffb4e2ull,
+    0x72be5d74f27b896full,0x80deb1fe3b1696b1ull,0x9bdc06a725c71235ull,0xc19bf174cf692694ull,
+    0xe49b69c19ef14ad2ull,0xefbe4786384f25e3ull,0x0fc19dc68b8cd5b5ull,0x240ca1cc77ac9c65ull,
+    0x2de92c6f592b0275ull,0x4a7484aa6ea6e483ull,0x5cb0a9dcbd41fbd4ull,0x76f988da831153b5ull,
+    0x983e5152ee66dfabull,0xa831c66d2db43210ull,0xb00327c898fb213full,0xbf597fc7beef0ee4ull,
+    0xc6e00bf33da88fc2ull,0xd5a79147930aa725ull,0x06ca6351e003826full,0x142929670a0e6e70ull,
+    0x27b70a8546d22ffcull,0x2e1b21385c26c926ull,0x4d2c6dfc5ac42aedull,0x53380d139d95b3dfull,
+    0x650a73548baf63deull,0x766a0abb3c77b2a8ull,0x81c2c92e47edaee6ull,0x92722c851482353bull,
+    0xa2bfe8a14cf10364ull,0xa81a664bbc423001ull,0xc24b8b70d0f89791ull,0xc76c51a30654be30ull,
+    0xd192e819d6ef5218ull,0xd69906245565a910ull,0xf40e35855771202aull,0x106aa07032bbd1b8ull,
+    0x19a4c116b8d2d0c8ull,0x1e376c085141ab53ull,0x2748774cdf8eeb99ull,0x34b0bcb5e19b48a8ull,
+    0x391c0cb3c5c95a63ull,0x4ed8aa4ae3418acbull,0x5b9cca4f7763e373ull,0x682e6ff3d6b2b8a3ull,
+    0x748f82ee5defb2fcull,0x78a5636f43172f60ull,0x84c87814a1f0ab72ull,0x8cc702081a6439ecull,
+    0x90befffa23631e28ull,0xa4506cebde82bde9ull,0xbef9a3f7b2c67915ull,0xc67178f2e372532bull,
+    0xca273eceea26619cull,0xd186b8c721c0c207ull,0xeada7dd6cde0eb1eull,0xf57d4f7fee6ed178ull,
+    0x06f067aa72176fbaull,0x0a637dc5a2c898a6ull,0x113f9804bef90daeull,0x1b710b35131c471bull,
+    0x28db77f523047d84ull,0x32caab7b40c72493ull,0x3c9ebe0a15c9bebcull,0x431d67c49c100d4cull,
+    0x4cc5d4becb3e42b6ull,0x597f299cfc657e2aull,0x5fcb6fab3ad6faecull,0x6c44198c4a475817ull,
+};
+
+static constexpr uint32_t ISA_SHA256_IV[8] = {
+    0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+    0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
+};
+static constexpr uint64_t ISA_SHA384_IV[8] = {
+    0xcbbb9d5dc1059ed8ull,0x629a292a367cd507ull,0x9159015a3070dd17ull,0x152fecd8f70e5939ull,
+    0x67332667ffc00b31ull,0x8eb44a8768581511ull,0xdb0c2e0d64f98fa7ull,0x47b5481dbefa4fa4ull,
+};
+static constexpr uint64_t ISA_SHA512_IV[8] = {
+    0x6a09e667f3bcc908ull,0xbb67ae8584caa73bull,0x3c6ef372fe94f82bull,0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull,0x9b05688c2b3e6c1full,0x1f83d9abfb41bd6bull,0x5be0cd19137e2179ull,
+};
+
+// Unpack 8 hash words from ACC0-ACC3 (+ regs[16-19] for SHA-512)
+static void sha_unpack(CPUState& s, uint64_t H[8]) {
+    if (s.sha_mode == 0) {
+        H[0] = (s.acc[0] >> 32) & 0xFFFFFFFFu; H[1] = s.acc[0] & 0xFFFFFFFFu;
+        H[2] = (s.acc[1] >> 32) & 0xFFFFFFFFu; H[3] = s.acc[1] & 0xFFFFFFFFu;
+        H[4] = (s.acc[2] >> 32) & 0xFFFFFFFFu; H[5] = s.acc[2] & 0xFFFFFFFFu;
+        H[6] = (s.acc[3] >> 32) & 0xFFFFFFFFu; H[7] = s.acc[3] & 0xFFFFFFFFu;
+    } else {
+        H[0] = s.acc[0]; H[1] = s.acc[1]; H[2] = s.acc[2]; H[3] = s.acc[3];
+        H[4] = s.regs[16]; H[5] = s.regs[17]; H[6] = s.regs[18]; H[7] = s.regs[19];
+    }
+}
+
+// Pack 8 hash words back into ACC0-ACC3 (+ regs[16-19] for SHA-512)
+static void sha_pack(CPUState& s, const uint64_t H[8]) {
+    if (s.sha_mode == 0) {
+        s.acc[0] = ((H[0] & 0xFFFFFFFFu) << 32) | (H[1] & 0xFFFFFFFFu);
+        s.acc[1] = ((H[2] & 0xFFFFFFFFu) << 32) | (H[3] & 0xFFFFFFFFu);
+        s.acc[2] = ((H[4] & 0xFFFFFFFFu) << 32) | (H[5] & 0xFFFFFFFFu);
+        s.acc[3] = ((H[6] & 0xFFFFFFFFu) << 32) | (H[7] & 0xFFFFFFFFu);
+    } else {
+        s.acc[0] = H[0]; s.acc[1] = H[1]; s.acc[2] = H[2]; s.acc[3] = H[3];
+        s.regs[16] = H[4]; s.regs[17] = H[5]; s.regs[18] = H[6]; s.regs[19] = H[7];
+    }
+}
+
+static int sha_block_size(CPUState& s) { return s.sha_mode >= 1 ? 128 : 64; }
+
+// Read one block from memory at TSRC0
+static void sha_read_block(CPUState& s, uint8_t* block) {
+    int bsz = sha_block_size(s);
+    for (int i = 0; i < bsz; i++)
+        block[i] = mem_read8(s, s.tsrc0 + i);
+}
+
+// SHA-256 compression (one 64-byte block)
+static void sha256_compress(uint64_t H[8], const uint8_t block[64]) {
+    uint32_t W[64];
+    for (int i = 0; i < 16; i++)
+        W[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16) |
+               ((uint32_t)block[i*4+2] << 8) | block[i*4+3];
+    for (int t = 16; t < 64; t++) {
+        uint32_t s0 = rotr32(W[t-15],7) ^ rotr32(W[t-15],18) ^ (W[t-15] >> 3);
+        uint32_t s1 = rotr32(W[t-2],17) ^ rotr32(W[t-2],19)  ^ (W[t-2] >> 10);
+        W[t] = W[t-16] + s0 + W[t-7] + s1;
+    }
+    uint32_t a=(uint32_t)H[0], b=(uint32_t)H[1], c=(uint32_t)H[2], d=(uint32_t)H[3];
+    uint32_t e=(uint32_t)H[4], f=(uint32_t)H[5], g=(uint32_t)H[6], h=(uint32_t)H[7];
+    for (int t = 0; t < 64; t++) {
+        uint32_t S1 = rotr32(e,6) ^ rotr32(e,11) ^ rotr32(e,25);
+        uint32_t ch = (e & f) ^ ((~e) & g);
+        uint32_t temp1 = h + S1 + ch + ISA_SHA256_K[t] + W[t];
+        uint32_t S0 = rotr32(a,2) ^ rotr32(a,13) ^ rotr32(a,22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+        h=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+    }
+    H[0] = ((uint32_t)H[0]+a) & 0xFFFFFFFFu;
+    H[1] = ((uint32_t)H[1]+b) & 0xFFFFFFFFu;
+    H[2] = ((uint32_t)H[2]+c) & 0xFFFFFFFFu;
+    H[3] = ((uint32_t)H[3]+d) & 0xFFFFFFFFu;
+    H[4] = ((uint32_t)H[4]+e) & 0xFFFFFFFFu;
+    H[5] = ((uint32_t)H[5]+f) & 0xFFFFFFFFu;
+    H[6] = ((uint32_t)H[6]+g) & 0xFFFFFFFFu;
+    H[7] = ((uint32_t)H[7]+h) & 0xFFFFFFFFu;
+}
+
+// SHA-512 compression (one 128-byte block)
+static void sha512_compress(uint64_t H[8], const uint8_t block[128]) {
+    uint64_t W[80];
+    for (int i = 0; i < 16; i++) {
+        uint64_t v = 0;
+        for (int j = 0; j < 8; j++)
+            v = (v << 8) | block[i*8+j];
+        W[i] = v;
+    }
+    for (int t = 16; t < 80; t++) {
+        uint64_t s0 = rotr64(W[t-15],1) ^ rotr64(W[t-15],8) ^ (W[t-15] >> 7);
+        uint64_t s1 = rotr64(W[t-2],19) ^ rotr64(W[t-2],61) ^ (W[t-2] >> 6);
+        W[t] = W[t-16] + s0 + W[t-7] + s1;
+    }
+    uint64_t a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for (int t = 0; t < 80; t++) {
+        uint64_t S1 = rotr64(e,14) ^ rotr64(e,18) ^ rotr64(e,41);
+        uint64_t ch = (e & f) ^ ((~e) & g);
+        uint64_t temp1 = h + S1 + ch + ISA_SHA512_K[t] + W[t];
+        uint64_t S0 = rotr64(a,28) ^ rotr64(a,34) ^ rotr64(a,39);
+        uint64_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t temp2 = S0 + maj;
+        h=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+    }
+    H[0]+=a; H[1]+=b; H[2]+=c; H[3]+=d;
+    H[4]+=e; H[5]+=f; H[6]+=g; H[7]+=h;
+}
+
+// Run compression on block at M[TSRC0], return cycle count
+static int sha_compress(CPUState& s) {
+    uint64_t H[8];
+    sha_unpack(s, H);
+    uint8_t block[128];
+    sha_read_block(s, block);
+    if (s.sha_mode == 0) {
+        sha256_compress(H, block);
+        sha_pack(s, H);
+        s.flag_z = 1;
+        return 64;
+    } else {
+        sha512_compress(H, block);
+        sha_pack(s, H);
+        s.flag_z = 1;
+        return 80;
+    }
+}
+
+// Write FIPS 180-4 padding at M[TSRC0+R0], return true if two-block pad
+static bool sha_write_pad(CPUState& s) {
+    int bsz = sha_block_size(s);
+    int lsz = s.sha_mode >= 1 ? 16 : 8;
+    int pos = (int)(s.regs[0] & 0xFFFFFFFFull) % bsz;
+    uint64_t base = s.tsrc0;
+
+    mem_write8(s, base + pos, 0x80);
+    pos++;
+
+    bool two_blocks = pos > (bsz - lsz);
+    if (two_blocks) {
+        while (pos < bsz) { mem_write8(s, base + pos, 0x00); pos++; }
+        s.flag_c = 1;
+        return true;
+    }
+    // zero-fill
+    while (pos < bsz - lsz) { mem_write8(s, base + pos, 0x00); pos++; }
+    // big-endian length
+    uint64_t lo = s.sha_msglen_lo, hi = s.sha_msglen_hi;
+    if (s.sha_mode >= 1) {
+        for (int i = 0; i < 8; i++)
+            mem_write8(s, base + bsz - 16 + i, (uint8_t)(hi >> (56 - i*8)));
+    }
+    for (int i = 0; i < 8; i++)
+        mem_write8(s, base + bsz - 8 + i, (uint8_t)(lo >> (56 - i*8)));
+    s.flag_c = 0;
+    return false;
+}
+
 static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
     uint8_t sub_op = fetch8(s);
     int unit = (sub_op >> 4) & 0xF;
@@ -2362,7 +2574,90 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO CRC reserved sub-op");
         }
     } else if (unit == 0x1) {
-        throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO SHA-2 not yet implemented");
+        // --- SHA-2 unit ---
+        switch (op) {
+        case 0x0: { // SHA.INIT imm8
+            uint8_t imm = fetch8(s);
+            s.sha_mode = imm & 0x03;
+            s.sha_msglen_lo = 0;
+            s.sha_msglen_hi = 0;
+            uint64_t H[8];
+            if (s.sha_mode == 0) {
+                for (int i = 0; i < 8; i++) H[i] = ISA_SHA256_IV[i];
+            } else if (s.sha_mode == 1) {
+                for (int i = 0; i < 8; i++) H[i] = ISA_SHA384_IV[i];
+            } else {
+                for (int i = 0; i < 8; i++) H[i] = ISA_SHA512_IV[i];
+            }
+            sha_pack(s, H);
+            return 2;
+        }
+        case 0x1: { // SHA.ROUND — compress block at TSRC0
+            return sha_compress(s);
+        }
+        case 0x2: { // SHA.PAD
+            sha_write_pad(s);
+            return 3;
+        }
+        case 0x3: { // SHA.DIN Rd, Rs — feed one byte
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
+            uint8_t byte_val = (uint8_t)(s.regs[rs] & 0xFF);
+            uint64_t base = s.tsrc0;
+            uint64_t r0 = s.regs[0];
+            mem_write8(s, base + r0, byte_val);
+            r0++;
+            // track message length in bits
+            uint64_t old = s.sha_msglen_lo;
+            s.sha_msglen_lo += 8;
+            if (s.sha_msglen_lo < old) s.sha_msglen_hi++;
+            // auto-round when block is full
+            int bsz = sha_block_size(s);
+            int cycles = 1;
+            if ((int)r0 >= bsz) {
+                cycles += sha_compress(s);
+                r0 = 0;
+            }
+            s.regs[0] = r0;
+            s.regs[rd] = r0;
+            return cycles;
+        }
+        case 0x4: { // SHA.DOUT Rd, Rs — read hash word
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
+            int idx = (int)(s.regs[rs]) & 0x7;
+            uint64_t H[8];
+            sha_unpack(s, H);
+            s.regs[rd] = H[idx];
+            return 1;
+        }
+        case 0x5: { // SHA.FINAL — pad + compress
+            bool two_blocks = sha_write_pad(s);
+            int cycles = 3;
+            if (two_blocks) {
+                cycles += sha_compress(s);
+                // write second pad block (zeros + length)
+                int bsz = sha_block_size(s);
+                int lsz = s.sha_mode >= 1 ? 16 : 8;
+                uint64_t base = s.tsrc0;
+                for (int i = 0; i < bsz - lsz; i++)
+                    mem_write8(s, base + i, 0x00);
+                uint64_t lo = s.sha_msglen_lo, hi = s.sha_msglen_hi;
+                if (s.sha_mode >= 1) {
+                    for (int i = 0; i < 8; i++)
+                        mem_write8(s, base + bsz - 16 + i, (uint8_t)(hi >> (56 - i*8)));
+                }
+                for (int i = 0; i < 8; i++)
+                    mem_write8(s, base + bsz - 8 + i, (uint8_t)(lo >> (56 - i*8)));
+            }
+            cycles += sha_compress(s);
+            return cycles;
+        }
+        default:
+            throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO SHA-2 reserved sub-op");
+        }
     } else if (unit == 0x2) {
         throw std::runtime_error("TRAP:ILLEGAL_OP:EXT.CRYPTO Field ALU not yet implemented");
     } else {
@@ -3319,6 +3614,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("ext_modifier", &CPUState::ext_modifier)
         .def_readwrite("crc_acc", &CPUState::crc_acc)
         .def_readwrite("crc_mode", &CPUState::crc_mode)
+        .def_readwrite("sha_mode", &CPUState::sha_mode)
+        .def_readwrite("sha_msglen_lo", &CPUState::sha_msglen_lo)
+        .def_readwrite("sha_msglen_hi", &CPUState::sha_msglen_hi)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
         .def_readwrite("mem_size", &CPUState::mem_size)

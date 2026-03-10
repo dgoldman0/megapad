@@ -73,6 +73,15 @@ module mp64_cpu_micro (
     input  wire        crc_done,
     input  wire        crc_rd_we_in,  // 1 = write crc_result to R[dst_reg]
 
+    // === Shared SHA interface (to cluster SHA arbiter) ===
+    output reg         sha_req,
+    output reg  [3:0]  sha_op,
+    output reg  [63:0] sha_rs_val,
+    output reg  [7:0]  sha_imm8,
+    input  wire [63:0] sha_result,
+    input  wire        sha_done,
+    input  wire        sha_rd_we_in,  // 1 = write sha_result to R[dst_reg]
+
     // === Shared Tile/MEX interface (to cluster tile arbiter) ===
     output reg         mex_req,       // request tile engine access
     output reg  [1:0]  mex_ss,        // source selector
@@ -257,6 +266,11 @@ module mp64_cpu_micro (
             crc_rs_val <= 64'd0;
             crc_imm8   <= 8'd0;
 
+            sha_req    <= 1'b0;
+            sha_op     <= 4'd0;
+            sha_rs_val <= 64'd0;
+            sha_imm8   <= 8'd0;
+
             mex_req        <= 1'b0;
             mex_ss         <= 2'd0;
             mex_op         <= 2'd0;
@@ -358,11 +372,29 @@ module mp64_cpu_micro (
                         bus_size <= BUS_DWORD;
                         cpu_state <= CPU_MEM_WRITE;
                     end else if (nib == EXT_CRYPTO) begin
-                        // EXT.CRYPTO — dispatch to cluster-shared CRC
+                        // EXT.CRYPTO — dispatch to cluster-shared engines
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
-                        if (ibuf[1][7:4] != 4'd0) begin
-                            // Only CRC unit (0) supported on micro-cores
+                        if (ibuf[1][7:4] == 4'd0) begin
+                            // CRC unit (0) → cluster CRC arbiter
+                            crc_req    <= 1'b1;
+                            crc_op     <= ibuf[1][3:0];
+                            crc_rs_val <= R[ibuf[2][3:0]];
+                            crc_imm8   <= ibuf[2];
+                            dst_reg    <= ibuf[2][7:4];
+                            ext_active <= 1'b0;
+                            cpu_state  <= CPU_CRYPTO;
+                        end else if (ibuf[1][7:4] == 4'd1) begin
+                            // SHA-2 unit (1) → cluster SHA arbiter
+                            sha_req    <= 1'b1;
+                            sha_op     <= ibuf[1][3:0];
+                            sha_rs_val <= R[ibuf[2][3:0]];
+                            sha_imm8   <= ibuf[2];
+                            dst_reg    <= ibuf[2][7:4];
+                            ext_active <= 1'b0;
+                            cpu_state  <= CPU_SHA_WAIT;
+                        end else begin
+                            // Unsupported unit → ILLEGAL_OP
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
                             mem_data <= R[psel];
@@ -371,14 +403,6 @@ module mp64_cpu_micro (
                             post_action <= POST_IRQ_VEC;
                             bus_size <= BUS_DWORD;
                             cpu_state <= CPU_MEM_WRITE;
-                        end else begin
-                            crc_req    <= 1'b1;
-                            crc_op     <= ibuf[1][3:0];
-                            crc_rs_val <= R[ibuf[2][3:0]];
-                            crc_imm8   <= ibuf[2];
-                            dst_reg    <= ibuf[2][7:4];
-                            ext_active <= 1'b0;
-                            cpu_state  <= CPU_CRYPTO;
                         end
                     end else begin
                         ext_active <= 1'b1;
@@ -725,7 +749,8 @@ module mp64_cpu_micro (
                             CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
                             CSR_CL_IVTBASE,
                             CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
-                            CSR_CRC_ACC, CSR_CRC_MODE: begin
+                            CSR_CRC_ACC, CSR_CRC_MODE,
+                            CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI: begin
                                 cl_csr_wen   <= 1'b1;
                                 cl_csr_wdata <= R[nib[2:0]];
                             end
@@ -771,8 +796,9 @@ module mp64_cpu_micro (
                             CSR_CL_IVTBASE,
                             CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS:
                                 R[nib[2:0]] <= cl_csr_rdata;
-                            // CRC CSRs: forwarded to cluster
-                            CSR_CRC_ACC, CSR_CRC_MODE:
+                            // CRC + SHA CSRs: forwarded to cluster
+                            CSR_CRC_ACC, CSR_CRC_MODE,
+                            CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI:
                                 R[nib[2:0]] <= cl_csr_rdata;
                             default: R[nib[2:0]] <= 64'd0;
                         endcase
@@ -964,6 +990,18 @@ module mp64_cpu_micro (
                     crc_req <= 1'b0;
                     if (crc_rd_we_in)
                         R[dst_reg] <= crc_result;
+                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
+            // SHA_WAIT: wait for shared cluster SHA-2 result
+            // ============================================================
+            CPU_SHA_WAIT: begin
+                if (sha_done) begin
+                    sha_req <= 1'b0;
+                    if (sha_rd_we_in)
+                        R[dst_reg] <= sha_result;
                     cpu_state <= CPU_FETCH;
                 end
             end

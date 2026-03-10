@@ -260,6 +260,54 @@ module mp64_cpu #(
     );
 
     // ====================================================================
+    // SHA-2 ISA instance (per-core, 64-cycle sequential)
+    // ====================================================================
+    reg  [1:0]  sha_mode;        // 0=SHA-256 (only mode in RTL)
+    reg  [63:0] sha_msglen_lo;   // total message length, bits (low 64)
+    reg  [63:0] sha_msglen_hi;   // high 64
+
+    // Local ACC shadow registers (authoritative copy in CPU)
+    reg  [63:0] acc_reg [0:3];   // ACC0..ACC3
+
+    // Local shadow of TSRC0 for SHA.ROUND bus reads
+    reg  [63:0] sha_tsrc0;
+
+    // SHA W buffer (loaded from tile memory before compression)
+    reg  [31:0] sha_w_buf [0:15];
+    reg  [3:0]  sha_load_cnt;   // 0..7 for 8 × 64-bit bus reads
+
+    // Unpack ACC → 8 × 32-bit H for SHA engine
+    wire [31:0] sha_h_unpack [0:7];
+    assign sha_h_unpack[0] = acc_reg[0][63:32];  // a
+    assign sha_h_unpack[1] = acc_reg[0][31:0];   // b
+    assign sha_h_unpack[2] = acc_reg[1][63:32];  // c
+    assign sha_h_unpack[3] = acc_reg[1][31:0];   // d
+    assign sha_h_unpack[4] = acc_reg[2][63:32];  // e
+    assign sha_h_unpack[5] = acc_reg[2][31:0];   // f
+    assign sha_h_unpack[6] = acc_reg[3][63:32];  // g
+    assign sha_h_unpack[7] = acc_reg[3][31:0];   // h
+
+    // SHA engine outputs
+    wire [31:0] sha_h_out [0:7];
+    wire        sha_h_we;
+    wire        sha_busy;
+    wire        sha_done;
+
+    reg         sha_start_r;
+
+    mp64_sha2_isa u_sha2_isa (
+        .clk     (clk),
+        .rst_n   (~rst),
+        .start   (sha_start_r),
+        .w_in    (sha_w_buf),
+        .h_in    (sha_h_unpack),
+        .h_out   (sha_h_out),
+        .h_we    (sha_h_we),
+        .busy    (sha_busy),
+        .done    (sha_done)
+    );
+
+    // ====================================================================
     // Multi-cycle temporaries
     // ====================================================================
     reg [63:0] mem_data;
@@ -470,6 +518,15 @@ module mp64_cpu #(
             crc_acc        <= 64'hFFFF_FFFF;
             crc_mode       <= 2'd0;
 
+            acc_reg[0]     <= 64'd0; acc_reg[1] <= 64'd0;
+            acc_reg[2]     <= 64'd0; acc_reg[3] <= 64'd0;
+            sha_mode       <= 2'd0;
+            sha_msglen_lo  <= 64'd0;
+            sha_msglen_hi  <= 64'd0;
+            sha_tsrc0      <= 64'd0;
+            sha_load_cnt   <= 4'd0;
+            sha_start_r    <= 1'b0;
+
             mul_result <= 128'd0;
             mul_start_r     <= 1'b0;
             mul_is_signed_r <= 1'b0;
@@ -526,6 +583,7 @@ module mp64_cpu #(
             mex_valid      <= 1'b0;
             icache_inv_all <= 1'b0;
             icache_inv_line<= 1'b0;
+            sha_start_r    <= 1'b0;
 
             // Performance counters
             if (perf_enable) begin
@@ -536,7 +594,9 @@ module mp64_cpu #(
                     (cpu_state == CPU_MEM_READ2 && !bus_ready) ||
                     (cpu_state == CPU_MEMALU_RD && !bus_ready) ||
                     (cpu_state == CPU_IRQ_PUSH  && !bus_ready) ||
-                    (cpu_state == CPU_IRQ_LOAD  && !bus_ready))
+                    (cpu_state == CPU_IRQ_LOAD  && !bus_ready) ||
+                    (cpu_state == CPU_SHA_LOAD  && !bus_ready) ||
+                    (cpu_state == CPU_SHA_WAIT  && !sha_done))
                     perf_stalls <= perf_stalls + 64'd1;
                 if (cpu_state == CPU_MEX_WAIT && mex_done)
                     perf_tileops <= perf_tileops + 64'd1;
@@ -1236,6 +1296,14 @@ module mp64_cpu #(
                             end
                             CSR_CRC_ACC:  crc_acc  <= R[nib[2:0]];
                             CSR_CRC_MODE: crc_mode <= R[nib[2:0]][1:0];
+                            CSR_ACC0:     acc_reg[0] <= R[nib[2:0]];
+                            CSR_ACC1:     acc_reg[1] <= R[nib[2:0]];
+                            CSR_ACC2:     acc_reg[2] <= R[nib[2:0]];
+                            CSR_ACC3:     acc_reg[3] <= R[nib[2:0]];
+                            CSR_TSRC0:    sha_tsrc0  <= R[nib[2:0]];
+                            CSR_SHA_MODE: sha_mode   <= R[nib[2:0]][1:0];
+                            CSR_SHA_MSGLEN:    sha_msglen_lo <= R[nib[2:0]];
+                            CSR_SHA_MSGLEN_HI: sha_msglen_hi <= R[nib[2:0]];
                             CSR_ICACHE_CTRL: begin
                                 icache_enabled <= R[nib[2:0]][0];
                                 if (R[nib[2:0]][1]) icache_inv_all <= 1'b1;
@@ -1296,6 +1364,13 @@ module mp64_cpu #(
                             CSR_DMA_CTRL:    R[nib[2:0]] <= dma_ctrl;
                             CSR_CRC_ACC:     R[nib[2:0]] <= crc_acc;
                             CSR_CRC_MODE:    R[nib[2:0]] <= {62'd0, crc_mode};
+                            CSR_ACC0:        R[nib[2:0]] <= acc_reg[0];
+                            CSR_ACC1:        R[nib[2:0]] <= acc_reg[1];
+                            CSR_ACC2:        R[nib[2:0]] <= acc_reg[2];
+                            CSR_ACC3:        R[nib[2:0]] <= acc_reg[3];
+                            CSR_SHA_MODE:    R[nib[2:0]] <= {62'd0, sha_mode};
+                            CSR_SHA_MSGLEN:  R[nib[2:0]] <= sha_msglen_lo;
+                            CSR_SHA_MSGLEN_HI: R[nib[2:0]] <= sha_msglen_hi;
                             default:         R[nib[2:0]] <= csr_rdata;
                         endcase
                     end
@@ -1331,14 +1406,65 @@ module mp64_cpu #(
             // ============================================================
             CPU_EXECUTE: begin
                 if (crypto_active) begin
-                    // CRC / crypto writeback
+                    // CRC / crypto writeback (unit 0)
                     if (crypto_unit_r == 4'd0) begin
                         if (crc_acc_we)  crc_acc  <= crc_acc_out;
                         if (crc_mode_we) crc_mode <= crc_mode_out;
                         if (crc_rd_we)   R[crypto_rd_r] <= crc_result;
+                        crypto_active <= 1'b0;
+                        cpu_state <= CPU_FETCH;
                     end
-                    // SHA-2 / Field ALU stubs — will trap as NOP until implemented
-                    crypto_active <= 1'b0;
+                    // SHA-2 (unit 1)
+                    else if (crypto_unit_r == 4'd1) begin
+                        case (crypto_op_r)
+                            ISA_SHA_INIT: begin
+                                // Load SHA-256 IV into ACC, set mode
+                                sha_mode <= crypto_imm_r[1:0];
+                                // SHA-256 IV (only mode supported in RTL)
+                                acc_reg[0] <= 64'h6a09e667_bb67ae85;
+                                acc_reg[1] <= 64'h3c6ef372_a54ff53a;
+                                acc_reg[2] <= 64'h510e527f_9b05688c;
+                                acc_reg[3] <= 64'h1f83d9ab_5be0cd19;
+                                sha_msglen_lo <= 64'd0;
+                                sha_msglen_hi <= 64'd0;
+                                crypto_active <= 1'b0;
+                                cpu_state <= CPU_FETCH;
+                            end
+                            ISA_SHA_ROUND: begin
+                                // Begin W loading from tile memory at TSRC0
+                                sha_load_cnt <= 4'd0;
+                                cpu_state <= CPU_SHA_LOAD;
+                            end
+                            ISA_SHA_DIN: begin
+                                // ACC[Rd[1:0]] ← Rs
+                                acc_reg[crypto_rd_r[1:0]] <= R[crypto_rs_r];
+                                crypto_active <= 1'b0;
+                                cpu_state <= CPU_FETCH;
+                            end
+                            ISA_SHA_DOUT: begin
+                                // Rd ← ACC[Rs[1:0]]
+                                R[crypto_rd_r] <= acc_reg[crypto_rs_r[1:0]];
+                                crypto_active <= 1'b0;
+                                cpu_state <= CPU_FETCH;
+                            end
+                            ISA_SHA_PAD, ISA_SHA_FINAL: begin
+                                // PAD and FINAL: handled by BIOS in software
+                                // (write padding manually, then SHA.ROUND)
+                                // RTL treats as NOP
+                                crypto_active <= 1'b0;
+                                cpu_state <= CPU_FETCH;
+                            end
+                            default: begin
+                                crypto_active <= 1'b0;
+                                cpu_state <= CPU_FETCH;
+                            end
+                        endcase
+                    end
+                    // Other crypto units — NOP
+                    else begin
+                        crypto_active <= 1'b0;
+                        cpu_state <= CPU_FETCH;
+                    end
                 end else if (bf_active) begin
                     R[dst_reg] <= bf_result;
                     flags[0]   <= bf_flag_z;   // Z
@@ -1796,6 +1922,49 @@ module mp64_cpu #(
                         flags[0] <= str_flag_z;  // Z
                         flags[5] <= str_flag_g;  // G
                     end
+                    cpu_state <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
+            // SHA_LOAD: Read 8 × 64-bit words from tile mem into sha_w_buf
+            // ============================================================
+            CPU_SHA_LOAD: begin
+                bus_valid <= 1'b1;
+                bus_addr  <= sha_tsrc0 + {sha_load_cnt[2:0], 3'b000};
+                bus_wen   <= 1'b0;
+                bus_size  <= BUS_DWORD;
+                if (bus_ready) begin
+                    bus_valid <= 1'b0;
+                    // Big-endian: high 32 bits = W[2i], low 32 bits = W[2i+1]
+                    sha_w_buf[{sha_load_cnt[2:0], 1'b0}]      <= bus_rdata[63:32];
+                    sha_w_buf[{sha_load_cnt[2:0], 1'b0} | 4'd1] <= bus_rdata[31:0];
+                    if (sha_load_cnt[2:0] == 3'd7) begin
+                        // All 16 W words loaded — start compression
+                        sha_start_r <= 1'b1;
+                        cpu_state   <= CPU_SHA_WAIT;
+                    end else begin
+                        sha_load_cnt <= sha_load_cnt + 4'd1;
+                    end
+                end
+            end
+
+            // ============================================================
+            // SHA_WAIT: Wait for 64-round compression engine to finish
+            // ============================================================
+            CPU_SHA_WAIT: begin
+                if (sha_done) begin
+                    // Write back H' to ACC registers
+                    acc_reg[0] <= {sha_h_out[0], sha_h_out[1]};
+                    acc_reg[1] <= {sha_h_out[2], sha_h_out[3]};
+                    acc_reg[2] <= {sha_h_out[4], sha_h_out[5]};
+                    acc_reg[3] <= {sha_h_out[6], sha_h_out[7]};
+                    // Update message length: +512 bits per block
+                    sha_msglen_lo <= sha_msglen_lo + 64'd512;
+                    if (sha_msglen_lo > (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))
+                        sha_msglen_hi <= sha_msglen_hi + 64'd1;
+                    flags[0] <= 1'b0;  // Z=0 (success)
+                    crypto_active <= 1'b0;
                     cpu_state <= CPU_FETCH;
                 end
             end

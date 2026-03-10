@@ -129,10 +129,20 @@ module mp64_cluster #(
     reg                 crc_done_reg;
     reg                 crc_rd_we_reg;
 
-    // Forward-declare MUL, MEX, and CRC grants (used in generate block)
+    // Per-micro-core SHA wires
+    wire [N-1:0]        mc_sha_req;
+    wire [N*4-1:0]      mc_sha_op;
+    wire [N*64-1:0]     mc_sha_rs_val;
+    wire [N*8-1:0]      mc_sha_imm8;
+    reg  [63:0]         sha_result_reg;
+    reg                 sha_done_reg;
+    reg                 sha_rd_we_reg;
+
+    // Forward-declare MUL, MEX, CRC, and SHA grants (used in generate block)
     reg  [ARB_BITS-1:0] mul_grant;
     reg  [ARB_BITS-1:0] mex_grant;
     reg  [ARB_BITS-1:0] crc_grant;
+    reg  [ARB_BITS-1:0] sha_grant;
 
     // ====================================================================
     // Cluster-shared state
@@ -143,6 +153,13 @@ module mp64_cluster #(
     reg [63:0]  cl_ivt_base;
     reg [63:0]  cl_crc_acc;        // cluster-shared CRC accumulator
     reg [1:0]   cl_crc_mode;       // cluster-shared CRC mode (0/1/2)
+
+    // Cluster-shared SHA-2 state
+    reg [63:0]  cl_sha_acc  [0:3]; // SHA accumulator (4 × 64-bit = 256 bits)
+    reg [1:0]   cl_sha_mode;       // 0=SHA-256
+    reg [63:0]  cl_sha_msglen_lo;  // message length in bits (low 64)
+    reg [63:0]  cl_sha_msglen_hi;  // high 64
+    reg [63:0]  cl_sha_tsrc0;      // shadow of TSRC0 for SHA W-loading
 
     // ====================================================================
     // Unpack per-micro-core address/wdata/size for indexing
@@ -199,6 +216,14 @@ module mp64_cluster #(
                 .crc_result (crc_result_reg),
                 .crc_done   (crc_done_reg && (crc_grant == gi[ARB_BITS-1:0])),
                 .crc_rd_we_in(crc_rd_we_reg && (crc_grant == gi[ARB_BITS-1:0])),
+
+                .sha_req    (mc_sha_req[gi]),
+                .sha_op     (mc_sha_op [gi*4  +: 4]),
+                .sha_rs_val (mc_sha_rs_val[gi*64 +: 64]),
+                .sha_imm8   (mc_sha_imm8 [gi*8  +: 8]),
+                .sha_result (sha_result_reg),
+                .sha_done   (sha_done_reg && (sha_grant == gi[ARB_BITS-1:0])),
+                .sha_rd_we_in(sha_rd_we_reg && (sha_grant == gi[ARB_BITS-1:0])),
 
                 .mex_req       (mc_mex_req[gi]),
                 .mex_ss        (mc_mex_ss       [gi*2  +: 2]),
@@ -261,6 +286,9 @@ module mp64_cluster #(
                     CSR_BARRIER_STATUS:mc_cl_csr_rdata[gi*64 +: 64] = {{(63-N){1'b0}}, barrier_done, barrier_arrive};
                     CSR_CRC_ACC:       mc_cl_csr_rdata[gi*64 +: 64] = cl_crc_acc;
                     CSR_CRC_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {62'd0, cl_crc_mode};
+                    CSR_SHA_MODE:      mc_cl_csr_rdata[gi*64 +: 64] = {62'd0, cl_sha_mode};
+                    CSR_SHA_MSGLEN:    mc_cl_csr_rdata[gi*64 +: 64] = cl_sha_msglen_lo;
+                    CSR_SHA_MSGLEN_HI: mc_cl_csr_rdata[gi*64 +: 64] = cl_sha_msglen_hi;
                     default:           mc_cl_csr_rdata[gi*64 +: 64] = 64'd0;
                 endcase
             end
@@ -358,6 +386,12 @@ module mp64_cluster #(
             cl_ivt_base   <= 64'd0;
             cl_crc_acc    <= 64'h0000_0000_FFFF_FFFF;
             cl_crc_mode   <= 2'd0;
+            cl_sha_acc[0] <= 64'd0; cl_sha_acc[1] <= 64'd0;
+            cl_sha_acc[2] <= 64'd0; cl_sha_acc[3] <= 64'd0;
+            cl_sha_mode      <= 2'd0;
+            cl_sha_msglen_lo <= 64'd0;
+            cl_sha_msglen_hi <= 64'd0;
+            cl_sha_tsrc0     <= 64'd0;
         end else begin
             mc_bus_ready <= {N{1'b0}};
             mc_mpu_fault <= {N{1'b0}};
@@ -384,7 +418,7 @@ module mp64_cluster #(
                         bus_valid <= 1'b0;
                     end
                 end
-            end else if (arb_any && !bist_running) begin
+            end else if (arb_any && !bist_running && !sha_bus_active) begin
                 arb_grant <= arb_next;
                 if (arb_mpu_fault) begin
                     mc_mpu_fault[arb_next] <= 1'b1;
@@ -425,9 +459,24 @@ module mp64_cluster #(
                             cl_crc_acc <= mc_cl_csr_wdata[mi*64 +: 64];
                         CSR_CRC_MODE:
                             cl_crc_mode <= mc_cl_csr_wdata[mi*64 +: 2];
+                        CSR_SHA_MODE:
+                            cl_sha_mode <= mc_cl_csr_wdata[mi*64 +: 2];
+                        CSR_SHA_MSGLEN:
+                            cl_sha_msglen_lo <= mc_cl_csr_wdata[mi*64 +: 64];
+                        CSR_SHA_MSGLEN_HI:
+                            cl_sha_msglen_hi <= mc_cl_csr_wdata[mi*64 +: 64];
                         default: ;
                     endcase
                 end
+            end
+
+            // ---------------------------------------------------------
+            // Sniff tile CSR writes for TSRC0 → shadow into cl_sha_tsrc0
+            // ---------------------------------------------------------
+            for (mi = 0; mi < N; mi = mi + 1) begin
+                if (mc_tile_csr_wen[mi] &&
+                    mc_tile_csr_addr[mi*8 +: 8] == CSR_TSRC0)
+                    cl_sha_tsrc0 <= mc_tile_csr_wdata[mi*64 +: 64];
             end
         end
     end
@@ -740,6 +789,246 @@ module mp64_cluster #(
                 end
 
                 default: crc_state <= CRC_IDLE;
+            endcase
+        end
+    end
+
+    // ====================================================================
+    // Shared SHA-2 ISA Engine + Arbiter
+    // ====================================================================
+    // One mp64_sha2_isa instance shared among N micro-cores.  Same
+    // round-robin + hardware lock pattern as CRC.
+    //
+    // SHA.INIT acquires lock, SHA.FINAL releases lock.
+    // SHA.ROUND is multi-cycle: loads 16×32-bit W from tile memory
+    //   (8 × 64-bit bus reads at cl_sha_tsrc0), then runs 64-round
+    //   compression (via mp64_sha2_isa engine).
+    //
+    // Bus access: SHA arbiter takes over the cluster bus during W loading
+    //   (sha_bus_active blocks the normal micro-core bus arbiter).
+
+    localparam SHA_IDLE    = 3'd0;
+    localparam SHA_SIMPLE  = 3'd1;   // single-cycle ops (INIT/DIN/DOUT/PAD/FINAL)
+    localparam SHA_LOAD    = 3'd2;   // loading W from tile memory (8 bus reads)
+    localparam SHA_COMPRESS= 3'd3;   // waiting for 64-round compression engine
+    localparam SHA_DONE    = 3'd4;   // signal result to micro-core
+
+    reg [2:0]           sha_state;
+    reg [ARB_BITS-1:0]  sha_last;
+    reg                 sha_locked;
+    reg [ARB_BITS-1:0]  sha_lock_owner;
+    reg                 sha_bus_active;   // blocks normal bus arbiter
+
+    // SHA W buffer (loaded from memory before compression)
+    reg  [31:0] sha_w_buf [0:15];
+    reg  [3:0]  sha_load_cnt;        // 0..7 for 8 × 64-bit reads
+    reg         sha_bus_pending;      // bus read in flight
+
+    // SHA engine instance
+    reg         sha_eng_start;
+    wire [31:0] sha_h_unpack [0:7];
+    wire [31:0] sha_h_out    [0:7];
+    wire        sha_h_we;
+    wire        sha_eng_busy;
+    wire        sha_eng_done;
+
+    // Unpack cluster SHA ACC → 8 × 32-bit H
+    assign sha_h_unpack[0] = cl_sha_acc[0][63:32];  // a
+    assign sha_h_unpack[1] = cl_sha_acc[0][31:0];   // b
+    assign sha_h_unpack[2] = cl_sha_acc[1][63:32];  // c
+    assign sha_h_unpack[3] = cl_sha_acc[1][31:0];   // d
+    assign sha_h_unpack[4] = cl_sha_acc[2][63:32];  // e
+    assign sha_h_unpack[5] = cl_sha_acc[2][31:0];   // f
+    assign sha_h_unpack[6] = cl_sha_acc[3][63:32];  // g
+    assign sha_h_unpack[7] = cl_sha_acc[3][31:0];   // h
+
+    mp64_sha2_isa u_cl_sha2 (
+        .clk     (clk),
+        .rst_n   (~cl_rst),
+        .start   (sha_eng_start),
+        .w_in    (sha_w_buf),
+        .h_in    (sha_h_unpack),
+        .h_out   (sha_h_out),
+        .h_we    (sha_h_we),
+        .busy    (sha_eng_busy),
+        .done    (sha_eng_done)
+    );
+
+    // SHA arbiter: round-robin with lock (same pattern as CRC)
+    reg [ARB_BITS-1:0] sha_next;
+    reg                sha_any;
+    reg [ARB_BITS:0]   sha_cand;
+
+    always @(*) begin
+        sha_next = sha_last;
+        sha_any  = 1'b0;
+        if (sha_locked) begin
+            if (mc_sha_req[sha_lock_owner]) begin
+                sha_next = sha_lock_owner;
+                sha_any  = 1'b1;
+            end
+        end else begin
+            for (mi = 1; mi <= N; mi = mi + 1) begin
+                sha_cand = {1'b0, sha_last} + mi[ARB_BITS:0];
+                if (sha_cand >= N_VAL)
+                    sha_cand = sha_cand - N_VAL;
+                if (!sha_any && mc_sha_req[sha_cand[ARB_BITS-1:0]]) begin
+                    sha_next = sha_cand[ARB_BITS-1:0];
+                    sha_any  = 1'b1;
+                end
+            end
+        end
+    end
+
+    // Latched op/imm8 from the granted core
+    reg  [3:0]  sha_op_r;
+    reg  [7:0]  sha_imm8_r;
+    reg  [63:0] sha_rs_val_r;
+
+    // SHA arbiter FSM
+    always @(posedge clk) begin
+        if (cl_rst) begin
+            sha_state      <= SHA_IDLE;
+            sha_grant      <= {ARB_BITS{1'b0}};
+            sha_last       <= {ARB_BITS{1'b0}};
+            sha_done_reg   <= 1'b0;
+            sha_rd_we_reg  <= 1'b0;
+            sha_result_reg <= 64'd0;
+            sha_locked     <= 1'b0;
+            sha_lock_owner <= {ARB_BITS{1'b0}};
+            sha_bus_active <= 1'b0;
+            sha_bus_pending<= 1'b0;
+            sha_load_cnt   <= 4'd0;
+            sha_eng_start  <= 1'b0;
+            sha_op_r       <= 4'd0;
+            sha_imm8_r     <= 8'd0;
+            sha_rs_val_r   <= 64'd0;
+        end else begin
+            sha_done_reg  <= 1'b0;
+            sha_rd_we_reg <= 1'b0;
+            sha_eng_start <= 1'b0;
+
+            case (sha_state)
+                SHA_IDLE: begin
+                    if (sha_any) begin
+                        sha_grant    <= sha_next;
+                        sha_op_r     <= mc_sha_op    [sha_next*4  +: 4];
+                        sha_imm8_r   <= mc_sha_imm8  [sha_next*8  +: 8];
+                        sha_rs_val_r <= mc_sha_rs_val [sha_next*64 +: 64];
+                        sha_state    <= SHA_SIMPLE;
+                    end
+                end
+
+                // Single-cycle dispatch: handle all ops here, branch to
+                // SHA_LOAD only for ROUND.
+                SHA_SIMPLE: begin
+                    sha_done_reg  <= 1'b1;  // default: done next cycle
+                    sha_rd_we_reg <= 1'b0;  // default: no GPR writeback
+
+                    case (sha_op_r)
+                        ISA_SHA_INIT: begin
+                            // Load SHA-256 IV, set mode, reset msglen
+                            cl_sha_mode      <= sha_imm8_r[1:0];
+                            cl_sha_acc[0]    <= 64'h6a09e667_bb67ae85;
+                            cl_sha_acc[1]    <= 64'h3c6ef372_a54ff53a;
+                            cl_sha_acc[2]    <= 64'h510e527f_9b05688c;
+                            cl_sha_acc[3]    <= 64'h1f83d9ab_5be0cd19;
+                            cl_sha_msglen_lo <= 64'd0;
+                            cl_sha_msglen_hi <= 64'd0;
+                            // Acquire lock
+                            sha_locked     <= 1'b1;
+                            sha_lock_owner <= sha_grant;
+                        end
+
+                        ISA_SHA_DIN: begin
+                            // ACC[imm8_hi[1:0]] ← rs_val
+                            cl_sha_acc[sha_imm8_r[5:4]] <= sha_rs_val_r;
+                        end
+
+                        ISA_SHA_DOUT: begin
+                            // Rd ← ACC[imm8_lo[1:0]]
+                            sha_result_reg <= cl_sha_acc[sha_imm8_r[1:0]];
+                            sha_rd_we_reg  <= 1'b1;
+                        end
+
+                        ISA_SHA_PAD: begin
+                            // NOP in RTL (BIOS does padding manually)
+                        end
+
+                        ISA_SHA_FINAL: begin
+                            // NOP + release lock
+                            sha_locked <= 1'b0;
+                        end
+
+                        ISA_SHA_ROUND: begin
+                            // Multi-cycle: start W loading from tile memory
+                            sha_done_reg   <= 1'b0;  // NOT done yet
+                            sha_bus_active <= 1'b1;   // take over bus
+                            sha_load_cnt   <= 4'd0;
+                            sha_bus_pending<= 1'b0;
+                            sha_state      <= SHA_LOAD;
+                        end
+
+                        default: ;
+                    endcase
+
+                    // For non-ROUND ops, return to IDLE
+                    if (sha_op_r != ISA_SHA_ROUND) begin
+                        sha_last  <= sha_grant;
+                        sha_state <= SHA_IDLE;
+                    end
+                end
+
+                // W-loading: 8 × 64-bit bus reads from cl_sha_tsrc0
+                SHA_LOAD: begin
+                    if (!sha_bus_pending && !arb_busy) begin
+                        // Issue bus read
+                        bus_valid      <= 1'b1;
+                        bus_addr       <= cl_sha_tsrc0 + {sha_load_cnt[2:0], 3'b000};
+                        bus_wen        <= 1'b0;
+                        bus_size       <= BUS_DWORD;
+                        sha_bus_pending <= 1'b1;
+                    end else if (sha_bus_pending) begin
+                        bus_valid <= 1'b1;   // keep valid asserted
+                        if (bus_ready) begin
+                            bus_valid <= 1'b0;
+                            sha_bus_pending <= 1'b0;
+                            // Big-endian: high 32 = W[2i], low 32 = W[2i+1]
+                            sha_w_buf[{sha_load_cnt[2:0], 1'b0}]        <= bus_rdata[63:32];
+                            sha_w_buf[{sha_load_cnt[2:0], 1'b0} | 4'd1] <= bus_rdata[31:0];
+                            if (sha_load_cnt[2:0] == 3'd7) begin
+                                // All 16 words loaded → start compression
+                                sha_eng_start  <= 1'b1;
+                                sha_bus_active <= 1'b0;   // release bus
+                                sha_state      <= SHA_COMPRESS;
+                            end else begin
+                                sha_load_cnt <= sha_load_cnt + 4'd1;
+                            end
+                        end
+                    end
+                end
+
+                // Wait for 64-round compression engine
+                SHA_COMPRESS: begin
+                    if (sha_eng_done) begin
+                        // Write back H' to cluster SHA ACC
+                        cl_sha_acc[0] <= {sha_h_out[0], sha_h_out[1]};
+                        cl_sha_acc[1] <= {sha_h_out[2], sha_h_out[3]};
+                        cl_sha_acc[2] <= {sha_h_out[4], sha_h_out[5]};
+                        cl_sha_acc[3] <= {sha_h_out[6], sha_h_out[7]};
+                        // Update message length: +512 bits per block
+                        cl_sha_msglen_lo <= cl_sha_msglen_lo + 64'd512;
+                        if (cl_sha_msglen_lo > (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))
+                            cl_sha_msglen_hi <= cl_sha_msglen_hi + 64'd1;
+                        // Signal done to micro-core
+                        sha_done_reg  <= 1'b1;
+                        sha_rd_we_reg <= 1'b0;
+                        sha_last      <= sha_grant;
+                        sha_state     <= SHA_IDLE;
+                    end
+                end
+
+                default: sha_state <= SHA_IDLE;
             endcase
         end
     end
