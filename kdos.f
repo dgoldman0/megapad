@@ -10527,64 +10527,6 @@ VARIABLE _TPC-POS
     0                                       \ success
 ;
 
-\ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
-\   Verify a TLS 1.3 CertificateVerify message.
-\   RFC 8446 §4.4.3:
-\     content = 0x20*64 || "TLS 1.3, server CertificateVerify" || 0x00 || H(transcript)
-\     Verify signature over SHA-256(content) using server's public key.
-\   Returns 0 on valid, -1 on invalid/unsupported.
-VARIABLE _TCV-CTX
-VARIABLE _TCV-MSG
-VARIABLE _TCV-MLEN
-CREATE _TCV-CONTENT 130 ALLOT        \ 64 + 33 + 1 + 32 = 130 bytes
-CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
-
-: TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
-    _TCV-MLEN !  _TCV-MSG !  _TCV-CTX !
-    \ CertificateVerify format:
-    \   [0]    type = 15
-    \   [1-3]  length (24-bit)
-    \   [4-5]  signature algorithm (2 bytes, big-endian)
-    \   [6-7]  signature length (2 bytes, big-endian)
-    \   [8..]  signature bytes
-    \ Extract signature algorithm
-    _TCV-MSG @ 4 + C@ 8 LSHIFT
-    _TCV-MSG @ 5 + C@ OR                   \ sig_algo
-    \ Extract signature
-    _TCV-MSG @ 6 + C@ 8 LSHIFT
-    _TCV-MSG @ 7 + C@ OR                   \ sig_len
-    _TCV-MSG @ 8 +                          \ sig_addr
-    ROT                                     \ sig_addr sig_len sig_algo
-    \ Build verification content:
-    \ 64 bytes of 0x20
-    _TCV-CONTENT 64 32 FILL
-    \ "TLS 1.3, server CertificateVerify" (33 bytes)
-    \ T=84 L=76 S=83 space=32 1=49 .=46 3=51 ,=44 sp=32
-    \ s=115 e=101 r=114 v=118 e=101 r=114 sp=32
-    \ C=67 e=101 r=114 t=116 i=105 f=102 i=105 c=99 a=97 t=116 e=101
-    \ V=86 e=101 r=114 i=105 f=102 y=121
-    S" TLS 1.3, server CertificateVerify"
-    _TCV-CONTENT 64 + SWAP CMOVE           \ copy context string
-    0 _TCV-CONTENT 64 + 33 + C!            \ trailing 0x00 separator
-    \ Hash current transcript (up to but not including this CV message)
-    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ _TCV-HASH TLS-HASH
-    \ Append transcript hash
-    _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
-    \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
-    _TCV-CONTENT 130 _TCV-HASH SHA256
-    \ Now dispatch by signature algorithm
-    DUP 0x0403 = IF                        \ ecdsa_secp256r1_sha256
-        DROP
-        \ ECDSA-P256-VERIFY ( hash pubkey sig slen -- flag )
-        _TCV-HASH
-        _TLS-SERVER-PUBKEY                  \ 65-byte uncompressed key
-        SWAP                                \ sig_addr sig_len → hash pub sig slen
-        ECDSA-P256-VERIFY EXIT
-    THEN
-    \ Unsupported algorithm — reject
-    2DROP DROP -1
-;
-
 \ =====================================================================
 \  §16.8  TLS 1.3 Record Layer
 \ =====================================================================
@@ -10974,6 +10916,64 @@ VARIABLE _TEL-OUT
     _TEL-SECRET @ TLS-HKDF-LABEL
     _TEL-LLEN @ 10 + _TEL-CLEN @ +
     _TEL-OLEN @ _TEL-OUT @ TLS-HKDF-EXPAND
+;
+
+\ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
+\   Verify a TLS 1.3 CertificateVerify message.
+\   RFC 8446 §4.4.3:
+\     content = 0x20*64 || "TLS 1.3, server CertificateVerify" || 0x00 || H(transcript)
+\     Verify signature over SHA-256(content) using server's public key.
+\   Returns 0 on valid, -1 on invalid/unsupported.
+VARIABLE _TCV-CTX
+VARIABLE _TCV-MSG
+VARIABLE _TCV-MLEN
+CREATE _TCV-CONTENT 130 ALLOT        \ 64 + 33 + 1 + 32 = 130 bytes
+CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
+
+: TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
+    _TCV-MLEN !  _TCV-MSG !  _TCV-CTX !
+    \ CertificateVerify format:
+    \   [0]    type = 15
+    \   [1-3]  length (24-bit)
+    \   [4-5]  signature algorithm (2 bytes, big-endian)
+    \   [6-7]  signature length (2 bytes, big-endian)
+    \   [8..]  signature bytes
+    \ Extract signature algorithm
+    _TCV-MSG @ 4 + C@ 8 LSHIFT
+    _TCV-MSG @ 5 + C@ OR                   \ sig_algo
+    \ Extract signature
+    _TCV-MSG @ 6 + C@ 8 LSHIFT
+    _TCV-MSG @ 7 + C@ OR                   \ sig_len
+    _TCV-MSG @ 8 +                          \ sig_addr
+    ROT                                     \ sig_addr sig_len sig_algo
+    \ Build verification content:
+    \ 64 bytes of 0x20
+    _TCV-CONTENT 64 32 FILL
+    \ "TLS 1.3, server CertificateVerify" (33 bytes)
+    \ T=84 L=76 S=83 space=32 1=49 .=46 3=51 ,=44 sp=32
+    \ s=115 e=101 r=114 v=118 e=101 r=114 sp=32
+    \ C=67 e=101 r=114 t=116 i=105 f=102 i=105 c=99 a=97 t=116 e=101
+    \ V=86 e=101 r=114 i=105 f=102 y=121
+    S" TLS 1.3, server CertificateVerify"
+    _TCV-CONTENT 64 + SWAP CMOVE           \ copy context string
+    0 _TCV-CONTENT 64 + 33 + C!            \ trailing 0x00 separator
+    \ Hash current transcript (up to but not including this CV message)
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ _TCV-HASH TLS-HASH
+    \ Append transcript hash
+    _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
+    \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
+    _TCV-CONTENT 130 _TCV-HASH SHA256
+    \ Now dispatch by signature algorithm
+    DUP 0x0403 = IF                        \ ecdsa_secp256r1_sha256
+        DROP
+        \ ECDSA-P256-VERIFY ( hash pubkey sig slen -- flag )
+        _TCV-HASH
+        _TLS-SERVER-PUBKEY                  \ 65-byte uncompressed key
+        SWAP                                \ sig_addr sig_len → hash pub sig slen
+        ECDSA-P256-VERIFY EXIT
+    THEN
+    \ Unsupported algorithm — reject
+    2DROP DROP -1
 ;
 
 \ --- Transcript Management ---
