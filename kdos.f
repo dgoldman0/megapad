@@ -1098,17 +1098,17 @@ VARIABLE _VERIFY-ACC
 \ =====================================================================
 \  §1.8  X25519 — Elliptic Curve Diffie-Hellman (RFC 7748)
 \ =====================================================================
-\  BIOS primitives (hardware accelerator at MMIO 0x0840):
-\    X25519-SCALAR! ( addr -- )    Write 32-byte scalar
-\    X25519-POINT!  ( addr -- )    Write 32-byte u-coordinate
-\    X25519-GO      ( -- )         Start computation
-\    X25519-WAIT    ( -- )         Poll until done
-\    X25519-STATUS@ ( -- n )       Read status (bit0=busy, bit1=done)
-\    X25519-RESULT@ ( addr -- )    Read 32-byte result
+\  BIOS primitives (per-core ISA via EXT.CRYPTO gf.x25519):
+\    X25519-SCALAR! ( addr -- )    Load 32-byte scalar → ACC
+\    X25519-POINT!  ( addr -- )    Set operand B address (TSRC0)
+\    X25519-GO      ( -- )         Execute gf.x25519 (synchronous)
+\    X25519-WAIT    ( -- )         No-op (ISA is synchronous)
+\    X25519-STATUS@ ( -- n )       Always 2 (done)
+\    X25519-RESULT@ ( addr -- )    Store ACC → 32 bytes
 
-CREATE X25519-PRIV  32 ALLOT      \ private key scratch buffer
-CREATE X25519-PUB   32 ALLOT      \ public key scratch buffer
-CREATE X25519-SHARED 32 ALLOT     \ shared secret scratch buffer
+CREATE X25519-PRIV  32 ALLOT
+CREATE X25519-PUB   32 ALLOT
+CREATE X25519-SHARED 32 ALLOT
 
 \ Curve25519 basepoint (u = 9, little-endian 32 bytes)
 CREATE X25519-BASE  32 ALLOT
@@ -1132,41 +1132,25 @@ CREATE X25519-BASE  32 ALLOT
     X25519-SCALAR!
     X25519-POINT!
     X25519-GO
-    X25519-WAIT
     R> X25519-RESULT@ ;
 
 \ X25519-KEYGEN ( -- )
 \   Generate a random private key and compute the public key.
-\   Private key stored in X25519-PRIV, public key in X25519-PUB.
 : X25519-KEYGEN ( -- )
-    \ Fill private key with 32 random bytes
     32 0 DO RANDOM8 X25519-PRIV I + C! LOOP
-    \ public = clamp(priv) * basepoint(9)
     X25519-PRIV X25519-BASE X25519-PUB X25519 ;
 
 \ X25519-DH ( their-pub-addr -- )
 \   Compute shared secret = our_priv * their_pub.
-\   Result stored in X25519-SHARED.
 : X25519-DH ( addr -- )
     X25519-PRIV SWAP X25519-SHARED X25519 ;
-
-\ .X25519-STATUS ( -- )  Print human-readable X25519 status.
-: .X25519-STATUS
-    X25519-STATUS@
-    DUP 0 = IF DROP ."  X25519: idle" CR ELSE
-    DUP 2 = IF DROP ."  X25519: done" CR ELSE
-    DUP 1 = IF DROP ."  X25519: busy" CR ELSE
-    DROP ."  X25519: unknown" CR
-    THEN THEN THEN ;
 
 \ =====================================================================
 \  §1.10  Field ALU — Multi-Prime Coprocessor + Raw 256x256 Multiply
 \ =====================================================================
-\  Hardware-accelerated field arithmetic via per-core ISA instructions
-\  (EXT.CRYPTO FB 20-2D).  Supports multiple primes via GF-PRIME /
-\  PRIME-SECP / PRIME-25519 words.  Default prime is Curve25519.
+\  Per-core ISA instructions (EXT.CRYPTO FB 20-2D).
 \
-\  BIOS primitives (ISA-based, per-core):
+\  BIOS primitives:
 \    GF-A!       ( addr -- )    Load 32 bytes → ACC0-ACC3
 \    GF-R@       ( addr -- )    Store ACC0-ACC3 → 32 bytes
 \    GF-PRIME    ( n -- )       Set prime: 0=25519, 1=secp, 2=P256, 3=custom
@@ -1182,35 +1166,8 @@ CREATE X25519-BASE  32 ALLOT
 \    FCEQ        ( a b r -- )   Constant-time equality test
 \    FMAC        ( a b r -- )   (a*b + prev) mod p
 \    FMUL-ADD-RAW ( a b rlo rhi -- ) Raw 512-bit MAC
-\
-\  Legacy MMIO plumbing (kept for backward compatibility):
-\    FIELD-A!  FIELD-B!  FIELD-CMD!  FIELD-WAIT  FIELD-RESULT@
 
-\ Mode constants (MMIO legacy — kept for backward compatibility)
-0 CONSTANT FMODE-X25519
-1 CONSTANT FMODE-ADD
-2 CONSTANT FMODE-SUB
-3 CONSTANT FMODE-MUL
-4 CONSTANT FMODE-SQR
-5 CONSTANT FMODE-INV
-6 CONSTANT FMODE-POW
-7 CONSTANT FMODE-RAW
-8 CONSTANT FMODE-CMOV
-9 CONSTANT FMODE-CEQ
-10 CONSTANT FMODE-LOAD-PRIME
-11 CONSTANT FMODE-MAC
-12 CONSTANT FMODE-MAC-RAW
-
-\ MMIO plumbing — kept for backward compatibility with legacy code
-0xFFFFFF0000000880 CONSTANT _FIELD-CMD-ADDR
-
-: FIELD-A!      X25519-SCALAR! ;
-: FIELD-B!      X25519-POINT! ;
-: FIELD-WAIT    X25519-WAIT ;
-: FIELD-STATUS@ X25519-STATUS@ ;
-: FIELD-RESULT@ X25519-RESULT@ ;
-
-\ Prime selection — now uses per-core ISA via GF-PRIME
+\ Prime selection
 : PRIME-25519  ( -- ) 0 GF-PRIME ;
 : PRIME-SECP   ( -- ) 1 GF-PRIME ;
 : PRIME-P256   ( -- ) 2 GF-PRIME ;
@@ -1221,19 +1178,6 @@ CREATE _FA  32 ALLOT
 CREATE _FB  32 ALLOT
 CREATE _FR  32 ALLOT
 CREATE _FRH 32 ALLOT
-
-\ FADD/FSUB/FMUL/FSQR/FINV/FPOW/FMUL-RAW/FCMOV/FCEQ/FMAC/
-\ FMUL-ADD-RAW/LOAD-PRIME are now BIOS dictionary primitives
-\ (ISA-based assembly in bios.asm).  No Forth definitions needed.
-
-\ .FIELD-STATUS ( -- )  Print human-readable field ALU status.
-: .FIELD-STATUS
-    FIELD-STATUS@
-    DUP 0 = IF DROP ."  Field ALU: idle" CR ELSE
-    DUP 2 = IF DROP ."  Field ALU: done" CR ELSE
-    DUP 1 = IF DROP ."  Field ALU: busy" CR ELSE
-    DROP ."  Field ALU: unknown" CR
-    THEN THEN THEN ;
 
 \ =====================================================================
 \  §1.11  NTT Engine — 256-point Number Theoretic Transform
@@ -9735,6 +9679,913 @@ VARIABLE _TPL-LEN
     0 DO TCP-POLL NET-IDLE LOOP ;
 
 \ =====================================================================
+\  §16.7a  ASN.1/DER Minimal Parser
+\ =====================================================================
+\
+\  Minimal tag-length-value parser for DER-encoded X.509 certificates.
+\  Non-recursive, bounded stack depth.  Only handles the subset needed
+\  for leaf certificate parsing (SEQUENCE, INTEGER, BIT STRING,
+\  OCTET STRING, OID, UTCTime, GeneralizedTime, context-tagged [0]-[3]).
+\
+\  DER-TAG@    ( addr -- tag )
+\  DER-LEN@    ( addr -- len hdr-bytes )
+\  DER-NEXT    ( addr -- val-addr val-len next-addr )
+\  DER-ENTER   ( addr -- inner-addr inner-len )
+\  DER-SKIP    ( addr -- next-addr )
+\  DER-FIND-TAG ( addr limit tag -- val-addr val-len | 0 0 )
+
+\ DER-TAG@ ( addr -- tag )   read single tag byte
+: DER-TAG@ ( addr -- tag )   C@ ;
+
+\ DER-LEN@ ( addr -- len hdr-bytes )
+\   addr points to first length byte (after tag).
+\   Returns decoded length and number of header bytes consumed (1..5).
+\   Handles short form (≤127) and long form (81 xx, 82 xx xx, etc.).
+: DER-LEN@ ( addr -- len hdr-bytes )
+    DUP C@
+    DUP 128 < IF                          \ short form
+        NIP 1 EXIT                        \ len=byte, consumed=1
+    THEN
+    127 AND                                \ number of length bytes
+    DUP 1 = IF
+        DROP 1+ C@ 2 EXIT                 \ 81 xx → len, consumed=2
+    THEN
+    DUP 2 = IF
+        DROP 1+ DUP C@ 8 LSHIFT
+        SWAP 1+ C@ OR 3 EXIT             \ 82 xx xx → len, consumed=3
+    THEN
+    DUP 3 = IF
+        DROP 1+ DUP C@ 16 LSHIFT
+        OVER 1+ C@ 8 LSHIFT OR
+        SWAP 2 + C@ OR 4 EXIT            \ 83 xx xx xx → len, consumed=4
+    THEN
+    \ 4-byte length (rare but possible for large certs)
+    DROP 1+ DUP C@ 24 LSHIFT
+    OVER 1+ C@ 16 LSHIFT OR
+    OVER 2 + C@ 8 LSHIFT OR
+    SWAP 3 + C@ OR 5                      \ 84 xx xx xx xx → len, consumed=5
+;
+
+\ DER-NEXT ( addr -- val-addr val-len next-addr )
+\   Parse one TLV element.  addr points to the tag byte.
+\   Returns pointer to value, value length, and address of next element.
+: DER-NEXT ( addr -- val-addr val-len next-addr )
+    DUP 1+                                \ ( addr addr+1 )
+    DER-LEN@                              \ ( addr len hdr-bytes )
+    ROT 1+ +                              \ ( len val-addr )  val=addr+1+hdr
+    SWAP                                  \ ( val-addr len )
+    2DUP +                                \ ( val-addr len next-addr )
+;
+
+\ DER-ENTER ( addr -- inner-addr inner-len )
+\   Enter a constructed element (SEQUENCE, SET, context-tagged).
+\   addr points to tag; returns contents pointer and length.
+: DER-ENTER ( addr -- inner-addr inner-len )
+    DER-NEXT DROP ;                        \ val-addr val-len (drop next)
+
+\ DER-SKIP ( addr -- next-addr )
+\   Skip one TLV element entirely.
+: DER-SKIP ( addr -- next-addr )
+    DER-NEXT NIP NIP ;                     \ next-addr
+
+\ DER-FIND-TAG ( addr limit tag -- val-addr val-len | 0 0 )
+\   Walk TLV elements from addr up to addr+limit, find first with matching tag.
+\   Returns 0 0 if not found.
+VARIABLE _DFT-LIM
+VARIABLE _DFT-TAG
+
+: DER-FIND-TAG ( addr limit tag -- val-addr val-len | 0 0 )
+    _DFT-TAG !  OVER + _DFT-LIM !
+    BEGIN
+        DUP _DFT-LIM @ < WHILE
+        DUP C@ _DFT-TAG @ = IF
+            DER-NEXT DROP EXIT             \ found: val-addr val-len
+        THEN
+        DER-SKIP                           \ skip this element
+    REPEAT
+    DROP 0 0                               \ not found
+;
+
+\ =====================================================================
+\  §16.7b  X.509 Leaf Certificate Parser
+\ =====================================================================
+\
+\  Parse a DER-encoded X.509v3 certificate (leaf only, no chain walk).
+\  Extract fields needed for TLS: subject public key, signature,
+\  Subject Alternative Names (for hostname verification).
+\
+\  Certificate ::= SEQUENCE {
+\    tbsCertificate       SEQUENCE { ... }
+\    signatureAlgorithm   SEQUENCE { OID, ... }
+\    signatureValue       BIT STRING
+\  }
+\
+\  tbsCertificate ::= SEQUENCE {
+\    version         [0] EXPLICIT INTEGER
+\    serialNumber    INTEGER
+\    signature       SEQUENCE { OID }
+\    issuer          SEQUENCE { ... }
+\    validity        SEQUENCE { notBefore, notAfter }
+\    subject         SEQUENCE { ... }
+\    subjectPKInfo   SEQUENCE { algorithm, subjectPublicKey }
+\    ...extensions   [3] EXPLICIT SEQUENCE { ... }
+\  }
+
+\ --- Scratch buffers for X.509 parse results ---
+CREATE _X509-PUBKEY     128 ALLOT    \ extracted public key bytes
+VARIABLE _X509-PUBKEY-LEN
+VARIABLE _X509-PUBKEY-ALGO          \ 0x0403=ECDSA-P256, 0x0807=Ed25519
+CREATE _X509-SIG        128 ALLOT   \ extracted signature bytes
+VARIABLE _X509-SIG-LEN
+VARIABLE _X509-SIG-ALGO             \ signature algorithm of the cert
+CREATE _X509-TBS-HASH    32 ALLOT   \ SHA-256 hash of tbsCertificate
+VARIABLE _X509-TBS-PTR              \ pointer to raw tbsCertificate
+VARIABLE _X509-TBS-LEN              \ length of raw tbsCertificate (incl tag+len)
+\ SAN (Subject Alternative Name) — for hostname matching
+CREATE _X509-SAN        256 ALLOT   \ raw SAN extension value
+VARIABLE _X509-SAN-LEN
+
+\ --- Well-known OID constants ---
+\ ecPublicKey       1.2.840.10045.2.1 = 06 07 2A 86 48 CE 3D 02 01
+\ prime256v1 (P256) 1.2.840.10045.3.1.7 = 06 08 2A 86 48 CE 3D 03 01 07
+\ sha256WithRSA     1.2.840.113549.1.1.11 = 06 09 2A 86 48 86 F7 0D 01 01 0B
+\ ecdsa-with-SHA256 1.2.840.10045.4.3.2 = 06 08 2A 86 48 CE 3D 04 03 02
+\ id-ce-subjectAltName 2.5.29.17 = 06 03 55 1D 11
+\ Ed25519           1.3.101.112 = 06 03 2B 65 70
+
+\ OID bytes for matching (without the 06 tag+len prefix)
+CREATE OID-EC-PUBKEY    42 C, 134 C, 72 C, 206 C, 61 C, 2 C, 1 C,
+7 CONSTANT /OID-EC-PUBKEY
+
+CREATE OID-P256         42 C, 134 C, 72 C, 206 C, 61 C, 3 C, 1 C, 7 C,
+8 CONSTANT /OID-P256
+
+CREATE OID-ECDSA-SHA256 42 C, 134 C, 72 C, 206 C, 61 C, 4 C, 3 C, 2 C,
+8 CONSTANT /OID-ECDSA-SHA256
+
+CREATE OID-ED25519      43 C, 101 C, 112 C,
+3 CONSTANT /OID-ED25519
+
+CREATE OID-SAN          85 C, 29 C, 17 C,
+3 CONSTANT /OID-SAN
+
+\ X509-OID-MATCH ( oid-addr oid-len known-addr known-len -- flag )
+\   Compare two OID value byte sequences.  Returns -1 if match, 0 if not.
+: X509-OID-MATCH ( a1 l1 a2 l2 -- flag )
+    ROT OVER <> IF 2DROP DROP 0 EXIT THEN   \ lengths differ → no match
+    0 DO                                      \ compare byte by byte
+        OVER I + C@  OVER I + C@ <> IF
+            2DROP 0 UNLOOP EXIT
+        THEN
+    LOOP
+    2DROP -1
+;
+
+\ X509-PARSE-SPKI ( spki-addr -- algo )
+\   Parse SubjectPublicKeyInfo SEQUENCE.
+\   Extracts algorithm OID → algo code, and raw public key → _X509-PUBKEY.
+\   Returns: 0x0403 for ECDSA-P256, 0x0807 for Ed25519, 0 for unknown.
+VARIABLE _XSPKI-PTR
+VARIABLE _XSPKI-ALG-OID
+VARIABLE _XSPKI-ALG-OLEN
+
+: X509-PARSE-SPKI ( spki-seq-val spki-seq-len -- algo )
+    DROP                                  \ drop len (we walk by TLV)
+    \ First child: algorithm SEQUENCE
+    DUP DER-ENTER                         \ alg-val alg-len
+    DROP                                  \ alg-val (first OID inside)
+    DUP DER-NEXT DROP                     \ oid-val oid-len
+    2DUP OID-EC-PUBKEY /OID-EC-PUBKEY X509-OID-MATCH IF
+        2DROP
+        \ EC key — need to check curve OID (second element in alg seq)
+        DER-SKIP                          \ skip algorithm SEQUENCE
+        \ Now at subjectPublicKey BIT STRING
+        DUP C@ 3 = IF                    \ tag=03 (BIT STRING)
+            DER-NEXT DROP                 \ bs-val bs-len
+            \ BIT STRING: first byte = unused bits (should be 0)
+            1- SWAP 1+ SWAP               \ skip unused-bits byte
+            \ For EC: this is 04 || x || y (65 bytes for P-256)
+            DUP 128 MIN _X509-PUBKEY-LEN !
+            _X509-PUBKEY SWAP 128 MIN CMOVE
+            0x0403 EXIT                   \ ECDSA-P256-SHA256
+        THEN
+        DROP 0 EXIT                       \ malformed
+    THEN
+    2DUP OID-ED25519 /OID-ED25519 X509-OID-MATCH IF
+        2DROP
+        DER-SKIP                          \ skip algorithm
+        DUP C@ 3 = IF                    \ BIT STRING
+            DER-NEXT DROP
+            1- SWAP 1+ SWAP              \ skip unused-bits
+            DUP 32 MIN _X509-PUBKEY-LEN !
+            _X509-PUBKEY SWAP 32 MIN CMOVE
+            0x0807 EXIT                   \ Ed25519
+        THEN
+        DROP 0 EXIT
+    THEN
+    2DROP DROP 0                           \ unknown algorithm
+;
+
+\ X509-PARSE-EXTENSIONS ( ext-seq-val ext-seq-len -- )
+\   Walk X.509v3 extensions, extract SAN if present.
+VARIABLE _XPE-LIM
+
+: X509-PARSE-EXTENSIONS ( addr len -- )
+    OVER + _XPE-LIM !
+    BEGIN DUP _XPE-LIM @ < WHILE
+        DUP DER-ENTER                     \ ext-seq-val ext-seq-len
+        DROP                              \ first child = OID
+        DUP DER-NEXT DROP                 \ oid-val oid-len
+        2DUP OID-SAN /OID-SAN X509-OID-MATCH IF
+            2DROP
+            \ SAN found — skip OID, optional critical BOOLEAN, then OCTET STRING
+            DER-SKIP                      \ skip OID
+            DUP C@ 1 = IF DER-SKIP THEN  \ skip critical BOOLEAN if present
+            DER-NEXT DROP                 \ octet-val octet-len (SAN value)
+            DUP 256 MIN _X509-SAN-LEN !
+            _X509-SAN SWAP 256 MIN CMOVE
+            DROP                          \ done with this extension
+        ELSE
+            2DROP DROP
+        THEN
+        \ Advance to next extension in outer SEQUENCE
+        DER-SKIP                          \ skip this ext SEQUENCE
+    REPEAT DROP
+;
+
+\ X509-PARSE ( cert clen -- flag )
+\   Parse a DER-encoded X.509 certificate.
+\   Fills _X509-PUBKEY, _X509-PUBKEY-ALGO, _X509-SIG, _X509-SAN, etc.
+\   Returns 0 on success, -1 on error.
+VARIABLE _XP-CERT
+VARIABLE _XP-CLEN
+VARIABLE _XP-TBS
+VARIABLE _XP-TBSLEN
+
+: X509-PARSE ( cert clen -- flag )
+    _XP-CLEN !  _XP-CERT !
+    0 _X509-SAN-LEN !
+    0 _X509-PUBKEY-LEN !
+    0 _X509-SIG-LEN !
+    \ Outermost SEQUENCE
+    _XP-CERT @ C@ 48 <> IF -1 EXIT THEN     \ must be SEQUENCE (0x30)
+    \ First child of outer SEQUENCE = tbsCertificate SEQUENCE tag
+    _XP-CERT @ DER-NEXT DROP                 \ ( val-addr val-len next-addr )
+    DROP DROP                                \ val-addr = tbs tag start
+    DUP _X509-TBS-PTR !
+    \ Get TBS total raw size (tag + length + content)
+    DUP DER-NEXT                             \ tbs-val tbs-len after-tbs
+    NIP                                      \ tbs-val after-tbs
+    _X509-TBS-PTR @ - _X509-TBS-LEN !       \ TBS raw len = after - start
+    DROP                                     \ clean stack (tbs-val not needed here)
+    \ Hash tbsCertificate for signature verification later
+    _X509-TBS-PTR @ _X509-TBS-LEN @ _X509-TBS-HASH SHA256
+    \ Walk inside tbsCertificate
+    _X509-TBS-PTR @ DER-ENTER DROP           \ tbs contents start
+    \ Field 0: version [0] EXPLICIT — skip if present (tag=0xA0)
+    DUP C@ 160 = IF DER-SKIP THEN           \ skip [0] version
+    \ Field 1: serialNumber INTEGER — skip
+    DER-SKIP
+    \ Field 2: signature algorithm SEQUENCE — skip (we use outer sig alg)
+    DER-SKIP
+    \ Field 3: issuer SEQUENCE — skip
+    DER-SKIP
+    \ Field 4: validity SEQUENCE — skip (Phase 2 will check dates)
+    DER-SKIP
+    \ Field 5: subject SEQUENCE — skip (hostname check uses SAN)
+    DER-SKIP
+    \ Field 6: subjectPublicKeyInfo SEQUENCE — PARSE
+    DUP C@ 48 <> IF DROP -1 EXIT THEN       \ must be SEQUENCE
+    DUP DER-ENTER                            \ ( pos spki-val spki-len )
+    X509-PARSE-SPKI                          \ ( pos algo )
+    _X509-PUBKEY-ALGO !                      \ ( pos )
+    DER-SKIP                                 \ advance past SPKI
+    \ Fields 7+: extensions [3] EXPLICIT — optional
+    DUP C@ 163 = IF                          \ tag = 0xA3 = [3] EXPLICIT
+        DER-ENTER                            \ ( ext-outer-val ext-outer-len )
+        DROP                                 \ inner SEQUENCE of extensions
+        DUP C@ 48 = IF
+            DER-ENTER                        \ ( ext-seq-val ext-seq-len )
+            X509-PARSE-EXTENSIONS
+        ELSE
+            DROP
+        THEN
+    ELSE
+        DROP
+    THEN
+    _X509-PUBKEY-ALGO @ 0= IF -1 ELSE 0 THEN
+;
+
+\ X509-CHECK-HOST ( hostname hlen -- flag )
+\   Verify hostname against extracted SAN dNSNames.
+\   Returns 0 if matched, -1 if no match found.
+\   Supports wildcard *.example.com matching (leftmost label only).
+VARIABLE _XCH-HOST
+VARIABLE _XCH-HLEN
+
+\ _XCH-IEQUAL ( a1 a2 len -- flag )  case-insensitive byte compare
+: _XCH-IEQUAL ( a1 a2 len -- flag )
+    0 DO
+        OVER I + C@ 32 OR
+        OVER I + C@ 32 OR
+        <> IF 2DROP FALSE UNLOOP EXIT THEN
+    LOOP
+    2DROP TRUE
+;
+
+\ _XCH-EXACT? ( dns-addr dns-len -- flag )  exact match against _XCH-HOST
+: _XCH-EXACT? ( addr len -- flag )
+    DUP _XCH-HLEN @ <> IF 2DROP FALSE EXIT THEN
+    _XCH-HOST @ SWAP _XCH-IEQUAL
+;
+
+\ _XCH-WILDCARD? ( dns-addr dns-len -- flag )
+\   Match "*.suffix" against hostname.  dns must start with "*.".
+\   Matches if hostname has at least one dot and suffix after first dot matches.
+VARIABLE _XCW-DPTR
+VARIABLE _XCW-DLEN
+
+: _XCH-WILDCARD? ( addr len -- flag )
+    _XCW-DLEN !  _XCW-DPTR !
+    \ Must start with "*." and have at least 3 chars
+    _XCW-DLEN @ 3 < IF FALSE EXIT THEN
+    _XCW-DPTR @ C@ 42 <> IF FALSE EXIT THEN    \ '*'
+    _XCW-DPTR @ 1+ C@ 46 <> IF FALSE EXIT THEN \ '.'
+    \ Find first '.' in hostname
+    _XCH-HLEN @ 0 DO
+        _XCH-HOST @ I + C@ 46 = IF
+            \ Hostname suffix starts at I+1
+            _XCH-HLEN @ I 1+ -                  \ suffix-len
+            _XCW-DLEN @ 2 -                      \ dns-suffix-len (skip "*.")
+            OVER OVER <> IF 2DROP FALSE UNLOOP EXIT THEN
+            DROP                                 \ matching lengths
+            _XCH-HOST @ I 1+  +                  \ host-suffix-addr
+            _XCW-DPTR @ 2 +                      \ dns-suffix-addr
+            _XCH-HLEN @ I 1+ -                   \ len
+            _XCH-IEQUAL UNLOOP EXIT
+        THEN
+    LOOP
+    FALSE                                        \ no dot in hostname
+;
+
+: X509-CHECK-HOST ( hostname hlen -- flag )
+    _XCH-HLEN !  _XCH-HOST !
+    _X509-SAN-LEN @ 0= IF -1 EXIT THEN
+    \ Walk SAN — may be a bare SEQUENCE or the raw extension value
+    _X509-SAN
+    _X509-SAN _X509-SAN-LEN @ +                 \ limit
+    SWAP                                         \ ( limit pos )
+    \ If starts with SEQUENCE tag, enter it
+    DUP C@ 48 = IF
+        DER-ENTER                                \ ( limit inner-addr inner-len )
+        ROT DROP                                 \ ( inner-addr inner-len )
+        OVER + SWAP                              \ ( new-limit new-pos )
+    THEN
+    BEGIN 2DUP > WHILE                           \ ( limit pos )
+        DUP C@ 130 = IF                          \ dNSName context [2]
+            DUP DER-NEXT                         \ ( limit pos dns-val dns-len next )
+            >R >R >R                             \ R: next dns-len dns-val
+            R> R>                                \ ( limit pos dns-val dns-len )
+            2DUP _XCH-WILDCARD? IF
+                2DROP 2DROP R> DROP 0 EXIT       \ MATCH (wildcard)
+            THEN
+            _XCH-EXACT? IF
+                DROP R> DROP 0 EXIT              \ MATCH (exact)
+            THEN
+            DROP R>                              \ ( limit next )
+        ELSE
+            DER-SKIP                             \ skip non-dNSName
+        THEN
+    REPEAT
+    2DROP -1                                     \ no match
+;
+
+\ =====================================================================
+\  §16.7c  P-256 ECDSA Verification
+\ =====================================================================
+\
+\  NIST P-256 (secp256r1) elliptic curve signature verification.
+\  Uses the Field ALU coprocessor (§1.10) for modular arithmetic.
+\
+\  Curve: y² = x³ + ax + b  over GF(p)
+\    p = 2²⁵⁶ − 2²²⁴ + 2¹⁹² + 2⁹⁶ − 1
+\    a = p − 3
+\    b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+\    G = (Gx, Gy)  — base point
+\    n = order of G
+\
+\  Point representation: Jacobian coordinates (X, Y, Z) where
+\    affine (x, y) = (X/Z², Y/Z³).
+
+\ --- P-256 Constants (little-endian 32-byte buffers) ---
+\ All values stored little-endian to match Field ALU memory format.
+
+\ P-256 base point Gx
+CREATE P256-GX
+    150 C, 194 C, 152 C, 216 C, 69 C, 57 C, 161 C, 244 C,
+    160 C, 51 C, 235 C, 45 C, 129 C, 125 C, 3 C, 119 C,
+    242 C, 64 C, 164 C, 99 C, 229 C, 230 C, 188 C, 248 C,
+    71 C, 66 C, 44 C, 225 C, 242 C, 209 C, 23 C, 107 C,
+\ = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
+
+\ P-256 base point Gy
+CREATE P256-GY
+    245 C, 81 C, 191 C, 55 C, 104 C, 64 C, 182 C, 203 C,
+    206 C, 94 C, 49 C, 107 C, 87 C, 51 C, 206 C, 43 C,
+    22 C, 158 C, 15 C, 124 C, 74 C, 235 C, 231 C, 142 C,
+    155 C, 127 C, 26 C, 254 C, 226 C, 66 C, 227 C, 79 C,
+\ = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
+
+\ P-256 curve order n (little-endian)
+CREATE P256-N
+    81 C, 37 C, 99 C, 252 C, 194 C, 202 C, 185 C, 243 C,
+    132 C, 158 C, 23 C, 167 C, 173 C, 250 C, 230 C, 188 C,
+    255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    0 C, 0 C, 0 C, 0 C, 255 C, 255 C, 255 C, 255 C,
+\ = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+\ P-256 parameter a = p - 3 (little-endian)
+CREATE P256-A
+    252 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C, 255 C,
+    255 C, 255 C, 255 C, 255 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    1 C, 0 C, 0 C, 0 C, 255 C, 255 C, 255 C, 255 C,
+\ = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC
+
+\ P-256 parameter b (little-endian)
+CREATE P256-B
+    75 C, 96 C, 210 C, 39 C, 62 C, 60 C, 206 C, 59 C,
+    246 C, 176 C, 83 C, 204 C, 176 C, 6 C, 29 C, 101 C,
+    188 C, 134 C, 152 C, 118 C, 85 C, 189 C, 235 C, 179 C,
+    231 C, 147 C, 58 C, 170 C, 216 C, 53 C, 198 C, 90 C,
+\ = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+
+\ --- Jacobian Point Scratch Buffers ---
+\ Each coordinate is 32 bytes.  We need several temp points.
+CREATE _EC-T1  32 ALLOT    \ temp field element
+CREATE _EC-T2  32 ALLOT
+CREATE _EC-T3  32 ALLOT
+CREATE _EC-T4  32 ALLOT
+CREATE _EC-T5  32 ALLOT
+CREATE _EC-T6  32 ALLOT
+
+\ Jacobian result point
+CREATE _EC-RX  32 ALLOT
+CREATE _EC-RY  32 ALLOT
+CREATE _EC-RZ  32 ALLOT
+
+\ Second Jacobian point for add
+CREATE _EC-QX  32 ALLOT
+CREATE _EC-QY  32 ALLOT
+CREATE _EC-QZ  32 ALLOT
+
+\ Accumulator point for scalar mul
+CREATE _EC-AX  32 ALLOT
+CREATE _EC-AY  32 ALLOT
+CREATE _EC-AZ  32 ALLOT
+
+\ u1*G result
+CREATE _EC-U1X 32 ALLOT
+CREATE _EC-U1Y 32 ALLOT
+CREATE _EC-U1Z 32 ALLOT
+
+\ u2*Q result
+CREATE _EC-U2X 32 ALLOT
+CREATE _EC-U2Y 32 ALLOT
+CREATE _EC-U2Z 32 ALLOT
+
+\ Identity / zero constant
+CREATE _EC-ZERO 32 ALLOT
+_EC-ZERO 32 0 FILL
+
+\ One constant
+CREATE _EC-ONE 32 ALLOT
+_EC-ONE 32 0 FILL
+1 _EC-ONE C!
+
+\ EC-DOUBLE ( Px Py Pz Rx Ry Rz -- )
+\   Point doubling in Jacobian coordinates on P-256.
+\   If Py==0, result is point at infinity (0,1,0).
+\   Uses: _EC-T1.._EC-T6 as scratch.
+\   All field ops under PRIME-P256.
+VARIABLE _ECD-PX  VARIABLE _ECD-PY  VARIABLE _ECD-PZ
+VARIABLE _ECD-RX  VARIABLE _ECD-RY  VARIABLE _ECD-RZ
+
+: EC-DOUBLE ( Px Py Pz Rx Ry Rz -- )
+    _ECD-RZ !  _ECD-RY !  _ECD-RX !
+    _ECD-PZ !  _ECD-PY !  _ECD-PX !
+    PRIME-P256
+    \ M = 3*X² + a*Z⁴
+    _ECD-PX @ _ECD-PX @ _EC-T1 FMUL             \ T1 = X²
+    _EC-T1 _EC-T1 _EC-T2 FADD                    \ T2 = 2X²
+    _EC-T2 _EC-T1 _EC-T2 FADD                    \ T2 = 3X²
+    _ECD-PZ @ _ECD-PZ @ _EC-T3 FMUL              \ T3 = Z²
+    _EC-T3 _EC-T3 _EC-T3 FMUL                    \ T3 = Z⁴
+    P256-A _EC-T3 _EC-T3 FMUL                    \ T3 = a*Z⁴
+    _EC-T2 _EC-T3 _EC-T1 FADD                    \ T1 = M = 3X² + aZ⁴
+    \ S = 4*X*Y²
+    _ECD-PY @ _ECD-PY @ _EC-T2 FMUL              \ T2 = Y²
+    _ECD-PX @ _EC-T2 _EC-T3 FMUL                 \ T3 = X*Y²
+    _EC-T3 _EC-T3 _EC-T4 FADD                    \ T4 = 2*X*Y²
+    _EC-T4 _EC-T4 _EC-T4 FADD                    \ T4 = S = 4*X*Y²
+    \ Rx = M² - 2S
+    _EC-T1 _EC-T1 _ECD-RX @ FMUL                 \ Rx = M²
+    _EC-T4 _EC-T4 _EC-T5 FADD                    \ T5 = 2S
+    _ECD-RX @ _EC-T5 _ECD-RX @ FSUB              \ Rx = M² - 2S
+    \ Ry = M*(S - Rx) - 8*Y⁴
+    _EC-T4 _ECD-RX @ _EC-T5 FSUB                 \ T5 = S - Rx
+    _EC-T1 _EC-T5 _ECD-RY @ FMUL                 \ Ry = M*(S-Rx)
+    _EC-T2 _EC-T2 _EC-T5 FMUL                    \ T5 = Y⁴
+    _EC-T5 _EC-T5 _EC-T6 FADD                    \ T6 = 2Y⁴
+    _EC-T6 _EC-T6 _EC-T6 FADD                    \ T6 = 4Y⁴
+    _EC-T6 _EC-T6 _EC-T6 FADD                    \ T6 = 8Y⁴
+    _ECD-RY @ _EC-T6 _ECD-RY @ FSUB              \ Ry = M*(S-Rx) - 8Y⁴
+    \ Rz = 2*Y*Z
+    _ECD-PY @ _ECD-PZ @ _ECD-RZ @ FMUL           \ Rz = Y*Z
+    _ECD-RZ @ _ECD-RZ @ _ECD-RZ @ FADD           \ Rz = 2*Y*Z
+;
+
+\ EC-ADD ( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )
+\   Point addition in Jacobian coordinates.  Handles P1==inf, P2==inf,
+\   P1==P2 (calls EC-DOUBLE), P1==-P2 (returns inf).
+\   Uses scratch: _EC-T1.._EC-T6.
+VARIABLE _ECA-P1X  VARIABLE _ECA-P1Y  VARIABLE _ECA-P1Z
+VARIABLE _ECA-P2X  VARIABLE _ECA-P2Y  VARIABLE _ECA-P2Z
+VARIABLE _ECA-RX   VARIABLE _ECA-RY   VARIABLE _ECA-RZ
+
+: EC-ADD ( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )
+    _ECA-RZ !  _ECA-RY !  _ECA-RX !
+    _ECA-P2Z !  _ECA-P2Y !  _ECA-P2X !
+    _ECA-P1Z !  _ECA-P1Y !  _ECA-P1X !
+    PRIME-P256
+    \ Check P1 = infinity (Z1==0)
+    _ECA-P1Z @ _EC-ZERO _EC-T1 FCEQ
+    _EC-T1 C@ 0<> IF    \ P1 is infinity → result = P2
+        _ECA-P2X @ _ECA-RX @ 32 CMOVE
+        _ECA-P2Y @ _ECA-RY @ 32 CMOVE
+        _ECA-P2Z @ _ECA-RZ @ 32 CMOVE EXIT
+    THEN
+    \ Check P2 = infinity (Z2==0)
+    _ECA-P2Z @ _EC-ZERO _EC-T1 FCEQ
+    _EC-T1 C@ 0<> IF    \ P2 is infinity → result = P1
+        _ECA-P1X @ _ECA-RX @ 32 CMOVE
+        _ECA-P1Y @ _ECA-RY @ 32 CMOVE
+        _ECA-P1Z @ _ECA-RZ @ 32 CMOVE EXIT
+    THEN
+    \ U1 = X1*Z2², U2 = X2*Z1²
+    _ECA-P2Z @ _ECA-P2Z @ _EC-T1 FMUL          \ T1 = Z2²
+    _ECA-P1X @ _EC-T1 _EC-T2 FMUL               \ T2 = U1 = X1*Z2²
+    _ECA-P1Z @ _ECA-P1Z @ _EC-T3 FMUL           \ T3 = Z1²
+    _ECA-P2X @ _EC-T3 _EC-T4 FMUL               \ T4 = U2 = X2*Z1²
+    \ S1 = Y1*Z2³, S2 = Y2*Z1³
+    _EC-T1 _ECA-P2Z @ _EC-T1 FMUL               \ T1 = Z2³
+    _ECA-P1Y @ _EC-T1 _EC-T5 FMUL               \ T5 = S1 = Y1*Z2³
+    _EC-T3 _ECA-P1Z @ _EC-T3 FMUL               \ T3 = Z1³
+    _ECA-P2Y @ _EC-T3 _EC-T6 FMUL               \ T6 = S2 = Y2*Z1³
+    \ H = U2 - U1
+    _EC-T4 _EC-T2 _EC-T1 FSUB                    \ T1 = H = U2 - U1
+    \ R = S2 - S1
+    _EC-T6 _EC-T5 _EC-T3 FSUB                    \ T3 = R = S2 - S1
+    \ If H==0: either same point (double) or inverse (infinity)
+    _EC-T1 _EC-ZERO _EC-T4 FCEQ
+    _EC-T4 C@ 0<> IF
+        _EC-T3 _EC-ZERO _EC-T4 FCEQ
+        _EC-T4 C@ 0<> IF
+            \ H==0 and R==0 → P1==P2, use doubling
+            _ECA-P1X @ _ECA-P1Y @ _ECA-P1Z @
+            _ECA-RX @ _ECA-RY @ _ECA-RZ @ EC-DOUBLE EXIT
+        THEN
+        \ H==0, R≠0 → P1==-P2, result = infinity
+        _EC-ZERO _ECA-RX @ 32 CMOVE
+        _EC-ONE  _ECA-RY @ 32 CMOVE
+        _EC-ZERO _ECA-RZ @ 32 CMOVE EXIT
+    THEN
+    \ H² and H³
+    _EC-T1 _EC-T1 _EC-T4 FMUL                    \ T4 = H²
+    _EC-T4 _EC-T1 _EC-T6 FMUL                    \ T6 = H³
+    \ U1*H²
+    _EC-T2 _EC-T4 _EC-T2 FMUL                    \ T2 = U1*H²
+    \ Rx = R² - H³ - 2*U1*H²
+    _EC-T3 _EC-T3 _ECA-RX @ FMUL                 \ Rx = R²
+    _ECA-RX @ _EC-T6 _ECA-RX @ FSUB              \ Rx = R² - H³
+    _EC-T2 _EC-T2 _EC-T4 FADD                    \ T4 = 2*U1*H²
+    _ECA-RX @ _EC-T4 _ECA-RX @ FSUB              \ Rx = R²-H³-2*U1*H²
+    \ Ry = R*(U1*H² - Rx) - S1*H³
+    _EC-T2 _ECA-RX @ _EC-T4 FSUB                 \ T4 = U1*H² - Rx
+    \ (T2 was overwritten as 2*U1*H² above; we need the original U1*H².)
+    \ Fix: T2 currently = 2*U1*H².  We need U1*H² = T4/2... no.
+    \ Let's recalculate: T4 = 2*U1*H²  so U1*H² = T4/2 ... messy.
+    \ Instead let's re-derive from T4:  U1*H² - Rx = (T4/2 ... no)
+
+    \ Actually T2 = U1*H² before it was doubled.  We doubled it IN T4.
+    \ T2 itself was overwritten by U1*H².  Then T4=T2+T2=2*U1*H².
+    \ But we already used T2 as source for T4 = T2+T2, so T2 still = U1*H².
+    \ FADD doesn't modify its source operands — only writes to dest.
+    \ So T2 still holds U1*H².   Good.
+    _EC-T2 _ECA-RX @ _EC-T4 FSUB                 \ T4 = U1*H² - Rx
+    _EC-T3 _EC-T4 _ECA-RY @ FMUL                 \ Ry = R*(U1*H²-Rx)
+    _EC-T5 _EC-T6 _EC-T4 FMUL                    \ T4 = S1*H³
+    _ECA-RY @ _EC-T4 _ECA-RY @ FSUB              \ Ry = R*(U1*H²-Rx)-S1*H³
+    \ Rz = H*Z1*Z2
+    _EC-T1 _ECA-P1Z @ _EC-T4 FMUL               \ T4 = H*Z1
+    _EC-T4 _ECA-P2Z @ _ECA-RZ @ FMUL            \ Rz = H*Z1*Z2
+;
+
+\ EC-AFFINE ( Jx Jy Jz Ax Ay -- )
+\   Convert Jacobian (X, Y, Z) → affine (x, y) = (X/Z², Y/Z³).
+VARIABLE _ECAF-JX  VARIABLE _ECAF-JY  VARIABLE _ECAF-JZ
+VARIABLE _ECAF-AX  VARIABLE _ECAF-AY
+
+: EC-AFFINE ( Jx Jy Jz Ax Ay -- )
+    _ECAF-AY !  _ECAF-AX !
+    _ECAF-JZ !  _ECAF-JY !  _ECAF-JX !
+    PRIME-P256
+    _ECAF-JZ @ _EC-T1 FINV                       \ T1 = Z⁻¹
+    _EC-T1 _EC-T1 _EC-T2 FMUL                    \ T2 = Z⁻²
+    _EC-T2 _EC-T1 _EC-T3 FMUL                    \ T3 = Z⁻³
+    _ECAF-JX @ _EC-T2 _ECAF-AX @ FMUL            \ Ax = X*Z⁻²
+    _ECAF-JY @ _EC-T3 _ECAF-AY @ FMUL            \ Ay = Y*Z⁻³
+;
+
+\ EC-MUL ( k Px Py Rx Ry -- )
+\   Scalar multiplication: R = k*P  (double-and-add, MSB first).
+\   k is a 32-byte big-endian scalar.  P is affine (Px, Py).
+\   Result R is affine (Rx, Ry).  Uses _EC-AX/AY/AZ as accumulator.
+VARIABLE _ECM-K   VARIABLE _ECM-PX  VARIABLE _ECM-PY
+VARIABLE _ECM-RX  VARIABLE _ECM-RY
+
+: EC-MUL ( k Px Py Rx Ry -- )
+    _ECM-RY !  _ECM-RX !
+    _ECM-PY !  _ECM-PX !  _ECM-K !
+    PRIME-P256
+    \ Init accumulator to infinity (0, 1, 0)
+    _EC-ZERO _EC-AX 32 CMOVE
+    _EC-ONE  _EC-AY 32 CMOVE
+    _EC-ZERO _EC-AZ 32 CMOVE
+    \ Set up P in Jacobian: (Px, Py, 1)
+    _ECM-PX @ _EC-QX 32 CMOVE
+    _ECM-PY @ _EC-QY 32 CMOVE
+    _EC-ONE   _EC-QZ 32 CMOVE
+    \ Double-and-add, MSB first, 256 bits
+    256 0 DO
+        \ Double accumulator
+        _EC-AX _EC-AY _EC-AZ
+        _EC-RX _EC-RY _EC-RZ EC-DOUBLE
+        _EC-RX _EC-AX 32 CMOVE
+        _EC-RY _EC-AY 32 CMOVE
+        _EC-RZ _EC-AZ 32 CMOVE
+        \ Test bit: byte = k[i/8], bit = 7-(i%8)
+        I 3 RSHIFT _ECM-K @ + C@         \ byte
+        7 I 7 AND - RSHIFT 1 AND         \ bit value
+        IF
+            \ Add P to accumulator
+            _EC-AX _EC-AY _EC-AZ
+            _EC-QX _EC-QY _EC-QZ
+            _EC-RX _EC-RY _EC-RZ EC-ADD
+            _EC-RX _EC-AX 32 CMOVE
+            _EC-RY _EC-AY 32 CMOVE
+            _EC-RZ _EC-AZ 32 CMOVE
+        THEN
+    LOOP
+    \ Convert to affine
+    _EC-AX _EC-AY _EC-AZ _ECM-RX @ _ECM-RY @ EC-AFFINE
+;
+
+\ --- ECDSA Signature Decoding ---
+\ DER-encoded ECDSA signature: SEQUENCE { INTEGER r, INTEGER s }
+\ Each INTEGER may have a leading 0x00 byte if MSB is set.
+CREATE _ECDSA-R   32 ALLOT    \ decoded r (32 bytes, zero-padded)
+CREATE _ECDSA-S   32 ALLOT    \ decoded s (32 bytes, zero-padded)
+
+\ ECDSA-DECODE-SIG ( sig slen -- flag )
+\   Decode DER-encoded ECDSA signature into _ECDSA-R and _ECDSA-S.
+\   Returns 0 on success, -1 on error.
+: ECDSA-DECODE-SIG ( sig slen -- flag )
+    DROP                                  \ we walk by TLV structure
+    DUP C@ 48 <> IF DROP -1 EXIT THEN    \ must start SEQUENCE
+    DER-ENTER DROP                        \ inside SEQUENCE
+    \ First INTEGER → r
+    DUP C@ 2 <> IF DROP -1 EXIT THEN     \ must be INTEGER
+    DER-NEXT DROP                         \ r-val r-len next
+    >R                                    \ R: next
+    _ECDSA-R 32 0 FILL                   \ zero-pad
+    DUP 32 > IF                           \ >32 bytes: skip leading zeros
+        32 - SWAP OVER + SWAP             \ advance past excess bytes
+        32
+    THEN
+    \ Copy r-len bytes right-aligned into _ECDSA-R
+    32 OVER - >R                          \ R: pad-offset
+    SWAP _ECDSA-R R> + SWAP CMOVE        \ copy r into _ECDSA-R[offset..]
+    R>                                    \ restore next
+    \ Second INTEGER → s
+    DUP C@ 2 <> IF DROP -1 EXIT THEN
+    DER-NEXT DROP                         \ s-val s-len next
+    DROP                                  \ don't need next
+    _ECDSA-S 32 0 FILL
+    DUP 32 > IF
+        32 - SWAP OVER + SWAP
+        32
+    THEN
+    32 OVER - >R
+    SWAP _ECDSA-S R> + SWAP CMOVE
+    0                                     \ success
+;
+
+\ --- Modular arithmetic over the curve order n ---
+\ We need s⁻¹ mod n and multiplications mod n for ECDSA verify.
+\ Use PRIME-CUSTOM with P256-N loaded as the prime.
+
+\ Montgomery p_inv for curve order n: -(n^{-1}) mod 2^64 = 0xCCD1C8AAEE00BC4F
+CREATE _P256-N-INV
+    79 C, 188 C, 0 C, 238 C, 170 C, 200 C, 209 C, 204 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+    0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C, 0 C,
+
+\ ECDSA-MOD-N-INV ( a out -- )  compute a^(n-2) mod n via FINV
+: ECDSA-MOD-N-INIT ( -- )
+    3 GF-PRIME                             \ custom prime
+    P256-N _P256-N-INV LOAD-PRIME ;        \ load n and its inverse
+
+\ ECDSA-P256-VERIFY ( hash pubkey sig slen -- flag )
+\   Verify an ECDSA-P256-SHA256 signature.
+\   hash  = 32-byte SHA-256 digest of the signed content
+\   pubkey = 65 bytes (04 || x || y) uncompressed P-256 public key
+\   sig   = DER-encoded signature, slen = its length
+\   Returns 0 on valid, -1 on invalid.
+VARIABLE _EPV-HASH
+VARIABLE _EPV-PUB
+CREATE _EPV-QX 32 ALLOT
+CREATE _EPV-QY 32 ALLOT
+CREATE _EPV-U1 32 ALLOT
+CREATE _EPV-U2 32 ALLOT
+CREATE _EPV-SINV 32 ALLOT
+CREATE _EPV-AX 32 ALLOT
+CREATE _EPV-AY 32 ALLOT
+
+: ECDSA-P256-VERIFY ( hash pubkey sig slen -- flag )
+    \ 1. Decode DER signature → r, s
+    ECDSA-DECODE-SIG
+    0<> IF 2DROP -1 EXIT THEN
+    _EPV-PUB !  _EPV-HASH !
+    \ 2. Extract Qx, Qy from uncompressed pubkey (skip 04 prefix)
+    _EPV-PUB @ 1+  _EPV-QX 32 CMOVE       \ Qx = pubkey[1..32]
+    _EPV-PUB @ 33 + _EPV-QY 32 CMOVE      \ Qy = pubkey[33..64]
+    \ 3. Compute s⁻¹ mod n
+    ECDSA-MOD-N-INIT
+    _ECDSA-S _EPV-SINV FINV                \ s_inv = s^(n-2) mod n
+    \ 4. u1 = hash * s⁻¹ mod n
+    _EPV-HASH @ _EPV-SINV _EPV-U1 FMUL
+    \ 5. u2 = r * s⁻¹ mod n
+    _ECDSA-R _EPV-SINV _EPV-U2 FMUL
+    \ 6. R = u1*G + u2*Q
+    PRIME-P256
+    _EPV-U1 P256-GX P256-GY _EC-U1X _EC-U1Y EC-MUL    \ u1*G
+    _EPV-U2 _EPV-QX _EPV-QY _EC-U2X _EC-U2Y EC-MUL    \ u2*Q
+    \ Add the two affine points (convert to Jacobian, add, convert back)
+    _EC-U1X _EC-U1Y _EC-ONE
+    _EC-U2X _EC-U2Y _EC-ONE
+    _EC-RX _EC-RY _EC-RZ EC-ADD
+    _EC-RX _EC-RY _EC-RZ _EPV-AX _EPV-AY EC-AFFINE
+    \ 7. Check r ≡ Rx mod n
+    \ Load curve order for comparison
+    ECDSA-MOD-N-INIT
+    _ECDSA-R _EPV-AX _EC-T1 FCEQ           \ constant-time compare
+    _EC-T1 C@ 0<> IF 0 ELSE -1 THEN        \ FCEQ: nonzero = equal
+;
+
+\ --- SNI host buffer (used by §16.7d and §16.10 ClientHello) ---
+CREATE TLS-SNI-HOST 64 ALLOT
+VARIABLE TLS-SNI-LEN
+
+\ =====================================================================
+\  §16.7d  TLS Certificate & CertificateVerify Processing
+\ =====================================================================
+\
+\  Words for extracting and verifying server identity during TLS 1.3
+\  handshake.  Wired into TLS-PROCESS-HS-MSG (§16.9).
+\
+\  TLS-PARSE-CERTIFICATE  ( msg mlen -- flag )
+\  TLS-VERIFY-CERT-SIG    ( ctx msg mlen -- flag )
+
+\ --- Scratch buffers for server certificate data ---
+CREATE _TLS-SERVER-PUBKEY 128 ALLOT    \ server's public key (from cert)
+VARIABLE _TLS-SERVER-PUBKEY-LEN
+VARIABLE _TLS-SERVER-PUBKEY-ALGO       \ algo code (e.g. 0x0403)
+
+\ TLS-PARSE-CERTIFICATE ( msg mlen -- flag )
+\   Parse the TLS 1.3 Certificate handshake message.
+\   Extracts the leaf certificate and parses it via X509-PARSE.
+\   Verifies hostname against SAN if TLS-SNI-LEN > 0.
+\   Returns 0 on success, -1 on error.
+VARIABLE _TPC-MSG
+VARIABLE _TPC-MLEN
+VARIABLE _TPC-POS
+
+: TLS-PARSE-CERTIFICATE ( msg mlen -- flag )
+    _TPC-MLEN !  _TPC-MSG !
+    \ Certificate message format (RFC 8446 §4.4.2):
+    \   [0]    type = 11
+    \   [1-3]  length (24-bit)
+    \   [4]    certificate_request_context length (typically 0)
+    \   [5..]  certificate_list
+    \     [0-2]  total list length (24-bit)
+    \     for each entry:
+    \       [0-2]  cert_data length (24-bit)
+    \       [len]  cert_data (DER X.509)
+    \       [0-1]  extensions length (16-bit)
+    \       [ext]  extensions
+    \ Skip to certificate_list
+    _TPC-MSG @ 4 + C@                     \ context_length
+    5 + _TPC-POS !                         \ skip type(1)+len(3)+ctx_len(1)+ctx
+    \ Read certificate_list total length (24-bit)
+    _TPC-MSG @ _TPC-POS @ + DUP C@ 16 LSHIFT
+    OVER 1+ C@ 8 LSHIFT OR
+    SWAP 2 + C@ OR                         \ list_len
+    DROP                                   \ we only need first cert
+    _TPC-POS @ 3 + _TPC-POS !             \ skip list_len
+    \ Read first cert_data length (24-bit)
+    _TPC-MSG @ _TPC-POS @ + DUP C@ 16 LSHIFT
+    OVER 1+ C@ 8 LSHIFT OR
+    SWAP 2 + C@ OR                         \ cert_len
+    _TPC-POS @ 3 + _TPC-POS !             \ skip cert_len field
+    \ Parse the DER certificate
+    _TPC-MSG @ _TPC-POS @ +               \ cert_data start
+    SWAP                                   \ cert_addr cert_len
+    X509-PARSE
+    DUP 0<> IF EXIT THEN                  \ parse failed
+    DROP
+    \ Copy server pubkey to TLS scratch
+    _X509-PUBKEY _TLS-SERVER-PUBKEY _X509-PUBKEY-LEN @ CMOVE
+    _X509-PUBKEY-LEN @  _TLS-SERVER-PUBKEY-LEN !
+    _X509-PUBKEY-ALGO @ _TLS-SERVER-PUBKEY-ALGO !
+    \ Hostname verification (if SNI was set)
+    TLS-SNI-LEN @ 0> IF
+        TLS-SNI-HOST TLS-SNI-LEN @ X509-CHECK-HOST
+        0<> IF -1 EXIT THEN               \ hostname mismatch
+    THEN
+    0                                       \ success
+;
+
+\ TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
+\   Verify a TLS 1.3 CertificateVerify message.
+\   RFC 8446 §4.4.3:
+\     content = 0x20*64 || "TLS 1.3, server CertificateVerify" || 0x00 || H(transcript)
+\     Verify signature over SHA-256(content) using server's public key.
+\   Returns 0 on valid, -1 on invalid/unsupported.
+VARIABLE _TCV-CTX
+VARIABLE _TCV-MSG
+VARIABLE _TCV-MLEN
+CREATE _TCV-CONTENT 130 ALLOT        \ 64 + 33 + 1 + 32 = 130 bytes
+CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
+
+: TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )
+    _TCV-MLEN !  _TCV-MSG !  _TCV-CTX !
+    \ CertificateVerify format:
+    \   [0]    type = 15
+    \   [1-3]  length (24-bit)
+    \   [4-5]  signature algorithm (2 bytes, big-endian)
+    \   [6-7]  signature length (2 bytes, big-endian)
+    \   [8..]  signature bytes
+    \ Extract signature algorithm
+    _TCV-MSG @ 4 + C@ 8 LSHIFT
+    _TCV-MSG @ 5 + C@ OR                   \ sig_algo
+    \ Extract signature
+    _TCV-MSG @ 6 + C@ 8 LSHIFT
+    _TCV-MSG @ 7 + C@ OR                   \ sig_len
+    _TCV-MSG @ 8 +                          \ sig_addr
+    ROT                                     \ sig_addr sig_len sig_algo
+    \ Build verification content:
+    \ 64 bytes of 0x20
+    _TCV-CONTENT 64 32 FILL
+    \ "TLS 1.3, server CertificateVerify" (33 bytes)
+    \ T=84 L=76 S=83 space=32 1=49 .=46 3=51 ,=44 sp=32
+    \ s=115 e=101 r=114 v=118 e=101 r=114 sp=32
+    \ C=67 e=101 r=114 t=116 i=105 f=102 i=105 c=99 a=97 t=116 e=101
+    \ V=86 e=101 r=114 i=105 f=102 y=121
+    S" TLS 1.3, server CertificateVerify"
+    _TCV-CONTENT 64 + SWAP CMOVE           \ copy context string
+    0 _TCV-CONTENT 64 + 33 + C!            \ trailing 0x00 separator
+    \ Hash current transcript (up to but not including this CV message)
+    TLS-HS-TRANSCRIPT TLS-HS-TR-LEN @ _TCV-HASH TLS-HASH
+    \ Append transcript hash
+    _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
+    \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
+    _TCV-CONTENT 130 _TCV-HASH SHA256
+    \ Now dispatch by signature algorithm
+    DUP 0x0403 = IF                        \ ecdsa_secp256r1_sha256
+        DROP
+        \ ECDSA-P256-VERIFY ( hash pubkey sig slen -- flag )
+        _TCV-HASH
+        _TLS-SERVER-PUBKEY                  \ 65-byte uncompressed key
+        SWAP                                \ sig_addr sig_len → hash pub sig slen
+        ECDSA-P256-VERIFY EXIT
+    THEN
+    \ Unsupported algorithm — reject
+    2DROP DROP -1
+;
+
+\ =====================================================================
 \  §16.8  TLS 1.3 Record Layer
 \ =====================================================================
 \
@@ -10257,8 +11108,7 @@ VARIABLE _TKSA-CTX
 \   Appends handshake message to transcript.
 \   Returns buffer address and total length.
 
-CREATE TLS-SNI-HOST 64 ALLOT
-VARIABLE TLS-SNI-LEN
+\ (TLS-SNI-HOST and TLS-SNI-LEN moved to §16.7d above)
 
 VARIABLE _TBCH-CTX
 VARIABLE _TBCH-POS
@@ -10547,11 +11397,18 @@ VARIABLE _TPHM-TYPE
         0 EXIT
     THEN
     _TPHM-TYPE @ TLSHT-CERTIFICATE = IF
+        \ Parse certificate, extract pubkey, verify hostname
+        _TPHM-MSG @ _TPHM-MLEN @ TLS-PARSE-CERTIFICATE
+        DUP 0<> IF EXIT THEN DROP         \ parse failed → abort
         _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
         TLSH-WAIT-CERT _TPHM-CTX @ TLS-CTX.HS-STATE !
         0 EXIT
     THEN
     _TPHM-TYPE @ TLSHT-CERT-VERIFY = IF
+        \ Verify signature BEFORE appending CV to transcript
+        \ (signature is over transcript hash up to this point)
+        _TPHM-CTX @ _TPHM-MSG @ _TPHM-MLEN @ TLS-VERIFY-CERT-SIG
+        DUP 0<> IF EXIT THEN DROP         \ signature invalid → abort
         _TPHM-MSG @ _TPHM-MLEN @ TLS-TR-APPEND
         TLSH-WAIT-CV _TPHM-CTX @ TLS-CTX.HS-STATE !
         0 EXIT

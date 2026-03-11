@@ -1400,6 +1400,29 @@ by `SOCK-ACCEPT`.
 | `AQ-PUSH` | `( new-tcb listener -- flag )` | Enqueue completed TCB; -1 ok, 0 full. |
 | `AQ-POP` | `( listener -- tcb \| 0 )` | Dequeue oldest completed TCB; 0 if empty. |
 
+### §16.7a–§16.7d Certificate Verification
+
+ASN.1/DER parser, X.509 leaf certificate parser, P-256 ECDSA signature
+verification, and TLS Certificate/CertificateVerify handler wiring.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `DER-TAG@` | `( addr -- tag )` | Read DER tag byte. |
+| `DER-LEN@` | `( addr -- len hdr-bytes )` | Decode DER length (short + long form 81/82/83/84). |
+| `DER-NEXT` | `( addr -- val-addr val-len next-addr )` | Parse one TLV element, return value and next position. |
+| `DER-ENTER` | `( addr -- inner-addr inner-len )` | Enter a constructed element (SEQUENCE, SET, context-tagged). |
+| `DER-SKIP` | `( addr -- next-addr )` | Skip one TLV element entirely. |
+| `DER-FIND-TAG` | `( addr limit tag -- val-addr val-len \| 0 0 )` | Find first element with matching tag. |
+| `X509-PARSE` | `( cert clen -- flag )` | Parse DER X.509 certificate. Extracts pubkey, algo, SAN. 0=ok, -1=error. |
+| `X509-CHECK-HOST` | `( hostname hlen -- flag )` | Verify hostname against SAN dNSNames. Supports wildcards. 0=match, -1=no match. |
+| `EC-DOUBLE` | `( Px Py Pz Rx Ry Rz -- )` | P-256 Jacobian point doubling. |
+| `EC-ADD` | `( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )` | P-256 Jacobian point addition. |
+| `EC-AFFINE` | `( Jx Jy Jz Ax Ay -- )` | Convert Jacobian → affine coordinates. |
+| `EC-MUL` | `( k Px Py Rx Ry -- )` | Scalar multiplication k*P (double-and-add, 256-bit). |
+| `ECDSA-P256-VERIFY` | `( hash pubkey sig slen -- flag )` | Verify ECDSA-P256-SHA256 signature. 0=valid, -1=invalid. |
+| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- flag )` | Parse TLS Certificate message, extract leaf cert, verify hostname. |
+| `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify TLS CertificateVerify signature per RFC 8446 §4.4.3. |
+
 ### §16.8–§16.11 TLS 1.3
 
 Full TLS 1.3 implementation with **dual-mode cipher suite** support:
@@ -1407,8 +1430,8 @@ Full TLS 1.3 implementation with **dual-mode cipher suite** support:
 - **0x1301** — TLS_AES_128_GCM_SHA256 (standard RFC 8446)
 
 Includes record-layer framing with reassembly buffers, multi-message
-handshake processing, SNI (Server Name Indication), and Change Cipher
-Spec tolerance.
+handshake processing, SNI (Server Name Indication), Change Cipher
+Spec tolerance, and **server certificate verification** (ECDSA-P256-SHA256).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

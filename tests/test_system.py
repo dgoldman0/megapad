@@ -71,7 +71,7 @@ from devices import (
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, DeviceBus, BusError,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
-    SHA256_BASE, FB_BASE,
+    FB_BASE,
     WOTS_BASE, WotsChainAccel,
 )
 from data_sources import (
@@ -10620,11 +10620,11 @@ class TestKDOSX25519(_KDOSTestBase):
         return lines
 
     def test_x25519_status_idle(self):
-        """X25519-STATUS@ returns 0 (idle) before any computation."""
+        """X25519-STATUS@ returns 2 (done) — ISA is synchronous."""
         text = self._run_kdos([
             '."  ST=" X25519-STATUS@ .',
         ])
-        self.assertIn("ST=0 ", text)
+        self.assertIn("ST=2 ", text)
 
     def test_x25519_bios_primitives(self):
         """BIOS primitives compute RFC 7748 vector 1 correctly."""
@@ -10769,9 +10769,9 @@ class TestKDOSX25519(_KDOSTestBase):
         self.assertIsNotNone(m)
 
     def test_x25519_status_display(self):
-        """.X25519-STATUS prints human-readable status."""
-        text = self._run_kdos([".X25519-STATUS"])
-        self.assertIn("X25519: idle", text)
+        """X25519-STATUS@ returns 2 (done) — no .X25519-STATUS word."""
+        text = self._run_kdos(['."  ST=" X25519-STATUS@ .'])
+        self.assertIn("ST=2 ", text)
 
 
 class TestFieldALU(_KDOSTestBase):
@@ -10954,27 +10954,34 @@ class TestFieldALU(_KDOSTestBase):
         self.assertIn("R1=0 ", text)
 
     def test_field_status_idle(self):
-        """FIELD-STATUS@ returns 0 when idle."""
-        text = self._run_kdos([
-            '."  ST=" FIELD-STATUS@ .',
-        ])
-        self.assertIn("ST=0 ", text)
-
-    def test_field_status_done(self):
-        """ISA field ops complete synchronously — FIELD-STATUS@ stays 0 (idle)."""
+        """ISA field ops are synchronous — no separate status word needed."""
         setup = self._setup_ab(42, 17)
         setup.extend([
             "tv-a tv-b tv-r FADD",
-            '."  ST=" FIELD-STATUS@ .',
+            '."  OK" ',
         ])
         text = self._run_kdos(setup)
-        # ISA ops don't touch the MMIO status register
-        self.assertIn("ST=0 ", text)
+        self.assertIn("OK", text)
+
+    def test_field_status_done(self):
+        """ISA field ops complete synchronously — FADD produces correct result."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FADD",
+            '."  R0=" tv-r C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=59 ", text)  # 42 + 17 = 59
 
     def test_field_status_display(self):
-        """.FIELD-STATUS prints human-readable status."""
-        text = self._run_kdos([".FIELD-STATUS"])
-        self.assertIn("Field ALU: idle", text)
+        """ISA field ops are synchronous — FSUB produces correct result."""
+        setup = self._setup_ab(42, 17)
+        setup.extend([
+            "tv-a tv-b tv-r FSUB",
+            '."  R0=" tv-r C@ .',
+        ])
+        text = self._run_kdos(setup)
+        self.assertIn("R0=25 ", text)  # 42 - 17 = 25
 
     def test_x25519_still_works(self):
         """Existing X25519 word still works (mode 0 backward compat)."""
@@ -15279,6 +15286,396 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("G=29 ", text)       # TLS-GROUP-X25519 default
+
+
+# ---------------------------------------------------------------------------
+#  ASN.1/DER Parser tests — §16.7a
+# ---------------------------------------------------------------------------
+
+class TestKDOSASN1(_KDOSTestBase):
+    """Tests for §16.7a ASN.1/DER minimal parser."""
+
+    def _store_bytes(self, name, data: bytes) -> list[str]:
+        """Generate Forth to CREATE a buffer and fill it with given bytes."""
+        lines = [f"CREATE {name} {len(data)} ALLOT"]
+        for i, b in enumerate(data):
+            lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def test_der_tag_read(self):
+        """DER-TAG@ reads the tag byte."""
+        lines = self._store_bytes("tv-buf", bytes([0x30, 0x03, 0x01, 0x01, 0xFF]))
+        lines.append('." TAG=" tv-buf DER-TAG@ .')
+        text = self._run_kdos(lines)
+        self.assertIn("TAG=48 ", text)  # 0x30 = SEQUENCE
+
+    def test_der_len_short(self):
+        """DER-LEN@ decodes short form length."""
+        lines = self._store_bytes("tv-buf", bytes([0x30, 0x03, 0x01, 0x01, 0xFF]))
+        lines.append('." LEN=" tv-buf 1 + DER-LEN@ . ." HBYTES=" .')
+        text = self._run_kdos(lines)
+        self.assertIn("LEN=1 ", text)   # hdr-bytes = 1
+        self.assertIn("HBYTES=3 ", text)  # length = 3
+
+    def test_der_len_long_81(self):
+        """DER-LEN@ decodes long form 81 xx."""
+        # 0x81 0x80 = length 128
+        lines = self._store_bytes("tv-buf", bytes([0x30, 0x81, 0x80]))
+        lines.append('." LEN=" tv-buf 1 + DER-LEN@ . ." HBYTES=" .')
+        text = self._run_kdos(lines)
+        self.assertIn("LEN=2 ", text)   # hdr-bytes = 2
+        self.assertIn("HBYTES=128 ", text)
+
+    def test_der_next_simple(self):
+        """DER-NEXT parses a simple TLV and returns correct addresses."""
+        # SEQUENCE(3) { BOOLEAN TRUE }
+        lines = self._store_bytes("tv-buf", bytes([0x30, 0x03, 0x01, 0x01, 0xFF]))
+        lines.extend([
+            "tv-buf DER-NEXT",
+            '." NEXT=" tv-buf - .',       # next-addr offset
+            '." VLEN=" .',                  # val-len
+            '." VOFF=" tv-buf - .',        # val-addr offset
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("VOFF=2 ", text)   # value starts at offset 2
+        self.assertIn("VLEN=3 ", text)   # value length 3
+        self.assertIn("NEXT=5 ", text)   # next element at offset 5
+
+    def test_der_skip(self):
+        """DER-SKIP advances past one TLV element."""
+        # Two consecutive INTEGERs: INT(1)=0x42, INT(1)=0x17
+        data = bytes([0x02, 0x01, 0x42, 0x02, 0x01, 0x17])
+        lines = self._store_bytes("tv-buf", data)
+        lines.extend([
+            "tv-buf DER-SKIP",
+            '." TAG2=" DUP C@ .',           # should be 0x02 (INTEGER)
+            "DER-NEXT DROP",
+            '." VAL2=" SWAP C@ .',          # should be 0x17
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("TAG2=2 ", text)
+        self.assertIn("VAL2=23 ", text)  # 0x17 = 23
+
+    def test_der_find_tag(self):
+        """DER-FIND-TAG finds a specific tag in a sequence of TLVs."""
+        # SEQUENCE{ INT(42), BOOL(true), OCT_STRING("AB") }
+        data = bytes([
+            0x30, 0x09,                   # SEQUENCE, length 9
+            0x02, 0x01, 0x2A,             # INTEGER 42
+            0x01, 0x01, 0xFF,             # BOOLEAN TRUE
+            0x04, 0x02, 0x41, 0x42,       # OCTET STRING "AB"
+        ])
+        lines = self._store_bytes("tv-buf", data)
+        lines.extend([
+            # Enter the SEQUENCE, then find OCTET STRING (tag 4)
+            "tv-buf DER-ENTER DROP",       # inner-addr
+            "9 4 DER-FIND-TAG",
+            '." FLEN=" .',
+            '." FB0=" DUP C@ .',
+            '." FB1=" 1 + C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("FLEN=2 ", text)
+        self.assertIn("FB0=65 ", text)   # 'A'
+        self.assertIn("FB1=66 ", text)   # 'B'
+
+
+# ---------------------------------------------------------------------------
+#  X.509 Certificate Parser tests — §16.7b
+# ---------------------------------------------------------------------------
+
+class TestKDOSX509(_KDOSTestBase):
+    """Tests for §16.7b X.509 leaf certificate parser."""
+
+    # DER-encoded self-signed P-256 test certificate with SAN
+    _CERT_DER = bytes([48, 130, 1, 102, 48, 130, 1, 12, 160, 3, 2, 1, 2, 2, 20,
+        34, 27, 200, 225, 145, 138, 207, 34, 68, 176, 101, 180, 106, 85,
+        246, 232, 230, 124, 74, 164, 48, 10, 6, 8, 42, 134, 72, 206, 61,
+        4, 3, 2, 48, 27, 49, 25, 48, 23, 6, 3, 85, 4, 3, 12, 16, 116,
+        101, 115, 116, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111,
+        109, 48, 30, 23, 13, 50, 52, 48, 49, 48, 49, 48, 48, 48, 48, 48,
+        48, 90, 23, 13, 50, 53, 49, 50, 51, 49, 48, 48, 48, 48, 48, 48,
+        90, 48, 27, 49, 25, 48, 23, 6, 3, 85, 4, 3, 12, 16, 116, 101,
+        115, 116, 46, 101, 120, 97, 109, 112, 108, 101, 46, 99, 111, 109,
+        48, 89, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134,
+        72, 206, 61, 3, 1, 7, 3, 66, 0, 4, 1, 253, 106, 192, 85, 127, 30,
+        235, 113, 4, 237, 5, 178, 208, 51, 134, 176, 210, 233, 162, 14,
+        74, 89, 33, 93, 197, 92, 125, 101, 231, 212, 248, 194, 104, 231,
+        234, 137, 196, 21, 199, 62, 212, 208, 86, 234, 244, 27, 140, 199,
+        120, 107, 238, 36, 249, 14, 44, 146, 16, 26, 236, 214, 33, 151,
+        26, 163, 46, 48, 44, 48, 42, 6, 3, 85, 29, 17, 4, 35, 48, 33,
+        130, 16, 116, 101, 115, 116, 46, 101, 120, 97, 109, 112, 108, 101,
+        46, 99, 111, 109, 130, 13, 42, 46, 101, 120, 97, 109, 112, 108,
+        101, 46, 99, 111, 109, 48, 10, 6, 8, 42, 134, 72, 206, 61, 4, 3,
+        2, 3, 72, 0, 48, 69, 2, 32, 119, 35, 216, 78, 51, 29, 150, 190,
+        215, 48, 178, 28, 238, 240, 193, 67, 65, 54, 224, 83, 95, 201,
+        170, 106, 229, 86, 98, 142, 247, 227, 254, 108, 2, 33, 0, 159, 81,
+        221, 61, 165, 60, 143, 129, 140, 175, 70, 103, 248, 76, 245, 239,
+        32, 123, 229, 194, 87, 146, 233, 250, 49, 0, 84, 16, 173, 105,
+        38, 134])
+
+    # Expected public key bytes (uncompressed, 65 bytes)
+    _PUB_KEY = bytes([4, 1, 253, 106, 192, 85, 127, 30, 235, 113, 4, 237, 5, 178,
+        208, 51, 134, 176, 210, 233, 162, 14, 74, 89, 33, 93, 197, 92,
+        125, 101, 231, 212, 248, 194, 104, 231, 234, 137, 196, 21, 199,
+        62, 212, 208, 86, 234, 244, 27, 140, 199, 120, 107, 238, 36, 249,
+        14, 44, 146, 16, 26, 236, 214, 33, 151, 26])
+
+    def _store_bytes(self, name, data: bytes) -> list[str]:
+        lines = [f"CREATE {name} {len(data)} ALLOT"]
+        for i, b in enumerate(data):
+            lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def test_x509_parse_success(self):
+        """X509-PARSE succeeds on valid P-256 certificate."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE",
+            '." FLAG=" .',
+            '." ALGO=" _X509-PUBKEY-ALGO @ .',
+            '." PKLEN=" _X509-PUBKEY-LEN @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=0 ", text)         # success
+        self.assertIn("ALGO=1027 ", text)      # 0x0403 = ECDSA-P256
+        self.assertIn("PKLEN=65 ", text)       # uncompressed point
+
+    def test_x509_parse_pubkey_bytes(self):
+        """X509-PARSE extracts correct public key bytes."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            # Check first byte (0x04 = uncompressed)
+            '." B0=" _X509-PUBKEY C@ .',
+            # Check a few more key bytes
+            '." B1=" _X509-PUBKEY 1 + C@ .',
+            '." B2=" _X509-PUBKEY 2 + C@ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn(f"B0={self._PUB_KEY[0]} ", text)  # 4
+        self.assertIn(f"B1={self._PUB_KEY[1]} ", text)  # 1
+        self.assertIn(f"B2={self._PUB_KEY[2]} ", text)  # 253
+
+    def test_x509_parse_rejects_non_sequence(self):
+        """X509-PARSE rejects a buffer that doesn't start with SEQUENCE."""
+        lines = self._store_bytes("tv-bad", bytes([0x02, 0x01, 0x00]))
+        lines.extend([
+            "tv-bad 3 X509-PARSE",
+            '." FLAG=" .',
+        ])
+        text = self._run_kdos(lines)
+        # Should return -1 (which in unsigned 64-bit is a large number)
+        # In Forth, -1 prints as -1 or as max unsigned depending on implementation
+        self.assertTrue("FLAG=-1 " in text or "FLAG=18446744073709551615 " in text)
+
+    def test_x509_check_host_exact(self):
+        """X509-CHECK-HOST matches exact hostname from SAN."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            'S" test.example.com" X509-CHECK-HOST',
+            '." MATCH=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("MATCH=0 ", text)  # 0 = matched
+
+    def test_x509_check_host_wildcard(self):
+        """X509-CHECK-HOST matches wildcard *.example.com."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            'S" foo.example.com" X509-CHECK-HOST',
+            '." MATCH=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("MATCH=0 ", text)  # 0 = matched
+
+    def test_x509_check_host_mismatch(self):
+        """X509-CHECK-HOST rejects non-matching hostname."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            'S" evil.attacker.com" X509-CHECK-HOST',
+            '." MATCH=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        # Should be -1 (no match)
+        self.assertTrue("MATCH=-1 " in text or "MATCH=18446744073709551615 " in text)
+
+    def test_x509_san_extracted(self):
+        """X509-PARSE extracts SAN extension."""
+        lines = self._store_bytes("tv-cert", self._CERT_DER)
+        lines.extend([
+            f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            '." SANLEN=" _X509-SAN-LEN @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        # SAN should be non-empty
+        san_len = int(text.split("SANLEN=")[1].split()[0])
+        self.assertGreater(san_len, 0)
+
+
+# ---------------------------------------------------------------------------
+#  P-256 ECDSA Verification tests — §16.7c
+# ---------------------------------------------------------------------------
+
+class TestKDOSECDSA(_KDOSTestBase):
+    """Tests for §16.7c P-256 ECDSA signature verification.
+    Note: EC scalar mul is computationally expensive. Tests use high step limits.
+    """
+
+    def _store_bytes(self, name, data: bytes) -> list[str]:
+        lines = [f"CREATE {name} {len(data)} ALLOT"]
+        for i, b in enumerate(data):
+            lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def test_ecdsa_decode_sig_valid(self):
+        """ECDSA-DECODE-SIG decodes a DER-encoded signature into r, s."""
+        # Simple test: r=1, s=2
+        sig_der = bytes([
+            0x30, 0x06,                   # SEQUENCE, length 6
+            0x02, 0x01, 0x01,             # INTEGER r=1
+            0x02, 0x01, 0x02,             # INTEGER s=2
+        ])
+        lines = self._store_bytes("tv-sig", sig_der)
+        lines.extend([
+            f"tv-sig {len(sig_der)} ECDSA-DECODE-SIG",
+            '." RET=" .',
+            '." R0=" _ECDSA-R 31 + C@ .',   # MSB (big-endian byte 31 of LE = byte 0 of BE)
+            '." S0=" _ECDSA-S 31 + C@ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("RET=0 ", text)     # success
+        self.assertIn("R0=1 ", text)      # r=1 in last byte (right-aligned)
+        self.assertIn("S0=2 ", text)      # s=2
+
+    def test_ecdsa_decode_sig_rejects_bad(self):
+        """ECDSA-DECODE-SIG rejects non-SEQUENCE."""
+        lines = self._store_bytes("tv-bad", bytes([0x02, 0x01, 0x00]))
+        lines.extend([
+            "tv-bad 3 ECDSA-DECODE-SIG",
+            '." RET=" .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertTrue("RET=-1 " in text or "RET=18446744073709551615 " in text)
+
+    def test_ec_double_identity(self):
+        """EC-DOUBLE of a known point produces a valid non-zero result."""
+        # Use P-256 generator G, double it, check Z != 0
+        lines = [
+            "PRIME-P256",
+            "P256-GX P256-GY _EC-ONE",           # Jacobian (Gx, Gy, 1)
+            "_EC-RX _EC-RY _EC-RZ EC-DOUBLE",
+            '." RZ0=" _EC-RZ C@ .',               # Z should be non-zero
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        rz0 = int(text.split("RZ0=")[1].split()[0])
+        self.assertNotEqual(rz0, 0, "Z coordinate should be non-zero after doubling G")
+
+    def test_ec_add_inf_plus_p(self):
+        """EC-ADD with P1=infinity returns P2."""
+        lines = [
+            "PRIME-P256",
+            # P1 = infinity (0, 1, 0)
+            "_EC-ZERO _EC-ONE _EC-ZERO",
+            # P2 = generator G (Gx, Gy, 1)
+            "P256-GX P256-GY _EC-ONE",
+            "_EC-RX _EC-RY _EC-RZ EC-ADD",
+            # Result should equal G
+            "P256-GX _EC-RX _EC-T1 FCEQ",
+            '." XEQGX=" _EC-T1 C@ .',
+            "P256-GY _EC-RY _EC-T1 FCEQ",
+            '." YEQGY=" _EC-T1 C@ .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        # FCEQ stores nonzero if equal
+        xeq = int(text.split("XEQGX=")[1].split()[0])
+        yeq = int(text.split("YEQGY=")[1].split()[0])
+        self.assertNotEqual(xeq, 0, "X should equal Gx")
+        self.assertNotEqual(yeq, 0, "Y should equal Gy")
+
+
+# ---------------------------------------------------------------------------
+#  TLS Certificate & CertificateVerify Handler tests — §16.7d
+# ---------------------------------------------------------------------------
+
+class TestKDOSTLSCertVerify(_KDOSTestBase):
+    """Tests for §16.7d TLS certificate parsing and CertificateVerify
+    verification wired into the handshake FSM."""
+
+    _CERT_DER = TestKDOSX509._CERT_DER
+
+    def _store_bytes(self, name, data: bytes) -> list[str]:
+        lines = [f"CREATE {name} {len(data)} ALLOT"]
+        for i, b in enumerate(data):
+            lines.append(f"{b} {name} {i} + C!")
+        return lines
+
+    def _build_cert_msg(self) -> bytes:
+        """Build a TLS Certificate handshake message wrapping _CERT_DER.
+        Format: type(1) | length(3) | ctx_len(1)=0 | list_len(3) |
+                cert_len(3) | cert_data | ext_len(2)=0
+        """
+        cert = self._CERT_DER
+        cert_len = len(cert)
+        # cert entry = cert_len(3) + cert + ext_len(2)
+        entry = (cert_len.to_bytes(3, 'big') + cert +
+                 (0).to_bytes(2, 'big'))
+        # certificate list = list_len(3) + entry
+        list_data = len(entry).to_bytes(3, 'big') + entry
+        # message body = ctx_len(1)=0 + list_data
+        body = bytes([0]) + list_data
+        # handshake header = type(1)=11 + length(3) + body
+        msg = bytes([11]) + len(body).to_bytes(3, 'big') + body
+        return msg
+
+    def test_tls_parse_certificate_success(self):
+        """TLS-PARSE-CERTIFICATE extracts pubkey and algo from a cert message."""
+        msg = self._build_cert_msg()
+        lines = self._store_bytes("tv-msg", msg)
+        lines.extend([
+            # Set SNI so hostname check runs
+            'S" test.example.com" TLS-SNI-HOST SWAP CMOVE',
+            '16 TLS-SNI-LEN !',
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+            '." ALGO=" _TLS-SERVER-PUBKEY-ALGO @ .',
+            '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=0 ", text)
+        self.assertIn("ALGO=1027 ", text)   # 0x0403
+        self.assertIn("PKLEN=65 ", text)
+
+    def test_tls_parse_certificate_hostname_mismatch(self):
+        """TLS-PARSE-CERTIFICATE rejects when SNI doesn't match SAN."""
+        msg = self._build_cert_msg()
+        lines = self._store_bytes("tv-msg", msg)
+        lines.extend([
+            'S" evil.attacker.com" TLS-SNI-HOST SWAP CMOVE',
+            '16 TLS-SNI-LEN !',
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        # Should fail (-1)
+        self.assertTrue("FLAG=-1 " in text or "FLAG=18446744073709551615 " in text)
+
+    def test_tls_parse_certificate_no_sni_skip(self):
+        """TLS-PARSE-CERTIFICATE succeeds with no SNI set (skip hostname check)."""
+        msg = self._build_cert_msg()
+        lines = self._store_bytes("tv-msg", msg)
+        lines.extend([
+            "0 TLS-SNI-LEN !",
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+            '." ALGO=" _TLS-SERVER-PUBKEY-ALGO @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=0 ", text)
+        self.assertIn("ALGO=1027 ", text)
 
 
 # ---------------------------------------------------------------------------

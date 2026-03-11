@@ -96,7 +96,8 @@ Full L2–L7 network stack, bottom-up:
 16. ✅ **TCP** — 11-state machine, 3-way handshake, sliding window,
     congestion control, retransmit, TIME_WAIT reaper (37 tests)
 17. ✅ **TLS 1.3** — HKDF, record layer, handshake, app data,
-    AES-256-GCM + SHA-3 HMAC (37 tests)
+    AES-256-GCM + SHA-3 HMAC, **server certificate verification**
+    (DER/X.509/ECDSA-P256), hostname SAN matching (57 tests)
 18. ✅ **Socket API** — `SOCKET`, `BIND`, `LISTEN`, `ACCEPT`, `CONNECT`,
     `SEND`, `RECV`, `CLOSE` (TCP + UDP)
 
