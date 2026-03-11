@@ -1,6 +1,6 @@
 # SoC Hardening Roadmap
 
-Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC full migration DONE (MMIO removed), Field ALU ISA DONE (emulator + RTL + tests) — 53/58 items done)  
+Status: in-progress (§0 STXI DONE, §2 string engine DONE, §3 dict engine DONE, §4e bitfield ALU DONE, §5 port I/O bridge DONE, §7 WOTS+ DONE, §9 bus timeout DONE, §10 BIOS lock guards DONE; §1 SHA-512 spec'd; Appendix B crypto ISA: CRC full migration DONE, SHA-2 ISA DONE, Field ALU ISA DONE, MMIO removal DONE — 55/58 items done)  
 Last updated: 2026-03-09
 
 ---
@@ -222,18 +222,16 @@ the instruction exists for stack-grow-down and reverse-fill patterns.
 **Priority: high — next crypto task**  
 **Topology: per-core ISA (EXT.CRYPTO FB, Appendix B)**
 
-> **Note:** This section was originally written for a shared MMIO
-> implementation.  Per the Appendix B decision, the unified SHA-2 engine
-> moves into each full core as ISA instructions (SHA.INIT, SHA.ROUND,
-> SHA.FINAL, etc.).  The RTL/emulator notes below describe the datapath
-> design, which is the same regardless of whether the unit is reached via
-> MMIO or ISA decode — only the control interface changes.  The MMIO
-> shared instance may be retained temporarily for micro-core access.
+> **Note:** SHA-2 is now implemented as per-core ISA instructions
+> (EXT.CRYPTO FB, sub-ops 0x10–0x15).  The MMIO shared instance has been
+> removed.  The datapath design notes below still describe the underlying
+> compression engine, which is the same whether reached via MMIO or ISA
+> decode.
 
 ### Current state
 
-`mp64_sha256.v` implements FIPS 180-4 SHA-256 only.  64 bytes MMIO at
-0x940–0x97F.  Clean FSM: IDLE → LOAD → ROUND → DONE (+ PAD).
+SHA-2 (256/384/512) is per-core ISA via EXT.CRYPTO (prefix FB).
+The MMIO shared instance (`mp64_sha256.v`) has been removed.
 
 ### What changes
 
@@ -323,12 +321,6 @@ For ISA integration (per Appendix B):
 - State (H[0..7]) maps to ACC0–ACC3; mode CSR at 0x82.
 - No MMIO bus involvement for full cores.
 
-For MMIO fallback (micro-cores, transition period):
-
-- `addr` port widens from `[5:0]` to `[6:0]`.
-- SoC decode change: `addr[11:7] == 5'b10010` (0x940–0x9BF).
-- *(CRC decode removed — CRC is now ISA-only.)*
-
 ### Emulator implementation notes
 
 For ISA path (full cores, target implementation per Appendix B):
@@ -338,16 +330,6 @@ For ISA path (full cores, target implementation per Appendix B):
   `hashlib.sha512()` internally.
 - State in ACC0–ACC3; message block in tile memory at TSRC0.
 - See Appendix B §B.4 for the full instruction set.
-
-For MMIO fallback (micro-cores, transition):
-
-- `devices.py` SHA256Device class: add `mode` register, branch on mode
-  for `hashlib.sha256()` vs `hashlib.sha384()` vs `hashlib.sha512()`.
-- Widen `digest` buffer to 64 bytes; DOUT reads at offset 0x18–0x57.
-- Update MMIO dispatch range in `system.py`.
-- *(CRC base address constant removed — CRC is now ISA-only.)*
-- BIOS `SHA256-INIT` word: add optional mode write before CMD=INIT.
-  Default mode=0 preserves backward compat.
 
 ---
 
@@ -1372,7 +1354,7 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0x8A0–0x8BF   | 32 B   | **WOTS+ Chain Accel** | **new (§7)** |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
-| 0x940–0x9BF   | 128 B  | **SHA-256/384/512** | **→ per-core ISA (Appendix B)** |
+| 0x940–0x9BF   | 128 B  | *(free — SHA-2 removed)* | ✅ SHA-2 is now ISA-only |
 | 0x9C0–0x9FF   | 64 B   | *(free)*            |            |
 | 0xA00–0xA1F   | 32 B   | *(free — CRC removed)* | ✅ CRC is now ISA-only |
 | 0xA20–0xA7F   | 96 B   | **Trace readout portal** | **new** |
@@ -1385,12 +1367,10 @@ extensions** (EXT.STRING F9, EXT.DICT FA) — they live inside each CPU
 as tightly-coupled sub-modules, like the multiplier.  They are not on
 the MMIO bus at all and require no cluster wrapper ports.
 
-**Crypto migration (Appendix B):** CRC migration is **complete** — MMIO
-`mp64_crc.v` removed, all cores use ISA instructions (EXT.CRYPTO FB),
-micro-cores share via cluster hardware-lock arbiter.  SHA-256/384/512
-and Field ALU are next — their MMIO slots (0x840, 0x940) may be
-retained temporarily for micro-core access or freed entirely once
-migration is complete.  See Appendix B §B.9 for the phased plan.
+**Crypto migration (Appendix B):** CRC, SHA-2, and Field ALU MMIO
+instances are **all removed**.  All cores use per-core ISA instructions
+(EXT.CRYPTO FB); micro-cores share via cluster hardware-lock arbiter.
+Their former MMIO slots (0x840, 0x940, 0x980) are freed.
 
 The main MMIO map carries only shared peripherals (AES, SHA-3, NTT,
 KEM, WOTS+, TRNG, RTC) plus bus infrastructure (mailbox, spinlocks,
@@ -1888,7 +1868,8 @@ AES key schedule, NTT polynomial arrays) or algorithmic structures
 (multi-phase KEM protocol) that don't map cleanly to core registers.
 
 **Micro-cores:** All EXT.CRYPTO instructions trap as `ILLEGAL_OP`.
-Micro-cores continue to use MMIO paths (or don't do crypto at all).
+Micro-cores share per-core ISA engines via the cluster hardware-lock
+arbiter (same as CRC).
 
 **Per-core area cost:**
 
@@ -2245,24 +2226,34 @@ migration is:
 
 | Phase | Action | Status |
 |-------|--------|--------|
-| **1 — Coexistence** | Both MMIO and ISA paths exist.  BIOS crypto words detect core type (full vs micro) and dispatch accordingly.  Full cores use ISA; micro-cores use MMIO (via bus). | ✅ CRC done |
-| **2 — MMIO deprecation** | Once all crypto BIOS words use ISA on full cores, the shared MMIO instances are only needed for micro-cores (if they do crypto at all).  If they don't, the MMIO blocks can be removed entirely. | ✅ CRC done |
-| **3 — Area recovery** | Removing shared CRC + SHA-256 + Field ALU MMIO blocks saves ~8K gates + MMIO bus decode logic.  This partially offsets the per-core replication cost. | ✅ CRC done |
+| **1 — Coexistence** | Both MMIO and ISA paths exist.  BIOS crypto words detect core type (full vs micro) and dispatch accordingly.  Full cores use ISA; micro-cores use MMIO (via bus). | ✅ All done |
+| **2 — MMIO deprecation** | Once all crypto BIOS words use ISA on full cores, the shared MMIO instances are only needed for micro-cores (if they do crypto at all).  If they don't, the MMIO blocks can be removed entirely. | ✅ All done |
+| **3 — Area recovery** | Removing shared CRC + SHA-256 + Field ALU MMIO blocks saves ~8K gates + MMIO bus decode logic.  This partially offsets the per-core replication cost. | ✅ All done |
 
 **CRC MMIO removal (DONE):** `mp64_crc.v` is no longer instantiated
 anywhere.  The MMIO address at 0x980 is freed.  `CRCDevice` removed
 from the emulator.  BIOS CRC words rewritten to use ISA instructions.
 Micro-cores access CRC through the cluster-shared `mp64_crc_isa`
 engine with a hardware-lock arbiter (CRC.INIT acquires, CRC.FIN
-releases).  The old `mp64_crc.v` file remains on disk but is orphaned.
+releases).
+
+**SHA-2 MMIO removal (DONE):** `mp64_sha256.v` removed from SoC and
+FPGA synthesis.  MMIO address 0x940 freed.  SHA256Device removed from
+emulator.  BIOS SHA256 words use ISA instructions (sha.init/sha.din/
+sha.final/sha.dout).
+
+**Field ALU MMIO removal (DONE):** `mp64_field_alu.v` removed from SoC
+and FPGA synthesis.  MMIO address 0x840 freed.  FieldALU device removed
+from emulator.  BIOS/KDOS field words use ISA instructions (gf.add/
+gf.mul/gf.x25519 etc).
 
 **MMIO addresses freed:**
 
 | Range | Former Peripheral | New Status |
 |-------|-------------------|------------|
-| 0x840–0x87F | Field ALU | Free (or retained for micro-core access) |
-| 0x940–0x9BF | SHA-256/384/512 | Free (or retained for micro-core access) |
-| 0x980–0x9BF | CRC (original) | **Freed** — MMIO CRC fully removed |
+| 0x840–0x87F | Field ALU | **Freed** |
+| 0x940–0x9BF | SHA-256/384/512 | **Freed** |
+| 0x980–0x9BF | CRC (original) | **Freed** |
 
 The WOTS+ chain accelerator (§7, MMIO 0x8A0) remains shared — it's a
 DMA-driven sequencer that chains SHA-3 rounds, not something that maps
@@ -2275,8 +2266,8 @@ to a core instruction.
 | Category | Current | Proposed | Rationale |
 |----------|---------|----------|-----------|
 | CRC32/CRC64 | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA + cluster-shared (hw lock)** | ✅ DONE — MMIO removed, cluster arbiter for micro-cores |
-| SHA-256/384/512 | Shared MMIO (1 instance) | **Per-core ISA (EXT.CRYPTO)** | 64–80 round compute; parallel TLS needs per-core |
-| Field ALU | Shared MMIO (1 instance) | **Per-core ISA (EXT.CRYPTO)** | Inner-loop field ops in Ed25519/X25519; 3-cycle bus overhead per op is 4× the compute |
+| SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
+| Field ALU | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
 | AES-256-GCM | Shared MMIO | Shared MMIO | Large key schedule; AES-NI style would need 240-byte state per core |
 | SHA-3/SHAKE | Shared MMIO | Shared MMIO | 1600-bit Keccak state doesn't fit core registers |
 | NTT | Shared MMIO | Shared MMIO | Polynomial array in dedicated BRAM |

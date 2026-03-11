@@ -57,10 +57,8 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0780     │  SHA-3 / SHAKE       │ │
     │   0x07E0     │  QoS Config          │ │
     │   0x0800     │  TRNG                │ │
-    │   0x0840     │  Field ALU (GF(p))   │ │
     │   0x08C0     │  NTT Engine          │ │
     │   0x0900     │  KEM (ML-KEM-512)    │ │
-    │   0x0940     │  SHA-256             │ │
     │   0x0A00     │  Framebuffer         │ │
     │   0x0B00     │  RTC / System Clock  │ │
     │              └──────────────────────┘ │
@@ -111,12 +109,9 @@ device occupies a small range:
 | **SHA-3/SHAKE** | `+0x0780` | 96 bytes | Keccak hash / XOF accelerator (SHA3-256, SHA3-512, SHAKE) |
 | **QoS Config** | `+0x07E0` | 16 bytes | Global bus QoS quantum / weights |
 | **TRNG** | `+0x0800` | 64 bytes | Hardware true random number generator |
-| **Field ALU** | `+0x0840` | 128 bytes | GF(2²⁵⁵−19) coprocessor (8 modes, supersedes X25519) |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
-| ~~**SHA-256**~~ | ~~`+0x0940`~~ | — | *Removed — SHA-256 is now per-core ISA (EXT.CRYPTO FB)* |
-| ~~**CRC32/CRC64**~~ | ~~`+0x0980`~~ | — | *Removed — CRC is now per-core ISA (EXT.CRYPTO FB)* |
 | **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
@@ -321,15 +316,15 @@ with 53 tile testbench tests passing.
 | SHA-3/SHAKE | 136 bytes / 41 cycles | Hashing (SHA3-256, SHA3-512), key derivation, XOF |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC32/CRC64 | 8 bytes / cycle | Data integrity (per-core ISA, no MMIO) |
-| Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519) |
+| Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
 
 ### Field ALU (GF(2²⁵⁵−19) Coprocessor)
 
-A general-purpose field arithmetic unit at MMIO base `+0x0840`,
-superseding the original X25519-only block.  Eight operation modes:
+A general-purpose field arithmetic unit implemented as per-core ISA
+instructions (EXT.CRYPTO FB, sub-ops 0x20–0x2D).  Eight operation modes:
 
 | Mode | Name | Description |
 |------|------|-------------|
@@ -342,20 +337,14 @@ superseding the original X25519-only block.  Eight operation modes:
 | 6 | FPOW | a^b mod p (general exponentiation) |
 | 7 | MUL_RAW | Raw 256×256→512-bit multiply (no modular reduction) |
 
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| OPERAND_A | `+0x00`–`+0x1F` | RW | 256-bit operand A (4 × 64-bit LE) |
-| OPERAND_B | `+0x20`–`+0x3F` | RW | 256-bit operand B (4 × 64-bit LE) |
-| CMD | `+0x40` | W | `{result_sel[5], mode[4:1], go[0]}` — write starts operation |
-| STATUS | `+0x48` | R | **bit 0:** busy, **bit 1:** done |
-| RESULT | `+0x00`–`+0x1F` | R | 256-bit result (read path, low half for MUL_RAW) |
-| RESULT_HI | `+0x20`–`+0x3F` | R | Upper 256 bits of MUL_RAW (via CMD bit 5) |
+Operands are staged via CSR writes (ACC0–ACC3 for A, TSRC0 for B
+address); results read back via CSR reads.  The ISA instructions are
+synchronous — each completes in deterministic cycles with no polling.
 
 Zero additional DSPs — reuses the existing shared 256-bit multiplier.
-**BIOS words:** `FIELD-A!`, `FIELD-B!`, `FIELD-CMD!`, `FIELD-STATUS@`,
-`FIELD-RESULT@`, `FIELD-RESULT-HI@`, `FIELD-WAIT`.
-**KDOS words (§1.10):** `FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`,
-`FMUL-RAW`, `F+`, `F-`, `F*`.
+**BIOS words:** `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`,
+`FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`, `FMUL-RAW`, `FMUL-ADD-RAW`.
+**KDOS words (§1.10):** `F+`, `F-`, `F*`.
 
 ### NTT Engine (Number Theoretic Transform)
 

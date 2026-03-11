@@ -112,7 +112,6 @@ arrays, and combinational logic.
 | **mp64_extmem** | 1 | ~0.2K | — | — | External memory controller |
 | **mp64_fp16_alu** | 4 | ~3.2K | — | — | FP16/FP32 convert + add |
 | **mp64_trng** | 1 | ~0.6K | — | — | Ring-osc entropy + LFSR conditioner |
-| **mp64_field_alu** | 1 | ~4.5K | — | 4–8 | GF(p) coprocessor, reuses shared multiplier |
 | **mp64_ntt** | 1 | ~5.0K | 3 | 8–12 | 256-pt butterfly, twiddle ROM, 3×256×32b reg files |
 | **mp64_kem** | 1 | ~0.8K | 3 | — | 3,296B buffer array, FSM, byte-stream port |
 

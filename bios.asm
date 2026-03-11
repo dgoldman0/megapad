@@ -10687,129 +10687,47 @@ w_seed_rng:
 ; =====================================================================
 ;  X25519 — Elliptic Curve Diffie-Hellman (RFC 7748)
 ; =====================================================================
-; X25519 base = 0xFFFF_FF00_0000_0840
-;   SCALAR +0x00 (W)  32-byte scalar (little-endian)
-;   POINT  +0x20 (W)  32-byte u-coordinate (little-endian)
-;   CMD    +0x3F (W)  write 1 to start computation
-;   STATUS +0x00 (R)  bit[0]=busy, bit[1]=done
-;   RESULT +0x08 (R)  32-byte result (little-endian)
+; ISA-based via EXT.CRYPTO gf.x25519 (sub-op 0x2D).
+;   Scalar → ACC0-ACC3, Point → M[TSRC0], Result → ACC0-ACC3.
+;   Synchronous — no polling needed.
 
-; X25519-SCALAR! ( addr -- )  Write 32-byte scalar from memory.
+; X25519-SCALAR! ( addr -- )  Load 32-byte scalar into ACC0-ACC3.
 w_x25519_scalar_store:
-    ldn r9, r14
+    ldn r10, r14
     addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0840    ; X25519_SCALAR base
-    ldi r12, 0
-.x25519_scalar_loop:
-    mov r13, r9
-    add r13, r12
-    ld.b r0, r13
-    mov r11, r7
-    add r11, r12
-    st.b r11, r0
-    addi r12, 1
-    cmpi r12, 32
-    brcc .x25519_scalar_loop
+    ldi64 r11, _gf_load_acc
+    call.l r11
     ret.l
 
-; X25519-POINT! ( addr -- )  Write 32-byte u-coordinate from memory.
+; X25519-POINT! ( addr -- )  Set operand B address (TSRC0).
 w_x25519_point_store:
-    ldn r9, r14
+    ldn r0, r14
     addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0860    ; X25519_POINT base (+0x20)
-    ldi r12, 0
-.x25519_point_loop:
-    mov r13, r9
-    add r13, r12
-    ld.b r0, r13
-    mov r11, r7
-    add r11, r12
-    st.b r11, r0
-    addi r12, 1
-    cmpi r12, 32
-    brcc .x25519_point_loop
+    csrw 0x16, r0            ; TSRC0 = point addr
     ret.l
 
-; X25519-GO ( -- )  Start X25519 computation.
+; X25519-GO ( -- )  Execute gf.x25519 (synchronous).
 w_x25519_go:
-    ldi64 r11, 0xFFFF_FF00_0000_0880   ; X25519_CMD (+0x40)
-    ldi r0, 1
-    st.b r11, r0
+    gf.x25519
     ret.l
 
-; X25519-STATUS@ ( -- n )  Read status: bit0=busy, bit1=done.
+; X25519-STATUS@ ( -- n )  Always 2 (done) — ISA is synchronous.
 w_x25519_status:
-    ldi64 r11, 0xFFFF_FF00_0000_0840   ; X25519_STATUS (+0x00 read)
-    ld.b r0, r11
     subi r14, 8
+    ldi r0, 2
     str r14, r0
     ret.l
 
-; X25519-RESULT@ ( addr -- )  Read 32-byte result into memory.
+; X25519-RESULT@ ( addr -- )  Store ACC0-ACC3 to 32 bytes at addr.
 w_x25519_result_fetch:
-    ldn r9, r14
+    ldn r10, r14
     addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0848    ; X25519_RESULT base (+0x08)
-    ldi r12, 0
-.x25519_result_loop:
-    mov r11, r7
-    add r11, r12
-    ld.b r0, r11
-    mov r13, r9
-    add r13, r12
-    st.b r13, r0
-    addi r12, 1
-    cmpi r12, 32
-    brcc .x25519_result_loop
+    ldi64 r11, _gf_store_acc
+    call.l r11
     ret.l
 
-; X25519-WAIT ( -- )  Poll until done (bit 1 set).
+; X25519-WAIT ( -- )  No-op — ISA is synchronous.
 w_x25519_wait:
-    ldi64 r11, 0xFFFF_FF00_0000_0840   ; X25519_STATUS
-.x25519_wait_loop:
-    ld.b r0, r11
-    ldi r1, 2                          ; done bit mask
-    and r0, r1
-    cmpi r0, 0
-    breq .x25519_wait_loop
-    ret.l
-
-; =====================================================================
-;  Field ALU — GF(2^255-19) coprocessor + raw 256x256 multiplier
-; =====================================================================
-; Uses same MMIO base as X25519 (0x0840).
-; CMD byte: bits [4:1] = mode, bit [0] = go.
-;   mode 0 = X25519 (legacy), 1 = FADD, 2 = FSUB, 3 = FMUL,
-;   4 = FSQR, 5 = FINV, 6 = FPOW, 7 = MUL_RAW.
-; RESULT_HI at read offset 0x28..0x47 (only meaningful for MUL_RAW).
-
-; FIELD-CMD! ( mode -- )  Start field ALU with given mode.
-w_field_cmd_store:
-    ldn r9, r14              ; pop mode
-    addi r14, 8
-    ldi r0, 1
-    shl r9, r0               ; mode << 1
-    ori r9, 1                ; | go bit
-    ldi64 r11, 0xFFFF_FF00_0000_0880   ; CMD offset 0x40
-    st.b r11, r9
-    ret.l
-
-; FIELD-RESULT-HI@ ( addr -- )  Read 32-byte RESULT_HI into memory.
-w_field_result_hi_fetch:
-    ldn r9, r14              ; pop dest addr
-    addi r14, 8
-    ldi64 r7, 0xFFFF_FF00_0000_0868    ; RESULT_HI base (+0x28)
-    ldi r12, 0
-.field_rhi_loop:
-    mov r11, r7
-    add r11, r12
-    ld.b r0, r11
-    mov r13, r9
-    add r13, r12
-    st.b r13, r0
-    addi r12, 1
-    cmpi r12, 32
-    brcc .field_rhi_loop
     ret.l
 
 ; =====================================================================
@@ -14438,27 +14356,9 @@ d_x25519_wait:
     call.l r11
     ret.l
 
-; === FIELD-CMD! ===
-d_field_cmd_store:
-    .dq d_x25519_wait
-    .db 10
-    .ascii "FIELD-CMD!"
-    ldi64 r11, w_field_cmd_store
-    call.l r11
-    ret.l
-
-; === FIELD-RESULT-HI@ ===
-d_field_result_hi_fetch:
-    .dq d_field_cmd_store
-    .db 16
-    .ascii "FIELD-RESULT-HI@"
-    ldi64 r11, w_field_result_hi_fetch
-    call.l r11
-    ret.l
-
 ; === GF-A! ===
 d_gf_a_store:
-    .dq d_field_result_hi_fetch
+    .dq d_x25519_wait
     .db 5
     .ascii "GF-A!"
     ldi64 r11, w_gf_a_store

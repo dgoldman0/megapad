@@ -392,129 +392,6 @@ struct CryptoAES {
 
 
 // =========================================================================
-//  SHA-256 Device
-// =========================================================================
-
-static const uint32_t SHA256_K[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-};
-
-static const uint32_t SHA256_IV[8] = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-};
-
-static inline uint32_t rotr32(uint32_t x, int n) {
-    return (x >> n) | (x << (32 - n));
-}
-
-static void sha256_compress(uint32_t H[8], const uint8_t block[64]) {
-    uint32_t W[64];
-    for (int i = 0; i < 16; i++) {
-        W[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16)
-             | ((uint32_t)block[i*4+2] << 8) | block[i*4+3];
-    }
-    for (int i = 16; i < 64; i++) {
-        uint32_t s0 = rotr32(W[i-15], 7) ^ rotr32(W[i-15], 18) ^ (W[i-15] >> 3);
-        uint32_t s1 = rotr32(W[i-2], 17) ^ rotr32(W[i-2], 19) ^ (W[i-2] >> 10);
-        W[i] = W[i-16] + s0 + W[i-7] + s1;
-    }
-    uint32_t a = H[0], b = H[1], c = H[2], d = H[3];
-    uint32_t e = H[4], f = H[5], g = H[6], h = H[7];
-    for (int i = 0; i < 64; i++) {
-        uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-        uint32_t ch = (e & f) ^ (~e & g);
-        uint32_t temp1 = h + S1 + ch + SHA256_K[i] + W[i];
-        uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-        uint32_t mj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = S0 + mj;
-        h = g; g = f; f = e;
-        e = d + temp1;
-        d = c; c = b; b = a;
-        a = temp1 + temp2;
-    }
-    H[0] += a; H[1] += b; H[2] += c; H[3] += d;
-    H[4] += e; H[5] += f; H[6] += g; H[7] += h;
-}
-
-struct CryptoSHA256 {
-    uint32_t H[8];
-    uint8_t buf[128];   // up to 2 blocks for padding
-    int buf_len;
-    uint64_t msg_len;
-    uint8_t status;
-    uint8_t digest[32];
-
-    void reset() {
-        std::memcpy(H, SHA256_IV, sizeof(SHA256_IV));
-        buf_len = 0;
-        msg_len = 0;
-        status = 0;
-        std::memset(digest, 0, 32);
-    }
-
-    void finalize() {
-        uint64_t bit_len = msg_len * 8;
-        buf[buf_len++] = 0x80;
-        while (buf_len % 64 != 56)
-            buf[buf_len++] = 0x00;
-        // Append 64-bit big-endian bit length
-        for (int i = 7; i >= 0; i--)
-            buf[buf_len++] = (bit_len >> (i * 8)) & 0xFF;
-        // Compress remaining blocks
-        int pos = 0;
-        while (pos + 64 <= buf_len) {
-            sha256_compress(H, buf + pos);
-            pos += 64;
-        }
-        // Build digest (big-endian)
-        for (int i = 0; i < 8; i++) {
-            digest[i*4]   = (H[i] >> 24) & 0xFF;
-            digest[i*4+1] = (H[i] >> 16) & 0xFF;
-            digest[i*4+2] = (H[i] >>  8) & 0xFF;
-            digest[i*4+3] = H[i] & 0xFF;
-        }
-        status = 2;
-    }
-
-    uint8_t read8(uint32_t offset) const {
-        if (offset == 0x08) return status;
-        if (offset >= 0x18 && offset < 0x38) return digest[offset - 0x18];
-        return 0;
-    }
-
-    void write8(uint32_t offset, uint8_t value) {
-        if (offset == 0x00) {  // CMD
-            if (value == 1)      reset();
-            else if (value == 3) finalize();
-        } else if (offset == 0x10) {  // DIN
-            buf[buf_len++] = value;
-            msg_len++;
-            if (buf_len == 64) {
-                sha256_compress(H, buf);
-                buf_len = 0;
-            }
-        }
-    }
-};
-
-
-// =========================================================================
 //  SHA-3 / SHAKE Device (Keccak-f[1600])
 // =========================================================================
 
@@ -1110,176 +987,6 @@ static BigNum make_p256_p() {
 }
 
 
-struct CryptoFieldALU {
-    uint8_t operand_a[32];
-    uint8_t operand_b[32];
-    uint8_t result_lo[32];
-    uint8_t result_hi[32];
-    bool busy;
-    bool done;
-    int prime_sel;
-    BigNum custom_p;
-    BigNum mont_p_inv;   // -p^{-1} mod 2^{256} for Montgomery REDC
-
-    static const BigNum PRIMES[3];
-
-    void reset() {
-        std::memset(operand_a, 0, 32);
-        std::memset(operand_b, 0, 32);
-        std::memset(result_lo, 0, 32);
-        std::memset(result_hi, 0, 32);
-        busy = false;
-        done = false;
-        prime_sel = 0;
-        custom_p = BigNum();
-        mont_p_inv = BigNum();
-    }
-
-    BigNum get_prime() const {
-        if (prime_sel < 3) return PRIMES[prime_sel];
-        if (prime_sel == 3 && !custom_p.is_zero()) return custom_p;
-        return PRIMES[0];  // default to Curve25519
-    }
-
-    void set_result(const BigNum& lo, const BigNum& hi = BigNum()) {
-        lo.to_le_bytes(result_lo);
-        hi.to_le_bytes(result_hi);
-        busy = false;
-        done = true;
-    }
-
-    void execute(int mode) {
-        BigNum p = get_prime();
-        BigNum a = BigNum::from_le_bytes(operand_a);
-        BigNum b = BigNum::from_le_bytes(operand_b);
-
-        switch (mode) {
-            case 0: {  // X25519
-                BigNum r = x25519_scalar_mul(operand_a, operand_b, PRIMES[0]);
-                set_result(r);
-                break;
-            }
-            case 1:  // FADD
-                set_result(bn_addmod(a, b, p));
-                break;
-            case 2:  // FSUB
-                set_result(bn_submod(a, b, p));
-                break;
-            case 3:  // FMUL
-                if (prime_sel == 3 && !mont_p_inv.is_zero())
-                    set_result(bn_mont_mulmod(a, b, p, mont_p_inv));
-                else
-                    set_result(bn_mulmod(a, b, p));
-                break;
-            case 4:  // FSQR
-                if (prime_sel == 3 && !mont_p_inv.is_zero())
-                    set_result(bn_mont_sqrmod(a, p, mont_p_inv));
-                else
-                    set_result(bn_sqrmod(a, p));
-                break;
-            case 5:  // FINV
-                set_result(bn_invmod(a, p));
-                break;
-            case 6: {  // FPOW
-                set_result(bn_powmod(a, b, p));
-                break;
-            }
-            case 7: {  // MUL_RAW
-                BigNum lo, hi;
-                BigNum::mul_wide(a, b, lo, hi);
-                set_result(lo, hi);
-                break;
-            }
-            case 8: {  // FCMOV
-                bool cond = b.w[0] & 1;
-                BigNum prev = BigNum::from_le_bytes(result_lo);
-                set_result(cond ? a : prev);
-                break;
-            }
-            case 9: {  // FCEQ
-                BigNum r;
-                r.w[0] = (a == b) ? 1 : 0;
-                set_result(r);
-                break;
-            }
-            case 10: {  // LOAD_PRIME
-                custom_p = a;
-                mont_p_inv = b;  // -p^{-1} mod 2^{256}
-                BigNum zero;
-                set_result(zero);
-                break;
-            }
-            case 11: {  // FMAC: (a*b mod p + prev_result) mod p
-                BigNum prev = BigNum::from_le_bytes(result_lo);
-                BigNum ab;
-                if (prime_sel == 3 && !mont_p_inv.is_zero())
-                    ab = bn_mont_mulmod(a, b, p, mont_p_inv);
-                else
-                    ab = bn_mulmod(a, b, p);
-                set_result(bn_addmod(ab, prev, p));
-                break;
-            }
-            case 12: {  // MUL_ADD_RAW: prev + a*b (512-bit)
-                BigNum prev_lo = BigNum::from_le_bytes(result_lo);
-                BigNum prev_hi = BigNum::from_le_bytes(result_hi);
-                BigNum mul_lo, mul_hi;
-                BigNum::mul_wide(a, b, mul_lo, mul_hi);
-                // Add: (prev_hi:prev_lo) + (mul_hi:mul_lo)
-                BigNum sum_lo = prev_lo.add(mul_lo);
-                // Check carry from low addition
-                BigNum sum_hi = prev_hi.add(mul_hi);
-                // If sum_lo < prev_lo, we had a carry
-                if (sum_lo < prev_lo) {
-                    BigNum one; one.w[0] = 1;
-                    sum_hi = sum_hi.add(one);
-                }
-                set_result(sum_lo, sum_hi);
-                break;
-            }
-            default: {
-                BigNum zero;
-                set_result(zero);
-                break;
-            }
-        }
-    }
-
-    uint8_t read8(uint32_t offset) const {
-        if (offset == 0x00) {  // STATUS
-            return ((done ? 1 : 0) << 1) | (busy ? 1 : 0);
-        }
-        if (offset >= 0x08 && offset < 0x28) return result_lo[offset - 0x08];
-        if (offset >= 0x28 && offset < 0x48) return result_hi[offset - 0x28];
-        return 0;
-    }
-
-    void write8(uint32_t offset, uint8_t value) {
-        if (offset < 0x20) {
-            operand_a[offset] = value;
-        } else if (offset >= 0x20 && offset < 0x40) {
-            operand_b[offset - 0x20] = value;
-        } else if (offset == 0x40) {  // CMD
-            if ((value & 1) && !busy) {
-                int mode = (value >> 1) & 0xF;
-                busy = true;
-                done = false;
-                execute(mode);
-            } else {
-                // No go — latch prime_sel
-                prime_sel = (value >> 6) & 0x3;
-            }
-        }
-    }
-};
-
-// Static prime table
-const BigNum CryptoFieldALU::PRIMES[3] = {
-    make_curve25519_p(),
-    make_secp256k1_p(),
-    make_p256_p(),
-};
-
-
 // =========================================================================
 //  WOTS+ Chain Accelerator
 // =========================================================================
@@ -1447,9 +1154,7 @@ struct WotsChain {
 
 struct CryptoDevices {
     CryptoAES aes;
-    CryptoSHA256 sha256;
     CryptoSHA3 sha3;
-    CryptoFieldALU field_alu;
     WotsChain wots;
     bool enabled;
 
@@ -1458,19 +1163,13 @@ struct CryptoDevices {
     static constexpr uint32_t AES_END     = 0x0770;
     static constexpr uint32_t SHA3_BASE   = 0x0780;
     static constexpr uint32_t SHA3_END    = 0x07D0; // expanded for SHA3-512 (64-byte DOUT at 0x10-0x4F)
-    static constexpr uint32_t FIELD_BASE  = 0x0840;
-    static constexpr uint32_t FIELD_END   = 0x0888;
     static constexpr uint32_t WOTS_BASE   = 0x08A0;
     static constexpr uint32_t WOTS_END    = 0x08C0;
-    static constexpr uint32_t SHA256_BASE = 0x0940;
-    static constexpr uint32_t SHA256_END  = 0x0980;
 
     void init() {
         aes.reset();
-        sha256.reset();
         sha3.reset();
         sha3.mode = 0;
-        field_alu.reset();
         wots.reset();
         wots.sha3 = &sha3;  // WOTS wraps the existing SHA3 engine
         enabled = true;
@@ -1481,9 +1180,7 @@ struct CryptoDevices {
         if (!enabled) return false;
         if (mmio_offset >= AES_BASE && mmio_offset < AES_END) return true;
         if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END) return true;
-        if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END) return true;
         if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END) return true;
-        if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END) return true;
         return false;
     }
 
@@ -1498,12 +1195,8 @@ struct CryptoDevices {
                 val |= 0x04;   // bit 2 = ext_locked
             return val;
         }
-        if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END)
-            return field_alu.read8(mmio_offset - FIELD_BASE);
         if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
             return wots.read8(mmio_offset);
-        if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END)
-            return sha256.read8(mmio_offset - SHA256_BASE);
         return 0xFF;
     }
 
@@ -1512,11 +1205,7 @@ struct CryptoDevices {
             aes.write8(mmio_offset - AES_BASE, value);
         else if (mmio_offset >= SHA3_BASE && mmio_offset < SHA3_END)
             sha3.write8(mmio_offset - SHA3_BASE, value);
-        else if (mmio_offset >= FIELD_BASE && mmio_offset < FIELD_END)
-            field_alu.write8(mmio_offset - FIELD_BASE, value);
         else if (mmio_offset >= WOTS_BASE && mmio_offset < WOTS_END)
             wots.write8(mmio_offset, value);
-        else if (mmio_offset >= SHA256_BASE && mmio_offset < SHA256_END)
-            sha256.write8(mmio_offset - SHA256_BASE, value);
     }
 };

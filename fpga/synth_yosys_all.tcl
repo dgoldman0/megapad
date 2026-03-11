@@ -79,7 +79,6 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_trng.v     \
     rtl/crypto/mp64_aes.v      \
     rtl/crypto/mp64_sha3.v     \
-    rtl/crypto/mp64_field_alu.v \
     rtl/crypto/mp64_ntt.v      \
     rtl/crypto/mp64_kem.v      \
     rtl/gpu/mp64_tile.v
@@ -141,15 +140,9 @@ log -------------------------------------------------------------------
 synth_xilinx -top mp64_sha3 -family xc7 -json fpga/build/synth_sha3.json
 tee -a fpga/build/synth_all_stats.txt stat -tech xilinx
 
-# === 7. Field ALU + NTT + KEM (post-quantum crypto) ==========================
+# === 7. NTT + KEM (post-quantum crypto) =======================================
 log -------------------------------------------------------------------
-log  [7/9] mp64_field_alu  (multi-prime field arithmetic)
-log -------------------------------------------------------------------
-synth_xilinx -top mp64_field_alu -family xc7 -json fpga/build/synth_field_alu.json
-tee -a fpga/build/synth_all_stats.txt stat -tech xilinx
-
-log -------------------------------------------------------------------
-log  [7b/9] mp64_ntt  (Number Theoretic Transform)
+log  [7/9] mp64_ntt  (Number Theoretic Transform)
 log -------------------------------------------------------------------
 synth_xilinx -top mp64_ntt -family xc7 -json fpga/build/synth_ntt.json
 tee -a fpga/build/synth_all_stats.txt stat -tech xilinx

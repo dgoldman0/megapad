@@ -611,23 +611,22 @@ of compiled code.
 | 277 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
 | 278 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
 
-### Field ALU (13 words)
+### Field ALU (12 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 279 | `FIELD-A!` | `( addr -- )` | | Load 256-bit operand A from addr |
-| 280 | `FIELD-B!` | `( addr -- )` | | Load 256-bit operand B from addr |
-| 281 | `FIELD-CMD!` | `( cmd -- )` | | Start operation (mode in bits 7:4, go in bit 0) |
-| 282 | `FIELD-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done |
-| 283 | `FIELD-RESULT@` | `( addr -- )` | | Read 256-bit result to addr |
-| 284 | `FIELD-RESULT-HI@` | `( addr -- )` | | Read upper 256 bits (MUL_RAW) to addr |
-| 285 | `FADD` | `( a b -- r )` | | (a + b) mod p |
-| 286 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
-| 287 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
-| 288 | `FSQR` | `( a -- r )` | | a² mod p |
-| 289 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
-| 290 | `FPOW` | `( a b -- r )` | | a^b mod p |
-| 291 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
+| 279 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
+| 280 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
+| 281 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
+| 282 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
+| 283 | `FADD` | `( a b -- r )` | | (a + b) mod p |
+| 284 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
+| 285 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
+| 286 | `FSQR` | `( a -- r )` | | a² mod p |
+| 287 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
+| 288 | `FPOW` | `( a b -- r )` | | a^b mod p |
+| 289 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
+| 290 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
 
 ### NTT Engine (9 words)
 

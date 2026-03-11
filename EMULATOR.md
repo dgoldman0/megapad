@@ -426,8 +426,7 @@ buffer), then tokenises and interprets:
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`
-`FIELD-A!` `FIELD-B!` `FIELD-CMD!` `FIELD-STATUS@` `FIELD-RESULT@`
-`FIELD-RESULT-HI@`
+`GF-A!` `GF-R@` `GF-PRIME` `LOAD-PRIME` `FMUL-ADD-RAW`
 
 **NTT Engine**
 `NTT-LOAD` `NTT-STORE` `NTT-FWD` `NTT-INV` `NTT-PMUL`

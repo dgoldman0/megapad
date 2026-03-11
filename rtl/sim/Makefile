@@ -46,7 +46,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals crypto ntt field_alu kem nic mailbox trng tile \
+        peripherals crypto ntt kem nic mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke
 
 all: phase1 phase2 phase3 phase4 phase5
@@ -266,7 +266,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
 # Phase 4: Peripherals, Crypto & GPU
 # ==========================================================================
 
-phase4: peripherals crypto ntt field_alu kem nic mailbox trng tile
+phase4: peripherals crypto ntt kem nic mailbox trng tile
 	@echo ""
 	@echo "--- Phase 4 complete ---"
 
@@ -283,7 +283,7 @@ crypto: tb_crypto.vvp
 	$(VVP) $<
 
 tb_crypto.vvp: tb_crypto.v \
-               $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_sha256.v $(CRYPTO)/mp64_aes.v
+               $(CRYPTO)/mp64_sha3.v $(CRYPTO)/mp64_aes.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- NTT ---
@@ -291,13 +291,6 @@ ntt: tb_ntt.vvp
 	$(VVP) $<
 
 tb_ntt.vvp: tb_ntt.v $(CRYPTO)/mp64_ntt.v
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
-
-# --- Field ALU ---
-field_alu: tb_field_alu.vvp
-	$(VVP) $<
-
-tb_field_alu.vvp: tb_field_alu.v $(CRYPTO)/mp64_field_alu.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- KEM ---

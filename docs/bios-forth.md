@@ -723,18 +723,16 @@ CSPRNG-backed in emulator, ring-oscillator + SHA-3 conditioner on FPGA.
 
 ## Field ALU — GF(2²⁵⁵−19) Arithmetic (13 words)
 
-General-purpose finite-field coprocessor at `0xFFFF_FF00_0000_0880`.
-Modes 0–7: X25519 (legacy), FADD, FSUB, FMUL, FSQR, FINV, FPOW,
-MUL_RAW (256×256→512-bit).
+General-purpose finite-field coprocessor, per-core ISA (EXT.CRYPTO FB,
+sub-ops 0x20–0x2D).  Operands staged via ACC0–ACC3 CSR writes;
+results read back via CSR reads.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FIELD-A!` | `( addr -- )` | Load 256-bit operand A from addr. |
-| `FIELD-B!` | `( addr -- )` | Load 256-bit operand B from addr. |
-| `FIELD-CMD!` | `( cmd -- )` | Start operation (mode in bits 7:4, go in bit 0). |
-| `FIELD-STATUS@` | `( -- status )` | Read status: 0 = busy, 1 = done. |
-| `FIELD-RESULT@` | `( addr -- )` | Read 256-bit result to addr. |
-| `FIELD-RESULT-HI@` | `( addr -- )` | Read upper 256 bits (MUL_RAW mode) to addr. |
+| `GF-A!` | `( addr -- )` | Load 256-bit operand A from addr into ACC0–ACC3. |
+| `GF-R@` | `( addr -- )` | Store ACC0–ACC3 (256-bit result) to addr. |
+| `GF-PRIME` | `( n -- )` | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom prime + Montgomery p_inv. |
 | `FADD` | `( a b -- r )` | (a + b) mod p — loads operands, executes, returns result. |
 | `FSUB` | `( a b -- r )` | (a − b) mod p. |
 | `FMUL` | `( a b -- r )` | (a · b) mod p. |
@@ -742,6 +740,7 @@ MUL_RAW (256×256→512-bit).
 | `FINV` | `( a -- r )` | a^(p−2) mod p (modular inverse). |
 | `FPOW` | `( a b -- r )` | a^b mod p. |
 | `FMUL-RAW` | `( a b -- rlo rhi )` | Raw 256×256→512-bit multiply (no reduction). |
+| `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | Multiply-accumulate (raw). |
 
 ---
 

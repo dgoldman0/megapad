@@ -369,12 +369,12 @@ class MegapadSystem:
         self.fb = CppFramebufferProxy(self.cores[0]._cs)
         self.rtc = RTC()
 
-        # AES, SHA3, SHA256, FieldALU, NIC, TRNG, and FB are all handled
-        # natively by the C++ accelerator — no Python device instances
-        # needed.  NIC MMIO (0x0400) does ~15K–35K accesses per TLS
-        # handshake; keeping it in C++ is critical for HTTPS perf.
-        # The Python NetworkDevice remains only as a facade for backend
-        # lifecycle, inject_frame(), and status display.
+        # AES, SHA3, NIC, TRNG, and FB are all handled natively by the
+        # C++ accelerator — no Python device instances needed.  NIC MMIO
+        # (0x0400) does ~15K–35K accesses per TLS handshake; keeping it
+        # in C++ is critical for HTTPS perf.  The Python NetworkDevice
+        # remains only as a facade for backend lifecycle, inject_frame(),
+        # and status display.
 
         self.bus.register(self.uart)
         # Timer: C++ handles all MMIO; proxy tick is called via bus.
@@ -388,8 +388,6 @@ class MegapadSystem:
         self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
-        # CRC: no longer MMIO — now ISA-only (per-core / cluster-shared)
-        # TRNG: NOT registered — C++ handles all MMIO
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
         # FB: NOT registered — C++ handles all MMIO; proxy tick is

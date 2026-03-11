@@ -40,12 +40,9 @@ SYSINFO_BASE = 0x0300
 NIC_BASE     = 0x0400
 MBOX_BASE    = 0x0500
 SPINLOCK_BASE = 0x0600
-# CRC_BASE removed — CRC is now ISA-only (per-core / cluster-shared)
 AES_BASE     = 0x0700
 SHA3_BASE    = 0x0780
 TRNG_BASE    = 0x0800
-SHA256_BASE  = 0x0940
-X25519_BASE  = 0x0840
 NTT_BASE     = 0x08C0
 KEM_BASE     = 0x0900
 FB_BASE      = 0x0A00
@@ -60,8 +57,8 @@ DEFAULT_PORT_MAP: dict[int, int] = {
     1: UART_BASE    + 0x00,   # UART TX_DATA  (single byte)
     2: NIC_BASE     + 0x18,   # NIC  DMA_PUSH (new byte-push reg)
     3: STORAGE_BASE + 0x10,   # Disk DMA_PUSH (new byte-push reg)
-    4: 0,                     # CRC removed — now ISA-only; port 4 disabled
-    5: SHA256_BASE  + 0x10,   # SHA  DIN      (existing streaming byte)
+    4: 0,                     # disabled
+    5: 0,                     # disabled
     6: FB_BASE      + 0x0C,   # FB   BASE_PUSH(new byte-push reg)
     7: 0,                     # configurable — 0 = disabled
 }
@@ -1054,12 +1051,6 @@ class SpinlockDevice(Device):
 # See CryptoSHA3 in mp64_crypto.h. MMIO range: 0x0780 – 0x07D0.
 
 
-# ---------------------------------------------------------------------------
-#  SHA-256 Accelerator — REMOVED (implemented in C++: accel/mp64_crypto.h)
-# ---------------------------------------------------------------------------
-# See CryptoSHA256 in mp64_crypto.h. MMIO range: 0x0940 – 0x0980.
-
-
 
 # ---------------------------------------------------------------------------
 #  ML-KEM-512 (Kyber) Key Encapsulation Mechanism Accelerator
@@ -1429,26 +1420,6 @@ class KemDevice(Device):
         self._bufs[4] = bytearray(K)
         self.status = 2
 
-
-# ---------------------------------------------------------------------------
-#  CRC Accelerator — REMOVED
-# ---------------------------------------------------------------------------
-# CRC is now ISA-only via EXT.CRYPTO (FB 00-04).  Full cores have a
-# per-core mp64_crc_isa instance; micro-cores share one per cluster
-# with a hardware lock arbiter.  The old MMIO device at 0x0980 has
-# been scrapped.
-
-
-# ---------------------------------------------------------------------------
-#  TRNG — REMOVED (implemented in C++: accel/mp64_nic.h)
-# ---------------------------------------------------------------------------
-# See TRNGDevice in mp64_nic.h. MMIO range: 0x0800 – 0x0820.
-
-
-# ---------------------------------------------------------------------------
-#  Field ALU — REMOVED (implemented in C++: accel/mp64_crypto.h)
-# ---------------------------------------------------------------------------
-# See CryptoFieldALU in mp64_crypto.h. MMIO range: 0x0840 – 0x0888.
 
 NTT_OP_FWD  = 0
 NTT_OP_INV  = 1

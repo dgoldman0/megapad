@@ -193,8 +193,7 @@ The largest rewrite — the 512-bit SIMD tile engine.
 | 6.2 | `mp64_sha3.v` — SHA-3 / Keccak | `tb_crypto` |
 | 6.3 | `mp64_crc.v` — CRC-32/64 | `tb_crypto` |
 | 6.4 | `mp64_trng.v` — TRNG (sim model + platform hook) | `tb_trng` |
-| 6.5 | `mp64_field_alu.v` — GF(2²⁵⁵−19) with proper multiplier | `tb_field_alu` |
-| 6.6 | `mp64_ntt.v` — NTT with Barrett reduction (no `%`) | `tb_ntt` |
+| 6.5 | `mp64_ntt.v` — NTT with Barrett reduction (no `%`) | `tb_ntt` |
 | 6.7 | `mp64_kem.v` — ML-KEM-512 | `tb_kem` |
 
 **Commit**: "Phase 6: crypto & math accelerators (synthesisable)"
@@ -302,9 +301,7 @@ fpga/
 │   ├── crypto/
 │   │   ├── mp64_aes.v               — AES-256-GCM
 │   │   ├── mp64_sha3.v              — SHA-3 / Keccak
-│   │   ├── mp64_crc.v               — CRC-32/64
 │   │   ├── mp64_trng.v              — TRNG (platform-hookable)
-│   │   ├── mp64_field_alu.v         — GF(p) field coprocessor
 │   │   ├── mp64_ntt.v               — NTT engine (Barrett mult)
 │   │   └── mp64_kem.v               — ML-KEM-512
 │   ├── mp64_soc.v                   — SoC integration

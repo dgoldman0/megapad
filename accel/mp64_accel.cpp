@@ -2326,9 +2326,7 @@ static inline uint64_t crc_byte_64(uint64_t acc, uint8_t b, uint64_t poly) {
 //  SHA-256 / SHA-512 helpers
 // ---------------------------------------------------------------------------
 
-// SHA-256 / SHA-512 helpers (rotr32 from mp64_crypto.h)
-// ---------------------------------------------------------------------------
-
+static inline uint32_t rotr32(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 static inline uint64_t rotr64(uint64_t x, int n) { return (x >> n) | (x << (64 - n)); }
 
 static constexpr uint32_t ISA_SHA256_K[64] = {
@@ -3896,9 +3894,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // Sync crypto state from Python devices (for save/restore)
         .def("crypto_aes_reset", [](CPUState& s) { s.crypto.aes.reset(); })
-        .def("crypto_sha256_reset", [](CPUState& s) { s.crypto.sha256.reset(); })
         .def("crypto_sha3_reset", [](CPUState& s) { s.crypto.sha3.reset(); s.crypto.sha3.mode = 0; })
-        .def("crypto_field_reset", [](CPUState& s) { s.crypto.field_alu.reset(); })
         .def("crypto_wots_reset", [](CPUState& s) {
             s.crypto.wots.reset();
             s.crypto.wots.sha3 = &s.crypto.sha3;

@@ -79,7 +79,6 @@ UART_TXD ◄──│       bus  │         │         │  tile              
 | `mp64_sha3` | `rtl/mp64_sha3.v` | ~395 | SHA3/Keccak engine |
 | `mp64_crc` | `rtl/mp64_crc.v` | ~174 | CRC-32 engine |
 | `mp64_trng` | `rtl/mp64_trng.v` | ~192 | True RNG (ring-osc + LFSR conditioner) |
-| `mp64_field_alu` | `rtl/mp64_field_alu.v` | ~488 | GF(2²⁵⁵−19) field coprocessor (8 modes) |
 | `mp64_ntt` | `rtl/mp64_ntt.v` | ~443 | 256-point NTT engine (Cooley-Tukey butterfly) |
 | `mp64_kem` | `rtl/mp64_kem.v` | ~337 | ML-KEM-512 key encapsulation accelerator |
 | `mp64_synth_top` | `rtl/mp64_synth_top.v` | ~136 | Synthesis top-level wrapper |
