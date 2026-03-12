@@ -990,3 +990,42 @@ def _emit_instruction(lineno: int, text: str, pc: int,
             raise AsmError(lineno, f"Unknown tile op: {sub_name!r}")
 
     raise AsmError(lineno, f"Unknown mnemonic: {mnem!r}")
+
+
+# ---- CLI entry point ----
+if __name__ == "__main__":
+    import sys
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print("Usage: python asm.py <input.asm> [output.rom] [--listing]",
+              file=sys.stderr)
+        sys.exit(0 if argv else 1)
+
+    src_path = argv[0]
+    out_path = argv[1] if len(argv) >= 2 else None
+    listing = "--listing" in argv
+
+    try:
+        with open(src_path) as f:
+            source = f.read()
+    except OSError as e:
+        print(f"asm: cannot read {src_path!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        rom = assemble(source, listing=listing)
+    except AsmError as e:
+        print(f"asm: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if out_path:
+        try:
+            with open(out_path, "wb") as f:
+                f.write(rom)
+        except OSError as e:
+            print(f"asm: cannot write {out_path!r}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"{src_path} -> {out_path}  ({len(rom)} bytes)")
+    else:
+        print(f"Assembled {len(rom)} bytes (no output file specified)")

@@ -448,6 +448,32 @@ interp_line_done:
     call.l r11
     lbr quit_loop
 interp_no_underflow:
+    ; Check for DSP overflow: R14 should be >= HERE (not into dictionary)
+    ldi64 r11, var_here
+    ldn r11, r11               ; R11 = HERE
+    cmp r11, r14               ; HERE <= R14 means no overflow
+    brle interp_no_dsp_overflow
+    ; DSP overflow detected — reset DSP and warn
+    mov r11, r2
+    lsri r11, 1               ; dsp_init = R2/2
+    mov r14, r11
+    ldi64 r10, str_stack_overflow
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+interp_no_dsp_overflow:
+    ; Check for RSP overflow: R15 should be >= R2/2 (not into DSP zone)
+    mov r11, r2
+    lsri r11, 1               ; rsp_floor = R2/2
+    cmp r11, r15               ; floor <= R15 means no overflow
+    brle interp_no_rsp_overflow
+    ; RSP overflow detected — reset RSP and warn
+    mov r15, r2               ; RSP = ram top
+    ldi64 r10, str_rstack_overflow
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+interp_no_rsp_overflow:
     ; Only print " ok" in interpret mode (STATE=0)
     ldi64 r11, var_state
     ldn r11, r11
@@ -15805,6 +15831,10 @@ str_compile_only:
     .asciiz "compile-only word\n"
 str_stack_underflow:
     .asciiz "Stack underflow\n"
+str_stack_overflow:
+    .asciiz "Stack overflow\n"
+str_rstack_overflow:
+    .asciiz "Return stack overflow\n"
 str_eval_depth:
     .asciiz "EVALUATE depth limit exceeded\n"
 str_dict_full:
