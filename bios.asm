@@ -8266,7 +8266,11 @@ w_cond_if:
     ; Flag is false — enter skip mode.
     ; We need to scan tokens until we find a matching [ELSE] or [THEN],
     ; counting nested [IF] depths.
-    ldi r10, 1                ; depth = 1  (we are inside one [IF])
+    ; Depth is kept in var_cond_depth (not a register — R10 is clobbered
+    ; by print_str and other BIOS routines).
+    ldi64 r11, var_cond_depth
+    ldi r1, 1
+    str r11, r1               ; depth = 1
 w_cond_skip_loop:
     ldi64 r11, parse_word
     call.l r11
@@ -8282,7 +8286,10 @@ w_cond_skip_loop:
     cmpi r0, 1
     brne w_cond_skip_not_if
     ; Nested [IF] — increment depth
-    addi r10, 1
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    addi r1, 1
+    str r11, r1
     lbr w_cond_skip_loop
 w_cond_skip_not_if:
     ; Check for [ELSE] (6 chars)
@@ -8294,7 +8301,9 @@ w_cond_skip_not_if:
     cmpi r0, 1
     brne w_cond_skip_not_else
     ; [ELSE] at depth 1 → stop skipping (execute the ELSE branch)
-    cmpi r10, 1
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    cmpi r1, 1
     lbrne w_cond_skip_loop     ; deeper nesting, keep skipping
     ; Matched — done skipping
     ret.l
@@ -8308,8 +8317,11 @@ w_cond_skip_not_else:
     cmpi r0, 1
     lbrne w_cond_skip_loop
     ; [THEN] — decrement depth
-    subi r10, 1
-    cmpi r10, 0
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    subi r1, 1
+    str r11, r1
+    cmpi r1, 0
     lbrne w_cond_skip_loop     ; still nested
     ; depth==0 — done skipping
     ret.l
@@ -8329,7 +8341,9 @@ w_cond_if_true:
 ;   When reached during normal execution (i.e. the [IF] branch was taken),
 ;   skip everything until matching [THEN].
 w_cond_else:
-    ldi r10, 1                ; depth = 1
+    ldi64 r11, var_cond_depth
+    ldi r1, 1
+    str r11, r1               ; depth = 1
 w_cond_else_skip:
     ldi64 r11, parse_word
     call.l r11
@@ -8343,7 +8357,10 @@ w_cond_else_skip:
     call.l r13
     cmpi r0, 1
     brne w_cond_else_not_if
-    addi r10, 1
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    addi r1, 1
+    str r11, r1
     lbr w_cond_else_skip
 w_cond_else_not_if:
     ; Check for [THEN] (6 chars)
@@ -8354,8 +8371,11 @@ w_cond_else_not_if:
     call.l r13
     cmpi r0, 1
     lbrne w_cond_else_skip
-    subi r10, 1
-    cmpi r10, 0
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    subi r1, 1
+    str r11, r1
+    cmpi r1, 0
     lbrne w_cond_else_skip
     ret.l
 w_cond_else_eol:
@@ -15519,6 +15539,10 @@ var_interp_if_depth:
     .dq 0                     ; nesting depth (0 = not in temp IF block)
 var_interp_if_start:
     .dq 0                     ; HERE value at start of outermost temp IF
+
+; [IF]/[ELSE] skip-mode nesting depth (avoids R10 clobber by print_str)
+var_cond_depth:
+    .dq 0
 
 ; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
 var_leave_count:

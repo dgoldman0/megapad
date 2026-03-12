@@ -3078,6 +3078,214 @@ class TestBIOS(unittest.TestCase):
         for word in ['[IF]', '[ELSE]', '[THEN]', '[DEFINED]', '[UNDEFINED]']:
             self.assertIn(word, text)
 
+    # -- Hardening: depth tracking survives across lines and deep nesting --
+
+    def test_cond_depth_3level_nested_false(self):
+        """3-level nesting with outer false: everything skipped."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 [IF]',
+            '    1 [IF]',
+            '      99 R !',
+            '    [THEN]',
+            '  [THEN]',
+            '[THEN]',
+            'R @ .',
+        ])
+        self.assertIn("0  ok", text)
+
+    def test_cond_depth_3level_inner_false(self):
+        """3-level nesting: outer/mid true, innermost false → inner skipped."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            'VARIABLE S  0 S !',
+            '1 [IF]',
+            '  1 [IF]',
+            '    0 [IF]',
+            '      99 R !',
+            '    [THEN]',
+            '    42 S !',
+            '  [THEN]',
+            '[THEN]',
+            'R @ .',
+            'S @ .',
+        ])
+        out_r = text.split("R @ .")[-1].split("S @ .")[0]
+        self.assertIn("0 ", out_r)
+        out_s = text.split("S @ .")[-1]
+        self.assertIn("42 ", out_s)
+
+    def test_cond_depth_3level_else_branches(self):
+        """3-level nesting with [ELSE] at each level."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF]',
+            '  0 [IF]',
+            '    0 [IF]',
+            '      1 R !',
+            '    [ELSE]',
+            '      2 R !',
+            '    [THEN]',
+            '  [ELSE]',
+            '    33 R !',
+            '  [THEN]',
+            '[THEN]',
+            'R @ .',
+        ])
+        # outer true → enter; mid false → skip to mid [ELSE]; mid ELSE sets 33
+        self.assertIn("33  ok", text)
+
+    def test_cond_depth_false_skips_else_at_depth2(self):
+        """Outer false skips nested [IF]/[ELSE]/[THEN] including ELSE."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 [IF]',
+            '    11 R !',
+            '  [ELSE]',
+            '    22 R !',
+            '  [THEN]',
+            '  33 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        self.assertIn("0  ok", text)
+
+    def test_cond_depth_4level_nested(self):
+        """4-level deep nesting: only innermost body executes."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF]',
+            '  1 [IF]',
+            '    1 [IF]',
+            '      1 [IF]',
+            '        77 R !',
+            '      [THEN]',
+            '    [THEN]',
+            '  [THEN]',
+            '[THEN]',
+            'R @ .',
+        ])
+        self.assertIn("77  ok", text)
+
+    def test_cond_depth_4level_mid_false(self):
+        """4-level nesting: level 2 false skips levels 3+4."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            'VARIABLE S  0 S !',
+            '1 [IF]',
+            '  0 [IF]',
+            '    1 [IF]',
+            '      1 [IF]',
+            '        99 R !',
+            '      [THEN]',
+            '    [THEN]',
+            '  [THEN]',
+            '  88 S !',
+            '[THEN]',
+            'R @ .',
+            'S @ .',
+        ])
+        out_r = text.split("R @ .")[-1].split("S @ .")[0]
+        self.assertIn("0 ", out_r)
+        out_s = text.split("S @ .")[-1]
+        self.assertIn("88 ", out_s)
+
+    def test_cond_depth_interleaved_else_multiline(self):
+        """[ELSE] at depth 1 fires correctly with deeper nesting above it."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 [IF]',
+            '    1 [IF]',
+            '      11 R !',
+            '    [THEN]',
+            '  [THEN]',
+            '[ELSE]',
+            '  55 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        # Outer false → skip everything until matching [ELSE] → execute 55 R !
+        self.assertIn("55  ok", text)
+
+    def test_cond_depth_many_lines_skipped(self):
+        """Skip 10+ lines in a false [IF] block — depth survives."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '0 [IF]',
+            '  1 R !',
+            '  2 R !',
+            '  3 R !',
+            '  4 R !',
+            '  5 R !',
+            '  6 R !',
+            '  7 R !',
+            '  8 R !',
+            '  9 R !',
+            '  10 R !',
+            '  11 R !',
+            '  12 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        self.assertIn("0  ok", text)
+
+    def test_cond_depth_else_skip_many_lines(self):
+        """[ELSE] branch: skip 10+ lines after true [IF] branch."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            'VARIABLE R  0 R !',
+            '1 [IF]',
+            '  42 R !',
+            '[ELSE]',
+            '  1 R !',
+            '  2 R !',
+            '  3 R !',
+            '  4 R !',
+            '  5 R !',
+            '  6 R !',
+            '  7 R !',
+            '  8 R !',
+            '  9 R !',
+            '  10 R !',
+            '  11 R !',
+            '  12 R !',
+            '[THEN]',
+            'R @ .',
+        ])
+        self.assertIn("42  ok", text)
+
+    def test_cond_depth_nested_definitions(self):
+        """Multiple colon definitions inside nested [IF] blocks."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '1 [IF]',
+            '  : FOO-A 10 ;',
+            '  1 [IF]',
+            '    : FOO-B 20 ;',
+            '    0 [IF]',
+            '      : FOO-C 99 ;',
+            '    [THEN]',
+            '  [THEN]',
+            '[THEN]',
+            'FOO-A FOO-B + .',
+            '[DEFINED] FOO-C .',
+        ])
+        self.assertIn("30  ok", text)
+        # FOO-C should not exist (inner false)
+        out_c = text.split("[DEFINED] FOO-C .")[-1]
+        self.assertIn("0 ", out_c)
+
     # ------------------------------------------------------------------
     #  Relocation tracking
     # ------------------------------------------------------------------
@@ -12635,6 +12843,322 @@ class TestKDOSCompilerChecks(_KDOSTestBase):
         ])
         self.assertNotIn("Too many LEAVEs", text)
         self.assertNotIn("?", text)
+
+
+class TestKDOSConditionalCompilation(_KDOSTestBase):
+    """Tests for BIOS [DEFINED] [UNDEFINED] [IF] [ELSE] [THEN] words.
+
+    Strategy: UART echoes input, so we can't assertNotIn on numbers that
+    appear in the source text.  Instead we use VARIABLEs — set them
+    inside conditional blocks, then print AFTER [THEN].  Only executed
+    branches modify the variable, so the final `. ` output is
+    unambiguous.
+    """
+
+    # -- [DEFINED] / [UNDEFINED] --
+
+    def test_defined_known_word(self):
+        """[DEFINED] returns true (-1) for a known word."""
+        text = self._run_kdos_fast(["[DEFINED] DUP ."])
+        self.assertTrue("-1 " in text or "18446744073709551615 " in text)
+
+    def test_defined_unknown_word(self):
+        """[DEFINED] returns 0 for an unknown word."""
+        text = self._run_kdos_fast(["[DEFINED] ZZZYYYXXX___NOEXIST ."])
+        self.assertIn("0 ", text)
+
+    def test_undefined_known_word(self):
+        """[UNDEFINED] returns 0 for a known word."""
+        text = self._run_kdos_fast(["[UNDEFINED] DUP ."])
+        self.assertIn("0 ", text)
+
+    def test_undefined_unknown_word(self):
+        """[UNDEFINED] returns true (-1) for a missing word."""
+        text = self._run_kdos_fast(["[UNDEFINED] ZZZYYYXXX___NOEXIST ."])
+        self.assertTrue("-1 " in text or "18446744073709551615 " in text)
+
+    # -- Multi-line [IF] / [THEN] (true) --
+
+    def test_if_true_multiline(self):
+        """True [IF]: body across multiple lines executes."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-A  0 CC-A !",
+            "VARIABLE CC-B  0 CC-B !",
+            "1 [IF]",
+            "  1 CC-A !",
+            "  2 CC-B !",
+            "[THEN]",
+            "CC-A @ . CC-B @ .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("2 ", text)
+
+    # -- Multi-line [IF] / [THEN] (false) --
+
+    def test_if_false_multiline(self):
+        """False [IF]: body across multiple lines is skipped."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-C  0 CC-C !",
+            "VARIABLE CC-D  0 CC-D !",
+            "0 [IF]",
+            "  99 CC-C !",
+            "  99 CC-D !",
+            "[THEN]",
+            "CC-C @ . CC-D @ .",
+        ])
+        # Both stay 0 — the body was skipped
+        out = text.split("CC-D @ .")[-1]
+        self.assertIn("0 ", out)
+
+    # -- Multi-line [IF] / [ELSE] / [THEN] (true branch) --
+
+    def test_if_else_true_multiline(self):
+        """True flag: multi-line [IF] branch runs, [ELSE] branch skipped."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-E  0 CC-E !",
+            "1 [IF]",
+            "  10 CC-E !",
+            "[ELSE]",
+            "  20 CC-E !",
+            "[THEN]",
+            "CC-E @ .",
+        ])
+        out = text.split("CC-E @ .")[-1]
+        self.assertIn("10 ", out)
+
+    # -- Multi-line [IF] / [ELSE] / [THEN] (false branch) --
+
+    def test_if_else_false_multiline(self):
+        """False flag: multi-line [IF] branch skipped, [ELSE] branch runs."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-F  0 CC-F !",
+            "0 [IF]",
+            "  10 CC-F !",
+            "[ELSE]",
+            "  20 CC-F !",
+            "[THEN]",
+            "CC-F @ .",
+        ])
+        out = text.split("CC-F @ .")[-1]
+        self.assertIn("20 ", out)
+
+    # -- Nested: outer false skips everything --
+
+    def test_nested_outer_false(self):
+        """Outer false [IF] skips everything including nested [IF]."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-G  0 CC-G !",
+            "VARIABLE CC-H  0 CC-H !",
+            "0 [IF]",
+            "  1 [IF]",
+            "    88 CC-G !",
+            "  [THEN]",
+            "  99 CC-H !",
+            "[THEN]",
+            "CC-G @ .",
+            "CC-H @ .",
+        ])
+        # Each "VAR @ ." echoes the line, then prints the value on next line.
+        # Extract text between the two prints to isolate each value.
+        out_g = text.split("CC-G @ .")[-1].split("CC-H @ .")[0]
+        self.assertIn("0 ", out_g)
+        out_h = text.split("CC-H @ .")[-1]
+        self.assertIn("0 ", out_h)
+
+    # -- Nested: outer true, inner false --
+
+    def test_nested_inner_false(self):
+        """Outer true, inner false: outer body runs, inner body skipped."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-I  0 CC-I !",
+            "VARIABLE CC-J  0 CC-J !",
+            "VARIABLE CC-K  0 CC-K !",
+            "1 [IF]",
+            "  1 CC-I !",
+            "  0 [IF]",
+            "    88 CC-J !",
+            "  [THEN]",
+            "  2 CC-K !",
+            "[THEN]",
+            "CC-I @ .",
+            "CC-J @ .",
+            "CC-K @ .",
+        ])
+        out_i = text.split("CC-I @ .")[-1].split("CC-J @ .")[0]
+        self.assertIn("1 ", out_i)
+        out_j = text.split("CC-J @ .")[-1].split("CC-K @ .")[0]
+        self.assertIn("0 ", out_j)
+        out_k = text.split("CC-K @ .")[-1]
+        self.assertIn("2 ", out_k)
+
+    # -- Nested: both true --
+
+    def test_nested_both_true(self):
+        """Nested [IF] both true: all bodies execute."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-L  0 CC-L !",
+            "VARIABLE CC-M  0 CC-M !",
+            "VARIABLE CC-N  0 CC-N !",
+            "1 [IF]",
+            "  1 CC-L !",
+            "  1 [IF]",
+            "    2 CC-M !",
+            "  [THEN]",
+            "  3 CC-N !",
+            "[THEN]",
+            "CC-L @ .",
+            "CC-M @ .",
+            "CC-N @ .",
+        ])
+        out_l = text.split("CC-L @ .")[-1].split("CC-M @ .")[0]
+        self.assertIn("1 ", out_l)
+        out_m = text.split("CC-M @ .")[-1].split("CC-N @ .")[0]
+        self.assertIn("2 ", out_m)
+        out_n = text.split("CC-N @ .")[-1]
+        self.assertIn("3 ", out_n)
+
+    # -- Nested: outer true, inner has [ELSE] --
+
+    def test_nested_inner_else(self):
+        """Nested [IF]/[ELSE]/[THEN] inside outer [IF] — inner false takes ELSE."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-O  0 CC-O !",
+            "VARIABLE CC-P  0 CC-P !",
+            "1 [IF]",
+            "  0 [IF]",
+            "    10 CC-O !",
+            "  [ELSE]",
+            "    20 CC-O !",
+            "  [THEN]",
+            "  1 CC-P !",
+            "[THEN]",
+            "CC-O @ .",
+            "CC-P @ .",
+        ])
+        out_o = text.split("CC-O @ .")[-1].split("CC-P @ .")[0]
+        self.assertIn("20 ", out_o)
+        out_p = text.split("CC-P @ .")[-1]
+        self.assertIn("1 ", out_p)
+
+    # -- Nested: outer false with inner [ELSE] (all skipped) --
+
+    def test_nested_outer_false_inner_else(self):
+        """Outer false skips nested [IF]/[ELSE]/[THEN] entirely."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-Q  0 CC-Q !",
+            "0 [IF]",
+            "  1 [IF]",
+            "    55 CC-Q !",
+            "  [ELSE]",
+            "    66 CC-Q !",
+            "  [THEN]",
+            "[THEN]",
+            "CC-Q @ .",
+        ])
+        out = text.split("CC-Q @ .")[-1]
+        self.assertIn("0 ", out)
+
+    # -- Double-nested (3 levels) --
+
+    def test_triple_nested(self):
+        """Three levels of nesting: outer true, mid true, inner false."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-R  0 CC-R !",
+            "VARIABLE CC-S  0 CC-S !",
+            "VARIABLE CC-T  0 CC-T !",
+            "1 [IF]",
+            "  1 CC-R !",
+            "  1 [IF]",
+            "    2 CC-S !",
+            "    0 [IF]",
+            "      99 CC-T !",
+            "    [THEN]",
+            "  [THEN]",
+            "[THEN]",
+            "CC-R @ .",
+            "CC-S @ .",
+            "CC-T @ .",
+        ])
+        out_r = text.split("CC-R @ .")[-1].split("CC-S @ .")[0]
+        self.assertIn("1 ", out_r)
+        out_s = text.split("CC-S @ .")[-1].split("CC-T @ .")[0]
+        self.assertIn("2 ", out_s)
+        out_t = text.split("CC-T @ .")[-1]
+        self.assertIn("0 ", out_t)  # inner false — stayed 0
+
+    # -- [DEFINED] + [IF] multi-line (real word exists) --
+
+    def test_defined_if_multiline(self):
+        """[DEFINED] + multi-line [IF]/[ELSE]/[THEN] — word exists."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-U  0 CC-U !",
+            "[DEFINED] DUP [IF]",
+            "  10 CC-U !",
+            "[ELSE]",
+            "  20 CC-U !",
+            "[THEN]",
+            "CC-U @ .",
+        ])
+        out = text.split("CC-U @ .")[-1]
+        self.assertIn("10 ", out)
+
+    # -- [UNDEFINED] + [IF] multi-line (word exists → false) --
+
+    def test_undefined_if_multiline(self):
+        """[UNDEFINED] + multi-line [IF]/[ELSE]/[THEN] — word exists → ELSE branch."""
+        text = self._run_kdos_fast([
+            "VARIABLE CC-V  0 CC-V !",
+            "[UNDEFINED] DUP [IF]",
+            "  10 CC-V !",
+            "[ELSE]",
+            "  20 CC-V !",
+            "[THEN]",
+            "CC-V @ .",
+        ])
+        out = text.split("CC-V @ .")[-1]
+        self.assertIn("20 ", out)
+
+    # -- Conditional definition: prerequisite present --
+
+    def test_conditional_definition_present(self):
+        """Define a word only when prerequisite exists (multi-line)."""
+        text = self._run_kdos_fast([
+            ": PREREQ 1 ;",
+            "[DEFINED] PREREQ [IF]",
+            ": GUARDED-WORD 42 ;",
+            "[THEN]",
+            "GUARDED-WORD .",
+        ])
+        self.assertIn("42 ", text)
+
+    # -- Conditional definition: prerequisite absent --
+
+    def test_conditional_definition_absent(self):
+        """Skip definition when prerequisite missing; word should not exist."""
+        text = self._run_kdos_fast([
+            "[DEFINED] ZZZYYYXXX___NOEXIST [IF]",
+            ": SHOULD-NOT-EXIST 99 ;",
+            "[THEN]",
+            "[DEFINED] SHOULD-NOT-EXIST .",
+        ])
+        # After the echo, the printed value must be 0
+        out = text.split("SHOULD-NOT-EXIST .")[-1]
+        self.assertIn("0 ", out)
+
+    # -- Nested conditional definitions --
+
+    def test_nested_conditional_definitions(self):
+        """Nested [DEFINED] gates: define B only if A exists."""
+        text = self._run_kdos_fast([
+            ": FEAT-A ;",
+            "[DEFINED] FEAT-A [IF]",
+            "  [DEFINED] DUP [IF]",
+            "    : FEAT-AB 77 ;",
+            "  [THEN]",
+            "[THEN]",
+            "FEAT-AB .",
+        ])
+        self.assertIn("77 ", text)
 
 
 class TestKDOSHardening(_KDOSTestBase):
