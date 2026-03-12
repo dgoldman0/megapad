@@ -102,13 +102,26 @@ class VirtualTerminal:
     Supports:
       - printable ASCII + UTF-8 multibyte characters
       - \\r, \\n, \\t, \\b (BS), \\x7f (DEL)
-      - ESC [ <n> ; <m> H  (cursor position)
-      - ESC [ <n> J         (erase in display)
-      - ESC [ <n> K         (erase in line)
-      - ESC [ <n> m         (SGR — bold, dim, italic, underline, blink,
-                              reverse, hidden, strikethrough, 16-color,
-                              256-color via 38;5;n / 48;5;n)
-      - ESC [ ? 25 h/l      (show/hide cursor)
+      - ESC [ <n> ; <m> H/f  (cursor position)
+      - ESC [ <n> A/B/C/D    (cursor up/down/right/left)
+      - ESC [ <n> E/F         (cursor next/previous line)
+      - ESC [ <n> G           (cursor to column)
+      - ESC [ <n> J           (erase in display: 0/1/2)
+      - ESC [ <n> K           (erase in line: 0/1/2)
+      - ESC [ <n> S/T         (scroll up/down)
+      - ESC [ <top> ; <bot> r (scroll region / DECSTBM)
+      - ESC [ s / ESC [ u     (save / restore cursor)
+      - ESC 7 / ESC 8         (DECSC / DECRC — save / restore cursor)
+      - ESC [ <n> m           (SGR — bold, dim, italic, underline, blink,
+                                reverse, hidden, strikethrough, 16-color,
+                                256-color via 38;5;n / 48;5;n,
+                                truecolor via 38;2;r;g;b / 48;2;r;g;b)
+      - ESC [ ? 25 h/l        (show/hide cursor)
+      - ESC [ ? 1049 h/l      (alternate screen buffer)
+      - ESC [ ? 1000/1006/2004 h/l (mouse/paste modes — absorbed)
+      - ESC [ 6 n             (DSR — reports cursor position)
+      - ESC [ 18 t            (reports terminal size)
+      - ESC ] ... ST           (OSC sequences — absorbed)
     """
 
     # Standard 16-color palette (R, G, B)
@@ -156,7 +169,8 @@ class VirtualTerminal:
     _DEFAULT_FG = COLORS_16[7]     # light gray
     _DEFAULT_BG = COLORS_16[0]     # black
 
-    def __init__(self, cols: int = TERM_COLS, rows: int = TERM_ROWS):
+    def __init__(self, cols: int = TERM_COLS, rows: int = TERM_ROWS,
+                 uart_inject: 'callable | None' = None):
         self.cols = cols
         self.rows = rows
         self.cx = 0        # cursor column
@@ -175,6 +189,29 @@ class VirtualTerminal:
         self.strikethrough = False
         self.cursor_visible = True
 
+        # Scroll region (0-based, inclusive). Full screen by default.
+        self._scroll_top = 0
+        self._scroll_bottom = rows - 1
+
+        # Saved cursor state (ESC[s / ESC 7)
+        self._saved_cx = 0
+        self._saved_cy = 0
+        self._saved_fg = self._DEFAULT_FG
+        self._saved_bg = self._DEFAULT_BG
+        self._saved_attrs = 0   # packed bitmask
+
+        # Alternate screen buffer (ESC[?1049h/l)
+        self._alt_grid: list | None = None
+        self._alt_cx = 0
+        self._alt_cy = 0
+        self._alt_fg = self._DEFAULT_FG
+        self._alt_bg = self._DEFAULT_BG
+        self._alt_attrs = 0
+        self._in_alt_screen = False
+
+        # UART inject callback for responding to queries (DSR, etc.)
+        self._uart_inject = uart_inject
+
         # Character grid: list of rows, each row = list of (char, fg_rgb, bg_rgb, attrs)
         # attrs is a bitmask: 1=bold 2=dim 4=italic 8=underline 16=blink
         #                      32=reverse 64=hidden 128=strikethrough
@@ -185,8 +222,10 @@ class VirtualTerminal:
         self.scrollback: deque = deque(maxlen=1000)
 
         # ESC sequence parser state
-        self._esc_state = 0   # 0=normal, 1=got ESC, 2=got CSI
+        # 0=normal, 1=got ESC, 2=got CSI, 3=inside OSC
+        self._esc_state = 0
         self._esc_buf = ""
+        self._osc_buf = ""       # accumulates OSC payload
 
         # UTF-8 accumulator
         self._utf8_buf = bytearray()
@@ -267,6 +306,21 @@ class VirtualTerminal:
             if ch == '[':
                 self._esc_state = 2
                 self._esc_buf = ""
+            elif ch == ']':
+                # OSC — Operating System Command (ESC ] ... ST)
+                self._esc_state = 3
+                self._osc_buf = ""
+            elif ch == '7':
+                # DECSC — save cursor
+                self._save_cursor()
+                self._esc_state = 0
+            elif ch == '8':
+                # DECRC — restore cursor
+                self._restore_cursor()
+                self._esc_state = 0
+            elif ch == '\\':
+                # ST (String Terminator) immediately after ESC — ignore
+                self._esc_state = 0
             else:
                 self._esc_state = 0  # unsupported ESC sequence
             return
@@ -277,6 +331,17 @@ class VirtualTerminal:
             # Got final character
             self._handle_csi(self._esc_buf, ch)
             self._esc_state = 0
+            return
+        if self._esc_state == 3:
+            # Inside OSC payload — absorb until ST (ESC \) or BEL (0x07)
+            if b == 0x07:
+                # BEL terminates OSC
+                self._esc_state = 0
+            elif ch == '\\' and self._osc_buf.endswith('\x1b'):
+                # ESC \ = ST terminates OSC
+                self._esc_state = 0
+            else:
+                self._osc_buf += ch
             return
 
         # Normal character processing
@@ -313,19 +378,98 @@ class VirtualTerminal:
             self.cx = 0
             self._line_feed()
 
-    def _line_feed(self):
-        self.cy += 1
-        if self.cy >= self.rows:
-            self.cy = self.rows - 1
-            self._scroll_up()
+    def _save_cursor(self):
+        """Save cursor position and attributes (DECSC / ESC[s)."""
+        self._saved_cx = self.cx
+        self._saved_cy = self.cy
+        self._saved_fg = self.fg
+        self._saved_bg = self.bg
+        self._saved_attrs = self._attrs_mask()
 
-    def _scroll_up(self):
-        """Scroll the display up one line."""
-        old_top = self.grid[0]
-        self.scrollback.append(old_top)
-        del self.grid[0]
+    def _restore_cursor(self):
+        """Restore cursor position and attributes (DECRC / ESC[u)."""
+        self.cx = min(self._saved_cx, self.cols - 1)
+        self.cy = min(self._saved_cy, self.rows - 1)
+        self.fg = self._saved_fg
+        self.bg = self._saved_bg
+        a = self._saved_attrs
+        self.bold = bool(a & 1)
+        self.dim = bool(a & 2)
+        self.italic = bool(a & 4)
+        self.underline = bool(a & 8)
+        self.blink = bool(a & 16)
+        self.reverse = bool(a & 32)
+        self.hidden = bool(a & 64)
+        self.strikethrough = bool(a & 128)
+
+    def _line_feed(self):
+        if self.cy == self._scroll_bottom:
+            # At bottom of scroll region — scroll the region up
+            self._scroll_up()
+        elif self.cy < self.rows - 1:
+            self.cy += 1
+
+    def _scroll_up(self, n: int = 1):
+        """Scroll the scroll region up by n lines."""
+        top = self._scroll_top
+        bot = self._scroll_bottom
         blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
-        self.grid.append([blank for _ in range(self.cols)])
+        for _ in range(min(n, bot - top + 1)):
+            old_row = self.grid[top]
+            if top == 0:
+                self.scrollback.append(old_row)
+            for r in range(top, bot):
+                self.grid[r] = self.grid[r + 1]
+            self.grid[bot] = [blank for _ in range(self.cols)]
+
+    def _scroll_down(self, n: int = 1):
+        """Scroll the scroll region down by n lines."""
+        top = self._scroll_top
+        bot = self._scroll_bottom
+        blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
+        for _ in range(min(n, bot - top + 1)):
+            for r in range(bot, top, -1):
+                self.grid[r] = self.grid[r - 1]
+            self.grid[top] = [blank for _ in range(self.cols)]
+
+    def _enter_alt_screen(self):
+        """Enter alternate screen buffer (ESC[?1049h)."""
+        if self._in_alt_screen:
+            return
+        # Save main screen state
+        self._alt_grid = [row[:] for row in self.grid]
+        self._alt_cx = self.cx
+        self._alt_cy = self.cy
+        self._alt_fg = self.fg
+        self._alt_bg = self.bg
+        self._alt_attrs = self._attrs_mask()
+        self._in_alt_screen = True
+        # Clear to fresh screen
+        self._clear_grid()
+        self.cx = self.cy = 0
+
+    def _leave_alt_screen(self):
+        """Leave alternate screen buffer (ESC[?1049l)."""
+        if not self._in_alt_screen:
+            return
+        # Restore main screen state
+        if self._alt_grid is not None:
+            self.grid = self._alt_grid
+            self._alt_grid = None
+        self.cx = self._alt_cx
+        self.cy = self._alt_cy
+        self.fg = self._alt_fg
+        self.bg = self._alt_bg
+        a = self._alt_attrs
+        self.bold = bool(a & 1)
+        self.dim = bool(a & 2)
+        self.italic = bool(a & 4)
+        self.underline = bool(a & 8)
+        self.blink = bool(a & 16)
+        self.reverse = bool(a & 32)
+        self.hidden = bool(a & 64)
+        self.strikethrough = bool(a & 128)
+        self._in_alt_screen = False
 
     def _handle_csi(self, params: str, cmd: str):
         """Handle CSI (ESC [) sequences."""
@@ -349,6 +493,17 @@ class VirtualTerminal:
             self.cx = min(self.cols - 1, self.cx + num())
         elif cmd == 'D':
             self.cx = max(0, self.cx - num())
+        elif cmd == 'E':
+            # Cursor Next Line
+            self.cx = 0
+            self.cy = min(self.rows - 1, self.cy + num())
+        elif cmd == 'F':
+            # Cursor Previous Line
+            self.cx = 0
+            self.cy = max(0, self.cy - num())
+        elif cmd == 'G':
+            # Cursor Horizontal Absolute (column, 1-based)
+            self.cx = max(0, min(num(0, 1) - 1, self.cols - 1))
         elif cmd == 'J':
             n = num(0, 0)
             blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
@@ -356,12 +511,19 @@ class VirtualTerminal:
                 self._clear_grid()
                 self.cx = self.cy = 0
             elif n == 0:
-                # Erase from cursor to end
+                # Erase from cursor to end of screen
                 for x in range(self.cx, self.cols):
                     self.grid[self.cy][x] = blank
                 for y in range(self.cy + 1, self.rows):
                     for x in range(self.cols):
                         self.grid[y][x] = blank
+            elif n == 1:
+                # Erase from beginning of screen to cursor
+                for y in range(0, self.cy):
+                    for x in range(self.cols):
+                        self.grid[y][x] = blank
+                for x in range(0, self.cx + 1):
+                    self.grid[self.cy][x] = blank
         elif cmd == 'K':
             n = num(0, 0)
             blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
@@ -374,14 +536,57 @@ class VirtualTerminal:
             elif n == 2:
                 for x in range(self.cols):
                     self.grid[self.cy][x] = blank
+        elif cmd == 'S':
+            # Scroll Up: ESC[nS
+            self._scroll_up(num())
+        elif cmd == 'T':
+            # Scroll Down: ESC[nT
+            self._scroll_down(num())
+        elif cmd == 'r':
+            # DECSTBM — Set scroll region: ESC[top;botr
+            top = num(0, 1) - 1
+            bot = num(1, self.rows) - 1
+            top = max(0, min(top, self.rows - 1))
+            bot = max(top, min(bot, self.rows - 1))
+            self._scroll_top = top
+            self._scroll_bottom = bot
+            # DECSTBM also homes the cursor
+            self.cx = 0
+            self.cy = 0
+        elif cmd == 's':
+            # Save cursor position: ESC[s
+            self._save_cursor()
+        elif cmd == 'u':
+            # Restore cursor position: ESC[u
+            self._restore_cursor()
         elif cmd == 'm':
             self._handle_sgr(parts)
+        elif cmd == 'n':
+            # Device Status Report
+            if num(0, 0) == 6 and self._uart_inject:
+                # DSR — report cursor position (1-based): ESC[row;colR
+                resp = f"\x1b[{self.cy + 1};{self.cx + 1}R"
+                self._uart_inject(resp.encode('ascii'))
+        elif cmd == 't':
+            # Terminal size query: ESC[18t → respond ESC[8;rows;colst
+            if num(0, 0) == 18 and self._uart_inject:
+                resp = f"\x1b[8;{self.rows};{self.cols}t"
+                self._uart_inject(resp.encode('ascii'))
         elif cmd == 'h':
+            # DEC private mode set
             if params == '?25':
                 self.cursor_visible = True
+            elif params == '?1049':
+                self._enter_alt_screen()
+            # Absorb mouse/paste modes silently
+            # ?1000, ?1006, ?2004 — no-op
         elif cmd == 'l':
+            # DEC private mode reset
             if params == '?25':
                 self.cursor_visible = False
+            elif params == '?1049':
+                self._leave_alt_screen()
+            # Absorb mouse/paste modes silently
 
     def _handle_sgr(self, parts: list[str]):
         """Handle SGR (Select Graphic Rendition) with 256-color support."""
@@ -545,7 +750,7 @@ class VirtualTerminal:
                         key = (ch, fg_rgb)
                         glyph = cache.get(key)
                         if glyph is None:
-                            glyph = font.render(ch, False, fg_rgb)
+                            glyph = font.render(ch, True, fg_rgb)
                             cache[key] = glyph
                         surface.blit(glyph, (px, py))
 
@@ -1401,7 +1606,8 @@ class FramebufferDisplay:
         self._started = threading.Event()
         self.fps = 30
         self.active_tab = self.TAB_TERMINAL
-        self.term = VirtualTerminal(TERM_COLS, TERM_ROWS)
+        self.term = VirtualTerminal(TERM_COLS, TERM_ROWS,
+                                     uart_inject=self.sys.uart.inject_input)
         self.status = StatusBar()
         self.debug = DebugPanel(ui_scale=self.scale)
         self._paused = False
@@ -1536,7 +1742,7 @@ class FramebufferDisplay:
         # Fonts — scale UI text with the display scale
         term_font_size = max(12, 14 * self.scale)
         term_font = pygame.font.SysFont("monospace", term_font_size)
-        test = term_font.render("M", False, (255, 255, 255))
+        test = term_font.render("M", True, (255, 255, 255))
         cell_w = test.get_width()
         cell_h = term_font.get_linesize()
 
