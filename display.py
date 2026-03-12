@@ -150,6 +150,10 @@ class VirtualTerminal:
         self._esc_state = 0   # 0=normal, 1=got ESC, 2=got CSI
         self._esc_buf = ""
 
+        # UTF-8 accumulator
+        self._utf8_buf = bytearray()
+        self._utf8_remaining = 0   # continuation bytes still expected
+
         # Lock for thread safety
         self._lock = threading.Lock()
         self._dirty = True
@@ -171,7 +175,42 @@ class VirtualTerminal:
             self._dirty = True
 
     def _process_byte(self, b: int):
-        ch = chr(b) if b < 128 else ''
+        # ── UTF-8 continuation byte accumulation ──────────────────
+        if self._utf8_remaining > 0:
+            if 0x80 <= b <= 0xBF:          # valid continuation byte
+                self._utf8_buf.append(b)
+                self._utf8_remaining -= 1
+                if self._utf8_remaining == 0:
+                    # Completed sequence — decode and place character
+                    try:
+                        ch = bytes(self._utf8_buf).decode('utf-8')
+                    except UnicodeDecodeError:
+                        ch = '?'
+                    self._utf8_buf.clear()
+                    self._place_char(ch)
+                return
+            else:
+                # Broken sequence — discard buffer, re-process this byte
+                self._utf8_buf.clear()
+                self._utf8_remaining = 0
+                # fall through to normal processing below
+
+        # ── UTF-8 leading byte detection ──────────────────────────
+        if b >= 0xC0:
+            if b < 0xE0:
+                self._utf8_remaining = 1   # 2-byte sequence
+            elif b < 0xF0:
+                self._utf8_remaining = 2   # 3-byte sequence
+            else:
+                self._utf8_remaining = 3   # 4-byte sequence
+            self._utf8_buf = bytearray([b])
+            return
+
+        # ── Bare continuation byte (0x80-0xBF) outside sequence — ignore
+        if b >= 0x80:
+            return
+
+        ch = chr(b)
 
         # ESC sequence parsing
         if self._esc_state == 1:
@@ -213,7 +252,11 @@ class VirtualTerminal:
         if b < 0x20:    # other control chars — ignore
             return
 
-        # Printable character
+        # Printable ASCII character
+        self._place_char(ch)
+
+    def _place_char(self, ch: str):
+        """Place a decoded character (ASCII or Unicode) into the grid."""
         fg = min(self.fg + (8 if self.bold and self.fg < 8 else 0), 15)
         self.grid[self.cy][self.cx] = (ch, fg, self.bg)
         self.cx += 1
@@ -331,7 +374,7 @@ class VirtualTerminal:
                         pygame_module.draw.rect(
                             surface, self.COLORS[bg],
                             (px, py, cell_w, cell_h))
-                    if ch != ' ':
+                    if ch and ch != ' ':
                         key = (ch, fg)
                         glyph = cache.get(key)
                         if glyph is None:
