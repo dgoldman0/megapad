@@ -97,20 +97,22 @@ class Theme:
 
 
 class VirtualTerminal:
-    """VT100-ish text terminal backed by a character grid.
+    """VT100-compatible text terminal backed by a character grid.
 
-    Supports a subset of ANSI/VT100:
-      - printable ASCII
+    Supports:
+      - printable ASCII + UTF-8 multibyte characters
       - \\r, \\n, \\t, \\b (BS), \\x7f (DEL)
       - ESC [ <n> ; <m> H  (cursor position)
       - ESC [ <n> J         (erase in display)
       - ESC [ <n> K         (erase in line)
-      - ESC [ <n> m         (SGR — bold, color)
+      - ESC [ <n> m         (SGR — bold, dim, italic, underline, blink,
+                              reverse, hidden, strikethrough, 16-color,
+                              256-color via 38;5;n / 48;5;n)
       - ESC [ ? 25 h/l      (show/hide cursor)
     """
 
-    # Default CGA-ish 16-color palette (R, G, B)
-    COLORS = [
+    # Standard 16-color palette (R, G, B)
+    COLORS_16 = [
         (0, 0, 0),          # 0 black
         (170, 0, 0),        # 1 red
         (0, 170, 0),        # 2 green
@@ -129,22 +131,58 @@ class VirtualTerminal:
         (255, 255, 255),    # 15 bright white
     ]
 
+    # Full xterm 256-color palette (built once at class level)
+    COLORS: list[tuple[int, int, int]] = []
+
+    @staticmethod
+    def _build_256_palette() -> list[tuple[int, int, int]]:
+        """Build the standard xterm 256-color palette."""
+        pal: list[tuple[int, int, int]] = []
+        # 0-15: standard 16 colors
+        pal.extend(VirtualTerminal.COLORS_16)
+        # 16-231: 6×6×6 color cube
+        levels = [0, 95, 135, 175, 215, 255]
+        for r in range(6):
+            for g in range(6):
+                for b in range(6):
+                    pal.append((levels[r], levels[g], levels[b]))
+        # 232-255: grayscale ramp
+        for i in range(24):
+            v = 8 + i * 10
+            pal.append((v, v, v))
+        return pal
+
+    # Default foreground/background as RGB
+    _DEFAULT_FG = COLORS_16[7]     # light gray
+    _DEFAULT_BG = COLORS_16[0]     # black
+
     def __init__(self, cols: int = TERM_COLS, rows: int = TERM_ROWS):
         self.cols = cols
         self.rows = rows
         self.cx = 0        # cursor column
         self.cy = 0        # cursor row
-        self.fg = 7        # foreground color index
-        self.bg = 0        # background color index
+        # Colors stored as RGB tuples
+        self.fg: tuple[int, int, int] = self._DEFAULT_FG
+        self.bg: tuple[int, int, int] = self._DEFAULT_BG
+        # SGR attributes
         self.bold = False
+        self.dim = False
+        self.italic = False
+        self.underline = False
+        self.blink = False
+        self.reverse = False
+        self.hidden = False
+        self.strikethrough = False
         self.cursor_visible = True
 
-        # Character grid: list of rows, each row = list of (char, fg, bg)
-        self.grid: list[list[tuple[str, int, int]]] = []
+        # Character grid: list of rows, each row = list of (char, fg_rgb, bg_rgb, attrs)
+        # attrs is a bitmask: 1=bold 2=dim 4=italic 8=underline 16=blink
+        #                      32=reverse 64=hidden 128=strikethrough
+        self.grid: list[list[tuple[str, tuple, tuple, int]]] = []
         self._clear_grid()
 
         # Scrollback buffer (lines that scrolled off the top)
-        self.scrollback: deque[list[tuple[str, int, int]]] = deque(maxlen=1000)
+        self.scrollback: deque = deque(maxlen=1000)
 
         # ESC sequence parser state
         self._esc_state = 0   # 0=normal, 1=got ESC, 2=got CSI
@@ -158,9 +196,21 @@ class VirtualTerminal:
         self._lock = threading.Lock()
         self._dirty = True
 
+    def _attrs_mask(self) -> int:
+        """Pack current SGR attributes into a bitmask."""
+        return ((1 if self.bold else 0) |
+                (2 if self.dim else 0) |
+                (4 if self.italic else 0) |
+                (8 if self.underline else 0) |
+                (16 if self.blink else 0) |
+                (32 if self.reverse else 0) |
+                (64 if self.hidden else 0) |
+                (128 if self.strikethrough else 0))
+
     def _clear_grid(self):
+        blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
         self.grid = [
-            [(' ', self.fg, self.bg) for _ in range(self.cols)]
+            [blank for _ in range(self.cols)]
             for _ in range(self.rows)
         ]
 
@@ -245,7 +295,7 @@ class VirtualTerminal:
         if b == 0x08 or b == 0x7F:  # BS or DEL
             if self.cx > 0:
                 self.cx -= 1
-                self.grid[self.cy][self.cx] = (' ', self.fg, self.bg)
+                self.grid[self.cy][self.cx] = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
             return
         if b == 0x07:   # BEL — ignore
             return
@@ -257,8 +307,7 @@ class VirtualTerminal:
 
     def _place_char(self, ch: str):
         """Place a decoded character (ASCII or Unicode) into the grid."""
-        fg = min(self.fg + (8 if self.bold and self.fg < 8 else 0), 15)
-        self.grid[self.cy][self.cx] = (ch, fg, self.bg)
+        self.grid[self.cy][self.cx] = (ch, self.fg, self.bg, self._attrs_mask())
         self.cx += 1
         if self.cx >= self.cols:
             self.cx = 0
@@ -275,9 +324,8 @@ class VirtualTerminal:
         old_top = self.grid[0]
         self.scrollback.append(old_top)
         del self.grid[0]
-        self.grid.append(
-            [(' ', self.fg, self.bg) for _ in range(self.cols)]
-        )
+        blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
+        self.grid.append([blank for _ in range(self.cols)])
 
     def _handle_csi(self, params: str, cmd: str):
         """Handle CSI (ESC [) sequences."""
@@ -303,55 +351,149 @@ class VirtualTerminal:
             self.cx = max(0, self.cx - num())
         elif cmd == 'J':
             n = num(0, 0)
+            blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
             if n == 2:
                 self._clear_grid()
                 self.cx = self.cy = 0
             elif n == 0:
                 # Erase from cursor to end
                 for x in range(self.cx, self.cols):
-                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+                    self.grid[self.cy][x] = blank
                 for y in range(self.cy + 1, self.rows):
                     for x in range(self.cols):
-                        self.grid[y][x] = (' ', self.fg, self.bg)
+                        self.grid[y][x] = blank
         elif cmd == 'K':
             n = num(0, 0)
+            blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
             if n == 0:
                 for x in range(self.cx, self.cols):
-                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+                    self.grid[self.cy][x] = blank
             elif n == 1:
                 for x in range(0, self.cx + 1):
-                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+                    self.grid[self.cy][x] = blank
             elif n == 2:
                 for x in range(self.cols):
-                    self.grid[self.cy][x] = (' ', self.fg, self.bg)
+                    self.grid[self.cy][x] = blank
         elif cmd == 'm':
-            # SGR — set graphic rendition
-            codes = [num(i, 0) for i in range(len(parts))]
-            for code in codes:
-                if code == 0:
-                    self.fg, self.bg, self.bold = 7, 0, False
-                elif code == 1:
-                    self.bold = True
-                elif code == 22:
-                    self.bold = False
-                elif 30 <= code <= 37:
-                    self.fg = code - 30
-                elif 40 <= code <= 47:
-                    self.bg = code - 40
-                elif 90 <= code <= 97:
-                    self.fg = code - 90 + 8
-                elif 100 <= code <= 107:
-                    self.bg = code - 100 + 8
-                elif code == 39:
-                    self.fg = 7
-                elif code == 49:
-                    self.bg = 0
+            self._handle_sgr(parts)
         elif cmd == 'h':
             if params == '?25':
                 self.cursor_visible = True
         elif cmd == 'l':
             if params == '?25':
                 self.cursor_visible = False
+
+    def _handle_sgr(self, parts: list[str]):
+        """Handle SGR (Select Graphic Rendition) with 256-color support."""
+        pal = self.COLORS
+        i = 0
+        while i < len(parts):
+            try:
+                code = int(parts[i]) if parts[i] else 0
+            except ValueError:
+                i += 1
+                continue
+
+            if code == 0:
+                # Reset all
+                self.fg = self._DEFAULT_FG
+                self.bg = self._DEFAULT_BG
+                self.bold = self.dim = self.italic = False
+                self.underline = self.blink = self.reverse = False
+                self.hidden = self.strikethrough = False
+            elif code == 1:
+                self.bold = True
+            elif code == 2:
+                self.dim = True
+            elif code == 3:
+                self.italic = True
+            elif code == 4:
+                self.underline = True
+            elif code == 5:
+                self.blink = True
+            elif code == 7:
+                self.reverse = True
+            elif code == 8:
+                self.hidden = True
+            elif code == 9:
+                self.strikethrough = True
+            elif code == 22:
+                self.bold = self.dim = False
+            elif code == 23:
+                self.italic = False
+            elif code == 24:
+                self.underline = False
+            elif code == 25:
+                self.blink = False
+            elif code == 27:
+                self.reverse = False
+            elif code == 28:
+                self.hidden = False
+            elif code == 29:
+                self.strikethrough = False
+            elif 30 <= code <= 37:
+                self.fg = pal[code - 30]
+            elif 40 <= code <= 47:
+                self.bg = pal[code - 40]
+            elif 90 <= code <= 97:
+                self.fg = pal[code - 90 + 8]
+            elif 100 <= code <= 107:
+                self.bg = pal[code - 100 + 8]
+            elif code == 39:
+                self.fg = self._DEFAULT_FG
+            elif code == 49:
+                self.bg = self._DEFAULT_BG
+            elif code == 38:
+                # Extended foreground: 38;5;n (256-color) or 38;2;r;g;b (truecolor)
+                if i + 1 < len(parts):
+                    try:
+                        mode = int(parts[i + 1])
+                    except (ValueError, IndexError):
+                        mode = 0
+                    if mode == 5 and i + 2 < len(parts):
+                        # 256-color palette
+                        try:
+                            n = int(parts[i + 2])
+                            if 0 <= n <= 255:
+                                self.fg = pal[n]
+                        except (ValueError, IndexError):
+                            pass
+                        i += 2  # skip '5' and 'n'
+                    elif mode == 2 and i + 4 < len(parts):
+                        # Truecolor: 38;2;r;g;b
+                        try:
+                            r = max(0, min(255, int(parts[i + 2])))
+                            g = max(0, min(255, int(parts[i + 3])))
+                            b = max(0, min(255, int(parts[i + 4])))
+                            self.fg = (r, g, b)
+                        except (ValueError, IndexError):
+                            pass
+                        i += 4  # skip '2', 'r', 'g', 'b'
+            elif code == 48:
+                # Extended background: 48;5;n (256-color) or 48;2;r;g;b (truecolor)
+                if i + 1 < len(parts):
+                    try:
+                        mode = int(parts[i + 1])
+                    except (ValueError, IndexError):
+                        mode = 0
+                    if mode == 5 and i + 2 < len(parts):
+                        try:
+                            n = int(parts[i + 2])
+                            if 0 <= n <= 255:
+                                self.bg = pal[n]
+                        except (ValueError, IndexError):
+                            pass
+                        i += 2
+                    elif mode == 2 and i + 4 < len(parts):
+                        try:
+                            r = max(0, min(255, int(parts[i + 2])))
+                            g = max(0, min(255, int(parts[i + 3])))
+                            b = max(0, min(255, int(parts[i + 4])))
+                            self.bg = (r, g, b)
+                        except (ValueError, IndexError):
+                            pass
+                        i += 4
+            i += 1
 
     def render(self, pygame_module, font, cell_w: int, cell_h: int,
                show_cursor: bool = True,
@@ -361,38 +503,80 @@ class VirtualTerminal:
             surf_w = self.cols * cell_w
             surf_h = self.rows * cell_h
             surface = pygame_module.Surface((surf_w, surf_h))
-            surface.fill(self.COLORS[0])
+            surface.fill(self._DEFAULT_BG)
 
             cache = _cache if _cache is not None else {}
 
             for y in range(self.rows):
                 for x in range(self.cols):
-                    ch, fg, bg = self.grid[y][x]
+                    cell = self.grid[y][x]
+                    ch = cell[0]
+                    fg_rgb = cell[1]
+                    bg_rgb = cell[2]
+                    attrs = cell[3] if len(cell) > 3 else 0
+
                     px = x * cell_w
                     py = y * cell_h
-                    if bg != 0:
+
+                    # Apply reverse video (swap fg/bg)
+                    if attrs & 32:
+                        fg_rgb, bg_rgb = bg_rgb, fg_rgb
+
+                    # Apply bold — brighten foreground by ~40%
+                    if attrs & 1:
+                        fg_rgb = (min(255, int(fg_rgb[0] * 1.4)),
+                                  min(255, int(fg_rgb[1] * 1.4)),
+                                  min(255, int(fg_rgb[2] * 1.4)))
+
+                    # Apply dim — darken foreground by ~50%
+                    if attrs & 2:
+                        fg_rgb = (fg_rgb[0] // 2,
+                                  fg_rgb[1] // 2,
+                                  fg_rgb[2] // 2)
+
+                    # Draw background
+                    if bg_rgb != self._DEFAULT_BG:
                         pygame_module.draw.rect(
-                            surface, self.COLORS[bg],
+                            surface, bg_rgb,
                             (px, py, cell_w, cell_h))
-                    if ch and ch != ' ':
-                        key = (ch, fg)
+
+                    # Draw character (skip if hidden, space, or empty)
+                    if ch and ch != ' ' and not (attrs & 64):
+                        key = (ch, fg_rgb)
                         glyph = cache.get(key)
                         if glyph is None:
-                            glyph = font.render(
-                                ch, False, self.COLORS[fg])
+                            glyph = font.render(ch, False, fg_rgb)
                             cache[key] = glyph
                         surface.blit(glyph, (px, py))
+
+                    # Draw underline
+                    if attrs & 8:
+                        pygame_module.draw.line(
+                            surface, fg_rgb,
+                            (px, py + cell_h - 1),
+                            (px + cell_w - 1, py + cell_h - 1))
+
+                    # Draw strikethrough
+                    if attrs & 128:
+                        mid_y = py + cell_h // 2
+                        pygame_module.draw.line(
+                            surface, fg_rgb,
+                            (px, mid_y), (px + cell_w - 1, mid_y))
 
             # Draw cursor
             if show_cursor and self.cursor_visible:
                 cx_px = self.cx * cell_w
                 cy_px = self.cy * cell_h
                 pygame_module.draw.rect(
-                    surface, self.COLORS[7],
+                    surface, (255, 255, 255),
                     (cx_px, cy_px + cell_h - 2, cell_w, 2))
 
             self._dirty = False
         return surface
+
+
+# Build the 256-color palette once at import time
+VirtualTerminal.COLORS = VirtualTerminal._build_256_palette()
 
 
 # ── Menu System ───────────────────────────────────────────────────────
