@@ -25,6 +25,7 @@ import os
 import sys
 import readline
 import shlex
+import threading
 import traceback
 from typing import Optional
 
@@ -1165,17 +1166,60 @@ def run_console(sys_emu: MegapadSystem) -> bool:
 
 
 def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
-    """Console loop with raw terminal input (interactive TTY)."""
-    import termios, tty, select
+    """Console loop with raw terminal input (interactive TTY).
+
+    A dedicated stdin-reader thread injects keystrokes into the UART RX
+    buffer asynchronously, so non-blocking Forth polling loops (KEY?)
+    see input arrive mid-batch — matching real hardware behaviour where
+    the UART STATUS register updates the instant a byte arrives.
+    """
+    import termios, tty, select, queue, time
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+
+    # Queue for control characters that must be handled by the main loop
+    ctrl_q: queue.Queue[bytes] = queue.Queue()
+    stop_reader = threading.Event()
+
+    def _stdin_reader():
+        """Background thread: read raw stdin → UART RX buffer."""
+        while not stop_reader.is_set():
+            try:
+                if select.select([fd], [], [], 0.01)[0]:
+                    ch = os.read(fd, 1)
+                    if not ch:                     # EOF
+                        ctrl_q.put(b'')
+                        break
+                    if ch == b'\x1d':              # Ctrl+]
+                        ctrl_q.put(ch)
+                        break
+                    if ch == b'\x03':              # Ctrl+C
+                        ctrl_q.put(ch)
+                        break
+                    sys_emu.uart.inject_input(ch)
+            except OSError:
+                break
 
     try:
         batch = (_BATCH_DISPLAY
                  if sys_emu.uart._tx_listeners else _BATCH_DEFAULT)
         tty.setraw(fd)
+
+        reader = threading.Thread(target=_stdin_reader, daemon=True,
+                                  name="stdin-reader")
+        reader.start()
+
         while True:
+            # --- Check for control chars from stdin reader ----------
+            try:
+                ctrl = ctrl_q.get_nowait()
+                if ctrl == b'\x1d':        # Ctrl+]
+                    return True
+                return False               # Ctrl+C / EOF
+            except queue.Empty:
+                pass
+
             # --- Run CPU in a batch until idle / halt ---------------
             if not sys_emu.cpu.halted and not (
                     sys_emu.cpu.idle and not sys_emu.uart.has_rx_data
@@ -1188,27 +1232,17 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
             if sys_emu.cpu.halted:
                 return False
 
-            # --- Poll stdin (non-blocking) -------------------------
-            # Use minimal sleep when NIC has pending frames (network
-            # polling loops should not stall 20ms per IDL cycle).
-            if not sys_emu.cpu.idle:
-                timeout = 0.0
-            elif sys_emu._any_nic_rx():
-                timeout = 0.001          # 1ms — fast network turnaround
-            else:
-                timeout = 0.02           # 20ms — normal keyboard wait
-            if select.select([sys.stdin], [], [], timeout)[0]:
-                ch = os.read(fd, 1)
-                if ch == b'\x1d':          # Ctrl+]
-                    return True
-                if ch == b'\x03':          # Ctrl+C
-                    return False
-                if ch:
-                    sys_emu.uart.inject_input(ch)
-            elif sys_emu.cpu.idle:
-                # Wake CPU so Forth polling loops (DHCP, ARP, PING)
-                # can advance their timeout counters.
-                # Tick bus so timer/RTC advance through idle gaps.
+            # --- Handle idle ----------------------------------------
+            # stdin is read asynchronously by the reader thread, so
+            # we only need to sleep here to avoid busy-waiting and to
+            # advance the bus timer through idle gaps.
+            if sys_emu.cpu.idle:
+                if sys_emu._any_nic_rx():
+                    timeout = 0.001      # 1ms — fast network turnaround
+                else:
+                    timeout = 0.02       # 20ms — normal idle wait
+                time.sleep(timeout)
+                # Tick bus so timer/RTC advance through idle gaps
                 cycles_slept = int(timeout * 100_000_000)  # 100 MHz nominal
                 if cycles_slept > 0:
                     sys_emu.bus.tick(cycles_slept)
@@ -1216,6 +1250,8 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
     except KeyboardInterrupt:
         return False
     finally:
+        stop_reader.set()
+        reader.join(timeout=0.15)
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         except Exception:
