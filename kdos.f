@@ -12230,10 +12230,10 @@ VARIABLE _HTE-HT
 \  file's own PROVIDED line (not the caller's REQUIRE path), different
 \  paths to the same file share the same key.
 \
-\  Uses a hash table (§19) for O(1) lookup.  16-byte key = module
+\  Uses a hash table (§19) for O(1) lookup.  24-byte key = module
 \  name (zero-padded, matching NAMEBUF layout), 1-byte value.
 
-16 1 32 HASHTABLE _MOD-HT
+24 1 32 HASHTABLE _MOD-HT
 
 \ Scratch for the 1-byte "loaded" marker value.
 CREATE _MOD-VAL  1 ALLOT
