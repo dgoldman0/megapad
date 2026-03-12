@@ -7974,6 +7974,100 @@ class TestBIOSHardening(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    # -- FSLOAD + [IF]/[ELSE]/[THEN] across line boundaries --
+
+    def test_fsload_cond_if_false_multiline(self):
+        """FSLOAD handles [IF] false-skip spanning multiple lines."""
+        fs = build_image()
+        src = (
+            b"VARIABLE R  0 R !\n"
+            b"0 [IF]\n"
+            b"  99 R !\n"
+            b"[THEN]\n"
+            b"R @ .\n"
+        )
+        fs.inject_file("cond.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD cond.f"])
+            # R should stay 0 — the 99 R ! was skipped
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_cond_if_else_multiline(self):
+        """FSLOAD handles [IF]/[ELSE]/[THEN] across lines."""
+        fs = build_image()
+        src = (
+            b"VARIABLE R  0 R !\n"
+            b"0 [IF]\n"
+            b"  10 R !\n"
+            b"[ELSE]\n"
+            b"  20 R !\n"
+            b"[THEN]\n"
+            b"R @ .\n"
+        )
+        fs.inject_file("cond2.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD cond2.f"])
+            # False → ELSE branch → R = 20
+            self.assertIn("20 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_cond_if_true_else_multiline(self):
+        """FSLOAD with [IF] true takes IF branch, [ELSE] skips across lines."""
+        fs = build_image()
+        src = (
+            b"VARIABLE R  0 R !\n"
+            b"1 [IF]\n"
+            b"  10 R !\n"
+            b"[ELSE]\n"
+            b"  20 R !\n"
+            b"[THEN]\n"
+            b"R @ .\n"
+        )
+        fs.inject_file("cond3.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD cond3.f"])
+            # True → IF branch → R = 10
+            self.assertIn("10 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_cond_defined_guard(self):
+        """FSLOAD [DEFINED] guard block spanning lines works."""
+        fs = build_image()
+        src = (
+            b"VARIABLE R  0 R !\n"
+            b"[DEFINED] NOTAWORD [IF]\n"
+            b"  99 R !\n"
+            b"[THEN]\n"
+            b"R @ .\n"
+        )
+        fs.inject_file("guard.f", src, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD guard.f"])
+            # NOTAWORD not defined → skipped → R stays 0
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
     # -- Stack underflow detection --
 
     def test_stack_underflow_detected(self):

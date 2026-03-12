@@ -7599,6 +7599,14 @@ w_eval_copy_done:
     str r11, r1
     ; Run the interpreter loop
 w_eval_loop:
+    ; --- [IF]/[ELSE] skip-mode resume across EVALUATE boundaries ---
+    ; If a previous EVALUATE hit EOL while skipping, var_cond_skip_type
+    ; is still > 0.  Continue the skip scan on this new line.
+    ldi64 r11, var_cond_skip_type
+    ldn r1, r11
+    cmpi r1, 0
+    lbrne w_eval_cond_resume
+w_eval_loop_normal:
     ldi64 r11, parse_word
     call.l r11
     cmpi r12, 0
@@ -7688,6 +7696,78 @@ w_eval_undef_no_ctx:
     ldi64 r10, str_undefined
     ldi64 r11, print_str
     call.l r11
+    lbr w_eval_done
+
+; --- [IF]/[ELSE] skip-mode resume across EVALUATE boundaries -----------
+; Called when var_cond_skip_type > 0 at the start of w_eval_loop.
+; Scans tokens for [IF]/[ELSE]/[THEN] keywords, adjusting var_cond_depth.
+; On EOL, falls through to w_eval_done to return to the FSLOAD driver
+; which feeds the next line via EVALUATE.
+w_eval_cond_resume:
+    ldi64 r11, parse_word
+    call.l r11
+    ; R9=word addr, R12=length  (0 = end of line)
+    cmpi r12, 0
+    lbreq w_eval_done          ; EOL → return for next EVALUATE call
+    ; Check for [IF] (4 chars) — increment depth
+    cmpi r12, 4
+    brne w_eval_cr_not_if
+    ldi64 r11, str_cond_if
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    brne w_eval_cr_not_if
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    addi r1, 1
+    str r11, r1
+    lbr w_eval_cond_resume
+w_eval_cr_not_if:
+    ; Check for [ELSE] (6 chars) — stops only during IF-skip at depth 1
+    cmpi r12, 6
+    brne w_eval_cr_not_else
+    ldi64 r11, str_cond_else
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    brne w_eval_cr_not_else
+    ; Only IF-skip (type 1) stops at [ELSE]; ELSE-skip ignores it
+    ldi64 r11, var_cond_skip_type
+    ldn r1, r11
+    cmpi r1, 1
+    brne w_eval_cond_resume    ; ELSE-skip → ignore [ELSE]
+    ; IF-skip: check depth
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    cmpi r1, 1
+    lbrne w_eval_cond_resume   ; nested → keep skipping
+    ; depth==1, [ELSE] → stop skipping, execute ELSE branch
+    ldi r1, 0
+    str r11, r1               ; var_cond_depth = 0
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; var_cond_skip_type = 0
+    lbr w_eval_loop_normal     ; resume normal interpretation
+w_eval_cr_not_else:
+    ; Check for [THEN] (6 chars)
+    cmpi r12, 6
+    lbrne w_eval_cond_resume   ; not [THEN], keep skipping
+    ldi64 r11, str_cond_then
+    ldi64 r13, cond_str_cmp
+    call.l r13
+    cmpi r0, 1
+    lbrne w_eval_cond_resume
+    ; [THEN] — decrement depth
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    subi r1, 1
+    str r11, r1
+    cmpi r1, 0
+    lbrne w_eval_cond_resume   ; still nested
+    ; depth==0, done skipping
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; var_cond_skip_type = 0 (r1 is 0)
+    lbr w_eval_loop_normal     ; resume normal interpretation
+
 w_eval_done:
     ; Restore input state from return stack
     ldn r1, r15
@@ -8271,6 +8351,8 @@ w_cond_if:
     ldi64 r11, var_cond_depth
     ldi r1, 1
     str r11, r1               ; depth = 1
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; skip_type = 1 (IF-skip)
 w_cond_skip_loop:
     ldi64 r11, parse_word
     call.l r11
@@ -8305,7 +8387,11 @@ w_cond_skip_not_if:
     ldn r1, r11
     cmpi r1, 1
     lbrne w_cond_skip_loop     ; deeper nesting, keep skipping
-    ; Matched — done skipping
+    ; Matched — done skipping.  Zero both skip vars.
+    ldi r1, 0
+    str r11, r1               ; var_cond_depth = 0
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; var_cond_skip_type = 0
     ret.l
 w_cond_skip_not_else:
     ; Check for [THEN] (6 chars)
@@ -8323,16 +8409,29 @@ w_cond_skip_not_else:
     str r11, r1
     cmpi r1, 0
     lbrne w_cond_skip_loop     ; still nested
-    ; depth==0 — done skipping
+    ; depth==0 — done skipping.  Zero skip_type.
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; var_cond_skip_type = 0 (r1 is 0)
     ret.l
 w_cond_skip_eol:
-    ; End of line while skipping — read another line and continue
+    ; End of line while skipping.
+    ; If inside EVALUATE (e.g. FSLOAD), return instead of reading UART.
+    ; var_cond_depth and var_cond_skip_type remain set so EVALUATE can
+    ; resume the skip on the next line.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_cond_skip_eol_eval
+    ; Interactive / top-level — read next line from UART as before
     ldi64 r11, read_line
     call.l r11
     ldi r1, 0
     ldi64 r11, var_to_in
     str r11, r1               ; >IN = 0
     lbr w_cond_skip_loop
+w_cond_skip_eol_eval:
+    ; Inside EVALUATE — return to let caller feed next line
+    ret.l
 w_cond_if_true:
     ; Flag is true — just continue (tokens execute normally)
     ret.l
@@ -8344,6 +8443,9 @@ w_cond_else:
     ldi64 r11, var_cond_depth
     ldi r1, 1
     str r11, r1               ; depth = 1
+    ldi r1, 2
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; skip_type = 2 (ELSE-skip)
 w_cond_else_skip:
     ldi64 r11, parse_word
     call.l r11
@@ -8377,14 +8479,26 @@ w_cond_else_not_if:
     str r11, r1
     cmpi r1, 0
     lbrne w_cond_else_skip
+    ; depth==0 — done.  Zero skip_type.
+    ldi64 r11, var_cond_skip_type
+    str r11, r1               ; var_cond_skip_type = 0 (r1 is 0)
     ret.l
 w_cond_else_eol:
+    ; If inside EVALUATE, return instead of reading UART.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_cond_else_eol_eval
+    ; Interactive — read from UART
     ldi64 r11, read_line
     call.l r11
     ldi r1, 0
     ldi64 r11, var_to_in
     str r11, r1
     lbr w_cond_else_skip
+w_cond_else_eol_eval:
+    ; Inside EVALUATE — return to let caller feed next line
+    ret.l
 
 ; [THEN] ( -- )  IMMEDIATE
 ;   No-op — just a marker.  The skipping logic in [IF]/[ELSE] handles it.
@@ -15542,6 +15656,12 @@ var_interp_if_start:
 
 ; [IF]/[ELSE] skip-mode nesting depth (avoids R10 clobber by print_str)
 var_cond_depth:
+    .dq 0
+
+; [IF]/[ELSE] skip-mode type for cross-EVALUATE resumption
+;   0 = not skipping, 1 = [IF]-skip (stops at [ELSE] or [THEN]),
+;   2 = [ELSE]-skip (stops only at [THEN])
+var_cond_skip_type:
     .dq 0
 
 ; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
