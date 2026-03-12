@@ -16130,7 +16130,7 @@ class TestKDOSX509(_KDOSTestBase):
         ])
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         # SAN should be non-empty
-        san_len = int(text.split("SANLEN=")[1].split()[0])
+        san_len = int(text.split("SANLEN=")[-1].split()[0])
         self.assertGreater(san_len, 0)
 
 
@@ -16189,7 +16189,7 @@ class TestKDOSECDSA(_KDOSTestBase):
             '." RZ0=" _EC-RZ C@ .',               # Z should be non-zero
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        rz0 = int(text.split("RZ0=")[1].split()[0])
+        rz0 = int(text.split("RZ0=")[-1].split()[0])
         self.assertNotEqual(rz0, 0, "Z coordinate should be non-zero after doubling G")
 
     def test_ec_add_inf_plus_p(self):
@@ -16209,8 +16209,8 @@ class TestKDOSECDSA(_KDOSTestBase):
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         # FCEQ stores nonzero if equal
-        xeq = int(text.split("XEQGX=")[1].split()[0])
-        yeq = int(text.split("YEQGY=")[1].split()[0])
+        xeq = int(text.split("XEQGX=")[-1].split()[0])
+        yeq = int(text.split("YEQGY=")[-1].split()[0])
         self.assertNotEqual(xeq, 0, "X should equal Gx")
         self.assertNotEqual(yeq, 0, "Y should equal Gy")
 

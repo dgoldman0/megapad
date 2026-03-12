@@ -9856,8 +9856,8 @@ VARIABLE _XSPKI-ALG-OLEN
     DROP                                  \ alg-val (first OID inside)
     DUP DER-NEXT DROP                     \ oid-val oid-len
     2DUP OID-EC-PUBKEY /OID-EC-PUBKEY X509-OID-MATCH IF
-        2DROP
-        \ EC key — need to check curve OID (second element in alg seq)
+        2DROP DROP
+        \ EC key — skip entire algorithm SEQUENCE at SPKI level
         DER-SKIP                          \ skip algorithm SEQUENCE
         \ Now at subjectPublicKey BIT STRING
         DUP C@ 3 = IF                    \ tag=03 (BIT STRING)
@@ -9872,8 +9872,8 @@ VARIABLE _XSPKI-ALG-OLEN
         DROP 0 EXIT                       \ malformed
     THEN
     2DUP OID-ED25519 /OID-ED25519 X509-OID-MATCH IF
-        2DROP
-        DER-SKIP                          \ skip algorithm
+        2DROP DROP
+        DER-SKIP                          \ skip algorithm SEQUENCE
         DUP C@ 3 = IF                    \ BIT STRING
             DER-NEXT DROP
             1- SWAP 1+ SWAP              \ skip unused-bits
@@ -9883,7 +9883,7 @@ VARIABLE _XSPKI-ALG-OLEN
         THEN
         DROP 0 EXIT
     THEN
-    2DROP DROP 0                           \ unknown algorithm
+    2DROP 2DROP 0                          \ unknown algorithm
 ;
 
 \ X509-PARSE-EXTENSIONS ( ext-seq-val ext-seq-len -- )
@@ -9930,11 +9930,11 @@ VARIABLE _XP-TBSLEN
     \ Outermost SEQUENCE
     _XP-CERT @ C@ 48 <> IF -1 EXIT THEN     \ must be SEQUENCE (0x30)
     \ First child of outer SEQUENCE = tbsCertificate SEQUENCE tag
-    _XP-CERT @ DER-NEXT DROP                 \ ( val-addr val-len next-addr )
-    DROP DROP                                \ val-addr = tbs tag start
-    DUP _X509-TBS-PTR !
+    _XP-CERT @ DER-NEXT DROP                 \ ( val-addr val-len )
+    DROP                                     \ ( val-addr ) = tbs tag start
+    _X509-TBS-PTR !                          \ store; stack clean
     \ Get TBS total raw size (tag + length + content)
-    DUP DER-NEXT                             \ tbs-val tbs-len after-tbs
+    _X509-TBS-PTR @ DER-NEXT                 \ tbs-val tbs-len after-tbs
     NIP                                      \ tbs-val after-tbs
     _X509-TBS-PTR @ - _X509-TBS-LEN !       \ TBS raw len = after - start
     DROP                                     \ clean stack (tbs-val not needed here)
@@ -10366,28 +10366,26 @@ CREATE _ECDSA-S   32 ALLOT    \ decoded s (32 bytes, zero-padded)
     DER-ENTER DROP                        \ inside SEQUENCE
     \ First INTEGER → r
     DUP C@ 2 <> IF DROP -1 EXIT THEN     \ must be INTEGER
-    DER-NEXT DROP                         \ r-val r-len next
+    DER-NEXT                              \ r-val r-len next
     >R                                    \ R: next
     _ECDSA-R 32 0 FILL                   \ zero-pad
     DUP 32 > IF                           \ >32 bytes: skip leading zeros
-        32 - SWAP OVER + SWAP             \ advance past excess bytes
-        32
+        DUP 32 - ROT + NIP 32            \ trim to last 32 bytes
     THEN
-    \ Copy r-len bytes right-aligned into _ECDSA-R
-    32 OVER - >R                          \ R: pad-offset
-    SWAP _ECDSA-R R> + SWAP CMOVE        \ copy r into _ECDSA-R[offset..]
+    \ Copy len bytes right-aligned into _ECDSA-R
+    32 OVER - _ECDSA-R +                  \ ( src len dest )
+    SWAP CMOVE                            \ copy r into _ECDSA-R
     R>                                    \ restore next
     \ Second INTEGER → s
     DUP C@ 2 <> IF DROP -1 EXIT THEN
-    DER-NEXT DROP                         \ s-val s-len next
+    DER-NEXT                              \ s-val s-len next
     DROP                                  \ don't need next
     _ECDSA-S 32 0 FILL
     DUP 32 > IF
-        32 - SWAP OVER + SWAP
-        32
+        DUP 32 - ROT + NIP 32
     THEN
-    32 OVER - >R
-    SWAP _ECDSA-S R> + SWAP CMOVE
+    32 OVER - _ECDSA-S +
+    SWAP CMOVE
     0                                     \ success
 ;
 
