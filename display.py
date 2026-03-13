@@ -1626,6 +1626,10 @@ class FramebufferDisplay:
         """Start the display thread.  Returns once the window is open."""
         self.sys.uart._tx_listeners.append(self.term.write)
 
+        # Set UART geometry to display terminal dimensions
+        if hasattr(self.sys, 'uart_geom'):
+            self.sys.uart_geom.host_set_size(self.term.cols, self.term.rows)
+
         self._stop_event.clear()
         self._started.clear()
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -1916,6 +1920,16 @@ class FramebufferDisplay:
                         screen = pygame.display.set_mode((win_w, win_h),
                                                           pygame.RESIZABLE)
                         menubar.layout(pygame, ui_font, win_w)
+                        # Recompute terminal grid dimensions from new window size
+                        avail_w = win_w - (self.debug.width if self.debug.visible else 0)
+                        avail_h = win_h - chrome_h
+                        new_cols = max(20, avail_w // cell_w)
+                        new_rows = max(5, avail_h // cell_h)
+                        if new_cols != self.term.cols or new_rows != self.term.rows:
+                            self.term.cols = new_cols
+                            self.term.rows = new_rows
+                            if hasattr(self.sys, 'uart_geom'):
+                                self.sys.uart_geom.host_set_size(new_cols, new_rows)
                     elif event.type == pygame.KEYDOWN:
                         mods = pygame.key.get_mods()
                         ctrl = mods & pygame.KMOD_CTRL
@@ -1999,6 +2013,33 @@ class FramebufferDisplay:
                                 self.active_tab = self.TAB_TERMINAL
                             elif mx < tab_w * 2:
                                 self.active_tab = self.TAB_GRAPHICS
+
+                # ── Handle firmware resize requests ───────────
+                if hasattr(self.sys, 'uart_geom') and self.sys.uart_geom.has_resize_request():
+                    rc = self.sys.uart_geom.req_cols
+                    rr = self.sys.uart_geom.req_rows
+                    # Clamp to reasonable bounds
+                    if 20 <= rc <= 400 and 5 <= rr <= 200:
+                        # Accept: resize terminal grid + window
+                        self.term.cols = rc
+                        self.term.rows = rr
+                        self.sys.uart_geom.host_accept_resize(rc, rr)
+                        # Resize the window to match
+                        new_term_w = rc * cell_w
+                        new_term_h = rr * cell_h
+                        debug_w = self.debug.width if self.debug.visible else 0
+                        win_w = new_term_w + debug_w
+                        win_h = new_term_h + chrome_h
+                        content_w = new_term_w
+                        screen = pygame.display.set_mode(
+                            (win_w, win_h), pygame.RESIZABLE)
+                        menubar.layout(pygame, ui_font, win_w)
+                        self.status.set_message(
+                            f"Resize accepted: {rc}x{rr}")
+                    else:
+                        self.sys.uart_geom.host_deny_resize()
+                        self.status.set_message(
+                            f"Resize denied: {rc}x{rr} out of range")
 
                 # ── Update status metrics ─────────────────────
                 now = time.time()

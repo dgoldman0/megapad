@@ -22,6 +22,7 @@
 #include "mp64_fb.h"
 #include "mp64_nic.h"
 #include "mp64_timer.h"
+#include "mp64_uart_geom.h"
 
 namespace py = pybind11;
 
@@ -217,6 +218,9 @@ struct CPUState {
 
     // C++ native timer device (bypass Python MMIO for timer polling)
     TimerDevice timer;
+
+    // C++ native UART geometry device (terminal dimensions)
+    UartGeomDevice uart_geom;
 
     // Accelerator hooks — intercept CALL.L to known BIOS word addresses
     static constexpr int MAX_ACCEL_HOOKS = 8;
@@ -1676,6 +1680,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.fb.read8(mmio_off);
         if (s.timer.handles(mmio_off))
             return s.timer.read8(mmio_off);
+        if (s.uart_geom.handles(mmio_off))
+            return s.uart_geom.read8(mmio_off);
         return cb.mmio_read8(addr);  // fallback to Python for other devices
     }
     if (s.priv_level) {
@@ -1719,6 +1725,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         }
         if (s.timer.handles(mmio_off)) {
             s.timer.write8(mmio_off, val);
+            return;
+        }
+        if (s.uart_geom.handles(mmio_off)) {
+            s.uart_geom.write8(mmio_off, val);
             return;
         }
         cb.mmio_write8(addr, val);  // fallback to Python for other devices
@@ -4193,6 +4203,52 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("timer_status",
             [](const CPUState& s) -> uint8_t { return s.timer.status; },
             [](CPUState& s, uint8_t v) { s.timer.status = v; })
+        // ── UART Geometry device ──────────────────────────────
+        .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {
+            s.uart_geom.init(cols, rows);
+        }, py::arg("cols") = 80, py::arg("rows") = 30)
+        .def("uart_geom_enabled", [](const CPUState& s) -> bool {
+            return s.uart_geom.enabled;
+        })
+        .def("uart_geom_disable", [](CPUState& s) {
+            s.uart_geom.enabled = false;
+        })
+        .def("uart_geom_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.uart_geom.read8(mmio_off);
+        })
+        .def("uart_geom_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.uart_geom.write8(mmio_off, val);
+        })
+        .def_property("uart_geom_cols",
+            [](const CPUState& s) -> uint16_t { return s.uart_geom.cols; },
+            [](CPUState& s, uint16_t v) { s.uart_geom.cols = v; })
+        .def_property("uart_geom_rows",
+            [](const CPUState& s) -> uint16_t { return s.uart_geom.rows; },
+            [](CPUState& s, uint16_t v) { s.uart_geom.rows = v; })
+        .def_property("uart_geom_status",
+            [](const CPUState& s) -> uint8_t { return s.uart_geom.status; },
+            [](CPUState& s, uint8_t v) { s.uart_geom.status = v; })
+        .def_property("uart_geom_ctrl",
+            [](const CPUState& s) -> uint8_t { return s.uart_geom.ctrl; },
+            [](CPUState& s, uint8_t v) { s.uart_geom.ctrl = v; })
+        .def_property("uart_geom_req_cols",
+            [](const CPUState& s) -> uint16_t { return s.uart_geom.req_cols; },
+            [](CPUState& s, uint16_t v) { s.uart_geom.req_cols = v; })
+        .def_property("uart_geom_req_rows",
+            [](const CPUState& s) -> uint16_t { return s.uart_geom.req_rows; },
+            [](CPUState& s, uint16_t v) { s.uart_geom.req_rows = v; })
+        .def("uart_geom_host_set_size", [](CPUState& s, uint16_t c, uint16_t r) {
+            s.uart_geom.host_set_size(c, r);
+        })
+        .def("uart_geom_has_resize_request", [](const CPUState& s) -> bool {
+            return s.uart_geom.has_resize_request();
+        })
+        .def("uart_geom_host_accept_resize", [](CPUState& s, uint16_t c, uint16_t r) {
+            s.uart_geom.host_accept_resize(c, r);
+        })
+        .def("uart_geom_host_deny_resize", [](CPUState& s) {
+            s.uart_geom.host_deny_resize();
+        })
         // ── Accelerator hooks ─────────────────────────────────
         .def("register_accel_hook", &CPUState::register_accel_hook)
         .def_readonly("accel_hook_count", &CPUState::accel_hook_count)

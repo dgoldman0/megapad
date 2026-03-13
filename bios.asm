@@ -40,6 +40,7 @@
 ;  MMIO
 ;  ----
 ;    UART   0xFFFF_FF00_0000_0000   TX=+0 RX=+1 STATUS=+2
+;    UGeom  0xFFFF_FF00_0000_0010   COLS=+0..1 ROWS=+2..3 STATUS=+4 CTRL=+5
 ;    Timer  0xFFFF_FF00_0000_0100   COUNT=+0..+3 CTRL=+8
 ;    RTC    0xFFFF_FF00_0000_0B00   UPTIME=+0..7 EPOCH=+8..F SEC=+10 MIN=+11 HOUR=+12 CTRL=+18
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
@@ -8860,7 +8861,6 @@ w_does:
 ;     does_body = return_addr + 2
 ;   Patches LATEST (the most recently CREATEd word) trampoline at offset 16.
 ; --- dictionary header so binimg can resolve compile_call references ---
-latest_entry:
 d_does_runtime:
     .dq d_squote_runtime
     .db 7
@@ -9850,6 +9850,136 @@ w_task_count:
     brne .tc_loop
     subi r14, 8
     str r14, r7
+    ret.l
+
+; =====================================================================
+;  UART Geometry — Terminal Dimensions
+; =====================================================================
+;  MMIO registers at UART_GEOM_BASE = 0xFFFF_FF00_0000_0010:
+;    +0x00  COLS    (RW) 16-bit LE terminal columns
+;    +0x02  ROWS    (RW) 16-bit LE terminal rows
+;    +0x04  STATUS  (RW) bit 0: RESIZED (W1C), bit 1: REQ_DENIED (W1C)
+;    +0x05  CTRL    (RW) bit 0: RESIZE_IE, bit 1: REQ_RESIZE
+;    +0x06  REQ_COLS (RW) 16-bit LE requested columns
+;    +0x08  REQ_ROWS (RW) 16-bit LE requested rows
+
+; COLS ( -- n )  read terminal column count from UART geometry
+w_cols:
+    ldi64 r11, 0xFFFF_FF00_0000_0010    ; UART_GEOM_BASE + 0x00 = COLS_LO
+    ld.b r0, r11
+    inc r11
+    ld.b r1, r11                         ; COLS_HI
+    lsli r1, 8
+    or  r0, r1
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; ROWS ( -- n )  read terminal row count from UART geometry
+w_rows:
+    ldi64 r11, 0xFFFF_FF00_0000_0012    ; UART_GEOM_BASE + 0x02 = ROWS_LO
+    ld.b r0, r11
+    inc r11
+    ld.b r1, r11                         ; ROWS_HI
+    lsli r1, 8
+    or  r0, r1
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; TERMSIZE ( -- cols rows )  push both terminal dimensions
+w_termsize:
+    ; Read COLS
+    ldi64 r11, 0xFFFF_FF00_0000_0010
+    ld.b r0, r11
+    inc r11
+    ld.b r1, r11
+    lsli r1, 8
+    or  r0, r1
+    subi r14, 8
+    str r14, r0
+    ; Read ROWS
+    ldi64 r11, 0xFFFF_FF00_0000_0012
+    ld.b r0, r11
+    inc r11
+    ld.b r1, r11
+    lsli r1, 8
+    or  r0, r1
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; RESIZED? ( -- flag )  check & clear RESIZED status flag
+;   Returns TRUE (-1) if terminal was resized since last check.
+w_resized_q:
+    ldi64 r11, 0xFFFF_FF00_0000_0014    ; UART_GEOM_BASE + 0x04 = STATUS
+    ld.b r0, r11
+    andi r0, 0x01                        ; isolate RESIZED bit
+    cmpi r0, 0
+    breq .resq_no
+    ; Clear RESIZED by writing 1 to bit 0 (W1C)
+    ldi r1, 0x01
+    st.b r11, r1
+    ldi r0, -1                           ; TRUE
+    subi r14, 8
+    str r14, r0
+    ret.l
+.resq_no:
+    ldi r0, 0                            ; FALSE
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; RESIZE-DENIED? ( -- flag )  check & clear REQ_DENIED status flag
+;   Returns TRUE (-1) if last resize request was denied.
+w_resize_denied_q:
+    ldi64 r11, 0xFFFF_FF00_0000_0014    ; STATUS
+    ld.b r0, r11
+    andi r0, 0x02                        ; isolate REQ_DENIED bit
+    cmpi r0, 0
+    breq .resdnq_no
+    ; Clear REQ_DENIED by writing 2 to STATUS (W1C)
+    ldi r1, 0x02
+    st.b r11, r1
+    ldi r0, -1                           ; TRUE
+    subi r14, 8
+    str r14, r0
+    ret.l
+.resdnq_no:
+    ldi r0, 0                            ; FALSE
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; RESIZE-REQUEST ( cols rows -- )  request terminal resize from host
+;   Writes REQ_COLS and REQ_ROWS, then sets CTRL.REQ_RESIZE=1.
+;   Poll RESIZED? for acceptance or RESIZE-DENIED? for denial.
+w_resize_request:
+    ; Pop rows
+    ldn r0, r14
+    addi r14, 8
+    ; Pop cols
+    ldn r1, r14
+    addi r14, 8
+    ; Write REQ_COLS (16-bit LE)
+    ldi64 r11, 0xFFFF_FF00_0000_0016    ; UART_GEOM_BASE + 0x06 = REQ_COLS_LO
+    mov r13, r1
+    st.b r11, r13                        ; low byte
+    inc r11
+    lsri r13, 8
+    st.b r11, r13                        ; high byte
+    ; Write REQ_ROWS (16-bit LE)
+    ldi64 r11, 0xFFFF_FF00_0000_0018    ; UART_GEOM_BASE + 0x08 = REQ_ROWS_LO
+    mov r13, r0
+    st.b r11, r13                        ; low byte
+    inc r11
+    lsri r13, 8
+    st.b r11, r13                        ; high byte
+    ; Set CTRL.REQ_RESIZE (bit 1)
+    ldi64 r11, 0xFFFF_FF00_0000_0015    ; CTRL
+    ld.b r13, r11
+    ori r13, 0x02
+    st.b r11, r13
     ret.l
 
 ; =====================================================================
@@ -15647,6 +15777,61 @@ d_task_count:
     .db 6
     .ascii "#TASKS"
     ldi64 r11, w_task_count
+    call.l r11
+    ret.l
+
+; === COLS ===
+d_cols:
+    .dq d_task_count
+    .db 4
+    .ascii "COLS"
+    ldi64 r11, w_cols
+    call.l r11
+    ret.l
+
+; === ROWS ===
+d_rows:
+    .dq d_cols
+    .db 4
+    .ascii "ROWS"
+    ldi64 r11, w_rows
+    call.l r11
+    ret.l
+
+; === TERMSIZE ===
+d_termsize:
+    .dq d_rows
+    .db 8
+    .ascii "TERMSIZE"
+    ldi64 r11, w_termsize
+    call.l r11
+    ret.l
+
+; === RESIZED? ===
+d_resized_q:
+    .dq d_termsize
+    .db 8
+    .ascii "RESIZED?"
+    ldi64 r11, w_resized_q
+    call.l r11
+    ret.l
+
+; === RESIZE-DENIED? ===
+d_resize_denied_q:
+    .dq d_resized_q
+    .db 14
+    .ascii "RESIZE-DENIED?"
+    ldi64 r11, w_resize_denied_q
+    call.l r11
+    ret.l
+
+; === RESIZE-REQUEST ===
+latest_entry:
+d_resize_request:
+    .dq d_resize_denied_q
+    .db 14
+    .ascii "RESIZE-REQUEST"
+    ldi64 r11, w_resize_request
     call.l r11
     ret.l
 

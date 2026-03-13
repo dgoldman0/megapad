@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 MMIO_BASE  = 0xFFFF_FF00_0000_0000
 
 UART_BASE    = 0x0000
+UART_GEOM_BASE = 0x0010  # UART geometry (terminal dimensions) — within UART block
 TIMER_BASE   = 0x0100
 STORAGE_BASE = 0x0200
 SYSINFO_BASE = 0x0300
@@ -1986,6 +1987,107 @@ class CppTimerProxy(Device):
 
     def tick(self, cycles: int):
         self._cs.timer_tick(cycles)
+
+
+# ---------------------------------------------------------------------------
+#  C++ UART Geometry Proxy
+# ---------------------------------------------------------------------------
+# Register map (offsets 0x10–0x1F within the UART block):
+#   0x10–0x11  COLS      (RW) 16-bit LE terminal column count
+#   0x12–0x13  ROWS      (RW) 16-bit LE terminal row count
+#   0x14       STATUS    (RW) bit 0: RESIZED (W1C), bit 1: REQ_DENIED (W1C)
+#   0x15       CTRL      (RW) bit 0: RESIZE_IE, bit 1: REQ_RESIZE
+#   0x16–0x17  REQ_COLS  (RW) 16-bit LE requested columns (FW writes)
+#   0x18–0x19  REQ_ROWS  (RW) 16-bit LE requested rows (FW writes)
+#   0x1A–0x1F  reserved
+
+class CppUartGeomProxy(Device):
+    """Thin proxy delegating UART Geometry state to the C++ UartGeomDevice.
+
+    All MMIO is handled in C++; this proxy exists so the Python side can
+    read/write terminal dimensions and handle resize requests.
+    """
+
+    def __init__(self, cs, initial_cols: int = 80, initial_rows: int = 30):
+        super().__init__("UartGeom", UART_GEOM_BASE, 0x10)
+        self._cs = cs
+        cs.uart_geom_init(initial_cols, initial_rows)
+
+    # -- Dimension properties (r/w) ------------------------------------
+
+    @property
+    def cols(self) -> int:
+        return self._cs.uart_geom_cols
+
+    @cols.setter
+    def cols(self, v: int):
+        self._cs.uart_geom_cols = v
+
+    @property
+    def rows(self) -> int:
+        return self._cs.uart_geom_rows
+
+    @rows.setter
+    def rows(self, v: int):
+        self._cs.uart_geom_rows = v
+
+    @property
+    def status(self) -> int:
+        return self._cs.uart_geom_status
+
+    @status.setter
+    def status(self, v: int):
+        self._cs.uart_geom_status = v
+
+    @property
+    def ctrl(self) -> int:
+        return self._cs.uart_geom_ctrl
+
+    @ctrl.setter
+    def ctrl(self, v: int):
+        self._cs.uart_geom_ctrl = v
+
+    @property
+    def req_cols(self) -> int:
+        return self._cs.uart_geom_req_cols
+
+    @req_cols.setter
+    def req_cols(self, v: int):
+        self._cs.uart_geom_req_cols = v
+
+    @property
+    def req_rows(self) -> int:
+        return self._cs.uart_geom_req_rows
+
+    @req_rows.setter
+    def req_rows(self, v: int):
+        self._cs.uart_geom_req_rows = v
+
+    # -- Host-side helpers ---------------------------------------------
+
+    def host_set_size(self, cols: int, rows: int):
+        """Called when the host detects a terminal/display resize."""
+        self._cs.uart_geom_host_set_size(cols, rows)
+
+    def has_resize_request(self) -> bool:
+        """Check if firmware requested a resize."""
+        return self._cs.uart_geom_has_resize_request()
+
+    def host_accept_resize(self, cols: int, rows: int):
+        """Accept a firmware resize request."""
+        self._cs.uart_geom_host_accept_resize(cols, rows)
+
+    def host_deny_resize(self):
+        """Deny a firmware resize request."""
+        self._cs.uart_geom_host_deny_resize()
+
+    # -- MMIO pass-through (for tests) ---------------------------------
+
+    def read8(self, offset: int) -> int:
+        return self._cs.uart_geom_read8(UART_GEOM_BASE + offset)
+
+    def write8(self, offset: int, value: int):
+        self._cs.uart_geom_write8(UART_GEOM_BASE + offset, value & 0xFF)
 
 
 # ---------------------------------------------------------------------------

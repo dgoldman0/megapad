@@ -27,10 +27,10 @@ from megapad64 import (
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
-    FramebufferDevice, CppFramebufferProxy, CppTimerProxy, RTC,
+    FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy, RTC,
     MailboxDevice, SpinlockDevice,
     NTTDevice, KemDevice, FramebufferDevice,
-    SECTOR_SIZE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
+    SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
     MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
     PortBridgeCSR,
@@ -369,6 +369,23 @@ class MegapadSystem:
         self.fb = CppFramebufferProxy(self.cores[0]._cs)
         self.rtc = RTC()
 
+        # Determine initial terminal dimensions:
+        # - If no display, use the host terminal size (fallback 80x24)
+        # - Display will override these when it starts
+        try:
+            import os
+            _tsz = os.get_terminal_size()
+            _init_cols, _init_rows = _tsz.columns, _tsz.lines
+        except (OSError, ValueError):
+            _init_cols, _init_rows = 80, 24
+
+        # UART geometry (terminal dimensions) — C++ native
+        self.uart_geom = CppUartGeomProxy(
+            self.cores[0]._cs,
+            initial_cols=_init_cols,
+            initial_rows=_init_rows,
+        )
+
         # AES, SHA3, NIC, TRNG, and FB are all handled natively by the
         # C++ accelerator — no Python device instances needed.  NIC MMIO
         # (0x0400) does ~15K–35K accesses per TLS handshake; keeping it
@@ -377,6 +394,8 @@ class MegapadSystem:
         # and status display.
 
         self.bus.register(self.uart)
+        # UART geometry: C++ handles all MMIO; proxy for Python access.
+        self.bus.register(self.uart_geom)
         # Timer: C++ handles all MMIO; proxy tick is called via bus.
         self.bus.register(self.timer)
         self.bus.register(self.storage)
@@ -437,6 +456,7 @@ class MegapadSystem:
             cs.init_trng()
             cs.fb_init()  # FB MMIO handled in C++ on all cores
             cs.timer_init()  # Timer MMIO handled in C++ on all cores
+            cs.uart_geom_init(_init_cols, _init_rows)  # UART geometry on all cores
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs

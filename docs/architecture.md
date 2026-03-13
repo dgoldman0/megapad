@@ -99,6 +99,7 @@ device occupies a small range:
 | Device | Offset | Size | Description |
 |--------|--------|------|-------------|
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
+| **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
 | **Storage** | `+0x0200` | 16 bytes | Sector-based disk controller |
 | **System Info** | `+0x0300` | 96 bytes | Board ID, config, core topology, HBW, VRAM, cluster enable |
@@ -141,6 +142,38 @@ and sees output.  It has a transmit buffer and a receive FIFO.
 
 **BIOS words:** `KEY` reads from RX_DATA (blocking), `KEY?` checks
 STATUS bit 1, `EMIT` writes to TX_DATA.
+
+---
+
+## UART Geometry (Terminal Dimensions)
+
+The UART Geometry block lives within the UART address range and exposes
+the terminal's column/row count as MMIO registers.  The host (emulator
+display or real terminal) updates these on resize; firmware can also
+request a resize and check whether it was accepted or denied.
+
+| Register | Offset | R/W | Description |
+|----------|--------|-----|-------------|
+| COLS | `+0x10`–`+0x11` | RW | 16-bit LE terminal column count. |
+| ROWS | `+0x12`–`+0x13` | RW | 16-bit LE terminal row count. |
+| STATUS | `+0x14` | RW | **bit 0:** `RESIZED` — set by host on resize (write 1 to clear).  **bit 1:** `REQ_DENIED` — host denied a firmware resize request (write 1 to clear). |
+| CTRL | `+0x15` | RW | **bit 0:** `RESIZE_IE` — enable resize interrupt/notification.  **bit 1:** `REQ_RESIZE` — firmware sets to request resize; host clears after accept/deny. |
+| REQ_COLS | `+0x16`–`+0x17` | RW | 16-bit LE requested columns (firmware writes before setting `REQ_RESIZE`). |
+| REQ_ROWS | `+0x18`–`+0x19` | RW | 16-bit LE requested rows. |
+
+**Host-initiated resize flow:**
+1. Host updates COLS/ROWS, sets `STATUS.RESIZED = 1`.
+2. Firmware polls `RESIZED?` → reads new COLS/ROWS, clears flag.
+
+**Firmware-requested resize flow:**
+1. Firmware writes REQ_COLS/REQ_ROWS, sets `CTRL.REQ_RESIZE = 1`.
+2. Host reads request, attempts resize.
+3. On success: host updates COLS/ROWS, clears `REQ_RESIZE`, sets `RESIZED`.
+4. On failure: host clears `REQ_RESIZE`, sets `STATUS.REQ_DENIED`.
+
+**BIOS words:** `COLS` ( -- n ), `ROWS` ( -- n ), `TERMSIZE` ( -- cols rows ),
+`RESIZED?` ( -- flag ), `RESIZE-DENIED?` ( -- flag ),
+`RESIZE-REQUEST` ( cols rows -- ).
 
 ---
 
