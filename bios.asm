@@ -449,8 +449,12 @@ interp_line_done:
     lbr quit_loop
 interp_no_underflow:
     ; Check for DSP overflow: R14 should be >= HERE (not into dictionary)
+    ; Skip when HERE is in external memory (ULAND); DSP stays in bank 0
+    ; so no collision is possible and the comparison would always trip.
     ldi64 r11, var_here
     ldn r11, r11               ; R11 = HERE
+    cmp r2, r11                ; ram_size vs HERE
+    brle interp_no_dsp_overflow ; HERE >= ram_size → ext mem, skip
     cmp r11, r14               ; HERE <= R14 means no overflow
     brle interp_no_dsp_overflow
     ; DSP overflow detected — reset DSP and warn
