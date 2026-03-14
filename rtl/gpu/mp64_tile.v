@@ -873,12 +873,17 @@ module mp64_tile (
                         best_is_nan = (best_raw[14:10] == 5'h1F) && |best_raw[9:0];
                     end
                     // Skip NaNs; take first non-NaN or update if cur < best
+                    // NOTE: This is NaN-*skipping*, not NaN-propagating.
+                    // TALU lane-wise MIN (mp64_fp16_alu) propagates NaN;
+                    // TRED reduction MIN skips NaN values.
                     if (!cur_is_nan) begin
                         if (best_is_nan) begin
                             best_raw = cur_raw;
                             best_idx = fp_ri;
                         end else begin
-                            // Compare: use magnitude comparison
+                            // Signed-magnitude FP comparison using
+                            // unsigned operators on the magnitude bits.
+                            // The sign bit directs the comparison sense:
                             // Both positive: smaller mag = smaller val
                             // Both negative: larger mag = smaller val
                             // Different sign: negative is smaller
@@ -926,11 +931,18 @@ module mp64_tile (
                         cur_is_nan  = (cur_raw[14:10] == 5'h1F) && |cur_raw[9:0];
                         best_is_nan = (best_raw[14:10] == 5'h1F) && |best_raw[9:0];
                     end
+                    // Skip NaNs; take first non-NaN or update if cur > best
+                    // NOTE: This is NaN-*skipping*, not NaN-propagating.
+                    // TALU lane-wise MAX (mp64_fp16_alu) propagates NaN;
+                    // TRED reduction MAX skips NaN values.
                     if (!cur_is_nan) begin
                         if (best_is_nan) begin
                             best_raw = cur_raw;
                             best_idx = fp_ri;
                         end else begin
+                            // Signed-magnitude FP comparison using
+                            // unsigned operators on the magnitude bits.
+                            // The sign bit directs the comparison sense.
                             if (cur_raw[15] != best_raw[15]) begin
                                 cur_gt = best_raw[15]; // best negative → cur > best
                             end else if (cur_raw[15]) begin

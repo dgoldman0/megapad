@@ -433,11 +433,16 @@ All standard TALU, TMUL, and TRED operations work with FP16/BF16:
 | ADD/SUB | IEEE round-to-nearest-even |
 | MUL | FP16×FP16 → FP16 |
 | FMA | FP16×FP16 + FP16 → FP16 |
-| MIN/MAX | NaN-propagating comparison |
+| MIN/MAX (TALU) | NaN-**propagating** — if either input is NaN, result is qNaN |
+| MIN/MAX (TRED) | NaN-**skipping** — NaN lanes are ignored; first non-NaN wins |
 | ABS | Clear sign bit |
 | DOT | FP16→FP32 widening multiply, FP32 accumulation |
 | SUM | FP16→FP32 widening, FP32 accumulation |
 | SUMSQ | FP16→FP32 square, FP32 accumulation |
+
+> **Note:** The TMODE signed flag (bit 4) is irrelevant in FP mode.
+> Floating-point comparisons are inherently signed via the sign bit;
+> `mode_signed` is not checked on the FP MIN/MAX path.
 
 ### FP32 Accumulation
 
