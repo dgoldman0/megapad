@@ -62,18 +62,30 @@ JIT-ON
 : SAMESTR?  ( a1 a2 maxlen -- flag )
     DUP >R SWAP R> COMPARE 0= IF -1 ELSE 0 THEN ;
 
-\ NAMEBUF -- 24-byte scratch for file name parsing
+\ NAMEBUF -- 24-byte scratch for single filename component (dirent name).
+\   Used by FIND-BY-NAME, MKFILE, RENAME, etc. — always ≤ 23 chars.
 VARIABLE NAMEBUF  23 ALLOT
 
+\ PATHBUF -- 128-byte scratch for full paths including '/' separators.
+\   Populated by PARSE-NAME alongside NAMEBUF.  Used by _RESOLVE-PATH
+\   so that paths like "lib/crypto/aes.f" (>23 chars total) are preserved.
+VARIABLE PATHBUF  127 ALLOT
+
 \ PARSE-NAME ( "name" -- )
-\   Parse next whitespace-delimited word, copy into NAMEBUF, null-terminate.
+\   Parse next whitespace-delimited word.  Stores full path (up to 127
+\   chars) in PATHBUF, and the first 23 chars in NAMEBUF (for direct
+\   dirent lookups).  Sets PN-LEN to the clamped NAMEBUF length.
 VARIABLE PN-LEN
 
 : PARSE-NAME  ( "name" -- )
     NAMEBUF 24 0 FILL
-    BL WORD DUP C@ 23 MIN PN-LEN !   ( waddr )
-    1+                                 ( src )
-    NAMEBUF PN-LEN @                   ( src dst len )
+    PATHBUF 128 0 FILL
+    BL WORD DUP C@                     ( waddr rawlen )
+    DUP 127 MIN >R                     \ R: pathlen (up to 127)
+    DROP 1+                             ( src )  \ drop rawlen, skip count byte
+    DUP PATHBUF R@ CMOVE               \ copy full path into PATHBUF
+    R> 23 MIN PN-LEN !                  \ clamp for NAMEBUF
+    NAMEBUF PN-LEN @                    ( src dst len )
     CMOVE ;
 
 \ -- Stack safety utilities --
@@ -3955,15 +3967,15 @@ VARIABLE _LD-SP
 \  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
 \  loads always return to the caller's working directory.
 
-CREATE _RP-PATH 24 ALLOT     \ copy of full path from NAMEBUF
-CREATE _RP-COMP 24 ALLOT     \ current component being processed
+CREATE _RP-PATH 128 ALLOT    \ copy of full path from PATHBUF (up to 128 B)
+CREATE _RP-COMP 24 ALLOT     \ current component being processed (≤ 23 chars)
 VARIABLE _RP-I                \ scan position within _RP-PATH
 
-\ _HAS-SLASH? ( -- flag )  True if NAMEBUF contains a '/' character.
+\ _HAS-SLASH? ( -- flag )  True if PATHBUF contains a '/' character.
 : _HAS-SLASH?  ( -- flag )
     FALSE
-    24 0 DO
-        NAMEBUF I + C@ DUP 0= IF DROP LEAVE THEN
+    128 0 DO
+        PATHBUF I + C@ DUP 0= IF DROP LEAVE THEN
         47 = IF DROP TRUE LEAVE THEN
     LOOP ;
 
@@ -3971,7 +3983,7 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
 : _RP-NEXT-SEP  ( -- pos )
     _RP-I @
     BEGIN
-        DUP 24 < IF
+        DUP 128 < IF
             _RP-PATH OVER + C@ DUP 0= SWAP 47 = OR
             IF TRUE ELSE 1+ FALSE THEN
         ELSE TRUE THEN
@@ -3992,19 +4004,19 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
     CWD ! TRUE ;
 
 \ _RESOLVE-PATH ( -- )
-\   If NAMEBUF contains '/', walk directory components adjusting CWD
+\   If PATHBUF contains '/', walk directory components adjusting CWD
 \   and leave the final filename in NAMEBUF.  No-op for plain names.
 : _RESOLVE-PATH  ( -- )
     _HAS-SLASH? 0= IF EXIT THEN
     \ Handle leading '/' — absolute path, start from root
-    NAMEBUF C@ 47 = IF 255 CWD ! THEN
-    NAMEBUF _RP-PATH 24 CMOVE
+    PATHBUF C@ 47 = IF 255 CWD ! THEN
+    PATHBUF _RP-PATH 128 CMOVE
     \ Skip leading '/' if present
     _RP-PATH C@ 47 = IF 1 ELSE 0 THEN  _RP-I !
     BEGIN
         _RP-NEXT-SEP                     ( end )
         \ What character terminated the scan?
-        DUP 24 < IF _RP-PATH OVER + C@ ELSE 0 THEN
+        DUP 128 < IF _RP-PATH OVER + C@ ELSE 0 THEN
         47 = IF
             \ '/' found — extract directory component [_RP-I, end)
             _RP-COMP 24 0 FILL
