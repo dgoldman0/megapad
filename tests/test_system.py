@@ -1301,6 +1301,36 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["0xAB 0x3000 C!", "0x3000 C@ ."])
         self.assertIn("171 ", text)
 
+    def test_on(self):
+        """ON stores TRUE (-1) at addr."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0 0x2000 !",          # pre-clear
+            "0x2000 ON",           # store TRUE
+            "0x2000 @ .",          # should print -1
+        ])
+        self.assertIn("-1 ", text)
+
+    def test_2store_2fetch(self):
+        """2! stores and 2@ fetches a cell pair."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "111 222 0x2000 2!",   # store: 222 at 0x2000, 111 at 0x2008
+            "0x2000 2@ . .",       # fetch: x2=222 printed first, x1=111 second
+        ])
+        self.assertIn("222 ", text)
+        self.assertIn("111 ", text)
+
+    def test_2store_2fetch_roundtrip(self):
+        """2! followed by 2@ preserves exact values."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "0xDEAD 0xBEEF 0x2000 2!",
+            "0x2000 2@ . .",
+        ])
+        self.assertIn("48879 ", text)   # 0xBEEF = 48879
+        self.assertIn("57005 ", text)   # 0xDEAD = 57005
+
     def test_fill_dump(self):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ["0x2000 16 0xCC FILL", "0x2000 16 DUMP"])

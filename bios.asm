@@ -8,7 +8,7 @@
 ;  v0.5 adds EXIT, >R/R>/R@, J, UNLOOP, +LOOP, AGAIN, S",
 ;  CREATE, IMMEDIATE, STATE, [, ], LITERAL, MIN, MAX, CELLS,
 ;  CELL+, +!, 2*, CMOVE, -ROT, <>, 0<>, 0>, ?DUP, BL, TRUE, FALSE,
-;  WORD, LATEST.
+;  WORD, LATEST, ON, 2!, 2@.
 ;
 ;  Register conventions
 ;  --------------------
@@ -1780,6 +1780,40 @@ w_cstore:
     ldn r0, r14
     addi r14, 8
     st.b r1, r0
+    ret.l
+
+; ON ( addr -- )  Store TRUE (-1) at addr
+w_on:
+    ldn r1, r14               ; addr
+    addi r14, 8
+    ldi r0, 0
+    dec r0                    ; r0 = -1 (TRUE)
+    str r1, r0
+    ret.l
+
+; 2! ( x1 x2 addr -- )  Store cell pair: x2 at addr, x1 at addr+8
+w_2store:
+    ldn r1, r14               ; addr
+    addi r14, 8
+    ldn r0, r14               ; x2
+    addi r14, 8
+    str r1, r0                ; [addr] = x2
+    ldn r0, r14               ; x1
+    addi r14, 8
+    addi r1, 8
+    str r1, r0                ; [addr+8] = x1
+    ret.l
+
+; 2@ ( addr -- x1 x2 )  Fetch cell pair: x2 from addr, x1 from addr+8
+w_2fetch:
+    ldn r1, r14               ; addr
+    addi r1, 8
+    ldn r0, r1                ; x1 = [addr+8]
+    str r14, r0               ; overwrite addr slot with x1
+    subi r1, 8
+    ldn r0, r1                ; x2 = [addr]
+    subi r14, 8
+    str r14, r0               ; push x2 on top
     ret.l
 
 ; HERE ( -- addr )
@@ -12439,9 +12473,36 @@ d_cstore:
     call.l r11
     ret.l
 
+; === ON ===
+d_on:
+    .dq d_cstore
+    .db 2
+    .ascii "ON"
+    ldi64 r11, w_on
+    call.l r11
+    ret.l
+
+; === 2! ===
+d_2store:
+    .dq d_on
+    .db 2
+    .ascii "2!"
+    ldi64 r11, w_2store
+    call.l r11
+    ret.l
+
+; === 2@ ===
+d_2fetch:
+    .dq d_2store
+    .db 2
+    .ascii "2@"
+    ldi64 r11, w_2fetch
+    call.l r11
+    ret.l
+
 ; === HERE ===
 d_here:
-    .dq d_cstore
+    .dq d_2fetch
     .db 4
     .ascii "HERE"
     ldi64 r11, w_here
