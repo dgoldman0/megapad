@@ -1821,7 +1821,7 @@ XMEM-INIT      \ initialise at load time
 \    LEAVE-USERLAND  ( -- )       switch HERE back to system dict
 \    .USERLAND       ( -- )       display userland status
 
-1048576 CONSTANT U-ZONE-SIZE   \ 1 MiB reserved for userland dictionary
+4194304 CONSTANT U-ZONE-SIZE   \ 4 MiB reserved for userland dictionary
 
 VARIABLE ULAND          0 ULAND !
 VARIABLE SYS-HERE-SAVE  0 SYS-HERE-SAVE !
@@ -12245,7 +12245,7 @@ VARIABLE _HTE-HT
 \  Uses a hash table (§19) for O(1) lookup.  24-byte key = module
 \  name (zero-padded, matching NAMEBUF layout), 1-byte value.
 
-24 1 32 HASHTABLE _MOD-HT
+24 1 128 HASHTABLE _MOD-HT
 
 \ Scratch for the 1-byte "loaded" marker value.
 CREATE _MOD-VAL  1 ALLOT

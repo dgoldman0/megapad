@@ -24720,7 +24720,7 @@ class TestKDOSUserland(_KDOSTestBase):
     def test_u_free(self):
         """U-FREE reports bytes remaining in userland zone."""
         text = self._run_kdos(['ENTER-USERLAND  333 ALLOT  U-FREE .'])
-        self.assertIn('1048243', text)  # 1048576 - 333
+        self.assertIn('4193971', text)  # 4194304 - 333
 
     def test_enter_idempotent(self):
         """Calling ENTER-USERLAND twice is safe (no-op)."""
