@@ -3691,9 +3691,11 @@ w_colon:
     call.l r11
     lbr quit_loop
 w_colon_not_compiling:
-    ; Clear stale :NONAME flag
+    ; Clear stale :NONAME flag and JIT peephole state
     ldi r1, 0
     ldi64 r11, var_noname_flag
+    str r11, r1
+    ldi64 r11, var_jit_last_type
     str r11, r1
     ; Check dictionary space: HERE + 1024 < R14 (data stack pointer)
     ; but only when HERE is in Bank 0 (system dict).  When KDOS
@@ -3827,6 +3829,9 @@ w_semi_quot_ok:
     ldi r1, 0
     ldi64 r11, var_state
     str r11, r1
+    ; Reset JIT peephole state so the next definition starts clean.
+    ldi64 r11, var_jit_last_type
+    str r11, r1
     ; NOTE: var_noname_flag is NOT cleared here.  It persists so that
     ; IMMEDIATE (which follows ;) can detect the :NONAME case and
     ; error out.  The flag is cleared at the start of : and :NONAME.
@@ -3848,6 +3853,10 @@ w_colonnoname:
     call.l r11
     lbr quit_loop
 w_colonnoname_ok:
+    ; Reset JIT peephole state for new definition
+    ldi r1, 0
+    ldi64 r11, var_jit_last_type
+    str r11, r1
     ; Push HERE onto data stack — this is the resulting XT
     ldi64 r11, var_here
     ldn r0, r11
@@ -5193,11 +5202,12 @@ w_right_bracket:
     ret.l
 
 ; LITERAL (IMMEDIATE) — compile literal from TOS
-;   Takes value from data stack, emits compile_literal code
+;   Takes value from data stack, emits jit_compile_literal (compact
+;   when 0–255, sets peephole state so the next word can fold).
 w_literal:
     ldn r1, r14               ; pop value
     addi r14, 8
-    ldi64 r11, compile_literal
+    ldi64 r11, jit_compile_literal
     call.l r11
     ret.l
 

@@ -3587,6 +3587,96 @@ class TestBIOS(unittest.TestCase):
         ])
         self.assertIn("unmatched ;]", text)
 
+    # ------------------------------------------------------------------
+    #  JIT peephole optimizer
+    # ------------------------------------------------------------------
+
+    def test_jit_literal_fold(self):
+        """LITERAL + produces a compact literal that folds with the next ALU op.
+
+        [: [ 10 ] LITERAL + ;] should produce smaller code than
+        [: 10 + ;] with JIT off — the key point is correctness.
+        """
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON",
+            ": ADD10 [ 10 ] LITERAL + ;",
+            "32 ADD10 .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_jit_literal_compact_size(self):
+        """LITERAL for 0-255 values produces compact code (8 bytes vs 16).
+
+        Compare HERE delta with JIT on vs JIT off for a small literal.
+        """
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON JIT-RESET",
+            "HERE",
+            ": TSZ1 [ 42 ] LITERAL ;",
+            "HERE SWAP - .",
+            "JIT-OFF",
+            "HERE",
+            ": TSZ2 [ 42 ] LITERAL ;",
+            "HERE SWAP - .",
+        ])
+        # Extract both sizes from output
+        nums = re.findall(r'(\d+)\s+ok', text)
+        self.assertGreaterEqual(len(nums), 2,
+                                f"Expected 2 size numbers, got: {text}")
+        jit_size = int(nums[0])
+        nojit_size = int(nums[1])
+        # JIT compact literal (8 bytes + 2 ret) < full (16 bytes + 2 ret)
+        self.assertLess(jit_size, nojit_size,
+                        f"JIT size {jit_size} should be < non-JIT {nojit_size}")
+
+    def test_jit_peephole_reset_at_semi(self):
+        """Peephole state is reset at ; so the next definition starts clean.
+
+        Define a word ending with a small literal, then define a second
+        word using DUP.  If peephole leaked, DUP might mis-fuse with
+        the stale literal type=1 state.
+        """
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON",
+            ": T1 10 ;",
+            ": T2 DUP + ;",
+            "21 T2 .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_jit_peephole_no_cross_def_fold(self):
+        """A literal in def1 must not fold with an ALU op in def2.
+
+        : D1 5 ;  : D2 + ;  — if peephole leaked, D2's + might try to
+        fold with 5 from D1 and produce addi 5, which would be wrong.
+        """
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON",
+            ": D1 5 ;",
+            ": D2 + ;",
+            "10 20 D2 .",
+        ])
+        self.assertIn("30 ", text)
+
+    def test_jit_stats_folds_counted(self):
+        """JIT-STATS counts folds — LITERAL + should register as a fold."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "JIT-ON JIT-RESET",
+            ": TFOLD [ 10 ] LITERAL + ;",
+            "JIT-STATS",
+        ])
+        # JIT-STATS prints "0xNNNNNNNN folds" in hex
+        # 10 + should fold → folds count > 0
+        m = re.search(r'(0x[0-9a-fA-F]+)\s+folds', text)
+        self.assertIsNotNone(m, f"JIT-STATS fold count not found in: {text}")
+        folds = int(m.group(1), 16)
+        self.assertGreater(folds, 0, "Expected at least 1 fold from LITERAL +")
+
 
 # ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)
