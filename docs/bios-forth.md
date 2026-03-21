@@ -312,7 +312,7 @@ execute at compile time to lay down branch instructions).
 
 ---
 
-## Compilation & Defining Words (21 words)
+## Compilation & Defining Words (24 words)
 
 These words create new dictionary entries or control the compiler.
 
@@ -357,6 +357,35 @@ These words create new dictionary entries or control the compiler.
 | `FIND` | `( c-addr -- xt flag \| c-addr 0 )` | Search the dictionary for a counted string.  Returns the xt and a flag (+1 immediate, −1 normal) or 0 if not found. |
 | `STATE` | `( -- addr )` | Address of the compiler state variable (0 = interpreting, non-zero = compiling). |
 | `LATEST` | `( -- addr )` | Address of the most recent dictionary entry.  Useful for dictionary traversal. |
+
+### Anonymous Definitions & Quotations
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `:NONAME` | `( -- xt )` | Begin an anonymous (headerless) definition.  Pushes HERE as the XT.  Terminated by `;`, which leaves the XT on the stack.  `IMMEDIATE` after `:NONAME ... ;` is an error (no dictionary entry to mark).  `RECURSE` works inside `:NONAME` (calls back into the anonymous body). |
+| `[:` | `( -- )` | Open a quotation inside a definition.  Compiles a forward branch over the quotation body and pushes bookkeeping data.  Immediate.  Must be used inside `:` or `:NONAME`. |
+| `;]` | `( -- )` | Close a quotation.  Compiles a return, resolves the forward branch, and compiles the quotation's XT as a literal into the enclosing definition.  Immediate.  Must pair with a preceding `[:`. |
+
+**Example — anonymous definitions:**
+```forth
+:NONAME DUP + ; 21 SWAP EXECUTE .   \ prints 42
+
+VARIABLE doubler
+:NONAME DUP + ; doubler !
+10 doubler @ EXECUTE .               \ prints 20
+```
+
+**Example — quotations:**
+```forth
+: APPLY  ( xt n -- n' )  SWAP EXECUTE ;
+: TEST   [: DUP * ;] 5 APPLY . ;
+TEST    \ prints 25
+
+\ Nested quotations
+: MAKE-ADDER  ( n -- xt )
+    [: [: DUP ;] EXECUTE + ;] ;
+5 MAKE-ADDER 3 SWAP EXECUTE .        \ prints 8
+```
 
 ---
 

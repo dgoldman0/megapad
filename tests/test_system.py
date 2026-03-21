@@ -3445,6 +3445,148 @@ class TestBIOS(unittest.TestCase):
         self.assertLess(reloc_addr, here_end,
                         f"Reloc {reloc_addr} < compile region end")
 
+    # ------------------------------------------------------------------
+    #  :NONAME — anonymous colon definitions
+    # ------------------------------------------------------------------
+
+    def test_colonnoname_basic(self):
+        """:NONAME compiles an anonymous word; EXECUTE runs it."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ":NONAME 42 . ; EXECUTE",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_colonnoname_store_and_call(self):
+        """:NONAME XT can be stored in a variable and EXECUTEd later."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE action",
+            ":NONAME 99 . ; action !",
+            "action @ EXECUTE",
+        ])
+        self.assertIn("99 ", text)
+
+    def test_colonnoname_with_args(self):
+        """:NONAME can consume and produce stack values."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ":NONAME DUP + ; 21 SWAP EXECUTE .",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_colonnoname_immediate_error(self):
+        """IMMEDIATE after :NONAME produces an error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ":NONAME 1 ; IMMEDIATE",
+        ])
+        self.assertIn("IMMEDIATE after :NONAME", text)
+
+    def test_colonnoname_recurse(self):
+        """RECURSE in a :NONAME definition calls itself."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ":NONAME DUP 1 > IF DUP 1- RECURSE * THEN ; 5 SWAP EXECUTE .",
+        ])
+        self.assertIn("120 ", text)
+
+    def test_colonnoname_if_else(self):
+        """Control flow inside :NONAME works."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ":NONAME DUP 0 > IF 1 ELSE -1 THEN ; 5 SWAP EXECUTE .",
+        ])
+        self.assertIn("1 ", text)
+
+    # ------------------------------------------------------------------
+    #  [: ... ;] — quotation literals
+    # ------------------------------------------------------------------
+
+    def test_quotation_basic(self):
+        """[: ;] compiles a quotation that can be EXECUTEd."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST [: 42 . ;] EXECUTE ;",
+            "TEST",
+        ])
+        self.assertIn("42 ", text)
+
+    def test_quotation_as_literal(self):
+        """[: ;] pushes an XT onto the stack at runtime."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": MAKE-PRINTER [: 77 . ;] ;",
+            "MAKE-PRINTER EXECUTE",
+        ])
+        self.assertIn("77 ", text)
+
+    def test_quotation_with_args(self):
+        """Quotations can consume stack values from the enclosing context."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST 10 [: DUP + ;] EXECUTE . ;",
+            "TEST",
+        ])
+        self.assertIn("20 ", text)
+
+    def test_quotation_nested(self):
+        """Nested quotations (quotation inside a quotation)."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST [: [: 55 . ;] EXECUTE ;] EXECUTE ;",
+            "TEST",
+        ])
+        self.assertIn("55 ", text)
+
+    def test_quotation_with_if(self):
+        """Control flow inside a quotation."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TEST [: DUP 0 > IF 1 ELSE -1 THEN ;] ;",
+            "5 TEST EXECUTE .",
+            "-3 TEST EXECUTE .",
+        ])
+        self.assertIn("1 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_quotation_with_variable(self):
+        """Quotation that reads/writes a variable."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE counter  0 counter !",
+            ": MAKE-INC [: counter @ 1+ counter ! ;] ;",
+            "MAKE-INC EXECUTE MAKE-INC EXECUTE MAKE-INC EXECUTE",
+            "counter @ .",
+        ])
+        self.assertIn("3 ", text)
+
+    # ------------------------------------------------------------------
+    #  Error guards for anonymous definitions
+    # ------------------------------------------------------------------
+
+    def test_semicolon_outside_def_error(self):
+        """; outside a definition produces a compile-only error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [";"])
+        self.assertIn("compile-only", text)
+
+    def test_semi_inside_quotation_error(self):
+        """; inside [: ... ;] produces an error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": FOO [: 1 ; ;] ;",
+        ])
+        self.assertIn("; inside [:", text)
+
+    def test_unmatched_close_quote_error(self):
+        """;] without matching [: produces an error."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": FOO 1 ;] ;",
+        ])
+        self.assertIn("unmatched ;]", text)
+
 
 # ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)

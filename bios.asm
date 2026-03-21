@@ -3681,6 +3681,20 @@ jit_bigram_table:
 ;  Then sets STATE=1 (compiling).  Code starts at HERE after the header.
 
 w_colon:
+    ; Guard: reject if already compiling
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_colon_not_compiling
+    ldi64 r10, str_nested_def
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_colon_not_compiling:
+    ; Clear stale :NONAME flag
+    ldi r1, 0
+    ldi64 r11, var_noname_flag
+    str r11, r1
     ; Check dictionary space: HERE + 1024 < R14 (data stack pointer)
     ; but only when HERE is in Bank 0 (system dict).  When KDOS
     ; ENTER-USERLAND moves HERE into ext mem (>= ram_size), the
@@ -3786,12 +3800,68 @@ w_colon_err:
 ;  ; (semicolon, IMMEDIATE) — end definition
 ; =====================================================================
 w_semicolon:
+    ; Guard: must be compiling
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_semi_state_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_semi_state_ok:
+    ; Guard: must not be inside [: ... ;] quotation
+    ldi64 r11, var_quot_depth
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_semi_quot_ok
+    ldi64 r10, str_semi_in_quot
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_semi_quot_ok:
     ; Compile ret.l
     ldi64 r11, compile_ret
     call.l r11
     ; STATE = 0 (interpreting)
     ldi r1, 0
     ldi64 r11, var_state
+    str r11, r1
+    ; NOTE: var_noname_flag is NOT cleared here.  It persists so that
+    ; IMMEDIATE (which follows ;) can detect the :NONAME case and
+    ; error out.  The flag is cleared at the start of : and :NONAME.
+    ret.l
+
+; =====================================================================
+;  :NONAME ( -- xt ) — begin anonymous (headerless) definition
+; =====================================================================
+;  Like : but no dictionary header is built. Pushes HERE (= the XT)
+;  onto the data stack.  Terminated by ; which leaves the XT.
+w_colonnoname:
+    ; Guard: reject if already compiling
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_colonnoname_ok
+    ldi64 r10, str_nested_def
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_colonnoname_ok:
+    ; Push HERE onto data stack — this is the resulting XT
+    ldi64 r11, var_here
+    ldn r0, r11
+    subi r14, 8
+    str r14, r0
+    ; Save XT for RECURSE
+    ldi64 r11, var_noname_xt
+    str r11, r0
+    ; Set STATE = 1 (compiling)
+    ldi r1, 1
+    ldi64 r11, var_state
+    str r11, r1
+    ; Set noname flag
+    ldi64 r11, var_noname_flag
     str r11, r1
     ret.l
 
@@ -5133,6 +5203,16 @@ w_literal:
 
 ; IMMEDIATE — set IMMEDIATE flag on most recent word
 w_immediate:
+    ; Guard: reject if last definition was :NONAME
+    ldi64 r11, var_noname_flag
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_immediate_ok
+    ldi64 r10, str_imm_noname
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_immediate_ok:
     ldi64 r11, var_latest
     ldn r9, r11               ; R9 = latest entry address
     mov r11, r9
@@ -7931,13 +8011,140 @@ w_bchar_empty:
 
 ; RECURSE (IMMEDIATE) -- compile call to current definition
 w_recurse:
+    ; If in :NONAME, use var_noname_xt instead of LATEST
+    ldi64 r11, var_noname_flag
+    ldn r11, r11
+    cmpi r11, 0
+    breq w_recurse_named
+    ; :NONAME path: compile call to var_noname_xt
+    ldi64 r11, var_noname_xt
+    ldn r9, r11
+    br w_recurse_emit
+w_recurse_named:
+    ; Named path: compile call to LATEST entry code
     ldi64 r11, var_latest
     ldn r9, r11
     ldi64 r11, entry_to_code
     call.l r11
+w_recurse_emit:
     mov r1, r9
     ldi64 r11, compile_call
     call.l r11
+    ret.l
+
+
+; =====================================================================
+;  [: (IMMEDIATE) — begin inline quotation
+; =====================================================================
+;  Compile-time: emits forward branch over quotation body, pushes
+;  {quot_xt, fixup_addr, sentinel} onto data stack.
+;  Sentinel = 0xDEAD0071 ("DEAD QUOT") for pairing validation.
+w_quote_open:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_quote_open_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_quote_open_ok:
+    ; Emit unconditional forward branch: lbr <placeholder>
+    ; LBR unconditional: opcode 0x40, then 16-bit BE offset
+    ldi64 r11, var_here
+    ldn r0, r11
+    ldi r7, 0x40
+    st.b r0, r7
+    inc r0
+    ; Save fixup address (where offset bytes go)
+    mov r9, r0                ; R9 = fixup_addr
+    ; Write placeholder offset (0x0000)
+    ldi r7, 0
+    st.b r0, r7
+    inc r0
+    st.b r0, r7
+    inc r0
+    ; Update HERE — now points to start of quotation body
+    ldi64 r11, var_here
+    str r11, r0
+    ; Push quot_xt (= current HERE = start of quotation body)
+    subi r14, 8
+    str r14, r0
+    ; Push fixup_addr
+    subi r14, 8
+    str r14, r9
+    ; Push sentinel (0xDEAD0071)
+    ldi64 r1, 0xDEAD0071
+    subi r14, 8
+    str r14, r1
+    ; Increment quotation depth
+    ldi64 r11, var_quot_depth
+    ldn r0, r11
+    addi r0, 1
+    str r11, r0
+    ret.l
+
+; =====================================================================
+;  ;] (IMMEDIATE) — end inline quotation
+; =====================================================================
+;  Compile-time: pops {sentinel, fixup_addr, quot_xt}, validates
+;  sentinel, compiles ret, resolves forward branch, compiles literal XT.
+w_quote_close:
+    ; Guard: compile-only
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    brne w_quote_close_ok
+    ldi64 r10, str_compile_only
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_quote_close_ok:
+    ; Pop sentinel and validate
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xDEAD0071
+    cmp r1, r11
+    breq w_quote_close_sentinel_ok
+    ldi64 r10, str_quot_mismatch
+    ldi64 r11, print_str
+    call.l r11
+    lbr quit_loop
+w_quote_close_sentinel_ok:
+    ; Pop fixup_addr
+    ldn r9, r14               ; R9 = fixup_addr
+    addi r14, 8
+    ; Pop quot_xt
+    ldn r13, r14              ; R13 = quot_xt (safe across calls)
+    addi r14, 8
+    ; Compile ret.l (end quotation body)
+    ldi64 r11, compile_ret
+    call.l r11
+    ; Resolve forward branch: offset = HERE - (fixup_addr + 2)
+    ldi64 r11, var_here
+    ldn r0, r11               ; R0 = HERE (target)
+    mov r1, r0
+    sub r1, r9                ; R1 = HERE - fixup_addr
+    subi r1, 2                ; R1 = HERE - (fixup_addr + 2)
+    ; Range check
+    ldi64 r11, check_branch16
+    call.l r11
+    ; Patch 16-bit big-endian offset at fixup_addr
+    mov r7, r1
+    lsri r7, 8
+    st.b r9, r7               ; high byte
+    inc r9
+    st.b r9, r1               ; low byte
+    ; Compile literal pushing quot_xt into enclosing word
+    mov r1, r13
+    ldi64 r11, compile_literal
+    call.l r11
+    ; Decrement quotation depth
+    ldi64 r11, var_quot_depth
+    ldn r0, r11
+    subi r0, 1
+    str r11, r0
     ret.l
 
 
@@ -15887,12 +16094,39 @@ d_resize_denied_q:
     ret.l
 
 ; === RESIZE-REQUEST ===
-latest_entry:
 d_resize_request:
     .dq d_resize_denied_q
     .db 14
     .ascii "RESIZE-REQUEST"
     ldi64 r11, w_resize_request
+    call.l r11
+    ret.l
+
+; === :NONAME ===
+d_colonnoname:
+    .dq d_resize_request
+    .db 7
+    .ascii ":NONAME"
+    ldi64 r11, w_colonnoname
+    call.l r11
+    ret.l
+
+; === [: ===
+d_quote_open:
+    .dq d_colonnoname
+    .db 0x82
+    .ascii "[:"
+    ldi64 r11, w_quote_open
+    call.l r11
+    ret.l
+
+; === ;] ===
+latest_entry:
+d_quote_close:
+    .dq d_quote_open
+    .db 0x82
+    .ascii ";]"
+    ldi64 r11, w_quote_close
     call.l r11
     ret.l
 
@@ -15929,6 +16163,14 @@ var_interp_if_depth:
     .dq 0                     ; nesting depth (0 = not in temp IF block)
 var_interp_if_start:
     .dq 0                     ; HERE value at start of outermost temp IF
+
+; Anonymous definition state (:NONAME, [: ;] quotations)
+var_noname_flag:
+    .dq 0                     ; 1 while compiling (or just finished) :NONAME
+var_noname_xt:
+    .dq 0                     ; XT of current :NONAME body (for RECURSE)
+var_quot_depth:
+    .dq 0                     ; nesting depth of [: ... ;] quotations
 
 ; [IF]/[ELSE] skip-mode nesting depth (avoids R10 clobber by print_str)
 var_cond_depth:
@@ -16091,6 +16333,15 @@ str_dict_full:
     .asciiz "Dictionary full\n"
 str_dict_overflow:
     .asciiz "dictionary overflow\n"
+
+str_imm_noname:
+    .asciiz "IMMEDIATE after :NONAME\n"
+str_nested_def:
+    .asciiz "nested definition\n"
+str_quot_mismatch:
+    .asciiz "unmatched ;]\n"
+str_semi_in_quot:
+    .asciiz "; inside [: ... ;]\n"
 
 str_fsload_no_disk:
     .asciiz "FSLOAD: no disk\n"

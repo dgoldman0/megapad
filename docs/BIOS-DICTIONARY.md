@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **363** dictionary words defined in `bios.asm`.
+Complete catalog of all **366** dictionary words defined in `bios.asm`.
 
 ---
 
@@ -255,7 +255,7 @@ Each entry is a linked list node:
 | 108 | `LEAVE` | `( -- )` | ✓ | Compile UNLOOP + forward branch (resolved by LOOP/+LOOP) |
 | 109 | `UNLOOP` | `( -- )` | ✓ | Compile `addi R15, 16` to drop loop control parameters from RSP |
 
-### Compilation & Defining (21 words)
+### Compilation & Defining (24 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -280,34 +280,37 @@ Each entry is a linked list node:
 | 128 | `[']` | `( "name" -- )` | ✓ | Compile-time: parse next word, compile its XT as a literal. Equivalent to `' name LITERAL` |
 | 129 | `>BODY` | `( xt -- addr )` | | Data-field address of a CREATEd word. CREATE's trampoline is 30 bytes, so addr = xt + 30 |
 | 130 | `FIND` | `( c-addr -- c-addr 0 \| xt 1 \| xt -1 )` | | ANS FIND: search dictionary for counted string. Returns xt+1 if immediate, xt+-1 if normal, c-addr+0 if not found |
+| 131 | `:NONAME` | `( -- xt )` | | Begin anonymous (headerless) definition. Pushes HERE as the XT. Terminated by `;` which leaves XT on stack |
+| 132 | `[:` | `( -- )` | ✓ | Open quotation: compile forward branch over body, push fixup data + sentinel. Must be inside a definition |
+| 133 | `;]` | `( -- )` | ✓ | Close quotation: compile ret, resolve forward branch, compile literal of quotation XT into enclosing definition |
 
 ### Return Stack (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 131 | `>R` | `( x -- )` `R:( -- x )` | ✓ | Compile inline: pop data stack, push return stack (10 bytes) |
-| 132 | `R>` | `( -- x )` `R:( x -- )` | ✓ | Compile inline: pop return stack, push data stack (10 bytes) |
-| 133 | `R@` | `( -- x )` `R:( x -- x )` | ✓ | Compile inline: copy RSP top to data stack (7 bytes) |
-| 134 | `2>R` | `( x1 x2 -- )` `R:( -- x1 x2 )` | ✓ | Compile inline: move pair to return stack (20 bytes) |
-| 135 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
-| 136 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
+| 134 | `>R` | `( x -- )` `R:( -- x )` | ✓ | Compile inline: pop data stack, push return stack (10 bytes) |
+| 135 | `R>` | `( -- x )` `R:( x -- )` | ✓ | Compile inline: pop return stack, push data stack (10 bytes) |
+| 136 | `R@` | `( -- x )` `R:( x -- x )` | ✓ | Compile inline: copy RSP top to data stack (7 bytes) |
+| 137 | `2>R` | `( x1 x2 -- )` `R:( -- x1 x2 )` | ✓ | Compile inline: move pair to return stack (20 bytes) |
+| 138 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
+| 139 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
 
 ### Input Source & Interpreter (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 137 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
-| 138 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
-| 139 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source (saves/restores TIB state on RSP) |
-| 140 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
-| 141 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
+| 140 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
+| 141 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
+| 142 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source (saves/restores TIB state on RSP) |
+| 143 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
+| 144 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
 
 ### Comments (2 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 142 | `\` | `( -- )` | ✓ | Line comment: set `>IN` = TIB length (skip rest of line) |
-| 143 | `(` | `( -- )` | ✓ | Block comment: skip characters until matching `)` |
+| 145 | `\` | `( -- )` | ✓ | Line comment: set `>IN` = TIB length (skip rest of line) |
+| 146 | `(` | `( -- )` | ✓ | Block comment: skip characters until matching `)` |
 
 ### JIT Compiler (4 words)
 
@@ -321,10 +324,10 @@ code.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 150 | `JIT-ON` | `( -- )` | | Enable JIT inline compilation |
-| 151 | `JIT-OFF` | `( -- )` | | Disable JIT inline compilation |
-| 152 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
-| 153 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
+| 153 | `JIT-ON` | `( -- )` | | Enable JIT inline compilation |
+| 154 | `JIT-OFF` | `( -- )` | | Disable JIT inline compilation |
+| 155 | `JIT-STATS` | `( -- )` | | Print JIT statistics: inlines, folds, peepholes, and bytes saved |
+| 156 | `JIT-RESET` | `( -- )` | | Reset JIT counters and peephole state to zero |
 
 **Inlined primitives (18):** `DUP` `DROP` `SWAP` `OVER` `NIP` `2DROP`
 `+` `-` `AND` `OR` `XOR` `INVERT` `NEGATE` `@` `!` `CELLS` `CELL+`
@@ -361,311 +364,311 @@ of compiled code.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 142 | `BL` | `( -- 32 )` | | Push space character constant (ASCII 32) |
-| 143 | `TRUE` | `( -- -1 )` | | Push true flag (0xFFFFFFFFFFFFFFFF) |
-| 144 | `FALSE` | `( -- 0 )` | | Push false flag (0) |
-| 145 | `LATEST` | `( -- entry )` | | Push current LATEST pointer (most recent dictionary entry address) |
-| 146 | `ABORT` | `( -- )` | | Reset DSP and RSP, jump to QUIT |
-| 147 | `ABORT"` | `( flag -- )` | ✓ | Compile: if flag≠0 at runtime, print inline message string and ABORT |
-| 148 | `TALIGN` | `( -- )` | | Align HERE to next 64-byte boundary (for tile data) |
-| 149 | `FSLOAD` | `( "name" -- )` | | Load named file from MP64FS disk and EVALUATE its contents line-by-line |
+| 145 | `BL` | `( -- 32 )` | | Push space character constant (ASCII 32) |
+| 146 | `TRUE` | `( -- -1 )` | | Push true flag (0xFFFFFFFFFFFFFFFF) |
+| 147 | `FALSE` | `( -- 0 )` | | Push false flag (0) |
+| 148 | `LATEST` | `( -- entry )` | | Push current LATEST pointer (most recent dictionary entry address) |
+| 149 | `ABORT` | `( -- )` | | Reset DSP and RSP, jump to QUIT |
+| 150 | `ABORT"` | `( flag -- )` | ✓ | Compile: if flag≠0 at runtime, print inline message string and ABORT |
+| 151 | `TALIGN` | `( -- )` | | Align HERE to next 64-byte boundary (for tile data) |
+| 152 | `FSLOAD` | `( "name" -- )` | | Load named file from MP64FS disk and EVALUATE its contents line-by-line |
 
 ### Tile Engine (39 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 150 | `TI` | `( -- )` | | Print all tile CSR info (mode, ctrl, src0, src1, dst, acc0–3) |
-| 151 | `TVIEW` | `( addr -- )` | | Display 64 bytes as 4×16 hex grid |
-| 152 | `TFILL` | `( addr byte -- )` | | Fill 64 bytes at addr with byte value |
-| 153 | `TSRC0!` | `( addr -- )` | | Set tile source 0 address (CSR 0x16) |
-| 154 | `TSRC1!` | `( addr -- )` | | Set tile source 1 address (CSR 0x17) |
-| 155 | `TDST!` | `( addr -- )` | | Set tile destination address (CSR 0x18) |
-| 156 | `TMODE!` | `( n -- )` | | Set tile mode register (CSR 0x14) |
-| 157 | `TCTRL!` | `( n -- )` | | Set tile control register (CSR 0x15) |
-| 158 | `TMODE@` | `( -- n )` | | Read tile mode register (CSR 0x14) |
-| 159 | `TCTRL@` | `( -- n )` | | Read tile control register (CSR 0x15) |
-| 160 | `TADD` | `( -- )` | | Tile element-wise addition (t.add instruction) |
-| 161 | `TSUB` | `( -- )` | | Tile element-wise subtraction (t.sub) |
-| 162 | `TAND` | `( -- )` | | Tile element-wise bitwise AND (t.and) |
-| 163 | `TOR` | `( -- )` | | Tile element-wise bitwise OR (t.or) |
-| 164 | `TXOR` | `( -- )` | | Tile element-wise bitwise XOR (t.xor) |
-| 165 | `TMUL` | `( -- )` | | Tile element-wise multiplication (t.mul) |
-| 166 | `TDOT` | `( -- )` | | Tile dot product, result in ACC (t.dot) |
-| 167 | `TSUM` | `( -- )` | | Tile sum reduction, result in ACC (t.sum) |
-| 168 | `TMIN` | `( -- )` | | Tile reduce-min, result in ACC (t.rmin) |
-| 169 | `TMAX` | `( -- )` | | Tile reduce-max, result in ACC (t.rmax) |
-| 170 | `TTRANS` | `( -- )` | | Tile transpose (t.trans) |
-| 171 | `TZERO` | `( -- )` | | Tile zero-fill destination (t.zero) |
-| 172 | `TPOPCNT` | `( -- )` | | Tile popcount reduction, result in ACC (t.popcnt) |
-| 173 | `TL1` | `( -- )` | | Tile L1 norm reduction, result in ACC (t.l1) |
-| 174 | `TEMIN` | `( -- )` | | Tile element-wise min, writes to DST (t.min) |
-| 175 | `TEMAX` | `( -- )` | | Tile element-wise max, writes to DST (t.max) |
-| 176 | `TABS` | `( -- )` | | Tile element-wise absolute value, writes to DST (t.abs) |
-| 177 | `TSUMSQ` | `( -- )` | | Tile sum-of-squares reduction, result in ACC (t.sumsq) |
-| 178 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=min, ACC1=index (t.minidx) |
-| 179 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=max, ACC1=index (t.maxidx) |
-| 180 | `TWMUL` | `( -- )` | | Tile widening multiply: 8b×8b→16b, 16b×16b→32b (t.wmul) |
-| 181 | `TMAC` | `( -- )` | | Tile multiply-accumulate: DST += SRC0 × SRC1 (t.mac) |
-| 182 | `TFMA` | `( -- )` | | Tile fused multiply-add: DST = SRC0 × SRC1 + DST (t.fma) |
-| 183 | `TDOTACC` | `( -- )` | | Tile 4-way dot product accumulate, results in ACC0–ACC3 (t.dotacc) |
-| 184 | `ACC@` | `( -- n )` | | Read tile accumulator ACC0 (CSR 0x19) |
-| 185 | `ACC1@` | `( -- n )` | | Read tile accumulator ACC1 (CSR 0x1A) |
-| 186 | `ACC2@` | `( -- n )` | | Read tile accumulator ACC2 (CSR 0x1B) |
-| 187 | `ACC3@` | `( -- n )` | | Read tile accumulator ACC3 (CSR 0x1C) |
-| 188 | `CYCLES` | `( -- n )` | | Read 32-bit hardware timer counter (MMIO +0x0100) |
+| 153 | `TI` | `( -- )` | | Print all tile CSR info (mode, ctrl, src0, src1, dst, acc0–3) |
+| 154 | `TVIEW` | `( addr -- )` | | Display 64 bytes as 4×16 hex grid |
+| 155 | `TFILL` | `( addr byte -- )` | | Fill 64 bytes at addr with byte value |
+| 156 | `TSRC0!` | `( addr -- )` | | Set tile source 0 address (CSR 0x16) |
+| 157 | `TSRC1!` | `( addr -- )` | | Set tile source 1 address (CSR 0x17) |
+| 158 | `TDST!` | `( addr -- )` | | Set tile destination address (CSR 0x18) |
+| 159 | `TMODE!` | `( n -- )` | | Set tile mode register (CSR 0x14) |
+| 160 | `TCTRL!` | `( n -- )` | | Set tile control register (CSR 0x15) |
+| 161 | `TMODE@` | `( -- n )` | | Read tile mode register (CSR 0x14) |
+| 162 | `TCTRL@` | `( -- n )` | | Read tile control register (CSR 0x15) |
+| 163 | `TADD` | `( -- )` | | Tile element-wise addition (t.add instruction) |
+| 164 | `TSUB` | `( -- )` | | Tile element-wise subtraction (t.sub) |
+| 165 | `TAND` | `( -- )` | | Tile element-wise bitwise AND (t.and) |
+| 166 | `TOR` | `( -- )` | | Tile element-wise bitwise OR (t.or) |
+| 167 | `TXOR` | `( -- )` | | Tile element-wise bitwise XOR (t.xor) |
+| 168 | `TMUL` | `( -- )` | | Tile element-wise multiplication (t.mul) |
+| 169 | `TDOT` | `( -- )` | | Tile dot product, result in ACC (t.dot) |
+| 170 | `TSUM` | `( -- )` | | Tile sum reduction, result in ACC (t.sum) |
+| 171 | `TMIN` | `( -- )` | | Tile reduce-min, result in ACC (t.rmin) |
+| 172 | `TMAX` | `( -- )` | | Tile reduce-max, result in ACC (t.rmax) |
+| 173 | `TTRANS` | `( -- )` | | Tile transpose (t.trans) |
+| 174 | `TZERO` | `( -- )` | | Tile zero-fill destination (t.zero) |
+| 175 | `TPOPCNT` | `( -- )` | | Tile popcount reduction, result in ACC (t.popcnt) |
+| 176 | `TL1` | `( -- )` | | Tile L1 norm reduction, result in ACC (t.l1) |
+| 177 | `TEMIN` | `( -- )` | | Tile element-wise min, writes to DST (t.min) |
+| 178 | `TEMAX` | `( -- )` | | Tile element-wise max, writes to DST (t.max) |
+| 179 | `TABS` | `( -- )` | | Tile element-wise absolute value, writes to DST (t.abs) |
+| 180 | `TSUMSQ` | `( -- )` | | Tile sum-of-squares reduction, result in ACC (t.sumsq) |
+| 181 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=min, ACC1=index (t.minidx) |
+| 182 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=max, ACC1=index (t.maxidx) |
+| 183 | `TWMUL` | `( -- )` | | Tile widening multiply: 8b×8b→16b, 16b×16b→32b (t.wmul) |
+| 184 | `TMAC` | `( -- )` | | Tile multiply-accumulate: DST += SRC0 × SRC1 (t.mac) |
+| 185 | `TFMA` | `( -- )` | | Tile fused multiply-add: DST = SRC0 × SRC1 + DST (t.fma) |
+| 186 | `TDOTACC` | `( -- )` | | Tile 4-way dot product accumulate, results in ACC0–ACC3 (t.dotacc) |
+| 187 | `ACC@` | `( -- n )` | | Read tile accumulator ACC0 (CSR 0x19) |
+| 188 | `ACC1@` | `( -- n )` | | Read tile accumulator ACC1 (CSR 0x1A) |
+| 189 | `ACC2@` | `( -- n )` | | Read tile accumulator ACC2 (CSR 0x1B) |
+| 190 | `ACC3@` | `( -- n )` | | Read tile accumulator ACC3 (CSR 0x1C) |
+| 191 | `CYCLES` | `( -- n )` | | Read 32-bit hardware timer counter (MMIO +0x0100) |
 
 ### NIC — Network Interface (10 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 189 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS register (MMIO +0x0401) |
-| 190 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
-| 191 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
-| 192 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
-| 193 | `NTOH` | `( x -- x' )` | | Network-to-host 64-bit byte order. Uses BSWAP instruction. |
-| 194 | `HTON` | `( x -- x' )` | | Host-to-network 64-bit byte order. Alias of NTOH (self-inverse). |
-| 195 | `NTOH32` | `( x -- x' )` | | Network-to-host 32-bit: BSWAP + 32 RSHIFT. |
-| 196 | `HTON32` | `( x -- x' )` | | Host-to-network 32-bit. Alias of NTOH32. |
-| 197 | `NTOH16` | `( x -- x' )` | | Network-to-host 16-bit: BSWAP + 48 RSHIFT. |
-| 198 | `HTON16` | `( x -- x' )` | | Host-to-network 16-bit. Alias of NTOH16. |
+| 192 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS register (MMIO +0x0401) |
+| 193 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
+| 194 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
+| 195 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
+| 196 | `NTOH` | `( x -- x' )` | | Network-to-host 64-bit byte order. Uses BSWAP instruction. |
+| 197 | `HTON` | `( x -- x' )` | | Host-to-network 64-bit byte order. Alias of NTOH (self-inverse). |
+| 198 | `NTOH32` | `( x -- x' )` | | Network-to-host 32-bit: BSWAP + 32 RSHIFT. |
+| 199 | `HTON32` | `( x -- x' )` | | Host-to-network 32-bit. Alias of NTOH32. |
+| 200 | `NTOH16` | `( x -- x' )` | | Network-to-host 16-bit: BSWAP + 48 RSHIFT. |
+| 201 | `HTON16` | `( x -- x' )` | | Host-to-network 16-bit. Alias of NTOH16. |
 
 ### Pool Allocator (3 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 199 | `POOL-ALLOC` | `( bitmap -- bitmap' index )` | | Allocate lowest free slot. Uses CTZ(~bitmap). Aborts if pool full. |
-| 200 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
-| 201 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
+| 202 | `POOL-ALLOC` | `( bitmap -- bitmap' index )` | | Allocate lowest free slot. Uses CTZ(~bitmap). Aborts if pool full. |
+| 203 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
+| 204 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
 ### Disk / Storage (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 202 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
-| 203 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
-| 204 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
-| 205 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
-| 206 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
-| 207 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
-| 208 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
+| 205 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
+| 206 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
+| 207 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
+| 208 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
+| 209 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
+| 210 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
+| 211 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
 
 ### Timer & Interrupts (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 199 | `TIMER!` | `( compare -- )` | | Set 32-bit compare-match register (MMIO +0x0104, written via st.w) |
-| 200 | `TIMER-CTRL!` | `( ctrl -- )` | | Write timer CONTROL byte (bit0=enable, bit1=compare-match IRQ, bit2=auto-reload) |
-| 201 | `TIMER-ACK` | `( -- )` | | Acknowledge timer IRQ (write 0x01 to STATUS at MMIO +0x0109) |
-| 202 | `EI!` | `( -- )` | | Enable interrupts globally (EI instruction) |
-| 203 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
-| 204 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
+| 202 | `TIMER!` | `( compare -- )` | | Set 32-bit compare-match register (MMIO +0x0104, written via st.w) |
+| 203 | `TIMER-CTRL!` | `( ctrl -- )` | | Write timer CONTROL byte (bit0=enable, bit1=compare-match IRQ, bit2=auto-reload) |
+| 204 | `TIMER-ACK` | `( -- )` | | Acknowledge timer IRQ (write 0x01 to STATUS at MMIO +0x0109) |
+| 205 | `EI!` | `( -- )` | | Enable interrupts globally (EI instruction) |
+| 206 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
+| 207 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
 
 ### RTC / System Clock (7 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 347 | `MS@` | `( -- ms )` | | Read 64-bit monotonic uptime in ms (reads UPTIME +0x0B00, byte 0 latches) |
-| 348 | `EPOCH@` | `( -- ms )` | | Read 64-bit epoch ms since Unix epoch (reads EPOCH +0x0B08, byte 0 latches) |
-| 349 | `RTC@` | `( -- sec min hour day mon year dow )` | | Read all seven calendar fields onto the stack |
-| 350 | `RTC!` | `( sec min hour day mon year -- )` | | Set calendar (writes SEC–YEAR_HI at +0x10–+0x16) |
-| 351 | `RTC-CTRL!` | `( ctrl -- )` | | Write RTC CTRL byte (bit0=run, bit1=alarm IRQ enable) at +0x18 |
-| 352 | `RTC-ALARM!` | `( sec min hour -- )` | | Set alarm time (writes ALARM_S/M/H at +0x1A–+0x1C) |
-| 353 | `RTC-ACK` | `( -- )` | | Clear alarm flag (write 0x01 to STATUS at +0x19) |
+| 350 | `MS@` | `( -- ms )` | | Read 64-bit monotonic uptime in ms (reads UPTIME +0x0B00, byte 0 latches) |
+| 351 | `EPOCH@` | `( -- ms )` | | Read 64-bit epoch ms since Unix epoch (reads EPOCH +0x0B08, byte 0 latches) |
+| 352 | `RTC@` | `( -- sec min hour day mon year dow )` | | Read all seven calendar fields onto the stack |
+| 353 | `RTC!` | `( sec min hour day mon year -- )` | | Set calendar (writes SEC–YEAR_HI at +0x10–+0x16) |
+| 354 | `RTC-CTRL!` | `( ctrl -- )` | | Write RTC CTRL byte (bit0=run, bit1=alarm IRQ enable) at +0x18 |
+| 355 | `RTC-ALARM!` | `( sec min hour -- )` | | Set alarm time (writes ALARM_S/M/H at +0x1A–+0x1C) |
+| 356 | `RTC-ACK` | `( -- )` | | Clear alarm flag (write 0x01 to STATUS at +0x19) |
 
 ### Multicore (11 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 205 | `COREID` | `( -- n )` | | Push this core's hardware ID (0–3). Reads CSR 0x20. |
-| 206 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
-| 207 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
-| 208 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
-| 209 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
-| 210 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
-| 211 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
-| 212 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
-| 213 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
-| 214 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
-| 215 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
+| 208 | `COREID` | `( -- n )` | | Push this core's hardware ID (0–3). Reads CSR 0x20. |
+| 209 | `NCORES` | `( -- n )` | | Push total number of hardware cores. Reads CSR 0x21. |
+| 210 | `IPI-SEND` | `( xt core -- )` | | Send inter-processor interrupt: writes 64-bit XT to mailbox DATA, then triggers IPI to target core. |
+| 211 | `IPI-STATUS` | `( -- mask )` | | Read pending IPI bitmask for this core (bit N = IPI from core N). MMIO at MBOX_BASE+0x09. |
+| 212 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
+| 213 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
+| 214 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
+| 215 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
+| 216 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
+| 217 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
+| 218 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
 
 ### Performance Counters (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 216 | `PERF-CYCLES` | `( -- n )` | | Read cycle counter (CSR 0x68) |
-| 217 | `PERF-STALLS` | `( -- n )` | | Read stall counter (CSR 0x69) |
-| 218 | `PERF-TILEOPS` | `( -- n )` | | Read tile operation counter (CSR 0x6A) |
-| 219 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
-| 220 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
+| 219 | `PERF-CYCLES` | `( -- n )` | | Read cycle counter (CSR 0x68) |
+| 220 | `PERF-STALLS` | `( -- n )` | | Read stall counter (CSR 0x69) |
+| 221 | `PERF-TILEOPS` | `( -- n )` | | Read tile operation counter (CSR 0x6A) |
+| 222 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
+| 223 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
 
 ### CRC Engine (6 words) — ISA-native (EXT.CRYPTO `FB`)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 221 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (`crc.poly`) |
-| 222 | `CRC-INIT!` | `( n -- )` | | Reset CRC accumulator (`crc.init`) |
-| 223 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (`crc.din`) |
-| 224 | `CRC@` | `( -- n )` | | Read current CRC result (CSR 0x80 CRC_ACC) |
-| 225 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (`crc.init`) |
-| 226 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (`crc.fin`, result → CSR 0x80) |
+| 224 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (`crc.poly`) |
+| 225 | `CRC-INIT!` | `( n -- )` | | Reset CRC accumulator (`crc.init`) |
+| 226 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (`crc.din`) |
+| 227 | `CRC@` | `( -- n )` | | Read current CRC result (CSR 0x80 CRC_ACC) |
+| 228 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (`crc.init`) |
+| 229 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (`crc.fin`, result → CSR 0x80) |
 
 ### Memory BIST (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 227 | `BIST-FULL` | `( -- )` | | Start full memory BIST (March C− + checkerboard + addr-as-data) |
-| 228 | `BIST-QUICK` | `( -- )` | | Start quick memory BIST (March C− only) |
-| 229 | `BIST-STATUS` | `( -- n )` | | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail |
-| 230 | `BIST-FAIL-ADDR` | `( -- n )` | | Read first failing address |
-| 231 | `BIST-FAIL-DATA` | `( -- n )` | | Read expected/actual data (packed) |
+| 230 | `BIST-FULL` | `( -- )` | | Start full memory BIST (March C− + checkerboard + addr-as-data) |
+| 231 | `BIST-QUICK` | `( -- )` | | Start quick memory BIST (March C− only) |
+| 232 | `BIST-STATUS` | `( -- n )` | | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail |
+| 233 | `BIST-FAIL-ADDR` | `( -- n )` | | Read first failing address |
+| 234 | `BIST-FAIL-DATA` | `( -- n )` | | Read expected/actual data (packed) |
 
 ### Tile Self-Test (3 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 232 | `TILE-TEST` | `( -- )` | | Start tile datapath self-test (~200 cycles) |
-| 233 | `TILE-TEST@` | `( -- n )` | | Read self-test status: 0=idle, 2=pass, 3=fail |
-| 234 | `TILE-DETAIL@` | `( -- n )` | | Read failed sub-test bitmask |
+| 235 | `TILE-TEST` | `( -- )` | | Start tile datapath self-test (~200 cycles) |
+| 236 | `TILE-TEST@` | `( -- n )` | | Read self-test status: 0=idle, 2=pass, 3=fail |
+| 237 | `TILE-DETAIL@` | `( -- n )` | | Read failed sub-test bitmask |
 
 ### Stride / 2D Addressing (6 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 235 | `TSTRIDE-R!` | `( n -- )` | | Set row stride in bytes (CSR 0x40) |
-| 236 | `TSTRIDE-R@` | `( -- n )` | | Read row stride (CSR 0x40) |
-| 237 | `TTILE-H!` | `( n -- )` | | Set tile height for 2D ops (CSR 0x42) |
-| 238 | `TTILE-W!` | `( n -- )` | | Set tile width for 2D ops (CSR 0x43) |
-| 239 | `TLOAD2D` | `( -- )` | | 2D strided load into tile register (t.load2d) |
-| 240 | `TSTORE2D` | `( -- )` | | 2D strided store from tile register (t.store2d) |
+| 238 | `TSTRIDE-R!` | `( n -- )` | | Set row stride in bytes (CSR 0x40) |
+| 239 | `TSTRIDE-R@` | `( -- n )` | | Read row stride (CSR 0x40) |
+| 240 | `TTILE-H!` | `( n -- )` | | Set tile height for 2D ops (CSR 0x42) |
+| 241 | `TTILE-W!` | `( n -- )` | | Set tile width for 2D ops (CSR 0x43) |
+| 242 | `TLOAD2D` | `( -- )` | | 2D strided load into tile register (t.load2d) |
+| 243 | `TSTORE2D` | `( -- )` | | 2D strided store from tile register (t.store2d) |
 
 ### FP16 / BF16 Modes (2 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 241 | `FP16-MODE` | `( -- )` | | Set TMODE to FP16 half-precision (EW=4) |
-| 242 | `BF16-MODE` | `( -- )` | | Set TMODE to bfloat16 (EW=5) |
+| 244 | `FP16-MODE` | `( -- )` | | Set TMODE to FP16 half-precision (EW=4) |
+| 245 | `BF16-MODE` | `( -- )` | | Set TMODE to bfloat16 (EW=5) |
 
 ### Instruction Cache (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 243 | `ICACHE-ON` | `( -- )` | | Enable the instruction cache |
-| 244 | `ICACHE-OFF` | `( -- )` | | Disable the instruction cache |
-| 245 | `ICACHE-INV` | `( -- )` | | Invalidate all I-cache lines, reset stats, re-enable |
-| 246 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
-| 247 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
+| 246 | `ICACHE-ON` | `( -- )` | | Enable the instruction cache |
+| 247 | `ICACHE-OFF` | `( -- )` | | Disable the instruction cache |
+| 248 | `ICACHE-INV` | `( -- )` | | Invalidate all I-cache lines, reset stats, re-enable |
+| 249 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
+| 250 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
 
 ### AES-256/128-GCM Engine (11 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 248 | `AES-KEY!` | `( addr -- )` | | Load 256-bit key (32 bytes at addr) into AES engine |
-| 249 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
-| 250 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
-| 251 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
-| 252 | `AES-CMD!` | `( cmd -- )` | | Start operation: 1 = encrypt, 2 = decrypt |
-| 253 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done, 2 = auth fail |
-| 254 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
-| 255 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
-| 256 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
-| 257 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
-| 258 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
+| 251 | `AES-KEY!` | `( addr -- )` | | Load 256-bit key (32 bytes at addr) into AES engine |
+| 252 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
+| 253 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
+| 254 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
+| 255 | `AES-CMD!` | `( cmd -- )` | | Start operation: 1 = encrypt, 2 = decrypt |
+| 256 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done, 2 = auth fail |
+| 257 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
+| 258 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
+| 259 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
+| 260 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+| 261 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
 
 ### SHA-3 / SHAKE Engine (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 259 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
-| 260 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
-| 261 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store digest at addr (mode-aware: 32B for SHA3-256, 64B for SHA3-512) |
-| 262 | `SHA3-STATUS@` | `( -- status )` | | Read engine status: 0 = busy, 1 = ready |
-| 263 | `SHA3-MODE!` | `( mode -- )` | | Set mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
-| 264 | `SHA3-MODE@` | `( -- mode )` | | Read current hash mode |
-| 265 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
-| 266 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
+| 262 | `SHA3-INIT` | `( -- )` | | Initialize SHA3 engine for new hash computation |
+| 263 | `SHA3-UPDATE` | `( addr len -- )` | | Feed data (len bytes at addr) into SHA3 engine |
+| 264 | `SHA3-FINAL` | `( addr -- )` | | Finalize hash and store digest at addr (mode-aware: 32B for SHA3-256, 64B for SHA3-512) |
+| 265 | `SHA3-STATUS@` | `( -- status )` | | Read engine status: 0 = busy, 1 = ready |
+| 266 | `SHA3-MODE!` | `( mode -- )` | | Set mode: 0=SHA3-256, 1=SHA3-512, 2=SHAKE128, 3=SHAKE256 |
+| 267 | `SHA3-MODE@` | `( -- mode )` | | Read current hash mode |
+| 268 | `SHA3-SQUEEZE` | `( addr len -- )` | | Squeeze len bytes of XOF output (SHAKE modes) |
+| 269 | `SHA3-SQUEEZE-NEXT` | `( addr len -- )` | | Auto-permute and squeeze next XOF block |
 
 ### SHA-256 Engine (5 words) — ISA-native (EXT.CRYPTO `FB`)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 267 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (`sha.init 0`) |
-| 268 | `SHA256-UPDATE` | `( addr len -- )` | | Feed data bytes into SHA-256 block buffer (`sha.din`) |
-| 269 | `SHA256-FINAL` | `( addr -- )` | | Finalize hash (`sha.final` + `sha.dout`), copy 32-byte digest to addr |
-| 270 | `SHA256-STATUS@` | `( -- status )` | | Always returns 0 (engine is synchronous, always ready) |
-| 271 | `SHA256-DOUT@` | `( addr -- )` | | Read 32 bytes of digest via `sha.dout` to addr |
+| 270 | `SHA256-INIT` | `( -- )` | | Initialize SHA-256 state (`sha.init 0`) |
+| 271 | `SHA256-UPDATE` | `( addr len -- )` | | Feed data bytes into SHA-256 block buffer (`sha.din`) |
+| 272 | `SHA256-FINAL` | `( addr -- )` | | Finalize hash (`sha.final` + `sha.dout`), copy 32-byte digest to addr |
+| 273 | `SHA256-STATUS@` | `( -- status )` | | Always returns 0 (engine is synchronous, always ready) |
+| 274 | `SHA256-DOUT@` | `( addr -- )` | | Read 32 bytes of digest via `sha.dout` to addr |
 
 ### CRC DMA (4 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 272 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
-| 273 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
-| 274 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
-| 275 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
+| 275 | `CRC-DMA` | `( addr len -- )` | | Feed len bytes via DMA to CRC engine |
+| 276 | `CCRC32` | `( addr len -- crc )` | | Compute CRC32 of memory region (reset + DMA + finalize) |
+| 277 | `CRC-DMA!` | `( addr -- )` | | Set CRC DMA source address |
+| 278 | `CRC-DMA-LEN!` | `( n -- )` | | Set CRC DMA transfer length |
 
 ### TRNG (3 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 276 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
-| 277 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
-| 278 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
+| 279 | `RANDOM` | `( -- u )` | | Return a 64-bit random number |
+| 280 | `RANDOM8` | `( -- u )` | | Return an 8-bit random number (0–255) |
+| 281 | `SEED-RNG` | `( u -- )` | | Seed the CSPRNG (emulator only) |
 
 ### Field ALU (12 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 279 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
-| 280 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
-| 281 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
-| 282 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
-| 283 | `FADD` | `( a b -- r )` | | (a + b) mod p |
-| 284 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
-| 285 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
-| 286 | `FSQR` | `( a -- r )` | | a² mod p |
-| 287 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
-| 288 | `FPOW` | `( a b -- r )` | | a^b mod p |
-| 289 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
-| 290 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
+| 282 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
+| 283 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
+| 284 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
+| 285 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
+| 286 | `FADD` | `( a b -- r )` | | (a + b) mod p |
+| 287 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
+| 288 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
+| 289 | `FSQR` | `( a -- r )` | | a² mod p |
+| 290 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
+| 291 | `FPOW` | `( a b -- r )` | | a^b mod p |
+| 292 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
+| 293 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
 
 ### NTT Engine (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 292 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
-| 293 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
-| 294 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
-| 295 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
-| 296 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
-| 297 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
-| 298 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
-| 299 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
-| 300 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
+| 295 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
+| 296 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
+| 297 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
+| 298 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
+| 299 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
+| 300 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
+| 301 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
+| 302 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
+| 303 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
 
 ### KEM Engine — ML-KEM-512 (7 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 301 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
-| 302 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
-| 303 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
-| 304 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
-| 305 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
-| 306 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
-| 307 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
+| 304 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
+| 305 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
+| 306 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
+| 307 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
+| 308 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
+| 309 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
+| 310 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
 ### Cooperative Multitasking (8 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 308 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
-| 309 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
-| 310 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
-| 311 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
-| 312 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
-| 313 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
-| 314 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
-| 315 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
+| 311 | `PAUSE` | `( -- )` | | Round-robin yield across all 4 task slots via `SEP R20`; resumes when the next active task yields back |
+| 312 | `TASK-YIELD` | `( -- )` | | Yield from the current background task back to Task 0 via `SEP R20` |
+| 313 | `BACKGROUND` | `( xt -- )` | | Set xt as Task 1 body and start it |
+| 314 | `TASK-STOP` | `( n -- )` | | Stop background task in slot n (1–3), reset to idle |
+| 315 | `TASK?` | `( n -- flag )` | | Return 0 if task slot n (1–3) is idle, 1 if running |
+| 316 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
+| 317 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
+| 318 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
 
 ---
 
