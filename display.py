@@ -199,6 +199,7 @@ class VirtualTerminal:
         self._saved_fg = self._DEFAULT_FG
         self._saved_bg = self._DEFAULT_BG
         self._saved_attrs = 0   # packed bitmask
+        self._saved_pending_wrap = False
 
         # Alternate screen buffer (ESC[?1049h/l)
         self._alt_grid: list | None = None
@@ -211,6 +212,11 @@ class VirtualTerminal:
 
         # UART inject callback for responding to queries (DSR, etc.)
         self._uart_inject = uart_inject
+
+        # Deferred (pending) wrap flag — standard xterm behavior.
+        # When a character is written to the last column, the cursor stays
+        # there and wrap is deferred until the next printable character.
+        self._pending_wrap = False
 
         # Character grid: list of rows, each row = list of (char, fg_rgb, bg_rgb, attrs)
         # attrs is a bitmask: 1=bold 2=dim 4=italic 8=underline 16=blink
@@ -350,14 +356,18 @@ class VirtualTerminal:
             return
         if b == 0x0D:   # CR
             self.cx = 0
+            self._pending_wrap = False
             return
         if b == 0x0A:   # LF
+            self._pending_wrap = False
             self._line_feed()
             return
         if b == 0x09:   # TAB
+            self._pending_wrap = False
             self.cx = min((self.cx // 8 + 1) * 8, self.cols - 1)
             return
         if b == 0x08 or b == 0x7F:  # BS or DEL
+            self._pending_wrap = False
             if self.cx > 0:
                 self.cx -= 1
                 self.grid[self.cy][self.cx] = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
@@ -372,11 +382,16 @@ class VirtualTerminal:
 
     def _place_char(self, ch: str):
         """Place a decoded character (ASCII or Unicode) into the grid."""
-        self.grid[self.cy][self.cx] = (ch, self.fg, self.bg, self._attrs_mask())
-        self.cx += 1
-        if self.cx >= self.cols:
+        if self._pending_wrap:
+            self._pending_wrap = False
             self.cx = 0
             self._line_feed()
+        self.grid[self.cy][self.cx] = (ch, self.fg, self.bg, self._attrs_mask())
+        if self.cx < self.cols - 1:
+            self.cx += 1
+        else:
+            # At last column — enter pending wrap state (deferred wrap).
+            self._pending_wrap = True
 
     def _save_cursor(self):
         """Save cursor position and attributes (DECSC / ESC[s)."""
@@ -385,9 +400,11 @@ class VirtualTerminal:
         self._saved_fg = self.fg
         self._saved_bg = self.bg
         self._saved_attrs = self._attrs_mask()
+        self._saved_pending_wrap = self._pending_wrap
 
     def _restore_cursor(self):
         """Restore cursor position and attributes (DECRC / ESC[u)."""
+        self._pending_wrap = self._saved_pending_wrap
         self.cx = min(self._saved_cx, self.cols - 1)
         self.cy = min(self._saved_cy, self.rows - 1)
         self.fg = self._saved_fg
@@ -444,6 +461,7 @@ class VirtualTerminal:
         self._alt_bg = self.bg
         self._alt_attrs = self._attrs_mask()
         self._in_alt_screen = True
+        self._pending_wrap = False
         # Clear to fresh screen
         self._clear_grid()
         self.cx = self.cy = 0
@@ -483,28 +501,37 @@ class VirtualTerminal:
 
         if cmd == 'H' or cmd == 'f':
             # Cursor position: ESC[row;colH
+            self._pending_wrap = False
             self.cy = max(0, min(num(0, 1) - 1, self.rows - 1))
             self.cx = max(0, min(num(1, 1) - 1, self.cols - 1))
         elif cmd == 'A':
+            self._pending_wrap = False
             self.cy = max(0, self.cy - num())
         elif cmd == 'B':
+            self._pending_wrap = False
             self.cy = min(self.rows - 1, self.cy + num())
         elif cmd == 'C':
+            self._pending_wrap = False
             self.cx = min(self.cols - 1, self.cx + num())
         elif cmd == 'D':
+            self._pending_wrap = False
             self.cx = max(0, self.cx - num())
         elif cmd == 'E':
             # Cursor Next Line
+            self._pending_wrap = False
             self.cx = 0
             self.cy = min(self.rows - 1, self.cy + num())
         elif cmd == 'F':
             # Cursor Previous Line
+            self._pending_wrap = False
             self.cx = 0
             self.cy = max(0, self.cy - num())
         elif cmd == 'G':
             # Cursor Horizontal Absolute (column, 1-based)
+            self._pending_wrap = False
             self.cx = max(0, min(num(0, 1) - 1, self.cols - 1))
         elif cmd == 'J':
+            self._pending_wrap = False
             n = num(0, 0)
             blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
             if n == 2:
@@ -544,6 +571,7 @@ class VirtualTerminal:
             self._scroll_down(num())
         elif cmd == 'r':
             # DECSTBM — Set scroll region: ESC[top;botr
+            self._pending_wrap = False
             top = num(0, 1) - 1
             bot = num(1, self.rows) - 1
             top = max(0, min(top, self.rows - 1))
