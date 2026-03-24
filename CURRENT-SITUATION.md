@@ -2,11 +2,24 @@
 
 **Date:** 2026-03-07  
 **Branch:** `main`  
-**Status:** 1,731 tests passing, 3 skipped (DNS/network).
+**Status:** 1,797 tests passing, 35 skipped.
 
 ---
 
 ## 1. Recent changes
+
+### UART TX ring buffer (2026-03-07)
+
+- **BIOS ring buffer** — 4096-byte RAM-resident TX ring buffer.  `EMIT`
+  appends to the buffer (fast RAM write); the buffer auto-flushes on
+  overflow or explicit `TX-FLUSH`.  `KEY` and `BYE` flush before
+  blocking/halting.  R19 holds the ring descriptor pointer (set at boot,
+  registered via TX_RING_BASE MMIO).
+- **UART device registers** — TX_FLUSH (`+0x06`, W) and TX_RING_BASE
+  (`+0x08`–`+0x0F`, W, 64-bit LE) added to the UART MMIO block.
+- **Python batch callbacks** — `on_tx_batch(data)` in `devices.py`;
+  `cli.py` uses `os.write` for console, `sendall` for headless TCP.
+- **New Forth word** — `TX-FLUSH` (dictionary entry #87).
 
 ### SEP dispatch & 1802 heritage restoration (Phases 0–9)
 
@@ -92,7 +105,7 @@ DNS/network tests requiring live internet are skipped in CI.
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|
-| BIOS | `bios.asm` → `bios.rom` | 14,524 (360 words) |
+| BIOS | `bios.asm` → `bios.rom` | 14,524 (367 words) |
 | KDOS | `kdos.f` | 11,760 |
 | Tools | `tools.f` | 990 |
 | CPU emulator | `megapad64.py` | 3,002 |

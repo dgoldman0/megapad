@@ -177,6 +177,73 @@ class TestUART(unittest.TestCase):
         self.assertEqual(uart.drain_tx(), "AB")  # drain_tx returns str
         self.assertEqual(uart.drain_tx(), "")
 
+    def test_tx_ring_batch_callback(self):
+        """TX ring buffer drain fires on_tx_batch with correct data."""
+        uart = UART()
+        # Simulate CPU memory: descriptor at address 0x1000
+        #   +0: head (LE u64)  +8: ring data
+        mem = bytearray(0x2000)
+        uart._cpu_mem = mem
+        # Register ring base via MMIO writes (LE bytes of 0x1000)
+        ring_base = 0x1000
+        for i in range(8):
+            uart.write8(0x08 + i, (ring_base >> (i * 8)) & 0xFF)
+        self.assertEqual(uart._tx_ring_base, ring_base)
+        # Write 5 bytes into ring buffer area
+        payload = b"Hello"
+        head = len(payload)
+        mem[ring_base:ring_base + 8] = head.to_bytes(8, 'little')
+        mem[ring_base + 8:ring_base + 8 + head] = payload
+        # Set batch callback
+        batches = []
+        uart.on_tx_batch = lambda data: batches.append(data)
+        # Trigger flush
+        uart.write8(0x06, 0x01)
+        self.assertEqual(batches, [b"Hello"])
+        # Head should be reset to 0
+        self.assertEqual(int.from_bytes(mem[ring_base:ring_base + 8], 'little'), 0)
+        # tx_buffer should also have accumulated the bytes
+        self.assertEqual(uart.drain_tx(), "Hello")
+
+    def test_tx_ring_fallback_per_byte(self):
+        """Without on_tx_batch, drain falls back to per-byte on_tx."""
+        uart = UART()
+        mem = bytearray(0x2000)
+        uart._cpu_mem = mem
+        ring_base = 0x1000
+        for i in range(8):
+            uart.write8(0x08 + i, (ring_base >> (i * 8)) & 0xFF)
+        payload = b"AB"
+        mem[ring_base:ring_base + 8] = len(payload).to_bytes(8, 'little')
+        mem[ring_base + 8:ring_base + 8 + len(payload)] = payload
+        per_byte = []
+        uart.on_tx = lambda b: per_byte.append(b)
+        uart.write8(0x06, 0x01)
+        self.assertEqual(per_byte, [0x41, 0x42])
+
+    def test_tx_ring_no_drain_without_base(self):
+        """Flush is a no-op if ring base was never registered."""
+        uart = UART()
+        uart._cpu_mem = bytearray(256)
+        batches = []
+        uart.on_tx_batch = lambda data: batches.append(data)
+        uart.write8(0x06, 0x01)
+        self.assertEqual(batches, [])
+
+    def test_tx_ring_no_drain_zero_head(self):
+        """Flush with head=0 does not fire callbacks."""
+        uart = UART()
+        mem = bytearray(0x2000)
+        uart._cpu_mem = mem
+        ring_base = 0x1000
+        for i in range(8):
+            uart.write8(0x08 + i, (ring_base >> (i * 8)) & 0xFF)
+        # head = 0 (already zeroed)
+        batches = []
+        uart.on_tx_batch = lambda data: batches.append(data)
+        uart.write8(0x06, 0x01)
+        self.assertEqual(batches, [])
+
 
 class TestTimer(unittest.TestCase):
     def test_tick_count(self):
@@ -1147,6 +1214,10 @@ class TestBIOS(unittest.TestCase):
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
         self._restore_cpu_state(sys.cpu, cpu_state)
         self._register_accel_hooks(sys)
+        # Restore TX ring buffer base from R19 (set during BIOS boot)
+        r19 = sys.cpu.regs[19]
+        if r19 and r19 < len(mem_bytes):
+            sys.uart._tx_ring_base = r19
         return sys, buf
 
     def _run_forth(self, sys, buf, input_lines: list[str],
@@ -4683,6 +4754,10 @@ class _KDOSTestBase(unittest.TestCase):
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
         # Restore CPU state
         self._restore_cpu_state(sys.cpu, cpu_state)
+        # Restore TX ring buffer base from R19 (set during BIOS boot)
+        r19 = sys.cpu.regs[19]
+        if r19 and r19 < len(mem_bytes):
+            sys.uart._tx_ring_base = r19
 
         # Inject NIC frames if provided
         if nic_frames:
@@ -8064,6 +8139,10 @@ class TestBIOSHardening(unittest.TestCase):
         buf = capture_uart(sys)
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
         self._restore_cpu_state(sys.cpu, cpu_state)
+        # Restore TX ring buffer base from R19 (set during BIOS boot)
+        r19 = sys.cpu.regs[19]
+        if r19 and r19 < len(mem_bytes):
+            sys.uart._tx_ring_base = r19
         return sys, buf
 
     def _run_forth(self, sys, buf, input_lines, max_steps=2_000_000):
@@ -14398,6 +14477,10 @@ class TestKDOSMulticore(unittest.TestCase):
         # Restore all core states
         for i, cpu in enumerate(sys.cores):
             self._restore_cpu_state(cpu, core_states[i])
+        # Restore TX ring buffer base from R19 (set during BIOS boot)
+        r19 = sys.cpu.regs[19]
+        if r19 and r19 < len(mem_bytes):
+            sys.uart._tx_ring_base = r19
 
         # Feed extra commands to core 0
         payload = "\n".join(extra_lines) + "\nBYE\n"
@@ -23824,6 +23907,10 @@ class TestHeadlessDisplay(_KDOSTestBase):
             buf = capture_uart(sys_emu)
             sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
             self._restore_cpu_state(sys_emu.cpu, cpu_state)
+            # Restore TX ring buffer base from R19 (set during BIOS boot)
+            r19 = sys_emu.cpu.regs[19]
+            if r19 and r19 < len(mem_bytes):
+                sys_emu.uart._tx_ring_base = r19
             sys_emu.cpu.halted = False
             sys_emu.cpu.idle = False
             # Inject commands

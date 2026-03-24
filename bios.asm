@@ -87,6 +87,14 @@ boot:
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
 
+    ; R19 = TX ring buffer descriptor (persistent across all calls)
+    ldi64 r11, tx_ring
+    mov   r19, r11
+
+    ; Register TX ring buffer with UART (write descriptor addr to UART+0x08)
+    ldi64 r11, 0xFFFF_FF00_0000_0008
+    str r11, r19
+
     ; Phase 3: JIT NEXT/EXIT dispatch registers
     ; (ldi64 can't target R16+ — EXT prefix conflict; use mov)
     ldi64 r11, forth_next
@@ -492,16 +500,71 @@ interp_no_rsp_overflow:
 ;  I/O Primitives
 ; =====================================================================
 
-; emit_char: write byte R1 to UART  [SEP dispatch — Phase 1, Q sem — Phase 4]
+; emit_char: write byte R1 to TX ring buffer  [SEP dispatch — Phase 1]
+; R19 = persistent pointer to tx_ring descriptor (+0=head, +8=buf[4096])
+; Preserves all registers (R11 saved/restored on R15 stack).
 emit_char:
-    seq                         ; Q ← 1 (UART busy)
-    st.b r8, r1
+    seq                         ; Q ← 1 (UART busy semaphore)
+    subi r15, 8
+    str  r15, r11               ; save R11
+    ldi64 r11, ring_write
+    call.l r11
+    ldn  r11, r15               ; restore R11
+    addi r15, 8
     req                         ; Q ← 0 (UART idle)
     sep  r3                     ; return via register switch
     br   emit_char              ; re-entry trampoline
 
+; --- TX Ring Buffer --------------------------------------------------------
+; The ring buffer is an *emulator-side* optimisation: it converts N per-byte
+; MMIO traps (expensive Python round-trips) into N fast RAM writes + 1 MMIO
+; flush.  On real hardware an MMIO store is a single bus cycle, so the
+; speedup disappears.  To be useful on FPGA/ASIC the SoC would need a small
+; DMA engine wired to TX_FLUSH that reads from the ring descriptor and feeds
+; the UART TX FIFO autonomously.  The buffer layout (head + contiguous data)
+; is already DMA-friendly by design.
+; --------------------------------------------------------------------------
+
+; ring_write: append byte R1 to the TX ring buffer.
+; R19 = persistent descriptor pointer (+0=head, +8=buf[4096]).
+; Clobbers: R11 only.  Preserves R0, R7, R9, R12, R13, R14, R15.
+ring_write:
+    ldn r11, r19              ; r11 = head
+    add r11, r19              ; r11 = &tx_ring + head
+    addi r11, 8              ; r11 = &tx_ring_buf[head]
+    st.b r11, r1             ; buf[head] = byte
+    sub r11, r19              ; r11 = head + 8
+    subi r11, 8              ; r11 = head
+    inc r11                  ; head++
+    str r19, r11             ; store new head
+    ; Auto-flush if head >= 4096 (buffer full)
+    lsri r11, 12             ; r11 >>= 12; non-zero means >= 4096
+    cmpi r11, 0
+    brne rw_overflow
+    ret.l
+rw_overflow:
+    ; Trigger MMIO flush — Python drains buffer and resets head to 0
+    ldi64 r11, 0xFFFF_FF00_0000_0006
+    st.b r11, r11            ; write to UART TX_FLUSH (value ignored)
+    ret.l
+
+; tx_flush: flush TX ring buffer to host.
+; Safe to call from any context (SEP routines, subroutines).
+; Clobbers: R11 only.
+tx_flush:
+    ldn r11, r19              ; head
+    cmpi r11, 0
+    breq txf_done             ; nothing to flush
+    ldi64 r11, 0xFFFF_FF00_0000_0006
+    st.b r11, r11            ; trigger MMIO flush
+txf_done:
+    ret.l
+
 ; key_char: blocking read -> R1  [SEP dispatch — Phase 1]
+; Flushes TX ring buffer before blocking so pending output is visible.
 key_char:
+    ldi64 r11, tx_flush
+    call.l r11                  ; flush pending TX before blocking
     ldi64 r13, 0xFFFF_FF00_0000_0002
 kc_poll:
     ld.b r1, r13
@@ -524,10 +587,12 @@ print_str:
     cmpi r1, 0x0A
     brne ps_not_lf
     ldi r1, 0x0D
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     ldi r1, 0x0A
 ps_not_lf:
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     inc r10
     br print_str
 ps_done:
@@ -550,7 +615,8 @@ pcnt_done:
     ret.l
 
 ; print_hex_byte: R1 low byte -> two hex chars  [SEP dispatch — Phase 1]
-; Note: already uses st.b r8 directly (no call to R4), so SEP-safe.
+; Uses ring_write via call.l (safe inside SEP routine: R15 balanced).
+; Clobbers: R11 only. Preserves R0.
 print_hex_byte:
     mov r0, r1
     lsri r1, 4
@@ -560,7 +626,8 @@ print_hex_byte:
     brcc phb_h
     addi r1, 7
 phb_h:
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     mov r1, r0
     andi r1, 0x0F
     addi r1, 0x30
@@ -568,7 +635,8 @@ phb_h:
     brcc phb_l
     addi r1, 7
 phb_l:
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     sep  r3                     ; return via register switch
     br   print_hex_byte         ; re-entry trampoline
 
@@ -597,9 +665,11 @@ print_hex32:
 ; print_crlf
 print_crlf:
     ldi r1, 0x0D
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     ldi r1, 0x0A
-    st.b r8, r1
+    ldi64 r11, ring_write
+    call.l r11
     ret.l
 
 ; do_print_ok:  print " ok\n"
@@ -2038,6 +2108,8 @@ wds_done:
 w_bye:
     ldi64 r10, str_bye
     ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, tx_flush
     call.l r11
     halt
 
@@ -10281,6 +10353,10 @@ secondary_core_entry:
     ldi64 r5, key_char
     ldi64 r6, print_hex_byte
 
+    ; R19 = TX ring buffer descriptor (shared with core 0)
+    ldi64 r11, tx_ring
+    mov   r19, r11
+
     ; Phase 3: JIT NEXT/EXIT dispatch registers
     ldi64 r11, forth_next
     mov   r16, r11
@@ -16131,12 +16207,21 @@ d_quote_open:
     ret.l
 
 ; === ;] ===
-latest_entry:
 d_quote_close:
     .dq d_quote_open
     .db 0x82
     .ascii ";]"
     ldi64 r11, w_quote_close
+    call.l r11
+    ret.l
+
+; === TX-FLUSH ===
+latest_entry:
+d_tx_flush:
+    .dq d_quote_close
+    .db 8
+    .ascii "TX-FLUSH"
+    ldi64 r11, tx_flush
     call.l r11
     ret.l
 
@@ -16470,6 +16555,50 @@ sha_blk_off:
 dict_pad:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+
+; =====================================================================
+;  TX Ring Buffer — 4096-byte output buffer for batched UART TX.
+;  Layout: +0 = head (8 bytes, 64-bit count of buffered bytes)
+;          +8 = buf[4096] (data bytes)
+;  R19 points here persistently.  Python reads this on TX_FLUSH.
+; =====================================================================
+tx_ring:
+tx_ring_head:
+    .dq 0
+tx_ring_buf:
+    ; 4096 bytes = 512 × .dq 0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 
 ; --- User dictionary free space starts here ---
 dict_free:

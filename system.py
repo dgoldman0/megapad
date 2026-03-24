@@ -485,6 +485,9 @@ class MegapadSystem:
         self._tx_log: list[int] = []
         self.uart.on_tx = lambda b: self._tx_log.append(b)
 
+        # Give UART a reference to CPU memory for TX ring buffer drain
+        self.uart._cpu_mem = self.cpu.mem
+
         # Wire cluster_en callback — writes to SysInfo 0x18 actually
         # enable/disable clusters
         if self.clusters:

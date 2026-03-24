@@ -190,15 +190,17 @@ COUNTER @ .               \ fetch and print: 42
 
 ---
 
-## Input & Output (17 words)
+## Input & Output (18 words)
 
-I/O goes through the UART.  `EMIT` sends one byte; `KEY` waits for one byte.
-The number-printing words all produce human-readable ASCII output.
+I/O goes through the UART.  `EMIT` appends one byte to a 4096-byte TX ring
+buffer in RAM (auto-flushed when full); `KEY` waits for one byte (and flushes
+the TX buffer first so prompts appear before blocking).  The number-printing
+words all produce human-readable ASCII output.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `EMIT` | `( c -- )` | Send one character to the UART. |
-| `KEY` | `( -- c )` | Wait for and return one character from the UART. |
+| `EMIT` | `( c -- )` | Append one character to the TX ring buffer (flushed automatically when full, or by `TX-FLUSH`). |
+| `KEY` | `( -- c )` | Flush the TX buffer, then wait for and return one character from the UART. |
 | `KEY?` | `( -- flag )` | True if a character is available (non-blocking check). |
 | `CR` | `( -- )` | Emit a carriage-return + line-feed (newline). |
 | `SPACE` | `( -- )` | Emit a single space character (ASCII 32). |
@@ -209,7 +211,8 @@ The number-printing words all produce human-readable ASCII output.
 | `TYPE` | `( addr n -- )` | Print *n* characters starting at addr. |
 | `ACCEPT` | `( addr n -- actual )` | Read up to *n* characters from the UART into addr.  Returns actual count.  Handles backspace. |
 | `WORDS` | `( -- )` | Print all words in the dictionary. |
-| `BYE` | `( -- )` | Halt the CPU (exit Forth). |
+| `BYE` | `( -- )` | Flush the TX buffer and halt the CPU (exit Forth). |
+| `TX-FLUSH` | `( -- )` | Explicitly drain the TX ring buffer to the host. |
 | `CYCLES` | `( -- u )` | Read the free-running cycle counter (for timing). |
 | `MS` | `( n -- )` | Delay approximately *n* milliseconds. |
 | `HEX` | `( -- )` | Set numeric output base to 16. |

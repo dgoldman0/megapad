@@ -234,6 +234,16 @@ bus arbiter timeout behaviour.
 | `+0x03` | CONTROL | RW | bit 0: RX IRQ enable, bit 1: TX IRQ enable |
 | `+0x04` | BAUD_LO | RW | Baud rate low (cosmetic) |
 | `+0x05` | BAUD_HI | RW | Baud rate high (cosmetic) |
+| `+0x06` | TX_FLUSH | W | Drain the TX ring buffer (triggers batch callback) |
+| `+0x08`–`+0x0F` | TX_RING_BASE | W | 64-bit LE pointer to the TX ring descriptor in RAM |
+
+> **Hardware note:** The TX ring buffer is an *emulator-side* optimisation —
+> it converts per-byte MMIO traps (expensive Python round-trips) into fast
+> RAM writes plus a single flush.  On real hardware MMIO stores are single
+> bus cycles, so the speedup disappears.  To be useful on FPGA/ASIC the SoC
+> would need a DMA engine wired to TX_FLUSH that reads from the ring
+> descriptor and feeds the UART TX FIFO.  The buffer layout is already
+> DMA-friendly by design.
 
 ### Timer
 
@@ -291,7 +301,7 @@ provides an interactive REPL over UART.
 
 1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
 2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
-3. Set up UART base in R8, subroutine pointers in R4/R5/R6
+3. Set up UART base in R8, TX ring descriptor pointer in R19, subroutine pointers in R4/R5/R6.  Register the ring buffer with the UART (write R19 to TX_RING_BASE).
 4. Enable timer, install IVT for bus fault handler
 5. Initialise Forth variables: STATE=0, BASE=10, HERE=dict_free, LATEST
 6. Print banner (`Megapad-64 Forth BIOS v1.0`, RAM size)
@@ -325,13 +335,14 @@ buffer), then tokenises and interprets:
 | R8 | UART base address (`0xFFFF_FF00_0000_0000`) |
 | R9–R12 | scratch / temp |
 | R13 | Scratch / temp |
+| R19 | TX ring buffer descriptor pointer (set at boot) |
 | R14 | DSP — data stack pointer (grows downward) |
 | R15 | RSP — return stack pointer (grows downward) |
 | R16 | NEXT handler (`sep r16` = fetch inline XT, advance IP, branch) |
 | R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
-### Built-in words (363)
+### Built-in words (364)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -353,7 +364,7 @@ buffer), then tokenises and interprets:
 
 **I/O & display**
 `EMIT` `KEY` `KEY?` `CR` `.` `U.` `.S` `WORDS` `BYE`
-`HEX` `DECIMAL` `BASE` `SPACE` `SPACES` `TYPE` `ACCEPT` `.ZSTR`
+`HEX` `DECIMAL` `BASE` `SPACE` `SPACES` `TYPE` `ACCEPT` `.ZSTR` `TX-FLUSH`
 
 **String & parsing**
 `S"` `."` `WORD` `COUNT` `COMPARE` `CHAR` `[CHAR]` `UCHAR`

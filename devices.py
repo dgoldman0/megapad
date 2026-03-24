@@ -112,15 +112,18 @@ class Device:
 #  UART — Serial Console
 # ---------------------------------------------------------------------------
 # Register map (offsets from UART_BASE):
-#   0x00  TX_DATA   (W)  — write a byte, queued for host output
-#   0x01  RX_DATA   (R)  — read next byte from input buffer
-#   0x02  STATUS    (R)  — bit 0: TX_READY (always 1 in emulator)
-#                          bit 1: RX_AVAIL (1 if input buffer non-empty)
-#                          bit 5: TX_EMPTY (always 1)
-#   0x03  CONTROL   (RW) — bit 0: RX interrupt enable
-#                          bit 1: TX interrupt enable
-#   0x04  BAUD_LO   (RW) — baud rate low byte (cosmetic in emulator)
-#   0x05  BAUD_HI   (RW) — baud rate high byte
+#   0x00  TX_DATA       (W)  — write a byte, queued for host output
+#   0x01  RX_DATA       (R)  — read next byte from input buffer
+#   0x02  STATUS        (R)  — bit 0: TX_READY (always 1 in emulator)
+#                               bit 1: RX_AVAIL (1 if input buffer non-empty)
+#                               bit 5: TX_EMPTY (always 1)
+#   0x03  CONTROL       (RW) — bit 0: RX interrupt enable
+#                               bit 1: TX interrupt enable
+#   0x04  BAUD_LO       (RW) — baud rate low byte (cosmetic in emulator)
+#   0x05  BAUD_HI       (RW) — baud rate high byte
+#   0x06  TX_FLUSH      (W)  — writing any value drains the TX ring buffer
+#   0x08–0x0F  TX_RING_BASE (W)  — 64-bit base address of TX ring descriptor
+#                                   (written byte-by-byte, LE, by BIOS at boot)
 
 class UART(Device):
     """Emulated serial console — connects to the CLI's terminal."""
@@ -135,7 +138,13 @@ class UART(Device):
 
         # Callbacks
         self.on_tx: Optional[callable] = None  # called with byte when CPU writes TX
+        self.on_tx_batch: Optional[callable] = None  # called with bytes on ring flush
         self._tx_listeners: list = []          # additional TX listeners (display, etc.)
+
+        # TX ring buffer support (BIOS-level batching)
+        self._tx_ring_addr_bytes = bytearray(8)   # LE bytes from UART+0x08 writes
+        self._tx_ring_base: int = 0                # resolved descriptor base in RAM
+        self._cpu_mem = None                       # set by system.py after boot
 
     def read8(self, offset: int) -> int:
         if offset == 0x00:     # TX_DATA — reading it is undefined, return 0
@@ -159,7 +168,7 @@ class UART(Device):
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        if offset == 0x00:     # TX_DATA
+        if offset == 0x00:     # TX_DATA (legacy per-byte path)
             self.tx_buffer.append(value)
             if self.on_tx:
                 self.on_tx(value)
@@ -171,6 +180,45 @@ class UART(Device):
             self.baud_lo = value
         elif offset == 0x05:
             self.baud_hi = value
+        elif offset == 0x06:   # TX_FLUSH — drain ring buffer
+            self._drain_ring()
+        elif 0x08 <= offset <= 0x0F:  # TX_RING_BASE (LE byte-by-byte)
+            self._tx_ring_addr_bytes[offset - 0x08] = value
+            if offset == 0x0F:   # last byte → resolve full address
+                self._tx_ring_base = int.from_bytes(
+                    self._tx_ring_addr_bytes, 'little')
+
+    def _drain_ring(self):
+        """Drain the BIOS TX ring buffer through callbacks."""
+        if not self._tx_ring_base or self._cpu_mem is None:
+            return
+        base = self._tx_ring_base
+        mem = self._cpu_mem
+        # Read head (LE 64-bit at descriptor +0)
+        head = int.from_bytes(mem[base:base + 8], 'little')
+        if head <= 0 or head > 4096:
+            return
+        # Read buffer data (descriptor +8)
+        buf_start = base + 8
+        data = bytes(mem[buf_start:buf_start + head])
+
+        # Accumulate in tx_buffer (for drain_tx() compatibility)
+        self.tx_buffer.extend(data)
+
+        # Batch callback (preferred) or per-byte fallback
+        if self.on_tx_batch:
+            self.on_tx_batch(data)
+        elif self.on_tx:
+            for b in data:
+                self.on_tx(b)
+
+        # Listeners (display, etc.) — per-byte for VirtualTerminal compat
+        for fn in self._tx_listeners:
+            for b in data:
+                fn(b)
+
+        # Reset head to 0 (LE 64-bit)
+        mem[base:base + 8] = b'\x00' * 8
 
     def inject_input(self, data: bytes | str):
         """Push bytes into the RX buffer (from host keyboard)."""

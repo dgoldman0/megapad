@@ -905,6 +905,7 @@ class HeadlessServer:
 
         # Wire UART TX → broadcast to all connected clients
         self.sys_emu.uart.on_tx = self._broadcast_byte
+        self.sys_emu.uart.on_tx_batch = self._broadcast_batch
 
         # CPU loop in background thread
         self._cpu_thread = threading.Thread(
@@ -980,6 +981,22 @@ class HeadlessServer:
     def _broadcast_byte(self, b: int):
         """Send one TX byte to every connected client."""
         data = bytes([b])
+        with self._lock:
+            dead: list = []
+            for sock in self.clients:
+                try:
+                    sock.sendall(data)
+                except Exception:
+                    dead.append(sock)
+            for sock in dead:
+                self.clients.remove(sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def _broadcast_batch(self, data: bytes):
+        """Send a batch of TX bytes to every connected client."""
         with self._lock:
             dead: list = []
             for sock in self.clients:
@@ -1155,17 +1172,20 @@ def run_console(sys_emu: MegapadSystem) -> bool:
 
     # Raw UART TX handler — write bytes directly to the terminal
     old_tx = sys_emu.uart.on_tx
+    old_tx_batch = sys_emu.uart.on_tx_batch
     sys_emu.uart.on_tx = lambda b: os.write(out_fd, bytes([b]))
+    # Batch callback for ring buffer drain — single syscall for many bytes
+    sys_emu.uart.on_tx_batch = lambda data: os.write(out_fd, data)
 
     is_tty = os.isatty(sys.stdin.fileno())
 
     if is_tty:
-        return _console_raw(sys_emu, old_tx, out_fd)
+        return _console_raw(sys_emu, old_tx, old_tx_batch, out_fd)
     else:
-        return _console_pipe(sys_emu, old_tx, out_fd)
+        return _console_pipe(sys_emu, old_tx, old_tx_batch, out_fd)
 
 
-def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
+def _console_raw(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
     """Console loop with raw terminal input (interactive TTY).
 
     A dedicated stdin-reader thread injects keystrokes into the UART RX
@@ -1257,10 +1277,11 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
         except Exception:
             pass
         sys_emu.uart.on_tx = old_tx
+        sys_emu.uart.on_tx_batch = old_tx_batch
 
 
-def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
-    """Console loop with piped/redirected stdin (non-interactive)."""
+def _console_pipe(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
+    """Console loop with piped/redirected stdin (non-interactive).""""
     import select
 
     fd = sys.stdin.fileno()
@@ -1298,6 +1319,7 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, out_fd) -> bool:
         return False
     finally:
         sys_emu.uart.on_tx = old_tx
+        sys_emu.uart.on_tx_batch = old_tx_batch
 
 
 # ---------------------------------------------------------------------------
@@ -1313,7 +1335,9 @@ def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
     """
     out_fd = sys.stdout.fileno()
     old_tx = sys_emu.uart.on_tx
+    old_tx_batch = sys_emu.uart.on_tx_batch
     sys_emu.uart.on_tx = lambda b: os.write(out_fd, bytes([b]))
+    sys_emu.uart.on_tx_batch = lambda data: os.write(out_fd, data)
 
     try:
         for path in paths:
@@ -1343,6 +1367,7 @@ def _inject_forth_files(sys_emu: MegapadSystem, paths: list[str]):
                         return
     finally:
         sys_emu.uart.on_tx = old_tx
+        sys_emu.uart.on_tx_batch = old_tx_batch
 
 
 # ---------------------------------------------------------------------------

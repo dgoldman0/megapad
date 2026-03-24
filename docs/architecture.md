@@ -139,9 +139,18 @@ and sees output.  It has a transmit buffer and a receive FIFO.
 | CONTROL | `+0x03` | RW | **bit 0:** RX IRQ enable.  **bit 1:** TX IRQ enable. |
 | BAUD_LO | `+0x04` | RW | Baud rate low byte (cosmetic — the emulated UART is always instant). |
 | BAUD_HI | `+0x05` | RW | Baud rate high byte. |
+| TX_FLUSH | `+0x06` | W | Drain the TX ring buffer (triggers batch output callback). |
+| TX_RING_BASE | `+0x08`–`+0x0F` | W | 64-bit LE pointer to the TX ring descriptor in RAM. |
 
 **BIOS words:** `KEY` reads from RX_DATA (blocking), `KEY?` checks
-STATUS bit 1, `EMIT` writes to TX_DATA.
+STATUS bit 1, `EMIT` appends to a 4096-byte TX ring buffer in RAM
+(flushed automatically when full, or explicitly via `TX-FLUSH`).
+
+> **Hardware note:** The TX ring buffer is an *emulator-side* optimisation.
+> On real hardware MMIO stores are single bus cycles, so the per-byte cost
+> is negligible and the ring provides no speedup.  For FPGA/ASIC targets a
+> DMA engine wired to TX_FLUSH would be needed to make the buffer useful.
+> The layout (head + contiguous 4 KB data) is already DMA-friendly.
 
 ---
 
