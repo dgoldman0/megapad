@@ -8706,12 +8706,12 @@ class TestKDOSAllocator(_KDOSTestBase):
     # -- In-place RESIZE tests --------------------------------------------
 
     def test_resize_shrink_preserves_data(self):
-        """RESIZE to smaller size keeps data, returns same addr."""
+        """DMA-RESIZE to smaller size keeps data, returns same addr."""
         text = self._run_kdos([
             "VARIABLE P",
-            "128 ALLOCATE DROP DUP P !",
+            "128 DMA-ALLOCATE DROP DUP P !",
             "DUP 77 SWAP !",          # write 77
-            "64 RESIZE DROP",          # shrink
+            "64 DMA-RESIZE DROP",      # shrink
             "DUP P @ = .",            # same addr? -1 = true
             "@ .",                     # data preserved?
         ])
@@ -8729,11 +8729,11 @@ class TestKDOSAllocator(_KDOSTestBase):
         self.assertIn("42 ", text)
 
     def test_resize_same_size(self):
-        """RESIZE to same size returns same addr, ior=0."""
+        """DMA-RESIZE to same size returns same addr, ior=0."""
         text = self._run_kdos([
             "VARIABLE P",
-            "64 ALLOCATE DROP DUP P !",
-            "64 RESIZE . P @ = .",     # prints ior (0), then compares addr' with original
+            "64 DMA-ALLOCATE DROP DUP P !",
+            "64 DMA-RESIZE . P @ = .",     # prints ior (0), then compares addr' with original
         ])
         self.assertIn("0 ", text)
         self.assertIn("-1 ", text)
@@ -8790,17 +8790,17 @@ class TestKDOSAllocator(_KDOSTestBase):
     # -- Edge case tests ---------------------------------------------------
 
     def test_double_free_detected(self):
-        """Freeing the same block twice aborts with clear message.
+        """Freeing the same Bank 0 block twice aborts with clear message.
 
-        Phase 2 hardening: FREE validates a magic canary in the
+        Phase 2 hardening: (BANK0-FREE) validates a magic canary in the
         allocation header.  Double-free clears the canary on the
         first FREE, so the second FREE sees a mismatch and aborts.
         """
         text = self._run_kdos([
             "VARIABLE P",
-            "64 ALLOCATE DROP DUP P !",
-            "DUP FREE",
-            "P @ FREE",          # second free — should abort
+            "64 DMA-ALLOCATE DROP DUP P !",
+            "DUP DMA-FREE",
+            "P @ DMA-FREE",          # second free — should abort
             '.\" should-not-reach"',
         ], max_steps=200_000_000)
         self.assertIn("FREE: invalid or double-free", text)

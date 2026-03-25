@@ -176,11 +176,11 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 4096 CONSTANT HEAP-GUARD   \ minimum gap between heap top and stack bottom
 
 \ HEAP-SETUP ( -- )  initialise the heap above HERE
-\   Leaves a gap above HERE for dictionary growth (1/4 of Bank 0),
+\   Leaves a 16 KiB gap above HERE for late Bank-0 dictionary growth,
 \   then creates one large free block spanning to the stack guard.
 : HEAP-SETUP  ( -- )
     HEAP-INIT @ IF EXIT THEN
-    HERE  MEM-SIZE 4 /  + TALIGN  HEAP-BASE !
+    HERE  16384  + TALIGN  HEAP-BASE !
     \ Heap end = data-stack bottom - 4096 guard
     MEM-SIZE 2 / 4096 -   ( heap-end )
     HEAP-BASE @ -          ( available-bytes )
@@ -207,11 +207,11 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 : ?CORE0  ( -- )
     COREID 0<> ABORT" core-0 only: use ARENA-ALLOT on secondary cores" ;
 
-\ ALLOCATE ( u -- addr ior )
-\   Allocate u bytes.  Returns address and 0 on success,
+\ (BANK0-ALLOCATE) ( u -- addr ior )
+\   Allocate u bytes from Bank 0 heap.  Returns address and 0 on success,
 \   or 0 and -1 on failure.  First-fit search.
 \   Core-0 only — uses shared scratch variables.
-: ALLOCATE  ( u -- addr ior )
+: (BANK0-ALLOCATE)  ( u -- addr ior )
     ?CORE0
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
     DUP 0= IF DROP 0 -1 EXIT THEN
@@ -284,11 +284,11 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
         THEN
     THEN ;
 
-\ FREE ( addr -- )
-\   Return a previously allocated block to the free list.
+\ (BANK0-FREE) ( addr -- )
+\   Return a previously allocated block to the Bank 0 free list.
 \   Inserts in address-sorted order and coalesces adjacent blocks.
 \   Core-0 only — uses shared scratch variables.
-: FREE  ( addr -- )
+: (BANK0-FREE)  ( addr -- )
     ?CORE0
     DUP 0= IF DROP EXIT THEN
     /ALLOC-HDR -   ( block )
@@ -317,8 +317,8 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
         A-CURR @ @ A-CURR !
     AGAIN ;
 
-\ RESIZE ( a1 u -- a2 ior )
-\   Resize an allocated block.
+\ (BANK0-RESIZE) ( a1 u -- a2 ior )
+\   Resize a Bank 0 allocated block.
 \   1) If shrinking or same size: update size in place, split if worthwhile.
 \   2) If growing and the next free block is adjacent + big enough: merge.
 \   3) Otherwise: alloc new, copy, free old.
@@ -357,7 +357,7 @@ VARIABLE R-NEW     \ new requested size (rounded)
                     0 OVER !                \ remnant.next = 0
                     SWAP /ALLOC-HDR - OVER 8 + !  \ remnant.size
                     ALLOC-MAGIC OVER 16 + ! \ stamp so FREE accepts it
-                    /ALLOC-HDR + FREE       \ free the remnant
+                    /ALLOC-HDR + (BANK0-FREE)  \ free the remnant
                 ELSE DROP
                 THEN
                 TRUE EXIT
@@ -369,7 +369,7 @@ VARIABLE R-NEW     \ new requested size (rounded)
     AGAIN ;
 
 \ Core-0 only — uses shared scratch variables.
-: RESIZE  ( a1 u -- a2 ior )
+: (BANK0-RESIZE)  ( a1 u -- a2 ior )
     ?CORE0
     \ Round new size
     DUP 0= IF  2DROP 0 -1 EXIT  THEN
@@ -386,7 +386,7 @@ VARIABLE R-NEW     \ new requested size (rounded)
             0 OVER !                       \ remnant.next = 0
             SWAP /ALLOC-HDR - OVER 8 + !   \ remnant.size = leftover-hdr
             ALLOC-MAGIC OVER 16 + !        \ stamp so FREE accepts it
-            /ALLOC-HDR + FREE              \ free the remnant
+            /ALLOC-HDR + (BANK0-FREE)      \ free the remnant
         ELSE DROP
         THEN
         0  EXIT                            \ return ( a1 0 )
@@ -396,11 +396,11 @@ VARIABLE R-NEW     \ new requested size (rounded)
         0  EXIT                            \ return ( a1 0 )
     THEN
     \ --- Case 3: fallback alloc+copy+free ---
-    R-NEW @ ALLOCATE                       ( a1 a2 ior )
+    R-NEW @ (BANK0-ALLOCATE)               ( a1 a2 ior )
     IF  DROP -1 EXIT  THEN                 ( a1 a2 )
     R-BLK !                                \ repurpose R-BLK to save a2
     DUP R-BLK @ R-OLD @ CMOVE             ( a1 ; CMOVE src=a1 dst=a2 cnt=old )
-    FREE                                   ( ; free old — clobbers A-CURR )
+    (BANK0-FREE)                           ( ; free old — clobbers A-CURR )
     R-BLK @ 0 ;                            \ ( a2 0 )
 
 \ HEAP-FREE-BYTES ( -- u )
@@ -1747,6 +1747,75 @@ VARIABLE FL-CURR                     \ search scratch
         2DROP 0 -1 EXIT
     THEN
     XMEM-HERE ! 0 ;
+
+\ =====================================================================
+\  §1.0b  Xmem-aware allocation dispatch
+\ =====================================================================
+\
+\  When extended memory is available, ALLOCATE routes to XMEM-ALLOT?
+\  with an 8-byte prefix storing the total block size (usable + 8).
+\  FREE reads this total to return the full block to XMEM-FREE-BLOCK.
+\  DMA-ALLOCATE / DMA-FREE always use the Bank 0 heap (required by
+\  DMA engines that dereference s.mem[] directly).
+
+\ ALLOCATE ( u -- addr ior )
+\   Xmem-aware: routes to xmem when available, Bank 0 otherwise.
+: ALLOCATE  ( u -- addr ior )
+    XMEM? IF
+        ?CORE0
+        DUP 0= IF DROP 0 -1 EXIT THEN
+        \ Round to 8-byte alignment, minimum 16, add 8-byte prefix
+        7 + -8 AND DUP 16 < IF DROP 16 THEN 8 +  ( total )
+        DUP XMEM-ALLOT?                  ( total addr ior )
+        IF  2DROP 0 -1 EXIT  THEN       ( total addr )
+        TUCK !                           \ store total at addr  ( addr )
+        8 +  0  EXIT                     \ return addr+8, ior=0
+    THEN
+    (BANK0-ALLOCATE) ;
+
+\ FREE ( addr -- )
+\   Auto-routes: xmem pointers → XMEM-FREE-BLOCK, Bank 0 → (BANK0-FREE).
+: FREE  ( addr -- )
+    DUP 0= IF DROP EXIT THEN
+    DUP MEM-SIZE >= IF
+        \ Xmem block: total-size stored 8 bytes before user pointer
+        8 -  DUP @                       ( block-addr total-size )
+        XMEM-FREE-BLOCK  EXIT
+    THEN
+    (BANK0-FREE) ;
+
+\ RESIZE ( a1 u -- a2 ior )
+\   Xmem blocks: alloc new, copy, free old (no in-place growth).
+\   Bank 0 blocks: full in-place resize support.
+VARIABLE _RS-OLD   \ saved old-addr for xmem resize
+: RESIZE  ( a1 u -- a2 ior )
+    OVER MEM-SIZE >= IF
+        \ Xmem path: alloc new, copy min(old,new), free old
+        OVER _RS-OLD !                   \ save a1
+        DUP ALLOCATE IF DROP DROP -1 EXIT THEN  ( a1 u a2 )
+        SWAP                             ( a1 a2 u )
+        _RS-OLD @ 8 - @  8 -            ( a1 a2 u old-usable )
+        MIN                              ( a1 a2 copy-len )
+        >R SWAP R>                       ( a2 a1 copy-len )
+        2 PICK SWAP CMOVE               ( a2 ; copied a1→a2 )
+        _RS-OLD @ FREE  0  EXIT
+    THEN
+    (BANK0-RESIZE) ;
+
+\ DMA-ALLOCATE ( u -- addr ior )
+\   Always allocates from Bank 0 heap (DMA-safe).
+: DMA-ALLOCATE  ( u -- addr ior )
+    (BANK0-ALLOCATE) ;
+
+\ DMA-FREE ( addr -- )
+\   Free a Bank 0 heap block.
+: DMA-FREE  ( addr -- )
+    (BANK0-FREE) ;
+
+\ DMA-RESIZE ( a1 u -- a2 ior )
+\   Resize a Bank 0 heap block.
+: DMA-RESIZE  ( a1 u -- a2 ior )
+    (BANK0-RESIZE) ;
 
 \ XMEM-TALIGN ( -- )  align XMEM-HERE up to 64-byte boundary
 : XMEM-TALIGN  ( -- )
@@ -4291,8 +4360,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
     \ Sectors for ciphertext + tag
     _FE-PAD @ 16 + 511 + 512 / _FE-SECS !
     \ Allocate sector-aligned buffers (DMA operates on full sectors)
-    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
-    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF _FE-BUF1 @ FREE -1 EXIT THEN _FE-BUF2 !
+    _FE-SECS @ 512 * DMA-ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
+    _FE-SECS @ 512 * DMA-ALLOCATE DROP DUP 0= IF _FE-BUF1 @ DMA-FREE -1 EXIT THEN _FE-BUF2 !
     \ Zero both buffers
     _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
     _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
@@ -4317,8 +4386,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
     _FE-USED @ _FE-DESC @ F.SLOT DIRENT 28 + L!
     FS-SYNC
     \ Free buffers
-    _FE-BUF1 @ FREE
-    _FE-BUF2 @ FREE
+    _FE-BUF1 @ DMA-FREE
+    _FE-BUF2 @ DMA-FREE
     0
 ;
 
@@ -4334,8 +4403,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
     _FE-USED @ 15 + -16 AND _FE-PAD !
     _FE-PAD @ 16 + 511 + 512 / _FE-SECS !
     \ Allocate sector-aligned buffers (DMA operates on full sectors)
-    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
-    _FE-SECS @ 512 * ALLOCATE DROP DUP 0= IF _FE-BUF1 @ FREE -1 EXIT THEN _FE-BUF2 !
+    _FE-SECS @ 512 * DMA-ALLOCATE DROP DUP 0= IF DROP -1 EXIT THEN _FE-BUF1 !
+    _FE-SECS @ 512 * DMA-ALLOCATE DROP DUP 0= IF _FE-BUF1 @ DMA-FREE -1 EXIT THEN _FE-BUF2 !
     \ Zero buffers
     _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
     _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
@@ -4363,8 +4432,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
         FS-SYNC
     THEN
     \ Free buffers
-    _FE-BUF1 @ FREE
-    _FE-BUF2 @ FREE
+    _FE-BUF1 @ DMA-FREE
+    _FE-BUF2 @ DMA-FREE
 ;
 
 \ =====================================================================
@@ -12636,10 +12705,10 @@ PORT-INIT
 DISK? IF FS-LOAD THEN
 
 \ Force system heap initialisation before userland can confuse HEAP-SETUP.
-\ ALLOCATE 16 bytes to trigger lazy HEAP-SETUP, then FREE immediately.
-\ This ensures the system heap is ready and HEAP-INIT=1, so any later
-\ ALLOCATE calls (even from userland code) use the system heap safely.
-16 ALLOCATE DROP FREE
+\ DMA-ALLOCATE 16 bytes to trigger lazy HEAP-SETUP, then DMA-FREE.
+\ Must use DMA- variants to target Bank 0 directly (ALLOCATE routes
+\ to xmem when extended memory is present).
+16 DMA-ALLOCATE DROP DMA-FREE
 
 \ -- AUTOEXEC: run autoexec.f if present on disk --
 \ Must use a colon definition because FSLOAD evaluates each line
