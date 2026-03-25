@@ -7327,6 +7327,10 @@ w_abort:
     mov r14, r2               ; reset DSP to ram_size
     lsri r14, 1               ; DSP = ram_size / 2
     mov r15, r2               ; reset RSP to ram_size
+    ; Reset EVALUATE nesting depth so future EVALUATEs work
+    ldi r1, 0
+    ldi64 r11, var_eval_depth
+    str r11, r1
     ldi64 r11, forth_quit
     call.l r11                ; jump to QUIT (never returns)
     halt

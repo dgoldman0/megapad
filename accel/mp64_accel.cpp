@@ -424,6 +424,27 @@ static inline uint8_t* resolve_write_ptr(CPUState& s, uint64_t addr) {
     return nullptr;
 }
 
+// Like resolve_write_ptr but also returns how many bytes remain in the region.
+// Used by accelerator hooks to clamp writes and prevent host buffer overflows.
+struct WriteRegion { uint8_t* ptr; uint64_t avail; };
+static inline WriteRegion resolve_write_region(CPUState& s, uint64_t addr) {
+    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+        uint64_t off = addr - s.vram_base;
+        return {s.vram_mem + off, s.vram_size - off};
+    }
+    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+        uint64_t off = addr - s.ext_mem_base;
+        return {s.ext_mem + off, s.ext_mem_size - off};
+    }
+    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        uint64_t off = addr - s.hbw_base;
+        return {s.hbw_mem + off, s.hbw_size - off};
+    }
+    if (addr < s.mem_size)
+        return {s.mem + addr, s.mem_size - addr};
+    return {nullptr, 0};
+}
+
 // Fast read for non-MMIO memory (font data is in main RAM or ext_mem)
 static inline uint8_t read8_fast(CPUState& s, uint64_t addr) {
     if (addr < s.mem_size) return s.mem[addr];
@@ -443,10 +464,12 @@ static int accel_rect_fill(CPUState& s) {
     if (w <= 0 || h <= 0) return 1;
 
     for (int64_t row = 0; row < h; row++) {
-        uint8_t* dst = resolve_write_ptr(s, addr);
-        if (dst) {
-            uint16_t* px = reinterpret_cast<uint16_t*>(dst);
-            for (int64_t col = 0; col < w; col++)
+        auto wr = resolve_write_region(s, addr);
+        if (wr.ptr) {
+            int64_t max_px = (int64_t)(wr.avail / 2);  // 2 bytes per pixel
+            int64_t safe_w = (w < max_px) ? w : max_px;
+            uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
+            for (int64_t col = 0; col < safe_w; col++)
                 px[col] = color16;
         }
         addr += stride;
@@ -472,9 +495,9 @@ static int accel_blit_glyph(CPUState& s) {
     for (int row = 0; row < 8; row++) {
         uint8_t bits = font_rows[row];
         if (bits) {  // skip empty rows entirely
-            uint8_t* dst = resolve_write_ptr(s, pixel_addr);
-            if (dst) {
-                uint16_t* px = reinterpret_cast<uint16_t*>(dst);
+            auto wr = resolve_write_region(s, pixel_addr);
+            if (wr.ptr && wr.avail >= 16) {  // 8 pixels × 2 bytes
+                uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
                 for (int col = 0; col < 8; col++) {
                     if (bits & 0x80) px[col] = fg16;
                     bits <<= 1;
@@ -504,10 +527,13 @@ static int accel_vram_copy(CPUState& s) {
     uint64_t dst_row = backward ? dst + (uint64_t)(h - 1) * (uint64_t)stride : dst;
 
     for (int64_t row = 0; row < h; row++) {
-        uint8_t* sp = resolve_write_ptr(s, src_row);
-        uint8_t* dp = resolve_write_ptr(s, dst_row);
-        if (sp && dp) {
-            std::memmove(dp, sp, (size_t)w);
+        auto sr = resolve_write_region(s, src_row);
+        auto dr = resolve_write_region(s, dst_row);
+        if (sr.ptr && dr.ptr) {
+            int64_t safe_w = w;
+            if ((uint64_t)safe_w > sr.avail) safe_w = (int64_t)sr.avail;
+            if ((uint64_t)safe_w > dr.avail) safe_w = (int64_t)dr.avail;
+            if (safe_w > 0) std::memmove(dr.ptr, sr.ptr, (size_t)safe_w);
         }
         if (backward) {
             src_row -= stride;
@@ -531,6 +557,8 @@ static int accel_blit_string(CPUState& s) {
     uint64_t c_addr     = pop_data(s);
 
     if (len <= 0) return 1;
+    // Clamp to a sane maximum to avoid host-side DoS from corrupt stack
+    if (len > 4096) len = 4096;
 
     for (int64_t i = 0; i < len; i++) {
         uint8_t ch = read8_fast(s, c_addr + i);
@@ -547,9 +575,9 @@ static int accel_blit_string(CPUState& s) {
         for (int row = 0; row < 8; row++) {
             uint8_t bits = font_rows[row];
             if (bits) {
-                uint8_t* dst = resolve_write_ptr(s, pa);
-                if (dst) {
-                    uint16_t* px = reinterpret_cast<uint16_t*>(dst);
+                auto wr = resolve_write_region(s, pa);
+                if (wr.ptr && wr.avail >= 16) {  // 8 pixels × 2 bytes
+                    uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
                     for (int col = 0; col < 8; col++) {
                         if (bits & 0x80) px[col] = fg16;
                         bits <<= 1;

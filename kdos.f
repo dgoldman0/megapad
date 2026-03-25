@@ -133,12 +133,20 @@ VARIABLE PN-LEN
 24 CONSTANT /ALLOC-HDR
 0xA110CA7EDEADBEEF CONSTANT ALLOC-MAGIC
 
+\ -- Heap state (declared early so ?DICT-ROOM can reference them) --
+VARIABLE HEAP-BASE    0 HEAP-BASE !
+VARIABLE HEAP-FREE    0 HEAP-FREE !    \ head of free list
+VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
+
 \ ?DICT-ROOM ( u -- )
-\   Abort if HERE + u would reach within 256 bytes of SP.
+\   Abort if HERE + u would reach within 256 bytes of SP,
+\   or would collide with the heap (if initialised).
 \   Use before large ALLOT or CREATE sequences in Forth code
 \   to catch dictionary overflow before it corrupts the stack.
 : ?DICT-ROOM  ( u -- )
-    HERE + 256 +  SP@ >= ABORT" dictionary overflow" ;
+    HERE + 256 +
+    DUP SP@ >= ABORT" dictionary overflow"
+    HEAP-INIT @ IF  HEAP-BASE @ >= ABORT" dictionary into heap"  ELSE DROP  THEN ;
 
 \ MEM-SIZE ( -- u )  total RAM in bytes
 \   Reads bank0_size (64-bit, in bytes) from SysInfo register at offset 0x08.
@@ -159,11 +167,6 @@ VARIABLE PN-LEN
 \ Legacy alias (matches BIOS N-FULL)
 : N-FULL-CORES  ( -- n )  N-FULL ;
 
-\ -- Heap state --
-VARIABLE HEAP-BASE    0 HEAP-BASE !
-VARIABLE HEAP-FREE    0 HEAP-FREE !    \ head of free list
-VARIABLE HEAP-INIT    0 HEAP-INIT !    \ flag: has heap been initialised?
-
 \ -- Allocator scratch variables (avoid deep stack gymnastics) --
 VARIABLE A-PREV       \ previous free-list node (0 = update HEAP-FREE)
 VARIABLE A-CURR       \ current free-list node being examined
@@ -173,11 +176,11 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 4096 CONSTANT HEAP-GUARD   \ minimum gap between heap top and stack bottom
 
 \ HEAP-SETUP ( -- )  initialise the heap above HERE
-\   Leaves a 4 KiB gap above HERE for dictionary growth,
+\   Leaves a gap above HERE for dictionary growth (1/4 of Bank 0),
 \   then creates one large free block spanning to the stack guard.
 : HEAP-SETUP  ( -- )
     HEAP-INIT @ IF EXIT THEN
-    HERE 4096 + TALIGN  HEAP-BASE !
+    HERE  MEM-SIZE 4 /  + TALIGN  HEAP-BASE !
     \ Heap end = data-stack bottom - 4096 guard
     MEM-SIZE 2 / 4096 -   ( heap-end )
     HEAP-BASE @ -          ( available-bytes )
