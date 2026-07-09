@@ -456,10 +456,17 @@ class MegapadSystem:
             cs.init_trng()
             cs.fb_init()  # FB MMIO handled in C++ on all cores
             cs.timer_init()  # Timer MMIO handled in C++ on all cores
+            # UART is one shared physical device. Core 0 owns the native queue;
+            # secondary cores fall through to the shared Python facade.
+            if cpu.core_id == 0:
+                cs.uart_init()
+            else:
+                cs.uart_disable()
             cs.uart_geom_init(_init_cols, _init_rows)  # UART geometry on all cores
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs
+        self.uart.attach_native(cpu0_cs)
         if nic_backend is not None:
             nic_backend.on_rx_frame = lambda frame, _cs=cpu0_cs: _cs.nic_inject_frame(frame)
 
@@ -686,6 +693,10 @@ class MegapadSystem:
         """Check if C++ NIC has RX data available."""
         return self.cores[0]._cs.nic_has_rx()
 
+    def _drain_native_uart_output(self) -> bytes:
+        """Deliver pending native UART output to Python observers in one batch."""
+        return self.uart._drain_native_output()
+
     def _raw_mem_read(self, addr: int) -> int:
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
@@ -712,15 +723,39 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def load_binary(self, addr: int, data: bytes | bytearray):
-        """Load raw bytes into shared RAM, HBW, or external memory."""
-        for i, b in enumerate(data):
-            target = (addr + i)
-            if self.hbw_size > 0 and HBW_BASE <= target < HBW_END:
-                self._hbw_mem[target - HBW_BASE] = b
-            elif self.ext_mem_size > 0 and self.ext_mem_base <= target < self.ext_mem_end:
-                self._ext_mem[target - self.ext_mem_base] = b
+        """Load raw bytes with slice copies across mapped memory regions.
+
+        Ordinary addresses retain the emulator's historical Bank 0 wrapping
+        semantics. HBW, external memory, and VRAM use their physical windows.
+        """
+        payload = memoryview(data).cast('B')
+        pos = 0
+        target = u64(addr)
+        total = len(payload)
+
+        while pos < total:
+            if (self.vram_size > 0
+                    and self.vram_base <= target < self.vram_end):
+                offset = target - self.vram_base
+                count = min(total - pos, self.vram_end - target)
+                self._vram_mem[offset:offset + count] = payload[pos:pos + count]
+            elif (self.hbw_size > 0
+                    and HBW_BASE <= target < HBW_BASE + self.hbw_size):
+                offset = target - HBW_BASE
+                count = min(total - pos, self.hbw_size - offset)
+                self._hbw_mem[offset:offset + count] = payload[pos:pos + count]
+            elif (self.ext_mem_size > 0
+                    and self.ext_mem_base <= target < self.ext_mem_end):
+                offset = target - self.ext_mem_base
+                count = min(total - pos, self.ext_mem_end - target)
+                self._ext_mem[offset:offset + count] = payload[pos:pos + count]
             else:
-                self._shared_mem[target % self.ram_size] = b
+                offset = target % self.ram_size
+                count = min(total - pos, self.ram_size - offset)
+                self._shared_mem[offset:offset + count] = payload[pos:pos + count]
+
+            pos += count
+            target = u64(target + count)
 
     def load_binary_file(self, path: str, addr: int = 0):
         """Load a binary file into RAM."""
@@ -804,6 +839,7 @@ class MegapadSystem:
 
         # Tick devices once per round
         self.bus.tick(1)
+        self._drain_native_uart_output()
 
         # Deliver timer IRQ to all cores with interrupts enabled
         if self.timer.irq_pending:
@@ -882,7 +918,9 @@ class MegapadSystem:
                     cpu._trap(e.ivec_id)
                 steps = 1
             except HaltError:
-                return 1
+                steps = 1
+
+            self._drain_native_uart_output()
 
             # Timer / device catch-up
             if steps > 0:
@@ -940,6 +978,7 @@ class MegapadSystem:
 
                 if round_steps == 0:
                     break
+            self._drain_native_uart_output()
             return max(total, 1)
 
         # ---------- Single core fallback (shouldn't reach here) ----------
@@ -1015,8 +1054,8 @@ class MegapadSystem:
 
         lines.append("=== Devices ===")
         lines.append(f"  UART: TX buf={len(self.uart.tx_buffer)} "
-                      f"RX buf={len(self.uart.rx_buffer)} "
-                      f"ctrl={self.uart.control:#04x}")
+                      f"RX buf={self.uart.rx_pending} "
+                      f"ctrl={self.uart.read8(0x03):#04x}")
         lines.append(f"  Timer: count={self.timer.counter} "
                       f"compare={self.timer.compare} "
                       f"ctrl={self.timer.control:#04x} "

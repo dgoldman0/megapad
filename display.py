@@ -259,6 +259,53 @@ class VirtualTerminal:
             for _ in range(self.rows)
         ]
 
+    def resize(self, cols: int, rows: int):
+        """Resize the terminal while preserving overlapping cells."""
+        cols = int(cols)
+        rows = int(rows)
+        if cols <= 0 or rows <= 0:
+            raise ValueError("terminal dimensions must be positive")
+
+        with self._lock:
+            if cols == self.cols and rows == self.rows:
+                return
+
+            old_rows = self.rows
+            old_scroll_full = (
+                self._scroll_top == 0
+                and self._scroll_bottom == old_rows - 1
+            )
+            blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
+
+            def resized(grid):
+                result = [[blank for _ in range(cols)] for _ in range(rows)]
+                if grid is None:
+                    return result
+                for y in range(min(rows, len(grid))):
+                    width = min(cols, len(grid[y]))
+                    result[y][:width] = grid[y][:width]
+                return result
+
+            self.grid = resized(self.grid)
+            if self._alt_grid is not None:
+                self._alt_grid = resized(self._alt_grid)
+
+            self.cols = cols
+            self.rows = rows
+            self.cx = min(self.cx, cols - 1)
+            self.cy = min(self.cy, rows - 1)
+            self._saved_cx = min(self._saved_cx, cols - 1)
+            self._saved_cy = min(self._saved_cy, rows - 1)
+            self._alt_cx = min(self._alt_cx, cols - 1)
+            self._alt_cy = min(self._alt_cy, rows - 1)
+            self._scroll_top = min(self._scroll_top, rows - 1)
+            self._scroll_bottom = (
+                rows - 1 if old_scroll_full
+                else max(self._scroll_top, min(self._scroll_bottom, rows - 1))
+            )
+            self._pending_wrap = False
+            self._dirty = True
+
     def write(self, data: bytes | int):
         """Feed raw bytes (or a single int) into the terminal."""
         with self._lock:
@@ -1954,8 +2001,7 @@ class FramebufferDisplay:
                         new_cols = max(20, avail_w // cell_w)
                         new_rows = max(5, avail_h // cell_h)
                         if new_cols != self.term.cols or new_rows != self.term.rows:
-                            self.term.cols = new_cols
-                            self.term.rows = new_rows
+                            self.term.resize(new_cols, new_rows)
                             if hasattr(self.sys, 'uart_geom'):
                                 self.sys.uart_geom.host_set_size(new_cols, new_rows)
                     elif event.type == pygame.KEYDOWN:
@@ -2049,8 +2095,7 @@ class FramebufferDisplay:
                     # Clamp to reasonable bounds
                     if 20 <= rc <= 400 and 5 <= rr <= 200:
                         # Accept: resize terminal grid + window
-                        self.term.cols = rc
-                        self.term.rows = rr
+                        self.term.resize(rc, rr)
                         self.sys.uart_geom.host_accept_resize(rc, rr)
                         # Resize the window to match
                         new_term_w = rc * cell_w

@@ -23,6 +23,7 @@
 #include "mp64_nic.h"
 #include "mp64_timer.h"
 #include "mp64_uart_geom.h"
+#include "mp64_uart.h"
 
 namespace py = pybind11;
 
@@ -221,6 +222,9 @@ struct CPUState {
 
     // C++ native UART geometry device (terminal dimensions)
     UartGeomDevice uart_geom;
+
+    // C++ native UART device (RX/status/TX and BIOS TX ring)
+    UARTDevice uart;
 
     // Accelerator hooks — intercept CALL.L to known BIOS word addresses
     static constexpr int MAX_ACCEL_HOOKS = 8;
@@ -1700,6 +1704,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.nic.handles(mmio_off))
             return s.nic.read8(mmio_off);
+        if (s.uart.handles(mmio_off))
+            return s.uart.read8(mmio_off);
         if (s.trng.handles(mmio_off))
             return s.trng.read8(mmio_off);
         if (s.crypto.handles(mmio_off))
@@ -1737,6 +1743,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.nic.handles(mmio_off)) {
             s.nic.write8(mmio_off, val);
+            return;
+        }
+        if (s.uart.handles(mmio_off)) {
+            s.uart.write8(mmio_off, val);
             return;
         }
         if (s.trng.handles(mmio_off)) {
@@ -3883,6 +3893,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::buffer_info info = buf.request(true);  // writable
             s.mem = static_cast<uint8_t*>(info.ptr);
             s.mem_size = size;
+            s.uart.attach_mem(s.mem, size);
             // WOTS chain accelerator needs direct memory access (DMA read)
             s.crypto.wots.mem = s.mem;
             s.crypto.wots.mem_size = (uint32_t)size;
@@ -3914,6 +3925,34 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def_readwrite("vram_base", &CPUState::vram_base)
         .def_readwrite("vram_size", &CPUState::vram_size)
+        // Native UART
+        .def("uart_init", [](CPUState& s) {
+            s.uart.init();
+            s.uart.attach_mem(s.mem, s.mem_size);
+        })
+        .def("uart_disable", [](CPUState& s) { s.uart.enabled = false; })
+        .def("uart_enabled", [](const CPUState& s) { return s.uart.enabled; })
+        .def("uart_read8", [](CPUState& s, uint32_t off) -> uint8_t {
+            return s.uart.read8(off);
+        })
+        .def("uart_write8", [](CPUState& s, uint32_t off, uint8_t value) {
+            s.uart.write8(off, value);
+        })
+        .def("uart_inject", [](CPUState& s, py::bytes payload) {
+            std::string data = payload;
+            s.uart.inject(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        })
+        .def("uart_has_rx", [](const CPUState& s) { return s.uart.has_rx_data(); })
+        .def("uart_rx_size", [](const CPUState& s) { return s.uart.rx_size(); })
+        .def_property("uart_tx_ring_base",
+            [](const CPUState& s) { return s.uart.get_tx_ring_base(); },
+            [](CPUState& s, uint64_t value) { s.uart.set_tx_ring_base(value); })
+        .def("uart_drain_tx", [](CPUState& s) -> py::bytes {
+            const std::vector<uint8_t> data = s.uart.take_tx();
+            if (data.empty())
+                return py::bytes();
+            return py::bytes(reinterpret_cast<const char*>(data.data()), data.size());
+        })
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })

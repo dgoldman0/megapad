@@ -341,6 +341,7 @@ The `docs/` directory contains comprehensive reference material:
 | [docs/tile-engine.md](docs/tile-engine.md) | Tile engine programming guide — CSRs, MEX encoding, extended ops, FP16/BF16 |
 | [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
 | [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite, C++ accelerator |
+| [docs/development-session.md](docs/development-session.md) | Headless and shared live control, terminal snapshots, JSON scenarios, pygame viewing, and PNG capture |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)
 > reflect the simplified emulator model rather than the complete hardware

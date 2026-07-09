@@ -139,14 +139,34 @@ class UART(Device):
         # Callbacks
         self.on_tx: Optional[callable] = None  # called with byte when CPU writes TX
         self.on_tx_batch: Optional[callable] = None  # called with bytes on ring flush
-        self._tx_listeners: list = []          # additional TX listeners (display, etc.)
+        # Listeners accept either one integer byte or a bytes batch. This keeps
+        # legacy direct TX compatible while preserving BIOS ring batches.
+        self._tx_listeners: list = []
+
+        # MegapadSystem attaches core 0's C++ UART here. Standalone UART
+        # instances remain the pure-Python reference device used by tests.
+        self._native = None
 
         # TX ring buffer support (BIOS-level batching)
         self._tx_ring_addr_bytes = bytearray(8)   # LE bytes from UART+0x08 writes
-        self._tx_ring_base: int = 0                # resolved descriptor base in RAM
+        self.__tx_ring_base: int = 0               # resolved descriptor base in RAM
         self._cpu_mem = None                       # set by system.py after boot
 
+    @property
+    def _tx_ring_base(self) -> int:
+        if self._native is not None:
+            return int(self._native.uart_tx_ring_base)
+        return self.__tx_ring_base
+
+    @_tx_ring_base.setter
+    def _tx_ring_base(self, value: int):
+        self.__tx_ring_base = int(value)
+        if self._native is not None:
+            self._native.uart_tx_ring_base = int(value)
+
     def read8(self, offset: int) -> int:
+        if self._native is not None:
+            return self._native.uart_read8(offset)
         if offset == 0x00:     # TX_DATA — reading it is undefined, return 0
             return 0
         elif offset == 0x01:   # RX_DATA
@@ -168,12 +188,16 @@ class UART(Device):
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
+        if self._native is not None:
+            self._native.uart_write8(offset, value)
+            # Calls through the Python facade retain immediate observer
+            # semantics. Native CPU execution is drained by MegapadSystem once
+            # after each execution batch.
+            if offset in (0x00, 0x06):
+                self._drain_native_output()
+            return
         if offset == 0x00:     # TX_DATA (legacy per-byte path)
-            self.tx_buffer.append(value)
-            if self.on_tx:
-                self.on_tx(value)
-            for fn in self._tx_listeners:
-                fn(value)
+            self._emit_byte(value)
         elif offset == 0x03:
             self.control = value
         elif offset == 0x04:
@@ -202,20 +226,7 @@ class UART(Device):
         buf_start = base + 8
         data = bytes(mem[buf_start:buf_start + head])
 
-        # Accumulate in tx_buffer (for drain_tx() compatibility)
-        self.tx_buffer.extend(data)
-
-        # Batch callback (preferred) or per-byte fallback
-        if self.on_tx_batch:
-            self.on_tx_batch(data)
-        elif self.on_tx:
-            for b in data:
-                self.on_tx(b)
-
-        # Listeners (display, etc.) — per-byte for VirtualTerminal compat
-        for fn in self._tx_listeners:
-            for b in data:
-                fn(b)
+        self._emit_batch(data)
 
         # Reset head to 0 (LE 64-bit)
         mem[base:base + 8] = b'\x00' * 8
@@ -223,13 +234,58 @@ class UART(Device):
     def inject_input(self, data: bytes | str):
         """Push bytes into the RX buffer (from host keyboard)."""
         if isinstance(data, str):
-            data = data.encode("ascii", errors="replace")
+            data = data.encode("utf-8")
+        if self._native is not None:
+            self._native.uart_inject(bytes(data))
+            return
         for b in data:
             self.rx_buffer.append(b & 0xFF)
 
     @property
     def has_rx_data(self) -> bool:
+        if self._native is not None:
+            return bool(self._native.uart_has_rx())
         return len(self.rx_buffer) > 0
+
+    @property
+    def rx_pending(self) -> int:
+        """Number of queued host-to-guest bytes."""
+        if self._native is not None:
+            return int(self._native.uart_rx_size())
+        return len(self.rx_buffer)
+
+    def attach_native(self, native_state):
+        """Attach core 0's native UART while retaining this public facade."""
+        self._native = native_state
+        if self.__tx_ring_base:
+            self._native.uart_tx_ring_base = self.__tx_ring_base
+
+    def _emit_byte(self, value: int):
+        self.tx_buffer.append(value)
+        if self.on_tx:
+            self.on_tx(value)
+        for fn in self._tx_listeners:
+            fn(value)
+
+    def _emit_batch(self, data: bytes):
+        if not data:
+            return
+        self.tx_buffer.extend(data)
+        if self.on_tx_batch:
+            self.on_tx_batch(data)
+        elif self.on_tx:
+            for b in data:
+                self.on_tx(b)
+        for fn in self._tx_listeners:
+            fn(data)
+
+    def _drain_native_output(self) -> bytes:
+        """Move one native TX batch into the Python observer facade."""
+        if self._native is None:
+            return b""
+        data = bytes(self._native.uart_drain_tx())
+        self._emit_batch(data)
+        return data
 
     def drain_tx(self) -> str:
         """Return all pending TX bytes as a string and clear the buffer."""

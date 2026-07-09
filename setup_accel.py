@@ -14,7 +14,11 @@ import pybind11
 ext = Extension(
     "_mp64_accel",
     sources=["accel/mp64_accel.cpp"],
-    depends=["accel/mp64_crypto.h", "accel/mp64_nic.h"],
+    depends=[
+        "accel/mp64_crypto.h",
+        "accel/mp64_nic.h",
+        "accel/mp64_uart.h",
+    ],
     include_dirs=[pybind11.get_include()],
     language="c++",
     extra_compile_args=[
