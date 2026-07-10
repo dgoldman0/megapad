@@ -28,6 +28,7 @@ standards, not a complete WebPKI implementation.
 6. Every required ECDSA-P256-SHA256 certificate signature.
 7. `CertificateVerify`, proving possession of the authenticated leaf key.
 8. The server `Finished` MAC.
+9. Exact `http/1.1` ALPN selection when the caller requests that profile.
 
 Only step 7 sets `TLS-CTX.PEER-AUTH`. The application key schedule additionally
 requires `TLSH-SERVER-FINISHED`; it otherwise returns without changing the
@@ -140,6 +141,23 @@ Unknown, duplicate, truncated, and out-of-order handshake messages fail. This
 profile does not currently support PSK-only handshakes, post-handshake client
 authentication, or a server CertificateRequest.
 
+Handshake messages are reassembled across protected records in a bounded
+73732-byte buffer. The plaintext `ServerHello` may also span records, but it
+must be the only plaintext handshake message before encrypted traffic begins.
+Transcript and reassembly overflow are sticky fatal failures.
+
+`TLS-CONNECT-ALPN` stores the requested and negotiated application protocol in
+the connection context. The currently implemented application profile is
+`http/1.1`; its ClientHello offer and EncryptedExtensions selection are both
+checked exactly. Plain `TLS-CONNECT` requests no ALPN profile.
+
+Incoming records require legacy record version `0x0303` and are bounded
+separately for plaintext and protected records. A compatibility
+ChangeCipherSpec is ignored only when it has the exact one-byte `0x01` form
+permitted during the handshake. Incoming alerts clear peer authorization and
+distinguish clean `close_notify` from fatal or malformed records. Application
+send and receive both require an established, authenticated context.
+
 ## Deployment Reality
 
 The code does not yet validate arbitrary public certificate chains. It lacks
@@ -174,6 +192,10 @@ Native guest tests cover:
 - stale-key clearing on every failed Certificate message;
 - a real CertificateVerify signature from the fixture leaf key;
 - rejection of early Finished and unauthenticated application-key derivation;
+- ALPN offer, exact selection, missing-selection, and per-context state;
+- handshake reassembly across arbitrary protected-record boundaries;
+- legacy record version, size-class, and compatibility CCS validation;
+- clean, fatal, and malformed incoming alert handling;
 - the surrounding record, handshake, and application-data regressions.
 
 The test private scalars are deliberately trivial and never enter a product
@@ -192,13 +214,14 @@ trust bundle.
 
 ### Protocol correctness
 
-- Harden `ServerHello` bounds and detect HelloRetryRequest.
-- Reassemble handshake messages fragmented across TLS records.
-- Make transcript overflow an explicit fatal status instead of truncation.
-- Parse incoming alerts and distinguish close, retryable I/O, and fatal errors.
-- Validate compatibility-mode CCS contents and all record versions/lengths.
-- Add ALPN for HTTP/1.1 before relying on general HTTPS endpoints.
-- Finish failed-connect cleanup and graceful close behavior across all states.
+- Convert the currently blocking connection handshake into a bounded
+  cooperative state machine with cancellation and precise timeout statuses.
+- Finish graceful close draining and distinguish EOF, retryable I/O, timeout,
+  and protocol failure throughout the public connection API.
+- Define or deliberately reject post-handshake `KeyUpdate` before long-lived
+  streaming connections are considered production-ready.
+- Run credential-free live interoperability against every intended endpoint
+  after provisioning a reviewed scoped trust bundle.
 
 ### Algorithm coverage
 
@@ -210,10 +233,12 @@ trust bundle.
 
 ### Concurrency
 
-Handshake transcript, certificate descriptors, cryptographic scratch, and
-hybrid key-exchange buffers are global. The current owner loop permits one
-handshake at a time. True concurrent handshakes require per-context state or a
-machine-wide handshake lock before multitasking can expose parallel TLS calls.
+ALPN result, traffic keys, authorization state, and connection errors are
+per-context. Handshake transcript, certificate descriptors, cryptographic
+scratch, record buffers, and hybrid key-exchange buffers remain global. The
+current owner loop permits one handshake and one record operation at a time.
+True concurrent TLS work requires per-context scratch or an explicit
+machine-wide TLS owner before multitasking can expose parallel calls.
 
 ## Acceptance Before Provider Credentials
 

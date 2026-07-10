@@ -15702,12 +15702,44 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=560 ", text)
+        self.assertIn("SZ=584 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
         text = self._run_kdos(["0 TLS-CTX@ .TLS-STATUS"])
         self.assertIn("TLS: none", text)
+
+    def test_tls_record_header_size_and_compat_ccs_validation(self):
+        """Incoming records require TLS 1.2 legacy versions and exact CCS."""
+        lines = [
+            "CREATE rec 8 ALLOT rec 8 0 FILL",
+            "3 rec 1+ C! 3 rec 2 + C!",
+            '." HEADER=" rec TLS-RECORD-HEADER? .',
+            "1 rec 2 + C!",
+            '." BADVER=" rec TLS-RECORD-HEADER? .',
+            "3 rec 2 + C!",
+            "TLS-CT-APP-DATA rec C!",
+            '." APPMAX=" rec 16645 TLS-RECORD-SIZE? .',
+            '." APPBIG=" rec 16646 TLS-RECORD-SIZE? .',
+            "TLS-CT-HANDSHAKE rec C!",
+            '." PLAINMAX=" rec 16389 TLS-RECORD-SIZE? .',
+            '." PLAINBIG=" rec 16390 TLS-RECORD-SIZE? .',
+            "TLS-CT-CCS rec C! 0 rec 3 + C! 1 rec 4 + C! 1 rec 5 + C!",
+            '." CCS=" rec 6 TLS-COMPAT-CCS? .',
+            "2 rec 5 + C!",
+            '." BADCCS=" rec 6 TLS-COMPAT-CCS? .',
+            '." LONGCCS=" rec 7 TLS-COMPAT-CCS? .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("HEADER=-1 ", text)
+        self.assertIn("BADVER=0 ", text)
+        self.assertIn("APPMAX=-1 ", text)
+        self.assertIn("APPBIG=0 ", text)
+        self.assertIn("PLAINMAX=-1 ", text)
+        self.assertIn("PLAINBIG=0 ", text)
+        self.assertIn("CCS=-1 ", text)
+        self.assertIn("BADCCS=0 ", text)
+        self.assertIn("LONGCCS=0 ", text)
 
 
 # ---------------------------------------------------------------------------
@@ -16058,7 +16090,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=560 ", text)
+        self.assertIn("SZ=584 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -16145,6 +16177,38 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         self.assertIn("LISTLEN=2 ", text)
         self.assertIn("ALG0=4 ", text)
         self.assertIn("ALG1=3 ", text)
+
+    def test_http11_alpn_profile_roundtrip(self):
+        """HTTP callers advertise and require an exact http/1.1 selection."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "0 TLS-SNI-LEN !",
+            "TLS-ALPN-HTTP11 test-ctx @ TLS-CTX.ALPN-PROFILE !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            '." CHLEN=" . DROP',
+            '." EXTLEN=" TLS-CH-BUF 85 + C@ .',
+            '." ATYPE=" TLS-CH-BUF 990 + C@ .',
+            '." ANAME=" TLS-CH-BUF 996 + 8 TYPE CR',
+            "CREATE ee 21 ALLOT ee 21 0 FILL",
+            "8 ee C! 17 ee 3 + C! 15 ee 5 + C!",
+            "16 ee 7 + C! 11 ee 9 + C! 9 ee 11 + C! 8 ee 12 + C!",
+            "TLS-ALPN-HTTP11-NAME ee 13 + 8 CMOVE",
+            "test-ctx @ ee 21 TLS-PARSE-ENCRYPTED-EXT",
+            '." EE=" .',
+            '." NEG=" test-ctx @ TLS-CTX.ALPN-NEGOTIATED @ .',
+            "CREATE no-ee 6 ALLOT no-ee 6 0 FILL",
+            "8 no-ee C! 2 no-ee 3 + C!",
+            "test-ctx @ no-ee 6 TLS-PARSE-ENCRYPTED-EXT",
+            '." MISSING=" .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("CHLEN=1004 ", text)
+        self.assertIn("EXTLEN=150 ", text)  # 918 = 0x0396
+        self.assertIn("ATYPE=16 ", text)
+        self.assertIn("ANAME=http/1.1", text)
+        self.assertIn("EE=0 ", text)
+        self.assertIn("NEG=1 ", text)
+        self.assertIn("MISSING=-1 ", text)
 
     def test_build_ch_hybrid_key_share_group(self):
         """ClientHello key_share first entry is hybrid PQ group (0x6399)."""
@@ -16311,6 +16375,40 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("ERROR=-1 ", text)
         self.assertIn("LEN=0 ", text)
+
+    def test_encrypted_handshake_fragments_reassemble(self):
+        """A handshake message may cross arbitrary protected-record boundaries."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-HELLO-RCVD test-ctx @ TLS-CTX.HS-STATE !",
+            "TLS-ALPN-NONE test-ctx @ TLS-CTX.ALPN-PROFILE !",
+            "TLS-HS-RBUF-RESET TLS-TR-RESET",
+            "CREATE ee-empty 6 ALLOT ee-empty 6 0 FILL",
+            "8 ee-empty C! 2 ee-empty 3 + C!",
+            "test-ctx @ ee-empty 3 TLS-PROCESS-HS-MSGS",
+            '." FIRST=" .',
+            '." HELD=" TLS-HS-RBUF-LEN @ .',
+            '." STATE1=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            "test-ctx @ ee-empty 3 + 3 TLS-PROCESS-HS-MSGS",
+            '." SECOND=" .',
+            '." LEFT=" TLS-HS-RBUF-LEN @ .',
+            '." STATE2=" test-ctx @ TLS-CTX.HS-STATE @ .',
+            "TLS-HS-RBUF-RESET",
+            "CREATE huge-hs 4 ALLOT 8 huge-hs C!",
+            "255 huge-hs 1+ C! 255 huge-hs 2 + C! 255 huge-hs 3 + C!",
+            "test-ctx @ huge-hs 4 TLS-PROCESS-HS-MSGS",
+            '." HUGE=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("FIRST=0 ", text)
+        self.assertIn("HELD=3 ", text)
+        self.assertIn("STATE1=2 ", text)
+        self.assertIn("SECOND=0 ", text)
+        self.assertIn("LEFT=0 ", text)
+        self.assertIn("STATE2=3 ", text)
+        self.assertIn("HUGE=-1 ", text)
 
     def test_hybrid_group_constants(self):
         """Hybrid PQ group constants have correct values."""
@@ -17037,6 +17135,7 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         "init-riv",
         "0 test-ctx @ TLS-CTX.WR-SEQ !",
         "0 test-ctx @ TLS-CTX.RD-SEQ !",
+        "1 test-ctx @ TLS-CTX.PEER-AUTH !",
         "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
     ]
 
@@ -17094,6 +17193,33 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         ]
         text = self._run_kdos(lines)
         self.assertIn("S=0 ", text)   # NONE — guard prevents close
+
+    def test_incoming_alerts_close_and_report(self):
+        lines = self._TLS_ESTAB_SETUP + [
+            "CREATE peer-alert 2 ALLOT",
+            "1 peer-alert C! 0 peer-alert 1+ C!",
+            "test-ctx @ peer-alert 2 TLS-PROCESS-ALERT",
+            '." CLOSE=" .',
+            '." CSTATE=" test-ctx @ TLS-CTX.STATE @ .',
+            '." CAUTH=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
+            "1 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "2 peer-alert C! 40 peer-alert 1+ C!",
+            "test-ctx @ peer-alert 2 TLS-PROCESS-ALERT",
+            '." FATAL=" .',
+            '." ERROR=" test-ctx @ TLS-CTX.ERROR @ .',
+            "test-ctx @ peer-alert 1 TLS-PROCESS-ALERT",
+            '." SHORT=" .',
+            '." RECORD=" test-ctx @ TLS-CTX.ERROR @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CLOSE=0 ", text)
+        self.assertIn("CSTATE=3 ", text)
+        self.assertIn("CAUTH=0 ", text)
+        self.assertIn("FATAL=-1 ", text)
+        self.assertIn("ERROR=-4201 ", text)
+        self.assertIn("SHORT=-1 ", text)
+        self.assertIn("RECORD=-4203 ", text)
 
     def test_alert_buf_layout(self):
         """TLS-ALERT-BUF stores level and description bytes."""
