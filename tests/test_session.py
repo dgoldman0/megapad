@@ -125,6 +125,37 @@ def test_machine_session_named_edit_keys_use_terminal_sequences():
     assert received == b"\x08\x1b[3~"
 
 
+def test_machine_session_encodes_modified_named_characters():
+    system = MegapadSystem(ram_size=64 * 1024)
+    with MachineSession(system) as session:
+        session.send_key("ctrl+space")
+        state = system.cpu._cs
+        received = bytes(state.uart_read8(0x01) for _ in range(7))
+
+    assert received == b"\x1b[32;5u"
+
+
+def test_machine_session_can_advance_timer_while_guest_is_idle():
+    system = MegapadSystem(ram_size=64 * 1024)
+    system.cpu.idle = True
+    system.cpu.flag_i = True
+    system.timer.counter = 0
+    system.timer.compare = 100
+    system.timer.control = 0x03
+    system.run_batch = lambda count: count
+
+    with MachineSession(system) as session:
+        report = session.run(
+            max_steps=1,
+            wall_timeout_s=0.1,
+            advance_idle=True,
+            idle_tick_cycles=100,
+        )
+
+    assert system.timer.irq_pending
+    assert report.reason == "step_budget"
+
+
 def test_machine_session_boots_interacts_and_captures(tmp_path):
     with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
         session.boot()

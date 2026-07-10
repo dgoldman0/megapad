@@ -209,6 +209,9 @@ class MachineSession:
         "f11": b"\x1b[23~",
         "f12": b"\x1b[24~",
     }
+    NAMED_CHARACTERS = {
+        "space": " ",
+    }
 
     def __init__(
         self,
@@ -333,6 +336,8 @@ class MachineSession:
         wall_timeout_s: float = 10.0,
         until_text: str | None = None,
         text_scope: Literal["raw", "screen"] = "raw",
+        advance_idle: bool = False,
+        idle_tick_cycles: int = 10_000,
     ) -> RunReport:
         if max_steps < 0:
             raise ValueError("max_steps cannot be negative")
@@ -340,6 +345,8 @@ class MachineSession:
             raise ValueError("wall_timeout_s must be positive")
         if text_scope not in ("raw", "screen"):
             raise ValueError("text_scope must be 'raw' or 'screen'")
+        if idle_tick_cycles <= 0:
+            raise ValueError("idle_tick_cycles must be positive")
         start = time.perf_counter()
         output_start = len(self.raw_output)
         steps = 0
@@ -361,13 +368,28 @@ class MachineSession:
             if self.system.all_halted:
                 reason = "halted"
                 break
-            if self.system.all_idle_or_halted and not self.system.uart.has_rx_data:
-                reason = "idle"
-                break
             if time.perf_counter() - start >= wall_timeout_s:
                 reason = "wall_timeout"
                 break
-
+            if self.system.all_idle_or_halted and not self.system.uart.has_rx_data:
+                if not advance_idle:
+                    reason = "idle"
+                    break
+                self.system.bus.tick(idle_tick_cycles)
+                if self.system.timer.irq_pending:
+                    for cpu in self.system.cores:
+                        if cpu.idle and cpu.flag_i:
+                            cpu.idle = False
+                            break
+                for cpu in self.system.cores:
+                    if cpu.idle and cpu.irq_ipi and cpu.flag_i:
+                        cpu.idle = False
+                core0 = self.system.cores[0]
+                if core0.idle and self.system._any_nic_rx():
+                    core0.idle = False
+                if self.system.all_idle_or_halted:
+                    time.sleep(0.001)
+                continue
             count = min(self.batch_steps, max_steps - steps)
             executed = self.system.run_batch(count)
             batches += 1
@@ -410,6 +432,7 @@ class MachineSession:
             wall_timeout_s=wall_timeout_s,
             until_text=text,
             text_scope=scope,
+            advance_idle=True,
         )
 
     def send_text(self, text: str | bytes):
@@ -422,7 +445,7 @@ class MachineSession:
             return
         parts = normalized.split("+")
         modifiers = set(parts[:-1])
-        char = parts[-1]
+        char = self.NAMED_CHARACTERS.get(parts[-1], parts[-1])
         if len(char) == 1 and modifiers == {"ctrl"}:
             if "a" <= char <= "z":
                 self.send_text(bytes([ord(char) & 0x1F]))
@@ -437,8 +460,8 @@ class MachineSession:
             modifier += 4 if "ctrl" in modifiers else 0
             self.send_text(f"\x1b[{ord(char)};{modifier}u".encode("ascii"))
             return
-        if len(key) == 1:
-            self.send_text(key)
+        if len(char) == 1 and not modifiers:
+            self.send_text(char)
             return
         raise ValueError(f"unknown key: {key}")
 
