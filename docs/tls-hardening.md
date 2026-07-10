@@ -1,272 +1,227 @@
-# TLS 1.3 Hardening Roadmap
+# Native TLS Hardening
 
-Status: **Phase 1 Complete — Phase 2 Next**
-Last updated: 2025-07-08
+Status: authenticated P-256 profile implemented; general WebPKI incomplete
+Last updated: 2026-07-10
 
-## Current State
+## Purpose
 
-The TLS 1.3 stack (kdos.f §16.8–§16.11) provides a structurally complete
-client-side handshake with dual cipher suite support (0x1301 standard +
-0xFF01 private), hybrid PQ key exchange (X25519 + ML-KEM-512), full key
-schedule, record encryption/decryption, Finished MAC verification, and a
-BSD socket API.
+MegaPad must authenticate a remote service on the machine itself. A Linux
+companion, emulator service, or host certificate library is not part of the
+security architecture. Host tools may generate fixtures and drive tests, but
+KDOS parses the wire message, builds the path, verifies signatures, checks the
+clock and hostname, and gates application traffic.
 
-**Fatal gap**: the server is never authenticated.  Certificates and
-CertificateVerify are hashed into the transcript but their contents are
-ignored.  Every connection is vulnerable to active MITM.
+The relevant standards are [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446)
+and [PKIX certificates (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280).
+The current implementation is a deliberately bounded profile of those
+standards, not a complete WebPKI implementation.
 
----
+## Security Invariant
 
-## Issues Inventory
+`TLS-SEND-DATA` is reachable only after all of the following succeed in order:
 
-Every bug and gap found during the 2026-03-11 audit, mapped to the phase
-that addresses it.
+1. `ServerHello` and the handshake key schedule.
+2. `EncryptedExtensions` with exact handshake framing.
+3. A complete server `Certificate` message.
+4. A path from leaf to an explicitly provisioned and hostname-scoped anchor.
+5. Certificate validity, CA constraints, key usage, EKU, SAN, and hostname.
+6. Every required ECDSA-P256-SHA256 certificate signature.
+7. `CertificateVerify`, proving possession of the authenticated leaf key.
+8. The server `Finished` MAC.
 
-### P0 — CRITICAL (no security without fixing)
+Only step 7 sets `TLS-CTX.PEER-AUTH`. The application key schedule additionally
+requires `TLSH-SERVER-FINISHED`; it otherwise returns without changing the
+connection to `TLSS-ESTABLISHED`. Starting a new ClientHello clears the retained
+leaf key, certificate status, and authentication bit.
 
-| # | Issue | Location | Description | Fix Phase |
-|---|-------|----------|-------------|-----------|
-| 1 | **No certificate validation** | kdos.f L9937, L10496–10499 | `TLSHT-CERTIFICATE` handler only appends to transcript. No X.509 parsing, no chain walk, no trust anchor, no expiry, no hostname/SAN match, no revocation. Any MITM succeeds. | **1b, 1e** |
-| 2 | **CertificateVerify never checked** | kdos.f L10500–10504 | `TLSHT-CERT-VERIFY` handler hashes into transcript and returns success. Signature algorithm, signature bytes, and verification input are all ignored. Server identity is never proven. | **1c, 1d** |
+## Implemented Native Profile
 
-### P1 — HIGH (will cause failures or silent misbehaviour with real servers)
+### Bounded DER and X.509
 
-| # | Issue | Location | Description | Fix Phase |
-|---|-------|----------|-------------|-----------|
-| 3 | **Incoming alerts ignored** | kdos.f L10654 | `TLS-RECV-DATA` silently drops any decrypted record with content type ≠ `TLS-CT-APP-DATA` (returns 0). Server `close_notify`, `bad_record_mac`, `handshake_failure` etc. are all swallowed. Client can't distinguish "no data" from "server terminated". | **3a** |
-| 4 | **HelloRetryRequest not detected** | kdos.f L9938, `TLS-PARSE-SERVER-HELLO` | Comment says "HRR → abort" but the code never checks if ServerHello random == SHA-256("HelloRetryRequest"). HRR is misparsed as normal SH, producing garbage keys. | **3b** |
-| 5 | **Handshake state ordering not enforced** | kdos.f `TLS-PROCESS-HS-MSG` L10459+ | Dispatches on message type without validating the current `HS-STATE` permits that transition. Finished accepted before Certificate, EncryptedExtensions after Finished, duplicates not rejected. RFC 8446 §4.4 mandates strict ordering. | **3c** |
-| 6 | **TCB leak on failed TCP connect** | kdos.f L10753 | If TCP doesn't reach ESTABLISHED, `TLS-CONNECT` returns 0 but never calls `TCP-CLOSE` on the allocated TCB. TLS context is recoverable (zero-filled = TLSS-NONE) but the TCB slot is permanently lost. | **4e** |
+`DER-READ` accepts definite, canonical DER lengths of at most four length
+octets and never reads beyond the caller's limit. `X509-DESC-PARSE` accepts
+certificates from 128 through 8192 bytes and records borrowed slices in a
+208-byte `/X509-CERT` descriptor.
 
-### P2 — MEDIUM (correctness / interop)
+The parser currently requires:
 
-| # | Issue | Location | Description | Fix Phase |
-|---|-------|----------|-------------|-----------|
-| 7 | **Outer record content type not validated** | kdos.f `TLS-CONNECT` L10773+ | After ServerHello, all encrypted records must have outer type 23 (application_data) per RFC 8446 §5.1. Code only checks for CCS=20 vs "everything else" — doesn't reject illegal outer types. | **4b** |
-| 8 | **`TLS-CLOSE` skips half-close** | kdos.f L10674–10681 | State jumps ESTABLISHED→NONE immediately after sending `close_notify`, without waiting for server's `close_notify`. `TLSS-CLOSING` is defined but never used. TCP connection closed before server can acknowledge. | **4d** |
-| 9 | **No ALPN extension** | kdos.f `TLS-BUILD-CLIENT-HELLO` | `HTTPS-GET` uses HTTP/1.1 but ClientHello doesn't advertise it via ALPN (RFC 7301). Some servers reject connections without ALPN. | **4a** |
-| 10 | **Post-handshake messages silently dropped** | kdos.f L10654 | `TLS-RECV-DATA` returns 0 for non-app-data records. Server-sent `NewSessionTicket` and `KeyUpdate` messages are lost with no indication. `KeyUpdate` in particular means the connection will break when the server starts using new keys. | **3a, 6** |
-| 11 | **Global scratch buffers prevent concurrent handshakes** | kdos.f L9984–9990 | `TLS-HS-KYBER-*`, `TLS-HS-TRANSCRIPT`, `TLS-FINISHED-KEY`, `TLS-VERIFY-DATA` etc. are all globals. 16 TLS context slots exist but only one handshake can run at a time. Multi-core parallel TLS will corrupt state. | **6** |
-| 12 | **No record size validation** | kdos.f `TLS-READ-RECORD` | No check that record payload ≤ 16640 bytes (2^14 + 256) per RFC 8446 §5.1. Oversized records accepted, could overflow TLS-RECV-REC (16896 bytes). | **4c** |
-| 13 | **Ambiguous `TLS-RECV-DATA` return** | kdos.f L10641–10657 | Returns 0 for both "no data available" and "received non-app-data record". Caller cannot distinguish the two cases. Should return distinct error codes or process non-app-data internally. | **3a** |
+- X.509 version 3.
+- P-256 uncompressed SubjectPublicKeyInfo.
+- ECDSA with SHA-256, or ECDSA with SHA-384 on a certificate used only as an
+  explicitly trusted anchor.
+- Strict outer/TBS signature-algorithm agreement.
+- UTC or Generalized time with seconds and `Z`.
+- Bounded BasicConstraints, KeyUsage, EKU, SAN, SKI, and AKI parsing.
+- Rejection of duplicate recognized extensions and unknown critical
+  extensions.
 
-### P3 — LOW (documentation / fragility / future)
+DNS names use ASCII-only labels of at most 63 bytes. Empty labels, illegal
+punctuation, edge hyphens, embedded wildcards, and broad forms such as `*.com`
+are rejected. A wildcard covers exactly one leftmost label. IDNA and IP address
+SANs are not implemented.
 
-| # | Issue | Location | Description | Fix Phase |
-|---|-------|----------|-------------|-----------|
-| 14 | **AES-STATUS@ documentation inconsistency** | bios-forth.md L667 vs kdos.f L749 | bios-forth.md says `0=busy, 1=done, 2=auth fail`. kdos.f says `0=idle, 2=done, 3=auth-fail`. extended-tpu-spec.md says "busy/done/auth-fail flags". The actual hardware uses `0=idle, 2=done, 3=auth-fail` (confirmed by `.AES-STATUS` at L819 and test_system.py). bios-forth.md and BIOS-DICTIONARY.md need correction. | **doc fix** |
-| 15 | **Hardcoded ClientHello extension length** | kdos.f L10234 | Magic number `907` (=7+878+12+10) for base extension length. If any extension sizes change, this must be manually updated. No runtime validation that `_TBCH-POS` matches the predicted total. | **4a** (when adding ALPN, refactor to compute dynamically) |
-| 16 | **No session resumption / PSK / 0-RTT** | — | `TLS-CTX.PSK` field exists (+520) but is never populated. Every connection requires a full handshake. Performance penalty for repeated connections. | **6** |
-| 17 | **No KeyUpdate support** | — | Long-lived connections cannot rotate keys. If a server sends KeyUpdate, the client will silently drop it (issue #10) and then fail to decrypt subsequent records. | **6** |
-| 18 | **No post-handshake client auth** | — | No `CertificateRequest` handling. Server cannot request client certificates. | **6** |
+### P-256 ECDSA
 
----
+The verifier converts network big-endian values to the Field ALU's
+little-endian representation, enforces canonical DER integers, checks
+`0 < r,s < n`, validates the public point against the P-256 curve, computes the
+two scalar products, rejects infinity, and compares `R.x mod n` with `r`.
 
-## Phase 1 — Server Authentication (P0)  ← COMPLETE
+ECDSA verification operates only on public data. The scalar-multiplication
+routine is not a general constant-time private-key primitive and must not be
+reused for signing or secret scalar operations.
 
-**Implemented** in kdos.f §16.7a–§16.7d, tested in tests/test_system.py.
+### Trust Bundles
 
-| Sub-phase | Status | Section | Words |
-|-----------|--------|---------|-------|
-| 1a. ASN.1/DER parser | **Done** | §16.7a | `DER-TAG@`, `DER-LEN@`, `DER-NEXT`, `DER-ENTER`, `DER-SKIP`, `DER-FIND-TAG` |
-| 1b. X.509 leaf parser | **Done** | §16.7b | `X509-PARSE`, `X509-PARSE-SPKI`, `X509-PARSE-EXTENSIONS`, `X509-CHECK-HOST`, `X509-OID-MATCH` |
-| 1c. P-256 ECDSA verify | **Done** | §16.7c | `EC-DOUBLE`, `EC-ADD`, `EC-AFFINE`, `EC-MUL`, `ECDSA-DECODE-SIG`, `ECDSA-P256-VERIFY` |
-| 1d. CertificateVerify wiring | **Done** | §16.7d | `TLS-VERIFY-CERT-SIG` — builds RFC 8446 §4.4.3 content, dispatches to ECDSA |
-| 1e. Certificate handler wiring | **Done** | §16.7d | `TLS-PARSE-CERTIFICATE` — extracts leaf cert, calls `X509-PARSE`, hostname check |
-| FSM wiring | **Done** | §16.9 | `TLS-PROCESS-HS-MSG` Certificate/CertVerify branches call new verifiers |
+The default trust store is empty. `TLS-TRUST-LOAD` copies and validates an
+in-memory bundle, allowing at most eight anchors and 32768 total bytes. An
+anchor must be a CA and, when KeyUsage is present, permit certificate signing.
 
-**Test classes added**: `TestKDOSASN1`, `TestKDOSX509`, `TestKDOSECDSA`, `TestKDOSTLSCertVerify`
+Bundle format, all integer fields big-endian:
 
-**Remaining Phase 1 gaps** (deferred to Phase 2+):
-- No certificate chain validation (only leaf parsed)
-- No trust anchor / CA store
-- No certificate expiry check
-- No CRL / OCSP revocation check
-- Ed25519 and RSA-PSS verify not yet implemented (only ECDSA-P256-SHA256)
+```text
+magic            4 bytes   "MPTA"
+format_version   u16       1
+anchor_count     u16       0..8
+generation       u64       provisioning metadata
 
-### Phase 1 Implementation Details
+repeated anchor_count times:
+flags            u16       bit 0: include subdomains
+scope_length     u16       0..253
+cert_length      u32       128..8192
+scope            bytes     ASCII DNS name; empty means global
+certificate      bytes     DER X.509 CA certificate
+```
 
-### 1b. X.509 leaf certificate parser
-**File**: kdos.f §1.13 (new)
-- `X509-PARSE ( cert clen -- flag )`
-  - Extract: subject, issuer, notBefore/notAfter, signature algorithm,
-    subject public key info (algorithm OID + key bytes), signature.
-  - Store results in global `_X509-*` scratch buffers.
-  - Returns 0 on success, -1 on parse error.
-- `X509-EXTRACT-PUBKEY ( cert clen out -- algo klen )`
-  - `algo`: 0x0403=ECDSA-P256, 0x0807=Ed25519, 0x0804=RSA-PSS
-  - Copy raw public key bytes to `out`, return algorithm + length.
-- `X509-CHECK-HOST ( hostname hlen -- flag )`
-  - Compare SNI hostname against subject CN / SAN dNSName.
-  - Support wildcard `*.example.com` matching.
+An exact scope authorizes only that hostname. `TTAF-SUBDOMAINS` additionally
+authorizes names below it. Scope is checked whether the trusted certificate is
+presented in the chain or omitted.
 
-### 1c. P-256 ECDSA verification
-**File**: kdos.f §1.14 (new)
-- Built on existing Field ALU primitives: `PRIME-P256`, `FADD`, `FSUB`,
-  `FMUL`, `FSQR`, `FINV`, `FCMOV`, `FCEQ`.
-- P-256 curve constants (G, n, a, b) as 32-byte CREATE buffers.
-- Jacobian point operations:
-  - `EC-DOUBLE ( Jx Jy Jz Rx Ry Rz -- )` — point doubling
-  - `EC-ADD    ( Jx Jy Jz Px Py Pz Rx Ry Rz -- )` — point addition
-  - `EC-MUL    ( k Px Py Rx Ry -- )` — scalar multiply (double-and-add)
-  - `EC-AFFINE ( Jx Jy Jz Ax Ay -- )` — Jacobian → affine via z⁻¹
-- ECDSA verify:
-  - `ECDSA-P256-VERIFY ( hash hlen pubkey sig slen -- flag )`
-    - Decode DER signature → (r, s)
-    - Compute u1 = z·s⁻¹ mod n, u2 = r·s⁻¹ mod n
-    - Compute R = u1·G + u2·Q
-    - Verify r ≡ R.x mod n
-    - Constant-time throughout (FCMOV/FCEQ for comparisons)
+The format itself is not signed and `generation` is not an anti-rollback
+counter. The caller must obtain the bundle through a trusted provisioning path.
+Signed updates and durable rollback protection remain release requirements.
 
-### 1d. TLS CertificateVerify verification
-**File**: kdos.f §16.9 (modify existing handler)
-- `TLS-VERIFY-CERT-SIG ( ctx msg mlen -- flag )`
-  - Build verification input per RFC 8446 §4.4.3:
-    `0x20×64 ‖ "TLS 1.3, server CertificateVerify" ‖ 0x00 ‖ H(transcript)`
-  - Extract signature algorithm from CertificateVerify message
-  - Dispatch to `ECDSA-P256-VERIFY` (0x0403) or reject unsupported
-  - Returns 0 on valid, -1 on failure
-- Wire into `TLS-PROCESS-HS-MSG` → `TLSHT-CERT-VERIFY` branch
+### Path Building
 
-### 1e. TLS Certificate message parser
-**File**: kdos.f §16.9 (modify existing handler)
-- `TLS-PARSE-CERTIFICATE ( msg mlen -- flag )`
-  - Walk the certificate_list from the Certificate handshake message
-  - Extract leaf certificate (first entry)
-  - Call `X509-PARSE` / `X509-EXTRACT-PUBKEY` on the leaf
-  - Store server public key in handshake scratch buffer for CertVerify
-  - Call `X509-CHECK-HOST` against TLS-SNI-HOST if set
-- Wire into `TLS-PROCESS-HS-MSG` → `TLSHT-CERTIFICATE` branch
+`X509-VERIFY-CHAIN` accepts one through eight parsed certificates. Descriptor
+zero is always the server leaf; remaining certificates may be unordered and
+may contain irrelevant entries. The bounded builder:
 
-**Deliverable**: MITM protection for ECDSA-P256-SHA256 servers (covers
-~85% of the real internet as of 2026).
+- requires the leaf not to be a CA;
+- checks digitalSignature and serverAuth when those extensions are present;
+- checks SAN hostname and RTC validity;
+- links issuer/subject and AKI/SKI when both key identifiers are available;
+- checks CA BasicConstraints, keyCertSign, EKU restrictions, and pathLen;
+- verifies each P-256/SHA-256 child signature;
+- terminates only at a scoped provisioned anchor.
 
----
+Failures return stable `TLS-CERT-*` statuses from `-4101` through `-4109`.
+`TLS-CERT-LAST-ERROR` retains the Certificate-message result. A clock earlier
+than 2020 is considered untrustworthy and fails closed.
 
-## Phase 2 — Chain Validation & Trust Store (P1)
+### TLS Certificate Messages
 
-### 2a. Root CA trust anchor store
-- Embed 4–8 most critical root CAs as DER-encoded public keys:
-  - ISRG Root X1 (Let's Encrypt)
-  - DigiCert Global Root G2
-  - GlobalSign Root R3
-  - Google Trust Services (GTS Root R1)
-  - Cloudflare Root CA (for CF-fronted sites)
-- `TLS-TRUST-FIND ( issuer-hash -- ca-pubkey | 0 )`
-- ~2 KB of data space for compressed root keys.
+`TLS-PARSE-CERTIFICATE` validates the handshake header and exact body length,
+requires the main-handshake empty request context, checks the exact
+certificate-list length, bounds every certificate and per-entry extension
+vector, and rejects more than eight entries. It requires SNI and a loaded
+trust store. The leaf public key is copied to CertificateVerify scratch only
+after the full path succeeds; every failure clears that scratch first.
 
-### 2b. Certificate chain walk
-- `X509-VERIFY-CHAIN ( cert-list n -- flag )`
-  - For each cert[i]: verify cert[i].signature using cert[i+1].pubkey
-  - Final cert: verify against trust anchor store
-  - Reject chains deeper than 4 (configurable)
-  - Return 0 on full chain verified, -1 on failure
+The handshake dispatcher enforces the prototype's certificate-authenticated
+sequence:
 
-### 2c. Validity period checking
-- `X509-CHECK-VALIDITY ( cert -- flag )`
-  - Parse notBefore / notAfter (UTCTime or GeneralizedTime)
-  - Compare against RTC (`TIME@` from BIOS)
-  - Reject expired or not-yet-valid certificates
+```text
+ClientHello -> ServerHello -> EncryptedExtensions -> Certificate
+            -> CertificateVerify -> Finished
+```
 
----
+Unknown, duplicate, truncated, and out-of-order handshake messages fail. This
+profile does not currently support PSK-only handshakes, post-handshake client
+authentication, or a server CertificateRequest.
 
-## Phase 3 — Alert & Error Handling (P1)
+## Deployment Reality
 
-### 3a. Incoming alert processing
-- `TLS-PROCESS-ALERT ( ctx data len -- )`
-  - Parse alert level + description
-  - Fatal alerts → abort connection, set error state
-  - `close_notify` → half-close, set TLSS-CLOSING
-- Wire into `TLS-RECV-DATA` non-app-data path
+The code does not yet validate arbitrary public certificate chains. It lacks
+P-384, RSA, Ed25519, SHA-384 certificate-signature verification, and a curated
+root program. Those omissions matter because modern chains commonly cross
+algorithm boundaries.
 
-### 3b. HelloRetryRequest detection
-- In `TLS-PARSE-SERVER-HELLO`: check if random == SHA-256("HelloRetryRequest")
-- If HRR detected: either re-send ClientHello with requested changes or abort
+For example, the `api.openai.com` chain observed on 2026-07-10 used a P-256
+leaf signed with ECDSA-SHA256 by Google Trust Services `WE1`; `WE1` was signed
+with ECDSA-SHA384 by the P-384 `GTS Root R4`. The current profile can connect
+only if the exact `WE1` certificate is provisioned as an anchor scoped to
+`api.openai.com` (or an intentionally selected parent scope). That is a narrow,
+updateable deployment profile, not equivalent to trusting the GTS root or the
+public WebPKI. Intermediate rotation requires a trust-bundle update.
 
-### 3c. Handshake state transition validation
-- `TLS-HS-EXPECT ( current-state msg-type -- flag )`
-- Enforce RFC 8446 §4.4 ordering:
-  SH → EE → Cert* → CV* → Finished
-- Reject out-of-order or duplicate messages
+No remote API credential should be provisioned until the intended endpoint's
+current chain is representable by the installed bundle and a credential-free
+live handshake succeeds on the machine.
 
----
+## Verified Tests
 
-## Phase 4 — Robustness & Interop (P2)
+Native guest tests cover:
 
-### 4a. ALPN extension
-- Add `application_layer_protocol_negotiation` (0x0010) to ClientHello
-- Advertise "http/1.1" for HTTPS, "h2" optional
-- Parse server's ALPN response in EncryptedExtensions
+- canonical DER signature integers and a real certificate signature;
+- valid, corrupt, and out-of-range ECDSA inputs;
+- deterministic root/intermediate/leaf fixtures with CA, KU, EKU, SAN,
+  SKI/AKI, pathLen, and validity constraints;
+- hostname, wildcard, clock, signature, scope, empty-store, and truncation
+  failures;
+- reordered and extraneous presented certificates;
+- exact TLS Certificate framing and bounded entry extensions;
+- stale-key clearing on every failed Certificate message;
+- a real CertificateVerify signature from the fixture leaf key;
+- rejection of early Finished and unauthenticated application-key derivation;
+- the surrounding record, handshake, and application-data regressions.
 
-### 4b. Outer record type enforcement
-- After ServerHello, verify all encrypted records have outer type 23
-- Reject any non-23 outer type (except CCS = 20, which is already handled)
+The test private scalars are deliberately trivial and never enter a product
+trust bundle.
 
-### 4c. Record size validation
-- Enforce max 16640 bytes (2^14 + 256) per RFC 8446 §5.1
-- Reject oversized records with record_overflow alert
+## Remaining Release Blockers
 
-### 4d. Proper half-close
-- `TLS-CLOSE`: send close_notify, transition to TLSS-CLOSING
-- Wait for server's close_notify (with timeout) before TCP-CLOSE
-- Handle server-initiated close_notify in recv path
+### Trust lifecycle
 
-### 4e. TCB leak fix in TLS-CONNECT
-- On TCP connect failure: call TCP-CLOSE on the allocated TCB before returning 0
+- Define a signed native trust-bundle update format and immutable bootstrap
+  verification key or reviewed physical provisioning ceremony.
+- Persist accepted generation state if rollback resistance is required.
+- Establish an explicit root/intermediate policy and expiry/rotation process.
+- Decide whether revocation is supported through stapled OCSP, short-lived
+  scoped anchors, or another bounded policy.
 
----
+### Protocol correctness
 
-## Phase 5 — Extended Signature Support (P2)
+- Harden `ServerHello` bounds and detect HelloRetryRequest.
+- Reassemble handshake messages fragmented across TLS records.
+- Make transcript overflow an explicit fatal status instead of truncation.
+- Parse incoming alerts and distinguish close, retryable I/O, and fatal errors.
+- Validate compatibility-mode CCS contents and all record versions/lengths.
+- Add ALPN for HTTP/1.1 before relying on general HTTPS endpoints.
+- Finish failed-connect cleanup and graceful close behavior across all states.
 
-### 5a. Ed25519 verification
-- Edwards curve point operations using existing Field ALU (PRIME-25519)
-- `ED25519-VERIFY ( msg mlen pubkey sig -- flag )`
-- Wire into CertificateVerify dispatcher for 0x0807
+### Algorithm coverage
 
-### 5b. RSA-PSS verification
-- Multi-word modular exponentiation using `FPOW` with custom prime
-- PKCS#1 v2.1 PSS signature verification
-- Wire into CertificateVerify dispatcher for 0x0804
-- Lower priority: most modern servers prefer ECDSA
+- Add ECDSA-SHA384 and P-384 verification for common GTS chains.
+- Add RSA-PSS and Ed25519 only with native vectors and bounded key sizes.
+- Advertise only signature algorithms whose complete certificate and
+  CertificateVerify paths are implemented. The current ClientHello advertises
+  only `ecdsa_secp256r1_sha256`.
 
----
+### Concurrency
 
-## Phase 6 — Future (P3)
+Handshake transcript, certificate descriptors, cryptographic scratch, and
+hybrid key-exchange buffers are global. The current owner loop permits one
+handshake at a time. True concurrent handshakes require per-context state or a
+machine-wide handshake lock before multitasking can expose parallel TLS calls.
 
-- **Session resumption**: process NewSessionTicket, PSK handshake mode
-- **KeyUpdate**: handle post-handshake key rotation
-- **Client certificates**: CertificateRequest handling
-- **OCSP stapling**: certificate status in EncryptedExtensions
-- **Concurrent handshakes**: per-connection scratch buffers (multi-core safe)
+## Acceptance Before Provider Credentials
 
----
-
-## Implementation Notes
-
-### Building Blocks Available
-| Primitive | Source | Notes |
-|-----------|--------|-------|
-| Field ALU GF(P-256) | Per-core ISA + BIOS | `PRIME-P256`, `FADD/FSUB/FMUL/FSQR/FINV` |
-| SHA-256 | Per-core ISA | Streaming: `SHA256-INIT`/`UPDATE`/`FINAL` |
-| SHA-3/256 | MMIO 0x780 | For 0xFF01 suite |
-| HMAC/HKDF | Forth (kdos.f) | Dual-mode SHA256/SHA3 |
-| Constant-time ops | Field ALU ISA | `FCMOV`, `FCEQ`, `VERIFY` |
-| AES-GCM | MMIO 0x700 | 128/256-bit key modes |
-
-### Size Budget
-- P-256 ECDSA verify: ~200 lines Forth
-- Jacobian EC point ops: ~150 lines Forth
-- ASN.1 DER parser: ~120 lines Forth
-- X.509 minimal parser: ~150 lines Forth
-- CertificateVerify wiring: ~60 lines Forth
-- Certificate message parser: ~80 lines Forth
-- P-256 constants (G, n, a, b): ~20 lines data
-- Trust anchor store: ~100 lines data
-- **Total Phase 1**: ~750 lines added to kdos.f
-
-### Test Plan
-- `TestKDOSASN1`: DER parser on synthetic TLV inputs
-- `TestKDOSX509`: Certificate parsing with known test certs
-- `TestKDOSECDSA`: P-256 point operations + ECDSA verify with NIST vectors
-- `TestKDOSTLSCertVerify`: Full CertificateVerify against test transcripts
-- All existing TLS tests must continue to pass
+1. All native TLS/X.509/ECDSA tests pass with no unresolved KDOS words.
+2. The installed trust bundle is reviewed and scoped to the target endpoint.
+3. The RTC is valid and survives the intended boot/power model.
+4. A credential-free live handshake authenticates the expected chain.
+5. HTTP response bytes can be streamed without overflowing TLS or transcript
+   buffers.
+6. Only then may a provider retrieve an in-memory credential and construct an
+   Authorization header.

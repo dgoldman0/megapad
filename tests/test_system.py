@@ -39,6 +39,7 @@ All tests must be run via the Makefile.
     4. If all green, commit.  If failures, check: make test-failures
 ═══════════════════════════════════════════════════════════════
 """
+import base64
 import copy
 import os
 import re
@@ -15701,7 +15702,7 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=552 ", text)
+        self.assertIn("SZ=560 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -15877,7 +15878,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." HT=" ch-addr @ 5 + C@ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("LEN=993 ", text)
+        self.assertIn("LEN=989 ", text)
         self.assertIn("CT=22 ", text)     # ContentType=handshake
         self.assertIn("V0=3 ", text)      # 0x0301
         self.assertIn("V1=1 ", text)
@@ -15904,7 +15905,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
 
     def test_build_ch_extensions(self):
         """ClientHello contains correct extension types and length."""
-        # extensions_len = 907 = 0x038B → high byte = 3, low byte = 139
+        # extensions_len = 903 = 0x0387 → high byte = 3, low byte = 135
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
@@ -15914,12 +15915,12 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." SV=" TLS-CH-BUF 87 + C@ .',           # supported_versions type low
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("EH=3 ", text)     # high byte of 907
-        self.assertIn("EL=139 ", text)   # low byte of 907 (0x8B)
+        self.assertIn("EH=3 ", text)     # high byte of 903
+        self.assertIn("EL=135 ", text)   # low byte of 903 (0x87)
         self.assertIn("SV=43 ", text)    # 0x2B
 
     def test_build_ch_transcript_length(self):
-        """After building CH, transcript contains 988 bytes."""
+        """After building CH, transcript contains 984 bytes."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
@@ -15927,7 +15928,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." TL=" TLS-HS-TR-LEN @ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("TL=988 ", text)
+        self.assertIn("TL=984 ", text)
 
     def test_parse_sh_extracts_pubkey(self):
         """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
@@ -16055,9 +16056,9 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         self.assertIn("RV1=3 ", text)
 
     def test_ctx_size_updated(self):
-        """TLS context is 552 bytes after handshake field expansion."""
+        """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=552 ", text)
+        self.assertIn("SZ=560 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -16092,6 +16093,59 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         self.assertIn("ST=1 ", text)       # TLSS-HANDSHAKE
         self.assertIn("HS=1 ", text)       # TLSH-CLIENT-HELLO-SENT
 
+    def test_finished_cannot_bypass_certificate_states(self):
+        """A Finished message is rejected until certificate proof succeeds."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-HELLO-RCVD test-ctx @ TLS-CTX.HS-STATE !",
+            "CREATE early-fin 36 ALLOT early-fin 36 0 FILL",
+            "20 early-fin C! 32 early-fin 3 + C!",
+            "test-ctx @ early-fin 36 TLS-PROCESS-HS-MSG",
+            '." FLAG=" .',
+            '." AUTH=" test-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." HS=" test-ctx @ TLS-CTX.HS-STATE @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("FLAG=-1 ", text)
+        self.assertIn("AUTH=0 ", text)
+        self.assertIn("HS=2 ", text)
+
+    def test_application_keys_require_peer_authentication(self):
+        """The application key schedule cannot establish an unauthenticated ctx."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            "TLSS-HANDSHAKE test-ctx @ TLS-CTX.STATE !",
+            "TLSH-SERVER-FINISHED test-ctx @ TLS-CTX.HS-STATE !",
+            "test-ctx @ TLS-KS-APPLICATION",
+            '." STATE=" test-ctx @ TLS-CTX.STATE @ .',
+            "CREATE fin-rec 128 ALLOT",
+            "test-ctx @ fin-rec TLS-HANDSHAKE-COMPLETE",
+            '." RECLEN=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("STATE=1 ", text)
+        self.assertIn("RECLEN=0 ", text)
+
+    def test_client_hello_advertises_only_supported_signature(self):
+        """The wire offer cannot negotiate an unimplemented verifier."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "0 TLS-SNI-LEN !",
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO 2DROP",
+            '." EXTLEN=" TLS-CH-BUF 974 + C@ .',
+            '." LISTLEN=" TLS-CH-BUF 976 + C@ .',
+            '." ALG0=" TLS-CH-BUF 977 + C@ .',
+            '." ALG1=" TLS-CH-BUF 978 + C@ .',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("EXTLEN=4 ", text)
+        self.assertIn("LISTLEN=2 ", text)
+        self.assertIn("ALG0=4 ", text)
+        self.assertIn("ALG1=3 ", text)
+
     def test_build_ch_hybrid_key_share_group(self):
         """ClientHello key_share first entry is hybrid PQ group (0x6399)."""
         # key_share ext starts at offset 93 (86+7 for supported_versions)
@@ -16114,19 +16168,17 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
 
     def test_build_ch_supported_groups_has_hybrid(self):
         """ClientHello supported_groups lists hybrid PQ (0x6399) first."""
-        # sig_algos (12B) follows key_share; groups (10B) follows sig_algos.
-        # key_share starts at 93, is 878B → sig_algos at 93+878 = 971
-        # sig_algos is 12B → groups at 971+12 = 983
-        # groups ext: type(2) + ext_len(2) + list_len(2) + group1(2) + group2(2)
-        # first group at offset 983+6 = 989
+        # sig_algos (8B) follows key_share; groups (10B) follows sig_algos.
+        # key_share starts at 93, is 878B → sig_algos at 971
+        # groups begin at 979; the first group follows its 6-byte header.
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
-            '." SG0=" TLS-CH-BUF 989 + C@ .',     # hybrid high = 99
-            '." SG1=" TLS-CH-BUF 990 + C@ .',     # hybrid low  = 153
-            '." SG2=" TLS-CH-BUF 991 + C@ .',     # x25519 high = 0
-            '." SG3=" TLS-CH-BUF 992 + C@ .',     # x25519 low  = 29
+            '." SG0=" TLS-CH-BUF 985 + C@ .',     # hybrid high = 99
+            '." SG1=" TLS-CH-BUF 986 + C@ .',     # hybrid low  = 153
+            '." SG2=" TLS-CH-BUF 987 + C@ .',     # x25519 high = 0
+            '." SG3=" TLS-CH-BUF 988 + C@ .',     # x25519 low  = 29
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("SG0=99 ", text)
@@ -16229,6 +16281,36 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         ]
         text = self._run_kdos(lines)
         self.assertIn("F=-1 ", text)
+
+    def test_parse_sh_rejects_hrr_and_truncation(self):
+        """HelloRetryRequest and undersized ServerHello fail explicitly."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "CREATE sh-buf 44 ALLOT sh-buf 44 0 FILL",
+            "2 sh-buf C! 40 sh-buf 3 + C!",
+            "3 sh-buf 4 + C! 3 sh-buf 5 + C!",
+            "TLS-HRR-RANDOM sh-buf 6 + 32 CMOVE",
+            "test-ctx @ sh-buf 44 TLS-PARSE-SERVER-HELLO",
+            '." HRR=" .',
+            "test-ctx @ sh-buf 43 TLS-PARSE-SERVER-HELLO",
+            '." SHORT=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("HRR=-1 ", text)
+        self.assertIn("SHORT=-1 ", text)
+
+    def test_transcript_overflow_is_sticky_and_explicit(self):
+        """An oversized transcript cannot silently hash a truncated prefix."""
+        lines = [
+            "CREATE tr-byte 1 ALLOT",
+            "TLS-TR-RESET",
+            "tr-byte TLS-HS-TR-MAX 1+ TLS-TR-APPEND",
+            '." ERROR=" TLS-HS-TR-ERROR @ .',
+            '." LEN=" TLS-HS-TR-LEN @ .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ERROR=-1 ", text)
+        self.assertIn("LEN=0 ", text)
 
     def test_hybrid_group_constants(self):
         """Hybrid PQ group constants have correct values."""
@@ -16506,8 +16588,8 @@ class TestKDOSECDSA(_KDOSTestBase):
         lines.extend([
             f"tv-sig {len(sig_der)} ECDSA-DECODE-SIG",
             '." RET=" .',
-            '." R0=" _ECDSA-R 31 + C@ .',   # MSB (big-endian byte 31 of LE = byte 0 of BE)
-            '." S0=" _ECDSA-S 31 + C@ .',
+            '." R0=" _ECDSA-R C@ .',
+            '." S0=" _ECDSA-S C@ .',
         ])
         text = self._run_kdos(lines)
         self.assertIn("RET=0 ", text)     # success
@@ -16559,6 +16641,187 @@ class TestKDOSECDSA(_KDOSTestBase):
         self.assertNotEqual(xeq, 0, "X should equal Gx")
         self.assertNotEqual(yeq, 0, "Y should equal Gy")
 
+    def test_ecdsa_verifies_certificate_signature(self):
+        """ECDSA-P256-VERIFY accepts a real SHA-256 certificate signature."""
+        pubkey = TestKDOSX509._PUB_KEY
+        digest = bytes.fromhex(
+            "b213ca91f5dcd3d45fbe66562ab30eaf"
+            "2dc9e89227656de3bd29b389f4e88530"
+        )
+        # The fixture certificate's outer signatureValue, without the BIT
+        # STRING unused-bits byte.
+        signature = bytes([
+            0x30, 0x45, 0x02, 0x20, 0x77, 0x23, 0xD8, 0x4E,
+            0x33, 0x1D, 0x96, 0xBE, 0xD7, 0x30, 0xB2, 0x1C,
+            0xEE, 0xF0, 0xC1, 0x43, 0x41, 0x36, 0xE0, 0x53,
+            0x5F, 0xC9, 0xAA, 0x6A, 0xE5, 0x56, 0x62, 0x8E,
+            0xF7, 0xE3, 0xFE, 0x6C, 0x02, 0x21, 0x00, 0x9F,
+            0x51, 0xDD, 0x3D, 0xA5, 0x3C, 0x8F, 0x81, 0x8C,
+            0xAF, 0x46, 0x67, 0xF8, 0x4C, 0xF5, 0xEF, 0x20,
+            0x7B, 0xE5, 0xC2, 0x57, 0x92, 0xE9, 0xFA, 0x31,
+            0x00, 0x54, 0x10, 0xAD, 0x69, 0x26, 0x86,
+        ])
+        lines = self._store_bytes("tv-hash", digest)
+        lines += self._store_bytes("tv-pub", pubkey)
+        lines += self._store_bytes("tv-sig", signature)
+        lines.extend([
+            f"tv-hash tv-pub tv-sig {len(signature)} ECDSA-P256-VERIFY",
+            '." VALID=" .',
+            "tv-sig 8 + DUP C@ 1 XOR SWAP C!",
+            f"tv-hash tv-pub tv-sig {len(signature)} ECDSA-P256-VERIFY",
+            '." CORRUPT=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
+        self.assertIn("VALID=0 ", text)
+        self.assertTrue(
+            "CORRUPT=-1 " in text or
+            "CORRUPT=18446744073709551615 " in text
+        )
+
+
+class TestKDOSX509Chain(_KDOSTestBase):
+    """Native trust-bundle and bounded certificate-path validation."""
+
+    FIXTURE_DIR = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
+    NOW = 1_767_225_600  # 2026-01-01T00:00:00Z
+
+    @classmethod
+    def _fixture(cls, name: str) -> bytes:
+        path = os.path.join(cls.FIXTURE_DIR, f"{name}.der.b64")
+        with open(path, "rb") as stream:
+            return base64.b64decode(stream.read())
+
+    @staticmethod
+    def _forth_bytes(name: str, data: bytes) -> list[str]:
+        lines = [f"CREATE {name}"]
+        for offset in range(0, len(data), 16):
+            chunk = data[offset:offset + 16]
+            lines.append(" ".join(f"{byte} C," for byte in chunk))
+        return lines
+
+    @staticmethod
+    def _bundle(root: bytes, scope=b"test.example.com", flags=0,
+                generation=1) -> bytes:
+        record = (
+            flags.to_bytes(2, "big") +
+            len(scope).to_bytes(2, "big") +
+            len(root).to_bytes(4, "big") +
+            scope + root
+        )
+        return (
+            b"MPTA" + (1).to_bytes(2, "big") +
+            (1).to_bytes(2, "big") + generation.to_bytes(8, "big") +
+            record
+        )
+
+    def _chain_lines(self, *, order=("leaf", "intermediate"),
+                     scope=b"test.example.com") -> list[str]:
+        root = self._fixture("root")
+        bundle = self._bundle(root, scope=scope)
+        lines = self._forth_bytes("tv-trust", bundle)
+        certs = {name: self._fixture(name) for name in set(order)}
+        for name in order:
+            lines += self._forth_bytes(f"tv-{name}", certs[name])
+        lines.extend([
+            "CREATE tv-chain /X509-CERT 3 * ALLOT",
+            f"tv-trust {len(bundle)} TLS-TRUST-LOAD",
+            '." TRUST=" .',
+        ])
+        for index, name in enumerate(order):
+            lines.extend([
+                f"tv-{name} {len(certs[name])} "
+                f"tv-chain /X509-CERT {index} * + X509-DESC-PARSE",
+                f'." PARSE{index}=" .',
+            ])
+        return lines
+
+    def test_chain_to_scoped_root(self):
+        lines = self._chain_lines()
+        lines.extend([
+            f'tv-chain 2 S" test.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." CHAIN=" .',
+            '." COUNT=" TLS-TRUST-COUNT @ .',
+            '." VERSION=" TLS-TRUST-VERSION @ .',
+            '." GENERATION=" TLS-TRUST-GENERATION @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
+        self.assertIn("TRUST=0 ", text)
+        self.assertIn("PARSE0=0 ", text)
+        self.assertIn("PARSE1=0 ", text)
+        self.assertIn("CHAIN=0 ", text)
+        self.assertIn("COUNT=1 ", text)
+        self.assertIn("VERSION=1 ", text)
+        self.assertIn("GENERATION=1 ", text)
+
+    def test_chain_rejects_hostname_time_signature_and_empty_trust(self):
+        lines = self._chain_lines()
+        lines.extend([
+            f'tv-chain 2 S" wrong.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." HOST=" .',
+            'tv-chain 2 S" test.example.com" 1700000000 X509-VERIFY-CHAIN',
+            '." EARLY=" .',
+            'tv-chain 2 S" test.example.com" 1900000000 X509-VERIFY-CHAIN',
+            '." LATE=" .',
+            "tv-chain XC.SIG-A + @ DUP C@ 1 XOR SWAP C!",
+            f'tv-chain 2 S" test.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." SIG=" .',
+            "TLS-TRUST-RESET",
+            f'tv-chain 2 S" test.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." EMPTY=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=8_000_000_000)
+        self.assertIn("HOST=-4105 ", text)
+        self.assertIn("EARLY=-4103 ", text)
+        self.assertIn("LATE=-4104 ", text)
+        self.assertIn("SIG=-4106 ", text)
+        self.assertIn("EMPTY=-4102 ", text)
+
+    def test_chain_accepts_extraneous_reordered_root(self):
+        lines = self._chain_lines(order=("leaf", "root", "intermediate"))
+        lines.extend([
+            f'tv-chain 3 S" test.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." CHAIN=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=7_000_000_000)
+        self.assertIn("PARSE2=0 ", text)
+        self.assertIn("CHAIN=0 ", text)
+
+    def test_trust_scope_is_enforced(self):
+        lines = self._chain_lines(scope=b"other.example")
+        lines.extend([
+            f'tv-chain 2 S" test.example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." CHAIN=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
+        self.assertIn("CHAIN=-4102 ", text)
+
+    def test_dns_identity_and_scope_reject_malformed_labels(self):
+        lines = self._chain_lines()
+        bad_bundle = self._bundle(self._fixture("root"),
+                                  scope=b"bad..example.com")
+        lines += self._forth_bytes("tv-bad-trust", bad_bundle)
+        lines.extend([
+            f'tv-chain 2 S" test..example.com" {self.NOW} X509-VERIFY-CHAIN',
+            '." HOST=" .',
+            f"tv-bad-trust {len(bad_bundle)} TLS-TRUST-LOAD",
+            '." SCOPE=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("HOST=-4105 ", text)
+        self.assertIn("SCOPE=-4101 ", text)
+
+    def test_trust_bundle_rejects_truncation(self):
+        bundle = self._bundle(self._fixture("root"))
+        lines = self._forth_bytes("tv-trust", bundle[:-1])
+        lines.extend([
+            f"tv-trust {len(bundle) - 1} TLS-TRUST-LOAD",
+            '." TRUST=" .',
+            '." COUNT=" TLS-TRUST-COUNT @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=1_000_000_000)
+        self.assertIn("TRUST=-4101 ", text)
+        self.assertIn("COUNT=0 ", text)
+
 
 # ---------------------------------------------------------------------------
 #  TLS Certificate & CertificateVerify Handler tests — §16.7d
@@ -16568,77 +16831,189 @@ class TestKDOSTLSCertVerify(_KDOSTestBase):
     """Tests for §16.7d TLS certificate parsing and CertificateVerify
     verification wired into the handshake FSM."""
 
-    _CERT_DER = TestKDOSX509._CERT_DER
+    NOW = TestKDOSX509Chain.NOW
+    _CV_SIGNATURE = bytes.fromhex(
+        "304402200cc1bd280427adf3879487204cfafe33"
+        "04a18a547ed1c70661b28b01ba8658d802207e4"
+        "82b4bd086cd5b1cf426ce19ae73e6e1e3a8e7e1"
+        "532f53dc843d8679267646"
+    )
 
     def _store_bytes(self, name, data: bytes) -> list[str]:
-        lines = [f"CREATE {name} {len(data)} ALLOT"]
-        for i, b in enumerate(data):
-            lines.append(f"{b} {name} {i} + C!")
-        return lines
+        return TestKDOSX509Chain._forth_bytes(name, data)
 
-    def _build_cert_msg(self) -> bytes:
-        """Build a TLS Certificate handshake message wrapping _CERT_DER.
-        Format: type(1) | length(3) | ctx_len(1)=0 | list_len(3) |
-                cert_len(3) | cert_data | ext_len(2)=0
-        """
-        cert = self._CERT_DER
-        cert_len = len(cert)
-        # cert entry = cert_len(3) + cert + ext_len(2)
-        entry = (cert_len.to_bytes(3, 'big') + cert +
-                 (0).to_bytes(2, 'big'))
-        # certificate list = list_len(3) + entry
-        list_data = len(entry).to_bytes(3, 'big') + entry
-        # message body = ctx_len(1)=0 + list_data
-        body = bytes([0]) + list_data
-        # handshake header = type(1)=11 + length(3) + body
+    @staticmethod
+    def _fixture(name: str) -> bytes:
+        return TestKDOSX509Chain._fixture(name)
+
+    @classmethod
+    def _set_epoch_lines(cls) -> list[str]:
+        epoch_ms = cls.NOW * 1000
+        rtc_epoch = 0xFFFF_FF00_0000_0B08
+        return [
+            f"{(epoch_ms >> (8 * index)) & 0xFF} "
+            f"0x{rtc_epoch + index:016X} C!"
+            for index in range(8)
+        ]
+
+    def _build_cert_msg(self, certs=None, context=b"",
+                        entry_extensions=b"") -> bytes:
+        """Build a bounded TLS 1.3 Certificate handshake message."""
+        if certs is None:
+            certs = [self._fixture("leaf"), self._fixture("intermediate")]
+        entries = b"".join(
+            len(cert).to_bytes(3, "big") + cert +
+            len(entry_extensions).to_bytes(2, "big") + entry_extensions
+            for cert in certs
+        )
+        list_data = len(entries).to_bytes(3, "big") + entries
+        body = bytes([len(context)]) + context + list_data
         msg = bytes([11]) + len(body).to_bytes(3, 'big') + body
         return msg
 
-    def test_tls_parse_certificate_success(self):
-        """TLS-PARSE-CERTIFICATE extracts pubkey and algo from a cert message."""
-        msg = self._build_cert_msg()
-        lines = self._store_bytes("tv-msg", msg)
+    @classmethod
+    def _build_cv_msg(cls) -> bytes:
+        body = (
+            (0x0403).to_bytes(2, "big") +
+            len(cls._CV_SIGNATURE).to_bytes(2, "big") +
+            cls._CV_SIGNATURE
+        )
+        return bytes([15]) + len(body).to_bytes(3, "big") + body
+
+    def _trusted_lines(self, msg: bytes, host="test.example.com") -> list[str]:
+        bundle = TestKDOSX509Chain._bundle(self._fixture("root"))
+        lines = self._store_bytes("tv-trust", bundle)
+        lines += self._store_bytes("tv-msg", msg)
+        lines += self._set_epoch_lines()
         lines.extend([
-            # Set SNI so hostname check runs
-            'S" test.example.com" TLS-SNI-HOST SWAP CMOVE',
-            '16 TLS-SNI-LEN !',
+            f"tv-trust {len(bundle)} TLS-TRUST-LOAD",
+            '." TRUST=" .',
+        ])
+        if host is None:
+            lines.append("0 TLS-SNI-LEN !")
+        else:
+            lines.extend([
+                f'S" {host}" TLS-SNI-HOST SWAP CMOVE',
+                f"{len(host)} TLS-SNI-LEN !",
+            ])
+        return lines
+
+    def test_tls_parse_certificate_success(self):
+        """A complete trusted chain authenticates before exposing its key."""
+        msg = self._build_cert_msg()
+        lines = self._trusted_lines(msg)
+        lines.extend([
             f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
             '." FLAG=" .',
+            '." LAST=" TLS-CERT-LAST-ERROR @ .',
+            '." CERTS=" TLS-PEER-CERT-COUNT @ .',
             '." ALGO=" _TLS-SERVER-PUBKEY-ALGO @ .',
             '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
-        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
+        self.assertIn("TRUST=0 ", text)
         self.assertIn("FLAG=0 ", text)
+        self.assertIn("LAST=0 ", text)
+        self.assertIn("CERTS=2 ", text)
         self.assertIn("ALGO=1027 ", text)   # 0x0403
         self.assertIn("PKLEN=65 ", text)
 
     def test_tls_parse_certificate_hostname_mismatch(self):
-        """TLS-PARSE-CERTIFICATE rejects when SNI doesn't match SAN."""
+        """The authenticated path remains bound to the requested SNI."""
         msg = self._build_cert_msg()
-        lines = self._store_bytes("tv-msg", msg)
+        lines = self._trusted_lines(msg, host="evil.attacker.com")
         lines.extend([
-            'S" evil.attacker.com" TLS-SNI-HOST SWAP CMOVE',
-            '16 TLS-SNI-LEN !',
             f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
             '." FLAG=" .',
+            '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
-        text = self._run_kdos(lines, max_steps=2_000_000_000)
-        # Should fail (-1)
-        self.assertTrue("FLAG=-1 " in text or "FLAG=18446744073709551615 " in text)
+        text = self._run_kdos(lines, max_steps=3_000_000_000)
+        self.assertIn("FLAG=-4105 ", text)
+        self.assertIn("PKLEN=0 ", text)
 
-    def test_tls_parse_certificate_no_sni_skip(self):
-        """TLS-PARSE-CERTIFICATE succeeds with no SNI set (skip hostname check)."""
+    def test_tls_parse_certificate_requires_sni(self):
+        """Secure server authentication never silently skips hostname checks."""
         msg = self._build_cert_msg()
-        lines = self._store_bytes("tv-msg", msg)
+        lines = self._trusted_lines(msg, host=None)
         lines.extend([
-            "0 TLS-SNI-LEN !",
             f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
             '." FLAG=" .',
-            '." ALGO=" _TLS-SERVER-PUBKEY-ALGO @ .',
+            '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
         ])
         text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=-4105 ", text)
+        self.assertIn("PKLEN=0 ", text)
+
+    def test_tls_parse_certificate_requires_trust(self):
+        """A syntactically valid chain cannot publish a key without trust."""
+        msg = self._build_cert_msg()
+        lines = self._store_bytes("tv-msg", msg) + self._set_epoch_lines()
+        lines.extend([
+            "TLS-TRUST-RESET",
+            'S" test.example.com" TLS-SNI-HOST SWAP CMOVE',
+            "16 TLS-SNI-LEN !",
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+            '." PKLEN=" _TLS-SERVER-PUBKEY-LEN @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=-4102 ", text)
+        self.assertIn("PKLEN=0 ", text)
+
+    def test_tls_parse_certificate_rejects_bad_framing(self):
+        """Handshake and certificate-list lengths must be exact."""
+        msg = bytearray(self._build_cert_msg())
+        msg[3] ^= 1
+        lines = self._trusted_lines(bytes(msg))
+        lines.extend([
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("FLAG=-4101 ", text)
+
+    def test_tls_parse_certificate_bounds_entry_extensions(self):
+        """Per-certificate TLS extensions are skipped only within bounds."""
+        msg = self._build_cert_msg(entry_extensions=b"\x00\x00\x00\x00")
+        lines = self._trusted_lines(msg)
+        lines.extend([
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
         self.assertIn("FLAG=0 ", text)
-        self.assertIn("ALGO=1027 ", text)
+
+    def test_certificate_verify_opens_peer_auth_gate(self):
+        """Only proof of the trusted leaf key sets the connection auth bit."""
+        cert_msg = self._build_cert_msg()
+        cv_msg = self._build_cv_msg()
+        transcript = b"authenticated transcript"
+        lines = self._trusted_lines(cert_msg)
+        lines += self._store_bytes("tv-transcript", transcript)
+        lines += self._store_bytes("tv-cv", cv_msg)
+        lines.extend([
+            f"tv-msg {len(cert_msg)} TLS-PARSE-CERTIFICATE",
+            '." CERT=" .',
+            "TLS-TR-RESET",
+            f"tv-transcript {len(transcript)} TLS-TR-APPEND",
+            "1 TLS-USE-SHA256 !",
+            "VARIABLE tv-ctx 0 TLS-CTX@ tv-ctx !",
+            "TLSS-HANDSHAKE tv-ctx @ TLS-CTX.STATE !",
+            "TLSH-CERT-RCVD tv-ctx @ TLS-CTX.HS-STATE !",
+            f"tv-ctx @ tv-cv {len(cv_msg)} TLS-PROCESS-HS-MSG",
+            '." CV=" .',
+            '." AUTH=" tv-ctx @ TLS-CTX.PEER-AUTH @ .',
+            '." STATE=" tv-ctx @ TLS-CTX.HS-STATE @ .',
+            "tv-cv 12 + DUP C@ 1 XOR SWAP C!",
+            f"tv-ctx @ tv-cv {len(cv_msg)} TLS-VERIFY-CERT-SIG",
+            '." CORRUPT=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=8_000_000_000)
+        self.assertIn("CERT=0 ", text)
+        self.assertIn("CV=0 ", text)
+        self.assertIn("AUTH=1 ", text)
+        self.assertIn("STATE=5 ", text)
+        self.assertIn("CORRUPT=-1 ", text)
 
 
 # ---------------------------------------------------------------------------
