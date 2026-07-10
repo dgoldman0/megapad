@@ -50,9 +50,9 @@ python3 megapad/session_viewer.py \
   --font akashic/assets/fonts/DejaVuSansMono.ttf
 ```
 
-The viewer accepts normal text and terminal keys. `F5` toggles pause, `F10`
-pauses and executes one instruction, `Ctrl+R` resets the guest, and `Ctrl+Q`
-closes only the viewer.
+The viewer accepts normal text and terminal keys. `Ctrl+F5` toggles pause,
+`Ctrl+F10` pauses and executes one instruction, `Ctrl+R` resets the guest,
+and `Ctrl+Q` closes only the viewer. Bare function keys reach the guest.
 
 Control or inspect that same machine from another process:
 
@@ -86,7 +86,9 @@ the server.
 - `enter`, `escape`, `tab`, `backspace`, `delete`
 - `up`, `down`, `left`, `right`
 - `home`, `end`, `pageup`, `pagedown`, `insert`
+- `f1` through `f12`
 - `ctrl+a` through `ctrl+z`
+- combined character modifiers such as `ctrl+shift+s` (CSI-u encoded)
 - `alt+<character>`
 
 `resize(cols, rows)` updates both the terminal grid and the guest UART geometry

@@ -114,6 +114,17 @@ def test_virtual_terminal_batch_equivalence_and_resize():
     assert all(len(row) == 10 for row in batched.grid)
 
 
+def test_machine_session_named_edit_keys_use_terminal_sequences():
+    system = MegapadSystem(ram_size=64 * 1024)
+    with MachineSession(system) as session:
+        session.send_key("backspace")
+        session.send_key("delete")
+        state = system.cpu._cs
+        received = bytes(state.uart_read8(0x01) for _ in range(5))
+
+    assert received == b"\x08\x1b[3~"
+
+
 def test_machine_session_boots_interacts_and_captures(tmp_path):
     with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
         session.boot()

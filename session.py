@@ -186,7 +186,7 @@ class MachineSession:
         "esc": b"\x1b",
         "tab": b"\t",
         "backspace": b"\x08",
-        "delete": b"\x7f",
+        "delete": b"\x1b[3~",
         "up": b"\x1b[A",
         "down": b"\x1b[B",
         "right": b"\x1b[C",
@@ -196,6 +196,18 @@ class MachineSession:
         "pageup": b"\x1b[5~",
         "pagedown": b"\x1b[6~",
         "insert": b"\x1b[2~",
+        "f1": b"\x1bOP",
+        "f2": b"\x1bOQ",
+        "f3": b"\x1bOR",
+        "f4": b"\x1bOS",
+        "f5": b"\x1b[15~",
+        "f6": b"\x1b[17~",
+        "f7": b"\x1b[18~",
+        "f8": b"\x1b[19~",
+        "f9": b"\x1b[20~",
+        "f10": b"\x1b[21~",
+        "f11": b"\x1b[23~",
+        "f12": b"\x1b[24~",
     }
 
     def __init__(
@@ -408,16 +420,23 @@ class MachineSession:
         if normalized in self.KEY_SEQUENCES:
             self.send_text(self.KEY_SEQUENCES[normalized])
             return
-        if normalized.startswith("ctrl+") and len(normalized) == 6:
-            char = normalized[-1]
+        parts = normalized.split("+")
+        modifiers = set(parts[:-1])
+        char = parts[-1]
+        if len(char) == 1 and modifiers == {"ctrl"}:
             if "a" <= char <= "z":
                 self.send_text(bytes([ord(char) & 0x1F]))
                 return
-        if normalized.startswith("alt+"):
-            char = key.split("+", 1)[1]
-            if len(char) == 1:
-                self.send_text(b"\x1b" + char.encode("utf-8"))
-                return
+        if len(char) == 1 and modifiers == {"alt"}:
+            self.send_text(b"\x1b" + char.encode("utf-8"))
+            return
+        if len(char) == 1 and modifiers and modifiers <= {"ctrl", "alt", "shift"}:
+            modifier = 1
+            modifier += 1 if "shift" in modifiers else 0
+            modifier += 2 if "alt" in modifiers else 0
+            modifier += 4 if "ctrl" in modifiers else 0
+            self.send_text(f"\x1b[{ord(char)};{modifier}u".encode("ascii"))
+            return
         if len(key) == 1:
             self.send_text(key)
             return

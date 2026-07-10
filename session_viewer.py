@@ -102,17 +102,19 @@ def main() -> int:
                     ctrl = bool(mods & pygame.KMOD_CTRL)
                     if ctrl and event.key == pygame.K_q:
                         running = False
-                    elif event.key == pygame.K_F5:
+                    elif ctrl and event.key == pygame.K_F5:
                         status = client.request("status")
                         method = "resume" if status["paused"] else "pause"
                         status = client.request(method)
-                    elif event.key == pygame.K_F10:
+                    elif ctrl and event.key == pygame.K_F10:
                         status = client.request("pause")
                         client.request("step", count=1)
                     elif ctrl and event.key == pygame.K_r:
                         status = client.request("reset", paused=False)
                     elif ctrl and pygame.K_a <= event.key <= pygame.K_z:
-                        client.request("send_key", key=f"ctrl+{chr(event.key)}")
+                        shift = bool(mods & pygame.KMOD_SHIFT)
+                        chord = "ctrl+shift+" if shift else "ctrl+"
+                        client.request("send_key", key=f"{chord}{chr(event.key)}")
                     else:
                         key_name = _pygame_key_name(pygame, event.key)
                         if key_name:
@@ -180,6 +182,18 @@ def _pygame_key_name(pygame, key: int) -> str | None:
         pygame.K_PAGEUP: "pageup",
         pygame.K_PAGEDOWN: "pagedown",
         pygame.K_INSERT: "insert",
+        pygame.K_F1: "f1",
+        pygame.K_F2: "f2",
+        pygame.K_F3: "f3",
+        pygame.K_F4: "f4",
+        pygame.K_F5: "f5",
+        pygame.K_F6: "f6",
+        pygame.K_F7: "f7",
+        pygame.K_F8: "f8",
+        pygame.K_F9: "f9",
+        pygame.K_F10: "f10",
+        pygame.K_F11: "f11",
+        pygame.K_F12: "f12",
     }
     return mapping.get(key)
 
