@@ -77,6 +77,22 @@ Other control commands are `pause`, `resume`, `step`, `reset`, `resize`,
 viewer and CLI are peers: input from either reaches the one UART queue owned by
 the server.
 
+### Warm-reset status
+
+`reset` restarts the CPU while retaining RAM and the attached storage image.
+The BIOS now clears its RAM-backed UART transmit descriptor during boot, so an
+interrupted output batch cannot suppress the next boot banner. A focused BIOS
+session regression covers that case.
+
+A separate issue remains under investigation: resetting a fully loaded
+Akashic Agent TUI while it is awaiting approval can leave the emulated terminal
+blank even though the CPU restarts and the BIOS bytes remain intact. Fresh
+boots, uninterrupted shared sessions, terminal capture, and Akashic's native
+VFS persistence are unaffected. Until the remaining device/session state is
+isolated, test crash recovery by reopening the runtime against the same VFS or
+by starting a fresh machine with the preserved disk image; do not use an
+in-place full-Akashic reset as a persistence acceptance test.
+
 ## Input
 
 `send_text()` accepts `str` or `bytes`. Strings are encoded as UTF-8.

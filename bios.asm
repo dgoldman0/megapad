@@ -91,6 +91,11 @@ boot:
     ldi64 r11, tx_ring
     mov   r19, r11
 
+    ; RAM survives a warm reset.  Discard any interrupted output batch before
+    ; registering the descriptor with the freshly reset UART.
+    ldi   r1, 0
+    str   r19, r1
+
     ; Register TX ring buffer with UART (write descriptor addr to UART+0x08)
     ldi64 r11, 0xFFFF_FF00_0000_0008
     str r11, r19

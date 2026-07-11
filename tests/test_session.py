@@ -189,6 +189,23 @@ def test_machine_session_boots_interacts_and_captures(tmp_path):
         assert bounds[3] - bounds[1] > 40
 
 
+def test_machine_session_warm_reset_discards_interrupted_uart_batch():
+    with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
+        session.boot()
+        assert session.wait_for_idle(max_steps=2_000_000).reason == "idle"
+
+        ring = session.system.uart._tx_ring_base
+        assert ring
+        session.system.cpu.mem[ring:ring + 8] = (4097).to_bytes(8, "little")
+
+        session.reset()
+        reboot = session.wait_for_idle(max_steps=2_000_000)
+
+        assert reboot.reason == "idle"
+        assert "Megapad-64 Forth BIOS" in session.raw_text()
+        assert int.from_bytes(session.system.cpu.mem[ring:ring + 8], "little") == 0
+
+
 def test_json_scenario_runner(tmp_path):
     scenario = tmp_path / "smoke.json"
     report = tmp_path / "report.json"
