@@ -93,6 +93,14 @@ isolated, test crash recovery by reopening the runtime against the same VFS or
 by starting a fresh machine with the preserved disk image; do not use an
 in-place full-Akashic reset as a persistence acceptance test.
 
+When this remaining reset defect returns to active work, include the related
+KDOS language cleanup in the same maintenance pass. Preserve the standard raw
+behavior of `S"`; add a distinct Forth 2012-style `S\"` escaped-string word for
+both interpretation and compilation, with explicit quote, backslash, newline,
+carriage-return, tab, and bounded hexadecimal escapes. Cover malformed and
+unterminated input as well as compiled-literal lifetime, then replace Akashic
+ASCII-34 workarounds and documentation examples only after the word exists.
+
 ## Input
 
 `send_text()` accepts `str` or `bytes`. Strings are encoded as UTF-8.
