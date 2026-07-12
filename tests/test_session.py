@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from dev_session import run_scenario
 from devices import UART
 from display import VirtualTerminal
+from nic_backends import LoopbackBackend
 from session import MachineSession
+from session_server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
 
 
@@ -187,6 +190,29 @@ def test_machine_session_boots_interacts_and_captures(tmp_path):
         assert bounds is not None
         assert bounds[2] - bounds[0] > 100
         assert bounds[3] - bounds[1] > 40
+
+
+def test_machine_session_owns_injected_nic_backend():
+    backend = LoopbackBackend()
+
+    with MachineSession.from_bios(BIOS, nic_backend=backend) as session:
+        assert session.system._nic_backend is backend
+        assert backend.link_up
+
+    assert not backend.link_up
+
+
+def test_session_server_rejects_unavailable_tap(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv", ["session_server.py", "--nic-tap", "missing-tap"]
+    )
+    with patch("nic_backends.tap_available", return_value=False):
+        try:
+            session_server_main()
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("unavailable TAP should stop session startup")
 
 
 def test_machine_session_warm_reset_discards_interrupted_uart_batch():

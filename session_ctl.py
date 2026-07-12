@@ -21,6 +21,12 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("status")
+    commands.add_parser("network")
+    forth = commands.add_parser("forth")
+    forth.add_argument("names", nargs="+")
+    peek = commands.add_parser("peek")
+    peek.add_argument("address", type=lambda value: int(value, 0))
+    peek.add_argument("count", nargs="?", type=int, default=1)
     commands.add_parser("text")
     raw = commands.add_parser("raw")
     raw.add_argument("--since", type=int, default=0)
@@ -61,6 +67,14 @@ def main() -> int:
         with SessionClient(args.socket) as client:
             if args.command == "status":
                 print_json(client.request("status"))
+            elif args.command == "network":
+                print_json(client.request("network"))
+            elif args.command == "forth":
+                print_json(client.request("forth", names=args.names))
+            elif args.command == "peek":
+                print_json(
+                    client.request("peek", address=args.address, count=args.count)
+                )
             elif args.command == "text":
                 print(client.request("text")["text"])
             elif args.command == "raw":

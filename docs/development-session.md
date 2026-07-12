@@ -29,6 +29,14 @@ with MachineSession.from_bios("bios.asm", cols=80, rows=30) as session:
 `RunReport` records the stop reason, executed steps, native batches, elapsed
 time, output byte count, and whether a text wait matched.
 
+`MachineSession.from_bios(..., nic_backend=backend)` attaches any MegaPad NIC
+backend to the owned system. Closing the session stops that backend and releases
+its listener, TAP descriptor, or tunnel resources.
+
+Direct sessions use deterministic cycle-derived RTC time by default. Pass
+`realtime_clock=True` for interactive or external-network work whose deadlines
+must continue to track host time while the emulator is idle or variably loaded.
+
 ## Shared Live Session
 
 Use the shared runtime when a person and an automation client need to watch and
@@ -42,6 +50,19 @@ Start the machine owner from the workspace root:
 ```bash
 python3 megapad/session_server.py
 ```
+
+To attach the shared machine to an already configured Linux TAP interface:
+
+```bash
+python3 megapad/session_server.py --nic-tap mp64tap0
+```
+
+The server refuses startup if the TAP device is missing or inaccessible; it
+does not create interfaces or alter host routing on the user's behalf.
+
+Shared sessions use the realtime RTC by default because they are interactive
+and may participate in external protocols. Pass `--virtual-clock` for a fully
+deterministic cycle-derived clock in isolated tests.
 
 Attach the live viewer in another terminal:
 
@@ -58,6 +79,9 @@ Control or inspect that same machine from another process:
 
 ```bash
 python3 megapad/session_ctl.py status
+python3 megapad/session_ctl.py network
+python3 megapad/session_ctl.py forth _ASHELL-LAST-TICK DESK-DESC
+python3 megapad/session_ctl.py peek 0x1000 4
 python3 megapad/session_ctl.py send '6 7 * .' --enter
 python3 megapad/session_ctl.py wait-text '42 ' --scope raw
 python3 megapad/session_ctl.py text
@@ -76,6 +100,13 @@ Other control commands are `pause`, `resume`, `step`, `reset`, `resize`,
 `key`, `raw`, and `shutdown`. `step` requires the machine to be paused. The
 viewer and CLI are peers: input from either reaches the one UART queue owned by
 the server.
+
+`status` includes all CPU registers, RTC mode and values, NIC counters, the
+current Forth word and BIOS primitive, and bounded data/return-stack snapshots.
+`network` reports guest and backend counters and the backend's bounded trace.
+`forth` resolves named dictionary entries and CREATE data fields; `peek` reads
+one through 256 consecutive 64-bit cells. These diagnostics are read-only and
+remain behind the owner-only local socket.
 
 ### Warm-reset status
 

@@ -191,9 +191,135 @@ class SharedMachine:
             else:
                 time.sleep(0)
 
+    @staticmethod
+    def _nearest_label(labels: dict[str, int], address: int) -> dict | None:
+        matches = (
+            (value, name) for name, value in labels.items() if value <= address
+        )
+        try:
+            value, name = max(matches)
+        except ValueError:
+            return None
+        return {"name": name, "address": value, "offset": address - value}
+
+    def _forth_dictionary(self, cpu) -> tuple[list[dict], int]:
+        labels = self.session.bios_labels
+        latest_variable = labels.get("var_latest")
+        here_variable = labels.get("var_here")
+        if latest_variable is None or here_variable is None:
+            return [], 0
+
+        words = []
+        seen = set()
+        try:
+            entry = int(cpu.mem_read64(latest_variable))
+            here = int(cpu.mem_read64(here_variable))
+            while entry and entry not in seen and len(words) < 16_384:
+                seen.add(entry)
+                flags_len = int(cpu.mem_read8(entry + 8))
+                name_len = flags_len & 0x7F
+                name = bytes(
+                    int(cpu.mem_read8(entry + 9 + index))
+                    for index in range(name_len)
+                ).decode("ascii", errors="replace")
+                code = entry + 9 + name_len
+                word = {"name": name, "header": entry, "code": code}
+                prefix = bytes(int(cpu.mem_read8(code + index)) for index in range(3))
+                suffix = bytes(
+                    int(cpu.mem_read8(code + 11 + index)) for index in range(6)
+                )
+                if prefix == b"\xf0\x60\x10" and suffix == b"\x67\xe0\x08\x54\xe1\x0e":
+                    data_address = sum(
+                        int(cpu.mem_read8(code + 3 + index)) << (index * 8)
+                        for index in range(8)
+                    )
+                    word["data_address"] = data_address
+                    word["value"] = int(cpu.mem_read64(data_address))
+                words.append(word)
+                entry = int(cpu.mem_read64(entry))
+        except (IndexError, RuntimeError, ValueError):
+            return words, 0
+        return words, here
+
+    @staticmethod
+    def _forth_word_at(words: list[dict], here: int, address: int) -> dict | None:
+        upper = here
+        for word in sorted(words, key=lambda item: item["code"], reverse=True):
+            code = word["code"]
+            if code <= address < upper:
+                return {
+                    "name": word["name"],
+                    "header": word["header"],
+                    "code": code,
+                    "offset": address - code,
+                }
+            upper = code
+        return None
+
+    def _forth_diagnostics(self, cpu) -> dict:
+        registers = [int(value) for value in cpu.regs]
+
+        def cells(address: int, count: int = 8) -> list[int]:
+            values = []
+            for index in range(count):
+                try:
+                    values.append(int(cpu.mem_read64(address + index * 8)))
+                except (IndexError, RuntimeError, ValueError):
+                    break
+            return values
+
+        ip = registers[3]
+        labels = self.session.bios_labels
+        words, here = self._forth_dictionary(cpu)
+        return_stack = cells(registers[15])
+        result = {
+            "instruction_pointer": ip,
+            "data_stack_pointer": registers[14],
+            "return_stack_pointer": registers[15],
+            "data_stack": cells(registers[14]),
+            "return_stack": return_stack,
+            "return_words": [
+                self._forth_word_at(words, here, address)
+                or self._nearest_label(labels, address)
+                for address in return_stack
+            ],
+            "bios_primitive": self._nearest_label(labels, int(cpu.pc)),
+            "word": self._forth_word_at(words, here, ip),
+        }
+        return result
+
+    def forth(self, names: list[str]) -> dict:
+        with self.lock:
+            words, here = self._forth_dictionary(self.session.system.cpu)
+            wanted = {str(name).upper() for name in names}
+            found = {}
+            for word in words:
+                key = word["name"].upper()
+                if key in wanted and key not in found:
+                    found[key] = word
+            return {"here": here, "words": found}
+
+    def peek(self, address: int, count: int = 1) -> dict:
+        address = int(address)
+        count = int(count)
+        if address < 0 or not (1 <= count <= 256):
+            raise ValueError("peek requires a non-negative address and 1..256 cells")
+        with self.lock:
+            cpu = self.session.system.cpu
+            return {
+                "address": address,
+                "cell_size": 8,
+                "values": [
+                    int(cpu.mem_read64(address + index * 8))
+                    for index in range(count)
+                ],
+            }
+
     def status(self) -> dict:
         with self.lock:
             system = self.session.system
+            cpu = system.cpu
+            backend = system.nic.backend
             if self.last_error:
                 state = "error"
             elif self.paused:
@@ -218,8 +344,44 @@ class SharedMachine:
                 "byte_callbacks": self.session.output_byte_callbacks,
                 "terminal": [self.session.terminal.cols, self.session.terminal.rows],
                 "uptime_s": time.time() - self.started_at,
+                "cpu": {
+                    "pc": cpu.pc,
+                    "cycles": cpu.cycle_count,
+                    "registers": [int(value) for value in cpu.regs],
+                    "psel": cpu.psel,
+                    "xsel": cpu.xsel,
+                    "spsel": cpu.spsel,
+                },
+                "forth": self._forth_diagnostics(cpu),
+                "clock": {
+                    "mode": system.rtc.clock_mode,
+                    "uptime_ms": system.rtc.uptime_ms,
+                    "epoch_ms": system.rtc.epoch_ms,
+                },
+                "nic": {
+                    "backend": system.nic.backend_name,
+                    "link_up": system.nic.link_up,
+                    "tx_frames": getattr(backend, "tx_frames", system.nic.tx_count),
+                    "rx_frames": getattr(backend, "rx_frames", 0),
+                    "rx_queued": cpu._cs.nic_rx_queue_size(),
+                },
                 "error": self.last_error,
             }
+
+    def network(self) -> dict:
+        with self.lock:
+            system = self.session.system
+            backend = system.nic.backend
+            result = {
+                "backend": system.nic.backend_name,
+                "link_up": system.nic.link_up,
+                "guest_tx_frames": system.nic.tx_count,
+                "guest_rx_frames": system.cpu._cs.nic_get_rx_count(),
+                "guest_rx_queued": system.cpu._cs.nic_rx_queue_size(),
+            }
+            if backend is not None and hasattr(backend, "stats"):
+                result["transport"] = backend.stats()
+            return result
 
     def pause(self) -> dict:
         with self.condition:
@@ -444,6 +606,15 @@ class SessionServer:
             with self._clients_lock:
                 result["clients"] = len(self._clients)
             return result
+        if method == "network":
+            return self.machine.network()
+        if method == "forth":
+            names = params.get("names") or []
+            if not isinstance(names, list) or len(names) > 64:
+                raise ValueError("forth names must be a list of at most 64 items")
+            return self.machine.forth(names)
+        if method == "peek":
+            return self.machine.peek(params["address"], params.get("count", 1))
         if method == "pause":
             return self.machine.pause()
         if method == "resume":

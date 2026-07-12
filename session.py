@@ -7,11 +7,14 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from asm import assemble
 from display import VirtualTerminal
 from system import MegapadSystem
+
+if TYPE_CHECKING:
+    from nic_backends import NICBackend
 
 
 _BIOS_CACHE: dict[tuple[str, int, int], tuple[bytes, dict[str, int]]] = {}
@@ -234,6 +237,7 @@ class MachineSession:
         self.output_batches = 0
         self.output_byte_callbacks = 0
         self.revision = 0
+        self.bios_labels: dict[str, int] = {}
         self._closed = False
         self._old_on_tx = self.system.uart.on_tx
         self._old_on_tx_batch = self.system.uart.on_tx_batch
@@ -255,6 +259,8 @@ class MachineSession:
         cols: int = 80,
         rows: int = 30,
         batch_steps: int = 100_000,
+        nic_backend: NICBackend | None = None,
+        realtime_clock: bool = False,
     ) -> "MachineSession":
         code, labels = _load_bios(Path(bios_path))
         system = MegapadSystem(
@@ -264,12 +270,16 @@ class MachineSession:
             vram_size=vram_size,
             num_cores=num_cores,
             num_clusters=num_clusters,
+            nic_backend=nic_backend,
+            realtime_clock=realtime_clock,
         )
         system.load_binary(0, code)
         for name, hook_id in _ACCEL_HOOKS:
             if name in labels:
                 system.cpu.register_accel_hook(labels[name], hook_id)
-        return cls(system, cols=cols, rows=rows, batch_steps=batch_steps)
+        session = cls(system, cols=cols, rows=rows, batch_steps=batch_steps)
+        session.bios_labels = dict(labels)
+        return session
 
     def __enter__(self) -> "MachineSession":
         return self
@@ -282,6 +292,7 @@ class MachineSession:
             return
         self.system.uart.on_tx = self._old_on_tx
         self.system.uart.on_tx_batch = self._old_on_tx_batch
+        self.system.nic.stop()
         self._closed = True
 
     def boot(self, entry: int = 0):

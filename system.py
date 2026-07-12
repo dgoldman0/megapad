@@ -268,7 +268,8 @@ class MegapadSystem:
                  num_clusters: int = 0,
                  hbw_size: int = HBW_SIZE,
                  ext_mem_size: int = 0,
-                 vram_size: int = VRAM_DEFAULT_SIZE):
+                 vram_size: int = VRAM_DEFAULT_SIZE,
+                 realtime_clock: bool = False):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -367,7 +368,7 @@ class MegapadSystem:
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
         self.fb = CppFramebufferProxy(self.cores[0]._cs)
-        self.rtc = RTC()
+        self.rtc = RTC(realtime=realtime_clock)
 
         # Determine initial terminal dimensions:
         # - If no display, use the host terminal size (fallback 80x24)

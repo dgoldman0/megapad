@@ -9693,9 +9693,14 @@ VARIABLE _TC-LPORT
 VARIABLE _TSND-TCB
 VARIABLE _TSND-SRC
 VARIABLE _TSND-LEN
+
+: TCP-SEND-READY?  ( tcb -- flag )
+    DUP TCB.STATE @ TCPS-ESTABLISHED <> IF DROP 0 EXIT THEN
+    DUP TCB.SND-NXT @ SWAP TCB.SND-UNA @ = ;
+
 : TCP-SEND  ( tcb addr len -- actual )
     _TSND-LEN !  _TSND-SRC !  _TSND-TCB !
-    _TSND-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF 0 EXIT THEN
+    _TSND-TCB @ TCP-SEND-READY? 0= IF 0 EXIT THEN
     _TSND-LEN @ TCP-MSS MIN  _TSND-LEN !
     \ Copy into TCB's TX-BUF
     _TSND-SRC @ _TSND-TCB @ TCB.TX-BUF _TSND-LEN @ CMOVE
@@ -9761,6 +9766,47 @@ VARIABLE _TPL-LEN
 \   ( max-attempts -- )
 : TCP-POLL-WAIT  ( n -- )
     0 DO TCP-POLL NET-IDLE LOOP ;
+
+\ TCP-WAIT-ESTABLISHED ( tcb max-attempts -- flag )
+\   Poll until this active-open TCB reaches ESTABLISHED. Unlike the generic
+\   pump above, it never idles after the requested state has been reached.
+: TCP-WAIT-ESTABLISHED  ( tcb n -- flag )
+    0 ?DO
+        DUP TCB.STATE @ TCPS-ESTABLISHED = IF
+            DROP -1 UNLOOP EXIT
+        THEN
+        TCP-POLL
+        DUP TCB.STATE @ TCPS-ESTABLISHED = IF
+            DROP -1 UNLOOP EXIT
+        THEN
+        DUP TCB.STATE @ TCPS-SYN-SENT <> IF
+            DROP 0 UNLOOP EXIT
+        THEN
+        NET-IDLE
+    LOOP
+    DROP 0 ;
+
+\ TCP-WAIT-RX ( tcb max-attempts -- flag )
+\   Poll until this established TCB has readable bytes. Data received with a
+\   peer FIN remains readable; a state change without data fails immediately.
+: TCP-WAIT-RX  ( tcb n -- flag )
+    0 ?DO
+        DUP TCB.RX-COUNT @ 0> IF
+            DROP -1 UNLOOP EXIT
+        THEN
+        DUP TCB.STATE @ TCPS-ESTABLISHED <> IF
+            DROP 0 UNLOOP EXIT
+        THEN
+        TCP-POLL
+        DUP TCB.RX-COUNT @ 0> IF
+            DROP -1 UNLOOP EXIT
+        THEN
+        DUP TCB.STATE @ TCPS-ESTABLISHED <> IF
+            DROP 0 UNLOOP EXIT
+        THEN
+        NET-IDLE
+    LOOP
+    DROP 0 ;
 
 \ =====================================================================
 \  §16.7a  ASN.1/DER Minimal Parser
@@ -11616,6 +11662,7 @@ VARIABLE _TPC-END
 VARIABLE _TPC-LIST-END
 VARIABLE _TPC-CERT-U
 VARIABLE _TPC-EXT-U
+VARIABLE _TPC-KEEP
 
 : _TPC-RESULT ( ior -- ior )
     DUP TLS-CERT-LAST-ERROR ! ;
@@ -11663,9 +11710,16 @@ VARIABLE _TPC-EXT-U
         _TPC-LIST-END @ _TPC-POS @ - _TPC-CERT-U @ 2 + < IF
             TLS-CERT-MALFORMED _TPC-RESULT EXIT
         THEN
+        1 _TPC-KEEP !
         _TPC-POS @ _TPC-CERT-U @
         TLS-PEER-CERT-COUNT @ /X509-CERT * TLS-PEER-CERTS +
-        X509-DESC-PARSE IF TLS-CERT-MALFORMED _TPC-RESULT EXIT THEN
+        X509-DESC-PARSE ?DUP IF
+            DROP
+            TLS-PEER-CERT-COUNT @ 0= IF
+                TLS-CERT-MALFORMED _TPC-RESULT EXIT
+            THEN
+            0 _TPC-KEEP !
+        THEN
         _TPC-CERT-U @ _TPC-POS +!
 
         _TPC-POS @ _BE16@ _TPC-EXT-U !
@@ -11674,7 +11728,7 @@ VARIABLE _TPC-EXT-U
             TLS-CERT-MALFORMED _TPC-RESULT EXIT
         THEN
         _TPC-EXT-U @ _TPC-POS +!
-        1 TLS-PEER-CERT-COUNT +!
+        _TPC-KEEP @ IF 1 TLS-PEER-CERT-COUNT +! THEN
     REPEAT
 
     TLS-PEER-CERT-COUNT @ 0= IF TLS-CERT-MALFORMED _TPC-RESULT EXIT THEN
@@ -11746,9 +11800,10 @@ VARIABLE _TPC-EXT-U
 \  +560    ERROR          8     Last connection-level TLS status
 \  +568    ALPN-PROFILE   8     Requested application protocol profile
 \  +576    ALPN-NEGOTIATED 8    Confirmed application protocol profile
-\  Total: 584 bytes
+\  +584    HELLO-PROFILE  8     Standard or private hybrid wire profile
+\  Total: 592 bytes
 
-584 CONSTANT /TLS-CTX
+592 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -11777,6 +11832,7 @@ VARIABLE _TPC-EXT-U
 : TLS-CTX.ERROR        ( ctx -- addr ) 560 + ;
 : TLS-CTX.ALPN-PROFILE ( ctx -- addr ) 568 + ;
 : TLS-CTX.ALPN-NEGOTIATED ( ctx -- addr ) 576 + ;
+: TLS-CTX.HELLO-PROFILE ( ctx -- addr ) 584 + ;
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
@@ -11813,6 +11869,24 @@ VARIABLE TLS-CTXS   0 TLS-CTXS !
 -4201 CONSTANT TLS-E-PEER-ALERT
 -4202 CONSTANT TLS-E-POST-HANDSHAKE
 -4203 CONSTANT TLS-E-RECORD
+
+0  CONSTANT TLS-CONNECT-E-OK
+1  CONSTANT TLS-CONNECT-E-CONFIG
+2  CONSTANT TLS-CONNECT-E-ALLOC
+3  CONSTANT TLS-CONNECT-E-CLIENT-HELLO
+4  CONSTANT TLS-CONNECT-E-TCP-OPEN
+5  CONSTANT TLS-CONNECT-E-TCP-ESTABLISH
+6  CONSTANT TLS-CONNECT-E-CLIENT-SEND
+7  CONSTANT TLS-CONNECT-E-SERVER-WAIT
+8  CONSTANT TLS-CONNECT-E-SERVER-RECORD
+9  CONSTANT TLS-CONNECT-E-SERVER-PROCESS
+10 CONSTANT TLS-CONNECT-E-HANDSHAKE-WAIT
+11 CONSTANT TLS-CONNECT-E-HANDSHAKE-RECORD
+12 CONSTANT TLS-CONNECT-E-HANDSHAKE-PROCESS
+13 CONSTANT TLS-CONNECT-E-FINISHED
+14 CONSTANT TLS-CONNECT-E-AUTH
+VARIABLE TLS-CONNECT-LAST-ERROR
+TLS-CONNECT-E-OK TLS-CONNECT-LAST-ERROR !
 
 \ --- Scratch Buffers for Record Layer ---
 CREATE TLS-NONCE-BUF  12 ALLOT        \ constructed per-record nonce
@@ -11969,7 +12043,10 @@ VARIABLE _TDR-CLEN
 
 \ --- Named Groups for key_share ---
 29    CONSTANT TLS-GROUP-X25519       \ 0x001D
-25497 CONSTANT TLS-GROUP-HYBRID-PQ   \ 0x6399 X25519+ML-KEM-512
+65024 CONSTANT TLS-GROUP-HYBRID-PQ   \ 0xFE00 private X25519+ML-KEM-512
+
+0 CONSTANT TLS-HELLO-STANDARD
+1 CONSTANT TLS-HELLO-HYBRID
 
 \ --- Hybrid PQ Handshake Scratch Buffers ---
 \  Shared across connections (only one handshake at a time).
@@ -12276,10 +12353,10 @@ VARIABLE _TKSA-CTX
 
 \ --- ClientHello Builder ---
 \ TLS-BUILD-CLIENT-HELLO ( ctx -- addr len )
-\   Build ClientHello with dual cipher suites (0x1301 + 0xFF01),
-\   dual key_share entries (hybrid PQ 0x6399 + x25519 0x001D),
-\   optional SNI extension, expanded signature_algorithms.
-\   Generates X25519 + Kyber ephemeral keypairs, stores in context/scratch.
+\   Build either a standard public-web profile (0x1301 + X25519) or the
+\   explicit private hybrid profile (0x1301/0xFF01 + 0xFE00/X25519).
+\   The private profile combines X25519 with ML-KEM-512 and is never offered
+\   by ordinary TLS-CONNECT callers.
 \   Appends handshake message to transcript.
 \   Returns buffer address and total length.
 
@@ -12287,6 +12364,8 @@ VARIABLE _TKSA-CTX
 
 VARIABLE _TBCH-CTX
 VARIABLE _TBCH-POS
+VARIABLE _TBCH-HYBRID
+VARIABLE _TBCH-FIXED
 
 \ Helper: store byte at current position, advance.
 : _TBCH-C! ( byte -- )
@@ -12297,6 +12376,10 @@ VARIABLE _TBCH-POS
     TLS-SNI-LEN @ 64 > IF 0 0 EXIT THEN
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-NONE <
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 > OR IF 0 0 EXIT THEN
+    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-STANDARD <
+    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-HYBRID > OR IF 0 0 EXIT THEN
+    _TBCH-CTX @ TLS-CTX.HELLO-PROFILE @ TLS-HELLO-HYBRID =
+    _TBCH-HYBRID !
     TLS-SNI-LEN @ 0> IF
         TLS-SNI-HOST TLS-SNI-LEN @ FALSE DNS-NAME-VALID? 0= IF 0 0 EXIT THEN
     THEN
@@ -12306,27 +12389,31 @@ VARIABLE _TBCH-POS
     0 _TBCH-CTX @ TLS-CTX.PEER-AUTH !
     TLS-ALPN-NONE _TBCH-CTX @ TLS-CTX.ALPN-NEGOTIATED !
     0 _TBCH-POS !
-    \ Generate ephemeral keypairs (X25519 + Kyber)
+    \ Generate the standard X25519 share. Private hybrid callers additionally
+    \ generate an ML-KEM-512 keypair for their private-use share.
     X25519-KEYGEN
     X25519-PRIV _TBCH-CTX @ TLS-CTX.MY-PRIVKEY 32 CMOVE
     X25519-PUB  _TBCH-CTX @ TLS-CTX.MY-PUBKEY  32 CMOVE
-    64 0 DO RANDOM8 TLS-HS-KYBER-SEED I + C! LOOP
-    TLS-HS-KYBER-SEED TLS-HS-KYBER-PK TLS-HS-KYBER-SK KYBER-KEYGEN
+    _TBCH-HYBRID @ IF
+        64 0 DO RANDOM8 TLS-HS-KYBER-SEED I + C! LOOP
+        TLS-HS-KYBER-SEED TLS-HS-KYBER-PK TLS-HS-KYBER-SK KYBER-KEYGEN
+    THEN
     TLS-GROUP-X25519 TLS-HS-GROUP !   \ default until server picks
     \ --- Compute extension lengths ---
-    \ versions: 7B.  key_share: 878B.  sig_algos: 8B.  groups: 10B.
-    903  \ base extensions length (7+878+8+10)
+    \ Standard: versions 7 + key_share 42 + signatures 8 + groups 8 = 65.
+    \ Hybrid: versions 7 + key_share 878 + signatures 8 + groups 10 = 903.
+    _TBCH-HYBRID @ IF 903 77 ELSE 65 75 THEN _TBCH-FIXED !
     TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN   \ +SNI ext
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF 15 + THEN
     >R  \ R: ext_len
     \ --- [0] TLS Record Header (5 bytes) ---
     TLS-CT-HANDSHAKE _TBCH-C!                     \ [0] = 22
     3 _TBCH-C!   1 _TBCH-C!                       \ [1-2] = 0x0301
-    R@ 81 +  DUP 8 RSHIFT _TBCH-C!               \ [3-4] fragment_length
+    R@ _TBCH-FIXED @ 4 + + DUP 8 RSHIFT _TBCH-C! \ [3-4] fragment_length
     255 AND _TBCH-C!
     \ --- [5] Handshake Header (4 bytes) ---
     TLSHT-CLIENT-HELLO _TBCH-C!                   \ [5] = 1
-    R@ 77 +  DUP 16 RSHIFT 255 AND _TBCH-C!      \ [6-8] hs_length (24-bit)
+    R@ _TBCH-FIXED @ + DUP 16 RSHIFT 255 AND _TBCH-C! \ [6-8] hs_length
     DUP 8 RSHIFT 255 AND _TBCH-C!
     255 AND _TBCH-C!
     \ --- [9] ClientHello Body ---
@@ -12334,12 +12421,15 @@ VARIABLE _TBCH-POS
     32 0 DO RANDOM8 _TBCH-C! LOOP                 \ [11-42] random
     32 _TBCH-C!                                    \ [43] sid_len=32
     32 0 DO RANDOM8 _TBCH-C! LOOP                 \ [44-75] sid
-    0 _TBCH-C!   4 _TBCH-C!                       \ [76-77] suites_len=4
+    0 _TBCH-C!
+    _TBCH-HYBRID @ IF 4 ELSE 2 THEN _TBCH-C!      \ cipher suites length
     19 _TBCH-C!  1 _TBCH-C!                       \ [78-79] 0x1301 (standard)
-    255 _TBCH-C!  1 _TBCH-C!                      \ [80-81] 0xFF01 (private)
-    1 _TBCH-C!                                     \ [82] comp_len=1
-    0 _TBCH-C!                                     \ [83] null comp
-    R@ 8 RSHIFT _TBCH-C!                          \ [84-85] ext_len
+    _TBCH-HYBRID @ IF
+        255 _TBCH-C!  1 _TBCH-C!                  \ 0xFF01 private suite
+    THEN
+    1 _TBCH-C!                                     \ comp_len=1
+    0 _TBCH-C!                                     \ null compression
+    R@ 8 RSHIFT _TBCH-C!                          \ extensions length
     R> 255 AND _TBCH-C!
     \ --- Extensions (starting at [86]) ---
     \ 1. SNI (0x0000) — only if hostname is set
@@ -12361,20 +12451,24 @@ VARIABLE _TBCH-POS
     0 _TBCH-C!  3  _TBCH-C!                       \ ext_len = 3
     2 _TBCH-C!                                     \ versions_len = 2
     3 _TBCH-C!  4  _TBCH-C!                       \ 0x0304 (TLS 1.3)
-    \ 3. key_share (0x0033): 878 bytes (hybrid PQ + x25519)
-    0 _TBCH-C!  51 _TBCH-C!                       \ type = 0x0033
-    3 _TBCH-C!  106 _TBCH-C!                      \ ext_len = 874 (0x036A)
-    3 _TBCH-C!  104 _TBCH-C!                      \ entries_len = 872 (0x0368)
-    \ Entry 1: hybrid PQ (group=0x6399, key=X25519_pub||Kyber_PK = 832B)
-    99 _TBCH-C!  153 _TBCH-C!                     \ group = 0x6399
-    3 _TBCH-C!  64 _TBCH-C!                       \ key_len = 832 (0x0340)
-    _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ X25519 pubkey (32B)
-    TLS-CH-BUF _TBCH-POS @ + 32 CMOVE
-    32 _TBCH-POS +!
-    TLS-HS-KYBER-PK                                \ Kyber PK (800B)
-    TLS-CH-BUF _TBCH-POS @ + 800 CMOVE
-    800 _TBCH-POS +!
-    \ Entry 2: x25519 (group=0x001D, key=32B)
+    \ 3. key_share (0x0033)
+    0 _TBCH-C!  51 _TBCH-C!
+    _TBCH-HYBRID @ IF
+        3 _TBCH-C!  106 _TBCH-C!                  \ ext_len=874
+        3 _TBCH-C!  104 _TBCH-C!                  \ entries_len=872
+        TLS-GROUP-HYBRID-PQ DUP 8 RSHIFT _TBCH-C!
+        255 AND _TBCH-C!                           \ private group 0xFE00
+        3 _TBCH-C!  64 _TBCH-C!                   \ key_len=832
+        _TBCH-CTX @ TLS-CTX.MY-PUBKEY
+        TLS-CH-BUF _TBCH-POS @ + 32 CMOVE
+        32 _TBCH-POS +!
+        TLS-HS-KYBER-PK TLS-CH-BUF _TBCH-POS @ + 800 CMOVE
+        800 _TBCH-POS +!
+    ELSE
+        0 _TBCH-C!  38 _TBCH-C!                   \ ext_len=38
+        0 _TBCH-C!  36 _TBCH-C!                   \ entries_len=36
+    THEN
+    \ Standard X25519 entry (also provides hybrid fallback).
     0 _TBCH-C!  29 _TBCH-C!                       \ group = x25519 (0x001D)
     0 _TBCH-C!  32 _TBCH-C!                       \ key_len = 32
     _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ copy public key
@@ -12385,11 +12479,14 @@ VARIABLE _TBCH-POS
     0 _TBCH-C!  4  _TBCH-C!                       \ ext_len = 4
     0 _TBCH-C!  2  _TBCH-C!                       \ list_len = 2 (1 algo)
     4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
-    \ 5. supported_groups (0x000A): 10 bytes
+    \ 5. supported_groups (0x000A)
     0 _TBCH-C!  10 _TBCH-C!                       \ type = 0x000A
-    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
-    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 groups)
-    99 _TBCH-C!  153 _TBCH-C!                     \ hybrid PQ (0x6399)
+    0 _TBCH-C!  _TBCH-HYBRID @ IF 6 ELSE 4 THEN _TBCH-C!
+    0 _TBCH-C!  _TBCH-HYBRID @ IF 4 ELSE 2 THEN _TBCH-C!
+    _TBCH-HYBRID @ IF
+        TLS-GROUP-HYBRID-PQ DUP 8 RSHIFT _TBCH-C!
+        255 AND _TBCH-C!
+    THEN
     0 _TBCH-C!  29 _TBCH-C!                       \ x25519 (0x001D)
     \ 6. ALPN (0x0010), when the caller selected the HTTP/1.1 profile.
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
@@ -12747,6 +12844,10 @@ VARIABLE _TSD-LEN
     _TSD-LEN !  _TSD-SRC !  _TSD-CTX !
     _TSD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TSD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
+    \ The TCP implementation owns one retransmit buffer.  Do not encrypt or
+    \ overwrite it until the preceding record (including client Finished) is
+    \ acknowledged; cooperative callers interpret zero as backpressure.
+    _TSD-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF 0 EXIT THEN
     _TSD-LEN @ 1400 MIN _TSD-LEN !
     \ Encrypt
     _TSD-CTX @  TLS-CT-APP-DATA  _TSD-SRC @  _TSD-LEN @
@@ -12804,7 +12905,12 @@ VARIABLE _TCCS-RLEN
         TLS-RECV-REC TLS-RBUF-LEN @ +        \ dst = buf + got
         16896 TLS-RBUF-LEN @ -                \ maxlen = bufsz - got
         TCP-RECV
-        DUP 0> IF TLS-RBUF-LEN +! ELSE DROP THEN
+        DUP 0> IF
+            TLS-RBUF-LEN +!
+            TLS-RBUF-LEN @ OVER >= IF 2DROP -1 UNLOOP EXIT THEN
+        ELSE
+            DROP
+        THEN
         TCP-POLL NET-IDLE
     LOOP
     2DROP 0 ;
@@ -13021,98 +13127,188 @@ VARIABLE _TLSC-TCB
 VARIABLE _TLSC-RLEN
 VARIABLE _TLSC-CTYPE
 VARIABLE _TLSC-ALPN
+VARIABLE _TLSC-HELLO
+VARIABLE _TLSC-CH-ADDR
+VARIABLE _TLSC-CH-LEN
 
 : _TLSC-FAIL ( -- 0 )
     _TLSC-TCB @ ?DUP IF TCP-CLOSE THEN
     _TLSC-CTX @ ?DUP IF DUP /TLS-CTX 0 FILL THEN
-    0 _TLSC-TCB ! 0 _TLSC-CTX ! 0 ;
+    0 _TLSC-TCB ! 0 _TLSC-CTX !
+    0 _TLSC-CH-ADDR ! 0 _TLSC-CH-LEN ! 0 ;
 
-: TLS-CONNECT-ALPN ( rip rport lport profile -- ctx | 0 )
+: TLS-CONNECT-MODE ( rip rport lport alpn hello -- ctx | 0 )
+    TLS-CONNECT-E-OK TLS-CONNECT-LAST-ERROR !
+    DUP TLS-HELLO-STANDARD < OVER TLS-HELLO-HYBRID > OR IF
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
+        DROP 2DROP 2DROP 0 EXIT
+    THEN
+    _TLSC-HELLO !
     DUP TLS-ALPN-NONE < OVER TLS-ALPN-HTTP11 > OR IF
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
         DROP 2DROP DROP 0 EXIT
     THEN
     _TLSC-ALPN !
     TLS-SNI-LEN @ 0= TLS-SNI-LEN @ 64 > OR
-    TLS-TRUST-COUNT @ 0= OR IF 2DROP DROP 0 EXIT THEN
+    TLS-TRUST-COUNT @ 0= OR IF
+        TLS-CONNECT-E-CONFIG TLS-CONNECT-LAST-ERROR !
+        2DROP DROP 0 EXIT
+    THEN
     0 _TLSC-CTX ! 0 _TLSC-TCB !
     >R >R >R
     \ 1. Allocate TLS context
-    TLS-CTX-ALLOC DUP 0= IF R> R> R> 2DROP DROP EXIT THEN
+    TLS-CTX-ALLOC DUP 0= IF
+        TLS-CONNECT-E-ALLOC TLS-CONNECT-LAST-ERROR !
+        R> R> R> 2DROP DROP EXIT
+    THEN
     _TLSC-CTX !
     _TLSC-CTX @ /TLS-CTX 0 FILL
     _TLSC-ALPN @ _TLSC-CTX @ TLS-CTX.ALPN-PROFILE !
-    \ 2. TCP connect
+    _TLSC-HELLO @ _TLSC-CTX @ TLS-CTX.HELLO-PROFILE !
+    \ 2. Prepare ClientHello before opening TCP. Ephemeral key generation can
+    \ be expensive on small targets; doing it after connect lets public peers
+    \ expire an otherwise healthy idle connection.
+    _TLSC-CTX @ TLS-BUILD-CLIENT-HELLO
+    _TLSC-CH-LEN ! _TLSC-CH-ADDR !
+    _TLSC-CH-LEN @ 0= IF
+        TLS-CONNECT-E-CLIENT-HELLO TLS-CONNECT-LAST-ERROR !
+        R> R> R> 2DROP DROP _TLSC-FAIL EXIT
+    THEN
+    \ 3. TCP connect
     R> R> R> TCP-CONNECT
-    DUP 0= IF DROP _TLSC-FAIL EXIT THEN
+    DUP 0= IF
+        TLS-CONNECT-E-TCP-OPEN TLS-CONNECT-LAST-ERROR !
+        DROP _TLSC-FAIL EXIT
+    THEN
     _TLSC-TCB !
     _TLSC-TCB @ _TLSC-CTX @ TLS-CTX.TCB !
-    \ 3. Wait for TCP established
-    50 TCP-POLL-WAIT
-    _TLSC-TCB @ TCB.STATE @ TCPS-ESTABLISHED <> IF _TLSC-FAIL EXIT THEN
-    \ 4. Build+send ClientHello
-    _TLSC-CTX @ TLS-BUILD-CLIENT-HELLO
-    _TLSC-TCB @ ROT ROT TCP-SEND DROP
-    \ 5. Init record reassembly buffer & wait for ServerHello
+    \ 4. Wait for TCP established
+    _TLSC-TCB @ 50 TCP-WAIT-ESTABLISHED 0= IF
+        TLS-CONNECT-E-TCP-ESTABLISH TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 5. Send the prepared ClientHello immediately.
+    _TLSC-TCB @ _TLSC-CH-ADDR @ _TLSC-CH-LEN @ TCP-SEND
+    _TLSC-CH-LEN @ <> IF
+        TLS-CONNECT-E-CLIENT-SEND TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 6. Init record reassembly buffer & wait for ServerHello
     TLS-RBUF-RESET
-    100 TCP-POLL-WAIT
-    \ 6. Read one ServerHello, allowing it to span plaintext records.
+    _TLSC-TCB @ 100 TCP-WAIT-RX 0= IF
+        TLS-CONNECT-E-SERVER-WAIT TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 7. Read one ServerHello, allowing it to span plaintext records.
     BEGIN
         _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-CLIENT-HELLO-SENT =
     WHILE
         _TLSC-TCB @ TLS-READ-RECORD
-        DUP 0= IF DROP _TLSC-FAIL EXIT THEN
+        DUP 0= IF
+            TLS-CONNECT-E-SERVER-RECORD TLS-CONNECT-LAST-ERROR !
+            DROP _TLSC-FAIL EXIT
+        THEN
         _TLSC-RLEN !
-        TLS-RECV-REC C@ TLS-CT-HANDSHAKE <> IF _TLSC-FAIL EXIT THEN
+        TLS-RECV-REC C@ TLS-CT-HANDSHAKE <> IF
+            TLS-CONNECT-E-SERVER-RECORD TLS-CONNECT-LAST-ERROR !
+            _TLSC-FAIL EXIT
+        THEN
         _TLSC-CTX @ TLS-RECV-REC 5 + _TLSC-RLEN @ 5 -
         TLS-PROCESS-HS-MSGS
-        DUP 0<> IF DROP _TLSC-FAIL EXIT THEN DROP
+        DUP 0<> IF
+            TLS-CONNECT-E-SERVER-PROCESS TLS-CONNECT-LAST-ERROR !
+            DROP _TLSC-FAIL EXIT
+        THEN DROP
         _TLSC-RLEN @ TLS-RBUF-CONSUME
     REPEAT
     _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-HELLO-RCVD <>
-    TLS-HS-RBUF-LEN @ 0<> OR IF _TLSC-FAIL EXIT THEN
-    \ 7. Receive encrypted handshake messages
+    TLS-HS-RBUF-LEN @ 0<> OR IF
+        TLS-CONNECT-E-SERVER-PROCESS TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 8. Receive encrypted handshake messages
     \ (CCS, EncryptedExtensions, Cert, CertVerify, server Finished)
     BEGIN
         _TLSC-CTX @ TLS-CTX.HS-STATE @ TLSH-SERVER-FINISHED <
     WHILE
-        100 TCP-POLL-WAIT
+        _TLSC-TCB @ 100 TCP-WAIT-RX 0= IF
+            TLS-CONNECT-E-HANDSHAKE-WAIT TLS-CONNECT-LAST-ERROR !
+            _TLSC-FAIL EXIT
+        THEN
         _TLSC-TCB @ TLS-READ-RECORD
-        DUP 0= IF DROP _TLSC-FAIL EXIT THEN
+        DUP 0= IF
+            TLS-CONNECT-E-HANDSHAKE-RECORD TLS-CONNECT-LAST-ERROR !
+            DROP _TLSC-FAIL EXIT
+        THEN
         _TLSC-RLEN !
         \ Ignore only the exact compatibility CCS permitted by TLS 1.3.
         TLS-RECV-REC C@ TLS-CT-CCS = IF
             TLS-RECV-REC _TLSC-RLEN @ TLS-COMPAT-CCS? 0= IF
+                TLS-CONNECT-E-HANDSHAKE-RECORD TLS-CONNECT-LAST-ERROR !
                 _TLSC-FAIL EXIT
             THEN
             _TLSC-RLEN @ TLS-RBUF-CONSUME
         ELSE
-            TLS-RECV-REC C@ TLS-CT-APP-DATA <> IF _TLSC-FAIL EXIT THEN
+            TLS-RECV-REC C@ TLS-CT-APP-DATA <> IF
+                TLS-CONNECT-E-HANDSHAKE-RECORD TLS-CONNECT-LAST-ERROR !
+                _TLSC-FAIL EXIT
+            THEN
             \ Decrypt record
             _TLSC-CTX @ TLS-RECV-REC _TLSC-RLEN @ TLS-PLAIN-BUF
             TLS-DECRYPT-RECORD
             _TLSC-RLEN @ TLS-RBUF-CONSUME
-            DUP 0= IF 2DROP _TLSC-FAIL EXIT THEN
+            DUP 0= IF
+                TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
+                2DROP _TLSC-FAIL EXIT
+            THEN
             \ Stack: ctype plen — process all HS messages in plaintext
-            OVER TLS-CT-HANDSHAKE <> IF 2DROP _TLSC-FAIL EXIT THEN
+            OVER TLS-CT-HANDSHAKE <> IF
+                TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
+                2DROP _TLSC-FAIL EXIT
+            THEN
             SWAP DROP  \ drop ctype, keep plen
             _TLSC-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-HS-MSGS
-            DUP 0<> IF DROP _TLSC-FAIL EXIT THEN DROP
+            DUP 0<> IF
+                TLS-CONNECT-E-HANDSHAKE-PROCESS TLS-CONNECT-LAST-ERROR !
+                DROP _TLSC-FAIL EXIT
+            THEN DROP
         THEN
     REPEAT
-    TLS-HS-RBUF-ERROR @ TLS-HS-RBUF-LEN @ 0<> OR IF _TLSC-FAIL EXIT THEN
-    \ 8. Send client Finished + install app keys
+    TLS-HS-RBUF-ERROR @ TLS-HS-RBUF-LEN @ 0<> OR IF
+        TLS-CONNECT-E-HANDSHAKE-RECORD TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 9. Send client Finished + install app keys
     _TLSC-CTX @  TLS-SEND-REC  TLS-HANDSHAKE-COMPLETE
-    DUP 0= IF DROP _TLSC-FAIL EXIT THEN
+    DUP 0= IF
+        TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
+        DROP _TLSC-FAIL EXIT
+    THEN
     _TLSC-TCB @  TLS-SEND-REC  ROT  TCP-SEND
-    0= IF _TLSC-FAIL EXIT THEN
+    0= IF
+        TLS-CONNECT-E-FINISHED TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
     _TLSC-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <>
-    _TLSC-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR IF _TLSC-FAIL EXIT THEN
-    \ 9. Return context
+    _TLSC-CTX @ TLS-CTX.PEER-AUTH @ 1 <> OR IF
+        TLS-CONNECT-E-AUTH TLS-CONNECT-LAST-ERROR !
+        _TLSC-FAIL EXIT
+    THEN
+    \ 10. Return context
     _TLSC-CTX @
 ;
 
+: TLS-CONNECT-ALPN ( rip rport lport profile -- ctx | 0 )
+    TLS-HELLO-STANDARD TLS-CONNECT-MODE ;
+
+: TLS-CONNECT-HYBRID-ALPN ( rip rport lport profile -- ctx | 0 )
+    TLS-HELLO-HYBRID TLS-CONNECT-MODE ;
+
 : TLS-CONNECT ( rip rport lport -- ctx | 0 )
     TLS-ALPN-NONE TLS-CONNECT-ALPN ;
+
+: TLS-CONNECT-HYBRID ( rip rport lport -- ctx | 0 )
+    TLS-ALPN-NONE TLS-CONNECT-HYBRID-ALPN ;
 
 \ -- TLS-SEND / TLS-RECV convenience aliases --
 : TLS-SEND ( ctx addr len -- actual )  TLS-SEND-DATA ;
@@ -13284,8 +13480,7 @@ VARIABLE _SCON-RPORT
         TCP-CONNECT
         DUP 0= IF DROP -1 EXIT THEN
         _SCON-SD @ SOCK.HANDLE !
-        50 TCP-POLL-WAIT
-        _SCON-SD @ SOCK.HANDLE @ TCB.STATE @ TCPS-ESTABLISHED = IF
+        _SCON-SD @ SOCK.HANDLE @ 50 TCP-WAIT-ESTABLISHED IF
             SOCKST-TCP _SCON-SD @ SOCK.STATE !
             0
         ELSE -1 THEN

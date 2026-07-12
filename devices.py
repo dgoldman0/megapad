@@ -2231,17 +2231,18 @@ def _dim(m: int, y: int) -> int:
 class RTC(Device):
     """Combined system clock: ms uptime + epoch + calendar + alarm.
 
-    On construction, initialises epoch_ms from the host wall-clock.
-    The emulator calls tick() once per step; the RTC internally
-    prescales to 1 ms using the nominal 100 MHz clock rate.
+    Deterministic mode advances from emulated cycles. Realtime mode uses
+    host monotonic time, which keeps interactive guests aligned with
+    external protocol deadlines even when emulation is slower than 100 MHz.
     """
 
     CLOCK_HZ = 100_000_000   # must match RTL CLOCK_HZ
     MS_DIVISOR = CLOCK_HZ // 1000  # cycles per ms
 
-    def __init__(self):
+    def __init__(self, *, realtime: bool = False):
         super().__init__("RTC", RTC_BASE, 0x20)  # 32 bytes
         now = _datetime.now()
+        self.realtime = bool(realtime)
         self.uptime_ms: int  = 0
         self.epoch_ms: int   = int(_time.time() * 1000) & ((1 << 64) - 1)
         self.sec: int   = now.second
@@ -2262,23 +2263,69 @@ class RTC(Device):
         # Latch registers
         self._uptime_latch: int = 0
         self._epoch_latch: int = 0
+        self._host_mono_anchor: float = _time.monotonic()
+        self._host_uptime_anchor: int = self.uptime_ms
+        self._host_epoch_anchor: int = self.epoch_ms
+
+    @property
+    def clock_mode(self) -> str:
+        return "realtime" if self.realtime else "virtual"
+
+    def _reanchor_host_clock(self):
+        self._host_mono_anchor = _time.monotonic()
+        self._host_uptime_anchor = self.uptime_ms
+        self._host_epoch_anchor = self.epoch_ms
+
+    def _sync_realtime(self):
+        if not self.realtime or not (self.ctrl & 1):
+            return
+        elapsed_ms = max(0, int((_time.monotonic() - self._host_mono_anchor) * 1000))
+        old_epoch = self.epoch_ms
+        self.uptime_ms = (self._host_uptime_anchor + elapsed_ms) & ((1 << 64) - 1)
+        self.epoch_ms = (self._host_epoch_anchor + elapsed_ms) & ((1 << 64) - 1)
+        if self.epoch_ms == old_epoch:
+            return
+        self.status |= 0x04
+        old_second = old_epoch // 1000
+        new_second = self.epoch_ms // 1000
+        if new_second == old_second:
+            return
+        self.status |= 0x02
+        now = _datetime.fromtimestamp(self.epoch_ms / 1000)
+        self.sec = now.second
+        self.min = now.minute
+        self.hour = now.hour
+        self.day = now.day
+        self.mon = now.month
+        self.year = now.year
+        self.dow = (now.weekday() + 1) % 7
+        if (self.sec == self.alarm_sec and
+            self.min == self.alarm_min and
+            self.hour == self.alarm_hour):
+            self.status |= 0x01
+            if self.ctrl & 2:
+                self.irq_pending = True
 
     # --- MMIO reads ---
     def read8(self, offset: int) -> int:
         # Uptime ms (latched: reading byte 0 snapshots)
         if offset == 0x00:
+            self._sync_realtime()
             self._uptime_latch = self.uptime_ms
             return self.uptime_ms & 0xFF
         if 0x01 <= offset <= 0x07:
             return (self._uptime_latch >> (8 * offset)) & 0xFF
         # Epoch ms (latched: reading byte 8 snapshots)
         if offset == 0x08:
+            self._sync_realtime()
             self._epoch_latch = self.epoch_ms
             return self.epoch_ms & 0xFF
         if 0x09 <= offset <= 0x0F:
             return (self._epoch_latch >> (8 * (offset - 0x08))) & 0xFF
         # Calendar
-        if offset == 0x10: return self.sec & 0x3F
+        if offset == 0x10:
+            self._sync_realtime()
+            return self.sec & 0x3F
         if offset == 0x11: return self.min & 0x3F
         if offset == 0x12: return self.hour & 0x1F
         if offset == 0x13: return self.day & 0x1F
@@ -2299,10 +2346,13 @@ class RTC(Device):
         value &= 0xFF
         # Epoch ms (byte-addressed write)
         if 0x08 <= offset <= 0x0F:
+            self._sync_realtime()
             shift = 8 * (offset - 0x08)
             mask = 0xFF << shift
             self.epoch_ms = (self.epoch_ms & ~mask) | (value << shift)
             self.epoch_ms &= (1 << 64) - 1
+            if self.realtime:
+                self._reanchor_host_clock()
             return
         # Calendar
         if   offset == 0x10: self.sec  = value & 0x3F
@@ -2313,7 +2363,13 @@ class RTC(Device):
         elif offset == 0x15: self.year = (self.year & 0xFF00) | value
         elif offset == 0x16: self.year = (self.year & 0x00FF) | (value << 8)
         elif offset == 0x17: self.dow  = value & 0x07
-        elif offset == 0x18: self.ctrl = value
+        elif offset == 0x18:
+            was_running = bool(self.ctrl & 1)
+            if was_running:
+                self._sync_realtime()
+            self.ctrl = value
+            if self.realtime and bool(self.ctrl & 1) != was_running:
+                self._reanchor_host_clock()
         elif offset == 0x19:
             # Write-1-to-clear
             self.status &= ~value
@@ -2325,6 +2381,9 @@ class RTC(Device):
 
     # --- Free-running tick (called from system step) ---
     def tick(self, cycles: int):
+        if self.realtime:
+            self._sync_realtime()
+            return
         if not (self.ctrl & 1) or cycles == 0:
             return
         self._ms_prescaler += cycles

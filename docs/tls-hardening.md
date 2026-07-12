@@ -1,7 +1,7 @@
 # Native TLS Hardening
 
 Status: authenticated P-256 profile implemented; general WebPKI incomplete
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
 ## Purpose
 
@@ -106,7 +106,11 @@ Signed updates and durable rollback protection remain release requirements.
 
 `X509-VERIFY-CHAIN` accepts one through eight parsed certificates. Descriptor
 zero is always the server leaf; remaining certificates may be unordered and
-may contain irrelevant entries. The bounded builder:
+may contain irrelevant entries. TLS Certificate processing requires the leaf
+to parse, but ignores unusable non-leaf extras after validating their enclosing
+TLS lengths. They cannot enter path construction; a required unsupported
+intermediate therefore still leaves no path and fails closed. The bounded
+builder:
 
 - requires the leaf not to be a CA;
 - checks digitalSignature and serverAuth when those extensions are present;
@@ -151,6 +155,41 @@ the connection context. The currently implemented application profile is
 `http/1.1`; its ClientHello offer and EncryptedExtensions selection are both
 checked exactly. Plain `TLS-CONNECT` requests no ALPN profile.
 
+Ordinary `TLS-CONNECT` and `TLS-CONNECT-ALPN` use the interoperable public
+profile: TLS 1.3 `TLS_AES_128_GCM_SHA256`, X25519, and only implemented
+ECDSA-P256-SHA256 signatures. `TLS-CONNECT-HYBRID` and
+`TLS-CONNECT-HYBRID-ALPN` explicitly select MegaPad's private X25519 plus
+ML-KEM-512 profile. That profile uses IANA private-use NamedGroup `0xFE00` and
+the private `0xFF01` cipher suite; it is not advertised to public servers.
+
+An earlier prototype incorrectly used `0x6399` for its ML-KEM-512 share. That
+code point means the obsolete but deployed X25519Kyber768Draft00 construction,
+whose key shape differs; public servers therefore correctly rejected the
+offer with `decode_error`. Private algorithms must remain in private-use code
+points unless their complete registered wire format is implemented.
+
+Connection waits are target-state aware. A completed SYN handshake returns
+immediately instead of running a fixed number of additional idle polls, and a
+record fill returns as soon as the requested bytes are buffered. The generic
+poll pump remains available for callers that intentionally want fixed polling.
+`TLS-CONNECT-LAST-ERROR` preserves a bounded phase code across failed-context
+cleanup so transports can distinguish configuration, TCP, ServerHello,
+protected-handshake, Finished, and authentication failures.
+
+The current TCP control block owns one retransmission buffer, so only one
+unacknowledged data segment may be in flight. `TCP-SEND-READY?` exposes that
+constraint and `TCP-SEND` returns zero without modifying the buffer while
+`SND-NXT` differs from `SND-UNA`. TLS checks readiness before encrypting, so a
+retry neither overwrites pending ciphertext nor advances the record sequence.
+This is deliberate backpressure for the present bounded stack, not a claim of
+multi-segment TCP throughput.
+
+`MS@` and `EPOCH@` reconstruct all eight RTC bytes. Immediate ISA shifts are
+four bits wide, so a 16-bit byte-position shift must be emitted as two 8-bit
+shifts. Regressions use nonzero data in every byte; a previous single encoded
+shift caused the millisecond value to wrap at 65.536 seconds, which stopped
+OAuth polling and invalidated certificate/token deadlines in long sessions.
+
 Incoming records require legacy record version `0x0303` and are bounded
 separately for plaintext and protected records. A compatibility
 ChangeCipherSpec is ignored only when it has the exact one-byte `0x01` form
@@ -193,6 +232,10 @@ Native guest tests cover:
 - a real CertificateVerify signature from the fixture leaf key;
 - rejection of early Finished and unauthenticated application-key derivation;
 - ALPN offer, exact selection, missing-selection, and per-context state;
+- standard-only and explicit private-hybrid ClientHello wire layouts;
+- immediate established/readable TCP waits and record-fill completion;
+- TCP/TLS send backpressure without retransmission-buffer or sequence loss;
+- full-width `MS@` and `EPOCH@` reconstruction across byte boundaries;
 - handshake reassembly across arbitrary protected-record boundaries;
 - legacy record version, size-class, and compatibility CCS validation;
 - clean, fatal, and malformed incoming alert handling;
@@ -222,6 +265,8 @@ trust bundle.
   streaming connections are considered production-ready.
 - Run credential-free live interoperability against every intended endpoint
   after provisioning a reviewed scoped trust bundle.
+- Keep the public and private ClientHello profiles separate; do not assign
+  experimental wire formats to registered NamedGroup values.
 
 ### Algorithm coverage
 

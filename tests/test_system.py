@@ -2303,6 +2303,24 @@ class TestBIOS(unittest.TestCase):
         # enable + IRQ + auto-reload = 7
         self.assertEqual(sys.timer.control, 7)
 
+    def test_ms_fetch_reconstructs_all_eight_uptime_bytes(self):
+        """MS@ must not wrap when the third uptime byte becomes nonzero."""
+        sys, buf = self._boot_bios()
+        expected = 0x0102030405060708
+        sys.rtc.ctrl = 0
+        sys.rtc.uptime_ms = expected
+        text = self._run_forth(sys, buf, ["MS@ ."])
+        self.assertIn(f"{expected} ", text)
+
+    def test_epoch_fetch_reconstructs_all_eight_epoch_bytes(self):
+        """EPOCH@ must preserve every byte used by token expiration."""
+        sys, buf = self._boot_bios()
+        expected = 0x0102030405060708
+        sys.rtc.ctrl = 0
+        sys.rtc.epoch_ms = expected
+        text = self._run_forth(sys, buf, ["EPOCH@ ."])
+        self.assertIn(f"{expected} ", text)
+
     def test_ei_di(self):
         """EI! and DI! toggle the global interrupt flag.
 
@@ -15702,7 +15720,7 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=584 ", text)
+        self.assertIn("SZ=592 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -15910,14 +15928,14 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." HT=" ch-addr @ 5 + C@ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("LEN=989 ", text)
+        self.assertIn("LEN=149 ", text)
         self.assertIn("CT=22 ", text)     # ContentType=handshake
         self.assertIn("V0=3 ", text)      # 0x0301
         self.assertIn("V1=1 ", text)
         self.assertIn("HT=1 ", text)      # ClientHello
 
     def test_build_ch_cipher_suite(self):
-        """ClientHello contains both cipher suites: 0x1301 + 0xFF01."""
+        """The default ClientHello offers only standard TLS 1.3."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
@@ -15925,30 +15943,27 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." SL=" TLS-CH-BUF 77 + C@ .',       # suites_len low byte
             '." CS0=" TLS-CH-BUF 78 + C@ .',      # 0x13
             '." CS1=" TLS-CH-BUF 79 + C@ .',      # 0x01
-            '." CS2=" TLS-CH-BUF 80 + C@ .',      # 0xFF
-            '." CS3=" TLS-CH-BUF 81 + C@ .',      # 0x01
+            '." COMP=" TLS-CH-BUF 80 + C@ .',     # compression list len
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("SL=4 ", text)       # 4 bytes = 2 suites
+        self.assertIn("SL=2 ", text)       # 2 bytes = 1 suite
         self.assertIn("CS0=19 ", text)     # 0x13
         self.assertIn("CS1=1 ", text)      # 0x01 (standard)
-        self.assertIn("CS2=255 ", text)    # 0xFF
-        self.assertIn("CS3=1 ", text)      # 0x01 (private)
+        self.assertIn("COMP=1 ", text)
 
     def test_build_ch_extensions(self):
-        """ClientHello contains correct extension types and length."""
-        # extensions_len = 903 = 0x0387 → high byte = 3, low byte = 135
+        """Standard ClientHello contains the bounded public extensions."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
-            '." EH=" TLS-CH-BUF 84 + C@ .',           # extensions_len high
-            '." EL=" TLS-CH-BUF 85 + C@ .',           # extensions_len low
-            '." SV=" TLS-CH-BUF 87 + C@ .',           # supported_versions type low
+            '." EH=" TLS-CH-BUF 82 + C@ .',           # extensions_len high
+            '." EL=" TLS-CH-BUF 83 + C@ .',           # extensions_len low
+            '." SV=" TLS-CH-BUF 85 + C@ .',           # supported_versions type low
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("EH=3 ", text)     # high byte of 903
-        self.assertIn("EL=135 ", text)   # low byte of 903 (0x87)
+        self.assertIn("EH=0 ", text)
+        self.assertIn("EL=65 ", text)
         self.assertIn("SV=43 ", text)    # 0x2B
 
     def test_build_ch_transcript_length(self):
@@ -15960,7 +15975,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." TL=" TLS-HS-TR-LEN @ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("TL=984 ", text)
+        self.assertIn("TL=144 ", text)
 
     def test_parse_sh_extracts_pubkey(self):
         """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
@@ -16090,7 +16105,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=584 ", text)
+        self.assertIn("SZ=592 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -16167,10 +16182,10 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO 2DROP",
-            '." EXTLEN=" TLS-CH-BUF 974 + C@ .',
-            '." LISTLEN=" TLS-CH-BUF 976 + C@ .',
-            '." ALG0=" TLS-CH-BUF 977 + C@ .',
-            '." ALG1=" TLS-CH-BUF 978 + C@ .',
+            '." EXTLEN=" TLS-CH-BUF 136 + C@ .',
+            '." LISTLEN=" TLS-CH-BUF 138 + C@ .',
+            '." ALG0=" TLS-CH-BUF 139 + C@ .',
+            '." ALG1=" TLS-CH-BUF 140 + C@ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("EXTLEN=4 ", text)
@@ -16186,9 +16201,9 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             "TLS-ALPN-HTTP11 test-ctx @ TLS-CTX.ALPN-PROFILE !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO",
             '." CHLEN=" . DROP',
-            '." EXTLEN=" TLS-CH-BUF 85 + C@ .',
-            '." ATYPE=" TLS-CH-BUF 990 + C@ .',
-            '." ANAME=" TLS-CH-BUF 996 + 8 TYPE CR',
+            '." EXTLEN=" TLS-CH-BUF 83 + C@ .',
+            '." ATYPE=" TLS-CH-BUF 150 + C@ .',
+            '." ANAME=" TLS-CH-BUF 156 + 8 TYPE CR',
             "CREATE ee 21 ALLOT ee 21 0 FILL",
             "8 ee C! 17 ee 3 + C! 15 ee 5 + C!",
             "16 ee 7 + C! 11 ee 9 + C! 9 ee 11 + C! 8 ee 12 + C!",
@@ -16202,56 +16217,82 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." MISSING=" .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("CHLEN=1004 ", text)
-        self.assertIn("EXTLEN=150 ", text)  # 918 = 0x0396
+        self.assertIn("CHLEN=164 ", text)
+        self.assertIn("EXTLEN=80 ", text)
         self.assertIn("ATYPE=16 ", text)
         self.assertIn("ANAME=http/1.1", text)
         self.assertIn("EE=0 ", text)
         self.assertIn("NEG=1 ", text)
         self.assertIn("MISSING=-1 ", text)
 
+    def test_public_sni_alpn_client_hello_shape(self):
+        """Codex-shaped public ClientHello has exact nested lengths."""
+        lines = [
+            "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
+            "test-ctx @ /TLS-CTX 0 FILL",
+            "TLS-ALPN-HTTP11 test-ctx @ TLS-CTX.ALPN-PROFILE !",
+            "15 TLS-SNI-LEN !",
+            'S" auth.openai.com" TLS-SNI-HOST SWAP CMOVE',
+            "test-ctx @ TLS-BUILD-CLIENT-HELLO",
+            '." CHLEN=" . DROP',
+            '." RECORD=" TLS-CH-BUF 3 + NW16@ .',
+            '." BODY=" TLS-CH-BUF 6 + _BE24@ .',
+            '." EXTS=" TLS-CH-BUF 82 + NW16@ .',
+            '." SNI=" TLS-CH-BUF 93 + 15 TYPE CR',
+            '." ALPN=" TLS-CH-BUF 180 + 8 TYPE CR',
+        ]
+        text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("CHLEN=188 ", text)
+        self.assertIn("RECORD=183 ", text)
+        self.assertIn("BODY=179 ", text)
+        self.assertIn("EXTS=104 ", text)
+        self.assertIn("SNI=auth.openai.com", text)
+        self.assertIn("ALPN=http/1.1", text)
+
     def test_build_ch_hybrid_key_share_group(self):
-        """ClientHello key_share first entry is hybrid PQ group (0x6399)."""
+        """Explicit hybrid ClientHello uses the private ML-KEM group."""
         # key_share ext starts at offset 93 (86+7 for supported_versions)
         # ext_type(2) + ext_len(2) + entries_len(2) = 6 bytes header
         # first entry group at offset 93+6 = 99
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
-            '." G0=" TLS-CH-BUF 99 + C@ .',       # group high = 0x63 = 99
-            '." G1=" TLS-CH-BUF 100 + C@ .',      # group low  = 0x99 = 153
+            '." G0=" TLS-CH-BUF 99 + C@ .',       # group high = 0xFE
+            '." G1=" TLS-CH-BUF 100 + C@ .',      # group low = 0x00
             '." KH=" TLS-CH-BUF 101 + C@ .',      # key_len high = 3
             '." KL=" TLS-CH-BUF 102 + C@ .',      # key_len low  = 64 (0x40)
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("G0=99 ", text)      # 0x63
-        self.assertIn("G1=153 ", text)     # 0x99
+        self.assertIn("G0=254 ", text)
+        self.assertIn("G1=0 ", text)
         self.assertIn("KH=3 ", text)       # 832 = 0x0340
         self.assertIn("KL=64 ", text)
 
     def test_build_ch_supported_groups_has_hybrid(self):
-        """ClientHello supported_groups lists hybrid PQ (0x6399) first."""
+        """Explicit hybrid supported_groups lists private ML-KEM first."""
         # sig_algos (8B) follows key_share; groups (10B) follows sig_algos.
         # key_share starts at 93, is 878B → sig_algos at 971
         # groups begin at 979; the first group follows its 6-byte header.
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
+            "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
-            '." SG0=" TLS-CH-BUF 985 + C@ .',     # hybrid high = 99
-            '." SG1=" TLS-CH-BUF 986 + C@ .',     # hybrid low  = 153
+            '." SG0=" TLS-CH-BUF 985 + C@ .',     # hybrid high = 254
+            '." SG1=" TLS-CH-BUF 986 + C@ .',     # hybrid low = 0
             '." SG2=" TLS-CH-BUF 987 + C@ .',     # x25519 high = 0
             '." SG3=" TLS-CH-BUF 988 + C@ .',     # x25519 low  = 29
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("SG0=99 ", text)
-        self.assertIn("SG1=153 ", text)
+        self.assertIn("SG0=254 ", text)
+        self.assertIn("SG1=0 ", text)
         self.assertIn("SG2=0 ", text)
         self.assertIn("SG3=29 ", text)
 
     def test_parse_sh_hybrid_group(self):
-        """TLS-PARSE-SERVER-HELLO accepts hybrid PQ key_share (0x6399)."""
+        """TLS-PARSE-SERVER-HELLO accepts the private hybrid key share."""
         # Build crafted SH with hybrid group:
         # key_data = x25519_pub(32) || kyber_ct(768) = 800 bytes
         lines = [
@@ -16297,7 +16338,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             # key_share (808B)
             "0 sh-buf 50 + C!  51 sh-buf 51 + C!",   # type=0x0033
             "3 sh-buf 52 + C!  36 sh-buf 53 + C!",   # ext_len=804 (0x0324)
-            "99 sh-buf 54 + C!  153 sh-buf 55 + C!", # group=0x6399
+            "254 sh-buf 54 + C!  0 sh-buf 55 + C!", # group=0xFE00
             "3 sh-buf 56 + C!  32 sh-buf 57 + C!",   # key_len=800 (0x0320)
             # key_data[0..31] = X25519 pubkey (66..97)
             ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
@@ -16313,7 +16354,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("F=0 ", text)          # success
-        self.assertIn("GRP=25497 ", text)    # TLS-GROUP-HYBRID-PQ
+        self.assertIn("GRP=65024 ", text)    # TLS-GROUP-HYBRID-PQ
         self.assertIn("PK0=66 ", text)       # first X25519 pubkey byte
         self.assertIn("CT0=170 ", text)      # first CT byte (0xAA)
         self.assertIn("CT767=170 ", text)    # last CT byte
@@ -16417,7 +16458,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." H=" TLS-GROUP-HYBRID-PQ .',
         ])
         self.assertIn("X=29 ", text)       # 0x001D
-        self.assertIn("H=25497 ", text)    # 0x6399
+        self.assertIn("H=65024 ", text)    # 0xFE00 private use
 
     def test_hs_group_default_after_ch(self):
         """TLS-HS-GROUP defaults to x25519 after ClientHello."""
@@ -17081,6 +17122,29 @@ class TestKDOSTLSCertVerify(_KDOSTestBase):
         text = self._run_kdos(lines, max_steps=5_000_000_000)
         self.assertIn("FLAG=0 ", text)
 
+    def test_tls_parse_certificate_ignores_unusable_nonleaf_extra(self):
+        """An unusable extra cannot block a valid explicitly anchored path."""
+        p256_oid = bytes.fromhex("06082a8648ce3d030107")
+        unknown_curve_oid = bytes.fromhex("06082a8648ce3d030108")
+        extra = self._fixture("intermediate").replace(
+            p256_oid, unknown_curve_oid, 1
+        )
+        self.assertNotEqual(extra, self._fixture("intermediate"))
+        msg = self._build_cert_msg(certs=[
+            self._fixture("leaf"),
+            self._fixture("intermediate"),
+            extra,
+        ])
+        lines = self._trusted_lines(msg)
+        lines.extend([
+            f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
+            '." FLAG=" .',
+            '." CERTS=" TLS-PEER-CERT-COUNT @ .',
+        ])
+        text = self._run_kdos(lines, max_steps=5_000_000_000)
+        self.assertIn("FLAG=0 ", text)
+        self.assertIn("CERTS=2 ", text)
+
     def test_certificate_verify_opens_peer_auth_gate(self):
         """Only proof of the trusted leaf key sets the connection auth bit."""
         cert_msg = self._build_cert_msg()
@@ -17148,6 +17212,22 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         ]
         text = self._run_kdos(lines)
         self.assertIn("S=0 ", text)
+
+    def test_tls_send_data_preserves_sequence_under_tcp_backpressure(self):
+        """A pending TCP record must defer TLS encryption and sequence use."""
+        lines = self._TLS_ESTAB_SETUP + [
+            "TCP-INIT-ALL",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA !",
+            "105 0 TCB-N TCB.SND-NXT !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "CREATE pending-msg 4 ALLOT  pending-msg 4 65 FILL",
+            'test-ctx @ pending-msg 4 TLS-SEND-DATA ."  sent=" .',
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("sent=0 ", text)
+        self.assertIn("seq=0 ", text)
 
     def test_tls_recv_data_not_established(self):
         """TLS-RECV-DATA returns 0 when not in ESTABLISHED state."""
@@ -17383,12 +17463,12 @@ class TestKDOSSocket(_KDOSTestBase):
             "VARIABLE sd  sd !",
             "sd @ 12345 BIND DROP",
             'sd @  PIP 80  CONNECT  ." CN=" .',
-            "5 TCP-POLL-WAIT",
+            'sd @ SOCK.HANDLE @ 1 TCP-WAIT-ESTABLISHED ." EW=" .',
             '." SST=" sd @ SOCK.STATE @ .',
             # Send "Hi"
             "CREATE MSG 2 ALLOT  72 MSG C!  105 MSG 1+ C!",
             'sd @ MSG 2 SEND ." SE=" .',
-            "5 TCP-POLL-WAIT",
+            'sd @ SOCK.HANDLE @ 5 TCP-WAIT-RX ." RW=" .',
             # Recv echo
             "CREATE RBF 64 ALLOT  RBF 64 0 FILL",
             'sd @ RBF 64 RECV ." RV=" .',
@@ -17398,8 +17478,10 @@ class TestKDOSSocket(_KDOSTestBase):
             "sd @ CLOSE",
         ], nic_tx_callback=tcp_echo)
         self.assertIn("CN=0 ", text)       # connect success
+        self.assertIn("EW=-1 ", text)      # already established: no extra idle
         self.assertIn("SST=1 ", text)      # SOCKST-TCP
         self.assertIn("SE=2 ", text)
+        self.assertIn("RW=-1 ", text)      # echo made the TCB readable
         self.assertIn("RV=2 ", text)
         self.assertIn("B0=72 ", text)      # 'H'
         self.assertIn("B1=105 ", text)     # 'i'
@@ -20581,6 +20663,22 @@ class TestKDOSNetStack(_KDOSTestBase):
             "0 TCB-N MSG2 4 TCP-SEND .",
         ])
         self.assertIn("0 ", text)
+
+    def test_tcp_send_backpressures_with_unacknowledged_data(self):
+        """TCP-SEND must not overwrite its sole retransmit buffer."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA !",
+            "105 0 TCB-N TCB.SND-NXT !",
+            "CREATE MSG3 4 ALLOT  MSG3 4 65 FILL",
+            '0 TCB-N MSG3 4 TCP-SEND ."  sent=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  buffered=" .',
+        ])
+        self.assertIn("sent=0 ", text)
+        self.assertIn("next=105 ", text)
+        self.assertIn("buffered=0 ", text)
 
     # -- 16.7j: TCP receive data --
 

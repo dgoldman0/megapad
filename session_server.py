@@ -27,8 +27,29 @@ def main() -> int:
     parser.add_argument("--cols", type=int, default=80)
     parser.add_argument("--rows", type=int, default=30)
     parser.add_argument("--batch-steps", type=int, default=100_000)
+    parser.add_argument(
+        "--nic-tap",
+        nargs="?",
+        const="mp64tap0",
+        help="attach the machine NIC to a preconfigured Linux TAP device",
+    )
+    parser.add_argument(
+        "--virtual-clock",
+        action="store_true",
+        help="advance the RTC from emulated cycles instead of host wall time",
+    )
     parser.add_argument("--paused", action="store_true")
     args = parser.parse_args()
+
+    nic_backend = None
+    if args.nic_tap:
+        from nic_backends import TAPBackend, tap_available
+
+        if not tap_available(args.nic_tap):
+            parser.error(
+                f"TAP device {args.nic_tap!r} does not exist or is not accessible"
+            )
+        nic_backend = TAPBackend(tap_name=args.nic_tap)
 
     session = MachineSession.from_bios(
         args.bios,
@@ -41,6 +62,8 @@ def main() -> int:
         cols=args.cols,
         rows=args.rows,
         batch_steps=args.batch_steps,
+        nic_backend=nic_backend,
+        realtime_clock=not args.virtual_clock,
     )
     machine = SharedMachine(session)
     machine.paused = args.paused
@@ -54,6 +77,12 @@ def main() -> int:
     server.start()
     print(f"[shared] socket: {server.socket_path}", flush=True)
     print(f"[shared] bios:   {args.bios.resolve()}", flush=True)
+    if args.nic_tap:
+        print(f"[shared] nic:    tap:{args.nic_tap}", flush=True)
+    print(
+        f"[shared] clock:  {'virtual' if args.virtual_clock else 'realtime'}",
+        flush=True,
+    )
     print("[shared] machine owner running; Ctrl+C stops it", flush=True)
     try:
         server.serve_forever()

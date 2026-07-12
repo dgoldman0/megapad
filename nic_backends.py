@@ -235,14 +235,27 @@ class TAPBackend(NICBackend):
         # Stats
         self.tx_bytes: int = 0
         self.rx_bytes: int = 0
+        self.tx_frames: int = 0
+        self.rx_frames: int = 0
         self.tx_errors: int = 0
+        self.first_tx_frame: Optional[bytes] = None
+        self.first_rx_frame: Optional[bytes] = None
+        self.last_tx_frame: Optional[bytes] = None
+        self.last_rx_frame: Optional[bytes] = None
+        self.frame_trace: deque[tuple[str, bytes]] = deque(maxlen=32)
 
     def send(self, frame: bytes) -> bool:
         if self._fd is None:
             return False
         try:
-            n = os.write(self._fd, frame[:NIC_MTU])
+            payload = bytes(frame[:NIC_MTU])
+            n = os.write(self._fd, payload)
             self.tx_bytes += n
+            self.tx_frames += 1
+            if self.first_tx_frame is None:
+                self.first_tx_frame = payload
+            self.last_tx_frame = payload
+            self.frame_trace.append(("tx", payload))
             return True
         except OSError as e:
             self.tx_errors += 1
@@ -309,6 +322,11 @@ class TAPBackend(NICBackend):
                     if data:
                         frame = data[:NIC_MTU]
                         self.rx_bytes += len(frame)
+                        self.rx_frames += 1
+                        if self.first_rx_frame is None:
+                            self.first_rx_frame = bytes(frame)
+                        self.last_rx_frame = bytes(frame)
+                        self.frame_trace.append(("rx", bytes(frame)))
                         if self.on_rx_frame:
                             self.on_rx_frame(bytes(frame))
                 except OSError:
@@ -352,11 +370,31 @@ class TAPBackend(NICBackend):
         return {
             "tap": self._tap_name,
             "link_up": self.link_up,
+            "tx_frames": self.tx_frames,
             "tx_bytes": self.tx_bytes,
+            "rx_frames": self.rx_frames,
             "rx_bytes": self.rx_bytes,
             "tx_errors": self.tx_errors,
+            "first_tx_hex": self._frame_prefix(self.first_tx_frame),
+            "first_rx_hex": self._frame_prefix(self.first_rx_frame),
+            "last_tx_hex": self._frame_prefix(self.last_tx_frame),
+            "last_rx_hex": self._frame_prefix(self.last_rx_frame),
+            "frame_trace": [
+                {
+                    "direction": direction,
+                    "length": len(frame),
+                    "prefix_hex": self._frame_prefix(frame, limit=96),
+                }
+                for direction, frame in self.frame_trace
+            ],
             "error": self._error_msg or None,
         }
+
+    @staticmethod
+    def _frame_prefix(frame: Optional[bytes], limit: int = 64) -> Optional[str]:
+        if frame is None:
+            return None
+        return frame[:limit].hex(" ")
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -89,6 +89,18 @@ def test_shared_server_clients_control_one_machine(tmp_path):
                 )
             )
             assert status["clients"] == 2
+            assert status["clock"]["mode"] == "virtual"
+            assert status["cpu"]["cycles"] >= 0
+            assert len(status["cpu"]["registers"]) == 32
+            assert "return_words" in status["forth"]
+            network = controller.request("network")
+            assert network["backend"] == "loopback"
+            assert network["guest_rx_queued"] == 0
+            forth = controller.request("forth", names=["STATE"])
+            assert forth["words"]["STATE"]["name"] == "STATE"
+            peek = controller.request("peek", address=0, count=2)
+            assert peek["cell_size"] == 8
+            assert len(peek["values"]) == 2
 
             initial = viewer.request("screen", since=-1)
             assert initial["changed"]

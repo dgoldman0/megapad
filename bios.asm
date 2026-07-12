@@ -6844,7 +6844,8 @@ w_ms_fetch:
     or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 2
-    lsli r0, 16
+    lsli r0, 8
+    lsli r0, 8
     or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 3
@@ -6889,7 +6890,8 @@ w_epoch_fetch:
     or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 2
-    lsli r0, 16
+    lsli r0, 8
+    lsli r0, 8
     or r1, r0
     addi r11, 1
     ld.b r0, r11                        ; byte 3
