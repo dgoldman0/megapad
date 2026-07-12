@@ -4,7 +4,7 @@
 //
 //  Handles all Timer MMIO (0x0100–0x010F) in C++ so that tight
 //  busy-wait loops polling Timer.STATUS never cross the pybind11
-//  boundary.  This is the last high-traffic Python MMIO device.
+//  boundary.
 //
 //  Register map (offsets from TIMER_BASE = 0x0100):
 //    0x00–0x03  COUNT    (R)   32-bit free-running counter (LE)

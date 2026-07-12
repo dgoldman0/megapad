@@ -2436,6 +2436,213 @@ class RTC(Device):
             if self.ctrl & 2:
                 self.irq_pending = True
 
+
+class CppRTCProxy(Device):
+    """Thin proxy for the C++ RTC used by :class:`MegapadSystem`.
+
+    ``RTC`` above intentionally remains the readable reference model and is
+    still used by its unit tests.  The proxy preserves that model's Python
+    attribute surface while normal guest MMIO stays inside the C++ batch loop.
+    """
+
+    CLOCK_HZ = RTC.CLOCK_HZ
+    MS_DIVISOR = RTC.MS_DIVISOR
+
+    def __init__(self, cs, *, realtime: bool = False):
+        super().__init__("RTC", RTC_BASE, 0x20)
+        self._cs = cs
+        reference = RTC(realtime=realtime)
+        cs.rtc_init(
+            reference.realtime,
+            reference.epoch_ms,
+            reference.sec,
+            reference.min,
+            reference.hour,
+            reference.day,
+            reference.mon,
+            reference.year,
+            reference.dow,
+        )
+
+    @property
+    def clock_mode(self) -> str:
+        return "realtime" if self.realtime else "virtual"
+
+    @property
+    def realtime(self) -> bool:
+        return self._cs.rtc_realtime
+
+    @realtime.setter
+    def realtime(self, value: bool):
+        self._cs.rtc_realtime = bool(value)
+
+    @property
+    def uptime_ms(self) -> int:
+        return self._cs.rtc_uptime_ms
+
+    @uptime_ms.setter
+    def uptime_ms(self, value: int):
+        self._cs.rtc_uptime_ms = value
+
+    @property
+    def epoch_ms(self) -> int:
+        return self._cs.rtc_epoch_ms
+
+    @epoch_ms.setter
+    def epoch_ms(self, value: int):
+        self._cs.rtc_epoch_ms = value
+
+    @property
+    def sec(self) -> int:
+        return self._cs.rtc_sec
+
+    @sec.setter
+    def sec(self, value: int):
+        self._cs.rtc_sec = value
+
+    @property
+    def min(self) -> int:
+        return self._cs.rtc_min
+
+    @min.setter
+    def min(self, value: int):
+        self._cs.rtc_min = value
+
+    @property
+    def hour(self) -> int:
+        return self._cs.rtc_hour
+
+    @hour.setter
+    def hour(self, value: int):
+        self._cs.rtc_hour = value
+
+    @property
+    def day(self) -> int:
+        return self._cs.rtc_day
+
+    @day.setter
+    def day(self, value: int):
+        self._cs.rtc_day = value
+
+    @property
+    def mon(self) -> int:
+        return self._cs.rtc_mon
+
+    @mon.setter
+    def mon(self, value: int):
+        self._cs.rtc_mon = value
+
+    @property
+    def year(self) -> int:
+        return self._cs.rtc_year
+
+    @year.setter
+    def year(self, value: int):
+        self._cs.rtc_year = value
+
+    @property
+    def dow(self) -> int:
+        return self._cs.rtc_dow
+
+    @dow.setter
+    def dow(self, value: int):
+        self._cs.rtc_dow = value
+
+    @property
+    def ctrl(self) -> int:
+        return self._cs.rtc_ctrl
+
+    @ctrl.setter
+    def ctrl(self, value: int):
+        self._cs.rtc_ctrl = value
+
+    @property
+    def status(self) -> int:
+        return self._cs.rtc_status
+
+    @status.setter
+    def status(self, value: int):
+        self._cs.rtc_status = value
+
+    @property
+    def alarm_sec(self) -> int:
+        return self._cs.rtc_alarm_sec
+
+    @alarm_sec.setter
+    def alarm_sec(self, value: int):
+        self._cs.rtc_alarm_sec = value
+
+    @property
+    def alarm_min(self) -> int:
+        return self._cs.rtc_alarm_min
+
+    @alarm_min.setter
+    def alarm_min(self, value: int):
+        self._cs.rtc_alarm_min = value
+
+    @property
+    def alarm_hour(self) -> int:
+        return self._cs.rtc_alarm_hour
+
+    @alarm_hour.setter
+    def alarm_hour(self, value: int):
+        self._cs.rtc_alarm_hour = value
+
+    @property
+    def irq_pending(self) -> bool:
+        return self._cs.rtc_irq_pending
+
+    @irq_pending.setter
+    def irq_pending(self, value: bool):
+        self._cs.rtc_irq_pending = bool(value)
+
+    @property
+    def _ms_prescaler(self) -> int:
+        return self._cs.rtc_ms_prescaler
+
+    @_ms_prescaler.setter
+    def _ms_prescaler(self, value: int):
+        self._cs.rtc_ms_prescaler = value
+
+    @property
+    def _sec_prescaler(self) -> int:
+        return self._cs.rtc_sec_prescaler
+
+    @_sec_prescaler.setter
+    def _sec_prescaler(self, value: int):
+        self._cs.rtc_sec_prescaler = value
+
+    @property
+    def _uptime_latch(self) -> int:
+        return self._cs.rtc_uptime_latch
+
+    @_uptime_latch.setter
+    def _uptime_latch(self, value: int):
+        self._cs.rtc_uptime_latch = value
+
+    @property
+    def _epoch_latch(self) -> int:
+        return self._cs.rtc_epoch_latch
+
+    @_epoch_latch.setter
+    def _epoch_latch(self, value: int):
+        self._cs.rtc_epoch_latch = value
+
+    def _reanchor_host_clock(self):
+        self._cs.rtc_reanchor_host_clock()
+
+    def _sync_realtime(self):
+        self._cs.rtc_sync_realtime()
+
+    def read8(self, offset: int) -> int:
+        return self._cs.rtc_read8(RTC_BASE + offset)
+
+    def write8(self, offset: int, value: int):
+        self._cs.rtc_write8(RTC_BASE + offset, value & 0xFF)
+
+    def tick(self, cycles: int):
+        self._cs.rtc_tick(cycles)
+
 # ---------------------------------------------------------------------------
 #  Port I/O Bridge CSR — remap table for OUT/INP → MMIO routing
 # ---------------------------------------------------------------------------

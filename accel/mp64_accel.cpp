@@ -21,6 +21,7 @@
 #include "mp64_crypto.h"
 #include "mp64_fb.h"
 #include "mp64_nic.h"
+#include "mp64_rtc.h"
 #include "mp64_timer.h"
 #include "mp64_uart_geom.h"
 #include "mp64_uart.h"
@@ -219,6 +220,9 @@ struct CPUState {
 
     // C++ native timer device (bypass Python MMIO for timer polling)
     TimerDevice timer;
+
+    // C++ native RTC device (bypass Python MMIO for MS@/EPOCH@ polling)
+    RTCDevice rtc;
 
     // C++ native UART geometry device (terminal dimensions)
     UartGeomDevice uart_geom;
@@ -1714,6 +1718,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.fb.read8(mmio_off);
         if (s.timer.handles(mmio_off))
             return s.timer.read8(mmio_off);
+        if (s.rtc.handles(mmio_off))
+            return s.rtc.read8(mmio_off);
         if (s.uart_geom.handles(mmio_off))
             return s.uart_geom.read8(mmio_off);
         return cb.mmio_read8(addr);  // fallback to Python for other devices
@@ -1763,6 +1769,10 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         }
         if (s.timer.handles(mmio_off)) {
             s.timer.write8(mmio_off, val);
+            return;
+        }
+        if (s.rtc.handles(mmio_off)) {
+            s.rtc.write8(mmio_off, val);
             return;
         }
         if (s.uart_geom.handles(mmio_off)) {
@@ -1827,6 +1837,12 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.timer.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (s.rtc.handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.rtc.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
@@ -1883,6 +1899,11 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
+        if (s.rtc.handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -1916,6 +1937,8 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
             return s.fb.read8(mmio_off) | ((uint16_t)s.fb.read8(mmio_off+1) << 8);
         if (s.timer.handles(mmio_off))
             return s.timer.read8(mmio_off) | ((uint16_t)s.timer.read8(mmio_off+1) << 8);
+        if (s.rtc.handles(mmio_off))
+            return s.rtc.read8(mmio_off) | ((uint16_t)s.rtc.read8(mmio_off+1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
@@ -1957,6 +1980,11 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.timer.handles(mmio_off)) {
             s.timer.write8(mmio_off, val & 0xFF);
             s.timer.write8(mmio_off+1, (val >> 8) & 0xFF);
+            return;
+        }
+        if (s.rtc.handles(mmio_off)) {
+            s.rtc.write8(mmio_off, val & 0xFF);
+            s.rtc.write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
         cb.mmio_write8(addr, val & 0xFF);
@@ -2004,6 +2032,12 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.timer.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (s.rtc.handles(mmio_off)) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.rtc.read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint32_t v = 0;
         for (int i = 0; i < 4; i++)
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
@@ -2048,6 +2082,11 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.timer.handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (s.rtc.handles(mmio_off)) {
+            for (int i = 0; i < 4; i++)
+                s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         for (int i = 0; i < 4; i++)
@@ -4270,6 +4309,94 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("timer_status",
             [](const CPUState& s) -> uint8_t { return s.timer.status; },
             [](CPUState& s, uint8_t v) { s.timer.status = v; })
+        // ── RTC device ───────────────────────────────────────────
+        .def("rtc_init", [](CPUState& s, bool realtime,
+                             uint64_t epoch_ms, uint8_t sec,
+                             uint8_t min, uint8_t hour, uint8_t day,
+                             uint8_t mon, uint32_t year, uint8_t dow) {
+            s.rtc.init(realtime, epoch_ms, sec, min, hour, day, mon, year, dow);
+        })
+        .def("rtc_enabled", [](const CPUState& s) -> bool {
+            return s.rtc.enabled;
+        })
+        .def("rtc_disable", [](CPUState& s) {
+            s.rtc.enabled = false;
+        })
+        .def("rtc_tick", [](CPUState& s, uint64_t cycles) {
+            s.rtc.tick(cycles);
+        })
+        .def("rtc_sync_realtime", [](CPUState& s) {
+            s.rtc.sync_realtime();
+        })
+        .def("rtc_reanchor_host_clock", [](CPUState& s) {
+            s.rtc.reanchor_host_clock();
+        })
+        .def("rtc_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.rtc.read8(mmio_off);
+        })
+        .def("rtc_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            s.rtc.write8(mmio_off, val);
+        })
+        .def_property("rtc_realtime",
+            [](const CPUState& s) -> bool { return s.rtc.realtime; },
+            [](CPUState& s, bool v) { s.rtc.realtime = v; })
+        .def_property("rtc_uptime_ms",
+            [](const CPUState& s) -> uint64_t { return s.rtc.uptime_ms; },
+            [](CPUState& s, uint64_t v) { s.rtc.uptime_ms = v; })
+        .def_property("rtc_epoch_ms",
+            [](const CPUState& s) -> uint64_t { return s.rtc.epoch_ms; },
+            [](CPUState& s, uint64_t v) { s.rtc.epoch_ms = v; })
+        .def_property("rtc_sec",
+            [](const CPUState& s) -> uint8_t { return s.rtc.sec; },
+            [](CPUState& s, uint8_t v) { s.rtc.sec = v; })
+        .def_property("rtc_min",
+            [](const CPUState& s) -> uint8_t { return s.rtc.min; },
+            [](CPUState& s, uint8_t v) { s.rtc.min = v; })
+        .def_property("rtc_hour",
+            [](const CPUState& s) -> uint8_t { return s.rtc.hour; },
+            [](CPUState& s, uint8_t v) { s.rtc.hour = v; })
+        .def_property("rtc_day",
+            [](const CPUState& s) -> uint8_t { return s.rtc.day; },
+            [](CPUState& s, uint8_t v) { s.rtc.day = v; })
+        .def_property("rtc_mon",
+            [](const CPUState& s) -> uint8_t { return s.rtc.mon; },
+            [](CPUState& s, uint8_t v) { s.rtc.mon = v; })
+        .def_property("rtc_year",
+            [](const CPUState& s) -> uint32_t { return s.rtc.year; },
+            [](CPUState& s, uint32_t v) { s.rtc.year = v; })
+        .def_property("rtc_dow",
+            [](const CPUState& s) -> uint8_t { return s.rtc.dow; },
+            [](CPUState& s, uint8_t v) { s.rtc.dow = v; })
+        .def_property("rtc_ctrl",
+            [](const CPUState& s) -> uint8_t { return s.rtc.ctrl; },
+            [](CPUState& s, uint8_t v) { s.rtc.ctrl = v; })
+        .def_property("rtc_status",
+            [](const CPUState& s) -> uint8_t { return s.rtc.status; },
+            [](CPUState& s, uint8_t v) { s.rtc.status = v; })
+        .def_property("rtc_alarm_sec",
+            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_sec; },
+            [](CPUState& s, uint8_t v) { s.rtc.alarm_sec = v; })
+        .def_property("rtc_alarm_min",
+            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_min; },
+            [](CPUState& s, uint8_t v) { s.rtc.alarm_min = v; })
+        .def_property("rtc_alarm_hour",
+            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_hour; },
+            [](CPUState& s, uint8_t v) { s.rtc.alarm_hour = v; })
+        .def_property("rtc_irq_pending",
+            [](const CPUState& s) -> bool { return s.rtc.irq_pending; },
+            [](CPUState& s, bool v) { s.rtc.irq_pending = v; })
+        .def_property("rtc_ms_prescaler",
+            [](const CPUState& s) -> uint64_t { return s.rtc.ms_prescaler; },
+            [](CPUState& s, uint64_t v) { s.rtc.ms_prescaler = v; })
+        .def_property("rtc_sec_prescaler",
+            [](const CPUState& s) -> uint64_t { return s.rtc.sec_prescaler; },
+            [](CPUState& s, uint64_t v) { s.rtc.sec_prescaler = v; })
+        .def_property("rtc_uptime_latch",
+            [](const CPUState& s) -> uint64_t { return s.rtc.uptime_latch; },
+            [](CPUState& s, uint64_t v) { s.rtc.uptime_latch = v; })
+        .def_property("rtc_epoch_latch",
+            [](const CPUState& s) -> uint64_t { return s.rtc.epoch_latch; },
+            [](CPUState& s, uint64_t v) { s.rtc.epoch_latch = v; })
         // ── UART Geometry device ──────────────────────────────
         .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {
             s.uart_geom.init(cols, rows);

@@ -17,6 +17,7 @@ ext = Extension(
     depends=[
         "accel/mp64_crypto.h",
         "accel/mp64_nic.h",
+        "accel/mp64_rtc.h",
         "accel/mp64_uart.h",
     ],
     include_dirs=[pybind11.get_include()],

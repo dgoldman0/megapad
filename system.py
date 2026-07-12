@@ -27,7 +27,8 @@ from megapad64 import (
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
-    FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy, RTC,
+    FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
+    CppRTCProxy,
     MailboxDevice, SpinlockDevice,
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
@@ -368,7 +369,12 @@ class MegapadSystem:
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
         self.fb = CppFramebufferProxy(self.cores[0]._cs)
-        self.rtc = RTC(realtime=realtime_clock)
+        # RTC MMIO is native on core 0; the proxy preserves the Python-facing
+        # state API and services fallback accesses from secondary/micro cores.
+        self.rtc = CppRTCProxy(
+            self.cores[0]._cs,
+            realtime=realtime_clock,
+        )
 
         # Determine initial terminal dimensions:
         # - If no display, use the host terminal size (fallback 80x24)
@@ -387,7 +393,7 @@ class MegapadSystem:
             initial_rows=_init_rows,
         )
 
-        # AES, SHA3, NIC, TRNG, and FB are all handled natively by the
+        # AES, SHA3, NIC, TRNG, FB, Timer, and RTC are handled natively by the
         # C++ accelerator — no Python device instances needed.  NIC MMIO
         # (0x0400) does ~15K–35K accesses per TLS handshake; keeping it
         # in C++ is critical for HTTPS perf.  The Python NetworkDevice
@@ -463,6 +469,9 @@ class MegapadSystem:
                 cs.uart_init()
             else:
                 cs.uart_disable()
+                # There is one physical RTC. Secondary cores fall through to
+                # the shared core-0 proxy instead of owning divergent clocks.
+                cs.rtc_disable()
             cs.uart_geom_init(_init_cols, _init_rows)  # UART geometry on all cores
 
         # Wire backend RX → C++ NIC queue
