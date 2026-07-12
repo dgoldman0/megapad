@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -66,6 +67,75 @@ def test_shared_machine_wakes_idle_cpu_for_timer_irq():
         machine.stop()
 
 
+def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
+    with MachineSession.from_bios(BIOS) as session:
+        machine = SharedMachine(session)
+        calls = []
+
+        def diagnostics(cpu):
+            calls.append(cpu)
+            return {"sentinel": True}
+
+        monkeypatch.setattr(machine, "_forth_diagnostics", diagnostics)
+
+        lightweight = machine.status(detailed=False)
+        assert calls == []
+        assert lightweight["protocol"] >= 1
+        assert "state" in lightweight
+        assert "steps" in lightweight
+        assert "revision" in lightweight
+        assert "forth" not in lightweight
+        assert "cpu" not in lightweight
+        assert "nic" not in lightweight
+
+        detailed = machine.status()
+        assert calls == [session.system.cpu]
+        assert detailed["forth"] == {"sentinel": True}
+        assert "cpu" in detailed
+        assert "nic" in detailed
+
+
+def test_screen_encodes_snapshot_outside_machine_lock(monkeypatch):
+    with MachineSession.from_bios(BIOS, cols=40, rows=12) as session:
+        machine = SharedMachine(session)
+        conversion_started = threading.Event()
+        allow_conversion = threading.Event()
+        original = snapshot_to_wire
+
+        def blocking_conversion(snapshot):
+            conversion_started.set()
+            assert allow_conversion.wait(timeout=2.0)
+            return original(snapshot)
+
+        monkeypatch.setattr(
+            "shared_session.snapshot_to_wire",
+            blocking_conversion,
+        )
+        result = []
+        failure = []
+
+        def request_screen():
+            try:
+                result.append(machine.screen(since=-1))
+            except BaseException as exc:  # propagate worker failures below
+                failure.append(exc)
+
+        worker = threading.Thread(target=request_screen)
+        worker.start()
+        assert conversion_started.wait(timeout=2.0)
+        acquired = machine.lock.acquire(timeout=0.5)
+        if acquired:
+            machine.lock.release()
+        allow_conversion.set()
+        worker.join(timeout=2.0)
+
+        assert acquired, "screen RLE conversion held the machine lock"
+        assert not worker.is_alive()
+        assert failure == []
+        assert result[0]["changed"]
+        assert snapshot_from_wire(result[0]["snapshot"]).cols == 40
+
+
 def test_shared_server_clients_control_one_machine(tmp_path):
     socket_path = tmp_path / "shared.sock"
     session = MachineSession.from_bios(BIOS, cols=60, rows=20)
@@ -93,6 +163,11 @@ def test_shared_server_clients_control_one_machine(tmp_path):
             assert status["cpu"]["cycles"] >= 0
             assert len(status["cpu"]["registers"]) == 32
             assert "return_words" in status["forth"]
+            lightweight = viewer.request("status", detailed=False)
+            assert lightweight["clients"] == 2
+            assert lightweight["state"] == "idle"
+            assert "forth" not in lightweight
+            assert "cpu" not in lightweight
             network = controller.request("network")
             assert network["backend"] == "loopback"
             assert network["guest_rx_queued"] == 0

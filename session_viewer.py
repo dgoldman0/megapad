@@ -79,7 +79,7 @@ def main() -> int:
     screen = make_window()
     pygame.display.set_caption(args.title)
     clock = pygame.time.Clock()
-    status = client.request("status")
+    status = client.request("status", detailed=False)
     last_poll = 0.0
     last_status = 0.0
     connected = True
@@ -103,7 +103,7 @@ def main() -> int:
                     if ctrl and event.key == pygame.K_q:
                         running = False
                     elif ctrl and event.key == pygame.K_F5:
-                        status = client.request("status")
+                        status = client.request("status", detailed=False)
                         method = "resume" if status["paused"] else "pause"
                         status = client.request(method)
                     elif ctrl and event.key == pygame.K_F10:
@@ -131,7 +131,7 @@ def main() -> int:
                         screen = make_window()
                 last_poll = now
             if now - last_status >= 0.25:
-                status = client.request("status")
+                status = client.request("status", detailed=False)
                 last_status = now
 
             screen.fill((0, 0, 0))

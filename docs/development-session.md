@@ -103,6 +103,10 @@ the server.
 
 `status` includes all CPU registers, RTC mode and values, NIC counters, the
 current Forth word and BIOS primitive, and bounded data/return-stack snapshots.
+Protocol clients that only need progress can send `{"detailed": false}` with
+the `status` request. That compact response omits CPU, Forth, RTC, and NIC
+diagnostics; the live viewer uses it for its periodic status-bar refresh so it
+does not repeatedly walk the guest dictionary.
 `network` reports guest and backend counters and the backend's bounded trace.
 `forth` resolves named dictionary entries and CREATE data fields; `peek` reads
 one through 256 consecutive 64-bit cells. These diagnostics are read-only and

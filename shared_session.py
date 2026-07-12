@@ -315,11 +315,17 @@ class SharedMachine:
                 ],
             }
 
-    def status(self) -> dict:
+    def status(self, *, detailed: bool = True) -> dict:
+        """Return machine status.
+
+        Detailed status remains the default for control and diagnostic
+        clients.  High-frequency observers such as the session viewer can
+        opt out of CPU/Forth/network diagnostics, most notably avoiding a
+        complete Forth dictionary walk while holding the machine lock.
+        """
         with self.lock:
             system = self.session.system
             cpu = system.cpu
-            backend = system.nic.backend
             if self.last_error:
                 state = "error"
             elif self.paused:
@@ -330,7 +336,7 @@ class SharedMachine:
                 state = "idle"
             else:
                 state = "running"
-            return {
+            result = {
                 "protocol": PROTOCOL_VERSION,
                 "state": state,
                 "paused": self.paused,
@@ -344,29 +350,40 @@ class SharedMachine:
                 "byte_callbacks": self.session.output_byte_callbacks,
                 "terminal": [self.session.terminal.cols, self.session.terminal.rows],
                 "uptime_s": time.time() - self.started_at,
-                "cpu": {
-                    "pc": cpu.pc,
-                    "cycles": cpu.cycle_count,
-                    "registers": [int(value) for value in cpu.regs],
-                    "psel": cpu.psel,
-                    "xsel": cpu.xsel,
-                    "spsel": cpu.spsel,
-                },
-                "forth": self._forth_diagnostics(cpu),
-                "clock": {
-                    "mode": system.rtc.clock_mode,
-                    "uptime_ms": system.rtc.uptime_ms,
-                    "epoch_ms": system.rtc.epoch_ms,
-                },
-                "nic": {
-                    "backend": system.nic.backend_name,
-                    "link_up": system.nic.link_up,
-                    "tx_frames": getattr(backend, "tx_frames", system.nic.tx_count),
-                    "rx_frames": getattr(backend, "rx_frames", 0),
-                    "rx_queued": cpu._cs.nic_rx_queue_size(),
-                },
                 "error": self.last_error,
             }
+            if not detailed:
+                return result
+
+            backend = system.nic.backend
+            result.update(
+                {
+                    "cpu": {
+                        "pc": cpu.pc,
+                        "cycles": cpu.cycle_count,
+                        "registers": [int(value) for value in cpu.regs],
+                        "psel": cpu.psel,
+                        "xsel": cpu.xsel,
+                        "spsel": cpu.spsel,
+                    },
+                    "forth": self._forth_diagnostics(cpu),
+                    "clock": {
+                        "mode": system.rtc.clock_mode,
+                        "uptime_ms": system.rtc.uptime_ms,
+                        "epoch_ms": system.rtc.epoch_ms,
+                    },
+                    "nic": {
+                        "backend": system.nic.backend_name,
+                        "link_up": system.nic.link_up,
+                        "tx_frames": getattr(
+                            backend, "tx_frames", system.nic.tx_count
+                        ),
+                        "rx_frames": getattr(backend, "rx_frames", 0),
+                        "rx_queued": cpu._cs.nic_rx_queue_size(),
+                    },
+                }
+            )
+            return result
 
     def network(self) -> dict:
         with self.lock:
@@ -453,11 +470,16 @@ class SharedMachine:
             revision = self.session.revision
             if int(since) == revision:
                 return {"changed": False, "revision": revision}
-            return {
-                "changed": True,
-                "revision": revision,
-                "snapshot": snapshot_to_wire(self.session.snapshot()),
-            }
+            snapshot = self.session.snapshot()
+
+        # TerminalSnapshot is immutable.  Keep the machine lock only for the
+        # coherent revision+snapshot capture; RLE and RGB packing can proceed
+        # while the emulator continues running.
+        return {
+            "changed": True,
+            "revision": revision,
+            "snapshot": snapshot_to_wire(snapshot),
+        }
 
     def text(self, trim_right: bool = True) -> dict:
         with self.lock:
@@ -602,7 +624,10 @@ class SessionServer:
         if method == "ping":
             return {"protocol": PROTOCOL_VERSION, "time": time.time()}
         if method == "status":
-            result = self.machine.status()
+            detailed = params.get("detailed", True)
+            if not isinstance(detailed, bool):
+                raise ValueError("status detailed must be a boolean")
+            result = self.machine.status(detailed=detailed)
             with self._clients_lock:
                 result["clients"] = len(self._clients)
             return result
