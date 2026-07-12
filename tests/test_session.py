@@ -202,6 +202,36 @@ def test_machine_session_owns_injected_nic_backend():
     assert not backend.link_up
 
 
+def test_machine_session_close_persists_attached_storage(tmp_path):
+    image = tmp_path / "session.img"
+    image.write_bytes(bytes(1024))
+    system = MegapadSystem(ram_size=64 * 1024, storage_image=str(image))
+
+    with MachineSession(system):
+        system.storage.write_sectors(0, 1, b"A" * 512)
+
+    assert image.read_bytes()[:512] == b"A" * 512
+
+
+def test_machine_session_close_releases_devices_when_save_fails(monkeypatch):
+    backend = LoopbackBackend()
+    session = MachineSession.from_bios(BIOS, nic_backend=backend)
+
+    def fail_save():
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(session.system.storage, "save_image", fail_save)
+    try:
+        session.close()
+    except OSError as exc:
+        assert str(exc) == "storage unavailable"
+    else:
+        raise AssertionError("storage failure should remain visible")
+
+    assert session._closed
+    assert not backend.link_up
+
+
 def test_session_server_rejects_unavailable_tap(monkeypatch):
     monkeypatch.setattr(
         "sys.argv", ["session_server.py", "--nic-tap", "missing-tap"]

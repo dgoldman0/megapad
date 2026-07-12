@@ -15720,7 +15720,7 @@ class TestKDOSTLSRecord(_KDOSTestBase):
             '." SZ=" /TLS-CTX .',
         ])
         self.assertIn("S=0 ", text)        # TLSS-NONE
-        self.assertIn("SZ=592 ", text)
+        self.assertIn("SZ=608 ", text)
 
     def test_tls_status_display(self):
         """.TLS-STATUS prints human-readable state."""
@@ -16105,7 +16105,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
     def test_ctx_size_updated(self):
         """TLS context includes an explicit peer-authentication gate."""
         text = self._run_kdos(['." SZ=" /TLS-CTX .'])
-        self.assertIn("SZ=592 ", text)
+        self.assertIn("SZ=608 ", text)
 
     def test_label_strings_correct(self):
         """TLS label constants contain correct ASCII bytes."""
@@ -17215,8 +17215,7 @@ class TestKDOSTLSAppData(_KDOSTestBase):
 
     def test_tls_send_data_preserves_sequence_under_tcp_backpressure(self):
         """A pending TCP record must defer TLS encryption and sequence use."""
-        lines = self._TLS_ESTAB_SETUP + [
-            "TCP-INIT-ALL",
+        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
             "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
             "100 0 TCB-N TCB.SND-UNA !",
             "105 0 TCB-N TCB.SND-NXT !",
@@ -17261,6 +17260,39 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("CT=23 ", text)      # APP_DATA
         self.assertIn("D0=72 ", text)      # 'H'
+
+    def test_tls_recv_data_retains_plaintext_beyond_caller_slice(self):
+        """A small caller buffer must not discard the rest of a TLS record."""
+        lines = self._TLS_ESTAB_SETUP + [
+            ": init-long-pt 10 0 DO 65 I + TLS-PLAIN-BUF I + C! LOOP ;",
+            "init-long-pt",
+            "CREATE slice-a 4 ALLOT CREATE slice-b 4 ALLOT",
+            "CREATE slice-c 4 ALLOT",
+            'test-ctx @ slice-a 4 10 _TLS-APP-DELIVER ." A=" .',
+            'test-ctx @ TLS-CTX.APP-LEN @ ." P1=" .',
+            'slice-a C@ ." A0=" . slice-a 3 + C@ ." A3=" .',
+            'test-ctx @ slice-b 4 TLS-RECV-DATA ." B=" .',
+            'test-ctx @ TLS-CTX.APP-LEN @ ." P2=" .',
+            'slice-b C@ ." B0=" . slice-b 3 + C@ ." B3=" .',
+            'test-ctx @ slice-c 4 TLS-RECV-DATA ." C=" .',
+            'test-ctx @ TLS-CTX.APP-LEN @ ." P3=" .',
+            'test-ctx @ TLS-CTX.APP-OFF @ ." OFF=" .',
+            'slice-c C@ ." C0=" . slice-c 1+ C@ ." C1=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("A=4 ", text)
+        self.assertIn("P1=6 ", text)
+        self.assertIn("A0=65 ", text)
+        self.assertIn("A3=68 ", text)
+        self.assertIn("B=4 ", text)
+        self.assertIn("P2=2 ", text)
+        self.assertIn("B0=69 ", text)
+        self.assertIn("B3=72 ", text)
+        self.assertIn("C=2 ", text)
+        self.assertIn("P3=0 ", text)
+        self.assertIn("OFF=0 ", text)
+        self.assertIn("C0=73 ", text)
+        self.assertIn("C1=74 ", text)
 
     def test_tls_close_state(self):
         """TLS-CLOSE transitions to CLOSING state."""
@@ -18251,6 +18283,29 @@ class TestKDOSNetStack(_KDOSTestBase):
         ], nic_frames=[reply_frame])
         self.assertIn("resolved", text)
         self.assertIn("170 ", text)  # 0xAA = first byte of other_mac
+
+    def test_arp_resolve_ignores_noisy_link_before_reply(self):
+        """Unrelated queued frames must not exhaust the ARP reply window."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        other_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02]
+        noisy_mac = [0x5A, 0xD0, 0x8F, 0x81, 0xD3, 0x16]
+        my_ip = [192, 168, 1, 100]
+        target_ip = [192, 168, 1, 1]
+        noise = self._build_arp_request_frame(
+            noisy_mac, [192, 168, 1, 2], [192, 168, 1, 200])
+        reply = self._build_arp_reply_frame(
+            other_mac, target_ip, nic_mac, my_ip)
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE noisy-trg 4 ALLOT",
+            "192 noisy-trg C! 168 noisy-trg 1+ C!",
+            "1 noisy-trg 2 + C! 1 noisy-trg 3 + C!",
+            'noisy-trg ARP-RESOLVE 0<> ."  noisy-resolved"',
+            "noisy-trg ARP-LOOKUP C@ .",
+        ], nic_frames=[noise] * 12 + [reply])
+        self.assertIn("noisy-resolved", text)
+        self.assertIn("170 ", text)
 
     def test_arp_resolve_miss_no_reply(self):
         """ARP-RESOLVE should return 0 when no reply arrives."""
@@ -25033,6 +25088,23 @@ class TestKDOSExtMem(_KDOSTestBase):
         ])
         self.assertIn('done', text)
         self.assertNotIn('XMEM-FREE:', text)  # no abort message
+
+    def test_xmem_free_list_splits_large_block_for_smaller_requests(self):
+        """Small reuse preserves the remainder of a reclaimed XMEM block."""
+        text = self._run_kdos([
+            'VARIABLE XM-BIG VARIABLE XM-MARK',
+            '65536 XMEM-ALLOT? DROP DUP XM-BIG ! DROP',
+            'XMEM-HERE @ XM-MARK !',
+            'XM-BIG @ 65536 XMEM-FREE-BLOCK',
+            '." [A=" 64 XMEM-ALLOT? DROP XM-BIG @ = .',
+            '." B=" 64000 XMEM-ALLOT? DROP XM-BIG @ 64 + = .',
+            '." C=" XMEM-HERE @ XM-MARK @ = . ." ]"',
+        ])
+        for marker in ('[A=-1', 'B=-1', 'C=-1'):
+            self.assertIn(
+                marker, text,
+                f"Reclaimed block was not split and reused: {text}",
+            )
 
 
 # =====================================================================

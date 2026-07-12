@@ -141,7 +141,10 @@ XMEM also has a **free-list** for individual block reclaim.  When an
 arena backed by XMEM is destroyed, its backing block is returned to
 the XMEM free-list via `XMEM-FREE-BLOCK`.  Subsequent `XMEM-ALLOT`
 calls check the free-list (first-fit) before falling back to the bump
-pointer.  `XMEM-RESET` clears the free-list along with the pointer.
+pointer.  First-fit reuse splits larger blocks when the remainder can
+hold another free-list node, so small requests do not consume an entire
+large reclaimed allocation.  `XMEM-RESET` clears the free-list along
+with the pointer.
 
 **Floor protection:** `XMEM-FLOOR` marks the boundary between
 kernel-reserved XMEM allocations (file buffers loaded at boot) and

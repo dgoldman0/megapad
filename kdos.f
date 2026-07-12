@@ -1681,6 +1681,7 @@ VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
 VARIABLE XMEM-FL     0 XMEM-FL !    \ free-list head (0 = empty)
 VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
+VARIABLE FL-NEED                     \ requested bytes during first-fit
 
 \ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
 \   Validates that addr falls within [EXT-MEM-BASE, XMEM-LIMIT),
@@ -1693,26 +1694,39 @@ VARIABLE FL-CURR                     \ search scratch
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
     XMEM-FL ! ;                       \ head = addr
 
+\ _XMEM-FL-REPLACE ( replacement -- )
+\   Replace FL-CURR in the free-list with replacement (or unlink it when 0).
+: _XMEM-FL-REPLACE  ( replacement -- )
+    FL-PREV @ 0= IF
+        XMEM-FL !
+    ELSE
+        FL-PREV @ 8 + !
+    THEN ;
+
 \ (XMEM-FL-FIND) ( u -- addr true | false )
-\   First-fit search of the XMEM free-list.
-\   On success, unlinks the block and returns its address.
+\   First-fit search of the XMEM free-list.  A larger reclaimed block is
+\   split so a small allocation cannot strand the unused tail.
 : (XMEM-FL-FIND)  ( u -- addr true | false )
+    FL-NEED !
     0 FL-PREV !   XMEM-FL @ FL-CURR !
     BEGIN FL-CURR @ WHILE
-        FL-CURR @ @  OVER >= IF           \ curr.size >= u ?
-            \ unlink: prev.next = curr.next
-            FL-CURR @ 8 + @               ( u next )
-            FL-PREV @ 0= IF
-                XMEM-FL !                  ( u ; head = next )
+        FL-CURR @ @ FL-NEED @ >= IF       \ curr.size >= need ?
+            FL-CURR @ @ FL-NEED @ -
+            DUP 16 >= IF
+                \ Keep the aligned tail as a recyclable free block.
+                FL-CURR @ FL-NEED @ +
+                SWAP OVER !
+                FL-CURR @ 8 + @ OVER 8 + !
+                _XMEM-FL-REPLACE
             ELSE
-                FL-PREV @ 8 + !            ( u ; prev.next = next )
+                DROP FL-CURR @ 8 + @ _XMEM-FL-REPLACE
             THEN
-            DROP FL-CURR @ TRUE EXIT
+            FL-CURR @ TRUE EXIT
         THEN
         FL-CURR @ FL-PREV !
         FL-CURR @ 8 + @ FL-CURR !
     REPEAT
-    DROP FALSE ;
+    FALSE ;
 
 \ XMEM? ( -- flag )  true if external memory hardware reports non-zero size
 : XMEM?  ( -- flag )
@@ -7727,6 +7741,8 @@ CREATE ARP-PKT-BUF  /ARP-PKT ALLOT   \ 28-byte scratch for building ARP
     ARP-F.TPA MY-IP IP= ;
 
 VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
+VARIABLE _ARP-RES-IDLE  \ consecutive empty receive windows
+VARIABLE _ARP-RES-SEEN  \ unrelated frames consumed while waiting
 \ -- ARP-RESOLVE: resolve IP to MAC, sending request if needed --
 \ ( ip-addr -- mac-addr | 0 )
 \ First checks table; if miss, sends request & waits for reply.
@@ -7737,24 +7753,33 @@ VARIABLE _ARP-RES-IP    \ saved target IP for ARP-RESOLVE
     DROP                      \ drop the 0
     DUP _ARP-RES-IP !         \ save IP
     ARP-SEND-REQUEST           \ broadcast request (consumes ip)
-    \ Wait for ARP reply (up to 10 receive attempts)
-    10 0 DO
+    \ Bound both quiet waits and noisy-link work.  Received broadcast
+    \ traffic must not consume the whole reply window before our reply.
+    0 _ARP-RES-IDLE !
+    0 _ARP-RES-SEEN !
+    BEGIN
         3 ETH-RECV-WAIT           \ ( len ) — ETH-RECV uses ETH-RX-BUF internally
         DUP 0 > IF
+            0 _ARP-RES-IDLE !
+            1 _ARP-RES-SEEN +!
             ETH-RX-BUF ETH-IS-ARP? IF
                 ETH-RX-BUF ETH-PLD ARP-IS-REPLY? IF
                     ETH-RX-BUF ETH-PLD ARP-PARSE-REPLY
                     _ARP-RES-IP @ ARP-LOOKUP
                     DUP 0<> IF
                         SWAP DROP   \ drop recv len under mac
-                        UNLOOP EXIT
+                        EXIT
                     THEN
                     DROP   \ drop 0 from failed lookup
                 THEN
             THEN
+        ELSE
+            1 _ARP-RES-IDLE +!
         THEN
         DROP   \ drop recv len
-    LOOP
+        _ARP-RES-IDLE @ 10 >=
+        _ARP-RES-SEEN @ 64 >= OR
+    UNTIL
     0 ;        \ timeout — no reply
 
 \ -- 10c: ARP auto-responder --
@@ -11801,9 +11826,11 @@ VARIABLE _TPC-KEEP
 \  +568    ALPN-PROFILE   8     Requested application protocol profile
 \  +576    ALPN-NEGOTIATED 8    Confirmed application protocol profile
 \  +584    HELLO-PROFILE  8     Standard or private hybrid wire profile
-\  Total: 592 bytes
+\  +592    APP-OFF        8     Offset of unread decrypted application data
+\  +600    APP-LEN        8     Bytes of unread decrypted application data
+\  Total: 608 bytes
 
-592 CONSTANT /TLS-CTX
+608 CONSTANT /TLS-CTX
 16 VALUE TLS-MAX-CTX              \ set by NET-TABLES-INIT
 
 : TLS-CTX.STATE       ( ctx -- addr )       ;  \ +0
@@ -11833,6 +11860,8 @@ VARIABLE _TPC-KEEP
 : TLS-CTX.ALPN-PROFILE ( ctx -- addr ) 568 + ;
 : TLS-CTX.ALPN-NEGOTIATED ( ctx -- addr ) 576 + ;
 : TLS-CTX.HELLO-PROFILE ( ctx -- addr ) 584 + ;
+: TLS-CTX.APP-OFF     ( ctx -- addr ) 592 + ;
+: TLS-CTX.APP-LEN     ( ctx -- addr ) 600 + ;
 
 \ -- TLS context table (dynamic, XMEM-backed) --
 VARIABLE TLS-CTXS   0 TLS-CTXS !
@@ -12974,6 +13003,27 @@ VARIABLE _TRD-CTX
 VARIABLE _TRD-DST
 VARIABLE _TRD-MAXLEN
 VARIABLE _TRD-RLEN
+VARIABLE _TRD-COPY
+
+VARIABLE _TAD-CTX
+VARIABLE _TAD-DST
+VARIABLE _TAD-MAXLEN
+VARIABLE _TAD-PLEN
+VARIABLE _TAD-COPY
+
+: _TLS-APP-DELIVER  ( ctx dst maxlen plaintext-len -- actual )
+    _TAD-PLEN ! _TAD-MAXLEN ! _TAD-DST ! _TAD-CTX !
+    _TAD-MAXLEN @ 0> 0= _TAD-PLEN @ 0> 0= OR IF 0 EXIT THEN
+    _TAD-PLEN @ _TAD-MAXLEN @ MIN _TAD-COPY !
+    _TAD-PLEN @ _TAD-COPY @ > IF
+        _TAD-COPY @ _TAD-CTX @ TLS-CTX.APP-OFF !
+        _TAD-PLEN @ _TAD-COPY @ - _TAD-CTX @ TLS-CTX.APP-LEN !
+    ELSE
+        0 _TAD-CTX @ TLS-CTX.APP-OFF !
+        0 _TAD-CTX @ TLS-CTX.APP-LEN !
+    THEN
+    TLS-PLAIN-BUF _TAD-DST @ _TAD-COPY @ CMOVE
+    _TAD-COPY @ ;
 
 VARIABLE _TPA-CTX
 VARIABLE _TPA-DATA
@@ -13004,6 +13054,20 @@ VARIABLE _TPA-LEN
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
     _TRD-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF 0 EXIT THEN
     _TRD-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF 0 EXIT THEN
+    _TRD-MAXLEN @ 0> 0= IF 0 EXIT THEN
+    \ A decrypted record may be larger than the caller's receive slice.
+    \ Drain its retained plaintext before reading or decrypting another record.
+    _TRD-CTX @ TLS-CTX.APP-LEN @ 0> IF
+        _TRD-CTX @ TLS-CTX.APP-LEN @ _TRD-MAXLEN @ MIN _TRD-COPY !
+        TLS-PLAIN-BUF _TRD-CTX @ TLS-CTX.APP-OFF @ +
+        _TRD-DST @ _TRD-COPY @ CMOVE
+        _TRD-COPY @ _TRD-CTX @ TLS-CTX.APP-OFF +!
+        _TRD-COPY @ NEGATE _TRD-CTX @ TLS-CTX.APP-LEN +!
+        _TRD-CTX @ TLS-CTX.APP-LEN @ 0= IF
+            0 _TRD-CTX @ TLS-CTX.APP-OFF !
+        THEN
+        _TRD-COPY @ EXIT
+    THEN
     \ Non-blocking record read — caller polls via TCP-POLL NET-IDLE
     _TRD-CTX @ TLS-CTX.TCB @  TLS-READ-RECORD-NB
     DUP 0= IF
@@ -13032,10 +13096,8 @@ VARIABLE _TPA-LEN
         TLSS-CLOSING _TRD-CTX @ TLS-CTX.STATE ! -1 EXIT
     THEN
     SWAP DROP
-    \ Copy min(plen, maxlen) to destination
-    _TRD-MAXLEN @ MIN
-    TLS-PLAIN-BUF _TRD-DST @ ROT DUP >R CMOVE
-    R>
+    \ Copy one caller-sized slice and retain any remainder for later calls.
+    >R _TRD-CTX @ _TRD-DST @ _TRD-MAXLEN @ R> _TLS-APP-DELIVER
 ;
 
 \ --- TLS-SEND-ALERT ---

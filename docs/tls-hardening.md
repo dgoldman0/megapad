@@ -184,6 +184,12 @@ retry neither overwrites pending ciphertext nor advances the record sequence.
 This is deliberate backpressure for the present bounded stack, not a claim of
 multi-segment TCP throughput.
 
+Application receive preserves decrypted record data across caller-sized reads.
+If a TLS record exceeds the destination slice, the context records an offset
+and remaining length into the shared plaintext buffer and drains that data
+before decrypting another record. A small HTTP receive scratch buffer therefore
+cannot silently truncate large response bodies.
+
 `MS@` and `EPOCH@` reconstruct all eight RTC bytes. Immediate ISA shifts are
 four bits wide, so a 16-bit byte-position shift must be emitted as two 8-bit
 shifts. Regressions use nonzero data in every byte; a previous single encoded
@@ -235,6 +241,7 @@ Native guest tests cover:
 - standard-only and explicit private-hybrid ClientHello wire layouts;
 - immediate established/readable TCP waits and record-fill completion;
 - TCP/TLS send backpressure without retransmission-buffer or sequence loss;
+- multi-read delivery of application records larger than the caller buffer;
 - full-width `MS@` and `EPOCH@` reconstruction across byte boundaries;
 - handshake reassembly across arbitrary protected-record boundaries;
 - legacy record version, size-class, and compatibility CCS validation;
