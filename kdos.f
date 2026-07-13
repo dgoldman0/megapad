@@ -41,7 +41,10 @@ JIT-ON
 \ =====================================================================
 \  Note: BIOS v1.0 provides all ANS core words including OFF, >=, <=,
 \  W@, W!, L@, L!, .ZSTR, UCHAR, 2OVER, 2SWAP, 2ROT, TALIGN, MOVE,
-\  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, FIND, SOURCE, >IN, >NUMBER,
+\  COMPARE, ABORT, ABORT", LEAVE, EVALUATE, EVALUATE-CHECKED,
+\  EVALUATE-FINISH, EVALUATOR-RESET, EVALUATOR-UNWIND, EVAL-STATUS,
+\  EVAL-LINE, EVAL-COLUMN, EVAL-DEPTH, EVAL-THROW, EVAL-TOKEN,
+\  FIND, SOURCE, >IN, >NUMBER,
 \  VALUE, TO, DOES>, POSTPONE, RECURSE, COUNT, WITHIN, U<, U>, 2/,
 \  CHAR, [CHAR], 2>R, 2R>, 2R@, QUIT, plus the v0.5 set.
 
@@ -4170,6 +4173,92 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
             DROP TRUE                    \ done
         THEN
     UNTIL ;
+
+\ ── Checked source compiler ─────────────────────────────────────────
+\
+\ SOURCE-EVALUATE-CHECKED is the transaction-friendly compiler surface
+\ used by hosted tools such as Akashic Pad.  It walks a complete buffer,
+\ evaluates one physical line at a time, stops at the first error, and
+\ then checks that no colon definition or cross-line conditional remains
+\ unfinished.  Callers own dictionary rollback (HERE/LATEST); after that
+\ rollback they must call EVALUATOR-RESET to clear compiler bookkeeping.
+
+0 CONSTANT EVAL-S-OK
+1 CONSTANT EVAL-S-UNDEFINED
+2 CONSTANT EVAL-S-LINE-TOO-LONG
+3 CONSTANT EVAL-S-DEPTH
+4 CONSTANT EVAL-S-UNFINISHED
+5 CONSTANT EVAL-S-THROW
+
+\ BIOS supplies the primitive EVALUATE-CHECKED before KDOS has an exception
+\ handler.  From this point onward KDOS deliberately shadows that dictionary
+\ entry with the same public name.  The wrapper owns CATCH/HANDLER semantics;
+\ BIOS owns complete input-frame restoration through EVALUATOR-UNWIND.
+\
+\ CATCH restores the input addr/len beneath its throw code.  On a caught
+\ source exception, consume those restored arguments, retain the exact code in
+\ EVAL-THROW, reconstruct every abandoned nested input frame, and return
+\ status 5 normally.  Normal source data-stack effects remain untouched.
+: EVALUATE-CHECKED  ( addr len -- status )
+    EVAL-DEPTH @ >R
+    ['] EVALUATE CATCH
+    DUP IF
+        EVAL-THROW ! 2DROP
+        R@ EVALUATOR-UNWIND
+        EVAL-S-THROW DUP EVAL-STATUS !
+        R> DROP EXIT
+    THEN
+    DROP R> DROP EVAL-STATUS @ ;
+
+VARIABLE _SEC-CUR
+VARIABLE _SEC-REM
+VARIABLE _SEC-RAW-LEN
+VARIABLE _SEC-EVAL-LEN
+VARIABLE _SEC-LINE
+
+\ _SEC-MEASURE ( -- )  Measure the next LF-delimited physical line.
+\ _SEC-RAW-LEN includes a trailing CR; _SEC-EVAL-LEN does not.
+: _SEC-MEASURE  ( -- )
+    _SEC-REM @ 0
+    BEGIN
+        DUP 2 PICK < IF
+            _SEC-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
+        ELSE TRUE THEN
+    UNTIL
+    NIP DUP _SEC-RAW-LEN ! _SEC-EVAL-LEN !
+    _SEC-EVAL-LEN @ 0> IF
+        _SEC-CUR @ _SEC-EVAL-LEN @ 1- + C@ 13 = IF
+            -1 _SEC-EVAL-LEN +!
+        THEN
+    THEN ;
+
+\ _SEC-ADVANCE ( -- )  Consume the measured line and an LF, if present.
+: _SEC-ADVANCE  ( -- )
+    _SEC-RAW-LEN @ DUP _SEC-CUR +! NEGATE _SEC-REM +!
+    _SEC-REM @ 0> IF
+        1 _SEC-CUR +!  -1 _SEC-REM +!
+    THEN ;
+
+\ SOURCE-EVALUATE-CHECKED ( addr len -- status )
+\
+\ Lines are numbered from 1 and columns from 0.  EVAL-LINE,
+\ EVAL-COLUMN, and EVAL-TOKEN retain the first failing location/token.
+\ As with EVALUATE, source-level data-stack effects are preserved.
+: SOURCE-EVALUATE-CHECKED  ( addr len -- status )
+    _SEC-REM ! _SEC-CUR !
+    0 _SEC-LINE !
+    BEGIN _SEC-REM @ 0> WHILE
+        1 _SEC-LINE +!
+        _SEC-LINE @ EVAL-LINE !
+        _SEC-MEASURE
+        _SEC-EVAL-LEN @ 0> IF
+            _SEC-CUR @ _SEC-EVAL-LEN @ EVALUATE-CHECKED
+            DUP EVAL-S-OK <> IF EXIT THEN DROP
+        THEN
+        _SEC-ADVANCE
+    REPEAT
+    _SEC-LINE @ EVAL-LINE !
+    EVALUATE-FINISH ;
 
 \ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
 \   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept

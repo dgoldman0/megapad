@@ -443,6 +443,8 @@ interp_undef_no_restore:
     ldi r1, 0
     ldi64 r11, var_state
     str r11, r1
+    ldi64 r11, var_compile_active
+    str r11, r1
     ; Reset interpret-mode IF depth (recover from unfinished temp blocks)
     ldi64 r11, var_interp_if_depth
     str r11, r1
@@ -3867,6 +3869,8 @@ w_colon_name_done:
     ldi r1, 1
     ldi64 r11, var_state
     str r11, r1
+    ldi64 r11, var_compile_active
+    str r11, r1
     ret.l
 
 w_colon_err:
@@ -3905,6 +3909,8 @@ w_semi_quot_ok:
     ; STATE = 0 (interpreting)
     ldi r1, 0
     ldi64 r11, var_state
+    str r11, r1
+    ldi64 r11, var_compile_active
     str r11, r1
     ; Reset JIT peephole state so the next definition starts clean.
     ldi64 r11, var_jit_last_type
@@ -3945,6 +3951,8 @@ w_colonnoname_ok:
     ; Set STATE = 1 (compiling)
     ldi r1, 1
     ldi64 r11, var_state
+    str r11, r1
+    ldi64 r11, var_compile_active
     str r11, r1
     ; Set noname flag
     ldi64 r11, var_noname_flag
@@ -6658,6 +6666,9 @@ w_fsload_line_loop:
     ldn r1, r11
     inc r1
     str r11, r1
+    ; Mirror the one-based source line into checked-evaluator context.
+    ldi64 r11, var_eval_line
+    str r11, r1
 
     ; Load state from RSP
     ldn r9, r15               ; cur_ptr
@@ -7787,8 +7798,168 @@ w_to_in:
     str r14, r1
     ret.l
 
-; EVALUATE ( addr len -- ) interpret a string as Forth source
+; EVALUATE status codes shared by the checked evaluator surface:
+;   0 = success
+;   1 = undefined token
+;   2 = input line exceeds the 255-byte TIB limit
+;   3 = evaluator nesting depth exceeded
+;   4 = unfinished compiler state (reported by EVALUATE-FINISH)
+;   5 = source-level THROW caught by the KDOS checked wrapper
+;
+; Save one caller input frame.  var_eval_depth has already been incremented,
+; so depth-1 is the frame index.  The complete 256-byte TIB is copied because
+; nested EVALUATE reuses tib_buffer and may overwrite bytes beyond the active
+; caller length before returning.
+eval_input_save:
+    subi r15, 8
+    str r15, r9               ; preserve source address
+    subi r15, 8
+    str r15, r12              ; preserve source length
+
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    dec r1                    ; zero-based frame index
+    mov r0, r1
+    lsli r0, 3                ; metadata byte offset
+
+    ldi64 r11, var_to_in
+    ldn r12, r11
+    ldi64 r11, eval_saved_to_in
+    add r11, r0
+    str r11, r12
+
+    ldi64 r11, var_tib_len
+    ldn r12, r11
+    ldi64 r11, eval_saved_tib_len
+    add r11, r0
+    str r11, r12
+
+    mov r13, r1
+    lsli r13, 8               ; frame index * 256
+    ldi64 r7, eval_saved_tib
+    add r7, r13               ; destination frame
+    ldi64 r9, tib_buffer      ; current caller TIB
+    ldi r1, 0
+    ldi64 r10, 256
+eval_input_save_loop:
+    cmp r1, r10
+    breq eval_input_save_done
+    ld.b r0, r9
+    st.b r7, r0
+    inc r9
+    inc r7
+    inc r1
+    br eval_input_save_loop
+eval_input_save_done:
+    ldn r12, r15
+    addi r15, 8
+    ldn r9, r15
+    addi r15, 8
+    ret.l
+
+; Restore and remove the innermost active input frame.  This is shared by the
+; normal EVALUATE return path and EVALUATOR-UNWIND after KDOS catches a THROW.
+eval_input_restore_one:
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    lbreq eval_input_restore_done
+    dec r1                    ; zero-based frame index
+
+    mov r13, r1
+    lsli r13, 8
+    ldi64 r9, eval_saved_tib
+    add r9, r13               ; saved caller TIB
+    ldi64 r7, tib_buffer      ; live TIB
+    ldi r1, 0
+    ldi64 r10, 256
+eval_input_restore_loop:
+    cmp r1, r10
+    breq eval_input_restore_meta
+    ld.b r0, r9
+    st.b r7, r0
+    inc r9
+    inc r7
+    inc r1
+    br eval_input_restore_loop
+
+eval_input_restore_meta:
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    dec r1                    ; recover frame index
+    mov r0, r1
+    lsli r0, 3
+
+    ldi64 r11, eval_saved_tib_len
+    add r11, r0
+    ldn r12, r11
+    ldi64 r11, var_tib_len
+    str r11, r12
+
+    ldi64 r11, eval_saved_to_in
+    add r11, r0
+    ldn r12, r11
+    ldi64 r11, var_to_in
+    str r11, r12
+
+    ldi64 r11, var_eval_depth
+    str r11, r1               ; depth := depth - 1
+eval_input_restore_done:
+    ret.l
+;
+; EVALUATOR-UNWIND ( depth -- )
+; Restore complete abandoned EVALUATE input frames down to a caller-owned
+; checkpoint.  Negative checkpoints and values above active depth are ignored.
+w_evaluator_unwind:
+    ldn r12, r14
+    addi r14, 8
+    cmpi r12, 0
+    lbrmi w_evaluator_unwind_done
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmp r12, r1
+    lbrgt w_evaluator_unwind_done
+    subi r15, 8
+    str r15, r12              ; keep target below helper call frames
+w_evaluator_unwind_loop:
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    ldn r12, r15
+    cmp r1, r12
+    breq w_evaluator_unwind_pop
+    ldi64 r11, eval_input_restore_one
+    call.l r11
+    lbr w_evaluator_unwind_loop
+w_evaluator_unwind_pop:
+    addi r15, 8
+w_evaluator_unwind_done:
+    ret.l
+;
+; EVALUATE ( addr len -- ) interpret a string as Forth source.
+; The legacy stack contract is retained.  Errors are also recorded in
+; EVAL-STATUS and the diagnostic fields, but no status cell is returned.
 w_evaluate:
+    ; A top-level call starts a fresh status.  Nested calls share the
+    ; outer call's status so the first failure remains sticky.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_status_ready
+    ldi64 r11, eval_diag_clear
+    call.l r11
+w_eval_status_ready:
+    ; Do not run another nested string after an earlier nested failure.
+    ldi64 r11, var_eval_depth
+    ldn r1, r11
+    cmpi r1, 0
+    breq w_eval_check_depth
+    ldi64 r11, var_eval_status
+    ldn r1, r11
+    cmpi r1, 0
+    breq w_eval_check_depth
+    addi r14, 16              ; drop addr len, preserve first status
+    ret.l
+w_eval_check_depth:
     ; Check nesting depth limit (max 16)
     ldi64 r11, var_eval_depth
     ldn r1, r11
@@ -7801,20 +7972,17 @@ w_evaluate:
     addi r14, 8
     ldn r9, r14               ; addr
     addi r14, 8
-    ; Save current input state on return stack
-    ldi64 r11, var_to_in
-    ldn r1, r11
-    subi r15, 8
-    str r15, r1               ; save >IN
-    ldi64 r11, var_tib_len
-    ldn r1, r11
-    subi r15, 8
-    str r15, r1               ; save TIB len
-    ; Copy source string into TIB (max 255 chars)
-    cmpi r12, 255
-    brle w_eval_len_ok
-    ldi r12, 255
-w_eval_len_ok:
+    ; The TIB has room for at most 255 source bytes plus its terminator.
+    ; Reject overlong input outright: truncating here can compile a valid
+    ; prefix while silently discarding the rest of a definition.
+    ldi r1, 255
+    cmp r12, r1
+    lbrgt w_eval_len_err
+    ; Preserve the caller's complete input context outside RSP.  A later
+    ; source-level THROW may unwind the CPU stacks before w_eval_done runs.
+    ldi64 r11, eval_input_save
+    call.l r11
+    ; Copy source string into TIB (length was checked above).
     ldi64 r7, tib_buffer
     ldi r1, 0
 w_eval_copy:
@@ -7880,6 +8048,12 @@ w_eval_exec:
     ldi64 r11, entry_to_code
     call.l r11
     call.l r9
+    ; A word may invoke EVALUATE recursively.  Stop this source line as
+    ; soon as that nested evaluation records an error.
+    ldi64 r11, var_eval_status
+    ldn r1, r11
+    cmpi r1, 0
+    lbrne w_eval_done
     lbr w_eval_loop
 w_eval_try_num:
     ldi64 r11, var_word_addr
@@ -7904,6 +8078,13 @@ w_eval_push_num:
     str r14, r1
     lbr w_eval_loop
 w_eval_undef:
+    ; Record a stable token copy and its zero-based TIB column before
+    ; printing.  The caller may safely inspect it after TIB restoration.
+    ldi r1, 1
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi64 r11, eval_diag_capture_token
+    call.l r11
     ; Check if inside FSLOAD (var_fsload_line > 0)
     ldi64 r11, var_fsload_line
     ldn r11, r11
@@ -8007,28 +8188,222 @@ w_eval_cr_not_else:
     lbr w_eval_loop_normal     ; resume normal interpretation
 
 w_eval_done:
-    ; Restore input state from return stack
-    ldn r1, r15
-    addi r15, 8
-    ldi64 r11, var_tib_len
+    ; Restore caller TIB bytes, length, >IN, and evaluator depth together.
+    ldi64 r11, eval_input_restore_one
+    call.l r11
+    ret.l
+
+w_eval_len_err:
+    ; Length failure occurs after depth increment but before input-state
+    ; save, so only the evaluator depth needs unwinding here.
+    ldi r1, 2
+    ldi64 r11, var_eval_status
     str r11, r1
-    ldn r1, r15
-    addi r15, 8
-    ldi64 r11, var_to_in
+    ldi r1, 0
+    ldi64 r11, var_eval_column
     str r11, r1
-    ; Decrement EVALUATE depth
+    ldi64 r11, var_eval_token_len
+    str r11, r1
     ldi64 r11, var_eval_depth
     ldn r1, r11
     dec r1
     str r11, r1
+    ldi64 r10, str_eval_length
+    ldi64 r11, print_str
+    call.l r11
     ret.l
 
 w_eval_depth_err:
     ; Depth limit exceeded — drop args and print error
     addi r14, 16              ; drop addr len
+    ldi r1, 3
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi r1, 0
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_eval_token_len
+    str r11, r1
     ldi64 r10, str_eval_depth
     ldi64 r11, print_str
     call.l r11
+    ret.l
+
+; Clear per-operation status and token/column/throw diagnostics.  The line field
+; is caller-owned context: SOURCE-EVALUATE-CHECKED and FSLOAD set it before
+; each line, and it intentionally survives until the next caller changes it.
+eval_diag_clear:
+    ldi r1, 0
+    ldi64 r11, var_eval_status
+    str r11, r1
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_eval_token_len
+    str r11, r1
+    ldi64 r11, var_eval_throw
+    str r11, r1
+    ret.l
+
+; Capture var_word_addr/var_word_len in the stable diagnostic buffer.
+; Token lengths cannot exceed 255 because EVALUATE rejects longer lines.
+eval_diag_capture_token:
+    ldi64 r11, var_word_addr
+    ldn r9, r11
+    ldi64 r11, tib_buffer
+    mov r1, r9
+    sub r1, r11
+    ldi64 r11, var_eval_column
+    str r11, r1
+    ldi64 r11, var_word_len
+    ldn r12, r11
+    ldi64 r11, var_eval_token_len
+    str r11, r12
+    ldi64 r7, eval_token_buffer
+    ldi r1, 0
+eval_diag_token_copy:
+    cmp r1, r12
+    breq eval_diag_token_done
+    mov r11, r9
+    add r11, r1
+    ld.b r0, r11
+    mov r11, r7
+    add r11, r1
+    st.b r11, r0
+    inc r1
+    br eval_diag_token_copy
+eval_diag_token_done:
+    ret.l
+
+; EVALUATE-CHECKED ( addr len -- status )
+; Checked wrapper around the legacy evaluator.  Source stack effects are
+; preserved and the status cell is pushed after evaluation returns.
+w_evaluate_checked:
+    ldi64 r11, w_evaluate
+    call.l r11
+    ldi64 r11, var_eval_status
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; EVALUATE-FINISH ( -- status )
+; Finalize a multi-line checked compilation.  STATE and the evaluator's
+; cross-line control bookkeeping must all be idle at end-of-source.
+w_evaluate_finish:
+    ldi64 r11, eval_diag_clear
+    call.l r11
+    ldi64 r11, var_compile_active
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi64 r11, var_state
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi64 r11, var_interp_if_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi64 r11, var_cond_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi64 r11, var_cond_skip_type
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi64 r11, var_quot_depth
+    ldn r1, r11
+    cmpi r1, 0
+    brne w_eval_finish_unfinished
+    ldi r1, 0
+    br w_eval_finish_push
+w_eval_finish_unfinished:
+    ldi r1, 4
+    ldi64 r11, var_eval_status
+    str r11, r1
+w_eval_finish_push:
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; EVALUATOR-RESET ( -- )
+; Reset interpreter/compiler bookkeeping after the caller has rolled HERE
+; and LATEST back to its transaction checkpoint.  The active EVALUATE depth
+; belongs to the caller and is deliberately preserved: hosted tools commonly
+; run inside a long-lived outer EVALUATE (for example DESK-RUN from autoexec).
+; Diagnostics are retained so an error can still be presented after rollback.
+w_evaluator_reset:
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1
+    ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, var_fsload_line
+    str r11, r1
+    ldi64 r11, var_interp_if_depth
+    str r11, r1
+    ldi64 r11, var_interp_if_start
+    str r11, r1
+    ldi64 r11, var_cond_depth
+    str r11, r1
+    ldi64 r11, var_cond_skip_type
+    str r11, r1
+    ldi64 r11, var_noname_flag
+    str r11, r1
+    ldi64 r11, var_noname_xt
+    str r11, r1
+    ldi64 r11, var_quot_depth
+    str r11, r1
+    ldi64 r11, var_leave_count
+    str r11, r1
+    ldi64 r11, var_jit_last_type
+    str r11, r1
+    ldi64 r11, var_jit_last_value
+    str r11, r1
+    ldi64 r11, var_jit_last_here
+    str r11, r1
+    ret.l
+
+; Checked-evaluator diagnostic accessors.
+w_eval_status:
+    ldi64 r1, var_eval_status
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_eval_line:
+    ldi64 r1, var_eval_line
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_eval_column:
+    ldi64 r1, var_eval_column
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_eval_depth:
+    ldi64 r1, var_eval_depth
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_eval_throw:
+    ldi64 r1, var_eval_throw
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+w_eval_token:
+    ldi64 r1, eval_token_buffer
+    subi r14, 8
+    str r14, r1
+    ldi64 r11, var_eval_token_len
+    ldn r1, r11
+    subi r14, 8
+    str r14, r1
     ret.l
 
 ; COMPARE ( addr1 u1 addr2 u2 -- n ) compare two strings
@@ -14410,9 +14785,99 @@ d_evaluate:
     call.l r11
     ret.l
 
+; === EVALUATE-CHECKED ===
+d_evaluate_checked:
+    .dq d_evaluate
+    .db 16
+    .ascii "EVALUATE-CHECKED"
+    ldi64 r11, w_evaluate_checked
+    call.l r11
+    ret.l
+
+; === EVALUATE-FINISH ===
+d_evaluate_finish:
+    .dq d_evaluate_checked
+    .db 15
+    .ascii "EVALUATE-FINISH"
+    ldi64 r11, w_evaluate_finish
+    call.l r11
+    ret.l
+
+; === EVALUATOR-RESET ===
+d_evaluator_reset:
+    .dq d_evaluate_finish
+    .db 15
+    .ascii "EVALUATOR-RESET"
+    ldi64 r11, w_evaluator_reset
+    call.l r11
+    ret.l
+
+; === EVALUATOR-UNWIND ===
+d_evaluator_unwind:
+    .dq d_evaluator_reset
+    .db 16
+    .ascii "EVALUATOR-UNWIND"
+    ldi64 r11, w_evaluator_unwind
+    call.l r11
+    ret.l
+
+; === EVAL-STATUS ===
+d_eval_status:
+    .dq d_evaluator_unwind
+    .db 11
+    .ascii "EVAL-STATUS"
+    ldi64 r11, w_eval_status
+    call.l r11
+    ret.l
+
+; === EVAL-LINE ===
+d_eval_line:
+    .dq d_eval_status
+    .db 9
+    .ascii "EVAL-LINE"
+    ldi64 r11, w_eval_line
+    call.l r11
+    ret.l
+
+; === EVAL-COLUMN ===
+d_eval_column:
+    .dq d_eval_line
+    .db 11
+    .ascii "EVAL-COLUMN"
+    ldi64 r11, w_eval_column
+    call.l r11
+    ret.l
+
+; === EVAL-DEPTH ===
+d_eval_depth:
+    .dq d_eval_column
+    .db 10
+    .ascii "EVAL-DEPTH"
+    ldi64 r11, w_eval_depth
+    call.l r11
+    ret.l
+
+; === EVAL-THROW ===
+d_eval_throw:
+    .dq d_eval_depth
+    .db 10
+    .ascii "EVAL-THROW"
+    ldi64 r11, w_eval_throw
+    call.l r11
+    ret.l
+
+; === EVAL-TOKEN ===
+d_eval_token:
+    .dq d_eval_throw
+    .db 10
+    .ascii "EVAL-TOKEN"
+    ldi64 r11, w_eval_token
+    call.l r11
+    ret.l
+
 ; === COMPARE ===
 d_compare:
-    .dq d_evaluate
+    .dq d_eval_token
     .db 7
     .ascii "COMPARE"
     ldi64 r11, w_compare
@@ -16290,6 +16755,21 @@ var_word_addr:
 var_word_len:
     .dq 0
 
+; Checked EVALUATE result and source diagnostics.  EVAL-LINE is one-based
+; caller context; EVAL-COLUMN is a zero-based byte offset in the line.
+var_eval_status:
+    .dq 0
+var_eval_line:
+    .dq 0
+var_eval_column:
+    .dq 0
+var_eval_token_len:
+    .dq 0
+var_eval_throw:
+    .dq 0                         ; source-level THROW caught by KDOS wrapper
+var_compile_active:
+    .dq 0                         ; inside : or :NONAME, even while [ is active
+
 ; FSLOAD line tracking — used for error context
 var_fsload_line:
     .dq 0
@@ -16297,6 +16777,17 @@ var_fsload_line:
 ; EVALUATE nesting depth — prevents unbounded RSP growth
 var_eval_depth:
     .dq 0
+
+; Each active EVALUATE frame owns a complete copy of its caller's input
+; context.  These arrays are indexed by the frame's zero-based depth.  They
+; live outside the CPU stacks so KDOS CATCH/THROW can unwind RSP and still ask
+; EVALUATOR-UNWIND to reconstruct every abandoned input frame exactly.
+eval_saved_to_in:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+eval_saved_tib_len:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
 
 ; Interpret-mode IF support — temporary compilation
 var_interp_if_depth:
@@ -16471,6 +16962,8 @@ str_rstack_overflow:
     .asciiz "Return stack overflow\n"
 str_eval_depth:
     .asciiz "EVALUATE depth limit exceeded\n"
+str_eval_length:
+    .asciiz "EVALUATE input exceeds 255 bytes\n"
 str_dict_full:
     .asciiz "Dictionary full\n"
 str_dict_overflow:
@@ -16582,6 +17075,52 @@ tib_buffer:
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
     .db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+
+; =====================================================================
+;  Nested EVALUATE caller TIB frames — 16 complete 256-byte snapshots
+; =====================================================================
+eval_saved_tib:
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+; =====================================================================
+;  Checked EVALUATE token diagnostic — stable across TIB restoration
+; =====================================================================
+eval_token_buffer:
+    .dq 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0
+    .dq 0,0,0,0,0,0,0,0
 
 ; =====================================================================
 ;  sha_blk_buf — 64-byte block buffer for SHA-256 ISA engine (TSRC0 target)

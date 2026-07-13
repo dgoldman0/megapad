@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **435** entries.  The numbered
+The live dictionary link chain contains **445** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -50,12 +50,45 @@ Each entry is a linked list node:
 
 ## EVALUATE Implementation
 
-`w_evaluate ( addr len -- )`:
-1. Saves current `>IN` and `var_tib_len` on return stack.
-2. Copies the source string into TIB (max 255 chars).
-3. Sets `>IN` = 0, `var_tib_len` = len.
-4. Runs a full interpreter loop (identical logic to QUIT's `interp_loop`): parse → find → execute/compile, or parse number, or print `" ?"`.
-5. On completion, restores saved `>IN` and `var_tib_len` from return stack.
+`w_evaluate ( addr len -- )` retains its legacy stack effect, while the
+checked wrapper `EVALUATE-CHECKED ( addr len -- status )` returns the same
+operation's status:
+
+1. Rejects source longer than 255 bytes before copying or executing any
+   prefix.  Legacy `EVALUATE` prints the error and records status 2 rather
+   than silently truncating.
+2. Saves the caller's complete 256-byte TIB, `>IN`, and `var_tib_len` in
+   the static frame indexed by evaluator depth.  This context survives a
+   return-stack exception unwind.
+3. Copies the source string into TIB, sets `>IN` = 0, and sets
+   `var_tib_len` = len.
+4. Runs the interpreter loop.  The first undefined token is copied to a
+   stable diagnostic buffer, its zero-based column is recorded, and the
+   rest of that input line is not executed.
+5. Restores the caller's TIB bytes, `>IN`, and `var_tib_len`, then removes
+   the depth frame.  Nested evaluator failure is sticky and propagates to
+   the outer checked call.
+
+Status values are: 0 success, 1 undefined token, 2 line too long, 3 nesting
+depth exceeded, 4 unfinished compiler state, and 5 a source-level `THROW`
+caught by KDOS.  The BIOS `EVALUATE-CHECKED` primitive returns 0–3 because it
+exists before KDOS's exception system.  After defining `CATCH`, KDOS
+deliberately shadows that public name with a wrapper which checkpoints depth,
+catches `THROW`, invokes `EVALUATOR-UNWIND`, records the exception in
+`EVAL-THROW`, and returns 5 normally.  `EVALUATE-FINISH` performs the
+end-of-source check that reports status 4.
+
+`EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`, and `EVAL-THROW`
+return variable addresses.  `EVALUATOR-UNWIND` restores complete abandoned
+input frames to a captured depth; negative and above-current checkpoints are
+ignored.  `EVAL-TOKEN` returns the stable `( addr len )` token copy.  Lines
+are one-based when supplied by the caller and columns are zero-based.
+
+After a transactional compiler caller restores `HERE` and `LATEST`, it must
+call `EVALUATOR-RESET`.  The reset clears `STATE`, cross-line conditionals,
+quotation/noname, LEAVE, and JIT peephole bookkeeping.  It does not perform
+dictionary rollback, disturb an enclosing evaluator frame, or erase the last
+status and diagnostics.
 
 ---
 
@@ -298,13 +331,23 @@ Each entry is a linked list node:
 | 139 | `2R>` | `( -- x1 x2 )` `R:( x1 x2 -- )` | ✓ | Compile inline: pop pair from return stack (20 bytes) |
 | 140 | `2R@` | `( -- x1 x2 )` `R:( x1 x2 -- x1 x2 )` | ✓ | Compile inline: copy pair from return stack (19 bytes) |
 
-### Input Source & Interpreter (5 words)
+### Input Source & Interpreter (15 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 141 | `SOURCE` | `( -- addr len )` | | Push TIB address and current TIB length |
 | 142 | `>IN` | `( -- addr )` | | Push address of `>IN` variable (parse offset into TIB) |
-| 143 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source (saves/restores TIB state on RSP) |
+| 143 | `EVALUATE` | `( addr len -- )` | | Interpret string as Forth source; nested calls restore complete caller input context and errors are recorded without returning a status cell |
+| — | `EVALUATE-CHECKED` | `( addr len -- status )` | | BIOS returns 0–3; the later KDOS shadow also catches source `THROW` and returns 5 |
+| — | `EVALUATE-FINISH` | `( -- status )` | | Return 4 if compiler/cross-line evaluator state is unfinished, otherwise 0 |
+| — | `EVALUATOR-RESET` | `( -- )` | | Clear compiler bookkeeping after caller-owned HERE/LATEST rollback; retain diagnostics and enclosing evaluator depth |
+| — | `EVALUATOR-UNWIND` | `( depth -- )` | | Restore complete abandoned evaluator input frames down to a valid captured depth |
+| — | `EVAL-STATUS` | `( -- addr )` | | Address of the last evaluator status cell |
+| — | `EVAL-LINE` | `( -- addr )` | | Address of one-based source-line context/diagnostic cell |
+| — | `EVAL-COLUMN` | `( -- addr )` | | Address of zero-based failing-token column cell |
+| — | `EVAL-DEPTH` | `( -- addr )` | | Address of active evaluator nesting cell for transaction checkpoints |
+| — | `EVAL-THROW` | `( -- addr )` | | Address of exact source exception code retained for status 5 |
+| — | `EVAL-TOKEN` | `( -- addr len )` | | Stable copy of the failing token; empty for non-token failures |
 | 144 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | | Convert string chars to number using BASE. Stops at first non-digit. ud treated as single 64-bit value |
 | 145 | `QUIT` | `( -- )` | | Reset return stack, enter outer interpreter loop (does not return) |
 
@@ -740,7 +783,10 @@ PERF-RESET → PERF-EXTMEM → PERF-TILEOPS → PERF-STALLS → PERF-CYCLES →
 CORE-STATUS → WAKE-CORE → SPIN! → SPIN@ → MBOX@ → MBOX! → IPI-ACK →
 IPI-STATUS → IPI-SEND → NCORES → COREID →
 FSLOAD → QUIT → >NUMBER → DOES> → 2R@ → 2R> → 2>R → POSTPONE → TO →
-VALUE → RECURSE → [CHAR] → CHAR → COMPARE → EVALUATE → >IN → SOURCE →
+VALUE → RECURSE → [CHAR] → CHAR → COMPARE → EVAL-TOKEN → EVAL-THROW →
+EVAL-DEPTH → EVAL-COLUMN → EVAL-LINE → EVAL-STATUS → EVALUATOR-UNWIND →
+EVALUATOR-RESET → EVALUATE-FINISH →
+EVALUATE-CHECKED → EVALUATE → >IN → SOURCE →
 FIND → WITHIN → MOVE → COUNT → 2/ → LEAVE → ABORT" → ABORT → TALIGN →
 UCHAR → .ZSTR → L! → L@ → W! → W@ → OFF → U> → U< → <= → >= → 2ROT →
 2SWAP → 2OVER → LATEST → WORD → FALSE → TRUE → BL → -ROT → CMOVE →

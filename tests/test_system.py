@@ -8476,6 +8476,79 @@ class TestBIOSHardening(unittest.TestCase):
         ], max_steps=5_000_000)
         self.assertIn("depth limit", text)
 
+    def test_evaluate_checked_undefined_stops_and_reports(self):
+        """Checked EVALUATE returns status 1 and stable token diagnostics."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE EHIT  0 EHIT !",
+            '17 EVAL-LINE ! S" 0 DROP NO_SUCH 1 EHIT !" '
+            'EVALUATE-CHECKED CR ." [ECHK " . '
+            'EVAL-LINE @ . EVAL-COLUMN @ . EVAL-TOKEN TYPE '
+            '."  " EHIT @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[ECHK\s+1\s+17\s+7\s+NO_SUCH\s+0\s+\]")
+
+    def test_evaluate_overlong_rejected_without_prefix_execution(self):
+        """Legacy and checked EVALUATE reject >255 bytes without truncation."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE LHIT  0 LHIT !",
+            'HERE 256 32 FILL S" 1 LHIT !" HERE SWAP CMOVE',
+            'HERE 256 EVALUATE CR ." [ELONG-LEGACY " '
+            'EVAL-STATUS @ . LHIT @ . ." ]"',
+            'HERE 256 EVALUATE-CHECKED CR ." [ELONG-CHECKED " '
+            '. LHIT @ . EVAL-TOKEN NIP . ." ]"',
+        ])
+        self.assertRegex(text, r"\[ELONG-LEGACY\s+2\s+0\s+\]")
+        self.assertRegex(text, r"\[ELONG-CHECKED\s+2\s+0\s+0\s+\]")
+
+    def test_evaluate_checked_depth_status(self):
+        """Nested checked EVALUATE propagates deterministic depth status 3."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': ETEST-CHECKED S" ETEST-CHECKED" EVALUATE-CHECKED DROP ;',
+            'S" ETEST-CHECKED" EVALUATE-CHECKED '
+            'CR ." [EDEPTH " . EVAL-STATUS @ . ." ]"',
+        ], max_steps=5_000_000)
+        self.assertRegex(text, r"\[EDEPTH\s+3\s+3\s+\]")
+
+    def test_evaluator_reset_preserves_enclosing_evaluate_depth(self):
+        """A hosted reset must not corrupt the EVALUATE frame invoking it."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': ERESET-INNER EVAL-DEPTH @ EVALUATOR-RESET '
+            'EVAL-DEPTH @ CR ." [ERESET-DEPTH " . . ." ]" ;',
+            'S" ERESET-INNER" EVALUATE-CHECKED DROP',
+            'CR ." [ERESET-AFTER " EVAL-DEPTH @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[ERESET-DEPTH\s+1\s+1\s+\]")
+        self.assertRegex(text, r"\[ERESET-AFTER\s+0\s+\]")
+
+    def test_nested_evaluate_restores_caller_tib_tail(self):
+        """A normal nested EVALUATE must resume the caller's original TIB."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE ENT-HIT  0 ENT-HIT !",
+            ': ENT-INNER  S" 7 ENT-HIT !" EVALUATE ;',
+            'S" ENT-INNER 9 ENT-HIT +!" EVALUATE-CHECKED',
+            'CR ." [EVAL-TIB-TAIL " . ENT-HIT @ . '
+            'EVAL-DEPTH @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[EVAL-TIB-TAIL\s+0\s+16\s+0\s+\]")
+
+    def test_evaluator_unwind_rejects_invalid_checkpoints(self):
+        """Negative and above-current unwind targets leave the frame intact."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ': EU-INVALID  EVAL-DEPTH @  -1 EVALUATOR-UNWIND '
+            'EVAL-DEPTH @  2 EVALUATOR-UNWIND EVAL-DEPTH @ '
+            'CR ." [EUNWIND-INVALID " . . . ." ]" ;',
+            'S" EU-INVALID" EVALUATE-CHECKED DROP',
+            'CR ." [EUNWIND-AFTER " EVAL-DEPTH @ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[EUNWIND-INVALID\s+1\s+1\s+1\s+\]")
+        self.assertRegex(text, r"\[EUNWIND-AFTER\s+0\s+\]")
+
     # -- Dictionary full guard --
 
     def test_dictionary_full_guard(self):
@@ -8493,6 +8566,125 @@ class TestBIOSHardening(unittest.TestCase):
         self.assertTrue(
             "dictionary overflow" in text or "Dictionary full" in text,
             f"Expected dictionary guard message, got: {text}")
+
+
+# ---------------------------------------------------------------------------
+#  KDOS checked source compiler tests
+# ---------------------------------------------------------------------------
+
+class TestKDOSCheckedCompiler(_KDOSTestBase):
+    """Transaction-facing whole-buffer compiler and rollback reset."""
+
+    def test_source_checked_stops_at_first_failed_line(self):
+        """No source line after the first undefined token is executed."""
+        text = self._run_kdos([
+            "VARIABLE CS-HIT  0 CS-HIT !",
+            "VARIABLE CS-SRC  63 ALLOT",
+            "CS-SRC 64 0 FILL",
+            'S" 0 CS-HIT !" CS-SRC SWAP CMOVE 10 CS-SRC 10 + C!',
+            'S" NO_SUCH" CS-SRC 11 + SWAP CMOVE 10 CS-SRC 18 + C!',
+            'S" 1 CS-HIT !" CS-SRC 19 + SWAP CMOVE',
+            'CS-SRC 29 SOURCE-EVALUATE-CHECKED '
+            'CR ." [SOURCE-ERR " . EVAL-LINE @ . EVAL-COLUMN @ . '
+            'EVAL-TOKEN TYPE ."  " CS-HIT @ . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[SOURCE-ERR\s+1\s+2\s+0\s+NO_SUCH\s+0\s+\]",
+        )
+
+    def test_source_checked_rejects_overlong_physical_line(self):
+        """The whole-buffer surface reports line 2 and skips line 3."""
+        text = self._run_kdos([
+            "VARIABLE CSL-HIT  0 CSL-HIT !",
+            "VARIABLE CSL-SRC  280 ALLOT",
+            "CSL-SRC 288 32 FILL",
+            "10 CSL-SRC C!  10 CSL-SRC 257 + C!",
+            'S" 1 CSL-HIT !" CSL-SRC 258 + SWAP CMOVE',
+            'CSL-SRC 268 SOURCE-EVALUATE-CHECKED '
+            'CR ." [SOURCE-LONG " . EVAL-LINE @ . EVAL-COLUMN @ . '
+            'EVAL-TOKEN NIP . CSL-HIT @ . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[SOURCE-LONG\s+2\s+2\s+0\s+0\s+0\s+\]",
+        )
+
+    def test_source_checked_unfinished_rollback_and_reset(self):
+        """Rollback plus EVALUATOR-RESET returns compiler state to idle."""
+        text = self._run_kdos([
+            "VARIABLE CS-SAVE-HERE",
+            "VARIABLE CS-SAVE-LATEST",
+            ": CS-ROLLBACK-TEST",
+            "  HERE CS-SAVE-HERE !  LATEST CS-SAVE-LATEST !",
+            '  S" : HALF-BUILT 123" SOURCE-EVALUATE-CHECKED',
+            '  CR ." [SOURCE-RESET " DUP . DROP EVAL-STATUS @ . STATE @ .',
+            "  CS-SAVE-HERE @ HERE - ALLOT",
+            "  CS-SAVE-LATEST @ LATEST!  EVALUATOR-RESET",
+            '  EVAL-STATUS @ . STATE @ . EVALUATE-FINISH . ." ]" ;',
+            "CS-ROLLBACK-TEST",
+        ])
+        self.assertRegex(
+            text,
+            r"\[SOURCE-RESET\s+4\s+4\s+1\s+4\s+0\s+0\s+\]",
+        )
+
+    def test_source_checked_detects_unfinished_definition_inside_brackets(self):
+        """A trailing [ cannot hide an unfinished colon definition."""
+        text = self._run_kdos([
+            "VARIABLE CS-BRACKET-HERE",
+            "VARIABLE CS-BRACKET-LATEST",
+            ": CS-BRACKET-TEST",
+            "  HERE CS-BRACKET-HERE !  LATEST CS-BRACKET-LATEST !",
+            '  S" : HALF-BRACKET [ 123 DROP" SOURCE-EVALUATE-CHECKED',
+            '  CR ." [SOURCE-BRACKET " . STATE @ . ." ]"',
+            "  CS-BRACKET-HERE @ HERE - ALLOT",
+            "  CS-BRACKET-LATEST @ LATEST!  EVALUATOR-RESET ;",
+            "CS-BRACKET-TEST",
+        ])
+        self.assertRegex(text, r"\[SOURCE-BRACKET\s+4\s+0\s+\]")
+
+    def test_source_checked_contains_throw_and_skips_both_tails(self):
+        """Status 5 contains THROW and no failed or enclosing tail executes."""
+        text = self._run_kdos([
+            "VARIABLE CST-SAVED",
+            "VARIABLE CST-AFTER-CATCH",
+            "VARIABLE CST-SOURCE-STATUS",
+            "VARIABLE CST-STATE-BEFORE",
+            "VARIABLE CST-SAVE-HERE",
+            "VARIABLE CST-SAVE-LATEST",
+            "VARIABLE CST-LATE  0 CST-LATE !",
+            "VARIABLE CST-OUTER-LATE  0 CST-OUTER-LATE !",
+            ": CST-BOOM  -77 THROW ; IMMEDIATE",
+            ": CST-HOST",
+            "  EVAL-DEPTH @ CST-SAVED !",
+            "  HERE CST-SAVE-HERE !  LATEST CST-SAVE-LATEST !",
+            '  S" : CST-HALF CST-BOOM 1 CST-LATE !"',
+            "  SOURCE-EVALUATE-CHECKED CST-SOURCE-STATUS !",
+            "  EVAL-DEPTH @ CST-AFTER-CATCH !",
+            "  STATE @ CST-STATE-BEFORE !",
+            "  CST-SAVE-HERE @ HERE - ALLOT",
+            "  CST-SAVE-LATEST @ LATEST!",
+            "  EVALUATOR-RESET",
+            '  CR ." [SOURCE-THROW " CST-SOURCE-STATUS @ .',
+            "  EVAL-THROW @ . CST-SAVED @ . CST-AFTER-CATCH @ .",
+            "  CST-STATE-BEFORE @ . STATE @ . EVAL-DEPTH @ .",
+            "  HERE CST-SAVE-HERE @ = . LATEST CST-SAVE-LATEST @ = .",
+            "  CST-LATE @ .",
+            '  ." ]" ;',
+            'S" CST-HOST 1 CST-OUTER-LATE !" EVALUATE-CHECKED',
+            'CR ." [SOURCE-THROW-OUTER " . EVAL-DEPTH @ . '
+            'CST-LATE @ . CST-OUTER-LATE @ . EVAL-THROW @ . ." ]"',
+        ])
+        self.assertRegex(
+            text,
+            r"\[SOURCE-THROW\s+5\s+-77\s+1\s+1\s+1\s+0\s+1\s+"
+            r"-1\s+-1\s+0\s+\]",
+        )
+        self.assertRegex(
+            text,
+            r"\[SOURCE-THROW-OUTER\s+5\s+0\s+0\s+0\s+-77\s+\]",
+        )
 
 
 # ---------------------------------------------------------------------------

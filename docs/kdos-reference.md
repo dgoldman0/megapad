@@ -628,6 +628,50 @@ Offset   Field          Meaning
 
 ---
 
+## Checked source compilation
+
+`SOURCE-EVALUATE-CHECKED ( addr len -- status )` is the whole-buffer
+compiler entry point for hosted editors and build tools.  It splits the
+buffer on LF, strips an optional CR, assigns one-based line numbers, and
+calls KDOS's checked evaluator for each non-empty physical line.  It stops at
+the first failure, so neither later tokens on that line nor later lines are
+executed.  At end-of-buffer it checks for an unfinished definition or
+cross-line conditional.
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `EVAL-S-OK` | 0 | Success |
+| `EVAL-S-UNDEFINED` | 1 | Undefined token |
+| `EVAL-S-LINE-TOO-LONG` | 2 | Physical line is longer than 255 bytes |
+| `EVAL-S-DEPTH` | 3 | Evaluator nesting limit exceeded |
+| `EVAL-S-UNFINISHED` | 4 | End of buffer left compiler state unfinished |
+| `EVAL-S-THROW` | 5 | A nonzero source-level `THROW` was caught; inspect `EVAL-THROW @` |
+
+On failure, read `EVAL-STATUS @`, `EVAL-LINE @`, `EVAL-COLUMN @`, and
+`EVAL-TOKEN` for token diagnostics, and `EVAL-THROW @` for the exact exception
+behind status 5.  Lines are one-based and columns are zero-based.
+The token is a stable copy and remains valid after input-source restoration.
+
+BIOS defines an early `EVALUATE-CHECKED` primitive returning statuses 0–3.
+It cannot own `CATCH`, because KDOS later supplies the execution-context-local
+`HANDLER` table.  Immediately above this whole-buffer compiler, KDOS
+deliberately shadows that BIOS word with the same public name.  The KDOS
+wrapper checkpoints `EVAL-DEPTH @`, runs legacy `EVALUATE` under `CATCH`, and
+on a source exception invokes `EVALUATOR-UNWIND`, stores the code in
+`EVAL-THROW`, and returns status 5 normally.  BIOS evaluator frames retain a
+complete caller TIB, length, and `>IN`, so normal nesting and caught unwinds
+both restore the exact caller source.  Status 5 remains sticky while enclosing
+evaluators unwind, preventing either the failed source tail or an enclosing
+line tail from executing.
+
+Dictionary changes are not automatically transactional.  A caller that
+snapshots `HERE` and `LATEST` must restore both on failure, then call
+`EVALUATOR-RESET`.  That order is intentional: reset clears compiler
+bookkeeping but does not move the dictionary pointers or disturb an enclosing
+`EVALUATE` frame.  The last status and diagnostics survive reset so the UI can
+present them afterward.
+Like `EVALUATE`, source-level data-stack effects are preserved.
+
 ## §7.6 MP64FS Filesystem
 
 The **MP64FS** is a simple on-disk named filesystem that fits on a 1 MiB
@@ -674,6 +718,7 @@ names.  See `docs/filesystem.md` for the full on-disk format specification.
 | `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor from the FD pool for `FREAD`/`FWRITE` access.  Returns 0 if not found.  `OPEN` is a `DEFER` word — override with `' my-open IS OPEN` (e.g. for a VFS layer). |
 | `FCLOSE` | `( fdesc -- )` | Release a file descriptor back to the FD pool.  No-op if `fdesc` is 0. |
 | `LOAD` | `( "filename" -- )` | Open a Forth source file from disk, read it into memory, and EVALUATE each line.  This is how KDOS extensions and scripts are loaded. |
+| `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
 
 **Example — filesystem operations:**

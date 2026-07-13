@@ -392,7 +392,7 @@ TEST    \ prints 25
 
 ---
 
-## Input Source & Evaluation (5 words)
+## Input Source & Evaluation (15 words)
 
 These words control where Forth reads its input from and how it processes
 text.
@@ -401,7 +401,17 @@ text.
 |------|-------------|-------------|
 | `SOURCE` | `( -- addr len )` | Address and length of the current input buffer. |
 | `>IN` | `( -- addr )` | Address of the variable holding the current parse position within `SOURCE`. |
-| `EVALUATE` | `( addr len -- )` | Interpret the given string as Forth source code.  Temporarily redirects the input source. |
+| `EVALUATE` | `( addr len -- )` | Interpret one string as Forth source.  Retains the legacy stack effect but records any error in `EVAL-STATUS`.  Input above 255 bytes is rejected, never truncated.  Nested calls preserve and restore the caller's complete TIB bytes, length, and `>IN`. |
+| `EVALUATE-CHECKED` | `( addr len -- status )` | BIOS primitive returning status 0–3.  After KDOS defines `CATCH`, KDOS deliberately shadows this name with the transaction-safe wrapper described below, which also returns status 5. |
+| `EVALUATE-FINISH` | `( -- status )` | End a multi-line checked operation, returning 4 if compiler or cross-line conditional state is unfinished, otherwise 0. |
+| `EVALUATOR-RESET` | `( -- )` | Clear compiler bookkeeping after the caller restores `HERE` and `LATEST`.  Does not roll back the dictionary, erase diagnostics, or change the enclosing evaluator depth. |
+| `EVALUATOR-UNWIND` | `( depth -- )` | Restore abandoned nested input frames down to a previously captured `EVAL-DEPTH @` checkpoint.  Negative or above-current targets are ignored. |
+| `EVAL-STATUS` | `( -- addr )` | Address of the last status cell. |
+| `EVAL-LINE` | `( -- addr )` | Address of the one-based source-line context/diagnostic cell. |
+| `EVAL-COLUMN` | `( -- addr )` | Address of the zero-based failing-token column cell. |
+| `EVAL-DEPTH` | `( -- addr )` | Address of the active evaluator-depth cell.  Transaction hosts capture its value before checked evaluation and pass that value to `EVALUATOR-UNWIND`; they do not repair the cell alone. |
+| `EVAL-THROW` | `( -- addr )` | Address of the exact source-level exception code retained when the KDOS checked wrapper returns status 5. |
+| `EVAL-TOKEN` | `( -- addr len )` | Stable counted view of the failing token; empty for line/depth/unfinished/throw failures. |
 | `>NUMBER` | `( ud addr len -- ud' addr' len' )` | Convert characters to a number, accumulating into *ud*.  Stops at the first non-digit. |
 | `QUIT` | `( -- )` | Clear the return stack and enter the outer interpreter loop (the REPL).  Does not return. |
 
@@ -409,6 +419,31 @@ text.
 ```forth
 S" 2 3 + ." EVALUATE    \ prints 5
 ```
+
+Checked status values are deterministic:
+
+| Status | Constant in KDOS | Meaning |
+|--------|------------------|---------|
+| 0 | `EVAL-S-OK` | Success |
+| 1 | `EVAL-S-UNDEFINED` | Undefined token; inspect line, column, and token diagnostics |
+| 2 | `EVAL-S-LINE-TOO-LONG` | Physical input line exceeds 255 bytes |
+| 3 | `EVAL-S-DEPTH` | Evaluator nesting limit exceeded |
+| 4 | `EVAL-S-UNFINISHED` | End of source reached with unfinished compiler state |
+| 5 | `EVAL-S-THROW` | KDOS caught a nonzero source-level `THROW`; inspect `EVAL-THROW @` |
+
+The BIOS definition of `EVALUATE-CHECKED` exists before KDOS and therefore
+cannot depend on KDOS's execution-context-local `HANDLER` table.  Once
+`CATCH`/`THROW` exist, KDOS defines a newer word with the same public name.
+That wrapper checkpoints `EVAL-DEPTH`, catches a source exception, asks BIOS to
+restore every abandoned input frame, stores the exact exception in
+`EVAL-THROW`, and returns status 5 normally.  This ordering keeps exception
+ownership in KDOS while making `SOURCE-EVALUATE-CHECKED` transaction-safe.
+
+Checked evaluation intentionally permits a colon definition or conditional to
+span calls.  Use `EVALUATE-FINISH` once after the last line.  KDOS packages
+that protocol as `SOURCE-EVALUATE-CHECKED` for complete multi-line buffers.
+After any nonzero transactional result, restore `HERE` and `LATEST` before
+calling `EVALUATOR-RESET`; status and diagnostics remain available afterward.
 
 ---
 
