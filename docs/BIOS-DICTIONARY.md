@@ -1,6 +1,8 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-Complete catalog of all **367** dictionary words defined in `bios.asm`.
+The live dictionary link chain contains **435** entries.  The numbered
+subsystem tables below are a historical catalog and do not yet enumerate every
+later-added BIOS entry.
 
 ---
 
@@ -658,7 +660,7 @@ of compiled code.
 | 310 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
 | 311 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
 
-### Cooperative Multitasking (8 words)
+### Cooperative Multitasking (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -670,6 +672,7 @@ of compiled code.
 | 317 | `BACKGROUND2` | `( xt -- )` | | Set xt as Task 2 body and start it |
 | 318 | `BACKGROUND3` | `( xt -- )` | | Set xt as Task 3 body and start it |
 | 319 | `#TASKS` | `( -- n )` | | Count active background tasks (0–3) |
+| 320 | `TASK-ID` | `( -- n )` | | Return executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0 |
 
 ---
 
@@ -711,8 +714,8 @@ of compiled code.
 | Field ALU | 13 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
-| Cooperative Multitasking | 8 |
-| **Total** | **363** |
+| Cooperative Multitasking | 9 |
+| **Catalogued subtotal** | **364** |
 
 ### All Immediate Words (34)
 
@@ -721,7 +724,7 @@ of compiled code.
 ### Dictionary Chain Order (link chain: last → first)
 
 ```
-#TASKS → BACKGROUND3 → BACKGROUND2 → TASK? → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
+TASK-ID → #TASKS → BACKGROUND3 → BACKGROUND2 → TASK? → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
 CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
 SHA256-DOUT@ → SHA256-STATUS@ → SHA256-FINAL → SHA256-UPDATE → SHA256-INIT →
 SHA3-SQUEEZE-NEXT → SHA3-SQUEEZE → SHA3-MODE@ → SHA3-MODE! →

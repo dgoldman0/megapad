@@ -813,7 +813,7 @@ SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
 
 ---
 
-## Cooperative Multitasking (8 words)
+## Cooperative Multitasking (9 words)
 
 Lightweight four-task cooperative multitasker.  R20 (REX-extended) holds
 the task trampoline PC; `SEP R20` round-robin yields across active task
@@ -830,6 +830,7 @@ return stacks.
 | `BACKGROUND2` | `( xt -- )` | Set xt as the Task 2 body and start it running. |
 | `BACKGROUND3` | `( xt -- )` | Set xt as the Task 3 body and start it running. |
 | `#TASKS` | `( -- n )` | Count active background tasks (0–3). |
+| `TASK-ID` | `( -- n )` | Return the executing cooperative slot on core 0 (0 foreground, 1–3 background); worker cores return 0. |
 
 ---
 

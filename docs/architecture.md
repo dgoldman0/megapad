@@ -719,9 +719,11 @@ A lightweight cooperative multitasker was added to the BIOS:
 - Each task has independent data and return stacks
 - A `task_cleanup` sentinel catches premature task exit
 
-Eight dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
+Nine dictionary words: **PAUSE**, **TASK-YIELD**, **BACKGROUND**,
 **TASK-STOP**, **TASK?**, **BACKGROUND2**, **BACKGROUND3**,
-**#TASKS**.
+**#TASKS**, and **TASK-ID**.  `TASK-ID` exposes the executing cooperative
+slot rather than the persistent round-robin cursor, allowing higher layers to
+key coroutine-local state such as exception chains.
 
 #### T-Register Fault Diagnostics (Phase 9)
 

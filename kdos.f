@@ -590,21 +590,28 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
 \  frame.  If the executed XT calls THROW with a non-zero code,
 \  control returns to the matching CATCH with stacks restored.
 \
-\  Exception frames are chained through a per-full-core HANDLER cell.
-\  A CATCH frame must not span PAUSE/TASK-YIELD while another coroutine on
-\  the same core enters CATCH; BIOS coroutine contexts share that core cell.
+\  Exception frames are chained through execution-context-local HANDLER cells:
+\  one for each BIOS coroutine on core 0, and one for each physical worker
+\  core.  CATCH frames may therefore remain live across PAUSE/TASK-YIELD.
 \
 \  Requires BIOS words: SP@ SP! RP@ RP!
 \
 
-\ Each full core has independent data/return stacks, so it must also have an
-\ independent exception-chain head.  Keep HANDLER's traditional `( -- addr )`
-\ interface while making the returned address depend on COREID.
+\ Each execution context with independent data/return stacks must also have an
+\ independent exception-chain head.  Core 0 selects by cooperative TASK-ID;
+\ physical worker cores select by COREID and do not consult core 0's task state.
+\ Keep HANDLER's traditional `( -- addr )` interface.
 CREATE _HANDLERS  NCORES CELLS ALLOT
 _HANDLERS NCORES CELLS 0 FILL
+CREATE _TASK-HANDLERS  4 CELLS ALLOT
+_TASK-HANDLERS 4 CELLS 0 FILL
 
 : HANDLER  ( -- addr )
-    COREID CELLS _HANDLERS + ;
+    COREID ?DUP IF
+        CELLS _HANDLERS +
+    ELSE
+        TASK-ID CELLS _TASK-HANDLERS +
+    THEN ;
 
 \ CATCH ( xt -- exception# | 0 )
 \   Execute xt.  If it completes normally, return 0.

@@ -2102,6 +2102,23 @@ class TestBIOS(unittest.TestCase):
         # 6 PAUSEs ensure all 5 iterations complete + 1 extra (nop after task exits).
         self.assertIn("5 ", text)
 
+    def test_task_id_tracks_executing_coroutine(self):
+        """TASK-ID distinguishes foreground from the active background slot."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "VARIABLE seen-task-id",
+            ": RECORD-TASK-ID  TASK-ID seen-task-id !  TASK-YIELD ;",
+            "TASK-ID .",
+            "' RECORD-TASK-ID BACKGROUND2",
+            "PAUSE",
+            "TASK-ID .",
+            "seen-task-id @ .",
+            "PAUSE",
+        ])
+        nums = [int(w) for w in text.split() if w.isdigit()]
+        self.assertEqual(nums[-3:], [0, 0, 2],
+                         f"TASK-ID should report foreground/background contexts: {text!r}")
+
     def test_task_stop_cancels_task(self):
         """TASK-STOP prevents further execution of background task."""
         sys, buf = self._boot_bios()
@@ -10106,6 +10123,50 @@ class TestKDOSExceptions(_KDOSTestBase):
             "OUTER .",
         ])
         self.assertIn("-42 ", text)
+
+    def test_catches_survive_foreground_background_interleave(self):
+        """Foreground and background CATCH frames survive a shared yield."""
+        text = self._run_kdos([
+            "VARIABLE _CTX-FG-R VARIABLE _CTX-BG-R",
+            "VARIABLE _CTX-FG-H VARIABLE _CTX-BG-H VARIABLE _CTX-BG-ID",
+            ": _CTX-BG-INNER  TASK-ID _CTX-BG-ID ! TASK-YIELD 22 THROW ;",
+            ": _CTX-BG-WORK  HANDLER _CTX-BG-H ! ['] _CTX-BG-INNER CATCH _CTX-BG-R ! ;",
+            ": _CTX-FG-INNER",
+            "  HANDLER _CTX-FG-H !",
+            "  ['] _CTX-BG-WORK BACKGROUND",
+            "  PAUSE",
+            "  11 THROW ;",
+            "' _CTX-FG-INNER CATCH _CTX-FG-R !",
+            "PAUSE",
+            "_CTX-FG-R @ . _CTX-BG-R @ . _CTX-BG-ID @ .",
+            "_CTX-FG-H @ _CTX-BG-H @ <> .",
+        ])
+        self.assertIn("11 22 1 ", text)
+        self.assertIn("-1 ", text)
+
+    def test_catches_are_independent_across_background_slots(self):
+        """Suspended catches in different cooperative slots unwind independently."""
+        text = self._run_kdos([
+            "VARIABLE _SLOT-R1 VARIABLE _SLOT-R2 VARIABLE _SLOT-R3",
+            "VARIABLE _SLOT-H1 VARIABLE _SLOT-H2 VARIABLE _SLOT-H3",
+            ": _SLOT-I1  TASK-YIELD 101 THROW ;",
+            ": _SLOT-I2  TASK-YIELD 202 THROW ;",
+            ": _SLOT-I3  TASK-YIELD 303 THROW ;",
+            ": _SLOT-W1  HANDLER _SLOT-H1 ! ['] _SLOT-I1 CATCH _SLOT-R1 ! ;",
+            ": _SLOT-W2  HANDLER _SLOT-H2 ! ['] _SLOT-I2 CATCH _SLOT-R2 ! ;",
+            ": _SLOT-W3  HANDLER _SLOT-H3 ! ['] _SLOT-I3 CATCH _SLOT-R3 ! ;",
+            "' _SLOT-W1 BACKGROUND",
+            "' _SLOT-W2 BACKGROUND2",
+            "' _SLOT-W3 BACKGROUND3",
+            "PAUSE PAUSE PAUSE",
+            "PAUSE PAUSE PAUSE",
+            "_SLOT-R1 @ . _SLOT-R2 @ . _SLOT-R3 @ .",
+            "_SLOT-H1 @ _SLOT-H2 @ <> .",
+            "_SLOT-H2 @ _SLOT-H3 @ <> .",
+            "_SLOT-H1 @ _SLOT-H3 @ <> .",
+        ])
+        self.assertIn("101 202 303 ", text)
+        self.assertGreaterEqual(text.count("-1 "), 3, text)
 
     def test_sp_fetch(self):
         """SP@ returns the data stack pointer."""

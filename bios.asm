@@ -9979,6 +9979,11 @@ w_pause:
     lsli r1, 3
     add r11, r1
     ldn r1, r11                 ; R1 = task's saved continuation
+    ; var_task_index is the round-robin cursor and deliberately remains at
+    ; the last-run slot after Task 0 resumes.  Publish the actually executing
+    ; coroutine separately, immediately before transferring control.
+    ldi64 r11, var_task_active
+    str r11, r7                 ; Task r7 is active until it yields
     ; Jump: overwrite R3 (the active PC, PSEL=3).
     ; Next instruction fetched is from the task's code.
     mov r3, r1
@@ -10020,6 +10025,9 @@ pause_yield_handler:
     ldn r15, r11
     ldn r14, r15              ; pop saved DSP
     addi r15, 8
+    ldi64 r11, var_task_active
+    ldi r1, 0
+    str r11, r1                 ; foreground context is restored
     ; Pop Task 0's return address into R3 and resume (PSEL ← 3)
     ldn r3, r15
     addi r15, 8
@@ -10161,6 +10169,23 @@ w_task_status:
     breq .ts_zero
     ldi r1, 1
 .ts_zero:
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; TASK-ID ( -- n )  current cooperative task slot (0 = foreground/worker)
+;
+; This reports the executing context, unlike var_task_index, which is the
+; persistent round-robin cursor.  Cooperative task dispatch exists on core 0,
+; so secondary full cores report 0 and use COREID for physical-core identity.
+w_task_id:
+    ldi r1, 0
+    csrr r0, 0x20
+    cmpi r0, 0
+    brne .task_id_push
+    ldi64 r11, var_task_active
+    ldn r1, r11
+.task_id_push:
     subi r14, 8
     str r14, r1
     ret.l
@@ -16145,9 +16170,18 @@ d_task_count:
     call.l r11
     ret.l
 
+; === TASK-ID ===
+d_task_id:
+    .dq d_task_count
+    .db 7
+    .ascii "TASK-ID"
+    ldi64 r11, w_task_id
+    call.l r11
+    ret.l
+
 ; === COLS ===
 d_cols:
-    .dq d_task_count
+    .dq d_task_id
     .db 4
     .ascii "COLS"
     ldi64 r11, w_cols
@@ -16325,7 +16359,9 @@ var_reloc_buf:
 ; All tasks run with PSEL=3 (required by Phase 3 NEXT handler).
 ; PAUSE dispatches via "mov r3, <task_pc>" and tasks yield via "sep r20".
 var_task_index:
-    .dq 0                             ; current task index (0–3)
+    .dq 0                             ; last-run slot / round-robin cursor
+var_task_active:
+    .dq 0                             ; executing slot (0 foreground, 1–3 bg)
 ; Task PC array — slot 0 is unused (Task 0 = R3, always active)
 var_task_pcs:
     .dq 0                             ; [0] placeholder (Task 0 uses R3)

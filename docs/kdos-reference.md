@@ -104,11 +104,11 @@ aligned with 16-byte minimum.
 
 ### §1.2 Exception Handling
 
-ANS Forth CATCH/THROW mechanism for structured error handling. Exception
-chains are per full core: `HANDLER` returns the calling core's chain-head
-cell, so simultaneous catches on different cores cannot overwrite each other.
-The chain is not per BIOS coroutine: do not suspend a live `CATCH` frame with
-`PAUSE`/`TASK-YIELD` and interleave another catch on the same core.
+ANS Forth CATCH/THROW mechanism for structured error handling. `HANDLER`
+selects an exception-chain head for the complete execution context: core 0
+uses the current BIOS `TASK-ID`, while physical worker cores use `COREID`.
+Foreground, background-slot, and worker catches can therefore remain live
+independently across `PAUSE`/`TASK-YIELD` and concurrent core execution.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
