@@ -108,7 +108,10 @@ ANS Forth CATCH/THROW mechanism for structured error handling. `HANDLER`
 selects an exception-chain head for the complete execution context: core 0
 uses the current BIOS `TASK-ID`, while physical worker cores use `COREID`.
 Foreground, background-slot, and worker catches can therefore remain live
-independently across `PAUSE`/`TASK-YIELD` and concurrent core execution.
+independently across `PAUSE`/`TASK-YIELD` and concurrent core execution. KDOS
+also clears a background slot's exception-chain head whenever that slot is
+stopped, replaced, or started again; an abandoned suspended `CATCH` frame can
+therefore never be inherited by the next coroutine to use the slot.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

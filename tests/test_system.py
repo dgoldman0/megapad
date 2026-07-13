@@ -10168,6 +10168,49 @@ class TestKDOSExceptions(_KDOSTestBase):
         self.assertIn("101 202 303 ", text)
         self.assertGreaterEqual(text.count("-1 "), 3, text)
 
+    def test_stopped_catch_is_cleared_before_slot_reuse(self):
+        """Stopping a suspended CATCH cannot leak its frame into a reused slot."""
+        text = self._run_kdos([
+            "VARIABLE _REUSE-BEFORE VARIABLE _REUSE-RESULT VARIABLE _REUSE-AFTER",
+            ": _REUSE-OLD-INNER  TASK-YIELD  -71 THROW ;",
+            ": _REUSE-OLD-WORK  ['] _REUSE-OLD-INNER CATCH DROP ;",
+            ": _REUSE-NEW-INNER  -72 THROW ;",
+            ": _REUSE-NEW-WORK",
+            "  HANDLER @ _REUSE-BEFORE !",
+            "  ['] _REUSE-NEW-INNER CATCH _REUSE-RESULT !",
+            "  HANDLER @ _REUSE-AFTER ! ;",
+            "' _REUSE-OLD-WORK BACKGROUND",
+            "PAUSE",
+            "1 TASK-STOP",
+            "' _REUSE-NEW-WORK BACKGROUND",
+            "PAUSE",
+            "_REUSE-BEFORE @ . _REUSE-RESULT @ . _REUSE-AFTER @ .",
+            "1 TASK? .",
+        ])
+        self.assertIn("0 -72 0 ", text)
+        self.assertIn("1 TASK? .\r\n0 ", text)
+
+    def test_replacing_suspended_catch_clears_slot_handler(self):
+        """BACKGROUND replacement also starts with a clean exception chain."""
+        text = self._run_kdos([
+            "VARIABLE _REPLACE-BEFORE VARIABLE _REPLACE-RESULT VARIABLE _REPLACE-AFTER",
+            ": _REPLACE-OLD-INNER  TASK-YIELD  -81 THROW ;",
+            ": _REPLACE-OLD-WORK  ['] _REPLACE-OLD-INNER CATCH DROP ;",
+            ": _REPLACE-NEW-INNER  -82 THROW ;",
+            ": _REPLACE-NEW-WORK",
+            "  HANDLER @ _REPLACE-BEFORE !",
+            "  ['] _REPLACE-NEW-INNER CATCH _REPLACE-RESULT !",
+            "  HANDLER @ _REPLACE-AFTER ! ;",
+            "' _REPLACE-OLD-WORK BACKGROUND2",
+            "PAUSE",
+            "' _REPLACE-NEW-WORK BACKGROUND2",
+            "PAUSE",
+            "_REPLACE-BEFORE @ . _REPLACE-RESULT @ . _REPLACE-AFTER @ .",
+            "2 TASK? .",
+        ])
+        self.assertIn("0 -82 0 ", text)
+        self.assertIn("2 TASK? .\r\n0 ", text)
+
     def test_sp_fetch(self):
         """SP@ returns the data stack pointer."""
         text = self._run_kdos(["SP@ .", ".\"  ok\""])

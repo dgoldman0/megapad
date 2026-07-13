@@ -593,6 +593,8 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
 \  Exception frames are chained through execution-context-local HANDLER cells:
 \  one for each BIOS coroutine on core 0, and one for each physical worker
 \  core.  CATCH frames may therefore remain live across PAUSE/TASK-YIELD.
+\  A stopped or replaced coroutine never resumes to unwind its live frames, so
+\  KDOS clears that slot's chain head at the BIOS scheduling boundary below.
 \
 \  Requires BIOS words: SP@ SP! RP@ RP!
 \
@@ -637,6 +639,30 @@ _TASK-HANDLERS 4 CELLS 0 FILL
         SP!             ( restore data stack )
         DROP R>         ( drop stale TOS, retrieve throw-code )
     THEN ;
+
+\ Preserve the BIOS task ABI while adding KDOS-owned exception cleanup.  BIOS
+\ cannot clear _TASK-HANDLERS because that table is allocated when KDOS loads.
+\ Scheduling a slot is also replacement, so reset on both start and stop.  Slot
+\ zero is the foreground handler and is deliberately never touched here.
+' BACKGROUND  CONSTANT _BIOS-BACKGROUND-XT
+' BACKGROUND2 CONSTANT _BIOS-BACKGROUND2-XT
+' BACKGROUND3 CONSTANT _BIOS-BACKGROUND3-XT
+' TASK-STOP   CONSTANT _BIOS-TASK-STOP-XT
+
+: _TASK-HANDLER-RESET  ( slot -- )
+    CELLS _TASK-HANDLERS + 0 SWAP ! ;
+
+: BACKGROUND  ( xt -- )
+    1 _TASK-HANDLER-RESET  _BIOS-BACKGROUND-XT EXECUTE ;
+
+: BACKGROUND2  ( xt -- )
+    2 _TASK-HANDLER-RESET  _BIOS-BACKGROUND2-XT EXECUTE ;
+
+: BACKGROUND3  ( xt -- )
+    3 _TASK-HANDLER-RESET  _BIOS-BACKGROUND3-XT EXECUTE ;
+
+: TASK-STOP  ( slot -- )
+    DUP _BIOS-TASK-STOP-XT EXECUTE  _TASK-HANDLER-RESET ;
 
 \ =====================================================================
 \  §1.3  CRC Convenience Words
