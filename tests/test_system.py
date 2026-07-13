@@ -15246,6 +15246,37 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         self.assertIn("0 ", text)   # flag was cleared by YIELD?
 
+    def test_worker_checkpoint_does_not_retire_core0_task(self):
+        """A secondary-core checkpoint must not touch CURRENT-TASK."""
+        text = self._run_mc([
+            "CREATE _CP-OWNER 48 ALLOT",
+            "T.RUNNING _CP-OWNER ! _CP-OWNER CURRENT-TASK !",
+            ": _CP-WORK  YIELD? ;",
+            "1 PREEMPT-ENABLED ! 1 PREEMPT-SET",
+            "' _CP-WORK 1 CORE-RUN 1 CORE-WAIT",
+            "_CP-OWNER T.STATUS . 1 PREEMPT-FLAG@ .",
+            "0 CURRENT-TASK ! PREEMPT-OFF-ALL",
+        ])
+        self.assertIn("2 0 ", text)
+
+    def test_catch_throw_chains_are_per_core(self):
+        """Concurrent full cores use independent exception frames."""
+        text = self._run_mc([
+            "VARIABLE _CATCH-R1 VARIABLE _CATCH-R2",
+            "VARIABLE _CATCH-H1 VARIABLE _CATCH-H2",
+            "VARIABLE _CATCH-READY1 VARIABLE _CATCH-READY2",
+            ": _CATCH-T11  -1 _CATCH-READY1 ! BEGIN _CATCH-READY2 @ UNTIL 11 THROW ;",
+            ": _CATCH-T22  -1 _CATCH-READY2 ! BEGIN _CATCH-READY1 @ UNTIL 22 THROW ;",
+            ": _CATCH-W1  HANDLER _CATCH-H1 ! ['] _CATCH-T11 CATCH _CATCH-R1 ! ;",
+            ": _CATCH-W2  HANDLER _CATCH-H2 ! ['] _CATCH-T22 CATCH _CATCH-R2 ! ;",
+            "' _CATCH-W1 1 CORE-RUN ' _CATCH-W2 2 CORE-RUN",
+            "1 CORE-WAIT 2 CORE-WAIT",
+            "_CATCH-R1 @ . _CATCH-R2 @ .",
+            "_CATCH-H1 @ _CATCH-H2 @ <> .",
+        ])
+        self.assertIn("11 22 ", text)
+        self.assertIn("-1 ", text)
+
     def test_timer_irq_broadcast(self):
         """Timer IRQ is delivered to all cores (system.py broadcast)."""
         # This test verifies the system.py change: timer IRQ broadcast.

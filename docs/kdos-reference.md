@@ -104,7 +104,11 @@ aligned with 16-byte minimum.
 
 ### §1.2 Exception Handling
 
-ANS Forth CATCH/THROW mechanism for structured error handling.
+ANS Forth CATCH/THROW mechanism for structured error handling. Exception
+chains are per full core: `HANDLER` returns the calling core's chain-head
+cell, so simultaneous catches on different cores cannot overwrite each other.
+The chain is not per BIOS coroutine: do not suspend a live `CATCH` frame with
+`PAUSE`/`TASK-YIELD` and interleave another catch on the same core.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -800,8 +804,11 @@ Offset   Field       Meaning
 | `BG` | `( xt -- )` | Spawn a task and immediately run the scheduler ("background" a task). |
 | `KILL` | `( tdesc -- )` | Force a task to DONE state (cancel it). |
 | `RESTART` | `( tdesc -- )` | Reset a DONE task back to READY so it can run again. |
-| `YIELD` | `( -- )` | Cooperative yield: mark the current task DONE (give up CPU). |
-| `YIELD?` | `( -- )` | Conditional yield: check the preemption flag and yield if it's set. Insert this in long-running loops for timer-based preemption support. |
+| `SCHED-YIELD` | `( -- )` | Mark the current core-0 KDOS task DONE. Scheduler-only primitive. |
+| `YIELD` | `( -- )` | Compatibility wrapper for `SCHED-YIELD`; a no-op on dispatched secondary full cores. |
+| `WORKER-CHECKPOINT` | `( -- )` | Check and clear the calling worker core's preemption flag without touching scheduler state. |
+| `CORE-CHECKPOINT` | `( -- )` | Check and clear the calling core's preemption flag. On core 0 this also performs `YIELD`; secondary one-shot workers continue without touching `CURRENT-TASK`. |
+| `YIELD?` | `( -- )` | Compatibility alias for `CORE-CHECKPOINT`. |
 | `FIND-READY` | `( -- tdesc \| 0 )` | Find the first READY task in the table (0 if none). |
 | `RUN-TASK` | `( tdesc -- )` | Low-level: set task to RUNNING, execute its XT, mark DONE on return. |
 | `TASK-COUNT-READY` | `( -- n )` | Count tasks currently in READY state. |
@@ -828,12 +835,13 @@ SCHEDULE              \ run both tasks
 
 ### How Preemption Works
 
-KDOS uses a "soft preemption" model.  The hardware timer fires periodically
-and sets `PREEMPT-FLAG`.  Long-running tasks should call `YIELD?` at
-regular intervals (e.g., inside loops).  When `YIELD?` sees the flag set,
-it yields back to the scheduler, which picks the next READY task.  This
-avoids the complexity of full preemptive context switching while still
-preventing runaway tasks.
+KDOS uses a "soft preemption" model. The hardware timer fires periodically
+and sets a per-core preemption flag. Long-running code should call
+`CORE-CHECKPOINT` (or the compatibility name `YIELD?`) at regular intervals.
+On core 0, a set flag yields the current KDOS task back to the scheduler. A
+secondary full core has no suspended KDOS task scheduler, so it clears its
+own flag and continues its one-shot dispatch without reading or modifying
+core 0's `CURRENT-TASK`.
 
 ---
 

@@ -590,12 +590,21 @@ VARIABLE FG-A   VARIABLE FG-L     \ FORGET scratch
 \  frame.  If the executed XT calls THROW with a non-zero code,
 \  control returns to the matching CATCH with stacks restored.
 \
-\  Exception frames are chained via HANDLER variable.
+\  Exception frames are chained through a per-full-core HANDLER cell.
+\  A CATCH frame must not span PAUSE/TASK-YIELD while another coroutine on
+\  the same core enters CATCH; BIOS coroutine contexts share that core cell.
 \
 \  Requires BIOS words: SP@ SP! RP@ RP!
 \
 
-VARIABLE HANDLER   0 HANDLER !
+\ Each full core has independent data/return stacks, so it must also have an
+\ independent exception-chain head.  Keep HANDLER's traditional `( -- addr )`
+\ interface while making the returned address depend on COREID.
+CREATE _HANDLERS  NCORES CELLS ALLOT
+_HANDLERS NCORES CELLS 0 FILL
+
+: HANDLER  ( -- addr )
+    COREID CELLS _HANDLERS + ;
 
 \ CATCH ( xt -- exception# | 0 )
 \   Execute xt.  If it completes normally, return 0.
@@ -4906,17 +4915,30 @@ VARIABLE TDESC-TEMP
 \   The task's XT should call YIELD to give up the CPU.
 \   Since our tasks run to completion or yield by returning,
 \   YIELD marks the task as DONE (it has "yielded" its time slice).
-: YIELD  ( -- )
+: SCHED-YIELD  ( -- )
+    COREID 0<> IF EXIT THEN
     CURRENT-TASK @ DUP IF
         T.DONE SWAP T.STATUS!
     ELSE DROP THEN ;
 
-\ -- YIELD? ( -- ) check preempt flag, yield if set --
-: YIELD?  ( -- )
+: YIELD  ( -- )
+    \ KDOS tasks are scheduled on core 0.  A dispatched full-core worker has
+    \ no CURRENT-TASK entry and must never mutate core 0's scheduler state.
+    SCHED-YIELD ;
+
+\ CORE-CHECKPOINT is deferred because the per-core preemption table is built
+\ later in the multicore section.  Words compiled before that point (notably
+\ CORE-WAIT and LOCK) still reach the final installed implementation.
+: _CORE-CHECKPOINT-BOOT  ( -- )
     PREEMPT-FLAG @ IF
         0 PREEMPT-FLAG !
         YIELD
     THEN ;
+
+DEFER CORE-CHECKPOINT
+' _CORE-CHECKPOINT-BOOT IS CORE-CHECKPOINT
+
+: YIELD?  ( -- )  CORE-CHECKPOINT ;
 
 \ -- SPAWN ( xt -- ) create an anonymous ready task with default priority --
 VARIABLE SPAWN-COUNT
@@ -4983,14 +5005,17 @@ VARIABLE PREEMPT-ENABLED
     1 TIMER-CTRL!                 \ enable counter only, no auto-reload
     0 PREEMPT-ENABLED ! ;
 
-\ -- YIELD? ( -- ) check timer, yield if time slice expired --
-: YIELD?  ( -- )
+\ Install the timer-aware single-core checkpoint.  Existing callers of the
+\ deferred CORE-CHECKPOINT immediately see this action.
+: _CORE-CHECKPOINT-TIMER  ( -- )
     PREEMPT-ENABLED @ IF
         PREEMPT-FLAG @ IF
             0 PREEMPT-FLAG !
             YIELD
         THEN
     THEN ;
+
+' _CORE-CHECKPOINT-TIMER IS CORE-CHECKPOINT
 
 \ =====================================================================
 \  §8.1  Multicore Dispatch
@@ -5464,13 +5489,27 @@ PREEMPT-FLAGS-INIT
     0 PREEMPT-ENABLED !
     PREEMPT-FLAGS-INIT ;
 
-: YIELD?  ( -- )
+: WORKER-CHECKPOINT  ( -- )
     PREEMPT-ENABLED @ IF
         COREID PREEMPT-FLAG@ IF
             COREID PREEMPT-CLR
-            YIELD
         THEN
     THEN ;
+
+: _CORE-CHECKPOINT-PER-CORE  ( -- )
+    COREID 0= IF
+        PREEMPT-ENABLED @ IF
+            0 PREEMPT-FLAG@ IF
+                0 PREEMPT-CLR SCHED-YIELD
+            THEN
+        THEN
+    ELSE
+        \ A secondary full core acknowledges its own flag and continues its
+        \ one-shot dispatch; there is no suspended task scheduler to enter.
+        WORKER-CHECKPOINT
+    THEN ;
+
+' _CORE-CHECKPOINT-PER-CORE IS CORE-CHECKPOINT
 
 : PREEMPT-INFO  ( -- )
     ."  --- Preemption ---" CR

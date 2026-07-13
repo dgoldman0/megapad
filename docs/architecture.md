@@ -203,9 +203,11 @@ and interrupts are enabled (IE=1), the timer fires `IVEC_TIMER`.  With
 auto-reload (bit 2), the counter resets to 0 on match, creating a periodic
 interrupt.
 
-KDOS uses this for **preemptive scheduling** — `PREEMPT-ON` configures a
-50,000-cycle timer with auto-reload, and `YIELD?` checks the preemption
-flag set by the timer handler.
+KDOS uses this for **cooperative preemption checkpoints** — `PREEMPT-ON`
+configures a 50,000-cycle timer with auto-reload, and `CORE-CHECKPOINT`
+(`YIELD?`) checks the per-core flag set by the timer handler. Core 0 may
+retire its current KDOS task; secondary one-shot workers acknowledge the
+checkpoint without touching the core-0 scheduler.
 
 ---
 
