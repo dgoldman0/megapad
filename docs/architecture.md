@@ -61,6 +61,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │   0x0900     │  KEM (ML-KEM-512)    │ │
     │   0x0A00     │  Framebuffer         │ │
     │   0x0B00     │  RTC / System Clock  │ │
+    │   0x0C00     │  PCM Audio Output    │ │
     │              └──────────────────────┘ │
     └───────────────────────────────────────┘
 ```
@@ -116,6 +117,7 @@ device occupies a small range:
 | **WOTS+ Chain Accel** | `+0x08A0` | 32 bytes | SPHINCS+ WOTS hash chain sequencer (wraps SHA3/SHAKE, DMA-read context) |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
+| **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 
 Any access outside RAM and the MMIO aperture triggers a **bus fault**
 (vector `IVEC_BUS_FAULT`).  In the RTL, the bus arbiter enforces

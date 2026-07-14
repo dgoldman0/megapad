@@ -26,6 +26,7 @@ from megapad64 import (
 )
 from devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
+    AudioOutput,
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
     CppRTCProxy,
@@ -344,6 +345,7 @@ class MegapadSystem:
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
+        self.audio = AudioOutput()
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
             passthrough_peer_port=nic_peer_port,
@@ -406,6 +408,7 @@ class MegapadSystem:
         # Timer: C++ handles all MMIO; proxy tick is called via bus.
         self.bus.register(self.timer)
         self.bus.register(self.storage)
+        self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
         # NIC: registered on the bus so that Python-fallback paths
         # (e.g. EXT.STRING CMOVE reading MMIO) can reach the NIC.
@@ -435,6 +438,8 @@ class MegapadSystem:
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read
         self.storage._mem_write = self._raw_mem_write
+        self.audio._mem_read = self._raw_mem_read
+        self.audio._mem_span_valid = self._raw_mem_span_valid
 
         # ── C++ NIC + TRNG ───────────────────────────────────
         # All NIC and TRNG MMIO is handled in C++ (no bus registration).
@@ -717,6 +722,26 @@ class MegapadSystem:
             return self._ext_mem[addr - self.ext_mem_base]
         return self._shared_mem[addr % self.ram_size]
 
+    def _raw_mem_span_valid(self, addr: int, count: int) -> bool:
+        """Require one complete DMA span inside one physical memory window."""
+        addr = u64(addr)
+        if count <= 0:
+            return False
+        end = addr + count
+        if end > (1 << 64):
+            return False
+        regions = [
+            (0, self.ram_size),
+        ]
+        if self.hbw_size > 0:
+            regions.append((HBW_BASE, HBW_BASE + self.hbw_size))
+        if self.ext_mem_size > 0:
+            regions.append((self.ext_mem_base, self.ext_mem_end))
+        if self.vram_size > 0:
+            regions.append((self.vram_base, self.vram_end))
+        return sum(base <= addr and end <= limit
+                   for base, limit in regions) == 1
+
     def _raw_mem_write(self, addr: int, val: int):
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
@@ -785,6 +810,7 @@ class MegapadSystem:
         Micro-cores start halted — they are only activated when their
         cluster is enabled via the SysInfo CLUSTER_EN register.
         """
+        self.audio.reset()
         for i, cpu in enumerate(self.cores):
             cpu._reset_state()
 
@@ -1073,6 +1099,12 @@ class MegapadSystem:
         lines.append(f"  Storage: {'present' if self.storage.status & 0x80 else 'none'} "
                       f"sectors={self.storage.total_sectors} "
                       f"image={self.storage.image_path or 'N/A'}")
+        lines.append(f"  Audio: generation={self.audio.generation} "
+                     f"frames={self.audio.last_frames} "
+                     f"rate={self.audio.last_rate or self.audio.rate} "
+                     f"channels={self.audio.last_channels or self.audio.channels} "
+                     f"sink={'yes' if self.audio.capabilities & 0x02 else 'no'} "
+                     f"error={self.audio.error}")
         lines.append(f"  NIC: {'link up' if self.nic.link_up else 'link down'} "
                       f"mac={self.nic.mac.hex(':')} "
                       f"tx={self.nic.tx_count} rx={self.cores[0]._cs.nic_get_rx_count()} "

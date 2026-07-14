@@ -188,6 +188,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x08A0` | 32 B | WOTS+ Chain Accelerator (SPHINCS+ hash chain sequencer) |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
+| `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
 
 > **Per-core crypto ISA (no MMIO):** CRC32/CRC64 and SHA-256 are
 > implemented as per-core ISA instructions (EXT.CRYPTO `FB` prefix)

@@ -60,6 +60,19 @@ python3 megapad/session_server.py --nic-tap mp64tap0
 The server refuses startup if the TAP device is missing or inaccessible; it
 does not create interfaces or alter host routing on the user's behalf.
 
+Audible one-shot PCM playback is likewise explicit opt-in:
+
+```bash
+python3 megapad/session_server.py --audio
+```
+
+Without `--audio`, the guest audio device still captures every successful
+submission deterministically for tests and inspection, but advertises no
+audible sink. With it, the owner process opens the pygame mixer at the exact
+rate and channel count requested by each submission. The viewer initializes
+video and fonts only, so it cannot contend for the host audio device. Server
+shutdown stops the owned voice and releases the mixer.
+
 Shared sessions use the realtime RTC by default because they are interactive
 and may participate in external protocols. Pass `--virtual-clock` for a fully
 deterministic cycle-derived clock in isolated tests.

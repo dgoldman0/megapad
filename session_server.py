@@ -38,6 +38,11 @@ def main() -> int:
         action="store_true",
         help="advance the RTC from emulated cycles instead of host wall time",
     )
+    parser.add_argument(
+        "--audio",
+        action="store_true",
+        help="attach the optional pygame PCM16 playback sink",
+    )
     parser.add_argument("--paused", action="store_true")
     args = parser.parse_args()
 
@@ -65,6 +70,18 @@ def main() -> int:
         nic_backend=nic_backend,
         realtime_clock=not args.virtual_clock,
     )
+    audio_sink = None
+    if args.audio:
+        from audio_sinks import AudioSinkUnavailable, PygameAudioSink
+
+        try:
+            audio_sink = PygameAudioSink()
+        except AudioSinkUnavailable as exc:
+            session.close()
+            parser.error(str(exc))
+        session.system.audio.on_submit = audio_sink.submit
+        session.system.audio.on_stop = audio_sink.stop
+        session.system.audio.on_playing = audio_sink.is_playing
     machine = SharedMachine(session)
     machine.paused = args.paused
     server = SessionServer(machine, args.socket)
@@ -74,20 +91,29 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    server.start()
-    print(f"[shared] socket: {server.socket_path}", flush=True)
-    print(f"[shared] bios:   {args.bios.resolve()}", flush=True)
-    if args.nic_tap:
-        print(f"[shared] nic:    tap:{args.nic_tap}", flush=True)
-    print(
-        f"[shared] clock:  {'virtual' if args.virtual_clock else 'realtime'}",
-        flush=True,
-    )
-    print("[shared] machine owner running; Ctrl+C stops it", flush=True)
     try:
+        server.start()
+        print(f"[shared] socket: {server.socket_path}", flush=True)
+        print(f"[shared] bios:   {args.bios.resolve()}", flush=True)
+        if args.nic_tap:
+            print(f"[shared] nic:    tap:{args.nic_tap}", flush=True)
+        print(
+            f"[shared] audio:  {'pygame PCM16' if audio_sink else 'capture only'}",
+            flush=True,
+        )
+        print(
+            f"[shared] clock:  "
+            f"{'virtual' if args.virtual_clock else 'realtime'}",
+            flush=True,
+        )
+        print("[shared] machine owner running; Ctrl+C stops it", flush=True)
         server.serve_forever()
     finally:
-        server.stop()
+        try:
+            server.stop()
+        finally:
+            if audio_sink is not None:
+                audio_sink.close()
     return 0
 
 

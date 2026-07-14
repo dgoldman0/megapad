@@ -98,7 +98,11 @@ def main() -> int:
         print(f"cannot connect to shared session: {exc}", file=sys.stderr)
         return 2
 
-    pygame.init()
+    # The machine-owner process may hold the optional audio mixer.  This
+    # viewer only needs video, font, and input, so do not claim an audio
+    # device merely as a side effect of pygame.init().
+    pygame.display.init()
+    pygame.font.init()
     _configure_keyboard(pygame)
     font = (
         pygame.font.Font(str(args.font), args.font_size)

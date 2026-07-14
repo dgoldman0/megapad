@@ -34,10 +34,10 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,760 lines Forth |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
-| **Tests** | 1,731 passing (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, crypto, networking, PQC) |
+| **Tests** | 1,911 passing, with 36 environment-gated skips (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, audio, crypto, networking, PQC) |
 | **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
-| **Devices** | 19 MMIO peripherals: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, Field ALU, NTT, KEM, WOTS+, Mailbox, Spinlock, SysInfo, Port I/O Bridge |
+| **Devices** | 20 emulator MMIO peripherals, including UART, Timer, Storage, NIC, one-shot PCM Audio, crypto accelerators, Mailbox, Spinlock, SysInfo, and Port I/O Bridge |
 | **FPGA RTL** | 36 Verilog modules + 32 testbenches + 12 target overrides (~430 HW tests), Genesys 2 + VU095 targets |
 
 All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
@@ -127,9 +127,11 @@ authentication), SHA-3/SHAKE (Keccak-f[1600], 4 modes + XOF squeeze),
 TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
 arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
 INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
-key encapsulation via NTT+SHA3+TRNG), SystemInfo (CPUID, memory size),
-Mailbox (inter-core IPI), Spinlocks (8 hardware mutexes).  17 device
-classes, all memory-mapped at `0xFFFF_FF00+`.
+key encapsulation via NTT+SHA3+TRNG), one-shot PCM Audio (deterministic
+headless capture with optional host playback), SystemInfo (CPUID, memory
+size), Mailbox (inter-core IPI), and Spinlocks (8 hardware mutexes). All are
+memory-mapped at `0xFFFF_FF00+`. The audio register contract is implemented
+in the emulator; its physical DMA/I2S bridge remains pending.
 
 ---
 
@@ -310,7 +312,8 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `kdos.f` | 11,760 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
 | `cli.py` | 1,557 | CLI, boot modes, headless TCP server, interactive debug monitor |
 | `asm.py` | 909 | Two-pass assembler with SKIP and listing output |
-| `devices.py` | 2,542 | 19 MMIO devices: UART, Timer, Storage, NIC, CRC, AES, SHA3, TRNG, FieldALU, NTT, KEM, WOTS+, Mailbox, Spinlock, SysInfo, Port I/O Bridge |
+| `devices.py` | 3,197 | MMIO device models, including deterministic one-shot PCM capture and optional playback sinks |
+| `audio_sinks.py` | 147 | Explicit opt-in pygame PCM16 playback adapter |
 | `nic_backends.py` | 399 | Pluggable NIC backends: Loopback, UDP tunnel, Linux TAP device |
 | `data_sources.py` | 697 | Simulated network data sources |
 | `diskutil.py` | 1,039 | MP64FS filesystem utility and disk image builder |
@@ -342,6 +345,7 @@ The `docs/` directory contains comprehensive reference material:
 | [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
 | [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite, C++ accelerator |
 | [docs/development-session.md](docs/development-session.md) | Headless and shared live control, terminal snapshots, JSON scenarios, pygame viewing, and PNG capture |
+| [docs/audio-output.md](docs/audio-output.md) | One-shot PCM DMA contract, deterministic capture semantics, and hardware direction |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)
 > reflect the simplified emulator model rather than the complete hardware

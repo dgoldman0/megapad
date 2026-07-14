@@ -315,8 +315,11 @@ class MachineSession:
         finally:
             self.system.uart.on_tx = self._old_on_tx
             self.system.uart.on_tx_batch = self._old_on_tx_batch
-            self.system.nic.stop()
-            self._closed = True
+            try:
+                self.system.audio.release_host_sink()
+            finally:
+                self.system.nic.stop()
+                self._closed = True
 
     def boot(self, entry: int = 0):
         self.system.boot(entry)
