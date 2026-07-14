@@ -885,6 +885,11 @@ pw_end:
 ;   linked-list walk and DINS the result so subsequent lookups hit.
 
 find_word:
+    ; EXT.DICT stores at most 31 name bytes and dict_pad is one count byte
+    ; plus those 31 bytes.  Longer dictionary names remain valid, but must
+    ; take the linked-list path without touching the accelerator scratch.
+    cmpi r12, 32
+    brcs fw_slow
     ; ---- build uppercase counted-string in dict_pad ----
     ldi64 r11, dict_pad
     st.b r11, r12             ; dict_pad[0] = name length
@@ -982,11 +987,16 @@ fw_hit:
     mov r11, r13
     addi r11, 8
     ld.b r1, r11              ; flags byte
+    ; A long name was found through the slow path.  Do not overflow
+    ; dict_pad while attempting to insert it into the 31-byte cache.
+    cmpi r12, 32
+    brcs fw_hit_return
     ; ---- populate dict cache (miss-then-find) ----
     ; dict_pad still holds the uppercase counted-string from above
     mov r0, r9                ; R0 = entry addr (stored as XT)
     ldi64 r13, dict_pad
     dins r0, r13              ; cache: uppercase_name → entry_addr
+fw_hit_return:
     ret.l
 
 fw_next:
@@ -1013,6 +1023,10 @@ dict_cache_seed:
     addi r11, 8
     ld.b r7, r11
     andi r7, 0x7F              ; pure name length
+    ; The dictionary supports the full header length, but EXT.DICT does not.
+    ; Leave longer entries uncached instead of overflowing dict_pad.
+    cmpi r7, 32
+    brcs dcs_done
     ; Build dict_pad[0..N]
     ldi64 r11, dict_pad
     st.b r11, r7               ; dict_pad[0] = count
@@ -1040,6 +1054,7 @@ dcs_dins:
     mov r0, r1                 ; R0 = entry addr
     ldi64 r13, dict_pad
     dins r0, r13               ; cache: name → latest entry
+dcs_done:
     ret.l
 
 ; =====================================================================

@@ -2893,6 +2893,17 @@ class TestBIOS(unittest.TestCase):
         # FIND on "DUP" should return xt and -1 (non-immediate)
         self.assertIn("-1 ", text)
 
+    def test_long_word_name_bypasses_dictionary_accelerator(self):
+        """Names beyond EXT.DICT's 31-byte cache limit use the slow path."""
+        sys, buf = self._boot_bios()
+        name = "_ARUNTIME-BUILD-DISCLOSURE-HISTORY"
+        self.assertGreater(len(name), 31)
+        text = self._run_forth(sys, buf, [
+            f": {name} 4242 ;",
+            f"{name} .",
+        ])
+        self.assertIn("4242 ", text)
+
     # --- Phase 1C tests ---
 
     def test_value_basic(self):
