@@ -138,6 +138,28 @@ def test_machine_session_encodes_modified_named_characters():
     assert received == b"\x1b[32;5u"
 
 
+def test_machine_session_encodes_alt_character_shortcut():
+    system = MegapadSystem(ram_size=64 * 1024)
+    with MachineSession(system) as session:
+        session.send_key("alt+5")
+        state = system.cpu._cs
+        received = bytes(state.uart_read8(0x01) for _ in range(2))
+
+    assert received == b"\x1b5"
+
+
+def test_machine_session_encodes_modified_named_navigation_keys():
+    system = MegapadSystem(ram_size=64 * 1024)
+    with MachineSession(system) as session:
+        session.send_key("alt+left")
+        session.send_key("ctrl+pagedown")
+        session.send_key("alt+delete")
+        state = system.cpu._cs
+        received = bytes(state.uart_read8(0x01) for _ in range(18))
+
+    assert received == b"\x1b[1;3D\x1b[6;5~\x1b[3;3~"
+
+
 def test_machine_session_can_advance_timer_while_guest_is_idle():
     system = MegapadSystem(ram_size=64 * 1024)
     system.cpu.idle = True

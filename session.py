@@ -215,6 +215,26 @@ class MachineSession:
     NAMED_CHARACTERS = {
         "space": " ",
     }
+    MODIFIED_CSI_KEYS = {
+        "up": ("1", "A"),
+        "down": ("1", "B"),
+        "right": ("1", "C"),
+        "left": ("1", "D"),
+        "home": ("1", "H"),
+        "end": ("1", "F"),
+        "insert": ("2", "~"),
+        "delete": ("3", "~"),
+        "pageup": ("5", "~"),
+        "pagedown": ("6", "~"),
+        "f5": ("15", "~"),
+        "f6": ("17", "~"),
+        "f7": ("18", "~"),
+        "f8": ("19", "~"),
+        "f9": ("20", "~"),
+        "f10": ("21", "~"),
+        "f11": ("23", "~"),
+        "f12": ("24", "~"),
+    }
 
     def __init__(
         self,
@@ -459,7 +479,20 @@ class MachineSession:
             return
         parts = normalized.split("+")
         modifiers = set(parts[:-1])
-        char = self.NAMED_CHARACTERS.get(parts[-1], parts[-1])
+        base = parts[-1]
+        if (
+            modifiers
+            and modifiers <= {"ctrl", "alt", "shift"}
+            and base in self.MODIFIED_CSI_KEYS
+        ):
+            modifier = 1
+            modifier += 1 if "shift" in modifiers else 0
+            modifier += 2 if "alt" in modifiers else 0
+            modifier += 4 if "ctrl" in modifiers else 0
+            parameter, final = self.MODIFIED_CSI_KEYS[base]
+            self.send_text(f"\x1b[{parameter};{modifier}{final}".encode("ascii"))
+            return
+        char = self.NAMED_CHARACTERS.get(base, base)
         if len(char) == 1 and modifiers == {"ctrl"}:
             if "a" <= char <= "z":
                 self.send_text(bytes([ord(char) & 0x1F]))

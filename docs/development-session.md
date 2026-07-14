@@ -71,9 +71,12 @@ python3 megapad/session_viewer.py \
   --font akashic/assets/fonts/DejaVuSansMono.ttf
 ```
 
-The viewer accepts normal text and terminal keys. `Ctrl+F5` toggles pause,
-`Ctrl+F10` pauses and executes one instruction, `Ctrl+R` resets the guest,
-and `Ctrl+Q` closes only the viewer. Bare function keys reach the guest.
+The viewer accepts composed text and Ctrl/Alt/Shift character chords. It also
+preserves modifiers on arrows, Home/End, Insert/Delete, PgUp/PgDn, and
+F5--F12. Held navigation and editing keys repeat after 400 ms at 35 ms
+intervals. `Ctrl+F5` toggles pause, `Ctrl+F10` pauses and executes one
+instruction, `Ctrl+R` resets the guest, and `Ctrl+Q` closes only the viewer.
+Bare function keys reach the guest.
 
 Control or inspect that same machine from another process:
 

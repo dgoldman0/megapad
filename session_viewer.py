@@ -13,6 +13,49 @@ from shared_session import DEFAULT_SOCKET, SessionClient, snapshot_from_wire
 
 
 ROOT = Path(__file__).resolve().parent
+KEY_REPEAT_DELAY_MS = 400
+KEY_REPEAT_INTERVAL_MS = 35
+
+
+class _GuestKeyboardForwarder:
+    """Forward pygame input once while keeping TEXTINPUT for composed text."""
+
+    def __init__(self, pygame, client):
+        self.pygame = pygame
+        self.client = client
+        self.suppressed_text_keys: dict[int, set[str]] = {}
+
+    def key_down(self, event, *, repeated: bool = False) -> bool:
+        key_name = _pygame_guest_key(self.pygame, event)
+        if key_name is None:
+            self.suppressed_text_keys.pop(event.key, None)
+            return False
+        if repeated and not _pygame_repeatable_guest_key(self.pygame, event):
+            return True
+        character = _pygame_modified_character(self.pygame, event)
+        if character is not None:
+            translated = getattr(event, "unicode", "")
+            self.suppressed_text_keys[event.key] = {
+                text for text in (character, translated) if text
+            }
+        self.client.request("send_key", key=key_name)
+        return True
+
+    def key_up(self, event) -> None:
+        self.suppressed_text_keys.pop(event.key, None)
+
+    def text_input(self, event) -> bool:
+        if not event.text:
+            return False
+        if any(
+            event.text in texts for texts in self.suppressed_text_keys.values()
+        ):
+            return True
+        self.client.request("send_text", text=event.text)
+        return True
+
+    def reset(self) -> None:
+        self.suppressed_text_keys.clear()
 
 
 def apply_snapshot(terminal: VirtualTerminal, wire: dict):
@@ -56,7 +99,7 @@ def main() -> int:
         return 2
 
     pygame.init()
-    pygame.key.start_text_input()
+    _configure_keyboard(pygame)
     font = (
         pygame.font.Font(str(args.font), args.font_size)
         if args.font else pygame.font.SysFont("monospace", args.font_size)
@@ -85,6 +128,8 @@ def main() -> int:
     connected = True
     glyph_cache = {}
     running = True
+    guest_keyboard = _GuestKeyboardForwarder(pygame, client)
+    keys_down: set[int] = set()
     viewer_started = time.monotonic()
 
     try:
@@ -95,30 +140,35 @@ def main() -> int:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.TEXTINPUT:
-                    if event.text:
-                        client.request("send_text", text=event.text)
+                    guest_keyboard.text_input(event)
                 elif event.type == pygame.KEYDOWN:
-                    mods = pygame.key.get_mods()
+                    mods = _pygame_event_mods(pygame, event)
                     ctrl = bool(mods & pygame.KMOD_CTRL)
-                    if ctrl and event.key == pygame.K_q:
+                    repeated = event.key in keys_down
+                    keys_down.add(event.key)
+                    if ctrl and event.key == pygame.K_q and not repeated:
                         running = False
-                    elif ctrl and event.key == pygame.K_F5:
+                    elif ctrl and event.key == pygame.K_F5 and not repeated:
                         status = client.request("status", detailed=False)
                         method = "resume" if status["paused"] else "pause"
                         status = client.request(method)
-                    elif ctrl and event.key == pygame.K_F10:
+                    elif ctrl and event.key == pygame.K_F10 and not repeated:
                         status = client.request("pause")
                         client.request("step", count=1)
-                    elif ctrl and event.key == pygame.K_r:
+                    elif ctrl and event.key == pygame.K_r and not repeated:
                         status = client.request("reset", paused=False)
-                    elif ctrl and pygame.K_a <= event.key <= pygame.K_z:
-                        shift = bool(mods & pygame.KMOD_SHIFT)
-                        chord = "ctrl+shift+" if shift else "ctrl+"
-                        client.request("send_key", key=f"{chord}{chr(event.key)}")
-                    else:
-                        key_name = _pygame_key_name(pygame, event.key)
-                        if key_name:
-                            client.request("send_key", key=key_name)
+                    elif not (
+                        ctrl
+                        and event.key
+                        in (pygame.K_q, pygame.K_F5, pygame.K_F10, pygame.K_r)
+                    ):
+                        guest_keyboard.key_down(event, repeated=repeated)
+                elif event.type == pygame.KEYUP:
+                    keys_down.discard(event.key)
+                    guest_keyboard.key_up(event)
+                elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+                    keys_down.clear()
+                    guest_keyboard.reset()
 
             now = time.monotonic()
             if now - last_poll >= 1.0 / max(1, args.fps):
@@ -196,6 +246,100 @@ def _pygame_key_name(pygame, key: int) -> str | None:
         pygame.K_F12: "f12",
     }
     return mapping.get(key)
+
+
+def _configure_keyboard(pygame) -> None:
+    pygame.key.start_text_input()
+    pygame.key.set_repeat(KEY_REPEAT_DELAY_MS, KEY_REPEAT_INTERVAL_MS)
+
+
+def _pygame_event_mods(pygame, event) -> int:
+    mods = getattr(event, "mod", None)
+    return pygame.key.get_mods() if mods is None else mods
+
+
+def _pygame_character_name(pygame, event) -> str | None:
+    if pygame.K_a <= event.key <= pygame.K_z:
+        return chr(ord("a") + event.key - pygame.K_a)
+    if pygame.K_0 <= event.key <= pygame.K_9:
+        return chr(ord("0") + event.key - pygame.K_0)
+    if event.key == pygame.K_SPACE:
+        return "space"
+    text = getattr(event, "unicode", "")
+    if len(text) == 1 and text.isascii() and text.isprintable() and text != "+":
+        return text
+    return None
+
+
+def _pygame_modifier_names(pygame, event) -> list[str]:
+    mods = _pygame_event_mods(pygame, event)
+    if mods & getattr(pygame, "KMOD_MODE", 0):
+        return []
+    names = []
+    if mods & pygame.KMOD_CTRL:
+        names.append("ctrl")
+    if mods & pygame.KMOD_ALT:
+        names.append("alt")
+    if mods & pygame.KMOD_SHIFT:
+        names.append("shift")
+    return names
+
+
+def _pygame_modified_character(pygame, event) -> str | None:
+    modifiers = _pygame_modifier_names(pygame, event)
+    if "ctrl" not in modifiers and "alt" not in modifiers:
+        return None
+    return _pygame_character_name(pygame, event)
+
+
+def _pygame_guest_key(pygame, event) -> str | None:
+    modifiers = _pygame_modifier_names(pygame, event)
+    named = _pygame_key_name(pygame, event.key)
+    if named is not None:
+        if modifiers and named in {
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "insert",
+            "delete",
+            "pageup",
+            "pagedown",
+            "f5",
+            "f6",
+            "f7",
+            "f8",
+            "f9",
+            "f10",
+            "f11",
+            "f12",
+        }:
+            return "+".join((*modifiers, named))
+        return named
+
+    character = _pygame_modified_character(pygame, event)
+    if character is None:
+        return None
+    return "+".join((*modifiers, character))
+
+
+def _pygame_repeatable_guest_key(pygame, event) -> bool:
+    """Limit host key repeat to editing and navigation operations."""
+
+    return _pygame_key_name(pygame, event.key) in {
+        "backspace",
+        "delete",
+        "up",
+        "down",
+        "left",
+        "right",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+    }
 
 
 if __name__ == "__main__":
