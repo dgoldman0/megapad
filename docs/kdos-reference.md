@@ -92,7 +92,7 @@ aligned with 16-byte minimum.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `ALLOCATE` | `( u -- addr ior )` | Allocate *u* bytes.  Returns address and 0 on success, or 0 and -1 on failure. |
+| `ALLOCATE` | `( u -- addr ior )` | Allocate a strictly positive *u* bytes. Returns address and 0 on success, or 0 and -1 for zero, negative, unrepresentable, or unavailable sizes. |
 | `FREE` | `( addr -- )` | Free a previously allocated block.  Merges adjacent free blocks. |
 | `RESIZE` | `( addr u -- addr' ior )` | Resize an allocated block.  May move data.  Returns 0 on success. |
 | `HEAP-SETUP` | `( -- )` | Initialize the heap (called automatically on first ALLOCATE). |

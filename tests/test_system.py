@@ -8934,6 +8934,48 @@ class TestKDOSAllocator(_KDOSTestBase):
         ])
         self.assertIn("-1 ", text)
 
+    def test_extreme_allocate_sizes_fail_without_allocator_mutation(self):
+        """Negative/max-cell heap and XMEM requests fail before rounding."""
+        text = self._run_kdos([
+            "VARIABLE _AB-HEAP VARIABLE _AB-XHERE VARIABLE _AB-XFL",
+            ": _AB-FAILED?  ( addr ior -- flag )"
+            "  SWAP 0= SWAP 0<> AND ;",
+            "HEAP-FREE-BYTES _AB-HEAP !",
+            "XMEM-HERE @ _AB-XHERE !  XMEM-FL @ _AB-XFL !",
+            'CR ." [AB-BN=" -1 DMA-ALLOCATE _AB-FAILED? . ." ]"',
+            'CR ." [AB-BM=" 0x7FFFFFFFFFFFFFFF DMA-ALLOCATE '
+            '_AB-FAILED? . ." ]"',
+            'CR ." [AB-XN=" -1 ALLOCATE _AB-FAILED? . ." ]"',
+            'CR ." [AB-XM=" 0x7FFFFFFFFFFFFFFF ALLOCATE '
+            '_AB-FAILED? . ." ]"',
+            'CR ." [AB-HS=" HEAP-FREE-BYTES _AB-HEAP @ = . ." ]"',
+            'CR ." [AB-XHS=" XMEM-HERE @ _AB-XHERE @ = . ." ]"',
+            'CR ." [AB-XFS=" XMEM-FL @ _AB-XFL @ = . ." ]"',
+        ])
+        for marker in (
+            'AB-BN', 'AB-BM', 'AB-XN', 'AB-XM', 'AB-HS', 'AB-XHS', 'AB-XFS'
+        ):
+            self.assertRegex(text, rf"\[{marker}=-1\s+\]")
+
+    def test_extreme_bank0_resize_sizes_preserve_allocation(self):
+        """Bank-0 resize rejects sizes that would wrap its alignment bias."""
+        text = self._run_kdos([
+            'VARIABLE _RB-P VARIABLE _RB-FREE',
+            ': _RB-FAILED?  ( addr ior -- flag )'
+            '  SWAP 0= SWAP 0<> AND ;',
+            '64 DMA-ALLOCATE DROP DUP _RB-P !',
+            '12345 OVER ! DROP',
+            'HEAP-FREE-BYTES _RB-FREE !',
+            'CR ." [RB-N=" _RB-P @ -1 DMA-RESIZE _RB-FAILED? . ." ]"',
+            'CR ." [RB-M=" _RB-P @ 0x7FFFFFFFFFFFFFFF DMA-RESIZE '
+            '_RB-FAILED? . ." ]"',
+            'CR ." [RB-D=" _RB-P @ @ 12345 = . ." ]"',
+            'CR ." [RB-FS=" HEAP-FREE-BYTES _RB-FREE @ = . ." ]"',
+            '_RB-P @ DMA-FREE',
+        ])
+        for marker in ('RB-N', 'RB-M', 'RB-D', 'RB-FS'):
+            self.assertRegex(text, rf"\[{marker}=-1\s+\]")
+
     def test_heap_check_after_alloc(self):
         """HEAP-CHECK still true after moderate allocation."""
         text = self._run_kdos([
@@ -25414,6 +25456,56 @@ class TestKDOSExtMem(_KDOSTestBase):
             '999999999 XMEM-FREE-BLOCK',
         ])
         self.assertIn('XMEM-FREE: exceeds limit', text)
+
+    def test_xmem_extreme_allot_requests_preserve_state(self):
+        """Direct XMEM allocators reject zero, negative, and max-cell sizes."""
+        text = self._run_kdos([
+            'VARIABLE _XB-HERE VARIABLE _XB-FL',
+            'XMEM-HERE @ _XB-HERE !  XMEM-FL @ _XB-FL !',
+            ': _XB-FAILED?  ( addr ior -- flag )'
+            '  SWAP 0= SWAP 0<> AND ;',
+            'CR ." [XB-N=" -1 XMEM-ALLOT? _XB-FAILED? . ." ]"',
+            'CR ." [XB-Z=" 0 XMEM-ALLOT? _XB-FAILED? . ." ]"',
+            'CR ." [XB-M=" 0x7FFFFFFFFFFFFFFF XMEM-ALLOT? '
+            '_XB-FAILED? . ." ]"',
+            'CR ." [XB-HS=" XMEM-HERE @ _XB-HERE @ = . ." ]"',
+            'CR ." [XB-FS=" XMEM-FL @ _XB-FL @ = . ." ]"',
+        ])
+        for marker in ('XB-N', 'XB-Z', 'XB-M', 'XB-HS', 'XB-FS'):
+            self.assertRegex(text, rf"\[{marker}=-1\s+\]")
+
+        for request, error in (
+            ('-1', 'Invalid ext mem size'),
+            ('0', 'Invalid ext mem size'),
+            ('0x7FFFFFFFFFFFFFFF', 'Ext mem overflow'),
+        ):
+            aborted = self._run_kdos([
+                'VARIABLE _XD-HERE VARIABLE _XD-FL',
+                'XMEM-HERE @ _XD-HERE !  XMEM-FL @ _XD-FL !',
+                f'{request} XMEM-ALLOT DROP',
+                'CR ." [XD-HS=" XMEM-HERE @ _XD-HERE @ = . ." ]"',
+                'CR ." [XD-FS=" XMEM-FL @ _XD-FL @ = . ." ]"',
+            ])
+            self.assertIn(error, aborted)
+            self.assertRegex(aborted, r"\[XD-HS=-1\s+\]")
+            self.assertRegex(aborted, r"\[XD-FS=-1\s+\]")
+
+    def test_xmem_wrapping_free_spans_preserve_state(self):
+        """Wrapping/outside free spans abort before later input executes."""
+        for bad_free in (
+            'XMEM-LIMIT @ 16 - 0x7FFFFFFFFFFFFFFF XMEM-FREE-BLOCK',
+            'XMEM-LIMIT @ 16 XMEM-FREE-BLOCK',
+        ):
+            text = self._run_kdos([
+                'VARIABLE _XD-HERE VARIABLE _XD-FL',
+                'XMEM-HERE @ _XD-HERE !  XMEM-FL @ _XD-FL !',
+                bad_free,
+                'CR ." [XF-HS=" XMEM-HERE @ _XD-HERE @ = . ." ]"',
+                'CR ." [XF-FS=" XMEM-FL @ _XD-FL @ = . ." ]"',
+            ])
+            self.assertIn('XMEM-FREE: exceeds limit', text)
+            self.assertRegex(text, r"\[XF-HS=-1\s+\]")
+            self.assertRegex(text, r"\[XF-FS=-1\s+\]")
 
     def test_xmem_free_block_normal(self):
         """XMEM-FREE-BLOCK succeeds for a valid block (no abort)."""

@@ -216,8 +216,12 @@ VARIABLE A-SIZE       \ requested allocation size (rounded)
 \   Core-0 only — uses shared scratch variables.
 : (BANK0-ALLOCATE)  ( u -- addr ior )
     ?CORE0
+    \ Reject non-positive sizes and values whose alignment addition would
+    \ cross the signed-cell ceiling.  Validate before lazy heap setup so a
+    \ rejected request cannot mutate allocator state.
+    DUP 0< OVER 0= OR
+    OVER 0x7FFFFFFFFFFFFFF8 > OR IF DROP 0 -1 EXIT THEN
     HEAP-INIT @ 0= IF HEAP-SETUP THEN
-    DUP 0= IF DROP 0 -1 EXIT THEN
     \ Round up to 8-byte alignment, minimum 16
     7 + -8 AND  DUP 16 < IF DROP 16 THEN
     A-SIZE !
@@ -374,8 +378,11 @@ VARIABLE R-NEW     \ new requested size (rounded)
 \ Core-0 only — uses shared scratch variables.
 : (BANK0-RESIZE)  ( a1 u -- a2 ior )
     ?CORE0
+    \ Reject non-positive or unroundable sizes before adding the alignment
+    \ bias.  This keeps a wrapped request from looking like a small resize.
+    DUP 0< OVER 0= OR
+    OVER 0x7FFFFFFFFFFFFFF8 > OR IF 2DROP 0 -1 EXIT THEN
     \ Round new size
-    DUP 0= IF  2DROP 0 -1 EXIT  THEN
     7 + -8 AND  DUP 16 < IF DROP 16 THEN
     R-NEW !
     DUP /ALLOC-HDR -  R-BLK !            \ block = a1 - header
@@ -1734,7 +1741,11 @@ VARIABLE FL-NEED                     \ requested bytes during first-fit
 : XMEM-FREE-BLOCK  ( addr size -- )
     DUP 16 < ABORT" XMEM-FREE: block too small"
     OVER EXT-MEM-BASE < ABORT" XMEM-FREE: addr below base"
-    2DUP + XMEM-LIMIT @ > ABORT" XMEM-FREE: exceeds limit"
+    OVER XMEM-LIMIT @ >= ABORT" XMEM-FREE: exceeds limit"
+    \ Check size <= limit-addr before any address addition.  The old
+    \ addr+size comparison could wrap and admit a span crossing the limit.
+    2DUP SWAP XMEM-LIMIT @ SWAP - >
+    ABORT" XMEM-FREE: exceeds limit"
     OVER !                            \ addr+0 = size
     XMEM-FL @ OVER 8 + !             \ addr+8 = old head
     XMEM-FL ! ;                       \ head = addr
@@ -1790,21 +1801,27 @@ VARIABLE FL-NEED                     \ requested bytes during first-fit
 \   Tries the free-list first (first-fit), then falls back to bump.
 : XMEM-ALLOT  ( u -- addr )
     XMEM? 0= ABORT" No external memory"
+    DUP 0< OVER 0= OR ABORT" Invalid ext mem size"
     DUP (XMEM-FL-FIND) IF              \ found a recycled block
         NIP EXIT
     THEN
+    \ Prove the request fits in the remaining span before adding it to the
+    \ bump pointer; base+size must never be used as the bounds check.
+    DUP XMEM-LIMIT @ XMEM-HERE @ - > ABORT" Ext mem overflow"
     XMEM-HERE @ SWAP
-    OVER + DUP XMEM-LIMIT @ > ABORT" Ext mem overflow"
+    OVER +
     XMEM-HERE ! ;
 
 \ XMEM-ALLOT? ( u -- addr ior )  like XMEM-ALLOT but returns ior
 : XMEM-ALLOT?  ( u -- addr ior )
     XMEM? 0= IF DROP 0 -1 EXIT THEN
+    DUP 0< OVER 0= OR IF DROP 0 -1 EXIT THEN
     DUP (XMEM-FL-FIND) IF NIP 0 EXIT THEN
-    XMEM-HERE @ SWAP
-    OVER + DUP XMEM-LIMIT @ > IF
-        2DROP 0 -1 EXIT
+    DUP XMEM-LIMIT @ XMEM-HERE @ - > IF
+        DROP 0 -1 EXIT
     THEN
+    XMEM-HERE @ SWAP
+    OVER +
     XMEM-HERE ! 0 ;
 
 \ =====================================================================
@@ -1822,7 +1839,10 @@ VARIABLE FL-NEED                     \ requested bytes during first-fit
 : ALLOCATE  ( u -- addr ior )
     XMEM? IF
         ?CORE0
-        DUP 0= IF DROP 0 -1 EXIT THEN
+        \ The aligned payload plus its 8-byte prefix must remain a positive
+        \ signed cell.  Reject before either addition or free-list search.
+        DUP 0< OVER 0= OR
+        OVER 0x7FFFFFFFFFFFFFF0 > OR IF DROP 0 -1 EXIT THEN
         \ Round to 8-byte alignment, minimum 16, add 8-byte prefix
         7 + -8 AND DUP 16 < IF DROP 16 THEN 8 +  ( total )
         DUP XMEM-ALLOT?                  ( total addr ior )

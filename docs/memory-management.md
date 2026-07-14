@@ -99,6 +99,9 @@ sorted order and coalesces adjacent blocks.
 - **Region:** Bank 0, above `HERE`, below the data stack.
 - **Cost:** O(n) where n = number of free blocks.
 - **Constraint:** core-0 only (`?CORE0` guard).
+- **Size contract:** requests must be strictly positive. Values that cannot be
+  aligned and represented in a signed cell fail before heap or free-list state
+  changes.
 
 ```forth
 1024 ALLOCATE ABORT" OOM"   ( addr )
@@ -131,6 +134,7 @@ Simple pointer-advance allocators for the two large memory regions.
 
 ```forth
 XMEM-ALLOT   ( u -- addr )   \ bump-allocate u bytes
+XMEM-ALLOT?  ( u -- addr ior ) \ checked form; 0/-1 on failure
 XMEM-RESET   ( -- )          \ reset pointer to floor (bulk free)
 XMEM-FREE    ( -- u )        \ bytes remaining
 .XMEM        ( -- )          \ print status
@@ -145,6 +149,13 @@ pointer.  First-fit reuse splits larger blocks when the remainder can
 hold another free-list node, so small requests do not consume an entire
 large reclaimed allocation.  `XMEM-RESET` clears the free-list along
 with the pointer.
+
+XMEM allocation sizes are strictly positive. `XMEM-ALLOT` aborts on an
+invalid or out-of-range request, while `XMEM-ALLOT?` returns `0 -1`. Bounds
+checks compare the request with `limit - current` before advancing the bump
+pointer, so cell overflow cannot turn a huge request into an in-range address.
+`XMEM-FREE-BLOCK` applies the analogous `size <= limit - addr` rule before
+writing free-list metadata; a rejected span leaves the list unchanged.
 
 **Floor protection:** `XMEM-FLOOR` marks the boundary between
 kernel-reserved XMEM allocations (file buffers loaded at boot) and
