@@ -25291,6 +25291,29 @@ class TestKDOSAutoexec(_KDOSTestBase):
         # Should NOT print "Running autoexec.f"
         self.assertNotIn('Running autoexec.f', text)
 
+    def test_autoexec_lookup_clears_entire_name_buffer(self):
+        """Stale bytes after the filename must not suppress boot lookup."""
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.inject_file(
+            "autoexec.f",
+            b'." AUTOEXEC-LOOKUP-OK" CR\n',
+            ftype=FTYPE_FORTH,
+        )
+        fs.save(img)
+        try:
+            text = self._run_kdos(
+                [
+                    "FS-LOAD",
+                    "NAMEBUF 24 88 FILL",
+                    "_AUTOEXEC-RUN",
+                ],
+                storage_image=img,
+            )
+            self.assertIn("AUTOEXEC-LOOKUP-OK", text)
+        finally:
+            os.unlink(img)
+
 
 # ---------------------------------------------------------------------------
 #  External Memory Allocator (§1.12a) tests
