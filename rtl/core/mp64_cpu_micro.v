@@ -358,6 +358,12 @@ module mp64_cpu_micro (
                     if (ibuf_len == 4'd0) begin
                         if (instr_len(bus_rdata[7:0], ext_active) == 4'd1)
                             cpu_state <= CPU_DECODE;
+                    end else if (ibuf_len == 4'd1 && ibuf[0] == 8'hFB &&
+                                 crypto_is_bare(bus_rdata[7:0])) begin
+                        // EXT.CRYPTO advertises its three-byte maximum from
+                        // byte zero. Bare sub-ops complete after byte one.
+                        ibuf_need <= 4'd2;
+                        cpu_state <= CPU_DECODE;
                     end else if (ibuf_len + 4'd1 >= ibuf_need) begin
                         cpu_state <= CPU_DECODE;
                     end
@@ -392,7 +398,20 @@ module mp64_cpu_micro (
                         // EXT.CRYPTO — dispatch to cluster-shared engines
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
-                        if (ibuf[1][7:4] == 4'd0) begin
+                        if (ibuf[1][7:4] == 4'd0 &&
+                            ibuf[1][3:0] > ISA_CRC_SEED) begin
+                            // Reserved CRC sub-ops are fail-closed two-byte
+                            // instructions, matching full cores/emulators.
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel];
+                            flags[6] <= 1'b0;
+                            ivec_id  <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            ext_active <= 1'b0;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else if (ibuf[1][7:4] == 4'd0) begin
                             // CRC unit (0) → cluster CRC arbiter
                             crc_req    <= 1'b1;
                             crc_op     <= ibuf[1][3:0];
@@ -766,11 +785,14 @@ module mp64_cpu_micro (
                             CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
                             CSR_CL_IVTBASE,
                             CSR_BARRIER_ARRIVE, CSR_BARRIER_STATUS,
-                            CSR_CRC_ACC, CSR_CRC_MODE,
                             CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI: begin
                                 cl_csr_wen   <= 1'b1;
                                 cl_csr_wdata <= R[nib[2:0]];
                             end
+                            // Shared CRC state is mutated only through the
+                            // arbitrated ISA transaction. Raw CSR writes are
+                            // deliberately ignored on micro-cores.
+                            CSR_CRC_ACC, CSR_CRC_MODE: ;
                             // IVT base is cluster-shared — write goes to cluster
                             CSR_IVTBASE: begin
                                 cl_csr_wen   <= 1'b1;

@@ -74,7 +74,7 @@ Not a resource concern on any target.
 
 | Category           | Topology               | Rationale                            |
 |--------------------|------------------------|--------------------------------------|
-| CRC32/CRC64        | **Per-core ISA + cluster-shared (hw lock)** | 1-cycle combinational; MMIO removed, cluster arbiter for micro-cores |
+| CRC (32/64-bit modes) | **Per-core ISA + cluster-shared (hw lock)** | 1-cycle combinational; MMIO removed, cluster arbiter for micro-cores |
 | SHA-256/384/512    | **Per-core ISA (EXT.CRYPTO FB)** | 64–80 round compute; parallel TLS needs per-core |
 | Field ALU (multi-prime) | **Per-core ISA (EXT.CRYPTO FB)** | Inner-loop field ops; 3-cycle bus overhead per op is 4× compute |
 | AES-256-GCM, SHA-3/SHAKE, NTT, KEM, WOTS+ | Shared (1 instance) | Large state / multi-phase protocols |
@@ -1354,9 +1354,9 @@ Proposed layout with SHA-256/512 widened and CRC relocated:
 | 0x8A0–0x8BF   | 32 B   | **WOTS+ Chain Accel** | **new (§7)** |
 | 0x8C0–0x8FF   | 64 B   | NTT                 | existing   |
 | 0x900–0x93F   | 64 B   | KEM                 | existing   |
-| 0x940–0x9BF   | 128 B  | *(free — SHA-2 removed)* | ✅ SHA-2 is now ISA-only |
+| 0x940–0x9BF   | 128 B  | *(free — SHA-2/CRC removed)* | ✅ Both are ISA-only |
 | 0x9C0–0x9FF   | 64 B   | *(free)*            |            |
-| 0xA00–0xA1F   | 32 B   | *(free — CRC removed)* | ✅ CRC is now ISA-only |
+| 0xA00–0xA1F   | 32 B   | *(free)*            |            |
 | 0xA20–0xA7F   | 96 B   | **Trace readout portal** | **new** |
 | 0xA80–0xAFF   | 128 B  | *(free — future)*   |            |
 | 0xB00–0xB1F   | 32 B   | RTC                 | existing   |
@@ -1368,8 +1368,9 @@ as tightly-coupled sub-modules, like the multiplier.  They are not on
 the MMIO bus at all and require no cluster wrapper ports.
 
 **Crypto migration (Appendix B):** CRC, SHA-2, and Field ALU MMIO
-instances are **all removed**.  All cores use per-core ISA instructions
-(EXT.CRYPTO FB); micro-cores share via cluster hardware-lock arbiter.
+instances are **all removed**. Full cores use EXT.CRYPTO instructions.
+For CRC specifically, micro-core clusters share one ISA engine protected by
+a transaction lock; CRC state is not replicated per micro-core.
 Their former MMIO slots (0x840, 0x940, 0x980) are freed.
 
 The main MMIO map carries only shared peripherals (AES, SHA-3, NTT,
@@ -1843,15 +1844,15 @@ REX-extended register indices, and flag updates.)*
 
 ## Appendix B — Core-Integrated Crypto ISA Extension (EXT.CRYPTO, prefix FB)
 
-> **Status:** Pre-implementation design.  NOT in `isa-reference.md` yet.
-> Encodings may change.  Move to ISA doc only after emulator + RTL
-> implementation is committed and tested.
+> **Reference boundary:** The implemented encodings are authoritative in
+> `docs/isa-reference.md`. This appendix retains the architecture rationale
+> and implementation topology.
 
 ### B.0  Rationale: Why Move Crypto Into the Core
 
-Five crypto primitives currently live as shared MMIO peripherals: CRC,
+Five crypto primitives formerly lived as shared MMIO peripherals: CRC,
 SHA-256, SHA-384, SHA-512, and the Field ALU (GF(2²⁵⁵−19) / multi-prime).
-Moving them into per-core ISA instructions eliminates:
+Moving them into core ISA instructions eliminated:
 
 1. **Bus round-trip overhead** — MMIO writes cost 1 cycle bus request +
    1 cycle bus grant + 1 cycle device ack = 3 cycles minimum per register
@@ -1867,9 +1868,10 @@ chain accelerator, TRNG.  These have state footprints (1600-bit Keccak state,
 AES key schedule, NTT polynomial arrays) or algorithmic structures
 (multi-phase KEM protocol) that don't map cleanly to core registers.
 
-**Micro-cores:** All EXT.CRYPTO instructions trap as `ILLEGAL_OP`.
-Micro-cores share per-core ISA engines via the cluster hardware-lock
-arbiter (same as CRC).
+**Micro-cores:** CRC instructions use one engine per cluster behind a
+hardware transaction lock. Reserved CRC sub-operations trap as
+`ILLEGAL_OP`; CRC CSR writes are ignored and reads expose shared cluster
+state. Other EXT.CRYPTO units have their own implementation constraints.
 
 **Per-core area cost:**
 
@@ -1934,39 +1936,61 @@ sub-op [3:0] = operation within unit
 
 ### B.3  CRC Instructions (sub-ops 0x00–0x0F)
 
-CRC state is a new per-core 64-bit CSR: **CRC_ACC** at CSR address
-**0x80**.  This replaces the entire MMIO CRC device for cores that
-have the crypto ISA extension.
+Full cores keep CRC state privately. Micro-core clusters share a 64-bit
+CRC_ACC and CRC_MODE through an owner-arbitrated ISA engine. This replaces
+the former MMIO CRC device.
 
 | Encoding | Mnemonic | Bytes | Cycles | Description |
 |----------|----------|-------|--------|-------------|
-| `FB 00` | **CRC.INIT** | 2 | 1 | `CRC_ACC ← 0xFFFF_FFFF` (CRC32 init).  Clears state. |
+| `FB 00` | **CRC.INIT** | 2 | 1 | Load the selected mode's all-ones initial accumulator. |
 | `FB 01 DR` | **CRC.B Rd, Rs** | 3 | 1 | Feed byte: `CRC_ACC ← crc_step(CRC_ACC, R[s][7:0])`.  Rd ← `CRC_ACC` (updated value). |
-| `FB 02 DR` | **CRC.Q Rd, Rs** | 3 | 1 | Feed 8 bytes: `CRC_ACC ← crc_step×8(CRC_ACC, R[s][63:0])`.  Rd ← `CRC_ACC`. |
-| `FB 03 DR` | **CRC.FIN Rd, Rs** | 3 | 1 | Finalize: `Rd ← CRC_ACC ^ mask`.  (mask = `0xFFFF_FFFF` for CRC32/C, all-ones for CRC64). |
-| `FB 04 imm8` | **CRC.MODE imm8** | 3 | 1 | Set polynomial: `imm8[1:0]`: 0=CRC32, 1=CRC32C, 2=CRC64-ECMA.  Latches polynomial for subsequent CRC ops. |
-| `FB 05`–`0F` | *(reserved)* | | | |
+| `FB 02 DR` | **CRC.Q Rd, Rs** | 3 | 1 | Feed `R[s]` as eight bytes, least-significant byte first. Rd ← updated CRC_ACC. |
+| `FB 03 DR` | **CRC.FIN Rd, Rs** | 3 | 1 | XOR-out and write the finalized value to CRC_ACC and Rd atomically. Rs is ignored. |
+| `FB 04 imm8` | **CRC.MODE imm8** | 3 | 1 | Select mode only when the complete imm8 is 0, 1, or 2; every other value selects mode 0. |
+| `FB 05 DR` | **CRC.SEED Rd, Rs** | 3 | 1 | Load a mode-width seed from Rs and return the stored value in Rd (32-bit modes zero-extend `Rs[31:0]`). |
+| `FB 06`–`0F` | *(reserved)* | 2 | — | Trap as `ILLEGAL_OP`. |
 
-**CRC_MODE** is a 2-bit per-core register (alongside CRC_ACC).  Default
-after reset: mode=0 (CRC32), CRC_ACC=0xFFFFFFFF.
+All modes are MSB-first and non-reflected. Their complete parameter tuples
+and canonical check values are:
+
+| Mode | Parameterization | Width | Polynomial | Init | XOR-out | `"123456789"` |
+|------|------------------|-------|------------|------|---------|-----------------|
+| 0 | CRC-32/BZIP2 | 32 | `0x04C11DB7` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0xFC891918` |
+| 1 | Castagnoli polynomial, non-reflected | 32 | `0x1EDC6F41` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0x05440F15` |
+| 2 | CRC-64/WE parameters | 64 | `0x42F0E1EBA9EA3693` | `0xFFFFFFFFFFFFFFFF` | `0xFFFFFFFFFFFFFFFF` | `0x62EC59E3F1A4F00A` |
+
+Mode 1 is not the commonly reflected CRC-32C tuple. Mode 2 uses the ECMA
+polynomial but is not CRC-64/ECMA-182, whose init and XOR-out are zero.
+After reset, mode=0 and CRC_ACC=`0xFFFFFFFF`.
+
+On a shared micro engine, MODE, INIT, and SEED acquire or retain the
+transaction lock. Another core's CRC instruction waits and retries until the
+owner executes FIN. FIN commits the finalized accumulator and releases the
+lock in the same grant.
+
+Traps and software exception unwinding do not implicitly release this lock.
+The owner must resume and execute FIN (it may reinitialize first), or the
+cluster must be reset/disabled; callers must not treat CRC ownership as an
+exception-safe region.
 
 **Pipeline:** Pure combinational.  CRC.B uses an 8-bit lookup table
 (~40 LUTs).  CRC.Q uses an 8-byte-wide parallel CRC circuit (~300 LUTs).
-No stalling — result available same cycle.
+The datapath result is available in one engine cycle. Micro-cores can stall
+for cluster arbitration or while another transaction owner holds the engine.
 
 **New CSRs:**
 
 | CSR Addr | Name | Width | R/W | Description |
 |----------|------|-------|-----|-------------|
-| `0x80` | **CRC_ACC** | 64 | RW | Running CRC accumulator |
-| `0x81` | **CRC_MODE** | 2 | RW | Polynomial select (0/1/2) |
+| `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized accumulator; micro writes are ignored |
+| `0x81` | **CRC_MODE** | 64 | RW full / R micro | Full-core writes accept exactly 0/1/2 and map every other complete value to 0; micro writes are ignored |
 
 **Flags:** None modified.
 
-**Example — CRC32 of a 512-byte sector:**
+**Example — mode-0 CRC of a 512-byte sector:**
 
 ```asm
-CRC.MODE  0           ; FB 04 00 — select CRC32
+CRC.MODE  0           ; FB 04 00 — select mode 0 (CRC-32/BZIP2 tuple)
 CRC.INIT              ; FB 00    — init to 0xFFFFFFFF
 ; R4 = src address, R5 = 64 (iterations for 512 bytes / 8 bytes each)
 .loop:
@@ -1976,7 +2000,7 @@ CRC.INIT              ; FB 00    — init to 0xFFFFFFFF
     DEC  R5
     BR.NE .loop
 CRC.FIN R0, R0        ; FB 03 00 — finalize into R0
-; R0 = CRC32 of sector
+; R0 = mode-0 CRC of sector
 ```
 
 64 iterations × 1 cycle = 64 cycles for 512 bytes (vs ~118 cycles
@@ -2156,12 +2180,12 @@ of field ops per signature.
 
 | Range | Unit | Count | Status |
 |-------|------|-------|--------|
-| `0x00–0x0F` | CRC32/CRC64 | 5 used, 11 reserved | Proposed |
+| `0x00–0x0F` | CRC | 6 used, 10 reserved | Implemented |
 | `0x10–0x1F` | SHA-2 (256/384/512) | 7 used, 9 reserved | Proposed |
 | `0x20–0x2F` | Field ALU (multi-prime) | 14 used, 2 reserved | Proposed |
 | `0x30–0xFF` | *(free — 208 slots)* | | Future |
 
-**Total new instructions: 26** (5 CRC + 7 SHA-2 + 14 Field ALU).
+**Total new instructions: 27** (6 CRC + 7 SHA-2 + 14 Field ALU).
 
 ---
 
@@ -2169,8 +2193,8 @@ of field ops per signature.
 
 | CSR Addr | Name | Width | R/W | Description |
 |----------|------|-------|-----|-------------|
-| `0x80` | CRC_ACC | 64 | RW | Running CRC accumulator |
-| `0x81` | CRC_MODE | 2 | RW | Polynomial select |
+| `0x80` | CRC_ACC | 64 | RW full / R micro | Running or finalized CRC accumulator; micro writes ignored |
+| `0x81` | CRC_MODE | 64 | RW full / R micro | Exact 0/1/2 selection; other full-core writes become 0, micro writes ignored |
 | `0x82` | SHA_MODE | 2 | RW | SHA-2 algorithm select |
 | `0x83` | SHA_MSGLEN | 64 | RW | Message length (low) |
 | `0x84` | SHA_MSGLEN_HI | 64 | RW | Message length (high) |
@@ -2189,6 +2213,7 @@ CSR range 0x80–0x8F reserved for crypto.  6 used, 10 free.
 | CRC.Q | FB 02 DR | 3 | 4 |
 | CRC.FIN | FB 03 DR | 3 | 4 |
 | CRC.MODE | FB 04 imm8 | 3 | — |
+| CRC.SEED | FB 05 DR | 3 | 4 |
 | SHA.INIT | FB 10 imm8 | 3 | — |
 | SHA.ROUND | FB 11 | 2 | — |
 | SHA.PAD | FB 12 | 2 | — |
@@ -2220,22 +2245,19 @@ CSR writes and tile loads.
 
 ### B.9  MMIO Migration Plan
 
-When the ISA extension is implemented, the shared MMIO peripherals for
-CRC, SHA-256, and Field ALU become **redundant for full cores**.  The
-migration is:
-
-| Phase | Action | Status |
-|-------|--------|--------|
-| **1 — Coexistence** | Both MMIO and ISA paths exist.  BIOS crypto words detect core type (full vs micro) and dispatch accordingly.  Full cores use ISA; micro-cores use MMIO (via bus). | ✅ All done |
-| **2 — MMIO deprecation** | Once all crypto BIOS words use ISA on full cores, the shared MMIO instances are only needed for micro-cores (if they do crypto at all).  If they don't, the MMIO blocks can be removed entirely. | ✅ All done |
-| **3 — Area recovery** | Removing shared CRC + SHA-256 + Field ALU MMIO blocks saves ~8K gates + MMIO bus decode logic.  This partially offsets the per-core replication cost. | ✅ All done |
+The shared MMIO peripherals for CRC, SHA-2, and the Field ALU have been
+removed. BIOS words use EXT.CRYPTO on every supported core: full cores keep
+private CRC state, while micro-cores use their cluster-shared CRC engine.
+There is no legacy micro-core MMIO fallback or runtime core-type dispatch.
 
 **CRC MMIO removal (DONE):** `mp64_crc.v` is no longer instantiated
 anywhere.  The MMIO address at 0x980 is freed.  `CRCDevice` removed
 from the emulator.  BIOS CRC words rewritten to use ISA instructions.
 Micro-cores access CRC through the cluster-shared `mp64_crc_isa`
-engine with a hardware-lock arbiter (CRC.INIT acquires, CRC.FIN
-releases).
+engine with a hardware-lock arbiter. CRC.MODE, CRC.INIT, and CRC.SEED
+acquire or retain ownership; CRC.FIN commits the final value and releases
+ownership atomically. The micro-core CRC CSRs are read-only views of shared
+state and ignore writes.
 
 **SHA-2 MMIO removal (DONE):** `mp64_sha256.v` removed from SoC and
 FPGA synthesis.  MMIO address 0x940 freed.  SHA256Device removed from
@@ -2252,7 +2274,7 @@ gf.mul/gf.x25519 etc).
 | Range | Former Peripheral | New Status |
 |-------|-------------------|------------|
 | 0x840–0x87F | Field ALU | **Freed** |
-| 0x940–0x9BF | SHA-256/384/512 | **Freed** |
+| 0x940–0x97F | SHA-256/384/512 | **Freed** |
 | 0x980–0x9BF | CRC (original) | **Freed** |
 
 The WOTS+ chain accelerator (§7, MMIO 0x8A0) remains shared — it's a
@@ -2265,7 +2287,7 @@ to a core instruction.
 
 | Category | Current | Proposed | Rationale |
 |----------|---------|----------|-----------|
-| CRC32/CRC64 | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA + cluster-shared (hw lock)** | ✅ DONE — MMIO removed, cluster arbiter for micro-cores |
+| CRC (32/64-bit modes) | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA + cluster-shared (hw lock)** | ✅ DONE — MMIO removed, cluster arbiter for micro-cores |
 | SHA-256/384/512 | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
 | Field ALU | ~~Shared MMIO~~ **REMOVED** | **Per-core ISA (EXT.CRYPTO)** | ✅ DONE — MMIO removed, per-core ISA |
 | AES-256-GCM | Shared MMIO | Shared MMIO | Large key schedule; AES-NI style would need 240-byte state per core |
@@ -2292,7 +2314,7 @@ elif ext_op == 0xFB:
 
     if unit == 0x0:  # --- CRC ---
         if op == 0x0:    # CRC.INIT
-            crc_acc = 0xFFFFFFFF if crc_mode < 2 else 0xFFFFFFFFFFFFFFFF
+            crc_acc = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
         elif op == 0x1:  # CRC.B
             rd, rs = decode_DR(ibuf[2])
             crc_acc = crc_update_byte(crc_acc, R[rs] & 0xFF, crc_mode)
@@ -2304,10 +2326,19 @@ elif ext_op == 0xFB:
             R[rd] = crc_acc
         elif op == 0x3:  # CRC.FIN
             rd, rs = decode_DR(ibuf[2])
-            mask = 0xFFFFFFFF if crc_mode < 2 else 0xFFFFFFFFFFFFFFFF
-            R[rd] = crc_acc ^ mask
+            mask = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
+            crc_acc ^= mask
+            R[rd] = crc_acc
         elif op == 0x4:  # CRC.MODE
-            crc_mode = ibuf[2] & 0x03
+            value = ibuf[2]
+            crc_mode = value if value in (0, 1, 2) else 0
+        elif op == 0x5:  # CRC.SEED
+            rd, rs = decode_DR(ibuf[2])
+            mask = 0xFFFFFFFFFFFFFFFF if crc_mode == 2 else 0xFFFFFFFF
+            crc_acc = R[rs] & mask
+            R[rd] = crc_acc
+        else:
+            trap(ILLEGAL_OP)
 
     elif unit == 0x1:  # --- SHA-2 ---
         if op == 0x0:    # SHA.INIT
@@ -2361,12 +2392,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
    BRAM, and hashing rarely coincides with tile compute.  If it does,
    caller saves/restores TSRC0.
 
-2. **CRC.Q byte order:** Should CRC.Q process R[s] bytes in LE order
-   (byte 0 = bits 7:0 first) or memory order?  **Recommendation:** LE
-   (native word order) — matches `LDN` which loads LE from memory.
-   Software that needs big-endian CRC can BSWAP first.
-
-3. **Field ALU DSP48 sharing:** Each core gets its own 256×256
+2. **Field ALU DSP48 sharing:** Each core gets its own 256×256
    multiplier, which is the biggest resource cost (~40 DSP48 per core,
    ~160 total for 4 cores).  Alternative: share a single multiplier
    with round-robin access (saves ~120 DSP48 but adds 3-cycle latency
@@ -2477,7 +2503,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 ### §8 — MMIO Map
 
 - [x] Map documented and updated
-- [x] Crypto ISA migration annotated (Field ALU, SHA-2, CRC → per-core)
+- [x] Crypto ISA migration annotated (full-core private and cluster-shared topology)
 
 ### §9 — Bus Arbiter MMIO/MEM ACK Timeout
 
@@ -2506,10 +2532,10 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] B.0: Rationale + per-core area budget
 - [x] B.1: EXT prefix slot map updated (FB assigned)
 - [x] B.2: Encoding scheme (sub-op high/low nibble split)
-- [x] B.3: CRC ISA spec (5 instructions, 2 new CSRs)
+- [x] B.3: CRC ISA spec (6 instructions, 2 CRC CSRs)
 - [x] B.4: SHA-2 ISA spec (7 instructions, 3 new CSRs)
 - [x] B.5: Field ALU ISA spec (14 instructions, 1 new CSR)
-- [x] B.6: Sub-op map (26 total instructions)
+- [x] B.6: Sub-op map (27 total instructions)
 - [x] B.7: New CSR summary (0x80–0x85)
 - [x] B.8: Instruction length summary
 - [x] B.9: MMIO migration plan (3 phases)
@@ -2519,7 +2545,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 - [x] Emulator: CRC ISA instructions (EXT.CRYPTO FB 0x–0F)
 - [x] Emulator: SHA-2 ISA instructions (EXT.CRYPTO FB 1x) (2026-03-10)
 - [x] Emulator: Field ALU ISA instructions (EXT.CRYPTO FB 2x) (2026-03-11)
-- [x] RTL: per-core CRC datapath
+- [x] RTL: CRC datapath per full core and per micro-core cluster
 - [x] RTL: per-core SHA-2 datapath (mp64_sha2_isa.v + tb, 7/7 NIST) (2026-03-10)
 - [x] RTL: per-core Field ALU datapath (mp64_field_alu_isa.v + tb, 33/33) (2026-03-11)
 - [x] RTL: instruction decode for FB prefix

@@ -57,6 +57,7 @@ from megapad64 import (
     CSR_BIST_CMD, CSR_BIST_STATUS, CSR_PRIV,
     CSR_MPU_BASE, CSR_MPU_LIMIT,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT,
+    CSR_CRC_ACC, CSR_CRC_MODE,
     CSR_D, CSR_DF, CSR_Q, CSR_T,
     CSR_IVT_BASE, CSR_IE, CSR_ICACHE_CTRL,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
@@ -4057,6 +4058,110 @@ class TestMicroCluster(unittest.TestCase):
         mc = Megapad64Micro(core_id=7, num_cores=16)
         self.assertEqual(mc.csr_read(CSR_COREID), 7)
         self.assertEqual(mc.csr_read(CSR_NCORES), 16)
+
+    def test_crc_reserved_subop_traps_as_two_byte_instruction(self):
+        """Reserved CRC opcodes fail closed without consuming a third byte."""
+        mc = Megapad64Micro(mem_size=1024, core_id=4, num_cores=16)
+        mc.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+        mc.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            mc.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+        self.assertEqual(mc.pc, 2)
+
+    def test_cluster_crc_owner_stalls_and_retries_distinct_mode(self):
+        """A losing MODE request retries only after the owner finalizes."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        owner, contender = cl.cores[0], cl.cores[1]
+        owner.load_bytes(0, assemble("crc.mode 0\ncrc.fin r4, r0\nhalt"))
+        contender.load_bytes(0x100, assemble("crc.mode 1\nhalt"))
+        owner.pc = 0
+        contender.pc = 0x100
+
+        owner.step()
+        self.assertTrue(cl.crc_locked)
+        self.assertEqual(cl.crc_owner, 0)
+        self.assertEqual(cl.crc_mode, 0)
+
+        contender.step()
+        self.assertEqual(contender.pc, 0x100)
+        self.assertEqual(cl.crc_owner, 0)
+        self.assertEqual(cl.crc_mode, 0)
+
+        owner.step()
+        self.assertFalse(cl.crc_locked)
+        self.assertEqual(cl.crc_acc, 0)
+
+        contender.step()
+        self.assertTrue(cl.crc_locked)
+        self.assertEqual(cl.crc_owner, 1)
+        self.assertEqual(cl.crc_mode, 1)
+        self.assertEqual(contender.pc, 0x103)
+
+    def test_cluster_crc_contended_rex_instruction_rewinds_prefix(self):
+        """A stalled REX+CRC operand instruction retries from its prefix."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        owner, contender = cl.cores[0], cl.cores[1]
+        owner.load_bytes(0, assemble("crc.mode 0\ncrc.fin r4, r0\nhalt"))
+        contender.load_bytes(0x100, assemble("crc.b r16, r17\nhalt"))
+        owner.pc = 0
+        contender.pc = 0x100
+        contender.regs[17] = 0x41
+
+        owner.step()
+        contender.step()
+        self.assertEqual(contender.pc, 0x100)
+        self.assertEqual(contender._ext_modifier, -1)
+
+        owner.step()
+        contender.step()
+        self.assertEqual(contender.pc, 0x104)
+        self.assertEqual(contender.regs[16], cl.crc_acc)
+
+    def test_cluster_crc_csrs_are_shared_read_only_snapshots(self):
+        """All micro-cores see shared CRC state; CSR writes are ignored."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.crc_acc = 0x0123_4567_89AB_CDEF
+        cl.crc_mode = 2
+        for mc in cl.cores:
+            self.assertEqual(mc.csr_read(CSR_CRC_ACC), cl.crc_acc)
+            self.assertEqual(mc.csr_read(CSR_CRC_MODE), 2)
+            mc.csr_write(CSR_CRC_ACC, 0)
+            mc.csr_write(CSR_CRC_MODE, 0)
+        self.assertEqual(cl.crc_acc, 0x0123_4567_89AB_CDEF)
+        self.assertEqual(cl.crc_mode, 2)
+
+    def test_cluster_crc_reset_on_enable_disable_and_boot(self):
+        """Cluster reset boundaries clear both CRC state and ownership."""
+        mem = bytearray(1 << 20)
+        cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.crc_acc = 7
+        cl.crc_mode = 2
+        cl.crc_locked = True
+        cl.crc_owner = 3
+        cl.set_enabled(True)
+        self.assertEqual((cl.crc_acc, cl.crc_mode), (0xFFFF_FFFF, 0))
+        self.assertFalse(cl.crc_locked)
+        self.assertIsNone(cl.crc_owner)
+
+        cl.crc_acc = 9
+        cl.crc_mode = 1
+        cl.crc_locked = True
+        cl.crc_owner = 0
+        cl.set_enabled(False)
+        self.assertEqual((cl.crc_acc, cl.crc_mode), (0xFFFF_FFFF, 0))
+        self.assertFalse(cl.crc_locked)
+
+        sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=1)
+        sys.clusters[0].crc_acc = 11
+        sys.clusters[0].crc_locked = True
+        sys.clusters[0].crc_owner = 0
+        sys.boot()
+        self.assertEqual(sys.clusters[0].crc_acc, 0xFFFF_FFFF)
+        self.assertFalse(sys.clusters[0].crc_locked)
 
     def test_mex_traps_on_standalone_micro_core(self):
         """MEX (tile engine) raises ILLEGAL_OP on standalone micro-cores (no cluster)."""
@@ -10477,6 +10582,18 @@ class TestKDOSExceptions(_KDOSTestBase):
 class TestKDOSCRC(_KDOSTestBase):
     """Tests for §1.3 CRC convenience words (CRC-BUF, CRC32-BUF, etc.)."""
 
+    @staticmethod
+    def _crc32_msb(data, seed=0xFFFFFFFF):
+        acc = seed
+        for byte in data:
+            acc ^= byte << 24
+            for _ in range(8):
+                if acc & 0x80000000:
+                    acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+                else:
+                    acc = (acc << 1) & 0xFFFFFFFF
+        return acc ^ 0xFFFFFFFF
+
     def test_crc32_8_bytes(self):
         """CRC32-BUF of 8 identical bytes matches reference."""
         # 8 bytes of 0x41 ('A') → CRC32 = 0xF59A903A = 4120547386
@@ -10547,8 +10664,23 @@ class TestKDOSCRC(_KDOSTestBase):
         ])
         self.assertIn("0 ", text)
 
+    def test_crc_authoritative_123456789_vectors(self):
+        """All public buffer helpers match their canonical check vector."""
+        lines = ["CREATE crc-check 9 ALLOT"]
+        for index, byte in enumerate(b"123456789"):
+            lines.append(f"{byte} crc-check {index} + C!")
+        lines.extend([
+            "crc-check 9 CRC32-BUF .",
+            "crc-check 9 CRC32C-BUF .",
+            "crc-check 9 CRC64-BUF .",
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("4236843288 ", text)
+        self.assertIn("88346389 ", text)
+        self.assertIn("7128171145767219210 ", text)
+
     def test_crc_primitives_direct(self):
-        """Low-level CRC primitives work: POLY!, INIT!, FEED, RESET, FINAL, @."""
+        """Legacy FINAL/@ remains compatible with the atomic ISA final."""
         text = self._run_kdos([
             "0 CRC-POLY!",
             "0xFFFFFFFF CRC-INIT!",
@@ -10558,6 +10690,109 @@ class TestKDOSCRC(_KDOSTestBase):
         ])
         # Same as CRC32 of 8 'A' bytes
         self.assertIn("4120547386 ", text)
+
+    def test_crc32_exact_tails_1_through_7(self):
+        """CRC32-BUF hashes tail bytes without adding zero padding."""
+        data = b"ABCDEFG"
+        lines = [
+            "CREATE crc-tail 8 ALLOT",
+            "crc-tail 8 0 FILL",
+        ]
+        for index, byte in enumerate(data):
+            lines.append(f"{byte} crc-tail {index} + C!")
+        for length in range(1, 8):
+            lines.append(f"crc-tail {length} CRC32-BUF .")
+        text = self._run_kdos(lines)
+        expected = [self._crc32_msb(data[:length]) for length in range(1, 8)]
+        for value in expected:
+            self.assertIn(f"{value} ", text)
+
+    def test_crc_arbitrary_seed_and_atomic_final_fetch(self):
+        """CRC-INIT! honors its seed and CRC-FINAL@ returns it atomically."""
+        seed = 0x12345678
+        expected = self._crc32_msb(b"A", seed)
+        text = self._run_kdos([
+            "0 CRC-POLY!",
+            f"{seed} CRC-INIT!",
+            "65 CRC-FEED-BYTE",
+            "CRC-FINAL@ .",
+        ])
+        self.assertIn(f"{expected} ", text)
+
+    def test_crc_mixed_quad_and_byte_tail(self):
+        """The accelerated quad path composes with exact byte tails."""
+        expected = self._crc32_msb(b"ABCDEFGHIJK")
+        text = self._run_kdos([
+            "0 CRC-POLY!",
+            "0xFFFFFFFF CRC-INIT!",
+            "0x4847464544434241 CRC-FEED",
+            "73 CRC-FEED-BYTE",
+            "74 CRC-FEED-BYTE",
+            "75 CRC-FEED-BYTE",
+            "CRC-FINAL@ .",
+        ])
+        self.assertIn(f"{expected} ", text)
+
+    def test_accelerated_crc_seed_and_invalid_mode(self):
+        """C++ CRC validates full mode values and width-masks seeds."""
+        for invalid_mode in (3, 5, 0xFF):
+            with self.subTest(path="instruction", value=invalid_mode):
+                code = assemble(
+                    f"crc.mode {invalid_mode}\n"
+                    "crc.init\n"
+                    "csrr r6, 0x81\n"
+                    "halt\n"
+                )
+                cpu = Megapad64(mem_size=4096)
+                cpu.load_bytes(0, code)
+                cpu.run(max_steps=100)
+                self.assertEqual(cpu.regs[6], 0)
+
+            with self.subTest(path="csr", value=invalid_mode):
+                code = assemble(
+                    f"ldi64 r2, {invalid_mode}\n"
+                    "csrw 0x81, r2\n"
+                    "csrr r6, 0x81\n"
+                    "halt\n"
+                )
+                cpu = Megapad64(mem_size=4096)
+                cpu.load_bytes(0, code)
+                cpu.run(max_steps=100)
+                self.assertEqual(cpu.regs[6], 0)
+
+        code = assemble(
+            "crc.mode 0\n"
+            "ldi64 r2, 0xDEADBEEF89ABCDEF\n"
+            "crc.seed r2, r2\n"
+            "csrr r7, 0x80\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[7], 0x89ABCDEF)
+
+        code = assemble(
+            "crc.mode 2\n"
+            "ldi64 r2, 0xDEADBEEF89ABCDEF\n"
+            "crc.seed r2, r2\n"
+            "csrr r7, 0x80\n"
+            "halt\n"
+        )
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, code)
+        cpu.run(max_steps=100)
+        self.assertEqual(cpu.regs[7], 0xDEADBEEF89ABCDEF)
+
+    def test_accelerated_crc_reserved_subop_traps(self):
+        """The C++ core rejects reserved CRC op 6 after exactly two bytes."""
+        cpu = Megapad64(mem_size=4096)
+        cpu.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+        cpu.pc = 0
+        with self.assertRaises(TrapError) as ctx:
+            cpu.step()
+        self.assertEqual(ctx.exception.ivec_id, IVEC_ILLEGAL_OP)
+        self.assertEqual(cpu.pc, 2)
 
 
 class TestKDOSDiagnostics(_KDOSTestBase):

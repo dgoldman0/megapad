@@ -577,16 +577,23 @@ These emit the corresponding MEX instruction or CSR access inline.
 | `TILE-TEST@` | `( -- n )` | Read tile self-test result |
 | `TILE-DETAIL@` | `( -- n )` | Read tile self-test failure detail bitmask |
 
-### CRC Engine
+### CRC Engine (8 BIOS words)
+
+These are ISA-backed CRC words, not tile operations. Full cores have private
+CRC state; a micro-core cluster shares an owner-arbitrated CRC engine. The
+exact mode tuples and transaction semantics are defined in
+[isa-reference.md](isa-reference.md).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-POLY!` | `( n -- )` | Select polynomial (0=CRC32, 1=CRC32C, 2=CRC64) |
-| `CRC-INIT!` | `( n -- )` | Set initial CRC value |
-| `CRC-FEED` | `( n -- )` | Feed 8 bytes of data |
-| `CRC@` | `( -- n )` | Read current CRC value |
-| `CRC-RESET` | `( -- )` | Reset CRC engine |
-| `CRC-FINAL` | `( -- )` | Finalize CRC (XOR-out) |
+| `CRC-POLY!` | `( n -- )` | Select mode 0/1/2; every other complete value selects mode 0 |
+| `CRC-INIT!` | `( n -- )` | Acquire and load a mode-width seed |
+| `CRC-FEED` | `( n -- )` | Feed 8 bytes, least-significant byte first |
+| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` |
+| `CRC@` | `( -- n )` | Read current shared or private CRC_ACC |
+| `CRC-RESET` | `( -- )` | Reset to the mode's all-ones initial value |
+| `CRC-FINAL` | `( -- )` | Finalize and release; separate `CRC@` can race on shared engines |
+| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result |
 
 ---
 

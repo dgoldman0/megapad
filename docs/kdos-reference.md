@@ -122,15 +122,28 @@ therefore never be inherited by the next coroutine to use the slot.
 
 ### §1.3 CRC Integration
 
-Convenience wrappers over the BIOS CRC accelerator.
+Convenience wrappers over the BIOS CRC ISA words. `CRC-BUF` feeds exact
+buffer length: full 8-byte chunks use `CRC-FEED`, and a 0–7 byte tail uses
+`CRC-FEED-BYTE` without zero padding. The result-producing wrappers use
+`CRC-FINAL@`, so finalization and final-value capture are one shared-engine
+operation.
+
+These wrappers do not make ownership exception-safe. On a micro-core, a
+caller that begins a CRC transaction must still reach `CRC-FINAL@`; a trap or
+`THROW` does not release the cluster lock.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-BUF` | `( addr len mode -- crc )` | Compute CRC of a buffer.  *mode*: 0=CRC-32, 1=CRC-32C, 2=CRC-64. |
-| `CRC32` | `( addr len -- crc )` | CRC-32 of a buffer (shortcut for mode 0). |
-| `CRC32C` | `( addr len -- crc )` | CRC-32C of a buffer (shortcut for mode 1). |
-| `CRC64` | `( addr len -- crc )` | CRC-64 of a buffer (shortcut for mode 2). |
-| `.CRC` | `( addr len -- )` | Print all three CRC values for a buffer. |
+| `CRC-BUF` | `( addr len -- )` | Feed a buffer into the active CRC transaction, using 8-byte acceleration plus exact byte tails. |
+| `CRC32-BUF` | `( addr len -- crc )` | Mode 0 CRC-32/BZIP2 tuple over a buffer. |
+| `CRC32C-BUF` | `( addr len -- crc )` | Mode 1 non-reflected Castagnoli tuple over a buffer. |
+| `CRC64-BUF` | `( addr len -- crc )` | Mode 2 CRC-64/WE tuple over a buffer. |
+| `CRC32-STR` | `( c-addr len -- crc )` | Readability alias for `CRC32-BUF`. |
+| `.CRC32` | `( addr len -- )` | Print `CRC32-BUF` in hexadecimal while preserving the caller's numeric base. |
+
+All three modes are MSB-first/non-reflected and use all-ones init and
+XOR-out. The exact polynomials and `"123456789"` check values are specified
+in the [ISA reference](isa-reference.md).
 
 ---
 

@@ -254,6 +254,7 @@ module tb_cpu_smoke;
     endtask
 
     integer i;
+    integer saw_illegal;
 
     // ====================================================================
     // Test program loader
@@ -461,6 +462,76 @@ module tb_cpu_smoke;
         run_to_halt;
         check_reg("SUB: R4", 4, 64'd0);
         check_flags_z("SUB: Z flag", 1'b1);
+
+        // -----------------------------------------------------------------
+        // Test 9: bare EXT.CRYPTO length on the full core.
+        // CRC.INIT is exactly two bytes; the following INC must not be
+        // consumed as a phantom register/immediate byte.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'hFB; mem[1] = 8'h00;  // CRC.INIT (bare, 2 bytes)
+        mem[2] = 8'h15;                   // INC R5
+        mem[3] = 8'h02;                   // HALT
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        check_reg("bare CRC.INIT preserves next opcode", 5, 64'd1);
+
+        // -----------------------------------------------------------------
+        // Test 10: CRC_MODE CSR validates the complete 64-bit value.
+        // Values 5 and 0xFF must not alias modes 1 and 3 after truncation.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0]  = 8'h60; mem[1]  = 8'h20; mem[2]  = 8'h05; // LDI R2,5
+        mem[3]  = 8'hDA; mem[4]  = 8'h81;                  // CSRW CRC_MODE,R2
+        mem[5]  = 8'hD5; mem[6]  = 8'h81;                  // CSRR R5,CRC_MODE
+        mem[7]  = 8'h60; mem[8]  = 8'h20; mem[9]  = 8'hFF; // LDI R2,FF
+        mem[10] = 8'hDA; mem[11] = 8'h81;                  // CSRW CRC_MODE,R2
+        mem[12] = 8'hD6; mem[13] = 8'h81;                  // CSRR R6,CRC_MODE
+        mem[14] = 8'h02;                                    // HALT
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        check_reg("CRC_MODE CSR rejects 5", 5, 64'd0);
+        check_reg("CRC_MODE CSR rejects FF", 6, 64'd0);
+
+        // -----------------------------------------------------------------
+        // Test 11: reserved CRC sub-op 6 is a two-byte illegal instruction.
+        // The following INC is neither fetched as an operand nor executed.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'hFB; mem[1] = 8'h06;  // reserved CRC op (2 bytes)
+        mem[2] = 8'h15;                   // INC R5 (must not execute)
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        saw_illegal = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(posedge clk);
+            if (uut.ivec_id == IRQX_ILLEGAL_OP) begin
+                saw_illegal = 1;
+                i = 200;
+            end
+        end
+        if (!saw_illegal) begin
+            $display("FAIL [reserved CRC op did not trap]");
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+        check_reg("reserved CRC op length", 3, 64'd2);
+        check_reg("reserved CRC op preserves next opcode", 5, 64'd0);
 
         // =================================================================
         $display("===========================================");

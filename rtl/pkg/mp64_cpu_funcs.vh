@@ -9,6 +9,7 @@
 // Provides:
 //   cond_eval()  — condition code evaluator for BR/LBR/SKIP
 //   instr_len()  — instruction byte length decoder
+//   crypto_is_bare() — identify two-byte EXT.CRYPTO instructions
 //
 
 // ========================================================================
@@ -50,6 +51,29 @@ function cond_eval;
             4'hE: cond_eval = |ef_val;
             4'hF: cond_eval = 1'b0;
             default: cond_eval = 1'b0;
+        endcase
+    end
+endfunction
+
+// EXT.CRYPTO is the only family whose length depends on its second byte.
+// CPU fetchers initially reserve the three-byte maximum, then use this
+// predicate after fetching the sub-op.
+function crypto_is_bare;
+    input [7:0] sub_op;
+    begin
+        case (sub_op)
+            8'h00,                         // CRC.INIT
+            8'h06, 8'h07, 8'h08, 8'h09,  // reserved CRC ops trap as
+            8'h0A, 8'h0B, 8'h0C, 8'h0D,  // complete two-byte encodings
+            8'h0E, 8'h0F,
+            8'h11, 8'h12, 8'h15,          // SHA.ROUND/PAD/FINAL
+            8'h20, 8'h21, 8'h22, 8'h23,  // GF.ADD/SUB/MUL/SQR
+            8'h24, 8'h25, 8'h26,          // GF.INV/POW/MULR
+            8'h27, 8'h28,                 // GF.MAC/MACR
+            8'h2A, 8'h2C, 8'h2D:          // GF.CEQ/LDPRIME/X25519
+                crypto_is_bare = 1'b1;
+            default:
+                crypto_is_bare = 1'b0;
         endcase
     end
 endfunction

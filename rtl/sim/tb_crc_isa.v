@@ -1,8 +1,8 @@
 // ============================================================================
-// tb_crc_isa.v — Testbench for mp64_crc_isa (CRC32/CRC32C/CRC64 ISA engine)
+// tb_crc_isa.v — Testbench for the 32/64-bit CRC ISA parameter tuples
 // ============================================================================
 //
-// Tests the standalone combinational CRC ISA module with all 5 sub-ops
+// Tests the standalone combinational CRC ISA module with all 6 sub-ops
 // across all 3 polynomial modes.  Test vectors match the Python emulator.
 //
 `timescale 1ns / 1ps
@@ -130,6 +130,22 @@ module tb_crc_isa;
         end
     endtask
 
+    task check_123456789;
+        input [255:0] label;
+        input [1:0]   mode_value;
+        input [63:0]  init_value;
+        input [63:0]  expected;
+        begin
+            sim_acc  = init_value;
+            sim_mode = mode_value;
+            feed_byte(8'h31); feed_byte(8'h32); feed_byte(8'h33);
+            feed_byte(8'h34); feed_byte(8'h35); feed_byte(8'h36);
+            feed_byte(8'h37); feed_byte(8'h38); feed_byte(8'h39);
+            do_fin;
+            check_result(label, expected, 1'b1);
+        end
+    endtask
+
     initial begin
         pass_count = 0;
         fail_count = 0;
@@ -166,9 +182,16 @@ module tb_crc_isa;
         imm8 = 8'd2;
         check_mode("CRC.MODE 2", 2'd2, 1'b1);
 
+        // Every complete imm8 other than 1/2 canonicalizes to mode 0.
+        imm8 = 8'd3;
+        check_mode("CRC.MODE 3 canonicalizes to mode 0", 2'd0, 1'b1);
+        imm8 = 8'd5;
+        check_mode("CRC.MODE 5 does not alias mode 1", 2'd0, 1'b1);
+        imm8 = 8'hFF;
+        check_mode("CRC.MODE FF canonicalizes to mode 0", 2'd0, 1'b1);
+
         // ================================================================
-        // 5. CRC32 of byte 'A' (0x41)
-        //    Known CRC32 of single byte "A" = 0xD3D99E8B
+        // 5. Mode-0 CRC of byte 'A' (0x41)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
         sim_mode = 2'd0;
@@ -177,8 +200,7 @@ module tb_crc_isa;
         check_result("CRC32 'A' FIN", 64'h0000_0000_81B0_2D8B, 1'b1);
 
         // ================================================================
-        // 6. CRC32 of "ABCD" (4 bytes)
-        //    CRC32("ABCD") = 0xDB1720A5
+        // 6. Mode-0 CRC of "ABCD" (4 bytes)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
         sim_mode = 2'd0;
@@ -235,7 +257,7 @@ module tb_crc_isa;
         end
 
         // ================================================================
-        // 9. CRC.FIN does NOT modify accumulator
+        // 9. CRC.FIN atomically stores and returns the finalized value
         // ================================================================
         sim_acc  = 64'h0000_0000_DEAD_BEEF;
         sim_mode = 2'd0;
@@ -243,8 +265,9 @@ module tb_crc_isa;
         crc_acc_in  = sim_acc;
         crc_mode_in = sim_mode;
         #1;
-        if (acc_we !== 1'b0) begin
-            $display("FAIL [CRC.FIN no acc_we]: acc_we=%b expected=0", acc_we);
+        if (acc_we !== 1'b1 || crc_acc_out !== result) begin
+            $display("FAIL [CRC.FIN atomic publish]: acc_we=%b acc=%016h result=%016h",
+                     acc_we, crc_acc_out, result);
             fail_count = fail_count + 1;
         end else begin
             pass_count = pass_count + 1;
@@ -280,17 +303,16 @@ module tb_crc_isa;
         end
 
         // ================================================================
-        // 12. CRC32C of 'A' (0x41)
-        //     CRC32C("A") = 0x30BA986A
+        // 12. Mode-1 non-reflected Castagnoli CRC of 'A' (0x41)
         // ================================================================
         sim_acc  = 64'h0000_0000_FFFF_FFFF;
         sim_mode = 2'd1;
         feed_byte(8'h41);
         do_fin;
-        check_result("CRC32C 'A' FIN", 64'h0000_0000_7B18_0D8C, 1'b1);
+        check_result("CRC mode 1 'A' FIN", 64'h0000_0000_7B18_0D8C, 1'b1);
 
         // ================================================================
-        // 13. CRC64 of 'A' (0x41)
+        // 13. Mode-2 CRC-64/WE parameters over 'A' (0x41)
         //     Full 64-bit init, single byte, finalize
         // ================================================================
         sim_acc  = 64'hFFFF_FFFF_FFFF_FFFF;
@@ -322,20 +344,95 @@ module tb_crc_isa;
         end
 
         // ================================================================
-        // 15. Reserved sub-op (0x5) → no writes
+        // 15. Mixed CRC.Q + CRC.B tail matches eleven CRC.B operations
         // ================================================================
-        op          = 4'd5;
+        sim_acc  = 64'h0000_0000_1234_5678;
+        sim_mode = 2'd0;
+        feed_quad(64'h48474645_44434241); // "ABCDEFGH"
+        feed_byte(8'h49);
+        feed_byte(8'h4A);
+        feed_byte(8'h4B);
+        begin : crc32_mixed_check
+            reg [63:0] mixed_acc;
+            reg [63:0] byte_acc;
+            integer bi;
+            mixed_acc = sim_acc;
+            byte_acc = 64'h0000_0000_1234_5678;
+            op = ISA_CRC_B;
+            crc_mode_in = 2'd0;
+            for (bi = 0; bi < 11; bi = bi + 1) begin
+                crc_acc_in = byte_acc;
+                rs_val = 8'h41 + bi;
+                #1;
+                byte_acc = crc_acc_out;
+            end
+            if (mixed_acc !== byte_acc) begin
+                $display("FAIL [CRC.Q + 3 CRC.B]: mixed=%016h bytes=%016h",
+                         mixed_acc, byte_acc);
+                fail_count = fail_count + 1;
+            end else begin
+                pass_count = pass_count + 1;
+            end
+        end
+
+        // ================================================================
+        // 16. CRC.SEED masks to the active algorithm width
+        // ================================================================
+        op          = ISA_CRC_SEED;
+        rs_val      = 64'h0123_4567_89AB_CDEF;
+        crc_acc_in  = 64'd0;
+        crc_mode_in = 2'd0;
+        #1;
+        if (!acc_we || !rd_we ||
+            crc_acc_out !== 64'h0000_0000_89AB_CDEF ||
+            result !== 64'h0000_0000_89AB_CDEF) begin
+            $display("FAIL [CRC.SEED 32-bit mask]: acc=%016h result=%016h acc_we=%b rd_we=%b",
+                     crc_acc_out, result, acc_we, rd_we);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        crc_mode_in = 2'd2;
+        #1;
+        if (!acc_we || !rd_we ||
+            crc_acc_out !== 64'h0123_4567_89AB_CDEF ||
+            result !== 64'h0123_4567_89AB_CDEF) begin
+            $display("FAIL [CRC.SEED 64-bit preserve]: acc=%016h result=%016h acc_we=%b rd_we=%b",
+                     crc_acc_out, result, acc_we, rd_we);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        // ================================================================
+        // 17. Reserved sub-op (0x6) → no writes
+        // ================================================================
+        op          = 4'd6;
         rs_val      = 64'h1234;
         crc_acc_in  = 64'h0000_0000_FFFF_FFFF;
         crc_mode_in = 2'd0;
         #1;
         if (acc_we !== 1'b0 || mode_we !== 1'b0 || rd_we !== 1'b0) begin
-            $display("FAIL [reserved sub-op 5]: writes asserted (acc_we=%b mode_we=%b rd_we=%b)",
+            $display("FAIL [reserved sub-op 6]: writes asserted (acc_we=%b mode_we=%b rd_we=%b)",
                      acc_we, mode_we, rd_we);
             fail_count = fail_count + 1;
         end else begin
             pass_count = pass_count + 1;
         end
+
+        // ================================================================
+        // 18. Authoritative check vectors for every complete parameter tuple
+        // ================================================================
+        check_123456789("mode 0 vector 123456789", 2'd0,
+                        64'h0000_0000_FFFF_FFFF,
+                        64'h0000_0000_FC89_1918);
+        check_123456789("mode 1 vector 123456789", 2'd1,
+                        64'h0000_0000_FFFF_FFFF,
+                        64'h0000_0000_0544_0F15);
+        check_123456789("mode 2 vector 123456789", 2'd2,
+                        64'hFFFF_FFFF_FFFF_FFFF,
+                        64'h62EC_59E3_F1A4_F00A);
 
         // ================================================================
         // Summary

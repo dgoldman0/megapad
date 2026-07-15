@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **445** entries.  The numbered
+The live dictionary link chain contains **447** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -547,16 +547,18 @@ of compiled code.
 | 223 | `PERF-EXTMEM` | `( -- n )` | | Read external memory beat counter (CSR 0x6B) |
 | 224 | `PERF-RESET` | `( -- )` | | Reset all perf counters and re-enable (CSR 0x6C ← 3) |
 
-### CRC Engine (6 words) — ISA-native (EXT.CRYPTO `FB`)
+### CRC Engine (8 words) — ISA-native (EXT.CRYPTO `FB`)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 225 | `CRC-POLY!` | `( n -- )` | | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64 (`crc.poly`) |
-| 226 | `CRC-INIT!` | `( n -- )` | | Reset CRC accumulator (`crc.init`) |
-| 227 | `CRC-FEED` | `( n -- )` | | Feed 8 bytes of data into CRC engine (`crc.din`) |
-| 228 | `CRC@` | `( -- n )` | | Read current CRC result (CSR 0x80 CRC_ACC) |
-| 229 | `CRC-RESET` | `( -- )` | | Reset CRC to initial value (`crc.init`) |
-| 230 | `CRC-FINAL` | `( -- )` | | Finalize CRC with XOR-out (`crc.fin`, result → CSR 0x80) |
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CRC-POLY!` | `( n -- )` | Select mode 0/1/2 with `crc.mode` and begin/retain a transaction; every other complete value selects mode 0 |
+| `CRC-INIT!` | `( n -- )` | Acquire with `crc.init`, then load a mode-width seed with `crc.seed` |
+| `CRC-FEED` | `( n -- )` | Feed 8 bytes in little-endian order with `crc.q` |
+| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` with `crc.b` |
+| `CRC@` | `( -- n )` | Read CRC_ACC (raw during a transaction, finalized after FIN) |
+| `CRC-RESET` | `( -- )` | Acquire and reset to the selected mode's all-ones default |
+| `CRC-FINAL` | `( -- )` | Finalize into CRC_ACC and release; a subsequent `CRC@` can race another shared-engine owner |
+| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result; authoritative shared-core final read |
 
 ### Memory BIST (5 words)
 
@@ -743,7 +745,7 @@ of compiled code.
 | RTC / System Clock | 7 |
 | Multicore | 11 |
 | Performance Counters | 5 |
-| CRC Engine | 6 |
+| CRC Engine | 8 |
 | Memory BIST | 5 |
 | Tile Self-Test | 3 |
 | Stride / 2D Addressing | 6 |
@@ -758,56 +760,20 @@ of compiled code.
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
-| **Catalogued subtotal** | **364** |
+| **Catalogued subtotal** | **366** |
 
 ### All Immediate Words (34)
 
 `;` `IF` `ELSE` `THEN` `BEGIN` `UNTIL` `WHILE` `REPEAT` `DO` `LOOP` `+LOOP` `AGAIN` `LEAVE` `UNLOOP` `EXIT` `>R` `R>` `R@` `2>R` `2R>` `2R@` `[` `LITERAL` `S"` `."` `\` `(` `TO` `POSTPONE` `RECURSE` `[CHAR]` `ABORT"` `DOES>` `[']`
 
-### Dictionary Chain Order (link chain: last → first)
+### Newest Dictionary Chain Segment (last → earlier)
+
+The complete authoritative link chain is the `.dq` chain in `bios.asm`.
+The appended CRC ABI entries preserve all older entry positions and form this
+newest segment:
 
 ```
-TASK-ID → #TASKS → BACKGROUND3 → BACKGROUND2 → TASK? → TASK-STOP → BACKGROUND → TASK-YIELD → PAUSE →
-CRC-DMA-LEN! → CRC-DMA! → CCRC32 → CRC-DMA →
-SHA256-DOUT@ → SHA256-STATUS@ → SHA256-FINAL → SHA256-UPDATE → SHA256-INIT →
-SHA3-SQUEEZE-NEXT → SHA3-SQUEEZE → SHA3-MODE@ → SHA3-MODE! →
-SHA3-STATUS@ → SHA3-FINAL → SHA3-UPDATE → SHA3-INIT →
-AES-KEY-MODE! → AES-TAG! → AES-TAG@ → AES-DOUT@ → AES-DIN! → AES-STATUS@ → AES-CMD! →
-AES-DATA-LEN! → AES-AAD-LEN! → AES-IV! → AES-KEY! →
-ICACHE-MISSES → ICACHE-HITS → ICACHE-INV → ICACHE-OFF → ICACHE-ON →
-BF16-MODE → FP16-MODE → TSTORE2D → TLOAD2D → TTILE-W! → TTILE-H! →
-TSTRIDE-R@ → TSTRIDE-R! → TILE-DETAIL@ → TILE-TEST@ → TILE-TEST →
-BIST-FAIL-DATA → BIST-FAIL-ADDR → BIST-STATUS → BIST-QUICK → BIST-FULL →
-CRC-FINAL → CRC-RESET → CRC@ → CRC-FEED → CRC-INIT! → CRC-POLY! →
-PERF-RESET → PERF-EXTMEM → PERF-TILEOPS → PERF-STALLS → PERF-CYCLES →
-CORE-STATUS → WAKE-CORE → SPIN! → SPIN@ → MBOX@ → MBOX! → IPI-ACK →
-IPI-STATUS → IPI-SEND → NCORES → COREID →
-FSLOAD → QUIT → >NUMBER → DOES> → 2R@ → 2R> → 2>R → POSTPONE → TO →
-VALUE → RECURSE → [CHAR] → CHAR → COMPARE → EVAL-TOKEN → EVAL-THROW →
-EVAL-DEPTH → EVAL-COLUMN → EVAL-LINE → EVAL-STATUS → EVALUATOR-UNWIND →
-EVALUATOR-RESET → EVALUATE-FINISH →
-EVALUATE-CHECKED → EVALUATE → >IN → SOURCE →
-FIND → WITHIN → MOVE → COUNT → 2/ → LEAVE → ABORT" → ABORT → TALIGN →
-UCHAR → .ZSTR → L! → L@ → W! → W@ → OFF → U> → U< → <= → >= → 2ROT →
-2SWAP → 2OVER → LATEST → WORD → FALSE → TRUE → BL → -ROT → CMOVE →
-2* → +! → CELL+ → CELLS → MAX → MIN → ?DUP → 0<> → <> → 0> → S" →
-CREATE → IMMEDIATE → LITERAL → ] → [ → STATE → AGAIN → +LOOP → UNLOOP →
-J → R@ → R> → >R → EXIT → ( → \ → ISR! → DI! → EI! → RTC-ACK →
-RTC-ALARM! → RTC-CTRL! → RTC! → EPOCH@ → MS@ → RTC@ → TIMER-ACK →
-TIMER-CTRL! → TIMER! → DISK-FLUSH → DISK-WRITE → DISK-READ → DISK-N! → DISK-DMA! →
-DISK-SEC! → DISK@ → NET-MAC@ → NET-RECV → NET-SEND → NET-STATUS →
-ACCEPT → ." → SPACES → SPACE → TYPE → CONSTANT → VARIABLE → I → LOOP →
-DO → REPEAT → WHILE → UNTIL → BEGIN → THEN → ELSE → IF → ; → : → ' →
-EXECUTE → TCTRL@ → TMODE@ → TABS → TDOTACC → TFMA → TMAC → TWMUL →
-TMAXIDX → TMINIDX → TSUMSQ → TEMAX → TEMIN → TL1 → TPOPCNT →
-ACC3@ → ACC2@ → ACC1@ → ACC@ → CYCLES → TZERO → TTRANS → TMAX → TMIN →
-TSUM → TDOT → TMUL → TXOR → TOR → TAND → TSUB → TADD → TCTRL! →
-TMODE! → TDST! → TSRC1! → TSRC0! → TFILL → TVIEW → TI → FILL → DUMP →
-BYE → WORDS → BASE → DECIMAL → HEX → .S → U. → . → CR → KEY? → KEY →
-EMIT → C, → , → ALLOT → HERE → C! → C@ → ! → @ → 0< → 0= → > → < →
-= → RSHIFT → LSHIFT → INVERT → XOR → OR → AND → 1- → 1+ → ABS →
-NEGATE → /MOD → MOD → / → * → - → + → ROLL → PICK → DEPTH → 2DROP → 2DUP →
-TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
+TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-REQUEST → … → DUP
 ```
 
 ### MMIO Address Map
@@ -827,7 +793,7 @@ TUCK → NIP → ROT → OVER → SWAP → DROP → DUP
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-256~~ | Removed — now per-core ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`) |
-| `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now per-core ISA (`crc.init`/`crc.poly`/`crc.din`/`crc.fin`) |
+| `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |
 
 ### Memory Layout

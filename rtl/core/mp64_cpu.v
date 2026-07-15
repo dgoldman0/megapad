@@ -617,6 +617,11 @@ module mp64_cpu #(
             CPU_FETCH: begin
                 if (irq_pending && ibuf_len == 5'd0) begin
                     cpu_state <= CPU_IRQ;
+                end else if (ibuf_len >= 5'd2 && ibuf[0] == 8'hFB &&
+                             crypto_is_bare(ibuf[1]) && ibuf_need != 4'd2) begin
+                    // EXT.CRYPTO length is selected by its second byte.
+                    // Correct the initial three-byte maximum before decode.
+                    ibuf_need <= 4'd2;
                 end else if (ibuf_len >= {1'b0, ibuf_need}) begin
                     cpu_state <= CPU_DECODE;
                 end else begin
@@ -754,14 +759,30 @@ module mp64_cpu #(
                         // EXT.CRYPTO — 2 or 3-byte instruction
                         //   ibuf[1] = sub-op: [7:4]=unit, [3:0]=op
                         //   ibuf[2] = DR or imm8 (3-byte ops only)
-                        crypto_unit_r  <= ibuf[1][7:4];
-                        crypto_op_r    <= ibuf[1][3:0];
-                        crypto_rd_r    <= {rex_d, ibuf[2][7:4]};
-                        crypto_rs_r    <= {rex_s, ibuf[2][3:0]};
-                        crypto_imm_r   <= ibuf[2];
-                        crypto_active  <= 1'b1;
-                        ext_active     <= 1'b0;
-                        cpu_state      <= CPU_EXECUTE;
+                        if (ibuf[1][7:4] == 4'd0 &&
+                            ibuf[1][3:0] > ISA_CRC_SEED) begin
+                            // Reserved CRC sub-ops are fail-closed two-byte
+                            // instructions, consistent with the emulators.
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            mem_data <= R[psel] + {60'd0, ibuf_need};
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            ext_active <= 1'b0;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
+                            crypto_unit_r  <= ibuf[1][7:4];
+                            crypto_op_r    <= ibuf[1][3:0];
+                            crypto_rd_r    <= {rex_d, ibuf[2][7:4]};
+                            crypto_rs_r    <= {rex_s, ibuf[2][3:0]};
+                            crypto_imm_r   <= ibuf[2];
+                            crypto_active  <= 1'b1;
+                            ext_active     <= 1'b0;
+                            cpu_state      <= CPU_EXECUTE;
+                        end
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -1295,7 +1316,10 @@ module mp64_cpu #(
                                 end
                             end
                             CSR_CRC_ACC:  crc_acc  <= R[nib[2:0]];
-                            CSR_CRC_MODE: crc_mode <= R[nib[2:0]][1:0];
+                            CSR_CRC_MODE:
+                                crc_mode <= (R[nib[2:0]] == 64'd1) ? 2'd1
+                                          : (R[nib[2:0]] == 64'd2) ? 2'd2
+                                          :                               2'd0;
                             CSR_ACC0:     acc_reg[0] <= R[nib[2:0]];
                             CSR_ACC1:     acc_reg[1] <= R[nib[2:0]];
                             CSR_ACC2:     acc_reg[2] <= R[nib[2:0]];

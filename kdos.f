@@ -678,20 +678,22 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 \  §1.3  CRC Convenience Words
 \ =====================================================================
 \
-\  The BIOS provides six CRC primitives that talk directly to the
-\  hardware CRC accelerator (MMIO at +0x0980):
-\    CRC-POLY!  ( n -- )       0=CRC32, 1=CRC32C, 2=CRC64
+\  The BIOS provides eight primitives backed by the CRC ISA accelerator:
+\    CRC-POLY!  ( n -- )       0=BZIP2 tuple, 1=non-reflected Castagnoli,
+\                              2=CRC-64/WE parameters
 \    CRC-INIT!  ( n -- )       initial CRC value
 \    CRC-FEED   ( n -- )       feed 8 bytes (LE 64-bit cell)
+\    CRC-FEED-BYTE ( b -- )    feed exactly one byte
 \    CRC@       ( -- n )       current CRC result
 \    CRC-RESET  ( -- )         reset to init value
 \    CRC-FINAL  ( -- )         XOR-out (finalize)
+\    CRC-FINAL@ ( -- n )       atomically finalize and return result
 \
 \  Below we build high-level words on top of those primitives.
 
 \ CRC-BUF ( addr u -- )  Feed u bytes from addr into the CRC engine.
-\   Processes full 8-byte chunks via CRC-FEED, then zero-pads and
-\   feeds any remaining 1..7 bytes.
+\   Processes full 8-byte chunks via CRC-FEED, then feeds each remaining
+\   byte exactly once.  No padding bytes become part of the checksum.
 : CRC-BUF  ( addr u -- )
     \ Process full 8-byte chunks using BEGIN/WHILE/REPEAT
     BEGIN  DUP 8 >=  WHILE
@@ -700,20 +702,12 @@ _TASK-HANDLERS 4 CELLS 0 FILL
         8 -
     REPEAT
     \ Remaining bytes: 0..7
-    DUP 0 > IF
-        \ Build a zero-padded 64-bit LE cell from remaining bytes.
-        \ Byte 0 → bits 0..7, byte 1 → bits 8..15, etc.
-        0 SWAP         ( addr cell rem )
-        0 DO
-            OVER I + C@   ( addr cell byte )
-            I 3 LSHIFT LSHIFT  ( addr cell byte<<shift )
-            OR            ( addr cell' )
-        LOOP
-        CRC-FEED
-        DROP
-    ELSE
-        2DROP
-    THEN
+    BEGIN  DUP 0 >  WHILE
+        OVER C@ CRC-FEED-BYTE
+        SWAP 1+ SWAP
+        1-
+    REPEAT
+    2DROP
 ;
 
 \ CRC32-BUF ( addr u -- crc )  Compute CRC-32 of a buffer.
@@ -721,24 +715,21 @@ _TASK-HANDLERS 4 CELLS 0 FILL
     0 CRC-POLY!
     0xFFFFFFFF CRC-INIT!
     CRC-BUF
-    CRC-FINAL
-    CRC@ ;
+    CRC-FINAL@ ;
 
-\ CRC32C-BUF ( addr u -- crc )  Compute CRC-32C of a buffer.
+\ CRC32C-BUF ( addr u -- crc )  Compute mode-1 non-reflected Castagnoli CRC.
 : CRC32C-BUF
     1 CRC-POLY!
     0xFFFFFFFF CRC-INIT!
     CRC-BUF
-    CRC-FINAL
-    CRC@ ;
+    CRC-FINAL@ ;
 
-\ CRC64-BUF ( addr u -- crc )  Compute CRC-64-ECMA of a buffer.
+\ CRC64-BUF ( addr u -- crc )  Compute CRC-64/WE of a buffer.
 : CRC64-BUF
     2 CRC-POLY!
     0xFFFFFFFFFFFFFFFF CRC-INIT!
     CRC-BUF
-    CRC-FINAL
-    CRC@ ;
+    CRC-FINAL@ ;
 
 \ CRC32-STR ( c-addr u -- crc )  CRC-32 of a counted/addr+len string.
 \   Same as CRC32-BUF, just an alias for readability.

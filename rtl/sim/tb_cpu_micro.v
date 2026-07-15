@@ -99,6 +99,10 @@ module tb_cpu_micro;
     wire        mul_req;
     wire [3:0]  mul_op;
     wire [63:0] mul_a, mul_b;
+    wire        crc_req;
+    wire [3:0]  crc_op;
+    wire [63:0] crc_rs_val;
+    wire [7:0]  crc_imm8;
     wire [7:0]  cl_csr_addr;
     wire        cl_csr_wen;
     wire [63:0] cl_csr_wdata;
@@ -124,10 +128,19 @@ module tb_cpu_micro;
         .mul_b     (mul_b),
         .mul_result(128'd0),
         .mul_done  (1'b0),
+        .crc_req   (crc_req),
+        .crc_op    (crc_op),
+        .crc_rs_val(crc_rs_val),
+        .crc_imm8  (crc_imm8),
+        .crc_result(64'd0),
+        .crc_done  (crc_req),
+        .crc_rd_we_in(1'b0),
         .cl_csr_addr  (cl_csr_addr),
         .cl_csr_wen   (cl_csr_wen),
         .cl_csr_wdata (cl_csr_wdata),
-        .cl_csr_rdata (64'd0)
+        .cl_csr_rdata (64'd0),
+        .cl_ivt_base  (64'h100),
+        .cl_priv_level(1'b0)
     );
 
     // ========================================================================
@@ -135,6 +148,7 @@ module tb_cpu_micro;
     // ========================================================================
     integer pass, fail, timeout;
     integer i;
+    integer saw_illegal;
 
     task clear_mem;
         integer j;
@@ -332,7 +346,7 @@ module tb_cpu_micro;
         mem[16'h03] = 8'h60; mem[16'h04] = 8'h60; mem[16'h05] = 8'h05;  // LDI R6, 5
         mem[16'h06] = 8'h15;                                              // INC R5
         mem[16'h07] = 8'h77; mem[16'h08] = 8'h56;                        // CMP R5, R6
-        mem[16'h09] = 8'h32; mem[16'h0A] = 8'hFF;                        // BR NE, -1
+        mem[16'h09] = 8'h32; mem[16'h0A] = 8'hFB;                        // BR NE, -5
         mem[16'h0B] = 8'h02;                                              // HALT
         reset_cpu;
         wait_halt(2000);
@@ -344,92 +358,24 @@ module tb_cpu_micro;
         end
 
         // ============================================================
-        // TEST 7: MULDIV trap — MUL should trigger illegal opcode
+        // TEST 7: a stripped MEMALU opcode raises ILLEGAL_OP.
+        // cl_ivt_base is wired to 0x100; IVEC 4 points to 0x120.
         // ============================================================
-        $display("Test 7: MULDIV trap");
+        $display("Test 7: stripped MEMALU trap");
         clear_mem;
-        // Set up IVT at address 0x100
-        // LDI R0, 0      → 0x60 0x00 0x00
-        // LDI R1, 1      → 0x60 0x10 0x01   (use as temp for IVT setup)
-        // First, write CSR IVTBASE = 0x100
-        //   LDI R0, 0    → (R0 will hold IVT base value)
-        //   ADDI R0, 0   → we need R0 = 0x100
-        //   Actually: LDI R0, 0x00 → then we need 0x100
-        //   Use EXT.IMM64? Too complex. Let's place handler at IVT[2]*8 = 0x10
-        //   So IVT base = 0. Handler address at mem[0x10..0x17] = handler addr.
-        //
-        // Simpler approach: IVT base = 0 (default), IVT[2] = illegal op handler.
-        // IVT[2] at offset 2*8 = 16 = 0x10. Write handler address there.
-        // Handler at 0x80: just HALT.
-        //
-        // Program:
-        // 0x00: LDI R4, 10       → 0x60 0x40 0x0A
-        // 0x03: LDI R5, 20       → 0x60 0x50 0x14
-        // 0x06: LDI R15, 0x00    → 0x60 0xF0 0x00  (SP = R15, init to top)
-        // Then set SP high: ADDI R15, 0x7F → 0x62 0xF0 0x7F (R15 = 0x7F)
-        //   That gives SP=0x7F... need more. Use two ADDIs.
-        //   ADDI R15, 0x7F → R15 = 0x7F
-        //   ADDI R15, 0x7F → R15 = 0xFE
-        //   That should be enough stack space.
-        //
-        // 0x09: ADDI R15, 0x7F   → 0x62 0xF0 0x7F (R15 = 127)
-        // 0x0C: ADDI R15, 0x7F   → 0x62 0xF0 0x7F (R15 = 254)
-        // 0x0F: MUL R4, R5       → 0xC0 0x45       (should trap!)
-        // 0x11: HALT             → 0x02             (should NOT reach here)
-        //
-        // IVT[2] at mem[0x10..0x17] = 0x80 (handler address)
-        // BUT the program occupies 0x00-0x11, and IVT[2] is at 0x10-0x17.
-        // They overlap! Let me move the program start.
-        //
-        // Actually IVT base is at 0x0000 by default. IVT[2] = illegal op
-        // is at address 0x10. So I need to make sure my program doesn't
-        // overwrite the IVT. Let me set IVT base to 0x100 using CSR write:
-        //
-        // 0x00: LDI R0, 0      → 0x60 0x00 0x00  (R0 = 0 for later)
-        // 0x03: LDI R1, 0      → 0x60 0x10 0x00
-        // 0x06: ADDI R1, 0x7F  → 0x62 0x10 0x7F  (R1 = 127)
-        // 0x09: ADDI R1, 0x7F  → 0x62 0x10 0x7F  (R1 = 254 = 0xFE)
-        // 0x0C: ADDI R1, 0x02  → 0x62 0x10 0x02  (R1 = 256 = 0x100)
-        // 0x0F: CSR.W R1 → IVTBASE → 0xD9 0x04  (CSRW: nib[3]=1, nib[2:0]=R1=1; CSR=0x04)
-        // 0x11: LDI R15, 0     → 0x60 0xF0 0x00
-        // 0x14: ADDI R15, 0x7F → 0x62 0xF0 0x7F  (R15 = 127)
-        // 0x17: ADDI R15, 0x7F → 0x62 0xF0 0x7F  (R15 = 254)
-        // 0x1A: LDI R4, 10     → 0x60 0x40 0x0A
-        // 0x1D: LDI R5, 20     → 0x60 0x50 0x14
-        // 0x20: MUL R4, R5     → 0xC0 0x45        (TRAP!)
-        // 0x22: HALT            → 0x02             (should not reach)
-        //
-        // Handler at 0x80: HALT = 0x02
-        // IVT[2] at 0x100 + 2*8 = 0x110 → store 0x80 there
-        mem[16'h00] = 8'h60; mem[16'h01] = 8'h00; mem[16'h02] = 8'h00;  // LDI R0,0
-        mem[16'h03] = 8'h60; mem[16'h04] = 8'h10; mem[16'h05] = 8'h00;  // LDI R1,0
-        mem[16'h06] = 8'h62; mem[16'h07] = 8'h10; mem[16'h08] = 8'h7F;  // ADDI R1,127
-        mem[16'h09] = 8'h62; mem[16'h0A] = 8'h10; mem[16'h0B] = 8'h7F;  // ADDI R1,127
-        mem[16'h0C] = 8'h62; mem[16'h0D] = 8'h10; mem[16'h0E] = 8'h02;  // ADDI R1,2
-        mem[16'h0F] = 8'hD9; mem[16'h10] = 8'h04;                        // CSRW R1,IVTBASE
-        mem[16'h11] = 8'h60; mem[16'h12] = 8'hF0; mem[16'h13] = 8'h00;  // LDI R15,0
-        mem[16'h14] = 8'h62; mem[16'h15] = 8'hF0; mem[16'h16] = 8'h7F;  // ADDI R15,127
-        mem[16'h17] = 8'h62; mem[16'h18] = 8'hF0; mem[16'h19] = 8'h7F;  // ADDI R15,127
-        mem[16'h1A] = 8'h60; mem[16'h1B] = 8'h40; mem[16'h1C] = 8'h0A;  // LDI R4,10
-        mem[16'h1D] = 8'h60; mem[16'h1E] = 8'h50; mem[16'h1F] = 8'h14;  // LDI R5,20
-        mem[16'h20] = 8'hC0; mem[16'h21] = 8'h45;                        // MUL R4,R5
-        mem[16'h22] = 8'h02;                                              // HALT (should not reach)
-
-        // Handler at 0x80
-        mem[16'h80] = 8'h02;  // HALT
-
-        // IVT[2] at 0x110: little-endian 64-bit address = 0x80
-        mem[16'h110] = 8'h80;
-        mem[16'h111] = 8'h00; mem[16'h112] = 8'h00; mem[16'h113] = 8'h00;
-        mem[16'h114] = 8'h00; mem[16'h115] = 8'h00; mem[16'h116] = 8'h00;
-        mem[16'h117] = 8'h00;
+        mem[16'h00] = 8'h60; mem[16'h01] = 8'hF0; mem[16'h02] = 8'h00;
+        mem[16'h03] = 8'h62; mem[16'h04] = 8'hF0; mem[16'h05] = 8'h7F;
+        mem[16'h06] = 8'h62; mem[16'h07] = 8'hF0; mem[16'h08] = 8'h7F;
+        mem[16'h09] = 8'h80;  // MEMALU is stripped on micro-cores
+        mem[16'h0A] = 8'h02;  // must not execute
+        mem[16'h80] = 8'h02;  // trap handler: HALT
+        mem[16'h120] = 8'h80; // IVT[ILLEGAL_OP] = 0x80 (little-endian)
 
         reset_cpu;
         wait_halt(2000);
         if (!timeout) begin
-            // PC should be at handler + 1 (0x81), NOT at 0x22
-            if (u_cpu.R[3] == 64'h22) begin
-                $display("FAIL T7: MUL did not trap (PC reached 0x22)");
+            if (u_cpu.R[3] == 64'h0B) begin
+                $display("FAIL T7: stripped MEMALU did not trap");
                 fail = fail + 1;
             end else begin
                 // Should be at 0x81 (handler HALT at 0x80, advanced by 1)
@@ -470,6 +416,44 @@ module tb_cpu_micro;
         wait_halt(300);
         // After SEP R4, psel=4 and R4=0x20 was used as PC. After HALT, PC=0x21.
         check_reg(4, 64'h21, "T9 R4=0x21 (SEP to R4, halted at 0x20+1)");
+
+        // ============================================================
+        // TEST 10: CRC.INIT is a bare two-byte instruction.
+        // The following INC must remain a distinct opcode.
+        // ============================================================
+        $display("Test 10: bare CRC.INIT length");
+        clear_mem;
+        mem[0] = 8'hFB; mem[1] = 8'h00;  // CRC.INIT
+        mem[2] = 8'h15;                   // INC R5
+        mem[3] = 8'h02;                   // HALT
+        reset_cpu;
+        wait_halt(500);
+        check_reg(5, 64'd1, "T10 bare CRC.INIT preserves next opcode");
+
+        // ============================================================
+        // TEST 11: reserved CRC op 6 traps after exactly two bytes.
+        // ============================================================
+        $display("Test 11: reserved CRC sub-op trap");
+        clear_mem;
+        mem[0] = 8'hFB; mem[1] = 8'h06;
+        mem[2] = 8'h15;                   // must not execute
+        reset_cpu;
+        saw_illegal = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(posedge clk);
+            if (u_cpu.ivec_id == IRQX_ILLEGAL_OP) begin
+                saw_illegal = 1;
+                i = 200;
+            end
+        end
+        if (!saw_illegal) begin
+            $display("FAIL T11: reserved CRC op did not trap");
+            fail = fail + 1;
+        end else begin
+            pass = pass + 1;
+        end
+        check_reg(3, 64'd2, "T11 reserved CRC op length=2");
+        check_reg(5, 64'd0, "T11 next opcode not executed");
 
         // ============================================================
         // Summary

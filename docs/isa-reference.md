@@ -366,9 +366,10 @@ BIOS initialises the default mapping at boot:
 | 3 | Disk DMA push | `+0x0210` | Byte-serial disk address write |
 | 6 | FB base push | `+0x0A0C` | Framebuffer base address write |
 
-Ports 4, 5, and 7 are unmapped (written to 0 at boot).  CRC and SHA-256
-are per-core ISA instructions (EXT.CRYPTO family, `FB` prefix) and no
-longer use the port I/O bridge.
+Ports 4, 5, and 7 are unmapped (written to 0 at boot). CRC and SHA-256 are
+ISA-native (EXT.CRYPTO family, `FB` prefix) and do not use the port I/O
+bridge; CRC topology is private on full cores and shared within each
+micro-core cluster.
 
 See `SoC-hardening.md` §5 for the full remap CSR register layout.
 
@@ -571,7 +572,7 @@ value is stored and consumed by the following instruction.
 | `F8` | **EXT.ETALU** | Extended tile ALU sub-functions for the next MEX instruction. |
 | `F9 ss DR` | **EXT.STRING** | Forth-aware string engine (3-byte self-contained). See below. |
 | `FA ss DR` | **EXT.DICT** | Dictionary search engine (3-byte self-contained). See below. |
-| `FB ss DR` | **EXT.CRYPTO** | Per-core crypto ISA (3-byte self-contained). See below. |
+| `FB ss [operand]` | **EXT.CRYPTO** | Crypto ISA (2–3 byte self-contained; topology depends on unit/core). See below. |
 | `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
@@ -649,30 +650,64 @@ Details TBD — the dictionary search engine accelerates FIND and
 vocabulary traversal.  See `docs/architecture.md` for the high-level
 description.
 
-### EXT.CRYPTO — Per-Core Crypto ISA (FB)
+### EXT.CRYPTO — Core Crypto ISA (FB)
 
 Self-contained 2–3 byte instructions for CRC, SHA-2, and Field ALU operations.
-All crypto state is **per-core** (no MMIO shared bus contention).
+Full cores hold CRC state per core; micro-core clusters share an ISA engine
+behind a hardware transaction lock. No removed CRC MMIO device is involved.
 
-**Encoding:** `FB <sub-op> <reg-byte>`
+**Encoding:** `FB <sub-op> [<reg-byte> | <imm8>]`
 
 - `FB` — EXT.CRYPTO prefix (family 0xF, nibble B)
 - `<sub-op>` — operation selector (1 byte)
-- `<reg-byte>` — `[Rd:4][Rs:4]` register pair
+- `<reg-byte>` — `[Rd:4][Rs:4]` register pair, when the operation uses registers
+- `<imm8>` — unsigned 8-bit immediate, when the operation uses an immediate
 
 With a REX prefix, Rd and Rs extend to R16–R31 (4-byte instruction).
 
-#### CRC Sub-Operations (sub-op 0x00–0x04)
+#### CRC Sub-Operations (sub-op 0x00–0x05)
 
-| Sub-op | Mnemonic | Operation |
-|--------|----------|-----------|
-| `0x00` | **CRC.INIT** | Reset CRC accumulator to all-ones (CSR 0x80). |
-| `0x01` | **CRC.POLY Rd** | Set polynomial mode from Rd (CSR 0x81: 0=CRC32, 1=CRC32C, 2=CRC64). |
-| `0x02` | *(reserved)* | |
-| `0x03` | **CRC.DIN Rd** | Feed byte Rd[7:0] into the CRC engine. |
-| `0x04` | **CRC.FIN Rd, Rs** | Finalise CRC: Rd ← final CRC value (XOR mask applied). |
+| Sub-op | Mnemonic | Bytes | Operation |
+|--------|----------|-------|-----------|
+| `0x00` | **CRC.INIT** | 2 | Reset CRC_ACC to the selected mode's all-ones initial value. |
+| `0x01` | **CRC.B Rd, Rs** | 3 | Feed `Rs[7:0]`; write the running accumulator to Rd. |
+| `0x02` | **CRC.Q Rd, Rs** | 3 | Feed eight bytes from Rs, least-significant byte first; write the running accumulator to Rd. |
+| `0x03` | **CRC.FIN Rd, Rs** | 3 | Apply the mode's XOR-out to CRC_ACC and Rd atomically. Rs is ignored. |
+| `0x04` | **CRC.MODE imm8** | 3 | Select mode 0, 1, or 2. Any other complete imm8 value selects mode 0. |
+| `0x05` | **CRC.SEED Rd, Rs** | 3 | Load CRC_ACC from Rs and copy the stored value to Rd. Modes 0/1 retain and zero-extend `Rs[31:0]`; mode 2 retains all 64 bits. |
+| `0x06`–`0x0F` | *(reserved)* | 2 | Trap as `ILLEGAL_OP`. |
 
-Read the running CRC accumulator at any time via `CSRR R0, 0x80`.
+All three modes process bytes most-significant-bit first and are
+non-reflected (`refin=false`, `refout=false`). Their complete parameter
+tuples are:
+
+| Mode | Parameterization | Width | Polynomial | Init | XOR-out | `"123456789"` |
+|------|------------------|-------|------------|------|---------|-----------------|
+| 0 | CRC-32/BZIP2 | 32 | `0x04C11DB7` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0xFC891918` |
+| 1 | Castagnoli polynomial, non-reflected | 32 | `0x1EDC6F41` | `0xFFFFFFFF` | `0xFFFFFFFF` | `0x05440F15` |
+| 2 | CRC-64/WE parameters | 64 | `0x42F0E1EBA9EA3693` | `0xFFFFFFFFFFFFFFFF` | `0xFFFFFFFFFFFFFFFF` | `0x62EC59E3F1A4F00A` |
+
+Mode 1 is not the commonly reflected CRC-32C tuple, and mode 2 is not
+CRC-64/ECMA-182 (which uses a zero initial value and zero XOR-out). The
+table and check values above are authoritative.
+
+Full cores keep CRC state per core. `CRC.MODE`, `CRC.INIT`, and `CRC.SEED`
+acquire or retain the owning transaction on a micro-core cluster's shared
+engine. While another micro-core owns that transaction, CRC instructions
+stall and retry. `CRC.FIN` updates CRC_ACC and Rd and releases ownership in
+one engine grant.
+
+Ownership is a deliberate lifetime rule, not exception unwinding: the owner
+must eventually execute `CRC.FIN` before another micro-core can acquire the
+engine. A hardware trap or software `THROW` does not release the lock. The
+same owner may resume, reinitialize, and finalize the transaction; resetting
+or disabling the cluster also clears CRC state and ownership.
+
+CSR `0x80` reads CRC_ACC and CSR `0x81` reads CRC_MODE. On full cores both
+CSRs are writable; a CRC_MODE write accepts only the complete values 0, 1,
+or 2, and canonicalizes every other 64-bit value to mode 0. On micro-cores
+the reads expose cluster-shared state and writes to either CRC CSR are
+ignored; use the CRC instructions to mutate shared state.
 
 #### SHA-2 Sub-Operations (sub-op 0x10–0x15)
 
@@ -697,8 +732,10 @@ The BIOS sets TSRC0 to `sha_blk_buf` (a 64-byte BSS region) before use.
 | `0x83` | SHA_MSGLEN | Message length in bits (low 64) |
 | `0x84` | SHA_MSGLEN_HI | Message length in bits (high 64, SHA-512 only) |
 
-**Cycle counts:** CRC.DIN = 1 cycle. SHA.DIN = 1 cycle (+ ~64 cycles when
-a full block triggers compression). SHA.FINAL = ~64 cycles. SHA.DOUT = 1 cycle.
+**Cycle counts:** CRC operations take one engine cycle on full cores.
+Micro-cores add cluster arbitration latency and can wait behind the current
+transaction owner. SHA.DIN = 1 cycle (+ ~64 cycles when a full block triggers
+compression). SHA.FINAL = ~64 cycles. SHA.DOUT = 1 cycle.
 
 #### Field ALU Sub-Operations (sub-op 0x20–0x2D)
 
@@ -736,8 +773,8 @@ Custom prime (sel=3) uses Montgomery REDC (4-cycle multiply pipeline).
 **Flags:** GF.CEQ sets the Z flag (constant-time).  All other field ALU
 ops do not modify flags (side-channel resistance).
 
-**Micro-cores:** EXT.CRYPTO is available on all core types (crypto FSM is
-lightweight enough to include everywhere).
+**Micro-cores:** CRC is available through the cluster-shared engine described
+above. Availability of the other EXT.CRYPTO units is implementation-specific.
 
 ---
 
@@ -829,8 +866,8 @@ low nibble of the opcode byte.
 | `0x71` | **ICACHE_HITS** | 64 | R | I-cache hit counter (since last invalidate) |
 | `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
 | | | | | |
-| `0x80` | **CRC_ACC** | 64 | RW | CRC accumulator (read via `crc@` / `csrr r0, 0x80`) |
-| `0x81` | **CRC_MODE** | 8 | RW | CRC polynomial mode: 0=CRC32, 1=CRC32C, 2=CRC64 |
+| `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized CRC accumulator; micro-core writes are ignored |
+| `0x81` | **CRC_MODE** | 64 | RW full / R micro | 0/1/2 select a CRC tuple; every other complete value becomes 0 on full-core writes, and micro-core writes are ignored |
 | `0x82` | **SHA_MODE** | 8 | RW | SHA-2 mode: 0=SHA-256, 1=SHA-384, 2=SHA-512 |
 | `0x83` | **SHA_MSGLEN** | 64 | RW | SHA-2 message length (low 64 bits, for padding) |
 | `0x84` | **SHA_MSGLEN_HI** | 64 | RW | SHA-2 message length (high 64 bits, SHA-512 only) |

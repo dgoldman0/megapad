@@ -167,9 +167,9 @@ struct CPUState {
         std::memset(dict_table, 0, sizeof(dict_table));
     }
 
-    // EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
+    // EXT.CRYPTO CRC state for accelerated full cores (Appendix B, §B.3)
     uint64_t crc_acc;   // 64-bit CRC accumulator
-    uint8_t  crc_mode;  // 0=CRC32, 1=CRC32C, 2=CRC64
+    uint8_t  crc_mode;  // exact non-reflected parameter tuple 0/1/2
 
     // EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
     uint8_t  sha_mode;       // 0=SHA-256, 1=SHA-384, 2=SHA-512
@@ -826,7 +826,10 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             if (val & 2) { s.icache_hits = 0; s.icache_misses = 0; s.icache_enabled = 1; }
             break;
         case CSR_CRC_ACC:  s.crc_acc = val; break;
-        case CSR_CRC_MODE: s.crc_mode = val & 0x03; break;
+        case CSR_CRC_MODE: {
+            s.crc_mode = (val == 1 || val == 2) ? (uint8_t)val : 0;
+            break;
+        }
         case CSR_SHA_MODE: s.sha_mode = val & 0x03; break;
         case CSR_SHA_MSGLEN: s.sha_msglen_lo = val; break;
         case CSR_SHA_MSGLEN_HI: s.sha_msglen_hi = val; break;
@@ -2382,7 +2385,9 @@ static int exec_dict(CPUState& s, const StepCallbacks& cb) {
 //  EXT.CRYPTO (prefix FB) — per-core crypto ISA instructions
 // ---------------------------------------------------------------------------
 
-// CRC polynomials (normal / MSB-first form)
+// CRC polynomials (normal / MSB-first, non-reflected form): mode 0 uses
+// CRC-32/BZIP2 parameters, mode 1 uses Castagnoli non-reflected, and mode 2
+// uses CRC-64/WE parameters.
 static constexpr uint32_t CRC32_POLY   = 0x04C11DB7u;
 static constexpr uint32_t CRC32C_POLY  = 0x1EDC6F41u;
 static constexpr uint64_t CRC64_POLY   = 0x42F0E1EBA9EA3693ull;
@@ -2677,7 +2682,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
 
     if (unit == 0x0) {
         // --- CRC unit ---
-        bool is64 = (s.crc_mode >= 2);
+        bool is64 = (s.crc_mode == 2);
         uint32_t poly32 = (s.crc_mode == 1) ? CRC32C_POLY : CRC32_POLY;
 
         switch (op) {
@@ -2720,12 +2725,21 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             uint8_t rb = fetch8(s);
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             uint64_t mask = is64 ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFu;
-            s.regs[rd] = s.crc_acc ^ mask;
+            s.crc_acc ^= mask;
+            s.regs[rd] = s.crc_acc;
             return 1;
         }
         case 0x4: { // CRC.MODE imm8
             uint8_t imm = fetch8(s);
-            s.crc_mode = imm & 0x03;
+            s.crc_mode = (imm == 1 || imm == 2) ? imm : 0;
+            return 1;
+        }
+        case 0x5: { // CRC.SEED Rd, Rs — width-masked accumulator load
+            uint8_t rb = fetch8(s);
+            int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
+            int rs = (rex_s(s.ext_modifier) << 4) | (rb & 0xF);
+            s.crc_acc = is64 ? s.regs[rs] : (uint32_t)s.regs[rs];
+            s.regs[rd] = s.crc_acc;
             return 1;
         }
         default:

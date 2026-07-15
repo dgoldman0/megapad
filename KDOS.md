@@ -115,7 +115,7 @@ PORTS                          \ List all port bindings
 - **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, GF-A!, GF-R@, GF-PRIME, LOAD-PRIME, FMUL-ADD-RAW
 - **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
 - **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
-- **CRC-32**: CRC-RESET, CRC-FEED, CRC-RESULT, CRC-DMA
+- **CRC**: exact-length byte/quad feeds and 32/64-bit non-reflected tuple helpers
 
 **KDOS v1.1** (~11,004 lines Forth, 923 colon defs, 707 vars/constants):
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
@@ -161,7 +161,7 @@ PORTS                          \ List all port bindings
 **Layer 1: Core Infrastructure** (✅ Items 1-8, committed):
 - **§1.1 Memory Allocator**: ALLOCATE / FREE / RESIZE — first-fit heap with coalescing (13 tests)
 - **§1.2 CATCH/THROW**: ANS-style exception handling with nested catch frames (8 tests)
-- **§1.3 CRC Integration**: CRC32 via hardware CRC device, CCRC32 with DMA (8 tests)
+- **§1.3 CRC Integration**: ISA-backed exact-length CRC buffer helpers
 - **§1.4 Hardware Diagnostics**: MEM-TEST, DEV-PROBE, SYS-CHECK — BIST infrastructure
 - **§1.5 AES-256-GCM**: AES-ENCRYPT / AES-DECRYPT via MMIO AES engine (9 tests)
 - **§1.6 SHA-3 / Keccak-256**: HASH / HMAC via MMIO SHA3 engine (10 tests)
@@ -469,7 +469,7 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **SysInfo** | Board ID, RAM size, feature flags |
 | **Mailbox** | Inter-core IPI messaging (4 cores) |
 | **Spinlock** | 8 hardware mutexes for shared resources |
-| **CRC** | CRC32/CRC32C/CRC64 with DMA |
+| **CRC** | ISA-backed 32/64-bit non-reflected tuples with exact byte tails |
 | **AES** | AES-256-GCM authenticated encryption |
 | **SHA-3** | Keccak-f[1600]: SHA3-256/512, SHAKE128/256, XOF squeeze |
 | **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
@@ -518,7 +518,7 @@ The BIOS provides:
 * **AES-256-GCM**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!,
   AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
 * **SHA-3 / Keccak-256**: SHA3-INIT, SHA3-UPDATE, SHA3-FINAL, SHA3-STATUS@
-* **CRC-32**: CRC-RESET, CRC-FEED, CRC-RESULT, CRC-DMA
+* **CRC**: CRC32-BUF, CRC32C-BUF, CRC64-BUF, CRC32-STR, .CRC32
 
 All required BIOS extensions for KDOS are **complete** as of v1.0.
 

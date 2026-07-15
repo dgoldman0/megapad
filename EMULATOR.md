@@ -190,11 +190,11 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
 
-> **Per-core crypto ISA (no MMIO):** CRC32/CRC64 and SHA-256 are
-> implemented as per-core ISA instructions (EXT.CRYPTO `FB` prefix)
-> with state in CSRs 0x80–0x85.  They do **not** appear in the MMIO
-> map.  See `docs/isa-reference.md` § EXT.CRYPTO for the instruction
-> encoding.
+> **Crypto ISA (no CRC MMIO):** CRC and SHA-256 use EXT.CRYPTO (`FB`).
+> Full cores keep CRC state privately; each micro-core cluster shares a CRC
+> engine behind a transaction lock. Micro-core CRC CSR reads expose that
+> shared state and writes are ignored. See `docs/isa-reference.md`
+> § EXT.CRYPTO for the instruction encoding and exact CRC parameter tuples.
 
 The system layer intercepts any CPU memory operation (8/16/32/64-bit) that
 falls in the MMIO aperture and routes it through the device bus; everything
@@ -343,7 +343,7 @@ buffer), then tokenises and interprets:
 | R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
-### Built-in words (364)
+### Built-in words (366)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -402,7 +402,8 @@ buffer), then tokenises and interprets:
 `PERF-CYCLES` `PERF-STALLS` `PERF-TILEOPS` `PERF-EXTMEM` `PERF-RESET`
 
 **CRC engine (ISA-native, EXT.CRYPTO)**
-`CRC-POLY!` `CRC-INIT!` `CRC-FEED` `CRC@` `CRC-RESET` `CRC-FINAL`
+`CRC-POLY!` `CRC-INIT!` `CRC-FEED` `CRC-FEED-BYTE` `CRC@` `CRC-RESET`
+`CRC-FINAL` `CRC-FINAL@`
 
 **SHA-256 engine (ISA-native, EXT.CRYPTO)**
 `SHA256-INIT` `SHA256-UPDATE` `SHA256-FINAL` `SHA256-STATUS@` `SHA256-DOUT@`

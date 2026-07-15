@@ -255,6 +255,49 @@ module tb_cluster;
     endtask
 
     integer i;
+    reg [N-1:0] tb_crc_req;
+    reg [N*4-1:0] tb_crc_op;
+    reg [N*64-1:0] tb_crc_rs_val;
+    reg [N*8-1:0] tb_crc_imm8;
+    reg [N-1:0] tb_crc_csr_wen;
+    reg [N*8-1:0] tb_crc_csr_addr;
+    reg [N*64-1:0] tb_crc_csr_wdata;
+    reg [63:0] tb_crc_result;
+    integer tb_crc_seen;
+
+    task drive_crc_op;
+        input integer core_idx;
+        input [3:0] op_value;
+        input [63:0] rs_value;
+        input [7:0] imm_value;
+        output [63:0] op_result;
+        integer cyc;
+        reg seen;
+        begin
+            tb_crc_op[core_idx*4 +: 4] = op_value;
+            tb_crc_rs_val[core_idx*64 +: 64] = rs_value;
+            tb_crc_imm8[core_idx*8 +: 8] = imm_value;
+            tb_crc_req[core_idx] = 1'b1;
+            seen = 1'b0;
+            op_result = 64'd0;
+            for (cyc = 0; cyc < 200; cyc = cyc + 1) begin
+                @(posedge clk);
+                if (uut.crc_done_reg && uut.crc_grant == core_idx) begin
+                    op_result = uut.crc_result_reg;
+                    seen = 1'b1;
+                    cyc = 200;
+                end
+            end
+            if (!seen) begin
+                $display("FAIL [CRC arbiter timeout]: core=%0d op=%0d",
+                         core_idx, op_value);
+                fail_count = fail_count + 1;
+            end
+            @(negedge clk);
+            tb_crc_req[core_idx] = 1'b0;
+            repeat (3) @(posedge clk);
+        end
+    endtask
 
     // ====================================================================
     // Main tests
@@ -577,6 +620,159 @@ module tb_cluster;
                      tile_mem_model[2], {64{8'h08}});
             fail_count = fail_count + 1;
         end
+
+        // -----------------------------------------------------------------
+        // Test 11: shared CRC transactions remain owner-atomic.
+        // Drive the arbiter at its request boundary so instruction-fetch
+        // bus timing is not part of this focused lock test.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'h02;
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+        wait_all_halt(5000);
+
+        tb_crc_req = {N{1'b0}};
+        tb_crc_op = {(N*4){1'b0}};
+        tb_crc_rs_val = {(N*64){1'b0}};
+        tb_crc_imm8 = {(N*8){1'b0}};
+        tb_crc_csr_wen = {N{1'b0}};
+        tb_crc_csr_addr = {(N*8){1'b0}};
+        tb_crc_csr_wdata = {(N*64){1'b0}};
+        force uut.mc_crc_req = tb_crc_req;
+        force uut.mc_crc_op = tb_crc_op;
+        force uut.mc_crc_rs_val = tb_crc_rs_val;
+        force uut.mc_crc_imm8 = tb_crc_imm8;
+        force uut.mc_cl_csr_wen = tb_crc_csr_wen;
+        force uut.mc_cl_csr_addr = tb_crc_csr_addr;
+        force uut.mc_cl_csr_wdata = tb_crc_csr_wdata;
+
+        // Two unlocked cores request distinct MODE transactions together.
+        // Round-robin starts after crc_last=0, so core 1 must win with its
+        // own immediate; core 0 must remain blocked by the new lock.
+        tb_crc_op[0 +: 4] = ISA_CRC_MODEX;
+        tb_crc_imm8[0 +: 8] = 8'd1;
+        tb_crc_op[4 +: 4] = ISA_CRC_MODEX;
+        tb_crc_imm8[8 +: 8] = 8'd0;
+        tb_crc_req[0] = 1'b1;
+        tb_crc_req[1] = 1'b1;
+        tb_crc_seen = 0;
+        for (i = 0; i < 200; i = i + 1) begin
+            @(posedge clk);
+            if (uut.crc_done_reg) begin
+                if (uut.crc_grant !== 1) begin
+                    $display("FAIL [simultaneous CRC.MODE grant]: got=%0d expected=1",
+                             uut.crc_grant);
+                    fail_count = fail_count + 1;
+                end else begin
+                    pass_count = pass_count + 1;
+                end
+                tb_crc_seen = 1;
+                i = 200;
+            end
+        end
+        if (!tb_crc_seen) begin
+            $display("FAIL [simultaneous CRC.MODE timeout]");
+            fail_count = fail_count + 1;
+        end
+        @(negedge clk);
+        tb_crc_req[1] = 1'b0;
+        repeat (20) begin
+            @(posedge clk);
+            if (uut.crc_done_reg && uut.crc_grant == 0) begin
+                $display("FAIL [losing simultaneous CRC.MODE interleaved]");
+                fail_count = fail_count + 1;
+            end
+        end
+        check64("simultaneous CRC.MODE uses winner immediate",
+                {62'd0, uut.cl_crc_mode}, 64'd0);
+        check64("simultaneous CRC.MODE locks winner",
+                {62'd0, uut.crc_lock_owner}, 64'd1);
+        @(negedge clk);
+        tb_crc_req[0] = 1'b0;
+        repeat (3) @(posedge clk);
+
+        drive_crc_op(1, ISA_CRC_INIT, 64'd0, 8'd0, tb_crc_result);
+
+        // Raw CRC CSR writes are ignored on every micro-core, independent
+        // of lock ownership.
+        tb_crc_csr_addr[0 +: 8] = CSR_CRC_ACC;
+        tb_crc_csr_wdata[0 +: 64] = 64'hDEAD_BEEF_CAFE_BABE;
+        tb_crc_csr_wen[0] = 1'b1;
+        repeat (2) @(posedge clk);
+        @(negedge clk);
+        tb_crc_csr_wen[0] = 1'b0;
+        check64("CRC non-owner CSR write ignored", uut.cl_crc_acc,
+                64'h0000_0000_FFFF_FFFF);
+
+        tb_crc_csr_addr[8 +: 8] = CSR_CRC_ACC;
+        tb_crc_csr_wdata[64 +: 64] = 64'h0123_4567_89AB_CDEF;
+        tb_crc_csr_wen[1] = 1'b1;
+        repeat (2) @(posedge clk);
+        @(negedge clk);
+        tb_crc_csr_wen[1] = 1'b0;
+        check64("CRC owner CSR write ignored", uut.cl_crc_acc,
+                64'h0000_0000_FFFF_FFFF);
+
+        drive_crc_op(1, ISA_CRC_SEED, 64'hDEAD_BEEF_FFFF_FFFF,
+                     8'd0, tb_crc_result);
+        check64("CRC.SEED masks high half in mode 0", uut.cl_crc_acc,
+                64'h0000_0000_FFFF_FFFF);
+
+        // A non-owner cannot interleave even a new MODE transaction.
+        tb_crc_op[0 +: 4] = ISA_CRC_MODEX;
+        tb_crc_imm8[0 +: 8] = 8'd1;
+        tb_crc_req[0] = 1'b1;
+        repeat (20) begin
+            @(posedge clk);
+            if (uut.crc_done_reg && uut.crc_grant == 0) begin
+                $display("FAIL [CRC non-owner interleaved while locked]");
+                fail_count = fail_count + 1;
+            end
+        end
+        @(negedge clk);
+        tb_crc_req[0] = 1'b0;
+
+        drive_crc_op(1, ISA_CRC_B, 64'h41, 8'd0, tb_crc_result);
+        drive_crc_op(1, ISA_CRC_FIN, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC owner 1 finalized result", tb_crc_result,
+                64'h0000_0000_81B0_2D8B);
+        check64("CRC FIN publishes shared accumulator", uut.cl_crc_acc,
+                64'h0000_0000_81B0_2D8B);
+        if (uut.crc_locked !== 1'b0) begin
+            $display("FAIL [CRC contention lock release]: crc_locked=%b",
+                     uut.crc_locked);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd3, tb_crc_result);
+        check64("CRC mode 3 canonicalizes to mode 0", {62'd0, uut.cl_crc_mode},
+                64'd0);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'd5, tb_crc_result);
+        check64("CRC mode 5 does not alias mode 1", {62'd0, uut.cl_crc_mode},
+                64'd0);
+        drive_crc_op(0, ISA_CRC_MODEX, 64'd0, 8'hFF, tb_crc_result);
+        check64("CRC mode FF canonicalizes to mode 0", {62'd0, uut.cl_crc_mode},
+                64'd0);
+        drive_crc_op(0, ISA_CRC_INIT, 64'd0, 8'd0, tb_crc_result);
+        drive_crc_op(0, ISA_CRC_SEED, 64'h0000_0000_FFFF_FFFF,
+                     8'd0, tb_crc_result);
+        drive_crc_op(0, ISA_CRC_B, 64'h41, 8'd0, tb_crc_result);
+        drive_crc_op(0, ISA_CRC_FIN, 64'd0, 8'd0, tb_crc_result);
+        check64("CRC owner 0 after handoff", tb_crc_result,
+                64'h0000_0000_81B0_2D8B);
+
+        release uut.mc_crc_req;
+        release uut.mc_crc_op;
+        release uut.mc_crc_rs_val;
+        release uut.mc_crc_imm8;
+        release uut.mc_cl_csr_wen;
+        release uut.mc_cl_csr_addr;
+        release uut.mc_cl_csr_wdata;
 
         // =================================================================
         $display("===========================================");

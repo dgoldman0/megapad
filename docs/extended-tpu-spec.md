@@ -20,7 +20,7 @@ existing tile engine and SoC infrastructure:
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
 | **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
-| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, CRC32/CRC64 | Large | ✅ Implemented (emulator + BIOS + KDOS) |
+| **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE, 32/64-bit CRC tuples | Large | ✅ Implemented (emulator + BIOS + KDOS) |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | ✅ CSRs + QoS done; DMA design only |
 | **Reliability / BIST** | Memory self-test, tile datapath check, perf counters | Small | ✅ Implemented |
 
@@ -307,23 +307,14 @@ output.
 absorb 136 bytes (SHA3-256 rate) in ~41 cycles (24 rounds + 17
 writes).
 
-### 4.3 CRC32 / CRC64
+### 4.3 CRC
 
-Lightweight CRC accelerator for data integrity. Supports:
-- CRC32 (ISO 3309 / ITU-T V.42, polynomial 0x04C11DB7)
-- CRC32C (Castagnoli, polynomial 0x1EDC6F41)
-- CRC64-ECMA (polynomial 0x42F0E1EBA9EA3693)
-
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| `CRC_POLY` | 0x980 | W | Polynomial select (0=CRC32, 1=CRC32C, 2=CRC64) |
-| `CRC_INIT` | 0x984 | W | Initial CRC value |
-| `CRC_DIN` | 0x988 | W | 64-bit data input (processes 8 bytes/cycle) |
-| `CRC_RESULT` | 0x990 | R | Current CRC value |
-| `CRC_CTRL` | 0x998 | W | 0=reset, 1=finalize (XOR-out) |
-
-**Performance**: 8 bytes per cycle using an 8-byte-wide lookup table
-or Sarwate algorithm. For a 512-byte disk sector: 64 cycles.
+CRC is an EXT.CRYPTO ISA facility, not an extended-TPU MMIO block. Full cores
+have private state and each micro-core cluster shares an owner-arbitrated
+engine. It provides byte and 8-byte feeds, arbitrary width-masked seeds, and
+atomic final publication. The exact non-reflected parameter tuples, encodings,
+and canonical vectors are specified in the [ISA reference](isa-reference.md#extcrypto--core-crypto-isa-fb).
+The 8-byte datapath processes a 512-byte disk sector in 64 feed operations.
 
 ### 4.4 SHA-256 (SHA-2) Accelerator
 
@@ -509,11 +500,11 @@ Additions to the existing MMIO map:
 | **0x780** | **96B** | **SHA-3/SHAKE** |
 | **0x7E0** | **16B** | **QoS Config** |
 | **0x800** | **64B** | **TRNG** |
-| **0x840** | **128B** | **Field ALU** (GF(2²⁵⁵−19)) |
+| **0x840** | **128B** | *(free; Field ALU is EXT.CRYPTO)* |
 | **0x8C0** | **64B** | **NTT Engine** |
 | **0x900** | **64B** | **KEM (ML-KEM-512)** |
-| **0x940** | **32B** | **SHA-256** |
-| **0x980** | **32B** | **CRC32/CRC64** |
+| **0x940** | **32B** | *(free; SHA-2 is EXT.CRYPTO)* |
+| **0x980** | **32B** | *(free; CRC is EXT.CRYPTO)* |
 | **0xA00** | **64B** | **Framebuffer** |
 | **0xB00** | **32B** | **RTC / System Clock** |
 

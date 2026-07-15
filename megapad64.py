@@ -116,7 +116,7 @@ CSR_QOS_BWLIMIT    = 0x59   # Bandwidth limit
 
 # EXT.CRYPTO CSRs (Appendix B)
 CSR_CRC_ACC       = 0x80   # RW: 64-bit running CRC accumulator
-CSR_CRC_MODE      = 0x81   # RW: polynomial select (0=CRC32, 1=CRC32C, 2=CRC64)
+CSR_CRC_MODE      = 0x81   # RW full / R micro: exact CRC tuple select 0/1/2
 CSR_SHA_MODE      = 0x82   # RW: 0=SHA-256, 1=SHA-384, 2=SHA-512
 CSR_SHA_MSGLEN    = 0x83   # RW: total message length in bits (low 64)
 CSR_SHA_MSGLEN_HI = 0x84   # RW: total message length in bits (high 64)
@@ -689,9 +689,10 @@ class Megapad64:
         # EXT prefix state
         self._ext_modifier: int = -1  # -1 = no active prefix
 
-        # EXT.CRYPTO CRC per-core state (Appendix B, §B.3)
+        # EXT.CRYPTO CRC state (private here; micro-cores override with the
+        # cluster-shared engine described in Appendix B, §B.3).
         self.crc_acc: int  = 0xFFFF_FFFF  # CRC accumulator
-        self.crc_mode: int = 0            # 0=CRC32, 1=CRC32C, 2=CRC64
+        self.crc_mode: int = 0            # exact non-reflected tuple 0/1/2
 
         # EXT.CRYPTO SHA-2 per-core state (Appendix B, §B.4)
         self.sha_mode: int      = 0   # 0=SHA-256, 1=SHA-384, 2=SHA-512
@@ -1149,7 +1150,8 @@ class Megapad64:
             CSR_QOS_BWLIMIT:   lambda v: setattr(self, 'qos_bwlimit', v),
             # EXT.CRYPTO CSRs (Appendix B)
             CSR_CRC_ACC:       lambda v: setattr(self, 'crc_acc', v & 0xFFFF_FFFF_FFFF_FFFF),
-            CSR_CRC_MODE:      lambda v: setattr(self, 'crc_mode', v & 0x03),
+            CSR_CRC_MODE:      lambda v: setattr(
+                self, 'crc_mode', v if v in (0, 1, 2) else 0),
             CSR_SHA_MODE:      lambda v: setattr(self, 'sha_mode', v & 0x03),
             CSR_SHA_MSGLEN:    lambda v: setattr(self, 'sha_msglen_lo', v & MASK64),
             CSR_SHA_MSGLEN_HI: lambda v: setattr(self, 'sha_msglen_hi', v & MASK64),
@@ -1780,11 +1782,11 @@ class Megapad64:
 
     # -- EXT.CRYPTO (prefix FB) --
 
-    # CRC polynomials (normal / MSB-first form, matching RTL mp64_crc.v)
+    # CRC polynomials (normal / MSB-first, non-reflected form)
     _CRC_POLYS = {
-        0: (0x04C11DB7, 32),          # CRC32 IEEE 802.3
-        1: (0x1EDC6F41, 32),          # CRC32C (Castagnoli)
-        2: (0x42F0E1EBA9EA3693, 64),  # CRC64 ECMA-182
+        0: (0x04C11DB7, 32),          # CRC-32/BZIP2 tuple
+        1: (0x1EDC6F41, 32),          # Castagnoli polynomial, non-reflected
+        2: (0x42F0E1EBA9EA3693, 64),  # CRC-64/WE tuple
     }
 
     @staticmethod
@@ -1829,12 +1831,13 @@ class Megapad64:
 
     def _exec_crc(self, op: int) -> int:
         """CRC sub-ops (FB 00–0F).
-        CRC_ACC (CSR 0x80) and CRC_MODE (CSR 0x81) are per-core state."""
+        Full cores own local CRC state; micro-cores override this method to
+        use the cluster-shared engine."""
         poly_info = self._CRC_POLYS.get(self.crc_mode, self._CRC_POLYS[0])
         poly, width = poly_info
 
         if op == 0x0:  # CRC.INIT
-            if self.crc_mode >= 2:
+            if self.crc_mode == 2:
                 self.crc_acc = 0xFFFF_FFFF_FFFF_FFFF
             else:
                 self.crc_acc = 0xFFFF_FFFF
@@ -1865,13 +1868,23 @@ class Megapad64:
         elif op == 0x3:  # CRC.FIN Rd, Rs — finalize
             reg_byte = self.fetch8()
             rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
-            mask = 0xFFFF_FFFF_FFFF_FFFF if self.crc_mode >= 2 else 0xFFFF_FFFF
-            self.regs[rd] = (self.crc_acc ^ mask) & MASK64
+            mask = 0xFFFF_FFFF_FFFF_FFFF if self.crc_mode == 2 else 0xFFFF_FFFF
+            self.crc_acc = (self.crc_acc ^ mask) & MASK64
+            self.regs[rd] = self.crc_acc
             return 1
 
         elif op == 0x4:  # CRC.MODE imm8
             imm8 = self.fetch8()
-            self.crc_mode = imm8 & 0x03
+            self.crc_mode = imm8 if imm8 in (0, 1, 2) else 0
+            return 1
+
+        elif op == 0x5:  # CRC.SEED Rd, Rs — width-masked accumulator load
+            reg_byte = self.fetch8()
+            rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+            rs = (self._rex_s << 4) | (reg_byte & 0xF)
+            mask = MASK64 if self.crc_mode == 2 else 0xFFFF_FFFF
+            self.crc_acc = self.regs[rs] & mask
+            self.regs[rd] = self.crc_acc
             return 1
 
         else:
@@ -3776,6 +3789,8 @@ class Megapad64:
         self.halted = False
         self.idle = False
         self._ext_modifier = -1
+        self.crc_acc = 0xFFFF_FFFF
+        self.crc_mode = 0
         # DMA / QoS
         self.dma_ring_base = 0
         self.dma_ring_size = 0
@@ -4042,10 +4057,59 @@ class Megapad64Micro(Megapad64):
         cycles = super()._exec_muldiv(sub)
         return cycles + 3  # shared unit overhead
 
+    # -- CRC — delegated to the cluster-shared engine --
+
+    def _exec_crc(self, op: int) -> int:
+        """Execute one arbitrated cluster-shared CRC instruction.
+
+        A contender leaves the complete instruction unconsumed by restoring
+        its PC, modelling the RTL request stall/retry boundary. MODE, INIT,
+        and SEED acquire the lock; FIN commits its result before release.
+        """
+        if op > 0x5:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO CRC sub-op {op:#x} reserved")
+
+        if self._cluster is None:
+            # Keep the trap PC at the architectural end of the instruction.
+            if op != 0x0:
+                self.fetch8()
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            "CRC engine not available on standalone micro-core")
+
+        cluster = self._cluster
+        acquire = op in (0x0, 0x4, 0x5)
+        owned_by_other = (cluster.crc_locked and
+                          not cluster.crc_is_owner(self.core_id))
+        if owned_by_other or (acquire and
+                              not cluster.crc_try_acquire(self.core_id)):
+            # At entry FB and its sub-op have been fetched; a REX prefix is
+            # also part of this instruction when _ext_modifier is active.
+            retry_len = 3 if self._ext_modifier >= 0 else 2
+            self.pc = u64(self.pc - retry_len)
+            return 3
+
+        self.crc_acc = cluster.crc_acc
+        self.crc_mode = cluster.crc_mode
+        cycles = super()._exec_crc(op)
+        cluster.crc_acc = self.crc_acc
+        cluster.crc_mode = self.crc_mode
+
+        if op == 0x3:
+            cluster.crc_release(self.core_id)
+
+        return cycles + 3
+
     # -- CSR overrides --
 
     def csr_read(self, addr: int) -> int:
         """Restricted CSR set matching RTL mp64_cpu_micro.v."""
+        # Shared CRC CSRs are diagnostic snapshots. Mutation is only through
+        # the arbitrated ISA transaction; standalone reads return zero.
+        if addr == CSR_CRC_ACC:
+            return self._cluster.crc_acc if self._cluster else 0
+        if addr == CSR_CRC_MODE:
+            return self._cluster.crc_mode if self._cluster else 0
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
                     CSR_IVT_BASE, CSR_IE, CSR_PRIV,
                     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
@@ -4089,6 +4153,8 @@ class Megapad64Micro(Megapad64):
     def csr_write(self, addr: int, val: int):
         """Restricted CSR set matching RTL mp64_cpu_micro.v."""
         val = u64(val)
+        if addr in (CSR_CRC_ACC, CSR_CRC_MODE):
+            return
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
                     CSR_IVT_BASE, CSR_IE, CSR_PRIV,
                     CSR_IVEC_ID, CSR_PERF_CTRL,

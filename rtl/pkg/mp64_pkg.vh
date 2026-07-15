@@ -160,6 +160,7 @@ localparam [3:0] ISA_CRC_B     = 4'd1;
 localparam [3:0] ISA_CRC_Q     = 4'd2;
 localparam [3:0] ISA_CRC_FIN   = 4'd3;
 localparam [3:0] ISA_CRC_MODEX = 4'd4;   // CRC.MODE (name avoids collision)
+localparam [3:0] ISA_CRC_SEED  = 4'd5;   // Load mode-width accumulator from Rs
 
 // --- EXT.CRYPTO SHA-2 sub-op codes (within SHA unit, sub_op[3:0]) ---
 localparam [3:0] ISA_SHA_INIT  = 4'd0;   // SHA.INIT imm8

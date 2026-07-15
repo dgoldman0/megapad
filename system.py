@@ -90,6 +90,7 @@ class MicroCluster:
     Shared resources:
       - 1 KiB scratchpad RAM (cluster-local, not on main bus)
       - Shared MUL/DIV unit (modelled as immediate, no contention)
+      - Shared CRC accumulator, mode, and transaction lock
       - Hardware barrier register
       - BIST controller for scratchpad/multiplier
 
@@ -126,6 +127,11 @@ class MicroCluster:
         self.cl_mpu_limit = 0    # exclusive upper bound
         self.cl_ivt_base = 0     # shared IVT base address
 
+        # Cluster-shared CRC state. MODE, INIT, or SEED acquires the
+        # transaction lock; FIN publishes the final accumulator and releases
+        # it. The owner is a local core index, matching the RTL arbiter.
+        self.reset_crc()
+
         # Create micro-cores
         self.cores: list[Megapad64Micro] = []
         for i in range(n):
@@ -136,6 +142,35 @@ class MicroCluster:
             if shared_mem is not None:
                 mc.mem = shared_mem
             self.cores.append(mc)
+
+    # -- Shared CRC engine --
+
+    def reset_crc(self):
+        """Reset shared CRC state and release any stranded transaction."""
+        self.crc_acc = 0xFFFF_FFFF
+        self.crc_mode = 0
+        self.crc_locked = False
+        self.crc_owner: Optional[int] = None
+
+    def crc_try_acquire(self, global_core_id: int) -> bool:
+        """Acquire the CRC transaction for a core, or report contention."""
+        local = global_core_id - self.id_base
+        if not 0 <= local < self.n:
+            return False
+        if not self.crc_locked:
+            self.crc_locked = True
+            self.crc_owner = local
+        return self.crc_owner == local
+
+    def crc_is_owner(self, global_core_id: int) -> bool:
+        local = global_core_id - self.id_base
+        return self.crc_locked and self.crc_owner == local
+
+    def crc_release(self, global_core_id: int):
+        """Release the CRC lock when the calling core owns it."""
+        if self.crc_is_owner(global_core_id):
+            self.crc_locked = False
+            self.crc_owner = None
 
     # -- Barrier --
 
@@ -236,6 +271,7 @@ class MicroCluster:
     def set_enabled(self, en: bool):
         """Enable or disable the cluster (matching RTL cluster_en gating)."""
         if en and not self.enabled:
+            self.reset_crc()
             # Coming out of reset — reset all micro-cores
             for mc in self.cores:
                 mc._reset_state()
@@ -246,6 +282,7 @@ class MicroCluster:
             self.cl_mpu_limit = 0
         self.enabled = en
         if not en:
+            self.reset_crc()
             # Entering reset — halt all micro-cores
             for mc in self.cores:
                 mc.halted = True
@@ -811,6 +848,9 @@ class MegapadSystem:
         cluster is enabled via the SysInfo CLUSTER_EN register.
         """
         self.audio.reset()
+        for cluster in self.clusters:
+            cluster.enabled = False
+            cluster.reset_crc()
         for i, cpu in enumerate(self.cores):
             cpu._reset_state()
 

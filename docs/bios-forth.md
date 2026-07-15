@@ -648,20 +648,34 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 ---
 
-## CRC Engine (6 words)
+## CRC Engine (8 words)
 
-Per-core CRC computation via ISA instructions (EXT.CRYPTO `FB` prefix).
-Supports CRC32, CRC32C, and CRC64 polynomials.  CRC state lives in
-CSR 0x80 (CRC_ACC) and CSR 0x81 (CRC_MODE).
+CRC computation uses EXT.CRYPTO `FB` instructions. Full cores have private
+state; each micro-core cluster shares an accelerator protected by a hardware
+transaction lock. `CRC-POLY!` or `CRC-INIT!` begins a transaction and
+finalization releases it. CRC state lives in CSR 0x80 (CRC_ACC) and CSR 0x81
+(CRC_MODE). Micro-cores may read those CSRs, but writes are ignored; the BIOS
+words mutate shared state through owner-arbitrated CRC instructions.
+
+The owning micro-core must reach a final operation: traps and `THROW` do not
+auto-release the lock. The same owner can resume, reset/reseed, and finalize;
+cluster reset or disable also clears ownership.
+
+All modes are MSB-first and non-reflected, with all-ones init and XOR-out.
+Mode 0 uses the CRC-32/BZIP2 tuple, mode 1 uses the Castagnoli polynomial in
+non-reflected form, and mode 2 uses CRC-64/WE parameters. See the
+[ISA reference](isa-reference.md) for the complete tuples and check vectors.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CRC-POLY!` | `( n -- )` | Select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64. |
-| `CRC-INIT!` | `( n -- )` | Set the initial CRC value. |
-| `CRC-FEED` | `( n -- )` | Feed 8 bytes of data into the CRC engine. |
-| `CRC@` | `( -- n )` | Read the current CRC result. |
-| `CRC-RESET` | `( -- )` | Reset CRC to its initial value. |
-| `CRC-FINAL` | `( -- )` | Finalize the CRC (apply XOR-out). |
+| `CRC-POLY!` | `( n -- )` | Select mode 0, 1, or 2 and begin/retain a transaction; every other complete value selects mode 0. |
+| `CRC-INIT!` | `( n -- )` | Acquire the shared engine and set a mode-width seed (low 32 bits in modes 0/1, all 64 bits in mode 2). |
+| `CRC-FEED` | `( n -- )` | Feed 8 bytes, least-significant byte first. |
+| `CRC-FEED-BYTE` | `( b -- )` | Feed exactly `b[7:0]` as one byte. |
+| `CRC@` | `( -- n )` | Read the current raw or finalized accumulator. |
+| `CRC-RESET` | `( -- )` | Acquire and reset to the mode's all-ones default. |
+| `CRC-FINAL` | `( -- )` | Finalize into CRC_ACC and release the shared lock. A later `CRC@` is a separate operation and can race another micro-core transaction. |
+| `CRC-FINAL@` | `( -- n )` | Atomically finalize, release, and return the result; authoritative final-read word for shared-core use. |
 
 ---
 

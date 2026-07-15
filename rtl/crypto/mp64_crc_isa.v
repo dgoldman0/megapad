@@ -1,24 +1,26 @@
 // ============================================================================
-// mp64_crc_isa.v — Per-Core CRC32/CRC32C/CRC64 ISA Engine
+// mp64_crc_isa.v — CRC ISA Datapath
 // ============================================================================
 //
 // Combinational CRC engine for EXT.CRYPTO (FB 0x) ISA instructions.
-// Instantiated per full core.  No stalling — result available same cycle.
+// Instantiated per full core and once per micro-core cluster. The datapath is
+// combinational; a cluster wrapper supplies arbitration and transaction lock.
 //
 // Sub-ops:
 //   0x0 CRC.INIT   — reset accumulator to all-ones
 //   0x1 CRC.B      — feed 1 byte (R[s][7:0])
 //   0x2 CRC.Q      — feed 8 bytes (R[s][63:0], LE order)
-//   0x3 CRC.FIN    — finalize (XOR with mask)
-//   0x4 CRC.MODE   — select polynomial (0=CRC32, 1=CRC32C, 2=CRC64)
+//   0x3 CRC.FIN    — finalize (XOR with mask), store and return result
+//   0x4 CRC.MODE   — select parameter tuple (only complete values 0/1/2)
+//   0x5 CRC.SEED   — load a mode-width accumulator from R[s]
 //
 // CRC state: 64-bit accumulator (crc_acc) + 2-bit mode (crc_mode)
 // These are CSR-accessible (0x80, 0x81).
 //
-// Polynomials (MSB-first / normal form, matches mp64_crc.v MMIO):
-//   Mode 0: CRC32  IEEE 802.3   = 0x04C11DB7
-//   Mode 1: CRC32C Castagnoli   = 0x1EDC6F41
-//   Mode 2: CRC64  ECMA-182     = 0x42F0E1EBA9EA3693
+// Parameter tuples are MSB-first and non-reflected, with all-ones init/xor:
+//   Mode 0: CRC-32/BZIP2                poly 0x04C11DB7
+//   Mode 1: Castagnoli, non-reflected    poly 0x1EDC6F41
+//   Mode 2: CRC-64/WE                    poly 0x42F0E1EBA9EA3693
 //
 
 `include "mp64_pkg.vh"
@@ -141,17 +143,33 @@ module mp64_crc_isa (
             end
 
             ISA_CRC_FIN: begin
-                // CRC.FIN: finalize (XOR with mask)
-                result = crc_acc_in ^ (is_64 ? 64'hFFFF_FFFF_FFFF_FFFF
-                                             : 64'h0000_0000_FFFF_FFFF);
-                rd_we  = 1'b1;
-                // acc not modified
+                // CRC.FIN atomically publishes the finalized value both to
+                // Rd and CRC_ACC.  Micro-core clusters release their shared
+                // transaction lock on this operation, so a later CSR write
+                // would race the next owner.
+                result      = crc_acc_in ^ (is_64 ? 64'hFFFF_FFFF_FFFF_FFFF
+                                                  : 64'h0000_0000_FFFF_FFFF);
+                crc_acc_out = result;
+                acc_we      = 1'b1;
+                rd_we       = 1'b1;
             end
 
             ISA_CRC_MODEX: begin
-                // CRC.MODE: set polynomial select
-                crc_mode_out = imm8[1:0];
+                // Only the complete values 1 and 2 select alternate
+                // algorithms. Every other imm8 value canonicalizes to 0;
+                // do not truncate first (for example, 5 is invalid).
+                crc_mode_out = (imm8 == 8'd1) ? 2'd1
+                             : (imm8 == 8'd2) ? 2'd2
+                             :                     2'd0;
                 mode_we      = 1'b1;
+            end
+
+            ISA_CRC_SEED: begin
+                // A 32-bit mode never carries hidden state in the high half.
+                crc_acc_out = is_64 ? rs_val : {32'd0, rs_val[31:0]};
+                result      = crc_acc_out;
+                acc_we      = 1'b1;
+                rd_we       = 1'b1;
             end
 
             default: begin

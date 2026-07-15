@@ -46,7 +46,7 @@
 ;    NIC    0xFFFF_FF00_0000_0400   CMD=+0 STATUS=+1 DMA=+2..+9
 ;    Mbox   0xFFFF_FF00_0000_0500   DATA=+0..7 SEND=+8 STATUS=+9 ACK=+A
 ;    Spin   0xFFFF_FF00_0000_0600   ACQUIRE=+N*4 RELEASE=+N*4+1
-;    CRC    ISA-only (EXT.CRYPTO FB 00-04; no MMIO)
+;    CRC    ISA-only (EXT.CRYPTO FB 00-05; no MMIO)
 ;    SHA256 ISA-only (EXT.CRYPTO FB 10-15; no MMIO)
 ;
 ;  Multicore CSRs
@@ -11172,7 +11172,7 @@ w_perf_reset:
     ret.l
 
 ; =====================================================================
-;  CRC Engine — ISA instructions (EXT.CRYPTO FB 00-04)
+;  CRC Engine — ISA instructions (EXT.CRYPTO FB 00-05)
 ; =====================================================================
 ; CRC is now per-core / cluster-shared via ISA instructions.
 ; No MMIO peripheral.  State lives in CSR 0x80 (CRC_ACC), 0x81 (CRC_MODE).
@@ -11180,20 +11180,34 @@ w_perf_reset:
 ;   CRC.INIT          — reset accumulator to all-ones (mode-dependent)
 ;   CRC.B   Rd, Rs    — feed 1 byte from Rs[7:0], result → Rd
 ;   CRC.Q   Rd, Rs    — feed 8 bytes from Rs (LE order), result → Rd
-;   CRC.FIN Rd, Rs    — finalize (XOR-out), result → Rd (Rs ignored)
-;   CRC.MODE imm8     — select polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
+;   CRC.FIN Rd, Rs    — finalize atomically, result → CRC_ACC and Rd
+;   CRC.MODE imm8     — exact 0/1/2 select a tuple; every other value → 0
+;   CRC.SEED Rd, Rs   — load a mode-width accumulator from Rs
 
-; CRC-POLY! ( n -- )  set polynomial: 0=CRC32, 1=CRC32C, 2=CRC64
+; CRC-POLY! ( n -- )  set CRC tuple: 0=BZIP2, 1=non-reflected Castagnoli,
+;                     2=CRC-64/WE parameters; every other value selects 0
 w_crc_poly_store:
     ldn r0, r14
     addi r14, 8
-    csrw 0x81, r0                       ; CSR_CRC_MODE
+    cmpi r0, 1
+    lbreq .crc_poly_1
+    cmpi r0, 2
+    lbreq .crc_poly_2
+    crc.mode 0                          ; also acquires shared CRC lock
+    ret.l
+.crc_poly_1:
+    crc.mode 1
+    ret.l
+.crc_poly_2:
+    crc.mode 2
     ret.l
 
-; CRC-INIT! ( n -- )  initialise CRC (value is ignored; always all-ones)
+; CRC-INIT! ( n -- )  acquire the CRC lock and set an arbitrary seed
 w_crc_init_store:
-    addi r14, 8                         ; drop the stack arg (not used)
+    ldn r0, r14
+    addi r14, 8
     crc.init
+    crc.seed r0, r0                     ; owner-arbitrated width-masked seed
     ret.l
 
 ; CRC-FEED ( n -- )  feed 8 bytes of data from TOS
@@ -11201,6 +11215,13 @@ w_crc_feed:
     ldn r0, r14
     addi r14, 8
     crc.q r0, r0                        ; feed 8 bytes, discard intermediate
+    ret.l
+
+; CRC-FEED-BYTE ( b -- )  feed TOS[7:0] as exactly one byte
+w_crc_feed_byte:
+    ldn r0, r14
+    addi r14, 8
+    crc.b r0, r0
     ret.l
 
 ; CRC@ ( -- n )  read current CRC accumulator (raw, not finalized)
@@ -11215,14 +11236,16 @@ w_crc_reset:
     crc.init
     ret.l
 
-; CRC-FINAL ( -- )  finalize CRC (XOR-out), store result in CRC_ACC CSR.
-;   Old MMIO CRC-FINAL was ( -- ) — it finalized the peripheral but did
-;   not push.  CRC@ then read back the finalized result.
-;   ISA CRC.FIN only writes Rd; it does NOT update crc_acc CSR.
-;   We must write back so CRC@ returns the finalized value.
+; CRC-FINAL ( -- )  finalize CRC; a later CRC@ can race on a shared engine.
 w_crc_final:
     crc.fin r0, r0                      ; r0 = crc_acc ^ mask (finalized)
-    csrw 0x80, r0                       ; CSR_CRC_ACC ← finalized value
+    ret.l
+
+; CRC-FINAL@ ( -- n )  atomically finalize and return the result directly.
+w_crc_final_fetch:
+    crc.fin r0, r0
+    subi r14, 8
+    str r14, r0
     ret.l
 
 ; =====================================================================
@@ -16740,10 +16763,30 @@ d_quote_close:
     call.l r11
     ret.l
 
+; CRC ABI extensions are appended so existing built-in dictionary ordinals
+; remain stable for tooling that still reports them.
+; === CRC-FEED-BYTE ===
+d_crc_feed_byte:
+    .dq d_quote_close
+    .db 13
+    .ascii "CRC-FEED-BYTE"
+    ldi64 r11, w_crc_feed_byte
+    call.l r11
+    ret.l
+
+; === CRC-FINAL@ ===
+d_crc_final_fetch:
+    .dq d_crc_feed_byte
+    .db 10
+    .ascii "CRC-FINAL@"
+    ldi64 r11, w_crc_final_fetch
+    call.l r11
+    ret.l
+
 ; === TX-FLUSH ===
 latest_entry:
 d_tx_flush:
-    .dq d_quote_close
+    .dq d_crc_final_fetch
     .db 8
     .ascii "TX-FLUSH"
     ldi64 r11, tx_flush

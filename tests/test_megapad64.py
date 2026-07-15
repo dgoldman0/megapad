@@ -8,7 +8,8 @@ Run with:  python test_megapad64.py
 import sys
 import traceback
 
-from megapad64 import (Megapad64, HaltError, TrapError, u64, sign_extend,
+from megapad64 import (Megapad64, HaltError, TrapError, IVEC_ILLEGAL_OP,
+                       u64, sign_extend,
                        EW_FP16, EW_BF16, _float_to_fp16, _fp16_to_float,
                        _float_to_bf16, _bf16_to_float, _fp32_to_bits,
                        _bits_to_fp32)
@@ -2230,7 +2231,7 @@ def test_ext_prefix():
 
 
 def test_crc_isa():
-    """EXT.CRYPTO CRC ISA instructions (FB 00–04)"""
+    """EXT.CRYPTO CRC ISA instructions (FB 00–05)"""
     print("\n== EXT.CRYPTO CRC ISA (FB 0x) ==")
 
     # --- CRC.INIT (FB 00) — default mode 0 = CRC32 ---
@@ -2240,7 +2241,7 @@ def test_crc_isa():
     """)
     check("CRC.INIT: CRC_ACC = 0xFFFFFFFF", cpu.crc_acc == 0xFFFFFFFF)
 
-    # --- CRC.MODE (FB 04) — select CRC32C ---
+    # --- CRC.MODE (FB 04) — select non-reflected Castagnoli mode ---
     cpu, _ = run_asm("""
         crc.mode 1
         crc.init
@@ -2258,6 +2259,27 @@ def test_crc_isa():
     """)
     check("CRC.MODE 2 + CRC.INIT: CRC_ACC = 0xFFFFFFFFFFFFFFFF",
           cpu.crc_acc == 0xFFFFFFFFFFFFFFFF)
+
+    for invalid_mode in (3, 5, 0xFF):
+        cpu, _ = run_asm(f"""
+            crc.mode {invalid_mode}
+            crc.init
+            halt
+        """)
+        check(f"CRC.MODE {invalid_mode:#x} canonicalizes to mode 0",
+              cpu.crc_mode == 0 and cpu.crc_acc == 0xFFFFFFFF)
+
+    # CSR mode selection follows the same full-value rule: values are
+    # validated before narrowing, so 5 must not alias mode 1.
+    for invalid_mode in (3, 5, 0xFF):
+        cpu, _ = run_asm(f"""
+            ldi64 r2, {invalid_mode}
+            csrw 0x81, r2
+            csrr r6, 0x81
+            halt
+        """)
+        check(f"CRC_MODE CSR {invalid_mode:#x} canonicalizes to mode 0",
+              cpu.regs[6] == 0 and cpu.crc_mode == 0)
 
     # --- CRC.B (FB 01) — feed one byte (CRC32 mode) ---
     # CRC32 of single byte 0x00 with init 0xFFFFFFFF
@@ -2307,6 +2329,9 @@ def test_crc_isa():
     check(f"CRC.FIN of 'A' = {expected_final:#010x}",
           cpu.regs[0] == expected_final,
           f"got {cpu.regs[0]:#010x}")
+    check("CRC.FIN atomically updates CRC_ACC",
+          cpu.crc_acc == expected_final,
+          f"acc={cpu.crc_acc:#010x}")
 
     # --- CRC.Q (FB 02) — feed 8 bytes at once ---
     # Feed 8 zero bytes
@@ -2354,7 +2379,7 @@ def test_crc_isa():
           cpu.regs[0] == expected_final,
           f"got {cpu.regs[0]:#010x}")
 
-    # --- CRC32C mode (mode 1) ---
+    # --- Non-reflected Castagnoli mode (mode 1) ---
     cpu, _ = run_asm("""
         crc.mode 1
         crc.init
@@ -2363,7 +2388,7 @@ def test_crc_isa():
         crc.fin r0, r0
         halt
     """)
-    # CRC32C of 'A' (0x41) with polynomial 0x1EDC6F41
+    # Mode 1, MSB-first/non-reflected polynomial 0x1EDC6F41.
     acc = 0xFFFFFFFF
     acc ^= 0x41 << 24
     for _ in range(8):
@@ -2372,7 +2397,7 @@ def test_crc_isa():
         else:
             acc = (acc << 1) & 0xFFFFFFFF
     expected_final = acc ^ 0xFFFFFFFF
-    check(f"CRC32C of 'A' = {expected_final:#010x}",
+    check(f"CRC mode 1 of 'A' = {expected_final:#010x}",
           cpu.regs[0] == expected_final,
           f"got {cpu.regs[0]:#010x}")
 
@@ -2385,7 +2410,7 @@ def test_crc_isa():
         crc.fin r0, r0
         halt
     """)
-    # CRC64 ECMA of 'A' (0x41) with polynomial 0x42F0E1EBA9EA3693
+    # Mode 2 (CRC-64/WE parameters) with polynomial 0x42F0E1EBA9EA3693.
     acc = 0xFFFFFFFFFFFFFFFF
     acc ^= 0x41 << 56
     for _ in range(8):
@@ -2394,7 +2419,7 @@ def test_crc_isa():
         else:
             acc = (acc << 1) & 0xFFFFFFFFFFFFFFFF
     expected_final = acc ^ 0xFFFFFFFFFFFFFFFF
-    check(f"CRC64 of 'A' = {expected_final:#018x}",
+    check(f"CRC mode 2 of 'A' = {expected_final:#018x}",
           cpu.regs[0] == expected_final,
           f"got {cpu.regs[0]:#018x}")
 
@@ -2412,6 +2437,79 @@ def test_crc_isa():
           cpu.regs[5] == cpu.regs[1],
           f"CSR={cpu.regs[5]:#x} vs R1={cpu.regs[1]:#x}")
     check("CSR read CRC_MODE (0x81) = 0", cpu.regs[6] == 0)
+
+    # --- Arbitrary seed + mixed accelerated/byte tail path ---
+    cpu, _ = run_asm("""
+        crc.mode 0
+        crc.init
+        ldi64 r2, 0x0000000012345678
+        crc.seed r2, r2
+        ldi64 r5, 0x4847464544434241
+        crc.q r1, r5
+        ldi r5, 0x49
+        crc.b r1, r5
+        ldi r5, 0x4A
+        crc.b r1, r5
+        ldi r5, 0x4B
+        crc.b r1, r5
+        crc.fin r4, r0
+        halt
+    """)
+    acc = 0x12345678
+    for b in b"ABCDEFGHIJK":
+        acc ^= b << 24
+        for _ in range(8):
+            if acc & 0x80000000:
+                acc = ((acc << 1) & 0xFFFFFFFF) ^ 0x04C11DB7
+            else:
+                acc = (acc << 1) & 0xFFFFFFFF
+    expected_final = acc ^ 0xFFFFFFFF
+    check("CRC arbitrary seed + CRC.Q/CRC.B tail",
+          cpu.regs[4] == expected_final and cpu.crc_acc == expected_final,
+          f"rd={cpu.regs[4]:#010x} acc={cpu.crc_acc:#010x}")
+
+    cpu, _ = run_asm("""
+        crc.mode 0
+        ldi64 r2, 0xDEADBEEF89ABCDEF
+        crc.seed r5, r2
+        halt
+    """)
+    check("CRC.SEED masks the high half in 32-bit modes",
+          cpu.regs[5] == 0x89ABCDEF and cpu.crc_acc == 0x89ABCDEF)
+
+    cpu, _ = run_asm("""
+        crc.mode 2
+        ldi64 r2, 0xDEADBEEF89ABCDEF
+        crc.seed r5, r2
+        halt
+    """)
+    check("CRC.SEED preserves all 64 bits in mode 2",
+          cpu.regs[5] == 0xDEADBEEF89ABCDEF and
+          cpu.crc_acc == 0xDEADBEEF89ABCDEF)
+
+    for mode, expected in (
+            (0, 0xFC891918),
+            (1, 0x05440F15),
+            (2, 0x62EC59E3F1A4F00A)):
+        feed = "\n".join(
+            f"ldi r2, {byte}\ncrc.b r1, r2"
+            for byte in b"123456789")
+        cpu, _ = run_asm(
+            f"crc.mode {mode}\ncrc.init\n{feed}\ncrc.fin r4, r0\nhalt")
+        check(f"CRC mode {mode} authoritative 123456789 vector",
+              cpu.regs[4] == expected and cpu.crc_acc == expected,
+              f"got {cpu.regs[4]:#x}")
+
+    cpu = Megapad64(mem_size=256)
+    cpu.load_bytes(0, bytes((0xFB, 0x06, 0x15)))
+    cpu.pc = 0
+    try:
+        cpu.step()
+        check("Reserved CRC sub-op traps", False, "instruction completed")
+    except TrapError as exc:
+        check("Reserved CRC sub-op traps as a two-byte instruction",
+              exc.ivec_id == IVEC_ILLEGAL_OP and cpu.pc == 2,
+              f"ivec={exc.ivec_id} pc={cpu.pc}")
 
 
 def test_fibonacci():

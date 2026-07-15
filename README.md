@@ -122,16 +122,17 @@ exposes `HBW-BASE` / `HBW-SIZE` words.
 
 **Devices** — UART (serial I/O), Timer (cycle-accurate with interrupts),
 Storage Controller (sector-based disk I/O), NIC (Ethernet frames with
-DMA), CRC Engine (CRC32/CRC32C/CRC64), AES-256-GCM (encrypt/decrypt with
+DMA), CRC ISA engine (three exact non-reflected 32/64-bit tuples), AES-256-GCM (encrypt/decrypt with
 authentication), SHA-3/SHAKE (Keccak-f[1600], 4 modes + XOF squeeze),
 TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
 arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
 INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
 key encapsulation via NTT+SHA3+TRNG), one-shot PCM Audio (deterministic
 headless capture with optional host playback), SystemInfo (CPUID, memory
-size), Mailbox (inter-core IPI), and Spinlocks (8 hardware mutexes). All are
-memory-mapped at `0xFFFF_FF00+`. The audio register contract is implemented
-in the emulator; its physical DMA/I2S bridge remains pending.
+size), Mailbox (inter-core IPI), and Spinlocks (8 hardware mutexes). Peripheral
+devices are memory-mapped at `0xFFFF_FF00+`; CRC, SHA-2, and Field ALU
+acceleration are EXT.CRYPTO ISA facilities instead. The audio register contract
+is implemented in the emulator; its physical DMA/I2S bridge remains pending.
 
 ---
 

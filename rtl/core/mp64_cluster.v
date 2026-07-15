@@ -384,8 +384,6 @@ module mp64_cluster #(
             cl_mpu_base   <= 64'd0;
             cl_mpu_limit  <= 64'd0;
             cl_ivt_base   <= 64'd0;
-            cl_crc_acc    <= 64'h0000_0000_FFFF_FFFF;
-            cl_crc_mode   <= 2'd0;
             cl_sha_acc[0] <= 64'd0; cl_sha_acc[1] <= 64'd0;
             cl_sha_acc[2] <= 64'd0; cl_sha_acc[3] <= 64'd0;
             cl_sha_mode      <= 2'd0;
@@ -455,10 +453,6 @@ module mp64_cluster #(
                             cl_mpu_limit <= mc_cl_csr_wdata[mi*64 +: 64];
                         CSR_IVTBASE, CSR_CL_IVTBASE:
                             cl_ivt_base <= mc_cl_csr_wdata[mi*64 +: 64];
-                        CSR_CRC_ACC:
-                            cl_crc_acc <= mc_cl_csr_wdata[mi*64 +: 64];
-                        CSR_CRC_MODE:
-                            cl_crc_mode <= mc_cl_csr_wdata[mi*64 +: 2];
                         CSR_SHA_MODE:
                             cl_sha_mode <= mc_cl_csr_wdata[mi*64 +: 2];
                         CSR_SHA_MSGLEN:
@@ -669,7 +663,7 @@ module mp64_cluster #(
     // Unlike MUL (stateless), CRC is stateful: the accumulator persists
     // across calls.  A hardware lock protects multi-instruction CRC
     // sequences:
-    //   CRC.INIT acquires the lock (sets crc_locked, records owner).
+    //   CRC.MODE or CRC.INIT acquires the lock (sets crc_locked, owner).
     //   CRC.FIN  releases the lock.
     //   While locked, only the lock owner can execute CRC ops.
     //   Other cores' crc_req stalls (they stay in CPU_CRYPTO).
@@ -678,6 +672,7 @@ module mp64_cluster #(
 
     localparam CRC_IDLE   = 2'd0;
     localparam CRC_ACTIVE = 2'd1;
+    localparam CRC_WAIT_DROP = 2'd2;
 
     reg [1:0]           crc_state;
     reg [ARB_BITS-1:0]  crc_last;
@@ -737,9 +732,12 @@ module mp64_cluster #(
     end
 
     // Mux granted core's signals to the CRC ISA engine
-    assign crc_isa_op     = mc_crc_op    [crc_next*4  +: 4];
-    assign crc_isa_rs_val = mc_crc_rs_val[crc_next*64 +: 64];
-    assign crc_isa_imm8   = mc_crc_imm8  [crc_next*8  +: 8];
+    // The request selector may change after a grant (especially when
+    // multiple unlocked cores request CRC.MODE together).  Execute the
+    // latched grant, never the next combinational candidate.
+    assign crc_isa_op     = mc_crc_op    [crc_grant*4  +: 4];
+    assign crc_isa_rs_val = mc_crc_rs_val[crc_grant*64 +: 64];
+    assign crc_isa_imm8   = mc_crc_imm8  [crc_grant*8  +: 8];
 
     // CRC arbiter FSM
     always @(posedge clk) begin
@@ -752,6 +750,8 @@ module mp64_cluster #(
             crc_result_reg <= 64'd0;
             crc_locked     <= 1'b0;
             crc_lock_owner <= {ARB_BITS{1'b0}};
+            cl_crc_acc     <= 64'h0000_0000_FFFF_FFFF;
+            cl_crc_mode    <= 2'd0;
         end else begin
             crc_done_reg  <= 1'b0;
             crc_rd_we_reg <= 1'b0;
@@ -775,8 +775,12 @@ module mp64_cluster #(
                     if (crc_isa_mode_we) cl_crc_mode <= crc_isa_mode_out;
 
                     // Hardware lock management
-                    if (crc_isa_op == ISA_CRC_INIT) begin
-                        // CRC.INIT: acquire lock
+                    if (crc_isa_op == ISA_CRC_MODEX ||
+                        crc_isa_op == ISA_CRC_INIT ||
+                        crc_isa_op == ISA_CRC_SEED) begin
+                        // A mode selection begins a complete CRC
+                        // transaction before a following INIT can race;
+                        // INIT independently remains a valid lock acquire.
                         crc_locked     <= 1'b1;
                         crc_lock_owner <= crc_grant;
                     end else if (crc_isa_op == ISA_CRC_FIN) begin
@@ -785,7 +789,15 @@ module mp64_cluster #(
                     end
 
                     crc_last  <= crc_grant;
-                    crc_state <= CRC_IDLE;
+                    // The micro-core holds crc_req through its DONE cycle.
+                    // Do not grant that level-sensitive request a second
+                    // time before the requester has observed completion.
+                    crc_state <= CRC_WAIT_DROP;
+                end
+
+                CRC_WAIT_DROP: begin
+                    if (!mc_crc_req[crc_grant])
+                        crc_state <= CRC_IDLE;
                 end
 
                 default: crc_state <= CRC_IDLE;
