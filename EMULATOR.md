@@ -350,7 +350,7 @@ buffer), then tokenises and interprets:
 `-ROT` `?DUP` `2OVER` `2SWAP` `2ROT`
 
 **Arithmetic**
-`+` `-` `*` `/` `MOD` `/MOD` `NEGATE` `ABS` `1+` `1-` `2*` `2/`
+`+` `-` `*` `UM*` `/` `MOD` `/MOD` `NEGATE` `ABS` `1+` `1-` `2*` `2/`
 `MIN` `MAX` `CELLS` `CELL+`
 
 **Logic & bitwise**

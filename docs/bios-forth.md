@@ -73,7 +73,7 @@ balance your `>R` / `R>` pairs within a single definition.**
 
 ---
 
-## Arithmetic (16 words)
+## Arithmetic (17 words)
 
 All arithmetic operates on **64-bit** values.  Division by zero triggers a
 CPU trap (vector `IVEC_DIV_ZERO`).
@@ -83,6 +83,7 @@ CPU trap (vector `IVEC_DIV_ZERO`).
 | `+` | `( a b -- a+b )` | Addition. |
 | `-` | `( a b -- a-b )` | Subtraction (a minus b). |
 | `*` | `( a b -- a*b )` | Signed multiplication (low 64 bits). |
+| `UM*` | `( u1 u2 -- lo hi )` | Unsigned 64×64-bit multiply, returning the low and high halves of the 128-bit product. |
 | `/` | `( a b -- a/b )` | Signed integer division.  Traps on b=0. |
 | `MOD` | `( a b -- a%b )` | Signed modulo. |
 | `/MOD` | `( a b -- rem quot )` | Signed division with remainder. |

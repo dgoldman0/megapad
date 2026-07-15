@@ -927,6 +927,11 @@ KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
 | `LOCK` | `( n -- )` | Acquire spinlock *n* with busy-wait (calls `SPIN@` in a loop). |
 | `UNLOCK` | `( n -- )` | Release spinlock *n* (calls `SPIN!`). |
 
+The eight hardware locks have one machine-wide allocation: 0 dictionary, 1
+UART, 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application
+runtime concurrency (including Akashic `EVT-LOCK`), and 7 IPI messaging.
+Subsystems must not privately reuse a number from this map.
+
 ### Parallel Pipeline Execution
 
 | Word | Stack Effect | Description |
@@ -1471,8 +1476,9 @@ by `SOCK-ACCEPT`.
 
 ### §16.7a–§16.7d Certificate Verification
 
-ASN.1/DER parser, X.509 leaf certificate parser, P-256 ECDSA signature
-verification, and TLS Certificate/CertificateVerify handler wiring.
+ASN.1/DER parsing, bounded X.509 path validation, P-256 ECDSA and fixed
+RSA-2048 signature verification, and TLS Certificate/CertificateVerify
+handler wiring.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -1482,15 +1488,24 @@ verification, and TLS Certificate/CertificateVerify handler wiring.
 | `DER-ENTER` | `( addr -- inner-addr inner-len )` | Enter a constructed element (SEQUENCE, SET, context-tagged). |
 | `DER-SKIP` | `( addr -- next-addr )` | Skip one TLV element entirely. |
 | `DER-FIND-TAG` | `( addr limit tag -- val-addr val-len \| 0 0 )` | Find first element with matching tag. |
-| `X509-PARSE` | `( cert clen -- flag )` | Parse DER X.509 certificate. Extracts pubkey, algo, SAN. 0=ok, -1=error. |
+| `X509-PARSE` | `( cert clen -- ior )` | Parse a DER X.509 certificate into compatibility buffers. Returns 0, -1 for malformed or oversized copied fields, or -2 for a well-formed unsupported key profile. |
+| `X509-DESC-PARSE` | `( cert clen desc -- ior )` | Parse a certificate into a borrowed-slice descriptor. Returns 0, -1 for malformed input, or -2 for a well-formed unsupported key profile. |
 | `X509-CHECK-HOST` | `( hostname hlen -- flag )` | Verify hostname against SAN dNSNames. Supports wildcards. 0=match, -1=no match. |
 | `EC-DOUBLE` | `( Px Py Pz Rx Ry Rz -- )` | P-256 Jacobian point doubling. |
 | `EC-ADD` | `( P1x P1y P1z P2x P2y P2z Rx Ry Rz -- )` | P-256 Jacobian point addition. |
 | `EC-AFFINE` | `( Jx Jy Jz Ax Ay -- )` | Convert Jacobian → affine coordinates. |
 | `EC-MUL` | `( k Px Py Rx Ry -- )` | Scalar multiplication k*P (double-and-add, 256-bit). |
 | `ECDSA-P256-VERIFY` | `( hash pubkey sig slen -- flag )` | Verify ECDSA-P256-SHA256 signature. 0=valid, -1=invalid. |
-| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- flag )` | Parse TLS Certificate message, extract leaf cert, verify hostname. |
-| `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify TLS CertificateVerify signature per RFC 8446 §4.4.3. |
+| `RSA-E-BUSY` | `( -- -2 )` | RSA scratch is owned by another operation or the caller is off core 0; owner-pumped code should retry later. |
+| `RSA2048-PUBLIC-BEGIN` | `( sig modulus em -- ior )` | Begin a core-0-only, owner-bound, fixed-exponent RSA-2048 public operation. Inputs are 256-byte big-endian values. |
+| `RSA2048-PUBLIC-STEP` | `( -- status )` | Perform one bounded RSA unit. Returns 0 while pending, 1 when the encoded message is ready, or -1 outside the owning execution context/state. |
+| `RSA2048-PUBLIC-FINAL` | `( -- ior )` | Finalize a ready operation and release its owner gate. Only the `(COREID,TASK-ID)` owner may call it. |
+| `RSA2048-PUBLIC-CANCEL` | `( -- ior )` | Wipe incremental RSA scratch and release its owner gate. Only the owner may call it. |
+| `RSA2048-PKCS1-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-2048 PKCS#1 v1.5 SHA-256 certificate padding. Blocking compatibility primitive. |
+| `RSA2048-PSS-SHA256-VERIFY` | `( hash modulus sig siglen -- flag )` | Verify exact RSA-PSS/SHA-256 with MGF1-SHA256 and 32-byte salt. Blocking compatibility primitive. |
+| `X509-VERIFY-CHAIN` | `( certs count hostname hlen now -- ior )` | Validate a bounded mixed ECDSA/RSA certificate path to a provisioned scoped anchor. |
+| `TLS-PARSE-CERTIFICATE` | `( msg mlen -- flag )` | Parse the bounded TLS Certificate message and authenticate its leaf through the configured path and hostname policy. |
+| `TLS-VERIFY-CERT-SIG` | `( ctx msg mlen -- flag )` | Verify RFC 8446 CertificateVerify using ECDSA-P256-SHA256 or RSA-PSS-RSAE-SHA256 according to the authenticated leaf key. |
 
 ### §16.8–§16.11 TLS 1.3
 
@@ -1500,7 +1515,11 @@ Full TLS 1.3 implementation with **dual-mode cipher suite** support:
 
 Includes record-layer framing with reassembly buffers, multi-message
 handshake processing, SNI (Server Name Indication), Change Cipher
-Spec tolerance, and **server certificate verification** (ECDSA-P256-SHA256).
+Spec tolerance, and bounded **server certificate verification** using
+ECDSA-P256-SHA256 and RSA-2048/SHA-256 profiles. Public ClientHello messages
+offer `ecdsa_secp256r1_sha256` and `rsa_pss_rsae_sha256` for
+CertificateVerify, while `signature_algorithms_cert` separately permits
+ECDSA-P256-SHA256 and RSA PKCS#1 v1.5 SHA-256 certificate signatures.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

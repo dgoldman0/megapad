@@ -157,13 +157,14 @@ status and diagnostics.
 | 16 | `2SWAP` | `( a b c d -- c d a b )` | | Swap top two pairs |
 | 17 | `2ROT` | `( a b c d e f -- c d e f a b )` | | Rotate third pair to top |
 
-### Arithmetic (16 words)
+### Arithmetic (17 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 17 | `+` | `( a b -- a+b )` | | Addition |
 | 18 | `-` | `( a b -- a-b )` | | Subtraction |
 | 19 | `*` | `( a b -- a*b )` | | Multiplication |
+| — | `UM*` | `( u1 u2 -- lo hi )` | | Unsigned 64×64-bit multiply; returns the low and high halves of the 128-bit product |
 | 20 | `/` | `( a b -- quot )` | | Signed division (quotient) |
 | 21 | `MOD` | `( a b -- rem )` | | Signed modulus (remainder) |
 | 22 | `/MOD` | `( a b -- rem quot )` | | Signed divide with remainder |
@@ -726,7 +727,7 @@ of compiled code.
 | Category | Count |
 |----------|-------|
 | Stack Manipulation | 16 |
-| Arithmetic | 16 |
+| Arithmetic | 17 |
 | Logic & Bitwise | 6 |
 | Comparison | 13 |
 | Memory | 18 |

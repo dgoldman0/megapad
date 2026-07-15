@@ -1,7 +1,7 @@
 # Native TLS Hardening
 
-Status: authenticated P-256 profile implemented; general WebPKI incomplete
-Last updated: 2026-07-11
+Status: authenticated bounded P-256/RSA-2048 profile implemented; general WebPKI incomplete
+Last updated: 2026-07-14
 
 ## Purpose
 
@@ -25,7 +25,8 @@ standards, not a complete WebPKI implementation.
 3. A complete server `Certificate` message.
 4. A path from leaf to an explicitly provisioned and hostname-scoped anchor.
 5. Certificate validity, CA constraints, key usage, EKU, SAN, and hostname.
-6. Every required ECDSA-P256-SHA256 certificate signature.
+6. Every required ECDSA-P256-SHA256 or RSA-2048/PKCS#1-SHA256 certificate
+   signature.
 7. `CertificateVerify`, proving possession of the authenticated leaf key.
 8. The server `Finished` MAC.
 9. Exact `http/1.1` ALPN selection when the caller requests that profile.
@@ -47,9 +48,11 @@ certificates from 128 through 8192 bytes and records borrowed slices in a
 The parser currently requires:
 
 - X.509 version 3.
-- P-256 uncompressed SubjectPublicKeyInfo.
-- ECDSA with SHA-256, or ECDSA with SHA-384 on a certificate used only as an
-  explicitly trusted anchor.
+- A P-256 uncompressed SubjectPublicKeyInfo, or a canonical full-width
+  RSA-2048 `rsaEncryption` key with explicit NULL parameters and exponent
+  65537.
+- ECDSA with SHA-256, RSA PKCS#1 v1.5 with SHA-256, or ECDSA with SHA-384 on a
+  certificate used only as an explicitly trusted anchor.
 - Strict outer/TBS signature-algorithm agreement.
 - UTC or Generalized time with seconds and `Z`.
 - Bounded BasicConstraints, KeyUsage, EKU, SAN, SKI, and AKI parsing.
@@ -72,11 +75,36 @@ ECDSA verification operates only on public data. The scalar-multiplication
 routine is not a general constant-time private-key primitive and must not be
 reused for signing or secret scalar operations.
 
+### Fixed RSA-2048
+
+The RSA verifier accepts only a 2048-bit odd modulus and public exponent
+65537. Its 32-limb CIOS Montgomery multiplication uses the BIOS `UM*` word,
+which executes the existing `UMUL`/`UMULH` instructions; it does not replace
+the native multiplication path with a software fallback. Certificate
+signatures must have exact PKCS#1 v1.5 SHA-256 encoding. TLS
+CertificateVerify must use `rsa_pss_rsae_sha256` with `emBits=2047`, SHA-256,
+MGF1-SHA256, and an exact 32-byte salt.
+
+RSA scratch is restricted to core 0 and serialized by an owner/phase gate.
+Cooperative code uses `RSA2048-PUBLIC-BEGIN`, pumps one bounded unit per
+`RSA2048-PUBLIC-STEP`, and then calls `RSA2048-PUBLIC-FINAL` or
+`RSA2048-PUBLIC-CANCEL`. The operation is bound to the initiating
+`(COREID,TASK-ID)`; another execution context cannot step, finalize, cancel,
+or wipe it. Physical worker cores are rejected. `RSA-E-BUSY` (`-2`) reports
+contention or off-core entry. The synchronous public and padding-verification
+words remain compatibility primitives and are not suitable for a responsive
+live owner loop.
+
 ### Trust Bundles
 
 The default trust store is empty. `TLS-TRUST-LOAD` copies and validates an
 in-memory bundle, allowing at most eight anchors and 32768 total bytes. An
-anchor must be a CA and, when KeyUsage is present, permit certificate signing.
+anchor must use a supported P-256 or RSA-2048 public key, be a CA, and, when
+KeyUsage is present, permit certificate signing. An RSA-2048 intermediate may
+be provisioned directly as the scoped anchor even when its own borrowed
+signature is 512 bytes from an unsupported RSA-4096 parent; anchor loading
+does not pretend to validate that parent. An RSA-4096 certificate itself is
+rejected as an unsupported anchor.
 
 Bundle format, all integer fields big-endian:
 
@@ -117,7 +145,8 @@ builder:
 - checks SAN hostname and RTC validity;
 - links issuer/subject and AKI/SKI when both key identifiers are available;
 - checks CA BasicConstraints, keyCertSign, EKU restrictions, and pathLen;
-- verifies each P-256/SHA-256 child signature;
+- verifies each child with either ECDSA-P256-SHA256 or exact
+  RSA-2048/PKCS#1-SHA256 according to its signature and issuer-key algorithms;
 - terminates only at a scoped provisioned anchor.
 
 Failures return stable `TLS-CERT-*` statuses from `-4101` through `-4109`.
@@ -156,17 +185,19 @@ the connection context. The currently implemented application profile is
 checked exactly. Plain `TLS-CONNECT` requests no ALPN profile.
 
 Ordinary `TLS-CONNECT` and `TLS-CONNECT-ALPN` use the interoperable public
-profile: TLS 1.3 `TLS_AES_128_GCM_SHA256`, X25519, and only implemented
-ECDSA-P256-SHA256 signatures. `TLS-CONNECT-HYBRID` and
-`TLS-CONNECT-HYBRID-ALPN` explicitly select MegaPad's private X25519 plus
-ML-KEM-512 profile. That profile uses IANA private-use NamedGroup `0xFE00` and
-the private `0xFF01` cipher suite; it is not advertised to public servers.
+profile: TLS 1.3 `TLS_AES_128_GCM_SHA256` and X25519. Its
+`signature_algorithms` extension is exactly
+`ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256`; the separate
+`signature_algorithms_cert` extension is exactly
+`ecdsa_secp256r1_sha256, rsa_pkcs1_sha256`. The standard extension block is 77
+bytes.
 
-An earlier prototype incorrectly used `0x6399` for its ML-KEM-512 share. That
-code point means the obsolete but deployed X25519Kyber768Draft00 construction,
-whose key shape differs; public servers therefore correctly rejected the
-offer with `decode_error`. Private algorithms must remain in private-use code
-points unless their complete registered wire format is implemented.
+`TLS-CONNECT-HYBRID` and `TLS-CONNECT-HYBRID-ALPN` explicitly select MegaPad's
+private X25519 plus ML-KEM-512 profile. That profile uses IANA private-use
+NamedGroup `0xFE00` and private cipher suite `0xFF01`, has a 915-byte extension
+block, and is not advertised to public servers. The private key-share shape
+must not be placed under a registered group code point belonging to another
+construction.
 
 Connection waits are target-state aware. A completed SYN handshake returns
 immediately instead of running a fixed number of additional idle polls, and a
@@ -190,11 +221,8 @@ and remaining length into the shared plaintext buffer and drains that data
 before decrypting another record. A small HTTP receive scratch buffer therefore
 cannot silently truncate large response bodies.
 
-`MS@` and `EPOCH@` reconstruct all eight RTC bytes. Immediate ISA shifts are
-four bits wide, so a 16-bit byte-position shift must be emitted as two 8-bit
-shifts. Regressions use nonzero data in every byte; a previous single encoded
-shift caused the millisecond value to wrap at 65.536 seconds, which stopped
-OAuth polling and invalidated certificate/token deadlines in long sessions.
+`MS@` and `EPOCH@` reconstruct all eight RTC bytes. Certificate and token
+deadlines therefore use the full-width clock rather than a truncated timer.
 
 Incoming records require legacy record version `0x0303` and are bounded
 separately for plaintext and protected records. A compatibility
@@ -205,18 +233,17 @@ send and receive both require an established, authenticated context.
 
 ## Deployment Reality
 
-The code does not yet validate arbitrary public certificate chains. It lacks
-P-384, RSA, Ed25519, SHA-384 certificate-signature verification, and a curated
-root program. Those omissions matter because modern chains commonly cross
-algorithm boundaries.
+The code does not validate arbitrary public certificate chains. It lacks P-384,
+Ed25519, ECDSA-SHA384 child-signature verification, variable-width RSA, and a
+curated root program. Public chains commonly cross those boundaries.
 
-For example, the `api.openai.com` chain observed on 2026-07-10 used a P-256
-leaf signed with ECDSA-SHA256 by Google Trust Services `WE1`; `WE1` was signed
-with ECDSA-SHA384 by the P-384 `GTS Root R4`. The current profile can connect
-only if the exact `WE1` certificate is provisioned as an anchor scoped to
-`api.openai.com` (or an intentionally selected parent scope). That is a narrow,
-updateable deployment profile, not equivalent to trusting the GTS root or the
-public WebPKI. Intermediate rotation requires a trust-bundle update.
+When an endpoint's representable leaf or intermediate is signed by an
+unsupported parent, that supported certificate may instead be provisioned as
+a narrowly hostname-scoped anchor. For example, pinning an RSA-2048
+intermediate is valid even if its own signature came from an RSA-4096 root.
+This is an explicit, updateable deployment profile, not equivalent to
+validating or trusting the unsupported parent. Intermediate rotation requires
+a trust-bundle update.
 
 No remote API credential should be provisioned until the intended endpoint's
 current chain is representable by the installed bundle and a credential-free
@@ -228,6 +255,14 @@ Native guest tests cover:
 
 - canonical DER signature integers and a real certificate signature;
 - valid, corrupt, and out-of-range ECDSA inputs;
+- differential RSA Montgomery/public-operation vectors, widened multiply
+  boundaries, and representative-range rejection;
+- exact PKCS#1 v1.5 and PSS padding failure axes, plus fixed real RSA
+  certificate and CertificateVerify signatures;
+- RSA-only and mixed RSA/ECDSA paths, unsupported RSA-4096 anchors, and a
+  directly pinned RSA-2048 intermediate carrying a 512-byte parent signature;
+- owner-bound incremental RSA stepping, contention, cancellation, and
+  synchronous-phase cancellation rejection;
 - deterministic root/intermediate/leaf fixtures with CA, KU, EKU, SAN,
   SKI/AKI, pathLen, and validity constraints;
 - hostname, wildcard, clock, signature, scope, empty-store, and truncation
@@ -278,23 +313,30 @@ trust bundle.
 ### Algorithm coverage
 
 - Add ECDSA-SHA384 and P-384 verification for common GTS chains.
-- Add RSA-PSS and Ed25519 only with native vectors and bounded key sizes.
+- Add Ed25519 only with native vectors and bounded key sizes. If RSA-PSS is
+  later accepted as an X.509 certificate-signature AlgorithmIdentifier, give
+  its parameters the same exact, bounded treatment as CertificateVerify.
 - Advertise only signature algorithms whose complete certificate and
   CertificateVerify paths are implemented. The current ClientHello advertises
-  only `ecdsa_secp256r1_sha256`.
+  `0x0403,0x0804` in `signature_algorithms` and `0x0403,0x0401` in
+  `signature_algorithms_cert`.
 
 ### Concurrency
 
 ALPN result, traffic keys, authorization state, and connection errors are
 per-context. Handshake transcript, certificate descriptors, cryptographic
 scratch, record buffers, and hybrid key-exchange buffers remain global. The
-current owner loop permits one handshake and one record operation at a time.
-True concurrent TLS work requires per-context scratch or an explicit
-machine-wide TLS owner before multitasking can expose parallel calls.
+current API does not yet enforce a machine-wide TLS/crypto owner, so callers
+must serialize all TLS and cryptographic use. RSA's core-0 phase gate protects
+only RSA scratch; it does not make the BIOS's single `sha_blk_buf` and
+`sha_blk_off` per-core. An unrelated parallel `SHA256-*` operation remains
+forbidden because it can corrupt X.509, PSS, or transcript hashing. The
+cooperative TLS owner is a required integration boundary until all shared
+scratch, including SHA block scratch, becomes per-context.
 
 ## Acceptance Before Provider Credentials
 
-1. All native TLS/X.509/ECDSA tests pass with no unresolved KDOS words.
+1. All native TLS/X.509/ECDSA/RSA tests pass with no unresolved KDOS words.
 2. The installed trust bundle is reviewed and scoped to the target endpoint.
 3. The RTC is valid and survives the intended boot/power model.
 4. A credential-free live handshake authenticates the expected chain.

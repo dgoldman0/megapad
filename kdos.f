@@ -5791,9 +5791,9 @@ VARIABLE MB-T   VARIABLE MB-P
 \  §8.7  Shared Resource Locks
 \ =====================================================================
 \
-\  Named spinlock assignments for shared resources.
-\  Uses hardware spinlocks 0-3 for specific subsystems.
-\  Spinlock 7 reserved for IPI messaging (MSG-SLOCK).
+\  Named machine-wide spinlock assignments.  Application/runtime concurrency
+\  owns lock 6 (Akashic uses it as EVT-LOCK); crypto must not reuse it.
+\  Spinlock 7 is reserved for IPI messaging (MSG-SLOCK).
 \
 \  DICT-ACQUIRE / DICT-RELEASE   — dictionary (HERE, ALLOT, CREATE)
 \  UART-ACQUIRE / UART-RELEASE   — UART output (EMIT, TYPE, .)
@@ -5805,6 +5805,9 @@ VARIABLE MB-T   VARIABLE MB-P
 1 CONSTANT UART-LOCK
 2 CONSTANT FS-LOCK
 3 CONSTANT HEAP-LOCK
+4 CONSTANT RING-LOCK
+5 CONSTANT HT-LOCK
+6 CONSTANT APP-LOCK
 
 : DICT-ACQUIRE  ( -- )  DICT-LOCK LOCK ;
 : DICT-RELEASE  ( -- )  DICT-LOCK UNLOCK ;
@@ -5827,6 +5830,9 @@ VARIABLE MB-T   VARIABLE MB-P
     ."    1 = UART" CR
     ."    2 = Filesystem" CR
     ."    3 = Heap" CR
+    ."    4 = Ring Buffers" CR
+    ."    5 = Hash Tables" CR
+    ."    6 = Application Runtime" CR
     ."    7 = IPI Messaging" CR ;
 
 \ =====================================================================
@@ -10119,10 +10125,10 @@ VARIABLE _DFT-TAG
 \  }
 
 \ --- Scratch buffers for X.509 parse results ---
-CREATE _X509-PUBKEY     128 ALLOT    \ extracted public key bytes
+CREATE _X509-PUBKEY     256 ALLOT    \ extracted public key bytes
 VARIABLE _X509-PUBKEY-LEN
 VARIABLE _X509-PUBKEY-ALGO          \ 0x0403=ECDSA-P256, 0x0807=Ed25519
-CREATE _X509-SIG        128 ALLOT   \ extracted signature bytes
+CREATE _X509-SIG        256 ALLOT   \ extracted signature bytes
 VARIABLE _X509-SIG-LEN
 VARIABLE _X509-SIG-ALGO             \ signature algorithm of the cert
 CREATE _X509-TBS-HASH    32 ALLOT   \ SHA-256 hash of tbsCertificate
@@ -10149,6 +10155,12 @@ CREATE OID-P256         42 C, 134 C, 72 C, 206 C, 61 C, 3 C, 1 C, 7 C,
 
 CREATE OID-ECDSA-SHA256 42 C, 134 C, 72 C, 206 C, 61 C, 4 C, 3 C, 2 C,
 8 CONSTANT /OID-ECDSA-SHA256
+
+CREATE OID-RSA-ENCRYPTION 42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 1 C,
+9 CONSTANT /OID-RSA-ENCRYPTION
+
+CREATE OID-RSA-SHA256 42 C, 134 C, 72 C, 134 C, 247 C, 13 C, 1 C, 1 C, 11 C,
+9 CONSTANT /OID-RSA-SHA256
 
 CREATE OID-ED25519      43 C, 101 C, 112 C,
 3 CONSTANT /OID-ED25519
@@ -10615,11 +10627,14 @@ CREATE OID-ECDSA-SHA384 42 C, 134 C, 72 C, 206 C, 61 C, 4 C, 3 C, 3 C,
 
 1027 CONSTANT X509-ALG-P256
 1283 CONSTANT X509-ALG-ECDSA-SHA384
+1025 CONSTANT X509-ALG-RSA2048
+-2   CONSTANT X509-PARSE-UNSUPPORTED
 
 VARIABLE _XA-POS
 VARIABLE _XA-LIMIT
 VARIABLE _XA-END
 VARIABLE _XA-NEXT
+VARIABLE _XA-AFTER-OID
 
 : X509-PARSE-ALG ( item limit -- algo ior )
     _XA-LIMIT ! _XA-POS !
@@ -10629,11 +10644,26 @@ VARIABLE _XA-NEXT
     _DB-NEXT @ _XA-NEXT !
     _DB-VAL @ _XA-END @ DER-READ IF 0 -1 EXIT THEN
     _DB-TAG @ 6 <> IF 0 -1 EXIT THEN
-    _DB-NEXT @ _XA-END @ <> IF 0 -1 EXIT THEN
+    _DB-NEXT @ _XA-AFTER-OID !
     _DB-VAL @ _DB-LEN @ OID-ECDSA-SHA256 /OID-ECDSA-SHA256
-    X509-OID-MATCH IF X509-ALG-P256 0 EXIT THEN
+    X509-OID-MATCH IF
+        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
+        X509-ALG-P256 0 EXIT
+    THEN
     _DB-VAL @ _DB-LEN @ OID-ECDSA-SHA384 /OID-ECDSA-SHA384
-    X509-OID-MATCH IF X509-ALG-ECDSA-SHA384 0 EXIT THEN
+    X509-OID-MATCH IF
+        _XA-AFTER-OID @ _XA-END @ <> IF 0 -1 EXIT THEN
+        X509-ALG-ECDSA-SHA384 0 EXIT
+    THEN
+    _DB-VAL @ _DB-LEN @ OID-RSA-SHA256 /OID-RSA-SHA256
+    X509-OID-MATCH IF
+        \ RFC 4055's sha256WithRSAEncryption AlgorithmIdentifier carries
+        \ an explicit NULL.  Reject absent, non-NULL, or trailing parameters.
+        _XA-AFTER-OID @ _XA-END @ DER-READ IF 0 -1 EXIT THEN
+        _DB-TAG @ 5 <> _DB-LEN @ 0<> OR _DB-NEXT @ _XA-END @ <> OR
+        IF 0 -1 EXIT THEN
+        X509-ALG-RSA2048 0 EXIT
+    THEN
     0 -1 ;
 
 VARIABLE _XS-POS
@@ -10643,6 +10673,10 @@ VARIABLE _XS-NEXT
 VARIABLE _XS-ALG-END
 VARIABLE _XS-ALG-NEXT
 VARIABLE _XS-CERT
+VARIABLE _XS-RSA-END
+VARIABLE _XS-RSA-MOD-A
+VARIABLE _XS-RSA-MOD-U
+VARIABLE _XS-RSA-UNSUPPORTED
 
 : X509-PARSE-SPKI-DESC ( item limit cert -- next ior )
     _XS-CERT ! _XS-LIMIT ! _XS-POS !
@@ -10656,6 +10690,49 @@ VARIABLE _XS-CERT
     _DB-NEXT @ _XS-ALG-NEXT !
     _DB-VAL @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
     _DB-TAG @ 6 <> IF _XS-POS @ -1 EXIT THEN
+
+    \ rsaEncryption has an exact NULL parameter and a DER RSAPublicKey in
+    \ the subjectPublicKey BIT STRING.  This profile accepts only a
+    \ canonical, full-width RSA-2048 modulus and exponent 65537.  Larger
+    \ canonical RSA keys are distinguished as unsupported from malformed.
+    _DB-VAL @ _DB-LEN @ OID-RSA-ENCRYPTION /OID-RSA-ENCRYPTION
+    X509-OID-MATCH IF
+        _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+        _DB-TAG @ 5 <> _DB-LEN @ 0<> OR _DB-NEXT @ _XS-ALG-END @ <> OR
+        IF _XS-POS @ -1 EXIT THEN
+        _XS-ALG-NEXT @ _XS-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+        _DB-TAG @ 3 <> _DB-LEN @ 1 < OR IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ C@ 0<> _DB-NEXT @ _XS-END @ <> OR
+        IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ 1+ DUP _DB-LEN @ 1- + _XS-RSA-END !
+        _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+        _DB-TAG @ 48 <> _DB-NEXT @ _XS-RSA-END @ <> OR
+        IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ _DB-LEN @ + _XS-RSA-END !
+        _DB-VAL @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+        _DB-TAG @ 2 <> _DB-LEN @ 2 < OR IF _XS-POS @ -1 EXIT THEN
+        \ Positive INTEGERs are canonical only when the leading zero is
+        \ required by the following high bit.
+        _DB-VAL @ C@ 0<> _DB-VAL @ 1+ C@ 128 AND 0= OR
+        IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ _DB-LEN @ 1- + C@ 1 AND 0= IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ 1+ _XS-RSA-MOD-A !
+        _DB-LEN @ 1- DUP _XS-RSA-MOD-U !
+        256 <> _XS-RSA-UNSUPPORTED !
+        _DB-NEXT @ _XS-RSA-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
+        _DB-TAG @ 2 <> _DB-LEN @ 3 <> OR IF _XS-POS @ -1 EXIT THEN
+        _DB-VAL @ C@ 1 <> _DB-VAL @ 1+ C@ 0<> OR
+        _DB-VAL @ 2 + C@ 1 <> OR _DB-NEXT @ _XS-RSA-END @ <> OR
+        IF _XS-POS @ -1 EXIT THEN
+        _XS-RSA-UNSUPPORTED @ IF
+            _XS-NEXT @ X509-PARSE-UNSUPPORTED EXIT
+        THEN
+        _XS-RSA-MOD-A @ _XS-CERT @ XC.PUB-A + !
+        _XS-RSA-MOD-U @ _XS-CERT @ XC.PUB-U + !
+        X509-ALG-RSA2048 _XS-CERT @ XC.PUB-ALGO + !
+        _XS-NEXT @ 0 EXIT
+    THEN
+
     _DB-VAL @ _DB-LEN @ OID-EC-PUBKEY /OID-EC-PUBKEY
     X509-OID-MATCH 0= IF _XS-POS @ -1 EXIT THEN
     _DB-NEXT @ _XS-ALG-END @ DER-READ IF _XS-POS @ -1 EXIT THEN
@@ -10893,7 +10970,7 @@ VARIABLE _XDP-AFTER-EXT
     _DB-NEXT @ _XDP-POS @ - _XDP-OUT @ XC.SUBJECT-U + !
     _DB-NEXT @ _XDP-POS !
     _XDP-POS @ _XDP-TBS-END @ _XDP-OUT @ X509-PARSE-SPKI-DESC
-    IF DROP -1 EXIT THEN _XDP-POS !
+    DUP IF NIP EXIT THEN DROP _XDP-POS !
     0 _XDP-EXT-SEEN !
     BEGIN _XDP-POS @ _XDP-TBS-END @ < WHILE
         _XDP-POS @ _XDP-TBS-END @ DER-READ IF -1 EXIT THEN
@@ -10926,10 +11003,12 @@ CREATE _X509-CERT0 /X509-CERT ALLOT
     _X509-CERT0 XC.TBS-A + @ _X509-TBS-PTR !
     _X509-CERT0 XC.TBS-U + @ _X509-TBS-LEN !
     _X509-TBS-PTR @ _X509-TBS-LEN @ _X509-TBS-HASH SHA256
-    _X509-CERT0 XC.PUB-U + @ DUP _X509-PUBKEY-LEN !
+    _X509-CERT0 XC.PUB-U + @ DUP 256 > IF DROP -1 EXIT THEN
+    DUP _X509-PUBKEY-LEN !
     _X509-CERT0 XC.PUB-A + @ _X509-PUBKEY ROT CMOVE
     _X509-CERT0 XC.PUB-ALGO + @ _X509-PUBKEY-ALGO !
-    _X509-CERT0 XC.SIG-U + @ DUP _X509-SIG-LEN !
+    _X509-CERT0 XC.SIG-U + @ DUP 256 > IF DROP -1 EXIT THEN
+    DUP _X509-SIG-LEN !
     _X509-CERT0 XC.SIG-A + @ _X509-SIG ROT CMOVE
     _X509-CERT0 XC.SIG-ALGO + @ _X509-SIG-ALGO !
     _X509-CERT0 XC.SAN-U + @ DUP 256 > IF DROP -1 EXIT THEN
@@ -11059,6 +11138,7 @@ VARIABLE _TTL-ANCHOR
     _TTS-A @ _TTL-SCOPE-U @ _TLS-SCOPE-VALID? 0= IF TLS-CERT-MALFORMED EXIT THEN
     TLS-TRUST-COUNT @ TLS-TRUST@ _TTL-ANCHOR !
     _TTL-A @ _TTL-CERT-U @ _TTL-ANCHOR @ TTA-DESC + X509-DESC-PARSE
+    DUP X509-PARSE-UNSUPPORTED = IF DROP TLS-CERT-UNSUPPORTED EXIT THEN
     IF TLS-CERT-MALFORMED EXIT THEN
     _TTL-ANCHOR @ TTA-DESC + DUP XC.FLAGS + @
     DUP XCF-BC-SEEN AND 0= SWAP XCF-CA AND 0= OR IF
@@ -11687,7 +11767,429 @@ CREATE _EPV-V 32 ALLOT
 ;
 
 \ =====================================================================
-\  §16.7c.1  Bounded X.509 path validation
+\  §16.7c.1  Bounded RSA-2048 verification
+\ =====================================================================
+\
+\  RSA values use 32 little-endian 64-bit limbs internally.  Montgomery
+\  products are computed with CIOS reduction and BIOS UM*, which maps to the
+\  existing UMUL/UMULH instructions.  The fixed public exponent is 65537;
+\  there is no private-key operation and no variable-width RSA profile.
+
+32  CONSTANT RSA2048-LIMBS
+256 CONSTANT /RSA2048
+-2  CONSTANT RSA-E-BUSY
+CREATE _RSA-N       /RSA2048 ALLOT
+CREATE _RSA-BASE    /RSA2048 ALLOT
+CREATE _RSA-ACC     /RSA2048 ALLOT
+CREATE _RSA-TMP     /RSA2048 ALLOT
+CREATE _RSA-DEC     /RSA2048 ALLOT
+CREATE _RSA-ONE     /RSA2048 ALLOT
+CREATE _RSA-CIOS-T  272 ALLOT             \ 34 limbs
+CREATE _RSA-EM      /RSA2048 ALLOT
+
+: _RSA-CELL@ ( addr index -- x )  8 * + @ ;
+: _RSA-CELL! ( x addr index -- )  8 * + ! ;
+
+VARIABLE _RM-X
+VARIABLE _RM-Y
+VARIABLE _RM-ADD
+VARIABLE _RM-CARRY
+VARIABLE _RM-LO
+VARIABLE _RM-HI
+VARIABLE _RM-SUM
+VARIABLE _RM-OUT
+VARIABLE _RM-C1
+VARIABLE _RM-C2
+
+\ Add a 64x64 product, one limb, and an incoming carry without losing either
+\ carry bit.  Bounds on the inputs guarantee the returned carry fits a cell.
+: _RSA-MAC ( x y add carry -- lo carry' )
+    _RM-CARRY ! _RM-ADD ! _RM-Y ! _RM-X !
+    _RM-X @ _RM-Y @ UM* _RM-HI ! _RM-LO !
+    _RM-LO @ _RM-ADD @ + DUP _RM-SUM !
+    _RM-LO @ U< IF 1 ELSE 0 THEN _RM-C1 !
+    _RM-SUM @ _RM-CARRY @ + DUP _RM-OUT !
+    _RM-SUM @ U< IF 1 ELSE 0 THEN _RM-C2 !
+    _RM-OUT @ _RM-HI @ _RM-C1 @ + _RM-C2 @ + ;
+
+VARIABLE _RU-A
+VARIABLE _RU-B
+
+: _RSA-U< ( a b -- flag )
+    _RU-B ! _RU-A !
+    RSA2048-LIMBS 0 DO
+        _RU-A @ 31 I - _RSA-CELL@
+        _RU-B @ 31 I - _RSA-CELL@
+        2DUP <> IF U< UNLOOP EXIT THEN 2DROP
+    LOOP
+    FALSE ;
+
+VARIABLE _RS-A
+VARIABLE _RS-B
+VARIABLE _RS-OUT
+VARIABLE _RS-X
+VARIABLE _RS-Y
+VARIABLE _RS-D1
+VARIABLE _RS-BORROW
+VARIABLE _RS-B1
+
+: _RSA-SUB ( a b out -- )
+    _RS-OUT ! _RS-B ! _RS-A ! 0 _RS-BORROW !
+    RSA2048-LIMBS 0 DO
+        _RS-A @ I _RSA-CELL@ DUP _RS-X !
+        _RS-B @ I _RSA-CELL@ DUP _RS-Y !
+        - DUP _RS-D1 ! DROP
+        _RS-X @ _RS-Y @ U< IF 1 ELSE 0 THEN _RS-B1 !
+        _RS-D1 @ _RS-BORROW @ - _RS-OUT @ I _RSA-CELL!
+        _RS-D1 @ _RS-BORROW @ U< IF 1 ELSE 0 THEN
+        _RS-B1 @ OR _RS-BORROW !
+    LOOP ;
+
+VARIABLE _RD-IN
+VARIABLE _RD-N
+VARIABLE _RD-OUT
+VARIABLE _RD-CARRY
+VARIABLE _RD-X
+
+: _RSA-DOUBLE-MOD ( in n out -- )
+    _RD-OUT ! _RD-N ! _RD-IN ! 0 _RD-CARRY !
+    RSA2048-LIMBS 0 DO
+        _RD-IN @ I _RSA-CELL@ DUP _RD-X !
+        1 LSHIFT _RD-CARRY @ OR _RD-OUT @ I _RSA-CELL!
+        _RD-X @ 63 RSHIFT _RD-CARRY !
+    LOOP
+    _RD-CARRY @ IF TRUE ELSE
+        _RD-OUT @ _RD-N @ _RSA-U< 0=
+    THEN IF
+        _RD-OUT @ _RD-N @ _RD-OUT @ _RSA-SUB
+    THEN ;
+
+VARIABLE _RN0-N
+VARIABLE _RN0-X
+
+: _RSA-N0' ( n0 -- n0-prime )
+    _RN0-N ! 1 _RN0-X !
+    6 0 DO
+        _RN0-X @ 2 _RN0-N @ _RN0-X @ * - * _RN0-X !
+    LOOP
+    0 _RN0-X @ - ;
+
+VARIABLE _RC-A
+VARIABLE _RC-B
+VARIABLE _RC-N
+VARIABLE _RC-N0
+VARIABLE _RC-OUT
+VARIABLE _RC-I
+VARIABLE _RC-CARRY
+VARIABLE _RC-M
+VARIABLE _RC-OLD
+VARIABLE _RC-SUM
+
+\ _RSA2048-MONT-MUL ( a b n n0-prime out -- )
+\   CIOS Montgomery multiplication.  Inputs must be reduced modulo n.
+: _RSA2048-MONT-MUL ( a b n n0-prime out -- )
+    _RC-OUT ! _RC-N0 ! _RC-N ! _RC-B ! _RC-A !
+    _RSA-CIOS-T 272 0 FILL
+    RSA2048-LIMBS 0 DO
+        I _RC-I ! 0 _RC-CARRY !
+        RSA2048-LIMBS 0 DO
+            _RC-A @ I _RSA-CELL@
+            _RC-B @ _RC-I @ _RSA-CELL@
+            _RSA-CIOS-T I _RSA-CELL@
+            _RC-CARRY @ _RSA-MAC
+            _RC-CARRY ! _RSA-CIOS-T I _RSA-CELL!
+        LOOP
+        \ Preserve the prior high limb while appending the multiplication
+        \ carry; the 34th cell catches the single overflow bit.
+        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
+        _RC-CARRY @ + DUP _RSA-CIOS-T 32 _RSA-CELL!
+        _RC-OLD @ U< IF 1 ELSE 0 THEN _RSA-CIOS-T 33 _RSA-CELL!
+
+        _RSA-CIOS-T 0 _RSA-CELL@ _RC-N0 @ * _RC-M !
+        0 _RC-CARRY !
+        RSA2048-LIMBS 0 DO
+            _RC-M @ _RC-N @ I _RSA-CELL@
+            _RSA-CIOS-T I _RSA-CELL@
+            _RC-CARRY @ _RSA-MAC
+            _RC-CARRY !
+            I IF _RSA-CIOS-T I 1- _RSA-CELL! ELSE DROP THEN
+        LOOP
+        _RSA-CIOS-T 32 _RSA-CELL@ DUP _RC-OLD !
+        _RC-CARRY @ + DUP _RC-SUM ! _RSA-CIOS-T 31 _RSA-CELL!
+        _RC-SUM @ _RC-OLD @ U< IF 1 ELSE 0 THEN
+        _RSA-CIOS-T 33 _RSA-CELL@ + _RSA-CIOS-T 32 _RSA-CELL!
+        0 _RSA-CIOS-T 33 _RSA-CELL!
+    LOOP
+    _RSA-CIOS-T 32 _RSA-CELL@ 0<> IF TRUE ELSE
+        _RSA-CIOS-T _RC-N @ _RSA-U< 0=
+    THEN IF
+        _RSA-CIOS-T _RC-N @ _RC-OUT @ _RSA-SUB
+    ELSE
+        _RSA-CIOS-T _RC-OUT @ /RSA2048 CMOVE
+    THEN ;
+
+VARIABLE _RB2L-SRC
+VARIABLE _RB2L-DST
+
+: _RSA-BE>LE ( src dst -- )
+    _RB2L-DST ! _RB2L-SRC !
+    RSA2048-LIMBS 0 DO
+        _RB2L-SRC @ 31 I - 8 * + _BE64@
+        _RB2L-DST @ I _RSA-CELL!
+    LOOP ;
+
+VARIABLE _RL2B-SRC
+VARIABLE _RL2B-DST
+
+: _RSA-LE>BE ( src dst -- )
+    _RL2B-DST ! _RL2B-SRC !
+    RSA2048-LIMBS 0 DO
+        _RL2B-SRC @ I _RSA-CELL@ BSWAP
+        _RL2B-DST @ 31 I - 8 * + !
+    LOOP ;
+
+VARIABLE _RP-SIG
+VARIABLE _RP-MOD
+VARIABLE _RP-OUT
+VARIABLE _RP-N0
+VARIABLE _RP-AP
+VARIABLE _RP-TP
+
+\ RSA2048-PUBLIC ( signature-be modulus-be encoded-message -- flag )
+\   Perform the fixed e=65537 public operation.  Returns 0 on success and -1
+\   for a non-full-width/even modulus or an out-of-range representative.
+: _RSA2048-PUBLIC-BODY ( sig modulus em -- flag )
+    _RP-OUT ! _RP-MOD ! _RP-SIG !
+    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF -1 EXIT THEN
+    _RP-MOD @ _RSA-N _RSA-BE>LE
+    _RP-SIG @ _RSA-BASE _RSA-BE>LE
+    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
+    _RSA-N @ _RSA-N0' DUP _RP-N0 !
+
+    \ Convert the representative to Montgomery form by 2048 reduced
+    \ doublings.  This avoids storing modulus-specific R^2 tables.
+    2048 0 DO _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD LOOP
+    _RSA-BASE _RSA-ACC /RSA2048 CMOVE
+    _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
+    16 0 DO
+        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
+        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
+    LOOP
+    _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
+    _RP-TP @ _RP-AP !
+    _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
+    _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
+    _RSA-DEC _RP-OUT @ _RSA-LE>BE
+    0 ;
+
+VARIABLE _RSA2048-PUBLIC-PHASE
+VARIABLE _RSAI-OWNER-CORE
+VARIABLE _RSAI-OWNER-TASK
+
+: RSA2048-PUBLIC-STATUS ( -- phase )
+    _RSA2048-PUBLIC-PHASE @ ;
+
+: _RSAI-OWNER! ( -- )
+    COREID _RSAI-OWNER-CORE !
+    TASK-ID _RSAI-OWNER-TASK ! ;
+
+: _RSAI-OWNER? ( -- flag )
+    COREID _RSAI-OWNER-CORE @ =
+    TASK-ID _RSAI-OWNER-TASK @ = AND ;
+
+: _RSAI-OWNER-CLEAR ( -- )
+    -1 _RSAI-OWNER-CORE !
+    -1 _RSAI-OWNER-TASK ! ;
+
+_RSAI-OWNER-CLEAR
+
+: RSA2048-PUBLIC ( sig modulus em -- flag )
+    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
+    -1 _RSA2048-PUBLIC-PHASE !
+    _RSA2048-PUBLIC-BODY
+    0 _RSA2048-PUBLIC-PHASE ! ;
+
+0 CONSTANT RSAI-IDLE
+1 CONSTANT RSAI-CONVERT
+2 CONSTANT RSAI-SQUARE
+3 CONSTANT RSAI-MULTIPLY
+4 CONSTANT RSAI-DECODE
+5 CONSTANT RSAI-READY
+
+VARIABLE _RPI-COUNT
+
+\ Incremental fixed-exponent public operation for cooperative owner loops.
+\ BEGIN copies the signature and modulus into owner-gated scratch.  Each STEP does
+\ one modular doubling or one Montgomery multiplication; FINAL releases the
+\ owner only after the encoded message has been committed to the caller buffer.
+: RSA2048-PUBLIC-BEGIN ( sig modulus em -- ior )
+    COREID IF 2DROP DROP RSA-E-BUSY EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ IF 2DROP DROP RSA-E-BUSY EXIT THEN
+    _RP-OUT ! _RP-MOD ! _RP-SIG !
+    _RP-MOD @ C@ 128 AND 0= _RP-MOD @ 255 + C@ 1 AND 0= OR IF
+        -1 EXIT
+    THEN
+    _RP-MOD @ _RSA-N _RSA-BE>LE
+    _RP-SIG @ _RSA-BASE _RSA-BE>LE
+    _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
+    _RSA-N @ _RSA-N0' _RP-N0 !
+    _RSAI-OWNER!
+    0 _RPI-COUNT ! RSAI-CONVERT _RSA2048-PUBLIC-PHASE ! 0 ;
+
+: RSA2048-PUBLIC-STEP ( -- status )
+    COREID IF -1 EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
+    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
+    _RSAI-OWNER? 0= IF -1 EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-CONVERT = IF
+        _RSA-BASE _RSA-N _RSA-BASE _RSA-DOUBLE-MOD
+        1 _RPI-COUNT +!
+        _RPI-COUNT @ 2048 = IF
+            _RSA-BASE _RSA-ACC /RSA2048 CMOVE
+            _RSA-ACC _RP-AP ! _RSA-TMP _RP-TP !
+            0 _RPI-COUNT ! RSAI-SQUARE _RSA2048-PUBLIC-PHASE !
+        THEN 0 EXIT
+    THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-SQUARE = IF
+        _RP-AP @ _RP-AP @ _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
+        _RP-AP @ _RP-TP @ _RP-AP ! _RP-TP !
+        1 _RPI-COUNT +!
+        _RPI-COUNT @ 16 = IF RSAI-MULTIPLY _RSA2048-PUBLIC-PHASE ! THEN
+        0 EXIT
+    THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-MULTIPLY = IF
+        _RP-AP @ _RSA-BASE _RSA-N _RP-N0 @ _RP-TP @ _RSA2048-MONT-MUL
+        _RP-TP @ _RP-AP ! RSAI-DECODE _RSA2048-PUBLIC-PHASE ! 0 EXIT
+    THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-DECODE = IF
+        _RSA-ONE /RSA2048 0 FILL 1 _RSA-ONE !
+        _RP-AP @ _RSA-ONE _RSA-N _RP-N0 @ _RSA-DEC _RSA2048-MONT-MUL
+        _RSA-DEC _RP-OUT @ _RSA-LE>BE
+        RSAI-READY _RSA2048-PUBLIC-PHASE ! 1 EXIT
+    THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-READY = IF 1 ELSE -1 THEN ;
+
+: RSA2048-PUBLIC-FINAL ( -- ior )
+    COREID IF -1 EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-READY <> IF -1 EXIT THEN
+    _RSAI-OWNER? 0= IF -1 EXIT THEN
+    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
+    _RSAI-OWNER-CLEAR 0 ;
+
+: RSA2048-PUBLIC-CANCEL ( -- ior )
+    COREID IF -1 EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ RSAI-IDLE =
+    _RSA2048-PUBLIC-PHASE @ -1 = OR IF -1 EXIT THEN
+    _RSAI-OWNER? 0= IF -1 EXIT THEN
+    _RSA-N /RSA2048 0 FILL
+    _RSA-BASE /RSA2048 0 FILL
+    _RSA-ACC /RSA2048 0 FILL
+    _RSA-TMP /RSA2048 0 FILL
+    _RSA-DEC /RSA2048 0 FILL
+    _RSA-CIOS-T 272 0 FILL
+    RSAI-IDLE _RSA2048-PUBLIC-PHASE !
+    _RSAI-OWNER-CLEAR 0 ;
+
+CREATE RSA-SHA256-DIGESTINFO
+    48 C, 49 C, 48 C, 13 C, 6 C, 9 C, 96 C, 134 C, 72 C, 1 C,
+    101 C, 3 C, 4 C, 2 C, 1 C, 5 C, 0 C, 4 C, 32 C,
+19 CONSTANT /RSA-SHA256-DIGESTINFO
+
+VARIABLE _RPK-HASH
+VARIABLE _RPK-MOD
+VARIABLE _RPK-SIG
+VARIABLE _RPK-SIG-U
+VARIABLE _RPK-EM
+
+: _RSA-PKCS1-SHA256-EM-CHECK ( hash em -- flag )
+    _RPK-EM ! _RPK-HASH !
+    _RPK-EM @ C@ 0<> _RPK-EM @ 1+ C@ 1 <> OR IF -1 EXIT THEN
+    202 0 DO _RPK-EM @ 2 + I + C@ 255 <> IF -1 UNLOOP EXIT THEN LOOP
+    _RPK-EM @ 204 + C@ 0<> IF -1 EXIT THEN
+    _RPK-EM @ 205 + RSA-SHA256-DIGESTINFO /RSA-SHA256-DIGESTINFO
+    _XC-BYTES= 0= IF -1 EXIT THEN
+    _RPK-EM @ 224 + _RPK-HASH @ 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
+
+\ Exact EMSA-PKCS1-v1_5 SHA-256 verification for certificate signatures.
+: _RSA2048-PKCS1-SHA256-BODY ( hash modulus sig sig-u -- flag )
+    _RPK-SIG-U ! _RPK-SIG ! _RPK-MOD ! _RPK-HASH !
+    _RPK-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
+    _RPK-SIG @ _RPK-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
+    _RPK-HASH @ _RSA-EM _RSA-PKCS1-SHA256-EM-CHECK ;
+
+: RSA2048-PKCS1-SHA256-VERIFY ( hash modulus sig sig-u -- flag )
+    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    -1 _RSA2048-PUBLIC-PHASE !
+    _RSA2048-PKCS1-SHA256-BODY
+    0 _RSA2048-PUBLIC-PHASE ! ;
+
+CREATE _RSA-PSS-MASK 223 ALLOT
+CREATE _RSA-PSS-DB   223 ALLOT
+CREATE _RSA-PSS-H     32 ALLOT
+CREATE _RSA-PSS-H2    32 ALLOT
+CREATE _RSA-PSS-MGF   32 ALLOT
+CREATE _RSA-PSS-CTR    4 ALLOT
+CREATE _RSA-PSS-MPRIME 72 ALLOT
+VARIABLE _RMG-H
+VARIABLE _RMG-OFF
+VARIABLE _RMG-N
+
+: _RSA-MGF1-SHA256-223 ( h -- )
+    _RMG-H ! 0 _RMG-OFF !
+    7 0 DO
+        _RSA-PSS-CTR 4 0 FILL I _RSA-PSS-CTR 3 + C!
+        SHA256-INIT
+        _RMG-H @ 32 SHA256-UPDATE
+        _RSA-PSS-CTR 4 SHA256-UPDATE
+        _RSA-PSS-MGF SHA256-FINAL
+        223 _RMG-OFF @ - 32 MIN DUP _RMG-N !
+        _RSA-PSS-MGF _RSA-PSS-MASK _RMG-OFF @ + _RMG-N @ CMOVE
+        _RMG-N @ _RMG-OFF +!
+    LOOP ;
+
+VARIABLE _RPS-HASH
+VARIABLE _RPS-MOD
+VARIABLE _RPS-SIG
+VARIABLE _RPS-SIG-U
+VARIABLE _RPS-EM
+
+: _RSA-PSS-SHA256-EM-CHECK ( message-hash em -- flag )
+    _RPS-EM ! _RPS-HASH !
+    _RPS-EM @ 255 + C@ 188 <> IF -1 EXIT THEN
+    _RPS-EM @ C@ 128 AND IF -1 EXIT THEN
+    _RPS-EM @ 223 + _RSA-PSS-H 32 CMOVE
+    _RSA-PSS-H _RSA-MGF1-SHA256-223
+    223 0 DO
+        _RPS-EM @ I + C@ _RSA-PSS-MASK I + C@ XOR _RSA-PSS-DB I + C!
+    LOOP
+    _RSA-PSS-DB C@ 127 AND _RSA-PSS-DB C!
+    190 0 DO _RSA-PSS-DB I + C@ IF -1 UNLOOP EXIT THEN LOOP
+    _RSA-PSS-DB 190 + C@ 1 <> IF -1 EXIT THEN
+    _RSA-PSS-MPRIME 72 0 FILL
+    _RPS-HASH @ _RSA-PSS-MPRIME 8 + 32 CMOVE
+    _RSA-PSS-DB 191 + _RSA-PSS-MPRIME 40 + 32 CMOVE
+    _RSA-PSS-MPRIME 72 _RSA-PSS-H2 SHA256
+    _RSA-PSS-H _RSA-PSS-H2 32 _XC-BYTES= IF 0 ELSE -1 THEN ;
+
+\ RFC 8017 EMSA-PSS verification with emBits=2047, SHA-256, MGF1-SHA256,
+\ and an exact 32-byte salt, as required by rsa_pss_rsae_sha256.
+: _RSA2048-PSS-SHA256-BODY ( message-hash modulus sig sig-u -- flag )
+    _RPS-SIG-U ! _RPS-SIG ! _RPS-MOD ! _RPS-HASH !
+    _RPS-SIG-U @ /RSA2048 <> IF -1 EXIT THEN
+    _RPS-SIG @ _RPS-MOD @ _RSA-EM _RSA2048-PUBLIC-BODY IF -1 EXIT THEN
+    _RPS-HASH @ _RSA-EM _RSA-PSS-SHA256-EM-CHECK ;
+
+: RSA2048-PSS-SHA256-VERIFY ( message-hash modulus sig sig-u -- flag )
+    COREID IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    _RSA2048-PUBLIC-PHASE @ IF 2DROP 2DROP RSA-E-BUSY EXIT THEN
+    -1 _RSA2048-PUBLIC-PHASE !
+    _RSA2048-PSS-SHA256-BODY
+    0 _RSA2048-PUBLIC-PHASE ! ;
+
+\ =====================================================================
+\  §16.7c.2  Bounded X.509 path validation
 \ =====================================================================
 \
 \  This layer follows the ECDSA primitive so every compiled call has a
@@ -11697,15 +12199,26 @@ CREATE _EPV-V 32 ALLOT
 : X509-VERIFY-SIGNED-BY ( child issuer -- ior )
     2DUP _X509-NAME-LINK? 0= IF 2DROP TLS-CERT-CONSTRAINT EXIT THEN
     _XVS-ISSUER ! _XVS-CHILD !
-    _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-P256 <> IF
-        TLS-CERT-UNSUPPORTED EXIT
-    THEN
-    _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-P256 <>
-    _XVS-ISSUER @ XC.PUB-U + @ 65 <> OR IF TLS-CERT-UNSUPPORTED EXIT THEN
     _XVS-CHILD @ XC.TBS-A + @ _XVS-CHILD @ XC.TBS-U + @ _XVS-HASH SHA256
-    _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
-    _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
-    ECDSA-P256-VERIFY IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN ;
+    _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-P256 = IF
+        _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-P256 <>
+        _XVS-ISSUER @ XC.PUB-U + @ 65 <> OR IF TLS-CERT-UNSUPPORTED EXIT THEN
+        _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
+        _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
+        ECDSA-P256-VERIFY IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN
+        EXIT
+    THEN
+    _XVS-CHILD @ XC.SIG-ALGO + @ X509-ALG-RSA2048 = IF
+        _XVS-ISSUER @ XC.PUB-ALGO + @ X509-ALG-RSA2048 <>
+        _XVS-ISSUER @ XC.PUB-U + @ /RSA2048 <> OR
+        _XVS-CHILD @ XC.SIG-U + @ /RSA2048 <> OR
+        IF TLS-CERT-UNSUPPORTED EXIT THEN
+        _XVS-HASH _XVS-ISSUER @ XC.PUB-A + @
+        _XVS-CHILD @ XC.SIG-A + @ _XVS-CHILD @ XC.SIG-U + @
+        RSA2048-PKCS1-SHA256-VERIFY
+        IF TLS-CERT-BAD-SIGNATURE ELSE TLS-CERT-OK THEN EXIT
+    THEN
+    TLS-CERT-UNSUPPORTED ;
 
 VARIABLE _XPV-CERTS
 VARIABLE _XPV-N
@@ -11822,6 +12335,8 @@ VARIABLE TLS-SNI-LEN
 15 CONSTANT TLSHT-CERT-VERIFY
 20 CONSTANT TLSHT-FINISHED
 1027 CONSTANT TLS-SIG-ECDSA-P256-SHA256
+2052 CONSTANT TLS-SIG-RSA-PSS-RSAE-SHA256
+1025 CONSTANT TLS-SIG-RSA-PKCS1-SHA256
 
 0 CONSTANT TLS-ALPN-NONE
 1 CONSTANT TLS-ALPN-HTTP11
@@ -11840,7 +12355,7 @@ CREATE TLS-ALPN-HTTP11-NAME
 \  TLS-VERIFY-CERT-SIG    ( ctx msg mlen -- flag )
 
 \ --- Scratch buffers for server certificate data ---
-CREATE _TLS-SERVER-PUBKEY 128 ALLOT    \ server's public key (from cert)
+CREATE _TLS-SERVER-PUBKEY 256 ALLOT    \ server's public key (from cert)
 VARIABLE _TLS-SERVER-PUBKEY-LEN
 VARIABLE _TLS-SERVER-PUBKEY-ALGO       \ algo code (e.g. 0x0403)
 
@@ -11868,7 +12383,7 @@ VARIABLE _TPC-KEEP
     0 TLS-PEER-CERT-COUNT !
     0 _TLS-SERVER-PUBKEY-LEN !
     0 _TLS-SERVER-PUBKEY-ALGO !
-    _TLS-SERVER-PUBKEY 128 0 FILL
+    _TLS-SERVER-PUBKEY 256 0 FILL
     0 TLS-CERT-LAST-ERROR ! ;
 
 : TLS-PARSE-CERTIFICATE ( msg mlen -- ior )
@@ -11911,6 +12426,10 @@ VARIABLE _TPC-KEEP
         _TPC-POS @ _TPC-CERT-U @
         TLS-PEER-CERT-COUNT @ /X509-CERT * TLS-PEER-CERTS +
         X509-DESC-PARSE ?DUP IF
+            DUP X509-PARSE-UNSUPPORTED =
+            TLS-PEER-CERT-COUNT @ 0= AND IF
+                DROP TLS-CERT-UNSUPPORTED _TPC-RESULT EXIT
+            THEN
             DROP
             TLS-PEER-CERT-COUNT @ 0= IF
                 TLS-CERT-MALFORMED _TPC-RESULT EXIT
@@ -12392,11 +12911,18 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     _TCV-MSG @ C@ TLSHT-CERT-VERIFY <> IF -1 EXIT THEN
     _TCV-MSG @ 1+ _BE24@ _TCV-MLEN @ 4 - <> IF -1 EXIT THEN
     _TCV-MSG @ 4 + _BE16@ DUP _TCV-ALGO !
-    TLS-SIG-ECDSA-P256-SHA256 <> IF -1 EXIT THEN
-    _TLS-SERVER-PUBKEY-LEN @ 65 <> IF -1 EXIT THEN
     _TCV-MSG @ 6 + _BE16@ DUP _TCV-SIG-U !
-    DUP 8 < SWAP 72 > OR IF -1 EXIT THEN
     _TCV-SIG-U @ 8 + _TCV-MLEN @ <> IF -1 EXIT THEN
+    _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
+        _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-P256 <>
+        _TLS-SERVER-PUBKEY-LEN @ 65 <> OR IF -1 EXIT THEN
+        _TCV-SIG-U @ DUP 8 < SWAP 72 > OR IF -1 EXIT THEN
+    ELSE
+        _TCV-ALGO @ TLS-SIG-RSA-PSS-RSAE-SHA256 <> IF -1 EXIT THEN
+        _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-RSA2048 <>
+        _TLS-SERVER-PUBKEY-LEN @ /RSA2048 <> OR
+        _TCV-SIG-U @ /RSA2048 <> OR IF -1 EXIT THEN
+    THEN
     \ Build verification content:
     \ 64 bytes of 0x20
     _TCV-CONTENT 64 32 FILL
@@ -12414,8 +12940,13 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     _TCV-HASH _TCV-CONTENT 98 + 32 CMOVE   \ 64+33+1 = 98
     \ Hash the entire content with SHA-256 (ECDSA uses SHA-256)
     _TCV-CONTENT 130 _TCV-HASH SHA256
-    _TCV-HASH _TLS-SERVER-PUBKEY
-    _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY
+    _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
+        _TCV-HASH _TLS-SERVER-PUBKEY
+        _TCV-MSG @ 8 + _TCV-SIG-U @ ECDSA-P256-VERIFY
+    ELSE
+        _TCV-HASH _TLS-SERVER-PUBKEY
+        _TCV-MSG @ 8 + _TCV-SIG-U @ RSA2048-PSS-SHA256-VERIFY
+    THEN
 ;
 
 \ --- Transcript Management ---
@@ -12601,9 +13132,11 @@ VARIABLE _TBCH-FIXED
     THEN
     TLS-GROUP-X25519 TLS-HS-GROUP !   \ default until server picks
     \ --- Compute extension lengths ---
-    \ Standard: versions 7 + key_share 42 + signatures 8 + groups 8 = 65.
-    \ Hybrid: versions 7 + key_share 878 + signatures 8 + groups 10 = 903.
-    _TBCH-HYBRID @ IF 903 77 ELSE 65 75 THEN _TBCH-FIXED !
+    \ Standard: versions 7 + key_share 42 + signatures 10 +
+    \ signature_algorithms_cert 10 + groups 8 = 77.
+    \ Hybrid: versions 7 + key_share 878 + signatures 10 +
+    \ signature_algorithms_cert 10 + groups 10 = 915.
+    _TBCH-HYBRID @ IF 915 77 ELSE 77 75 THEN _TBCH-FIXED !
     TLS-SNI-LEN @ 0> IF TLS-SNI-LEN @ 9 + + THEN   \ +SNI ext
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF 15 + THEN
     >R  \ R: ext_len
@@ -12675,12 +13208,19 @@ VARIABLE _TBCH-FIXED
     _TBCH-CTX @ TLS-CTX.MY-PUBKEY                  \ copy public key
     TLS-CH-BUF _TBCH-POS @ + 32 CMOVE
     32 _TBCH-POS +!
-    \ 4. signature_algorithms (0x000D): advertise only implemented verify
+    \ 4. signature_algorithms (0x000D): handshake signature verification
     0 _TBCH-C!  13 _TBCH-C!                       \ type = 0x000D
-    0 _TBCH-C!  4  _TBCH-C!                       \ ext_len = 4
-    0 _TBCH-C!  2  _TBCH-C!                       \ list_len = 2 (1 algo)
+    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
+    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 algos)
     4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
-    \ 5. supported_groups (0x000A)
+    8 _TBCH-C!  4  _TBCH-C!                       \ RSA-PSS-RSAE-SHA256 (0x0804)
+    \ 5. signature_algorithms_cert (0x0032): certificate signatures
+    0 _TBCH-C!  50 _TBCH-C!                       \ type = 0x0032
+    0 _TBCH-C!  6  _TBCH-C!                       \ ext_len = 6
+    0 _TBCH-C!  4  _TBCH-C!                       \ list_len = 4 (2 algos)
+    4 _TBCH-C!  3  _TBCH-C!                       \ ECDSA-P256-SHA256 (0x0403)
+    4 _TBCH-C!  1  _TBCH-C!                       \ RSA-PKCS1-SHA256 (0x0401)
+    \ 6. supported_groups (0x000A)
     0 _TBCH-C!  10 _TBCH-C!                       \ type = 0x000A
     0 _TBCH-C!  _TBCH-HYBRID @ IF 6 ELSE 4 THEN _TBCH-C!
     0 _TBCH-C!  _TBCH-HYBRID @ IF 4 ELSE 2 THEN _TBCH-C!
@@ -12689,7 +13229,7 @@ VARIABLE _TBCH-FIXED
         255 AND _TBCH-C!
     THEN
     0 _TBCH-C!  29 _TBCH-C!                       \ x25519 (0x001D)
-    \ 6. ALPN (0x0010), when the caller selected the HTTP/1.1 profile.
+    \ 7. ALPN (0x0010), when the caller selected the HTTP/1.1 profile.
     _TBCH-CTX @ TLS-CTX.ALPN-PROFILE @ TLS-ALPN-HTTP11 = IF
         0 _TBCH-C! 16 _TBCH-C!                     \ type = 0x0010
         0 _TBCH-C! 11 _TBCH-C!                     \ extension data length
@@ -13795,8 +14335,6 @@ VARIABLE _SCON-RPORT
 \    +40  lock#       spinlock number for atomicity
 \    +48  data...     capacity × elem-size bytes
 
-4 CONSTANT RING-LOCK
-
 : RING  ( elem-size capacity "name" -- )
     HERE >R
     SWAP ,                      \ +0  elem-size
@@ -13895,8 +14433,6 @@ VARIABLE _RP-RING
 \    [0]  flag        0 = empty, 1 = occupied, 2 = tombstone
 \    [1..keysize]     key bytes
 \    [1+keysize..]    value bytes
-
-5 CONSTANT HT-LOCK
 
 VARIABLE _HT-KSIZE
 VARIABLE _HT-VSIZE

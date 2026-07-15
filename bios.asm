@@ -1499,6 +1499,23 @@ w_star:
     str r14, r0
     ret.l
 
+; UM* ( u1 u2 -- ud-lo ud-hi )
+;   Standard unsigned widening multiply.  The ISA already provides both
+;   halves; keeping the pair in BIOS gives high-level multi-precision code a
+;   portable Forth surface without exposing instruction encoding details.
+w_um_star:
+    ldn r1, r14               ; u2
+    addi r14, 8
+    ldn r7, r14               ; u1
+    mov r0, r7
+    umul r0, r1               ; low 64 bits
+    mov r11, r7
+    umulh r11, r1             ; high 64 bits
+    str r14, r0               ; deeper cell = low half
+    subi r14, 8
+    str r14, r11              ; top cell = high half
+    ret.l
+
 ; / ( a b -- quot )  signed
 ;   Note: div Rd,Rs puts quotient in Rd and remainder in R0.
 ;   When Rd=R0, the remainder overwrites the quotient.  So we use R7
@@ -12891,9 +12908,18 @@ d_star:
     call.l r11
     ret.l
 
+; === UM* ===
+d_um_star:
+    .dq d_star
+    .db 3
+    .ascii "UM*"
+    ldi64 r11, w_um_star
+    call.l r11
+    ret.l
+
 ; === / ===
 d_slash:
-    .dq d_star
+    .dq d_um_star
     .db 1
     .ascii "/"
     ldi64 r11, w_slash

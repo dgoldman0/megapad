@@ -41,7 +41,9 @@ All tests must be run via the Makefile.
 """
 import base64
 import copy
+import hashlib
 import os
+import random
 import re
 import sys
 import tempfile
@@ -1301,6 +1303,22 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ["6 7 * ."])
         self.assertIn("42 ", text)
+
+    def test_um_star_unsigned_widening_boundaries(self):
+        """UM* returns exact low/high halves at unsigned carry edges."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            "HEX",
+            '0 -1 UM* ." ZH=" U. ." ZL=" U.',
+            '-1 -1 UM* ." MH=" U. ." ML=" U.',
+            '0x8000000000000000 2 UM* ." CH=" U. ." CL=" U.',
+        ])
+        self.assertIn("ZH=0 ", text)
+        self.assertIn("ZL=0 ", text)
+        self.assertIn("MH=FFFFFFFFFFFFFFFE ", text)
+        self.assertIn("ML=1 ", text)
+        self.assertIn("CH=1 ", text)
+        self.assertIn("CL=0 ", text)
 
     def test_divmod(self):
         sys, buf = self._boot_bios()
@@ -15274,6 +15292,39 @@ class TestKDOSMulticore(unittest.TestCase):
         ])
         self.assertIn("77 ", text)
 
+    def test_lock_info_reserves_application_runtime_slot(self):
+        """The platform lock map keeps slot 6 for application concurrency."""
+        text = self._run_mc(["LOCK-INFO"])
+        self.assertIn("4 = Ring Buffers", text)
+        self.assertIn("5 = Hash Tables", text)
+        self.assertIn("6 = Application Runtime", text)
+        self.assertNotIn("RSA Scratch", text)
+
+    def test_rsa_public_scratch_is_rejected_off_core_zero(self):
+        """Every public RSA scratch entry rejects a physical worker core."""
+        text = self._run_mc([
+            "CREATE rsa-off-results 7 CELLS ALLOT",
+            ": RSA-OFF-CORE",
+            "  0 0 0 RSA2048-PUBLIC rsa-off-results !",
+            "  0 0 0 RSA2048-PUBLIC-BEGIN rsa-off-results CELL+ !",
+            "  RSA2048-PUBLIC-STEP rsa-off-results 2 CELLS + !",
+            "  RSA2048-PUBLIC-FINAL rsa-off-results 3 CELLS + !",
+            "  RSA2048-PUBLIC-CANCEL rsa-off-results 4 CELLS + !",
+            "  0 0 0 0 RSA2048-PKCS1-SHA256-VERIFY rsa-off-results 5 CELLS + !",
+            "  0 0 0 0 RSA2048-PSS-SHA256-VERIFY rsa-off-results 6 CELLS + ! ;",
+            "' RSA-OFF-CORE 1 CORE-RUN 1 CORE-WAIT",
+            "rsa-off-results @ . rsa-off-results CELL+ @ .",
+            "rsa-off-results 2 CELLS + @ . rsa-off-results 3 CELLS + @ .",
+            "rsa-off-results 4 CELLS + @ . rsa-off-results 5 CELLS + @ .",
+            "rsa-off-results 6 CELLS + @ .",
+            'RSA2048-PUBLIC-STATUS ." PHASE=" .',
+        ])
+        self.assertIn("-2 -2  ok", text)
+        self.assertIn("-1 -1  ok", text)
+        self.assertIn("-1 -2  ok", text)
+        self.assertIn("-2  ok", text)
+        self.assertIn("PHASE=0 ", text)
+
     # --- CORES display ---
 
     def test_cores_display_4(self):
@@ -16543,7 +16594,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." HT=" ch-addr @ 5 + C@ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("LEN=149 ", text)
+        self.assertIn("LEN=161 ", text)
         self.assertIn("CT=22 ", text)     # ContentType=handshake
         self.assertIn("V0=3 ", text)      # 0x0301
         self.assertIn("V1=1 ", text)
@@ -16578,11 +16629,11 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("EH=0 ", text)
-        self.assertIn("EL=65 ", text)
+        self.assertIn("EL=77 ", text)
         self.assertIn("SV=43 ", text)    # 0x2B
 
     def test_build_ch_transcript_length(self):
-        """After building CH, transcript contains 984 bytes."""
+        """After building CH, transcript contains the exact handshake bytes."""
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
@@ -16590,7 +16641,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." TL=" TLS-HS-TR-LEN @ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("TL=144 ", text)
+        self.assertIn("TL=156 ", text)
 
     def test_parse_sh_extracts_pubkey(self):
         """TLS-PARSE-SERVER-HELLO extracts X25519 peer pubkey."""
@@ -16791,8 +16842,8 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
         self.assertIn("STATE=1 ", text)
         self.assertIn("RECLEN=0 ", text)
 
-    def test_client_hello_advertises_only_supported_signature(self):
-        """The wire offer cannot negotiate an unimplemented verifier."""
+    def test_client_hello_advertises_separate_supported_signatures(self):
+        """Handshake and certificate signature offers are exact and distinct."""
         lines = [
             "VARIABLE test-ctx 0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
@@ -16801,12 +16852,28 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." LISTLEN=" TLS-CH-BUF 138 + C@ .',
             '." ALG0=" TLS-CH-BUF 139 + C@ .',
             '." ALG1=" TLS-CH-BUF 140 + C@ .',
+            '." ALG2=" TLS-CH-BUF 141 + C@ .',
+            '." ALG3=" TLS-CH-BUF 142 + C@ .',
+            '." CTYPE=" TLS-CH-BUF 144 + C@ .',
+            '." CLEN=" TLS-CH-BUF 146 + C@ .',
+            '." CALG0=" TLS-CH-BUF 149 + C@ .',
+            '." CALG1=" TLS-CH-BUF 150 + C@ .',
+            '." CALG2=" TLS-CH-BUF 151 + C@ .',
+            '." CALG3=" TLS-CH-BUF 152 + C@ .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("EXTLEN=4 ", text)
-        self.assertIn("LISTLEN=2 ", text)
+        self.assertIn("EXTLEN=6 ", text)
+        self.assertIn("LISTLEN=4 ", text)
         self.assertIn("ALG0=4 ", text)
         self.assertIn("ALG1=3 ", text)
+        self.assertIn("ALG2=8 ", text)
+        self.assertIn("ALG3=4 ", text)
+        self.assertIn("CTYPE=50 ", text)
+        self.assertIn("CLEN=6 ", text)
+        self.assertIn("CALG0=4 ", text)
+        self.assertIn("CALG1=3 ", text)
+        self.assertIn("CALG2=4 ", text)
+        self.assertIn("CALG3=1 ", text)
 
     def test_http11_alpn_profile_roundtrip(self):
         """HTTP callers advertise and require an exact http/1.1 selection."""
@@ -16817,8 +16884,8 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             "test-ctx @ TLS-BUILD-CLIENT-HELLO",
             '." CHLEN=" . DROP',
             '." EXTLEN=" TLS-CH-BUF 83 + C@ .',
-            '." ATYPE=" TLS-CH-BUF 150 + C@ .',
-            '." ANAME=" TLS-CH-BUF 156 + 8 TYPE CR',
+            '." ATYPE=" TLS-CH-BUF 162 + C@ .',
+            '." ANAME=" TLS-CH-BUF 168 + 8 TYPE CR',
             "CREATE ee 21 ALLOT ee 21 0 FILL",
             "8 ee C! 17 ee 3 + C! 15 ee 5 + C!",
             "16 ee 7 + C! 11 ee 9 + C! 9 ee 11 + C! 8 ee 12 + C!",
@@ -16832,8 +16899,8 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." MISSING=" .',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("CHLEN=164 ", text)
-        self.assertIn("EXTLEN=80 ", text)
+        self.assertIn("CHLEN=176 ", text)
+        self.assertIn("EXTLEN=92 ", text)
         self.assertIn("ATYPE=16 ", text)
         self.assertIn("ANAME=http/1.1", text)
         self.assertIn("EE=0 ", text)
@@ -16854,13 +16921,13 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
             '." BODY=" TLS-CH-BUF 6 + _BE24@ .',
             '." EXTS=" TLS-CH-BUF 82 + NW16@ .',
             '." SNI=" TLS-CH-BUF 93 + 15 TYPE CR',
-            '." ALPN=" TLS-CH-BUF 180 + 8 TYPE CR',
+            '." ALPN=" TLS-CH-BUF 192 + 8 TYPE CR',
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
-        self.assertIn("CHLEN=188 ", text)
-        self.assertIn("RECORD=183 ", text)
-        self.assertIn("BODY=179 ", text)
-        self.assertIn("EXTS=104 ", text)
+        self.assertIn("CHLEN=200 ", text)
+        self.assertIn("RECORD=195 ", text)
+        self.assertIn("BODY=191 ", text)
+        self.assertIn("EXTS=116 ", text)
         self.assertIn("SNI=auth.openai.com", text)
         self.assertIn("ALPN=http/1.1", text)
 
@@ -16887,20 +16954,23 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
 
     def test_build_ch_supported_groups_has_hybrid(self):
         """Explicit hybrid supported_groups lists private ML-KEM first."""
-        # sig_algos (8B) follows key_share; groups (10B) follows sig_algos.
-        # key_share starts at 93, is 878B → sig_algos at 971
-        # groups begin at 979; the first group follows its 6-byte header.
+        # key_share is followed by 10-byte handshake and certificate
+        # signature extensions.  The groups list follows both exact offers.
         lines = [
             "VARIABLE test-ctx  0 TLS-CTX@ test-ctx !",
             "0 TLS-SNI-LEN !",
             "TLS-HELLO-HYBRID test-ctx @ TLS-CTX.HELLO-PROFILE !",
             "test-ctx @ TLS-BUILD-CLIENT-HELLO  2DROP",
-            '." SG0=" TLS-CH-BUF 985 + C@ .',     # hybrid high = 254
-            '." SG1=" TLS-CH-BUF 986 + C@ .',     # hybrid low = 0
-            '." SG2=" TLS-CH-BUF 987 + C@ .',     # x25519 high = 0
-            '." SG3=" TLS-CH-BUF 988 + C@ .',     # x25519 low  = 29
+            '." EH=" TLS-CH-BUF 84 + C@ .',       # 915 = 0x0393
+            '." EL=" TLS-CH-BUF 85 + C@ .',
+            '." SG0=" TLS-CH-BUF 997 + C@ .',     # hybrid high = 254
+            '." SG1=" TLS-CH-BUF 998 + C@ .',     # hybrid low = 0
+            '." SG2=" TLS-CH-BUF 999 + C@ .',     # x25519 high = 0
+            '." SG3=" TLS-CH-BUF 1000 + C@ .',    # x25519 low  = 29
         ]
         text = self._run_kdos(lines, max_steps=2_000_000_000)
+        self.assertIn("EH=3 ", text)
+        self.assertIn("EL=147 ", text)
         self.assertIn("SG0=254 ", text)
         self.assertIn("SG1=0 ", text)
         self.assertIn("SG2=0 ", text)
@@ -17431,6 +17501,372 @@ class TestKDOSECDSA(_KDOSTestBase):
             "CORRUPT=-1 " in text or
             "CORRUPT=18446744073709551615 " in text
         )
+
+
+class TestKDOSRSA(_KDOSTestBase):
+    """Bounded RSA-2048 arithmetic, DER, padding, and TLS dispatch."""
+
+    FIXTURE_DIR = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
+    NOW = 1_767_225_600
+
+    @classmethod
+    def _fixture(cls, name: str) -> bytes:
+        with open(os.path.join(cls.FIXTURE_DIR, f"{name}.b64"), "rb") as stream:
+            return base64.b64decode(stream.read())
+
+    @staticmethod
+    def _forth_bytes(name: str, data: bytes) -> list[str]:
+        lines = [f"CREATE {name}"]
+        for offset in range(0, len(data), 16):
+            lines.append(" ".join(f"{byte} C," for byte in data[offset:offset + 16]))
+        return lines
+
+    @staticmethod
+    def _rsa_modulus(cert: bytes) -> bytes:
+        marker = bytes.fromhex("0282010100")
+        start = cert.index(marker) + len(marker)
+        return cert[start:start + 256]
+
+    @staticmethod
+    def _der(tag: int, value: bytes) -> bytes:
+        length = len(value)
+        if length < 128:
+            encoded = bytes([length])
+        else:
+            raw = length.to_bytes((length.bit_length() + 7) // 8, "big")
+            encoded = bytes([0x80 | len(raw)]) + raw
+        return bytes([tag]) + encoded + value
+
+    @classmethod
+    def _rsa_spki(cls, modulus: bytes, exponent=b"\x01\x00\x01") -> bytes:
+        algorithm = cls._der(
+            0x30,
+            bytes.fromhex("06092a864886f70d0101010500"),
+        )
+        public = cls._der(
+            0x30,
+            cls._der(0x02, b"\x00" + modulus) + cls._der(0x02, exponent),
+        )
+        return cls._der(0x30, algorithm + cls._der(0x03, b"\x00" + public))
+
+    @staticmethod
+    def _bundle(root: bytes, scope=b"rsa.test.example") -> bytes:
+        record = (
+            (0).to_bytes(2, "big") + len(scope).to_bytes(2, "big") +
+            len(root).to_bytes(4, "big") + scope + root
+        )
+        return b"MPTA" + b"\x00\x01\x00\x01" + (1).to_bytes(8, "big") + record
+
+    @staticmethod
+    def _mgf1_sha256(seed: bytes, length: int) -> bytes:
+        result = bytearray()
+        for counter in range((length + 31) // 32):
+            result += hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        return bytes(result[:length])
+
+    @classmethod
+    def _pss_em(cls, message_hash: bytes, salt: bytes, *,
+                pad_byte=0, delimiter=1, trailer=0xBC,
+                corrupt_salt=False) -> bytes:
+        db = bytearray([pad_byte] + [0] * 189 + [delimiter])
+        db += salt
+        h = hashlib.sha256(b"\x00" * 8 + message_hash + salt).digest()
+        if corrupt_salt:
+            db[-1] ^= 1
+        mask = cls._mgf1_sha256(h, 223)
+        masked = bytearray(left ^ right for left, right in zip(db, mask))
+        masked[0] &= 0x7F
+        return bytes(masked) + h + bytes([trailer])
+
+    def test_montgomery_differential_and_high_limb_subtraction(self):
+        """CIOS agrees with Python, including the t[32] subtraction path."""
+        n = (1 << 2048) - 159
+        rng = random.Random(0x4D503634)
+        cases = [(n - 1, n - 1)]
+        cases += [(rng.randrange(1, n), rng.randrange(1, n)) for _ in range(3)]
+        r_inv = pow(1 << 2048, -1, n)
+        lines = self._forth_bytes("tv-rn", n.to_bytes(256, "little"))
+        for index, (left, right) in enumerate(cases):
+            expected = left * right * r_inv % n
+            lines += self._forth_bytes(f"tv-ra{index}", left.to_bytes(256, "little"))
+            lines += self._forth_bytes(f"tv-rb{index}", right.to_bytes(256, "little"))
+            lines += self._forth_bytes(f"tv-re{index}", expected.to_bytes(256, "little"))
+            lines.append(f"CREATE tv-ro{index} 256 ALLOT")
+            lines.extend([
+                f"tv-ra{index} tv-rb{index} tv-rn tv-rn @ _RSA-N0' "
+                f"tv-ro{index} _RSA2048-MONT-MUL",
+                f'." M{index}=" tv-ro{index} tv-re{index} 256 _XC-BYTES= .',
+            ])
+        text = self._run_kdos(lines, max_steps=900_000_000)
+        for index in range(len(cases)):
+            self.assertIn(f"M{index}=-1 ", text)
+
+    def test_public_differential_incremental_and_busy_gate(self):
+        """Incremental and synchronous e=65537 paths match Python exactly."""
+        n = (1 << 2048) - 159
+        signature = int.from_bytes(hashlib.sha256(b"dense RSA input").digest() * 8, "big")
+        expected = pow(signature, 65537, n).to_bytes(256, "big")
+        lines = self._forth_bytes("tv-pn", n.to_bytes(256, "big"))
+        lines += self._forth_bytes("tv-ps", signature.to_bytes(256, "big"))
+        lines += self._forth_bytes("tv-pe", expected)
+        lines.extend([
+            "CREATE tv-po 256 ALLOT CREATE tv-busy 256 ALLOT",
+            'tv-ps tv-pn tv-po RSA2048-PUBLIC-BEGIN ." BEGIN=" .',
+            'tv-ps tv-pn tv-busy RSA2048-PUBLIC ." BUSY=" .',
+            'RSA-E-BUSY ." BUSYCODE=" .',
+            ": tv-rsa-steps BEGIN RSA2048-PUBLIC-STEP DUP 0= WHILE DROP REPEAT ;",
+            'tv-rsa-steps ." DONE=" .',
+            'RSA2048-PUBLIC-FINAL ." FINAL=" .',
+            'tv-po tv-pe 256 _XC-BYTES= ." MATCH=" .',
+            'RSA2048-PUBLIC-STATUS ." PHASE=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=900_000_000)
+        self.assertIn("BEGIN=0 ", text)
+        self.assertIn("BUSY=-2 ", text)
+        self.assertIn("BUSYCODE=-2 ", text)
+        self.assertIn("DONE=1 ", text)
+        self.assertIn("FINAL=0 ", text)
+        self.assertIn("MATCH=-1 ", text)
+        self.assertIn("PHASE=0 ", text)
+
+    def test_incremental_public_operation_is_bound_to_its_owner(self):
+        """A different cooperative context cannot step, finish, or cancel RSA."""
+        n = ((1 << 2048) - 159).to_bytes(256, "big")
+        signature = (17).to_bytes(256, "big")
+        lines = self._forth_bytes("tv-owner-n", n)
+        lines += self._forth_bytes("tv-owner-s", signature)
+        lines.extend([
+            "CREATE tv-owner-o 256 ALLOT",
+            "VARIABLE tv-other-step VARIABLE tv-other-final",
+            "VARIABLE tv-other-cancel VARIABLE tv-other-phase",
+            ": tv-other-rsa",
+            "  RSA2048-PUBLIC-STEP tv-other-step !",
+            "  RSA2048-PUBLIC-FINAL tv-other-final !",
+            "  RSA2048-PUBLIC-CANCEL tv-other-cancel !",
+            "  RSA2048-PUBLIC-STATUS tv-other-phase ! ;",
+            'tv-owner-s tv-owner-n tv-owner-o RSA2048-PUBLIC-BEGIN ." BEGIN=" .',
+            "' tv-other-rsa BACKGROUND",
+            "PAUSE",
+            'tv-other-step @ ." OSTEP=" .',
+            'tv-other-final @ ." OFINAL=" .',
+            'tv-other-cancel @ ." OCANCEL=" .',
+            'tv-other-phase @ ." OPHASE=" .',
+            'RSA2048-PUBLIC-STATUS ." PHASE=" .',
+            'RSA2048-PUBLIC-CANCEL ." CANCEL=" .',
+            'RSA2048-PUBLIC-STATUS ." IDLE=" .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("BEGIN=0 ", text)
+        self.assertIn("OSTEP=-1 ", text)
+        self.assertIn("OFINAL=-1 ", text)
+        self.assertIn("OCANCEL=-1 ", text)
+        self.assertIn("OPHASE=1 ", text)
+        self.assertIn("PHASE=1 ", text)
+        self.assertIn("CANCEL=0 ", text)
+        self.assertIn("IDLE=0 ", text)
+
+    def test_cancel_rejects_the_private_synchronous_phase(self):
+        """CANCEL cannot alter the private phase used by blocking verifiers."""
+        lines = [
+            "VARIABLE tv-sync-cancel VARIABLE tv-sync-phase",
+            ": tv-cancel-sync",
+            "  RSA2048-PUBLIC-CANCEL tv-sync-cancel !",
+            "  RSA2048-PUBLIC-STATUS tv-sync-phase ! ;",
+            "-1 _RSA2048-PUBLIC-PHASE !",
+            "' tv-cancel-sync BACKGROUND",
+            "PAUSE",
+            'tv-sync-cancel @ ." CANCEL=" .',
+            'tv-sync-phase @ ." PHASE=" .',
+            "0 _RSA2048-PUBLIC-PHASE !",
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("CANCEL=-1 ", text)
+        self.assertIn("PHASE=-1 ", text)
+
+    def test_public_rejects_signature_equal_to_modulus(self):
+        n = ((1 << 2048) - 159).to_bytes(256, "big")
+        lines = self._forth_bytes("tv-n", n)
+        lines.extend([
+            "CREATE tv-o 256 ALLOT",
+            'tv-n tv-n tv-o RSA2048-PUBLIC ." FLAG=" .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("FLAG=-1 ", text)
+
+    def test_rsa_spki_and_signature_algorithm_are_strict(self):
+        modulus = ((1 << 2048) - 159).to_bytes(256, "big")
+        valid = self._rsa_spki(modulus)
+        bad_null = valid.replace(b"\x05\x00", b"\x04\x00", 1)
+        bad_lead = valid.replace(bytes.fromhex("0282010100"),
+                                 bytes.fromhex("0282010101"), 1)
+        bad_exp = valid[:-1] + bytes([valid[-1] ^ 2])
+        even = self._rsa_spki(modulus[:-1] + bytes([modulus[-1] & 0xFE]))
+        rsa4096 = self._rsa_spki(b"\x80" + b"\x00" * 510 + b"\x01")
+        lines = []
+        for name, data in (("v", valid), ("n", bad_null), ("l", bad_lead),
+                           ("e", bad_exp), ("o", even), ("u", rsa4096)):
+            lines += self._forth_bytes(f"tv-{name}", data)
+            lines.append(f"CREATE tv-d{name} /X509-CERT ALLOT")
+            lines.append(
+                f'." {name.upper()}=" tv-{name} tv-{name} {len(data)} + '
+                f"tv-d{name} X509-PARSE-SPKI-DESC . DROP"
+            )
+        alg = bytes.fromhex("300d06092a864886f70d01010b0500")
+        alg_no_null = bytes.fromhex("300b06092a864886f70d01010b")
+        lines += self._forth_bytes("tv-alg", alg)
+        lines += self._forth_bytes("tv-alg-bad", alg_no_null)
+        lines.extend([
+            f'." AI=" tv-alg tv-alg {len(alg)} + X509-PARSE-ALG . .',
+            f'." BI=" tv-alg-bad tv-alg-bad {len(alg_no_null)} + '
+            "X509-PARSE-ALG . .",
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("V=0 ", text)
+        for label in ("N", "L", "E", "O"):
+            self.assertIn(f"{label}=-1 ", text)
+        self.assertIn("U=-2 ", text)
+        self.assertIn("AI=0 1025 ", text)
+        self.assertIn("BI=-1 0 ", text)
+
+    def test_4096_anchor_scope_and_512_byte_signature_are_bounded(self):
+        """A 2048-bit key with a 4096-bit issuer signature is borrowed safely."""
+        root = self._fixture("rsa4096_root.der")
+        intermediate = self._fixture("rsa2048_by_4096_intermediate.der")
+        bundle = self._bundle(root)
+        pinned_bundle = self._bundle(intermediate)
+        lines = self._forth_bytes("tv-root4096", root)
+        lines += self._forth_bytes("tv-int2048", intermediate)
+        lines += self._forth_bytes("tv-bundle4096", bundle)
+        lines += self._forth_bytes("tv-pinned2048", pinned_bundle)
+        lines.extend([
+            "CREATE tv-int-desc /X509-CERT ALLOT",
+            f'tv-int2048 {len(intermediate)} tv-int-desc X509-DESC-PARSE '
+            '." DESC=" .',
+            '." PUB=" tv-int-desc XC.PUB-U + @ .',
+            '." SIG=" tv-int-desc XC.SIG-U + @ .',
+            f'tv-int2048 {len(intermediate)} X509-PARSE ." LEGACY=" .',
+            f'tv-bundle4096 {len(bundle)} TLS-TRUST-LOAD ." TRUST=" .',
+            '." COUNT=" TLS-TRUST-COUNT @ .',
+            f'tv-pinned2048 {len(pinned_bundle)} TLS-TRUST-LOAD '
+            '." PINNED=" .',
+            '." PINCOUNT=" TLS-TRUST-COUNT @ .',
+        ])
+        text = self._run_kdos(lines)
+        self.assertIn("DESC=0 ", text)
+        self.assertIn("PUB=256 ", text)
+        self.assertIn("SIG=512 ", text)
+        self.assertIn("LEGACY=-1 ", text)
+        self.assertIn("TRUST=-4108 ", text)
+        self.assertIn("COUNT=0 ", text)
+        self.assertIn("PINNED=0 ", text)
+        self.assertIn("PINCOUNT=1 ", text)
+
+    def test_pkcs1_padding_failure_axes(self):
+        digest = hashlib.sha256(b"certificate body").digest()
+        prefix = bytes.fromhex("3031300d060960864801650304020105000420")
+        valid = b"\x00\x01" + b"\xff" * 202 + b"\x00" + prefix + digest
+        variants = {
+            "ok": valid,
+            "ps": valid[:17] + b"\x7f" + valid[18:],
+            "delim": valid[:204] + b"\x01" + valid[205:],
+            "di": valid[:210] + bytes([valid[210] ^ 1]) + valid[211:],
+            "hash": valid[:-1] + bytes([valid[-1] ^ 1]),
+        }
+        lines = self._forth_bytes("tv-h", digest)
+        for name, em in variants.items():
+            lines += self._forth_bytes(f"tv-{name}", em)
+            lines.append(
+                f'." {name.upper()}=" tv-h tv-{name} '
+                "_RSA-PKCS1-SHA256-EM-CHECK ."
+            )
+        text = self._run_kdos(lines)
+        self.assertIn("OK=0 ", text)
+        for label in ("PS", "DELIM", "DI", "HASH"):
+            self.assertIn(f"{label}=-1 ", text)
+
+    def test_pss_padding_failure_axes_and_real_signature(self):
+        transcript = b"rsa authenticated transcript"
+        transcript_hash = hashlib.sha256(transcript).digest()
+        content = (b" " * 64 + b"TLS 1.3, server CertificateVerify" +
+                   b"\x00" + transcript_hash)
+        message_hash = hashlib.sha256(content).digest()
+        salt = bytes(range(32))
+        valid = self._pss_em(message_hash, salt)
+        variants = {
+            "ok": valid,
+            "high": bytes([valid[0] | 0x80]) + valid[1:],
+            "trailer": valid[:-1] + b"\xbd",
+            "pad": self._pss_em(message_hash, salt, pad_byte=1),
+            "delim": self._pss_em(message_hash, salt, delimiter=0),
+            "salt": self._pss_em(message_hash, salt, corrupt_salt=True),
+        }
+        leaf = self._fixture("rsa_leaf.der")
+        modulus = self._rsa_modulus(leaf)
+        signature = self._fixture("rsa_cv_sig")
+        lines = self._forth_bytes("tv-mh", message_hash)
+        for name, em in variants.items():
+            lines += self._forth_bytes(f"tv-{name}", em)
+            lines.append(
+                f'." {name.upper()}=" tv-mh tv-{name} '
+                "_RSA-PSS-SHA256-EM-CHECK ."
+            )
+        lines += self._forth_bytes("tv-mod", modulus)
+        lines += self._forth_bytes("tv-sig", signature)
+        lines.append(
+            '." REAL=" tv-mh tv-mod tv-sig 256 RSA2048-PSS-SHA256-VERIFY .'
+        )
+        text = self._run_kdos(lines, max_steps=900_000_000)
+        self.assertIn("OK=0 ", text)
+        self.assertIn("REAL=0 ", text)
+        for label in ("HIGH", "TRAILER", "PAD", "DELIM", "SALT"):
+            self.assertIn(f"{label}=-1 ", text)
+
+    def test_rsa_anchor_validates_rsa_and_ecdsa_leaf_signatures(self):
+        root = self._fixture("rsa_root.der")
+        rsa_leaf = self._fixture("rsa_leaf.der")
+        ec_leaf = self._fixture("ecdsa_by_rsa_leaf.der")
+        bundle = self._bundle(root)
+        lines = self._forth_bytes("tv-trust", bundle)
+        lines += self._forth_bytes("tv-rsa-leaf", rsa_leaf)
+        lines += self._forth_bytes("tv-ec-leaf", ec_leaf)
+        lines.extend([
+            "CREATE tv-chain /X509-CERT 2 * ALLOT",
+            f'tv-trust {len(bundle)} TLS-TRUST-LOAD ." TRUST=" .',
+            f'tv-rsa-leaf {len(rsa_leaf)} tv-chain X509-DESC-PARSE ." RP=" .',
+            f'tv-ec-leaf {len(ec_leaf)} tv-chain /X509-CERT + '
+            'X509-DESC-PARSE ." EP=" .',
+            f'tv-chain 1 S" rsa.test.example" {self.NOW} '
+            'X509-VERIFY-CHAIN ." RSA=" .',
+            f'tv-chain /X509-CERT + 1 S" rsa.test.example" {self.NOW} '
+            'X509-VERIFY-CHAIN ." MIXED=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=1_200_000_000)
+        for token in ("TRUST=0 ", "RP=0 ", "EP=0 ", "RSA=0 ", "MIXED=0 "):
+            self.assertIn(token, text)
+
+    def test_tls_certificate_verify_rsa_pss_dispatch(self):
+        leaf = self._fixture("rsa_leaf.der")
+        modulus = self._rsa_modulus(leaf)
+        signature = self._fixture("rsa_cv_sig")
+        transcript = b"rsa authenticated transcript"
+        body = b"\x08\x04" + len(signature).to_bytes(2, "big") + signature
+        message = b"\x0f" + len(body).to_bytes(3, "big") + body
+        lines = self._forth_bytes("tv-mod", modulus)
+        lines += self._forth_bytes("tv-cv", message)
+        lines += self._forth_bytes("tv-tr", transcript)
+        lines.extend([
+            "tv-mod _TLS-SERVER-PUBKEY 256 CMOVE",
+            "256 _TLS-SERVER-PUBKEY-LEN !",
+            "X509-ALG-RSA2048 _TLS-SERVER-PUBKEY-ALGO !",
+            "TLS-TR-RESET 1 TLS-USE-SHA256 !",
+            f"tv-tr {len(transcript)} TLS-TR-APPEND",
+            f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." CV=" .',
+            "4 tv-cv 4 + C! 1 tv-cv 5 + C!",
+            f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." BADALG=" .',
+        ])
+        text = self._run_kdos(lines, max_steps=900_000_000)
+        self.assertIn("CV=0 ", text)
+        self.assertIn("BADALG=-1 ", text)
 
 
 class TestKDOSX509Chain(_KDOSTestBase):
