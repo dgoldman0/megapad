@@ -18536,6 +18536,45 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         self.assertGreaterEqual(len(sent), 1)
         self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
 
+    def test_tls_close_notify_can_reply_after_peer_close(self):
+        """Retained write keys can answer close_notify after the peer FIN."""
+        sent = []
+        lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE alert-peer 4 ALLOT  10 0 0 77 alert-peer IP!",
+            "CREATE alert-mac 6 ALLOT  alert-mac 6 170 FILL",
+            "alert-peer alert-mac ARP-INSERT",
+            "TCPS-CLOSE-WAIT 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "alert-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "TLSS-CLOSING test-ctx @ TLS-CTX.STATE !",
+            "0 test-ctx @ TLS-CTX.PEER-AUTH !",
+            "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
+            "test-ctx @ 1 0 TLS-SEND-ALERT",
+            # The closing-state exception is deliberately limited to the
+            # warning close_notify tuple; no other alert may consume keys.
+            "test-ctx @ 2 40 TLS-SEND-ALERT",
+            "test-ctx @ 1 1 TLS-SEND-ALERT",
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("seq=1 ", text)
+        self.assertIn("next=124 ", text)
+        self.assertIn("state=7 ", text)
+        tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual(len(tcp_frames), 1)
+        self.assertEqual(tcp_frames[0]['flags'],
+                         TestKDOSNetStack.TCP_PSH | TestKDOSNetStack.TCP_ACK)
+        self.assertEqual(len(tcp_frames[0]['payload']), 24)
+
     def test_tls_send_data_preserves_sequence_under_tcp_backpressure(self):
         """A pending TCP record must defer TLS encryption and sequence use."""
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
@@ -18616,6 +18655,31 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         self.assertIn("OFF=0 ", text)
         self.assertIn("C0=73 ", text)
         self.assertIn("C1=74 ", text)
+
+    def test_tls_recv_reports_truncation_after_close_wait_drain(self):
+        """Bare TCP FIN drains retained plaintext, then fails without close_notify."""
+        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
+            "TCPS-CLOSE-WAIT 0 TCB-N TCB.STATE !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
+            "3 test-ctx @ TLS-CTX.APP-LEN !",
+            "0 test-ctx @ TLS-CTX.APP-OFF !",
+            "TLS-PLAIN-BUF 3 65 FILL",
+            "CREATE trunc-slice 2 ALLOT",
+            'test-ctx @ trunc-slice 2 TLS-RECV-DATA ."  first=" .',
+            'test-ctx @ trunc-slice 2 TLS-RECV-DATA ."  second=" .',
+            'test-ctx @ trunc-slice 2 TLS-RECV-DATA ."  third=" .',
+            'test-ctx @ TLS-CTX.ERROR @ TLS-E-RECORD = ."  record=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("first=2 ", text)
+        self.assertIn("second=1 ", text)
+        self.assertIn("third=-1 ", text)
+        self.assertIn("record=-1 ", text)
+        self.assertIn("state=3 ", text)
+        self.assertIn("auth=0 ", text)
 
     def test_tls_close_state(self):
         """TLS-CLOSE transitions to CLOSING state."""
@@ -22809,6 +22873,75 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("st1=4 ", text)    # ESTABLISHED
         self.assertIn("st2=5 ", text)    # FIN-WAIT-1
         self.assertGreaterEqual(len(fin_sent), 1, "should send FIN")
+
+    def test_tcp_send_remains_available_in_close_wait(self):
+        """The local half may transmit orderly shutdown data after peer FIN."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE close-wait-ip 4 ALLOT  10 0 0 77 close-wait-ip IP!",
+            "CREATE close-wait-mac 6 ALLOT  close-wait-mac 6 170 FILL",
+            "close-wait-ip close-wait-mac ARP-INSERT",
+            "TCPS-CLOSE-WAIT 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "close-wait-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "CREATE close-wait-msg 3 ALLOT  close-wait-msg 3 65 FILL",
+            '0 TCB-N TCP-SEND-READY? ."  ready=" .',
+            '0 TCB-N close-wait-msg 3 TCP-SEND ."  sent=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("ready=-1 ", text)
+        self.assertIn("sent=3 ", text)
+        self.assertIn("next=103 ", text)
+        self.assertIn("state=7 ", text)
+        tcp_frames = [self._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual(len(tcp_frames), 1)
+        self.assertEqual(tcp_frames[0]['payload'], b'AAA')
+        self.assertEqual(tcp_frames[0]['flags'], self.TCP_PSH | self.TCP_ACK)
+
+    def test_tcp_last_ack_requires_fin_covering_ack(self):
+        """An old ACK must not reclaim LAST-ACK; the FIN ACK must reclaim it."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [10, 0, 0, 77]
+        my_ip = [10, 0, 0, 2]
+        old_ack = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 100, self.TCP_ACK, 4096)
+        fin_ack = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 101, self.TCP_ACK, 4096)
+        setup = [
+            "TCP-INIT-ALL",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE last-ack-peer 4 ALLOT  10 0 0 77 last-ack-peer IP!",
+            "TCPS-LAST-ACK 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "last-ack-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  101 0 TCB-N TCB.SND-NXT !",
+            "200 0 TCB-N TCB.RCV-NXT !  4096 0 TCB-N TCB.RCV-WND !",
+            "TCP-MSS 0 TCB-N TCB.CWND !  65535 0 TCB-N TCB.SSTHRESH !",
+        ]
+        old_text = self._run_kdos(setup + [
+            "5 TCP-POLL-WAIT",
+            '0 TCB-N TCB.STATE @ ."  state1=" .',
+            '0 TCB-N TCB.SND-UNA @ ."  una1=" .',
+        ], nic_frames=[old_ack])
+        fin_text = self._run_kdos(setup + [
+            "5 TCP-POLL-WAIT",
+            '0 TCB-N TCB.STATE @ ."  state2=" .',
+            '0 TCB-N TCB.LOCAL-PORT @ ."  local2=" .',
+        ], nic_frames=[fin_ack])
+        self.assertIn("state1=9 ", old_text)
+        self.assertIn("una1=100 ", old_text)
+        self.assertIn("state2=0 ", fin_text)
+        self.assertIn("local2=0 ", fin_text)
 
     def test_tcp_close_failed_fin_leaves_state_and_sequence(self):
         """A FIN consumes state and sequence only after successful emission."""

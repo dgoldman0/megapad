@@ -10063,8 +10063,12 @@ VARIABLE _TI-HLEN
         THEN
         \ Handle LAST-ACK → CLOSED
         R@ TCB.STATE @ TCPS-LAST-ACK = IF
-            R@ TCB-INIT
-            R> DROP EXIT
+            \ Only the ACK covering our FIN completes LAST-ACK.  A duplicate
+            \ or old ACK must retain the TCB and its retransmission state.
+            R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = IF
+                R@ TCB-INIT
+                R> DROP EXIT
+            THEN
         THEN
     THEN
     \ --- Process data (ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2) ---
@@ -10224,7 +10228,8 @@ VARIABLE _TSND-SRC
 VARIABLE _TSND-LEN
 
 : TCP-SEND-READY?  ( tcb -- flag )
-    DUP TCB.STATE @ TCPS-ESTABLISHED <> IF DROP 0 EXIT THEN
+    DUP TCB.STATE @ DUP TCPS-ESTABLISHED =
+    SWAP TCPS-CLOSE-WAIT = OR 0= IF DROP 0 EXIT THEN
     DUP TCB.SND-NXT @ SWAP TCB.SND-UNA @ = ;
 
 : TCP-SEND  ( tcb addr len -- actual )
@@ -14200,7 +14205,20 @@ VARIABLE _TPA-LEN
         DROP TLS-RBUF-ERROR @ IF
             TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR ! -1
         ELSE
-            0
+            \ TCP EOF without an authenticated close_notify is TLS
+            \ truncation, not a clean end-of-stream.  Retained plaintext was
+            \ drained above before this transport-state check.
+            _TRD-CTX @ TLS-CTX.TCB @ ?DUP IF
+                TCB.STATE @ TCPS-CLOSE-WAIT = IF
+                    TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR !
+                    0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
+                    TLSS-CLOSING _TRD-CTX @ TLS-CTX.STATE ! -1
+                ELSE
+                    0
+                THEN
+            ELSE
+                0
+            THEN
         THEN
         EXIT
     THEN
@@ -14231,11 +14249,19 @@ VARIABLE _TPA-LEN
 CREATE TLS-ALERT-BUF 2 ALLOT
 VARIABLE _TSA-CTX
 
+: _TLS-ALERT-WRITE-OPEN?  ( ctx -- flag )
+    DUP TLS-CTX.STATE @ TLSS-ESTABLISHED =
+    OVER TLS-CTX.PEER-AUTH @ 1 = AND
+    OVER TLS-CTX.STATE @ TLSS-CLOSING =
+    2 PICK TLS-CTX.ERROR @ TLS-E-OK = AND
+    TLS-ALERT-BUF C@ 1 = AND
+    TLS-ALERT-BUF 1+ C@ 0= AND OR
+    SWAP DROP ;
+
 : TLS-SEND-ALERT ( ctx level desc -- )
     TLS-ALERT-BUF 1+ C!   TLS-ALERT-BUF C!
     _TSA-CTX !
-    _TSA-CTX @ TLS-CTX.STATE @ TLSS-ESTABLISHED <> IF EXIT THEN
-    _TSA-CTX @ TLS-CTX.PEER-AUTH @ 1 <> IF EXIT THEN
+    _TSA-CTX @ _TLS-ALERT-WRITE-OPEN? 0= IF EXIT THEN
     _TSA-CTX @ TLS-CTX.TCB @ TCP-SEND-READY? 0= IF EXIT THEN
     _TSA-CTX @  TLS-CT-ALERT  TLS-ALERT-BUF  2
     TLS-SEND-REC  TLS-ENCRYPT-RECORD
