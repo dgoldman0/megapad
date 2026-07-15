@@ -18629,6 +18629,111 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("S=0 ", text)   # NONE — guard prevents close
 
+    def test_tls_close_preserves_graceful_tcp_teardown(self):
+        """TLS-CLOSE should still initiate FIN teardown, not abort its TCB."""
+        sent = []
+        lines = [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE tls-close-ip 4 ALLOT  10 0 0 77 tls-close-ip IP!",
+            "CREATE tls-close-mac 6 ALLOT  tls-close-mac 6 170 FILL",
+            "tls-close-ip tls-close-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "tls-close-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "1234 0 TCB-N TCB.SND-NXT !  5678 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            "VARIABLE tls-close-ctx  0 TLS-CTX@ tls-close-ctx !",
+            "tls-close-ctx @ /TLS-CTX 0 FILL",
+            "TLSS-HANDSHAKE tls-close-ctx @ TLS-CTX.STATE !",
+            "0 TCB-N tls-close-ctx @ TLS-CTX.TCB !",
+            "tls-close-ctx @ TLS-CLOSE",
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'tls-close-ctx @ TLS-CTX.STATE @ ."  ctx-state=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("tcb-state=5 ", text)  # FIN-WAIT-1
+        self.assertIn("ctx-state=0 ", text)  # context wiped
+        tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual(len(tcp_frames), 1)
+        self.assertEqual(tcp_frames[0]['flags'],
+                         TestKDOSNetStack.TCP_FIN | TestKDOSNetStack.TCP_ACK)
+
+    def test_tls_abort_reclaims_tcb_notifies_and_wipes_context(self):
+        """TLS-ABORT should pass through cached-route RST and erase secrets."""
+        sent = []
+        lines = [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE tls-abort-ip 4 ALLOT  10 0 0 77 tls-abort-ip IP!",
+            "CREATE tls-abort-mac 6 ALLOT  tls-abort-mac 6 187 FILL",
+            "tls-abort-ip tls-abort-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "tls-abort-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "1111 0 TCB-N TCB.SND-NXT !  2222 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            "VARIABLE tls-abort-ctx  0 TLS-CTX@ tls-abort-ctx !",
+            "tls-abort-ctx @ /TLS-CTX 90 FILL",
+            "TLSS-ESTABLISHED tls-abort-ctx @ TLS-CTX.STATE !",
+            "0 TCB-N tls-abort-ctx @ TLS-CTX.TCB !",
+            ": tls-abort-zero? /TLS-CTX 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            'tls-abort-ctx @ TLS-ABORT ."  status=" .',
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'tls-abort-ctx @ tls-abort-zero? ."  wiped=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("status=1 ", text)     # TLS-ABORT-S-RST-SENT
+        self.assertIn("tcb-state=0 ", text)
+        self.assertIn("wiped=-1 ", text)
+        tcp_frames = [TestKDOSNetStack._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual(len(tcp_frames), 1)
+        self.assertEqual(tcp_frames[0]['flags'],
+                         TestKDOSNetStack.TCP_RST | TestKDOSNetStack.TCP_ACK)
+
+    def test_tls_abort_without_tcb_wipes_and_is_idempotent(self):
+        """An active TLS context without a TCB is still synchronously wiped."""
+        lines = [
+            "VARIABLE tls-local-ctx  0 TLS-CTX@ tls-local-ctx !",
+            "tls-local-ctx @ /TLS-CTX 165 FILL",
+            "TLSS-HANDSHAKE tls-local-ctx @ TLS-CTX.STATE !",
+            "0 tls-local-ctx @ TLS-CTX.TCB !",
+            ": tls-local-zero? /TLS-CTX 0 DO DUP I + C@ IF DROP 0 UNLOOP EXIT THEN LOOP DROP -1 ;",
+            'tls-local-ctx @ TLS-ABORT ."  first=" .',
+            'tls-local-ctx @ tls-local-zero? ."  wiped=" .',
+            'tls-local-ctx @ TLS-ABORT ."  second=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("first=0 ", text)      # TLS-ABORT-S-LOCAL
+        self.assertIn("wiped=-1 ", text)
+        self.assertIn("second=2 ", text)     # TLS-ABORT-S-NONE
+
+    def test_tls_abort_none_state_still_reclaims_attached_tcb(self):
+        """TCB ownership remains authoritative for a partial TLS context."""
+        sent = []
+        lines = [
+            "TCP-INIT-ALL ARP-CLEAR",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "VARIABLE tls-partial-ctx  0 TLS-CTX@ tls-partial-ctx !",
+            "tls-partial-ctx @ /TLS-CTX 0 FILL",
+            "0 TCB-N tls-partial-ctx @ TLS-CTX.TCB !",
+            'tls-partial-ctx @ TLS-ABORT ."  status=" .',
+            '0 TCB-N TCB.STATE @ ."  tcb-state=" .',
+            'tls-partial-ctx @ TLS-CTX.TCB @ ."  ctx-tcb=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("status=0 ", text)     # work occurred: not NONE
+        self.assertIn("tcb-state=0 ", text)
+        self.assertIn("ctx-tcb=0 ", text)
+        self.assertEqual(sent, [])
+
     def test_incoming_alerts_close_and_report(self):
         lines = self._TLS_ESTAB_SETUP + [
             "CREATE peer-alert 2 ALLOT",
@@ -22787,6 +22892,107 @@ class TestKDOSNetStack(_KDOSTestBase):
             "_CLL-TCB @ TCB.STATE @ .",
         ])
         self.assertIn("0 ", text)  # CLOSED
+
+    # -- 16.7m2: TCP synchronous abort --
+
+    def test_tcp_abort_cached_peer_sends_valid_rst_and_reclaims(self):
+        """A synchronized warm-cache abort sends one valid RST and reclaims."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE abort-ip 4 ALLOT  10 0 0 77 abort-ip IP!",
+            "CREATE abort-mac 6 ALLOT  abort-mac 6 204 FILL",
+            "abort-ip abort-mac ARP-INSERT",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "abort-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "305419896 0 TCB-N TCB.SND-NXT !",
+            "591751049 0 TCB-N TCB.RCV-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            "VARIABLE abort-depth  DEPTH abort-depth !",
+            '0 TCB-N TCP-ABORT ."  first=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.REMOTE-PORT @ ."  rport=" .',
+            '0 TCB-N TCP-ABORT ."  second=" .',
+            'DEPTH abort-depth @ = ."  balanced=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("first=1 ", text)      # TCP-ABORT-S-RST-SENT
+        self.assertIn("state=0 ", text)
+        self.assertIn("rport=0 ", text)
+        self.assertIn("second=2 ", text)     # idempotent CLOSED result
+        self.assertIn("balanced=-1 ", text)
+        tcp_frames = [self._parse_tcp_frame(f) for f in sent]
+        tcp_frames = [f for f in tcp_frames if f is not None]
+        self.assertEqual(len(tcp_frames), 1)
+        rst = tcp_frames[0]
+        self.assertEqual(rst['flags'], self.TCP_RST | self.TCP_ACK)
+        self.assertEqual(rst['sport'], 40000)
+        self.assertEqual(rst['dport'], 443)
+        self.assertEqual(rst['seq'], 305419896)
+        self.assertEqual(rst['ack'], 591751049)
+        self.assertEqual(rst['src_ip'], [10, 0, 0, 2])
+        self.assertEqual(rst['dst_ip'], [10, 0, 0, 77])
+
+    def test_tcp_abort_cold_peer_reclaims_without_resolution_or_frame(self):
+        """A cold-cache abort is local-only and never starts ARP resolution."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE cold-abort-ip 4 ALLOT  10 0 0 77 cold-abort-ip IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "cold-abort-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-NXT !  200 0 TCB-N TCB.RCV-NXT !",
+            '0 TCB-N TCP-ABORT ."  status=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.LOCAL-PORT @ ."  lport=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("status=0 ", text)     # TCP-ABORT-S-LOCAL
+        self.assertIn("state=0 ", text)
+        self.assertIn("lport=0 ", text)
+        self.assertEqual(sent, [], "abort must not emit an ARP request")
+
+    def test_tcp_abort_syn_sent_is_local_even_with_cached_peer(self):
+        """An unsynchronized active open must be reclaimed without a RST."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE syn-abort-ip 4 ALLOT  10 0 0 77 syn-abort-ip IP!",
+            "CREATE syn-abort-mac 6 ALLOT  syn-abort-mac 6 221 FILL",
+            "syn-abort-ip syn-abort-mac ARP-INSERT",
+            "TCPS-SYN-SENT 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "syn-abort-ip 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            '0 TCB-N TCP-ABORT ."  status=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("status=0 ", text)
+        self.assertIn("state=0 ", text)
+        self.assertEqual(sent, [])
+
+    def test_tcp_abort_listener_reclaims_queued_connections(self):
+        """Aborting a listener must not orphan its completed accept queue."""
+        text = self._run_kdos([
+            "TCP-INIT-ALL ARP-CLEAR",
+            "TCPS-LISTEN 0 TCB-N TCB.STATE !",
+            "TCPS-ESTABLISHED 1 TCB-N TCB.STATE !",
+            "1 TCB-N 0 TCB-N AQ-PUSH DROP",
+            "VARIABLE listener-abort-depth  DEPTH listener-abort-depth !",
+            '0 TCB-N TCP-ABORT ."  status=" .',
+            '0 TCB-N TCB.STATE @ ."  listener=" .',
+            '1 TCB-N TCB.STATE @ ."  child=" .',
+            'DEPTH listener-abort-depth @ = ."  balanced=" .',
+        ])
+        self.assertIn("status=0 ", text)
+        self.assertIn("listener=0 ", text)
+        self.assertIn("child=0 ", text)
+        self.assertIn("balanced=-1 ", text)
 
     # -- 16.7n: TCP-POLL --
 

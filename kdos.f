@@ -10277,6 +10277,81 @@ VARIABLE _TSND-LEN
         SWAP TCB-INIT
     ENDCASE ;
 
+\ -- TCP-ABORT: synchronously abandon and reclaim a connection --
+\   ( tcb -- status )
+\
+\ Local reclamation is unconditional and does not wait for network progress.
+\ For a synchronized connection, make one best-effort RST+ACK notification
+\ only when the next-hop MAC is already cached.  An abort never starts ARP
+\ resolution, polls the NIC, or changes the graceful TCP-CLOSE path.
+0 CONSTANT TCP-ABORT-S-LOCAL
+1 CONSTANT TCP-ABORT-S-RST-SENT
+2 CONSTANT TCP-ABORT-S-ALREADY-CLOSED
+
+: _TCP-ABORT-SYNCHRONIZED?  ( state -- flag )
+    DUP TCPS-SYN-RCVD >= SWAP TCPS-LAST-ACK <= AND ;
+
+VARIABLE _TAR-TCB
+VARIABLE _TAR-MAC
+VARIABLE _TAR-IP-BUF
+VARIABLE _TAR-IP-LEN
+
+: _TCP-ABORT-RST?  ( tcb -- flag )
+    \ A cache lookup is deliberately the only L2 operation before send.
+    DUP TCB.REMOTE-IP NEXT-HOP ARP-LOOKUP
+    DUP 0= IF 2DROP 0 EXIT THEN
+    _TAR-MAC ! _TAR-TCB !
+
+    _TAR-TCB @ TCP-RST TCP-ACK OR 0 0 TCP-BUILD
+    DUP 0= IF 2DROP 0 EXIT THEN
+    2DUP >R >R
+    MY-IP _TAR-TCB @ TCB.REMOTE-IP R> R> TCP-FILL-CKSUM
+
+    >R >R
+    IP-PROTO-TCP _TAR-TCB @ TCB.REMOTE-IP R> R> IP-BUILD
+    DUP 0= IF 2DROP 0 EXIT THEN
+    _TAR-IP-LEN ! _TAR-IP-BUF !
+    _TAR-MAC @ ETYPE-IP4 _TAR-IP-BUF @ _TAR-IP-LEN @ ETH-SEND-TX
+    -1 ;
+
+: _TCP-ABORT-DRAIN-AQ  ( listener -- )
+    BEGIN
+        DUP AQ-POP DUP 0<>
+    WHILE
+        DUP TCB.STATE @ _TCP-ABORT-SYNCHRONIZED? IF
+            DUP _TCP-ABORT-RST? DROP
+        THEN
+        TCB-INIT
+    REPEAT
+    2DROP ;
+
+VARIABLE _TCA-TCB
+VARIABLE _TCA-STATUS
+
+: TCP-ABORT  ( tcb -- status )
+    DUP _TCA-TCB !
+    TCB.STATE @ DUP TCPS-CLOSED = IF
+        DROP TCP-ABORT-S-ALREADY-CLOSED EXIT
+    THEN
+    DUP TCPS-LISTEN = IF
+        DROP
+        _TCA-TCB @ _TCP-ABORT-DRAIN-AQ
+        _TCA-TCB @ TCB-INIT
+        TCP-ABORT-S-LOCAL EXIT
+    THEN
+    _TCP-ABORT-SYNCHRONIZED? IF
+        _TCA-TCB @ _TCP-ABORT-RST? IF
+            TCP-ABORT-S-RST-SENT
+        ELSE
+            TCP-ABORT-S-LOCAL
+        THEN
+    ELSE
+        TCP-ABORT-S-LOCAL
+    THEN
+    _TCA-STATUS !
+    _TCA-TCB @ TCB-INIT
+    _TCA-STATUS @ ;
+
 \ -- TCP-POLL: poll network for incoming TCP segments --
 \   Receives one IP frame; if TCP, processes it.
 \   ( -- )
@@ -14182,6 +14257,35 @@ VARIABLE _TCL-CTX
     _TCL-CTX @ TLS-CTX.TCB @ ?DUP IF TCP-CLOSE THEN
     _TCL-CTX @ /TLS-CTX 0 FILL
 ;
+
+\ --- TLS-ABORT ---
+\ Reclaim the associated TCB immediately and wipe the complete context.
+\ The only possible wire action is TCP-ABORT's cached-route RST; this word
+\ never emits close_notify, resolves ARP, polls, or waits.
+0 CONSTANT TLS-ABORT-S-LOCAL
+1 CONSTANT TLS-ABORT-S-RST-SENT
+2 CONSTANT TLS-ABORT-S-NONE
+
+VARIABLE _TLA-CTX
+VARIABLE _TLA-STATUS
+
+: TLS-ABORT  ( ctx -- status )
+    DUP _TLA-CTX !
+    TLS-ABORT-S-NONE _TLA-STATUS !
+    TLS-CTX.STATE @ TLSS-NONE <> IF
+        TLS-ABORT-S-LOCAL _TLA-STATUS !
+    THEN
+    \ TCB presence is authoritative even if the TLS state was only partly
+    \ initialized or was corrupted back to NONE.
+    _TLA-CTX @ TLS-CTX.TCB @ ?DUP IF
+        TCP-ABORT TCP-ABORT-S-RST-SENT = IF
+            TLS-ABORT-S-RST-SENT _TLA-STATUS !
+        ELSE
+            TLS-ABORT-S-LOCAL _TLA-STATUS !
+        THEN
+    THEN
+    _TLA-CTX @ /TLS-CTX 0 FILL
+    _TLA-STATUS @ ;
 
 \ =====================================================================
 \  §16.11  TLS 1.3 Connection API
