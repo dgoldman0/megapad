@@ -74,8 +74,9 @@ module mp64_soc #(
     // ========================================================================
     // Derived constants
     // ========================================================================
-    localparam N_BUS_PORTS = NUM_CORES + NUM_CLUSTERS;  // 7 masters
-    localparam PORT_BITS   = $clog2(N_BUS_PORTS);
+    localparam NIC_BUS_PORT = NUM_CORES + NUM_CLUSTERS;
+    localparam N_BUS_PORTS  = NUM_CORES + NUM_CLUSTERS + 1;
+    localparam PORT_BITS    = $clog2(N_BUS_PORTS);
 
     // System-wide reset (active-high for cores, active-low for peripherals)
     wire rst_h = ~sys_rst_n;
@@ -151,6 +152,15 @@ module mp64_soc #(
     wire        irq_nic_w;
     wire        irq_timer_w;
     wire [NUM_CORES-1:0] ipi_out;
+
+    // NIC byte-DMA master.  It participates in the same memory arbiter as
+    // CPUs and clusters so BIOS NET-RECV/NET-SEND reach real system RAM.
+    wire        nic_dma_req;
+    wire [63:0] nic_dma_addr;
+    wire [7:0]  nic_dma_wdata;
+    wire        nic_dma_wen;
+    wire [7:0]  nic_dma_rdata;
+    wire        nic_dma_ack;
 
     // ---- SysInfo localparams (match emulator devices.py register map) ----
     localparam [63:0] MEM_SIZE_BYTES  = MEM_DEPTH * 512 / 8 * 4;  // 4 banks total
@@ -334,8 +344,9 @@ module mp64_soc #(
     // ========================================================================
     // Bus Arbiter — pack N_BUS_PORTS flat signals
     // ========================================================================
-    // Port layout: [0..NUM_CORES-1] = CPU data buses
-    //              [NUM_CORES..N_BUS_PORTS-1] = I-cache refill buses
+    // Port layout: [0..NUM_CORES-1] = muxed CPU data/I-cache buses
+    //              [NUM_CORES..NIC_BUS_PORT-1] = cluster buses
+    //              [NIC_BUS_PORT] = NIC byte-DMA master
     //
     // WAIT — I-caches also need bus access for refills.  The bus has
     // N_PORTS master ports.  We need:
@@ -398,6 +409,7 @@ module mp64_soc #(
     wire [N_BUS_PORTS-1:0]    bus_cpu_port_io;
     wire [N_BUS_PORTS*64-1:0] bus_cpu_rdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_ready;
+    wire [63:0]               nic_dma_bus_rdata;
 
     genvar pi;
     generate
@@ -411,7 +423,7 @@ module mp64_soc #(
             assign bus_cpu_port_io[pi]         = muxed_port_io[pi];
         end
 
-        // Ports [NUM_CORES..N_BUS_PORTS-1]: clusters
+        // Ports [NUM_CORES..NIC_BUS_PORT-1]: clusters
         for (pi = 0; pi < NUM_CLUSTERS; pi = pi + 1) begin : g_pack_cluster
             localparam P = NUM_CORES + pi;
             assign bus_cpu_valid[P]           = cluster_bus_valid[pi];
@@ -422,6 +434,19 @@ module mp64_soc #(
             assign bus_cpu_port_io[P]          = 1'b0;
         end
     endgenerate
+
+    // Pack the NIC as a normal byte-wide memory master.  mp64_memory expects
+    // sub-word write data in the low bits and returns the containing 64-bit
+    // word, so reads select the addressed byte lane on acknowledgement.
+    assign bus_cpu_valid[NIC_BUS_PORT]                 = nic_dma_req;
+    assign bus_cpu_addr [NIC_BUS_PORT*64 +: 64]        = nic_dma_addr;
+    assign bus_cpu_wdata[NIC_BUS_PORT*64 +: 64]        = {56'd0, nic_dma_wdata};
+    assign bus_cpu_wen  [NIC_BUS_PORT]                 = nic_dma_wen;
+    assign bus_cpu_size [NIC_BUS_PORT*2 +: 2]          = BUS_BYTE;
+    assign bus_cpu_port_io[NIC_BUS_PORT]               = 1'b0;
+    assign nic_dma_bus_rdata = bus_cpu_rdata[NIC_BUS_PORT*64 +: 64];
+    assign nic_dma_rdata = nic_dma_bus_rdata[nic_dma_addr[2:0]*8 +: 8];
+    assign nic_dma_ack   = bus_cpu_ready[NIC_BUS_PORT];
 
     // Unpack bus responses back to cores and clusters
     generate
@@ -983,12 +1008,12 @@ module mp64_soc #(
         .rdata (nic_rdata_raw),
         .ack   (nic_ack),
         .irq   (irq_nic_w),
-        .dma_req   (),
-        .dma_addr  (),
-        .dma_wdata (),
-        .dma_wen   (),
-        .dma_rdata (8'd0),
-        .dma_ack   (1'b0),
+        .dma_req   (nic_dma_req),
+        .dma_addr  (nic_dma_addr),
+        .dma_wdata (nic_dma_wdata),
+        .dma_wen   (nic_dma_wen),
+        .dma_rdata (nic_dma_rdata),
+        .dma_ack   (nic_dma_ack),
         .phy_tx_valid (nic_tx_valid),
         .phy_tx_data  (nic_tx_data),
         .phy_tx_ready (nic_tx_ready),

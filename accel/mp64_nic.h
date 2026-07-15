@@ -14,6 +14,9 @@
 // =========================================================================
 
 #include <cstdint>
+#include <atomic>
+#include <array>
+#include <bitset>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -21,25 +24,26 @@
 #include <functional>
 #include <algorithm>
 
-static constexpr int NIC_MTU = 1500;
+static constexpr int NIC_MAX_FRAME = 1514;
+static constexpr size_t NIC_DATA_WINDOW_SIZE = 96;
 
 struct NICDevice {
     // --- State ---
     uint8_t  mac[6];
     uint64_t dma_addr;
     uint16_t frame_len;
-    uint8_t  irq_ctrl;
-    uint8_t  irq_status;
-    bool     error;
+    std::atomic<uint8_t>  irq_ctrl;
+    std::atomic<uint8_t>  irq_status;
+    std::atomic<bool>     error;      // sticky until CMD RESET
     bool     link_up;
     uint16_t tx_count;
-    uint16_t rx_count;
+    std::atomic<uint16_t> rx_count;
     bool     enabled;
     uint8_t  dma_push_ctr;   // byte-push counter for DMA_PUSH (0-7)
 
-    // Data port buffer (byte-at-a-time alternative to DMA)
-    std::vector<uint8_t> data_buf;
-    size_t data_pos;
+    // Address-indexed diagnostic window.  Frame transport remains DMA-only.
+    std::array<uint8_t, NIC_DATA_WINDOW_SIZE> data_window;
+    std::bitset<NIC_DATA_WINDOW_SIZE> data_window_valid;
 
     // RX queue — guarded by mutex (TAP thread pushes, CPU thread pops)
     std::deque<std::vector<uint8_t>> rx_queue;
@@ -84,8 +88,8 @@ struct NICDevice {
         enabled = true;
         dma_push_ctr = 0;
 
-        data_buf.clear();
-        data_pos = 0;
+        data_window.fill(0);
+        data_window_valid.reset();
 
         {
             std::lock_guard<std::mutex> lock(rx_mutex);
@@ -105,18 +109,16 @@ struct NICDevice {
 
     void reset_state() {
         // CMD 0x04 RESET — clear queues and counters, keep MAC and mem ptrs
-        {
-            std::lock_guard<std::mutex> lock(rx_mutex);
-            rx_queue.clear();
-        }
+        std::lock_guard<std::mutex> lock(rx_mutex);
+        rx_queue.clear();
         tx_queue.clear();
-        data_buf.clear();
-        data_pos = 0;
+        data_window.fill(0);
+        data_window_valid.reset();
         frame_len = 0;
-        irq_status = 0;
-        error = false;
+        irq_status.store(0, std::memory_order_relaxed);
+        error.store(false, std::memory_order_relaxed);
         tx_count = 0;
-        rx_count = 0;
+        rx_count.store(0, std::memory_order_relaxed);
     }
 
     // -------------------------------------------------------------------
@@ -151,7 +153,7 @@ struct NICDevice {
                     if (!rx_queue.empty()) s |= 0x02;  // RX available
                 }
                 if (link_up) s |= 0x04;
-                if (error)   s |= 0x08;
+                if (error.load(std::memory_order_relaxed)) s |= 0x08;
                 return s;
             }
             case 0x02: case 0x03: case 0x04: case 0x05:
@@ -163,9 +165,9 @@ struct NICDevice {
             case 0x0B:  // FRAME_LEN high
                 return (frame_len >> 8) & 0xFF;
             case 0x0C:  // IRQ_CTRL
-                return irq_ctrl;
+                return irq_ctrl.load(std::memory_order_relaxed);
             case 0x0D:  // IRQ_STATUS
-                return irq_status;
+                return irq_status.load(std::memory_order_relaxed);
             case 0x0E: case 0x0F: case 0x10: case 0x11:
             case 0x12: case 0x13: {  // MAC_ADDR (6 bytes)
                 int idx = off - 0x0E;
@@ -176,16 +178,14 @@ struct NICDevice {
             case 0x15:  // TX_COUNT high
                 return (tx_count >> 8) & 0xFF;
             case 0x16:  // RX_COUNT low
-                return rx_count & 0xFF;
+                return rx_count.load(std::memory_order_relaxed) & 0xFF;
             case 0x17:  // RX_COUNT high
-                return (rx_count >> 8) & 0xFF;
+                return (rx_count.load(std::memory_order_relaxed) >> 8) & 0xFF;
             default:
                 if (off >= 0x20 && off <= 0x7F) {
-                    // DATA port read
-                    if (data_pos < data_buf.size()) {
-                        return data_buf[data_pos++];
-                    }
-                    return 0;
+                    // Address-indexed DATA window; reads have no cursor side effect.
+                    size_t idx = off - 0x20;
+                    return data_window_valid.test(idx) ? data_window[idx] : 0;
                 }
                 return 0;
         }
@@ -212,10 +212,11 @@ struct NICDevice {
                 frame_len = (frame_len & 0x00FF) | ((uint16_t)val << 8);
                 break;
             case 0x0C:  // IRQ_CTRL
-                irq_ctrl = val;
+                irq_ctrl.store(val, std::memory_order_relaxed);
                 break;
             case 0x0D:  // IRQ_STATUS (write-1-to-clear)
-                irq_status &= ~val;
+                irq_status.fetch_and(static_cast<uint8_t>(~val),
+                                     std::memory_order_relaxed);
                 break;
             case 0x18: {  // DMA_PUSH — byte-serial address write
                 int shift = 8 * dma_push_ctr;
@@ -226,8 +227,10 @@ struct NICDevice {
             }
             default:
                 if (off >= 0x20 && off <= 0x7F) {
-                    // DATA port write
-                    data_buf.push_back(val);
+                    // Address-indexed DATA window.
+                    size_t idx = off - 0x20;
+                    data_window[idx] = val;
+                    data_window_valid.set(idx);
                 }
                 break;
         }
@@ -238,7 +241,6 @@ struct NICDevice {
     // -------------------------------------------------------------------
 
     void execute_cmd(uint8_t cmd) {
-        error = false;
         dma_push_ctr = 0;  // reset byte-push on any command
         switch (cmd) {
             case 0x01:  // SEND
@@ -291,7 +293,7 @@ struct NICDevice {
     // -------------------------------------------------------------------
 
     void do_send() {
-        if (frame_len == 0 || frame_len > NIC_MTU) {
+        if (frame_len == 0 || frame_len > NIC_MAX_FRAME) {
             error = true;
             return;
         }
@@ -302,12 +304,6 @@ struct NICDevice {
             frame.resize(frame_len);
             for (uint16_t i = 0; i < frame_len; i++)
                 frame[i] = dma_read_byte(dma_addr + i);
-        } else if (!data_buf.empty()) {
-            // Fallback: data port buffer
-            size_t n = std::min((size_t)frame_len, data_buf.size());
-            frame.assign(data_buf.begin(), data_buf.begin() + n);
-            data_buf.clear();
-            data_pos = 0;
         } else {
             error = true;
             return;
@@ -325,12 +321,11 @@ struct NICDevice {
         }
 
         // TX IRQ
-        if (irq_ctrl & 2)
-            irq_status |= 2;
+        irq_status.fetch_or(2, std::memory_order_relaxed);
     }
 
     // -------------------------------------------------------------------
-    //  RECV — pop frame from RX queue, write to DMA + data port
+    //  RECV — pop frame from RX queue and write it through DMA
     // -------------------------------------------------------------------
 
     void do_recv() {
@@ -351,9 +346,6 @@ struct NICDevice {
         for (size_t i = 0; i < frame.size(); i++)
             dma_write_byte(dma_addr + i, frame[i]);
 
-        // Also populate data port buffer
-        data_buf.assign(frame.begin(), frame.end());
-        data_pos = 0;
     }
 
     // -------------------------------------------------------------------
@@ -361,15 +353,28 @@ struct NICDevice {
     //  Called from TAP/UDP backend RX thread via pybind11
     // -------------------------------------------------------------------
 
-    void inject_frame(const uint8_t* data, size_t len) {
-        if (len > NIC_MTU) len = NIC_MTU;
+    bool inject_frame(const uint8_t* data, size_t len) {
+        // The backend thread and CPU MMIO thread serialize queue/reset
+        // semantics here; associated status metadata is atomic for reads.
         std::lock_guard<std::mutex> lock(rx_mutex);
+        if (len == 0 || len > NIC_MAX_FRAME) {
+            error.store(true, std::memory_order_relaxed);
+            return false;
+        }
         if (rx_queue.size() < RX_QUEUE_MAX) {
             rx_queue.emplace_back(data, data + len);
-            rx_count = (rx_count + 1) & 0xFFFF;
-            if (irq_ctrl & 1)  // RX IRQ enable
-                irq_status |= 1;
+            rx_count.fetch_add(1, std::memory_order_relaxed);
+            irq_status.fetch_or(1, std::memory_order_relaxed);
+            return true;
         }
+        error.store(true, std::memory_order_relaxed);
+        return false;
+    }
+
+    bool irq_pending() const {
+        uint8_t ctrl = irq_ctrl.load(std::memory_order_relaxed);
+        uint8_t pending = irq_status.load(std::memory_order_relaxed);
+        return (ctrl & pending & 0x03) != 0;
     }
 
     // -------------------------------------------------------------------

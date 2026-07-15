@@ -73,7 +73,7 @@ UART_TXD ◄──│       bus  │         │         │  tile              
 | `mp64_uart` | `rtl/mp64_uart.v` | ~238 | UART 8N1, 16-byte FIFOs |
 | `mp64_timer` | `rtl/mp64_timer.v` | ~120 | 32-bit timer, compare-match, auto-reload |
 | `mp64_disk` | `rtl/mp64_disk.v` | ~270 | SPI-SD controller with DMA |
-| `mp64_nic` | `rtl/mp64_nic.v` | ~309 | NIC with 1500-byte RX buffer, DMA |
+| `mp64_nic` | `rtl/mp64_nic.v` | ~309 | NIC with 1514-byte no-FCS frame buffers and DMA |
 | `mp64_mailbox` | `rtl/mp64_mailbox.v` | ~216 | Multicore mailbox + IPI |
 | `mp64_aes` | `rtl/mp64_aes.v` | ~735 | AES-256-GCM engine |
 | `mp64_sha3` | `rtl/mp64_sha3.v` | ~395 | SHA3/Keccak engine |
@@ -340,7 +340,11 @@ launch_runs synth_1 -jobs 8
 launch_runs impl_1 -to_step write_bitstream
 ```
 
-**Note:** Synthesis not yet attempted (no hardware available). RTL is lint-clean and unit-tested, ready for synthesis when FPGA hardware is acquired.
+**Note:** Target synthesis and implementation have not been attempted (Vivado
+and FPGA hardware are not available). The NIC alone elaborates under generic
+Yosys, but its frame buffers are currently lowered to registers rather than
+inferred BRAM; this is a functional synthesis check, not resource or timing
+closure.
 
 ### 9.6  Programming (Requires Hardware)
 
@@ -359,12 +363,13 @@ vivado -mode batch -source program.tcl
 | Lint verification | ✅ Pass | 0 errors (Verilator) |
 | Unit tests | ✅ Pass | ~180 tests (Icarus) |
 | CPU bugs | ✅ Fixed | Multi-byte fetch + address staleness |
-| Synthesis | ⏸️ Pending | Requires Vivado + time |
+| Target synthesis | ⏸️ Pending | Requires Vivado; no resource or timing closure yet |
 | Timing closure | ⏸️ Pending | Requires synthesis |
 | FPGA programming | ❌ Blocked | No hardware available |
 | Hardware validation | ❌ Blocked | No hardware available |
 
-**Design is ready for hardware bring-up.** All software-verifiable steps complete.
+The portable RTL has unit-level verification, but target synthesis, resource
+closure, timing closure, and board validation remain hardware-bring-up work.
 
 ---
 
@@ -380,7 +385,10 @@ vivado -mode batch -source program.tcl
 
 ### 11.2  Missing Features
 
-- **No DMA completion**: Disk and NIC modules assert `dma_req` but SoC doesn't wire DMA ack/handshake. DMA is currently polled-only (CPU reads status register).
+- **Disk DMA is not integrated**: The disk controller's DMA request is not yet
+  connected to the shared memory bus. The NIC's byte-DMA master is connected
+  and its acknowledge/completion behavior is covered by an integration
+  testbench using the real bus arbiter and internal memory.
   
 - **No boot ROM**: BIOS must be preloaded into BRAM via synthesis or JTAG memory write. A small boot ROM (256 bytes) could load BIOS from SD card.
 
@@ -393,7 +401,9 @@ vivado -mode batch -source program.tcl
 - ✅ **CPU core**: All ISA families tested except EXT (prefix), MEMALU (legacy), and complex MEX modes.
 - ✅ **Memory**: Dual-port BRAM verified. External memory forwarding logic tested (stub only, no real PHY).
 - ✅ **Tile engine**: TALU and TRED basic ops verified. TMUL (multiply, DOT product) not yet tested.
-- ⚠️ **Peripherals**: UART, timer, disk, NIC are **untested** — structural design only, no simulation or hardware validation.
+- ⚠️ **Peripherals**: The NIC has unit simulation plus a shared-bus DMA
+  integration test. UART, timer, and disk remain structural-only here, and no
+  peripheral has board-level validation.
 - ⚠️ **SoC integration**: Module wiring verified by lint, but no full-system simulation with all peripherals active.
 
 **Recommendation:** Prioritize UART testbench next (critical for debugging on hardware). Then timer (interrupt delivery test).
@@ -414,7 +424,7 @@ Target: **Digilent Genesys 2** (Kintex-7 325T, primary) or **Nexys A7-200T** (le
 1. ~~Pipelined CPU~~ — **Done.** 2-stage IF+DEX with 16-byte prefetch buffer
 2. ~~Instruction cache~~ — **Done.** 4 KiB per-core, direct-mapped, 16-byte lines
 3. **Tile double-buffering** — overlap load + compute for throughput
-4. **DMA completion handshake** — wire up disk/NIC DMA ack signals
+4. **Disk DMA completion handshake** — connect the disk controller to the shared bus
 5. **Interrupt priority encoder** — timer highest, NIC/UART mid, disk low
 
 ### 12.3  New Peripherals

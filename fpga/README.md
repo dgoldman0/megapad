@@ -103,7 +103,7 @@ arrays, and combinational logic.
 | **mp64_aes** | 1 | 4.2K | — | — | AES-256-GCM, 15 round keys |
 | **mp64_sha3** | 1 | 3.3K | — | — | Keccak-f[1600], 5×5×64 state |
 | **mp64_crc** | 1 | ~0.2K | — | — | CRC-32 |
-| **mp64_nic** | 1 | 13.6K | 6 | — | 1500B RX/TX buffers, data window |
+| **mp64_nic** | 1 | 13.6K | 6* | — | 1514B no-FCS RX/TX buffers, data window |
 | **mp64_bus** | 1 | ~0.5K | — | — | QoS arbiter, weights/counters |
 | **mp64_uart** | 1 | ~0.3K | — | — | 16B TX/RX FIFOs |
 | **mp64_timer** | 1 | ~0.3K | — | — | 32-bit timer + compare |
@@ -114,6 +114,11 @@ arrays, and combinational logic.
 | **mp64_trng** | 1 | ~0.6K | — | — | Ring-osc entropy + LFSR conditioner |
 | **mp64_ntt** | 1 | ~5.0K | 3 | 8–12 | 256-pt butterfly, twiddle ROM, 3×256×32b reg files |
 | **mp64_kem** | 1 | ~0.8K | 3 | — | 3,296B buffer array, FSM, byte-stream port |
+
+\* The NIC BRAM count is an architectural estimate. Generic Yosys can
+elaborate the NIC, but currently lowers its frame buffers and data window to
+registers; target-specific BRAM inference and resource closure have not been
+demonstrated.
 
 ### DSP Usage Notes
 

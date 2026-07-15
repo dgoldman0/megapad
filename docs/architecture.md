@@ -300,24 +300,45 @@ Board identification and core-topology registers (12 × 64-bit aligned,
 
 ## NIC (Network Interface Controller)
 
-An Ethernet-style network controller with a 1500-byte MTU.  Supports both
-DMA and byte-at-a-time data transfer.  Default MAC address:
+An Ethernet-style network controller with a 1514-byte maximum frame size
+(14-byte Ethernet header plus a 1500-byte L3 MTU, without FCS).  Oversized
+frames are rejected rather than truncated.  Frame transfer uses DMA; a
+separate address-indexed diagnostic window is available for register-path
+checks.  Default MAC address:
 `02:4D:50:36:34:00`.
+
+Host-side injection accepts complete, non-empty frames only.  Empty or
+oversized injections are rejected and latch STATUS.error; later commands do
+not clear that error.  CMD RESET is the sole error-clear operation.
+
+The DMA frame excludes Ethernet FCS.  Host TAP networking and an FPGA's
+external PHY/MAC adapter are responsible for generating and validating that
+wire-level CRC; it is distinct from the IPv4 and UDP ones-complement checksums.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
 | CMD | `+0x00` | W | **0x01:** SEND, **0x02:** RECV, **0x03:** STATUS, **0x04:** RESET |
-| STATUS | `+0x01` | R | **bit 0:** TX busy, **bit 1:** RX available, **bit 2:** link up, **bit 3:** error, **bit 7:** present |
+| STATUS | `+0x01` | R | **bit 0:** TX busy, **bit 1:** RX available, **bit 2:** link up, **bit 3:** error (sticky until RESET), **bit 4:** RX DMA busy, **bit 7:** present |
 | DMA_ADDR | `+0x02`–`+0x09` | RW | 64-bit DMA address (LE) |
 | FRAME_LEN | `+0x0A`–`+0x0B` | RW | 16-bit frame length (LE) |
-| IRQ_CTRL | `+0x0C` | RW | **bit 0:** RX IRQ enable, **bit 1:** TX IRQ enable |
-| IRQ_STATUS | `+0x0D` | RW | **bit 0:** RX IRQ pending, **bit 1:** TX IRQ pending (W1C) |
+| IRQ_CTRL | `+0x0C` | RW | **bit 0:** RX IRQ enable, **bit 1:** TX IRQ enable; masks the external IRQ line only |
+| IRQ_STATUS | `+0x0D` | RW | **bit 0:** RX event pending, **bit 1:** TX event pending (W1C); events latch even while masked |
 | MAC_ADDR | `+0x0E`–`+0x13` | R | 6-byte MAC address |
 | TX_COUNT | `+0x14`–`+0x15` | R | Frames sent (16-bit LE) |
 | RX_COUNT | `+0x16`–`+0x17` | R | Frames received (16-bit LE) |
-| DATA | `+0x20`–`+0x7F` | RW | 96-byte data window for byte-at-a-time I/O |
+| DATA | `+0x20`–`+0x7F` | RW | 96-byte address-indexed diagnostic window; unwritten/reset bytes read as zero |
 
 **BIOS words:** `NET-STATUS`, `NET-SEND`, `NET-RECV`, `NET-MAC@`.
+`NET-RECV` waits for STATUS bit 4 to clear before it reads `FRAME_LEN` or
+returns access to the destination buffer.  Native devices complete the same
+transaction synchronously, so software observes one completion contract.
+RECV with no available frame publishes length zero; a duplicate RECV while
+RX DMA is active is ignored.  SEND while TX is busy leaves the active transfer
+unchanged and latches STATUS.error.
+
+DATA offsets are independent registers, not aliases for a FIFO: repeated reads
+of one offset return the same byte and do not advance a hidden cursor.  The
+window is not a substitute frame path; `NET-SEND` and `NET-RECV` use DMA.
 
 **KDOS data ports** (§10) provide a higher-level frame routing layer on
 top of the NIC — incoming frames are parsed and routed to bound buffers

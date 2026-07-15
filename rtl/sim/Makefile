@@ -4,6 +4,7 @@
 
 IVERILOG ?= iverilog
 VVP      ?= vvp
+VERILATOR ?= verilator
 IVFLAGS  ?= -g2012
 
 # Common include path
@@ -46,7 +47,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals crypto ntt kem nic mailbox trng tile \
+        peripherals crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
         opcodes qos cpu_micro multicore_smoke
 
 all: phase1 phase2 phase3 phase4 phase5
@@ -305,7 +306,19 @@ tb_kem.vvp: tb_kem.v $(CRYPTO)/mp64_kem.v \
 nic: tb_nic.vvp
 	$(VVP) $<
 
+nic_lint:
+	$(VERILATOR) --lint-only --Wall -Wno-fatal -Wno-UNUSEDPARAM \
+		-I../pkg $(PERIPH)/mp64_nic.v
+
 tb_nic.vvp: tb_nic.v $(PERIPH)/mp64_nic.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+nic_bus: tb_nic_bus_dma.vvp
+	$(VVP) $<
+
+tb_nic_bus_dma.vvp: tb_nic_bus_dma.v $(PERIPH)/mp64_nic.v \
+                    $(BUS)/mp64_bus.v $(MEM)/mp64_memory.v \
+                    $(PRIM)/mp64_sram_dp.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Mailbox ---

@@ -468,9 +468,9 @@ of compiled code.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 193 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS register (MMIO +0x0401) |
+| 193 | `NET-STATUS` | `( -- status )` | | Read NIC STATUS (bit 3 is sticky error; bit 4 is RX-DMA-busy) |
 | 194 | `NET-SEND` | `( addr len -- )` | | DMA send frame: write DMA addr + length, issue SEND command (0x01) |
-| 195 | `NET-RECV` | `( addr -- len )` | | DMA receive frame: returns frame length (0 if no frame available) |
+| 195 | `NET-RECV` | `( addr -- len )` | | DMA receive frame; wait for RX-DMA-busy to clear before returning committed data/length (0 if unavailable) |
 | 196 | `NET-MAC@` | `( -- addr )` | | Push MMIO address of 6-byte MAC at NIC+0x0E |
 | 197 | `NTOH` | `( x -- x' )` | | Network-to-host 64-bit byte order. Uses BSWAP instruction. |
 | 198 | `HTON` | `( x -- x' )` | | Host-to-network 64-bit byte order. Alias of NTOH (self-inverse). |

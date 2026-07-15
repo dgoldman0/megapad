@@ -4078,9 +4078,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
             };
         })
-        .def("nic_inject_frame", [](CPUState& s, py::bytes frame) {
+        .def("nic_inject_frame", [](CPUState& s, py::bytes frame) -> bool {
             std::string data = frame;
-            s.nic.inject_frame(
+            return s.nic.inject_frame(
                 reinterpret_cast<const uint8_t*>(data.data()), data.size()
             );
         })
@@ -4115,11 +4115,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
             s.nic.write8(mmio_off, val);
         })
+        .def("nic_irq_pending", [](const CPUState& s) -> bool {
+            return s.nic.irq_pending();
+        })
         .def("nic_get_tx_count", [](const CPUState& s) -> uint16_t {
             return s.nic.tx_count;
         })
         .def("nic_get_rx_count", [](const CPUState& s) -> uint16_t {
-            return s.nic.rx_count;
+            return s.nic.rx_count.load(std::memory_order_relaxed);
         })
         // ── TRNG device ───────────────────────────────────────
         .def("init_trng", [](CPUState& s) {

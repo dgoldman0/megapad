@@ -1,12 +1,12 @@
 """
 data_sources.py — External data injection for Megapad-64 NIC
 
-Frame protocol (6-byte header + payload, fits NIC MTU of 1500):
+Frame protocol (6-byte header + payload, fits the 1500-byte IPv4 MTU):
     +0   u8    SRC_ID       source identifier (0-255)
     +1   u8    DTYPE        data type
     +2   u16   SEQ          sequence number (LE)
     +4   u16   PAYLOAD_LEN  payload byte count (LE)
-    +6   ...   PAYLOAD      data bytes (up to 1494)
+    +6   ...   PAYLOAD      data bytes (up to 1466)
 
 Data types:
     0 = RAW    arbitrary bytes
@@ -37,13 +37,17 @@ DTYPE_U64   = 3
 DTYPE_TEXT  = 4
 DTYPE_CMD   = 5
 
-FRAME_HDR_SIZE = 6
-MAX_PAYLOAD    = 1494   # 1500 MTU - 6 header
+IP_MTU          = 1500
+IP_HEADER_SIZE  = 20
+UDP_HEADER_SIZE = 8
+FRAME_HDR_SIZE  = 6
+PORT_FRAME_MAX  = IP_MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE
+MAX_PAYLOAD     = PORT_FRAME_MAX - FRAME_HDR_SIZE
 
 # Default MACs and IPs for emulator data-port frames
 NIC_MAC  = bytes([0x02, 0x4D, 0x50, 0x36, 0x34, 0x00])
 PEER_MAC = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01])
-NIC_IP   = (10, 0, 0, 1)    # KDOS default IP (set in §14)
+NIC_IP   = (10, 64, 0, 2)   # KDOS default IP (set in §14)
 PEER_IP  = (10, 0, 0, 2)    # sender IP
 PORT_UDP = 9000              # well-known UDP port for data ports
 
@@ -54,7 +58,9 @@ def encode_frame(src_id: int, dtype: int, seq: int,
                  payload: bytes) -> bytes:
     """Encode a data-port frame: 6-byte header + payload."""
     if len(payload) > MAX_PAYLOAD:
-        payload = payload[:MAX_PAYLOAD]
+        raise ValueError(
+            f"data-port payload exceeds {MAX_PAYLOAD}-byte IPv4/UDP budget"
+        )
     header = struct.pack('<BBHH', src_id & 0xFF, dtype & 0xFF,
                          seq & 0xFFFF, len(payload))
     return header + bytes(payload)
@@ -65,6 +71,8 @@ def decode_header(frame: bytes) -> dict:
     if len(frame) < FRAME_HDR_SIZE:
         raise ValueError("frame too short")
     src_id, dtype, seq, plen = struct.unpack('<BBHH', frame[:6])
+    if plen != len(frame) - FRAME_HDR_SIZE:
+        raise ValueError("data-port payload length does not match capture")
     return {'src_id': src_id, 'dtype': dtype, 'seq': seq,
             'payload_len': plen,
             'payload': frame[6:6 + plen]}
@@ -82,6 +90,10 @@ def wrap_port_frame(payload: bytes, *,
     The payload is typically the output of encode_frame(). The resulting
     bytes can be passed to system.nic.inject_frame().
     """
+    if len(payload) > PORT_FRAME_MAX:
+        raise ValueError(
+            f"data-port frame exceeds {PORT_FRAME_MAX}-byte UDP payload budget"
+        )
     # UDP header
     udp_len = 8 + len(payload)
     udp_hdr = bytearray(8)

@@ -465,7 +465,7 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **UART** | Serial console — primary I/O for the Forth REPL |
 | **Timer** | 32-bit free-running counter with compare-match and IRQ |
 | **Storage** | Sector-based block device (512-byte sectors, DMA) |
-| **NIC** | Ethernet device with DMA, TX/RX queues, 1500-byte MTU |
+| **NIC** | Ethernet device with DMA and TX/RX queues; 1514-byte no-FCS frame limit carrying a 1500-byte IP MTU |
 | **SysInfo** | Board ID, RAM size, feature flags |
 | **Mailbox** | Inter-core IPI messaging (4 cores) |
 | **Spinlock** | 8 hardware mutexes for shared resources |
@@ -1100,7 +1100,7 @@ Offset  Size  Field
   +1    u8    DTYPE        Data type (0=raw, 1=u8, 2=u16, 3=u64, 4=text, 5=cmd)
   +2    u16   SEQ          Sequence number (LE)
   +4    u16   PAYLOAD_LEN  Payload byte count (LE)
-  +6    ...   PAYLOAD      Data bytes (up to 1494)
+  +6    ...   PAYLOAD      Data bytes (up to 1466; IP/UDP headers remain inside the 1500-byte IP MTU)
 ```
 
 ### Port Binding
@@ -1118,7 +1118,7 @@ Each source ID (0-255) can be bound to a buffer descriptor:
 | Word | Stack | Description |
 |---|---|---|
 | `NET-RX?` | `( -- flag )` | Is a NIC frame waiting? |
-| `RECV-FRAME` | `( -- len )` | Receive frame into FRAME-BUF |
+| `RECV-FRAME` | `( -- flag )` | Receive and route a length-valid data-port frame |
 | `POLL` | `( -- id\|-1 )` | Receive + route one frame |
 | `INGEST` | `( n -- received )` | Receive + route up to n frames |
 

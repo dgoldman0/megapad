@@ -6328,7 +6328,9 @@ w_net_send:
     ret.l
 
 ; NET-RECV ( addr -- len )  receive a frame via NIC DMA
-;   Returns 0 if no frame available.
+;   Returns 0 if no frame is available.  RTL DMA completes asynchronously;
+;   STATUS bit 4 remains set until FRAME_LEN and all destination bytes are
+;   committed.  Native devices complete synchronously and never expose bit 4.
 w_net_recv:
     ldn r9, r14               ; addr
     addi r14, 8
@@ -6351,6 +6353,14 @@ w_net_recv:
     ; RECV command
     ldi r1, 0x02
     st.b r11, r1
+    ; Wait for RX DMA completion before observing FRAME_LEN or destination RAM.
+w_net_recv_dma_wait:
+    mov r0, r11
+    inc r0
+    ld.b r1, r0
+    andi r1, 0x10
+    cmpi r1, 0
+    brne w_net_recv_dma_wait
     ; Read frame length
     mov r0, r11
     addi r0, 0x0A

@@ -1067,6 +1067,12 @@ Offset   Size   Field          Description
 +6       ...    PAYLOAD        Actual data
 ```
 
+The complete data-port frame is a UDP payload.  Its maximum is 1472 bytes:
+the six-byte header plus at most 1466 payload bytes, leaving the IPv4 and UDP
+headers inside the 1500-byte IP MTU.  Receivers require `PAYLOAD_LEN` to match
+the captured UDP payload exactly; malformed frames are dropped without
+changing the last routed buffer.
+
 ### Words
 
 | Word | Stack Effect | Description |
@@ -1076,8 +1082,10 @@ Offset   Size   Field          Description
 | `UNPORT` | `( id -- )` | Unbind a source ID. |
 | `POLL` | `( -- id \| -1 )` | Receive and route one frame.  Returns the source ID, or −1 if no frame was available. |
 | `INGEST` | `( n -- received )` | Receive and route up to *n* frames.  Returns the actual count received. |
-| `RECV-FRAME` | `( -- len )` | Low-level: receive one raw frame into the internal frame buffer. |
+| `RECV-FRAME` | `( -- flag )` | Receive and route one data-port frame; true only when a bound source was routed. |
 | `ROUTE-FRAME` | `( -- id \| -1 )` | Low-level: receive a frame and route its payload to the bound buffer. |
+| `PORT-SEND` | `( buf id -- )` | Send one buffer as a data-port UDP frame; reject data over 1466 bytes rather than sending a prefix. |
+| `PORT-SEND-SLICE` | `( buf off len id -- )` | Send one complete in-bounds slice up to 1466 bytes; reject invalid or oversized slices. |
 | `.FRAME` | `( -- )` | Print the last received frame's header (source, type, seq, length). |
 | `PORTS` | `( -- )` | List all bound ports with stats. |
 | `PORT-STATS` | `( -- )` | One-line summary: port count, received frames, dropped frames. |
@@ -1396,10 +1404,9 @@ DNS → TCP → TLS 1.3.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `ETH-BUILD` | `( dst-mac src-mac ethertype -- )` | Build Ethernet header in frame buffer. |
-| `ETH-PARSE` | `( frame -- ethertype )` | Parse Ethernet header, extract EtherType. |
-| `ETH-SEND` | `( buf len -- )` | Transmit Ethernet frame via NIC. |
-| `ETH-RECV` | `( buf -- len \| 0 )` | Receive Ethernet frame from NIC. |
+| `ETH-BUILD` | `( dst src etype payload paylen frame -- total )` | Build an Ethernet frame in caller-provided storage; return 0 without mutation when `paylen` is outside 0..1500. |
+| `ETH-SEND` | `( buf len -- )` | Transmit one complete 14..1514-byte Ethernet frame; invalid lengths are not sent. |
+| `ETH-RECV` | `( -- len \| 0 )` | Receive into `ETH-RX-BUF`; reject runts and frames over the 1514-byte no-FCS limit. |
 
 ### §16.1 ARP
 
@@ -1408,30 +1415,30 @@ DNS → TCP → TLS 1.3.
 | `ARP-LOOKUP` | `( ip -- mac flag )` | Look up MAC address for IP.  *flag* = -1 if found. |
 | `ARP-INSERT` | `( ip mac -- )` | Insert/update ARP table entry. |
 | `ARP-RESOLVE` | `( ip -- mac )` | Resolve IP to MAC via ARP request.  Blocks until reply. |
-| `ARP-RESPONDER` | `( frame -- )` | Auto-reply to incoming ARP requests. |
+| `ARP-HANDLE` | `( -- flag )` | Validate and handle the frame in `ETH-RX-BUF`; sender L2/L3 identities must agree. |
 
 ### §16.2 IPv4
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `IP-BUILD` | `( src dst proto payload-len -- )` | Build IPv4 header with HW-CRC checksum. |
-| `IP-SEND` | `( dst proto buf len -- )` | Send IP packet: ARP-resolve → ETH-frame → NIC TX. |
-| `IP-RECV` | `( -- proto src buf len \| 0 )` | Receive and parse incoming IP packet. |
+| `IP-BUILD` | `( proto dst payload paylen -- buf total )` | Build an IPv4 packet with the RFC ones-complement header checksum; payloads are limited to 1480 bytes and invalid input returns `0 0`. CRC is not an IP checksum. |
+| `IP-SEND` | `( proto dst buf len -- ior )` | Send IP packet: route/ARP-resolve → Ethernet → NIC TX. Returns −1 for an invalid length or failed ARP resolution. |
+| `IP-RECV` | `( -- hdr ip-len \| 0 0 )` | Accept only captured, checksum-valid IPv4/IHL=5 packets within the 1500-byte IP MTU; reject fragments. |
 | `NEXT-HOP` | `( dst-ip -- hop-ip )` | Route: if dst is on subnet, return dst; otherwise return gateway. |
 
 ### §16.3 ICMP
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PING` | `( ip -- )` | Send ICMP echo request, wait for reply, print result. |
-| `PING-IP` | `( ip -- rtt-ms flag )` | Programmatic ping, returns round-trip time and success flag. |
+| `PING` | `( ip count -- )` | Send `count` ICMP echo requests and print results. Replies must match the target source address, identifier, and sequence. |
+| `PING-IP` | `( a b c d count -- )` | Dotted-quad convenience wrapper for `PING`. |
 
 ### §16.4 UDP
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `UDP-SEND` | `( dst-ip dst-port src-port buf len -- )` | Send UDP datagram. |
-| `UDP-RECV` | `( -- src-ip src-port buf len \| 0 )` | Receive UDP datagram. |
+| `UDP-SEND` | `( dst-ip dst-port src-port buf len -- ior )` | Send a UDP payload up to 1472 bytes; return −1 without sending for invalid lengths or failed ARP resolution. |
+| `UDP-RECV` | `( -- src-ip udp-buf udp-len \| 0 0 0 )` | Receive only complete UDP headers whose declared length is bounded by and consistent with IPv4 before checksum verification. |
 
 ### §16.5 DHCP
 
@@ -1443,7 +1450,7 @@ DNS → TCP → TLS 1.3.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `DNS-RESOLVE` | `( c-addr len -- ip \| 0 )` | Resolve hostname to IP via DNS A-record query. |
+| `DNS-RESOLVE` | `( c-addr len -- ip \| 0 )` | Resolve an A record; require matching server IP/ports, transaction ID, and echoed question, with every name/RR walk bounded by the UDP response length. |
 | `DNS-LOOKUP` | `( "name" -- ip \| 0 )` | Parse domain from input, resolve via DNS. |
 
 ### §16.7 TCP
@@ -1459,11 +1466,11 @@ by `SOCK-ACCEPT`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TCP-CONNECT` | `( ip port -- tcb )` | Active open: SYN → SYN-ACK → ACK.  Returns TCB handle. |
+| `TCP-CONNECT` | `( ip remote-port local-port -- tcb \| 0 )` | Start an active open and return its SYN-SENT TCB. If the SYN cannot be emitted, reclaim the TCB and return 0. |
 | `TCP-LISTEN` | `( port -- tcb )` | Passive open: listen for incoming SYN.  Initialises accept queue. |
-| `TCP-SEND` | `( tcb buf len -- )` | Send data on an established connection. |
+| `TCP-SEND` | `( tcb buf len -- actual )` | Accept up to one 1460-byte segment on an established, ready connection. Return 0 without advancing sequence/retransmit state when emission fails. |
 | `TCP-RECV` | `( tcb buf maxlen -- len )` | Receive data.  Returns bytes read. |
-| `TCP-CLOSE` | `( tcb -- )` | Graceful close: FIN → FIN-ACK → TIME_WAIT.  Drains accept queue for listeners. |
+| `TCP-CLOSE` | `( tcb -- )` | Begin graceful close only after the FIN is emitted; a failed send leaves state and sequence unchanged. Drains accept queues for listeners. |
 | `TCP-STATUS` | `( tcb -- state )` | Read connection state (11-state enum). |
 | `.TCP` | `( -- )` | Print all active TCB connections. |
 | `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
@@ -1520,6 +1527,9 @@ ECDSA-P256-SHA256 and RSA-2048/SHA-256 profiles. Public ClientHello messages
 offer `ecdsa_secp256r1_sha256` and `rsa_pss_rsae_sha256` for
 CertificateVerify, while `signature_algorithms_cert` separately permits
 ECDSA-P256-SHA256 and RSA PKCS#1 v1.5 SHA-256 certificate signatures.
+Record plaintext is bounded before scratch-buffer access. Application-data
+and alert sends consume a write sequence number only after TCP accepts the
+encrypted record.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

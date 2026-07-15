@@ -81,6 +81,7 @@ from devices import (
 from data_sources import (
     encode_frame, decode_header, DTYPE_RAW, DTYPE_U8, DTYPE_TEXT,
     wrap_port_frame, extract_port_payload,
+    MAX_PAYLOAD, PORT_FRAME_MAX,
     DataSource, SineSource, RandomSource, CounterSource, ReplaySource,
     TemperatureSource, StockSource, SeismicSource, ImageSource,
     AudioSource, TextSource, EmbeddingSource, MultiChannelSource,
@@ -427,37 +428,35 @@ class TestNIC(unittest.TestCase):
     def test_inject_and_recv_frame(self):
         nic = NetworkDevice()
         frame = b'Hello NIC!'
+        ram = bytearray(64)
+        nic._mem_write = lambda addr, val: ram.__setitem__(addr, val & 0xFF)
         nic.inject_frame(frame)
         # STATUS should show RX available
         self.assertTrue(nic.read8(0x01) & 0x02)
         self.assertEqual(nic.rx_count, 1)
-        # Set up data port recv
+        # Receive through the same DMA contract used by BIOS and RTL.
         nic._execute_cmd(0x02)  # RECV
         self.assertEqual(nic.frame_len, len(frame))
-        # Read via data port
-        result = bytearray()
-        for _ in range(nic.frame_len):
-            result.append(nic.read8(0x20))  # DATA port
-        self.assertEqual(result, frame)
+        self.assertEqual(bytes(ram[:len(frame)]), frame)
         # RX queue empty now
         self.assertFalse(nic.read8(0x01) & 0x02)
 
-    def test_tx_via_data_port(self):
+    def test_data_window_is_address_indexed_not_a_fifo(self):
         nic = NetworkDevice()
-        sent = []
-        nic.on_tx_frame = lambda f: sent.append(f)
-        # Write frame via data port
-        frame = b'TX test'
-        for b in frame:
-            nic.write8(0x20, b)
-        # Set frame length
-        nic.write8(0x0A, len(frame) & 0xFF)
-        nic.write8(0x0B, 0)
-        # Send
-        nic._execute_cmd(0x01)
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0], frame)
-        self.assertEqual(nic.tx_count, 1)
+        nic.write8(0x20, 0xDE)
+        nic.write8(0x21, 0xAD)
+        nic.write8(0x7F, 0x5E)
+
+        self.assertEqual(nic.read8(0x20), 0xDE)
+        self.assertEqual(nic.read8(0x20), 0xDE)
+        self.assertEqual(nic.read8(0x21), 0xAD)
+        self.assertEqual(nic.read8(0x7F), 0x5E)
+        self.assertEqual(nic.read8(0x22), 0)
+
+        nic._execute_cmd(0x04)
+        self.assertEqual(nic.read8(0x20), 0)
+        self.assertEqual(nic.read8(0x21), 0)
+        self.assertEqual(nic.read8(0x7F), 0)
 
     def test_tx_via_dma(self):
         """TX using DMA with mem_read callback."""
@@ -508,9 +507,11 @@ class TestNIC(unittest.TestCase):
         for i in range(3):
             nic.inject_frame(bytes([i]))
         self.assertEqual(nic.rx_count, 3)
-        # Send two frames via data port
+        # Send two frames through DMA.
+        current = [0]
+        nic._mem_read = lambda _addr: current[0]
         for i in range(2):
-            nic._data_buf = bytearray([0x41 + i])
+            current[0] = 0x41 + i
             nic.frame_len = 1
             nic._execute_cmd(0x01)
         self.assertEqual(nic.tx_count, 2)
@@ -564,11 +565,126 @@ class TestNIC(unittest.TestCase):
         status = bus.read8(NIC_BASE + 0x01)
         self.assertTrue(status & 0x80)  # present
 
-    def test_mtu_truncation(self):
+    def test_frame_limit_rejects_without_truncation(self):
         nic = NetworkDevice()
         big_frame = bytes(2000)
-        nic.inject_frame(big_frame)
-        self.assertEqual(len(nic.rx_queue[0]), 1500)
+        self.assertFalse(nic.inject_frame(big_frame))
+        self.assertEqual(len(nic.rx_queue), 0)
+        self.assertTrue(nic.error)
+
+    def test_empty_rx_is_rejected_and_error_is_sticky_until_reset(self):
+        nic = NetworkDevice()
+        self.assertFalse(nic.inject_frame(b''))
+        self.assertEqual(len(nic.rx_queue), 0)
+        self.assertTrue(nic.read8(0x01) & 0x08)
+
+        # Neither a status command nor a subsequent valid receive may hide
+        # the earlier boundary violation.
+        nic._execute_cmd(0x03)
+        self.assertTrue(nic.read8(0x01) & 0x08)
+        self.assertTrue(nic.inject_frame(b'valid'))
+        nic._execute_cmd(0x02)
+        self.assertTrue(nic.read8(0x01) & 0x08)
+
+        nic._execute_cmd(0x04)
+        self.assertFalse(nic.read8(0x01) & 0x08)
+
+        nic.frame_len = 0
+        nic._execute_cmd(0x01)
+        self.assertTrue(nic.read8(0x01) & 0x08)
+        nic._mem_read = lambda _addr: ord('x')
+        nic.frame_len = 1
+        nic._execute_cmd(0x01)
+        self.assertTrue(nic.read8(0x01) & 0x08)
+        nic._execute_cmd(0x04)
+        self.assertFalse(nic.read8(0x01) & 0x08)
+
+    def test_native_nic_matches_empty_rx_and_sticky_error_contract(self):
+        sys = make_system()
+        cs = sys.cores[0]._cs
+        self.assertFalse(cs.nic_inject_frame(b''))
+        self.assertEqual(cs.nic_rx_queue_size(), 0)
+        self.assertTrue(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+
+        cs.nic_write8(NIC_BASE + 0x00, 0x03)
+        self.assertTrue(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+        self.assertTrue(cs.nic_inject_frame(b'valid'))
+        cs.nic_write8(NIC_BASE + 0x00, 0x02)
+        self.assertTrue(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+
+        cs.nic_write8(NIC_BASE + 0x00, 0x04)
+        self.assertFalse(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+
+        cs.nic_write8(NIC_BASE + 0x0A, 0)
+        cs.nic_write8(NIC_BASE + 0x0B, 0)
+        cs.nic_write8(NIC_BASE + 0x00, 0x01)
+        self.assertTrue(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+        cs.nic_write8(NIC_BASE + 0x0A, 1)
+        cs.nic_write8(NIC_BASE + 0x00, 0x01)
+        self.assertTrue(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+        cs.nic_write8(NIC_BASE + 0x00, 0x04)
+        self.assertFalse(cs.nic_read8(NIC_BASE + 0x01) & 0x08)
+
+    def test_irq_events_latch_while_masked_then_assert_when_enabled(self):
+        nic = NetworkDevice()
+        self.assertEqual(nic.irq_ctrl, 0)
+        self.assertFalse(nic.irq_pending)
+
+        self.assertTrue(nic.inject_frame(b'rx'))
+        self.assertEqual(nic.read8(0x0D) & 0x01, 0x01)
+        self.assertFalse(nic.irq_pending)
+        nic.write8(0x0C, 0x01)
+        self.assertTrue(nic.irq_pending)
+        nic.write8(0x0D, 0x01)
+        self.assertFalse(nic.irq_pending)
+
+        nic._mem_read = lambda _addr: 0xA5
+        nic.frame_len = 1
+        nic.write8(0x0C, 0x00)
+        nic._execute_cmd(0x01)
+        self.assertEqual(nic.read8(0x0D) & 0x02, 0x02)
+        self.assertFalse(nic.irq_pending)
+        nic.write8(0x0C, 0x02)
+        self.assertTrue(nic.irq_pending)
+
+    def test_native_irq_and_data_window_match_rtl_contract(self):
+        sys = make_system()
+        cs = sys.cores[0]._cs
+
+        cs.nic_write8(NIC_BASE + 0x20, 0xDE)
+        cs.nic_write8(NIC_BASE + 0x21, 0xAD)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x20), 0xDE)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x20), 0xDE)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x21), 0xAD)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x22), 0)
+
+        cs.nic_write8(NIC_BASE + 0x0C, 0)
+        self.assertTrue(cs.nic_inject_frame(b'rx'))
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x0D) & 0x01, 0x01)
+        self.assertFalse(cs.nic_irq_pending())
+        cs.nic_write8(NIC_BASE + 0x0C, 0x01)
+        self.assertTrue(cs.nic_irq_pending())
+        cs.nic_write8(NIC_BASE + 0x0D, 0x01)
+        self.assertFalse(cs.nic_irq_pending())
+
+        cs.nic_write8(NIC_BASE + 0x0C, 0)
+        cs.nic_write8(NIC_BASE + 0x0A, 1)
+        cs.nic_write8(NIC_BASE + 0x0B, 0)
+        cs.nic_write8(NIC_BASE + 0x00, 0x01)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x0D) & 0x02, 0x02)
+        self.assertFalse(cs.nic_irq_pending())
+        cs.nic_write8(NIC_BASE + 0x0C, 0x02)
+        self.assertTrue(cs.nic_irq_pending())
+
+        cs.nic_write8(NIC_BASE + 0x00, 0x04)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x20), 0)
+        self.assertEqual(cs.nic_read8(NIC_BASE + 0x21), 0)
+
+    def test_standard_maximum_ethernet_frame_is_preserved(self):
+        nic = NetworkDevice()
+        frame = bytes((i & 0xFF) for i in range(1514))
+        self.assertTrue(nic.inject_frame(frame))
+        self.assertEqual(nic.rx_queue[0], frame)
 
 
 # ---------------------------------------------------------------------------
@@ -6544,6 +6660,49 @@ class TestKDOS(_KDOSTestBase):
         self.assertIn("1000 ", text)   # SEQ
         self.assertIn("4 ", text)      # PAYLOAD_LEN
 
+    def test_malformed_data_frame_is_dropped_before_valid_recovery(self):
+        """Declared app length must match the captured UDP payload exactly."""
+        malformed = b'\x01\x01\x00\x00\x02\x00\xAA'
+        valid = encode_frame(1, DTYPE_U8, 1, b'\x55')
+        text = self._run_kdos([
+            "0 1 8 BUFFER data-rx",
+            "data-rx 1 PORT!",
+            '."  bad=" POLL .',
+            '."  good=" POLL .',
+            'data-rx B.DATA C@ ."  byte=" .',
+            'PORT-DROP @ ."  drops=" .',
+        ], nic_frames=[wrap_port_frame(malformed), wrap_port_frame(valid)])
+        self.assertIn("bad=-1 ", text)
+        self.assertIn("good=1 ", text)
+        self.assertIn("byte=85 ", text)
+        self.assertIn("drops=1 ", text)
+
+    def test_bound_port_rejects_payload_larger_than_destination(self):
+        """Routing never reports success or copies a prefix into a small buffer."""
+        oversized = wrap_port_frame(
+            encode_frame(7, DTYPE_U8, 0, bytes([0xAA] * 8)))
+        valid = wrap_port_frame(
+            encode_frame(7, DTYPE_U8, 1, bytes([0x55] * 4)))
+        text = self._run_kdos([
+            "0 1 4 BUFFER small-route",
+            "123 small-route B.FILL",
+            "small-route 7 PORT!",
+            'POLL ."  oversize=" .',
+            'small-route B.DATA C@ ."  unchanged=" .',
+            'PORT-RX @ ."  rx0=" .',
+            'PORT-DROP @ ."  drop=" .',
+            'POLL ."  recovered=" .',
+            'small-route B.DATA C@ ."  byte=" .',
+            'PORT-RX @ ."  rx1=" .',
+        ], nic_frames=[oversized, valid])
+        self.assertIn("oversize=-1 ", text)
+        self.assertIn("unchanged=123 ", text)
+        self.assertIn("rx0=0 ", text)
+        self.assertIn("drop=1 ", text)
+        self.assertIn("recovered=7 ", text)
+        self.assertIn("byte=85 ", text)
+        self.assertIn("rx1=1 ", text)
+
     def test_ingest_multiple(self):
         """INGEST receives multiple frames."""
         frames = [
@@ -6616,6 +6775,22 @@ class TestKDOS(_KDOSTestBase):
         self.assertEqual(hdr2['seq'], 1)
         # Second frame starts at counter=8
         self.assertEqual(list(hdr2['payload']), [8, 9, 10, 11, 12, 13, 14, 15])
+
+    def test_data_frame_budget_preserves_full_standard_ethernet_frame(self):
+        """The maximum app payload wraps to exactly 1514 bytes, not beyond it."""
+        port_frame = encode_frame(1, DTYPE_RAW, 0, bytes(MAX_PAYLOAD))
+        self.assertEqual(len(port_frame), PORT_FRAME_MAX)
+        self.assertEqual(len(wrap_port_frame(port_frame)), 1514)
+
+    def test_data_frame_oversize_is_rejected_without_prefix_truncation(self):
+        with self.assertRaises(ValueError):
+            encode_frame(1, DTYPE_RAW, 0, bytes(MAX_PAYLOAD + 1))
+        with self.assertRaises(ValueError):
+            wrap_port_frame(bytes(PORT_FRAME_MAX + 1))
+
+    def test_decode_header_rejects_declared_length_mismatch(self):
+        with self.assertRaises(ValueError):
+            decode_header(b'\x01\x00\x00\x00\x02\x00A')
 
     def test_data_source_sine(self):
         """SineSource generates valid U8 data."""
@@ -16313,6 +16488,30 @@ class TestKDOSTLSRecord(_KDOSTestBase):
         self.assertIn("H1=3 ", text)       # version
         self.assertIn("H2=3 ", text)
 
+    def test_tls_encrypt_record_rejects_impossible_lengths_without_mutation(self):
+        """The record scratch boundary includes the trailing content type."""
+        lines = self._TLS_CTX_SETUP + [
+            "CREATE tls-bound-pt 1 ALLOT  65 tls-bound-pt C!",
+            "CREATE tls-bound-rec 64 ALLOT  tls-bound-rec 64 90 FILL",
+            "9 test-ctx @ TLS-CTX.WR-SEQ !",
+            "VARIABLE tls-bound-depth  DEPTH tls-bound-depth !",
+            'test-ctx @ TLS-CT-APP-DATA tls-bound-pt -1 tls-bound-rec '
+            'TLS-ENCRYPT-RECORD ."  neg=" .',
+            'test-ctx @ TLS-CT-APP-DATA tls-bound-pt 1500 tls-bound-rec '
+            'TLS-ENCRYPT-RECORD ."  over=" .',
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            'tls-bound-rec C@ ."  first=" .',
+            'tls-bound-rec 63 + C@ ."  last=" .',
+            'DEPTH tls-bound-depth @ = ."  balanced=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("neg=0 ", text)
+        self.assertIn("over=0 ", text)
+        self.assertIn("seq=9 ", text)
+        self.assertIn("first=90 ", text)
+        self.assertIn("last=90 ", text)
+        self.assertIn("balanced=-1 ", text)
+
     def test_tls_encrypt_decrypt_roundtrip(self):
         """TLS-ENCRYPT-RECORD → TLS-DECRYPT-RECORD recovers plaintext."""
         lines = self._TLS_CTX_SETUP + [
@@ -18264,6 +18463,79 @@ class TestKDOSTLSAppData(_KDOSTestBase):
         text = self._run_kdos(lines)
         self.assertIn("S=0 ", text)
 
+    def test_tls_send_data_rejects_nonpositive_length_before_mutation(self):
+        """A user send with no data is a side-effect-free no-op."""
+        sent = []
+        lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "CREATE tls-empty-msg 1 ALLOT  65 tls-empty-msg C!",
+            "90 TLS-SEND-REC C!",
+            "VARIABLE tls-send-depth  DEPTH tls-send-depth !",
+            'test-ctx @ tls-empty-msg -1 TLS-SEND-DATA ."  neg=" .',
+            'test-ctx @ tls-empty-msg 0 TLS-SEND-DATA ."  zero=" .',
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            'TLS-SEND-REC C@ ."  rec=" .',
+            'DEPTH tls-send-depth @ = ."  balanced=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("neg=0 ", text)
+        self.assertIn("zero=0 ", text)
+        self.assertIn("seq=0 ", text)
+        self.assertIn("rec=90 ", text)
+        self.assertIn("balanced=-1 ", text)
+        self.assertEqual(sent, [])
+
+    def test_tls_send_failure_rolls_back_record_sequence(self):
+        """A record rejected by TCP can be retried with the same nonce."""
+        sent = []
+        lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE tls-no-peer 4 ALLOT  10 0 0 77 tls-no-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "tls-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "CREATE tls-failed-msg 4 ALLOT  tls-failed-msg 4 65 FILL",
+            'test-ctx @ tls-failed-msg 4 TLS-SEND-DATA ."  actual=" .',
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("actual=0 ", text)
+        self.assertIn("seq=0 ", text)
+        self.assertIn("next=100 ", text)
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
+    def test_tls_send_alert_failure_preserves_record_sequence(self):
+        """Alert emission observes the same TCP acceptance boundary."""
+        sent = []
+        lines = ["TCP-INIT-ALL", "ARP-CLEAR"] + self._TLS_ESTAB_SETUP + [
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE alert-no-peer 4 ALLOT  10 0 0 77 alert-no-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  443 0 TCB-N TCB.REMOTE-PORT !",
+            "alert-no-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            "0 TCB-N test-ctx @ TLS-CTX.TCB !",
+            "test-ctx @ 1 0 TLS-SEND-ALERT",
+            'test-ctx @ TLS-CTX.WR-SEQ @ ."  seq=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+        ]
+        text = self._run_kdos(
+            lines, nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("seq=0 ", text)
+        self.assertIn("next=100 ", text)
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
     def test_tls_send_data_preserves_sequence_under_tcp_backpressure(self):
         """A pending TCP record must defer TLS encryption and sequence use."""
         lines = ["TCP-INIT-ALL"] + self._TLS_ESTAB_SETUP + [
@@ -18641,14 +18913,19 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("6 ", text)
 
     def test_eth_mtu_constant(self):
-        """ETH-MTU should be 1500."""
+        """ETH-MTU is the 1514-byte no-FCS Ethernet frame limit."""
         text = self._run_kdos(["ETH-MTU ."])
-        self.assertIn("1500 ", text)
+        self.assertIn("1514 ", text)
 
     def test_eth_max_pld_constant(self):
-        """ETH-MAX-PLD should be 1486."""
+        """Ethernet can carry a complete 1500-byte IPv4 packet."""
         text = self._run_kdos(["ETH-MAX-PLD ."])
-        self.assertIn("1486 ", text)
+        self.assertIn("1500 ", text)
+
+    def test_ip_mtu_constant(self):
+        """The IPv4 MTU remains 1500 bytes."""
+        text = self._run_kdos(["IP-MTU ."])
+        self.assertIn("1500 ", text)
 
     def test_etype_ip4_constant(self):
         """ETYPE-IP4 should be 2048 (0x0800)."""
@@ -18817,6 +19094,28 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("22 ", text)     # 14 + 8
         self.assertIn("-1 ", text)     # src MAC matches MY-MAC
         self.assertIn("2054 ", text)   # ETYPE-ARP
+
+    def test_eth_build_and_send_reject_invalid_payload_lengths(self):
+        """The fixed Ethernet TX buffer is never partially overwritten."""
+        sent = []
+        text = self._run_kdos([
+            "CREATE eth-bound-pay 1 ALLOT  85 eth-bound-pay C!",
+            "90 ETH-TX-BUF C!",
+            "91 ETH-TX-BUF ETH-PLD C!",
+            "92 ETH-TX-BUF ETH-MTU 1- + C!",
+            'MAC-BCAST ETYPE-IP4 eth-bound-pay 1501 ETH-BUILD-TX '
+            '."  build=" .',
+            "MAC-BCAST ETYPE-IP4 eth-bound-pay 1501 ETH-SEND-TX",
+            "MAC-BCAST ETYPE-IP4 eth-bound-pay -1 ETH-SEND-TX",
+            'ETH-TX-BUF C@ ."  c0=" .',
+            'ETH-TX-BUF ETH-PLD C@ ."  c14=" .',
+            'ETH-TX-BUF ETH-MTU 1- + C@ ."  clast=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("build=0 ", text)
+        self.assertIn("c0=90 ", text)
+        self.assertIn("c14=91 ", text)
+        self.assertIn("clast=92 ", text)
+        self.assertEqual(sent, [])
 
     def test_eth_is_ip4(self):
         """ETH-IS-IP4? should detect IPv4 frames."""
@@ -19513,6 +19812,24 @@ class TestKDOSNetStack(_KDOSTestBase):
         ])
         self.assertIn("65535 ", text)
 
+    def test_ip_checksum_odd_known_vector(self):
+        """Internet checksum pads an odd trailing byte in the high octet."""
+        text = self._run_kdos([
+            "CREATE odd-ck 3 ALLOT",
+            "1 odd-ck C!  2 odd-ck 1+ C!  3 odd-ck 2 + C!",
+            'odd-ck 3 IP-CHECKSUM ."  cksum=" .',
+        ])
+        # ~(0x0102 + 0x0300) = 0xFBFD.
+        self.assertIn("cksum=64509 ", text)
+
+    def test_ip_checksum_rejects_negative_length(self):
+        """The public checksum helper cannot turn a negative bound into a loop."""
+        text = self._run_kdos([
+            "CREATE bad-ck-len 1 ALLOT",
+            'bad-ck-len -1 IP-CHECKSUM ."  cksum=" .',
+        ])
+        self.assertIn("cksum=65535 ", text)
+
     def test_ip_build_returns_correct_length(self):
         """IP-BUILD should return total = 20 + payload."""
         text = self._run_kdos([
@@ -19664,6 +19981,40 @@ class TestKDOSNetStack(_KDOSTestBase):
         ])
         self.assertIn("-1 ", text)   # ARP failure
 
+    def test_ip_build_and_send_reject_invalid_lengths_without_mutation(self):
+        """Invalid IP payload lengths neither touch the TX buffer nor ARP."""
+        sent = []
+        text = self._run_kdos([
+            "ARP-CLEAR  10 64 0 2 IP-SET",
+            "CREATE ip-bound-dst 4 ALLOT  10 0 0 99 ip-bound-dst IP!",
+            "CREATE ip-bound-pay 1 ALLOT  85 ip-bound-pay C!",
+            "90 IP-TX-BUF C!",
+            "91 IP-TX-BUF IP-H.DATA C!",
+            "92 IP-TX-BUF IP-MTU 1- + C!",
+            "1234 IP-IDENT !",
+            'IP-PROTO-UDP ip-bound-dst ip-bound-pay 1481 IP-BUILD '
+            '."  build-len=" . ."  build-buf=" .',
+            'IP-PROTO-UDP ip-bound-dst ip-bound-pay 1481 IP-SEND '
+            '."  over-ior=" .',
+            'IP-PROTO-UDP ip-bound-dst ip-bound-pay -1 IP-SEND '
+            '."  neg-ior=" .',
+            'IP-TX-BUF C@ ."  c0=" .',
+            'IP-TX-BUF IP-H.DATA C@ ."  c20=" .',
+            'IP-TX-BUF IP-MTU 1- + C@ ."  clast=" .',
+            'IP-IDENT @ ."  ident=" .',
+            'ETH-TX-COUNT @ ."  tx=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("build-len=0 ", text)
+        self.assertIn("build-buf=0 ", text)
+        self.assertIn("over-ior=-1 ", text)
+        self.assertIn("neg-ior=-1 ", text)
+        self.assertIn("c0=90 ", text)
+        self.assertIn("c20=91 ", text)
+        self.assertIn("clast=92 ", text)
+        self.assertIn("ident=1234 ", text)
+        self.assertIn("tx=0 ", text)
+        self.assertEqual(sent, [])
+
     # --- 11c: IP-RECV (demux incoming Ethernet by EtherType) ---
 
     @staticmethod
@@ -19712,6 +20063,14 @@ class TestKDOSNetStack(_KDOSTestBase):
             "IP-RECV . .",
         ])
         self.assertIn("0 0 ", text)
+
+    def test_ip_recv_wait_timeout_preserves_stack_depth(self):
+        text = self._run_kdos([
+            "VARIABLE ipwait-depth  DEPTH ipwait-depth !",
+            "3 IP-RECV-WAIT 2DROP",
+            'DEPTH ipwait-depth @ = ."  balanced=" .',
+        ])
+        self.assertIn("balanced=-1 ", text)
 
     def test_ip_recv_arp_handled_transparently(self):
         """IP-RECV should auto-handle ARP and return 0 0."""
@@ -19792,6 +20151,41 @@ class TestKDOSNetStack(_KDOSTestBase):
             "IP-CHECKSUM .",  # should be 0 for valid checksum
         ])
         self.assertIn("0 ", text)
+
+    def test_icmp_build_echo_req_copies_odd_payload_without_stack_leak(self):
+        """Odd echo payloads are copied from their address and balance DEPTH."""
+        text = self._run_kdos([
+            "CREATE odd-echo-pay 3 ALLOT",
+            "17 odd-echo-pay C!  34 odd-echo-pay 1+ C!  51 odd-echo-pay 2 + C!",
+            "VARIABLE odd-depth  DEPTH odd-depth !",
+            "odd-echo-pay 3 ICMP-BUILD-ECHO-REQ",
+            'OVER ICMP-H.DATA C@ ."  p0=" .',
+            'OVER ICMP-H.DATA 1+ C@ ."  p1=" .',
+            'OVER ICMP-H.DATA 2 + C@ ."  p2=" .',
+            '2DUP IP-CHECKSUM ."  verify=" .',
+            "2DROP",
+            'DEPTH odd-depth @ = ."  balanced=" .',
+        ])
+        self.assertIn("p0=17 ", text)
+        self.assertIn("p1=34 ", text)
+        self.assertIn("p2=51 ", text)
+        self.assertIn("verify=0 ", text)
+        self.assertIn("balanced=-1 ", text)
+
+    def test_icmp_build_rejects_oversize_without_mutation(self):
+        """An echo payload over 1472 bytes is rejected before buffer writes."""
+        text = self._run_kdos([
+            "CREATE icmp-bound-pay 1 ALLOT",
+            "90 ICMP-BUF C!  91 ICMP-BUF ICMP-H.DATA C!",
+            'icmp-bound-pay 1473 ICMP-BUILD-ECHO-REQ '
+            '."  len=" . ."  buf=" .',
+            'ICMP-BUF C@ ."  c0=" .',
+            'ICMP-BUF ICMP-H.DATA C@ ."  c8=" .',
+        ])
+        self.assertIn("len=0 ", text)
+        self.assertIn("buf=0 ", text)
+        self.assertIn("c0=90 ", text)
+        self.assertIn("c8=91 ", text)
 
     def test_icmp_build_echo_req_ident(self):
         """ICMP echo request ident should be 0x4D50 (MP)."""
@@ -19916,6 +20310,63 @@ class TestKDOSNetStack(_KDOSTestBase):
             "IP-RECV ICMP-HANDLE .",
         ], nic_frames=[frame])
         self.assertIn("-1 ", text)
+
+    def test_icmp_odd_checksum_rejects_bad_then_accepts_valid(self):
+        """Odd-length ICMP verification includes the final payload byte."""
+        good = self._build_icmp_echo_req_frame(
+            self.NIC_MAC, self.OTHER_MAC,
+            [10, 0, 0, 1], [192, 168, 1, 100], payload=b'XYZ')
+        bad = bytearray(good)
+        bad[-1] ^= 0x01
+        text = self._run_kdos([
+            "192 168 1 100 IP-SET",
+            'IP-RECV ICMP-RX ."  bad-len=" . DROP',
+            'IP-RECV ICMP-RX ."  good-len=" . 0<> ."  good=" .',
+        ], nic_frames=[bytes(bad), good])
+        self.assertIn("bad-len=0 ", text)
+        self.assertIn("good-len=11 ", text)
+        self.assertIn("good=-1 ", text)
+
+    def test_icmp_direct_entry_rejects_short_length_before_header_access(self):
+        """The explicit ICMP boundary fails closed even outside IP-RECV."""
+        text = self._run_kdos([
+            "VARIABLE icmp-direct-depth  DEPTH icmp-direct-depth !",
+            '0 0 ICMP-RX ."  rx-len=" . ."  rx-buf=" .',
+            '0 0 ICMP-HANDLE ."  handled=" .',
+            'DEPTH icmp-direct-depth @ = ."  balanced=" .',
+        ])
+        self.assertIn("rx-len=0 ", text)
+        self.assertIn("rx-buf=0 ", text)
+        self.assertIn("handled=0 ", text)
+        self.assertIn("balanced=-1 ", text)
+
+    def test_icmp_reply_keeps_source_across_cold_arp_resolution(self):
+        """Nested ARP receive cannot overwrite the echo reply destination."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6]
+        my_ip = [192, 168, 1, 100]
+        peer_ip = [192, 168, 1, 50]
+        echo = self._build_icmp_echo_req_frame(
+            nic_mac, peer_mac, peer_ip, my_ip, payload=b'odd')
+        arp_reply = self._build_arp_reply_frame(
+            peer_mac, peer_ip, nic_mac, my_ip)
+        sent = []
+
+        def capture(_nic, frame):
+            sent.append(bytes(frame))
+
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "255 255 255 0 NET-MASK IP!",
+            'PING-POLL ."  handled=" .',
+        ], nic_frames=[echo, arp_reply], nic_tx_callback=capture)
+        self.assertIn("handled=-1 ", text)
+        ip_replies = [frame for frame in sent
+                      if len(frame) >= 34 and frame[12:14] == b'\x08\x00']
+        self.assertEqual(len(ip_replies), 1)
+        self.assertEqual(ip_replies[0][30:34], bytes(peer_ip))
+        self.assertEqual(ip_replies[0][34], 0)  # ICMP echo reply
 
     def test_icmp_handle_non_icmp(self):
         """ICMP-HANDLE should return 0 for non-ICMP packets."""
@@ -20194,6 +20645,37 @@ class TestKDOSNetStack(_KDOSTestBase):
         ], nic_frames=[arp_reply])
         self.assertIn("0 ", text)  # ior = 0 (success)
 
+    def test_udp_build_and_send_reject_invalid_lengths_without_mutation(self):
+        """Invalid UDP payload lengths do not alter its buffer or send ARP."""
+        sent = []
+        text = self._run_kdos([
+            "ARP-CLEAR  10 64 0 2 IP-SET",
+            "CREATE udp-bound-dst 4 ALLOT  10 0 0 99 udp-bound-dst IP!",
+            "CREATE udp-bound-pay 1 ALLOT  85 udp-bound-pay C!",
+            "90 UDP-TX-BUF C!",
+            "91 UDP-TX-BUF UDP-H.DATA C!",
+            "92 UDP-TX-BUF IP-PAYLOAD-MAX 1- + C!",
+            '3000 5000 udp-bound-pay 1473 UDP-BUILD '
+            '."  build-len=" . ."  build-buf=" .',
+            'udp-bound-dst 5000 3000 udp-bound-pay 1473 UDP-SEND '
+            '."  over-ior=" .',
+            'udp-bound-dst 5000 3000 udp-bound-pay -1 UDP-SEND '
+            '."  neg-ior=" .',
+            'UDP-TX-BUF C@ ."  c0=" .',
+            'UDP-TX-BUF UDP-H.DATA C@ ."  c8=" .',
+            'UDP-TX-BUF IP-PAYLOAD-MAX 1- + C@ ."  clast=" .',
+            'ETH-TX-COUNT @ ."  tx=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("build-len=0 ", text)
+        self.assertIn("build-buf=0 ", text)
+        self.assertIn("over-ior=-1 ", text)
+        self.assertIn("neg-ior=-1 ", text)
+        self.assertIn("c0=90 ", text)
+        self.assertIn("c8=91 ", text)
+        self.assertIn("clast=92 ", text)
+        self.assertIn("tx=0 ", text)
+        self.assertEqual(sent, [])
+
     def test_udp_recv_basic(self):
         """UDP-RECV should return src-ip, udp-buf, udp-len for a valid UDP frame."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
@@ -20327,6 +20809,35 @@ class TestKDOSNetStack(_KDOSTestBase):
         # Length: 240 hdr + 3 (opt53 msgtype) + 6 (opt55 paramlist) + 1 (end) = 250
         self.assertIn("len=250 ", text)
 
+    def test_dhcp_send_emits_valid_nonzero_udp_checksum(self):
+        """DHCP's broadcast UDP checksum uses the correct pseudo-header tuple."""
+        sent = []
+        self._run_kdos([
+            "DHCP-BUILD-DISCOVER DHCP-SEND",
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertEqual(len(sent), 1)
+
+        frame = sent[0]
+        self.assertEqual(frame[12:14], b'\x08\x00')
+        ip = frame[14:]
+        self.assertEqual(ip[9], 17)
+        ip_hlen = (ip[0] & 0x0F) * 4
+        udp_len = (ip[ip_hlen + 4] << 8) | ip[ip_hlen + 5]
+        udp = ip[ip_hlen:ip_hlen + udp_len]
+        wire_checksum = (udp[6] << 8) | udp[7]
+        self.assertNotEqual(wire_checksum, 0)
+
+        pseudo = (ip[12:16] + ip[16:20] + b'\x00\x11' +
+                  bytes((udp_len >> 8, udp_len & 0xFF)))
+        covered = pseudo + udp
+        if len(covered) & 1:
+            covered += b'\x00'
+        total = sum((covered[i] << 8) | covered[i + 1]
+                    for i in range(0, len(covered), 2))
+        while total > 0xFFFF:
+            total = (total & 0xFFFF) + (total >> 16)
+        self.assertEqual(total, 0xFFFF)
+
     def test_dhcp_build_discover_magic(self):
         """DHCP DISCOVER should have correct magic cookie."""
         text = self._run_kdos([
@@ -20384,8 +20895,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             dhcp_pkt)
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
-            "UDP-RECV DROP UDP-H.DATA",         # get DHCP data
-            "NIP",                               # drop src-ip, keep dhcp ptr
+            "UDP-RECV DHCP-UDP-DATA NIP",       # bind captured DHCP length
             "DUP DHCP-GET-MSGTYPE .\"  mt=\" .",
             "DHCP-PARSE-OFFER",
             "SWAP C@ .\"  oip0=\" .",
@@ -20413,8 +20923,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             dhcp_pkt)
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
-            "UDP-RECV DROP UDP-H.DATA",
-            "NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-PARSE-ACK .",
             "MY-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_frames=[frame])
@@ -20510,6 +21019,36 @@ class TestKDOSNetStack(_KDOSTestBase):
         ])
         self.assertIn("0 ", text)
 
+    def test_dhcp_wait_bounds_fixed_fields_and_options_then_recovers(self):
+        """Truncated BOOTP/options are skipped before a complete OFFER."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        valid = self._build_dhcp_reply(
+            msg_type=2, xid=0x12345678,
+            yiaddr=[10, 0, 0, 42], siaddr=[10, 0, 0, 1],
+            chaddr=nic_mac)
+        bad_options = bytearray(valid)
+        bad_options[241] = 250  # option 53 extends beyond captured payload
+        frames = [
+            self._build_dhcp_frame(
+                nic_mac, [0xBB] * 6,
+                [10, 0, 0, 1], [255, 255, 255, 255], valid[:100]),
+            self._build_dhcp_frame(
+                nic_mac, [0xBB] * 6,
+                [10, 0, 0, 1], [255, 255, 255, 255],
+                bytes(bad_options)),
+            self._build_dhcp_frame(
+                nic_mac, [0xBB] * 6,
+                [10, 0, 0, 1], [255, 255, 255, 255], valid),
+        ]
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            "305419896 DHCP-XID !",
+            '10 DHCP-OFFER DHCP-WAIT-REPLY DUP 0<> ."  ok=" .',
+            'DUP 0<> IF DHCP-GET-MSGTYPE ELSE DROP 0 THEN ."  type=" .',
+        ], nic_frames=frames)
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("type=2 ", text)
+
     def test_dhcp_xid_changes(self):
         """DHCP-NEW-XID should produce a different XID each call."""
         text = self._run_kdos([
@@ -20537,7 +21076,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "305419896 DHCP-XID !",        # 0x12345678
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-VALIDATE-REPLY .",
         ], nic_frames=[frame])
         self.assertIn("-1 ", text)
@@ -20555,7 +21094,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "305419896 DHCP-XID !",        # 0x12345678
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-VALIDATE-REPLY .",
         ], nic_frames=[frame])
         self.assertIn("0 ", text)
@@ -20574,7 +21113,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "305419896 DHCP-XID !",
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-VALIDATE-REPLY .",
         ], nic_frames=[frame])
         self.assertIn("0 ", text)
@@ -20593,7 +21132,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "305419896 DHCP-XID !",
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-VALIDATE-REPLY .",
         ], nic_frames=[frame])
         self.assertIn("0 ", text)
@@ -20612,7 +21151,7 @@ class TestKDOSNetStack(_KDOSTestBase):
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
             "305419896 DHCP-XID !",
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-VALIDATE-REPLY .",
         ], nic_frames=[frame])
         self.assertIn("0 ", text)
@@ -20658,7 +21197,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             [10, 0, 0, 1], [255, 255, 255, 255], dhcp_pkt)
         text = self._run_kdos([
             "0 0 0 0 IP-SET",
-            "UDP-RECV DROP UDP-H.DATA NIP",
+            "UDP-RECV DHCP-UDP-DATA NIP",
             "DHCP-PARSE-ACK .",
             "DNS-SERVER-IP IP@ .\"  d=\" . .\"  c=\" . .\"  b=\" . .\"  a=\" .",
         ], nic_frames=[frame])
@@ -20927,6 +21466,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
             "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
             "FIP FMAC ARP-INSERT",
+            "42 DNS-ID !",
             'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
             'DNAME 3 DNS-RESOLVE',
             'DUP 0<> .\"  ok=\" .',
@@ -21005,6 +21545,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             "CREATE FMAC 6 ALLOT 204 FMAC C! 204 FMAC 1+ C! 204 FMAC 2 + C! 204 FMAC 3 + C! 204 FMAC 4 + C! 204 FMAC 5 + C!",
             "CREATE FIP 4 ALLOT 8 8 8 8 FIP IP!",
             "FIP FMAC ARP-INSERT",
+            "42 DNS-ID !",
             'CREATE DNAME 3 ALLOT  120 DNAME C!  46 DNAME 1+ C!  121 DNAME 2 + C!',
             'DNAME 3 DNS-RESOLVE',
             'DUP 0<> .\"  ok=\" .',
@@ -21166,6 +21707,57 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("r=4 ", text)
         self.assertIn("p=8 ", text)
         self.assertIn("a=16 ", text)
+
+    def test_tcp_public_lengths_and_parser_are_bounded(self):
+        """Public TCP helpers reject impossible lengths with fixed arity."""
+        sent = []
+        text = self._run_kdos([
+            "CREATE tcp-bound-pay 1 ALLOT  85 tcp-bound-pay C!",
+            "90 TCP-TX-PKT C!  91 TCP-TX-PKT TCP-H.DATA C!",
+            "VARIABLE tcp-bound-depth  DEPTH tcp-bound-depth !",
+            '0 TCP-ACK tcp-bound-pay 1461 TCP-BUILD '
+            '."  build-len=" . ."  build-buf=" .',
+            '0 TCP-ACK tcp-bound-pay 1461 TCP-SEND-SEG ."  seg-ior=" .',
+            '0 tcp-bound-pay -1 TCP-SEND ."  send-neg=" .',
+            '0 tcp-bound-pay 0 TCP-SEND ."  send-zero=" .',
+            '0 tcp-bound-pay -1 TCP-RECV ."  recv-neg=" .',
+            'TCP-TX-PKT C@ ."  c0=" .',
+            'TCP-TX-PKT TCP-H.DATA C@ ."  c20=" .',
+            'DEPTH tcp-bound-depth @ = ."  balanced=" .',
+            "CREATE tcp-parse-bound 24 ALLOT  tcp-parse-bound 24 0 FILL",
+            "1234 tcp-parse-bound TCP-H.SPORT NW16!",
+            "5678 tcp-parse-bound TCP-H.DPORT NW16!",
+            "287454020 tcp-parse-bound TCP-H.SEQ NW32!",
+            "1432778632 tcp-parse-bound TCP-H.ACK NW32!",
+            "80 tcp-parse-bound TCP-H.DOFF C!",
+            "16 tcp-parse-bound TCP-H.FLAGS C!",
+            "4096 tcp-parse-bound TCP-H.WIN NW16!",
+            'tcp-parse-bound 24 TCP-PARSE ."  data=" . ."  win=" . '
+            '."  flags=" . ."  ack=" . ."  seq=" . ."  dport=" . '
+            '."  sport=" .',
+            "240 tcp-parse-bound TCP-H.DOFF C!",
+            'tcp-parse-bound 24 TCP-PARSE + + + + + + ."  bad-doff-sum=" .',
+            'tcp-parse-bound 19 TCP-PARSE + + + + + + ."  short-sum=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("build-len=0 ", text)
+        self.assertIn("build-buf=0 ", text)
+        self.assertIn("seg-ior=-1 ", text)
+        self.assertIn("send-neg=0 ", text)
+        self.assertIn("send-zero=0 ", text)
+        self.assertIn("recv-neg=0 ", text)
+        self.assertIn("c0=90 ", text)
+        self.assertIn("c20=91 ", text)
+        self.assertIn("balanced=-1 ", text)
+        self.assertIn("data=4 ", text)
+        self.assertIn("win=4096 ", text)
+        self.assertIn("flags=16 ", text)
+        self.assertIn("ack=1432778632 ", text)
+        self.assertIn("seq=287454020 ", text)
+        self.assertIn("dport=5678 ", text)
+        self.assertIn("sport=1234 ", text)
+        self.assertIn("bad-doff-sum=0 ", text)
+        self.assertIn("short-sum=0 ", text)
+        self.assertEqual(sent, [])
 
     def test_tcp_state_constants(self):
         """TCP state constants should be enumerated 0..10."""
@@ -21576,6 +22168,23 @@ class TestKDOSNetStack(_KDOSTestBase):
         ])
         self.assertIn("0 ", text)
 
+    def test_tcp_connect_failed_syn_reclaims_tcb(self):
+        """A SYN that cannot be emitted never publishes a SYN-SENT TCB."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL  ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE no-syn-peer 4 ALLOT  10 0 0 77 no-syn-peer IP!",
+            'no-syn-peer 80 40000 TCP-CONNECT ."  conn=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            'TCB-USAGE DROP ."  used=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("conn=0 ", text)
+        self.assertIn("state=0 ", text)
+        self.assertIn("used=0 ", text)
+        self.assertGreaterEqual(len(sent), 1)  # ARP resolution was attempted.
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
     # -- 16.7f: TCP-LISTEN (passive open) --
 
     def test_tcp_listen_sets_state(self):
@@ -21769,6 +22378,77 @@ class TestKDOSNetStack(_KDOSTestBase):
             "0 TCB-N MSG2 4 TCP-SEND .",
         ])
         self.assertIn("0 ", text)
+
+    def test_tcp_send_failure_does_not_accept_or_advance(self):
+        """Failed ARP/IP emission leaves sequence and retransmit state intact."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL  ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE no-data-peer 4 ALLOT  10 0 0 77 no-data-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !",
+            "80 0 TCB-N TCB.REMOTE-PORT !",
+            "no-data-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "77 0 TCB-N TCB.RTO-TIMER !  33 0 TCB-N TCB.TX-LEN !",
+            "90 0 TCB-N TCB.TX-BUF C!",
+            "CREATE failed-data 4 ALLOT  failed-data 4 65 FILL",
+            '0 TCB-N failed-data 4 TCP-SEND ."  actual=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+            '0 TCB-N TCB.SND-UNA @ ."  una=" .',
+            '0 TCB-N TCB.RTO-TIMER @ ."  timer=" .',
+            '0 TCB-N TCB.TX-LEN @ ."  txlen=" .',
+            '0 TCB-N TCB.TX-BUF C@ ."  txbyte=" .',
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("actual=0 ", text)
+        self.assertIn("next=100 ", text)
+        self.assertIn("una=100 ", text)
+        self.assertIn("timer=77 ", text)
+        self.assertIn("txlen=33 ", text)
+        self.assertIn("txbyte=90 ", text)
+        self.assertIn("state=4 ", text)
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
+    def test_tcp_cold_arp_retransmit_copy_uses_owned_payload(self):
+        """Nested ARP receive cannot corrupt the accepted retransmit bytes."""
+        my_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        my_ip = [10, 0, 0, 2]
+        peer_ip = [10, 0, 0, 77]
+        arp_reply = self._build_arp_reply_frame(
+            peer_mac, peer_ip, my_mac, my_ip)
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL  ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE cold-peer 4 ALLOT  10 0 0 77 cold-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  80 0 TCB-N TCB.REMOTE-PORT !",
+            "cold-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !  25 0 TCB-N TCB.RTO-VALUE !",
+            "17 ETH-RX-BUF C!  34 ETH-RX-BUF 1+ C!",
+            "51 ETH-RX-BUF 2 + C!  68 ETH-RX-BUF 3 + C!",
+            '0 TCB-N ETH-RX-BUF 4 TCP-SEND ."  actual=" .',
+            '0 TCB-N TCB.TX-BUF C@ ."  b0=" .',
+            '0 TCB-N TCB.TX-BUF 1+ C@ ."  b1=" .',
+            '0 TCB-N TCB.TX-BUF 2 + C@ ."  b2=" .',
+            '0 TCB-N TCB.TX-BUF 3 + C@ ."  b3=" .',
+        ], nic_frames=[arp_reply],
+            nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("actual=4 ", text)
+        self.assertIn("b0=17 ", text)
+        self.assertIn("b1=34 ", text)
+        self.assertIn("b2=51 ", text)
+        self.assertIn("b3=68 ", text)
+        tcp = [self._parse_tcp_frame(frame) for frame in sent]
+        tcp = [parsed for parsed in tcp if parsed is not None and parsed['payload']]
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]['payload'], bytes((17, 34, 51, 68)))
 
     def test_tcp_send_backpressures_with_unacknowledged_data(self):
         """TCP-SEND must not overwrite its sole retransmit buffer."""
@@ -22025,6 +22705,27 @@ class TestKDOSNetStack(_KDOSTestBase):
         self.assertIn("st2=5 ", text)    # FIN-WAIT-1
         self.assertGreaterEqual(len(fin_sent), 1, "should send FIN")
 
+    def test_tcp_close_failed_fin_leaves_state_and_sequence(self):
+        """A FIN consumes state and sequence only after successful emission."""
+        sent = []
+        text = self._run_kdos([
+            "TCP-INIT-ALL  ARP-CLEAR",
+            "10 0 0 2 IP-SET  255 255 255 0 NET-MASK IP!",
+            "CREATE no-fin-peer 4 ALLOT  10 0 0 77 no-fin-peer IP!",
+            "TCPS-ESTABLISHED 0 TCB-N TCB.STATE !",
+            "40000 0 TCB-N TCB.LOCAL-PORT !  80 0 TCB-N TCB.REMOTE-PORT !",
+            "no-fin-peer 0 TCB-N TCB.REMOTE-IP 4 CMOVE",
+            "100 0 TCB-N TCB.SND-UNA !  100 0 TCB-N TCB.SND-NXT !",
+            "4096 0 TCB-N TCB.RCV-WND !",
+            "0 TCB-N TCP-CLOSE",
+            '0 TCB-N TCB.STATE @ ."  state=" .',
+            '0 TCB-N TCB.SND-NXT @ ."  next=" .',
+        ], nic_tx_callback=lambda _nic, frame: sent.append(bytes(frame)))
+        self.assertIn("state=4 ", text)
+        self.assertIn("next=100 ", text)
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertTrue(all(frame[12:14] == b'\x08\x06' for frame in sent))
+
     def test_tcp_close_full_teardown(self):
         """Full teardown: FIN → ACK+FIN → ACK → TIME-WAIT."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
@@ -22215,6 +22916,22 @@ class TestNetHardening(_KDOSTestBase):
     """
 
     # ---- helpers ----
+
+    @staticmethod
+    def _fix_ip_checksum(frame):
+        """Recompute the checksum of the fixed 20-byte IPv4 header."""
+        data = bytearray(frame)
+        data[24] = 0
+        data[25] = 0
+        total = 0
+        for offset in range(14, 34, 2):
+            total += (data[offset] << 8) | data[offset + 1]
+        while total > 0xFFFF:
+            total = (total & 0xFFFF) + (total >> 16)
+        checksum = (~total) & 0xFFFF
+        data[24] = checksum >> 8
+        data[25] = checksum & 0xFF
+        return bytes(data)
 
     @staticmethod
     def _build_arp_reply(dst_mac, src_mac, sender_ip, sender_mac,
@@ -22519,23 +23236,51 @@ class TestNetHardening(_KDOSTestBase):
         """PING-WAIT-REPLY with no frames should return 0."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
+            "VARIABLE pingwait-depth  DEPTH pingwait-depth !",
             "5 PING-WAIT-REPLY .\"  r=\" .",
+            'DEPTH pingwait-depth @ = ."  balanced=" .',
         ])
         self.assertIn("r=0 ", text)
+        self.assertIn("balanced=-1 ", text)
+
+    def test_ping_wait_reply_matches_source_ident_and_sequence(self):
+        """Unrelated or stale echo replies cannot satisfy the active wait."""
+        my_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA] * 6
+        my_ip = [10, 0, 0, 100]
+        peer_ip = [10, 0, 0, 1]
+        other_ip = [10, 0, 0, 9]
+        frames = [
+            self._build_icmp_echo_reply(
+                my_mac, peer_mac, other_ip, my_ip, ident=0x4D50, seq=7),
+            self._build_icmp_echo_reply(
+                my_mac, peer_mac, peer_ip, my_ip, ident=0x1234, seq=7),
+            self._build_icmp_echo_reply(
+                my_mac, peer_mac, peer_ip, my_ip, ident=0x4D50, seq=6),
+            self._build_icmp_echo_reply(
+                my_mac, peer_mac, peer_ip, my_ip, ident=0x4D50, seq=7),
+        ]
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "CREATE expected-peer 4 ALLOT  10 0 0 1 expected-peer IP!",
+            "expected-peer PING-TARGET 4 CMOVE  7 PING-EXPECT-SEQ !",
+            '3 PING-WAIT-REPLY ."  unrelated=" .',
+            '1 PING-WAIT-REPLY ."  matched=" .',
+        ], nic_frames=frames)
+        self.assertIn("unrelated=0 ", text)
+        self.assertIn("matched=-1 ", text)
 
     # ================================================================
     #  32c: Stress / robustness
     # ================================================================
 
     def test_malformed_frame_too_short(self):
-        """Receiving a truncated frame should not crash."""
+        """ETH-RECV rejects a frame shorter than the Ethernet header."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "ETH-RECV .\"  got=\" .",       # try receive on the truncated frame
         ], nic_frames=[b'\x00\x01\x02'])   # 3 bytes — way too short
-        self.assertIn("got=", text)        # didn't crash
-        # Should return 0 (no valid frame) or some small number
-        self.assertNotIn("ABORT", text)
+        self.assertIn("got=0 ", text)
 
     def test_malformed_frame_bad_ethertype(self):
         """Frame with unknown EtherType should be ignored by IP-RECV."""
@@ -22589,9 +23334,9 @@ class TestNetHardening(_KDOSTestBase):
         self.assertIn("cnt=5 ", text)
 
     def test_mtu_max_frame(self):
-        """A frame with exactly 1500-byte payload (MTU) should be receivable."""
+        """A 1500-byte IPv4 packet in a 1514-byte frame is receivable intact."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
-        payload = bytes(range(256)) * 5 + bytes(range(256))[:220]  # 1480 bytes
+        payload = bytes(range(256)) * 5 + bytes(range(256))[:200]  # 1480 bytes
         frame = TestKDOSNetStack._build_ip_frame(
             nic_mac, [0xAA]*6, 17,
             [10, 0, 0, 1], [10, 0, 0, 100], payload)
@@ -22599,6 +23344,7 @@ class TestNetHardening(_KDOSTestBase):
             "10 0 0 100 IP-SET",
             "IP-RECV .\"  len=\" . 0<> .\"  got\"",
         ], nic_frames=[frame])
+        self.assertIn("len=1500 ", text)
         self.assertIn("got", text)
 
     def test_arp_table_overflow(self):
@@ -22631,7 +23377,7 @@ class TestNetHardening(_KDOSTestBase):
     # ---- 32c: Protocol edge cases / robustness ----
 
     def test_truncated_ip_header(self):
-        """Frame with valid EtherType but truncated IP header (<20 bytes)."""
+        """IP-RECV rejects a captured IPv4 header shorter than 20 bytes."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         # Ethernet header (14) + only 10 bytes of "IP" = too short
         frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' + b'\x45' + b'\x00' * 9
@@ -22640,6 +23386,7 @@ class TestNetHardening(_KDOSTestBase):
             "IP-RECV . .",
             ".\"  ok\"",
         ], nic_frames=[frame])
+        self.assertIn("0 0 ", text)
         self.assertIn("ok", text)
 
     def test_ip_version_not_4(self):
@@ -22652,17 +23399,18 @@ class TestNetHardening(_KDOSTestBase):
         ip_hdr[8] = 64; ip_hdr[9] = 17
         ip_hdr[12:16] = bytes([10,0,0,1])
         ip_hdr[16:20] = bytes([10,0,0,100])
-        frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' + bytes(ip_hdr) + b'\x00'*8
+        frame = self._fix_ip_checksum(
+            bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' +
+            bytes(ip_hdr) + b'\x00'*8)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "IP-RECV . . .\"  done\"",
         ], nic_frames=[frame])
-        # Should return 0 0 (checksum will fail since version is wrong)
-        self.assertIn("0 0", text)
+        self.assertIn("0 0 ", text)
         self.assertIn("done", text)
 
     def test_ip_bad_ihl(self):
-        """IP header with IHL=0 should not crash."""
+        """IP-RECV rejects IHL below the fixed-header minimum."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         ip_hdr = bytearray(20)
         ip_hdr[0] = 0x40  # version=4, ihl=0 (invalid)
@@ -22670,11 +23418,14 @@ class TestNetHardening(_KDOSTestBase):
         ip_hdr[8] = 64; ip_hdr[9] = 17
         ip_hdr[12:16] = bytes([10,0,0,1])
         ip_hdr[16:20] = bytes([10,0,0,100])
-        frame = bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' + bytes(ip_hdr) + b'\x00'*8
+        frame = self._fix_ip_checksum(
+            bytes(nic_mac) + bytes([0xAA]*6) + b'\x08\x00' +
+            bytes(ip_hdr) + b'\x00'*8)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "IP-RECV . . .\"  ok\"",
         ], nic_frames=[frame])
+        self.assertIn("0 0 ", text)
         self.assertIn("ok", text)
 
     def test_ip_ttl_zero(self):
@@ -22741,7 +23492,7 @@ class TestNetHardening(_KDOSTestBase):
         self.assertIn("ok", text)
 
     def test_oversized_frame(self):
-        """Frame larger than MTU should be received without crash."""
+        """A frame over 1514 bytes is rejected, never truncated."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         # Build a 1600-byte payload (>1500 MTU)
         payload = bytes(range(256)) * 6 + bytes(range(64))
@@ -22753,15 +23504,17 @@ class TestNetHardening(_KDOSTestBase):
             "ETH-RECV .\"  len=\" .",
             ".\"  ok\"",
         ], nic_frames=[frame])
+        self.assertIn("len=0 ", text)
         self.assertIn("ok", text)
 
     def test_runt_frame_1_byte(self):
-        """A 1-byte runt frame should not crash ETH-RECV."""
+        """A 1-byte runt is rejected at the Ethernet boundary."""
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
             "ETH-RECV .\"  r=\" .",
             ".\"  ok\"",
         ], nic_frames=[b'\xFF'])
+        self.assertIn("r=0 ", text)
         self.assertIn("ok", text)
 
     def test_empty_frame_zero_bytes(self):
@@ -22774,7 +23527,7 @@ class TestNetHardening(_KDOSTestBase):
         self.assertIn("ok", text)
 
     def test_ip_fragment_flag_set(self):
-        """IP frame with MF (more fragments) flag should not crash."""
+        """The minimal IPv4 stack rejects fragmented packets."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         frame = TestKDOSNetStack._build_ip_frame(
             nic_mac, [0xAA]*6, 17,
@@ -22795,7 +23548,136 @@ class TestNetHardening(_KDOSTestBase):
             "10 0 0 100 IP-SET",
             "IP-RECV . . .\"  ok\"",
         ], nic_frames=[bytes(fa)])
+        self.assertIn("0 0 ", text)
         self.assertIn("ok", text)
+
+    def test_ip_reserved_flag_is_rejected_then_valid_packet_recovers(self):
+        """The reserved IPv4 flag is invalid, while the next packet survives."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        valid = TestKDOSNetStack._build_ip_frame(
+            nic_mac, [0xAA] * 6, 17,
+            [10, 0, 0, 1], [10, 0, 0, 100], b'\x00' * 8)
+        reserved = bytearray(valid)
+        reserved[14 + 6:14 + 8] = (0x8000).to_bytes(2, 'big')
+        reserved = self._fix_ip_checksum(reserved)
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            ": IR IP-RECV NIP ;",
+            '."  reserved=" IR . ."  good=" IR .',
+        ], nic_frames=[reserved, valid])
+        self.assertIn("reserved=0 ", text)
+        self.assertIn("good=28 ", text)
+
+    def test_ip_length_failures_do_not_poison_next_frame(self):
+        """Truncated/undersized IP lengths are dropped before a valid frame."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        valid = TestKDOSNetStack._build_ip_frame(
+            nic_mac, [0xAA]*6, 17,
+            [10, 0, 0, 1], [10, 0, 0, 100], b'\x00' * 8)
+        beyond_capture = bytearray(valid)
+        beyond_capture[16:18] = (100).to_bytes(2, 'big')
+        beyond_capture = self._fix_ip_checksum(beyond_capture)
+        below_header = bytearray(valid)
+        below_header[16:18] = (19).to_bytes(2, 'big')
+        below_header = self._fix_ip_checksum(below_header)
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            ": IR IP-RECV NIP ;",
+            '."  a=" IR . ."  b=" IR . ."  good=" IR .',
+        ], nic_frames=[beyond_capture, below_header, valid])
+        self.assertIn("a=0 ", text)
+        self.assertIn("b=0 ", text)
+        self.assertIn("good=28 ", text)
+
+    def test_ip_destination_must_be_ours_or_limited_broadcast(self):
+        """An L2 match cannot smuggle a packet for another IPv4 destination."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        valid = TestKDOSNetStack._build_ip_frame(
+            nic_mac, [0xAA] * 6, 17,
+            [10, 0, 0, 1], [10, 0, 0, 100], b'\x00' * 8)
+        wrong = bytearray(valid)
+        wrong[30:34] = bytes([10, 0, 0, 200])
+        wrong = self._fix_ip_checksum(wrong)
+        zero = bytearray(valid)
+        zero[30:34] = bytes([0, 0, 0, 0])
+        zero = self._fix_ip_checksum(zero)
+        broadcast = TestKDOSNetStack._build_ip_frame(
+            [0xFF] * 6, [0xAA] * 6, 17,
+            [10, 0, 0, 1], [255, 255, 255, 255], b'\x00' * 8)
+        text = self._run_kdos([
+            "0 0 0 0 IP-SET",
+            ": IR IP-RECV NIP ;",
+            '."  zero=" IR .',
+            "10 0 0 100 IP-SET",
+            '."  wrong=" IR . ."  broadcast=" IR . ."  ours=" IR .',
+        ], nic_frames=[zero, wrong, broadcast, valid])
+        self.assertIn("zero=0 ", text)
+        self.assertIn("wrong=0 ", text)
+        self.assertIn("broadcast=28 ", text)
+        self.assertIn("ours=28 ", text)
+
+    def test_udp_lengths_are_validated_before_checksum_and_recover(self):
+        """UDP length must be at least 8 and exactly bounded by IPv4."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        valid = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6,
+            [10, 0, 0, 1], [10, 0, 0, 100],
+            53, 12345, b'abcd')
+        too_short = bytearray(valid)
+        too_short[38:40] = (7).to_bytes(2, 'big')
+        too_short[40:42] = b'\x00\x00'
+        beyond_ip = bytearray(valid)
+        beyond_ip[38:40] = (13).to_bytes(2, 'big')
+        beyond_ip[40:42] = b'\x00\x00'
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            ": UR UDP-RECV >R 2DROP R> ;",
+            '."  short=" UR . ."  long=" UR . ."  good=" UR .',
+        ], nic_frames=[bytes(too_short), bytes(beyond_ip), valid])
+        self.assertIn("short=0 ", text)
+        self.assertIn("long=0 ", text)
+        self.assertIn("good=12 ", text)
+
+    def test_arp_sender_mismatch_is_ignored_before_valid_reply(self):
+        """ARP learning requires Ethernet source and ARP SHA agreement."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip = [192, 168, 1, 50]
+        my_ip = [192, 168, 1, 100]
+        valid = TestKDOSNetStack._build_arp_reply_frame(
+            peer_mac, peer_ip, nic_mac, my_ip)
+        mismatch = bytearray(valid)
+        mismatch[22] ^= 0x01  # ARP SHA differs from Ethernet source MAC
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "192 168 1 100 IP-SET",
+            "CREATE ARP-TARGET 4 ALLOT 192 168 1 50 ARP-TARGET IP!",
+            'ARP-TARGET ARP-RESOLVE DUP 0<> ."  resolved=" .',
+            'DUP C@ ."  mac0=" . DROP',
+        ], nic_frames=[bytes(mismatch), valid])
+        self.assertIn("resolved=-1 ", text)
+        self.assertIn("mac0=170 ", text)
+
+    def test_dns_truncated_answer_is_bounded_then_parser_recovers(self):
+        """A-record RDATA may not extend beyond the captured DNS message."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        response = TestKDOSNetStack._build_dns_response(
+            42, "a.b", [1, 2, 3, 4])
+        truncated = response[:-2]
+        bad_frame = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345, truncated)
+        good_frame = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345, response)
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            ": DPR UDP-RECV DUP 0= IF 2DROP DROP 0 EXIT THEN "
+            ">R NIP UDP-H.DATA R> /UDP-HDR - DNS-PARSE-RESPONSE ;",
+            '."  bad=" DPR 0<> . ."  good=" DPR 0<> .',
+        ], nic_frames=[bad_frame, good_frame])
+        self.assertIn("bad=0 ", text)
+        self.assertIn("good=-1 ", text)
 
     def test_udp_bad_checksum_end_to_end(self):
         """UDP frame with corrupt checksum injected through full stack."""
@@ -22921,40 +23803,54 @@ class TestNetHardening(_KDOSTestBase):
         self.assertIn("ok", text)
 
     def test_dns_wrong_id_reply_not_accepted(self):
-        """DNS response with wrong transaction ID should not match.
-
-        We test at the UDP level rather than calling DNS-RESOLVE (which
-        loops forever waiting for a matching reply and would hang).
-        We inject a DNS response with a mismatched ID and verify that
-        DNS-ID does not match it.
-        """
+        """DNS-RESOLVE skips a wrong transaction ID and accepts the next reply."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
-        # Inject a DNS response UDP packet with transaction ID 0xBEEF
-        dns_resp = bytearray(12)
-        dns_resp[0] = 0xBE; dns_resp[1] = 0xEF  # txn ID
-        dns_resp[2] = 0x81; dns_resp[3] = 0x80   # flags: response
-        udp_hdr = bytearray(8)
-        udp_hdr[0] = 0; udp_hdr[1] = 53  # sport=53
-        udp_hdr[2] = 0x80; udp_hdr[3] = 0x01  # dport=32769
-        udp_len = 8 + len(dns_resp)
-        udp_hdr[4] = (udp_len >> 8) & 0xFF; udp_hdr[5] = udp_len & 0xFF
-        frame = TestKDOSNetStack._build_ip_frame(
-            nic_mac, [0xAA]*6, 17,
-            [10, 0, 0, 1], [10, 0, 0, 100],
-            bytes(udp_hdr) + bytes(dns_resp))
+        wrong = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345,
+            TestKDOSNetStack._build_dns_response(43, "x.y", [9, 9, 9, 9]))
+        valid = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345,
+            TestKDOSNetStack._build_dns_response(42, "x.y", [1, 2, 3, 4]))
         text = self._run_kdos([
+            "ARP-CLEAR",
             "10 0 0 100 IP-SET",
-            # Set DNS-ID to something different from 0xBEEF
-            "48879 DNS-ID !",  # 0xBEEF = 48879
-            # Change to a DIFFERENT expected ID
-            "12345 DNS-ID !",
-            # Try to receive the injected DNS via IP layer
-            "IP-RECV DUP 0<> IF .\"  ip-got\" 2DROP ELSE .\"  ip-empty\" DROP THEN",
-            ".\"  ok\"",
-        ], nic_frames=[frame])
-        # The frame arrives at IP level, but if DNS-RESOLVE were running
-        # it would reject the ID mismatch. Here we just verify no crash.
-        self.assertIn("ok", text)
+            "CREATE DNS-MAC 6 ALLOT DNS-MAC 6 170 FILL",
+            "DNS-SERVER-IP DNS-MAC ARP-INSERT",
+            "42 DNS-ID !",
+            'S" x.y" DNS-RESOLVE DUP 0<> ."  ok=" .',
+            'DUP 3 + C@ ."  last=" . DROP',
+        ], nic_frames=[wrong, valid])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("last=4 ", text)
+
+    def test_dns_source_and_question_are_scoped_to_request(self):
+        """Matching IDs from the wrong server or for another name are skipped."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        wrong_source = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [1, 1, 1, 1], [10, 0, 0, 100],
+            53, 12345,
+            TestKDOSNetStack._build_dns_response(42, "x.y", [9, 9, 9, 9]))
+        wrong_question = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345,
+            TestKDOSNetStack._build_dns_response(42, "z.y", [8, 8, 8, 8]))
+        valid = TestKDOSNetStack._build_udp_frame(
+            nic_mac, [0xAA]*6, [8, 8, 8, 8], [10, 0, 0, 100],
+            53, 12345,
+            TestKDOSNetStack._build_dns_response(42, "x.y", [5, 6, 7, 8]))
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 0 0 100 IP-SET",
+            "CREATE DNS-MAC2 6 ALLOT DNS-MAC2 6 170 FILL",
+            "DNS-SERVER-IP DNS-MAC2 ARP-INSERT",
+            "42 DNS-ID !",
+            'S" x.y" DNS-RESOLVE DUP 0<> ."  ok=" .',
+            'DUP C@ ."  first=" . DROP',
+        ], nic_frames=[wrong_source, wrong_question, valid])
+        self.assertIn("ok=-1 ", text)
+        self.assertIn("first=5 ", text)
 
     def test_icmp_non_echo_type_ignored(self):
         """ICMP type=3 (dest unreachable) should not crash PING-POLL."""
@@ -23047,8 +23943,60 @@ class TestNetHardening(_KDOSTestBase):
         ], nic_frames=[frame])
         self.assertIn("ok", text)
 
+    def test_tcp_header_bounds_reject_then_valid_segment_recovers(self):
+        """TCP minimum/data-offset bounds are proved before field access."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        src_mac = [0xAA] * 6
+        src_ip = [10, 0, 0, 1]
+        dst_ip = [10, 0, 0, 100]
+
+        short = TestKDOSNetStack._build_ip_frame(
+            nic_mac, src_mac, 6, src_ip, dst_ip, b'\x00' * 10)
+        valid = TestKDOSNetStack._build_tcp_frame(
+            nic_mac, src_mac, src_ip, dst_ip,
+            80, 12345, 1, 0, 0x04, 4096)
+        doff_small = bytearray(valid)
+        doff_small[14 + 20 + 12] = 0x40       # 16-byte header (< minimum)
+        doff_beyond = bytearray(valid)
+        doff_beyond[14 + 20 + 12] = 0xF0      # 60-byte header in 20 bytes
+
+        text = self._run_kdos([
+            "10 0 0 100 IP-SET",
+            "TCP-INIT-ALL",
+            '0 _TI-SPORT ! TCP-POLL ."  short=" _TI-SPORT @ .',
+            '0 _TI-SPORT ! TCP-POLL ."  small=" _TI-SPORT @ .',
+            '0 _TI-SPORT ! TCP-POLL ."  beyond=" _TI-SPORT @ .',
+            '0 _TI-SPORT ! TCP-POLL ."  good=" _TI-SPORT @ .',
+        ], nic_frames=[short, bytes(doff_small), bytes(doff_beyond), valid])
+        self.assertIn("short=0 ", text)
+        self.assertIn("small=0 ", text)
+        self.assertIn("beyond=0 ", text)
+        self.assertIn("good=80 ", text)
+
+    def test_truncated_icmp_is_rejected_then_echo_request_recovers(self):
+        """ICMP type/checksum/echo fields require a complete 8-byte header."""
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        src_mac = [0xAA] * 6
+        src_ip = [10, 0, 0, 1]
+        dst_ip = [10, 0, 0, 100]
+        truncated = TestKDOSNetStack._build_ip_frame(
+            nic_mac, src_mac, 1, src_ip, dst_ip, b'\x08\x00\x00\x00')
+        valid = TestKDOSNetStack._build_icmp_echo_req_frame(
+            nic_mac, src_mac, src_ip, dst_ip)
+        text = self._run_kdos([
+            "ARP-CLEAR",
+            "10 0 0 100 IP-SET",
+            "CREATE ICSRIP 4 ALLOT 10 0 0 1 ICSRIP IP!",
+            "CREATE ICSRMC 6 ALLOT ICSRMC 6 170 FILL",
+            "ICSRIP ICSRMC ARP-INSERT",
+            'PING-POLL ."  short=" .',
+            'PING-POLL ."  good=" .',
+        ], nic_frames=[truncated, valid])
+        self.assertIn("short=0 ", text)
+        self.assertIn("good=-1 ", text)
+
     def test_truncated_udp_header(self):
-        """UDP header with only 4 bytes (< 8 min) should not crash."""
+        """UDP-RECV rejects an IP payload shorter than the UDP header."""
         nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
         udp_partial = b'\x00\x63\x00\x64'  # Only sport + dport, no length/cksum
         frame = TestKDOSNetStack._build_ip_frame(
@@ -23056,10 +24004,9 @@ class TestNetHardening(_KDOSTestBase):
             [10, 0, 0, 1], [10, 0, 0, 100], udp_partial)
         text = self._run_kdos([
             "10 0 0 100 IP-SET",
-            "IP-RECV DUP 0<> IF .\"  got\" 2DROP ELSE .\"  empty\" DROP THEN",
-            ".\"  ok\"",
+            "UDP-RECV . . .",
         ], nic_frames=[frame])
-        self.assertIn("ok", text)
+        self.assertIn("0 0 0 ", text)
 
     def test_all_zeros_frame(self):
         """64-byte frame of all zeros should not crash any layer."""
@@ -25734,8 +26681,24 @@ class TestPortSend(_KDOSTestBase):
         self.assertIn('ok', text)
         self.assertEqual(len(sent), 0)
 
-    def test_port_send_clamps_to_mtu(self):
-        """PORT-SEND clamps payload to 1400 bytes (leaving room for UDP/IP)."""
+    def test_port_send_exact_ipv4_budget_reaches_1514_bytes(self):
+        """A 1466-byte app payload fills one standard no-FCS frame exactly."""
+        sent = []
+        def capture(nic, data):
+            sent.append(bytes(data))
+        self._run_kdos([
+            '0 1 1466 BUFFER maxbuf',
+            'maxbuf B.DATA 1466 42 FILL',
+            'maxbuf 1 PORT-SEND',
+        ], nic_tx_callback=capture)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent[0]), 1514)
+        frame = extract_port_payload(sent[0])
+        plen = frame[4] | (frame[5] << 8)
+        self.assertEqual(plen, 1466)
+
+    def test_port_send_rejects_oversize_without_prefix(self):
+        """PORT-SEND rejects an oversized app payload instead of truncating it."""
         sent = []
         def capture(nic, data):
             sent.append(bytes(data))
@@ -25743,13 +26706,12 @@ class TestPortSend(_KDOSTestBase):
             '0 1 2000 BUFFER bigbuf',
             'bigbuf B.DATA 2000 42 FILL',
             'bigbuf 1 PORT-SEND',
+            'PORT-DROP @ .\" drop=\" .',
             '.\" ok\"',
         ], nic_tx_callback=capture)
         self.assertIn('ok', text)
-        self.assertGreaterEqual(len(sent), 1)
-        frame = extract_port_payload(sent[-1])
-        plen = frame[4] | (frame[5] << 8)
-        self.assertEqual(plen, 1400, "clamped for UDP headroom")
+        self.assertIn('drop=1 ', text)
+        self.assertEqual(len(sent), 0)
 
     def test_port_send_dtype_mapping(self):
         """Buffer types map to correct DTYPE in frame header."""

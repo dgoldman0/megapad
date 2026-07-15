@@ -525,7 +525,7 @@ class MegapadSystem:
         # Patch inject_frame so test & CLI injections reach C++ queue
         _orig_inject = self.nic.inject_frame
         def _dual_inject(data: bytes, _orig=_orig_inject, _cs=cpu0_cs):
-            _cs.nic_inject_frame(data)
+            return _cs.nic_inject_frame(data)
         self.nic.inject_frame = _dual_inject
 
         # Wire mailbox IPI delivery

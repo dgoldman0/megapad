@@ -1021,29 +1021,36 @@ class SystemInfo(Device):
 #  Network Interface Controller (NIC)
 # ---------------------------------------------------------------------------
 # A simple frame-oriented NIC with DMA support and optional host
-# passthrough via UDP.  Frames up to 1500 bytes.
+# passthrough via UDP.  Standard Ethernet frames up to 1514 bytes
+# (14-byte header plus a 1500-byte IPv4 MTU; no FCS) are accepted.
 #
 # Register map (offsets from NIC_BASE):
 #   0x00  CMD        (W)  — 0x01=SEND, 0x02=RECV, 0x03=STATUS, 0x04=RESET
 #   0x01  STATUS     (R)  — bit 0: TX busy
 #                           bit 1: RX frame available
 #                           bit 2: link up
-#                           bit 3: error
+#                           bit 3: error (sticky until RESET)
+#                           bit 4: RX DMA busy (always clear in native model)
 #                           bit 7: present
 #   0x02..0x09  DMA_ADDR (RW)  — 64-bit DMA address in RAM
 #   0x0A..0x0B  FRAME_LEN (RW) — 16-bit frame length (for TX, set before SEND;
 #                                 for RX, read after RECV)
 #   0x0C  IRQ_CTRL   (RW) — bit 0: RX IRQ enable, bit 1: TX IRQ enable
-#   0x0D  IRQ_STATUS (R)  — bit 0: RX IRQ pending, bit 1: TX IRQ pending
+#   0x0D  IRQ_STATUS (RW) — bit 0: RX pending, bit 1: TX pending (W1C)
 #   0x0E..0x13  MAC_ADDR (R) — 6-byte MAC address (bytes 0x0E-0x13)
 #   0x14  TX_COUNT_LO (R) — frames sent (low byte)
 #   0x15  TX_COUNT_HI (R) — frames sent (high byte)
 #   0x16  RX_COUNT_LO (R) — frames received (low byte)
 #   0x17  RX_COUNT_HI (R) — frames received (high byte)
 #   0x18..0x1F  reserved
-#   0x20..0x7F  DATA port (RW) — byte-at-a-time alternative to DMA
+#   0x20..0x7F  DATA window (RW) — 96 address-indexed diagnostic bytes
 
-NIC_MTU = 1500
+IP_MTU = 1500
+NIC_MAX_FRAME = 14 + IP_MTU
+NIC_DATA_WINDOW_SIZE = 0x60
+# Backward-compatible import name.  MTU remains the L3 payload limit; raw
+# Ethernet code must use NIC_MAX_FRAME so the 14-byte header is not lost.
+NIC_MTU = IP_MTU
 
 class NetworkDevice(Device):
     """Emulated NIC with pluggable backend.
@@ -1079,9 +1086,10 @@ class NetworkDevice(Device):
         self.tx_queue: deque[bytes] = deque(maxlen=64)
         self.rx_queue: deque[bytes] = deque(maxlen=64)
 
-        # Data port (byte-at-a-time alternative to DMA)
-        self._data_buf: bytearray = bytearray()
-        self._data_pos: int = 0
+        # Address-indexed diagnostic window.  It is deliberately not a hidden
+        # FIFO or a second frame transport: frame I/O uses DMA on every target.
+        self._data_window: bytearray = bytearray(NIC_DATA_WINDOW_SIZE)
+        self._data_window_valid: int = 0
 
         # DMA callbacks — system.py sets these
         self._mem_read: Optional[callable] = None
@@ -1112,13 +1120,15 @@ class NetworkDevice(Device):
 
     def _backend_rx(self, frame: bytes):
         """Callback from NICBackend when a frame arrives from the wire."""
-        if len(frame) > NIC_MTU:
-            frame = frame[:NIC_MTU]
+        if not frame or len(frame) > NIC_MAX_FRAME:
+            self.error = True
+            return
         if len(self.rx_queue) < (self.rx_queue.maxlen or 64):
             self.rx_queue.append(bytes(frame))
             self.rx_count = (self.rx_count + 1) & 0xFFFF
-            if self.irq_ctrl & 1:  # RX IRQ enable
-                self.irq_status |= 1
+            self.irq_status |= 1
+        else:
+            self.error = True
 
     @property
     def backend(self) -> 'Optional[NICBackend]':
@@ -1152,12 +1162,16 @@ class NetworkDevice(Device):
         """Background thread: receive UDP datagrams → RX queue."""
         while self._running and self._sock:
             try:
-                data, addr = self._sock.recvfrom(NIC_MTU + 64)
-                if data and len(self.rx_queue) < self.rx_queue.maxlen:
-                    self.rx_queue.append(bytes(data[:NIC_MTU]))
+                data, addr = self._sock.recvfrom(NIC_MAX_FRAME + 1)
+                if not data or len(data) > NIC_MAX_FRAME:
+                    self.error = True
+                    continue
+                if len(self.rx_queue) < self.rx_queue.maxlen:
+                    self.rx_queue.append(bytes(data))
                     self.rx_count = (self.rx_count + 1) & 0xFFFF
-                    if self.irq_ctrl & 1:  # RX IRQ enable
-                        self.irq_status |= 1
+                    self.irq_status |= 1
+                else:
+                    self.error = True
             except socket.timeout:
                 continue
             except OSError:
@@ -1177,12 +1191,21 @@ class NetworkDevice(Device):
 
     def inject_frame(self, data: bytes):
         """Push a frame into the RX queue (for testing or local injection)."""
-        if len(data) > NIC_MTU:
-            data = data[:NIC_MTU]
+        if not data or len(data) > NIC_MAX_FRAME:
+            self.error = True
+            return False
+        if len(self.rx_queue) >= (self.rx_queue.maxlen or 64):
+            self.error = True
+            return False
         self.rx_queue.append(bytes(data))
         self.rx_count = (self.rx_count + 1) & 0xFFFF
-        if self.irq_ctrl & 1:
-            self.irq_status |= 1
+        self.irq_status |= 1
+        return True
+
+    @property
+    def irq_pending(self) -> bool:
+        """Return the externally visible, enable-masked IRQ line."""
+        return bool(self.irq_ctrl & self.irq_status & 0x03)
 
     def read8(self, offset: int) -> int:
         if offset == 0x00:      # CMD (write-only)
@@ -1219,11 +1242,10 @@ class NetworkDevice(Device):
             return self.rx_count & 0xFF
         elif offset == 0x17:    # RX_COUNT high
             return (self.rx_count >> 8) & 0xFF
-        elif 0x20 <= offset <= 0x7F:  # DATA port
-            if self._data_pos < len(self._data_buf):
-                b = self._data_buf[self._data_pos]
-                self._data_pos += 1
-                return b
+        elif 0x20 <= offset <= 0x7F:  # address-indexed DATA window
+            idx = offset - 0x20
+            if self._data_window_valid & (1 << idx):
+                return self._data_window[idx]
             return 0
         return 0
 
@@ -1243,15 +1265,16 @@ class NetworkDevice(Device):
             self.irq_ctrl = value
         elif offset == 0x0D:    # IRQ_STATUS (write-1-to-clear)
             self.irq_status &= ~value
-        elif 0x20 <= offset <= 0x7F:  # DATA port write
-            self._data_buf.append(value)
+        elif 0x20 <= offset <= 0x7F:  # address-indexed DATA window
+            idx = offset - 0x20
+            self._data_window[idx] = value
+            self._data_window_valid |= 1 << idx
         elif offset == 0x18:    # DMA_PUSH — byte-serial address write
             shift = 8 * self._dma_push_ctr
             self.dma_addr = (self.dma_addr & ~(0xFF << shift)) | (value << shift)
             self._dma_push_ctr = (self._dma_push_ctr + 1) & 7
 
     def _execute_cmd(self, cmd: int):
-        self.error = False
         self._dma_push_ctr = 0  # reset byte-push on any command
         if cmd == 0x01:         # SEND — transmit frame
             frame = self._read_tx_frame()
@@ -1273,8 +1296,7 @@ class NetworkDevice(Device):
                         )
                     except OSError:
                         self.error = True
-                if self.irq_ctrl & 2:  # TX IRQ enable
-                    self.irq_status |= 2
+                self.irq_status |= 2
         elif cmd == 0x02:       # RECV — receive next frame
             if self.rx_queue:
                 frame = self.rx_queue.popleft()
@@ -1287,8 +1309,8 @@ class NetworkDevice(Device):
         elif cmd == 0x04:       # RESET
             self.tx_queue.clear()
             self.rx_queue.clear()
-            self._data_buf = bytearray()
-            self._data_pos = 0
+            self._data_window = bytearray(NIC_DATA_WINDOW_SIZE)
+            self._data_window_valid = 0
             self.frame_len = 0
             self.irq_status = 0
             self.error = False
@@ -1296,9 +1318,9 @@ class NetworkDevice(Device):
             self.rx_count = 0
 
     def _read_tx_frame(self) -> Optional[bytes]:
-        """Read frame_len bytes from DMA address (or data port fallback)."""
+        """Read frame_len bytes from the programmed DMA address."""
         nbytes = self.frame_len
-        if nbytes <= 0 or nbytes > NIC_MTU:
+        if nbytes <= 0 or nbytes > NIC_MAX_FRAME:
             self.error = True
             return None
         if self._mem_read:
@@ -1306,22 +1328,14 @@ class NetworkDevice(Device):
             for i in range(nbytes):
                 data.append(self._mem_read(self.dma_addr + i))
             return bytes(data)
-        elif self._data_buf:
-            frame = bytes(self._data_buf[:nbytes])
-            self._data_buf = bytearray()
-            self._data_pos = 0
-            return frame
         self.error = True
         return None
 
     def _write_rx_frame(self, frame: bytes):
-        """Write received frame to DMA address (and data port buffer)."""
+        """Write a received frame to the programmed DMA address."""
         if self._mem_write:
             for i, b in enumerate(frame):
                 self._mem_write(self.dma_addr + i, b)
-        # Also make available via data port
-        self._data_buf = bytearray(frame)
-        self._data_pos = 0
 
     def drain_tx(self) -> list[bytes]:
         """Return and clear all pending TX frames."""

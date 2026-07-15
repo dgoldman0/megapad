@@ -12,13 +12,18 @@ from __future__ import annotations
 import time
 import unittest
 
-from nic_backends import TAPBackend, tap_available
+from nic_backends import IP_MTU, NIC_MAX_FRAME, NIC_MTU, TAPBackend, tap_available
 
 EMU_MAC = b'\x02\x4D\x50\x36\x34\x00'
 
 
 class TestNICBackends(unittest.TestCase):
     """Unit tests for the NIC backend abstraction itself."""
+
+    def test_ip_mtu_and_raw_frame_limit_are_distinct(self):
+        self.assertEqual(IP_MTU, 1500)
+        self.assertEqual(NIC_MTU, IP_MTU)
+        self.assertEqual(NIC_MAX_FRAME, 1514)
 
     def test_loopback_backend(self):
         """LoopbackBackend should accept sends silently."""
@@ -27,6 +32,8 @@ class TestNICBackends(unittest.TestCase):
         b.start()
         self.assertTrue(b.link_up)
         self.assertTrue(b.send(b'\xff' * 14))
+        self.assertTrue(b.send(b'\xff' * NIC_MAX_FRAME))
+        self.assertFalse(b.send(b'\xff' * (NIC_MAX_FRAME + 1)))
         self.assertEqual(b.name, "loopback")
         b.stop()
         self.assertFalse(b.link_up)
@@ -83,9 +90,9 @@ class TestNICBackends(unittest.TestCase):
         b_tx = UDPBackend(bind_port=19881, peer_port=19880)
         nic = NetworkDevice(backend=b_tx)
 
-        # Write a frame via data port and send
+        # Supply a DMA source and send.
         frame = b'\xAA\xBB\xCC' * 5  # 15 bytes
-        nic._data_buf = bytearray(frame)
+        nic._mem_read = lambda addr: frame[addr]
         nic.frame_len = len(frame)
         nic._execute_cmd(0x01)  # SEND
 
@@ -119,6 +126,20 @@ class TestNICBackends(unittest.TestCase):
         nic.stop()
         b_sender.stop()
 
+    def test_backend_rx_rejects_oversize_without_truncation(self):
+        """The Python NIC drops an oversized frame instead of queuing a prefix."""
+        from devices import NetworkDevice
+        nic = NetworkDevice()
+        nic._backend_rx(b'\xAA' * (NIC_MAX_FRAME + 1))
+        self.assertEqual(len(nic.rx_queue), 0)
+        self.assertTrue(nic.error)
+
+        nic.error = False
+        frame = bytes((i & 0xFF) for i in range(NIC_MAX_FRAME))
+        nic._backend_rx(frame)
+        self.assertEqual(nic.rx_queue[0], frame)
+        self.assertFalse(nic.error)
+
     def test_tap_unavailable_graceful(self):
         """TAPBackend with a non-existent device should fail gracefully."""
         b = TAPBackend(tap_name="mp64_nonexistent_999")
@@ -148,7 +169,7 @@ class TestNICBackends(unittest.TestCase):
 
 class TestBackwardCompat(unittest.TestCase):
     """Verify that the default (no-backend) NetworkDevice still works
-    exactly as before — inject_frame, on_tx_frame, data port, DMA."""
+    for injection, TX callbacks, and DMA without a host backend."""
 
     def test_default_nic_no_backend(self):
         """NetworkDevice() with no args should behave as loopback."""
@@ -173,7 +194,7 @@ class TestBackwardCompat(unittest.TestCase):
         nic = NetworkDevice()
         nic.on_tx_frame = lambda f: captured.append(f)
         frame = b'\xBB' * 30
-        nic._data_buf = bytearray(frame)
+        nic._mem_read = lambda addr: frame[addr]
         nic.frame_len = len(frame)
         nic._execute_cmd(0x01)
         self.assertEqual(len(captured), 1)

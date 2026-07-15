@@ -38,7 +38,11 @@ from collections import deque
 from typing import Optional, Callable
 
 # ── Constants ─────────────────────────────────────────────────────────
-NIC_MTU = 1500
+IP_MTU = 1500
+NIC_MAX_FRAME = 14 + IP_MTU
+# Compatibility alias for callers that use MTU in its L3 sense.  Raw frame
+# transport uses NIC_MAX_FRAME throughout this module.
+NIC_MTU = IP_MTU
 
 # Linux ioctl constants for TAP
 TUNSETIFF   = 0x400454ca
@@ -104,7 +108,7 @@ class LoopbackBackend(NICBackend):
         self._up = True
 
     def send(self, frame: bytes) -> bool:
-        return True   # silently drop (tests use on_tx_frame callback)
+        return 0 < len(frame) <= NIC_MAX_FRAME
 
     def start(self):
         pass
@@ -147,8 +151,11 @@ class UDPBackend(NICBackend):
     def send(self, frame: bytes) -> bool:
         if not self._sock:
             return False
+        if not frame or len(frame) > NIC_MAX_FRAME:
+            self._error = True
+            return False
         try:
-            self._sock.sendto(frame[:NIC_MTU],
+            self._sock.sendto(frame,
                               (self._peer_host, self._peer_port))
             return True
         except OSError:
@@ -181,9 +188,12 @@ class UDPBackend(NICBackend):
     def _rx_loop(self):
         while self._running and self._sock:
             try:
-                data, _addr = self._sock.recvfrom(NIC_MTU + 64)
+                data, _addr = self._sock.recvfrom(NIC_MAX_FRAME + 1)
+                if len(data) > NIC_MAX_FRAME:
+                    self._error = True
+                    continue
                 if data and self.on_rx_frame:
-                    self.on_rx_frame(bytes(data[:NIC_MTU]))
+                    self.on_rx_frame(bytes(data))
             except socket.timeout:
                 continue
             except OSError:
@@ -247,8 +257,12 @@ class TAPBackend(NICBackend):
     def send(self, frame: bytes) -> bool:
         if self._fd is None:
             return False
+        if not frame or len(frame) > NIC_MAX_FRAME:
+            self.tx_errors += 1
+            self._error_msg = "Ethernet frame exceeds 1514-byte no-FCS limit"
+            return False
         try:
-            payload = bytes(frame[:NIC_MTU])
+            payload = bytes(frame)
             n = os.write(self._fd, payload)
             self.tx_bytes += n
             self.tx_frames += 1
@@ -318,9 +332,15 @@ class TAPBackend(NICBackend):
 
             if self._fd in readable:
                 try:
-                    data = os.read(self._fd, NIC_MTU + 64)
+                    data = os.read(self._fd, NIC_MAX_FRAME + 1)
                     if data:
-                        frame = data[:NIC_MTU]
+                        if len(data) > NIC_MAX_FRAME:
+                            self._error_msg = (
+                                "received Ethernet frame exceeds 1514-byte "
+                                "no-FCS limit"
+                            )
+                            continue
+                        frame = data
                         self.rx_bytes += len(frame)
                         self.rx_frames += 1
                         if self.first_rx_frame is None:

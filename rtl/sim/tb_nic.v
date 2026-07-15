@@ -8,7 +8,8 @@
 //   3. DMA base register write/readback
 //   4. Frame length register write/readback
 //   5. IRQ control register
-//   6. RX path — PHY drives frame → rx_buf → CMD RECV → DMA out
+//   6. RX path — PHY drives frame → rx_buf → CMD RECV → DMA out; status
+//      exposes DMA busy until both RAM and FRAME_LEN are committed
 //   7. RX IRQ generation
 //   8. TX path — set frame_len + DMA base → CMD SEND → DMA in → PHY out
 //   9. TX complete IRQ
@@ -16,6 +17,15 @@
 //  11. RX counter increments
 //  12. TX counter increments
 //  13. Data window register read/write
+//  14. Exact 1514-byte no-FCS frame is preserved through RX DMA
+//  15. Oversized RX is rejected without truncation; next frame recovers
+//  16. RESET aborts stalled RX DMA and clears state without losing config
+//  17. RESET aborts stalled TX DMA without stranding a request
+//  18. TX snapshots DMA parameters and honors PHY back-pressure
+//  19. A stalled DMA beat cannot be preempted by the other engine
+//  20. RESET drains the remainder of an interrupted PHY frame
+//  21. TX errors remain sticky across later commands until RESET
+//  22. RX/TX events latch while masked and assert when later enabled
 //
 
 `timescale 1ns / 1ps
@@ -48,6 +58,7 @@ module tb_nic;
     wire       dma_wen;
     reg  [7:0] dma_rdata;
     reg        dma_ack;
+    reg        dma_stall;
 
     wire       phy_tx_valid;
     wire [7:0] phy_tx_data;
@@ -77,13 +88,13 @@ module tb_nic;
     // Combinational ack + read path: ack asserts same delta as req,
     // so it drops immediately when NIC deasserts req (no stale-ack skip).
     always @(*) begin
-        dma_ack   = dma_req;
+        dma_ack   = dma_req && !dma_stall;
         dma_rdata = dma_mem[dma_addr[7:0]];
     end
 
     // Clocked write path
     always @(posedge clk) begin
-        if (dma_req && dma_wen)
+        if (dma_req && dma_wen && dma_ack)
             dma_mem[dma_addr[7:0]] <= dma_wdata;
     end
 
@@ -149,6 +160,7 @@ module tb_nic;
         phy_rx_valid = 1'b0;
         phy_rx_data  = 8'd0;
         phy_link_up  = 1'b1;
+        dma_stall    = 1'b0;
         for (i = 0; i < 256; i = i + 1) dma_mem[i] = 8'd0;
 
         repeat(4) @(posedge clk);
@@ -165,6 +177,7 @@ module tb_nic;
         check1("link_up", rd[2], 1'b1);
         check1("rx_avail initially 0", rd[1], 1'b0);
         check1("tx_busy initially 0", rd[0], 1'b0);
+        check1("DMA request inactive after reset", dma_req, 1'b0);
 
         // =================================================================
         // TEST 2: MAC address readback
@@ -190,7 +203,8 @@ module tb_nic;
         nic_write(7'h07, 8'h00);
         nic_write(7'h08, 8'h00);
         nic_write(7'h09, 8'h00);
-        // Readback is not directly supported via register map; verified via DMA address
+        nic_read(7'h02, rd); check8("DMA base byte0", rd, 8'h00);
+        nic_read(7'h03, rd); check8("DMA base byte1", rd, 8'h40);
 
         // =================================================================
         // TEST 4: Frame length register
@@ -237,15 +251,46 @@ module tb_nic;
         check1("rx_avail after frame", rd[1], 1'b1);
 
         // Issue CMD=RECV (0x02) to trigger DMA
+        dma_stall = 1'b1;
         nic_write(7'h00, 8'h02);  // CMD=RECV
+        wait (dma_req === 1'b1);
+        #1;
+        check1("rx_dma_busy after RECV", u_nic.status[4], 1'b1);
+        check8("frame_len remains old while DMA busy",
+               u_nic.frame_len[7:0], 8'h08);
+        begin
+            reg [63:0] held_addr;
+            reg [7:0] held_data;
+            held_addr = dma_addr;
+            held_data = dma_wdata;
+            repeat (3) begin
+                @(posedge clk);
+                #1;
+                check1("stalled DMA request stays asserted", dma_req, 1'b1);
+                check1("stalled RX DMA remains a write", dma_wen, 1'b1);
+                check1("stalled DMA address stays stable", dma_addr === held_addr, 1'b1);
+                check1("stalled DMA data stays stable", dma_wdata === held_data, 1'b1);
+            end
+        end
+        // Reprogramming the live MMIO base cannot redirect an operation that
+        // already accepted RECV.
+        nic_write(7'h02, 8'h40);
+        #1;
+        check8("live DMA base changes during RX", u_nic.dma_base[7:0], 8'h40);
+        check8("RX request keeps snapshotted base", dma_addr[7:0], 8'h00);
+        dma_stall = 1'b0;
         // Wait for DMA to complete (4 bytes)
         repeat(20) @(posedge clk);
+
+        check1("rx_dma_busy clears after commit", u_nic.status[4], 1'b0);
+        check8("frame_len published after DMA", u_nic.frame_len[7:0], 8'h04);
 
         // Verify DMA memory contents
         check8("dma_mem[0]", dma_mem[0], 8'hAA);
         check8("dma_mem[1]", dma_mem[1], 8'hBB);
         check8("dma_mem[2]", dma_mem[2], 8'hCC);
         check8("dma_mem[3]", dma_mem[3], 8'hDD);
+        check8("rewritten RX base receives no prefix", dma_mem[8'h40], 8'h00);
 
         // =================================================================
         // TEST 7: RX IRQ generation
@@ -292,22 +337,35 @@ module tb_nic;
         nic_write(7'h0A, 8'h04);  // frame_len = 4
         nic_write(7'h0B, 8'h00);
 
-        // Issue CMD=SEND (0x01)
+        // Stall the first read so DMA base and length can be rewritten after
+        // SEND.  The in-flight operation must retain its accepted parameters.
+        dma_stall = 1'b1;
         nic_write(7'h00, 8'h01);
+        wait (dma_req === 1'b1);
+        #1;
+        check1("TX DMA request asserted", dma_req, 1'b1);
+        check8("TX first DMA address", dma_addr[7:0], 8'h00);
+        nic_write(7'h02, 8'h40);
+        nic_write(7'h0A, 8'h01);
+        #1;
+        check8("TX request keeps snapshotted base", dma_addr[7:0], 8'h00);
+        check8("TX keeps snapshotted length", u_nic.tx_len[7:0], 8'h04);
+        dma_stall = 1'b0;
 
         // Wait for TX DMA read + PHY send
-        // Capture PHY output
+        // Capture only accepted PHY handshakes.
         begin
             reg [7:0] captured [0:3];
             integer cap_idx;
             cap_idx = 0;
             repeat(40) begin
                 @(posedge clk);
-                if (phy_tx_valid && cap_idx < 4) begin
+                if (phy_tx_valid && phy_tx_ready && cap_idx < 4) begin
                     captured[cap_idx] = phy_tx_data;
                     cap_idx = cap_idx + 1;
                 end
             end
+            check1("four PHY handshakes", cap_idx == 4, 1'b1);
             check8("PHY TX byte0", captured[0], 8'h11);
             check8("PHY TX byte1", captured[1], 8'h22);
             check8("PHY TX byte2", captured[2], 8'h33);
@@ -339,8 +397,373 @@ module tb_nic;
         // Write to data window at offset 0x20
         nic_write(7'h20, 8'hDE);
         nic_write(7'h21, 8'hAD);
+        nic_write(7'h7F, 8'h5E);
         nic_read(7'h20, rd); check8("data_window[0]", rd, 8'hDE);
         nic_read(7'h21, rd); check8("data_window[1]", rd, 8'hAD);
+        nic_read(7'h7F, rd); check8("data_window[95]", rd, 8'h5E);
+
+        // =================================================================
+        // TEST 14: Maximum standard Ethernet frame (1514 bytes, no FCS)
+        // =================================================================
+        test_num = 14;
+        $display("\n=== TEST %0d: 1514-byte RX frame ===", test_num);
+        @(posedge clk);
+        phy_rx_valid = 1'b1;
+        for (i = 0; i < 1514; i = i + 1) begin
+            phy_rx_data = i[7:0];
+            @(posedge clk);
+        end
+        phy_rx_valid = 1'b0;
+        repeat(3) @(posedge clk);
+        check1("1514-byte frame available", u_nic.status[1], 1'b1);
+        check1("1514-byte frame has no error", u_nic.status[3], 1'b0);
+        nic_write(7'h00, 8'h02);
+        #1;
+        check1("1514-byte RX DMA busy", u_nic.status[4], 1'b1);
+        // The request/ack handshake consumes two clocks per byte.
+        repeat(3050) @(posedge clk);
+        check1("1514-byte RX DMA complete", u_nic.status[4], 1'b0);
+        nic_read(7'h0A, rd); check8("1514 frame_len lo", rd, 8'hEA);
+        nic_read(7'h0B, rd); check8("1514 frame_len hi", rd, 8'h05);
+
+        // =================================================================
+        // TEST 15: Oversize reject and receive recovery
+        // =================================================================
+        test_num = 15;
+        $display("\n=== TEST %0d: Oversize RX rejection ===", test_num);
+        @(posedge clk);
+        phy_rx_valid = 1'b1;
+        for (i = 0; i < 1515; i = i + 1) begin
+            phy_rx_data = 8'hA5;
+            @(posedge clk);
+        end
+        phy_rx_valid = 1'b0;
+        repeat(3) @(posedge clk);
+        check1("oversize frame not available", u_nic.status[1], 1'b0);
+        check1("oversize frame reports error", u_nic.status[3], 1'b1);
+        check8("oversize frame_len is zero", u_nic.frame_len[7:0], 8'h00);
+
+        // A following valid frame becomes available but cannot hide the
+        // earlier boundary violation.  Only RESET clears the sticky error.
+        @(posedge clk);
+        phy_rx_valid = 1'b1; phy_rx_data = 8'h5A;
+        @(posedge clk);
+        phy_rx_valid = 1'b0;
+        repeat(3) @(posedge clk);
+        check1("post-error frame available", u_nic.status[1], 1'b1);
+        check1("post-error receive leaves error sticky", u_nic.status[3], 1'b1);
+
+        // =================================================================
+        // TEST 16: RESET aborts stalled RX DMA and preserves configuration
+        // =================================================================
+        test_num = 16;
+        $display("\n=== TEST %0d: RESET during RX DMA ===", test_num);
+        nic_write(7'h02, 8'h30);
+        nic_write(7'h03, 8'h00);
+        nic_write(7'h0A, 8'h34);
+        nic_write(7'h0B, 8'h12);
+        dma_stall = 1'b1;
+        nic_write(7'h00, 8'h02);
+        wait (dma_req === 1'b1);
+        #1;
+        check1("RX DMA request asserted before RESET", dma_req, 1'b1);
+        check1("RX DMA is a write before RESET", dma_wen, 1'b1);
+        check8("RX DMA uses accepted base before RESET", dma_addr[7:0], 8'h30);
+        check1("RX counter populated before RESET", u_nic.rx_count != 0, 1'b1);
+        check1("TX counter populated before RESET", u_nic.tx_count != 0, 1'b1);
+        nic_write(7'h00, 8'h02);
+        #1;
+        check1("duplicate RECV keeps RX DMA busy", u_nic.status[4], 1'b1);
+        check8("duplicate RECV preserves unpublished length low",
+               u_nic.frame_len[7:0], 8'h34);
+        check8("duplicate RECV preserves unpublished length high",
+               u_nic.frame_len[15:8], 8'h12);
+        nic_write(7'h00, 8'h04);
+        #1;
+        check1("RESET drops stalled RX DMA request", dma_req, 1'b0);
+        check1("RESET clears RX DMA busy", u_nic.status[4], 1'b0);
+        check1("RESET clears RX available", u_nic.status[1], 1'b0);
+        check1("RESET clears error status", u_nic.status[3], 1'b0);
+        check1("RESET re-arms PHY receive", phy_rx_ready, 1'b1);
+        check8("RESET clears frame length low", u_nic.frame_len[7:0], 8'h00);
+        check8("RESET clears frame length high", u_nic.frame_len[15:8], 8'h00);
+        check8("RESET clears IRQ status", u_nic.irq_status, 8'h00);
+        check8("RESET clears TX count", u_nic.tx_count[7:0], 8'h00);
+        check8("RESET clears RX count", u_nic.rx_count[7:0], 8'h00);
+        check8("RESET preserves IRQ control", u_nic.irq_ctrl, 8'h03);
+        check8("RESET preserves DMA base", u_nic.dma_base[7:0], 8'h30);
+        nic_read(7'h00, rd); check8("CMD remains write-only", rd, 8'h00);
+        nic_read(7'h20, rd); check8("RESET clears data window byte0", rd, 8'h00);
+        nic_read(7'h21, rd); check8("RESET clears data window byte1", rd, 8'h00);
+        nic_read(7'h7F, rd); check8("RESET clears data window byte95", rd, 8'h00);
+        dma_stall = 1'b0;
+
+        // =================================================================
+        // TEST 17: RESET aborts stalled TX DMA
+        // =================================================================
+        test_num = 17;
+        $display("\n=== TEST %0d: RESET during TX DMA ===", test_num);
+        dma_mem[8'h30] = 8'h91;
+        dma_mem[8'h31] = 8'h92;
+        dma_mem[8'h32] = 8'h93;
+        dma_mem[8'h33] = 8'h94;
+        nic_write(7'h0A, 8'h04);
+        nic_write(7'h0B, 8'h00);
+        dma_stall = 1'b1;
+        nic_write(7'h00, 8'h01);
+        wait (dma_req === 1'b1);
+        #1;
+        check1("TX DMA request asserted before RESET", dma_req, 1'b1);
+        check1("TX DMA is a read before RESET", dma_wen, 1'b0);
+        check1("TX busy before RESET", u_nic.status[0], 1'b1);
+        nic_write(7'h00, 8'h04);
+        #1;
+        check1("RESET drops stalled TX DMA request", dma_req, 1'b0);
+        check1("RESET clears TX busy", u_nic.status[0], 1'b0);
+        check1("RESET drops PHY valid", phy_tx_valid, 1'b0);
+        check8("TX RESET clears frame length", u_nic.frame_len[7:0], 8'h00);
+        check8("TX RESET preserves DMA base", u_nic.dma_base[7:0], 8'h30);
+        check8("TX RESET preserves IRQ control", u_nic.irq_ctrl, 8'h03);
+        dma_stall = 1'b0;
+
+        // =================================================================
+        // TEST 18: TX snapshots parameters and holds bytes under back-pressure
+        // =================================================================
+        test_num = 18;
+        $display("\n=== TEST %0d: TX PHY back-pressure ===", test_num);
+        dma_mem[8'h20] = 8'hA1;
+        dma_mem[8'h21] = 8'hA2;
+        dma_mem[8'h22] = 8'hA3;
+        dma_mem[8'h23] = 8'hA4;
+        dma_mem[8'h40] = 8'hB1;
+        dma_mem[8'h41] = 8'hB2;
+        dma_mem[8'h42] = 8'hB3;
+        dma_mem[8'h43] = 8'hB4;
+        nic_write(7'h02, 8'h20);
+        nic_write(7'h0A, 8'h04);
+        nic_write(7'h0B, 8'h00);
+        phy_tx_ready = 1'b0;
+        dma_stall = 1'b1;
+        nic_write(7'h00, 8'h01);
+        wait (dma_req === 1'b1);
+        #1;
+        check8("stalled TX starts at accepted base", dma_addr[7:0], 8'h20);
+        nic_write(7'h02, 8'h40);
+        nic_write(7'h0A, 8'h01);
+        #1;
+        check8("base rewrite does not redirect stalled TX", dma_addr[7:0], 8'h20);
+        check8("length rewrite does not shorten TX", u_nic.tx_len[7:0], 8'h04);
+        nic_write(7'h00, 8'h01);
+        #1;
+        check1("SEND while busy latches error", u_nic.status[3], 1'b1);
+        check8("duplicate SEND does not replace TX length", u_nic.tx_len[7:0], 8'h04);
+        dma_stall = 1'b0;
+
+        wait (phy_tx_valid === 1'b1);
+        #1;
+        check8("first presented byte", phy_tx_data, 8'hA1);
+        repeat(3) begin
+            @(posedge clk);
+            #1;
+            check1("first byte remains valid while stalled", phy_tx_valid, 1'b1);
+            check8("first byte remains stable while stalled", phy_tx_data, 8'hA1);
+        end
+
+        // Accept byte 1, then stall byte 2 in the middle of the frame.
+        @(negedge clk); phy_tx_ready = 1'b1;
+        @(posedge clk); check8("accepted PHY byte1", phy_tx_data, 8'hA1);
+        #1; check8("PHY advances to byte2", phy_tx_data, 8'hA2);
+        @(negedge clk); phy_tx_ready = 1'b0;
+        repeat(2) begin
+            @(posedge clk);
+            #1;
+            check1("middle byte remains valid while stalled", phy_tx_valid, 1'b1);
+            check8("middle byte remains stable while stalled", phy_tx_data, 8'hA2);
+        end
+
+        // Accept bytes 2 and 3, then hold the final byte unacknowledged.
+        @(negedge clk); phy_tx_ready = 1'b1;
+        @(posedge clk); check8("accepted PHY byte2", phy_tx_data, 8'hA2);
+        #1; check8("PHY advances to byte3", phy_tx_data, 8'hA3);
+        @(posedge clk); check8("accepted PHY byte3", phy_tx_data, 8'hA3);
+        #1; check8("PHY advances to final byte", phy_tx_data, 8'hA4);
+        @(negedge clk); phy_tx_ready = 1'b0;
+        repeat(3) begin
+            @(posedge clk);
+            #1;
+            check1("final byte remains valid while stalled", phy_tx_valid, 1'b1);
+            check8("final byte remains stable while stalled", phy_tx_data, 8'hA4);
+            check1("TX remains busy before final handshake", u_nic.status[0], 1'b1);
+            check8("TX count waits for final handshake", u_nic.tx_count[7:0], 8'h00);
+        end
+
+        @(negedge clk); phy_tx_ready = 1'b1;
+        @(posedge clk); check8("accepted final PHY byte", phy_tx_data, 8'hA4);
+        #1;
+        check1("PHY valid drops after final handshake", phy_tx_valid, 1'b0);
+        check8("counter still waits for DONE edge", u_nic.tx_count[7:0], 8'h00);
+        @(posedge clk);
+        #1;
+        check1("TX busy clears after accepted final byte", u_nic.status[0], 1'b0);
+        check8("TX count increments once", u_nic.tx_count[7:0], 8'h01);
+        check1("TX IRQ pending after completion", u_nic.irq_status[1], 1'b1);
+
+        // =================================================================
+        // TEST 19: A stalled TX beat survives RX arrival and RECV
+        // =================================================================
+        test_num = 19;
+        $display("\n=== TEST %0d: DMA beat ownership ===", test_num);
+        nic_write(7'h00, 8'h04);
+        dma_mem[8'h10] = 8'hC1;
+        dma_mem[8'h11] = 8'hC2;
+        nic_write(7'h02, 8'h10);
+        nic_write(7'h03, 8'h00);
+        nic_write(7'h0A, 8'h02);
+        nic_write(7'h0B, 8'h00);
+        dma_stall = 1'b1;
+        nic_write(7'h00, 8'h01);
+        wait (dma_req === 1'b1);
+        #1;
+        begin
+            reg [63:0] held_addr;
+            reg [7:0] held_wdata;
+            reg held_wen;
+            held_addr  = dma_addr;
+            held_wdata = dma_wdata;
+            held_wen   = dma_wen;
+
+            // RX will use a different destination, while the TX request must
+            // retain the tuple that was already presented to memory.
+            nic_write(7'h02, 8'h30);
+            @(negedge clk); phy_rx_valid = 1'b1; phy_rx_data = 8'hD1;
+            @(negedge clk); phy_rx_data = 8'hD2;
+            @(negedge clk); phy_rx_valid = 1'b0;
+            repeat(3) @(posedge clk);
+            check1("RX frame can queue behind stalled TX beat", u_nic.status[1], 1'b1);
+            check1("stalled TX request remains asserted after RX arrival", dma_req, 1'b1);
+            check1("stalled TX address survives RX arrival", dma_addr === held_addr, 1'b1);
+            check1("stalled TX direction survives RX arrival", dma_wen === held_wen, 1'b1);
+            check1("stalled TX data survives RX arrival", dma_wdata === held_wdata, 1'b1);
+
+            nic_write(7'h00, 8'h02);
+            #1;
+            check1("RECV enters RX DMA behind owned TX beat",
+                   u_nic.rx_state == 3'd2, 1'b1);
+            check1("RECV cannot withdraw owned TX request", dma_req, 1'b1);
+            check1("RECV cannot change owned TX address", dma_addr === held_addr, 1'b1);
+            check1("RECV cannot change owned TX direction", dma_wen === held_wen, 1'b1);
+            check1("RECV cannot change owned TX data", dma_wdata === held_wdata, 1'b1);
+        end
+        dma_stall = 1'b0;
+        wait (u_nic.status[4] === 1'b0);
+        wait (u_nic.tx_count == 16'd1);
+        repeat(2) @(posedge clk);
+        check8("TX byte0 survives RX arbitration", u_nic.tx_buf[0], 8'hC1);
+        check8("TX byte1 survives RX arbitration", u_nic.tx_buf[1], 8'hC2);
+        check8("queued RX byte0 reaches its snapshot base", dma_mem[8'h30], 8'hD1);
+        check8("queued RX byte1 reaches its snapshot base", dma_mem[8'h31], 8'hD2);
+
+        // =================================================================
+        // TEST 20: RESET drains an interrupted PHY frame
+        // =================================================================
+        test_num = 20;
+        $display("\n=== TEST %0d: RESET during PHY receive ===", test_num);
+        @(negedge clk);
+        phy_rx_valid = 1'b1; phy_rx_data = 8'hD1;
+        @(posedge clk);
+        @(negedge clk); phy_rx_data = 8'hD2;
+        nic_write(7'h00, 8'h04);
+        #1;
+        check1("RESET enters RX drain while VALID remains high",
+               u_nic.rx_state == 3'd4, 1'b1);
+        @(negedge clk); phy_rx_data = 8'hD3;
+        repeat(2) @(posedge clk);
+        check1("interrupted suffix is not published", u_nic.status[1], 1'b0);
+        @(negedge clk); phy_rx_valid = 1'b0;
+        repeat(2) @(posedge clk);
+        check1("RX drain returns to idle", u_nic.rx_state == 3'd0, 1'b1);
+        check8("interrupted frame does not increment RX count",
+               u_nic.rx_count[7:0], 8'h00);
+
+        @(negedge clk);
+        phy_rx_valid = 1'b1; phy_rx_data = 8'hE1;
+        @(posedge clk);
+        @(negedge clk); phy_rx_valid = 1'b0;
+        repeat(3) @(posedge clk);
+        check1("receive recovers after RESET drain", u_nic.status[1], 1'b1);
+        check8("only recovered frame increments RX count",
+               u_nic.rx_count[7:0], 8'h01);
+
+        // =================================================================
+        // TEST 21: TX error is sticky until RESET
+        // =================================================================
+        test_num = 21;
+        $display("\n=== TEST %0d: Sticky TX error ===", test_num);
+        nic_write(7'h00, 8'h04);
+        nic_write(7'h0A, 8'h00);
+        nic_write(7'h0B, 8'h00);
+        nic_write(7'h00, 8'h01);
+        #1;
+        check1("zero-length TX reports error", u_nic.status[3], 1'b1);
+        nic_write(7'h00, 8'h03);
+        check1("STATUS command leaves error sticky", u_nic.status[3], 1'b1);
+        dma_mem[8'h30] = 8'hF1;
+        nic_write(7'h02, 8'h30);
+        nic_write(7'h0A, 8'h01);
+        nic_write(7'h00, 8'h01);
+        wait (u_nic.tx_count == 16'd1);
+        repeat(2) @(posedge clk);
+        check1("valid TX leaves prior error sticky", u_nic.status[3], 1'b1);
+        nic_write(7'h00, 8'h04);
+        #1;
+        check1("RESET clears sticky TX error", u_nic.status[3], 1'b0);
+        nic_write(7'h0A, 8'h5A);
+        nic_write(7'h0B, 8'hA5);
+        nic_write(7'h00, 8'h02);
+        #1;
+        check8("RECV with no frame clears length low", u_nic.frame_len[7:0], 8'h00);
+        check8("RECV with no frame clears length high", u_nic.frame_len[15:8], 8'h00);
+
+        // =================================================================
+        // TEST 22: IRQ events are pending independently of their masks
+        // =================================================================
+        test_num = 22;
+        $display("\n=== TEST %0d: Masked IRQ event latching ===", test_num);
+        nic_write(7'h00, 8'h04);
+        nic_write(7'h0C, 8'h00);
+        nic_write(7'h0D, 8'h03);
+
+        @(negedge clk);
+        phy_rx_valid = 1'b1; phy_rx_data = 8'h6A;
+        @(negedge clk); phy_rx_valid = 1'b0;
+        repeat(3) @(posedge clk);
+        check1("masked RX event still becomes pending", u_nic.irq_status[0], 1'b1);
+        check1("masked RX event leaves IRQ low", nic_irq, 1'b0);
+        nic_write(7'h0C, 8'h01);
+        #1;
+        check1("enabling pending RX event asserts IRQ", nic_irq, 1'b1);
+        nic_write(7'h0D, 8'h01);
+        #1;
+        check1("W1C deasserts enabled RX event", nic_irq, 1'b0);
+
+        nic_write(7'h00, 8'h04);
+        nic_write(7'h0C, 8'h00);
+        dma_mem[8'h70] = 8'hA6;
+        nic_write(7'h02, 8'h70);
+        nic_write(7'h03, 8'h00);
+        nic_write(7'h0A, 8'h01);
+        nic_write(7'h0B, 8'h00);
+        nic_write(7'h00, 8'h01);
+        wait (u_nic.tx_count == 16'd1);
+        repeat(2) @(posedge clk);
+        check1("masked TX event still becomes pending", u_nic.irq_status[1], 1'b1);
+        check1("masked TX event leaves IRQ low", nic_irq, 1'b0);
+        nic_write(7'h0C, 8'h02);
+        #1;
+        check1("enabling pending TX event asserts IRQ", nic_irq, 1'b1);
+        nic_write(7'h0D, 8'h02);
+        #1;
+        check1("W1C deasserts enabled TX event", nic_irq, 1'b0);
 
         // =================================================================
         // Summary

@@ -9,36 +9,6 @@
 # Usage:  cd megapad-64 && yosys -s fpga/synth_yosys_soc.tcl
 #
 
-# ---- NIC blackbox (deep FIFOs — too complex for stateless synthesis) --------
-read_verilog -sv <<EOT
-(* blackbox *)
-module mp64_nic (
-    input         clk,
-    input         rst_n,
-    input         req,
-    input  [6:0]  addr,
-    input  [7:0]  wdata,
-    input         wen,
-    output [7:0]  rdata,
-    output        ack,
-    output        irq,
-    output        dma_req,
-    output [63:0] dma_addr,
-    output [7:0]  dma_wdata,
-    output        dma_wen,
-    input  [7:0]  dma_rdata,
-    input         dma_ack,
-    output        phy_tx_valid,
-    output [7:0]  phy_tx_data,
-    input         phy_tx_ready,
-    input         phy_rx_valid,
-    input  [7:0]  phy_rx_data,
-    output        phy_rx_ready,
-    input         phy_link_up
-);
-endmodule
-EOT
-
 # ---- Package / include files ------------------------------------------------
 read_verilog -sv -DSIMULATION=0 \
     rtl/pkg/mp64_defs.vh       \
@@ -80,6 +50,7 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_uart.v     \
     rtl/periph/mp64_timer.v    \
     rtl/periph/mp64_disk.v     \
+    rtl/periph/mp64_nic.v      \
     rtl/periph/mp64_mailbox.v  \
     rtl/periph/mp64_trng.v
 
