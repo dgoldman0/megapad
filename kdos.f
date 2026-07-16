@@ -3478,11 +3478,12 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 \  §7.6  MP64FS — On-Disk Named File System
 \ =====================================================================
 \
-\  Disk layout (1 MiB = 2048 x 512-byte sectors):
-\    Sector 0       Superblock (magic "MP64", version, geometry)
-\    Sector 1       Allocation bitmap (2048 bits = 256 bytes)
-\    Sectors 2-13   Directory (128 entries x 48 bytes)
-\    Sectors 14+    Data area (2034 sectors ~ 1 MB usable)
+\  Disk layout (15..8192 x 512-byte sectors, format marker 1):
+\    Sector 0         Superblock (magic "MP64", marker, geometry)
+\    Sectors 1..B     Allocation bitmap (one bit per sector)
+\    Next 12 sectors  Directory (128 entries x 48 bytes)
+\    Remaining        Data area
+\  B = ceil(total_sectors / 4096); directory and data starts follow B.
 \
 \  Directory entry (48 bytes):
 \    +0   name[24]       null-terminated (max 23 chars)
@@ -3510,16 +3511,19 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 \  Pool slot has an in_use flag at fdesc - 8.
 
 \ -- Constants --
-14  CONSTANT FS-DATA-START
 128 CONSTANT FS-MAX-FILES
 48  CONSTANT FS-ENTRY-SIZE
 
 \ -- RAM caches (loaded from disk by FS-LOAD) --
 VARIABLE FS-SUPER  SECTOR 1- ALLOT            \ 512 bytes — superblock
-VARIABLE FS-BMAP   SECTOR 1- ALLOT            \ 512 bytes — bitmap
+VARIABLE FS-BMAP   SECTOR 2 * 1- ALLOT         \ up to 8192 sector bits
 VARIABLE FS-DIR    SECTOR 12 * 1- ALLOT       \ 6144 bytes — directory
 
 VARIABLE FS-OK     0 FS-OK !
+VARIABLE FS-TOTAL  2048 FS-TOTAL !
+VARIABLE FS-BMAP-N 1 FS-BMAP-N !
+: FS-DIR-START  ( -- n ) FS-BMAP-N @ 1+ ;
+: FS-DSTART     ( -- n ) FS-DIR-START 12 + ;
 
 \ -- Current working directory (parent slot, 0xFF = root) --
 VARIABLE CWD   255 CWD !
@@ -3558,10 +3562,10 @@ VARIABLE FF-LEN
 
 : FIND-FREE  ( count -- sector | -1 )
     FF-NEED !
-    FS-DATA-START FF-START !
+    FS-DSTART FF-START !
     0 FF-LEN !
     -1                                 \ result on stack
-    2048 FS-DATA-START DO
+    FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF
             FF-LEN @ 0= IF I FF-START ! THEN
             1 FF-LEN +!
@@ -3603,31 +3607,34 @@ VARIABLE FF-LEN
 
 \ FS-LOAD ( -- ) read superblock + bitmap + directory from disk
 : FS-LOAD  ( -- )
+    0 FS-OK !
     DISK? 0= IF
         ."  No disk attached" CR EXIT
     THEN
-    \ Read superblock (sector 0)
-    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-READ
-    \ Check magic "MP64" (M=77 P=80 6=54 4=52)
-    FS-SUPER     C@ 77 <>
-    FS-SUPER 1+  C@ 80 <> OR
-    FS-SUPER 2 + C@ 54 <> OR
-    FS-SUPER 3 + C@ 52 <> OR
-    IF
-        ."  Not an MP64FS disk" CR EXIT
+    MP64FS-VALID? 0= IF
+        ."  Invalid MP64FS" CR EXIT
     THEN
-    \ Read bitmap (sector 1)
-    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-READ
-    \ Read directory (sectors 2-13)
-    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-READ
+    \ The shared BIOS validator has already checked the marker, geometry,
+    \ reserved bitmap, directory entries, parents, extents, and byte bounds.
+    \ Read the accepted geometry into KDOS's cache coordinates.
+    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-READ
+    FS-SUPER 6 + L@ FS-TOTAL !
+    FS-SUPER 12 + W@ FS-BMAP-N !
+    \ Read the complete geometry-selected bitmap and directory.
+    1 DISK-SEC!  FS-BMAP DISK-DMA!
+    FS-BMAP-N @ DISK-N!  DISK-READ
+    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
+    12 DISK-N!  DISK-READ
     -1 FS-OK !
     ."  MP64FS loaded" CR ;
 
 \ FS-SYNC ( -- ) write bitmap + directory back to disk
 : FS-SYNC  ( -- )
     FS-OK @ 0= IF ."  FS not loaded" CR EXIT THEN
-    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
-    2 DISK-SEC!  FS-DIR  DISK-DMA!  12 DISK-N!  DISK-WRITE ;
+    1 DISK-SEC!  FS-BMAP DISK-DMA!
+    FS-BMAP-N @ DISK-N!  DISK-WRITE
+    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
+    12 DISK-N!  DISK-WRITE ;
 
 \ FS-ENSURE ( -- ) auto-load if not yet loaded
 : FS-ENSURE  ( -- )
@@ -3640,29 +3647,36 @@ VARIABLE FF-LEN
 \ FORMAT ( -- ) initialise a fresh MP64FS on the attached disk
 : FORMAT  ( -- )
     DISK? 0= IF ."  No disk" CR EXIT THEN
+    DISK-SECTORS DUP 15 < OVER 8192 > OR IF
+        DROP ."  Unsupported disk size" CR EXIT
+    THEN
+    FS-TOTAL !
+    FS-TOTAL @ 4095 + 4096 / FS-BMAP-N !
     \ Build superblock in RAM
     FS-SUPER SECTOR 0 FILL
     77 FS-SUPER     C!              \ 'M'
     80 FS-SUPER 1+  C!              \ 'P'
     54 FS-SUPER 2 + C!              \ '6'
     52 FS-SUPER 3 + C!              \ '4'
-    1    FS-SUPER 4  + W!           \ version
-    2048 FS-SUPER 6  + L!           \ total sectors (u32)
-    1    FS-SUPER 10 + W!           \ bitmap start
-    1    FS-SUPER 12 + W!           \ bitmap sectors
-    2    FS-SUPER 14 + W!           \ dir start
-    12   FS-SUPER 16 + W!           \ dir sectors
-    14   FS-SUPER 18 + W!           \ data start
+    1              FS-SUPER 4  + W! \ format marker
+    FS-TOTAL @     FS-SUPER 6  + L! \ total sectors (u32)
+    1               FS-SUPER 10 + W!
+    FS-BMAP-N @     FS-SUPER 12 + W!
+    FS-DIR-START    FS-SUPER 14 + W!
+    12              FS-SUPER 16 + W!
+    FS-DSTART       FS-SUPER 18 + W!
     128  FS-SUPER 20 + C!           \ max files
     48   FS-SUPER 21 + C!           \ entry size
     0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-WRITE
-    \ Initialise bitmap — mark sectors 0-13 (metadata) as allocated
-    FS-BMAP SECTOR 0 FILL
-    FS-DATA-START 0 DO I BIT-SET LOOP
-    1 DISK-SEC!  FS-BMAP DISK-DMA!  1 DISK-N!  DISK-WRITE
+    \ Initialise bitmap — mark every sector below FS-DSTART as metadata
+    FS-BMAP FS-BMAP-N @ SECTOR * 0 FILL
+    FS-DSTART 0 DO I BIT-SET LOOP
+    1 DISK-SEC!  FS-BMAP DISK-DMA!
+    FS-BMAP-N @ DISK-N!  DISK-WRITE
     \ Zero directory
     FS-DIR SECTOR 12 * 0 FILL
-    2 DISK-SEC!  FS-DIR DISK-DMA!  12 DISK-N!  DISK-WRITE
+    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
+    12 DISK-N!  DISK-WRITE
     -1 FS-OK !
     255 CWD !
     ."  MP64FS formatted" CR ;
@@ -3703,7 +3717,7 @@ VARIABLE FF-LEN
         THEN
     LOOP
     DUP . ."  file(s), "
-    0  2048 FS-DATA-START DO
+    0  FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DUP . ."  free sectors ("
@@ -3730,7 +3744,7 @@ VARIABLE FF-LEN
         THEN
     LOOP
     ."  (" . ."  files, "
-    0 2048 FS-DATA-START DO
+    0 FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     . ."  free sectors)" CR ;
@@ -3779,7 +3793,7 @@ VARIABLE MK-START
     MK-START @ -1 = IF
         ."  No space: need " MK-NSEC @ .
         ."  sectors, "
-        0 2048 FS-DATA-START DO
+        0 FS-TOTAL @ FS-DSTART DO
             I BIT-FREE? IF 1+ THEN
         LOOP
         . ."  free" CR EXIT
@@ -3895,7 +3909,7 @@ VARIABLE LF-RUN
 
 : FS-LARGEST-FREE  ( -- n )
     0 LF-BEST !  0 LF-RUN !
-    2048 FS-DATA-START DO
+    FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF
             1 LF-RUN +!
             LF-RUN @ LF-BEST @ > IF LF-RUN @ LF-BEST ! THEN
@@ -3911,7 +3925,7 @@ VARIABLE LF-RUN
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
     0   \ free sector count
-    2048 FS-DATA-START DO
+    FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DUP . ."  free sectors ("
@@ -6614,7 +6628,7 @@ INSTALL-TUI
     STOR-N @ SCR-MAX !
     STOR-N @ 0= IF S" (empty)" W.LINE THEN
     W.GAP
-    0  2048 FS-DATA-START DO
+    0  FS-TOTAL @ FS-DSTART DO
         I BIT-FREE? IF 1+ THEN
     LOOP
     DIM ."   " .N ."  free sectors" RESET-COLOR CR

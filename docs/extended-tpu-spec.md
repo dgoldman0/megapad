@@ -491,7 +491,7 @@ Additions to the existing MMIO map:
 |--------|------|------------|
 | 0x000 | 16B | UART (existing) |
 | 0x100 | 16B | Timer (existing) |
-| 0x200 | 16B | Disk (existing) |
+| 0x200 | 24B | Disk (existing, including read-only capacity) |
 | 0x300 | 96B | SysInfo (12 × 64-bit regs) |
 | 0x400 | 128B | NIC (existing) |
 | 0x500 | 16B | Mailbox (existing) |

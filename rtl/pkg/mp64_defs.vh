@@ -180,13 +180,15 @@ parameter [4:0] RTC_ALARM_S  = 5'h1A;  // alarm seconds
 parameter [4:0] RTC_ALARM_M  = 5'h1B;  // alarm minutes
 parameter [4:0] RTC_ALARM_H  = 5'h1C;  // alarm hours
 
-// Storage registers
-parameter [3:0] DISK_CMD     = 4'h0;
-parameter [3:0] DISK_STATUS  = 4'h1;
-parameter [3:0] DISK_SECTOR  = 4'h2;  // +2..+5 (32-bit)
-parameter [3:0] DISK_DMA     = 4'h6;  // +6..+D (64-bit)
-parameter [3:0] DISK_SECN    = 4'hE;
-parameter [3:0] DISK_DATA    = 4'hF;
+// Storage registers use 5-bit offsets so capacity has its own addresses.
+parameter [4:0] DISK_CMD      = 5'h00;
+parameter [4:0] DISK_STATUS   = 5'h01;
+parameter [4:0] DISK_SECTOR   = 5'h02;  // +2..+5 (32-bit)
+parameter [4:0] DISK_DMA      = 5'h06;  // +6..+D (64-bit)
+parameter [4:0] DISK_SECN     = 5'h0E;
+parameter [4:0] DISK_DATA     = 5'h0F;
+parameter [4:0] DISK_DMA_PUSH = 5'h10;
+parameter [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
 
 // NIC registers
 parameter [3:0] NIC_CMD      = 4'h0;

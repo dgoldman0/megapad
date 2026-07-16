@@ -10,6 +10,7 @@
 //   - DISK-DMA! to set the DMA target address in RAM
 //   - DISK-N!   to set the sector count (usually 1)
 //   - DISK-READ (CMD=0x01) / DISK-WRITE (CMD=0x02)
+//   - DISK-SECTORS to read the configured logical capacity at +0x11..+0x14
 //
 // DMA writes directly into the internal BRAM via a dedicated port on the
 // bus arbiter (not shown here — the SoC top-level wires it).
@@ -17,13 +18,15 @@
 
 `include "mp64_pkg.vh"
 
-module mp64_disk (
+module mp64_disk #(
+    parameter [31:0] TOTAL_SECTORS = 32'd8192
+)(
     input  wire        clk,
     input  wire        rst_n,
 
     // === MMIO register interface ===
     input  wire        req,
-    input  wire [3:0]  addr,
+    input  wire [4:0]  addr,
     input  wire [7:0]  wdata,
     input  wire        wen,
     output reg  [7:0]  rdata,
@@ -262,6 +265,10 @@ module mp64_disk (
                 DISK_SECTOR+2:  rdata <= sector[23:16];
                 DISK_SECTOR+3:  rdata <= sector[31:24];
                 DISK_SECN:      rdata <= sec_count;
+                DISK_TOTAL+0:   rdata <= TOTAL_SECTORS[ 7: 0];
+                DISK_TOTAL+1:   rdata <= TOTAL_SECTORS[15: 8];
+                DISK_TOTAL+2:   rdata <= TOTAL_SECTORS[23:16];
+                DISK_TOTAL+3:   rdata <= TOTAL_SECTORS[31:24];
                 default:        rdata <= 8'd0;
             endcase
         end

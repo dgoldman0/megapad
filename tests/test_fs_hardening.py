@@ -8,6 +8,7 @@ import pytest
 
 from diskutil import (
     MP64FS, _compute_geometry, SECTOR_SIZE,
+    FS_MARKER,
     FTYPE_FORTH, FTYPE_DATA, FTYPE_RAW,
 )
 
@@ -33,7 +34,7 @@ class TestComputeGeometry:
         assert dir_start == 3
         assert data_start == 15
 
-    def test_8mib(self):
+    def test_formula_beyond_supported_runtime_cap(self):
         bmap, dir_start, data_start = _compute_geometry(16384)
         assert bmap == 4
         assert dir_start == 5
@@ -45,8 +46,7 @@ class TestComputeGeometry:
         assert bmap == 2
 
 
-class TestFormat1MiB:
-    """Backward compatibility: 1 MiB images are identical to before."""
+class TestFormatSmallImage:
 
     def test_geometry(self):
         fs = MP64FS(total_sectors=2048)
@@ -61,6 +61,7 @@ class TestFormat1MiB:
         assert struct.unpack_from("<H", fs.img, 12)[0] == 1   # bmap_sectors
         assert struct.unpack_from("<H", fs.img, 14)[0] == 2   # dir_start
         assert struct.unpack_from("<H", fs.img, 18)[0] == 14  # data_start
+        assert struct.unpack_from("<H", fs.img, 4)[0] == FS_MARKER
 
     def test_metadata_sectors_allocated(self):
         fs = MP64FS(total_sectors=2048)
@@ -98,6 +99,7 @@ class TestFormatLargeImage:
         assert struct.unpack_from("<H", fs.img, 12)[0] == 2
         assert struct.unpack_from("<H", fs.img, 14)[0] == 3
         assert struct.unpack_from("<H", fs.img, 18)[0] == 15
+        assert struct.unpack_from("<H", fs.img, 4)[0] == FS_MARKER
 
     def test_4mib_metadata_allocated(self):
         fs = MP64FS(total_sectors=8192)
@@ -137,6 +139,16 @@ class TestFormatLargeImage:
         remaining = fs._count_free()
         assert remaining == 8177 - 8000
 
+    def test_rejects_media_above_runtime_cap(self):
+        fs = MP64FS(total_sectors=8193)
+        with pytest.raises(ValueError, match="at most 8192 sectors"):
+            fs.format()
+
+    def test_rejects_media_without_a_data_sector(self):
+        fs = MP64FS(total_sectors=14)
+        with pytest.raises(ValueError, match="too small"):
+            fs.format()
+
 
 class TestSaveLoadRoundtrip:
     def test_1mib_roundtrip(self):
@@ -172,6 +184,65 @@ class TestSaveLoadRoundtrip:
             assert fs2.read_file("test.f") == b"hello"
         finally:
             os.unlink(path)
+
+
+class TestGeometryValidation:
+    def test_rejects_invalid_format_marker(self):
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<H", fs.img, 4, 99)
+        with pytest.raises(ValueError, match="invalid format marker"):
+            MP64FS(bytearray(fs.img))
+
+    def test_rejects_geometry_larger_than_image(self):
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<I", fs.img, 6, 16384)
+        with pytest.raises(ValueError, match="image sectors"):
+            MP64FS(bytearray(fs.img))
+
+    def test_rejects_shifted_directory(self):
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<H", fs.img, 14, 4)
+        with pytest.raises(ValueError, match="directory start"):
+            MP64FS(bytearray(fs.img))
+
+    def test_cli_contains_malformed_attached_filesystem(self, capsys):
+        """Host inspection reports invalid geometry without aborting the CLI."""
+        from types import SimpleNamespace
+        from cli import MegapadCLI
+
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        struct.pack_into("<H", fs.img, 14, 3)
+        system = SimpleNamespace(
+            storage=SimpleNamespace(_image_data=bytearray(fs.img)),
+            uart=SimpleNamespace(on_tx=None),
+        )
+
+        cli = MegapadCLI(system)
+        assert cli._get_fs() is None
+        assert "Invalid filesystem:" in capsys.readouterr().out
+
+    def test_cli_contains_unaligned_storage_attach(self, tmp_path, capsys):
+        """An invalid host image cannot escape the interactive command."""
+        from types import SimpleNamespace
+        from cli import MegapadCLI
+        from devices import Storage
+
+        image = tmp_path / "unaligned.img"
+        image.write_bytes(b"not a sector")
+        system = SimpleNamespace(
+            storage=Storage(),
+            sysinfo=SimpleNamespace(has_storage=False),
+            uart=SimpleNamespace(on_tx=None),
+        )
+
+        cli = MegapadCLI(system)
+        cli.do_storage(f"attach {image}")
+        assert system.sysinfo.has_storage is False
+        assert "Storage attach failed:" in capsys.readouterr().out
 
 
 # ── Phase 2: better error messages + largest_free_run ────────────────

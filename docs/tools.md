@@ -298,9 +298,10 @@ See the ISA Reference for the full instruction list.
 
 ## Disk Utility
 
-`diskutil.py` creates and manages **MP64FS** disk images — 1 MiB
-flat filesystems with a superblock, allocation bitmap, and 128-entry
-directory.  See the Filesystem Specification for the on-disk format.
+`diskutil.py` creates and manages **MP64FS** disk images from 15 through
+8192 sectors.  Every image uses marker 1 with capacity-derived bitmap,
+directory, and data geometry.  See the Filesystem Specification for the
+on-disk format.
 
 ### Command-Line Subcommands
 
@@ -310,13 +311,16 @@ python diskutil.py <subcommand> [args]
 
 | Subcommand | Syntax | Description |
 |------------|--------|-------------|
-| `create` | `create <file>` | Create a new, formatted 1 MiB disk image |
+| `format` | `format [-o FILE] [--sectors N]` | Create a blank formatted image; defaults to 2048 sectors |
 | `inject` | `inject <image> <file> [--type TYPE]` | Add a host file to the disk image |
-| `list` | `list <image>` | List all files (name, size, type) |
-| `read` | `read <image> <name>` | Read a file from the image, print to stdout |
-| `delete` | `delete <image> <name>` | Remove a file from the image |
+| `ls` | `ls <image>` | List all entries (name, size, type, parent, flags) |
+| `cat` | `cat <image> <name>` | Read a root file and write it to stdout |
+| `rm` | `rm <image> <name> [--path PATH]` | Remove a file from the selected directory |
+| `mkdir` | `mkdir <image> <name> [--path PATH]` | Create a subdirectory under the selected path |
+| `check` | `check <image>` | Verify stored content CRCs |
+| `compact` | `compact <image>` | Rewrite files into one contiguous extent each |
 | `info` | `info <image>` | Show filesystem info (superblock, free space) |
-| `sample` | `sample` | Build the standard `sample.img` with all content |
+| `sample` | `sample [-o FILE]` | Build the standard sample image with all content |
 
 ### File Type Flags
 
@@ -338,7 +342,7 @@ Use `--type` with the `inject` subcommand:
 
 ```bash
 # Create an empty formatted image
-python diskutil.py create myimage.img
+python diskutil.py format -o myimage.img --sectors 8192
 
 # Add the KDOS source (BIOS auto-boots the first Forth-type file)
 python diskutil.py inject myimage.img kdos.f --type forth
@@ -346,8 +350,12 @@ python diskutil.py inject myimage.img kdos.f --type forth
 # Add a documentation file
 python diskutil.py inject myimage.img mydoc.txt --type doc
 
+# Create a directory and add a file beneath it
+python diskutil.py mkdir myimage.img tools
+python diskutil.py inject myimage.img helper.f --type forth --path /tools
+
 # Verify
-python diskutil.py list myimage.img
+python diskutil.py ls myimage.img
 ```
 
 **Build the standard sample image:**
@@ -367,14 +375,14 @@ python diskutil.py sample
 The `MP64FS` class can be used programmatically:
 
 ```python
-from diskutil import MP64FS
+from diskutil import FTYPE_FORTH, MP64FS
 
 fs = MP64FS()
 fs.format()
-fs.inject("hello.f", b': greet ." Hello!" CR ;\n', file_type=3)
+fs.inject_file("hello.f", b': greet ." Hello!" CR ;\n', ftype=FTYPE_FORTH)
 
 for entry in fs.list_files():
-    print(entry['name'], entry['used_bytes'], 'bytes')
+    print(entry.name, entry.used_bytes, 'bytes')
 
 content = fs.read_file("hello.f")
 fs.delete_file("hello.f")
@@ -387,7 +395,7 @@ fs.save("myimage.img")
 
 | File | Type | Description |
 |------|------|-------------|
-| `kdos.f` | Forth | Complete KDOS operating system source (auto-booted by BIOS) |
+| `kdos.f` | Forth | Packed executable KDOS source (auto-booted by BIOS) |
 | `getting-started` | Doc | Introduction and first steps |
 | `buffers` | Doc | Buffer subsystem guide |
 | `kernels` | Doc | Kernel registry guide |

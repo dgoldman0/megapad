@@ -1,8 +1,10 @@
 # MP64FS Filesystem Specification
 
 **MP64FS** (Megapad-64 File System) is a sector-based filesystem designed
-for the Megapad-64's storage controller.  The default geometry fits on a
-**1 MiB disk image** (2048 × 512-byte sectors) and supports up to
+for the Megapad-64's storage controller.  One draft format marker (`1`)
+uses the same derived-geometry rule from 15 through 8192 sectors (4 MiB).
+The host utility still defaults to **1 MiB** (2048 × 512-byte sectors) and
+the filesystem supports up to
 **128 named files** with 23-character names, hierarchical subdirectories,
 two-extent allocation, RTC timestamps, and hardware-verified CRC32
 integrity.
@@ -25,29 +27,29 @@ This document covers:
 
 | Property | Value |
 |----------|-------|
-| Total size | 1,048,576 bytes (1 MiB) |
+| Supported size | 15–8192 sectors (up to 4 MiB); host default 2048 sectors |
 | Sector size | 512 bytes |
-| Total sectors | 2,048 |
-| Metadata sectors | 14 (sectors 0–13) |
-| Data sectors | 2,034 (sectors 14–2047) |
+| Bitmap sectors | `ceil(total_sectors / 4096)` (1 or 2) |
+| Directory start | `1 + bitmap_sectors` |
+| Data start | `directory_start + 12` |
 | Max files | 128 |
 | Max filename | 23 characters (NUL-terminated in 24 bytes) |
 | Directory entry size | 48 bytes |
 | Max extents per file | 2 (primary + one secondary) |
 
-The superblock stores `total_sectors` as a **u32**, so larger disk images
-(e.g., 4 MiB, 16 MiB) work simply by increasing the image size and
-bitmap sector count.  The 1 MiB default is the reference geometry.
+The superblock stores `total_sectors` as a **u32**, but this draft deliberately
+caps it at 8192 sectors because the runtime caches at most two bitmap sectors.
+The 1 MiB default and 4 MiB Desktop image use the same marker and formula.
 
 ---
 
 ## On-Disk Layout
 
 ```
-Sector 0           Superblock (format identifier + geometry)
-Sector 1           Allocation Bitmap (one bit per sector)
-Sectors 2–13       Directory (128 entries × 48 bytes = 6144 bytes)
-Sectors 14–2047    Data Area (~1 MB usable storage)
+Sector 0                          Superblock (format identifier + geometry)
+Sector 1 .. bmap_sectors          Allocation bitmap (one bit per sector)
+Next 12 sectors                   Directory (128 × 48 bytes = 6144 bytes)
+Remaining sectors                 Data area
 ```
 
 ### Superblock (Sector 0)
@@ -59,30 +61,30 @@ geometry.  The first 4 bytes are the magic number — if they don't read
 | Offset | Size | Field | Value | Description |
 |--------|------|-------|-------|-------------|
 | +0 | 4 | `magic` | `b"MP64"` | Format identifier.  Always the ASCII bytes `4D 50 36 34`. |
-| +4 | 2 | `version` | 1 (u16 LE) | Filesystem version number. |
-| +6 | 4 | `total_sectors` | 2048 (u32 LE) | Total sectors on disk. |
+| +4 | 2 | `marker` | 1 (u16 LE) | The single accepted draft format marker. |
+| +6 | 4 | `total_sectors` | u32 LE | Must exactly equal attached media capacity and be ≤8192. |
 | +10 | 2 | `bmap_start` | 1 (u16 LE) | Starting sector of the allocation bitmap. |
-| +12 | 2 | `bmap_sectors` | 1 (u16 LE) | Number of bitmap sectors. |
-| +14 | 2 | `dir_start` | 2 (u16 LE) | Starting sector of the directory. |
+| +12 | 2 | `bmap_sectors` | u16 LE | Exactly `ceil(total_sectors / 4096)`. |
+| +14 | 2 | `dir_start` | u16 LE | Exactly `bmap_start + bmap_sectors`. |
 | +16 | 2 | `dir_sectors` | 12 (u16 LE) | Number of directory sectors. |
-| +18 | 2 | `data_start` | 14 (u16 LE) | First data sector. |
+| +18 | 2 | `data_start` | u16 LE | Exactly `dir_start + dir_sectors`. |
 | +20 | 1 | `max_files` | 128 (u8) | Maximum directory entries. |
 | +21 | 1 | `entry_size` | 48 (u8) | Bytes per directory entry. |
 | +22 | 490 | *reserved* | zeroes | Padding to fill the 512-byte sector. |
 
-### Allocation Bitmap (Sector 1)
+### Allocation Bitmap (Starting at Sector 1)
 
 The bitmap tracks which sectors are allocated.  It uses **one bit per
 sector** — bit N = 1 means sector N is in use.
 
-- 2048 sectors ÷ 8 bits/byte = **256 bytes** of bitmap data
-- The remaining 256 bytes of the sector are unused (zeroed)
-- On a freshly formatted disk, sectors 0–13 (metadata) are marked as
+- One 512-byte bitmap sector represents 4096 sectors; the 8192-sector
+  geometry uses two bitmap sectors
+- On a freshly formatted disk, sectors 0 through `data_start - 1` are marked
   allocated; everything else is free
-- For larger disk images, additional bitmap sectors are used
-  (e.g., a 4 MiB / 8192-sector disk needs 2 bitmap sectors)
+- Bitmap count, directory start, and data start are always derived and
+  validated rather than selected by another format marker
 
-### Directory (Sectors 2–13)
+### Directory (12 Sectors at `dir_start`)
 
 The directory holds **128 fixed-size entries**, each **48 bytes**:
 
@@ -405,8 +407,8 @@ managing MP64FS disk images from the host system.
 ### Command-Line Usage
 
 ```bash
-# Create a blank, formatted 1 MiB image
-python diskutil.py create myimage.img
+# Create a blank, formatted 4 MiB image
+python diskutil.py format -o myimage.img --sectors 8192
 
 # Inject a file into the image (root directory by default)
 python diskutil.py inject myimage.img myfile.f --type forth
@@ -415,19 +417,17 @@ python diskutil.py inject myimage.img myfile.f --type forth
 python diskutil.py inject myimage.img aes.f --type forth --path /tools/crypto
 
 # Create a subdirectory
-python diskutil.py mkdir myimage.img /tools/crypto
+python diskutil.py mkdir myimage.img tools
+python diskutil.py mkdir myimage.img crypto --path /tools
 
 # List all files on the image
-python diskutil.py list myimage.img
-
-# List files in a subdirectory
-python diskutil.py list myimage.img /tools
+python diskutil.py ls myimage.img
 
 # Read a file from the image
-python diskutil.py read myimage.img myfile.f
+python diskutil.py cat myimage.img myfile.f
 
 # Delete a file from the image
-python diskutil.py delete myimage.img myfile.f
+python diskutil.py rm myimage.img myfile.f
 
 # Verify CRC integrity of all files
 python diskutil.py check myimage.img
@@ -460,7 +460,7 @@ When injecting a file, use `--type` to set the file type:
 The `MP64FS` class provides programmatic access:
 
 ```python
-from diskutil import MP64FS
+from diskutil import FTYPE_FORTH, MP64FS
 
 # Create a new formatted image
 fs = MP64FS()
@@ -471,10 +471,10 @@ fs.mkdir("/tools")
 fs.mkdir("/tools/crypto")
 
 # Inject a file into root
-fs.inject("hello.f", b': greet ." Hello!" CR ;\n', file_type=3)
+fs.inject_file("hello.f", b': greet ." Hello!" CR ;\n', ftype=FTYPE_FORTH)
 
 # Inject a file into a subdirectory
-fs.inject("aes.f", data, file_type=3, path="/tools/crypto")
+fs.inject_file("aes.f", data, ftype=FTYPE_FORTH, path="/tools/crypto")
 
 # Create a symbolic link
 fs.mklink("quick.f", target="/tools/crypto/aes.f")
@@ -482,9 +482,9 @@ fs.mklink("quick.f", target="/tools/crypto/aes.f")
 # Create a stream file (pre-allocate 4 sectors)
 fs.mkstream("log.stream", sectors=4)
 
-# List files (optionally filtered by directory)
-for entry in fs.list_files(path="/tools"):
-    print(entry['name'], entry['used_bytes'], 'bytes')
+# List all entries. Pass a directory slot as parent= to filter.
+for entry in fs.list_files():
+    print(entry.name, entry.used_bytes, 'bytes')
 
 # Read a file
 content = fs.read_file("hello.f")
@@ -513,8 +513,9 @@ fs = MP64FS.load("myimage.img")
 
 `build_sample_image()` creates a fully-populated disk image with:
 
-- **KDOS** (`kdos.f`) — the full operating system as a Forth source file
-  (auto-booted by the BIOS as the first Forth-type file on disk)
+- **KDOS** (`kdos.f`) — packed executable Forth source with blank lines and
+  full-line backslash comments omitted; the BIOS auto-boots it as the first
+  Forth-type file on disk
 - **10 documentation topics** — getting-started, buffers, kernels,
   pipelines, data-ports, scheduler, screens, filesystem, tile-engine,
   reference
@@ -524,6 +525,8 @@ fs = MP64FS.load("myimage.img")
 - **demo-bundle** — sample pipeline bundle (type 7)
 
 This is the standard "ship it" disk image that boots KDOS automatically.
+Packing changes no executable line, inline comment, or string content; it keeps
+the boot source within FSLOAD's bounded Bank 0 DMA window.
 
 ---
 

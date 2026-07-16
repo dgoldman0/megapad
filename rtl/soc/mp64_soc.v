@@ -33,6 +33,7 @@ module mp64_soc #(
     parameter CORES_PER_CLUSTER = 4,
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
     parameter EXT_MEM_SIZE_PARAM = 0,         // ext mem bytes; 0 = auto (EXT_MEM_MAX-0x100000)
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192,
     parameter BIOS_INIT_FILE    = "rom.hex"
 )(
     input  wire        sys_clk,
@@ -973,11 +974,13 @@ module mp64_soc #(
     wire [7:0]  disk_dma_wdata;
     wire        disk_dma_wen;
 
-    mp64_disk u_disk (
+    mp64_disk #(
+        .TOTAL_SECTORS (DISK_TOTAL_SECTORS)
+    ) u_disk (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_disk),
-        .addr  (mmio_addr_eff[3:0]),
+        .addr  (mmio_addr_eff[4:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (disk_rdata_raw),

@@ -5,8 +5,8 @@ assembly.  It boots from address zero, initializes hardware, and presents a
 standard Forth REPL over the UART.  If a disk is attached it will
 automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
 
-This document catalogs every word in the BIOS dictionary — **363 entries** —
-organized by functional category.  Each entry shows the **stack effect**
+This document organizes the BIOS dictionary by functional category.  Each
+entry shows the **stack effect**
 (data-stack inputs on the left, outputs on the right of `--`), a plain-
 English description, and notes on edge cases where relevant.
 
@@ -448,7 +448,7 @@ calling `EVALUATOR-RESET`; status and diagnostics remain available afterward.
 
 ---
 
-## Disk I/O (6 words)
+## Disk I/O (9 words)
 
 Low-level sector-based disk access.  Each sector is **512 bytes**.
 These words talk directly to the storage controller MMIO registers.
@@ -456,6 +456,8 @@ These words talk directly to the storage controller MMIO registers.
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `DISK@` | `( -- status )` | Read the storage controller status register.  Bit 7 = device present. |
+| `DISK-SECTORS` | `( -- count )` | Read the attached media capacity as an unsigned count of 512-byte sectors. |
+| `MP64FS-VALID?` | `( -- flag )` | Validate the attached marker, derived geometry, reserved bitmap, directory entries, parents, extents, and byte bounds. |
 | `DISK-SEC!` | `( sector -- )` | Set the sector number for the next disk operation. |
 | `DISK-DMA!` | `( addr -- )` | Set the DMA address (where data will be read to or written from). |
 | `DISK-N!` | `( n -- )` | Set the number of sectors to transfer. |

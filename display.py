@@ -1915,7 +1915,11 @@ class FramebufferDisplay:
                     if not self.sys.storage._image_data:
                         self.status.set_message("No disk image attached")
                     else:
-                        fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        try:
+                            fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        except ValueError as exc:
+                            self.status.set_message(f"Invalid filesystem: {exc}")
+                            continue
                         chosen = SimpleDialog.disk_browser(
                             pygame, screen, ui_font, fs)
                         if chosen:
@@ -1944,7 +1948,11 @@ class FramebufferDisplay:
                     if not self.sys.storage._image_data:
                         self.status.set_message("No disk image attached")
                     else:
-                        fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        try:
+                            fs = MP64FS(bytearray(self.sys.storage._image_data))
+                        except ValueError as exc:
+                            self.status.set_message(f"Invalid filesystem: {exc}")
+                            continue
                         dest_str = SimpleDialog.pick_directory(
                             pygame, screen, ui_font,
                             default="extracted",
@@ -1973,7 +1981,11 @@ class FramebufferDisplay:
                     if not s._image_data:
                         self.status.set_message("No disk image attached")
                     else:
-                        fs = MP64FS(bytearray(s._image_data))
+                        try:
+                            fs = MP64FS(bytearray(s._image_data))
+                        except ValueError as exc:
+                            self.status.set_message(f"Invalid filesystem: {exc}")
+                            continue
                         meta = fs.info()
                         if meta.get("formatted"):
                             self.status.set_message(

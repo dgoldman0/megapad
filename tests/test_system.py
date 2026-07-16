@@ -45,6 +45,7 @@ import hashlib
 import os
 import random
 import re
+import struct
 import sys
 import tempfile
 import unittest
@@ -88,12 +89,14 @@ from data_sources import (
 )
 from diskutil import (
     MP64FS, format_image,
-    FTYPE_DOC, FTYPE_TUT, FTYPE_FORTH, FTYPE_DATA, FTYPE_BUNDLE, FTYPE_NAMES,
+    FTYPE_DOC, FTYPE_TUT, FTYPE_FORTH, FTYPE_DATA, FTYPE_BUNDLE, FTYPE_DIR,
+    FTYPE_NAMES,
     inject_file as du_inject_file,
     read_file as du_read_file,
     list_files as du_list_files,
     delete_file as du_delete_file,
     build_docs, build_tutorials, build_image, build_sample_image,
+    pack_forth_source,
     DOCS, TUTORIALS,
 )
 
@@ -275,6 +278,9 @@ class TestStorage(unittest.TestCase):
             stor.load_image(path)  # creates default 1 MiB image
             self.assertGreater(stor.total_sectors, 0)
             self.assertTrue(stor.status & 0x80)
+            raw_total = bytes(stor.read8(offset)
+                              for offset in range(0x11, 0x15))
+            self.assertEqual(struct.unpack("<I", raw_total)[0], 2048)
 
             # Write test data into internal buffer
             test_data = bytes(range(256))
@@ -293,6 +299,86 @@ class TestStorage(unittest.TestCase):
     def test_no_image(self):
         stor = Storage()
         self.assertFalse(stor.status & 0x80)
+        self.assertEqual([stor.read8(offset) for offset in range(0x11, 0x15)],
+                         [0, 0, 0, 0])
+
+    def test_total_sector_register_is_exact_u32_le(self):
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.truncate(8192 * SECTOR_SIZE)
+        try:
+            stor = Storage(path)
+            raw = bytes(stor.read8(offset) for offset in range(0x11, 0x15))
+            self.assertEqual(struct.unpack("<I", raw)[0], 8192)
+            stor.write8(0x11, 0)
+            raw = bytes(stor.read8(offset) for offset in range(0x11, 0x15))
+            self.assertEqual(struct.unpack("<I", raw)[0], 8192)
+        finally:
+            os.unlink(path)
+
+    def test_fixed_capacity_transfer_boundaries(self):
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.truncate(2 * SECTOR_SIZE)
+        try:
+            stor = Storage(path)
+            capacity = stor.total_sectors
+            image_size = len(stor._image_data)
+
+            payload = bytes([0xA5]) * SECTOR_SIZE
+            stor.write_sectors(capacity - 1, 1, payload)
+            self.assertEqual(stor.read_sectors(capacity - 1, 1), payload)
+
+            with self.assertRaises(ValueError):
+                stor.read_sectors(capacity, 1)
+            self.assertTrue(stor.error)
+            self.assertEqual(stor.total_sectors, capacity)
+            self.assertEqual(len(stor._image_data), image_size)
+
+            with self.assertRaises(ValueError):
+                stor.write_sectors(capacity - 1, 2, payload * 2)
+            self.assertTrue(stor.error)
+            self.assertEqual(stor.total_sectors, capacity)
+            self.assertEqual(len(stor._image_data), image_size)
+        finally:
+            os.unlink(path)
+
+    def test_oob_mmio_commands_set_error_without_mutating_capacity(self):
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.truncate(2 * SECTOR_SIZE)
+        try:
+            stor = Storage(path)
+            original = bytes(stor._image_data)
+            stor.sector_num = stor.total_sectors
+            stor.sec_count = 1
+
+            stor.write8(0x00, 0x01)
+            self.assertTrue(stor.read8(0x01) & 0x02)
+            stor.data_port_buf = bytearray(SECTOR_SIZE)
+            stor.write8(0x00, 0x02)
+            self.assertTrue(stor.read8(0x01) & 0x02)
+
+            self.assertEqual(stor.total_sectors, 2)
+            self.assertEqual(bytes(stor._image_data), original)
+            raw = bytes(stor.read8(offset) for offset in range(0x11, 0x15))
+            self.assertEqual(struct.unpack("<I", raw)[0], 2)
+        finally:
+            os.unlink(path)
+
+    def test_short_write_is_rejected_without_shrinking_image(self):
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.truncate(2 * SECTOR_SIZE)
+        try:
+            stor = Storage(path)
+            with self.assertRaises(ValueError):
+                stor.write_sectors(0, 1, b"short")
+            self.assertTrue(stor.error)
+            self.assertEqual(stor.total_sectors, 2)
+            self.assertEqual(len(stor._image_data), 2 * SECTOR_SIZE)
+        finally:
+            os.unlink(path)
 
     def test_swap_image(self):
         """swap_image() saves the old image and loads the new one."""
@@ -1961,7 +2047,7 @@ class TestBIOS(unittest.TestCase):
         for word in ["VARIABLE", "CONSTANT", "IF", "THEN", "ELSE",
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
                      "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
-                     "DISK-FLUSH",
+                     "DISK-FLUSH", "DISK-SECTORS",
                      "TIMER!", "EI!", "DI!", "ISR!", "KEY?"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
@@ -1986,6 +2072,20 @@ class TestBIOS(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+    def test_disk_sectors_reports_attached_capacity(self):
+        """DISK-SECTORS reports the exact attached block-device geometry."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["DISK-SECTORS ."])
+            self.assertIn("8192 ", text)
+        finally:
+            os.unlink(path)
 
     def test_disk_write_read_roundtrip(self):
         """Write data to disk sector 0, read it back via DMA."""
@@ -2050,6 +2150,219 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ["FSLOAD test.f"])
         self.assertIn("no disk", text)
+
+    def test_fsload_uses_dynamic_directory_geometry(self):
+        """BIOS file loading follows the directory geometry on large media."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("largeboot.f", b'." LARGE-FSLOAD-PASS"', ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD largeboot.f"])
+            self.assertIn("LARGE-FSLOAD-PASS", text)
+        finally:
+            os.unlink(path)
+
+    def test_autoboot_uses_dynamic_directory_geometry(self):
+        """BIOS startup discovers the first Forth file on large media."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("largeauto.f", b": LARGEAUTO 77 ;\n", ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["LARGEAUTO ."])
+            self.assertIn("77 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_rejects_inconsistent_geometry(self):
+        """BIOS refuses geometry that is not derived from the media size."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("badboot.f", b': BADBOOT 99 ;\n', ftype=FTYPE_FORTH)
+        struct.pack_into("<H", fs.img, 14, 4)  # derived directory start is 3
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD badboot.f"])
+            self.assertIn("invalid MP64FS", text)
+            self.assertNotIn("99 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_rejects_invalid_format_marker(self):
+        """BIOS accepts only the one draft MP64FS format marker."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<H", fs.img, 4, 2)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD any.f"])
+            self.assertIn("invalid MP64FS", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_rejects_file_whose_bitmap_bit_is_clear(self):
+        """FSLOAD never DMA-evaluates an extent the bitmap does not own."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        fs.inject_file("bad.f", b'." FSLOAD-MALFORMED-RAN"', ftype=2)
+        slot, entry = fs.find_file("bad.f")
+        bmap_off = SECTOR_SIZE + entry.start_sector // 8
+        fs.img[bmap_off] &= ~(1 << (entry.start_sector % 8)) & 0xFF
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD bad.f"])
+            self.assertIn("invalid MP64FS", text)
+            self.assertNotIn("FSLOAD-MALFORMED-RAN", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_rejects_file_beyond_live_ram_span(self):
+        """FSLOAD rejects an oversized valid file without wrapping Bank 0."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        source = b"\\ filler\n" * 20_000
+        fs.inject_file("oversize.f", source, ftype=FTYPE_DATA)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(
+                sys, buf, ["FSLOAD oversize.f", "42 ."],
+                max_steps=20_000_000,
+            )
+            self.assertIn("file exceeds RAM buffer", text)
+            self.assertIn("42 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_accepts_last_whole_sector_below_control_stack(self):
+        """The final safe sector remains readable below live RSP state."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        filler = b"\\ " + (b"x" * 252) + b"\n"
+        source = (filler * 511) + b": DMAEDGE 255 ;\n"
+        self.assertEqual((len(source) + SECTOR_SIZE - 1) // SECTOR_SIZE, 255)
+        fs.inject_file("edge.f", source, ftype=FTYPE_DATA)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(
+                sys, buf, ["FSLOAD edge.f", "DMAEDGE ."],
+                max_steps=80_000_000,
+            )
+            self.assertIn("255 ", text)
+            self.assertNotIn("file exceeds RAM buffer", text)
+        finally:
+            os.unlink(path)
+
+    def test_fsload_rejects_free_metadata_sector(self):
+        """The shared validator rejects a free bit in reserved metadata."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        fs.img[SECTOR_SIZE] &= 0xFE
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD any.f", "43 ."])
+            self.assertIn("invalid MP64FS", text)
+            self.assertIn("43 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_mp64fs_validator_rejects_metadata_dma_without_stack_headroom(self):
+        """Metadata validation never DMA-overwrites its live return stack."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            run_until(sys, 2_000_000)
+            metadata_buffer = sys.cpu.regs[15] - 4096
+            sys.cpu.regs[2] = metadata_buffer * 2
+            sentinel = bytes([0xA5]) * 64
+            sys.cpu.mem[metadata_buffer:metadata_buffer + len(sentinel)] = sentinel
+
+            text = self._run_forth(sys, buf, ["MP64FS-VALID? .", "44 ."])
+
+            self.assertIn("0 ", text)
+            self.assertIn("44 ", text)
+            self.assertEqual(
+                bytes(sys.cpu.mem[metadata_buffer:metadata_buffer + len(sentinel)]),
+                sentinel,
+            )
+        finally:
+            os.unlink(path)
+
+    def test_fsload_reads_valid_secondary_extent(self):
+        """FSLOAD concatenates both validated extents before EVALUATE."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        source = (b"\\ x\n" * 128) + b": SPLITFS 314 ;\n"
+        fs.inject_file("split.f", source, ftype=FTYPE_DATA)
+        slot, entry = fs.find_file("split.f")
+        self.assertEqual(entry.sector_count, 2)
+        second = entry.start_sector + 2
+        fs.img[second * SECTOR_SIZE:(second + 1) * SECTOR_SIZE] = \
+            fs.img[(entry.start_sector + 1) * SECTOR_SIZE:
+                   (entry.start_sector + 2) * SECTOR_SIZE]
+        de_off = fs.dir_start * SECTOR_SIZE + slot * 48
+        struct.pack_into("<H", fs.img, de_off + 26, 1)
+        struct.pack_into("<HH", fs.img, de_off + 44, second, 1)
+        fs.img[SECTOR_SIZE + (entry.start_sector + 1) // 8] &= \
+            ~(1 << ((entry.start_sector + 1) % 8)) & 0xFF
+        fs.img[SECTOR_SIZE + second // 8] |= 1 << (second % 8)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["FSLOAD split.f", "SPLITFS ."])
+            self.assertIn("314 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_autoboot_rejects_used_bytes_beyond_extent(self):
+        """Autoboot skips a Forth entry whose byte count exceeds capacity."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        fs.inject_file("badauto.f", b'." MALFORMED-AUTO-RAN"\n',
+                       ftype=FTYPE_FORTH)
+        slot, _ = fs.find_file("badauto.f")
+        de_off = fs.dir_start * SECTOR_SIZE + slot * 48
+        struct.pack_into("<I", fs.img, de_off + 28, SECTOR_SIZE + 1)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, ["123 ."])
+            self.assertIn("123 ", text)
+            self.assertNotIn("MALFORMED-AUTO-RAN", text)
+        finally:
+            os.unlink(path)
 
     def test_fsload_file_not_found(self):
         """FSLOAD with empty formatted disk prints not-found error."""
@@ -7534,6 +7847,132 @@ class TestKDOS(_KDOSTestBase):
         finally:
             os.unlink(path)
 
+    def test_fs_load_dynamic_geometry(self):
+        """KDOS mounts and reports every sector in an 8192-sector image."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                "FS-SUPER 4 + W@ . FS-TOTAL @ . FS-BMAP-N @ .",
+                "FS-DIR-START . FS-DSTART .",
+                "FS-FREE",
+            ], storage_image=path)
+            self.assertIn("MP64FS loaded", text)
+            self.assertIn("1 8192 2 ", text)
+            self.assertIn("3 15 ", text)
+            self.assertIn("8177  free sectors", text)
+        finally:
+            os.unlink(path)
+
+    def test_fs_load_rejects_inconsistent_geometry(self):
+        """KDOS leaves FS-OK clear when disk geometry is inconsistent."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<H", fs.img, 14, 4)  # directory must start at 3
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos(["FS-LOAD", "FS-OK @ ."], storage_image=path)
+            self.assertIn("Invalid MP64FS", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_fs_load_rejects_invalid_format_marker(self):
+        """KDOS leaves FS-OK clear for every non-1 format marker."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        struct.pack_into("<H", fs.img, 4, 2)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos(["FS-LOAD", "FS-OK @ ."],
+                                  storage_image=path)
+            self.assertIn("Invalid MP64FS", text)
+            self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_format_uses_attached_media_geometry(self):
+        """KDOS FORMAT derives geometry from an 8192-sector device."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (8192 * 512))
+        try:
+            text = self._run_kdos([
+                "FORMAT",
+                "FS-SUPER 4 + W@ . FS-TOTAL @ . FS-BMAP-N @ .",
+                "FS-DIR-START . FS-DSTART .",
+                "DISK-FLUSH",
+            ], storage_image=path)
+            self.assertIn("MP64FS formatted", text)
+            self.assertIn("1 8192 2 ", text)
+            self.assertIn("3 15 ", text)
+            formatted = MP64FS.load(path)
+            self.assertEqual(formatted.marker, 1)
+            self.assertEqual(formatted.info()["free_sectors"], 8177)
+        finally:
+            os.unlink(path)
+
+    def test_high_bitmap_sector_allocation_and_free_sync(self):
+        """KDOS allocation/free persists bits above the first bitmap sector."""
+        fs = MP64FS(total_sectors=8192)
+        fs.format()
+        fs.inject_file("prefix", bytes(4100 * 512), ftype=FTYPE_DATA)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                "1 1 MKFILE high",
+                "RMFILE prefix",
+                "DISK-FLUSH",
+            ], storage_image=path)
+            self.assertIn("Created: high", text)
+            self.assertIn("Deleted: prefix", text)
+            persisted = MP64FS.load(path)
+            high = persisted.find_file("high")
+            self.assertIsNotNone(high)
+            self.assertGreater(high[1].start_sector, 4096)
+            self.assertEqual(persisted.info()["free_sectors"], 8176)
+        finally:
+            os.unlink(path)
+
+    def test_fs_load_rejects_malformed_entry_before_rmfile(self):
+        """A failed directory mount leaves RMFILE unable to alter the image."""
+        fs = MP64FS(total_sectors=2048)
+        fs.format()
+        fs.inject_file("victim", b"protected", ftype=FTYPE_DATA)
+        slot, entry = fs.find_file("victim")
+        de_off = fs.dir_start * SECTOR_SIZE + slot * 48
+        struct.pack_into("<H", fs.img, de_off + 44,
+                         entry.start_sector + entry.sector_count)
+        struct.pack_into("<H", fs.img, de_off + 46, 0)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        with open(path, "rb") as f:
+            before = f.read()
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                "RMFILE victim",
+                "DISK-FLUSH",
+            ], storage_image=path)
+            self.assertIn("Invalid MP64FS", text)
+            self.assertIn("No filesystem", text)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), before)
+        finally:
+            os.unlink(path)
+
     def test_fs_load_no_disk(self):
         """FS-LOAD with no disk prints error."""
         text = self._run_kdos_fast(["FS-LOAD"])
@@ -8211,11 +8650,23 @@ class TestDiskUtil(unittest.TestCase):
             fs = format_image(f.name)
             info = fs.info()
             self.assertTrue(info["formatted"])
-            self.assertEqual(info["version"], 1)
+            self.assertEqual(info["marker"], 1)
             self.assertEqual(info["total_sectors"], 2048)
             self.assertEqual(info["data_start"], 14)
             self.assertEqual(info["files"], 0)
             self.assertEqual(info["free_sectors"], 2034)
+
+    def test_pack_forth_source_keeps_only_executable_lines(self):
+        source = (
+            b"\\ heading\n\n"
+            b"  \\ indented heading\n"
+            b': GREET ." text \\ stays" ; \\ inline stays\n'
+            b"GREET\n"
+        )
+        self.assertEqual(
+            pack_forth_source(source),
+            b': GREET ." text \\ stays" ; \\ inline stays\nGREET\n',
+        )
 
     def test_diskutil_inject_read(self):
         """inject_file + read_file round-trips data."""
@@ -8237,6 +8688,30 @@ class TestDiskUtil(unittest.TestCase):
             self.assertIn("alpha", names)
             self.assertIn("beta", names)
             self.assertEqual(len(entries), 2)
+
+    def test_diskutil_mkdir_cli_resolves_parent_path(self):
+        """The mkdir CLI composes --path with the requested directory name."""
+        from unittest.mock import patch
+        from diskutil import main as diskutil_main
+
+        with tempfile.NamedTemporaryFile(suffix=".img") as f:
+            format_image(f.name)
+            with patch.object(
+                sys, "argv", ["diskutil", "mkdir", f.name, "tools"]
+            ):
+                diskutil_main()
+            with patch.object(
+                sys,
+                "argv",
+                ["diskutil", "mkdir", f.name, "crypto", "--path", "/tools"],
+            ):
+                diskutil_main()
+
+            fs = MP64FS.load(f.name)
+            tools_slot, tools = fs.find_file("tools")
+            self.assertEqual(tools.ftype, FTYPE_DIR)
+            _, crypto = fs.find_file("crypto", parent=tools_slot)
+            self.assertEqual(crypto.ftype, FTYPE_DIR)
 
     def test_diskutil_delete_file(self):
         """delete_file removes a file and frees sectors."""
@@ -26894,7 +27369,9 @@ class TestHeadlessDisplay(_KDOSTestBase):
             # We need access to the system object, so call _run_kdos_fast
             # the same way _run_kdos does, but capture the system.
             mem_bytes, cpu_state = _kdos_shared_snapshot
-            sys_emu = make_system(ram_kib=1024, storage_image=img)
+            sys_emu = make_system(
+                ram_kib=1024, storage_image=img, ext_mem_mib=16
+            )
             buf = capture_uart(sys_emu)
             sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
             self._restore_cpu_state(sys_emu.cpu, cpu_state)

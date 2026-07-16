@@ -335,7 +335,11 @@ class MegapadCLI(cmd.Cmd):
         """Return an MP64FS view of the live disk image, or None."""
         if not self._require_storage():
             return None
-        return MP64FS(bytearray(self.sys.storage._image_data))
+        try:
+            return MP64FS(bytearray(self.sys.storage._image_data))
+        except ValueError as exc:
+            print(f"Invalid filesystem: {exc}")
+            return None
 
     def do_storage(self, arg):
         """Storage commands:
@@ -360,7 +364,11 @@ class MegapadCLI(cmd.Cmd):
             if len(parts) < 2:
                 print("Usage: storage attach <image_file>")
                 return
-            self.sys.storage.load_image(parts[1])
+            try:
+                self.sys.storage.load_image(parts[1])
+            except (OSError, ValueError) as exc:
+                print(f"Storage attach failed: {exc}")
+                return
             self.sys.sysinfo.has_storage = True
             print(f"Storage attached: {parts[1]} "
                   f"({self.sys.storage.total_sectors} sectors)")
@@ -377,7 +385,11 @@ class MegapadCLI(cmd.Cmd):
                 print("Usage: storage swap <image_file>")
                 return
             old = self.sys.storage.image_path or "(none)"
-            self.sys.storage.swap_image(parts[1])
+            try:
+                self.sys.storage.swap_image(parts[1])
+            except (OSError, ValueError) as exc:
+                print(f"Storage swap failed: {exc}")
+                return
             self.sys.sysinfo.has_storage = True
             print(f"Swapped: {old} → {parts[1]} "
                   f"({self.sys.storage.total_sectors} sectors)")
@@ -393,7 +405,7 @@ class MegapadCLI(cmd.Cmd):
             if fs:
                 meta = fs.info()
                 if meta.get("formatted"):
-                    print(f"  FS ver:  {meta['version']}  "
+                    print(f"  FS mark: {meta['marker']}  "
                           f"files={meta['files']}  "
                           f"free={meta['free_sectors']} sectors")
 
@@ -1281,7 +1293,7 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
 
 
 def _console_pipe(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
-    """Console loop with piped/redirected stdin (non-interactive).""""
+    """Console loop with piped/redirected stdin (non-interactive)."""
     import select
 
     fd = sys.stdin.fileno()

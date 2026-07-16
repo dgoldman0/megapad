@@ -687,16 +687,18 @@ Like `EVALUATE`, source-level data-stack effects are preserved.
 
 ## §7.6 MP64FS Filesystem
 
-The **MP64FS** is a simple on-disk named filesystem that fits on a 1 MiB
-(2048-sector) disk image.  It supports up to 64 files with 15-character
-names.  See `docs/filesystem.md` for the full on-disk format specification.
+The **MP64FS** is a simple on-disk named filesystem with one draft format
+marker and uniformly derived geometry through 8192 sectors (4 MiB).  It
+supports 128 entries, 23-character names, and two extents per file.  See
+`docs/filesystem.md` for the full on-disk format specification.
 
 ### Key Concepts
 
-- **Superblock** (sector 0) — magic number `"MP64"`, version, geometry
-- **Bitmap** (sector 1) — 2048-bit allocation map, one bit per sector
-- **Directory** (sectors 2–13) — 128 entries × 48 bytes each
-- **Data area** (sectors 6–2047) — ~1 MB of usable file storage
+- **Superblock** (sector 0) — magic number `"MP64"`, marker, geometry
+- **Bitmap** (starting at sector 1) — one bit per sector; count is
+  `ceil(total_sectors / 4096)`
+- **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
+- **Data area** — begins immediately after the derived directory
 
 ### File Type Codes
 
@@ -715,10 +717,10 @@ names.  See `docs/filesystem.md` for the full on-disk format specification.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FS-LOAD` | `( -- )` | Load the superblock, bitmap, and directory from disk into RAM.  Checks the `"MP64"` magic.  Sets `FS-OK`. |
+| `FS-LOAD` | `( -- )` | Load and validate marker-1 superblock geometry against `DISK-SECTORS`, then cache the complete bitmap and directory.  Sets `FS-OK`. |
 | `FS-SYNC` | `( -- )` | Write the in-RAM bitmap and directory back to disk.  Call after any changes. |
 | `FS-ENSURE` | `( -- )` | Auto-load the filesystem if not yet loaded. |
-| `FORMAT` | `( -- )` | **Initialize a fresh filesystem** on the attached disk.  Writes superblock, clears bitmap (marks metadata sectors 0–5 as allocated), clears directory. |
+| `FORMAT` | `( -- )` | **Initialize a fresh filesystem** using the attached media capacity.  Writes marker 1 and derived geometry, marks every metadata sector allocated, and clears the directory. |
 | `DIR` | `( -- )` | List all files showing name, size, and type.  Also shows a free-space summary. |
 | `CATALOG` | `( -- )` | Detailed directory listing with sector start, sector count, byte size, and type. |
 | `FIND-BY-NAME` | `( -- slot \| -1 )` | Search the directory for a file matching `NAMEBUF`.  Caller must call `PARSE-NAME` first.  Returns the slot index or −1. |

@@ -12,24 +12,27 @@ capacity and robustness limits worth addressing.
 
 | Parameter | Current | Limit Imposed |
 |-----------|---------|---------------|
-| Bitmap | 1 sector (512 bytes) | 4096 sectors max (2 MiB) |
+| Bitmap | 1–2 sectors (512–1024 bytes) | 8192 sectors max (4 MiB) |
 | Image default | 2048 sectors (1 MiB) | Comfortable for small FS |
 | Directory | 128 entries × 48 B | 128 files max, flat scan |
 | Extents per file | 2 | Large files need contiguous runs or fail |
 | Filename | 23 chars | Tight for paths with directories |
-| `total_sectors` in superblock | u32 | No structural limit, but bitmap is the bottleneck |
+| `total_sectors` in superblock | u32 | Current draft deliberately caps it at 8192 |
 
-The bitmap is the hard ceiling.  Everything else scales if it grows.
+The two-sector runtime bitmap cache is the current hard ceiling.
 
 ---
 
 ## Phase 1 — Multi-Sector Bitmap  ★ highest impact
 
-**Problem:** `BMAP_SECTORS = 1` caps trackable sectors at 4096.  Any
-image > 2 MiB hits this wall even though the superblock already stores
+**Status: implemented.**  Marker 1 now applies one derived geometry rule at
+every supported capacity through 8192 sectors.
+
+**Original problem:** `BMAP_SECTORS = 1` capped trackable sectors at 4096.
+Images above 2 MiB hit that wall even though the superblock already stored
 `total_sectors` as a u32.
 
-**Plan:**
+**Implementation:**
 - Make `BMAP_SECTORS` dynamic: `ceil(total_sectors / (512 × 8))`.
 - Update `DATA_START` to `BMAP_START + bmap_sectors + DIR_SECTORS + …`
   (read from superblock, not hardcoded).
@@ -37,11 +40,11 @@ image > 2 MiB hits this wall even though the superblock already stores
   writes it into the superblock, adjusts `dir_start` and `data_start`.
 - `kdos.f`: `FS-LOAD` reads `bmap_sectors` from superblock, DMA-reads
   that many sectors into an appropriately-sized RAM cache.
-- Default stays 1 MiB / 1-sector bitmap for backward compat; larger
-  images (e.g. `--sectors 8192`) get 2 bitmap sectors automatically.
+- The host default stays 1 MiB / 1-sector bitmap; larger images such as
+  `--sectors 8192` get 2 bitmap sectors automatically under the same format.
 
-**Risk:** Low — clean arithmetic change.  Existing 1 MiB images are
-unaffected (their superblock says `bmap_sectors = 1`).
+**Risk:** Low — the arithmetic and every derived field are validated against
+the attached media before variable-size DMA.
 
 **Estimated scope:** ~60 lines Python, ~30 lines Forth.
 
@@ -151,7 +154,7 @@ bundles, streams, and links all compete for slots.
 | 4 | **P1** | None | Silent corruption is worse than crashes |
 | 3 | **P1** | None | Reduces wasted space, fewer "no space" errors |
 | 6 | **P2** | Phase 1 | Nice-to-have, only matters at scale |
-| 5 | **P2** | Phase 4 | Significant complexity, save for v1.1+ |
+| 5 | **P2** | Phase 4 | Significant complexity; reserve for a later hardening milestone |
 
 Phases 1 and 2 can ship together as a single PR.  Phase 4 is a natural
 follow-up.  Phase 5 is a design decision that warrants its own RFC.

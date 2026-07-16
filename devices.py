@@ -428,6 +428,10 @@ class Timer(Device):
 #   0x0E  SEC_COUNT  (RW) — number of sectors to transfer (1-255)
 #   0x0F  DATA       (RW) — byte-at-a-time data port (alternative to DMA)
 #   0x10  DMA_PUSH   (W)  — byte-push: writes accumulate LE into DMA_ADDR
+#   0x11  TOTAL_0    (R)   — attached media sector count, u32 LE
+#   0x12  TOTAL_1    (R)
+#   0x13  TOTAL_2    (R)
+#   0x14  TOTAL_3    (R)
 
 SECTOR_SIZE = 512
 
@@ -438,6 +442,7 @@ class Storage(Device):
         super().__init__("Storage", STORAGE_BASE, 0x18)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
+        self._capacity_sectors: int = 0
         self.sector_num: int = 0
         self.dma_addr: int = 0
         self.sec_count: int = 1
@@ -463,14 +468,19 @@ class Storage(Device):
         """Load a disk image from file."""
         try:
             with open(path, "rb") as f:
-                self._image_data = bytearray(f.read())
-            self.image_path = path
-            self.status = 0x80  # present
+                image_data = bytearray(f.read())
         except FileNotFoundError:
             # Create empty image
-            self._image_data = bytearray(SECTOR_SIZE * 2048)  # 1 MiB default
-            self.image_path = path
-            self.status = 0x80
+            image_data = bytearray(SECTOR_SIZE * 2048)  # 1 MiB default
+        if len(image_data) % SECTOR_SIZE:
+            raise ValueError(
+                f"storage image size {len(image_data)} is not a multiple "
+                f"of the {SECTOR_SIZE}-byte sector size"
+            )
+        self._image_data = image_data
+        self._capacity_sectors = len(image_data) // SECTOR_SIZE
+        self.image_path = path
+        self.status = 0x80  # present
 
     def save_image(self):
         """Flush image data back to host file."""
@@ -501,6 +511,7 @@ class Storage(Device):
         if save:
             self.save_image()
         self._image_data = bytearray()
+        self._capacity_sectors = 0
         self.image_path = None
         self.status = 0
         self.data_port_buf = bytearray()
@@ -508,27 +519,40 @@ class Storage(Device):
 
     @property
     def total_sectors(self) -> int:
-        return len(self._image_data) // SECTOR_SIZE if self._image_data else 0
+        return self._capacity_sectors
+
+    def _transfer_bounds(self, sector: int, count: int) -> tuple[int, int]:
+        """Validate a fixed-capacity transfer and return its byte bounds."""
+        if sector < 0 or count <= 0:
+            self.error = True
+            raise ValueError(
+                f"invalid storage transfer: sector={sector}, count={count}"
+            )
+        if (sector >= self._capacity_sectors
+                or count > self._capacity_sectors - sector):
+            self.error = True
+            raise ValueError(
+                f"storage transfer [{sector}, {sector + count}) exceeds "
+                f"attached capacity {self._capacity_sectors} sectors"
+            )
+        start = sector * SECTOR_SIZE
+        return start, start + count * SECTOR_SIZE
 
     def read_sectors(self, sector: int, count: int) -> bytearray:
         """Read `count` sectors starting at `sector`."""
-        start = sector * SECTOR_SIZE
-        end = start + count * SECTOR_SIZE
-        if end > len(self._image_data):
-            # Pad with zeros beyond image
-            data = bytearray(self._image_data[start:])
-            data.extend(bytearray(end - len(self._image_data)))
-            return data
+        start, end = self._transfer_bounds(sector, count)
         return bytearray(self._image_data[start:end])
 
     def write_sectors(self, sector: int, count: int, data: bytes | bytearray):
         """Write `count` sectors starting at `sector`."""
-        start = sector * SECTOR_SIZE
-        end = start + count * SECTOR_SIZE
-        # Extend image if necessary
-        if end > len(self._image_data):
-            self._image_data.extend(bytearray(end - len(self._image_data)))
-        self._image_data[start:end] = data[:count * SECTOR_SIZE]
+        start, end = self._transfer_bounds(sector, count)
+        transfer_size = count * SECTOR_SIZE
+        if len(data) < transfer_size:
+            self.error = True
+            raise ValueError(
+                f"storage write needs {transfer_size} bytes, got {len(data)}"
+            )
+        self._image_data[start:end] = data[:transfer_size]
 
     def read8(self, offset: int) -> int:
         if offset == 0x01:    # STATUS
@@ -552,6 +576,8 @@ class Storage(Device):
                 self.data_port_pos += 1
                 return b
             return 0
+        if 0x11 <= offset <= 0x14:
+            return (self.total_sectors >> (8 * (offset - 0x11))) & 0xFF
         return 0
 
     def write8(self, offset: int, value: int):
@@ -579,30 +605,36 @@ class Storage(Device):
     def _execute_cmd(self, cmd: int):
         self.error = False
         self._dma_push_ctr = 0  # reset byte-push on any command
-        if cmd == 0x01:       # READ → DMA
-            data = self.read_sectors(self.sector_num, self.sec_count)
-            if self._mem_write:
-                for i, b in enumerate(data):
-                    self._mem_write(self.dma_addr + i, b)
-            # Also fill data port buffer
-            self.data_port_buf = data
-            self.data_port_pos = 0
-        elif cmd == 0x02:     # WRITE ← DMA
-            if self._mem_read:
-                nbytes = self.sec_count * SECTOR_SIZE
-                data = bytearray()
-                for i in range(nbytes):
-                    data.append(self._mem_read(self.dma_addr + i))
-                self.write_sectors(self.sector_num, self.sec_count, data)
-            else:
-                # Write from data port buffer
-                self.write_sectors(self.sector_num, self.sec_count, self.data_port_buf)
-                self.data_port_buf = bytearray()
+        try:
+            if cmd == 0x01:       # READ → DMA
+                data = self.read_sectors(self.sector_num, self.sec_count)
+                if self._mem_write:
+                    for i, b in enumerate(data):
+                        self._mem_write(self.dma_addr + i, b)
+                # Also fill data port buffer
+                self.data_port_buf = data
                 self.data_port_pos = 0
-        elif cmd == 0x03:     # STATUS (no-op, just read STATUS reg)
-            pass
-        elif cmd == 0xFF:     # FLUSH (save to host file)
-            self.save_image()
+            elif cmd == 0x02:     # WRITE ← DMA
+                # Reject an out-of-range command before reading guest memory.
+                self._transfer_bounds(self.sector_num, self.sec_count)
+                if self._mem_read:
+                    nbytes = self.sec_count * SECTOR_SIZE
+                    data = bytearray()
+                    for i in range(nbytes):
+                        data.append(self._mem_read(self.dma_addr + i))
+                    self.write_sectors(self.sector_num, self.sec_count, data)
+                else:
+                    # Write from data port buffer
+                    self.write_sectors(self.sector_num, self.sec_count, self.data_port_buf)
+                    self.data_port_buf = bytearray()
+                    self.data_port_pos = 0
+            elif cmd == 0x03:     # STATUS (no-op, just read STATUS reg)
+                pass
+            elif cmd == 0xFF:     # FLUSH (save to host file)
+                self.save_image()
+        except ValueError:
+            # Guest MMIO commands report transfer failures through STATUS bit 1.
+            self.error = True
 
 
 # ---------------------------------------------------------------------------

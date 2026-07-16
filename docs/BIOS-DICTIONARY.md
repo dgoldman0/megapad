@@ -97,13 +97,18 @@ status and diagnostics.
 `w_fsload ( "name" -- )`:
 1. Parses filename from input stream.
 2. Checks disk present (MMIO STATUS bit 7).
-3. Reads MP64FS directory (sectors 2–5, 2048 bytes) into buffer at `ram_size / 2`.
-4. Scans 64 directory entries (32 bytes each) for exact name match (including NUL-padding check).
-5. Extracts `start_sector` (u16 @ +16), `sector_count` (u16 @ +18), `used_bytes` (u32 @ +20).
-6. Reads file data sectors via `disk_read_sectors` into RAM buffer.
-7. Walks content line-by-line (splitting on LF, stripping trailing CR):
+3. Reads sector 0 and accepts only marker 1 with geometry derived from the
+   exact attached `TOTAL_SECTORS` register.
+4. Reads the complete bitmap and 12-sector directory, then validates reserved
+   allocation bits, entry types and parents, both extents, and byte bounds.
+5. Scans 128 directory entries (48 bytes each) for an exact name match.
+6. Extracts the primary and optional secondary extents plus `used_bytes`.
+7. Rejects the file unless its complete sector-rounded DMA span ends below the
+   live return-stack frame in Bank 0.
+8. Reads both validated extents contiguously into the buffer at `ram_size / 2`.
+9. Walks content line-by-line (splitting on LF, stripping trailing CR):
    - Pushes `( addr len )` for each non-empty line and calls `w_evaluate`.
-8. Cleans up RSP frame on completion.
+10. Cleans up RSP frame on completion.
 
 ---
 
@@ -487,17 +492,19 @@ of compiled code.
 | 204 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
 | 205 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
-### Disk / Storage (6 words)
+### Disk / Storage (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 206 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
-| 207 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
-| 208 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
-| 209 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
-| 210 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
-| 211 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
-| 212 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
+| 207 | `DISK-SECTORS` | `( -- count )` | | Read attached media capacity from MMIO +0x0211 (u32 LE) |
+| 208 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
+| 209 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
+| 210 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
+| 211 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
+| 212 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
+| 213 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
+| 214 | `MP64FS-VALID?` | `( -- flag )` | | Validate the attached marker, derived geometry, reserved bitmap, complete directory, parents, extents, and byte bounds. |
 
 ### Timer & Interrupts (6 words)
 
@@ -741,7 +748,7 @@ of compiled code.
 | Miscellaneous / System | 9 |
 | Tile Engine | 39 |
 | NIC | 4 |
-| Disk / Storage | 6 |
+| Disk / Storage | 9 |
 | Timer & Interrupts | 6 |
 | RTC / System Clock | 7 |
 | Multicore | 11 |
@@ -783,7 +790,7 @@ TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-R
 |---|---|---|
 | `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2 |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
-| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E |
+| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL_SECTORS=+11..+14 |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |

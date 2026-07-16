@@ -417,13 +417,15 @@ localparam [3:0] TIMER_CMP    = 4'h4;
 localparam [3:0] TIMER_CTRL   = 4'h8;
 localparam [3:0] TIMER_STATUS = 4'h9;
 
-// --- Disk registers ---
-localparam [3:0] DISK_CMD     = 4'h0;
-localparam [3:0] DISK_STATUS  = 4'h1;
-localparam [3:0] DISK_SECTOR  = 4'h2;
-localparam [3:0] DISK_DMA     = 4'h6;
-localparam [3:0] DISK_SECN    = 4'hE;
-localparam [3:0] DISK_DATA    = 4'hF;
+// --- Disk registers (5-bit offsets give capacity its own addresses) ---
+localparam [4:0] DISK_CMD      = 5'h00;
+localparam [4:0] DISK_STATUS   = 5'h01;
+localparam [4:0] DISK_SECTOR   = 5'h02;
+localparam [4:0] DISK_DMA      = 5'h06;
+localparam [4:0] DISK_SECN     = 5'h0E;
+localparam [4:0] DISK_DATA     = 5'h0F;
+localparam [4:0] DISK_DMA_PUSH = 5'h10;
+localparam [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
 
 // --- NIC registers ---
 localparam [3:0] NIC_CMD      = 4'h0;

@@ -32,7 +32,8 @@ module mp64_top #(
     parameter MEM_DEPTH         = 16384,     // per-bank rows (×512 bits)
     parameter MEM_BANKS         = 4,
     parameter ICACHE_LINES      = 256,
-    parameter ICACHE_LINE_W     = 128        // bits per I-cache line
+    parameter ICACHE_LINE_W     = 128,       // bits per I-cache line
+    parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -81,7 +82,8 @@ module mp64_top #(
         .NUM_CORES          (NUM_CORES),
         .NUM_CLUSTERS       (NUM_CLUSTERS),
         .CORES_PER_CLUSTER  (CORES_PER_CLUSTER),
-        .MEM_DEPTH          (MEM_DEPTH)
+        .MEM_DEPTH          (MEM_DEPTH),
+        .DISK_TOTAL_SECTORS (DISK_TOTAL_SECTORS)
     ) u_soc (
         .sys_clk       (clk),
         .sys_rst_n     (rst_n),

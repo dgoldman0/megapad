@@ -106,7 +106,7 @@ PORTS                          \ List all port bindings
 - All 22 tile engine words + ACC@/ACC1@/ACC2@/ACC3@, TPOPCNT/TL1/TEMIN/TEMAX/TABS
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
-- Storage device support: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+- Storage device support: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
@@ -183,7 +183,7 @@ PORTS                          \ List all port bindings
 - Demo buffers: demo-a, demo-b, demo-c
 
 **Phase 2: Storage & Persistence** (✅ complete — v0.4)
-- 6 BIOS disk words: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+- 9 BIOS disk words: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
 - Buffer persistence: B.SAVE / B.LOAD (DMA to/from disk sectors)
 - B.SECTORS, DISK?, DISK-INFO — disk queries
 - FILE abstraction: sector-backed files with cursor, up to 8 registered
@@ -263,27 +263,35 @@ Replace the manual sector-range FILE abstraction with a proper named file
 system on disk, providing the storage foundation for docs, tutorials, and
 persistent user data.
 
-*Disk layout (MP64FS, 1 MiB = 2048 × 512-byte sectors):*
+*Disk layout (MP64FS, 15–8192 × 512-byte sectors):*
 ```
-Sector 0:      Superblock (magic "MP64", version, geometry)
-Sector 1:      Allocation bitmap (256 bytes = 2048 bits)
-Sectors 2-13:  Directory (128 entries × 48 bytes each)
-Sectors 6+:    Data area (2042 sectors ≈ 1 MB usable)
+Sector 0:             Superblock (magic "MP64", marker 1, geometry)
+Sectors 1..B:         Allocation bitmap (one bit per sector)
+Next 12 sectors:      Directory (128 entries × 48 bytes each)
+Remaining sectors:    Data area
 ```
 
-*Directory entry (32 bytes):*
+`B = ceil(total_sectors / 4096)`.  The directory and data starts are derived
+from `B`, so marker 1 has the same geometry rules at every supported capacity.
+
+*Directory entry (48 bytes):*
 ```
-+0   name[16]       null-terminated (max 15 chars)
-+16  start_sec[2]   starting sector (u16 LE)
-+18  sec_count[2]   allocated sectors (u16 LE)
-+20  used_bytes[4]  bytes written (u32 LE)
-+24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data 6=tut 7=bundle
-+25  flags[1]       bit0=readonly, bit1=system
-+26  reserved[6]
++0   name[24]       null-terminated (max 23 chars)
++24  start_sec[2]   primary extent start (u16 LE)
++26  sec_count[2]   primary extent sectors (u16 LE)
++28  used_bytes[4]  bytes written (u32 LE)
++32  type[1]        file type
++33  flags[1]       readonly/system/encrypted/append flags
++34  parent[1]      parent directory slot (0xFF=root)
++35  reserved[1]
++36  mtime[4]       modification time (u32 LE)
++40  data_crc32[4]  content CRC-32 (u32 LE)
++44  ext1_start[2]  optional second extent start (u16 LE)
++46  ext1_count[2]  optional second extent sectors (u16 LE)
 ```
 
 New Python tool — diskutil.py:
-- `format_image()`: create formatted 1 MiB image
+- `format_image()`: create a formatted image at a supported capacity
 - `inject_file()`: allocate sectors, write named file into image
 - `read_file()`: read file from image by name
 - `list_files()`: list directory
@@ -509,7 +517,7 @@ The BIOS provides:
 * **Return stack**: `>R`, `R>`, `R@`, `2>R`, `2R>`, `2R@`
 * **String ops**: S", .", COMPARE, TYPE, ACCEPT, WORD, COUNT
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
-* **Storage support**: DISK@, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE
+* **Storage support**: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
 * **FSLOAD**: Load and EVALUATE files from MP64FS disk
@@ -708,11 +716,12 @@ and a file abstraction provides cursor-based I/O over contiguous sector ranges.
 
 ### 7.1 BIOS Disk Words
 
-Six new BIOS words expose the storage device (at MMIO offset 0x0200):
+Nine BIOS words expose the storage device (at MMIO offset 0x0200):
 
 | Word | Stack | Description |
 |---|---|---|
 | `DISK@` | ( -- status ) | Read device status (bit 7 = present) |
+| `DISK-SECTORS` | ( -- count ) | Read the attached media capacity in 512-byte sectors |
 | `DISK-SEC!` | ( n -- ) | Set starting sector number |
 | `DISK-DMA!` | ( addr -- ) | Set DMA address in RAM |
 | `DISK-N!` | ( n -- ) | Set sector count |

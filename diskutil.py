@@ -5,35 +5,45 @@ Provides Python-side tools for creating, formatting, and populating
 MP64FS disk images.  These images can then be attached to the Megapad-64
 emulator via --storage and accessed from KDOS.
 
-Disk layout (1 MiB = 2048 × 512-byte sectors):
-    Sector 0       Superblock
-    Sector 1       Allocation bitmap (2048 bits = 256 bytes)
-    Sectors 2-5    Directory (64 entries × 32 bytes)
-    Sectors 6+     Data area
+Disk layout (512-byte sectors, 15 through 8192 sectors total):
+    Sector 0                     Superblock
+    Sector 1 .. bmap_sectors     Allocation bitmap (one bit per sector)
+    Next 12 sectors              Directory (128 entries × 48 bytes)
+    Remaining sectors            Data area
+
+The one draft format marker is 1 at every capacity.  Geometry is derived
+uniformly: bmap_sectors = ceil(total_sectors / 4096), dir_start =
+1 + bmap_sectors, and data_start = dir_start + 12.
 
 Superblock (sector 0, 512 bytes):
     +0   magic[4]       b"MP64"
-    +4   version[2]     u16 LE  (1)
-    +6   total_sec[2]   u16 LE  (2048)
-    +8   bmap_start[2]  u16 LE  (1)
-    +10  bmap_secs[2]   u16 LE  (1)
-    +12  dir_start[2]   u16 LE  (2)
-    +14  dir_secs[2]    u16 LE  (4)
-    +16  data_start[2]  u16 LE  (6)
-    +18  reserved[494]  zeroed
+    +4   marker[2]      u16 LE  (1)
+    +6   total_sec[4]   u32 LE
+    +10  bmap_start[2]  u16 LE  (1)
+    +12  bmap_secs[2]   u16 LE  (derived)
+    +14  dir_start[2]   u16 LE  (derived)
+    +16  dir_secs[2]    u16 LE  (12)
+    +18  data_start[2]  u16 LE  (derived)
+    +20  max_files[1]   u8      (128)
+    +21  entry_size[1]  u8      (48)
+    +22  reserved[490]  zeroed
 
-Directory entry (32 bytes):
-    +0   name[16]       null-terminated (max 15 chars)
-    +16  start_sec[2]   u16 LE
-    +18  sec_count[2]   u16 LE
-    +20  used_bytes[4]  u32 LE
-    +24  type[1]        0=free 1=raw 2=text 3=forth 4=doc 5=data
-    +25  flags[1]       bit0=readonly bit1=system
-    +26  reserved[6]    zeroed
+Directory entry (48 bytes):
+    +0   name[24]       null-terminated (max 23 chars)
+    +24  start_sec[2]   u16 LE
+    +26  sec_count[2]   u16 LE
+    +28  used_bytes[4]  u32 LE
+    +32  type[1]        file type
+    +33  flags[1]       bit0=readonly bit1=system
+    +34  parent[1]      directory slot, 0xFF=root
+    +36  mtime[4]       u32 LE epoch seconds
+    +40  data_crc32[4]  u32 LE
+    +44  ext1_start[2]  optional second extent
+    +46  ext1_count[2]
 
 Allocation bitmap:
     Bit N = 1 means sector N is allocated.
-    Sectors 0-5 (superblock + bitmap + directory) are always allocated.
+    Sectors 0 through data_start-1 are always allocated metadata.
 """
 
 from __future__ import annotations
@@ -51,15 +61,14 @@ from dataclasses import dataclass, field
 SECTOR_SIZE = 512
 DEFAULT_TOTAL_SECTORS = 2048        # 1 MiB
 MAGIC = b"MP64"
-FS_VERSION = 1
+FS_MARKER = 1
 
 BMAP_START = 1
-BMAP_SECTORS = 1          # default for ≤4096 sectors; computed per image
-DIR_START = 2             # default; BMAP_START + bmap_sectors
 DIR_SECTORS = 12
-DATA_START = 14           # default; dir_start + DIR_SECTORS
 
 BITS_PER_BMAP_SECTOR = SECTOR_SIZE * 8   # 4096
+MAX_BMAP_SECTORS = 2
+MAX_TOTAL_SECTORS = MAX_BMAP_SECTORS * BITS_PER_BMAP_SECTOR
 
 DIR_ENTRY_SIZE = 48
 MAX_NAME_LEN = 23
@@ -235,7 +244,7 @@ def _bitmap_clear(bmap: bytearray, sector: int):
 
 
 def _bitmap_find_free(bmap: bytearray, count: int,
-                      total: int, start: int = DATA_START) -> int | None:
+                      total: int, start: int) -> int | None:
     """Find a contiguous run of *count* free sectors starting at >= *start*.
     Returns the first sector number, or None if not found."""
     run_start = start
@@ -266,6 +275,7 @@ class MP64FS:
         # Default geometry; overridden by _read_geometry() for loaded images
         self.bmap_sectors, self.dir_start, self.data_start = (
             _compute_geometry(self.total))
+        self.marker = FS_MARKER
         if data is not None:
             self._read_geometry()
 
@@ -280,7 +290,7 @@ class MP64FS:
     def _write_superblock(self):
         sb = bytearray(SECTOR_SIZE)
         sb[0:4] = MAGIC
-        struct.pack_into("<H", sb, 4, FS_VERSION)
+        struct.pack_into("<H", sb, 4, self.marker)
         struct.pack_into("<I", sb, 6, self.total)       # u32 total_sectors
         struct.pack_into("<H", sb, 10, BMAP_START)
         struct.pack_into("<H", sb, 12, self.bmap_sectors)
@@ -298,10 +308,58 @@ class MP64FS:
         """Read geometry fields from the in-memory superblock."""
         if not self._verify_magic():
             return
+        self.marker = struct.unpack_from("<H", self.img, 4)[0]
         self.total = struct.unpack_from("<I", self.img, 6)[0]
         self.bmap_sectors = struct.unpack_from("<H", self.img, 12)[0]
         self.dir_start = struct.unpack_from("<H", self.img, 14)[0]
         self.data_start = struct.unpack_from("<H", self.img, 18)[0]
+        errors = self.geometry_errors()
+        if errors:
+            raise ValueError("Invalid MP64FS geometry: " + "; ".join(errors))
+
+    def geometry_errors(self) -> list[str]:
+        """Return fail-closed superblock/image geometry diagnostics."""
+        if not self._verify_magic():
+            return ["bad magic"]
+
+        errors: list[str] = []
+        image_sectors = len(self.img) // SECTOR_SIZE
+        bmap_start = struct.unpack_from("<H", self.img, 10)[0]
+        dir_sectors = struct.unpack_from("<H", self.img, 16)[0]
+        max_files = self.img[20]
+        entry_size = self.img[21]
+        expected_bmap, expected_dir, expected_data = _compute_geometry(self.total)
+
+        if len(self.img) % SECTOR_SIZE:
+            errors.append("image length is not sector aligned")
+        if self.marker != FS_MARKER:
+            errors.append(f"invalid format marker {self.marker}")
+        if self.total != image_sectors:
+            errors.append(
+                f"superblock total {self.total} != image sectors {image_sectors}")
+        if not (1 <= self.total <= MAX_TOTAL_SECTORS):
+            errors.append(f"total sectors {self.total} outside 1..{MAX_TOTAL_SECTORS}")
+        if bmap_start != BMAP_START:
+            errors.append(f"bitmap start {bmap_start} != {BMAP_START}")
+        if not (1 <= self.bmap_sectors <= MAX_BMAP_SECTORS):
+            errors.append(
+                f"bitmap sectors {self.bmap_sectors} outside 1..{MAX_BMAP_SECTORS}")
+        if self.bmap_sectors != expected_bmap:
+            errors.append(
+                f"bitmap sectors {self.bmap_sectors} != required {expected_bmap}")
+        if self.dir_start != expected_dir:
+            errors.append(f"directory start {self.dir_start} != {expected_dir}")
+        if dir_sectors != DIR_SECTORS:
+            errors.append(f"directory sectors {dir_sectors} != {DIR_SECTORS}")
+        if self.data_start != expected_data:
+            errors.append(f"data start {self.data_start} != {expected_data}")
+        if self.data_start >= self.total:
+            errors.append("data start is outside the image")
+        if max_files != MAX_FILES:
+            errors.append(f"max files {max_files} != {MAX_FILES}")
+        if entry_size != DIR_ENTRY_SIZE:
+            errors.append(f"entry size {entry_size} != {DIR_ENTRY_SIZE}")
+        return errors
 
     # ── bitmap ─────────────────────────────────────────────────────
 
@@ -344,6 +402,15 @@ class MP64FS:
         self.img[:] = b"\x00" * len(self.img)
         self.bmap_sectors, self.dir_start, self.data_start = (
             _compute_geometry(self.total))
+        if self.total > MAX_TOTAL_SECTORS:
+            raise ValueError(
+                f"MP64FS supports at most {MAX_TOTAL_SECTORS} sectors")
+        if self.bmap_sectors > MAX_BMAP_SECTORS:
+            raise ValueError(
+                f"MP64FS supports at most {MAX_BMAP_SECTORS} bitmap sectors")
+        if self.data_start >= self.total:
+            raise ValueError("MP64FS image is too small for filesystem metadata")
+        self.marker = FS_MARKER
         self._write_superblock()
 
         # Mark metadata sectors as allocated in bitmap
@@ -745,7 +812,7 @@ class MP64FS:
             return {"formatted": False}
         return {
             "formatted": True,
-            "version": struct.unpack_from("<H", self.img, 4)[0],
+            "marker": self.marker,
             "total_sectors": self.total,
             "bmap_sectors": self.bmap_sectors,
             "dir_start": self.dir_start,
@@ -971,7 +1038,7 @@ STORAGE & MP64FS
 ================
 
 KDOS supports persistent storage via the MP64FS
-file system on a 1 MiB virtual disk.
+file system on attached media of 15-8192 sectors.
 
 DISK BASICS
   DISK?                  Check if disk is attached
@@ -1002,10 +1069,12 @@ STORAGE SCREEN
   It shows a DIR listing and disk usage info.
 
 DISK LAYOUT
-  Sector 0       Superblock (magic MP64)
-  Sector 1       Allocation bitmap
-  Sectors 2-13   Directory (128 entries, 48 B each)
-  Sectors 14+    Data area (~1 MB usable)
+  Sector 0       Superblock (magic MP64, marker 1)
+  Sectors 1..B   Bitmap (one bit per sector)
+  Next 12        Directory (128 entries, 48 B each)
+  Remaining      Data area
+  B = ceil(total sectors / 4096); later starts
+  are derived from B at every supported capacity.
 
 SUBDIRECTORIES
   MKDIR subdir             Create a subdirectory
@@ -1382,6 +1451,20 @@ def build_tutorials(fs: MP64FS):
         fs.inject_file(name, content.encode("ascii"), ftype=FTYPE_TUT)
 
 
+def pack_forth_source(source: bytes) -> bytes:
+    """Pack executable Forth source without changing executable lines.
+
+    Blank lines and full-line backslash comments are not needed by the guest
+    evaluator.  Removing them keeps boot source within the BIOS's bounded
+    Bank 0 load buffer while preserving inline comments and string contents.
+    """
+    executable = [
+        line for line in source.splitlines()
+        if line.strip() and not line.lstrip().startswith(b"\\")
+    ]
+    return b"\n".join(executable) + (b"\n" if executable else b"")
+
+
 def build_image(path: str | Path | None = None,
                 total_sectors: int = DEFAULT_TOTAL_SECTORS) -> MP64FS:
     """Create a fully-populated image with docs and tutorials."""
@@ -1405,8 +1488,9 @@ def build_sample_image(path: str | Path | None = None,
     """
     fs = build_image(total_sectors=total_sectors)
 
-    # Inject KDOS source -- the BIOS auto-boots this via FSLOAD kdos.f
-    kdos_src = Path(kdos_path).read_bytes()
+    # Inject packed KDOS execution source.  FSLOAD evaluates it line by line;
+    # removing full-line comments and blanks has no executable effect.
+    kdos_src = pack_forth_source(Path(kdos_path).read_bytes())
     fs.inject_file("kdos.f", kdos_src, ftype=FTYPE_FORTH, flags=0x02)  # system
 
     # Inject sample data for tutorials
@@ -1596,8 +1680,9 @@ def main():
 
     elif args.cmd == "mkdir":
         fs = MP64FS.load(args.image)
-        parent = fs.resolve_path(args.path)
-        fs.mkdir(args.name, parent=parent)
+        parent_path = args.path.rstrip("/")
+        target = f"{parent_path}/{args.name}" if parent_path else f"/{args.name}"
+        fs.mkdir(target)
         fs.save(args.image)
         print(f"Created directory '{args.name}'")
 
@@ -1625,4 +1710,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError as exc:
+        raise SystemExit(f"Invalid filesystem: {exc}") from None

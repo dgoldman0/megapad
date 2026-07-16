@@ -102,7 +102,7 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
-| **Storage** | `+0x0200` | 16 bytes | Sector-based disk controller |
+| **Storage** | `+0x0200` | 24 bytes | Sector-based disk controller with attached-capacity register |
 | **System Info** | `+0x0300` | 96 bytes | Board ID, config, core topology, HBW, VRAM, cluster enable |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
@@ -253,7 +253,13 @@ IRQ vector: `IVEC_RTC` (16).
 ## Storage Controller
 
 A sector-based disk controller supporting DMA transfers.  Sector size is
-**512 bytes**.  The disk image can hold up to 2048 sectors (1 MiB).
+**512 bytes**.  The current MP64FS draft supports media through 8192 sectors
+(4 MiB).
+
+FPGA builds expose the logical media window through the synthesizable
+`DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the
+canonical 8192 sectors; board integrations using a different window must
+override the parameter so `TOTAL_SECTORS` remains truthful.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
@@ -263,6 +269,7 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 | DMA_ADDR | `+0x06`–`+0x0D` | RW | 64-bit RAM address for DMA (LE) |
 | SEC_COUNT | `+0x0E` | RW | Number of sectors to transfer (1–255) |
 | DATA | `+0x0F` | RW | Byte-at-a-time data port (alternative to DMA) |
+| TOTAL_SECTORS | `+0x11`–`+0x14` | R | Attached media sector count (u32 LE; zero when detached) |
 
 **Typical read sequence:**
 1. Write sector number to SECTOR registers
@@ -272,7 +279,9 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 5. Data appears in RAM at DMA_ADDR
 
 **BIOS words:** `DISK-SEC!`, `DISK-DMA!`, `DISK-N!`, `DISK-READ`,
-`DISK-WRITE`, `DISK-FLUSH`, `DISK@` (read status).
+`DISK-WRITE`, `DISK-FLUSH`, `DISK@` (read status), `DISK-SECTORS`
+(read attached capacity), and `MP64FS-VALID?` (validate the complete attached
+filesystem before use).
 
 ---
 
@@ -765,7 +774,8 @@ The full boot process from power-on to the KDOS REPL:
    UART, initializes the Forth dictionary (HERE, LATEST, base number,
    compilation state)
 3. **Disk detection** — BIOS checks `DISK@` status register bit 7
-4. **If disk present:** BIOS reads the MP64FS directory and scans for
+4. **If disk present:** BIOS validates sector 0 against the attached media,
+   reads the derived MP64FS directory, and scans for
    the first file with type=3 (Forth)
    - Reads its data sectors into a RAM buffer
    - EVALUATEs each line via FSLOAD
@@ -790,7 +800,7 @@ After a full KDOS boot with filesystem loaded:
 | BIOS code | ~20 KB | Machine code, IVT, boot logic |
 | KDOS dictionary | ~40–50 KB | Compiled definitions, strings |
 | Buffers | ~10 KB | 6 demo buffers, histogram bins |
-| FS cache | ~3 KB | Superblock (512B) + bitmap (512B) + directory (2048B) |
+| FS cache | ~7.5 KB | Superblock (512B) + bitmap (up to 1024B) + directory (6144B) |
 | Task stacks | 2 KB | 8 × 256 bytes |
 | Frame buffer | 1.5 KB | NIC frame receive buffer |
 | **Total HERE** | ~80 KB | Leaves ~950 KB free for user data/code |

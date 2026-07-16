@@ -21,8 +21,9 @@
 //   Disk:
 //    14. Register write/readback (sector, DMA base, sec_count)
 //    15. Status register (present bit)
-//    16. READ command → SPI → DMA flow
-//    17. SPI clock divider
+//    16. Read-only capacity register has no low-address aliases
+//    17. READ command → SPI → DMA flow
+//    18. SPI clock divider
 //
 
 `timescale 1ns / 1ps
@@ -81,7 +82,7 @@ module tb_peripherals;
     // Disk DUT
     // ========================================================================
     reg        disk_req;
-    reg  [3:0] disk_addr;
+    reg  [4:0] disk_addr;
     reg  [7:0] disk_wdata;
     reg        disk_wen;
     wire [7:0] disk_rdata;
@@ -99,7 +100,9 @@ module tb_peripherals;
     reg        spi_miso;
     wire       spi_cs_n;
 
-    mp64_disk u_disk (
+    mp64_disk #(
+        .TOTAL_SECTORS(32'd4096)
+    ) u_disk (
         .clk(clk), .rst_n(rst_n),
         .req(disk_req), .addr(disk_addr), .wdata(disk_wdata), .wen(disk_wen),
         .rdata(disk_rdata), .ack(disk_ack),
@@ -153,7 +156,7 @@ module tb_peripherals;
         end
     endtask
 
-    task disk_write(input [3:0] a, input [7:0] d);
+    task disk_write(input [4:0] a, input [7:0] d);
         begin
             @(posedge clk);
             disk_req <= 1'b1; disk_addr <= a; disk_wdata <= d; disk_wen <= 1'b1;
@@ -162,7 +165,7 @@ module tb_peripherals;
         end
     endtask
 
-    task disk_read(input [3:0] a, output [7:0] d);
+    task disk_read(input [4:0] a, output [7:0] d);
         begin
             @(posedge clk);
             disk_req <= 1'b1; disk_addr <= a; disk_wen <= 1'b0;
@@ -479,8 +482,20 @@ module tb_peripherals;
         disk_read(DISK_SECN, rd8);
         check8("sec_count", rd8, 8'd4);
 
-        // === TEST 16: Disk READ command starts SPI ===
+        // === TEST 16: Capacity register is read-only and does not alias ===
         test_num = 16;
+        $display("\n=== TEST %0d: Disk capacity register ===", test_num);
+        disk_read(DISK_TOTAL + 0, rd8); check8("total byte0", rd8, 8'h00);
+        disk_read(DISK_TOTAL + 1, rd8); check8("total byte1", rd8, 8'h10);
+        disk_read(DISK_TOTAL + 2, rd8); check8("total byte2", rd8, 8'h00);
+        disk_read(DISK_TOTAL + 3, rd8); check8("total byte3", rd8, 8'h00);
+        // A write at +0x12 must neither change capacity nor alias sector +0x02.
+        disk_write(DISK_TOTAL + 1, 8'hA5);
+        disk_read(DISK_TOTAL + 1, rd8); check8("total remains read-only", rd8, 8'h10);
+        disk_read(DISK_SECTOR + 0, rd8); check8("capacity has no sector alias", rd8, 8'h78);
+
+        // === TEST 17: Disk READ command starts SPI ===
+        test_num = 17;
         $display("\n=== TEST %0d: Disk READ command starts SPI ===", test_num);
         disk_write(DISK_SECN, 8'd1);
         disk_write(DISK_SECTOR + 0, 8'h00);

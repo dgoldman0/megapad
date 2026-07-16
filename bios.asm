@@ -193,15 +193,15 @@ boot:
     andi r1, 0x80
     lbreq no_autoboot
 
-    ; Read directory sectors 2-13 into buffer at R2/2
+    ; Read and validate the MP64FS superblock into buffer at R2/2.
     mov r9, r2
     lsri r9, 1
-    ldi r1, 2                 ; start sector
-    ldi r12, 12               ; 12 sectors = 6144 bytes = 128 entries
     subi r15, 8
     str r15, r9               ; save buf_addr on RSP
-    ldi64 r11, disk_read_sectors
+    ldi64 r11, mp64fs_validate_at
     call.l r11
+    cmpi r0, 0
+    lbreq autoboot_not_found
 
     ; Scan directory for first Forth-type file (type == 3 at offset +32)
     ldn r9, r15               ; buf_addr
@@ -218,6 +218,11 @@ autoboot_scan:
     add r13, r10              ; index * 48
     add r13, r9
 
+    ; Empty slots are not directory entries, regardless of stale tail bytes.
+    ld.b r7, r13
+    cmpi r7, 0
+    breq autoboot_next
+
     ; Check type byte at offset +32
     mov r11, r13
     addi r11, 32
@@ -225,6 +230,7 @@ autoboot_scan:
     cmpi r7, 3                ; FTYPE_FORTH
     breq autoboot_found
 
+autoboot_next:
     inc r0
     lbr autoboot_scan
 
@@ -6397,6 +6403,7 @@ w_net_mac:
 ;   +0x06  DMA_ADDR  (RW)  DMA address (8 bytes LE)
 ;   +0x0E  SEC_COUNT (RW)  number of sectors
 ;   +0x0F  DATA      (RW)  byte-at-a-time port
+;   +0x11  TOTAL     (R)   attached media sector count (4 bytes LE)
 
 ; DISK@ ( -- status )  read storage STATUS register
 w_disk_status:
@@ -6484,6 +6491,29 @@ w_disk_flush:
     st.b r11, r1
     ret.l
 
+; DISK-SECTORS ( -- count )  attached media capacity in 512-byte sectors
+w_disk_sectors:
+    ldi64 r11, 0xFFFF_FF00_0000_0211
+    ld.b r1, r11
+    inc r11
+    ld.b r7, r11
+    lsli r7, 8
+    or r1, r7
+    inc r11
+    ld.b r7, r11
+    lsli r7, 8
+    lsli r7, 8
+    or r1, r7
+    inc r11
+    ld.b r7, r11
+    lsli r7, 8
+    lsli r7, 8
+    lsli r7, 8
+    or r1, r7
+    subi r14, 8
+    str r14, r1
+    ret.l
+
 ; =====================================================================
 ;  FSLOAD — load and evaluate a file from MP64FS disk
 ; =====================================================================
@@ -6535,6 +6565,413 @@ disk_rd_clamp_ok:
 disk_read_all_done:
     ret.l
 
+; mp64fs_geometry: validate the single draft MP64FS geometry before using it.
+;   R9 = address of the 512-byte superblock
+;   Returns R0 = valid flag.
+;   The advertised media size and every derived geometry field must agree.
+;   Clobbers: R7, R10, R11, R13
+mp64fs_geometry:
+    ldi r0, 0
+
+    ; Magic and the one accepted format marker.
+    ld.w r1, r9
+    ldi64 r7, 0x3436504D       ; "MP64" as a little-endian u32
+    cmp r1, r7
+    lbrne mp64fs_geometry_bad
+    mov r11, r9
+    addi r11, 4
+    ld.h r1, r11
+    cmpi r1, 1
+    lbrne mp64fs_geometry_bad
+
+    ; Total sectors must be supported and exactly match the attached media.
+    addi r11, 2                ; total sectors at +6
+    ld.w r13, r11
+    ldi r7, 14
+    cmp r13, r7
+    lbrle mp64fs_geometry_bad
+    ldi64 r7, 8192
+    cmp r13, r7
+    lbrgt mp64fs_geometry_bad
+    ldi64 r11, 0xFFFF_FF00_0000_0211
+    ld.w r7, r11
+    cmp r13, r7
+    lbrne mp64fs_geometry_bad
+
+    ; The bitmap always begins at sector 1.  Apply count=ceil(total/4096)
+    ; uniformly, then derive every following start from that count.
+    mov r11, r9
+    addi r11, 10
+    ld.h r1, r11
+    cmpi r1, 1
+    lbrne mp64fs_geometry_bad
+    addi r11, 2
+    ld.h r12, r11             ; bitmap sector count
+    ldi64 r7, 4096
+    cmp r13, r7
+    lbrgt mp64fs_geometry_large
+    cmpi r12, 1
+    lbrne mp64fs_geometry_bad
+    ldi r10, 2                ; expected directory start
+    ldi r7, 14                ; expected data start
+    lbr mp64fs_geometry_tail
+mp64fs_geometry_large:
+    cmpi r12, 2
+    lbrne mp64fs_geometry_bad
+    ldi r10, 3                ; expected directory start
+    ldi r7, 15                ; expected data start
+
+mp64fs_geometry_tail:
+    ; Directory start/count, data start, and entry layout are canonical.
+    addi r11, 2               ; directory start at +14
+    ld.h r1, r11
+    cmp r1, r10
+    lbrne mp64fs_geometry_bad
+    addi r11, 2
+    ld.h r12, r11             ; directory sectors at +16
+    cmpi r12, 12
+    lbrne mp64fs_geometry_bad
+    addi r11, 2
+    ld.h r10, r11             ; data start at +18
+    cmp r10, r7
+    lbrne mp64fs_geometry_bad
+    ldi64 r1, var_mp64fs_data_start
+    st.h r1, r10
+    cmp r13, r7               ; data start must be inside the media
+    lbrle mp64fs_geometry_bad
+    addi r11, 2
+    ld.b r10, r11             ; maximum files at +20
+    ldi r7, 128               ; CMPI sign-extends its 8-bit immediate
+    cmp r10, r7
+    lbrne mp64fs_geometry_bad
+    inc r11
+    ld.b r10, r11             ; directory entry size at +21
+    cmpi r10, 48
+    lbrne mp64fs_geometry_bad
+
+    ; Retain only the bounds needed after the superblock buffer is reused.
+    ldi64 r10, var_mp64fs_total
+    st.w r10, r13
+    ldi r0, 1
+mp64fs_geometry_bad:
+    ret.l
+
+; mp64fs_read_metadata: read the accepted bitmap and directory.
+;   R9 = metadata buffer.  The 6144-byte directory begins there and the
+;   at-most-1024-byte bitmap follows it, so both remain live for validation.
+mp64fs_read_metadata:
+    ldi64 r11, var_mp64fs_dir_buf
+    str r11, r9
+    mov r10, r9
+    ldi64 r7, 6144
+    add r10, r7
+    ldi64 r11, var_mp64fs_bmap_buf
+    str r11, r10
+
+    ; The canonical starts/counts are still live in the superblock buffer.
+    mov r11, r9
+    addi r11, 10
+    ld.h r1, r11
+    addi r11, 2
+    ld.h r12, r11
+    mov r9, r10
+    ldi64 r11, disk_read_sectors
+    call.l r11
+
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r9, r11
+    mov r11, r9
+    addi r11, 14
+    ld.h r1, r11
+    addi r11, 2
+    ld.h r12, r11
+    ldi64 r11, disk_read_sectors
+    call.l r11
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r9, r11
+    ret.l
+
+; mp64fs_metadata_allocated: every reserved metadata sector must be marked
+; allocated before the directory or its extents can be trusted.
+mp64fs_metadata_allocated:
+    ldi r1, 0
+mp64fs_metadata_allocated_loop:
+    ldi64 r11, var_mp64fs_data_start
+    ld.h r7, r11
+    cmp r1, r7
+    breq mp64fs_metadata_allocated_good
+    mov r7, r1
+    lsri r7, 3
+    ldi64 r11, var_mp64fs_bmap_buf
+    ldn r10, r11
+    add r7, r10
+    ld.b r11, r7
+    mov r7, r1
+    andi r7, 7
+    ldi r10, 1
+    shl r10, r7
+    and r11, r10
+    cmpi r11, 0
+    breq mp64fs_metadata_allocated_bad
+    inc r1
+    lbr mp64fs_metadata_allocated_loop
+mp64fs_metadata_allocated_good:
+    ldi r0, 1
+    ret.l
+mp64fs_metadata_allocated_bad:
+    ldi r0, 0
+    ret.l
+
+; mp64fs_run_allocated: validate one non-empty extent.
+;   R1 = start sector, R12 = count.  Returns R0 = valid flag.
+;   Bounds use count <= total-start, avoiding addition overflow.
+mp64fs_run_allocated:
+    ldi r0, 0
+    cmpi r12, 0
+    lbreq mp64fs_run_allocated_bad
+    ldi64 r11, var_mp64fs_data_start
+    ld.h r7, r11
+    cmp r7, r1
+    lbrgt mp64fs_run_allocated_bad
+    ldi64 r11, var_mp64fs_total
+    ld.w r13, r11
+    cmp r13, r1
+    lbrle mp64fs_run_allocated_bad
+    sub r13, r1
+    cmp r12, r13
+    lbrgt mp64fs_run_allocated_bad
+    ldi64 r11, var_mp64fs_bmap_buf
+    ldn r10, r11
+mp64fs_run_allocated_loop:
+    mov r7, r1
+    lsri r7, 3
+    add r7, r10
+    ld.b r11, r7
+    mov r7, r1
+    andi r7, 7
+    ldi r13, 1
+    shl r13, r7
+    and r11, r13
+    cmpi r11, 0
+    lbreq mp64fs_run_allocated_bad
+    inc r1
+    dec r12
+    cmpi r12, 0
+    lbrne mp64fs_run_allocated_loop
+    ldi r0, 1
+mp64fs_run_allocated_bad:
+    ret.l
+
+; mp64fs_entry_valid: validate an occupied directory entry against the
+; accepted geometry, allocation bitmap, and parent directory table.
+;   R13 = entry address.  Returns R0 = valid flag and preserves R13.
+mp64fs_entry_valid:
+    ldi64 r11, var_mp64fs_entry
+    str r11, r13
+
+    ; Parent is root or an occupied directory slot.
+    mov r11, r13
+    addi r11, 34
+    ld.b r7, r11
+    ldi r10, 255
+    cmp r7, r10
+    breq mp64fs_entry_parent_ok
+    cmpi r7, 127
+    lbrgt mp64fs_entry_bad
+    mov r10, r7
+    lsli r10, 5
+    mov r11, r7
+    lsli r11, 4
+    add r10, r11
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r11, r11
+    add r10, r11
+    ld.b r7, r10
+    cmpi r7, 0
+    lbreq mp64fs_entry_bad
+    addi r10, 32
+    ld.b r7, r10
+    cmpi r7, 8
+    lbrne mp64fs_entry_bad
+
+mp64fs_entry_parent_ok:
+    ldi64 r11, var_mp64fs_entry
+    ldn r13, r11
+    mov r11, r13
+    addi r11, 32
+    ld.b r7, r11
+    cmpi r7, 0
+    lbreq mp64fs_entry_bad
+    cmpi r7, 10
+    lbrgt mp64fs_entry_bad
+    cmpi r7, 8
+    lbreq mp64fs_entry_directory
+
+    ; Every non-directory has a non-empty primary extent.
+    mov r11, r13
+    addi r11, 24
+    ld.h r1, r11
+    addi r11, 2
+    ld.h r12, r11
+    ldi64 r10, var_mp64fs_primary_count
+    st.h r10, r12
+    ldi64 r11, mp64fs_run_allocated
+    call.l r11
+    cmpi r0, 0
+    lbreq mp64fs_entry_bad
+
+    ; Secondary start/count are both zero or both nonzero.
+    ldi64 r11, var_mp64fs_entry
+    ldn r13, r11
+    mov r11, r13
+    addi r11, 44
+    ld.h r1, r11
+    addi r11, 2
+    ld.h r12, r11
+    ldi64 r10, var_mp64fs_secondary_count
+    st.h r10, r12
+    cmpi r12, 0
+    brne mp64fs_entry_secondary_present
+    cmpi r1, 0
+    lbrne mp64fs_entry_bad
+    lbr mp64fs_entry_used
+mp64fs_entry_secondary_present:
+    cmpi r1, 0
+    lbreq mp64fs_entry_bad
+    ldi64 r11, mp64fs_run_allocated
+    call.l r11
+    cmpi r0, 0
+    lbreq mp64fs_entry_bad
+
+mp64fs_entry_used:
+    ldi64 r11, var_mp64fs_entry
+    ldn r13, r11
+    mov r11, r13
+    addi r11, 28
+    ld.w r1, r11
+    ldi64 r11, var_mp64fs_primary_count
+    ld.h r7, r11
+    ldi64 r11, var_mp64fs_secondary_count
+    ld.h r10, r11
+    add r7, r10
+    lsli r7, 9
+    cmp r1, r7
+    lbrgt mp64fs_entry_bad
+    lbr mp64fs_entry_good
+
+mp64fs_entry_directory:
+    ; Directories never own data extents or bytes.
+    mov r11, r13
+    addi r11, 24
+    ld.h r1, r11
+    addi r11, 2
+    ld.h r7, r11
+    or r1, r7
+    addi r11, 2
+    ld.w r7, r11
+    or r1, r7
+    addi r11, 16
+    ld.h r7, r11
+    or r1, r7
+    addi r11, 2
+    ld.h r7, r11
+    or r1, r7
+    cmpi r1, 0
+    lbrne mp64fs_entry_bad
+
+mp64fs_entry_good:
+    ldi r0, 1
+    ldi64 r11, var_mp64fs_entry
+    ldn r13, r11
+    ret.l
+mp64fs_entry_bad:
+    ldi r0, 0
+    ldi64 r11, var_mp64fs_entry
+    ldn r13, r11
+    ret.l
+
+; mp64fs_directory_valid: reject the complete table before any entry is used.
+mp64fs_directory_valid:
+    ldi r1, 0
+    ldi64 r11, var_mp64fs_scan_index
+    st.h r11, r1
+mp64fs_directory_valid_loop:
+    ldi64 r11, var_mp64fs_scan_index
+    ld.h r1, r11
+    cmpi r1, 127
+    lbrgt mp64fs_directory_valid_good
+    mov r13, r1
+    lsli r13, 5
+    mov r10, r1
+    lsli r10, 4
+    add r13, r10
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r10, r11
+    add r13, r10
+    ld.b r7, r13
+    cmpi r7, 0
+    breq mp64fs_directory_valid_next
+    ldi64 r11, mp64fs_entry_valid
+    call.l r11
+    cmpi r0, 0
+    lbreq mp64fs_directory_valid_bad
+mp64fs_directory_valid_next:
+    ldi64 r11, var_mp64fs_scan_index
+    ld.h r1, r11
+    inc r1
+    st.h r11, r1
+    lbr mp64fs_directory_valid_loop
+mp64fs_directory_valid_good:
+    ldi r0, 1
+    ret.l
+mp64fs_directory_valid_bad:
+    ldi r0, 0
+    ret.l
+
+; mp64fs_validate_at: read and validate the attached MP64FS into one buffer.
+;   R9 = metadata buffer.  Returns R0 = valid flag.
+;   The buffer pointer is retained in var_mp64fs_dir_buf because the DMA
+;   helper advances R9 past each transfer.
+mp64fs_validate_at:
+    ; Validation keeps the 6144-byte directory and at-most-1024-byte bitmap
+    ; live together.  Reject a buffer without room for that complete span
+    ; below the two deepest return cells before issuing any DMA.
+    mov r10, r15
+    subi r10, 16
+    cmp r9, r10
+    lbrgt mp64fs_validate_at_bad
+    sub r10, r9
+    ldi64 r11, 7168
+    cmp r11, r10
+    lbrgt mp64fs_validate_at_bad
+
+    ldi64 r11, var_mp64fs_dir_buf
+    str r11, r9
+    ldi r1, 0
+    ldi r12, 1
+    ldi64 r11, disk_read_sectors
+    call.l r11
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r9, r11
+    ldi64 r11, mp64fs_geometry
+    call.l r11
+    cmpi r0, 0
+    breq mp64fs_validate_at_bad
+    ldi64 r11, var_mp64fs_dir_buf
+    ldn r9, r11
+    ldi64 r11, mp64fs_read_metadata
+    call.l r11
+    ldi64 r11, mp64fs_metadata_allocated
+    call.l r11
+    cmpi r0, 0
+    breq mp64fs_validate_at_bad
+    ldi64 r11, mp64fs_directory_valid
+    call.l r11
+    ret.l
+mp64fs_validate_at_bad:
+    ldi r0, 0
+    ret.l
+
 ; FSLOAD ( "name" -- )  Load a file from MP64FS and EVALUATE its contents.
 ;
 ; Parses the next word as a filename, reads the MP64FS directory from
@@ -6571,15 +7008,15 @@ w_fsload:
     andi r1, 0x80
     lbreq w_fsload_no_disk
 
-    ; ---- Read directory sectors 2-13 (6144 bytes) into buffer ----
+    ; ---- Read and validate the MP64FS superblock ----
     mov r9, r2
     lsri r9, 1                ; buffer = R2 / 2
     subi r15, 8
     str r15, r9               ; [RSP+0]=buf_addr
-    ldi r1, 2                 ; start sector = 2
-    ldi r12, 12               ; 12 sectors
-    ldi64 r11, disk_read_sectors
+    ldi64 r11, mp64fs_validate_at
     call.l r11
+    cmpi r0, 0
+    lbreq w_fsload_bad_dir
 
     ; ---- Scan 128 directory entries for name match ----
     ldn r9, r15               ; buf_addr
@@ -6660,9 +7097,23 @@ w_fsload_found:
     ld.b r7, r11              ; hi
     lsli r7, 8
     or r12, r7                ; R12 = sector_count
+    ldi64 r10, var_mp64fs_primary_count
+    st.h r10, r12
+
+    ; Retain the validated secondary extent for a contiguous second DMA.
+    mov r11, r13
+    addi r11, 44
+    ld.h r7, r11
+    ldi64 r10, var_mp64fs_secondary_start
+    st.h r10, r7
+    addi r11, 2
+    ld.h r7, r11
+    ldi64 r10, var_mp64fs_secondary_count
+    st.h r10, r7
 
     ; Extract used_bytes (u32 LE at +28)
-    inc r11
+    mov r11, r13
+    addi r11, 28
     ld.b r13, r11             ; byte 0
     inc r11
     ld.b r7, r11              ; byte 1
@@ -6680,8 +7131,29 @@ w_fsload_found:
     lsli r7, 8
     or r13, r7                ; R13 = used_bytes
 
-    ; Clean up name/buf RSP frame (3 slots)
+    ; Clean up name/buf RSP frame (3 slots).
     addi r15, 24
+
+    ; The two extents are read contiguously from R2/2.  Bound the complete
+    ; sector-rounded DMA footprint below the two FSLOAD state cells and the
+    ; disk helper's live return address before issuing either transfer.  This
+    ; prevents valid large media from wrapping Bank 0 or overwriting control
+    ; state.
+    ldi64 r10, var_mp64fs_primary_count
+    ld.h r12, r10
+    ldi64 r10, var_mp64fs_secondary_count
+    ld.h r7, r10
+    add r12, r7
+    mov r7, r15
+    subi r7, 24
+    mov r9, r2
+    lsri r9, 1
+    cmp r7, r9
+    lbrle w_fsload_too_large
+    sub r7, r9
+    lsri r7, 9
+    cmp r12, r7
+    lbrgt w_fsload_too_large
 
     ; ---- Read file data into buffer at R2/2 ----
     ; R1 = start_sector, R12 = sector_count, R13 = used_bytes
@@ -6693,8 +7165,22 @@ w_fsload_found:
     subi r15, 8
     str r15, r9               ; [RSP+0] = cur_ptr (buffer start)
     ; Do the disk read
+    ldi64 r10, var_mp64fs_primary_count
+    ld.h r12, r10
     ldi64 r11, disk_read_sectors
     call.l r11
+
+    ; A fragmented file's validated second extent follows the primary in RAM.
+    ; disk_read_sectors leaves R9 immediately after the primary transfer.
+    ldi64 r11, var_mp64fs_secondary_count
+    ld.h r12, r11
+    cmpi r12, 0
+    breq w_fsload_data_ready
+    ldi64 r11, var_mp64fs_secondary_start
+    ld.h r1, r11
+    ldi64 r11, disk_read_sectors
+    call.l r11
+w_fsload_data_ready:
 
     ; Initialize FSLOAD line counter
     ldi r1, 0
@@ -6848,6 +7334,20 @@ w_fsload_not_found:
     addi r15, 24
     ; Print the filename
     ldi64 r10, str_fsload_err
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_fsload_bad_dir:
+    ; Clean up name + buf frame
+    addi r15, 24
+    ldi64 r10, str_fsload_bad_dir
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_fsload_too_large:
+    ldi64 r10, str_fsload_too_large
     ldi64 r11, print_str
     call.l r11
     ret.l
@@ -14187,9 +14687,37 @@ d_disk_flush:
     call.l r11
     ret.l
 
+; === DISK-SECTORS ===
+d_disk_sectors:
+    .dq d_disk_flush
+    .db 12
+    .ascii "DISK-SECTORS"
+    ldi64 r11, w_disk_sectors
+    call.l r11
+    ret.l
+
+; === MP64FS-VALID? ===
+d_mp64fs_valid:
+    .dq d_disk_sectors
+    .db 13
+    .ascii "MP64FS-VALID?"
+    ldi r0, 0
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r1, r11
+    andi r1, 0x80
+    breq d_mp64fs_valid_result
+    mov r9, r2
+    lsri r9, 1
+    ldi64 r11, mp64fs_validate_at
+    call.l r11
+d_mp64fs_valid_result:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; === TIMER! ===
 d_timer_store:
-    .dq d_disk_flush
+    .dq d_mp64fs_valid
     .db 6
     .ascii "TIMER!"
     ldi64 r11, w_timer_store
@@ -16868,6 +17396,28 @@ var_compile_active:
 var_fsload_line:
     .dq 0
 
+; Validated MP64FS geometry and metadata buffers.  FSLOAD and autoboot share
+; the same bounded reader and reject the directory before using any entry.
+var_mp64fs_total:
+    .dd 0
+var_mp64fs_data_start:
+    .dw 0
+    .dw 0                    ; align following pointers
+var_mp64fs_dir_buf:
+    .dq 0
+var_mp64fs_bmap_buf:
+    .dq 0
+var_mp64fs_entry:
+    .dq 0
+var_mp64fs_primary_count:
+    .dw 0
+var_mp64fs_secondary_start:
+    .dw 0
+var_mp64fs_secondary_count:
+    .dw 0
+var_mp64fs_scan_index:
+    .dw 0
+
 ; EVALUATE nesting depth — prevents unbounded RSP growth
 var_eval_depth:
     .dq 0
@@ -17074,6 +17624,10 @@ str_semi_in_quot:
 
 str_fsload_no_disk:
     .asciiz "FSLOAD: no disk\n"
+str_fsload_bad_dir:
+    .asciiz "FSLOAD: invalid MP64FS\n"
+str_fsload_too_large:
+    .asciiz "FSLOAD: file exceeds RAM buffer\n"
 str_fsload_err:
     .asciiz "FSLOAD: not found\n"
 

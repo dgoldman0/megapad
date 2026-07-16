@@ -34,8 +34,8 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,760 lines Forth |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
-| **Tests** | 1,911 passing, with 36 environment-gated skips (CPU, BIOS, KDOS, FS, devices, assembler, multicore, micro-clusters, HBW, tile, audio, crypto, networking, PQC) |
-| **Filesystem** | MP64FS — 1 MiB images, 64 files, 7 file types |
+| **Tests** | 2,000+ passing checks across CPU, BIOS, KDOS, FS, devices, assembler, multicore, HBW, tile, audio, crypto, networking, and PQC; environment/capacity gates are reported separately |
+| **Filesystem** | MP64FS — capacity-derived geometry through 4 MiB, 128 entries, two extents |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
 | **Devices** | 20 emulator MMIO peripherals, including UART, Timer, Storage, NIC, one-shot PCM Audio, crypto accelerators, Mailbox, Spinlock, SysInfo, and Port I/O Bridge |
 | **FPGA RTL** | 36 Verilog modules + 32 testbenches + 12 target overrides (~430 HW tests), Genesys 2 + VU095 targets |
