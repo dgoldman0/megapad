@@ -2423,6 +2423,7 @@ class TestBIOS(unittest.TestCase):
             self.assertIn("3 ", text)
             self.assertIn("-1 ", text)
             self.assertIn("NETWORK-WORD", text)
+            self.assertNotIn("? (not found)", text)
         finally:
             os.unlink(path)
 
@@ -2442,6 +2443,44 @@ class TestBIOS(unittest.TestCase):
             self.assertIn("Standard autoexec requires external memory", text)
             self.assertIn("3 ", text)
             self.assertIn("0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_standard_autoexec_does_not_reenter_bios_fsload(self):
+        """Userland networking uses KDOS REQUIRE while KDOS autoboot is live."""
+        fs = build_sample_image()
+        autoexec = fs.read_file("autoexec.f")
+        marker = b"\n_ENTER-UL\n"
+        self.assertEqual(autoexec.count(marker), 1)
+        autoexec = autoexec.replace(
+            marker,
+            marker + b': FSLOAD ABORT" nested BIOS FSLOAD" ;\n',
+            1,
+        )
+        fs.delete_file("autoexec.f")
+        fs.inject_file("autoexec.f", autoexec, ftype=FTYPE_FORTH)
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(
+                ram_kib=1024,
+                storage_image=path,
+                ext_mem_mib=16,
+            )
+            text = self._run_forth(
+                sys,
+                buf,
+                [
+                    "MODULE? networking.f .",
+                    "' PORT-INIT DROP .\" NETWORK-TAIL\"",
+                ],
+                max_steps=900_000_000,
+            )
+            self.assertNotIn("nested BIOS FSLOAD", text)
+            self.assertNotIn("? (not found)", text)
+            self.assertIn("-1 ", text)
+            self.assertIn("NETWORK-TAIL", text)
         finally:
             os.unlink(path)
 
@@ -8985,6 +9024,9 @@ class TestDiskUtil(unittest.TestCase):
             e for e in entries if e.name == "networking.f")
         self.assertEqual(networking_entry.ftype, FTYPE_FORTH)
         self.assertGreater(networking_entry.sector_count, 255)
+        autoexec = fs.read_file("autoexec.f")
+        self.assertIn(b"REQUIRE networking.f", autoexec)
+        self.assertNotIn(b"FSLOAD networking.f", autoexec)
         demo_entry = next(e for e in entries if e.name == "demo-data")
         self.assertEqual(demo_entry.ftype, FTYPE_DATA)
         bdl_entry = next(e for e in entries if e.name == "demo-bundle")
@@ -19057,6 +19099,64 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         "TLSS-ESTABLISHED test-ctx @ TLS-CTX.STATE !",
     ]
 
+    @staticmethod
+    def _new_session_ticket(*, lifetime=86_400, age_add=0x01020304,
+                            nonce=b"", ticket=b"ticket", extensions=()):
+        """Build one wire-format TLS 1.3 NewSessionTicket handshake message."""
+        if len(nonce) > 255:
+            raise ValueError("ticket nonce exceeds its uint8 length")
+        if len(ticket) > 0xFFFF:
+            raise ValueError("ticket exceeds its uint16 length")
+        ext_bytes = b"".join(
+            struct.pack(">HH", ext_type, len(ext_data)) + ext_data
+            for ext_type, ext_data in extensions
+        )
+        if len(ext_bytes) > 0xFFFF:
+            raise ValueError("ticket extensions exceed their uint16 length")
+        body = (
+            struct.pack(">II", lifetime, age_add)
+            + bytes([len(nonce)]) + nonce
+            + struct.pack(">H", len(ticket)) + ticket
+            + struct.pack(">H", len(ext_bytes)) + ext_bytes
+        )
+        return b"\x04" + len(body).to_bytes(3, "big") + body
+
+    @staticmethod
+    def _forth_bytes(name, data):
+        """Create and initialize a small byte buffer in the Forth fixture."""
+        lines = [f"CREATE {name} {max(len(data), 1)} ALLOT"]
+        lines.extend(f"{byte} {name} {offset} + C!"
+                     for offset, byte in enumerate(data))
+        return lines
+
+    def _encrypted_record_stream(self, records):
+        """Encrypt records with test-ctx and preload the TLS receive buffer."""
+        lines = []
+        for index, (content_type, plaintext) in enumerate(records):
+            lines += self._forth_bytes(f"ph-plain{index}", plaintext)
+            lines += [
+                f"CREATE ph-rec{index} {len(plaintext) + 32} ALLOT",
+                f"test-ctx @ {content_type} ph-plain{index} "
+                f"{len(plaintext)} ph-rec{index} TLS-ENCRYPT-RECORD",
+                f"VARIABLE ph-rlen{index} ph-rlen{index} !",
+            ]
+        lines += [
+            "TLS-RBUF-RESET TLS-HS-RBUF-RESET",
+            "VARIABLE ph-stream-len 0 ph-stream-len !",
+        ]
+        for index, _record in enumerate(records):
+            lines += [
+                f"ph-rec{index} TLS-RECV-REC ph-stream-len @ + "
+                f"ph-rlen{index} @ CMOVE",
+                f"ph-rlen{index} @ ph-stream-len +!",
+            ]
+        lines += [
+            "ph-stream-len @ TLS-RBUF-LEN !",
+            "0 test-ctx @ TLS-CTX.RD-SEQ !",
+            "TLS-E-OK test-ctx @ TLS-CTX.ERROR !",
+        ]
+        return lines
+
     def test_tls_send_data_not_established(self):
         """TLS-SEND-DATA returns 0 when not in ESTABLISHED state."""
         lines = [
@@ -19203,6 +19303,173 @@ class TestKDOSTLSAppData(_KDOSNetworkTestBase):
         ]
         text = self._run_kdos(lines)
         self.assertIn("R=0 ", text)
+
+    def test_tls_recv_discards_coalesced_new_session_tickets(self):
+        """Complete authenticated tickets are validated, discarded, and skipped."""
+        ticket_a = self._new_session_ticket(
+            nonce=b"\xaa\xbb", ticket=b"one",
+            extensions=(
+                (42, struct.pack(">I", 4096)),
+                (0x1234, b"ignored"),
+            ))
+        ticket_b = self._new_session_ticket(ticket=b"two")
+        lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+            ("TLS-CT-HANDSHAKE", ticket_a + ticket_b),
+            ("TLS-CT-APP-DATA", b"OK"),
+        ]) + [
+            "CREATE ph-out 8 ALLOT",
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  ticket=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+            'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+            'TLS-HS-RBUF-LEN @ ."  held=" .',
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  app=" .',
+            'ph-out C@ ."  first=" . ph-out 1+ C@ ."  second=" .',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("ticket=0 ", text)
+        self.assertIn("state=2 ", text)
+        self.assertIn("auth=1 ", text)
+        self.assertIn("error=0 ", text)
+        self.assertIn("held=0 ", text)
+        self.assertIn("app=2 ", text)
+        self.assertIn("first=79 ", text)
+        self.assertIn("second=75 ", text)
+
+    def test_tls_recv_reassembles_fragmented_new_session_ticket(self):
+        """An authenticated ticket may span headers and protected records."""
+        ticket = self._new_session_ticket(
+            nonce=b"nonce", ticket=b"fragmented-ticket")
+        lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+            ("TLS-CT-HANDSHAKE", ticket[:3]),
+            ("TLS-CT-HANDSHAKE", ticket[3:11]),
+            ("TLS-CT-HANDSHAKE", ticket[11:]),
+            ("TLS-CT-APP-DATA", b"NEXT"),
+        ]) + [
+            "CREATE ph-out 8 ALLOT",
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part1=" .',
+            'TLS-HS-RBUF-LEN @ ."  held1=" .',
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part2=" .',
+            'TLS-HS-RBUF-LEN @ ."  held2=" .',
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  part3=" .',
+            'TLS-HS-RBUF-LEN @ ."  held3=" .',
+            'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+            'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+            'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+            'test-ctx @ ph-out 8 TLS-RECV-DATA ."  app=" .',
+            'ph-out 4 TYPE',
+        ]
+        text = self._run_kdos(lines)
+        self.assertIn("part1=0 ", text)
+        self.assertIn("held1=3 ", text)
+        self.assertIn("part2=0 ", text)
+        self.assertIn("held2=11 ", text)
+        self.assertIn("part3=0 ", text)
+        self.assertIn("held3=0 ", text)
+        self.assertIn("state=2 ", text)
+        self.assertIn("auth=1 ", text)
+        self.assertIn("error=0 ", text)
+        self.assertIn("app=4 ", text)
+        self.assertIn("NEXT", text)
+
+    def test_tls_recv_rejects_malformed_new_session_tickets(self):
+        """Authenticated malformed tickets fail closed before application use."""
+        valid = self._new_session_ticket(ticket=b"x")
+        bad_header = bytearray(valid)
+        bad_header[3] -= 1
+        bad_nonce = bytearray(valid)
+        bad_nonce[12] = 255
+        bad_ticket = bytearray(valid)
+        bad_ticket[13:15] = b"\xff\xff"
+        bad_extensions = bytearray(valid)
+        bad_extensions[-2:] = b"\x00\x01"
+        cases = {
+            "handshake length": bytes(bad_header),
+            "lifetime": self._new_session_ticket(
+                lifetime=604_801, ticket=b"x"),
+            "nonce bounds": bytes(bad_nonce),
+            "ticket nonempty": self._new_session_ticket(ticket=b""),
+            "ticket bounds": bytes(bad_ticket),
+            "extension vector": bytes(bad_extensions),
+            "early_data length": self._new_session_ticket(
+                ticket=b"x", extensions=((42, b"\x00\x00\x00"),)),
+            "duplicate early_data": self._new_session_ticket(
+                ticket=b"x", extensions=(
+                    (42, b"\x00\x00\x00\x01"),
+                    (42, b"\x00\x00\x00\x02"),
+                )),
+            "duplicate unknown extension": self._new_session_ticket(
+                ticket=b"x", extensions=(
+                    (0x1234, b"first"),
+                    (0x1234, b"second"),
+                )),
+        }
+        for label, ticket in cases.items():
+            with self.subTest(label=label):
+                lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+                    ("TLS-CT-HANDSHAKE", ticket),
+                ]) + [
+                    "CREATE ph-out 8 ALLOT",
+                    'test-ctx @ ph-out 8 TLS-RECV-DATA ."  result=" .',
+                    'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+                    'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+                    'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+                ]
+                text = self._run_kdos(lines)
+                self.assertIn("result=-1 ", text)
+                self.assertIn("error=-4202 ", text)
+                self.assertIn("state=3 ", text)
+                self.assertIn("auth=0 ", text)
+
+    def test_tls_recv_rejects_unsupported_post_handshake_messages(self):
+        """KeyUpdate, CertificateRequest, unknown, and empty messages fail closed."""
+        cases = {
+            "KeyUpdate": b"\x18\x00\x00\x01\x00",
+            "CertificateRequest": b"\x0d\x00\x00\x03\x00\x00\x00",
+            "unknown": b"\x63\x00\x00\x00",
+            "empty record": b"",
+        }
+        for label, message in cases.items():
+            with self.subTest(label=label):
+                lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+                    ("TLS-CT-HANDSHAKE", message),
+                ]) + [
+                    "CREATE ph-out 8 ALLOT",
+                    'test-ctx @ ph-out 8 TLS-RECV-DATA ."  result=" .',
+                    'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+                    'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+                    'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+                ]
+                text = self._run_kdos(lines)
+                self.assertIn("result=-1 ", text)
+                self.assertIn("error=-4202 ", text)
+                self.assertIn("state=3 ", text)
+                self.assertIn("auth=0 ", text)
+
+    def test_tls_recv_rejects_non_handshake_during_ticket_fragment(self):
+        """Application data and alerts cannot abandon a partial ticket."""
+        ticket_prefix = self._new_session_ticket(ticket=b"fragment")[:10]
+        for label, content_type, payload in (
+                ("application data", "TLS-CT-APP-DATA", b"bad"),
+                ("alert", "TLS-CT-ALERT", b"\x01\x00")):
+            with self.subTest(label=label):
+                lines = self._TLS_ESTAB_SETUP + self._encrypted_record_stream([
+                    ("TLS-CT-HANDSHAKE", ticket_prefix),
+                    (content_type, payload),
+                ]) + [
+                    "CREATE ph-out 8 ALLOT",
+                    'test-ctx @ ph-out 8 TLS-RECV-DATA ."  fragment=" .',
+                    'test-ctx @ ph-out 8 TLS-RECV-DATA ."  result=" .',
+                    'test-ctx @ TLS-CTX.ERROR @ ."  error=" .',
+                    'test-ctx @ TLS-CTX.STATE @ ."  state=" .',
+                    'test-ctx @ TLS-CTX.PEER-AUTH @ ."  auth=" .',
+                ]
+                text = self._run_kdos(lines)
+                self.assertIn("fragment=0 ", text)
+                self.assertIn("result=-1 ", text)
+                self.assertIn("error=-4202 ", text)
+                self.assertIn("state=3 ", text)
+                self.assertIn("auth=0 ", text)
 
     def test_tls_encrypt_decrypt_roundtrip(self):
         """TLS-ENCRYPT-RECORD / TLS-DECRYPT-RECORD roundtrip via raw buffers."""
@@ -25065,6 +25332,74 @@ class TestAppLoad(_KDOSTestBase):
             import os
             os.unlink(img)
 
+    def test_nested_large_app_load_restores_parent_loader(self):
+        """APP-LOAD batches large input without corrupting its LOAD caller."""
+        filler = b"\\ " + (b"a" * 249) + b"\n"
+        app = (
+            b": APP-HEAD 1 ;\n"
+            + (filler * 520)
+            + b": APP-TAIL 5151 ;\n"
+        )
+        self.assertGreater(
+            (len(app) + SECTOR_SIZE - 1) // SECTOR_SIZE,
+            255,
+        )
+        img = self._make_formatted_image()
+        du_inject_file(img, "bigapp.f", app, ftype=FTYPE_FORTH)
+        du_inject_file(
+            img,
+            "outer.f",
+            b"APP-LOAD bigapp.f\n: OUTER-TAIL 6262 ;\n",
+            ftype=FTYPE_FORTH,
+        )
+        try:
+            out = self._run_kdos(
+                ["LOAD outer.f", "APP-TAIL .", "OUTER-TAIL ."],
+                max_steps=400_000_000,
+                storage_image=img,
+            )
+            self.assertIn("5151 ", out)
+            self.assertIn("6262 ", out)
+            self.assertNotIn("? (not found)", out)
+        finally:
+            import os
+            os.unlink(img)
+
+    def test_app_load_throw_restores_loader_and_machine_state(self):
+        """A thrown app releases its loader frame before the next APP-LOAD."""
+        img = self._make_formatted_image()
+        du_inject_file(
+            img, "badapp.f", b"-88 THROW\n", ftype=FTYPE_FORTH)
+        du_inject_file(
+            img,
+            "goodapp.f",
+            b": APP-RECOVERED 7373 ;\n",
+            ftype=FTYPE_FORTH,
+        )
+        try:
+            out = self._run_kdos(
+                [
+                    "VARIABLE BAD-APP-IOR",
+                    ': TRY-BAD-APP S" APP-LOAD badapp.f" EVALUATE ;',
+                    ": CATCH-BAD-APP ['] TRY-BAD-APP CATCH "
+                    "BAD-APP-IOR ! ;",
+                    "CATCH-BAD-APP",
+                    '." BAD-APP-IOR=" BAD-APP-IOR @ .',
+                    '." AFTER-BAD-APP=" _LD-SP @ . PRIV@ .',
+                    "APP-LOAD goodapp.f",
+                    "APP-RECOVERED .",
+                    '." AFTER-GOOD-APP=" _LD-SP @ . PRIV@ .',
+                ],
+                storage_image=img,
+            )
+            self.assertIn("BAD-APP-IOR=-88 ", out)
+            self.assertIn("AFTER-BAD-APP=0 0 ", out)
+            self.assertIn("7373 ", out)
+            self.assertIn("AFTER-GOOD-APP=0 0 ", out)
+        finally:
+            import os
+            os.unlink(img)
+
     def test_load_stays_supervisor(self):
         """Existing LOAD word runs in supervisor mode (PRIV@ shows 0)."""
         img = self._make_image_with_file(
@@ -25650,6 +25985,146 @@ class TestKDOSModuleSystem(_KDOSTestBase):
         finally:
             os.unlink(img)
 
+    def test_require_reads_module_larger_than_255_sectors(self):
+        """KDOS batches a large module read and evaluates its final line."""
+        filler = b"\\ " + (b"x" * 249) + b"\n"
+        source = (
+            b"PROVIDED huge.f\n"
+            + (filler * 520)
+            + b": HUGE-TAIL 4242 ;\n"
+        )
+        self.assertGreater(
+            (len(source) + SECTOR_SIZE - 1) // SECTOR_SIZE,
+            255,
+        )
+        img = self._make_module_image({"huge.f": source})
+        try:
+            text = self._run_kdos(
+                ["ENTER-USERLAND", "REQUIRE huge.f", "HUGE-TAIL ."],
+                max_steps=300_000_000,
+                storage_image=img,
+            )
+            self.assertIn("4242 ", text)
+            self.assertNotIn("? (not found)", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_reads_large_fragmented_module_tail(self):
+        """A batched module read appends its validated second extent."""
+        filler = b"\\ " + (b"y" * 249) + b"\n"
+        source = (
+            b"PROVIDED splitbig.f\n"
+            + (filler * 550)
+            + b": SPLITBIG-TAIL 4343 ;\n"
+        )
+        img = self._make_module_image({"splitbig.f": source})
+        try:
+            fs = MP64FS.load(img)
+            slot, entry = fs.find_file("splitbig.f")
+            self.assertGreater(entry.sector_count, 260)
+            primary_count = 1
+            secondary_count = entry.sector_count - primary_count
+            self.assertGreater(secondary_count, 255)
+            secondary_start = entry.start_sector + entry.sector_count + 1
+            self.assertLess(secondary_start + secondary_count, fs.total)
+
+            old_tail = entry.start_sector + primary_count
+            fs.img[
+                secondary_start * SECTOR_SIZE:
+                (secondary_start + secondary_count) * SECTOR_SIZE
+            ] = fs.img[
+                old_tail * SECTOR_SIZE:
+                (old_tail + secondary_count) * SECTOR_SIZE
+            ]
+            for sector in range(old_tail, old_tail + secondary_count):
+                offset = SECTOR_SIZE + sector // 8
+                fs.img[offset] &= ~(1 << (sector % 8)) & 0xFF
+            for sector in range(
+                secondary_start, secondary_start + secondary_count
+            ):
+                offset = SECTOR_SIZE + sector // 8
+                fs.img[offset] |= 1 << (sector % 8)
+
+            de_offset = fs.dir_start * SECTOR_SIZE + slot * 48
+            struct.pack_into("<H", fs.img, de_offset + 26, primary_count)
+            struct.pack_into(
+                "<HH",
+                fs.img,
+                de_offset + 44,
+                secondary_start,
+                secondary_count,
+            )
+            fs.save(img)
+
+            text = self._run_kdos(
+                [
+                    "ENTER-USERLAND",
+                    "REQUIRE splitbig.f",
+                    "SPLITBIG-TAIL .",
+                ],
+                max_steps=300_000_000,
+                storage_image=img,
+            )
+            self.assertIn("4343 ", text)
+            self.assertNotIn("? (not found)", text)
+        finally:
+            os.unlink(img)
+
+    def test_relative_require_throw_rolls_back_and_retries(self):
+        """A failed relative module restores CWD, mark, buffer, and frame."""
+        filler = b"\\ " + (b"z" * 249) + b"\n"
+        retry = (
+            b"PROVIDED retry.f\n"
+            b"BAD-ATTEMPTS @ 1+ DUP BAD-ATTEMPTS ! "
+            b"1 = IF -77 THROW THEN\n"
+            + (filler * 520)
+            + b": RETRY-TAIL 4545 ;\n"
+        )
+        img = self._make_formatted_image()
+        fs = MP64FS.load(img)
+        fs.mkdir("mods")
+        fs.inject_file(
+            "retry.f", retry, ftype=FTYPE_FORTH, path="/mods")
+        fs.save(img)
+        try:
+            text = self._run_kdos(
+                [
+                    "ENTER-USERLAND",
+                    "VARIABLE BAD-IOR VARIABLE BAD-CWD "
+                    "VARIABLE BAD-ATTEMPTS",
+                    "CWD @ BAD-CWD !",
+                    ': TRY-BAD S" REQUIRE mods/retry.f" EVALUATE ;',
+                    ": CATCH-BAD ['] TRY-BAD CATCH BAD-IOR ! ;",
+                    "CATCH-BAD",
+                    '." BAD-IOR=" BAD-IOR @ .',
+                    '." CWD-SAME=" CWD @ BAD-CWD @ = .',
+                    '." ROLLED-BACK=" MODULE? retry.f 0= .',
+                    '." AFTER-BAD=" _LD-SP @ .',
+                    '." REQ-AFTER-BAD=" _REQ-SP @ .',
+                    "REQUIRE mods/retry.f",
+                    "RETRY-TAIL .",
+                    '." LOADED=" MODULE? retry.f .',
+                    '." ATTEMPTS=" BAD-ATTEMPTS @ .',
+                    '." AFTER-RETRY=" _LD-SP @ .',
+                    '." REQ-AFTER-RETRY=" _REQ-SP @ .',
+                ],
+                max_steps=600_000_000,
+                storage_image=img,
+            )
+            self.assertIn("BAD-IOR=-77 ", text)
+            self.assertIn("CWD-SAME=-1 ", text)
+            self.assertIn("ROLLED-BACK=-1 ", text)
+            self.assertIn("4545 ", text)
+            self.assertIn("LOADED=-1 ", text)
+            self.assertIn("ATTEMPTS=2 ", text)
+            self.assertIn("AFTER-BAD=0 ", text)
+            self.assertIn("REQ-AFTER-BAD=0 ", text)
+            self.assertIn("AFTER-RETRY=0 ", text)
+            self.assertIn("REQ-AFTER-RETRY=0 ", text)
+            self.assertNotIn("REQUIRE nested too deep", text)
+        finally:
+            os.unlink(img)
+
     def test_require_idempotent(self):
         """REQUIRE does not reload an already-loaded module."""
         img = self._make_module_image({
@@ -25707,6 +26182,23 @@ class TestKDOSModuleSystem(_KDOSTestBase):
                 "APP-VAL .",
             ], storage_image=img)
             self.assertIn("20 ", text)
+        finally:
+            os.unlink(img)
+
+    def test_require_hides_cwd_state_and_preserves_source_stack_effects(self):
+        """REQUIRE state is private while intentional module results survive."""
+        img = self._make_module_image({
+            "probe.f": b"PROVIDED probe.f\nDEPTH .\n",
+            "effect.f": b"PROVIDED effect.f\n123\n",
+        })
+        try:
+            text = self._run_kdos([
+                'REQUIRE probe.f ." ENTRY-DONE"',
+                "REQUIRE effect.f",
+                '." CWD=" CWD @ . ." DEPTH=" DEPTH . ." VALUE=" .',
+            ], storage_image=img)
+            self.assertIn("0 ENTRY-DONE", text)
+            self.assertIn("CWD=255 DEPTH=1 VALUE=123 ", text)
         finally:
             os.unlink(img)
 

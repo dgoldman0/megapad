@@ -7,12 +7,13 @@
 \
 \      JIT-ON
 \      ENTER-USERLAND
-\      FSLOAD networking.f
+\      REQUIRE networking.f
 \      JIT-OFF
 \
-\  FSLOAD is intentional: this subsystem is larger than one 8-bit
-\  DISK-N transfer, and the BIOS loader performs guarded multi-batch
-\  reads.  The caller owns JIT policy; standard autoexec enables it.
+\  REQUIRE is intentional: KDOS reads the large source into external memory
+\  in guarded batches without aliasing the BIOS buffer that is still loading
+\  KDOS during autoboot.  The caller owns JIT policy; standard autoexec
+\  enables it.
 
 PROVIDED networking.f
 
@@ -5266,6 +5267,7 @@ VARIABLE TLS-SNI-LEN
 \ TLS 1.3 handshake message types used by certificate and handshake layers.
 1  CONSTANT TLSHT-CLIENT-HELLO
 2  CONSTANT TLSHT-SERVER-HELLO
+4  CONSTANT TLSHT-NEW-SESSION-TICKET
 8  CONSTANT TLSHT-ENCRYPTED-EXT
 11 CONSTANT TLSHT-CERTIFICATE
 15 CONSTANT TLSHT-CERT-VERIFY
@@ -6669,6 +6671,112 @@ VARIABLE _TAD-MAXLEN
 VARIABLE _TAD-PLEN
 VARIABLE _TAD-COPY
 
+\ -- Authenticated post-handshake messages --
+\
+\ Resumption is not implemented, but public TLS 1.3 servers commonly send
+\ NewSessionTicket immediately before their first application-data record.
+\ Decode the complete bounded structure before discarding it.  The shared
+\ handshake reassembly buffer is empty once TLS-CONNECT succeeds, so it also
+\ provides bounded retention when a ticket spans protected records.
+604800 CONSTANT TLS-NST-MAX-LIFETIME
+42     CONSTANT TLS-EXT-EARLY-DATA
+
+VARIABLE _TNST-MSG
+VARIABLE _TNST-MLEN
+VARIABLE _TNST-POS
+VARIABLE _TNST-END
+VARIABLE _TNST-U
+VARIABLE _TNST-EEND
+VARIABLE _TNST-ETYPE
+VARIABLE _TNST-ELEN
+VARIABLE _TNST-EXTS
+VARIABLE _TNST-CUR
+VARIABLE _TNST-SCAN
+
+: _TNST-EXT-SEEN? ( -- flag )
+    _TNST-EXTS @ _TNST-SCAN !
+    BEGIN _TNST-SCAN @ _TNST-CUR @ < WHILE
+        _TNST-SCAN @ _BE16@ _TNST-ETYPE @ = IF -1 EXIT THEN
+        _TNST-SCAN @ 2 + _BE16@ 4 + _TNST-SCAN +!
+    REPEAT
+    0 ;
+
+: TLS-PARSE-NEW-SESSION-TICKET ( msg mlen -- ior )
+    _TNST-MLEN ! _TNST-MSG !
+    _TNST-MLEN @ 18 < IF -1 EXIT THEN
+    _TNST-MSG @ C@ TLSHT-NEW-SESSION-TICKET <> IF -1 EXIT THEN
+    _TNST-MSG @ 1+ _BE24@ _TNST-MLEN @ 4 - <> IF -1 EXIT THEN
+    _TNST-MSG @ _TNST-MLEN @ + _TNST-END !
+    _TNST-MSG @ 4 + _TNST-POS !
+
+    \ ticket_lifetime, ticket_age_add, and ticket_nonce length.
+    _TNST-POS @ 9 + _TNST-END @ > IF -1 EXIT THEN
+    _TNST-POS @ _BE32@ TLS-NST-MAX-LIFETIME > IF -1 EXIT THEN
+    8 _TNST-POS +!
+    _TNST-POS @ C@ _TNST-U ! 1 _TNST-POS +!
+    _TNST-POS @ _TNST-U @ + _TNST-END @ > IF -1 EXIT THEN
+    _TNST-U @ _TNST-POS +!
+
+    \ ticket is a nonempty uint16-length vector.
+    _TNST-POS @ 2 + _TNST-END @ > IF -1 EXIT THEN
+    _TNST-POS @ _BE16@ DUP 0= IF DROP -1 EXIT THEN _TNST-U !
+    2 _TNST-POS +!
+    _TNST-POS @ _TNST-U @ + _TNST-END @ > IF -1 EXIT THEN
+    _TNST-U @ _TNST-POS +!
+
+    \ The extension vector must consume the message exactly and every type
+    \ must be unique.  Unknown extensions are otherwise ignored; early_data
+    \ has an exact uint32 payload.
+    _TNST-POS @ 2 + _TNST-END @ > IF -1 EXIT THEN
+    _TNST-POS @ _BE16@ _TNST-U ! 2 _TNST-POS +!
+    _TNST-POS @ _TNST-U @ + DUP _TNST-EEND !
+    _TNST-END @ <> IF -1 EXIT THEN
+    _TNST-POS @ _TNST-EXTS !
+    BEGIN _TNST-POS @ _TNST-EEND @ < WHILE
+        _TNST-POS @ 4 + _TNST-EEND @ > IF -1 EXIT THEN
+        _TNST-POS @ _TNST-CUR !
+        _TNST-POS @ DUP _BE16@ _TNST-ETYPE !
+        2 + _BE16@ _TNST-ELEN ! 4 _TNST-POS +!
+        _TNST-POS @ _TNST-ELEN @ + _TNST-EEND @ > IF -1 EXIT THEN
+        _TNST-EXT-SEEN? IF -1 EXIT THEN
+        _TNST-ETYPE @ TLS-EXT-EARLY-DATA = IF
+            _TNST-ELEN @ 4 <> IF -1 EXIT THEN
+        THEN
+        _TNST-ELEN @ _TNST-POS +!
+    REPEAT
+    0 ;
+
+VARIABLE _TPPH-PTR
+VARIABLE _TPPH-REM
+VARIABLE _TPPH-TOTAL
+
+: TLS-PROCESS-POST-HANDSHAKE ( plain plen -- ior )
+    _TPPH-REM ! _TPPH-PTR !
+    TLS-HS-RBUF-ERROR @ IF -1 EXIT THEN
+    _TPPH-REM @ 0<
+    TLS-HS-RBUF-LEN @ _TPPH-REM @ + TLS-HS-RBUF-MAX > OR IF
+        -1 TLS-HS-RBUF-ERROR ! -1 EXIT
+    THEN
+    _TPPH-PTR @ TLS-HS-RBUF TLS-HS-RBUF-LEN @ + _TPPH-REM @ CMOVE
+    _TPPH-REM @ TLS-HS-RBUF-LEN +!
+
+    BEGIN TLS-HS-RBUF-LEN @ 4 >= WHILE
+        \ Once the complete handshake header is authenticated, fail closed
+        \ on KeyUpdate, CertificateRequest, and every unsupported type.
+        TLS-HS-RBUF C@ TLSHT-NEW-SESSION-TICKET <> IF
+            -1 TLS-HS-RBUF-ERROR ! -1 EXIT
+        THEN
+        TLS-HS-RBUF 1+ _BE24@ 4 + DUP _TPPH-TOTAL !
+        TLS-HS-RBUF-MAX > IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
+        TLS-HS-RBUF-LEN @ _TPPH-TOTAL @ < IF 0 EXIT THEN
+        TLS-HS-RBUF _TPPH-TOTAL @ TLS-PARSE-NEW-SESSION-TICKET
+        0<> IF -1 TLS-HS-RBUF-ERROR ! -1 EXIT THEN
+        TLS-HS-RBUF _TPPH-TOTAL @ + TLS-HS-RBUF
+        TLS-HS-RBUF-LEN @ _TPPH-TOTAL @ - CMOVE
+        _TPPH-TOTAL @ NEGATE TLS-HS-RBUF-LEN +!
+    REPEAT
+    0 ;
+
 : _TLS-APP-DELIVER  ( ctx dst maxlen plaintext-len -- actual )
     _TAD-PLEN ! _TAD-MAXLEN ! _TAD-DST ! _TAD-CTX !
     _TAD-MAXLEN @ 0> 0= _TAD-PLEN @ 0> 0= OR IF 0 EXIT THEN
@@ -6707,6 +6815,11 @@ VARIABLE _TPA-LEN
     TLS-E-PEER-ALERT _TPA-CTX @ TLS-CTX.ERROR !
     0 _TPA-CTX @ TLS-CTX.PEER-AUTH !
     TLSS-CLOSING _TPA-CTX @ TLS-CTX.STATE ! -1 ;
+
+: _TLS-POST-HANDSHAKE-FAIL ( ctx -- -1 )
+    TLS-E-POST-HANDSHAKE OVER TLS-CTX.ERROR !
+    0 OVER TLS-CTX.PEER-AUTH !
+    TLSS-CLOSING SWAP TLS-CTX.STATE ! -1 ;
 
 : TLS-RECV-DATA ( ctx addr maxlen -- actual | -1 )
     _TRD-MAXLEN !  _TRD-DST !  _TRD-CTX !
@@ -6756,15 +6869,26 @@ VARIABLE _TPA-LEN
     _TRD-RLEN @ TLS-RBUF-CONSUME
     \ Stack: ctype plen  (or -1 0)
     DUP 0= IF
+        OVER TLS-CT-HANDSHAKE = IF
+            2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
+        THEN
         2DROP TLS-E-RECORD _TRD-CTX @ TLS-CTX.ERROR ! -1 EXIT
+    THEN
+    \ A fragmented NewSessionTicket must be completed by HANDSHAKE records;
+    \ accepting application data or alerts here would silently abandon an
+    \ authenticated but structurally incomplete post-handshake message.
+    TLS-HS-RBUF-LEN @ 0<> 2 PICK TLS-CT-HANDSHAKE <> AND IF
+        2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
+    THEN
+    OVER TLS-CT-HANDSHAKE = IF
+        SWAP DROP TLS-PLAIN-BUF SWAP TLS-PROCESS-POST-HANDSHAKE
+        IF _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL ELSE 0 THEN EXIT
     THEN
     OVER TLS-CT-ALERT = IF
         SWAP DROP _TRD-CTX @ TLS-PLAIN-BUF ROT TLS-PROCESS-ALERT EXIT
     THEN
     OVER TLS-CT-APP-DATA <> IF
-        2DROP TLS-E-POST-HANDSHAKE _TRD-CTX @ TLS-CTX.ERROR !
-        0 _TRD-CTX @ TLS-CTX.PEER-AUTH !
-        TLSS-CLOSING _TRD-CTX @ TLS-CTX.STATE ! -1 EXIT
+        2DROP _TRD-CTX @ _TLS-POST-HANDSHAKE-FAIL EXIT
     THEN
     SWAP DROP
     \ Copy one caller-sized slice and retain any remainder for later calls.

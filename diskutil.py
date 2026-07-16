@@ -1455,8 +1455,9 @@ def pack_forth_source(source: bytes) -> bytes:
     """Pack executable Forth source without changing executable lines.
 
     Blank lines and full-line backslash comments are not needed by the guest
-    evaluator.  Removing them keeps boot source within the BIOS's bounded
-    Bank 0 load buffer while preserving inline comments and string contents.
+    evaluator.  Removing them keeps the KDOS boot source within the BIOS's
+    bounded Bank 0 load buffer and reduces later KDOS module-loader transfers,
+    while preserving inline comments and string contents.
     """
     executable = [
         line for line in source.splitlines()

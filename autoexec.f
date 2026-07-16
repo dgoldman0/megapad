@@ -20,8 +20,9 @@ JIT-ON
 _ENTER-UL
 
 \ ── Load networking before compiling references to its words ─────────
-\ FSLOAD handles this large source through guarded multi-batch reads.
-FSLOAD networking.f
+\ REQUIRE reads large sources through KDOS's external-memory, batched loader.
+\ Unlike BIOS FSLOAD, it cannot alias the still-active KDOS autoboot buffer.
+REQUIRE networking.f
 
 \ ── Network auto-configuration ────────────────────────────────────────
 \ NET-STATUS bit 2 = link up, bit 7 = NIC present.

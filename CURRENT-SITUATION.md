@@ -105,7 +105,8 @@ DNS/network tests requiring live internet are skipped in CI.
 
 The standard disk boot compiles `kdos.f` into Bank 0.  KDOS then runs
 `autoexec.f`, which enters the XMEM userland dictionary, loads
-`networking.f` with `FSLOAD`, configures the link, and loads `tools.f`.
+`networking.f` with its batched `REQUIRE` path, configures the link, and loads
+`tools.f`.
 
 | Layer | File(s) | Lines |
 |-------|---------|-------|

@@ -1979,9 +1979,10 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
 : USERLAND-INIT  ( -- )
     U-INIT-DONE @ IF EXIT THEN
     XMEM? 0= IF EXIT THEN
-    \ Start userland dict ABOVE any prior XMEM allocations (e.g. file
-    \ buffers for graphics.f / autoexec.f that _MOD-LOAD-BODY placed
-    \ via XMEM-ALLOT).  Cell-align for safe @ / ! access.
+    \ Start userland dict above any live prior XMEM allocations.  Loader
+    \ source buffers use reclaimable ALLOCATE/FREE storage, while persistent
+    \ XBUF kernel buffers remain below this boundary.  Cell-align for safe
+    \ @ / ! access.
     XMEM-HERE @ 7 + -8 AND  DUP U-DICT-BASE ! U-DICT-HERE !
     \ Push XMEM allocator past the userland zone
     U-DICT-BASE @ U-ZONE-SIZE +  DUP XMEM-HERE ! XMEM-FLOOR !
@@ -4083,10 +4084,9 @@ DEFER OPEN
 
 \ ── LOAD — load and execute a Forth source file ─────────────────────
 \ LOAD ( "filename" -- ) open a file by name, read it, EVALUATE it
-\   Reads the entire file into a temporary buffer at HERE, then
-\   walks through it line by line, EVALUATEing each line.
+\   Reads the entire file into a reclaimable loader allocation, then walks
+\   through it line by line, EVALUATEing each line.
 
-VARIABLE LD-FD
 VARIABLE LD-BUF
 VARIABLE LD-SZ
 VARIABLE LD-CUR
@@ -4116,6 +4116,31 @@ VARIABLE _LD-SP
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-CUR !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
+
+\ _LD-READ-RUN ( sector count addr -- next-addr )
+\ Read one validated extent in bounded hardware-sized batches.
+: _LD-READ-RUN  ( sector count addr -- next-addr )
+    >R
+    BEGIN DUP 0> WHILE
+        OVER DISK-SEC! R@ DISK-DMA!
+        DUP 255 MIN DUP DISK-N! DISK-READ
+        >R R@ - SWAP R@ + SWAP
+        R> SECTOR * R> + >R
+    REPEAT
+    2DROP R> ;
+
+: _LD-SLOT-BYTES  ( slot -- bytes )
+    DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
+
+\ _LD-READ-SLOT ( slot -- )  Concatenate both validated extents in LD-BUF.
+: _LD-READ-SLOT  ( slot -- )
+    DIRENT
+    DUP DE.SEC OVER DE.COUNT LD-BUF @ _LD-READ-RUN
+    OVER DE.EXT1-CNT DUP IF
+        2 PICK DE.EXT1-SEC SWAP ROT _LD-READ-RUN 2DROP
+    ELSE
+        DROP 2DROP
+    THEN ;
 
 \ ── Relative-path resolution for LOAD / REQUIRE ─────────────────────
 \  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
@@ -4313,6 +4338,20 @@ VARIABLE _SEC-LINE
         LD-CUR +!
     REPEAT ;
 
+: _LD-RELEASE  ( -- )
+    LD-BUF @ FREE
+    _LD-RESTORE ;
+
+\ Run a source walk with the loader allocation and nesting frame owned by
+\ this call.  Cleanup precedes rethrow so a bad module cannot poison the next
+\ LOAD/REQUIRE or strand its sector-rounded source allocation.
+: _LD-WALK-GUARDED  ( -- )
+    ['] _LD-WALK CATCH
+    DUP IF
+        >R _LD-RELEASE R> THROW
+    THEN
+    DROP _LD-RELEASE ;
+
 : LOAD  ( "filename" -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
@@ -4324,32 +4363,20 @@ VARIABLE _SEC-LINE
         DROP ."  Not found: " NAMEBUF .ZSTR CR
         _LD-RESTORE EXIT
     THEN
-    DIRENT                               ( de )
-    \ Open by slot
-    DUP DE.USED DUP 0= IF
+    DUP DIRENT DE.USED DUP 0= IF
         2DROP ."  Empty file" CR
         _LD-RESTORE EXIT
     THEN
-    LD-SZ !                              ( de )
-    DUP 24 + W@ SWAP DE.COUNT           ( start count )
-    \ Read file data into a buffer.  If external memory is present
-    \ use it — file text is only needed during EVALUATE and keeping
-    \ it out of Bank 0 relieves dictionary / stack pressure.
-    \ When no ext mem, fall back to HERE + ALLOT (original path).
-    XMEM? IF
-        LD-SZ @ XMEM-ALLOT LD-BUF !     ( start count )
-    ELSE
-        HERE LD-BUF !
-        LD-SZ @ ALLOT                    ( start count )
+    LD-SZ !                              ( slot )
+    \ Source text is temporary.  ALLOCATE routes it to XMEM when present;
+    \ the full sector-rounded span bounds DMA and is reclaimed after walk.
+    DUP _LD-SLOT-BYTES ALLOCATE IF
+        2DROP ."  File buffer allocation failed" CR
+        _LD-RESTORE EXIT
     THEN
-    \ Read sectors directly into buffer
-    OVER DISK-SEC!
-    LD-BUF @ DISK-DMA!
-    DUP DISK-N!
-    DISK-READ
-    2DROP                                ( -- clean stack )
-    _LD-WALK
-    _LD-RESTORE ;
+    LD-BUF !
+    _LD-READ-SLOT
+    _LD-WALK-GUARDED ;
 
 \ ── Application Loading ──────────────────────────────────────────────
 \  APP-EVAL evaluates a string.  ENTER-USER / SYS-EXIT are retained
@@ -4379,33 +4406,7 @@ VARIABLE _SEC-LINE
     ENTER-USER EVALUATE SYS-EXIT
     _APP-MPU-OFF ;
 
-: APP-LOAD  ( "filename" -- )
-    FS-ENSURE
-    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
-    PARSE-NAME
-    FIND-BY-NAME DUP -1 = IF
-        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
-    THEN
-    DIRENT
-    DUP DE.USED DUP 0= IF
-        2DROP ."  Empty file" CR EXIT
-    THEN LD-SZ !
-    DUP 24 + W@ SWAP DE.COUNT
-    \ File buffer in ext mem when available — user data belongs there.
-    XMEM? IF
-        LD-SZ @ XMEM-ALLOT LD-BUF !
-    ELSE
-        HERE LD-BUF !
-        LD-SZ @ ALLOT
-    THEN
-    OVER DISK-SEC!
-    LD-BUF @ DISK-DMA!
-    DUP DISK-N!
-    DISK-READ
-    2DROP
-    \ Configure MPU (Bank 0 + ext mem visible) and enter user mode
-    _APP-MPU-ON
-    ENTER-USER
+: _APP-LOAD-WALK  ( -- )
     LD-BUF @
     LD-SZ @
     BEGIN DUP 0> WHILE
@@ -4430,9 +4431,38 @@ VARIABLE _SEC-LINE
         + SWAP DROP
         R>
     REPEAT
-    2DROP
+    2DROP ;
+
+: APP-LOAD  ( "filename" -- )
+    FS-ENSURE
+    FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
+    PARSE-NAME
+    FIND-BY-NAME DUP -1 = IF
+        DROP ."  Not found: " NAMEBUF .ZSTR CR EXIT
+    THEN
+    DUP DIRENT DE.USED DUP 0= IF
+        2DROP ."  Empty file" CR EXIT
+    THEN
+    _LD-SAVE
+    LD-SZ !
+    DUP _LD-SLOT-BYTES ALLOCATE IF
+        2DROP ."  File buffer allocation failed" CR
+        _LD-RESTORE EXIT
+    THEN
+    LD-BUF !
+    _LD-READ-SLOT
+    \ Configure MPU (Bank 0 + ext mem visible) and enter user mode
+    _APP-MPU-ON
+    ENTER-USER
+    ['] _APP-LOAD-WALK CATCH
+    DUP IF
+        SYS-EXIT _APP-MPU-OFF
+        >R _LD-RELEASE R> THROW
+    THEN
+    DROP
     SYS-EXIT
-    _APP-MPU-OFF ;
+    _APP-MPU-OFF
+    _LD-RELEASE ;
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
@@ -7794,6 +7824,22 @@ VARIABLE _HTE-HT
 CREATE _MOD-VAL  1 ALLOT
 1 _MOD-VAL C!
 
+\ One provisional PROVIDED key per active loader frame.  A module is marked
+\ before execution to break mutual-REQUIRE cycles; if its walk throws, that
+\ frame owns deletion of the incomplete mark before propagating the error.
+_LD-MAXLVL 24 * XBUF _MOD-PENDING-NAMES
+_LD-MAXLVL 8 * XBUF _MOD-PENDING-FLAGS
+_MOD-PENDING-FLAGS _LD-MAXLVL 8 * 0 FILL
+
+: _MOD-DEPTH-INDEX  ( -- n )
+    _LD-SP @ _LD-FRAME / 1- ;
+
+: _MOD-PENDING-NAME  ( -- addr )
+    _MOD-DEPTH-INDEX 24 * _MOD-PENDING-NAMES + ;
+
+: _MOD-PENDING-FLAG  ( -- addr )
+    _MOD-DEPTH-INDEX 8 * _MOD-PENDING-FLAGS + ;
+
 \ _MOD-MARK ( -- )  Mark NAMEBUF as a loaded module in _MOD-HT.
 : _MOD-MARK  ( -- )
     NAMEBUF _MOD-VAL _MOD-HT HT-PUT ;
@@ -7933,6 +7979,24 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
 : MODULE?  ( "name" -- flag )
     PARSE-NAME  _MOD-LOADED? ;
 
+: _MOD-ROLLBACK-PENDING  ( -- )
+    _MOD-PENDING-FLAG @ IF
+        _MOD-PENDING-NAME _MOD-HT HT-DEL DROP
+        0 _MOD-PENDING-FLAG !
+    THEN ;
+
+: _MOD-WALK-GUARDED  ( -- )
+    ['] _LD-WALK CATCH
+    DUP IF
+        >R
+        _MOD-ROLLBACK-PENDING
+        _LD-RELEASE
+        R> THROW
+    THEN
+    DROP
+    0 _MOD-PENDING-FLAG !
+    _LD-RELEASE ;
+
 \ _MOD-LOAD-BODY ( -- )  Load file whose name is already in NAMEBUF.
 \   This is the core of LOAD without the PARSE-NAME call.
 \   CWD must already point to the target directory (set by
@@ -7945,25 +8009,19 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
     FIND-BY-NAME DUP -1 = IF
         DROP ."  Module not found: " NAMEBUF .ZSTR CR EXIT
     THEN
-    DIRENT
-    DUP DE.USED DUP 0= IF
+    DUP DIRENT DE.USED DUP 0= IF
         2DROP ."  Empty module" CR EXIT
     THEN
     _LD-SAVE
-    LD-SZ !
-    DUP 24 + W@ SWAP DE.COUNT
-    \ File buffer in ext mem when available (see §1.12a)
-    XMEM? IF
-        LD-SZ @ XMEM-ALLOT LD-BUF !
-    ELSE
-        HERE LD-BUF !
-        LD-SZ @ ALLOT
+    0 _MOD-PENDING-FLAG !
+    LD-SZ !                              ( slot )
+    \ Module source is a reclaimable loader allocation, not permanent XMEM.
+    DUP _LD-SLOT-BYTES ALLOCATE IF
+        2DROP ."  Module buffer allocation failed" CR
+        _LD-RESTORE EXIT
     THEN
-    OVER DISK-SEC!
-    LD-BUF @ DISK-DMA!
-    DUP DISK-N!
-    DISK-READ
-    2DROP
+    LD-BUF !
+    _LD-READ-SLOT
     \ Pre-scan: look for PROVIDED before executing anything.
     \ Save/restore NAMEBUF across prescan (NAMEBUF holds the
     \ filename we just loaded; prescan overwrites it with the
@@ -7974,19 +8032,20 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
         _MOD-LOADED? IF
             \ Already loaded — skip execution entirely
             _PS-NBSAVE NAMEBUF 24 CMOVE  \ restore NAMEBUF
-            _LD-RESTORE EXIT
+            _LD-RELEASE EXIT
         THEN
         \ First time — pre-register NOW so that any mutual
         \ REQUIRE during _LD-WALK sees us as already loaded.
         \ NAMEBUF still holds the PROVIDED name from prescan.
+        NAMEBUF _MOD-PENDING-NAME 24 CMOVE
+        1 _MOD-PENDING-FLAG !
         _MOD-MARK
         _PS-NBSAVE NAMEBUF 24 CMOVE
     ELSE
         \ No PROVIDED found — restore NAMEBUF; load unconditionally
         _PS-NBSAVE NAMEBUF 24 CMOVE
     THEN
-    _LD-WALK
-    _LD-RESTORE ;
+    _MOD-WALK-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
 \   The file's own PROVIDED line is the sole guard against duplicate
@@ -7994,15 +8053,30 @@ CREATE _PS-NBSAVE 24 ALLOT  \ save area for NAMEBUF across prescan
 \   Accepts relative paths: REQUIRE ../lib/util.f
 \   Path components adjust CWD; the final name is looked up in
 \   the resolved directory.  CWD is restored after loading.
+_LD-MAXLVL 8 * XBUF _REQ-CWD-STK
+VARIABLE _REQ-SP  0 _REQ-SP !
+
+: _REQ-SAVE-CWD  ( -- )
+    _REQ-SP @ _LD-MAXLVL 8 * >= ABORT" REQUIRE nested too deep"
+    CWD @ _REQ-SP @ _REQ-CWD-STK + !
+    8 _REQ-SP +! ;
+
+: _REQ-RESTORE-CWD  ( -- )
+    _REQ-SP @ 0= ABORT" REQUIRE nesting underflow"
+    -8 _REQ-SP +!
+    _REQ-SP @ _REQ-CWD-STK + @ CWD ! ;
+
+: _REQUIRE-BODY  ( -- )
+    _RESOLVE-PATH
+    _MOD-LOAD-BODY ;
+
 : REQUIRE  ( "name" -- )
     PARSE-NAME
     FS-ENSURE                  \ load FS before path resolution
-    CWD @ >R                   \ save CWD (return stack is safe
-                               \ here — _MOD-LOAD-BODY uses its
-                               \ own _LD-SAVE/_LD-RESTORE pair)
-    _RESOLVE-PATH
-    _MOD-LOAD-BODY
-    R> CWD ! ;                 \ restore caller's CWD
+    _REQ-SAVE-CWD
+    ['] _REQUIRE-BODY CATCH
+    _REQ-RESTORE-CWD           \ restore before returning or rethrowing
+    THROW ;
 
 \ _MOD-SHOW ( key-addr val-addr -- )  Print one module name.
 : _MOD-SHOW  ( key-addr val-addr -- )

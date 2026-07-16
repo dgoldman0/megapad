@@ -790,9 +790,10 @@ The full boot process from power-on to the KDOS REPL:
    loads the filesystem (`FS-LOAD`), initializes the Bank 0 heap, and runs
    `autoexec.f` if present
 6. **Standard userland loads** — `autoexec.f` enables JIT compilation,
-   enters the XMEM userland dictionary, loads `networking.f` with `FSLOAD`,
-   runs DHCP with a static fallback, loads `tools.f`, and disables JIT for
-   interactive use.  `graphics.f` remains available for explicit loading
+   enters the XMEM userland dictionary, loads `networking.f` through the
+   batched KDOS `REQUIRE` path, runs DHCP with a static fallback, loads
+   `tools.f`, and disables JIT for interactive use.  `graphics.f` remains
+   available for explicit loading
 7. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
 
 **If no disk:** BIOS skips step 4, drops directly into the bare Forth

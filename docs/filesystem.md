@@ -519,7 +519,8 @@ fs = MP64FS.load("myimage.img")
 - **Networking** (`networking.f`) — packed loadable module containing Ethernet
   through TLS, sockets, and the UDP-backed data-port transport
 - **Boot script** (`autoexec.f`) — enters the XMEM userland dictionary, loads
-  `networking.f` with `FSLOAD`, configures the network, and loads `tools.f`
+  `networking.f` with KDOS `REQUIRE`, configures the network, and loads
+  `tools.f`
 - **User modules** — `tools.f` is loaded by standard autoexec; `graphics.f`
   is present for explicit loading
 - **10 documentation topics** — getting-started, buffers, kernels,
@@ -534,7 +535,9 @@ This is the standard "ship it" disk image.  The BIOS loads the KDOS core;
 KDOS then runs autoexec, which loads networking and tools in userland.
 Packing changes no executable line, inline comment, or string content.  It
 keeps `kdos.f` within `FSLOAD`'s bounded Bank 0 DMA window and reduces the
-disk and transient loader footprint of the larger `networking.f` module.
+disk and XMEM source-buffer footprint of the larger `networking.f` module.
+KDOS reads that module in bounded 255-sector batches and concatenates its
+validated secondary extent before evaluation.
 
 ---
 

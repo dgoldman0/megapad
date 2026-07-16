@@ -6,9 +6,14 @@
 load into the XMEM userland dictionary.
 
 The standard disk boot loads `kdos.f` first.  KDOS initializes MP64FS and its
-heap, then `autoexec.f` enters userland, loads `networking.f` with `FSLOAD`,
-configures the network, and loads `tools.f`.  This keeps Ethernet through TLS,
-sockets, and the UDP-backed data-port transport out of the Bank 0 core.
+heap, then `autoexec.f` enters userland, loads `networking.f` through KDOS
+`REQUIRE`, configures the network, and loads `tools.f`.  The KDOS loader reads
+large and fragmented extents in bounded batches without reusing the BIOS's
+active KDOS boot buffer.  Transfer allocations are reclaimed after normal or
+thrown evaluation; a failed relative `REQUIRE` also restores its caller's
+directory and rolls back the provisional module mark so a corrected retry can
+run.  This keeps Ethernet through TLS, sockets, and the UDP-backed data-port
+transport out of the Bank 0 core.
 
 ---
 

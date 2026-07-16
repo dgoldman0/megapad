@@ -1163,9 +1163,11 @@ The startup section runs automatically when the KDOS core loads.  It:
 6. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
 
 The standard autoexec enables JIT for its own load, enters the 4 MiB XMEM
-userland dictionary, loads `networking.f` with `FSLOAD`, configures DHCP or
-the static fallback, loads `tools.f`, and disables JIT.  Thus the network
-stack does not enlarge the Bank 0 core dictionary.
+userland dictionary, loads `networking.f` with KDOS `REQUIRE`, configures DHCP
+or the static fallback, loads `tools.f`, and disables JIT.  The module loader
+batches both validated MP64FS extents into external memory, so the network
+stack does not enlarge the Bank 0 core dictionary or alias the BIOS boot
+buffer.
 
 Users can re-enable JIT for their own code with `JIT-ON`.
 

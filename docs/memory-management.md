@@ -279,7 +279,7 @@ instead of Bank 0.
 
 ```forth
 ENTER-USERLAND      \ HERE → XMEM userland zone
-FSLOAD networking.f \ standard network module compiles in XMEM
+REQUIRE networking.f \ batched module load compiles in XMEM
 REQUIRE tools.f      \ tools compile in the same userland dictionary
 LEAVE-USERLAND      \ HERE → Bank 0 system dictionary
 ```
@@ -287,7 +287,10 @@ LEAVE-USERLAND      \ HERE → Bank 0 system dictionary
 This is the boundary used by standard autoexec: the KDOS core remains in
 Bank 0, while `networking.f`, `tools.f`, and later user definitions occupy
 XMEM.  System words remain accessible — dictionary search walks from LATEST
-regardless of where HERE points.
+regardless of where HERE points.  LOAD, APP-LOAD, and REQUIRE use separate
+sector-rounded transfer allocations and release them after evaluation,
+including the guarded THROW path; compiled definitions remain in the userland
+dictionary rather than in those temporary buffers.
 
 ---
 

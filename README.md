@@ -183,8 +183,12 @@ CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
 **Networking module** — `networking.f` supplies Ethernet, ARP, IPv4,
 ICMP, UDP, DHCP, DNS, TCP, TLS 1.3, sockets, and the UDP-backed data-port
 transport.  The standard `autoexec.f` enters userland and loads this module
-with `FSLOAD` before it loads `tools.f`, keeping the KDOS core dictionary in
-Bank 0.
+with KDOS `REQUIRE` before it loads `tools.f`, keeping the KDOS core dictionary
+in Bank 0.  The module loader batches large and fragmented MP64FS extents into
+external memory, so it does not re-enter the BIOS boot loader's live buffer.
+Its temporary transfer allocation, relative-directory state, and provisional
+`PROVIDED` mark are all unwound when source evaluation throws, allowing an
+incomplete module to be corrected and retried.
 
 ---
 

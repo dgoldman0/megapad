@@ -596,7 +596,7 @@ Low-level access to the network interface controller.
 | `ABORT` | `( -- )` | Clear both stacks and restart the outer interpreter. |
 | `ABORT"` | `( flag "msg" -- )` | If flag is true, print the message and abort.  Immediate. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary. |
-| `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory, validates the file extent and RAM span, transfers it in guarded batches, and EVALUATEs each line.  This is how the KDOS core and large userland modules boot from disk. |
+| `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory, validates the file extent and RAM span, transfers it in guarded batches, and EVALUATEs each line.  The standard image uses it for the KDOS core; KDOS `REQUIRE` owns later userland modules. |
 | `EXIT` | `( -- )` | Return from the current word immediately. |
 
 ---
@@ -903,7 +903,7 @@ When the Megapad-64 powers on:
 5. **KDOS startup** — the core loads MP64FS, initializes its heap, and runs
    `autoexec.f` from the filesystem
 6. **Standard userland load** — autoexec enters the XMEM userland dictionary,
-   loads `networking.f` with `FSLOAD`, configures networking, and loads
+   loads `networking.f` with KDOS `REQUIRE`, configures networking, and loads
    `tools.f`
 7. **REPL** — the Forth outer interpreter (`QUIT`) runs, accepting
    input from the UART and executing/compiling words

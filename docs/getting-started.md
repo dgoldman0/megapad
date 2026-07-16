@@ -50,9 +50,9 @@ What happens:
 5. KDOS prints its banner, initializes MP64FS and its heap, then runs
    `autoexec.f`
 6. The standard autoexec enables the compact JIT policy, enters the XMEM
-   userland dictionary, loads `networking.f` with `FSLOAD`, configures DHCP
-   or the static fallback, loads `tools.f`, and disables JIT for interactive
-   use
+   userland dictionary, loads `networking.f` with KDOS `REQUIRE`, configures
+   DHCP or the static fallback, loads `tools.f`, and disables JIT for
+   interactive use
 7. The system enters the REPL.
 
 The startup banner is:

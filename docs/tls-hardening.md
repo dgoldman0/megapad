@@ -231,6 +231,15 @@ permitted during the handshake. Incoming alerts clear peer authorization and
 distinguish clean `close_notify` from fatal or malformed records. Application
 send and receive both require an established, authenticated context.
 
+Session resumption is not implemented. Authenticated post-handshake
+`NewSessionTicket` messages are reassembled in the bounded handshake buffer,
+validated through every nested nonce, ticket, and extension length, and then
+discarded; lifetime is capped at seven days, every extension type must be
+unique, and `early_data` requires its exact four-byte payload. KeyUpdate,
+CertificateRequest, other post-handshake
+messages, malformed tickets, and non-handshake records interleaved with a
+ticket fragment fail closed with `TLS-E-POST-HANDSHAKE`.
+
 ## Deployment Reality
 
 The code does not validate arbitrary public certificate chains. It lacks P-384,
@@ -303,8 +312,8 @@ trust bundle.
   cooperative state machine with cancellation and precise timeout statuses.
 - Finish graceful close draining and distinguish EOF, retryable I/O, timeout,
   and protocol failure throughout the public connection API.
-- Define or deliberately reject post-handshake `KeyUpdate` before long-lived
-  streaming connections are considered production-ready.
+- Add bounded `KeyUpdate` support before long-lived streaming connections are
+  considered production-ready; it is currently rejected fail-closed.
 - Run credential-free live interoperability against every intended endpoint
   after provisioning a reviewed scoped trust bundle.
 - Keep the public and private ClientHello profiles separate; do not assign
