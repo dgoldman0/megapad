@@ -79,7 +79,7 @@ MMIO devices live at the top of the address space.
 |---------|---------|
 | `0x0000_0000` | **Bank 0** — BIOS code (loaded at boot, ~20 KB) |
 | `0x0000_4F00`+ | Forth dictionary grows upward from HERE |
-| *(varies)* | KDOS code, buffer data, FS caches, task stacks |
+| *(varies)* | KDOS core code, buffer data, FS caches, task stacks |
 | *(varies)* | Free space between HERE and SP |
 | ← SP | Data stack grows downward from top of Bank 0 |
 | `RAM_SIZE` | Top of Bank 0 (default 0x0010_0000 = 1 MiB) |
@@ -87,10 +87,12 @@ MMIO devices live at the top of the address space.
 | `0xFF00_0000`–`0xFF3F_FFFF` | **VRAM** — 4 MiB dedicated framebuffer (double-buffered 1280×720 RGBA) |
 | `0xFFD0_0000`–`0xFFFF_FFFF` | **Banks 1–3** — 3 MiB HBW math RAM for tile/SIMD working buffers |
 
-The BIOS sets `HERE` just past its own code.  As KDOS loads (via FSLOAD),
-it compiles words and allocates data, advancing HERE.  The data stack lives
-at the top of RAM and grows downward.  The return stack sits below the data
-stack.
+The BIOS sets `HERE` just past its own code.  As `kdos.f` loads through
+`FSLOAD`, it compiles the KDOS core and allocates its Bank 0 data, advancing
+HERE.  Standard autoexec then redirects `HERE` to the XMEM userland zone
+before loading `networking.f` and `tools.f`; those modules do not consume the
+Bank 0 dictionary.  The data stack lives at the top of RAM and grows
+downward.  The return stack sits below the data stack.
 
 ### MMIO Region
 
@@ -622,7 +624,11 @@ the correct default for pre-privilege firmware.
 │  User Code / REPL                               │
 │  (Forth words, scripts, interactive commands)    │
 ├─────────────────────────────────────────────────┤
-│  KDOS v1.1  (kdos.f, 10,225 lines)             │
+│  networking.f  (userland dictionary in XMEM)    │
+│  Ethernet · IPv4 · UDP/TCP · TLS · Sockets      │
+│  UDP-backed data-port transport                  │
+├─────────────────────────────────────────────────┤
+│  KDOS core  (kdos.f, Bank 0)                    │
 │  ┌───────────┬───────────┬────────────────────┐ │
 │  │  Buffers  │  Kernels  │   Pipelines        │ │
 │  │  (§2–§3)  │  (§4–§5)  │   (§6)             │ │
@@ -630,13 +636,13 @@ the correct default for pre-privilege firmware.
 │  │  Storage  │ MP64FS    │  Doc Browser       │ │
 │  │  (§7)     │ (§7.6)    │  (§7.7)            │ │
 │  ├───────────┼───────────┼────────────────────┤ │
-│  │ Scheduler │ Screens   │  Data Ports (NIC)  │ │
+│  │ Scheduler │ Screens   │  Data Port Core    │ │
 │  │  (§8)     │ (§9)      │  (§10)             │ │
 │  ├───────────┴───────────┴────────────────────┤ │
 │  │ Dashboard, Help, Startup, Bundles (§12–§15) │ │
 │  └────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
-│  BIOS v1.0  (bios.asm, 14,524 lines)            │
+│  BIOS  (bios.asm)                               │
 │  Subroutine-threaded Forth, 360 dictionary words │
 │  Disk I/O, FSLOAD, UART, timer, tile engine      │
 ├─────────────────────────────────────────────────┤
@@ -779,17 +785,20 @@ The full boot process from power-on to the KDOS REPL:
    the first file with type=3 (Forth)
    - Reads its data sectors into a RAM buffer
    - EVALUATEs each line via FSLOAD
-5. **KDOS loads** — the Forth file (typically `kdos.f`) causes:
-   - All sections of KDOS to be read from disk
-   - Each line is EVALUATE'd, compiling definitions into the dictionary
-   - §14 startup code runs: prints banner, loads filesystem (`FS-LOAD`),
-     initializes heap, loads `autoexec.f` (which chains `graphics.f`
-     and `tools.f`), runs DHCP, enters userland memory isolation
-6. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
+5. **KDOS core loads** — `FSLOAD` reads and evaluates `kdos.f`, compiling
+   the core dictionary into Bank 0.  Its startup code prints the banner,
+   loads the filesystem (`FS-LOAD`), initializes the Bank 0 heap, and runs
+   `autoexec.f` if present
+6. **Standard userland loads** — `autoexec.f` enables JIT compilation,
+   enters the XMEM userland dictionary, loads `networking.f` with `FSLOAD`,
+   runs DHCP with a static fallback, loads `tools.f`, and disables JIT for
+   interactive use.  `graphics.f` remains available for explicit loading
+7. **REPL ready** — the outer interpreter (`QUIT`) awaits user input
 
 **If no disk:** BIOS skips step 4, drops directly into the bare Forth
-REPL.  KDOS can still be loaded via `--forth kdos.f` on the CLI (UART
-injection), but without filesystem access.
+REPL.  The KDOS core can still be loaded via `--forth kdos.f` on the CLI
+(UART injection), but without filesystem access, autoexec, or the networking
+module.
 
 ### Memory Usage (Typical)
 
@@ -798,12 +807,13 @@ After a full KDOS boot with filesystem loaded:
 | Region | Approximate Size | Contents |
 |--------|-----------------|----------|
 | BIOS code | ~20 KB | Machine code, IVT, boot logic |
-| KDOS dictionary | ~40–50 KB | Compiled definitions, strings |
+| KDOS core dictionary | Build-dependent | Bank 0 definitions and strings from `kdos.f` |
+| Userland dictionary | Build-dependent | `networking.f`, `tools.f`, and later user definitions in XMEM |
 | Buffers | ~10 KB | 6 demo buffers, histogram bins |
 | FS cache | ~7.5 KB | Superblock (512B) + bitmap (up to 1024B) + directory (6144B) |
 | Task stacks | 2 KB | 8 × 256 bytes |
 | Frame buffer | 1.5 KB | NIC frame receive buffer |
-| **Total HERE** | ~80 KB | Leaves ~950 KB free for user data/code |
+| Bank 0 headroom | Build-dependent | Core dictionary, heap, and stacks share the 1 MiB bank |
 
 ---
 
@@ -855,7 +865,8 @@ DMA, and reliability specifications.
 | System glue | `system.py` | 991 | Quad-core SoC, MMIO, mailbox IPI, spinlocks |
 | Devices | `devices.py` | 2,287 | UART, Timer, Storage, NIC, Mailbox, Spinlock, AES, SHA3, SHA256, TRNG, FieldALU, NTT, KEM, Framebuffer, RTC |
 | BIOS | `bios.asm` | 14,524 | Forth interpreter, boot, multicore, 360 dictionary words |
-| OS | `kdos.f` | 11,760 | Buffers, kernels, TUI, FS, crypto, networking, TLS 1.3, PQC, multicore |
+| OS core | `kdos.f` | ~8,100 | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
+| Networking | `networking.f` | ~7,500 | Userland Ethernet through TLS, sockets, and UDP data-port transport |
 | Tools | `tools.f` | 990 | ED line editor, SCROLL web client (HTTP/HTTPS/FTP/Gopher) |
 | Assembler | `asm.py` | 792 | Two-pass macro assembler |
 | CLI/Monitor | `cli.py` | 1,557 | Debug, inspect, boot, headless TCP server |

@@ -103,10 +103,15 @@ DNS/network tests requiring live internet are skipped in CI.
 
 ## 3. Architecture at a glance
 
+The standard disk boot compiles `kdos.f` into Bank 0.  KDOS then runs
+`autoexec.f`, which enters the XMEM userland dictionary, loads
+`networking.f` with `FSLOAD`, configures the link, and loads `tools.f`.
+
 | Layer | File(s) | Lines |
 |-------|---------|-------|
 | BIOS | `bios.asm` → `bios.rom` | 14,524 (367 words) |
-| KDOS | `kdos.f` | 11,760 |
+| KDOS core (Bank 0) | `kdos.f` | ~8,100 |
+| Networking (userland) | `networking.f` | ~7,500 |
 | Tools | `tools.f` | 990 |
 | CPU emulator | `megapad64.py` | 3,002 |
 | SoC | `system.py` | 1,018 |

@@ -45,8 +45,17 @@ What happens:
 1. The assembler translates `bios.asm` into machine code (~20 KB)
 2. The emulator loads the binary at address 0 and starts the CPU
 3. The BIOS boots, detects the disk, reads the MP64FS directory
-4. It finds `kdos.f` (the first Forth-type file) and loads it via FSLOAD
-5. KDOS loads all 16 sections and prints its banner:
+4. It finds `kdos.f` (the first Forth-type file) and loads the KDOS core
+   into Bank 0 with `FSLOAD`
+5. KDOS prints its banner, initializes MP64FS and its heap, then runs
+   `autoexec.f`
+6. The standard autoexec enables the compact JIT policy, enters the XMEM
+   userland dictionary, loads `networking.f` with `FSLOAD`, configures DHCP
+   or the static fallback, loads `tools.f`, and disables JIT for interactive
+   use
+7. The system enters the REPL.
+
+The startup banner is:
 
 ```
 ------------------------------------------------------------
@@ -57,8 +66,9 @@ Type SCREENS for interactive TUI.
 Type TOPICS or LESSONS for documentation.
 ```
 
-You're now at the Forth REPL with the full KDOS environment, including
-filesystem access (`DIR`, `CAT`, `DOC`, `TUTORIAL`, etc.).
+You're now at the Forth REPL with the KDOS core, the userland networking
+stack, network tools, and filesystem access (`DIR`, `CAT`, `DOC`,
+`TUTORIAL`, etc.).
 
 ### Without a Disk Image (development mode)
 
@@ -69,10 +79,10 @@ without a disk:
 python cli.py --bios bios.asm --forth kdos.f
 ```
 
-The CLI sends `kdos.f` line-by-line through the serial port.  This is
-slower than disk boot and doesn't give you filesystem access (no `DIR`,
-`CAT`, `DOC`, etc.), but it's useful for testing KDOS changes without
-rebuilding the disk image.
+The CLI sends `kdos.f` line-by-line through the serial port.  This loads the
+KDOS core only.  Without MP64FS there is no autoexec, networking module, or
+filesystem access (`DIR`, `CAT`, `DOC`, etc.), but the mode is useful for
+testing core changes without rebuilding the disk image.
 
 > **Don't mix the two.**  If you have a disk image with KDOS, you don't
 > need `--forth kdos.f` — the BIOS loads it from disk automatically.
@@ -87,8 +97,11 @@ image:
 python diskutil.py sample
 ```
 
-This creates `sample.img` containing KDOS itself, ten documentation
-topics, five tutorials, demo data, and a demo pipeline bundle (18 files total).
+This creates `sample.img` with 22 files: the packed KDOS core, the packed
+`networking.f` userland module, `autoexec.f`, `tools.f`, `graphics.f`, ten
+documentation topics, five tutorials, demo data, and a demo pipeline bundle.
+The standard boot loads networking and tools; graphics remains available for
+explicit loading.
 
 ---
 

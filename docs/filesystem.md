@@ -513,9 +513,15 @@ fs = MP64FS.load("myimage.img")
 
 `build_sample_image()` creates a fully-populated disk image with:
 
-- **KDOS** (`kdos.f`) — packed executable Forth source with blank lines and
-  full-line backslash comments omitted; the BIOS auto-boots it as the first
-  Forth-type file on disk
+- **KDOS core** (`kdos.f`) — packed executable Forth source with blank lines
+  and full-line backslash comments omitted; the BIOS loads it into Bank 0 as
+  the first Forth-type file on disk
+- **Networking** (`networking.f`) — packed loadable module containing Ethernet
+  through TLS, sockets, and the UDP-backed data-port transport
+- **Boot script** (`autoexec.f`) — enters the XMEM userland dictionary, loads
+  `networking.f` with `FSLOAD`, configures the network, and loads `tools.f`
+- **User modules** — `tools.f` is loaded by standard autoexec; `graphics.f`
+  is present for explicit loading
 - **10 documentation topics** — getting-started, buffers, kernels,
   pipelines, data-ports, scheduler, screens, filesystem, tile-engine,
   reference
@@ -524,9 +530,11 @@ fs = MP64FS.load("myimage.img")
 - **demo-data** — 256-byte test data file
 - **demo-bundle** — sample pipeline bundle (type 7)
 
-This is the standard "ship it" disk image that boots KDOS automatically.
-Packing changes no executable line, inline comment, or string content; it keeps
-the boot source within FSLOAD's bounded Bank 0 DMA window.
+This is the standard "ship it" disk image.  The BIOS loads the KDOS core;
+KDOS then runs autoexec, which loads networking and tools in userland.
+Packing changes no executable line, inline comment, or string content.  It
+keeps `kdos.f` within `FSLOAD`'s bounded Bank 0 DMA window and reduces the
+disk and transient loader footprint of the larger `networking.f` module.
 
 ---
 

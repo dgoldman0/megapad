@@ -2,8 +2,9 @@
 
 The Megapad-64 BIOS implements a **subroutine-threaded Forth** directly in
 assembly.  It boots from address zero, initializes hardware, and presents a
-standard Forth REPL over the UART.  If a disk is attached it will
-automatically attempt `FSLOAD autoexec.f` to bootstrap the operating system.
+standard Forth REPL over the UART.  If a disk is attached it scans MP64FS for
+the first Forth-type file and loads it with the `FSLOAD` machinery.  The
+standard image places the KDOS core first.
 
 This document organizes the BIOS dictionary by functional category.  Each
 entry shows the **stack effect**
@@ -595,7 +596,7 @@ Low-level access to the network interface controller.
 | `ABORT` | `( -- )` | Clear both stacks and restart the outer interpreter. |
 | `ABORT"` | `( flag "msg" -- )` | If flag is true, print the message and abort.  Immediate. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary. |
-| `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory from the attached disk, finds the named file, reads it sector-by-sector, and EVALUATEs each line.  This is how KDOS boots from disk. |
+| `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory, validates the file extent and RAM span, transfers it in guarded batches, and EVALUATEs each line.  This is how the KDOS core and large userland modules boot from disk. |
 | `EXIT` | `( -- )` | Return from the current word immediately. |
 
 ---
@@ -895,15 +896,21 @@ When the Megapad-64 powers on:
 2. **BIOS starts** — initializes the interrupt vector table, configures
    the UART, sets up the Forth dictionary (HERE, LATEST, etc.)
 3. **Disk check** — if a storage device is present (bit 7 of `DISK@`),
-   the BIOS executes `FSLOAD autoexec.f`
-4. **autoexec.f** typically contains: `FSLOAD kdos.f` — which loads the
-   entire KDOS operating system from the disk
-5. **REPL** — the Forth outer interpreter (`QUIT`) runs, accepting
+   the BIOS validates MP64FS and scans for the first Forth-type file
+4. **KDOS core load** — in the standard image that file is `kdos.f`; the
+   BIOS reads and evaluates it through `FSLOAD`, compiling the core into
+   Bank 0
+5. **KDOS startup** — the core loads MP64FS, initializes its heap, and runs
+   `autoexec.f` from the filesystem
+6. **Standard userland load** — autoexec enters the XMEM userland dictionary,
+   loads `networking.f` with `FSLOAD`, configures networking, and loads
+   `tools.f`
+7. **REPL** — the Forth outer interpreter (`QUIT`) runs, accepting
    input from the UART and executing/compiling words
 
 If no disk is attached, the BIOS drops straight into the REPL after
 step 2, ready for Forth input over the UART (or via the `--forth` CLI
-flag for file injection).
+flag for core-only file injection).
 
 ---
 

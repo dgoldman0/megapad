@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Live HTTP/HTTPS diagnostic test over TAP.
 
-Boots BIOS + KDOS + tools.f via UART, configures real TAP networking,
-then runs SCROLL-GET for both http:// and https:// against example.com.
+Boots BIOS + KDOS + networking.f + tools.f via UART, configures real TAP
+networking, then runs SCROLL-GET for both http:// and https:// against
+example.com.
 Prints full UART output for diagnosis.
 
 Usage:
@@ -32,6 +33,7 @@ EMU_IP   = os.environ.get("MP64_EMU_IP", "10.64.0.2")
 
 BIOS_PATH  = os.path.join(PROJECT_ROOT, "bios.asm")
 KDOS_PATH  = os.path.join(PROJECT_ROOT, "kdos.f")
+NETWORKING_PATH = os.path.join(PROJECT_ROOT, "networking.f")
 TOOLS_PATH = os.path.join(PROJECT_ROOT, "tools.f")
 
 
@@ -102,23 +104,33 @@ def restore_cpu_state(cpu, state):
 
 
 def build_snapshot():
-    """Boot BIOS + load KDOS + tools.f via UART.  Returns (mem_bytes, cpu_state)."""
-    print("[*] Building snapshot: BIOS + KDOS + tools.f ...")
+    """Boot BIOS and load the userland network/tool modules via UART."""
+    print("[*] Building snapshot: BIOS + KDOS + networking.f + tools.f ...")
     bios_code = _load_bios()
     kdos_lines = _load_forth_lines(KDOS_PATH)
+    networking_lines = _load_forth_lines(NETWORKING_PATH)
     tools_lines = _load_forth_lines(TOOLS_PATH)
 
-    sys_obj = MegapadSystem(ram_size=1024 * 1024)
+    sys_obj = MegapadSystem(
+        ram_size=1024 * 1024,
+        ext_mem_size=16 * (1 << 20),
+    )
     buf = capture_uart(sys_obj)
     sys_obj.load_binary(0, bios_code)
     sys_obj.boot()
 
-    all_lines = kdos_lines + tools_lines
+    all_lines = (
+        kdos_lines
+        + ["JIT-ON", "ENTER-USERLAND"]
+        + networking_lines
+        + tools_lines
+        + ["JIT-OFF"]
+    )
     payload = "\n".join(all_lines) + "\n"
     data = payload.encode()
     pos = 0
     steps = 0
-    max_steps = 600_000_000  # generous — KDOS + tools.f is ~11k lines
+    max_steps = 600_000_000  # generous for core + networking + tools
 
     while steps < max_steps:
         if sys_obj.cpu.halted:
@@ -142,7 +154,11 @@ def build_snapshot():
         for ln in last_lines:
             print(f"    {ln}")
 
-    snapshot = (bytes(sys_obj.cpu.mem), save_cpu_state(sys_obj.cpu))
+    snapshot = (
+        bytes(sys_obj.cpu.mem),
+        bytes(sys_obj._ext_mem),
+        save_cpu_state(sys_obj.cpu),
+    )
     print(f"[*] Snapshot ready.  {steps:,} steps, {len(data):,} bytes injected.")
     return snapshot
 
@@ -153,13 +169,18 @@ def run_with_tap(snapshot, commands, label="test", max_steps=800_000_000):
     print(f"[*] Running: {label}")
     print(f"{'='*60}")
 
-    mem_bytes, cpu_state = snapshot
+    mem_bytes, ext_mem_bytes, cpu_state = snapshot
     backend = TAPBackend(tap_name=TAP_NAME)
-    sys_obj = MegapadSystem(ram_size=1024 * 1024, nic_backend=backend)
+    sys_obj = MegapadSystem(
+        ram_size=1024 * 1024,
+        nic_backend=backend,
+        ext_mem_size=16 * (1 << 20),
+    )
     buf = capture_uart(sys_obj)
 
     # Restore memory + CPU state
     sys_obj.cpu.mem[:len(mem_bytes)] = mem_bytes
+    sys_obj._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
     restore_cpu_state(sys_obj.cpu, cpu_state)
 
     # IP config + user commands

@@ -53,9 +53,11 @@ python cli.py --bios bios.asm --storage sample.img
 ```
 
 The assembler builds the BIOS, the CPU boots from address 0, detects the
-disk, reads the MP64FS directory, and auto-loads the first Forth-type
-file (typically `kdos.f`).  You land in the KDOS REPL with full
-filesystem access.  Press **Ctrl+]** to escape to the debug monitor.
+disk, reads the MP64FS directory, and loads the first Forth-type file
+(typically the `kdos.f` core) into Bank 0.  KDOS runs standard autoexec,
+which enters XMEM userland, loads `networking.f`, configures the network,
+and loads `tools.f`.  You land in the KDOS REPL with filesystem and network
+support.  Press **Ctrl+]** to escape to the debug monitor.
 
 **BIOS + UART injection** (development) — use `--bios` + `--forth`:
 
@@ -64,8 +66,9 @@ python cli.py --bios bios.asm --forth kdos.f
 ```
 
 The `--forth` files are injected line-by-line through the UART after
-BIOS boot.  Useful for testing Forth source changes without rebuilding
-the disk image.  No filesystem access in this mode.
+BIOS boot.  With only `kdos.f`, this is a core-only environment: there is
+no filesystem, autoexec, or networking module.  It is useful for testing
+core source changes without rebuilding the disk image.
 
 > **Don't combine `--forth kdos.f` with `--storage`** — the BIOS will
 > auto-load KDOS from the disk, and `--forth` would load it again.
@@ -391,11 +394,12 @@ fs.save("myimage.img")
 
 ### The Sample Image Contents
 
-`build_sample_image()` populates the image with:
+`build_sample_image()` populates the image with 22 files:
 
 | File | Type | Description |
 |------|------|-------------|
-| `kdos.f` | Forth | Packed executable KDOS source (auto-booted by BIOS) |
+| `kdos.f` | Forth | Packed Bank 0 KDOS core (loaded first by the BIOS) |
+| `networking.f` | Forth | Packed userland Ethernet-to-TLS stack, sockets, and data-port transport |
 | `getting-started` | Doc | Introduction and first steps |
 | `buffers` | Doc | Buffer subsystem guide |
 | `kernels` | Doc | Kernel registry guide |
@@ -413,8 +417,8 @@ fs.save("myimage.img")
 | `custom-kernel` | Tutorial | Writing custom kernels |
 | `demo-data` | Data | 256-byte test data file |
 | `demo-bundle` | Bundle | Demo pipeline bundle (load with `BUNDLE-LOAD`) |
-| `autoexec.f` | Forth | Boot script — runs automatically after KDOS loads; chains `graphics.f` and `tools.f` |
-| `graphics.f` | Forth | Framebuffer / tile-engine graphics module |
+| `autoexec.f` | Forth | Enters userland, loads networking, configures the link, then loads `tools.f` |
+| `graphics.f` | Forth | Framebuffer / tile-engine graphics module, available for explicit loading |
 | `tools.f` | Forth | Network tools: HTTP/HTTPS/FTP/FTPS/Gopher client, DNS-LOOKUP |
 
 ---
@@ -494,7 +498,7 @@ that cover every layer of the system.
 | `TestHeadlessDisplay` | Headless display: TCP terminal server mode |
 | `TestPortSend` | Data port send/recv, cross-task communication |
 | `TestKDOSFP16` | FP16/bfloat16 tile arithmetic |
-| `TestKDOSAutoexec` | autoexec.f boot chain (auto-loads tools.f, graphics.f) |
+| `TestKDOSAutoexec` | autoexec.f boot chain (userland networking, link configuration, and tools) |
 | `TestKDOSExtMem` | External memory: alloc, read/write, userland dictionary |
 | `TestToolsModule` | tools.f: HTTP, HTTPS, FTP, Gopher, DNS-LOOKUP |
 | `TestKDOSUserland` | Userland memory isolation: per-process dictionary, HERE/ALLOT |
@@ -598,10 +602,11 @@ the boot cost; subsequent tests restore from the cached snapshot.
 | `diskutil.py` | ~1,162 | MP64FS disk utility and image builder |
 | `bios.asm` | ~14,524 | Forth BIOS (360 dictionary words, crypto, PQC, SHA-256, hardened, multicore) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | ~10,225 | KDOS v1.1 (871 colon defs, §1–§17, multicore, crypto, network, PQC, TLS dual-mode) |
+| `kdos.f` | ~8,100 | Bank 0 KDOS core (compute, storage, scheduler, UI, crypto, modules, PQC, multicore) |
+| `networking.f` | ~7,500 | Userland Ethernet-to-TLS stack, sockets, and UDP data-port transport |
 | `tools.f` | ~990 | Network tools (HTTP/HTTPS/FTP/Gopher client, DNS-LOOKUP) |
 | `graphics.f` | ~150 | Framebuffer / tile-engine graphics module |
-| `autoexec.f` | ~20 | Boot chain script (auto-loads graphics.f + tools.f) |
+| `autoexec.f` | ~55 | Boot chain script (enters userland, loads networking, configures it, then loads tools) |
 | `test_megapad64.py` | ~2,193 | CPU unit tests (23 tests) |
 | `test_system.py` | ~19,216 | Integration test suite (1,316 tests, 69 classes) |
 | `test_networking.py` | ~1,239 | Real-networking tests (48 tests, 9 classes) |

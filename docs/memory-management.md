@@ -19,7 +19,7 @@ different bus with different characteristics:
  ─────────────────────────────────────────────────────────────────
  0x0000_0000          Bank 0          1 MiB   On-chip BRAM  1 cycle
    ├─ BIOS code + dict (~20 KB)
-   ├─ KDOS dictionary  (~50 KB)
+   ├─ KDOS core dictionary
    ├─ HERE ↓ (grows up)
    │    ... free heap space ...
    ├─ data stack SP ↑ (grows down)
@@ -27,7 +27,7 @@ different bus with different characteristics:
  0x000F_FFFF
 
  0x0010_0000          External RAM   up to    HyperRAM/SDRAM  6+ cycles
-   ├─ Userland dictionary (1 MiB zone)   ~4 GiB
+   ├─ Userland dictionary (4 MiB zone)   ~4 GiB
    └─ XMEM allocator region
  0xFEFF_FFFF (hardware max, before VRAM/HBW)
 
@@ -271,21 +271,23 @@ data that must persist across arena resets, objects that need `RESIZE`.
 
 ### 2.5 Userland Dictionary — `ENTER-USERLAND`
 
-When external RAM is present, KDOS partitions the first 1 MiB of XMEM
-as a userland dictionary zone.  `ENTER-USERLAND` redirects `HERE` into
-this zone; all subsequent `:` definitions, `CREATE`, `VARIABLE`, etc.
-compile there instead of Bank 0.
+When external RAM is present, KDOS reserves a 4 MiB XMEM zone for the
+userland dictionary.  It begins above any XMEM buffers allocated before
+userland initialization.  `ENTER-USERLAND` redirects `HERE` into this zone;
+all subsequent `:` definitions, `CREATE`, `VARIABLE`, etc. compile there
+instead of Bank 0.
 
 ```forth
 ENTER-USERLAND      \ HERE → XMEM userland zone
-: MY-WORD  ... ;    \ compiled in XMEM
+FSLOAD networking.f \ standard network module compiles in XMEM
+REQUIRE tools.f      \ tools compile in the same userland dictionary
 LEAVE-USERLAND      \ HERE → Bank 0 system dictionary
 ```
 
-This protects the kernel dictionary from overflow when loading large
-user modules (like `tools.f`).  System words in Bank 0 remain
-accessible — the dictionary search walks from LATEST regardless of
-where HERE points.
+This is the boundary used by standard autoexec: the KDOS core remains in
+Bank 0, while `networking.f`, `tools.f`, and later user definitions occupy
+XMEM.  System words remain accessible — dictionary search walks from LATEST
+regardless of where HERE points.
 
 ---
 
@@ -455,7 +457,7 @@ XMEM region:
   │  Kernel file buffers (XBUF)  │  ← protected by XMEM-FLOOR
   ├──────────────────────────────┤
   │  Userland dictionary         │  ← HERE when ULAND=1
-  │  (1 MiB zone)               │
+  │  (4 MiB zone)               │
   ├──────────────────────────────┤  XMEM-FLOOR
   │  XMEM general allocator     │  ← XMEM-ALLOT / arenas
   │  (remaining XMEM)           │
@@ -733,6 +735,6 @@ Switch the affected workload to arenas — arenas cannot fragment.
 | **Free-list** | Linked list of available blocks.  First-fit search.  Can fragment. |
 | **Coalescing** | Merging adjacent free blocks to reduce fragmentation. |
 | **XMEM floor** | Pointer below which `XMEM-RESET` will not reclaim.  Protects kernel data. |
-| **Userland zone** | 1 MiB dictionary area in XMEM for user-loaded code. |
+| **Userland zone** | 4 MiB dictionary area in XMEM for networking, tools, and user-loaded code. |
 | **Descriptor** | 32-byte arena metadata: base, size, ptr, source. |
 | **?CORE0** | Runtime guard that aborts if `COREID` ≠ 0.  Protects shared-state allocators. |

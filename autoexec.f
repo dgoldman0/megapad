@@ -1,9 +1,27 @@
 \ autoexec.f — Megapad-64 boot script
 \ Loaded automatically by KDOS at startup if present on disk.
-\ Sets up networking, switches to userland, then loads user modules
-\ into the userland dictionary (ext mem) to conserve system space.
+\ Switches to userland, loads networking, configures the link, then
+\ loads the remaining user modules into external dictionary space.
 
 PROVIDED autoexec.f
+
+\ Compile the standard userland modules with the same compact JIT policy
+\ used for the KDOS core.  This script restores the interactive default.
+JIT-ON
+
+\ ── Switch to userland ────────────────────────────────────────────────
+\ Networking and tools are intentionally external-memory modules.
+\ NOTE: Must wrap in a : definition — interpret-mode IF compiles temp
+\ code at HERE and clears up to var_here afterward.  ENTER-USERLAND
+\ changes HERE, which would make the clear loop wipe system RAM.
+: _ENTER-UL
+    XMEM? 0= ABORT" Standard autoexec requires external memory"
+    ENTER-USERLAND ;
+_ENTER-UL
+
+\ ── Load networking before compiling references to its words ─────────
+\ FSLOAD handles this large source through guarded multi-batch reads.
+FSLOAD networking.f
 
 \ ── Network auto-configuration ────────────────────────────────────────
 \ NET-STATUS bit 2 = link up, bit 7 = NIC present.
@@ -30,15 +48,7 @@ PROVIDED autoexec.f
 
 AUTOEXEC-NET
 
-\ ── Switch to userland ────────────────────────────────────────────────
-\ Switch to userland so subsequent modules and interactive definitions
-\ go to ext mem, conserving the system dictionary.
-\ NOTE: Must wrap in a : definition — interpret-mode IF compiles temp
-\ code at HERE and clears up to var_here afterward.  ENTER-USERLAND
-\ changes HERE, which would make the clear loop wipe system RAM.
-: _ENTER-UL  XMEM? IF ENTER-USERLAND THEN ;
-_ENTER-UL
-
 \ ── Load user modules (into userland dictionary) ──────────────────────
 REQUIRE tools.f
 
+JIT-OFF

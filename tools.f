@@ -8,6 +8,10 @@
 
 PROVIDED tools.f
 
+\ SCROLL and the remote-transfer clients below use DNS, UDP, TCP, TLS,
+\ and data-port words from networking.f.  Standard autoexec loads that
+\ prerequisite first.  Load this module from userland dictionary space.
+
 \ =====================================================================
 \  §T1  ED — Line Editor
 \ =====================================================================
@@ -329,7 +333,7 @@ CREATE ED-CMD-BUF 80 ALLOT
 \    SCROLL-SAVE  ( url len "file" -- )        fetch and save to disk
 \    SCROLL-LOAD  ( url len -- )               fetch and EVALUATE
 \
-\  Uses TCP (§16.7), UDP (§16.4), DNS (§16.6), TLS (§16.8-16.11) from KDOS.
+\  Uses TCP, UDP, DNS, and TLS from networking.f.
 
 \ -- URL parsing state --
 VARIABLE _SC-PROTO             \ 0=http, 1=tftp, 2=gopher, 3=https
@@ -678,7 +682,7 @@ VARIABLE _HG-EMPTY            \ consecutive empty-recv counter
 
 \ ── HTTPS GET — fetch via TLS ───────────────────────────────────────
 \
-\  Uses TLS-CONNECT / TLS-SEND / TLS-RECV from KDOS §16.11.
+\  Uses TLS-CONNECT / TLS-SEND / TLS-RECV from networking.f.
 \  Same request building & header parsing as HTTP-GET.
 
 VARIABLE _HGS-CTX

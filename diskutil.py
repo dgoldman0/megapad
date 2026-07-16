@@ -1531,6 +1531,14 @@ def build_sample_image(path: str | Path | None = None,
     ).encode("ascii")
     fs.inject_file("demo-bundle", demo_bundle, ftype=FTYPE_BUNDLE)
 
+    # Inject the loadable networking stack.  It is large enough that packing
+    # materially reduces both disk footprint and its transient LOAD buffer.
+    # This is a required standard-boot component: autoexec.f loads it before
+    # compiling tools.f, so a missing sibling must fail the image build.
+    networking_path = Path(__file__).parent / "networking.f"
+    networking_src = pack_forth_source(networking_path.read_bytes())
+    fs.inject_file("networking.f", networking_src, ftype=FTYPE_FORTH)
+
     # Inject graphics module (Forth, loadable via LOAD graphics.f)
     gfx_path = Path(__file__).parent / "graphics.f"
     if gfx_path.exists():

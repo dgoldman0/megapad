@@ -26,12 +26,12 @@ Assume everything is rough draft, both in this project and in the megapad projec
 
 Feel free top drop by and discuss this project in the Tinkerers Guild channel of the Barayin-Adamah server: https://discord.gg/AnrXxhs3b2
 
-## Current Version (ish): v1.0 (Multicore + PQC)
+## Current System
 
 | Component | Stats |
 |-----------|-------|
 | **BIOS** | 360 Forth dictionary words, 14,524 lines ASM, ~28 KB binary |
-| **KDOS** | v1.1 — 923 colon definitions + 707 variables/constants, 11,760 lines Forth |
+| **KDOS** | Bank 0 core in `kdos.f`; loadable networking in userland `networking.f` |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM, 3,002+991 lines Python |
 | **C++ Accelerator** | Optional pybind11 CPU core (3,229 lines) — 63× speedup over PyPy |
 | **Tests** | 2,000+ passing checks across CPU, BIOS, KDOS, FS, devices, assembler, multicore, HBW, tile, audio, crypto, networking, and PQC; environment/capacity gates are reported separately |
@@ -40,8 +40,8 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **Devices** | 20 emulator MMIO peripherals, including UART, Timer, Storage, NIC, one-shot PCM Audio, crypto accelerators, Mailbox, Spinlock, SysInfo, and Port I/O Bridge |
 | **FPGA RTL** | 36 Verilog modules + 32 testbenches + 12 target overrides (~430 HW tests), Genesys 2 + VU095 targets |
 
-All core subsystems are **functionally complete**: BIOS Forth, KDOS kernel
-dashboard, tile engine, filesystem, scheduler, pipelines, full network
+All core subsystems are **functionally complete**: BIOS Forth, the KDOS
+core, tile engine, filesystem, scheduler, pipelines, the loadable network
 stack (L2–L7 through TLS 1.3 + socket API), disk I/O, auto-boot from
 disk, interactive TUI, built-in documentation browser, **16-core
 heterogeneous SoC** (4 full cores + 3 micro-clusters of 4 cores each)
@@ -142,12 +142,14 @@ is implemented in the emulator; its physical DMA/I2S bridge remains pending.
 ┌─────────────────────────────────┐
 │          User Programs          │  ← Forth words at the REPL
 ├─────────────────────────────────┤
-│    KDOS v1.1 (11,760 lines)    │  ← Buffers, kernels, pipelines,
-│  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
-│  Scheduler · Filesystem · TUI   │    data ports, multicore, network,
-│  Network Stack · TLS 1.3       │    TLS 1.3, sockets, PQC
+│ networking.f (userland / XMEM)  │  ← Ethernet through TLS 1.3,
+│ Network · Sockets · Data Ports  │    sockets, UDP data-port transport
 ├─────────────────────────────────┤
-│    BIOS v1.0 (14,524 lines)    │  ← Subroutine-threaded Forth,
+│      KDOS Core (Bank 0)         │  ← Buffers, kernels, pipelines,
+│  Buffers · Kernels · Pipelines  │    scheduler, filesystem, TUI,
+│  Scheduler · Filesystem · TUI   │    module loading, multicore, PQC
+├─────────────────────────────────┤
+│         BIOS (bios.asm)         │  ← Subroutine-threaded Forth,
 │  360 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← megapad64.py + devices.py
@@ -167,17 +169,22 @@ Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
 with stack underflow detection, EVALUATE depth limiting, dictionary-full
 guards, and FSLOAD error recovery with file/line context.
 
-**KDOS** — The Kernel Dashboard OS v1.1, written entirely in Forth.  19
-sections covering: utility words, described buffers with tile-aligned
-storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
+**KDOS core** — The Bank 0-resident part of the Kernel Dashboard OS,
+written entirely in Forth.  It covers utility words, described buffers with
+tile-aligned storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
 registry with 18 built-in compute kernels, a pipeline engine, raw and
 named file I/O, the MP64FS filesystem, a documentation browser, dictionary
 search tools, a cooperative scheduler with timer-assisted preemption, a
-9-screen interactive TUI (with auto-refresh), data ports for NIC ingestion,
+9-screen interactive TUI (with auto-refresh), data-port structures and binding,
 benchmarking, a full dashboard, a categorized help system with per-word
-`DESCRIBE`, versioned pipeline bundles, **multicore dispatch** (CORE-RUN,
-CORE-WAIT, BARRIER, P.RUN-PAR), a full **TCP/IP network stack** (Ethernet
-through TLS 1.3), **socket API**, and auto-boot.
+`DESCRIBE`, pipeline bundles, **multicore dispatch** (CORE-RUN,
+CORE-WAIT, BARRIER, P.RUN-PAR), and auto-boot.
+
+**Networking module** — `networking.f` supplies Ethernet, ARP, IPv4,
+ICMP, UDP, DHCP, DNS, TCP, TLS 1.3, sockets, and the UDP-backed data-port
+transport.  The standard `autoexec.f` enters userland and loads this module
+with `FSLOAD` before it loads `tools.f`, keeping the KDOS core dictionary in
+Bank 0.
 
 ---
 
@@ -199,13 +206,13 @@ cd megapad-64
 ### Boot the System
 
 ```bash
-# Build the sample disk image (includes KDOS + docs + tutorials)
+# Build the sample disk image (KDOS core, networking, modules, docs, tutorials)
 python diskutil.py sample
 
 # Boot from disk (recommended) — BIOS auto-loads KDOS from disk
 python cli.py --bios bios.asm --storage sample.img
 
-# Without disk (development mode — KDOS injected via UART, no FS access)
+# Without disk (development mode — KDOS core only, no FS or networking module)
 python cli.py --bios bios.asm --forth kdos.f
 
 # ~5× faster under PyPy (see 'make setup-pypy')
@@ -310,7 +317,8 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 | `system.py` | 1,018 | Quad-core SoC integration + `run_batch()` C++ fast path |
 | `bios.asm` | 14,957 | Forth BIOS in assembly (363 words, multicore, crypto, hardened) |
 | `bios.rom` | ~24 KB | Pre-assembled BIOS binary |
-| `kdos.f` | 11,760 | KDOS v1.1 operating system in Forth (923 colon defs, §1–§17) |
+| `kdos.f` | ~8,100 | Bank 0 KDOS core: compute, storage, scheduler, UI, modules, crypto, multicore |
+| `networking.f` | ~7,500 | Userland network module: Ethernet through TLS, sockets, and UDP data-port transport |
 | `cli.py` | 1,557 | CLI, boot modes, headless TCP server, interactive debug monitor |
 | `asm.py` | 909 | Two-pass assembler with SKIP and listing output |
 | `devices.py` | 3,197 | MMIO device models, including deterministic one-shot PCM capture and optional playback sinks |
@@ -338,7 +346,7 @@ The `docs/` directory contains comprehensive reference material:
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
 | [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 360 entries by category) |
-| [docs/kdos-reference.md](docs/kdos-reference.md) | Complete KDOS v1.1 word reference (all 923 definitions by section, §1–§17) |
+| [docs/kdos-reference.md](docs/kdos-reference.md) | KDOS core and loadable networking word reference, organized by source section |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
 | [docs/filesystem.md](docs/filesystem.md) | MP64FS specification — on-disk format, directory entries, file types |

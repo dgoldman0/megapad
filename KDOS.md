@@ -2,7 +2,13 @@
 
 ### A Megapad-Centric General-Purpose Computer
 
-**Current Status: KDOS v1.1 — Multicore Dispatch, Network Stack, TLS 1.3, Post-Quantum Crypto**
+**Current structure:** the KDOS core resides in Bank 0; networking and tools
+load into the XMEM userland dictionary.
+
+The standard disk boot loads `kdos.f` first.  KDOS initializes MP64FS and its
+heap, then `autoexec.f` enters userland, loads `networking.f` with `FSLOAD`,
+configures the network, and loads `tools.f`.  This keeps Ethernet through TLS,
+sockets, and the UDP-backed data-port transport out of the Bank 0 core.
 
 ---
 
@@ -15,7 +21,7 @@
 python diskutil.py sample
 python cli.py --bios bios.asm --storage sample.img
 
-# Development mode (UART injection, no filesystem)
+# Development mode (UART injection: KDOS core only, no filesystem/networking module)
 python cli.py --bios bios.asm --forth kdos.f
 
 # Full test suite (1,687 tests)
@@ -117,7 +123,7 @@ PORTS                          \ List all port bindings
 - **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
 - **CRC**: exact-length byte/quad feeds and 32/64-bit non-reflected tuple helpers
 
-**KDOS v1.1** (~11,004 lines Forth, 923 colon defs, 707 vars/constants):
+**KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
@@ -134,9 +140,8 @@ PORTS                          \ List all port bindings
 - **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
-- **Data ports**: NIC-based external data ingestion with frame protocol
+- **Data ports**: Transport-neutral frame structures and source-to-buffer binding
 - **Port binding**: PORT!, UNPORT, PORT@, 256-slot source→buffer mapping
-- **Frame routing**: POLL, INGEST, ROUTE-FRAME, NET-RX?, RECV-FRAME
 - **Frame protocol**: 6-byte header (src_id, dtype, seq, len) + payload
 - **Python data sources**: data_sources.py — SineSource, CounterSource, RandomSource, ReplaySource, CSVSource
 - **Real-world data sources**: TemperatureSource, StockSource, SeismicSource, ImageSource, AudioSource, TextSource, EmbeddingSource, MultiChannelSource
@@ -157,6 +162,13 @@ PORTS                          \ List all port bindings
 - **SCR-DOCS**: Screen 7 — documentation browser listing topics and tutorials
 - **Doc builder**: diskutil.py build_docs(), build_tutorials(), build_image()
 - **Pre-built content**: 10 documentation topics + 5 interactive tutorials
+
+**Networking module (`networking.f`):**
+
+- **Network stack**: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP, and TLS
+- **Socket API**: Unified TCP/TLS socket descriptors and readiness polling
+- **Data-port transport**: `PORT-SEND`, `RECV-FRAME`, `ROUTE-FRAME`, `POLL`, and `INGEST` over UDP
+- **Boot placement**: Loaded by standard autoexec after `ENTER-USERLAND`
 
 **Layer 1: Core Infrastructure** (✅ Items 1-8, committed):
 - **§1.1 Memory Allocator**: ALLOCATE / FREE / RESIZE — first-fit heap with coalescing (13 tests)

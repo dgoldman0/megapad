@@ -2410,13 +2410,38 @@ class TestBIOS(unittest.TestCase):
             fs.save(path)
         try:
             sys, buf = self._boot_bios(ram_kib=1024, storage_image=path,
-                                          ext_mem_mib=4)
+                                       ext_mem_mib=16)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
             # 800M steps: KDOS boot + DHCP timeout + autoexec.f need ~600M.
-            text = self._run_forth(sys, buf, ["1 2 + ."], max_steps=800_000_000)
+            text = self._run_forth(sys, buf, [
+                "1 2 + .",
+                "MODULE? networking.f .",
+                "' UDP-SEND DROP .\" NETWORK-WORD\"",
+            ], max_steps=800_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("3 ", text)
+            self.assertIn("-1 ", text)
+            self.assertIn("NETWORK-WORD", text)
+        finally:
+            os.unlink(path)
+
+    def test_standard_autoexec_requires_external_memory(self):
+        """Standard userland modules stop clearly when XMEM is absent."""
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path,
+                                       ext_mem_mib=0)
+            text = self._run_forth(sys, buf, [
+                "1 2 + .",
+                "MODULE? networking.f .",
+            ], max_steps=600_000_000)
+            self.assertIn("Standard autoexec requires external memory", text)
+            self.assertIn("3 ", text)
+            self.assertIn("0 ", text)
         finally:
             os.unlink(path)
 
@@ -5168,15 +5193,18 @@ class TestAssemblerBranchRange(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
+NETWORKING_PATH = os.path.join(PROJECT_ROOT, "networking.f")
 
 
 # ── Module-level KDOS snapshot cache ─────────────────────────────────
 # Shared across ALL _KDOSTestBase subclasses so the expensive BIOS
 # assemble + KDOS interpret happens exactly once per test session
 # instead of once per subclass (~50× saving).
-_kdos_shared_snapshot = None   # (mem_bytes, cpu_state)
+_kdos_shared_snapshot = None   # (bank0_bytes, extmem_bytes, cpu_state)
 _kdos_shared_bios_code = None
 _kdos_shared_lines = None
+_kdos_network_shared_snapshot = None
+_kdos_network_lines = None
 
 
 def _build_kdos_snapshot():
@@ -5226,6 +5254,7 @@ def _build_kdos_snapshot():
     # Save snapshot: raw memory + CPU state
     _kdos_shared_snapshot = (
         bytes(sys_obj.cpu.mem),       # immutable copy of RAM
+        bytes(sys_obj._ext_mem),      # preserve XMEM-backed kernel state
         _KDOSTestBase._save_cpu_state(sys_obj.cpu),
     )
 
@@ -5279,6 +5308,10 @@ class _KDOSTestBase(unittest.TestCase):
         """Ensure the shared KDOS snapshot is built (once per session)."""
         _build_kdos_snapshot()
 
+    def _snapshot_data(self):
+        """Return the memory/CPU snapshot used by this fixture."""
+        return _kdos_shared_snapshot
+
     def setUp(self):
         self._ensure_snapshot()
         self.bios_code = _kdos_shared_bios_code
@@ -5300,7 +5333,7 @@ class _KDOSTestBase(unittest.TestCase):
         """Load KDOS then execute extra_lines, return UART output."""
         # Use the fast snapshot path whenever the snapshot exists.
         # The fast path now supports storage_image and nic_frames.
-        if _kdos_shared_snapshot is not None:
+        if self._snapshot_data() is not None:
             return self._run_kdos_fast(extra_lines,
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
@@ -5341,9 +5374,11 @@ class _KDOSTestBase(unittest.TestCase):
                        max_steps=50_000_000,
                        nic_frames=None,
                        storage_image=None,
-                       nic_tx_callback=None) -> str:
+                       nic_tx_callback=None,
+                       _snapshot=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
-        mem_bytes, cpu_state = _kdos_shared_snapshot
+        snapshot = self._snapshot_data() if _snapshot is None else _snapshot
+        mem_bytes, ext_mem_bytes, cpu_state = snapshot
 
         sys = make_system(ram_kib=1024, storage_image=storage_image,
                           ext_mem_mib=16)
@@ -5351,6 +5386,7 @@ class _KDOSTestBase(unittest.TestCase):
 
         # Restore memory (BIOS + KDOS already compiled)
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        sys._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
         # Restore CPU state
         self._restore_cpu_state(sys.cpu, cpu_state)
         # Restore TX ring buffer base from R19 (set during BIOS boot)
@@ -5391,6 +5427,12 @@ class _KDOSTestBase(unittest.TestCase):
 
         return uart_text(buf)
 
+    def _run_kdos_networking(self, extra_lines: list[str], **kwargs) -> str:
+        """Run commands from the KDOS + userland networking snapshot."""
+        _build_kdos_network_snapshot()
+        return self._run_kdos_fast(
+            extra_lines, _snapshot=_kdos_network_shared_snapshot, **kwargs)
+
     # ------------------------------------------------------------------
     #  MP64FS helpers (shared by Filesystem / FileCrypto subclasses)
     # ------------------------------------------------------------------
@@ -5408,6 +5450,71 @@ class _KDOSTestBase(unittest.TestCase):
         path = self._make_formatted_image()
         du_inject_file(path, name, data, ftype=ftype)
         return path
+
+
+def _build_kdos_network_snapshot():
+    """Build a derivative snapshot with networking compiled in userland."""
+    global _kdos_network_shared_snapshot, _kdos_network_lines
+    if _kdos_network_shared_snapshot is not None:
+        return
+
+    _build_kdos_snapshot()
+    bank0_bytes, ext_mem_bytes, cpu_state = _kdos_shared_snapshot
+
+    with open(NETWORKING_PATH) as f:
+        _kdos_network_lines = [
+            line for line in f.read().splitlines()
+            if line.strip() and not line.lstrip().startswith('\\')
+        ]
+
+    sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
+    capture_uart(sys_obj)
+    sys_obj.cpu.mem[:len(bank0_bytes)] = bank0_bytes
+    sys_obj._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
+    _KDOSTestBase._restore_cpu_state(sys_obj.cpu, cpu_state)
+    r19 = sys_obj.cpu.regs[19]
+    if r19 and r19 < len(bank0_bytes):
+        sys_obj.uart._tx_ring_base = r19
+
+    payload = "\n".join(
+        ["JIT-ON", "ENTER-USERLAND"]
+        + _kdos_network_lines
+        + ["JIT-OFF"]
+    ) + "\n"
+    data = payload.encode()
+    pos = 0
+    steps = 0
+    max_steps = 400_000_000
+    while steps < max_steps:
+        if sys_obj.cpu.halted:
+            break
+        if sys_obj.cpu.idle and not sys_obj.uart.has_rx_data:
+            if pos < len(data):
+                chunk = _next_line_chunk(data, pos)
+                sys_obj.uart.inject_input(chunk)
+                pos += len(chunk)
+            else:
+                break
+            continue
+        batch = sys_obj.run_batch(min(100_000, max_steps - steps))
+        steps += max(batch, 1)
+
+    _kdos_network_shared_snapshot = (
+        bytes(sys_obj.cpu.mem),
+        bytes(sys_obj._ext_mem),
+        _KDOSTestBase._save_cpu_state(sys_obj.cpu),
+    )
+
+
+class _KDOSNetworkTestBase(_KDOSTestBase):
+    """KDOS fixture with networking.f compiled in userland XMEM."""
+
+    @classmethod
+    def _ensure_snapshot(cls):
+        _build_kdos_network_snapshot()
+
+    def _snapshot_data(self):
+        return _kdos_network_shared_snapshot
 
 
 class TestKDOS(_KDOSTestBase):
@@ -6914,13 +7021,13 @@ class TestKDOS(_KDOSTestBase):
 
     def test_poll_no_data(self):
         """POLL returns -1 when no NIC frames."""
-        text = self._run_kdos(["POLL ."])
+        text = self._run_kdos_networking(["POLL ."])
         self.assertIn("-1 ", text)
 
     def test_poll_unbound_source(self):
         """POLL drops frames from unbound sources."""
         frame = wrap_port_frame(encode_frame(99, DTYPE_U8, 0, bytes(8)))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "POLL .",
             "PORT-DROP @ .",
         ], nic_frames=[frame])
@@ -6932,7 +7039,7 @@ class TestKDOS(_KDOSTestBase):
         # Create a frame: src_id=1, 8 bytes of value 0xAA
         payload = bytes([0xAA] * 8)
         frame = wrap_port_frame(encode_frame(1, DTYPE_U8, 0, payload))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
             "POLL .",           # should return 1 (src_id)
@@ -6945,7 +7052,7 @@ class TestKDOS(_KDOSTestBase):
         """Payload bytes arrive in correct order."""
         payload = bytes(range(16))
         frame = wrap_port_frame(encode_frame(5, DTYPE_U8, 42, payload))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 5 PORT!",
             "POLL DROP",
@@ -6961,7 +7068,7 @@ class TestKDOS(_KDOSTestBase):
         """Frame header accessors parse correctly after RECV-FRAME."""
         payload = bytes([1, 2, 3, 4])
         frame = wrap_port_frame(encode_frame(7, DTYPE_U8, 1000, payload))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "RECV-FRAME DROP",
             "FRAME-SRC .",
             "FRAME-TYPE .",
@@ -6977,7 +7084,7 @@ class TestKDOS(_KDOSTestBase):
         """Declared app length must match the captured UDP payload exactly."""
         malformed = b'\x01\x01\x00\x00\x02\x00\xAA'
         valid = encode_frame(1, DTYPE_U8, 1, b'\x55')
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 8 BUFFER data-rx",
             "data-rx 1 PORT!",
             '."  bad=" POLL .',
@@ -6996,7 +7103,7 @@ class TestKDOS(_KDOSTestBase):
             encode_frame(7, DTYPE_U8, 0, bytes([0xAA] * 8)))
         valid = wrap_port_frame(
             encode_frame(7, DTYPE_U8, 1, bytes([0x55] * 4)))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 4 BUFFER small-route",
             "123 small-route B.FILL",
             "small-route 7 PORT!",
@@ -7022,7 +7129,7 @@ class TestKDOS(_KDOSTestBase):
             wrap_port_frame(encode_frame(1, DTYPE_U8, i, bytes([i * 10] * 8)))
             for i in range(3)
         ]
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
             "3 INGEST .",       # should return 3 (all received)
@@ -7033,7 +7140,7 @@ class TestKDOS(_KDOSTestBase):
     def test_ingest_partial(self):
         """INGEST with fewer frames than requested."""
         frame = wrap_port_frame(encode_frame(1, DTYPE_U8, 0, bytes(8)))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
             "5 INGEST .",       # only 1 frame available
@@ -7056,7 +7163,7 @@ class TestKDOS(_KDOSTestBase):
     def test_dot_frame(self):
         """.FRAME prints last received frame header."""
         frame = wrap_port_frame(encode_frame(42, DTYPE_RAW, 7, bytes(10)))
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "RECV-FRAME DROP",
             ".FRAME",
         ], nic_frames=[frame])
@@ -7133,7 +7240,7 @@ class TestKDOS(_KDOSTestBase):
         src = CounterSource(src_id=1, length=64)
         frame = wrap_port_frame(src.next_frame())
         # Payload is bytes 0..63, sum = 64*63/2 = 2016
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 1 PORT!",
             "POLL DROP",
@@ -7145,7 +7252,7 @@ class TestKDOS(_KDOSTestBase):
         """SineSource -> NIC -> buffer -> kstats (min, max, sum)."""
         src = SineSource(src_id=2, length=64, frequency=1.0)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "b1 2 PORT!",
             "POLL DROP",
@@ -7591,7 +7698,7 @@ class TestKDOS(_KDOSTestBase):
         # Use kclamp instead of knorm to stay within emulator step budget
         src = TemperatureSource(src_id=20, length=32)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 32 BUFFER tb",
             "tb 20 PORT!",
             "POLL DROP",
@@ -7608,7 +7715,7 @@ class TestKDOS(_KDOSTestBase):
         """Stock prices → delta encode → detect price changes."""
         src = StockSource(src_id=21, length=64, seed=7)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER sb",
             "0 1 64 BUFFER db",
             "sb 21 PORT!",
@@ -7627,7 +7734,7 @@ class TestKDOS(_KDOSTestBase):
         # Use lightweight ops to stay within emulator step budget
         src = SeismicSource(src_id=22, length=32, event_prob=0.15, seed=42)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 32 BUFFER raw",
             "raw 22 PORT!",
             "POLL DROP",
@@ -7646,7 +7753,7 @@ class TestKDOS(_KDOSTestBase):
         src = ImageSource(src_id=23, width=64, height=64,
                           pattern='gradient')
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER img",
             "img 23 PORT!",
             "POLL DROP",
@@ -7665,7 +7772,7 @@ class TestKDOS(_KDOSTestBase):
         src = AudioSource(src_id=24, length=64, waveform='tone',
                           frequency=440.0)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER aud",
             "aud 24 PORT!",
             "POLL DROP",
@@ -7686,7 +7793,7 @@ class TestKDOS(_KDOSTestBase):
         """Text → histogram → character frequency analysis."""
         src = TextSource(src_id=25, chunk_size=64, sample='pangram')
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER txt",
             "txt 25 PORT!",
             "POLL DROP",
@@ -7709,7 +7816,7 @@ class TestKDOS(_KDOSTestBase):
         s3 = ReplaySource(src_id=3, data=bytes([50] * 64))
         multi = MultiChannelSource([s1, s2, s3])
         frames = [wrap_port_frame(multi.next_frame()) for _ in range(3)]
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER b1",
             "0 1 64 BUFFER b2",
             "0 1 64 BUFFER b3",
@@ -7731,7 +7838,7 @@ class TestKDOS(_KDOSTestBase):
                               texts=["cat on mat", "dog on rug"])
         f1 = wrap_port_frame(src.next_frame())
         f2 = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 64 BUFFER e1",
             "0 1 64 BUFFER e2",
             "e1 30 PORT!",
@@ -7753,7 +7860,7 @@ class TestKDOS(_KDOSTestBase):
         # Use a small buffer to keep emulator step count reasonable
         src = SeismicSource(src_id=40, length=32, event_prob=0.1, seed=123)
         frame = wrap_port_frame(src.next_frame())
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 1 32 BUFFER raw",
             "raw 40 PORT!",
             "POLL DROP",
@@ -8862,25 +8969,31 @@ class TestDiskUtil(unittest.TestCase):
             self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS))
 
     def test_diskutil_build_sample_image(self):
-        """build_sample_image creates image with KDOS, docs, tutorials, demo-data, demo-bundle."""
+        """Sample image includes the core and loadable networking module."""
         fs = build_sample_image()
         entries = fs.list_files()
         names = [e.name for e in entries]
         self.assertIn("kdos.f", names)
+        self.assertIn("networking.f", names)
         self.assertIn("autoexec.f", names)
         self.assertIn("demo-data", names)
         self.assertIn("demo-bundle", names)
         # Check file types
         kdos_entry = next(e for e in entries if e.name == "kdos.f")
         self.assertEqual(kdos_entry.ftype, FTYPE_FORTH)
+        networking_entry = next(
+            e for e in entries if e.name == "networking.f")
+        self.assertEqual(networking_entry.ftype, FTYPE_FORTH)
+        self.assertGreater(networking_entry.sector_count, 255)
         demo_entry = next(e for e in entries if e.name == "demo-data")
         self.assertEqual(demo_entry.ftype, FTYPE_DATA)
         bdl_entry = next(e for e in entries if e.name == "demo-bundle")
         self.assertEqual(bdl_entry.ftype, FTYPE_BUNDLE)
         # KDOS source should be substantial
         self.assertGreater(kdos_entry.used_bytes, 50000)
-        # Total files: 10 docs + 5 tutorials + kdos.f + demo-data + demo-bundle + graphics.f + tools.f + autoexec.f = 21
-        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 6)
+        # Extra files: kdos, networking, demo data/bundle, graphics, tools,
+        # and autoexec.
+        self.assertEqual(len(entries), len(DOCS) + len(TUTORIALS) + 7)
 
     def test_diskutil_build_sample_image_save(self):
         """build_sample_image can save to file path."""
@@ -8889,6 +9002,7 @@ class TestDiskUtil(unittest.TestCase):
             loaded = MP64FS.load(f.name)
             names = [e.name for e in loaded.list_files()]
             self.assertIn("kdos.f", names)
+            self.assertIn("networking.f", names)
             self.assertIn("autoexec.f", names)
 
 
@@ -12064,7 +12178,7 @@ class TestKDOSSHA256(_KDOSTestBase):
 
     def test_tls_dispatch_sha256_mode(self):
         """TLS-HASH dispatches to SHA256 when TLS-USE-SHA256=1."""
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "1 TLS-USE-SHA256 !",
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
@@ -12078,7 +12192,7 @@ class TestKDOSSHA256(_KDOSTestBase):
 
     def test_tls_dispatch_sha3_mode(self):
         """TLS-HASH dispatches to SHA3 when TLS-USE-SHA256=0."""
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             "0 TLS-USE-SHA256 !",
             "CREATE msg 3 ALLOT",
             "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
@@ -12092,7 +12206,7 @@ class TestKDOSSHA256(_KDOSTestBase):
 
     def test_tls_key_len_sha256_mode(self):
         """TLS-KEY-LEN returns 16 in SHA-256 mode (AES-128)."""
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             '1 TLS-USE-SHA256 !',
             '."  KL=" TLS-KEY-LEN .',
         ])
@@ -12100,7 +12214,7 @@ class TestKDOSSHA256(_KDOSTestBase):
 
     def test_tls_key_len_sha3_mode(self):
         """TLS-KEY-LEN returns 32 in SHA3 mode (AES-256)."""
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             '0 TLS-USE-SHA256 !',
             '."  KL=" TLS-KEY-LEN .',
         ])
@@ -12481,7 +12595,7 @@ class TestKDOSTRNG(_KDOSTestBase):
 
     def test_dns_id_random(self):
         """DNS-ID is initialized with a random value (not fixed 42)."""
-        text = self._run_kdos([
+        text = self._run_kdos_networking([
             '."  DNSID=" DNS-ID @ .',
         ])
         import re
@@ -14978,11 +15092,13 @@ class TestKDOSHardening(_KDOSTestBase):
             text = self._run_forth(sys, buf, [
                 "10 20 + .",
                 "BUF-COUNT @ .",
+                "MODULE? networking.f .",
             ], max_steps=800_000_000)
             self.assertIn("KDOS", text)
             self.assertIn("30 ", text)
             # BUF-COUNT should be a valid number (0 initially)
             self.assertIn("0 ", text)
+            self.assertIn("-1 ", text)
         finally:
             os.unlink(path)
 
@@ -15652,6 +15768,7 @@ class TestKDOSMulticore(unittest.TestCase):
     _mc_snapshot = None
     _bios_code = None
     _kdos_lines = None
+    _network_lines = None
 
     @classmethod
     def _save_cpu_state(cls, cpu):
@@ -15698,14 +15815,24 @@ class TestKDOSMulticore(unittest.TestCase):
                 if not stripped or stripped.startswith('\\'):
                     continue
                 cls._kdos_lines.append(line)
+        with open(NETWORKING_PATH) as f:
+            cls._network_lines = [
+                line for line in f.read().splitlines()
+                if line.strip() and not line.lstrip().startswith('\\')
+            ]
 
-        # Boot 4-core BIOS and load KDOS on core 0
-        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
+        # Boot 4-core BIOS, load KDOS, then compile networking in userland.
+        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=16)
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
 
-        payload = "\n".join(cls._kdos_lines) + "\n"
+        payload = "\n".join(
+            cls._kdos_lines
+            + ["JIT-ON", "ENTER-USERLAND"]
+            + cls._network_lines
+            + ["JIT-OFF"]
+        ) + "\n"
         data = payload.encode()
         pos = 0
         max_steps = 400_000_000
@@ -15728,6 +15855,7 @@ class TestKDOSMulticore(unittest.TestCase):
         # Save snapshot: raw memory + core 0 CPU state + per-core states
         cls._mc_snapshot = (
             bytes(sys_obj.cpu.mem),
+            bytes(sys_obj._ext_mem),
             cls._save_cpu_state(sys_obj.cpu),
             [cls._save_cpu_state(c) for c in sys_obj.cores],
         )
@@ -15738,13 +15866,14 @@ class TestKDOSMulticore(unittest.TestCase):
     def _run_mc(self, extra_lines: list[str],
                 max_steps=50_000_000) -> str:
         """Restore 4-core KDOS from snapshot, run extra_lines, return output."""
-        mem_bytes, cpu0_state, core_states = self.__class__._mc_snapshot
+        mem_bytes, ext_mem_bytes, cpu0_state, core_states = self.__class__._mc_snapshot
 
-        sys = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=1)
+        sys = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=16)
         buf = capture_uart(sys)
 
         # Restore shared memory
         sys.cpu.mem[:len(mem_bytes)] = mem_bytes
+        sys._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
         # Restore all core states
         for i, cpu in enumerate(sys.cores):
             self._restore_cpu_state(cpu, core_states[i])
@@ -16803,7 +16932,7 @@ class TestKDOSMulticore(unittest.TestCase):
 #  TLS 1.3 Record Layer tests — §16.8
 # ---------------------------------------------------------------------------
 
-class TestKDOSTLSRecord(_KDOSTestBase):
+class TestKDOSTLSRecord(_KDOSNetworkTestBase):
     """Tests for §16.8 TLS 1.3 record layer — nonce, AEAD, encrypt/decrypt."""
 
     _TLS_CTX_SETUP = [
@@ -17104,7 +17233,7 @@ class TestKDOSTLSRecord(_KDOSTestBase):
 #  TLS 1.3 Handshake tests — §16.9
 # ---------------------------------------------------------------------------
 
-class TestKDOSTLSHandshake(_KDOSTestBase):
+class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
     """Tests for §16.9 TLS 1.3 handshake — key schedule, ClientHello,
     ServerHello, Finished MAC, and handshake state machine."""
 
@@ -17835,7 +17964,7 @@ class TestKDOSTLSHandshake(_KDOSTestBase):
 #  ASN.1/DER Parser tests — §16.7a
 # ---------------------------------------------------------------------------
 
-class TestKDOSASN1(_KDOSTestBase):
+class TestKDOSASN1(_KDOSNetworkTestBase):
     """Tests for §16.7a ASN.1/DER minimal parser."""
 
     def _store_bytes(self, name, data: bytes) -> list[str]:
@@ -17927,7 +18056,7 @@ class TestKDOSASN1(_KDOSTestBase):
 #  X.509 Certificate Parser tests — §16.7b
 # ---------------------------------------------------------------------------
 
-class TestKDOSX509(_KDOSTestBase):
+class TestKDOSX509(_KDOSNetworkTestBase):
     """Tests for §16.7b X.509 leaf certificate parser."""
 
     # DER-encoded self-signed P-256 test certificate with SAN
@@ -18063,7 +18192,7 @@ class TestKDOSX509(_KDOSTestBase):
 #  P-256 ECDSA Verification tests — §16.7c
 # ---------------------------------------------------------------------------
 
-class TestKDOSECDSA(_KDOSTestBase):
+class TestKDOSECDSA(_KDOSNetworkTestBase):
     """Tests for §16.7c P-256 ECDSA signature verification.
     Note: EC scalar mul is computationally expensive. Tests use high step limits.
     """
@@ -18177,7 +18306,7 @@ class TestKDOSECDSA(_KDOSTestBase):
         )
 
 
-class TestKDOSRSA(_KDOSTestBase):
+class TestKDOSRSA(_KDOSNetworkTestBase):
     """Bounded RSA-2048 arithmetic, DER, padding, and TLS dispatch."""
 
     FIXTURE_DIR = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
@@ -18543,7 +18672,7 @@ class TestKDOSRSA(_KDOSTestBase):
         self.assertIn("BADALG=-1 ", text)
 
 
-class TestKDOSX509Chain(_KDOSTestBase):
+class TestKDOSX509Chain(_KDOSNetworkTestBase):
     """Native trust-bundle and bounded certificate-path validation."""
 
     FIXTURE_DIR = os.path.join(PROJECT_ROOT, "tests", "fixtures", "tls")
@@ -18691,7 +18820,7 @@ class TestKDOSX509Chain(_KDOSTestBase):
 #  TLS Certificate & CertificateVerify Handler tests — §16.7d
 # ---------------------------------------------------------------------------
 
-class TestKDOSTLSCertVerify(_KDOSTestBase):
+class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
     """Tests for §16.7d TLS certificate parsing and CertificateVerify
     verification wired into the handshake FSM."""
 
@@ -18907,7 +19036,7 @@ class TestKDOSTLSCertVerify(_KDOSTestBase):
 #  TLS 1.3 Application Data tests — §16.10 / §16.11
 # ---------------------------------------------------------------------------
 
-class TestKDOSTLSAppData(_KDOSTestBase):
+class TestKDOSTLSAppData(_KDOSNetworkTestBase):
     """Tests for §16.10/§16.11 TLS app data, TLS-SEND-DATA, TLS-RECV-DATA,
     TLS-CLOSE, and TLS-SEND-ALERT."""
 
@@ -19318,7 +19447,7 @@ class TestKDOSTLSAppData(_KDOSTestBase):
 #  Socket API tests — §17
 # ---------------------------------------------------------------------------
 
-class TestKDOSSocket(_KDOSTestBase):
+class TestKDOSSocket(_KDOSNetworkTestBase):
     """Tests for §17 Socket API — SOCKET, BIND, CONNECT, SEND, RECV, CLOSE."""
 
     def test_socket_alloc_tcp(self):
@@ -19538,10 +19667,10 @@ class TestKDOSSocket(_KDOSTestBase):
 
 
 # ---------------------------------------------------------------------------
-#  KDOS network stack tests — §16 Ethernet Framing
+#  networking.f stack tests — §16 Ethernet Framing
 # ---------------------------------------------------------------------------
 
-class TestKDOSNetStack(_KDOSTestBase):
+class TestKDOSNetStack(_KDOSNetworkTestBase):
     """Tests for §16 Network Stack — Ethernet framing constants and layout."""
 
     # --- 9a: Constants and frame buffer layout ---
@@ -22303,7 +22432,7 @@ class TestKDOSNetStack(_KDOSTestBase):
             'src_ip': src_ip, 'dst_ip': dst_ip,
         }
 
-    # TCP flag constants (matching kdos.f)
+    # TCP flag constants (matching networking.f)
     TCP_FIN = 0x01
     TCP_SYN = 0x02
     TCP_RST = 0x04
@@ -23722,7 +23851,7 @@ class TestKDOSNetStack(_KDOSTestBase):
 #  Network Hardening (Item 32)
 # ---------------------------------------------------------------------------
 
-class TestNetHardening(_KDOSTestBase):
+class TestNetHardening(_KDOSNetworkTestBase):
     """Tests for item 32 — real-world networking hardening.
 
     32a: PING command, NEXT-HOP subnet routing
@@ -25050,7 +25179,7 @@ class TestKDOSLoadBuffer(_KDOSTestBase):
             os.unlink(img)
 
 
-class TestKDOSSocketReady(_KDOSTestBase):
+class TestKDOSSocketReady(_KDOSNetworkTestBase):
     """Tests for the SOCKET-READY? word."""
 
     def test_socket_ready_fresh(self):
@@ -27368,12 +27497,13 @@ class TestHeadlessDisplay(_KDOSTestBase):
             # Use the fast path which constructs a MegapadSystem internally.
             # We need access to the system object, so call _run_kdos_fast
             # the same way _run_kdos does, but capture the system.
-            mem_bytes, cpu_state = _kdos_shared_snapshot
+            mem_bytes, ext_mem_bytes, cpu_state = _kdos_shared_snapshot
             sys_emu = make_system(
                 ram_kib=1024, storage_image=img, ext_mem_mib=16
             )
             buf = capture_uart(sys_emu)
             sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
+            sys_emu._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
             self._restore_cpu_state(sys_emu.cpu, cpu_state)
             # Restore TX ring buffer base from R19 (set during BIOS boot)
             r19 = sys_emu.cpu.regs[19]
@@ -27416,7 +27546,7 @@ class TestHeadlessDisplay(_KDOSTestBase):
 #  TestPortSend — §10.1 outbound data (PORT-SEND, PORT-SEND-SLICE)
 # =====================================================================
 
-class TestPortSend(_KDOSTestBase):
+class TestPortSend(_KDOSNetworkTestBase):
     """Tests for the PORT-SEND outbound data path (via UDP)."""
 
     def test_port_send_basic(self):
@@ -28013,7 +28143,7 @@ class TestKDOSExtMem(_KDOSTestBase):
 #  tools.f Tests — ED Line Editor + SCROLL Multi-Protocol Fetcher
 # =====================================================================
 
-class TestToolsModule(_KDOSTestBase):
+class TestToolsModule(_KDOSNetworkTestBase):
     """Tests for tools.f — ED editor + SCROLL network fetcher.
 
     tools.f is a loadable module (LOAD tools.f / REQUIRE tools.f).

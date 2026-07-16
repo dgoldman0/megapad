@@ -65,6 +65,7 @@ _LOCK_PATH = os.path.join(tempfile.gettempdir(), "mp64_tap.lock")
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BIOS_PATH     = os.environ.get("MP64_BIOS", os.path.join(_PROJECT_ROOT, "bios.asm"))
 _KDOS_PATH     = os.path.join(_PROJECT_ROOT, "kdos.f")
+_NETWORKING_PATH = os.path.join(_PROJECT_ROOT, "networking.f")
 _TOOLS_PATH    = os.path.join(_PROJECT_ROOT, "tools.f")
 _AUTOEXEC_PATH = os.path.join(_PROJECT_ROOT, "autoexec.f")
 _GRAPHICS_PATH = os.path.join(_PROJECT_ROOT, "graphics.f")
@@ -194,16 +195,25 @@ _snapshot_lock = threading.Lock()
 
 def _build_disk_image() -> str:
     """Create a unique-per-process disk image with KDOS + friends."""
-    from diskutil import format_image, inject_file, FTYPE_FORTH
+    from diskutil import format_image, inject_file, pack_forth_source, FTYPE_FORTH
 
     path = os.path.join(
         tempfile.gettempdir(),
         f"mp64_livenet_{os.getpid()}.img",
     )
     format_image(path)
-    for fpath in (_KDOS_PATH, _AUTOEXEC_PATH, _GRAPHICS_PATH, _TOOLS_PATH):
+    for fpath in (
+        _KDOS_PATH,
+        _NETWORKING_PATH,
+        _AUTOEXEC_PATH,
+        _GRAPHICS_PATH,
+        _TOOLS_PATH,
+    ):
         with open(fpath, 'rb') as f:
-            inject_file(path, os.path.basename(fpath), f.read(),
+            source = f.read()
+            if fpath == _NETWORKING_PATH:
+                source = pack_forth_source(source)
+            inject_file(path, os.path.basename(fpath), source,
                         ftype=FTYPE_FORTH)
     return path
 
@@ -360,6 +370,12 @@ class LiveNetBase(unittest.TestCase):
             sys.cpu.mem[:len(mem_bytes)] = mem_bytes
             sys._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
             _restore_cpu_state(sys.cpu, cpu_state)
+            # The restored CPU points at the BIOS UART TX ring in R19, but
+            # this fresh device instance has not booted and therefore has
+            # not learned that host-side ring address.
+            r19 = sys.cpu.regs[19]
+            if r19 and r19 < len(mem_bytes):
+                sys.uart._tx_ring_base = r19
 
             # Prepare commands
             ip_lines = []

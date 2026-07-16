@@ -1,15 +1,14 @@
 # KDOS Word Reference
 
-**KDOS v1.1** — the Kernel Dashboard Operating System — is a Forth-based
-OS that runs on top of the Megapad-64 BIOS.  It provides buffers, compute
-kernels, pipelines, a cooperative scheduler, a named filesystem, networking,
-versioned pipeline bundles, multicore dispatch, and an interactive 9-screen
-TUI dashboard.
+KDOS — the Kernel Dashboard Operating System — is a Forth-based OS that runs
+on top of the Megapad-64 BIOS.  Its Bank 0 core provides buffers, compute
+kernels, pipelines, a cooperative scheduler, a named filesystem, multicore
+dispatch, and an interactive 9-screen TUI dashboard.  The loadable
+`networking.f` module adds Ethernet through TLS, sockets, and the UDP-backed
+data-port transport from the XMEM userland dictionary.
 
-This reference documents every word defined in KDOS, organized by the
-sections of `kdos.f`.  There are **871 colon definitions** and **490
-variables/constants/creates** — roughly 1,361 named entities in total across
-10,225 lines of Forth.
+This reference documents words from the KDOS core and networking module,
+organized by their source sections in `kdos.f` and `networking.f`.
 
 > **Notation.**  `( before -- after )` is the Forth stack comment.
 > Words from the BIOS are used freely (see `docs/bios-forth.md` for those).
@@ -54,8 +53,8 @@ variables/constants/creates** — roughly 1,361 named entities in total across
 17. [§13 Help System](#13-help-system)
 18. [§14 Startup](#14-startup)
 19. [§15 Pipeline Bundles](#15-pipeline-bundles)
-20. [§16 Network Stack](#16-network-stack)
-21. [§17 Socket API](#17-socket-api)
+20. [`networking.f` §16 Network Stack](#16-network-stack)
+21. [`networking.f` §17 Socket API](#17-socket-api)
 
 ---
 
@@ -312,8 +311,8 @@ a single 32-byte hybrid shared secret.
 ### §1.15 Userland Memory Isolation
 
 Provides separate dictionary space in external RAM for user-loaded modules
-(tools.f, user scripts), protecting the kernel dictionary in system RAM
-from overflow.  When `ENTER-USERLAND` is called, the Forth dictionary
+(`networking.f`, `tools.f`, and user scripts), protecting the core dictionary
+in system RAM from overflow.  When `ENTER-USERLAND` is called, the Forth dictionary
 pointer (`HERE`) is redirected to external memory.  All subsequent
 `CREATE`, `ALLOT`, `:` definitions, `VARIABLE`s, etc. compile into the
 userland zone.  System words remain accessible.
@@ -322,7 +321,7 @@ userland zone.  System words remain accessible.
 
 | Region | Address Range | Contents |
 |--------|--------------|----------|
-| System RAM | `0x00000 .. HERE` | BIOS + KDOS dictionary |
+| System RAM | `0x00000 .. HERE` | BIOS + KDOS core dictionary |
 | System heap | `HERE+4K .. 0x7F000` | `ALLOCATE` / `FREE` blocks |
 | Stacks | `0x80000 .. 0xFFFFF` | Data stack + return stack |
 | Userland dict | `EXT-MEM-BASE+N .. +U-ZONE-SIZE` | User word definitions + data |
@@ -337,7 +336,7 @@ userland zone.  System words remain accessible.
 | `U-USED` | `( -- u )` | Bytes used in the userland dictionary. |
 | `U-FREE` | `( -- u )` | Bytes remaining in the userland zone. |
 | `.USERLAND` | `( -- )` | Display userland memory status. |
-| `U-ZONE-SIZE` | `( -- u )` | Constant: 1 MiB (size of the userland dictionary zone). |
+| `U-ZONE-SIZE` | `( -- u )` | Constant: 4 MiB (size of the userland dictionary zone). |
 
 > **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
 > `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`
@@ -1051,9 +1050,10 @@ These are available for your own use outside of SCREENS:
 
 ## §10 Data Ports
 
-The data port system provides **NIC-based external data ingestion**.
-External sources send frames over the network; KDOS routes each frame's
-payload into a bound buffer based on the source ID.
+The data port system provides **NIC-based external data ingestion**.  The
+KDOS core defines the frame structures, buffer bindings, accessors, and
+statistics.  `networking.f` supplies the UDP transport and routes each
+received payload into a bound buffer based on the source ID.
 
 ### Frame Protocol
 
@@ -1152,17 +1152,20 @@ Stack & diagnostics.
 
 ## §14 Startup
 
-The startup section runs automatically when KDOS loads.  It:
+The startup section runs automatically when the KDOS core loads.  It:
 
-1. Enables **JIT compilation** (`JIT-ON`) for bulk KDOS load — saves ~49 KiB
-   of dictionary space by inlining call sequences
-2. Compiles all KDOS subsystems (§1–§19)
-3. Prints the banner: **"KDOS v1.1 — Kernel Dashboard OS"**
-4. Prints usage hints: `HELP`, `SCREENS`, `TOPICS`/`LESSONS`
-5. If a disk is attached (`DISK?`), automatically loads the filesystem
-   (`FS-LOAD`) so DIR, CAT, LOAD, etc. work immediately
-6. Runs `autoexec.f` if present on disk
-7. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
+1. Uses **JIT compilation** (`JIT-ON`) while `kdos.f` compiles into Bank 0
+2. Prints the banner and usage hints
+3. If a disk is attached (`DISK?`), loads the filesystem (`FS-LOAD`) so
+   `DIR`, `CAT`, `LOAD`, and related words work immediately
+4. Initializes the Bank 0 heap before any userland transition
+5. Runs `autoexec.f` if present on disk
+6. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
+
+The standard autoexec enables JIT for its own load, enters the 4 MiB XMEM
+userland dictionary, loads `networking.f` with `FSLOAD`, configures DHCP or
+the static fallback, loads `tools.f`, and disables JIT.  Thus the network
+stack does not enlarge the Bank 0 core dictionary.
 
 Users can re-enable JIT for their own code with `JIT-ON`.
 
@@ -1399,8 +1402,9 @@ HELP                     \ reference
 ## §16 Network Stack
 
 Full TCP/IP network stack built on the NIC hardware (§16–§16.11 in
-`kdos.f`).  Bottom-up: Ethernet → ARP → IPv4 → ICMP → UDP → DHCP →
-DNS → TCP → TLS 1.3.
+`networking.f`).  The standard autoexec loads it after entering userland.
+Bottom-up: Ethernet → ARP → IPv4 → ICMP → UDP → DHCP → DNS → TCP →
+TLS 1.3.
 
 ### §16 Ethernet Framing
 
@@ -1556,15 +1560,15 @@ encrypted record.
 
 ## §17 Socket API
 
-Unified socket interface over TCP and UDP (§17 in `kdos.f`).
+BSD-style socket interface over TCP and TLS (§17 in `networking.f`).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `SOCKET` | `( proto -- sd )` | Create socket descriptor.  *proto*: 6 = TCP, 17 = UDP. |
-| `BIND` | `( sd port -- )` | Bind socket to local port. |
-| `LISTEN` | `( sd -- )` | Mark socket as listening (TCP only). |
-| `ACCEPT` | `( sd -- sd' )` | Dequeue completed connection from listener's accept queue.  Returns new socket or -1. |
-| `CONNECT` | `( sd ip port -- )` | Connect to remote host (TCP) or set default destination (UDP). |
+| `SOCKET` | `( type -- sd \| -1 )` | Create a socket descriptor.  *type*: 0 = TCP, 1 = TLS. |
+| `BIND` | `( sd port -- ior )` | Set the local port; returns 0. |
+| `LISTEN` | `( sd -- ior )` | Open a passive TCP listener; returns 0 or -1. |
+| `SOCK-ACCEPT` | `( sd -- sd' \| -1 )` | Dequeue a completed connection from a listener. |
+| `CONNECT` | `( sd ip port -- ior )` | Open TCP and, for a TLS socket, complete the TLS handshake. |
 | `SEND` | `( sd buf len -- n )` | Send data, return bytes sent. |
 | `RECV` | `( sd buf maxlen -- n )` | Receive data, return bytes read. |
 | `CLOSE` | `( sd -- )` | Close socket and release resources. |
