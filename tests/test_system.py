@@ -17519,14 +17519,17 @@ class TestKDOSTLSHandshake(_KDOSNetworkTestBase):
             # pubkey = 66..97 (0x42..0x61)
             ": fill-pk 32 0 DO I 66 + sh-buf 58 + I + C! LOOP ; fill-pk",
             # Parse
+            "VARIABLE sh-depth  DEPTH sh-depth !",
             "test-ctx @  sh-buf 90  TLS-PARSE-SERVER-HELLO",
             '." F=" .',
+            'DEPTH sh-depth @ = ." SH-BALANCED=" .',
             '." PK0=" test-ctx @ TLS-CTX.PEER-PUBKEY C@ .',
             '." PK1=" test-ctx @ TLS-CTX.PEER-PUBKEY 1 + C@ .',
             '." PK31=" test-ctx @ TLS-CTX.PEER-PUBKEY 31 + C@ .',
         ]
         text = self._run_kdos(lines)
         self.assertIn("F=0 ", text)        # success
+        self.assertIn("SH-BALANCED=-1 ", text)
         self.assertIn("PK0=66 ", text)     # first pubkey byte
         self.assertIn("PK1=67 ", text)
         self.assertIn("PK31=97 ", text)    # last pubkey byte
@@ -18199,11 +18202,14 @@ class TestKDOSX509(_KDOSNetworkTestBase):
         lines = self._store_bytes("tv-cert", self._CERT_DER)
         lines.extend([
             f"tv-cert {len(self._CERT_DER)} X509-PARSE DROP",
+            "VARIABLE wildcard-depth  DEPTH wildcard-depth !",
             'S" foo.example.com" X509-CHECK-HOST',
             '." MATCH=" .',
+            'DEPTH wildcard-depth @ = ." BALANCED=" .',
         ])
         text = self._run_kdos(lines, max_steps=2_000_000_000)
         self.assertIn("MATCH=0 ", text)  # 0 = matched
+        self.assertIn("BALANCED=-1 ", text)
 
     def test_x509_check_host_mismatch(self):
         """X509-CHECK-HOST rejects non-matching hostname."""
@@ -18655,14 +18661,24 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
                 f'." {name.upper()}=" tv-mh tv-{name} '
                 "_RSA-PSS-SHA256-EM-CHECK ."
             )
+        lines.extend([
+            "VARIABLE pss-em-depth  DEPTH pss-em-depth !",
+            'tv-mh tv-ok _RSA-PSS-SHA256-EM-CHECK ." EM=" .',
+            'DEPTH pss-em-depth @ = ." EM-BALANCED=" .',
+        ])
         lines += self._forth_bytes("tv-mod", modulus)
         lines += self._forth_bytes("tv-sig", signature)
-        lines.append(
-            '." REAL=" tv-mh tv-mod tv-sig 256 RSA2048-PSS-SHA256-VERIFY .'
-        )
+        lines.extend([
+            "VARIABLE pss-depth  DEPTH pss-depth !",
+            '." REAL=" tv-mh tv-mod tv-sig 256 RSA2048-PSS-SHA256-VERIFY .',
+            'DEPTH pss-depth @ = ." PSS-BALANCED=" .',
+        ])
         text = self._run_kdos(lines, max_steps=900_000_000)
         self.assertIn("OK=0 ", text)
+        self.assertIn("EM=0 ", text)
+        self.assertIn("EM-BALANCED=-1 ", text)
         self.assertIn("REAL=0 ", text)
+        self.assertIn("PSS-BALANCED=-1 ", text)
         for label in ("HIGH", "TRAILER", "PAD", "DELIM", "SALT"):
             self.assertIn(f"{label}=-1 ", text)
 
@@ -18705,13 +18721,19 @@ class TestKDOSRSA(_KDOSNetworkTestBase):
             "X509-ALG-RSA2048 _TLS-SERVER-PUBKEY-ALGO !",
             "TLS-TR-RESET 1 TLS-USE-SHA256 !",
             f"tv-tr {len(transcript)} TLS-TR-APPEND",
+            "VARIABLE cv-depth  DEPTH cv-depth !",
             f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." CV=" .',
+            'DEPTH cv-depth @ = ." CV-BALANCED=" .',
             "4 tv-cv 4 + C! 1 tv-cv 5 + C!",
+            "VARIABLE badalg-depth  DEPTH badalg-depth !",
             f'0 TLS-CTX@ tv-cv {len(message)} TLS-VERIFY-CERT-SIG ." BADALG=" .',
+            'DEPTH badalg-depth @ = ." BADALG-BALANCED=" .',
         ])
         text = self._run_kdos(lines, max_steps=900_000_000)
         self.assertIn("CV=0 ", text)
+        self.assertIn("CV-BALANCED=-1 ", text)
         self.assertIn("BADALG=-1 ", text)
+        self.assertIn("BADALG-BALANCED=-1 ", text)
 
 
 class TestKDOSX509Chain(_KDOSNetworkTestBase):
@@ -18938,8 +18960,10 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         msg = self._build_cert_msg()
         lines = self._trusted_lines(msg)
         lines.extend([
+            "VARIABLE cert-depth  DEPTH cert-depth !",
             f"tv-msg {len(msg)} TLS-PARSE-CERTIFICATE",
             '." FLAG=" .',
+            'DEPTH cert-depth @ = ." CERT-BALANCED=" .',
             '." LAST=" TLS-CERT-LAST-ERROR @ .',
             '." CERTS=" TLS-PEER-CERT-COUNT @ .',
             '." ALGO=" _TLS-SERVER-PUBKEY-ALGO @ .',
@@ -18948,6 +18972,7 @@ class TestKDOSTLSCertVerify(_KDOSNetworkTestBase):
         text = self._run_kdos(lines, max_steps=5_000_000_000)
         self.assertIn("TRUST=0 ", text)
         self.assertIn("FLAG=0 ", text)
+        self.assertIn("CERT-BALANCED=-1 ", text)
         self.assertIn("LAST=0 ", text)
         self.assertIn("CERTS=2 ", text)
         self.assertIn("ALGO=1027 ", text)   # 0x0403

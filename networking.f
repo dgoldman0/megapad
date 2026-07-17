@@ -3338,8 +3338,7 @@ VARIABLE _XCW-DLEN
             \ Hostname suffix starts at I+1
             _XCH-HLEN @ I 1+ -                  \ suffix-len
             _XCW-DLEN @ 2 -                      \ dns-suffix-len (skip "*.")
-            OVER OVER <> IF 2DROP FALSE UNLOOP EXIT THEN
-            DROP                                 \ matching lengths
+            <> IF FALSE UNLOOP EXIT THEN
             _XCH-HOST @ I 1+  +                  \ host-suffix-addr
             _XCW-DPTR @ 2 +                      \ dns-suffix-addr
             _XCH-HLEN @ I 1+ -                   \ len
@@ -4901,7 +4900,7 @@ VARIABLE _RP-TP
     _RP-MOD @ _RSA-N _RSA-BE>LE
     _RP-SIG @ _RSA-BASE _RSA-BE>LE
     _RSA-BASE _RSA-N _RSA-U< 0= IF -1 EXIT THEN
-    _RSA-N @ _RSA-N0' DUP _RP-N0 !
+    _RSA-N @ _RSA-N0' _RP-N0 !
 
     \ Convert the representative to Montgomery form by 2048 reduced
     \ doublings.  This avoids storing modulus-specific R^2 tables.
@@ -5081,7 +5080,7 @@ VARIABLE _RMG-N
         _RMG-H @ 32 SHA256-UPDATE
         _RSA-PSS-CTR 4 SHA256-UPDATE
         _RSA-PSS-MGF SHA256-FINAL
-        223 _RMG-OFF @ - 32 MIN DUP _RMG-N !
+        223 _RMG-OFF @ - 32 MIN _RMG-N !
         _RSA-PSS-MGF _RSA-PSS-MASK _RMG-OFF @ + _RMG-N @ CMOVE
         _RMG-N @ _RMG-OFF +!
     LOOP ;
@@ -5344,7 +5343,7 @@ VARIABLE _TPC-KEEP
     _TPC-POS @ _BE24@ DUP 0= IF
         DROP TLS-CERT-MALFORMED _TPC-RESULT EXIT
     THEN
-    _TPC-POS @ 3 + DUP _TPC-POS ! SWAP + DUP _TPC-LIST-END !
+    _TPC-POS @ 3 + DUP _TPC-POS ! SWAP + _TPC-LIST-END !
     _TPC-LIST-END @ _TPC-END @ <> IF TLS-CERT-MALFORMED _TPC-RESULT EXIT THEN
 
     BEGIN _TPC-POS @ _TPC-LIST-END @ < WHILE
@@ -5851,8 +5850,8 @@ CREATE _TCV-HASH    32 ALLOT         \ SHA-256 of content
     _TCV-MLEN @ 8 < IF -1 EXIT THEN
     _TCV-MSG @ C@ TLSHT-CERT-VERIFY <> IF -1 EXIT THEN
     _TCV-MSG @ 1+ _BE24@ _TCV-MLEN @ 4 - <> IF -1 EXIT THEN
-    _TCV-MSG @ 4 + _BE16@ DUP _TCV-ALGO !
-    _TCV-MSG @ 6 + _BE16@ DUP _TCV-SIG-U !
+    _TCV-MSG @ 4 + _BE16@ _TCV-ALGO !
+    _TCV-MSG @ 6 + _BE16@ _TCV-SIG-U !
     _TCV-SIG-U @ 8 + _TCV-MLEN @ <> IF -1 EXIT THEN
     _TCV-ALGO @ TLS-SIG-ECDSA-P256-SHA256 = IF
         _TLS-SERVER-PUBKEY-ALGO @ X509-ALG-P256 <>
@@ -6238,7 +6237,7 @@ CREATE TLS-HRR-RANDOM
     _TPSH-POS @ 1+ _TPSH-POS !
     _TPSH-MSG @ _TPSH-POS @ + _BE16@ _TPSH-EXTLEN !
     _TPSH-POS @ 2 + _TPSH-POS !
-    _TPSH-MSG @ _TPSH-POS @ + _TPSH-EXTLEN @ + DUP _TPSH-EEND !
+    _TPSH-MSG @ _TPSH-POS @ + _TPSH-EXTLEN @ + _TPSH-EEND !
     _TPSH-EEND @ _TPSH-END @ <> IF -1 EXIT THEN
 
     BEGIN _TPSH-MSG @ _TPSH-POS @ + _TPSH-EEND @ < WHILE
