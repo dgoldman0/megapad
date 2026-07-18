@@ -6444,6 +6444,8 @@ w_net_mac:
 ;   +0x1A  MEDIA_GEN (R)   attachment generation (4 bytes LE)
 ;   +0x1E  CAPS      (R)   backend/controller capabilities
 ;   +0x1F  TRANSFERRED (R) confirmed sectors in last controller request
+;   +0x20  EXPECTED_MEDIA_GEN (RW) guarded command generation (4 bytes LE)
+;   +0x24  GUARDED_CMD (W) atomically check generation and issue command
 
 ; DISK@ ( -- status )  read storage STATUS register
 w_disk_status:
@@ -6558,6 +6560,23 @@ w_disk_sectors:
     lsli r7, 8
     lsli r7, 8
     or r1, r7
+    subi r14, 8
+    str r14, r1
+    ret.l
+
+; DISK-MEDIA-GEN ( -- generation )  current attachment generation (u32)
+w_disk_media_gen:
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    subi r14, 8
+    str r14, r7
+    ret.l
+
+; DISK-CAPS ( -- caps )  controller capability bits
+w_disk_caps:
+    ldi64 r11, 0xFFFF_FF00_0000_021E
+    ld.b r1, r11
     subi r14, 8
     str r14, r1
     ret.l
@@ -6698,17 +6717,20 @@ disk_dma_span_ok:
     ret.l
 
 ; disk_command_checked: submit and wait for exactly one controller command.
-;   R0 = command, R1 = LBA, R9 = DMA address, R12 = controller count
+;   R0 = command, R1 = LBA, R9 = DMA address, R10 = expected MEDIA_GEN,
+;   R12 = controller count
 ;   Caller owns FS lock and has validated the complete public request.
 ;   Returns R0 = RESULT/TIMEOUT, R7 = TRANSFERRED.
 ;   COMPLETE is snapshotted only after an inherited busy command is gone, so
 ;   an old terminal publication cannot be mistaken for this request.
 disk_command_checked:
-    subi r15, 24
+    subi r15, 32
     str r15, r0               ; +0 command
     mov r11, r15
     addi r11, 8
     str r11, r12              ; +8 controller count
+    addi r11, 16
+    str r11, r10              ; +24 expected MEDIA_GEN
 
     ; Defense in depth for a legacy/raw command that bypassed FS lock.
     ldi64 r12, 1048576
@@ -6749,8 +6771,16 @@ disk_command_idle:
     st.b r11, r12
 
 disk_command_issue:
+    ; Publish the generation tuple before the atomic guarded submit.  The
+    ; expected value was saved before COMPLETE reads clobbered R10.
+    mov r11, r15
+    addi r11, 24
+    ldn r1, r11
+    ldi64 r0, 0xFFFF_FF00_0000_0220
+    ldi64 r11, write_mmio_u32_le
+    call.l r11
     ldn r7, r15
-    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi64 r11, 0xFFFF_FF00_0000_0224
     st.b r11, r7
 
     ldi64 r12, 1048576
@@ -6837,18 +6867,19 @@ disk_command_complete:
     ld.b r7, r11              ; confirmed whole sectors for this chunk
 
 disk_command_return:
-    addi r15, 24
+    addi r15, 32
     ret.l
 
 ; disk_transfer_checked: common checked READ/WRITE implementation.
-;   R0 = 1 READ or 2 WRITE, R1 = starting LBA, R9 = DMA, R12 = total count
+;   R0 = 1 READ or 2 WRITE, R1 = starting LBA, R9 = DMA, R12 = total count,
+;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound)
 ;   Returns R0 = status, R13 = confirmed sectors.  R1/R9 advance only across
 ;   confirmed sectors and R12 is the unconfirmed remainder.
 ;   The complete request is validated before its first externally visible
 ;   chunk and FS lock 2 is held across validation, setup, all chunks, and
 ;   terminal result readback.
 disk_transfer_checked:
-    subi r15, 56
+    subi r15, 64
     str r15, r0               ; +0 command
     mov r11, r15
     addi r11, 8
@@ -6860,13 +6891,18 @@ disk_transfer_checked:
     ldi r7, 0
     addi r11, 8
     str r11, r7               ; +32 confirmed sectors
+    addi r11, 8
+    str r11, r10              ; +40 expected/snapshotted MEDIA_GEN
+    addi r11, 16
+    str r11, r8               ; +56 generation mode
 
     ldi64 r11, disk_lock_acquire
     call.l r11
     cmpi r0, 0
     lbrne disk_transfer_return_unlocked
 
-    ; Presence and required precise/completion capabilities.
+    ; Presence and the precise/completion/media-generation/guard capabilities
+    ; required by every checked operation.
     ldi64 r11, 0xFFFF_FF00_0000_0201
     ld.b r7, r11
     andi r7, 0x80
@@ -6877,24 +6913,40 @@ disk_transfer_checked:
     ldn r0, r15
     cmpi r0, 1
     breq disk_transfer_check_read_caps
-    andi r7, 0x1A            ; WRITE + PRECISE_RESULT + COMPLETION
-    cmpi r7, 0x1A
-    lbreq disk_transfer_validate_count
+    andi r7, 0x7A            ; WRITE + PRECISE + COMPLETE + GEN + GUARD
+    cmpi r7, 0x7A
+    lbreq disk_transfer_bind_generation
     lbr disk_transfer_unsupported
 disk_transfer_check_read_caps:
-    andi r7, 0x19            ; READ + PRECISE_RESULT + COMPLETION
-    cmpi r7, 0x19
-    lbreq disk_transfer_validate_count
+    andi r7, 0x79            ; READ + PRECISE + COMPLETE + GEN + GUARD
+    cmpi r7, 0x79
+    lbreq disk_transfer_bind_generation
     lbr disk_transfer_unsupported
 
-disk_transfer_validate_count:
-    ; Bind every controller-sized chunk to the same attachment identity.
+disk_transfer_bind_generation:
+    ; Bind every controller-sized chunk to one attachment identity while the
+    ; FS lock is held.  Legacy checked words snapshot here; generation-bound
+    ; words reject a stale caller generation before geometry validation.
     ldi64 r11, 0xFFFF_FF00_0000_021A
     ldi64 r0, read_mmio_u32_le
     call.l r0
     mov r11, r15
+    addi r11, 56
+    ldn r8, r11
+    cmpi r8, 0
+    breq disk_transfer_snapshot_generation
+    mov r11, r15
     addi r11, 40
-    str r11, r7               ; +40 public-request MEDIA_GEN
+    ldn r10, r11
+    cmp r7, r10
+    lbrne disk_transfer_media_removed
+    lbr disk_transfer_validate_count
+disk_transfer_snapshot_generation:
+    mov r11, r15
+    addi r11, 40
+    str r11, r7
+
+disk_transfer_validate_count:
     mov r11, r15
     addi r11, 24
     ldn r12, r11
@@ -6957,6 +7009,9 @@ disk_transfer_batch_ready:
     ldn r1, r11
     addi r11, 8
     ldn r9, r11
+    mov r11, r15
+    addi r11, 40
+    ldn r10, r11
     ldi64 r11, disk_command_checked
     call.l r11                ; R0=result, R7=TRANSFERRED
 
@@ -7080,12 +7135,19 @@ disk_transfer_return_unlocked:
     ldn r12, r11
     addi r11, 8
     ldn r13, r11
-    addi r15, 56
+    addi r15, 64
     ret.l
 
 ; disk_flush_checked_core: checked durability barrier using the same command
-; submission/completion/result path as checked transfers.  Returns R0=status.
+; submission/completion/result path as checked transfers.
+;   R10 = caller generation, R8 = generation mode (0=snapshot, 1=bound)
+;   Returns R0=status.
 disk_flush_checked_core:
+    subi r15, 16
+    str r15, r10              ; +0 expected/snapshotted MEDIA_GEN
+    mov r11, r15
+    addi r11, 8
+    str r11, r8               ; +8 generation mode
     ldi64 r11, disk_lock_acquire
     call.l r11
     cmpi r0, 0
@@ -7097,13 +7159,29 @@ disk_flush_checked_core:
     breq disk_flush_checked_no_media
     ldi64 r11, 0xFFFF_FF00_0000_021E
     ld.b r7, r11
-    andi r7, 0x1C            ; FLUSH + PRECISE_RESULT + COMPLETION
-    cmpi r7, 0x1C
+    andi r7, 0x7C            ; FLUSH + PRECISE + COMPLETE + GEN + GUARD
+    cmpi r7, 0x7C
     brne disk_flush_checked_unsupported
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 8
+    ldn r8, r11
+    cmpi r8, 0
+    breq disk_flush_checked_snapshot_generation
+    ldn r10, r15
+    cmp r7, r10
+    brne disk_flush_checked_media_removed
+    lbr disk_flush_checked_issue
+disk_flush_checked_snapshot_generation:
+    str r15, r7
+disk_flush_checked_issue:
     ldi r0, 0xFF
     ldi r1, 0
     ldi r9, 0
     ldi r12, 0
+    ldn r10, r15
     ldi64 r11, disk_command_checked
     call.l r11
     cmpi r0, 0
@@ -7117,14 +7195,16 @@ disk_flush_checked_no_media:
     lbr disk_flush_checked_release
 disk_flush_checked_unsupported:
     ldi r0, 0x02
+    lbr disk_flush_checked_release
+disk_flush_checked_media_removed:
+    ldi r0, 0x0B
 disk_flush_checked_release:
-    subi r15, 8
     str r15, r0
     ldi64 r11, disk_lock_release
     call.l r11
     ldn r0, r15
-    addi r15, 8
 disk_flush_checked_return_unlocked:
+    addi r15, 16
     ret.l
 
 ; Public checked block operations.
@@ -7136,6 +7216,8 @@ w_disk_read_checked:
     ldn r1, r11
     addi r11, 8
     ldn r9, r11
+    ldi r8, 0                 ; snapshot current generation under FS lock
+    ldi r10, 0
     ldi r0, 0x01
     ldi64 r11, disk_transfer_checked
     call.l r11
@@ -7154,6 +7236,8 @@ w_disk_write_checked:
     ldn r1, r11
     addi r11, 8
     ldn r9, r11
+    ldi r8, 0                 ; snapshot current generation under FS lock
+    ldi r10, 0
     ldi r0, 0x02
     ldi64 r11, disk_transfer_checked
     call.l r11
@@ -7166,10 +7250,65 @@ w_disk_write_checked:
 
 ; DISK-FLUSH-CHECKED ( -- status )
 w_disk_flush_checked:
+    ldi r8, 0                 ; snapshot current generation under FS lock
+    ldi r10, 0
     ldi64 r11, disk_flush_checked_core
     call.l r11
     subi r14, 8
     str r14, r0
+    ret.l
+
+; DISK-READ-GEN-CHECKED
+;   ( dma lba count generation -- completed status )
+w_disk_read_gen_checked:
+    ldn r10, r14
+    mov r11, r14
+    addi r11, 8
+    ldn r12, r11
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi r8, 1                 ; bind to the caller's generation
+    ldi r0, 0x01
+    ldi64 r11, disk_transfer_checked
+    call.l r11
+    addi r14, 16              ; four inputs become two outputs
+    str r14, r0               ; TOS = status
+    mov r11, r14
+    addi r11, 8
+    str r11, r13              ; NOS = completed
+    ret.l
+
+; DISK-WRITE-GEN-CHECKED
+;   ( dma lba count generation -- completed status )
+w_disk_write_gen_checked:
+    ldn r10, r14
+    mov r11, r14
+    addi r11, 8
+    ldn r12, r11
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi r8, 1                 ; bind to the caller's generation
+    ldi r0, 0x02
+    ldi64 r11, disk_transfer_checked
+    call.l r11
+    addi r14, 16
+    str r14, r0
+    mov r11, r14
+    addi r11, 8
+    str r11, r13
+    ret.l
+
+; DISK-FLUSH-GEN-CHECKED ( generation -- status )
+w_disk_flush_gen_checked:
+    ldn r10, r14
+    ldi r8, 1                 ; bind to the caller's generation
+    ldi64 r11, disk_flush_checked_core
+    call.l r11
+    str r14, r0               ; replace generation with status
     ret.l
 
 ; disk_read_sectors: BIOS MP64FS reader backed by the public checked core.
@@ -7177,6 +7316,8 @@ w_disk_flush_checked:
 ;   Returns R0=status and R13=confirmed sectors.  R1/R9 advance only over
 ;   confirmed data.  Callers must not inspect DMA bytes unless R0 is zero.
 disk_read_sectors:
+    ldi r8, 0                 ; BIOS filesystem reads snapshot generation
+    ldi r10, 0
     ldi r0, 0x01
     ldi64 r11, disk_transfer_checked
     call.l r11
@@ -15360,9 +15501,27 @@ d_disk_sectors:
     call.l r11
     ret.l
 
+; === DISK-MEDIA-GEN ===
+d_disk_media_gen:
+    .dq d_disk_sectors
+    .db 14
+    .ascii "DISK-MEDIA-GEN"
+    ldi64 r11, w_disk_media_gen
+    call.l r11
+    ret.l
+
+; === DISK-CAPS ===
+d_disk_caps:
+    .dq d_disk_media_gen
+    .db 9
+    .ascii "DISK-CAPS"
+    ldi64 r11, w_disk_caps
+    call.l r11
+    ret.l
+
 ; === DISK-READ-CHECKED ===
 d_disk_read_checked:
-    .dq d_disk_sectors
+    .dq d_disk_caps
     .db 17
     .ascii "DISK-READ-CHECKED"
     ldi64 r11, w_disk_read_checked
@@ -15387,9 +15546,36 @@ d_disk_flush_checked:
     call.l r11
     ret.l
 
+; === DISK-READ-GEN-CHECKED ===
+d_disk_read_gen_checked:
+    .dq d_disk_flush_checked
+    .db 21
+    .ascii "DISK-READ-GEN-CHECKED"
+    ldi64 r11, w_disk_read_gen_checked
+    call.l r11
+    ret.l
+
+; === DISK-WRITE-GEN-CHECKED ===
+d_disk_write_gen_checked:
+    .dq d_disk_read_gen_checked
+    .db 22
+    .ascii "DISK-WRITE-GEN-CHECKED"
+    ldi64 r11, w_disk_write_gen_checked
+    call.l r11
+    ret.l
+
+; === DISK-FLUSH-GEN-CHECKED ===
+d_disk_flush_gen_checked:
+    .dq d_disk_write_gen_checked
+    .db 22
+    .ascii "DISK-FLUSH-GEN-CHECKED"
+    ldi64 r11, w_disk_flush_gen_checked
+    call.l r11
+    ret.l
+
 ; === MP64FS-VALID? ===
 d_mp64fs_valid:
-    .dq d_disk_flush_checked
+    .dq d_disk_flush_gen_checked
     .db 13
     .ascii "MP64FS-VALID?"
     ldi r0, 0

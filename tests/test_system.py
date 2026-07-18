@@ -77,6 +77,8 @@ from devices import (
     NetworkDevice, DeviceBus, BusError,
     STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
     STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
+    STORAGE_RESULT_MEDIA_REMOVED, STORAGE_RESULT_UNSUPPORTED,
+    STORAGE_CAP_GEN_GUARD, STORAGE_CAPS,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     FB_BASE,
     WOTS_BASE, WotsChainAccel,
@@ -2050,8 +2052,12 @@ class TestBIOS(unittest.TestCase):
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
                      "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
                      "DISK-FLUSH", "DISK-SECTORS",
+                     "DISK-MEDIA-GEN", "DISK-CAPS",
                      "DISK-READ-CHECKED", "DISK-WRITE-CHECKED",
                      "DISK-FLUSH-CHECKED",
+                     "DISK-READ-GEN-CHECKED",
+                     "DISK-WRITE-GEN-CHECKED",
+                     "DISK-FLUSH-GEN-CHECKED",
                      "TIMER!", "EI!", "DI!", "ISR!", "KEY?"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
@@ -2088,6 +2094,216 @@ class TestBIOS(unittest.TestCase):
             sys, buf = self._boot_bios(storage_image=path)
             text = self._run_forth(sys, buf, ["DISK-SECTORS ."])
             self.assertIn("8192 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_disk_generation_and_capability_queries(self):
+        """BIOS exposes the current media identity and controller features."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            generation = sys.storage.media_generation
+            text = self._run_forth(sys, buf, [
+                'DISK-MEDIA-GEN ."  GEN=" .',
+                'DISK-CAPS ."  CAPS=" .',
+            ])
+            self.assertIn(f"GEN={generation} ", text)
+            self.assertIn(f"CAPS={STORAGE_CAPS} ", text)
+            self.assertEqual(STORAGE_CAPS & STORAGE_CAP_GEN_GUARD,
+                             STORAGE_CAP_GEN_GUARD)
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_submit_snapshots_generation_and_uses_guard(self):
+        """Legacy checked I/O snapshots generation and submits at +0x24."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x4D" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+
+            generation = sys.storage.media_generation
+            writes = []
+            original_write8 = sys.storage.write8
+
+            def record_write(offset, value):
+                writes.append((offset, value))
+                original_write8(offset, value)
+
+            sys.storage.write8 = record_write
+            text = self._run_forth(sys, buf, [
+                "VARIABLE guarded-read-buf 512 ALLOT",
+                ("guarded-read-buf 3 1 DISK-READ-CHECKED "
+                 '."  GUARDED=" . .'),
+            ])
+
+            self.assertIn("GUARDED=0 1 ", text)
+            guarded_index = writes.index((0x24, STORAGE_CMD_READ))
+            expected_tuple = [
+                (0x20 + index, byte)
+                for index, byte in enumerate(
+                    generation.to_bytes(4, byteorder="little")
+                )
+            ]
+            self.assertEqual(writes[guarded_index - 4:guarded_index],
+                             expected_tuple)
+            self.assertNotIn((0x00, STORAGE_CMD_READ), writes)
+        finally:
+            os.unlink(path)
+
+    def test_disk_generation_bound_transfers_accept_current_reject_stale(self):
+        """Bound reads/writes reject stale media before DMA or mutation."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x31" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            generation = sys.storage.media_generation
+            stale = (generation + 1) & 0xFFFF_FFFF
+
+            text = self._run_forth(sys, buf, [
+                "VARIABLE gen-bound-buf 512 ALLOT",
+                "0xA5 gen-bound-buf C!",
+                (f"gen-bound-buf 7 1 {generation} "
+                 'DISK-WRITE-GEN-CHECKED ."  W-CURRENT=" . .'),
+                "0x5A gen-bound-buf C!",
+                (f"gen-bound-buf 8 1 {stale} "
+                 'DISK-WRITE-GEN-CHECKED ."  W-STALE=" . .'),
+                "0xCC gen-bound-buf C!",
+                (f"gen-bound-buf 8 1 {stale} "
+                 'DISK-READ-GEN-CHECKED ."  R-STALE=" . .'),
+                'gen-bound-buf C@ ."  STALE-BYTE=" .',
+                (f"0 999999 1 {stale} DISK-READ-GEN-CHECKED "
+                 '."  STALE-RANGE=" . .'),
+                "0 gen-bound-buf C!",
+                (f"gen-bound-buf 7 1 {generation} "
+                 'DISK-READ-GEN-CHECKED ."  R-CURRENT=" . .'),
+                'gen-bound-buf C@ ."  CURRENT-BYTE=" .',
+            ])
+
+            self.assertIn("W-CURRENT=0 1 ", text)
+            self.assertIn(
+                f"W-STALE={STORAGE_RESULT_MEDIA_REMOVED} 0 ", text
+            )
+            self.assertIn(
+                f"R-STALE={STORAGE_RESULT_MEDIA_REMOVED} 0 ", text
+            )
+            self.assertIn("STALE-BYTE=204 ", text)
+            self.assertIn(
+                f"STALE-RANGE={STORAGE_RESULT_MEDIA_REMOVED} 0 ", text
+            )
+            self.assertIn("R-CURRENT=0 1 ", text)
+            self.assertIn("CURRENT-BYTE=165 ", text)
+            self.assertEqual(sys.storage._image_data[7 * SECTOR_SIZE], 0xA5)
+            self.assertEqual(sys.storage._image_data[8 * SECTOR_SIZE], 0x31)
+        finally:
+            os.unlink(path)
+
+    def test_disk_generation_bound_flush_checks_identity(self):
+        """A stale bound flush has no host effect; the current one persists."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            generation = sys.storage.media_generation
+            stale = (generation + 1) & 0xFFFF_FFFF
+            save_calls = 0
+            original_save_image = sys.storage.save_image
+
+            def count_save():
+                nonlocal save_calls
+                save_calls += 1
+                return original_save_image()
+
+            sys.storage.save_image = count_save
+            text = self._run_forth(sys, buf, [
+                "VARIABLE gen-flush-buf 512 ALLOT",
+                "0xBC gen-flush-buf C!",
+                (f"gen-flush-buf 11 1 {generation} "
+                 'DISK-WRITE-GEN-CHECKED ."  WRITE=" . .'),
+                (f"{stale} DISK-FLUSH-GEN-CHECKED "
+                 '."  FLUSH-STALE=" .'),
+                (f"{generation} DISK-FLUSH-GEN-CHECKED "
+                 '."  FLUSH-CURRENT=" .'),
+            ])
+
+            self.assertIn("WRITE=0 1 ", text)
+            self.assertIn(
+                f"FLUSH-STALE={STORAGE_RESULT_MEDIA_REMOVED} ", text
+            )
+            self.assertIn("FLUSH-CURRENT=0 ", text)
+            self.assertEqual(save_calls, 1)
+            with open(path, "rb") as fh:
+                fh.seek(11 * SECTOR_SIZE)
+                self.assertEqual(fh.read(1), b"\xBC")
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_operations_require_generation_guard_capability(self):
+        """All checked APIs fail closed when CAPS bit 6 is unavailable."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x27" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            generation = sys.storage.media_generation
+            completion = sys.storage.completion
+            original_read8 = sys.storage.read8
+
+            def read_without_generation_guard(offset):
+                value = original_read8(offset)
+                if offset == 0x1E:
+                    return value & ~STORAGE_CAP_GEN_GUARD
+                return value
+
+            sys.storage.read8 = read_without_generation_guard
+            text = self._run_forth(sys, buf, [
+                "VARIABLE no-guard-buf 512 ALLOT",
+                ("no-guard-buf 4 1 DISK-READ-CHECKED "
+                 '."  READ=" . .'),
+                ("no-guard-buf 4 1 DISK-WRITE-CHECKED "
+                 '."  WRITE=" . .'),
+                'DISK-FLUSH-CHECKED ."  FLUSH=" .',
+                (f"no-guard-buf 4 1 {generation} "
+                 'DISK-READ-GEN-CHECKED ."  GREAD=" . .'),
+                (f"no-guard-buf 4 1 {generation} "
+                 'DISK-WRITE-GEN-CHECKED ."  GWRITE=" . .'),
+                (f"{generation} DISK-FLUSH-GEN-CHECKED "
+                 '."  GFLUSH=" .'),
+            ])
+
+            unsupported = STORAGE_RESULT_UNSUPPORTED
+            self.assertIn(f"READ={unsupported} 0 ", text)
+            self.assertIn(f"WRITE={unsupported} 0 ", text)
+            self.assertIn(f"FLUSH={unsupported} ", text)
+            self.assertIn(f"GREAD={unsupported} 0 ", text)
+            self.assertIn(f"GWRITE={unsupported} 0 ", text)
+            self.assertIn(f"GFLUSH={unsupported} ", text)
+            self.assertEqual(sys.storage.completion, completion)
+            self.assertEqual(sys.storage._image_data[4 * SECTOR_SIZE], 0x27)
         finally:
             os.unlink(path)
 

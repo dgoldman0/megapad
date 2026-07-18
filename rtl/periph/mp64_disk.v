@@ -41,7 +41,7 @@ module mp64_disk #(
 
     // MMIO register interface
     input  wire        req,
-    input  wire [4:0]  addr,
+    input  wire [5:0]  addr,
     input  wire [7:0]  wdata,
     input  wire        wen,
     output reg  [7:0]  rdata,
@@ -75,6 +75,7 @@ module mp64_disk #(
     reg [63:0] dma_base;
     reg [7:0]  sec_count;
     reg [2:0]  dma_push_ctr;
+    reg [31:0] expected_media_generation;
 
     reg [7:0]  result;
     reg [31:0] completion;
@@ -87,8 +88,9 @@ module mp64_disk #(
     reg media_changed;
     reg externally_visible_effect;
 
-    // READ, WRITE, FLUSH, precise results, COMPLETE, and MEDIA_GEN.
-    localparam [7:0] DISK_CAPABILITIES = 8'h3F;
+    // READ, WRITE, FLUSH, precise results, COMPLETE, MEDIA_GEN, and atomic
+    // generation-guarded command submission.
+    localparam [7:0] DISK_CAPABILITIES = 8'h7F;
 
     // Synchronize physical sidebands before they affect command state.
     reg present_meta, present_sync;
@@ -124,6 +126,11 @@ module mp64_disk #(
     };
 
     wire [31:0] visible_total = present_sync ? TOTAL_SECTORS : 32'd0;
+    // A synchronized attachment transition and a guarded command may reach
+    // this state machine on the same edge.  Compare against the generation
+    // that transition publishes, not the previous-cycle register value.
+    wire [31:0] media_generation_at_accept = media_generation +
+        ((present_sync != present_prev) ? 32'd1 : 32'd0);
 
     // ------------------------------------------------------------------------
     // SPI byte engine (mode 0, clock idle low)
@@ -399,6 +406,7 @@ module mp64_disk #(
             dma_base <= 64'd0;
             sec_count <= 8'd1;
             dma_push_ctr <= 3'd0;
+            expected_media_generation <= 32'd0;
             result <= 8'd0;
             completion <= 32'd0;
             media_generation <= 32'd0;
@@ -471,6 +479,7 @@ module mp64_disk #(
                 dma_base <= 64'd0;
                 sec_count <= 8'd1;
                 dma_push_ctr <= 3'd0;
+                expected_media_generation <= 32'd0;
                 complete_command(DISK_RES_RESET_ABORTED);
             end else begin
                 // MMIO writes either program an idle controller or are rejected
@@ -487,8 +496,11 @@ module mp64_disk #(
                             media_changed <= 1'b0;
                     end else if (busy) begin
                         if ((addr == DISK_CMD) ||
+                            (addr == DISK_GUARDED_CMD) ||
                             ((addr >= DISK_SECTOR) &&
-                             (addr <= DISK_DMA_PUSH)))
+                             (addr <= DISK_DMA_PUSH)) ||
+                            ((addr >= DISK_EXPECTED_MEDIA_GEN) &&
+                             (addr <= DISK_EXPECTED_MEDIA_GEN + 3)))
                             rejected <= 1'b1;
                     end else begin
                         case (addr)
@@ -518,12 +530,22 @@ module mp64_disk #(
                                 endcase
                                 dma_push_ctr <= dma_push_ctr + 3'd1;
                             end
-                            DISK_CMD: begin
-                                if (wdata == DISK_CMD_STATUS) begin
+                            DISK_EXPECTED_MEDIA_GEN + 0:
+                                expected_media_generation[7:0] <= wdata;
+                            DISK_EXPECTED_MEDIA_GEN + 1:
+                                expected_media_generation[15:8] <= wdata;
+                            DISK_EXPECTED_MEDIA_GEN + 2:
+                                expected_media_generation[23:16] <= wdata;
+                            DISK_EXPECTED_MEDIA_GEN + 3:
+                                expected_media_generation[31:24] <= wdata;
+                            DISK_CMD, DISK_GUARDED_CMD: begin
+                                if ((addr == DISK_CMD) &&
+                                    (wdata == DISK_CMD_STATUS)) begin
                                     // Backward-compatible no-op; STATUS is read
                                     // from its register and does not publish a
                                     // synthetic command completion.
-                                end else if (wdata == DISK_CMD_RESET) begin
+                                end else if ((addr == DISK_CMD) &&
+                                             (wdata == DISK_CMD_RESET)) begin
                                     active_cmd <= wdata;
                                     transferred <= 8'd0;
                                     rejected <= 1'b0;
@@ -532,6 +554,7 @@ module mp64_disk #(
                                     dma_base <= 64'd0;
                                     sec_count <= 8'd1;
                                     dma_push_ctr <= 3'd0;
+                                    expected_media_generation <= 32'd0;
                                     card_initialized <= 1'b0;
                                     result <= 8'd0;
                                     result_valid <= 1'b0;
@@ -547,7 +570,15 @@ module mp64_disk #(
                                     current_lba <= sector;
                                     active_count <= sec_count;
                                     active_dma_cursor <= dma_base;
-                                    if (!present_sync) begin
+                                    if ((addr == DISK_GUARDED_CMD) &&
+                                        (expected_media_generation !=
+                                         media_generation_at_accept)) begin
+                                        // Conditional acceptance fails before
+                                        // DMA, SD protocol, or FLUSH effects.
+                                        result <= {1'b0, DISK_RES_MEDIA_REMOVED};
+                                        result_valid <= 1'b1;
+                                        completion <= completion + 32'd1;
+                                    end else if (!present_sync) begin
                                         result <= {1'b0, DISK_RES_NO_MEDIA};
                                         result_valid <= 1'b1;
                                         completion <= completion + 32'd1;
@@ -1134,6 +1165,15 @@ module mp64_disk #(
                 DISK_MEDIA_GEN + 3: rdata <= media_generation[31:24];
                 DISK_CAPS: rdata <= DISK_CAPABILITIES;
                 DISK_TRANSFERRED: rdata <= transferred;
+                DISK_EXPECTED_MEDIA_GEN + 0:
+                    rdata <= expected_media_generation[7:0];
+                DISK_EXPECTED_MEDIA_GEN + 1:
+                    rdata <= expected_media_generation[15:8];
+                DISK_EXPECTED_MEDIA_GEN + 2:
+                    rdata <= expected_media_generation[23:16];
+                DISK_EXPECTED_MEDIA_GEN + 3:
+                    rdata <= expected_media_generation[31:24];
+                DISK_GUARDED_CMD: rdata <= 8'd0;
                 default: rdata <= 8'd0;
             endcase
         end

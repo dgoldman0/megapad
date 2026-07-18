@@ -1022,7 +1022,7 @@ module mp64_soc #(
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_disk),
-        .addr  (mmio_addr_eff[4:0]),
+        .addr  (mmio_addr_eff[5:0]),
         .wdata (bus_mmio_wdata[7:0]),
         .wen   (bus_mmio_wen),
         .rdata (disk_rdata_raw),

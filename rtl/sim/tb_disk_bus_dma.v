@@ -20,7 +20,7 @@ module tb_disk_bus_dma;
     always #5 clk = ~clk;
 
     reg        disk_req;
-    reg [4:0]  disk_addr;
+    reg [5:0]  disk_addr;
     reg [7:0]  disk_wdata;
     reg        disk_wen;
     wire [7:0] disk_rdata;
@@ -216,7 +216,7 @@ module tb_disk_bus_dma;
     endtask
 
     task disk_write;
-        input [4:0] register_address;
+        input [5:0] register_address;
         input [7:0] value;
         begin
             @(negedge clk);
@@ -270,7 +270,7 @@ module tb_disk_bus_dma;
         expected_completion = 0;
         rst_n = 1'b0;
         disk_req = 1'b0;
-        disk_addr = 5'd0;
+        disk_addr = 6'd0;
         disk_wdata = 8'd0;
         disk_wen = 1'b0;
         phy_stall = 1'b0;

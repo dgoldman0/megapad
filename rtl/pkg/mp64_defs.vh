@@ -180,20 +180,23 @@ parameter [4:0] RTC_ALARM_S  = 5'h1A;  // alarm seconds
 parameter [4:0] RTC_ALARM_M  = 5'h1B;  // alarm minutes
 parameter [4:0] RTC_ALARM_H  = 5'h1C;  // alarm hours
 
-// Storage registers use 5-bit offsets so capacity has its own addresses.
-parameter [4:0] DISK_CMD      = 5'h00;
-parameter [4:0] DISK_STATUS   = 5'h01;
-parameter [4:0] DISK_SECTOR   = 5'h02;  // +2..+5 (32-bit)
-parameter [4:0] DISK_DMA      = 5'h06;  // +6..+D (64-bit)
-parameter [4:0] DISK_SECN     = 5'h0E;
-parameter [4:0] DISK_DATA     = 5'h0F;
-parameter [4:0] DISK_DMA_PUSH = 5'h10;
-parameter [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
-parameter [4:0] DISK_RESULT   = 5'h15;
-parameter [4:0] DISK_COMPLETE = 5'h16;  // +0x16..+0x19, u32 LE
-parameter [4:0] DISK_MEDIA_GEN= 5'h1A;  // +0x1A..+0x1D, u32 LE
-parameter [4:0] DISK_CAPS     = 5'h1E;
-parameter [4:0] DISK_TRANSFERRED = 5'h1F;
+// Storage registers use 6-bit offsets for guarded generation submission.
+parameter [5:0] DISK_CMD      = 6'h00;
+parameter [5:0] DISK_STATUS   = 6'h01;
+parameter [5:0] DISK_SECTOR   = 6'h02;  // +2..+5 (32-bit)
+parameter [5:0] DISK_DMA      = 6'h06;  // +6..+D (64-bit)
+parameter [5:0] DISK_SECN     = 6'h0E;
+parameter [5:0] DISK_DATA     = 6'h0F;
+parameter [5:0] DISK_DMA_PUSH = 6'h10;
+parameter [5:0] DISK_TOTAL    = 6'h11;  // +0x11..+0x14, u32 LE sectors
+parameter [5:0] DISK_RESULT   = 6'h15;
+parameter [5:0] DISK_COMPLETE = 6'h16;  // +0x16..+0x19, u32 LE
+parameter [5:0] DISK_MEDIA_GEN= 6'h1A;  // +0x1A..+0x1D, u32 LE
+parameter [5:0] DISK_CAPS     = 6'h1E;
+parameter [5:0] DISK_TRANSFERRED = 6'h1F;
+parameter [5:0] DISK_EXPECTED_MEDIA_GEN = 6'h20;
+parameter [5:0] DISK_GUARDED_CMD = 6'h24;
+parameter [7:0] DISK_CAP_GEN_GUARD = 8'h40;
 
 // NIC registers
 parameter [3:0] NIC_CMD      = 4'h0;

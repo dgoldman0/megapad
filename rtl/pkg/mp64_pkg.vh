@@ -440,20 +440,24 @@ localparam [4:0] RTC_ALARM_S = 5'h1A;
 localparam [4:0] RTC_ALARM_M = 5'h1B;
 localparam [4:0] RTC_ALARM_H = 5'h1C;
 
-// --- Disk registers (5-bit offsets give capacity its own addresses) ---
-localparam [4:0] DISK_CMD      = 5'h00;
-localparam [4:0] DISK_STATUS   = 5'h01;
-localparam [4:0] DISK_SECTOR   = 5'h02;
-localparam [4:0] DISK_DMA      = 5'h06;
-localparam [4:0] DISK_SECN     = 5'h0E;
-localparam [4:0] DISK_DATA     = 5'h0F;
-localparam [4:0] DISK_DMA_PUSH = 5'h10;
-localparam [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
-localparam [4:0] DISK_RESULT   = 5'h15;
-localparam [4:0] DISK_COMPLETE = 5'h16;  // +0x16..+0x19, u32 LE
-localparam [4:0] DISK_MEDIA_GEN= 5'h1A;  // +0x1A..+0x1D, u32 LE
-localparam [4:0] DISK_CAPS     = 5'h1E;
-localparam [4:0] DISK_TRANSFERRED = 5'h1F;
+// --- Disk registers (6-bit offsets include guarded generation submission) ---
+localparam [5:0] DISK_CMD      = 6'h00;
+localparam [5:0] DISK_STATUS   = 6'h01;
+localparam [5:0] DISK_SECTOR   = 6'h02;
+localparam [5:0] DISK_DMA      = 6'h06;
+localparam [5:0] DISK_SECN     = 6'h0E;
+localparam [5:0] DISK_DATA     = 6'h0F;
+localparam [5:0] DISK_DMA_PUSH = 6'h10;
+localparam [5:0] DISK_TOTAL    = 6'h11;  // +0x11..+0x14, u32 LE sectors
+localparam [5:0] DISK_RESULT   = 6'h15;
+localparam [5:0] DISK_COMPLETE = 6'h16;  // +0x16..+0x19, u32 LE
+localparam [5:0] DISK_MEDIA_GEN= 6'h1A;  // +0x1A..+0x1D, u32 LE
+localparam [5:0] DISK_CAPS     = 6'h1E;
+localparam [5:0] DISK_TRANSFERRED = 6'h1F;
+localparam [5:0] DISK_EXPECTED_MEDIA_GEN = 6'h20; // +0x20..+0x23, u32 LE
+localparam [5:0] DISK_GUARDED_CMD = 6'h24;
+
+localparam [7:0] DISK_CAP_GEN_GUARD = 8'h40;
 
 // Disk commands
 localparam [7:0] DISK_CMD_READ   = 8'h01;

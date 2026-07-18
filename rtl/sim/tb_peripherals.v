@@ -82,7 +82,7 @@ module tb_peripherals;
     // Disk DUT
     // ========================================================================
     reg        disk_req;
-    reg  [4:0] disk_addr;
+    reg  [5:0] disk_addr;
     reg  [7:0] disk_wdata;
     reg        disk_wen;
     wire [7:0] disk_rdata;
@@ -158,7 +158,7 @@ module tb_peripherals;
         end
     endtask
 
-    task disk_write(input [4:0] a, input [7:0] d);
+    task disk_write(input [5:0] a, input [7:0] d);
         begin
             @(posedge clk);
             disk_req <= 1'b1; disk_addr <= a; disk_wdata <= d; disk_wen <= 1'b1;
@@ -167,7 +167,7 @@ module tb_peripherals;
         end
     endtask
 
-    task disk_read(input [4:0] a, output [7:0] d);
+    task disk_read(input [5:0] a, output [7:0] d);
         begin
             @(posedge clk);
             disk_req <= 1'b1; disk_addr <= a; disk_wen <= 1'b0;

@@ -280,6 +280,8 @@ override the parameter so `TOTAL_SECTORS` remains truthful.
 | MEDIA_GEN | `+0x1A`–`+0x1D` | R | Attachment identity generation (u32 LE) |
 | CAPS | `+0x1E` | R | Backend capability bits |
 | TRANSFERRED | `+0x1F` | R | Whole sectors completed by the terminal request |
+| EXPECTED_MEDIA_GEN | `+0x20`–`+0x23` | RW | Required u32 attachment generation for conditional submission |
+| GUARDED_CMD | `+0x24` | W | Atomically compare generation and submit READ/WRITE/FLUSH; reads as zero |
 
 **Typical read sequence:**
 1. Write sector number to SECTOR registers
@@ -288,6 +290,12 @@ override the parameter so `TOTAL_SECTORS` remains truthful.
 4. Snapshot COMPLETE and write `0x01` to CMD (READ)
 5. Wait boundedly for COMPLETE to change
 6. Accept the data only when RESULT is zero and TRANSFERRED equals SEC_COUNT
+
+Persistent block-device and volume handles use the guarded form: write their
+captured generation to `EXPECTED_MEDIA_GEN`, snapshot `COMPLETE`, then write
+READ, WRITE, or FLUSH to `GUARDED_CMD`.  A generation mismatch completes as
+`MEDIA_REMOVED` with zero transferred sectors and no DMA or media effect.
+`CAPS` bit 6 advertises this atomic guard.
 
 **BIOS words:** production code uses `DISK-READ-CHECKED`,
 `DISK-WRITE-CHECKED`, and `DISK-FLUSH-CHECKED`.  Raw `DISK-SEC!`,

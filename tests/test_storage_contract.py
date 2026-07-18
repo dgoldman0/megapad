@@ -13,6 +13,7 @@ from devices import (
     STORAGE_CAPS,
     STORAGE_CAP_COMPLETION,
     STORAGE_CAP_FLUSH,
+    STORAGE_CAP_GEN_GUARD,
     STORAGE_CAP_MEDIA_GEN,
     STORAGE_CAP_PRECISE_RESULT,
     STORAGE_CAP_READ,
@@ -86,10 +87,15 @@ def _program(device: Storage, *, sector=0, dma=0, count=1) -> None:
     device.write8(0x0E, count)
 
 
+def _guarded_command(device: Storage, command: int, generation: int) -> None:
+    _write_le(device, 0x20, generation, 4)
+    device.write8(0x24, command)
+
+
 def test_extended_register_map_is_little_endian_and_capability_complete(tmp_path):
     device, _memory, _path = _attached_device(tmp_path)
 
-    assert device.size == 0x20
+    assert device.size == 0x25
     assert _read_le(device, 0x11, 4) == 4
     assert _read_le(device, 0x1A, 4) == 1
     assert device.read8(0x1E) == STORAGE_CAPS
@@ -100,7 +106,12 @@ def test_extended_register_map_is_little_endian_and_capability_complete(tmp_path
         | STORAGE_CAP_PRECISE_RESULT
         | STORAGE_CAP_COMPLETION
         | STORAGE_CAP_MEDIA_GEN
+        | STORAGE_CAP_GEN_GUARD
     )
+
+    _write_le(device, 0x20, 0x7856_3412, 4)
+    assert _read_le(device, 0x20, 4) == 0x7856_3412
+    assert device.read8(0x24) == 0
 
     device.completion = 0x7856_3412
     assert bytes(device.read8(offset) for offset in range(0x16, 0x1A)) == (
@@ -165,6 +176,7 @@ def test_idle_media_change_preserves_setup_and_terminal_publication(tmp_path):
     terminal = (device.result, device.completion, device.transferred)
     _program(device, sector=1, dma=0, count=1)
     device.write8(0x10, 0x34)
+    _write_le(device, 0x20, 0x1234_5678, 4)
 
     device.swap_image(str(second), save_current=False)
     device.write8(0x10, 0x12)
@@ -172,6 +184,7 @@ def test_idle_media_change_preserves_setup_and_terminal_publication(tmp_path):
     assert _read_le(device, 0x02, 4) == 1
     assert _read_le(device, 0x06, 8) == 0x1234
     assert device.read8(0x0E) == 1
+    assert _read_le(device, 0x20, 4) == 0x1234_5678
     assert (device.result, device.completion, device.transferred) == terminal
     assert device.read8(0x01) & (
         STORAGE_STATUS_ERROR
@@ -227,6 +240,86 @@ def test_successful_write_and_read_publish_one_completion_each(tmp_path):
     assert device.completion == 2
     assert device.transferred == 2
     assert memory[2048:2048 + len(first)] == first
+
+
+def test_guarded_commands_succeed_only_for_the_bound_generation(tmp_path):
+    device, memory, path = _attached_device(tmp_path, sectors=4)
+    generation = device.media_generation
+    payload = bytes((index * 7) & 0xFF for index in range(SECTOR_SIZE))
+    memory[:SECTOR_SIZE] = payload
+    _program(device, sector=1, dma=0, count=1)
+
+    _guarded_command(device, STORAGE_CMD_WRITE, generation)
+
+    assert device.result == STORAGE_RESULT_OK
+    assert device.transferred == 1
+    assert bytes(device._image_data[SECTOR_SIZE:2 * SECTOR_SIZE]) == payload
+
+    memory[SECTOR_SIZE:2 * SECTOR_SIZE] = b"\x00" * SECTOR_SIZE
+    _program(device, sector=1, dma=SECTOR_SIZE, count=1)
+    _guarded_command(device, STORAGE_CMD_READ, generation)
+
+    assert device.result == STORAGE_RESULT_OK
+    assert device.transferred == 1
+    assert memory[SECTOR_SIZE:2 * SECTOR_SIZE] == payload
+
+    _guarded_command(device, STORAGE_CMD_FLUSH, generation)
+    assert device.result == STORAGE_RESULT_OK
+    assert device.transferred == 0
+    assert path.read_bytes()[SECTOR_SIZE:2 * SECTOR_SIZE] == payload
+
+
+@pytest.mark.parametrize(
+    "command",
+    (STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH),
+)
+def test_stale_guarded_command_has_no_dma_media_or_flush_effect(
+    tmp_path, command
+):
+    device, memory, _old_path = _attached_device(
+        tmp_path, sectors=2, fill=0x31
+    )
+    memory[:] = b"\xA7" * len(memory)
+    original_memory = bytes(memory)
+    dma_reads = []
+    dma_writes = []
+    device._mem_read = (
+        lambda address: dma_reads.append(address) or memory[address]
+    )
+    device._mem_write = (
+        lambda address, value: dma_writes.append((address, value))
+        or memory.__setitem__(address, value)
+    )
+    flush_calls = []
+    original_save = device.save_image
+
+    def record_flush():
+        flush_calls.append(True)
+        original_save()
+
+    device.save_image = record_flush
+    _program(device, sector=0, dma=0, count=1)
+    captured_generation = device.media_generation
+    _write_le(device, 0x20, captured_generation, 4)
+
+    replacement_path = tmp_path / "replacement.img"
+    replacement_path.write_bytes(b"\x42" * (2 * SECTOR_SIZE))
+    device.swap_image(str(replacement_path), save_current=False)
+    original_media = bytes(device._image_data)
+    original_file = replacement_path.read_bytes()
+
+    device.write8(0x24, command)
+
+    assert device.result == STORAGE_RESULT_MEDIA_REMOVED
+    assert device.transferred == 0
+    assert device.completion == 1
+    assert not device.busy
+    assert bytes(memory) == original_memory
+    assert dma_reads == []
+    assert dma_writes == []
+    assert bytes(device._image_data) == original_media
+    assert replacement_path.read_bytes() == original_file
+    assert flush_calls == []
 
 
 def test_status_noop_idle_reset_and_unsupported_completion(tmp_path):
@@ -318,6 +411,7 @@ def test_stalled_command_owns_immutable_snapshot_and_rejects_busy_writes(tmp_pat
     device, memory, _path = _attached_device(tmp_path, fill=0x5A)
     device.write8(0x01, STORAGE_STATUS_MEDIA_CHANGED)
     _program(device, sector=1, dma=64, count=1)
+    _write_le(device, 0x20, 0x1234_5678, 4)
     device.inject_fault("start", command=STORAGE_CMD_READ, action="stall")
 
     device.write8(0x00, STORAGE_CMD_READ)
@@ -328,6 +422,9 @@ def test_stalled_command_owns_immutable_snapshot_and_rejects_busy_writes(tmp_pat
 
     for offset in range(0x02, 0x11):
         device.write8(offset, 0xA5)
+    for offset in range(0x20, 0x24):
+        device.write8(offset, 0x5A)
+    device.write8(0x24, STORAGE_CMD_WRITE)
     device.write8(0x00, STORAGE_CMD_WRITE)
 
     assert device.active_request == snapshot
@@ -336,6 +433,7 @@ def test_stalled_command_owns_immutable_snapshot_and_rejects_busy_writes(tmp_pat
     assert device.read8(0x02) == 1
     assert device.read8(0x06) == 64
     assert device.read8(0x0E) == 1
+    assert _read_le(device, 0x20, 4) == 0x1234_5678
 
     # STATUS W1C remains meaningful during a command.  Writes to the read-only
     # result block are harmless and do not create a fresh rejection.
@@ -363,6 +461,7 @@ def test_reset_aborts_stalled_command_once_without_side_effects(tmp_path):
     memory[:SECTOR_SIZE] = b"\xC3" * SECTOR_SIZE
     original = bytes(device._image_data)
     _program(device)
+    _write_le(device, 0x20, 0xCAFE_BABE, 4)
     device.inject_fault("accept", command=STORAGE_CMD_WRITE, action="stall")
     device.write8(0x00, STORAGE_CMD_WRITE)
 
@@ -375,6 +474,7 @@ def test_reset_aborts_stalled_command_once_without_side_effects(tmp_path):
     assert device.result == STORAGE_RESULT_RESET_ABORTED
     assert device.transferred == 0
     assert bytes(device._image_data) == original
+    assert device.expected_media_generation == 0
     assert not device.release_stall()
 
 

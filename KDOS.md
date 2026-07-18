@@ -117,10 +117,11 @@ PORTS                          \ List all port bindings
 - All 22 tile engine words + ACC@/ACC1@/ACC2@/ACC3@, TPOPCNT/TL1/TEMIN/TEMAX/TABS
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
-- Storage device support: DISK@, DISK-SECTORS, MP64FS-VALID?,
-  DISK-READ-CHECKED, DISK-WRITE-CHECKED, DISK-FLUSH-CHECKED, plus the
-  diagnostic raw words DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ,
-  DISK-WRITE, and DISK-FLUSH
+- Storage device support: DISK@, DISK-SECTORS, DISK-MEDIA-GEN, DISK-CAPS,
+  MP64FS-VALID?, the snapshotting DISK-READ-CHECKED, DISK-WRITE-CHECKED,
+  and DISK-FLUSH-CHECKED words, their generation-bound `-GEN-CHECKED`
+  variants, plus the diagnostic raw words DISK-SEC!, DISK-DMA!, DISK-N!,
+  DISK-READ, DISK-WRITE, and DISK-FLUSH
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
@@ -203,9 +204,9 @@ PORTS                          \ List all port bindings
 - Demo buffers: demo-a, demo-b, demo-c
 
 **Phase 2: Storage & Persistence** (✅ complete — v0.4)
-- 12 BIOS disk words: DISK@, DISK-SECTORS, MP64FS-VALID?, the production
-  DISK-READ-CHECKED / DISK-WRITE-CHECKED / DISK-FLUSH-CHECKED operations,
-  and six diagnostic raw setup/command words
+- 17 BIOS disk words: DISK@, DISK-SECTORS, DISK-MEDIA-GEN, DISK-CAPS,
+  MP64FS-VALID?, the production snapshotting and generation-bound checked
+  operations, and six diagnostic raw setup/command words
 - Buffer persistence: B.SAVE / B.LOAD (DMA to/from disk sectors)
 - B.SECTORS, DISK?, DISK-INFO — disk queries
 - FILE abstraction: sector-backed files with cursor, up to 8 registered
@@ -739,7 +740,7 @@ and a file abstraction provides cursor-based I/O over contiguous sector ranges.
 
 ### 7.1 BIOS Disk Words
 
-Twelve BIOS words expose the storage device (at MMIO offset 0x0200).
+Seventeen BIOS words expose the storage device (at MMIO offset 0x0200).
 KDOS production paths use the checked operations; raw setup/command words are
 retained for controller diagnostics and do not wait for completion.
 
@@ -747,10 +748,15 @@ retained for controller diagnostics and do not wait for completion.
 |---|---|---|
 | `DISK@` | ( -- status ) | Read live/sticky device status (bit 7 = present) |
 | `DISK-SECTORS` | ( -- count ) | Read the attached media capacity in 512-byte sectors |
+| `DISK-MEDIA-GEN` | ( -- generation ) | Read the current attachment generation (u32 identity) |
+| `DISK-CAPS` | ( -- caps ) | Read controller capability bits; bit 6 is atomic generation guard |
 | `MP64FS-VALID?` | ( -- flag ) | Checked read and structural validation of the attached MP64FS image |
 | `DISK-READ-CHECKED` | ( dma lba count -- completed status ) | Production read with full-request validation, locking, splitting, timeout, and precise result |
 | `DISK-WRITE-CHECKED` | ( dma lba count -- completed status ) | Production write; success is complete transfer, not durability |
 | `DISK-FLUSH-CHECKED` | ( -- status ) | Production ordering and durability barrier |
+| `DISK-READ-GEN-CHECKED` | ( dma lba count generation -- completed status ) | Generation-bound production read; stale identity returns MEDIA_REMOVED |
+| `DISK-WRITE-GEN-CHECKED` | ( dma lba count generation -- completed status ) | Generation-bound production write; stale identity is rejected before mutation |
+| `DISK-FLUSH-GEN-CHECKED` | ( generation -- status ) | Generation-bound durability barrier; stale identity has no flush effect |
 | `DISK-SEC!` | ( n -- ) | Diagnostic: set raw starting sector register |
 | `DISK-DMA!` | ( addr -- ) | Diagnostic: set raw 64-bit DMA address |
 | `DISK-N!` | ( n -- ) | Diagnostic: set raw controller sector count |
@@ -762,7 +768,36 @@ The storage device uses 512-byte sectors and DMA transfers. `FS-SYNC` and
 `FORMAT` report success only after their checked writes and a successful
 checked flush durability barrier.
 
-### 7.2 Buffer Persistence
+### 7.2 Block Devices, Volumes, and Partitions
+
+KDOS production storage is bound to an explicit attachment rather than to
+ambient controller state.  `BD-OPEN` captures the media generation, capacity,
+capabilities, and access flags in a caller-owned `/BLOCK-DEVICE` descriptor.
+`VOL-RAW` and `VOL-SLICE` then create caller-owned `/VOLUME` objects whose
+relative LBAs are checked and translated within a fixed half-open extent.
+Every read, write, and flush carries the captured generation through the
+controller's atomic guarded-command path, so a replacement between validation
+and command acceptance fails stale before DMA or media effects.
+
+The public object operations are `BD-OPEN`, `BD-CLOSE`, `BD-VALID?`,
+`BD-STALE?`, `BD-READ`, `BD-WRITE`, `BD-FLUSH`, `VOL-RAW`, `VOL-SLICE`,
+`VOL-CLOSE`, `VOL-VALID?`, `VOL-STALE?`, `VOL-READ`, `VOL-WRITE`, and
+`VOL-FLUSH`.  They return structured ior values; transfer operations also
+return the confirmed sector count.  `PART-SCAN` discovers a raw identity
+volume or validated MBR/GPT slices transactionally, while `MBR-SCAN` and
+`GPT-SCAN` expose the strict format-specific paths.  All scanners use the
+common stack effect `( bd volumes max workspace bytes -- count ior )` and
+require at least `PART-WORKSPACE-MIN` bytes of caller-owned scratch space.
+
+The singleton KDOS boot/recovery path deliberately rebinds `FS-VOLUME` to
+`SYSTEM-RAW-VOLUME` when `FS-LOAD` or `FORMAT` starts; buffer persistence and
+the file layer then route through that bounded raw object.  Akashic filesystem
+instances instead receive any validated raw, MBR, or GPT volume explicitly.
+The complete descriptor layouts, structured error fields, lifetime rules,
+and partition-validation policy are specified in
+[the block/volume contract](docs/block-volume-contract.md).
+
+### 7.3 Buffer Persistence
 
 ```forth
 \ Save buffer to disk
@@ -781,7 +816,7 @@ DISK-INFO                     \ Print "Storage: present" or "not attached"
 and issue one checked public request; the BIOS splits it into controller-sized
 chunks when necessary.
 
-### 7.3 File Abstraction
+### 7.4 File Abstraction
 
 A file is a contiguous region of sectors with a cursor for sequential I/O.
 

@@ -1,10 +1,12 @@
 # Storage controller and checked block-I/O contract
 
-This document freezes the observable first-generation Megapad storage
-contract.  It applies equally to the host emulator and the RTL-visible
-controller.  The raw register words remain available for diagnostics and
-boot compatibility, but production filesystem code uses the checked BIOS
-operations described below.
+This document freezes the observable Megapad storage contract.  It applies
+equally to the host emulator and the RTL-visible controller.  The original
+registers and commands remain compatible; the appended generation-guarded
+submit registers let persistent block-device handles fail closed across
+replacement media.  Raw register words remain available for diagnostics and
+boot compatibility, but production filesystem code uses checked BIOS
+operations.
 
 The controller transfers fixed 512-byte logical sectors.  It accepts one
 request at a time and has no request queue.  A successful `WRITE` means the
@@ -33,6 +35,8 @@ window.
 | `MEDIA_GEN` | `+0x1a..+0x1d` | R | Attachment identity generation, wrapping u32 little-endian |
 | `CAPS` | `+0x1e` | R | Backend capability bits |
 | `TRANSFERRED` | `+0x1f` | R | Completely transferred sectors in the last accepted controller request |
+| `EXPECTED_MEDIA_GEN` | `+0x20..+0x23` | RW | Required attachment generation for `GUARDED_CMD`, wrapping u32 little-endian |
+| `GUARDED_CMD` | `+0x24` | W | Conditionally submit READ, WRITE, or FLUSH; reads return zero |
 
 `STATUS` has these bits:
 
@@ -51,8 +55,9 @@ Writing `STATUS` only clears written-one bits 2 and 4.  It cannot clear a
 terminal result or alter live state.
 
 `CAPS` uses bit 0 for READ, bit 1 for WRITE, bit 2 for FLUSH, bit 3 for precise
-results, bit 4 for the completion generation, and bit 5 for the media
-generation.  Unassigned bits read zero.
+results, bit 4 for the completion generation, bit 5 for the media generation,
+and bit 6 for atomic generation-guarded submission.  Unassigned bits read
+zero.
 
 ## Acceptance, completion, and ordering
 
@@ -61,6 +66,16 @@ An idle READ or WRITE command atomically snapshots `SECTOR`, `DMA_ADDR`,
 ignores transfer setup.  `BUSY` becomes part of the accepted state before the
 command write is acknowledged.  Later setup writes cannot redirect an active
 request.
+
+For a persistent device or volume handle, software writes its captured
+generation to `EXPECTED_MEDIA_GEN` and submits READ, WRITE, or FLUSH through
+`GUARDED_CMD`.  Generation comparison and command acceptance are one
+controller action.  If the expected value differs from the generation that is
+current at that acceptance edge, the controller publishes `MEDIA_REMOVED`
+with `TRANSFERRED=0` and increments `COMPLETE` without DMA, media protocol,
+media mutation, or FLUSH effects.  A matching guarded command follows the
+same validation and execution path as its `CMD` counterpart.  Other values
+written to `GUARDED_CMD`, including STATUS and RESET, publish `UNSUPPORTED`.
 
 The controller publishes `RESULT` and `TRANSFERRED`, increments `COMPLETE`
 exactly once, sets `RESULT_VALID` and `ERROR` as appropriate, and finally
@@ -74,14 +89,16 @@ increments `COMPLETE`.  An unsupported idle command behaves the same way with
 `UNSUPPORTED`.  Command `03` remains a compatibility no-op and does not
 publish a completion.
 
-While busy, writes to the programmable/diagnostic range `+0x02..+0x10` and
-commands other than RESET are ignored and set `REJECTED`; they neither change
-the active snapshot nor increment `COMPLETE`.  `STATUS` W1C remains usable,
-and writes to the read-only result range are harmless no-ops.
+While busy, writes to the programmable/diagnostic range `+0x02..+0x10`, the
+guard setup range `+0x20..+0x23`, `GUARDED_CMD`, and commands other than RESET
+are ignored and set `REJECTED`; they neither change the active snapshot nor
+increment `COMPLETE`.  `STATUS` W1C remains usable, and writes to the
+read-only result range are harmless no-ops.
 RESET aborts an active request, prevents later actions from that request, and
 publishes one `RESET_ABORTED` completion.  An idle RESET clears the current
 terminal/rejection state without incrementing `COMPLETE`; it does not clear
-`MEDIA_CHANGED` or change media contents.
+`MEDIA_CHANGED` or change media contents.  Active and idle RESET restore
+`EXPECTED_MEDIA_GEN` with the rest of the programmable request tuple.
 
 Requests from production software are serialized across register setup,
 command submission, completion, and result readback.  The checked layer uses
@@ -142,14 +159,16 @@ without issuing a command.
 Attach, detach, and swap increment `MEDIA_GEN`, including wrap from all ones
 to zero.  An accepted request remains bound to the snapshotted generation.
 Removal or replacement aborts it with `MEDIA_REMOVED`; it must never continue
-against replacement bytes.  Future block-device handles will retain this
-generation, but those objects are outside this first contract.
+against replacement bytes.  Block-device handles retain this generation and
+use guarded submission so a request that begins after replacement also fails
+before touching the new attachment.
 
 A media-identity event does not itself rewrite `SECTOR`, `DMA_ADDR`,
-`SEC_COUNT`, or the `DMA_PUSH` serializer state, and it does not erase an idle
-terminal publication.  If a request is active, its `MEDIA_REMOVED` completion
-becomes the new terminal publication.  RESET remains the explicit operation
-that restores the programmable request tuple and clears terminal state.
+`SEC_COUNT`, `EXPECTED_MEDIA_GEN`, or the `DMA_PUSH` serializer state, and it
+does not erase an idle terminal publication.  If a request is active, its
+`MEDIA_REMOVED` completion becomes the new terminal publication.  RESET
+remains the explicit operation that restores the programmable request tuple
+and clears terminal state.
 
 For the host emulator, successful FLUSH means the complete live image was
 written, the host file was flushed, and `fsync` returned successfully.  A
@@ -189,6 +208,10 @@ Deterministic emulator and RTL test facilities may inject rejection, selected
 DMA/media failure, stalled acknowledgement, write completion failure, flush
 failure, timeout, and removal.  These controls are test machinery and are not
 guest policy or production filesystem APIs.
+
+Qualification of generation-bound handles additionally proves that stale
+guarded READ, WRITE, and FLUSH commands complete as `MEDIA_REMOVED` with zero
+progress and cause no DMA, replacement-media, or durability side effect.
 
 The first contract is complete only when the emulator, focused RTL controller
 tests, BIOS/KDOS checked words, and an MP64FS cold-process regression agree on

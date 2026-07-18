@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **453** entries.  The numbered
+The live dictionary link chain contains **458** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -492,7 +492,7 @@ of compiled code.
 | 204 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
 | 205 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
-### Disk / Storage (12 words)
+### Disk / Storage (17 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -508,6 +508,11 @@ of compiled code.
 | 215 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | | Production checked read: validates, locks, splits, waits for matching completion, and returns precise progress/result |
 | 216 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | | Production checked write; successful completion is not a durability claim |
 | 217 | `DISK-FLUSH-CHECKED` | `( -- status )` | | Production ordering and durability barrier |
+| 218 | `DISK-MEDIA-GEN` | `( -- generation )` | | Read the current attachment generation (u32 LE at MMIO +0x021A) |
+| 219 | `DISK-CAPS` | `( -- caps )` | | Read controller capabilities; bit 6 advertises atomic generation-guarded submission |
+| 220 | `DISK-READ-GEN-CHECKED` | `( dma lba count generation -- completed status )` | | Generation-bound checked read; rejects a stale identity before DMA |
+| 221 | `DISK-WRITE-GEN-CHECKED` | `( dma lba count generation -- completed status )` | | Generation-bound checked write; rejects a stale identity before media mutation |
+| 222 | `DISK-FLUSH-GEN-CHECKED` | `( generation -- status )` | | Generation-bound ordering and durability barrier |
 
 ### Timer & Interrupts (6 words)
 
@@ -793,7 +798,7 @@ TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-R
 |---|---|---|
 | `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2 |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
-| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F |
+| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F, EXPECTED_MEDIA_GEN=+20..+23, GUARDED_CMD=+24 |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |

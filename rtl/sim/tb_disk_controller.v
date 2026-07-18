@@ -15,7 +15,7 @@ module tb_disk_controller;
     always #5 clk = ~clk;
 
     reg        req;
-    reg [4:0]  addr;
+    reg [5:0]  addr;
     reg [7:0]  wdata;
     reg        wen;
     wire [7:0] rdata;
@@ -104,6 +104,8 @@ module tb_disk_controller;
     integer fail_count;
     integer i;
     integer before_count;
+    integer before_dma_count;
+    integer dma_ack_count;
     integer boundary_watchdog;
     reg [31:0] expected_completion;
     reg [31:0] before_generation;
@@ -113,6 +115,11 @@ module tb_disk_controller;
     reg [63:0] held_addr;
     reg [7:0] held_data;
     reg held_wen;
+
+    always @(posedge clk) begin
+        if (dma_req && dma_ack)
+            dma_ack_count <= dma_ack_count + 1;
+    end
 
     task check;
         input [8*80-1:0] label;
@@ -129,7 +136,7 @@ module tb_disk_controller;
     endtask
 
     task disk_write;
-        input [4:0] register_address;
+        input [5:0] register_address;
         input [7:0] value;
         begin
             @(negedge clk);
@@ -144,7 +151,7 @@ module tb_disk_controller;
     endtask
 
     task disk_write_held;
-        input [4:0] register_address;
+        input [5:0] register_address;
         input [7:0] value;
         input integer hold_cycles;
         integer held_cycle;
@@ -163,7 +170,7 @@ module tb_disk_controller;
     endtask
 
     task disk_read;
-        input [4:0] register_address;
+        input [5:0] register_address;
         output [7:0] value;
         begin
             @(negedge clk);
@@ -190,6 +197,16 @@ module tb_disk_controller;
                 disk_write(DISK_DMA + byte_index,
                            request_dma[(byte_index*8) +: 8]);
             disk_write(DISK_SECN, request_count);
+        end
+    endtask
+
+    task program_expected_generation;
+        input [31:0] generation;
+        integer byte_index;
+        begin
+            for (byte_index = 0; byte_index < 4; byte_index = byte_index + 1)
+                disk_write(DISK_EXPECTED_MEDIA_GEN + byte_index,
+                           generation[(byte_index*8) +: 8]);
         end
     endtask
 
@@ -230,10 +247,11 @@ module tb_disk_controller;
     initial begin
         pass_count = 0;
         fail_count = 0;
+        dma_ack_count = 0;
         expected_completion = 32'd0;
         rst_n = 1'b0;
         req = 1'b0;
-        addr = 5'd0;
+        addr = 6'd0;
         wdata = 8'd0;
         wen = 1'b0;
         dma_stall = 1'b0;
@@ -261,10 +279,17 @@ module tb_disk_controller;
         check("TOTAL reports the attached medium's exact sector count",
               read_value == TOTAL_SECTORS);
         disk_read(DISK_CAPS, read_value);
-        check("CAPS advertises frozen read/write/flush/result/completion/media ABI",
-              read_value == 8'h3F);
+        check("CAPS advertises guarded generation submission",
+              read_value == 8'h7F && read_value[6]);
         disk_read(DISK_TRANSFERRED, read_value);
         check("TRANSFERRED resets to zero", read_value == 8'd0);
+        program_expected_generation(32'h7856_3412);
+        disk_read(DISK_EXPECTED_MEDIA_GEN + 0, read_value);
+        check("EXPECTED_MEDIA_GEN is byte-addressable little-endian setup",
+              read_value == 8'h12 &&
+              dut.expected_media_generation == 32'h7856_3412);
+        disk_read(DISK_GUARDED_CMD, read_value);
+        check("GUARDED_CMD reads as zero", read_value == 8'd0);
 
         before_count = dut.completion;
         disk_write(DISK_CMD, DISK_CMD_STATUS);
@@ -288,6 +313,8 @@ module tb_disk_controller;
         @(negedge clk);
         card_present = 1'b1;
         repeat (5) @(posedge clk);
+        check("media transitions preserve guarded-generation setup",
+              dut.expected_media_generation == 32'h7856_3412);
         disk_write(DISK_STATUS, 8'h10);
 
         $display("\nHeld-REQ bus handshake");
@@ -316,6 +343,48 @@ module tb_disk_controller;
         check("STATUS command preserves DMA_PUSH sequencing",
               dut.dma_push_ctr == 2 && dut.dma_base[15:0] == 16'hCDAB);
         disk_write(DISK_CMD, DISK_CMD_RESET);
+
+        $display("\nGeneration-guarded command submission");
+        program_request(32'd0, 64'h100, 8'd1);
+        program_expected_generation(dut.media_generation);
+        disk_write(DISK_GUARDED_CMD, DISK_CMD_READ);
+        expect_next_completion();
+        check("matching guarded READ follows the normal transfer path",
+              dut.result == DISK_RES_OK && dut.transferred == 1);
+
+        program_request(32'd0, 64'h800, 8'd1);
+        program_expected_generation(dut.media_generation - 32'd1);
+        before_count = card_write_count;
+        before_dma_count = dma_ack_count;
+        read_value = card.media[0];
+        disk_write(DISK_GUARDED_CMD, DISK_CMD_WRITE);
+        expect_next_completion();
+        check("stale guarded WRITE fails as MEDIA_REMOVED with zero progress",
+              dut.result == DISK_RES_MEDIA_REMOVED && dut.transferred == 0);
+        check("stale guarded WRITE performs no DMA or card/media write",
+              dma_ack_count == before_dma_count &&
+              card_write_count == before_count && card.media[0] == read_value);
+
+        program_request(32'd1, 64'h400, 8'd1);
+        before_count = card_read_count;
+        before_dma_count = dma_ack_count;
+        read_value = dma_memory[16'h400];
+        disk_write(DISK_GUARDED_CMD, DISK_CMD_READ);
+        expect_next_completion();
+        check("stale guarded READ fails without DMA or SD access",
+              dut.result == DISK_RES_MEDIA_REMOVED && dut.transferred == 0 &&
+              dma_ack_count == before_dma_count &&
+              card_read_count == before_count &&
+              dma_memory[16'h400] == read_value);
+
+        before_count = card_flush_count;
+        disk_write(DISK_GUARDED_CMD, DISK_CMD_FLUSH);
+        expect_next_completion();
+        check("stale guarded FLUSH never reaches card status protocol",
+              dut.result == DISK_RES_MEDIA_REMOVED && dut.transferred == 0 &&
+              card_flush_count == before_count);
+
+        program_expected_generation(dut.media_generation);
 
         $display("\nPreflight validation");
         program_request(32'd0, 64'h100, 8'd0);
@@ -390,11 +459,14 @@ module tb_disk_controller;
         end
         check("DMA request tuple remains stable under backpressure", stable_ok);
         disk_write(DISK_SECTOR, 8'h05);
+        disk_write(DISK_EXPECTED_MEDIA_GEN, 8'hA5);
+        disk_write(DISK_GUARDED_CMD, DISK_CMD_WRITE);
         disk_write(DISK_CMD, DISK_CMD_WRITE);
         disk_read(DISK_STATUS, read_value);
         check("setup/command writes while BUSY set REJECTED", read_value[2]);
         check("busy writes cannot alter the active snapshot",
-              dut.current_lba == 32'd1 && dut.active_dma_cursor == 64'h400);
+              dut.current_lba == 32'd1 && dut.active_dma_cursor == 64'h400 &&
+              dut.expected_media_generation == dut.media_generation);
         disk_write(DISK_STATUS, 8'h04);
         disk_read(DISK_STATUS, read_value);
         check("STATUS.REJECTED is write-one-to-clear while BUSY", !read_value[2]);
@@ -568,7 +640,7 @@ module tb_disk_controller;
         check("active RESET preserves sticky MEDIA_CHANGED", dut.media_changed);
         check("active RESET restores the programmable request tuple",
               dut.sector == 0 && dut.dma_base == 0 && dut.sec_count == 1 &&
-              dut.dma_push_ctr == 0);
+              dut.dma_push_ctr == 0 && dut.expected_media_generation == 0);
         dma_stall = 1'b0;
 
         before_count = dut.completion;
@@ -587,7 +659,7 @@ module tb_disk_controller;
         check("idle RESET also preserves MEDIA_CHANGED", dut.media_changed);
         check("idle RESET restores the programmable request tuple",
               dut.sector == 0 && dut.dma_base == 0 && dut.sec_count == 1 &&
-              dut.dma_push_ctr == 0);
+              dut.dma_push_ctr == 0 && dut.expected_media_generation == 0);
 
         $display("\nDisk controller: %0d PASSED, %0d FAILED", pass_count, fail_count);
         if (fail_count != 0)

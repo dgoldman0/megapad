@@ -445,6 +445,11 @@ class Timer(Device):
 #   0x1D  MEDIA_GEN_3 (R)
 #   0x1E  CAPS        (R)  — controller capability bits
 #   0x1F  TRANSFERRED (R)  — fully completed sectors in the last command
+#   0x20  EXPECTED_MEDIA_GEN_0 (RW) — guarded-submit generation, u32 LE
+#   0x21  EXPECTED_MEDIA_GEN_1 (RW)
+#   0x22  EXPECTED_MEDIA_GEN_2 (RW)
+#   0x23  EXPECTED_MEDIA_GEN_3 (RW)
+#   0x24  GUARDED_CMD (W) — READ/WRITE/FLUSH iff expected generation matches
 
 SECTOR_SIZE = 512
 
@@ -485,6 +490,7 @@ STORAGE_CAP_FLUSH = 0x04
 STORAGE_CAP_PRECISE_RESULT = 0x08
 STORAGE_CAP_COMPLETION = 0x10
 STORAGE_CAP_MEDIA_GEN = 0x20
+STORAGE_CAP_GEN_GUARD = 0x40
 STORAGE_CAPS = (
     STORAGE_CAP_READ
     | STORAGE_CAP_WRITE
@@ -492,6 +498,7 @@ STORAGE_CAPS = (
     | STORAGE_CAP_PRECISE_RESULT
     | STORAGE_CAP_COMPLETION
     | STORAGE_CAP_MEDIA_GEN
+    | STORAGE_CAP_GEN_GUARD
 )
 
 
@@ -530,7 +537,7 @@ class Storage(Device):
     _FAULT_ACTIONS = frozenset({"fail", "stall", "detach"})
 
     def __init__(self, image_path: Optional[str] = None):
-        super().__init__("Storage", STORAGE_BASE, 0x20)
+        super().__init__("Storage", STORAGE_BASE, 0x25)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
         self._capacity_sectors: int = 0
@@ -550,6 +557,7 @@ class Storage(Device):
         self.result: int = STORAGE_RESULT_OK
         self.completion: int = 0
         self.media_generation: int = 0
+        self.expected_media_generation: int = 0
         self.transferred: int = 0
         self.data_port_buf: bytearray = bytearray()
         self.data_port_pos: int = 0
@@ -660,6 +668,7 @@ class Storage(Device):
         self.dma_addr = 0
         self.sec_count = 1
         self._dma_push_ctr = 0
+        self.expected_media_generation = 0
         self.data_port_buf = bytearray()
         self.data_port_pos = 0
 
@@ -818,6 +827,10 @@ class Storage(Device):
             return STORAGE_CAPS
         if offset == 0x1F:
             return self.transferred & 0xFF
+        if 0x20 <= offset <= 0x23:
+            return (
+                self.expected_media_generation >> (8 * (offset - 0x20))
+            ) & 0xFF
         return 0
 
     def write8(self, offset: int, value: int):
@@ -840,7 +853,7 @@ class Storage(Device):
                 if value & STORAGE_STATUS_MEDIA_CHANGED:
                     self.media_changed = False
                 return
-            if 0x02 <= offset <= 0x10:
+            if (0x02 <= offset <= 0x10) or (0x20 <= offset <= 0x24):
                 self.rejected = True
             return
 
@@ -875,6 +888,17 @@ class Storage(Device):
             self.dma_addr = (self.dma_addr & ~(0xFF << shift)) | (value << shift)
             self.dma_addr &= 0xFFFF_FFFF_FFFF_FFFF
             self._dma_push_ctr = (self._dma_push_ctr + 1) & 7
+        elif 0x20 <= offset <= 0x23:
+            shift = 8 * (offset - 0x20)
+            mask = 0xFF << shift
+            self.expected_media_generation = (
+                self.expected_media_generation & ~mask
+            ) | (value << shift)
+            self.expected_media_generation &= 0xFFFF_FFFF
+        elif offset == 0x24:  # GUARDED_CMD
+            self._accept_command(
+                value, expected_generation=self.expected_media_generation
+            )
 
     def _command_reset(self):
         if self.busy:
@@ -903,7 +927,9 @@ class Storage(Device):
         self._complete(result, self._active_transferred)
         return True
 
-    def _accept_command(self, command: int):
+    def _accept_command(
+        self, command: int, *, expected_generation: Optional[int] = None
+    ):
         request = (
             command,
             self.sector_num,
@@ -920,6 +946,20 @@ class Storage(Device):
         self.result_valid = False
         self.transferred = 0
         self._dma_push_ctr = 0
+        if (
+            expected_generation is not None
+            and command in {
+                STORAGE_CMD_READ,
+                STORAGE_CMD_WRITE,
+                STORAGE_CMD_FLUSH,
+            }
+            and expected_generation != self.media_generation
+        ):
+            # Generation comparison and command acceptance are one controller
+            # action.  A stale handle cannot DMA from, write, or flush the
+            # replacement medium before software notices the identity change.
+            self._complete(STORAGE_RESULT_MEDIA_REMOVED, 0)
+            return
         self._run_active()
 
     def _take_fault(

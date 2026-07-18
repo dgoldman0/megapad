@@ -449,23 +449,33 @@ calling `EVALUATOR-RESET`; status and diagnostics remain available afterward.
 
 ---
 
-## Disk I/O (12 words)
+## Disk I/O (17 words)
 
 Sector-based disk access. Each sector is **512 bytes**. Production code uses
-the three checked operations, which validate the complete request, own
-filesystem spinlock 2, split transfers above 255 sectors, wait for a matching
-completion generation, and return precise status. The raw setup and command
-words remain available for diagnostics and controller bring-up; they do not
-wait for completion and are unsafe as filesystem primitives.
+the checked operations, which validate the complete request, own filesystem
+spinlock 2, split transfers above 255 sectors, wait for a matching completion
+generation, and return precise status. The ordinary checked words snapshot
+`DISK-MEDIA-GEN` under the lock; the `-GEN-CHECKED` variants instead bind the
+request to a caller-supplied generation and return `MEDIA_REMOVED` (11) for a
+stale identity. Both forms require the controller's generation-guard
+capability (CAPS bit 6) and submit atomically through `GUARDED_CMD`. The raw
+setup and command words remain available for diagnostics and controller
+bring-up; they do not wait for completion and are unsafe as filesystem
+primitives.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `DISK@` | `( -- status )` | Read controller status: busy=bit 0, error=bit 1, rejected=bit 2, result-valid=bit 3, media-changed=bit 4, write-protected=bit 5, present=bit 7. |
 | `DISK-SECTORS` | `( -- count )` | Read the attached media capacity as an unsigned count of 512-byte sectors. |
+| `DISK-MEDIA-GEN` | `( -- generation )` | Read the current attachment generation as an unsigned 32-bit identity. It changes whenever media is attached, detached, or replaced. |
+| `DISK-CAPS` | `( -- caps )` | Read controller capabilities: read=bit 0, write=bit 1, flush=bit 2, precise result=bit 3, completion=bit 4, media generation=bit 5, generation guard=bit 6. |
 | `MP64FS-VALID?` | `( -- flag )` | Validate the attached marker, derived geometry, reserved bitmap, directory entries, parents, extents, and byte bounds. |
 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | Production read. Returns only confirmed whole sectors and the stable controller result byte. |
 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | Production write. Completion is not durability; follow persistent updates with checked flush. |
 | `DISK-FLUSH-CHECKED` | `( -- status )` | Production ordering and durability barrier for all earlier successful writes. |
+| `DISK-READ-GEN-CHECKED` | `( dma lba count generation -- completed status )` | Generation-bound production read. A stale generation returns zero completed sectors and `MEDIA_REMOVED`. |
+| `DISK-WRITE-GEN-CHECKED` | `( dma lba count generation -- completed status )` | Generation-bound production write. A stale generation is rejected before DMA or media mutation. |
+| `DISK-FLUSH-GEN-CHECKED` | `( generation -- status )` | Generation-bound ordering and durability barrier. A stale generation is rejected before any flush effect. |
 | `DISK-SEC!` | `( sector -- )` | Diagnostic: set the raw sector register. |
 | `DISK-DMA!` | `( addr -- )` | Diagnostic: set the raw 64-bit DMA address. |
 | `DISK-N!` | `( n -- )` | Diagnostic: set the raw controller sector count (legal command counts are 1–255). |
