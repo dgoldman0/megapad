@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The live dictionary link chain contains **447** entries.  The numbered
+The live dictionary link chain contains **453** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -492,19 +492,22 @@ of compiled code.
 | 204 | `POOL-FREE` | `( bitmap index -- bitmap' )` | | Free slot at index: clear bit. |
 | 205 | `POOL-COUNT` | `( bitmap -- n )` | | Count allocated slots via POPCNT. |
 
-### Disk / Storage (9 words)
+### Disk / Storage (12 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 206 | `DISK@` | `( -- status )` | | Read storage STATUS register (bit7=present, bit0=busy, bit1=error) |
 | 207 | `DISK-SECTORS` | `( -- count )` | | Read attached media capacity from MMIO +0x0211 (u32 LE) |
 | 208 | `DISK-SEC!` | `( sector -- )` | | Set sector number (32-bit LE at MMIO +0x0202) |
-| 209 | `DISK-DMA!` | `( addr -- )` | | Set DMA address (64-bit LE at MMIO +0x0206, upper 4 bytes zeroed) |
+| 209 | `DISK-DMA!` | `( addr -- )` | | Diagnostic: set the complete 64-bit LE DMA address at MMIO +0x0206 |
 | 210 | `DISK-N!` | `( count -- )` | | Set sector count (byte at MMIO +0x020E) |
-| 211 | `DISK-READ` | `( -- )` | | Issue READ command 0x01 (DMA: disk → RAM) |
-| 212 | `DISK-WRITE` | `( -- )` | | Issue WRITE command 0x02 (DMA: RAM → disk) |
-| 213 | `DISK-FLUSH` | `( -- )` | | Issue FLUSH command 0xFF (save in-memory image to host file) |
+| 211 | `DISK-READ` | `( -- )` | | Diagnostic: issue raw READ command 0x01 without waiting |
+| 212 | `DISK-WRITE` | `( -- )` | | Diagnostic: issue raw WRITE command 0x02 without waiting |
+| 213 | `DISK-FLUSH` | `( -- )` | | Diagnostic: issue raw FLUSH command 0xFF without waiting |
 | 214 | `MP64FS-VALID?` | `( -- flag )` | | Validate the attached marker, derived geometry, reserved bitmap, complete directory, parents, extents, and byte bounds. |
+| 215 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | | Production checked read: validates, locks, splits, waits for matching completion, and returns precise progress/result |
+| 216 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | | Production checked write; successful completion is not a durability claim |
+| 217 | `DISK-FLUSH-CHECKED` | `( -- status )` | | Production ordering and durability barrier |
 
 ### Timer & Interrupts (6 words)
 
@@ -748,7 +751,7 @@ of compiled code.
 | Miscellaneous / System | 9 |
 | Tile Engine | 39 |
 | NIC | 4 |
-| Disk / Storage | 9 |
+| Disk / Storage | 12 |
 | Timer & Interrupts | 6 |
 | RTC / System Clock | 7 |
 | Multicore | 11 |
@@ -790,7 +793,7 @@ TX-FLUSH → CRC-FINAL@ → CRC-FEED-BYTE → ;] → [: → :NONAME → RESIZE-R
 |---|---|---|
 | `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2 |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
-| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL_SECTORS=+11..+14 |
+| `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F |
 | `0xFFFF_FF00_0000_0400` | NIC | CMD=+0, STATUS=+1, DMA=+2..+9, LEN=+A..+B, MAC=+E..+13 |
 | `0xFFFF_FF00_0000_0500` | Mailbox | DATA=+0..+7, SEND=+8, STATUS=+9, ACK=+A |
 | `0xFFFF_FF00_0000_0600` | Spinlock | Per-lock: ACQUIRE=+n*4, RELEASE=+n*4+1 |

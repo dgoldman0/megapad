@@ -189,6 +189,11 @@ parameter [4:0] DISK_SECN     = 5'h0E;
 parameter [4:0] DISK_DATA     = 5'h0F;
 parameter [4:0] DISK_DMA_PUSH = 5'h10;
 parameter [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
+parameter [4:0] DISK_RESULT   = 5'h15;
+parameter [4:0] DISK_COMPLETE = 5'h16;  // +0x16..+0x19, u32 LE
+parameter [4:0] DISK_MEDIA_GEN= 5'h1A;  // +0x1A..+0x1D, u32 LE
+parameter [4:0] DISK_CAPS     = 5'h1E;
+parameter [4:0] DISK_TRANSFERRED = 5'h1F;
 
 // NIC registers
 parameter [3:0] NIC_CMD      = 4'h0;

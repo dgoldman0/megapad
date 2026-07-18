@@ -32,7 +32,7 @@ module mp64_soc #(
     parameter NUM_CLUSTERS      = 3,
     parameter CORES_PER_CLUSTER = 4,
     parameter MEM_DEPTH         = 16384,    // per-bank depth (×512-bit rows)
-    parameter EXT_MEM_SIZE_PARAM = 0,         // ext mem bytes; 0 = auto (EXT_MEM_MAX-0x100000)
+    parameter EXT_MEM_SIZE_PARAM = 0,         // ext bytes; 0 = up to VRAM_BASE
     parameter [31:0] DISK_TOTAL_SECTORS = 32'd8192,
     parameter BIOS_INIT_FILE    = "rom.hex"
 )(
@@ -58,6 +58,8 @@ module mp64_soc #(
     output wire        sd_mosi,
     input  wire        sd_miso,
     output wire        sd_cs_n,
+    input  wire        sd_card_present,
+    input  wire        sd_write_protected,
 
     // === NIC PHY ===
     output wire        nic_tx_valid,
@@ -75,8 +77,9 @@ module mp64_soc #(
     // ========================================================================
     // Derived constants
     // ========================================================================
-    localparam NIC_BUS_PORT = NUM_CORES + NUM_CLUSTERS;
-    localparam N_BUS_PORTS  = NUM_CORES + NUM_CLUSTERS + 1;
+    localparam NIC_BUS_PORT  = NUM_CORES + NUM_CLUSTERS;
+    localparam DISK_BUS_PORT = NIC_BUS_PORT + 1;
+    localparam N_BUS_PORTS   = NUM_CORES + NUM_CLUSTERS + 2;
     localparam PORT_BITS    = $clog2(N_BUS_PORTS);
 
     // System-wide reset (active-high for cores, active-low for peripherals)
@@ -163,15 +166,37 @@ module mp64_soc #(
     wire [7:0]  nic_dma_rdata;
     wire        nic_dma_ack;
 
+    // Disk byte-DMA master uses an independent arbiter port.  Unlike sharing
+    // a request mux with NIC, this preserves each device's held-request/ACK
+    // ownership when both engines are active.
+    wire        disk_dma_req;
+    wire [63:0] disk_dma_addr;
+    wire [7:0]  disk_dma_wdata;
+    wire        disk_dma_wen;
+    wire [7:0]  disk_dma_rdata;
+    wire        disk_dma_ack;
+    wire        disk_dma_err;
+
     // ---- SysInfo localparams (match emulator devices.py register map) ----
     localparam [63:0] MEM_SIZE_BYTES  = MEM_DEPTH * 512 / 8 * 4;  // 4 banks total
     localparam [63:0] BANK0_SIZE      = MEM_DEPTH * 512 / 8;      // 1 bank (system RAM)
     localparam [63:0] NUM_ALL_CORES   = NUM_CORES + NUM_CLUSTERS * CORES_PER_CLUSTER;
     localparam [63:0] HBW_SIZE_BYTES  = 3 * BANK0_SIZE;           // 3 HBW banks
-    localparam [31:0] EXT_MEM_BASE    = 32'h0010_0000;            // ext mem start
-    localparam [63:0] EXT_MEM_SIZE    = (EXT_MEM_SIZE_PARAM != 0)
+    localparam [31:0] EXT_MEM_BASE    = MP64_EXT_MEM_BASE;
+    // The external allocation window ends where the distinct VRAM window
+    // begins.  Clamp an oversized board parameter rather than allowing one
+    // DMA request to straddle external RAM and VRAM as if they were one span.
+    localparam [63:0] EXT_MEM_REQUESTED_SIZE = (EXT_MEM_SIZE_PARAM != 0)
                                         ? EXT_MEM_SIZE_PARAM
-                                        : (EXT_MEM_MAX - 32'h0010_0000);
+                                        : (MP64_VRAM_BASE_ADDR - EXT_MEM_BASE);
+    localparam [63:0] EXT_MEM_MAX_SIZE = MP64_VRAM_BASE_ADDR - EXT_MEM_BASE;
+    localparam [63:0] EXT_MEM_SIZE = (EXT_MEM_REQUESTED_SIZE < EXT_MEM_MAX_SIZE)
+                                        ? EXT_MEM_REQUESTED_SIZE
+                                        : EXT_MEM_MAX_SIZE;
+    localparam [63:0] EXT_MEM_LIMIT = {32'd0, EXT_MEM_BASE} + EXT_MEM_SIZE;
+    localparam [63:0] VRAM_LIMIT = {32'd0, MP64_VRAM_BASE_ADDR} +
+                                    {32'd0, MP64_VRAM_DEFAULT_SIZE};
+    localparam [63:0] HBW_LIMIT = {32'd0, MP64_HBW_BASE_ADDR} + HBW_SIZE_BYTES;
     reg [63:0] sysinfo_cluster_en;  // R/W at SysInfo offset 0x18
 
     genvar ci;
@@ -348,6 +373,7 @@ module mp64_soc #(
     // Port layout: [0..NUM_CORES-1] = muxed CPU data/I-cache buses
     //              [NUM_CORES..NIC_BUS_PORT-1] = cluster buses
     //              [NIC_BUS_PORT] = NIC byte-DMA master
+    //              [DISK_BUS_PORT] = disk byte-DMA master
     //
     // WAIT — I-caches also need bus access for refills.  The bus has
     // N_PORTS master ports.  We need:
@@ -410,7 +436,9 @@ module mp64_soc #(
     wire [N_BUS_PORTS-1:0]    bus_cpu_port_io;
     wire [N_BUS_PORTS*64-1:0] bus_cpu_rdata;
     wire [N_BUS_PORTS-1:0]    bus_cpu_ready;
+    wire [N_BUS_PORTS-1:0]    bus_err_w;
     wire [63:0]               nic_dma_bus_rdata;
+    wire [63:0]               disk_dma_bus_rdata;
 
     genvar pi;
     generate
@@ -449,6 +477,19 @@ module mp64_soc #(
     assign nic_dma_rdata = nic_dma_bus_rdata[nic_dma_addr[2:0]*8 +: 8];
     assign nic_dma_ack   = bus_cpu_ready[NIC_BUS_PORT];
 
+    // Pack disk DMA identically: byte writes are presented in the low lane for
+    // mp64_memory's RMW path, and reads select the addressed lane on response.
+    assign bus_cpu_valid[DISK_BUS_PORT]                 = disk_dma_req;
+    assign bus_cpu_addr [DISK_BUS_PORT*64 +: 64]        = disk_dma_addr;
+    assign bus_cpu_wdata[DISK_BUS_PORT*64 +: 64]        = {56'd0, disk_dma_wdata};
+    assign bus_cpu_wen  [DISK_BUS_PORT]                 = disk_dma_wen;
+    assign bus_cpu_size [DISK_BUS_PORT*2 +: 2]          = BUS_BYTE;
+    assign bus_cpu_port_io[DISK_BUS_PORT]               = 1'b0;
+    assign disk_dma_bus_rdata = bus_cpu_rdata[DISK_BUS_PORT*64 +: 64];
+    assign disk_dma_rdata = disk_dma_bus_rdata[disk_dma_addr[2:0]*8 +: 8];
+    assign disk_dma_ack = bus_cpu_ready[DISK_BUS_PORT];
+    assign disk_dma_err = bus_err_w[DISK_BUS_PORT];
+
     // Unpack bus responses back to cores and clusters
     generate
         for (pi = 0; pi < NUM_CORES; pi = pi + 1) begin : g_unpack_core
@@ -481,8 +522,6 @@ module mp64_soc #(
     wire        bus_mmio_ack;
 
     wire        bus_mmio_port_io;
-
-    wire [N_BUS_PORTS-1:0] bus_err_w;    // per-port bus-error (sticky)
 
     mp64_bus #(
         .N_PORTS   (N_BUS_PORTS),
@@ -539,9 +578,7 @@ module mp64_soc #(
     wire [63:0] mem_ext_addr;
     wire [63:0] mem_ext_wdata;
     wire        mem_ext_wen;
-    /* verilator lint_off UNUSED */
-    wire [1:0]  mem_ext_size;   // driven by memory, unused by extmem
-    /* verilator lint_on  UNUSED */
+    wire [1:0]  mem_ext_size;
     wire [63:0] mem_ext_rdata;
     wire        mem_ext_ack;
 
@@ -607,6 +644,7 @@ module mp64_soc #(
         .cpu_addr  (mem_ext_addr[31:0]),
         .cpu_wdata (mem_ext_wdata),
         .cpu_wen   (mem_ext_wen),
+        .cpu_size  (mem_ext_size),
         .cpu_rdata (mem_ext_rdata),
         .cpu_ack   (mem_ext_ack),
 
@@ -661,7 +699,7 @@ module mp64_soc #(
     reg                      tile_arb_busy;
     reg                      tile_arb_ext;   // 0=internal, 1=external
 
-    always @(posedge clk) begin
+    always @(posedge sys_clk) begin
         if (rst_h) begin
             tile_arb_grant <= {TILE_ARB_BITS{1'b0}};
             tile_arb_busy  <= 1'b0;
@@ -969,13 +1007,17 @@ module mp64_soc #(
     // Disk (SD card SPI)
     wire [7:0]  disk_rdata_raw;
     wire        disk_ack;
-    wire        disk_dma_req;
-    wire [63:0] disk_dma_addr;
-    wire [7:0]  disk_dma_wdata;
-    wire        disk_dma_wen;
 
     mp64_disk #(
-        .TOTAL_SECTORS (DISK_TOTAL_SECTORS)
+        .TOTAL_SECTORS  (DISK_TOTAL_SECTORS),
+        .DMA_BASE_ADDR  (64'd0),
+        .DMA_LIMIT_ADDR (BANK0_SIZE),
+        .DMA1_BASE_ADDR ({32'd0, EXT_MEM_BASE}),
+        .DMA1_LIMIT_ADDR(EXT_MEM_LIMIT),
+        .DMA2_BASE_ADDR ({32'd0, MP64_VRAM_BASE_ADDR}),
+        .DMA2_LIMIT_ADDR(VRAM_LIMIT),
+        .DMA3_BASE_ADDR ({32'd0, MP64_HBW_BASE_ADDR}),
+        .DMA3_LIMIT_ADDR(HBW_LIMIT)
     ) u_disk (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
@@ -989,8 +1031,11 @@ module mp64_soc #(
         .dma_addr  (disk_dma_addr),
         .dma_wdata (disk_dma_wdata),
         .dma_wen   (disk_dma_wen),
-        .dma_rdata (8'd0),      // DMA read-back not wired yet
-        .dma_ack   (1'b0),
+        .dma_rdata (disk_dma_rdata),
+        .dma_ack   (disk_dma_ack),
+        .dma_err   (disk_dma_err),
+        .card_present          (sd_card_present),
+        .card_write_protected  (sd_write_protected),
         .spi_clk   (sd_sck),
         .spi_mosi  (sd_mosi),
         .spi_miso  (sd_miso),
@@ -1070,6 +1115,7 @@ module mp64_soc #(
     wire [63:0] sha3_rdata;
     wire        sha3_ack;
     wire        sha3_irq;
+    wire        wots_active;
 
     mp64_sha3 u_sha3 (
         .clk   (sys_clk),
@@ -1086,7 +1132,6 @@ module mp64_soc #(
     // WOTS+ chain accelerator (wraps SHA3 engine)
     wire [63:0] wots_rdata;
     wire        wots_ack;
-    wire        wots_active;
     wire        wots_irq;
 
     // DMA read port (connects to bus arbiter / memory)
@@ -1125,7 +1170,6 @@ module mp64_soc #(
         .sha3_din_valid(),
         .sha3_din      (),
         .sha3_dout     (8'd0),
-        .sha3_dout_valid(1'b0),
         .sha3_ready    (1'b1),
         .sha3_mode_wr  (),
         .sha3_mode_val (),
@@ -1180,7 +1224,9 @@ module mp64_soc #(
     wire        rtc_ack;
     wire        irq_rtc_w;
 
-    mp64_rtc u_rtc (
+    mp64_rtc #(
+        .CLOCK_HZ (CLOCK_HZ)
+    ) u_rtc (
         .clk   (sys_clk),
         .rst_n (sys_rst_n),
         .req   (mmio_sel_rtc),
@@ -1241,14 +1287,14 @@ module mp64_soc #(
                 4'h1: mmio_rdata_mux = BANK0_SIZE;               // 0x08
                 4'h2: mmio_rdata_mux = NUM_ALL_CORES;            // 0x10
                 4'h3: mmio_rdata_mux = sysinfo_cluster_en;       // 0x18 (R/W)
-                4'h4: mmio_rdata_mux = {32'd0, HBW_BASE_ADDR};  // 0x20
+                4'h4: mmio_rdata_mux = {32'd0, MP64_HBW_BASE_ADDR};  // 0x20
                 4'h5: mmio_rdata_mux = HBW_SIZE_BYTES;           // 0x28
                 4'h6: mmio_rdata_mux = MEM_SIZE_BYTES;           // 0x30
                 4'h7: mmio_rdata_mux = {32'd0, EXT_MEM_BASE};   // 0x38
                 4'h8: mmio_rdata_mux = EXT_MEM_SIZE;             // 0x40
                 4'h9: mmio_rdata_mux = {56'd0, NUM_CORES[7:0]};  // 0x48 NUM_FULL
-                4'hA: mmio_rdata_mux = {32'd0, VRAM_BASE_ADDR};  // 0x50
-                4'hB: mmio_rdata_mux = {32'd0, VRAM_DEFAULT_SIZE}; // 0x58
+                4'hA: mmio_rdata_mux = {32'd0, MP64_VRAM_BASE_ADDR};  // 0x50
+                4'hB: mmio_rdata_mux = {32'd0, MP64_VRAM_DEFAULT_SIZE}; // 0x58
                 default: mmio_rdata_mux = 64'd0;
             endcase
             mmio_ack_mux = 1'b1;

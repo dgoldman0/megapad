@@ -3213,7 +3213,8 @@ VARIABLE BENCH-T0
 \  §7  Storage & Persistence
 \ =====================================================================
 \
-\  Uses BIOS words: DISK@ DISK-SEC! DISK-DMA! DISK-N! DISK-READ DISK-WRITE
+\  Production I/O uses the BIOS checked block words.  The raw setup/command
+\  words remain BIOS diagnostics and are not used by KDOS filesystem paths.
 \  Storage device: 512-byte sectors, DMA to/from RAM.
 \
 \  B.SAVE / B.LOAD persist buffers by writing their data region to disk.
@@ -3225,6 +3226,37 @@ VARIABLE BENCH-T0
 \ DISK? ( -- flag ) true if storage device present
 : DISK?  ( -- flag )  DISK@ 128 AND 0<> ;
 
+\ Last checked result is retained for diagnostics even when the compatibility
+\ wrapper raises ABORT.  A zero controller status with a short transfer is an
+\ internal contract failure (result 0x0E), never a successful KDOS operation.
+VARIABLE DISK-IO-STATUS
+VARIABLE DISK-IO-COMPLETED
+
+: _DISK-XFER-OK?  ( expected completed status -- flag )
+    DISK-IO-STATUS !
+    DISK-IO-COMPLETED !
+    DISK-IO-STATUS @ 0<> IF DROP FALSE EXIT THEN
+    DISK-IO-COMPLETED @ =
+    DUP 0= IF 14 DISK-IO-STATUS ! THEN ;
+
+: _DISK-READ?  ( dma lba count -- flag )
+    DUP >R DISK-READ-CHECKED R> -ROT _DISK-XFER-OK? ;
+
+: _DISK-WRITE?  ( dma lba count -- flag )
+    DUP >R DISK-WRITE-CHECKED R> -ROT _DISK-XFER-OK? ;
+
+: _DISK-FLUSH?  ( -- flag )
+    DISK-FLUSH-CHECKED DUP DISK-IO-STATUS ! 0= ;
+
+: _DISK-READ  ( dma lba count -- )
+    _DISK-READ? 0= ABORT" Disk read failed" ;
+
+: _DISK-WRITE  ( dma lba count -- )
+    _DISK-WRITE? 0= ABORT" Disk write failed" ;
+
+: _DISK-FLUSH  ( -- )
+    _DISK-FLUSH? 0= ABORT" Disk flush failed" ;
+
 \ B.SECTORS ( desc -- n ) number of disk sectors needed for buffer data
 : B.SECTORS  ( desc -- n )  B.BYTES SECTOR 1- + SECTOR / ;
 
@@ -3233,24 +3265,16 @@ VARIABLE BENCH-T0
     SWAP                      ( sector desc )
     DUP B.DATA                ( sector desc addr )
     SWAP B.SECTORS            ( sector addr nsectors )
-    ROT                       ( addr nsectors sector )
-    DISK-SEC!                 ( addr nsectors )
-    DUP DISK-N!               ( addr nsectors )
-    DROP                      ( addr )
-    DISK-DMA!                 ( )
-    DISK-WRITE ;
+    ROT SWAP                  ( addr sector nsectors )
+    _DISK-WRITE ;
 
 \ B.LOAD ( desc sector -- ) load buffer data from disk starting at sector
 : B.LOAD  ( desc sector -- )
     SWAP                      ( sector desc )
     DUP B.DATA                ( sector desc addr )
     SWAP B.SECTORS            ( sector addr nsectors )
-    ROT                       ( addr nsectors sector )
-    DISK-SEC!                 ( addr nsectors )
-    DUP DISK-N!               ( addr nsectors )
-    DROP                      ( addr )
-    DISK-DMA!                 ( )
-    DISK-READ ;
+    ROT SWAP                  ( addr sector nsectors )
+    _DISK-READ ;
 
 \ DISK-INFO ( -- ) print storage device status
 : DISK-INFO  ( -- )
@@ -3345,37 +3369,28 @@ VARIABLE FW-CHUNK   \ temp: byte count for head copy
 \ FW-HEAD ( -- ) read-modify-write leading partial sector
 : FW-HEAD  ( -- )
     FW-POS @ SECTOR MOD  DUP 0= IF DROP EXIT THEN  ( off )
-    FW-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FSCRATCH FW-DISK-SEC 1 _DISK-READ
     SECTOR OVER -  FW-REM @ MIN  FW-CHUNK !  ( off )
     FW-ADDR @  SWAP FSCRATCH +  FW-CHUNK @  CMOVE
-    FW-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-WRITE
+    FSCRATCH FW-DISK-SEC 1 _DISK-WRITE
     FW-CHUNK @ DUP FW-ADDR +!  DUP FW-POS +!  NEGATE FW-REM +! ;
 
 \ FW-FULL ( -- ) DMA full sectors directly from user buffer
 : FW-FULL  ( -- )
-    FW-REM @ SECTOR /  ( n-full )
-    BEGIN DUP 0> WHILE
-        FW-DISK-SEC DISK-SEC!
-        FW-ADDR @ DISK-DMA!
-        DUP 255 MIN  ( n-full batch )
-        DUP DISK-N!  DISK-WRITE
-        DUP SECTOR *
-        DUP FW-ADDR +!
-        DUP FW-POS +!
-        NEGATE FW-REM +!
-        -
-    REPEAT DROP ;
+    FW-REM @ SECTOR / DUP 0= IF DROP EXIT THEN
+    DUP >R
+    FW-ADDR @ FW-DISK-SEC ROT _DISK-WRITE
+    R> SECTOR *
+    DUP FW-ADDR +!
+    DUP FW-POS +!
+    NEGATE FW-REM +! ;
 
 \ FW-TAIL ( -- ) read-modify-write trailing partial sector
 : FW-TAIL  ( -- )
     FW-REM @ 0= IF EXIT THEN
-    FW-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FSCRATCH FW-DISK-SEC 1 _DISK-READ
     FW-ADDR @  FSCRATCH  FW-REM @  CMOVE
-    FW-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-WRITE ;
+    FSCRATCH FW-DISK-SEC 1 _DISK-WRITE ;
 
 : FWRITE  ( addr len fdesc -- )
     FW-FD !  FW-LEN !  FW-ADDR !
@@ -3413,32 +3428,25 @@ VARIABLE FR-POS     \ current byte position in file
 VARIABLE FR-CHUNK   \ temp: byte count for head copy
 : FR-HEAD  ( -- )
     FR-POS @ SECTOR MOD  DUP 0= IF DROP EXIT THEN  ( off )
-    FR-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FSCRATCH FR-DISK-SEC 1 _DISK-READ
     SECTOR OVER -  FR-REM @ MIN  FR-CHUNK !  ( off )
     FSCRATCH +  FR-ADDR @  FR-CHUNK @  CMOVE
     FR-CHUNK @ DUP FR-ADDR +!  DUP FR-POS +!  NEGATE FR-REM +! ;
 
 \ FR-FULL ( -- ) DMA full sectors directly into user buffer
 : FR-FULL  ( -- )
-    FR-REM @ SECTOR /  ( n-full )
-    BEGIN DUP 0> WHILE
-        FR-DISK-SEC DISK-SEC!
-        FR-ADDR @ DISK-DMA!
-        DUP 255 MIN  ( n-full batch )
-        DUP DISK-N!  DISK-READ
-        DUP SECTOR *
-        DUP FR-ADDR +!
-        DUP FR-POS +!
-        NEGATE FR-REM +!
-        -
-    REPEAT DROP ;
+    FR-REM @ SECTOR / DUP 0= IF DROP EXIT THEN
+    DUP >R
+    FR-ADDR @ FR-DISK-SEC ROT _DISK-READ
+    R> SECTOR *
+    DUP FR-ADDR +!
+    DUP FR-POS +!
+    NEGATE FR-REM +! ;
 
 \ FR-TAIL ( -- ) copy trailing partial sector via scratch buffer
 : FR-TAIL  ( -- )
     FR-REM @ 0= IF EXIT THEN
-    FR-DISK-SEC DISK-SEC!
-    FSCRATCH DISK-DMA!  1 DISK-N!  DISK-READ
+    FSCRATCH FR-DISK-SEC 1 _DISK-READ
     FSCRATCH  FR-ADDR @  FR-REM @  CMOVE ;
 
 : FREAD  ( addr len fdesc -- actual )
@@ -3620,24 +3628,21 @@ VARIABLE FF-LEN
     \ The shared BIOS validator has already checked the marker, geometry,
     \ reserved bitmap, directory entries, parents, extents, and byte bounds.
     \ Read the accepted geometry into KDOS's cache coordinates.
-    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-READ
+    FS-SUPER 0 1 _DISK-READ
     FS-SUPER 6 + L@ FS-TOTAL !
     FS-SUPER 12 + W@ FS-BMAP-N !
     \ Read the complete geometry-selected bitmap and directory.
-    1 DISK-SEC!  FS-BMAP DISK-DMA!
-    FS-BMAP-N @ DISK-N!  DISK-READ
-    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
-    12 DISK-N!  DISK-READ
+    FS-BMAP 1 FS-BMAP-N @ _DISK-READ
+    FS-DIR FS-DIR-START 12 _DISK-READ
     -1 FS-OK !
     ."  MP64FS loaded" CR ;
 
 \ FS-SYNC ( -- ) write bitmap + directory back to disk
 : FS-SYNC  ( -- )
     FS-OK @ 0= IF ."  FS not loaded" CR EXIT THEN
-    1 DISK-SEC!  FS-BMAP DISK-DMA!
-    FS-BMAP-N @ DISK-N!  DISK-WRITE
-    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
-    12 DISK-N!  DISK-WRITE ;
+    FS-BMAP 1 FS-BMAP-N @ _DISK-WRITE
+    FS-DIR FS-DIR-START 12 _DISK-WRITE
+    _DISK-FLUSH ;
 
 \ FS-ENSURE ( -- ) auto-load if not yet loaded
 : FS-ENSURE  ( -- )
@@ -3649,6 +3654,7 @@ VARIABLE FF-LEN
 
 \ FORMAT ( -- ) initialise a fresh MP64FS on the attached disk
 : FORMAT  ( -- )
+    0 FS-OK !
     DISK? 0= IF ."  No disk" CR EXIT THEN
     DISK-SECTORS DUP 15 < OVER 8192 > OR IF
         DROP ."  Unsupported disk size" CR EXIT
@@ -3670,16 +3676,15 @@ VARIABLE FF-LEN
     FS-DSTART       FS-SUPER 18 + W!
     128  FS-SUPER 20 + C!           \ max files
     48   FS-SUPER 21 + C!           \ entry size
-    0 DISK-SEC!  FS-SUPER DISK-DMA!  1 DISK-N!  DISK-WRITE
+    FS-SUPER 0 1 _DISK-WRITE
     \ Initialise bitmap — mark every sector below FS-DSTART as metadata
     FS-BMAP FS-BMAP-N @ SECTOR * 0 FILL
     FS-DSTART 0 DO I BIT-SET LOOP
-    1 DISK-SEC!  FS-BMAP DISK-DMA!
-    FS-BMAP-N @ DISK-N!  DISK-WRITE
+    FS-BMAP 1 FS-BMAP-N @ _DISK-WRITE
     \ Zero directory
     FS-DIR SECTOR 12 * 0 FILL
-    FS-DIR-START DISK-SEC!  FS-DIR DISK-DMA!
-    12 DISK-N!  DISK-WRITE
+    FS-DIR FS-DIR-START 12 _DISK-WRITE
+    _DISK-FLUSH
     -1 FS-OK !
     255 CWD !
     ."  MP64FS formatted" CR ;
@@ -3891,10 +3896,8 @@ VARIABLE CAT-SLOT
         DROP ."  (empty file)" CR EXIT
     THEN                                 ( used_bytes )
     \ Read file sectors into HERE (temporary)
-    CAT-SLOT @ DIRENT DE.SEC DISK-SEC!
-    HERE DISK-DMA!
-    CAT-SLOT @ DIRENT DE.COUNT DISK-N!
-    DISK-READ
+    HERE CAT-SLOT @ DIRENT DE.SEC
+    CAT-SLOT @ DIRENT DE.COUNT _DISK-READ
     \ Print used_bytes characters from HERE
     HERE SWAP                            ( addr count )
     0 DO
@@ -3956,10 +3959,8 @@ VARIABLE SB-DESC
         ."   (create with MKFILE first)" CR EXIT
     THEN
     \ Write buffer data into file's sectors
-    SB-SLOT @ DIRENT DE.SEC DISK-SEC!
-    SB-DESC @ B.DATA DISK-DMA!
-    SB-SLOT @ DIRENT DE.COUNT DISK-N!
-    DISK-WRITE
+    SB-DESC @ B.DATA SB-SLOT @ DIRENT DE.SEC
+    SB-SLOT @ DIRENT DE.COUNT _DISK-WRITE
     \ Update used_bytes in directory
     SB-DESC @ B.LEN
     SB-SLOT @ DIRENT 28 + L!
@@ -3981,10 +3982,8 @@ VARIABLE LB-DESC
         ."  Not found: " NAMEBUF .ZSTR CR EXIT
     THEN
     \ Read file data into buffer
-    LB-SLOT @ DIRENT DE.SEC DISK-SEC!
-    LB-DESC @ B.DATA DISK-DMA!
-    LB-SLOT @ DIRENT DE.COUNT DISK-N!
-    DISK-READ
+    LB-DESC @ B.DATA LB-SLOT @ DIRENT DE.SEC
+    LB-SLOT @ DIRENT DE.COUNT _DISK-READ
     ."  Loaded " LB-SLOT @ DIRENT 28 + L@ . ."  bytes from " NAMEBUF .ZSTR CR ;
 
 \ ── FD Pool — fixed pool of reusable file descriptors ────────────────
@@ -4117,17 +4116,16 @@ VARIABLE _LD-SP
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-SZ  !
     -8 _LD-SP +!  _LD-SP @ _LD-STK + @ LD-BUF ! ;
 
+VARIABLE _LD-RUN-SEC
+VARIABLE _LD-RUN-CNT
+VARIABLE _LD-RUN-ADDR
+
 \ _LD-READ-RUN ( sector count addr -- next-addr )
-\ Read one validated extent in bounded hardware-sized batches.
+\ The BIOS checked layer owns hardware-sized splitting and completion.
 : _LD-READ-RUN  ( sector count addr -- next-addr )
-    >R
-    BEGIN DUP 0> WHILE
-        OVER DISK-SEC! R@ DISK-DMA!
-        DUP 255 MIN DUP DISK-N! DISK-READ
-        >R R@ - SWAP R@ + SWAP
-        R> SECTOR * R> + >R
-    REPEAT
-    2DROP R> ;
+    _LD-RUN-ADDR ! _LD-RUN-CNT ! _LD-RUN-SEC !
+    _LD-RUN-ADDR @ _LD-RUN-SEC @ _LD-RUN-CNT @ _DISK-READ
+    _LD-RUN-ADDR @ _LD-RUN-CNT @ SECTOR * + ;
 
 : _LD-SLOT-BYTES  ( slot -- bytes )
     DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
@@ -4568,10 +4566,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
     _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
     _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
     \ DMA-read file data from disk into buf1
-    _FE-DESC @ F.START DISK-SEC!
-    _FE-BUF1 @ DISK-DMA!
-    _FE-USED @ 511 + 512 / DISK-N!
-    DISK-READ
+    _FE-BUF1 @ _FE-DESC @ F.START
+    _FE-USED @ 511 + 512 / _DISK-READ
     \ Derive IV from directory slot
     _FE-DESC @ _FE-MKIV
     \ Encrypt: ( key iv src dst len -- tag-addr )
@@ -4579,10 +4575,7 @@ VARIABLE _FE-BUF2                 \ buffer 2
     \ Copy 16-byte tag after ciphertext in buf2
     _FE-BUF2 @ _FE-PAD @ + 16 CMOVE
     \ DMA-write ciphertext + tag back to disk
-    _FE-DESC @ F.START DISK-SEC!
-    _FE-BUF2 @ DISK-DMA!
-    _FE-SECS @ DISK-N!
-    DISK-WRITE
+    _FE-BUF2 @ _FE-DESC @ F.START _FE-SECS @ _DISK-WRITE
     \ Set encrypted flag and sync directory
     _FE-DESC @ _FE-SET-ENC
     _FE-USED @ _FE-DESC @ F.SLOT DIRENT 28 + L!
@@ -4611,10 +4604,7 @@ VARIABLE _FE-BUF2                 \ buffer 2
     _FE-BUF1 @ _FE-SECS @ 512 * 0 FILL
     _FE-BUF2 @ _FE-SECS @ 512 * 0 FILL
     \ DMA-read ciphertext + tag from disk
-    _FE-DESC @ F.START DISK-SEC!
-    _FE-BUF1 @ DISK-DMA!
-    _FE-SECS @ DISK-N!
-    DISK-READ
+    _FE-BUF1 @ _FE-DESC @ F.START _FE-SECS @ _DISK-READ
     \ Derive IV
     _FE-DESC @ _FE-MKIV
     \ Decrypt: ( key iv src dst len tag -- flag )
@@ -4624,10 +4614,8 @@ VARIABLE _FE-BUF2                 \ buffer 2
     \ flag on stack: 0 = auth OK, -1 = auth fail
     DUP 0= IF
         \ Write plaintext back to disk
-        _FE-DESC @ F.START DISK-SEC!
-        _FE-BUF2 @ DISK-DMA!
-        _FE-USED @ 511 + 512 / DISK-N!
-        DISK-WRITE
+        _FE-BUF2 @ _FE-DESC @ F.START
+        _FE-USED @ 511 + 512 / _DISK-WRITE
         \ Clear encrypted flag, sync
         _FE-DESC @ _FE-CLR-ENC
         _FE-USED @ _FE-DESC @ F.SLOT DIRENT 28 + L!
@@ -5846,6 +5834,11 @@ VARIABLE MB-T   VARIABLE MB-P
 \  FS-ACQUIRE   / FS-RELEASE     — filesystem (F-OPEN, F-READ, etc.)
 \  HEAP-ACQUIRE / HEAP-RELEASE   — heap allocator (ALLOC, FREE)
 \  WITH-LOCK    ( xt lock# -- )  — execute xt while holding lock
+\
+\  Checked disk/filesystem operations acquire FS-LOCK internally.  Do not
+\  wrap them in FS-ACQUIRE or WITH-LOCK: the hardware recognizes a same-core
+\  reacquire but has no recursion depth, so the inner release would end the
+\  outer critical section early.
 
 0 CONSTANT DICT-LOCK
 1 CONSTANT UART-LOCK

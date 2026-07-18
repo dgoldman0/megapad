@@ -75,6 +75,8 @@ from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, DeviceBus, BusError,
+    STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
+    STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
     PORT_BRIDGE_BASE, DEFAULT_PORT_MAP, PortBridgeCSR,
     FB_BASE,
     WOTS_BASE, WotsChainAccel,
@@ -2048,6 +2050,8 @@ class TestBIOS(unittest.TestCase):
                      "DO", "LOOP", "BEGIN", "UNTIL", "NET-STATUS",
                      "SPACE", "TYPE", "DISK-READ", "DISK-WRITE",
                      "DISK-FLUSH", "DISK-SECTORS",
+                     "DISK-READ-CHECKED", "DISK-WRITE-CHECKED",
+                     "DISK-FLUSH-CHECKED",
                      "TIMER!", "EI!", "DI!", "ISR!", "KEY?"]:
             self.assertIn(word, text, f"Missing word: {word}")
 
@@ -2066,8 +2070,8 @@ class TestBIOS(unittest.TestCase):
         try:
             os.unlink(path)
             sys, buf = self._boot_bios(storage_image=path)
-            text = self._run_forth(sys, buf, ["DISK@ ."])
-            # bit 7 = 0x80 = 128
+            text = self._run_forth(sys, buf, ["DISK@ 0x80 AND ."])
+            # RESULT_VALID may also be set after the BIOS mount probe.
             self.assertIn("128 ", text)
         finally:
             if os.path.exists(path):
@@ -2142,6 +2146,257 @@ class TestBIOS(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+    def test_disk_checked_read_reports_no_media(self):
+        """Checked reads return stable status/count cells without raw setup."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            '0 0 1 DISK-READ-CHECKED ."  S=" . ."  C=" .',
+        ])
+        self.assertIn("S=1 ", text)
+        self.assertIn("C=0 ", text)
+
+    def test_disk_checked_validates_complete_request_before_dma(self):
+        """Count, range, overflow, and physical-window failures are precise."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                '0 0 0 DISK-READ-CHECKED ."  ZERO=" . .',
+                '0 2048 1 DISK-READ-CHECKED ."  RANGE=" . .',
+                ('0xFFFFFFFFFFFFFF00 0 1 DISK-READ-CHECKED '
+                 '."  WRAP=" . .'),
+                ('0xFFFFFFFFFFFFFE00 0 1 DISK-READ-CHECKED '
+                 '."  LASTMAX=" . .'),
+                ('0xFFFFFFFFFFFFFE01 0 1 DISK-READ-CHECKED '
+                 '."  LASTWRAP=" . .'),
+                '0x40000 0 1 DISK-READ-CHECKED ."  DMA=" . .',
+            ])
+            # Each marker is followed by status then confirmed-sector count.
+            self.assertIn("ZERO=3 0 ", text)
+            self.assertIn("RANGE=4 0 ", text)
+            self.assertIn("WRAP=5 0 ", text)
+            self.assertIn("LASTMAX=6 0 ", text)
+            self.assertIn("LASTWRAP=5 0 ", text)
+            self.assertIn("DMA=6 0 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_transfer_splits_above_controller_limit(self):
+        """One public transfer spans multiple <=255-sector commands."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "VARIABLE checked-buf 153600 ALLOT",
+                "0xA5 checked-buf C!",
+                "0x5A checked-buf 153599 + C!",
+                ("checked-buf 100 300 DISK-WRITE-CHECKED "
+                 '."  W=" . .'),
+                "0 checked-buf C! 0 checked-buf 153599 + C!",
+                ("checked-buf 100 300 DISK-READ-CHECKED "
+                 '."  R=" . .'),
+                'checked-buf C@ ."  FIRST=" .',
+                'checked-buf 153599 + C@ ."  LAST=" .',
+            ], max_steps=8_000_000)
+            self.assertIn("W=0 300 ", text)
+            self.assertIn("R=0 300 ", text)
+            self.assertIn("FIRST=165 ", text)
+            self.assertIn("LAST=90 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_preserves_partial_result_and_confirmed_count(self):
+        """A failed sector stops the request and reports only whole sectors."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            sys.storage.inject_fault(
+                "media",
+                result=STORAGE_RESULT_MEDIA_FAILURE,
+                command=STORAGE_CMD_WRITE,
+                sector_index=1,
+            )
+            text = self._run_forth(sys, buf, [
+                "VARIABLE partial-buf 1536 ALLOT",
+                "partial-buf 1536 0xA7 FILL",
+                ("partial-buf 20 3 DISK-WRITE-CHECKED "
+                 '."  PARTIAL=" . .'),
+            ])
+            self.assertIn("PARTIAL=137 1 ", text)
+            start = 20 * SECTOR_SIZE
+            self.assertEqual(
+                bytes(sys.storage._image_data[start:start + SECTOR_SIZE]),
+                b"\xA7" * SECTOR_SIZE,
+            )
+            self.assertEqual(
+                bytes(sys.storage._image_data[
+                    start + SECTOR_SIZE:start + 2 * SECTOR_SIZE
+                ]),
+                b"\x00" * SECTOR_SIZE,
+            )
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_rejects_media_change_at_command_completion(self):
+        """A generation change after CMD acceptance cannot publish success."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x6D" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            original_complete = sys.storage._complete
+            changed = False
+
+            def complete_then_change_generation(result, transferred):
+                nonlocal changed
+                original_complete(result, transferred)
+                if not changed:
+                    changed = True
+                    sys.storage.media_generation = (
+                        sys.storage.media_generation + 1
+                    ) & 0xFFFF_FFFF
+
+            sys.storage._complete = complete_then_change_generation
+            text = self._run_forth(sys, buf, [
+                "VARIABLE generation-race-buf 512 ALLOT",
+                ("generation-race-buf 12 1 DISK-READ-CHECKED "
+                 '."  SWAP=" . .'),
+            ], max_steps=4_000_000)
+            self.assertIn("SWAP=139 1 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_timeout_resets_controller_and_releases_lock(self):
+        """A stalled command times out finitely and the next request works."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x3C" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            sys.storage.inject_fault(
+                "start", command=STORAGE_CMD_READ, action="stall"
+            )
+            text = self._run_forth(sys, buf, [
+                "VARIABLE timeout-buf 512 ALLOT",
+                ("timeout-buf 10 1 DISK-READ-CHECKED "
+                 '."  TIMEOUT=" . .'),
+                ("timeout-buf 10 1 DISK-READ-CHECKED "
+                 '."  RETRY=" . .'),
+                'timeout-buf C@ ."  BYTE=" .',
+            ], max_steps=40_000_000)
+            self.assertIn("TIMEOUT=10 0 ", text)
+            self.assertIn("RETRY=0 1 ", text)
+            self.assertIn("BYTE=60 ", text)
+            self.assertFalse(sys.spinlock.locked[2])
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_timeout_marks_reset_boundary_completion_partial(self):
+        """A completion hidden by an idle RESET is never reported as clean."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x29" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            sys.storage.inject_fault(
+                "start", command=STORAGE_CMD_READ, action="stall"
+            )
+            original_write8 = sys.storage.write8
+            raced = False
+
+            def complete_before_reset(offset, value):
+                nonlocal raced
+                if (not raced and offset == 0 and value == 4
+                        and sys.storage.busy):
+                    raced = True
+                    sys.storage._complete(0, 1)
+                original_write8(offset, value)
+
+            sys.storage.write8 = complete_before_reset
+            text = self._run_forth(sys, buf, [
+                "VARIABLE reset-race-buf 512 ALLOT",
+                ("reset-race-buf 9 1 DISK-READ-CHECKED "
+                 '."  RESET-RACE=" . .'),
+            ], max_steps=30_000_000)
+
+            self.assertTrue(raced)
+            self.assertIn("RESET-RACE=138 0 ", text)
+            self.assertFalse(sys.spinlock.locked[2])
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_lock_contention_times_out_without_issuing(self):
+        """Another core's lock ownership cannot interleave register tuples."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x51" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            for _ in range(20):
+                if sys.cpu.idle:
+                    break
+                sys.run_batch(100_000)
+            self.assertTrue(sys.cpu.idle)
+            completion = sys.storage.completion
+            sys.spinlock.locked[2] = True
+            sys.spinlock.owner[2] = 1
+
+            text = self._run_forth(sys, buf, [
+                "VARIABLE contended-buf 512 ALLOT",
+                ("contended-buf 0 1 DISK-READ-CHECKED "
+                 '."  CONTENDED=" . .'),
+            ], max_steps=20_000_000)
+
+            self.assertIn("CONTENDED=10 0 ", text)
+            self.assertEqual(sys.storage.completion, completion)
+            self.assertTrue(sys.spinlock.locked[2])
+            self.assertEqual(sys.spinlock.owner[2], 1)
+        finally:
+            os.unlink(path)
+
+    def test_disk_checked_flush_is_durability_boundary(self):
+        """Checked WRITE plus checked FLUSH persists without raw commands."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            sys, buf = self._boot_bios(storage_image=path)
+            text = self._run_forth(sys, buf, [
+                "VARIABLE checked-flush-buf 512 ALLOT",
+                "0xBC checked-flush-buf C!",
+                ("checked-flush-buf 7 1 DISK-WRITE-CHECKED "
+                 '."  WRITE=" . .'),
+                'DISK-FLUSH-CHECKED ."  FLUSH=" .',
+            ])
+            self.assertIn("WRITE=0 1 ", text)
+            self.assertIn("FLUSH=0 ", text)
+            with open(path, "rb") as fh:
+                fh.seek(7 * SECTOR_SIZE)
+                self.assertEqual(fh.read(1), b"\xBC")
+        finally:
+            os.unlink(path)
 
     # -- FSLOAD (BIOS filesystem boot) --
 
@@ -2557,7 +2812,7 @@ class TestBIOS(unittest.TestCase):
             text = self._run_forth(sys, buf, [
                 "VARIABLE dbuf  512 ALLOT",
                 "0 DISK-SEC!  dbuf DISK-DMA!  1 DISK-N!  DISK-READ",
-                "DISK@ .",
+                "DISK@ 0x80 AND .",
             ])
             self.assertIn("128 ", text)  # bit7 = present
         finally:
@@ -5367,6 +5622,7 @@ class _KDOSTestBase(unittest.TestCase):
     def _run_kdos(self, extra_lines: list[str],
                   max_steps=400_000_000,
                   storage_image=None,
+                  storage_faults=None,
                   nic_frames=None,
                   nic_tx_callback=None) -> str:
         """Load KDOS then execute extra_lines, return UART output."""
@@ -5377,9 +5633,13 @@ class _KDOSTestBase(unittest.TestCase):
                                       max_steps=max_steps,
                                       nic_frames=nic_frames,
                                       storage_image=storage_image,
+                                      storage_faults=storage_faults,
                                       nic_tx_callback=nic_tx_callback)
 
         sys, buf = self._boot_bios(storage_image=storage_image)
+        if storage_faults:
+            for fault in storage_faults:
+                sys.storage.inject_fault(**fault)
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
@@ -5413,6 +5673,7 @@ class _KDOSTestBase(unittest.TestCase):
                        max_steps=50_000_000,
                        nic_frames=None,
                        storage_image=None,
+                       storage_faults=None,
                        nic_tx_callback=None,
                        _snapshot=None) -> str:
         """Fast path: restore KDOS from snapshot, run only extra_lines."""
@@ -5437,6 +5698,9 @@ class _KDOSTestBase(unittest.TestCase):
         if nic_frames:
             for frame in nic_frames:
                 sys.nic.inject_frame(frame)
+        if storage_faults:
+            for fault in storage_faults:
+                sys.storage.inject_fault(**fault)
 
         # Set TX callback for dynamic response (e.g. DHCP)
         if nic_tx_callback:
@@ -7990,6 +8254,51 @@ class TestKDOS(_KDOSTestBase):
         try:
             text = self._run_kdos(["FS-LOAD"], storage_image=path)
             self.assertIn("MP64FS loaded", text)
+        finally:
+            os.unlink(path)
+
+    def test_fs_sync_does_not_publish_after_checked_flush_failure(self):
+        """FS-SYNC throws before its caller can report durable success."""
+        path = self._make_formatted_image()
+        try:
+            text = self._run_kdos([
+                "FS-LOAD",
+                ': SYNC-FAIL-PROBE FS-SYNC ."  SYNC-PUBLISHED" ;',
+                "SYNC-FAIL-PROBE",
+                '."  STATUS=" DISK-IO-STATUS @ .',
+            ], storage_image=path, storage_faults=[{
+                "stage": "flush",
+                "result": STORAGE_RESULT_FLUSH_FAILURE,
+                "command": STORAGE_CMD_FLUSH,
+            }])
+            self.assertIn("MP64FS loaded", text)
+            self.assertEqual(text.count("SYNC-PUBLISHED"), 1)
+            self.assertIn("Disk flush failed", text)
+            self.assertIn("STATUS=13 ", text)
+        finally:
+            os.unlink(path)
+
+    def test_format_does_not_publish_after_checked_flush_failure(self):
+        """FORMAT sets FS-OK and prints success only after durable flush."""
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            f.write(b"\x00" * (2048 * SECTOR_SIZE))
+        try:
+            text = self._run_kdos([
+                ': FORMAT-FAIL-PROBE FORMAT ."  FORMAT-PUBLISHED" ;',
+                "FORMAT-FAIL-PROBE",
+                '."  STATUS=" DISK-IO-STATUS @ .',
+                '."  FSOK=" FS-OK @ .',
+            ], storage_image=path, storage_faults=[{
+                "stage": "flush",
+                "result": STORAGE_RESULT_FLUSH_FAILURE,
+                "command": STORAGE_CMD_FLUSH,
+            }])
+            self.assertNotIn("MP64FS formatted", text)
+            self.assertEqual(text.count("FORMAT-PUBLISHED"), 1)
+            self.assertIn("Disk flush failed", text)
+            self.assertIn("STATUS=13 ", text)
+            self.assertIn("FSOK=0 ", text)
         finally:
             os.unlink(path)
 

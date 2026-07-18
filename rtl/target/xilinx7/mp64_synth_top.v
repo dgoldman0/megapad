@@ -119,6 +119,9 @@ module mp64_synth_top (
         .sd_mosi    (sd_mosi),
         .sd_miso    (sd_miso),
         .sd_cs_n    (sd_cs_n),
+        // This target has no constrained card-detect/write-protect pins.
+        .sd_card_present     (1'b1),
+        .sd_write_protected  (1'b0),
 
         // NIC (tied off)
         .nic_tx_valid (),

@@ -449,32 +449,41 @@ calling `EVALUATOR-RESET`; status and diagnostics remain available afterward.
 
 ---
 
-## Disk I/O (9 words)
+## Disk I/O (12 words)
 
-Low-level sector-based disk access.  Each sector is **512 bytes**.
-These words talk directly to the storage controller MMIO registers.
+Sector-based disk access. Each sector is **512 bytes**. Production code uses
+the three checked operations, which validate the complete request, own
+filesystem spinlock 2, split transfers above 255 sectors, wait for a matching
+completion generation, and return precise status. The raw setup and command
+words remain available for diagnostics and controller bring-up; they do not
+wait for completion and are unsafe as filesystem primitives.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `DISK@` | `( -- status )` | Read the storage controller status register.  Bit 7 = device present. |
+| `DISK@` | `( -- status )` | Read controller status: busy=bit 0, error=bit 1, rejected=bit 2, result-valid=bit 3, media-changed=bit 4, write-protected=bit 5, present=bit 7. |
 | `DISK-SECTORS` | `( -- count )` | Read the attached media capacity as an unsigned count of 512-byte sectors. |
 | `MP64FS-VALID?` | `( -- flag )` | Validate the attached marker, derived geometry, reserved bitmap, directory entries, parents, extents, and byte bounds. |
-| `DISK-SEC!` | `( sector -- )` | Set the sector number for the next disk operation. |
-| `DISK-DMA!` | `( addr -- )` | Set the DMA address (where data will be read to or written from). |
-| `DISK-N!` | `( n -- )` | Set the number of sectors to transfer. |
-| `DISK-READ` | `( -- )` | Issue a read command.  Transfers sector(s) from disk to RAM at the DMA address. |
-| `DISK-WRITE` | `( -- )` | Issue a write command.  Transfers sector(s) from RAM to disk. |
-| `DISK-FLUSH` | `( -- )` | Flush the in-memory disk image to the host file (command 0xFF).  No-op on real hardware. |
+| `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | Production read. Returns only confirmed whole sectors and the stable controller result byte. |
+| `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | Production write. Completion is not durability; follow persistent updates with checked flush. |
+| `DISK-FLUSH-CHECKED` | `( -- status )` | Production ordering and durability barrier for all earlier successful writes. |
+| `DISK-SEC!` | `( sector -- )` | Diagnostic: set the raw sector register. |
+| `DISK-DMA!` | `( addr -- )` | Diagnostic: set the raw 64-bit DMA address. |
+| `DISK-N!` | `( n -- )` | Diagnostic: set the raw controller sector count (legal command counts are 1–255). |
+| `DISK-READ` | `( -- )` | Diagnostic: issue raw READ without waiting or translating its result. |
+| `DISK-WRITE` | `( -- )` | Diagnostic: issue raw WRITE without waiting or translating its result. |
+| `DISK-FLUSH` | `( -- )` | Diagnostic: issue raw FLUSH without waiting. Hardware backends perform their defined media-ready durability protocol. |
 
-**Example — reading sector 10 into a buffer:**
+**Example — checked read of sector 10 into a buffer:**
 ```forth
 CREATE SECBUF 512 ALLOT
-10 DISK-SEC!
-SECBUF DISK-DMA!
-1 DISK-N!
-DISK-READ
+SECBUF 10 1 DISK-READ-CHECKED  ( completed status )
+0<> ABORT" disk read failed"
+1 <> ABORT" short disk read"
 SECBUF 512 DUMP
 ```
+
+The result enum and extended MMIO registers are frozen in
+[`storage-controller-contract.md`](storage-controller-contract.md).
 
 ---
 

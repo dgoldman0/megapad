@@ -712,8 +712,8 @@ print_space:
 ; GLO/GHI don't help for writes (ghi+plo+st.b = 6 bytes vs lsri+st.b
 ; = 4 bytes).  The win is deduplication + eliminating cascading shifts.
 
-; write_mmio_addr8_le: write R1[31:0] as 4 LE bytes + 4 zero bytes
-;   Entry: R0 = MMIO destination, R1 = source value (low 32 bits used)
+; write_mmio_addr8_le: write R1[63:0] as 8 little-endian bytes
+;   Entry: R0 = MMIO destination, R1 = source value
 ;   Exit:  R0 points at last byte written (advanced by 7 from entry)
 ;   Preserves: R1
 ;   Clobbers: R7
@@ -730,11 +730,20 @@ write_mmio_addr8_le:
     stxi                      ; byte 2
     ghi  r7                   ; D ← R1[31:24]
     stxi                      ; byte 3
-    ldi  r7, 0
-    glo  r7                   ; D ← 0
+    mov  r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
     stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
     stxi                      ; byte 5
+    lsri r7, 8
+    lsri r7, 8
+    glo  r7                   ; D ← R1[55:48]
     stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
     stxi                      ; byte 7
     sex  r2                   ; restore XSEL
     ret.l
@@ -758,6 +767,32 @@ write_mmio_u32_le:
     ghi  r7                   ; D ← R1[31:24]
     stxi                      ; byte 3
     sex  r2                   ; restore XSEL
+    ret.l
+
+; read_mmio_u32_le: read four ascending byte-wide MMIO registers as LE u32.
+;   Entry: R11 = MMIO source address
+;   Exit:  R7 = zero-extended value, R11 advanced by 3
+;   Preserves: R1, R9, R12, R13
+;   Clobbers: R10
+; Disk MMIO is byte-wide in RTL even when the CPU issued LD.W, so qualified
+; controller code must use this serializer for TOTAL, COMPLETE, and MEDIA_GEN.
+read_mmio_u32_le:
+    ld.b r7, r11
+    inc r11
+    ld.b r10, r11
+    lsli r10, 8
+    or r7, r10
+    inc r11
+    ld.b r10, r11
+    lsli r10, 8
+    lsli r10, 8
+    or r7, r10
+    inc r11
+    ld.b r10, r11
+    lsli r10, 8
+    lsli r10, 8
+    lsli r10, 8
+    or r7, r10
     ret.l
 
 ; =====================================================================
@@ -6404,6 +6439,11 @@ w_net_mac:
 ;   +0x0E  SEC_COUNT (RW)  number of sectors
 ;   +0x0F  DATA      (RW)  byte-at-a-time port
 ;   +0x11  TOTAL     (R)   attached media sector count (4 bytes LE)
+;   +0x15  RESULT    (R)   terminal result (bit7=partial)
+;   +0x16  COMPLETE  (R)   terminal generation (4 bytes LE)
+;   +0x1A  MEDIA_GEN (R)   attachment generation (4 bytes LE)
+;   +0x1E  CAPS      (R)   backend/controller capabilities
+;   +0x1F  TRANSFERRED (R) confirmed sectors in last controller request
 
 ; DISK@ ( -- status )  read storage STATUS register
 w_disk_status:
@@ -6452,12 +6492,20 @@ w_disk_dma_store:
     stxi                      ; byte 2
     ghi  r7                   ; D ← R1[31:24]
     stxi                      ; byte 3
-    ; Upper 4 bytes = 0
-    ldi  r7, 0
-    glo  r7                   ; D ← 0
+    mov  r7, r1
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    lsri r7, 8
+    glo  r7                   ; D ← R1[39:32]
     stxi                      ; byte 4
+    ghi  r7                   ; D ← R1[47:40]
     stxi                      ; byte 5
+    lsri r7, 8
+    lsri r7, 8
+    glo  r7                   ; D ← R1[55:48]
     stxi                      ; byte 6
+    ghi  r7                   ; D ← R1[63:56]
     stxi                      ; byte 7
     sex  r2                   ; restore XSEL
     ret.l
@@ -6484,7 +6532,7 @@ w_disk_write:
     st.b r11, r1
     ret.l
 
-; DISK-FLUSH ( -- )  flush in-memory image to host file (cmd 0xFF)
+; DISK-FLUSH ( -- )  issue raw backend FLUSH command (cmd 0xFF)
 w_disk_flush:
     ldi64 r11, 0xFFFF_FF00_0000_0200
     ldi r1, 0xFF
@@ -6518,51 +6566,620 @@ w_disk_sectors:
 ;  FSLOAD — load and evaluate a file from MP64FS disk
 ; =====================================================================
 
-; disk_read_sectors: internal helper — DMA read from disk.
-;   R1 = start sector (32-bit), R9 = DMA dest addr, R12 = sector count
-;   Clobbers: R7, R11, R13
-;   Handles transfers > 255 sectors via multi-batch loop (hardware
-;   SEC_COUNT register is 1 byte, max 255 per command).
-disk_read_sectors:
-disk_read_next_batch:
+; Stable storage result values.  The checked words return the controller's
+; RESULT byte verbatim; BIOS-generated validation and timeout failures use the
+; same low-seven-bit cause values.  Bit 7 denotes a partially applied public
+; request.
+;   00 OK                 08 WRITE_PROTECTED
+;   01 NO_MEDIA           09 MEDIA_FAILURE
+;   02 UNSUPPORTED        0A TIMEOUT
+;   03 INVALID_COUNT      0B MEDIA_REMOVED
+;   04 LBA_RANGE          0C RESET_ABORTED
+;   05 ADDRESS_OVERFLOW   0D FLUSH_FAILURE
+;   06 DMA_INVALID        0E INTERNAL
+;   07 DMA_FAILURE        80 PARTIAL
+;
+; The poll bound is deliberately finite even before KDOS has installed its
+; cooperative scheduler.  Controller operations normally complete far below
+; this bound; a timeout sends RESET so a stranded command cannot poison the
+; next checked caller.
+
+; disk_lock_acquire: acquire machine-wide filesystem spinlock 2.
+;   Returns R0 = 0 on success, 0x0A on bounded contention timeout.
+;   Clobbers R7, R11, R12.
+disk_lock_acquire:
+    ldi64 r12, 1048576
+disk_lock_acquire_loop:
+    ldi64 r11, 0xFFFF_FF00_0000_0608
+    ld.b r7, r11
+    cmpi r7, 0
+    breq disk_lock_acquire_ok
+    dec r12
     cmpi r12, 0
-    lbreq disk_read_all_done
-    ; Batch size = min(R12, 255)
-    mov r13, r12              ; R13 = total remaining
-    ldi r7, 255
-    cmp r12, r7
-    brle disk_rd_clamp_ok
-    ldi r12, 255              ; clamp to hardware max
-disk_rd_clamp_ok:
-    ; --- Set sector number (4 bytes LE) [Phase 7: dedup helper] ---
+    lbrne disk_lock_acquire_loop
+    ldi r0, 0x0A
+    ret.l
+disk_lock_acquire_ok:
+    ldi r0, 0
+    ret.l
+
+; disk_lock_release: release machine-wide filesystem spinlock 2.
+disk_lock_release:
+    ldi64 r11, 0xFFFF_FF00_0000_0609
+    ldi r7, 1
+    st.b r11, r7
+    ret.l
+
+; disk_dma_span_status: validate a complete DMA byte span before chunking.
+;   R9 = first byte, R10 = byte count (>0)
+;   Returns R0 = 0, ADDRESS_OVERFLOW, or DMA_INVALID.
+;   A legal span must fit wholly in exactly one Bank 0, external, HBW, or VRAM
+;   physical window advertised by SysInfo.
+;   Clobbers R1, R7, R11, R12, R13.
+disk_dma_span_status:
+    mov r13, r10
+    dec r13                   ; inclusive last-byte offset
+    add r13, r9               ; inclusive last byte
+    cmp r13, r9
+    lbrcc disk_dma_span_overflow
+
+    ; Bank 0: [0, R2)
+    cmp r9, r2
+    breq disk_dma_check_ext
+    brgt disk_dma_check_ext
+    cmp r13, r2
+    lbrcc disk_dma_span_ok
+
+disk_dma_check_ext:
+    ldi64 r11, 0xFFFF_FF00_0000_0338
+    ldn r1, r11               ; external base
+    addi r11, 8
+    ldn r7, r11               ; external size
+    cmpi r7, 0
+    breq disk_dma_check_hbw
+    mov r12, r1
+    add r12, r7               ; external limit
+    cmp r12, r1
+    brle disk_dma_check_hbw
+    cmp r9, r1
+    breq disk_dma_ext_start_ok
+    brgt disk_dma_ext_start_ok
+    lbr disk_dma_check_hbw
+disk_dma_ext_start_ok:
+    cmp r13, r12
+    lbrcc disk_dma_span_ok
+
+disk_dma_check_hbw:
+    ldi64 r11, 0xFFFF_FF00_0000_0320
+    ldn r1, r11               ; HBW base
+    addi r11, 8
+    ldn r7, r11               ; HBW size
+    cmpi r7, 0
+    breq disk_dma_check_vram
+    mov r12, r1
+    add r12, r7               ; HBW limit
+    cmp r12, r1
+    brle disk_dma_check_vram
+    cmp r9, r1
+    breq disk_dma_hbw_start_ok
+    brgt disk_dma_hbw_start_ok
+    lbr disk_dma_check_vram
+disk_dma_hbw_start_ok:
+    cmp r13, r12
+    lbrcc disk_dma_span_ok
+
+disk_dma_check_vram:
+    ldi64 r11, 0xFFFF_FF00_0000_0350
+    ldn r1, r11               ; VRAM base
+    addi r11, 8
+    ldn r7, r11               ; VRAM size
+    cmpi r7, 0
+    breq disk_dma_span_invalid
+    mov r12, r1
+    add r12, r7               ; VRAM limit
+    cmp r12, r1
+    brle disk_dma_span_invalid
+    cmp r9, r1
+    breq disk_dma_vram_start_ok
+    brgt disk_dma_vram_start_ok
+    lbr disk_dma_span_invalid
+disk_dma_vram_start_ok:
+    cmp r13, r12
+    lbrcc disk_dma_span_ok
+
+disk_dma_span_invalid:
+    ldi r0, 0x06
+    ret.l
+disk_dma_span_overflow:
+    ldi r0, 0x05
+    ret.l
+disk_dma_span_ok:
+    ldi r0, 0
+    ret.l
+
+; disk_command_checked: submit and wait for exactly one controller command.
+;   R0 = command, R1 = LBA, R9 = DMA address, R12 = controller count
+;   Caller owns FS lock and has validated the complete public request.
+;   Returns R0 = RESULT/TIMEOUT, R7 = TRANSFERRED.
+;   COMPLETE is snapshotted only after an inherited busy command is gone, so
+;   an old terminal publication cannot be mistaken for this request.
+disk_command_checked:
+    subi r15, 24
+    str r15, r0               ; +0 command
+    mov r11, r15
+    addi r11, 8
+    str r11, r12              ; +8 controller count
+
+    ; Defense in depth for a legacy/raw command that bypassed FS lock.
+    ldi64 r12, 1048576
+disk_command_wait_idle:
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r7, r11
+    andi r7, 0x01
+    cmpi r7, 0
+    breq disk_command_idle
+    dec r12
+    cmpi r12, 0
+    lbrne disk_command_wait_idle
+    lbr disk_command_timeout_before_issue
+
+disk_command_idle:
+    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 16
+    str r11, r7               ; +16 pre-command COMPLETE
+
+    ; FLUSH ignores transfer setup.  READ/WRITE publish the validated chunk.
+    ldn r0, r15
+    cmpi r0, 0xFF
+    breq disk_command_issue
     ldi64 r0, 0xFFFF_FF00_0000_0202
     ldi64 r11, write_mmio_u32_le
     call.l r11
-    ; --- Set DMA address (8 bytes LE, upper 4 = 0) [Phase 7: dedup helper] ---
-    subi r15, 8
-    str r15, r1               ; save sector number on RSP
     ldi64 r0, 0xFFFF_FF00_0000_0206
-    mov r1, r9                ; pass DMA addr
+    mov r1, r9
     ldi64 r11, write_mmio_addr8_le
     call.l r11
-    ldn r1, r15               ; restore sector number
-    addi r15, 8
-    ; --- Set sector count (1 byte) ---
+    mov r11, r15
+    addi r11, 8
+    ldn r12, r11
     ldi64 r11, 0xFFFF_FF00_0000_020E
     st.b r11, r12
-    ; --- Issue READ command ---
+
+disk_command_issue:
+    ldn r7, r15
     ldi64 r11, 0xFFFF_FF00_0000_0200
-    ldi r7, 0x01
     st.b r11, r7
-    ; --- Advance for next batch ---
-    add r1, r12               ; sector_num += batch
+
+    ldi64 r12, 1048576
+disk_command_wait_complete:
+    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 16
+    ldn r1, r11
+    cmp r7, r1
+    lbrne disk_command_complete
+    dec r12
+    cmpi r12, 0
+    lbrne disk_command_wait_complete
+
+    ; Close the boundary race: accept a completion published on the final
+    ; bounded iteration before deciding that this command timed out.
+    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 16
+    ldn r1, r11
+    cmp r7, r1
+    lbrne disk_command_complete
+
+disk_command_timeout:
+    ; RESET publishes RESET_ABORTED for the active request.  The public cause
+    ; remains TIMEOUT, but preserve RESET's partial bit and confirmed whole
+    ; sectors so callers never mistake an uncertain prefix for zero progress.
+    ; If the request completed between our final COMPLETE read and RESET
+    ; acceptance, RESET is idle and clears its result.  Detect the changed
+    ; generation and conservatively mark that lost terminal publication
+    ; partial rather than claiming a clean timeout.
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r7, 0x04
+    st.b r11, r7
+    ldi64 r11, 0xFFFF_FF00_0000_0215
+    ld.b r1, r11
+    ldi64 r11, 0xFFFF_FF00_0000_021F
+    ld.b r7, r11
+    mov r13, r1
+    andi r13, 0x7F
+    cmpi r13, 0x0C
+    breq disk_command_timeout_reset_result
+
+    ; A non-RESET_ABORTED result after RESET is the cleared idle tuple.  Use
+    ; COMPLETE to determine whether an unobservable terminal operation raced
+    ; with RESET; save TRANSFERRED because the serializer returns in R7.
+    mov r13, r7
+    ldi64 r11, 0xFFFF_FF00_0000_0216
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 16
+    ldn r12, r11
+    cmp r7, r12
+    mov r7, r13
+    ldi r0, 0x0A
+    lbreq disk_command_return
+    ori r0, 0x80
+    lbr disk_command_return
+
+disk_command_timeout_reset_result:
+    andi r1, 0x80
+    ldi r0, 0x0A
+    or r0, r1
+    lbr disk_command_return
+
+disk_command_timeout_before_issue:
+    ; An inherited raw command is not progress for this checked request.
+    ldi64 r11, 0xFFFF_FF00_0000_0200
+    ldi r7, 0x04
+    st.b r11, r7
+    ldi r0, 0x0A
+    ldi r7, 0
+    lbr disk_command_return
+
+disk_command_complete:
+    ldi64 r11, 0xFFFF_FF00_0000_0215
+    ld.b r0, r11              ; stable controller result, PARTIAL preserved
+    addi r11, 10              ; +0x15 -> +0x1F
+    ld.b r7, r11              ; confirmed whole sectors for this chunk
+
+disk_command_return:
+    addi r15, 24
+    ret.l
+
+; disk_transfer_checked: common checked READ/WRITE implementation.
+;   R0 = 1 READ or 2 WRITE, R1 = starting LBA, R9 = DMA, R12 = total count
+;   Returns R0 = status, R13 = confirmed sectors.  R1/R9 advance only across
+;   confirmed sectors and R12 is the unconfirmed remainder.
+;   The complete request is validated before its first externally visible
+;   chunk and FS lock 2 is held across validation, setup, all chunks, and
+;   terminal result readback.
+disk_transfer_checked:
+    subi r15, 56
+    str r15, r0               ; +0 command
+    mov r11, r15
+    addi r11, 8
+    str r11, r1               ; +8 current LBA
+    addi r11, 8
+    str r11, r9               ; +16 current DMA
+    addi r11, 8
+    str r11, r12              ; +24 remaining sectors
+    ldi r7, 0
+    addi r11, 8
+    str r11, r7               ; +32 confirmed sectors
+
+    ldi64 r11, disk_lock_acquire
+    call.l r11
+    cmpi r0, 0
+    lbrne disk_transfer_return_unlocked
+
+    ; Presence and required precise/completion capabilities.
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r7, r11
+    andi r7, 0x80
+    cmpi r7, 0
+    lbreq disk_transfer_no_media
+    ldi64 r11, 0xFFFF_FF00_0000_021E
+    ld.b r7, r11
+    ldn r0, r15
+    cmpi r0, 1
+    breq disk_transfer_check_read_caps
+    andi r7, 0x1A            ; WRITE + PRECISE_RESULT + COMPLETION
+    cmpi r7, 0x1A
+    lbreq disk_transfer_validate_count
+    lbr disk_transfer_unsupported
+disk_transfer_check_read_caps:
+    andi r7, 0x19            ; READ + PRECISE_RESULT + COMPLETION
+    cmpi r7, 0x19
+    lbreq disk_transfer_validate_count
+    lbr disk_transfer_unsupported
+
+disk_transfer_validate_count:
+    ; Bind every controller-sized chunk to the same attachment identity.
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 40
+    str r11, r7               ; +40 public-request MEDIA_GEN
+    mov r11, r15
+    addi r11, 24
+    ldn r12, r11
+    cmpi r12, 0
+    lbreq disk_transfer_invalid_count
+
+    ; Validate the complete LBA interval without addition overflow.
+    ldi64 r11, 0xFFFF_FF00_0000_0211
+    ldi64 r0, read_mmio_u32_le
+    call.l r0                 ; R7 = attached capacity u32
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11
+    cmp r1, r7
+    lbreq disk_transfer_lba_range
+    lbrgt disk_transfer_lba_range
+    sub r7, r1                ; sectors available from starting LBA
+    cmp r12, r7
+    lbrgt disk_transfer_lba_range
+
+    ; Capacity is u32, so a valid sector count shifted by nine cannot itself
+    ; overflow u64.  The span helper distinguishes end-address wrap from an
+    ; otherwise unmapped/cross-window DMA interval.
+    mov r10, r12
+    lsli r10, 9
+    mov r11, r15
+    addi r11, 16
+    ldn r9, r11
+    ldi64 r11, disk_dma_span_status
+    call.l r11
+    cmpi r0, 0
+    lbrne disk_transfer_release
+
+disk_transfer_next_chunk:
+    mov r11, r15
+    addi r11, 24
+    ldn r12, r11
+    cmpi r12, 0
+    lbreq disk_transfer_success
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 40
+    ldn r10, r11
+    cmp r7, r10
+    lbrne disk_transfer_media_removed
+    ldi r7, 255
+    cmp r12, r7
+    brle disk_transfer_batch_ready
+    ldi r12, 255
+disk_transfer_batch_ready:
+    mov r11, r15
+    addi r11, 48
+    str r11, r12              ; +48 active batch
+
+    ldn r0, r15
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi64 r11, disk_command_checked
+    call.l r11                ; R0=result, R7=TRANSFERRED
+
+    ; The attachment can change after the pre-command generation check but
+    ; before CMD acceptance.  Preserve the terminal result/count across a
+    ; byte-serial post-command MEDIA_GEN read and reject that mixed-media
+    ; chunk before accepting or advancing it.
+    mov r1, r0
+    mov r13, r7
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    mov r11, r15
+    addi r11, 40
+    ldn r10, r11
+    cmp r7, r10
+    lbrne disk_transfer_media_changed_after_command
+    mov r0, r1
+    mov r7, r13
+
+    ; TRANSFERRED may never exceed the accepted controller chunk.
+    mov r11, r15
+    addi r11, 48
+    ldn r12, r11
+    cmp r7, r12
+    lbrgt disk_transfer_internal
+
+    mov r11, r15
+    addi r11, 32
+    ldn r13, r11
+    add r13, r7
+    str r11, r13
+    cmpi r0, 0
+    lbrne disk_transfer_mark_partial
+    cmp r7, r12
+    lbrne disk_transfer_internal
+
+    ; Advance only after a fully successful chunk.
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11
+    add r1, r12
+    str r11, r1
+    addi r11, 8
+    ldn r9, r11
     mov r7, r12
-    lsli r7, 9               ; batch * 512
-    add r9, r7               ; DMA addr += batch * 512
-    sub r13, r12              ; remaining -= batch
-    mov r12, r13              ; R12 = new remaining
-    lbr disk_read_next_batch
-disk_read_all_done:
+    lsli r7, 9
+    add r9, r7
+    str r11, r9
+    addi r11, 8
+    ldn r7, r11
+    sub r7, r12
+    str r11, r7
+    lbr disk_transfer_next_chunk
+
+disk_transfer_media_changed_after_command:
+    ; Count sectors that the changed-media command confirms it affected, but
+    ; never advance the public request onto the replacement attachment.
+    mov r7, r13
+    mov r11, r15
+    addi r11, 48
+    ldn r12, r11
+    cmp r7, r12
+    lbrgt disk_transfer_internal
+    mov r11, r15
+    addi r11, 32
+    ldn r13, r11
+    add r13, r7
+    str r11, r13
+    ldi r0, 0x0B
+    andi r1, 0x80
+    or r0, r1                 ; preserve uncertain controller-side effect
+    lbr disk_transfer_mark_partial
+
+disk_transfer_internal:
+    ldi r0, 0x0E
+disk_transfer_mark_partial:
+    mov r11, r15
+    addi r11, 32
+    ldn r13, r11
+    cmpi r13, 0
+    breq disk_transfer_release
+    ori r0, 0x80
+    lbr disk_transfer_release
+
+disk_transfer_success:
+    ldi r0, 0
+    lbr disk_transfer_release
+disk_transfer_no_media:
+    ldi r0, 0x01
+    lbr disk_transfer_release
+disk_transfer_unsupported:
+    ldi r0, 0x02
+    lbr disk_transfer_release
+disk_transfer_invalid_count:
+    ldi r0, 0x03
+    lbr disk_transfer_release
+disk_transfer_lba_range:
+    ldi r0, 0x04
+    lbr disk_transfer_release
+disk_transfer_media_removed:
+    ldi r0, 0x0B
+    lbr disk_transfer_mark_partial
+
+disk_transfer_release:
+    ; Preserve status across the release helper.
+    subi r15, 8
+    str r15, r0
+    ldi64 r11, disk_lock_release
+    call.l r11
+    ldn r0, r15
+    addi r15, 8
+
+disk_transfer_return_unlocked:
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    addi r11, 8
+    ldn r12, r11
+    addi r11, 8
+    ldn r13, r11
+    addi r15, 56
+    ret.l
+
+; disk_flush_checked_core: checked durability barrier using the same command
+; submission/completion/result path as checked transfers.  Returns R0=status.
+disk_flush_checked_core:
+    ldi64 r11, disk_lock_acquire
+    call.l r11
+    cmpi r0, 0
+    lbrne disk_flush_checked_return_unlocked
+    ldi64 r11, 0xFFFF_FF00_0000_0201
+    ld.b r7, r11
+    andi r7, 0x80
+    cmpi r7, 0
+    breq disk_flush_checked_no_media
+    ldi64 r11, 0xFFFF_FF00_0000_021E
+    ld.b r7, r11
+    andi r7, 0x1C            ; FLUSH + PRECISE_RESULT + COMPLETION
+    cmpi r7, 0x1C
+    brne disk_flush_checked_unsupported
+    ldi r0, 0xFF
+    ldi r1, 0
+    ldi r9, 0
+    ldi r12, 0
+    ldi64 r11, disk_command_checked
+    call.l r11
+    cmpi r0, 0
+    brne disk_flush_checked_release
+    cmpi r7, 0
+    breq disk_flush_checked_release
+    ldi r0, 0x0E             ; FLUSH can never transfer sectors
+    lbr disk_flush_checked_release
+disk_flush_checked_no_media:
+    ldi r0, 0x01
+    lbr disk_flush_checked_release
+disk_flush_checked_unsupported:
+    ldi r0, 0x02
+disk_flush_checked_release:
+    subi r15, 8
+    str r15, r0
+    ldi64 r11, disk_lock_release
+    call.l r11
+    ldn r0, r15
+    addi r15, 8
+disk_flush_checked_return_unlocked:
+    ret.l
+
+; Public checked block operations.
+; DISK-READ-CHECKED ( dma lba count -- completed status )
+w_disk_read_checked:
+    ldn r12, r14
+    mov r11, r14
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi r0, 0x01
+    ldi64 r11, disk_transfer_checked
+    call.l r11
+    addi r14, 8               ; three inputs become two outputs
+    str r14, r0               ; TOS = status
+    mov r11, r14
+    addi r11, 8
+    str r11, r13              ; NOS = completed
+    ret.l
+
+; DISK-WRITE-CHECKED ( dma lba count -- completed status )
+w_disk_write_checked:
+    ldn r12, r14
+    mov r11, r14
+    addi r11, 8
+    ldn r1, r11
+    addi r11, 8
+    ldn r9, r11
+    ldi r0, 0x02
+    ldi64 r11, disk_transfer_checked
+    call.l r11
+    addi r14, 8
+    str r14, r0
+    mov r11, r14
+    addi r11, 8
+    str r11, r13
+    ret.l
+
+; DISK-FLUSH-CHECKED ( -- status )
+w_disk_flush_checked:
+    ldi64 r11, disk_flush_checked_core
+    call.l r11
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; disk_read_sectors: BIOS MP64FS reader backed by the public checked core.
+;   R1 = start sector, R9 = DMA destination, R12 = sector count
+;   Returns R0=status and R13=confirmed sectors.  R1/R9 advance only over
+;   confirmed data.  Callers must not inspect DMA bytes unless R0 is zero.
+disk_read_sectors:
+    ldi r0, 0x01
+    ldi64 r11, disk_transfer_checked
+    call.l r11
     ret.l
 
 ; mp64fs_geometry: validate the single draft MP64FS geometry before using it.
@@ -6594,7 +7211,9 @@ mp64fs_geometry:
     cmp r13, r7
     lbrgt mp64fs_geometry_bad
     ldi64 r11, 0xFFFF_FF00_0000_0211
-    ld.w r7, r11
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    ldi r0, 0                  ; preserve geometry's default invalid result
     cmp r13, r7
     lbrne mp64fs_geometry_bad
 
@@ -6677,6 +7296,8 @@ mp64fs_read_metadata:
     mov r9, r10
     ldi64 r11, disk_read_sectors
     call.l r11
+    cmpi r0, 0
+    brne mp64fs_read_metadata_bad
 
     ldi64 r11, var_mp64fs_dir_buf
     ldn r9, r11
@@ -6687,8 +7308,14 @@ mp64fs_read_metadata:
     ld.h r12, r11
     ldi64 r11, disk_read_sectors
     call.l r11
+    cmpi r0, 0
+    brne mp64fs_read_metadata_bad
     ldi64 r11, var_mp64fs_dir_buf
     ldn r9, r11
+    ldi r0, 1
+    ret.l
+mp64fs_read_metadata_bad:
+    ldi r0, 0
     ret.l
 
 ; mp64fs_metadata_allocated: every reserved metadata sector must be marked
@@ -6933,11 +7560,21 @@ mp64fs_directory_valid_bad:
 ;   The buffer pointer is retained in var_mp64fs_dir_buf because the DMA
 ;   helper advances R9 past each transfer.
 mp64fs_validate_at:
+    ; A mount is several checked requests.  Retain the attachment generation
+    ; so equally-sized media cannot be swapped between superblock, bitmap,
+    ; and directory reads and then published as one mixed filesystem.
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    ldi64 r11, var_mp64fs_media_gen
+    st.w r11, r7
+
     ; Validation keeps the 6144-byte directory and at-most-1024-byte bitmap
     ; live together.  Reject a buffer without room for that complete span
-    ; below the two deepest return cells before issuing any DMA.
+    ; below the deepest checked-I/O call frame before issuing any DMA.
     mov r10, r15
-    subi r10, 16
+    subi r10, 64
+    subi r10, 64
     cmp r9, r10
     lbrgt mp64fs_validate_at_bad
     sub r10, r9
@@ -6951,22 +7588,36 @@ mp64fs_validate_at:
     ldi r12, 1
     ldi64 r11, disk_read_sectors
     call.l r11
+    cmpi r0, 0
+    lbrne mp64fs_validate_at_bad
     ldi64 r11, var_mp64fs_dir_buf
     ldn r9, r11
     ldi64 r11, mp64fs_geometry
     call.l r11
     cmpi r0, 0
-    breq mp64fs_validate_at_bad
+    lbreq mp64fs_validate_at_bad
     ldi64 r11, var_mp64fs_dir_buf
     ldn r9, r11
     ldi64 r11, mp64fs_read_metadata
     call.l r11
+    cmpi r0, 0
+    lbreq mp64fs_validate_at_bad
     ldi64 r11, mp64fs_metadata_allocated
     call.l r11
     cmpi r0, 0
-    breq mp64fs_validate_at_bad
+    lbreq mp64fs_validate_at_bad
     ldi64 r11, mp64fs_directory_valid
     call.l r11
+    cmpi r0, 0
+    lbreq mp64fs_validate_at_bad
+    ldi64 r11, 0xFFFF_FF00_0000_021A
+    ldi64 r0, read_mmio_u32_le
+    call.l r0
+    ldi64 r11, var_mp64fs_media_gen
+    ld.w r10, r11
+    cmp r7, r10
+    lbrne mp64fs_validate_at_bad
+    ldi r0, 1
     ret.l
 mp64fs_validate_at_bad:
     ldi r0, 0
@@ -7136,7 +7787,7 @@ w_fsload_found:
 
     ; The two extents are read contiguously from R2/2.  Bound the complete
     ; sector-rounded DMA footprint below the two FSLOAD state cells and the
-    ; disk helper's live return address before issuing either transfer.  This
+    ; deepest checked-I/O command frame before issuing either transfer.  This
     ; prevents valid large media from wrapping Bank 0 or overwriting control
     ; state.
     ldi64 r10, var_mp64fs_primary_count
@@ -7145,7 +7796,8 @@ w_fsload_found:
     ld.h r7, r10
     add r12, r7
     mov r7, r15
-    subi r7, 24
+    subi r7, 64
+    subi r7, 64
     mov r9, r2
     lsri r9, 1
     cmp r7, r9
@@ -7169,6 +7821,8 @@ w_fsload_found:
     ld.h r12, r10
     ldi64 r11, disk_read_sectors
     call.l r11
+    cmpi r0, 0
+    lbrne w_fsload_data_io_error
 
     ; A fragmented file's validated second extent follows the primary in RAM.
     ; disk_read_sectors leaves R9 immediately after the primary transfer.
@@ -7180,6 +7834,8 @@ w_fsload_found:
     ld.h r1, r11
     ldi64 r11, disk_read_sectors
     call.l r11
+    cmpi r0, 0
+    lbrne w_fsload_data_io_error
 w_fsload_data_ready:
 
     ; Initialize FSLOAD line counter
@@ -7348,6 +8004,14 @@ w_fsload_bad_dir:
 
 w_fsload_too_large:
     ldi64 r10, str_fsload_too_large
+    ldi64 r11, print_str
+    call.l r11
+    ret.l
+
+w_fsload_data_io_error:
+    ; cur_ptr + remaining are the only live FSLOAD state cells here.
+    addi r15, 16
+    ldi64 r10, str_fsload_io_error
     ldi64 r11, print_str
     call.l r11
     ret.l
@@ -14696,9 +15360,36 @@ d_disk_sectors:
     call.l r11
     ret.l
 
+; === DISK-READ-CHECKED ===
+d_disk_read_checked:
+    .dq d_disk_sectors
+    .db 17
+    .ascii "DISK-READ-CHECKED"
+    ldi64 r11, w_disk_read_checked
+    call.l r11
+    ret.l
+
+; === DISK-WRITE-CHECKED ===
+d_disk_write_checked:
+    .dq d_disk_read_checked
+    .db 18
+    .ascii "DISK-WRITE-CHECKED"
+    ldi64 r11, w_disk_write_checked
+    call.l r11
+    ret.l
+
+; === DISK-FLUSH-CHECKED ===
+d_disk_flush_checked:
+    .dq d_disk_write_checked
+    .db 18
+    .ascii "DISK-FLUSH-CHECKED"
+    ldi64 r11, w_disk_flush_checked
+    call.l r11
+    ret.l
+
 ; === MP64FS-VALID? ===
 d_mp64fs_valid:
-    .dq d_disk_sectors
+    .dq d_disk_flush_checked
     .db 13
     .ascii "MP64FS-VALID?"
     ldi r0, 0
@@ -17403,6 +18094,9 @@ var_mp64fs_total:
 var_mp64fs_data_start:
     .dw 0
     .dw 0                    ; align following pointers
+var_mp64fs_media_gen:
+    .dd 0
+    .dd 0                    ; align following pointers
 var_mp64fs_dir_buf:
     .dq 0
 var_mp64fs_bmap_buf:
@@ -17628,6 +18322,8 @@ str_fsload_bad_dir:
     .asciiz "FSLOAD: invalid MP64FS\n"
 str_fsload_too_large:
     .asciiz "FSLOAD: file exceeds RAM buffer\n"
+str_fsload_io_error:
+    .asciiz "FSLOAD: disk I/O failed\n"
 str_fsload_err:
     .asciiz "FSLOAD: not found\n"
 

@@ -66,12 +66,17 @@ module mp64_memory #(
     // ========================================================================
     // CPU FSM states
     // ========================================================================
-    localparam [1:0] MEM_IDLE     = 2'd0;
-    localparam [1:0] MEM_CPU_RESP = 2'd1;
-    localparam [1:0] MEM_CPU_RMW  = 2'd2;
-    localparam [1:0] MEM_EXT_WAIT = 2'd3;
+    localparam [2:0] MEM_IDLE       = 3'd0;
+    localparam [2:0] MEM_CPU_RESP   = 3'd1;
+    localparam [2:0] MEM_CPU_RMW    = 3'd2;
+    localparam [2:0] MEM_EXT_WAIT   = 3'd3;
+    localparam [2:0] MEM_EXT_CANCEL = 3'd4;
 
-    reg [1:0] cpu_state;
+    reg [2:0] cpu_state;
+    // The upstream bus holds cpu_req through the cycle in which it observes
+    // registered cpu_ack.  Remember the accepted request until cpu_req is
+    // sampled low so returning to MEM_IDLE cannot execute it a second time.
+    reg       cpu_req_seen;
 
     // ========================================================================
     // Bank address decode — Tile port
@@ -187,9 +192,9 @@ module mp64_memory #(
     // ========================================================================
     // CPU port — FSM
     // ========================================================================
-    wire cpu_start_internal = cpu_req && cpu_is_internal &&
+    wire cpu_start_internal = cpu_req && !cpu_req_seen && cpu_is_internal &&
                               (cpu_state == MEM_IDLE);
-    wire cpu_start_external = cpu_req && !cpu_is_internal &&
+    wire cpu_start_external = cpu_req && !cpu_req_seen && !cpu_is_internal &&
                               (cpu_state == MEM_IDLE);
     wire cpu_is_subword     = (cpu_size != BUS_DWORD);
 
@@ -253,6 +258,7 @@ module mp64_memory #(
     always @(posedge clk) begin
         if (!rst_n) begin
             cpu_state      <= MEM_IDLE;
+            cpu_req_seen   <= 1'b0;
             cpu_ack        <= 1'b0;
             cpu_rdata      <= 64'd0;
             cpu_bank_sel_r <= 2'd0;
@@ -265,6 +271,9 @@ module mp64_memory #(
         end else begin
             cpu_ack       <= 1'b0;
 
+            if (!cpu_req)
+                cpu_req_seen <= 1'b0;
+
             case (cpu_state)
 
                 // ============================================================
@@ -272,6 +281,7 @@ module mp64_memory #(
                 // ============================================================
                 MEM_IDLE: begin
                     if (cpu_start_internal) begin
+                        cpu_req_seen   <= 1'b1;
                         cpu_bank_sel_r <= cpu_bank_sel;
 
                         if (cpu_wen && cpu_is_subword) begin
@@ -284,6 +294,7 @@ module mp64_memory #(
                             cpu_state     <= MEM_CPU_RESP;
                         end
                     end else if (cpu_start_external) begin
+                        cpu_req_seen <= 1'b1;
                         ext_req   <= 1'b1;
                         ext_addr  <= cpu_addr;
                         ext_wdata <= cpu_wdata;
@@ -317,12 +328,24 @@ module mp64_memory #(
                 // EXT_WAIT — waiting for external memory ack
                 // ============================================================
                 MEM_EXT_WAIT: begin
-                    if (ext_ack) begin
+                    if (!cpu_req) begin
+                        // The bus can withdraw a request after its own timeout.
+                        // Cancel downstream and drain any late ACK before the
+                        // next external transaction is eligible.
+                        ext_req   <= 1'b0;
+                        cpu_state <= MEM_EXT_CANCEL;
+                    end else if (ext_ack) begin
                         ext_req   <= 1'b0;
                         cpu_ack   <= 1'b1;
                         cpu_rdata <= ext_rdata;
                         cpu_state <= MEM_IDLE;
                     end
+                end
+
+                MEM_EXT_CANCEL: begin
+                    ext_req <= 1'b0;
+                    if (!ext_ack)
+                        cpu_state <= MEM_IDLE;
                 end
 
                 default: cpu_state <= MEM_IDLE;

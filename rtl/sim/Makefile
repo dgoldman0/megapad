@@ -47,8 +47,8 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
-        opcodes qos cpu_micro multicore_smoke
+        peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
+        opcodes qos cpu_micro multicore_smoke soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -267,7 +267,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
 # Phase 4: Peripherals, Crypto & GPU
 # ==========================================================================
 
-phase4: peripherals crypto ntt kem nic mailbox trng tile
+phase4: peripherals disk_controller disk_bus_dma crypto ntt kem nic mailbox trng tile
 	@echo ""
 	@echo "--- Phase 4 complete ---"
 
@@ -277,6 +277,28 @@ peripherals: tb_peripherals.vvp
 
 tb_peripherals.vvp: tb_peripherals.v $(PERIPH)/mp64_timer.v \
                     $(PERIPH)/mp64_uart.v $(PERIPH)/mp64_disk.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Checked storage controller with behavioral SDHC and byte DMA ---
+disk_controller: tb_disk_controller.vvp
+	$(VVP) $<
+
+disk_lint:
+	$(VERILATOR) --lint-only --Wall -Wno-fatal -Wno-UNUSEDPARAM \
+		-I../pkg $(PERIPH)/mp64_disk.v
+
+tb_disk_controller.vvp: tb_disk_controller.v sd_spi_model.v \
+                        $(PERIPH)/mp64_disk.v ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+disk_bus_dma: tb_disk_bus_dma.vvp
+	$(VVP) $<
+
+tb_disk_bus_dma.vvp: tb_disk_bus_dma.v sd_spi_model.v \
+                     $(PERIPH)/mp64_disk.v $(BUS)/mp64_bus.v \
+                     $(MEM)/mp64_memory.v $(MEM)/mp64_extmem.v \
+                     $(PRIM)/mp64_sram_dp.v \
+                     ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Crypto (SHA-3, AES) ---
@@ -346,7 +368,7 @@ tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
 # Phase 5: Integration (QoS, multicore, SoC)
 # ==========================================================================
 
-phase5: qos multicore_smoke
+phase5: qos multicore_smoke soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -371,3 +393,12 @@ tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \
                         $(BUS)/mp64_bus.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Standalone full-SoC elaboration (catches integration/port drift) ---
+SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
+                            $(PERIPH)/*.v $(CRYPTO)/*.v $(GPU)/*.v $(PRIM)/*.v)
+
+soc_elaborate: mp64_soc.vvp
+
+mp64_soc.vvp: $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s mp64_soc -o $@ $(SOC_ELAB_SRC)

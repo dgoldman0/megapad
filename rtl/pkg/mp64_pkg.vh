@@ -376,8 +376,14 @@ localparam [31:0] MP64_HBW_BASE_ADDR = 32'hFFD0_0000;
 // Bank 3: 0xFFF0_0000 – 0xFFFF_FFFF
 
 // External memory limit
+localparam [31:0] MP64_EXT_MEM_BASE = 32'h0010_0000;
 localparam [31:0] MP64_EXT_MEM_MAX = MP64_HBW_BASE_ADDR;
 localparam MP64_EXT_BURST_LEN     = 8;            // 8-beat = 64 bytes
+
+// Dedicated framebuffer window.  It is bus-backed by a distinct physical
+// allocation even on platforms where external RAM and VRAM share a PHY.
+localparam [31:0] MP64_VRAM_BASE_ADDR = 32'hFF00_0000;
+localparam [31:0] MP64_VRAM_DEFAULT_SIZE = 32'h0040_0000;
 
 // MMIO
 localparam [63:0] MP64_MMIO_BASE = 64'hFFFF_FF00_0000_0000;
@@ -417,6 +423,23 @@ localparam [3:0] TIMER_CMP    = 4'h4;
 localparam [3:0] TIMER_CTRL   = 4'h8;
 localparam [3:0] TIMER_STATUS = 4'h9;
 
+// --- RTC registers ---
+localparam [4:0] RTC_UPTIME  = 5'h00;
+localparam [4:0] RTC_EPOCH   = 5'h08;
+localparam [4:0] RTC_SEC     = 5'h10;
+localparam [4:0] RTC_MIN     = 5'h11;
+localparam [4:0] RTC_HOUR    = 5'h12;
+localparam [4:0] RTC_DAY     = 5'h13;
+localparam [4:0] RTC_MON     = 5'h14;
+localparam [4:0] RTC_YEAR_LO = 5'h15;
+localparam [4:0] RTC_YEAR_HI = 5'h16;
+localparam [4:0] RTC_DOW     = 5'h17;
+localparam [4:0] RTC_CTRL    = 5'h18;
+localparam [4:0] RTC_STATUS  = 5'h19;
+localparam [4:0] RTC_ALARM_S = 5'h1A;
+localparam [4:0] RTC_ALARM_M = 5'h1B;
+localparam [4:0] RTC_ALARM_H = 5'h1C;
+
 // --- Disk registers (5-bit offsets give capacity its own addresses) ---
 localparam [4:0] DISK_CMD      = 5'h00;
 localparam [4:0] DISK_STATUS   = 5'h01;
@@ -426,6 +449,35 @@ localparam [4:0] DISK_SECN     = 5'h0E;
 localparam [4:0] DISK_DATA     = 5'h0F;
 localparam [4:0] DISK_DMA_PUSH = 5'h10;
 localparam [4:0] DISK_TOTAL    = 5'h11;  // +0x11..+0x14, u32 LE sectors
+localparam [4:0] DISK_RESULT   = 5'h15;
+localparam [4:0] DISK_COMPLETE = 5'h16;  // +0x16..+0x19, u32 LE
+localparam [4:0] DISK_MEDIA_GEN= 5'h1A;  // +0x1A..+0x1D, u32 LE
+localparam [4:0] DISK_CAPS     = 5'h1E;
+localparam [4:0] DISK_TRANSFERRED = 5'h1F;
+
+// Disk commands
+localparam [7:0] DISK_CMD_READ   = 8'h01;
+localparam [7:0] DISK_CMD_WRITE  = 8'h02;
+localparam [7:0] DISK_CMD_STATUS = 8'h03;
+localparam [7:0] DISK_CMD_RESET  = 8'h04;
+localparam [7:0] DISK_CMD_FLUSH  = 8'hFF;
+
+// Disk RESULT low seven bits.  RESULT[7] reports a partial transfer.
+localparam [6:0] DISK_RES_OK               = 7'h00;
+localparam [6:0] DISK_RES_NO_MEDIA         = 7'h01;
+localparam [6:0] DISK_RES_UNSUPPORTED      = 7'h02;
+localparam [6:0] DISK_RES_INVALID_COUNT    = 7'h03;
+localparam [6:0] DISK_RES_LBA_RANGE        = 7'h04;
+localparam [6:0] DISK_RES_ADDRESS_OVERFLOW = 7'h05;
+localparam [6:0] DISK_RES_DMA_INVALID      = 7'h06;
+localparam [6:0] DISK_RES_DMA_FAILURE      = 7'h07;
+localparam [6:0] DISK_RES_WRITE_PROTECTED  = 7'h08;
+localparam [6:0] DISK_RES_MEDIA_FAILURE    = 7'h09;
+localparam [6:0] DISK_RES_TIMEOUT          = 7'h0A;
+localparam [6:0] DISK_RES_MEDIA_REMOVED    = 7'h0B;
+localparam [6:0] DISK_RES_RESET_ABORTED    = 7'h0C;
+localparam [6:0] DISK_RES_FLUSH_FAILURE    = 7'h0D;
+localparam [6:0] DISK_RES_INTERNAL         = 7'h0E;
 
 // --- NIC registers ---
 localparam [3:0] NIC_CMD      = 4'h0;

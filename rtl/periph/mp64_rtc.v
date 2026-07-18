@@ -32,7 +32,9 @@
 
 `include "mp64_pkg.vh"
 
-module mp64_rtc (
+module mp64_rtc #(
+    parameter integer CLOCK_HZ = 100_000_000
+) (
     input  wire        clk,
     input  wire        rst_n,
 

@@ -99,6 +99,8 @@ module mp64_platform_sim #(
         .sd_mosi        (),
         .sd_miso        (1'b1),
         .sd_cs_n        (),
+        .sd_card_present(1'b0),
+        .sd_write_protected(1'b0),
 
         // External memory (tied off)
         .phy_req        (),

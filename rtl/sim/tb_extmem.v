@@ -31,6 +31,7 @@ module tb_extmem;
     reg  [31:0]  cpu_addr;
     reg  [63:0]  cpu_wdata;
     reg          cpu_wen;
+    reg  [1:0]   cpu_size;
     wire [63:0]  cpu_rdata;
     wire         cpu_ack;
 
@@ -85,6 +86,7 @@ module tb_extmem;
         .cpu_addr      (cpu_addr),
         .cpu_wdata     (cpu_wdata),
         .cpu_wen       (cpu_wen),
+        .cpu_size      (cpu_size),
         .cpu_rdata     (cpu_rdata),
         .cpu_ack       (cpu_ack),
         .tile_req      (tile_req),
@@ -112,6 +114,7 @@ module tb_extmem;
             cpu_addr   <= 32'd0;
             cpu_wdata  <= 64'd0;
             cpu_wen    <= 1'b0;
+            cpu_size   <= 2'd3;
             tile_req   <= 1'b0;
             tile_addr  <= 32'd0;
             tile_wdata <= 512'd0;
@@ -170,14 +173,16 @@ module tb_extmem;
         $display("--- Test 2: CPU read ---");
         @(negedge clk);
         cpu_req   <= 1'b1;
-        cpu_addr  <= 32'h8000_0100;
+        cpu_addr  <= 32'h8000_0103;
         cpu_wdata <= 64'd0;
         cpu_wen   <= 1'b0;
+        cpu_size  <= 2'd0;
 
         wait_phy_req;
         check("phy_req for CPU read",      phy_req       == 1'b1);
         check("phy_burst_len is 1",        phy_burst_len == 4'd1);
-        check("phy_addr correct",          phy_addr      == 32'h8000_0100);
+        check("unaligned CPU read uses aligned PHY word",
+              phy_addr == 32'h8000_0100);
         check("phy_wen is 0",              phy_wen       == 1'b0);
 
         // PHY responds
@@ -199,6 +204,7 @@ module tb_extmem;
         cpu_addr  <= 32'h8000_0200;
         cpu_wdata <= 64'hCAFE_BABE_0000_0001;
         cpu_wen   <= 1'b1;
+        cpu_size  <= 2'd3;
 
         wait_phy_req;
         check("phy_req for CPU write", phy_req   == 1'b1);
@@ -209,6 +215,101 @@ module tb_extmem;
         phy_ack <= 1'b1;
         @(posedge clk); #1;
         check("cpu_ack for write", cpu_ack == 1'b1);
+        @(negedge clk);
+        clear_all;
+        @(negedge clk);
+
+        // ---- Test 3b: CPU byte write uses aligned PHY read-modify-write ----
+        $display("--- Test 3b: CPU byte RMW and held request ---");
+        @(negedge clk);
+        cpu_req   <= 1'b1;
+        cpu_addr  <= 32'h8000_0203;
+        cpu_wdata <= 64'h0000_0000_0000_00AA;
+        cpu_wen   <= 1'b1;
+        cpu_size  <= 2'd0;
+
+        wait_phy_req;
+        check("byte write starts with PHY read", phy_req && !phy_wen);
+        check("byte RMW read address is 8-byte aligned",
+              phy_addr == 32'h8000_0200);
+
+        // Return the containing word.  Lane 3 (old 0x55) becomes 0xAA.
+        @(negedge clk);
+        phy_rdata <= 64'h1122_3344_5566_7788;
+        phy_ack   <= 1'b1;
+        @(posedge clk); #1;
+        check("RMW inserts a gap between PHY read and write", !phy_req);
+        check("byte RMW preserves all untouched neighbors",
+              phy_wdata == 64'h1122_3344_AA66_7788);
+
+        @(negedge clk);
+        phy_ack <= 1'b0;
+        @(posedge clk); #1;
+        check("byte RMW issues aligned full-word PHY write",
+              phy_req && phy_wen && phy_addr == 32'h8000_0200);
+
+        @(negedge clk);
+        phy_ack <= 1'b1;
+        @(posedge clk); #1;
+        check("CPU ACK waits for RMW write commit", cpu_ack && !phy_req);
+
+        // Keep cpu_req asserted beyond registered ACK, as mp64_memory does.
+        // The accepted transfer must not re-enter IDLE.
+        @(negedge clk);
+        phy_ack <= 1'b0;
+        begin : blk_held_cpu_req
+            integer held_cycle;
+            reg no_duplicate;
+            no_duplicate = 1'b1;
+            for (held_cycle = 0; held_cycle < 4; held_cycle = held_cycle + 1) begin
+                @(posedge clk); #1;
+                if (phy_req || cpu_ack)
+                    no_duplicate = 1'b0;
+            end
+            check("held CPU request is accepted exactly once", no_duplicate);
+        end
+        @(negedge clk);
+        clear_all;
+        @(negedge clk);
+
+        // ---- Test 3c: withdrawn request cancels and drains late PHY ACK ----
+        $display("--- Test 3c: CPU cancellation and recovery ---");
+        @(negedge clk);
+        cpu_req  <= 1'b1;
+        cpu_addr <= 32'h8000_0305;
+        cpu_wen  <= 1'b0;
+        cpu_size <= 2'd0;
+        wait_phy_req;
+        check("unresponsive CPU read reaches PHY", phy_req && !phy_wen);
+
+        @(negedge clk);
+        cpu_req <= 1'b0;
+        @(posedge clk); #1;
+        check("withdrawn CPU request cancels PHY request", !phy_req && !cpu_ack);
+
+        // A tardy response must be drained, not completed or reused.
+        @(negedge clk);
+        phy_ack   <= 1'b1;
+        phy_rdata <= 64'hBAD0_BAD0_BAD0_BAD0;
+        @(posedge clk); #1;
+        check("late PHY ACK is ignored during cancellation", !phy_req && !cpu_ack);
+        @(negedge clk);
+        phy_ack <= 1'b0;
+        @(posedge clk); #1;
+
+        // A subsequent request must complete normally after the drain.
+        @(negedge clk);
+        cpu_req  <= 1'b1;
+        cpu_addr <= 32'h8000_0407;
+        wait_phy_req;
+        check("controller accepts request after cancellation",
+              phy_req && phy_addr == 32'h8000_0400);
+        @(negedge clk);
+        phy_rdata <= 64'h0123_4567_89AB_CDEF;
+        phy_ack   <= 1'b1;
+        @(posedge clk); #1;
+        check("post-cancel request returns its own response",
+              cpu_ack && cpu_rdata == 64'h0123_4567_89AB_CDEF);
         @(negedge clk);
         clear_all;
         @(negedge clk);
@@ -338,7 +439,7 @@ module tb_extmem;
         $display("=== tb_extmem: %0d passed, %0d failed ===",
                  pass_count, fail_count);
         if (fail_count > 0)
-            $display("*** FAILURES DETECTED ***");
+            $fatal(1, "tb_extmem failures detected");
 
         #100;
         $finish;

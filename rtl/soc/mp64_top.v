@@ -47,6 +47,8 @@ module mp64_top #(
     output wire        sd_mosi,
     input  wire        sd_miso,
     output wire        sd_cs_n,
+    input  wire        sd_card_present,
+    input  wire        sd_write_protected,
 
     // === External memory PHY ===
     output wire        phy_req,
@@ -107,6 +109,8 @@ module mp64_top #(
         .sd_mosi       (sd_mosi),
         .sd_miso       (sd_miso),
         .sd_cs_n       (sd_cs_n),
+        .sd_card_present      (sd_card_present),
+        .sd_write_protected   (sd_write_protected),
 
         // NIC PHY
         .nic_tx_valid  (nic_tx_valid),

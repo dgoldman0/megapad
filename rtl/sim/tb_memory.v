@@ -13,7 +13,7 @@
 //   6.  Tile 512-bit write + read-back (Bank 0)
 //   7.  HBW bank 1 CPU write + read
 //   8.  HBW bank 2 tile write + read
-//   9.  External forward (address outside all banks)
+//   9.  Held CPU requests execute once (internal RMW and external forward)
 //  10.  Concurrent tile + CPU on different banks
 //
 
@@ -63,6 +63,8 @@ module tb_memory;
     // Assertions
     // ========================================================================
     integer pass_count, fail_count, test_num;
+    integer bank0_ce_count, ext_req_rise_count;
+    reg     ext_req_d;
 
     task check;
         input [511:0] label;
@@ -84,6 +86,23 @@ module tb_memory;
     // ========================================================================
     initial clk = 0;
     always #CLK_HALF clk = ~clk;
+
+    // Count physical target transactions, not just CPU acknowledgements.  A
+    // held request must not start another SRAM operation or external request
+    // while the registered ACK is making its way back through the bus.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            bank0_ce_count   = 0;
+            ext_req_rise_count = 0;
+            ext_req_d        <= 1'b0;
+        end else begin
+            if (dut.bank_b_ce[0])
+                bank0_ce_count = bank0_ce_count + 1;
+            if (ext_req && !ext_req_d)
+                ext_req_rise_count = ext_req_rise_count + 1;
+            ext_req_d <= ext_req;
+        end
+    end
 
     // ========================================================================
     // DUT
@@ -295,6 +314,41 @@ module tb_memory;
         cpu_read(64'h0000_0000_0000_0100, SZ_DWORD, rd64);
         check("word RMW correct", rd64 == 64'hDEAD_BEEF_0000_0000);
 
+        // Keep REQ asserted well beyond ACK, matching the registered bus
+        // master's release timing.  The byte update must remain exactly one
+        // SRAM read plus one SRAM write.
+        $display("--- Test 5b: Held internal request is one-shot ---");
+        cpu_write(64'h0000_0000_0000_0180,
+                  64'h1122_3344_5566_7788, SZ_DWORD);
+        begin : blk_t5b
+            integer ce_before;
+            integer wd;
+            ce_before = bank0_ce_count;
+            @(negedge clk);
+            cpu_req   <= 1'b1;
+            cpu_addr  <= 64'h0000_0000_0000_0183;
+            cpu_wdata <= 64'h0000_0000_0000_00AA;
+            cpu_wen   <= 1'b1;
+            cpu_size  <= SZ_BYTE;
+            wd = 0;
+            while (!cpu_ack && wd < 50) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+            repeat (4) begin
+                @(posedge clk); #1;
+            end
+            check("held byte request performs one physical RMW",
+                  (bank0_ce_count - ce_before) == 2);
+            @(negedge clk);
+            cpu_req <= 1'b0;
+            cpu_wen <= 1'b0;
+            @(negedge clk);
+        end
+        cpu_read(64'h0000_0000_0000_0180, SZ_DWORD, rd64);
+        check("held byte request updates exactly one lane",
+              rd64 == 64'h1122_3344_AA66_7788);
+
         // ---- Test 6: Tile 512-bit write + read (Bank 0) ----
         $display("--- Test 6: Tile write+read ---");
         begin : blk_t6
@@ -348,7 +402,38 @@ module tb_memory;
         // Posedge: FSM processes ext_ack → cpu_ack<=1, cpu_state<=IDLE
         @(posedge clk); #1;
         check("ext rdata returned", cpu_rdata == 64'hE00E_0A10);
-        // Clear cpu_req and ext_ack before next posedge to prevent FSM re-entry
+        // Leave cpu_req held after ACK: the memory boundary must suppress a
+        // second external pulse until it observes REQ low.
+        @(negedge clk);
+        ext_ack <= 1'b0;
+        repeat (4) begin
+            @(posedge clk); #1;
+        end
+        check("held external request produces one target transaction",
+              ext_req_rise_count == 1);
+        @(negedge clk);
+        cpu_req <= 1'b0;
+        @(negedge clk);
+
+        // Once REQ has dropped, a new external request must be accepted.
+        @(negedge clk);
+        cpu_req  <= 1'b1;
+        cpu_addr <= 64'h0000_0000_8000_0008;
+        begin : blk_t9_recovery
+            integer wd;
+            wd = 0;
+            while (!ext_req && wd < 50) begin
+                @(posedge clk); #1;
+                wd = wd + 1;
+            end
+        end
+        @(posedge clk); #1;
+        check("new external request is accepted after held REQ drops",
+              ext_req && (ext_req_rise_count == 2));
+        @(negedge clk);
+        ext_rdata <= 64'hA55A_5AA5_1234_5678;
+        ext_ack   <= 1'b1;
+        @(posedge clk); #1;
         @(negedge clk);
         ext_ack <= 1'b0;
         cpu_req <= 1'b0;
@@ -404,7 +489,7 @@ module tb_memory;
         $display("=== tb_memory: %0d passed, %0d failed ===",
                  pass_count, fail_count);
         if (fail_count > 0)
-            $display("*** FAILURES DETECTED ***");
+            $fatal(1, "*** FAILURES DETECTED ***");
 
         #100;
         $finish;

@@ -313,6 +313,7 @@ class MegapadSystem:
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
         self.hbw_size = hbw_size          # Banks 1–3 (HBW math RAM)
+        self.hbw_end = (HBW_BASE + hbw_size) if hbw_size > 0 else 0
         self.ext_mem_size = ext_mem_size  # External memory (HyperRAM/SDRAM)
         self.vram_size = vram_size        # Dedicated VRAM
 
@@ -475,6 +476,7 @@ class MegapadSystem:
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read
         self.storage._mem_write = self._raw_mem_write
+        self.storage._mem_span_valid = self._raw_mem_span_valid
         self.audio._mem_read = self._raw_mem_read
         self.audio._mem_span_valid = self._raw_mem_span_valid
 
@@ -635,6 +637,7 @@ class MegapadSystem:
         bus = self.bus
         hbw_mem = self._hbw_mem
         hbw_size = self.hbw_size
+        hbw_end = self.hbw_end
         ext_mem = self._ext_mem
         ext_mem_size = self.ext_mem_size
         ext_mem_base = self.ext_mem_base
@@ -664,7 +667,7 @@ class MegapadSystem:
                 return cluster.spad_read8(addr & 0xFFFF_FFFF)
             if vram_size > 0 and vram_base <= addr < vram_end:
                 return vram_mem[addr - vram_base]
-            if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+            if hbw_size > 0 and HBW_BASE <= addr < hbw_end:
                 return hbw_mem[addr - HBW_BASE]
             if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
                 return ext_mem[addr - ext_mem_base]
@@ -688,7 +691,7 @@ class MegapadSystem:
             if vram_size > 0 and vram_base <= addr < vram_end:
                 vram_mem[addr - vram_base] = val & 0xFF
                 return
-            if hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+            if hbw_size > 0 and HBW_BASE <= addr < hbw_end:
                 hbw_mem[addr - HBW_BASE] = val & 0xFF
                 return
             if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
@@ -753,7 +756,7 @@ class MegapadSystem:
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
             return self._vram_mem[addr - self.vram_base]
-        if self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+        if self.hbw_size > 0 and HBW_BASE <= addr < self.hbw_end:
             return self._hbw_mem[addr - HBW_BASE]
         if self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
             return self._ext_mem[addr - self.ext_mem_base]
@@ -771,7 +774,7 @@ class MegapadSystem:
             (0, self.ram_size),
         ]
         if self.hbw_size > 0:
-            regions.append((HBW_BASE, HBW_BASE + self.hbw_size))
+            regions.append((HBW_BASE, self.hbw_end))
         if self.ext_mem_size > 0:
             regions.append((self.ext_mem_base, self.ext_mem_end))
         if self.vram_size > 0:
@@ -783,7 +786,7 @@ class MegapadSystem:
         addr = u64(addr)
         if self.vram_size > 0 and self.vram_base <= addr < self.vram_end:
             self._vram_mem[addr - self.vram_base] = val & 0xFF
-        elif self.hbw_size > 0 and HBW_BASE <= addr < HBW_END:
+        elif self.hbw_size > 0 and HBW_BASE <= addr < self.hbw_end:
             self._hbw_mem[addr - HBW_BASE] = val & 0xFF
         elif self.ext_mem_size > 0 and self.ext_mem_base <= addr < self.ext_mem_end:
             self._ext_mem[addr - self.ext_mem_base] = val & 0xFF
@@ -812,7 +815,7 @@ class MegapadSystem:
                 count = min(total - pos, self.vram_end - target)
                 self._vram_mem[offset:offset + count] = payload[pos:pos + count]
             elif (self.hbw_size > 0
-                    and HBW_BASE <= target < HBW_BASE + self.hbw_size):
+                    and HBW_BASE <= target < self.hbw_end):
                 offset = target - HBW_BASE
                 count = min(total - pos, self.hbw_size - offset)
                 self._hbw_mem[offset:offset + count] = payload[pos:pos + count]
@@ -847,6 +850,7 @@ class MegapadSystem:
         Micro-cores start halted — they are only activated when their
         cluster is enabled via the SysInfo CLUSTER_EN register.
         """
+        self.storage.reset()
         self.audio.reset()
         for cluster in self.clusters:
             cluster.enabled = False

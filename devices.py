@@ -19,9 +19,11 @@ these through the MMIO dispatch layer in system.py.
 """
 
 from __future__ import annotations
+import os
 import socket
 import time
 import threading
+from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 from collections import deque
 
@@ -411,8 +413,8 @@ class Timer(Device):
 # Emulates a simple sector-based storage device backed by a host file.
 #
 # Register map (offsets from STORAGE_BASE):
-#   0x00  CMD       (W)  — command: 0x01=READ, 0x02=WRITE, 0x03=STATUS
-#   0x01  STATUS    (R)  — bit 0: busy, bit 1: error, bit 7: present
+#   0x00  CMD       (W)  — 01=READ, 02=WRITE, 03=STATUS, 04=RESET, FF=FLUSH
+#   0x01  STATUS  (R/W1C) — busy/error/rejected/result/media/write-protect/present
 #   0x02  SECTOR_0  (RW) — sector number byte 0 (LSB)
 #   0x03  SECTOR_1  (RW) — sector number byte 1
 #   0x04  SECTOR_2  (RW) — sector number byte 2
@@ -426,20 +428,109 @@ class Timer(Device):
 #   0x0C  DMA_ADDR_6 (RW)
 #   0x0D  DMA_ADDR_7 (RW)
 #   0x0E  SEC_COUNT  (RW) — number of sectors to transfer (1-255)
-#   0x0F  DATA       (RW) — byte-at-a-time data port (alternative to DMA)
-#   0x10  DMA_PUSH   (W)  — byte-push: writes accumulate LE into DMA_ADDR
-#   0x11  TOTAL_0    (R)   — attached media sector count, u32 LE
-#   0x12  TOTAL_1    (R)
-#   0x13  TOTAL_2    (R)
-#   0x14  TOTAL_3    (R)
+#   0x0F  DATA       (RW) — legacy diagnostic PIO byte port
+#   0x10  DMA_PUSH    (W)  — byte-push: writes accumulate LE into DMA_ADDR
+#   0x11  TOTAL_0     (R)  — attached media sector count, u32 LE
+#   0x12  TOTAL_1     (R)
+#   0x13  TOTAL_2     (R)
+#   0x14  TOTAL_3     (R)
+#   0x15  RESULT      (R)  — terminal result; bit 7 means partial/may-applied
+#   0x16  COMPLETE_0  (R)  — accepted-command completion generation, u32 LE
+#   0x17  COMPLETE_1  (R)
+#   0x18  COMPLETE_2  (R)
+#   0x19  COMPLETE_3  (R)
+#   0x1A  MEDIA_GEN_0 (R)  — media attachment generation, u32 LE
+#   0x1B  MEDIA_GEN_1 (R)
+#   0x1C  MEDIA_GEN_2 (R)
+#   0x1D  MEDIA_GEN_3 (R)
+#   0x1E  CAPS        (R)  — controller capability bits
+#   0x1F  TRANSFERRED (R)  — fully completed sectors in the last command
 
 SECTOR_SIZE = 512
 
+STORAGE_CMD_READ = 0x01
+STORAGE_CMD_WRITE = 0x02
+STORAGE_CMD_STATUS = 0x03
+STORAGE_CMD_RESET = 0x04
+STORAGE_CMD_FLUSH = 0xFF
+
+STORAGE_STATUS_BUSY = 0x01
+STORAGE_STATUS_ERROR = 0x02
+STORAGE_STATUS_REJECTED = 0x04
+STORAGE_STATUS_RESULT_VALID = 0x08
+STORAGE_STATUS_MEDIA_CHANGED = 0x10
+STORAGE_STATUS_WRITE_PROTECTED = 0x20
+STORAGE_STATUS_PRESENT = 0x80
+
+STORAGE_RESULT_PARTIAL = 0x80
+STORAGE_RESULT_OK = 0x00
+STORAGE_RESULT_NO_MEDIA = 0x01
+STORAGE_RESULT_UNSUPPORTED = 0x02
+STORAGE_RESULT_INVALID_COUNT = 0x03
+STORAGE_RESULT_LBA_RANGE = 0x04
+STORAGE_RESULT_ADDRESS_OVERFLOW = 0x05
+STORAGE_RESULT_DMA_INVALID = 0x06
+STORAGE_RESULT_DMA_FAILURE = 0x07
+STORAGE_RESULT_WRITE_PROTECTED = 0x08
+STORAGE_RESULT_MEDIA_FAILURE = 0x09
+STORAGE_RESULT_TIMEOUT = 0x0A
+STORAGE_RESULT_MEDIA_REMOVED = 0x0B
+STORAGE_RESULT_RESET_ABORTED = 0x0C
+STORAGE_RESULT_FLUSH_FAILURE = 0x0D
+STORAGE_RESULT_INTERNAL = 0x0E
+
+STORAGE_CAP_READ = 0x01
+STORAGE_CAP_WRITE = 0x02
+STORAGE_CAP_FLUSH = 0x04
+STORAGE_CAP_PRECISE_RESULT = 0x08
+STORAGE_CAP_COMPLETION = 0x10
+STORAGE_CAP_MEDIA_GEN = 0x20
+STORAGE_CAPS = (
+    STORAGE_CAP_READ
+    | STORAGE_CAP_WRITE
+    | STORAGE_CAP_FLUSH
+    | STORAGE_CAP_PRECISE_RESULT
+    | STORAGE_CAP_COMPLETION
+    | STORAGE_CAP_MEDIA_GEN
+)
+
+
+@dataclass(frozen=True)
+class StorageFault:
+    """One-shot, test-only fault injected at a deterministic command stage.
+
+    ``sector_index`` and ``byte_index`` are zero-based within the accepted
+    request.  A field left as ``None`` matches every value.  Stalls are
+    intentionally restricted to the pre-mutation ``accept`` and ``start``
+    stages so releasing a stalled command cannot replay an already-applied
+    side effect.
+    """
+
+    stage: str
+    result: int = STORAGE_RESULT_MEDIA_FAILURE
+    command: Optional[int] = None
+    sector_index: Optional[int] = None
+    byte_index: Optional[int] = None
+    action: str = "fail"
+
 class Storage(Device):
-    """Block device backed by a host file."""
+    """Block device backed by a host file.
+
+    Commands complete synchronously by default, which preserves the existing
+    emulator's fire-and-forget behavior.  The BUSY transition is nevertheless
+    part of the command lifecycle, and a deterministic injected stall makes it
+    observable for ownership, contention, and reset tests.  COMPLETE is the
+    authoritative completion signal, including for an immediately completed
+    command.
+    """
+
+    _FAULT_STAGES = frozenset({
+        "accept", "start", "dma", "media", "write_complete", "flush",
+    })
+    _FAULT_ACTIONS = frozenset({"fail", "stall", "detach"})
 
     def __init__(self, image_path: Optional[str] = None):
-        super().__init__("Storage", STORAGE_BASE, 0x18)
+        super().__init__("Storage", STORAGE_BASE, 0x20)
         self.image_path = image_path
         self._image_data: bytearray = bytearray()
         self._capacity_sectors: int = 0
@@ -447,9 +538,19 @@ class Storage(Device):
         self.dma_addr: int = 0
         self.sec_count: int = 1
         self._dma_push_ctr: int = 0   # byte-push counter (0-7)
-        self.status: int = 0  # bit 7 = present
+        # ``status`` remains as the legacy host-visible PRESENT latch.  The
+        # complete guest status byte is synthesized by read8(STATUS).
+        self.status: int = 0
         self.busy: bool = False
         self.error: bool = False
+        self.rejected: bool = False
+        self.result_valid: bool = False
+        self.media_changed: bool = False
+        self.write_protected: bool = False
+        self.result: int = STORAGE_RESULT_OK
+        self.completion: int = 0
+        self.media_generation: int = 0
+        self.transferred: int = 0
         self.data_port_buf: bytearray = bytearray()
         self.data_port_pos: int = 0
 
@@ -460,12 +561,20 @@ class Storage(Device):
         # Reference to system memory (set by system.py)
         self._mem_read: Optional[callable] = None
         self._mem_write: Optional[callable] = None
+        self._mem_span_valid: Optional[callable] = None
+
+        # A request is (command, LBA, DMA address, count, media generation).
+        self._active_request: Optional[tuple[int, int, int, int, int]] = None
+        self._active_effect: bool = False
+        self._active_transferred: int = 0
+        self._stalled: bool = False
+        self._faults: list[StorageFault] = []
 
         if image_path:
             self.load_image(image_path)
 
-    def load_image(self, path: str):
-        """Load a disk image from file."""
+    @staticmethod
+    def _read_image(path: str) -> bytearray:
         try:
             with open(path, "rb") as f:
                 image_data = bytearray(f.read())
@@ -477,16 +586,41 @@ class Storage(Device):
                 f"storage image size {len(image_data)} is not a multiple "
                 f"of the {SECTOR_SIZE}-byte sector size"
             )
+        if len(image_data) // SECTOR_SIZE > 0xFFFF_FFFF:
+            raise ValueError("storage image exceeds the u32 sector capacity")
+        return image_data
+
+    def load_image(self, path: str):
+        """Attach a disk image, creating a 1 MiB image if it is absent."""
+        image_data = self._read_image(path)
+        self._replace_media(image_data, path)
+
+    def _replace_media(self, image_data: bytearray, path: str):
+        self._abort_for_media_change()
         self._image_data = image_data
         self._capacity_sectors = len(image_data) // SECTOR_SIZE
         self.image_path = path
-        self.status = 0x80  # present
+        self.status = STORAGE_STATUS_PRESENT
+        self.media_generation = (self.media_generation + 1) & 0xFFFF_FFFF
+        self.media_changed = True
 
     def save_image(self):
-        """Flush image data back to host file."""
-        if self.image_path and self._image_data:
+        """Durably flush the complete attached image to its host file.
+
+        Direct host callers see any ``OSError``.  The MMIO FLUSH command maps
+        it to a precise terminal result instead of allowing it to escape the
+        emulator.
+        """
+        if self.image_path is not None and self.status & STORAGE_STATUS_PRESENT:
             with open(self.image_path, "wb") as f:
-                f.write(self._image_data)
+                written = f.write(self._image_data)
+                if written != len(self._image_data):
+                    raise OSError(
+                        f"short storage image write: {written} of "
+                        f"{len(self._image_data)} bytes"
+                    )
+                f.flush()
+                os.fsync(f.fileno())
 
     def swap_image(self, new_path: str, *, save_current: bool = True):
         """Hot-swap to a different disk image.
@@ -495,27 +629,115 @@ class Storage(Device):
         then loads *new_path*.  If *new_path* does not exist a fresh
         empty image is created.
         """
+        image_data = self._read_image(new_path)
         if save_current:
             self.save_image()
-        self.data_port_buf = bytearray()
-        self.data_port_pos = 0
-        self.sector_num = 0
-        self.dma_addr = 0
-        self.sec_count = 1
-        self.busy = False
-        self.error = False
-        self.load_image(new_path)
+        self._replace_media(image_data, new_path)
 
     def detach_image(self, *, save: bool = True):
         """Detach the current disk image."""
         if save:
             self.save_image()
+        self._abort_for_media_change()
         self._image_data = bytearray()
         self._capacity_sectors = 0
         self.image_path = None
         self.status = 0
+        self.media_generation = (self.media_generation + 1) & 0xFFFF_FFFF
+        self.media_changed = True
+
+    def _force_fault_detach(self):
+        """Remove media inside an active injected fault without recursing."""
+        self._image_data = bytearray()
+        self._capacity_sectors = 0
+        self.image_path = None
+        self.status = 0
+        self.media_generation = (self.media_generation + 1) & 0xFFFF_FFFF
+        self.media_changed = True
+
+    def _reset_request_registers(self):
+        self.sector_num = 0
+        self.dma_addr = 0
+        self.sec_count = 1
+        self._dma_push_ctr = 0
         self.data_port_buf = bytearray()
         self.data_port_pos = 0
+
+    def _clear_last_result(self):
+        self.error = False
+        self.result_valid = False
+        self.result = STORAGE_RESULT_OK
+        self.transferred = 0
+
+    def reset(self):
+        """Restore controller power-on state without changing attached media."""
+        self.busy = False
+        self.rejected = False
+        self.media_changed = False
+        self.completion = 0
+        self._active_request = None
+        self._active_effect = False
+        self._active_transferred = 0
+        self._stalled = False
+        self._faults.clear()
+        self._reset_request_registers()
+        self._clear_last_result()
+
+    def inject_fault(
+        self,
+        stage: str,
+        result: int = STORAGE_RESULT_MEDIA_FAILURE,
+        *,
+        command: Optional[int] = None,
+        sector_index: Optional[int] = None,
+        byte_index: Optional[int] = None,
+        action: str = "fail",
+    ) -> StorageFault:
+        """Queue one deterministic, one-shot controller fault for tests."""
+        if stage not in self._FAULT_STAGES:
+            raise ValueError(f"unknown storage fault stage: {stage}")
+        if action not in self._FAULT_ACTIONS:
+            raise ValueError(f"unknown storage fault action: {action}")
+        if action == "stall" and stage not in {"accept", "start"}:
+            raise ValueError("storage stalls are only safe at accept/start")
+        if not 0 <= result <= 0xFF:
+            raise ValueError("storage fault result must fit in one byte")
+        if command is not None and not 0 <= command <= 0xFF:
+            raise ValueError("storage fault command must fit in one byte")
+        if sector_index is not None and sector_index < 0:
+            raise ValueError("storage fault sector index cannot be negative")
+        if byte_index is not None and byte_index < 0:
+            raise ValueError("storage fault byte index cannot be negative")
+        fault = StorageFault(
+            stage=stage,
+            result=result,
+            command=command,
+            sector_index=sector_index,
+            byte_index=byte_index,
+            action=action,
+        )
+        self._faults.append(fault)
+        return fault
+
+    def clear_faults(self):
+        self._faults.clear()
+
+    @property
+    def stalled(self) -> bool:
+        return self._stalled
+
+    @property
+    def active_request(self) -> Optional[tuple[int, int, int, int, int]]:
+        """Immutable snapshot of the active request, or ``None``."""
+        return self._active_request
+
+    def release_stall(self) -> bool:
+        """Resume one command held by a consumed test-only stall fault."""
+        if not self.busy or not self._stalled:
+            return False
+        self._stalled = False
+        self._run_active()
+        return True
 
     @property
     def total_sectors(self) -> int:
@@ -557,12 +779,20 @@ class Storage(Device):
     def read8(self, offset: int) -> int:
         if offset == 0x01:    # STATUS
             s = 0
-            if self._image_data:
-                s |= 0x80    # present
+            if self.status & STORAGE_STATUS_PRESENT:
+                s |= STORAGE_STATUS_PRESENT
             if self.busy:
-                s |= 0x01
+                s |= STORAGE_STATUS_BUSY
             if self.error:
-                s |= 0x02
+                s |= STORAGE_STATUS_ERROR
+            if self.rejected:
+                s |= STORAGE_STATUS_REJECTED
+            if self.result_valid:
+                s |= STORAGE_STATUS_RESULT_VALID
+            if self.media_changed:
+                s |= STORAGE_STATUS_MEDIA_CHANGED
+            if self.write_protected:
+                s |= STORAGE_STATUS_WRITE_PROTECTED
             return s
         if 0x02 <= offset <= 0x05:
             return (self.sector_num >> (8 * (offset - 0x02))) & 0xFF
@@ -578,12 +808,54 @@ class Storage(Device):
             return 0
         if 0x11 <= offset <= 0x14:
             return (self.total_sectors >> (8 * (offset - 0x11))) & 0xFF
+        if offset == 0x15:
+            return self.result & 0xFF
+        if 0x16 <= offset <= 0x19:
+            return (self.completion >> (8 * (offset - 0x16))) & 0xFF
+        if 0x1A <= offset <= 0x1D:
+            return (self.media_generation >> (8 * (offset - 0x1A))) & 0xFF
+        if offset == 0x1E:
+            return STORAGE_CAPS
+        if offset == 0x1F:
+            return self.transferred & 0xFF
         return 0
 
     def write8(self, offset: int, value: int):
         value &= 0xFF
+
+        # RESET is the only command allowed to take ownership from an active
+        # request.  Setup-register rewrites and other commands are rejected;
+        # STATUS W1C remains usable, while read-only/diagnostic writes remain
+        # harmless no-ops.
+        if self.busy:
+            if offset == 0x00:
+                if value == STORAGE_CMD_RESET:
+                    self._command_reset()
+                else:
+                    self.rejected = True
+                return
+            if offset == 0x01:
+                if value & STORAGE_STATUS_REJECTED:
+                    self.rejected = False
+                if value & STORAGE_STATUS_MEDIA_CHANGED:
+                    self.media_changed = False
+                return
+            if 0x02 <= offset <= 0x10:
+                self.rejected = True
+            return
+
         if offset == 0x00:    # CMD
-            self._execute_cmd(value)
+            if value == STORAGE_CMD_STATUS:
+                return
+            if value == STORAGE_CMD_RESET:
+                self._command_reset()
+                return
+            self._accept_command(value)
+        elif offset == 0x01:  # STATUS sticky-bit W1C
+            if value & STORAGE_STATUS_REJECTED:
+                self.rejected = False
+            if value & STORAGE_STATUS_MEDIA_CHANGED:
+                self.media_changed = False
         elif 0x02 <= offset <= 0x05:
             shift = 8 * (offset - 0x02)
             mask = 0xFF << shift
@@ -593,48 +865,364 @@ class Storage(Device):
             shift = 8 * (offset - 0x06)
             mask = 0xFF << shift
             self.dma_addr = (self.dma_addr & ~mask) | (value << shift)
+            self.dma_addr &= 0xFFFF_FFFF_FFFF_FFFF
         elif offset == 0x0E:
-            self.sec_count = value if value else 1
+            self.sec_count = value
         elif offset == 0x0F:  # DATA port write
             self.data_port_buf.append(value)
         elif offset == 0x10:  # DMA_PUSH — byte-serial address write
             shift = 8 * self._dma_push_ctr
             self.dma_addr = (self.dma_addr & ~(0xFF << shift)) | (value << shift)
+            self.dma_addr &= 0xFFFF_FFFF_FFFF_FFFF
             self._dma_push_ctr = (self._dma_push_ctr + 1) & 7
 
-    def _execute_cmd(self, cmd: int):
+    def _command_reset(self):
+        if self.busy:
+            result = STORAGE_RESULT_RESET_ABORTED
+            if self._active_effect:
+                result |= STORAGE_RESULT_PARTIAL
+            self._complete(result, self._active_transferred)
+            # Keep the aborted command's terminal result and completion.
+            self.rejected = False
+            self._reset_request_registers()
+            return
+        self.rejected = False
+        self._stalled = False
+        self._active_request = None
+        self._active_effect = False
+        self._active_transferred = 0
+        self._reset_request_registers()
+        self._clear_last_result()
+
+    def _abort_for_media_change(self) -> bool:
+        if not self.busy:
+            return False
+        result = STORAGE_RESULT_MEDIA_REMOVED
+        if self._active_effect:
+            result |= STORAGE_RESULT_PARTIAL
+        self._complete(result, self._active_transferred)
+        return True
+
+    def _accept_command(self, command: int):
+        request = (
+            command,
+            self.sector_num,
+            self.dma_addr,
+            self.sec_count,
+            self.media_generation,
+        )
+        self._active_request = request
+        self._active_effect = False
+        self._active_transferred = 0
+        self._stalled = False
+        self.busy = True
         self.error = False
-        self._dma_push_ctr = 0  # reset byte-push on any command
+        self.result_valid = False
+        self.transferred = 0
+        self._dma_push_ctr = 0
+        self._run_active()
+
+    def _take_fault(
+        self,
+        stage: str,
+        request: tuple[int, int, int, int, int],
+        *,
+        sector_index: Optional[int] = None,
+        byte_index: Optional[int] = None,
+    ) -> Optional[StorageFault]:
+        command = request[0]
+        for index, fault in enumerate(self._faults):
+            if fault.stage != stage:
+                continue
+            if fault.command is not None and fault.command != command:
+                continue
+            if (fault.sector_index is not None
+                    and fault.sector_index != sector_index):
+                continue
+            if fault.byte_index is not None and fault.byte_index != byte_index:
+                continue
+            return self._faults.pop(index)
+        return None
+
+    def _apply_fault(
+        self,
+        fault: StorageFault,
+        *,
+        transferred: int,
+        effect_applied: bool,
+    ) -> bool:
+        if fault.action == "stall":
+            self._stalled = True
+            return True
+        result = fault.result
+        if fault.action == "detach":
+            self._force_fault_detach()
+            result = STORAGE_RESULT_MEDIA_REMOVED
+        if effect_applied and result != STORAGE_RESULT_OK:
+            result |= STORAGE_RESULT_PARTIAL
+        self._complete(result, transferred)
+        return True
+
+    def _preflight(
+        self, request: tuple[int, int, int, int, int]
+    ) -> int:
+        command, sector, dma_addr, count, _media_generation = request
+        if not self.status & STORAGE_STATUS_PRESENT:
+            return STORAGE_RESULT_NO_MEDIA
+        if command == STORAGE_CMD_FLUSH:
+            return STORAGE_RESULT_OK
+        if count == 0:
+            return STORAGE_RESULT_INVALID_COUNT
+        if not 0 <= sector <= 0xFFFF_FFFF:
+            return STORAGE_RESULT_LBA_RANGE
+        if (sector >= self._capacity_sectors
+                or count > self._capacity_sectors - sector):
+            return STORAGE_RESULT_LBA_RANGE
+        nbytes = count * SECTOR_SIZE
+        if (not 0 <= dma_addr <= 0xFFFF_FFFF_FFFF_FFFF
+                or dma_addr > (1 << 64) - nbytes):
+            return STORAGE_RESULT_ADDRESS_OVERFLOW
+        callback = self._mem_write if command == STORAGE_CMD_READ else self._mem_read
+        if callback is None or self._mem_span_valid is None:
+            return STORAGE_RESULT_DMA_INVALID
         try:
-            if cmd == 0x01:       # READ → DMA
-                data = self.read_sectors(self.sector_num, self.sec_count)
-                if self._mem_write:
-                    for i, b in enumerate(data):
-                        self._mem_write(self.dma_addr + i, b)
-                # Also fill data port buffer
-                self.data_port_buf = data
+            if not self._mem_span_valid(dma_addr, nbytes):
+                return STORAGE_RESULT_DMA_INVALID
+        except Exception:
+            return STORAGE_RESULT_DMA_FAILURE
+        if command == STORAGE_CMD_WRITE and self.write_protected:
+            return STORAGE_RESULT_WRITE_PROTECTED
+        return STORAGE_RESULT_OK
+
+    def _request_is_current(
+        self, request: tuple[int, int, int, int, int]
+    ) -> bool:
+        return (
+            self.busy
+            and self._active_request == request
+            and request[4] == self.media_generation
+            and bool(self.status & STORAGE_STATUS_PRESENT)
+        )
+
+    def _run_active(self):
+        request = self._active_request
+        if request is None or not self.busy or self._stalled:
+            return
+
+        try:
+            for stage in ("accept", "start"):
+                fault = self._take_fault(stage, request)
+                if fault is not None:
+                    self._apply_fault(
+                        fault,
+                        transferred=0,
+                        effect_applied=False,
+                    )
+                    return
+
+            command = request[0]
+            if command not in {
+                STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
+            }:
+                self._complete(STORAGE_RESULT_UNSUPPORTED, 0)
+                return
+
+            preflight = self._preflight(request)
+            if preflight != STORAGE_RESULT_OK:
+                self._complete(preflight, 0)
+                return
+
+            if command == STORAGE_CMD_READ:
+                self._run_read(request)
+            elif command == STORAGE_CMD_WRITE:
+                self._run_write(request)
+            else:
+                self._run_flush(request)
+        except Exception:
+            # Guest commands never escape into the emulator host.  Known
+            # failure sites use their precise classes; this is the final
+            # containment boundary for an unexpected device defect.
+            if self.busy and self._active_request == request:
+                result = STORAGE_RESULT_INTERNAL
+                if self._active_effect:
+                    result |= STORAGE_RESULT_PARTIAL
+                self._complete(result, self._active_transferred)
+
+    def _run_read(self, request: tuple[int, int, int, int, int]):
+        _command, sector, dma_addr, count, _generation = request
+        transferred = 0
+        effect_applied = False
+        port_data = bytearray()
+
+        for sector_index in range(count):
+            if not self._request_is_current(request):
+                return
+            fault = self._take_fault(
+                "media", request, sector_index=sector_index
+            )
+            if fault is not None:
+                self.data_port_buf = port_data
                 self.data_port_pos = 0
-            elif cmd == 0x02:     # WRITE ← DMA
-                # Reject an out-of-range command before reading guest memory.
-                self._transfer_bounds(self.sector_num, self.sec_count)
-                if self._mem_read:
-                    nbytes = self.sec_count * SECTOR_SIZE
-                    data = bytearray()
-                    for i in range(nbytes):
-                        data.append(self._mem_read(self.dma_addr + i))
-                    self.write_sectors(self.sector_num, self.sec_count, data)
-                else:
-                    # Write from data port buffer
-                    self.write_sectors(self.sector_num, self.sec_count, self.data_port_buf)
-                    self.data_port_buf = bytearray()
+                self._apply_fault(
+                    fault,
+                    transferred=transferred,
+                    effect_applied=effect_applied,
+                )
+                return
+
+            start = (sector + sector_index) * SECTOR_SIZE
+            sector_data = bytes(self._image_data[start:start + SECTOR_SIZE])
+            for byte_index, value in enumerate(sector_data):
+                if not self._request_is_current(request):
+                    return
+                fault = self._take_fault(
+                    "dma",
+                    request,
+                    sector_index=sector_index,
+                    byte_index=byte_index,
+                )
+                if fault is not None:
+                    self.data_port_buf = port_data
                     self.data_port_pos = 0
-            elif cmd == 0x03:     # STATUS (no-op, just read STATUS reg)
-                pass
-            elif cmd == 0xFF:     # FLUSH (save to host file)
-                self.save_image()
-        except ValueError:
-            # Guest MMIO commands report transfer failures through STATUS bit 1.
-            self.error = True
+                    self._apply_fault(
+                        fault,
+                        transferred=transferred,
+                        effect_applied=effect_applied,
+                    )
+                    return
+                try:
+                    # A throwing callback may have applied the byte before it
+                    # reported failure, so invocation itself crosses the
+                    # conservative MAY_HAVE_APPLIED boundary.
+                    self._active_effect = True
+                    effect_applied = True
+                    self._mem_write(
+                        dma_addr + sector_index * SECTOR_SIZE + byte_index,
+                        value,
+                    )
+                    port_data.append(value)
+                except Exception:
+                    self.data_port_buf = port_data
+                    self.data_port_pos = 0
+                    self._complete(
+                        STORAGE_RESULT_DMA_FAILURE | STORAGE_RESULT_PARTIAL,
+                        transferred,
+                    )
+                    return
+            transferred += 1
+            self._active_transferred = transferred
+
+        self.data_port_buf = port_data
+        self.data_port_pos = 0
+        self._complete(STORAGE_RESULT_OK, transferred)
+
+    def _run_write(self, request: tuple[int, int, int, int, int]):
+        _command, sector, dma_addr, count, _generation = request
+        transferred = 0
+        effect_applied = False
+
+        for sector_index in range(count):
+            if not self._request_is_current(request):
+                return
+            payload = bytearray()
+            for byte_index in range(SECTOR_SIZE):
+                fault = self._take_fault(
+                    "dma",
+                    request,
+                    sector_index=sector_index,
+                    byte_index=byte_index,
+                )
+                if fault is not None:
+                    self._apply_fault(
+                        fault,
+                        transferred=transferred,
+                        effect_applied=effect_applied,
+                    )
+                    return
+                try:
+                    payload.append(self._mem_read(
+                        dma_addr + sector_index * SECTOR_SIZE + byte_index
+                    ))
+                except Exception:
+                    result = STORAGE_RESULT_DMA_FAILURE
+                    if effect_applied:
+                        result |= STORAGE_RESULT_PARTIAL
+                    self._complete(result, transferred)
+                    return
+                if not self._request_is_current(request):
+                    return
+
+            media_start = (sector + sector_index) * SECTOR_SIZE
+            for byte_index, value in enumerate(payload):
+                if not self._request_is_current(request):
+                    return
+                fault = self._take_fault(
+                    "media",
+                    request,
+                    sector_index=sector_index,
+                    byte_index=byte_index,
+                )
+                if fault is not None:
+                    self._apply_fault(
+                        fault,
+                        transferred=transferred,
+                        effect_applied=effect_applied,
+                    )
+                    return
+                self._image_data[media_start + byte_index] = value
+                effect_applied = True
+                self._active_effect = True
+            transferred += 1
+            self._active_transferred = transferred
+
+        fault = self._take_fault(
+            "write_complete",
+            request,
+            sector_index=count - 1,
+            byte_index=SECTOR_SIZE - 1,
+        )
+        if fault is not None:
+            self._apply_fault(
+                fault,
+                transferred=transferred,
+                effect_applied=effect_applied,
+            )
+            return
+        self._complete(STORAGE_RESULT_OK, transferred)
+
+    def _run_flush(self, request: tuple[int, int, int, int, int]):
+        if not self._request_is_current(request):
+            return
+        fault = self._take_fault("flush", request)
+        if fault is not None:
+            self._apply_fault(fault, transferred=0, effect_applied=False)
+            return
+        try:
+            self.save_image()
+        except OSError:
+            # A host write/fsync failure can occur after bytes reached the
+            # backing file; report the uncertainty conservatively.
+            self._complete(
+                STORAGE_RESULT_FLUSH_FAILURE | STORAGE_RESULT_PARTIAL, 0
+            )
+            return
+        if not self._request_is_current(request):
+            return
+        self._complete(STORAGE_RESULT_OK, 0)
+
+    def _complete(self, result: int, transferred: int):
+        if not self.busy or self._active_request is None:
+            return
+        self.result = result & 0xFF
+        self.transferred = max(0, min(0xFF, transferred))
+        self.completion = (self.completion + 1) & 0xFFFF_FFFF
+        self.error = (self.result & 0x7F) != STORAGE_RESULT_OK
+        self.result_valid = True
+        self.busy = False
+        self._stalled = False
+        self._active_request = None
+        self._active_effect = False
+        self._active_transferred = 0
 
 
 # ---------------------------------------------------------------------------

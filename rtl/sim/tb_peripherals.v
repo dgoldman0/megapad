@@ -101,14 +101,16 @@ module tb_peripherals;
     wire       spi_cs_n;
 
     mp64_disk #(
-        .TOTAL_SECTORS(32'd4096)
+        .TOTAL_SECTORS(32'd4096),
+        .SPI_INIT_HALF_PERIOD(1)
     ) u_disk (
         .clk(clk), .rst_n(rst_n),
         .req(disk_req), .addr(disk_addr), .wdata(disk_wdata), .wen(disk_wen),
         .rdata(disk_rdata), .ack(disk_ack),
         .dma_req(disk_dma_req), .dma_addr(disk_dma_addr),
         .dma_wdata(disk_dma_wdata), .dma_wen(disk_dma_wen),
-        .dma_rdata(disk_dma_rdata), .dma_ack(disk_dma_ack),
+        .dma_rdata(disk_dma_rdata), .dma_ack(disk_dma_ack), .dma_err(1'b0),
+        .card_present(1'b1), .card_write_protected(1'b0),
         .spi_clk(spi_clk_w), .spi_mosi(spi_mosi),
         .spi_miso(spi_miso), .spi_cs_n(spi_cs_n)
     );
@@ -511,25 +513,18 @@ module tb_peripherals;
         // Check busy
         disk_read(DISK_STATUS, rd8);
         check1("Disk busy after READ", rd8[0], 1'b1);
-        check1("Disk CS_n asserted", spi_cs_n, 1'b0);
-
-        // Feed SPI data and DMA ack for a few bytes
         begin
-            integer byte_idx;
-            for (byte_idx = 0; byte_idx < 4; byte_idx = byte_idx + 1) begin
-                // Drive MISO with pattern byte
-                spi_miso = 1'b1;  // drive constant 0xFF
-                // Wait for spi_byte_done
-                repeat(40) @(posedge clk);
-                // ACK the DMA write
-                if (disk_dma_req) begin
-                    disk_dma_ack = 1'b1;
-                    @(posedge clk);
-                    disk_dma_ack = 1'b0;
-                end
+            integer wait_cycles;
+            // SD SPI requires at least 80 clocks with CS high before CMD0.
+            wait_cycles = 0;
+            while (spi_cs_n && wait_cycles < 1000) begin
+                @(posedge clk);
+                wait_cycles = wait_cycles + 1;
             end
+            check1("Disk CS_n asserted after initialization clocks",
+                   spi_cs_n, 1'b0);
         end
-        $display("  PASS: Disk SPI + DMA flow exercised");
+        $display("  PASS: Disk SPI initialization flow exercised");
         pass_count = pass_count + 1;
 
         // ================================================================

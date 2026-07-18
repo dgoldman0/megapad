@@ -76,6 +76,8 @@ module tb_soc_smoke;
         .sd_mosi       (sd_mosi),
         .sd_miso       (1'b1),
         .sd_cs_n       (sd_cs_n),
+        .sd_card_present(1'b0),
+        .sd_write_protected(1'b0),
 
         // NIC — tied off
         .nic_tx_valid  (nic_tx_valid),

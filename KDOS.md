@@ -117,7 +117,10 @@ PORTS                          \ List all port bindings
 - All 22 tile engine words + ACC@/ACC1@/ACC2@/ACC3@, TPOPCNT/TL1/TEMIN/TEMAX/TABS
 - Comment words: `\` (line comment), `(` (paren comment)
 - Network device support: NET-STATUS, NET-RECV, NET-SEND, NET-MAC@
-- Storage device support: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
+- Storage device support: DISK@, DISK-SECTORS, MP64FS-VALID?,
+  DISK-READ-CHECKED, DISK-WRITE-CHECKED, DISK-FLUSH-CHECKED, plus the
+  diagnostic raw words DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ,
+  DISK-WRITE, and DISK-FLUSH
 - Timer & interrupt support: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - **Non-blocking input**: KEY? (non-blocking key check for interactive TUI)
 - **AES-256-GCM engine**: AES-KEY!, AES-IV!, AES-AAD-LEN!, AES-DATA-LEN!, AES-CMD!, AES-STATUS@, AES-DIN!, AES-DOUT@, AES-TAG@, AES-TAG!
@@ -200,7 +203,9 @@ PORTS                          \ List all port bindings
 - Demo buffers: demo-a, demo-b, demo-c
 
 **Phase 2: Storage & Persistence** (✅ complete — v0.4)
-- 9 BIOS disk words: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
+- 12 BIOS disk words: DISK@, DISK-SECTORS, MP64FS-VALID?, the production
+  DISK-READ-CHECKED / DISK-WRITE-CHECKED / DISK-FLUSH-CHECKED operations,
+  and six diagnostic raw setup/command words
 - Buffer persistence: B.SAVE / B.LOAD (DMA to/from disk sectors)
 - B.SECTORS, DISK?, DISK-INFO — disk queries
 - FILE abstraction: sector-backed files with cursor, up to 8 registered
@@ -534,7 +539,8 @@ The BIOS provides:
 * **Return stack**: `>R`, `R>`, `R@`, `2>R`, `2R>`, `2R@`
 * **String ops**: S", .", COMPARE, TYPE, ACCEPT, WORD, COUNT
 * **Network support**: NET-STATUS, NET-RX, NET-TX, NET-MAC@
-* **Storage support**: DISK@, DISK-SECTORS, DISK-SEC!, DISK-DMA!, DISK-N!, DISK-READ, DISK-WRITE, DISK-FLUSH, MP64FS-VALID?
+* **Storage support**: DISK@, DISK-SECTORS, MP64FS-VALID?, production checked
+  READ/WRITE/FLUSH words, and six diagnostic raw setup/command words
 * **Timer & interrupt**: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 * **Non-blocking input**: KEY? (poll UART RX without blocking)
 * **FSLOAD**: Load and EVALUATE files from MP64FS disk
@@ -733,20 +739,28 @@ and a file abstraction provides cursor-based I/O over contiguous sector ranges.
 
 ### 7.1 BIOS Disk Words
 
-Nine BIOS words expose the storage device (at MMIO offset 0x0200):
+Twelve BIOS words expose the storage device (at MMIO offset 0x0200).
+KDOS production paths use the checked operations; raw setup/command words are
+retained for controller diagnostics and do not wait for completion.
 
 | Word | Stack | Description |
 |---|---|---|
-| `DISK@` | ( -- status ) | Read device status (bit 7 = present) |
+| `DISK@` | ( -- status ) | Read live/sticky device status (bit 7 = present) |
 | `DISK-SECTORS` | ( -- count ) | Read the attached media capacity in 512-byte sectors |
-| `DISK-SEC!` | ( n -- ) | Set starting sector number |
-| `DISK-DMA!` | ( addr -- ) | Set DMA address in RAM |
-| `DISK-N!` | ( n -- ) | Set sector count |
-| `DISK-READ` | ( -- ) | Issue read command: disk → RAM via DMA |
-| `DISK-WRITE` | ( -- ) | Issue write command: RAM → disk via DMA |
-| `DISK-FLUSH` | ( -- ) | Flush in-memory image to host file (cmd 0xFF) |
+| `MP64FS-VALID?` | ( -- flag ) | Checked read and structural validation of the attached MP64FS image |
+| `DISK-READ-CHECKED` | ( dma lba count -- completed status ) | Production read with full-request validation, locking, splitting, timeout, and precise result |
+| `DISK-WRITE-CHECKED` | ( dma lba count -- completed status ) | Production write; success is complete transfer, not durability |
+| `DISK-FLUSH-CHECKED` | ( -- status ) | Production ordering and durability barrier |
+| `DISK-SEC!` | ( n -- ) | Diagnostic: set raw starting sector register |
+| `DISK-DMA!` | ( addr -- ) | Diagnostic: set raw 64-bit DMA address |
+| `DISK-N!` | ( n -- ) | Diagnostic: set raw controller sector count |
+| `DISK-READ` | ( -- ) | Diagnostic: issue READ without waiting |
+| `DISK-WRITE` | ( -- ) | Diagnostic: issue WRITE without waiting |
+| `DISK-FLUSH` | ( -- ) | Diagnostic: issue FLUSH without waiting |
 
-The storage device uses 512-byte sectors and DMA transfers.
+The storage device uses 512-byte sectors and DMA transfers. `FS-SYNC` and
+`FORMAT` report success only after their checked writes and a successful
+checked flush durability barrier.
 
 ### 7.2 Buffer Persistence
 
@@ -763,8 +777,9 @@ DISK?                         \ True if storage device present
 DISK-INFO                     \ Print "Storage: present" or "not attached"
 ```
 
-`B.SAVE` and `B.LOAD` compute the number of sectors from the buffer descriptor,
-set up DMA address / sector / count, and issue a single DMA transfer.
+`B.SAVE` and `B.LOAD` compute the number of sectors from the buffer descriptor
+and issue one checked public request; the BIOS splits it into controller-sized
+chunks when necessary.
 
 ### 7.3 File Abstraction
 

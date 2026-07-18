@@ -104,7 +104,7 @@ device occupies a small range:
 | **UART** | `+0x0000` | 16 bytes | Serial I/O (keyboard/terminal) |
 | **UART Geometry** | `+0x0010` | 16 bytes | Terminal dimensions, resize status/request |
 | **Timer** | `+0x0100` | 16 bytes | 32-bit timer with compare-match |
-| **Storage** | `+0x0200` | 24 bytes | Sector-based disk controller with attached-capacity register |
+| **Storage** | `+0x0200` | 32 bytes | Checked sector controller with completion, precise result, media identity, and capacity registers |
 | **System Info** | `+0x0300` | 96 bytes | Board ID, config, core topology, HBW, VRAM, cluster enable |
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
@@ -258,6 +258,9 @@ A sector-based disk controller supporting DMA transfers.  Sector size is
 **512 bytes**.  The current MP64FS draft supports media through 8192 sectors
 (4 MiB).
 
+The normative command, completion, failure, ordering, and durability behavior
+is defined in [Storage controller and checked block-I/O contract](storage-controller-contract.md).
+
 FPGA builds expose the logical media window through the synthesizable
 `DISK_TOTAL_SECTORS` parameter.  The portable top and SoC default it to the
 canonical 8192 sectors; board integrations using a different window must
@@ -265,25 +268,33 @@ override the parameter so `TOTAL_SECTORS` remains truthful.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| CMD | `+0x00` | W | **0x01:** READ, **0x02:** WRITE, **0x03:** STATUS, **0xFF:** FLUSH |
-| STATUS | `+0x01` | R | **bit 0:** busy, **bit 1:** error, **bit 7:** device present |
+| CMD | `+0x00` | W | **0x01:** READ, **0x02:** WRITE, **0x03:** STATUS, **0x04:** RESET, **0xFF:** FLUSH |
+| STATUS | `+0x01` | R/W1C | busy, terminal error, rejected-write, valid-result, media-change, write-protect, and present state |
 | SECTOR | `+0x02`–`+0x05` | RW | 32-bit sector number (LE) |
 | DMA_ADDR | `+0x06`–`+0x0D` | RW | 64-bit RAM address for DMA (LE) |
 | SEC_COUNT | `+0x0E` | RW | Number of sectors to transfer (1–255) |
-| DATA | `+0x0F` | RW | Byte-at-a-time data port (alternative to DMA) |
+| DATA | `+0x0F` | RW | Legacy diagnostic byte port; outside the qualified checked path |
 | TOTAL_SECTORS | `+0x11`–`+0x14` | R | Attached media sector count (u32 LE; zero when detached) |
+| RESULT | `+0x15` | R | Precise terminal cause; bit 7 marks a possibly applied prefix |
+| COMPLETE | `+0x16`–`+0x19` | R | Terminal completion generation (u32 LE) |
+| MEDIA_GEN | `+0x1A`–`+0x1D` | R | Attachment identity generation (u32 LE) |
+| CAPS | `+0x1E` | R | Backend capability bits |
+| TRANSFERRED | `+0x1F` | R | Whole sectors completed by the terminal request |
 
 **Typical read sequence:**
 1. Write sector number to SECTOR registers
 2. Write RAM destination to DMA_ADDR registers
 3. Write sector count to SEC_COUNT
-4. Write `0x01` to CMD (READ)
-5. Data appears in RAM at DMA_ADDR
+4. Snapshot COMPLETE and write `0x01` to CMD (READ)
+5. Wait boundedly for COMPLETE to change
+6. Accept the data only when RESULT is zero and TRANSFERRED equals SEC_COUNT
 
-**BIOS words:** `DISK-SEC!`, `DISK-DMA!`, `DISK-N!`, `DISK-READ`,
-`DISK-WRITE`, `DISK-FLUSH`, `DISK@` (read status), `DISK-SECTORS`
-(read attached capacity), and `MP64FS-VALID?` (validate the complete attached
-filesystem before use).
+**BIOS words:** production code uses `DISK-READ-CHECKED`,
+`DISK-WRITE-CHECKED`, and `DISK-FLUSH-CHECKED`.  Raw `DISK-SEC!`,
+`DISK-DMA!`, `DISK-N!`, `DISK-READ`, `DISK-WRITE`, and `DISK-FLUSH` remain
+diagnostic compatibility words.  `DISK@` reads status, `DISK-SECTORS` reads
+attached capacity, and `MP64FS-VALID?` validates the complete attached
+filesystem before use.
 
 ---
 
