@@ -748,7 +748,30 @@ class MegapadCLI(cmd.Cmd):
             return
         kib = self._parse_int(arg)
         new_size = kib * 1024
-        self.sys = MegapadSystem(ram_size=new_size, storage_image=self.sys.storage.image_path)
+        old_sys = self.sys
+        storage_image = old_sys.storage.image_path
+        nic_backend = old_sys._nic_backend
+        nic_port = old_sys.nic._passthrough_port
+        nic_peer_port = old_sys.nic._passthrough_peer_port
+
+        # A RAM resize resets machine state, but it must not silently change
+        # the configured machine.  Flush attached storage and hand the NIC
+        # transport cleanly from the old instance to the replacement.
+        old_sys.storage.save_image()
+        old_sys.nic.stop()
+        self.sys = MegapadSystem(
+            ram_size=new_size,
+            storage_image=storage_image,
+            nic_port=nic_port,
+            nic_peer_port=nic_peer_port,
+            nic_backend=nic_backend,
+            num_cores=old_sys.num_full_cores,
+            num_clusters=old_sys.num_clusters,
+            hbw_size=old_sys.hbw_size,
+            ext_mem_size=old_sys.ext_mem_size,
+            vram_size=old_sys.vram_size,
+            realtime_clock=old_sys.rtc.realtime,
+        )
         self.sys.uart.on_tx = self._uart_tx_handler
         print(f"  RAM resized to {kib} KiB. System recreated (use 'boot' to start).")
 
@@ -1433,8 +1456,8 @@ def main():
                         help="Open a pygame window showing the framebuffer")
     parser.add_argument("--scale", type=int, default=2, metavar="N",
                         help="Pixel scale factor for display window (default: 2)")
-    parser.add_argument("--extmem", type=int, default=16, metavar="MiB",
-                        help="External memory size in MiB (default: 16, set 0 to disable)")
+    parser.add_argument("--extmem", type=int, default=128, metavar="MiB",
+                        help="External memory size in MiB (default: 128, set 0 to disable)")
     parser.add_argument("--vram", type=int, default=4, metavar="MiB",
                         help="Dedicated VRAM size in MiB (default: 4, set 0 to disable)")
 

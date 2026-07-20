@@ -111,7 +111,7 @@ class LoopbackBackend(NICBackend):
         return 0 < len(frame) <= NIC_MAX_FRAME
 
     def start(self):
-        pass
+        self._up = True
 
     def stop(self):
         self._up = False

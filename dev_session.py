@@ -49,7 +49,7 @@ def run_scenario(path: Path) -> dict:
         bios,
         storage_image=storage,
         ram_size=int(machine.get("ram_kib", 1024)) << 10,
-        ext_mem_size=int(machine.get("ext_mem_mib", 16)) << 20,
+        ext_mem_size=int(machine.get("ext_mem_mib", 128)) << 20,
         vram_size=int(machine.get("vram_mib", 4)) << 20,
         num_cores=int(machine.get("cores", 1)),
         num_clusters=int(machine.get("clusters", 0)),

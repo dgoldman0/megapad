@@ -14,7 +14,7 @@ system-on-chip.  The design targets the **Digilent Genesys 2**
 | **Tile engines** | 4 × 64-lane SIMD (one per core, private state) |
 | **Internal RAM** | 1 MiB shared BRAM (dual-port, arbitrated) |
 | **Tile fast path** | 512-bit single-cycle read/write to BRAM (arbitrated) |
-| **External memory** | HyperRAM / SDRAM via PMOD, ≥ 4 MiB |
+| **External memory** | HyperRAM / SDRAM via PMOD, ≥ 64 MiB for standard KDOS userland |
 | **Clock** | 100 MHz system clock |
 | **UART** | 115 200 baud, USB bridge on-board |
 | **Storage** | SPI-SD on-board micro-SD slot |

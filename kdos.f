@@ -1955,7 +1955,7 @@ XMEM-INIT      \ initialise at load time
 \      dict_free .. ~0x7F000  KDOS dictionary + system heap
 \      0x80000 .. 0xFFFFF     Stacks (data + return)
 \
-\    External RAM (e.g. 16 MiB at 0x100000):
+\    External RAM (128 MiB by default, at 0x100000):
 \      0x100000 .. +U-ZONE    Userland dictionary (HERE when ULAND=1)
 \      +U-ZONE  .. end        XMEM general allocator
 \
@@ -1965,7 +1965,7 @@ XMEM-INIT      \ initialise at load time
 \    LEAVE-USERLAND  ( -- )       switch HERE back to system dict
 \    .USERLAND       ( -- )       display userland status
 
-4194304 CONSTANT U-ZONE-SIZE   \ 4 MiB reserved for userland dictionary
+33554432 CONSTANT U-ZONE-SIZE  \ 32 MiB reserved for userland dictionary
 
 VARIABLE ULAND          0 ULAND !
 VARIABLE SYS-HERE-SAVE  0 SYS-HERE-SAVE !
@@ -1983,7 +1983,10 @@ VARIABLE U-INIT-DONE    0 U-INIT-DONE !
     \ source buffers use reclaimable ALLOCATE/FREE storage, while persistent
     \ XBUF kernel buffers remain below this boundary.  Cell-align for safe
     \ @ / ! access.
-    XMEM-HERE @ 7 + -8 AND  DUP U-DICT-BASE ! U-DICT-HERE !
+    XMEM-HERE @ 7 + -8 AND
+    DUP U-ZONE-SIZE + EXT-MEM-BASE EXT-MEM-SIZE + >
+        ABORT" Insufficient ext mem for userland dictionary"
+    DUP U-DICT-BASE ! U-DICT-HERE !
     \ Push XMEM allocator past the userland zone
     U-DICT-BASE @ U-ZONE-SIZE +  DUP XMEM-HERE ! XMEM-FLOOR !
     1 U-INIT-DONE ! ;

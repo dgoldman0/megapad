@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from cli import MegapadCLI, main as cli_main
 from dev_session import run_scenario
 from devices import UART
 from display import VirtualTerminal
@@ -183,6 +184,7 @@ def test_machine_session_can_advance_timer_while_guest_is_idle():
 
 def test_machine_session_boots_interacts_and_captures(tmp_path):
     with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
+        assert session.system.ext_mem_size == 128 << 20
         session.boot()
         boot = session.wait_for_idle(max_steps=2_000_000)
         assert boot.reason == "idle"
@@ -222,6 +224,42 @@ def test_machine_session_owns_injected_nic_backend():
         assert backend.link_up
 
     assert not backend.link_up
+
+
+def test_cli_ramsize_preserves_machine_configuration(tmp_path, capsys):
+    image = tmp_path / "configured.img"
+    image.write_bytes(bytes(1024))
+    backend = LoopbackBackend()
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        storage_image=str(image),
+        nic_backend=backend,
+        num_cores=2,
+        num_clusters=1,
+        hbw_size=128,
+        ext_mem_size=2 << 20,
+        vram_size=256,
+        realtime_clock=True,
+    )
+    cli = MegapadCLI(system)
+
+    cli.do_ramsize("128")
+
+    assert cli.sys is not system
+    assert cli.sys.ram_size == 128 * 1024
+    assert cli.sys.storage.image_path == str(image)
+    assert cli.sys._nic_backend is backend
+    assert backend.link_up
+    assert cli.sys.num_full_cores == 2
+    assert cli.sys.num_clusters == 1
+    assert cli.sys.hbw_size == 128
+    assert cli.sys.ext_mem_size == 2 << 20
+    assert cli.sys.vram_size == 256
+    assert cli.sys.rtc.realtime
+    assert cli.sys.uart.on_tx == cli._uart_tx_handler
+    assert "RAM resized to 128 KiB" in capsys.readouterr().out
+
+    cli.sys.nic.stop()
 
 
 def test_machine_session_close_persists_attached_storage(tmp_path):
@@ -267,6 +305,30 @@ def test_session_server_rejects_unavailable_tap(monkeypatch):
             raise AssertionError("unavailable TAP should stop session startup")
 
 
+def test_cli_uses_128_mib_external_memory_by_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["cli.py"])
+    with (
+        patch("cli.MegapadSystem", wraps=MegapadSystem) as system_factory,
+        patch.object(MegapadCLI, "cmdloop", return_value=None),
+    ):
+        cli_main()
+
+    assert system_factory.call_args.kwargs["ext_mem_size"] == 128 << 20
+
+
+def test_session_server_uses_128_mib_external_memory_by_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["session_server.py"])
+    with (
+        patch("session_server.MachineSession.from_bios") as from_bios,
+        patch("session_server.SharedMachine"),
+        patch("session_server.SessionServer"),
+        patch("session_server.signal.signal"),
+    ):
+        assert session_server_main() == 0
+
+    assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
+
+
 def test_machine_session_warm_reset_discards_interrupted_uart_batch():
     with MachineSession.from_bios(BIOS, cols=80, rows=30) as session:
         session.boot()
@@ -309,9 +371,14 @@ def test_json_scenario_runner(tmp_path):
         "report": str(report),
     }), encoding="utf-8")
 
-    summary = run_scenario(scenario)
+    with patch(
+        "dev_session.MachineSession.from_bios",
+        wraps=MachineSession.from_bios,
+    ) as from_bios:
+        summary = run_scenario(scenario)
 
     assert summary["success"]
+    assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
     assert summary["uart"]["byte_callbacks"] == 0
     assert image.is_file()
     assert json.loads(report.read_text())["success"]

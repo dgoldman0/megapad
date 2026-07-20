@@ -336,7 +336,7 @@ userland zone.  System words remain accessible.
 | `U-USED` | `( -- u )` | Bytes used in the userland dictionary. |
 | `U-FREE` | `( -- u )` | Bytes remaining in the userland zone. |
 | `.USERLAND` | `( -- )` | Display userland memory status. |
-| `U-ZONE-SIZE` | `( -- u )` | Constant: 4 MiB (size of the userland dictionary zone). |
+| `U-ZONE-SIZE` | `( -- u )` | Constant: 32 MiB (size of the userland dictionary zone). |
 
 > **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
 > `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`
@@ -1162,7 +1162,7 @@ The startup section runs automatically when the KDOS core loads.  It:
 5. Runs `autoexec.f` if present on disk
 6. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
 
-The standard autoexec enables JIT for its own load, enters the 4 MiB XMEM
+The standard autoexec enables JIT for its own load, enters the 32 MiB XMEM
 userland dictionary, loads `networking.f` with KDOS `REQUIRE`, configures DHCP
 or the static fallback, loads `tools.f`, and disables JIT.  The module loader
 batches both validated MP64FS extents into external memory, so the network

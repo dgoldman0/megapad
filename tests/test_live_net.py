@@ -241,7 +241,7 @@ def _ensure_snapshot():
         sys_obj = MegapadSystem(
             ram_size=1024 * 1024,
             storage_image=disk_path,
-            ext_mem_size=16 * (1 << 20),    # 16 MiB XMEM for XBUF
+            ext_mem_size=128 * (1 << 20),
         )
         # Disable link-up on BOTH Python and C++ NIC so autoexec.f
         # skips DHCP entirely (NET-STATUS bit 2 = 0).
@@ -362,7 +362,7 @@ class LiveNetBase(unittest.TestCase):
                 ram_size=1024 * 1024,
                 nic_backend=backend,
                 storage_image=disk_path,
-                ext_mem_size=16 * (1 << 20),
+                ext_mem_size=128 * (1 << 20),
             )
             buf = capture_uart(sys)
 

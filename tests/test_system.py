@@ -2881,7 +2881,7 @@ class TestBIOS(unittest.TestCase):
             fs.save(path)
         try:
             sys, buf = self._boot_bios(ram_kib=1024, storage_image=path,
-                                       ext_mem_mib=16)
+                                       ext_mem_mib=128)
             # The auto-boot should have run FSLOAD kdos.f directly
             # which loads KDOS.  Verify KDOS banner appeared.
             # 800M steps: KDOS boot + DHCP timeout + autoexec.f need ~600M.
@@ -2917,6 +2917,33 @@ class TestBIOS(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_standard_autoexec_rejects_undersized_external_memory(self):
+        """The 32 MiB userland reservation fails closed without capacity."""
+        fs = build_sample_image()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            path = f.name
+            fs.save(path)
+        try:
+            sys, buf = self._boot_bios(ram_kib=1024, storage_image=path,
+                                       ext_mem_mib=16)
+            text = self._run_forth(sys, buf, [
+                "1 2 + .",
+                "9999 1+ ULAND @ + .",
+                "MODULE? networking.f 19999 1+ + .",
+                "29999 1+ U-INIT-DONE @ + .",
+                "39999 1+ U-DICT-BASE @ + .",
+                "49999 1+ U-DICT-HERE @ + .",
+            ], max_steps=600_000_000)
+            self.assertIn("Insufficient ext mem for userland dictionary", text)
+            self.assertIn("3 ", text)
+            self.assertIn("10000 ", text)
+            self.assertIn("20000 ", text)
+            self.assertIn("30000 ", text)
+            self.assertIn("40000 ", text)
+            self.assertIn("50000 ", text)
+        finally:
+            os.unlink(path)
+
     def test_standard_autoexec_does_not_reenter_bios_fsload(self):
         """Userland networking uses KDOS REQUIRE while KDOS autoboot is live."""
         fs = build_sample_image()
@@ -2937,7 +2964,7 @@ class TestBIOS(unittest.TestCase):
             sys, buf = self._boot_bios(
                 ram_kib=1024,
                 storage_image=path,
-                ext_mem_mib=16,
+                ext_mem_mib=128,
             )
             text = self._run_forth(
                 sys,
@@ -5704,6 +5731,7 @@ class TestAssemblerBranchRange(unittest.TestCase):
 
 KDOS_PATH = os.path.join(PROJECT_ROOT, "kdos.f")
 NETWORKING_PATH = os.path.join(PROJECT_ROOT, "networking.f")
+KDOS_TEST_EXT_MEM_MIB = 64
 
 
 # ── Module-level KDOS snapshot cache ─────────────────────────────────
@@ -5735,8 +5763,10 @@ def _build_kdos_snapshot():
             kdos_lines.append(line)
     _kdos_shared_lines = kdos_lines
 
-    # Boot BIOS and load KDOS fully (with 16 MiB ext mem)
-    sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
+    # The shared fixture needs room for the 32 MiB userland zone and runtime
+    # allocations, but need not pay the copy cost of the 128 MiB emulator
+    # default in every KDOS test.
+    sys_obj = make_system(ram_kib=1024, ext_mem_mib=KDOS_TEST_EXT_MEM_MIB)
     buf = capture_uart(sys_obj)
     sys_obj.load_binary(0, _kdos_shared_bios_code)
     sys_obj.boot()
@@ -5827,7 +5857,8 @@ class _KDOSTestBase(unittest.TestCase):
         self.bios_code = _kdos_shared_bios_code
         self.kdos_lines = _kdos_shared_lines
 
-    def _boot_bios(self, ram_kib=1024, storage_image=None, ext_mem_mib=16):
+    def _boot_bios(self, ram_kib=1024, storage_image=None,
+                   ext_mem_mib=KDOS_TEST_EXT_MEM_MIB):
         sys = make_system(ram_kib=ram_kib, storage_image=storage_image,
                           ext_mem_mib=ext_mem_mib)
         buf = capture_uart(sys)
@@ -5896,8 +5927,11 @@ class _KDOSTestBase(unittest.TestCase):
         snapshot = self._snapshot_data() if _snapshot is None else _snapshot
         mem_bytes, ext_mem_bytes, cpu_state = snapshot
 
-        sys = make_system(ram_kib=1024, storage_image=storage_image,
-                          ext_mem_mib=16)
+        sys = make_system(
+            ram_kib=1024,
+            storage_image=storage_image,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
         buf = capture_uart(sys)
 
         # Restore memory (BIOS + KDOS already compiled)
@@ -5986,7 +6020,7 @@ def _build_kdos_network_snapshot():
             if line.strip() and not line.lstrip().startswith('\\')
         ]
 
-    sys_obj = make_system(ram_kib=1024, ext_mem_mib=16)
+    sys_obj = make_system(ram_kib=1024, ext_mem_mib=KDOS_TEST_EXT_MEM_MIB)
     capture_uart(sys_obj)
     sys_obj.cpu.mem[:len(bank0_bytes)] = bank0_bytes
     sys_obj._ext_mem[:len(ext_mem_bytes)] = ext_mem_bytes
@@ -16389,7 +16423,11 @@ class TestKDOSMulticore(unittest.TestCase):
             ]
 
         # Boot 4-core BIOS, load KDOS, then compile networking in userland.
-        sys_obj = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=16)
+        sys_obj = make_system(
+            ram_kib=1024,
+            num_cores=4,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
         buf = capture_uart(sys_obj)
         sys_obj.load_binary(0, cls._bios_code)
         sys_obj.boot()
@@ -16435,7 +16473,11 @@ class TestKDOSMulticore(unittest.TestCase):
         """Restore 4-core KDOS from snapshot, run extra_lines, return output."""
         mem_bytes, ext_mem_bytes, cpu0_state, core_states = self.__class__._mc_snapshot
 
-        sys = make_system(ram_kib=1024, num_cores=4, ext_mem_mib=16)
+        sys = make_system(
+            ram_kib=1024,
+            num_cores=4,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
         buf = capture_uart(sys)
 
         # Restore shared memory
@@ -28541,7 +28583,9 @@ class TestHeadlessDisplay(_KDOSTestBase):
             # the same way _run_kdos does, but capture the system.
             mem_bytes, ext_mem_bytes, cpu_state = _kdos_shared_snapshot
             sys_emu = make_system(
-                ram_kib=1024, storage_image=img, ext_mem_mib=16
+                ram_kib=1024,
+                storage_image=img,
+                ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
             )
             buf = capture_uart(sys_emu)
             sys_emu.cpu.mem[:len(mem_bytes)] = mem_bytes
@@ -28944,7 +28988,7 @@ class TestKDOSExtMem(_KDOSTestBase):
     """Tests for the XMEM allocator and ext-mem aware LOAD."""
 
     def test_xmem_present(self):
-        """XMEM? returns true when ext mem is enabled (16 MiB)."""
+        """XMEM? returns true with the 64 MiB KDOS test fixture."""
         text = self._run_kdos([
             'XMEM? . CR',
         ])
@@ -28958,11 +29002,11 @@ class TestKDOSExtMem(_KDOSTestBase):
         self.assertIn('1048576', text)  # 0x100000
 
     def test_xmem_size(self):
-        """EXT-MEM-SIZE reports 16 MiB."""
+        """EXT-MEM-SIZE reports the configured fixture capacity."""
         text = self._run_kdos([
             'EXT-MEM-SIZE .',
         ])
-        self.assertIn('16777216', text)  # 16 * 1024 * 1024
+        self.assertIn(str(KDOS_TEST_EXT_MEM_MIB << 20), text)
 
     def test_xmem_free_initial(self):
         """XMEM-FREE reports substantial ext mem after boot."""
@@ -28973,8 +29017,8 @@ class TestKDOSExtMem(_KDOSTestBase):
         m = re.search(r'(\d+)', text.split('XMEM-FREE')[1])
         self.assertIsNotNone(m)
         free = int(m.group(1))
-        # Must have most of 16 MiB free (network tables use up to ~2 MB)
-        self.assertGreater(free, 14_000_000)
+        # Must retain most of the fixture after XMEM-backed kernel tables.
+        self.assertGreater(free, (KDOS_TEST_EXT_MEM_MIB - 4) << 20)
 
     def test_xmem_allot(self):
         """XMEM-ALLOT returns an address in ext mem range."""
@@ -28987,7 +29031,7 @@ class TestKDOSExtMem(_KDOSTestBase):
         addr = int(m.group(1))
         # Must be within ext mem region (>= 0x100000)
         self.assertGreaterEqual(addr, 0x100000)
-        self.assertLess(addr, 0x100000 + 16 * 1024 * 1024)
+        self.assertLess(addr, 0x100000 + (KDOS_TEST_EXT_MEM_MIB << 20))
 
     def test_xmem_allot_advances(self):
         """After XMEM-ALLOT, free space decreases by the allocation size."""
@@ -29728,7 +29772,7 @@ class TestKDOSUserland(_KDOSTestBase):
         here = int(m.group(1))
         # HERE must be within ext mem (>= EXT-MEM-BASE)
         self.assertGreaterEqual(here, 0x100000)
-        self.assertLess(here, 0x100000 + 16 * 1024 * 1024)
+        self.assertLess(here, 0x100000 + (KDOS_TEST_EXT_MEM_MIB << 20))
 
     def test_create_in_userland(self):
         """CREATE in userland allocates data body in ext mem."""
@@ -29773,8 +29817,9 @@ class TestKDOSUserland(_KDOSTestBase):
         m = re.search(r'(\d+)', text.split('XMEM-HERE')[1])
         self.assertIsNotNone(m)
         here = int(m.group(1))
-        # Floor must be above EXT-MEM-BASE + 1MiB (userland zone)
-        self.assertGreater(here, 0x100000 + 1024 * 1024)
+        # The allocator floor must protect the complete 32 MiB zone.  It may
+        # be higher because persistent XMEM buffers can precede userland.
+        self.assertGreaterEqual(here, 0x100000 + 32 * 1024 * 1024)
 
     def test_u_used(self):
         """U-USED reports bytes used in userland dictionary."""
@@ -29784,7 +29829,7 @@ class TestKDOSUserland(_KDOSTestBase):
     def test_u_free(self):
         """U-FREE reports bytes remaining in userland zone."""
         text = self._run_kdos(['ENTER-USERLAND  333 ALLOT  U-FREE .'])
-        self.assertIn('4193971', text)  # 4194304 - 333
+        self.assertIn('33554099', text)  # 33554432 - 333
 
     def test_enter_idempotent(self):
         """Calling ENTER-USERLAND twice is safe (no-op)."""

@@ -272,7 +272,7 @@ class MachineSession:
         *,
         storage_image: str | os.PathLike | None = None,
         ram_size: int = 1 << 20,
-        ext_mem_size: int = 16 << 20,
+        ext_mem_size: int = 128 << 20,
         vram_size: int = 4 << 20,
         num_cores: int = 1,
         num_clusters: int = 0,

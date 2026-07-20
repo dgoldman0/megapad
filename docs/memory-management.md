@@ -27,7 +27,7 @@ different bus with different characteristics:
  0x000F_FFFF
 
  0x0010_0000          External RAM   up to    HyperRAM/SDRAM  6+ cycles
-   ├─ Userland dictionary (4 MiB zone)   ~4 GiB
+   ├─ Userland dictionary (32 MiB zone)  ~4 GiB
    └─ XMEM allocator region
  0xFEFF_FFFF (hardware max, before VRAM/HBW)
 
@@ -271,7 +271,7 @@ data that must persist across arena resets, objects that need `RESIZE`.
 
 ### 2.5 Userland Dictionary — `ENTER-USERLAND`
 
-When external RAM is present, KDOS reserves a 4 MiB XMEM zone for the
+When external RAM is present, KDOS reserves a 32 MiB XMEM zone for the
 userland dictionary.  It begins above any XMEM buffers allocated before
 userland initialization.  `ENTER-USERLAND` redirects `HERE` into this zone;
 all subsequent `:` definitions, `CREATE`, `VARIABLE`, etc. compile there
@@ -460,7 +460,7 @@ XMEM region:
   │  Kernel file buffers (XBUF)  │  ← protected by XMEM-FLOOR
   ├──────────────────────────────┤
   │  Userland dictionary         │  ← HERE when ULAND=1
-  │  (4 MiB zone)               │
+  │  (32 MiB zone)              │
   ├──────────────────────────────┤  XMEM-FLOOR
   │  XMEM general allocator     │  ← XMEM-ALLOT / arenas
   │  (remaining XMEM)           │
@@ -738,6 +738,6 @@ Switch the affected workload to arenas — arenas cannot fragment.
 | **Free-list** | Linked list of available blocks.  First-fit search.  Can fragment. |
 | **Coalescing** | Merging adjacent free blocks to reduce fragmentation. |
 | **XMEM floor** | Pointer below which `XMEM-RESET` will not reclaim.  Protects kernel data. |
-| **Userland zone** | 4 MiB dictionary area in XMEM for networking, tools, and user-loaded code. |
+| **Userland zone** | 32 MiB dictionary area in XMEM for networking, tools, and user-loaded code. |
 | **Descriptor** | 32-byte arena metadata: base, size, ptr, source. |
 | **?CORE0** | Runtime guard that aborts if `COREID` ≠ 0.  Protects shared-state allocators. |

@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 
 from devices import SECTOR_SIZE, STORAGE_CMD_WRITE
 from tests.test_system import (
+    KDOS_TEST_EXT_MEM_MIB,
     _KDOSTestBase,
     _next_line_chunk,
     capture_uart,
@@ -294,7 +295,9 @@ class TestKDOSBlockVolume(_KDOSTestBase):
         """
         mem_bytes, ext_mem_bytes, cpu_state = self._snapshot_data()
         system = make_system(
-            ram_kib=1024, storage_image=storage_image, ext_mem_mib=16,
+            ram_kib=1024,
+            storage_image=storage_image,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
         )
         uart = capture_uart(system)
         system.cpu.mem[:len(mem_bytes)] = mem_bytes

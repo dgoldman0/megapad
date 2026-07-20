@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument("--storage", type=Path)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=int, default=1024)
-    parser.add_argument("--ext-mem-mib", type=int, default=16)
+    parser.add_argument("--ext-mem-mib", type=int, default=128)
     parser.add_argument("--vram-mib", type=int, default=4)
     parser.add_argument("--cores", type=int, default=1)
     parser.add_argument("--clusters", type=int, default=0)

@@ -113,7 +113,7 @@ def build_snapshot():
 
     sys_obj = MegapadSystem(
         ram_size=1024 * 1024,
-        ext_mem_size=16 * (1 << 20),
+        ext_mem_size=128 * (1 << 20),
     )
     buf = capture_uart(sys_obj)
     sys_obj.load_binary(0, bios_code)
@@ -174,7 +174,7 @@ def run_with_tap(snapshot, commands, label="test", max_steps=800_000_000):
     sys_obj = MegapadSystem(
         ram_size=1024 * 1024,
         nic_backend=backend,
-        ext_mem_size=16 * (1 << 20),
+        ext_mem_size=128 * (1 << 20),
     )
     buf = capture_uart(sys_obj)
 
