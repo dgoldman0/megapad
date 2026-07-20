@@ -133,8 +133,9 @@ status and diagnostics.
 | `var_tib_len` | Length of current TIB content |
 | `var_word_addr` | Last parsed word address (for error messages) |
 | `var_word_len` | Last parsed word length |
-| `var_leave_count` | Compile-time: number of LEAVE fixups in current loop |
-| `var_leave_fixups` | Array of up to 8 LEAVE branch fixup addresses |
+| `var_leave_count` | Compile-time: next slot in the bounded nested-loop fixup stack |
+| `var_leave_base` | Compile-time: first fixup slot owned by the current `DO`/`?DO` scope |
+| `var_leave_fixups` | Stack of 128 branch fixups; each active loop owns at most 8, including `?DO`'s zero-trip branch |
 
 ---
 

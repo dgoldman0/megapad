@@ -4657,13 +4657,16 @@ w_do_ok:
     ldn r1, r11
     subi r14, 8
     str r14, r1
-    ; Save current leave_count on data stack (for nesting) then reset to 0
-    ldi64 r11, var_leave_count
+    ; Save the parent scope's fixup base on the data stack, then start this
+    ; loop's suffix at the current top of the shared fixup stack.
+    ldi64 r11, var_leave_base
     ldn r1, r11
     subi r14, 8
-    str r14, r1               ; push saved leave_count
-    ldi r1, 0
-    str r11, r1               ; leave_count = 0
+    str r14, r1               ; push saved parent base
+    ldi64 r11, var_leave_count
+    ldn r1, r11
+    ldi64 r11, var_leave_base
+    str r11, r1               ; current base = current stack top
     ret.l
 
 ; ?DO (IMMEDIATE) — start a counted loop, skip body if limit == index
@@ -4803,19 +4806,34 @@ w_qdo_ok:
     ldn r1, r11
     subi r14, 8
     str r14, r1
-    ; Save current leave_count on data stack, reset to 0
-    ldi64 r11, var_leave_count
+    ; Save the parent scope's fixup base and start this loop's suffix at the
+    ; current top of the shared fixup stack.
+    ldi64 r11, var_leave_base
     ldn r1, r11
     subi r14, 8
-    str r14, r1               ; push saved leave_count
-    ldi r1, 0
-    str r11, r1               ; leave_count = 0
-    ; Store skip fixup in var_leave_fixups[0] (leave_count is now 0)
-    ldi64 r11, var_leave_fixups
-    str r11, r13               ; fixups[0] = skip fixup addr
+    str r14, r1               ; push saved parent base
     ldi64 r11, var_leave_count
-    ldi r1, 1
-    str r11, r1               ; leave_count = 1
+    ldn r1, r11
+    ldi64 r11, var_leave_base
+    str r11, r1               ; current base = current stack top
+    ; The implicit zero-trip branch is the first LEAVE-style fixup owned by
+    ; this loop.  Append it instead of overwriting an outer loop's slot.
+    cmpi r1, 128
+    brcc w_qdo_fixup_ok
+    ldi64 r10, str_leave_overflow
+    ldi64 r11, print_str
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11
+w_qdo_fixup_ok:
+    mov r9, r1
+    lsli r9, 3
+    ldi64 r7, var_leave_fixups
+    add r7, r9
+    str r7, r13               ; fixups[count] = skip fixup addr
+    ldi64 r11, var_leave_count
+    inc r1
+    str r11, r1               ; advance shared fixup-stack top
 w_qdo_done:
     ret.l
 
@@ -4904,8 +4922,8 @@ w_loop_ok:
     ldi64 r11, compile_byte
     call.l r11
     ; lbrne <loop-top>
-    ; Pop saved_leave_count first (pushed by DO after loop-target)
-    ldn r12, r14              ; saved leave_count
+    ; Pop the parent scope's fixup base (pushed by DO after loop-target).
+    ldn r12, r14              ; saved parent base
     addi r14, 8
     ; Pop loop-target
     ldn r9, r14               ; loop target addr
@@ -4944,14 +4962,16 @@ w_loop_ok:
     str r11, r0
     ; --- Resolve LEAVE fixups ---
     ; R0 = HERE (target for LEAVE branches = just past LOOP cleanup)
-    ; R12 = saved leave_count (from DO)
-    ; Walk var_leave_fixups[0 .. var_leave_count-1], patch each to branch to HERE
+    ; R12 = saved parent base (from DO)
+    ; Patch only this loop's suffix [leave_base, leave_count).  Outer-loop
+    ; fixups remain untouched until their own LOOP closes the scope.
     ldi64 r11, var_leave_count
     ldn r1, r11               ; current leave_count
-    cmpi r1, 0
+    ldi64 r11, var_leave_base
+    ldn r7, r11               ; first fixup owned by this loop
+    cmp r7, r1
     breq w_loop_leave_done
     ldi64 r9, var_leave_fixups
-    ldi r7, 0                 ; index
 w_loop_leave_resolve:
     cmp r7, r1
     breq w_loop_leave_done
@@ -4975,8 +4995,12 @@ w_loop_leave_resolve:
     ldn r1, r11               ; reload count (R1 was clobbered)
     br w_loop_leave_resolve
 w_loop_leave_done:
-    ; Restore leave_count from saved value (R12)
+    ; Pop this loop's suffix, then restore the parent scope's base.
+    ldi64 r11, var_leave_base
+    ldn r1, r11
     ldi64 r11, var_leave_count
+    str r11, r1
+    ldi64 r11, var_leave_base
     str r11, r12
     ret.l
 
@@ -5246,8 +5270,8 @@ w_plus_loop_ok:
     ldi64 r11, compile_byte
     call.l r11
     ; lbrne <loop-top>: 42 XX XX
-    ; Pop saved_leave_count first (pushed by DO after loop-target)
-    ldn r12, r14              ; saved leave_count
+    ; Pop the parent scope's fixup base (pushed by DO after loop-target).
+    ldn r12, r14              ; saved parent base
     addi r14, 8
     ; Pop loop-target
     ldn r9, r14               ; loop target addr from data stack
@@ -5281,13 +5305,14 @@ w_plus_loop_ok:
     inc r0
     ldi64 r11, var_here
     str r11, r0
-    ; --- Resolve LEAVE fixups (same as w_loop) ---
+    ; --- Resolve only this loop's LEAVE-fixup suffix (same as w_loop) ---
     ldi64 r11, var_leave_count
     ldn r1, r11
-    cmpi r1, 0
+    ldi64 r11, var_leave_base
+    ldn r7, r11
+    cmp r7, r1
     breq w_ploop_leave_done
     ldi64 r9, var_leave_fixups
-    ldi r7, 0
 w_ploop_leave_resolve:
     cmp r7, r1
     breq w_ploop_leave_done
@@ -5308,7 +5333,11 @@ w_ploop_leave_resolve:
     ldn r1, r11
     br w_ploop_leave_resolve
 w_ploop_leave_done:
+    ldi64 r11, var_leave_base
+    ldn r1, r11
     ldi64 r11, var_leave_count
+    str r11, r1
+    ldi64 r11, var_leave_base
     str r11, r12
     ret.l
 
@@ -9002,10 +9031,20 @@ w_leave_compile:
     ; Store fixup in var_leave_fixups[leave_count]
     ldi64 r11, var_leave_count
     ldn r1, r11               ; count
-    ; count < 8 check — abort if full (was silent, now fatal)
-    cmpi r1, 8
-    brcc w_leave_ok            ; C=0 means count < 8, proceed
-    ; Too many LEAVEs — abort compilation
+    ; Preserve the documented maximum of eight LEAVE-style fixups per loop,
+    ; independent of any outer loop's entries in the shared stack.
+    ldi64 r7, var_leave_base
+    ldn r9, r7
+    mov r0, r1
+    sub r0, r9                 ; local count = top - current base
+    cmpi r0, 8
+    brcc w_leave_global_check  ; C=0 means local count < 8
+    lbr w_leave_overflow
+w_leave_global_check:
+    ; The shared stack holds sixteen fully populated loop scopes.
+    cmpi r1, 128
+    brcc w_leave_ok            ; C=0 means global count < 128
+w_leave_overflow:
     ldi64 r10, str_leave_overflow
     ldi64 r11, print_str
     call.l r11
@@ -9703,6 +9742,8 @@ w_evaluator_reset:
     ldi64 r11, var_quot_depth
     str r11, r1
     ldi64 r11, var_leave_count
+    str r11, r1
+    ldi64 r11, var_leave_base
     str r11, r1
     ldi64 r11, var_jit_last_type
     str r11, r1
@@ -18337,11 +18378,32 @@ var_cond_depth:
 var_cond_skip_type:
     .dq 0
 
-; LEAVE tracking — used by DO/LEAVE/LOOP at compile time
+; LEAVE tracking — used by DO/?DO/LEAVE/LOOP at compile time.
+; Fixups form one bounded stack.  Each nested loop records its base, appends
+; at most eight entries (including ?DO's implicit zero-trip branch), and
+; resolves only [base, count) when it closes.  128 entries retain the prior
+; eight-fixup allowance across sixteen fully populated nested scopes.
 var_leave_count:
-    .dq 0
+    .dq 0                              ; next shared-stack slot
+var_leave_base:
+    .dq 0                              ; current loop's first slot
 var_leave_fixups:
-    .dq 0, 0, 0, 0, 0, 0, 0, 0   ; up to 8 LEAVEs per loop level
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
+    .dq 0, 0, 0, 0, 0, 0, 0, 0
 
 ; JIT compiler state
 var_jit_enabled:

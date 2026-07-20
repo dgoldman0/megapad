@@ -3410,6 +3410,32 @@ class TestBIOS(unittest.TestCase):
         nums = [x for x in text.split() if x.isdigit()]
         self.assertEqual(nums[-6:], ["0", "0", "1", "1", "2", "2"])
 
+    def test_nested_qdo_zero_trip_preserves_outer_loop(self):
+        """An inner zero-trip ?DO must not consume the outer loop frame."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TNQ 0 9 0 ?DO I 0 ?DO 1+ LOOP LOOP ;",
+            "TNQ . 12345 .",
+        ])
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertEqual(nums[-2:], ["36", "12345"])
+
+    def test_nested_loop_keeps_eight_fixups_per_scope(self):
+        """Outer ?DO fixups must not reduce an inner loop's eight slots."""
+        sys, buf = self._boot_bios()
+        text = self._run_forth(sys, buf, [
+            ": TNQ8 2 0 ?DO 10 0 DO",
+            " I 0 = IF LEAVE THEN I 1 = IF LEAVE THEN",
+            " I 2 = IF LEAVE THEN I 3 = IF LEAVE THEN",
+            " I 4 = IF LEAVE THEN I 5 = IF LEAVE THEN",
+            " I 6 = IF LEAVE THEN I 7 = IF LEAVE THEN",
+            " LOOP LOOP 77 ;",
+            "TNQ8 .",
+        ])
+        self.assertNotIn("Too many LEAVEs", text)
+        nums = [x for x in text.split() if x.isdigit()]
+        self.assertEqual(nums[-1], "77")
+
     def test_unloop_exit(self):
         """UNLOOP + EXIT breaks out of a loop cleanly."""
         sys, buf = self._boot_bios()
