@@ -29224,6 +29224,38 @@ class TestKDOSExtMem(_KDOSTestBase):
                 f"Reclaimed block was not split and reused: {text}",
             )
 
+    def test_xmem_eight_byte_split_preserves_nonzero_successor(self):
+        """An 8-byte split must not overwrite the old free-list successor."""
+        text = self._run_kdos([
+            'VARIABLE XM-A VARIABLE XM-B VARIABLE XM-TINY',
+            'VARIABLE XM-NEXT VARIABLE XM-TAIL VARIABLE XM-LINK-OK',
+            '65536 XMEM-ALLOT? DROP XM-A !',
+            '65536 XMEM-ALLOT? DROP XM-B !',
+            'XM-B @ 65536 XMEM-FREE-BLOCK',
+            'XM-A @ 65536 XMEM-FREE-BLOCK',
+            '8 XMEM-ALLOT? DROP XM-TINY !',
+            'XMEM-FL @ 8 + @ XM-B @ = DUP XM-LINK-OK !',
+            '." [XS-T=" XM-TINY @ XM-A @ = .',
+            '." H=" XMEM-FL @ XM-A @ 8 + = .',
+            '." S=" XMEM-FL @ @ 65528 = .',
+            '." N=" XM-LINK-OK @ .',
+            'XM-LINK-OK @ IF',
+            '65536 XMEM-ALLOT? DROP XM-NEXT !',
+            '65528 XMEM-ALLOT? DROP XM-TAIL !',
+            'ELSE 0 XM-NEXT ! 0 XM-TAIL ! THEN',
+            '." B=" XM-NEXT @ XM-B @ = .',
+            '." A=" XM-TAIL @ XM-A @ 8 + = .',
+            '." XR=" XM-NEXT @ EXT-MEM-BASE >= '
+            'XM-TAIL @ EXT-MEM-BASE >= AND .',
+            '." E=" XMEM-FL @ 0= . ." ]"',
+        ])
+        for marker in ('XS-T', 'H', 'S', 'N', 'B', 'A', 'XR', 'E'):
+            self.assertRegex(
+                text,
+                rf"(?:\[)?{marker}=-1\s+",
+                f"8-byte XMEM split corrupted its successor: {text}",
+            )
+
 
 # =====================================================================
 #  tools.f Tests — ED Line Editor + SCROLL Multi-Protocol Fetcher

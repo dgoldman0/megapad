@@ -1727,6 +1727,7 @@ VARIABLE XMEM-FL     0 XMEM-FL !    \ free-list head (0 = empty)
 VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
 VARIABLE FL-NEED                     \ requested bytes during first-fit
+VARIABLE FL-NEXT                     \ successor preserved while splitting
 
 \ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
 \   Validates that addr falls within [EXT-MEM-BASE, XMEM-LIMIT),
@@ -1762,10 +1763,13 @@ VARIABLE FL-NEED                     \ requested bytes during first-fit
         FL-CURR @ @ FL-NEED @ >= IF       \ curr.size >= need ?
             FL-CURR @ @ FL-NEED @ -
             DUP 16 >= IF
-                \ Keep the aligned tail as a recyclable free block.
+                \ Keep the tail as a recyclable free block.  Preserve the
+                \ successor before writing the tail header: for an 8-byte
+                \ request the tail starts on the current node's +8 next cell.
+                FL-CURR @ 8 + @ FL-NEXT !
                 FL-CURR @ FL-NEED @ +
                 SWAP OVER !
-                FL-CURR @ 8 + @ OVER 8 + !
+                FL-NEXT @ OVER 8 + !
                 _XMEM-FL-REPLACE
             ELSE
                 DROP FL-CURR @ 8 + @ _XMEM-FL-REPLACE
