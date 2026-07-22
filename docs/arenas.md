@@ -303,8 +303,11 @@ XMEM now supports individual block reclaim via a free-list.
 - **XMEM-backed arenas:** `ARENA-DESTROY` returns the backing block
   to the XMEM free-list via `XMEM-FREE-BLOCK`.  Subsequent
   `XMEM-ALLOT` calls check the free-list (first-fit) before falling
-  back to bump allocation.  This means XMEM-backed arenas can be
-  repeatedly created and destroyed without leaking memory.
+  back to bump allocation. Requests and frees share 16-byte size
+  normalization, so padding remains part of the live allocation and is
+  recovered even when the requested arena size is not node-aligned. This
+  means XMEM-backed arenas can be repeatedly created and destroyed without
+  leaking memory.
   `XMEM-RESET` clears the free-list along with the bump pointer.
 
 - **HBW-backed arenas:** HBW remains a pure bump allocator.  In

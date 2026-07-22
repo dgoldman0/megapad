@@ -145,17 +145,19 @@ XMEM also has a **free-list** for individual block reclaim.  When an
 arena backed by XMEM is destroyed, its backing block is returned to
 the XMEM free-list via `XMEM-FREE-BLOCK`.  Subsequent `XMEM-ALLOT`
 calls check the free-list (first-fit) before falling back to the bump
-pointer.  First-fit reuse splits larger blocks when the remainder can
-hold another free-list node, so small requests do not consume an entire
-large reclaimed allocation.  `XMEM-RESET` clears the free-list along
-with the pointer.
+pointer. Allocation and free sizes are normalized upward to 16 bytes,
+the size of a free-list node. First-fit reuse therefore splits only on
+recyclable boundaries: padding is temporary space owned by the live
+allocation and is recovered when the caller frees with its original request
+size. `XMEM-RESET` clears the free-list along with the pointer.
 
 XMEM allocation sizes are strictly positive. `XMEM-ALLOT` aborts on an
 invalid or out-of-range request, while `XMEM-ALLOT?` returns `0 -1`. Bounds
-checks compare the request with `limit - current` before advancing the bump
-pointer, so cell overflow cannot turn a huge request into an in-range address.
-`XMEM-FREE-BLOCK` applies the analogous `size <= limit - addr` rule before
-writing free-list metadata; a rejected span leaves the list unchanged.
+checks reject an impossible original request before normalizing it, then
+compare the rounded request with `limit - current` before advancing the bump
+pointer. `XMEM-FREE-BLOCK` similarly validates both the original and rounded
+span before writing free-list metadata; a rejected span leaves the list
+unchanged.
 
 **Floor protection:** `XMEM-FLOOR` marks the boundary between
 kernel-reserved XMEM allocations (file buffers loaded at boot) and

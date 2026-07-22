@@ -29146,11 +29146,11 @@ class TestKDOSExtMem(_KDOSTestBase):
 
     # -- XMEM-FREE-BLOCK bounds validation (Phase 3 hardening) --
 
-    def test_xmem_free_block_too_small(self):
-        """XMEM-FREE-BLOCK rejects blocks smaller than 16 bytes."""
+    def test_xmem_free_block_nonpositive_size(self):
+        """XMEM-FREE-BLOCK rejects a nonpositive original request."""
         text = self._run_kdos([
             '8 XMEM-ALLOT',             # get a valid ext-mem addr
-            '8 XMEM-FREE-BLOCK',        # try to free with size=8 (< 16)
+            '0 XMEM-FREE-BLOCK',        # no allocation has a zero-byte span
         ])
         self.assertIn('XMEM-FREE: block too small', text)
 
@@ -29233,6 +29233,41 @@ class TestKDOSExtMem(_KDOSTestBase):
         self.assertIn('done', text)
         self.assertNotIn('XMEM-FREE:', text)  # no abort message
 
+    def test_xmem_original_size_free_reclaims_normalized_span(self):
+        """Freeing with the original size recovers a sub-16-byte request."""
+        text = self._run_kdos([
+            'VARIABLE XM-P',
+            '8 XMEM-ALLOT? DROP XM-P !',
+            'XM-P @ 8 XMEM-FREE-BLOCK',
+            '." [S=" XMEM-FL @ @ 16 = .',
+            '." R=" 8 XMEM-ALLOT? DROP XM-P @ = .',
+            '." E=" XMEM-FL @ 0= . ." ]"',
+        ])
+        for marker in ('[S=-1', 'R=-1', 'E=-1'):
+            self.assertIn(marker, text)
+
+    def test_xmem_odd_size_churn_preserves_total_available_bytes(self):
+        """Repeated odd-sized reuse cannot accumulate sub-node tail loss."""
+        text = self._run_kdos([
+            'VARIABLE XM-P VARIABLE XM-BEFORE',
+            ': XM-AVAILABLE  ( -- u )',
+            '  XMEM-FREE XMEM-FL @',
+            '  BEGIN ?DUP WHILE',
+            '    DUP @ ROT + SWAP 8 + @',
+            '  REPEAT ;',
+            ': XM-CYCLE  ( -- )',
+            '  64 0 DO',
+            '    17 XMEM-ALLOT? ABORT" odd allocation failed" XM-P !',
+            '    XM-P @ 17 XMEM-FREE-BLOCK',
+            '  LOOP ;',
+            'XM-AVAILABLE XM-BEFORE !',
+            'XM-CYCLE',
+            '." [T=" XM-AVAILABLE XM-BEFORE @ = .',
+            '." S=" XMEM-FL @ @ 32 = . ." ]"',
+        ])
+        self.assertIn('[T=-1', text)
+        self.assertIn('S=-1', text)
+
     def test_xmem_free_list_splits_large_block_for_smaller_requests(self):
         """Small reuse preserves the remainder of a reclaimed XMEM block."""
         text = self._run_kdos([
@@ -29250,8 +29285,8 @@ class TestKDOSExtMem(_KDOSTestBase):
                 f"Reclaimed block was not split and reused: {text}",
             )
 
-    def test_xmem_eight_byte_split_preserves_nonzero_successor(self):
-        """An 8-byte split must not overwrite the old free-list successor."""
+    def test_xmem_minimum_split_preserves_nonzero_successor(self):
+        """A normalized minimum allocation preserves the old successor."""
         text = self._run_kdos([
             'VARIABLE XM-A VARIABLE XM-B VARIABLE XM-TINY',
             'VARIABLE XM-NEXT VARIABLE XM-TAIL VARIABLE XM-LINK-OK',
@@ -29262,15 +29297,15 @@ class TestKDOSExtMem(_KDOSTestBase):
             '8 XMEM-ALLOT? DROP XM-TINY !',
             'XMEM-FL @ 8 + @ XM-B @ = DUP XM-LINK-OK !',
             '." [XS-T=" XM-TINY @ XM-A @ = .',
-            '." H=" XMEM-FL @ XM-A @ 8 + = .',
-            '." S=" XMEM-FL @ @ 65528 = .',
+            '." H=" XMEM-FL @ XM-A @ 16 + = .',
+            '." S=" XMEM-FL @ @ 65520 = .',
             '." N=" XM-LINK-OK @ .',
             'XM-LINK-OK @ IF',
             '65536 XMEM-ALLOT? DROP XM-NEXT !',
-            '65528 XMEM-ALLOT? DROP XM-TAIL !',
+            '65520 XMEM-ALLOT? DROP XM-TAIL !',
             'ELSE 0 XM-NEXT ! 0 XM-TAIL ! THEN',
             '." B=" XM-NEXT @ XM-B @ = .',
-            '." A=" XM-TAIL @ XM-A @ 8 + = .',
+            '." A=" XM-TAIL @ XM-A @ 16 + = .',
             '." XR=" XM-NEXT @ EXT-MEM-BASE >= '
             'XM-TAIL @ EXT-MEM-BASE >= AND .',
             '." E=" XMEM-FL @ 0= . ." ]"',

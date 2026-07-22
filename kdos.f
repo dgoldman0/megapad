@@ -1722,22 +1722,32 @@ VARIABLE XMEM-LIMIT  0 XMEM-LIMIT !
 \   Each freed block stores at its address:
 \     +0  size   (bytes)
 \     +8  next   (ptr to next free block, or 0)
-\   Minimum recyclable block: 16 bytes (2 cells).
+\   Requests are rounded up to 16 bytes, the minimum recyclable block.
+\   XMEM-FREE-BLOCK accepts the original positive request size and applies
+\   the same normalization, so sub-node tails never become unrecoverable.
 VARIABLE XMEM-FL     0 XMEM-FL !    \ free-list head (0 = empty)
 VARIABLE FL-PREV                     \ search scratch
 VARIABLE FL-CURR                     \ search scratch
 VARIABLE FL-NEED                     \ requested bytes during first-fit
 VARIABLE FL-NEXT                     \ successor preserved while splitting
 
+: _XMEM-NORMALIZE-SIZE  ( u -- u' )
+    15 + -16 AND ;
+
 \ XMEM-FREE-BLOCK ( addr size -- )  return a block to the XMEM free-list
 \   Validates that addr falls within [EXT-MEM-BASE, XMEM-LIMIT),
-\   addr+size does not exceed XMEM-LIMIT, and size >= 16.
+\   the positive original request fits, and its 16-byte-normalized span
+\   does not exceed XMEM-LIMIT.
 : XMEM-FREE-BLOCK  ( addr size -- )
-    DUP 16 < ABORT" XMEM-FREE: block too small"
+    DUP 1 < ABORT" XMEM-FREE: block too small"
     OVER EXT-MEM-BASE < ABORT" XMEM-FREE: addr below base"
     OVER XMEM-LIMIT @ >= ABORT" XMEM-FREE: exceeds limit"
     \ Check size <= limit-addr before any address addition.  The old
     \ addr+size comparison could wrap and admit a span crossing the limit.
+    2DUP SWAP XMEM-LIMIT @ SWAP - >
+    ABORT" XMEM-FREE: exceeds limit"
+    _XMEM-NORMALIZE-SIZE
+    \ Rounding is part of the owned span, so validate it independently.
     2DUP SWAP XMEM-LIMIT @ SWAP - >
     ABORT" XMEM-FREE: exceeds limit"
     OVER !                            \ addr+0 = size
@@ -1795,10 +1805,13 @@ VARIABLE FL-NEXT                     \ successor preserved while splitting
     THEN ;
 
 \ XMEM-ALLOT ( u -- addr )  allocate u bytes from ext mem
-\   Tries the free-list first (first-fit), then falls back to bump.
+\   Rounds positive requests to 16 bytes, tries the free-list first
+\   (first-fit), then falls back to bump allocation.
 : XMEM-ALLOT  ( u -- addr )
     XMEM? 0= ABORT" No external memory"
     DUP 0< OVER 0= OR ABORT" Invalid ext mem size"
+    DUP XMEM-LIMIT @ EXT-MEM-BASE - > ABORT" Ext mem overflow"
+    _XMEM-NORMALIZE-SIZE
     DUP (XMEM-FL-FIND) IF              \ found a recycled block
         NIP EXIT
     THEN
@@ -1813,6 +1826,8 @@ VARIABLE FL-NEXT                     \ successor preserved while splitting
 : XMEM-ALLOT?  ( u -- addr ior )
     XMEM? 0= IF DROP 0 -1 EXIT THEN
     DUP 0< OVER 0= OR IF DROP 0 -1 EXIT THEN
+    DUP XMEM-LIMIT @ EXT-MEM-BASE - > IF DROP 0 -1 EXIT THEN
+    _XMEM-NORMALIZE-SIZE
     DUP (XMEM-FL-FIND) IF NIP 0 EXIT THEN
     DUP XMEM-LIMIT @ XMEM-HERE @ - > IF
         DROP 0 -1 EXIT
