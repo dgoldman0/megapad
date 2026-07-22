@@ -29314,7 +29314,7 @@ class TestKDOSExtMem(_KDOSTestBase):
             self.assertRegex(
                 text,
                 rf"(?:\[)?{marker}=-1\s+",
-                f"8-byte XMEM split corrupted its successor: {text}",
+                f"Normalized XMEM split corrupted its successor: {text}",
             )
 
 
