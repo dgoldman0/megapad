@@ -10839,7 +10839,7 @@ w_2r_from:
 
 ; 2R@ (IMMEDIATE) — compile inline: copy two from return stack, push to data stack
 ;   Emits:  ldn r0, r15      (50 0F)     — x2 (top of RSP)
-;           mov r1, r15      (42 1F)
+;           mov r1, r15      (78 1F)
 ;           addi r1, 8       (62 10 08)
 ;           ldn r1, r1       (50 11)     — x1
 ;           subi r14, 8      (67 E0 08)  — push x1 first (deeper)
@@ -10855,8 +10855,8 @@ w_2r_fetch:
     ldi r1, 0x0F
     ldi64 r11, compile_byte
     call.l r11
-    ; mov r1, r15: 42 1F
-    ldi r1, 0x42
+    ; mov r1, r15: 78 1F
+    ldi r1, 0x78
     ldi64 r11, compile_byte
     call.l r11
     ldi r1, 0x1F

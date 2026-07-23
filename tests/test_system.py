@@ -3998,13 +3998,21 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("1 ", text)
 
     def test_2r_fetch(self):
+        """2R@ copies both cells regardless of the incoming condition flags."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
-            ': TEST  10 20 2>R 2R@ . . 2R> 2DROP ;',
-            'TEST'
+            ': TEST-Z  10 20 2>R 0 0 = 2R@ '
+            '." Z-TOP=" . ." Z-DEEP=" . DROP '
+            '2R> ." Z-R-TOP=" . ." Z-R-DEEP=" . ;',
+            ': TEST-NE  30 40 2>R 0 1 = 2R@ '
+            '." NE-TOP=" . ." NE-DEEP=" . DROP '
+            '2R> ." NE-R-TOP=" . ." NE-R-DEEP=" . ;',
+            'TEST-Z',
+            'TEST-NE',
         ])
-        self.assertIn("20 ", text)
-        self.assertIn("10 ", text)
+        self.assertIn("Z-TOP=20 Z-DEEP=10 Z-R-TOP=20 Z-R-DEEP=10", text)
+        self.assertIn("NE-TOP=40 NE-DEEP=30 NE-R-TOP=40 NE-R-DEEP=30",
+                      text)
 
     def test_does_basic(self):
         """CREATE...DOES> basic defining word."""
