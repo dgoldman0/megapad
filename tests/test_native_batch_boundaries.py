@@ -1,0 +1,228 @@
+"""Progress accounting at native batch control-flow boundaries."""
+
+from __future__ import annotations
+
+import pytest
+
+import _mp64_accel
+from accel_wrapper import Megapad64 as NativeMegapad64
+from megapad64 import (
+    IVEC_ILLEGAL_OP,
+    IVEC_SW_TRAP,
+    Megapad64 as PythonMegapad64,
+    TrapError,
+)
+from system import MegapadSystem
+
+
+MMIO_START = 0xFFFF_FF00_0000_0000
+MMIO_END = 0xFFFF_FF80_0000_0000
+NOP_THEN_DOUBLE_EXT = bytes((0x01, 0xF0, 0xF0))
+
+
+def _raw_run(cpu: NativeMegapad64, max_steps: int):
+    return _mp64_accel.run_steps(
+        cpu._cs,
+        mmio_read8=cpu._mmio_read8,
+        mmio_write8=cpu._mmio_write8,
+        on_output=cpu._do_output,
+        csr_read_override=None,
+        mmio_start=MMIO_START,
+        mmio_end=MMIO_END,
+        max_steps=max_steps,
+    )
+
+
+def _install_vector(cpu, ivec_id: int, handler: int = 0x300) -> int:
+    ivt_base = 0x100
+    stack_top = 0xF00
+    cpu.ivt_base = ivt_base
+    cpu.regs[cpu.spsel] = stack_top
+    cpu.mem[ivt_base + ivec_id * 8:ivt_base + ivec_id * 8 + 8] = (
+        handler.to_bytes(8, "little")
+    )
+    return handler
+
+
+def _reset_visible_state(cpu) -> tuple:
+    return (
+        tuple(cpu.regs),
+        (cpu.psel, cpu.xsel, cpu.spsel),
+        (
+            cpu.flag_z,
+            cpu.flag_c,
+            cpu.flag_n,
+            cpu.flag_v,
+            cpu.flag_p,
+            cpu.flag_g,
+            cpu.flag_i,
+            cpu.flag_s,
+        ),
+        (cpu.d_reg, cpu.q_out, cpu.t_reg),
+        (cpu.sb, cpu.sr, cpu.sc, cpu.sw),
+        (
+            cpu.tmode,
+            cpu.tctrl,
+            cpu.tsrc0,
+            cpu.tsrc1,
+            cpu.tdst,
+            cpu.tstride_r,
+            cpu.tstride_c,
+            cpu.ttile_h,
+            cpu.ttile_w,
+        ),
+        tuple(cpu.acc),
+        (cpu.ivt_base, cpu.ivec_id, cpu.trap_addr, cpu.ef_flags),
+        (cpu.halted, cpu.idle, cpu.priv_level, cpu.mpu_base, cpu.mpu_limit),
+        (
+            cpu.cycle_count,
+            cpu.perf_enable,
+            cpu.perf_cycles,
+            cpu.perf_stalls,
+            cpu.perf_tileops,
+            cpu.perf_extmem,
+        ),
+        (cpu.crc_acc, cpu.crc_mode, cpu._ext_modifier),
+        bytes(cpu.mem),
+    )
+
+
+def _seed_reset_state(cpu) -> None:
+    cpu.load_bytes(0, bytes((0x01, 0x03)))  # NOP; RESET
+    for index in range(32):
+        cpu.regs[index] = 0x1000 + index
+    cpu.pc = 0
+    cpu.flags_unpack(0xFF)
+    cpu.d_reg = 0xA5
+    cpu.q_out = 1
+    cpu.t_reg = 0xBEEF
+    cpu.sb, cpu.sr, cpu.sc, cpu.sw = 3, 4, 5, 6
+    cpu.tmode = 3
+    cpu.tctrl = 7
+    cpu.tsrc0, cpu.tsrc1, cpu.tdst = 0x200, 0x300, 0x400
+    cpu.tstride_r = 11
+    cpu.tstride_c = 13
+    cpu.ttile_h = 2
+    cpu.ttile_w = 7
+    cpu.acc = [0x11, 0x22, 0x33, 0x44]
+    cpu.ivt_base = 0x500
+    cpu.ivec_id = 9
+    cpu.trap_addr = 0x777
+    cpu.ef_flags = 0xA
+    cpu.priv_level = 1
+    cpu.mpu_base = 0x100
+    cpu.mpu_limit = 0x900
+    cpu.cycle_count = 5
+    cpu.perf_cycles = 7
+    cpu.perf_stalls = 8
+    cpu.perf_tileops = 9
+    cpu.perf_extmem = 10
+    cpu.crc_acc = 0x1234
+    cpu.crc_mode = 2
+    cpu._ext_modifier = -1
+
+
+def test_raw_batch_reports_prefix_before_pending_trap():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, NOP_THEN_DOUBLE_EXT)
+    cpu.pc = 0
+
+    result = _raw_run(cpu, max_steps=2)
+
+    assert (
+        result.steps_executed,
+        result.total_cycles,
+        result.stop_reason,
+        result.trap_id,
+    ) == (1, 1, 5, IVEC_ILLEGAL_OP)
+    assert cpu.pc == len(NOP_THEN_DOUBLE_EXT)
+    assert cpu.cycle_count == 1
+
+
+def test_wrapper_counts_prefix_and_delivers_pending_trap():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, NOP_THEN_DOUBLE_EXT)
+    handler = _install_vector(cpu, IVEC_ILLEGAL_OP)
+    stack_top = cpu.regs[cpu.spsel]
+    cpu.pc = 0
+
+    assert cpu.run_steps(max_steps=2) == (2, 0)
+    assert cpu.pc == handler
+    assert cpu.ivec_id == IVEC_ILLEGAL_OP
+    assert cpu.regs[cpu.spsel] == stack_top - 16
+    assert cpu.cycle_count == 1
+    assert cpu.perf_cycles == 1
+
+
+def test_no_ivt_trap_carries_native_prefix_progress():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, NOP_THEN_DOUBLE_EXT)
+    cpu.pc = 0
+
+    with pytest.raises(TrapError) as raised:
+        cpu.run_steps(max_steps=2)
+
+    error = raised.value
+    assert error.ivec_id == IVEC_ILLEGAL_OP
+    assert error.steps_executed == 2
+    assert error.native_prefix_steps == 1
+    assert error.native_prefix_cycles == 1
+    assert cpu.pc == len(NOP_THEN_DOUBLE_EXT)
+
+
+def test_system_ticks_complete_prefix_when_batch_trap_has_no_ivt():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, NOP_THEN_DOUBLE_EXT)
+    system.cpu.pc = 0
+    ticks = []
+    system.bus.tick = ticks.append
+
+    assert system.run_batch(2) == 2
+    assert ticks == [2]
+    assert system.cpu.pc == len(NOP_THEN_DOUBLE_EXT)
+
+
+def test_reset_after_native_prefix_matches_python_state_and_count():
+    oracle = PythonMegapad64(mem_size=4096)
+    native = NativeMegapad64(mem_size=4096)
+    _seed_reset_state(oracle)
+    _seed_reset_state(native)
+
+    assert oracle.step() == 1
+    assert oracle.step() == 1
+    assert native.run_steps(max_steps=2) == (2, 0)
+    assert _reset_visible_state(native) == _reset_visible_state(oracle)
+
+
+def test_software_trap_cycle_and_state_match_python_oracle():
+    oracle = PythonMegapad64(mem_size=4096)
+    native = NativeMegapad64(mem_size=4096)
+    for cpu in (oracle, native):
+        cpu.load_bytes(0, bytes((0x0F,)))  # SYS.TRAP
+        _install_vector(cpu, IVEC_SW_TRAP)
+        cpu.pc = 0
+
+    assert oracle.step() == 3
+    assert native.step() == 3
+    assert _reset_visible_state(native) == _reset_visible_state(oracle)
+
+
+def test_software_trap_after_batch_prefix_matches_python_oracle():
+    oracle = PythonMegapad64(mem_size=4096)
+    native = NativeMegapad64(mem_size=4096)
+    for cpu in (oracle, native):
+        cpu.load_bytes(0, bytes((0x01, 0x0F)))  # NOP; SYS.TRAP
+        _install_vector(cpu, IVEC_SW_TRAP)
+        cpu.pc = 0
+
+    assert oracle.step() == 1
+    assert oracle.step() == 3
+    assert native.run_steps(max_steps=2) == (2, 0)
+    assert _reset_visible_state(native) == _reset_visible_state(oracle)

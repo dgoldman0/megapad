@@ -413,8 +413,7 @@ def {_attr}(self, v):
             elif msg == "MEX_FALLBACK" or msg == "EXT_ISA_FALLBACK":
                 return self._step_python_fallback()
             elif msg.startswith("TRAP:"):
-                self._handle_trap(msg)
-                return 1
+                return self._handle_trap(msg)
             else:
                 raise
 
@@ -441,11 +440,38 @@ def {_attr}(self, v):
         elif "ILLEGAL_OP" in msg:
             ivec = IVEC_ILLEGAL_OP
         elif "RESET" in msg:
-            self._reset_state()
-            return  # RESET is not a trap
+            return self._finish_reset()
         else:
             ivec = IVEC_ILLEGAL_OP
-        self._trap(ivec)
+        return self._finish_trap(ivec)
+
+    def _finish_trap(self, ivec_id: int) -> int:
+        """Deliver a pending native trap and return its public cycle cost."""
+        self._trap(ivec_id)
+        if ivec_id == IVEC_SW_TRAP:
+            # The Python ISA oracle models SYS.TRAP as three cycles when an
+            # IVT is installed.  Other synchronous faults abort before normal
+            # cycle accounting and retain the wrapper's historical return 1.
+            self._cs.cycle_count += 3
+            if self._cs.perf_enable:
+                self._cs.perf_cycles += 3
+            return 3
+        return 1
+
+    def _finish_reset(self) -> int:
+        """Apply RESET after fetch and account its one completed cycle."""
+        self._reset_state()
+        self._cs.cycle_count += 1
+        if self._cs.perf_enable:
+            self._cs.perf_cycles += 1
+        return 1
+
+    @staticmethod
+    def _annotate_batch_trap(error: TrapError, result) -> None:
+        """Attach progress discarded by an exception-based public return."""
+        error.steps_executed = result.steps_executed + 1
+        error.native_prefix_steps = result.steps_executed
+        error.native_prefix_cycles = result.total_cycles
 
     def _step_python_fallback(self):
         """Fall back to pure-Python step() for complex instructions.
@@ -534,7 +560,21 @@ def {_attr}(self, v):
             # the one pending fallback instruction.  This deliberately runs
             # outside the native control-string handler so callback errors
             # propagate unchanged.
-            self._step_python_fallback()
+            try:
+                self._step_python_fallback()
+            except TrapError as error:
+                self._annotate_batch_trap(error, result)
+                raise
+            return result.steps_executed + 1, 0
+        if result.stop_reason == 5:
+            try:
+                self._finish_trap(result.trap_id)
+            except TrapError as error:
+                self._annotate_batch_trap(error, result)
+                raise
+            return result.steps_executed + 1, 0
+        if result.stop_reason == 6:
+            self._finish_reset()
             return result.steps_executed + 1, 0
         return result.steps_executed, result.stop_reason
 

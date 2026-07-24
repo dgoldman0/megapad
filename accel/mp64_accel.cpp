@@ -1090,18 +1090,6 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 //  Trap delivery
 // ---------------------------------------------------------------------------
 
-static void do_trap(CPUState& s, int ivec_id) {
-    if (s.ivt_base == 0) return;  // no IVT, caller will handle
-    push64(s, flags_pack(s) | ((uint64_t)s.priv_level << 8));
-    push64(s, pc(s));
-    s.flag_i = 0;
-    s.priv_level = 0;  // escalate to supervisor
-    s.idle = false;     // interrupt wakes CPU from idle
-    s.ivec_id = ivec_id;
-    uint64_t handler = mem_read64(s, s.ivt_base + ivec_id * 8);
-    pc(s) = handler;
-}
-
 // ---------------------------------------------------------------------------
 //  _next_instruction_size — for SKIP mode
 // ---------------------------------------------------------------------------
@@ -4070,19 +4058,40 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 struct RunResult {
     int64_t total_cycles;
     int steps_executed;
-    int stop_reason;  // 0=max_steps, 1=halt, 2=idle, 3/4=Python fallback
+    int stop_reason;
+    int trap_id;
 };
+
+enum RunStopReason {
+    RUN_LIMIT = 0,
+    RUN_HALT = 1,
+    RUN_IDLE = 2,
+    RUN_MEX_FALLBACK = 3,
+    RUN_EXT_FALLBACK = 4,
+    RUN_TRAP = 5,
+    RUN_RESET = 6,
+};
+
+static int trap_id_from_runtime_error(const std::string& what) {
+    if (what.find("SW_TRAP") != std::string::npos)
+        return IVEC_SW_TRAP;
+    if (what.find("DIV_ZERO") != std::string::npos)
+        return IVEC_DIV_ZERO;
+    if (what.find("PRIV_FAULT") != std::string::npos)
+        return IVEC_PRIV_FAULT;
+    return IVEC_ILLEGAL_OP;
+}
 
 static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) {
     // GIL is released by the caller (pybind11 binding).  All Python
     // callbacks in StepCallbacks reacquire it as needed.  This lets
     // background threads (display, NIC RX) run freely while the CPU
     // inner loop executes pure C++.
-    RunResult result = {0, 0, 0};
+    RunResult result = {0, 0, RUN_LIMIT, -1};
 
     for (int i = 0; i < max_steps; i++) {
-        if (s.halted) { result.stop_reason = 1; break; }
-        if (s.idle) { result.stop_reason = 2; break; }
+        if (s.halted) { result.stop_reason = RUN_HALT; break; }
+        if (s.idle) { result.stop_reason = RUN_IDLE; break; }
 
         try {
             int cycles = step_one(s, cb);
@@ -4091,34 +4100,29 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
         } catch (const std::runtime_error& e) {
             std::string what = e.what();
             if (what == "HALT") {
-                result.stop_reason = 1;
+                result.stop_reason = RUN_HALT;
                 break;
             } else if (what.substr(0, 5) == "TRAP:") {
-                // Decode trap type and deliver
-                if (what == "TRAP:SW_TRAP") {
-                    if (s.ivt_base) do_trap(s, IVEC_SW_TRAP);
-                    else throw;
-                } else if (what == "TRAP:DIV_ZERO") {
-                    if (s.ivt_base) do_trap(s, IVEC_DIV_ZERO);
-                    else throw;
-                } else if (what == "TRAP:ILLEGAL_OP:Double EXT prefix") {
-                    if (s.ivt_base) do_trap(s, IVEC_ILLEGAL_OP);
-                    else throw;
-                } else if (what == "TRAP:RESET") {
-                    throw;  // Let Python handle RESET
+                // Preserve the completed native prefix and let the wrapper
+                // perform the same trap/reset path used by single-step
+                // execution.  The faulting instruction is pending and is not
+                // included in steps_executed or total_cycles.
+                if (what == "TRAP:RESET") {
+                    result.stop_reason = RUN_RESET;
                 } else {
-                    throw;  // Unknown trap → Python
+                    result.stop_reason = RUN_TRAP;
+                    result.trap_id = trap_id_from_runtime_error(what);
                 }
-                result.steps_executed++;
+                break;
             } else if (what == "MEX_FALLBACK") {
                 // The instruction was rewound transactionally by step_one.
                 // Preserve the completed native prefix in RunResult and let
                 // the wrapper execute exactly this one instruction in Python.
-                result.stop_reason = 3;
+                result.stop_reason = RUN_MEX_FALLBACK;
                 break;
             } else if (what == "EXT_ISA_FALLBACK") {
                 // Unhandled EXT ISA op; like MEX fallback, its PC is rewound.
-                result.stop_reason = 4;
+                result.stop_reason = RUN_EXT_FALLBACK;
                 break;
             } else {
                 throw;
@@ -4860,6 +4864,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("total_cycles", &RunResult::total_cycles)
         .def_readonly("steps_executed", &RunResult::steps_executed)
         .def_readonly("stop_reason", &RunResult::stop_reason)
+        .def_readonly("trap_id", &RunResult::trap_id)
         ;
 
     // Single step function

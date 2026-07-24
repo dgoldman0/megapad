@@ -996,7 +996,7 @@ class MegapadSystem:
             except TrapError as e:
                 if cpu.ivt_base != 0:
                     cpu._trap(e.ivec_id)
-                steps = 1
+                steps = getattr(e, 'steps_executed', 1)
             except HaltError:
                 steps = 1
 
@@ -1035,7 +1035,7 @@ class MegapadSystem:
                     except TrapError as e:
                         if cpu.ivt_base != 0:
                             cpu._trap(e.ivec_id)
-                        round_steps += 1
+                        round_steps += getattr(e, 'steps_executed', 1)
                     except HaltError:
                         round_steps += 1
 
