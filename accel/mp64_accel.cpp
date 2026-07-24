@@ -257,8 +257,10 @@ struct CPUState {
     // C++ native framebuffer device (bypass Python MMIO for FB registers)
     FramebufferDevice fb;
 
-    // C++ native timer device (bypass Python MMIO for timer polling)
-    TimerDevice timer;
+    // Standalone states own a private timer.  System-owned states borrow the
+    // one architecturally singleton timer retained by SystemState.
+    std::unique_ptr<TimerDevice> private_timer;
+    TimerDevice* timer = nullptr;
 
     // C++ native RTC device (bypass Python MMIO for MS@/EPOCH@ polling)
     RTCDevice rtc;
@@ -282,13 +284,20 @@ struct CPUState {
 };
 
 static std::unique_ptr<CPUState> make_cpu_state(
-        MemoryMappings* shared_memory = nullptr) {
+        MemoryMappings* shared_memory = nullptr,
+        TimerDevice* shared_timer = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
     } else {
         state->private_memory = std::make_unique<MemoryMappings>();
         state->memory = state->private_memory.get();
+    }
+    if (shared_timer != nullptr) {
+        state->timer = shared_timer;
+    } else {
+        state->private_timer = std::make_unique<TimerDevice>();
+        state->timer = state->private_timer.get();
     }
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
@@ -303,10 +312,10 @@ static std::unique_ptr<CPUState> make_cpu_state(
     return state;
 }
 
-// SystemState owns full-core lifetimes and exactly one mapping set.  Singleton
-// devices and scheduling remain per-core compatibility paths for later
-// transactional milestones.  shared_memory is declared before cores so cores
-// and their cached device pointers are destroyed before the leases they borrow.
+// SystemState owns full-core lifetimes, exactly one mapping set, and the first
+// migrated singleton device.  Other devices and scheduling remain per-core
+// compatibility paths for later transactional milestones.  Shared resources
+// are declared before cores so borrowed pointers die before their owners.
 struct SystemState {
     explicit SystemState(int full_core_count, int all_core_count = 0) {
         if (full_core_count < 1 || full_core_count > 255)
@@ -320,7 +329,7 @@ struct SystemState {
 
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
-            auto core = make_cpu_state(&shared_memory);
+            auto core = make_cpu_state(&shared_memory, &shared_timer);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -344,6 +353,7 @@ struct SystemState {
     }
 
     MemoryMappings shared_memory;
+    TimerDevice shared_timer{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -2742,8 +2752,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.crypto.read8(mmio_off);
         if (s.fb.handles(mmio_off))
             return s.fb.read8(mmio_off);
-        if (s.timer.handles(mmio_off))
-            return s.timer.read8(mmio_off);
+        if (s.timer->handles(mmio_off))
+            return s.timer->read8(mmio_off);
         if (s.rtc.handles(mmio_off))
             return s.rtc.read8(mmio_off);
         if (s.uart_geom.handles(mmio_off))
@@ -2793,8 +2803,8 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
             s.fb.write8(mmio_off, val);
             return;
         }
-        if (s.timer.handles(mmio_off)) {
-            s.timer.write8(mmio_off, val);
+        if (s.timer->handles(mmio_off)) {
+            s.timer->write8(mmio_off, val);
             return;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -2857,10 +2867,10 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.fb.read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.timer.handles(mmio_off)) {
+        if (s.timer->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.timer.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.timer->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -2906,9 +2916,9 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.timer.handles(mmio_off)) {
+        if (s.timer->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -2936,8 +2946,9 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
             return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
         if (s.fb.handles(mmio_off))
             return s.fb.read8(mmio_off) | ((uint16_t)s.fb.read8(mmio_off+1) << 8);
-        if (s.timer.handles(mmio_off))
-            return s.timer.read8(mmio_off) | ((uint16_t)s.timer.read8(mmio_off+1) << 8);
+        if (s.timer->handles(mmio_off))
+            return s.timer->read8(mmio_off) |
+                   ((uint16_t)s.timer->read8(mmio_off + 1) << 8);
         if (s.rtc.handles(mmio_off))
             return s.rtc.read8(mmio_off) | ((uint16_t)s.rtc.read8(mmio_off+1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
@@ -2964,9 +2975,9 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.fb.write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
-        if (s.timer.handles(mmio_off)) {
-            s.timer.write8(mmio_off, val & 0xFF);
-            s.timer.write8(mmio_off+1, (val >> 8) & 0xFF);
+        if (s.timer->handles(mmio_off)) {
+            s.timer->write8(mmio_off, val & 0xFF);
+            s.timer->write8(mmio_off + 1, (val >> 8) & 0xFF);
             return;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -3002,10 +3013,10 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.fb.read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.timer.handles(mmio_off)) {
+        if (s.timer->handles(mmio_off)) {
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
-                v |= (uint32_t)s.timer.read8(mmio_off + i) << (8*i);
+                v |= (uint32_t)s.timer->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -3041,9 +3052,9 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.timer.handles(mmio_off)) {
+        if (s.timer->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
-                s.timer.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.rtc.handles(mmio_off)) {
@@ -5412,38 +5423,74 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── Timer device ──────────────────────────────────────
         .def("timer_init", [](CPUState& s) {
-            s.timer.init();
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.timer->init();
         })
-        .def("timer_enabled", [](const CPUState& s) -> bool {
-            return s.timer.enabled;
+        .def("timer_enabled", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.timer->enabled;
         })
         .def("timer_disable", [](CPUState& s) {
-            s.timer.enabled = false;
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.timer->enabled = false;
         })
         .def("timer_tick", [](CPUState& s, uint32_t cycles) {
-            s.timer.tick(cycles);
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.timer->tick(cycles);
         })
-        .def("timer_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
-            return s.timer.read8(mmio_off);
+        .def("timer_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.timer->read8(mmio_off);
         })
         .def("timer_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
-            s.timer.write8(mmio_off, val);
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.timer->write8(mmio_off, val);
         })
         .def_property("timer_irq_pending",
-            [](const CPUState& s) -> bool { return s.timer.irq_pending; },
-            [](CPUState& s, bool v) { s.timer.irq_pending = v; })
+            [](CPUState& s) -> bool {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.timer->irq_pending;
+            },
+            [](CPUState& s, bool v) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.timer->irq_pending = v;
+            })
         .def_property("timer_counter",
-            [](const CPUState& s) -> uint32_t { return s.timer.counter; },
-            [](CPUState& s, uint32_t v) { s.timer.counter = v; })
+            [](CPUState& s) -> uint32_t {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.timer->counter;
+            },
+            [](CPUState& s, uint32_t v) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.timer->counter = v;
+            })
         .def_property("timer_compare",
-            [](const CPUState& s) -> uint32_t { return s.timer.compare; },
-            [](CPUState& s, uint32_t v) { s.timer.compare = v; })
+            [](CPUState& s) -> uint32_t {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.timer->compare;
+            },
+            [](CPUState& s, uint32_t v) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.timer->compare = v;
+            })
         .def_property("timer_control",
-            [](const CPUState& s) -> uint8_t { return s.timer.control; },
-            [](CPUState& s, uint8_t v) { s.timer.control = v; })
+            [](CPUState& s) -> uint8_t {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.timer->control;
+            },
+            [](CPUState& s, uint8_t v) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.timer->control = v;
+            })
         .def_property("timer_status",
-            [](const CPUState& s) -> uint8_t { return s.timer.status; },
-            [](CPUState& s, uint8_t v) { s.timer.status = v; })
+            [](CPUState& s) -> uint8_t {
+                auto memory_guard = acquire_shared_memory_use(s);
+                return s.timer->status;
+            },
+            [](CPUState& s, uint8_t v) {
+                auto memory_guard = acquire_shared_memory_use(s);
+                s.timer->status = v;
+            })
         // ── RTC device ───────────────────────────────────────────
         .def("rtc_init", [](CPUState& s, bool realtime,
                              uint64_t epoch_ms, uint8_t sec,

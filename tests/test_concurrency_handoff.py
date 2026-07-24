@@ -283,27 +283,44 @@ def test_core0_timer_proxy_advances_when_the_bus_ticks():
     assert system.timer.counter == 17
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "secondary full cores own private native timers, while bus.tick only "
-        "advances the core-0 timer proxy"
-    ),
-)
 def test_secondary_native_timer_observes_shared_ticking_state():
     """Every requester must read the same architecturally singleton timer."""
     system = _new_system(full_cores=2)
     system.timer.control = 1
     system.bus.tick(17)
+    system.timer.control = 0
+    system.timer.compare = 0xFFFF_FFFF
 
-    read_counter = assemble(
+    read_and_write_timer = assemble(
         f"""
         ldi64 r1, {MMIO_BASE + TIMER_BASE}
         ld.b r4, r1
+        ldi64 r2, {MMIO_BASE + TIMER_BASE + 0x04}
+        ldi64 r5, 0x34
+        st.b r2, r5
         halt
         """
     )
-    _run_only_secondary(system, read_counter)
+    secondary = system.cores[1]
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
 
-    assert system.cores[1].regs[4] >= 17
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, read_and_write_timer)
+
+    assert secondary.regs[4] == 17
+    assert system.timer.compare == 0xFFFF_FF34
+    assert callback_reads == callback_writes == 0

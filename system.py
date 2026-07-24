@@ -551,7 +551,6 @@ class MegapadSystem:
             cs.nic_set_tx_callback(_tx_cb)
             cs.init_trng()
             cs.fb_init()  # FB MMIO handled in C++ on all cores
-            cs.timer_init()  # Timer MMIO handled in C++ on all cores
             # UART is one shared physical device. Core 0 owns the native queue;
             # secondary cores fall through to the shared Python facade.
             if cpu.core_id == 0:

@@ -11,6 +11,7 @@ import pytest
 import _mp64_accel
 from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
+from devices import TIMER_BASE
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
 
@@ -116,6 +117,10 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
 
     core.set_reg(9, 0xCAFE)
     assert core.get_reg(9) == 0xCAFE
+    core.timer_init()
+    core.timer_control = 1
+    core.timer_tick(3)
+    assert core.timer_counter == 3
 
 
 def test_megapad_system_wraps_native_owned_full_cores() -> None:
@@ -196,6 +201,56 @@ def test_standalone_cpu_ownership_and_execution_remain_available() -> None:
     assert cpu._system_owner is None
     assert cpu.step() == 1
     assert cpu.pc == len(program)
+
+
+def test_system_timer_is_one_native_instance_for_every_full_core() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+    system.timer.counter = 23
+    system.timer.compare = 99
+    system.timer.control = 1
+    system.timer.status = 1
+    system.timer.irq_pending = True
+
+    assert (
+        core1.timer_counter,
+        core1.timer_compare,
+        core1.timer_control,
+        core1.timer_status,
+        core1.timer_irq_pending,
+    ) == (23, 99, 1, 1, True)
+
+    core1.timer_compare = 123
+    core1.timer_write8(TIMER_BASE + 0x09, 0x01)
+    core1.timer_tick(5)
+
+    assert core0.timer_counter == system.timer.counter == 28
+    assert core0.timer_compare == system.timer.compare == 123
+    assert core0.timer_status == system.timer.status == 0
+    assert not core0.timer_irq_pending
+    assert not system.timer.irq_pending
+
+
+def test_standalone_native_timers_remain_private() -> None:
+    first = _mp64_accel.CPUState()
+    second = _mp64_accel.CPUState()
+    first.timer_init()
+    second.timer_init()
+    first.timer_control = 1
+    first.timer_tick(17)
+    first.timer_compare = 41
+
+    assert first.timer_counter == 17
+    assert first.timer_compare == 41
+    assert second.timer_counter == 0
+    assert second.timer_compare == 0xFFFF_FFFF
 
 
 @pytest.mark.parametrize(
