@@ -276,6 +276,11 @@ def _float_to_bf16(f: float) -> int:
     """Convert Python float to bfloat16 (16-bit raw).
     Uses round-to-nearest-even."""
     bits = _pack_fp32_bits(f)
+    if (bits & 0x7F80_0000) == 0x7F80_0000 and bits & 0x007F_FFFF:
+        # NaN payloads are not numbers to round.  Preserve their sign and
+        # representable high payload while forcing the BF16 quiet bit; numeric
+        # rounding could otherwise carry 0x7FFF into 0x8000 (negative zero).
+        return ((bits >> 16) | 0x0040) & 0xFFFF
     # Round: look at lower 16 bits
     round_bit = (bits >> 15) & 1
     sticky = (bits & 0x7FFF) != 0

@@ -1528,15 +1528,32 @@ static inline float bf16_to_float(uint16_t b) {
     float f; std::memcpy(&f, &bits32, 4); return f;
 }
 
-static inline uint16_t float_to_bf16(float f) {
-    uint32_t bits;
-    std::memcpy(&bits, &f, 4);
+static constexpr uint16_t fp32_bits_to_bf16(uint32_t bits) {
+    if ((bits & 0x7F800000U) == 0x7F800000U &&
+        (bits & 0x007FFFFFU) != 0) {
+        // Preserve sign and the representable payload while forcing the BF16
+        // quiet bit.  Numeric rounding can carry a maximal NaN payload into
+        // a zero encoding, so NaNs must bypass the rounding path.
+        return static_cast<uint16_t>((bits >> 16) | 0x0040U);
+    }
     uint32_t round_bit = (bits >> 15) & 1;
     uint32_t sticky    = (bits & 0x7FFF) ? 1 : 0;
     uint32_t result    = bits >> 16;
     if (round_bit && (sticky || (result & 1)))
         result++;
-    return (uint16_t)(result & 0xFFFF);
+    return static_cast<uint16_t>(result & 0xFFFFU);
+}
+
+static_assert(fp32_bits_to_bf16(0x7FFFFFFFU) == 0x7FFF);
+static_assert(fp32_bits_to_bf16(0xFFFFFFFFU) == 0xFFFF);
+static_assert(fp32_bits_to_bf16(0x7F800001U) == 0x7FC0);
+static_assert(fp32_bits_to_bf16(0xFF800001U) == 0xFFC0);
+static_assert(fp32_bits_to_bf16(0x7FCD0000U) == 0x7FCD);
+
+static inline uint16_t float_to_bf16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    return fp32_bits_to_bf16(bits);
 }
 
 static inline float fp_decode(uint16_t raw, int ew) {

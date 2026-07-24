@@ -85,6 +85,26 @@ def test_float_to_bf16_special_values_and_overflow(
 
 
 @pytest.mark.parametrize(
+    ("fp32_bits", "expected"),
+    [
+        pytest.param(0x7FFF_FFFF, 0x7FFF, id="positive-maximal-payload"),
+        pytest.param(0xFFFF_FFFF, 0xFFFF, id="negative-maximal-payload"),
+        pytest.param(0x7F80_0001, 0x7FC0, id="positive-low-payload"),
+        pytest.param(0xFF80_0001, 0xFFC0, id="negative-low-payload"),
+        pytest.param(0x7FCD_0000, 0x7FCD, id="preserved-high-payload"),
+    ],
+)
+def test_float_to_bf16_preserves_a_valid_quiet_nan(
+    fp32_bits: int,
+    expected: int,
+) -> None:
+    encoded = _float_to_bf16(_bits_to_fp32(fp32_bits))
+
+    assert encoded == expected
+    assert math.isnan(_bf16_to_float(encoded))
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         pytest.param(1.0 + 2.0**-8, 0x3F80, id="normal-tie-even-down"),
