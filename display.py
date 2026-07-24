@@ -61,6 +61,36 @@ _BASE_STATUS_HEIGHT = 22
 # fall through to raw NumPy views of memory that the CPU may be writing.
 _FRAMEBUFFER_RENDER_BUSY = "CPUState framebuffer render is busy"
 
+
+def _framebuffer_display_config(fb) -> tuple[int, int, int, int]:
+    """Return enable, width, height, and mode from one scalar snapshot."""
+    snapshot = getattr(fb, "snapshot", None)
+    if callable(snapshot):
+        (
+            _base,
+            width,
+            height,
+            _stride,
+            mode,
+            enable,
+            _vsync_count,
+            _vblank,
+            _cycles_per_frame,
+        ) = snapshot()
+        return int(enable), int(width), int(height), int(mode)
+    return int(fb.enable), int(fb.width), int(fb.height), int(fb.mode)
+
+
+def _framebuffer_host_present(fb) -> None:
+    """Publish a displayed frame without splitting the device transition."""
+    host_present = getattr(fb, "host_present", None)
+    if callable(host_present):
+        host_present()
+        return
+    fb.vsync_count = (fb.vsync_count + 1) & 0xFFFF_FFFF
+    fb.vblank = True
+
+
 # ── Color Palette ─────────────────────────────────────────────────────
 
 class Theme:
@@ -1475,6 +1505,17 @@ def save_snapshot(sys_emu: "MegapadSystem", path: str):
     File extension: .mp64
     """
     cpu = sys_emu.cpu
+    (
+        fb_base,
+        fb_width,
+        fb_height,
+        fb_stride,
+        fb_mode,
+        fb_enable,
+        _fb_vsync_count,
+        _fb_vblank,
+        _fb_cycles_per_frame,
+    ) = sys_emu.fb.snapshot()
 
     # CPU state
     state = {
@@ -1499,12 +1540,12 @@ def save_snapshot(sys_emu: "MegapadSystem", path: str):
             "image_path": sys_emu.storage.image_path,
         },
         "fb": {
-            "enable": sys_emu.fb.enable,
-            "width": sys_emu.fb.width,
-            "height": sys_emu.fb.height,
-            "mode": sys_emu.fb.mode,
-            "fb_base": sys_emu.fb.fb_base,
-            "stride": sys_emu.fb.stride,
+            "enable": fb_enable,
+            "width": fb_width,
+            "height": fb_height,
+            "mode": fb_mode,
+            "fb_base": fb_base,
+            "stride": fb_stride,
         },
     }
 
@@ -2268,7 +2309,8 @@ class FramebufferDisplay:
                                  content_rect.y + max(0, ty)))
 
                 elif self.active_tab == self.TAB_GRAPHICS:
-                    if not (fb.enable & 1):
+                    fb_enable, w, h, mode = _framebuffer_display_config(fb)
+                    if not (fb_enable & 1):
                         label = ui_font.render(
                             "Framebuffer disabled  \u2014  use GFX-INIT",
                             True, (100, 100, 120))
@@ -2276,7 +2318,6 @@ class FramebufferDisplay:
                                     (content_rect.x + 10,
                                      content_rect.y + 10))
                     else:
-                        w, h, mode = fb.width, fb.height, fb.mode
                         if w >= 1 and h >= 1:
                             if (w != last_w or h != last_h
                                     or mode != last_mode):
@@ -2302,8 +2343,7 @@ class FramebufferDisplay:
                                         (content_rect.x + ox,
                                          content_rect.y + oy))
 
-                            fb.vsync_count += 1
-                            fb.vblank = True
+                            _framebuffer_host_present(fb)
 
                 # ── Debug panel ───────────────────────────────
                 if self.debug.visible:
@@ -2495,11 +2535,19 @@ class HeadlessDisplay:
 
     def snapshot(self) -> bytes | None:
         fb = self.sys.fb
-        if not (fb.enable & 1):
+        (
+            base_addr,
+            _width,
+            h,
+            stride,
+            _mode,
+            enable,
+            _vsync_count,
+            _vblank,
+            _cycles_per_frame,
+        ) = fb.snapshot()
+        if not (enable & 1):
             return None
-        base_addr = fb.fb_base
-        stride = fb.stride
-        h = fb.height
         mem, mem_off = self._resolve_fb_mem(base_addr)
         if mem is None:
             return None

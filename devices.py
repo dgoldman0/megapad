@@ -2873,6 +2873,25 @@ class FramebufferDevice(Device):
             self.vsync_count = (self.vsync_count + 1) & 0xFFFFFFFF
             self.vblank = True
 
+    def host_present(self):
+        """Publish one host-presented frame as one device transition."""
+        self.vsync_count = (self.vsync_count + 1) & 0xFFFFFFFF
+        self.vblank = True
+
+    def snapshot(self) -> tuple[int, int, int, int, int, int, int, bool, int]:
+        """Return one coherent scalar configuration/state snapshot."""
+        return (
+            self.fb_base,
+            self.width,
+            self.height,
+            self.stride,
+            self.mode,
+            self.enable,
+            self.vsync_count,
+            self.vblank,
+            self.cycles_per_frame,
+        )
+
     def bpp(self) -> int:
         """Bytes per pixel for the current mode."""
         return FB_BPP.get(self.mode, 1)
@@ -3000,8 +3019,14 @@ class CppFramebufferProxy(Device):
     def tick(self, cycles: int):
         self._cs.fb_tick(cycles)
 
+    def host_present(self):
+        self._cs.fb_host_present()
+
+    def snapshot(self) -> tuple[int, int, int, int, int, int, int, bool, int]:
+        return tuple(self._cs.fb_snapshot())
+
     def bpp(self) -> int:
-        return FB_BPP.get(self.mode, 1)
+        return FB_BPP.get(self.snapshot()[4], 1)
 
     @property
     def irq_pending(self) -> bool:
@@ -3009,7 +3034,8 @@ class CppFramebufferProxy(Device):
 
     @property
     def frame_bytes(self) -> int:
-        return self.stride * self.height
+        snapshot = self.snapshot()
+        return snapshot[3] * snapshot[2]
 
 
 class CppTimerProxy(Device):

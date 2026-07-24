@@ -103,9 +103,10 @@ STATE_COMPARISON_SCOPE = {
         "is equal."
     ),
     "native_audit_basis": (
-        "CPUState and its nested device structs in accel/mp64_accel.cpp and "
-        "accel/mp64_*.h; native fields without non-destructive pybind "
-        "readback are exclusions even when they affect future execution"
+        "CPUState, SystemState, and their owned or borrowed device structs in "
+        "accel/mp64_accel.cpp and accel/mp64_*.h; native fields without "
+        "non-destructive pybind readback are exclusions even when they affect "
+        "future execution"
     ),
     "included": [
         "all 32 GPRs and every scalar CPUState field exposed by the binding",

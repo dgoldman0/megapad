@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from display import FramebufferDisplay
+from display import (
+    FramebufferDisplay,
+    _framebuffer_display_config,
+    _framebuffer_host_present,
+)
 from system import MegapadSystem
 
 
@@ -25,6 +29,41 @@ class _NativeFramebuffer:
     @property
     def fb_base(self):
         pytest.fail("busy native scanout must not use the raw-memory fallback")
+
+
+class _AtomicFramebufferView:
+    def __init__(self):
+        self.presentations = 0
+
+    def snapshot(self):
+        return (0x1234, 640, 360, 2560, 3, 3, 17, False, 33333)
+
+    def host_present(self):
+        self.presentations += 1
+
+    @property
+    def enable(self):
+        pytest.fail("display config must not use piecemeal properties")
+
+    @property
+    def width(self):
+        pytest.fail("display config must not use piecemeal properties")
+
+    @property
+    def height(self):
+        pytest.fail("display config must not use piecemeal properties")
+
+    @property
+    def mode(self):
+        pytest.fail("display config must not use piecemeal properties")
+
+    @property
+    def vsync_count(self):
+        pytest.fail("host presentation must use one device transition")
+
+    @property
+    def vblank(self):
+        pytest.fail("host presentation must use one device transition")
 
 
 class _NativeGeometry:
@@ -100,6 +139,15 @@ def _display_without_runtime_dependencies():
         "busy native scanout must not resolve a raw framebuffer view"
     )
     return display
+
+
+def test_display_configuration_and_present_use_atomic_framebuffer_methods():
+    framebuffer = _AtomicFramebufferView()
+
+    assert _framebuffer_display_config(framebuffer) == (3, 640, 360, 3)
+    _framebuffer_host_present(framebuffer)
+
+    assert framebuffer.presentations == 1
 
 
 def test_busy_native_scanout_skips_frame_without_raw_memory_fallback(

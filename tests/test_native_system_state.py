@@ -11,7 +11,7 @@ import pytest
 import _mp64_accel
 from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
-from devices import TIMER_BASE, UART_GEOM_BASE
+from devices import FB_BASE, TIMER_BASE, UART_GEOM_BASE
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
 
@@ -124,6 +124,10 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
     core.uart_geom_init(91, 31)
     core.uart_geom_host_set_size(92, 32)
     assert (core.uart_geom_cols, core.uart_geom_rows) == (92, 32)
+    core.fb_init()
+    core.fb_width = 512
+    core.fb_height = 288
+    assert core.fb_snapshot()[1:3] == (512, 288)
 
 
 def test_megapad_system_wraps_native_owned_full_cores() -> None:
@@ -254,6 +258,151 @@ def test_standalone_native_timers_remain_private() -> None:
     assert first.timer_compare == 41
     assert second.timer_counter == 0
     assert second.timer_compare == 0xFFFF_FFFF
+
+
+def test_system_framebuffer_is_one_native_instance_for_every_full_core() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+
+    system.fb.fb_base = 0x1234_5678
+    system.fb.width = 640
+    system.fb.height = 360
+    system.fb.stride = 2560
+    system.fb.mode = 3
+    system.fb.enable = 3
+    core1.fb_set_palette_entry(7, 0x12AB34)
+
+    assert (
+        core0.fb_base_addr,
+        core1.fb_base_addr,
+        core0.fb_width,
+        core1.fb_width,
+        core0.fb_height,
+        core1.fb_height,
+        core0.fb_stride,
+        core1.fb_stride,
+        core0.fb_mode,
+        core1.fb_mode,
+        core0.fb_enable,
+        core1.fb_enable,
+    ) == (
+        0x1234_5678,
+        0x1234_5678,
+        640,
+        640,
+        360,
+        360,
+        2560,
+        2560,
+        3,
+        3,
+        3,
+        3,
+    )
+    assert system.fb.palette[7] == core0.fb_get_palette()[7] == 0x12AB34
+    assert system.fb.snapshot() == (
+        0x1234_5678,
+        640,
+        360,
+        2560,
+        3,
+        3,
+        0,
+        False,
+        33333,
+    )
+
+    core1.fb_write8(FB_BASE + 0x20, 1)
+    core1.fb_write8(FB_BASE + 0x28, 2)
+    assert (system.fb.mode, system.fb.enable) == (1, 2)
+
+    core1.fb_enable = 3
+    core1.fb_cycles_per_frame = 5
+    core1.fb_tick(5)
+    assert (
+        core0.fb_vsync_count,
+        system.fb.vsync_count,
+        core0.fb_vblank,
+        system.fb.vblank,
+        core0.fb_irq_pending(),
+    ) == (1, 1, True, True, True)
+
+    for index, value in enumerate((1, 0, 0, 0)):
+        core0.fb_write8(FB_BASE + 0x30 + index, value)
+    assert not core1.fb_vblank
+    assert not system.fb.irq_pending
+
+    core0.fb_vsync_count = 0xFFFF_FFFF
+    core0.fb_vblank = False
+    core1.fb_host_present()
+    assert (
+        system.fb.vsync_count,
+        system.fb.vblank,
+        system.fb.irq_pending,
+    ) == (0, True, True)
+
+
+def test_shared_framebuffer_render_uses_one_palette_snapshot() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=16,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+
+    system._vram_mem[0] = 7
+    core1.fb_base_addr = system.vram_base
+    core1.fb_width = 1
+    core1.fb_height = 1
+    core1.fb_stride = 1
+    core1.fb_mode = 0
+    system.fb.palette = [
+        0x000000 if index != 7 else 0x12AB34
+        for index in range(256)
+    ]
+
+    image = core0.render_fb_rgb()
+
+    assert image.shape == (1, 1, 3)
+    assert image[0, 0, :].tolist() == [0x12, 0xAB, 0x34]
+
+
+def test_standalone_native_framebuffers_remain_private() -> None:
+    first = _mp64_accel.CPUState()
+    second = _mp64_accel.CPUState()
+    first.fb_init()
+    second.fb_init()
+
+    first.fb_base_addr = 0x2000
+    first.fb_width = 800
+    first.fb_height = 600
+    first.fb_mode = 3
+    first.fb_set_palette_entry(9, 0xABCDEF)
+
+    assert (
+        first.fb_base_addr,
+        first.fb_width,
+        first.fb_height,
+        first.fb_mode,
+        first.fb_get_palette()[9],
+    ) == (0x2000, 800, 600, 3, 0xABCDEF)
+    assert (
+        second.fb_base_addr,
+        second.fb_width,
+        second.fb_height,
+        second.fb_mode,
+        second.fb_get_palette()[9],
+    ) == (0, 320, 240, 0, 0x090909)
 
 
 def test_system_uart_geometry_is_one_native_instance_for_every_full_core() -> None:

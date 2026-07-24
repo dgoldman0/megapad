@@ -14,42 +14,58 @@
 #include <cstdint>
 #include <cstring>
 #include <array>
+#include <mutex>
 
 struct FramebufferDevice {
+    struct Snapshot {
+        uint64_t fb_base;
+        uint32_t width;
+        uint32_t height;
+        uint32_t stride;
+        uint8_t mode;
+        uint8_t enable;
+        uint32_t vsync_count;
+        bool vblank;
+        uint32_t cycles_per_frame;
+        std::array<uint32_t, 256> palette;
+    };
+
+    mutable std::mutex mutex;
+
     // --- Configuration registers ---
-    uint64_t fb_base;       // 64-bit pixel data start address
-    uint32_t width;         // pixels per row
-    uint32_t height;        // rows
-    uint32_t stride;        // bytes per row
-    uint8_t  mode;          // 0=8bpp indexed, 1=RGB565, 2=FP16, 3=RGBA8888
-    uint8_t  enable;        // bit 0: scanout, bit 1: vsync IRQ
+    uint64_t fb_base = 0;       // 64-bit pixel data start address
+    uint32_t width = 0;         // pixels per row
+    uint32_t height = 0;        // rows
+    uint32_t stride = 0;        // bytes per row
+    uint8_t  mode = 0;          // 0=8bpp indexed, 1=RGB565, 2=FP16, 3=RGBA8888
+    uint8_t  enable = 0;        // bit 0: scanout, bit 1: vsync IRQ
 
     // --- Vsync state ---
-    uint32_t vsync_count;   // frame counter (wraps at 32 bits)
-    bool     vblank;        // set by tick(), cleared by ack
+    uint32_t vsync_count = 0;   // frame counter (wraps at 32 bits)
+    bool     vblank = false;    // set by tick(), cleared by ack
 
     // --- Palette ---
-    std::array<uint32_t, 256> palette;  // 24-bit 0x00RRGGBB entries
-    uint8_t  pal_idx;       // current palette write index
+    std::array<uint32_t, 256> palette{};  // 24-bit 0x00RRGGBB entries
+    uint8_t  pal_idx = 0;       // current palette write index
 
     // --- Tick state ---
-    uint32_t frame_cycles;       // accumulated cycles since last vsync
-    uint32_t cycles_per_frame;   // threshold (~33333 for 30 FPS)
+    uint32_t frame_cycles = 0;       // accumulated cycles since last vsync
+    uint32_t cycles_per_frame = 0;   // threshold (~33333 for 30 FPS)
 
     // --- Byte-assembly buffers for multi-byte LE writes ---
-    uint8_t  base_buf[8];
-    uint8_t  width_buf[4];
-    uint8_t  height_buf[4];
-    uint8_t  stride_buf[4];
-    uint8_t  vsync_buf[4];
-    uint8_t  pal_data_buf[4];
+    uint8_t  base_buf[8]{};
+    uint8_t  width_buf[4]{};
+    uint8_t  height_buf[4]{};
+    uint8_t  stride_buf[4]{};
+    uint8_t  vsync_buf[4]{};
+    uint8_t  pal_data_buf[4]{};
 
     // Byte-push for fb_base (via port I/O bridge)
-    uint8_t  base_push_ctr;
-    uint64_t base_push_buf;
+    uint8_t  base_push_ctr = 0;
+    uint64_t base_push_buf = 0;
 
     // --- Active flag ---
-    bool     enabled;       // false = bypass, fall through to Python
+    bool     enabled = false;  // false = bypass, fall through to Python
 
     // MMIO address range (offsets from MMIO_START)
     static constexpr uint32_t FB_BASE_OFF = 0x0A00;
@@ -60,6 +76,7 @@ struct FramebufferDevice {
     // -------------------------------------------------------------------
 
     void init() {
+        std::lock_guard<std::mutex> guard(mutex);
         fb_base = 0;
         width = 320;
         height = 240;
@@ -92,10 +109,16 @@ struct FramebufferDevice {
     // -------------------------------------------------------------------
 
     bool handles(uint32_t mmio_offset) const {
-        return enabled && mmio_offset >= FB_BASE_OFF && mmio_offset < FB_END_OFF;
+        // System dispatch probes the framebuffer before several other
+        // devices. Keep unrelated MMIO off this device's mutex entirely.
+        if (mmio_offset < FB_BASE_OFF || mmio_offset >= FB_END_OFF)
+            return false;
+        std::lock_guard<std::mutex> guard(mutex);
+        return enabled;
     }
 
     uint8_t read8(uint32_t mmio_offset) const {
+        std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - FB_BASE_OFF;
 
         // FB_BASE — 8 bytes LE (0x00..0x07)
@@ -138,6 +161,7 @@ struct FramebufferDevice {
     }
 
     void write8(uint32_t mmio_offset, uint8_t value) {
+        std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - FB_BASE_OFF;
 
         // FB_BASE — 8-byte LE accumulator (0x00..0x07)
@@ -247,6 +271,7 @@ struct FramebufferDevice {
     // -------------------------------------------------------------------
 
     void tick(uint32_t cycles) {
+        std::lock_guard<std::mutex> guard(mutex);
         if (!(enable & 1))
             return;
         frame_cycles += cycles;
@@ -257,11 +282,20 @@ struct FramebufferDevice {
         }
     }
 
+    // Preserve the display front end's existing presentation policy while
+    // making its counter increment and vblank publication one transition.
+    void host_present() {
+        std::lock_guard<std::mutex> guard(mutex);
+        vsync_count++;
+        vblank = true;
+    }
+
     // -------------------------------------------------------------------
     //  Convenience: IRQ pending check
     // -------------------------------------------------------------------
 
     bool irq_pending() const {
+        std::lock_guard<std::mutex> guard(mutex);
         return (enable & 2) && vblank;
     }
 
@@ -270,6 +304,7 @@ struct FramebufferDevice {
     // -------------------------------------------------------------------
 
     int bpp() const {
+        std::lock_guard<std::mutex> guard(mutex);
         switch (mode) {
             case 0: return 1;
             case 1: return 2;
@@ -277,5 +312,21 @@ struct FramebufferDevice {
             case 3: return 4;
             default: return 1;
         }
+    }
+
+    Snapshot snapshot() const {
+        std::lock_guard<std::mutex> guard(mutex);
+        return {
+            fb_base,
+            width,
+            height,
+            stride,
+            mode,
+            enable,
+            vsync_count,
+            vblank,
+            cycles_per_frame,
+            palette,
+        };
     }
 };

@@ -16,8 +16,10 @@ ext = Extension(
     sources=["accel/mp64_accel.cpp"],
     depends=[
         "accel/mp64_crypto.h",
+        "accel/mp64_fb.h",
         "accel/mp64_nic.h",
         "accel/mp64_rtc.h",
+        "accel/mp64_timer.h",
         "accel/mp64_uart.h",
         "accel/mp64_uart_geom.h",
     ],

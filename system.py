@@ -550,7 +550,8 @@ class MegapadSystem:
                 return True
             cs.nic_set_tx_callback(_tx_cb)
             cs.init_trng()
-            cs.fb_init()  # FB MMIO handled in C++ on all cores
+            # The public proxy initialized the shared framebuffer once.
+            # Every full core reaches that same native controller.
             # UART is one shared physical device. Core 0 owns the native queue;
             # secondary cores fall through to the shared Python facade.
             if cpu.core_id == 0:

@@ -254,8 +254,10 @@ struct CPUState {
     // C++ native TRNG device (bypass Python MMIO for random bytes)
     TRNGDevice trng;
 
-    // C++ native framebuffer device (bypass Python MMIO for FB registers)
-    FramebufferDevice fb;
+    // Standalone states own a private framebuffer.  System-owned states
+    // borrow the one scanout controller retained by SystemState.
+    std::unique_ptr<FramebufferDevice> private_fb;
+    FramebufferDevice* fb = nullptr;
 
     // Standalone states own a private timer.  System-owned states borrow the
     // one architecturally singleton timer retained by SystemState.
@@ -288,7 +290,8 @@ struct CPUState {
 static std::unique_ptr<CPUState> make_cpu_state(
         MemoryMappings* shared_memory = nullptr,
         TimerDevice* shared_timer = nullptr,
-        UartGeomDevice* shared_uart_geom = nullptr) {
+        UartGeomDevice* shared_uart_geom = nullptr,
+        FramebufferDevice* shared_fb = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -307,6 +310,12 @@ static std::unique_ptr<CPUState> make_cpu_state(
     } else {
         state->private_uart_geom = std::make_unique<UartGeomDevice>();
         state->uart_geom = state->private_uart_geom.get();
+    }
+    if (shared_fb != nullptr) {
+        state->fb = shared_fb;
+    } else {
+        state->private_fb = std::make_unique<FramebufferDevice>();
+        state->fb = state->private_fb.get();
     }
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
@@ -339,7 +348,10 @@ struct SystemState {
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
             auto core = make_cpu_state(
-                &shared_memory, &shared_timer, &shared_uart_geom);
+                &shared_memory,
+                &shared_timer,
+                &shared_uart_geom,
+                &shared_fb);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -365,6 +377,7 @@ struct SystemState {
     MemoryMappings shared_memory;
     TimerDevice shared_timer{};
     UartGeomDevice shared_uart_geom{};
+    FramebufferDevice shared_fb{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -2771,8 +2784,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.trng.read8(mmio_off);
         if (s.crypto.handles(mmio_off))
             return s.crypto.read8(mmio_off);
-        if (s.fb.handles(mmio_off))
-            return s.fb.read8(mmio_off);
+        if (s.fb->handles(mmio_off))
+            return s.fb->read8(mmio_off);
         if (s.timer->handles(mmio_off))
             return s.timer->read8(mmio_off);
         if (s.rtc.handles(mmio_off))
@@ -2821,8 +2834,8 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
             s.crypto.write8(mmio_off, val);
             return;
         }
-        if (s.fb.handles(mmio_off)) {
-            s.fb.write8(mmio_off, val);
+        if (s.fb->handles(mmio_off)) {
+            s.fb->write8(mmio_off, val);
             return;
         }
         if (s.timer->handles(mmio_off)) {
@@ -2884,10 +2897,10 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.crypto.read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.fb.handles(mmio_off)) {
+        if (s.fb->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.fb.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.fb->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.timer->handles(mmio_off)) {
@@ -2941,9 +2954,9 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.fb.handles(mmio_off)) {
+        if (s.fb->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.fb->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.timer->handles(mmio_off)) {
@@ -2981,8 +2994,9 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto.handles(mmio_off))
             return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
-        if (s.fb.handles(mmio_off))
-            return s.fb.read8(mmio_off) | ((uint16_t)s.fb.read8(mmio_off+1) << 8);
+        if (s.fb->handles(mmio_off))
+            return s.fb->read8(mmio_off) |
+                   ((uint16_t)s.fb->read8(mmio_off + 1) << 8);
         if (s.timer->handles(mmio_off))
             return s.timer->read8(mmio_off) |
                    ((uint16_t)s.timer->read8(mmio_off + 1) << 8);
@@ -3011,9 +3025,9 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.crypto.write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
-        if (s.fb.handles(mmio_off)) {
-            s.fb.write8(mmio_off, val & 0xFF);
-            s.fb.write8(mmio_off+1, (val >> 8) & 0xFF);
+        if (s.fb->handles(mmio_off)) {
+            s.fb->write8(mmio_off, val & 0xFF);
+            s.fb->write8(mmio_off + 1, (val >> 8) & 0xFF);
             return;
         }
         if (s.timer->handles(mmio_off)) {
@@ -3054,10 +3068,10 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.crypto.read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.fb.handles(mmio_off)) {
+        if (s.fb->handles(mmio_off)) {
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
-                v |= (uint32_t)s.fb.read8(mmio_off + i) << (8*i);
+                v |= (uint32_t)s.fb->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.timer->handles(mmio_off)) {
@@ -3101,9 +3115,9 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.fb.handles(mmio_off)) {
+        if (s.fb->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
-                s.fb.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.fb->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.timer->handles(mmio_off)) {
@@ -5320,60 +5334,158 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── Framebuffer device ────────────────────────────────
         .def("fb_init", [](CPUState& s) {
-            s.fb.init();
+            s.fb->init();
         })
-        .def("fb_enabled", [](const CPUState& s) -> bool {
-            return s.fb.enabled;
+        .def("fb_enabled", [](CPUState& s) -> bool {
+            std::lock_guard<std::mutex> framebuffer_guard(
+                s.fb->mutex);
+            return s.fb->enabled;
         })
         .def("fb_disable", [](CPUState& s) {
-            s.fb.enabled = false;
+            std::lock_guard<std::mutex> framebuffer_guard(
+                s.fb->mutex);
+            s.fb->enabled = false;
         })
         .def("fb_tick", [](CPUState& s, uint32_t cycles) {
-            s.fb.tick(cycles);
+            s.fb->tick(cycles);
         })
-        .def("fb_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
-            return s.fb.read8(mmio_off);
+        .def("fb_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.fb->read8(mmio_off);
         })
         .def("fb_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
-            s.fb.write8(mmio_off, val);
+            s.fb->write8(mmio_off, val);
         })
-        .def("fb_irq_pending", [](const CPUState& s) -> bool {
-            return s.fb.irq_pending();
+        .def("fb_irq_pending", [](CPUState& s) -> bool {
+            return s.fb->irq_pending();
+        })
+        .def("fb_host_present", [](CPUState& s) {
+            s.fb->host_present();
         })
         // FB properties for display thread access
         .def_property("fb_base_addr",
-            [](const CPUState& s) -> uint64_t { return s.fb.fb_base; },
-            [](CPUState& s, uint64_t v) { s.fb.fb_base = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->fb_base;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->fb_base = v;
+            })
         .def_property("fb_width",
-            [](const CPUState& s) -> uint32_t { return s.fb.width; },
-            [](CPUState& s, uint32_t v) { s.fb.width = v; })
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->width;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->width = v;
+            })
         .def_property("fb_height",
-            [](const CPUState& s) -> uint32_t { return s.fb.height; },
-            [](CPUState& s, uint32_t v) { s.fb.height = v; })
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->height;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->height = v;
+            })
         .def_property("fb_stride",
-            [](const CPUState& s) -> uint32_t { return s.fb.stride; },
-            [](CPUState& s, uint32_t v) { s.fb.stride = v; })
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->stride;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->stride = v;
+            })
         .def_property("fb_mode",
-            [](const CPUState& s) -> uint8_t { return s.fb.mode; },
-            [](CPUState& s, uint8_t v) { s.fb.mode = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->mode;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->mode = v;
+            })
         .def_property("fb_enable",
-            [](const CPUState& s) -> uint8_t { return s.fb.enable; },
-            [](CPUState& s, uint8_t v) { s.fb.enable = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->enable;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->enable = v;
+            })
         .def_property("fb_vsync_count",
-            [](const CPUState& s) -> uint32_t { return s.fb.vsync_count; },
-            [](CPUState& s, uint32_t v) { s.fb.vsync_count = v; })
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->vsync_count;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->vsync_count = v;
+            })
         .def_property("fb_vblank",
-            [](const CPUState& s) -> bool { return s.fb.vblank; },
-            [](CPUState& s, bool v) { s.fb.vblank = v; })
+            [](CPUState& s) -> bool {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->vblank;
+            },
+            [](CPUState& s, bool v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->vblank = v;
+            })
         .def_property("fb_cycles_per_frame",
-            [](const CPUState& s) -> uint32_t { return s.fb.cycles_per_frame; },
-            [](CPUState& s, uint32_t v) { s.fb.cycles_per_frame = v; })
-        .def("fb_get_palette", [](const CPUState& s) -> std::vector<uint32_t> {
-            return std::vector<uint32_t>(s.fb.palette.begin(), s.fb.palette.end());
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                return s.fb->cycles_per_frame;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->cycles_per_frame = v;
+            })
+        .def("fb_get_palette", [](CPUState& s) -> std::vector<uint32_t> {
+            const auto framebuffer = s.fb->snapshot();
+            return std::vector<uint32_t>(
+                framebuffer.palette.begin(),
+                framebuffer.palette.end());
         })
         .def("fb_set_palette_entry", [](CPUState& s, int idx, uint32_t rgb) {
-            if (idx >= 0 && idx < 256)
-                s.fb.palette[idx] = rgb & 0x00FFFFFF;
+            if (idx >= 0 && idx < 256) {
+                std::lock_guard<std::mutex> framebuffer_guard(
+                    s.fb->mutex);
+                s.fb->palette[idx] = rgb & 0x00FFFFFF;
+            }
+        })
+        .def("fb_snapshot", [](CPUState& s) {
+            const auto framebuffer = s.fb->snapshot();
+            return py::make_tuple(
+                framebuffer.fb_base,
+                framebuffer.width,
+                framebuffer.height,
+                framebuffer.stride,
+                framebuffer.mode,
+                framebuffer.enable,
+                framebuffer.vsync_count,
+                framebuffer.vblank,
+                framebuffer.cycles_per_frame);
         })
         // ── Framebuffer render (C++ pixel conversion) ─────────
         //
@@ -5390,11 +5502,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("render_fb_rgb", [](CPUState& s) -> py::object {
             ExclusiveMemoryUseGuard memory_guard(
                 *s.memory, "CPUState framebuffer render is busy");
-            uint32_t w = s.fb.width;
-            uint32_t h = s.fb.height;
-            uint32_t stride = s.fb.stride;
-            uint8_t  mode = s.fb.mode;
-            uint64_t base = s.fb.fb_base;
+            const auto framebuffer = s.fb->snapshot();
+            uint32_t w = framebuffer.width;
+            uint32_t h = framebuffer.height;
+            uint32_t stride = framebuffer.stride;
+            uint8_t  mode = framebuffer.mode;
+            uint64_t base = framebuffer.fb_base;
 
             if (w == 0 || h == 0 || w > 4096 || h > 4096)
                 return py::none();
@@ -5428,7 +5541,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             std::memset(result.mutable_data(), 0,
                         static_cast<size_t>(result.nbytes()));
             auto buf = result.mutable_unchecked<3>();
-            const auto palette = s.fb.palette;
+            const auto& palette = framebuffer.palette;
 
             // Release GIL for the pixel conversion loop
             {

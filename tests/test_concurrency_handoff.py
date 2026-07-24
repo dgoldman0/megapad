@@ -13,6 +13,7 @@ import pytest
 
 from asm import assemble
 from devices import (
+    FB_BASE,
     MMIO_BASE,
     RTC_BASE,
     SYSINFO_BASE,
@@ -290,6 +291,50 @@ def test_secondary_native_rtc_access_uses_the_shared_core0_instance():
     _run_only_secondary(system, read_uptime)
 
     assert system.cores[1].regs[4] == 0x5A
+
+
+def test_secondary_native_framebuffer_reaches_shared_host_state():
+    """Secondary guest MMIO and the host facade use one framebuffer."""
+    system = _new_system(full_cores=2)
+    system.fb.width = 0x0102
+    system.fb.height = 0x00F1
+    read_and_configure = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + FB_BASE + 0x08}
+        ld.w r4, r1
+        ldi64 r2, {MMIO_BASE + FB_BASE + 0x20}
+        ldi64 r5, 0x03
+        st.b r2, r5
+        ldi64 r2, {MMIO_BASE + FB_BASE + 0x28}
+        ldi64 r5, 0x03
+        st.b r2, r5
+        halt
+        """
+    )
+    secondary = system.cores[1]
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, read_and_configure)
+
+    assert secondary.regs[4] == 0x0102
+    assert (system.fb.width, system.fb.height) == (0x0102, 0x00F1)
+    assert (system.fb.mode, system.fb.enable) == (0x03, 0x03)
+    assert callback_reads == callback_writes == 0
 
 
 def test_secondary_native_uart_geometry_reaches_shared_host_state():
