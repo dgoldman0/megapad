@@ -13,6 +13,7 @@ mailbox (IPI), hardware spinlocks, and cluster enable/disable gating.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import weakref
 from typing import Optional, TYPE_CHECKING
 
@@ -90,6 +91,22 @@ BOOT_VECTOR = 0x0000_0000_0000_0000
 #   Core 2: stack at top of 0xD0000–0xDFFFF  → SP = 0xE0000
 #   Core 3: stack at top of 0xC0000–0xCFFFF  → SP = 0xD0000
 CORE_STACK_TOPS = [0x100000, 0xF0000, 0xE0000, 0xD0000]
+
+
+def _cpu_logical_memory_use(cpu):
+    """Return one full-core operation scope, or a no-op for micro-cores."""
+    state = getattr(cpu, "_cs", None)
+    if state is None:
+        return nullcontext()
+    return state._logical_memory_use()
+
+
+def _cpu_memory_use(cpu):
+    """Return a non-executing full-core scope, or a no-op for micro-cores."""
+    state = getattr(cpu, "_cs", None)
+    if state is None:
+        return nullcontext()
+    return state._memory_use()
 
 
 # ---------------------------------------------------------------------------
@@ -349,10 +366,25 @@ class MegapadSystem:
         self.vram_base = VRAM_BASE if vram_size > 0 else 0
         self.vram_end = (VRAM_BASE + vram_size) if vram_size > 0 else 0
 
-        # Native Phase-1 owner for all full-core CPUState lifetimes.  Shared
-        # mappings and singleton devices remain on their existing compatibility
-        # paths until their transactional migrations land.
+        # Native Phase-1 owner for all full-core CPUState lifetimes and their
+        # single shared mapping set.  Attach each exporter exactly once before
+        # borrowing the first core, which seals the mapping against divergent
+        # per-core replacement.  Singleton devices and scheduling remain on
+        # their existing compatibility paths.
         self._native_system = NativeSystemState(num_cores, self.num_cores)
+        self._native_system.attach_mem(self._shared_mem, ram_size)
+        if hbw_size > 0:
+            self._native_system.attach_hbw_mem(
+                self._hbw_mem, HBW_BASE, hbw_size
+            )
+        if ext_mem_size > 0:
+            self._native_system.attach_ext_mem(
+                self._ext_mem, EXT_MEM_BASE, ext_mem_size
+            )
+        if vram_size > 0:
+            self._native_system.attach_vram(
+                self._vram_mem, VRAM_BASE, vram_size
+            )
 
         # Create Python API wrappers around the natively owned full cores.
         self.cores: list[Megapad64] = []
@@ -360,16 +392,8 @@ class MegapadSystem:
             cpu = Megapad64._from_system_state(
                 self._native_system,
                 i,
-                mem_size=ram_size,
                 num_cores=self.num_cores,
             )
-            cpu.mem = self._shared_mem
-            if hbw_size > 0 and hasattr(cpu, 'attach_hbw'):
-                cpu.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
-            if ext_mem_size > 0 and hasattr(cpu, 'attach_ext_mem'):
-                cpu.attach_ext_mem(self._ext_mem, EXT_MEM_BASE, ext_mem_size)
-            if vram_size > 0 and hasattr(cpu, 'attach_vram'):
-                cpu.attach_vram(self._vram_mem, VRAM_BASE, vram_size)
             self.cores.append(cpu)
 
         # Create micro-core clusters
@@ -956,14 +980,16 @@ class MegapadSystem:
             if cpu.halted or cpu.idle:
                 continue
 
-            try:
-                cycles = cpu.step()
-                total_cycles += cycles
-            except TrapError as e:
-                if cpu.ivt_base != 0:
-                    cpu._trap(e.ivec_id)
-                else:
-                    raise
+            with _cpu_logical_memory_use(cpu):
+                try:
+                    cycles = cpu.step()
+                    total_cycles += cycles
+                except TrapError as e:
+                    if cpu.ivt_base != 0:
+                        with _cpu_memory_use(cpu):
+                            cpu._trap(e.ivec_id)
+                    else:
+                        raise
 
         # Tick devices once per round
         self.bus.tick(1)
@@ -1039,14 +1065,16 @@ class MegapadSystem:
         cpu = self.cores[0]
         if (not cpu.halted and not cpu.idle
                 and all(c.idle or c.halted for c in self.cores[1:])):
-            try:
-                steps, reason = cpu.run_steps(n)
-            except TrapError as e:
-                if cpu.ivt_base != 0:
-                    cpu._trap(e.ivec_id)
-                steps = getattr(e, 'steps_executed', 1)
-            except HaltError:
-                steps = 1
+            with _cpu_logical_memory_use(cpu):
+                try:
+                    steps, reason = cpu.run_steps(n)
+                except TrapError as e:
+                    if cpu.ivt_base != 0:
+                        with _cpu_memory_use(cpu):
+                            cpu._trap(e.ivec_id)
+                    steps = getattr(e, 'steps_executed', 1)
+                except HaltError:
+                    steps = 1
 
             self._drain_native_uart_output()
 
@@ -1077,15 +1105,17 @@ class MegapadSystem:
                 for cpu in self.cores:
                     if cpu.halted or cpu.idle:
                         continue
-                    try:
-                        steps, reason = cpu.run_steps(chunk)
-                        round_steps += steps
-                    except TrapError as e:
-                        if cpu.ivt_base != 0:
-                            cpu._trap(e.ivec_id)
-                        round_steps += getattr(e, 'steps_executed', 1)
-                    except HaltError:
-                        round_steps += 1
+                    with _cpu_logical_memory_use(cpu):
+                        try:
+                            steps, reason = cpu.run_steps(chunk)
+                            round_steps += steps
+                        except TrapError as e:
+                            if cpu.ivt_base != 0:
+                                with _cpu_memory_use(cpu):
+                                    cpu._trap(e.ivec_id)
+                            round_steps += getattr(e, 'steps_executed', 1)
+                        except HaltError:
+                            round_steps += 1
 
                 # Device ticking + IRQ delivery
                 if round_steps > 0:

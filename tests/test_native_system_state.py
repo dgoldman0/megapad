@@ -2,15 +2,74 @@
 
 from __future__ import annotations
 
+import array
 import gc
 import weakref
 
 import pytest
 
-from accel_wrapper import Megapad64, NativeSystemState
+import _mp64_accel
+from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
+
+
+REGIONS = (
+    ("main", "attach_mem", None, "mem_size"),
+    ("hbw", "attach_hbw_mem", 0x1000, "hbw_size"),
+    ("ext_mem", "attach_ext_mem", 0x2000, "ext_mem_size"),
+    ("vram", "attach_vram", 0x3000, "vram_size"),
+)
+
+
+class _CountingExporter:
+    def __init__(self, size: int, on_acquire=None):
+        self.storage = bytearray(size)
+        self.acquisitions = 0
+        self.releases = 0
+        self.on_acquire = on_acquire
+
+    def __buffer__(self, _flags):
+        self.acquisitions += 1
+        if self.on_acquire is not None:
+            self.on_acquire()
+        return memoryview(self.storage)
+
+    def __release_buffer__(self, _view):
+        self.releases += 1
+
+
+def _attach_system_region(
+    owner,
+    attach_name: str,
+    base: int | None,
+    buffer,
+    size: int,
+) -> None:
+    attach = getattr(owner, attach_name)
+    if base is None:
+        attach(buffer, size)
+    else:
+        attach(buffer, base, size)
+
+
+def _native_step(state, *, on_output=lambda _port, _value: None) -> int:
+    return _mp64_accel.step_one(
+        state,
+        mmio_read8=lambda _addr: 0,
+        mmio_write8=lambda _addr, _value: None,
+        on_output=on_output,
+        csr_read_override=None,
+        mmio_start=0xFFFF_FF00_0000_0000,
+        mmio_end=0xFFFF_FF80_0000_0000,
+    )
+
+
+def _set_pc(state, value: int) -> None:
+    state.psel = 3
+    state.xsel = 2
+    state.set_reg(3, value)
 
 
 def test_native_system_state_validates_topology_and_core_bounds() -> None:
@@ -137,3 +196,624 @@ def test_standalone_cpu_ownership_and_execution_remain_available() -> None:
     assert cpu._system_owner is None
     assert cpu.step() == 1
     assert cpu.pc == len(program)
+
+
+@pytest.mark.parametrize(
+    ("region", "attach_name", "base", "size_attr"),
+    REGIONS,
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_system_mapping_is_one_export_visible_to_every_core(
+    region: str,
+    attach_name: str,
+    base: int | None,
+    size_attr: str,
+) -> None:
+    store = assemble("st.b r4, r1")
+    load = assemble("ld.b r5, r4")
+    main_exporter = _CountingExporter(256)
+    main = main_exporter.storage
+    main[: len(store + load)] = store + load
+    owner = NativeSystemState(2)
+    owner.attach_mem(main_exporter, len(main))
+    assert main_exporter.acquisitions == 1
+
+    if region == "main":
+        exporter = main_exporter
+        backing = main
+        target = 0x80
+    else:
+        exporter = _CountingExporter(16)
+        backing = exporter.storage
+        target = base + 3
+        _attach_system_region(
+            owner, attach_name, base, exporter, len(backing)
+        )
+        assert exporter.acquisitions == 1
+
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    _set_pc(core0, 0)
+    _set_pc(core1, len(store))
+    core0.set_reg(4, target)
+    core0.set_reg(1, 0xA5)
+    core1.set_reg(4, target)
+    core1.set_reg(5, 0)
+
+    assert _native_step(core0) > 0
+    assert _native_step(core1) > 0
+
+    offset = target if region == "main" else target - base
+    assert backing[offset] == 0xA5
+    assert core1.get_reg(5) == 0xA5
+    assert getattr(core0, size_attr) == getattr(core1, size_attr)
+    if base is not None:
+        base_attr = f"{region}_base"
+        assert getattr(core0, base_attr) == getattr(core1, base_attr) == base
+    assert exporter.acquisitions == 1
+
+
+@pytest.mark.parametrize(
+    ("region", "attach_name", "base", "size_attr"),
+    REGIONS,
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_system_mapping_replacement_is_transactional_before_sealing(
+    region: str,
+    attach_name: str,
+    base: int | None,
+    size_attr: str,
+) -> None:
+    owner = NativeSystemState(2)
+    load = assemble("ld.b r5, r4")
+    if region != "main":
+        main = bytearray(64)
+        main[: len(load)] = load
+        owner.attach_mem(main, len(main))
+    original = _CountingExporter(16)
+    _attach_system_region(owner, attach_name, base, original, 8)
+    original_base = (
+        getattr(owner, f"{region}_base") if base is not None else None
+    )
+
+    with pytest.raises(BufferError):
+        _attach_system_region(
+            owner,
+            attach_name,
+            None if base is None else base + 0x100,
+            bytes(16),
+            16,
+        )
+
+    assert getattr(owner, size_attr) == 8
+    if base is not None:
+        assert getattr(owner, f"{region}_base") == original_base
+    assert original.acquisitions == 1
+    assert original.releases == 0
+
+    replacement = _CountingExporter(24)
+    replacement_base = None if base is None else base + 0x100
+    target = 8 if base is None else replacement_base + 3
+    if base is None:
+        replacement.storage[: len(load)] = load
+        replacement.storage[target] = 0xC3
+    else:
+        replacement.storage[target - replacement_base] = 0xC3
+    _attach_system_region(
+        owner,
+        attach_name,
+        replacement_base,
+        replacement,
+        12,
+    )
+
+    assert original.releases == 1
+    assert replacement.acquisitions == 1
+    assert replacement.releases == 0
+    assert getattr(owner, size_attr) == 12
+    buffer_attr = "mem_buffer" if region == "main" else f"{region}_buffer"
+    assert getattr(owner, buffer_attr) is replacement
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    assert getattr(core0, size_attr) == getattr(core1, size_attr) == 12
+    if base is not None:
+        assert (
+            getattr(core0, f"{region}_base")
+            == getattr(core1, f"{region}_base")
+            == replacement_base
+        )
+    for core in (core0, core1):
+        _set_pc(core, 0)
+        core.set_reg(4, target)
+        core.set_reg(5, 0)
+        assert _native_step(core) > 0
+        assert core.get_reg(5) == 0xC3
+
+
+def test_system_mappings_seal_and_owned_cores_reject_divergent_mutation() -> None:
+    owner = NativeSystemState(2)
+    owner.attach_mem(bytearray(32), 32)
+    owner.attach_hbw_mem(bytearray(16), 0x1000, 16)
+    owner.attach_ext_mem(bytearray(16), 0x2000, 16)
+    owner.attach_vram(bytearray(16), 0x3000, 16)
+    core = owner.core(0)
+
+    assert owner.mappings_sealed
+    owner_replacements = (
+        ("attach_mem", None),
+        ("attach_hbw_mem", 0x1100),
+        ("attach_ext_mem", 0x2100),
+        ("attach_vram", 0x3100),
+    )
+    for attach_name, base in owner_replacements:
+        rejected_exporter = _CountingExporter(64)
+        with pytest.raises(RuntimeError, match="sealed"):
+            _attach_system_region(
+                owner, attach_name, base, rejected_exporter, 64
+            )
+        assert rejected_exporter.acquisitions == 0
+
+    rejected_exporter = _CountingExporter(64)
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.attach_mem(rejected_exporter, 64)
+    assert rejected_exporter.acquisitions == 0
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.attach_hbw_mem(bytearray(8), 0x1100, 8)
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.attach_ext_mem(bytearray(8), 0x2100, 8)
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.attach_vram(bytearray(8), 0x3100, 8)
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.mem_size = 16
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.hbw_base = 0x1100
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.hbw_size = 8
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.ext_mem_base = 0x2100
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.ext_mem_size = 8
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.vram_base = 0x3100
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        core.vram_size = 8
+
+    assert (
+        core.mem_size,
+        core.hbw_base,
+        core.hbw_size,
+        core.ext_mem_base,
+        core.ext_mem_size,
+        core.vram_base,
+        core.vram_size,
+    ) == (
+        32,
+        0x1000,
+        16,
+        0x2000,
+        16,
+        0x3000,
+        16,
+    )
+
+
+def test_buffer_callback_sealing_aborts_system_replacement_transactionally() -> None:
+    owner = NativeSystemState(1)
+    original = bytearray(8)
+    owner.attach_mem(original, len(original))
+    replacement = _CountingExporter(
+        16,
+        on_acquire=lambda: owner.core(0),
+    )
+
+    with pytest.raises(RuntimeError, match="sealed"):
+        owner.attach_mem(replacement, len(replacement.storage))
+
+    assert owner.mappings_sealed
+    assert owner.mem_size == len(original)
+    assert replacement.acquisitions == replacement.releases == 1
+    with pytest.raises(BufferError):
+        original.extend(b"x")
+
+
+def test_system_mapping_lease_follows_a_retained_core_view() -> None:
+    owner = NativeSystemState(1)
+    exported = array.array("B", [0x01])
+    exported_ref = weakref.ref(exported)
+    owner.attach_mem(exported, len(exported))
+    core = owner.core(0)
+    del owner
+    del exported
+    gc.collect()
+
+    assert exported_ref() is not None
+    _set_pc(core, 0)
+    assert _native_step(core) == 1
+
+    del core
+    gc.collect()
+    assert exported_ref() is None
+
+
+def test_cross_core_execution_and_render_use_one_mapping_guard() -> None:
+    owner = NativeSystemState(2)
+    owner.attach_mem(bytearray([0x91]), 1)
+    owner.attach_vram(bytearray([0xE0, 0x07]), 0x3000, 2)
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    _set_pc(core0, 0)
+    _set_pc(core1, 0)
+    core1.fb_base_addr = 0x3000
+    core1.fb_width = 1
+    core1.fb_height = 1
+    core1.fb_stride = 2
+    core1.fb_mode = 1
+    rejected = []
+    core1_pc = core1.get_reg(core1.psel)
+    core1_cycles = core1.cycle_count
+
+    def on_output(_port, _value):
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core1)
+        rejected.append("execution")
+        with pytest.raises(
+            RuntimeError, match="^CPUState framebuffer render is busy$"
+        ):
+            core1.render_fb_rgb()
+        rejected.append("render")
+
+    assert _native_step(core0, on_output=on_output) > 0
+    assert rejected == ["execution", "render"]
+    assert core1.get_reg(core1.psel) == core1_pc
+    assert core1.cycle_count == core1_cycles
+    assert core1.render_fb_rgb()[:, 0, :].tolist() == [[0, 252, 0]]
+    assert _native_step(core1) > 0
+    assert core1.get_reg(core1.psel) > core1_pc
+
+
+def test_secondary_proxy_dma_borrows_the_outer_mapping_scope() -> None:
+    memory = bytearray(256)
+    memory[0] = 0x91  # OUT1
+    memory[0x80:0x88] = (1).to_bytes(8, "little")
+    memory[0x88] = ord("A")
+    owner = NativeSystemState(2)
+    owner.attach_mem(memory, len(memory))
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    core0.uart_init()
+    core0.uart_tx_ring_base = 0x80
+    _set_pc(core1, 0)
+
+    assert _native_step(
+        core1,
+        on_output=lambda _port, _value: core0.uart_write8(0x06, 0),
+    ) > 0
+
+    assert core0.uart_drain_tx() == b"A"
+    assert memory[0x80:0x88] == bytes(8)
+
+
+def test_python_memory_scope_retains_the_borrowed_core_and_system_owner() -> None:
+    owner = NativeSystemState(1)
+    owner.attach_mem(bytearray([0x01]), 1)
+    core = owner.core(0)
+    owner_ref = weakref.ref(owner)
+    core_ref = weakref.ref(core)
+    scope = core._memory_use()
+    del owner
+    del core
+    gc.collect()
+
+    assert owner_ref() is not None
+    assert core_ref() is not None
+
+    scope.__exit__(None, None, None)
+    del scope
+    gc.collect()
+    assert core_ref() is None
+    assert owner_ref() is None
+
+
+def test_out_of_order_scope_close_retains_the_root_mapping_lease() -> None:
+    owner = NativeSystemState(2)
+    owner.attach_mem(bytearray([0x01, 0x01]), 2)
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    _set_pc(core0, 0)
+    _set_pc(core1, 0)
+    outer = core0._logical_memory_use()
+    inner = core0._logical_memory_use()
+
+    # Closing the root first must unlink only that owner.  The borrowed child
+    # keeps both the shared mutex and the mapping-wide execution flag alive.
+    outer.__exit__(None, None, None)
+    with pytest.raises(RuntimeError, match="already executing"):
+        _native_step(core1)
+
+    # The child's logical permission remains usable exactly once.
+    assert _native_step(core0) == 1
+    with pytest.raises(RuntimeError, match="already executing"):
+        _native_step(core0)
+    with pytest.raises(RuntimeError, match="already executing"):
+        _native_step(core1)
+
+    inner.__exit__(None, None, None)
+    assert _native_step(core1) == 1
+
+
+def test_callback_retained_scope_keeps_native_root_ownership_alive() -> None:
+    owner = NativeSystemState(2)
+    owner.attach_mem(bytearray([0x91, 0x01]), 2)
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    _set_pc(core0, 0)
+    _set_pc(core1, 1)
+    retained = []
+
+    assert _native_step(
+        core0,
+        on_output=lambda _port, _value: retained.append(
+            core0._memory_use()
+        ),
+    ) > 0
+    assert len(retained) == 1
+
+    # CPUExecutionGuard has unwound, but the escaped child still owns its
+    # shared root lease and must exclude every core until explicitly closed.
+    with pytest.raises(RuntimeError, match="already executing"):
+        _native_step(core1)
+    retained.pop().__exit__(None, None, None)
+    assert _native_step(core1) == 1
+
+
+def test_python_fallback_holds_the_system_one_worker_scope() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = system.cores
+    system._shared_mem[0] = 0x01  # NOP for the post-fallback probe
+    _set_pc(core0._cs, 0)
+    _set_pc(core1._cs, 0)
+    core0_pc = core0.pc
+    core0_cycles = core0.cycle_count
+    core1_pc = core1.pc
+    core1_cycles = core1.cycle_count
+    fallback = core0._get_fallback()
+    rejected = []
+
+    def fallback_step():
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core0._cs)
+        rejected.append("same-core execution")
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core1._cs)
+        rejected.append("cross-core execution")
+        return 7
+
+    fallback.step = fallback_step
+    assert core0._step_python_fallback() == 7
+    assert rejected == ["same-core execution", "cross-core execution"]
+    assert core0.pc == core0_pc
+    assert core0.cycle_count == core0_cycles
+    assert core1.pc == core1_pc
+    assert core1.cycle_count == core1_cycles
+    assert _native_step(core0._cs) == 1
+    assert _native_step(core1._cs) == 1
+
+
+def test_run_preserves_overridable_step_and_trap_dispatch() -> None:
+    cpu = Megapad64(mem_size=64)
+    cpu.mem[0] = 0x01
+    cpu.pc = 0
+    cpu.ivt_base = 8
+    calls = []
+
+    def overridden_step():
+        calls.append("step")
+        raise TrapError(7)
+
+    def overridden_trap(ivec_id: int) -> None:
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(cpu._cs)
+        calls.append(("trap", ivec_id))
+
+    cpu.step = overridden_step
+    cpu._trap = overridden_trap
+
+    assert cpu.run(max_steps=1) == 0
+    assert calls == ["step", ("trap", 7)]
+    assert _native_step(cpu._cs) == 1
+
+
+def test_native_batch_handoff_keeps_one_scope_through_python_fallback() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = system.cores
+    program = assemble("out1\nt.fma")
+    core0.load_bytes(0, program)
+    core0.regs[core0.xsel] = 0x80
+    core0.mem[0x80] = 0xA5
+    core0.pc = 0
+    core1.mem[0x40] = 0x01  # NOP for exclusion and post-scope probes
+    core1.pc = 0x40
+    core1_pc = core1.pc
+    core1_cycles = core1.cycle_count
+    fallback = core0._get_fallback()
+    rejected = []
+
+    def reject_sibling(label: str) -> None:
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core1._cs)
+        assert core1.pc == core1_pc
+        assert core1.cycle_count == core1_cycles
+        rejected.append(label)
+
+    core0.on_output = lambda _port, _value: reject_sibling(
+        "native dispatch"
+    )
+
+    def fallback_step():
+        reject_sibling("Python continuation")
+        return 7
+
+    fallback.step = fallback_step
+
+    assert core0.run_steps(2) == (2, 0)
+    assert rejected == ["native dispatch", "Python continuation"]
+    assert _native_step(core1._cs) == 1
+
+
+@pytest.mark.parametrize("operation", ["step", "run_batch"])
+def test_system_trap_catch_stays_inside_the_core_operation_scope(
+    operation: str,
+) -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = system.cores
+    core0.ivt_base = 8
+    core0.load_bytes(0, assemble("t.fma"))
+    core0.pc = 0
+    core1.halted = True
+    core1.mem[0x40] = 0x01
+    core1.pc = 0x40
+    core0_pc = core0.pc
+    core0_cycles = core0.cycle_count
+    core1_pc = core1.pc
+    core1_cycles = core1.cycle_count
+    fallback = core0._get_fallback()
+    rejected = []
+
+    def raise_trap():
+        raise TrapError(7)
+
+    def deliver_trap(ivec_id: int) -> None:
+        assert ivec_id == 7
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core0._cs)
+        rejected.append("same-core trap delivery")
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core1._cs)
+        rejected.append("cross-core trap delivery")
+
+    fallback.step = raise_trap
+    core0._trap = deliver_trap
+    if operation == "step":
+        assert system.step() == 1
+    else:
+        assert system.run_batch(1) == 1
+
+    assert rejected == [
+        "same-core trap delivery",
+        "cross-core trap delivery",
+    ]
+    assert core0.pc == core0_pc
+    assert core0.cycle_count == core0_cycles
+    assert core1.pc == core1_pc
+    assert core1.cycle_count == core1_cycles
+    core0.mem[0x41] = 0x01
+    core0.pc = 0x41
+    assert _native_step(core0._cs) == 1
+    core1.halted = False
+    assert _native_step(core1._cs) == 1
+
+
+@pytest.mark.parametrize("operation", ["step", "run_batch"])
+def test_system_trap_catch_masks_an_unused_override_permission(
+    operation: str,
+) -> None:
+    system = MegapadSystem(
+        ram_size=64,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = system.cores
+    core0.mem[0] = 0x01
+    core0.pc = 0
+    core0.ivt_base = 8
+    core1.halted = True
+    rejected = []
+
+    def raise_before_native(*_args, **_kwargs):
+        raise TrapError(7)
+
+    def overridden_trap(ivec_id: int) -> None:
+        assert ivec_id == 7
+        with pytest.raises(RuntimeError, match="already executing"):
+            _native_step(core0._cs)
+        rejected.append("same-core trap continuation")
+
+    core0._trap = overridden_trap
+    if operation == "step":
+        core0.step = raise_before_native
+        assert system.step() == 1
+    else:
+        core0.run_steps = raise_before_native
+        assert system.run_batch(1) == 1
+
+    assert rejected == ["same-core trap continuation"]
+    assert core0.pc == 0
+    assert core0.cycle_count == 0
+    assert _native_step(core0._cs) == 1
+
+
+def test_megapad_system_wrappers_retain_the_central_python_buffers() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=64,
+        ext_mem_size=32,
+        vram_size=16,
+    )
+
+    assert system._native_system.mappings_sealed
+    assert system._native_system.mem_buffer is system._shared_mem
+    assert system._native_system.hbw_buffer is system._hbw_mem
+    assert system._native_system.ext_mem_buffer is system._ext_mem
+    assert system._native_system.vram_buffer is system._vram_mem
+    for cpu in system.cores:
+        assert cpu.mem is system._shared_mem
+        assert cpu._hbw_buf is system._hbw_mem
+        assert cpu._ext_mem_buf is system._ext_mem
+        assert cpu._vram_buf is system._vram_mem
+
+    original = system.cores[0].mem
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        system.cores[0].mem = bytearray(8192)
+    assert system.cores[0].mem is original
+    assert system.cores[1].mem is original
+    with pytest.raises(RuntimeError, match="owned by SystemState"):
+        system.cores[0].mem_size = 16
+    assert system.cores[0].mem_size == system.cores[1].mem_size == 4096
+
+    original_regions = (
+        ("attach_hbw", "_hbw_buf", 0x1000),
+        ("attach_ext_mem", "_ext_mem_buf", 0x2000),
+        ("attach_vram", "_vram_buf", 0x3000),
+    )
+    for method_name, owner_attr, base in original_regions:
+        original_buffer = getattr(system.cores[0], owner_attr)
+        with pytest.raises(RuntimeError, match="system-owned CPUState"):
+            getattr(system.cores[0], method_name)(bytearray(8), base, 8)
+        assert getattr(system.cores[0], owner_attr) is original_buffer
+        assert getattr(system.cores[1], owner_attr) is original_buffer

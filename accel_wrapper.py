@@ -99,19 +99,21 @@ class Megapad64:
         _system_owner=None,
         _system_core_index: Optional[int] = None,
     ):
-        self.mem_size = mem_size
-        self._mem = bytearray(mem_size)
+        self._mem_size = mem_size
 
         # C++ state.  Standalone wrappers own their CPUState directly.  A
         # system-created wrapper borrows a stable core view while retaining
-        # the native SystemState owner explicitly for the wrapper's lifetime.
+        # the native SystemState owner and its Python fallback buffers
+        # explicitly for the wrapper's lifetime.
         self._system_owner = _system_owner
         if _system_owner is None:
             if _system_core_index is not None:
                 raise ValueError(
                     "_system_core_index requires a native SystemState owner"
                 )
+            self._mem = bytearray(mem_size)
             self._cs = _accel.CPUState()
+            self._cs.attach_mem(self._mem, mem_size)
         else:
             if _system_core_index is None:
                 raise ValueError(
@@ -125,8 +127,22 @@ class Megapad64:
                 raise ValueError(
                     "num_cores must match the native SystemState topology"
                 )
+            # core() seals the central mappings.  Read canonical exporters
+            # only after that transition so a thread switch cannot pair an
+            # old Python buffer with a newly replaced native mapping.
             self._cs = _system_owner.core(_system_core_index)
-        self._cs.attach_mem(self._mem, mem_size)
+            if _system_owner.mem_buffer is None:
+                raise ValueError(
+                    "native SystemState main mapping must be attached first"
+                )
+            self._mem_size = _system_owner.mem_size
+            self._mem = _system_owner.mem_buffer
+            if _system_owner.hbw_buffer is not None:
+                self._hbw_buf = _system_owner.hbw_buffer
+            if _system_owner.ext_mem_buffer is not None:
+                self._ext_mem_buf = _system_owner.ext_mem_buffer
+            if _system_owner.vram_buffer is not None:
+                self._vram_buf = _system_owner.vram_buffer
         self._cs.core_id = core_id
         self._cs.num_cores = num_cores
         self._cs.psel = 3
@@ -165,12 +181,13 @@ class Megapad64:
         owner,
         core_index: int,
         *,
-        mem_size: int,
         num_cores: int,
     ) -> "Megapad64":
-        """Create a wrapper around a full core owned by native SystemState."""
+        """Create a wrapper around an already-mapped native system core."""
         return cls(
-            mem_size=mem_size,
+            # System-owned construction derives size after core() seals the
+            # owner; this placeholder is never used as mapping geometry.
+            mem_size=0,
             core_id=core_index,
             num_cores=num_cores,
             _system_owner=owner,
@@ -178,6 +195,22 @@ class Megapad64:
         )
 
     # ── Memory property — auto-syncs C++ pointer on set ──
+
+    @property
+    def mem_size(self) -> int:
+        if self._system_owner is not None:
+            return self._cs.mem_size
+        return self._mem_size
+
+    @mem_size.setter
+    def mem_size(self, value: int):
+        if self._system_owner is not None:
+            raise RuntimeError(
+                "system-owned Megapad64 memory size is owned by SystemState"
+            )
+        if hasattr(self, "_cs"):
+            self._cs.mem_size = value
+        self._mem_size = value
 
     @property
     def mem(self):
@@ -191,7 +224,7 @@ class Megapad64:
         # previous mapping intact when validation fails.
         self._cs.attach_mem(value, sz)
         self._mem = value
-        self.mem_size = sz
+        self._mem_size = sz
 
     def attach_hbw(self, buf: bytearray, base: int, size: int):
         """Attach HBW math RAM buffer to C++ state."""
@@ -433,6 +466,11 @@ def {_attr}(self, v):
         Tries the C++ fast path first.  Falls back to the pure-Python
         step() for MEX FP operations and other edge cases.
         """
+        with self._cs._logical_memory_use():
+            return self._step_in_memory_scope()
+
+    def _step_in_memory_scope(self):
+        """Execute one complete instruction under one mapping ownership."""
         if self.halted:
             raise HaltError("CPU is halted")
         if self.idle:
@@ -495,7 +533,12 @@ def {_attr}(self, v):
 
     def _finish_trap(self, ivec_id: int) -> int:
         """Deliver a pending native trap and return its public cycle cost."""
-        self._trap(ivec_id)
+        with self._cs._memory_use():
+            return self._finish_trap_in_memory_scope(ivec_id)
+
+    def _finish_trap_in_memory_scope(self, ivec_id: int) -> int:
+        """Deliver and account for a trap under one mapping ownership."""
+        self._trap_in_memory_scope(ivec_id)
         if ivec_id == IVEC_SW_TRAP:
             # The Python ISA oracle models SYS.TRAP as three cycles when an
             # IVT is installed.  Other synchronous faults abort before normal
@@ -508,7 +551,12 @@ def {_attr}(self, v):
 
     def _finish_reset(self) -> int:
         """Apply RESET after fetch and account its one completed cycle."""
-        self._reset_state()
+        with self._cs._memory_use():
+            return self._finish_reset_in_memory_scope()
+
+    def _finish_reset_in_memory_scope(self) -> int:
+        """Reset and account under the instruction's mapping ownership."""
+        self._reset_state_in_memory_scope()
         self._cs.cycle_count += 1
         if self._cs.perf_enable:
             self._cs.perf_cycles += 1
@@ -524,6 +572,11 @@ def {_attr}(self, v):
     def _step_python_fallback(self):
         """Fall back to pure-Python step() for complex instructions.
         Returns cycle count."""
+        with self._cs._memory_use():
+            return self._step_python_fallback_in_memory_scope()
+
+    def _step_python_fallback_in_memory_scope(self):
+        """Execute one Python-oracle instruction with shared mapping ownership."""
         # Sync C++ state → Python fallback CPU
         fb = self._get_fallback()
         _sync_cs_to_py(self._cs, fb)
@@ -578,6 +631,11 @@ def {_attr}(self, v):
         in C++ and only calls back to Python for MMIO accesses.
         Returns (steps_executed, stop_reason).
         """
+        with self._cs._logical_memory_use():
+            return self._run_steps_in_memory_scope(max_steps)
+
+    def _run_steps_in_memory_scope(self, max_steps: int):
+        """Execute a native batch and its continuation under one ownership."""
         if self.halted or self.idle:
             return 0, 1 if self.halted else 2
 
@@ -630,17 +688,23 @@ def {_attr}(self, v):
 
     def _next_instruction_size(self) -> int:
         """Peek at the next instruction to determine its byte length."""
-        # Delegate to pure-Python version
-        fb = self._get_fallback()
-        _sync_cs_to_py(self._cs, fb)
-        fb.mem = self.mem
-        fb.mem_size = self.mem_size
-        return fb._next_instruction_size()
+        with self._cs._memory_use():
+            # Delegate to pure-Python version
+            fb = self._get_fallback()
+            _sync_cs_to_py(self._cs, fb)
+            fb.mem = self.mem
+            fb.mem_size = self.mem_size
+            return fb._next_instruction_size()
 
     # -- Trap delivery --
 
     def _trap(self, ivec_id: int):
         """Deliver a synchronous trap."""
+        with self._cs._memory_use():
+            return self._trap_in_memory_scope(ivec_id)
+
+    def _trap_in_memory_scope(self, ivec_id: int):
+        """Deliver a trap while excluding other users of shared mappings."""
         if self.ivt_base == 0:
             raise TrapError(ivec_id)
         self.push64(self.flags_pack() | (self.priv_level << 8))
@@ -656,6 +720,11 @@ def {_attr}(self, v):
 
     def _reset_state(self):
         """Reinitialize all CPU state (called by system.py boot)."""
+        with self._cs._memory_use():
+            self._reset_state_in_memory_scope()
+
+    def _reset_state_in_memory_scope(self):
+        """Reset architectural state inside the system one-worker scope."""
         for i in range(32):
             self._cs.set_reg(i, 0)
         self._cs.psel = 3
@@ -696,23 +765,29 @@ def {_attr}(self, v):
         """Run until HALT, IDLE, or max_steps. Returns total cycles."""
         total = 0
         for _ in range(max_steps):
-            if self.halted or self.idle:
-                break
-            try:
-                total += self.step()
-            except TrapError as e:
-                if self.ivt_base != 0:
-                    self._trap(e.ivec_id)
-                else:
-                    raise
+            with self._cs._logical_memory_use():
+                if self.halted or self.idle:
+                    break
+                try:
+                    total += self.step()
+                except TrapError as e:
+                    if self.ivt_base != 0:
+                        # An overridden step() may raise before consuming the
+                        # logical scope's native-dispatch permit.  Mask it
+                        # while overridable trap continuation code runs.
+                        with self._cs._memory_use():
+                            self._trap(e.ivec_id)
+                    else:
+                        raise
         return total
 
     # -- Load bytes --
 
     def load_bytes(self, addr: int, data: bytes | bytearray):
         """Write raw bytes into memory at the given address."""
-        for i, b in enumerate(data):
-            self.mem[(addr + i) % self.mem_size] = b
+        with self._cs._memory_use():
+            for i, b in enumerate(data):
+                self.mem[(addr + i) % self.mem_size] = b
 
     # -- Debug / introspection --
 

@@ -86,7 +86,53 @@ enum IVEC {
 enum EW { EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16 };
 
 // ---------------------------------------------------------------------------
-//  CPU State — flat struct
+//  Memory mappings
+// ---------------------------------------------------------------------------
+
+struct MemoryMappings {
+    // Bank 0
+    uint8_t* mem = nullptr;
+    uint64_t mem_size = 0;
+    uint64_t mem_capacity = 0;
+    std::unique_ptr<py::buffer_info> mem_lease;
+    py::object mem_exporter;
+
+    // HBW math RAM (banks 1-3, contiguous)
+    uint8_t* hbw_mem = nullptr;
+    uint64_t hbw_base = 0;
+    uint64_t hbw_size = 0;
+    uint64_t hbw_capacity = 0;
+    std::unique_ptr<py::buffer_info> hbw_lease;
+    py::object hbw_exporter;
+
+    // External memory (HyperRAM / SDRAM)
+    uint8_t* ext_mem = nullptr;
+    uint64_t ext_mem_base = 0;
+    uint64_t ext_mem_size = 0;
+    uint64_t ext_mem_capacity = 0;
+    std::unique_ptr<py::buffer_info> ext_mem_lease;
+    py::object ext_mem_exporter;
+
+    // Dedicated VRAM (framebuffer pixel memory)
+    uint8_t* vram_mem = nullptr;
+    uint64_t vram_base = 0;
+    uint64_t vram_size = 0;
+    uint64_t vram_capacity = 0;
+    std::unique_ptr<py::buffer_info> vram_lease;
+    py::object vram_exporter;
+
+    // Execution reads mappings under shared ownership.  Attachment/metadata
+    // replacement and framebuffer rendering are exclusive users; serializing
+    // rendering also avoids races with guest framebuffer writes.  A single
+    // execution flag deliberately enforces one-worker access for every core
+    // that shares this mapping.
+    std::shared_mutex mutex;
+    std::atomic<bool> execution_active{false};
+    std::atomic<bool> exclusive_active{false};
+};
+
+// ---------------------------------------------------------------------------
+//  CPU State — flat execution state plus borrowed memory mappings
 // ---------------------------------------------------------------------------
 
 struct CPUState {
@@ -194,41 +240,10 @@ struct CPUState {
     uint8_t  core_id;
     uint8_t  num_cores;
 
-    // Memory
-    uint8_t* mem = nullptr;
-    uint64_t mem_size = 0;
-    uint64_t mem_capacity = 0;
-    std::unique_ptr<py::buffer_info> mem_lease;
-
-    // HBW math RAM (banks 1-3, contiguous)
-    uint8_t* hbw_mem = nullptr;
-    uint64_t hbw_base = 0;
-    uint64_t hbw_size = 0;
-    uint64_t hbw_capacity = 0;
-    std::unique_ptr<py::buffer_info> hbw_lease;
-
-    // External memory (HyperRAM / SDRAM)
-    uint8_t* ext_mem = nullptr;
-    uint64_t ext_mem_base = 0;
-    uint64_t ext_mem_size = 0;
-    uint64_t ext_mem_capacity = 0;
-    std::unique_ptr<py::buffer_info> ext_mem_lease;
-
-    // Dedicated VRAM (framebuffer pixel memory)
-    uint8_t* vram_mem = nullptr;
-    uint64_t vram_base = 0;
-    uint64_t vram_size = 0;
-    uint64_t vram_capacity = 0;
-    std::unique_ptr<py::buffer_info> vram_lease;
-
-    // Execution reads mappings under shared ownership.  Attachment/metadata
-    // replacement and framebuffer rendering are exclusive users; serializing
-    // rendering also avoids races with guest framebuffer writes.  Exclusive
-    // operations fail fast behind execution, while execution may wait behind
-    // a render only during a binding scope that has released the GIL.
-    std::shared_mutex memory_mutex;
-    std::atomic<bool> execution_active{false};
-    std::atomic<bool> exclusive_memory_active{false};
+    // Standalone states own one private mapping.  System-owned states borrow
+    // their parent's shared mapping and leave private_memory empty.
+    std::unique_ptr<MemoryMappings> private_memory;
+    MemoryMappings* memory = nullptr;
 
     // C++ native crypto devices (bypass Python MMIO callbacks)
     CryptoDevices crypto;
@@ -266,8 +281,15 @@ struct CPUState {
     void register_accel_hook(uint64_t addr, int hook_id);
 };
 
-static std::unique_ptr<CPUState> make_cpu_state() {
+static std::unique_ptr<CPUState> make_cpu_state(
+        MemoryMappings* shared_memory = nullptr) {
     auto state = std::make_unique<CPUState>();
+    if (shared_memory != nullptr) {
+        state->memory = shared_memory;
+    } else {
+        state->private_memory = std::make_unique<MemoryMappings>();
+        state->memory = state->private_memory.get();
+    }
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
     state->dict_clear_all();
@@ -281,10 +303,10 @@ static std::unique_ptr<CPUState> make_cpu_state() {
     return state;
 }
 
-// First Phase-1 ownership slice.  SystemState owns full-core lifetimes while
-// memory mappings, singleton devices, and scheduling are migrated in later
-// transactional milestones.  unique_ptr is required because CPUState contains
-// mutexes and atomics and is intentionally neither copyable nor movable.
+// SystemState owns full-core lifetimes and exactly one mapping set.  Singleton
+// devices and scheduling remain per-core compatibility paths for later
+// transactional milestones.  shared_memory is declared before cores so cores
+// and their cached device pointers are destroyed before the leases they borrow.
 struct SystemState {
     explicit SystemState(int full_core_count, int all_core_count = 0) {
         if (full_core_count < 1 || full_core_count > 255)
@@ -298,7 +320,7 @@ struct SystemState {
 
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
-            auto core = make_cpu_state();
+            auto core = make_cpu_state(&shared_memory);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -309,6 +331,7 @@ struct SystemState {
     CPUState& core(int index) {
         if (index < 0 || index >= static_cast<int>(cores.size()))
             throw std::out_of_range("full-core index is out of range");
+        mappings_sealed = true;
         return *cores[static_cast<std::size_t>(index)];
     }
 
@@ -320,8 +343,10 @@ struct SystemState {
         return advertised_core_count;
     }
 
+    MemoryMappings shared_memory;
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
+    bool mappings_sealed = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -334,19 +359,117 @@ struct SystemState {
 // than only the innermost owner, also catches custom-buffer re-entry such as
 // attach(A) -> attach(B) -> execute(A).
 struct ThreadExclusiveMemoryOwner {
-    CPUState* state;
+    MemoryMappings* memory;
     ThreadExclusiveMemoryOwner* previous;
 };
 
 static thread_local ThreadExclusiveMemoryOwner*
     thread_exclusive_memory_owners = nullptr;
 
-static bool thread_owns_exclusive_memory(const CPUState& state) {
+// The root shared mapping ownership may be borrowed by nested Python scopes
+// and native callbacks.  Keep the CAS and mutex lease alive until the final
+// descendant closes, even when same-thread scopes are retained or exited out
+// of lexical order.
+class SharedMemoryLease {
+public:
+    SharedMemoryLease(MemoryMappings& memory, const char* busy_message)
+        : memory_(memory),
+          memory_lock_(memory.mutex, std::defer_lock) {
+        bool expected = false;
+        if (!memory_.execution_active.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            throw std::runtime_error(busy_message);
+        }
+        owns_execution_flag_ = true;
+
+        try {
+            memory_lock_.lock();
+        } catch (...) {
+            memory_.execution_active.store(false, std::memory_order_release);
+            owns_execution_flag_ = false;
+            throw;
+        }
+    }
+
+    ~SharedMemoryLease() {
+        if (memory_lock_.owns_lock())
+            memory_lock_.unlock();
+        if (owns_execution_flag_)
+            memory_.execution_active.store(false, std::memory_order_release);
+    }
+
+    SharedMemoryLease(const SharedMemoryLease&) = delete;
+    SharedMemoryLease& operator=(const SharedMemoryLease&) = delete;
+
+private:
+    MemoryMappings& memory_;
+    std::shared_lock<std::shared_mutex> memory_lock_;
+    bool owns_execution_flag_ = false;
+};
+
+struct ThreadSharedMemoryOwner {
+    MemoryMappings* memory;
+    CPUState* permitted_cpu;
+    std::shared_ptr<SharedMemoryLease> lease;
+    ThreadSharedMemoryOwner* previous;
+};
+
+static thread_local ThreadSharedMemoryOwner*
+    thread_shared_memory_owners = nullptr;
+
+struct ThreadNativeExecutionOwner {
+    MemoryMappings* memory;
+    ThreadNativeExecutionOwner* previous;
+};
+
+static thread_local ThreadNativeExecutionOwner*
+    thread_native_execution_owners = nullptr;
+
+template <typename Owner>
+static void unlink_thread_owner(Owner*& head, Owner& target) {
+    Owner** link = &head;
+    while (*link != nullptr) {
+        if (*link == &target) {
+            *link = target.previous;
+            return;
+        }
+        link = &((*link)->previous);
+    }
+}
+
+static bool thread_owns_exclusive_memory(const MemoryMappings& memory) {
     for (ThreadExclusiveMemoryOwner* owner =
              thread_exclusive_memory_owners;
          owner != nullptr;
          owner = owner->previous) {
-        if (owner->state == &state)
+        if (owner->memory == &memory)
+            return true;
+    }
+    return false;
+}
+
+static ThreadSharedMemoryOwner* current_thread_shared_memory_owner(
+        const MemoryMappings& memory) {
+    for (ThreadSharedMemoryOwner* owner = thread_shared_memory_owners;
+         owner != nullptr;
+         owner = owner->previous) {
+        if (owner->memory == &memory)
+            return owner;
+    }
+    return nullptr;
+}
+
+static bool thread_owns_shared_memory(const MemoryMappings& memory) {
+    return current_thread_shared_memory_owner(memory) != nullptr;
+}
+
+static bool thread_is_executing_memory(const MemoryMappings& memory) {
+    for (ThreadNativeExecutionOwner* owner =
+             thread_native_execution_owners;
+         owner != nullptr;
+         owner = owner->previous) {
+        if (owner->memory == &memory)
             return true;
     }
     return false;
@@ -355,20 +478,20 @@ static bool thread_owns_exclusive_memory(const CPUState& state) {
 class ExclusiveMemoryUseGuard {
 public:
     explicit ExclusiveMemoryUseGuard(
-            CPUState& state,
+            MemoryMappings& memory,
             const char* busy_message =
                 "memory attachments cannot be changed while CPUState memory is in use")
-        : state_(state),
-          lock_(state.memory_mutex, std::defer_lock),
-          thread_owner_{&state, nullptr} {
+        : memory_(memory),
+          lock_(memory.mutex, std::defer_lock),
+          thread_owner_{&memory, nullptr} {
         // An execution callback reaches this check on the same thread that
-        // owns memory_mutex shared.  Reject before any mutex operation so the
+        // owns the mapping mutex shared.  Reject before any mutex operation so the
         // path is defined by the C++ SharedMutex contract.
-        if (state_.execution_active.load(std::memory_order_acquire))
+        if (memory_.execution_active.load(std::memory_order_acquire))
             throw std::runtime_error(busy_message);
 
         bool expected = false;
-        if (!state_.exclusive_memory_active.compare_exchange_strong(
+        if (!memory_.exclusive_active.compare_exchange_strong(
                 expected, true,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
             throw std::runtime_error(busy_message);
@@ -379,8 +502,8 @@ public:
         // operation backs off.  An execution that arrives after unique
         // ownership may safely wait because both Python execution bindings
         // release the GIL while acquiring their shared lock.
-        if (state_.execution_active.load(std::memory_order_acquire)) {
-            state_.exclusive_memory_active.store(
+        if (memory_.execution_active.load(std::memory_order_acquire)) {
+            memory_.exclusive_active.store(
                 false, std::memory_order_release);
             throw std::runtime_error(busy_message);
         }
@@ -389,12 +512,12 @@ public:
         try {
             locked = lock_.try_lock();
         } catch (...) {
-            state_.exclusive_memory_active.store(
+            memory_.exclusive_active.store(
                 false, std::memory_order_release);
             throw;
         }
         if (!locked) {
-            state_.exclusive_memory_active.store(
+            memory_.exclusive_active.store(
                 false, std::memory_order_release);
             throw std::runtime_error(busy_message);
         }
@@ -405,17 +528,18 @@ public:
 
     ~ExclusiveMemoryUseGuard() {
         if (registered_thread_state_)
-            thread_exclusive_memory_owners = thread_owner_.previous;
+            unlink_thread_owner(
+                thread_exclusive_memory_owners, thread_owner_);
         if (lock_.owns_lock())
             lock_.unlock();
-        state_.exclusive_memory_active.store(false, std::memory_order_release);
+        memory_.exclusive_active.store(false, std::memory_order_release);
     }
 
     ExclusiveMemoryUseGuard(const ExclusiveMemoryUseGuard&) = delete;
     ExclusiveMemoryUseGuard& operator=(const ExclusiveMemoryUseGuard&) = delete;
 
 private:
-    CPUState& state_;
+    MemoryMappings& memory_;
     std::unique_lock<std::shared_mutex> lock_;
     ThreadExclusiveMemoryOwner thread_owner_;
     bool registered_thread_state_ = false;
@@ -425,7 +549,7 @@ using MemoryMutationGuard = ExclusiveMemoryUseGuard;
 
 void CPUState::register_accel_hook(uint64_t addr, int hook_id) {
     MemoryMutationGuard guard(
-        *this,
+        *memory,
         "CPUState accelerator hooks cannot be changed while CPUState is in use");
     if (accel_hook_count < MAX_ACCEL_HOOKS)
         accel_hooks[accel_hook_count++] = {addr, hook_id};
@@ -435,44 +559,183 @@ class CPUExecutionGuard {
 public:
     explicit CPUExecutionGuard(CPUState& state)
         : state_(state),
-          memory_lock_(state.memory_mutex, std::defer_lock) {
+          memory_(*state.memory),
+          shared_owner_{&memory_, nullptr, nullptr, nullptr},
+          native_owner_{&memory_, nullptr} {
         // A custom buffer/exporter or other same-thread re-entry must never
         // block on an exclusive lock already owned by this thread.
-        if (thread_owns_exclusive_memory(state_))
+        if (thread_owns_exclusive_memory(memory_))
             throw std::runtime_error(
                 "CPUState cannot execute during same-thread exclusive memory use");
 
-        bool expected = false;
-        if (!state_.execution_active.compare_exchange_strong(
-                expected, true,
-                std::memory_order_acq_rel, std::memory_order_acquire)) {
+        if (thread_is_executing_memory(memory_))
             throw std::runtime_error("CPUState is already executing");
+
+        // Megapad64 owns a logical-operation mapping scope across native
+        // dispatch and any Python continuation.  The matching CPU may borrow
+        // that scope, while sibling cores remain excluded by its global CAS.
+        if (ThreadSharedMemoryOwner* owner =
+                current_thread_shared_memory_owner(memory_)) {
+            if (owner->permitted_cpu != &state_)
+                throw std::runtime_error("CPUState is already executing");
+            shared_owner_.lease = owner->lease;
+            if (!shared_owner_.lease)
+                throw std::runtime_error(
+                    "CPUState shared memory ownership is invalid");
+            // A logical operation grants exactly one native dispatch.  Clear
+            // every matching permission in the nested owner stack before
+            // entering native code so no outer scope can re-expose it after
+            // an inner scope unwinds into Python continuation code.
+            for (ThreadSharedMemoryOwner* candidate =
+                     thread_shared_memory_owners;
+                 candidate != nullptr;
+                 candidate = candidate->previous) {
+                if (candidate->memory == &memory_ &&
+                    candidate->permitted_cpu == &state_) {
+                    candidate->permitted_cpu = nullptr;
+                }
+            }
+            register_shared_memory();
+            register_native_execution();
+            return;
         }
 
         // Both bindings release the GIL while acquiring this potentially
         // blocking lock.  They reacquire it only after this guard owns the
         // mapping, so render completion never waits behind a Python thread
         // that is itself waiting for memory.
-        try {
-            memory_lock_.lock();
-        } catch (...) {
-            state_.execution_active.store(false, std::memory_order_release);
-            throw;
-        }
+        shared_owner_.lease = std::make_shared<SharedMemoryLease>(
+            memory_, "CPUState is already executing");
+        register_shared_memory();
+        register_native_execution();
     }
 
     ~CPUExecutionGuard() {
-        if (memory_lock_.owns_lock())
-            memory_lock_.unlock();
-        state_.execution_active.store(false, std::memory_order_release);
+        if (registered_native_state_)
+            unlink_thread_owner(
+                thread_native_execution_owners, native_owner_);
+        if (registered_shared_state_)
+            unlink_thread_owner(
+                thread_shared_memory_owners, shared_owner_);
+        shared_owner_.lease.reset();
     }
 
     CPUExecutionGuard(const CPUExecutionGuard&) = delete;
     CPUExecutionGuard& operator=(const CPUExecutionGuard&) = delete;
 
 private:
+    void register_shared_memory() {
+        shared_owner_.previous = thread_shared_memory_owners;
+        thread_shared_memory_owners = &shared_owner_;
+        registered_shared_state_ = true;
+    }
+
+    void register_native_execution() {
+        native_owner_.previous = thread_native_execution_owners;
+        thread_native_execution_owners = &native_owner_;
+        registered_native_state_ = true;
+    }
+
     CPUState& state_;
-    std::shared_lock<std::shared_mutex> memory_lock_;
+    MemoryMappings& memory_;
+    ThreadSharedMemoryOwner shared_owner_;
+    ThreadNativeExecutionOwner native_owner_;
+    bool registered_shared_state_ = false;
+    bool registered_native_state_ = false;
+};
+
+// Direct DMA-capable device bindings participate in the same one-worker
+// mapping scope as instruction execution.  A secondary-core Python MMIO
+// fallback may re-enter a core-0 proxy on the same thread; that path borrows
+// the outer scope instead of recursively locking std::shared_mutex.
+class SharedMemoryUseGuard {
+public:
+    explicit SharedMemoryUseGuard(
+            MemoryMappings& memory,
+            CPUState* permitted_cpu = nullptr)
+        : memory_(memory),
+          thread_owner_{&memory, permitted_cpu, nullptr, nullptr} {
+        if (thread_owns_exclusive_memory(memory_))
+            throw std::runtime_error(
+                "CPUState cannot use memory during same-thread exclusive memory use");
+
+        if (ThreadSharedMemoryOwner* owner =
+                current_thread_shared_memory_owner(memory_)) {
+            thread_owner_.lease = owner->lease;
+            if (!thread_owner_.lease)
+                throw std::runtime_error(
+                    "CPUState shared memory ownership is invalid");
+            // Nested scopes can preserve an existing permission for the same
+            // CPU, but can never introduce or transfer permission.
+            if (permitted_cpu == nullptr ||
+                owner->permitted_cpu != permitted_cpu ||
+                thread_is_executing_memory(memory_)) {
+                thread_owner_.permitted_cpu = nullptr;
+            }
+            register_thread_state();
+            return;
+        }
+
+        thread_owner_.lease = std::make_shared<SharedMemoryLease>(
+            memory_, "CPUState memory is already in use");
+        register_thread_state();
+    }
+
+    ~SharedMemoryUseGuard() {
+        if (registered_thread_state_)
+            unlink_thread_owner(
+                thread_shared_memory_owners, thread_owner_);
+        thread_owner_.lease.reset();
+    }
+
+    SharedMemoryUseGuard(const SharedMemoryUseGuard&) = delete;
+    SharedMemoryUseGuard& operator=(const SharedMemoryUseGuard&) = delete;
+
+private:
+    void register_thread_state() {
+        thread_owner_.previous = thread_shared_memory_owners;
+        thread_shared_memory_owners = &thread_owner_;
+        registered_thread_state_ = true;
+    }
+
+    MemoryMappings& memory_;
+    ThreadSharedMemoryOwner thread_owner_;
+    bool registered_thread_state_ = false;
+};
+
+static std::unique_ptr<SharedMemoryUseGuard>
+acquire_shared_memory_use(
+        CPUState& state,
+        bool permit_native_execution = false) {
+    // Proxy re-entry on the execution thread must not create a fresh
+    // GIL-free window while the outer instruction is mutating CPU/device
+    // state.  Borrowing and same-thread exclusive rejection cannot block.
+    if (thread_owns_shared_memory(*state.memory) ||
+        thread_owns_exclusive_memory(*state.memory)) {
+        return std::make_unique<SharedMemoryUseGuard>(
+            *state.memory,
+            permit_native_execution ? &state : nullptr);
+    }
+    py::gil_scoped_release release;
+    return std::make_unique<SharedMemoryUseGuard>(
+        *state.memory,
+        permit_native_execution ? &state : nullptr);
+}
+
+class PythonMemoryUseScope {
+public:
+    PythonMemoryUseScope(
+            CPUState& state,
+            bool permit_native_execution)
+        : guard_(acquire_shared_memory_use(
+              state, permit_native_execution)) {}
+
+    void close() {
+        guard_.reset();
+    }
+
+private:
+    std::unique_ptr<SharedMemoryUseGuard> guard_;
 };
 
 struct PreparedBuffer {
@@ -518,16 +781,39 @@ static inline void validate_guest_region(uint64_t base, uint64_t size) {
 
 static inline void sync_nic_memory_ptrs(CPUState& s) {
     s.nic.attach_mem_ptrs(
-        s.mem, s.mem_size,
-        s.hbw_mem, s.hbw_base, s.hbw_size,
-        s.ext_mem, s.ext_mem_base, s.ext_mem_size);
+        s.memory->mem, s.memory->mem_size,
+        s.memory->hbw_mem, s.memory->hbw_base, s.memory->hbw_size,
+        s.memory->ext_mem, s.memory->ext_mem_base, s.memory->ext_mem_size);
 }
 
 static inline void sync_main_memory_ptrs(CPUState& s) {
-    s.uart.attach_mem(s.mem, s.mem_size);
-    s.crypto.wots.mem = s.mem;
-    s.crypto.wots.mem_size = s.mem_size;
+    s.uart.attach_mem(s.memory->mem, s.memory->mem_size);
+    s.crypto.wots.mem = s.memory->mem;
+    s.crypto.wots.mem_size = s.memory->mem_size;
     sync_nic_memory_ptrs(s);
+}
+
+static inline void sync_system_nic_memory_ptrs(SystemState& system) {
+    for (const auto& core : system.cores)
+        sync_nic_memory_ptrs(*core);
+}
+
+static inline void sync_system_main_memory_ptrs(SystemState& system) {
+    for (const auto& core : system.cores)
+        sync_main_memory_ptrs(*core);
+}
+
+static inline void require_private_memory_mapping(const CPUState& s) {
+    if (!s.private_memory)
+        throw std::runtime_error(
+            "system-owned CPUState mappings must be changed through SystemState");
+}
+
+static inline void require_unsealed_system_mappings(
+        const SystemState& system) {
+    if (system.mappings_sealed)
+        throw std::runtime_error(
+            "SystemState mappings are sealed after the first core borrow");
 }
 
 static inline uint64_t u64(uint64_t v) { return v; }  // native 64-bit
@@ -598,15 +884,15 @@ static inline bool region_span_fits(uint64_t size, uint64_t off, uint64_t span) 
 }
 
 static inline MemRegion resolve_mem(CPUState& s, uint64_t addr) {
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
-        return {s.vram_mem, addr - s.vram_base, s.vram_size};
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
-        return {s.ext_mem, addr - s.ext_mem_base, s.ext_mem_size};
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr))
-        return {s.hbw_mem, addr - s.hbw_base, s.hbw_size};
-    if (!s.mem || s.mem_size == 0)
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr))
+        return {s.memory->vram_mem, addr - s.memory->vram_base, s.memory->vram_size};
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr))
+        return {s.memory->ext_mem, addr - s.memory->ext_mem_base, s.memory->ext_mem_size};
+    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr))
+        return {s.memory->hbw_mem, addr - s.memory->hbw_base, s.memory->hbw_size};
+    if (!s.memory->mem || s.memory->mem_size == 0)
         throw std::runtime_error("main memory is not attached");
-    return {s.mem, addr % s.mem_size, s.mem_size};
+    return {s.memory->mem, addr % s.memory->mem_size, s.memory->mem_size};
 }
 
 static inline bool resolved_span_is_contiguous(
@@ -764,20 +1050,20 @@ static constexpr uint64_t MAX_ACCEL_HOOK_EXTRA_CYCLES =
 // VRAM -> external memory -> HBW -> Bank 0.
 static inline DirectMemoryRegion resolve_accel_scalar_region(
         CPUState& s, uint64_t addr) {
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
-        uint64_t off = addr - s.vram_base;
-        return {s.vram_mem + off, s.vram_size - off, 0};
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
+        uint64_t off = addr - s.memory->vram_base;
+        return {s.memory->vram_mem + off, s.memory->vram_size - off, 0};
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
-        uint64_t off = addr - s.ext_mem_base;
-        return {s.ext_mem + off, s.ext_mem_size - off, 1};
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
+        uint64_t off = addr - s.memory->ext_mem_base;
+        return {s.memory->ext_mem + off, s.memory->ext_mem_size - off, 1};
     }
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        uint64_t off = addr - s.hbw_base;
-        return {s.hbw_mem + off, s.hbw_size - off, 2};
+    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        uint64_t off = addr - s.memory->hbw_base;
+        return {s.memory->hbw_mem + off, s.memory->hbw_size - off, 2};
     }
-    if (s.mem && addr < s.mem_size)
-        return {s.mem + addr, s.mem_size - addr, 3};
+    if (s.memory->mem && addr < s.memory->mem_size)
+        return {s.memory->mem + addr, s.memory->mem_size - addr, 3};
     return {nullptr, 0, 4};
 }
 
@@ -785,24 +1071,24 @@ static inline DirectMemoryRegion resolve_accel_scalar_region(
 // sys_read8()/sys_write8(): HBW -> external memory -> VRAM -> Bank 0.
 static inline DirectMemoryRegion resolve_accel_byte_region(
         CPUState& s, uint64_t addr) {
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        uint64_t off = addr - s.hbw_base;
-        return {s.hbw_mem + off, s.hbw_size - off, 0};
+    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        uint64_t off = addr - s.memory->hbw_base;
+        return {s.memory->hbw_mem + off, s.memory->hbw_size - off, 0};
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr))
         return {
-            s.ext_mem + (addr - s.ext_mem_base),
-            s.ext_mem_size - (addr - s.ext_mem_base),
+            s.memory->ext_mem + (addr - s.memory->ext_mem_base),
+            s.memory->ext_mem_size - (addr - s.memory->ext_mem_base),
             1,
         };
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr))
         return {
-            s.vram_mem + (addr - s.vram_base),
-            s.vram_size - (addr - s.vram_base),
+            s.memory->vram_mem + (addr - s.memory->vram_base),
+            s.memory->vram_size - (addr - s.memory->vram_base),
             2,
         };
-    if (s.mem && addr < s.mem_size)
-        return {s.mem + addr, s.mem_size - addr, 3};
+    if (s.memory->mem && addr < s.memory->mem_size)
+        return {s.memory->mem + addr, s.memory->mem_size - addr, 3};
     return {nullptr, 0, 4};
 }
 
@@ -845,28 +1131,28 @@ static inline bool higher_priority_region_intersects_span(
     if (model == AccelAccessModel::SCALAR) {
         if (selected_priority > 0 &&
             guest_region_intersects_span(
-                s.vram_base, s.vram_size, addr, size))
+                s.memory->vram_base, s.memory->vram_size, addr, size))
             return true;
         if (selected_priority > 1 &&
             guest_region_intersects_span(
-                s.ext_mem_base, s.ext_mem_size, addr, size))
+                s.memory->ext_mem_base, s.memory->ext_mem_size, addr, size))
             return true;
         if (selected_priority > 2 &&
             guest_region_intersects_span(
-                s.hbw_base, s.hbw_size, addr, size))
+                s.memory->hbw_base, s.memory->hbw_size, addr, size))
             return true;
     } else {
         if (selected_priority > 0 &&
             guest_region_intersects_span(
-                s.hbw_base, s.hbw_size, addr, size))
+                s.memory->hbw_base, s.memory->hbw_size, addr, size))
             return true;
         if (selected_priority > 1 &&
             guest_region_intersects_span(
-                s.ext_mem_base, s.ext_mem_size, addr, size))
+                s.memory->ext_mem_base, s.memory->ext_mem_size, addr, size))
             return true;
         if (selected_priority > 2 &&
             guest_region_intersects_span(
-                s.vram_base, s.vram_size, addr, size))
+                s.memory->vram_base, s.memory->vram_size, addr, size))
             return true;
     }
     return false;
@@ -1748,65 +2034,65 @@ static inline __int128 floor_shift_right(__int128 value, unsigned shift) {
 // ---------------------------------------------------------------------------
 
 static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
-        const uint64_t off = addr - s.vram_base;
-        if (region_span_fits(s.vram_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.vram_mem + off, TILE_BYTES);
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
+        const uint64_t off = addr - s.memory->vram_base;
+        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.memory->vram_mem + off, TILE_BYTES);
         else
             out.fill(0);
         return;
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
-        const uint64_t off = addr - s.ext_mem_base;
-        if (region_span_fits(s.ext_mem_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.ext_mem + off, TILE_BYTES);
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
+        const uint64_t off = addr - s.memory->ext_mem_base;
+        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.memory->ext_mem + off, TILE_BYTES);
         else
             out.fill(0);
         return;
     }
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        const uint64_t off = addr - s.hbw_base;
-        if (region_span_fits(s.hbw_size, off, TILE_BYTES))
-            std::memcpy(out.data(), s.hbw_mem + off, TILE_BYTES);
+    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        const uint64_t off = addr - s.memory->hbw_base;
+        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.memory->hbw_mem + off, TILE_BYTES);
         else
             out.fill(0);
         return;
     }
-    if (!s.mem || s.mem_size == 0) {
+    if (!s.memory->mem || s.memory->mem_size == 0) {
         out.fill(0);
         return;
     }
-    uint64_t a = addr % s.mem_size;
-    if (region_span_fits(s.mem_size, a, TILE_BYTES))
-        std::memcpy(out.data(), s.mem + a, TILE_BYTES);
+    uint64_t a = addr % s.memory->mem_size;
+    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES))
+        std::memcpy(out.data(), s.memory->mem + a, TILE_BYTES);
     else
         out.fill(0);
 }
 
 static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& data) {
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
-        const uint64_t off = addr - s.vram_base;
-        if (region_span_fits(s.vram_size, off, TILE_BYTES))
-            std::memcpy(s.vram_mem + off, data.data(), TILE_BYTES);
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
+        const uint64_t off = addr - s.memory->vram_base;
+        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
+            std::memcpy(s.memory->vram_mem + off, data.data(), TILE_BYTES);
         return;
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
-        const uint64_t off = addr - s.ext_mem_base;
-        if (region_span_fits(s.ext_mem_size, off, TILE_BYTES))
-            std::memcpy(s.ext_mem + off, data.data(), TILE_BYTES);
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
+        const uint64_t off = addr - s.memory->ext_mem_base;
+        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES))
+            std::memcpy(s.memory->ext_mem + off, data.data(), TILE_BYTES);
         return;
     }
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        const uint64_t off = addr - s.hbw_base;
-        if (region_span_fits(s.hbw_size, off, TILE_BYTES))
-            std::memcpy(s.hbw_mem + off, data.data(), TILE_BYTES);
+    if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        const uint64_t off = addr - s.memory->hbw_base;
+        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES))
+            std::memcpy(s.memory->hbw_mem + off, data.data(), TILE_BYTES);
         return;
     }
-    if (!s.mem || s.mem_size == 0)
+    if (!s.memory->mem || s.memory->mem_size == 0)
         return;
-    uint64_t a = addr % s.mem_size;
-    if (region_span_fits(s.mem_size, a, TILE_BYTES))
-        std::memcpy(s.mem + a, data.data(), TILE_BYTES);
+    uint64_t a = addr % s.memory->mem_size;
+    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES))
+        std::memcpy(s.memory->mem + a, data.data(), TILE_BYTES);
 }
 
 // ---------------------------------------------------------------------------
@@ -2466,19 +2752,19 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     }
     if (s.priv_level) {
         // User mode: block HBW entirely, check MPU for RAM
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr;
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        return s.hbw_mem[addr - s.hbw_base];
+    } else if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        return s.memory->hbw_mem[addr - s.memory->hbw_base];
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
-        return s.ext_mem[addr - s.ext_mem_base];
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
+        return s.memory->ext_mem[addr - s.memory->ext_mem_base];
     }
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
-        return s.vram_mem[addr - s.vram_base];
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
+        return s.memory->vram_mem[addr - s.memory->vram_base];
     }
     return mem_read8(s, addr);
 }
@@ -2523,21 +2809,21 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr;
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
-        s.hbw_mem[addr - s.hbw_base] = val;
+    } else if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
+        s.memory->hbw_mem[addr - s.memory->hbw_base] = val;
         return;
     }
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
-        s.ext_mem[addr - s.ext_mem_base] = val;
+    if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
+        s.memory->ext_mem[addr - s.memory->ext_mem_base] = val;
         return;
     }
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
-        s.vram_mem[addr - s.vram_base] = val;
+    if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
+        s.memory->vram_mem[addr - s.memory->vram_base] = val;
         return;
     }
     mem_write8(s, addr, val);
@@ -2589,7 +2875,7 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
         return v;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -2635,7 +2921,7 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -2657,7 +2943,7 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -2693,7 +2979,7 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -2734,7 +3020,7 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
         return v;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -2770,7 +3056,7 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
@@ -4537,9 +4823,39 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
 PYBIND11_MODULE(_mp64_accel, m) {
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
+    py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")
+        .def(
+            "__enter__",
+            [](PythonMemoryUseScope& scope) -> PythonMemoryUseScope& {
+                return scope;
+            },
+            py::return_value_policy::reference_internal)
+        .def(
+            "__exit__",
+            [](PythonMemoryUseScope& scope,
+               py::object, py::object, py::object) {
+                scope.close();
+                return false;
+            })
+        ;
+
     // Expose CPUState
     py::class_<CPUState>(m, "CPUState")
         .def(py::init([]() { return make_cpu_state(); }))
+        .def(
+            "_memory_use",
+            [](CPUState& state) {
+                return std::make_unique<PythonMemoryUseScope>(
+                    state, /*permit_native_execution=*/false);
+            },
+            py::keep_alive<0, 1>())
+        .def(
+            "_logical_memory_use",
+            [](CPUState& state) {
+                return std::make_unique<PythonMemoryUseScope>(
+                    state, /*permit_native_execution=*/true);
+            },
+            py::keep_alive<0, 1>())
         .def_readwrite("psel", &CPUState::psel)
         .def_readwrite("xsel", &CPUState::xsel)
         .def_readwrite("spsel", &CPUState::spsel)
@@ -4600,16 +4916,17 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
         .def_property("mem_size",
-            [](const CPUState& s) { return s.mem_size; },
+            [](const CPUState& s) { return s.memory->mem_size; },
             [](CPUState& s, uint64_t size) {
-                MemoryMutationGuard guard(s);
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
                 if (size == 0)
                     throw py::value_error(
                         "main memory size must be greater than zero");
-                if (!s.mem_lease || size > s.mem_capacity)
+                if (!s.memory->mem_lease || size > s.memory->mem_capacity)
                     throw py::value_error(
                         "main memory size exceeds attached buffer capacity");
-                s.mem_size = size;
+                s.memory->mem_size = size;
                 sync_main_memory_ptrs(s);
             })
         // Register access
@@ -4626,16 +4943,17 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("set_port_map", [](CPUState& s, int i, uint32_t v) { s.port_map[i & 7] = v; })
         // Memory attachment
         .def("attach_mem", [](CPUState& s, py::buffer buf, uint64_t size) {
+            require_private_memory_mapping(s);
             PreparedBuffer prepared =
                 prepare_writable_byte_buffer(buf, size, true);
             std::unique_ptr<py::buffer_info> old_lease;
             {
-                MemoryMutationGuard guard(s);
-                old_lease = std::move(s.mem_lease);
-                s.mem_lease = std::move(prepared.lease);
-                s.mem = prepared.ptr;
-                s.mem_size = size;
-                s.mem_capacity = prepared.capacity;
+                MemoryMutationGuard guard(*s.memory);
+                old_lease = std::move(s.memory->mem_lease);
+                s.memory->mem_lease = std::move(prepared.lease);
+                s.memory->mem = prepared.ptr;
+                s.memory->mem_size = size;
+                s.memory->mem_capacity = prepared.capacity;
                 sync_main_memory_ptrs(s);
             }
             // PyBuffer_Release may invoke arbitrary exporter code.  Release
@@ -4643,122 +4961,136 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // HBW memory attachment
         .def("attach_hbw_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
                 prepare_writable_byte_buffer(buf, size, false);
             std::unique_ptr<py::buffer_info> old_lease;
             {
-                MemoryMutationGuard guard(s);
-                old_lease = std::move(s.hbw_lease);
-                s.hbw_lease = std::move(prepared.lease);
-                s.hbw_mem = prepared.ptr;
-                s.hbw_base = base;
-                s.hbw_size = size;
-                s.hbw_capacity = prepared.capacity;
+                MemoryMutationGuard guard(*s.memory);
+                old_lease = std::move(s.memory->hbw_lease);
+                s.memory->hbw_lease = std::move(prepared.lease);
+                s.memory->hbw_mem = prepared.ptr;
+                s.memory->hbw_base = base;
+                s.memory->hbw_size = size;
+                s.memory->hbw_capacity = prepared.capacity;
                 sync_nic_memory_ptrs(s);
             }
         })
         .def_property("hbw_base",
-            [](const CPUState& s) { return s.hbw_base; },
+            [](const CPUState& s) { return s.memory->hbw_base; },
             [](CPUState& s, uint64_t base) {
-                MemoryMutationGuard guard(s);
-                validate_guest_region(base, s.hbw_size);
-                s.hbw_base = base;
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                validate_guest_region(base, s.memory->hbw_size);
+                s.memory->hbw_base = base;
                 sync_nic_memory_ptrs(s);
             })
         .def_property("hbw_size",
-            [](const CPUState& s) { return s.hbw_size; },
+            [](const CPUState& s) { return s.memory->hbw_size; },
             [](CPUState& s, uint64_t size) {
-                MemoryMutationGuard guard(s);
-                if ((size != 0 && !s.hbw_lease) || size > s.hbw_capacity)
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                if ((size != 0 && !s.memory->hbw_lease) || size > s.memory->hbw_capacity)
                     throw py::value_error(
                         "HBW memory size exceeds attached buffer capacity");
-                validate_guest_region(s.hbw_base, size);
-                s.hbw_size = size;
+                validate_guest_region(s.memory->hbw_base, size);
+                s.memory->hbw_size = size;
                 sync_nic_memory_ptrs(s);
             })
         // External memory attachment
         .def("attach_ext_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
                 prepare_writable_byte_buffer(buf, size, false);
             std::unique_ptr<py::buffer_info> old_lease;
             {
-                MemoryMutationGuard guard(s);
-                old_lease = std::move(s.ext_mem_lease);
-                s.ext_mem_lease = std::move(prepared.lease);
-                s.ext_mem = prepared.ptr;
-                s.ext_mem_base = base;
-                s.ext_mem_size = size;
-                s.ext_mem_capacity = prepared.capacity;
+                MemoryMutationGuard guard(*s.memory);
+                old_lease = std::move(s.memory->ext_mem_lease);
+                s.memory->ext_mem_lease = std::move(prepared.lease);
+                s.memory->ext_mem = prepared.ptr;
+                s.memory->ext_mem_base = base;
+                s.memory->ext_mem_size = size;
+                s.memory->ext_mem_capacity = prepared.capacity;
                 sync_nic_memory_ptrs(s);
             }
         })
         .def_property("ext_mem_base",
-            [](const CPUState& s) { return s.ext_mem_base; },
+            [](const CPUState& s) { return s.memory->ext_mem_base; },
             [](CPUState& s, uint64_t base) {
-                MemoryMutationGuard guard(s);
-                validate_guest_region(base, s.ext_mem_size);
-                s.ext_mem_base = base;
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                validate_guest_region(base, s.memory->ext_mem_size);
+                s.memory->ext_mem_base = base;
                 sync_nic_memory_ptrs(s);
             })
         .def_property("ext_mem_size",
-            [](const CPUState& s) { return s.ext_mem_size; },
+            [](const CPUState& s) { return s.memory->ext_mem_size; },
             [](CPUState& s, uint64_t size) {
-                MemoryMutationGuard guard(s);
-                if ((size != 0 && !s.ext_mem_lease) ||
-                    size > s.ext_mem_capacity)
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                if ((size != 0 && !s.memory->ext_mem_lease) ||
+                    size > s.memory->ext_mem_capacity)
                     throw py::value_error(
                         "external memory size exceeds attached buffer capacity");
-                validate_guest_region(s.ext_mem_base, size);
-                s.ext_mem_size = size;
+                validate_guest_region(s.memory->ext_mem_base, size);
+                s.memory->ext_mem_size = size;
                 sync_nic_memory_ptrs(s);
             })
         // VRAM memory attachment
         .def("attach_vram", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+            require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
                 prepare_writable_byte_buffer(buf, size, false);
             std::unique_ptr<py::buffer_info> old_lease;
             {
-                MemoryMutationGuard guard(s);
-                old_lease = std::move(s.vram_lease);
-                s.vram_lease = std::move(prepared.lease);
-                s.vram_mem = prepared.ptr;
-                s.vram_base = base;
-                s.vram_size = size;
-                s.vram_capacity = prepared.capacity;
+                MemoryMutationGuard guard(*s.memory);
+                old_lease = std::move(s.memory->vram_lease);
+                s.memory->vram_lease = std::move(prepared.lease);
+                s.memory->vram_mem = prepared.ptr;
+                s.memory->vram_base = base;
+                s.memory->vram_size = size;
+                s.memory->vram_capacity = prepared.capacity;
             }
         })
         .def_property("vram_base",
-            [](const CPUState& s) { return s.vram_base; },
+            [](const CPUState& s) { return s.memory->vram_base; },
             [](CPUState& s, uint64_t base) {
-                MemoryMutationGuard guard(s);
-                validate_guest_region(base, s.vram_size);
-                s.vram_base = base;
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                validate_guest_region(base, s.memory->vram_size);
+                s.memory->vram_base = base;
             })
         .def_property("vram_size",
-            [](const CPUState& s) { return s.vram_size; },
+            [](const CPUState& s) { return s.memory->vram_size; },
             [](CPUState& s, uint64_t size) {
-                MemoryMutationGuard guard(s);
-                if ((size != 0 && !s.vram_lease) ||
-                    size > s.vram_capacity)
+                require_private_memory_mapping(s);
+                MemoryMutationGuard guard(*s.memory);
+                if ((size != 0 && !s.memory->vram_lease) ||
+                    size > s.memory->vram_capacity)
                     throw py::value_error(
                         "VRAM size exceeds attached buffer capacity");
-                validate_guest_region(s.vram_base, size);
-                s.vram_size = size;
+                validate_guest_region(s.memory->vram_base, size);
+                s.memory->vram_size = size;
             })
         // Native UART
         .def("uart_init", [](CPUState& s) {
+            MemoryMutationGuard guard(
+                *s.memory,
+                "CPUState UART memory cannot be initialized while memory is in use");
             s.uart.init();
-            s.uart.attach_mem(s.mem, s.mem_size);
+            s.uart.attach_mem(s.memory->mem, s.memory->mem_size);
         })
         .def("uart_disable", [](CPUState& s) { s.uart.enabled = false; })
         .def("uart_enabled", [](const CPUState& s) { return s.uart.enabled; })
         .def("uart_read8", [](CPUState& s, uint32_t off) -> uint8_t {
+            auto memory_guard = acquire_shared_memory_use(s);
             return s.uart.read8(off);
         })
         .def("uart_write8", [](CPUState& s, uint32_t off, uint8_t value) {
+            auto memory_guard = acquire_shared_memory_use(s);
             s.uart.write8(off, value);
         })
         .def("uart_inject", [](CPUState& s, py::bytes payload) {
@@ -4781,10 +5113,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })
         // Crypto devices — initialize C++ native crypto accelerators
         .def("init_crypto", [](CPUState& s) {
+            MemoryMutationGuard guard(
+                *s.memory,
+                "CPUState crypto memory cannot be initialized while memory is in use");
             s.crypto.init();
             // Ensure WOTS chain has current memory pointer
-            s.crypto.wots.mem = s.mem;
-            s.crypto.wots.mem_size = s.mem_size;
+            s.crypto.wots.mem = s.memory->mem;
+            s.crypto.wots.mem_size = s.memory->mem_size;
         })
         .def("disable_crypto", [](CPUState& s) {
             s.crypto.enabled = false;
@@ -4796,23 +5131,31 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("crypto_aes_reset", [](CPUState& s) { s.crypto.aes.reset(); })
         .def("crypto_sha3_reset", [](CPUState& s) { s.crypto.sha3.reset(); s.crypto.sha3.mode = 0; })
         .def("crypto_wots_reset", [](CPUState& s) {
+            MemoryMutationGuard guard(
+                *s.memory,
+                "CPUState WOTS memory cannot be reset while memory is in use");
             s.crypto.wots.reset();
             s.crypto.wots.sha3 = &s.crypto.sha3;
-            s.crypto.wots.mem = s.mem;
-            s.crypto.wots.mem_size = s.mem_size;
+            s.crypto.wots.mem = s.memory->mem;
+            s.crypto.wots.mem_size = s.memory->mem_size;
         })
         .def("crypto_wots_status", [](const CPUState& s) -> uint8_t {
             return s.crypto.wots.status;
         })
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto.read8(mmio_off);
         })
         .def("crypto_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            auto memory_guard = acquire_shared_memory_use(s);
             s.crypto.write8(mmio_off, val);
         })
         // ── NIC device ────────────────────────────────────────
         .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
+            MemoryMutationGuard guard(
+                *s.memory,
+                "CPUState NIC memory cannot be initialized while memory is in use");
             std::string mac_str = mac_bytes;
             uint8_t mac[6] = {};
             size_t n = std::min(mac_str.size(), (size_t)6);
@@ -4820,14 +5163,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.nic.init(mac);
             // Wire memory pointers from CPUState
             s.nic.attach_mem_ptrs(
-                s.mem, s.mem_size,
-                s.hbw_mem, s.hbw_base, s.hbw_size,
-                s.ext_mem, s.ext_mem_base, s.ext_mem_size
+                s.memory->mem, s.memory->mem_size,
+                s.memory->hbw_mem, s.memory->hbw_base, s.memory->hbw_size,
+                s.memory->ext_mem, s.memory->ext_mem_base, s.memory->ext_mem_size
             );
         })
         .def("nic_sync_mem_ptrs", [](CPUState& s) {
             // Re-sync memory pointers after attach_ext_mem / attach_hbw_mem
-            MemoryMutationGuard guard(s);
+            MemoryMutationGuard guard(*s.memory);
             sync_nic_memory_ptrs(s);
         })
         .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
@@ -4877,9 +5220,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.nic.reset_state();
         })
         .def("nic_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            auto memory_guard = acquire_shared_memory_use(s);
             return s.nic.read8(mmio_off);
         })
         .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            auto memory_guard = acquire_shared_memory_use(s);
             s.nic.write8(mmio_off, val);
         })
         .def("nic_irq_pending", [](const CPUState& s) -> bool {
@@ -4972,7 +5317,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // any attached memory region.
         .def("render_fb_rgb", [](CPUState& s) -> py::object {
             ExclusiveMemoryUseGuard memory_guard(
-                s, "CPUState framebuffer render is busy");
+                *s.memory, "CPUState framebuffer render is busy");
             uint32_t w = s.fb.width;
             uint32_t h = s.fb.height;
             uint32_t stride = s.fb.stride;
@@ -4987,21 +5332,21 @@ PYBIND11_MODULE(_mp64_accel, m) {
             uint64_t mem_size = 0;
             uint64_t mem_off = 0;
 
-            if (s.vram_mem &&
-                region_contains(s.vram_base, s.vram_size, base)) {
-                src = s.vram_mem;
-                mem_off = base - s.vram_base;
-                mem_size = s.vram_size;
-            } else if (s.ext_mem &&
-                       region_contains(s.ext_mem_base, s.ext_mem_size, base)) {
-                src = s.ext_mem;
-                mem_off = base - s.ext_mem_base;
-                mem_size = s.ext_mem_size;
-            } else if (s.hbw_mem &&
-                       region_contains(s.hbw_base, s.hbw_size, base)) {
-                src = s.hbw_mem;
-                mem_off = base - s.hbw_base;
-                mem_size = s.hbw_size;
+            if (s.memory->vram_mem &&
+                region_contains(s.memory->vram_base, s.memory->vram_size, base)) {
+                src = s.memory->vram_mem;
+                mem_off = base - s.memory->vram_base;
+                mem_size = s.memory->vram_size;
+            } else if (s.memory->ext_mem &&
+                       region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, base)) {
+                src = s.memory->ext_mem;
+                mem_off = base - s.memory->ext_mem_base;
+                mem_size = s.memory->ext_mem_size;
+            } else if (s.memory->hbw_mem &&
+                       region_contains(s.memory->hbw_base, s.memory->hbw_size, base)) {
+                src = s.memory->hbw_mem;
+                mem_off = base - s.memory->hbw_base;
+                mem_size = s.memory->hbw_size;
             }
             if (!src)
                 return py::none();
@@ -5250,6 +5595,203 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property_readonly(
+            "mappings_sealed",
+            [](const SystemState& system) {
+                return system.mappings_sealed;
+            })
+        .def_property_readonly(
+            "mem_size",
+            [](const SystemState& system) {
+                return system.shared_memory.mem_size;
+            })
+        .def_property_readonly(
+            "hbw_base",
+            [](const SystemState& system) {
+                return system.shared_memory.hbw_base;
+            })
+        .def_property_readonly(
+            "hbw_size",
+            [](const SystemState& system) {
+                return system.shared_memory.hbw_size;
+            })
+        .def_property_readonly(
+            "ext_mem_base",
+            [](const SystemState& system) {
+                return system.shared_memory.ext_mem_base;
+            })
+        .def_property_readonly(
+            "ext_mem_size",
+            [](const SystemState& system) {
+                return system.shared_memory.ext_mem_size;
+            })
+        .def_property_readonly(
+            "vram_base",
+            [](const SystemState& system) {
+                return system.shared_memory.vram_base;
+            })
+        .def_property_readonly(
+            "vram_size",
+            [](const SystemState& system) {
+                return system.shared_memory.vram_size;
+            })
+        .def_property_readonly(
+            "mem_buffer",
+            [](const SystemState& system) -> py::object {
+                if (!system.shared_memory.mem_exporter)
+                    return py::none();
+                return system.shared_memory.mem_exporter;
+            })
+        .def_property_readonly(
+            "hbw_buffer",
+            [](const SystemState& system) -> py::object {
+                if (!system.shared_memory.hbw_exporter)
+                    return py::none();
+                return system.shared_memory.hbw_exporter;
+            })
+        .def_property_readonly(
+            "ext_mem_buffer",
+            [](const SystemState& system) -> py::object {
+                if (!system.shared_memory.ext_mem_exporter)
+                    return py::none();
+                return system.shared_memory.ext_mem_exporter;
+            })
+        .def_property_readonly(
+            "vram_buffer",
+            [](const SystemState& system) -> py::object {
+                if (!system.shared_memory.vram_exporter)
+                    return py::none();
+                return system.shared_memory.vram_exporter;
+            })
+        .def(
+            "attach_mem",
+            [](SystemState& system, py::buffer buf, uint64_t size) {
+                require_unsealed_system_mappings(system);
+                PreparedBuffer prepared =
+                    prepare_writable_byte_buffer(buf, size, true);
+                py::object prepared_exporter = buf;
+                std::unique_ptr<py::buffer_info> old_lease;
+                py::object old_exporter;
+                {
+                    MemoryMutationGuard guard(system.shared_memory);
+                    require_unsealed_system_mappings(system);
+                    old_lease =
+                        std::move(system.shared_memory.mem_lease);
+                    old_exporter =
+                        std::move(system.shared_memory.mem_exporter);
+                    system.shared_memory.mem_lease =
+                        std::move(prepared.lease);
+                    system.shared_memory.mem_exporter =
+                        std::move(prepared_exporter);
+                    system.shared_memory.mem = prepared.ptr;
+                    system.shared_memory.mem_size = size;
+                    system.shared_memory.mem_capacity =
+                        prepared.capacity;
+                    sync_system_main_memory_ptrs(system);
+                }
+                // Releasing an exporter may invoke Python, so the old lease
+                // remains alive until after the mapping lock is free.
+            },
+            py::arg("buffer"),
+            py::arg("size"))
+        .def(
+            "attach_hbw_mem",
+            [](SystemState& system, py::buffer buf,
+               uint64_t base, uint64_t size) {
+                require_unsealed_system_mappings(system);
+                validate_guest_region(base, size);
+                PreparedBuffer prepared =
+                    prepare_writable_byte_buffer(buf, size, false);
+                py::object prepared_exporter = buf;
+                std::unique_ptr<py::buffer_info> old_lease;
+                py::object old_exporter;
+                {
+                    MemoryMutationGuard guard(system.shared_memory);
+                    require_unsealed_system_mappings(system);
+                    old_lease =
+                        std::move(system.shared_memory.hbw_lease);
+                    old_exporter =
+                        std::move(system.shared_memory.hbw_exporter);
+                    system.shared_memory.hbw_lease =
+                        std::move(prepared.lease);
+                    system.shared_memory.hbw_exporter =
+                        std::move(prepared_exporter);
+                    system.shared_memory.hbw_mem = prepared.ptr;
+                    system.shared_memory.hbw_base = base;
+                    system.shared_memory.hbw_size = size;
+                    system.shared_memory.hbw_capacity =
+                        prepared.capacity;
+                    sync_system_nic_memory_ptrs(system);
+                }
+            },
+            py::arg("buffer"),
+            py::arg("base"),
+            py::arg("size"))
+        .def(
+            "attach_ext_mem",
+            [](SystemState& system, py::buffer buf,
+               uint64_t base, uint64_t size) {
+                require_unsealed_system_mappings(system);
+                validate_guest_region(base, size);
+                PreparedBuffer prepared =
+                    prepare_writable_byte_buffer(buf, size, false);
+                py::object prepared_exporter = buf;
+                std::unique_ptr<py::buffer_info> old_lease;
+                py::object old_exporter;
+                {
+                    MemoryMutationGuard guard(system.shared_memory);
+                    require_unsealed_system_mappings(system);
+                    old_lease =
+                        std::move(system.shared_memory.ext_mem_lease);
+                    old_exporter =
+                        std::move(system.shared_memory.ext_mem_exporter);
+                    system.shared_memory.ext_mem_lease =
+                        std::move(prepared.lease);
+                    system.shared_memory.ext_mem_exporter =
+                        std::move(prepared_exporter);
+                    system.shared_memory.ext_mem = prepared.ptr;
+                    system.shared_memory.ext_mem_base = base;
+                    system.shared_memory.ext_mem_size = size;
+                    system.shared_memory.ext_mem_capacity =
+                        prepared.capacity;
+                    sync_system_nic_memory_ptrs(system);
+                }
+            },
+            py::arg("buffer"),
+            py::arg("base"),
+            py::arg("size"))
+        .def(
+            "attach_vram",
+            [](SystemState& system, py::buffer buf,
+               uint64_t base, uint64_t size) {
+                require_unsealed_system_mappings(system);
+                validate_guest_region(base, size);
+                PreparedBuffer prepared =
+                    prepare_writable_byte_buffer(buf, size, false);
+                py::object prepared_exporter = buf;
+                std::unique_ptr<py::buffer_info> old_lease;
+                py::object old_exporter;
+                {
+                    MemoryMutationGuard guard(system.shared_memory);
+                    require_unsealed_system_mappings(system);
+                    old_lease =
+                        std::move(system.shared_memory.vram_lease);
+                    old_exporter =
+                        std::move(system.shared_memory.vram_exporter);
+                    system.shared_memory.vram_lease =
+                        std::move(prepared.lease);
+                    system.shared_memory.vram_exporter =
+                        std::move(prepared_exporter);
+                    system.shared_memory.vram_mem = prepared.ptr;
+                    system.shared_memory.vram_base = base;
+                    system.shared_memory.vram_size = size;
+                    system.shared_memory.vram_capacity =
+                        prepared.capacity;
+                }
+            },
+            py::arg("buffer"),
+            py::arg("base"),
+            py::arg("size"))
         .def(
             "core",
             &SystemState::core,
