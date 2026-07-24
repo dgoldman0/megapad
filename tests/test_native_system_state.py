@@ -11,7 +11,7 @@ import pytest
 import _mp64_accel
 from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
-from devices import FB_BASE, TIMER_BASE, UART_GEOM_BASE
+from devices import FB_BASE, RTC, RTC_BASE, TIMER_BASE, UART_GEOM_BASE
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
 
@@ -128,6 +128,10 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
     core.fb_width = 512
     core.fb_height = 288
     assert core.fb_snapshot()[1:3] == (512, 288)
+    core.rtc_init(False, 1_000, 1, 2, 3, 4, 5, 2026, 6)
+    core.rtc_uptime_ms = 17
+    core.rtc_tick(RTC.MS_DIVISOR)
+    assert core.rtc_snapshot()[2] == 18
 
 
 def test_megapad_system_wraps_native_owned_full_cores() -> None:
@@ -403,6 +407,166 @@ def test_standalone_native_framebuffers_remain_private() -> None:
         second.fb_mode,
         second.fb_get_palette()[9],
     ) == (0, 320, 240, 0, 0x090909)
+
+
+def test_system_rtc_is_one_native_instance_for_every_full_core() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        realtime_clock=False,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+
+    assert core0.rtc_enabled()
+    assert core1.rtc_enabled()
+
+    system.rtc.realtime = False
+    system.rtc.uptime_ms = 0x0102_0304_0506_0708
+    system.rtc.epoch_ms = 0x1112_1314_1516_1718
+    system.rtc.sec = 59
+    system.rtc.min = 59
+    system.rtc.hour = 23
+    system.rtc.day = 28
+    system.rtc.mon = 2
+    system.rtc.year = 2024
+    system.rtc.dow = 3
+    system.rtc.ctrl = 3
+    system.rtc.status = 0
+    system.rtc.alarm_sec = 0
+    system.rtc.alarm_min = 0
+    system.rtc.alarm_hour = 0
+    system.rtc.irq_pending = False
+    system.rtc._ms_prescaler = RTC.MS_DIVISOR - 1
+    system.rtc._sec_prescaler = 999
+
+    assert (
+        core1.rtc_uptime_ms,
+        core1.rtc_epoch_ms,
+        core1.rtc_sec,
+        core1.rtc_min,
+        core1.rtc_hour,
+        core1.rtc_day,
+        core1.rtc_mon,
+        core1.rtc_year,
+        core1.rtc_dow,
+        core1.rtc_ctrl,
+        core1.rtc_alarm_sec,
+        core1.rtc_alarm_min,
+        core1.rtc_alarm_hour,
+    ) == (
+        0x0102_0304_0506_0708,
+        0x1112_1314_1516_1718,
+        59,
+        59,
+        23,
+        28,
+        2,
+        2024,
+        3,
+        3,
+        0,
+        0,
+        0,
+    )
+    assert core0.rtc_snapshot() == core1.rtc_snapshot() == system.rtc.snapshot()
+
+    core1.rtc_tick(1)
+    assert (
+        core0.rtc_uptime_ms,
+        system.rtc.uptime_ms,
+        core0.rtc_sec,
+        system.rtc.sec,
+        core0.rtc_day,
+        system.rtc.day,
+        core0.rtc_dow,
+        system.rtc.dow,
+        core0.rtc_status,
+        system.rtc.status,
+        core0.rtc_irq_pending,
+        system.rtc.irq_pending,
+    ) == (
+        0x0102_0304_0506_0709,
+        0x0102_0304_0506_0709,
+        0,
+        0,
+        29,
+        29,
+        4,
+        4,
+        0x07,
+        0x07,
+        True,
+        True,
+    )
+
+    core0.rtc_write8(RTC_BASE + 0x19, 0x07)
+    assert core1.rtc_status == system.rtc.status == 0
+    assert not core1.rtc_irq_pending
+    assert not system.rtc.irq_pending
+
+
+def test_system_rtc_latches_are_shared_across_full_cores() -> None:
+    owner = NativeSystemState(2)
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    core0.rtc_init(False, 0, 0, 0, 0, 1, 1, 2000, 6)
+    old_uptime = 0x0102_0304_0506_0708
+    old_epoch = 0x1112_1314_1516_1718
+    new_uptime = 0xA1A2_A3A4_A5A6_A7A8
+    new_epoch = 0xB1B2_B3B4_B5B6_B7B8
+    core0.rtc_uptime_ms = old_uptime
+    core0.rtc_epoch_ms = old_epoch
+
+    uptime_low = core0.rtc_read8(RTC_BASE)
+    epoch_low = core0.rtc_read8(RTC_BASE + 0x08)
+    core1.rtc_uptime_ms = new_uptime
+    core1.rtc_epoch_ms = new_epoch
+
+    latched_uptime = uptime_low | sum(
+        core1.rtc_read8(RTC_BASE + index) << (8 * index)
+        for index in range(1, 8)
+    )
+    latched_epoch = epoch_low | sum(
+        core1.rtc_read8(RTC_BASE + 0x08 + index) << (8 * index)
+        for index in range(1, 8)
+    )
+    assert (latched_uptime, latched_epoch) == (old_uptime, old_epoch)
+
+    refreshed_uptime = core1.rtc_read8(RTC_BASE) | sum(
+        core0.rtc_read8(RTC_BASE + index) << (8 * index)
+        for index in range(1, 8)
+    )
+    refreshed_epoch = core1.rtc_read8(RTC_BASE + 0x08) | sum(
+        core0.rtc_read8(RTC_BASE + 0x08 + index) << (8 * index)
+        for index in range(1, 8)
+    )
+    assert (refreshed_uptime, refreshed_epoch) == (new_uptime, new_epoch)
+
+
+def test_standalone_native_rtcs_remain_private() -> None:
+    first = _mp64_accel.CPUState()
+    second = _mp64_accel.CPUState()
+    first.rtc_init(False, 1_000, 1, 2, 3, 4, 5, 2026, 6)
+    second.rtc_init(False, 2_000, 7, 8, 9, 10, 11, 2030, 1)
+
+    first.rtc_uptime_ms = 41
+    first.rtc_tick(RTC.MS_DIVISOR)
+    first.rtc_alarm_sec = 17
+
+    assert (
+        first.rtc_uptime_ms,
+        first.rtc_epoch_ms,
+        first.rtc_alarm_sec,
+    ) == (42, 1_001, 17)
+    assert (
+        second.rtc_uptime_ms,
+        second.rtc_epoch_ms,
+        second.rtc_alarm_sec,
+    ) == (0, 2_000, 0)
 
 
 def test_system_uart_geometry_is_one_native_instance_for_every_full_core() -> None:

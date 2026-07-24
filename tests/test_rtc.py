@@ -46,6 +46,37 @@ def test_realtime_rtc_tracks_host_time_and_pauses_cleanly():
         assert _read_u64(rtc, 0x00) == 350
 
 
+def test_cpp_realtime_rtc_sync_and_reanchor_paths_remain_callable():
+    cpu = Megapad64(mem_size=64 * 1024)
+    rtc = CppRTCProxy(cpu._cs, realtime=True)
+
+    assert rtc.clock_mode == "realtime"
+
+    # Each operation enters a different lock-owning path.  In particular,
+    # these calls guard against accidentally re-locking the RTC mutex from
+    # sync/reanchor helpers.
+    rtc.tick(1)
+    rtc.read8(0x00)
+    rtc.read8(0x08)
+    rtc.read8(0x10)
+    rtc.write8(0x08, rtc.epoch_ms & 0xFF)
+
+    rtc.write8(0x18, 0)
+    paused = rtc.snapshot()
+    rtc.tick(10 * RTC.MS_DIVISOR)
+    rtc.read8(0x00)
+    rtc.read8(0x08)
+    rtc.read8(0x10)
+    after_paused_reads = rtc.snapshot()
+
+    assert after_paused_reads[2:13] == paused[2:13]
+
+    rtc.write8(0x18, 1)
+    rtc.tick(1)
+    rtc.read8(0x00)
+    assert rtc.ctrl == 1
+
+
 def _rtc_pair():
     reference = RTC()
     cpu = Megapad64(mem_size=64 * 1024)
@@ -130,10 +161,13 @@ def test_cpp_rtc_matches_reference_latches_writes_and_pause():
 
 
 def test_system_rtc_access_widths_stay_in_native_batch_loop():
-    system = MegapadSystem(ram_size=64 * 1024)
+    system = MegapadSystem(ram_size=64 * 1024, num_cores=2)
     rtc_addr = MMIO_BASE + RTC_BASE
     code = assemble(f"""
         ldi64 r11, {rtc_addr}
+        ldi64 r10, {rtc_addr + 0x10}
+        ldi64 r9, 37
+        st.b r10, r9
     loop:
         ld.b r1, r11
         ld.h r2, r11
@@ -143,28 +177,60 @@ def test_system_rtc_access_widths_stay_in_native_batch_loop():
     """)
     system.load_binary(0, code)
     system.boot()
+    for core in system.cores:
+        core.halted = True
+        core.idle = False
+    secondary = system.cores[1]
+    secondary.pc = 0
+    secondary.halted = False
 
     callback_reads = 0
-    original_read = system.cpu._mmio_read8
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
 
     def counted_read(addr):
         nonlocal callback_reads
         callback_reads += 1
         return original_read(addr)
 
-    system.cpu._mmio_read8 = counted_read
+    def counted_write(addr, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(addr, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
     executed = system.run_batch(10_000)
 
     assert executed == 10_000
-    assert callback_reads == 0
+    assert secondary._cs.rtc_enabled()
+    assert system.rtc.sec == 37
+    assert callback_reads == callback_writes == 0
 
 
-def test_secondary_core_falls_back_to_shared_core0_rtc():
+def test_secondary_core_uses_shared_native_rtc():
     system = MegapadSystem(ram_size=64 * 1024, num_cores=2)
     expected = 0x0102030405060708
     system.rtc.ctrl = 0
     system.rtc.uptime_ms = expected
 
     assert system.cores[0]._cs.rtc_enabled()
-    assert not system.cores[1]._cs.rtc_enabled()
-    assert system.cores[1]._mmio_read8(MMIO_BASE + RTC_BASE) == (expected & 0xFF)
+    assert system.cores[1]._cs.rtc_enabled()
+    assert system.cores[1]._cs.rtc_read8(RTC_BASE) == (expected & 0xFF)
+
+
+def test_micro_core_rtc_fallback_reaches_the_shared_native_instance():
+    system = MegapadSystem(
+        ram_size=64 * 1024,
+        num_cores=2,
+        num_clusters=1,
+    )
+    expected = 0xA5
+    system.rtc.ctrl = 0
+    system.rtc.uptime_ms = expected
+    micro = system.clusters[0].cores[0]
+
+    assert micro.mem_read8(MMIO_BASE + RTC_BASE) == expected
+    micro.mem_write8(MMIO_BASE + RTC_BASE + 0x10, 37)
+    assert system.rtc.sec == 37

@@ -1017,6 +1017,7 @@ def _native_device_state(cpu) -> dict:
     nic_window = bytes(
         cs.nic_read8(address) for address in range(0x0400, 0x0480)
     )
+    rtc = cs.rtc_snapshot()
     return {
         "core_id": int(cpu.core_id),
         "timer": {
@@ -1042,31 +1043,31 @@ def _native_device_state(cpu) -> dict:
             "palette": _integer_sequence_summary(cs.fb_get_palette()),
         },
         "rtc": {
-            "enabled": bool(cs.rtc_enabled()),
-            "realtime": bool(cs.rtc_realtime),
-            "uptime_ms": int(cs.rtc_uptime_ms),
-            "epoch_ms": int(cs.rtc_epoch_ms),
+            "enabled": bool(rtc[0]),
+            "realtime": bool(rtc[1]),
+            "uptime_ms": int(rtc[2]),
+            "epoch_ms": int(rtc[3]),
             "calendar": {
-                "second": int(cs.rtc_sec),
-                "minute": int(cs.rtc_min),
-                "hour": int(cs.rtc_hour),
-                "day": int(cs.rtc_day),
-                "month": int(cs.rtc_mon),
-                "year": int(cs.rtc_year),
-                "day_of_week": int(cs.rtc_dow),
+                "second": int(rtc[4]),
+                "minute": int(rtc[5]),
+                "hour": int(rtc[6]),
+                "day": int(rtc[7]),
+                "month": int(rtc[8]),
+                "year": int(rtc[9]),
+                "day_of_week": int(rtc[10]),
             },
-            "control": int(cs.rtc_ctrl),
-            "status": int(cs.rtc_status),
+            "control": int(rtc[11]),
+            "status": int(rtc[12]),
             "alarm": {
-                "second": int(cs.rtc_alarm_sec),
-                "minute": int(cs.rtc_alarm_min),
-                "hour": int(cs.rtc_alarm_hour),
+                "second": int(rtc[13]),
+                "minute": int(rtc[14]),
+                "hour": int(rtc[15]),
             },
-            "irq_pending": bool(cs.rtc_irq_pending),
-            "millisecond_prescaler": int(cs.rtc_ms_prescaler),
-            "second_prescaler": int(cs.rtc_sec_prescaler),
-            "uptime_latch": int(cs.rtc_uptime_latch),
-            "epoch_latch": int(cs.rtc_epoch_latch),
+            "irq_pending": bool(rtc[16]),
+            "millisecond_prescaler": int(rtc[17]),
+            "second_prescaler": int(rtc[18]),
+            "uptime_latch": int(rtc[19]),
+            "epoch_latch": int(rtc[20]),
         },
         "uart_geometry": {
             "enabled": bool(cs.uart_geom_enabled()),

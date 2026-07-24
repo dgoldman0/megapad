@@ -3302,6 +3302,32 @@ class RTC(Device):
     def clock_mode(self) -> str:
         return "realtime" if self.realtime else "virtual"
 
+    def snapshot(self) -> tuple:
+        """Return observable RTC state without advancing realtime mode."""
+        return (
+            True,
+            self.realtime,
+            self.uptime_ms,
+            self.epoch_ms,
+            self.sec,
+            self.min,
+            self.hour,
+            self.day,
+            self.mon,
+            self.year,
+            self.dow,
+            self.ctrl,
+            self.status,
+            self.alarm_sec,
+            self.alarm_min,
+            self.alarm_hour,
+            self.irq_pending,
+            self._ms_prescaler,
+            self._sec_prescaler,
+            self._uptime_latch,
+            self._epoch_latch,
+        )
+
     def _reanchor_host_clock(self):
         self._host_mono_anchor = _time.monotonic()
         self._host_uptime_anchor = self.uptime_ms
@@ -3664,6 +3690,10 @@ class CppRTCProxy(Device):
 
     def _sync_realtime(self):
         self._cs.rtc_sync_realtime()
+
+    def snapshot(self) -> tuple:
+        """Return observable RTC state without advancing realtime mode."""
+        return tuple(self._cs.rtc_snapshot())
 
     def read8(self, offset: int) -> int:
         return self._cs.rtc_read8(RTC_BASE + offset)

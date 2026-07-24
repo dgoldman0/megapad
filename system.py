@@ -454,8 +454,8 @@ class MegapadSystem:
         self.kem = KemDevice()
         # FB is now handled natively by C++ accelerator — use proxy
         self.fb = CppFramebufferProxy(self.cores[0]._cs)
-        # RTC MMIO is native on core 0; the proxy preserves the Python-facing
-        # state API and services fallback accesses from secondary/micro cores.
+        # RTC MMIO is native on every full core through one shared device.
+        # The proxy preserves the Python-facing API and micro-core fallback.
         self.rtc = CppRTCProxy(
             self.cores[0]._cs,
             realtime=realtime_clock,
@@ -558,9 +558,6 @@ class MegapadSystem:
                 cs.uart_init()
             else:
                 cs.uart_disable()
-                # There is one physical RTC. Secondary cores fall through to
-                # the shared core-0 proxy instead of owning divergent clocks.
-                cs.rtc_disable()
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs

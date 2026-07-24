@@ -276,7 +276,7 @@ def test_private_parallel_progress_advances_one_shared_device_clock():
 
 
 def test_secondary_native_rtc_access_uses_the_shared_core0_instance():
-    """The deliberately disabled secondary RTC provides a singleton control."""
+    """Secondary guest MMIO reaches the one shared native RTC directly."""
     system = _new_system(full_cores=2)
     system.rtc.ctrl = 0
     system.rtc.uptime_ms = 0x5A
@@ -287,10 +287,21 @@ def test_secondary_native_rtc_access_uses_the_shared_core0_instance():
         halt
         """
     )
+    secondary = system.cores[1]
+    callback_reads = 0
+    original_read = secondary._mmio_read8
 
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    secondary._mmio_read8 = counted_read
     _run_only_secondary(system, read_uptime)
 
-    assert system.cores[1].regs[4] == 0x5A
+    assert secondary._cs.rtc_enabled()
+    assert secondary.regs[4] == 0x5A
+    assert callback_reads == 0
 
 
 def test_secondary_native_framebuffer_reaches_shared_host_state():

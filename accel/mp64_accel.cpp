@@ -264,8 +264,10 @@ struct CPUState {
     std::unique_ptr<TimerDevice> private_timer;
     TimerDevice* timer = nullptr;
 
-    // C++ native RTC device (bypass Python MMIO for MS@/EPOCH@ polling)
-    RTCDevice rtc;
+    // Standalone states own a private RTC. System-owned states borrow the
+    // one SoC clock retained by SystemState.
+    std::unique_ptr<RTCDevice> private_rtc;
+    RTCDevice* rtc = nullptr;
 
     // Standalone states own private terminal geometry.  System-owned states
     // borrow the one host/guest geometry block retained by SystemState.
@@ -291,7 +293,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
         MemoryMappings* shared_memory = nullptr,
         TimerDevice* shared_timer = nullptr,
         UartGeomDevice* shared_uart_geom = nullptr,
-        FramebufferDevice* shared_fb = nullptr) {
+        FramebufferDevice* shared_fb = nullptr,
+        RTCDevice* shared_rtc = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -316,6 +319,12 @@ static std::unique_ptr<CPUState> make_cpu_state(
     } else {
         state->private_fb = std::make_unique<FramebufferDevice>();
         state->fb = state->private_fb.get();
+    }
+    if (shared_rtc != nullptr) {
+        state->rtc = shared_rtc;
+    } else {
+        state->private_rtc = std::make_unique<RTCDevice>();
+        state->rtc = state->private_rtc.get();
     }
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
@@ -351,7 +360,8 @@ struct SystemState {
                 &shared_memory,
                 &shared_timer,
                 &shared_uart_geom,
-                &shared_fb);
+                &shared_fb,
+                &shared_rtc);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -378,6 +388,7 @@ struct SystemState {
     TimerDevice shared_timer{};
     UartGeomDevice shared_uart_geom{};
     FramebufferDevice shared_fb{};
+    RTCDevice shared_rtc{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -2788,8 +2799,8 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.fb->read8(mmio_off);
         if (s.timer->handles(mmio_off))
             return s.timer->read8(mmio_off);
-        if (s.rtc.handles(mmio_off))
-            return s.rtc.read8(mmio_off);
+        if (s.rtc->handles(mmio_off))
+            return s.rtc->read8(mmio_off);
         if (uart_geom_span(mmio_off, 1) &&
                 s.uart_geom->handles(mmio_off))
             return s.uart_geom->read8(mmio_off);
@@ -2842,8 +2853,8 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
             s.timer->write8(mmio_off, val);
             return;
         }
-        if (s.rtc.handles(mmio_off)) {
-            s.rtc.write8(mmio_off, val);
+        if (s.rtc->handles(mmio_off)) {
+            s.rtc->write8(mmio_off, val);
             return;
         }
         if (uart_geom_span(mmio_off, 1) &&
@@ -2909,10 +2920,10 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.timer->read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.rtc.handles(mmio_off)) {
+        if (s.rtc->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.rtc.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.rtc->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (uart_geom_span(mmio_off, 8) &&
@@ -2964,9 +2975,9 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.rtc.handles(mmio_off)) {
+        if (s.rtc->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.rtc->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (uart_geom_span(mmio_off, 8) &&
@@ -3000,8 +3011,9 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         if (s.timer->handles(mmio_off))
             return s.timer->read8(mmio_off) |
                    ((uint16_t)s.timer->read8(mmio_off + 1) << 8);
-        if (s.rtc.handles(mmio_off))
-            return s.rtc.read8(mmio_off) | ((uint16_t)s.rtc.read8(mmio_off+1) << 8);
+        if (s.rtc->handles(mmio_off))
+            return s.rtc->read8(mmio_off) |
+                   ((uint16_t)s.rtc->read8(mmio_off + 1) << 8);
         if (uart_geom_span(mmio_off, 2) &&
                 s.uart_geom->handles(mmio_off))
             return s.uart_geom->read8(mmio_off) |
@@ -3035,9 +3047,9 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
             s.timer->write8(mmio_off + 1, (val >> 8) & 0xFF);
             return;
         }
-        if (s.rtc.handles(mmio_off)) {
-            s.rtc.write8(mmio_off, val & 0xFF);
-            s.rtc.write8(mmio_off+1, (val >> 8) & 0xFF);
+        if (s.rtc->handles(mmio_off)) {
+            s.rtc->write8(mmio_off, val & 0xFF);
+            s.rtc->write8(mmio_off + 1, (val >> 8) & 0xFF);
             return;
         }
         if (uart_geom_span(mmio_off, 2) &&
@@ -3080,10 +3092,10 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.timer->read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.rtc.handles(mmio_off)) {
+        if (s.rtc->handles(mmio_off)) {
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
-                v |= (uint32_t)s.rtc.read8(mmio_off + i) << (8*i);
+                v |= (uint32_t)s.rtc->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (uart_geom_span(mmio_off, 4) &&
@@ -3125,9 +3137,9 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.rtc.handles(mmio_off)) {
+        if (s.rtc->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
-                s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.rtc->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (uart_geom_span(mmio_off, 4) &&
@@ -5670,89 +5682,237 @@ PYBIND11_MODULE(_mp64_accel, m) {
                              uint64_t epoch_ms, uint8_t sec,
                              uint8_t min, uint8_t hour, uint8_t day,
                              uint8_t mon, uint32_t year, uint8_t dow) {
-            s.rtc.init(realtime, epoch_ms, sec, min, hour, day, mon, year, dow);
+            s.rtc->init(
+                realtime, epoch_ms, sec, min, hour, day, mon, year, dow);
         })
-        .def("rtc_enabled", [](const CPUState& s) -> bool {
-            return s.rtc.enabled;
+        .def("rtc_enabled", [](CPUState& s) -> bool {
+            std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+            return s.rtc->enabled;
         })
         .def("rtc_disable", [](CPUState& s) {
-            s.rtc.enabled = false;
+            std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+            s.rtc->enabled = false;
         })
         .def("rtc_tick", [](CPUState& s, uint64_t cycles) {
-            s.rtc.tick(cycles);
+            s.rtc->tick(cycles);
         })
         .def("rtc_sync_realtime", [](CPUState& s) {
-            s.rtc.sync_realtime();
+            s.rtc->sync_realtime();
         })
         .def("rtc_reanchor_host_clock", [](CPUState& s) {
-            s.rtc.reanchor_host_clock();
+            s.rtc->reanchor_host_clock();
         })
         .def("rtc_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
-            return s.rtc.read8(mmio_off);
+            return s.rtc->read8(mmio_off);
         })
         .def("rtc_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
-            s.rtc.write8(mmio_off, val);
+            s.rtc->write8(mmio_off, val);
         })
         .def_property("rtc_realtime",
-            [](const CPUState& s) -> bool { return s.rtc.realtime; },
-            [](CPUState& s, bool v) { s.rtc.realtime = v; })
+            [](CPUState& s) -> bool {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->realtime;
+            },
+            [](CPUState& s, bool v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->realtime = v;
+            })
         .def_property("rtc_uptime_ms",
-            [](const CPUState& s) -> uint64_t { return s.rtc.uptime_ms; },
-            [](CPUState& s, uint64_t v) { s.rtc.uptime_ms = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->uptime_ms;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->uptime_ms = v;
+            })
         .def_property("rtc_epoch_ms",
-            [](const CPUState& s) -> uint64_t { return s.rtc.epoch_ms; },
-            [](CPUState& s, uint64_t v) { s.rtc.epoch_ms = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->epoch_ms;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->epoch_ms = v;
+            })
         .def_property("rtc_sec",
-            [](const CPUState& s) -> uint8_t { return s.rtc.sec; },
-            [](CPUState& s, uint8_t v) { s.rtc.sec = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->sec;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->sec = v;
+            })
         .def_property("rtc_min",
-            [](const CPUState& s) -> uint8_t { return s.rtc.min; },
-            [](CPUState& s, uint8_t v) { s.rtc.min = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->min;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->min = v;
+            })
         .def_property("rtc_hour",
-            [](const CPUState& s) -> uint8_t { return s.rtc.hour; },
-            [](CPUState& s, uint8_t v) { s.rtc.hour = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->hour;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->hour = v;
+            })
         .def_property("rtc_day",
-            [](const CPUState& s) -> uint8_t { return s.rtc.day; },
-            [](CPUState& s, uint8_t v) { s.rtc.day = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->day;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->day = v;
+            })
         .def_property("rtc_mon",
-            [](const CPUState& s) -> uint8_t { return s.rtc.mon; },
-            [](CPUState& s, uint8_t v) { s.rtc.mon = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->mon;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->mon = v;
+            })
         .def_property("rtc_year",
-            [](const CPUState& s) -> uint32_t { return s.rtc.year; },
-            [](CPUState& s, uint32_t v) { s.rtc.year = v; })
+            [](CPUState& s) -> uint32_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->year;
+            },
+            [](CPUState& s, uint32_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->year = v;
+            })
         .def_property("rtc_dow",
-            [](const CPUState& s) -> uint8_t { return s.rtc.dow; },
-            [](CPUState& s, uint8_t v) { s.rtc.dow = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->dow;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->dow = v;
+            })
         .def_property("rtc_ctrl",
-            [](const CPUState& s) -> uint8_t { return s.rtc.ctrl; },
-            [](CPUState& s, uint8_t v) { s.rtc.ctrl = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->ctrl;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->ctrl = v;
+            })
         .def_property("rtc_status",
-            [](const CPUState& s) -> uint8_t { return s.rtc.status; },
-            [](CPUState& s, uint8_t v) { s.rtc.status = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->status;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->status = v;
+            })
         .def_property("rtc_alarm_sec",
-            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_sec; },
-            [](CPUState& s, uint8_t v) { s.rtc.alarm_sec = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->alarm_sec;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->alarm_sec = v;
+            })
         .def_property("rtc_alarm_min",
-            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_min; },
-            [](CPUState& s, uint8_t v) { s.rtc.alarm_min = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->alarm_min;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->alarm_min = v;
+            })
         .def_property("rtc_alarm_hour",
-            [](const CPUState& s) -> uint8_t { return s.rtc.alarm_hour; },
-            [](CPUState& s, uint8_t v) { s.rtc.alarm_hour = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->alarm_hour;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->alarm_hour = v;
+            })
         .def_property("rtc_irq_pending",
-            [](const CPUState& s) -> bool { return s.rtc.irq_pending; },
-            [](CPUState& s, bool v) { s.rtc.irq_pending = v; })
+            [](CPUState& s) -> bool {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->irq_pending;
+            },
+            [](CPUState& s, bool v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->irq_pending = v;
+            })
         .def_property("rtc_ms_prescaler",
-            [](const CPUState& s) -> uint64_t { return s.rtc.ms_prescaler; },
-            [](CPUState& s, uint64_t v) { s.rtc.ms_prescaler = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->ms_prescaler;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->ms_prescaler = v;
+            })
         .def_property("rtc_sec_prescaler",
-            [](const CPUState& s) -> uint64_t { return s.rtc.sec_prescaler; },
-            [](CPUState& s, uint64_t v) { s.rtc.sec_prescaler = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->sec_prescaler;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->sec_prescaler = v;
+            })
         .def_property("rtc_uptime_latch",
-            [](const CPUState& s) -> uint64_t { return s.rtc.uptime_latch; },
-            [](CPUState& s, uint64_t v) { s.rtc.uptime_latch = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->uptime_latch;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->uptime_latch = v;
+            })
         .def_property("rtc_epoch_latch",
-            [](const CPUState& s) -> uint64_t { return s.rtc.epoch_latch; },
-            [](CPUState& s, uint64_t v) { s.rtc.epoch_latch = v; })
+            [](CPUState& s) -> uint64_t {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->epoch_latch;
+            },
+            [](CPUState& s, uint64_t v) {
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->epoch_latch = v;
+            })
+        .def("rtc_snapshot", [](CPUState& s) {
+            const auto rtc = s.rtc->snapshot();
+            return py::make_tuple(
+                rtc.enabled,
+                rtc.realtime,
+                rtc.uptime_ms,
+                rtc.epoch_ms,
+                rtc.sec,
+                rtc.min,
+                rtc.hour,
+                rtc.day,
+                rtc.mon,
+                rtc.year,
+                rtc.dow,
+                rtc.ctrl,
+                rtc.status,
+                rtc.alarm_sec,
+                rtc.alarm_min,
+                rtc.alarm_hour,
+                rtc.irq_pending,
+                rtc.ms_prescaler,
+                rtc.sec_prescaler,
+                rtc.uptime_latch,
+                rtc.epoch_latch);
+        })
         // ── UART Geometry device ──────────────────────────────
         .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {
             s.uart_geom->init(cols, rows);
