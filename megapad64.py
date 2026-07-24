@@ -205,6 +205,21 @@ def _fp16_to_float(h: int) -> float:
     return -val if sign else val
 
 
+def _pack_fp32_bits(f: float) -> int:
+    """Round a Python float to IEEE 754 binary32 and return its raw bits.
+
+    ``struct.pack("<f")`` provides the required round-to-nearest-even
+    conversion for representable values, but CPython raises ``OverflowError``
+    for finite values at or beyond the binary32 overflow midpoint.  Guest
+    floating-point conversion follows IEEE overflow semantics instead: those
+    values become signed infinity.
+    """
+    try:
+        return struct.unpack('<I', struct.pack('<f', f))[0]
+    except OverflowError:
+        return 0xFF80_0000 if f < 0.0 else 0x7F80_0000
+
+
 def _float_to_fp16(f: float) -> int:
     """Convert Python float to IEEE 754 half-precision (16-bit raw).
     Uses round-to-nearest-even."""
@@ -216,7 +231,7 @@ def _float_to_fp16(f: float) -> int:
     if f == 0.0:
         return 0x8000 if math.copysign(1.0, f) < 0 else 0x0000
     # Get FP32 bits for the rounding logic
-    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    bits = _pack_fp32_bits(f)
     sign = (bits >> 31) & 1
     exp32 = (bits >> 23) & 0xFF
     frac32 = bits & 0x7FFFFF
@@ -260,7 +275,7 @@ def _bf16_to_float(b: int) -> float:
 def _float_to_bf16(f: float) -> int:
     """Convert Python float to bfloat16 (16-bit raw).
     Uses round-to-nearest-even."""
-    bits = struct.unpack('<I', struct.pack('<f', f))[0]
+    bits = _pack_fp32_bits(f)
     # Round: look at lower 16 bits
     round_bit = (bits >> 15) & 1
     sticky = (bits & 0x7FFF) != 0
@@ -273,7 +288,7 @@ def _float_to_bf16(f: float) -> int:
 
 def _fp32_to_bits(f: float) -> int:
     """Python float → 32-bit IEEE 754 bit pattern."""
-    return struct.unpack('<I', struct.pack('<f', f))[0]
+    return _pack_fp32_bits(f)
 
 
 def _bits_to_fp32(b: int) -> float:

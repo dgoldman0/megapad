@@ -1580,11 +1580,9 @@ static constexpr double FP32_PACK_OVERFLOW_THRESHOLD =
     0x1.ffffffp+127;
 
 static inline bool fp32_pack_overflows(double value) {
-    // Python's struct.pack("<f", value), used by the executable oracle for
-    // BF16 and FP32 results, raises OverflowError exactly when conversion
-    // reaches the halfway point above the largest finite FP32 value.  Compare
-    // in double precision so detection does not itself perform an overflowing
-    // or implementation-defined narrowing conversion.
+    // The executable oracle rounds finite results at or beyond this midpoint
+    // to signed FP32 infinity.  Compare in double precision so identifying
+    // that boundary does not itself narrow or overflow the value.
     return std::isfinite(value) &&
            std::fabs(value) >= FP32_PACK_OVERFLOW_THRESHOLD;
 }
@@ -1844,13 +1842,12 @@ static int exec_mex(CPUState& s, int n) {
                 }
             }
 
-            // BF16 spans essentially the full FP32 exponent range.  Finite
-            // BF16 operands can therefore produce a mathematical result that
-            // Python refuses to pack as FP32, while native float arithmetic
-            // would silently yield infinity.  Preflight every arithmetic
-            // result in double precision and fall back transactionally so the
-            // Python oracle owns both the exception and its architectural
-            // post-state.
+            // BF16 spans essentially the full FP32 exponent range.  Preflight
+            // results at the FP32 overflow boundary in double precision and
+            // fall back transactionally so the executable oracle owns the
+            // exact infinity encoding and architectural post-state.  This
+            // also avoids relying on native intermediate-rounding details at
+            // the edge of the accelerated format.
             if (ew_bits == EW_BF16) {
                 auto lane_value = [&](const Tile& tile, int lane) {
                     return static_cast<double>(fp_decode(

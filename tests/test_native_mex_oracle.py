@@ -1036,108 +1036,121 @@ def test_nonfinite_fp_arithmetic_source_fallbacks_exactly_once(
 
 
 @pytest.mark.parametrize(
-    ("instruction", "source_b_bits", "acc_zero"),
+    ("instruction", "source_b_bits", "result_kind"),
     [
-        pytest.param("t.add", 0x7F7F, False, id="add"),
-        pytest.param("t.sub", 0xFF7F, False, id="sub"),
-        pytest.param("t.mul", 0x7F7F, False, id="mul"),
-        pytest.param("t.wmul", 0x7F7F, False, id="wmul"),
-        pytest.param("t.dot", 0x7F7F, True, id="dot-acc-zero"),
-        pytest.param("t.mac", 0x7F7F, False, id="mac"),
-        pytest.param("t.fma", 0x7F7F, False, id="fma"),
-        pytest.param("t.dotacc", 0x7F7F, True, id="dotacc-acc-zero"),
+        pytest.param("t.add", 0x7F7F, "tile", id="add"),
+        pytest.param("t.sub", 0xFF7F, "tile", id="sub"),
+        pytest.param("t.mul", 0x7F7F, "tile", id="mul"),
+        pytest.param("t.wmul", 0x7F7F, "wide", id="wmul"),
+        pytest.param("t.dot", 0x7F7F, "dot", id="dot-acc-zero"),
+        pytest.param("t.mac", 0x7F7F, "tile", id="mac"),
+        pytest.param("t.fma", 0x7F7F, "tile", id="fma"),
+        pytest.param(
+            "t.dotacc",
+            0x7F7F,
+            "dotacc",
+            id="dotacc-acc-zero",
+        ),
     ],
 )
-def test_finite_bf16_result_overflow_fallbacks_before_mutation(
+def test_fp32_range_bf16_overflow_fallback_completes_as_infinity(
     instruction: str,
     source_b_bits: int,
-    acc_zero: bool,
+    result_kind: str,
 ) -> None:
     max_finite = (0x7F7F).to_bytes(2, "little") * _lane_count(EW_BF16)
     source_b = (
         source_b_bits.to_bytes(2, "little") * _lane_count(EW_BF16)
     )
-    cpu = NativeMegapad64(mem_size=MEM_SIZE)
-    watchers = _seed_common_state(
-        cpu,
-        tmode=EW_BF16,
-        src0=max_finite,
-        src1=source_b,
-        dst0=max_finite,
-        tctrl=0x2 if acc_zero else 0,
+
+    def setup(cpu: Any) -> Watchers:
+        return _seed_common_state(
+            cpu,
+            tmode=EW_BF16,
+            src0=max_finite,
+            src1=source_b,
+            dst0=max_finite,
+            tctrl=0x2 if result_kind in ("dot", "dotacc") else 0,
+        )
+
+    oracle = _assert_native_matches_oracle(
+        instruction,
+        setup,
+        expected_dispatch="fallback",
     )
-    program = assemble(instruction)
-    cpu.load_bytes(0, program)
-    cpu.pc = 0
+    after_mex = oracle["after_mex"]
+    bf16_infinity_tile = (0x7F80).to_bytes(2, "little") * 32
+    fp32_infinity_tile = (0x7F80_0000).to_bytes(4, "little") * 16
 
-    before_mex = _snapshot(cpu, watchers)
-    pre_fallback = _install_dispatch_probe(cpu, "fallback", watchers)
-
-    with pytest.raises(OverflowError):
-        cpu.step()
-
-    _assert_dispatch("fallback", before_mex, pre_fallback)
-    after_exception = _snapshot(cpu, watchers)
-    assert after_exception["pc"] == len(program)
-    assert after_exception["regs"][3] == len(program)
-    if acc_zero:
-        assert after_exception["acc"] == (0, 0, 0, 0)
-        assert after_exception["tile"][1] == 0
-        after_exception["acc"] = before_mex["acc"]
-        normalized_tile = list(after_exception["tile"])
-        normalized_tile[1] = before_mex["tile"][1]
-        after_exception["tile"] = tuple(normalized_tile)
-    after_exception["pc"] = before_mex["pc"]
-    normalized_regs = list(after_exception["regs"])
-    normalized_regs[3] = before_mex["regs"][3]
-    after_exception["regs"] = tuple(normalized_regs)
-    differences = _state_differences(before_mex, after_exception)
-    assert not differences, (
-        "overflowing Python fallback changed state other than its fetched PC:\n  "
-        + "\n  ".join(differences)
-    )
+    if result_kind == "tile":
+        assert after_mex["memory:dst0"] == bf16_infinity_tile
+    elif result_kind == "wide":
+        assert after_mex["memory:dst0"] == fp32_infinity_tile
+        assert after_mex["memory:dst1"] == fp32_infinity_tile
+    elif result_kind == "dot":
+        assert after_mex["acc"] == (0x7F80_0000, 0, 0, 0)
+    else:
+        assert result_kind == "dotacc"
+        assert after_mex["acc"] == (0x7F80_0000,) * 4
 
 
-def test_bf16_dotacc_later_chunk_overflow_fallbacks_before_mutation() -> None:
+def test_bf16_dotacc_later_chunk_overflow_completes_every_chunk() -> None:
     one = (0x3F80).to_bytes(2, "little")
     max_finite = (0x7F7F).to_bytes(2, "little")
     source = one * 8 + max_finite * 8 + one * 16
-    cpu = NativeMegapad64(mem_size=MEM_SIZE)
-    watchers = _seed_common_state(
-        cpu,
-        tmode=EW_BF16,
-        src0=source,
-        src1=source,
-        tctrl=0x2,
+
+    def setup(cpu: Any) -> Watchers:
+        return _seed_common_state(
+            cpu,
+            tmode=EW_BF16,
+            src0=source,
+            src1=source,
+            tctrl=0x2,
+        )
+
+    oracle = _assert_native_matches_oracle(
+        "t.dotacc",
+        setup,
+        expected_dispatch="fallback",
     )
-    program = assemble("t.dotacc")
-    cpu.load_bytes(0, program)
-    cpu.pc = 0
+    assert oracle["after_mex"]["acc"] == (
+        0x4100_0000,
+        0x7F80_0000,
+        0x4100_0000,
+        0x4100_0000,
+    )
 
-    before_mex = _snapshot(cpu, watchers)
-    pre_fallback = _install_dispatch_probe(cpu, "fallback", watchers)
 
-    with pytest.raises(OverflowError):
-        cpu.step()
+@pytest.mark.parametrize(
+    ("source_a_bits", "source_b_bits", "expected_bits"),
+    [
+        pytest.param(0x7F7F, 0x7B00, 0x7F80, id="positive"),
+        pytest.param(0xFF7F, 0xFB00, 0xFF80, id="negative"),
+    ],
+)
+def test_native_bf16_rounding_overflow_produces_signed_infinity(
+    source_a_bits: int,
+    source_b_bits: int,
+    expected_bits: int,
+) -> None:
+    source_a = source_a_bits.to_bytes(2, "little") * 32
+    source_b = source_b_bits.to_bytes(2, "little") * 32
 
-    _assert_dispatch("fallback", before_mex, pre_fallback)
-    after_exception = _snapshot(cpu, watchers)
-    assert after_exception["pc"] == len(program)
-    assert after_exception["regs"][3] == len(program)
-    assert after_exception["acc"] == (0x4100_0000, 0, 0, 0)
-    assert after_exception["tile"][1] == 0
-    after_exception["pc"] = before_mex["pc"]
-    after_exception["acc"] = before_mex["acc"]
-    normalized_tile = list(after_exception["tile"])
-    normalized_tile[1] = before_mex["tile"][1]
-    after_exception["tile"] = tuple(normalized_tile)
-    normalized_regs = list(after_exception["regs"])
-    normalized_regs[3] = before_mex["regs"][3]
-    after_exception["regs"] = tuple(normalized_regs)
-    differences = _state_differences(before_mex, after_exception)
-    assert not differences, (
-        "later DOTACC overflow changed unexpected fallback state:\n  "
-        + "\n  ".join(differences)
+    def setup(cpu: Any) -> Watchers:
+        return _seed_common_state(
+            cpu,
+            tmode=EW_BF16,
+            src0=source_a,
+            src1=source_b,
+        )
+
+    oracle = _assert_native_matches_oracle(
+        "t.add",
+        setup,
+        expected_dispatch="native",
+    )
+    assert oracle["after_mex"]["memory:dst0"] == (
+        expected_bits.to_bytes(2, "little") * 32
     )
 
 
