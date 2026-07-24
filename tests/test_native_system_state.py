@@ -11,7 +11,7 @@ import pytest
 import _mp64_accel
 from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
-from devices import TIMER_BASE
+from devices import TIMER_BASE, UART_GEOM_BASE
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
 
@@ -121,6 +121,9 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
     core.timer_control = 1
     core.timer_tick(3)
     assert core.timer_counter == 3
+    core.uart_geom_init(91, 31)
+    core.uart_geom_host_set_size(92, 32)
+    assert (core.uart_geom_cols, core.uart_geom_rows) == (92, 32)
 
 
 def test_megapad_system_wraps_native_owned_full_cores() -> None:
@@ -251,6 +254,243 @@ def test_standalone_native_timers_remain_private() -> None:
     assert first.timer_compare == 41
     assert second.timer_counter == 0
     assert second.timer_compare == 0xFFFF_FFFF
+
+
+def test_system_uart_geometry_is_one_native_instance_for_every_full_core() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+
+    core1.uart_geom_status = 0xA2
+    core1.uart_geom_req_cols = 111
+    core1.uart_geom_req_rows = 37
+    core1.uart_geom_ctrl = 0xA3
+    system.uart_geom.host_set_size(132, 43)
+    assert (
+        core0.uart_geom_cols,
+        core1.uart_geom_cols,
+        core0.uart_geom_rows,
+        core1.uart_geom_rows,
+        core0.uart_geom_status,
+        core1.uart_geom_status,
+        core0.uart_geom_ctrl,
+        core1.uart_geom_ctrl,
+        core0.uart_geom_req_cols,
+        core1.uart_geom_req_rows,
+    ) == (132, 132, 43, 43, 0xA3, 0xA3, 0xA3, 0xA3, 111, 37)
+
+    core1.uart_geom_status = 0xA2
+    core1.uart_geom_req_cols = 120
+    core1.uart_geom_req_rows = 40
+    core1.uart_geom_ctrl = 0xA3
+    assert system.uart_geom.has_resize_request()
+    assert (system.uart_geom.req_cols, system.uart_geom.req_rows) == (120, 40)
+
+    system.uart_geom.host_accept_resize(120, 40)
+    assert (core0.uart_geom_cols, core1.uart_geom_cols) == (120, 120)
+    assert (core0.uart_geom_rows, core1.uart_geom_rows) == (40, 40)
+    assert core0.uart_geom_ctrl == core1.uart_geom_ctrl == 0xA1
+    assert core0.uart_geom_status == core1.uart_geom_status == 0xA3
+
+    core1.uart_geom_write8(UART_GEOM_BASE + 0x04, 0x01)
+    assert core0.uart_geom_status == system.uart_geom.status == 0xA2
+
+    core1.uart_geom_req_cols = 200
+    core1.uart_geom_req_rows = 60
+    core1.uart_geom_ctrl = 0xA3
+    core1.uart_geom_status = 0xA1
+    system.uart_geom.host_deny_resize()
+    assert (system.uart_geom.cols, system.uart_geom.rows) == (120, 40)
+    assert core0.uart_geom_ctrl == core1.uart_geom_ctrl == 0xA1
+    assert core0.uart_geom_status == core1.uart_geom_status == 0xA3
+
+
+def test_uart_geometry_completion_rejects_stale_request_snapshots() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    geometry = system.uart_geom
+    geometry.host_set_size(90, 30)
+    geometry.status = 0xA0
+    geometry.req_cols = 100
+    geometry.req_rows = 35
+    geometry.ctrl = 0xA3
+    generation, cols, rows = geometry.snapshot_resize_request()
+    assert (cols, rows) == (100, 35)
+
+    geometry.req_cols = 132
+    geometry.req_rows = 43
+    assert not geometry.host_accept_resize_if_pending(
+        generation, cols, rows)
+    assert not geometry.host_deny_resize_if_pending(generation)
+    assert (
+        geometry.cols,
+        geometry.rows,
+        geometry.status,
+        geometry.ctrl,
+        geometry.req_cols,
+        geometry.req_rows,
+    ) == (90, 30, 0xA0, 0xA3, 132, 43)
+
+    replacement_generation, replacement_cols, replacement_rows = (
+        geometry.snapshot_resize_request()
+    )
+    assert (replacement_cols, replacement_rows) == (132, 43)
+    assert geometry.host_deny_resize_if_pending(replacement_generation)
+    assert (
+        geometry.cols,
+        geometry.rows,
+        geometry.status,
+        geometry.ctrl,
+    ) == (90, 30, 0xA2, 0xA1)
+    assert geometry.snapshot_resize_request() is None
+    assert not geometry.host_accept_resize_if_pending(
+        replacement_generation, replacement_cols, replacement_rows)
+    assert not geometry.host_deny_resize_if_pending(replacement_generation)
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    (
+        pytest.param(0x05, 0xA3, id="control"),
+        pytest.param(0x06, 0x79, id="requested-columns-low"),
+        pytest.param(0x07, 0x9A, id="requested-columns-high"),
+        pytest.param(0x08, 0xBC, id="requested-rows-low"),
+        pytest.param(0x09, 0xDE, id="requested-rows-high"),
+    ),
+)
+def test_uart_geometry_guest_writes_invalidate_host_request_snapshots(
+    offset: int,
+    value: int,
+) -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    geometry = system.uart_geom
+    geometry.req_cols = 0x1234
+    geometry.req_rows = 0x5678
+    geometry.ctrl = 0xA3
+    generation, cols, rows = geometry.snapshot_resize_request()
+
+    geometry.write8(offset, value)
+    assert not geometry.host_accept_resize_if_pending(
+        generation, cols, rows)
+    assert not geometry.host_deny_resize_if_pending(generation)
+    assert geometry.ctrl & 0x02
+
+    replacement_generation, replacement_cols, replacement_rows = (
+        geometry.snapshot_resize_request()
+    )
+    assert geometry.host_accept_resize_if_pending(
+        replacement_generation,
+        replacement_cols,
+        replacement_rows,
+    )
+    assert (
+        geometry.cols,
+        geometry.rows,
+        geometry.status,
+        geometry.ctrl,
+    ) == (replacement_cols, replacement_rows, 0x01, 0xA1)
+
+
+def test_uart_geometry_control_setter_invalidates_host_request_snapshot() -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    geometry = system.uart_geom
+    geometry.req_cols = 120
+    geometry.req_rows = 40
+    geometry.ctrl = 0xA3
+    generation, cols, rows = geometry.snapshot_resize_request()
+
+    geometry.ctrl = 0xA3
+
+    assert not geometry.host_accept_resize_if_pending(
+        generation, cols, rows)
+    assert not geometry.host_deny_resize_if_pending(generation)
+    assert geometry.snapshot_resize_request()[1:] == (120, 40)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        pytest.param("req_cols", 132, id="requested-columns"),
+        pytest.param("req_rows", 43, id="requested-rows"),
+    ),
+)
+def test_uart_geometry_request_setters_invalidate_host_request_snapshot(
+    field: str,
+    value: int,
+) -> None:
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    geometry = system.uart_geom
+    geometry.req_cols = 120
+    geometry.req_rows = 40
+    geometry.ctrl = 0xA3
+    generation, cols, rows = geometry.snapshot_resize_request()
+
+    setattr(geometry, field, value)
+
+    assert not geometry.host_accept_resize_if_pending(
+        generation, cols, rows)
+    assert not geometry.host_deny_resize_if_pending(generation)
+    assert geometry.snapshot_resize_request() is not None
+
+
+def test_standalone_native_uart_geometry_remains_private() -> None:
+    first = _mp64_accel.CPUState()
+    second = _mp64_accel.CPUState()
+    first.uart_geom_init(80, 24)
+    second.uart_geom_init(132, 43)
+
+    first.uart_geom_host_set_size(90, 30)
+    first.uart_geom_req_cols = 100
+    first.uart_geom_req_rows = 35
+    first.uart_geom_ctrl = 0x02
+
+    assert (
+        first.uart_geom_cols,
+        first.uart_geom_rows,
+        first.uart_geom_req_cols,
+        first.uart_geom_req_rows,
+        first.uart_geom_ctrl,
+    ) == (90, 30, 100, 35, 0x02)
+    assert (
+        second.uart_geom_cols,
+        second.uart_geom_rows,
+        second.uart_geom_req_cols,
+        second.uart_geom_req_rows,
+        second.uart_geom_ctrl,
+    ) == (132, 43, 0, 0, 0)
 
 
 @pytest.mark.parametrize(

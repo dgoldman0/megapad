@@ -3164,6 +3164,10 @@ class CppUartGeomProxy(Device):
         """Check if firmware requested a resize."""
         return self._cs.uart_geom_has_resize_request()
 
+    def snapshot_resize_request(self):
+        """Return an immutable pending-request token and dimensions."""
+        return self._cs.uart_geom_snapshot_resize_request()
+
     def host_accept_resize(self, cols: int, rows: int):
         """Accept a firmware resize request."""
         self._cs.uart_geom_host_accept_resize(cols, rows)
@@ -3171,6 +3175,20 @@ class CppUartGeomProxy(Device):
     def host_deny_resize(self):
         """Deny a firmware resize request."""
         self._cs.uart_geom_host_deny_resize()
+
+    def host_accept_resize_if_pending(
+        self,
+        generation: int,
+        cols: int,
+        rows: int,
+    ) -> bool:
+        """Accept only if the snapshotted firmware request is unchanged."""
+        return self._cs.uart_geom_host_accept_resize_if_pending(
+            generation, cols, rows)
+
+    def host_deny_resize_if_pending(self, generation: int) -> bool:
+        """Deny only if the snapshotted firmware request is unchanged."""
+        return self._cs.uart_geom_host_deny_resize_if_pending(generation)
 
     # -- MMIO pass-through (for tests) ---------------------------------
 

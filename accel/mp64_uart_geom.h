@@ -32,15 +32,25 @@
 // =========================================================================
 
 #include <cstdint>
+#include <mutex>
 
 struct UartGeomDevice {
-    uint16_t cols;        // current terminal columns
-    uint16_t rows;        // current terminal rows
-    uint8_t  status;      // bit 0: RESIZED, bit 1: REQ_DENIED
-    uint8_t  ctrl;        // bit 0: RESIZE_IE, bit 1: REQ_RESIZE
-    uint16_t req_cols;    // firmware-requested columns
-    uint16_t req_rows;    // firmware-requested rows
-    bool     enabled;     // false = bypass, fall through to Python
+    struct ResizeRequestSnapshot {
+        bool pending;
+        uint64_t generation;
+        uint16_t cols;
+        uint16_t rows;
+    };
+
+    mutable std::mutex mutex;
+    uint16_t cols = 0;        // current terminal columns
+    uint16_t rows = 0;        // current terminal rows
+    uint8_t  status = 0;      // bit 0: RESIZED, bit 1: REQ_DENIED
+    uint8_t  ctrl = 0;        // bit 0: RESIZE_IE, bit 1: REQ_RESIZE
+    uint16_t req_cols = 0;    // firmware-requested columns
+    uint16_t req_rows = 0;    // firmware-requested rows
+    bool     enabled = false; // false = bypass, fall through to Python
+    uint64_t request_generation = 0;
 
     // Status bits
     static constexpr uint8_t ST_RESIZED    = 0x01;
@@ -59,6 +69,7 @@ struct UartGeomDevice {
     // -------------------------------------------------------------------
 
     void init(uint16_t initial_cols = 80, uint16_t initial_rows = 30) {
+        std::lock_guard<std::mutex> guard(mutex);
         cols     = initial_cols;
         rows     = initial_rows;
         status   = 0;
@@ -66,6 +77,7 @@ struct UartGeomDevice {
         req_cols = 0;
         req_rows = 0;
         enabled  = true;
+        ++request_generation;
     }
 
     // -------------------------------------------------------------------
@@ -74,6 +86,7 @@ struct UartGeomDevice {
 
     // Called when the host detects a terminal resize.
     void host_set_size(uint16_t new_cols, uint16_t new_rows) {
+        std::lock_guard<std::mutex> guard(mutex);
         cols = new_cols;
         rows = new_rows;
         status |= ST_RESIZED;
@@ -81,21 +94,63 @@ struct UartGeomDevice {
 
     // Check if firmware has requested a resize.
     bool has_resize_request() const {
+        std::lock_guard<std::mutex> guard(mutex);
         return (ctrl & CT_REQ_RESIZE) != 0;
+    }
+
+    ResizeRequestSnapshot snapshot_resize_request() const {
+        std::lock_guard<std::mutex> guard(mutex);
+        return {
+            (ctrl & CT_REQ_RESIZE) != 0,
+            request_generation,
+            req_cols,
+            req_rows,
+        };
     }
 
     // Accept a firmware resize request: update actual dims, signal FW.
     void host_accept_resize(uint16_t accepted_cols, uint16_t accepted_rows) {
+        std::lock_guard<std::mutex> guard(mutex);
         cols = accepted_cols;
         rows = accepted_rows;
         ctrl &= ~CT_REQ_RESIZE;
         status |= ST_RESIZED;
+        ++request_generation;
     }
 
     // Deny a firmware resize request: leave dims unchanged, signal FW.
     void host_deny_resize() {
+        std::lock_guard<std::mutex> guard(mutex);
         ctrl &= ~CT_REQ_RESIZE;
         status |= ST_REQ_DENIED;
+        ++request_generation;
+    }
+
+    bool host_accept_resize_if_pending(
+            uint64_t generation,
+            uint16_t accepted_cols,
+            uint16_t accepted_rows) {
+        std::lock_guard<std::mutex> guard(mutex);
+        if (!(ctrl & CT_REQ_RESIZE) ||
+                request_generation != generation)
+            return false;
+        cols = accepted_cols;
+        rows = accepted_rows;
+        ctrl &= ~CT_REQ_RESIZE;
+        status |= ST_RESIZED;
+        ++request_generation;
+        return true;
+    }
+
+    bool host_deny_resize_if_pending(uint64_t generation) {
+        std::lock_guard<std::mutex> guard(mutex);
+        if (!(ctrl & CT_REQ_RESIZE) ||
+                request_generation != generation)
+            return false;
+        ctrl &= ~CT_REQ_RESIZE;
+        status |= ST_REQ_DENIED;
+        ++request_generation;
+        return true;
     }
 
     // -------------------------------------------------------------------
@@ -103,10 +158,12 @@ struct UartGeomDevice {
     // -------------------------------------------------------------------
 
     bool handles(uint32_t mmio_offset) const {
+        std::lock_guard<std::mutex> guard(mutex);
         return enabled && mmio_offset >= GEOM_BASE && mmio_offset < GEOM_END;
     }
 
     uint8_t read8(uint32_t mmio_offset) const {
+        std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - GEOM_BASE;
 
         // COLS — 2 bytes LE (0x00..0x01 relative)
@@ -135,6 +192,7 @@ struct UartGeomDevice {
     }
 
     void write8(uint32_t mmio_offset, uint8_t value) {
+        std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - GEOM_BASE;
 
         // COLS — 2 bytes LE (firmware-writable for resize request compat)
@@ -149,14 +207,34 @@ struct UartGeomDevice {
         if (off == 0x04) { status &= ~value; return; }
 
         // CTRL
-        if (off == 0x05) { ctrl = value; return; }
+        if (off == 0x05) {
+            ctrl = value;
+            ++request_generation;
+            return;
+        }
 
         // REQ_COLS — 2 bytes LE
-        if (off == 0x06) { req_cols = (req_cols & 0xFF00) | value; return; }
-        if (off == 0x07) { req_cols = (req_cols & 0x00FF) | ((uint16_t)value << 8); return; }
+        if (off == 0x06) {
+            req_cols = (req_cols & 0xFF00) | value;
+            ++request_generation;
+            return;
+        }
+        if (off == 0x07) {
+            req_cols = (req_cols & 0x00FF) | ((uint16_t)value << 8);
+            ++request_generation;
+            return;
+        }
 
         // REQ_ROWS — 2 bytes LE
-        if (off == 0x08) { req_rows = (req_rows & 0xFF00) | value; return; }
-        if (off == 0x09) { req_rows = (req_rows & 0x00FF) | ((uint16_t)value << 8); return; }
+        if (off == 0x08) {
+            req_rows = (req_rows & 0xFF00) | value;
+            ++request_generation;
+            return;
+        }
+        if (off == 0x09) {
+            req_rows = (req_rows & 0x00FF) | ((uint16_t)value << 8);
+            ++request_generation;
+            return;
+        }
     }
 };

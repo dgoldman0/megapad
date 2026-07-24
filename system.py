@@ -560,7 +560,6 @@ class MegapadSystem:
                 # There is one physical RTC. Secondary cores fall through to
                 # the shared core-0 proxy instead of owning divergent clocks.
                 cs.rtc_disable()
-            cs.uart_geom_init(_init_cols, _init_rows)  # UART geometry on all cores
 
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs

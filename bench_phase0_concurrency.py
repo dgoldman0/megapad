@@ -171,6 +171,14 @@ STATE_COMPARISON_SCOPE = {
             ),
         },
         {
+            "state": "native UART geometry request_generation",
+            "reason": (
+                "the visible geometry registers and pending request are "
+                "captured, but the unbound host-side stale-ack token affects "
+                "future conditional resize completion"
+            ),
+        },
+        {
             "state": (
                 "native NIC dma_push_ctr and data_window_valid bitset"
             ),
@@ -609,14 +617,13 @@ def _base_system(
     rtc._sec_prescaler = 0
     rtc._uptime_latch = 0
     rtc._epoch_latch = 0
-    for cpu in system.cores:
-        cs = cpu._cs
-        cs.uart_geom_cols = 80
-        cs.uart_geom_rows = 24
-        cs.uart_geom_status = 0
-        cs.uart_geom_ctrl = 0
-        cs.uart_geom_req_cols = 0
-        cs.uart_geom_req_rows = 0
+    geometry = system.uart_geom
+    geometry.cols = 80
+    geometry.rows = 24
+    geometry.status = 0
+    geometry.ctrl = 0
+    geometry.req_cols = 0
+    geometry.req_rows = 0
 
     system.load_binary(CODE_BASE, code)
     system.boot(CODE_BASE)
@@ -813,8 +820,8 @@ SCENARIOS = {
         Scenario(
             "mmio_poll",
             "Each loop polls native Timer MMIO and Python SystemInfo MMIO.",
-            "Timer state is native per CPUState today, while SystemInfo falls "
-            "through to the shared Python DeviceBus.",
+            "Timer state is one native SystemState singleton, while SystemInfo "
+            "falls through to the shared Python DeviceBus.",
             "diagnostic_baseline",
             "mixed native and Python-dispatched MMIO polling",
             build_mmio_poll,

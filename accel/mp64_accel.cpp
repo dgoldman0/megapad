@@ -265,8 +265,10 @@ struct CPUState {
     // C++ native RTC device (bypass Python MMIO for MS@/EPOCH@ polling)
     RTCDevice rtc;
 
-    // C++ native UART geometry device (terminal dimensions)
-    UartGeomDevice uart_geom;
+    // Standalone states own private terminal geometry.  System-owned states
+    // borrow the one host/guest geometry block retained by SystemState.
+    std::unique_ptr<UartGeomDevice> private_uart_geom;
+    UartGeomDevice* uart_geom = nullptr;
 
     // C++ native UART device (RX/status/TX and BIOS TX ring)
     UARTDevice uart;
@@ -285,7 +287,8 @@ struct CPUState {
 
 static std::unique_ptr<CPUState> make_cpu_state(
         MemoryMappings* shared_memory = nullptr,
-        TimerDevice* shared_timer = nullptr) {
+        TimerDevice* shared_timer = nullptr,
+        UartGeomDevice* shared_uart_geom = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -298,6 +301,12 @@ static std::unique_ptr<CPUState> make_cpu_state(
     } else {
         state->private_timer = std::make_unique<TimerDevice>();
         state->timer = state->private_timer.get();
+    }
+    if (shared_uart_geom != nullptr) {
+        state->uart_geom = shared_uart_geom;
+    } else {
+        state->private_uart_geom = std::make_unique<UartGeomDevice>();
+        state->uart_geom = state->private_uart_geom.get();
     }
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
@@ -312,8 +321,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
     return state;
 }
 
-// SystemState owns full-core lifetimes, exactly one mapping set, and the first
-// migrated singleton device.  Other devices and scheduling remain per-core
+// SystemState owns full-core lifetimes, exactly one mapping set, and migrated
+// singleton devices.  Other devices and scheduling remain per-core
 // compatibility paths for later transactional milestones.  Shared resources
 // are declared before cores so borrowed pointers die before their owners.
 struct SystemState {
@@ -329,7 +338,8 @@ struct SystemState {
 
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
-            auto core = make_cpu_state(&shared_memory, &shared_timer);
+            auto core = make_cpu_state(
+                &shared_memory, &shared_timer, &shared_uart_geom);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -354,6 +364,7 @@ struct SystemState {
 
     MemoryMappings shared_memory;
     TimerDevice shared_timer{};
+    UartGeomDevice shared_uart_geom{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -2737,6 +2748,16 @@ static inline void mpu_check(CPUState& s, uint64_t addr) {
     }
 }
 
+static inline bool uart_geom_span(uint32_t mmio_off, uint32_t width) {
+    return mmio_off >= UartGeomDevice::GEOM_BASE &&
+           mmio_off < UartGeomDevice::GEOM_END &&
+           width <= UartGeomDevice::GEOM_END - mmio_off;
+}
+
+// UART geometry is byte-oriented.  Wider guest accesses may stay native, but
+// every read8/write8 retains its own device-lock acquisition so adjacent byte
+// transactions are not silently combined into a new atomic operation.
+
 // Memory access with MMIO and HBW intercept
 static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
@@ -2756,8 +2777,9 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
             return s.timer->read8(mmio_off);
         if (s.rtc.handles(mmio_off))
             return s.rtc.read8(mmio_off);
-        if (s.uart_geom.handles(mmio_off))
-            return s.uart_geom.read8(mmio_off);
+        if (uart_geom_span(mmio_off, 1) &&
+                s.uart_geom->handles(mmio_off))
+            return s.uart_geom->read8(mmio_off);
         return cb.mmio_read8(addr);  // fallback to Python for other devices
     }
     if (s.priv_level) {
@@ -2811,8 +2833,9 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
             s.rtc.write8(mmio_off, val);
             return;
         }
-        if (s.uart_geom.handles(mmio_off)) {
-            s.uart_geom.write8(mmio_off, val);
+        if (uart_geom_span(mmio_off, 1) &&
+                s.uart_geom->handles(mmio_off)) {
+            s.uart_geom->write8(mmio_off, val);
             return;
         }
         cb.mmio_write8(addr, val);  // fallback to Python for other devices
@@ -2879,6 +2902,13 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint64_t)s.rtc.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (uart_geom_span(mmio_off, 8) &&
+                s.uart_geom->handles(mmio_off)) {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; i++)
+                v |= (uint64_t)s.uart_geom->read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint64_t v = 0;
         for (int i = 0; i < 8; i++)
             v |= (uint64_t)cb.mmio_read8(addr + i) << (8*i);
@@ -2926,6 +2956,13 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
                 s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
+        if (uart_geom_span(mmio_off, 8) &&
+                s.uart_geom->handles(mmio_off)) {
+            for (int i = 0; i < 8; i++)
+                s.uart_geom->write8(
+                    mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
         return;
@@ -2951,6 +2988,10 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
                    ((uint16_t)s.timer->read8(mmio_off + 1) << 8);
         if (s.rtc.handles(mmio_off))
             return s.rtc.read8(mmio_off) | ((uint16_t)s.rtc.read8(mmio_off+1) << 8);
+        if (uart_geom_span(mmio_off, 2) &&
+                s.uart_geom->handles(mmio_off))
+            return s.uart_geom->read8(mmio_off) |
+                   ((uint16_t)s.uart_geom->read8(mmio_off + 1) << 8);
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
@@ -2983,6 +3024,12 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.rtc.handles(mmio_off)) {
             s.rtc.write8(mmio_off, val & 0xFF);
             s.rtc.write8(mmio_off+1, (val >> 8) & 0xFF);
+            return;
+        }
+        if (uart_geom_span(mmio_off, 2) &&
+                s.uart_geom->handles(mmio_off)) {
+            s.uart_geom->write8(mmio_off, val & 0xFF);
+            s.uart_geom->write8(mmio_off + 1, (val >> 8) & 0xFF);
             return;
         }
         cb.mmio_write8(addr, val & 0xFF);
@@ -3025,6 +3072,13 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
                 v |= (uint32_t)s.rtc.read8(mmio_off + i) << (8*i);
             return v;
         }
+        if (uart_geom_span(mmio_off, 4) &&
+                s.uart_geom->handles(mmio_off)) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++)
+                v |= (uint32_t)s.uart_geom->read8(mmio_off + i) << (8*i);
+            return v;
+        }
         uint32_t v = 0;
         for (int i = 0; i < 4; i++)
             v |= (uint32_t)cb.mmio_read8(addr + i) << (8*i);
@@ -3060,6 +3114,13 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         if (s.rtc.handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.rtc.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            return;
+        }
+        if (uart_geom_span(mmio_off, 4) &&
+                s.uart_geom->handles(mmio_off)) {
+            for (int i = 0; i < 4; i++)
+                s.uart_geom->write8(
+                    mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         for (int i = 0; i < 4; i++)
@@ -5581,50 +5642,128 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](CPUState& s, uint64_t v) { s.rtc.epoch_latch = v; })
         // ── UART Geometry device ──────────────────────────────
         .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {
-            s.uart_geom.init(cols, rows);
+            s.uart_geom->init(cols, rows);
         }, py::arg("cols") = 80, py::arg("rows") = 30)
-        .def("uart_geom_enabled", [](const CPUState& s) -> bool {
-            return s.uart_geom.enabled;
+        .def("uart_geom_enabled", [](CPUState& s) -> bool {
+            std::lock_guard<std::mutex> geometry_guard(
+                s.uart_geom->mutex);
+            return s.uart_geom->enabled;
         })
         .def("uart_geom_disable", [](CPUState& s) {
-            s.uart_geom.enabled = false;
+            std::lock_guard<std::mutex> geometry_guard(
+                s.uart_geom->mutex);
+            s.uart_geom->enabled = false;
         })
-        .def("uart_geom_read8", [](const CPUState& s, uint32_t mmio_off) -> uint8_t {
-            return s.uart_geom.read8(mmio_off);
+        .def("uart_geom_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+            return s.uart_geom->read8(mmio_off);
         })
         .def("uart_geom_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
-            s.uart_geom.write8(mmio_off, val);
+            s.uart_geom->write8(mmio_off, val);
         })
         .def_property("uart_geom_cols",
-            [](const CPUState& s) -> uint16_t { return s.uart_geom.cols; },
-            [](CPUState& s, uint16_t v) { s.uart_geom.cols = v; })
+            [](CPUState& s) -> uint16_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->cols;
+            },
+            [](CPUState& s, uint16_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->cols = v;
+            })
         .def_property("uart_geom_rows",
-            [](const CPUState& s) -> uint16_t { return s.uart_geom.rows; },
-            [](CPUState& s, uint16_t v) { s.uart_geom.rows = v; })
+            [](CPUState& s) -> uint16_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->rows;
+            },
+            [](CPUState& s, uint16_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->rows = v;
+            })
         .def_property("uart_geom_status",
-            [](const CPUState& s) -> uint8_t { return s.uart_geom.status; },
-            [](CPUState& s, uint8_t v) { s.uart_geom.status = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->status;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->status = v;
+            })
         .def_property("uart_geom_ctrl",
-            [](const CPUState& s) -> uint8_t { return s.uart_geom.ctrl; },
-            [](CPUState& s, uint8_t v) { s.uart_geom.ctrl = v; })
+            [](CPUState& s) -> uint8_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->ctrl;
+            },
+            [](CPUState& s, uint8_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->ctrl = v;
+                ++s.uart_geom->request_generation;
+            })
         .def_property("uart_geom_req_cols",
-            [](const CPUState& s) -> uint16_t { return s.uart_geom.req_cols; },
-            [](CPUState& s, uint16_t v) { s.uart_geom.req_cols = v; })
+            [](CPUState& s) -> uint16_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->req_cols;
+            },
+            [](CPUState& s, uint16_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->req_cols = v;
+                ++s.uart_geom->request_generation;
+            })
         .def_property("uart_geom_req_rows",
-            [](const CPUState& s) -> uint16_t { return s.uart_geom.req_rows; },
-            [](CPUState& s, uint16_t v) { s.uart_geom.req_rows = v; })
+            [](CPUState& s) -> uint16_t {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                return s.uart_geom->req_rows;
+            },
+            [](CPUState& s, uint16_t v) {
+                std::lock_guard<std::mutex> geometry_guard(
+                    s.uart_geom->mutex);
+                s.uart_geom->req_rows = v;
+                ++s.uart_geom->request_generation;
+            })
         .def("uart_geom_host_set_size", [](CPUState& s, uint16_t c, uint16_t r) {
-            s.uart_geom.host_set_size(c, r);
+            s.uart_geom->host_set_size(c, r);
         })
-        .def("uart_geom_has_resize_request", [](const CPUState& s) -> bool {
-            return s.uart_geom.has_resize_request();
+        .def("uart_geom_has_resize_request", [](CPUState& s) -> bool {
+            return s.uart_geom->has_resize_request();
         })
+        .def("uart_geom_snapshot_resize_request",
+            [](CPUState& s) -> py::object {
+                const auto snapshot =
+                    s.uart_geom->snapshot_resize_request();
+                if (!snapshot.pending)
+                    return py::none();
+                return py::make_tuple(
+                    snapshot.generation,
+                    snapshot.cols,
+                    snapshot.rows);
+            })
         .def("uart_geom_host_accept_resize", [](CPUState& s, uint16_t c, uint16_t r) {
-            s.uart_geom.host_accept_resize(c, r);
+            s.uart_geom->host_accept_resize(c, r);
         })
         .def("uart_geom_host_deny_resize", [](CPUState& s) {
-            s.uart_geom.host_deny_resize();
+            s.uart_geom->host_deny_resize();
         })
+        .def(
+            "uart_geom_host_accept_resize_if_pending",
+            [](CPUState& s, uint64_t generation, uint16_t c, uint16_t r) {
+                return s.uart_geom->host_accept_resize_if_pending(
+                    generation, c, r);
+            })
+        .def(
+            "uart_geom_host_deny_resize_if_pending",
+            [](CPUState& s, uint64_t generation) {
+                return s.uart_geom->host_deny_resize_if_pending(
+                    generation);
+            })
         // ── Accelerator hooks ─────────────────────────────────
         .def("register_accel_hook", &CPUState::register_accel_hook)
         .def_readonly("accel_hook_count", &CPUState::accel_hook_count)

@@ -7,10 +7,18 @@ avoids turning accidental chunking or duplicated-device behavior into a
 permanent compatibility contract.
 """
 
+import threading
+
 import pytest
 
 from asm import assemble
-from devices import MMIO_BASE, RTC_BASE, TIMER_BASE
+from devices import (
+    MMIO_BASE,
+    RTC_BASE,
+    SYSINFO_BASE,
+    TIMER_BASE,
+    UART_GEOM_BASE,
+)
 from megapad64 import IVEC_IPI
 from system import MegapadSystem
 
@@ -40,6 +48,17 @@ loop:
 )
 
 _NOP_SLED = assemble("\n".join(["nop"] * 1_001))
+
+_UART_GEOMETRY_SPIN = assemble(
+    f"""
+    ldi64 r3, {MMIO_BASE + SYSINFO_BASE}
+    ld.b r0, r3
+    ldi64 r1, {MMIO_BASE + UART_GEOM_BASE}
+loop:
+    ld.b r2, r1
+    br loop
+"""
+)
 
 
 def _new_system(*, full_cores=1, clusters=0, code=_SPIN):
@@ -271,6 +290,189 @@ def test_secondary_native_rtc_access_uses_the_shared_core0_instance():
     _run_only_secondary(system, read_uptime)
 
     assert system.cores[1].regs[4] == 0x5A
+
+
+def test_secondary_native_uart_geometry_reaches_shared_host_state():
+    """Secondary guest MMIO and host resize helpers use one geometry block."""
+    system = _new_system(full_cores=2)
+    system.uart_geom.host_set_size(0x015A, 0x012B)
+    read_and_request_resize = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + UART_GEOM_BASE}
+        ld.b r4, r1
+        ld.h r6, r1
+        ld.w r7, r1
+        ld.d r8, r1
+        ldi64 r2, {MMIO_BASE + UART_GEOM_BASE + 0x06}
+        ldi64 r5, 0xBEEF
+        st.h r2, r5
+        ld.h r9, r2
+        ldi64 r5, 0x00AB1234
+        st.w r2, r5
+        ld.w r10, r2
+        ldi64 r2, {MMIO_BASE + UART_GEOM_BASE + 0x08}
+        ldi64 r5, 0x0156
+        str r2, r5
+        ld.h r11, r2
+        ldi64 r2, {MMIO_BASE + UART_GEOM_BASE + 0x05}
+        ldi64 r5, 0x02
+        st.b r2, r5
+        halt
+        """
+    )
+    secondary = system.cores[1]
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, read_and_request_resize)
+
+    assert secondary.regs[4] == 0x5A
+    assert secondary.regs[6] == 0x015A
+    assert secondary.regs[7] == 0x012B015A
+    assert secondary.regs[8] == 0x00000001012B015A
+    assert secondary.regs[9] == 0xBEEF
+    assert secondary.regs[10] == 0x00AB1234
+    assert secondary.regs[11] == 0x0156
+    assert system.uart_geom.req_cols == 0x1234
+    assert system.uart_geom.req_rows == 0x0156
+    assert system.uart_geom.has_resize_request()
+    assert callback_reads == callback_writes == 0
+
+
+def test_uart_geometry_access_crossing_its_boundary_falls_back_bytewise():
+    """A partial geometry span must not be captured as native wide MMIO."""
+    system = _new_system(full_cores=2)
+    cross_boundary_access = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + UART_GEOM_BASE + 0x0F}
+        ld.h r4, r1
+        ldi64 r5, 0x1234
+        st.h r1, r5
+        halt
+        """
+    )
+    secondary = system.cores[1]
+    callback_reads = 0
+    callback_writes = 0
+
+    def counted_read(_address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return 0xA5
+
+    def counted_write(_address, _value):
+        nonlocal callback_writes
+        callback_writes += 1
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, cross_boundary_access)
+
+    assert secondary.regs[4] == 0xA5A5
+    assert callback_reads == callback_writes == 2
+
+
+@pytest.mark.parametrize("execution_mode", ("step", "batch"))
+def test_uart_geometry_host_updates_progress_during_native_execution(
+    execution_mode,
+):
+    """Host geometry access and native execution must both finish."""
+    system = _new_system(full_cores=1, code=_UART_GEOMETRY_SPIN)
+    assert not hasattr(system.cpu._cs, "_uart_geom_use")
+    start = threading.Event()
+    first_update = threading.Event()
+    stop = threading.Event()
+    failures = []
+    host_update_counts = []
+    original_read = system.cpu._mmio_read8
+
+    def signal_execution_entry(address):
+        result = original_read(address)
+        if address == MMIO_BASE + SYSINFO_BASE:
+            start.set()
+            if not first_update.wait(timeout=2):
+                raise RuntimeError(
+                    "host geometry update did not enter active execution")
+        return result
+
+    system.cpu._mmio_read8 = signal_execution_entry
+
+    def update_host_geometry():
+        start.wait()
+        count = 0
+        try:
+            while not stop.is_set():
+                system.uart_geom.host_set_size(
+                    80 + (count % 40),
+                    24 + (count % 20),
+                )
+                count += 1
+                first_update.set()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            host_update_counts.append(count)
+
+    worker = threading.Thread(
+        target=update_host_geometry,
+        daemon=True,
+        name=f"uart-geometry-{execution_mode}",
+    )
+    worker.start()
+    start.set()
+    try:
+        if execution_mode == "step":
+            # The trigger callback proves one host access while step_one is
+            # active; repeated calls then pin progress at GIL boundaries.
+            for _ in range(3_000):
+                system.step()
+        else:
+            # The trigger callback waits for the first host update from inside
+            # run_steps; the remaining native geometry loop then overlaps it.
+            system.run_batch(10_000)
+    finally:
+        stop.set()
+        start.set()
+        first_update.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert len(host_update_counts) == 1
+    assert host_update_counts[0] > 0
+    assert system.cpu._cs.cycle_count > 0
+
+
+def test_micro_core_uart_geometry_fallback_reaches_the_shared_instance():
+    """Python-only micro-core MMIO remains attached to the same geometry."""
+    system = _new_system(full_cores=2, clusters=1)
+    geometry_addr = MMIO_BASE + UART_GEOM_BASE
+    micro = system.clusters[0].cores[0]
+    system.uart_geom.host_set_size(77, 33)
+
+    assert micro.mem_read8(geometry_addr) == 77
+    assert micro.mem_read8(geometry_addr + 0x02) == 33
+
+    micro.mem_write8(geometry_addr + 0x06, 88)
+    micro.mem_write8(geometry_addr + 0x08, 44)
+    micro.mem_write8(geometry_addr + 0x05, 0x02)
+
+    assert (system.uart_geom.req_cols, system.uart_geom.req_rows) == (88, 44)
+    assert system.uart_geom.has_resize_request()
 
 
 def test_core0_timer_proxy_advances_when_the_bus_ticks():

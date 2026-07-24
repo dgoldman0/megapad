@@ -1784,6 +1784,70 @@ class FramebufferDisplay:
 
     # -- internals --------------------------------------------------------
 
+    def _service_uart_geom_resize_request(
+        self,
+        apply_resize,
+    ) -> tuple[int, int, bool] | None:
+        """Apply and conditionally acknowledge one firmware resize request."""
+        geometry = getattr(self.sys, "uart_geom", None)
+        if geometry is None:
+            return None
+        request = geometry.snapshot_resize_request()
+        if request is None:
+            return None
+        generation, cols, rows = request
+        accepted = 20 <= cols <= 400 and 5 <= rows <= 200
+        if accepted:
+            # A failing host operation leaves REQ_RESIZE set for retry.
+            apply_resize(cols, rows)
+            completed = geometry.host_accept_resize_if_pending(
+                generation, cols, rows)
+        else:
+            completed = geometry.host_deny_resize_if_pending(generation)
+        if not completed:
+            # Firmware changed/cancelled the request while the host operation
+            # ran.  A successful host resize is irreversible here, so publish
+            # its actual size without clearing any newer pending request.
+            if accepted:
+                geometry.host_set_size(cols, rows)
+            return None
+        return cols, rows, accepted
+
+    def _service_uart_geom_resize_request_safely(
+        self,
+        apply_resize,
+        resize_error,
+    ) -> tuple[int, int, bool] | None:
+        """Keep the display alive when its backend rejects a resize."""
+        try:
+            return self._service_uart_geom_resize_request(apply_resize)
+        except resize_error as exc:
+            self.status.set_message(f"Resize failed: {exc}")
+            return None
+
+    def _apply_uart_geom_resize(
+        self,
+        pygame,
+        menubar,
+        ui_font,
+        cell_w: int,
+        cell_h: int,
+        chrome_h: int,
+        cols: int,
+        rows: int,
+    ):
+        """Apply host display state only after set_mode accepts the size."""
+        new_term_w = cols * cell_w
+        new_term_h = rows * cell_h
+        debug_w = self.debug.width if self.debug.visible else 0
+        new_win_w = new_term_w + debug_w
+        new_win_h = new_term_h + chrome_h
+        new_screen = pygame.display.set_mode(
+            (new_win_w, new_win_h), pygame.RESIZABLE)
+        self.term.resize(cols, rows)
+        menubar.layout(pygame, ui_font, new_win_w)
+        return new_screen, new_term_w, new_win_w, new_win_h
+
     def _build_menus(self) -> MenuBar:
         return MenuBar([
             Menu("File", [
@@ -1853,6 +1917,24 @@ class FramebufferDisplay:
         # Build menus
         menubar = self._build_menus()
         menubar.layout(pygame, ui_font, win_w)
+
+        def apply_uart_resize(cols: int, rows: int):
+            nonlocal content_w, screen, win_w, win_h
+            (
+                screen,
+                content_w,
+                win_w,
+                win_h,
+            ) = self._apply_uart_geom_resize(
+                pygame,
+                menubar,
+                ui_font,
+                cell_w,
+                cell_h,
+                chrome_h,
+                cols,
+                rows,
+            )
 
         # Framebuffer surface
         fb_surface = pygame.Surface((320, 240))
@@ -2020,7 +2102,8 @@ class FramebufferDisplay:
                         if new_cols != self.term.cols or new_rows != self.term.rows:
                             self.term.resize(new_cols, new_rows)
                             if hasattr(self.sys, 'uart_geom'):
-                                self.sys.uart_geom.host_set_size(new_cols, new_rows)
+                                self.sys.uart_geom.host_set_size(
+                                    new_cols, new_rows)
                     elif event.type == pygame.KEYDOWN:
                         mods = pygame.key.get_mods()
                         ctrl = mods & pygame.KMOD_CTRL
@@ -2106,28 +2189,16 @@ class FramebufferDisplay:
                                 self.active_tab = self.TAB_GRAPHICS
 
                 # ── Handle firmware resize requests ───────────
-                if hasattr(self.sys, 'uart_geom') and self.sys.uart_geom.has_resize_request():
-                    rc = self.sys.uart_geom.req_cols
-                    rr = self.sys.uart_geom.req_rows
-                    # Clamp to reasonable bounds
-                    if 20 <= rc <= 400 and 5 <= rr <= 200:
-                        # Accept: resize terminal grid + window
-                        self.term.resize(rc, rr)
-                        self.sys.uart_geom.host_accept_resize(rc, rr)
-                        # Resize the window to match
-                        new_term_w = rc * cell_w
-                        new_term_h = rr * cell_h
-                        debug_w = self.debug.width if self.debug.visible else 0
-                        win_w = new_term_w + debug_w
-                        win_h = new_term_h + chrome_h
-                        content_w = new_term_w
-                        screen = pygame.display.set_mode(
-                            (win_w, win_h), pygame.RESIZABLE)
-                        menubar.layout(pygame, ui_font, win_w)
+                resize_request = (
+                    self._service_uart_geom_resize_request_safely(
+                        apply_uart_resize, pygame.error)
+                )
+                if resize_request is not None:
+                    rc, rr, accepted = resize_request
+                    if accepted:
                         self.status.set_message(
                             f"Resize accepted: {rc}x{rr}")
                     else:
-                        self.sys.uart_geom.host_deny_resize()
                         self.status.set_message(
                             f"Resize denied: {rc}x{rr} out of range")
 
