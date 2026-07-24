@@ -75,6 +75,7 @@ from megapad64 import (
 
 import _mp64_accel
 _accel = _mp64_accel
+NativeSystemState = _accel.SystemState
 
 ACCEL_AVAILABLE: bool = True
 """Always True — the C++ accelerator is required."""
@@ -89,13 +90,42 @@ class Megapad64:
 
     _accel_backend = True  # introspection flag
 
-    def __init__(self, mem_size: int = 1 << 20, core_id: int = 0,
-                 num_cores: int = 1):
+    def __init__(
+        self,
+        mem_size: int = 1 << 20,
+        core_id: int = 0,
+        num_cores: int = 1,
+        *,
+        _system_owner=None,
+        _system_core_index: Optional[int] = None,
+    ):
         self.mem_size = mem_size
         self._mem = bytearray(mem_size)
 
-        # C++ state
-        self._cs = _accel.CPUState()
+        # C++ state.  Standalone wrappers own their CPUState directly.  A
+        # system-created wrapper borrows a stable core view while retaining
+        # the native SystemState owner explicitly for the wrapper's lifetime.
+        self._system_owner = _system_owner
+        if _system_owner is None:
+            if _system_core_index is not None:
+                raise ValueError(
+                    "_system_core_index requires a native SystemState owner"
+                )
+            self._cs = _accel.CPUState()
+        else:
+            if _system_core_index is None:
+                raise ValueError(
+                    "system-owned CPUs require a full-core index"
+                )
+            if core_id != _system_core_index:
+                raise ValueError(
+                    "system-owned CPU core_id must match its full-core index"
+                )
+            if num_cores != _system_owner.all_core_count:
+                raise ValueError(
+                    "num_cores must match the native SystemState topology"
+                )
+            self._cs = _system_owner.core(_system_core_index)
         self._cs.attach_mem(self._mem, mem_size)
         self._cs.core_id = core_id
         self._cs.num_cores = num_cores
@@ -128,6 +158,24 @@ class Megapad64:
 
         # Keep a pure-Python fallback for MEX FP operations
         self._py_fallback: Optional[_PyMegapad64] = None
+
+    @classmethod
+    def _from_system_state(
+        cls,
+        owner,
+        core_index: int,
+        *,
+        mem_size: int,
+        num_cores: int,
+    ) -> "Megapad64":
+        """Create a wrapper around a full core owned by native SystemState."""
+        return cls(
+            mem_size=mem_size,
+            core_id=core_index,
+            num_cores=num_cores,
+            _system_owner=owner,
+            _system_core_index=core_index,
+        )
 
     # ── Memory property — auto-syncs C++ pointer on set ──
 

@@ -18,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <vector>
 #include <unistd.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -263,6 +264,64 @@ struct CPUState {
     int accel_hook_count = 0;
 
     void register_accel_hook(uint64_t addr, int hook_id);
+};
+
+static std::unique_ptr<CPUState> make_cpu_state() {
+    auto state = std::make_unique<CPUState>();
+    for (int index = 0; index < 8; index++)
+        state->port_map[index] = 0xFFFF;
+    state->dict_clear_all();
+    state->crc_acc = 0xFFFFFFFF;
+    state->crc_mode = 0;
+    state->gf_prime_sel = 0;
+    state->gf_custom_p = BigNum();
+    state->gf_mont_pinv = BigNum();
+    state->gf_prev_lo = BigNum();
+    state->gf_prev_hi = BigNum();
+    return state;
+}
+
+// First Phase-1 ownership slice.  SystemState owns full-core lifetimes while
+// memory mappings, singleton devices, and scheduling are migrated in later
+// transactional milestones.  unique_ptr is required because CPUState contains
+// mutexes and atomics and is intentionally neither copyable nor movable.
+struct SystemState {
+    explicit SystemState(int full_core_count, int all_core_count = 0) {
+        if (full_core_count < 1 || full_core_count > 255)
+            throw std::invalid_argument(
+                "full_core_count must be between 1 and 255");
+        if (all_core_count == 0)
+            all_core_count = full_core_count;
+        if (all_core_count < full_core_count || all_core_count > 255)
+            throw std::invalid_argument(
+                "all_core_count must include every full core and fit in 8 bits");
+
+        cores.reserve(static_cast<std::size_t>(full_core_count));
+        for (int index = 0; index < full_core_count; index++) {
+            auto core = make_cpu_state();
+            core->core_id = static_cast<uint8_t>(index);
+            core->num_cores = static_cast<uint8_t>(all_core_count);
+            cores.push_back(std::move(core));
+        }
+        advertised_core_count = all_core_count;
+    }
+
+    CPUState& core(int index) {
+        if (index < 0 || index >= static_cast<int>(cores.size()))
+            throw std::out_of_range("full-core index is out of range");
+        return *cores[static_cast<std::size_t>(index)];
+    }
+
+    int full_core_count() const {
+        return static_cast<int>(cores.size());
+    }
+
+    int all_core_count() const {
+        return advertised_core_count;
+    }
+
+    std::vector<std::unique_ptr<CPUState>> cores;
+    int advertised_core_count = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -4480,23 +4539,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
 
     // Expose CPUState
     py::class_<CPUState>(m, "CPUState")
-        .def(py::init([]() {
-            auto s = std::make_unique<CPUState>();
-            // Default port_map entries to disabled (0xFFFF sentinel)
-            for (int i = 0; i < 8; i++) s->port_map[i] = 0xFFFF;
-            // Zero-init dictionary cache
-            s->dict_clear_all();
-            // CRC state defaults
-            s->crc_acc = 0xFFFFFFFF;
-            s->crc_mode = 0;
-            // Field ALU state defaults
-            s->gf_prime_sel = 0;
-            s->gf_custom_p = BigNum();
-            s->gf_mont_pinv = BigNum();
-            s->gf_prev_lo = BigNum();
-            s->gf_prev_hi = BigNum();
-            return s;
-        }))
+        .def(py::init([]() { return make_cpu_state(); }))
         .def_readwrite("psel", &CPUState::psel)
         .def_readwrite("xsel", &CPUState::xsel)
         .def_readwrite("spsel", &CPUState::spsel)
@@ -5195,6 +5238,23 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("accel_hook_count", &CPUState::accel_hook_count)
         // ── Dictionary cache ──────────────────────────────────
         .def("dict_clear", &CPUState::dict_clear_all)
+        ;
+
+    // Native system ownership.  Borrowed core views keep their parent alive
+    // and never take ownership of the pointed-to CPUState.
+    py::class_<SystemState>(m, "SystemState")
+        .def(py::init<int, int>(),
+             py::arg("full_core_count"),
+             py::arg("all_core_count") = 0)
+        .def_property_readonly(
+            "full_core_count", &SystemState::full_core_count)
+        .def_property_readonly(
+            "all_core_count", &SystemState::all_core_count)
+        .def(
+            "core",
+            &SystemState::core,
+            py::arg("index"),
+            py::return_value_policy::reference_internal)
         ;
 
     // Expose RunResult

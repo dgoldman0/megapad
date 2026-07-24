@@ -12,12 +12,24 @@ mailbox (IPI), hardware spinlocks, and cluster enable/disable gating.
 """
 
 from __future__ import annotations
+
+import weakref
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
-from accel_wrapper import Megapad64, HaltError, TrapError, u64, IVEC_TIMER, IVEC_IPI, IVEC_PRIV_FAULT, IVEC_BUS_FAULT
+from accel_wrapper import (
+    HaltError,
+    IVEC_BUS_FAULT,
+    IVEC_IPI,
+    IVEC_PRIV_FAULT,
+    IVEC_TIMER,
+    Megapad64,
+    NativeSystemState,
+    TrapError,
+    u64,
+)
 from megapad64 import (
     Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
@@ -337,11 +349,20 @@ class MegapadSystem:
         self.vram_base = VRAM_BASE if vram_size > 0 else 0
         self.vram_end = (VRAM_BASE + vram_size) if vram_size > 0 else 0
 
-        # Create full CPU cores
+        # Native Phase-1 owner for all full-core CPUState lifetimes.  Shared
+        # mappings and singleton devices remain on their existing compatibility
+        # paths until their transactional migrations land.
+        self._native_system = NativeSystemState(num_cores, self.num_cores)
+
+        # Create Python API wrappers around the natively owned full cores.
         self.cores: list[Megapad64] = []
         for i in range(num_cores):
-            cpu = Megapad64(mem_size=ram_size, core_id=i,
-                            num_cores=self.num_cores)
+            cpu = Megapad64._from_system_state(
+                self._native_system,
+                i,
+                mem_size=ram_size,
+                num_cores=self.num_cores,
+            )
             cpu.mem = self._shared_mem
             if hbw_size > 0 and hasattr(cpu, 'attach_hbw'):
                 cpu.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
@@ -521,13 +542,40 @@ class MegapadSystem:
         # Wire backend RX → C++ NIC queue
         cpu0_cs = self.cores[0]._cs
         self.uart.attach_native(cpu0_cs)
+        # Native TX callbacks retain the Python NIC facade from inside an
+        # opaque std::function.  Every facade/backend edge back to the borrowed
+        # core must therefore be weak or Python's GC cannot see and break the
+        # resulting SystemState ownership cycle.
+        cpu0_ref = weakref.ref(cpu0_cs)
+        py_nic_ref = weakref.ref(self.nic)
         if nic_backend is not None:
-            nic_backend.on_rx_frame = lambda frame, _cs=cpu0_cs: _cs.nic_inject_frame(frame)
+            def _native_rx(
+                frame: bytes,
+                _cs_ref=cpu0_ref,
+                _nic_ref=py_nic_ref,
+            ):
+                cs = _cs_ref()
+                if cs is not None:
+                    cs.nic_inject_frame(frame)
+                    return
+                py_nic = _nic_ref()
+                if py_nic is not None:
+                    py_nic._backend_rx(frame)
+            nic_backend.on_rx_frame = _native_rx
 
         # Patch inject_frame so test & CLI injections reach C++ queue
-        _orig_inject = self.nic.inject_frame
-        def _dual_inject(data: bytes, _orig=_orig_inject, _cs=cpu0_cs):
-            return _cs.nic_inject_frame(data)
+        def _dual_inject(
+            data: bytes,
+            _cs_ref=cpu0_ref,
+            _nic_ref=py_nic_ref,
+        ):
+            cs = _cs_ref()
+            if cs is not None:
+                return cs.nic_inject_frame(data)
+            py_nic = _nic_ref()
+            if py_nic is None:
+                return False
+            return NetworkDevice.inject_frame(py_nic, data)
         self.nic.inject_frame = _dual_inject
 
         # Wire mailbox IPI delivery
