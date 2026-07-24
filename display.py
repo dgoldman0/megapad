@@ -56,6 +56,11 @@ _BASE_MENU_HEIGHT = 24
 _BASE_TAB_HEIGHT = 28
 _BASE_STATUS_HEIGHT = 22
 
+# Native scanout is deliberately non-blocking with respect to CPU execution.
+# A busy result means "keep the previous surface for this frame"; it must not
+# fall through to raw NumPy views of memory that the CPU may be writing.
+_FRAMEBUFFER_RENDER_BUSY = "CPUState framebuffer render is busy"
+
 # ── Color Palette ─────────────────────────────────────────────────────
 
 class Theme:
@@ -2306,14 +2311,22 @@ class FramebufferDisplay:
 
         # Fast path: C++ pixel conversion (no GIL, no per-pixel Python)
         if hasattr(fb, '_cs') and hasattr(fb._cs, 'render_fb_rgb'):
-            result = fb._cs.render_fb_rgb()
+            try:
+                result = fb._cs.render_fb_rgb()
+            except RuntimeError as exc:
+                if str(exc) == _FRAMEBUFFER_RENDER_BUSY:
+                    return
+                raise
             if result is not None:
                 pixels_rgb = np.asarray(result)
                 if pixels_rgb.shape == (w, h, 3):
                     pygame.surfarray.blit_array(surface, pixels_rgb)
-                    return
-            # Fall through to Python path if C++ returned None
-            # (e.g. fb_base points to unmapped memory)
+            # A native-capable framebuffer owns its complete scanout path.
+            # None and shape mismatches mean that this frame is stale,
+            # unmapped, or outside the native renderer's safety limits.  Do
+            # not bypass its memory guard and bounds checks by falling through
+            # to the raw Python renderer.
+            return
 
         base_addr = fb.fb_base
         stride = fb.stride

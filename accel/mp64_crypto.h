@@ -1020,7 +1020,7 @@ struct WotsChain {
 
     // Memory pointer (set by CPUState init, points to main RAM)
     uint8_t* mem;
-    uint32_t mem_size;
+    uint64_t mem_size;
 
     // SHA3 engine pointer (shared with CryptoDevices)
     CryptoSHA3* sha3;

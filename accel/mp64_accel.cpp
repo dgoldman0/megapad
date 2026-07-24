@@ -8,9 +8,15 @@
  * Build: see setup_accel.py (pybind11 extension module)
  */
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <unistd.h>
 #include <pybind11/pybind11.h>
@@ -188,23 +194,40 @@ struct CPUState {
     uint8_t  num_cores;
 
     // Memory
-    uint8_t* mem;
-    uint64_t mem_size;
+    uint8_t* mem = nullptr;
+    uint64_t mem_size = 0;
+    uint64_t mem_capacity = 0;
+    std::unique_ptr<py::buffer_info> mem_lease;
 
     // HBW math RAM (banks 1-3, contiguous)
-    uint8_t* hbw_mem;
-    uint64_t hbw_base;
-    uint64_t hbw_size;
+    uint8_t* hbw_mem = nullptr;
+    uint64_t hbw_base = 0;
+    uint64_t hbw_size = 0;
+    uint64_t hbw_capacity = 0;
+    std::unique_ptr<py::buffer_info> hbw_lease;
 
     // External memory (HyperRAM / SDRAM)
-    uint8_t* ext_mem;
-    uint64_t ext_mem_base;
-    uint64_t ext_mem_size;
+    uint8_t* ext_mem = nullptr;
+    uint64_t ext_mem_base = 0;
+    uint64_t ext_mem_size = 0;
+    uint64_t ext_mem_capacity = 0;
+    std::unique_ptr<py::buffer_info> ext_mem_lease;
 
     // Dedicated VRAM (framebuffer pixel memory)
-    uint8_t* vram_mem;
-    uint64_t vram_base;
-    uint64_t vram_size;
+    uint8_t* vram_mem = nullptr;
+    uint64_t vram_base = 0;
+    uint64_t vram_size = 0;
+    uint64_t vram_capacity = 0;
+    std::unique_ptr<py::buffer_info> vram_lease;
+
+    // Execution reads mappings under shared ownership.  Attachment/metadata
+    // replacement and framebuffer rendering are exclusive users; serializing
+    // rendering also avoids races with guest framebuffer writes.  Exclusive
+    // operations fail fast behind execution, while execution may wait behind
+    // a render only during a binding scope that has released the GIL.
+    std::shared_mutex memory_mutex;
+    std::atomic<bool> execution_active{false};
+    std::atomic<bool> exclusive_memory_active{false};
 
     // C++ native crypto devices (bypass Python MMIO callbacks)
     CryptoDevices crypto;
@@ -249,6 +272,200 @@ struct CPUState {
 // ---------------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------------
+
+// Blocking on a different thread's framebuffer render is safe once the GIL is
+// released.  Blocking on an exclusive lock already owned by this same thread
+// is not, so guards publish every per-thread owner explicitly.  A stack, rather
+// than only the innermost owner, also catches custom-buffer re-entry such as
+// attach(A) -> attach(B) -> execute(A).
+struct ThreadExclusiveMemoryOwner {
+    CPUState* state;
+    ThreadExclusiveMemoryOwner* previous;
+};
+
+static thread_local ThreadExclusiveMemoryOwner*
+    thread_exclusive_memory_owners = nullptr;
+
+static bool thread_owns_exclusive_memory(const CPUState& state) {
+    for (ThreadExclusiveMemoryOwner* owner =
+             thread_exclusive_memory_owners;
+         owner != nullptr;
+         owner = owner->previous) {
+        if (owner->state == &state)
+            return true;
+    }
+    return false;
+}
+
+class ExclusiveMemoryUseGuard {
+public:
+    explicit ExclusiveMemoryUseGuard(
+            CPUState& state,
+            const char* busy_message =
+                "memory attachments cannot be changed while CPUState memory is in use")
+        : state_(state),
+          lock_(state.memory_mutex, std::defer_lock),
+          thread_owner_{&state, nullptr} {
+        // An execution callback reaches this check on the same thread that
+        // owns memory_mutex shared.  Reject before any mutex operation so the
+        // path is defined by the C++ SharedMutex contract.
+        if (state_.execution_active.load(std::memory_order_acquire))
+            throw std::runtime_error(busy_message);
+
+        bool expected = false;
+        if (!state_.exclusive_memory_active.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            throw std::runtime_error(busy_message);
+        }
+
+        // Close the false->active race with CPUExecutionGuard.  If execution
+        // publishes itself before we own the unique lock, this exclusive
+        // operation backs off.  An execution that arrives after unique
+        // ownership may safely wait because both Python execution bindings
+        // release the GIL while acquiring their shared lock.
+        if (state_.execution_active.load(std::memory_order_acquire)) {
+            state_.exclusive_memory_active.store(
+                false, std::memory_order_release);
+            throw std::runtime_error(busy_message);
+        }
+
+        bool locked = false;
+        try {
+            locked = lock_.try_lock();
+        } catch (...) {
+            state_.exclusive_memory_active.store(
+                false, std::memory_order_release);
+            throw;
+        }
+        if (!locked) {
+            state_.exclusive_memory_active.store(
+                false, std::memory_order_release);
+            throw std::runtime_error(busy_message);
+        }
+        thread_owner_.previous = thread_exclusive_memory_owners;
+        thread_exclusive_memory_owners = &thread_owner_;
+        registered_thread_state_ = true;
+    }
+
+    ~ExclusiveMemoryUseGuard() {
+        if (registered_thread_state_)
+            thread_exclusive_memory_owners = thread_owner_.previous;
+        if (lock_.owns_lock())
+            lock_.unlock();
+        state_.exclusive_memory_active.store(false, std::memory_order_release);
+    }
+
+    ExclusiveMemoryUseGuard(const ExclusiveMemoryUseGuard&) = delete;
+    ExclusiveMemoryUseGuard& operator=(const ExclusiveMemoryUseGuard&) = delete;
+
+private:
+    CPUState& state_;
+    std::unique_lock<std::shared_mutex> lock_;
+    ThreadExclusiveMemoryOwner thread_owner_;
+    bool registered_thread_state_ = false;
+};
+
+using MemoryMutationGuard = ExclusiveMemoryUseGuard;
+
+class CPUExecutionGuard {
+public:
+    explicit CPUExecutionGuard(CPUState& state)
+        : state_(state),
+          memory_lock_(state.memory_mutex, std::defer_lock) {
+        // A custom buffer/exporter or other same-thread re-entry must never
+        // block on an exclusive lock already owned by this thread.
+        if (thread_owns_exclusive_memory(state_))
+            throw std::runtime_error(
+                "CPUState cannot execute during same-thread exclusive memory use");
+
+        bool expected = false;
+        if (!state_.execution_active.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            throw std::runtime_error("CPUState is already executing");
+        }
+
+        // Both bindings release the GIL while acquiring this potentially
+        // blocking lock.  They reacquire it only after this guard owns the
+        // mapping, so render completion never waits behind a Python thread
+        // that is itself waiting for memory.
+        try {
+            memory_lock_.lock();
+        } catch (...) {
+            state_.execution_active.store(false, std::memory_order_release);
+            throw;
+        }
+    }
+
+    ~CPUExecutionGuard() {
+        if (memory_lock_.owns_lock())
+            memory_lock_.unlock();
+        state_.execution_active.store(false, std::memory_order_release);
+    }
+
+    CPUExecutionGuard(const CPUExecutionGuard&) = delete;
+    CPUExecutionGuard& operator=(const CPUExecutionGuard&) = delete;
+
+private:
+    CPUState& state_;
+    std::shared_lock<std::shared_mutex> memory_lock_;
+};
+
+struct PreparedBuffer {
+    std::unique_ptr<py::buffer_info> lease;
+    uint8_t* ptr;
+    uint64_t capacity;
+};
+
+static PreparedBuffer prepare_writable_byte_buffer(
+        py::buffer& buf, uint64_t logical_size, bool require_nonempty) {
+    if (require_nonempty && logical_size == 0)
+        throw py::value_error("main memory size must be greater than zero");
+
+    auto lease = std::make_unique<py::buffer_info>(buf.request(true));
+    if (lease->readonly)
+        throw py::buffer_error("memory attachment requires a writable buffer");
+    if (lease->ndim != 1 || lease->itemsize != 1 ||
+        lease->shape.size() != 1 || lease->shape[0] < 0) {
+        throw py::value_error(
+            "memory attachment requires a one-dimensional byte buffer");
+    }
+    if (lease->strides.size() != 1 || lease->strides[0] != 1 ||
+        !lease->view() || !PyBuffer_IsContiguous(lease->view(), 'C')) {
+        throw py::value_error("memory attachment requires a C-contiguous buffer");
+    }
+
+    const uint64_t capacity = static_cast<uint64_t>(lease->shape[0]);
+    if (logical_size > capacity)
+        throw py::value_error("memory region size exceeds buffer capacity");
+    if (capacity != 0 && lease->ptr == nullptr)
+        throw py::value_error("memory attachment exposes a null data pointer");
+
+    auto* ptr = static_cast<uint8_t*>(lease->ptr);
+    return {std::move(lease), ptr, capacity};
+}
+
+static inline void validate_guest_region(uint64_t base, uint64_t size) {
+    // The last byte may be exactly UINT64_MAX.  Only a non-empty region whose
+    // inclusive last offset would wrap past it is invalid.
+    if (size != 0 && (size - 1) > (MASK64 - base))
+        throw py::value_error("guest memory region wraps past UINT64_MAX");
+}
+
+static inline void sync_nic_memory_ptrs(CPUState& s) {
+    s.nic.attach_mem_ptrs(
+        s.mem, s.mem_size,
+        s.hbw_mem, s.hbw_base, s.hbw_size,
+        s.ext_mem, s.ext_mem_base, s.ext_mem_size);
+}
+
+static inline void sync_main_memory_ptrs(CPUState& s) {
+    s.uart.attach_mem(s.mem, s.mem_size);
+    s.crypto.wots.mem = s.mem;
+    s.crypto.wots.mem_size = s.mem_size;
+    sync_nic_memory_ptrs(s);
+}
 
 static inline uint64_t u64(uint64_t v) { return v; }  // native 64-bit
 static inline int64_t  s64(uint64_t v) { return static_cast<int64_t>(v); }
@@ -308,14 +525,43 @@ struct MemRegion {
     uint64_t size;
 };
 
+static inline bool region_contains(uint64_t base, uint64_t size, uint64_t addr) {
+    // Subtraction after the lower-bound check avoids wrapping base + size.
+    return addr >= base && (addr - base) < size;
+}
+
+static inline bool region_span_fits(uint64_t size, uint64_t off, uint64_t span) {
+    return off < size && span <= (size - off);
+}
+
 static inline MemRegion resolve_mem(CPUState& s, uint64_t addr) {
-    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size)
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
         return {s.vram_mem, addr - s.vram_base, s.vram_size};
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
         return {s.ext_mem, addr - s.ext_mem_base, s.ext_mem_size};
-    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size)
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr))
         return {s.hbw_mem, addr - s.hbw_base, s.hbw_size};
+    if (!s.mem || s.mem_size == 0)
+        throw std::runtime_error("main memory is not attached");
     return {s.mem, addr % s.mem_size, s.mem_size};
+}
+
+static inline bool resolved_span_is_contiguous(
+        CPUState& s, uint64_t addr, const MemRegion& first, uint64_t span) {
+    if (!region_span_fits(first.size, first.off, span))
+        return false;
+
+    // Region membership can change in either direction inside a scalar
+    // access (for example Bank0 -> HBW or HBW -> Bank0).  Prove every byte
+    // maps to the same host buffer at the next contiguous offset before
+    // taking the memcpy fast path.  Unsigned guest-address addition wraps
+    // naturally, and an offset discontinuity then rejects the fast path.
+    for (uint64_t i = 1; i < span; i++) {
+        const MemRegion next = resolve_mem(s, addr + i);
+        if (next.buf != first.buf || next.off != first.off + i)
+            return false;
+    }
+    return true;
 }
 
 static inline uint8_t mem_read8(CPUState& s, uint64_t addr) {
@@ -331,67 +577,75 @@ static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
 static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
     auto r = resolve_mem(s, addr);
     uint16_t v;
-    if (__builtin_expect(r.off + 2 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 2), 1))
         std::memcpy(&v, r.buf + r.off, 2);
     else {
-        v = r.buf[r.off] | (uint16_t(r.buf[(r.off+1) % r.size]) << 8);
+        v = 0;
+        for (int i = 0; i < 2; i++)
+            v |= uint16_t(mem_read8(s, addr + static_cast<uint64_t>(i)))
+                 << (8 * i);
     }
     return v;
 }
 
 static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
     auto r = resolve_mem(s, addr);
-    if (__builtin_expect(r.off + 2 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 2), 1))
         std::memcpy(r.buf + r.off, &val, 2);
     else {
-        r.buf[r.off] = val & 0xFF;
-        r.buf[(r.off+1) % r.size] = (val >> 8) & 0xFF;
+        for (int i = 0; i < 2; i++)
+            mem_write8(s, addr + static_cast<uint64_t>(i),
+                       static_cast<uint8_t>(val >> (8 * i)));
     }
 }
 
 static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
     auto r = resolve_mem(s, addr);
     uint32_t v;
-    if (__builtin_expect(r.off + 4 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 4), 1))
         std::memcpy(&v, r.buf + r.off, 4);
     else {
         v = 0;
         for (int i = 0; i < 4; i++)
-            v |= uint32_t(r.buf[(r.off+i) % r.size]) << (8*i);
+            v |= uint32_t(mem_read8(
+                     s, addr + static_cast<uint64_t>(i))) << (8 * i);
     }
     return v;
 }
 
 static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
     auto r = resolve_mem(s, addr);
-    if (__builtin_expect(r.off + 4 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 4), 1))
         std::memcpy(r.buf + r.off, &val, 4);
     else {
         for (int i = 0; i < 4; i++)
-            r.buf[(r.off+i) % r.size] = (val >> (8*i)) & 0xFF;
+            mem_write8(s, addr + static_cast<uint64_t>(i),
+                       static_cast<uint8_t>(val >> (8 * i)));
     }
 }
 
 static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
     auto r = resolve_mem(s, addr);
     uint64_t v;
-    if (__builtin_expect(r.off + 8 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 8), 1))
         std::memcpy(&v, r.buf + r.off, 8);
     else {
         v = 0;
         for (int i = 0; i < 8; i++)
-            v |= uint64_t(r.buf[(r.off+i) % r.size]) << (8*i);
+            v |= uint64_t(mem_read8(
+                     s, addr + static_cast<uint64_t>(i))) << (8 * i);
     }
     return v;
 }
 
 static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
     auto r = resolve_mem(s, addr);
-    if (__builtin_expect(r.off + 8 <= r.size, 1))
+    if (__builtin_expect(resolved_span_is_contiguous(s, addr, r, 8), 1))
         std::memcpy(r.buf + r.off, &val, 8);
     else {
         for (int i = 0; i < 8; i++)
-            r.buf[(r.off+i) % r.size] = (val >> (8*i)) & 0xFF;
+            mem_write8(s, addr + static_cast<uint64_t>(i),
+                       static_cast<uint8_t>(val >> (8 * i)));
     }
 }
 
@@ -413,21 +667,20 @@ static inline int find_accel_hook(CPUState& s, uint64_t target) {
 
 // Pop one cell from data stack (r14) — direct memory read
 static inline uint64_t pop_data(CPUState& s) {
-    uint64_t val;
-    std::memcpy(&val, s.mem + (s.regs[14] % s.mem_size), 8);
+    uint64_t val = mem_read64(s, s.regs[14]);
     s.regs[14] += 8;
     return val;
 }
 
 // Resolve guest address to host write pointer (VRAM, ext_mem, HBW, or main RAM)
 static inline uint8_t* resolve_write_ptr(CPUState& s, uint64_t addr) {
-    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size)
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
         return s.vram_mem + (addr - s.vram_base);
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
         return s.ext_mem + (addr - s.ext_mem_base);
-    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size)
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr))
         return s.hbw_mem + (addr - s.hbw_base);
-    if (addr < s.mem_size)
+    if (s.mem && addr < s.mem_size)
         return s.mem + addr;
     return nullptr;
 }
@@ -436,27 +689,27 @@ static inline uint8_t* resolve_write_ptr(CPUState& s, uint64_t addr) {
 // Used by accelerator hooks to clamp writes and prevent host buffer overflows.
 struct WriteRegion { uint8_t* ptr; uint64_t avail; };
 static inline WriteRegion resolve_write_region(CPUState& s, uint64_t addr) {
-    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
         uint64_t off = addr - s.vram_base;
         return {s.vram_mem + off, s.vram_size - off};
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
         uint64_t off = addr - s.ext_mem_base;
         return {s.ext_mem + off, s.ext_mem_size - off};
     }
-    if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
         uint64_t off = addr - s.hbw_base;
         return {s.hbw_mem + off, s.hbw_size - off};
     }
-    if (addr < s.mem_size)
+    if (s.mem && addr < s.mem_size)
         return {s.mem + addr, s.mem_size - addr};
     return {nullptr, 0};
 }
 
 // Fast read for non-MMIO memory (font data is in main RAM or ext_mem)
 static inline uint8_t read8_fast(CPUState& s, uint64_t addr) {
-    if (addr < s.mem_size) return s.mem[addr];
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size)
+    if (s.mem && addr < s.mem_size) return s.mem[addr];
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
         return s.ext_mem[addr - s.ext_mem_base];
     return 0;
 }
@@ -611,13 +864,8 @@ static int execute_accel_hook(CPUState& s, int hook_id) {
 
 static inline uint8_t fetch8(CPUState& s) {
     uint64_t a = pc(s);
-    uint8_t v;
-    if (__builtin_expect(s.ext_mem != nullptr && a >= s.ext_mem_base
-                         && a < s.ext_mem_base + s.ext_mem_size, 0)) {
-        v = s.ext_mem[a - s.ext_mem_base];
-    } else {
-        v = s.mem[a % s.mem_size];
-    }
+    const auto region = resolve_mem(s, a);
+    const uint8_t v = region.buf[region.off];
     pc(s) = a + 1;
     return v;
 }
@@ -1005,6 +1253,16 @@ static inline bool fp_is_nan(uint16_t raw, int ew) {
         return ((raw >> 7) & 0xFF) == 0xFF && (raw & 0x7F) != 0;
 }
 
+static inline bool fp_is_finite(uint16_t raw, int ew) {
+    if (ew == EW_FP16)
+        return ((raw >> 10) & 0x1F) != 0x1F;
+    return ((raw >> 7) & 0xFF) != 0xFF;
+}
+
+static inline bool fp32_bits_are_finite(uint64_t raw) {
+    return ((static_cast<uint32_t>(raw) >> 23) & 0xFF) != 0xFF;
+}
+
 static inline uint32_t fp32_to_bits(float f) {
     uint32_t b; std::memcpy(&b, &f, 4); return b;
 }
@@ -1013,87 +1271,172 @@ static inline float bits_to_fp32(uint32_t b) {
     float f; std::memcpy(&f, &b, 4); return f;
 }
 
+static_assert(sizeof(float) == 4 &&
+              std::numeric_limits<float>::is_iec559);
+static_assert(sizeof(double) == 8 &&
+              std::numeric_limits<double>::is_iec559);
+static constexpr double FP32_PACK_OVERFLOW_THRESHOLD =
+    0x1.ffffffp+127;
+
+static inline bool fp32_pack_overflows(double value) {
+    // Python's struct.pack("<f", value), used by the executable oracle for
+    // BF16 and FP32 results, raises OverflowError exactly when conversion
+    // reaches the halfway point above the largest finite FP32 value.  Compare
+    // in double precision so detection does not itself perform an overflowing
+    // or implementation-defined narrowing conversion.
+    return std::isfinite(value) &&
+           std::fabs(value) >= FP32_PACK_OVERFLOW_THRESHOLD;
+}
+
 // ---------------------------------------------------------------------------
 //  Tile helpers for MEX
 // ---------------------------------------------------------------------------
 
-static inline uint64_t tile_get_elem(const uint8_t* tile, int lane, int eb) {
-    int off = lane * eb;
+static constexpr std::size_t TILE_BYTES = 64;
+using Tile = std::array<uint8_t, TILE_BYTES>;
+
+template <std::size_t ElemBytes>
+static inline uint64_t tile_get_elem_width(const Tile& tile, int lane) {
+    static_assert(ElemBytes == 1 || ElemBytes == 2 ||
+                  ElemBytes == 4 || ElemBytes == 8);
+    if (lane < 0 || static_cast<std::size_t>(lane) >= TILE_BYTES / ElemBytes)
+        return 0;
+    const std::size_t off = static_cast<std::size_t>(lane) * ElemBytes;
     uint64_t v = 0;
-    for (int i = 0; i < eb; i++)
+    for (std::size_t i = 0; i < ElemBytes; i++)
         v |= (uint64_t)tile[off + i] << (8 * i);
     return v;
 }
 
-static inline void tile_set_elem(uint8_t* tile, int lane, int eb, uint64_t val) {
-    int off = lane * eb;
-    for (int i = 0; i < eb; i++)
+static inline uint64_t tile_get_elem(const Tile& tile, int lane, int eb) {
+    switch (eb) {
+        case 1: return tile_get_elem_width<1>(tile, lane);
+        case 2: return tile_get_elem_width<2>(tile, lane);
+        case 4: return tile_get_elem_width<4>(tile, lane);
+        case 8: return tile_get_elem_width<8>(tile, lane);
+        default: return 0;
+    }
+}
+
+template <std::size_t ElemBytes>
+static inline void tile_set_elem_width(Tile& tile, int lane, uint64_t val) {
+    static_assert(ElemBytes == 1 || ElemBytes == 2 ||
+                  ElemBytes == 4 || ElemBytes == 8);
+    if (lane < 0 || static_cast<std::size_t>(lane) >= TILE_BYTES / ElemBytes)
+        return;
+    const std::size_t off = static_cast<std::size_t>(lane) * ElemBytes;
+    for (std::size_t i = 0; i < ElemBytes; i++)
         tile[off + i] = (val >> (8 * i)) & 0xFF;
+}
+
+static inline void tile_set_elem(Tile& tile, int lane, int eb, uint64_t val) {
+    switch (eb) {
+        case 1: tile_set_elem_width<1>(tile, lane, val); break;
+        case 2: tile_set_elem_width<2>(tile, lane, val); break;
+        case 4: tile_set_elem_width<4>(tile, lane, val); break;
+        case 8: tile_set_elem_width<8>(tile, lane, val); break;
+        default: break;
+    }
 }
 
 static inline int64_t to_signed_eb(uint64_t v, int eb) {
     int bits = eb * 8;
+    if (eb == 8) {
+        if (v & SIGN64) {
+            const __int128 signed_v =
+                static_cast<__int128>(v) -
+                (static_cast<__int128>(1) << 64);
+            return static_cast<int64_t>(signed_v);
+        }
+        return static_cast<int64_t>(v);
+    }
     if (v & (1ULL << (bits - 1)))
-        return (int64_t)(v - (1ULL << bits));
+        return static_cast<int64_t>(v) - static_cast<int64_t>(1ULL << bits);
     return (int64_t)v;
+}
+
+static inline uint64_t elem_mask(int elem_bytes) {
+    return elem_bytes == 8 ? MASK64 : ((1ULL << (elem_bytes * 8)) - 1);
+}
+
+static inline __int128 floor_shift_right(__int128 value, unsigned shift) {
+    if (shift == 0)
+        return value;
+    if (value >= 0)
+        return value >> shift;
+    const __int128 divisor = static_cast<__int128>(1) << shift;
+    return -(((-value) + divisor - 1) >> shift);
 }
 
 // ---------------------------------------------------------------------------
 //  Unified tile memory access (64-byte reads/writes with address decoding)
 // ---------------------------------------------------------------------------
 
-static inline void tile_read_64bytes(CPUState& s, uint64_t addr, uint8_t* out) {
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 64 <= s.vram_size) {
-        std::memcpy(out, s.vram_mem + (addr - s.vram_base), 64);
+static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
+        const uint64_t off = addr - s.vram_base;
+        if (region_span_fits(s.vram_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.vram_mem + off, TILE_BYTES);
+        else
+            out.fill(0);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 64 <= s.ext_mem_size) {
-        std::memcpy(out, s.ext_mem + (addr - s.ext_mem_base), 64);
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
+        const uint64_t off = addr - s.ext_mem_base;
+        if (region_span_fits(s.ext_mem_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.ext_mem + off, TILE_BYTES);
+        else
+            out.fill(0);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 64 <= s.hbw_size) {
-        std::memcpy(out, s.hbw_mem + (addr - s.hbw_base), 64);
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        const uint64_t off = addr - s.hbw_base;
+        if (region_span_fits(s.hbw_size, off, TILE_BYTES))
+            std::memcpy(out.data(), s.hbw_mem + off, TILE_BYTES);
+        else
+            out.fill(0);
+        return;
+    }
+    if (!s.mem || s.mem_size == 0) {
+        out.fill(0);
         return;
     }
     uint64_t a = addr % s.mem_size;
-    if (a + 64 <= s.mem_size)
-        std::memcpy(out, s.mem + a, 64);
+    if (region_span_fits(s.mem_size, a, TILE_BYTES))
+        std::memcpy(out.data(), s.mem + a, TILE_BYTES);
     else
-        std::memset(out, 0, 64);
+        out.fill(0);
 }
 
-static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const uint8_t* data) {
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 64 <= s.vram_size) {
-        std::memcpy(s.vram_mem + (addr - s.vram_base), data, 64);
+static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& data) {
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
+        const uint64_t off = addr - s.vram_base;
+        if (region_span_fits(s.vram_size, off, TILE_BYTES))
+            std::memcpy(s.vram_mem + off, data.data(), TILE_BYTES);
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 64 <= s.ext_mem_size) {
-        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), data, 64);
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
+        const uint64_t off = addr - s.ext_mem_base;
+        if (region_span_fits(s.ext_mem_size, off, TILE_BYTES))
+            std::memcpy(s.ext_mem + off, data.data(), TILE_BYTES);
         return;
     }
-    if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 64 <= s.hbw_size) {
-        std::memcpy(s.hbw_mem + (addr - s.hbw_base), data, 64);
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        const uint64_t off = addr - s.hbw_base;
+        if (region_span_fits(s.hbw_size, off, TILE_BYTES))
+            std::memcpy(s.hbw_mem + off, data.data(), TILE_BYTES);
         return;
     }
+    if (!s.mem || s.mem_size == 0)
+        return;
     uint64_t a = addr % s.mem_size;
-    if (a + 64 <= s.mem_size)
-        std::memcpy(s.mem + a, data, 64);
-}
-
-static inline void tile_zero_64bytes(CPUState& s, uint64_t addr) {
-    static const uint8_t zeros[64] = {0};
-    tile_write_64bytes(s, addr, zeros);
-}
-
-static inline void tile_fill_64bytes(CPUState& s, uint64_t addr, uint8_t fill) {
-    uint8_t buf[64];
-    std::memset(buf, fill, 64);
-    tile_write_64bytes(s, addr, buf);
+    if (region_span_fits(s.mem_size, a, TILE_BYTES))
+        std::memcpy(s.mem + a, data.data(), TILE_BYTES);
 }
 
 // ---------------------------------------------------------------------------
-//  MEX core — handles TALU, TMUL, TRED, TSYS for all element types
-//  Returns -1 only for unimplemented ops (LOAD2D/STORE2D etc.)
+//  MEX core — native only where behavior is exact and mutation-free fallback
+//  is possible.  Returning -1 asks the Python oracle to execute the operation.
 // ---------------------------------------------------------------------------
 
 static int exec_mex(CPUState& s, int n) {
@@ -1114,8 +1457,26 @@ static int exec_mex(CPUState& s, int n) {
     int num_lanes = 64 / elem_bytes;
     bool is_signed = (s.tmode >> 4) & 1;
 
+    // SS=imm8 uses the function byte as data and forces the operation's
+    // sub-function to zero.
+    if (ss == 0x2)
+        funct = 0;
+
+    // Python owns the 256-bit integer accumulator semantics and the current
+    // TSYS instruction map.  Decide this before reading sources or changing
+    // ACC/TCTRL/destination state so rewind-and-fallback is transactional.
+    const bool fp_bit_reduction = is_fp && op == 0x2 &&
+                                  (funct == 3 || funct == 4);
+    const bool fp_sum_reduction = is_fp && op == 0x2 &&
+                                  (funct == 0 || funct == 5);
+    if ((op == 0x1 && !is_fp && funct != 0) ||
+        (op == 0x2 && (!is_fp || fp_bit_reduction || fp_sum_reduction)) ||
+        op == 0x3) {
+        return -1;
+    }
+
     // Read source tiles
-    uint8_t src_a[64], src_b[64], dst[64];
+    Tile src_a{}, src_b{}, dst{};
     tile_read_64bytes(s, s.tsrc0, src_a);
 
     if (ss == 0x0) {  // tile-tile
@@ -1127,15 +1488,142 @@ static int exec_mex(CPUState& s, int n) {
         for (int lane = 0; lane < num_lanes; lane++)
             tile_set_elem(src_b, lane, elem_bytes, bval);
     } else if (ss == 0x2) {  // imm8 splat
-        std::memcpy(src_b, src_a, 64);
-        std::memset(src_a, funct_byte, 64);
-        funct = 0;
+        src_b = src_a;
+        src_a.fill(funct_byte);
     } else {  // ss == 3, in-place
         tile_read_64bytes(s, s.tdst, src_a);
         tile_read_64bytes(s, s.tsrc0, src_b);
     }
 
-    std::memset(dst, 0, 64);
+    // Python's floating-point helpers own NaN payload/sign propagation and
+    // non-finite arithmetic semantics.  These checks are deliberately after
+    // safe source reads but before ACC_ZERO, TCTRL, accumulator, or memory
+    // mutation, so step_one can rewind and retry transactionally.
+    Tile fp_existing{};
+    bool fp_existing_loaded = false;
+    if (is_fp) {
+        const bool fp_talu_arithmetic =
+            op == 0x0 && (funct == 0 || funct == 1);
+        const bool fp_tmul_arithmetic =
+            op == 0x1 && funct >= 0 && funct <= 5;
+        const bool fp_tred_ordering =
+            op == 0x2 &&
+            (funct == 1 || funct == 2 || funct == 6 || funct == 7);
+        if (fp_talu_arithmetic || fp_tmul_arithmetic || fp_tred_ordering) {
+            auto tile_is_finite = [&](const Tile& tile) {
+                for (int lane = 0; lane < num_lanes; lane++) {
+                    const uint16_t raw = static_cast<uint16_t>(
+                        tile_get_elem(tile, lane, 2));
+                    if (!fp_is_finite(raw, ew_bits))
+                        return false;
+                }
+                return true;
+            };
+
+            if (!tile_is_finite(src_a) ||
+                (!fp_tred_ordering && !tile_is_finite(src_b))) {
+                return -1;
+            }
+
+            if (op == 0x1 && (funct == 3 || funct == 4)) {
+                tile_read_64bytes(s, s.tdst, fp_existing);
+                fp_existing_loaded = true;
+                if (!tile_is_finite(fp_existing))
+                    return -1;
+            }
+
+            const bool consumes_acc =
+                op == 0x1 && (funct == 1 || funct == 5) &&
+                (s.tctrl & 0x1) && !(s.tctrl & 0x2);
+            if (consumes_acc) {
+                const int acc_count = funct == 1 ? 1 : 4;
+                for (int index = 0; index < acc_count; index++) {
+                    if (!fp32_bits_are_finite(s.acc[index]))
+                        return -1;
+                }
+            }
+
+            // BF16 spans essentially the full FP32 exponent range.  Finite
+            // BF16 operands can therefore produce a mathematical result that
+            // Python refuses to pack as FP32, while native float arithmetic
+            // would silently yield infinity.  Preflight every arithmetic
+            // result in double precision and fall back transactionally so the
+            // Python oracle owns both the exception and its architectural
+            // post-state.
+            if (ew_bits == EW_BF16) {
+                auto lane_value = [&](const Tile& tile, int lane) {
+                    return static_cast<double>(fp_decode(
+                        static_cast<uint16_t>(
+                            tile_get_elem(tile, lane, 2)),
+                        ew_bits));
+                };
+
+                if (fp_talu_arithmetic) {
+                    for (int lane = 0; lane < num_lanes; lane++) {
+                        const double a = lane_value(src_a, lane);
+                        const double b = lane_value(src_b, lane);
+                        const double result =
+                            funct == 0 ? a + b : a - b;
+                        if (fp32_pack_overflows(result))
+                            return -1;
+                    }
+                } else if (fp_tmul_arithmetic) {
+                    if (funct == 0 || funct == 2) {
+                        for (int lane = 0; lane < num_lanes; lane++) {
+                            const double result =
+                                lane_value(src_a, lane) *
+                                lane_value(src_b, lane);
+                            if (fp32_pack_overflows(result))
+                                return -1;
+                        }
+                    } else if (funct == 3 || funct == 4) {
+                        for (int lane = 0; lane < num_lanes; lane++) {
+                            const double result =
+                                lane_value(src_a, lane) *
+                                    lane_value(src_b, lane) +
+                                lane_value(fp_existing, lane);
+                            if (fp32_pack_overflows(result))
+                                return -1;
+                        }
+                    } else if (funct == 1) {
+                        double total = 0.0;
+                        for (int lane = 0; lane < num_lanes; lane++) {
+                            total += lane_value(src_a, lane) *
+                                     lane_value(src_b, lane);
+                        }
+                        if (consumes_acc) {
+                            total =
+                                static_cast<double>(bits_to_fp32(
+                                    static_cast<uint32_t>(s.acc[0]))) +
+                                total;
+                        }
+                        if (fp32_pack_overflows(total))
+                            return -1;
+                    } else if (funct == 5) {
+                        const int chunk_size = num_lanes / 4;
+                        for (int chunk = 0; chunk < 4; chunk++) {
+                            double total = 0.0;
+                            for (int lane = 0; lane < chunk_size; lane++) {
+                                const int index =
+                                    chunk * chunk_size + lane;
+                                total += lane_value(src_a, index) *
+                                         lane_value(src_b, index);
+                            }
+                            if (consumes_acc) {
+                                total =
+                                    static_cast<double>(bits_to_fp32(
+                                        static_cast<uint32_t>(
+                                            s.acc[chunk]))) +
+                                    total;
+                            }
+                            if (fp32_pack_overflows(total))
+                                return -1;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Extended Tile ALU (EXT modifier 8)
     if (s.ext_modifier == 8 && op == 0x0) {
@@ -1144,18 +1632,21 @@ static int exec_mex(CPUState& s, int n) {
             uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
             uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
             int bits = elem_bytes * 8;
-            uint64_t mask = (elem_bytes < 8) ? ((1ULL << bits) - 1) : MASK64;
+            uint64_t mask = elem_mask(elem_bytes);
             int shift_amt = eb_val & (bits - 1);
             uint64_t r = 0;
             if (funct == 0) {  // VSHR
                 if (is_signed) {
-                    int64_t sv = to_signed_eb(ea, elem_bytes);
-                    if (rounding && shift_amt > 0) sv += (1LL << (shift_amt - 1));
-                    r = (sv >> shift_amt) & mask;
+                    __int128 value = to_signed_eb(ea, elem_bytes);
+                    if (rounding && shift_amt > 0)
+                        value += static_cast<__int128>(1) << (shift_amt - 1);
+                    r = static_cast<uint64_t>(
+                            floor_shift_right(value, static_cast<unsigned>(shift_amt))) & mask;
                 } else {
-                    uint64_t v = ea;
-                    if (rounding && shift_amt > 0) v += (1ULL << (shift_amt - 1));
-                    r = (v >> shift_amt) & mask;
+                    __uint128_t value = ea;
+                    if (rounding && shift_amt > 0)
+                        value += static_cast<__uint128_t>(1) << (shift_amt - 1);
+                    r = static_cast<uint64_t>(value >> shift_amt) & mask;
                 }
             } else if (funct == 1) {  // VSHL
                 r = (ea << shift_amt) & mask;
@@ -1194,7 +1685,9 @@ static int exec_mex(CPUState& s, int n) {
                         else {
                             float fa = fp_decode(ea, ew_bits);
                             float fb = fp_decode(eb_val, ew_bits);
-                            r = fp_encode(fa < fb ? fa : fb, ew_bits);
+                            // Python min/max preserve the first operand on
+                            // equality, including the sign of zero.
+                            r = fp_encode(fb < fa ? fb : fa, ew_bits);
                         }
                         break;
                     }
@@ -1204,7 +1697,7 @@ static int exec_mex(CPUState& s, int n) {
                         else {
                             float fa = fp_decode(ea, ew_bits);
                             float fb = fp_decode(eb_val, ew_bits);
-                            r = fp_encode(fa > fb ? fa : fb, ew_bits);
+                            r = fp_encode(fb > fa ? fb : fa, ew_bits);
                         }
                         break;
                     }
@@ -1227,23 +1720,29 @@ static int exec_mex(CPUState& s, int n) {
             uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
             uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
             int bits = elem_bytes * 8;
-            uint64_t mask = (elem_bytes < 8) ? ((1ULL << bits) - 1) : MASK64;
+            uint64_t mask = elem_mask(elem_bytes);
             uint64_t r = 0;
 
             switch (funct) {
                 case 0: {  // ADD
                     if (saturate) {
                         if (is_signed) {
-                            int64_t sum = to_signed_eb(ea, elem_bytes) +
-                                          to_signed_eb(eb_val, elem_bytes);
-                            int64_t hi = (1LL << (bits-1)) - 1;
-                            int64_t lo = -(1LL << (bits-1));
+                            __int128 sum = static_cast<__int128>(
+                                               to_signed_eb(ea, elem_bytes)) +
+                                           static_cast<__int128>(
+                                               to_signed_eb(eb_val, elem_bytes));
+                            const __int128 bound =
+                                static_cast<__int128>(1) << (bits - 1);
+                            const __int128 hi = bound - 1;
+                            const __int128 lo = -bound;
                             if (sum > hi) sum = hi;
                             if (sum < lo) sum = lo;
-                            r = sum & mask;
+                            r = static_cast<uint64_t>(sum) & mask;
                         } else {
-                            uint64_t sum = ea + eb_val;
-                            r = (sum > mask) ? mask : sum;
+                            const __uint128_t sum =
+                                static_cast<__uint128_t>(ea) + eb_val;
+                            r = sum > static_cast<__uint128_t>(mask)
+                                    ? mask : static_cast<uint64_t>(sum);
                         }
                     } else {
                         r = (ea + eb_val) & mask;
@@ -1253,16 +1752,19 @@ static int exec_mex(CPUState& s, int n) {
                 case 1: {  // SUB
                     if (saturate) {
                         if (is_signed) {
-                            int64_t diff = to_signed_eb(ea, elem_bytes) -
-                                           to_signed_eb(eb_val, elem_bytes);
-                            int64_t hi = (1LL << (bits-1)) - 1;
-                            int64_t lo = -(1LL << (bits-1));
+                            __int128 diff = static_cast<__int128>(
+                                                to_signed_eb(ea, elem_bytes)) -
+                                            static_cast<__int128>(
+                                                to_signed_eb(eb_val, elem_bytes));
+                            const __int128 bound =
+                                static_cast<__int128>(1) << (bits - 1);
+                            const __int128 hi = bound - 1;
+                            const __int128 lo = -bound;
                             if (diff > hi) diff = hi;
                             if (diff < lo) diff = lo;
-                            r = diff & mask;
+                            r = static_cast<uint64_t>(diff) & mask;
                         } else {
-                            int64_t diff = (int64_t)ea - (int64_t)eb_val;
-                            r = (diff < 0) ? 0 : diff;
+                            r = ea < eb_val ? 0 : ea - eb_val;
                         }
                     } else {
                         r = (ea - eb_val) & mask;
@@ -1290,8 +1792,10 @@ static int exec_mex(CPUState& s, int n) {
                 }
                 case 7: {  // ABS
                     if (is_signed) {
-                        int64_t sv = to_signed_eb(ea, elem_bytes);
-                        r = (sv < 0 ? -sv : sv) & mask;
+                        const int64_t sv = to_signed_eb(ea, elem_bytes);
+                        // Compute the magnitude in unsigned arithmetic so
+                        // abs(INT64_MIN) is defined and wraps like Python.
+                        r = (sv < 0 ? (~ea + 1) : ea) & mask;
                     } else {
                         r = ea;
                     }
@@ -1321,23 +1825,24 @@ static int exec_mex(CPUState& s, int n) {
                     s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
                     s.tctrl &= ~0x2ULL;
                 }
-                float total = 0.0f;
+                double total = 0.0;
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
+                    double fa = fp_decode(
+                        (uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
+                    double fb = fp_decode(
+                        (uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
                     total += fa * fb;
                 }
                 if (s.tctrl & 0x1)  // ACC_ACC
-                    total += bits_to_fp32((uint32_t)s.acc[0]);
-                s.acc[0] = fp32_to_bits(total);
+                    total = static_cast<double>(
+                                bits_to_fp32((uint32_t)s.acc[0])) + total;
+                s.acc[0] = fp32_to_bits(static_cast<float>(total));
                 s.acc[1] = s.acc[2] = s.acc[3] = 0;
                 s.flag_z = (total == 0.0f) ? 1 : 0;
                 return 3;
             }
             if (funct == 2) {  // WMUL — fp16/bf16 → fp32 widening multiply
-                uint8_t dst0[64], dst1[64];
-                std::memset(dst0, 0, 64);
-                std::memset(dst1, 0, 64);
+                Tile dst0{}, dst1{};
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
@@ -1352,24 +1857,26 @@ static int exec_mex(CPUState& s, int n) {
                 return 2;
             }
             if (funct == 3) {  // MAC — fp mul-accumulate: dst += a*b
-                uint8_t existing[64];
-                tile_read_64bytes(s, s.tdst, existing);
+                // Preloaded by the transactional finite-input check above.
+                if (!fp_existing_loaded)
+                    tile_read_64bytes(s, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    float fc = fp_decode((uint16_t)tile_get_elem(existing, lane, 2), ew_bits);
+                    float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fc + fa * fb, ew_bits));
                 }
                 tile_write_64bytes(s, s.tdst, dst);
                 return 2;
             }
             if (funct == 4) {  // FMA — dst = a*b + dst
-                uint8_t existing[64];
-                tile_read_64bytes(s, s.tdst, existing);
+                // Preloaded by the transactional finite-input check above.
+                if (!fp_existing_loaded)
+                    tile_read_64bytes(s, s.tdst, fp_existing);
                 for (int lane = 0; lane < num_lanes; lane++) {
                     float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
                     float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    float fc = fp_decode((uint16_t)tile_get_elem(existing, lane, 2), ew_bits);
+                    float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
                     tile_set_elem(dst, lane, 2, fp_encode(fa * fb + fc, ew_bits));
                 }
                 tile_write_64bytes(s, s.tdst, dst);
@@ -1382,16 +1889,19 @@ static int exec_mex(CPUState& s, int n) {
                     s.tctrl &= ~0x2ULL;
                 }
                 for (int k = 0; k < 4; k++) {
-                    float dot = 0.0f;
+                    double dot = 0.0;
                     for (int lane = 0; lane < chunk_size; lane++) {
                         int idx = k * chunk_size + lane;
-                        float fa = fp_decode((uint16_t)tile_get_elem(src_a, idx, 2), ew_bits);
-                        float fb = fp_decode((uint16_t)tile_get_elem(src_b, idx, 2), ew_bits);
+                        double fa = fp_decode(
+                            (uint16_t)tile_get_elem(src_a, idx, 2), ew_bits);
+                        double fb = fp_decode(
+                            (uint16_t)tile_get_elem(src_b, idx, 2), ew_bits);
                         dot += fa * fb;
                     }
                     if (s.tctrl & 0x1)  // ACC_ACC
-                        dot += bits_to_fp32((uint32_t)s.acc[k]);
-                    s.acc[k] = fp32_to_bits(dot);
+                        dot = static_cast<double>(
+                                  bits_to_fp32((uint32_t)s.acc[k])) + dot;
+                    s.acc[k] = fp32_to_bits(static_cast<float>(dot));
                 }
                 s.flag_z = (s.acc[0] == 0 && s.acc[1] == 0 &&
                             s.acc[2] == 0 && s.acc[3] == 0) ? 1 : 0;
@@ -1405,45 +1915,34 @@ static int exec_mex(CPUState& s, int n) {
             for (int lane = 0; lane < num_lanes; lane++) {
                 uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
                 uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-                uint64_t mask = (elem_bytes < 8) ? ((1ULL << (elem_bytes*8)) - 1) : MASK64;
-                uint64_t r;
-                if (is_signed)
-                    r = (to_signed_eb(ea, elem_bytes) * to_signed_eb(eb_val, elem_bytes)) & mask;
-                else
-                    r = (ea * eb_val) & mask;
+                const uint64_t mask = elem_mask(elem_bytes);
+                uint64_t r = 0;
+                if (is_signed) {
+                    const __int128 product =
+                        static_cast<__int128>(to_signed_eb(ea, elem_bytes)) *
+                        static_cast<__int128>(to_signed_eb(eb_val, elem_bytes));
+                    r = static_cast<uint64_t>(product) & mask;
+                } else {
+                    const __uint128_t product =
+                        static_cast<__uint128_t>(ea) * eb_val;
+                    r = static_cast<uint64_t>(product) & mask;
+                }
                 tile_set_elem(dst, lane, elem_bytes, r);
             }
             tile_write_64bytes(s, s.tdst, dst);
-            return 0;
+            return 1;
         }
-        if (funct == 1 || funct == 4) {  // DOT, DOTACC
-            // Handle ACC_ZERO (TCTRL bit 1): clear accumulator, one-shot
-            if (s.tctrl & 0x2) {
-                s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                s.tctrl &= ~0x2;
-            }
-            bool dot_acc = (funct == 4) || ((s.tctrl & 0x1) != 0);
-            int64_t acc_val = dot_acc ? (int64_t)s.acc[0] : 0;
-            for (int lane = 0; lane < num_lanes; lane++) {
-                uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
-                uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-                if (is_signed)
-                    acc_val += to_signed_eb(ea, elem_bytes) * to_signed_eb(eb_val, elem_bytes);
-                else
-                    acc_val += (int64_t)(ea * eb_val);
-            }
-            s.acc[0] = (uint64_t)acc_val;
-            s.flag_z = (s.acc[0] == 0) ? 1 : 0;
-            return 0;
-        }
-        if (funct == 2 || funct == 3 || funct == 5 || funct == 6) {
-            // FMA, MAC, WMUL, MAXIDX, MINIDX — fall back to Python
-            return -1;
-        }
-        return -1;  // unknown funct
+        // Non-MUL integer functions were routed to Python before source reads.
+        return -1;
     }
 
     if (op == 0x2) {  // TRED (reductions)
+        // Keep this guard adjacent to ACC_ZERO as a transactional invariant,
+        // even though the same cases are routed before source reads above.
+        if (!is_fp || funct == 0 || funct == 3 ||
+            funct == 4 || funct == 5)
+            return -1;
+
         // Handle ACC_ZERO (TCTRL bit 1): clear accumulator, one-shot
         if (s.tctrl & 0x2) {
             s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
@@ -1528,152 +2027,16 @@ static int exec_mex(CPUState& s, int n) {
                 s.acc[2] = s.acc[3] = 0;
                 return 0;
             }
-            // POPCNT, L1 on FP bits — fall through to integer path
+            // funct is masked to three bits; FP POPCNT/L1 were routed before
+            // ACC_ZERO, and every other value returned above.
+            return 0;
         }
-
-        // ---- Integer TRED ----
-        uint64_t result = 0;
-
-        switch (funct) {
-            case 0: {  // SUM
-                int64_t sum = 0;
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    uint64_t v = tile_get_elem(src_a, lane, elem_bytes);
-                    if (is_signed)
-                        sum += to_signed_eb(v, elem_bytes);
-                    else
-                        sum += (int64_t)v;
-                }
-                result = (uint64_t)sum;
-                break;
-            }
-            case 1: {  // MIN
-                int64_t mn;
-                if (is_signed) {
-                    mn = to_signed_eb(tile_get_elem(src_a, 0, elem_bytes), elem_bytes);
-                    for (int lane = 1; lane < num_lanes; lane++) {
-                        int64_t v = to_signed_eb(tile_get_elem(src_a, lane, elem_bytes), elem_bytes);
-                        if (v < mn) mn = v;
-                    }
-                } else {
-                    mn = tile_get_elem(src_a, 0, elem_bytes);
-                    for (int lane = 1; lane < num_lanes; lane++) {
-                        uint64_t v = tile_get_elem(src_a, lane, elem_bytes);
-                        if (v < (uint64_t)mn) mn = v;
-                    }
-                }
-                result = (uint64_t)mn;
-                break;
-            }
-            case 2: {  // MAX
-                int64_t mx;
-                if (is_signed) {
-                    mx = to_signed_eb(tile_get_elem(src_a, 0, elem_bytes), elem_bytes);
-                    for (int lane = 1; lane < num_lanes; lane++) {
-                        int64_t v = to_signed_eb(tile_get_elem(src_a, lane, elem_bytes), elem_bytes);
-                        if (v > mx) mx = v;
-                    }
-                } else {
-                    mx = tile_get_elem(src_a, 0, elem_bytes);
-                    for (int lane = 1; lane < num_lanes; lane++) {
-                        uint64_t v = tile_get_elem(src_a, lane, elem_bytes);
-                        if (v > (uint64_t)mx) mx = v;
-                    }
-                }
-                result = (uint64_t)mx;
-                break;
-            }
-            case 3: {  // POPCNT
-                uint64_t cnt = 0;
-                for (int i = 0; i < 64; i++)
-                    cnt += __builtin_popcount(src_a[i]);
-                result = cnt;
-                break;
-            }
-            case 4: {  // L1 (sum of absolute values)
-                int64_t sum = 0;
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    uint64_t v = tile_get_elem(src_a, lane, elem_bytes);
-                    if (is_signed) {
-                        int64_t sv = to_signed_eb(v, elem_bytes);
-                        sum += (sv < 0) ? -sv : sv;
-                    } else {
-                        sum += v;
-                    }
-                }
-                result = (uint64_t)sum;
-                break;
-            }
-            case 5: {  // SUMSQ (sum of squares)
-                int64_t sum = 0;
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    uint64_t v = tile_get_elem(src_a, lane, elem_bytes);
-                    if (is_signed) {
-                        int64_t sv = to_signed_eb(v, elem_bytes);
-                        sum += sv * sv;
-                    } else {
-                        sum += (int64_t)(v * v);
-                    }
-                }
-                result = (uint64_t)sum;
-                break;
-            }
-            case 6:   // EMIN (element-min index)
-            case 7: { // EMAX (element-max index)
-                // Fall back for these
-                return -1;
-            }
-        }
-        if (acc_acc) {
-            // Accumulate with existing ACC
-            result += s.acc[0];
-        }
-        s.acc[0] = result;
-        s.flag_z = (result == 0) ? 1 : 0;
         return 0;
     }
 
-    if (op == 0x3) {  // TSYS
-        if (s.ext_modifier == 8) {
-            // Extended TSYS: LOAD2D / STORE2D — fall back to Python
-            return -1;
-        }
-        switch (funct) {
-            case 0: {  // TRANS (8×8 byte transpose)
-                for (int r = 0; r < 8; r++)
-                    for (int c = 0; c < 8; c++)
-                        dst[c * 8 + r] = src_a[r * 8 + c];
-                tile_write_64bytes(s, s.tdst, dst);
-                return 1;
-            }
-            case 1: {  // ZERO
-                tile_zero_64bytes(s, s.tdst);
-                return 0;
-            }
-            case 2: {  // LOADC (cursor load from SB+SR*SW+SC)
-                uint64_t base = s.sb + s.sr * s.sw + s.sc;
-                uint8_t tmp[64];
-                tile_read_64bytes(s, base, tmp);
-                tile_write_64bytes(s, s.tdst, tmp);
-                return 0;
-            }
-            case 3: {  // MOVBANK (move tile from dst to src0)
-                uint8_t tmp[64];
-                tile_read_64bytes(s, s.tdst, tmp);
-                tile_write_64bytes(s, s.tsrc0, tmp);
-                return 0;
-            }
-            case 4: {  // FILL  (fill dst tile with byte from src_b lane 0)
-                uint8_t fill_byte = src_b[0];
-                tile_fill_64bytes(s, s.tdst, fill_byte);
-                return 0;
-            }
-            default:
-                return -1;  // unimplemented TSYS
-        }
-    }
-
-    return -1;  // shouldn't reach
+    // TSYS and all ambiguous integer accumulator paths returned before any
+    // source read or architectural mutation.
+    return -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1729,18 +2092,18 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     }
     if (s.priv_level) {
         // User mode: block HBW entirely, check MPU for RAM
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr;
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
         return s.hbw_mem[addr - s.hbw_base];
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
         return s.ext_mem[addr - s.ext_mem_base];
     }
-    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
         return s.vram_mem[addr - s.vram_base];
     }
     return mem_read8(s, addr);
@@ -1786,20 +2149,20 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr;
             throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+    } else if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
         s.hbw_mem[addr - s.hbw_base] = val;
         return;
     }
-    if (s.ext_mem && addr >= s.ext_mem_base && addr < s.ext_mem_base + s.ext_mem_size) {
+    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
         s.ext_mem[addr - s.ext_mem_base] = val;
         return;
     }
-    if (s.vram_mem && addr >= s.vram_base && addr < s.vram_base + s.vram_size) {
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
         s.vram_mem[addr - s.vram_base] = val;
         return;
     }
@@ -1852,24 +2215,10 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
         return v;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 8 <= s.hbw_size) {
-        uint64_t v;
-        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 8);
-        return v;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 8 <= s.ext_mem_size) {
-        uint64_t v;
-        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 8);
-        return v;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 8 <= s.vram_size) {
-        uint64_t v;
-        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 8);
-        return v;
     }
     return mem_read64(s, addr);
 }
@@ -1912,21 +2261,10 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 8 <= s.hbw_size) {
-        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 8);
-        return;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 8 <= s.ext_mem_size) {
-        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 8);
-        return;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 8 <= s.vram_size) {
-        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 8);
-        return;
     }
     mem_write64(s, addr, val);
 }
@@ -1945,24 +2283,10 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
         return cb.mmio_read8(addr) | ((uint16_t)cb.mmio_read8(addr+1) << 8);
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 2 <= s.hbw_size) {
-        uint16_t v;
-        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 2);
-        return v;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 2 <= s.ext_mem_size) {
-        uint16_t v;
-        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 2);
-        return v;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 2 <= s.vram_size) {
-        uint16_t v;
-        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 2);
-        return v;
     }
     return mem_read16(s, addr);
 }
@@ -1995,21 +2319,10 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 2 <= s.hbw_size) {
-        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 2);
-        return;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 2 <= s.ext_mem_size) {
-        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 2);
-        return;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 2 <= s.vram_size) {
-        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 2);
-        return;
     }
     mem_write16(s, addr, val);
 }
@@ -2047,24 +2360,10 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
         return v;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 4 <= s.hbw_size) {
-        uint32_t v;
-        std::memcpy(&v, s.hbw_mem + (addr - s.hbw_base), 4);
-        return v;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 4 <= s.ext_mem_size) {
-        uint32_t v;
-        std::memcpy(&v, s.ext_mem + (addr - s.ext_mem_base), 4);
-        return v;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 4 <= s.vram_size) {
-        uint32_t v;
-        std::memcpy(&v, s.vram_mem + (addr - s.vram_base), 4);
-        return v;
     }
     return mem_read32(s, addr);
 }
@@ -2097,21 +2396,10 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         return;
     }
     if (s.priv_level) {
-        if (s.hbw_mem && addr >= s.hbw_base && addr < s.hbw_base + s.hbw_size) {
+        if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
             s.trap_addr = addr; throw std::runtime_error("TRAP:PRIV_FAULT");
         }
         mpu_check(s, addr);
-    } else if (s.hbw_mem && addr >= s.hbw_base && (addr - s.hbw_base) + 4 <= s.hbw_size) {
-        std::memcpy(s.hbw_mem + (addr - s.hbw_base), &val, 4);
-        return;
-    }
-    if (s.ext_mem && addr >= s.ext_mem_base && (addr - s.ext_mem_base) + 4 <= s.ext_mem_size) {
-        std::memcpy(s.ext_mem + (addr - s.ext_mem_base), &val, 4);
-        return;
-    }
-    if (s.vram_mem && addr >= s.vram_base && (addr - s.vram_base) + 4 <= s.vram_size) {
-        std::memcpy(s.vram_mem + (addr - s.vram_base), &val, 4);
-        return;
     }
     mem_write32(s, addr, val);
 }
@@ -3782,7 +4070,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 struct RunResult {
     int64_t total_cycles;
     int steps_executed;
-    int stop_reason;  // 0=max_steps, 1=halt, 2=idle
+    int stop_reason;  // 0=max_steps, 1=halt, 2=idle, 3/4=Python fallback
 };
 
 static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) {
@@ -3823,18 +4111,15 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
                 }
                 result.steps_executed++;
             } else if (what == "MEX_FALLBACK") {
-                // Return to Python to handle this MEX instruction
-                // PC was already advanced past the opcode bytes consumed so far;
-                // We need to tell Python to re-execute this instruction.
-                // Rewind PC to the start of the MEX instruction:
-                // byte0 (1) + funct_byte (1) + maybe broadcast_reg (1) = 2 or 3 bytes
-                // This is tricky. Instead, use a different approach:
-                // throw to Python which handles it
-                throw;
+                // The instruction was rewound transactionally by step_one.
+                // Preserve the completed native prefix in RunResult and let
+                // the wrapper execute exactly this one instruction in Python.
+                result.stop_reason = 3;
+                break;
             } else if (what == "EXT_ISA_FALLBACK") {
-                // Unhandled EXT ISA op — PC already rewound.
-                // Return to Python to execute this instruction.
-                throw;
+                // Unhandled EXT ISA op; like MEX fallback, its PC is rewound.
+                result.stop_reason = 4;
+                break;
             } else {
                 throw;
             }
@@ -3901,6 +4186,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("idle", &CPUState::idle)
         .def_readwrite("cycle_count", &CPUState::cycle_count)
         .def_readwrite("tstride_r", &CPUState::tstride_r)
+        .def_readwrite("tstride_c", &CPUState::tstride_c)
         .def_readwrite("ttile_h", &CPUState::ttile_h)
         .def_readwrite("ttile_w", &CPUState::ttile_w)
         .def_readwrite("perf_enable", &CPUState::perf_enable)
@@ -3928,7 +4214,19 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("gf_prime_sel", &CPUState::gf_prime_sel)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
-        .def_readwrite("mem_size", &CPUState::mem_size)
+        .def_property("mem_size",
+            [](const CPUState& s) { return s.mem_size; },
+            [](CPUState& s, uint64_t size) {
+                MemoryMutationGuard guard(s);
+                if (size == 0)
+                    throw py::value_error(
+                        "main memory size must be greater than zero");
+                if (!s.mem_lease || size > s.mem_capacity)
+                    throw py::value_error(
+                        "main memory size exceeds attached buffer capacity");
+                s.mem_size = size;
+                sync_main_memory_ptrs(s);
+            })
         // Register access
         .def("get_reg", [](const CPUState& s, int i) { return s.regs[i & 0x1F]; })
         .def("set_reg", [](CPUState& s, int i, uint64_t v) { s.regs[i & 0x1F] = v; })
@@ -3943,41 +4241,128 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("set_port_map", [](CPUState& s, int i, uint32_t v) { s.port_map[i & 7] = v; })
         // Memory attachment
         .def("attach_mem", [](CPUState& s, py::buffer buf, uint64_t size) {
-            py::buffer_info info = buf.request(true);  // writable
-            s.mem = static_cast<uint8_t*>(info.ptr);
-            s.mem_size = size;
-            s.uart.attach_mem(s.mem, size);
-            // WOTS chain accelerator needs direct memory access (DMA read)
-            s.crypto.wots.mem = s.mem;
-            s.crypto.wots.mem_size = (uint32_t)size;
+            PreparedBuffer prepared =
+                prepare_writable_byte_buffer(buf, size, true);
+            std::unique_ptr<py::buffer_info> old_lease;
+            {
+                MemoryMutationGuard guard(s);
+                old_lease = std::move(s.mem_lease);
+                s.mem_lease = std::move(prepared.lease);
+                s.mem = prepared.ptr;
+                s.mem_size = size;
+                s.mem_capacity = prepared.capacity;
+                sync_main_memory_ptrs(s);
+            }
+            // PyBuffer_Release may invoke arbitrary exporter code.  Release
+            // the replaced export only after the mapping lock is free.
         })
         // HBW memory attachment
         .def("attach_hbw_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
-            py::buffer_info info = buf.request(true);  // writable
-            s.hbw_mem = static_cast<uint8_t*>(info.ptr);
-            s.hbw_base = base;
-            s.hbw_size = size;
+            validate_guest_region(base, size);
+            PreparedBuffer prepared =
+                prepare_writable_byte_buffer(buf, size, false);
+            std::unique_ptr<py::buffer_info> old_lease;
+            {
+                MemoryMutationGuard guard(s);
+                old_lease = std::move(s.hbw_lease);
+                s.hbw_lease = std::move(prepared.lease);
+                s.hbw_mem = prepared.ptr;
+                s.hbw_base = base;
+                s.hbw_size = size;
+                s.hbw_capacity = prepared.capacity;
+                sync_nic_memory_ptrs(s);
+            }
         })
-        .def_readwrite("hbw_base", &CPUState::hbw_base)
-        .def_readwrite("hbw_size", &CPUState::hbw_size)
+        .def_property("hbw_base",
+            [](const CPUState& s) { return s.hbw_base; },
+            [](CPUState& s, uint64_t base) {
+                MemoryMutationGuard guard(s);
+                validate_guest_region(base, s.hbw_size);
+                s.hbw_base = base;
+                sync_nic_memory_ptrs(s);
+            })
+        .def_property("hbw_size",
+            [](const CPUState& s) { return s.hbw_size; },
+            [](CPUState& s, uint64_t size) {
+                MemoryMutationGuard guard(s);
+                if ((size != 0 && !s.hbw_lease) || size > s.hbw_capacity)
+                    throw py::value_error(
+                        "HBW memory size exceeds attached buffer capacity");
+                validate_guest_region(s.hbw_base, size);
+                s.hbw_size = size;
+                sync_nic_memory_ptrs(s);
+            })
         // External memory attachment
         .def("attach_ext_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
-            py::buffer_info info = buf.request(true);  // writable
-            s.ext_mem = static_cast<uint8_t*>(info.ptr);
-            s.ext_mem_base = base;
-            s.ext_mem_size = size;
+            validate_guest_region(base, size);
+            PreparedBuffer prepared =
+                prepare_writable_byte_buffer(buf, size, false);
+            std::unique_ptr<py::buffer_info> old_lease;
+            {
+                MemoryMutationGuard guard(s);
+                old_lease = std::move(s.ext_mem_lease);
+                s.ext_mem_lease = std::move(prepared.lease);
+                s.ext_mem = prepared.ptr;
+                s.ext_mem_base = base;
+                s.ext_mem_size = size;
+                s.ext_mem_capacity = prepared.capacity;
+                sync_nic_memory_ptrs(s);
+            }
         })
-        .def_readwrite("ext_mem_base", &CPUState::ext_mem_base)
-        .def_readwrite("ext_mem_size", &CPUState::ext_mem_size)
+        .def_property("ext_mem_base",
+            [](const CPUState& s) { return s.ext_mem_base; },
+            [](CPUState& s, uint64_t base) {
+                MemoryMutationGuard guard(s);
+                validate_guest_region(base, s.ext_mem_size);
+                s.ext_mem_base = base;
+                sync_nic_memory_ptrs(s);
+            })
+        .def_property("ext_mem_size",
+            [](const CPUState& s) { return s.ext_mem_size; },
+            [](CPUState& s, uint64_t size) {
+                MemoryMutationGuard guard(s);
+                if ((size != 0 && !s.ext_mem_lease) ||
+                    size > s.ext_mem_capacity)
+                    throw py::value_error(
+                        "external memory size exceeds attached buffer capacity");
+                validate_guest_region(s.ext_mem_base, size);
+                s.ext_mem_size = size;
+                sync_nic_memory_ptrs(s);
+            })
         // VRAM memory attachment
         .def("attach_vram", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
-            py::buffer_info info = buf.request(true);  // writable
-            s.vram_mem = static_cast<uint8_t*>(info.ptr);
-            s.vram_base = base;
-            s.vram_size = size;
+            validate_guest_region(base, size);
+            PreparedBuffer prepared =
+                prepare_writable_byte_buffer(buf, size, false);
+            std::unique_ptr<py::buffer_info> old_lease;
+            {
+                MemoryMutationGuard guard(s);
+                old_lease = std::move(s.vram_lease);
+                s.vram_lease = std::move(prepared.lease);
+                s.vram_mem = prepared.ptr;
+                s.vram_base = base;
+                s.vram_size = size;
+                s.vram_capacity = prepared.capacity;
+            }
         })
-        .def_readwrite("vram_base", &CPUState::vram_base)
-        .def_readwrite("vram_size", &CPUState::vram_size)
+        .def_property("vram_base",
+            [](const CPUState& s) { return s.vram_base; },
+            [](CPUState& s, uint64_t base) {
+                MemoryMutationGuard guard(s);
+                validate_guest_region(base, s.vram_size);
+                s.vram_base = base;
+            })
+        .def_property("vram_size",
+            [](const CPUState& s) { return s.vram_size; },
+            [](CPUState& s, uint64_t size) {
+                MemoryMutationGuard guard(s);
+                if ((size != 0 && !s.vram_lease) ||
+                    size > s.vram_capacity)
+                    throw py::value_error(
+                        "VRAM size exceeds attached buffer capacity");
+                validate_guest_region(s.vram_base, size);
+                s.vram_size = size;
+            })
         // Native UART
         .def("uart_init", [](CPUState& s) {
             s.uart.init();
@@ -4014,7 +4399,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.crypto.init();
             // Ensure WOTS chain has current memory pointer
             s.crypto.wots.mem = s.mem;
-            s.crypto.wots.mem_size = (uint32_t)s.mem_size;
+            s.crypto.wots.mem_size = s.mem_size;
         })
         .def("disable_crypto", [](CPUState& s) {
             s.crypto.enabled = false;
@@ -4029,7 +4414,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.crypto.wots.reset();
             s.crypto.wots.sha3 = &s.crypto.sha3;
             s.crypto.wots.mem = s.mem;
-            s.crypto.wots.mem_size = (uint32_t)s.mem_size;
+            s.crypto.wots.mem_size = s.mem_size;
         })
         .def("crypto_wots_status", [](const CPUState& s) -> uint8_t {
             return s.crypto.wots.status;
@@ -4057,11 +4442,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("nic_sync_mem_ptrs", [](CPUState& s) {
             // Re-sync memory pointers after attach_ext_mem / attach_hbw_mem
-            s.nic.attach_mem_ptrs(
-                s.mem, s.mem_size,
-                s.hbw_mem, s.hbw_base, s.hbw_size,
-                s.ext_mem, s.ext_mem_base, s.ext_mem_size
-            );
+            MemoryMutationGuard guard(s);
+            sync_nic_memory_ptrs(s);
         })
         .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
             // tx_callback: called from C++ when NIC sends a frame
@@ -4204,6 +4586,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Returns None if the framebuffer base address doesn't map to
         // any attached memory region.
         .def("render_fb_rgb", [](CPUState& s) -> py::object {
+            ExclusiveMemoryUseGuard memory_guard(
+                s, "CPUState framebuffer render is busy");
             uint32_t w = s.fb.width;
             uint32_t h = s.fb.height;
             uint32_t stride = s.fb.stride;
@@ -4218,18 +4602,18 @@ PYBIND11_MODULE(_mp64_accel, m) {
             uint64_t mem_size = 0;
             uint64_t mem_off = 0;
 
-            if (s.vram_mem && base >= s.vram_base
-                && base < s.vram_base + s.vram_size) {
+            if (s.vram_mem &&
+                region_contains(s.vram_base, s.vram_size, base)) {
                 src = s.vram_mem;
                 mem_off = base - s.vram_base;
                 mem_size = s.vram_size;
-            } else if (s.ext_mem && base >= s.ext_mem_base
-                       && base < s.ext_mem_base + s.ext_mem_size) {
+            } else if (s.ext_mem &&
+                       region_contains(s.ext_mem_base, s.ext_mem_size, base)) {
                 src = s.ext_mem;
                 mem_off = base - s.ext_mem_base;
                 mem_size = s.ext_mem_size;
-            } else if (s.hbw_mem && base >= s.hbw_base
-                       && base < s.hbw_base + s.hbw_size) {
+            } else if (s.hbw_mem &&
+                       region_contains(s.hbw_base, s.hbw_size, base)) {
                 src = s.hbw_mem;
                 mem_off = base - s.hbw_base;
                 mem_size = s.hbw_size;
@@ -4239,7 +4623,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
 
             // Allocate output: shape (w, h, 3) for pygame surfarray
             auto result = py::array_t<uint8_t>({(int)w, (int)h, 3});
+            std::memset(result.mutable_data(), 0,
+                        static_cast<size_t>(result.nbytes()));
             auto buf = result.mutable_unchecked<3>();
+            const auto palette = s.fb.palette;
 
             // Release GIL for the pixel conversion loop
             {
@@ -4247,13 +4634,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
 
                 if (mode == 0) {
                     // 8-bit indexed — palette lookup
-                    const auto& pal = s.fb.palette;
                     for (uint32_t y = 0; y < h; y++) {
                         uint64_t row_off = mem_off + (uint64_t)y * stride;
                         if (row_off + w > mem_size) break;
                         const uint8_t* row = src + row_off;
                         for (uint32_t x = 0; x < w; x++) {
-                            uint32_t rgb = pal[row[x]];
+                            uint32_t rgb = palette[row[x]];
                             buf(x, y, 0) = (rgb >> 16) & 0xFF;
                             buf(x, y, 1) = (rgb >>  8) & 0xFF;
                             buf(x, y, 2) =  rgb        & 0xFF;
@@ -4264,10 +4650,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     for (uint32_t y = 0; y < h; y++) {
                         uint64_t row_off = mem_off + (uint64_t)y * stride;
                         if (row_off + (uint64_t)w * 2 > mem_size) break;
-                        const uint16_t* row =
-                            reinterpret_cast<const uint16_t*>(src + row_off);
+                        const uint8_t* row = src + row_off;
                         for (uint32_t x = 0; x < w; x++) {
-                            uint16_t px = row[x];
+                            const uint32_t byte_off = x * 2;
+                            const uint16_t px =
+                                static_cast<uint16_t>(row[byte_off]) |
+                                (static_cast<uint16_t>(row[byte_off + 1]) << 8);
                             buf(x, y, 0) = ((px >> 11) & 0x1F) << 3;
                             buf(x, y, 1) = ((px >>  5) & 0x3F) << 2;
                             buf(x, y, 2) = ( px        & 0x1F) << 3;
@@ -4503,6 +4891,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return result.cast<uint64_t>();
             };
         }
+        // A scanout may briefly own the memory mapping while its conversion
+        // loop runs without the GIL.  Release the GIL only for blocking lock
+        // acquisition, then retain it for all single-step Python callbacks.
+        std::unique_ptr<CPUExecutionGuard> execution_guard;
+        {
+            py::gil_scoped_release release;
+            execution_guard = std::make_unique<CPUExecutionGuard>(s);
+        }
         return step_one(s, cb);
     },
     py::arg("state"),
@@ -4554,6 +4950,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             };
         }
         py::gil_scoped_release release;
+        CPUExecutionGuard execution_guard(s);
         return run_steps(s, cb, max_steps);
     },
     py::arg("state"),

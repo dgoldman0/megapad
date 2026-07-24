@@ -96,14 +96,19 @@ class Megapad64:
 
         # C++ state
         self._cs = _accel.CPUState()
-        self._cs.mem_size = mem_size
         self._cs.attach_mem(self._mem, mem_size)
         self._cs.core_id = core_id
         self._cs.num_cores = num_cores
         self._cs.psel = 3
         self._cs.xsel = 2
         self._cs.spsel = 15
+        self._cs.sw = 1
+        self._cs.ttile_h = 8
+        self._cs.ttile_w = 8
+        self._cs.perf_enable = 1
+        self._cs.icache_enabled = 1
         self._cs.ext_modifier = -1
+        self._cs.crc_acc = 0xFFFF_FFFF
 
         # Initialize C++ crypto devices (AES, SHA-256, SHA-3, FieldALU)
         self._cs.init_crypto()
@@ -132,25 +137,28 @@ class Megapad64:
 
     @mem.setter
     def mem(self, value):
-        self._mem = value
         sz = len(value)
-        self._cs.mem_size = sz
-        self._cs.attach_mem(self._mem, sz)
+        # Commit Python-visible ownership only after the native attachment
+        # has accepted and pinned the replacement buffer.  This keeps the
+        # previous mapping intact when validation fails.
+        self._cs.attach_mem(value, sz)
+        self._mem = value
+        self.mem_size = sz
 
     def attach_hbw(self, buf: bytearray, base: int, size: int):
         """Attach HBW math RAM buffer to C++ state."""
-        self._hbw_buf = buf  # prevent GC
         self._cs.attach_hbw_mem(buf, base, size)
+        self._hbw_buf = buf  # Python fallback uses the original object
 
     def attach_ext_mem(self, buf: bytearray, base: int, size: int):
         """Attach external memory (HyperRAM/SDRAM) buffer to C++ state."""
-        self._ext_mem_buf = buf  # prevent GC
         self._cs.attach_ext_mem(buf, base, size)
+        self._ext_mem_buf = buf  # Python fallback uses the original object
 
     def attach_vram(self, buf: bytearray, base: int, size: int):
         """Attach dedicated VRAM buffer to C++ state."""
-        self._vram_buf = buf  # prevent GC
         self._cs.attach_vram(buf, base, size)
+        self._vram_buf = buf  # Python fallback uses the original object
 
     def register_accel_hook(self, addr: int, hook_id: int):
         """Register a CALL.L intercept for a BIOS word address."""
@@ -204,7 +212,7 @@ class Megapad64:
         'tmode', 'tctrl', 'tsrc0', 'tsrc1', 'tdst',
         'ivt_base', 'ivec_id', 'trap_addr',
         'ef_flags', 'halted', 'idle', 'cycle_count',
-        'tstride_r', 'ttile_h', 'ttile_w',
+        'tstride_r', 'tstride_c', 'ttile_h', 'ttile_w',
         'perf_enable', 'perf_cycles', 'perf_stalls',
         'perf_tileops', 'perf_extmem',
         'bist_status', 'bist_fail_addr', 'bist_fail_data',
@@ -213,6 +221,9 @@ class Megapad64:
         'priv_level',
         'mpu_base', 'mpu_limit',
         'ext_modifier',
+        'crc_acc', 'crc_mode',
+        'sha_mode', 'sha_msglen_lo', 'sha_msglen_hi',
+        'gf_prime_sel',
         'core_id', 'num_cores',
     ):
         exec(f"""
@@ -233,9 +244,6 @@ def {_attr}(self, v):
     @_ext_modifier.setter
     def _ext_modifier(self, v):
         self._cs.ext_modifier = v
-
-    # tstride_c only exists in Python (reserved in C++)
-    tstride_c: int = 0
 
     # ── Accumulators ─────────────────────────────────────
 
@@ -446,6 +454,7 @@ def {_attr}(self, v):
         fb = self._get_fallback()
         _sync_cs_to_py(self._cs, fb)
         fb.mem = self.mem               # share memory
+        fb.mem_size = self.mem_size     # replacement may change geometry
         fb.mem_read8 = self.mem_read8    # use patched MMIO
         fb.mem_write8 = self.mem_write8
         fb.mem_read16 = self.mem_read16
@@ -468,11 +477,14 @@ def {_attr}(self, v):
         if vram is not None:
             fb.attach_vram(vram, self._cs.vram_base, self._cs.vram_size)
 
-        cycles = fb.step()
-
-        # Sync back Python → C++
-        _sync_py_to_cs(fb, self._cs)
-        return cycles
+        # The Python oracle may raise after advancing PC or changing other
+        # architectural state.  Keep the native state coherent on both the
+        # successful and exceptional paths so a caught guest exception cannot
+        # leave the two backends at different instruction boundaries.
+        try:
+            return fb.step()
+        finally:
+            _sync_py_to_cs(fb, self._cs)
 
     def _get_fallback(self) -> _PyMegapad64:
         if self._py_fallback is None:
@@ -506,20 +518,25 @@ def {_attr}(self, v):
                 mmio_end=0xFFFF_FF80_0000_0000,
                 max_steps=max_steps,
             )
-            return result.steps_executed, result.stop_reason
         except RuntimeError as e:
             msg = str(e)
             if msg == "HALT":
                 return 0, 1
-            elif msg == "MEX_FALLBACK" or msg == "EXT_ISA_FALLBACK":
-                # Single-step fallback then resume
-                self._step_python_fallback()
-                return 1, 0
             elif msg.startswith("TRAP:"):
                 self._handle_trap(msg)
                 return 1, 0  # trap handled, continue
             else:
                 raise
+        if result.stop_reason in (3, 4):
+            # Native execution stopped immediately before an instruction
+            # delegated to the Python oracle.  Preserve every completed
+            # native instruction in the public count, then execute and count
+            # the one pending fallback instruction.  This deliberately runs
+            # outside the native control-string handler so callback errors
+            # propagate unchanged.
+            self._step_python_fallback()
+            return result.steps_executed + 1, 0
+        return result.steps_executed, result.stop_reason
 
     # -- Instruction size (for SKIP) --
 
@@ -529,6 +546,7 @@ def {_attr}(self, v):
         fb = self._get_fallback()
         _sync_cs_to_py(self._cs, fb)
         fb.mem = self.mem
+        fb.mem_size = self.mem_size
         return fb._next_instruction_size()
 
     # -- Trap delivery --
@@ -593,8 +611,7 @@ def {_attr}(self, v):
             if self.halted or self.idle:
                 break
             try:
-                self.step()
-                total += 1
+                total += self.step()
             except TrapError as e:
                 if self.ivt_base != 0:
                     self._trap(e.ivec_id)
@@ -712,6 +729,7 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.idle = cs.idle
     py_cpu.cycle_count = cs.cycle_count
     py_cpu.tstride_r = cs.tstride_r
+    py_cpu.tstride_c = cs.tstride_c
     py_cpu.ttile_h = cs.ttile_h
     py_cpu.ttile_w = cs.ttile_w
     py_cpu.perf_enable = cs.perf_enable
@@ -776,6 +794,7 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.idle = py_cpu.idle
     cs.cycle_count = py_cpu.cycle_count
     cs.tstride_r = py_cpu.tstride_r
+    cs.tstride_c = py_cpu.tstride_c
     cs.ttile_h = py_cpu.ttile_h
     cs.ttile_w = py_cpu.ttile_w
     cs.perf_enable = py_cpu.perf_enable

@@ -261,12 +261,18 @@ struct NICDevice {
     //  DMA memory access (direct, no Python callback!)
     // -------------------------------------------------------------------
 
+    static bool mapped_region_contains(
+            uint64_t base, uint64_t size, uint64_t addr) {
+        return addr >= base && (addr - base) < size;
+    }
+
     uint8_t dma_read_byte(uint64_t addr) const {
         // Check ext_mem first (most likely for TLS buffers in userland)
-        if (ext_mem && addr >= ext_mem_base && addr < ext_mem_base + ext_mem_size)
+        if (ext_mem && mapped_region_contains(
+                ext_mem_base, ext_mem_size, addr))
             return ext_mem[addr - ext_mem_base];
         // HBW memory
-        if (hbw_mem && addr >= hbw_base && addr < hbw_base + hbw_size)
+        if (hbw_mem && mapped_region_contains(hbw_base, hbw_size, addr))
             return hbw_mem[addr - hbw_base];
         // Main RAM
         if (mem && addr < mem_size)
@@ -275,11 +281,12 @@ struct NICDevice {
     }
 
     void dma_write_byte(uint64_t addr, uint8_t val) {
-        if (ext_mem && addr >= ext_mem_base && addr < ext_mem_base + ext_mem_size) {
+        if (ext_mem && mapped_region_contains(
+                ext_mem_base, ext_mem_size, addr)) {
             ext_mem[addr - ext_mem_base] = val;
             return;
         }
-        if (hbw_mem && addr >= hbw_base && addr < hbw_base + hbw_size) {
+        if (hbw_mem && mapped_region_contains(hbw_base, hbw_size, addr)) {
             hbw_mem[addr - hbw_base] = val;
             return;
         }
