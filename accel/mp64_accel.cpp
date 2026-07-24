@@ -249,6 +249,159 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+//  System virtual time and deterministic event horizons
+// ---------------------------------------------------------------------------
+
+class SystemClock {
+public:
+    static constexpr int EVENT_TIMER = 0;
+    static constexpr int EVENT_FRAMEBUFFER = 1;
+    static constexpr int EVENT_RTC = 2;
+    static constexpr int EVENT_INTERRUPT = 3;
+    static constexpr int EVENT_EXTERNAL = 4;
+    static constexpr int EVENT_SOURCE_COUNT = 5;
+
+    struct Snapshot {
+        uint64_t cycles;
+        bool has_deadline;
+        uint64_t earliest_deadline;
+        uint64_t source_mask;
+        std::array<uint64_t, EVENT_SOURCE_COUNT> deadlines;
+        uint64_t active_sources;
+    };
+
+    uint64_t cycles() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return cycles_;
+    }
+
+    void advance_by(
+            uint64_t delta,
+            TimerDevice& timer,
+            FramebufferDevice& framebuffer,
+            RTCDevice& rtc) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        advance_by_unlocked(delta, timer, framebuffer, rtc);
+    }
+
+    void advance_to(
+            uint64_t target,
+            TimerDevice& timer,
+            FramebufferDevice& framebuffer,
+            RTCDevice& rtc) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (target < cycles_)
+            throw std::invalid_argument(
+                "system cycle target cannot move backwards");
+        advance_by_unlocked(
+            target - cycles_, timer, framebuffer, rtc);
+    }
+
+    void set_event_deadline(int source_id, uint64_t deadline) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        validate_source(source_id);
+        if (deadline < cycles_)
+            throw std::invalid_argument(
+                "event deadline cannot precede current system time");
+        deadlines_[static_cast<std::size_t>(source_id)] = deadline;
+        active_sources_ |= uint64_t{1} << source_id;
+    }
+
+    void clear_event_deadline(int source_id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        validate_source(source_id);
+        active_sources_ &= ~(uint64_t{1} << source_id);
+    }
+
+    Snapshot snapshot() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (active_sources_ == 0)
+            return {
+                cycles_, false, 0, 0, deadlines_, active_sources_
+            };
+
+        const uint64_t earliest = earliest_deadline_unlocked();
+        uint64_t mask = 0;
+        for (int source_id = 0;
+             source_id < EVENT_SOURCE_COUNT;
+             source_id++) {
+            const uint64_t source_bit = uint64_t{1} << source_id;
+            if (!(active_sources_ & source_bit))
+                continue;
+            const uint64_t deadline =
+                deadlines_[static_cast<std::size_t>(source_id)];
+            if (deadline == earliest)
+                mask |= source_bit;
+        }
+        return {
+            cycles_,
+            true,
+            earliest,
+            mask,
+            deadlines_,
+            active_sources_,
+        };
+    }
+
+private:
+    static void validate_source(int source_id) {
+        if (source_id < 0 || source_id >= EVENT_SOURCE_COUNT)
+            throw std::invalid_argument(
+                "system event source must be between 0 and 4");
+    }
+
+    uint64_t earliest_deadline_unlocked() const {
+        uint64_t earliest = std::numeric_limits<uint64_t>::max();
+        for (int source_id = 0;
+             source_id < EVENT_SOURCE_COUNT;
+             source_id++) {
+            const uint64_t source_bit = uint64_t{1} << source_id;
+            if (!(active_sources_ & source_bit))
+                continue;
+            earliest = std::min(
+                earliest,
+                deadlines_[static_cast<std::size_t>(source_id)]);
+        }
+        return earliest;
+    }
+
+    void advance_by_unlocked(
+            uint64_t delta,
+            TimerDevice& timer,
+            FramebufferDevice& framebuffer,
+            RTCDevice& rtc) {
+        if (delta == 0)
+            return;
+        if (delta > std::numeric_limits<uint32_t>::max())
+            throw std::invalid_argument(
+                "one system clock advance cannot exceed 32-bit device time");
+        if (cycles_ > std::numeric_limits<uint64_t>::max() - delta)
+            throw std::overflow_error("system cycle counter overflow");
+        const uint64_t target = cycles_ + delta;
+        if (active_sources_ != 0 &&
+            target > earliest_deadline_unlocked()) {
+            throw std::invalid_argument(
+                "system clock advance cannot cross the event horizon");
+        }
+
+        // Preserve the current DeviceBus tick order and call shape.  The
+        // future scheduler will stop at event horizons before invoking this
+        // operation; this ownership slice deliberately does not reinterpret
+        // legacy Python instruction counts as system cycles.
+        const uint32_t device_cycles = static_cast<uint32_t>(delta);
+        timer.tick(device_cycles);
+        framebuffer.tick(device_cycles);
+        rtc.tick(delta);
+        cycles_ = target;
+    }
+
+    mutable std::mutex mutex_;
+    uint64_t cycles_ = 0;
+    std::array<uint64_t, EVENT_SOURCE_COUNT> deadlines_{};
+    uint64_t active_sources_ = 0;
+};
+
+// ---------------------------------------------------------------------------
 //  CPU State — flat execution state plus borrowed memory mappings
 // ---------------------------------------------------------------------------
 
@@ -516,6 +669,7 @@ struct SystemState {
     FramebufferDevice shared_fb{};
     RTCDevice shared_rtc{};
     InterruptRouter shared_interrupts{};
+    SystemClock shared_clock{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -892,6 +1046,22 @@ acquire_shared_memory_use(
     return std::make_unique<SharedMemoryUseGuard>(
         *state.memory,
         permit_native_execution ? &state : nullptr);
+}
+
+static std::unique_ptr<SharedMemoryUseGuard>
+acquire_system_clock_advance_use(SystemState& system) {
+    // A Python continuation or native callback already inside the logical
+    // guest operation must not advance device time reentrantly.  Future
+    // native scheduling can call SystemClock directly while it owns the
+    // mapping-wide execution lease.
+    if (thread_owns_shared_memory(system.shared_memory) ||
+        thread_owns_exclusive_memory(system.shared_memory)) {
+        throw std::runtime_error(
+            "SystemState time cannot advance during guest execution");
+    }
+    py::gil_scoped_release release;
+    return std::make_unique<SharedMemoryUseGuard>(
+        system.shared_memory);
 }
 
 class PythonMemoryUseScope {
@@ -6228,6 +6398,114 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property_readonly_static(
+            "EVENT_TIMER",
+            [](py::object) { return SystemClock::EVENT_TIMER; })
+        .def_property_readonly_static(
+            "EVENT_FRAMEBUFFER",
+            [](py::object) {
+                return SystemClock::EVENT_FRAMEBUFFER;
+            })
+        .def_property_readonly_static(
+            "EVENT_RTC",
+            [](py::object) { return SystemClock::EVENT_RTC; })
+        .def_property_readonly_static(
+            "EVENT_INTERRUPT",
+            [](py::object) {
+                return SystemClock::EVENT_INTERRUPT;
+            })
+        .def_property_readonly_static(
+            "EVENT_EXTERNAL",
+            [](py::object) {
+                return SystemClock::EVENT_EXTERNAL;
+            })
+        .def_property_readonly_static(
+            "EVENT_SOURCE_COUNT",
+            [](py::object) {
+                return SystemClock::EVENT_SOURCE_COUNT;
+            })
+        .def_property_readonly(
+            "system_cycles",
+            [](const SystemState& system) {
+                return system.shared_clock.cycles();
+            })
+        .def(
+            "advance_system_cycles",
+            [](SystemState& system, uint64_t delta) {
+                auto memory_guard =
+                    acquire_system_clock_advance_use(system);
+                system.shared_clock.advance_by(
+                    delta,
+                    system.shared_timer,
+                    system.shared_fb,
+                    system.shared_rtc);
+            },
+            py::arg("delta"))
+        .def(
+            "advance_system_to",
+            [](SystemState& system, uint64_t target) {
+                auto memory_guard =
+                    acquire_system_clock_advance_use(system);
+                system.shared_clock.advance_to(
+                    target,
+                    system.shared_timer,
+                    system.shared_fb,
+                    system.shared_rtc);
+            },
+            py::arg("target"))
+        .def(
+            "set_event_deadline",
+            [](SystemState& system, int source_id, uint64_t deadline) {
+                system.shared_clock.set_event_deadline(
+                    source_id, deadline);
+            },
+            py::arg("source_id"),
+            py::arg("deadline"))
+        .def(
+            "clear_event_deadline",
+            [](SystemState& system, int source_id) {
+                system.shared_clock.clear_event_deadline(source_id);
+            },
+            py::arg("source_id"))
+        .def(
+            "event_horizon",
+            [](const SystemState& system) {
+                const auto snapshot = system.shared_clock.snapshot();
+                py::object deadline = snapshot.has_deadline
+                    ? py::cast(snapshot.earliest_deadline)
+                    : py::none();
+                return py::make_tuple(
+                    snapshot.cycles,
+                    deadline,
+                    snapshot.source_mask);
+            })
+        .def(
+            "system_clock_snapshot",
+            [](const SystemState& system) {
+                const auto snapshot = system.shared_clock.snapshot();
+                py::tuple deadlines(SystemClock::EVENT_SOURCE_COUNT);
+                for (int source_id = 0;
+                     source_id < SystemClock::EVENT_SOURCE_COUNT;
+                     source_id++) {
+                    const uint64_t source_bit =
+                        uint64_t{1} << source_id;
+                    if (snapshot.active_sources & source_bit) {
+                        deadlines[source_id] = py::cast(
+                            snapshot.deadlines[
+                                static_cast<std::size_t>(source_id)]);
+                    } else {
+                        deadlines[source_id] = py::none();
+                    }
+                }
+                py::object earliest = snapshot.has_deadline
+                    ? py::cast(snapshot.earliest_deadline)
+                    : py::none();
+                return py::make_tuple(
+                    snapshot.cycles,
+                    deadlines,
+                    earliest,
+                    snapshot.source_mask);
+            })
         .def(
             "ipi_send",
             [](SystemState& system, int requester_id, int target_id) {

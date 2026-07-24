@@ -23,6 +23,12 @@ REGIONS = (
     ("vram", "attach_vram", 0x3000, "vram_size"),
 )
 
+EVENT_SOURCE_TIMER = 0
+EVENT_SOURCE_FRAMEBUFFER = 1
+EVENT_SOURCE_RTC = 2
+EVENT_SOURCE_INTERRUPT = 3
+EVENT_SOURCE_EXTERNAL = 4
+
 
 class _CountingExporter:
     def __init__(self, size: int, on_acquire=None):
@@ -105,6 +111,206 @@ def test_native_system_state_owns_stable_isolated_core_objects() -> None:
     assert owner.core(1) is core1
     assert core0.get_reg(7) == 0x1111
     assert core1.get_reg(7) == 0x2222
+
+
+def test_native_system_clock_advances_all_shared_cycle_devices_once() -> None:
+    owner = NativeSystemState(2)
+    core0 = owner.core(0)
+    core1 = owner.core(1)
+    delta = RTC.MS_DIVISOR
+
+    core0.timer_init()
+    core0.timer_control = 1
+    core0.timer_counter = 9
+    core0.fb_init()
+    core0.fb_enable = 1
+    # One bulk tick intentionally publishes at most one vsync even when its
+    # delta spans two frame thresholds; preserve that current device contract.
+    core0.fb_cycles_per_frame = delta // 2
+    core0.rtc_init(False, 1_000, 1, 2, 3, 4, 5, 2026, 6)
+    core0.rtc_uptime_ms = 41
+
+    assert owner.system_cycles == 0
+
+    owner.advance_system_cycles(delta)
+
+    assert owner.system_cycles == delta
+    assert core0.timer_counter == core1.timer_counter == 9 + delta
+    assert core0.fb_vsync_count == core1.fb_vsync_count == 1
+    assert core0.fb_vblank and core1.fb_vblank
+    assert core0.rtc_uptime_ms == core1.rtc_uptime_ms == 42
+    assert core0.rtc_epoch_ms == core1.rtc_epoch_ms == 1_001
+
+
+def test_native_system_clock_rejects_invalid_moves_atomically() -> None:
+    owner = NativeSystemState(1)
+    core = owner.core(0)
+    core.timer_init()
+    core.timer_control = 1
+    core.fb_init()
+    core.fb_enable = 1
+    core.fb_cycles_per_frame = 100
+    core.rtc_init(False, 1_000, 1, 2, 3, 4, 5, 2026, 6)
+    owner.advance_system_cycles(7)
+    owner.advance_system_to(9)
+
+    assert owner.system_cycles == 9
+    assert core.timer_counter == 9
+
+    def state():
+        return (
+            owner.system_cycles,
+            core.timer_counter,
+            core.fb_snapshot(),
+            core.rtc_snapshot(),
+            owner.event_horizon(),
+        )
+
+    before = state()
+    owner.advance_system_to(owner.system_cycles)
+    assert state() == before
+
+    invalid_advances = (
+        lambda: owner.advance_system_to(owner.system_cycles - 1),
+        lambda: owner.advance_system_cycles(1 << 32),
+        lambda: owner.advance_system_to(owner.system_cycles + (1 << 32)),
+    )
+    for advance in invalid_advances:
+        with pytest.raises(ValueError):
+            advance()
+        assert state() == before
+
+
+def test_native_system_clock_rejects_reentrant_guest_callbacks() -> None:
+    owner = NativeSystemState(1)
+    memory = bytearray(16)
+    memory[0] = 0x91  # OUT1
+    owner.attach_mem(memory, len(memory))
+    core = owner.core(0)
+    core.timer_init()
+    core.timer_control = 1
+    _set_pc(core, 0)
+    rejected = []
+
+    def try_reentrant_advance(_port, _value):
+        with pytest.raises(
+            RuntimeError,
+            match="time cannot advance during guest execution",
+        ):
+            owner.advance_system_cycles(1)
+        rejected.append(True)
+
+    assert _native_step(core, on_output=try_reentrant_advance) > 0
+    assert rejected == [True]
+    assert owner.system_cycles == 0
+    assert core.timer_counter == 0
+
+    owner.advance_system_cycles(1)
+    assert owner.system_cycles == 1
+    assert core.timer_counter == 1
+
+
+def test_native_event_horizon_tracks_ties_reschedules_and_clears() -> None:
+    owner = NativeSystemState(1)
+
+    assert (
+        owner.EVENT_TIMER,
+        owner.EVENT_FRAMEBUFFER,
+        owner.EVENT_RTC,
+        owner.EVENT_INTERRUPT,
+        owner.EVENT_EXTERNAL,
+        owner.EVENT_SOURCE_COUNT,
+    ) == (0, 1, 2, 3, 4, 5)
+    assert owner.event_horizon() == (0, None, 0)
+    assert owner.system_clock_snapshot() == (
+        0,
+        (None, None, None, None, None),
+        None,
+        0,
+    )
+
+    owner.set_event_deadline(EVENT_SOURCE_TIMER, 40)
+    owner.set_event_deadline(EVENT_SOURCE_RTC, 20)
+    owner.set_event_deadline(EVENT_SOURCE_EXTERNAL, 20)
+    assert owner.event_horizon() == (
+        0,
+        20,
+        (1 << EVENT_SOURCE_RTC) | (1 << EVENT_SOURCE_EXTERNAL),
+    )
+
+    owner.set_event_deadline(EVENT_SOURCE_TIMER, 20)
+    assert owner.event_horizon() == (
+        0,
+        20,
+        (1 << EVENT_SOURCE_TIMER)
+        | (1 << EVENT_SOURCE_RTC)
+        | (1 << EVENT_SOURCE_EXTERNAL),
+    )
+
+    before_crossing = owner.event_horizon()
+    with pytest.raises(ValueError, match="cannot cross the event horizon"):
+        owner.advance_system_cycles(21)
+    assert owner.event_horizon() == before_crossing
+
+    owner.advance_system_to(20)
+    assert owner.event_horizon() == (
+        20,
+        20,
+        (1 << EVENT_SOURCE_TIMER)
+        | (1 << EVENT_SOURCE_RTC)
+        | (1 << EVENT_SOURCE_EXTERNAL),
+    )
+    with pytest.raises(ValueError, match="cannot cross the event horizon"):
+        owner.advance_system_cycles(1)
+
+    owner.set_event_deadline(EVENT_SOURCE_RTC, 50)
+    owner.clear_event_deadline(EVENT_SOURCE_EXTERNAL)
+    assert owner.event_horizon() == (20, 20, 1 << EVENT_SOURCE_TIMER)
+    assert owner.system_clock_snapshot() == (
+        20,
+        (20, None, 50, None, None),
+        20,
+        1 << EVENT_SOURCE_TIMER,
+    )
+
+    owner.clear_event_deadline(EVENT_SOURCE_TIMER)
+    assert owner.event_horizon() == (20, 50, 1 << EVENT_SOURCE_RTC)
+
+    owner.clear_event_deadline(EVENT_SOURCE_RTC)
+    assert owner.event_horizon() == (20, None, 0)
+
+
+def test_native_event_deadlines_reject_past_cycles_and_unknown_sources() -> None:
+    owner = NativeSystemState(1)
+    owner.advance_system_to(10)
+    owner.set_event_deadline(EVENT_SOURCE_FRAMEBUFFER, 12)
+    owner.set_event_deadline(EVENT_SOURCE_INTERRUPT, 10)
+
+    assert owner.event_horizon() == (
+        10,
+        10,
+        1 << EVENT_SOURCE_INTERRUPT,
+    )
+
+    with pytest.raises(ValueError):
+        owner.set_event_deadline(EVENT_SOURCE_FRAMEBUFFER, 9)
+    for source_id in (-1, EVENT_SOURCE_EXTERNAL + 1):
+        with pytest.raises(ValueError):
+            owner.set_event_deadline(source_id, 10)
+        with pytest.raises(ValueError):
+            owner.clear_event_deadline(source_id)
+
+    assert owner.event_horizon() == (
+        10,
+        10,
+        1 << EVENT_SOURCE_INTERRUPT,
+    )
+    owner.clear_event_deadline(EVENT_SOURCE_INTERRUPT)
+    assert owner.event_horizon() == (
+        10,
+        12,
+        1 << EVENT_SOURCE_FRAMEBUFFER,
+    )
 
 
 def test_borrowed_core_view_retains_its_native_owner() -> None:

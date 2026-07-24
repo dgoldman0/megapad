@@ -18,12 +18,12 @@
 #include <cstdint>
 
 struct TimerDevice {
-    uint32_t counter;
-    uint32_t compare;
-    uint8_t  control;
-    uint8_t  status;
-    bool     irq_pending;
-    bool     enabled;       // false = bypass, fall through to Python
+    uint32_t counter = 0;
+    uint32_t compare = 0;
+    uint8_t  control = 0;
+    uint8_t  status = 0;
+    bool     irq_pending = false;
+    bool     enabled = false;  // false = bypass, fall through to Python
 
     // MMIO address range (offsets from MMIO_START)
     static constexpr uint32_t TIMER_BASE = 0x0100;

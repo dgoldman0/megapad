@@ -12,10 +12,10 @@ The report keeps four quantities separate:
 * per-core architectural cycle-counter deltas; and
 * arguments passed to ``DeviceBus.tick()``.
 
-There is no single virtual system clock in the legacy runner, so
-``virtual_system_cycles`` is emitted as JSON ``null``.  In particular, neither
-the sum nor the maximum of the per-core cycle counters is silently relabelled
-as system time.
+The native owner now contains a system clock, but the legacy runner does not
+advance it yet.  ``virtual_system_cycles`` therefore remains JSON ``null``.
+In particular, neither the sum nor the maximum of the per-core cycle counters
+is silently relabelled as system time.
 
 Default coverage:
 
@@ -78,7 +78,7 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
 SCHEMA_VERSION = 2
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -119,8 +119,8 @@ STATE_COMPARISON_SCOPE = {
         "native timer, framebuffer (including palette), RTC, UART geometry, "
         "UART, crypto-MMIO-visible, NIC-MMIO-visible, and TRNG enable state "
         "for every full core, including secondary cores",
-        "registered-device layout, platform topology, and benchmark "
-        "orchestration counters",
+        "native system-cycle and event-horizon state, registered-device "
+        "layout, platform topology, and benchmark orchestration counters",
     ],
     "explicit_exclusions": [
         {
@@ -1166,7 +1166,21 @@ def _shared_device_state(system: MegapadSystem) -> dict:
     kem = system.kem
     port_bridge = system.port_bridge
     wots = system.wots
+    system_cycles, event_deadlines, event_deadline, event_sources = (
+        system._native_system.system_clock_snapshot()
+    )
     return {
+        "system_clock": {
+            "cycles": int(system_cycles),
+            "event_deadline": (
+                None if event_deadline is None else int(event_deadline)
+            ),
+            "event_source_mask": int(event_sources),
+            "source_deadlines": [
+                None if deadline is None else int(deadline)
+                for deadline in event_deadlines
+            ],
+        },
         "device_bus": {
             "registered_devices": [
                 {
@@ -1532,7 +1546,8 @@ def _accounting_probe(
             (bus_stats["tick_argument_units"] / returned) if returned else None,
         "virtual_system_cycles": None,
         "virtual_system_cycles_availability":
-            "unavailable: the legacy runner has no unified virtual clock",
+            "unavailable: the legacy runner does not drive the native "
+            "system clock",
         "observation": observation,
     }
 
@@ -1769,8 +1784,8 @@ def run_report(
                 "legacy runner derives these from aggregate instructions",
             "virtual_system_cycles": None,
             "virtual_system_cycles_availability":
-                "unavailable until a scheduler exposes one unified virtual "
-                "clock",
+                "unavailable until the native scheduler drives the owned "
+                "system clock",
             "host_cpu_utilization_percent":
                 "process CPU time divided by wall time; may exceed 100% when "
                 "host worker threads overlap",
@@ -1850,8 +1865,8 @@ def print_human(report: dict) -> None:
         )
     print()
     print(
-        "Virtual system cycles: unavailable in the legacy runner "
-        "(JSON value is null)."
+        "Virtual system cycles: native owner exists but the legacy runner "
+        "does not drive it (JSON value is null)."
     )
     print(
         "Per-core instruction rates are derived from an exact untimed "

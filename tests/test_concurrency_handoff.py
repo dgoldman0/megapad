@@ -736,6 +736,19 @@ def test_core0_timer_proxy_advances_when_the_bus_ticks():
     assert system.timer.counter == 17
 
 
+def test_legacy_runner_does_not_drive_the_native_system_clock():
+    """Steps-as-time remains isolated until the native scheduler takes over."""
+    system = _new_system(full_cores=1)
+    system.timer.control = 1
+
+    system.run_batch(10)
+    system.bus.tick(17)
+
+    assert system.timer.counter > 0
+    assert system._native_system.system_cycles == 0
+    assert system._native_system.event_horizon() == (0, None, 0)
+
+
 def test_secondary_native_timer_observes_shared_ticking_state():
     """Every requester must read the same architecturally singleton timer."""
     system = _new_system(full_cores=2)
