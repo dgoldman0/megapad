@@ -421,6 +421,12 @@ class MegapadSystem:
         # Convenience alias: self.cpu always refers to core 0
         self.cpu = self.cores[0]
 
+        # Python micro-cores observe the same SystemState-owned IPI lines as
+        # native full cores.  Their property delegates through these hooks.
+        for cpu in self.cores[num_cores:]:
+            cpu._irq_ipi_getter = self._native_system.ipi_line
+            cpu._irq_ipi_setter = self._native_system.set_ipi_line
+
         # --- Device bus ---
         self.bus = DeviceBus()
 
@@ -449,6 +455,12 @@ class MegapadSystem:
             vram_size=vram_size,
         )
         self.mailbox = MailboxDevice(num_cores=self.num_cores)
+        self.mailbox.attach_ipi_router(
+            pending_mask=self._native_system.ipi_pending_mask,
+            pending_snapshot=self._native_system.ipi_pending_snapshot,
+            send=self._native_system.ipi_send,
+            acknowledge=self._native_system.ipi_ack,
+        )
         self.spinlock = SpinlockDevice()
         self.ntt = NTTDevice()
         self.kem = KemDevice()
@@ -598,10 +610,6 @@ class MegapadSystem:
             return NetworkDevice.inject_frame(py_nic, data)
         self.nic.inject_frame = _dual_inject
 
-        # Wire mailbox IPI delivery
-        self.mailbox.on_ipi = self._deliver_ipi
-        self.mailbox.on_ack = self._handle_ipi_ack
-
         # Patch CPU memory access functions to intercept MMIO (per core)
         for cpu in self.cores:
             self._patch_cpu_mem(cpu)
@@ -638,44 +646,23 @@ class MegapadSystem:
     #  IPI wiring
     # -----------------------------------------------------------------
 
-    def _deliver_ipi(self, target_core: int):
-        """Called by MailboxDevice when an IPI is sent to a core."""
-        if 0 <= target_core < self.num_cores:
-            self.cores[target_core].irq_ipi = True
-
-    def _handle_ipi_ack(self, acking_core: int):
-        """Called by MailboxDevice after an MMIO ACK clears a pending bit."""
-        if 0 <= acking_core < self.num_cores:
-            if self.mailbox.pending[acking_core] == 0:
-                self.cores[acking_core].irq_ipi = False
-
     def _wire_ipi_csrs(self, cpu: Megapad64):
-        """Wire the CPU's CSR IPI stubs to the real mailbox device."""
+        """Wire Python-oracle CSR IPI methods to the shared native router."""
         core_id = cpu.core_id
         mailbox = self.mailbox
 
-        @property
-        def ipi_pending_mask(self):
-            return mailbox.pending[core_id]
-
-        # Monkey-patch the property onto this specific instance
-        # We use a simpler approach: override the methods directly
         def ipi_send(target: int):
-            target = target & 0xFF
-            if target < self.num_cores and target != core_id:
-                mailbox.pending[target] |= (1 << core_id)
-                self._deliver_ipi(target)
+            mailbox.send_ipi(
+                core_id,
+                target,
+                publish_payload=False,
+            )
 
         def ipi_ack(from_core: int):
-            from_core = from_core & 0xFF
-            if from_core < self.num_cores:
-                mailbox.pending[core_id] &= ~(1 << from_core)
-                # Clear irq_ipi if no more pending
-                if mailbox.pending[core_id] == 0:
-                    cpu.irq_ipi = False
+            mailbox.acknowledge_ipi(core_id, from_core)
 
         def get_ipi_pending():
-            return mailbox.pending[core_id]
+            return self._native_system.ipi_pending_mask(core_id)
 
         cpu._ipi_send = ipi_send
         cpu._ipi_ack = ipi_ack
@@ -723,10 +710,9 @@ class MegapadSystem:
         def patched_read8(addr: int) -> int:
             addr = u64(addr)
             if MMIO_START <= addr < MMIO_END:
-                bus.requester_id = core_id
                 offset = addr - MMIO_START
                 try:
-                    return bus.read8(offset)
+                    return bus.read8(offset, requester_id=core_id)
                 except BusError:
                     cpu.trap_addr = addr
                     raise TrapError(IVEC_BUS_FAULT,
@@ -744,10 +730,13 @@ class MegapadSystem:
         def patched_write8(addr: int, val: int):
             addr = u64(addr)
             if MMIO_START <= addr < MMIO_END:
-                bus.requester_id = core_id
                 offset = addr - MMIO_START
                 try:
-                    bus.write8(offset, val)
+                    bus.write8(
+                        offset,
+                        val,
+                        requester_id=core_id,
+                    )
                 except BusError:
                     cpu.trap_addr = addr
                     raise TrapError(IVEC_BUS_FAULT,

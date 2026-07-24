@@ -2018,7 +2018,7 @@ class NetworkDevice(Device):
 #   0x09        STATUS     — read: bit[n] = pending IPI from core n
 #   0x0A        ACK        — write source_core_id to clear pending bit
 #
-# Requester identity comes from DeviceBus.requester_id (set by system.py).
+# Requester identity is carried explicitly by each DeviceBus transaction.
 
 class MailboxDevice(Device):
     """Inter-core mailbox with IPI delivery."""
@@ -2028,49 +2028,150 @@ class MailboxDevice(Device):
         self.num_cores = num_cores
         # data[sender] = 64-bit value written by sender
         self.data: list[int] = [0] * num_cores
-        # pending[target] = bitmask of which cores have sent an unacked IPI
-        self.pending: list[int] = [0] * num_cores
+        # Standalone devices retain local pending state.  MegapadSystem
+        # attaches the SystemState router so MMIO and native CSR accesses
+        # observe one pending mask and interrupt line.
+        self._pending: list[int] = [0] * num_cores
+        self._router_pending = None
+        self._router_snapshot = None
+        self._router_send = None
+        self._router_ack = None
         # Callback: called with (target_core_id,) when IPI is sent
         self.on_ipi: Optional[callable] = None
         # Callback: called with (acking_core_id,) after ACK clears a pending bit
         self.on_ack: Optional[callable] = None
-        # Requester context — set by DeviceBus before each access
-        self._requester_id: int = 0
 
-    def read8(self, offset: int) -> int:
-        rid = self._requester_id
+    def attach_ipi_router(
+        self,
+        *,
+        pending_mask,
+        pending_snapshot,
+        send,
+        acknowledge,
+    ):
+        """Attach explicit SystemState IPI routing operations."""
+        self._router_pending = pending_mask
+        self._router_snapshot = pending_snapshot
+        self._router_send = send
+        self._router_ack = acknowledge
+
+    @property
+    def pending(self) -> list[int]:
+        if self._router_pending is None:
+            return self._pending
+        if self._router_snapshot is not None:
+            return [
+                int(mask)
+                for mask in self._router_snapshot()
+            ]
+        return [
+            int(self._router_pending(core_id))
+            for core_id in range(self.num_cores)
+        ]
+
+    def _pending_mask(self, core_id: int) -> int:
+        if self._router_pending is not None:
+            return int(self._router_pending(core_id))
+        return self._pending[core_id]
+
+    def send_ipi(
+        self,
+        requester_id: int,
+        target_id: int,
+        *,
+        publish_payload: bool = False,
+    ) -> bool:
+        """Send using the frozen emulator contract for the selected path."""
+        requester_id &= 0xFF
+        target_id &= 0xFF
+        if (
+            requester_id >= self.num_cores
+            or target_id >= self.num_cores
+            or target_id == requester_id
+        ):
+            return False
+        if publish_payload:
+            self.data[target_id] = self.data[requester_id]
+        if self._router_send is not None:
+            sent = bool(self._router_send(requester_id, target_id))
+        else:
+            self._pending[target_id] |= 1 << requester_id
+            sent = True
+        # A native router owns both pending bits and the IPI level as one
+        # synchronized transition.  Legacy callbacks are only for standalone
+        # devices; running them after a routed transition could overwrite the
+        # router's newer line state.
+        if self._router_send is None and sent and self.on_ipi:
+            self.on_ipi(target_id)
+        return sent
+
+    def acknowledge_ipi(self, requester_id: int, source_id: int) -> bool:
+        requester_id &= 0xFF
+        source_id &= 0xFF
+        if (
+            requester_id >= self.num_cores
+            or source_id >= self.num_cores
+        ):
+            return False
+        if self._router_ack is not None:
+            acknowledged = bool(
+                self._router_ack(requester_id, source_id)
+            )
+        else:
+            was_pending = bool(
+                self._pending[requester_id] & (1 << source_id)
+            )
+            self._pending[requester_id] &= ~(1 << source_id)
+            acknowledged = was_pending
+        if self._router_ack is None and self.on_ack:
+            self.on_ack(requester_id)
+        return acknowledged
+
+    def read8_for_requester(self, requester_id: int, offset: int) -> int:
+        requester_id &= 0xFF
+        if requester_id >= self.num_cores:
+            return 0
         if 0x00 <= offset <= 0x07:
             # Read mailbox data for the requesting core's slot
             # Returns the data from the first pending sender
             shift = 8 * offset
-            return (self.data[rid] >> shift) & 0xFF
+            return (self.data[requester_id] >> shift) & 0xFF
         elif offset == 0x09:  # STATUS
-            return self.pending[rid] & 0xFF
+            return self._pending_mask(requester_id) & 0xFF
         return 0
 
-    def write8(self, offset: int, value: int):
+    def write8_for_requester(
+        self,
+        requester_id: int,
+        offset: int,
+        value: int,
+    ):
         value &= 0xFF
-        rid = self._requester_id
+        requester_id &= 0xFF
+        if requester_id >= self.num_cores:
+            return
         if 0x00 <= offset <= 0x07:
             # Write to this core's outgoing data slot
             shift = 8 * offset
             mask = 0xFF << shift
-            self.data[rid] = (self.data[rid] & ~mask) | (value << shift)
-            self.data[rid] &= (1 << 64) - 1
+            self.data[requester_id] = (
+                self.data[requester_id] & ~mask
+            ) | (value << shift)
+            self.data[requester_id] &= (1 << 64) - 1
         elif offset == 0x08:  # SEND — value is target core ID
-            target = value & 0xFF
-            if target < self.num_cores and target != rid:
-                # Copy sender's outgoing data to target's inbox
-                self.data[target] = self.data[rid]
-                self.pending[target] |= (1 << rid)
-                if self.on_ipi:
-                    self.on_ipi(target)
+            self.send_ipi(
+                requester_id,
+                value,
+                publish_payload=True,
+            )
         elif offset == 0x0A:  # ACK — value is source core ID to clear
-            source = value & 0xFF
-            if source < self.num_cores:
-                self.pending[rid] &= ~(1 << source)
-                if self.on_ack:
-                    self.on_ack(rid)
+            self.acknowledge_ipi(requester_id, value)
+
+    def read8(self, offset: int) -> int:
+        return self.read8_for_requester(0, offset)
+
+    def write8(self, offset: int, value: int):
+        self.write8_for_requester(0, offset, value)
 
 
 # ---------------------------------------------------------------------------
@@ -2097,38 +2198,49 @@ class SpinlockDevice(Device):
         self.locked: list[bool] = [False] * num_locks
         # owner[i] = core_id that holds lock i (-1 if free)
         self.owner: list[int] = [-1] * num_locks
-        # Requester context — set by DeviceBus before each access
-        self._requester_id: int = 0
-
-    def read8(self, offset: int) -> int:
+    def read8_for_requester(self, requester_id: int, offset: int) -> int:
         lock_idx = offset // 4
         sub = offset % 4
         if lock_idx >= self.num_locks:
             return 0xFF
-        rid = self._requester_id
+        requester_id &= 0xFF
         if sub == 0:  # ACQUIRE (test-and-set)
             if not self.locked[lock_idx]:
                 # Free — acquire it
                 self.locked[lock_idx] = True
-                self.owner[lock_idx] = rid
+                self.owner[lock_idx] = requester_id
                 return 0  # success
-            elif self.owner[lock_idx] == rid:
+            elif self.owner[lock_idx] == requester_id:
                 # Re-entrant — already own it
                 return 0
             else:
                 return 1  # busy
         return 0
 
-    def write8(self, offset: int, value: int):
+    def write8_for_requester(
+        self,
+        requester_id: int,
+        offset: int,
+        value: int,
+    ):
         lock_idx = offset // 4
         sub = offset % 4
         if lock_idx >= self.num_locks:
             return
-        rid = self._requester_id
+        requester_id &= 0xFF
         if sub == 1:  # RELEASE
-            if self.locked[lock_idx] and self.owner[lock_idx] == rid:
+            if (
+                self.locked[lock_idx]
+                and self.owner[lock_idx] == requester_id
+            ):
                 self.locked[lock_idx] = False
                 self.owner[lock_idx] = -1
+
+    def read8(self, offset: int) -> int:
+        return self.read8_for_requester(0, offset)
+
+    def write8(self, offset: int, value: int):
+        self.write8_for_requester(0, offset, value)
 
 
 # ---------------------------------------------------------------------------
@@ -3907,7 +4019,6 @@ class DeviceBus:
 
     def __init__(self):
         self.devices: list[Device] = []
-        self.requester_id: int = 0  # set by system.py before per-core dispatch
 
     def register(self, device: Device):
         self.devices.append(device)
@@ -3920,22 +4031,32 @@ class DeviceBus:
                 return dev, mmio_offset - dev.base
         return None, 0
 
-    def _set_requester(self, dev: Device):
-        """Propagate requester_id to devices that need it."""
-        if hasattr(dev, '_requester_id'):
-            dev._requester_id = self.requester_id
-
-    def read8(self, mmio_offset: int) -> int:
+    def read8(self, mmio_offset: int, *, requester_id: int = 0) -> int:
         dev, local = self.find_device(mmio_offset)
         if dev:
-            self._set_requester(dev)
+            requester_read = getattr(
+                dev, "read8_for_requester", None
+            )
+            if requester_read is not None:
+                return requester_read(requester_id, local)
             return dev.read8(local)
         raise BusError(mmio_offset, write=False)
 
-    def write8(self, mmio_offset: int, value: int):
+    def write8(
+        self,
+        mmio_offset: int,
+        value: int,
+        *,
+        requester_id: int = 0,
+    ):
         dev, local = self.find_device(mmio_offset)
         if dev:
-            self._set_requester(dev)
+            requester_write = getattr(
+                dev, "write8_for_requester", None
+            )
+            if requester_write is not None:
+                requester_write(requester_id, local, value)
+                return
             dev.write8(local, value)
             return
         raise BusError(mmio_offset, write=True)

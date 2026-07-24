@@ -599,7 +599,9 @@ class Megapad64:
         # Core identity (multicore)
         self.core_id: int = core_id
         self.num_cores: int = num_cores
-        self.irq_ipi: bool = False  # pending IPI from mailbox
+        self._irq_ipi: bool = False
+        self._irq_ipi_getter = None
+        self._irq_ipi_setter = None
 
         # 32 × 64-bit GPRs (R0-R15 base, R16-R31 via REX prefix)
         self.regs: list[int] = [0] * 32
@@ -1571,6 +1573,22 @@ class Megapad64:
                     result = max(values_s)
                 self.acc[0] = result & MASK64
                 self.acc[1] = (result >> 64) & MASK64
+
+    @property
+    def irq_ipi(self) -> bool:
+        """Current IPI input line, optionally owned by SystemState."""
+        getter = self._irq_ipi_getter
+        if getter is not None:
+            return bool(getter(self.core_id))
+        return self._irq_ipi
+
+    @irq_ipi.setter
+    def irq_ipi(self, asserted: bool):
+        setter = getattr(self, "_irq_ipi_setter", None)
+        if setter is not None:
+            setter(self.core_id, bool(asserted))
+        else:
+            self._irq_ipi = bool(asserted)
 
     @property
     def _ipi_pending_mask(self) -> int:

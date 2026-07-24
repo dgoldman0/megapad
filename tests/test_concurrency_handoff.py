@@ -14,13 +14,15 @@ import pytest
 from asm import assemble
 from devices import (
     FB_BASE,
+    MBOX_BASE,
     MMIO_BASE,
     RTC_BASE,
+    SPINLOCK_BASE,
     SYSINFO_BASE,
     TIMER_BASE,
     UART_GEOM_BASE,
 )
-from megapad64 import IVEC_IPI
+from megapad64 import CSR_IPIACK, CSR_MBOX, IVEC_IPI
 from system import MegapadSystem
 
 
@@ -204,6 +206,199 @@ def test_step_delivers_a_pending_ipi_at_its_execution_boundary():
     system.step()
 
     assert events == [IVEC_IPI]
+    assert system.cpu.irq_ipi
+
+
+def test_bus_requester_metadata_preserves_mailbox_payload_and_ack_contract():
+    """Each byte transaction carries its requester without ambient bus state."""
+    system = _new_system(full_cores=3)
+    bus = system.bus
+
+    assert not hasattr(bus, "requester_id")
+    assert not hasattr(system.mailbox, "_requester_id")
+
+    payload0 = 0x0102_0304_0506_0708
+    payload1 = 0xA1A2_A3A4_A5A6_A7A8
+    for sender, payload in ((0, payload0), (1, payload1)):
+        for index in range(8):
+            bus.write8(
+                MBOX_BASE + index,
+                (payload >> (8 * index)) & 0xFF,
+                requester_id=sender,
+            )
+        bus.write8(MBOX_BASE + 0x08, 2, requester_id=sender)
+
+    assert system.mailbox.data == [payload0, payload1, payload1]
+    assert system.mailbox.pending == [0, 0, 0b011]
+    assert system.cores[2].irq_ipi
+    assert sum(
+        bus.read8(MBOX_BASE + index, requester_id=2) << (8 * index)
+        for index in range(8)
+    ) == payload1
+
+    bus.write8(MBOX_BASE + 0x0A, 0, requester_id=2)
+    assert system.mailbox.pending[2] == 0b010
+    assert system.cores[2].irq_ipi
+
+    bus.write8(MBOX_BASE + 0x0A, 1, requester_id=2)
+    assert system.mailbox.pending[2] == 0
+    assert not system.cores[2].irq_ipi
+
+
+def test_bus_requester_metadata_preserves_spinlock_ownership_contract():
+    """Spinlock test-and-set and owner release use the request metadata."""
+    system = _new_system(full_cores=2)
+    bus = system.bus
+
+    assert not hasattr(system.spinlock, "_requester_id")
+    assert bus.read8(SPINLOCK_BASE, requester_id=1) == 0
+    assert bus.read8(SPINLOCK_BASE, requester_id=1) == 0
+    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 1
+    assert system.spinlock.owner[0] == 1
+
+    bus.write8(SPINLOCK_BASE + 1, 0, requester_id=0)
+    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 1
+    assert system.spinlock.owner[0] == 1
+
+    bus.write8(SPINLOCK_BASE + 1, 0, requester_id=1)
+    assert bus.read8(SPINLOCK_BASE, requester_id=0) == 0
+    assert system.spinlock.owner[0] == 0
+
+
+def test_native_ipi_router_does_not_replay_legacy_line_callbacks():
+    """Routed pending/line transitions cannot be overwritten after unlocking."""
+    system = _new_system(full_cores=2)
+    target = system.cores[1]
+
+    # These deliberately stale line mutations model the legacy callback path.
+    # A router-attached mailbox must not invoke them after its atomic update.
+    system.mailbox.on_ipi = lambda core_id: setattr(
+        system.cores[core_id],
+        "irq_ipi",
+        False,
+    )
+    system.mailbox.on_ack = lambda core_id: setattr(
+        system.cores[core_id],
+        "irq_ipi",
+        True,
+    )
+
+    assert system.mailbox.send_ipi(0, 1)
+    assert system.mailbox.pending[1] == 1
+    assert target.irq_ipi
+
+    assert system.mailbox.acknowledge_ipi(1, 0)
+    assert system.mailbox.pending[1] == 0
+    assert not target.irq_ipi
+
+
+def test_native_mailbox_csrs_share_pending_and_ipi_routing_state():
+    """Native CSR send/read/ACK uses the same router as mailbox MMIO."""
+    system = _new_system(full_cores=3)
+    system.mailbox.data[1] = 0xA5
+    system.mailbox.data[2] = 0x5A
+    sender_code = assemble(
+        f"""
+        ldi64 r1, 2
+        csrw {CSR_MBOX}, r1
+        halt
+        """
+    )
+    _run_only_secondary(system, sender_code)
+
+    sender = system.cores[1]
+    target = system.cores[2]
+    assert system.mailbox.data == [0, 0xA5, 0x5A]
+    assert system.mailbox.pending == [0, 0, 0b010]
+    assert target.irq_ipi
+    assert target._cs.irq_ipi
+    assert sender._cs.ipi_pending_mask() == 0
+
+    target_code = assemble(
+        f"""
+        csrr r4, {CSR_MBOX}
+        ldi64 r1, 1
+        csrw {CSR_IPIACK}, r1
+        csrr r5, {CSR_MBOX}
+        halt
+        """
+    )
+    system.load_binary(0x200, target_code)
+    for core in system.cores:
+        core.halted = True
+        core.idle = False
+    target.pc = 0x200
+    target.halted = False
+    system.run_batch(100)
+
+    assert target.regs[4:6] == [0b010, 0]
+    assert system.mailbox.pending == [0, 0, 0]
+    assert not target.irq_ipi
+    assert not target._cs.irq_ipi
+
+    target.irq_ipi = True
+    assert target._cs.irq_ipi
+    target._reset_state()
+    assert not target.irq_ipi
+    assert not target._cs.irq_ipi
+
+
+def test_secondary_native_mailbox_mmio_carries_its_requester_identity():
+    """A native callback preserves the issuing core on every mailbox byte."""
+    system = _new_system(full_cores=2)
+    mailbox_addr = MMIO_BASE + MBOX_BASE
+    send_from_secondary = assemble(
+        f"""
+        ldi64 r1, {mailbox_addr}
+        ldi64 r2, 0x5a
+        st.b r1, r2
+        ldi64 r1, {mailbox_addr + 0x08}
+        ldi64 r2, 0
+        st.b r1, r2
+        halt
+        """
+    )
+
+    _run_only_secondary(system, send_from_secondary)
+
+    assert system.mailbox.data == [0x5A, 0x5A]
+    assert system.mailbox.pending == [0b10, 0]
+    assert system.cores[0].irq_ipi
+
+    system.bus.write8(MBOX_BASE + 0x0A, 1, requester_id=0)
+    assert system.mailbox.pending == [0, 0]
+    assert not system.cores[0].irq_ipi
+
+
+def test_native_csr_ipi_preserves_advertised_micro_core_reachability():
+    """SystemState routing retains the emulator's all-core IPI reach."""
+    system = _new_system(full_cores=2, clusters=1)
+    micro = system.clusters[0].cores[0]
+    send_to_micro = assemble(
+        f"""
+        ldi64 r1, {micro.core_id}
+        csrw {CSR_MBOX}, r1
+        halt
+        """
+    )
+
+    _run_only_secondary(system, send_to_micro)
+
+    assert micro.irq_ipi
+    assert micro.csr_read(CSR_MBOX) == 0b10
+    assert system.mailbox.pending[micro.core_id] == 0b10
+
+    micro.csr_write(CSR_IPIACK, 1)
+    assert not micro.irq_ipi
+    assert micro.csr_read(CSR_MBOX) == 0
+
+    micro.csr_write(CSR_MBOX, 0)
+    assert system.cores[0].irq_ipi
+    assert system.cores[0].csr_read(CSR_MBOX) == 1 << micro.core_id
+
+    system.cores[0].csr_write(CSR_IPIACK, micro.core_id)
+    assert not system.cores[0].irq_ipi
+    assert system.cores[0].csr_read(CSR_MBOX) == 0
 
 
 @pytest.mark.xfail(

@@ -78,7 +78,7 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
 SCHEMA_VERSION = 2
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -110,7 +110,7 @@ STATE_COMPARISON_SCOPE = {
     ),
     "included": [
         "all 32 GPRs and every scalar CPUState field exposed by the binding",
-        "Python-side CPU state (irq_ipi and reserved tstride_c)",
+        "per-core interrupt-line state and Python-reserved tstride_c",
         "native port output/map state and accelerator hook count",
         "complete shared, HBW, external, and VRAM byte regions via size and "
         "SHA-256",
@@ -119,8 +119,8 @@ STATE_COMPARISON_SCOPE = {
         "native timer, framebuffer (including palette), RTC, UART geometry, "
         "UART, crypto-MMIO-visible, NIC-MMIO-visible, and TRNG enable state "
         "for every full core, including secondary cores",
-        "device-bus requester identity, registered-device layout, platform "
-        "topology, and benchmark orchestration counters",
+        "registered-device layout, platform topology, and benchmark "
+        "orchestration counters",
     ],
     "explicit_exclusions": [
         {
@@ -935,7 +935,7 @@ def _core_state(cpu) -> dict:
             "ivec_id": int(cpu.ivec_id),
             "trap_addr": int(cpu.trap_addr),
             "ef_flags": int(cpu.ef_flags),
-            "irq_ipi_python": bool(cpu.irq_ipi),
+            "irq_ipi": bool(cpu.irq_ipi),
         },
         "execution": {
             "halted": bool(cpu.halted),
@@ -1168,7 +1168,6 @@ def _shared_device_state(system: MegapadSystem) -> dict:
     wots = system.wots
     return {
         "device_bus": {
-            "requester_id": int(system.bus.requester_id),
             "registered_devices": [
                 {
                     "name": device.name,
@@ -1252,13 +1251,11 @@ def _shared_device_state(system: MegapadSystem) -> dict:
             "num_cores": int(mailbox.num_cores),
             "data": [int(value) for value in mailbox.data],
             "pending": [int(value) for value in mailbox.pending],
-            "requester_id": int(mailbox._requester_id),
         },
         "spinlocks": {
             "num_locks": int(spinlock.num_locks),
             "locked": [bool(value) for value in spinlock.locked],
             "owner": [int(value) for value in spinlock.owner],
-            "requester_id": int(spinlock._requester_id),
         },
         "ntt": {
             "q": int(ntt._q),

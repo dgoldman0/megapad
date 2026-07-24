@@ -134,6 +134,35 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
     assert core.rtc_snapshot()[2] == 18
 
 
+def test_borrowed_core_views_retain_the_shared_interrupt_router() -> None:
+    def make_retained_cores():
+        owner = NativeSystemState(2, 6)
+        return owner.core(0), owner.core(1)
+
+    core0, core1 = make_retained_cores()
+    gc.collect()
+
+    assert core0.ipi_send(1)
+    assert core1.ipi_pending_mask() == 0b1
+    assert core1.irq_ipi
+    assert core1.ipi_ack(0)
+    assert core1.ipi_pending_mask() == 0
+    assert not core1.irq_ipi
+
+
+def test_standalone_native_ipi_latches_remain_private() -> None:
+    first = _mp64_accel.CPUState()
+    second = _mp64_accel.CPUState()
+
+    first.irq_ipi = True
+
+    assert first.irq_ipi
+    assert not second.irq_ipi
+    assert first.ipi_pending_mask() == second.ipi_pending_mask() == 0
+    assert not first.ipi_send(0)
+    assert not first.ipi_ack(0)
+
+
 def test_megapad_system_wraps_native_owned_full_cores() -> None:
     system = MegapadSystem(
         ram_size=4096,

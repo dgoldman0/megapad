@@ -8,6 +8,7 @@
  * Build: see setup_accel.py (pybind11 extension module)
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -132,6 +133,122 @@ struct MemoryMappings {
 };
 
 // ---------------------------------------------------------------------------
+//  Interrupt routing metadata
+// ---------------------------------------------------------------------------
+
+class InterruptRouter {
+public:
+    void configure(int core_count) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        core_count_ = core_count;
+        pending_.assign(
+            static_cast<std::size_t>(core_count) *
+                static_cast<std::size_t>(core_count),
+            0);
+        ipi_lines_.assign(static_cast<std::size_t>(core_count), 0);
+    }
+
+    bool send_ipi(int requester_id, int target_id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(requester_id) ||
+            !valid_core_unlocked(target_id) ||
+            requester_id == target_id)
+            return false;
+        pending_[pending_index_unlocked(target_id, requester_id)] = 1;
+        ipi_lines_[static_cast<std::size_t>(target_id)] = 1;
+        return true;
+    }
+
+    bool acknowledge_ipi(int target_id, int source_id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(target_id) ||
+            !valid_core_unlocked(source_id))
+            return false;
+        const std::size_t index =
+            pending_index_unlocked(target_id, source_id);
+        const bool was_pending = pending_[index] != 0;
+        pending_[index] = 0;
+        if (!has_pending_unlocked(target_id))
+            ipi_lines_[static_cast<std::size_t>(target_id)] = 0;
+        return was_pending;
+    }
+
+    uint64_t pending_mask(int target_id) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(target_id))
+            return 0;
+        uint64_t mask = 0;
+        const int visible_sources = std::min(core_count_, 64);
+        for (int source_id = 0; source_id < visible_sources; source_id++) {
+            if (pending_[
+                    pending_index_unlocked(target_id, source_id)] != 0)
+                mask |= uint64_t{1} << source_id;
+        }
+        return mask;
+    }
+
+    bool ipi_line(int core_id) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(core_id))
+            return false;
+        return ipi_lines_[static_cast<std::size_t>(core_id)] != 0;
+    }
+
+    void set_ipi_line(int core_id, bool asserted) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!valid_core_unlocked(core_id))
+            return;
+        ipi_lines_[static_cast<std::size_t>(core_id)] =
+            asserted ? 1 : 0;
+    }
+
+    std::vector<uint64_t> pending_snapshot() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        std::vector<uint64_t> masks(
+            static_cast<std::size_t>(core_count_), 0);
+        const int visible_sources = std::min(core_count_, 64);
+        for (int target_id = 0; target_id < core_count_; target_id++) {
+            for (int source_id = 0;
+                 source_id < visible_sources;
+                 source_id++) {
+                if (pending_[
+                        pending_index_unlocked(
+                            target_id, source_id)] != 0)
+                    masks[static_cast<std::size_t>(target_id)] |=
+                        uint64_t{1} << source_id;
+            }
+        }
+        return masks;
+    }
+
+private:
+    bool valid_core_unlocked(int core_id) const {
+        return core_id >= 0 && core_id < core_count_;
+    }
+
+    std::size_t pending_index_unlocked(
+            int target_id, int source_id) const {
+        return static_cast<std::size_t>(target_id) *
+                   static_cast<std::size_t>(core_count_) +
+               static_cast<std::size_t>(source_id);
+    }
+
+    bool has_pending_unlocked(int target_id) const {
+        for (int source_id = 0; source_id < core_count_; source_id++) {
+            if (pending_[
+                    pending_index_unlocked(target_id, source_id)] != 0)
+                return true;
+        }
+        return false;
+    }
+
+    mutable std::mutex mutex_;
+    int core_count_ = 0;
+    std::vector<uint8_t> pending_;
+    std::vector<uint8_t> ipi_lines_;
+};
+
+// ---------------------------------------------------------------------------
 //  CPU State — flat execution state plus borrowed memory mappings
 // ---------------------------------------------------------------------------
 
@@ -240,6 +357,11 @@ struct CPUState {
     uint8_t  core_id;
     uint8_t  num_cores;
 
+    // System-owned cores borrow the central IPI router.  Standalone cores
+    // preserve the historical manually settable interrupt-line latch.
+    InterruptRouter* interrupts = nullptr;
+    std::atomic<bool> private_irq_ipi{false};
+
     // Standalone states own one private mapping.  System-owned states borrow
     // their parent's shared mapping and leave private_memory empty.
     std::unique_ptr<MemoryMappings> private_memory;
@@ -294,7 +416,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
         TimerDevice* shared_timer = nullptr,
         UartGeomDevice* shared_uart_geom = nullptr,
         FramebufferDevice* shared_fb = nullptr,
-        RTCDevice* shared_rtc = nullptr) {
+        RTCDevice* shared_rtc = nullptr,
+        InterruptRouter* shared_interrupts = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -326,6 +449,7 @@ static std::unique_ptr<CPUState> make_cpu_state(
         state->private_rtc = std::make_unique<RTCDevice>();
         state->rtc = state->private_rtc.get();
     }
+    state->interrupts = shared_interrupts;
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
     state->dict_clear_all();
@@ -354,6 +478,7 @@ struct SystemState {
             throw std::invalid_argument(
                 "all_core_count must include every full core and fit in 8 bits");
 
+        shared_interrupts.configure(all_core_count);
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
             auto core = make_cpu_state(
@@ -361,7 +486,8 @@ struct SystemState {
                 &shared_timer,
                 &shared_uart_geom,
                 &shared_fb,
-                &shared_rtc);
+                &shared_rtc,
+                &shared_interrupts);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -389,6 +515,7 @@ struct SystemState {
     UartGeomDevice shared_uart_geom{};
     FramebufferDevice shared_fb{};
     RTCDevice shared_rtc{};
+    InterruptRouter shared_interrupts{};
     std::vector<std::unique_ptr<CPUState>> cores;
     int advertised_core_count = 0;
     bool mappings_sealed = false;
@@ -1697,6 +1824,11 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_ACC3:      return s.acc[3];
         case CSR_COREID:    return s.core_id;
         case CSR_NCORES:    return s.num_cores;
+        case CSR_MBOX:
+            return s.interrupts != nullptr
+                ? s.interrupts->pending_mask(s.core_id)
+                : 0;
+        case CSR_IPIACK:    return 0;
         case CSR_IVEC_ID:   return s.ivec_id;
         case CSR_TRAP_ADDR: return s.trap_addr;
         case CSR_MEGAPAD_SZ:return 64;
@@ -1755,6 +1887,16 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_ACC1:      s.acc[1] = val; break;
         case CSR_ACC2:      s.acc[2] = val; break;
         case CSR_ACC3:      s.acc[3] = val; break;
+        case CSR_MBOX:
+            if (s.interrupts != nullptr)
+                s.interrupts->send_ipi(
+                    s.core_id, static_cast<uint8_t>(val));
+            break;
+        case CSR_IPIACK:
+            if (s.interrupts != nullptr)
+                s.interrupts->acknowledge_ipi(
+                    s.core_id, static_cast<uint8_t>(val));
+            break;
         case CSR_TSTRIDE_R: s.tstride_r = val; break;
         case CSR_TTILE_H:   s.ttile_h = val; break;
         case CSR_TTILE_W:   s.ttile_w = val; break;
@@ -5013,6 +5155,38 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("gf_prime_sel", &CPUState::gf_prime_sel)
         .def_readwrite("core_id", &CPUState::core_id)
         .def_readwrite("num_cores", &CPUState::num_cores)
+        .def_property(
+            "irq_ipi",
+            [](const CPUState& s) {
+                if (s.interrupts != nullptr)
+                    return s.interrupts->ipi_line(s.core_id);
+                return s.private_irq_ipi.load(
+                    std::memory_order_acquire);
+            },
+            [](CPUState& s, bool asserted) {
+                if (s.interrupts != nullptr) {
+                    s.interrupts->set_ipi_line(
+                        s.core_id, asserted);
+                } else {
+                    s.private_irq_ipi.store(
+                        asserted, std::memory_order_release);
+                }
+            })
+        .def("ipi_pending_mask", [](const CPUState& s) {
+            return s.interrupts != nullptr
+                ? s.interrupts->pending_mask(s.core_id)
+                : uint64_t{0};
+        })
+        .def("ipi_send", [](CPUState& s, uint64_t target_id) {
+            return s.interrupts != nullptr &&
+                s.interrupts->send_ipi(
+                    s.core_id, static_cast<uint8_t>(target_id));
+        })
+        .def("ipi_ack", [](CPUState& s, uint64_t source_id) {
+            return s.interrupts != nullptr &&
+                s.interrupts->acknowledge_ipi(
+                    s.core_id, static_cast<uint8_t>(source_id));
+        })
         .def_property("mem_size",
             [](const CPUState& s) { return s.memory->mem_size; },
             [](CPUState& s, uint64_t size) {
@@ -6054,6 +6228,48 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def(
+            "ipi_send",
+            [](SystemState& system, int requester_id, int target_id) {
+                return system.shared_interrupts.send_ipi(
+                    requester_id, target_id);
+            },
+            py::arg("requester_id"),
+            py::arg("target_id"))
+        .def(
+            "ipi_ack",
+            [](SystemState& system, int target_id, int source_id) {
+                return system.shared_interrupts.acknowledge_ipi(
+                    target_id, source_id);
+            },
+            py::arg("target_id"),
+            py::arg("source_id"))
+        .def(
+            "ipi_pending_mask",
+            [](const SystemState& system, int target_id) {
+                return system.shared_interrupts.pending_mask(
+                    target_id);
+            },
+            py::arg("target_id"))
+        .def(
+            "ipi_line",
+            [](const SystemState& system, int core_id) {
+                return system.shared_interrupts.ipi_line(core_id);
+            },
+            py::arg("core_id"))
+        .def(
+            "set_ipi_line",
+            [](SystemState& system, int core_id, bool asserted) {
+                system.shared_interrupts.set_ipi_line(
+                    core_id, asserted);
+            },
+            py::arg("core_id"),
+            py::arg("asserted"))
+        .def(
+            "ipi_pending_snapshot",
+            [](const SystemState& system) {
+                return system.shared_interrupts.pending_snapshot();
+            })
         .def_property_readonly(
             "mappings_sealed",
             [](const SystemState& system) {

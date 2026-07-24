@@ -226,6 +226,15 @@ class Megapad64:
         self._mem = value
         self._mem_size = sz
 
+    @property
+    def irq_ipi(self) -> bool:
+        """Current IPI input line owned by native interrupt metadata."""
+        return bool(self._cs.irq_ipi)
+
+    @irq_ipi.setter
+    def irq_ipi(self, asserted: bool):
+        self._cs.irq_ipi = bool(asserted)
+
     def attach_hbw(self, buf: bytearray, base: int, size: int):
         """Attach HBW math RAM buffer to C++ state."""
         self._cs.attach_hbw_mem(buf, base, size)
@@ -1019,6 +1028,8 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_ACC3: lambda: cs.get_acc(3),
         CSR_COREID: lambda: cs.core_id,
         CSR_NCORES: lambda: cs.num_cores,
+        CSR_MBOX: lambda: cs.ipi_pending_mask(),
+        CSR_IPIACK: lambda: 0,
         CSR_IVEC_ID: lambda: cs.ivec_id,
         CSR_TRAP_ADDR: lambda: cs.trap_addr,
         CSR_MEGAPAD_SZ: lambda: 64,
@@ -1072,6 +1083,8 @@ def _csr_write_py(cpu, addr: int, val: int):
     elif addr == CSR_ACC1:    cs.set_acc(1, val)
     elif addr == CSR_ACC2:    cs.set_acc(2, val)
     elif addr == CSR_ACC3:    cs.set_acc(3, val)
+    elif addr == CSR_MBOX:    cs.ipi_send(val)
+    elif addr == CSR_IPIACK:  cs.ipi_ack(val)
     elif addr == CSR_TSTRIDE_R: cs.tstride_r = val
     elif addr == CSR_TTILE_H: cs.ttile_h = val
     elif addr == CSR_TTILE_W: cs.ttile_w = val
