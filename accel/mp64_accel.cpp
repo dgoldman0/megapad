@@ -262,11 +262,7 @@ struct CPUState {
     AccelHookEntry accel_hooks[MAX_ACCEL_HOOKS];
     int accel_hook_count = 0;
 
-    void register_accel_hook(uint64_t addr, int hook_id) {
-        if (accel_hook_count < MAX_ACCEL_HOOKS) {
-            accel_hooks[accel_hook_count++] = {addr, hook_id};
-        }
-    }
+    void register_accel_hook(uint64_t addr, int hook_id);
 };
 
 // ---------------------------------------------------------------------------
@@ -367,6 +363,14 @@ private:
 };
 
 using MemoryMutationGuard = ExclusiveMemoryUseGuard;
+
+void CPUState::register_accel_hook(uint64_t addr, int hook_id) {
+    MemoryMutationGuard guard(
+        *this,
+        "CPUState accelerator hooks cannot be changed while CPUState is in use");
+    if (accel_hook_count < MAX_ACCEL_HOOKS)
+        accel_hooks[accel_hook_count++] = {addr, hook_id};
+}
 
 class CPUExecutionGuard {
 public:
@@ -665,137 +669,390 @@ static inline int find_accel_hook(CPUState& s, uint64_t target) {
     return 0;
 }
 
-// Pop one cell from data stack (r14) — direct memory read
-static inline uint64_t pop_data(CPUState& s) {
-    uint64_t val = mem_read64(s, s.regs[14]);
-    s.regs[14] += 8;
-    return val;
-}
+struct AccelHookContext {
+    bool has_mmio;
+    uint64_t mmio_start;
+    uint64_t mmio_end;
+};
 
-// Resolve guest address to host write pointer (VRAM, ext_mem, HBW, or main RAM)
-static inline uint8_t* resolve_write_ptr(CPUState& s, uint64_t addr) {
-    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
-        return s.vram_mem + (addr - s.vram_base);
-    if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
-        return s.ext_mem + (addr - s.ext_mem_base);
-    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr))
-        return s.hbw_mem + (addr - s.hbw_base);
-    if (s.mem && addr < s.mem_size)
-        return s.mem + addr;
-    return nullptr;
-}
+struct AccelHookResult {
+    bool handled;
+    int extra_cycles;
+};
 
-// Like resolve_write_ptr but also returns how many bytes remain in the region.
-// Used by accelerator hooks to clamp writes and prevent host buffer overflows.
-struct WriteRegion { uint8_t* ptr; uint64_t avail; };
-static inline WriteRegion resolve_write_region(CPUState& s, uint64_t addr) {
+struct DirectMemoryRegion {
+    uint8_t* ptr;
+    uint64_t avail;
+    int priority;
+};
+
+enum class AccelAccessModel {
+    SCALAR,
+    BYTE,
+};
+
+// The native renderer rejects framebuffer dimensions beyond 4096×4096.
+// Graphics shortcuts use that same architectural envelope.  VRAM-COPY's
+// width is measured in bytes, so allow a full 4096-pixel RGBA scanline.
+static constexpr uint64_t MAX_ACCEL_FB_DIMENSION = 4096;
+static constexpr uint64_t MAX_ACCEL_COPY_ROW_BYTES =
+    MAX_ACCEL_FB_DIMENSION * 4;
+static constexpr uint64_t MAX_ACCEL_STRING_GLYPHS = 4096;
+static constexpr uint64_t MAX_ACCEL_HOOK_EXTRA_CYCLES =
+    static_cast<uint64_t>(std::numeric_limits<int>::max()) - 2;
+
+// Scalar loads/stores use resolve_mem(), whose overlap priority is
+// VRAM -> external memory -> HBW -> Bank 0.
+static inline DirectMemoryRegion resolve_accel_scalar_region(
+        CPUState& s, uint64_t addr) {
     if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr)) {
         uint64_t off = addr - s.vram_base;
-        return {s.vram_mem + off, s.vram_size - off};
+        return {s.vram_mem + off, s.vram_size - off, 0};
     }
     if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr)) {
         uint64_t off = addr - s.ext_mem_base;
-        return {s.ext_mem + off, s.ext_mem_size - off};
+        return {s.ext_mem + off, s.ext_mem_size - off, 1};
     }
     if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
         uint64_t off = addr - s.hbw_base;
-        return {s.hbw_mem + off, s.hbw_size - off};
+        return {s.hbw_mem + off, s.hbw_size - off, 2};
     }
     if (s.mem && addr < s.mem_size)
-        return {s.mem + addr, s.mem_size - addr};
-    return {nullptr, 0};
+        return {s.mem + addr, s.mem_size - addr, 3};
+    return {nullptr, 0, 4};
 }
 
-// Fast read for non-MMIO memory (font data is in main RAM or ext_mem)
-static inline uint8_t read8_fast(CPUState& s, uint64_t addr) {
-    if (s.mem && addr < s.mem_size) return s.mem[addr];
+// Byte instructions have an explicit supervisor-mode routing order in
+// sys_read8()/sys_write8(): HBW -> external memory -> VRAM -> Bank 0.
+static inline DirectMemoryRegion resolve_accel_byte_region(
+        CPUState& s, uint64_t addr) {
+    if (s.hbw_mem && region_contains(s.hbw_base, s.hbw_size, addr)) {
+        uint64_t off = addr - s.hbw_base;
+        return {s.hbw_mem + off, s.hbw_size - off, 0};
+    }
     if (s.ext_mem && region_contains(s.ext_mem_base, s.ext_mem_size, addr))
-        return s.ext_mem[addr - s.ext_mem_base];
-    return 0;
+        return {
+            s.ext_mem + (addr - s.ext_mem_base),
+            s.ext_mem_size - (addr - s.ext_mem_base),
+            1,
+        };
+    if (s.vram_mem && region_contains(s.vram_base, s.vram_size, addr))
+        return {
+            s.vram_mem + (addr - s.vram_base),
+            s.vram_size - (addr - s.vram_base),
+            2,
+        };
+    if (s.mem && addr < s.mem_size)
+        return {s.mem + addr, s.mem_size - addr, 3};
+    return {nullptr, 0, 4};
+}
+
+static inline DirectMemoryRegion resolve_accel_region(
+        CPUState& s, uint64_t addr, AccelAccessModel model) {
+    return model == AccelAccessModel::SCALAR
+        ? resolve_accel_scalar_region(s, addr)
+        : resolve_accel_byte_region(s, addr);
+}
+
+static inline bool accel_span_overlaps_mmio(
+        uint64_t addr, uint64_t size, const AccelHookContext& context) {
+    if (!context.has_mmio || context.mmio_start >= context.mmio_end ||
+        size == 0)
+        return false;
+    if (size - 1 > MASK64 - addr)
+        return true;
+    const uint64_t last = addr + size - 1;
+    return addr < context.mmio_end && last >= context.mmio_start;
+}
+
+static inline bool guest_region_intersects_span(
+        uint64_t region_base,
+        uint64_t region_size,
+        uint64_t span_base,
+        uint64_t span_size) {
+    if (region_size == 0 || span_size == 0)
+        return false;
+    const uint64_t region_last = region_base + region_size - 1;
+    const uint64_t span_last = span_base + span_size - 1;
+    return region_base <= span_last && span_base <= region_last;
+}
+
+static inline bool higher_priority_region_intersects_span(
+        CPUState& s,
+        uint64_t addr,
+        uint64_t size,
+        AccelAccessModel model,
+        int selected_priority) {
+    if (model == AccelAccessModel::SCALAR) {
+        if (selected_priority > 0 &&
+            guest_region_intersects_span(
+                s.vram_base, s.vram_size, addr, size))
+            return true;
+        if (selected_priority > 1 &&
+            guest_region_intersects_span(
+                s.ext_mem_base, s.ext_mem_size, addr, size))
+            return true;
+        if (selected_priority > 2 &&
+            guest_region_intersects_span(
+                s.hbw_base, s.hbw_size, addr, size))
+            return true;
+    } else {
+        if (selected_priority > 0 &&
+            guest_region_intersects_span(
+                s.hbw_base, s.hbw_size, addr, size))
+            return true;
+        if (selected_priority > 1 &&
+            guest_region_intersects_span(
+                s.ext_mem_base, s.ext_mem_size, addr, size))
+            return true;
+        if (selected_priority > 2 &&
+            guest_region_intersects_span(
+                s.vram_base, s.vram_size, addr, size))
+            return true;
+    }
+    return false;
+}
+
+static inline bool accel_span_is_direct(
+        CPUState& s,
+        uint64_t addr,
+        uint64_t size,
+        AccelAccessModel model,
+        const AccelHookContext& context) {
+    if (size == 0)
+        return true;
+    if (size - 1 > MASK64 - addr ||
+        accel_span_overlaps_mmio(addr, size, context))
+        return false;
+    const auto region = resolve_accel_region(s, addr, model);
+    return region.ptr && size <= region.avail &&
+        !higher_priority_region_intersects_span(
+            s, addr, size, model, region.priority);
+}
+
+static inline bool accel_stack_is_direct(
+        CPUState& s, uint64_t cells, const AccelHookContext& context) {
+    return !s.priv_level &&
+        accel_span_is_direct(
+            s,
+            s.regs[14],
+            cells * 8,
+            AccelAccessModel::SCALAR,
+            context);
+}
+
+// Peek first and consume only after the complete operation has passed
+// preflight.  A declined shortcut therefore leaves the data stack exactly as
+// ordinary CALL.L expects before entering the BIOS implementation.
+static inline uint64_t peek_data(CPUState& s, uint64_t index) {
+    return mem_read64(s, s.regs[14] + index * 8);
+}
+
+static inline void consume_data(CPUState& s, uint64_t cells) {
+    s.regs[14] += cells * 8;
+}
+
+static inline bool checked_accel_cycle_cost(
+        uint64_t per_unit,
+        uint64_t width,
+        uint64_t height,
+        uint64_t base,
+        int& result) {
+    if (per_unit == 0 || base > MAX_ACCEL_HOOK_EXTRA_CYCLES)
+        return false;
+    const uint64_t unit_budget =
+        (MAX_ACCEL_HOOK_EXTRA_CYCLES - base) / per_unit;
+    if (height != 0 && width > unit_budget / height)
+        return false;
+    result = static_cast<int>(per_unit * width * height + base);
+    return true;
+}
+
+static inline void write_rgb565_le(uint8_t* ptr, uint16_t value) {
+    ptr[0] = static_cast<uint8_t>(value);
+    ptr[1] = static_cast<uint8_t>(value >> 8);
+}
+
+static inline uint8_t read_accel_byte(CPUState& s, uint64_t addr) {
+    return *resolve_accel_byte_region(s, addr).ptr;
+}
+
+static inline bool host_spans_overlap(
+        const uint8_t* first,
+        uint64_t first_size,
+        const uint8_t* second,
+        uint64_t second_size) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(first);
+    const uintptr_t b = reinterpret_cast<uintptr_t>(second);
+    return a <= b ? b - a < first_size : a - b < second_size;
 }
 
 // RECT-FILL ( addr stride w h color16 -- )
-static int accel_rect_fill(CPUState& s) {
-    uint16_t color16 = (uint16_t)pop_data(s);
-    int64_t  h       = (int64_t)pop_data(s);
-    int64_t  w       = (int64_t)pop_data(s);
-    int64_t  stride  = (int64_t)pop_data(s);
-    uint64_t addr    = pop_data(s);
+static AccelHookResult accel_rect_fill(
+        CPUState& s, const AccelHookContext& context) {
+    if (!accel_stack_is_direct(s, 5, context))
+        return {false, 0};
 
-    if (w <= 0 || h <= 0) return 1;
+    const uint16_t color16 = static_cast<uint16_t>(peek_data(s, 0));
+    const uint64_t h = peek_data(s, 1);
+    const uint64_t w = peek_data(s, 2);
+    const uint64_t stride = peek_data(s, 3);
+    uint64_t addr = peek_data(s, 4);
 
-    for (int64_t row = 0; row < h; row++) {
-        auto wr = resolve_write_region(s, addr);
-        if (wr.ptr) {
-            int64_t max_px = (int64_t)(wr.avail / 2);  // 2 bytes per pixel
-            int64_t safe_w = (w < max_px) ? w : max_px;
-            uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
-            for (int64_t col = 0; col < safe_w; col++)
-                px[col] = color16;
-        }
+    if (w == 0 || h == 0) {
+        consume_data(s, 5);
+        return {true, 1};
+    }
+
+    int cycle_cost = 0;
+    if (w > MAX_ACCEL_FB_DIMENSION || h > MAX_ACCEL_FB_DIMENSION ||
+        !checked_accel_cycle_cost(5, w, h, 10, cycle_cost))
+        return {false, 0};
+
+    const uint64_t row_bytes = w * 2;
+    uint64_t row_addr = addr;
+    for (uint64_t row = 0; row < h; row++) {
+        if (!accel_span_is_direct(
+                s,
+                row_addr,
+                row_bytes,
+                AccelAccessModel::SCALAR,
+                context))
+            return {false, 0};
+        row_addr += stride;
+    }
+
+    consume_data(s, 5);
+    for (uint64_t row = 0; row < h; row++) {
+        auto region = resolve_accel_scalar_region(s, addr);
+        for (uint64_t col = 0; col < w; col++)
+            write_rgb565_le(region.ptr + col * 2, color16);
         addr += stride;
     }
-    return (int)(5 * w * h + 10);  // simulated cycle cost
+    return {true, cycle_cost};
 }
 
 // BLIT-GLYPH ( glyph-addr pixel-addr stride fg16 -- )
-static int accel_blit_glyph(CPUState& s) {
-    uint16_t fg16       = (uint16_t)pop_data(s);
-    int64_t  stride     = (int64_t)pop_data(s);
-    uint64_t pixel_addr = pop_data(s);
-    uint64_t glyph_addr = pop_data(s);
+static AccelHookResult accel_blit_glyph(
+        CPUState& s, const AccelHookContext& context) {
+    if (!accel_stack_is_direct(s, 4, context))
+        return {false, 0};
 
-    if (glyph_addr == 0) return 1;
+    const uint16_t fg16 = static_cast<uint16_t>(peek_data(s, 0));
+    const uint64_t stride = peek_data(s, 1);
+    uint64_t pixel_addr = peek_data(s, 2);
+    const uint64_t glyph_addr = peek_data(s, 3);
+
+    if (glyph_addr == 0) {
+        consume_data(s, 4);
+        return {true, 1};
+    }
+    if (!accel_span_is_direct(
+            s,
+            glyph_addr,
+            8,
+            AccelAccessModel::BYTE,
+            context))
+        return {false, 0};
 
     // Read 8 font bytes from guest memory
     uint8_t font_rows[8];
     for (int i = 0; i < 8; i++)
-        font_rows[i] = read8_fast(s, glyph_addr + i);
+        font_rows[i] = read_accel_byte(s, glyph_addr + i);
+    const auto font_region = resolve_accel_byte_region(s, glyph_addr);
+
+    uint64_t row_addr = pixel_addr;
+    for (int row = 0; row < 8; row++) {
+        if (!accel_span_is_direct(
+                s,
+                row_addr,
+                16,
+                AccelAccessModel::SCALAR,
+                context))
+            return {false, 0};
+        const auto output_region =
+            resolve_accel_scalar_region(s, row_addr);
+        if (host_spans_overlap(
+                font_region.ptr, 8, output_region.ptr, 16))
+            return {false, 0};
+        row_addr += stride;
+    }
 
     // Blit 8x8 glyph — only foreground (set) bits written
+    consume_data(s, 4);
     for (int row = 0; row < 8; row++) {
         uint8_t bits = font_rows[row];
         if (bits) {  // skip empty rows entirely
-            auto wr = resolve_write_region(s, pixel_addr);
-            if (wr.ptr && wr.avail >= 16) {  // 8 pixels × 2 bytes
-                uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
-                for (int col = 0; col < 8; col++) {
-                    if (bits & 0x80) px[col] = fg16;
-                    bits <<= 1;
-                }
+            auto region = resolve_accel_scalar_region(s, pixel_addr);
+            for (int col = 0; col < 8; col++) {
+                if (bits & 0x80)
+                    write_rgb565_le(region.ptr + col * 2, fg16);
+                bits <<= 1;
             }
         }
         pixel_addr += stride;
     }
-    return 120;  // simulated cycle cost
+    return {true, 120};
 }
 
 // VRAM-COPY ( src dst stride w h -- )
 // Copy a w×h byte rectangle within VRAM.  Overlap-safe (memmove per row).
-static int accel_vram_copy(CPUState& s) {
-    int64_t  h      = (int64_t)pop_data(s);
-    int64_t  w      = (int64_t)pop_data(s);
-    int64_t  stride = (int64_t)pop_data(s);
-    uint64_t dst    = pop_data(s);
-    uint64_t src    = pop_data(s);
+static AccelHookResult accel_vram_copy(
+        CPUState& s, const AccelHookContext& context) {
+    if (!accel_stack_is_direct(s, 5, context))
+        return {false, 0};
 
-    if (w <= 0 || h <= 0) return 1;
-    if (src == dst) return 1;
+    const uint64_t h = peek_data(s, 0);
+    const uint64_t w = peek_data(s, 1);
+    const uint64_t stride = peek_data(s, 2);
+    const uint64_t dst = peek_data(s, 3);
+    const uint64_t src = peek_data(s, 4);
+
+    if (w == 0 || h == 0 || src == dst) {
+        consume_data(s, 5);
+        return {true, 1};
+    }
+
+    int cycle_cost = 0;
+    if (w > MAX_ACCEL_COPY_ROW_BYTES || h > MAX_ACCEL_FB_DIMENSION ||
+        !checked_accel_cycle_cost(3, w, h, 10, cycle_cost))
+        return {false, 0};
 
     // Determine copy direction for overlap safety
-    bool backward = dst > src;
-    uint64_t src_row = backward ? src + (uint64_t)(h - 1) * (uint64_t)stride : src;
-    uint64_t dst_row = backward ? dst + (uint64_t)(h - 1) * (uint64_t)stride : dst;
+    const bool backward = dst > src;
+    uint64_t src_row = backward ? src + (h - 1) * stride : src;
+    uint64_t dst_row = backward ? dst + (h - 1) * stride : dst;
 
-    for (int64_t row = 0; row < h; row++) {
-        auto sr = resolve_write_region(s, src_row);
-        auto dr = resolve_write_region(s, dst_row);
-        if (sr.ptr && dr.ptr) {
-            int64_t safe_w = w;
-            if ((uint64_t)safe_w > sr.avail) safe_w = (int64_t)sr.avail;
-            if ((uint64_t)safe_w > dr.avail) safe_w = (int64_t)dr.avail;
-            if (safe_w > 0) std::memmove(dr.ptr, sr.ptr, (size_t)safe_w);
+    // Preflight every row before changing R14 or guest memory.  The BIOS
+    // copies bytes left-to-right within a row, so decline partial same-row
+    // overlap where memmove would deliberately produce a different result.
+    uint64_t check_src = src_row;
+    uint64_t check_dst = dst_row;
+    for (uint64_t row = 0; row < h; row++) {
+        if (!accel_span_is_direct(
+                s, check_src, w, AccelAccessModel::BYTE, context) ||
+            !accel_span_is_direct(
+                s, check_dst, w, AccelAccessModel::BYTE, context))
+            return {false, 0};
+        const auto sr = resolve_accel_byte_region(s, check_src);
+        const auto dr = resolve_accel_byte_region(s, check_dst);
+        if (sr.ptr != dr.ptr &&
+            host_spans_overlap(sr.ptr, w, dr.ptr, w))
+            return {false, 0};
+        if (backward) {
+            check_src -= stride;
+            check_dst -= stride;
+        } else {
+            check_src += stride;
+            check_dst += stride;
         }
+    }
+
+    consume_data(s, 5);
+    for (uint64_t row = 0; row < h; row++) {
+        const auto sr = resolve_accel_byte_region(s, src_row);
+        const auto dr = resolve_accel_byte_region(s, dst_row);
+        std::memmove(dr.ptr, sr.ptr, static_cast<size_t>(w));
         if (backward) {
             src_row -= stride;
             dst_row -= stride;
@@ -804,61 +1061,117 @@ static int accel_vram_copy(CPUState& s) {
             dst_row += stride;
         }
     }
-    return (int)(3 * w * h + 10);  // simulated cycle cost
+    return {true, cycle_cost};
 }
 
 // BLIT-STRING ( c-addr len pixel-addr stride fg16 font-base -- )
 // Render a string of 8×8 glyphs.  Foreground-only (transparent bg).
-static int accel_blit_string(CPUState& s) {
-    uint64_t font_base  = pop_data(s);
-    uint16_t fg16       = (uint16_t)pop_data(s);
-    int64_t  stride     = (int64_t)pop_data(s);
-    uint64_t pixel_addr = pop_data(s);
-    int64_t  len        = (int64_t)pop_data(s);
-    uint64_t c_addr     = pop_data(s);
+static AccelHookResult accel_blit_string(
+        CPUState& s, const AccelHookContext& context) {
+    if (!accel_stack_is_direct(s, 6, context))
+        return {false, 0};
 
-    if (len <= 0) return 1;
-    // Clamp to a sane maximum to avoid host-side DoS from corrupt stack
-    if (len > 4096) len = 4096;
+    const uint64_t font_base = peek_data(s, 0);
+    const uint16_t fg16 = static_cast<uint16_t>(peek_data(s, 1));
+    const uint64_t stride = peek_data(s, 2);
+    uint64_t pixel_addr = peek_data(s, 3);
+    const uint64_t len = peek_data(s, 4);
+    const uint64_t c_addr = peek_data(s, 5);
 
-    for (int64_t i = 0; i < len; i++) {
-        uint8_t ch = read8_fast(s, c_addr + i);
+    if (len == 0) {
+        consume_data(s, 6);
+        return {true, 1};
+    }
+
+    int cycle_cost = 0;
+    if (len > MAX_ACCEL_STRING_GLYPHS ||
+        !checked_accel_cycle_cost(120, len, 1, 10, cycle_cost) ||
+        !accel_span_is_direct(
+            s, c_addr, len, AccelAccessModel::BYTE, context))
+        return {false, 0};
+
+    // Every character maps into the fixed 0x20..0xFF font table.  Proving the
+    // whole table direct also lets us reject output/input aliasing up front,
+    // so drawing cannot change a later character or glyph behind preflight.
+    static constexpr uint64_t FONT_TABLE_BYTES = (0x100 - 0x20) * 8;
+    if (!accel_span_is_direct(
+            s,
+            font_base,
+            FONT_TABLE_BYTES,
+            AccelAccessModel::BYTE,
+            context))
+        return {false, 0};
+    const auto chars_region = resolve_accel_byte_region(s, c_addr);
+    const auto font_region = resolve_accel_byte_region(s, font_base);
+
+    // Validate every potential output row before committing.
+    uint64_t glyph_pixel_addr = pixel_addr;
+    for (uint64_t i = 0; i < len; i++) {
+        uint64_t row_addr = glyph_pixel_addr;
+        for (int row = 0; row < 8; row++) {
+            if (!accel_span_is_direct(
+                    s,
+                    row_addr,
+                    16,
+                    AccelAccessModel::SCALAR,
+                    context))
+                return {false, 0};
+            const auto output_region =
+                resolve_accel_scalar_region(s, row_addr);
+            if (host_spans_overlap(
+                    chars_region.ptr, len, output_region.ptr, 16) ||
+                host_spans_overlap(
+                    font_region.ptr,
+                    FONT_TABLE_BYTES,
+                    output_region.ptr,
+                    16))
+                return {false, 0};
+            row_addr += stride;
+        }
+        glyph_pixel_addr += 16;
+    }
+
+    consume_data(s, 6);
+    for (uint64_t i = 0; i < len; i++) {
+        uint8_t ch = read_accel_byte(s, c_addr + i);
         if (ch < 0x20) ch = 0x20;
-        uint64_t glyph_addr = font_base + (uint64_t)(ch - 0x20) * 8;
+        const uint64_t glyph_addr =
+            font_base + static_cast<uint64_t>(ch - 0x20) * 8;
 
         // Read 8 font bytes
         uint8_t font_rows[8];
         for (int r = 0; r < 8; r++)
-            font_rows[r] = read8_fast(s, glyph_addr + r);
+            font_rows[r] = read_accel_byte(s, glyph_addr + r);
 
         // Blit 8×8 glyph
         uint64_t pa = pixel_addr;
         for (int row = 0; row < 8; row++) {
             uint8_t bits = font_rows[row];
             if (bits) {
-                auto wr = resolve_write_region(s, pa);
-                if (wr.ptr && wr.avail >= 16) {  // 8 pixels × 2 bytes
-                    uint16_t* px = reinterpret_cast<uint16_t*>(wr.ptr);
-                    for (int col = 0; col < 8; col++) {
-                        if (bits & 0x80) px[col] = fg16;
-                        bits <<= 1;
-                    }
+                auto region = resolve_accel_scalar_region(s, pa);
+                for (int col = 0; col < 8; col++) {
+                    if (bits & 0x80)
+                        write_rgb565_le(region.ptr + col * 2, fg16);
+                    bits <<= 1;
                 }
             }
             pa += stride;
         }
         pixel_addr += 16;  // advance 8 pixels × 2 bytes
     }
-    return (int)(120 * len + 10);  // simulated cycle cost
+    return {true, cycle_cost};
 }
 
-static int execute_accel_hook(CPUState& s, int hook_id) {
+static AccelHookResult execute_accel_hook(
+        CPUState& s,
+        int hook_id,
+        const AccelHookContext& context) {
     switch (hook_id) {
-        case 1: return accel_rect_fill(s);
-        case 2: return accel_blit_glyph(s);
-        case 3: return accel_vram_copy(s);
-        case 4: return accel_blit_string(s);
-        default: return 0;
+        case 1: return accel_rect_fill(s, context);
+        case 2: return accel_blit_glyph(s, context);
+        case 3: return accel_vram_copy(s, context);
+        case 4: return accel_blit_string(s, context);
+        default: return {false, 0};
     }
 }
 
@@ -3375,11 +3688,22 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 // Check accelerator hooks BEFORE pushing return address
                 int hook = find_accel_hook(s, target);
                 if (hook) {
-                    // Don't push return addr — we skip the word entirely.
-                    // PC stays where it is (after the CALL.L instruction).
-                    cycles += execute_accel_hook(s, hook);
-                    break;
+                    const AccelHookContext context = {
+                        cb.has_mmio,
+                        cb.mmio_start,
+                        cb.mmio_end,
+                    };
+                    const AccelHookResult result =
+                        execute_accel_hook(s, hook, context);
+                    if (result.handled) {
+                        // Don't push a return address for an accepted shortcut:
+                        // PC remains after CALL.L and the BIOS word is skipped.
+                        cycles += result.extra_cycles;
+                        break;
+                    }
                 }
+                // Unsafe, unsupported, or non-equivalent shortcuts fall
+                // through transactionally to the ordinary BIOS call.
                 uint64_t ret_addr = pc(s);
                 sys_push64(s, cb, ret_addr);
                 pc(s) = target;
