@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import MachineSession, TerminalCell, TerminalSnapshot
 
 
 PROTOCOL_VERSION = 1
-DEFAULT_SOCKET = f"/tmp/megapad-session-{os.getuid()}.sock"
+DEFAULT_SOCKET = shared_session_socket()
 MAX_REQUEST_BYTES = 1 << 20
 
 
@@ -528,10 +530,16 @@ class SessionServer:
         self._clients: set[socket.socket] = set()
         self._clients_lock = threading.Lock()
         self._serve_thread: threading.Thread | None = None
+        self._socket_owner: RuntimeOwnershipLock | None = None
+        self._socket_identity: tuple[int, int] | None = None
 
     def start(self):
         self._bind()
-        self.machine.start()
+        try:
+            self.machine.start()
+        except Exception:
+            self._close_owned_listener()
+            raise
 
     def serve_in_thread(self):
         self.start()
@@ -545,23 +553,119 @@ class SessionServer:
     def _bind(self):
         path = Path(self.socket_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        ownership = RuntimeOwnershipLock.acquire(self.socket_path)
+        self._socket_owner = ownership
+        server = None
+        bound_info = None
+        try:
             try:
-                probe.connect(self.socket_path)
-            except OSError:
-                path.unlink()
+                existing = os.lstat(path)
+            except FileNotFoundError:
+                pass
             else:
-                probe.close()
-                raise RuntimeError(f"shared session already listening at {path}")
-            finally:
-                probe.close()
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(self.socket_path)
-        os.chmod(self.socket_path, 0o600)
-        server.listen(8)
-        server.settimeout(0.25)
-        self._socket = server
+                self._validate_socket_path(path, existing)
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.connect(self.socket_path)
+                except ConnectionRefusedError:
+                    if not self._unlink_socket_if_matching(path, existing):
+                        raise RuntimeError(
+                            f"shared session socket changed during stale "
+                            f"recovery: {path}"
+                        )
+                else:
+                    raise RuntimeError(
+                        f"shared session already listening at {path}"
+                    )
+                finally:
+                    probe.close()
+
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(self.socket_path)
+            bound_info = os.lstat(path)
+            self._validate_socket_path(path, bound_info)
+            os.chmod(self.socket_path, 0o600)
+            server.listen(8)
+            server.settimeout(0.25)
+            info = os.lstat(path)
+            self._validate_socket_path(path, info)
+            identity = (info.st_dev, info.st_ino)
+            bound_identity = (bound_info.st_dev, bound_info.st_ino)
+            if identity != bound_identity:
+                raise RuntimeError(
+                    f"shared session socket changed during bind: {path}"
+                )
+            self._socket_identity = bound_identity
+            self._socket = server
+        except Exception:
+            if server is not None:
+                try:
+                    server.close()
+                except OSError:
+                    pass
+            if bound_info is not None:
+                self._unlink_socket_if_matching(path, bound_info)
+            self._socket_owner = None
+            self._socket_identity = None
+            ownership.release()
+            raise
+
+    @staticmethod
+    def _validate_socket_path(path: Path, info: os.stat_result) -> None:
+        if not stat.S_ISSOCK(info.st_mode):
+            raise RuntimeError(
+                f"unsafe shared session path is not a socket: {path}"
+            )
+        if info.st_uid != os.getuid():
+            raise RuntimeError(
+                f"unsafe shared session socket is owned by uid {info.st_uid}, "
+                f"expected {os.getuid()}: {path}"
+            )
+
+    @staticmethod
+    def _unlink_socket_if_matching(
+        path: Path,
+        expected: os.stat_result,
+    ) -> bool:
+        try:
+            current = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            return False
+        path.unlink()
+        return True
+
+    def _close_owned_listener(self) -> bool:
+        ownership = self._socket_owner
+        if ownership is None:
+            return False
+        self._socket_owner = None
+        try:
+            if self._socket is not None:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
+                self._socket = None
+            identity = self._socket_identity
+            self._socket_identity = None
+            if identity is None:
+                return False
+            path = Path(self.socket_path)
+            try:
+                current = os.lstat(path)
+            except FileNotFoundError:
+                return False
+            if (current.st_dev, current.st_ino) != identity:
+                return False
+            path.unlink()
+            return True
+        finally:
+            ownership.release()
 
     def serve_forever(self):
         if self._socket is None:
@@ -673,12 +777,7 @@ class SessionServer:
         if self._stopping.is_set():
             return
         self._stopping.set()
-        if self._socket is not None:
-            try:
-                self._socket.close()
-            except OSError:
-                pass
-            self._socket = None
+        self._close_owned_listener()
         with self._clients_lock:
             clients = list(self._clients)
             self._clients.clear()
@@ -688,10 +787,6 @@ class SessionServer:
             except OSError:
                 pass
         self.machine.stop()
-        try:
-            Path(self.socket_path).unlink()
-        except FileNotFoundError:
-            pass
 
 
 class SessionClient:

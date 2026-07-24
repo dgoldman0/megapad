@@ -18,7 +18,10 @@ import os
 import sys
 import time
 
-STATUS_FILE = "/tmp/megapad_test_status.json"
+from runtime_paths import test_status_path
+
+
+STATUS_FILE = test_status_path()
 
 # ANSI colors
 GREEN = "\033[32m"

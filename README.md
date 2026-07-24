@@ -237,12 +237,30 @@ python cli.py --bios bios.asm --storage sample.img --headless --headless-port 77
 # Connect with the built-in client
 python cli.py --connect localhost:6464
 
+# Or discover the active server from its status file
+python cli.py --connect
+
 # Or connect with nc / telnet
 nc localhost 6464
 ```
 
 The headless server writes status to `/tmp/megapad_headless.json` (PID + port)
 for discoverability.  Multiple clients can connect simultaneously.
+
+For a parallel checkout, export a short runtime namespace before starting the
+server. Its discovery file is placed in the UID-owned, mode-`0700` directory
+`/tmp/megapad-runtime-<uid>-<namespace>/`, and the default TCP port is assigned
+by the OS so it cannot collide with the legacy port:
+
+```bash
+export MP64_RUNTIME_NAMESPACE=megapad-concurrency
+python cli.py --bios bios.asm --storage sample.img --headless
+```
+
+The selected port is printed at startup and recorded in `headless.json`.
+`python cli.py --connect` reads that file when the same namespace is exported.
+An explicit connection endpoint or `--headless-port` still overrides
+discovery.
 
 You'll see the KDOS banner and land at the Forth REPL:
 

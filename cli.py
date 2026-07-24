@@ -39,6 +39,12 @@ from devices import (
     NIC_BASE, MBOX_BASE, SPINLOCK_BASE, SECTOR_SIZE,
 )
 from diskutil import MP64FS, FTYPE_NAMES
+from runtime_paths import (
+    HeadlessStatusOwner,
+    default_headless_port,
+    headless_status_path,
+    read_headless_status,
+)
 
 # ---------------------------------------------------------------------------
 #  Disassembler (basic — enough for debugging)
@@ -907,8 +913,8 @@ class MegapadCLI(cmd.Cmd):
 #  Headless TCP terminal server
 # ---------------------------------------------------------------------------
 
-_HEADLESS_PORT = 6464
-_HEADLESS_STATUS = "/tmp/megapad_headless.json"
+_HEADLESS_PORT = default_headless_port()
+_HEADLESS_STATUS = headless_status_path()
 _HEADLESS_BATCH = 1_000_000
 
 
@@ -919,22 +925,30 @@ class HeadlessServer:
     serves UART I/O over a TCP socket.  Multiple clients can connect
     simultaneously; all see TX output and any can send input.
 
-    Status info (PID, port) is written to /tmp/megapad_headless.json
-    so ``--connect`` can auto-discover a running instance.
+    Status info (PID, port) is written to the runtime discovery file.
     """
 
-    def __init__(self, sys_emu: MegapadSystem, port: int = _HEADLESS_PORT):
+    def __init__(
+        self,
+        sys_emu: MegapadSystem,
+        port: int = _HEADLESS_PORT,
+        status_path: str = _HEADLESS_STATUS,
+    ):
         self.sys_emu = sys_emu
         self.port = port
+        self.status_path = status_path
         self.clients: list = []            # connected client sockets
         self._lock = __import__("threading").Lock()
         self.running = False
+        self._srv = None
+        self._discovery_owner: HeadlessStatusOwner | None = None
 
     # -- public API -------------------------------------------------------
 
     def serve_forever(self):
         """Start the CPU thread and block on the accept loop."""
-        import threading, signal, json, socket as _socket
+        import signal
+        import threading
 
         self.running = True
 
@@ -942,38 +956,28 @@ class HeadlessServer:
         self.sys_emu.uart.on_tx = self._broadcast_byte
         self.sys_emu.uart.on_tx_batch = self._broadcast_batch
 
-        # CPU loop in background thread
-        self._cpu_thread = threading.Thread(
-            target=self._cpu_loop, daemon=True, name="cpu-loop")
-        self._cpu_thread.start()
-
-        # TCP server
-        self._srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        self._srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        self._srv.bind(("0.0.0.0", self.port))
-        self._srv.listen(8)
-        self._srv.settimeout(1.0)     # so we can check self.running
-
-        # Write status file
-        status = {"pid": os.getpid(), "port": self.port}
-        with open(_HEADLESS_STATUS, "w") as f:
-            json.dump(status, f)
-
-        # Handle SIGTERM / SIGINT gracefully
-        def _shutdown(sig, frame):
-            self.running = False
-        signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGINT, _shutdown)
-
-        print(f"[headless] Listening on 0.0.0.0:{self.port}  "
-              f"(PID {os.getpid()})")
-        print(f"[headless] Connect with:  python cli.py --connect "
-              f"localhost:{self.port}")
-        print(f"[headless] Or plain:      nc localhost {self.port}")
-        print(f"[headless] Status file:   {_HEADLESS_STATUS}")
-        print(f"[headless] Ctrl+C to stop.")
-
         try:
+            self._open_listener()
+            self._publish_discovery()
+
+            # Start emulation only after this server owns its discovery path.
+            self._cpu_thread = threading.Thread(
+                target=self._cpu_loop, daemon=True, name="cpu-loop")
+            self._cpu_thread.start()
+
+            # Handle SIGTERM / SIGINT gracefully
+            def _shutdown(sig, frame):
+                self.running = False
+            signal.signal(signal.SIGTERM, _shutdown)
+            signal.signal(signal.SIGINT, _shutdown)
+
+            print(f"[headless] Listening on 0.0.0.0:{self.port}  "
+                  f"(PID {os.getpid()})")
+            print("[headless] Connect with:  python cli.py --connect")
+            print(f"[headless] Or plain:      nc localhost {self.port}")
+            print(f"[headless] Status file:   {self.status_path}")
+            print("[headless] Ctrl+C to stop.")
+
             while self.running:
                 try:
                     sock, addr = self._srv.accept()
@@ -988,6 +992,27 @@ class HeadlessServer:
             self._cleanup()
 
     # -- internals --------------------------------------------------------
+
+    def _open_listener(self):
+        import socket as _socket
+
+        self._srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        self._srv.bind(("0.0.0.0", self.port))
+        self.port = int(self._srv.getsockname()[1])
+        self._srv.listen(8)
+        self._srv.settimeout(1.0)     # so we can check self.running
+
+    def _publish_discovery(self):
+        self._discovery_owner = HeadlessStatusOwner.claim(
+            self.status_path,
+            port=self.port,
+        )
+
+    def _remove_discovery(self) -> bool:
+        owner = self._discovery_owner
+        self._discovery_owner = None
+        return owner.release() if owner is not None else False
 
     def _cpu_loop(self):
         """Run the CPU continuously in a background thread."""
@@ -1098,16 +1123,34 @@ class HeadlessServer:
                 except Exception:
                     pass
             self.clients.clear()
-        try:
-            self._srv.close()
-        except Exception:
-            pass
-        # Remove status file
-        try:
-            os.unlink(_HEADLESS_STATUS)
-        except FileNotFoundError:
-            pass
+        if self._srv is not None:
+            try:
+                self._srv.close()
+            except Exception:
+                pass
+            self._srv = None
+        self._remove_discovery()
         print("[headless] Server stopped.")
+
+
+def resolve_headless_endpoint(
+    spec: str,
+    *,
+    status_path: str = _HEADLESS_STATUS,
+) -> tuple[str, int]:
+    """Resolve an explicit endpoint or discover the active local server."""
+    if not spec or spec.lower() == "auto":
+        status = read_headless_status(status_path)
+        return "localhost", int(status["port"])
+    if ":" in spec:
+        host_text, port_text = spec.rsplit(":", 1)
+        host = host_text or "localhost"
+    else:
+        host, port_text = "localhost", spec
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError("headless port must be in 1..65535")
+    return host, port
 
 
 def headless_connect(host: str, port: int):
@@ -1422,7 +1465,7 @@ def main():
                "\n"
                "Headless mode (TCP terminal server):\n"
                "  python cli.py --bios bios.asm --storage disk.img --headless\n"
-               "  python cli.py --connect localhost:6464\n"
+               "  python cli.py --connect\n"
     )
     parser.add_argument("--ram", type=int, default=1024,
                         help="RAM size in KiB (default: 1024)")
@@ -1467,21 +1510,25 @@ def main():
                              "(connect with --connect or nc/telnet)")
     parser.add_argument("--headless-port", type=int, default=_HEADLESS_PORT,
                         metavar="PORT",
-                        help=f"TCP port for headless server (default: {_HEADLESS_PORT})")
-    parser.add_argument("--connect", type=str, default=None,
-                        metavar="[HOST:]PORT",
-                        help="Connect to a running headless instance "
-                             "(e.g. localhost:6464)")
+                        help=(
+                            "TCP port for headless server "
+                            f"(default: {'automatic' if _HEADLESS_PORT == 0 else _HEADLESS_PORT})"
+                        ))
+    parser.add_argument("--connect", nargs="?", const="auto", default=None,
+                        metavar="ENDPOINT",
+                        help="Connect to the discovered headless instance, "
+                             "or to an explicit endpoint")
     args = parser.parse_args()
 
     # ---- Connect-only mode (no emulator needed) -----------------------
-    if args.connect:
-        spec = args.connect
-        if ":" in spec:
-            h, p = spec.rsplit(":", 1)
-            host, port = (h or "localhost"), int(p)
-        else:
-            host, port = "localhost", int(spec)
+    if args.connect is not None:
+        try:
+            host, port = resolve_headless_endpoint(
+                args.connect,
+                status_path=_HEADLESS_STATUS,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.error(f"cannot resolve headless endpoint: {exc}")
         headless_connect(host, port)
         return
 

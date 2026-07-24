@@ -112,6 +112,14 @@ and can be overridden with `--socket` on all three commands. The protocol is
 newline-delimited JSON over that local socket. Screen reads accept a revision
 number and return no cell payload when nothing has changed.
 
+Set `MP64_RUNTIME_NAMESPACE` in the server, controller, and viewer
+environments to use
+`/tmp/megapad-runtime-<uid>-<namespace>/session.sock` instead. The runtime
+directory is owned by the current UID with mode `0700`; unsafe pre-existing
+paths are rejected. This lets parallel checkouts run independent default
+sessions without requiring a different `--socket` argument on every command.
+An explicit `--socket` continues to override the default.
+
 Other control commands are `pause`, `resume`, `step`, `reset`, `resize`,
 `key`, `raw`, and `shutdown`. `step` requires the machine to be paused. The
 viewer and CLI are peers: input from either reaches the one UART queue owned by

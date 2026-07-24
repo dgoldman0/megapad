@@ -21,12 +21,29 @@
 # to monitor progress.
 #
 # tests/conftest.py writes live status to /tmp/megapad_test_status.json.
-# test_monitor.py reads it and renders the dashboard.
+# test_monitor.py reads it and renders the dashboard.  Set
+# MP64_RUNTIME_NAMESPACE to isolate these files for a parallel checkout.
+
+.DEFAULT_GOAL := test
 
 VENV_PY  := .venv/bin/python
 PYTEST   := -m pytest tests/
 WORKERS  := 8
 PYTEST_ARGS := -n $(WORKERS) --dist loadgroup --tb=long
+
+export MP64_RUNTIME_NAMESPACE
+RUNTIME_PATHS := python3 runtime_paths.py
+TEST_SUPERVISOR := python3 test_process_supervisor.py
+
+define RESOLVE_TEST_PATHS
+status_file="$$( $(RUNTIME_PATHS) test-status)" || exit $$?; \
+pid_file="$$( $(RUNTIME_PATHS) test-pid)" || exit $$?; \
+output_file="$$( $(RUNTIME_PATHS) test-output)" || exit $$?;
+endef
+
+.PHONY: runtime-paths
+runtime-paths:
+	@$(RUNTIME_PATHS) all
 
 # --- C++ accelerator ---
 .PHONY: accel accel-clean
@@ -48,35 +65,27 @@ test: test-bg
 # --- Quick smoke test: BIOS + CPU only ---
 .PHONY: test-quick
 test-quick: accel
-	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
-		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
-		exit 1; \
-	fi
-	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting quick smoke test in background..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short \
-		> /tmp/megapad_test_output.txt 2>&1 & \
-		echo "$$!" > /tmp/megapad_test_pid.txt
-	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
-	@echo "Monitor: make test-status  |  make test-watch"
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	echo "Starting quick smoke test in background..."; \
+	$(TEST_SUPERVISOR) start \
+		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
+		env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short; \
+	echo "Monitor: make test-status  |  make test-watch"
 
 # --- Single test (usage: make test-one K=TestFoo) ---
 # Runs sequentially (-n 1) to avoid spawning 8 workers that each
 # independently rebuild the KDOS snapshot for a small test subset.
 .PHONY: test-one
 test-one: accel
-	@if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi
-	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
-		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
-		exit 1; \
-	fi
-	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting tests in background (K=$(K))..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n 1 --dist loadgroup --tb=long -v -k "$(K)" \
-		> /tmp/megapad_test_output.txt 2>&1 & \
-		echo "$$!" > /tmp/megapad_test_pid.txt
-	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
-	@echo "Monitor: make test-status  |  make test-watch"
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	if [ -z "$(K)" ]; then echo "Usage: make test-one K=TestFoo"; exit 1; fi; \
+	echo "Starting tests in background (K=$(K))..."; \
+	$(TEST_SUPERVISOR) start \
+		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
+		env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n 1 --dist loadgroup --tb=long -v -k "$(K)"; \
+	echo "Monitor: make test-status  |  make test-watch"
 
 # --- Background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
@@ -84,40 +93,32 @@ test-one: accel
 # Then:  make test-status  or  make test-watch
 .PHONY: test-bg
 test-bg: accel
-	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
-		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
-		exit 1; \
-	fi
-	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting tests in background (C++ accel)..."
-	@if [ -n "$(K)" ]; then \
-		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) -k "$(K)" \
-			> /tmp/megapad_test_output.txt 2>&1 & \
-		echo "$$!" > /tmp/megapad_test_pid.txt; \
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	echo "Starting tests in background (C++ accel)..."; \
+	if [ -n "$(K)" ]; then \
+		$(TEST_SUPERVISOR) start \
+			--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
+			env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) -k "$(K)"; \
 	else \
-		nohup env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) \
-			> /tmp/megapad_test_output.txt 2>&1 & \
-		echo "$$!" > /tmp/megapad_test_pid.txt; \
-	fi
-	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
-	@echo "Monitor: make test-status  |  make test-watch"
+		$(TEST_SUPERVISOR) start \
+			--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
+			env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS); \
+	fi; \
+	echo "Monitor: make test-status  |  make test-watch"
 
 # --- Real-network tests (requires TAP device) ---
 # Usage: make test-net              (all live-net tests)
 #        make test-net K=TestLiveARP (subset)
 .PHONY: test-net
 test-net: accel
-	@if [ -f /tmp/megapad_test_pid.txt ] && kill -0 $$(cat /tmp/megapad_test_pid.txt) 2>/dev/null; then \
-		echo "Tests already running (PID $$(cat /tmp/megapad_test_pid.txt)). Use 'make test-kill' first."; \
-		exit 1; \
-	fi
-	@rm -f /tmp/megapad_test_status.json /tmp/megapad_test_pid.txt
-	@echo "Starting live-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."
-	@nohup env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_live_net.py tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",) \
-		> /tmp/megapad_test_output.txt 2>&1 & \
-		echo "$$!" > /tmp/megapad_test_pid.txt
-	@echo "PID: $$(cat /tmp/megapad_test_pid.txt)"
-	@echo "Monitor: make test-status  |  make test-watch"
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	echo "Starting live-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."; \
+	$(TEST_SUPERVISOR) start \
+		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
+		env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_live_net.py tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",); \
+	echo "Monitor: make test-status  |  make test-watch"
 
 # --- Show live test status ---
 .PHONY: test-status
@@ -137,19 +138,9 @@ test-failures:
 # --- Kill background test run ---
 .PHONY: test-kill
 test-kill:
-	@if [ -f /tmp/megapad_test_pid.txt ]; then \
-		PID=$$(cat /tmp/megapad_test_pid.txt); \
-		if kill -0 $$PID 2>/dev/null; then \
-			kill -- -$$PID 2>/dev/null || kill $$PID 2>/dev/null; \
-			rm -f /tmp/megapad_test_pid.txt; \
-			echo "Killed PID $$PID."; \
-		else \
-			rm -f /tmp/megapad_test_pid.txt; \
-			echo "Process already exited."; \
-		fi; \
-	else \
-		echo "No tests running (no PID file)."; \
-	fi
+	@set -eu; \
+	pid_file="$$( $(RUNTIME_PATHS) test-pid)" || exit $$?; \
+	$(TEST_SUPERVISOR) stop --state "$$pid_file"
 
 # --- Run the interactive emulator ---
 .PHONY: run disk
@@ -158,4 +149,3 @@ run:
 
 disk:
 	$(VENV_PY) diskutil.py sample
-

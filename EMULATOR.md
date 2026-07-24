@@ -612,6 +612,20 @@ make test-one K=TestKDOS                                   # single class
 make test-one K=test_coreid_word                           # single test
 ```
 
+Parallel checkouts can isolate the background PID, output, and live-status
+files by exporting a runtime namespace before invoking test or monitor
+targets:
+
+```bash
+export MP64_RUNTIME_NAMESPACE=megapad-concurrency
+make test-one K=TestKDOS
+make test-status
+```
+
+With no namespace, the historical `/tmp/megapad_test_*` paths remain
+unchanged. Namespaced artifacts live in the UID-owned, mode-`0700` directory
+`/tmp/megapad-runtime-<uid>-<namespace>/`.
+
 | Runner | Parallelism | Approximate Time | Speedup |
 |--------|-------------|-------------------|---------| 
 | CPython | sequential | ~40 min | 1× |

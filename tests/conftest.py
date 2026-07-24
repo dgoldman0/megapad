@@ -18,7 +18,10 @@ import sys
 import time
 import pytest
 
-STATUS_FILE = "/tmp/megapad_test_status.json"
+from runtime_paths import test_status_path
+
+
+STATUS_FILE = test_status_path()
 
 
 def pytest_collection_modifyitems(items):
@@ -238,5 +241,4 @@ def _fmt_duration(seconds):
         return f"{m}m{s:02d}s"
     else:
         return f"{s}s"
-
 
