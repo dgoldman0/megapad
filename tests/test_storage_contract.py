@@ -534,6 +534,48 @@ def test_read_dma_fault_reports_exact_completed_sector_and_prefix(tmp_path):
     )
 
 
+def test_read_callback_reentry_preserves_may_have_applied_result(tmp_path):
+    device, memory, _path = _attached_device(
+        tmp_path,
+        sectors=1,
+        fill=0xA6,
+    )
+    _program(device)
+
+    def write_then_reset(address, value):
+        memory[address] = value
+        device.write8(0x00, STORAGE_CMD_RESET)
+
+    device._mem_write = write_then_reset
+    device.write8(0x00, STORAGE_CMD_READ)
+
+    assert memory[0] == 0xA6
+    assert device.result == (
+        STORAGE_RESULT_PARTIAL | STORAGE_RESULT_RESET_ABORTED
+    )
+    assert device.completion == 1
+    assert device.transferred == 0
+
+
+@pytest.mark.parametrize("invalid_byte", (-1, 0x100, 1.5))
+def test_write_rejects_invalid_dma_callback_bytes(tmp_path, invalid_byte):
+    device, _memory, _path = _attached_device(
+        tmp_path,
+        sectors=1,
+        fill=0x39,
+    )
+    original = bytes(device._image_data)
+    device._mem_read = lambda _address: invalid_byte
+    _program(device)
+
+    device.write8(0x00, STORAGE_CMD_WRITE)
+
+    assert device.result == STORAGE_RESULT_DMA_FAILURE
+    assert device.completion == 1
+    assert device.transferred == 0
+    assert bytes(device._image_data) == original
+
+
 def test_write_media_fault_reports_exact_completed_sector_and_prefix(tmp_path):
     device, memory, _path = _attached_device(tmp_path, sectors=2)
     first = b"\xA1" * SECTOR_SIZE

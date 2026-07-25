@@ -19,6 +19,7 @@ these through the MMIO dispatch layer in system.py.
 """
 
 from __future__ import annotations
+import operator
 import os
 import socket
 import time
@@ -498,6 +499,17 @@ class StorageFault:
     byte_index: Optional[int] = None
     action: str = "fail"
 
+
+@dataclass(frozen=True)
+class StorageDMABeat:
+    """One immutable byte beat exposed on the disk's physical bus port."""
+
+    token: int
+    write: bool
+    address: int
+    write_data: int = 0
+
+
 class Storage(Device):
     """Block device backed by a host file.
 
@@ -548,6 +560,8 @@ class Storage(Device):
         self._mem_read: Optional[callable] = None
         self._mem_write: Optional[callable] = None
         self._mem_span_valid: Optional[callable] = None
+        self._cycle_mutation_guard: Optional[callable] = None
+        self._stall_release_guard: Optional[callable] = None
 
         # A request is (command, LBA, DMA address, count, media generation).
         self._active_request: Optional[tuple[int, int, int, int, int]] = None
@@ -555,6 +569,17 @@ class Storage(Device):
         self._active_transferred: int = 0
         self._stalled: bool = False
         self._faults: list[StorageFault] = []
+        self._strict_cycle_submission: bool = False
+        self._dma_async: bool = False
+        self._dma_phase: Optional[str] = None
+        self._dma_sector_index: int = 0
+        self._dma_byte_index: int = 0
+        self._dma_sector_data: bytes = b""
+        self._dma_write_sector: bytearray = bytearray()
+        self._dma_read_port_prefix: bytearray = bytearray()
+        self._dma_pending: Optional[StorageDMABeat] = None
+        # Tokens are host-coordinator identities, not guest reset state.
+        self._dma_next_token: int = 1
 
         if image_path:
             self.load_image(image_path)
@@ -578,6 +603,7 @@ class Storage(Device):
 
     def load_image(self, path: str):
         """Attach a disk image, creating a 1 MiB image if it is absent."""
+        self._require_cycle_mutation_allowed()
         image_data = self._read_image(path)
         self._replace_media(image_data, path)
 
@@ -615,6 +641,7 @@ class Storage(Device):
         then loads *new_path*.  If *new_path* does not exist a fresh
         empty image is created.
         """
+        self._require_cycle_mutation_allowed()
         image_data = self._read_image(new_path)
         if save_current:
             self.save_image()
@@ -622,6 +649,7 @@ class Storage(Device):
 
     def detach_image(self, *, save: bool = True):
         """Detach the current disk image."""
+        self._require_cycle_mutation_allowed()
         if save:
             self.save_image()
         self._abort_for_media_change()
@@ -656,8 +684,24 @@ class Storage(Device):
         self.result = STORAGE_RESULT_OK
         self.transferred = 0
 
+    def _clear_dma_fsm(self):
+        self._dma_async = False
+        self._dma_phase = None
+        self._dma_sector_index = 0
+        self._dma_byte_index = 0
+        self._dma_sector_data = b""
+        self._dma_write_sector = bytearray()
+        self._dma_read_port_prefix = bytearray()
+        self._dma_pending = None
+
+    def _require_cycle_mutation_allowed(self):
+        guard = self._cycle_mutation_guard
+        if guard is not None:
+            guard()
+
     def reset(self):
         """Restore controller power-on state without changing attached media."""
+        self._require_cycle_mutation_allowed()
         self.busy = False
         self.rejected = False
         self.media_changed = False
@@ -666,6 +710,7 @@ class Storage(Device):
         self._active_effect = False
         self._active_transferred = 0
         self._stalled = False
+        self._clear_dma_fsm()
         self._faults.clear()
         self._reset_request_registers()
         self._clear_last_result()
@@ -681,6 +726,7 @@ class Storage(Device):
         action: str = "fail",
     ) -> StorageFault:
         """Queue one deterministic, one-shot controller fault for tests."""
+        self._require_cycle_mutation_allowed()
         if stage not in self._FAULT_STAGES:
             raise ValueError(f"unknown storage fault stage: {stage}")
         if action not in self._FAULT_ACTIONS:
@@ -707,6 +753,7 @@ class Storage(Device):
         return fault
 
     def clear_faults(self):
+        self._require_cycle_mutation_allowed()
         self._faults.clear()
 
     @property
@@ -722,6 +769,9 @@ class Storage(Device):
         """Resume one command held by a consumed test-only stall fault."""
         if not self.busy or not self._stalled:
             return False
+        guard = self._stall_release_guard
+        if guard is not None:
+            guard()
         self._stalled = False
         self._run_active()
         return True
@@ -754,6 +804,7 @@ class Storage(Device):
 
     def write_sectors(self, sector: int, count: int, data: bytes | bytearray):
         """Write `count` sectors starting at `sector`."""
+        self._require_cycle_mutation_allowed()
         start, end = self._transfer_bounds(sector, count)
         transfer_size = count * SECTOR_SIZE
         if len(data) < transfer_size:
@@ -812,6 +863,7 @@ class Storage(Device):
         return 0
 
     def write8(self, offset: int, value: int):
+        self._require_cycle_mutation_allowed()
         value &= 0xFF
 
         # RESET is the only command allowed to take ownership from an active
@@ -908,6 +960,10 @@ class Storage(Device):
     def _accept_command(
         self, command: int, *, expected_generation: Optional[int] = None
     ):
+        self._clear_dma_fsm()
+        self._dma_async = bool(
+            self._strict_cycle_submission
+        )
         request = (
             command,
             self.sector_num,
@@ -1051,9 +1107,9 @@ class Storage(Device):
                 return
 
             if command == STORAGE_CMD_READ:
-                self._run_read(request)
+                self._start_dma(request, "read")
             elif command == STORAGE_CMD_WRITE:
-                self._run_write(request)
+                self._start_dma(request, "write")
             else:
                 self._run_flush(request)
         except Exception:
@@ -1066,147 +1122,365 @@ class Storage(Device):
                     result |= STORAGE_RESULT_PARTIAL
                 self._complete(result, self._active_transferred)
 
-    def _run_read(self, request: tuple[int, int, int, int, int]):
-        _command, sector, dma_addr, count, _generation = request
-        transferred = 0
-        effect_applied = False
-        port_data = bytearray()
+    def _start_dma(
+        self,
+        request: tuple[int, int, int, int, int],
+        phase: str,
+    ):
+        self._dma_phase = phase
+        self._dma_sector_index = 0
+        self._dma_byte_index = 0
+        self._dma_sector_data = b""
+        self._dma_write_sector = bytearray()
+        self._dma_read_port_prefix = bytearray()
+        self._dma_pending = None
+        self._stage_next_dma_beat()
+        if not self._dma_async:
+            self._drain_dma_immediate()
 
-        for sector_index in range(count):
-            if not self._request_is_current(request):
-                return
-            fault = self._take_fault(
-                "media", request, sector_index=sector_index
-            )
-            if fault is not None:
-                self.data_port_buf = port_data
-                self.data_port_pos = 0
-                self._apply_fault(
-                    fault,
-                    transferred=transferred,
-                    effect_applied=effect_applied,
-                )
-                return
-
-            start = (sector + sector_index) * SECTOR_SIZE
-            sector_data = bytes(self._image_data[start:start + SECTOR_SIZE])
-            for byte_index, value in enumerate(sector_data):
-                if not self._request_is_current(request):
-                    return
-                fault = self._take_fault(
-                    "dma",
-                    request,
-                    sector_index=sector_index,
-                    byte_index=byte_index,
-                )
-                if fault is not None:
-                    self.data_port_buf = port_data
-                    self.data_port_pos = 0
-                    self._apply_fault(
-                        fault,
-                        transferred=transferred,
-                        effect_applied=effect_applied,
-                    )
-                    return
-                try:
-                    # A throwing callback may have applied the byte before it
-                    # reported failure, so invocation itself crosses the
-                    # conservative MAY_HAVE_APPLIED boundary.
-                    self._active_effect = True
-                    effect_applied = True
-                    self._mem_write(
-                        dma_addr + sector_index * SECTOR_SIZE + byte_index,
-                        value,
-                    )
-                    port_data.append(value)
-                except Exception:
-                    self.data_port_buf = port_data
-                    self.data_port_pos = 0
-                    self._complete(
-                        STORAGE_RESULT_DMA_FAILURE | STORAGE_RESULT_PARTIAL,
-                        transferred,
-                    )
-                    return
-            transferred += 1
-            self._active_transferred = transferred
-
-        self.data_port_buf = port_data
-        self.data_port_pos = 0
-        self._complete(STORAGE_RESULT_OK, transferred)
-
-    def _run_write(self, request: tuple[int, int, int, int, int]):
-        _command, sector, dma_addr, count, _generation = request
-        transferred = 0
-        effect_applied = False
-
-        for sector_index in range(count):
-            if not self._request_is_current(request):
-                return
-            payload = bytearray()
-            for byte_index in range(SECTOR_SIZE):
-                fault = self._take_fault(
-                    "dma",
-                    request,
-                    sector_index=sector_index,
-                    byte_index=byte_index,
-                )
-                if fault is not None:
-                    self._apply_fault(
-                        fault,
-                        transferred=transferred,
-                        effect_applied=effect_applied,
-                    )
-                    return
-                try:
-                    payload.append(self._mem_read(
-                        dma_addr + sector_index * SECTOR_SIZE + byte_index
-                    ))
-                except Exception:
-                    result = STORAGE_RESULT_DMA_FAILURE
-                    if effect_applied:
-                        result |= STORAGE_RESULT_PARTIAL
-                    self._complete(result, transferred)
-                    return
-                if not self._request_is_current(request):
-                    return
-
-            media_start = (sector + sector_index) * SECTOR_SIZE
-            for byte_index, value in enumerate(payload):
-                if not self._request_is_current(request):
-                    return
-                fault = self._take_fault(
-                    "media",
-                    request,
-                    sector_index=sector_index,
-                    byte_index=byte_index,
-                )
-                if fault is not None:
-                    self._apply_fault(
-                        fault,
-                        transferred=transferred,
-                        effect_applied=effect_applied,
-                    )
-                    return
-                self._image_data[media_start + byte_index] = value
-                effect_applied = True
-                self._active_effect = True
-            transferred += 1
-            self._active_transferred = transferred
-
-        fault = self._take_fault(
-            "write_complete",
-            request,
-            sector_index=count - 1,
-            byte_index=SECTOR_SIZE - 1,
+    def _publish_read_prefix(self):
+        self.data_port_buf = bytearray(
+            self._dma_read_port_prefix
         )
-        if fault is not None:
-            self._apply_fault(
-                fault,
-                transferred=transferred,
-                effect_applied=effect_applied,
+        self.data_port_pos = 0
+
+    def _allocate_dma_beat(
+        self,
+        *,
+        write: bool,
+        address: int,
+        write_data: int = 0,
+    ) -> Optional[StorageDMABeat]:
+        if self._dma_next_token > 0xFFFF_FFFF_FFFF_FFFF:
+            self._complete(
+                STORAGE_RESULT_INTERNAL
+                | (
+                    STORAGE_RESULT_PARTIAL
+                    if self._active_effect
+                    else 0
+                ),
+                self._active_transferred,
             )
+            return None
+        beat = StorageDMABeat(
+            token=self._dma_next_token,
+            write=write,
+            address=address,
+            write_data=write_data & 0xFF,
+        )
+        self._dma_next_token += 1
+        return beat
+
+    def _stage_next_dma_beat(self):
+        try:
+            self._stage_next_dma_beat_impl()
+        except Exception:
+            request = self._active_request
+            if self.busy and request is not None:
+                result = STORAGE_RESULT_INTERNAL
+                if self._active_effect:
+                    result |= STORAGE_RESULT_PARTIAL
+                self._complete(
+                    result,
+                    self._active_transferred,
+                )
+
+    def _stage_next_dma_beat_impl(self):
+        request = self._active_request
+        if (
+            request is None
+            or not self.busy
+            or self._stalled
+            or self._dma_pending is not None
+        ):
             return
-        self._complete(STORAGE_RESULT_OK, transferred)
+        _command, sector, dma_addr, count, _generation = request
+
+        while self._request_is_current(request):
+            if self._dma_phase == "read":
+                if self._dma_sector_index >= count:
+                    self._publish_read_prefix()
+                    self._complete(
+                        STORAGE_RESULT_OK,
+                        self._active_transferred,
+                    )
+                    return
+                if (
+                    self._dma_byte_index == 0
+                    and not self._dma_sector_data
+                ):
+                    fault = self._take_fault(
+                        "media",
+                        request,
+                        sector_index=self._dma_sector_index,
+                    )
+                    if fault is not None:
+                        self._publish_read_prefix()
+                        self._apply_fault(
+                            fault,
+                            transferred=self._active_transferred,
+                            effect_applied=self._active_effect,
+                        )
+                        return
+                    media_start = (
+                        sector + self._dma_sector_index
+                    ) * SECTOR_SIZE
+                    self._dma_sector_data = bytes(
+                        self._image_data[
+                            media_start:media_start + SECTOR_SIZE
+                        ]
+                    )
+                if self._dma_byte_index >= SECTOR_SIZE:
+                    self._active_transferred += 1
+                    self._dma_sector_index += 1
+                    self._dma_byte_index = 0
+                    self._dma_sector_data = b""
+                    continue
+                fault = self._take_fault(
+                    "dma",
+                    request,
+                    sector_index=self._dma_sector_index,
+                    byte_index=self._dma_byte_index,
+                )
+                if fault is not None:
+                    self._publish_read_prefix()
+                    self._apply_fault(
+                        fault,
+                        transferred=self._active_transferred,
+                        effect_applied=self._active_effect,
+                    )
+                    return
+                self._dma_pending = self._allocate_dma_beat(
+                    write=True,
+                    address=(
+                        dma_addr
+                        + self._dma_sector_index * SECTOR_SIZE
+                        + self._dma_byte_index
+                    ),
+                    write_data=self._dma_sector_data[
+                        self._dma_byte_index
+                    ],
+                )
+                return
+
+            if self._dma_phase == "write":
+                if self._dma_sector_index >= count:
+                    fault = self._take_fault(
+                        "write_complete",
+                        request,
+                        sector_index=count - 1,
+                        byte_index=SECTOR_SIZE - 1,
+                    )
+                    if fault is not None:
+                        self._apply_fault(
+                            fault,
+                            transferred=self._active_transferred,
+                            effect_applied=self._active_effect,
+                        )
+                        return
+                    self._complete(
+                        STORAGE_RESULT_OK,
+                        self._active_transferred,
+                    )
+                    return
+                if self._dma_byte_index < SECTOR_SIZE:
+                    fault = self._take_fault(
+                        "dma",
+                        request,
+                        sector_index=self._dma_sector_index,
+                        byte_index=self._dma_byte_index,
+                    )
+                    if fault is not None:
+                        self._apply_fault(
+                            fault,
+                            transferred=self._active_transferred,
+                            effect_applied=self._active_effect,
+                        )
+                        return
+                    self._dma_pending = self._allocate_dma_beat(
+                        write=False,
+                        address=(
+                            dma_addr
+                            + self._dma_sector_index * SECTOR_SIZE
+                            + self._dma_byte_index
+                        ),
+                    )
+                    return
+
+                media_start = (
+                    sector + self._dma_sector_index
+                ) * SECTOR_SIZE
+                for byte_index, value in enumerate(
+                    self._dma_write_sector
+                ):
+                    if not self._request_is_current(request):
+                        return
+                    fault = self._take_fault(
+                        "media",
+                        request,
+                        sector_index=self._dma_sector_index,
+                        byte_index=byte_index,
+                    )
+                    if fault is not None:
+                        self._apply_fault(
+                            fault,
+                            transferred=self._active_transferred,
+                            effect_applied=self._active_effect,
+                        )
+                        return
+                    self._image_data[
+                        media_start + byte_index
+                    ] = value
+                    self._active_effect = True
+                self._active_transferred += 1
+                self._dma_sector_index += 1
+                self._dma_byte_index = 0
+                self._dma_write_sector = bytearray()
+                continue
+
+            raise RuntimeError(
+                "storage DMA phase is invalid"
+            )
+
+    def cycle_dma_view(
+        self,
+    ) -> tuple[bool, Optional[StorageDMABeat]]:
+        """Return a pure snapshot of the strict-cycle disk endpoint."""
+        active = bool(
+            self.busy and self._dma_async
+        )
+        return active, self._dma_pending
+
+    def cycle_dma_complete(
+        self,
+        token: int,
+        *,
+        read_value: Optional[int],
+        faulted: bool,
+        target_effects_committed: bool,
+    ) -> bool:
+        beat = self._dma_pending
+        request = self._active_request
+        if (
+            beat is None
+            or beat.token != token
+            or request is None
+            or not self.busy
+        ):
+            return False
+        if (
+            self._dma_phase == "read"
+            and not beat.write
+        ) or (
+            self._dma_phase == "write"
+            and beat.write
+        ):
+            return False
+
+        self._dma_pending = None
+        try:
+            if self._dma_phase == "read":
+                if faulted or not target_effects_committed:
+                    if target_effects_committed:
+                        self._active_effect = True
+                    self._publish_read_prefix()
+                    result = STORAGE_RESULT_DMA_FAILURE
+                    if self._active_effect:
+                        result |= STORAGE_RESULT_PARTIAL
+                    self._complete(
+                        result,
+                        self._active_transferred,
+                    )
+                    return True
+                self._active_effect = True
+                self._dma_read_port_prefix.append(
+                    beat.write_data
+                )
+                self._dma_byte_index += 1
+            else:
+                if faulted or read_value is None:
+                    result = STORAGE_RESULT_DMA_FAILURE
+                    if self._active_effect:
+                        result |= STORAGE_RESULT_PARTIAL
+                    self._complete(
+                        result,
+                        self._active_transferred,
+                    )
+                    return True
+                try:
+                    byte_value = operator.index(read_value)
+                except Exception:
+                    byte_value = -1
+                if not 0 <= byte_value <= 0xFF:
+                    result = STORAGE_RESULT_DMA_FAILURE
+                    if self._active_effect:
+                        result |= STORAGE_RESULT_PARTIAL
+                    self._complete(
+                        result,
+                        self._active_transferred,
+                    )
+                    return True
+                self._dma_write_sector.append(
+                    byte_value
+                )
+                self._dma_byte_index += 1
+            self._stage_next_dma_beat()
+        except Exception:
+            if self.busy and self._active_request == request:
+                result = STORAGE_RESULT_INTERNAL
+                if self._active_effect:
+                    result |= STORAGE_RESULT_PARTIAL
+                self._complete(
+                    result,
+                    self._active_transferred,
+                )
+        return True
+
+    def _drain_dma_immediate(self):
+        while self.busy and self._dma_pending is not None:
+            beat = self._dma_pending
+            if beat.write:
+                # The legacy callback can fail after changing memory or can
+                # re-enter the controller before returning.  Invocation
+                # therefore crosses the same MAY_HAVE_APPLIED boundary as the
+                # original synchronous implementation.
+                self._active_effect = True
+                try:
+                    self._mem_write(
+                        beat.address,
+                        beat.write_data,
+                    )
+                except Exception:
+                    self.cycle_dma_complete(
+                        beat.token,
+                        read_value=None,
+                        faulted=True,
+                        target_effects_committed=True,
+                    )
+                else:
+                    self.cycle_dma_complete(
+                        beat.token,
+                        read_value=None,
+                        faulted=False,
+                        target_effects_committed=True,
+                    )
+            else:
+                try:
+                    value = self._mem_read(beat.address)
+                except Exception:
+                    self.cycle_dma_complete(
+                        beat.token,
+                        read_value=None,
+                        faulted=True,
+                        target_effects_committed=False,
+                    )
+                else:
+                    self.cycle_dma_complete(
+                        beat.token,
+                        read_value=value,
+                        faulted=False,
+                        target_effects_committed=True,
+                    )
 
     def _run_flush(self, request: tuple[int, int, int, int, int]):
         if not self._request_is_current(request):
@@ -1238,6 +1512,7 @@ class Storage(Device):
         self.result_valid = True
         self.busy = False
         self._stalled = False
+        self._clear_dma_fsm()
         self._active_request = None
         self._active_effect = False
         self._active_transferred = 0

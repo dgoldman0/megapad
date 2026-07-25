@@ -9,7 +9,24 @@ import pytest
 
 import _mp64_accel
 from asm import assemble
-from devices import AUDIO_BASE, MMIO_BASE, NIC_BASE, UART_BASE
+from devices import (
+    AUDIO_BASE,
+    MMIO_BASE,
+    NIC_BASE,
+    SECTOR_SIZE,
+    STORAGE_BASE,
+    STORAGE_CMD_READ,
+    STORAGE_CMD_RESET,
+    STORAGE_CMD_WRITE,
+    STORAGE_RESULT_DMA_FAILURE,
+    STORAGE_RESULT_DMA_INVALID,
+    STORAGE_RESULT_OK,
+    STORAGE_RESULT_PARTIAL,
+    STORAGE_RESULT_RESET_ABORTED,
+    STORAGE_STATUS_BUSY,
+    STORAGE_STATUS_RESULT_VALID,
+    UART_BASE,
+)
 from system import MegapadSystem
 
 
@@ -18,6 +35,7 @@ def _system(
     *,
     cores: int = 1,
     realtime_clock: bool = False,
+    storage_image: str | None = None,
 ) -> MegapadSystem:
     system = MegapadSystem(
         ram_size=4096,
@@ -27,6 +45,7 @@ def _system(
         ext_mem_size=0,
         vram_size=0,
         realtime_clock=realtime_clock,
+        storage_image=storage_image,
     )
     system.load_binary(0, code)
     system.boot(entry=0)
@@ -1636,3 +1655,766 @@ def test_warm_boot_clears_cached_dma_endpoint_and_bus_frontier():
     assert snapshot.active_grant is None
     assert snapshot.next_grant_sequence == 1
     assert snapshot.last_issue_sequences == [0, 0, 0]
+
+
+def _write_native_nic_register(system, offset, value, width):
+    native = system.cores[0]._cs
+    for index in range(width):
+        native.nic_write8(
+            NIC_BASE + offset + index,
+            (value >> (8 * index)) & 0xFF,
+        )
+
+
+def _pending_nic_requests(system):
+    requester = system._native_system.NIC_DMA_REQUESTER_ID
+    return [
+        request
+        for request in system._native_system._cycle_pending_bus_requests()
+        if request.requester_id == requester
+    ]
+
+
+def _drain_strict_nic(system, done, *, max_slices=64):
+    observed = {}
+    final = None
+    for _ in range(max_slices):
+        for request in _pending_nic_requests(system):
+            observed.setdefault(
+                int(request.ordering.issue_sequence),
+                (
+                    request.operation,
+                    int(request.address),
+                    int(request.write_data),
+                ),
+            )
+        final = system.run_cycle_batch(
+            1,
+            max_instructions=100,
+        )
+        if done() and not _pending_nic_requests(system):
+            break
+    else:
+        pytest.fail("strict NIC DMA did not quiesce")
+    return [observed[key] for key in sorted(observed)], final
+
+
+def test_native_nic_rx_is_byte_resumable_and_publishes_length_last():
+    system = _system(assemble("st.b r1, r2\nhalt"))
+    cpu = system.cpu
+    native = cpu._cs
+    frame = b"abc"
+    target = 0x180
+    _write_native_nic_register(system, 0x02, target, 8)
+    _write_native_nic_register(system, 0x0A, 0x55, 2)
+    assert native.nic_inject_frame(frame)
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x02
+
+    command = system.run_cycle_batch(
+        2,
+        max_instructions=100,
+    )
+
+    assert command.system_stop_reason == "cycle_limit"
+    assert bytes(cpu.mem[target:target + len(frame)]) == b"\x00" * len(frame)
+    assert native.nic_read8(NIC_BASE + 0x0A) == 0x55
+    assert native.nic_read8(NIC_BASE + 0x01) & 0x12 == 0x12
+    pending = _pending_nic_requests(system)
+    assert len(pending) == 1
+    assert pending[0].operation == _mp64_accel.BusOperation.WRITE
+    assert pending[0].address == target
+    assert pending[0].write_data == frame[0]
+    with pytest.raises(
+        RuntimeError,
+        match="native NIC cannot mutate while cycle execution is suspended",
+    ):
+        native.nic_write8(NIC_BASE + 0x02, 0xFF)
+    blocked_host_mutations = (
+        lambda: native.nic_init(b"\x00" * 6),
+        native.nic_sync_mem_ptrs,
+        lambda: native.nic_set_tx_callback(lambda _frame: True),
+    )
+    for mutation in blocked_host_mutations:
+        with pytest.raises(
+            RuntimeError,
+            match="native NIC cannot mutate while cycle execution is suspended",
+        ):
+            mutation()
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            native.nic_read8(NIC_BASE + 0x01) & 0x10
+        ) == 0,
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.WRITE, target + 0, ord("a")),
+        (_mp64_accel.BusOperation.WRITE, target + 1, ord("b")),
+        (_mp64_accel.BusOperation.WRITE, target + 2, ord("c")),
+    ]
+    assert bytes(cpu.mem[target:target + len(frame)]) == frame
+    assert native.nic_read8(NIC_BASE + 0x0A) == len(frame)
+    assert native.nic_read8(NIC_BASE + 0x0B) == 0
+    assert native.nic_read8(NIC_BASE + 0x01) & 0x12 == 0
+    nic_port = system._native_system.main_bus_port_for_requester(
+        system._native_system.NIC_DMA_REQUESTER_ID
+    )
+    assert (
+        system._native_system
+        ._main_bus_snapshot()
+        .last_issue_sequences[nic_port]
+    ) == len(frame)
+
+
+def test_native_nic_tx_defers_publication_until_final_bus_read():
+    system = _system(assemble("st.b r1, r2\nhalt"))
+    cpu = system.cpu
+    native = cpu._cs
+    frame = b"xyz"
+    source = 0x180
+    cpu.mem[source:source + len(frame)] = frame
+    _write_native_nic_register(system, 0x02, source, 8)
+    _write_native_nic_register(system, 0x0A, len(frame), 2)
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x01
+
+    system.run_cycle_batch(2, max_instructions=100)
+
+    assert native.nic_read8(NIC_BASE + 0x01) & 0x01
+    assert native.nic_get_tx_count() == 0
+    assert native.nic_tx_queue_size() == 0
+    assert native.nic_read8(NIC_BASE + 0x0D) & 0x02 == 0
+    assert list(system.nic.tx_queue) == []
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            native.nic_read8(NIC_BASE + 0x01) & 0x01
+        ) == 0,
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.READ, source + 0, 0),
+        (_mp64_accel.BusOperation.READ, source + 1, 0),
+        (_mp64_accel.BusOperation.READ, source + 2, 0),
+    ]
+    assert native.nic_get_tx_count() == 1
+    assert native.nic_tx_queue_size() == 1
+    assert native.nic_read8(NIC_BASE + 0x0D) & 0x02
+    assert list(system.nic.tx_queue) == [frame]
+
+
+@pytest.mark.parametrize(
+    "store",
+    ("st.h", "st.w", "str"),
+)
+def test_native_nic_wide_command_stores_remain_strict(store):
+    system = _system(assemble(f"{store} r1, r2\nhalt"))
+    cpu = system.cpu
+    native = cpu._cs
+    frame = b"wide"
+    source = 0x180
+    cpu.mem[source:source + len(frame)] = frame
+    _write_native_nic_register(system, 0x02, source, 8)
+    _write_native_nic_register(system, 0x0A, len(frame), 2)
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x01
+
+    system.run_cycle_batch(2, max_instructions=100)
+
+    assert native.nic_read8(NIC_BASE + 0x01) & 0x01
+    assert native.nic_get_tx_count() == 0
+    pending = _pending_nic_requests(system)
+    assert len(pending) == 1
+    assert pending[0].operation == _mp64_accel.BusOperation.READ
+    assert pending[0].address == source
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            cpu.halted
+            and native.nic_read8(NIC_BASE + 0x01) & 0x01 == 0
+        ),
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.READ, source + index, 0)
+        for index in range(len(frame))
+    ]
+    assert cpu.halted
+    assert list(system.nic.tx_queue) == [frame]
+
+
+def test_native_nic_preserves_held_tx_then_uses_local_rx_priority():
+    system = _system(
+        assemble("st.b r1, r2\nst.b r1, r4\nhalt")
+    )
+    cpu = system.cpu
+    native = cpu._cs
+    source = 0x180
+    cpu.mem[source:source + 3] = b"ABC"
+    _write_native_nic_register(system, 0x02, source, 8)
+    _write_native_nic_register(system, 0x0A, 3, 2)
+    assert native.nic_inject_frame(b"xy")
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x01
+    cpu.regs[4] = 0x02
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            cpu.halted
+            and native.nic_read8(NIC_BASE + 0x01) & 0x11 == 0
+        ),
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.READ, source + 0, 0),
+        (_mp64_accel.BusOperation.READ, source + 1, 0),
+        (_mp64_accel.BusOperation.WRITE, source + 0, ord("x")),
+        (_mp64_accel.BusOperation.WRITE, source + 1, ord("y")),
+        (_mp64_accel.BusOperation.READ, source + 2, 0),
+    ]
+    assert bytes(cpu.mem[source:source + 3]) == b"xyC"
+    assert list(system.nic.tx_queue) == [b"ABC"]
+    assert native.nic_read8(NIC_BASE + 0x0A) == 2
+
+
+def test_native_nic_guest_reset_cancels_tail_and_next_token_recovers():
+    system = _system(
+        assemble("st.b r1, r2\nst.b r1, r4\nhalt")
+    )
+    cpu = system.cpu
+    native = cpu._cs
+    source = 0x180
+    frame = b"ABC"
+    cpu.mem[source:source + len(frame)] = frame
+    _write_native_nic_register(system, 0x02, source, 8)
+    _write_native_nic_register(system, 0x0A, len(frame), 2)
+    _write_native_nic_register(system, 0x0C, 0x03, 1)
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x01
+    cpu.regs[4] = 0x04
+
+    reset = system.run_cycle_batch(32, max_instructions=100)
+
+    assert reset.system_stop_reason == "all_halted"
+    assert native.nic_get_tx_count() == 0
+    assert list(system.nic.tx_queue) == []
+    assert native.nic_read8(NIC_BASE + 0x01) & 0x11 == 0
+    assert native.nic_read8(NIC_BASE + 0x0C) == 0x03
+    assert sum(
+        native.nic_read8(NIC_BASE + 0x02 + index) << (8 * index)
+        for index in range(8)
+    ) == source
+    assert _pending_nic_requests(system) == []
+    assert not system._native_system.cycle_execution_pending
+
+    # Host reconfiguration is legal once the timeline is clean, but it must
+    # not rewind the endpoint token below coordinator history.
+    native.nic_init(bytes(system.nic.mac))
+    _write_native_nic_register(system, 0x02, source, 8)
+    retry_entry = 0x20
+    system.load_binary(
+        retry_entry,
+        assemble("st.b r1, r2\nhalt"),
+    )
+    _write_native_nic_register(system, 0x0A, len(frame), 2)
+    cpu.pc = retry_entry
+    cpu.halted = False
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            cpu.halted
+            and native.nic_read8(NIC_BASE + 0x01) & 0x01 == 0
+        ),
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.READ, source + index, 0)
+        for index in range(len(frame))
+    ]
+    assert cpu.halted
+    assert native.nic_get_tx_count() == 1
+    assert list(system.nic.tx_queue) == [frame]
+
+
+def test_warm_boot_readopts_native_nic_dma_before_unbounded_execution():
+    system = _system(assemble("st.b r1, r2\nhalt"))
+    cpu = system.cpu
+    native = cpu._cs
+    frame = b"abc"
+    target = 0x180
+    _write_native_nic_register(system, 0x02, target, 8)
+    assert native.nic_inject_frame(frame)
+    cpu.regs[1] = MMIO_BASE + NIC_BASE
+    cpu.regs[2] = 0x02
+    system.run_cycle_batch(2, max_instructions=100)
+    held = _pending_nic_requests(system)[0]
+
+    system.boot(entry=2)
+
+    pending = _pending_nic_requests(system)
+    assert len(pending) == 1
+    assert (
+        pending[0].operation,
+        pending[0].address,
+        pending[0].write_data,
+    ) == (
+        held.operation,
+        held.address,
+        held.write_data,
+    )
+    assert system._native_system.cycle_execution_pending
+    with pytest.raises(
+        RuntimeError,
+        match="suspended cycle execution requires",
+    ):
+        system.run_batch(1)
+
+    beats, _final = _drain_strict_nic(
+        system,
+        lambda: (
+            cpu.halted
+            and native.nic_read8(NIC_BASE + 0x01) & 0x10 == 0
+        ),
+    )
+
+    assert beats == [
+        (_mp64_accel.BusOperation.WRITE, target + index, value)
+        for index, value in enumerate(frame)
+    ]
+    assert cpu.halted
+    assert bytes(cpu.mem[target:target + len(frame)]) == frame
+
+
+def _write_storage_register(storage, offset, value, width):
+    for index in range(width):
+        storage.write8(
+            offset + index,
+            (value >> (8 * index)) & 0xFF,
+        )
+
+
+def _pending_storage_requests(system):
+    requester = system._native_system.DISK_DMA_REQUESTER_ID
+    return [
+        request
+        for request in system._native_system._cycle_pending_bus_requests()
+        if request.requester_id == requester
+    ]
+
+
+def _record_storage_requests(system, observed):
+    for request in _pending_storage_requests(system):
+        observed.setdefault(
+            int(request.ordering.issue_sequence),
+            (
+                request.operation,
+                int(request.address),
+                int(request.write_data),
+            ),
+        )
+
+
+def _drain_strict_storage(system, done, *, max_slices=520):
+    observed = {}
+    final = None
+    for _ in range(max_slices):
+        _record_storage_requests(system, observed)
+        final = system.run_cycle_batch(
+            3,
+            max_instructions=100,
+        )
+        if done() and not _pending_storage_requests(system):
+            break
+    else:
+        pytest.fail("strict storage DMA did not quiesce")
+    return [observed[key] for key in sorted(observed)], final
+
+
+def _prepare_strict_storage_command(
+    tmp_path,
+    *,
+    command,
+    media,
+    dma_address,
+):
+    path = tmp_path / "strict-cycle-storage.img"
+    path.write_bytes(media)
+    system = _system(
+        assemble("st.b r1, r2\nhalt"),
+        storage_image=str(path),
+    )
+    storage = system.storage
+    _write_storage_register(storage, 0x02, 0, 4)
+    _write_storage_register(storage, 0x06, dma_address, 8)
+    storage.write8(0x0E, 1)
+    system.cpu.regs[1] = MMIO_BASE + STORAGE_BASE
+    system.cpu.regs[2] = command
+    return system, storage
+
+
+def test_storage_read_is_strict_byte_dma_and_publishes_terminal_state(
+    tmp_path,
+):
+    payload = bytes(
+        (index * 13 + 7) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    target = 0x400
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_READ,
+        media=payload,
+        dma_address=target,
+    )
+
+    command = system.run_cycle_batch(
+        2,
+        max_instructions=100,
+    )
+
+    assert command.system_stop_reason == "cycle_limit"
+    assert storage.read8(0x01) & STORAGE_STATUS_BUSY
+    assert storage.completion == 0
+    assert storage.transferred == 0
+    assert bytes(system.cpu.mem[target:target + SECTOR_SIZE]) == (
+        b"\x00" * SECTOR_SIZE
+    )
+    pending = _pending_storage_requests(system)
+    assert len(pending) == 1
+    assert pending[0].operation == _mp64_accel.BusOperation.WRITE
+    assert pending[0].address == target
+    assert pending[0].write_data == payload[0]
+    with pytest.raises(
+        RuntimeError,
+        match="storage cannot mutate while cycle execution is suspended",
+    ):
+        storage.reset()
+
+    beats, final = _drain_strict_storage(
+        system,
+        lambda: not storage.busy,
+    )
+
+    assert beats == [
+        (
+            _mp64_accel.BusOperation.WRITE,
+            target + index,
+            value,
+        )
+        for index, value in enumerate(payload)
+    ]
+    assert final.system_stop_reason == "all_halted"
+    assert bytes(system.cpu.mem[target:target + SECTOR_SIZE]) == payload
+    assert storage.result == STORAGE_RESULT_OK
+    assert storage.completion == 1
+    assert storage.transferred == 1
+    assert storage.read8(0x01) & STORAGE_STATUS_RESULT_VALID
+    assert not storage.read8(0x01) & STORAGE_STATUS_BUSY
+    assert bytes(storage.data_port_buf) == payload
+    disk_port = system._native_system.main_bus_port_for_requester(
+        system._native_system.DISK_DMA_REQUESTER_ID
+    )
+    assert (
+        system._native_system
+        ._main_bus_snapshot()
+        .last_issue_sequences[disk_port]
+    ) == SECTOR_SIZE
+
+
+def test_storage_stall_release_rejects_native_batch_reentry(tmp_path):
+    target = 0x400
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_READ,
+        media=b"\x6D" * SECTOR_SIZE,
+        dma_address=target,
+    )
+    storage.inject_fault(
+        "start",
+        command=STORAGE_CMD_READ,
+        action="stall",
+    )
+    release_errors = []
+    original_write8 = storage.write8
+
+    def write8_with_reentrant_release(offset, value):
+        original_write8(offset, value)
+        if offset == 0x00 and storage.stalled:
+            try:
+                storage.release_stall()
+            except RuntimeError as error:
+                release_errors.append(str(error))
+
+    storage.write8 = write8_with_reentrant_release
+
+    result = system.run_cycle_batch(
+        2,
+        max_instructions=100,
+    )
+
+    assert result.system_stop_reason == "cycle_limit"
+    assert release_errors == [
+        "storage stall release cannot mutate during an "
+        "active native system batch"
+    ]
+    assert storage.busy
+    assert storage.stalled
+    assert storage.cycle_dma_view() == (True, None)
+    assert _pending_storage_requests(system) == []
+
+
+def test_storage_stall_resumes_between_strict_cycle_slices(tmp_path):
+    payload = bytes(
+        (index * 17 + 9) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    target = 0x400
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_READ,
+        media=payload,
+        dma_address=target,
+    )
+    storage.inject_fault(
+        "start",
+        command=STORAGE_CMD_READ,
+        action="stall",
+    )
+
+    stalled = system.run_cycle_batch(
+        2,
+        max_instructions=100,
+    )
+
+    assert stalled.system_stop_reason == "cycle_limit"
+    assert storage.busy
+    assert storage.stalled
+    assert storage.cycle_dma_view() == (True, None)
+    assert _pending_storage_requests(system) == []
+    assert system._native_system.cycle_execution_pending
+
+    # This test-only transition is intentionally legal between suspended
+    # slices.  It stages the disk beat locally; the native coordinator adopts
+    # that immutable beat at the next cycle boundary.
+    assert storage.release_stall()
+    assert not storage.stalled
+    active, staged = storage.cycle_dma_view()
+    assert active
+    assert staged is not None
+    assert staged.address == target
+    first_beat = (
+        _mp64_accel.BusOperation.WRITE,
+        staged.address,
+        staged.write_data,
+    )
+    assert _pending_storage_requests(system) == []
+
+    adopted = system.run_cycle_batch(
+        1,
+        max_instructions=100,
+    )
+    pending = _pending_storage_requests(system)
+    assert adopted.system_stop_reason == "cycle_limit"
+    assert len(pending) == 1
+    assert pending[0].operation == _mp64_accel.BusOperation.WRITE
+    assert pending[0].address == target + 1
+    assert pending[0].write_data == payload[1]
+    assert system.cpu.mem[target] == payload[0]
+
+    beats, final = _drain_strict_storage(
+        system,
+        lambda: not storage.busy,
+    )
+    for _ in range(8):
+        if system.cpu.halted:
+            break
+        final = system.run_cycle_batch(
+            3,
+            max_instructions=100,
+        )
+    else:
+        pytest.fail("core did not settle after resumed storage DMA")
+    final = system.run_cycle_batch(
+        1,
+        max_instructions=100,
+    )
+
+    assert [first_beat, *beats] == [
+        (
+            _mp64_accel.BusOperation.WRITE,
+            target + index,
+            value,
+        )
+        for index, value in enumerate(payload)
+    ]
+    assert final.system_stop_reason == "all_halted"
+    assert bytes(system.cpu.mem[target:target + SECTOR_SIZE]) == payload
+    assert storage.result == STORAGE_RESULT_OK
+    assert storage.completion == 1
+    assert storage.transferred == 1
+
+
+def test_storage_write_captures_full_sector_before_media_commit(tmp_path):
+    payload = bytes(
+        (index * 5 + 3) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    source = 0x400
+    original_media = b"\x39" * SECTOR_SIZE
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_WRITE,
+        media=original_media,
+        dma_address=source,
+    )
+    system.cpu.mem[source:source + SECTOR_SIZE] = payload
+
+    system.run_cycle_batch(2, max_instructions=100)
+
+    observed = {}
+    for _ in range(SECTOR_SIZE):
+        _record_storage_requests(system, observed)
+        pending = _pending_storage_requests(system)
+        if (
+            pending
+            and pending[0].ordering.issue_sequence == SECTOR_SIZE
+        ):
+            break
+        system.run_cycle_batch(3, max_instructions=100)
+    else:
+        pytest.fail("strict storage WRITE did not expose its final beat")
+
+    assert bytes(storage._image_data) == original_media
+    assert storage.busy
+    assert storage.completion == 0
+    assert storage.transferred == 0
+    final = system.run_cycle_batch(3, max_instructions=100)
+
+    assert [
+        observed[key]
+        for key in sorted(observed)
+    ] == [
+        (
+            _mp64_accel.BusOperation.READ,
+            source + index,
+            0,
+        )
+        for index in range(SECTOR_SIZE)
+    ]
+    assert final.system_stop_reason == "all_halted"
+    assert bytes(storage._image_data) == payload
+    assert storage.result == STORAGE_RESULT_OK
+    assert storage.completion == 1
+    assert storage.transferred == 1
+    assert not storage.busy
+
+
+def test_storage_strict_preflight_failure_emits_no_dma_beat(tmp_path):
+    invalid = 4096 - SECTOR_SIZE + 1
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_READ,
+        media=b"\x5A" * SECTOR_SIZE,
+        dma_address=invalid,
+    )
+
+    result = system.run_cycle_batch(16, max_instructions=100)
+
+    assert result.system_stop_reason == "all_halted"
+    assert storage.result == STORAGE_RESULT_DMA_INVALID
+    assert storage.completion == 1
+    assert storage.transferred == 0
+    assert _pending_storage_requests(system) == []
+    disk_port = system._native_system.main_bus_port_for_requester(
+        system._native_system.DISK_DMA_REQUESTER_ID
+    )
+    assert (
+        system._native_system
+        ._main_bus_snapshot()
+        .last_issue_sequences[disk_port]
+    ) == 0
+
+
+def test_storage_guest_reset_follows_captured_beat_and_cancels_tail(tmp_path):
+    payload = bytes(
+        (index * 11 + 1) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    target = 0x400
+    path = tmp_path / "strict-cycle-reset.img"
+    path.write_bytes(payload)
+    system = _system(
+        assemble("st.b r1, r2\nst.b r1, r4\nhalt"),
+        storage_image=str(path),
+    )
+    storage = system.storage
+    _write_storage_register(storage, 0x02, 0, 4)
+    _write_storage_register(storage, 0x06, target, 8)
+    storage.write8(0x0E, 1)
+    system.cpu.regs[1] = MMIO_BASE + STORAGE_BASE
+    system.cpu.regs[2] = STORAGE_CMD_READ
+    system.cpu.regs[4] = STORAGE_CMD_RESET
+
+    result = system.run_cycle_batch(32, max_instructions=100)
+
+    assert result.system_stop_reason == "all_halted"
+    assert bytes(system.cpu.mem[target:target + 2]) == (
+        payload[:1] + b"\x00"
+    )
+    assert storage.result == (
+        STORAGE_RESULT_PARTIAL | STORAGE_RESULT_RESET_ABORTED
+    )
+    assert storage.completion == 1
+    assert storage.transferred == 0
+    assert not storage.busy
+    assert _pending_storage_requests(system) == []
+    assert not system._native_system.cycle_execution_pending
+
+
+def test_storage_strict_dma_fault_reports_exact_applied_prefix(tmp_path):
+    payload = bytes(
+        (index * 9 + 5) & 0xFF
+        for index in range(SECTOR_SIZE)
+    )
+    target = 0x400
+    system, storage = _prepare_strict_storage_command(
+        tmp_path,
+        command=STORAGE_CMD_READ,
+        media=payload,
+        dma_address=target,
+    )
+    storage.inject_fault(
+        "dma",
+        STORAGE_RESULT_DMA_FAILURE,
+        command=STORAGE_CMD_READ,
+        sector_index=0,
+        byte_index=10,
+    )
+
+    result = system.run_cycle_batch(64, max_instructions=100)
+
+    assert result.system_stop_reason == "all_halted"
+    assert bytes(system.cpu.mem[target:target + 10]) == payload[:10]
+    assert bytes(system.cpu.mem[target + 10:target + SECTOR_SIZE]) == (
+        b"\x00" * (SECTOR_SIZE - 10)
+    )
+    assert storage.result == (
+        STORAGE_RESULT_PARTIAL | STORAGE_RESULT_DMA_FAILURE
+    )
+    assert storage.completion == 1
+    assert storage.transferred == 0
+    assert not storage.busy
+    disk_port = system._native_system.main_bus_port_for_requester(
+        system._native_system.DISK_DMA_REQUESTER_ID
+    )
+    assert (
+        system._native_system
+        ._main_bus_snapshot()
+        .last_issue_sequences[disk_port]
+    ) == 10

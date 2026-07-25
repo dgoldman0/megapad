@@ -2227,6 +2227,28 @@ acquire_shared_memory_use(
         permit_native_execution ? &state : nullptr);
 }
 
+static void require_cycle_device_mutation_allowed(
+        CPUState& state,
+        const char* device_name) {
+    const bool cycle_pending =
+        state.system_cycle_execution_pending != nullptr &&
+        state.system_cycle_execution_pending->load(
+            std::memory_order_acquire);
+    const bool batch_active =
+        state.system_batch_active != nullptr &&
+        state.system_batch_active->load(
+            std::memory_order_acquire);
+    const bool scheduler_continuation =
+        batch_active &&
+        thread_owns_shared_memory(*state.memory);
+    if ((cycle_pending || batch_active) &&
+        !scheduler_continuation) {
+        throw std::runtime_error(
+            std::string(device_name) +
+            " cannot mutate while cycle execution is suspended");
+    }
+}
+
 static std::unique_ptr<SharedMemoryUseGuard>
 acquire_system_clock_advance_use(SystemState& system) {
     // A Python continuation or native callback already inside the logical
@@ -4263,6 +4285,7 @@ struct StepCallbacks {
     uint64_t mmio_end;
     bool has_mmio;
     ResumableBusAccess* bus_access = nullptr;
+    bool strict_cycle_dma = false;
 };
 
 struct DmaEndpointCallbacks {
@@ -4363,6 +4386,23 @@ static inline uint8_t sys_read8(
     return mem_read8(s, addr);
 }
 
+static inline bool write_native_nic_bytes(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint32_t mmio_offset,
+        uint64_t value,
+        int byte_count) {
+    if (!s.nic->handles(mmio_offset))
+        return false;
+    for (int index = 0; index < byte_count; index++) {
+        s.nic->write8(
+            mmio_offset + static_cast<uint32_t>(index),
+            static_cast<uint8_t>(value >> (8 * index)),
+            cb.strict_cycle_dma);
+    }
+    return true;
+}
+
 static inline void sys_write8(
         CPUState& s,
         const StepCallbacks& cb,
@@ -4382,8 +4422,8 @@ static inline void sys_write8(
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic->handles(mmio_off)) {
-            s.nic->write8(mmio_off, val);
+        if (write_native_nic_bytes(
+                s, cb, mmio_off, val, 1)) {
             return;
         }
         if (s.uart->handles(mmio_off)) {
@@ -4531,9 +4571,8 @@ static inline void sys_write64(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic->handles(mmio_off)) {
-            for (int i = 0; i < 8; i++)
-                s.nic->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+        if (write_native_nic_bytes(
+                s, cb, mmio_off, val, 8)) {
             return;
         }
         if (s.trng->handles(mmio_off)) {
@@ -4641,6 +4680,10 @@ static inline void sys_write16(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (write_native_nic_bytes(
+                s, cb, mmio_off, val, 2)) {
+            return;
+        }
         if (s.crypto->handles(mmio_off)) {
             s.crypto->write8(mmio_off, val & 0xFF);
             s.crypto->write8(mmio_off+1, (val >> 8) & 0xFF);
@@ -4759,6 +4802,10 @@ static inline void sys_write32(
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
+        if (write_native_nic_bytes(
+                s, cb, mmio_off, val, 4)) {
+            return;
+        }
         if (s.crypto->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
@@ -4956,6 +5003,7 @@ static std::optional<uint64_t> execute_granted_bus_target(
     const BusRequest& request = grant.request;
     StepCallbacks direct_callbacks = callbacks;
     direct_callbacks.bus_access = nullptr;
+    direct_callbacks.strict_cycle_dma = true;
 
     if (grant.target == BusTarget::MMIO) {
         if (request.operation == BusOperation::READ) {
@@ -9098,9 +9146,73 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
     return callbacks;
 }
 
+static DmaEndpointCallbacks
+build_native_nic_dma_callbacks(SystemState& system) {
+    DmaEndpointCallbacks endpoint;
+    endpoint.requester_id =
+        SystemState::NIC_DMA_REQUESTER_ID;
+    endpoint.inspect =
+        [&system](uint64_t) {
+            DmaEndpointView view;
+            view.active =
+                system.shared_nic
+                    .has_cycle_dma_work();
+            const std::optional<NICDMABeat> beat =
+                system.shared_nic
+                    .cycle_dma_beat();
+            if (beat.has_value()) {
+                view.pending = DmaBeat{
+                    beat->token,
+                    std::nullopt,
+                    beat->write
+                        ? BusOperation::WRITE
+                        : BusOperation::READ,
+                    beat->address,
+                    beat->write_data,
+                };
+            }
+            return view;
+        };
+    endpoint.complete =
+        [&system](
+                uint64_t token,
+                const BusResult& result) {
+            std::optional<uint8_t> read_value;
+            if (result.grant.request.operation ==
+                BusOperation::READ) {
+                read_value = static_cast<uint8_t>(
+                    result.read_value.value_or(0));
+            }
+            if (!system.shared_nic
+                     .complete_cycle_dma(
+                         token,
+                         read_value)) {
+                throw std::logic_error(
+                    "native NIC rejected its DMA completion");
+            }
+        };
+    return endpoint;
+}
+
+static DmaEndpointCallbacks
+build_inactive_dma_callbacks(int requester_id) {
+    DmaEndpointCallbacks endpoint;
+    endpoint.requester_id = requester_id;
+    endpoint.inspect =
+        [](uint64_t) {
+            return DmaEndpointView{};
+        };
+    endpoint.complete =
+        [](uint64_t, const BusResult&) {
+            throw std::logic_error(
+                "inactive DMA endpoint received a completion");
+        };
+    return endpoint;
+}
+
 static std::vector<DmaEndpointCallbacks>
 build_system_dma_callbacks(
-        const SystemState& system,
+        SystemState& system,
         const py::list& callback_sets) {
     if (callback_sets.size() !=
         system.dma_cycle_states.size()) {
@@ -9133,15 +9245,16 @@ build_system_dma_callbacks(
         endpoint.requester_id =
             system.dma_cycle_states[index].requester_id;
         if (inspect_object.is_none()) {
-            endpoint.inspect =
-                [](uint64_t) {
-                    return DmaEndpointView{};
-                };
-            endpoint.complete =
-                [](uint64_t, const BusResult&) {
-                    throw std::logic_error(
-                        "inactive DMA endpoint received a completion");
-                };
+            if (endpoint.requester_id ==
+                SystemState::NIC_DMA_REQUESTER_ID) {
+                endpoint =
+                    build_native_nic_dma_callbacks(
+                        system);
+            } else {
+                endpoint =
+                    build_inactive_dma_callbacks(
+                        endpoint.requester_id);
+            }
         } else {
             py::function inspect =
                 inspect_object.cast<py::function>();
@@ -9563,6 +9676,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── NIC device ────────────────────────────────────────
         .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState NIC memory cannot be initialized while memory is in use");
@@ -9580,12 +9694,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("nic_sync_mem_ptrs", [](CPUState& s) {
             // Re-sync memory pointers after attach_ext_mem / attach_hbw_mem
+            require_cycle_device_mutation_allowed(s, "native NIC");
             MemoryMutationGuard guard(*s.memory);
             sync_nic_memory_ptrs(s);
         })
         .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
             // tx_callback: called from C++ when NIC sends a frame
             // cb receives (bytes,) and returns bool
+            require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->tx_callback = [cb](const uint8_t* data, size_t len) -> bool {
                 py::gil_scoped_acquire gil;
@@ -9600,6 +9716,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             };
         })
         .def("nic_inject_frame", [](CPUState& s, py::bytes frame) -> bool {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             std::string data = frame;
             return s.nic->inject_frame(
                 reinterpret_cast<const uint8_t*>(data.data()), data.size()
@@ -9621,6 +9738,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return py::bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
         })
         .def("nic_set_link_up", [](CPUState& s, bool up) {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->link_up = up;
         })
@@ -9629,10 +9747,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return s.nic->enabled;
         })
         .def("nic_disable", [](CPUState& s) {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->enabled = false;
         })
         .def("nic_reset", [](CPUState& s) {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->reset_state();
         })
@@ -9641,6 +9761,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return s.nic->read8(mmio_off);
         })
         .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+            require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->write8(mmio_off, val);
         })
@@ -9680,6 +9801,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("_native_singleton_write8",
              [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
+            if (s.nic->handles(mmio_off))
+                require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             if (s.nic->handles(mmio_off)) {
                 s.nic->write8(mmio_off, value);
@@ -10856,6 +10979,63 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 system.reset_cycle_execution();
                 system.main_bus.reset(
                     system.shared_clock.cycles());
+            })
+        .def(
+            "_adopt_native_nic_cycle_dma",
+            [](SystemState& system) {
+                std::vector<DmaEndpointCallbacks> callbacks;
+                callbacks.reserve(
+                    system.dma_cycle_states.size());
+                for (const DmaCycleState& state :
+                     system.dma_cycle_states) {
+                    if (state.requester_id ==
+                        SystemState::NIC_DMA_REQUESTER_ID) {
+                        callbacks.push_back(
+                            build_native_nic_dma_callbacks(
+                                system));
+                    } else {
+                        callbacks.push_back(
+                            build_inactive_dma_callbacks(
+                                state.requester_id));
+                    }
+                }
+
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "native NIC DMA cannot be adopted during an "
+                        "active native system batch");
+                }
+                if (system.has_cycle_execution_pending() ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value()) {
+                    throw std::runtime_error(
+                        "native NIC DMA adoption requires a clean "
+                        "cycle timeline");
+                }
+                refresh_cycle_dma_requests(
+                    system,
+                    callbacks,
+                    system.shared_clock.cycles());
+            })
+        .def(
+            "_require_storage_mutation_allowed",
+            [](SystemState& system) {
+                require_cycle_device_mutation_allowed(
+                    *system.cores.front(),
+                    "storage");
+            })
+        .def(
+            "_require_storage_stall_release_allowed",
+            [](SystemState& system) {
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "storage stall release cannot mutate during an "
+                        "active native system batch");
+                }
             })
         .def_property_readonly(
             "cycle_execution_pending",

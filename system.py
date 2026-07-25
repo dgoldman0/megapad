@@ -22,7 +22,13 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
-from _mp64_accel import ExternalEventKind
+from _mp64_accel import (
+    BusFault,
+    BusOperation,
+    DmaBeat,
+    DmaEndpointView,
+    ExternalEventKind,
+)
 from accel_wrapper import (
     HaltError,
     IVEC_BUS_FAULT,
@@ -483,6 +489,12 @@ class MegapadSystem:
         # Timer is now handled natively by C++ accelerator — use proxy
         self.timer = CppTimerProxy(self.cores[0]._cs)
         self.storage = Storage(storage_image)
+        self.storage._cycle_mutation_guard = (
+            self._native_system._require_storage_mutation_allowed
+        )
+        self.storage._stall_release_guard = (
+            self._native_system._require_storage_stall_release_allowed
+        )
         self.audio = AudioOutput()
         self.nic = NetworkDevice(
             passthrough_port=nic_port,
@@ -1221,6 +1233,10 @@ class MegapadSystem:
             cpu.halted = False
             cpu.idle = False
 
+        # The shared NIC survives a warm CPU boot. Re-register any held DMA
+        # beat on the freshly reset fabric so unbounded execution cannot
+        # orphan it and the next cycle-bounded call resumes the same byte.
+        self._native_system._adopt_native_nic_cycle_dma()
         self._booted = True
 
     # -----------------------------------------------------------------
@@ -1513,15 +1529,24 @@ class MegapadSystem:
             for cpu in self.cores[:self.num_full_cores]
         ]
         dma_callback_sets = self._cycle_dma_callback_sets()
-        result = self._native_system.run_full_core_cycle_batch(
-            max_system_cycles,
-            callback_sets,
-            dma_callback_sets,
-            self._prepare_native_cycle_batch,
-            self._settle_native_core_continuation,
-            self._settle_native_system_round,
-            max_instructions,
+        previous_strict_submission = (
+            self.storage._strict_cycle_submission
         )
+        self.storage._strict_cycle_submission = True
+        try:
+            result = self._native_system.run_full_core_cycle_batch(
+                max_system_cycles,
+                callback_sets,
+                dma_callback_sets,
+                self._prepare_native_cycle_batch,
+                self._settle_native_core_continuation,
+                self._settle_native_system_round,
+                max_instructions,
+            )
+        finally:
+            self.storage._strict_cycle_submission = (
+                previous_strict_submission
+            )
         stop_reason = str(result.system_stop_reason)
         if "." in stop_reason:
             stop_reason = stop_reason.rsplit(".", 1)[-1]
@@ -1557,12 +1582,49 @@ class MegapadSystem:
             pending_interrupt_vector=int(result.pending_interrupt_vector),
         )
 
-    @staticmethod
-    def _cycle_dma_callback_sets():
-        """Return inactive NIC/disk endpoints until their FSMs are attached."""
+    def _inspect_storage_dma(self, _current_cycle: int) -> DmaEndpointView:
+        active, pending = self.storage.cycle_dma_view()
+        beat = None
+        if pending is not None:
+            beat = DmaBeat(
+                pending.token,
+                (
+                    BusOperation.WRITE
+                    if pending.write
+                    else BusOperation.READ
+                ),
+                pending.address,
+                pending.write_data,
+            )
+        return DmaEndpointView(active, beat)
+
+    def _complete_storage_dma(self, token: int, result) -> None:
+        read_value = (
+            None
+            if result.read_value is None
+            else int(result.read_value) & 0xFF
+        )
+        accepted = self.storage.cycle_dma_complete(
+            int(token),
+            read_value=read_value,
+            faulted=result.fault != BusFault.NONE,
+            target_effects_committed=bool(
+                result.target_effects_committed
+            ),
+        )
+        if not accepted:
+            raise RuntimeError(
+                "storage rejected its strict-cycle DMA completion"
+            )
+
+    def _cycle_dma_callback_sets(self):
+        """Bind the native NIC and Python storage DMA endpoints."""
         return [
             (None, None),
-            (None, None),
+            (
+                self._inspect_storage_dma,
+                self._complete_storage_dma,
+            ),
         ]
 
     def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
