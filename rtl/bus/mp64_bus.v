@@ -203,10 +203,13 @@ module mp64_bus #(
 
     integer rr_i;
     reg [PORT_BITS-1:0] rr_candidate;
+    reg [PORT_BITS:0]   rr_candidate_wide;
 
     always @(*) begin
-        next_grant  = last_grant;
-        any_request = 1'b0;
+        next_grant       = last_grant;
+        any_request      = 1'b0;
+        rr_candidate     = {PORT_BITS{1'b0}};
+        rr_candidate_wide = {(PORT_BITS+1){1'b0}};
 
         // Current port still has weight budget and is eligible?
         if (weight_remain > 8'd0 && eligible[last_grant]) begin
@@ -215,10 +218,16 @@ module mp64_bus #(
         end else begin
             // Scan for next eligible port (round-robin)
             for (rr_i = 1; rr_i <= N_PORTS; rr_i = rr_i + 1) begin
-                // Synthesisable wrap-around without %
-                rr_candidate = last_grant + rr_i[PORT_BITS-1:0];
-                if (rr_candidate >= N_PORTS[PORT_BITS-1:0])
-                    rr_candidate = rr_candidate - N_PORTS[PORT_BITS-1:0];
+                // Synthesisable wrap-around without %.  Preserve one extra
+                // bit until after subtraction so a non-power-of-two fabric
+                // cannot lose high ports when last_grant + rr_i crosses the
+                // PORT_BITS boundary (the integrated SoC has nine ports).
+                rr_candidate_wide =
+                    {1'b0, last_grant} + rr_i[PORT_BITS:0];
+                if (rr_candidate_wide >= N_PORTS[PORT_BITS:0])
+                    rr_candidate_wide =
+                        rr_candidate_wide - N_PORTS[PORT_BITS:0];
+                rr_candidate = rr_candidate_wide[PORT_BITS-1:0];
                 if (!any_request && eligible[rr_candidate]) begin
                     next_grant  = rr_candidate;
                     any_request = 1'b1;

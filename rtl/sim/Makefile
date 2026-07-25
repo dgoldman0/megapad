@@ -123,10 +123,14 @@ clean:
 # ==========================================================================
 
 # --- Bus arbiter ---
-bus_arbiter: tb_bus_arbiter.vvp
-	$(VVP) $<
+bus_arbiter: tb_bus_arbiter.vvp tb_bus_arbiter_nine_port.vvp
+	$(VVP) tb_bus_arbiter.vvp
+	$(VVP) tb_bus_arbiter_nine_port.vvp
 
 tb_bus_arbiter.vvp: tb_bus_arbiter.v $(BUS)/mp64_bus.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+tb_bus_arbiter_nine_port.vvp: tb_bus_arbiter_nine_port.v $(BUS)/mp64_bus.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Memory subsystem ---
