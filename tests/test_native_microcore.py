@@ -10,6 +10,7 @@ from megapad64 import (
     CPUID_MICRO,
     CSR_CPUID,
     IVEC_ILLEGAL_OP,
+    Megapad64 as PythonMegapad64,
     Megapad64Micro as PythonMegapad64Micro,
     TrapError,
 )
@@ -27,7 +28,7 @@ _RETAINED_SCALAR_PROGRAM = assemble(
     breq equal
     ldi r20, 0xff
 equal:
-    dec r1
+    dec r17
     halt
 """
 )
@@ -73,9 +74,38 @@ def test_retained_scalar_and_rex_execution_matches_python_microcore():
     assert native_cycles == oracle_cycles
     assert _local_state(native) == _local_state(oracle)
     assert native.regs[16] == 0x1A
-    assert native.regs[17] == 3
+    assert native.regs[17] == 2
     assert native.regs[18] == 3
     assert native.regs[20] == 0
+
+
+@pytest.mark.parametrize(
+    "cpu_type",
+    (PythonMegapad64, PythonMegapad64Micro),
+)
+def test_python_isa_rex_inc_and_dec_select_high_registers(cpu_type):
+    """The Python oracle applies the REX nibble bit to unary GPR ops."""
+    cpu = cpu_type(mem_size=64, core_id=0, num_cores=1)
+    cpu.load_bytes(
+        0,
+        assemble(
+            """
+            ldi r16, 7
+            ldi r17, 9
+            inc r16
+            dec r17
+            halt
+"""
+        ),
+    )
+
+    while not cpu.halted:
+        cpu.step()
+
+    assert cpu.regs[16] == 8
+    assert cpu.regs[17] == 8
+    assert cpu.regs[0] == 0
+    assert cpu.regs[1] == 0
 
 
 def test_memory_and_csr_instructions_use_one_transactional_oracle_step():

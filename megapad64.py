@@ -2497,12 +2497,14 @@ class Megapad64:
 
     # -- 0x1: INC Rn --
     def _exec_inc(self, n: int) -> int:
-        self.regs[n] = u64(self.regs[n] + 1)
+        rn = n | (self._rex_n << 4)
+        self.regs[rn] = u64(self.regs[rn] + 1)
         return 0
 
     # -- 0x2: DEC Rn --
     def _exec_dec(self, n: int) -> int:
-        self.regs[n] = u64(self.regs[n] - 1)
+        rn = n | (self._rex_n << 4)
+        self.regs[rn] = u64(self.regs[rn] - 1)
         return 0
 
     # -- 0x3: BR (short branch) / SKIP --
