@@ -34,17 +34,30 @@ module tb_sha2_isa;
 
     // Outputs
     wire [31:0] h_out [0:7];
+    wire [511:0] w_in_flat;
+    wire [255:0] h_in_flat;
+    wire [255:0] h_out_flat;
     wire        h_we;
     wire        busy;
     wire        done;
+
+    genvar pack_i;
+    generate
+        for (pack_i = 0; pack_i < 16; pack_i = pack_i + 1)
+            assign w_in_flat[pack_i*32 +: 32] = w_in[pack_i];
+        for (pack_i = 0; pack_i < 8; pack_i = pack_i + 1) begin
+            assign h_in_flat[pack_i*32 +: 32] = h_in[pack_i];
+            assign h_out[pack_i] = h_out_flat[pack_i*32 +: 32];
+        end
+    endgenerate
 
     mp64_sha2_isa uut (
         .clk    (clk),
         .rst_n  (rst_n),
         .start  (start),
-        .w_in   (w_in),
-        .h_in   (h_in),
-        .h_out  (h_out),
+        .w_in   (w_in_flat),
+        .h_in   (h_in_flat),
+        .h_out  (h_out_flat),
         .h_we   (h_we),
         .busy   (busy),
         .done   (done)
@@ -341,11 +354,17 @@ module tb_sha2_isa;
         $display("=== tb_sha2_isa: %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count != 0) begin
             $display("SOME TESTS FAILED");
-            $finish;
+            $finish(1);
         end else begin
             $display("ALL TESTS PASSED");
         end
-        $finish;
+        $finish(0);
+    end
+
+    initial begin
+        #200000;
+        $display("tb_sha2_isa: TIMEOUT");
+        $finish(1);
     end
 
 endmodule

@@ -12,7 +12,8 @@
 #
 
 set PROJ_DIR  [file dirname [file normalize [info script]]]
-set RTL_DIR   ${PROJ_DIR}/rtl
+set REPO_DIR  [file normalize ${PROJ_DIR}/..]
+set RTL_DIR   ${REPO_DIR}/rtl
 set CONST_DIR ${PROJ_DIR}/constraints
 set BUILD_DIR ${PROJ_DIR}/build
 
@@ -29,31 +30,54 @@ set_property target_language Verilog [current_project]
 # 2. Add RTL sources
 # -------------------------------------------------------------------------
 set rtl_files [list \
-    ${RTL_DIR}/mp64_defs.vh      \
-    ${RTL_DIR}/mp64_synth_top.v  \
-    ${RTL_DIR}/mp64_soc.v        \
-    ${RTL_DIR}/mp64_cpu.v        \
-    ${RTL_DIR}/mp64_icache.v     \
-    ${RTL_DIR}/mp64_bus.v        \
-    ${RTL_DIR}/mp64_memory.v     \
-    ${RTL_DIR}/mp64_extmem.v     \
-    ${RTL_DIR}/mp64_uart.v       \
-    ${RTL_DIR}/mp64_timer.v      \
-    ${RTL_DIR}/mp64_disk.v       \
-    ${RTL_DIR}/mp64_nic.v        \
-    ${RTL_DIR}/mp64_tile.v       \
-    ${RTL_DIR}/mp64_mailbox.v    \
-    ${RTL_DIR}/mp64_fp16_alu.v   \
-    ${RTL_DIR}/mp64_aes.v        \
-    ${RTL_DIR}/mp64_sha3.v       \
+    ${RTL_DIR}/pkg/mp64_defs.vh                    \
+    ${RTL_DIR}/pkg/mp64_pkg.vh                     \
+    ${RTL_DIR}/pkg/mp64_cpu_common.vh              \
+    ${RTL_DIR}/target/xilinx7/mp64_sram_dp_xilinx7.v \
+    ${RTL_DIR}/target/xilinx7/mp64_sram_sp_xilinx7.v \
+    ${RTL_DIR}/target/xilinx7/mp64_clkgate_xilinx7.v \
+    ${RTL_DIR}/target/xilinx7/mp64_mul_xilinx7.v   \
+    ${RTL_DIR}/target/xilinx7/mp64_pll_xilinx7.v   \
+    ${RTL_DIR}/core/mp64_alu.v                     \
+    ${RTL_DIR}/core/mp64_bitfield.v                \
+    ${RTL_DIR}/core/mp64_dict.v                    \
+    ${RTL_DIR}/core/mp64_fp16_alu.v                \
+    ${RTL_DIR}/core/mp64_string.v                  \
+    ${RTL_DIR}/core/mp64_cpu.v                     \
+    ${RTL_DIR}/core/mp64_cpu_micro.v               \
+    ${RTL_DIR}/core/mp64_icache.v                  \
+    ${RTL_DIR}/core/mp64_cluster.v                 \
+    ${RTL_DIR}/bus/mp64_bus.v                      \
+    ${RTL_DIR}/mem/mp64_memory.v                   \
+    ${RTL_DIR}/mem/mp64_extmem.v                   \
+    ${RTL_DIR}/gpu/mp64_tile.v                     \
+    ${RTL_DIR}/periph/mp64_uart.v                  \
+    ${RTL_DIR}/periph/mp64_timer.v                 \
+    ${RTL_DIR}/periph/mp64_disk.v                  \
+    ${RTL_DIR}/periph/mp64_nic.v                   \
+    ${RTL_DIR}/periph/mp64_mailbox.v               \
+    ${RTL_DIR}/periph/mp64_rtc.v                   \
+    ${RTL_DIR}/periph/mp64_trng.v                  \
+    ${RTL_DIR}/crypto/mp64_aes.v                   \
+    ${RTL_DIR}/crypto/mp64_crc_isa.v               \
+    ${RTL_DIR}/crypto/mp64_field_alu_isa.v         \
+    ${RTL_DIR}/crypto/mp64_kem.v                   \
+    ${RTL_DIR}/crypto/mp64_ntt.v                   \
+    ${RTL_DIR}/crypto/mp64_sha2_isa.v              \
+    ${RTL_DIR}/crypto/mp64_sha3.v                  \
+    ${RTL_DIR}/crypto/mp64_wots.v                  \
+    ${RTL_DIR}/soc/mp64_core_bus_mux.v             \
+    ${RTL_DIR}/soc/mp64_tile_port_arbiter.v        \
+    ${RTL_DIR}/soc/mp64_soc.v                      \
+    ${RTL_DIR}/target/xilinx7/mp64_synth_top.v     \
 ]
 
 foreach f $rtl_files {
     if {[file extension $f] eq ".vh"} {
-        read_verilog -sv $f
+        read_verilog -sv -include_dirs ${RTL_DIR}/pkg $f
         set_property IS_GLOBAL_INCLUDE TRUE [get_files [file tail $f]]
     } else {
-        read_verilog -sv $f
+        read_verilog -sv -include_dirs ${RTL_DIR}/pkg $f
     }
 }
 

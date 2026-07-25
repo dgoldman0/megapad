@@ -26,7 +26,10 @@ read_verilog -sv \
 # ---- Core -------------------------------------------------------------------
 read_verilog -sv -Irtl/pkg \
     rtl/core/mp64_alu.v        \
+    rtl/core/mp64_bitfield.v   \
+    rtl/core/mp64_dict.v       \
     rtl/core/mp64_fp16_alu.v   \
+    rtl/core/mp64_string.v     \
     rtl/core/mp64_cpu.v        \
     rtl/core/mp64_cpu_micro.v  \
     rtl/core/mp64_icache.v     \
@@ -52,15 +55,19 @@ read_verilog -sv -Irtl/pkg \
     rtl/periph/mp64_disk.v     \
     rtl/periph/mp64_nic.v      \
     rtl/periph/mp64_mailbox.v  \
+    rtl/periph/mp64_rtc.v      \
     rtl/periph/mp64_trng.v
 
 # ---- Crypto accelerators ----------------------------------------------------
 read_verilog -sv -Irtl/pkg \
-    rtl/crypto/mp64_aes.v      \
-    rtl/crypto/mp64_sha3.v     \
-
-    rtl/crypto/mp64_ntt.v      \
-    rtl/crypto/mp64_kem.v
+    rtl/crypto/mp64_aes.v          \
+    rtl/crypto/mp64_crc_isa.v      \
+    rtl/crypto/mp64_field_alu_isa.v \
+    rtl/crypto/mp64_kem.v          \
+    rtl/crypto/mp64_ntt.v          \
+    rtl/crypto/mp64_sha2_isa.v     \
+    rtl/crypto/mp64_sha3.v         \
+    rtl/crypto/mp64_wots.v
 
 # ---- SoC integration --------------------------------------------------------
 read_verilog -sv -Irtl/pkg \

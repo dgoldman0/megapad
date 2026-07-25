@@ -28,14 +28,14 @@ module mp64_sha2_isa (
     // Command
     input  wire        start,          // pulse: begin 64-round compression
 
-    // W[0..15] pre-loaded by CPU (big-endian 32-bit words)
-    input  wire [31:0] w_in [0:15],
+    // W[0..15] pre-loaded by CPU (word N occupies bits N*32 +: 32)
+    input  wire [511:0] w_in,
 
-    // Hash state in (from ACC registers, unpacked to 8 × 32-bit)
-    input  wire [31:0] h_in [0:7],
+    // Hash state in (word N occupies bits N*32 +: 32)
+    input  wire [255:0] h_in,
 
     // Hash state out (updated H' = H + working_vars)
-    output reg  [31:0] h_out [0:7],
+    output reg  [255:0] h_out,
     output reg         h_we,          // pulse when result valid
 
     // Status
@@ -201,7 +201,7 @@ module mp64_sha2_isa (
                 W[ki] <= 32'd0;
             for (ki = 0; ki < 8; ki = ki + 1) begin
                 H_save[ki] <= 32'd0;
-                h_out[ki]  <= 32'd0;
+                h_out[ki*32 +: 32] <= 32'd0;
             end
         end else begin
             done <= 1'b0;
@@ -212,14 +212,18 @@ module mp64_sha2_isa (
                     if (start) begin
                         // Latch W and H from inputs
                         for (ki = 0; ki < 16; ki = ki + 1)
-                            W[ki] <= w_in[ki];
+                            W[ki] <= w_in[ki*32 +: 32];
                         for (ki = 0; ki < 8; ki = ki + 1)
-                            H_save[ki] <= h_in[ki];
+                            H_save[ki] <= h_in[ki*32 +: 32];
                         // Initialize working variables
-                        wa <= h_in[0]; wb <= h_in[1];
-                        wc <= h_in[2]; wd <= h_in[3];
-                        we <= h_in[4]; wf <= h_in[5];
-                        wg <= h_in[6]; wh <= h_in[7];
+                        wa <= h_in[0*32 +: 32];
+                        wb <= h_in[1*32 +: 32];
+                        wc <= h_in[2*32 +: 32];
+                        wd <= h_in[3*32 +: 32];
+                        we <= h_in[4*32 +: 32];
+                        wf <= h_in[5*32 +: 32];
+                        wg <= h_in[6*32 +: 32];
+                        wh <= h_in[7*32 +: 32];
                         round_cnt <= 7'd0;
                         busy      <= 1'b1;
                         state     <= S_ROUND;
@@ -251,14 +255,14 @@ module mp64_sha2_isa (
 
                 S_DONE: begin
                     // H' = H + working variables
-                    h_out[0] <= H_save[0] + wa;
-                    h_out[1] <= H_save[1] + wb;
-                    h_out[2] <= H_save[2] + wc;
-                    h_out[3] <= H_save[3] + wd;
-                    h_out[4] <= H_save[4] + we;
-                    h_out[5] <= H_save[5] + wf;
-                    h_out[6] <= H_save[6] + wg;
-                    h_out[7] <= H_save[7] + wh;
+                    h_out[0*32 +: 32] <= H_save[0] + wa;
+                    h_out[1*32 +: 32] <= H_save[1] + wb;
+                    h_out[2*32 +: 32] <= H_save[2] + wc;
+                    h_out[3*32 +: 32] <= H_save[3] + wd;
+                    h_out[4*32 +: 32] <= H_save[4] + we;
+                    h_out[5*32 +: 32] <= H_save[5] + wf;
+                    h_out[6*32 +: 32] <= H_save[6] + wg;
+                    h_out[7*32 +: 32] <= H_save[7] + wh;
                     h_we  <= 1'b1;
                     done  <= 1'b1;
                     busy  <= 1'b0;

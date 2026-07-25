@@ -116,7 +116,13 @@ module mp64_mailbox #(
                 4'h5:         rdata = mbox_data[requester_id][47:40];
                 4'h6:         rdata = mbox_data[requester_id][55:48];
                 4'h7:         rdata = mbox_data[requester_id][63:56];
-                MBOX_STATUS:  rdata = mbox_pending[requester_id][7:0];
+                MBOX_STATUS: begin
+                    // The architectural status register is eight bits even
+                    // when a reduced SoC instantiates fewer requesters.
+                    rdata = 8'd0;
+                    for (ri = 0; ri < N_CORES && ri < 8; ri = ri + 1)
+                        rdata[ri] = mbox_pending[requester_id][ri];
+                end
                 default:      rdata = 8'd0;
             endcase
         end else if (is_slock) begin

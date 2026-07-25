@@ -26,8 +26,8 @@ module tb_soc_tile_icache;
     integer pass_count;
     integer fail_count;
     integer guard;
-    integer c0_write_commits;
-    integer cluster_write_commits;
+    integer c0_write_accepts;
+    integer cluster_write_accepts;
 
     mp64_soc #(
         .MEM_DEPTH (16)
@@ -86,21 +86,21 @@ module tb_soc_tile_icache;
 
     always @(posedge sys_clk) begin
         if (!sys_rst_n) begin
-            c0_write_commits <= 0;
-            cluster_write_commits <= 0;
-        end else if (u_soc.tile_write_commit) begin
-            if (u_soc.tile_write_owner == 2'd0)
-                c0_write_commits <= c0_write_commits + 1;
-            else
-                cluster_write_commits <= cluster_write_commits + 1;
+            c0_write_accepts <= 0;
+            cluster_write_accepts <= 0;
+        end else if (u_soc.u_memory.tile_start && u_soc.tile_mem_wen) begin
+            if (u_soc.tile_mem_addr == 32'h0000_0123)
+                c0_write_accepts <= c0_write_accepts + 1;
+            else if (u_soc.tile_mem_addr == 32'h0000_0223)
+                cluster_write_accepts <= cluster_write_accepts + 1;
         end
     end
 
     initial begin
         pass_count = 0;
         fail_count = 0;
-        c0_write_commits = 0;
-        cluster_write_commits = 0;
+        c0_write_accepts = 0;
+        cluster_write_accepts = 0;
         sys_rst_n = 1'b0;
         repeat (4) clock;
 
@@ -155,8 +155,8 @@ module tb_soc_tile_icache;
         check("core-0 tile commit clears resident instruction line",
               !u_soc.g_core[0].u_icache.valid[8'h10]);
         repeat (4) clock;
-        check("held request executes core-0 tile write exactly once",
-              c0_write_commits == 1);
+        check("core-0 tile write reaches physical memory exactly once",
+              c0_write_accepts == 1);
 
         // A cluster tile write is deliberately noncoherent to the full-core
         // private cache and therefore must not drive core-0 invalidation.
@@ -187,8 +187,8 @@ module tb_soc_tile_icache;
         check("cluster tile commit preserves core-0 private line",
               u_soc.g_core[0].u_icache.valid[8'h20]);
         repeat (4) clock;
-        check("held request executes cluster tile write exactly once",
-              cluster_write_commits == 1);
+        check("cluster tile write reaches physical memory exactly once",
+              cluster_write_accepts == 1);
 
         $display("");
         if (fail_count == 0)

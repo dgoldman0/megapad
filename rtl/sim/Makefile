@@ -181,7 +181,8 @@ tb_crc_isa.vvp: tb_crc_isa.v $(CRYPTO)/mp64_crc_isa.v
 sha2_isa: tb_sha2_isa.vvp
 	$(VVP) $<
 
-tb_sha2_isa.vvp: tb_sha2_isa.v $(CRYPTO)/mp64_sha2_isa.v
+tb_sha2_isa.vvp: tb_sha2_isa.v $(CRYPTO)/mp64_sha2_isa.v \
+                 ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Field ALU ISA engine ---
@@ -367,11 +368,12 @@ tile: tb_tile.vvp tb_tile_write_ack.vvp
 	$(VVP) tb_tile.vvp
 	$(VVP) tb_tile_write_ack.vvp
 
-tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
+tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+             ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tile.v \
-                       $(CORE)/mp64_fp16_alu.v
+                       $(CORE)/mp64_fp16_alu.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================

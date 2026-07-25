@@ -44,6 +44,13 @@ module tb_tile_write_ack;
     integer fail_count;
     integer guard;
 
+    // Distinct lower and upper lane groups make swapped, duplicated, zeroed,
+    // or otherwise corrupted WMUL halves observable at the write ports.
+    localparam [511:0] WMUL_A  = {{32{8'h04}}, {32{8'h02}}};
+    localparam [511:0] WMUL_B  = {64{8'h03}};
+    localparam [511:0] WMUL_LO = {32{16'h0006}};
+    localparam [511:0] WMUL_HI = {32{16'h000C}};
+
     mp64_tile uut (
         .clk            (clk),
         .rst_n          (rst_n),
@@ -191,16 +198,24 @@ module tb_tile_write_ack;
         input [511:0] label;
         input integer cycles;
         integer n;
+        integer failed;
     begin
+        failed = 0;
         for (n = 0; n < cycles; n = n + 1) begin
             clock;
             if (mex_done || !mex_busy) begin
                 $display("  FAIL: %0s", label);
                 fail_count = fail_count + 1;
+                failed = 1;
+                n = cycles;
+            end else if (tile_req || ext_tile_req) begin
+                $display("  FAIL: %0s (request repeated before ACK)", label);
+                fail_count = fail_count + 1;
+                failed = 1;
                 n = cycles;
             end
         end
-        if (!mex_done && mex_busy) begin
+        if (!failed) begin
             $display("  PASS: %0s", label);
             pass_count = pass_count + 1;
         end
@@ -296,14 +311,18 @@ module tb_tile_write_ack;
         csr_write(CSR_TMODE, 64'd0);
         dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 1'b0, 4'd0);
         wait_internal(1'b0, 32'h0000);
-        ack_internal({64{8'h02}});
+        ack_internal(WMUL_A);
         wait_internal(1'b0, 32'h0040);
-        ack_internal({64{8'h03}});
+        ack_internal(WMUL_B);
         wait_internal(1'b1, 32'h0200);
+        check("WMUL first store carries lower widening half",
+              tile_wdata == WMUL_LO);
         expect_no_retirement("WMUL waits for first store ACK", 3);
         check("WMUL second store is not issued early", !tile_req);
         ack_internal(512'd0);
         wait_internal(1'b1, 32'h0240);
+        check("WMUL second store carries upper widening half",
+              tile_wdata == WMUL_HI);
         expect_no_retirement("WMUL waits for second store ACK", 3);
         ack_internal(512'd0);
         finish_operation("WMUL retires after second store ACK");
@@ -315,13 +334,17 @@ module tb_tile_write_ack;
         csr_write(CSR_TDST,  64'h0010_0000);
         dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 1'b0, 4'd0);
         wait_internal(1'b0, 32'h0000);
-        ack_internal({64{8'h02}});
+        ack_internal(WMUL_A);
         wait_internal(1'b0, 32'h0040);
-        ack_internal({64{8'h03}});
+        ack_internal(WMUL_B);
         wait_external(1'b1, 64'h0010_0000);
+        check("external WMUL first burst carries lower widening half",
+              ext_tile_wdata == WMUL_LO);
         expect_no_retirement("external WMUL waits for first burst ACK", 3);
         ack_external(512'd0);
         wait_external(1'b1, 64'h0010_0040);
+        check("external WMUL second burst carries upper widening half",
+              ext_tile_wdata == WMUL_HI);
         expect_no_retirement("external WMUL waits for second burst ACK", 3);
         ack_external(512'd0);
         finish_operation("external WMUL retires after both burst ACKs");
@@ -334,12 +357,16 @@ module tb_tile_write_ack;
         csr_write(CSR_TDST,  64'h000F_FFC0);
         dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 1'b0, 4'd0);
         wait_internal(1'b0, 32'h0000);
-        ack_internal({64{8'h02}});
+        ack_internal(WMUL_A);
         wait_internal(1'b0, 32'h0040);
-        ack_internal({64{8'h03}});
+        ack_internal(WMUL_B);
         wait_internal(1'b1, 32'h000F_FFC0);
+        check("Bank-0 WMUL half carries lower widening result",
+              tile_wdata == WMUL_LO);
         ack_internal(512'd0);
         wait_external(1'b1, 64'h0010_0000);
+        check("cross-aperture external half carries upper result",
+              ext_tile_wdata == WMUL_HI);
         expect_no_retirement(
             "Bank-0/external WMUL waits for cross-aperture second ACK", 2);
         ack_external(512'd0);
@@ -351,12 +378,16 @@ module tb_tile_write_ack;
         csr_write(CSR_TDST,  64'h0000_0000_FFCF_FFC0);
         dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 1'b0, 4'd0);
         wait_internal(1'b0, 32'h0000);
-        ack_internal({64{8'h02}});
+        ack_internal(WMUL_A);
         wait_internal(1'b0, 32'h0040);
-        ack_internal({64{8'h03}});
+        ack_internal(WMUL_B);
         wait_external(1'b1, 64'h0000_0000_FFCF_FFC0);
+        check("external WMUL half carries lower widening result",
+              ext_tile_wdata == WMUL_LO);
         ack_external(512'd0);
         wait_internal(1'b1, 32'hFFD0_0000);
+        check("cross-aperture HBW half carries upper result",
+              tile_wdata == WMUL_HI);
         expect_no_retirement(
             "external/HBW WMUL waits for cross-aperture second ACK", 2);
         ack_internal(512'd0);

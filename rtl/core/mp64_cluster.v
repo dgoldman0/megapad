@@ -838,29 +838,38 @@ module mp64_cluster #(
 
     // SHA engine instance
     reg         sha_eng_start;
-    wire [31:0] sha_h_unpack [0:7];
-    wire [31:0] sha_h_out    [0:7];
+    wire [511:0] sha_w_flat;
+    wire [255:0] sha_h_in_flat;
+    wire [255:0] sha_h_out_flat;
     wire        sha_h_we;
     wire        sha_eng_busy;
     wire        sha_eng_done;
 
     // Unpack cluster SHA ACC → 8 × 32-bit H
-    assign sha_h_unpack[0] = cl_sha_acc[0][63:32];  // a
-    assign sha_h_unpack[1] = cl_sha_acc[0][31:0];   // b
-    assign sha_h_unpack[2] = cl_sha_acc[1][63:32];  // c
-    assign sha_h_unpack[3] = cl_sha_acc[1][31:0];   // d
-    assign sha_h_unpack[4] = cl_sha_acc[2][63:32];  // e
-    assign sha_h_unpack[5] = cl_sha_acc[2][31:0];   // f
-    assign sha_h_unpack[6] = cl_sha_acc[3][63:32];  // g
-    assign sha_h_unpack[7] = cl_sha_acc[3][31:0];   // h
+    genvar sha_pack_i;
+    generate
+        for (sha_pack_i = 0; sha_pack_i < 16;
+             sha_pack_i = sha_pack_i + 1) begin : g_sha_w_pack
+            assign sha_w_flat[sha_pack_i*32 +: 32] =
+                sha_w_buf[sha_pack_i];
+        end
+    endgenerate
+    assign sha_h_in_flat[0*32 +: 32] = cl_sha_acc[0][63:32]; // a
+    assign sha_h_in_flat[1*32 +: 32] = cl_sha_acc[0][31:0];  // b
+    assign sha_h_in_flat[2*32 +: 32] = cl_sha_acc[1][63:32]; // c
+    assign sha_h_in_flat[3*32 +: 32] = cl_sha_acc[1][31:0];  // d
+    assign sha_h_in_flat[4*32 +: 32] = cl_sha_acc[2][63:32]; // e
+    assign sha_h_in_flat[5*32 +: 32] = cl_sha_acc[2][31:0];  // f
+    assign sha_h_in_flat[6*32 +: 32] = cl_sha_acc[3][63:32]; // g
+    assign sha_h_in_flat[7*32 +: 32] = cl_sha_acc[3][31:0];  // h
 
     mp64_sha2_isa u_cl_sha2 (
         .clk     (clk),
         .rst_n   (~cl_rst),
         .start   (sha_eng_start),
-        .w_in    (sha_w_buf),
-        .h_in    (sha_h_unpack),
-        .h_out   (sha_h_out),
+        .w_in    (sha_w_flat),
+        .h_in    (sha_h_in_flat),
+        .h_out   (sha_h_out_flat),
         .h_we    (sha_h_we),
         .busy    (sha_eng_busy),
         .done    (sha_eng_done)
@@ -1024,10 +1033,18 @@ module mp64_cluster #(
                 SHA_COMPRESS: begin
                     if (sha_eng_done) begin
                         // Write back H' to cluster SHA ACC
-                        cl_sha_acc[0] <= {sha_h_out[0], sha_h_out[1]};
-                        cl_sha_acc[1] <= {sha_h_out[2], sha_h_out[3]};
-                        cl_sha_acc[2] <= {sha_h_out[4], sha_h_out[5]};
-                        cl_sha_acc[3] <= {sha_h_out[6], sha_h_out[7]};
+                        cl_sha_acc[0] <= {
+                            sha_h_out_flat[0*32 +: 32],
+                            sha_h_out_flat[1*32 +: 32]};
+                        cl_sha_acc[1] <= {
+                            sha_h_out_flat[2*32 +: 32],
+                            sha_h_out_flat[3*32 +: 32]};
+                        cl_sha_acc[2] <= {
+                            sha_h_out_flat[4*32 +: 32],
+                            sha_h_out_flat[5*32 +: 32]};
+                        cl_sha_acc[3] <= {
+                            sha_h_out_flat[6*32 +: 32],
+                            sha_h_out_flat[7*32 +: 32]};
                         // Update message length: +512 bits per block
                         cl_sha_msglen_lo <= cl_sha_msglen_lo + 64'd512;
                         if (cl_sha_msglen_lo > (64'hFFFF_FFFF_FFFF_FFFF - 64'd512))
