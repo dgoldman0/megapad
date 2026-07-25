@@ -30,7 +30,7 @@ from typing import Optional
 # exception classes regardless of whether the accelerator is available.
 from megapad64 import (
     Megapad64 as _PyMegapad64,
-    Megapad64Micro,
+    Megapad64Micro as _PyMegapad64Micro,
     Megapad64Error, TrapError, HaltError,
     u64, s64, sign_extend, zero_extend,
     MASK64, SIGN64,
@@ -107,6 +107,7 @@ class Megapad64:
     """Accelerated Megapad-64 CPU (C++ inner loop, Python-compatible API)."""
 
     _accel_backend = True  # introspection flag
+    _micro_profile = False
 
     def __init__(
         self,
@@ -116,6 +117,7 @@ class Megapad64:
         *,
         _system_owner=None,
         _system_core_index: Optional[int] = None,
+        _system_micro_index: Optional[int] = None,
     ):
         self._mem_size = mem_size
 
@@ -125,30 +127,58 @@ class Megapad64:
         # explicitly for the wrapper's lifetime.
         self._system_owner = _system_owner
         if _system_owner is None:
-            if _system_core_index is not None:
+            if (
+                _system_core_index is not None or
+                _system_micro_index is not None
+            ):
                 raise ValueError(
-                    "_system_core_index requires a native SystemState owner"
+                    "system core indices require a native SystemState owner"
                 )
             self._mem = bytearray(mem_size)
-            self._cs = _accel.CPUState()
+            if self._micro_profile:
+                self._cs = _accel._make_micro_cpu_state()
+            else:
+                self._cs = _accel.CPUState()
             self._cs.attach_mem(self._mem, mem_size)
         else:
-            if _system_core_index is None:
+            if (
+                (_system_core_index is None) ==
+                (_system_micro_index is None)
+            ):
                 raise ValueError(
-                    "system-owned CPUs require a full-core index"
-                )
-            if core_id != _system_core_index:
-                raise ValueError(
-                    "system-owned CPU core_id must match its full-core index"
+                    "system-owned CPUs require exactly one profile index"
                 )
             if num_cores != _system_owner.all_core_count:
                 raise ValueError(
                     "num_cores must match the native SystemState topology"
                 )
-            # core() seals the central mappings.  Read canonical exporters
-            # only after that transition so a thread switch cannot pair an
-            # old Python buffer with a newly replaced native mapping.
-            self._cs = _system_owner.core(_system_core_index)
+            if self._micro_profile:
+                if _system_micro_index is None:
+                    raise ValueError(
+                        "microcore wrappers require a microcore index"
+                    )
+                expected_core_id = (
+                    _system_owner.full_core_count + _system_micro_index
+                )
+                if core_id != expected_core_id:
+                    raise ValueError(
+                        "system-owned microcore ID must match its topology"
+                    )
+                self._cs = _system_owner.micro_core(_system_micro_index)
+            else:
+                if _system_core_index is None:
+                    raise ValueError(
+                        "full-core wrappers require a full-core index"
+                    )
+                if core_id != _system_core_index:
+                    raise ValueError(
+                        "system-owned CPU core_id must match its full-core index"
+                    )
+                self._cs = _system_owner.core(_system_core_index)
+            # Borrowing either profile seals the central mappings.  Read
+            # canonical exporters only after that transition so a thread
+            # switch cannot pair an old Python buffer with a newly replaced
+            # native mapping.
             if _system_owner.mem_buffer is None:
                 raise ValueError(
                     "native SystemState main mapping must be attached first"
@@ -863,6 +893,176 @@ def {_attr}(self, v):
                       f"I={self.flag_i} S={self.flag_s}")
         lines.append(f"  D = {self.d_reg:#04x}  Q = {self.q_out}  "
                       f"PSEL={self.psel} XSEL={self.xsel} SPSEL={self.spsel}")
+        return "\n".join(lines)
+
+
+class Megapad64Micro(Megapad64):
+    """Accelerated reduced core with explicit Python-oracle boundaries.
+
+    Core-local scalar instructions execute in C++.  Instructions whose
+    semantics are cluster-shared, memory-routed, or absent from the reduced
+    hardware yield transactionally to ``megapad64.Megapad64Micro``.
+    """
+
+    _micro_profile = True
+
+    def __init__(
+        self,
+        mem_size: int = 1 << 20,
+        core_id: int = 0,
+        num_cores: int = NUM_ALL_CORES,
+        *,
+        _system_owner=None,
+        _system_micro_index: Optional[int] = None,
+    ):
+        super().__init__(
+            mem_size=mem_size,
+            core_id=core_id,
+            num_cores=num_cores,
+            _system_owner=_system_owner,
+            _system_micro_index=_system_micro_index,
+        )
+        if not self._cs.is_micro_core:
+            raise RuntimeError("Megapad64Micro requires a micro-profile state")
+        self._cluster = None
+        self._enforce_reduced_state()
+
+    @classmethod
+    def _from_system_state(
+        cls,
+        owner,
+        micro_index: int,
+        *,
+        num_cores: int,
+    ) -> "Megapad64Micro":
+        """Borrow one stable microcore view by its local microcore index."""
+        return cls(
+            mem_size=0,
+            core_id=owner.full_core_count + micro_index,
+            num_cores=num_cores,
+            _system_owner=owner,
+            _system_micro_index=micro_index,
+        )
+
+    def _enforce_reduced_state(self) -> None:
+        """Keep architecturally removed local state observably absent."""
+        self._cs.d_reg = 0
+        self._cs.q_out = 0
+        self._cs.t_reg = 0
+        self._cs.tile_selftest = 0
+        self._cs.tile_st_detail = 0
+        self._cs.icache_enabled = 0
+        self._cs.icache_hits = 0
+        self._cs.icache_misses = 0
+
+    @property
+    def port_out(self):
+        return None
+
+    @port_out.setter
+    def port_out(self, value):
+        pass
+
+    @property
+    def port_in(self):
+        return None
+
+    @port_in.setter
+    def port_in(self, value):
+        pass
+
+    def _get_fallback(self) -> _PyMegapad64Micro:
+        if self._py_fallback is None:
+            fallback = _PyMegapad64Micro(
+                mem_size=self.mem_size,
+                core_id=self.core_id,
+                num_cores=self.num_cores,
+            )
+            original_csr_read = fallback.csr_read
+
+            def routed_csr_read(addr, _original=original_csr_read):
+                pending_getter = getattr(
+                    self, "_ipi_pending_getter", None
+                )
+                if addr == CSR_MBOX and pending_getter is not None:
+                    return pending_getter()
+                return _original(addr)
+
+            fallback.csr_read = routed_csr_read
+            self._py_fallback = fallback
+
+        fallback = self._py_fallback
+        fallback._cluster = self._cluster
+        fallback._irq_ipi_getter = lambda _core_id: bool(self.irq_ipi)
+        fallback._irq_ipi_setter = (
+            lambda _core_id, asserted: setattr(self, "irq_ipi", asserted)
+        )
+        fallback._ipi_send = getattr(self, "_ipi_send", fallback._ipi_send)
+        fallback._ipi_ack = getattr(self, "_ipi_ack", fallback._ipi_ack)
+        return fallback
+
+    def csr_read(self, addr: int) -> int:
+        """Use the reduced-core CSR oracle, including shared cluster CSRs."""
+        with self._cs._memory_use():
+            fallback = self._get_fallback()
+            _sync_cs_to_py(self._cs, fallback)
+            try:
+                return fallback.csr_read(addr)
+            finally:
+                _sync_py_to_cs(fallback, self._cs)
+                self._enforce_reduced_state()
+
+    def csr_write(self, addr: int, val: int):
+        """Use the reduced-core CSR oracle, including shared cluster CSRs."""
+        with self._cs._memory_use():
+            fallback = self._get_fallback()
+            _sync_cs_to_py(self._cs, fallback)
+            try:
+                return fallback.csr_write(addr, val)
+            finally:
+                _sync_py_to_cs(fallback, self._cs)
+                self._enforce_reduced_state()
+
+    def _step_python_fallback_in_memory_scope(self):
+        try:
+            return super()._step_python_fallback_in_memory_scope()
+        finally:
+            self._enforce_reduced_state()
+
+    def _trap_in_memory_scope(self, ivec_id: int):
+        """Enter the reduced-core trap frame without full-core privilege."""
+        if self.ivt_base == 0:
+            raise TrapError(ivec_id)
+        self.push64(self.flags_pack())
+        self.push64(self.pc)
+        self.flag_i = 0
+        self.idle = False
+        self.ivec_id = ivec_id
+        self.pc = self.mem_read64(self.ivt_base + ivec_id * 8)
+
+    def _reset_state_in_memory_scope(self):
+        super()._reset_state_in_memory_scope()
+        self._enforce_reduced_state()
+
+    def dump_regs(self) -> str:
+        lines = []
+        for i in range(16):
+            tag = ""
+            if i == self.psel:
+                tag += " <PC"
+            if i == self.xsel:
+                tag += " <X"
+            if i == self.spsel:
+                tag += " <SP"
+            lines.append(f"  R{i:<2d} = {self.regs[i]:#018x}{tag}")
+        lines.append(
+            f"  FLAGS = Z={self.flag_z} C={self.flag_c} "
+            f"N={self.flag_n} V={self.flag_v} P={self.flag_p} "
+            f"G={self.flag_g} I={self.flag_i} S={self.flag_s}"
+        )
+        lines.append(
+            f"  PSEL={self.psel} XSEL={self.xsel} SPSEL={self.spsel}"
+        )
         return "\n".join(lines)
 
 

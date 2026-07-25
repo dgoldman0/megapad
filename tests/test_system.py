@@ -50,7 +50,11 @@ import sys
 import tempfile
 import unittest
 
-from accel_wrapper import Megapad64, HaltError
+from accel_wrapper import (
+    HaltError,
+    Megapad64,
+    Megapad64Micro as AcceleratedMegapad64Micro,
+)
 from megapad64 import (
     Megapad64Micro, TrapError, IVEC_ILLEGAL_OP, IVEC_PRIV_FAULT,
     IVEC_BUS_FAULT,
@@ -5442,7 +5446,11 @@ class TestMicroCluster(unittest.TestCase):
             self.assertNotIsInstance(sys.cores[i], Megapad64Micro)
         # Next 12 are micro-cores
         for i in range(4, 16):
-            self.assertIsInstance(sys.cores[i], Megapad64Micro)
+            self.assertIsInstance(
+                sys.cores[i],
+                AcceleratedMegapad64Micro,
+            )
+            self.assertTrue(sys.cores[i]._cs.is_micro_core)
 
     def test_micro_cores_start_halted(self):
         """Micro-cores start halted after boot (cluster_en defaults 0)."""

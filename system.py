@@ -36,12 +36,14 @@ from accel_wrapper import (
     IVEC_PRIV_FAULT,
     IVEC_TIMER,
     Megapad64,
+    Megapad64Micro,
     NativeSystemState,
     TrapError,
     u64,
 )
 from megapad64 import (
-    Megapad64Micro, CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
+    Megapad64Micro as _PyMegapad64Micro,
+    CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR,
     CSR_BIST_FAIL_DATA, MICRO_PER_CLUSTER, NUM_CLUSTERS, MICRO_ID_BASE,
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
@@ -171,7 +173,9 @@ class MicroCluster:
                  n: int = MICRO_PER_CLUSTER,
                  shared_mem: bytearray = None,
                  mem_size: int = 1 << 20,
-                 num_all_cores: int = NUM_ALL_CORES):
+                 num_all_cores: int = NUM_ALL_CORES,
+                 native_system=None,
+                 native_micro_offset: int = 0):
         self.cluster_id = cluster_id
         self.id_base = id_base
         self.n = n
@@ -202,13 +206,23 @@ class MicroCluster:
         self.reset_crc()
 
         # Create micro-cores
-        self.cores: list[Megapad64Micro] = []
+        self.cores: list[Megapad64Micro | _PyMegapad64Micro] = []
         for i in range(n):
             core_id = id_base + i
-            mc = Megapad64Micro(mem_size=mem_size, core_id=core_id,
-                                num_cores=num_all_cores)
+            if native_system is None:
+                mc = _PyMegapad64Micro(
+                    mem_size=mem_size,
+                    core_id=core_id,
+                    num_cores=num_all_cores,
+                )
+            else:
+                mc = Megapad64Micro._from_system_state(
+                    native_system,
+                    native_micro_offset + i,
+                    num_cores=num_all_cores,
+                )
             mc._cluster = self
-            if shared_mem is not None:
+            if shared_mem is not None and native_system is None:
                 mc.mem = shared_mem
             self.cores.append(mc)
 
@@ -461,16 +475,12 @@ class MegapadSystem:
                 shared_mem=self._shared_mem,
                 mem_size=ram_size,
                 num_all_cores=self.num_cores,
+                native_system=self._native_system,
+                native_micro_offset=c * MICRO_PER_CLUSTER,
             )
             self.clusters.append(cluster)
             # Add all micro-cores to the flat core list
             for mc in cluster.cores:
-                if hbw_size > 0 and hasattr(mc, 'attach_hbw'):
-                    mc.attach_hbw(self._hbw_mem, HBW_BASE, hbw_size)
-                if ext_mem_size > 0 and hasattr(mc, 'attach_ext_mem'):
-                    mc.attach_ext_mem(self._ext_mem, EXT_MEM_BASE, ext_mem_size)
-                if vram_size > 0 and hasattr(mc, 'attach_vram'):
-                    mc.attach_vram(self._vram_mem, VRAM_BASE, vram_size)
                 self.cores.append(mc)
 
         # Convenience alias: self.cpu always refers to core 0
@@ -914,6 +924,7 @@ class MegapadSystem:
 
         cpu._ipi_send = ipi_send
         cpu._ipi_ack = ipi_ack
+        cpu._ipi_pending_getter = get_ipi_pending
         # Override the property-style access: patch csr_read's MBOX handler
         original_csr_read = cpu.csr_read
         def patched_csr_read(addr):

@@ -6140,6 +6140,77 @@ static SystemInstructionTraits classify_system_instruction(
     return {};
 }
 
+static bool micro_instruction_requires_python_oracle(CPUState& state) {
+    if (state.profile != CoreProfile::MICRO)
+        return false;
+
+    // The reduced core's cluster privilege state is still owned by the
+    // Python compatibility model.  Until element 6 moves that shared state
+    // into the native cluster scheduler, keep every user-mode instruction
+    // on the oracle path.
+    if (state.priv_level != 0)
+        return true;
+
+    uint64_t address = pc(state);
+    uint8_t opcode = mem_read8(state, address);
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+
+    // F0-F8 are modifiers (including REX).  Classify the instruction they
+    // prefix without consuming either byte.  The self-contained extended
+    // engines are absent or cluster-shared on a micro-core.
+    if (family == 0xF) {
+        if (subop == 0x9 || subop == 0xA || subop == 0xB)
+            return true;
+        opcode = mem_read8(state, address + 1);
+        family = (opcode >> 4) & 0xF;
+        subop = opcode & 0xF;
+        if (
+            family == 0xF &&
+            (subop == 0x9 || subop == 0xA || subop == 0xB)
+        ) {
+            return true;
+        }
+    }
+
+    switch (family) {
+        case 0x0:
+            // Retain only IDL, NOP, HALT, EI, and DI.  Reset, trap/return,
+            // stack traffic, and stripped 1802 heritage use the micro oracle.
+            return !(
+                subop == 0x0 ||
+                subop == 0x1 ||
+                subop == 0x2 ||
+                subop == 0xB ||
+                subop == 0xC
+            );
+        case 0x5:
+            // Native scalar memory does not yet recognize cluster scratchpad
+            // ownership and would bypass the compatibility MMIO route.
+            return true;
+        case 0x6:
+            // GLO/GHI/PLO/PHI use the stripped D register.
+            return subop >= 0xC;
+        case 0x8:
+        case 0x9:
+            // MEMALU and port I/O are not implemented by the reduced core.
+            return true;
+        case 0xC:
+            // MUL/DIV is cluster-shared; Tier-2 bitfield is gated out.
+            // Tier-1 POPCNT/CLZ/CTZ/BITREV remains core-local.
+            return subop <= 0x7 || subop >= 0xC;
+        case 0xD:
+            // Restricted and cluster-shared CSR semantics remain authoritative
+            // in Megapad64Micro for this element.
+            return true;
+        case 0xE:
+            // The tile engine is a cluster-shared resource.
+            return true;
+        default:
+            return false;
+    }
+}
+
 static int step_one(CPUState& s, const StepCallbacks& cb) {
     if (s.halted)
         throw std::runtime_error("HALT");
@@ -6147,6 +6218,12 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         s.cycle_count++;
         return 1;
     }
+
+    // This is a transactional boundary: the Python microcore must see the
+    // exact original PC and prefix state.  The classifier only peeks through
+    // central mappings and runs before fetch or any architectural mutation.
+    if (micro_instruction_requires_python_oracle(s))
+        throw std::runtime_error("EXT_ISA_FALLBACK");
 
     uint64_t pc_start = pc(s);  // save so we can rewind for MEX_FALLBACK
     uint8_t byte0 = fetch8(s);
@@ -11886,6 +11963,16 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::arg("index"),
             py::return_value_policy::reference_internal)
         ;
+
+    // Kept private because arbitrary profile selection is not a supported
+    // public CPUState contract.  The accelerated Megapad64Micro wrapper uses
+    // this only for standalone oracle/differential tests; production system
+    // microcores borrow their stable SystemState-owned views.
+    m.def(
+        "_make_micro_cpu_state",
+        []() {
+            return make_cpu_state(CoreProfile::MICRO);
+        });
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")

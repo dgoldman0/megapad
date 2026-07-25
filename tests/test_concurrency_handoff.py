@@ -164,7 +164,7 @@ def test_enabling_cluster_releases_micro_cores_from_reset():
 
 
 def test_manually_released_micro_core_can_step():
-    """The Python stepping path can execute a manually released micro-core."""
+    """The compatibility scheduler can step a manually released micro-core."""
     system = _new_system(full_cores=1, clusters=1)
     system.sysinfo.write8(0x18, 0x01)
 
@@ -179,27 +179,54 @@ def test_manually_released_micro_core_can_step():
     assert micro.regs[1] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason=(
-        "run_batch_stats requires native structured execution results, while "
-        "Python-only micro-core batching is deferred"
-    ),
-)
-def test_run_batch_executes_an_active_micro_core():
-    """An active advertised micro-core must participate in batched execution."""
+def test_one_active_native_microcore_uses_structured_compatibility_batch():
+    """One microcore runs natively without claiming element-6 scheduling."""
     system = _new_system(full_cores=1, clusters=1)
     system.sysinfo.write8(0x18, 0x01)
-    system.cpu.halted = True
+    for core in system.cores:
+        core.halted = True
+        core.idle = False
 
     system.load_binary(0x100, _COUNTING_SPIN)
     micro = system.clusters[0].cores[0]
     micro.pc = 0x100
     micro.halted = False
 
-    assert system.run_batch(8) == 8
-    assert micro.regs[1] == 4
+    def reject_python_fallback():
+        raise AssertionError("core-local counting loop left native execution")
+
+    micro._step_python_fallback_in_memory_scope = reject_python_fallback
+    peer_state = tuple(
+        (core.pc, core.regs[1], core.cycle_count)
+        for core in system.cores
+        if core is not micro
+    )
+    native_counters = (
+        system._native_system.native_batch_runs,
+        system._native_system.native_dispatches,
+    )
+
+    stats = system.run_batch_stats(9)
+
+    assert stats.instructions_executed == 9
+    assert stats.per_core_instructions == (0, 9, 0, 0, 0)
+    assert stats.per_core_cycles[0] == 0
+    assert stats.per_core_cycles[1] == stats.system_cycles_advanced
+    assert stats.per_core_cycles[2:] == (0, 0, 0)
+    assert not stats.native_scheduler
+    assert micro._accel_backend
+    assert micro._cs.is_micro_core
+    assert micro._cs is system._native_system.micro_core(0)
+    assert micro.regs[1] == 5
+    assert (
+        system._native_system.native_batch_runs,
+        system._native_system.native_dispatches,
+    ) == native_counters
+    assert tuple(
+        (core.pc, core.regs[1], core.cycle_count)
+        for core in system.cores
+        if core is not micro
+    ) == peer_state
 
 
 def test_step_delivers_a_pending_ipi_at_its_execution_boundary():
