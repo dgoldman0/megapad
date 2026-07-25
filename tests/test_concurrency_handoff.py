@@ -769,8 +769,11 @@ def test_uart_geometry_host_updates_progress_during_native_execution(
         name=f"uart-geometry-{execution_mode}",
     )
     worker.start()
-    start.set()
     try:
+        # signal_execution_entry releases the worker only after the system
+        # has opened its lock-free external-event staging gate.  Releasing it
+        # here allowed a host update to miss that gate, then block on the
+        # scheduler lock while the callback waited for the same update.
         if execution_mode == "step":
             # The trigger callback proves one host access while step_one is
             # active; repeated calls then pin progress at GIL boundaries.
