@@ -115,6 +115,7 @@ module mp64_cpu #(
     reg [63:0] ivt_base;
     reg [7:0]  ivec_id;
     reg [63:0] trap_addr;
+    reg [63:0] trap_return_pc;
 
     // Privilege / MPU  (priv_level retained as inert CSR — no enforcement)
     reg        priv_level;            // 0=supervisor, 1=user (NOT ENFORCED)
@@ -473,6 +474,7 @@ module mp64_cpu #(
             ivt_base   <= 64'd0;
             ivec_id    <= 8'd0;
             trap_addr  <= 64'd0;
+            trap_return_pc <= 64'd0;
             priv_level <= 1'b0;
             mpu_base   <= 64'd0;
             mpu_limit  <= 64'd0;
@@ -616,6 +618,7 @@ module mp64_cpu #(
             // ============================================================
             CPU_FETCH: begin
                 if (irq_pending && ibuf_len == 5'd0) begin
+                    ivec_id  <= {4'd0, irq_vector};
                     cpu_state <= CPU_IRQ;
                 end else if (ibuf_len >= 5'd2 && ibuf[0] == 8'hFB &&
                              crypto_is_bare(ibuf[1]) && ibuf_need != 4'd2) begin
@@ -765,7 +768,8 @@ module mp64_cpu #(
                             // instructions, consistent with the emulators.
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel] + {60'd0, ibuf_need};
+                            trap_return_pc <= R[psel] + {60'd0, ibuf_need};
+                            mem_data <= {55'd0, priv_level, flags};
                             flags[6] <= 1'b0;
                             priv_level <= 1'b0;
                             ivec_id <= IRQX_ILLEGAL_OP;
@@ -882,7 +886,8 @@ module mp64_cpu #(
                         4'hF: begin // TRAP
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel] + {60'd0, ibuf_need};
+                            trap_return_pc <= R[psel] + {60'd0, ibuf_need};
+                            mem_data <= {55'd0, priv_level, flags};
                             flags[6] <= 1'b0;
                             priv_level <= 1'b0;
                             ivec_id <= IRQX_SW_TRAP;
@@ -1509,7 +1514,9 @@ module mp64_cpu #(
                 if (mpu_fault && post_action == POST_NONE) begin
                     trap_addr <= effective_addr;
                     R[spsel]<=R[spsel]-64'd8; effective_addr<=R[spsel]-64'd8;
-                    mem_data<=R[psel]; flags[6]<=1'b0; priv_level<=1'b0;
+                    trap_return_pc<=R[psel];
+                    mem_data<={55'd0,priv_level,flags};
+                    flags[6]<=1'b0; priv_level<=1'b0;
                     ivec_id<={4'd0,IRQX_PRIV}; post_action<=POST_IRQ_VEC;
                     bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE;
                 end else begin
@@ -1593,7 +1600,9 @@ module mp64_cpu #(
                 if (mpu_fault && post_action == POST_NONE) begin
                     trap_addr <= effective_addr;
                     R[spsel]<=R[spsel]-64'd8; effective_addr<=R[spsel]-64'd8;
-                    mem_data<=R[psel]; flags[6]<=1'b0; priv_level<=1'b0;
+                    trap_return_pc<=R[psel];
+                    mem_data<={55'd0,priv_level,flags};
+                    flags[6]<=1'b0; priv_level<=1'b0;
                     ivec_id<={4'd0,IRQX_PRIV}; post_action<=POST_IRQ_VEC;
                     bus_size<=BUS_DWORD; cpu_state<=CPU_MEM_WRITE;
                 end else begin
@@ -1611,7 +1620,7 @@ module mp64_cpu #(
                         if (post_action == POST_IRQ_VEC) begin
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= {55'd0, priv_level, flags};
+                            mem_data <= trap_return_pc;
                             post_action <= POST_NONE;
                             cpu_state <= CPU_IRQ_PUSH;
                         end else
@@ -1621,7 +1630,7 @@ module mp64_cpu #(
             end
 
             // ============================================================
-            // IRQ_PUSH: push flags+priv, then load IVT vector
+            // IRQ_PUSH: push return PC, then load IVT vector
             // ============================================================
             CPU_IRQ_PUSH: begin
                 bus_valid <= 1'b1;
@@ -1804,16 +1813,16 @@ module mp64_cpu #(
             end
 
             // ============================================================
-            // IRQ: push PC, enter vector
+            // IRQ: save FLAGS+priv first; IRQ_PUSH saves the return PC
             // ============================================================
             CPU_IRQ: begin
                 R[spsel] <= R[spsel] - 64'd8;
                 effective_addr <= R[spsel] - 64'd8;
-                mem_data <= R[psel];
+                trap_return_pc <= R[psel];
+                mem_data <= {55'd0, priv_level, flags};
                 bus_size <= BUS_DWORD;
                 flags[6] <= 1'b0;
                 priv_level <= 1'b0;
-                ivec_id <= {4'd0, irq_vector};
                 post_action <= POST_IRQ_VEC;
                 cpu_state <= CPU_MEM_WRITE;
             end
@@ -1822,7 +1831,10 @@ module mp64_cpu #(
             // HALT: wait for interrupt
             // ============================================================
             CPU_HALT: begin
-                if (irq_pending) cpu_state <= CPU_IRQ;
+                if (irq_pending) begin
+                    ivec_id  <= {4'd0, irq_vector};
+                    cpu_state <= CPU_IRQ;
+                end
             end
 
             // ============================================================

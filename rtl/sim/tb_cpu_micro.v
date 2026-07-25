@@ -38,7 +38,9 @@ module tb_cpu_micro;
     reg  [63:0] bus_rdata;
     reg         bus_ready;
 
-    always @(posedge clk) begin
+    // Respond between CPU sampling edges so each ready pulse acknowledges
+    // exactly one held request, including back-to-back trap-frame accesses.
+    always @(negedge clk) begin
         bus_ready <= 1'b0;
         bus_rdata <= 64'd0;
         if (bus_valid) begin
@@ -207,6 +209,24 @@ module tb_cpu_micro;
         begin
             if (actual !== expected) begin
                 $display("FAIL %0s: flag=%b expected=%b", name, actual, expected);
+                fail = fail + 1;
+            end else begin
+                pass = pass + 1;
+            end
+        end
+    endtask
+
+    task check_mem_qword_le;
+        input [12:0]  addr;
+        input [63:0]  expected;
+        input [255:0] name;
+        reg [63:0] actual;
+        begin
+            actual = {mem[addr+7], mem[addr+6], mem[addr+5], mem[addr+4],
+                      mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
+            if (actual !== expected) begin
+                $display("FAIL %0s: mem[%h]=%h expected=%h",
+                         name, addr, actual, expected);
                 fail = fail + 1;
             end else begin
                 pass = pass + 1;
@@ -454,6 +474,39 @@ module tb_cpu_micro;
         end
         check_reg(3, 64'd2, "T11 reserved CRC op length=2");
         check_reg(5, 64'd0, "T11 next opcode not executed");
+
+        // ============================================================
+        // TEST 12: TRAP + RTI preserves the documented stack frame.
+        // Trap entry pushes FLAGS first and the return PC second, so
+        // RTI pops PC first and then restores FLAGS (including IE).
+        // ============================================================
+        $display("Test 12: TRAP + RTI stack-frame round trip");
+        clear_mem;
+        mem[16'h00] = 8'h60; mem[16'h01] = 8'hF0; mem[16'h02] = 8'h80;
+        mem[16'h03] = 8'h0F;  // TRAP; return PC is 0x04
+        mem[16'h04] = 8'h02;  // HALT after RTI
+        mem[16'h40] = 8'h04;  // RTI handler
+        mem[16'h130] = 8'h40; // IVT[SW_TRAP] = 0x40 (little-endian)
+
+        reset_cpu;
+        wait_halt(2000);
+        if (!timeout) begin
+            check_reg(3, 64'h05, "T12 PC resumes after TRAP");
+            check_reg(15, 64'h80, "T12 SP restored after RTI");
+            if (u_cpu.flags !== 8'h40) begin
+                $display("FAIL T12 FLAGS=%h expected=40", u_cpu.flags);
+                fail = fail + 1;
+            end else begin
+                pass = pass + 1;
+            end
+            check_mem_qword_le(13'h070, 64'h04,
+                               "T12 stack top stores return PC");
+            check_mem_qword_le(13'h078, 64'h40,
+                               "T12 lower frame stores saved FLAGS");
+        end else begin
+            $display("FAIL T12: timed out");
+            fail = fail + 1;
+        end
 
         // ============================================================
         // Summary

@@ -141,6 +141,7 @@ module mp64_cpu_micro (
     // Trap / interrupt context
     reg [7:0]  ivec_id;
     reg [63:0] trap_addr;
+    reg [63:0] trap_return_pc;
 
     // Performance counter (cycles only)
     reg [63:0] perf_cycles;
@@ -256,6 +257,7 @@ module mp64_cpu_micro (
 
             ivec_id   <= 8'd0;
             trap_addr <= 64'd0;
+            trap_return_pc <= 64'd0;
 
             post_action <= POST_NONE;
             mem_sub     <= 4'd0;
@@ -326,6 +328,7 @@ module mp64_cpu_micro (
             // ============================================================
             CPU_FETCH: begin
                 if (irq_pending && ibuf_len == 4'd0) begin
+                    ivec_id  <= {4'd0, irq_vector};
                     cpu_state <= CPU_IRQ;
                 end else begin
                     fetch_pending <= 1'b0;
@@ -388,7 +391,8 @@ module mp64_cpu_micro (
                         // EXT.STRING / EXT.DICT not available on micro-cores → ILLEGAL_OP
                         R[spsel] <= R[spsel] - 64'd8;
                         effective_addr <= R[spsel] - 64'd8;
-                        mem_data <= R[psel];
+                        trap_return_pc <= R[psel];
+                        mem_data <= {56'd0, flags};
                         flags[6] <= 1'b0;
                         ivec_id  <= IRQX_ILLEGAL_OP;
                         post_action <= POST_IRQ_VEC;
@@ -404,7 +408,8 @@ module mp64_cpu_micro (
                             // instructions, matching full cores/emulators.
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel];
+                            trap_return_pc <= R[psel];
+                            mem_data <= {56'd0, flags};
                             flags[6] <= 1'b0;
                             ivec_id  <= IRQX_ILLEGAL_OP;
                             post_action <= POST_IRQ_VEC;
@@ -433,7 +438,8 @@ module mp64_cpu_micro (
                             // Unsupported unit → ILLEGAL_OP
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel];
+                            trap_return_pc <= R[psel];
+                            mem_data <= {56'd0, flags};
                             flags[6] <= 1'b0;
                             ivec_id  <= IRQX_ILLEGAL_OP;
                             post_action <= POST_IRQ_VEC;
@@ -480,7 +486,8 @@ module mp64_cpu_micro (
                         4'h5, 4'h6, 4'h7, 4'h8, 4'h9, 4'hA: begin
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel];
+                            trap_return_pc <= R[psel];
+                            mem_data <= {56'd0, flags};
                             flags[6] <= 1'b0;
                             ivec_id  <= IRQX_ILLEGAL_OP;
                             post_action <= POST_IRQ_VEC;
@@ -511,7 +518,8 @@ module mp64_cpu_micro (
                         4'hF: begin // TRAP
                             R[spsel] <= R[spsel] - 64'd8;
                             effective_addr <= R[spsel] - 64'd8;
-                            mem_data <= R[psel] + {60'd0, ibuf_len};
+                            trap_return_pc <= R[psel] + {60'd0, ibuf_len};
+                            mem_data <= {56'd0, flags};
                             flags[6] <= 1'b0;
                             ivec_id  <= IRQX_SW_TRAP;
                             post_action <= POST_IRQ_VEC;
@@ -638,7 +646,8 @@ module mp64_cpu_micro (
                             4'hC, 4'hD, 4'hE, 4'hF: begin
                                 R[spsel] <= R[spsel] - 64'd8;
                                 effective_addr <= R[spsel] - 64'd8;
-                                mem_data <= R[psel];
+                                trap_return_pc <= R[psel];
+                                mem_data <= {56'd0, flags};
                                 flags[6] <= 1'b0;
                                 ivec_id  <= IRQX_ILLEGAL_OP;
                                 post_action <= POST_IRQ_VEC;
@@ -678,7 +687,8 @@ module mp64_cpu_micro (
                     ext_active <= 1'b0;
                     R[spsel] <= R[spsel] - 64'd8;
                     effective_addr <= R[spsel] - 64'd8;
-                    mem_data <= R[psel]; flags[6] <= 1'b0;
+                    trap_return_pc <= R[psel];
+                    mem_data <= {56'd0, flags}; flags[6] <= 1'b0;
                     ivec_id  <= IRQX_ILLEGAL_OP;
                     post_action <= POST_IRQ_VEC;
                     bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
@@ -691,7 +701,8 @@ module mp64_cpu_micro (
                     ext_active <= 1'b0;
                     R[spsel] <= R[spsel] - 64'd8;
                     effective_addr <= R[spsel] - 64'd8;
-                    mem_data <= R[psel]; flags[6] <= 1'b0;
+                    trap_return_pc <= R[psel];
+                    mem_data <= {56'd0, flags}; flags[6] <= 1'b0;
                     ivec_id  <= IRQX_ILLEGAL_OP;
                     post_action <= POST_IRQ_VEC;
                     bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
@@ -897,7 +908,8 @@ module mp64_cpu_micro (
                     trap_addr <= effective_addr;
                     R[spsel] <= R[spsel] - 64'd8;
                     effective_addr <= R[spsel] - 64'd8;
-                    mem_data <= R[psel]; flags[6] <= 1'b0;
+                    trap_return_pc <= R[psel];
+                    mem_data <= {56'd0, flags}; flags[6] <= 1'b0;
                     ivec_id  <= IRQX_PRIV;
                     post_action <= POST_IRQ_VEC;
                     bus_size <= BUS_DWORD; cpu_state <= CPU_MEM_WRITE;
@@ -954,7 +966,8 @@ module mp64_cpu_micro (
                     trap_addr <= effective_addr;
                     R[spsel] <= R[spsel] - 64'd8;
                     effective_addr <= R[spsel] - 64'd8;
-                    mem_data <= R[psel]; flags[6] <= 1'b0;
+                    trap_return_pc <= R[psel];
+                    mem_data <= {56'd0, flags}; flags[6] <= 1'b0;
                     ivec_id  <= IRQX_PRIV;
                     post_action <= POST_IRQ_VEC;
                     bus_size <= BUS_DWORD;
@@ -967,7 +980,7 @@ module mp64_cpu_micro (
                     if (post_action == POST_IRQ_VEC) begin
                         R[spsel] <= R[spsel] - 64'd8;
                         effective_addr <= R[spsel] - 64'd8;
-                        mem_data <= {56'd0, flags};
+                        mem_data <= trap_return_pc;
                         post_action <= POST_NONE;
                         cpu_state <= CPU_IRQ_PUSH;
                     end else
@@ -978,7 +991,7 @@ module mp64_cpu_micro (
             end
 
             // ============================================================
-            // IRQ_PUSH: push flags, then load IVT vector
+            // IRQ_PUSH: push return PC, then load IVT vector
             // ============================================================
             CPU_IRQ_PUSH: begin
                 bus_addr  <= effective_addr;
@@ -1095,15 +1108,15 @@ module mp64_cpu_micro (
             end
 
             // ============================================================
-            // IRQ: vectored interrupt entry
+            // IRQ: save FLAGS first; IRQ_PUSH saves the return PC
             // ============================================================
             CPU_IRQ: begin
                 R[spsel] <= R[spsel] - 64'd8;
                 effective_addr <= R[spsel] - 64'd8;
-                mem_data <= R[psel];
+                trap_return_pc <= R[psel];
+                mem_data <= {56'd0, flags};
                 bus_size <= BUS_DWORD;
                 flags[6] <= 1'b0;
-                ivec_id  <= {4'd0, irq_vector};
                 post_action <= POST_IRQ_VEC;
                 cpu_state <= CPU_MEM_WRITE;
             end
@@ -1112,8 +1125,10 @@ module mp64_cpu_micro (
             // HALT: wait for interrupt
             // ============================================================
             CPU_HALT: begin
-                if (irq_pending)
+                if (irq_pending) begin
+                    ivec_id  <= {4'd0, irq_vector};
                     cpu_state <= CPU_IRQ;
+                end
             end
 
             // ============================================================

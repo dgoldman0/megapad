@@ -216,6 +216,24 @@ module tb_cpu_smoke;
         end
     endtask
 
+    task check_mem_qword_be;
+        input [255:0] label;
+        input [11:0]  addr;
+        input [63:0]  expected;
+        reg [63:0] actual;
+        begin
+            actual = {mem[addr],   mem[addr+1], mem[addr+2], mem[addr+3],
+                      mem[addr+4], mem[addr+5], mem[addr+6], mem[addr+7]};
+            if (actual !== expected) begin
+                $display("FAIL [%0s]: mem[%h]=%h expected=%h",
+                         label, addr, actual, expected);
+                fail_count = fail_count + 1;
+            end else begin
+                pass_count = pass_count + 1;
+            end
+        end
+    endtask
+
     task wait_state;
         input [3:0] target_state;
         input integer max_cycles;
@@ -532,6 +550,52 @@ module tb_cpu_smoke;
         end
         check_reg("reserved CRC op length", 3, 64'd2);
         check_reg("reserved CRC op preserves next opcode", 5, 64'd0);
+
+        // -----------------------------------------------------------------
+        // Test 12: TRAP + RTI uses the documented FLAGS/PC stack order.
+        // The saved FLAGS word includes IE and sits below the return PC.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80; // LDI R15,0x80
+        mem[3] = 8'h60; mem[4] = 8'h20; mem[5] = 8'h01; // LDI R2,1
+        mem[6] = 8'hDA; mem[7] = 8'h0A;                  // CSRW PRIV,R2
+        mem[8] = 8'h0F;                                  // TRAP
+        mem[9] = 8'h02;                                  // HALT after RTI
+        mem[16'h30] = 8'h00; mem[16'h31] = 8'h00;
+        mem[16'h32] = 8'h00; mem[16'h33] = 8'h00;
+        mem[16'h34] = 8'h00; mem[16'h35] = 8'h00;
+        mem[16'h36] = 8'h00; mem[16'h37] = 8'h40;          // IVT[6] = 0x40
+        mem[16'h40] = 8'h04;                               // RTI
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        if (uut.cpu_state !== CPU_HALT) begin
+            $display("FAIL [TRAP+RTI did not return to HALT]");
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+        check_reg("TRAP+RTI: PC resumes", 3, 64'h0A);
+        check_reg("TRAP+RTI: SP restored", 15, 64'h80);
+        if (uut.flags !== 8'h40) begin
+            $display("FAIL [TRAP+RTI: FLAGS]: got=%h expected=40", uut.flags);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+        if (uut.priv_level !== 1'b1) begin
+            $display("FAIL [TRAP+RTI: PRIV]: got=%b expected=1",
+                     uut.priv_level);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+        check_mem_qword_be("TRAP frame return PC", 12'h070, 64'h09);
+        check_mem_qword_be("TRAP frame saved FLAGS+PRIV", 12'h078, 64'h140);
 
         // =================================================================
         $display("===========================================");
