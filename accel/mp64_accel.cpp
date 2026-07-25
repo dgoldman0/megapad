@@ -1044,7 +1044,13 @@ private:
 //  CPU State — flat execution state plus borrowed memory mappings
 // ---------------------------------------------------------------------------
 
+enum class CoreProfile : uint8_t {
+    FULL = 0,
+    MICRO = 1,
+};
+
 struct CPUState {
+    CoreProfile profile = CoreProfile::FULL;
     uint64_t regs[32];      // GP registers (R0-R15 base, R16-R31 via REX)
     uint8_t  psel;          // PC register index
     uint8_t  xsel;          // X register index
@@ -1417,6 +1423,7 @@ public:
 };
 
 static std::unique_ptr<CPUState> make_cpu_state(
+        CoreProfile profile = CoreProfile::FULL,
         MemoryMappings* shared_memory = nullptr,
         TimerDevice* shared_timer = nullptr,
         UartGeomDevice* shared_uart_geom = nullptr,
@@ -1430,6 +1437,7 @@ static std::unique_ptr<CPUState> make_cpu_state(
         std::atomic<bool>* shared_batch_active = nullptr,
         std::atomic<bool>* shared_cycle_execution_pending = nullptr) {
     auto state = std::make_unique<CPUState>();
+    state->profile = profile;
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
     } else {
@@ -1542,6 +1550,7 @@ struct SystemState {
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
             auto core = make_cpu_state(
+                CoreProfile::FULL,
                 &shared_memory,
                 &shared_timer,
                 &shared_uart_geom,
@@ -1557,6 +1566,27 @@ struct SystemState {
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
+        }
+        micro_cores.reserve(static_cast<std::size_t>(micro_core_count));
+        for (int index = 0; index < micro_core_count; index++) {
+            auto core = make_cpu_state(
+                CoreProfile::MICRO,
+                &shared_memory,
+                &shared_timer,
+                &shared_uart_geom,
+                &shared_fb,
+                &shared_rtc,
+                &shared_interrupts,
+                &shared_crypto,
+                &shared_nic,
+                &shared_trng,
+                &shared_uart,
+                &native_batch_active,
+                &cycle_execution_pending);
+            core->core_id = static_cast<uint8_t>(
+                full_core_count + index);
+            core->num_cores = static_cast<uint8_t>(all_core_count);
+            micro_cores.push_back(std::move(core));
         }
         full_core_cycle_states.resize(cores.size());
         dma_cycle_states[0].requester_id =
@@ -1575,6 +1605,20 @@ struct SystemState {
 
     int full_core_count() const {
         return static_cast<int>(cores.size());
+    }
+
+    CPUState& micro_core(int index) {
+        if (index < 0 ||
+            index >= static_cast<int>(micro_cores.size())) {
+            throw std::out_of_range(
+                "micro-core index is out of range");
+        }
+        mappings_sealed = true;
+        return *micro_cores[static_cast<std::size_t>(index)];
+    }
+
+    int micro_core_count() const {
+        return static_cast<int>(micro_cores.size());
     }
 
     int all_core_count() const {
@@ -1682,6 +1726,7 @@ struct SystemState {
     ExternalEventInbox external_events{};
     MainBusArbiter main_bus{};
     std::vector<std::unique_ptr<CPUState>> cores;
+    std::vector<std::unique_ptr<CPUState>> micro_cores;
     std::vector<FullCoreCycleState> full_core_cycle_states;
     std::array<DmaCycleState, 2> dma_cycle_states{};
     std::optional<uint64_t> cycle_target_completion_cycle;
@@ -9308,6 +9353,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
     // Expose CPUState
     py::class_<CPUState>(m, "CPUState")
         .def(py::init([]() { return make_cpu_state(); }))
+        .def_property_readonly(
+            "is_micro_core",
+            [](const CPUState& state) {
+                return state.profile == CoreProfile::MICRO;
+            })
         .def(
             "_memory_use",
             [](CPUState& state) {
@@ -10867,6 +10917,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property_readonly(
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
+            "micro_core_count", &SystemState::micro_core_count)
+        .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
         .def_property_readonly_static(
             "NIC_DMA_REQUESTER_ID",
@@ -11826,6 +11878,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "core",
             &SystemState::core,
+            py::arg("index"),
+            py::return_value_policy::reference_internal)
+        .def(
+            "micro_core",
+            &SystemState::micro_core,
             py::arg("index"),
             py::return_value_policy::reference_internal)
         ;

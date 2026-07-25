@@ -96,14 +96,32 @@ def test_native_system_state_validates_topology_and_core_bounds() -> None:
     owner = NativeSystemState(2, 6)
 
     assert owner.full_core_count == 2
+    assert owner.micro_core_count == 4
     assert owner.all_core_count == 6
     assert (owner.core(0).core_id, owner.core(1).core_id) == (0, 1)
     assert owner.core(0).num_cores == owner.core(1).num_cores == 6
+    assert not owner.core(0).is_micro_core
+    assert tuple(owner.micro_core(i).core_id for i in range(4)) == (
+        2,
+        3,
+        4,
+        5,
+    )
+    assert all(owner.micro_core(i).is_micro_core for i in range(4))
+    assert all(owner.micro_core(i).num_cores == 6 for i in range(4))
+    assert tuple(
+        owner.main_bus_port_for_requester(core_id)
+        for core_id in range(2, 6)
+    ) == (2, 2, 2, 2)
 
     with pytest.raises(IndexError):
         owner.core(-1)
     with pytest.raises(IndexError):
         owner.core(2)
+    with pytest.raises(IndexError):
+        owner.micro_core(-1)
+    with pytest.raises(IndexError):
+        owner.micro_core(4)
     with pytest.raises(ValueError):
         NativeSystemState(0)
     with pytest.raises(ValueError):
@@ -113,17 +131,25 @@ def test_native_system_state_validates_topology_and_core_bounds() -> None:
 
 
 def test_native_system_state_owns_stable_isolated_core_objects() -> None:
-    owner = NativeSystemState(2)
+    owner = NativeSystemState(2, 6)
     core0 = owner.core(0)
     core1 = owner.core(1)
+    micro0 = owner.micro_core(0)
+    micro3 = owner.micro_core(3)
 
     core0.set_reg(7, 0x1111)
     core1.set_reg(7, 0x2222)
+    micro0.set_reg(7, 0x3333)
+    micro3.set_reg(7, 0x4444)
 
     assert owner.core(0) is core0
     assert owner.core(1) is core1
+    assert owner.micro_core(0) is micro0
+    assert owner.micro_core(3) is micro3
     assert core0.get_reg(7) == 0x1111
     assert core1.get_reg(7) == 0x2222
+    assert micro0.get_reg(7) == 0x3333
+    assert micro3.get_reg(7) == 0x4444
 
 
 def test_native_system_run_loop_owns_budget_cursor_and_exact_results() -> None:
@@ -593,6 +619,21 @@ def test_borrowed_core_view_retains_its_native_owner() -> None:
     core.rtc_uptime_ms = 17
     core.rtc_tick(RTC.MS_DIVISOR)
     assert core.rtc_snapshot()[2] == 18
+
+
+def test_borrowed_micro_core_view_retains_its_native_owner() -> None:
+    def make_retained_micro():
+        owner = NativeSystemState(1, 5)
+        return owner.micro_core(2)
+
+    micro = make_retained_micro()
+    gc.collect()
+
+    assert micro.is_micro_core
+    assert (micro.core_id, micro.num_cores) == (3, 5)
+    micro.set_reg(9, 0xBEEF)
+    assert micro.get_reg(9) == 0xBEEF
+    assert micro.ipi_send(0)
 
 
 def test_borrowed_core_views_retain_the_shared_interrupt_router() -> None:
@@ -1673,6 +1714,20 @@ def test_system_mappings_seal_and_owned_cores_reject_divergent_mutation() -> Non
         0x3000,
         16,
     )
+
+
+def test_borrowing_a_micro_core_seals_system_mappings() -> None:
+    owner = NativeSystemState(1, 5)
+    owner.attach_mem(bytearray(32), 32)
+
+    micro = owner.micro_core(0)
+
+    assert owner.mappings_sealed
+    assert micro.mem_size == 32
+    with pytest.raises(RuntimeError, match="sealed"):
+        owner.attach_mem(bytearray(64), 64)
+    with pytest.raises(RuntimeError, match="system-owned CPUState"):
+        micro.attach_mem(bytearray(64), 64)
 
 
 def test_buffer_callback_sealing_aborts_system_replacement_transactionally() -> None:
