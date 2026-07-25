@@ -361,6 +361,13 @@ class MegapadSystem:
     stepping, per-core IRQ delivery, mailbox IPI, and spinlocks.
     """
 
+    _COMPLETE_SNAPSHOT_UNSUPPORTED_REASON = (
+        "complete machine snapshots are unavailable for the native Phase 2 "
+        "timeline; MP64SNAP v1 omits the shared clock, main bus, suspended "
+        "execution, external-event journal, interrupts, and authoritative "
+        "native device state"
+    )
+
     def __init__(self, ram_size: int = 1 << 20,
                  storage_image: Optional[str] = None,
                  nic_port: Optional[int] = None,
@@ -723,6 +730,14 @@ class MegapadSystem:
 
         # Boot state
         self._booted = False
+
+    def _require_complete_snapshot_support(self) -> None:
+        """Fail before a partial snapshot can observe or mutate this machine."""
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            raise RuntimeError(
+                self._COMPLETE_SNAPSHOT_UNSUPPORTED_REASON
+            )
 
     # -----------------------------------------------------------------
     #  Timestamped host ingress
@@ -1146,7 +1161,12 @@ class MegapadSystem:
     #  Boot
     # -----------------------------------------------------------------
 
-    def boot(self, entry: int = BOOT_VECTOR):
+    def boot(
+        self,
+        entry: int = BOOT_VECTOR,
+        *,
+        discard_uart_output: bool = False,
+    ):
         """Warm-boot processor and cluster execution state.
 
         Full cores start at the entry point (matching FPGA behaviour).
@@ -1154,9 +1174,15 @@ class MegapadSystem:
         Micro-cores start halted — they are only activated when their
         cluster is enabled via the SysInfo CLUSTER_EN register. Authoritative
         system time, shared ingress devices, and their event journal survive.
+        A session frontend may discard output that was not yet presented;
+        this does not alter guest-visible UART input or its provenance.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
+            if discard_uart_output:
+                self.cpu._cs.uart_drain_tx()
+                self.uart._tx_ring_base = 0
+                self.uart.tx_buffer.clear()
             self._boot_locked(entry)
 
     def _boot_locked(self, entry: int) -> None:

@@ -326,11 +326,6 @@ class MachineSession:
 
     def reset(self, entry: int = 0, *, clear_terminal: bool = True):
         """Reset the owned machine and optionally clear captured terminal state."""
-        if hasattr(self.system.cpu, "_cs"):
-            self.system.cpu._cs.uart_init()
-        self.system.uart._tx_ring_base = 0
-        self.system.uart.tx_buffer.clear()
-        self.system.uart.rx_buffer.clear()
         self.raw_output.clear()
         self.output_batches = 0
         self.output_byte_callbacks = 0
@@ -343,7 +338,7 @@ class MachineSession:
             )
             self.system.uart_geom.host_set_size(cols, rows)
         self.revision += 1
-        self.system.boot(entry)
+        self.system.boot(entry, discard_uart_output=True)
 
     def _receive_byte(self, value: int):
         self.raw_output.append(value)

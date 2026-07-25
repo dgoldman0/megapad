@@ -555,15 +555,6 @@ public:
         return next_sequence_;
     }
 
-    void reset() {
-        std::lock_guard<std::mutex> guard(mutex_);
-        pending_.clear();
-        history_.clear();
-        staged_.clear();
-        staging_open_ = false;
-        next_sequence_ = 1;
-    }
-
 private:
     uint64_t allocate_sequence_unlocked() {
         if (next_sequence_ ==
@@ -1612,10 +1603,6 @@ struct SystemState {
         cycle_execution_pending.store(
             false,
             std::memory_order_release);
-    }
-
-    void reset_external_events() {
-        external_events.reset();
     }
 
     bool has_cycle_execution_pending() const {
@@ -10727,19 +10714,6 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 return system.external_events.next_sequence();
-            })
-        .def(
-            "_reset_external_events",
-            [](SystemState& system) {
-                auto scheduler_guard =
-                    acquire_system_scheduler_lock(system);
-                if (system.native_batch_active.load(
-                        std::memory_order_acquire)) {
-                    throw std::runtime_error(
-                        "external input cannot reset during an active "
-                        "native system batch");
-                }
-                system.reset_external_events();
             })
         .def(
             "run_full_core_batch",

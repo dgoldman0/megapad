@@ -802,11 +802,10 @@ class MegapadCLI(cmd.Cmd):
     # -- NIC --
 
     def do_nic(self, arg):
-        """NIC commands: nic [status|inject|send|reset]
+        """NIC commands: nic [status|inject|send]
         nic              — show NIC status
         nic inject <hex> — inject hex bytes as received frame
-        nic send <hex>   — queue hex bytes as TX frame
-        nic reset        — reset NIC state"""
+        nic send <hex>   — queue hex bytes as TX frame"""
         n = self.sys.nic
         parts = arg.strip().split(None, 1) if arg.strip() else []
         sub = parts[0].lower() if parts else 'status'
@@ -844,10 +843,12 @@ class MegapadCLI(cmd.Cmd):
             except ValueError:
                 print("  Error: invalid hex bytes.")
         elif sub == 'reset':
-            self.sys.cores[0]._cs.nic_reset()
-            print("  NIC reset.")
+            print(
+                "  NIC reset unavailable: warm reset preserves journaled "
+                "device state."
+            )
         else:
-            print("Usage: nic [status|inject|send|reset]")
+            print("Usage: nic [status|inject|send]")
 
     # -- Snapshots --
 

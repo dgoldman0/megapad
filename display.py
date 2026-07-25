@@ -10,7 +10,7 @@ Features:
   - Debug panel: registers, flags, disassembly, memory view
   - Status bar: cycles, speed (MIPS), core state, FPS
   - Keyboard pass-through to UART
-  - Snapshot save / load (JSON + binary memory)
+  - Fail-closed snapshot controls pending a complete timeline format
   - Window resizing
 
 Usage (programmatic):
@@ -26,12 +26,9 @@ Usage (CLI):
 
 from __future__ import annotations
 
-import json
 import os
-import struct
 import threading
 import time
-import zlib
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1494,202 +1491,20 @@ class DebugPanel:
 
 
 def save_snapshot(sys_emu: "MegapadSystem", path: str):
-    """Save a complete system snapshot to disk.
-
-    Format: "MP64SNAP" magic + lengths + JSON metadata + zlib-compressed memory.
-    File extension: .mp64
-    """
-    cpu = sys_emu.cpu
-    (
-        fb_base,
-        fb_width,
-        fb_height,
-        fb_stride,
-        fb_mode,
-        fb_enable,
-        _fb_vsync_count,
-        _fb_vblank,
-        _fb_cycles_per_frame,
-    ) = sys_emu.fb.snapshot()
-
-    # CPU state
-    state = {
-        "version": 1,
-        "ram_size": sys_emu.ram_size,
-        "hbw_size": sys_emu.hbw_size,
-        "ext_mem_size": sys_emu.ext_mem_size,
-        "num_cores": sys_emu.num_full_cores,
-        "num_clusters": sys_emu.num_clusters,
-        "cores": [],
-        "timer": {
-            "counter": sys_emu.timer.counter,
-            "compare": sys_emu.timer.compare,
-            "control": sys_emu.timer.control,
-            "prescaler": sys_emu.timer.prescaler,
-        },
-        "uart": {
-            "control": sys_emu.uart.control,
-            "rx_buffer": list(sys_emu.uart.rx_buffer),
-        },
-        "storage": {
-            "image_path": sys_emu.storage.image_path,
-        },
-        "fb": {
-            "enable": fb_enable,
-            "width": fb_width,
-            "height": fb_height,
-            "mode": fb_mode,
-            "fb_base": fb_base,
-            "stride": fb_stride,
-        },
-    }
-
-    # Per-core state
-    for i, core in enumerate(sys_emu.cores[:sys_emu.num_full_cores]):
-        cs = {
-            "core_id": core.core_id,
-            "regs": list(core.regs),
-            "psel": core.psel,
-            "xsel": core.xsel,
-            "spsel": core.spsel,
-            "flag_z": core.flag_z, "flag_c": core.flag_c,
-            "flag_n": core.flag_n, "flag_v": core.flag_v,
-            "flag_p": core.flag_p, "flag_g": core.flag_g,
-            "flag_i": core.flag_i, "flag_s": core.flag_s,
-            "d_reg": core.d_reg, "q_out": core.q_out, "t_reg": core.t_reg,
-            "ivt_base": core.ivt_base, "ivec_id": core.ivec_id,
-            "priv_level": core.priv_level,
-            "mpu_base": core.mpu_base, "mpu_limit": core.mpu_limit,
-            "halted": core.halted, "idle": core.idle,
-            "cycle_count": core.cycle_count,
-            "sb": core.sb, "sr": core.sr, "sc": core.sc, "sw": core.sw,
-            "tmode": core.tmode, "tctrl": core.tctrl,
-            "tsrc0": core.tsrc0, "tsrc1": core.tsrc1, "tdst": core.tdst,
-            "acc": list(core.acc),
-            "tstride_r": core.tstride_r,
-            "ttile_h": core.ttile_h, "ttile_w": core.ttile_w,
-        }
-        state["cores"].append(cs)
-
-    # Write: JSON header + compressed memory blobs
-    meta_bytes = json.dumps(state, indent=2).encode('utf-8')
-    ram_compressed = zlib.compress(bytes(sys_emu._shared_mem), level=6)
-    hbw_compressed = zlib.compress(bytes(sys_emu._hbw_mem), level=6) if sys_emu.hbw_size > 0 else b''
-    ext_compressed = zlib.compress(bytes(sys_emu._ext_mem), level=6) if sys_emu.ext_mem_size > 0 else b''
-
-    with open(path, 'wb') as f:
-        f.write(b'MP64SNAP')
-        f.write(struct.pack('<IIII',
-                            len(meta_bytes),
-                            len(ram_compressed),
-                            len(hbw_compressed),
-                            len(ext_compressed)))
-        f.write(meta_bytes)
-        f.write(ram_compressed)
-        f.write(hbw_compressed)
-        f.write(ext_compressed)
+    """Reject the incomplete legacy format before touching ``path``."""
+    del path
+    sys_emu._require_complete_snapshot_support()
 
 
 def load_snapshot(sys_emu: "MegapadSystem", path: str) -> bool:
-    """Load a system snapshot from disk. Returns True on success."""
+    """Reject legacy snapshots before reading the file or changing state."""
+    del path
     try:
-        with open(path, 'rb') as f:
-            magic = f.read(8)
-            if magic != b'MP64SNAP':
-                print(f"[snapshot] Invalid file: bad magic")
-                return False
-
-            meta_len, ram_len, hbw_len, ext_len = struct.unpack('<IIII', f.read(16))
-            meta_bytes = f.read(meta_len)
-            ram_compressed = f.read(ram_len)
-            hbw_compressed = f.read(hbw_len) if hbw_len > 0 else b''
-            ext_compressed = f.read(ext_len) if ext_len > 0 else b''
-
-        state = json.loads(meta_bytes.decode('utf-8'))
-
-        # Restore RAM
-        ram_data = zlib.decompress(ram_compressed)
-        if len(ram_data) <= len(sys_emu._shared_mem):
-            sys_emu._shared_mem[:len(ram_data)] = ram_data
-
-        # Restore HBW
-        if hbw_compressed and sys_emu.hbw_size > 0:
-            hbw_data = zlib.decompress(hbw_compressed)
-            if len(hbw_data) <= len(sys_emu._hbw_mem):
-                sys_emu._hbw_mem[:len(hbw_data)] = hbw_data
-
-        # Restore ext mem
-        if ext_compressed and sys_emu.ext_mem_size > 0:
-            ext_data = zlib.decompress(ext_compressed)
-            if len(ext_data) <= len(sys_emu._ext_mem):
-                sys_emu._ext_mem[:len(ext_data)] = ext_data
-
-        # Restore per-core state
-        for cs_data in state.get("cores", []):
-            core_id = cs_data["core_id"]
-            if core_id < len(sys_emu.cores):
-                core = sys_emu.cores[core_id]
-                for i, v in enumerate(cs_data["regs"]):
-                    core.regs[i] = v
-                core.psel = cs_data["psel"]
-                core.xsel = cs_data["xsel"]
-                core.spsel = cs_data["spsel"]
-                core.flag_z = cs_data["flag_z"]
-                core.flag_c = cs_data["flag_c"]
-                core.flag_n = cs_data["flag_n"]
-                core.flag_v = cs_data["flag_v"]
-                core.flag_p = cs_data["flag_p"]
-                core.flag_g = cs_data["flag_g"]
-                core.flag_i = cs_data["flag_i"]
-                core.flag_s = cs_data["flag_s"]
-                core.d_reg = cs_data["d_reg"]
-                core.q_out = cs_data["q_out"]
-                core.t_reg = cs_data["t_reg"]
-                core.ivt_base = cs_data["ivt_base"]
-                core.ivec_id = cs_data["ivec_id"]
-                core.priv_level = cs_data["priv_level"]
-                core.mpu_base = cs_data["mpu_base"]
-                core.mpu_limit = cs_data["mpu_limit"]
-                core.halted = cs_data["halted"]
-                core.idle = cs_data["idle"]
-                core.cycle_count = cs_data["cycle_count"]
-                core.sb = cs_data["sb"]
-                core.sr = cs_data["sr"]
-                core.sc = cs_data["sc"]
-                core.sw = cs_data["sw"]
-                core.tmode = cs_data["tmode"]
-                core.tctrl = cs_data["tctrl"]
-                core.tsrc0 = cs_data["tsrc0"]
-                core.tsrc1 = cs_data["tsrc1"]
-                core.tdst = cs_data["tdst"]
-                for j, v in enumerate(cs_data.get("acc", [])):
-                    core.acc[j] = v
-                core.tstride_r = cs_data.get("tstride_r", 0)
-                core.ttile_h = cs_data.get("ttile_h", 8)
-                core.ttile_w = cs_data.get("ttile_w", 8)
-
-        # Restore timer
-        timer_data = state.get("timer", {})
-        sys_emu.timer.counter = timer_data.get("counter", 0)
-        sys_emu.timer.compare = timer_data.get("compare", 0)
-        sys_emu.timer.control = timer_data.get("control", 0)
-        sys_emu.timer.prescaler = timer_data.get("prescaler", 0)
-
-        # Restore FB config
-        fb_data = state.get("fb", {})
-        sys_emu.fb.enable = fb_data.get("enable", 0)
-        sys_emu.fb.width = fb_data.get("width", 320)
-        sys_emu.fb.height = fb_data.get("height", 240)
-        sys_emu.fb.mode = fb_data.get("mode", 0)
-        sys_emu.fb.fb_base = fb_data.get("fb_base", 0)
-        sys_emu.fb.stride = fb_data.get("stride", 320)
-
-        sys_emu._booted = True
-        return True
-
-    except Exception as e:
-        print(f"[snapshot] Error loading {path}: {e}")
+        sys_emu._require_complete_snapshot_support()
+    except RuntimeError as error:
+        print(f"[snapshot] Restore unavailable: {error}")
         return False
+    raise RuntimeError("complete snapshot loader is not implemented")
 
 
 # ── Main Display ──────────────────────────────────────────────────────
@@ -1704,7 +1519,7 @@ class FramebufferDisplay:
       - Optional debug panel (registers, disassembly, stack)
       - Status bar (cycles, MIPS, FPS, core states)
       - Keyboard input -> UART
-      - Snapshot save/load
+      - Fail-closed snapshot controls pending a complete timeline format
     """
 
     TAB_TERMINAL = 0
