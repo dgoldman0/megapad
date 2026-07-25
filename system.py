@@ -258,6 +258,8 @@ class MicroCluster:
             mc._cluster = self
             if shared_mem is not None and native_system is None:
                 mc.mem = shared_mem
+            mc.halted = True
+            mc.idle = False
             self.cores.append(mc)
 
     # -- Shared CRC engine --
@@ -657,10 +659,11 @@ class MicroCluster:
         """Enable or disable the cluster (matching RTL cluster_en gating)."""
         if en and not self.enabled:
             self.reset_shared_resources()
-            # Coming out of reset — reset all micro-cores
+            # Coming out of reset starts every micro-core at its reset vector.
             for mc in self.cores:
                 mc._reset_state()
-                mc.halted = True  # held in reset → halted
+                mc.halted = False
+                mc.idle = False
             # Reset cluster MPU to supervisor / open
             self.cl_priv_level = 0
             self.cl_mpu_base = 0
@@ -1043,13 +1046,18 @@ class MegapadSystem:
         if self.clusters:
             original_sysinfo_write = self.sysinfo.write8
             clusters = self.clusters
+
             def cluster_en_write(offset: int, val: int):
-                original_sysinfo_write(offset, val)
-                if 0x18 <= offset < 0x20:
-                    # Update cluster enable state
-                    en_mask = self.sysinfo.cluster_en
-                    for i, cl in enumerate(clusters):
-                        cl.set_enabled(bool(en_mask & (1 << i)))
+                with self._scheduler_lock:
+                    original_sysinfo_write(offset, val)
+                    if 0x18 <= offset < 0x20:
+                        # Apply one coherent byte-updated mask. The lock is
+                        # reentrant for an MMIO write from the active guest
+                        # instruction and serializes host writes with batches.
+                        en_mask = self.sysinfo.cluster_en
+                        for i, cl in enumerate(clusters):
+                            cl.set_enabled(bool(en_mask & (1 << i)))
+
             self.sysinfo.write8 = cluster_en_write
 
         # Boot state
@@ -1496,11 +1504,11 @@ class MegapadSystem:
 
         Full cores start at the entry point (matching FPGA behaviour).
         Core 0 gets SP at top of RAM; secondary cores get per-core stacks.
-        Micro-cores start halted — they are only activated when their
-        cluster is enabled via the SysInfo CLUSTER_EN register. Authoritative
-        system time, shared ingress devices, and their event journal survive.
-        A session frontend may discard output that was not yet presented;
-        this does not alter guest-visible UART input or its provenance.
+        Micro-cores are reset and then either released or held according to
+        the persistent SysInfo CLUSTER_EN mask. Authoritative system time,
+        shared ingress devices, and their event journal survive. A session
+        frontend may discard output that was not yet presented; this does not
+        alter guest-visible UART input or its provenance.
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
@@ -1520,6 +1528,7 @@ class MegapadSystem:
         # reboot, so retain their external-event provenance and future events.
         # A later full-SoC reset must clear devices and the journal together.
         self._scheduler_cursor = 0
+        cluster_enable_mask = self.sysinfo.cluster_en
         for cluster in self.clusters:
             cluster.enabled = False
             cluster.reset_shared_resources()
@@ -1545,6 +1554,13 @@ class MegapadSystem:
 
             cpu.halted = False
             cpu.idle = False
+
+        # CLUSTER_EN is a persistent board-control register across this warm
+        # CPU boot. Reapply it only after every reduced core has reached the
+        # reset vector so register state and execution gating cannot diverge.
+        for index, cluster in enumerate(self.clusters):
+            if cluster_enable_mask & (1 << index):
+                cluster.set_enabled(True)
 
         # The shared NIC survives a warm CPU boot. Re-register any held DMA
         # beat on the freshly reset fabric so unbounded execution cannot

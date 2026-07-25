@@ -1027,6 +1027,13 @@ class Megapad64Micro(Megapad64):
         try:
             return super()._step_python_fallback_in_memory_scope()
         finally:
+            # A reduced core may disable its own cluster through SysInfo
+            # during this fallback. The generic Python-to-native sync reflects
+            # the instruction's pre-write running state, so reassert the reset
+            # gate after synchronization.
+            if self._cluster is not None and not self._cluster.enabled:
+                self._cs.halted = True
+                self._cs.idle = False
             self._enforce_reduced_state()
 
     def _trap_in_memory_scope(self, ivec_id: int):

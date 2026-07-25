@@ -297,6 +297,7 @@ def test_cluster_mul_uses_independent_equal_round_robin_credit():
         ext_mem_size=0,
         vram_size=0,
     )
+    system.sysinfo.write8(0x18, 0x01)
     first, second = system.clusters[0].cores[:2]
     first_pc = 0x100
     second_pc = 0x180
@@ -346,6 +347,7 @@ def test_cluster_crc_lock_blocks_without_retiring_the_contender():
         ext_mem_size=0,
         vram_size=0,
     )
+    system.sysinfo.write8(0x18, 0x01)
     cluster = system.clusters[0]
     first, second = cluster.cores[:2]
     first_pc = 0x100
@@ -410,6 +412,7 @@ def test_direct_sha_transaction_blocks_sibling_until_final():
         ext_mem_size=0,
         vram_size=0,
     )
+    system.sysinfo.write8(0x18, 0x01)
     cluster = system.clusters[0]
     owner, contender = cluster.cores[:2]
     owner_pc = 0x100

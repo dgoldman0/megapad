@@ -145,14 +145,6 @@ def test_cluster_enable_reset_value_matches_rtl():
     assert system.sysinfo.cluster_en == 0xFFFF_FFFF_FFFF_FFFF
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "enabling a cluster currently leaves its micro-cores halted instead "
-        "of releasing the RTL reset gate"
-    ),
-)
 def test_enabling_cluster_releases_micro_cores_from_reset():
     """An enabled cluster's cores must leave their reset-held state."""
     system = _new_system(full_cores=1, clusters=1)
@@ -161,6 +153,69 @@ def test_enabling_cluster_releases_micro_cores_from_reset():
     system.sysinfo.write8(0x18, 0x01)
 
     assert all(not core.halted for core in cluster.cores)
+
+
+def test_guest_cluster_enable_write_is_safe_inside_native_batch():
+    """A guest MMIO write can release a cluster at its instruction boundary."""
+    address = MMIO_BASE + SYSINFO_BASE + 0x18
+    code = assemble(
+        f"""
+        ldi64 r1, {address}
+        ldi r2, 1
+        st.b r1, r2
+        halt
+    """
+    )
+    system = _new_system(full_cores=1, clusters=1, code=code)
+
+    stats = system.run_batch_stats(3)
+
+    assert stats.instructions_executed == 3
+    assert system.sysinfo.cluster_en & 1
+    assert system.clusters[0].enabled
+    assert all(not core.halted for core in system.clusters[0].cores)
+
+
+def test_micro_core_can_disable_its_own_cluster():
+    """Self-disable remains asserted after the Python fallback synchronizes."""
+    system = _new_system(full_cores=1, clusters=1)
+    system.sysinfo.write8(0x18, 0x01)
+    address = MMIO_BASE + SYSINFO_BASE + 0x18
+    system.load_binary(
+        0x100,
+        assemble(
+            f"""
+            ldi64 r1, {address}
+            ldi r2, 0
+            st.b r1, r2
+        """
+        ),
+    )
+    micro = system.clusters[0].cores[0]
+    micro.pc = 0x100
+
+    for _ in range(3):
+        micro.step()
+
+    assert not system.clusters[0].enabled
+    assert all(core.halted for core in system.clusters[0].cores)
+
+
+def test_warm_boot_reapplies_persistent_cluster_enable_mask():
+    """Warm boot resets enabled micro-cores and releases them at PC zero."""
+    system = _new_system(full_cores=1, clusters=1)
+    system.sysinfo.write8(0x18, 0x01)
+    micro = system.clusters[0].cores[0]
+    micro.pc = 0x1234
+    micro.regs[1] = 99
+
+    system.boot(entry=0)
+
+    assert system.sysinfo.cluster_en == 1
+    assert system.clusters[0].enabled
+    assert micro.pc == 0
+    assert micro.regs[1] == 0
+    assert all(not core.halted for core in system.clusters[0].cores)
 
 
 def test_manually_released_micro_core_can_step():

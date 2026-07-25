@@ -11617,14 +11617,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "reset_cluster_arbitration",
             [](SystemState& system, int cluster_index) {
+                // External callers wait for a native batch; a guest MMIO
+                // callback may reset cluster resources reentrantly at its
+                // current instruction boundary.
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                if (system.native_batch_active.load(
-                        std::memory_order_acquire)) {
-                    throw std::runtime_error(
-                        "cluster arbitration cannot reset during an "
-                        "active native system batch");
-                }
                 checked_cluster_state(
                     system,
                     cluster_index).reset_arbitration();
@@ -11633,14 +11630,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "reset_cluster_state",
             [](SystemState& system, int cluster_index) {
+                // See reset_cluster_arbitration: the recursive scheduler
+                // mutex is the serialization boundary for CLUSTER_EN writes.
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                if (system.native_batch_active.load(
-                        std::memory_order_acquire)) {
-                    throw std::runtime_error(
-                        "cluster state cannot reset during an "
-                        "active native system batch");
-                }
                 checked_cluster_state(
                     system,
                     cluster_index).reset();

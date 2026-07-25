@@ -5121,6 +5121,7 @@ class TestMicroCluster(unittest.TestCase):
         """A losing MODE request retries only after the owner finalizes."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         owner, contender = cl.cores[0], cl.cores[1]
         owner.load_bytes(0, assemble("crc.mode 0\ncrc.fin r4, r0\nhalt"))
         contender.load_bytes(0x100, assemble("crc.mode 1\nhalt"))
@@ -5151,6 +5152,7 @@ class TestMicroCluster(unittest.TestCase):
         """A stalled REX+CRC operand instruction retries from its prefix."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         owner, contender = cl.cores[0], cl.cores[1]
         owner.load_bytes(0, assemble("crc.mode 0\ncrc.fin r4, r0\nhalt"))
         contender.load_bytes(0x100, assemble("crc.b r16, r17\nhalt"))
@@ -5227,6 +5229,7 @@ class TestMicroCluster(unittest.TestCase):
         """MEX T.ADD works on a micro-core inside a cluster (shared tile engine)."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         mc = cl.cores[0]
 
         # Set up tile CSRs via the micro-core
@@ -5259,6 +5262,7 @@ class TestMicroCluster(unittest.TestCase):
         """Micro-core in cluster can read/write tile CSRs."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         mc = cl.cores[0]
 
         tile_csrs = [
@@ -5304,6 +5308,7 @@ class TestMicroCluster(unittest.TestCase):
         """MEX T.SUM (reduction) works on clustered micro-core."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         mc = cl.cores[0]
 
         mc.csr_write(CSR_TSRC0, 0x1000)
@@ -5327,6 +5332,7 @@ class TestMicroCluster(unittest.TestCase):
         """MEX on clustered micro-core returns cycles + 3 overhead."""
         mem = bytearray(1 << 20)
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
+        cl.set_enabled(True)
         mc = cl.cores[0]
 
         mc.csr_write(CSR_TSRC0, 0x1000)
@@ -5420,12 +5426,12 @@ class TestMicroCluster(unittest.TestCase):
         # Starts disabled
         self.assertFalse(cl.enabled)
         for mc in cl.cores:
-            self.assertFalse(mc.halted)  # constructor doesn't halt
-        # Enable — resets and halts cores (held in reset)
+            self.assertTrue(mc.halted)
+        # Enable — resets and releases cores
         cl.set_enabled(True)
         self.assertTrue(cl.enabled)
         for mc in cl.cores:
-            self.assertTrue(mc.halted)
+            self.assertFalse(mc.halted)
         # Disable — halts cores
         cl.set_enabled(False)
         self.assertFalse(cl.enabled)
