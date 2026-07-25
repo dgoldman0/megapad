@@ -397,7 +397,11 @@ class MegapadSystem:
         # borrowing the first core, which seals the mapping against divergent
         # per-core replacement. Heterogeneous micro-cores and Python-bus
         # devices retain their explicit compatibility paths.
-        self._native_system = NativeSystemState(num_cores, self.num_cores)
+        self._native_system = NativeSystemState(
+            num_cores,
+            self.num_cores,
+            num_cores + num_clusters + 2,
+        )
         self._native_system.attach_mem(self._shared_mem, ram_size)
         if hbw_size > 0:
             self._native_system.attach_hbw_mem(
@@ -953,6 +957,7 @@ class MegapadSystem:
         """
         self.storage.reset()
         self.audio.reset()
+        self._native_system._main_bus_reset()
         self._scheduler_cursor = 0
         for cluster in self.clusters:
             cluster.enabled = False
@@ -1015,6 +1020,11 @@ class MegapadSystem:
             )
         if cycles > (1 << 64) - 1 - current:
             raise OverflowError("system cycle counter overflow")
+        bus_timeout = self._native_system.main_bus_timeout_cycle
+        if bus_timeout is not None and cycles > bus_timeout - current:
+            raise ValueError(
+                "system clock cannot cross the active main bus timeout"
+            )
 
         remaining = cycles
         while remaining:

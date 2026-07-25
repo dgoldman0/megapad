@@ -636,6 +636,7 @@ def test_megapad_system_wraps_native_owned_full_cores() -> None:
 
     assert owner.full_core_count == 2
     assert owner.all_core_count == system.num_cores == 6
+    assert owner.main_bus_port_count == 5
     assert all(cpu._system_owner is owner for cpu in system.cores[:2])
 
     owner.core(0).set_reg(10, 0x1234)

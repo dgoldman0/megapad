@@ -17,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <vector>
@@ -402,6 +403,452 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+//  Explicit main-bus transactions and integrated-SoC arbitration
+// ---------------------------------------------------------------------------
+
+enum class BusOperation : uint8_t {
+    READ = 0,
+    WRITE = 1,
+};
+
+// Byte counts are used here rather than the RTL's encoded size values so a
+// request describes the guest transaction directly.  The target adapter will
+// translate 1/2/4/8 to BUS_BYTE/BUS_HALF/BUS_WORD/BUS_DWORD.
+enum class BusWidth : uint8_t {
+    BYTE = 1,
+    HALF = 2,
+    WORD = 4,
+    DOUBLEWORD = 8,
+};
+
+enum class BusTarget : uint8_t {
+    MEMORY = 0,
+    MMIO = 1,
+};
+
+enum class BusFault : uint8_t {
+    NONE = 0,
+    MMIO_TIMEOUT = 1,
+    MEMORY_TIMEOUT = 2,
+    TARGET_FAULT = 3,
+};
+
+struct BusOrderingMetadata {
+    int main_port_id = 0;
+    uint64_t issue_sequence = 0;
+    bool port_io = false;
+};
+
+struct BusRequest {
+    int requester_id = 0;
+    uint64_t ready_cycle = 0;
+    BusOperation operation = BusOperation::READ;
+    uint64_t address = 0;
+    BusWidth width = BusWidth::BYTE;
+    uint64_t write_data = 0;
+    BusOrderingMetadata ordering{};
+};
+
+struct BusGrant {
+    BusRequest request{};
+    uint64_t grant_sequence = 0;
+    uint64_t grant_cycle = 0;
+    BusTarget target = BusTarget::MEMORY;
+    uint64_t timeout_cycle = 0;
+};
+
+struct BusResult {
+    BusGrant grant{};
+    uint64_t completion_cycle = 0;
+    std::optional<uint64_t> read_value;
+    BusFault fault = BusFault::NONE;
+    bool target_effects_committed = false;
+};
+
+struct MainBusSnapshot {
+    static constexpr uint64_t SCHEMA_VERSION = 1;
+
+    uint64_t schema_version = SCHEMA_VERSION;
+    int port_count = 0;
+    int last_grant = 0;
+    bool reset_port_zero_credit = true;
+    uint64_t next_grant_sequence = 1;
+    uint64_t earliest_arbitration_cycle = 0;
+    bool served_last = false;
+    std::optional<uint64_t> last_arbitration_cycle;
+    std::optional<BusGrant> active_grant;
+    std::vector<uint64_t> last_issue_sequences;
+    std::vector<uint8_t> sticky_bus_errors;
+};
+
+class MainBusArbiter {
+public:
+    static constexpr uint64_t MMIO_TIMEOUT_CYCLES = 64;
+    static constexpr uint64_t MEMORY_TIMEOUT_CYCLES = 256;
+    static constexpr uint64_t TIMEOUT_SENTINEL =
+        0xDEADDEADDEADDEADULL;
+
+    MainBusArbiter() = default;
+
+    void configure(int port_count) {
+        if (port_count < 1 || port_count > 257)
+            throw std::invalid_argument(
+                "main bus port count must be between 1 and 257");
+        port_count_ = port_count;
+        last_issue_sequences_.assign(
+            static_cast<std::size_t>(port_count), 0);
+        sticky_bus_errors_.assign(
+            static_cast<std::size_t>(port_count), 0);
+        reset(0);
+    }
+
+    int port_count() const {
+        return port_count_;
+    }
+
+    std::optional<uint64_t> active_timeout_cycle() const {
+        if (!active_grant_.has_value())
+            return std::nullopt;
+        return active_grant_->timeout_cycle;
+    }
+
+    void validate_clock_target(uint64_t target_cycle) const {
+        if (active_grant_.has_value() &&
+            target_cycle > active_grant_->timeout_cycle) {
+            throw std::invalid_argument(
+                "system clock cannot cross the active main bus timeout");
+        }
+    }
+
+    void reset(uint64_t system_cycle) {
+        require_configured();
+        last_grant_ = 0;
+        // This is the literal mp64_bus reset state.  It gives port 0 the first
+        // post-reset tie; after that, every eligible peer has equal weight.
+        reset_port_zero_credit_ = true;
+        next_grant_sequence_ = 1;
+        earliest_arbitration_cycle_ = system_cycle;
+        served_last_ = false;
+        last_arbitration_cycle_.reset();
+        active_grant_.reset();
+        std::fill(
+            last_issue_sequences_.begin(),
+            last_issue_sequences_.end(),
+            0);
+        std::fill(
+            sticky_bus_errors_.begin(),
+            sticky_bus_errors_.end(),
+            0);
+    }
+
+    std::optional<BusGrant> try_grant(
+            const std::vector<BusRequest>& pending,
+            uint64_t system_cycle) {
+        require_configured();
+        if (active_grant_.has_value())
+            return std::nullopt;
+        const auto slots = validate_pending(pending);
+        if (system_cycle < earliest_arbitration_cycle_)
+            return std::nullopt;
+        if (last_arbitration_cycle_.has_value() &&
+            *last_arbitration_cycle_ == system_cycle) {
+            return std::nullopt;
+        }
+
+        // If the caller advanced past the first idle edge after completion,
+        // the RTL has already cleared its one-edge held-valid safeguard.
+        const bool held_valid_guard =
+            served_last_ &&
+            system_cycle == earliest_arbitration_cycle_;
+
+        const int winner = select_port(slots, system_cycle);
+        if (winner < 0) {
+            // An empty IDLE edge clears served_last in mp64_bus.
+            served_last_ = false;
+            last_arbitration_cycle_ = system_cycle;
+            return std::nullopt;
+        }
+
+        // The cycle after completion is suppressed when the same physical
+        // master port still presents valid.  A different port can turn around
+        // immediately even when its request was already waiting.
+        if (held_valid_guard && winner == last_grant_) {
+            if (system_cycle == std::numeric_limits<uint64_t>::max())
+                throw std::overflow_error(
+                    "main bus arbitration cycle overflow");
+            served_last_ = false;
+            earliest_arbitration_cycle_ = system_cycle + 1;
+            last_arbitration_cycle_ = system_cycle;
+            return std::nullopt;
+        }
+
+        if (next_grant_sequence_ ==
+            std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "main bus grant sequence overflow");
+        }
+
+        const BusRequest& request =
+            *slots[static_cast<std::size_t>(winner)];
+        const BusTarget target = target_for_address(request.address);
+        const uint64_t timeout_delta =
+            target == BusTarget::MMIO
+            ? MMIO_TIMEOUT_CYCLES
+            : MEMORY_TIMEOUT_CYCLES;
+        if (system_cycle >
+            std::numeric_limits<uint64_t>::max() - timeout_delta) {
+            throw std::overflow_error(
+                "main bus timeout cycle overflow");
+        }
+
+        BusGrant grant{
+            request,
+            next_grant_sequence_,
+            system_cycle,
+            target,
+            system_cycle + timeout_delta,
+        };
+
+        // Hard QoS is an eligibility/reservation concern, not a secondary
+        // ordering bias.  The integrated RTL's write sideband is tied off, so
+        // this primitive orders all ready peers by equal round-robin.  Consume
+        // the sole reset credit after the first issued transaction.
+        reset_port_zero_credit_ = false;
+
+        next_grant_sequence_++;
+        last_issue_sequences_[static_cast<std::size_t>(winner)] =
+            request.ordering.issue_sequence;
+        served_last_ = false;
+        last_arbitration_cycle_ = system_cycle;
+        active_grant_ = grant;
+        return grant;
+    }
+
+    std::optional<uint64_t> next_arbitration_cycle(
+            const std::vector<BusRequest>& pending,
+            uint64_t system_cycle) const {
+        require_configured();
+        if (active_grant_.has_value())
+            return std::nullopt;
+        validate_pending(pending);
+        if (pending.empty())
+            return std::nullopt;
+
+        uint64_t first_cycle = std::max(
+            system_cycle, earliest_arbitration_cycle_);
+        if (last_arbitration_cycle_.has_value() &&
+            *last_arbitration_cycle_ == first_cycle) {
+            if (first_cycle == std::numeric_limits<uint64_t>::max())
+                return std::nullopt;
+            first_cycle++;
+        }
+
+        std::optional<uint64_t> earliest;
+        for (const BusRequest& request : pending) {
+            const uint64_t candidate =
+                std::max(first_cycle, request.ready_cycle);
+            if (!earliest.has_value() || candidate < *earliest)
+                earliest = candidate;
+        }
+        return earliest;
+    }
+
+    BusResult complete(
+            uint64_t grant_sequence,
+            uint64_t system_cycle,
+            std::optional<uint64_t> read_value,
+            BusFault fault,
+            bool target_effects_committed) {
+        require_configured();
+        if (!active_grant_.has_value())
+            throw std::runtime_error(
+                "main bus has no active grant to complete");
+
+        const BusGrant grant = *active_grant_;
+        if (grant_sequence != grant.grant_sequence)
+            throw std::invalid_argument(
+                "main bus completion does not match the active grant");
+        if (system_cycle <= grant.grant_cycle)
+            throw std::invalid_argument(
+                "main bus completion must follow its grant cycle");
+        if (system_cycle > grant.timeout_cycle)
+            throw std::invalid_argument(
+                "main bus completion cannot follow its timeout cycle");
+        if (system_cycle == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error(
+                "main bus turnaround cycle overflow");
+
+        const bool is_timeout =
+            fault == BusFault::MMIO_TIMEOUT ||
+            fault == BusFault::MEMORY_TIMEOUT;
+        if (!valid_fault(fault))
+            throw std::invalid_argument("main bus fault is invalid");
+        if (fault == BusFault::MMIO_TIMEOUT &&
+            grant.target != BusTarget::MMIO) {
+            throw std::invalid_argument(
+                "MMIO timeout cannot complete a memory grant");
+        }
+        if (fault == BusFault::MEMORY_TIMEOUT &&
+            grant.target != BusTarget::MEMORY) {
+            throw std::invalid_argument(
+                "memory timeout cannot complete an MMIO grant");
+        }
+        if (is_timeout && system_cycle != grant.timeout_cycle)
+            throw std::invalid_argument(
+                "main bus timeout must complete on its timeout cycle");
+        if (is_timeout && target_effects_committed)
+            throw std::invalid_argument(
+                "a timed-out target cannot report committed effects");
+        if (is_timeout && read_value.has_value())
+            throw std::invalid_argument(
+                "main bus timeout supplies its sentinel value");
+        if (fault == BusFault::NONE &&
+            grant.request.operation == BusOperation::READ &&
+            !read_value.has_value()) {
+            throw std::invalid_argument(
+                "a successful bus read requires a result value");
+        }
+
+        if (is_timeout)
+            read_value = TIMEOUT_SENTINEL;
+
+        const std::size_t port = static_cast<std::size_t>(
+            grant.request.ordering.main_port_id);
+        if (is_timeout)
+            sticky_bus_errors_[port] = 1;
+
+        BusResult result{
+            grant,
+            system_cycle,
+            read_value,
+            fault,
+            target_effects_committed,
+        };
+
+        last_grant_ = static_cast<int>(port);
+        earliest_arbitration_cycle_ = system_cycle + 1;
+        served_last_ = true;
+        active_grant_.reset();
+        return result;
+    }
+
+    MainBusSnapshot snapshot() const {
+        require_configured();
+        return {
+            MainBusSnapshot::SCHEMA_VERSION,
+            port_count_,
+            last_grant_,
+            reset_port_zero_credit_,
+            next_grant_sequence_,
+            earliest_arbitration_cycle_,
+            served_last_,
+            last_arbitration_cycle_,
+            active_grant_,
+            last_issue_sequences_,
+            sticky_bus_errors_,
+        };
+    }
+
+private:
+    static bool valid_operation(BusOperation operation) {
+        return operation == BusOperation::READ ||
+               operation == BusOperation::WRITE;
+    }
+
+    static bool valid_width(BusWidth width) {
+        return width == BusWidth::BYTE ||
+               width == BusWidth::HALF ||
+               width == BusWidth::WORD ||
+               width == BusWidth::DOUBLEWORD;
+    }
+
+    static bool valid_fault(BusFault fault) {
+        return fault == BusFault::NONE ||
+               fault == BusFault::MMIO_TIMEOUT ||
+               fault == BusFault::MEMORY_TIMEOUT ||
+               fault == BusFault::TARGET_FAULT;
+    }
+
+    static BusTarget target_for_address(uint64_t address) {
+        return static_cast<uint32_t>(address >> 32) == 0xFFFFFF00U
+            ? BusTarget::MMIO
+            : BusTarget::MEMORY;
+    }
+
+    void require_configured() const {
+        if (port_count_ < 1)
+            throw std::logic_error("main bus arbiter is not configured");
+    }
+
+    std::vector<const BusRequest*> validate_pending(
+            const std::vector<BusRequest>& pending) const {
+        std::vector<const BusRequest*> slots(
+            static_cast<std::size_t>(port_count_), nullptr);
+        for (const BusRequest& request : pending) {
+            const int port = request.ordering.main_port_id;
+            if (port < 0 || port >= port_count_)
+                throw std::out_of_range(
+                    "main bus request port is out of range");
+            if (request.ordering.issue_sequence == 0)
+                throw std::invalid_argument(
+                    "main bus issue sequence must be positive");
+            if (!valid_operation(request.operation))
+                throw std::invalid_argument(
+                    "main bus operation is invalid");
+            if (!valid_width(request.width))
+                throw std::invalid_argument(
+                    "main bus width must be 1, 2, 4, or 8 bytes");
+
+            const std::size_t index = static_cast<std::size_t>(port);
+            if (slots[index] != nullptr)
+                throw std::invalid_argument(
+                    "main bus pending snapshot contains duplicate ports");
+            if (request.ordering.issue_sequence <=
+                last_issue_sequences_[index]) {
+                throw std::invalid_argument(
+                    "main bus issue sequence must advance per port");
+            }
+            slots[index] = &request;
+        }
+        return slots;
+    }
+
+    int select_port(
+            const std::vector<const BusRequest*>& slots,
+            uint64_t system_cycle) const {
+        const auto eligible = [&](int port) {
+            const BusRequest* request =
+                slots[static_cast<std::size_t>(port)];
+            return request != nullptr &&
+                   request->ready_cycle <= system_cycle;
+        };
+
+        if (reset_port_zero_credit_ && eligible(last_grant_))
+            return last_grant_;
+
+        for (int offset = 1; offset <= port_count_; offset++) {
+            int candidate = last_grant_ + offset;
+            if (candidate >= port_count_)
+                candidate -= port_count_;
+            if (eligible(candidate))
+                return candidate;
+        }
+        return -1;
+    }
+
+    int port_count_ = 0;
+    int last_grant_ = 0;
+    bool reset_port_zero_credit_ = true;
+    uint64_t next_grant_sequence_ = 1;
+    uint64_t earliest_arbitration_cycle_ = 0;
+    bool served_last_ = false;
+    std::optional<uint64_t> last_arbitration_cycle_;
+    std::optional<BusGrant> active_grant_;
+    std::vector<uint64_t> last_issue_sequences_;
+    std::vector<uint8_t> sticky_bus_errors_;
+};
+
+// ---------------------------------------------------------------------------
 //  CPU State — flat execution state plus borrowed memory mappings
 // ---------------------------------------------------------------------------
 
@@ -654,7 +1101,14 @@ static std::unique_ptr<CPUState> make_cpu_state(
 // transactional milestones. Shared resources are declared before cores so
 // borrowed pointers die before their owners.
 struct SystemState {
-    explicit SystemState(int full_core_count, int all_core_count = 0) {
+    static constexpr int NIC_DMA_REQUESTER_ID = -1;
+    static constexpr int DISK_DMA_REQUESTER_ID = -2;
+    static constexpr int MICRO_CORES_PER_CLUSTER = 4;
+
+    explicit SystemState(
+            int full_core_count,
+            int all_core_count = 0,
+            int main_bus_port_count = 0) {
         if (full_core_count < 1 || full_core_count > 255)
             throw std::invalid_argument(
                 "full_core_count must be between 1 and 255");
@@ -664,6 +1118,19 @@ struct SystemState {
             throw std::invalid_argument(
                 "all_core_count must include every full core and fit in 8 bits");
 
+        const int micro_core_count = all_core_count - full_core_count;
+        const int required_cluster_ports =
+            (micro_core_count + MICRO_CORES_PER_CLUSTER - 1) /
+            MICRO_CORES_PER_CLUSTER;
+        const int minimum_main_bus_ports =
+            full_core_count + required_cluster_ports + 2;
+        if (main_bus_port_count == 0)
+            main_bus_port_count = minimum_main_bus_ports;
+        if (main_bus_port_count != minimum_main_bus_ports)
+            throw std::invalid_argument(
+                "main_bus_port_count must exactly match the system topology");
+
+        main_bus.configure(main_bus_port_count);
         shared_interrupts.configure(all_core_count);
         shared_crypto.init();
         cores.reserve(static_cast<std::size_t>(full_core_count));
@@ -702,6 +1169,48 @@ struct SystemState {
         return advertised_core_count;
     }
 
+    int main_bus_port_for_requester(int requester_id) const {
+        const int port_count = main_bus.port_count();
+        if (requester_id == NIC_DMA_REQUESTER_ID)
+            return port_count - 2;
+        if (requester_id == DISK_DMA_REQUESTER_ID)
+            return port_count - 1;
+        if (requester_id < 0 || requester_id >= advertised_core_count)
+            throw std::out_of_range(
+                "main bus requester is outside the advertised topology");
+        if (requester_id < full_core_count())
+            return requester_id;
+
+        const int cluster_index =
+            (requester_id - full_core_count()) /
+            MICRO_CORES_PER_CLUSTER;
+        const int cluster_port_count =
+            port_count - full_core_count() - 2;
+        if (cluster_index >= cluster_port_count)
+            throw std::out_of_range(
+                "micro-core requester has no main bus cluster port");
+        return full_core_count() + cluster_index;
+    }
+
+    void validate_main_bus_request(const BusRequest& request) const {
+        const int expected_port =
+            main_bus_port_for_requester(request.requester_id);
+        if (request.ordering.main_port_id != expected_port)
+            throw std::invalid_argument(
+                "main bus requester does not match its physical port");
+        if (request.ordering.port_io &&
+            (request.requester_id < 0 ||
+             request.requester_id >= full_core_count())) {
+            throw std::invalid_argument(
+                "only a full core can issue main-bus port I/O");
+        }
+        if (request.requester_id < 0 &&
+            request.width != BusWidth::BYTE) {
+            throw std::invalid_argument(
+                "main-bus DMA requesters are byte-wide");
+        }
+    }
+
     MemoryMappings shared_memory;
     CryptoDevices shared_crypto{};
     NICDevice shared_nic{};
@@ -713,6 +1222,7 @@ struct SystemState {
     RTCDevice shared_rtc{};
     InterruptRouter shared_interrupts{};
     SystemClock shared_clock{};
+    MainBusArbiter main_bus{};
     std::vector<std::unique_ptr<CPUState>> cores;
     // Serializes native scheduling with clock/deadline mutation. Recursive
     // acquisition is required when a Python round-settlement callback advances
@@ -6983,6 +7493,142 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("dict_clear", &CPUState::dict_clear_all)
         ;
 
+    py::enum_<BusOperation>(m, "BusOperation")
+        .value("READ", BusOperation::READ)
+        .value("WRITE", BusOperation::WRITE);
+
+    py::enum_<BusWidth>(m, "BusWidth")
+        .value("BYTE", BusWidth::BYTE)
+        .value("HALF", BusWidth::HALF)
+        .value("WORD", BusWidth::WORD)
+        .value("DOUBLEWORD", BusWidth::DOUBLEWORD);
+
+    py::enum_<BusTarget>(m, "BusTarget")
+        .value("MEMORY", BusTarget::MEMORY)
+        .value("MMIO", BusTarget::MMIO);
+
+    py::enum_<BusFault>(m, "BusFault")
+        .value("NONE", BusFault::NONE)
+        .value("MMIO_TIMEOUT", BusFault::MMIO_TIMEOUT)
+        .value("MEMORY_TIMEOUT", BusFault::MEMORY_TIMEOUT)
+        .value("TARGET_FAULT", BusFault::TARGET_FAULT);
+
+    py::class_<BusOrderingMetadata>(m, "BusOrderingMetadata")
+        .def(
+            py::init([](
+                    int main_port_id,
+                    uint64_t issue_sequence,
+                    bool port_io) {
+                if (main_port_id < 0)
+                    throw std::invalid_argument(
+                        "main_port_id cannot be negative");
+                if (issue_sequence == 0)
+                    throw std::invalid_argument(
+                        "issue_sequence must be positive");
+                return BusOrderingMetadata{
+                    main_port_id,
+                    issue_sequence,
+                    port_io,
+                };
+            }),
+            py::arg("main_port_id"),
+            py::arg("issue_sequence"),
+            py::arg("port_io") = false)
+        .def_readonly(
+            "main_port_id",
+            &BusOrderingMetadata::main_port_id)
+        .def_readonly(
+            "issue_sequence",
+            &BusOrderingMetadata::issue_sequence)
+        .def_readonly("port_io", &BusOrderingMetadata::port_io)
+        ;
+
+    py::class_<BusRequest>(m, "BusRequest")
+        .def(
+            py::init([](
+                    int requester_id,
+                    uint64_t ready_cycle,
+                    BusOperation operation,
+                    uint64_t address,
+                    BusWidth width,
+                    const BusOrderingMetadata& ordering,
+                    uint64_t write_data) {
+                return BusRequest{
+                    requester_id,
+                    ready_cycle,
+                    operation,
+                    address,
+                    width,
+                    write_data,
+                    ordering,
+                };
+            }),
+            py::arg("requester_id"),
+            py::arg("ready_cycle"),
+            py::arg("operation"),
+            py::arg("address"),
+            py::arg("width"),
+            py::arg("ordering"),
+            py::arg("write_data") = 0)
+        .def_readonly("requester_id", &BusRequest::requester_id)
+        .def_readonly("ready_cycle", &BusRequest::ready_cycle)
+        .def_readonly("operation", &BusRequest::operation)
+        .def_readonly("address", &BusRequest::address)
+        .def_readonly("width", &BusRequest::width)
+        .def_readonly("write_data", &BusRequest::write_data)
+        .def_readonly("ordering", &BusRequest::ordering)
+        ;
+
+    py::class_<BusGrant>(m, "BusGrant")
+        .def_readonly("request", &BusGrant::request)
+        .def_readonly("grant_sequence", &BusGrant::grant_sequence)
+        .def_readonly("grant_cycle", &BusGrant::grant_cycle)
+        .def_readonly("target", &BusGrant::target)
+        .def_readonly("timeout_cycle", &BusGrant::timeout_cycle)
+        ;
+
+    py::class_<BusResult>(m, "BusResult")
+        .def_readonly("grant", &BusResult::grant)
+        .def_readonly(
+            "completion_cycle",
+            &BusResult::completion_cycle)
+        .def_readonly("read_value", &BusResult::read_value)
+        .def_readonly("fault", &BusResult::fault)
+        .def_readonly(
+            "target_effects_committed",
+            &BusResult::target_effects_committed)
+        ;
+
+    py::class_<MainBusSnapshot>(m, "MainBusSnapshot")
+        .def_readonly(
+            "schema_version",
+            &MainBusSnapshot::schema_version)
+        .def_readonly("port_count", &MainBusSnapshot::port_count)
+        .def_readonly("last_grant", &MainBusSnapshot::last_grant)
+        .def_readonly(
+            "reset_port_zero_credit",
+            &MainBusSnapshot::reset_port_zero_credit)
+        .def_readonly(
+            "next_grant_sequence",
+            &MainBusSnapshot::next_grant_sequence)
+        .def_readonly(
+            "earliest_arbitration_cycle",
+            &MainBusSnapshot::earliest_arbitration_cycle)
+        .def_readonly("served_last", &MainBusSnapshot::served_last)
+        .def_readonly(
+            "last_arbitration_cycle",
+            &MainBusSnapshot::last_arbitration_cycle)
+        .def_readonly(
+            "active_grant",
+            &MainBusSnapshot::active_grant)
+        .def_readonly(
+            "last_issue_sequences",
+            &MainBusSnapshot::last_issue_sequences)
+        .def_readonly(
+            "sticky_bus_errors",
+            &MainBusSnapshot::sticky_bus_errors)
+        ;
+
     py::class_<SystemBatchResult>(m, "SystemBatchResult")
         .def_readonly(
             "instructions_executed",
@@ -7014,13 +7660,125 @@ PYBIND11_MODULE(_mp64_accel, m) {
     // Native system ownership.  Borrowed core views keep their parent alive
     // and never take ownership of the pointed-to CPUState.
     py::class_<SystemState>(m, "SystemState")
-        .def(py::init<int, int>(),
+        .def(py::init<int, int, int>(),
              py::arg("full_core_count"),
-             py::arg("all_core_count") = 0)
+             py::arg("all_core_count") = 0,
+             py::arg("main_bus_port_count") = 0)
         .def_property_readonly(
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property_readonly_static(
+            "NIC_DMA_REQUESTER_ID",
+            [](py::object) {
+                return SystemState::NIC_DMA_REQUESTER_ID;
+            })
+        .def_property_readonly_static(
+            "DISK_DMA_REQUESTER_ID",
+            [](py::object) {
+                return SystemState::DISK_DMA_REQUESTER_ID;
+            })
+        .def_property_readonly_static(
+            "MAIN_BUS_MMIO_TIMEOUT_CYCLES",
+            [](py::object) {
+                return MainBusArbiter::MMIO_TIMEOUT_CYCLES;
+            })
+        .def_property_readonly_static(
+            "MAIN_BUS_MEMORY_TIMEOUT_CYCLES",
+            [](py::object) {
+                return MainBusArbiter::MEMORY_TIMEOUT_CYCLES;
+            })
+        .def_property_readonly_static(
+            "MAIN_BUS_TIMEOUT_SENTINEL",
+            [](py::object) {
+                return MainBusArbiter::TIMEOUT_SENTINEL;
+            })
+        .def_property_readonly(
+            "main_bus_port_count",
+            [](const SystemState& system) {
+                return system.main_bus.port_count();
+            })
+        .def(
+            "main_bus_port_for_requester",
+            &SystemState::main_bus_port_for_requester,
+            py::arg("requester_id"))
+        .def(
+            "_main_bus_try_grant",
+            [](SystemState& system,
+               const std::vector<BusRequest>& pending) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "main bus state cannot change during an active "
+                        "native system batch");
+                }
+                for (const BusRequest& request : pending)
+                    system.validate_main_bus_request(request);
+                return system.main_bus.try_grant(
+                    pending, system.shared_clock.cycles());
+            },
+            py::arg("pending"))
+        .def(
+            "_main_bus_next_arbitration_cycle",
+            [](SystemState& system,
+               const std::vector<BusRequest>& pending) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                for (const BusRequest& request : pending)
+                    system.validate_main_bus_request(request);
+                return system.main_bus.next_arbitration_cycle(
+                    pending, system.shared_clock.cycles());
+            },
+            py::arg("pending"))
+        .def(
+            "_main_bus_complete",
+            [](SystemState& system,
+               uint64_t grant_sequence,
+               std::optional<uint64_t> read_value,
+               BusFault fault,
+               bool target_effects_committed) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "main bus state cannot change during an active "
+                        "native system batch");
+                }
+                return system.main_bus.complete(
+                    grant_sequence,
+                    system.shared_clock.cycles(),
+                    read_value,
+                    fault,
+                    target_effects_committed);
+            },
+            py::arg("grant_sequence"),
+            py::arg("read_value") = py::none(),
+            py::arg("fault") = BusFault::NONE,
+            py::arg("target_effects_committed") = false)
+        .def(
+            "_main_bus_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.main_bus.snapshot();
+            })
+        .def(
+            "_main_bus_reset",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "main bus state cannot change during an active "
+                        "native system batch");
+                }
+                system.main_bus.reset(
+                    system.shared_clock.cycles());
+            })
         .def_property(
             "scheduler_cursor",
             [](SystemState& system) {
@@ -7093,6 +7851,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     acquire_system_scheduler_lock(system);
                 return system.shared_clock.cycles();
             })
+        .def_property_readonly(
+            "main_bus_timeout_cycle",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.main_bus.active_timeout_cycle();
+            })
         .def(
             "advance_system_cycles",
             [](SystemState& system, uint64_t delta) {
@@ -7100,6 +7865,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     acquire_system_scheduler_lock(system);
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
+                const uint64_t current =
+                    system.shared_clock.cycles();
+                if (delta >
+                    std::numeric_limits<uint64_t>::max() - current) {
+                    throw std::overflow_error(
+                        "system cycle counter overflow");
+                }
+                system.main_bus.validate_clock_target(
+                    current + delta);
                 system.shared_clock.advance_by(
                     delta,
                     system.shared_timer,
@@ -7114,6 +7888,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     acquire_system_scheduler_lock(system);
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
+                system.main_bus.validate_clock_target(target);
                 system.shared_clock.advance_to(
                     target,
                     system.shared_timer,
