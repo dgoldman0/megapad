@@ -5783,9 +5783,13 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
         uint8_t  fb  = s.d_reg;
         // Fast path: memset when entirely within one RAM region (not MMIO)
         bool in_mmio = cb.has_mmio && dst >= cb.mmio_start && dst < cb.mmio_end;
-        if (cb.bus_access == nullptr && !in_mmio) {
+        // The direct memset shortcut is supervisor-only: user-mode writes
+        // must retain the scalar path's MPU checks.  Use subtraction-based
+        // bounds so an attacker-controlled length cannot wrap off + len and
+        // turn a rejected span into an out-of-bounds host memset.
+        if (cb.bus_access == nullptr && !s.priv_level && !in_mmio) {
             auto r = resolve_mem(s, dst);
-            if (r.buf && r.off + ln <= r.size) {
+            if (r.buf && region_span_fits(r.size, r.off, ln)) {
                 std::memset(r.buf + r.off, fb, (size_t)ln);
                 icache_invalidate_span(s, dst, ln);
                 s.regs[rd] = dst + ln;
