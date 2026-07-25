@@ -21,6 +21,7 @@ The wrapper also re-exports everything from megapad64 so you can do::
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import importlib
 import sys
 from typing import Optional
@@ -84,6 +85,23 @@ ACCEL_AVAILABLE: bool = True
 # ---------------------------------------------------------------------------
 #  Accelerated wrapper
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CoreRunStats:
+    """Completed work from one accelerated wrapper batch.
+
+    ``total_cycles`` is scheduler-visible elapsed cost, including a Python
+    fallback or handled trap/reset continuation.  It can differ from an
+    architectural ``cycle_count`` delta when a handled fault has a defined
+    public cost.  ``stop_reason`` retains the legacy ``run_steps()`` tuple
+    semantics: 0 means execution may continue, 1 means halted, and 2 means
+    idle.
+    """
+
+    steps_executed: int
+    total_cycles: int
+    stop_reason: int
+
 
 class Megapad64:
     """Accelerated Megapad-64 CPU (C++ inner loop, Python-compatible API)."""
@@ -644,9 +662,22 @@ def {_attr}(self, v):
             return self._run_steps_in_memory_scope(max_steps)
 
     def _run_steps_in_memory_scope(self, max_steps: int):
+        """Compatibility tuple adapter under one mapping ownership."""
+        stats = self._run_steps_stats_in_memory_scope(max_steps)
+        return stats.steps_executed, stats.stop_reason
+
+    def run_steps_stats(self, max_steps: int = 1_000_000) -> CoreRunStats:
+        """Execute a batch and return exact completed-step and cycle totals."""
+        with self._cs._logical_memory_use():
+            return self._run_steps_stats_in_memory_scope(max_steps)
+
+    def _run_steps_stats_in_memory_scope(
+        self,
+        max_steps: int,
+    ) -> CoreRunStats:
         """Execute a native batch and its continuation under one ownership."""
         if self.halted or self.idle:
-            return 0, 1 if self.halted else 2
+            return CoreRunStats(0, 0, 1 if self.halted else 2)
 
         try:
             result = _accel.run_steps(
@@ -662,10 +693,10 @@ def {_attr}(self, v):
         except RuntimeError as e:
             msg = str(e)
             if msg == "HALT":
-                return 0, 1
+                return CoreRunStats(0, 0, 1)
             elif msg.startswith("TRAP:"):
-                self._handle_trap(msg)
-                return 1, 0  # trap handled, continue
+                cycles = self._handle_trap(msg)
+                return CoreRunStats(1, cycles, 0)  # trap handled, continue
             else:
                 raise
         if result.stop_reason in (3, 4):
@@ -676,22 +707,38 @@ def {_attr}(self, v):
             # outside the native control-string handler so callback errors
             # propagate unchanged.
             try:
-                self._step_python_fallback()
+                continuation_cycles = self._step_python_fallback()
             except TrapError as error:
                 self._annotate_batch_trap(error, result)
                 raise
-            return result.steps_executed + 1, 0
+            return CoreRunStats(
+                result.steps_executed + 1,
+                result.total_cycles + continuation_cycles,
+                0,
+            )
         if result.stop_reason == 5:
             try:
-                self._finish_trap(result.trap_id)
+                continuation_cycles = self._finish_trap(result.trap_id)
             except TrapError as error:
                 self._annotate_batch_trap(error, result)
                 raise
-            return result.steps_executed + 1, 0
+            return CoreRunStats(
+                result.steps_executed + 1,
+                result.total_cycles + continuation_cycles,
+                0,
+            )
         if result.stop_reason == 6:
-            self._finish_reset()
-            return result.steps_executed + 1, 0
-        return result.steps_executed, result.stop_reason
+            continuation_cycles = self._finish_reset()
+            return CoreRunStats(
+                result.steps_executed + 1,
+                result.total_cycles + continuation_cycles,
+                0,
+            )
+        return CoreRunStats(
+            result.steps_executed,
+            result.total_cycles,
+            result.stop_reason,
+        )
 
     # -- Instruction size (for SKIP) --
 

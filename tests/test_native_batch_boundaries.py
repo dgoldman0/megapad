@@ -6,6 +6,7 @@ import pytest
 
 import _mp64_accel
 from accel_wrapper import Megapad64 as NativeMegapad64
+from asm import assemble
 from megapad64 import (
     IVEC_ILLEGAL_OP,
     IVEC_SW_TRAP,
@@ -137,6 +138,148 @@ def test_raw_batch_reports_prefix_before_pending_trap():
     ) == (1, 1, 5, IVEC_ILLEGAL_OP)
     assert cpu.pc == len(NOP_THEN_DOUBLE_EXT)
     assert cpu.cycle_count == 1
+
+
+def test_structured_batch_reports_native_multicycle_progress():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, assemble("mul r1, r2"))
+    cpu.regs[1] = 6
+    cpu.regs[2] = 7
+    cpu.pc = 0
+
+    stats = cpu.run_steps_stats(max_steps=1)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (1, 4, 0)
+    assert cpu.regs[1] == 42
+    assert cpu.cycle_count == 4
+
+    compatibility_cpu = NativeMegapad64(mem_size=4096)
+    compatibility_cpu.load_bytes(0, assemble("mul r1, r2"))
+    compatibility_cpu.regs[1] = 6
+    compatibility_cpu.regs[2] = 7
+    compatibility_cpu.pc = 0
+    assert compatibility_cpu.run_steps(max_steps=1) == (1, 0)
+
+
+def test_structured_batch_composes_native_prefix_and_python_fallback_cycles():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, assemble("nop\nt.sum"))
+    cpu.mem[0x100:0x140] = bytes(range(64))
+    cpu.tsrc0 = 0x100
+    cpu.pc = 0
+
+    stats = cpu.run_steps_stats(max_steps=2)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (2, 2, 0)
+    assert cpu.cycle_count == 2
+
+
+def test_structured_batch_composes_software_trap_cycles():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, bytes((0x01, 0x0F)))  # NOP; SYS.TRAP
+    handler = _install_vector(cpu, IVEC_SW_TRAP)
+    cpu.pc = 0
+
+    stats = cpu.run_steps_stats(max_steps=2)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (2, 4, 0)
+    assert cpu.pc == handler
+    assert cpu.cycle_count == 4
+
+
+def test_structured_batch_preserves_elapsed_fault_cost_not_counter_delta():
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, NOP_THEN_DOUBLE_EXT)
+    handler = _install_vector(cpu, IVEC_ILLEGAL_OP)
+    cpu.pc = 0
+
+    stats = cpu.run_steps_stats(max_steps=2)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (2, 2, 0)
+    assert cpu.pc == handler
+    assert cpu.cycle_count == 1
+
+
+def test_structured_batch_preserves_prefix_cycles_across_reset():
+    cpu = NativeMegapad64(mem_size=4096)
+    _seed_reset_state(cpu)
+
+    stats = cpu.run_steps_stats(max_steps=2)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (2, 2, 0)
+    assert cpu.cycle_count == 7
+
+
+@pytest.mark.parametrize(
+    ("state_name", "stop_reason"),
+    (
+        pytest.param("halted", 1, id="halted"),
+        pytest.param("idle", 2, id="idle"),
+    ),
+)
+def test_structured_batch_reports_zero_progress_when_already_stopped(
+    state_name: str,
+    stop_reason: int,
+) -> None:
+    cpu = NativeMegapad64(mem_size=4096)
+    setattr(cpu, state_name, True)
+
+    stats = cpu.run_steps_stats(max_steps=100)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (0, 0, stop_reason)
+
+
+@pytest.mark.parametrize(
+    ("instruction", "stop_reason"),
+    (
+        pytest.param("halt", 1, id="halt"),
+        pytest.param("idl", 2, id="idle"),
+    ),
+)
+def test_structured_batch_counts_instruction_before_stopped_boundary(
+    instruction: str,
+    stop_reason: int,
+) -> None:
+    cpu = NativeMegapad64(mem_size=4096)
+    cpu.load_bytes(0, assemble(instruction))
+    cpu.pc = 0
+
+    stats = cpu.run_steps_stats(max_steps=2)
+
+    assert (
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (1, 1, stop_reason)
+
+    compatibility_cpu = NativeMegapad64(mem_size=4096)
+    compatibility_cpu.load_bytes(0, assemble(instruction))
+    compatibility_cpu.pc = 0
+    assert compatibility_cpu.run_steps(max_steps=2) == (1, stop_reason)
 
 
 def test_wrapper_counts_prefix_and_delivers_pending_trap():
