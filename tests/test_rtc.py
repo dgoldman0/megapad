@@ -4,7 +4,14 @@ from unittest.mock import patch
 
 from accel_wrapper import Megapad64
 from asm import assemble
-from devices import CppRTCProxy, MMIO_BASE, RTC, RTC_BASE
+from devices import (
+    CppRTCProxy,
+    CppTimerProxy,
+    MMIO_BASE,
+    RTC,
+    RTC_BASE,
+    Timer,
+)
 from system import MegapadSystem
 
 
@@ -16,11 +23,54 @@ def test_virtual_rtc_advances_from_emulated_cycles():
     rtc = RTC()
     epoch = rtc.epoch_ms
 
+    assert epoch == 0
+    assert (
+        rtc.year,
+        rtc.mon,
+        rtc.day,
+        rtc.hour,
+        rtc.min,
+        rtc.sec,
+        rtc.dow,
+    ) == (1970, 1, 1, 0, 0, 0, 4)
+
     rtc.tick(3 * RTC.MS_DIVISOR)
 
     assert _read_u64(rtc, 0x00) == 3
     assert _read_u64(rtc, 0x08) == epoch + 3
     assert rtc.clock_mode == "virtual"
+
+
+def test_virtual_rtc_default_does_not_sample_python_host_clocks():
+    unavailable = AssertionError("virtual RTC sampled a host clock")
+    with patch("devices._time.time", side_effect=unavailable), patch(
+        "devices._time.monotonic",
+        side_effect=unavailable,
+    ):
+        reference = RTC()
+        cpu = Megapad64(mem_size=64 * 1024)
+        native = CppRTCProxy(cpu._cs)
+
+    assert reference.epoch_ms == native.epoch_ms == 0
+
+
+def test_explicit_virtual_rtc_epoch_seeds_reference_and_native_calendar():
+    epoch_ms = 946_684_800_000  # 2000-01-01T00:00:00Z
+    reference = RTC(initial_epoch_ms=epoch_ms)
+    cpu = Megapad64(mem_size=64 * 1024)
+    native = CppRTCProxy(cpu._cs, initial_epoch_ms=epoch_ms)
+
+    assert native.snapshot() == reference.snapshot()
+    assert (
+        native.epoch_ms,
+        native.year,
+        native.mon,
+        native.day,
+        native.hour,
+        native.min,
+        native.sec,
+        native.dow,
+    ) == (epoch_ms, 2000, 1, 1, 0, 0, 0, 6)
 
 
 def test_realtime_rtc_tracks_host_time_and_pauses_cleanly():
@@ -75,6 +125,43 @@ def test_cpp_realtime_rtc_sync_and_reanchor_paths_remain_callable():
     rtc.tick(1)
     rtc.read8(0x00)
     assert rtc.ctrl == 1
+
+
+def _timer_state(timer):
+    return (
+        timer.counter,
+        timer.compare,
+        timer.control,
+        timer.status,
+        timer.irq_pending,
+    )
+
+
+def test_native_timer_batch_tick_matches_repeated_single_ticks():
+    scenarios = (
+        (0xFFFF_FFFD, 0, 0x03, 5),
+        (0xFFFF_FFFD, 0, 0x07, 5),
+        (5, 5, 0x07, 4),
+        (2, 3, 0x07, 10),
+        (0xFFFF_FFFE, 2, 0x07, 8),
+        (0xFFFF_FFFE, 1, 0x03, 4),
+        (2, 3, 0x05, 4),
+    )
+
+    for counter, compare, control, cycles in scenarios:
+        reference = Timer()
+        cpu = Megapad64(mem_size=64 * 1024)
+        native = CppTimerProxy(cpu._cs)
+        for timer in (reference, native):
+            timer.counter = counter
+            timer.compare = compare
+            timer.control = control
+
+        native.tick(cycles)
+        for _ in range(cycles):
+            reference.tick(1)
+
+        assert _timer_state(native) == _timer_state(reference)
 
 
 def _rtc_pair():

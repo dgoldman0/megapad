@@ -75,9 +75,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 6
+STATE_SCHEMA_VERSION = 7
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -109,7 +109,7 @@ STATE_COMPARISON_SCOPE = {
     ),
     "included": [
         "all 32 GPRs and every scalar CPUState field exposed by the binding",
-        "per-core interrupt-line state and Python-reserved tstride_c",
+        "per-core interrupt-line state and native tstride_c",
         "native port output/map state and accelerator hook count",
         "complete shared, HBW, external, and VRAM byte regions via size and "
         "SHA-256",
@@ -120,22 +120,15 @@ STATE_COMPARISON_SCOPE = {
         "and TRNG state as observed through every full core",
         "native system-cycle and event-horizon state, one-worker scheduler "
         "cursor, complete main-bus arbiter snapshot, observable quiescent "
-        "cycle-execution state, registered-device layout, platform topology, "
-        "and benchmark orchestration counters",
+        "cycle-execution state, the immutable timestamped external-event "
+        "pending/history journal including payload hashes and sequence order, "
+        "registered-device layout, platform topology, and benchmark "
+        "orchestration counters",
     ],
     "explicit_exclusions": [
         {
             "state": "native input-port latch values",
             "reason": "the binding permits writes but exposes no readback",
-        },
-        {
-            "state": "native CPUState::tstride_c",
-            "reason": (
-                "the field exists in native CPUState but is neither bound nor "
-                "read by the current native executor; the captured "
-                "Megapad64.tstride_c value is a separate Python-side "
-                "compatibility field and cannot observe it"
-            ),
         },
         {
             "state": (
@@ -162,7 +155,8 @@ STATE_COMPARISON_SCOPE = {
             ),
             "reason": (
                 "only queue depth/status is exposed non-destructively; drain "
-                "APIs would mutate the measured state"
+                "APIs would mutate the measured state. Payloads retained in "
+                "the external-event journal are captured separately."
             ),
         },
         {
@@ -978,6 +972,41 @@ def _main_bus_state(system: MegapadSystem) -> dict:
     }
 
 
+def _external_event_record_state(event) -> dict:
+    return {
+        "cycle": int(event.cycle),
+        "sequence": int(event.sequence),
+        "kind": _enum_name(event.kind),
+        "payload": _blob_summary(bytes(event.payload)),
+        "argument0": int(event.argument0),
+        "argument1": int(event.argument1),
+    }
+
+
+def _external_event_journal_state(system: MegapadSystem) -> dict:
+    owner = system._native_system
+    pending = [
+        _external_event_record_state(event)
+        for event in owner.external_event_pending
+    ]
+    history = [
+        _external_event_record_state(event)
+        for event in owner.external_event_history
+    ]
+    return {
+        "next_cycle": (
+            None
+            if owner.external_event_next_cycle is None
+            else int(owner.external_event_next_cycle)
+        ),
+        "next_sequence": int(owner.external_event_next_sequence),
+        "pending": pending,
+        "history": history,
+        "pending_canonical_json_sha256": _json_sha256(pending),
+        "history_canonical_json_sha256": _json_sha256(history),
+    }
+
+
 def _ordered_blob_queue(queue: Iterable[bytes]) -> dict:
     entries = [_blob_summary(frame) for frame in queue]
     return {
@@ -1023,7 +1052,7 @@ def _core_state(cpu) -> dict:
             "tdst": int(cpu.tdst),
             "accumulators": [int(cpu.acc[index]) for index in range(4)],
             "tstride_r": int(cpu.tstride_r),
-            "tstride_c_python_reserved": int(cpu.tstride_c),
+            "tstride_c": int(cpu.tstride_c),
             "ttile_h": int(cpu.ttile_h),
             "ttile_w": int(cpu.ttile_w),
         },
@@ -1281,6 +1310,7 @@ def _shared_device_state(system: MegapadSystem) -> dict:
                 for deadline in event_deadlines
             ],
         },
+        "external_events": _external_event_journal_state(system),
         "main_bus": _main_bus_state(system),
         "device_bus": {
             "registered_devices": [
@@ -2029,6 +2059,22 @@ def run_report(
             )
             for result in results
         ),
+        "all_external_event_journals_quiescent": all(
+            not sample["observation"]["canonical_state"][
+                "shared_devices"
+            ]["external_events"]["pending"]
+            and not sample["observation"]["canonical_state"][
+                "shared_devices"
+            ]["external_events"]["history"]
+            and sample["observation"]["canonical_state"][
+                "shared_devices"
+            ]["external_events"]["next_sequence"] == 1
+            for result in results
+            for sample in (
+                *result["timed_samples"],
+                result["accounting_probe"],
+            )
+        ),
         "all_timed_repeats_deterministic": all(
             result["summary"]["deterministic_timed_repeats"]
             for result in results
@@ -2117,6 +2163,10 @@ def run_report(
                 "canonical JSON over the captured scope documented in "
                 "state_comparison_scope; workload counters are added to form "
                 "the behavior oracle",
+            "timestamped_external_event_oracle":
+                "pending and historical external inputs are captured in "
+                "cycle/sequence order with payload size and SHA-256; Phase 0 "
+                "validates that timed and accounting runs remain quiescent",
             "deterministic_platform_initialization":
                 "the harness pins the virtual RTC to "
                 "2000-01-01T00:00:00Z and UART geometry to 80x24",

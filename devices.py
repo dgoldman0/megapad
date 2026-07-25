@@ -357,7 +357,6 @@ class Timer(Device):
             return
 
         if cycles == 1:
-            # Fast path for single-tick (common in per-step execution)
             self.counter = (self.counter + 1) & 0xFFFFFFFF
             if self.counter == self.compare:
                 self.status |= 1
@@ -367,44 +366,23 @@ class Timer(Device):
                     self.counter = 0
             return
 
-        # O(1) batch tick — avoid per-cycle Python loop
-        old = self.counter
-        cmp = self.compare
+        counter_modulus = 1 << 32
+        match_delta = (
+            (self.compare - self.counter) % counter_modulus
+            or counter_modulus
+        )
+        if cycles < match_delta:
+            self.counter = (self.counter + cycles) & 0xFFFFFFFF
+            return
 
+        self.status |= 1
+        if self.control & 2:
+            self.irq_pending = True
         if self.control & 4:
-            # Auto-reload mode: counter resets to 0 on match
-            if cmp == 0:
-                # Degenerate: compare=0 means match every tick
-                self.status |= 1
-                if self.control & 2:
-                    self.irq_pending = True
-                self.counter = 0
-                return
-            # How many ticks until we hit compare?
-            gap = (cmp - old) & 0xFFFFFFFF
-            if cycles >= gap:
-                # We hit (and possibly wrap past) the compare value
-                self.status |= 1
-                if self.control & 2:
-                    self.irq_pending = True
-                # After match, counter reloads to 0 and keeps counting
-                remaining = cycles - gap
-                self.counter = remaining % cmp if cmp > 0 else 0
-            else:
-                self.counter = (old + cycles) & 0xFFFFFFFF
+            period = self.compare or counter_modulus
+            self.counter = (cycles - match_delta) % period
         else:
-            # No auto-reload: just check if compare is crossed
-            new = old + cycles  # unbounded to detect crossing
-            if old < cmp <= new:
-                self.status |= 1
-                if self.control & 2:
-                    self.irq_pending = True
-            # Also handle 32-bit wrap-around case
-            elif new > 0xFFFFFFFF and cmp <= (new & 0xFFFFFFFF):
-                self.status |= 1
-                if self.control & 2:
-                    self.irq_pending = True
-            self.counter = new & 0xFFFFFFFF
+            self.counter = (self.counter + cycles) & 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------
@@ -1729,7 +1707,9 @@ class NetworkDevice(Device):
                  passthrough_port: Optional[int] = None,
                  passthrough_host: str = '127.0.0.1',
                  passthrough_peer_port: Optional[int] = None,
-                 backend: 'Optional[NICBackend]' = None):
+                 backend: 'Optional[NICBackend]' = None,
+                 *,
+                 autostart: bool = True):
         super().__init__("NIC", NIC_BASE, 0x80)
         self.mac = bytearray(mac[:6].ljust(6, b'\x00'))
         self.dma_addr: int = 0
@@ -1760,10 +1740,7 @@ class NetworkDevice(Device):
 
         # --- Pluggable backend ---
         self._backend: 'Optional[NICBackend]' = backend
-        if self._backend is not None:
-            self._backend.on_rx_frame = self._backend_rx
-            self._backend.start()
-            self.link_up = self._backend.link_up
+        self._host_rx_handler = self._backend_rx
 
         # UDP passthrough (legacy mode — used when no backend is set)
         self._passthrough_port = passthrough_port
@@ -1775,8 +1752,27 @@ class NetworkDevice(Device):
         self._rx_thread: Optional[threading.Thread] = None
         self._running = False
 
-        if passthrough_port is not None and self._backend is None:
+        if autostart:
+            self.start()
+
+    def start(self):
+        """Start host ingress after the owner has installed its RX route."""
+        if self._backend is not None:
+            self._backend.on_rx_frame = self._host_rx_handler
+            self._backend.start()
+            self.link_up = self._backend.link_up
+        elif self._passthrough_port is not None and not self._running:
             self._start_passthrough()
+
+    def set_host_rx_handler(self, callback):
+        """Install the single route used by every host RX transport."""
+        if self._running:
+            raise RuntimeError(
+                "NIC host RX route cannot change while passthrough is active"
+            )
+        self._host_rx_handler = callback
+        if self._backend is not None:
+            self._backend.on_rx_frame = callback
 
     def _backend_rx(self, frame: bytes):
         """Callback from NICBackend when a frame arrives from the wire."""
@@ -1826,12 +1822,7 @@ class NetworkDevice(Device):
                 if not data or len(data) > NIC_MAX_FRAME:
                     self.error = True
                     continue
-                if len(self.rx_queue) < self.rx_queue.maxlen:
-                    self.rx_queue.append(bytes(data))
-                    self.rx_count = (self.rx_count + 1) & 0xFFFF
-                    self.irq_status |= 1
-                else:
-                    self.error = True
+                self._host_rx_handler(data)
             except socket.timeout:
                 continue
             except OSError:
@@ -2977,12 +2968,17 @@ class FramebufferDevice(Device):
 
     def tick(self, cycles: int):
         """Advance frame counter based on accumulated cycles."""
-        if not (self.enable & 1):
+        if not (self.enable & 1) or cycles == 0 or self.cycles_per_frame == 0:
             return
-        self._frame_cycles += cycles
-        if self._frame_cycles >= self.cycles_per_frame:
-            self._frame_cycles -= self.cycles_per_frame
-            self.vsync_count = (self.vsync_count + 1) & 0xFFFFFFFF
+
+        completed_frames, self._frame_cycles = divmod(
+            self._frame_cycles + cycles,
+            self.cycles_per_frame,
+        )
+        if completed_frames:
+            self.vsync_count = (
+                self.vsync_count + completed_frames
+            ) & 0xFFFFFFFF
             self.vblank = True
 
     def host_present(self):
@@ -3358,7 +3354,7 @@ class CppUartGeomProxy(Device):
 #   0x1C       ALARM_H  (RW)  alarm hours
 
 import time as _time
-from datetime import datetime as _datetime
+from datetime import datetime as _datetime, timezone as _timezone
 
 _DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
@@ -3374,20 +3370,44 @@ def _dim(m: int, y: int) -> int:
 class RTC(Device):
     """Combined system clock: ms uptime + epoch + calendar + alarm.
 
-    Deterministic mode advances from emulated cycles. Realtime mode uses
-    host monotonic time, which keeps interactive guests aligned with
-    external protocol deadlines even when emulation is slower than 100 MHz.
+    Virtual mode starts at the Unix epoch by default, derives its calendar in
+    UTC, and advances only from emulated cycles. Realtime mode defaults to host
+    wall time and uses host monotonic time after construction.
     """
 
     CLOCK_HZ = 100_000_000   # must match RTL CLOCK_HZ
     MS_DIVISOR = CLOCK_HZ // 1000  # cycles per ms
 
-    def __init__(self, *, realtime: bool = False):
+    def __init__(
+        self,
+        *,
+        realtime: bool = False,
+        initial_epoch_ms: int | None = None,
+    ):
         super().__init__("RTC", RTC_BASE, 0x20)  # 32 bytes
-        now = _datetime.now()
         self.realtime = bool(realtime)
+        if initial_epoch_ms is None:
+            epoch_ms = int(_time.time() * 1000) if self.realtime else 0
+        else:
+            epoch_ms = int(initial_epoch_ms)
+        if not 0 <= epoch_ms < (1 << 64):
+            raise ValueError(
+                "initial_epoch_ms must fit in an unsigned 64-bit value"
+            )
+        try:
+            if self.realtime:
+                now = _datetime.fromtimestamp(epoch_ms / 1000)
+            else:
+                now = _datetime.fromtimestamp(
+                    epoch_ms / 1000,
+                    tz=_timezone.utc,
+                )
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ValueError(
+                "initial_epoch_ms is outside the supported calendar range"
+            ) from exc
         self.uptime_ms: int  = 0
-        self.epoch_ms: int   = int(_time.time() * 1000) & ((1 << 64) - 1)
+        self.epoch_ms: int   = epoch_ms & ((1 << 64) - 1)
         self.sec: int   = now.second
         self.min: int   = now.minute
         self.hour: int  = now.hour
@@ -3406,7 +3426,9 @@ class RTC(Device):
         # Latch registers
         self._uptime_latch: int = 0
         self._epoch_latch: int = 0
-        self._host_mono_anchor: float = _time.monotonic()
+        self._host_mono_anchor: float = (
+            _time.monotonic() if self.realtime else 0.0
+        )
         self._host_uptime_anchor: int = self.uptime_ms
         self._host_epoch_anchor: int = self.epoch_ms
 
@@ -3617,10 +3639,19 @@ class CppRTCProxy(Device):
     CLOCK_HZ = RTC.CLOCK_HZ
     MS_DIVISOR = RTC.MS_DIVISOR
 
-    def __init__(self, cs, *, realtime: bool = False):
+    def __init__(
+        self,
+        cs,
+        *,
+        realtime: bool = False,
+        initial_epoch_ms: int | None = None,
+    ):
         super().__init__("RTC", RTC_BASE, 0x20)
         self._cs = cs
-        reference = RTC(realtime=realtime)
+        reference = RTC(
+            realtime=realtime,
+            initial_epoch_ms=initial_epoch_ms,
+        )
         cs.rtc_init(
             reference.realtime,
             reference.epoch_ms,

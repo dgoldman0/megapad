@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _mp64_accel import ExternalEventKind
+from devices import FramebufferDevice
 from display import (
     FramebufferDisplay,
     _framebuffer_display_config,
@@ -141,13 +143,70 @@ def _display_without_runtime_dependencies():
     return display
 
 
-def test_display_configuration_and_present_use_atomic_framebuffer_methods():
+def test_display_configuration_is_atomic_and_host_present_is_observer_only():
     framebuffer = _AtomicFramebufferView()
 
     assert _framebuffer_display_config(framebuffer) == (3, 640, 360, 3)
     _framebuffer_host_present(framebuffer)
 
-    assert framebuffer.presentations == 1
+    assert framebuffer.presentations == 0
+
+
+def test_explicit_device_host_present_remains_available_for_compatibility():
+    framebuffer = FramebufferDevice()
+
+    _framebuffer_host_present(framebuffer)
+    assert (framebuffer.vsync_count, framebuffer.vblank) == (0, False)
+
+    framebuffer.host_present()
+    assert (framebuffer.vsync_count, framebuffer.vblank) == (1, True)
+
+
+def test_native_framebuffer_tick_matches_segmented_reference_across_frames():
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    native = system.fb
+    reference = FramebufferDevice()
+    for framebuffer in (native, reference):
+        framebuffer.enable = 1
+        framebuffer.cycles_per_frame = 10
+
+    native.tick(37)
+    for cycles in (7, 8, 22):
+        reference.tick(cycles)
+
+    assert native.snapshot() == reference.snapshot()
+    assert (native.vsync_count, native.vblank) == (3, True)
+
+    native.tick(3)
+    reference.tick(3)
+    assert native.snapshot() == reference.snapshot()
+    assert native.vsync_count == 4
+
+
+def test_native_framebuffer_tick_is_overflow_safe_for_uint64_batch():
+    system = MegapadSystem(
+        ram_size=256,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    framebuffer = system.fb
+    framebuffer.enable = 1
+    framebuffer.cycles_per_frame = 3
+
+    framebuffer.tick((1 << 64) - 1)
+
+    assert framebuffer.vsync_count == 0x5555_5555
+    assert framebuffer.vblank
 
 
 def test_busy_native_scanout_skips_frame_without_raw_memory_fallback(
@@ -196,6 +255,13 @@ def test_display_uart_geometry_transaction_composes_with_native_system_state():
     assert (system.uart_geom.cols, system.uart_geom.rows) == (100, 35)
     assert not system.uart_geom.has_resize_request()
     assert system.cores[0]._cs.uart_geom_ctrl == 0x01
+    assert [
+        event.kind
+        for event in system._native_system.external_event_history
+    ] == [
+        ExternalEventKind.UART_GEOMETRY,
+        ExternalEventKind.UART_GEOMETRY_ACCEPT,
+    ]
 
 
 @pytest.mark.parametrize(

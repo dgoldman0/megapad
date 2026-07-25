@@ -16,6 +16,7 @@
 // =========================================================================
 
 #include <cstdint>
+#include <optional>
 
 struct TimerDevice {
     uint32_t counter = 0;
@@ -102,13 +103,27 @@ struct TimerDevice {
     //  Tick — O(1) batch tick matching Python Timer.tick() exactly
     // -------------------------------------------------------------------
 
-    void tick(uint32_t cycles) {
+    uint64_t next_compare_match_delta() const {
+        constexpr uint64_t COUNTER_MODULUS = uint64_t{1} << 32;
+        const uint64_t delta =
+            (static_cast<uint64_t>(compare) + COUNTER_MODULUS -
+             static_cast<uint64_t>(counter)) %
+            COUNTER_MODULUS;
+        return delta == 0 ? COUNTER_MODULUS : delta;
+    }
+
+    std::optional<uint64_t> next_irq_assertion_delta() const {
+        if (!enabled || !(control & 1) || !(control & 2) || irq_pending)
+            return std::nullopt;
+        return next_compare_match_delta();
+    }
+
+    void tick(uint64_t cycles) {
         if (!(control & 1) || cycles == 0)
             return;
 
         if (cycles == 1) {
-            // Fast path for single-tick
-            counter = (counter + 1) & 0xFFFFFFFF;
+            ++counter;
             if (counter == compare) {
                 status |= 1;
                 if (control & 2)
@@ -119,44 +134,32 @@ struct TimerDevice {
             return;
         }
 
-        // O(1) batch tick
-        uint32_t old = counter;
-        uint32_t cmp = compare;
+        constexpr uint64_t COUNTER_MODULUS = uint64_t{1} << 32;
+        const uint64_t elapsed = cycles;
+        const uint64_t match_delta = next_compare_match_delta();
+
+        if (elapsed < match_delta) {
+            counter = static_cast<uint32_t>(
+                static_cast<uint64_t>(counter) + elapsed);
+            return;
+        }
+
+        status |= 1;
+        if (control & 2)
+            irq_pending = true;
 
         if (control & 4) {
-            // Auto-reload mode: counter resets to 0 on match
-            if (cmp == 0) {
-                status |= 1;
-                if (control & 2)
-                    irq_pending = true;
-                counter = 0;
-                return;
-            }
-            uint32_t gap = (cmp - old) & 0xFFFFFFFF;
-            if (cycles >= gap) {
-                status |= 1;
-                if (control & 2)
-                    irq_pending = true;
-                uint32_t remaining = cycles - gap;
-                counter = (cmp > 0) ? (remaining % cmp) : 0;
-            } else {
-                counter = (old + cycles) & 0xFFFFFFFF;
-            }
+            // The matching increment resets the counter to zero. Subsequent
+            // matches are compare cycles apart, except compare==0 where a
+            // complete 32-bit wrap is required to match zero again.
+            const uint64_t period =
+                compare == 0 ? COUNTER_MODULUS
+                             : static_cast<uint64_t>(compare);
+            counter = static_cast<uint32_t>(
+                (elapsed - match_delta) % period);
         } else {
-            // No auto-reload: check if compare is crossed
-            uint64_t new_val = (uint64_t)old + cycles;
-            if (old < cmp && cmp <= new_val) {
-                status |= 1;
-                if (control & 2)
-                    irq_pending = true;
-            }
-            // Handle 32-bit wrap-around case
-            else if (new_val > 0xFFFFFFFF && cmp <= (new_val & 0xFFFFFFFF)) {
-                status |= 1;
-                if (control & 2)
-                    irq_pending = true;
-            }
-            counter = (uint32_t)(new_val & 0xFFFFFFFF);
+            counter = static_cast<uint32_t>(
+                static_cast<uint64_t>(counter) + elapsed);
         }
     }
 };

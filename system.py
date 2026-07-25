@@ -14,7 +14,7 @@ mailbox (IPI), hardware spinlocks, and cluster enable/disable gating.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
 import weakref
 from typing import Optional, TYPE_CHECKING
@@ -22,6 +22,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
+from _mp64_accel import ExternalEventKind
 from accel_wrapper import (
     HaltError,
     IVEC_BUS_FAULT,
@@ -49,7 +50,7 @@ from devices import (
     NTTDevice, KemDevice, FramebufferDevice,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
-    NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
+    NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
     PortBridgeCSR,
     WotsChainAccel,
 )
@@ -135,6 +136,11 @@ class SystemRunStats:
     system_stop_reason: str = "instruction_limit"
     stop_cycle: int = 0
     event_source_mask: int = 0
+    per_core_interrupts: tuple[int, ...] = ()
+    interrupts_delivered: int = 0
+    external_events_applied: int = 0
+    pending_interrupt_core: int = -1
+    pending_interrupt_vector: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +371,10 @@ class MegapadSystem:
                  hbw_size: int = HBW_SIZE,
                  ext_mem_size: int = 0,
                  vram_size: int = VRAM_DEFAULT_SIZE,
-                 realtime_clock: bool = False):
+                 realtime_clock: bool = False,
+                 rtc_epoch_ms: Optional[int] = None,
+                 terminal_cols: int = 80,
+                 terminal_rows: int = 24):
         self.ram_size = ram_size          # Bank 0 (system RAM)
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
@@ -472,6 +481,7 @@ class MegapadSystem:
             passthrough_port=nic_port,
             passthrough_peer_port=nic_peer_port,
             backend=nic_backend,
+            autostart=False,
         )
         self.sysinfo = SystemInfo(
             bank0_size=ram_size,
@@ -504,23 +514,15 @@ class MegapadSystem:
         self.rtc = CppRTCProxy(
             self.cores[0]._cs,
             realtime=realtime_clock,
+            initial_epoch_ms=rtc_epoch_ms,
         )
 
-        # Determine initial terminal dimensions:
-        # - If no display, use the host terminal size (fallback 80x24)
-        # - Display will override these when it starts
-        try:
-            import os
-            _tsz = os.get_terminal_size()
-            _init_cols, _init_rows = _tsz.columns, _tsz.lines
-        except (OSError, ValueError):
-            _init_cols, _init_rows = 80, 24
-
-        # UART geometry (terminal dimensions) — C++ native
+        # UART geometry is part of deterministic machine state. Interactive
+        # frontends may explicitly publish a different size after startup.
         self.uart_geom = CppUartGeomProxy(
             self.cores[0]._cs,
-            initial_cols=_init_cols,
-            initial_rows=_init_rows,
+            initial_cols=terminal_cols,
+            initial_rows=terminal_rows,
         )
 
         # AES, SHA3, NIC, TRNG, UART, FB, Timer, and RTC are handled by native
@@ -581,7 +583,6 @@ class MegapadSystem:
         cpu0_cs = self.cores[0]._cs
         cpu0_cs.nic_init(bytes(self.nic.mac))
         cpu0_cs.nic_sync_mem_ptrs()
-        cpu0_cs.nic_set_link_up(self.nic.link_up)
 
         # TX callback: mirror to Python facade + send via backend.
         def _tx_cb(frame: bytes, py_nic=_py_nic, be=_be) -> bool:
@@ -597,43 +598,99 @@ class MegapadSystem:
         cpu0_cs.init_trng()
         cpu0_cs.uart_init()
 
-        # Wire backend RX → C++ NIC queue
+        # Route host ingress through the SystemState timestamped journal. Keep
+        # only weak edges back to the system because the backend and native TX
+        # callback can both outlive an individual frontend reference.
         self.uart.attach_native(cpu0_cs)
-        # Native TX callbacks retain the Python NIC facade from inside an
-        # opaque std::function.  Every facade/backend edge back to the borrowed
-        # core must therefore be weak or Python's GC cannot see and break the
-        # resulting SystemState ownership cycle.
+        system_ref = weakref.ref(self)
         cpu0_ref = weakref.ref(cpu0_cs)
+        uart_ref = weakref.ref(self.uart)
         py_nic_ref = weakref.ref(self.nic)
-        if nic_backend is not None:
-            def _native_rx(
-                frame: bytes,
-                _cs_ref=cpu0_ref,
-                _nic_ref=py_nic_ref,
-            ):
-                cs = _cs_ref()
-                if cs is not None:
-                    cs.nic_inject_frame(frame)
-                    return
-                py_nic = _nic_ref()
-                if py_nic is not None:
-                    py_nic._backend_rx(frame)
-            nic_backend.on_rx_frame = _native_rx
 
-        # Patch inject_frame so test & CLI injections reach C++ queue
+        def _scheduled_uart_inject(
+            data: bytes | str,
+            _system_ref=system_ref,
+            _uart_ref=uart_ref,
+        ) -> None:
+            system = _system_ref()
+            if system is not None:
+                system.schedule_uart_input(data)
+                return
+            uart = _uart_ref()
+            if uart is not None:
+                UART.inject_input(uart, data)
+
+        self.uart.inject_input = _scheduled_uart_inject
+
         def _dual_inject(
             data: bytes,
+            _system_ref=system_ref,
             _cs_ref=cpu0_ref,
             _nic_ref=py_nic_ref,
-        ):
-            cs = _cs_ref()
-            if cs is not None:
-                return cs.nic_inject_frame(data)
+        ) -> bool:
+            payload = bytes(data)
+            system = _system_ref()
+            if system is not None:
+                cs = _cs_ref()
+                if cs is None:
+                    return False
+                if not payload or len(payload) > NIC_MAX_FRAME:
+                    # Preserve inject_frame()'s compatibility contract while
+                    # letting the authoritative native NIC latch the error.
+                    return bool(cs.nic_inject_frame(payload))
+                rx_count = cs.nic_get_rx_count()
+                _, staged = system._schedule_external_event(
+                    ExternalEventKind.NIC_RX,
+                    at_cycle=None,
+                    payload=payload,
+                )
+                if staged:
+                    return True
+                return cs.nic_get_rx_count() != rx_count
             py_nic = _nic_ref()
             if py_nic is None:
                 return False
-            return NetworkDevice.inject_frame(py_nic, data)
+            return NetworkDevice.inject_frame(py_nic, payload)
+
         self.nic.inject_frame = _dual_inject
+
+        geometry_ref = weakref.ref(self.uart_geom)
+
+        def _scheduled_geometry_update(
+            cols: int,
+            rows: int,
+            _system_ref=system_ref,
+            _geometry_ref=geometry_ref,
+        ) -> None:
+            system = _system_ref()
+            if system is not None:
+                system.schedule_terminal_resize(cols, rows)
+                return
+            geometry = _geometry_ref()
+            if geometry is not None:
+                CppUartGeomProxy.host_set_size(
+                    geometry,
+                    cols,
+                    rows,
+                )
+
+        # Existing display/session callers keep their façade while every
+        # spontaneous host geometry update enters the same timestamped log.
+        self.uart_geom.host_set_size = _scheduled_geometry_update
+
+        if nic_backend is not None:
+            def _native_rx(frame: bytes, _inject=_dual_inject) -> None:
+                _inject(frame)
+
+            self.nic.set_host_rx_handler(_native_rx)
+        else:
+            # Legacy UDP passthrough must use the same journal-aware route.
+            self.nic.set_host_rx_handler(_dual_inject)
+
+        # No transport can deliver a frame before every RX source resolves to
+        # the journal-aware façade above.
+        self.nic.start()
+        cpu0_cs.nic_set_link_up(self.nic.link_up)
 
         # Patch CPU memory access functions to intercept MMIO (per core)
         for cpu in self.cores:
@@ -666,6 +723,145 @@ class MegapadSystem:
 
         # Boot state
         self._booted = False
+
+    # -----------------------------------------------------------------
+    #  Timestamped host ingress
+    # -----------------------------------------------------------------
+
+    def _schedule_external_event(
+        self,
+        kind,
+        *,
+        at_cycle: Optional[int],
+        payload: bytes = b"",
+        argument0: int = 0,
+        argument1: int = 0,
+    ) -> tuple[int, bool]:
+        """Journal one host event, returning ``(sequence, staged)``."""
+        if at_cycle is None:
+            staged = self._native_system._try_stage_external_event(
+                kind,
+                payload,
+                argument0,
+                argument1,
+            )
+            if staged is not None:
+                return int(staged), True
+
+        with self._scheduler_lock:
+            if at_cycle is None:
+                # Execution may have opened staging after the optimistic
+                # attempt but before this thread acquired the Python lock.
+                staged = self._native_system._try_stage_external_event(
+                    kind,
+                    payload,
+                    argument0,
+                    argument1,
+                )
+                if staged is not None:
+                    return int(staged), True
+            current_cycle = int(self._native_system.system_cycles)
+            event_cycle = current_cycle if at_cycle is None else at_cycle
+            sequence = self._native_system._schedule_external_event(
+                kind,
+                event_cycle,
+                payload,
+                argument0,
+                argument1,
+            )
+            if event_cycle == current_cycle:
+                self._native_system._apply_due_external_events()
+            return int(sequence), False
+
+    def _begin_external_event_staging_locked(self) -> None:
+        """Open the live-ingress gate for one positive execution call."""
+        self._native_system._begin_external_event_staging()
+
+    def _close_external_event_staging_locked(self) -> int:
+        """Publish live host ingress at the completed execution boundary."""
+        return int(
+            self._native_system._close_external_event_staging()
+        )
+
+    def schedule_uart_input(
+        self,
+        data: bytes | bytearray | memoryview | str,
+        *,
+        at_cycle: Optional[int] = None,
+    ) -> int:
+        """Schedule host-to-guest UART bytes at an exact system cycle."""
+        payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        sequence, _ = self._schedule_external_event(
+            ExternalEventKind.UART_RX,
+            at_cycle=at_cycle,
+            payload=payload,
+        )
+        return sequence
+
+    def schedule_nic_frame(
+        self,
+        data: bytes | bytearray | memoryview,
+        *,
+        at_cycle: Optional[int] = None,
+    ) -> int:
+        """Schedule one raw Ethernet frame at an exact system cycle."""
+        sequence, _ = self._schedule_external_event(
+            ExternalEventKind.NIC_RX,
+            at_cycle=at_cycle,
+            payload=bytes(data),
+        )
+        return sequence
+
+    def schedule_terminal_resize(
+        self,
+        cols: int,
+        rows: int,
+        *,
+        at_cycle: Optional[int] = None,
+    ) -> int:
+        """Schedule host terminal geometry at an exact system cycle."""
+        sequence, _ = self._schedule_external_event(
+            ExternalEventKind.UART_GEOMETRY,
+            at_cycle=at_cycle,
+            argument0=cols,
+            argument1=rows,
+        )
+        return sequence
+
+    def schedule_terminal_resize_response(
+        self,
+        generation: int,
+        *,
+        accepted: bool,
+        cols: int = 0,
+        rows: int = 0,
+        at_cycle: Optional[int] = None,
+    ) -> int:
+        """Journal the host outcome of one firmware resize request."""
+        if not 0 <= generation < (1 << 64):
+            raise ValueError("terminal resize generation must fit uint64")
+        if accepted and (
+            not 0 <= cols < (1 << 16)
+            or not 0 <= rows < (1 << 16)
+        ):
+            raise ValueError("terminal resize dimensions must fit uint16")
+        packed_dimensions = (
+            (int(rows) << 16) | int(cols)
+            if accepted
+            else 0
+        )
+        kind = (
+            ExternalEventKind.UART_GEOMETRY_ACCEPT
+            if accepted
+            else ExternalEventKind.UART_GEOMETRY_DENY
+        )
+        sequence, _ = self._schedule_external_event(
+            kind,
+            at_cycle=at_cycle,
+            argument0=generation,
+            argument1=packed_dimensions,
+        )
+        return sequence
 
     # -----------------------------------------------------------------
     #  IPI wiring
@@ -951,17 +1147,26 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def boot(self, entry: int = BOOT_VECTOR):
-        """Cold boot the system.
+        """Warm-boot processor and cluster execution state.
 
         Full cores start at the entry point (matching FPGA behaviour).
         Core 0 gets SP at top of RAM; secondary cores get per-core stacks.
         Micro-cores start halted — they are only activated when their
-        cluster is enabled via the SysInfo CLUSTER_EN register.
+        cluster is enabled via the SysInfo CLUSTER_EN register. Authoritative
+        system time, shared ingress devices, and their event journal survive.
         """
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            self._boot_locked(entry)
+
+    def _boot_locked(self, entry: int) -> None:
         self.storage.reset()
         self.audio.reset()
         self._native_system._reset_cycle_execution()
         self._native_system._main_bus_reset()
+        # System time and shared input devices intentionally survive this CPU
+        # reboot, so retain their external-event provenance and future events.
+        # A later full-SoC reset must clear devices and the journal together.
         self._scheduler_cursor = 0
         for cluster in self.clusters:
             cluster.enabled = False
@@ -995,8 +1200,17 @@ class MegapadSystem:
     #  Execution
     # -----------------------------------------------------------------
 
+    def _next_external_event_cycle(self) -> Optional[int]:
+        """Return the earliest unapplied host-input cycle, if one exists."""
+        cycle = self._native_system.external_event_next_cycle
+        return None if cycle is None else int(cycle)
+
     def _require_cycle_unbounded_execution(self) -> None:
         """Reject unsafe post-hoc execution while a timed event is active."""
+        if self._next_external_event_cycle() is not None:
+            raise RuntimeError(
+                "pending external events require cycle-bounded native execution"
+            )
         _cycles, deadline, _sources = self._native_system.event_horizon()
         if deadline is not None:
             raise RuntimeError(
@@ -1026,6 +1240,16 @@ class MegapadSystem:
         """Advance time while the scheduler transaction lock is held."""
         if cycles < 0:
             raise ValueError("system cycles cannot advance by a negative value")
+        if cycles and not self._native_system.native_batch_active:
+            current = int(self._native_system.system_cycles)
+            external_cycle = self._next_external_event_cycle()
+            if (
+                external_cycle is not None
+                and external_cycle <= current + cycles
+            ):
+                raise RuntimeError(
+                    "system time cannot cross a pending external event"
+                )
         if (
             self._native_system.cycle_execution_pending
             and not self._native_system.native_batch_active
@@ -1047,14 +1271,10 @@ class MegapadSystem:
                 "system clock cannot cross the active main bus timeout"
             )
 
-        remaining = cycles
-        while remaining:
-            delta = min(remaining, 0xFFFF_FFFF)
-            self._native_system.advance_system_cycles(delta)
-            for device in self.bus.devices:
-                if device not in (self.timer, self.fb, self.rtc):
-                    device.tick(delta)
-            remaining -= delta
+        self._native_system.advance_system_cycles(cycles)
+        for device in self.bus.devices:
+            if device not in (self.timer, self.fb, self.rtc):
+                device.tick(cycles)
 
     def _deliver_pending_interrupts(self) -> None:
         """Deliver timer and IPI lines at a completed execution boundary."""
@@ -1104,6 +1324,10 @@ class MegapadSystem:
                     cpu.idle = False
                 elif self._any_nic_rx():
                     cpu.idle = False
+
+    @staticmethod
+    def _prepare_native_cycle_batch() -> None:
+        """Leave cycle-mode eligibility and wake transitions to native code."""
 
     @staticmethod
     def _settle_native_batch_trap_error(
@@ -1264,7 +1488,7 @@ class MegapadSystem:
         result = self._native_system.run_full_core_cycle_batch(
             max_system_cycles,
             callback_sets,
-            self._prepare_native_full_core_batch,
+            self._prepare_native_cycle_batch,
             self._settle_native_core_continuation,
             self._settle_native_system_round,
             max_instructions,
@@ -1274,21 +1498,34 @@ class MegapadSystem:
             stop_reason = stop_reason.rsplit(".", 1)[-1]
         stop_reason = stop_reason.lower()
         return SystemRunStats(
-            int(result.instructions_executed),
-            int(result.system_cycles_advanced),
-            tuple(int(value) for value in result.per_core_instructions),
-            tuple(int(value) for value in result.per_core_cycles),
-            tuple(int(value) for value in result.per_core_dispatches),
-            tuple(
+            instructions_executed=int(result.instructions_executed),
+            system_cycles_advanced=int(result.system_cycles_advanced),
+            per_core_instructions=tuple(
+                int(value) for value in result.per_core_instructions
+            ),
+            per_core_cycles=tuple(
+                int(value) for value in result.per_core_cycles
+            ),
+            per_core_dispatches=tuple(
+                int(value) for value in result.per_core_dispatches
+            ),
+            per_core_stop_reasons=tuple(
                 tuple(int(value) for value in reasons)
                 for reasons in result.per_core_stop_reasons
             ),
-            True,
-            int(result.rounds),
-            int(result.continuations),
-            stop_reason,
-            int(result.stop_cycle),
-            int(result.event_source_mask),
+            native_scheduler=True,
+            native_rounds=int(result.rounds),
+            native_continuations=int(result.continuations),
+            system_stop_reason=stop_reason,
+            stop_cycle=int(result.stop_cycle),
+            event_source_mask=int(result.event_source_mask),
+            per_core_interrupts=tuple(
+                int(value) for value in result.per_core_interrupts
+            ),
+            interrupts_delivered=int(result.interrupts_delivered),
+            external_events_applied=int(result.external_events_applied),
+            pending_interrupt_core=int(result.pending_interrupt_core),
+            pending_interrupt_vector=int(result.pending_interrupt_vector),
         )
 
     def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
@@ -1327,7 +1564,13 @@ class MegapadSystem:
         """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
-            return self._step_locked()
+            self._require_cycle_unbounded_execution()
+            self._begin_external_event_staging_locked()
+            try:
+                result = self._step_locked()
+            finally:
+                self._close_external_event_staging_locked()
+            return result
 
     def _step_locked(self) -> int:
         """Execute one deterministic round under the scheduler lock."""
@@ -1416,7 +1659,23 @@ class MegapadSystem:
     def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
         """Execute a deterministic one-worker batch with exact cycle totals."""
         with self._scheduler_lock:
-            return self._run_batch_stats_locked(n)
+            self._reject_native_batch_reentry()
+            if n <= 0:
+                return self._run_batch_stats_locked(n)
+            self._require_cycle_unbounded_execution()
+            self._begin_external_event_staging_locked()
+            try:
+                result = self._run_batch_stats_locked(n)
+            finally:
+                applied = self._close_external_event_staging_locked()
+            if applied:
+                result = replace(
+                    result,
+                    external_events_applied=(
+                        result.external_events_applied + applied
+                    ),
+                )
+            return result
 
     def run_cycle_batch(
         self,
@@ -1429,7 +1688,12 @@ class MegapadSystem:
         ``max_system_cycles`` is a relative authoritative-system-clock
         budget. ``max_instructions`` remains an aggregate retirement cap.
         A tied event horizon wins over the caller cycle limit and remains
-        armed for the caller to process or reschedule.
+        armed for the caller to process or reschedule. Timestamped UART, NIC,
+        and geometry input is applied at its exact cycle. Eligible TIMER/IPI
+        lines are accepted before the core's next fetch, with IPI priority and
+        trap-frame traffic arbitrated on the equal round-robin main bus. A
+        pending interrupt without an installed IVT returns
+        ``unhandled_interrupt`` without changing that core.
         """
         if max_system_cycles < 0:
             raise ValueError("max_system_cycles cannot be negative")
@@ -1441,16 +1705,48 @@ class MegapadSystem:
             raise OverflowError("max_instructions exceeds int64")
 
         with self._scheduler_lock:
+            if self.rtc.realtime:
+                raise RuntimeError(
+                    "cycle-bounded execution does not support a realtime RTC"
+                )
             self._reject_native_batch_reentry()
+            current_cycle = int(self._native_system.system_cycles)
+            if max_system_cycles > (1 << 64) - 1 - current_cycle:
+                raise OverflowError("cycle batch deadline overflow")
+            if (
+                self._native_system.main_bus_timeout_cycle is not None
+                and not self._native_system.cycle_execution_pending
+            ):
+                raise RuntimeError(
+                    "cycle-bounded execution cannot adopt an external "
+                    "active main-bus grant"
+                )
             if not self._native_full_core_batch_eligible():
                 raise RuntimeError(
                     "cycle-bounded execution currently requires canonical "
                     "native full cores without micro-core clusters"
                 )
-            return self._run_native_full_core_cycle_batch(
-                max_system_cycles,
-                max_instructions,
-            )
+            if max_system_cycles == 0 or max_instructions == 0:
+                return self._run_native_full_core_cycle_batch(
+                    max_system_cycles,
+                    max_instructions,
+                )
+            self._begin_external_event_staging_locked()
+            try:
+                result = self._run_native_full_core_cycle_batch(
+                    max_system_cycles,
+                    max_instructions,
+                )
+            finally:
+                applied = self._close_external_event_staging_locked()
+            if applied:
+                result = replace(
+                    result,
+                    external_events_applied=(
+                        result.external_events_applied + applied
+                    ),
+                )
+            return result
 
     def _run_batch_stats_locked(self, n: int) -> SystemRunStats:
         """Execute one system batch under the scheduler transaction lock."""

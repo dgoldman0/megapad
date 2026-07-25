@@ -270,14 +270,24 @@ struct FramebufferDevice {
     //  Tick — advance vsync counter based on accumulated cycles
     // -------------------------------------------------------------------
 
-    void tick(uint32_t cycles) {
+    void tick(uint64_t cycles) {
         std::lock_guard<std::mutex> guard(mutex);
-        if (!(enable & 1))
+        if (!(enable & 1) || cycles == 0 || cycles_per_frame == 0)
             return;
-        frame_cycles += cycles;
-        if (frame_cycles >= cycles_per_frame) {
-            frame_cycles -= cycles_per_frame;
-            vsync_count = (vsync_count + 1) & 0xFFFFFFFF;
+
+        uint64_t completed_frames =
+            cycles / cycles_per_frame;
+        const uint64_t remainder =
+            cycles % cycles_per_frame;
+        const uint64_t accumulated =
+            static_cast<uint64_t>(frame_cycles) + remainder;
+        completed_frames +=
+            accumulated / cycles_per_frame;
+        frame_cycles = static_cast<uint32_t>(
+            accumulated % cycles_per_frame);
+        if (completed_frames != 0) {
+            vsync_count = static_cast<uint32_t>(
+                static_cast<uint64_t>(vsync_count) + completed_frames);
             vblank = true;
         }
     }

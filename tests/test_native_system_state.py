@@ -378,8 +378,7 @@ def test_native_system_clock_advances_all_shared_cycle_devices_once() -> None:
     core0.timer_counter = 9
     core0.fb_init()
     core0.fb_enable = 1
-    # One bulk tick intentionally publishes at most one vsync even when its
-    # delta spans two frame thresholds; preserve that current device contract.
+    # One bulk tick accounts for every completed virtual frame.
     core0.fb_cycles_per_frame = delta // 2
     core0.rtc_init(False, 1_000, 1, 2, 3, 4, 5, 2026, 6)
     core0.rtc_uptime_ms = 41
@@ -390,7 +389,7 @@ def test_native_system_clock_advances_all_shared_cycle_devices_once() -> None:
 
     assert owner.system_cycles == delta
     assert core0.timer_counter == core1.timer_counter == 9 + delta
-    assert core0.fb_vsync_count == core1.fb_vsync_count == 1
+    assert core0.fb_vsync_count == core1.fb_vsync_count == 2
     assert core0.fb_vblank and core1.fb_vblank
     assert core0.rtc_uptime_ms == core1.rtc_uptime_ms == 42
     assert core0.rtc_epoch_ms == core1.rtc_epoch_ms == 1_001
@@ -426,13 +425,15 @@ def test_native_system_clock_rejects_invalid_moves_atomically() -> None:
 
     invalid_advances = (
         lambda: owner.advance_system_to(owner.system_cycles - 1),
-        lambda: owner.advance_system_cycles(1 << 32),
-        lambda: owner.advance_system_to(owner.system_cycles + (1 << 32)),
     )
     for advance in invalid_advances:
         with pytest.raises(ValueError):
             advance()
         assert state() == before
+
+    owner.advance_system_cycles(1 << 32)
+    assert owner.system_cycles == 9 + (1 << 32)
+    assert core.timer_counter == 9
 
 
 def test_native_system_clock_rejects_reentrant_guest_callbacks() -> None:

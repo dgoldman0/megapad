@@ -100,7 +100,10 @@ struct RTCDevice {
         sec_prescaler = 0;
         uptime_latch = 0;
         epoch_latch = 0;
-        reanchor_host_clock_unlocked();
+        host_uptime_anchor = uptime_ms;
+        host_epoch_anchor = epoch_ms;
+        if (realtime)
+            reanchor_host_clock_unlocked();
     }
 
     bool handles(uint32_t mmio_offset) const {
@@ -112,7 +115,21 @@ struct RTCDevice {
 
     void reanchor_host_clock() {
         std::lock_guard<std::mutex> guard(mutex);
-        reanchor_host_clock_unlocked();
+        if (realtime)
+            reanchor_host_clock_unlocked();
+    }
+
+    void set_realtime(bool use_realtime) {
+        std::lock_guard<std::mutex> guard(mutex);
+        if (realtime == use_realtime)
+            return;
+        if (use_realtime) {
+            realtime = true;
+            reanchor_host_clock_unlocked();
+            return;
+        }
+        sync_realtime_unlocked();
+        realtime = false;
     }
 
     void sync_realtime() {
@@ -201,9 +218,11 @@ struct RTCDevice {
         if (!(ctrl & 1) || cycles == 0)
             return;
 
-        uint64_t total_cycles = ms_prescaler + cycles;
-        uint64_t elapsed_ms = total_cycles / MS_DIVISOR;
-        ms_prescaler = total_cycles % MS_DIVISOR;
+        uint64_t elapsed_ms = cycles / MS_DIVISOR;
+        const uint64_t partial_cycles =
+            ms_prescaler + cycles % MS_DIVISOR;
+        elapsed_ms += partial_cycles / MS_DIVISOR;
+        ms_prescaler = partial_cycles % MS_DIVISOR;
         if (elapsed_ms == 0)
             return;
 
@@ -211,11 +230,12 @@ struct RTCDevice {
         epoch_ms += elapsed_ms;
         status |= 0x04;
 
-        uint64_t total_ms = sec_prescaler + elapsed_ms;
-        uint64_t elapsed_seconds = total_ms / 1000;
-        sec_prescaler = total_ms % 1000;
-        while (elapsed_seconds-- > 0)
-            advance_one_second_unlocked();
+        uint64_t elapsed_seconds = elapsed_ms / 1000;
+        const uint64_t partial_ms =
+            sec_prescaler + elapsed_ms % 1000;
+        elapsed_seconds += partial_ms / 1000;
+        sec_prescaler = partial_ms % 1000;
+        advance_seconds_unlocked(elapsed_seconds);
     }
 
     Snapshot snapshot() const {
@@ -310,6 +330,71 @@ private:
         }
     }
 
+    void advance_one_day_unlocked() {
+        dow = static_cast<uint8_t>((dow + 1) % 7);
+        const uint8_t dim = days_in_month(mon, year);
+        if (day < dim) {
+            ++day;
+        } else {
+            day = 1;
+            if (mon < 12) {
+                ++mon;
+            } else {
+                mon = 1;
+                ++year;
+            }
+        }
+    }
+
+    void advance_seconds_unlocked(uint64_t elapsed_seconds) {
+        if (elapsed_seconds == 0)
+            return;
+
+        // Guest byte writes can temporarily leave time-of-day fields outside
+        // their calendar range. One reference transition normalizes them
+        // before the bounded bulk path.
+        if (sec > 59 || min > 59 || hour > 23) {
+            advance_one_second_unlocked();
+            if (--elapsed_seconds == 0)
+                return;
+        }
+
+        status |= 0x02;
+        const uint64_t current_second =
+            static_cast<uint64_t>(hour) * 3600 +
+            static_cast<uint64_t>(min) * 60 +
+            sec;
+        if (alarm_sec <= 59 &&
+            alarm_min <= 59 &&
+            alarm_hour <= 23) {
+            const uint64_t alarm_second =
+                static_cast<uint64_t>(alarm_hour) * 3600 +
+                static_cast<uint64_t>(alarm_min) * 60 +
+                alarm_sec;
+            uint64_t until_alarm =
+                (alarm_second + 86400 - current_second) % 86400;
+            if (until_alarm == 0)
+                until_alarm = 86400;
+            if (elapsed_seconds >= until_alarm) {
+                status |= 0x01;
+                if (ctrl & 2)
+                    irq_pending = true;
+            }
+        }
+
+        const uint64_t total_seconds =
+            current_second + elapsed_seconds;
+        uint64_t elapsed_days = total_seconds / 86400;
+        const uint64_t second_of_day =
+            total_seconds % 86400;
+        while (elapsed_days-- != 0)
+            advance_one_day_unlocked();
+        hour = static_cast<uint8_t>(second_of_day / 3600);
+        min = static_cast<uint8_t>(
+            (second_of_day % 3600) / 60);
+        sec = static_cast<uint8_t>(second_of_day % 60);
+    }
+
     void advance_one_second_unlocked() {
         status |= 0x02;
         if (sec < 59) {
@@ -324,19 +409,7 @@ private:
                     ++hour;
                 } else {
                     hour = 0;
-                    dow = static_cast<uint8_t>((dow + 1) % 7);
-                    uint8_t dim = days_in_month(mon, year);
-                    if (day < dim) {
-                        ++day;
-                    } else {
-                        day = 1;
-                        if (mon < 12) {
-                            ++mon;
-                        } else {
-                            mon = 1;
-                            ++year;
-                        }
-                    }
+                    advance_one_day_unlocked();
                 }
             }
         }

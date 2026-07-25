@@ -82,13 +82,8 @@ def _framebuffer_display_config(fb) -> tuple[int, int, int, int]:
 
 
 def _framebuffer_host_present(fb) -> None:
-    """Publish a displayed frame without splitting the device transition."""
-    host_present = getattr(fb, "host_present", None)
-    if callable(host_present):
-        host_present()
-        return
-    fb.vsync_count = (fb.vsync_count + 1) & 0xFFFF_FFFF
-    fb.vblank = True
+    """Observe host presentation without changing guest framebuffer state."""
+    _ = fb
 
 
 # ── Color Palette ─────────────────────────────────────────────────────
@@ -1838,13 +1833,42 @@ class FramebufferDisplay:
             return None
         generation, cols, rows = request
         accepted = 20 <= cols <= 400 and 5 <= rows <= 200
+        schedule_response = getattr(
+            self.sys,
+            "schedule_terminal_resize_response",
+            None,
+        )
         if accepted:
             # A failing host operation leaves REQ_RESIZE set for retry.
             apply_resize(cols, rows)
-            completed = geometry.host_accept_resize_if_pending(
-                generation, cols, rows)
+            if schedule_response is not None:
+                current_request = geometry.snapshot_resize_request()
+                completed = (
+                    current_request is not None
+                    and current_request[0] == generation
+                )
+                schedule_response(
+                    generation,
+                    accepted=True,
+                    cols=cols,
+                    rows=rows,
+                )
+            else:
+                completed = geometry.host_accept_resize_if_pending(
+                    generation, cols, rows)
         else:
-            completed = geometry.host_deny_resize_if_pending(generation)
+            if schedule_response is not None:
+                current_request = geometry.snapshot_resize_request()
+                completed = (
+                    current_request is not None
+                    and current_request[0] == generation
+                )
+                schedule_response(
+                    generation,
+                    accepted=False,
+                )
+            else:
+                completed = geometry.host_deny_resize_if_pending(generation)
         if not completed:
             # Firmware changed/cancelled the request while the host operation
             # ran.  A successful host resize is irreversible here, so publish
