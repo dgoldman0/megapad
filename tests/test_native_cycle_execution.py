@@ -24,6 +24,7 @@ from devices import (
     STORAGE_RESULT_PARTIAL,
     STORAGE_RESULT_RESET_ABORTED,
     STORAGE_STATUS_BUSY,
+    STORAGE_STATUS_PRESENT,
     STORAGE_STATUS_RESULT_VALID,
     UART_BASE,
 )
@@ -604,11 +605,43 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
 
     bus_state = phase0._main_bus_state(system)
 
-    assert phase0.SCHEMA_VERSION == 6
-    assert phase0.STATE_SCHEMA_VERSION == 7
+    assert phase0.SCHEMA_VERSION == 7
+    assert phase0.STATE_SCHEMA_VERSION == 8
+    assert bus_state["arbitration_contract"] == {
+        "hard_qos_role": (
+            "determines must/may eligibility and reserved entitlement only"
+        ),
+        "simultaneously_eligible_peer_order": "equal_round_robin",
+        "unused_reserved_capacity": "work_conserving",
+        "best_effort_weights": "none",
+        "secondary_ordering_biases": [],
+    }
     assert bus_state["cycle_execution_pending"]
     assert len(bus_state["cycle_pending_requests"]) == 1
     assert bus_state["last_issue_sequences"] == [1, 0, 0, 0]
+    assert bus_state["dma_coordinator"] == {
+        "schema_version": 1,
+        "endpoints": [
+            {
+                "requester_id": -1,
+                "main_bus_port_id": 2,
+                "next_issue_sequence": 1,
+                "highest_observed_token": 0,
+                "timeline_active": False,
+                "pending_token": None,
+                "pending_request": None,
+            },
+            {
+                "requester_id": -2,
+                "main_bus_port_id": 3,
+                "next_issue_sequence": 1,
+                "highest_observed_token": 0,
+                "timeline_active": False,
+                "pending_token": None,
+                "pending_request": None,
+            },
+        ],
+    }
     with pytest.raises(RuntimeError, match="requires quiescent"):
         phase0._state_observation(
             SimpleNamespace(system=system, metrics={})
@@ -625,6 +658,16 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
     assert captured["cycle_execution_pending"] is False
     assert captured["cycle_pending_requests"] == []
     assert captured["next_grant_sequence"] == 1
+    storage_dma = observation["canonical_state"]["shared_devices"][
+        "storage"
+    ]["dma_fsm"]
+    assert storage_dma["next_token"] == 1
+    assert storage_dma["pending"] is None
+    nic_dma = observation["canonical_state"][
+        "native_devices_per_full_core"
+    ][0]["nic"]["cycle_dma"]
+    assert nic_dma["next_token"] == 1
+    assert nic_dma["pending"] is None
     journal = observation["canonical_state"]["shared_devices"][
         "external_events"
     ]
@@ -635,6 +678,167 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
     assert journal["pending"][0]["payload"] == phase0._blob_summary(
         b"oracle"
     )
+
+
+def test_native_nic_dma_snapshot_rejects_active_system_batch():
+    system = _system(assemble("st.b r1, r2\nhalt"))
+    system.cpu.regs[1] = MMIO_BASE + STORAGE_BASE
+    system.cpu.regs[2] = STORAGE_CMD_RESET
+    snapshot_errors = []
+    original_write8 = system.storage.write8
+
+    def write8_with_reentrant_snapshot(offset, value):
+        original_write8(offset, value)
+        if offset == 0x00:
+            try:
+                system.cpu._cs.nic_cycle_dma_snapshot()
+            except RuntimeError as error:
+                snapshot_errors.append(str(error))
+
+    system.storage.write8 = write8_with_reentrant_snapshot
+
+    result = system.run_cycle_batch(16, max_instructions=10)
+
+    assert result.system_stop_reason == "all_halted"
+    assert snapshot_errors == [
+        "native NIC DMA state cannot be observed during an "
+        "active native system batch"
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload_bytes",
+    [SECTOR_SIZE, SECTOR_SIZE * 2],
+)
+def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
+    payload_bytes,
+):
+    import bench_phase0_concurrency as phase0
+
+    report = phase0._strict_nic_disk_dma_report(
+        payload_bytes,
+        repeats=1,
+        warmups=0,
+    )
+
+    assert all(report["validation"].values())
+    sample = report["timed_samples"][0]
+    assert sample["stop_reason"] == "all_halted"
+    assert sample["payload_bytes_per_endpoint"] == payload_bytes
+    assert sample["total_dma_payload_bytes"] == payload_bytes * 2
+    assert sample["main_bus"]["port_count"] == 4
+    assert sample["main_bus"]["nic_port_id"] == 2
+    assert sample["main_bus"]["disk_port_id"] == 3
+    assert sample["main_bus"]["issue_sequence_deltas"] == [
+        1,
+        1,
+        payload_bytes,
+        payload_bytes,
+    ]
+    assert sample["main_bus"]["grant_sequence_delta"] == (
+        payload_bytes * 2 + 2
+    )
+    assert not any(sample["main_bus"]["sticky_bus_errors"])
+
+    trace = report["service_trace"]["ports"]
+    assert trace == [
+        0,
+        1,
+        *[
+            port
+            for _ in range(payload_bytes)
+            for port in (2, 3)
+        ],
+    ]
+    assert report["arbitration_contract"][
+        "simultaneously_eligible_peer_order"
+    ] == "equal_round_robin"
+    assert report["arbitration_contract"]["best_effort_weights"] == "none"
+    assert report["arbitration_contract"][
+        "secondary_ordering_biases"
+    ] == []
+    assert report["configuration"]["one_shot_cycle_budget"] == (
+        payload_bytes * 8 + 256
+    )
+    assert report["configuration"][
+        "max_instructions_per_cycle_batch"
+    ] == phase0.STRICT_DMA_MAX_INSTRUCTIONS
+    assert report["configuration"]["ordering_evidence_scope"] == (
+        "two continuously eligible default-policy NIC and disk peers"
+    )
+
+    observation = sample["observation"]
+    assert observation["state_schema_version"] == 8
+    metrics = observation["workload_metrics"]["strict_nic_disk_dma"]
+    assert metrics["published_nic_frames"]["entries"] == [
+        metrics["nic_source"]
+    ]
+    assert metrics["storage_destination"] == metrics["storage_media"]
+    assert metrics["storage_status"] == (
+        STORAGE_STATUS_PRESENT | STORAGE_STATUS_RESULT_VALID
+    )
+    assert metrics["storage_transferred_sectors"] == (
+        payload_bytes // SECTOR_SIZE
+    )
+    assert all(metrics["validation"].values())
+
+    canonical = observation["canonical_state"]
+    coordinator = canonical["shared_devices"]["main_bus"][
+        "dma_coordinator"
+    ]
+    assert coordinator["endpoints"] == [
+        {
+            "requester_id": -1,
+            "main_bus_port_id": 2,
+            "next_issue_sequence": payload_bytes + 1,
+            "highest_observed_token": payload_bytes,
+            "timeline_active": False,
+            "pending_token": None,
+            "pending_request": None,
+        },
+        {
+            "requester_id": -2,
+            "main_bus_port_id": 3,
+            "next_issue_sequence": payload_bytes + 1,
+            "highest_observed_token": payload_bytes,
+            "timeline_active": False,
+            "pending_token": None,
+            "pending_request": None,
+        },
+    ]
+    storage_dma = canonical["shared_devices"]["storage"]["dma_fsm"]
+    assert storage_dma["strict_cycle_submission"] is False
+    assert storage_dma["async"] is False
+    assert storage_dma["phase"] is None
+    assert storage_dma["sector_index"] == 0
+    assert storage_dma["byte_index"] == 0
+    assert storage_dma["sector_data"]["size_bytes"] == 0
+    assert storage_dma["write_sector"]["size_bytes"] == 0
+    assert storage_dma["read_port_prefix"]["size_bytes"] == 0
+    assert storage_dma["next_token"] == payload_bytes + 1
+    assert storage_dma["pending"] is None
+    nic_dma = canonical["native_devices_per_full_core"][0]["nic"][
+        "cycle_dma"
+    ]
+    assert set(nic_dma) == {
+        "schema_version",
+        "rx_active",
+        "tx_active",
+        "rx_base",
+        "tx_base",
+        "tx_length",
+        "rx_index",
+        "tx_index",
+        "rx_frame",
+        "tx_frame",
+        "next_token",
+        "pending",
+    }
+    assert nic_dma["schema_version"] == 1
+    assert nic_dma["rx_active"] is False
+    assert nic_dma["tx_active"] is False
+    assert nic_dma["next_token"] == payload_bytes + 1
+    assert nic_dma["pending"] is None
 
 
 def test_cycle_api_rejects_invalid_or_unsupported_calls_before_mutation():

@@ -25,6 +25,12 @@ Default coverage:
 * periodic timer interrupts; and
 * legacy sequential storage/display orchestration around guest VRAM writes.
 
+The report also carries a separate strict-cycle DMA probe. Two guest cores
+start one native NIC transmit and one storage read, then the physical NIC and
+disk ports contend under the integrated equal round-robin arbiter. DMA bytes
+and virtual cycles are reported separately from the legacy instruction/MIPS
+scenarios.
+
 Examples::
 
     python3 bench_phase0_concurrency.py --quick --json
@@ -64,8 +70,17 @@ from accel_wrapper import ACCEL_AVAILABLE
 from asm import assemble
 from devices import (
     MMIO_BASE,
+    NIC_BASE,
+    SECTOR_SIZE,
+    STORAGE_BASE,
     STORAGE_CMD_READ,
     STORAGE_RESULT_OK,
+    STORAGE_STATUS_BUSY,
+    STORAGE_STATUS_ERROR,
+    STORAGE_STATUS_MEDIA_CHANGED,
+    STORAGE_STATUS_PRESENT,
+    STORAGE_STATUS_REJECTED,
+    STORAGE_STATUS_RESULT_VALID,
     SYSINFO_BASE,
     TIMER_BASE,
 )
@@ -75,9 +90,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 7
+STATE_SCHEMA_VERSION = 8
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -88,8 +103,21 @@ FRAME_WIDTH = 128
 FRAME_HEIGHT = 96
 FRAME_STRIDE = FRAME_WIDTH
 FRAME_BYTES = FRAME_STRIDE * FRAME_HEIGHT
+STRICT_DMA_DEFAULT_BYTES = 1024
+STRICT_DMA_QUICK_BYTES = SECTOR_SIZE
+STRICT_DMA_MAX_INSTRUCTIONS = 16
 
 DETERMINISTIC_RTC_EPOCH_MS = 946_684_800_000  # 2000-01-01T00:00:00Z
+
+ARBITRATION_CONTRACT = {
+    "hard_qos_role": (
+        "determines must/may eligibility and reserved entitlement only"
+    ),
+    "simultaneously_eligible_peer_order": "equal_round_robin",
+    "unused_reserved_capacity": "work_conserving",
+    "best_effort_weights": "none",
+    "secondary_ordering_biases": [],
+}
 
 STATE_COMPARISON_SCOPE = {
     "oracle": (
@@ -120,7 +148,8 @@ STATE_COMPARISON_SCOPE = {
         "and TRNG state as observed through every full core",
         "native system-cycle and event-horizon state, one-worker scheduler "
         "cursor, complete main-bus arbiter snapshot, observable quiescent "
-        "cycle-execution state, the immutable timestamped external-event "
+        "cycle-execution state, complete NIC/disk DMA coordinator and "
+        "resumable-FSM diagnostics, the immutable timestamped external-event "
         "pending/history journal including payload hashes and sequence order, "
         "registered-device layout, platform topology, and benchmark "
         "orchestration counters",
@@ -317,6 +346,19 @@ COVERAGE_METADATA = {
                 "DeviceBus-routed storage, NIC DMA, or DMA/display/core overlap"
             ),
         },
+        {
+            "scenario": "strict_nic_disk_dma",
+            "classification": "strict_cycle_real_dma_baseline",
+            "covers": (
+                "guest-issued native NIC transmit and storage read bytes "
+                "contending on their physical main-bus ports"
+            ),
+            "does_not_claim": (
+                "hard-QoS eligibility transitions, unused-reservation "
+                "borrowing, active-display overlap, or the deferred Phase 4 "
+                "bulk-DMA optimization"
+            ),
+        },
     ],
     "deferred_gates": [
         {
@@ -332,12 +374,13 @@ COVERAGE_METADATA = {
             "gate": "nic_dma_with_active_display_overlap",
             "status": "deferred",
             "reason": (
-                "the bounded Phase 0 harness has no honest concurrent NIC-DMA "
-                "and display execution path; the existing storage/display "
-                "case is deliberately sequential"
+                "the strict DMA probe now exercises real NIC and disk ports, "
+                "but it deliberately leaves display traffic inactive; the "
+                "existing storage/display case remains sequential"
             ),
         },
     ],
+    "main_bus_arbitration_contract": ARBITRATION_CONTRACT,
 }
 
 
@@ -388,6 +431,11 @@ loop:
     br loop
 """
 
+STRICT_DMA_COMMAND = """
+    st.b r1, r2
+    halt
+"""
+
 
 def parse_count(text: str) -> int:
     """Parse a positive count with optional k/m/g suffix."""
@@ -423,6 +471,15 @@ def parse_nonnegative_int(text: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid integer: {text!r}") from exc
     if value < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
+    return value
+
+
+def parse_strict_dma_bytes(text: str) -> int:
+    value = parse_count(text)
+    if value % SECTOR_SIZE != 0 or value > 1024:
+        raise argparse.ArgumentTypeError(
+            "strict DMA bytes must be 512 or 1024"
+        )
     return value
 
 
@@ -933,11 +990,42 @@ def _bus_grant_state(grant) -> dict:
     }
 
 
+def _dma_coordinator_state(system: MegapadSystem) -> dict:
+    snapshot = system._native_system._cycle_dma_snapshot()
+    endpoints = []
+    for endpoint in snapshot["endpoints"]:
+        pending = endpoint["pending_request"]
+        endpoints.append({
+            "requester_id": int(endpoint["requester_id"]),
+            "main_bus_port_id": int(endpoint["main_bus_port_id"]),
+            "next_issue_sequence": int(
+                endpoint["next_issue_sequence"]
+            ),
+            "highest_observed_token": int(
+                endpoint["highest_observed_token"]
+            ),
+            "timeline_active": bool(endpoint["timeline_active"]),
+            "pending_token": (
+                None
+                if endpoint["pending_token"] is None
+                else int(endpoint["pending_token"])
+            ),
+            "pending_request": (
+                None if pending is None else _bus_request_state(pending)
+            ),
+        })
+    return {
+        "schema_version": int(snapshot["schema_version"]),
+        "endpoints": endpoints,
+    }
+
+
 def _main_bus_state(system: MegapadSystem) -> dict:
     owner = system._native_system
     snapshot = owner._main_bus_snapshot()
     pending = owner._cycle_pending_bus_requests()
     return {
+        "arbitration_contract": ARBITRATION_CONTRACT,
         "schema_version": int(snapshot.schema_version),
         "port_count": int(snapshot.port_count),
         "last_grant": int(snapshot.last_grant),
@@ -969,6 +1057,7 @@ def _main_bus_state(system: MegapadSystem) -> dict:
         "cycle_pending_requests": [
             _bus_request_state(request) for request in pending
         ],
+        "dma_coordinator": _dma_coordinator_state(system),
     }
 
 
@@ -1143,6 +1232,8 @@ def _native_device_state(cpu) -> dict:
     nic_window = bytes(
         cs.nic_read8(address) for address in range(0x0400, 0x0480)
     )
+    nic_dma = cs.nic_cycle_dma_snapshot()
+    nic_pending = nic_dma["pending"]
     rtc = cs.rtc_snapshot()
     return {
         "core_id": int(cpu.core_id),
@@ -1229,6 +1320,34 @@ def _native_device_state(cpu) -> dict:
             "tx_count": int(cs.nic_get_tx_count()),
             "irq_pending": bool(cs.nic_irq_pending()),
             "mmio_visible_window": _blob_summary(nic_window),
+            "cycle_dma": {
+                "schema_version": int(nic_dma["schema_version"]),
+                "rx_active": bool(nic_dma["rx_active"]),
+                "tx_active": bool(nic_dma["tx_active"]),
+                "rx_base": int(nic_dma["rx_base"]),
+                "tx_base": int(nic_dma["tx_base"]),
+                "tx_length": int(nic_dma["tx_length"]),
+                "rx_index": int(nic_dma["rx_index"]),
+                "tx_index": int(nic_dma["tx_index"]),
+                "rx_frame": _blob_summary(nic_dma["rx_frame"]),
+                "tx_frame": _blob_summary(nic_dma["tx_frame"]),
+                "next_token": int(nic_dma["next_token"]),
+                "pending": (
+                    None
+                    if nic_pending is None
+                    else {
+                        "token": int(nic_pending["token"]),
+                        "owner": {
+                            0: "none",
+                            1: "rx",
+                            2: "tx",
+                        }[int(nic_pending["owner"])],
+                        "address": int(nic_pending["address"]),
+                        "write": bool(nic_pending["write"]),
+                        "write_data": int(nic_pending["write_data"]),
+                    }
+                ),
+            },
         },
         "trng": {
             "enabled": bool(cs.trng_enabled()),
@@ -1248,6 +1367,7 @@ def _storage_state(storage) -> dict:
         }
         for fault in storage._faults
     ]
+    dma_pending = storage._dma_pending
     return {
         "capacity_sectors": int(storage._capacity_sectors),
         "media": _blob_summary(storage._image_data),
@@ -1278,6 +1398,31 @@ def _storage_state(storage) -> dict:
         "active_transferred": int(storage._active_transferred),
         "stalled": bool(storage._stalled),
         "queued_faults": faults,
+        "dma_fsm": {
+            "strict_cycle_submission": bool(
+                storage._strict_cycle_submission
+            ),
+            "async": bool(storage._dma_async),
+            "phase": storage._dma_phase,
+            "sector_index": int(storage._dma_sector_index),
+            "byte_index": int(storage._dma_byte_index),
+            "sector_data": _blob_summary(storage._dma_sector_data),
+            "write_sector": _blob_summary(storage._dma_write_sector),
+            "read_port_prefix": _blob_summary(
+                storage._dma_read_port_prefix
+            ),
+            "pending": (
+                None
+                if dma_pending is None
+                else {
+                    "token": int(dma_pending.token),
+                    "write": bool(dma_pending.write),
+                    "address": int(dma_pending.address),
+                    "write_data": int(dma_pending.write_data),
+                }
+            ),
+            "next_token": int(storage._dma_next_token),
+        },
     }
 
 
@@ -1441,10 +1586,36 @@ def _shared_device_state(system: MegapadSystem) -> dict:
 
 
 def _state_observation(workload: Workload) -> dict:
+    with workload.system._scheduler_lock:
+        return _state_observation_locked(workload)
+
+
+def _state_observation_locked(workload: Workload) -> dict:
     system = workload.system
-    if system._native_system.cycle_execution_pending:
+    coordinator = _dma_coordinator_state(system)
+    storage_active, storage_pending = system.storage.cycle_dma_view()
+    nic_dma = system.cpu._cs.nic_cycle_dma_snapshot()
+    endpoint_pending = any(
+        endpoint["timeline_active"]
+        or endpoint["pending_token"] is not None
+        or endpoint["pending_request"] is not None
+        for endpoint in coordinator["endpoints"]
+    )
+    device_pending = (
+        storage_active
+        or storage_pending is not None
+        or bool(nic_dma["rx_active"])
+        or bool(nic_dma["tx_active"])
+        or nic_dma["pending"] is not None
+    )
+    if (
+        system._native_system.cycle_execution_pending
+        or endpoint_pending
+        or device_pending
+    ):
         raise RuntimeError(
-            "Phase 0 canonical state requires quiescent cycle execution"
+            "Phase 0 canonical state requires quiescent cycle and DMA "
+            "execution"
         )
     cores = [_core_state(cpu) for cpu in system.cores]
     memory = {
@@ -1586,6 +1757,480 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
             "restored_to_prior_state": gc_restored_to_prior_state,
         },
         "observation": observation,
+    }
+
+
+def _write_le_register(write8, offset: int, value: int, width: int) -> None:
+    for index in range(width):
+        write8(
+            offset + index,
+            (value >> (8 * index)) & 0xFF,
+        )
+
+
+def _build_strict_nic_disk_dma(
+    payload_bytes: int,
+) -> tuple[Workload, dict]:
+    if (
+        payload_bytes % SECTOR_SIZE != 0
+        or not SECTOR_SIZE <= payload_bytes <= 1024
+    ):
+        raise ValueError(
+            "strict DMA payload must be 512 or 1024 bytes"
+        )
+
+    temp_dir = tempfile.TemporaryDirectory(
+        prefix="megapad_phase0_strict_dma_"
+    )
+    image_path = Path(temp_dir.name) / "strict-dma-storage.img"
+    nic_payload = bytes(
+        (index * 73 + 41) & 0xFF
+        for index in range(payload_bytes)
+    )
+    disk_payload = bytes(
+        (index * 13 + 7) & 0xFF
+        for index in range(payload_bytes)
+    )
+
+    try:
+        image_path.write_bytes(disk_payload)
+        system, _ = _base_system(
+            2,
+            STRICT_DMA_COMMAND,
+            storage_image=str(image_path),
+        )
+        nic_source = DMA_DATA_BASE
+        disk_target = DMA_DATA_BASE + 0x4000
+        system.cpu.mem[
+            nic_source:nic_source + payload_bytes
+        ] = nic_payload
+
+        native = system.cpu._cs
+        _write_le_register(
+            native.nic_write8,
+            NIC_BASE + 0x02,
+            nic_source,
+            8,
+        )
+        _write_le_register(
+            native.nic_write8,
+            NIC_BASE + 0x0A,
+            payload_bytes,
+            2,
+        )
+
+        storage = system.storage
+        storage.write8(0x01, STORAGE_STATUS_MEDIA_CHANGED)
+        _write_le_register(storage.write8, 0x02, 0, 4)
+        _write_le_register(
+            storage.write8,
+            0x06,
+            disk_target,
+            8,
+        )
+        storage.write8(0x0E, payload_bytes // SECTOR_SIZE)
+
+        nic_core, disk_core = system.cores
+        nic_core.regs[1] = MMIO_BASE + NIC_BASE
+        nic_core.regs[2] = 0x01
+        disk_core.regs[1] = MMIO_BASE + STORAGE_BASE
+        disk_core.regs[2] = STORAGE_CMD_READ
+
+        metrics = {
+            "mode": "strict_cycle",
+            "payload_bytes_per_endpoint": payload_bytes,
+            "total_dma_payload_bytes": payload_bytes * 2,
+            "nic_operation": "transmit_memory_read",
+            "storage_operation": "read_media_to_memory",
+            "nic_source": _blob_summary(nic_payload),
+            "storage_media": _blob_summary(disk_payload),
+            "arbitration_contract": ARBITRATION_CONTRACT,
+            "ordering_evidence_scope": (
+                "two continuously eligible default-policy NIC and disk peers"
+            ),
+        }
+        workload = Workload(
+            system,
+            metrics={"strict_nic_disk_dma": metrics},
+            cleanup=temp_dir.cleanup,
+        )
+        return workload, {
+            "nic_payload": nic_payload,
+            "disk_payload": disk_payload,
+            "nic_source": nic_source,
+            "disk_target": disk_target,
+        }
+    except Exception:
+        temp_dir.cleanup()
+        raise
+
+
+def _execute_strict_nic_disk_dma(
+    system: MegapadSystem,
+    payload_bytes: int,
+    *,
+    cycle_slice: int | None,
+) -> dict:
+    owner = system._native_system
+    before = owner._main_bus_snapshot()
+    trace = []
+    instructions = 0
+    system_cycles = 0
+    calls = 0
+    final = None
+    cycle_budget = payload_bytes * 8 + 256
+    max_calls = (
+        cycle_budget + 8
+        if cycle_slice is not None
+        else 2
+    )
+
+    for _ in range(max_calls):
+        previous_grant_sequence = int(
+            owner._main_bus_snapshot().next_grant_sequence
+        )
+        final = system.run_cycle_batch(
+            cycle_budget if cycle_slice is None else cycle_slice,
+            max_instructions=STRICT_DMA_MAX_INSTRUCTIONS,
+        )
+        calls += 1
+        instructions += int(final.instructions_executed)
+        system_cycles += int(final.system_cycles_advanced)
+        current_bus = owner._main_bus_snapshot()
+        grant_delta = (
+            int(current_bus.next_grant_sequence)
+            - previous_grant_sequence
+        )
+        if cycle_slice is not None:
+            if grant_delta > 1:
+                raise RuntimeError(
+                    "one-cycle DMA replay observed multiple grants"
+                )
+            if grant_delta == 1:
+                trace.append(int(current_bus.last_grant))
+
+        quiescent = (
+            all(cpu.halted for cpu in system.cores)
+            and not owner.cycle_execution_pending
+            and not owner._cycle_pending_bus_requests()
+            and owner._main_bus_snapshot().active_grant is None
+        )
+        if quiescent and final.system_stop_reason == "all_halted":
+            break
+        if cycle_slice is None:
+            if quiescent:
+                cycle_slice = 1
+                continue
+            raise RuntimeError(
+                "strict DMA probe exceeded its one-shot cycle budget"
+            )
+    else:
+        raise RuntimeError("strict DMA probe did not quiesce")
+
+    return {
+        "cycle_batch_calls": calls,
+        "instructions_retired": instructions,
+        "system_cycles_advanced": system_cycles,
+        "stop_reason": final.system_stop_reason,
+        "service_trace": trace,
+        "before_bus": before,
+        "after_bus": owner._main_bus_snapshot(),
+    }
+
+
+def _strict_nic_disk_dma_sample(
+    payload_bytes: int,
+    *,
+    cycle_slice: int | None = None,
+    used_for_throughput: bool = True,
+) -> dict:
+    workload, context = _build_strict_nic_disk_dma(payload_bytes)
+    system = workload.system
+    owner = system._native_system
+    gc_enabled_before = gc.isenabled()
+    collected_before_timing = gc.collect()
+    try:
+        if gc_enabled_before:
+            gc.disable()
+        gc_enabled_during_timing = gc.isenabled()
+        try:
+            wall_start = time.perf_counter()
+            cpu_start = time.process_time()
+            execution = _execute_strict_nic_disk_dma(
+                system,
+                payload_bytes,
+                cycle_slice=cycle_slice,
+            )
+            process_cpu_s = time.process_time() - cpu_start
+            wall_s = time.perf_counter() - wall_start
+        finally:
+            if gc_enabled_before:
+                gc.enable()
+        gc_restored_to_prior_state = (
+            gc.isenabled() == gc_enabled_before
+        )
+
+        before = execution.pop("before_bus")
+        after = execution.pop("after_bus")
+        nic_requester = owner.NIC_DMA_REQUESTER_ID
+        disk_requester = owner.DISK_DMA_REQUESTER_ID
+        nic_port = owner.main_bus_port_for_requester(nic_requester)
+        disk_port = owner.main_bus_port_for_requester(disk_requester)
+        issue_deltas = [
+            int(end) - int(start)
+            for start, end in zip(
+                before.last_issue_sequences,
+                after.last_issue_sequences,
+            )
+        ]
+        grant_delta = (
+            int(after.next_grant_sequence)
+            - int(before.next_grant_sequence)
+        )
+        native = system.cpu._cs
+        storage = system.storage
+        destination = bytes(
+            system.cpu.mem[
+                context["disk_target"]:
+                context["disk_target"] + payload_bytes
+            ]
+        )
+        published_frames = list(system.nic.tx_queue)
+        storage_status = storage.read8(0x01)
+        coordinator = _dma_coordinator_state(system)
+        checks = {
+            "all_halted":
+                execution["stop_reason"] == "all_halted",
+            "nic_payload_exact":
+                published_frames == [context["nic_payload"]],
+            "storage_payload_exact":
+                destination == context["disk_payload"],
+            "nic_issue_count_exact":
+                issue_deltas[nic_port] == payload_bytes,
+            "disk_issue_count_exact":
+                issue_deltas[disk_port] == payload_bytes,
+            "command_issue_counts_exact":
+                issue_deltas[:2] == [1, 1],
+            "grant_count_exact":
+                grant_delta == payload_bytes * 2 + 2,
+            "storage_terminal_result":
+                storage.result == STORAGE_RESULT_OK
+                and storage.completion == 1
+                and storage.transferred
+                    == payload_bytes // SECTOR_SIZE,
+            "storage_terminal_status_exact":
+                storage_status
+                == (
+                    STORAGE_STATUS_PRESENT
+                    | STORAGE_STATUS_RESULT_VALID
+                )
+                and not bool(
+                    storage_status
+                    & (
+                        STORAGE_STATUS_BUSY
+                        | STORAGE_STATUS_ERROR
+                        | STORAGE_STATUS_REJECTED
+                        | STORAGE_STATUS_MEDIA_CHANGED
+                    )
+                ),
+            "nic_terminal_result":
+                native.nic_get_tx_count() == 1
+                and native.nic_tx_queue_size() == 1
+                and not bool(
+                    native.nic_read8(NIC_BASE + 0x01) & 0x01
+                ),
+            "coordinator_quiescent": (
+                not owner.cycle_execution_pending
+                and not owner._cycle_pending_bus_requests()
+                and after.active_grant is None
+                and all(
+                    not endpoint["timeline_active"]
+                    and endpoint["pending_token"] is None
+                    and endpoint["pending_request"] is None
+                    for endpoint in coordinator["endpoints"]
+                )
+            ),
+            "no_sticky_bus_error":
+                int(after.sticky_bus_errors[nic_port]) == 0
+                and int(after.sticky_bus_errors[disk_port]) == 0,
+        }
+        failed = [
+            name for name, passed in checks.items() if not passed
+        ]
+        if failed:
+            raise RuntimeError(
+                "strict NIC/disk DMA probe failed: "
+                + ", ".join(failed)
+            )
+
+        deterministic_metrics = workload.metrics[
+            "strict_nic_disk_dma"
+        ]
+        deterministic_metrics.update({
+            "nic_requester_id": int(nic_requester),
+            "disk_requester_id": int(disk_requester),
+            "nic_main_bus_port_id": int(nic_port),
+            "disk_main_bus_port_id": int(disk_port),
+            "issue_sequence_deltas": issue_deltas,
+            "main_bus_grant_sequence_delta": grant_delta,
+            "published_nic_frames": _ordered_blob_queue(
+                published_frames
+            ),
+            "storage_destination": _blob_summary(destination),
+            "storage_result": int(storage.result),
+            "storage_status": int(storage_status),
+            "storage_completion": int(storage.completion),
+            "storage_transferred_sectors": int(storage.transferred),
+            "native_nic_tx_count": int(native.nic_get_tx_count()),
+            "validation": checks,
+        })
+        observation = _state_observation(workload)
+    finally:
+        if gc.isenabled() != gc_enabled_before:
+            if gc_enabled_before:
+                gc.enable()
+            else:
+                gc.disable()
+        workload.close()
+
+    total_bytes = payload_bytes * 2
+    return {
+        "used_for_throughput": used_for_throughput,
+        "cycle_slice": cycle_slice,
+        "payload_bytes_per_endpoint": payload_bytes,
+        "total_dma_payload_bytes": total_bytes,
+        "wall_time_s": wall_s,
+        "process_cpu_time_s": process_cpu_s,
+        "host_cpu_utilization_percent":
+            (process_cpu_s / wall_s * 100.0) if wall_s else None,
+        "dma_payload_bytes_per_s":
+            (total_bytes / wall_s) if wall_s else None,
+        "virtual_cycles_per_dma_payload_byte":
+            execution["system_cycles_advanced"] / total_bytes,
+        **execution,
+        "main_bus": {
+            "port_count": int(after.port_count),
+            "nic_port_id": int(nic_port),
+            "disk_port_id": int(disk_port),
+            "issue_sequence_deltas": issue_deltas,
+            "grant_sequence_delta": grant_delta,
+            "sticky_bus_errors": [
+                int(value) for value in after.sticky_bus_errors
+            ],
+        },
+        "validation": checks,
+        "cyclic_gc": {
+            "enabled_before_timing": gc_enabled_before,
+            "collected_objects_before_timing": collected_before_timing,
+            "enabled_during_timing": gc_enabled_during_timing,
+            "disabled_by_harness": gc_enabled_before,
+            "restored_to_prior_state": gc_restored_to_prior_state,
+        },
+        "observation": observation,
+    }
+
+
+def _strict_nic_disk_dma_report(
+    payload_bytes: int,
+    *,
+    repeats: int,
+    warmups: int,
+) -> dict:
+    for _ in range(warmups):
+        _strict_nic_disk_dma_sample(
+            payload_bytes,
+            used_for_throughput=False,
+        )
+    samples = [
+        _strict_nic_disk_dma_sample(payload_bytes)
+        for _ in range(repeats)
+    ]
+    sliced = _strict_nic_disk_dma_sample(
+        payload_bytes,
+        cycle_slice=1,
+        used_for_throughput=False,
+    )
+    nic_port = sliced["main_bus"]["nic_port_id"]
+    disk_port = sliced["main_bus"]["disk_port_id"]
+    expected_trace = [
+        0,
+        1,
+        *[
+            port
+            for _ in range(payload_bytes)
+            for port in (nic_port, disk_port)
+        ],
+    ]
+    trace = sliced["service_trace"]
+    timed_oracles = [
+        sample["observation"]["behavior_oracle_sha256"]
+        for sample in samples
+    ]
+    sliced_oracle = sliced["observation"][
+        "behavior_oracle_sha256"
+    ]
+    rates = [
+        sample["dma_payload_bytes_per_s"] for sample in samples
+    ]
+    walls = [sample["wall_time_s"] for sample in samples]
+    validations = {
+        "all_timed_samples_valid": all(
+            all(sample["validation"].values()) for sample in samples
+        ),
+        "sliced_replay_valid": all(sliced["validation"].values()),
+        "timed_repeats_deterministic":
+            len(set(timed_oracles)) == 1,
+        "sliced_replay_matches_timed_oracle":
+            bool(timed_oracles)
+            and all(value == sliced_oracle for value in timed_oracles),
+        "default_eligible_peer_trace_is_equal_round_robin":
+            trace == expected_trace,
+    }
+    return {
+        "description": (
+            "Two guest-issued commands start native NIC TX and storage READ "
+            "DMA on their physical strict-cycle main-bus ports."
+        ),
+        "arbitration_contract": ARBITRATION_CONTRACT,
+        "configuration": {
+            "full_cores": 2,
+            "payload_bytes_per_endpoint": payload_bytes,
+            "total_dma_payload_bytes_per_sample": payload_bytes * 2,
+            "timed_repeats": repeats,
+            "discarded_warmups": warmups,
+            "sliced_oracle_cycle_budget": 1,
+            "one_shot_cycle_budget": payload_bytes * 8 + 256,
+            "max_instructions_per_cycle_batch":
+                STRICT_DMA_MAX_INSTRUCTIONS,
+            "ordering_evidence_scope": (
+                "two continuously eligible default-policy NIC and disk peers"
+            ),
+        },
+        "timed_samples": samples,
+        "sliced_oracle_replay": sliced,
+        "service_trace": {
+            "ports": trace,
+            "summary": _integer_sequence_summary(trace),
+            "expected_summary":
+                _integer_sequence_summary(expected_trace),
+        },
+        "summary": {
+            "median_wall_time_s": statistics.median(walls),
+            "median_dma_payload_bytes_per_s":
+                statistics.median(rates),
+            "median_dma_payload_mib_per_s":
+                statistics.median(rates) / (1024 * 1024),
+            "median_host_cpu_utilization_percent":
+                statistics.median(
+                    sample["host_cpu_utilization_percent"]
+                    for sample in samples
+                ),
+            "virtual_cycles_per_dma_payload_byte":
+                samples[0]["virtual_cycles_per_dma_payload_byte"],
+            "timed_behavior_oracle_sha256": timed_oracles,
+            "sliced_behavior_oracle_sha256": sliced_oracle,
+        },
+        "validation": validations,
     }
 
 
@@ -1973,6 +2618,7 @@ def run_report(
     repeats: int,
     warmups: int,
     warmup_instructions: int,
+    strict_dma_bytes: int = STRICT_DMA_DEFAULT_BYTES,
 ) -> dict:
     core_counts = list(core_counts)
     scenario_names = list(scenario_names)
@@ -2006,6 +2652,11 @@ def run_report(
                 }
             )
 
+    strict_dma = _strict_nic_disk_dma_report(
+        strict_dma_bytes,
+        repeats=repeats,
+        warmups=warmups,
+    )
     validation = {
         "all_instruction_accounting_matches": all(
             result["accounting_probe"][
@@ -2100,6 +2751,20 @@ def run_report(
             for result in results
             for sample in result["timed_samples"]
         ),
+        "strict_dma_all_timed_samples_valid":
+            strict_dma["validation"]["all_timed_samples_valid"],
+        "strict_dma_sliced_replay_valid":
+            strict_dma["validation"]["sliced_replay_valid"],
+        "strict_dma_timed_repeats_deterministic":
+            strict_dma["validation"]["timed_repeats_deterministic"],
+        "strict_dma_sliced_replay_matches_timed_oracle":
+            strict_dma["validation"][
+                "sliced_replay_matches_timed_oracle"
+            ],
+        "strict_dma_default_eligible_peer_trace_is_equal_round_robin":
+            strict_dma["validation"][
+                "default_eligible_peer_trace_is_equal_round_robin"
+            ],
     }
     return {
         "schema": SCHEMA,
@@ -2108,6 +2773,7 @@ def run_report(
         "repository": repository_metadata(),
         "host": host_metadata(),
         "coverage": COVERAGE_METADATA,
+        "main_bus_arbitration_contract": ARBITRATION_CONTRACT,
         "state_comparison_scope": STATE_COMPARISON_SCOPE,
         "configuration": {
             "full_core_counts": list(core_counts),
@@ -2116,6 +2782,8 @@ def run_report(
             "timed_repeats": repeats,
             "warmup_runs_per_case": warmups,
             "warmup_instructions_per_run": warmup_instructions,
+            "strict_dma_payload_bytes_per_endpoint":
+                strict_dma_bytes,
         },
         "measurement_semantics": {
             "timed_throughput":
@@ -2170,9 +2838,18 @@ def run_report(
             "deterministic_platform_initialization":
                 "the harness pins the virtual RTC to "
                 "2000-01-01T00:00:00Z and UART geometry to 80x24",
+            "strict_nic_disk_dma":
+                "separate cycle-bounded byte throughput and virtual-cycle "
+                "measurement; it is not folded into instruction MIPS",
+            "dma_qos_and_ordering":
+                "hard QoS controls must/may eligibility and entitlement; "
+                "simultaneously eligible physical peers use equal "
+                "round-robin, with unused reservation work-conserving and "
+                "no weights or secondary bias",
         },
         "validation": validation,
         "results": results,
+        "strict_nic_disk_dma": strict_dma,
     }
 
 
@@ -2234,6 +2911,17 @@ def print_human(report: dict) -> None:
             f"{callbacks:>10,} {str(deterministic):>14}"
         )
     print()
+    dma = report["strict_nic_disk_dma"]
+    dma_summary = dma["summary"]
+    dma_valid = all(dma["validation"].values())
+    print(
+        "Strict NIC+disk DMA: "
+        f"{dma_summary['median_dma_payload_mib_per_s']:.2f} MiB/s, "
+        f"{dma_summary['virtual_cycles_per_dma_payload_byte']:.3f} "
+        "virtual cycles/payload byte, "
+        f"deterministic={dma_valid}"
+    )
+    print()
     print(
         "Virtual system cycles: reported from the authoritative native clock "
         "in each accounting replay."
@@ -2290,6 +2978,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="aggregate instructions per warmup run (default: 100k)",
     )
     parser.add_argument(
+        "--strict-dma-bytes",
+        type=parse_strict_dma_bytes,
+        default=STRICT_DMA_DEFAULT_BYTES,
+        help=(
+            "bytes transferred by each strict NIC/disk endpoint per sample; "
+            "512 or 1024 (default: 1024)"
+        ),
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="bounded smoke profile: 100k instructions, one repeat, no warmup",
@@ -2319,6 +3016,7 @@ def main(argv: list[str] | None = None) -> int:
         args.repeats = 1
         args.warmups = 0
         args.warmup_instructions = 10_000
+        args.strict_dma_bytes = STRICT_DMA_QUICK_BYTES
 
     report = run_report(
         core_counts=args.cores,
@@ -2327,6 +3025,7 @@ def main(argv: list[str] | None = None) -> int:
         repeats=args.repeats,
         warmups=args.warmups,
         warmup_instructions=args.warmup_instructions,
+        strict_dma_bytes=args.strict_dma_bytes,
     )
     encoded = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:

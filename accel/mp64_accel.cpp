@@ -9765,6 +9765,51 @@ PYBIND11_MODULE(_mp64_accel, m) {
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->write8(mmio_off, val);
         })
+        .def("nic_cycle_dma_snapshot", [](CPUState& s) {
+            if (
+                s.system_batch_active != nullptr &&
+                s.system_batch_active->load(
+                    std::memory_order_acquire)
+            ) {
+                throw std::runtime_error(
+                    "native NIC DMA state cannot be observed during an "
+                    "active native system batch");
+            }
+            auto memory_guard = acquire_shared_memory_use(s);
+            py::dict snapshot;
+            snapshot["schema_version"] = 1;
+            snapshot["rx_active"] = s.nic->rx_dma_active;
+            snapshot["tx_active"] = s.nic->tx_dma_active;
+            snapshot["rx_base"] = s.nic->rx_dma_base;
+            snapshot["tx_base"] = s.nic->tx_dma_base;
+            snapshot["tx_length"] = s.nic->tx_dma_len;
+            snapshot["rx_index"] = s.nic->rx_dma_index;
+            snapshot["tx_index"] = s.nic->tx_dma_index;
+            snapshot["rx_frame"] = py::bytes(
+                reinterpret_cast<const char*>(
+                    s.nic->rx_dma_frame.data()),
+                s.nic->rx_dma_frame.size());
+            snapshot["tx_frame"] = py::bytes(
+                reinterpret_cast<const char*>(
+                    s.nic->tx_dma_frame.data()),
+                s.nic->tx_dma_frame.size());
+            snapshot["next_token"] = s.nic->next_dma_token;
+            if (s.nic->pending_dma_beat.has_value()) {
+                const NICDMABeat& beat =
+                    *s.nic->pending_dma_beat;
+                py::dict pending;
+                pending["token"] = beat.token;
+                pending["owner"] =
+                    static_cast<int>(beat.owner);
+                pending["address"] = beat.address;
+                pending["write"] = beat.write;
+                pending["write_data"] = beat.write_data;
+                snapshot["pending"] = pending;
+            } else {
+                snapshot["pending"] = py::none();
+            }
+            return snapshot;
+        })
         .def("nic_irq_pending", [](const CPUState& s) -> bool {
             return s.nic->irq_pending();
         })
@@ -11050,6 +11095,47 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 return collect_cycle_bus_requests(system);
+            })
+        .def(
+            "_cycle_dma_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                py::list endpoints;
+                for (const DmaCycleState& state :
+                     system.dma_cycle_states) {
+                    py::dict endpoint;
+                    endpoint["requester_id"] =
+                        state.requester_id;
+                    endpoint["main_bus_port_id"] =
+                        system.main_bus_port_for_requester(
+                            state.requester_id);
+                    endpoint["next_issue_sequence"] =
+                        state.next_issue_sequence;
+                    endpoint["highest_observed_token"] =
+                        state.highest_observed_token;
+                    endpoint["timeline_active"] =
+                        state.timeline_active;
+                    if (state.pending_token.has_value()) {
+                        endpoint["pending_token"] =
+                            *state.pending_token;
+                    } else {
+                        endpoint["pending_token"] =
+                            py::none();
+                    }
+                    if (state.pending_request.has_value()) {
+                        endpoint["pending_request"] =
+                            py::cast(*state.pending_request);
+                    } else {
+                        endpoint["pending_request"] =
+                            py::none();
+                    }
+                    endpoints.append(endpoint);
+                }
+                py::dict snapshot;
+                snapshot["schema_version"] = 1;
+                snapshot["endpoints"] = endpoints;
+                return snapshot;
             })
         .def_property(
             "scheduler_cursor",
