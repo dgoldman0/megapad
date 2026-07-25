@@ -1250,3 +1250,376 @@ def test_cycle_execution_rejects_realtime_rtc_before_mutation():
         system.cpu.cycle_count,
         system._native_system.system_cycles,
     ) == before
+
+
+class _CycleDmaStub:
+    """Pure endpoint view plus exactly-once completion for scheduler oracles."""
+
+    def __init__(self, requester_id, beats, completion_log=None):
+        self.requester_id = requester_id
+        self.beats = list(beats)
+        self.inspect_cycles = []
+        self.completions = []
+        self.completion_log = (
+            completion_log if completion_log is not None else []
+        )
+
+    def inspect(self, current_cycle):
+        self.inspect_cycles.append(int(current_cycle))
+        if not self.beats:
+            return None
+        return _mp64_accel.DmaEndpointView(
+            active=True,
+            pending=self.beats[0],
+        )
+
+    def complete(self, token, result):
+        assert self.beats
+        beat = self.beats[0]
+        assert token == beat.token
+        assert result.grant.request.requester_id == self.requester_id
+        assert result.grant.request.address == beat.address
+        assert result.grant.request.operation == beat.operation
+        assert result.grant.request.write_data == beat.write_data
+        record = (
+            self.requester_id,
+            int(token),
+            int(result.grant.grant_cycle),
+            int(result.completion_cycle),
+            int(result.grant.request.address),
+            None if result.read_value is None else int(result.read_value),
+        )
+        self.completions.append(record)
+        self.completion_log.append(record)
+        self.beats.pop(0)
+
+
+def _dma_beat(
+    token,
+    *,
+    ready_cycle=0,
+    operation=_mp64_accel.BusOperation.WRITE,
+    address,
+    write_data=0,
+):
+    return _mp64_accel.DmaBeat(
+        token=token,
+        ready_cycle=ready_cycle,
+        operation=operation,
+        address=address,
+        write_data=write_data,
+    )
+
+
+def _attach_cycle_dma_stubs(system, nic=None, disk=None):
+    system._cycle_dma_callback_sets = lambda: [
+        (
+            (nic.inspect, nic.complete)
+            if nic is not None
+            else (None, None)
+        ),
+        (
+            (disk.inspect, disk.complete)
+            if disk is not None
+            else (None, None)
+        ),
+    ]
+
+
+def _run_equal_dma_case(*, sliced):
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    completion_log = []
+    nic = _CycleDmaStub(
+        owner.NIC_DMA_REQUESTER_ID,
+        [
+            _dma_beat(1, address=0x180, write_data=0xA1),
+            _dma_beat(2, address=0x181, write_data=0xA2),
+        ],
+        completion_log,
+    )
+    disk = _CycleDmaStub(
+        owner.DISK_DMA_REQUESTER_ID,
+        [
+            _dma_beat(101, address=0x182, write_data=0xB1),
+            _dma_beat(102, address=0x183, write_data=0xB2),
+        ],
+        completion_log,
+    )
+    _attach_cycle_dma_stubs(system, nic, disk)
+
+    if sliced:
+        final = None
+        for _ in range(16):
+            final = system.run_cycle_batch(
+                1,
+                max_instructions=100,
+            )
+            if (
+                not nic.beats
+                and not disk.beats
+                and not owner.cycle_execution_pending
+                and final.system_stop_reason == "all_halted"
+            ):
+                break
+        else:
+            pytest.fail("sliced DMA endpoints did not quiesce")
+    else:
+        final = system.run_cycle_batch(
+            32,
+            max_instructions=100,
+        )
+
+    snapshot = owner._main_bus_snapshot()
+    return (
+        bytes(system.cpu.mem[0x180:0x184]),
+        completion_log,
+        int(owner.system_cycles),
+        str(final.system_stop_reason),
+        int(snapshot.last_grant),
+        int(snapshot.next_grant_sequence),
+        tuple(int(value) for value in snapshot.last_issue_sequences),
+        bool(owner.cycle_execution_pending),
+    )
+
+
+def test_dma_endpoints_are_equal_peers_and_slice_identical():
+    whole = _run_equal_dma_case(sliced=False)
+    sliced = _run_equal_dma_case(sliced=True)
+
+    assert whole == sliced
+    memory, completions, cycles, stop, last_grant, grants, issues, pending = (
+        whole
+    )
+    assert memory == b"\xA1\xA2\xB1\xB2"
+    assert [
+        (requester, grant_cycle, completion_cycle)
+        for (
+            requester,
+            _token,
+            grant_cycle,
+            completion_cycle,
+            _address,
+            _read_value,
+        ) in completions
+    ] == [
+        (-1, 0, 1),
+        (-2, 2, 3),
+        (-1, 4, 5),
+        (-2, 6, 7),
+    ]
+    assert cycles == 7
+    assert stop == "all_halted"
+    assert last_grant == 2
+    assert grants == 5
+    assert issues == (0, 2, 2)
+    assert not pending
+
+
+def test_dma_zero_budgets_do_not_inspect_or_mutate_endpoints():
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    nic = _CycleDmaStub(
+        owner.NIC_DMA_REQUESTER_ID,
+        [_dma_beat(1, address=0x180, write_data=0x5A)],
+    )
+    _attach_cycle_dma_stubs(system, nic=nic)
+    before = owner._main_bus_snapshot()
+
+    no_cycles = system.run_cycle_batch(
+        0,
+        max_instructions=10,
+    )
+    no_instructions = system.run_cycle_batch(
+        10,
+        max_instructions=0,
+    )
+
+    after = owner._main_bus_snapshot()
+    assert no_cycles.system_stop_reason == "cycle_limit"
+    assert no_instructions.system_stop_reason == "instruction_limit"
+    assert nic.inspect_cycles == []
+    assert nic.completions == []
+    assert owner.system_cycles == 0
+    assert system.cpu.pc == 0
+    assert bytes(system.cpu.mem[0x180:0x181]) == b"\x00"
+    assert after.next_grant_sequence == before.next_grant_sequence
+    assert after.last_issue_sequences == before.last_issue_sequences
+    assert owner._cycle_pending_bus_requests() == []
+
+
+def test_denied_dma_beat_is_stable_and_cancellation_precedes_replacement():
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    nic = _CycleDmaStub(
+        owner.NIC_DMA_REQUESTER_ID,
+        [
+            _dma_beat(
+                1,
+                ready_cycle=5,
+                address=0x180,
+                write_data=0x31,
+            )
+        ],
+    )
+    _attach_cycle_dma_stubs(system, nic=nic)
+
+    system.run_cycle_batch(1, max_instructions=100)
+    first = owner._cycle_pending_bus_requests()
+    system.run_cycle_batch(1, max_instructions=100)
+    second = owner._cycle_pending_bus_requests()
+
+    assert len(first) == len(second) == 1
+    assert (
+        first[0].requester_id,
+        first[0].ready_cycle,
+        first[0].address,
+        first[0].write_data,
+        first[0].ordering.issue_sequence,
+    ) == (
+        second[0].requester_id,
+        second[0].ready_cycle,
+        second[0].address,
+        second[0].write_data,
+        second[0].ordering.issue_sequence,
+    )
+
+    nic.beats[0] = _dma_beat(
+        1,
+        ready_cycle=5,
+        address=0x180,
+        write_data=0x32,
+    )
+    with pytest.raises(RuntimeError, match="held DMA beat changed"):
+        system.run_cycle_batch(1, max_instructions=100)
+
+    replacement = _system(assemble("halt"))
+    replacement_owner = replacement._native_system
+    endpoint = _CycleDmaStub(
+        replacement_owner.NIC_DMA_REQUESTER_ID,
+        [
+            _dma_beat(
+                1,
+                ready_cycle=10,
+                address=0x180,
+                write_data=0x41,
+            )
+        ],
+    )
+    _attach_cycle_dma_stubs(replacement, nic=endpoint)
+    replacement.run_cycle_batch(1, max_instructions=100)
+
+    endpoint.beats.clear()
+    cancelled = replacement.run_cycle_batch(
+        1,
+        max_instructions=100,
+    )
+    assert cancelled.system_stop_reason == "all_halted"
+    assert replacement_owner._cycle_pending_bus_requests() == []
+    assert not replacement_owner.cycle_execution_pending
+
+    endpoint.beats.append(
+        _dma_beat(
+            2,
+            ready_cycle=replacement_owner.system_cycles,
+            address=0x180,
+            write_data=0x42,
+        )
+    )
+    completed = replacement.run_cycle_batch(
+        8,
+        max_instructions=100,
+    )
+    assert completed.system_stop_reason == "all_halted"
+    assert replacement.cpu.mem[0x180] == 0x42
+    assert len(endpoint.completions) == 1
+
+
+def test_dma_same_address_effects_and_lone_port_bubbles_follow_bus_order():
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    completion_log = []
+    system.cpu.mem[0x190] = 0x11
+    nic = _CycleDmaStub(
+        owner.NIC_DMA_REQUESTER_ID,
+        [_dma_beat(1, address=0x190, write_data=0xAA)],
+        completion_log,
+    )
+    disk = _CycleDmaStub(
+        owner.DISK_DMA_REQUESTER_ID,
+        [
+            _dma_beat(
+                1,
+                operation=_mp64_accel.BusOperation.READ,
+                address=0x190,
+            )
+        ],
+        completion_log,
+    )
+    _attach_cycle_dma_stubs(system, nic, disk)
+
+    result = system.run_cycle_batch(16, max_instructions=100)
+
+    assert result.system_stop_reason == "all_halted"
+    assert system.cpu.mem[0x190] == 0xAA
+    assert [
+        (entry[0], entry[5])
+        for entry in completion_log
+    ] == [
+        (owner.NIC_DMA_REQUESTER_ID, None),
+        (owner.DISK_DMA_REQUESTER_ID, 0xAA),
+    ]
+
+    lone = _system(assemble("halt"))
+    lone_owner = lone._native_system
+    endpoint = _CycleDmaStub(
+        lone_owner.NIC_DMA_REQUESTER_ID,
+        [
+            _dma_beat(1, address=0x1A0, write_data=1),
+            _dma_beat(2, address=0x1A1, write_data=2),
+            _dma_beat(3, address=0x1A2, write_data=3),
+        ],
+    )
+    _attach_cycle_dma_stubs(lone, nic=endpoint)
+
+    lone_result = lone.run_cycle_batch(
+        16,
+        max_instructions=100,
+    )
+
+    assert lone_result.system_stop_reason == "all_halted"
+    assert bytes(lone.cpu.mem[0x1A0:0x1A3]) == b"\x01\x02\x03"
+    assert [
+        (entry[2], entry[3])
+        for entry in endpoint.completions
+    ] == [(0, 1), (3, 4), (6, 7)]
+
+
+def test_warm_boot_clears_cached_dma_endpoint_and_bus_frontier():
+    system = _system(assemble("halt"))
+    owner = system._native_system
+    nic = _CycleDmaStub(
+        owner.NIC_DMA_REQUESTER_ID,
+        [
+            _dma_beat(
+                1,
+                ready_cycle=10,
+                address=0x180,
+                write_data=0x7A,
+            )
+        ],
+    )
+    _attach_cycle_dma_stubs(system, nic=nic)
+    system.run_cycle_batch(1, max_instructions=100)
+
+    assert owner._cycle_pending_bus_requests()
+    assert owner.cycle_execution_pending
+
+    system.boot(entry=0)
+
+    snapshot = owner._main_bus_snapshot()
+    assert owner._cycle_pending_bus_requests() == []
+    assert not owner.cycle_execution_pending
+    assert snapshot.active_grant is None
+    assert snapshot.next_grant_sequence == 1
+    assert snapshot.last_issue_sequences == [0, 0, 0]

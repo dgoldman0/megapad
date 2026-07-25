@@ -1511,9 +1511,11 @@ class MegapadSystem:
             )
             for cpu in self.cores[:self.num_full_cores]
         ]
+        dma_callback_sets = self._cycle_dma_callback_sets()
         result = self._native_system.run_full_core_cycle_batch(
             max_system_cycles,
             callback_sets,
+            dma_callback_sets,
             self._prepare_native_cycle_batch,
             self._settle_native_core_continuation,
             self._settle_native_system_round,
@@ -1553,6 +1555,14 @@ class MegapadSystem:
             pending_interrupt_core=int(result.pending_interrupt_core),
             pending_interrupt_vector=int(result.pending_interrupt_vector),
         )
+
+    @staticmethod
+    def _cycle_dma_callback_sets():
+        """Return inactive NIC/disk endpoints until their FSMs are attached."""
+        return [
+            (None, None),
+            (None, None),
+        ]
 
     def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
         """Run one core under one logical operation and recover exact progress."""

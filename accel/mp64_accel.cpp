@@ -640,6 +640,23 @@ struct BusResult {
     bool target_effects_committed = false;
 };
 
+// A device endpoint describes only the next immutable byte beat that it is
+// ready to place on its physical main-bus port.  Eligibility belongs to the
+// endpoint; ordering among simultaneously eligible endpoints belongs solely
+// to MainBusArbiter's equal round robin.
+struct DmaBeat {
+    uint64_t token = 0;
+    std::optional<uint64_t> ready_cycle;
+    BusOperation operation = BusOperation::READ;
+    uint64_t address = 0;
+    uint8_t write_data = 0;
+};
+
+struct DmaEndpointView {
+    bool active = false;
+    std::optional<DmaBeat> pending;
+};
+
 struct MainBusSnapshot {
     static constexpr uint64_t SCHEMA_VERSION = 1;
 
@@ -1375,6 +1392,15 @@ struct FullCoreCycleState {
     std::unique_ptr<ResumableInstruction> instruction;
 };
 
+struct DmaCycleState {
+    int requester_id = 0;
+    uint64_t next_issue_sequence = 1;
+    uint64_t highest_observed_token = 0;
+    bool timeline_active = false;
+    std::optional<uint64_t> pending_token;
+    std::optional<BusRequest> pending_request;
+};
+
 struct BusYieldSignal {};
 
 class ResumableBusAccess {
@@ -1533,6 +1559,10 @@ struct SystemState {
             cores.push_back(std::move(core));
         }
         full_core_cycle_states.resize(cores.size());
+        dma_cycle_states[0].requester_id =
+            NIC_DMA_REQUESTER_ID;
+        dma_cycle_states[1].requester_id =
+            DISK_DMA_REQUESTER_ID;
         advertised_core_count = all_core_count;
     }
 
@@ -1600,6 +1630,13 @@ struct SystemState {
             state.next_issue_sequence = 1;
             state.instruction.reset();
         }
+        for (DmaCycleState& state : dma_cycle_states) {
+            state.next_issue_sequence = 1;
+            state.highest_observed_token = 0;
+            state.timeline_active = false;
+            state.pending_token.reset();
+            state.pending_request.reset();
+        }
         cycle_execution_pending.store(
             false,
             std::memory_order_release);
@@ -1618,6 +1655,13 @@ struct SystemState {
                 full_core_cycle_states.end(),
                 [](const FullCoreCycleState& state) {
                     return state.instruction != nullptr;
+                }) ||
+            std::any_of(
+                dma_cycle_states.begin(),
+                dma_cycle_states.end(),
+                [](const DmaCycleState& state) {
+                    return state.timeline_active ||
+                           state.pending_request.has_value();
                 });
         cycle_execution_pending.store(
             pending,
@@ -1639,6 +1683,7 @@ struct SystemState {
     MainBusArbiter main_bus{};
     std::vector<std::unique_ptr<CPUState>> cores;
     std::vector<FullCoreCycleState> full_core_cycle_states;
+    std::array<DmaCycleState, 2> dma_cycle_states{};
     std::optional<uint64_t> cycle_target_completion_cycle;
     // Serializes native scheduling with clock/deadline mutation. Recursive
     // acquisition is required when a Python round-settlement callback advances
@@ -4220,6 +4265,12 @@ struct StepCallbacks {
     ResumableBusAccess* bus_access = nullptr;
 };
 
+struct DmaEndpointCallbacks {
+    int requester_id = 0;
+    std::function<DmaEndpointView(uint64_t)> inspect;
+    std::function<void(uint64_t, const BusResult&)> complete;
+};
+
 // MPU check — user-mode memory window enforcement
 static inline void mpu_check(CPUState& s, uint64_t addr) {
     if (s.priv_level && s.mpu_limit > s.mpu_base) {
@@ -4814,6 +4865,88 @@ static inline void direct_system_memory_write8(
         return;
     }
     mem_write8(s, address, value);
+}
+
+struct DmaTargetAccess {
+    std::optional<uint64_t> read_value;
+    bool target_effects_committed = false;
+};
+
+static uint8_t* resolve_dma_memory_byte(
+        MemoryMappings& memory,
+        uint64_t address,
+        bool allow_vram) {
+    if (allow_vram &&
+        memory.vram_mem &&
+        region_contains(
+            memory.vram_base,
+            memory.vram_size,
+            address)) {
+        return memory.vram_mem +
+            (address - memory.vram_base);
+    }
+    if (memory.hbw_mem &&
+        region_contains(
+            memory.hbw_base,
+            memory.hbw_size,
+            address)) {
+        return memory.hbw_mem +
+            (address - memory.hbw_base);
+    }
+    if (memory.ext_mem &&
+        region_contains(
+            memory.ext_mem_base,
+            memory.ext_mem_size,
+            address)) {
+        return memory.ext_mem +
+            (address - memory.ext_mem_base);
+    }
+    if (memory.mem && address < memory.mem_size)
+        return memory.mem + address;
+    return nullptr;
+}
+
+static DmaTargetAccess execute_dma_bus_target(
+        SystemState& system,
+        const BusGrant& grant) {
+    const BusRequest& request = grant.request;
+    if (request.width != BusWidth::BYTE ||
+        request.ordering.port_io) {
+        throw std::logic_error(
+            "DMA target received a non-byte or port-I/O request");
+    }
+
+    // The selected compatibility contract for native NIC DMA has always
+    // returned zero for an unmapped read and dropped an unmapped write.
+    // Although the RTL fabric classifies the top MMIO aperture by address,
+    // making DMA invoke arbitrary MMIO side effects would be a separate
+    // guest-visible architecture decision.  Preserve the native behavior
+    // while still accounting for the byte beat on its real physical port.
+    if (grant.target == BusTarget::MMIO) {
+        if (request.operation == BusOperation::READ)
+            return {uint64_t{0}, false};
+        return {std::nullopt, false};
+    }
+
+    uint8_t* byte = resolve_dma_memory_byte(
+        system.shared_memory,
+        request.address,
+        request.requester_id ==
+            SystemState::DISK_DMA_REQUESTER_ID);
+    if (request.operation == BusOperation::READ) {
+        return {
+            byte
+                ? std::optional<uint64_t>{*byte}
+                : std::optional<uint64_t>{uint64_t{0}},
+            byte != nullptr,
+        };
+    }
+    if (byte != nullptr) {
+        *byte = static_cast<uint8_t>(
+            request.write_data);
+        return {std::nullopt, true};
+    }
+    return {std::nullopt, false};
 }
 
 static std::optional<uint64_t> execute_granted_bus_target(
@@ -7765,10 +7898,168 @@ static CycleCoreProgress run_cycle_core_once(
     return CycleCoreProgress::RETIRED;
 }
 
+static DmaCycleState& cycle_dma_state_for_requester(
+        SystemState& system,
+        int requester_id) {
+    for (DmaCycleState& state : system.dma_cycle_states) {
+        if (state.requester_id == requester_id)
+            return state;
+    }
+    throw std::runtime_error(
+        "cycle DMA requester has no endpoint state");
+}
+
+static const DmaEndpointCallbacks&
+cycle_dma_callbacks_for_requester(
+        const std::vector<DmaEndpointCallbacks>& callbacks,
+        int requester_id) {
+    for (const DmaEndpointCallbacks& endpoint : callbacks) {
+        if (endpoint.requester_id == requester_id)
+            return endpoint;
+    }
+    throw std::runtime_error(
+        "cycle DMA requester has no callback endpoint");
+}
+
+static bool cycle_dma_request_matches_beat(
+        const BusRequest& request,
+        const DmaBeat& beat) {
+    return (
+               !beat.ready_cycle.has_value() ||
+               request.ready_cycle == *beat.ready_cycle
+           ) &&
+           request.operation == beat.operation &&
+           request.address == beat.address &&
+           request.width == BusWidth::BYTE &&
+           request.write_data == beat.write_data &&
+           !request.ordering.port_io;
+}
+
+static void refresh_cycle_dma_requests(
+        SystemState& system,
+        const std::vector<DmaEndpointCallbacks>& callbacks,
+        uint64_t current_cycle) {
+    if (callbacks.size() != system.dma_cycle_states.size()) {
+        throw std::invalid_argument(
+            "one callback endpoint is required for NIC and disk DMA");
+    }
+
+    const MainBusSnapshot bus = system.main_bus.snapshot();
+    for (DmaCycleState& state : system.dma_cycle_states) {
+        const DmaEndpointCallbacks& endpoint =
+            cycle_dma_callbacks_for_requester(
+                callbacks,
+                state.requester_id);
+        if (endpoint.requester_id != state.requester_id ||
+            !endpoint.inspect ||
+            !endpoint.complete) {
+            throw std::invalid_argument(
+                "cycle DMA callbacks do not match their physical endpoint");
+        }
+
+        if (bus.active_grant.has_value() &&
+            bus.active_grant->request.requester_id ==
+                state.requester_id) {
+            if (!state.pending_request.has_value() ||
+                !state.pending_token.has_value()) {
+                throw std::logic_error(
+                    "captured DMA grant has no held endpoint request");
+            }
+            state.timeline_active = true;
+            continue;
+        }
+
+        const DmaEndpointView view =
+            endpoint.inspect(current_cycle);
+        if (view.pending.has_value() && !view.active) {
+            throw std::runtime_error(
+                "inactive DMA endpoint exposed a pending beat");
+        }
+        state.timeline_active =
+            view.active || view.pending.has_value();
+        if (!view.pending.has_value()) {
+            state.pending_token.reset();
+            state.pending_request.reset();
+            continue;
+        }
+
+        const DmaBeat& beat = *view.pending;
+        if (beat.token == 0) {
+            throw std::runtime_error(
+                "DMA beat token must be positive");
+        }
+        if (beat.operation != BusOperation::READ &&
+            beat.operation != BusOperation::WRITE) {
+            throw std::runtime_error(
+                "DMA beat operation is invalid");
+        }
+
+        if (state.pending_token.has_value() &&
+            *state.pending_token == beat.token) {
+            if (!state.pending_request.has_value() ||
+                !cycle_dma_request_matches_beat(
+                    *state.pending_request,
+                    beat)) {
+                throw std::runtime_error(
+                    "held DMA beat changed before completion");
+            }
+            continue;
+        }
+        if (state.pending_token.has_value()) {
+            throw std::runtime_error(
+                "held DMA endpoint replaced its pending beat");
+        }
+        if (beat.token <= state.highest_observed_token) {
+            throw std::runtime_error(
+                "DMA endpoint token did not advance monotonically");
+        }
+        if (state.next_issue_sequence ==
+            std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "DMA issue sequence overflow");
+        }
+
+        const uint64_t issue_sequence =
+            state.next_issue_sequence++;
+        state.highest_observed_token = beat.token;
+        state.pending_token = beat.token;
+        state.pending_request = BusRequest{
+            state.requester_id,
+            beat.ready_cycle.value_or(current_cycle),
+            beat.operation,
+            beat.address,
+            BusWidth::BYTE,
+            beat.write_data,
+            BusOrderingMetadata{
+                system.main_bus_port_for_requester(
+                    state.requester_id),
+                issue_sequence,
+                false,
+            },
+        };
+        system.validate_main_bus_request(
+            *state.pending_request);
+    }
+    system.refresh_cycle_execution_pending();
+}
+
+static bool has_cycle_dma_work(
+        const SystemState& system) {
+    return std::any_of(
+        system.dma_cycle_states.begin(),
+        system.dma_cycle_states.end(),
+        [](const DmaCycleState& state) {
+            return state.timeline_active ||
+                   state.pending_request.has_value();
+        });
+}
+
 static std::vector<BusRequest> collect_cycle_bus_requests(
         const SystemState& system) {
     std::vector<BusRequest> pending;
-    pending.reserve(system.full_core_cycle_states.size());
+    pending.reserve(
+        system.full_core_cycle_states.size() +
+        system.dma_cycle_states.size());
     for (const FullCoreCycleState& state :
          system.full_core_cycle_states) {
         if (state.instruction &&
@@ -7776,6 +8067,11 @@ static std::vector<BusRequest> collect_cycle_bus_requests(
             pending.push_back(
                 *state.instruction->pending_request);
         }
+    }
+    for (const DmaCycleState& state :
+         system.dma_cycle_states) {
+        if (state.pending_request.has_value())
+            pending.push_back(*state.pending_request);
     }
     return pending;
 }
@@ -7824,10 +8120,28 @@ static int full_core_index_for_requester(
         "cycle bus grant does not belong to a full core");
 }
 
+static bool held_dma_request_matches_grant(
+        const BusRequest& pending,
+        const BusRequest& granted) {
+    return pending.requester_id == granted.requester_id &&
+           pending.ready_cycle == granted.ready_cycle &&
+           pending.operation == granted.operation &&
+           pending.address == granted.address &&
+           pending.width == granted.width &&
+           pending.write_data == granted.write_data &&
+           pending.ordering.main_port_id ==
+               granted.ordering.main_port_id &&
+           pending.ordering.issue_sequence ==
+               granted.ordering.issue_sequence &&
+           pending.ordering.port_io ==
+               granted.ordering.port_io;
+}
+
 static void complete_cycle_bus_target(
         SystemState& system,
         uint64_t completion_cycle,
         const std::vector<StepCallbacks>& callbacks,
+        const std::vector<DmaEndpointCallbacks>& dma_callbacks,
         const py::function& settle_round) {
     const MainBusSnapshot snapshot =
         system.main_bus.snapshot();
@@ -7839,6 +8153,66 @@ static void complete_cycle_bus_target(
             "cycle target completion has no matching grant");
     }
     const BusGrant grant = *snapshot.active_grant;
+    settle_cycle_clock_to(
+        system,
+        completion_cycle,
+        settle_round);
+
+    if (grant.request.requester_id < 0) {
+        DmaCycleState& dma_state =
+            cycle_dma_state_for_requester(
+                system,
+                grant.request.requester_id);
+        if (!dma_state.pending_request.has_value() ||
+            !dma_state.pending_token.has_value() ||
+            !held_dma_request_matches_grant(
+                *dma_state.pending_request,
+                grant.request)) {
+            throw std::logic_error(
+                "granted DMA endpoint has no matching held request");
+        }
+
+        DmaTargetAccess target;
+        BusFault fault = BusFault::NONE;
+        try {
+            auto memory_guard =
+                acquire_shared_memory_use(
+                    *system.cores.front());
+            target = execute_dma_bus_target(
+                system,
+                grant);
+        } catch (...) {
+            fault = BusFault::TARGET_FAULT;
+            target.read_value.reset();
+            // The exact byte target is single-effect, but an exception can
+            // occur after the target changed.  Never retry it as untouched.
+            target.target_effects_committed = true;
+        }
+
+        BusResult result = system.main_bus.complete(
+            grant.grant_sequence,
+            completion_cycle,
+            target.read_value,
+            fault,
+            target.target_effects_committed);
+        const uint64_t completed_token =
+            *dma_state.pending_token;
+        dma_state.pending_request.reset();
+        dma_state.pending_token.reset();
+        system.cycle_target_completion_cycle.reset();
+
+        const DmaEndpointCallbacks& endpoint =
+            cycle_dma_callbacks_for_requester(
+                dma_callbacks,
+                grant.request.requester_id);
+        endpoint.complete(completed_token, result);
+        refresh_cycle_dma_requests(
+            system,
+            dma_callbacks,
+            completion_cycle);
+        return;
+    }
+
     const int core_index = full_core_index_for_requester(
         system,
         grant.request.requester_id);
@@ -7861,11 +8235,6 @@ static void complete_cycle_bus_target(
         throw std::runtime_error(
             "active grant diverged from its suspended request");
     }
-
-    settle_cycle_clock_to(
-        system,
-        completion_cycle,
-        settle_round);
 
     std::optional<uint64_t> read_value;
     BusFault fault = BusFault::NONE;
@@ -7918,6 +8287,10 @@ static void complete_cycle_bus_target(
     cycle_state.instruction->pending_request.reset();
     cycle_state.ready_cycle = completion_cycle;
     system.cycle_target_completion_cycle.reset();
+    refresh_cycle_dma_requests(
+        system,
+        dma_callbacks,
+        completion_cycle);
 }
 
 static bool has_cycle_interrupt_operation(
@@ -8175,6 +8548,7 @@ static SystemBatchResult run_full_core_cycle_batch(
         uint64_t max_system_cycles,
         int64_t max_instructions,
         const std::vector<StepCallbacks>& callbacks,
+        const std::vector<DmaEndpointCallbacks>& dma_callbacks,
         const py::function& prepare_batch,
         const py::function& settle_continuation,
         const py::function& settle_round) {
@@ -8193,6 +8567,11 @@ static SystemBatchResult run_full_core_cycle_batch(
     if (callbacks.size() != core_count)
         throw std::invalid_argument(
             "one callback set is required for every full core");
+    if (dma_callbacks.size() !=
+        system.dma_cycle_states.size()) {
+        throw std::invalid_argument(
+            "one callback endpoint is required for NIC and disk DMA");
+    }
     if (system.shared_rtc.snapshot().realtime) {
         throw std::runtime_error(
             "cycle-bounded execution does not support a realtime RTC");
@@ -8272,6 +8651,10 @@ static SystemBatchResult run_full_core_cycle_batch(
         result.scheduler_cursor = system.scheduler_cursor;
         return result;
     }
+    refresh_cycle_dma_requests(
+        system,
+        dma_callbacks,
+        clock_start);
 
     const std::optional<uint64_t> initial_timer_cycle =
         next_cycle_timer_irq(system);
@@ -8284,6 +8667,7 @@ static SystemBatchResult run_full_core_cycle_batch(
 
     if (pending_instruction_count(system) == 0 &&
         !system.cycle_target_completion_cycle.has_value() &&
+        !has_cycle_dma_work(system) &&
         cycle_system_all_halted(system) &&
         !has_future_virtual_work) {
         result.system_stop_reason =
@@ -8294,6 +8678,7 @@ static SystemBatchResult run_full_core_cycle_batch(
     }
     if (pending_instruction_count(system) == 0 &&
         !system.cycle_target_completion_cycle.has_value() &&
+        !has_cycle_dma_work(system) &&
         cycle_system_all_idle_or_halted(system) &&
         !has_future_virtual_work) {
         result.system_stop_reason =
@@ -8433,6 +8818,7 @@ static SystemBatchResult run_full_core_cycle_batch(
                 system,
                 scheduler_cycle,
                 callbacks,
+                dma_callbacks,
                 settle_round);
         }
         if (external_frontier) {
@@ -8447,6 +8833,10 @@ static SystemBatchResult run_full_core_cycle_batch(
                     "external event accounting overflow");
             }
             result.external_events_applied += applied;
+            refresh_cycle_dma_requests(
+                system,
+                dma_callbacks,
+                scheduler_cycle);
         }
         if (scheduler_cycle < effective_deadline &&
             !accept_cycle_interrupts(
@@ -8574,6 +8964,7 @@ static SystemBatchResult run_full_core_cycle_batch(
             system.external_events.next_cycle().has_value();
         if (!has_suspended_instruction &&
             !system.cycle_target_completion_cycle.has_value() &&
+            !has_cycle_dma_work(system) &&
             cycle_system_all_halted(system) &&
             !has_future_virtual_work) {
             result.system_stop_reason =
@@ -8582,6 +8973,7 @@ static SystemBatchResult run_full_core_cycle_batch(
         }
         if (!has_suspended_instruction &&
             !system.cycle_target_completion_cycle.has_value() &&
+            !has_cycle_dma_work(system) &&
             cycle_system_all_idle_or_halted(system) &&
             !has_future_virtual_work) {
             result.system_stop_reason =
@@ -8621,10 +9013,15 @@ static SystemBatchResult run_full_core_cycle_batch(
         stop_cycle,
         settle_round);
     settle_round(0, false, true, false);
+    refresh_cycle_dma_requests(
+        system,
+        dma_callbacks,
+        system.shared_clock.cycles());
     result.system_cycles_advanced =
         system.shared_clock.cycles() - clock_start;
     result.stop_cycle = system.shared_clock.cycles();
     result.scheduler_cursor = system.scheduler_cursor;
+    system.refresh_cycle_execution_pending();
     return result;
 }
 
@@ -8697,6 +9094,76 @@ static std::vector<StepCallbacks> build_system_step_callbacks(
         }
         callbacks.push_back(
             std::move(core_callbacks));
+    }
+    return callbacks;
+}
+
+static std::vector<DmaEndpointCallbacks>
+build_system_dma_callbacks(
+        const SystemState& system,
+        const py::list& callback_sets) {
+    if (callback_sets.size() !=
+        system.dma_cycle_states.size()) {
+        throw std::invalid_argument(
+            "one callback endpoint is required for NIC and disk DMA");
+    }
+
+    std::vector<DmaEndpointCallbacks> callbacks;
+    callbacks.reserve(system.dma_cycle_states.size());
+    for (std::size_t index = 0;
+         index < system.dma_cycle_states.size();
+         index++) {
+        py::tuple callback_set =
+            py::cast<py::tuple>(
+                callback_sets[index]);
+        if (callback_set.size() != 2) {
+            throw std::invalid_argument(
+                "each DMA callback endpoint must contain inspect "
+                "and completion entries");
+        }
+        py::object inspect_object = callback_set[0];
+        py::object complete_object = callback_set[1];
+        if (inspect_object.is_none() !=
+            complete_object.is_none()) {
+            throw std::invalid_argument(
+                "a DMA endpoint must provide both callbacks or neither");
+        }
+
+        DmaEndpointCallbacks endpoint;
+        endpoint.requester_id =
+            system.dma_cycle_states[index].requester_id;
+        if (inspect_object.is_none()) {
+            endpoint.inspect =
+                [](uint64_t) {
+                    return DmaEndpointView{};
+                };
+            endpoint.complete =
+                [](uint64_t, const BusResult&) {
+                    throw std::logic_error(
+                        "inactive DMA endpoint received a completion");
+                };
+        } else {
+            py::function inspect =
+                inspect_object.cast<py::function>();
+            py::function complete =
+                complete_object.cast<py::function>();
+            endpoint.inspect =
+                [inspect](uint64_t current_cycle) {
+                    py::gil_scoped_acquire acquire;
+                    py::object view = inspect(current_cycle);
+                    if (view.is_none())
+                        return DmaEndpointView{};
+                    return view.cast<DmaEndpointView>();
+                };
+            endpoint.complete =
+                [complete](
+                        uint64_t token,
+                        const BusResult& result) {
+                    py::gil_scoped_acquire acquire;
+                    complete(token, result);
+                };
+        }
+        callbacks.push_back(std::move(endpoint));
     }
     return callbacks;
 }
@@ -10046,6 +10513,53 @@ PYBIND11_MODULE(_mp64_accel, m) {
             &BusResult::target_effects_committed)
         ;
 
+    py::class_<DmaBeat>(m, "DmaBeat")
+        .def(
+            py::init([](
+                    uint64_t token,
+                    BusOperation operation,
+                    uint64_t address,
+                    uint8_t write_data,
+                    std::optional<uint64_t> ready_cycle) {
+                if (token == 0)
+                    throw std::invalid_argument(
+                        "DMA beat token must be positive");
+                if (operation != BusOperation::READ &&
+                    operation != BusOperation::WRITE) {
+                    throw std::invalid_argument(
+                        "DMA beat operation is invalid");
+                }
+                return DmaBeat{
+                    token,
+                    ready_cycle,
+                    operation,
+                    address,
+                    write_data,
+                };
+            }),
+            py::arg("token"),
+            py::arg("operation"),
+            py::arg("address"),
+            py::arg("write_data") = 0,
+            py::arg("ready_cycle") = std::nullopt)
+        .def_readonly("token", &DmaBeat::token)
+        .def_readonly(
+            "ready_cycle",
+            &DmaBeat::ready_cycle)
+        .def_readonly("operation", &DmaBeat::operation)
+        .def_readonly("address", &DmaBeat::address)
+        .def_readonly("write_data", &DmaBeat::write_data)
+        ;
+
+    py::class_<DmaEndpointView>(m, "DmaEndpointView")
+        .def(
+            py::init<bool, std::optional<DmaBeat>>(),
+            py::arg("active"),
+            py::arg("pending") = std::nullopt)
+        .def_readonly("active", &DmaEndpointView::active)
+        .def_readonly("pending", &DmaEndpointView::pending)
+        ;
+
     py::class_<MainBusSnapshot>(m, "MainBusSnapshot")
         .def_readonly(
             "schema_version",
@@ -10754,6 +11268,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system,
                uint64_t max_system_cycles,
                py::list callback_sets,
+               py::list dma_callback_sets,
                py::function prepare_batch,
                py::function settle_continuation,
                py::function settle_round,
@@ -10762,6 +11277,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     build_system_step_callbacks(
                         system,
                         callback_sets);
+                std::vector<DmaEndpointCallbacks> dma_callbacks =
+                    build_system_dma_callbacks(
+                        system,
+                        dma_callback_sets);
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 return run_full_core_cycle_batch(
@@ -10769,12 +11288,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     max_system_cycles,
                     max_instructions,
                     callbacks,
+                    dma_callbacks,
                     prepare_batch,
                     settle_continuation,
                     settle_round);
             },
             py::arg("max_system_cycles"),
             py::arg("callback_sets"),
+            py::arg("dma_callback_sets"),
             py::arg("prepare_batch"),
             py::arg("settle_continuation"),
             py::arg("settle_round"),
