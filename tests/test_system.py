@@ -5188,8 +5188,7 @@ class TestMicroCluster(unittest.TestCase):
         cl = MicroCluster(cluster_id=0, id_base=4, n=4, shared_mem=mem)
         cl.crc_acc = 7
         cl.crc_mode = 2
-        cl.crc_locked = True
-        cl.crc_owner = 3
+        self.assertTrue(cl.crc_try_acquire(cl.id_base + 3))
         cl.set_enabled(True)
         self.assertEqual((cl.crc_acc, cl.crc_mode), (0xFFFF_FFFF, 0))
         self.assertFalse(cl.crc_locked)
@@ -5197,16 +5196,16 @@ class TestMicroCluster(unittest.TestCase):
 
         cl.crc_acc = 9
         cl.crc_mode = 1
-        cl.crc_locked = True
-        cl.crc_owner = 0
+        self.assertTrue(cl.crc_try_acquire(cl.id_base))
         cl.set_enabled(False)
         self.assertEqual((cl.crc_acc, cl.crc_mode), (0xFFFF_FFFF, 0))
         self.assertFalse(cl.crc_locked)
 
         sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=1)
         sys.clusters[0].crc_acc = 11
-        sys.clusters[0].crc_locked = True
-        sys.clusters[0].crc_owner = 0
+        self.assertTrue(
+            sys.clusters[0].crc_try_acquire(sys.clusters[0].id_base)
+        )
         sys.boot()
         self.assertEqual(sys.clusters[0].crc_acc, 0xFFFF_FFFF)
         self.assertFalse(sys.clusters[0].crc_locked)

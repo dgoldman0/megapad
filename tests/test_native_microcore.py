@@ -1,4 +1,4 @@
-"""Phase 2 element-5 native microcore execution boundaries."""
+"""Phase 2 native microcore execution and cluster-resource boundaries."""
 
 from __future__ import annotations
 
@@ -14,8 +14,16 @@ from bench_phase2_microcore import (
     run_report,
 )
 from megapad64 import (
+    CLUSTER_SPAD_ADDR,
     CPUID_MICRO,
+    CSR_ACC0,
     CSR_CPUID,
+    CSR_CRC_ACC,
+    CSR_CRC_MODE,
+    CSR_SHA_MODE,
+    CSR_SHA_MSGLEN,
+    CSR_SHA_MSGLEN_HI,
+    CSR_TSRC0,
     IVEC_ILLEGAL_OP,
     Megapad64 as PythonMegapad64,
     Megapad64Micro as PythonMegapad64Micro,
@@ -390,3 +398,142 @@ def test_cluster_crc_lock_blocks_without_retiring_the_contender():
     assert snapshot["crc_locked"]
     assert snapshot["crc_lock_owner"] == 0
     assert snapshot["grant_counts"]["crc"] == 3
+
+
+def test_direct_sha_transaction_blocks_sibling_until_final():
+    """Direct stepping observes the same SHA INIT-to-FINAL ownership."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    owner, contender = cluster.cores[:2]
+    owner_pc = 0x100
+    contender_pc = 0x200
+    system.load_binary(
+        owner_pc,
+        assemble("sha.init 0\nsha.final\nhalt"),
+    )
+    system.load_binary(
+        contender_pc,
+        assemble("sha.init 1\nhalt"),
+    )
+    owner.pc = owner_pc
+    contender.pc = contender_pc
+    owner.halted = False
+    contender.halted = False
+
+    owner.step()
+
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 0
+    assert contender.csr_read(CSR_SHA_MODE) == 0
+
+    contender.step()
+
+    assert contender.pc == contender_pc
+    assert cluster.sha_owner == 0
+    assert contender.csr_read(CSR_SHA_MODE) == 0
+
+    owner.step()
+
+    assert not cluster.sha_locked
+    assert cluster.sha_owner is None
+
+    contender.step()
+
+    assert contender.pc > contender_pc
+    assert cluster.sha_locked
+    assert cluster.sha_owner == 1
+    assert owner.csr_read(CSR_SHA_MODE) == 1
+
+
+def test_native_cluster_state_is_shared_locally_and_isolated_globally():
+    """Scratchpad, tile, and CRC state have exactly one owner per cluster."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=2,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster0, cluster1 = system.clusters
+    first, sibling = cluster0.cores[:2]
+    other = cluster1.cores[0]
+
+    first.csr_write(CSR_TSRC0, 0x1234_5678)
+    first.csr_write(CSR_ACC0, 0xCAFE_BABE)
+    first.csr_write(CSR_SHA_MODE, 2)
+    first.csr_write(CSR_SHA_MSGLEN, 0x808)
+    first.csr_write(CSR_SHA_MSGLEN_HI, 1)
+
+    assert sibling.csr_read(CSR_TSRC0) == 0x1234_5678
+    assert sibling.csr_read(CSR_ACC0) == 0xCAFE_BABE
+    assert sibling.csr_read(CSR_SHA_MODE) == 2
+    assert sibling.csr_read(CSR_SHA_MSGLEN) == 0x808
+    assert sibling.csr_read(CSR_SHA_MSGLEN_HI) == 1
+    assert other.csr_read(CSR_TSRC0) == 0
+    assert other.csr_read(CSR_ACC0) == 0
+    assert other.csr_read(CSR_SHA_MODE) == 0
+    assert other.csr_read(CSR_SHA_MSGLEN) == 0
+    assert other.csr_read(CSR_SHA_MSGLEN_HI) == 0
+
+    first.mem_write8(CLUSTER_SPAD_ADDR + 17, 0xA5)
+    other.mem_write8(CLUSTER_SPAD_ADDR + 17, 0x5A)
+
+    assert sibling.mem_read8(CLUSTER_SPAD_ADDR + 17) == 0xA5
+    assert other.mem_read8(CLUSTER_SPAD_ADDR + 17) == 0x5A
+    assert system._shared_mem[17] == 0
+
+    cluster0.crc_acc = 0x1111_2222
+    cluster0.crc_mode = 1
+    cluster1.crc_acc = 0xAAAA_BBBB_CCCC_DDDD
+    cluster1.crc_mode = 2
+
+    assert sibling.csr_read(CSR_CRC_ACC) == 0x1111_2222
+    assert sibling.csr_read(CSR_CRC_MODE) == 1
+    assert other.csr_read(CSR_CRC_ACC) == 0xAAAA_BBBB_CCCC_DDDD
+    assert other.csr_read(CSR_CRC_MODE) == 2
+
+
+def test_native_cluster_reset_preserves_scratchpad_and_api_boundaries():
+    """Arbiter-only reset preserves engines; cluster reset preserves RAM."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    first, sibling = cluster.cores[:2]
+
+    first.csr_write(CSR_TSRC0, 0x1234)
+    first.mem_write8(CLUSTER_SPAD_ADDR + 23, 0xA5)
+    cluster.crc_acc = 0x5678
+    cluster.crc_mode = 2
+    with pytest.raises(ValueError, match="crc_try_acquire"):
+        cluster.crc_locked = True
+    assert not cluster.crc_locked
+    assert cluster.crc_owner is None
+    assert cluster.crc_try_acquire(first.core_id)
+
+    system._native_system.reset_cluster_arbitration(0)
+
+    assert sibling.csr_read(CSR_TSRC0) == 0x1234
+    assert sibling.csr_read(CSR_CRC_ACC) == 0x5678
+    assert sibling.csr_read(CSR_CRC_MODE) == 2
+    assert not cluster.crc_locked
+
+    cluster.reset_shared_resources()
+
+    assert sibling.csr_read(CSR_TSRC0) == 0
+    assert sibling.csr_read(CSR_CRC_ACC) == 0xFFFF_FFFF
+    assert sibling.csr_read(CSR_CRC_MODE) == 0
+    assert sibling.mem_read8(CLUSTER_SPAD_ADDR + 23) == 0xA5

@@ -1550,6 +1550,31 @@ struct ClusterState {
     bool sha_locked = false;
     int sha_lock_owner = -1;
     uint64_t grant_sequence = 0;
+    uint64_t crc_acc = 0xFFFF'FFFFULL;
+    int crc_mode = 0;
+    std::array<uint8_t, 1024> scratchpad{};
+
+    // Compatibility-visible shared tile/SHA bank. The unbounded scheduler
+    // still executes these complex operations through the Python ISA oracle,
+    // but the state now has one native owner per cluster rather than one copy
+    // per reduced core.
+    uint64_t sb = 0;
+    uint64_t sr = 0;
+    uint64_t sc = 0;
+    uint64_t sw = 1;
+    uint64_t tmode = 0;
+    uint64_t tctrl = 0;
+    uint64_t tsrc0 = 0;
+    uint64_t tsrc1 = 0;
+    uint64_t tdst = 0;
+    std::array<uint64_t, 4> acc{};
+    uint64_t tstride_r = 0;
+    uint64_t tstride_c = 0;
+    uint64_t ttile_h = 8;
+    uint64_t ttile_w = 8;
+    int sha_mode = 0;
+    uint64_t sha_msglen_lo = 0;
+    uint64_t sha_msglen_hi = 0;
 
     ClusterState() = default;
 
@@ -1567,7 +1592,7 @@ struct ClusterState {
         reset();
     }
 
-    void reset() {
+    void reset_arbitration() {
         last_grants.fill(0);
         grant_counts.fill(0);
         crc_locked = false;
@@ -1575,6 +1600,33 @@ struct ClusterState {
         sha_locked = false;
         sha_lock_owner = -1;
         grant_sequence = 0;
+    }
+
+    void reset_shared_engines() {
+        crc_acc = 0xFFFF'FFFFULL;
+        crc_mode = 0;
+        sb = 0;
+        sr = 0;
+        sc = 0;
+        sw = 1;
+        tmode = 0;
+        tctrl = 0;
+        tsrc0 = 0;
+        tsrc1 = 0;
+        tdst = 0;
+        acc.fill(0);
+        tstride_r = 0;
+        tstride_c = 0;
+        ttile_h = 8;
+        ttile_w = 8;
+        sha_mode = 0;
+        sha_msglen_lo = 0;
+        sha_msglen_hi = 0;
+    }
+
+    void reset() {
+        reset_arbitration();
+        reset_shared_engines();
     }
 
     bool local_core_is_eligible(
@@ -9739,6 +9791,21 @@ acquire_system_scheduler_lock(SystemState& system) {
         system.scheduler_mutex);
 }
 
+static ClusterState& checked_cluster_state(
+        SystemState& system,
+        int cluster_index) {
+    if (
+        cluster_index < 0 ||
+        cluster_index >= static_cast<int>(
+            system.cluster_states.size())
+    ) {
+        throw std::out_of_range(
+            "cluster state index is out of range");
+    }
+    return system.cluster_states[
+        static_cast<std::size_t>(cluster_index)];
+}
+
 static std::vector<StepCallbacks> build_system_step_callbacks(
         const SystemState& system,
         const py::list& callback_sets,
@@ -11552,42 +11619,475 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system, int cluster_index) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                if (
-                    cluster_index < 0 ||
-                    cluster_index >= static_cast<int>(
-                        system.cluster_states.size())
-                ) {
-                    throw std::out_of_range(
-                        "cluster arbiter index is out of range");
-                }
                 if (system.native_batch_active.load(
                         std::memory_order_acquire)) {
                     throw std::runtime_error(
                         "cluster arbitration cannot reset during an "
                         "active native system batch");
                 }
-                system.cluster_states[
-                    static_cast<std::size_t>(
-                        cluster_index)].reset();
+                checked_cluster_state(
+                    system,
+                    cluster_index).reset_arbitration();
             },
             py::arg("cluster_index"))
+        .def(
+            "reset_cluster_state",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "cluster state cannot reset during an "
+                        "active native system batch");
+                }
+                checked_cluster_state(
+                    system,
+                    cluster_index).reset();
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_crc_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                py::dict snapshot;
+                snapshot["acc"] = cluster.crc_acc;
+                snapshot["mode"] = cluster.crc_mode;
+                snapshot["locked"] = cluster.crc_locked;
+                if (cluster.crc_lock_owner < 0) {
+                    snapshot["owner"] = py::none();
+                } else {
+                    snapshot["owner"] =
+                        cluster.crc_lock_owner;
+                }
+                return snapshot;
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_crc_update",
+            [](SystemState& system,
+               int cluster_index,
+               const py::dict& changes) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                uint64_t next_acc = cluster.crc_acc;
+                int next_mode = cluster.crc_mode;
+                bool next_locked = cluster.crc_locked;
+                int next_owner = cluster.crc_lock_owner;
+                for (auto item : changes) {
+                    const std::string field =
+                        py::cast<std::string>(item.first);
+                    py::handle value = item.second;
+                    if (field == "acc") {
+                        next_acc =
+                            py::cast<uint64_t>(value);
+                    } else if (field == "mode") {
+                        const int mode =
+                            py::cast<int>(value);
+                        if (mode < 0 || mode > 2) {
+                            throw std::invalid_argument(
+                                "cluster CRC mode must be 0, 1, or 2");
+                        }
+                        next_mode = mode;
+                    } else if (field == "locked") {
+                        next_locked =
+                            py::cast<bool>(value);
+                    } else if (field == "owner") {
+                        if (value.is_none()) {
+                            next_owner = -1;
+                        } else {
+                            const int owner =
+                                py::cast<int>(value);
+                            if (
+                                owner < 0 ||
+                                owner >= cluster.core_count
+                            ) {
+                                throw std::out_of_range(
+                                    "cluster CRC owner is out of range");
+                            }
+                            next_owner = owner;
+                        }
+                    } else {
+                        throw std::invalid_argument(
+                            "unknown cluster CRC state field");
+                    }
+                }
+                const bool owner_is_valid =
+                    next_owner >= 0 &&
+                    next_owner < cluster.core_count;
+                if (next_locked != owner_is_valid) {
+                    throw std::invalid_argument(
+                        "cluster CRC lock and owner must change atomically");
+                }
+                cluster.crc_acc = next_acc;
+                cluster.crc_mode = next_mode;
+                cluster.crc_locked = next_locked;
+                cluster.crc_lock_owner = next_owner;
+            },
+            py::arg("cluster_index"),
+            py::arg("changes"))
+        .def(
+            "_cluster_crc_try_acquire",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    local_core < 0 ||
+                    local_core >= cluster.core_count
+                ) {
+                    return false;
+                }
+                if (!cluster.crc_locked) {
+                    cluster.crc_locked = true;
+                    cluster.crc_lock_owner =
+                        local_core;
+                }
+                return (
+                    cluster.crc_lock_owner ==
+                    local_core
+                );
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_crc_is_owner",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                return (
+                    cluster.crc_locked &&
+                    cluster.crc_lock_owner ==
+                        local_core
+                );
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_crc_release",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    cluster.crc_locked &&
+                    cluster.crc_lock_owner ==
+                        local_core
+                ) {
+                    cluster.crc_locked = false;
+                    cluster.crc_lock_owner = -1;
+                }
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_sha_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                py::dict snapshot;
+                snapshot["locked"] = cluster.sha_locked;
+                if (cluster.sha_lock_owner < 0) {
+                    snapshot["owner"] = py::none();
+                } else {
+                    snapshot["owner"] =
+                        cluster.sha_lock_owner;
+                }
+                return snapshot;
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_sha_try_acquire",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    local_core < 0 ||
+                    local_core >= cluster.core_count
+                ) {
+                    return false;
+                }
+                if (!cluster.sha_locked) {
+                    cluster.sha_locked = true;
+                    cluster.sha_lock_owner =
+                        local_core;
+                }
+                return (
+                    cluster.sha_lock_owner ==
+                    local_core
+                );
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_sha_is_owner",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                return (
+                    cluster.sha_locked &&
+                    cluster.sha_lock_owner ==
+                        local_core
+                );
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_sha_release",
+            [](SystemState& system,
+               int cluster_index,
+               int local_core) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                if (
+                    cluster.sha_locked &&
+                    cluster.sha_lock_owner ==
+                        local_core
+                ) {
+                    cluster.sha_locked = false;
+                    cluster.sha_lock_owner = -1;
+                }
+            },
+            py::arg("cluster_index"),
+            py::arg("local_core"))
+        .def(
+            "_cluster_spad_read8",
+            [](SystemState& system,
+               int cluster_index,
+               uint64_t offset) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                return cluster.scratchpad[
+                    static_cast<std::size_t>(
+                        offset %
+                        cluster.scratchpad.size())];
+            },
+            py::arg("cluster_index"),
+            py::arg("offset"))
+        .def(
+            "_cluster_spad_write8",
+            [](SystemState& system,
+               int cluster_index,
+               uint64_t offset,
+               uint8_t value) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                cluster.scratchpad[
+                    static_cast<std::size_t>(
+                        offset %
+                        cluster.scratchpad.size())] =
+                    value;
+            },
+            py::arg("cluster_index"),
+            py::arg("offset"),
+            py::arg("value"))
+        .def(
+            "_cluster_spad_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                return py::bytes(
+                    reinterpret_cast<const char*>(
+                        cluster.scratchpad.data()),
+                    cluster.scratchpad.size());
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_spad_restore",
+            [](SystemState& system,
+               int cluster_index,
+               const py::bytes& image) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                const std::string bytes = image;
+                if (bytes.size() !=
+                    cluster.scratchpad.size()) {
+                    throw std::invalid_argument(
+                        "cluster scratchpad image must be exactly 1024 bytes");
+                }
+                std::copy(
+                    bytes.begin(),
+                    bytes.end(),
+                    cluster.scratchpad.begin());
+            },
+            py::arg("cluster_index"),
+            py::arg("image"))
+        .def(
+            "_cluster_tile_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                const ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                py::dict state;
+                state["sb"] = cluster.sb;
+                state["sr"] = cluster.sr;
+                state["sc"] = cluster.sc;
+                state["sw"] = cluster.sw;
+                state["tmode"] = cluster.tmode;
+                state["tctrl"] = cluster.tctrl;
+                state["tsrc0"] = cluster.tsrc0;
+                state["tsrc1"] = cluster.tsrc1;
+                state["tdst"] = cluster.tdst;
+                state["acc"] = cluster.acc;
+                state["tstride_r"] =
+                    cluster.tstride_r;
+                state["tstride_c"] =
+                    cluster.tstride_c;
+                state["ttile_h"] = cluster.ttile_h;
+                state["ttile_w"] = cluster.ttile_w;
+                state["sha_mode"] = cluster.sha_mode;
+                state["sha_msglen_lo"] =
+                    cluster.sha_msglen_lo;
+                state["sha_msglen_hi"] =
+                    cluster.sha_msglen_hi;
+                return state;
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_tile_update",
+            [](SystemState& system,
+               int cluster_index,
+               const py::dict& state) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                ClusterState& cluster =
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
+                const uint64_t sb =
+                    state["sb"].cast<uint64_t>();
+                const uint64_t sr =
+                    state["sr"].cast<uint64_t>();
+                const uint64_t sc =
+                    state["sc"].cast<uint64_t>();
+                const uint64_t sw =
+                    state["sw"].cast<uint64_t>();
+                const uint64_t tmode =
+                    state["tmode"].cast<uint64_t>();
+                const uint64_t tctrl =
+                    state["tctrl"].cast<uint64_t>();
+                const uint64_t tsrc0 =
+                    state["tsrc0"].cast<uint64_t>();
+                const uint64_t tsrc1 =
+                    state["tsrc1"].cast<uint64_t>();
+                const uint64_t tdst =
+                    state["tdst"].cast<uint64_t>();
+                const std::array<uint64_t, 4> acc =
+                    state["acc"].cast<
+                        std::array<uint64_t, 4>>();
+                const uint64_t tstride_r =
+                    state["tstride_r"].cast<uint64_t>();
+                const uint64_t tstride_c =
+                    state["tstride_c"].cast<uint64_t>();
+                const uint64_t ttile_h =
+                    state["ttile_h"].cast<uint64_t>();
+                const uint64_t ttile_w =
+                    state["ttile_w"].cast<uint64_t>();
+                const int sha_mode =
+                    state["sha_mode"].cast<int>();
+                if (sha_mode < 0 || sha_mode > 3) {
+                    throw std::invalid_argument(
+                        "cluster SHA mode must fit its two-bit field");
+                }
+                const uint64_t sha_msglen_lo =
+                    state["sha_msglen_lo"].cast<
+                        uint64_t>();
+                const uint64_t sha_msglen_hi =
+                    state["sha_msglen_hi"].cast<
+                        uint64_t>();
+                cluster.sb = sb;
+                cluster.sr = sr;
+                cluster.sc = sc;
+                cluster.sw = sw;
+                cluster.tmode = tmode;
+                cluster.tctrl = tctrl;
+                cluster.tsrc0 = tsrc0;
+                cluster.tsrc1 = tsrc1;
+                cluster.tdst = tdst;
+                cluster.acc = acc;
+                cluster.tstride_r = tstride_r;
+                cluster.tstride_c = tstride_c;
+                cluster.ttile_h = ttile_h;
+                cluster.ttile_w = ttile_w;
+                cluster.sha_mode = sha_mode;
+                cluster.sha_msglen_lo = sha_msglen_lo;
+                cluster.sha_msglen_hi = sha_msglen_hi;
+            },
+            py::arg("cluster_index"),
+            py::arg("state"))
         .def(
             "_cluster_arbiter_snapshot",
             [](SystemState& system, int cluster_index) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                if (
-                    cluster_index < 0 ||
-                    cluster_index >= static_cast<int>(
-                        system.cluster_states.size())
-                ) {
-                    throw std::out_of_range(
-                        "cluster arbiter index is out of range");
-                }
                 const ClusterState& cluster =
-                    system.cluster_states[
-                        static_cast<std::size_t>(
-                            cluster_index)];
+                    checked_cluster_state(
+                        system,
+                        cluster_index);
                 py::dict last_grants;
                 py::dict grant_counts;
                 for (

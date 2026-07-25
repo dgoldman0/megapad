@@ -160,14 +160,37 @@ class MicroCluster:
 
     Shared resources:
       - 1 KiB scratchpad RAM (cluster-local, not on main bus)
-      - Shared MUL/DIV unit (modelled as immediate, no contention)
+      - Shared MUL/DIV unit (cooperatively arbitrated in native batches)
       - Shared CRC accumulator, mode, and transaction lock
+      - Shared tile and SHA compatibility state
       - Hardware barrier register
       - BIST controller for scratchpad/multiplier
 
     Cluster enable/disable is controlled by the SysInfo CLUSTER_EN
     register.  When disabled, all micro-cores are held in reset.
     """
+
+    @staticmethod
+    def _new_shared_engine_state() -> dict:
+        return {
+            "sb": 0,
+            "sr": 0,
+            "sc": 0,
+            "sw": 1,
+            "tmode": 0,
+            "tctrl": 0,
+            "tsrc0": 0,
+            "tsrc1": 0,
+            "tdst": 0,
+            "acc": [0, 0, 0, 0],
+            "tstride_r": 0,
+            "tstride_c": 0,
+            "ttile_h": 8,
+            "ttile_w": 8,
+            "sha_mode": 0,
+            "sha_msglen_lo": 0,
+            "sha_msglen_hi": 0,
+        }
 
     def __init__(self, cluster_id: int, id_base: int,
                  n: int = MICRO_PER_CLUSTER,
@@ -187,6 +210,13 @@ class MicroCluster:
 
         # Scratchpad — 1 KiB, cluster-local
         self.scratchpad = bytearray(CLUSTER_SPAD_BYTES)
+        self._crc_acc = 0xFFFF_FFFF
+        self._crc_mode = 0
+        self._crc_locked = False
+        self._crc_owner: Optional[int] = None
+        self._sha_locked = False
+        self._sha_owner: Optional[int] = None
+        self._tile_state = self._new_shared_engine_state()
 
         # Barrier register
         self.barrier_arrive = 0   # N-bit mask
@@ -207,7 +237,7 @@ class MicroCluster:
         # Cluster-shared CRC state. MODE, INIT, or SEED acquires the
         # transaction lock; FIN publishes the final accumulator and releases
         # it. The owner is a local core index, matching the RTL arbiter.
-        self.reset_crc()
+        self.reset_shared_resources()
 
         # Create micro-cores
         self.cores: list[Megapad64Micro | _PyMegapad64Micro] = []
@@ -232,36 +262,217 @@ class MicroCluster:
 
     # -- Shared CRC engine --
 
+    def _native_crc_snapshot(self) -> Optional[dict]:
+        if self._native_cluster_index is None:
+            return None
+        return self._native_system._cluster_crc_snapshot(
+            self._native_cluster_index
+        )
+
+    def _native_crc_update(self, **changes) -> bool:
+        if self._native_cluster_index is None:
+            return False
+        self._native_system._cluster_crc_update(
+            self._native_cluster_index,
+            changes,
+        )
+        return True
+
+    @property
+    def crc_acc(self) -> int:
+        state = self._native_crc_snapshot()
+        return self._crc_acc if state is None else int(state["acc"])
+
+    @crc_acc.setter
+    def crc_acc(self, value: int):
+        value = int(value) & ((1 << 64) - 1)
+        if not self._native_crc_update(acc=value):
+            self._crc_acc = value
+
+    @property
+    def crc_mode(self) -> int:
+        state = self._native_crc_snapshot()
+        return self._crc_mode if state is None else int(state["mode"])
+
+    @crc_mode.setter
+    def crc_mode(self, value: int):
+        value = int(value)
+        value = value if value in (0, 1, 2) else 0
+        if not self._native_crc_update(mode=value):
+            self._crc_mode = value
+
+    @property
+    def crc_locked(self) -> bool:
+        state = self._native_crc_snapshot()
+        return self._crc_locked if state is None else bool(state["locked"])
+
+    @crc_locked.setter
+    def crc_locked(self, value: bool):
+        value = bool(value)
+        if value:
+            if not self.crc_locked:
+                raise ValueError(
+                    "claim the CRC transaction with crc_try_acquire()"
+                )
+            return
+        if not self._native_crc_update(locked=False, owner=None):
+            self._crc_locked = False
+            self._crc_owner = None
+
+    @property
+    def crc_owner(self) -> Optional[int]:
+        state = self._native_crc_snapshot()
+        if state is None:
+            return self._crc_owner
+        owner = state["owner"]
+        return None if owner is None else int(owner)
+
+    @crc_owner.setter
+    def crc_owner(self, value: Optional[int]):
+        owner = None if value is None else int(value)
+        if owner is not None and not 0 <= owner < self.n:
+            raise ValueError("cluster CRC owner is out of range")
+        changes = {
+            "locked": owner is not None,
+            "owner": owner,
+        }
+        if not self._native_crc_update(**changes):
+            self._crc_locked = owner is not None
+            self._crc_owner = owner
+
     def reset_crc(self):
         """Reset shared CRC state and release any stranded transaction."""
-        self.crc_acc = 0xFFFF_FFFF
-        self.crc_mode = 0
-        self.crc_locked = False
-        self.crc_owner: Optional[int] = None
         if self._native_cluster_index is not None:
-            self._native_system.reset_cluster_arbitration(
+            self._native_system._cluster_crc_update(
+                self._native_cluster_index,
+                {
+                    "acc": 0xFFFF_FFFF,
+                    "mode": 0,
+                    "locked": False,
+                    "owner": None,
+                },
+            )
+            return
+        self._crc_acc = 0xFFFF_FFFF
+        self._crc_mode = 0
+        self._crc_locked = False
+        self._crc_owner = None
+
+    def reset_shared_resources(self):
+        """Reset cluster engines, transaction locks, and grant cursors."""
+        if self._native_cluster_index is not None:
+            self._native_system.reset_cluster_state(
                 self._native_cluster_index
             )
+            return
+        self.reset_crc()
+        self._sha_locked = False
+        self._sha_owner = None
+        self._tile_state = self._new_shared_engine_state()
 
     def crc_try_acquire(self, global_core_id: int) -> bool:
         """Acquire the CRC transaction for a core, or report contention."""
         local = global_core_id - self.id_base
         if not 0 <= local < self.n:
             return False
-        if not self.crc_locked:
-            self.crc_locked = True
-            self.crc_owner = local
-        return self.crc_owner == local
+        if self._native_cluster_index is not None:
+            return bool(
+                self._native_system._cluster_crc_try_acquire(
+                    self._native_cluster_index,
+                    local,
+                )
+            )
+        if not self._crc_locked:
+            self._crc_locked = True
+            self._crc_owner = local
+        return self._crc_owner == local
 
     def crc_is_owner(self, global_core_id: int) -> bool:
         local = global_core_id - self.id_base
-        return self.crc_locked and self.crc_owner == local
+        if self._native_cluster_index is not None:
+            return bool(
+                self._native_system._cluster_crc_is_owner(
+                    self._native_cluster_index,
+                    local,
+                )
+            )
+        return self._crc_locked and self._crc_owner == local
 
     def crc_release(self, global_core_id: int):
         """Release the CRC lock when the calling core owns it."""
+        if self._native_cluster_index is not None:
+            local = global_core_id - self.id_base
+            self._native_system._cluster_crc_release(
+                self._native_cluster_index,
+                local,
+            )
+            return
         if self.crc_is_owner(global_core_id):
-            self.crc_locked = False
-            self.crc_owner = None
+            self._crc_locked = False
+            self._crc_owner = None
+
+    # -- Shared SHA transaction ownership --
+
+    def _native_sha_snapshot(self) -> Optional[dict]:
+        if self._native_cluster_index is None:
+            return None
+        return self._native_system._cluster_sha_snapshot(
+            self._native_cluster_index
+        )
+
+    @property
+    def sha_locked(self) -> bool:
+        state = self._native_sha_snapshot()
+        return self._sha_locked if state is None else bool(state["locked"])
+
+    @property
+    def sha_owner(self) -> Optional[int]:
+        state = self._native_sha_snapshot()
+        if state is None:
+            return self._sha_owner
+        owner = state["owner"]
+        return None if owner is None else int(owner)
+
+    def sha_try_acquire(self, global_core_id: int) -> bool:
+        """Acquire SHA INIT-to-FINAL ownership for one local core."""
+        local = global_core_id - self.id_base
+        if not 0 <= local < self.n:
+            return False
+        if self._native_cluster_index is not None:
+            return bool(
+                self._native_system._cluster_sha_try_acquire(
+                    self._native_cluster_index,
+                    local,
+                )
+            )
+        if not self._sha_locked:
+            self._sha_locked = True
+            self._sha_owner = local
+        return self._sha_owner == local
+
+    def sha_is_owner(self, global_core_id: int) -> bool:
+        local = global_core_id - self.id_base
+        if self._native_cluster_index is not None:
+            return bool(
+                self._native_system._cluster_sha_is_owner(
+                    self._native_cluster_index,
+                    local,
+                )
+            )
+        return self._sha_locked and self._sha_owner == local
+
+    def sha_release(self, global_core_id: int):
+        """Release SHA transaction ownership after the owner's FINAL."""
+        local = global_core_id - self.id_base
+        if self._native_cluster_index is not None:
+            self._native_system._cluster_sha_release(
+                self._native_cluster_index,
+                local,
+            )
+            return
+        if self.sha_is_owner(global_core_id):
+            self._sha_locked = False
+            self._sha_owner = None
 
     # -- Barrier --
 
@@ -320,49 +531,132 @@ class MicroCluster:
 
     def _bist_spad(self) -> bool:
         """March C- test on scratchpad memory."""
-        sz = len(self.scratchpad)
-        saved = bytes(self.scratchpad)  # save contents
+        sz = CLUSTER_SPAD_BYTES
+        saved = self.spad_snapshot()
         ok = True
         # Phase 0: write all 0x00
         for i in range(sz):
-            self.scratchpad[i] = 0x00
+            self.spad_write8(i, 0x00)
         # Phase 1: read 0x00, write 0xFF ascending
         for i in range(sz):
-            if self.scratchpad[i] != 0x00:
+            observed = self.spad_read8(i)
+            if observed != 0x00:
                 self.bist_fail_addr = i
-                self.bist_fail_data = (0x00 << 8) | self.scratchpad[i]
+                self.bist_fail_data = observed
                 ok = False
                 break
-            self.scratchpad[i] = 0xFF
+            self.spad_write8(i, 0xFF)
         if ok:
             # Phase 2: read 0xFF, write 0x00 descending
             for i in range(sz - 1, -1, -1):
-                if self.scratchpad[i] != 0xFF:
+                observed = self.spad_read8(i)
+                if observed != 0xFF:
                     self.bist_fail_addr = i
-                    self.bist_fail_data = (0xFF << 8) | self.scratchpad[i]
+                    self.bist_fail_data = (0xFF << 8) | observed
                     ok = False
                     break
-                self.scratchpad[i] = 0x00
+                self.spad_write8(i, 0x00)
         # Restore
-        self.scratchpad[:] = saved
+        self.spad_restore(saved)
         return ok
 
     # -- Scratchpad access helpers --
 
     def spad_read8(self, offset: int) -> int:
+        if self._native_cluster_index is not None:
+            return int(
+                self._native_system._cluster_spad_read8(
+                    self._native_cluster_index,
+                    int(offset) % CLUSTER_SPAD_BYTES,
+                )
+            )
         offset = offset % CLUSTER_SPAD_BYTES
         return self.scratchpad[offset]
 
     def spad_write8(self, offset: int, val: int):
+        if self._native_cluster_index is not None:
+            self._native_system._cluster_spad_write8(
+                self._native_cluster_index,
+                int(offset) % CLUSTER_SPAD_BYTES,
+                int(val) & 0xFF,
+            )
+            return
         offset = offset % CLUSTER_SPAD_BYTES
         self.scratchpad[offset] = val & 0xFF
+
+    def spad_snapshot(self) -> bytes:
+        if self._native_cluster_index is not None:
+            return bytes(
+                self._native_system._cluster_spad_snapshot(
+                    self._native_cluster_index
+                )
+            )
+        return bytes(self.scratchpad)
+
+    def spad_restore(self, image: bytes):
+        if len(image) != CLUSTER_SPAD_BYTES:
+            raise ValueError(
+                "cluster scratchpad image must be exactly 1024 bytes"
+            )
+        if self._native_cluster_index is not None:
+            self._native_system._cluster_spad_restore(
+                self._native_cluster_index,
+                bytes(image),
+            )
+            return
+        self.scratchpad[:] = image
+
+    # -- Shared tile and SHA compatibility bank --
+
+    def _shared_engine_snapshot(self) -> dict:
+        if self._native_cluster_index is not None:
+            state = dict(
+                self._native_system._cluster_tile_snapshot(
+                    self._native_cluster_index
+                )
+            )
+            state["acc"] = list(state["acc"])
+            return state
+        state = dict(self._tile_state)
+        state["acc"] = list(self._tile_state["acc"])
+        return state
+
+    def load_shared_engine_state(self, cpu) -> None:
+        state = self._shared_engine_snapshot()
+        for name in (
+            "sb", "sr", "sc", "sw", "tmode", "tctrl",
+            "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
+            "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
+            "sha_msglen_hi",
+        ):
+            setattr(cpu, name, int(state[name]))
+        cpu.acc = list(state["acc"])
+
+    def store_shared_engine_state(self, cpu) -> None:
+        state = {
+            name: int(getattr(cpu, name))
+            for name in (
+                "sb", "sr", "sc", "sw", "tmode", "tctrl",
+                "tsrc0", "tsrc1", "tdst", "tstride_r", "tstride_c",
+                "ttile_h", "ttile_w", "sha_mode", "sha_msglen_lo",
+                "sha_msglen_hi",
+            )
+        }
+        state["acc"] = [int(value) for value in cpu.acc]
+        if self._native_cluster_index is not None:
+            self._native_system._cluster_tile_update(
+                self._native_cluster_index,
+                state,
+            )
+            return
+        self._tile_state = state
 
     # -- Enable / disable --
 
     def set_enabled(self, en: bool):
         """Enable or disable the cluster (matching RTL cluster_en gating)."""
         if en and not self.enabled:
-            self.reset_crc()
+            self.reset_shared_resources()
             # Coming out of reset — reset all micro-cores
             for mc in self.cores:
                 mc._reset_state()
@@ -373,7 +667,7 @@ class MicroCluster:
             self.cl_mpu_limit = 0
         self.enabled = en
         if not en:
-            self.reset_crc()
+            self.reset_shared_resources()
             # Entering reset — halt all micro-cores
             for mc in self.cores:
                 mc.halted = True
@@ -1228,7 +1522,7 @@ class MegapadSystem:
         self._scheduler_cursor = 0
         for cluster in self.clusters:
             cluster.enabled = False
-            cluster.reset_crc()
+            cluster.reset_shared_resources()
         for i, cpu in enumerate(self.cores):
             cpu._reset_state()
 

@@ -4042,9 +4042,11 @@ class Megapad64Micro(Megapad64):
             self.fetch8()  # consume the funct byte
             raise TrapError(IVEC_ILLEGAL_OP,
                             "MEX (tile engine) not available on standalone micro-core")
-        # Delegate to parent class — cluster shared tile engine is modelled
-        # as immediate (no cycle-accurate contention in emulator).
-        cycles = super()._exec_mex(n)
+        self._cluster.load_shared_engine_state(self)
+        try:
+            cycles = super()._exec_mex(n)
+        finally:
+            self._cluster.store_shared_engine_state(self)
         return cycles + 3  # shared unit arbitration overhead
 
     # -- SYS family: trap 1802-heritage sub-ops --
@@ -4140,6 +4142,34 @@ class Megapad64Micro(Megapad64):
 
         return cycles + 3
 
+    def _exec_sha(self, op: int) -> int:
+        """Execute one cluster-owned SHA transaction instruction."""
+        if op > 0x5:
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            f"EXT.CRYPTO SHA-2 sub-op {op:#x} reserved")
+        if self._cluster is None:
+            return super()._exec_sha(op)
+
+        cluster = self._cluster
+        owned_by_other = (cluster.sha_locked and
+                          not cluster.sha_is_owner(self.core_id))
+        if owned_by_other or (op == 0x0 and
+                              not cluster.sha_try_acquire(self.core_id)):
+            # FB and its sub-op have been fetched; preserve a preceding REX
+            # prefix as part of the retried instruction.
+            retry_len = 3 if self._ext_modifier >= 0 else 2
+            self.pc = u64(self.pc - retry_len)
+            return 3
+
+        cluster.load_shared_engine_state(self)
+        try:
+            cycles = super()._exec_sha(op)
+        finally:
+            cluster.store_shared_engine_state(self)
+        if op == 0x5:
+            cluster.sha_release(self.core_id)
+        return cycles + 3
+
     # -- CSR overrides --
 
     def csr_read(self, addr: int) -> int:
@@ -4160,8 +4190,15 @@ class Megapad64Micro(Megapad64):
         if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
                     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
                     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
-                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W):
-            return super().csr_read(addr)
+                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
+                    CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI):
+            if not self._cluster:
+                return super().csr_read(addr)
+            self._cluster.load_shared_engine_state(self)
+            try:
+                return super().csr_read(addr)
+            finally:
+                self._cluster.store_shared_engine_state(self)
         if addr == CSR_CPUID:
             return CPUID_MICRO
         # D/DF/Q/T CSRs — not present, always return 0
@@ -4204,8 +4241,15 @@ class Megapad64Micro(Megapad64):
         if addr in (CSR_SB, CSR_SR, CSR_SC, CSR_SW,
                     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
                     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
-                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W):
-            return super().csr_write(addr, val)
+                    CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
+                    CSR_SHA_MODE, CSR_SHA_MSGLEN, CSR_SHA_MSGLEN_HI):
+            if not self._cluster:
+                return super().csr_write(addr, val)
+            self._cluster.load_shared_engine_state(self)
+            try:
+                return super().csr_write(addr, val)
+            finally:
+                self._cluster.store_shared_engine_state(self)
         # D/DF/Q/T CSR writes — silently ignored
         if addr in (CSR_D, CSR_DF, CSR_Q, CSR_T):
             return
