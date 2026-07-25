@@ -77,7 +77,10 @@ EXPLICIT_EXCLUSIONS = [
         "state_or_behavior": (
             "cluster scratchpad, MUL/DIV, CRC, MEX, barrier, BIST, and MPU"
         ),
-        "reason": "cluster-shared resource arbitration belongs to element 6",
+        "reason": (
+            "cluster-shared resource arbitration is covered by the "
+            "versioned element-6 cluster oracle"
+        ),
     },
     {
         "state_or_behavior": "strict-cycle hardware CPI",
