@@ -1509,6 +1509,175 @@ static std::unique_ptr<CPUState> make_cpu_state(
     return state;
 }
 
+enum class ClusterResourceKind : uint8_t {
+    NONE = 0,
+    BUS = 1,
+    MUL_DIV = 2,
+    CRC = 3,
+    SHA = 4,
+    MEX = 5,
+};
+
+static constexpr std::size_t CLUSTER_RESOURCE_KIND_COUNT = 6;
+
+static const char* cluster_resource_name(
+        ClusterResourceKind kind) {
+    switch (kind) {
+        case ClusterResourceKind::BUS:
+            return "bus";
+        case ClusterResourceKind::MUL_DIV:
+            return "mul_div";
+        case ClusterResourceKind::CRC:
+            return "crc";
+        case ClusterResourceKind::SHA:
+            return "sha";
+        case ClusterResourceKind::MEX:
+            return "mex";
+        case ClusterResourceKind::NONE:
+            return "none";
+    }
+    throw std::logic_error("invalid cluster resource kind");
+}
+
+struct ClusterState {
+    int cluster_id = 0;
+    int global_id_base = 0;
+    int core_count = 0;
+    std::array<int, CLUSTER_RESOURCE_KIND_COUNT> last_grants{};
+    std::array<uint64_t, CLUSTER_RESOURCE_KIND_COUNT> grant_counts{};
+    bool crc_locked = false;
+    int crc_lock_owner = -1;
+    bool sha_locked = false;
+    int sha_lock_owner = -1;
+    uint64_t grant_sequence = 0;
+
+    ClusterState() = default;
+
+    ClusterState(
+            int cluster_id_value,
+            int global_id_base_value,
+            int core_count_value)
+        : cluster_id(cluster_id_value),
+          global_id_base(global_id_base_value),
+          core_count(core_count_value) {
+        if (core_count < 1 || core_count > 4) {
+            throw std::invalid_argument(
+                "native cluster must contain between one and four cores");
+        }
+        reset();
+    }
+
+    void reset() {
+        last_grants.fill(0);
+        grant_counts.fill(0);
+        crc_locked = false;
+        crc_lock_owner = -1;
+        sha_locked = false;
+        sha_lock_owner = -1;
+        grant_sequence = 0;
+    }
+
+    bool local_core_is_eligible(
+            ClusterResourceKind kind,
+            int local_core) const {
+        if (local_core < 0 || local_core >= core_count)
+            return false;
+        if (kind == ClusterResourceKind::CRC && crc_locked)
+            return local_core == crc_lock_owner;
+        if (kind == ClusterResourceKind::SHA && sha_locked)
+            return local_core == sha_lock_owner;
+        return true;
+    }
+
+    std::optional<int> choose(
+            ClusterResourceKind kind,
+            const std::vector<int>& candidates) const {
+        const std::size_t resource_index =
+            static_cast<std::size_t>(kind);
+        if (
+            kind == ClusterResourceKind::NONE ||
+            resource_index >= last_grants.size()
+        ) {
+            throw std::invalid_argument(
+                "cluster arbitration requires a shared resource");
+        }
+
+        std::array<bool, 4> pending{};
+        for (int local_core : candidates) {
+            if (local_core < 0 || local_core >= core_count) {
+                throw std::out_of_range(
+                    "cluster request has an invalid local core");
+            }
+            pending[static_cast<std::size_t>(local_core)] = true;
+        }
+
+        const int last = last_grants[resource_index];
+        for (int offset = 1; offset <= core_count; offset++) {
+            int candidate = last + offset;
+            if (candidate >= core_count)
+                candidate -= core_count;
+            if (
+                pending[static_cast<std::size_t>(candidate)] &&
+                local_core_is_eligible(kind, candidate)
+            ) {
+                return candidate;
+            }
+        }
+        return std::nullopt;
+    }
+
+    void commit(
+            ClusterResourceKind kind,
+            int local_core,
+            int operation) {
+        const std::size_t resource_index =
+            static_cast<std::size_t>(kind);
+        if (
+            kind == ClusterResourceKind::NONE ||
+            resource_index >= last_grants.size() ||
+            local_core < 0 ||
+            local_core >= core_count
+        ) {
+            throw std::invalid_argument(
+                "invalid native cluster grant");
+        }
+        if (
+            grant_counts[resource_index] ==
+                std::numeric_limits<uint64_t>::max() ||
+            grant_sequence ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "native cluster grant accounting overflow");
+        }
+        last_grants[resource_index] = local_core;
+        grant_counts[resource_index]++;
+        grant_sequence++;
+
+        if (kind == ClusterResourceKind::CRC) {
+            if (
+                operation == 0x0 ||
+                operation == 0x4 ||
+                operation == 0x5
+            ) {
+                crc_locked = true;
+                crc_lock_owner = local_core;
+            } else if (operation == 0x3) {
+                crc_locked = false;
+                crc_lock_owner = -1;
+            }
+        } else if (kind == ClusterResourceKind::SHA) {
+            if (operation == 0x0) {
+                sha_locked = true;
+                sha_lock_owner = local_core;
+            } else if (operation == 0x5) {
+                sha_locked = false;
+                sha_lock_owner = -1;
+            }
+        }
+    }
+};
+
 // SystemState owns full-core lifetimes, exactly one mapping set, and every
 // native SoC-singleton device reached directly by a full core. Python-bus
 // devices and scheduling retain their compatibility paths for later
@@ -1547,6 +1716,23 @@ struct SystemState {
         main_bus.configure(main_bus_port_count);
         shared_interrupts.configure(all_core_count);
         shared_crypto.init();
+        cluster_states.reserve(
+            static_cast<std::size_t>(required_cluster_ports));
+        for (
+            int cluster_index = 0;
+            cluster_index < required_cluster_ports;
+            cluster_index++
+        ) {
+            const int cluster_core_base =
+                cluster_index * MICRO_CORES_PER_CLUSTER;
+            const int cluster_core_count = std::min(
+                MICRO_CORES_PER_CLUSTER,
+                micro_core_count - cluster_core_base);
+            cluster_states.emplace_back(
+                cluster_index,
+                full_core_count + cluster_core_base,
+                cluster_core_count);
+        }
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
             auto core = make_cpu_state(
@@ -1730,6 +1916,9 @@ struct SystemState {
     SystemClock shared_clock{};
     ExternalEventInbox external_events{};
     MainBusArbiter main_bus{};
+    // Cluster-local arbitration state is declared before CPU ownership so
+    // reduced CPU views are destroyed before the shared arbiters they use.
+    std::vector<ClusterState> cluster_states;
     std::vector<std::unique_ptr<CPUState>> cores;
     std::vector<std::unique_ptr<CPUState>> micro_cores;
     // Stable non-owning topology order used by the unbounded native system
@@ -7158,13 +7347,96 @@ struct SystemBatchResult {
     int pending_interrupt_vector = -1;
 };
 
+struct PendingClusterRequest {
+    ClusterResourceKind resource =
+        ClusterResourceKind::NONE;
+    int operation = -1;
+    int continuation_reason = RUN_EXT_FALLBACK;
+};
+
 struct CoreDispatchResult {
     int64_t steps = 0;
     int64_t cycles = 0;
     uint64_t dispatches = 0;
     uint64_t continuations = 0;
     std::array<uint64_t, 7> stop_reasons{};
+    std::optional<PendingClusterRequest> pending_cluster_request;
 };
+
+static PendingClusterRequest classify_pending_cluster_request(
+        CPUState& core,
+        int continuation_reason) {
+    PendingClusterRequest request;
+    request.continuation_reason = continuation_reason;
+    if (
+        core.profile != CoreProfile::MICRO ||
+        (
+            continuation_reason != RUN_MEX_FALLBACK &&
+            continuation_reason != RUN_EXT_FALLBACK
+        )
+    ) {
+        return request;
+    }
+
+    uint64_t address = pc(core);
+    uint8_t opcode = mem_read8(core, address);
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+
+    // F0-F8 are instruction modifiers. Preserve the original PC while
+    // classifying the following reduced-core instruction.
+    if (family == 0xF && subop <= 0x8) {
+        address++;
+        opcode = mem_read8(core, address);
+        family = (opcode >> 4) & 0xF;
+        subop = opcode & 0xF;
+    }
+
+    switch (family) {
+        case 0x0:
+            if (
+                subop == 0x4 ||
+                subop == 0xD ||
+                subop == 0xE ||
+                subop == 0xF
+            ) {
+                request.resource = ClusterResourceKind::BUS;
+            }
+            break;
+        case 0x5:
+            request.resource = ClusterResourceKind::BUS;
+            break;
+        case 0xC:
+            if (subop <= 0x7) {
+                request.resource =
+                    ClusterResourceKind::MUL_DIV;
+                request.operation = subop;
+            }
+            break;
+        case 0xE:
+            request.resource = ClusterResourceKind::MEX;
+            request.operation = subop;
+            break;
+        case 0xF:
+            if (subop == 0xB) {
+                const uint8_t crypto_subop =
+                    mem_read8(core, address + 1);
+                const int unit = (crypto_subop >> 4) & 0xF;
+                request.operation = crypto_subop & 0xF;
+                if (unit == 0x0) {
+                    request.resource =
+                        ClusterResourceKind::CRC;
+                } else if (unit == 0x1) {
+                    request.resource =
+                        ClusterResourceKind::SHA;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return request;
+}
 
 struct NativeBatchActiveGuard {
     SystemState& system;
@@ -7312,6 +7584,34 @@ static CoreDispatchResult run_system_core_dispatch(
 
         if (raw.stop_reason >= RUN_MEX_FALLBACK &&
             raw.stop_reason <= RUN_RESET) {
+            const PendingClusterRequest cluster_request =
+                classify_pending_cluster_request(
+                    core,
+                    raw.stop_reason);
+            if (
+                yield_after_micro_continuation &&
+                cluster_request.resource !=
+                    ClusterResourceKind::NONE
+            ) {
+                // The native prefix retired before this immutable shared
+                // request was raised. Publish only that prefix now; the outer
+                // scheduler snapshots all peer requests before selecting one
+                // cluster-local winner. A losing request remains at its
+                // original PC and consumes neither instruction budget nor
+                // resource credit.
+                dispatch.steps = checked_scheduler_add(
+                    dispatch.steps,
+                    raw.steps_executed,
+                    "instruction accounting");
+                dispatch.cycles = checked_scheduler_add(
+                    dispatch.cycles,
+                    raw.total_cycles,
+                    "cycle accounting");
+                dispatch.pending_cluster_request =
+                    cluster_request;
+                break;
+            }
+
             py::object settled_object = settle_continuation(
                 core_index,
                 raw.stop_reason,
@@ -7423,6 +7723,50 @@ static void merge_core_dispatch(
     }
 }
 
+struct DeferredClusterRequest {
+    int core_index = -1;
+    int cluster_index = -1;
+    int local_core = -1;
+    PendingClusterRequest request{};
+};
+
+static CoreDispatchResult settle_deferred_cluster_request(
+        int core_index,
+        const PendingClusterRequest& request,
+        const py::function& settle_continuation) {
+    py::object settled_object = settle_continuation(
+        core_index,
+        request.continuation_reason,
+        -1,
+        0,
+        0);
+    py::tuple settled = settled_object.cast<py::tuple>();
+    if (settled.size() != 3) {
+        throw std::runtime_error(
+            "deferred cluster continuation must return "
+            "(invocation_steps, invocation_cycles, terminal)");
+    }
+
+    CoreDispatchResult dispatch;
+    dispatch.steps = settled[0].cast<int64_t>();
+    dispatch.cycles = settled[1].cast<int64_t>();
+    const bool terminal = settled[2].cast<bool>();
+    if (
+        dispatch.steps < 0 ||
+        dispatch.steps > 1 ||
+        dispatch.cycles < 0
+    ) {
+        throw std::runtime_error(
+            "deferred cluster continuation returned invalid progress");
+    }
+    if (!terminal && dispatch.steps == 0) {
+        throw std::runtime_error(
+            "granted cluster continuation made no progress");
+    }
+    dispatch.continuations = 1;
+    return dispatch;
+}
+
 static SystemBatchResult run_full_core_system_batch(
         SystemState& system,
         int64_t max_steps,
@@ -7495,7 +7839,13 @@ static SystemBatchResult run_full_core_system_batch(
         return result;
     }
 
-    if (active_indices.size() == 1) {
+    if (
+        active_indices.size() == 1 &&
+        system.execution_cores[
+            static_cast<std::size_t>(
+                active_indices.front())]->profile ==
+            CoreProfile::FULL
+    ) {
         const int core_index = active_indices.front();
         CoreDispatchResult dispatch = run_system_core_dispatch(
             system,
@@ -7543,6 +7893,8 @@ static SystemBatchResult run_full_core_system_batch(
                 max_dispatch_steps,
                 remaining / active_count +
                     (remaining % active_count != 0 ? 1 : 0));
+        std::vector<DeferredClusterRequest>
+            deferred_cluster_requests;
 
         for (std::size_t offset = 0; offset < core_count; offset++) {
             const int core_index = (
@@ -7570,6 +7922,28 @@ static SystemBatchResult run_full_core_system_batch(
                     settle_dispatch_error,
                     true);
                 merge_core_dispatch(result, core_index, dispatch);
+                if (dispatch.pending_cluster_request.has_value()) {
+                    const int first_micro_index =
+                        static_cast<int>(system.cores.size());
+                    if (core_index < first_micro_index) {
+                        throw std::logic_error(
+                            "full core published a cluster request");
+                    }
+                    const int micro_index =
+                        core_index - first_micro_index;
+                    DeferredClusterRequest deferred;
+                    deferred.core_index = core_index;
+                    deferred.cluster_index =
+                        micro_index /
+                        SystemState::MICRO_CORES_PER_CLUSTER;
+                    deferred.local_core =
+                        micro_index %
+                        SystemState::MICRO_CORES_PER_CLUSTER;
+                    deferred.request =
+                        *dispatch.pending_cluster_request;
+                    deferred_cluster_requests.push_back(
+                        deferred);
+                }
                 round_steps = checked_scheduler_add(
                     round_steps,
                     dispatch.steps,
@@ -7587,6 +7961,129 @@ static SystemBatchResult run_full_core_system_batch(
                 // successful cores in this round, drain output, skip IRQ
                 // delivery, and then preserve the original exception.
                 settle_round(round_cycles, true, true, false);
+                throw;
+            }
+        }
+
+        // Every reduced core has now reached the same abstract scheduling
+        // boundary. Select at most one request per independent cluster
+        // resource from this immutable set, then settle winners in the global
+        // cyclic order so an aggregate host budget cannot introduce a hidden
+        // resource-class priority.
+        std::vector<DeferredClusterRequest>
+            cluster_winners;
+        for (
+            std::size_t cluster_index = 0;
+            cluster_index < system.cluster_states.size();
+            cluster_index++
+        ) {
+            ClusterState& cluster =
+                system.cluster_states[cluster_index];
+            for (
+                std::size_t resource_index = 1;
+                resource_index <
+                    CLUSTER_RESOURCE_KIND_COUNT;
+                resource_index++
+            ) {
+                const ClusterResourceKind resource =
+                    static_cast<ClusterResourceKind>(
+                        resource_index);
+                std::vector<int> candidates;
+                for (
+                    const DeferredClusterRequest& deferred :
+                    deferred_cluster_requests
+                ) {
+                    if (
+                        deferred.cluster_index ==
+                            static_cast<int>(cluster_index) &&
+                        deferred.request.resource == resource
+                    ) {
+                        candidates.push_back(
+                            deferred.local_core);
+                    }
+                }
+                const std::optional<int> winner =
+                    cluster.choose(resource, candidates);
+                if (!winner.has_value())
+                    continue;
+                const auto selected = std::find_if(
+                    deferred_cluster_requests.begin(),
+                    deferred_cluster_requests.end(),
+                    [&](const DeferredClusterRequest& deferred) {
+                        return (
+                            deferred.cluster_index ==
+                                static_cast<int>(cluster_index) &&
+                            deferred.request.resource ==
+                                resource &&
+                            deferred.local_core == *winner
+                        );
+                    });
+                if (selected ==
+                    deferred_cluster_requests.end()) {
+                    throw std::logic_error(
+                        "cluster winner has no immutable request");
+                }
+                cluster_winners.push_back(*selected);
+            }
+        }
+        std::sort(
+            cluster_winners.begin(),
+            cluster_winners.end(),
+            [&](const DeferredClusterRequest& left,
+                const DeferredClusterRequest& right) {
+                const int left_distance =
+                    (
+                        left.core_index -
+                        round_start +
+                        static_cast<int>(core_count)
+                    ) % static_cast<int>(core_count);
+                const int right_distance =
+                    (
+                        right.core_index -
+                        round_start +
+                        static_cast<int>(core_count)
+                    ) % static_cast<int>(core_count);
+                return left_distance < right_distance;
+            });
+
+        for (const DeferredClusterRequest& winner :
+             cluster_winners) {
+            if (round_steps >= remaining)
+                break;
+            try {
+                CoreDispatchResult settled =
+                    settle_deferred_cluster_request(
+                        winner.core_index,
+                        winner.request,
+                        settle_continuation);
+                system.cluster_states[
+                    static_cast<std::size_t>(
+                        winner.cluster_index)].commit(
+                            winner.request.resource,
+                            winner.local_core,
+                            winner.request.operation);
+                merge_core_dispatch(
+                    result,
+                    winner.core_index,
+                    settled);
+                round_steps = checked_scheduler_add(
+                    round_steps,
+                    settled.steps,
+                    "round cluster instruction accounting");
+                round_cycles = std::max(
+                    round_cycles,
+                    settled.cycles);
+                if (settled.steps > 0) {
+                    system.scheduler_cursor =
+                        (winner.core_index + 1) %
+                        static_cast<int>(core_count);
+                }
+            } catch (...) {
+                settle_round(
+                    round_cycles,
+                    true,
+                    true,
+                    false);
                 throw;
             }
         }
@@ -11044,6 +11541,96 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "micro_core_count", &SystemState::micro_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property_readonly(
+            "cluster_arbiter_count",
+            [](const SystemState& system) {
+                return static_cast<int>(
+                    system.cluster_states.size());
+            })
+        .def(
+            "reset_cluster_arbitration",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    cluster_index < 0 ||
+                    cluster_index >= static_cast<int>(
+                        system.cluster_states.size())
+                ) {
+                    throw std::out_of_range(
+                        "cluster arbiter index is out of range");
+                }
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "cluster arbitration cannot reset during an "
+                        "active native system batch");
+                }
+                system.cluster_states[
+                    static_cast<std::size_t>(
+                        cluster_index)].reset();
+            },
+            py::arg("cluster_index"))
+        .def(
+            "_cluster_arbiter_snapshot",
+            [](SystemState& system, int cluster_index) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (
+                    cluster_index < 0 ||
+                    cluster_index >= static_cast<int>(
+                        system.cluster_states.size())
+                ) {
+                    throw std::out_of_range(
+                        "cluster arbiter index is out of range");
+                }
+                const ClusterState& cluster =
+                    system.cluster_states[
+                        static_cast<std::size_t>(
+                            cluster_index)];
+                py::dict last_grants;
+                py::dict grant_counts;
+                for (
+                    std::size_t resource_index = 1;
+                    resource_index <
+                        CLUSTER_RESOURCE_KIND_COUNT;
+                    resource_index++
+                ) {
+                    const ClusterResourceKind resource =
+                        static_cast<ClusterResourceKind>(
+                            resource_index);
+                    const char* name =
+                        cluster_resource_name(resource);
+                    last_grants[name] =
+                        cluster.last_grants[resource_index];
+                    grant_counts[name] =
+                        cluster.grant_counts[resource_index];
+                }
+                py::dict snapshot;
+                snapshot["schema_version"] = 1;
+                snapshot["cluster_id"] =
+                    cluster.cluster_id;
+                snapshot["global_id_base"] =
+                    cluster.global_id_base;
+                snapshot["core_count"] =
+                    cluster.core_count;
+                snapshot["last_grants"] =
+                    last_grants;
+                snapshot["grant_counts"] =
+                    grant_counts;
+                snapshot["grant_sequence"] =
+                    cluster.grant_sequence;
+                snapshot["crc_locked"] =
+                    cluster.crc_locked;
+                snapshot["crc_lock_owner"] =
+                    cluster.crc_lock_owner;
+                snapshot["sha_locked"] =
+                    cluster.sha_locked;
+                snapshot["sha_lock_owner"] =
+                    cluster.sha_lock_owner;
+                return snapshot;
+            },
+            py::arg("cluster_index"))
         .def_property_readonly_static(
             "NIC_DMA_REQUESTER_ID",
             [](py::object) {

@@ -179,6 +179,10 @@ class MicroCluster:
         self.cluster_id = cluster_id
         self.id_base = id_base
         self.n = n
+        self._native_system = native_system
+        self._native_cluster_index = (
+            cluster_id if native_system is not None else None
+        )
         self.enabled = False   # matches RTL default: clusters off at reset
 
         # Scratchpad — 1 KiB, cluster-local
@@ -234,6 +238,10 @@ class MicroCluster:
         self.crc_mode = 0
         self.crc_locked = False
         self.crc_owner: Optional[int] = None
+        if self._native_cluster_index is not None:
+            self._native_system.reset_cluster_arbitration(
+                self._native_cluster_index
+            )
 
     def crc_try_acquire(self, global_core_id: int) -> bool:
         """Acquire the CRC transaction for a core, or report contention."""

@@ -277,3 +277,116 @@ loop:
         1,
     ) * system.num_cores
     assert system._scheduler_cursor == 0
+
+
+def test_cluster_mul_uses_independent_equal_round_robin_credit():
+    """A shared MUL grant retires one contender and rotates local credit."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    first, second = system.clusters[0].cores[:2]
+    first_pc = 0x100
+    second_pc = 0x180
+    system.load_binary(first_pc, assemble("mul r1, r2\nhalt"))
+    system.load_binary(second_pc, assemble("mul r1, r2\nhalt"))
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    for cpu, address, left, right in (
+        (first, first_pc, 6, 7),
+        (second, second_pc, 8, 9),
+    ):
+        cpu.pc = address
+        cpu.regs[1] = left
+        cpu.regs[2] = right
+        cpu.halted = False
+
+    first_grant = system.run_batch_stats(1)
+
+    assert first_grant.native_scheduler
+    assert first_grant.per_core_instructions == (0, 0, 1, 0, 0)
+    assert first.pc == first_pc
+    assert first.regs[1] == 6
+    assert second.regs[1] == 72
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["last_grants"]["mul_div"] == 1
+    assert snapshot["grant_counts"]["mul_div"] == 1
+
+    second.halted = True
+    second_grant = system.run_batch_stats(1)
+
+    assert second_grant.per_core_instructions == (0, 1, 0, 0, 0)
+    assert first.regs[1] == 42
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["last_grants"]["mul_div"] == 0
+    assert snapshot["grant_counts"]["mul_div"] == 2
+
+
+def test_cluster_crc_lock_blocks_without_retiring_the_contender():
+    """A locked-out CRC request preserves its PC and instruction budget."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=1,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    cluster = system.clusters[0]
+    first, second = cluster.cores[:2]
+    first_pc = 0x100
+    second_pc = 0x180
+    system.load_binary(
+        first_pc,
+        assemble("crc.mode 0\ncrc.fin r4, r0\nhalt"),
+    )
+    system.load_binary(
+        second_pc,
+        assemble("crc.mode 1\ncrc.fin r4, r0\nhalt"),
+    )
+
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    first.pc = first_pc
+    second.pc = second_pc
+    first.halted = False
+    second.halted = False
+
+    acquire = system.run_batch_stats(1)
+
+    assert acquire.per_core_instructions == (0, 0, 1, 0, 0)
+    assert first.pc == first_pc
+    assert second.pc > second_pc
+    assert cluster.crc_locked
+    assert cluster.crc_owner == 1
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["crc_locked"]
+    assert snapshot["crc_lock_owner"] == 1
+
+    release = system.run_batch_stats(1)
+
+    assert release.per_core_instructions == (0, 0, 1, 0, 0)
+    assert first.pc == first_pc
+    assert not cluster.crc_locked
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert not snapshot["crc_locked"]
+    assert snapshot["grant_counts"]["crc"] == 2
+
+    second.halted = True
+    next_owner = system.run_batch_stats(1)
+
+    assert next_owner.per_core_instructions == (0, 1, 0, 0, 0)
+    assert first.pc > first_pc
+    assert cluster.crc_locked
+    assert cluster.crc_owner == 0
+    snapshot = system._native_system._cluster_arbiter_snapshot(0)
+    assert snapshot["crc_locked"]
+    assert snapshot["crc_lock_owner"] == 0
+    assert snapshot["grant_counts"]["crc"] == 3
