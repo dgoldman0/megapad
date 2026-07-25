@@ -2010,9 +2010,9 @@ def _strict_nic_disk_dma_sample(
             "disk_issue_count_exact":
                 issue_deltas[disk_port] == payload_bytes,
             "command_issue_counts_exact":
-                issue_deltas[:2] == [1, 1],
+                issue_deltas[:2] == [3, 3],
             "grant_count_exact":
-                grant_delta == payload_bytes * 2 + 2,
+                grant_delta == payload_bytes * 2 + 6,
             "storage_terminal_result":
                 storage.result == STORAGE_RESULT_OK
                 and storage.completion == 1
@@ -2155,6 +2155,10 @@ def _strict_nic_disk_dma_report(
     expected_trace = [
         0,
         1,
+        0,
+        1,
+        0,
+        1,
         *[
             port
             for _ in range(payload_bytes)
@@ -2188,8 +2192,9 @@ def _strict_nic_disk_dma_report(
     }
     return {
         "description": (
-            "Two guest-issued commands start native NIC TX and storage READ "
-            "DMA on their physical strict-cycle main-bus ports."
+            "Two cold guest I-cache refills precede guest-issued commands "
+            "that start native NIC TX and storage READ DMA on their physical "
+            "strict-cycle main-bus ports."
         ),
         "arbitration_contract": ARBITRATION_CONTRACT,
         "configuration": {

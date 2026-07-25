@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 
 _BIOS_CACHE: dict[tuple[str, int, int], tuple[bytes, dict[str, int]]] = {}
 _ACCEL_HOOKS = (
-    ("w_rect_fill", 1),
-    ("w_blit_glyph", 2),
-    ("w_vram_copy", 3),
-    ("w_blit_string", 4),
+    ("w_rect_fill", 1, 53),
+    ("w_blit_glyph", 2, 79),
+    ("w_vram_copy", 3, 131),
+    ("w_blit_string", 4, 175),
 )
 
 
@@ -294,9 +294,13 @@ class MachineSession:
             realtime_clock=realtime_clock,
         )
         system.load_binary(0, code)
-        for name, hook_id in _ACCEL_HOOKS:
+        for name, hook_id, code_size in _ACCEL_HOOKS:
             if name in labels:
-                system.cpu.register_accel_hook(labels[name], hook_id)
+                system.cpu.register_accel_hook(
+                    labels[name],
+                    hook_id,
+                    code_size,
+                )
         session = cls(system, cols=cols, rows=rows, batch_steps=batch_steps)
         session.bios_labels = dict(labels)
         return session

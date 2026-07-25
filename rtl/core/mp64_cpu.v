@@ -44,9 +44,11 @@ module mp64_cpu #(
     input  wire [63:0] icache_data,
     input  wire        icache_hit,
     input  wire        icache_stall,
+    output reg         icache_enabled,
     output reg         icache_inv_all,
     output reg         icache_inv_line,
     output reg  [63:0] icache_inv_addr,
+    output reg  [6:0]  icache_inv_size,
 
     // === Data bus master ===
     output reg         bus_valid,
@@ -145,9 +147,6 @@ module mp64_cpu #(
     // EXT prefix
     reg [3:0]  ext_mod;
     reg        ext_active;
-
-    // I-cache enable
-    reg        icache_enabled;
 
     // ====================================================================
     // Instruction prefetch buffer
@@ -464,6 +463,7 @@ module mp64_cpu #(
             icache_inv_all <= 1'b0;
             icache_inv_line<= 1'b0;
             icache_inv_addr<= 64'd0;
+            icache_inv_size<= 7'd1;
             icache_req     <= 1'b0;
 
             psel   <= 5'd3;
@@ -619,6 +619,9 @@ module mp64_cpu #(
             CPU_FETCH: begin
                 if (irq_pending && ibuf_len == 5'd0) begin
                     ivec_id  <= {4'd0, irq_vector};
+                    // Abandon the CPU-side fetch request while the cache
+                    // independently drains any bus request it already owns.
+                    icache_req <= 1'b0;
                     cpu_state <= CPU_IRQ;
                 end else if (ibuf_len >= 5'd2 && ibuf[0] == 8'hFB &&
                              crypto_is_bare(ibuf[1]) && ibuf_need != 4'd2) begin
@@ -809,6 +812,12 @@ module mp64_cpu #(
                             flags <= 8'h40; priv_level <= 1'b0;
                             D <= 8'd0; Q <= 1'b0; T <= 16'd0;
                             ivt_base <= 64'd0; ivec_id <= 8'd0;
+                            fetch_pc <= 64'd0;
+                            ibuf_len <= 5'd0;
+                            ibuf_need <= 4'd1;
+                            icache_req <= 1'b0;
+                            icache_enabled <= 1'b1;
+                            icache_inv_all <= 1'b1;
                             R[0] <= 64'd0; R[1] <= 64'd0; R[2] <= 64'd0; R[3] <= 64'd0;
                             R[4] <= 64'd0; R[5] <= 64'd0; R[6] <= 64'd0; R[7] <= 64'd0;
                             R[8] <= 64'd0; R[9] <= 64'd0; R[10]<= 64'd0; R[11]<= 64'd0;
@@ -1612,10 +1621,6 @@ module mp64_cpu #(
                     bus_wen   <= 1'b1;
                     if (bus_ready) begin
                         bus_valid <= 1'b0;
-                        if (icache_enabled) begin
-                            icache_inv_line <= 1'b1;
-                            icache_inv_addr <= effective_addr;
-                        end
                         if (mem_sub == 4'h5) R[xsel] <= R[xsel] - 64'd8;
                         if (post_action == POST_IRQ_VEC) begin
                             R[spsel] <= R[spsel] - 64'd8;
@@ -2029,6 +2034,22 @@ module mp64_cpu #(
             end
 
             endcase
+
+            // Every completed write on this core's data port invalidates the
+            // exact writer-local byte span.  This central point includes
+            // scalar stores, both interrupt stack writes, BIST, and the
+            // EXT.STRING engine, and it remains active while lookup is
+            // disabled.
+            if (bus_valid && bus_wen && bus_ready) begin
+                icache_inv_line <= 1'b1;
+                icache_inv_addr <= bus_addr;
+                case (bus_size)
+                    BUS_BYTE:  icache_inv_size <= 7'd1;
+                    BUS_HALF:  icache_inv_size <= 7'd2;
+                    BUS_WORD:  icache_inv_size <= 7'd4;
+                    default:   icache_inv_size <= 7'd8;
+                endcase
+            end
         end
     end
 

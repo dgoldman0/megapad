@@ -127,6 +127,13 @@ CSR_ICACHE_CTRL   = 0x70   # W: bit0=enable, bit1=invalidate-all; R: bit0=enable
 CSR_ICACHE_HITS   = 0x71   # R: hit counter
 CSR_ICACHE_MISSES = 0x72   # R: miss counter
 
+# Full-core instruction-cache geometry.  Tags retain every physical-address
+# bit above the line/index fields; truncating them to Bank 0 would make
+# executable external-memory apertures alias low memory.
+ICACHE_LINE_BYTES = 16
+ICACHE_NUM_LINES  = 256
+ICACHE_INDEX_MASK = ICACHE_NUM_LINES - 1
+
 # Cluster-level IVT / Barrier CSRs (§6.3)
 CSR_CL_IVTBASE     = 0x73   # Cluster shared IVT base address
 CSR_BARRIER_ARRIVE = 0x74   # R/W: per-core barrier arrive bitmask (cluster)
@@ -691,10 +698,19 @@ class Megapad64:
         self.tile_selftest: int    = 0   # 0=idle, 2=pass, 3=fail
         self.tile_st_detail: int   = 0   # bitmask of failed sub-tests
 
-        # I-cache emulation state (behavioural – no actual cache modelled)
-        self.icache_enabled: int = 1   # 1 = cache enabled
-        self.icache_hits: int    = 0   # hit counter (always 0 in emulator)
-        self.icache_misses: int  = 0   # miss counter (always 0 in emulator)
+        # Private, direct-mapped 4 KiB guest I-cache.  The eight-byte fetch
+        # window models one RTL CPU-side request per instruction (and a
+        # second request only when the instruction crosses a DWORD boundary).
+        self.icache_enabled: int = 1
+        self.icache_hits: int = 0
+        self.icache_misses: int = 0
+        self._icache_valid: list[bool] = [False] * ICACHE_NUM_LINES
+        self._icache_tags: list[int] = [0] * ICACHE_NUM_LINES
+        self._icache_data = bytearray(
+            ICACHE_NUM_LINES * ICACHE_LINE_BYTES
+        )
+        self._ifetch_window_addr: Optional[int] = None
+        self._ifetch_window_data: int = 0
 
         # DMA ring buffer state
         self.dma_ring_base: int = 0
@@ -822,20 +838,24 @@ class Megapad64:
             off = a - self._vram_base
             if off + 64 <= self._vram_size:
                 self._vram_mem[off:off+64] = data[:64]
+                self._icache_invalidate_span(a, 64)
             return
         if self._ext_mem and self._ext_mem_base <= a < self._ext_mem_base + self._ext_mem_size:
             off = a - self._ext_mem_base
             if off + 64 <= self._ext_mem_size:
                 self._ext_mem[off:off+64] = data[:64]
+                self._icache_invalidate_span(a, 64)
             return
         if self._hbw_mem and self._hbw_base <= a < self._hbw_base + self._hbw_size:
             off = a - self._hbw_base
             if off + 64 <= self._hbw_size:
                 self._hbw_mem[off:off+64] = data[:64]
+                self._icache_invalidate_span(a, 64)
             return
         a = a % self.mem_size
         if a + 64 <= self.mem_size:
             self.mem[a:a+64] = data[:64]
+            self._icache_invalidate_span(addr, 64)
 
     # -- Property shortcuts --
 
@@ -921,6 +941,7 @@ class Megapad64:
     def mem_write8(self, addr: int, val: int):
         buf, off, _ = self._resolve_addr(addr)
         buf[off] = val & 0xFF
+        self._icache_invalidate_span(addr, 1)
 
     def mem_read16(self, addr: int) -> int:
         buf, off, sz = self._resolve_addr(addr)
@@ -930,6 +951,7 @@ class Megapad64:
         buf, off, sz = self._resolve_addr(addr)
         buf[off]            = val & 0xFF
         buf[(off+1) % sz]   = (val >> 8) & 0xFF
+        self._icache_invalidate_span(addr, 2)
 
     def mem_read32(self, addr: int) -> int:
         buf, off, sz = self._resolve_addr(addr)
@@ -942,6 +964,7 @@ class Megapad64:
         buf, off, sz = self._resolve_addr(addr)
         for i in range(4):
             buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
+        self._icache_invalidate_span(addr, 4)
 
     def mem_read64(self, addr: int) -> int:
         buf, off, sz = self._resolve_addr(addr)
@@ -954,6 +977,7 @@ class Megapad64:
         buf, off, sz = self._resolve_addr(addr)
         for i in range(8):
             buf[(off+i) % sz] = (val >> (8*i)) & 0xFF
+        self._icache_invalidate_span(addr, 8)
 
     # -- Stack helpers --
 
@@ -968,9 +992,81 @@ class Megapad64:
 
     # -- Fetch --
 
+    @staticmethod
+    def _icache_key(addr: int) -> tuple[int, int]:
+        line = u64(addr) >> 4
+        return line & ICACHE_INDEX_MASK, line >> 8
+
+    def _icache_invalidate_span(self, addr: int, size: int):
+        """Invalidate matching lines after a completed write by this core."""
+        if size <= 0:
+            return
+        first = u64(addr) & ~(ICACHE_LINE_BYTES - 1)
+        line_count = (
+            (u64(addr) & (ICACHE_LINE_BYTES - 1)) + size
+            + ICACHE_LINE_BYTES - 1
+        ) // ICACHE_LINE_BYTES
+        for line_number in range(line_count):
+            line = u64(first + line_number * ICACHE_LINE_BYTES)
+            index, tag = self._icache_key(line)
+            if self._icache_valid[index] and self._icache_tags[index] == tag:
+                self._icache_valid[index] = False
+
+    def _icache_invalidate_all(self, *, reset_statistics: bool = True):
+        self._icache_valid[:] = [False] * ICACHE_NUM_LINES
+        self._ifetch_window_addr = None
+        if reset_statistics:
+            self.icache_hits = 0
+            self.icache_misses = 0
+
+    def _icache_reset(self):
+        self.icache_enabled = 1
+        self._icache_invalidate_all()
+
+    def _load_fetch_window(self, addr: int):
+        """Load the aligned eight-byte CPU fetch response containing *addr*."""
+        window_addr = u64(addr) & ~7
+        if not self.icache_enabled:
+            self._ifetch_window_data = self.mem_read64(window_addr)
+            self._ifetch_window_addr = window_addr
+            return
+
+        index, tag = self._icache_key(window_addr)
+        if self._icache_valid[index] and self._icache_tags[index] == tag:
+            self.icache_hits = u64(self.icache_hits + 1)
+        else:
+            self.icache_misses = u64(self.icache_misses + 1)
+            line_base = window_addr & ~(ICACHE_LINE_BYTES - 1)
+            lo = self.mem_read64(line_base)
+            hi = self.mem_read64(u64(line_base + 8))
+            data_off = index * ICACHE_LINE_BYTES
+            self._icache_data[data_off:data_off + 8] = lo.to_bytes(
+                8, "little"
+            )
+            self._icache_data[data_off + 8:data_off + 16] = hi.to_bytes(
+                8, "little"
+            )
+            self._icache_tags[index] = tag
+            self._icache_valid[index] = True
+
+        data_off = index * ICACHE_LINE_BYTES
+        if window_addr & 8:
+            data_off += 8
+        self._ifetch_window_data = int.from_bytes(
+            self._icache_data[data_off:data_off + 8], "little"
+        )
+        self._ifetch_window_addr = window_addr
+
+    def _icache_read_byte(self, addr: int) -> int:
+        window_addr = u64(addr) & ~7
+        if self._ifetch_window_addr != window_addr:
+            self._load_fetch_window(addr)
+        shift = (u64(addr) & 7) * 8
+        return (self._ifetch_window_data >> shift) & 0xFF
+
     def fetch8(self) -> int:
         """Fetch one byte at PC and advance PC."""
-        val = self.mem_read8(self.pc)
+        val = self._icache_read_byte(self.pc)
         self.pc = u64(self.pc + 1)
         return val
 
@@ -1204,11 +1300,17 @@ class Megapad64:
         self.bist_fail_data = 0
         # Scratchpad region 0xFFF80..0xFFFFF is excluded from BIST
         end = min(self.mem_size, 0xFFF80)
-        ok = self._bist_march_c_minus(end)
-        if ok and val == 1:
-            ok = self._bist_checkerboard(end)
-        if ok and val == 1:
-            ok = self._bist_addr_as_data(end)
+        try:
+            ok = self._bist_march_c_minus(end)
+            if ok and val == 1:
+                ok = self._bist_checkerboard(end)
+            if ok and val == 1:
+                ok = self._bist_addr_as_data(end)
+        finally:
+            # The BIST writes Bank 0 behind the scalar helpers.  Discard only
+            # matching resident lines and preserve the architectural cache
+            # counters.
+            self._icache_invalidate_span(0, end)
         self.bist_status = 2 if ok else 3
 
     def _bist_march_c_minus(self, end: int) -> bool:
@@ -1281,9 +1383,8 @@ class Megapad64:
         Bit 1: if set, invalidate all lines (auto-clears).
         """
         self.icache_enabled = val & 1
-        if val & 2:                 # invalidate-all bit
-            self.icache_hits   = 0
-            self.icache_misses = 0
+        if val & 2:
+            self._icache_invalidate_all()
 
     def _dma_ctrl_write(self, val: int):
         """Handle writes to CSR_DMA_CTRL — matches RTL mp64_cpu.v.
@@ -1317,6 +1418,7 @@ class Megapad64:
         fail_mask |= self._tile_st_sum(TILE_A)             # bit 3
         # Restore scratchpad and tile state
         self.mem[TILE_A:TILE_A + 128] = bytearray(save_scratch)
+        self._icache_invalidate_span(TILE_A, 128)
         self.tsrc0, self.tsrc1, self.tdst, self.tmode, \
             self.tctrl, self.acc = save
         self.tile_st_detail = fail_mask
@@ -1326,6 +1428,7 @@ class Megapad64:
         """Write 64 bytes to memory for tile self-test."""
         a = addr % self.mem_size
         self.mem[a:a+64] = data[:64]
+        self._icache_invalidate_span(addr, 64)
 
     def _tile_st_read(self, addr: int) -> bytearray:
         """Read 64 bytes from memory for tile self-test."""
@@ -2323,6 +2426,7 @@ class Megapad64:
             self.cycle_count += 1
             return 1
 
+        self._ifetch_window_addr = None
         byte0 = self.fetch8()
         f = (byte0 >> 4) & 0xF  # family
         n = byte0 & 0xF         # operand nibble
@@ -3840,13 +3944,16 @@ class Megapad64:
         self.dma_ctrl = 0
         self.qos_weight = 0
         self.qos_bwlimit = 0
+        self._icache_reset()
         # Note: core_id and num_cores are NOT reset — they are hardware-fixed
 
     # -- Instruction size helper (for SKIP) --
 
     def _next_instruction_size(self) -> int:
         """Peek at the instruction at PC and return its byte size."""
-        b0 = self.mem_read8(self.pc)
+        # RTL issues a distinct I-cache request for SKIP's target peek.
+        self._ifetch_window_addr = None
+        b0 = self._icache_read_byte(self.pc)
         f = (b0 >> 4) & 0xF
         n = b0 & 0xF
         # EXT prefix: 1 byte + size of following instruction
@@ -3855,7 +3962,7 @@ class Megapad64:
                 return 3
             if n == 0xA:  # EXT.DICT: self-contained 3-byte
                 return 3
-            b1 = self.mem_read8(u64(self.pc + 1))
+            b1 = self._icache_read_byte(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
             if f2 == 0xF and n2 == 0x9:  # REX + F9
@@ -3898,7 +4005,7 @@ class Megapad64:
             if ss == 1:
                 return 3  # broadcast: opcode + funct + reg
             if op == 3:   # TSYS
-                funct_b = self.mem_read8(u64(addr + 1))
+                funct_b = self._icache_read_byte(u64(addr + 1))
                 if (funct_b & 0x07) == 7:  # RROT: opcode + funct + ctrl
                     return 3
             return 2
@@ -4281,3 +4388,10 @@ class Megapad64Micro(Megapad64):
 
     def _icache_ctrl_write(self, val: int):
         pass  # no I-cache on micro-cores
+
+    def _icache_reset(self):
+        self.icache_enabled = 0
+        self._icache_valid[:] = [False] * ICACHE_NUM_LINES
+        self._ifetch_window_addr = None
+        self.icache_hits = 0
+        self.icache_misses = 0

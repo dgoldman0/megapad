@@ -164,7 +164,8 @@ module tb_multicore_smoke;
             // I-cache wires
             wire [63:0] ic_fetch_addr, ic_fetch_data, ic_inv_addr;
             wire        ic_fetch_req, ic_fetch_hit, ic_fetch_stall;
-            wire        ic_inv_all, ic_inv_line;
+            wire        ic_enabled, ic_inv_all, ic_inv_line;
+            wire [6:0]  ic_inv_size;
             wire        ic_bus_valid;
             wire [63:0] ic_bus_addr;
             wire        ic_bus_wen;
@@ -186,6 +187,7 @@ module tb_multicore_smoke;
             mp64_icache u_icache (
                 .clk        (clk),
                 .rst       (~rst_n),
+                .enabled    (ic_enabled),
                 .fetch_addr (ic_fetch_addr),
                 .fetch_valid(ic_fetch_req),
                 .fetch_data (ic_fetch_data),
@@ -194,6 +196,7 @@ module tb_multicore_smoke;
                 .inv_all    (ic_inv_all),
                 .inv_line   (ic_inv_line),
                 .inv_addr   (ic_inv_addr),
+                .inv_size   (ic_inv_size),
                 .bus_valid  (ic_bus_valid),
                 .bus_addr   (ic_bus_addr),
                 .bus_rdata  (ic_bus_rdata),
@@ -215,9 +218,11 @@ module tb_multicore_smoke;
                 .icache_data    (ic_fetch_data),
                 .icache_hit     (ic_fetch_hit),
                 .icache_stall   (ic_fetch_stall),
+                .icache_enabled (ic_enabled),
                 .icache_inv_all (ic_inv_all),
                 .icache_inv_line(ic_inv_line),
                 .icache_inv_addr(ic_inv_addr),
+                .icache_inv_size(ic_inv_size),
 
                 .bus_valid  (cpu_bus_valid[c]),
                 .bus_addr   (cpu_bus_addr [c*64 +: 64]),

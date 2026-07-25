@@ -128,9 +128,11 @@ module mp64_soc #(
     wire [63:0] cpu_icache_data    [0:NUM_CORES-1];
     wire        cpu_icache_hit     [0:NUM_CORES-1];
     wire        cpu_icache_stall   [0:NUM_CORES-1];
+    wire        cpu_icache_enabled [0:NUM_CORES-1];
     wire        cpu_icache_inv_all [0:NUM_CORES-1];
     wire        cpu_icache_inv_line[0:NUM_CORES-1];
     wire [63:0] cpu_icache_inv_addr[0:NUM_CORES-1];
+    wire [6:0]  cpu_icache_inv_size[0:NUM_CORES-1];
     wire [63:0] ic_stat_hits       [0:NUM_CORES-1];
     wire [63:0] ic_stat_misses     [0:NUM_CORES-1];
 
@@ -216,9 +218,11 @@ module mp64_soc #(
                 .icache_data     (cpu_icache_data[ci]),
                 .icache_hit      (cpu_icache_hit[ci]),
                 .icache_stall    (cpu_icache_stall[ci]),
+                .icache_enabled  (cpu_icache_enabled[ci]),
                 .icache_inv_all  (cpu_icache_inv_all[ci]),
                 .icache_inv_line (cpu_icache_inv_line[ci]),
                 .icache_inv_addr (cpu_icache_inv_addr[ci]),
+                .icache_inv_size (cpu_icache_inv_size[ci]),
                 .icache_stat_hits  (ic_stat_hits[ci]),
                 .icache_stat_misses(ic_stat_misses[ci]),
 
@@ -265,6 +269,7 @@ module mp64_soc #(
                 .rst         (rst_h),
 
                 // CPU fetch side
+                .enabled     (cpu_icache_enabled[ci]),
                 .fetch_addr  (cpu_icache_addr[ci]),
                 .fetch_valid (cpu_icache_req[ci]),
                 .fetch_data  (cpu_icache_data[ci]),
@@ -283,6 +288,7 @@ module mp64_soc #(
                 .inv_all     (cpu_icache_inv_all[ci]),
                 .inv_line    (cpu_icache_inv_line[ci]),
                 .inv_addr    (cpu_icache_inv_addr[ci]),
+                .inv_size    (cpu_icache_inv_size[ci]),
 
                 // Stats
                 .stat_hits   (ic_stat_hits[ci]),
@@ -400,30 +406,35 @@ module mp64_soc #(
     genvar mi;
     generate
         for (mi = 0; mi < NUM_CORES; mi = mi + 1) begin : g_bus_mux
-            // I-cache refill has priority (CPU is stalled during refill)
-            assign muxed_valid[mi] = ic_bus_valid[mi] ? 1'b1
-                                                      : core_bus_valid[mi];
-            assign muxed_addr[mi]  = ic_bus_valid[mi] ? ic_bus_addr[mi]
-                                                      : core_bus_addr[mi];
-            assign muxed_wdata[mi] = ic_bus_valid[mi] ? 64'd0
-                                                      : core_bus_wdata[mi];
-            assign muxed_wen[mi]   = ic_bus_valid[mi] ? ic_bus_wen[mi]
-                                                      : core_bus_wen[mi];
-            assign muxed_size[mi]  = ic_bus_valid[mi] ? ic_bus_size[mi]
-                                                      : core_bus_size[mi];
-            // I-cache refills are never port I/O
-            assign muxed_port_io[mi] = ic_bus_valid[mi] ? 1'b0
-                                                        : core_bus_port_io[mi];
-
-            // Demux response back to CPU or I-cache
             wire bus_resp_ready;
             wire [63:0] bus_resp_rdata;
 
-            // These get assigned from unpacked bus arbiter output below
-            assign core_bus_rdata[mi] = bus_resp_rdata;
-            assign core_bus_ready[mi] = bus_resp_ready && !ic_bus_valid[mi];
-            assign ic_bus_rdata[mi]   = bus_resp_rdata;
-            assign ic_bus_ready[mi]   = bus_resp_ready && ic_bus_valid[mi];
+            mp64_core_bus_mux u_core_bus_mux (
+                .clk          (sys_clk),
+                .rst_n        (sys_rst_n),
+                .core_valid   (core_bus_valid[mi]),
+                .core_addr    (core_bus_addr[mi]),
+                .core_wdata   (core_bus_wdata[mi]),
+                .core_wen     (core_bus_wen[mi]),
+                .core_size    (core_bus_size[mi]),
+                .core_port_io (core_bus_port_io[mi]),
+                .ic_valid     (ic_bus_valid[mi]),
+                .ic_addr      (ic_bus_addr[mi]),
+                .ic_wen       (ic_bus_wen[mi]),
+                .ic_size      (ic_bus_size[mi]),
+                .mux_valid    (muxed_valid[mi]),
+                .mux_addr     (muxed_addr[mi]),
+                .mux_wdata    (muxed_wdata[mi]),
+                .mux_wen      (muxed_wen[mi]),
+                .mux_size     (muxed_size[mi]),
+                .mux_port_io  (muxed_port_io[mi]),
+                .bus_rdata    (bus_resp_rdata),
+                .bus_ready    (bus_resp_ready),
+                .core_rdata   (core_bus_rdata[mi]),
+                .core_ready   (core_bus_ready[mi]),
+                .ic_rdata     (ic_bus_rdata[mi]),
+                .ic_ready     (ic_bus_ready[mi])
+            );
         end
     endgenerate
 

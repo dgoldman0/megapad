@@ -301,9 +301,14 @@ class Megapad64:
         self._cs.attach_vram(buf, base, size)
         self._vram_buf = buf  # Python fallback uses the original object
 
-    def register_accel_hook(self, addr: int, hook_id: int):
-        """Register a CALL.L intercept for a BIOS word address."""
-        self._cs.register_accel_hook(addr, hook_id)
+    def register_accel_hook(
+        self,
+        addr: int,
+        hook_id: int,
+        code_size: int,
+    ):
+        """Register a code-identity-checked CALL.L BIOS intercept."""
+        self._cs.register_accel_hook(addr, hook_id, code_size)
 
     # ── Register access ──────────────────────────────────
 
@@ -435,6 +440,7 @@ def {_attr}(self, v):
 
     def mem_write8(self, addr: int, val: int):
         self.mem[u64(addr) % self.mem_size] = val & 0xFF
+        self._cs.icache_invalidate_span(u64(addr), 1)
 
     def mem_read16(self, addr: int) -> int:
         a = u64(addr) % self.mem_size
@@ -444,6 +450,7 @@ def {_attr}(self, v):
         a = u64(addr) % self.mem_size
         self.mem[a] = val & 0xFF
         self.mem[(a+1) % self.mem_size] = (val >> 8) & 0xFF
+        self._cs.icache_invalidate_span(u64(addr), 2)
 
     def mem_read32(self, addr: int) -> int:
         a = u64(addr) % self.mem_size
@@ -456,6 +463,7 @@ def {_attr}(self, v):
         a = u64(addr) % self.mem_size
         for i in range(4):
             self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
+        self._cs.icache_invalidate_span(u64(addr), 4)
 
     def mem_read64(self, addr: int) -> int:
         a = u64(addr) % self.mem_size
@@ -468,6 +476,7 @@ def {_attr}(self, v):
         a = u64(addr) % self.mem_size
         for i in range(8):
             self.mem[(a+i) % self.mem_size] = (val >> (8*i)) & 0xFF
+        self._cs.icache_invalidate_span(u64(addr), 8)
 
     # -- Stack helpers --
 
@@ -643,13 +652,34 @@ def {_attr}(self, v):
         fb.mem = self.mem               # share memory
         fb.mem_size = self.mem_size     # replacement may change geometry
         fb.mem_read8 = self.mem_read8    # use patched MMIO
-        fb.mem_write8 = self.mem_write8
         fb.mem_read16 = self.mem_read16
-        fb.mem_write16 = self.mem_write16
         fb.mem_read32 = self.mem_read32
-        fb.mem_write32 = self.mem_write32
         fb.mem_read64 = self.mem_read64
-        fb.mem_write64 = self.mem_write64
+
+        # A fallback instruction owns the Python cache snapshot until it is
+        # copied back below.  Route the physical write through the wrapper,
+        # then invalidate that snapshot too; otherwise the final sync would
+        # resurrect a line that the native writer-side helper had discarded.
+        def fallback_write8(addr: int, value: int):
+            self.mem_write8(addr, value)
+            fb._icache_invalidate_span(addr, 1)
+
+        def fallback_write16(addr: int, value: int):
+            self.mem_write16(addr, value)
+            fb._icache_invalidate_span(addr, 2)
+
+        def fallback_write32(addr: int, value: int):
+            self.mem_write32(addr, value)
+            fb._icache_invalidate_span(addr, 4)
+
+        def fallback_write64(addr: int, value: int):
+            self.mem_write64(addr, value)
+            fb._icache_invalidate_span(addr, 8)
+
+        fb.mem_write8 = fallback_write8
+        fb.mem_write16 = fallback_write16
+        fb.mem_write32 = fallback_write32
+        fb.mem_write64 = fallback_write64
         fb.on_output = self.on_output
 
         # Forward extended memory regions so _read_tile/_write_tile resolve
@@ -845,6 +875,7 @@ def {_attr}(self, v):
         self._cs.ext_modifier = -1
         self._cs.crc_acc = 0xFFFF_FFFF
         self._cs.crc_mode = 0
+        self._cs.icache_reset()
         # Clear dictionary cache
         self._cs.dict_clear()
 
@@ -1175,6 +1206,11 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.icache_enabled = cs.icache_enabled
     py_cpu.icache_hits = cs.icache_hits
     py_cpu.icache_misses = cs.icache_misses
+    cache_valid, cache_tags, cache_data = cs.icache_snapshot()
+    py_cpu._icache_valid[:] = [bool(value) for value in cache_valid]
+    py_cpu._icache_tags[:] = cache_tags
+    py_cpu._icache_data[:] = cache_data
+    py_cpu._ifetch_window_addr = None
     py_cpu.priv_level = cs.priv_level
     py_cpu.mpu_base = cs.mpu_base
     py_cpu.mpu_limit = cs.mpu_limit
@@ -1240,6 +1276,11 @@ def _sync_py_to_cs(py_cpu: _PyMegapad64, cs):
     cs.icache_enabled = py_cpu.icache_enabled
     cs.icache_hits = py_cpu.icache_hits
     cs.icache_misses = py_cpu.icache_misses
+    cs.icache_restore(
+        bytes(py_cpu._icache_valid),
+        py_cpu._icache_tags,
+        bytes(py_cpu._icache_data),
+    )
     cs.priv_level = py_cpu.priv_level
     cs.mpu_base = py_cpu.mpu_base
     cs.mpu_limit = py_cpu.mpu_limit
@@ -1358,10 +1399,7 @@ def _csr_write_py(cpu, addr: int, val: int):
             cs.perf_tileops = 0; cs.perf_extmem = 0
             cs.perf_enable = 1
     elif addr == CSR_ICACHE_CTRL:
-        cs.icache_enabled = val & 1
-        if val & 2:
-            cs.icache_hits = 0; cs.icache_misses = 0
-            cs.icache_enabled = 1
+        cs.icache_control_write(val)
 
 # Pure-Python backend kept as _PyMegapad64 for ISA reference tests
 # and MEX fallback only — not used as main Megapad64.

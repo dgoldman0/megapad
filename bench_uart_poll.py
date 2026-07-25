@@ -20,14 +20,18 @@ def boot_bios() -> MegapadSystem:
     code = assemble((ROOT / "bios.asm").read_text(), labels_out=labels)
     system = MegapadSystem(ram_size=1024 * 1024)
     system.load_binary(0, code)
-    for name, hook_id in (
-        ("w_rect_fill", 1),
-        ("w_blit_glyph", 2),
-        ("w_vram_copy", 3),
-        ("w_blit_string", 4),
+    for name, hook_id, code_size in (
+        ("w_rect_fill", 1, 53),
+        ("w_blit_glyph", 2, 79),
+        ("w_vram_copy", 3, 131),
+        ("w_blit_string", 4, 175),
     ):
         if name in labels:
-            system.cpu.register_accel_hook(labels[name], hook_id)
+            system.cpu.register_accel_hook(
+                labels[name],
+                hook_id,
+                code_size,
+            )
     system.boot()
     for _ in range(100):
         if system.cpu.idle:

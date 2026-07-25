@@ -1321,6 +1321,7 @@ class MegapadSystem:
                             offset,
                             val & 0xFF,
                         ):
+                            native_state.icache_invalidate_span(addr, 1)
                             return
                     bus.write8(
                         offset,
@@ -1331,18 +1332,28 @@ class MegapadSystem:
                     cpu.trap_addr = addr
                     raise TrapError(IVEC_BUS_FAULT,
                                     f"Bus timeout @ {addr:#018x}")
+                if native_state is not None:
+                    native_state.icache_invalidate_span(addr, 1)
                 return
             if cluster and (addr >> 32) == 0xFFFF_FE00:
                 cluster.spad_write8(addr & 0xFFFF_FFFF, val)
+                if native_state is not None:
+                    native_state.icache_invalidate_span(addr, 1)
                 return
             if vram_size > 0 and vram_base <= addr < vram_end:
                 vram_mem[addr - vram_base] = val & 0xFF
+                if native_state is not None:
+                    native_state.icache_invalidate_span(addr, 1)
                 return
             if hbw_size > 0 and HBW_BASE <= addr < hbw_end:
                 hbw_mem[addr - HBW_BASE] = val & 0xFF
+                if native_state is not None:
+                    native_state.icache_invalidate_span(addr, 1)
                 return
             if ext_mem_size > 0 and ext_mem_base <= addr < ext_mem_end:
                 ext_mem[addr - ext_mem_base] = val & 0xFF
+                if native_state is not None:
+                    native_state.icache_invalidate_span(addr, 1)
                 return
             original_write8(addr, val)
 
@@ -1454,6 +1465,17 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def load_binary(self, addr: int, data: bytes | bytearray):
+        """Load bytes through the scheduler's exclusive host-mutation seam."""
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            if self._native_system.cycle_execution_pending:
+                raise RuntimeError(
+                    "binary loading cannot mutate memory while cycle "
+                    "execution is suspended"
+                )
+            self._load_binary_locked(addr, data)
+
+    def _load_binary_locked(self, addr: int, data: bytes | bytearray):
         """Load raw bytes with slice copies across mapped memory regions.
 
         Ordinary addresses retain the emulator's historical Bank 0 wrapping

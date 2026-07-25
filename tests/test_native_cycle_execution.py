@@ -31,12 +31,42 @@ from devices import (
 from system import MegapadSystem
 
 
+def _prime_instruction_cache(
+    system: MegapadSystem,
+    address: int,
+    size: int,
+) -> None:
+    """Start a data/timing oracle from an explicitly warm guest cache."""
+    if size <= 0:
+        return
+    first_line = address & ~0xF
+    last_line = (address + size - 1) & ~0xF
+    for cpu in system.cores[:system.num_full_cores]:
+        valid_bytes, tags, data_bytes = cpu._cs.icache_snapshot()
+        valid = bytearray(valid_bytes)
+        tags = list(tags)
+        data = bytearray(data_bytes)
+        line_address = first_line
+        while line_address <= last_line:
+            index = (line_address >> 4) & 0xFF
+            valid[index] = 1
+            tags[index] = line_address >> 12
+            data_offset = index * 16
+            for byte_offset in range(16):
+                data[data_offset + byte_offset] = cpu.mem[
+                    (line_address + byte_offset) % cpu.mem_size
+                ]
+            line_address += 16
+        cpu._cs.icache_restore(bytes(valid), tags, bytes(data))
+
+
 def _system(
     code: bytes,
     *,
     cores: int = 1,
     realtime_clock: bool = False,
     storage_image: str | None = None,
+    cold_instruction_cache: bool = False,
 ) -> MegapadSystem:
     system = MegapadSystem(
         ram_size=4096,
@@ -50,6 +80,8 @@ def _system(
     )
     system.load_binary(0, code)
     system.boot(entry=0)
+    if not cold_instruction_cache:
+        _prime_instruction_cache(system, 0, len(code))
     return system
 
 
@@ -730,18 +762,22 @@ def test_phase0_strict_dma_probe_uses_real_equal_round_robin_ports(
     assert sample["main_bus"]["nic_port_id"] == 2
     assert sample["main_bus"]["disk_port_id"] == 3
     assert sample["main_bus"]["issue_sequence_deltas"] == [
-        1,
-        1,
+        3,
+        3,
         payload_bytes,
         payload_bytes,
     ]
     assert sample["main_bus"]["grant_sequence_delta"] == (
-        payload_bytes * 2 + 2
+        payload_bytes * 2 + 6
     )
     assert not any(sample["main_bus"]["sticky_bus_errors"])
 
     trace = report["service_trace"]["ports"]
     assert trace == [
+        0,
+        1,
+        0,
+        1,
         0,
         1,
         *[

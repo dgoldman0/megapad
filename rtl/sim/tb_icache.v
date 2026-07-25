@@ -1,5 +1,5 @@
 // ============================================================================
-// tb_icache.v — Testbench for mp64_icache
+// tb_icache.v — Contract tests for mp64_icache
 // ============================================================================
 `timescale 1ns / 1ps
 
@@ -8,6 +8,7 @@
 module tb_icache;
 
     reg         clk, rst;
+    reg         enabled;
     reg  [63:0] fetch_addr;
     reg         fetch_valid;
     wire [63:0] fetch_data;
@@ -21,30 +22,32 @@ module tb_icache;
     wire [1:0]  bus_size;
     reg         inv_all, inv_line;
     reg  [63:0] inv_addr;
+    reg  [6:0]  inv_size;
     wire [63:0] stat_hits, stat_misses;
 
     mp64_icache uut (
-        .clk        (clk),
-        .rst        (rst),
-        .fetch_addr (fetch_addr),
-        .fetch_valid(fetch_valid),
-        .fetch_data (fetch_data),
-        .fetch_hit  (fetch_hit),
-        .fetch_stall(fetch_stall),
-        .bus_valid  (bus_valid),
-        .bus_addr   (bus_addr),
-        .bus_rdata  (bus_rdata),
-        .bus_ready  (bus_ready),
-        .bus_wen    (bus_wen),
-        .bus_size   (bus_size),
-        .inv_all    (inv_all),
-        .inv_line   (inv_line),
-        .inv_addr   (inv_addr),
-        .stat_hits  (stat_hits),
-        .stat_misses(stat_misses)
+        .clk         (clk),
+        .rst         (rst),
+        .enabled     (enabled),
+        .fetch_addr  (fetch_addr),
+        .fetch_valid (fetch_valid),
+        .fetch_data  (fetch_data),
+        .fetch_hit   (fetch_hit),
+        .fetch_stall (fetch_stall),
+        .bus_valid   (bus_valid),
+        .bus_addr    (bus_addr),
+        .bus_rdata   (bus_rdata),
+        .bus_ready   (bus_ready),
+        .bus_wen     (bus_wen),
+        .bus_size    (bus_size),
+        .inv_all     (inv_all),
+        .inv_line    (inv_line),
+        .inv_addr    (inv_addr),
+        .inv_size    (inv_size),
+        .stat_hits   (stat_hits),
+        .stat_misses (stat_misses)
     );
 
-    // Clock: 10 ns period
     always #5 clk = ~clk;
 
     integer pass_count, fail_count;
@@ -54,7 +57,8 @@ module tb_icache;
         input [63:0]  actual, expected;
         begin
             if (actual !== expected) begin
-                $display("FAIL [%0s]: got %h, expected %h", label, actual, expected);
+                $display("FAIL [%0s]: got %h, expected %h",
+                         label, actual, expected);
                 fail_count = fail_count + 1;
             end else begin
                 pass_count = pass_count + 1;
@@ -64,9 +68,9 @@ module tb_icache;
 
     task assert_true;
         input [255:0] label;
-        input         val;
+        input         value;
         begin
-            if (val !== 1'b1) begin
+            if (value !== 1'b1) begin
                 $display("FAIL [%0s]: expected true", label);
                 fail_count = fail_count + 1;
             end else begin
@@ -77,9 +81,9 @@ module tb_icache;
 
     task assert_false;
         input [255:0] label;
-        input         val;
+        input         value;
         begin
-            if (val !== 1'b0) begin
+            if (value !== 1'b0) begin
                 $display("FAIL [%0s]: expected false", label);
                 fail_count = fail_count + 1;
             end else begin
@@ -88,28 +92,148 @@ module tb_icache;
         end
     endtask
 
-    // Helper: complete a 2-beat refill by responding when bus_valid goes high
-    task do_refill;
+    task begin_request;
+        input [63:0] address;
+        begin
+            @(negedge clk);
+            fetch_addr  = address;
+            fetch_valid = 1'b1;
+            @(posedge clk);
+            #1;
+        end
+    endtask
+
+    // Retire an immediate cache hit.  begin_request already crossed the
+    // accepting edge, so the request must be dropped before another edge.
+    task finish_hit;
+        begin
+            @(negedge clk);
+            fetch_valid = 1'b0;
+            @(posedge clk);
+            #1;
+        end
+    endtask
+
+    // A refill/bypass response becomes visible after its bus-accept edge.
+    // Hold the request through one more edge so the requester consumes it.
+    task finish_response;
+        begin
+            @(posedge clk);
+            @(negedge clk);
+            fetch_valid = 1'b0;
+            @(posedge clk);
+            #1;
+        end
+    endtask
+
+    task complete_refill;
+        input [63:0] expected_base;
         input [63:0] beat0_data;
         input [63:0] beat1_data;
         begin
-            // Wait for first beat request
-            while (!bus_valid) @(posedge clk);
+            while (!bus_valid)
+                @(posedge clk);
+
             @(negedge clk);
+            assert_eq("refill beat 0 address", bus_addr, expected_base);
             bus_rdata = beat0_data;
             bus_ready = 1'b1;
-            @(posedge clk); // first beat consumed
+            @(posedge clk);
+
             @(negedge clk);
             bus_ready = 1'b0;
-
-            // Wait for second beat request
-            while (!bus_valid) @(posedge clk);
-            @(negedge clk);
+            while (!bus_valid)
+                @(negedge clk);
+            assert_eq("refill beat 1 address", bus_addr,
+                      expected_base + 64'd8);
             bus_rdata = beat1_data;
             bus_ready = 1'b1;
-            @(posedge clk); // second beat consumed
+            @(posedge clk);
+
             @(negedge clk);
             bus_ready = 1'b0;
+            #1;
+        end
+    endtask
+
+    task complete_bypass;
+        input [63:0] expected_address;
+        input [63:0] read_data;
+        begin
+            while (!bus_valid)
+                @(posedge clk);
+
+            @(negedge clk);
+            assert_eq("bypass DWORD address", bus_addr, expected_address);
+            bus_rdata = read_data;
+            bus_ready = 1'b1;
+            @(posedge clk);
+
+            @(negedge clk);
+            bus_ready = 1'b0;
+            #1;
+        end
+    endtask
+
+    task invalidate_line;
+        input [63:0] address;
+        begin
+            @(negedge clk);
+            inv_addr = address;
+            inv_size = 7'd1;
+            inv_line = 1'b1;
+            @(posedge clk);
+            @(negedge clk);
+            inv_line = 1'b0;
+            #1;
+        end
+    endtask
+
+    task invalidate_all;
+        begin
+            @(negedge clk);
+            inv_all = 1'b1;
+            @(posedge clk);
+            #1;
+            @(negedge clk);
+            inv_all = 1'b0;
+            @(posedge clk);
+            #1;
+        end
+    endtask
+
+    // Complete a refill while invalidating its line on the final beat.
+    task complete_refill_with_final_invalidate;
+        input [63:0] expected_base;
+        input [63:0] beat0_data;
+        input [63:0] beat1_data;
+        begin
+            while (!bus_valid)
+                @(posedge clk);
+
+            @(negedge clk);
+            assert_eq("race refill beat 0 address", bus_addr, expected_base);
+            bus_rdata = beat0_data;
+            bus_ready = 1'b1;
+            @(posedge clk);
+
+            @(negedge clk);
+            bus_ready = 1'b0;
+            while (!bus_valid)
+                @(negedge clk);
+            assert_eq("race refill beat 1 address", bus_addr,
+                      expected_base + 64'd8);
+            bus_rdata = beat1_data;
+            bus_ready = 1'b1;
+            inv_addr  = expected_base;
+            inv_size  = 7'd1;
+            inv_line  = 1'b1;
+            @(posedge clk);
+
+            @(negedge clk);
+            bus_ready = 1'b0;
+            inv_line  = 1'b0;
+            #1;
         end
     endtask
 
@@ -119,8 +243,9 @@ module tb_icache;
 
         pass_count  = 0;
         fail_count  = 0;
-        clk         = 0;
-        rst         = 1;
+        clk         = 1'b0;
+        rst         = 1'b1;
+        enabled     = 1'b1;
         fetch_addr  = 64'd0;
         fetch_valid = 1'b0;
         bus_rdata   = 64'd0;
@@ -128,190 +253,265 @@ module tb_icache;
         inv_all     = 1'b0;
         inv_line    = 1'b0;
         inv_addr    = 64'd0;
+        inv_size    = 7'd1;
 
-        // Reset for 3 cycles
         repeat (3) @(posedge clk);
-        @(negedge clk); rst = 1'b0;
-        @(posedge clk);
-
-        // ================================================================
-        // Test 1: Cold miss — request addr 0x100, refill with known data
-        // ================================================================
         @(negedge clk);
-        fetch_addr  = 64'h0000_0000_0000_0100;
-        fetch_valid = 1'b1;
+        rst = 1'b0;
         @(posedge clk);
-        assert_false("T1: no immediate hit", fetch_hit);
-        assert_true("T1: stall on miss", fetch_stall);
+        #1;
 
-        // Complete 2-beat refill
-        do_refill(64'hAAAA_BBBB_CCCC_DDDD,   // lo half (bytes 0-7)
-                  64'h1111_2222_3333_4444);   // hi half (bytes 8-15)
-
-        // After refill, line should be valid — next cycle should hit
-        @(posedge clk);
-        assert_true("T1: hit after refill", fetch_hit);
-        assert_eq("T1: fetch_data lo", fetch_data, 64'hAAAA_BBBB_CCCC_DDDD);
+        assert_false("read-only bus", bus_wen);
+        assert_eq("DWORD bus size", {62'd0, bus_size},
+                  {62'd0, BUS_DWORD});
+        assert_eq("reset hit count", stat_hits, 64'd0);
+        assert_eq("reset miss count", stat_misses, 64'd0);
 
         // ================================================================
-        // Test 2: Hit — same line, upper half (offset[3]=1)
+        // Test 1: one enabled miss, exactly two aligned refill beats
         // ================================================================
+        begin_request(64'h0000_0000_0000_0100);
+        assert_false("T1 cold request is not a hit", fetch_hit);
+        assert_true("T1 cold request stalls", fetch_stall);
+        assert_eq("T1 hit count before refill", stat_hits, 64'd0);
+        assert_eq("T1 miss count", stat_misses, 64'd1);
+
+        complete_refill(64'h0000_0000_0000_0100,
+                        64'hAAAA_BBBB_CCCC_DDDD,
+                        64'h1111_2222_3333_4444);
+        assert_true("T1 refill response ready", fetch_hit);
+        assert_eq("T1 refill response data", fetch_data,
+                  64'hAAAA_BBBB_CCCC_DDDD);
+        assert_eq("T1 refill is not also a hit", stat_hits, 64'd0);
+        assert_eq("T1 still exactly one miss", stat_misses, 64'd1);
+        finish_response;
+        assert_eq("T1 response retirement adds no hit", stat_hits, 64'd0);
+
+        // ================================================================
+        // Test 2: an actual resident lookup counts exactly one hit
+        // ================================================================
+        begin_request(64'h0000_0000_0000_0108);
+        assert_true("T2 upper half hit", fetch_hit);
+        assert_eq("T2 upper half data", fetch_data,
+                  64'h1111_2222_3333_4444);
+        assert_eq("T2 exact hit count", stat_hits, 64'd1);
+        assert_eq("T2 miss count unchanged", stat_misses, 64'd1);
+        finish_hit;
+
+        // ================================================================
+        // Test 3: line invalidation compares the complete physical tag
+        // ================================================================
+        invalidate_line(64'h0000_0001_0000_0100);
+        begin_request(64'h0000_0000_0000_0100);
+        assert_true("T3 different-tag invalidation preserves line", fetch_hit);
+        assert_eq("T3 preserved line data", fetch_data,
+                  64'hAAAA_BBBB_CCCC_DDDD);
+        assert_eq("T3 second exact hit", stat_hits, 64'd2);
+        finish_hit;
+
+        invalidate_line(64'h0000_0000_0000_0100);
+        begin_request(64'h0000_0000_0000_0100);
+        assert_false("T3 matching invalidation removes line", fetch_hit);
+        assert_eq("T3 matching invalidation causes miss", stat_misses, 64'd2);
+        complete_refill(64'h0000_0000_0000_0100,
+                        64'hAAAA_0000_0000_0001,
+                        64'hAAAA_0000_0000_0002);
+        finish_response;
+
+        // ================================================================
+        // Test 4: address bits above the old 20-bit tag cannot alias
+        // ================================================================
+        begin_request(64'h0000_0001_0000_0100);
+        assert_false("T4 high physical address conflicts", fetch_hit);
+        assert_eq("T4 high-address miss count", stat_misses, 64'd3);
+        complete_refill(64'h0000_0001_0000_0100,
+                        64'hBBBB_0000_0000_0001,
+                        64'hBBBB_0000_0000_0002);
+        assert_eq("T4 high-address response", fetch_data,
+                  64'hBBBB_0000_0000_0001);
+        finish_response;
+
+        begin_request(64'h0000_0000_0000_0100);
+        assert_false("T4 original full tag was evicted", fetch_hit);
+        assert_eq("T4 original address misses again", stat_misses, 64'd4);
+        complete_refill(64'h0000_0000_0000_0100,
+                        64'hCCCC_0000_0000_0001,
+                        64'hCCCC_0000_0000_0002);
+        finish_response;
+
+        // ================================================================
+        // Test 5: invalidate-all clears both state and exact counters
+        // ================================================================
+        invalidate_all;
+        assert_eq("T5 invalidate-all resets hits", stat_hits, 64'd0);
+        assert_eq("T5 invalidate-all resets misses", stat_misses, 64'd0);
+
+        begin_request(64'h0000_0000_0000_0100);
+        assert_false("T5 invalidate-all removed resident line", fetch_hit);
+        assert_eq("T5 post-reset first miss", stat_misses, 64'd1);
+        complete_refill(64'h0000_0000_0000_0100,
+                        64'hDDDD_0000_0000_0001,
+                        64'hDDDD_0000_0000_0002);
+        finish_response;
+
+        // ================================================================
+        // Test 6: disabled fetch is one aligned uncached DWORD transaction
+        // ================================================================
+        invalidate_all;
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0108;  // same line, hi half
-        @(posedge clk);
-        assert_true("T2: hit upper half", fetch_hit);
-        assert_eq("T2: fetch_data hi", fetch_data, 64'h1111_2222_3333_4444);
+        enabled = 1'b0;
 
-        // ================================================================
-        // Test 3: Repeated hit on same line
-        // ================================================================
+        begin_request(64'h0000_0000_0000_012C);
+        assert_false("T6 bypass waits for bus data", fetch_hit);
+        assert_true("T6 bypass stalls until ready", fetch_stall);
+        assert_eq("T6 bypass does not count a hit", stat_hits, 64'd0);
+        assert_eq("T6 bypass does not count a miss", stat_misses, 64'd0);
+        complete_bypass(64'h0000_0000_0000_0128,
+                        64'h0123_4567_89AB_CDEF);
+        assert_true("T6 bypass response ready", fetch_hit);
+        assert_eq("T6 bypass response data", fetch_data,
+                  64'h0123_4567_89AB_CDEF);
+        assert_eq("T6 bypass response leaves hits zero", stat_hits, 64'd0);
+        assert_eq("T6 bypass response leaves misses zero", stat_misses, 64'd0);
+        finish_response;
+
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0100;  // back to lo
-        @(posedge clk);
-        assert_true("T3: repeated hit", fetch_hit);
-        assert_eq("T3: data", fetch_data, 64'hAAAA_BBBB_CCCC_DDDD);
+        enabled = 1'b1;
+        begin_request(64'h0000_0000_0000_012C);
+        assert_false("T6 bypass did not allocate a line", fetch_hit);
+        assert_eq("T6 enabled lookup now counts a miss", stat_misses, 64'd1);
+        complete_refill(64'h0000_0000_0000_0120,
+                        64'hEEEE_0000_0000_0001,
+                        64'hEEEE_0000_0000_0002);
+        assert_eq("T6 enabled refill selects upper beat", fetch_data,
+                  64'hEEEE_0000_0000_0002);
+        finish_response;
 
         // ================================================================
-        // Test 4: Miss at different index (addr 0x200)
+        // Test 7: matching invalidation wins over final refill publication
         // ================================================================
+        invalidate_all;
+        begin_request(64'h0000_0000_0000_0340);
+        assert_eq("T7 initial refill miss", stat_misses, 64'd1);
+        complete_refill_with_final_invalidate(
+                        64'h0000_0000_0000_0340,
+                        64'hFACE_0000_0000_0001,
+                        64'hFACE_0000_0000_0002);
+        assert_false("T7 invalidated refill has no response", fetch_hit);
+
+        // Stop the held request before IDLE can retry it.
+        fetch_valid = 1'b0;
+        @(posedge clk);
+        #1;
+        begin_request(64'h0000_0000_0000_0340);
+        assert_false("T7 invalidated refill was not published", fetch_hit);
+        assert_eq("T7 retry is a second miss", stat_misses, 64'd2);
+        complete_refill(64'h0000_0000_0000_0340,
+                        64'hBEEF_0000_0000_0001,
+                        64'hBEEF_0000_0000_0002);
+        assert_true("T7 clean retry responds", fetch_hit);
+        assert_eq("T7 clean retry data", fetch_data,
+                  64'hBEEF_0000_0000_0001);
+        assert_eq("T7 misses never become hits", stat_hits, 64'd0);
+        finish_response;
+
+        // ================================================================
+        // Test 8: an unaligned store span invalidates both touched lines
+        // ================================================================
+        invalidate_all;
+        begin_request(64'h0000_0000_0000_0400);
+        complete_refill(64'h0000_0000_0000_0400,
+                        64'h4000_0000_0000_0001,
+                        64'h4000_0000_0000_0002);
+        finish_response;
+        begin_request(64'h0000_0000_0000_0410);
+        complete_refill(64'h0000_0000_0000_0410,
+                        64'h4100_0000_0000_0001,
+                        64'h4100_0000_0000_0002);
+        finish_response;
+
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0200;
-        @(posedge clk);
-        assert_false("T4: miss different index", fetch_hit);
-
-        do_refill(64'hDEAD_BEEF_CAFE_BABE,
-                  64'hFACE_FEED_C0DE_D00D);
-        @(posedge clk);
-        assert_true("T4: hit after refill", fetch_hit);
-        assert_eq("T4: data", fetch_data, 64'hDEAD_BEEF_CAFE_BABE);
-
-        // ================================================================
-        // Test 5: Original line (0x100) still valid
-        // ================================================================
-        @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0100;
-        @(posedge clk);
-        assert_true("T5: line 0x100 still valid", fetch_hit);
-        assert_eq("T5: data", fetch_data, 64'hAAAA_BBBB_CCCC_DDDD);
-
-        // ================================================================
-        // Test 6: Invalidate single line
-        // ================================================================
-        @(negedge clk);
+        inv_addr = 64'h0000_0000_0000_040F;
+        inv_size = 7'd2;
         inv_line = 1'b1;
-        inv_addr = 64'h0000_0000_0000_0100;  // invalidate line at index for 0x100
         @(posedge clk);
         @(negedge clk);
         inv_line = 1'b0;
+        inv_size = 7'd1;
 
-        // Now accessing 0x100 should miss
-        fetch_addr = 64'h0000_0000_0000_0100;
-        @(posedge clk);
-        assert_false("T6: miss after inv_line", fetch_hit);
+        begin_request(64'h0000_0000_0000_0400);
+        assert_false("T8 crossing store invalidates first line", fetch_hit);
+        complete_refill(64'h0000_0000_0000_0400,
+                        64'h4000_0000_0000_0003,
+                        64'h4000_0000_0000_0004);
+        finish_response;
+        begin_request(64'h0000_0000_0000_0410);
+        assert_false("T8 crossing store invalidates second line", fetch_hit);
+        complete_refill(64'h0000_0000_0000_0410,
+                        64'h4100_0000_0000_0003,
+                        64'h4100_0000_0000_0004);
+        finish_response;
 
-        // But 0x200 should still hit
+        // An invalid producer size must fail safe.  The architectural maximum
+        // is 64 bytes; a larger span conservatively flushes private lines
+        // without using a wrapped line count.
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0200;
-
-        // Need to clear the pending miss on 0x100 first
-        // Actually the FSM will try to refill 0x100 — let it complete
-        do_refill(64'h0000_0000_0000_0001, 64'h0000_0000_0000_0002);
+        inv_addr = 64'h0000_0000_0000_0000;
+        inv_size = 7'd65;
+        inv_line = 1'b1;
         @(posedge clk);
-
-        // Now switch to 0x200
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0200;
-        @(posedge clk);
-        assert_true("T6: 0x200 still valid", fetch_hit);
-        assert_eq("T6: data", fetch_data, 64'hDEAD_BEEF_CAFE_BABE);
+        inv_line = 1'b0;
+        inv_size = 7'd1;
+        begin_request(64'h0000_0000_0000_0400);
+        assert_false("T8 oversized span conservatively flushes", fetch_hit);
+        complete_refill(64'h0000_0000_0000_0400,
+                        64'h4000_0000_0000_0005,
+                        64'h4000_0000_0000_0006);
+        finish_response;
 
         // ================================================================
-        // Test 7: Invalidate all
+        // Test 9: invalidate-all drains an already offered transaction
         // ================================================================
+        begin_request(64'h0000_0000_0000_0500);
+        while (!bus_valid)
+            @(posedge clk);
         @(negedge clk);
         inv_all = 1'b1;
         @(posedge clk);
+        #1;
+        assert_true("T9 canceled request remains valid until READY",
+                    bus_valid);
+        assert_eq("T9 invalidate-all resets hits while draining",
+                  stat_hits, 64'd0);
+        assert_eq("T9 invalidate-all resets misses while draining",
+                  stat_misses, 64'd0);
         @(negedge clk);
         inv_all = 1'b0;
-
-        // Both 0x100 and 0x200 should miss
-        fetch_addr = 64'h0000_0000_0000_0200;
+        bus_rdata = 64'h5000_0000_0000_0001;
+        bus_ready = 1'b1;
         @(posedge clk);
-        assert_false("T7: miss after inv_all", fetch_hit);
-
-        // Complete the refill to get FSM back to IDLE
-        do_refill(64'hBBBB, 64'hCCCC);
-        @(posedge clk);
-
-        // ================================================================
-        // Test 8: Tag conflict — same index, different tag
-        //   addr 0x100 → index=0x10, tag=0x00
-        //   addr 0x1100 → index=0x10, tag=0x01
-        //   They alias to the same cache line
-        // ================================================================
         @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0100;
-        @(posedge clk);
-        // miss (was invalidated) — refill
-        do_refill(64'hAAAA_0000_0000_0001, 64'hAAAA_0000_0000_0002);
-        @(posedge clk);
-        assert_true("T8a: tag0 hit", fetch_hit);
-
-        // Now access aliased address
-        @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_1100;
-        @(posedge clk);
-        assert_false("T8b: tag conflict miss", fetch_hit);
-
-        // Refill with different data
-        do_refill(64'hBBBB_0000_0000_0001, 64'hBBBB_0000_0000_0002);
-        @(posedge clk);
-        assert_true("T8c: new tag hit", fetch_hit);
-        assert_eq("T8c: data", fetch_data, 64'hBBBB_0000_0000_0001);
-
-        // Original should now miss (evicted)
-        @(negedge clk);
-        fetch_addr = 64'h0000_0000_0000_0100;
-        @(posedge clk);
-        assert_false("T8d: evicted tag miss", fetch_hit);
-
-        // Complete pending refill
-        do_refill(64'hAAAA_0000_0000_0001, 64'hAAAA_0000_0000_0002);
-        @(posedge clk);
-
-        // ================================================================
-        // Test 9: bus_wen always 0, bus_size always DWORD
-        // ================================================================
-        assert_false("T9: bus_wen always 0", bus_wen);
-        assert_eq("T9: bus_size", {62'd0, bus_size}, {62'd0, BUS_DWORD});
-
-        // ================================================================
-        // Test 10: Statistics
-        // ================================================================
-        // We can't predict exact counts easily, but hits > 0 and misses > 0
-        assert_true("T10: hits > 0", stat_hits > 0);
-        assert_true("T10: misses > 0", stat_misses > 0);
-
-        // ================================================================
-        // Test 11: No fetch_valid → no hit, no stall
-        // ================================================================
-        @(negedge clk);
+        bus_ready = 1'b0;
         fetch_valid = 1'b0;
-        fetch_addr  = 64'h0000_0000_0000_0100;
-        @(posedge clk);
-        assert_false("T11: no hit when !valid", fetch_hit);
-        assert_false("T11: no stall when !valid", fetch_stall);
+        #1;
+        assert_false("T9 drained request publishes no response", fetch_hit);
+        assert_false("T9 drained request releases bus", bus_valid);
 
         // ================================================================
-        // Summary
+        // Test 10: idle interface has neither hit nor stall
         // ================================================================
+        assert_false("T10 no hit without request", fetch_hit);
+        assert_false("T10 no stall without request", fetch_stall);
+
         #20;
         $display("");
         $display("============================================");
         if (fail_count == 0)
             $display(" tb_icache: ALL %0d assertions PASSED", pass_count);
         else
-            $display(" tb_icache: %0d PASSED, %0d FAILED", pass_count, fail_count);
+            $display(" tb_icache: %0d PASSED, %0d FAILED",
+                     pass_count, fail_count);
         $display("============================================");
         $finish;
     end

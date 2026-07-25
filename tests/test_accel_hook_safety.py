@@ -23,7 +23,8 @@ def _make_hook_cpu(
     source: str = "call.l r4\nhalt",
 ) -> Megapad64:
     cpu = Megapad64(mem_size=MEM_SIZE)
-    cpu.load_bytes(0, assemble(source))
+    code = assemble(source)
+    cpu.load_bytes(0, code)
     cpu.pc = 0
     cpu.regs[4] = HOOK_TARGET
     cpu.regs[14] = DATA_STACK
@@ -31,7 +32,11 @@ def _make_hook_cpu(
     for index, value in enumerate(popped_cells):
         start = DATA_STACK + index * 8
         cpu.mem[start:start + 8] = (value & MASK64).to_bytes(8, "little")
-    cpu.register_accel_hook(HOOK_TARGET, hook_id)
+    # Most safety cases use a synthetic one-byte body at HOOK_TARGET. The
+    # ordinary-copy fallback below assembles a real body and fingerprints its
+    # complete span.
+    code_size = max(1, len(code) - HOOK_TARGET)
+    cpu.register_accel_hook(HOOK_TARGET, hook_id, code_size)
     return cpu
 
 
@@ -251,6 +256,13 @@ def test_unknown_hook_id_declines_to_ordinary_call():
     _assert_declined(cpu, assert_memory_unchanged=True)
 
 
+def test_hook_declines_after_registered_body_is_overwritten():
+    cpu = _make_hook_cpu(1, [0xCAFE, 1, 1, 2, 0x1000])
+    cpu.mem[HOOK_TARGET] = assemble("halt")[0]
+
+    _assert_declined(cpu)
+
+
 def test_user_mode_hook_declines_instead_of_bypassing_mpu_routing():
     cpu = _make_hook_cpu(1, [0xCAFE, 1, 1, 2, 0x1000])
     cpu.priv_level = 1
@@ -324,7 +336,7 @@ def test_hook_registration_fails_fast_from_execution_callback():
                 "while CPUState is in use$"
             ),
         ):
-            cpu.register_accel_hook(HOOK_TARGET, 1)
+            cpu.register_accel_hook(HOOK_TARGET, 1, 1)
         rejected.append("registration")
 
     cpu.on_output = register_during_output

@@ -95,8 +95,9 @@ module tb_cpu_smoke;
     wire        icache_req;
     reg  [63:0] icache_data;
     reg         icache_hit;
-    wire        icache_inv_all, icache_inv_line;
+    wire        icache_enabled, icache_inv_all, icache_inv_line;
     wire [63:0] icache_inv_addr;
+    wire [6:0]  icache_inv_size;
 
     wire [11:0] ic_base = {icache_addr[11:3], 3'b000};
     always @(negedge clk) begin
@@ -138,9 +139,11 @@ module tb_cpu_smoke;
         .icache_data    (icache_data),
         .icache_hit     (icache_hit),
         .icache_stall   (1'b0),
+        .icache_enabled (icache_enabled),
         .icache_inv_all (icache_inv_all),
         .icache_inv_line(icache_inv_line),
         .icache_inv_addr(icache_inv_addr),
+        .icache_inv_size(icache_inv_size),
 
         // Data bus
         .bus_valid (bus_valid),

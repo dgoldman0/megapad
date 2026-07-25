@@ -1402,9 +1402,18 @@ class TestBIOS(unittest.TestCase):
         """Register C++ accelerator hooks for BIOS graphics words."""
         labels = getattr(cls, '_bios_labels', {})
         if labels and hasattr(sys_obj.cpu, 'register_accel_hook'):
-            for name, hook_id in [('w_rect_fill', 1), ('w_blit_glyph', 2), ('w_vram_copy', 3), ('w_blit_string', 4)]:
+            for name, hook_id, code_size in [
+                ('w_rect_fill', 1, 53),
+                ('w_blit_glyph', 2, 79),
+                ('w_vram_copy', 3, 131),
+                ('w_blit_string', 4, 175),
+            ]:
                 if name in labels:
-                    sys_obj.cpu.register_accel_hook(labels[name], hook_id)
+                    sys_obj.cpu.register_accel_hook(
+                        labels[name],
+                        hook_id,
+                        code_size,
+                    )
 
     def _boot_bios(self, ram_kib=256, storage_image=None, ext_mem_mib=0):
         # Fast path: restore from snapshot (default 256K, no storage)
@@ -23707,13 +23716,14 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
     def test_tcb_alloc_scavenges_timewait(self):
         """TCB-ALLOC should reap expired TIME_WAIT before returning -1."""
         text = self._run_kdos([
-            # Fill all slots with TIME_WAIT, set old timestamp
+            # Fill all slots with TIME_WAIT and make each timestamp exactly
+            # one 2MSL interval old.  Do not assume the deterministic RTC has
+            # advanced 60 seconds merely because the interpreter booted.
             ": fill-tw /TCP-MAX-CONN 0 DO"
             "  TCPS-TIME-WAIT I TCB-N TCB.STATE !"
-            "  0 I TCB-N TCB.RTO-TIMER !"  # stamp = 0 (ancient)
+            "  EPOCH@ TCP-2MSL - I TCB-N TCB.RTO-TIMER !"
             " LOOP ;",
             "fill-tw",
-            # EPOCH@ should be >> 60000, so all are expired
             "TCB-ALLOC .\" a=\" .",
         ])
         # Should have scavenged and found a free slot

@@ -111,18 +111,21 @@ module tb_opcodes;
     // I-cache wires
     wire [63:0] ic_fetch_addr, ic_fetch_data, ic_inv_addr;
     wire        ic_fetch_req, ic_fetch_hit, ic_fetch_stall;
-    wire        ic_inv_all, ic_inv_line;
+    wire        ic_enabled, ic_inv_all, ic_inv_line;
+    wire [6:0]  ic_inv_size;
 
     wire        ic_bus_valid;
     wire [63:0] ic_bus_addr;
     reg  [63:0] ic_bus_rdata;
     reg         ic_bus_ready;
+    reg         hold_icache_ready;
+    reg         irq_timer_tb;
 
     // I-cache memory port (read-only 1-cycle latency from same mem[])
     always @(posedge clk) begin
         ic_bus_ready <= 1'b0;
         ic_bus_rdata <= 64'd0;
-        if (ic_bus_valid) begin
+        if (ic_bus_valid && !hold_icache_ready) begin
             ic_bus_ready <= 1'b1;
             ic_bus_rdata <= {mem[ic_bus_addr[12:0]+7],
                              mem[ic_bus_addr[12:0]+6],
@@ -138,6 +141,7 @@ module tb_opcodes;
     mp64_icache u_icache (
         .clk        (clk),
         .rst        (~rst_n),
+        .enabled    (ic_enabled),
         .fetch_addr (ic_fetch_addr),
         .fetch_valid(ic_fetch_req),
         .fetch_data (ic_fetch_data),
@@ -146,6 +150,7 @@ module tb_opcodes;
         .inv_all    (ic_inv_all),
         .inv_line   (ic_inv_line),
         .inv_addr   (ic_inv_addr),
+        .inv_size   (ic_inv_size),
         .bus_valid  (ic_bus_valid),
         .bus_addr   (ic_bus_addr),
         .bus_rdata  (ic_bus_rdata),
@@ -163,9 +168,11 @@ module tb_opcodes;
         .icache_data    (ic_fetch_data),
         .icache_hit     (ic_fetch_hit),
         .icache_stall   (ic_fetch_stall),
+        .icache_enabled (ic_enabled),
         .icache_inv_all (ic_inv_all),
         .icache_inv_line(ic_inv_line),
         .icache_inv_addr(ic_inv_addr),
+        .icache_inv_size(ic_inv_size),
 
         .bus_valid (bus_valid),
         .bus_addr  (bus_addr),
@@ -186,7 +193,7 @@ module tb_opcodes;
         .mex_imm8  (mex_imm8_w),
         .mex_done  (1'b0),
         .mex_busy  (1'b0),
-        .irq_timer (1'b0),
+        .irq_timer (irq_timer_tb),
         .irq_uart  (1'b0),
         .irq_nic   (1'b0),
         .irq_ipi   (1'b0),
@@ -228,6 +235,8 @@ module tb_opcodes;
         begin
             rst_n = 0;
             ef_in = 4'b0000;
+            hold_icache_ready = 1'b0;
+            irq_timer_tb = 1'b0;
             #20;
             rst_n = 1;
             for (i = 0; i < max_cycles; i = i + 1) begin
@@ -255,6 +264,8 @@ module tb_opcodes;
         $dumpvars(0, tb_opcodes);
         rst_n = 0;
         ef_in = 4'b0000;
+        hold_icache_ready = 1'b0;
+        irq_timer_tb = 1'b0;
 
         // ================================================================
         // TEST 1: EI / DI
@@ -1478,6 +1489,30 @@ module tb_opcodes;
         load_and_run(400);
         check64("D after LDXA (fixed)", {56'd0, uut.D}, 64'h77);
         check64("R2 after LDXA (fixed)", uut.R[2], 64'h301);
+
+        // ================================================================
+        // TEST 77: IRQ abandons the CPU-side fetch request
+        // ================================================================
+        $display("\n=== TEST 77: IRQ abandons pending fetch ===");
+        clear_mem;
+        mem[0] = 8'h01;  // NOP
+        hold_icache_ready = 1'b1;
+        irq_timer_tb = 1'b0;
+        rst_n = 1'b0;
+        #20;
+        rst_n = 1'b1;
+        wait (ic_fetch_req === 1'b1);
+        irq_timer_tb = 1'b1;
+        @(posedge clk);
+        #1;
+        check1("CPU fetch request withdrawn on IRQ",
+               ic_fetch_req, 1'b0);
+        check64("CPU entered IRQ state",
+                {59'd0, uut.cpu_state}, {59'd0, CPU_IRQ});
+        check1("cache drains already offered refill",
+               ic_bus_valid, 1'b1);
+        irq_timer_tb = 1'b0;
+        hold_icache_ready = 1'b0;
 
         // ================================================================
         // DONE

@@ -48,7 +48,7 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
-        opcodes qos cpu_micro multicore_smoke soc_elaborate
+        opcodes qos cpu_micro multicore_smoke core_bus_mux soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -372,7 +372,7 @@ tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
 # Phase 5: Integration (QoS, multicore, SoC)
 # ==========================================================================
 
-phase5: qos multicore_smoke soc_elaborate
+phase5: qos multicore_smoke core_bus_mux soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -396,6 +396,13 @@ tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
                         $(PRIM)/mp64_sram_sp.v $(PRIM)/mp64_sram_dp.v \
                         $(PRIM)/mp64_mul.v $(MEM)/mp64_memory.v \
                         $(BUS)/mp64_bus.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- Shared full-core data/I-cache bus ownership ---
+core_bus_mux: tb_core_bus_mux.vvp
+	$(VVP) $<
+
+tb_core_bus_mux.vvp: tb_core_bus_mux.v $(SOC)/mp64_core_bus_mux.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Standalone full-SoC elaboration (catches integration/port drift) ---

@@ -1049,6 +1049,8 @@ enum class CoreProfile : uint8_t {
     MICRO = 1,
 };
 
+class ResumableBusAccess;
+
 struct CPUState {
     CoreProfile profile = CoreProfile::FULL;
     uint64_t regs[32];      // GP registers (R0-R15 base, R16-R31 via REX)
@@ -1104,9 +1106,32 @@ struct CPUState {
     uint64_t bist_status, bist_fail_addr, bist_fail_data;
     uint64_t tile_selftest, tile_st_detail;
 
-    // I-cache
+    // Private full-core I-cache: 256 direct-mapped 16-byte lines.  Tags
+    // retain every physical-address bit above the line/index fields.
+    static constexpr std::size_t ICACHE_LINES = 256;
+    static constexpr std::size_t ICACHE_LINE_BYTES = 16;
     uint8_t  icache_enabled;
     uint64_t icache_hits, icache_misses;
+    std::array<uint8_t, ICACHE_LINES> icache_valid{};
+    std::array<uint64_t, ICACHE_LINES> icache_tags{};
+    std::array<
+        std::array<uint8_t, ICACHE_LINE_BYTES>,
+        ICACHE_LINES
+    > icache_data{};
+    bool ifetch_window_valid = false;
+    uint64_t ifetch_window_addr = 0;
+    uint64_t ifetch_window_data = 0;
+    ResumableBusAccess* instruction_bus_access = nullptr;
+    struct IcacheUndoLine {
+        std::size_t index = 0;
+        uint8_t valid = 0;
+        uint64_t tag = 0;
+        std::array<uint8_t, ICACHE_LINE_BYTES> data{};
+    };
+    std::array<IcacheUndoLine, 4> icache_undo_lines{};
+    std::size_t icache_undo_count = 0;
+    uint64_t icache_undo_hits = 0;
+    uint64_t icache_undo_misses = 0;
 
     // Privilege level (0=supervisor, 1=user)
     uint8_t  priv_level;
@@ -1206,12 +1231,16 @@ struct CPUState {
     static constexpr int MAX_ACCEL_HOOKS = 8;
     struct AccelHookEntry {
         uint64_t addr;
-        int      id;    // 1=RECT_FILL, 2=BLIT_GLYPH
+        int      id;    // 1=RECT_FILL, 2=BLIT_GLYPH, 3=COPY, 4=STRING
+        std::vector<uint8_t> code_identity;
     };
     AccelHookEntry accel_hooks[MAX_ACCEL_HOOKS];
     int accel_hook_count = 0;
 
-    void register_accel_hook(uint64_t addr, int hook_id);
+    void register_accel_hook(
+        uint64_t addr,
+        int hook_id,
+        uint64_t code_size);
 };
 
 // A suspended system-owned instruction may be decoded and executed more than
@@ -1288,6 +1317,12 @@ struct CPUExecutionCheckpoint {
     std::array<uint8_t, 8> port_out{};
     std::array<uint8_t, 8> port_in{};
     std::array<uint32_t, 8> port_map{};
+    std::array<uint8_t, CPUState::ICACHE_LINES> icache_valid{};
+    std::array<uint64_t, CPUState::ICACHE_LINES> icache_tags{};
+    std::array<
+        std::array<uint8_t, CPUState::ICACHE_LINE_BYTES>,
+        CPUState::ICACHE_LINES
+    > icache_data{};
     std::array<
         std::array<CPUState::DictEntry, CPUState::DICT_WAYS>,
         CPUState::DICT_SETS
@@ -1323,6 +1358,9 @@ struct CPUExecutionCheckpoint {
             dict_table.data(),
             state.dict_table,
             sizeof(state.dict_table));
+        icache_valid = state.icache_valid;
+        icache_tags = state.icache_tags;
+        icache_data = state.icache_data;
 
 #define MP64_CAPTURE_CHECKPOINT_FIELD(type, name) name = state.name;
         MP64_EXECUTION_CHECKPOINT_SCALARS(
@@ -1349,6 +1387,10 @@ struct CPUExecutionCheckpoint {
             state.dict_table,
             dict_table.data(),
             sizeof(state.dict_table));
+        state.icache_valid = icache_valid;
+        state.icache_tags = icache_tags;
+        state.icache_data = icache_data;
+        state.ifetch_window_valid = false;
 
 #define MP64_RESTORE_CHECKPOINT_FIELD(type, name) state.name = name;
         MP64_EXECUTION_CHECKPOINT_SCALARS(
@@ -1499,6 +1541,11 @@ static std::unique_ptr<CPUState> make_cpu_state(
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
     state->dict_clear_all();
+    state->icache_enabled =
+        profile == CoreProfile::FULL ? 1 : 0;
+    state->icache_valid.fill(0);
+    state->icache_hits = 0;
+    state->icache_misses = 0;
     state->crc_acc = 0xFFFFFFFF;
     state->crc_mode = 0;
     state->gf_prime_sel = 0;
@@ -2325,14 +2372,6 @@ private:
 
 using MemoryMutationGuard = ExclusiveMemoryUseGuard;
 
-void CPUState::register_accel_hook(uint64_t addr, int hook_id) {
-    MemoryMutationGuard guard(
-        *memory,
-        "CPUState accelerator hooks cannot be changed while CPUState is in use");
-    if (accel_hook_count < MAX_ACCEL_HOOKS)
-        accel_hooks[accel_hook_count++] = {addr, hook_id};
-}
-
 class CPUExecutionGuard {
 public:
     explicit CPUExecutionGuard(CPUState& state)
@@ -2767,9 +2806,57 @@ static inline uint8_t mem_read8(CPUState& s, uint64_t addr) {
     return r.buf[r.off];
 }
 
+static inline std::pair<std::size_t, uint64_t>
+icache_key(uint64_t address) {
+    const uint64_t line = address >> 4;
+    return {
+        static_cast<std::size_t>(
+            line & (CPUState::ICACHE_LINES - 1)),
+        line >> 8,
+    };
+}
+
+static inline void icache_invalidate_span(
+        CPUState& s,
+        uint64_t address,
+        uint64_t size) {
+    if (s.profile != CoreProfile::FULL || size == 0)
+        return;
+    const uint64_t first =
+        address & ~(CPUState::ICACHE_LINE_BYTES - 1);
+    const uint64_t line_count =
+        ((address & (CPUState::ICACHE_LINE_BYTES - 1)) +
+         size + CPUState::ICACHE_LINE_BYTES - 1) /
+        CPUState::ICACHE_LINE_BYTES;
+    for (uint64_t number = 0; number < line_count; number++) {
+        const uint64_t line_address =
+            first + number * CPUState::ICACHE_LINE_BYTES;
+        const auto [index, tag] = icache_key(line_address);
+        if (s.icache_valid[index] && s.icache_tags[index] == tag)
+            s.icache_valid[index] = 0;
+    }
+}
+
+static inline void icache_invalidate_all(
+        CPUState& s,
+        bool reset_statistics) {
+    s.icache_valid.fill(0);
+    s.ifetch_window_valid = false;
+    if (reset_statistics) {
+        s.icache_hits = 0;
+        s.icache_misses = 0;
+    }
+}
+
+static inline void icache_reset(CPUState& s) {
+    s.icache_enabled = s.profile == CoreProfile::FULL ? 1 : 0;
+    icache_invalidate_all(s, true);
+}
+
 static inline void mem_write8(CPUState& s, uint64_t addr, uint8_t val) {
     auto r = resolve_mem(s, addr);
     r.buf[r.off] = val;
+    icache_invalidate_span(s, addr, 1);
 }
 
 static inline uint16_t mem_read16(CPUState& s, uint64_t addr) {
@@ -2795,6 +2882,7 @@ static inline void mem_write16(CPUState& s, uint64_t addr, uint16_t val) {
             mem_write8(s, addr + static_cast<uint64_t>(i),
                        static_cast<uint8_t>(val >> (8 * i)));
     }
+    icache_invalidate_span(s, addr, 2);
 }
 
 static inline uint32_t mem_read32(CPUState& s, uint64_t addr) {
@@ -2820,6 +2908,7 @@ static inline void mem_write32(CPUState& s, uint64_t addr, uint32_t val) {
             mem_write8(s, addr + static_cast<uint64_t>(i),
                        static_cast<uint8_t>(val >> (8 * i)));
     }
+    icache_invalidate_span(s, addr, 4);
 }
 
 static inline uint64_t mem_read64(CPUState& s, uint64_t addr) {
@@ -2845,6 +2934,40 @@ static inline void mem_write64(CPUState& s, uint64_t addr, uint64_t val) {
             mem_write8(s, addr + static_cast<uint64_t>(i),
                        static_cast<uint8_t>(val >> (8 * i)));
     }
+    icache_invalidate_span(s, addr, 8);
+}
+
+void CPUState::register_accel_hook(
+        uint64_t addr,
+        int hook_id,
+        uint64_t code_size) {
+    if (code_size == 0 || code_size > 4096)
+        throw std::invalid_argument(
+            "accelerator hook code size must be between 1 and 4096 bytes");
+
+    MemoryMutationGuard guard(
+        *memory,
+        "CPUState accelerator hooks cannot be changed while CPUState is in use");
+    std::vector<uint8_t> identity;
+    identity.reserve(static_cast<std::size_t>(code_size));
+    for (uint64_t offset = 0; offset < code_size; offset++)
+        identity.push_back(mem_read8(*this, addr + offset));
+
+    for (int index = 0; index < accel_hook_count; index++) {
+        if (accel_hooks[index].addr == addr) {
+            accel_hooks[index].id = hook_id;
+            accel_hooks[index].code_identity = std::move(identity);
+            return;
+        }
+    }
+    if (accel_hook_count >= MAX_ACCEL_HOOKS)
+        throw std::runtime_error(
+            "maximum accelerator hook count exceeded");
+    accel_hooks[accel_hook_count++] = {
+        addr,
+        hook_id,
+        std::move(identity),
+    };
 }
 
 // PC via psel
@@ -2858,7 +2981,21 @@ static inline uint64_t& sp(CPUState& s) { return s.regs[s.spsel]; }
 
 static inline int find_accel_hook(CPUState& s, uint64_t target) {
     for (int i = 0; i < s.accel_hook_count; i++) {
-        if (s.accel_hooks[i].addr == target) return s.accel_hooks[i].id;
+        const auto& entry = s.accel_hooks[i];
+        if (entry.addr != target)
+            continue;
+        bool matches = true;
+        for (std::size_t offset = 0;
+             offset < entry.code_identity.size();
+             offset++) {
+            if (mem_read8(s, target + offset) !=
+                entry.code_identity[offset]) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches)
+            return entry.id;
     }
     return 0;
 }
@@ -3121,6 +3258,7 @@ static AccelHookResult accel_rect_fill(
         auto region = resolve_accel_scalar_region(s, addr);
         for (uint64_t col = 0; col < w; col++)
             write_rgb565_le(region.ptr + col * 2, color16);
+        icache_invalidate_span(s, addr, row_bytes);
         addr += stride;
     }
     return {true, cycle_cost};
@@ -3179,8 +3317,13 @@ static AccelHookResult accel_blit_glyph(
         if (bits) {  // skip empty rows entirely
             auto region = resolve_accel_scalar_region(s, pixel_addr);
             for (int col = 0; col < 8; col++) {
-                if (bits & 0x80)
+                if (bits & 0x80) {
                     write_rgb565_le(region.ptr + col * 2, fg16);
+                    icache_invalidate_span(
+                        s,
+                        pixel_addr + static_cast<uint64_t>(col) * 2,
+                        2);
+                }
                 bits <<= 1;
             }
         }
@@ -3247,6 +3390,7 @@ static AccelHookResult accel_vram_copy(
         const auto sr = resolve_accel_byte_region(s, src_row);
         const auto dr = resolve_accel_byte_region(s, dst_row);
         std::memmove(dr.ptr, sr.ptr, static_cast<size_t>(w));
+        icache_invalidate_span(s, dst_row, w);
         if (backward) {
             src_row -= stride;
             dst_row -= stride;
@@ -3344,8 +3488,13 @@ static AccelHookResult accel_blit_string(
             if (bits) {
                 auto region = resolve_accel_scalar_region(s, pa);
                 for (int col = 0; col < 8; col++) {
-                    if (bits & 0x80)
+                    if (bits & 0x80) {
                         write_rgb565_le(region.ptr + col * 2, fg16);
+                        icache_invalidate_span(
+                            s,
+                            pa + static_cast<uint64_t>(col) * 2,
+                            2);
+                    }
                     bits <<= 1;
                 }
             }
@@ -3369,10 +3518,124 @@ static AccelHookResult execute_accel_hook(
     }
 }
 
+static inline void icache_begin_instruction(CPUState& s) {
+    s.ifetch_window_valid = false;
+    s.icache_undo_count = 0;
+    s.icache_undo_hits = s.icache_hits;
+    s.icache_undo_misses = s.icache_misses;
+}
+
+static inline void icache_record_line_undo(
+        CPUState& s,
+        std::size_t index) {
+    for (std::size_t entry = 0; entry < s.icache_undo_count; entry++) {
+        if (s.icache_undo_lines[entry].index == index)
+            return;
+    }
+    if (s.icache_undo_count >= s.icache_undo_lines.size())
+        throw std::logic_error(
+            "instruction touched too many I-cache lines");
+    auto& undo = s.icache_undo_lines[s.icache_undo_count++];
+    undo.index = index;
+    undo.valid = s.icache_valid[index];
+    undo.tag = s.icache_tags[index];
+    undo.data = s.icache_data[index];
+}
+
+static inline void icache_rollback_instruction(CPUState& s) {
+    for (std::size_t entry = 0; entry < s.icache_undo_count; entry++) {
+        const auto& undo = s.icache_undo_lines[entry];
+        s.icache_valid[undo.index] = undo.valid;
+        s.icache_tags[undo.index] = undo.tag;
+        s.icache_data[undo.index] = undo.data;
+    }
+    s.icache_hits = s.icache_undo_hits;
+    s.icache_misses = s.icache_undo_misses;
+    s.icache_undo_count = 0;
+    s.ifetch_window_valid = false;
+}
+
+static inline uint64_t read_instruction_dword(
+        CPUState& s,
+        uint64_t aligned_address) {
+    if (s.instruction_bus_access != nullptr) {
+        return s.instruction_bus_access->access(
+            BusOperation::READ,
+            aligned_address,
+            BusWidth::DOUBLEWORD,
+            0,
+            false);
+    }
+    return mem_read64(s, aligned_address);
+}
+
+static inline void load_fetch_window(CPUState& s, uint64_t address) {
+    const uint64_t window_address = address & ~uint64_t{7};
+    if (!s.icache_enabled) {
+        s.ifetch_window_data =
+            read_instruction_dword(s, window_address);
+        s.ifetch_window_addr = window_address;
+        s.ifetch_window_valid = true;
+        return;
+    }
+
+    const auto [index, tag] = icache_key(window_address);
+    if (s.icache_valid[index] && s.icache_tags[index] == tag) {
+        s.icache_hits++;
+    } else {
+        const uint64_t line_address =
+            window_address & ~(CPUState::ICACHE_LINE_BYTES - 1);
+        const uint64_t lo =
+            read_instruction_dword(s, line_address);
+        const uint64_t hi =
+            read_instruction_dword(s, line_address + 8);
+        icache_record_line_undo(s, index);
+        std::memcpy(s.icache_data[index].data(), &lo, 8);
+        std::memcpy(s.icache_data[index].data() + 8, &hi, 8);
+        s.icache_tags[index] = tag;
+        s.icache_valid[index] = 1;
+        s.icache_misses++;
+    }
+
+    const std::size_t half = (window_address & 8) ? 8 : 0;
+    std::memcpy(
+        &s.ifetch_window_data,
+        s.icache_data[index].data() + half,
+        8);
+    s.ifetch_window_addr = window_address;
+    s.ifetch_window_valid = true;
+}
+
+static inline uint8_t icache_read_byte(
+        CPUState& s,
+        uint64_t address) {
+    if (s.profile != CoreProfile::FULL)
+        return mem_read8(s, address);
+    const uint64_t window_address = address & ~uint64_t{7};
+    if (!s.ifetch_window_valid ||
+        s.ifetch_window_addr != window_address) {
+        load_fetch_window(s, address);
+    }
+    return static_cast<uint8_t>(
+        s.ifetch_window_data >> ((address & 7) * 8));
+}
+
+static inline uint8_t icache_peek_byte_without_accounting(
+        CPUState& s,
+        uint64_t address) {
+    if (s.profile != CoreProfile::FULL || !s.icache_enabled)
+        return mem_read8(s, address);
+    const auto [index, tag] = icache_key(address);
+    if (!s.icache_valid[index] || s.icache_tags[index] != tag)
+        return mem_read8(s, address);
+    return s.icache_data[index][
+        static_cast<std::size_t>(
+            address & (CPUState::ICACHE_LINE_BYTES - 1))];
+}
+
 static inline uint8_t fetch8(CPUState& s) {
     uint64_t a = pc(s);
-    const auto region = resolve_mem(s, a);
-    const uint8_t v = region.buf[region.off];
+    const uint8_t v = icache_read_byte(s, a);
     pc(s) = a + 1;
     return v;
 }
@@ -3593,7 +3856,8 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             break;
         case CSR_ICACHE_CTRL:
             s.icache_enabled = val & 1;
-            if (val & 2) { s.icache_hits = 0; s.icache_misses = 0; s.icache_enabled = 1; }
+            if (val & 2)
+                icache_invalidate_all(s, true);
             break;
         case CSR_CRC_ACC:  s.crc_acc = val; break;
         case CSR_CRC_MODE: {
@@ -3617,7 +3881,9 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 // ---------------------------------------------------------------------------
 
 static int next_instruction_size(CPUState& s) {
-    uint8_t peek = mem_read8(s, pc(s));
+    // SKIP performs its own cache lookup for the target instruction.
+    s.ifetch_window_valid = false;
+    uint8_t peek = icache_read_byte(s, pc(s));
     int f = (peek >> 4) & 0xF;
     // Estimate: most instructions are 1 or 2 bytes
     switch (f) {
@@ -3936,27 +4202,35 @@ static inline void tile_read_64bytes(CPUState& s, uint64_t addr, Tile& out) {
 static inline void tile_write_64bytes(CPUState& s, uint64_t addr, const Tile& data) {
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         const uint64_t off = addr - s.memory->vram_base;
-        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES))
+        if (region_span_fits(s.memory->vram_size, off, TILE_BYTES)) {
             std::memcpy(s.memory->vram_mem + off, data.data(), TILE_BYTES);
+            icache_invalidate_span(s, addr, TILE_BYTES);
+        }
         return;
     }
     if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
         const uint64_t off = addr - s.memory->ext_mem_base;
-        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES))
+        if (region_span_fits(s.memory->ext_mem_size, off, TILE_BYTES)) {
             std::memcpy(s.memory->ext_mem + off, data.data(), TILE_BYTES);
+            icache_invalidate_span(s, addr, TILE_BYTES);
+        }
         return;
     }
     if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
         const uint64_t off = addr - s.memory->hbw_base;
-        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES))
+        if (region_span_fits(s.memory->hbw_size, off, TILE_BYTES)) {
             std::memcpy(s.memory->hbw_mem + off, data.data(), TILE_BYTES);
+            icache_invalidate_span(s, addr, TILE_BYTES);
+        }
         return;
     }
     if (!s.memory->mem || s.memory->mem_size == 0)
         return;
     uint64_t a = addr % s.memory->mem_size;
-    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES))
+    if (region_span_fits(s.memory->mem_size, a, TILE_BYTES)) {
         std::memcpy(s.memory->mem + a, data.data(), TILE_BYTES);
+        icache_invalidate_span(s, addr, TILE_BYTES);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4712,6 +4986,7 @@ static inline void sys_write8(
             BusWidth::BYTE,
             val,
             port_io);
+        icache_invalidate_span(s, addr, 1);
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
@@ -4719,38 +4994,47 @@ static inline void sys_write8(
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 1)) {
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.uart->handles(mmio_off)) {
             s.uart->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.trng->handles(mmio_off)) {
             s.trng->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.crypto->handles(mmio_off)) {
             s.crypto->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.fb->handles(mmio_off)) {
             s.fb->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.timer->handles(mmio_off)) {
             s.timer->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (s.rtc->handles(mmio_off)) {
             s.rtc->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         if (uart_geom_span(mmio_off, 1) &&
                 s.uart_geom->handles(mmio_off)) {
             s.uart_geom->write8(mmio_off, val);
+            icache_invalidate_span(s, addr, 1);
             return;
         }
         cb.mmio_write8(addr, val);  // fallback to Python for other devices
+        icache_invalidate_span(s, addr, 1);
         return;
     }
     if (s.priv_level) {
@@ -4761,14 +5045,17 @@ static inline void sys_write8(
         mpu_check(s, addr);
     } else if (s.memory->hbw_mem && region_contains(s.memory->hbw_base, s.memory->hbw_size, addr)) {
         s.memory->hbw_mem[addr - s.memory->hbw_base] = val;
+        icache_invalidate_span(s, addr, 1);
         return;
     }
     if (s.memory->ext_mem && region_contains(s.memory->ext_mem_base, s.memory->ext_mem_size, addr)) {
         s.memory->ext_mem[addr - s.memory->ext_mem_base] = val;
+        icache_invalidate_span(s, addr, 1);
         return;
     }
     if (s.memory->vram_mem && region_contains(s.memory->vram_base, s.memory->vram_size, addr)) {
         s.memory->vram_mem[addr - s.memory->vram_base] = val;
+        icache_invalidate_span(s, addr, 1);
         return;
     }
     mem_write8(s, addr, val);
@@ -4862,37 +5149,44 @@ static inline void sys_write64(
             BusWidth::DOUBLEWORD,
             val,
             port_io);
+        icache_invalidate_span(s, addr, 8);
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 8)) {
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (s.trng->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
                 s.trng->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (s.crypto->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
                 s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (s.fb->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
                 s.fb->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (s.timer->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
                 s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (s.rtc->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
                 s.rtc->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         if (uart_geom_span(mmio_off, 8) &&
@@ -4900,10 +5194,12 @@ static inline void sys_write64(
             for (int i = 0; i < 8; i++)
                 s.uart_geom->write8(
                     mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 8);
             return;
         }
         for (int i = 0; i < 8; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
+        icache_invalidate_span(s, addr, 8);
         return;
     }
     if (s.priv_level) {
@@ -4971,42 +5267,50 @@ static inline void sys_write16(
             BusWidth::HALF,
             val,
             port_io);
+        icache_invalidate_span(s, addr, 2);
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 2)) {
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         if (s.crypto->handles(mmio_off)) {
             s.crypto->write8(mmio_off, val & 0xFF);
             s.crypto->write8(mmio_off+1, (val >> 8) & 0xFF);
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         if (s.fb->handles(mmio_off)) {
             s.fb->write8(mmio_off, val & 0xFF);
             s.fb->write8(mmio_off + 1, (val >> 8) & 0xFF);
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         if (s.timer->handles(mmio_off)) {
             s.timer->write8(mmio_off, val & 0xFF);
             s.timer->write8(mmio_off + 1, (val >> 8) & 0xFF);
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         if (s.rtc->handles(mmio_off)) {
             s.rtc->write8(mmio_off, val & 0xFF);
             s.rtc->write8(mmio_off + 1, (val >> 8) & 0xFF);
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         if (uart_geom_span(mmio_off, 2) &&
                 s.uart_geom->handles(mmio_off)) {
             s.uart_geom->write8(mmio_off, val & 0xFF);
             s.uart_geom->write8(mmio_off + 1, (val >> 8) & 0xFF);
+            icache_invalidate_span(s, addr, 2);
             return;
         }
         cb.mmio_write8(addr, val & 0xFF);
         cb.mmio_write8(addr+1, (val >> 8) & 0xFF);
+        icache_invalidate_span(s, addr, 2);
         return;
     }
     if (s.priv_level) {
@@ -5093,32 +5397,38 @@ static inline void sys_write32(
             BusWidth::WORD,
             val,
             port_io);
+        icache_invalidate_span(s, addr, 4);
         return;
     }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (write_native_nic_bytes(
                 s, cb, mmio_off, val, 4)) {
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         if (s.crypto->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         if (s.fb->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.fb->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         if (s.timer->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.timer->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         if (s.rtc->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
                 s.rtc->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         if (uart_geom_span(mmio_off, 4) &&
@@ -5126,10 +5436,12 @@ static inline void sys_write32(
             for (int i = 0; i < 4; i++)
                 s.uart_geom->write8(
                     mmio_off + i, (val >> (8*i)) & 0xFF);
+            icache_invalidate_span(s, addr, 4);
             return;
         }
         for (int i = 0; i < 4; i++)
             cb.mmio_write8(addr + i, (val >> (8*i)) & 0xFF);
+        icache_invalidate_span(s, addr, 4);
         return;
     }
     if (s.priv_level) {
@@ -5186,6 +5498,7 @@ static inline void direct_system_memory_write8(
             address)) {
         s.memory->hbw_mem[
             address - s.memory->hbw_base] = value;
+        icache_invalidate_span(s, address, 1);
         return;
     }
     if (s.memory->ext_mem &&
@@ -5195,6 +5508,7 @@ static inline void direct_system_memory_write8(
             address)) {
         s.memory->ext_mem[
             address - s.memory->ext_mem_base] = value;
+        icache_invalidate_span(s, address, 1);
         return;
     }
     if (s.memory->vram_mem &&
@@ -5204,6 +5518,7 @@ static inline void direct_system_memory_write8(
             address)) {
         s.memory->vram_mem[
             address - s.memory->vram_base] = value;
+        icache_invalidate_span(s, address, 1);
         return;
     }
     mem_write8(s, address, value);
@@ -5472,6 +5787,7 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
             auto r = resolve_mem(s, dst);
             if (r.buf && r.off + ln <= r.size) {
                 std::memset(r.buf + r.off, fb, (size_t)ln);
+                icache_invalidate_span(s, dst, ln);
                 s.regs[rd] = dst + ln;
                 s.regs[rs] = 0;
                 return (int)ln + 2;
@@ -6330,7 +6646,8 @@ struct SystemInstructionTraits {
 static SystemInstructionTraits classify_system_instruction(
         CPUState& state) {
     uint64_t address = pc(state);
-    uint8_t opcode = mem_read8(state, address);
+    uint8_t opcode =
+        icache_peek_byte_without_accounting(state, address);
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
 
@@ -6340,7 +6657,8 @@ static SystemInstructionTraits classify_system_instruction(
         if (subop == 0xB)
             return {true, false};
 
-        opcode = mem_read8(state, address + 1);
+        opcode =
+            icache_peek_byte_without_accounting(state, address + 1);
         family = (opcode >> 4) & 0xF;
         subop = opcode & 0xF;
         if (family == 0xF && (subop == 0x9 || subop == 0xA))
@@ -6469,12 +6787,28 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         return 1;
     }
 
+    struct InstructionBusScope {
+        CPUState& state;
+        ResumableBusAccess* previous;
+        InstructionBusScope(
+                CPUState& state_value,
+                ResumableBusAccess* current)
+            : state(state_value),
+              previous(state_value.instruction_bus_access) {
+            state.instruction_bus_access = current;
+        }
+        ~InstructionBusScope() {
+            state.instruction_bus_access = previous;
+        }
+    } instruction_bus_scope(s, cb.bus_access);
+
     // This is a transactional boundary: the Python microcore must see the
     // exact original PC and prefix state.  The classifier only peeks through
     // central mappings and runs before fetch or any architectural mutation.
     if (micro_instruction_requires_python_oracle(s))
         throw std::runtime_error("EXT_ISA_FALLBACK");
 
+    icache_begin_instruction(s);
     uint64_t pc_start = pc(s);  // save so we can rewind for MEX_FALLBACK
     uint8_t byte0 = fetch8(s);
     int f = (byte0 >> 4) & 0xF;
@@ -7256,6 +7590,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             // re-fetch and execute the entire instruction correctly.
             pc(s) = pc_start;
             s.ext_modifier = -1;
+            icache_rollback_instruction(s);
             throw std::runtime_error("MEX_FALLBACK");
         }
         cycles += rc;
@@ -8415,7 +8750,9 @@ static CycleCoreProgress run_cycle_core_once(
         }
         const uint64_t remaining =
             cycle_deadline - cycle_state.ready_cycle;
-        if (traits.needs_bus_journal || remaining < 5) {
+        if (core.profile == CoreProfile::FULL ||
+            traits.needs_bus_journal ||
+            remaining < 5) {
             cycle_state.instruction =
                 std::make_unique<ResumableInstruction>(
                     core,
@@ -10116,6 +10453,58 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("icache_enabled", &CPUState::icache_enabled)
         .def_readwrite("icache_hits", &CPUState::icache_hits)
         .def_readwrite("icache_misses", &CPUState::icache_misses)
+        .def("icache_reset", [](CPUState& s) {
+            icache_reset(s);
+        })
+        .def("icache_control_write", [](CPUState& s, uint64_t value) {
+            if (s.profile != CoreProfile::FULL)
+                return;
+            s.icache_enabled = value & 1;
+            if (value & 2)
+                icache_invalidate_all(s, true);
+        })
+        .def("icache_invalidate_span",
+            [](CPUState& s, uint64_t address, uint64_t size) {
+                icache_invalidate_span(s, address, size);
+            })
+        .def("icache_snapshot", [](const CPUState& s) {
+            py::tuple result(3);
+            result[0] = py::bytes(
+                reinterpret_cast<const char*>(
+                    s.icache_valid.data()),
+                s.icache_valid.size());
+            result[1] = py::cast(s.icache_tags);
+            result[2] = py::bytes(
+                reinterpret_cast<const char*>(
+                    s.icache_data.data()),
+                sizeof(s.icache_data));
+            return result;
+        })
+        .def("icache_restore",
+            [](CPUState& s,
+               const py::bytes& valid_bytes,
+               const std::array<
+                   uint64_t,
+                   CPUState::ICACHE_LINES>& tags,
+               const py::bytes& data_bytes) {
+                const std::string valid = valid_bytes;
+                const std::string data = data_bytes;
+                if (valid.size() != s.icache_valid.size() ||
+                    data.size() != sizeof(s.icache_data)) {
+                    throw py::value_error(
+                        "invalid I-cache snapshot geometry");
+                }
+                std::memcpy(
+                    s.icache_valid.data(),
+                    valid.data(),
+                    valid.size());
+                s.icache_tags = tags;
+                std::memcpy(
+                    s.icache_data.data(),
+                    data.data(),
+                    data.size());
+                s.ifetch_window_valid = false;
+            })
         .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("mpu_base", &CPUState::mpu_base)
         .def_readwrite("mpu_limit", &CPUState::mpu_limit)
