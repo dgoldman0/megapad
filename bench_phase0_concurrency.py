@@ -77,7 +77,7 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
 SCHEMA_VERSION = 3
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 4
+STATE_SCHEMA_VERSION = 5
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -115,9 +115,9 @@ STATE_COMPARISON_SCOPE = {
         "SHA-256",
         "all scalar and buffer state of shared Python devices, with large "
         "buffers and ordered frame queues represented by stable hashes",
-        "native timer, framebuffer (including palette), RTC, UART geometry, "
-        "UART, crypto-MMIO-visible, NIC-MMIO-visible, and TRNG enable state "
-        "for every full core, including secondary cores",
+        "SystemState-owned native timer, framebuffer (including palette), "
+        "RTC, UART geometry, UART, crypto-MMIO-visible, NIC-MMIO-visible, "
+        "and TRNG state as observed through every full core",
         "native system-cycle and event-horizon state, one-worker scheduler "
         "cursor, registered-device layout, platform topology, and benchmark "
         "orchestration counters",

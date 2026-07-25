@@ -47,8 +47,8 @@ from devices import (
     CppRTCProxy,
     MailboxDevice, SpinlockDevice,
     NTTDevice, KemDevice, FramebufferDevice,
-    SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE, NIC_BASE,
-    MBOX_BASE, SPINLOCK_BASE,
+    SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
+    SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU,
     PortBridgeCSR,
     WotsChainAccel,
@@ -383,8 +383,8 @@ class MegapadSystem:
         # Native Phase-1 owner for all full-core CPUState lifetimes and their
         # single shared mapping set.  Attach each exporter exactly once before
         # borrowing the first core, which seals the mapping against divergent
-        # per-core replacement.  Remaining heterogeneous cores and unmigrated
-        # singleton devices retain their explicit compatibility paths.
+        # per-core replacement. Heterogeneous micro-cores and Python-bus
+        # devices retain their explicit compatibility paths.
         self._native_system = NativeSystemState(num_cores, self.num_cores)
         self._native_system.attach_mem(self._shared_mem, ram_size)
         if hbw_size > 0:
@@ -504,8 +504,8 @@ class MegapadSystem:
             initial_rows=_init_rows,
         )
 
-        # AES, SHA3, NIC, TRNG, FB, Timer, and RTC are handled natively by the
-        # C++ accelerator — no Python device instances needed.  NIC MMIO
+        # AES, SHA3, NIC, TRNG, UART, FB, Timer, and RTC are handled by native
+        # SystemState singletons. NIC MMIO
         # (0x0400) does ~15K–35K accesses per TLS handshake; keeping it
         # in C++ is critical for HTTPS perf.  The Python NetworkDevice
         # remains only as a facade for backend lifecycle, inject_frame(),
@@ -519,10 +519,9 @@ class MegapadSystem:
         self.bus.register(self.storage)
         self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
-        # NIC: registered on the bus so that Python-fallback paths
-        # (e.g. EXT.STRING CMOVE reading MMIO) can reach the NIC.
-        # The C++ fast path checks s.nic first, so this is never hit
-        # during normal batch execution — zero performance impact.
+        # Retain the Python NIC for micro-core MMIO and backend/status facade
+        # compatibility. Full-core native execution and Python continuations
+        # probe their SystemState singleton before reaching this bus entry.
         self.bus.register(self.nic)
         self.bus.register(self.mailbox)
         self.bus.register(self.spinlock)
@@ -539,7 +538,8 @@ class MegapadSystem:
         for cpu in self.cores:
             self.port_bridge.attach_cpu(cpu)
 
-        # WOTS+ chain accelerator — DMA reads from RAM, wraps SHA3
+        # Python WOTS+ remains the micro-core bus device. Full-core native
+        # execution and continuations use SystemState's shared crypto block.
         self.wots = WotsChainAccel()
         self.wots.attach_mem(self._shared_mem)
         self.bus.register(self.wots)
@@ -552,42 +552,33 @@ class MegapadSystem:
         self.audio._mem_read = self._raw_mem_read
         self.audio._mem_span_valid = self._raw_mem_span_valid
 
-        # ── C++ NIC + TRNG ───────────────────────────────────
-        # All NIC and TRNG MMIO is handled in C++ (no bus registration).
-        # DMA goes directly through CPUState memory pointers.
-        # TX calls back to Python once per frame (backend.send).
+        # ── Shared native NIC, TRNG, and UART ─────────────────
+        # DMA uses SystemState's central mappings. TX calls back to Python
+        # once per frame, while every full core reaches the same native MMIO
+        # state retained by SystemState.
         self._nic_backend = nic_backend
         _py_nic = self.nic
         _be = nic_backend
-        for cpu in self.cores:
-            if not hasattr(cpu, '_cs'):
-                continue  # micro-cores lack C++ state
-            cs = cpu._cs
-            cs.nic_init(bytes(self.nic.mac))
-            cs.nic_sync_mem_ptrs()
-            cs.nic_set_link_up(self.nic.link_up)
-            # TX callback: mirror to Python facade + send via backend
-            def _tx_cb(frame: bytes, py_nic=_py_nic, be=_be) -> bool:
-                py_nic.tx_queue.append(frame)
-                py_nic.tx_count = (py_nic.tx_count + 1) & 0xFFFF
-                if py_nic.on_tx_frame:
-                    py_nic.on_tx_frame(frame)
-                if be is not None:
-                    return be.send(frame)
-                return True
-            cs.nic_set_tx_callback(_tx_cb)
-            cs.init_trng()
-            # The public proxy initialized the shared framebuffer once.
-            # Every full core reaches that same native controller.
-            # UART is one shared physical device. Core 0 owns the native queue;
-            # secondary cores fall through to the shared Python facade.
-            if cpu.core_id == 0:
-                cs.uart_init()
-            else:
-                cs.uart_disable()
+        cpu0_cs = self.cores[0]._cs
+        cpu0_cs.nic_init(bytes(self.nic.mac))
+        cpu0_cs.nic_sync_mem_ptrs()
+        cpu0_cs.nic_set_link_up(self.nic.link_up)
+
+        # TX callback: mirror to Python facade + send via backend.
+        def _tx_cb(frame: bytes, py_nic=_py_nic, be=_be) -> bool:
+            py_nic.tx_queue.append(frame)
+            py_nic.tx_count = (py_nic.tx_count + 1) & 0xFFFF
+            if py_nic.on_tx_frame:
+                py_nic.on_tx_frame(frame)
+            if be is not None:
+                return be.send(frame)
+            return True
+
+        cpu0_cs.nic_set_tx_callback(_tx_cb)
+        cpu0_cs.init_trng()
+        cpu0_cs.uart_init()
 
         # Wire backend RX → C++ NIC queue
-        cpu0_cs = self.cores[0]._cs
         self.uart.attach_native(cpu0_cs)
         # Native TX callbacks retain the Python NIC facade from inside an
         # opaque std::function.  Every facade/backend edge back to the borrowed
@@ -719,6 +710,7 @@ class MegapadSystem:
 
         # Scratchpad interception for micro-cores
         cluster = getattr(cpu, '_cluster', None)
+        native_state = getattr(cpu, '_cs', None)
 
         # MPU / privilege enforcement removed (user mode stripped).
 
@@ -727,6 +719,16 @@ class MegapadSystem:
             if MMIO_START <= addr < MMIO_END:
                 offset = addr - MMIO_START
                 try:
+                    # Native full-core instructions and their Python
+                    # continuations must observe the same SystemState-owned
+                    # SoC singleton. Micro-cores retain the Python bus path
+                    # until heterogeneous scheduling moves in Phase 2.
+                    if native_state is not None:
+                        native_value = (
+                            native_state._native_singleton_read8(offset)
+                        )
+                        if native_value >= 0:
+                            return native_value
                     return bus.read8(offset, requester_id=core_id)
                 except BusError:
                     cpu.trap_addr = addr
@@ -747,6 +749,12 @@ class MegapadSystem:
             if MMIO_START <= addr < MMIO_END:
                 offset = addr - MMIO_START
                 try:
+                    if native_state is not None:
+                        if native_state._native_singleton_write8(
+                            offset,
+                            val & 0xFF,
+                        ):
+                            return
                     bus.write8(
                         offset,
                         val,

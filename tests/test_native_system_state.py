@@ -11,7 +11,20 @@ import pytest
 import _mp64_accel
 from accel_wrapper import Megapad64, NativeSystemState, TrapError
 from asm import assemble
-from devices import FB_BASE, RTC, RTC_BASE, TIMER_BASE, UART_GEOM_BASE
+from devices import (
+    AES_BASE,
+    FB_BASE,
+    MMIO_BASE,
+    NIC_BASE,
+    RTC,
+    RTC_BASE,
+    SHA3_BASE,
+    TIMER_BASE,
+    TRNG_BASE,
+    UART_BASE,
+    UART_GEOM_BASE,
+    WOTS_BASE,
+)
 from nic_backends import LoopbackBackend
 from system import MegapadSystem
 
@@ -447,6 +460,185 @@ def test_standalone_cpu_ownership_and_execution_remain_available() -> None:
     assert cpu._system_owner is None
     assert cpu.step() == 1
     assert cpu.pc == len(program)
+
+
+def test_system_remaining_native_peripherals_are_singletons() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    core0, core1 = (cpu._cs for cpu in system.cores)
+
+    assert core0.uart_enabled() and core1.uart_enabled()
+    core1.uart_inject(b"Q")
+    assert core0.uart_read8(UART_BASE + 0x01) == ord("Q")
+    core1.uart_write8(UART_BASE, ord("A"))
+    assert core0.uart_drain_tx() == b"A"
+
+    core1.nic_write8(NIC_BASE + 0x02, 0xA5)
+    assert core0.nic_read8(NIC_BASE + 0x02) == 0xA5
+    assert core1.nic_inject_frame(b"shared frame")
+    assert core0.nic_rx_queue_size() == 1
+
+    core1.crypto_write8(SHA3_BASE + 0x02, 3)
+    assert core0.crypto_read8(SHA3_BASE + 0x02) == 3
+    core1.crypto_write8(WOTS_BASE + 0x0C, 1)
+    core1.crypto_write8(WOTS_BASE + 0x0E, 1)
+    assert core0.crypto_wots_status() == 2
+
+    core1.disable_trng()
+    assert not core0.trng_enabled()
+    core0.init_trng()
+    assert core1.trng_enabled()
+
+
+def test_shared_crypto_initialization_does_not_depend_on_wrapper_order() -> None:
+    owner = NativeSystemState(2)
+    owner.attach_mem(bytearray(4096), 4096)
+
+    secondary = Megapad64._from_system_state(owner, 1, num_cores=2)
+    assert secondary._cs.crypto_enabled()
+    secondary._cs.crypto_write8(SHA3_BASE + 0x02, 3)
+
+    primary = Megapad64._from_system_state(owner, 0, num_cores=2)
+    assert primary._cs.crypto_enabled()
+    assert primary._cs.crypto_read8(SHA3_BASE + 0x02) == 3
+
+
+def test_standalone_remaining_native_peripherals_remain_private() -> None:
+    first = Megapad64(mem_size=4096)
+    second = Megapad64(mem_size=4096)
+    first_cs = first._cs
+    second_cs = second._cs
+
+    for cs, mac in (
+        (first_cs, b"\x02\x00\x00\x00\x00\x01"),
+        (second_cs, b"\x02\x00\x00\x00\x00\x02"),
+    ):
+        cs.uart_init()
+        cs.nic_init(mac)
+        cs.init_trng()
+
+    first_cs.uart_inject(b"X")
+    first_cs.nic_write8(NIC_BASE + 0x02, 0x5A)
+    first_cs.crypto_write8(SHA3_BASE + 0x02, 2)
+    first_cs.disable_trng()
+
+    assert first_cs.uart_has_rx()
+    assert not second_cs.uart_has_rx()
+    assert first_cs.nic_read8(NIC_BASE + 0x02) == 0x5A
+    assert second_cs.nic_read8(NIC_BASE + 0x02) == 0
+    assert first_cs.crypto_read8(SHA3_BASE + 0x02) == 2
+    assert second_cs.crypto_read8(SHA3_BASE + 0x02) == 0
+    assert not first_cs.trng_enabled()
+    assert second_cs.trng_enabled()
+
+
+@pytest.mark.parametrize(
+    ("mmio_offset", "expected"),
+    (
+        pytest.param(UART_BASE + 0x01, ord("Q"), id="uart"),
+        pytest.param(NIC_BASE + 0x02, 0xA5, id="nic"),
+        pytest.param(AES_BASE + 0x3A, 0x01, id="crypto"),
+        pytest.param(TRNG_BASE + 0x10, 0x01, id="trng"),
+        pytest.param(WOTS_BASE + 0x0E, 0x02, id="wots"),
+    ),
+)
+def test_full_core_python_fallback_reads_system_native_singletons(
+    mmio_offset: int,
+    expected: int,
+) -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    if mmio_offset == UART_BASE + 0x01:
+        primary.uart_inject(b"Q")
+    elif mmio_offset == NIC_BASE + 0x02:
+        primary.nic_write8(mmio_offset, expected)
+    elif mmio_offset == AES_BASE + 0x3A:
+        primary.crypto_write8(mmio_offset, expected)
+    elif mmio_offset == WOTS_BASE + 0x0E:
+        primary.crypto_write8(WOTS_BASE + 0x0C, 1)
+        primary.crypto_write8(WOTS_BASE + 0x0E, 1)
+
+    # LOAD2D is a transactional Python fallback. Keep its eager TSRC0 tile
+    # read in RAM, then gather through the target byte from its 64-byte-aligned
+    # MMIO cursor.
+    cursor_address = (MMIO_BASE + mmio_offset) & ~0x3F
+    cursor_offset = (MMIO_BASE + mmio_offset) - cursor_address
+    program = assemble("t.load2d")
+    secondary.load_bytes(0, program)
+    secondary.pc = 0
+    secondary.tsrc0 = 0x100
+    secondary.tdst = 0x200
+    secondary.sb = cursor_address // (4 * 1024 * 1024)
+    secondary.sr = 0
+    secondary.sc = (cursor_address // 64) & 0xFFFF
+    secondary.sw = 1
+    secondary.tstride_r = 1
+    secondary.ttile_h = 1
+    secondary.ttile_w = cursor_offset + 1
+
+    secondary.step()
+
+    assert secondary._py_fallback is not None
+    assert secondary.mem[secondary.tdst + cursor_offset] == expected
+
+
+@pytest.mark.parametrize(
+    "mmio_offset",
+    (
+        pytest.param(NIC_BASE + 0x02, id="nic"),
+        pytest.param(SHA3_BASE + 0x02, id="crypto"),
+    ),
+)
+def test_full_core_python_fallback_writes_system_native_singletons(
+    mmio_offset: int,
+) -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    primary = system.cores[0]._cs
+    secondary = system.cores[1]
+    cursor_address = (MMIO_BASE + mmio_offset) & ~0x3F
+    cursor_offset = (MMIO_BASE + mmio_offset) - cursor_address
+    written = 0x5A
+    secondary.mem[0x100 + cursor_offset] = written
+    secondary.load_bytes(0, assemble("t.store2d"))
+    secondary.pc = 0
+    secondary.tsrc0 = 0x100
+    secondary.tdst = 0x200
+    secondary.sb = cursor_address // (4 * 1024 * 1024)
+    secondary.sr = 0
+    secondary.sc = (cursor_address // 64) & 0xFFFF
+    secondary.sw = 1
+    secondary.tstride_r = 1
+    secondary.ttile_h = 1
+    secondary.ttile_w = cursor_offset + 1
+
+    secondary.step()
+
+    assert secondary._py_fallback is not None
+    if mmio_offset == NIC_BASE + 0x02:
+        assert primary.nic_read8(mmio_offset) == written
+    else:
+        assert primary.crypto_read8(mmio_offset) == written & 0x03
 
 
 def test_system_timer_is_one_native_instance_for_every_full_core() -> None:

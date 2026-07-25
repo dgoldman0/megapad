@@ -16,10 +16,14 @@ from devices import (
     FB_BASE,
     MBOX_BASE,
     MMIO_BASE,
+    NIC_BASE,
     RTC_BASE,
+    SHA3_BASE,
     SPINLOCK_BASE,
     SYSINFO_BASE,
     TIMER_BASE,
+    TRNG_BASE,
+    UART_BASE,
     UART_GEOM_BASE,
 )
 from megapad64 import CSR_IPIACK, CSR_MBOX, IVEC_IPI
@@ -547,6 +551,53 @@ def test_secondary_native_framebuffer_reaches_shared_host_state():
     assert secondary.regs[4] == 0x0102
     assert (system.fb.width, system.fb.height) == (0x0102, 0x00F1)
     assert (system.fb.mode, system.fb.enable) == (0x03, 0x03)
+    assert callback_reads == callback_writes == 0
+
+
+def test_secondary_native_remaining_singletons_reach_shared_state():
+    """UART, NIC, crypto, and TRNG dispatch through SystemState ownership."""
+    system = _new_system(full_cores=2)
+    exercise_singletons = assemble(
+        f"""
+        ldi64 r1, {MMIO_BASE + UART_BASE}
+        ldi64 r2, 0x5a
+        st.b r1, r2
+        ldi64 r1, {MMIO_BASE + NIC_BASE + 0x02}
+        ldi64 r2, 0xa5
+        st.b r1, r2
+        ldi64 r1, {MMIO_BASE + SHA3_BASE + 0x02}
+        ldi64 r2, 0x03
+        st.b r1, r2
+        ldi64 r1, {MMIO_BASE + TRNG_BASE + 0x10}
+        ld.b r4, r1
+        halt
+        """
+    )
+    secondary = system.cores[1]
+    callback_reads = 0
+    callback_writes = 0
+    original_read = secondary._mmio_read8
+    original_write = secondary._mmio_write8
+
+    def counted_read(address):
+        nonlocal callback_reads
+        callback_reads += 1
+        return original_read(address)
+
+    def counted_write(address, value):
+        nonlocal callback_writes
+        callback_writes += 1
+        return original_write(address, value)
+
+    secondary._mmio_read8 = counted_read
+    secondary._mmio_write8 = counted_write
+    _run_only_secondary(system, exercise_singletons)
+
+    primary = system.cores[0]._cs
+    assert system._tx_log == [0x5A]
+    assert primary.nic_read8(NIC_BASE + 0x02) == 0xA5
+    assert primary.crypto_read8(SHA3_BASE + 0x02) == 3
+    assert secondary.regs[4] == 1
     assert callback_reads == callback_writes == 0
 
 

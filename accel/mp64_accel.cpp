@@ -520,14 +520,16 @@ struct CPUState {
     std::unique_ptr<MemoryMappings> private_memory;
     MemoryMappings* memory = nullptr;
 
-    // C++ native crypto devices (bypass Python MMIO callbacks)
-    CryptoDevices crypto;
-
-    // C++ native NIC device (bypass Python MMIO for networking)
-    NICDevice nic;
-
-    // C++ native TRNG device (bypass Python MMIO for random bytes)
-    TRNGDevice trng;
+    // Standalone states retain private native SoC peripherals. System-owned
+    // states borrow the one corresponding device retained by SystemState.
+    std::unique_ptr<CryptoDevices> private_crypto;
+    CryptoDevices* crypto = nullptr;
+    std::unique_ptr<NICDevice> private_nic;
+    NICDevice* nic = nullptr;
+    std::unique_ptr<TRNGDevice> private_trng;
+    TRNGDevice* trng = nullptr;
+    std::unique_ptr<UARTDevice> private_uart;
+    UARTDevice* uart = nullptr;
 
     // Standalone states own a private framebuffer.  System-owned states
     // borrow the one scanout controller retained by SystemState.
@@ -549,9 +551,6 @@ struct CPUState {
     std::unique_ptr<UartGeomDevice> private_uart_geom;
     UartGeomDevice* uart_geom = nullptr;
 
-    // C++ native UART device (RX/status/TX and BIOS TX ring)
-    UARTDevice uart;
-
     // Accelerator hooks — intercept CALL.L to known BIOS word addresses
     static constexpr int MAX_ACCEL_HOOKS = 8;
     struct AccelHookEntry {
@@ -570,7 +569,11 @@ static std::unique_ptr<CPUState> make_cpu_state(
         UartGeomDevice* shared_uart_geom = nullptr,
         FramebufferDevice* shared_fb = nullptr,
         RTCDevice* shared_rtc = nullptr,
-        InterruptRouter* shared_interrupts = nullptr) {
+        InterruptRouter* shared_interrupts = nullptr,
+        CryptoDevices* shared_crypto = nullptr,
+        NICDevice* shared_nic = nullptr,
+        TRNGDevice* shared_trng = nullptr,
+        UARTDevice* shared_uart = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -602,6 +605,30 @@ static std::unique_ptr<CPUState> make_cpu_state(
         state->private_rtc = std::make_unique<RTCDevice>();
         state->rtc = state->private_rtc.get();
     }
+    if (shared_crypto != nullptr) {
+        state->crypto = shared_crypto;
+    } else {
+        state->private_crypto = std::make_unique<CryptoDevices>();
+        state->crypto = state->private_crypto.get();
+    }
+    if (shared_nic != nullptr) {
+        state->nic = shared_nic;
+    } else {
+        state->private_nic = std::make_unique<NICDevice>();
+        state->nic = state->private_nic.get();
+    }
+    if (shared_trng != nullptr) {
+        state->trng = shared_trng;
+    } else {
+        state->private_trng = std::make_unique<TRNGDevice>();
+        state->trng = state->private_trng.get();
+    }
+    if (shared_uart != nullptr) {
+        state->uart = shared_uart;
+    } else {
+        state->private_uart = std::make_unique<UARTDevice>();
+        state->uart = state->private_uart.get();
+    }
     state->interrupts = shared_interrupts;
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
@@ -616,10 +643,11 @@ static std::unique_ptr<CPUState> make_cpu_state(
     return state;
 }
 
-// SystemState owns full-core lifetimes, exactly one mapping set, and migrated
-// singleton devices.  Other devices and scheduling remain per-core
-// compatibility paths for later transactional milestones.  Shared resources
-// are declared before cores so borrowed pointers die before their owners.
+// SystemState owns full-core lifetimes, exactly one mapping set, and every
+// native SoC-singleton device reached directly by a full core. Python-bus
+// devices and scheduling retain their compatibility paths for later
+// transactional milestones. Shared resources are declared before cores so
+// borrowed pointers die before their owners.
 struct SystemState {
     explicit SystemState(int full_core_count, int all_core_count = 0) {
         if (full_core_count < 1 || full_core_count > 255)
@@ -632,6 +660,7 @@ struct SystemState {
                 "all_core_count must include every full core and fit in 8 bits");
 
         shared_interrupts.configure(all_core_count);
+        shared_crypto.init();
         cores.reserve(static_cast<std::size_t>(full_core_count));
         for (int index = 0; index < full_core_count; index++) {
             auto core = make_cpu_state(
@@ -640,7 +669,11 @@ struct SystemState {
                 &shared_uart_geom,
                 &shared_fb,
                 &shared_rtc,
-                &shared_interrupts);
+                &shared_interrupts,
+                &shared_crypto,
+                &shared_nic,
+                &shared_trng,
+                &shared_uart);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -664,6 +697,10 @@ struct SystemState {
     }
 
     MemoryMappings shared_memory;
+    CryptoDevices shared_crypto{};
+    NICDevice shared_nic{};
+    TRNGDevice shared_trng{};
+    UARTDevice shared_uart{};
     TimerDevice shared_timer{};
     UartGeomDevice shared_uart_geom{};
     FramebufferDevice shared_fb{};
@@ -1122,27 +1159,38 @@ static inline void validate_guest_region(uint64_t base, uint64_t size) {
 }
 
 static inline void sync_nic_memory_ptrs(CPUState& s) {
-    s.nic.attach_mem_ptrs(
+    s.nic->attach_mem_ptrs(
         s.memory->mem, s.memory->mem_size,
         s.memory->hbw_mem, s.memory->hbw_base, s.memory->hbw_size,
         s.memory->ext_mem, s.memory->ext_mem_base, s.memory->ext_mem_size);
 }
 
 static inline void sync_main_memory_ptrs(CPUState& s) {
-    s.uart.attach_mem(s.memory->mem, s.memory->mem_size);
-    s.crypto.wots.mem = s.memory->mem;
-    s.crypto.wots.mem_size = s.memory->mem_size;
+    s.uart->attach_mem(s.memory->mem, s.memory->mem_size);
+    s.crypto->wots.mem = s.memory->mem;
+    s.crypto->wots.mem_size = s.memory->mem_size;
     sync_nic_memory_ptrs(s);
 }
 
 static inline void sync_system_nic_memory_ptrs(SystemState& system) {
-    for (const auto& core : system.cores)
-        sync_nic_memory_ptrs(*core);
+    system.shared_nic.attach_mem_ptrs(
+        system.shared_memory.mem,
+        system.shared_memory.mem_size,
+        system.shared_memory.hbw_mem,
+        system.shared_memory.hbw_base,
+        system.shared_memory.hbw_size,
+        system.shared_memory.ext_mem,
+        system.shared_memory.ext_mem_base,
+        system.shared_memory.ext_mem_size);
 }
 
 static inline void sync_system_main_memory_ptrs(SystemState& system) {
-    for (const auto& core : system.cores)
-        sync_main_memory_ptrs(*core);
+    system.shared_uart.attach_mem(
+        system.shared_memory.mem,
+        system.shared_memory.mem_size);
+    system.shared_crypto.wots.mem = system.shared_memory.mem;
+    system.shared_crypto.wots.mem_size = system.shared_memory.mem_size;
+    sync_system_nic_memory_ptrs(system);
 }
 
 static inline void require_private_memory_mapping(const CPUState& s) {
@@ -3099,14 +3147,14 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first (no Python callback needed)
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic.handles(mmio_off))
-            return s.nic.read8(mmio_off);
-        if (s.uart.handles(mmio_off))
-            return s.uart.read8(mmio_off);
-        if (s.trng.handles(mmio_off))
-            return s.trng.read8(mmio_off);
-        if (s.crypto.handles(mmio_off))
-            return s.crypto.read8(mmio_off);
+        if (s.nic->handles(mmio_off))
+            return s.nic->read8(mmio_off);
+        if (s.uart->handles(mmio_off))
+            return s.uart->read8(mmio_off);
+        if (s.trng->handles(mmio_off))
+            return s.trng->read8(mmio_off);
+        if (s.crypto->handles(mmio_off))
+            return s.crypto->read8(mmio_off);
         if (s.fb->handles(mmio_off))
             return s.fb->read8(mmio_off);
         if (s.timer->handles(mmio_off))
@@ -3141,20 +3189,20 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic.handles(mmio_off)) {
-            s.nic.write8(mmio_off, val);
+        if (s.nic->handles(mmio_off)) {
+            s.nic->write8(mmio_off, val);
             return;
         }
-        if (s.uart.handles(mmio_off)) {
-            s.uart.write8(mmio_off, val);
+        if (s.uart->handles(mmio_off)) {
+            s.uart->write8(mmio_off, val);
             return;
         }
-        if (s.trng.handles(mmio_off)) {
-            s.trng.write8(mmio_off, val);
+        if (s.trng->handles(mmio_off)) {
+            s.trng->write8(mmio_off, val);
             return;
         }
-        if (s.crypto.handles(mmio_off)) {
-            s.crypto.write8(mmio_off, val);
+        if (s.crypto->handles(mmio_off)) {
+            s.crypto->write8(mmio_off, val);
             return;
         }
         if (s.fb->handles(mmio_off)) {
@@ -3202,22 +3250,22 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
 static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic.handles(mmio_off)) {
+        if (s.nic->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.nic.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.nic->read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.trng.handles(mmio_off)) {
+        if (s.trng->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.trng.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.trng->read8(mmio_off + i) << (8*i);
             return v;
         }
-        if (s.crypto.handles(mmio_off)) {
+        if (s.crypto->handles(mmio_off)) {
             uint64_t v = 0;
             for (int i = 0; i < 8; i++)
-                v |= (uint64_t)s.crypto.read8(mmio_off + i) << (8*i);
+                v |= (uint64_t)s.crypto->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.fb->handles(mmio_off)) {
@@ -3262,19 +3310,19 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
 static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint64_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.nic.handles(mmio_off)) {
+        if (s.nic->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.nic.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.nic->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.trng.handles(mmio_off)) {
+        if (s.trng->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.trng.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.trng->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
-        if (s.crypto.handles(mmio_off)) {
+        if (s.crypto->handles(mmio_off)) {
             for (int i = 0; i < 8; i++)
-                s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.fb->handles(mmio_off)) {
@@ -3315,8 +3363,8 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
 static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.crypto.handles(mmio_off))
-            return s.crypto.read8(mmio_off) | ((uint16_t)s.crypto.read8(mmio_off+1) << 8);
+        if (s.crypto->handles(mmio_off))
+            return s.crypto->read8(mmio_off) | ((uint16_t)s.crypto->read8(mmio_off+1) << 8);
         if (s.fb->handles(mmio_off))
             return s.fb->read8(mmio_off) |
                    ((uint16_t)s.fb->read8(mmio_off + 1) << 8);
@@ -3344,9 +3392,9 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
 static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint16_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.crypto.handles(mmio_off)) {
-            s.crypto.write8(mmio_off, val & 0xFF);
-            s.crypto.write8(mmio_off+1, (val >> 8) & 0xFF);
+        if (s.crypto->handles(mmio_off)) {
+            s.crypto->write8(mmio_off, val & 0xFF);
+            s.crypto->write8(mmio_off+1, (val >> 8) & 0xFF);
             return;
         }
         if (s.fb->handles(mmio_off)) {
@@ -3386,10 +3434,10 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
 static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.crypto.handles(mmio_off)) {
+        if (s.crypto->handles(mmio_off)) {
             uint32_t v = 0;
             for (int i = 0; i < 4; i++)
-                v |= (uint32_t)s.crypto.read8(mmio_off + i) << (8*i);
+                v |= (uint32_t)s.crypto->read8(mmio_off + i) << (8*i);
             return v;
         }
         if (s.fb->handles(mmio_off)) {
@@ -3434,9 +3482,9 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
 static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint32_t val) {
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
-        if (s.crypto.handles(mmio_off)) {
+        if (s.crypto->handles(mmio_off)) {
             for (int i = 0; i < 4; i++)
-                s.crypto.write8(mmio_off + i, (val >> (8*i)) & 0xFF);
+                s.crypto->write8(mmio_off + i, (val >> (8*i)) & 0xFF);
             return;
         }
         if (s.fb->handles(mmio_off)) {
@@ -5522,30 +5570,36 @@ PYBIND11_MODULE(_mp64_accel, m) {
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState UART memory cannot be initialized while memory is in use");
-            s.uart.init();
-            s.uart.attach_mem(s.memory->mem, s.memory->mem_size);
+            s.uart->init();
+            s.uart->attach_mem(s.memory->mem, s.memory->mem_size);
         })
-        .def("uart_disable", [](CPUState& s) { s.uart.enabled = false; })
-        .def("uart_enabled", [](const CPUState& s) { return s.uart.enabled; })
+        .def("uart_disable", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.uart->enabled = false;
+        })
+        .def("uart_enabled", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.uart->enabled;
+        })
         .def("uart_read8", [](CPUState& s, uint32_t off) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
-            return s.uart.read8(off);
+            return s.uart->read8(off);
         })
         .def("uart_write8", [](CPUState& s, uint32_t off, uint8_t value) {
             auto memory_guard = acquire_shared_memory_use(s);
-            s.uart.write8(off, value);
+            s.uart->write8(off, value);
         })
         .def("uart_inject", [](CPUState& s, py::bytes payload) {
             std::string data = payload;
-            s.uart.inject(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+            s.uart->inject(reinterpret_cast<const uint8_t*>(data.data()), data.size());
         })
-        .def("uart_has_rx", [](const CPUState& s) { return s.uart.has_rx_data(); })
-        .def("uart_rx_size", [](const CPUState& s) { return s.uart.rx_size(); })
+        .def("uart_has_rx", [](const CPUState& s) { return s.uart->has_rx_data(); })
+        .def("uart_rx_size", [](const CPUState& s) { return s.uart->rx_size(); })
         .def_property("uart_tx_ring_base",
-            [](const CPUState& s) { return s.uart.get_tx_ring_base(); },
-            [](CPUState& s, uint64_t value) { s.uart.set_tx_ring_base(value); })
+            [](const CPUState& s) { return s.uart->get_tx_ring_base(); },
+            [](CPUState& s, uint64_t value) { s.uart->set_tx_ring_base(value); })
         .def("uart_drain_tx", [](CPUState& s) -> py::bytes {
-            const std::vector<uint8_t> data = s.uart.take_tx();
+            const std::vector<uint8_t> data = s.uart->take_tx();
             if (data.empty())
                 return py::bytes();
             return py::bytes(reinterpret_cast<const char*>(data.data()), data.size());
@@ -5558,40 +5612,50 @@ PYBIND11_MODULE(_mp64_accel, m) {
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState crypto memory cannot be initialized while memory is in use");
-            s.crypto.init();
+            s.crypto->init();
             // Ensure WOTS chain has current memory pointer
-            s.crypto.wots.mem = s.memory->mem;
-            s.crypto.wots.mem_size = s.memory->mem_size;
+            s.crypto->wots.mem = s.memory->mem;
+            s.crypto->wots.mem_size = s.memory->mem_size;
         })
         .def("disable_crypto", [](CPUState& s) {
-            s.crypto.enabled = false;
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->enabled = false;
         })
-        .def("crypto_enabled", [](const CPUState& s) {
-            return s.crypto.enabled;
+        .def("crypto_enabled", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.crypto->enabled;
         })
         // Sync crypto state from Python devices (for save/restore)
-        .def("crypto_aes_reset", [](CPUState& s) { s.crypto.aes.reset(); })
-        .def("crypto_sha3_reset", [](CPUState& s) { s.crypto.sha3.reset(); s.crypto.sha3.mode = 0; })
+        .def("crypto_aes_reset", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->aes.reset();
+        })
+        .def("crypto_sha3_reset", [](CPUState& s) {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.crypto->sha3.reset();
+            s.crypto->sha3.mode = 0;
+        })
         .def("crypto_wots_reset", [](CPUState& s) {
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState WOTS memory cannot be reset while memory is in use");
-            s.crypto.wots.reset();
-            s.crypto.wots.sha3 = &s.crypto.sha3;
-            s.crypto.wots.mem = s.memory->mem;
-            s.crypto.wots.mem_size = s.memory->mem_size;
+            s.crypto->wots.reset();
+            s.crypto->wots.sha3 = &s.crypto->sha3;
+            s.crypto->wots.mem = s.memory->mem;
+            s.crypto->wots.mem_size = s.memory->mem_size;
         })
-        .def("crypto_wots_status", [](const CPUState& s) -> uint8_t {
-            return s.crypto.wots.status;
+        .def("crypto_wots_status", [](CPUState& s) -> uint8_t {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.crypto->wots.status;
         })
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
-            return s.crypto.read8(mmio_off);
+            return s.crypto->read8(mmio_off);
         })
         .def("crypto_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
             auto memory_guard = acquire_shared_memory_use(s);
-            s.crypto.write8(mmio_off, val);
+            s.crypto->write8(mmio_off, val);
         })
         // ── NIC device ────────────────────────────────────────
         .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
@@ -5602,9 +5666,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             uint8_t mac[6] = {};
             size_t n = std::min(mac_str.size(), (size_t)6);
             std::memcpy(mac, mac_str.data(), n);
-            s.nic.init(mac);
+            s.nic->init(mac);
             // Wire memory pointers from CPUState
-            s.nic.attach_mem_ptrs(
+            s.nic->attach_mem_ptrs(
                 s.memory->mem, s.memory->mem_size,
                 s.memory->hbw_mem, s.memory->hbw_base, s.memory->hbw_size,
                 s.memory->ext_mem, s.memory->ext_mem_base, s.memory->ext_mem_size
@@ -5618,7 +5682,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
             // tx_callback: called from C++ when NIC sends a frame
             // cb receives (bytes,) and returns bool
-            s.nic.tx_callback = [cb](const uint8_t* data, size_t len) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.nic->tx_callback = [cb](const uint8_t* data, size_t len) -> bool {
                 py::gil_scoped_acquire gil;
                 try {
                     py::bytes frame(reinterpret_cast<const char*>(data), len);
@@ -5632,61 +5697,99 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("nic_inject_frame", [](CPUState& s, py::bytes frame) -> bool {
             std::string data = frame;
-            return s.nic.inject_frame(
+            return s.nic->inject_frame(
                 reinterpret_cast<const uint8_t*>(data.data()), data.size()
             );
         })
         .def("nic_has_rx", [](CPUState& s) -> bool {
-            return s.nic.has_rx();
+            return s.nic->has_rx();
         })
         .def("nic_rx_queue_size", [](CPUState& s) -> size_t {
-            return s.nic.rx_queue_size();
+            return s.nic->rx_queue_size();
         })
-        .def("nic_tx_queue_size", [](const CPUState& s) -> size_t {
-            return s.nic.tx_queue_size();
+        .def("nic_tx_queue_size", [](CPUState& s) -> size_t {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.nic->tx_queue_size();
         })
         .def("nic_drain_one_tx", [](CPUState& s) -> py::bytes {
-            auto frame = s.nic.drain_one_tx();
+            auto memory_guard = acquire_shared_memory_use(s);
+            auto frame = s.nic->drain_one_tx();
             return py::bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
         })
         .def("nic_set_link_up", [](CPUState& s, bool up) {
-            s.nic.link_up = up;
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.nic->link_up = up;
         })
-        .def("nic_enabled", [](const CPUState& s) -> bool {
-            return s.nic.enabled;
+        .def("nic_enabled", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.nic->enabled;
         })
         .def("nic_disable", [](CPUState& s) {
-            s.nic.enabled = false;
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.nic->enabled = false;
         })
         .def("nic_reset", [](CPUState& s) {
-            s.nic.reset_state();
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.nic->reset_state();
         })
         .def("nic_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
             auto memory_guard = acquire_shared_memory_use(s);
-            return s.nic.read8(mmio_off);
+            return s.nic->read8(mmio_off);
         })
         .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
             auto memory_guard = acquire_shared_memory_use(s);
-            s.nic.write8(mmio_off, val);
+            s.nic->write8(mmio_off, val);
         })
         .def("nic_irq_pending", [](const CPUState& s) -> bool {
-            return s.nic.irq_pending();
+            return s.nic->irq_pending();
         })
-        .def("nic_get_tx_count", [](const CPUState& s) -> uint16_t {
-            return s.nic.tx_count;
+        .def("nic_get_tx_count", [](CPUState& s) -> uint16_t {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.nic->tx_count;
         })
         .def("nic_get_rx_count", [](const CPUState& s) -> uint16_t {
-            return s.nic.rx_count.load(std::memory_order_relaxed);
+            return s.nic->rx_count.load(std::memory_order_relaxed);
         })
         // ── TRNG device ───────────────────────────────────────
         .def("init_trng", [](CPUState& s) {
-            s.trng.init();
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.trng->init();
         })
-        .def("trng_enabled", [](const CPUState& s) -> bool {
-            return s.trng.enabled;
+        .def("trng_enabled", [](CPUState& s) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            return s.trng->enabled;
         })
         .def("disable_trng", [](CPUState& s) {
-            s.trng.enabled = false;
+            auto memory_guard = acquire_shared_memory_use(s);
+            s.trng->enabled = false;
+        })
+        .def("_native_singleton_read8",
+             [](CPUState& s, uint32_t mmio_off) -> int {
+            auto memory_guard = acquire_shared_memory_use(s);
+            if (s.nic->handles(mmio_off))
+                return s.nic->read8(mmio_off);
+            if (s.trng->handles(mmio_off))
+                return s.trng->read8(mmio_off);
+            if (s.crypto->handles(mmio_off))
+                return s.crypto->read8(mmio_off);
+            return -1;
+        })
+        .def("_native_singleton_write8",
+             [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
+            auto memory_guard = acquire_shared_memory_use(s);
+            if (s.nic->handles(mmio_off)) {
+                s.nic->write8(mmio_off, value);
+                return true;
+            }
+            if (s.trng->handles(mmio_off)) {
+                s.trng->write8(mmio_off, value);
+                return true;
+            }
+            if (s.crypto->handles(mmio_off)) {
+                s.crypto->write8(mmio_off, value);
+                return true;
+            }
+            return false;
         })
         // ── Framebuffer device ────────────────────────────────
         .def("fb_init", [](CPUState& s) {

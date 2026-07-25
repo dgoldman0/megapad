@@ -59,10 +59,10 @@ def test_native_uart_drains_bios_ring_once():
 def test_multicore_uses_one_shared_uart_owner():
     system = MegapadSystem(ram_size=64 * 1024, num_cores=2)
     assert system.cores[0]._cs.uart_enabled()
-    assert not system.cores[1]._cs.uart_enabled()
+    assert system.cores[1]._cs.uart_enabled()
     system.uart.inject_input(b"X")
-    # A secondary core's fallback callback reaches the shared core-0 queue.
-    assert system.cores[1]._mmio_read8(0xFFFF_FF00_0000_0001) == ord("X")
+    # Every full core reaches the one SystemState-owned native queue.
+    assert system.cores[1]._cs.uart_read8(0x01) == ord("X")
 
 
 def test_reference_uart_listener_preserves_ring_batch():

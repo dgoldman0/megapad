@@ -174,8 +174,11 @@ class Megapad64:
         self._cs.ext_modifier = -1
         self._cs.crc_acc = 0xFFFF_FFFF
 
-        # Initialize C++ crypto devices (AES, SHA-256, SHA-3, FieldALU)
-        self._cs.init_crypto()
+        # Standalone CPUs initialize their private MMIO crypto. Native
+        # SystemState initializes its shared SoC device independently of
+        # Python wrapper construction order.
+        if self._system_owner is None:
+            self._cs.init_crypto()
 
         # Port I/O bridge remap table (mirrors Python megapad64.Megapad64)
         from devices import DEFAULT_PORT_MAP
