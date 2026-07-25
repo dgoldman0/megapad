@@ -1059,6 +1059,10 @@ class MegapadSystem:
                             cl.set_enabled(bool(en_mask & (1 << i)))
 
             self.sysinfo.write8 = cluster_en_write
+            for i, cluster in enumerate(clusters):
+                cluster.set_enabled(
+                    bool(self.sysinfo.cluster_en & (1 << i))
+                )
 
         # Boot state
         self._booted = False
@@ -1535,7 +1539,7 @@ class MegapadSystem:
         for i, cpu in enumerate(self.cores):
             cpu._reset_state()
 
-            # Micro-cores in clusters start halted (cluster_en defaults to 0)
+            # Hold reduced cores at reset until the saved mask is reapplied.
             if isinstance(cpu, Megapad64Micro):
                 cpu.halted = True
                 cpu.idle = False

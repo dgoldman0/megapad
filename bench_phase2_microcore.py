@@ -2,10 +2,11 @@
 """Versioned Phase 2 baseline for one active accelerated microcore.
 
 This diagnostic benchmark began as the element-5 ownership baseline.  Version
-2 preserves that workload while recording the element-6 transition to the
-native all-core system scheduler.  It deliberately does not exercise cluster
-contention, hard-QoS eligibility, equal-round-robin ordering among peers,
-shared engines, or strict-cycle execution.
+3 preserves that workload while recording both the element-6 native all-core
+system scheduler and the selected all-ones CLUSTER_EN reset contract.  It
+deliberately does not exercise cluster contention, hard-QoS eligibility,
+equal-round-robin ordering among peers, shared engines, or strict-cycle
+execution.
 """
 
 from __future__ import annotations
@@ -25,9 +26,9 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 RAM_SIZE = 1 << 16
 CODE_BASE = 0x100
@@ -60,13 +61,6 @@ EXPLICIT_EXCLUSIONS = [
         "reason": (
             "element-5 behavior tests cover widened registers; this baseline "
             "keeps a common R0-R15 state surface"
-        ),
-    },
-    {
-        "state_or_behavior": "CLUSTER_EN reset and release policy",
-        "reason": (
-            "the selected microcore is released manually; enable wiring "
-            "remains an explicit later decision"
         ),
     },
     {
@@ -226,7 +220,11 @@ def _observe(
         "program_sha256": PROGRAM_SHA256,
         "active_global_core_id": int(micro.core_id),
         "active_local_microcore_index": 0,
-        "manual_release_without_cluster_en": True,
+        "cluster_enable_policy": (
+            "all_ones_reset_then_host_selects_one_runnable_core"
+        ),
+        "cluster_enable_mask": int(system.sysinfo.cluster_en),
+        "other_cores_halted_by_host_for_single_core_baseline": True,
         "retained_native_program": True,
         "runnable_core_count": 1,
         "contention_exercised": False,
@@ -265,6 +263,7 @@ def _observe(
             micro._cs.is_micro_core and
             micro._cs is owner.micro_core(0)
         ),
+        "cluster_enable_mask": int(system.sysinfo.cluster_en),
         "cluster_enabled": bool(system.clusters[0].enabled),
     }
     canonical_state = {

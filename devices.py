@@ -1883,7 +1883,9 @@ class SystemInfo(Device):
         self.bank0_size = bank0_size
         self.num_cores = num_cores
         self.num_full_cores = num_full_cores if num_full_cores is not None else num_cores
-        self.cluster_en = 0
+        # Current integrated SoC reset contract: every configured cluster is
+        # released unless software explicitly clears its enable bit.
+        self.cluster_en = 0xFFFF_FFFF_FFFF_FFFF
         self.hbw_base = hbw_base
         self.hbw_size = hbw_size
         self.int_mem_total = int_mem_total

@@ -130,14 +130,6 @@ def test_disabled_cluster_holds_micro_cores_in_reset():
     assert all(core.halted for core in system.clusters[0].cores)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SystemInfo currently resets CLUSTER_EN to zero, while mp64_soc.v "
-        "resets the 64-bit register to all ones"
-    ),
-)
 def test_cluster_enable_reset_value_matches_rtl():
     """Reset enables every configured cluster through an all-ones mask."""
     system = _new_system(full_cores=1, clusters=3)
@@ -167,6 +159,8 @@ def test_guest_cluster_enable_write_is_safe_inside_native_batch():
     """
     )
     system = _new_system(full_cores=1, clusters=1, code=code)
+    system.sysinfo.write8(0x18, 0)
+    assert all(core.halted for core in system.clusters[0].cores)
 
     stats = system.run_batch_stats(3)
 
@@ -211,7 +205,7 @@ def test_warm_boot_reapplies_persistent_cluster_enable_mask():
 
     system.boot(entry=0)
 
-    assert system.sysinfo.cluster_en == 1
+    assert system.sysinfo.cluster_en == 0xFFFF_FFFF_FFFF_FF01
     assert system.clusters[0].enabled
     assert micro.pc == 0
     assert micro.regs[1] == 0

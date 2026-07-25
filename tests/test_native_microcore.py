@@ -223,8 +223,20 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
 
         topology = state["topology"]
         assert topology["active_core_is_system_owned_micro_profile"]
-        assert topology["cluster_enabled"] is False
-        assert state["workload"]["contention_exercised"] is False
+        assert topology["cluster_enable_mask"] == 0xFFFF_FFFF_FFFF_FFFF
+        assert topology["cluster_enabled"] is True
+        workload = state["workload"]
+        assert workload["cluster_enable_policy"] == (
+            "all_ones_reset_then_host_selects_one_runnable_core"
+        )
+        assert workload["cluster_enable_mask"] == 0xFFFF_FFFF_FFFF_FFFF
+        assert (
+            workload[
+                "other_cores_halted_by_host_for_single_core_baseline"
+            ]
+            is True
+        )
+        assert workload["contention_exercised"] is False
         assert state["cores"][1]["profile"] == "micro"
         assert state["cores"][1]["accelerated_wrapper"]
         assert state["cores"][1]["common_gprs_r0_r15"][1] == 5

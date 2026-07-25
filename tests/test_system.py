@@ -646,11 +646,11 @@ class TestNIC(unittest.TestCase):
     def test_sysinfo_cluster_en_rw(self):
         """SysInfo cluster_en at offset 0x18 is read-write."""
         si = SystemInfo()
-        self.assertEqual(si.read8(0x18), 0)  # default off
+        self.assertEqual(si.read8(0x18), 0xFF)  # default all enabled
         si.write8(0x18, 0x05)  # enable clusters 0 and 2
         self.assertEqual(si.read8(0x18), 0x05)
         si.write8(0x19, 0x03)  # set byte 1
-        self.assertEqual(si.cluster_en, 0x0305)
+        self.assertEqual(si.cluster_en, 0xFFFF_FFFF_FFFF_0305)
 
     def test_bus_routes_nic(self):
         bus = DeviceBus()
@@ -5458,19 +5458,14 @@ class TestMicroCluster(unittest.TestCase):
             )
             self.assertTrue(sys.cores[i]._cs.is_micro_core)
 
-    def test_micro_cores_start_halted(self):
-        """Micro-cores start halted after boot (cluster_en defaults 0)."""
+    def test_micro_cores_start_released(self):
+        """All-ones CLUSTER_EN releases every micro-core after boot."""
         sys = MegapadSystem(ram_size=1 << 20, num_cores=1, num_clusters=1)
-        # Write a halt instruction for core 0
-        code = assemble("halt")
-        sys.load_binary(0, code)
         sys.boot()
-        run_until(sys)
-        # Core 0 halted (full core)
-        self.assertTrue(sys.cores[0].halted)
-        # Micro-cores should be halted (cluster disabled)
+        self.assertEqual(sys.sysinfo.cluster_en, 0xFFFF_FFFF_FFFF_FFFF)
+        self.assertTrue(sys.clusters[0].enabled)
         for mc in sys.clusters[0].cores:
-            self.assertTrue(mc.halted)
+            self.assertFalse(mc.halted)
 
     def test_cluster_en_sysinfo(self):
         """Writing cluster_en via SysInfo enables/disables clusters."""
