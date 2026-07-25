@@ -126,6 +126,247 @@ def test_native_system_state_owns_stable_isolated_core_objects() -> None:
     assert core1.get_reg(7) == 0x2222
 
 
+def test_native_system_run_loop_owns_budget_cursor_and_exact_results() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(
+        0,
+        assemble(
+            """
+loop:
+    inc r1
+    br loop
+"""
+        ),
+    )
+    system.boot(entry=0)
+
+    def reject_legacy_scheduler(*_args, **_kwargs):
+        raise AssertionError("Python core scheduler handled a native batch")
+
+    system._run_core_batch = reject_legacy_scheduler
+    native_runs_before = system._native_system.native_batch_runs
+
+    stats = system.run_batch_stats(2_001)
+
+    assert stats.native_scheduler
+    assert system._native_system.native_batch_runs == native_runs_before + 1
+    assert stats.instructions_executed == 2_001
+    assert stats.per_core_instructions == (1_001, 1_000)
+    assert stats.per_core_cycles == (1_501, 1_500)
+    assert stats.system_cycles_advanced == 1_501
+    assert stats.per_core_dispatches == (2, 1)
+    assert stats.per_core_stop_reasons == (
+        (2, 0, 0, 0, 0, 0, 0),
+        (1, 0, 0, 0, 0, 0, 0),
+    )
+    assert system._scheduler_cursor == 1
+
+    followup = system.run_batch_stats(1)
+
+    assert followup.native_scheduler
+    assert followup.per_core_instructions == (0, 1)
+    assert system._scheduler_cursor == 0
+
+    system.boot(entry=0)
+    assert system._scheduler_cursor == 0
+
+
+def test_native_system_loop_resumes_around_python_fallback() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("nop\nt.sum\nnop"))
+    system.cpu.mem[0x100:0x140] = bytes(range(64))
+    system.cpu.tsrc0 = 0x100
+    system.cpu.pc = 0
+    native_runs_before = system._native_system.native_batch_runs
+
+    stats = system.run_batch_stats(3)
+
+    assert stats.native_scheduler
+    assert system._native_system.native_batch_runs == native_runs_before + 1
+    assert stats.instructions_executed == 3
+    assert stats.system_cycles_advanced == 3
+    assert stats.per_core_instructions == (3,)
+    assert stats.per_core_cycles == (3,)
+    assert stats.per_core_dispatches == (2,)
+    assert stats.per_core_stop_reasons == (
+        (1, 0, 0, 1, 0, 0, 0),
+    )
+    assert stats.native_continuations == 1
+
+
+def test_native_system_batch_rejects_uart_observer_reentry() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(
+        0,
+        assemble(
+            f"""
+    ldi64 r1, {MMIO_BASE + UART_BASE}
+    ldi64 r2, 0x41
+    st.b r1, r2
+    idl
+"""
+        ),
+    )
+    system.cpu.pc = 0
+    rejections = []
+
+    def reject_reentrant_execution(_value):
+        attempts = (
+            ("batch", lambda: system.run_batch_stats(1)),
+            ("step", system.step),
+            ("run", lambda: system.run(max_steps=1)),
+            ("direct core", lambda: system.cpu.run_steps_stats(1)),
+            ("direct idle step", system.cpu.step),
+        )
+        for label, attempt in attempts:
+            with pytest.raises(
+                RuntimeError,
+                match="native system batch is already active",
+            ):
+                attempt()
+            rejections.append(label)
+
+    system.uart.on_tx = reject_reentrant_execution
+    native_runs_before = system._native_system.native_batch_runs
+
+    stats = system.run_batch_stats(4)
+
+    assert rejections == [
+        "batch",
+        "step",
+        "run",
+        "direct core",
+        "direct idle step",
+    ]
+    assert stats.native_scheduler
+    assert stats.instructions_executed == 4
+    assert stats.per_core_instructions == (4,)
+    assert stats.system_cycles_advanced == stats.per_core_cycles[0]
+    assert system.cpu.cycle_count == stats.per_core_cycles[0]
+    assert system._native_system.native_batch_runs == native_runs_before + 1
+
+
+def test_native_system_batch_rejects_mid_dispatch_deadline_mutation() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("out1\nnop"))
+    system.cpu.regs[system.cpu.xsel] = 0x80
+    system.cpu.mem[0x80] = 0xA5
+    system.cpu.pc = 0
+    rejections = []
+
+    def reject_deadline_mutation(_port, _value):
+        with pytest.raises(
+            RuntimeError,
+            match="event deadlines cannot change during an active",
+        ):
+            system._native_system.set_event_deadline(
+                EVENT_SOURCE_EXTERNAL,
+                1,
+            )
+        rejections.append(True)
+
+    system.cpu.on_output = reject_deadline_mutation
+
+    stats = system.run_batch_stats(2)
+
+    assert rejections == [True]
+    assert stats.native_scheduler
+    assert stats.instructions_executed == 2
+    assert system._native_system.event_horizon() == (2, None, 0)
+
+
+def test_native_system_batch_rejects_nonterminal_zero_step_settlement() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("t.sum"))
+    system.cpu.mem[0x100:0x140] = bytes(range(64))
+    system.cpu.tsrc0 = 0x100
+    system.cpu.pc = 0
+    original_settlement = system._settle_native_core_continuation
+    system._settle_native_core_continuation = (
+        lambda *_args: (0, 0, False)
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="nonterminal native continuation made no progress",
+    ):
+        system.run_batch_stats(1)
+
+    assert system.cpu.pc == 0
+    assert system._native_system.system_cycles == 0
+
+    system._settle_native_core_continuation = original_settlement
+    stats = system.run_batch_stats(1)
+    assert stats.native_scheduler
+    assert stats.instructions_executed == 1
+
+
+def test_native_system_batch_rejects_cycle_accounting_overflow() -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("t.sum"))
+    system.cpu.pc = 0
+    original_settlement = system._settle_native_core_continuation
+    system._settle_native_core_continuation = (
+        lambda *_args: (1, (1 << 63) - 1, False)
+    )
+
+    with pytest.raises(
+        OverflowError,
+        match="native scheduler cycle accounting overflow",
+    ):
+        system.run_batch_stats(2)
+
+    assert system.cpu.pc == 0
+    assert system._native_system.system_cycles == 0
+
+    system._settle_native_core_continuation = original_settlement
+    stats = system.run_batch_stats(1)
+    assert stats.native_scheduler
+    assert stats.instructions_executed == 1
+
+
 def test_native_system_clock_advances_all_shared_cycle_devices_once() -> None:
     owner = NativeSystemState(2)
     core0 = owner.core(0)

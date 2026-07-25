@@ -8,7 +8,7 @@ deterministic scheduler is built out in stages.
 The report keeps four quantities separate:
 
 * returned aggregate instructions (the legacy ``run_batch`` result);
-* exact per-core instructions from a benchmark-only accounting replay;
+* exact per-core instructions from native system-batch results;
 * per-core architectural cycle-counter deltas; and
 * authoritative virtual system cycles passed through ``DeviceBus.tick()``.
 
@@ -75,7 +75,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 5
 
@@ -233,6 +233,18 @@ STATE_COMPARISON_SCOPE = {
         {
             "state": "registered accelerator hook addresses",
             "reason": "the binding exposes only the hook count",
+        },
+        {
+            "state": (
+                "cumulative native_batch_runs and native_dispatches "
+                "provenance counters and transient native_batch_active flag"
+            ),
+            "reason": (
+                "the counters are reported as per-execution deltas outside "
+                "the behavior hash so host call segmentation cannot change "
+                "canonical state; the active flag is an in-call exclusion "
+                "guard and is false at every completed observation boundary"
+            ),
         },
         {
             "state": (
@@ -1393,6 +1405,12 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
     workload = scenario.build(num_cores)
     gc_enabled_before = gc.isenabled()
     collected_before_timing = gc.collect()
+    native_batches_before = int(
+        workload.system._native_system.native_batch_runs
+    )
+    native_dispatches_before = int(
+        workload.system._native_system.native_dispatches
+    )
     try:
         if gc_enabled_before:
             gc.disable()
@@ -1407,6 +1425,14 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
             if gc_enabled_before:
                 gc.enable()
         gc_restored_to_prior_state = gc.isenabled() == gc_enabled_before
+        native_batch_delta = (
+            int(workload.system._native_system.native_batch_runs)
+            - native_batches_before
+        )
+        native_dispatch_delta = (
+            int(workload.system._native_system.native_dispatches)
+            - native_dispatches_before
+        )
         observation = _state_observation(workload)
     finally:
         if gc.isenabled() != gc_enabled_before:
@@ -1427,6 +1453,13 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
             (instructions / wall_s) if wall_s else None,
         "aggregate_mips":
             (instructions / wall_s / 1_000_000.0) if wall_s else None,
+        "scheduler_provenance": {
+            "native_batch_runs_counter_delta": native_batch_delta,
+            "native_dispatches_counter_delta": native_dispatch_delta,
+            "all_run_batch_calls_native":
+                native_batch_delta == execution.run_batch_calls
+                and native_dispatch_delta > 0,
+        },
         "cyclic_gc": {
             "enabled_before_timing": gc_enabled_before,
             "collected_objects_before_timing": collected_before_timing,
@@ -1438,47 +1471,36 @@ def _timed_sample(scenario: Scenario, num_cores: int, target: int) -> dict:
     }
 
 
-def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
+def _install_accounting(
+    workload: Workload,
+) -> tuple[list[dict], dict, dict]:
     """Install accounting-only wrappers; never used for timed throughput."""
+    stop_reason_names = (
+        "run_limit",
+        "halt",
+        "idle",
+        "mex_fallback",
+        "ext_fallback",
+        "trap",
+        "reset",
+    )
     core_stats = []
     for cpu in workload.system.cores:
         stats = {
             "core_id": cpu.core_id,
             "instructions": 0,
             "scheduler_cycles": 0,
-            "run_steps_calls": 0,
-            "stop_reasons": {},
+            "native_dispatches": 0,
+            "native_stop_reasons": {
+                reason: 0 for reason in stop_reason_names
+            },
             "python_mmio_reads": 0,
             "python_mmio_writes": 0,
         }
         core_stats.append(stats)
 
-        original_run_steps_stats = cpu.run_steps_stats
         original_read = cpu._mmio_read8
         original_write = cpu._mmio_write8
-
-        def counted_run_steps_stats(
-            max_steps: int,
-            *,
-            _original=original_run_steps_stats,
-            _stats=stats,
-        ):
-            result = _original(max_steps)
-            _stats["instructions"] += int(result.steps_executed)
-            _stats["scheduler_cycles"] += int(result.total_cycles)
-            _stats["run_steps_calls"] += 1
-            reason_key = {
-                0: "max_steps",
-                1: "halt",
-                2: "idle",
-            }.get(
-                int(result.stop_reason),
-                f"unknown_{int(result.stop_reason)}",
-            )
-            _stats["stop_reasons"][reason_key] = (
-                _stats["stop_reasons"].get(reason_key, 0) + 1
-            )
-            return result
 
         def counted_read(addr: int, *, _original=original_read, _stats=stats):
             _stats["python_mmio_reads"] += 1
@@ -1494,9 +1516,70 @@ def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
             _stats["python_mmio_writes"] += 1
             return _original(addr, value)
 
-        cpu.run_steps_stats = counted_run_steps_stats
         cpu._mmio_read8 = counted_read
         cpu._mmio_write8 = counted_write
+
+    scheduler_stats = {
+        "system_batch_calls": 0,
+        "native_system_batch_calls": 0,
+        "compatibility_system_batch_calls": 0,
+        "native_rounds": 0,
+        "native_continuations": 0,
+    }
+    original_run_batch_stats = workload.system.run_batch_stats
+
+    def counted_run_batch_stats(max_steps: int):
+        result = original_run_batch_stats(max_steps)
+        core_count = len(core_stats)
+        if (
+            len(result.per_core_instructions) != core_count
+            or len(result.per_core_cycles) != core_count
+        ):
+            raise RuntimeError(
+                "system batch returned incomplete per-core accounting"
+            )
+
+        scheduler_stats["system_batch_calls"] += 1
+        scheduler_stats[
+            "native_system_batch_calls"
+            if result.native_scheduler
+            else "compatibility_system_batch_calls"
+        ] += 1
+        scheduler_stats["native_rounds"] += int(result.native_rounds)
+        scheduler_stats["native_continuations"] += int(
+            result.native_continuations
+        )
+
+        dispatches = result.per_core_dispatches or (0,) * core_count
+        stop_reasons = result.per_core_stop_reasons or ((),) * core_count
+        if len(dispatches) != core_count or len(stop_reasons) != core_count:
+            raise RuntimeError(
+                "system batch returned incomplete scheduler diagnostics"
+            )
+
+        for index, stats in enumerate(core_stats):
+            stats["instructions"] += int(
+                result.per_core_instructions[index]
+            )
+            stats["scheduler_cycles"] += int(
+                result.per_core_cycles[index]
+            )
+            stats["native_dispatches"] += int(dispatches[index])
+            for reason, count in enumerate(stop_reasons[index]):
+                count = int(count)
+                if count == 0:
+                    continue
+                reason_key = (
+                    stop_reason_names[reason]
+                    if reason < len(stop_reason_names)
+                    else f"unknown_{reason}"
+                )
+                stats["native_stop_reasons"][reason_key] = (
+                    stats["native_stop_reasons"].get(reason_key, 0) + count
+                )
+        return result
+
+    workload.system.run_batch_stats = counted_run_batch_stats
 
     bus_stats = {"tick_calls": 0, "tick_argument_units": 0}
     original_tick = workload.system.bus.tick
@@ -1507,7 +1590,7 @@ def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
         return original_tick(units)
 
     workload.system.bus.tick = counted_tick
-    return core_stats, bus_stats
+    return core_stats, bus_stats, scheduler_stats
 
 
 def _accounting_probe(
@@ -1516,9 +1599,15 @@ def _accounting_probe(
     target: int,
 ) -> dict:
     workload = scenario.build(num_cores)
-    core_stats, bus_stats = _install_accounting(workload)
+    core_stats, bus_stats, scheduler_stats = _install_accounting(workload)
     start_cycles = [int(cpu.cycle_count) for cpu in workload.system.cores]
     start_system_cycles = int(workload.system._native_system.system_cycles)
+    start_native_batches = int(
+        workload.system._native_system.native_batch_runs
+    )
+    start_native_dispatches = int(
+        workload.system._native_system.native_dispatches
+    )
     try:
         execution = workload.execute(target)
         observation = _state_observation(workload)
@@ -1527,6 +1616,12 @@ def _accounting_probe(
         ]
         end_system_cycles = int(
             workload.system._native_system.system_cycles
+        )
+        end_native_batches = int(
+            workload.system._native_system.native_batch_runs
+        )
+        end_native_dispatches = int(
+            workload.system._native_system.native_dispatches
         )
     finally:
         workload.close()
@@ -1537,7 +1632,31 @@ def _accounting_probe(
     per_core_instructions = [entry["instructions"] for entry in core_stats]
     aggregate_core_cycles = sum(per_core_cycles)
     aggregate_instructions = sum(per_core_instructions)
+    aggregate_native_dispatches = sum(
+        entry["native_dispatches"] for entry in core_stats
+    )
     returned = execution.returned_aggregate_instructions
+    native_batch_delta = end_native_batches - start_native_batches
+    native_dispatch_delta = (
+        end_native_dispatches - start_native_dispatches
+    )
+    native_stop_reason_count = sum(
+        sum(entry["native_stop_reasons"].values())
+        for entry in core_stats
+    )
+    native_continuation_stop_count = sum(
+        sum(
+            entry["native_stop_reasons"][reason]
+            for reason in (
+                "mex_fallback",
+                "ext_fallback",
+                "trap",
+                "reset",
+            )
+        )
+        for entry in core_stats
+    )
+    virtual_system_cycles = end_system_cycles - start_system_cycles
     return {
         "instrumented": True,
         "used_for_throughput": False,
@@ -1552,13 +1671,39 @@ def _accounting_probe(
         "aggregate_instructions_from_per_core": aggregate_instructions,
         "instruction_accounting_matches_runner":
             aggregate_instructions == returned,
+        "scheduler_provenance": {
+            **scheduler_stats,
+            "reported_native_dispatches": aggregate_native_dispatches,
+            "native_batch_runs_counter_delta": native_batch_delta,
+            "native_dispatches_counter_delta": native_dispatch_delta,
+            "all_batches_native": (
+                scheduler_stats["native_system_batch_calls"]
+                == scheduler_stats["system_batch_calls"]
+                and scheduler_stats["compatibility_system_batch_calls"] == 0
+            ),
+            "native_batch_count_matches_runner_calls": (
+                native_batch_delta == execution.run_batch_calls
+                == scheduler_stats["system_batch_calls"]
+            ),
+            "native_dispatch_count_matches_results":
+                aggregate_native_dispatches == native_dispatch_delta,
+            "benchmark_stop_reason_count_matches_dispatches":
+                native_stop_reason_count == aggregate_native_dispatches,
+            "native_continuation_count_matches_stop_reasons":
+                native_continuation_stop_count
+                == scheduler_stats["native_continuations"],
+            "device_tick_calls_match_native_rounds":
+                bus_stats["tick_calls"] == scheduler_stats["native_rounds"],
+            "device_tick_units_match_virtual_system_cycles":
+                bus_stats["tick_argument_units"] == virtual_system_cycles,
+        },
         "aggregate_core_architectural_cycles": aggregate_core_cycles,
         "max_core_architectural_cycles": max(per_core_cycles, default=0),
         "device_bus_tick_calls": bus_stats["tick_calls"],
         "device_bus_tick_argument_units": bus_stats["tick_argument_units"],
         "device_cycle_to_returned_instruction_ratio":
             (bus_stats["tick_argument_units"] / returned) if returned else None,
-        "virtual_system_cycles": end_system_cycles - start_system_cycles,
+        "virtual_system_cycles": virtual_system_cycles,
         "virtual_system_cycles_availability":
             "available from the authoritative native system clock",
         "observation": observation,
@@ -1585,6 +1730,7 @@ def _summary(samples: list[dict], accounting: dict) -> dict:
         "behavior_oracle_sha256"
     ]
     accounting_execution = accounting["execution"]
+    accounting_scheduler = accounting["scheduler_provenance"]
     replay_comparisons = []
     for repeat_index, (sample, timed_oracle) in enumerate(
         zip(samples, oracle_signatures)
@@ -1600,11 +1746,25 @@ def _summary(samples: list[dict], accounting: dict) -> dict:
             )
         )
         oracle_matches = timed_oracle == accounting_oracle
+        timed_scheduler = sample["scheduler_provenance"]
+        scheduler_matches = (
+            timed_scheduler["all_run_batch_calls_native"]
+            and accounting_scheduler["all_batches_native"]
+            and timed_scheduler["native_batch_runs_counter_delta"]
+            == accounting_scheduler["native_batch_runs_counter_delta"]
+            and timed_scheduler["native_dispatches_counter_delta"]
+            == accounting_scheduler["native_dispatches_counter_delta"]
+        )
         replay_comparisons.append({
             "repeat_index": repeat_index,
             "behavior_oracle_matches": oracle_matches,
             "execution_accounting_matches": execution_matches,
-            "matches": oracle_matches and execution_matches,
+            "scheduler_provenance_matches": scheduler_matches,
+            "matches": (
+                oracle_matches
+                and execution_matches
+                and scheduler_matches
+            ),
         })
 
     all_replays_match = (
@@ -1735,6 +1895,52 @@ def run_report(
             ]
             for result in results
         ),
+        "all_timed_samples_used_native_scheduler": all(
+            sample["scheduler_provenance"]["all_run_batch_calls_native"]
+            for result in results
+            for sample in result["timed_samples"]
+        ),
+        "all_accounting_batches_used_native_scheduler": all(
+            result["accounting_probe"]["scheduler_provenance"][
+                "all_batches_native"
+            ]
+            for result in results
+        ),
+        "all_native_batch_counts_match_runner_calls": all(
+            result["accounting_probe"]["scheduler_provenance"][
+                "native_batch_count_matches_runner_calls"
+            ]
+            for result in results
+        ),
+        "all_native_dispatch_counts_match_reported_results": all(
+            result["accounting_probe"]["scheduler_provenance"][
+                "native_dispatch_count_matches_results"
+            ]
+            for result in results
+        ),
+        "all_benchmark_stop_reason_counts_match_dispatches": all(
+            result["accounting_probe"]["scheduler_provenance"][
+                "benchmark_stop_reason_count_matches_dispatches"
+            ]
+            for result in results
+        ),
+        "all_native_continuation_counts_match_stop_reasons": all(
+            result["accounting_probe"]["scheduler_provenance"][
+                "native_continuation_count_matches_stop_reasons"
+            ]
+            for result in results
+        ),
+        "all_device_ticks_match_native_rounds_and_system_cycles": all(
+            (
+                result["accounting_probe"]["scheduler_provenance"][
+                    "device_tick_calls_match_native_rounds"
+                ]
+                and result["accounting_probe"]["scheduler_provenance"][
+                    "device_tick_units_match_virtual_system_cycles"
+                ]
+            )
+            for result in results
+        ),
         "all_timed_repeats_deterministic": all(
             result["summary"]["deterministic_timed_repeats"]
             for result in results
@@ -1784,11 +1990,22 @@ def run_report(
             "aggregate_instructions":
                 "sum of values returned by MegapadSystem.run_batch()",
             "per_core_instructions":
-                "exact benchmark-only run_steps_stats wrapper counts from a "
+                "exact per-core instructions from native SystemRunStats in a "
                 "separate, untimed accounting replay",
             "per_core_scheduler_cycles":
-                "exact scheduler-visible total_cycles from each core's "
-                "run_steps_stats results in the untimed accounting replay",
+                "exact scheduler-visible per-core cycles from native "
+                "SystemRunStats in the untimed accounting replay",
+            "native_dispatches":
+                "raw native C++ run_steps segments reported per core by "
+                "SystemRunStats",
+            "native_stop_reasons":
+                "seven native scheduler stop observations: run_limit, halt, "
+                "idle, MEX fallback, EXT fallback, trap, and reset; a Python "
+                "callback exception settled outside run_steps has no raw "
+                "stop-reason bucket",
+            "scheduler_provenance":
+                "native batch/dispatch counter deltas outside the canonical "
+                "behavior hash, checked across timed and accounting runs",
             "per_core_architectural_cycles":
                 "delta of each CPU architectural cycle_count",
             "aggregate_core_architectural_cycles":

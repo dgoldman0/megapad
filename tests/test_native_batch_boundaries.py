@@ -404,6 +404,79 @@ def test_multicore_batch_settles_prior_progress_before_halt_exception():
     assert system._scheduler_cursor == 1
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "run_steps_stats",
+        "_run_steps_stats_in_memory_scope",
+    ),
+)
+def test_system_batch_preserves_class_level_core_batch_overrides(
+    monkeypatch,
+    method_name: str,
+) -> None:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("nop"))
+    system.cpu.pc = 0
+    cpu_type = type(system.cpu)
+    original = getattr(cpu_type, method_name)
+    calls = []
+
+    def counted(self, max_steps):
+        calls.append(max_steps)
+        return original(self, max_steps)
+
+    monkeypatch.setattr(cpu_type, method_name, counted)
+
+    stats = system.run_batch_stats(1)
+
+    assert not stats.native_scheduler
+    assert stats.instructions_executed == 1
+    assert calls == [1]
+
+
+def test_native_system_loop_settles_prior_round_before_later_callback_error():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("mul r1, r2\nhalt"))
+    system.load_binary(0x40, assemble("out1"))
+    system.boot(entry=0)
+    system.cores[1].pc = 0x40
+    system.cores[1].regs[system.cores[1].xsel] = 0x80
+    system.cores[1].mem[0x80] = 0xA5
+    system.timer.control = 1
+    failure = RuntimeError("later native callback failed")
+
+    def raise_callback_error(_port, _value):
+        raise failure
+
+    system.cores[1].on_output = raise_callback_error
+    native_runs_before = system._native_system.native_batch_runs
+
+    with pytest.raises(RuntimeError) as raised:
+        system.run_batch_stats(1_000)
+
+    assert raised.value is failure
+    assert system._native_system.native_batch_runs == native_runs_before + 1
+    assert system.cores[0].cycle_count == 5
+    assert system._native_system.system_cycles == 5
+    assert system.timer.counter == 5
+    assert system._scheduler_cursor == 1
+
+
 def test_system_batch_finishes_its_budget_after_a_python_fallback_boundary():
     system = MegapadSystem(
         ram_size=4096,

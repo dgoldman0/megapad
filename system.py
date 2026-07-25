@@ -54,6 +54,14 @@ from devices import (
     WotsChainAccel,
 )
 
+# Capture the full-core batch extension seams before user/test monkeypatches.
+# The Phase-1 native loop bypasses these two methods, so any replacement must
+# retain the compatibility scheduler that dynamically dispatches through them.
+_CANONICAL_RUN_STEPS_STATS = Megapad64.run_steps_stats
+_CANONICAL_RUN_STEPS_STATS_IN_SCOPE = (
+    Megapad64._run_steps_stats_in_memory_scope
+)
+
 # ---------------------------------------------------------------------------
 #  Memory map constants
 # ---------------------------------------------------------------------------
@@ -119,6 +127,11 @@ class SystemRunStats:
     system_cycles_advanced: int
     per_core_instructions: tuple[int, ...]
     per_core_cycles: tuple[int, ...]
+    per_core_dispatches: tuple[int, ...] = ()
+    per_core_stop_reasons: tuple[tuple[int, ...], ...] = ()
+    native_scheduler: bool = False
+    native_rounds: int = 0
+    native_continuations: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +375,6 @@ class MegapadSystem:
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
         self.num_cores = num_cores + self.num_micro_cores
         self._scheduler_lock = threading.RLock()
-        self._scheduler_cursor = 0
 
         # Shared memory — all cores reference the same bytearray
         self._shared_mem = bytearray(ram_size)
@@ -873,6 +885,15 @@ class MegapadSystem:
         else:
             self._shared_mem[addr % self.ram_size] = val & 0xFF
 
+    @property
+    def _scheduler_cursor(self) -> int:
+        """Compatibility view of the native scheduler's next core."""
+        return int(self._native_system.scheduler_cursor)
+
+    @_scheduler_cursor.setter
+    def _scheduler_cursor(self, value: int) -> None:
+        self._native_system.scheduler_cursor = int(value)
+
     # -----------------------------------------------------------------
     #  Loading
     # -----------------------------------------------------------------
@@ -973,6 +994,11 @@ class MegapadSystem:
                 "active event horizons require cycle-bounded native execution"
             )
 
+    def _reject_native_batch_reentry(self) -> None:
+        """Keep every system execution API outside an active native batch."""
+        if self._native_system.native_batch_active:
+            raise RuntimeError("native system batch is already active")
+
     def advance_system_cycles(self, cycles: int) -> None:
         """Advance authoritative system time and every cycle-driven device."""
         with self._scheduler_lock:
@@ -1010,6 +1036,185 @@ class MegapadSystem:
             if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
                 cpu._trap(IVEC_IPI)
 
+    def _native_full_core_batch_eligible(self) -> bool:
+        """Whether this call can use the Phase-1 native full-core scheduler."""
+        if self.num_clusters != 0:
+            return False
+        for cpu in self.cores[:self.num_full_cores]:
+            cpu_vars = vars(cpu)
+            if (
+                "run_steps_stats" in cpu_vars
+                or "_run_steps_stats_in_memory_scope" in cpu_vars
+            ):
+                return False
+            cpu_type = type(cpu)
+            if (
+                getattr(cpu_type, "run_steps_stats", None)
+                is not _CANONICAL_RUN_STEPS_STATS
+                or getattr(
+                    cpu_type,
+                    "_run_steps_stats_in_memory_scope",
+                    None,
+                )
+                is not _CANONICAL_RUN_STEPS_STATS_IN_SCOPE
+            ):
+                return False
+        return True
+
+    def _prepare_native_full_core_batch(self) -> None:
+        """Apply compatibility wake checks under the native scheduler lock."""
+        for cpu in self.cores[:self.num_full_cores]:
+            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
+                cpu.idle = False
+            if cpu.idle and cpu.core_id == 0:
+                if self.uart.has_rx_data:
+                    cpu.idle = False
+                elif self.timer.irq_pending and cpu.flag_i:
+                    cpu.idle = False
+                elif self._any_nic_rx():
+                    cpu.idle = False
+
+    @staticmethod
+    def _settle_native_batch_trap_error(
+        cpu,
+        error: TrapError,
+        *,
+        prefix_steps: int,
+        prefix_cycles: int,
+        annotate: bool,
+    ) -> tuple[int, int, bool]:
+        """Reproduce _run_core_batch's tested TrapError accounting."""
+        if annotate:
+            error.steps_executed = prefix_steps + 1
+            error.native_prefix_steps = prefix_steps
+            error.native_prefix_cycles = prefix_cycles
+        if cpu.ivt_base != 0:
+            with _cpu_memory_use(cpu):
+                cpu._trap(error.ivec_id)
+        return (
+            int(getattr(error, "steps_executed", 1)),
+            int(getattr(error, "native_prefix_cycles", 0)),
+            True,
+        )
+
+    def _settle_native_core_continuation(
+        self,
+        core_index: int,
+        stop_reason: int,
+        trap_id: int,
+        prefix_steps: int,
+        prefix_cycles: int,
+    ) -> tuple[int, int, bool]:
+        """Settle a raw native boundary and return whole-invocation progress."""
+        cpu = self.cores[core_index]
+        try:
+            if stop_reason in (3, 4):
+                continuation_cycles = cpu._step_python_fallback()
+            elif stop_reason == 5:
+                continuation_cycles = cpu._finish_trap(trap_id)
+            elif stop_reason == 6:
+                continuation_cycles = cpu._finish_reset()
+            else:
+                raise RuntimeError(
+                    f"invalid native continuation reason {stop_reason}"
+                )
+        except TrapError as error:
+            return self._settle_native_batch_trap_error(
+                cpu,
+                error,
+                prefix_steps=prefix_steps,
+                prefix_cycles=prefix_cycles,
+                annotate=stop_reason in (3, 4, 5),
+            )
+        return (
+            prefix_steps + 1,
+            prefix_cycles + continuation_cycles,
+            False,
+        )
+
+    def _settle_native_core_dispatch_error(
+        self,
+        core_index: int,
+        error: BaseException,
+    ):
+        """Handle callback exceptions interpreted by the legacy wrapper."""
+        cpu = self.cores[core_index]
+        if isinstance(error, TrapError):
+            return self._settle_native_batch_trap_error(
+                cpu,
+                error,
+                prefix_steps=0,
+                prefix_cycles=0,
+                annotate=False,
+            )
+        if isinstance(error, RuntimeError):
+            message = str(error)
+            if message == "HALT":
+                return 0, 0, True
+            if message.startswith("TRAP:"):
+                try:
+                    cycles = cpu._handle_trap(message)
+                except TrapError as trap_error:
+                    return self._settle_native_batch_trap_error(
+                        cpu,
+                        trap_error,
+                        prefix_steps=0,
+                        prefix_cycles=0,
+                        annotate=False,
+                    )
+                return 1, cycles, False
+        return None
+
+    def _settle_native_system_round(
+        self,
+        cycles: int,
+        advance_clock: bool,
+        drain_uart: bool,
+        deliver_interrupts: bool,
+    ) -> None:
+        """Settle one completed native scheduler round in legacy order."""
+        if advance_clock:
+            self.bus.tick(cycles)
+        if drain_uart:
+            self._drain_native_uart_output()
+        if deliver_interrupts:
+            self._deliver_pending_interrupts()
+
+    def _run_native_full_core_batch(self, n: int) -> SystemRunStats:
+        """Adapt the bound SystemState scheduler to the public result type."""
+        callback_sets = [
+            (
+                cpu._mmio_read8,
+                cpu._mmio_write8,
+                cpu._do_output,
+                getattr(cpu, '_csr_read_override', None),
+            )
+            for cpu in self.cores[:self.num_full_cores]
+        ]
+        result = self._native_system.run_full_core_batch(
+            n,
+            callback_sets,
+            self._prepare_native_full_core_batch,
+            self._settle_native_core_continuation,
+            self._settle_native_core_dispatch_error,
+            self._settle_native_system_round,
+            1000,
+        )
+        return SystemRunStats(
+            int(result.instructions_executed),
+            int(result.system_cycles_advanced),
+            tuple(int(value) for value in result.per_core_instructions),
+            tuple(int(value) for value in result.per_core_cycles),
+            tuple(int(value) for value in result.per_core_dispatches),
+            tuple(
+                tuple(int(value) for value in reasons)
+                for reasons in result.per_core_stop_reasons
+            ),
+            True,
+            int(result.rounds),
+            int(result.continuations),
+        )
+
     def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
         """Run one core under one logical operation and recover exact progress."""
         total_steps = 0
@@ -1045,6 +1250,7 @@ class MegapadSystem:
         Returns total cycles consumed across all cores.
         """
         with self._scheduler_lock:
+            self._reject_native_batch_reentry()
             return self._step_locked()
 
     def _step_locked(self) -> int:
@@ -1103,6 +1309,7 @@ class MegapadSystem:
 
     def run(self, max_steps: int = 1_000_000) -> int:
         """Run until all cores HALT, or max_steps."""
+        self._reject_native_batch_reentry()
         self._require_cycle_unbounded_execution()
         total = 0
         for _ in range(max_steps):
@@ -1141,6 +1348,12 @@ class MegapadSystem:
             zeros = (0,) * self.num_cores
             return SystemRunStats(0, 0, zeros, zeros)
 
+        self._reject_native_batch_reentry()
+        if self._native_full_core_batch_eligible():
+            return self._run_native_full_core_batch(n)
+
+        # Compatibility path for heterogeneous topologies and deliberate
+        # per-instance run_steps_stats overrides.
         self._require_cycle_unbounded_execution()
         clock_start = int(self._native_system.system_cycles)
 
@@ -1256,6 +1469,7 @@ class MegapadSystem:
 
     def run_until_halt(self, max_steps: int = 10_000_000) -> int:
         """Run until all cores HALT."""
+        self._reject_native_batch_reentry()
         total = 0
         for _ in range(max_steps):
             if self.all_halted:

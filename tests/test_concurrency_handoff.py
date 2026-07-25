@@ -824,12 +824,14 @@ def test_batch_rejects_an_active_horizon_before_guest_state_changes():
     )
     pc_before = system.cpu.pc
     cycles_before = system.cpu.cycle_count
+    native_runs_before = system._native_system.native_batch_runs
 
     with pytest.raises(RuntimeError, match="cycle-bounded native execution"):
         system.run_batch(10)
 
     assert system.cpu.pc == pc_before
     assert system.cpu.cycle_count == cycles_before
+    assert system._native_system.native_batch_runs == native_runs_before
     assert system._native_system.event_horizon() == (
         0,
         5,

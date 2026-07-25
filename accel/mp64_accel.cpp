@@ -509,6 +509,9 @@ struct CPUState {
     // Core identity
     uint8_t  core_id;
     uint8_t  num_cores;
+    // System-owned cores reject guest execution while their parent's native
+    // scheduler batch is active. Standalone cores leave this pointer null.
+    std::atomic<bool>* system_batch_active = nullptr;
 
     // System-owned cores borrow the central IPI router.  Standalone cores
     // preserve the historical manually settable interrupt-line latch.
@@ -573,7 +576,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
         CryptoDevices* shared_crypto = nullptr,
         NICDevice* shared_nic = nullptr,
         TRNGDevice* shared_trng = nullptr,
-        UARTDevice* shared_uart = nullptr) {
+        UARTDevice* shared_uart = nullptr,
+        std::atomic<bool>* shared_batch_active = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -630,6 +634,7 @@ static std::unique_ptr<CPUState> make_cpu_state(
         state->uart = state->private_uart.get();
     }
     state->interrupts = shared_interrupts;
+    state->system_batch_active = shared_batch_active;
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
     state->dict_clear_all();
@@ -673,7 +678,8 @@ struct SystemState {
                 &shared_crypto,
                 &shared_nic,
                 &shared_trng,
-                &shared_uart);
+                &shared_uart,
+                &native_batch_active);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
@@ -708,6 +714,14 @@ struct SystemState {
     InterruptRouter shared_interrupts{};
     SystemClock shared_clock{};
     std::vector<std::unique_ptr<CPUState>> cores;
+    // Serializes native scheduling with clock/deadline mutation. Recursive
+    // acquisition is required when a Python round-settlement callback advances
+    // the clock on the same scheduler thread.
+    mutable std::recursive_mutex scheduler_mutex;
+    int scheduler_cursor = 0;
+    uint64_t native_batch_runs = 0;
+    uint64_t native_dispatches = 0;
+    std::atomic<bool> native_batch_active{false};
     int advertised_core_count = 0;
     bool mappings_sealed = false;
 };
@@ -788,6 +802,33 @@ struct ThreadNativeExecutionOwner {
 
 static thread_local ThreadNativeExecutionOwner*
     thread_native_execution_owners = nullptr;
+
+// A SystemState scheduler batch blocks every ordinary CPU execution entry
+// point, including direct core bindings. Only the exact raw dispatch issued by
+// that scheduler may pass the CPUExecutionGuard while the batch flag is set.
+static thread_local std::atomic<bool>*
+    thread_system_batch_execution_permission = nullptr;
+
+class SystemBatchExecutionPermissionGuard {
+public:
+    explicit SystemBatchExecutionPermissionGuard(
+            std::atomic<bool>& batch_active)
+        : previous_(thread_system_batch_execution_permission) {
+        thread_system_batch_execution_permission = &batch_active;
+    }
+
+    ~SystemBatchExecutionPermissionGuard() {
+        thread_system_batch_execution_permission = previous_;
+    }
+
+    SystemBatchExecutionPermissionGuard(
+        const SystemBatchExecutionPermissionGuard&) = delete;
+    SystemBatchExecutionPermissionGuard& operator=(
+        const SystemBatchExecutionPermissionGuard&) = delete;
+
+private:
+    std::atomic<bool>* previous_;
+};
 
 template <typename Owner>
 static void unlink_thread_owner(Owner*& head, Owner& target) {
@@ -925,6 +966,17 @@ public:
           memory_(*state.memory),
           shared_owner_{&memory_, nullptr, nullptr, nullptr},
           native_owner_{&memory_, nullptr} {
+        if (
+            state_.system_batch_active != nullptr &&
+            state_.system_batch_active->load(std::memory_order_acquire) &&
+            thread_system_batch_execution_permission !=
+                state_.system_batch_active
+        ) {
+            throw std::runtime_error(
+                "native system batch is already active; "
+                "CPUState is already executing");
+        }
+
         // A custom buffer/exporter or other same-thread re-entry must never
         // block on an exclusive lock already owned by this thread.
         if (thread_owns_exclusive_memory(memory_))
@@ -5273,6 +5325,437 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
     return result;
 }
 
+// ---------------------------------------------------------------------------
+//  Native SystemState one-worker scheduler
+// ---------------------------------------------------------------------------
+
+struct SystemBatchResult {
+    int64_t instructions_executed = 0;
+    uint64_t system_cycles_advanced = 0;
+    std::vector<int64_t> per_core_instructions;
+    std::vector<int64_t> per_core_cycles;
+    std::vector<uint64_t> per_core_dispatches;
+    std::vector<std::array<uint64_t, 7>> per_core_stop_reasons;
+    uint64_t rounds = 0;
+    uint64_t continuations = 0;
+    int scheduler_cursor = 0;
+};
+
+struct CoreDispatchResult {
+    int64_t steps = 0;
+    int64_t cycles = 0;
+    uint64_t dispatches = 0;
+    uint64_t continuations = 0;
+    std::array<uint64_t, 7> stop_reasons{};
+};
+
+struct NativeBatchActiveGuard {
+    SystemState& system;
+
+    explicit NativeBatchActiveGuard(SystemState& system_value)
+        : system(system_value) {
+        if (system.native_batch_active.exchange(
+                true, std::memory_order_acq_rel)) {
+            throw std::runtime_error(
+                "native system batch is already active");
+        }
+    }
+
+    NativeBatchActiveGuard(const NativeBatchActiveGuard&) = delete;
+    NativeBatchActiveGuard& operator=(
+        const NativeBatchActiveGuard&) = delete;
+
+    ~NativeBatchActiveGuard() {
+        system.native_batch_active.store(
+            false, std::memory_order_release);
+    }
+};
+
+static int64_t checked_scheduler_add(
+        int64_t current,
+        int64_t increment,
+        const char* field_name) {
+    if (current < 0 || increment < 0 ||
+        current > std::numeric_limits<int64_t>::max() - increment) {
+        throw std::overflow_error(
+            std::string("native scheduler ") +
+            field_name + " overflow");
+    }
+    return current + increment;
+}
+
+static void checked_scheduler_increment(
+        uint64_t& counter,
+        const char* field_name) {
+    if (counter == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error(
+            std::string("native scheduler ") +
+            field_name + " overflow");
+    }
+    counter++;
+}
+
+static CoreDispatchResult run_system_core_dispatch(
+        SystemState& system,
+        int core_index,
+        int64_t max_steps,
+        const StepCallbacks& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error) {
+    CoreDispatchResult dispatch;
+    CPUState& core =
+        *system.cores[static_cast<std::size_t>(core_index)];
+
+    while (dispatch.steps < max_steps) {
+        if (core.halted) {
+            dispatch.stop_reasons[RUN_HALT]++;
+            break;
+        }
+        if (core.idle) {
+            dispatch.stop_reasons[RUN_IDLE]++;
+            break;
+        }
+
+        const int64_t remaining = max_steps - dispatch.steps;
+        const int request = static_cast<int>(std::min<int64_t>(
+            remaining,
+            static_cast<int64_t>(std::numeric_limits<int>::max())));
+
+        // Retain one logical mapping lease across the raw native segment and
+        // its optional Python continuation. CPUExecutionGuard consumes the
+        // one native-dispatch permission, so continuation code cannot re-enter
+        // guest execution while it borrows this root scope.
+        auto logical_guard =
+            acquire_shared_memory_use(core, true);
+        RunResult raw{};
+        checked_scheduler_increment(
+            system.native_dispatches,
+            "dispatch counter");
+        dispatch.dispatches++;
+        try {
+            py::gil_scoped_release release;
+            SystemBatchExecutionPermissionGuard execution_permission(
+                system.native_batch_active);
+            CPUExecutionGuard execution_guard(core);
+            raw = run_steps(core, callbacks, request);
+        } catch (py::error_already_set& error) {
+            py::object settled_object = settle_dispatch_error(
+                core_index,
+                error.value());
+            if (settled_object.is_none())
+                throw;
+            py::tuple settled = settled_object.cast<py::tuple>();
+            if (settled.size() != 3) {
+                throw std::runtime_error(
+                    "native dispatch error settlement must return "
+                    "(invocation_steps, invocation_cycles, terminal)");
+            }
+            const int64_t invocation_steps =
+                settled[0].cast<int64_t>();
+            const int64_t invocation_cycles =
+                settled[1].cast<int64_t>();
+            const bool terminal = settled[2].cast<bool>();
+            if (invocation_steps < 0 ||
+                invocation_steps > remaining ||
+                invocation_cycles < 0) {
+                throw std::runtime_error(
+                    "native dispatch error settlement returned "
+                    "invalid progress");
+            }
+            if (!terminal && invocation_steps == 0) {
+                throw std::runtime_error(
+                    "nonterminal native dispatch error settlement "
+                    "made no progress");
+            }
+            dispatch.steps = checked_scheduler_add(
+                dispatch.steps,
+                invocation_steps,
+                "instruction accounting");
+            dispatch.cycles = checked_scheduler_add(
+                dispatch.cycles,
+                invocation_cycles,
+                "cycle accounting");
+            if (terminal)
+                break;
+            continue;
+        }
+
+        if (raw.steps_executed < 0 ||
+            raw.steps_executed > request ||
+            raw.total_cycles < 0) {
+            throw std::runtime_error(
+                "native core dispatch returned invalid progress");
+        }
+        if (raw.stop_reason >= RUN_LIMIT &&
+            raw.stop_reason <= RUN_RESET) {
+            dispatch.stop_reasons[
+                static_cast<std::size_t>(raw.stop_reason)]++;
+        }
+
+        if (raw.stop_reason >= RUN_MEX_FALLBACK &&
+            raw.stop_reason <= RUN_RESET) {
+            py::object settled_object = settle_continuation(
+                core_index,
+                raw.stop_reason,
+                raw.trap_id,
+                raw.steps_executed,
+                raw.total_cycles);
+            py::tuple settled = settled_object.cast<py::tuple>();
+            if (settled.size() != 3) {
+                throw std::runtime_error(
+                    "native continuation must return "
+                    "(invocation_steps, invocation_cycles, terminal)");
+            }
+            const int64_t invocation_steps =
+                settled[0].cast<int64_t>();
+            const int64_t invocation_cycles =
+                settled[1].cast<int64_t>();
+            const bool terminal = settled[2].cast<bool>();
+            if (invocation_steps < 0 ||
+                invocation_steps > remaining ||
+                invocation_cycles < 0) {
+                throw std::runtime_error(
+                    "native continuation returned invalid progress");
+            }
+            if (!terminal && invocation_steps == 0) {
+                throw std::runtime_error(
+                    "nonterminal native continuation made no progress");
+            }
+            dispatch.steps = checked_scheduler_add(
+                dispatch.steps,
+                invocation_steps,
+                "instruction accounting");
+            dispatch.cycles = checked_scheduler_add(
+                dispatch.cycles,
+                invocation_cycles,
+                "cycle accounting");
+            dispatch.continuations++;
+            if (terminal)
+                break;
+            continue;
+        }
+
+        dispatch.steps = checked_scheduler_add(
+            dispatch.steps,
+            raw.steps_executed,
+            "instruction accounting");
+        dispatch.cycles = checked_scheduler_add(
+            dispatch.cycles,
+            raw.total_cycles,
+            "cycle accounting");
+        if (raw.stop_reason != RUN_LIMIT ||
+            raw.steps_executed == 0) {
+            break;
+        }
+    }
+
+    return dispatch;
+}
+
+static bool system_all_halted(const SystemState& system) {
+    return std::all_of(
+        system.cores.begin(),
+        system.cores.end(),
+        [](const std::unique_ptr<CPUState>& core) {
+            return core->halted;
+        });
+}
+
+static bool system_all_idle_or_halted(const SystemState& system) {
+    return std::all_of(
+        system.cores.begin(),
+        system.cores.end(),
+        [](const std::unique_ptr<CPUState>& core) {
+            return core->halted || core->idle;
+        });
+}
+
+static void merge_core_dispatch(
+        SystemBatchResult& result,
+        int core_index,
+        const CoreDispatchResult& dispatch) {
+    const std::size_t index = static_cast<std::size_t>(core_index);
+    result.per_core_instructions[index] = checked_scheduler_add(
+        result.per_core_instructions[index],
+        dispatch.steps,
+        "per-core instruction accounting");
+    result.per_core_cycles[index] = checked_scheduler_add(
+        result.per_core_cycles[index],
+        dispatch.cycles,
+        "per-core cycle accounting");
+    result.per_core_dispatches[index] += dispatch.dispatches;
+    result.continuations += dispatch.continuations;
+    for (std::size_t reason = 0;
+         reason < dispatch.stop_reasons.size();
+         reason++) {
+        result.per_core_stop_reasons[index][reason] +=
+            dispatch.stop_reasons[reason];
+    }
+}
+
+static SystemBatchResult run_full_core_system_batch(
+        SystemState& system,
+        int64_t max_steps,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& prepare_batch,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error,
+        const py::function& settle_round,
+        int max_dispatch_steps) {
+    const std::size_t core_count = system.cores.size();
+    SystemBatchResult result;
+    result.per_core_instructions.assign(core_count, 0);
+    result.per_core_cycles.assign(core_count, 0);
+    result.per_core_dispatches.assign(core_count, 0);
+    result.per_core_stop_reasons.assign(core_count, {});
+    result.scheduler_cursor = system.scheduler_cursor;
+
+    if (max_steps <= 0)
+        return result;
+    if (callbacks.size() != core_count)
+        throw std::invalid_argument(
+            "one callback set is required for every full core");
+    if (max_dispatch_steps <= 0)
+        throw std::invalid_argument(
+            "max_dispatch_steps must be positive");
+
+    NativeBatchActiveGuard active_guard(system);
+    const auto horizon = system.shared_clock.snapshot();
+    if (horizon.has_deadline) {
+        throw std::runtime_error(
+            "active event horizons require cycle-bounded native execution");
+    }
+
+    const uint64_t clock_start = system.shared_clock.cycles();
+    checked_scheduler_increment(
+        system.native_batch_runs,
+        "batch counter");
+
+    // Wake checks are a Python compatibility boundary, but execute while the
+    // native scheduler mutex excludes deadline and clock mutation.
+    prepare_batch();
+
+    std::vector<int> active_indices;
+    active_indices.reserve(core_count);
+    for (std::size_t index = 0; index < core_count; index++) {
+        const CPUState& core = *system.cores[index];
+        if (!core.halted && !core.idle)
+            active_indices.push_back(static_cast<int>(index));
+    }
+    if (active_indices.empty()) {
+        result.system_cycles_advanced =
+            system.shared_clock.cycles() - clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+
+    if (active_indices.size() == 1) {
+        const int core_index = active_indices.front();
+        CoreDispatchResult dispatch = run_system_core_dispatch(
+            system,
+            core_index,
+            max_steps,
+            callbacks[static_cast<std::size_t>(core_index)],
+            settle_continuation,
+            settle_dispatch_error);
+        merge_core_dispatch(result, core_index, dispatch);
+        result.instructions_executed = dispatch.steps;
+        if (dispatch.steps > 0) {
+            system.scheduler_cursor =
+                (core_index + 1) % static_cast<int>(core_count);
+        }
+        // advance=true, drain=true, deliver_interrupts=true
+        settle_round(dispatch.cycles, true, true, true);
+        result.rounds = 1;
+        result.system_cycles_advanced =
+            system.shared_clock.cycles() - clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+
+    int64_t remaining = max_steps;
+    while (remaining > 0 && !system_all_halted(system)) {
+        if (system_all_idle_or_halted(system))
+            break;
+
+        int64_t round_steps = 0;
+        int64_t round_cycles = 0;
+        const int round_start =
+            system.scheduler_cursor % static_cast<int>(core_count);
+
+        for (std::size_t offset = 0; offset < core_count; offset++) {
+            const int core_index = (
+                round_start + static_cast<int>(offset)
+            ) % static_cast<int>(core_count);
+            CPUState& core =
+                *system.cores[static_cast<std::size_t>(core_index)];
+            if (core.halted || core.idle)
+                continue;
+
+            const int64_t dispatch_steps = std::min<int64_t>(
+                max_dispatch_steps,
+                remaining - round_steps);
+            if (dispatch_steps <= 0)
+                break;
+
+            try {
+                CoreDispatchResult dispatch = run_system_core_dispatch(
+                    system,
+                    core_index,
+                    dispatch_steps,
+                    callbacks[static_cast<std::size_t>(core_index)],
+                    settle_continuation,
+                    settle_dispatch_error);
+                merge_core_dispatch(result, core_index, dispatch);
+                round_steps = checked_scheduler_add(
+                    round_steps,
+                    dispatch.steps,
+                    "round instruction accounting");
+                round_cycles = std::max(
+                    round_cycles,
+                    dispatch.cycles);
+                if (dispatch.steps > 0) {
+                    system.scheduler_cursor =
+                        (core_index + 1) %
+                        static_cast<int>(core_count);
+                }
+            } catch (...) {
+                // Match the compatibility scheduler: settle only earlier
+                // successful cores in this round, drain output, skip IRQ
+                // delivery, and then preserve the original exception.
+                settle_round(round_cycles, true, true, false);
+                throw;
+            }
+        }
+
+        result.instructions_executed = checked_scheduler_add(
+            result.instructions_executed,
+            round_steps,
+            "aggregate instruction accounting");
+        remaining -= round_steps;
+        // advance=true, drain=false, deliver_interrupts=true
+        settle_round(round_cycles, true, false, true);
+        result.rounds++;
+        if (round_steps == 0)
+            break;
+    }
+
+    // Multicore execution batches native UART observation once after all
+    // successful rounds.
+    settle_round(0, false, true, false);
+    result.system_cycles_advanced =
+        system.shared_clock.cycles() - clock_start;
+    result.scheduler_cursor = system.scheduler_cursor;
+    return result;
+}
+
+static std::unique_lock<std::recursive_mutex>
+acquire_system_scheduler_lock(SystemState& system) {
+    py::gil_scoped_release release;
+    return std::unique_lock<std::recursive_mutex>(
+        system.scheduler_mutex);
+}
+
 
 // ---------------------------------------------------------------------------
 //  pybind11 module
@@ -5310,6 +5793,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "_logical_memory_use",
             [](CPUState& state) {
+                if (
+                    state.system_batch_active != nullptr &&
+                    state.system_batch_active->load(
+                        std::memory_order_acquire)
+                ) {
+                    throw std::runtime_error(
+                        "native system batch is already active; "
+                        "CPUState is already executing");
+                }
                 return std::make_unique<PythonMemoryUseScope>(
                     state, /*permit_native_execution=*/true);
             },
@@ -6491,6 +6983,34 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("dict_clear", &CPUState::dict_clear_all)
         ;
 
+    py::class_<SystemBatchResult>(m, "SystemBatchResult")
+        .def_readonly(
+            "instructions_executed",
+            &SystemBatchResult::instructions_executed)
+        .def_readonly(
+            "system_cycles_advanced",
+            &SystemBatchResult::system_cycles_advanced)
+        .def_readonly(
+            "per_core_instructions",
+            &SystemBatchResult::per_core_instructions)
+        .def_readonly(
+            "per_core_cycles",
+            &SystemBatchResult::per_core_cycles)
+        .def_readonly(
+            "per_core_dispatches",
+            &SystemBatchResult::per_core_dispatches)
+        .def_readonly(
+            "per_core_stop_reasons",
+            &SystemBatchResult::per_core_stop_reasons)
+        .def_readonly("rounds", &SystemBatchResult::rounds)
+        .def_readonly(
+            "continuations",
+            &SystemBatchResult::continuations)
+        .def_readonly(
+            "scheduler_cursor",
+            &SystemBatchResult::scheduler_cursor)
+        ;
+
     // Native system ownership.  Borrowed core views keep their parent alive
     // and never take ownership of the pointed-to CPUState.
     py::class_<SystemState>(m, "SystemState")
@@ -6501,6 +7021,45 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "full_core_count", &SystemState::full_core_count)
         .def_property_readonly(
             "all_core_count", &SystemState::all_core_count)
+        .def_property(
+            "scheduler_cursor",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.scheduler_cursor;
+            },
+            [](SystemState& system, int cursor) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (cursor < 0 ||
+                    cursor >= system.all_core_count()) {
+                    throw std::out_of_range(
+                        "scheduler cursor is outside the advertised topology");
+                }
+                system.scheduler_cursor = cursor;
+            })
+        .def_property_readonly(
+            "native_batch_runs",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.native_batch_runs;
+            })
+        .def_property_readonly(
+            "native_dispatches",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.native_dispatches;
+            })
+        .def_property_readonly(
+            "native_batch_active",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.native_batch_active.load(
+                    std::memory_order_acquire);
+            })
         .def_property_readonly_static(
             "EVENT_TIMER",
             [](py::object) { return SystemClock::EVENT_TIMER; })
@@ -6529,12 +7088,16 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         .def_property_readonly(
             "system_cycles",
-            [](const SystemState& system) {
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
                 return system.shared_clock.cycles();
             })
         .def(
             "advance_system_cycles",
             [](SystemState& system, uint64_t delta) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
                 system.shared_clock.advance_by(
@@ -6547,6 +7110,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "advance_system_to",
             [](SystemState& system, uint64_t target) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
                 system.shared_clock.advance_to(
@@ -6559,6 +7124,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "set_event_deadline",
             [](SystemState& system, int source_id, uint64_t deadline) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "event deadlines cannot change during an active "
+                        "native system batch");
+                }
                 system.shared_clock.set_event_deadline(
                     source_id, deadline);
             },
@@ -6567,12 +7140,22 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "clear_event_deadline",
             [](SystemState& system, int source_id) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "event deadlines cannot change during an active "
+                        "native system batch");
+                }
                 system.shared_clock.clear_event_deadline(source_id);
             },
             py::arg("source_id"))
         .def(
             "event_horizon",
-            [](const SystemState& system) {
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
                 const auto snapshot = system.shared_clock.snapshot();
                 py::object deadline = snapshot.has_deadline
                     ? py::cast(snapshot.earliest_deadline)
@@ -6584,7 +7167,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         .def(
             "system_clock_snapshot",
-            [](const SystemState& system) {
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
                 const auto snapshot = system.shared_clock.snapshot();
                 py::tuple deadlines(SystemClock::EVENT_SOURCE_COUNT);
                 for (int source_id = 0;
@@ -6609,6 +7194,96 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     earliest,
                     snapshot.source_mask);
             })
+        .def(
+            "run_full_core_batch",
+            [](SystemState& system,
+               int64_t max_steps,
+               py::list callback_sets,
+               py::function prepare_batch,
+               py::function settle_continuation,
+               py::function settle_dispatch_error,
+               py::function settle_round,
+               int max_dispatch_steps) {
+                if (callback_sets.size() != system.cores.size()) {
+                    throw std::invalid_argument(
+                        "one callback set is required for every full core");
+                }
+
+                std::vector<StepCallbacks> callbacks;
+                callbacks.reserve(system.cores.size());
+                for (py::handle item : callback_sets) {
+                    py::tuple callback_set =
+                        py::cast<py::tuple>(item);
+                    if (callback_set.size() != 4) {
+                        throw std::invalid_argument(
+                            "each callback set must contain MMIO read, "
+                            "MMIO write, output, and CSR override entries");
+                    }
+                    py::function mmio_read8 =
+                        callback_set[0].cast<py::function>();
+                    py::function mmio_write8 =
+                        callback_set[1].cast<py::function>();
+                    py::function on_output =
+                        callback_set[2].cast<py::function>();
+                    py::object csr_read_override = callback_set[3];
+
+                    StepCallbacks core_callbacks;
+                    core_callbacks.mmio_start =
+                        0xFFFFFF0000000000ULL;
+                    core_callbacks.mmio_end =
+                        0xFFFFFF8000000000ULL;
+                    core_callbacks.has_mmio = true;
+                    core_callbacks.mmio_read8 =
+                        [mmio_read8](uint64_t address) -> uint8_t {
+                            py::gil_scoped_acquire acquire;
+                            return mmio_read8(address).cast<uint8_t>();
+                        };
+                    core_callbacks.mmio_write8 =
+                        [mmio_write8](uint64_t address, uint8_t value) {
+                            py::gil_scoped_acquire acquire;
+                            mmio_write8(address, value);
+                        };
+                    core_callbacks.on_output =
+                        [on_output](int port, int value) {
+                            py::gil_scoped_acquire acquire;
+                            on_output(port, value);
+                        };
+                    if (!csr_read_override.is_none()) {
+                        py::function override_function =
+                            csr_read_override.cast<py::function>();
+                        core_callbacks.csr_read_override =
+                            [override_function](int address) -> uint64_t {
+                                py::gil_scoped_acquire acquire;
+                                py::object result =
+                                    override_function(address);
+                                if (result.is_none())
+                                    return static_cast<uint64_t>(-1);
+                                return result.cast<uint64_t>();
+                            };
+                    }
+                    callbacks.push_back(
+                        std::move(core_callbacks));
+                }
+
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return run_full_core_system_batch(
+                    system,
+                    max_steps,
+                    callbacks,
+                    prepare_batch,
+                    settle_continuation,
+                    settle_dispatch_error,
+                    settle_round,
+                    max_dispatch_steps);
+            },
+            py::arg("max_steps"),
+            py::arg("callback_sets"),
+            py::arg("prepare_batch"),
+            py::arg("settle_continuation"),
+            py::arg("settle_dispatch_error"),
+            py::arg("settle_round"),
+            py::arg("max_dispatch_steps") = 1000)
         .def(
             "ipi_send",
             [](SystemState& system, int requester_id, int target_id) {
