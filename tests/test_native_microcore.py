@@ -6,6 +6,13 @@ import pytest
 
 from accel_wrapper import Megapad64Micro
 from asm import assemble
+from bench_phase2_microcore import (
+    REPORT_SCHEMA,
+    REPORT_SCHEMA_VERSION,
+    STATE_SCHEMA,
+    STATE_SCHEMA_VERSION,
+    run_report,
+)
 from megapad64 import (
     CPUID_MICRO,
     CSR_CPUID,
@@ -165,3 +172,59 @@ def test_reduced_illegal_instruction_traps_match_python_oracle(instruction):
     assert native_error.value.ivec_id == IVEC_ILLEGAL_OP
     assert oracle_error.value.ivec_id == IVEC_ILLEGAL_OP
     assert _local_state(native) == _local_state(oracle)
+
+
+def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
+    """The element-5 benchmark pins native execution without fairness claims."""
+    report = run_report(
+        instructions=9,
+        repeats=2,
+        warmups=0,
+        warmup_instructions=1,
+    )
+
+    assert report["schema"] == REPORT_SCHEMA
+    assert report["schema_version"] == REPORT_SCHEMA_VERSION
+    assert report["determinism"]["canonical_state_matches"]
+    assert report["determinism"]["behavior_oracle_matches"]
+    assert report["semantics"]["native_scheduler_expected"] is False
+    scope = report["semantics"]["qos_and_fairness_scope"]
+    assert scope["contention_exercised"] is False
+    assert scope["qos_claim"] == "excluded"
+    assert scope["fairness_claim"] == "excluded"
+
+    hashes = set()
+    for sample in report["samples"]:
+        observation = sample["observation"]
+        assert observation["state_schema"] == STATE_SCHEMA
+        assert observation["state_schema_version"] == STATE_SCHEMA_VERSION
+        hashes.add(observation["behavior_oracle_sha256"])
+        state = observation["canonical_state"]
+        execution = state["execution"]
+        assert execution["instructions_executed"] == 9
+        assert execution["per_core_instructions"] == [0, 9, 0, 0, 0]
+        assert execution["per_core_cycles"][0] == 0
+        assert execution["per_core_cycles"][1] == 13
+        assert execution["per_core_cycles"][2:] == [0, 0, 0]
+        assert execution["system_cycles_advanced"] == 13
+        assert execution["native_scheduler"] is False
+        assert execution["native_batch_runs_counter_delta"] == 0
+        assert execution["native_dispatches_counter_delta"] == 0
+        assert execution["python_fallback_instantiated"] is False
+
+        topology = state["topology"]
+        assert topology["active_core_is_system_owned_micro_profile"]
+        assert topology["cluster_enabled"] is False
+        assert state["workload"]["contention_exercised"] is False
+        assert state["cores"][1]["profile"] == "micro"
+        assert state["cores"][1]["accelerated_wrapper"]
+        assert state["cores"][1]["common_gprs_r0_r15"][1] == 5
+        assert all(
+            core["halted"]
+            for index, core in enumerate(state["cores"])
+            if index != 1
+        )
+        assert state["main_bus"]["active_grant"] is False
+        assert state["main_bus"]["pending_request_count"] == 0
+
+    assert len(hashes) == 1
