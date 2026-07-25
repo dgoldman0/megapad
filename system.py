@@ -992,11 +992,15 @@ class MegapadSystem:
     # -----------------------------------------------------------------
 
     def _require_cycle_unbounded_execution(self) -> None:
-        """Reject unsafe post-hoc execution while any horizon is active."""
+        """Reject unsafe post-hoc execution while a timed event is active."""
         _cycles, deadline, _sources = self._native_system.event_horizon()
         if deadline is not None:
             raise RuntimeError(
                 "active event horizons require cycle-bounded native execution"
+            )
+        if self._native_system.main_bus_timeout_cycle is not None:
+            raise RuntimeError(
+                "active main-bus grants require cycle-bounded native execution"
             )
 
     def _reject_native_batch_reentry(self) -> None:
@@ -1359,12 +1363,12 @@ class MegapadSystem:
             return SystemRunStats(0, 0, zeros, zeros)
 
         self._reject_native_batch_reentry()
+        self._require_cycle_unbounded_execution()
         if self._native_full_core_batch_eligible():
             return self._run_native_full_core_batch(n)
 
         # Compatibility path for heterogeneous topologies and deliberate
         # per-instance run_steps_stats overrides.
-        self._require_cycle_unbounded_execution()
         clock_start = int(self._native_system.system_cycles)
 
         # --- wake checks (same as step()) ---

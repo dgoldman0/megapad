@@ -549,3 +549,124 @@ def test_cold_boot_resets_owned_main_bus_state():
     assert snapshot.next_grant_sequence == 1
     assert snapshot.reset_port_zero_credit
     assert snapshot.sticky_bus_errors == [0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    "execute",
+    [
+        lambda system: system.step(),
+        lambda system: system.run(max_steps=1),
+        lambda system: system.run_batch_stats(1),
+        lambda system: system.run_until_halt(max_steps=1),
+    ],
+    ids=["step", "run", "run_batch_stats", "run_until_halt"],
+)
+def test_legacy_execution_rejects_active_grant_before_guest_mutation(execute):
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, b"\x11")  # INC R1
+    system.boot(entry=0)
+    owner = system._native_system
+    grant = owner._main_bus_try_grant([
+        _request(
+            owner,
+            0,
+            1,
+            operation=BusOperation.READ,
+            address=MEMORY_ADDRESS,
+        )
+    ])
+    before = (
+        system.cpu.pc,
+        system.cpu.regs[1],
+        system.cpu.cycle_count,
+        owner.native_batch_runs,
+        bytes(system.cpu.mem),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="active main-bus grants require cycle-bounded native execution",
+    ):
+        execute(system)
+
+    assert (
+        system.cpu.pc,
+        system.cpu.regs[1],
+        system.cpu.cycle_count,
+        owner.native_batch_runs,
+        bytes(system.cpu.mem),
+    ) == before
+    assert (
+        owner._main_bus_snapshot().active_grant.grant_sequence
+        == grant.grant_sequence
+    )
+
+
+def test_direct_native_batch_rejects_active_grant_before_guest_mutation():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, b"\x11")  # INC R1
+    system.boot(entry=0)
+    owner = system._native_system
+    grant = owner._main_bus_try_grant([
+        _request(
+            owner,
+            0,
+            1,
+            operation=BusOperation.READ,
+            address=MEMORY_ADDRESS,
+        )
+    ])
+    cpu = system.cpu
+    callback_sets = [(
+        cpu._mmio_read8,
+        cpu._mmio_write8,
+        cpu._do_output,
+        getattr(cpu, "_csr_read_override", None),
+    )]
+    before = (
+        cpu.pc,
+        cpu.regs[1],
+        cpu.cycle_count,
+        owner.native_batch_runs,
+        bytes(cpu.mem),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="active main-bus grants require cycle-bounded native execution",
+    ):
+        owner.run_full_core_batch(
+            1,
+            callback_sets,
+            system._prepare_native_full_core_batch,
+            system._settle_native_core_continuation,
+            system._settle_native_core_dispatch_error,
+            system._settle_native_system_round,
+            1000,
+        )
+
+    assert (
+        cpu.pc,
+        cpu.regs[1],
+        cpu.cycle_count,
+        owner.native_batch_runs,
+        bytes(cpu.mem),
+    ) == before
+    assert (
+        owner._main_bus_snapshot().active_grant.grant_sequence
+        == grant.grant_sequence
+    )

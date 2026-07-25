@@ -6129,6 +6129,10 @@ static SystemBatchResult run_full_core_system_batch(
         throw std::invalid_argument(
             "max_dispatch_steps must be positive");
 
+    if (system.main_bus.active_timeout_cycle().has_value()) {
+        throw std::runtime_error(
+            "active main-bus grants require cycle-bounded native execution");
+    }
     NativeBatchActiveGuard active_guard(system);
     const auto horizon = system.shared_clock.snapshot();
     if (horizon.has_deadline) {
