@@ -75,9 +75,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 5
+STATE_SCHEMA_VERSION = 6
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -119,8 +119,9 @@ STATE_COMPARISON_SCOPE = {
         "RTC, UART geometry, UART, crypto-MMIO-visible, NIC-MMIO-visible, "
         "and TRNG state as observed through every full core",
         "native system-cycle and event-horizon state, one-worker scheduler "
-        "cursor, registered-device layout, platform topology, and benchmark "
-        "orchestration counters",
+        "cursor, complete main-bus arbiter snapshot, observable quiescent "
+        "cycle-execution state, registered-device layout, platform topology, "
+        "and benchmark orchestration counters",
     ],
     "explicit_exclusions": [
         {
@@ -244,6 +245,18 @@ STATE_COMPARISON_SCOPE = {
                 "the behavior hash so host call segmentation cannot change "
                 "canonical state; the active flag is an in-call exclusion "
                 "guard and is false at every completed observation boundary"
+            ),
+        },
+        {
+            "state": (
+                "suspended cycle-execution checkpoints, completed-access "
+                "journals, deferred retirement cycles, and target-completion "
+                "frontiers"
+            ),
+            "reason": (
+                "those internals are not a public snapshot format; the Phase "
+                "0 canonical observer refuses non-quiescent cycle execution "
+                "instead of hashing an incomplete continuation"
             ),
         },
         {
@@ -895,6 +908,76 @@ def _integer_sequence_summary(values: Iterable[int]) -> dict:
     }
 
 
+def _enum_name(value) -> str:
+    """Return one stable lowercase name for a bound native enum."""
+    return str(value).rsplit(".", 1)[-1].lower()
+
+
+def _bus_request_state(request) -> dict:
+    return {
+        "requester_id": int(request.requester_id),
+        "ready_cycle": int(request.ready_cycle),
+        "operation": _enum_name(request.operation),
+        "address": int(request.address),
+        "width": _enum_name(request.width),
+        "write_data": int(request.write_data),
+        "ordering": {
+            "main_port_id": int(request.ordering.main_port_id),
+            "issue_sequence": int(request.ordering.issue_sequence),
+            "port_io": bool(request.ordering.port_io),
+        },
+    }
+
+
+def _bus_grant_state(grant) -> dict:
+    return {
+        "request": _bus_request_state(grant.request),
+        "grant_sequence": int(grant.grant_sequence),
+        "grant_cycle": int(grant.grant_cycle),
+        "target": _enum_name(grant.target),
+        "timeout_cycle": int(grant.timeout_cycle),
+    }
+
+
+def _main_bus_state(system: MegapadSystem) -> dict:
+    owner = system._native_system
+    snapshot = owner._main_bus_snapshot()
+    pending = owner._cycle_pending_bus_requests()
+    return {
+        "schema_version": int(snapshot.schema_version),
+        "port_count": int(snapshot.port_count),
+        "last_grant": int(snapshot.last_grant),
+        "reset_port_zero_credit": bool(snapshot.reset_port_zero_credit),
+        "next_grant_sequence": int(snapshot.next_grant_sequence),
+        "earliest_arbitration_cycle": int(
+            snapshot.earliest_arbitration_cycle
+        ),
+        "served_last": bool(snapshot.served_last),
+        "last_arbitration_cycle": (
+            None
+            if snapshot.last_arbitration_cycle is None
+            else int(snapshot.last_arbitration_cycle)
+        ),
+        "active_grant": (
+            None
+            if snapshot.active_grant is None
+            else _bus_grant_state(snapshot.active_grant)
+        ),
+        "last_issue_sequences": [
+            int(value) for value in snapshot.last_issue_sequences
+        ],
+        "sticky_bus_errors": [
+            int(value) for value in snapshot.sticky_bus_errors
+        ],
+        "cycle_execution_pending": bool(
+            owner.cycle_execution_pending
+        ),
+        "cycle_pending_requests": [
+            _bus_request_state(request) for request in pending
+        ],
+    }
+
+
 def _ordered_blob_queue(queue: Iterable[bytes]) -> dict:
     entries = [_blob_summary(frame) for frame in queue]
     return {
@@ -1198,6 +1281,7 @@ def _shared_device_state(system: MegapadSystem) -> dict:
                 for deadline in event_deadlines
             ],
         },
+        "main_bus": _main_bus_state(system),
         "device_bus": {
             "registered_devices": [
                 {
@@ -1328,6 +1412,10 @@ def _shared_device_state(system: MegapadSystem) -> dict:
 
 def _state_observation(workload: Workload) -> dict:
     system = workload.system
+    if system._native_system.cycle_execution_pending:
+        raise RuntimeError(
+            "Phase 0 canonical state requires quiescent cycle execution"
+        )
     cores = [_core_state(cpu) for cpu in system.cores]
     memory = {
         "shared_ram": _blob_summary(system._shared_mem),

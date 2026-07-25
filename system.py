@@ -132,6 +132,9 @@ class SystemRunStats:
     native_scheduler: bool = False
     native_rounds: int = 0
     native_continuations: int = 0
+    system_stop_reason: str = "instruction_limit"
+    stop_cycle: int = 0
+    event_source_mask: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +960,7 @@ class MegapadSystem:
         """
         self.storage.reset()
         self.audio.reset()
+        self._native_system._reset_cycle_execution()
         self._native_system._main_bus_reset()
         self._scheduler_cursor = 0
         for cluster in self.clusters:
@@ -1002,6 +1006,11 @@ class MegapadSystem:
             raise RuntimeError(
                 "active main-bus grants require cycle-bounded native execution"
             )
+        if self._native_system.cycle_execution_pending:
+            raise RuntimeError(
+                "suspended cycle execution requires cycle-bounded native "
+                "execution"
+            )
 
     def _reject_native_batch_reentry(self) -> None:
         """Keep every system execution API outside an active native batch."""
@@ -1017,6 +1026,14 @@ class MegapadSystem:
         """Advance time while the scheduler transaction lock is held."""
         if cycles < 0:
             raise ValueError("system cycles cannot advance by a negative value")
+        if (
+            self._native_system.cycle_execution_pending
+            and not self._native_system.native_batch_active
+        ):
+            raise RuntimeError(
+                "system time cannot advance while cycle execution is "
+                "suspended"
+            )
         current, deadline, _sources = self._native_system.event_horizon()
         if deadline is not None and cycles > deadline - current:
             raise ValueError(
@@ -1229,6 +1246,51 @@ class MegapadSystem:
             int(result.continuations),
         )
 
+    def _run_native_full_core_cycle_batch(
+        self,
+        max_system_cycles: int,
+        max_instructions: int,
+    ) -> SystemRunStats:
+        """Run full cores to an exact virtual-cycle or event boundary."""
+        callback_sets = [
+            (
+                cpu._mmio_read8,
+                cpu._mmio_write8,
+                cpu._do_output,
+                getattr(cpu, "_csr_read_override", None),
+            )
+            for cpu in self.cores[:self.num_full_cores]
+        ]
+        result = self._native_system.run_full_core_cycle_batch(
+            max_system_cycles,
+            callback_sets,
+            self._prepare_native_full_core_batch,
+            self._settle_native_core_continuation,
+            self._settle_native_system_round,
+            max_instructions,
+        )
+        stop_reason = str(result.system_stop_reason)
+        if "." in stop_reason:
+            stop_reason = stop_reason.rsplit(".", 1)[-1]
+        stop_reason = stop_reason.lower()
+        return SystemRunStats(
+            int(result.instructions_executed),
+            int(result.system_cycles_advanced),
+            tuple(int(value) for value in result.per_core_instructions),
+            tuple(int(value) for value in result.per_core_cycles),
+            tuple(int(value) for value in result.per_core_dispatches),
+            tuple(
+                tuple(int(value) for value in reasons)
+                for reasons in result.per_core_stop_reasons
+            ),
+            True,
+            int(result.rounds),
+            int(result.continuations),
+            stop_reason,
+            int(result.stop_cycle),
+            int(result.event_source_mask),
+        )
+
     def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
         """Run one core under one logical operation and recover exact progress."""
         total_steps = 0
@@ -1355,6 +1417,40 @@ class MegapadSystem:
         """Execute a deterministic one-worker batch with exact cycle totals."""
         with self._scheduler_lock:
             return self._run_batch_stats_locked(n)
+
+    def run_cycle_batch(
+        self,
+        max_system_cycles: int,
+        *,
+        max_instructions: int = 100_000,
+    ) -> SystemRunStats:
+        """Run to an exact virtual-cycle, event, or instruction boundary.
+
+        ``max_system_cycles`` is a relative authoritative-system-clock
+        budget. ``max_instructions`` remains an aggregate retirement cap.
+        A tied event horizon wins over the caller cycle limit and remains
+        armed for the caller to process or reschedule.
+        """
+        if max_system_cycles < 0:
+            raise ValueError("max_system_cycles cannot be negative")
+        if max_system_cycles > (1 << 64) - 1:
+            raise OverflowError("max_system_cycles exceeds uint64")
+        if max_instructions < 0:
+            raise ValueError("max_instructions cannot be negative")
+        if max_instructions > (1 << 63) - 1:
+            raise OverflowError("max_instructions exceeds int64")
+
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            if not self._native_full_core_batch_eligible():
+                raise RuntimeError(
+                    "cycle-bounded execution currently requires canonical "
+                    "native full cores without micro-core clusters"
+                )
+            return self._run_native_full_core_cycle_batch(
+                max_system_cycles,
+                max_instructions,
+            )
 
     def _run_batch_stats_locked(self, n: int) -> SystemRunStats:
         """Execute one system batch under the scheduler transaction lock."""

@@ -433,6 +433,10 @@ enum class BusFault : uint8_t {
     TARGET_FAULT = 3,
 };
 
+static bool main_bus_address_is_mmio(uint64_t address) {
+    return static_cast<uint32_t>(address >> 32) == 0xFFFFFF00U;
+}
+
 struct BusOrderingMetadata {
     int main_port_id = 0;
     uint64_t issue_sequence = 0;
@@ -770,7 +774,7 @@ private:
     }
 
     static BusTarget target_for_address(uint64_t address) {
-        return static_cast<uint32_t>(address >> 32) == 0xFFFFFF00U
+        return main_bus_address_is_mmio(address)
             ? BusTarget::MMIO
             : BusTarget::MEMORY;
     }
@@ -959,6 +963,9 @@ struct CPUState {
     // System-owned cores reject guest execution while their parent's native
     // scheduler batch is active. Standalone cores leave this pointer null.
     std::atomic<bool>* system_batch_active = nullptr;
+    // A cycle-bounded call may leave one instruction suspended across public
+    // calls. Direct per-core execution must not bypass that continuation.
+    std::atomic<bool>* system_cycle_execution_pending = nullptr;
 
     // System-owned cores borrow the central IPI router.  Standalone cores
     // preserve the historical manually settable interrupt-line latch.
@@ -1013,6 +1020,192 @@ struct CPUState {
     void register_accel_hook(uint64_t addr, int hook_id);
 };
 
+// A suspended system-owned instruction may be decoded and executed more than
+// once while completed shared accesses are replayed from an effect journal.
+// Only core-private architectural state is rewound.  Borrowed owners,
+// mappings, shared devices, interrupt lines, and host synchronization objects
+// deliberately remain outside this checkpoint.
+#define MP64_EXECUTION_CHECKPOINT_SCALARS(X) \
+    X(uint8_t, psel) \
+    X(uint8_t, xsel) \
+    X(uint8_t, spsel) \
+    X(uint8_t, flag_z) \
+    X(uint8_t, flag_c) \
+    X(uint8_t, flag_n) \
+    X(uint8_t, flag_v) \
+    X(uint8_t, flag_p) \
+    X(uint8_t, flag_g) \
+    X(uint8_t, flag_i) \
+    X(uint8_t, flag_s) \
+    X(uint8_t, d_reg) \
+    X(uint8_t, q_out) \
+    X(uint16_t, t_reg) \
+    X(uint64_t, sb) \
+    X(uint64_t, sr) \
+    X(uint64_t, sc) \
+    X(uint64_t, sw) \
+    X(uint64_t, tmode) \
+    X(uint64_t, tctrl) \
+    X(uint64_t, tsrc0) \
+    X(uint64_t, tsrc1) \
+    X(uint64_t, tdst) \
+    X(uint64_t, ivt_base) \
+    X(uint64_t, ivec_id) \
+    X(uint64_t, trap_addr) \
+    X(uint8_t, ef_flags) \
+    X(bool, halted) \
+    X(bool, idle) \
+    X(uint64_t, cycle_count) \
+    X(uint64_t, tstride_r) \
+    X(uint64_t, tstride_c) \
+    X(uint64_t, ttile_h) \
+    X(uint64_t, ttile_w) \
+    X(uint8_t, perf_enable) \
+    X(uint64_t, perf_cycles) \
+    X(uint64_t, perf_stalls) \
+    X(uint64_t, perf_tileops) \
+    X(uint64_t, perf_extmem) \
+    X(uint64_t, bist_status) \
+    X(uint64_t, bist_fail_addr) \
+    X(uint64_t, bist_fail_data) \
+    X(uint64_t, tile_selftest) \
+    X(uint64_t, tile_st_detail) \
+    X(uint8_t, icache_enabled) \
+    X(uint64_t, icache_hits) \
+    X(uint64_t, icache_misses) \
+    X(uint8_t, priv_level) \
+    X(uint64_t, mpu_base) \
+    X(uint64_t, mpu_limit) \
+    X(int, ext_modifier) \
+    X(uint64_t, crc_acc) \
+    X(uint8_t, crc_mode) \
+    X(uint8_t, sha_mode) \
+    X(uint64_t, sha_msglen_lo) \
+    X(uint64_t, sha_msglen_hi) \
+    X(uint8_t, gf_prime_sel) \
+    X(BigNum, gf_custom_p) \
+    X(BigNum, gf_mont_pinv) \
+    X(BigNum, gf_prev_lo) \
+    X(BigNum, gf_prev_hi)
+
+struct CPUExecutionCheckpoint {
+    std::array<uint64_t, 32> regs{};
+    std::array<uint64_t, 4> acc{};
+    std::array<uint8_t, 8> port_out{};
+    std::array<uint8_t, 8> port_in{};
+    std::array<uint32_t, 8> port_map{};
+    std::array<
+        std::array<CPUState::DictEntry, CPUState::DICT_WAYS>,
+        CPUState::DICT_SETS
+    > dict_table{};
+
+#define MP64_DECLARE_CHECKPOINT_FIELD(type, name) type name{};
+    MP64_EXECUTION_CHECKPOINT_SCALARS(
+        MP64_DECLARE_CHECKPOINT_FIELD)
+#undef MP64_DECLARE_CHECKPOINT_FIELD
+
+    explicit CPUExecutionCheckpoint(const CPUState& state) {
+        std::copy(
+            std::begin(state.regs),
+            std::end(state.regs),
+            regs.begin());
+        std::copy(
+            std::begin(state.acc),
+            std::end(state.acc),
+            acc.begin());
+        std::copy(
+            std::begin(state.port_out),
+            std::end(state.port_out),
+            port_out.begin());
+        std::copy(
+            std::begin(state.port_in),
+            std::end(state.port_in),
+            port_in.begin());
+        std::copy(
+            std::begin(state.port_map),
+            std::end(state.port_map),
+            port_map.begin());
+        std::memcpy(
+            dict_table.data(),
+            state.dict_table,
+            sizeof(state.dict_table));
+
+#define MP64_CAPTURE_CHECKPOINT_FIELD(type, name) name = state.name;
+        MP64_EXECUTION_CHECKPOINT_SCALARS(
+            MP64_CAPTURE_CHECKPOINT_FIELD)
+#undef MP64_CAPTURE_CHECKPOINT_FIELD
+    }
+
+    void restore(CPUState& state) const {
+        std::copy(regs.begin(), regs.end(), std::begin(state.regs));
+        std::copy(acc.begin(), acc.end(), std::begin(state.acc));
+        std::copy(
+            port_out.begin(),
+            port_out.end(),
+            std::begin(state.port_out));
+        std::copy(
+            port_in.begin(),
+            port_in.end(),
+            std::begin(state.port_in));
+        std::copy(
+            port_map.begin(),
+            port_map.end(),
+            std::begin(state.port_map));
+        std::memcpy(
+            state.dict_table,
+            dict_table.data(),
+            sizeof(state.dict_table));
+
+#define MP64_RESTORE_CHECKPOINT_FIELD(type, name) state.name = name;
+        MP64_EXECUTION_CHECKPOINT_SCALARS(
+            MP64_RESTORE_CHECKPOINT_FIELD)
+#undef MP64_RESTORE_CHECKPOINT_FIELD
+    }
+};
+
+#undef MP64_EXECUTION_CHECKPOINT_SCALARS
+
+struct BusReplayRecord {
+    BusResult result{};
+    std::optional<std::string> target_error_message;
+};
+
+struct ResumableInstruction {
+    explicit ResumableInstruction(
+            const CPUState& state,
+            uint64_t start_cycle_value)
+        : checkpoint(state),
+          start_cycle(start_cycle_value) {}
+
+    CPUExecutionCheckpoint checkpoint;
+    uint64_t start_cycle = 0;
+    std::vector<BusReplayRecord> completed_accesses;
+    std::optional<BusRequest> pending_request;
+    std::optional<uint64_t> retire_cycle;
+    std::size_t replay_cursor = 0;
+};
+
+struct FullCoreCycleState {
+    uint64_t ready_cycle = 0;
+    uint64_t next_issue_sequence = 1;
+    std::unique_ptr<ResumableInstruction> instruction;
+};
+
+struct BusYieldSignal {};
+
+class ResumableBusAccess {
+public:
+    virtual ~ResumableBusAccess() = default;
+
+    virtual uint64_t access(
+        BusOperation operation,
+        uint64_t address,
+        BusWidth width,
+        uint64_t write_data,
+        bool port_io
+    ) = 0;
+};
+
 static std::unique_ptr<CPUState> make_cpu_state(
         MemoryMappings* shared_memory = nullptr,
         TimerDevice* shared_timer = nullptr,
@@ -1024,7 +1217,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
         NICDevice* shared_nic = nullptr,
         TRNGDevice* shared_trng = nullptr,
         UARTDevice* shared_uart = nullptr,
-        std::atomic<bool>* shared_batch_active = nullptr) {
+        std::atomic<bool>* shared_batch_active = nullptr,
+        std::atomic<bool>* shared_cycle_execution_pending = nullptr) {
     auto state = std::make_unique<CPUState>();
     if (shared_memory != nullptr) {
         state->memory = shared_memory;
@@ -1082,6 +1276,8 @@ static std::unique_ptr<CPUState> make_cpu_state(
     }
     state->interrupts = shared_interrupts;
     state->system_batch_active = shared_batch_active;
+    state->system_cycle_execution_pending =
+        shared_cycle_execution_pending;
     for (int index = 0; index < 8; index++)
         state->port_map[index] = 0xFFFF;
     state->dict_clear_all();
@@ -1146,11 +1342,13 @@ struct SystemState {
                 &shared_nic,
                 &shared_trng,
                 &shared_uart,
-                &native_batch_active);
+                &native_batch_active,
+                &cycle_execution_pending);
             core->core_id = static_cast<uint8_t>(index);
             core->num_cores = static_cast<uint8_t>(all_core_count);
             cores.push_back(std::move(core));
         }
+        full_core_cycle_states.resize(cores.size());
         advertised_core_count = all_core_count;
     }
 
@@ -1211,6 +1409,37 @@ struct SystemState {
         }
     }
 
+    void reset_cycle_execution() {
+        cycle_target_completion_cycle.reset();
+        for (FullCoreCycleState& state : full_core_cycle_states) {
+            state.ready_cycle = shared_clock.cycles();
+            state.next_issue_sequence = 1;
+            state.instruction.reset();
+        }
+        cycle_execution_pending.store(
+            false,
+            std::memory_order_release);
+    }
+
+    bool has_cycle_execution_pending() const {
+        return cycle_execution_pending.load(
+            std::memory_order_acquire);
+    }
+
+    void refresh_cycle_execution_pending() {
+        const bool pending =
+            cycle_target_completion_cycle.has_value() ||
+            std::any_of(
+                full_core_cycle_states.begin(),
+                full_core_cycle_states.end(),
+                [](const FullCoreCycleState& state) {
+                    return state.instruction != nullptr;
+                });
+        cycle_execution_pending.store(
+            pending,
+            std::memory_order_release);
+    }
+
     MemoryMappings shared_memory;
     CryptoDevices shared_crypto{};
     NICDevice shared_nic{};
@@ -1224,6 +1453,8 @@ struct SystemState {
     SystemClock shared_clock{};
     MainBusArbiter main_bus{};
     std::vector<std::unique_ptr<CPUState>> cores;
+    std::vector<FullCoreCycleState> full_core_cycle_states;
+    std::optional<uint64_t> cycle_target_completion_cycle;
     // Serializes native scheduling with clock/deadline mutation. Recursive
     // acquisition is required when a Python round-settlement callback advances
     // the clock on the same scheduler thread.
@@ -1232,8 +1463,116 @@ struct SystemState {
     uint64_t native_batch_runs = 0;
     uint64_t native_dispatches = 0;
     std::atomic<bool> native_batch_active{false};
+    std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
     bool mappings_sealed = false;
+};
+
+class JournaledBusAccess final : public ResumableBusAccess {
+public:
+    JournaledBusAccess(SystemState& system, int core_index)
+        : system_(system),
+          core_index_(core_index) {}
+
+    uint64_t access(
+            BusOperation operation,
+            uint64_t address,
+            BusWidth width,
+            uint64_t write_data,
+            bool port_io) override {
+        FullCoreCycleState& cycle_state =
+            system_.full_core_cycle_states[
+                static_cast<std::size_t>(core_index_)];
+        if (!cycle_state.instruction)
+            throw std::logic_error(
+                "journaled bus access has no suspended instruction");
+        ResumableInstruction& instruction =
+            *cycle_state.instruction;
+
+        if (instruction.replay_cursor <
+            instruction.completed_accesses.size()) {
+            BusReplayRecord& record =
+                instruction.completed_accesses[
+                    instruction.replay_cursor];
+            const BusRequest& recorded =
+                record.result.grant.request;
+            validate_replay(
+                recorded,
+                operation,
+                address,
+                width,
+                write_data,
+                port_io);
+            instruction.replay_cursor++;
+            if (record.target_error_message.has_value()) {
+                throw std::runtime_error(
+                    "main bus target callback failed: " +
+                    *record.target_error_message);
+            }
+            if (record.result.fault == BusFault::TARGET_FAULT)
+                throw std::runtime_error("TRAP:BUS_FAULT");
+            return record.result.read_value.value_or(0);
+        }
+
+        if (instruction.pending_request.has_value())
+            throw std::logic_error(
+                "a suspended instruction already has a pending request");
+        if (cycle_state.next_issue_sequence ==
+            std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "main bus issue sequence overflow");
+        }
+
+        uint64_t ready_cycle = instruction.start_cycle;
+        if (!instruction.completed_accesses.empty()) {
+            ready_cycle = instruction.completed_accesses.back()
+                .result.completion_cycle;
+        }
+
+        const int requester_id =
+            system_.cores[static_cast<std::size_t>(core_index_)]->core_id;
+        instruction.pending_request = BusRequest{
+            requester_id,
+            ready_cycle,
+            operation,
+            address,
+            width,
+            write_data,
+            BusOrderingMetadata{
+                system_.main_bus_port_for_requester(requester_id),
+                cycle_state.next_issue_sequence,
+                port_io,
+            },
+        };
+        cycle_state.next_issue_sequence++;
+        throw BusYieldSignal{};
+    }
+
+private:
+    void validate_replay(
+            const BusRequest& recorded,
+            BusOperation operation,
+            uint64_t address,
+            BusWidth width,
+            uint64_t write_data,
+            bool port_io) const {
+        const int requester_id =
+            system_.cores[static_cast<std::size_t>(core_index_)]->core_id;
+        if (recorded.requester_id != requester_id ||
+            recorded.operation != operation ||
+            recorded.address != address ||
+            recorded.width != width ||
+            recorded.write_data != write_data ||
+            recorded.ordering.port_io != port_io ||
+            recorded.ordering.main_port_id !=
+                system_.main_bus_port_for_requester(requester_id)) {
+            throw std::runtime_error(
+                "resumable instruction bus replay diverged");
+        }
+    }
+
+    SystemState& system_;
+    int core_index_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1476,6 +1815,17 @@ public:
           memory_(*state.memory),
           shared_owner_{&memory_, nullptr, nullptr, nullptr},
           native_owner_{&memory_, nullptr} {
+        if (
+            state_.system_cycle_execution_pending != nullptr &&
+            state_.system_cycle_execution_pending->load(
+                std::memory_order_acquire) &&
+            thread_system_batch_execution_permission !=
+                state_.system_batch_active
+        ) {
+            throw std::runtime_error(
+                "suspended cycle execution must be resumed by its "
+                "native system scheduler");
+        }
         if (
             state_.system_batch_active != nullptr &&
             state_.system_batch_active->load(std::memory_order_acquire) &&
@@ -3682,6 +4032,7 @@ struct StepCallbacks {
     uint64_t mmio_start;
     uint64_t mmio_end;
     bool has_mmio;
+    ResumableBusAccess* bus_access = nullptr;
 };
 
 // MPU check — user-mode memory window enforcement
@@ -3704,8 +4055,37 @@ static inline bool uart_geom_span(uint32_t mmio_off, uint32_t width) {
 // every read8/write8 retains its own device-lock acquisition so adjacent byte
 // transactions are not silently combined into a new atomic operation.
 
+static inline void preflight_resumable_bus_access(
+        CPUState& s,
+        uint64_t address) {
+    if (main_bus_address_is_mmio(address) || !s.priv_level)
+        return;
+    if (s.memory->hbw_mem &&
+        region_contains(
+            s.memory->hbw_base,
+            s.memory->hbw_size,
+            address)) {
+        s.trap_addr = address;
+        throw std::runtime_error("TRAP:PRIV_FAULT");
+    }
+    mpu_check(s, address);
+}
+
 // Memory access with MMIO and HBW intercept
-static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
+static inline uint8_t sys_read8(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        return static_cast<uint8_t>(cb.bus_access->access(
+            BusOperation::READ,
+            addr,
+            BusWidth::BYTE,
+            0,
+            port_io));
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first (no Python callback needed)
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
@@ -3747,7 +4127,22 @@ static inline uint8_t sys_read8(CPUState& s, const StepCallbacks& cb, uint64_t a
     return mem_read8(s, addr);
 }
 
-static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint8_t val) {
+static inline void sys_write8(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        uint8_t val,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        cb.bus_access->access(
+            BusOperation::WRITE,
+            addr,
+            BusWidth::BYTE,
+            val,
+            port_io);
+        return;
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         // Try C++ devices first
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
@@ -3809,7 +4204,20 @@ static inline void sys_write8(CPUState& s, const StepCallbacks& cb, uint64_t add
 }
 
 // Wider MMIO/HBW-aware reads/writes
-static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
+static inline uint64_t sys_read64(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        return cb.bus_access->access(
+            BusOperation::READ,
+            addr,
+            BusWidth::DOUBLEWORD,
+            0,
+            port_io);
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.nic->handles(mmio_off)) {
@@ -3869,7 +4277,22 @@ static inline uint64_t sys_read64(CPUState& s, const StepCallbacks& cb, uint64_t
     return mem_read64(s, addr);
 }
 
-static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint64_t val) {
+static inline void sys_write64(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        uint64_t val,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        cb.bus_access->access(
+            BusOperation::WRITE,
+            addr,
+            BusWidth::DOUBLEWORD,
+            val,
+            port_io);
+        return;
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.nic->handles(mmio_off)) {
@@ -3922,7 +4345,20 @@ static inline void sys_write64(CPUState& s, const StepCallbacks& cb, uint64_t ad
     mem_write64(s, addr, val);
 }
 
-static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
+static inline uint16_t sys_read16(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        return static_cast<uint16_t>(cb.bus_access->access(
+            BusOperation::READ,
+            addr,
+            BusWidth::HALF,
+            0,
+            port_io));
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto->handles(mmio_off))
@@ -3951,7 +4387,22 @@ static inline uint16_t sys_read16(CPUState& s, const StepCallbacks& cb, uint64_t
     return mem_read16(s, addr);
 }
 
-static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint16_t val) {
+static inline void sys_write16(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        uint16_t val,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        cb.bus_access->access(
+            BusOperation::WRITE,
+            addr,
+            BusWidth::HALF,
+            val,
+            port_io);
+        return;
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto->handles(mmio_off)) {
@@ -3993,7 +4444,20 @@ static inline void sys_write16(CPUState& s, const StepCallbacks& cb, uint64_t ad
     mem_write16(s, addr, val);
 }
 
-static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t addr) {
+static inline uint32_t sys_read32(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        return static_cast<uint32_t>(cb.bus_access->access(
+            BusOperation::READ,
+            addr,
+            BusWidth::WORD,
+            0,
+            port_io));
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto->handles(mmio_off)) {
@@ -4041,7 +4505,22 @@ static inline uint32_t sys_read32(CPUState& s, const StepCallbacks& cb, uint64_t
     return mem_read32(s, addr);
 }
 
-static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t addr, uint32_t val) {
+static inline void sys_write32(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint64_t addr,
+        uint32_t val,
+        bool port_io = false) {
+    if (cb.bus_access != nullptr) {
+        preflight_resumable_bus_access(s, addr);
+        cb.bus_access->access(
+            BusOperation::WRITE,
+            addr,
+            BusWidth::WORD,
+            val,
+            port_io);
+        return;
+    }
     if (cb.has_mmio && addr >= cb.mmio_start && addr < cb.mmio_end) {
         uint32_t mmio_off = (uint32_t)(addr - cb.mmio_start);
         if (s.crypto->handles(mmio_off)) {
@@ -4082,6 +4561,195 @@ static inline void sys_write32(CPUState& s, const StepCallbacks& cb, uint64_t ad
         mpu_check(s, addr);
     }
     mem_write32(s, addr, val);
+}
+
+static inline uint8_t direct_system_memory_read8(
+        CPUState& s,
+        uint64_t address) {
+    preflight_resumable_bus_access(s, address);
+    if (!s.priv_level &&
+        s.memory->hbw_mem &&
+        region_contains(
+            s.memory->hbw_base,
+            s.memory->hbw_size,
+            address)) {
+        return s.memory->hbw_mem[
+            address - s.memory->hbw_base];
+    }
+    if (s.memory->ext_mem &&
+        region_contains(
+            s.memory->ext_mem_base,
+            s.memory->ext_mem_size,
+            address)) {
+        return s.memory->ext_mem[
+            address - s.memory->ext_mem_base];
+    }
+    if (s.memory->vram_mem &&
+        region_contains(
+            s.memory->vram_base,
+            s.memory->vram_size,
+            address)) {
+        return s.memory->vram_mem[
+            address - s.memory->vram_base];
+    }
+    return mem_read8(s, address);
+}
+
+static inline void direct_system_memory_write8(
+        CPUState& s,
+        uint64_t address,
+        uint8_t value) {
+    preflight_resumable_bus_access(s, address);
+    if (!s.priv_level &&
+        s.memory->hbw_mem &&
+        region_contains(
+            s.memory->hbw_base,
+            s.memory->hbw_size,
+            address)) {
+        s.memory->hbw_mem[
+            address - s.memory->hbw_base] = value;
+        return;
+    }
+    if (s.memory->ext_mem &&
+        region_contains(
+            s.memory->ext_mem_base,
+            s.memory->ext_mem_size,
+            address)) {
+        s.memory->ext_mem[
+            address - s.memory->ext_mem_base] = value;
+        return;
+    }
+    if (s.memory->vram_mem &&
+        region_contains(
+            s.memory->vram_base,
+            s.memory->vram_size,
+            address)) {
+        s.memory->vram_mem[
+            address - s.memory->vram_base] = value;
+        return;
+    }
+    mem_write8(s, address, value);
+}
+
+static std::optional<uint64_t> execute_granted_bus_target(
+        CPUState& s,
+        const StepCallbacks& callbacks,
+        const BusGrant& grant) {
+    const BusRequest& request = grant.request;
+    StepCallbacks direct_callbacks = callbacks;
+    direct_callbacks.bus_access = nullptr;
+
+    if (grant.target == BusTarget::MMIO) {
+        if (request.operation == BusOperation::READ) {
+            switch (request.width) {
+                case BusWidth::BYTE:
+                    return sys_read8(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        request.ordering.port_io);
+                case BusWidth::HALF:
+                    return sys_read16(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        request.ordering.port_io);
+                case BusWidth::WORD:
+                    return sys_read32(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        request.ordering.port_io);
+                case BusWidth::DOUBLEWORD:
+                    return sys_read64(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        request.ordering.port_io);
+            }
+        } else {
+            switch (request.width) {
+                case BusWidth::BYTE:
+                    sys_write8(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        static_cast<uint8_t>(request.write_data),
+                        request.ordering.port_io);
+                    break;
+                case BusWidth::HALF:
+                    sys_write16(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        static_cast<uint16_t>(request.write_data),
+                        request.ordering.port_io);
+                    break;
+                case BusWidth::WORD:
+                    sys_write32(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        static_cast<uint32_t>(request.write_data),
+                        request.ordering.port_io);
+                    break;
+                case BusWidth::DOUBLEWORD:
+                    sys_write64(
+                        s,
+                        direct_callbacks,
+                        request.address,
+                        request.write_data,
+                        request.ordering.port_io);
+                    break;
+            }
+            return std::nullopt;
+        }
+    } else {
+        preflight_resumable_bus_access(s, request.address);
+        if (request.operation == BusOperation::READ) {
+            switch (request.width) {
+                case BusWidth::BYTE:
+                    return direct_system_memory_read8(
+                        s, request.address);
+                case BusWidth::HALF:
+                    return mem_read16(s, request.address);
+                case BusWidth::WORD:
+                    return mem_read32(s, request.address);
+                case BusWidth::DOUBLEWORD:
+                    return mem_read64(s, request.address);
+            }
+        } else {
+            switch (request.width) {
+                case BusWidth::BYTE:
+                    direct_system_memory_write8(
+                        s,
+                        request.address,
+                        static_cast<uint8_t>(request.write_data));
+                    break;
+                case BusWidth::HALF:
+                    mem_write16(
+                        s,
+                        request.address,
+                        static_cast<uint16_t>(request.write_data));
+                    break;
+                case BusWidth::WORD:
+                    mem_write32(
+                        s,
+                        request.address,
+                        static_cast<uint32_t>(request.write_data));
+                    break;
+                case BusWidth::DOUBLEWORD:
+                    mem_write64(
+                        s,
+                        request.address,
+                        request.write_data);
+                    break;
+            }
+            return std::nullopt;
+        }
+    }
+
+    throw std::logic_error("main bus target width is invalid");
 }
 
 // Push/pop through MMIO-aware writes
@@ -4139,7 +4807,7 @@ static int exec_string(CPUState& s, const StepCallbacks& cb) {
         uint8_t  fb  = s.d_reg;
         // Fast path: memset when entirely within one RAM region (not MMIO)
         bool in_mmio = cb.has_mmio && dst >= cb.mmio_start && dst < cb.mmio_end;
-        if (!in_mmio) {
+        if (cb.bus_access == nullptr && !in_mmio) {
             auto r = resolve_mem(s, dst);
             if (r.buf && r.off + ln <= r.size) {
                 std::memset(r.buf + r.off, fb, (size_t)ln);
@@ -4464,11 +5132,21 @@ static void sha_pack(CPUState& s, const uint64_t H[8]) {
 
 static int sha_block_size(CPUState& s) { return s.sha_mode >= 1 ? 128 : 64; }
 
-// Read one block from memory at TSRC0
-static void sha_read_block(CPUState& s, uint8_t* block) {
-    int bsz = sha_block_size(s);
-    for (int i = 0; i < bsz; i++)
-        block[i] = mem_read8(s, s.tsrc0 + i);
+// Read one block from memory at TSRC0. The full-core RTL fetches each
+// 64-byte SHA-256 block as eight 64-bit main-bus transactions.
+static void sha_read_block(
+        CPUState& s,
+        const StepCallbacks& cb,
+        uint8_t* block) {
+    const int bsz = sha_block_size(s);
+    for (int offset = 0; offset < bsz; offset += 8) {
+        const uint64_t word =
+            sys_read64(s, cb, s.tsrc0 + offset);
+        for (int byte = 0; byte < 8; byte++) {
+            block[offset + byte] = static_cast<uint8_t>(
+                word >> (byte * 8));
+        }
+    }
 }
 
 // SHA-256 compression (one 64-byte block)
@@ -4532,11 +5210,13 @@ static void sha512_compress(uint64_t H[8], const uint8_t block[128]) {
 }
 
 // Run compression on block at M[TSRC0], return cycle count
-static int sha_compress(CPUState& s) {
+static int sha_compress(
+        CPUState& s,
+        const StepCallbacks& cb) {
     uint64_t H[8];
     sha_unpack(s, H);
     uint8_t block[128];
-    sha_read_block(s, block);
+    sha_read_block(s, cb, block);
     if (s.sha_mode == 0) {
         sha256_compress(H, block);
         sha_pack(s, H);
@@ -4551,31 +5231,47 @@ static int sha_compress(CPUState& s) {
 }
 
 // Write FIPS 180-4 padding at M[TSRC0+R0], return true if two-block pad
-static bool sha_write_pad(CPUState& s) {
+static bool sha_write_pad(
+        CPUState& s,
+        const StepCallbacks& cb) {
     int bsz = sha_block_size(s);
     int lsz = s.sha_mode >= 1 ? 16 : 8;
     int pos = (int)(s.regs[0] & 0xFFFFFFFFull) % bsz;
     uint64_t base = s.tsrc0;
 
-    mem_write8(s, base + pos, 0x80);
+    sys_write8(s, cb, base + pos, 0x80);
     pos++;
 
     bool two_blocks = pos > (bsz - lsz);
     if (two_blocks) {
-        while (pos < bsz) { mem_write8(s, base + pos, 0x00); pos++; }
+        while (pos < bsz) {
+            sys_write8(s, cb, base + pos, 0x00);
+            pos++;
+        }
         s.flag_c = 1;
         return true;
     }
     // zero-fill
-    while (pos < bsz - lsz) { mem_write8(s, base + pos, 0x00); pos++; }
+    while (pos < bsz - lsz) {
+        sys_write8(s, cb, base + pos, 0x00);
+        pos++;
+    }
     // big-endian length
     uint64_t lo = s.sha_msglen_lo, hi = s.sha_msglen_hi;
     if (s.sha_mode >= 1) {
         for (int i = 0; i < 8; i++)
-            mem_write8(s, base + bsz - 16 + i, (uint8_t)(hi >> (56 - i*8)));
+            sys_write8(
+                s,
+                cb,
+                base + bsz - 16 + i,
+                static_cast<uint8_t>(hi >> (56 - i * 8)));
     }
     for (int i = 0; i < 8; i++)
-        mem_write8(s, base + bsz - 8 + i, (uint8_t)(lo >> (56 - i*8)));
+        sys_write8(
+            s,
+            cb,
+            base + bsz - 8 + i,
+            static_cast<uint8_t>(lo >> (56 - i * 8)));
     s.flag_c = 0;
     return false;
 }
@@ -4612,18 +5308,32 @@ static void gf_bignum_to_acc(CPUState& s, const BigNum& v) {
     s.acc[2] = v.w[2]; s.acc[3] = v.w[3];
 }
 
-static BigNum gf_read_tile_b(CPUState& s) {
-    uint8_t buf[32];
+static BigNum gf_read_tile_b(
+        CPUState& s,
+        const StepCallbacks& cb) {
+    BigNum value;
     uint64_t base = s.tsrc0;
-    for (int i = 0; i < 32; i++) buf[i] = mem_read8(s, base + i);
-    return BigNum::from_le_bytes(buf);
+    for (int limb = 0; limb < 4; limb++) {
+        value.w[limb] = sys_read64(
+            s,
+            cb,
+            base + static_cast<uint64_t>(limb * 8));
+    }
+    return value;
 }
 
-static void gf_write_tile_dst(CPUState& s, const BigNum& v) {
-    uint8_t buf[32];
-    v.to_le_bytes(buf);
+static void gf_write_tile_dst(
+        CPUState& s,
+        const StepCallbacks& cb,
+        const BigNum& v) {
     uint64_t base = s.tdst;
-    for (int i = 0; i < 32; i++) mem_write8(s, base + i, buf[i]);
+    for (int limb = 0; limb < 4; limb++) {
+        sys_write64(
+            s,
+            cb,
+            base + static_cast<uint64_t>(limb * 8),
+            v.w[limb]);
+    }
 }
 
 static BigNum gf_mulmod_sel(const CPUState& s, const BigNum& a, const BigNum& b, const BigNum& p) {
@@ -4733,10 +5443,10 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             return 2;
         }
         case 0x1: { // SHA.ROUND — compress block at TSRC0
-            return sha_compress(s);
+            return sha_compress(s, cb);
         }
         case 0x2: { // SHA.PAD
-            sha_write_pad(s);
+            sha_write_pad(s, cb);
             return 3;
         }
         case 0x3: { // SHA.DIN Rd, Rs — feed one byte
@@ -4746,7 +5456,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             uint8_t byte_val = (uint8_t)(s.regs[rs] & 0xFF);
             uint64_t base = s.tsrc0;
             uint64_t r0 = s.regs[0];
-            mem_write8(s, base + r0, byte_val);
+            sys_write8(s, cb, base + r0, byte_val);
             r0++;
             // track message length in bits
             uint64_t old = s.sha_msglen_lo;
@@ -4756,7 +5466,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             int bsz = sha_block_size(s);
             int cycles = 1;
             if ((int)r0 >= bsz) {
-                cycles += sha_compress(s);
+                cycles += sha_compress(s, cb);
                 r0 = 0;
             }
             s.regs[0] = r0;
@@ -4774,25 +5484,37 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             return 1;
         }
         case 0x5: { // SHA.FINAL — pad + compress
-            bool two_blocks = sha_write_pad(s);
+            bool two_blocks = sha_write_pad(s, cb);
             int cycles = 3;
             if (two_blocks) {
-                cycles += sha_compress(s);
+                cycles += sha_compress(s, cb);
                 // write second pad block (zeros + length)
                 int bsz = sha_block_size(s);
                 int lsz = s.sha_mode >= 1 ? 16 : 8;
                 uint64_t base = s.tsrc0;
                 for (int i = 0; i < bsz - lsz; i++)
-                    mem_write8(s, base + i, 0x00);
+                    sys_write8(s, cb, base + i, 0x00);
                 uint64_t lo = s.sha_msglen_lo, hi = s.sha_msglen_hi;
                 if (s.sha_mode >= 1) {
-                    for (int i = 0; i < 8; i++)
-                        mem_write8(s, base + bsz - 16 + i, (uint8_t)(hi >> (56 - i*8)));
+                    for (int i = 0; i < 8; i++) {
+                        sys_write8(
+                            s,
+                            cb,
+                            base + bsz - 16 + i,
+                            static_cast<uint8_t>(
+                                hi >> (56 - i * 8)));
+                    }
                 }
-                for (int i = 0; i < 8; i++)
-                    mem_write8(s, base + bsz - 8 + i, (uint8_t)(lo >> (56 - i*8)));
+                for (int i = 0; i < 8; i++) {
+                    sys_write8(
+                        s,
+                        cb,
+                        base + bsz - 8 + i,
+                        static_cast<uint8_t>(
+                            lo >> (56 - i * 8)));
+                }
             }
-            cycles += sha_compress(s);
+            cycles += sha_compress(s, cb);
             return cycles;
         }
         default:
@@ -4804,7 +5526,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         switch (op) {
         case 0x0: { // GF.ADD
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum r = bn_addmod(a, b, p);
             gf_bignum_to_acc(s, r);
             s.gf_prev_lo = r;
@@ -4812,7 +5534,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0x1: { // GF.SUB
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum r = bn_submod(a, b, p);
             gf_bignum_to_acc(s, r);
             s.gf_prev_lo = r;
@@ -4820,7 +5542,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0x2: { // GF.MUL
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum r = gf_mulmod_sel(s, a, b, p);
             gf_bignum_to_acc(s, r);
             s.gf_prev_lo = r;
@@ -4842,7 +5564,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0x5: { // GF.POW
             BigNum a = gf_acc_to_bignum(s);
-            BigNum e = gf_read_tile_b(s);
+            BigNum e = gf_read_tile_b(s, cb);
             BigNum r = bn_powmod(a, e, p);
             gf_bignum_to_acc(s, r);
             s.gf_prev_lo = r;
@@ -4850,18 +5572,18 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0x6: { // GF.MULR — raw 256×256→512
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum lo, hi;
             BigNum::mul_wide(a, b, lo, hi);
             gf_bignum_to_acc(s, lo);
-            gf_write_tile_dst(s, hi);
+            gf_write_tile_dst(s, cb, hi);
             s.gf_prev_lo = lo;
             s.gf_prev_hi = hi;
             return 1;
         }
         case 0x7: { // GF.MAC — (ACC * B + prev) mod p
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum ab = gf_mulmod_sel(s, a, b, p);
             BigNum r = bn_addmod(ab, s.gf_prev_lo, p);
             gf_bignum_to_acc(s, r);
@@ -4870,7 +5592,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0x8: { // GF.MACR — raw: prev_512 + ACC * B
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum mul_lo, mul_hi;
             BigNum::mul_wide(a, b, mul_lo, mul_hi);
             BigNum sum_lo = s.gf_prev_lo.add(mul_lo);
@@ -4880,7 +5602,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
                 sum_hi = sum_hi.add(one);
             }
             gf_bignum_to_acc(s, sum_lo);
-            gf_write_tile_dst(s, sum_hi);
+            gf_write_tile_dst(s, cb, sum_hi);
             s.gf_prev_lo = sum_lo;
             s.gf_prev_hi = sum_hi;
             return 1;
@@ -4889,7 +5611,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
             uint8_t rb = fetch8(s);
             int rd = (rex_d(s.ext_modifier) << 4) | ((rb >> 4) & 0xF);
             bool cond = s.regs[rd] != 0;
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             if (cond) {
                 gf_bignum_to_acc(s, b);
                 s.gf_prev_lo = b;
@@ -4898,7 +5620,7 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0xA: { // GF.CEQ — constant-time equality
             BigNum a = gf_acc_to_bignum(s);
-            BigNum b = gf_read_tile_b(s);
+            BigNum b = gf_read_tile_b(s, cb);
             BigNum eq;
             eq.w[0] = (a == b) ? 1 : 0;
             gf_bignum_to_acc(s, eq);
@@ -4913,12 +5635,12 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
         }
         case 0xC: { // GF.LDPRIME
             s.gf_custom_p = gf_acc_to_bignum(s);
-            s.gf_mont_pinv = gf_read_tile_b(s);
+            s.gf_mont_pinv = gf_read_tile_b(s, cb);
             return 1;
         }
         case 0xD: { // GF.X25519
             BigNum scalar = gf_acc_to_bignum(s);
-            BigNum u_coord = gf_read_tile_b(s);
+            BigNum u_coord = gf_read_tile_b(s, cb);
             uint8_t scalar_bytes[32], u_bytes[32];
             scalar.to_le_bytes(scalar_bytes);
             u_coord.to_le_bytes(u_bytes);
@@ -4938,6 +5660,74 @@ static int exec_crypto(CPUState& s, const StepCallbacks& cb) {
 // ---------------------------------------------------------------------------
 //  The main step function
 // ---------------------------------------------------------------------------
+
+struct SystemInstructionTraits {
+    bool needs_bus_journal = false;
+    bool has_unjournaled_shared_access = false;
+};
+
+static SystemInstructionTraits classify_system_instruction(
+        CPUState& state) {
+    uint64_t address = pc(state);
+    uint8_t opcode = mem_read8(state, address);
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+
+    if (family == 0xF) {
+        if (subop == 0x9 || subop == 0xA)
+            return {true, false};
+        if (subop == 0xB)
+            return {true, false};
+
+        opcode = mem_read8(state, address + 1);
+        family = (opcode >> 4) & 0xF;
+        subop = opcode & 0xF;
+        if (family == 0xF && (subop == 0x9 || subop == 0xA))
+            return {true, false};
+        if (family == 0xF && subop == 0xB)
+            return {true, false};
+    }
+
+    if (family == 0x0) {
+        switch (subop) {
+            case 0x4:
+            case 0x5:
+            case 0x6:
+            case 0x7:
+            case 0x8:
+            case 0xD:
+            case 0xE:
+                return {true, false};
+            default:
+                return {};
+        }
+    }
+    if (family == 0x5)
+        return {true, false};
+    if (family == 0x8) {
+        switch (subop) {
+            case 0x0:
+            case 0x1:
+            case 0x2:
+            case 0x3:
+            case 0x4:
+            case 0x5:
+            case 0x7:
+            case 0x8:
+            case 0x9:
+            case 0xB:
+            case 0xF:
+                return {true, false};
+            default:
+                return {};
+        }
+    }
+    if (family == 0x9 && subop != 0x0 && subop != 0x8)
+        return {true, false};
+    if (family == 0xE)
+        return {false, true};
+    return {};
+}
 
 static int step_one(CPUState& s, const StepCallbacks& cb) {
     if (s.halted)
@@ -5066,7 +5856,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
                 uint64_t target = s.regs[rn];
                 // Check accelerator hooks BEFORE pushing return address
                 int hook = find_accel_hook(s, target);
-                if (hook) {
+                if (hook && cb.bus_access == nullptr) {
                     const AccelHookContext context = {
                         cb.has_mmio,
                         cb.mmio_start,
@@ -5542,7 +6332,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             uint32_t mmio_off = s.port_map[n];
             if (mmio_off < 0x1000 && cb.has_mmio) {
                 uint64_t mmio_addr = cb.mmio_start + mmio_off;
-                sys_write8(s, cb, mmio_addr, val);
+                sys_write8(s, cb, mmio_addr, val, true);
             }
             if (cb.on_output)
                 cb.on_output(n, val);
@@ -5552,7 +6342,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
             uint32_t mmio_off = s.port_map[port];
             if (mmio_off < 0x1000 && cb.has_mmio) {
                 uint64_t mmio_addr = cb.mmio_start + mmio_off;
-                val = sys_read8(s, cb, mmio_addr);
+                val = sys_read8(s, cb, mmio_addr, true);
             } else {
                 val = s.port_in[port];
             }
@@ -5782,6 +6572,8 @@ static int trap_id_from_runtime_error(const std::string& what) {
         return IVEC_DIV_ZERO;
     if (what.find("PRIV_FAULT") != std::string::npos)
         return IVEC_PRIV_FAULT;
+    if (what.find("BUS_FAULT") != std::string::npos)
+        return IVEC_BUS_FAULT;
     return IVEC_ILLEGAL_OP;
 }
 
@@ -5839,6 +6631,14 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
 //  Native SystemState one-worker scheduler
 // ---------------------------------------------------------------------------
 
+enum class SystemStopReason : uint8_t {
+    INSTRUCTION_LIMIT = 0,
+    CYCLE_LIMIT = 1,
+    EVENT_HORIZON = 2,
+    ALL_HALTED = 3,
+    ALL_IDLE = 4,
+};
+
 struct SystemBatchResult {
     int64_t instructions_executed = 0;
     uint64_t system_cycles_advanced = 0;
@@ -5849,6 +6649,10 @@ struct SystemBatchResult {
     uint64_t rounds = 0;
     uint64_t continuations = 0;
     int scheduler_cursor = 0;
+    SystemStopReason system_stop_reason =
+        SystemStopReason::INSTRUCTION_LIMIT;
+    uint64_t stop_cycle = 0;
+    uint64_t event_source_mask = 0;
 };
 
 struct CoreDispatchResult {
@@ -6133,6 +6937,11 @@ static SystemBatchResult run_full_core_system_batch(
         throw std::runtime_error(
             "active main-bus grants require cycle-bounded native execution");
     }
+    if (system.has_cycle_execution_pending()) {
+        throw std::runtime_error(
+            "suspended cycle execution requires cycle-bounded "
+            "native execution");
+    }
     NativeBatchActiveGuard active_guard(system);
     const auto horizon = system.shared_clock.snapshot();
     if (horizon.has_deadline) {
@@ -6263,11 +7072,906 @@ static SystemBatchResult run_full_core_system_batch(
     return result;
 }
 
+static uint64_t checked_cycle_add(
+        uint64_t cycle,
+        uint64_t delta,
+        const char* field_name) {
+    if (delta > std::numeric_limits<uint64_t>::max() - cycle) {
+        throw std::overflow_error(
+            std::string(field_name) + " overflow");
+    }
+    return cycle + delta;
+}
+
+static RunResult run_one_system_instruction(
+        CPUState& core,
+        const StepCallbacks& callbacks) {
+    RunResult result{0, 0, RUN_LIMIT, -1};
+    try {
+        result.total_cycles = step_one(core, callbacks);
+        result.steps_executed = 1;
+    } catch (const std::runtime_error& error) {
+        const std::string what = error.what();
+        if (what == "HALT") {
+            result.stop_reason = RUN_HALT;
+        } else if (what.rfind("TRAP:", 0) == 0) {
+            if (what == "TRAP:RESET") {
+                result.stop_reason = RUN_RESET;
+            } else {
+                result.stop_reason = RUN_TRAP;
+                result.trap_id =
+                    trap_id_from_runtime_error(what);
+            }
+        } else if (what == "MEX_FALLBACK") {
+            result.stop_reason = RUN_MEX_FALLBACK;
+        } else if (what == "EXT_ISA_FALLBACK") {
+            result.stop_reason = RUN_EXT_FALLBACK;
+        } else {
+            throw;
+        }
+    }
+    return result;
+}
+
+enum class CycleCoreProgress {
+    RETIRED,
+    WAITING_BUS,
+    BLOCKED_BY_CYCLE_LIMIT,
+    TERMINAL,
+};
+
+static uint64_t pending_instruction_count(
+        const SystemState& system) {
+    return static_cast<uint64_t>(std::count_if(
+        system.full_core_cycle_states.begin(),
+        system.full_core_cycle_states.end(),
+        [](const FullCoreCycleState& state) {
+            return state.instruction != nullptr;
+        }));
+}
+
+static CycleCoreProgress run_cycle_core_once(
+        SystemState& system,
+        int core_index,
+        uint64_t cycle_deadline,
+        const StepCallbacks& base_callbacks,
+        const py::function& settle_continuation,
+        SystemBatchResult& batch_result) {
+    const std::size_t index =
+        static_cast<std::size_t>(core_index);
+    CPUState& core = *system.cores[index];
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[index];
+
+    if (core.halted)
+        return CycleCoreProgress::TERMINAL;
+    if (core.idle)
+        return CycleCoreProgress::TERMINAL;
+    if (!cycle_state.instruction &&
+        cycle_state.ready_cycle >= cycle_deadline) {
+        return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+    }
+
+    if (!cycle_state.instruction) {
+        const SystemInstructionTraits traits =
+            classify_system_instruction(core);
+        if (traits.has_unjournaled_shared_access) {
+            throw std::runtime_error(
+                "cycle-bounded execution does not yet support "
+                "MEX shared-memory operations because the selected "
+                "full-core tile topology remains unresolved");
+        }
+        const uint64_t remaining =
+            cycle_deadline - cycle_state.ready_cycle;
+        if (traits.needs_bus_journal || remaining < 5) {
+            cycle_state.instruction =
+                std::make_unique<ResumableInstruction>(
+                    core,
+                    cycle_state.ready_cycle);
+            system.cycle_execution_pending.store(
+                true,
+                std::memory_order_release);
+        }
+    }
+
+    ResumableInstruction* instruction =
+        cycle_state.instruction.get();
+    if (instruction &&
+        instruction->retire_cycle.has_value() &&
+        *instruction->retire_cycle > cycle_deadline) {
+        return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+    }
+
+    if (system.native_dispatches ==
+        std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error(
+            "native scheduler dispatch counter overflow");
+    }
+    system.native_dispatches++;
+    batch_result.per_core_dispatches[index]++;
+
+    StepCallbacks callbacks = base_callbacks;
+    std::unique_ptr<JournaledBusAccess> bus_access;
+    if (instruction) {
+        instruction->checkpoint.restore(core);
+        instruction->replay_cursor = 0;
+        bus_access = std::make_unique<JournaledBusAccess>(
+            system,
+            core_index);
+        callbacks.bus_access = bus_access.get();
+    }
+
+    auto logical_guard =
+        acquire_shared_memory_use(core, true);
+    SystemBatchExecutionPermissionGuard execution_permission(
+        system.native_batch_active);
+    CPUExecutionGuard execution_guard(core);
+
+    RunResult raw{};
+    try {
+        raw = run_one_system_instruction(core, callbacks);
+    } catch (const BusYieldSignal&) {
+        if (!instruction ||
+            !instruction->pending_request.has_value()) {
+            throw std::logic_error(
+                "bus yield did not publish an immutable request");
+        }
+        instruction->checkpoint.restore(core);
+        cycle_state.ready_cycle =
+            instruction->pending_request->ready_cycle;
+        return CycleCoreProgress::WAITING_BUS;
+    } catch (...) {
+        if (instruction)
+            instruction->checkpoint.restore(core);
+        throw;
+    }
+
+    if (raw.stop_reason == RUN_MEX_FALLBACK ||
+        raw.stop_reason == RUN_EXT_FALLBACK) {
+        if (instruction)
+            instruction->checkpoint.restore(core);
+        throw std::runtime_error(
+            "cycle-bounded execution cannot enter an "
+            "unbounded Python ISA fallback");
+    }
+
+    uint64_t completion_cycle = cycle_state.ready_cycle;
+    int64_t retired_cycles = 0;
+    int64_t retired_steps = 0;
+    bool terminal = false;
+
+    if (raw.stop_reason == RUN_TRAP ||
+        raw.stop_reason == RUN_RESET) {
+        const uint64_t predicted_cycles =
+            raw.stop_reason == RUN_TRAP &&
+            raw.trap_id == IVEC_SW_TRAP &&
+            core.ivt_base != 0
+            ? 3
+            : 1;
+        const uint64_t predicted_completion =
+            checked_cycle_add(
+                instruction
+                    ? instruction->start_cycle
+                    : cycle_state.ready_cycle,
+                predicted_cycles,
+                "cycle-bounded trap completion");
+        if (predicted_completion > cycle_deadline) {
+            if (!instruction) {
+                throw std::logic_error(
+                    "cycle-boundary trap lacked a checkpoint");
+            }
+            instruction->checkpoint.restore(core);
+            instruction->retire_cycle =
+                predicted_completion;
+            cycle_state.ready_cycle =
+                predicted_completion;
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
+
+        py::object settled_object = settle_continuation(
+            core_index,
+            raw.stop_reason,
+            raw.trap_id,
+            0,
+            0);
+        py::tuple settled =
+            settled_object.cast<py::tuple>();
+        if (settled.size() != 3) {
+            throw std::runtime_error(
+                "native continuation must return "
+                "(invocation_steps, invocation_cycles, terminal)");
+        }
+        retired_steps = settled[0].cast<int64_t>();
+        retired_cycles = settled[1].cast<int64_t>();
+        terminal = settled[2].cast<bool>();
+        if (retired_steps < 0 ||
+            retired_steps > 1 ||
+            retired_cycles < 0) {
+            throw std::runtime_error(
+                "native continuation returned invalid progress");
+        }
+        completion_cycle = checked_cycle_add(
+            instruction
+                ? instruction->start_cycle
+                : cycle_state.ready_cycle,
+            static_cast<uint64_t>(retired_cycles),
+            "cycle-bounded continuation completion");
+        if (completion_cycle > cycle_deadline) {
+            throw std::runtime_error(
+                "native continuation crossed its cycle bound");
+        }
+        batch_result.continuations++;
+        batch_result.per_core_stop_reasons[index][
+            static_cast<std::size_t>(raw.stop_reason)]++;
+    } else if (raw.stop_reason == RUN_HALT) {
+        batch_result.per_core_stop_reasons[index][RUN_HALT]++;
+        terminal = true;
+    } else {
+        if (raw.steps_executed != 1 ||
+            raw.total_cycles <= 0) {
+            throw std::runtime_error(
+                "cycle-bounded core made invalid progress");
+        }
+
+        const uint64_t start_cycle =
+            instruction
+                ? instruction->start_cycle
+                : cycle_state.ready_cycle;
+        const uint64_t logical_completion =
+            checked_cycle_add(
+                start_cycle,
+                static_cast<uint64_t>(raw.total_cycles),
+                "cycle-bounded instruction completion");
+        completion_cycle = logical_completion;
+        if (instruction &&
+            !instruction->completed_accesses.empty()) {
+            completion_cycle = std::max(
+                completion_cycle,
+                instruction->completed_accesses.back()
+                    .result.completion_cycle);
+        }
+
+        if (completion_cycle > cycle_deadline) {
+            if (!instruction) {
+                throw std::logic_error(
+                    "cycle-boundary instruction lacked a checkpoint");
+            }
+            instruction->checkpoint.restore(core);
+            instruction->retire_cycle =
+                completion_cycle;
+            cycle_state.ready_cycle =
+                completion_cycle;
+            return CycleCoreProgress::BLOCKED_BY_CYCLE_LIMIT;
+        }
+
+        const uint64_t stall_cycles =
+            completion_cycle - logical_completion;
+        if (stall_cycles != 0) {
+            core.cycle_count = checked_cycle_add(
+                core.cycle_count,
+                stall_cycles,
+                "core cycle counter");
+            if (core.perf_enable) {
+                core.perf_cycles = checked_cycle_add(
+                    core.perf_cycles,
+                    stall_cycles,
+                    "core performance cycle counter");
+                core.perf_stalls = checked_cycle_add(
+                    core.perf_stalls,
+                    stall_cycles,
+                    "core performance stall counter");
+            }
+        }
+        const uint64_t elapsed_cycles =
+            completion_cycle - start_cycle;
+        if (elapsed_cycles >
+            static_cast<uint64_t>(
+                std::numeric_limits<int64_t>::max())) {
+            throw std::overflow_error(
+                "cycle-bounded per-core cycle accounting overflow");
+        }
+        retired_steps = 1;
+        retired_cycles =
+            static_cast<int64_t>(elapsed_cycles);
+        batch_result.per_core_stop_reasons[index][RUN_LIMIT]++;
+    }
+
+    cycle_state.ready_cycle = completion_cycle;
+    cycle_state.instruction.reset();
+    system.refresh_cycle_execution_pending();
+    batch_result.instructions_executed =
+        checked_scheduler_add(
+            batch_result.instructions_executed,
+            retired_steps,
+            "aggregate instruction accounting");
+    batch_result.per_core_instructions[index] =
+        checked_scheduler_add(
+            batch_result.per_core_instructions[index],
+            retired_steps,
+            "per-core instruction accounting");
+    batch_result.per_core_cycles[index] =
+        checked_scheduler_add(
+            batch_result.per_core_cycles[index],
+            retired_cycles,
+            "per-core cycle accounting");
+
+    if (retired_steps > 0) {
+        system.scheduler_cursor =
+            (core_index + 1) %
+            static_cast<int>(system.cores.size());
+    }
+    if (terminal)
+        return CycleCoreProgress::TERMINAL;
+    return CycleCoreProgress::RETIRED;
+}
+
+static std::vector<BusRequest> collect_cycle_bus_requests(
+        const SystemState& system) {
+    std::vector<BusRequest> pending;
+    pending.reserve(system.full_core_cycle_states.size());
+    for (const FullCoreCycleState& state :
+         system.full_core_cycle_states) {
+        if (state.instruction &&
+            state.instruction->pending_request.has_value()) {
+            pending.push_back(
+                *state.instruction->pending_request);
+        }
+    }
+    return pending;
+}
+
+static void settle_cycle_clock_to(
+        SystemState& system,
+        uint64_t target_cycle,
+        const py::function& settle_round) {
+    const uint64_t current = system.shared_clock.cycles();
+    if (target_cycle < current)
+        throw std::logic_error(
+            "cycle scheduler clock moved backwards");
+    if (target_cycle == current)
+        return;
+    const uint64_t delta = target_cycle - current;
+    if (delta >
+        static_cast<uint64_t>(
+            std::numeric_limits<int64_t>::max())) {
+        throw std::overflow_error(
+            "cycle settlement exceeds Python callback range");
+    }
+    settle_round(
+        static_cast<int64_t>(delta),
+        true,
+        false,
+        false);
+    if (system.shared_clock.cycles() != target_cycle) {
+        throw std::runtime_error(
+            "cycle settlement callback did not reach its target");
+    }
+}
+
+static int full_core_index_for_requester(
+        const SystemState& system,
+        int requester_id) {
+    for (std::size_t index = 0;
+         index < system.cores.size();
+         index++) {
+        if (system.cores[index]->core_id == requester_id)
+            return static_cast<int>(index);
+    }
+    throw std::runtime_error(
+        "cycle bus grant does not belong to a full core");
+}
+
+static void complete_cycle_bus_target(
+        SystemState& system,
+        uint64_t completion_cycle,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& settle_round) {
+    const MainBusSnapshot snapshot =
+        system.main_bus.snapshot();
+    if (!snapshot.active_grant.has_value() ||
+        !system.cycle_target_completion_cycle.has_value() ||
+        *system.cycle_target_completion_cycle !=
+            completion_cycle) {
+        throw std::logic_error(
+            "cycle target completion has no matching grant");
+    }
+    const BusGrant grant = *snapshot.active_grant;
+    const int core_index = full_core_index_for_requester(
+        system,
+        grant.request.requester_id);
+    const std::size_t index =
+        static_cast<std::size_t>(core_index);
+    FullCoreCycleState& cycle_state =
+        system.full_core_cycle_states[index];
+    if (!cycle_state.instruction ||
+        !cycle_state.instruction->pending_request.has_value()) {
+        throw std::logic_error(
+            "granted core has no suspended request");
+    }
+    const BusRequest& pending =
+        *cycle_state.instruction->pending_request;
+    if (pending.ordering.issue_sequence !=
+            grant.request.ordering.issue_sequence ||
+        pending.address != grant.request.address ||
+        pending.operation != grant.request.operation ||
+        pending.width != grant.request.width) {
+        throw std::runtime_error(
+            "active grant diverged from its suspended request");
+    }
+
+    settle_cycle_clock_to(
+        system,
+        completion_cycle,
+        settle_round);
+
+    std::optional<uint64_t> read_value;
+    BusFault fault = BusFault::NONE;
+    bool target_effects_committed = false;
+    std::optional<std::string> target_error_message;
+    {
+        auto memory_guard =
+            acquire_shared_memory_use(
+                *system.cores[index]);
+        try {
+            read_value = execute_granted_bus_target(
+                *system.cores[index],
+                callbacks[index],
+                grant);
+            target_effects_committed = true;
+        } catch (const py::error_already_set& error) {
+            target_error_message = error.what();
+            fault = BusFault::TARGET_FAULT;
+            // A byte-oriented callback may have committed a prefix before
+            // throwing.  Never claim the target was untouched or retry it.
+            target_effects_committed = true;
+            read_value.reset();
+        } catch (const std::exception& error) {
+            target_error_message = error.what();
+            fault = BusFault::TARGET_FAULT;
+            target_effects_committed = true;
+            read_value.reset();
+        } catch (...) {
+            target_error_message =
+                "unknown non-standard target exception";
+            fault = BusFault::TARGET_FAULT;
+            // A byte-oriented callback may have committed a prefix before
+            // throwing.  Never claim the target was untouched or retry it.
+            target_effects_committed = true;
+            read_value.reset();
+        }
+    }
+
+    BusResult result = system.main_bus.complete(
+        grant.grant_sequence,
+        completion_cycle,
+        read_value,
+        fault,
+        target_effects_committed);
+    cycle_state.instruction->completed_accesses.push_back(
+        BusReplayRecord{
+            std::move(result),
+            std::move(target_error_message),
+        });
+    cycle_state.instruction->pending_request.reset();
+    cycle_state.ready_cycle = completion_cycle;
+    system.cycle_target_completion_cycle.reset();
+}
+
+static bool cycle_system_all_halted(
+        const SystemState& system) {
+    return std::all_of(
+        system.cores.begin(),
+        system.cores.end(),
+        [](const std::unique_ptr<CPUState>& core) {
+            return core->halted;
+        });
+}
+
+static bool cycle_system_all_idle_or_halted(
+        const SystemState& system) {
+    return std::all_of(
+        system.cores.begin(),
+        system.cores.end(),
+        [](const std::unique_ptr<CPUState>& core) {
+            return core->halted || core->idle;
+        });
+}
+
+static SystemBatchResult run_full_core_cycle_batch(
+        SystemState& system,
+        uint64_t max_system_cycles,
+        int64_t max_instructions,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& prepare_batch,
+        const py::function& settle_continuation,
+        const py::function& settle_round) {
+    const std::size_t core_count = system.cores.size();
+    SystemBatchResult result;
+    result.per_core_instructions.assign(core_count, 0);
+    result.per_core_cycles.assign(core_count, 0);
+    result.per_core_dispatches.assign(core_count, 0);
+    result.per_core_stop_reasons.assign(core_count, {});
+    result.scheduler_cursor = system.scheduler_cursor;
+
+    if (max_instructions < 0)
+        throw std::invalid_argument(
+            "max_instructions cannot be negative");
+    if (callbacks.size() != core_count)
+        throw std::invalid_argument(
+            "one callback set is required for every full core");
+    if (system.main_bus.active_timeout_cycle().has_value() &&
+        !system.cycle_target_completion_cycle.has_value()) {
+        throw std::runtime_error(
+            "cycle-bounded execution cannot adopt an external "
+            "active main-bus grant");
+    }
+
+    const uint64_t clock_start =
+        system.shared_clock.cycles();
+    const uint64_t caller_deadline = checked_cycle_add(
+        clock_start,
+        max_system_cycles,
+        "cycle batch deadline");
+    const auto horizon =
+        system.shared_clock.snapshot();
+    uint64_t cycle_deadline = caller_deadline;
+    bool stops_at_event_horizon = false;
+    if (horizon.has_deadline &&
+        horizon.earliest_deadline <= cycle_deadline) {
+        cycle_deadline = horizon.earliest_deadline;
+        stops_at_event_horizon = true;
+    }
+
+    NativeBatchActiveGuard active_guard(system);
+    checked_scheduler_increment(
+        system.native_batch_runs,
+        "batch counter");
+    prepare_batch();
+
+    for (FullCoreCycleState& state :
+         system.full_core_cycle_states) {
+        if (!state.instruction &&
+            state.ready_cycle < clock_start) {
+            state.ready_cycle = clock_start;
+        }
+    }
+
+    if (stops_at_event_horizon &&
+        cycle_deadline == clock_start) {
+        result.system_stop_reason =
+            SystemStopReason::EVENT_HORIZON;
+        result.stop_cycle = clock_start;
+        result.event_source_mask = horizon.source_mask;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+    if (max_system_cycles == 0) {
+        result.system_stop_reason =
+            SystemStopReason::CYCLE_LIMIT;
+        result.stop_cycle = clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+    if (max_instructions == 0) {
+        result.system_stop_reason =
+            SystemStopReason::INSTRUCTION_LIMIT;
+        result.stop_cycle = clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+    if (pending_instruction_count(system) == 0 &&
+        !system.cycle_target_completion_cycle.has_value() &&
+        cycle_system_all_halted(system)) {
+        result.system_stop_reason =
+            SystemStopReason::ALL_HALTED;
+        result.stop_cycle = clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+    if (pending_instruction_count(system) == 0 &&
+        !system.cycle_target_completion_cycle.has_value() &&
+        cycle_system_all_idle_or_halted(system)) {
+        result.system_stop_reason =
+            SystemStopReason::ALL_IDLE;
+        result.stop_cycle = clock_start;
+        result.scheduler_cursor = system.scheduler_cursor;
+        return result;
+    }
+
+    uint64_t scheduler_cycle = clock_start;
+    uint64_t last_retirement_cycle = clock_start;
+    bool reached_cycle_limit = false;
+
+    while (true) {
+        if (result.instructions_executed >= max_instructions)
+            break;
+
+        std::optional<uint64_t> next_core_cycle;
+        const uint64_t suspended_count =
+            pending_instruction_count(system);
+        for (std::size_t index = 0;
+             index < core_count;
+             index++) {
+            const CPUState& core = *system.cores[index];
+            const FullCoreCycleState& state =
+                system.full_core_cycle_states[index];
+            if (core.halted || core.idle)
+                continue;
+            if (state.instruction &&
+                state.instruction->pending_request.has_value()) {
+                continue;
+            }
+            if (!state.instruction &&
+                static_cast<uint64_t>(
+                    result.instructions_executed) +
+                    suspended_count >=
+                    static_cast<uint64_t>(max_instructions)) {
+                continue;
+            }
+            if (!next_core_cycle.has_value() ||
+                state.ready_cycle < *next_core_cycle) {
+                next_core_cycle = state.ready_cycle;
+            }
+        }
+
+        const std::vector<BusRequest> pending =
+            collect_cycle_bus_requests(system);
+        std::optional<uint64_t> next_arbitration_cycle;
+        if (!system.cycle_target_completion_cycle.has_value()) {
+            next_arbitration_cycle =
+                system.main_bus.next_arbitration_cycle(
+                    pending,
+                    scheduler_cycle);
+        }
+
+        uint64_t next_cycle = cycle_deadline;
+        if (next_core_cycle.has_value())
+            next_cycle = std::min(next_cycle, *next_core_cycle);
+        if (next_arbitration_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_arbitration_cycle);
+        }
+        if (system.cycle_target_completion_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *system.cycle_target_completion_cycle);
+        }
+        if (next_cycle < scheduler_cycle)
+            next_cycle = scheduler_cycle;
+        scheduler_cycle = next_cycle;
+        result.rounds++;
+
+        if (system.cycle_target_completion_cycle.has_value() &&
+            *system.cycle_target_completion_cycle ==
+                scheduler_cycle) {
+            complete_cycle_bus_target(
+                system,
+                scheduler_cycle,
+                callbacks,
+                settle_round);
+        }
+
+        const int round_start =
+            system.scheduler_cursor %
+            static_cast<int>(core_count);
+        for (std::size_t offset = 0;
+             offset < core_count;
+             offset++) {
+            const int core_index = (
+                round_start + static_cast<int>(offset)
+            ) % static_cast<int>(core_count);
+            FullCoreCycleState& state =
+                system.full_core_cycle_states[
+                    static_cast<std::size_t>(core_index)];
+            CPUState& core =
+                *system.cores[
+                    static_cast<std::size_t>(core_index)];
+            if (core.halted || core.idle)
+                continue;
+            if (state.instruction &&
+                state.instruction->pending_request.has_value()) {
+                continue;
+            }
+            if (state.ready_cycle > scheduler_cycle)
+                continue;
+            if (!state.instruction &&
+                scheduler_cycle >= cycle_deadline) {
+                continue;
+            }
+            if (!state.instruction &&
+                static_cast<uint64_t>(
+                    result.instructions_executed) +
+                    pending_instruction_count(system) >=
+                    static_cast<uint64_t>(max_instructions)) {
+                continue;
+            }
+
+            const int64_t instructions_before =
+                result.instructions_executed;
+            const CycleCoreProgress progress =
+                run_cycle_core_once(
+                    system,
+                    core_index,
+                    cycle_deadline,
+                    callbacks[
+                        static_cast<std::size_t>(core_index)],
+                    settle_continuation,
+                    result);
+            if (progress == CycleCoreProgress::RETIRED ||
+                result.instructions_executed >
+                    instructions_before) {
+                last_retirement_cycle = std::max(
+                    last_retirement_cycle,
+                    state.ready_cycle);
+            }
+            if (result.instructions_executed >=
+                max_instructions) {
+                break;
+            }
+        }
+
+        if (scheduler_cycle < cycle_deadline &&
+            !system.cycle_target_completion_cycle.has_value()) {
+            const std::vector<BusRequest> ready_pending =
+                collect_cycle_bus_requests(system);
+            const std::optional<BusGrant> grant =
+                system.main_bus.try_grant(
+                    ready_pending,
+                    scheduler_cycle);
+            if (grant.has_value()) {
+                system.cycle_target_completion_cycle =
+                    checked_cycle_add(
+                        grant->grant_cycle,
+                        1,
+                        "main bus target completion");
+            }
+        }
+
+        if (scheduler_cycle >= cycle_deadline) {
+            reached_cycle_limit = true;
+            break;
+        }
+        if (result.instructions_executed >= max_instructions)
+            break;
+
+        const bool has_suspended_instruction =
+            pending_instruction_count(system) != 0;
+        if (!has_suspended_instruction &&
+            !system.cycle_target_completion_cycle.has_value() &&
+            cycle_system_all_halted(system)) {
+            result.system_stop_reason =
+                SystemStopReason::ALL_HALTED;
+            break;
+        }
+        if (!has_suspended_instruction &&
+            !system.cycle_target_completion_cycle.has_value() &&
+            cycle_system_all_idle_or_halted(system)) {
+            result.system_stop_reason =
+                SystemStopReason::ALL_IDLE;
+            break;
+        }
+
+        if (!next_core_cycle.has_value() &&
+            pending.empty() &&
+            !system.cycle_target_completion_cycle.has_value()) {
+            result.system_stop_reason =
+                cycle_system_all_halted(system)
+                ? SystemStopReason::ALL_HALTED
+                : SystemStopReason::ALL_IDLE;
+            break;
+        }
+    }
+
+    uint64_t stop_cycle = scheduler_cycle;
+    if (reached_cycle_limit) {
+        stop_cycle = cycle_deadline;
+        result.system_stop_reason =
+            stops_at_event_horizon
+            ? SystemStopReason::EVENT_HORIZON
+            : SystemStopReason::CYCLE_LIMIT;
+        if (stops_at_event_horizon)
+            result.event_source_mask = horizon.source_mask;
+    } else if (result.instructions_executed >=
+               max_instructions) {
+        stop_cycle = std::max(
+            scheduler_cycle,
+            last_retirement_cycle);
+        result.system_stop_reason =
+            SystemStopReason::INSTRUCTION_LIMIT;
+    } else if (
+            result.system_stop_reason ==
+                SystemStopReason::ALL_HALTED ||
+            result.system_stop_reason ==
+                SystemStopReason::ALL_IDLE) {
+        stop_cycle = std::max(
+            scheduler_cycle,
+            last_retirement_cycle);
+    }
+
+    settle_cycle_clock_to(
+        system,
+        stop_cycle,
+        settle_round);
+    settle_round(0, false, true, false);
+    result.system_cycles_advanced =
+        system.shared_clock.cycles() - clock_start;
+    result.stop_cycle = system.shared_clock.cycles();
+    result.scheduler_cursor = system.scheduler_cursor;
+    return result;
+}
+
 static std::unique_lock<std::recursive_mutex>
 acquire_system_scheduler_lock(SystemState& system) {
     py::gil_scoped_release release;
     return std::unique_lock<std::recursive_mutex>(
         system.scheduler_mutex);
+}
+
+static std::vector<StepCallbacks> build_system_step_callbacks(
+        const SystemState& system,
+        const py::list& callback_sets) {
+    if (callback_sets.size() != system.cores.size()) {
+        throw std::invalid_argument(
+            "one callback set is required for every full core");
+    }
+
+    std::vector<StepCallbacks> callbacks;
+    callbacks.reserve(system.cores.size());
+    for (py::handle item : callback_sets) {
+        py::tuple callback_set =
+            py::cast<py::tuple>(item);
+        if (callback_set.size() != 4) {
+            throw std::invalid_argument(
+                "each callback set must contain MMIO read, "
+                "MMIO write, output, and CSR override entries");
+        }
+        py::function mmio_read8 =
+            callback_set[0].cast<py::function>();
+        py::function mmio_write8 =
+            callback_set[1].cast<py::function>();
+        py::function on_output =
+            callback_set[2].cast<py::function>();
+        py::object csr_read_override = callback_set[3];
+
+        StepCallbacks core_callbacks;
+        core_callbacks.mmio_start =
+            0xFFFFFF0000000000ULL;
+        core_callbacks.mmio_end =
+            0xFFFFFF8000000000ULL;
+        core_callbacks.has_mmio = true;
+        core_callbacks.mmio_read8 =
+            [mmio_read8](uint64_t address) -> uint8_t {
+                py::gil_scoped_acquire acquire;
+                return mmio_read8(address).cast<uint8_t>();
+            };
+        core_callbacks.mmio_write8 =
+            [mmio_write8](uint64_t address, uint8_t value) {
+                py::gil_scoped_acquire acquire;
+                mmio_write8(address, value);
+            };
+        core_callbacks.on_output =
+            [on_output](int port, int value) {
+                py::gil_scoped_acquire acquire;
+                on_output(port, value);
+            };
+        if (!csr_read_override.is_none()) {
+            py::function override_function =
+                csr_read_override.cast<py::function>();
+            core_callbacks.csr_read_override =
+                [override_function](int address) -> uint64_t {
+                    py::gil_scoped_acquire acquire;
+                    py::object result =
+                        override_function(address);
+                    if (result.is_none())
+                        return static_cast<uint64_t>(-1);
+                    return result.cast<uint64_t>();
+                };
+        }
+        callbacks.push_back(
+            std::move(core_callbacks));
+    }
+    return callbacks;
 }
 
 
@@ -7633,6 +9337,17 @@ PYBIND11_MODULE(_mp64_accel, m) {
             &MainBusSnapshot::sticky_bus_errors)
         ;
 
+    py::enum_<SystemStopReason>(m, "SystemStopReason")
+        .value(
+            "INSTRUCTION_LIMIT",
+            SystemStopReason::INSTRUCTION_LIMIT)
+        .value("CYCLE_LIMIT", SystemStopReason::CYCLE_LIMIT)
+        .value(
+            "EVENT_HORIZON",
+            SystemStopReason::EVENT_HORIZON)
+        .value("ALL_HALTED", SystemStopReason::ALL_HALTED)
+        .value("ALL_IDLE", SystemStopReason::ALL_IDLE);
+
     py::class_<SystemBatchResult>(m, "SystemBatchResult")
         .def_readonly(
             "instructions_executed",
@@ -7659,6 +9374,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly(
             "scheduler_cursor",
             &SystemBatchResult::scheduler_cursor)
+        .def_readonly(
+            "system_stop_reason",
+            &SystemBatchResult::system_stop_reason)
+        .def_readonly(
+            "stop_cycle",
+            &SystemBatchResult::stop_cycle)
+        .def_readonly(
+            "event_source_mask",
+            &SystemBatchResult::event_source_mask)
         ;
 
     // Native system ownership.  Borrowed core views keep their parent alive
@@ -7718,6 +9442,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "main bus state cannot change during an active "
                         "native system batch");
                 }
+                if (system.has_cycle_execution_pending()) {
+                    throw std::runtime_error(
+                        "main bus state cannot change while cycle "
+                        "execution is suspended");
+                }
                 for (const BusRequest& request : pending)
                     system.validate_main_bus_request(request);
                 return system.main_bus.try_grant(
@@ -7751,6 +9480,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "main bus state cannot change during an active "
                         "native system batch");
                 }
+                if (system.has_cycle_execution_pending()) {
+                    throw std::runtime_error(
+                        "main bus state cannot change while cycle "
+                        "execution is suspended");
+                }
                 return system.main_bus.complete(
                     grant_sequence,
                     system.shared_clock.cycles(),
@@ -7780,8 +9514,40 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "main bus state cannot change during an active "
                         "native system batch");
                 }
+                if (system.has_cycle_execution_pending()) {
+                    throw std::runtime_error(
+                        "main bus state cannot change while cycle "
+                        "execution is suspended");
+                }
                 system.main_bus.reset(
                     system.shared_clock.cycles());
+            })
+        .def(
+            "_reset_cycle_execution",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "cycle execution cannot reset during an active "
+                        "native system batch");
+                }
+                system.reset_cycle_execution();
+            })
+        .def_property_readonly(
+            "cycle_execution_pending",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.has_cycle_execution_pending();
+            })
+        .def(
+            "_cycle_pending_bus_requests",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return collect_cycle_bus_requests(system);
             })
         .def_property(
             "scheduler_cursor",
@@ -7797,6 +9563,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     cursor >= system.all_core_count()) {
                     throw std::out_of_range(
                         "scheduler cursor is outside the advertised topology");
+                }
+                if (system.has_cycle_execution_pending()) {
+                    throw std::runtime_error(
+                        "scheduler cursor cannot change while cycle "
+                        "execution is suspended");
                 }
                 system.scheduler_cursor = cursor;
             })
@@ -7867,6 +9638,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system, uint64_t delta) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
+                if (system.has_cycle_execution_pending() &&
+                    !system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "system time cannot advance while cycle "
+                        "execution is suspended");
+                }
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
                 const uint64_t current =
@@ -7890,6 +9668,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
             [](SystemState& system, uint64_t target) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
+                if (system.has_cycle_execution_pending() &&
+                    !system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "system time cannot advance while cycle "
+                        "execution is suspended");
+                }
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
                 system.main_bus.validate_clock_target(target);
@@ -7983,66 +9768,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
                py::function settle_dispatch_error,
                py::function settle_round,
                int max_dispatch_steps) {
-                if (callback_sets.size() != system.cores.size()) {
-                    throw std::invalid_argument(
-                        "one callback set is required for every full core");
-                }
-
-                std::vector<StepCallbacks> callbacks;
-                callbacks.reserve(system.cores.size());
-                for (py::handle item : callback_sets) {
-                    py::tuple callback_set =
-                        py::cast<py::tuple>(item);
-                    if (callback_set.size() != 4) {
-                        throw std::invalid_argument(
-                            "each callback set must contain MMIO read, "
-                            "MMIO write, output, and CSR override entries");
-                    }
-                    py::function mmio_read8 =
-                        callback_set[0].cast<py::function>();
-                    py::function mmio_write8 =
-                        callback_set[1].cast<py::function>();
-                    py::function on_output =
-                        callback_set[2].cast<py::function>();
-                    py::object csr_read_override = callback_set[3];
-
-                    StepCallbacks core_callbacks;
-                    core_callbacks.mmio_start =
-                        0xFFFFFF0000000000ULL;
-                    core_callbacks.mmio_end =
-                        0xFFFFFF8000000000ULL;
-                    core_callbacks.has_mmio = true;
-                    core_callbacks.mmio_read8 =
-                        [mmio_read8](uint64_t address) -> uint8_t {
-                            py::gil_scoped_acquire acquire;
-                            return mmio_read8(address).cast<uint8_t>();
-                        };
-                    core_callbacks.mmio_write8 =
-                        [mmio_write8](uint64_t address, uint8_t value) {
-                            py::gil_scoped_acquire acquire;
-                            mmio_write8(address, value);
-                        };
-                    core_callbacks.on_output =
-                        [on_output](int port, int value) {
-                            py::gil_scoped_acquire acquire;
-                            on_output(port, value);
-                        };
-                    if (!csr_read_override.is_none()) {
-                        py::function override_function =
-                            csr_read_override.cast<py::function>();
-                        core_callbacks.csr_read_override =
-                            [override_function](int address) -> uint64_t {
-                                py::gil_scoped_acquire acquire;
-                                py::object result =
-                                    override_function(address);
-                                if (result.is_none())
-                                    return static_cast<uint64_t>(-1);
-                                return result.cast<uint64_t>();
-                            };
-                    }
-                    callbacks.push_back(
-                        std::move(core_callbacks));
-                }
+                std::vector<StepCallbacks> callbacks =
+                    build_system_step_callbacks(
+                        system,
+                        callback_sets);
 
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
@@ -8063,6 +9792,36 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::arg("settle_dispatch_error"),
             py::arg("settle_round"),
             py::arg("max_dispatch_steps") = 1000)
+        .def(
+            "run_full_core_cycle_batch",
+            [](SystemState& system,
+               uint64_t max_system_cycles,
+               py::list callback_sets,
+               py::function prepare_batch,
+               py::function settle_continuation,
+               py::function settle_round,
+               int64_t max_instructions) {
+                std::vector<StepCallbacks> callbacks =
+                    build_system_step_callbacks(
+                        system,
+                        callback_sets);
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return run_full_core_cycle_batch(
+                    system,
+                    max_system_cycles,
+                    max_instructions,
+                    callbacks,
+                    prepare_batch,
+                    settle_continuation,
+                    settle_round);
+            },
+            py::arg("max_system_cycles"),
+            py::arg("callback_sets"),
+            py::arg("prepare_batch"),
+            py::arg("settle_continuation"),
+            py::arg("settle_round"),
+            py::arg("max_instructions") = 100000)
         .def(
             "ipi_send",
             [](SystemState& system, int requester_id, int target_id) {
