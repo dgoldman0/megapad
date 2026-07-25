@@ -179,8 +179,8 @@ def test_manually_released_micro_core_can_step():
     assert micro.regs[1] == 1
 
 
-def test_one_active_native_microcore_uses_structured_compatibility_batch():
-    """One microcore runs natively without claiming element-6 scheduling."""
+def test_one_active_native_microcore_uses_native_system_batch():
+    """One runnable reduced core participates in the native system scheduler."""
     system = _new_system(full_cores=1, clusters=1)
     system.sysinfo.write8(0x18, 0x01)
     for core in system.cores:
@@ -201,7 +201,7 @@ def test_one_active_native_microcore_uses_structured_compatibility_batch():
         for core in system.cores
         if core is not micro
     )
-    native_counters = (
+    native_counters_before = (
         system._native_system.native_batch_runs,
         system._native_system.native_dispatches,
     )
@@ -213,15 +213,17 @@ def test_one_active_native_microcore_uses_structured_compatibility_batch():
     assert stats.per_core_cycles[0] == 0
     assert stats.per_core_cycles[1] == stats.system_cycles_advanced
     assert stats.per_core_cycles[2:] == (0, 0, 0)
-    assert not stats.native_scheduler
+    assert stats.native_scheduler
     assert micro._accel_backend
     assert micro._cs.is_micro_core
     assert micro._cs is system._native_system.micro_core(0)
     assert micro.regs[1] == 5
-    assert (
+    native_counters_after = (
         system._native_system.native_batch_runs,
         system._native_system.native_dispatches,
-    ) == native_counters
+    )
+    assert native_counters_after[0] == native_counters_before[0] + 1
+    assert native_counters_after[1] > native_counters_before[1]
     assert tuple(
         (core.pc, core.regs[1], core.cycle_count)
         for core in system.cores

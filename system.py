@@ -1342,7 +1342,7 @@ class MegapadSystem:
                 cpu._trap(IVEC_IPI)
 
     def _native_full_core_batch_eligible(self) -> bool:
-        """Whether this call can use the Phase-1 native full-core scheduler."""
+        """Whether strict-cycle execution can use only canonical full cores."""
         if self.num_clusters != 0:
             return False
         for cpu in self.cores[:self.num_full_cores]:
@@ -1366,9 +1366,32 @@ class MegapadSystem:
                 return False
         return True
 
+    def _native_system_batch_eligible(self) -> bool:
+        """Whether every advertised core can use the native system scheduler."""
+        for cpu in self.cores:
+            cpu_vars = vars(cpu)
+            if (
+                "run_steps_stats" in cpu_vars
+                or "_run_steps_stats_in_memory_scope" in cpu_vars
+            ):
+                return False
+            cpu_type = type(cpu)
+            if (
+                getattr(cpu_type, "run_steps_stats", None)
+                is not _CANONICAL_RUN_STEPS_STATS
+                or getattr(
+                    cpu_type,
+                    "_run_steps_stats_in_memory_scope",
+                    None,
+                )
+                is not _CANONICAL_RUN_STEPS_STATS_IN_SCOPE
+            ):
+                return False
+        return True
+
     def _prepare_native_full_core_batch(self) -> None:
-        """Apply compatibility wake checks under the native scheduler lock."""
-        for cpu in self.cores[:self.num_full_cores]:
+        """Apply compatibility wake checks for every native execution core."""
+        for cpu in self.cores:
             if cpu.idle and cpu.irq_ipi and cpu.flag_i:
                 cpu.idle = False
             if cpu.idle and cpu.core_id == 0:
@@ -1490,7 +1513,12 @@ class MegapadSystem:
             self._deliver_pending_interrupts()
 
     def _run_native_full_core_batch(self, n: int) -> SystemRunStats:
-        """Adapt the bound SystemState scheduler to the public result type."""
+        """Adapt the all-core SystemState scheduler to the public result type.
+
+        The method name remains as a compatibility seam for tests and callers
+        introduced during Phase 1; callback and result topology now includes
+        full and reduced cores in global core-ID order.
+        """
         callback_sets = [
             (
                 cpu._mmio_read8,
@@ -1498,7 +1526,7 @@ class MegapadSystem:
                 cpu._do_output,
                 getattr(cpu, '_csr_read_override', None),
             )
-            for cpu in self.cores[:self.num_full_cores]
+            for cpu in self.cores
         ]
         result = self._native_system.run_full_core_batch(
             n,
@@ -1866,7 +1894,7 @@ class MegapadSystem:
 
         self._reject_native_batch_reentry()
         self._require_cycle_unbounded_execution()
-        if self._native_full_core_batch_eligible():
+        if self._native_system_batch_eligible():
             return self._run_native_full_core_batch(n)
 
         # Compatibility path for heterogeneous topologies and deliberate

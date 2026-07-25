@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Versioned Phase 2 baseline for one active accelerated microcore.
 
-This diagnostic benchmark isolates the element-5 claim: a production
-microcore borrows its stable native ``CPUState`` and executes retained scalar
-instructions in C++, while the heterogeneous system remains on the Python
-compatibility scheduler.  It deliberately does not exercise cluster
-contention, hard-QoS eligibility, equal-round-robin ordering, shared engines,
-or strict-cycle execution.
+This diagnostic benchmark began as the element-5 ownership baseline.  Version
+2 preserves that workload while recording the element-6 transition to the
+native all-core system scheduler.  It deliberately does not exercise cluster
+contention, hard-QoS eligibility, equal-round-robin ordering among peers,
+shared engines, or strict-cycle execution.
 """
 
 from __future__ import annotations
@@ -26,9 +25,9 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 RAM_SIZE = 1 << 16
 CODE_BASE = 0x100
@@ -90,7 +89,7 @@ EXPLICIT_EXCLUSIONS = [
         "state_or_behavior": "strict-cycle hardware CPI",
         "reason": (
             "heterogeneous cycle-bounded scheduling remains rejected; "
-            "reported cycles are compatibility-scheduler accounting"
+            "reported cycles are unbounded native-scheduler accounting"
         ),
     },
     {
@@ -391,10 +390,10 @@ def run_report(
         "semantics": {
             "classification": "behavior_oracle_and_diagnostic_baseline",
             "execution_engine": (
-                "native microcore scalar execution under the Python "
-                "heterogeneous compatibility scheduler"
+                "native microcore scalar execution under the native "
+                "all-core system scheduler"
             ),
-            "native_scheduler_expected": False,
+            "native_scheduler_expected": True,
             "qos_and_fairness_scope": QOS_AND_FAIRNESS_SCOPE,
             "explicit_exclusions": EXPLICIT_EXCLUSIONS,
         },

@@ -1588,6 +1588,11 @@ struct SystemState {
             core->num_cores = static_cast<uint8_t>(all_core_count);
             micro_cores.push_back(std::move(core));
         }
+        execution_cores.reserve(static_cast<std::size_t>(all_core_count));
+        for (const auto& core : cores)
+            execution_cores.push_back(core.get());
+        for (const auto& core : micro_cores)
+            execution_cores.push_back(core.get());
         full_core_cycle_states.resize(cores.size());
         dma_cycle_states[0].requester_id =
             NIC_DMA_REQUESTER_ID;
@@ -1727,6 +1732,10 @@ struct SystemState {
     MainBusArbiter main_bus{};
     std::vector<std::unique_ptr<CPUState>> cores;
     std::vector<std::unique_ptr<CPUState>> micro_cores;
+    // Stable non-owning topology order used by the unbounded native system
+    // scheduler. The pointed-to CPUState objects are heap-owned by the two
+    // vectors above, so vector growth cannot invalidate these addresses.
+    std::vector<CPUState*> execution_cores;
     std::vector<FullCoreCycleState> full_core_cycle_states;
     std::array<DmaCycleState, 2> dma_cycle_states{};
     std::optional<uint64_t> cycle_target_completion_cycle;
@@ -7209,10 +7218,11 @@ static CoreDispatchResult run_system_core_dispatch(
         int64_t max_steps,
         const StepCallbacks& callbacks,
         const py::function& settle_continuation,
-        const py::function& settle_dispatch_error) {
+        const py::function& settle_dispatch_error,
+        bool yield_after_micro_continuation) {
     CoreDispatchResult dispatch;
     CPUState& core =
-        *system.cores[static_cast<std::size_t>(core_index)];
+        *system.execution_cores[static_cast<std::size_t>(core_index)];
 
     while (dispatch.steps < max_steps) {
         if (core.halted) {
@@ -7340,6 +7350,18 @@ static CoreDispatchResult run_system_core_dispatch(
             dispatch.continuations++;
             if (terminal)
                 break;
+            // A reduced core reaches Python only at a memory, CSR, or
+            // cluster-shared instruction boundary. With eligible peers, end
+            // this core's private segment here so the outer equal cyclic
+            // order—not a 1,000-instruction compatibility quantum—chooses the
+            // next contender. A single active microcore may continue in the
+            // same dispatch because there is no peer whose order can change.
+            if (
+                yield_after_micro_continuation &&
+                core.profile == CoreProfile::MICRO
+            ) {
+                break;
+            }
             continue;
         }
 
@@ -7362,18 +7384,18 @@ static CoreDispatchResult run_system_core_dispatch(
 
 static bool system_all_halted(const SystemState& system) {
     return std::all_of(
-        system.cores.begin(),
-        system.cores.end(),
-        [](const std::unique_ptr<CPUState>& core) {
+        system.execution_cores.begin(),
+        system.execution_cores.end(),
+        [](const CPUState* core) {
             return core->halted;
         });
 }
 
 static bool system_all_idle_or_halted(const SystemState& system) {
     return std::all_of(
-        system.cores.begin(),
-        system.cores.end(),
-        [](const std::unique_ptr<CPUState>& core) {
+        system.execution_cores.begin(),
+        system.execution_cores.end(),
+        [](const CPUState* core) {
             return core->halted || core->idle;
         });
 }
@@ -7410,7 +7432,8 @@ static SystemBatchResult run_full_core_system_batch(
         const py::function& settle_dispatch_error,
         const py::function& settle_round,
         int max_dispatch_steps) {
-    const std::size_t core_count = system.cores.size();
+    const std::size_t core_count =
+        system.execution_cores.size();
     SystemBatchResult result;
     result.per_core_instructions.assign(core_count, 0);
     result.per_core_cycles.assign(core_count, 0);
@@ -7423,7 +7446,7 @@ static SystemBatchResult run_full_core_system_batch(
         return result;
     if (callbacks.size() != core_count)
         throw std::invalid_argument(
-            "one callback set is required for every full core");
+            "one callback set is required for every execution core");
     if (max_dispatch_steps <= 0)
         throw std::invalid_argument(
             "max_dispatch_steps must be positive");
@@ -7461,7 +7484,7 @@ static SystemBatchResult run_full_core_system_batch(
     std::vector<int> active_indices;
     active_indices.reserve(core_count);
     for (std::size_t index = 0; index < core_count; index++) {
-        const CPUState& core = *system.cores[index];
+        const CPUState& core = *system.execution_cores[index];
         if (!core.halted && !core.idle)
             active_indices.push_back(static_cast<int>(index));
     }
@@ -7480,7 +7503,8 @@ static SystemBatchResult run_full_core_system_batch(
             max_steps,
             callbacks[static_cast<std::size_t>(core_index)],
             settle_continuation,
-            settle_dispatch_error);
+            settle_dispatch_error,
+            false);
         merge_core_dispatch(result, core_index, dispatch);
         result.instructions_executed = dispatch.steps;
         if (dispatch.steps > 0) {
@@ -7505,18 +7529,33 @@ static SystemBatchResult run_full_core_system_batch(
         int64_t round_cycles = 0;
         const int round_start =
             system.scheduler_cursor % static_cast<int>(core_count);
+        const int64_t active_count = static_cast<int64_t>(
+            std::count_if(
+                system.execution_cores.begin(),
+                system.execution_cores.end(),
+                [](const CPUState* core) {
+                    return !core->halted && !core->idle;
+                }));
+        if (active_count == 0)
+            break;
+        const int64_t equal_round_quantum =
+            std::min<int64_t>(
+                max_dispatch_steps,
+                remaining / active_count +
+                    (remaining % active_count != 0 ? 1 : 0));
 
         for (std::size_t offset = 0; offset < core_count; offset++) {
             const int core_index = (
                 round_start + static_cast<int>(offset)
             ) % static_cast<int>(core_count);
             CPUState& core =
-                *system.cores[static_cast<std::size_t>(core_index)];
+                *system.execution_cores[
+                    static_cast<std::size_t>(core_index)];
             if (core.halted || core.idle)
                 continue;
 
             const int64_t dispatch_steps = std::min<int64_t>(
-                max_dispatch_steps,
+                equal_round_quantum,
                 remaining - round_steps);
             if (dispatch_steps <= 0)
                 break;
@@ -7528,7 +7567,8 @@ static SystemBatchResult run_full_core_system_batch(
                     dispatch_steps,
                     callbacks[static_cast<std::size_t>(core_index)],
                     settle_continuation,
-                    settle_dispatch_error);
+                    settle_dispatch_error,
+                    true);
                 merge_core_dispatch(result, core_index, dispatch);
                 round_steps = checked_scheduler_add(
                     round_steps,
@@ -9204,14 +9244,21 @@ acquire_system_scheduler_lock(SystemState& system) {
 
 static std::vector<StepCallbacks> build_system_step_callbacks(
         const SystemState& system,
-        const py::list& callback_sets) {
-    if (callback_sets.size() != system.cores.size()) {
+        const py::list& callback_sets,
+        std::size_t expected_core_count,
+        const char* topology_name) {
+    (void)system;
+    if (
+        static_cast<std::size_t>(callback_sets.size()) !=
+        expected_core_count
+    ) {
         throw std::invalid_argument(
-            "one callback set is required for every full core");
+            std::string("one callback set is required for every ") +
+            topology_name + " core");
     }
 
     std::vector<StepCallbacks> callbacks;
-    callbacks.reserve(system.cores.size());
+    callbacks.reserve(expected_core_count);
     for (py::handle item : callback_sets) {
         py::tuple callback_set =
             py::cast<py::tuple>(item);
@@ -11655,7 +11702,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 std::vector<StepCallbacks> callbacks =
                     build_system_step_callbacks(
                         system,
-                        callback_sets);
+                        callback_sets,
+                        system.execution_cores.size(),
+                        "execution");
 
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
@@ -11689,7 +11738,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 std::vector<StepCallbacks> callbacks =
                     build_system_step_callbacks(
                         system,
-                        callback_sets);
+                        callback_sets,
+                        system.cores.size(),
+                        "full");
                 std::vector<DmaEndpointCallbacks> dma_callbacks =
                     build_system_dma_callbacks(
                         system,

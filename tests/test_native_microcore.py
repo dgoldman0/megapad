@@ -21,6 +21,7 @@ from megapad64 import (
     Megapad64Micro as PythonMegapad64Micro,
     TrapError,
 )
+from system import MegapadSystem
 
 
 _RETAINED_SCALAR_PROGRAM = assemble(
@@ -175,7 +176,7 @@ def test_reduced_illegal_instruction_traps_match_python_oracle(instruction):
 
 
 def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
-    """The element-5 benchmark pins native execution without fairness claims."""
+    """The versioned baseline records native scheduling without peer claims."""
     report = run_report(
         instructions=9,
         repeats=2,
@@ -187,7 +188,7 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
     assert report["schema_version"] == REPORT_SCHEMA_VERSION
     assert report["determinism"]["canonical_state_matches"]
     assert report["determinism"]["behavior_oracle_matches"]
-    assert report["semantics"]["native_scheduler_expected"] is False
+    assert report["semantics"]["native_scheduler_expected"] is True
     scope = report["semantics"]["qos_and_fairness_scope"]
     assert scope["contention_exercised"] is False
     assert scope["qos_claim"] == "excluded"
@@ -207,9 +208,9 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
         assert execution["per_core_cycles"][1] == 13
         assert execution["per_core_cycles"][2:] == [0, 0, 0]
         assert execution["system_cycles_advanced"] == 13
-        assert execution["native_scheduler"] is False
-        assert execution["native_batch_runs_counter_delta"] == 0
-        assert execution["native_dispatches_counter_delta"] == 0
+        assert execution["native_scheduler"] is True
+        assert execution["native_batch_runs_counter_delta"] == 1
+        assert execution["native_dispatches_counter_delta"] == 1
         assert execution["python_fallback_instantiated"] is False
 
         topology = state["topology"]
@@ -228,3 +229,51 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
         assert state["main_bus"]["pending_request_count"] == 0
 
     assert len(hashes) == 1
+
+
+def test_all_advertised_cores_share_the_native_scheduler_budget():
+    """Full and reduced cores receive one equal cyclic turn per small batch."""
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=4,
+        num_clusters=3,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(
+        0x100,
+        assemble(
+            """
+loop:
+    inc r1
+    br loop
+"""
+        ),
+    )
+
+    for cpu in system.cores:
+        cpu.pc = 0x100
+        cpu.halted = False
+        cpu.idle = False
+
+    for cpu in system.cores[system.num_full_cores:]:
+        def reject_python_fallback(_cpu=cpu):
+            raise AssertionError(
+                f"microcore {_cpu.core_id} left native scalar execution"
+            )
+
+        cpu._step_python_fallback_in_memory_scope = reject_python_fallback
+
+    runs_before = system._native_system.native_batch_runs
+    stats = system.run_batch_stats(system.num_cores * 2)
+
+    assert stats.native_scheduler
+    assert system._native_system.native_batch_runs == runs_before + 1
+    assert stats.instructions_executed == system.num_cores * 2
+    assert stats.per_core_instructions == (2,) * system.num_cores
+    assert stats.per_core_dispatches == (1,) * system.num_cores
+    assert tuple(cpu.regs[1] for cpu in system.cores) == (
+        1,
+    ) * system.num_cores
+    assert system._scheduler_cursor == 0
