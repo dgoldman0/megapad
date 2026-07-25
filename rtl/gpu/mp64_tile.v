@@ -152,6 +152,11 @@ module mp64_tile (
     wire dst_bank0 = (tdst[63:20] == 44'd0);
     wire dst_hbw   = (tdst[63:32] == 32'd0) && (tdst[31:20] >= 12'hFFD);
     wire dst_internal  = dst_bank0 || dst_hbw;
+    wire [63:0] tdst_second = tdst + 64'd64;
+    wire dst2_bank0 = (tdst_second[63:20] == 44'd0);
+    wire dst2_hbw   = (tdst_second[63:32] == 32'd0)
+                   && (tdst_second[31:20] >= 12'hFFD);
+    wire dst2_internal = dst2_bank0 || dst2_hbw;
 
     // ========================================================================
     // Mode decode
@@ -166,24 +171,28 @@ module mp64_tile (
     // ========================================================================
     // State machine
     // ========================================================================
-    localparam S_IDLE       = 4'd0;
-    localparam S_LOAD_A     = 4'd1;
-    localparam S_LOAD_B     = 4'd2;
-    localparam S_COMPUTE    = 4'd3;
-    localparam S_STORE      = 4'd4;
-    localparam S_REDUCE     = 4'd5;
-    localparam S_EXT_LOAD_A = 4'd6;
-    localparam S_EXT_LOAD_B = 4'd7;
-    localparam S_EXT_STORE  = 4'd8;
-    localparam S_DONE       = 4'd9;
-    localparam S_LOAD_C     = 4'd10;   // load existing TDST for MAC/FMA
-    localparam S_STORE2     = 4'd11;   // second tile store for WMUL
-    localparam S_LOAD2D_REQ = 4'd12;   // LOAD2D: issue tile read for row
-    localparam S_LOAD2D_WAIT= 4'd13;   // LOAD2D: wait for tile ack
-    localparam S_STORE2D_REQ= 4'd14;   // STORE2D: issue tile read (RMW)
-    localparam S_STORE2D_WAIT=4'd15;   // STORE2D: wait for read ack, then write
+    localparam S_IDLE        = 5'd0;
+    localparam S_LOAD_A      = 5'd1;
+    localparam S_LOAD_B      = 5'd2;
+    localparam S_COMPUTE     = 5'd3;
+    localparam S_STORE       = 5'd4;
+    localparam S_REDUCE      = 5'd5;
+    localparam S_EXT_LOAD_A  = 5'd6;
+    localparam S_EXT_LOAD_B  = 5'd7;
+    localparam S_EXT_STORE   = 5'd8;
+    localparam S_DONE        = 5'd9;
+    localparam S_LOAD_C      = 5'd10;  // load existing TDST for MAC/FMA
+    localparam S_STORE2      = 5'd11;  // wait first WMUL store, issue second
+    localparam S_LOAD2D_REQ  = 5'd12;  // LOAD2D: issue tile read for row
+    localparam S_LOAD2D_WAIT = 5'd13;  // LOAD2D: wait for tile ack
+    localparam S_STORE2D_REQ = 5'd14;  // STORE2D: issue tile read (RMW)
+    localparam S_STORE2D_WAIT= 5'd15;  // STORE2D: wait for read, issue write
+    localparam S_STORE_WAIT  = 5'd16;  // wait ordinary internal store
+    localparam S_STORE2_WAIT = 5'd17;  // wait final internal WMUL store
+    localparam S_EXT_STORE2_WAIT = 5'd18; // wait final external WMUL store
+    localparam S_STORE2D_WRITE_WAIT = 5'd19; // wait row write acknowledgement
 
-    reg [3:0]   state;
+    reg [4:0]   state;
     reg [511:0] tile_a;
     reg [511:0] tile_b;
     reg [511:0] tile_c;          // existing TDST (MAC/FMA)
@@ -1773,12 +1782,14 @@ module mp64_tile (
             result        <= 512'd0;
             result2       <= 512'd0;
             ext_tile_req  <= 1'b0;
+            ext_tile_wen  <= 1'b0;
             needs_load_c  <= 1'b0;
         end else begin
             mex_done     <= 1'b0;
             tile_req     <= 1'b0;
             tile_wen     <= 1'b0;
             ext_tile_req <= 1'b0;
+            ext_tile_wen <= 1'b0;
 
             case (state)
             S_IDLE: begin
@@ -1797,11 +1808,19 @@ module mp64_tile (
                     // TSYS.ZERO — write zeros
                     if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
                         !(mex_ext_active && mex_ext_mod == 4'd8)) begin
-                        tile_req  <= 1'b1;
-                        tile_addr <= tdst[31:0];
-                        tile_wen  <= 1'b1;
-                        tile_wdata<= 512'd0;
-                        state     <= S_DONE;
+                        if (dst_internal) begin
+                            tile_req   <= 1'b1;
+                            tile_addr  <= tdst[31:0];
+                            tile_wen   <= 1'b1;
+                            tile_wdata <= 512'd0;
+                            state      <= S_STORE_WAIT;
+                        end else begin
+                            ext_tile_req   <= 1'b1;
+                            ext_tile_addr  <= tdst;
+                            ext_tile_wen   <= 1'b1;
+                            ext_tile_wdata <= 512'd0;
+                            state          <= S_EXT_STORE;
+                        end
                     end
                     // TSYS.TRANS — read TDST
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_TRANS &&
@@ -2065,7 +2084,7 @@ module mp64_tile (
                     if (op_reg == MEX_TMUL && funct_reg == TMUL_WMUL)
                         state <= S_STORE2;
                     else
-                        state <= S_DONE;
+                        state <= S_STORE_WAIT;
                 end else begin
                     ext_tile_req   <= 1'b1;
                     ext_tile_addr  <= tdst;
@@ -2077,12 +2096,30 @@ module mp64_tile (
 
             S_STORE2: begin
                 if (tile_ack) begin
-                    tile_req   <= 1'b1;
-                    tile_addr  <= tdst[31:0] + 32'd64;
-                    tile_wen   <= 1'b1;
-                    tile_wdata <= result2;
-                    state      <= S_DONE;
+                    if (dst2_internal) begin
+                        tile_req   <= 1'b1;
+                        tile_addr  <= tdst_second[31:0];
+                        tile_wen   <= 1'b1;
+                        tile_wdata <= result2;
+                        state      <= S_STORE2_WAIT;
+                    end else begin
+                        ext_tile_req   <= 1'b1;
+                        ext_tile_addr  <= tdst_second;
+                        ext_tile_wen   <= 1'b1;
+                        ext_tile_wdata <= result2;
+                        state          <= S_EXT_STORE2_WAIT;
+                    end
                 end
+            end
+
+            S_STORE_WAIT: begin
+                if (tile_ack)
+                    state <= S_DONE;
+            end
+
+            S_STORE2_WAIT: begin
+                if (tile_ack)
+                    state <= S_DONE;
             end
 
             S_REDUCE: begin
@@ -2210,7 +2247,32 @@ module mp64_tile (
                 end
             end
 
-            S_EXT_STORE: if (ext_tile_ack) state <= S_DONE;
+            S_EXT_STORE: begin
+                if (ext_tile_ack) begin
+                    if (op_reg == MEX_TMUL && funct_reg == TMUL_WMUL) begin
+                        if (dst2_internal) begin
+                            tile_req   <= 1'b1;
+                            tile_addr  <= tdst_second[31:0];
+                            tile_wen   <= 1'b1;
+                            tile_wdata <= result2;
+                            state      <= S_STORE2_WAIT;
+                        end else begin
+                            ext_tile_req   <= 1'b1;
+                            ext_tile_addr  <= tdst_second;
+                            ext_tile_wen   <= 1'b1;
+                            ext_tile_wdata <= result2;
+                            state          <= S_EXT_STORE2_WAIT;
+                        end
+                    end else begin
+                        state <= S_DONE;
+                    end
+                end
+            end
+
+            S_EXT_STORE2_WAIT: begin
+                if (ext_tile_ack)
+                    state <= S_DONE;
+            end
 
             // ================================================================
             // LOAD2D: multi-cycle strided gather from tile BRAM → result
@@ -2278,7 +2340,15 @@ module mp64_tile (
                     tile_req  <= 1'b1;
                     tile_addr <= ld2d_row_addr[31:0];
                     tile_wen  <= 1'b1;
-                    // Advance to next row
+                    state     <= S_STORE2D_WRITE_WAIT;
+                end
+            end
+
+            S_STORE2D_WRITE_WAIT: begin
+                if (tile_ack) begin
+                    // Commit row progress only after the read-modify-write
+                    // reaches memory.  This prevents the following row read
+                    // from being mistaken for the outstanding write response.
                     ld2d_row     <= ld2d_row + 4'd1;
                     ld2d_off     <= ld2d_off + ld2d_w;
                     ld2d_row_addr<= ld2d_row_addr + ld2d_stride;

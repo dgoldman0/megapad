@@ -144,14 +144,16 @@ module tb_soc_smoke;
         else
             $display("ALL TESTS PASSED");
 
-        $finish;
+        if (fail_count > 0)
+            $finish(1);
+        $finish(0);
     end
 
     // Timeout watchdog
     initial begin
         #50000;
         $display("TIMEOUT after 50us — aborting");
-        $finish;
+        $finish(1);
     end
 
 endmodule

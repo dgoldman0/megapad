@@ -48,7 +48,8 @@ CORE_SRC = $(CORE)/mp64_alu.v \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto ntt kem nic nic_lint nic_bus mailbox trng tile \
-        opcodes qos cpu_micro multicore_smoke core_bus_mux soc_elaborate
+        opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
+        soc_smoke soc_tile_icache soc_elaborate
 
 all: phase1 phase2 phase3 phase4 phase5
 	@echo ""
@@ -362,17 +363,23 @@ tb_trng.vvp: tb_trng.v $(PERIPH)/mp64_trng.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # --- Tile engine ---
-tile: tb_tile.vvp
-	$(VVP) $<
+tile: tb_tile.vvp tb_tile_write_ack.vvp
+	$(VVP) tb_tile.vvp
+	$(VVP) tb_tile_write_ack.vvp
 
 tb_tile.vvp: tb_tile.v $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tile.v \
+                       $(CORE)/mp64_fp16_alu.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================
 # Phase 5: Integration (QoS, multicore, SoC)
 # ==========================================================================
 
-phase5: qos multicore_smoke core_bus_mux soc_elaborate
+phase5: qos multicore_smoke core_bus_mux tile_port_arbiter \
+        soc_smoke soc_tile_icache soc_elaborate
 	@echo ""
 	@echo "--- Phase 5 complete ---"
 
@@ -405,9 +412,31 @@ core_bus_mux: tb_core_bus_mux.vvp
 tb_core_bus_mux.vvp: tb_core_bus_mux.v $(SOC)/mp64_core_bus_mux.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
+# --- Buffered shared tile-memory ownership and equal round-robin ---
+tile_port_arbiter: tb_tile_port_arbiter.vvp
+	$(VVP) $<
+
+tb_tile_port_arbiter.vvp: tb_tile_port_arbiter.v \
+                          $(SOC)/mp64_tile_port_arbiter.v
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
 # --- Standalone full-SoC elaboration (catches integration/port drift) ---
 SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
                             $(PERIPH)/*.v $(CRYPTO)/*.v $(GPU)/*.v $(PRIM)/*.v)
+
+soc_smoke: tb_soc_smoke.vvp
+	$(VVP) $<
+
+tb_soc_smoke.vvp: tb_soc_smoke.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_smoke -o $@ \
+		tb_soc_smoke.v $(SOC_ELAB_SRC)
+
+soc_tile_icache: tb_soc_tile_icache.vvp
+	$(VVP) $<
+
+tb_soc_tile_icache.vvp: tb_soc_tile_icache.v $(SOC_ELAB_SRC) ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -s tb_soc_tile_icache -o $@ \
+		tb_soc_tile_icache.v $(SOC_ELAB_SRC)
 
 soc_elaborate: mp64_soc.vvp
 
