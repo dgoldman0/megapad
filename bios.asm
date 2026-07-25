@@ -14024,15 +14024,15 @@ w_cluster_en_fetch:
     str r14, r0
     ret.l
 
-; BARRIER-ARRIVE ( -- )  signal barrier arrival for this core (CSR 0x66)
+; BARRIER-ARRIVE ( -- )  signal barrier arrival for this core (CSR 0x74)
 w_barrier_arrive:
     ldi r0, 1
-    csrw 0x66, r0
+    csrw 0x74, r0
     ret.l
 
 ; BARRIER-STATUS ( -- n )  read barrier status: bit8=done, [N-1:0]=arrive mask
 w_barrier_status:
-    csrr r0, 0x67
+    csrr r0, 0x75
     subi r14, 8
     str r14, r0
     ret.l

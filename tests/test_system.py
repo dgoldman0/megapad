@@ -49,6 +49,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 from accel_wrapper import (
     HaltError,
@@ -5560,6 +5561,25 @@ class TestMicroCluster(unittest.TestCase):
                      "BARRIER-ARRIVE", "BARRIER-STATUS", "SPAD"]:
             self.assertIn(word, text,
                           f"'{word}' should be in WORDS output")
+
+    def test_bios_barrier_words_use_canonical_cluster_csrs(self):
+        """BIOS emits the same barrier CSR addresses as the ISA contract."""
+        source = Path("bios.asm").read_text(encoding="utf-8")
+        arrive = source.split("w_barrier_arrive:", 1)[1].split(
+            "w_barrier_status:", 1
+        )[0]
+        status = source.split("w_barrier_status:", 1)[1].split(
+            "w_spad:", 1
+        )[0]
+
+        self.assertIn(
+            f"csrw 0x{CSR_BARRIER_ARRIVE:02x}, r0",
+            arrive,
+        )
+        self.assertIn(
+            f"csrr r0, 0x{CSR_BARRIER_STATUS:02x}",
+            status,
+        )
 
     # -- 1802-heritage strip tests (micro-core only) --
 
