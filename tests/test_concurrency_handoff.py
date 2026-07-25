@@ -2,8 +2,8 @@
 
 The passing tests below pin useful current behavior and provide controls for
 the strict xfails.  Each strict xfail describes a known concurrency defect
-that later scheduler work is expected to fix; keeping those assertions red
-avoids turning accidental chunking or duplicated-device behavior into a
+that later heterogeneous/event scheduling or architecture work must fix;
+keeping those assertions red avoids turning incomplete behavior into a
 permanent compatibility contract.
 """
 
@@ -54,8 +54,8 @@ _NOP_SLED = assemble("\n".join(["nop"] * 1_001))
 
 _UART_GEOMETRY_SPIN = assemble(
     f"""
-    ldi64 r3, {MMIO_BASE + SYSINFO_BASE}
-    ld.b r0, r3
+    ldi64 r4, {MMIO_BASE + SYSINFO_BASE}
+    ld.b r0, r4
     ldi64 r1, {MMIO_BASE + UART_GEOM_BASE}
 loop:
     ld.b r2, r1
@@ -179,8 +179,8 @@ def test_manually_released_micro_core_can_step():
     strict=True,
     raises=AttributeError,
     reason=(
-        "run_batch assumes every active core has native run_steps, but "
-        "Megapad64Micro is still a Python-only core"
+        "run_batch_stats requires native structured execution results, while "
+        "Python-only micro-core batching is deferred"
     ),
 )
 def test_run_batch_executes_an_active_micro_core():
@@ -401,11 +401,6 @@ def test_native_csr_ipi_preserves_advertised_micro_core_reachability():
     assert system.cores[0].csr_read(CSR_MBOX) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="the core-0 one-call native fast path omits post-batch IPI delivery",
-)
 def test_core0_native_batch_delivers_a_pending_ipi_at_its_boundary():
     """A native batch boundary must not leave an enabled IPI unobserved."""
     system = _new_system()
@@ -416,14 +411,6 @@ def test_core0_native_batch_delivers_a_pending_ipi_at_its_boundary():
     assert events == [IVEC_IPI]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "four active cores currently execute a final 4x1000-instruction "
-        "round, returning 12000 for a 10001-instruction aggregate budget"
-    ),
-)
 def test_multicore_batch_never_overshoots_its_instruction_budget():
     """The compatibility wrapper's aggregate instruction limit is a hard cap."""
     system = _new_system(full_cores=4)
@@ -431,32 +418,51 @@ def test_multicore_batch_never_overshoots_its_instruction_budget():
 
     executed = system.run_batch(requested)
 
-    assert executed <= requested
+    assert executed == requested
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="run_batch discards native total_cycles and ticks devices by steps",
-)
+def test_repeated_small_batch_budgets_rotate_across_active_cores():
+    """The hard aggregate cap must not turn into fixed-priority starvation."""
+    system = _new_system(full_cores=2, code=_COUNTING_SPIN)
+
+    assert system.run_batch(1) == 1
+    assert [core.regs[1] for core in system.cores] == [1, 0]
+    assert system.run_batch(1) == 1
+    assert [core.regs[1] for core in system.cores] == [1, 1]
+    assert system._scheduler_cursor == 0
+
+
 def test_single_core_batch_ticks_devices_by_native_cycles():
     """Long-latency instructions and devices must share one time basis."""
     system = _new_system(code=_MULTICYCLE_SPIN)
     system.timer.control = 1
 
-    executed = system.run_batch(10)
+    stats = system.run_batch_stats(10)
     native_cycles = system.cpu._cs.cycle_count
 
-    if native_cycles <= executed:
+    if native_cycles <= stats.instructions_executed:
         raise RuntimeError("multicycle timing workload did not exceed its step count")
+    assert stats.instructions_executed == 10
+    assert stats.system_cycles_advanced == native_cycles
+    assert stats.per_core_instructions == (10,)
+    assert stats.per_core_cycles == (native_cycles,)
     assert system.timer.counter == native_cycles
+    assert system._native_system.system_cycles == native_cycles
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="device time currently advances by the sum of all core steps",
-)
+def test_single_step_advances_shared_time_by_its_native_cycle_cost():
+    """The one-instruction path uses the same cycle clock as batch execution."""
+    system = _new_system(code=_MULTICYCLE_SPIN)
+    system.timer.control = 1
+
+    returned_cycles = system.step()
+
+    assert returned_cycles == 4
+    assert system.cpu.cycle_count == 4
+    assert system.timer.counter == 4
+    assert system._native_system.system_cycles == 4
+
+
 def test_private_parallel_progress_advances_one_shared_device_clock():
     """Two independent 1000-cycle cores represent 1000 elapsed SoC cycles."""
     system = _new_system(full_cores=2, code=_NOP_SLED)
@@ -468,6 +474,7 @@ def test_private_parallel_progress_advances_one_shared_device_clock():
     if not core_cycles or max(core_cycles) == 0:
         raise RuntimeError("private-progress workload executed no core cycles")
     assert system.timer.counter == max(core_cycles)
+    assert system._native_system.system_cycles == max(core_cycles)
 
 
 def test_secondary_native_rtc_access_uses_the_shared_core0_instance():
@@ -727,26 +734,56 @@ def test_micro_core_uart_geometry_fallback_reaches_the_shared_instance():
 
 
 def test_core0_timer_proxy_advances_when_the_bus_ticks():
-    """The core-0 timer proxy is the current device-tick control."""
+    """The device-bus facade delegates to the authoritative native clock."""
     system = _new_system(full_cores=2)
     system.timer.control = 1
 
     system.bus.tick(17)
 
     assert system.timer.counter == 17
+    assert system._native_system.system_cycles == 17
 
 
-def test_legacy_runner_does_not_drive_the_native_system_clock():
-    """Steps-as-time remains isolated until the native scheduler takes over."""
+def test_scheduler_and_direct_bus_ticks_share_the_native_clock():
+    """Scheduled and explicit device time use one authoritative clock."""
     system = _new_system(full_cores=1)
     system.timer.control = 1
 
     system.run_batch(10)
+    scheduled_cycles = system._native_system.system_cycles
+    assert scheduled_cycles == system.timer.counter
+
     system.bus.tick(17)
 
-    assert system.timer.counter > 0
-    assert system._native_system.system_cycles == 0
-    assert system._native_system.event_horizon() == (0, None, 0)
+    assert system.timer.counter == scheduled_cycles + 17
+    assert system._native_system.system_cycles == scheduled_cycles + 17
+    assert system._native_system.event_horizon() == (
+        scheduled_cycles + 17,
+        None,
+        0,
+    )
+
+
+def test_batch_rejects_an_active_horizon_before_guest_state_changes():
+    """Post-hoc core stats cannot safely execute against an active deadline."""
+    system = _new_system(full_cores=1)
+    system._native_system.set_event_deadline(
+        system._native_system.EVENT_EXTERNAL,
+        5,
+    )
+    pc_before = system.cpu.pc
+    cycles_before = system.cpu.cycle_count
+
+    with pytest.raises(RuntimeError, match="cycle-bounded native execution"):
+        system.run_batch(10)
+
+    assert system.cpu.pc == pc_before
+    assert system.cpu.cycle_count == cycles_before
+    assert system._native_system.event_horizon() == (
+        0,
+        5,
+        1 << system._native_system.EVENT_EXTERNAL,
+    )
 
 
 def test_secondary_native_timer_observes_shared_ticking_state():

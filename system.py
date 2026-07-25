@@ -14,6 +14,8 @@ mailbox (IPI), hardware spinlocks, and cluster enable/disable gating.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
+import threading
 import weakref
 from typing import Optional, TYPE_CHECKING
 
@@ -107,6 +109,16 @@ def _cpu_memory_use(cpu):
     if state is None:
         return nullcontext()
     return state._memory_use()
+
+
+@dataclass(frozen=True)
+class SystemRunStats:
+    """Cycle and instruction progress from one system batch."""
+
+    instructions_executed: int
+    system_cycles_advanced: int
+    per_core_instructions: tuple[int, ...]
+    per_core_cycles: tuple[int, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +361,8 @@ class MegapadSystem:
         # Total core count matches RTL NUM_ALL_CORES
         self.num_micro_cores = num_clusters * MICRO_PER_CLUSTER
         self.num_cores = num_cores + self.num_micro_cores
+        self._scheduler_lock = threading.RLock()
+        self._scheduler_cursor = 0
 
         # Shared memory — all cores reference the same bytearray
         self._shared_mem = bytearray(ram_size)
@@ -369,8 +383,8 @@ class MegapadSystem:
         # Native Phase-1 owner for all full-core CPUState lifetimes and their
         # single shared mapping set.  Attach each exporter exactly once before
         # borrowing the first core, which seals the mapping against divergent
-        # per-core replacement.  Singleton devices and scheduling remain on
-        # their existing compatibility paths.
+        # per-core replacement.  Remaining heterogeneous cores and unmigrated
+        # singleton devices retain their explicit compatibility paths.
         self._native_system = NativeSystemState(num_cores, self.num_cores)
         self._native_system.attach_mem(self._shared_mem, ram_size)
         if hbw_size > 0:
@@ -529,6 +543,7 @@ class MegapadSystem:
         self.wots = WotsChainAccel()
         self.wots.attach_mem(self._shared_mem)
         self.bus.register(self.wots)
+        self.bus.set_tick_driver(self.advance_system_cycles)
 
         # Wire storage DMA to shared memory
         self.storage._mem_read = self._raw_mem_read
@@ -909,6 +924,7 @@ class MegapadSystem:
         """
         self.storage.reset()
         self.audio.reset()
+        self._scheduler_cursor = 0
         for cluster in self.clusters:
             cluster.enabled = False
             cluster.reset_crc()
@@ -941,12 +957,94 @@ class MegapadSystem:
     #  Execution
     # -----------------------------------------------------------------
 
+    def _require_cycle_unbounded_execution(self) -> None:
+        """Reject unsafe post-hoc execution while any horizon is active."""
+        _cycles, deadline, _sources = self._native_system.event_horizon()
+        if deadline is not None:
+            raise RuntimeError(
+                "active event horizons require cycle-bounded native execution"
+            )
+
+    def advance_system_cycles(self, cycles: int) -> None:
+        """Advance authoritative system time and every cycle-driven device."""
+        with self._scheduler_lock:
+            self._advance_system_cycles_locked(cycles)
+
+    def _advance_system_cycles_locked(self, cycles: int) -> None:
+        """Advance time while the scheduler transaction lock is held."""
+        if cycles < 0:
+            raise ValueError("system cycles cannot advance by a negative value")
+        current, deadline, _sources = self._native_system.event_horizon()
+        if deadline is not None and cycles > deadline - current:
+            raise ValueError(
+                "system clock advance cannot cross the event horizon"
+            )
+        if cycles > (1 << 64) - 1 - current:
+            raise OverflowError("system cycle counter overflow")
+
+        remaining = cycles
+        while remaining:
+            delta = min(remaining, 0xFFFF_FFFF)
+            self._native_system.advance_system_cycles(delta)
+            for device in self.bus.devices:
+                if device not in (self.timer, self.fb, self.rtc):
+                    device.tick(delta)
+            remaining -= delta
+
+    def _deliver_pending_interrupts(self) -> None:
+        """Deliver timer and IPI lines at a completed execution boundary."""
+        if self.timer.irq_pending:
+            for cpu in self.cores:
+                if cpu.flag_i and not cpu.halted:
+                    cpu._trap(IVEC_TIMER)
+
+        for cpu in self.cores:
+            if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
+                cpu._trap(IVEC_IPI)
+
+    def _run_core_batch(self, cpu, max_steps: int) -> tuple[int, int]:
+        """Run one core under one logical operation and recover exact progress."""
+        total_steps = 0
+        total_cycles = 0
+        while total_steps < max_steps:
+            with _cpu_logical_memory_use(cpu):
+                try:
+                    stats = cpu.run_steps_stats(max_steps - total_steps)
+                except TrapError as error:
+                    if cpu.ivt_base != 0:
+                        with _cpu_memory_use(cpu):
+                            cpu._trap(error.ivec_id)
+                    total_steps += getattr(error, "steps_executed", 1)
+                    total_cycles += getattr(
+                        error,
+                        "native_prefix_cycles",
+                        0,
+                    )
+                    break
+                total_steps += stats.steps_executed
+                total_cycles += stats.total_cycles
+                if (
+                    stats.stop_reason != 0
+                    or stats.steps_executed == 0
+                ):
+                    break
+
+        return total_steps, total_cycles
+
     def step(self) -> int:
         """Execute one instruction on each active core (round-robin).
 
         Returns total cycles consumed across all cores.
         """
+        with self._scheduler_lock:
+            return self._step_locked()
+
+    def _step_locked(self) -> int:
+        """Execute one deterministic round under the scheduler lock."""
+        self._require_cycle_unbounded_execution()
         total_cycles = 0
+        elapsed_cycles = 0
+        pending_error = None
 
         for cpu in self.cores:
             # Wake CPU from idle on IPI
@@ -969,33 +1067,35 @@ class MegapadSystem:
                 try:
                     cycles = cpu.step()
                     total_cycles += cycles
+                    elapsed_cycles = max(elapsed_cycles, cycles)
                 except TrapError as e:
                     if cpu.ivt_base != 0:
                         with _cpu_memory_use(cpu):
                             cpu._trap(e.ivec_id)
                     else:
-                        raise
+                        pending_error = e
+                        break
+                except Exception as error:
+                    pending_error = error
+                    break
 
-        # Tick devices once per round
-        self.bus.tick(1)
+        # Cores in one deterministic round share one elapsed system frontier.
+        if elapsed_cycles > 0:
+            self.bus.tick(elapsed_cycles)
+        elif pending_error is None:
+            self.bus.tick(1)
         self._drain_native_uart_output()
 
-        # Deliver timer IRQ to all cores with interrupts enabled
-        if self.timer.irq_pending:
-            for cpu in self.cores:
-                if cpu.flag_i and not cpu.halted:
-                    cpu._trap(IVEC_TIMER)
+        if pending_error is not None:
+            raise pending_error
 
-        # Deliver IPI interrupts to cores with pending IPI
-        for cpu in self.cores:
-            if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
-                cpu._trap(IVEC_IPI)
-                # Don't clear irq_ipi here — handler reads STATUS and ACKs
+        self._deliver_pending_interrupts()
 
         return max(total_cycles, 1)
 
     def run(self, max_steps: int = 1_000_000) -> int:
         """Run until all cores HALT, or max_steps."""
+        self._require_cycle_unbounded_execution()
         total = 0
         for _ in range(max_steps):
             if self.all_halted:
@@ -1019,18 +1119,23 @@ class MegapadSystem:
         return total
 
     def run_batch(self, n: int = 100_000) -> int:
-        """Execute up to *n* instructions via C++ batch mode.
+        """Compatibility adapter returning aggregate executed instructions."""
+        return self.run_batch_stats(n).instructions_executed
 
-        For single-core systems this runs the entire inner loop in
-        C++ (``cpu.run_steps``), calling back to Python only for
-        the rare MMIO access.
+    def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
+        """Execute a deterministic one-worker batch with exact cycle totals."""
+        with self._scheduler_lock:
+            return self._run_batch_stats_locked(n)
 
-        For multicore systems, each active core runs a chunk of
-        steps in C++ per round, with device ticking and IRQ delivery
-        between rounds.
+    def _run_batch_stats_locked(self, n: int) -> SystemRunStats:
+        """Execute one system batch under the scheduler transaction lock."""
+        if n <= 0:
+            zeros = (0,) * self.num_cores
+            return SystemRunStats(0, 0, zeros, zeros)
 
-        Returns the number of steps actually executed.
-        """
+        self._require_cycle_unbounded_execution()
+        clock_start = int(self._native_system.system_cycles)
+
         # --- wake checks (same as step()) ---
         for cpu in self.cores:
             if cpu.idle and cpu.irq_ipi and cpu.flag_i:
@@ -1044,98 +1149,102 @@ class MegapadSystem:
                     cpu.idle = False
 
         if self.all_halted or self.all_idle_or_halted:
-            return 0
+            zeros = (0,) * self.num_cores
+            return SystemRunStats(0, 0, zeros, zeros)
 
-        # ---------- C++ fast path (single active core) ----------
-        cpu = self.cores[0]
-        if (not cpu.halted and not cpu.idle
-                and all(c.idle or c.halted for c in self.cores[1:])):
-            with _cpu_logical_memory_use(cpu):
-                try:
-                    steps, reason = cpu.run_steps(n)
-                except TrapError as e:
-                    if cpu.ivt_base != 0:
-                        with _cpu_memory_use(cpu):
-                            cpu._trap(e.ivec_id)
-                    steps = getattr(e, 'steps_executed', 1)
-                except HaltError:
-                    steps = 1
+        per_core_instructions = [0] * self.num_cores
+        per_core_cycles = [0] * self.num_cores
+        active_indices = [
+            index
+            for index, cpu in enumerate(self.cores)
+            if not cpu.halted and not cpu.idle
+        ]
 
-            self._drain_native_uart_output()
-
-            # Timer / device catch-up
+        # ---------- Native fast path (one active core) ----------
+        if len(active_indices) == 1:
+            core_index = active_indices[0]
+            cpu = self.cores[core_index]
+            steps, cycles = self._run_core_batch(cpu, n)
+            per_core_instructions[core_index] = steps
+            per_core_cycles[core_index] = cycles
             if steps > 0:
-                self.bus.tick(steps)
+                self._scheduler_cursor = (
+                    core_index + 1
+                ) % self.num_cores
+            self.bus.tick(cycles)
+            self._drain_native_uart_output()
+            self._deliver_pending_interrupts()
+            return SystemRunStats(
+                steps,
+                int(self._native_system.system_cycles) - clock_start,
+                tuple(per_core_instructions),
+                tuple(per_core_cycles),
+            )
 
-            # Timer IRQ delivery
-            if self.timer.irq_pending:
-                for c in self.cores:
-                    if c.flag_i and not c.halted:
-                        c._trap(IVEC_TIMER)
-
-            return max(steps, 1)
-
-        # ---------- C++ multicore path ----------
-        # Run each active core for a chunk via C++ run_steps, with
-        # device ticking and IRQ delivery between rounds.
+        # ---------- Deterministic full-core rounds ----------
         if self.num_cores > 1:
-            CHUNK = 1000  # steps per core per round
+            max_dispatch_steps = 1000
             total = 0
             remaining = n
             while remaining > 0 and not self.all_halted:
                 if self.all_idle_or_halted:
                     break
-                chunk = min(CHUNK, remaining)
                 round_steps = 0
-                for cpu in self.cores:
+                round_cycles = 0
+                round_error = None
+                round_start = self._scheduler_cursor
+                ordered_indices = (
+                    (round_start + offset) % self.num_cores
+                    for offset in range(self.num_cores)
+                )
+                for core_index in ordered_indices:
+                    cpu = self.cores[core_index]
                     if cpu.halted or cpu.idle:
                         continue
-                    with _cpu_logical_memory_use(cpu):
-                        try:
-                            steps, reason = cpu.run_steps(chunk)
-                            round_steps += steps
-                        except TrapError as e:
-                            if cpu.ivt_base != 0:
-                                with _cpu_memory_use(cpu):
-                                    cpu._trap(e.ivec_id)
-                            round_steps += getattr(e, 'steps_executed', 1)
-                        except HaltError:
-                            round_steps += 1
+                    dispatch_steps = min(
+                        max_dispatch_steps,
+                        remaining - round_steps,
+                    )
+                    if dispatch_steps <= 0:
+                        break
+                    try:
+                        steps, cycles = self._run_core_batch(
+                            cpu,
+                            dispatch_steps,
+                        )
+                    except Exception as error:
+                        round_error = error
+                        break
+                    per_core_instructions[core_index] += steps
+                    per_core_cycles[core_index] += cycles
+                    round_steps += steps
+                    round_cycles = max(round_cycles, cycles)
+                    if steps > 0:
+                        self._scheduler_cursor = (
+                            core_index + 1
+                        ) % self.num_cores
 
-                # Device ticking + IRQ delivery
-                if round_steps > 0:
-                    self.bus.tick(round_steps)
-                    total += round_steps
-                    remaining -= round_steps
+                total += round_steps
+                remaining -= round_steps
+                self.bus.tick(round_cycles)
+                if round_error is not None:
+                    self._drain_native_uart_output()
+                    raise round_error
 
-                # Timer IRQ delivery
-                if self.timer.irq_pending:
-                    for c in self.cores:
-                        if c.flag_i and not c.halted:
-                            c._trap(IVEC_TIMER)
-
-                # IPI delivery
-                for cpu in self.cores:
-                    if cpu.irq_ipi and cpu.flag_i and not cpu.halted and not cpu.idle:
-                        cpu._trap(IVEC_IPI)
-
+                self._deliver_pending_interrupts()
                 if round_steps == 0:
                     break
             self._drain_native_uart_output()
-            return max(total, 1)
+            return SystemRunStats(
+                total,
+                int(self._native_system.system_cycles) - clock_start,
+                tuple(per_core_instructions),
+                tuple(per_core_cycles),
+            )
 
         # ---------- Single core fallback (shouldn't reach here) ----------
-        total = 0
-        for _ in range(n):
-            if self.all_halted:
-                break
-            if self.all_idle_or_halted:
-                break
-            try:
-                total += self.step()
-            except HaltError:
-                break
-        return max(total, 1)
+        zeros = (0,) * self.num_cores
+        return SystemRunStats(0, 0, zeros, zeros)
 
     def run_until_halt(self, max_steps: int = 10_000_000) -> int:
         """Run until all cores HALT."""

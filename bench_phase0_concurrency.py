@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Bounded Phase 0 baseline for the legacy MegaPad system runner.
+"""Bounded Phase 0 baseline for the MegaPad one-worker system runner.
 
 This benchmark is deliberately diagnostic rather than aspirational.  It
-records what the current ``MegapadSystem.run_batch()`` path does before the
-deterministic concurrency scheduler replaces it.
+records the current ``MegapadSystem.run_batch()`` behavior while the
+deterministic scheduler is built out in stages.
 
 The report keeps four quantities separate:
 
 * returned aggregate instructions (the legacy ``run_batch`` result);
 * exact per-core instructions from a benchmark-only accounting replay;
 * per-core architectural cycle-counter deltas; and
-* arguments passed to ``DeviceBus.tick()``.
+* authoritative virtual system cycles passed through ``DeviceBus.tick()``.
 
-The native owner now contains a system clock, but the legacy runner does not
-advance it yet.  ``virtual_system_cycles`` therefore remains JSON ``null``.
-In particular, neither the sum nor the maximum of the per-core cycle counters
-is silently relabelled as system time.
+The native owner contains the authoritative system clock.  The one-worker
+runner advances it from exact core results while keeping aggregate and
+per-core architectural counters distinct.
 
 Default coverage:
 
@@ -76,9 +75,9 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATE_SCHEMA = "megapad.phase0-canonical-state"
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 RAM_SIZE = 1 << 20
 CODE_BASE = 0x1000
@@ -119,8 +118,9 @@ STATE_COMPARISON_SCOPE = {
         "native timer, framebuffer (including palette), RTC, UART geometry, "
         "UART, crypto-MMIO-visible, NIC-MMIO-visible, and TRNG enable state "
         "for every full core, including secondary cores",
-        "native system-cycle and event-horizon state, registered-device "
-        "layout, platform topology, and benchmark orchestration counters",
+        "native system-cycle and event-horizon state, one-worker scheduler "
+        "cursor, registered-device layout, platform topology, and benchmark "
+        "orchestration counters",
     ],
     "explicit_exclusions": [
         {
@@ -246,7 +246,9 @@ STATE_COMPARISON_SCOPE = {
             ),
         },
         {
-            "state": "micro-core cluster scratchpads and scheduler state",
+            "state": (
+                "micro-core cluster scratchpads and cluster scheduler state"
+            ),
             "reason": (
                 "Phase 0 cases explicitly construct num_clusters=0; topology "
                 "is captured and the oracle rejects no hidden cluster presence"
@@ -1170,6 +1172,9 @@ def _shared_device_state(system: MegapadSystem) -> dict:
         system._native_system.system_clock_snapshot()
     )
     return {
+        "scheduler": {
+            "next_core_index": int(system._scheduler_cursor),
+        },
         "system_clock": {
             "cycles": int(system_cycles),
             "event_deadline": (
@@ -1440,6 +1445,7 @@ def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
         stats = {
             "core_id": cpu.core_id,
             "instructions": 0,
+            "scheduler_cycles": 0,
             "run_steps_calls": 0,
             "stop_reasons": {},
             "python_mmio_reads": 0,
@@ -1447,28 +1453,32 @@ def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
         }
         core_stats.append(stats)
 
-        original_run_steps = cpu.run_steps
+        original_run_steps_stats = cpu.run_steps_stats
         original_read = cpu._mmio_read8
         original_write = cpu._mmio_write8
 
-        def counted_run_steps(
+        def counted_run_steps_stats(
             max_steps: int,
             *,
-            _original=original_run_steps,
+            _original=original_run_steps_stats,
             _stats=stats,
         ):
-            steps, reason = _original(max_steps)
-            _stats["instructions"] += int(steps)
+            result = _original(max_steps)
+            _stats["instructions"] += int(result.steps_executed)
+            _stats["scheduler_cycles"] += int(result.total_cycles)
             _stats["run_steps_calls"] += 1
             reason_key = {
                 0: "max_steps",
                 1: "halt",
                 2: "idle",
-            }.get(int(reason), f"unknown_{int(reason)}")
+            }.get(
+                int(result.stop_reason),
+                f"unknown_{int(result.stop_reason)}",
+            )
             _stats["stop_reasons"][reason_key] = (
                 _stats["stop_reasons"].get(reason_key, 0) + 1
             )
-            return steps, reason
+            return result
 
         def counted_read(addr: int, *, _original=original_read, _stats=stats):
             _stats["python_mmio_reads"] += 1
@@ -1484,7 +1494,7 @@ def _install_accounting(workload: Workload) -> tuple[list[dict], dict]:
             _stats["python_mmio_writes"] += 1
             return _original(addr, value)
 
-        cpu.run_steps = counted_run_steps
+        cpu.run_steps_stats = counted_run_steps_stats
         cpu._mmio_read8 = counted_read
         cpu._mmio_write8 = counted_write
 
@@ -1508,12 +1518,16 @@ def _accounting_probe(
     workload = scenario.build(num_cores)
     core_stats, bus_stats = _install_accounting(workload)
     start_cycles = [int(cpu.cycle_count) for cpu in workload.system.cores]
+    start_system_cycles = int(workload.system._native_system.system_cycles)
     try:
         execution = workload.execute(target)
         observation = _state_observation(workload)
         end_cycles = [
             int(cpu.cycle_count) for cpu in workload.system.cores
         ]
+        end_system_cycles = int(
+            workload.system._native_system.system_cycles
+        )
     finally:
         workload.close()
 
@@ -1542,12 +1556,11 @@ def _accounting_probe(
         "max_core_architectural_cycles": max(per_core_cycles, default=0),
         "device_bus_tick_calls": bus_stats["tick_calls"],
         "device_bus_tick_argument_units": bus_stats["tick_argument_units"],
-        "device_tick_to_returned_instruction_ratio":
+        "device_cycle_to_returned_instruction_ratio":
             (bus_stats["tick_argument_units"] / returned) if returned else None,
-        "virtual_system_cycles": None,
+        "virtual_system_cycles": end_system_cycles - start_system_cycles,
         "virtual_system_cycles_availability":
-            "unavailable: the legacy runner does not drive the native "
-            "system clock",
+            "available from the authoritative native system clock",
         "observation": observation,
     }
 
@@ -1769,10 +1782,13 @@ def run_report(
                 "uninstrumented wall/process time around workload execution "
                 "with cyclic garbage collection disabled and restored safely",
             "aggregate_instructions":
-                "sum of values returned by legacy MegapadSystem.run_batch()",
+                "sum of values returned by MegapadSystem.run_batch()",
             "per_core_instructions":
-                "exact benchmark-only run_steps wrapper counts from a "
+                "exact benchmark-only run_steps_stats wrapper counts from a "
                 "separate, untimed accounting replay",
+            "per_core_scheduler_cycles":
+                "exact scheduler-visible total_cycles from each core's "
+                "run_steps_stats results in the untimed accounting replay",
             "per_core_architectural_cycles":
                 "delta of each CPU architectural cycle_count",
             "aggregate_core_architectural_cycles":
@@ -1780,12 +1796,11 @@ def run_report(
             "max_core_architectural_cycles":
                 "diagnostic critical-path proxy only; not system time",
             "device_bus_tick_argument_units":
-                "sum of integer arguments passed to DeviceBus.tick(); the "
-                "legacy runner derives these from aggregate instructions",
-            "virtual_system_cycles": None,
+                "sum of virtual-cycle arguments passed to DeviceBus.tick()",
+            "virtual_system_cycles":
+                "delta of the authoritative native SystemState clock",
             "virtual_system_cycles_availability":
-                "unavailable until the native scheduler drives the owned "
-                "system clock",
+                "available for every accounting replay",
             "host_cpu_utilization_percent":
                 "process CPU time divided by wall time; may exceed 100% when "
                 "host worker threads overlap",
@@ -1865,8 +1880,8 @@ def print_human(report: dict) -> None:
         )
     print()
     print(
-        "Virtual system cycles: native owner exists but the legacy runner "
-        "does not drive it (JSON value is null)."
+        "Virtual system cycles: reported from the authoritative native clock "
+        "in each accounting replay."
     )
     print(
         "Per-core instruction rates are derived from an exact untimed "
@@ -1879,7 +1894,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run a reproducible, bounded Phase 0 baseline for MegaPad's "
-            "legacy multicore system runner."
+            "one-worker multicore system runner."
         )
     )
     parser.add_argument(

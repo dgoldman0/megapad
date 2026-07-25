@@ -8,6 +8,7 @@ import _mp64_accel
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
 from megapad64 import (
+    HaltError,
     IVEC_ILLEGAL_OP,
     IVEC_SW_TRAP,
     Megapad64 as PythonMegapad64,
@@ -313,7 +314,7 @@ def test_no_ivt_trap_carries_native_prefix_progress():
     assert cpu.pc == len(NOP_THEN_DOUBLE_EXT)
 
 
-def test_system_ticks_complete_prefix_when_batch_trap_has_no_ivt():
+def test_system_clock_advances_only_completed_prefix_when_batch_trap_has_no_ivt():
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -324,12 +325,106 @@ def test_system_ticks_complete_prefix_when_batch_trap_has_no_ivt():
     )
     system.load_binary(0, NOP_THEN_DOUBLE_EXT)
     system.cpu.pc = 0
-    ticks = []
-    system.bus.tick = ticks.append
+    system.timer.control = 1
 
     assert system.run_batch(2) == 2
-    assert ticks == [2]
+    assert system._native_system.system_cycles == 1
+    assert system.timer.counter == 1
     assert system.cpu.pc == len(NOP_THEN_DOUBLE_EXT)
+
+
+def test_step_settles_prior_core_time_before_later_unhandled_trap():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    trap_address = 0x100
+    system.load_binary(0, assemble("nop"))
+    system.load_binary(trap_address, bytes((0xF0, 0xF0)))
+    system.cores[1].pc = trap_address
+    system.timer.control = 1
+
+    with pytest.raises(TrapError) as raised:
+        system.step()
+
+    assert raised.value.ivec_id == IVEC_ILLEGAL_OP
+    assert system.cores[0].pc == 1
+    assert system._native_system.system_cycles == 1
+    assert system.timer.counter == 1
+
+
+def test_system_batch_never_fabricates_progress_for_halt_exception():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+
+    def raise_halt(_max_steps):
+        raise HaltError("no structured progress")
+
+    system.cpu.run_steps_stats = raise_halt
+
+    with pytest.raises(HaltError, match="no structured progress"):
+        system.run_batch_stats(1)
+
+    assert system._native_system.system_cycles == 0
+
+
+def test_multicore_batch_settles_prior_progress_before_halt_exception():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=2,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("mul r1, r2\nhalt"))
+    system.timer.control = 1
+
+    def raise_halt(_max_steps):
+        raise HaltError("no structured progress")
+
+    system.cores[1].run_steps_stats = raise_halt
+
+    with pytest.raises(HaltError, match="no structured progress"):
+        system.run_batch_stats(1_000)
+
+    assert system.cores[0].cycle_count == 5
+    assert system._native_system.system_cycles == 5
+    assert system.timer.counter == 5
+    assert system._scheduler_cursor == 1
+
+
+def test_system_batch_finishes_its_budget_after_a_python_fallback_boundary():
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=1,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+    )
+    system.load_binary(0, assemble("t.sum\nnop"))
+    system.cpu.mem[0x100:0x140] = bytes(range(64))
+    system.cpu.tsrc0 = 0x100
+    system.cpu.pc = 0
+
+    stats = system.run_batch_stats(2)
+
+    assert stats.instructions_executed == 2
+    assert stats.system_cycles_advanced == 2
+    assert stats.per_core_instructions == (2,)
+    assert stats.per_core_cycles == (2,)
+    assert system._native_system.system_cycles == 2
 
 
 def test_reset_after_native_prefix_matches_python_state_and_count():

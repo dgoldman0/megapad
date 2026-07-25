@@ -1610,7 +1610,7 @@ def test_system_trap_catch_masks_an_unused_override_permission(
         core0.step = raise_before_native
         assert system.step() == 1
     else:
-        core0.run_steps = raise_before_native
+        core0.run_steps_stats = raise_before_native
         assert system.run_batch(1) == 1
 
     assert rejected == ["same-core trap continuation"]

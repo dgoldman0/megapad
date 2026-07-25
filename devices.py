@@ -4019,9 +4019,14 @@ class DeviceBus:
 
     def __init__(self):
         self.devices: list[Device] = []
+        self._tick_driver = None
 
     def register(self, device: Device):
         self.devices.append(device)
+
+    def set_tick_driver(self, driver):
+        """Install one authoritative system-time driver."""
+        self._tick_driver = driver
 
     def find_device(self, mmio_offset: int) -> tuple[Optional[Device], int]:
         """Given an offset within the MMIO aperture, find the device and
@@ -4062,5 +4067,8 @@ class DeviceBus:
         raise BusError(mmio_offset, write=True)
 
     def tick(self, cycles: int):
+        if self._tick_driver is not None:
+            self._tick_driver(cycles)
+            return
         for dev in self.devices:
             dev.tick(cycles)
