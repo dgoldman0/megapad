@@ -1186,10 +1186,11 @@ class MegapadSystem:
             self._boot_locked(entry)
 
     def _boot_locked(self, entry: int) -> None:
+        # Cancel every native target and cached DMA beat atomically before a
+        # device can discard the controller state that would consume it.
+        self._native_system._reset_cycle_execution_and_main_bus()
         self.storage.reset()
         self.audio.reset()
-        self._native_system._reset_cycle_execution()
-        self._native_system._main_bus_reset()
         # System time and shared input devices intentionally survive this CPU
         # reboot, so retain their external-event provenance and future events.
         # A later full-SoC reset must clear devices and the journal together.

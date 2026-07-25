@@ -10839,6 +10839,24 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
                 system.reset_cycle_execution();
             })
+        .def(
+            "_reset_cycle_execution_and_main_bus",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "cycle timeline cannot reset during an active "
+                        "native system batch");
+                }
+                // Cancel the coordinator target and its endpoint cache before
+                // releasing the captured fabric grant. Device reset follows
+                // only after this atomic native boundary returns.
+                system.reset_cycle_execution();
+                system.main_bus.reset(
+                    system.shared_clock.cycles());
+            })
         .def_property_readonly(
             "cycle_execution_pending",
             [](SystemState& system) {

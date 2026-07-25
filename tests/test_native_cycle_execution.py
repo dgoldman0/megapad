@@ -1615,9 +1615,22 @@ def test_warm_boot_clears_cached_dma_endpoint_and_bus_frontier():
     assert owner._cycle_pending_bus_requests()
     assert owner.cycle_execution_pending
 
+    reset_observations = []
+    original_storage_reset = system.storage.reset
+
+    def checked_storage_reset():
+        reset_observations.append((
+            owner.cycle_execution_pending,
+            owner._main_bus_snapshot().active_grant,
+            owner._cycle_pending_bus_requests(),
+        ))
+        original_storage_reset()
+
+    system.storage.reset = checked_storage_reset
     system.boot(entry=0)
 
     snapshot = owner._main_bus_snapshot()
+    assert reset_observations == [(False, None, [])]
     assert owner._cycle_pending_bus_requests() == []
     assert not owner.cycle_execution_pending
     assert snapshot.active_grant is None
