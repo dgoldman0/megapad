@@ -379,7 +379,7 @@ module tb_cpu_micro;
 
         // ============================================================
         // TEST 7: a stripped MEMALU opcode raises ILLEGAL_OP.
-        // cl_ivt_base is wired to 0x100; IVEC 4 points to 0x120.
+        // cl_ivt_base is wired to 0x100; IVEC 2 points to 0x110.
         // ============================================================
         $display("Test 7: stripped MEMALU trap");
         clear_mem;
@@ -389,7 +389,7 @@ module tb_cpu_micro;
         mem[16'h09] = 8'h80;  // MEMALU is stripped on micro-cores
         mem[16'h0A] = 8'h02;  // must not execute
         mem[16'h80] = 8'h02;  // trap handler: HALT
-        mem[16'h120] = 8'h80; // IVT[ILLEGAL_OP] = 0x80 (little-endian)
+        mem[16'h110] = 8'h80; // IVT[ILLEGAL_OP] = 0x80 (little-endian)
 
         reset_cpu;
         wait_halt(2000);
@@ -400,6 +400,13 @@ module tb_cpu_micro;
             end else begin
                 // Should be at 0x81 (handler HALT at 0x80, advanced by 1)
                 check_reg(3, 64'h81, "T7 PC=0x81 (trapped to handler)");
+                if (u_cpu.ivec_id !== IRQX_ILLEGAL_OP) begin
+                    $display("FAIL T7: IVEC=%0d expected ILLEGAL_OP=%0d",
+                             u_cpu.ivec_id, IRQX_ILLEGAL_OP);
+                    fail = fail + 1;
+                end else begin
+                    pass = pass + 1;
+                end
             end
         end else begin
             $display("FAIL T7: timed out");
@@ -505,6 +512,34 @@ module tb_cpu_micro;
                                "T12 lower frame stores saved FLAGS");
         end else begin
             $display("FAIL T12: timed out");
+            fail = fail + 1;
+        end
+
+        // ============================================================
+        // TEST 13: division by zero remains distinct from ILLEGAL_OP.
+        // ============================================================
+        $display("Test 13: DIV_ZERO vector");
+        clear_mem;
+        mem[16'h00] = 8'h60; mem[16'h01] = 8'hF0; mem[16'h02] = 8'h80;
+        mem[16'h03] = 8'h60; mem[16'h04] = 8'h40; mem[16'h05] = 8'h0A;
+        mem[16'h06] = 8'hC5; mem[16'h07] = 8'h45; // UDIV R4,R5; R5=0
+        mem[16'h08] = 8'h02;                       // must not execute
+        mem[16'h40] = 8'h02;                       // DIV_ZERO handler: HALT
+        mem[16'h120] = 8'h40;                      // IVT[DIV_ZERO] = 0x40
+
+        reset_cpu;
+        wait_halt(2000);
+        if (!timeout) begin
+            check_reg(3, 64'h41, "T13 PC=0x41 (DIV_ZERO handler)");
+            if (u_cpu.ivec_id !== IRQX_DIV_ZERO) begin
+                $display("FAIL T13: IVEC=%0d expected DIV_ZERO=%0d",
+                         u_cpu.ivec_id, IRQX_DIV_ZERO);
+                fail = fail + 1;
+            end else begin
+                pass = pass + 1;
+            end
+        end else begin
+            $display("FAIL T13: timed out");
             fail = fail + 1;
         end
 

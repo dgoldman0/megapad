@@ -435,7 +435,8 @@ parameter [2:0] IRQ_SWTRAP = 3'd6;
 parameter [2:0] IRQ_TIMER  = 3'd7;
 
 // Software / internal interrupt vectors (IVT indices 0-7)
-parameter [7:0] IRQX_ILLEGAL_OP = 8'd4;  // Illegal opcode trap
+parameter [7:0] IRQX_ILLEGAL_OP = 8'd2;  // Illegal opcode trap
+parameter [7:0] IRQX_DIV_ZERO   = 8'd4;  // Division-by-zero trap
 parameter [7:0] IRQX_SW_TRAP    = 8'd6;  // Software TRAP instruction
 
 // Extended interrupt sources (active on per-core irq_ext lines)

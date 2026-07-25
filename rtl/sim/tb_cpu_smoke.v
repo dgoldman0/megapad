@@ -597,6 +597,41 @@ module tb_cpu_smoke;
         check_mem_qword_be("TRAP frame return PC", 12'h070, 64'h09);
         check_mem_qword_be("TRAP frame saved FLAGS+PRIV", 12'h078, 64'h140);
 
+        // -----------------------------------------------------------------
+        // Test 13: division by zero uses vector 4, not ILLEGAL_OP vector 2.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+
+        mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h80; // LDI R15,0x80
+        mem[3] = 8'h60; mem[4] = 8'h40; mem[5] = 8'h0A; // LDI R4,10
+        mem[6] = 8'hC5; mem[7] = 8'h45;                 // UDIV R4,R5; R5=0
+        mem[8] = 8'h02;                                  // must not execute
+        mem[16'h20] = 8'h00; mem[16'h21] = 8'h00;
+        mem[16'h22] = 8'h00; mem[16'h23] = 8'h00;
+        mem[16'h24] = 8'h00; mem[16'h25] = 8'h00;
+        mem[16'h26] = 8'h00; mem[16'h27] = 8'h40;        // IVT[4] = 0x40
+        mem[16'h40] = 8'h02;                              // DIV_ZERO handler
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        run_to_halt;
+        if (uut.cpu_state !== CPU_HALT) begin
+            $display("FAIL [DIV_ZERO did not reach handler]");
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+        check_reg("DIV_ZERO: handler PC", 3, 64'h41);
+        if (uut.ivec_id !== IRQX_DIV_ZERO) begin
+            $display("FAIL [DIV_ZERO IVEC]: got=%0d expected=%0d",
+                     uut.ivec_id, IRQX_DIV_ZERO);
+            fail_count = fail_count + 1;
+        end else begin
+            pass_count = pass_count + 1;
+        end
+
         // =================================================================
         $display("===========================================");
         if (fail_count == 0)

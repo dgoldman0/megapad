@@ -736,7 +736,7 @@ module mp64_cpu_micro (
                     if (nib <= 4'h7) begin
                         // MUL/DIV sub-ops 0–7 → cluster shared unit
                         if (nib >= 4'h4 && R[ibuf[1][3:0]] == 64'd0) begin
-                            ivec_id   <= IRQX_ILLEGAL_OP;
+                            ivec_id   <= IRQX_DIV_ZERO;
                             cpu_state <= CPU_IRQ;
                         end else begin
                             mul_req <= 1'b1;

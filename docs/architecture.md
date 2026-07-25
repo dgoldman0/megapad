@@ -547,7 +547,7 @@ native ISA as full cores **minus** the CDP1802-heritage features:
 | GLO / GHI / PLO / PHI | Family 0x6 sub 0xC–0xF | D ↔ GPR byte transfer |
 | RET / DIS / MARK / SAV / SEQ / REQ | Family 0x0 sub 0x5–0xA | 1802 SCRT + Q |
 
-All stripped opcodes trap as `ILLEGAL_OP` (interrupt vector 0x01).
+All stripped opcodes trap as `ILLEGAL_OP` (interrupt vector 0x02).
 CSR reads to D/DF/Q/T return 0; writes are silently ignored.
 
 Micro-cores **retain**: INC, DEC, branch, long-branch, MEM (load/store),

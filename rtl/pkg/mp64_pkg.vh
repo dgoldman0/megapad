@@ -525,7 +525,8 @@ localparam [2:0] IRQ_BUS    = 3'd5;
 localparam [2:0] IRQ_SWTRAP = 3'd6;
 localparam [2:0] IRQ_TIMER  = 3'd7;
 
-localparam [7:0] IRQX_ILLEGAL_OP = 8'd4;
+localparam [7:0] IRQX_ILLEGAL_OP = 8'd2;
+localparam [7:0] IRQX_DIV_ZERO   = 8'd4;
 localparam [7:0] IRQX_SW_TRAP    = 8'd6;
 
 localparam [3:0] IRQX_BUS   = 4'd5;    // bus-error timeout trap

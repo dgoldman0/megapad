@@ -1172,7 +1172,7 @@ module mp64_cpu #(
                         end
                         4'h4: begin // DIV (signed)
                             if (R[src5] == 64'd0) begin
-                                ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
+                                ivec_id <= IRQX_DIV_ZERO; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b1;
                                 div_dividend  <= R[dst5][63]
@@ -1189,7 +1189,7 @@ module mp64_cpu #(
                         end
                         4'h5: begin // UDIV
                             if (R[src5] == 64'd0) begin
-                                ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
+                                ivec_id <= IRQX_DIV_ZERO; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b0;
                                 div_dividend  <= R[dst5];
@@ -1204,7 +1204,7 @@ module mp64_cpu #(
                         end
                         4'h6: begin // MOD (signed)
                             if (R[src5] == 64'd0) begin
-                                ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
+                                ivec_id <= IRQX_DIV_ZERO; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b1;
                                 div_dividend  <= R[dst5][63]
@@ -1221,7 +1221,7 @@ module mp64_cpu #(
                         end
                         4'h7: begin // UMOD
                             if (R[src5] == 64'd0) begin
-                                ivec_id <= IRQX_ILLEGAL_OP; cpu_state <= CPU_IRQ;
+                                ivec_id <= IRQX_DIV_ZERO; cpu_state <= CPU_IRQ;
                             end else begin
                                 div_signed_op <= 1'b0;
                                 div_dividend  <= R[dst5];
