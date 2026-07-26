@@ -8215,10 +8215,9 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
     if (state.profile != CoreProfile::MICRO)
         return false;
 
-    // The reduced core's cluster privilege state is still owned by the
-    // Python compatibility model.  Until element 6 moves that shared state
-    // into the native cluster scheduler, keep every user-mode instruction
-    // on the oracle path.
+    // The reduced core's cluster privilege state remains owned by the Python
+    // compatibility model.  Keep every user-mode instruction on the oracle
+    // path while that ownership boundary remains in force.
     if (state.priv_level != 0)
         return true;
 

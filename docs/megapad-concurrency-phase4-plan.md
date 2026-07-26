@@ -2,7 +2,8 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1 through 5 of 6 complete; Element 6 not started
+**Status:** Phase 4 complete in the commit containing the handoff; all six
+elements are versioned there
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -38,7 +39,7 @@ current milestone, but it does not create a new element or sub-element.
 | 3 | Longer proven-private execution | Complete |
 | 4 | Host decode/JIT-style cache | Complete |
 | 5 | Shared/MMIO/DMA optimization | Complete |
-| 6 | System closure/final validation/handoff | Pending |
+| 6 | System closure/final validation/handoff | Complete |
 
 ## Architecture-preservation gates
 
@@ -849,8 +850,9 @@ timing-hygiene validations pass. Canonical state remains
 `b0bb4266f1fd36a73722cbadad17e2f109eac3f77579b4cc3e44f74de35ccffe`
 and benchmark architectural state remains
 `ae14e15754764700096c4305e88b433888518040d5dc1aa291cf7a93700502fd`.
-Hot and disabled medians are 89.185 and 44.026 MIPS, a diagnostic 1.957x
-ratio. The command takes 0.11 seconds, peaks at 32,760 KiB, and uses no swap.
+Hot and disabled medians are 89.185 and 44.026 MIPS; the report's median
+paired hot/disabled ratio is a diagnostic 1.957x. The command takes
+0.11 seconds, peaks at 32,760 KiB, and uses no swap.
 
 Generated reports remain ignored. Their clean source revisions, native
 artifacts, schemas, exact commands, hashes, sizes, validation outcomes, and
@@ -1002,11 +1004,15 @@ Median unprofiled target throughput is:
 
 Profiled shared-memory coordinator-boundary time falls by
 33.9%/29.6%/32.8% at one/two/four lanes. Profiled MMIO coordinator-boundary
-time falls by 6.3%/1.7%/5.2%. Structural counts do not change: shared and
-MMIO each retain 50,125 logical subfrontiers, 200,000 coordinator boundaries,
-100,000 worker commands, and 300,000 private steps. Strict DMA retains
-2.00537109375 virtual cycles per payload byte, equal round-robin eligible-peer
-order, one-shot/sliced state equivalence, and replay validity.
+time falls by 6.3%/1.7%/5.2%. Those timer values are diagnostic rather than a
+like-for-like causal measurement: the old per-core scope began before its
+memory acquisition and GIL release, while the optimized scope begins after
+the new pass-wide GIL release. The unprofiled throughput and exact equivalence
+results support the retained optimization. Structural counts do not change:
+shared and MMIO each retain 50,125 logical subfrontiers, 200,000 coordinator
+boundaries, 100,000 worker commands, and 300,000 private steps. Strict DMA
+retains 2.00537109375 virtual cycles per payload byte, equal round-robin
+eligible-peer order, one-shot/sliced state equivalence, and replay validity.
 
 The established longer private-compute control was also refreshed cleanly:
 
@@ -1073,8 +1079,8 @@ speculatively.
 | P4-D3 | Skipping a worker for an immediate boundary can save the dominant protocol cost, but an early coordinator commit or failure could expose an incomplete peer-private frontier. Runtime-adaptive routing could also let host timing influence behavior. | Preclassify only unbounded full-core commands under the retained logical-frontier admission. Synthesize only proven zero-progress results, gather every remaining worker result, preserve original cohort position and global cyclic settlement, and keep the choice independent of timing, helper readiness, or completion order. Report bypasses separately from physical worker work. | The claim covers the existing read-only full-core classifier and zero-progress interrupt, halted/idle, I-cache, and shared boundaries only. Strict-cycle, microcore, speculative execution, cross-frontier fusion, and callback settlement remain unchanged. Revisit complete-frontier lane queues only if later measurements show this bounded fast path insufficient. |
 | P4-D4 | Copying a complete CPU checkpoint for a command that exits before its first private instruction is wasted work, but moving capture past guest mutation would weaken whole-command failure containment. | Perform validation and read-only first-instruction classification before capture, then take the unchanged full checkpoint immediately before the first admitted guest `step_one` and retain it until command completion. | This removes checkpoints only from zero-mutation exits. It does not authorize partial checkpoints, checkpoint deletion for progressing commands, or mutation followed by speculative rollback. Reopen only with an injectable failure oracle that proves an equally strong containment boundary. |
 | P4-D5 | The Phase 3 mixed-topology clamp serializes even a sole logical participant, but independently widening one member of a true mixed frontier can reverse callback order, change exception-visible peer prefixes, or cross a peer-asserted interrupt. A longer command also enlarges the prefix restored by an unexpected internal worker failure. | Permit the existing bounded private command to consume remaining round credit only when the current mixed-topology subfrontier has exactly one executable or coordinator participant. Keep every multi-participant mixed subfrontier at one instruction and retain the unchanged whole-command checkpoint. | The proof is structural and unbounded-only: no other reservation can act in that subfrontier, every instruction is classified before mutation, and all existing own-command boundaries remain. Supported coordinator callback failures retain the completed prefix; only an unexpected internal helper failure restores a longer command instead of one former subfrontier. Reopen multi-participant fusion only with a non-mutating common-span proof covering every participant, callback and interrupt ordering, and exact one/two/four-lane failure evidence. Reopen rollback granularity only if internal-failure partial progress becomes a public contract or gains an injectable oracle. |
-| P4-D6 | Exact-byte host admission plans are safest, but a full core that validates an entire identity and then performs the unchanged native decode pays two protocols per instruction. A weaker identity, speculative translated execution, or timing-adaptive selection would either weaken the cache-observation contract or expand Element 4 materially. | Keep complete byte-validated plans. Use them at unbounded full-core frontier admission and on every eligible microcore worker step, where the single-use proof removes a duplicated Python-oracle eligibility decode. Use the established direct classifier inside full-core worker spans and all strict-cycle work. Clear full-core plans on reset, complete invalidation, restore, or an actual resident matching-line invalidation, but not on unrelated stores. | This is an admission cache, not translated execution. Full per-step reuse may be reconsidered only with a genuine decoded executor or a separately proved O(1) guest-cache identity generation covering refill, invalidation, rollback, checkpoint restore, explicit cache restore, and noncoherent host mutation. Runtime host timing, lane width, and helper readiness must never select the path. |
-| P4-D7 | Calling every registered Python device on every system-clock transition preserves order mechanically, but inherited no-op hooks waste host time and native-owned timer/display/RTC proxies must not be advanced twice. Dynamic hook mutation would make a cached active list stale. | Classify effective clock ownership at registration. Preserve the complete MMIO registration list, maintain a second ordered list only for devices whose class overrides `Device.tick`, and exclude proxies explicitly marked as externally clocked by the native clock. Late registered extensions join the ordered active list normally. | Classification is intentionally registration-time. Direct mutation of `bus.devices` or assigning a new `tick` implementation after registration is not supported by repository callers and does not silently alter participation. Revisit with an explicit re-registration API if dynamic device mutation becomes a public requirement. This decision does not authorize bulk DMA fusion, beat reordering, or skipped native clock transitions. |
+| P4-D6 | Exact-byte host admission plans are safest, but a full core that validates an entire identity and then performs the unchanged native decode pays two protocols per instruction. A weaker identity, speculative translated execution, or timing-adaptive selection would either weaken the cache-observation contract or expand Element 4 materially. | Keep complete byte-validated plans. Use them at unbounded full-core frontier admission and on every eligible microcore worker step, where the single-use proof removes a duplicated Python-oracle eligibility decode. Use the established direct classifier inside full-core worker spans and all strict-cycle work. Clear full-core plans on reset, complete invalidation, explicit guest-I-cache restore, or an actual resident matching-line invalidation, but not on unrelated stores. | This is an admission cache, not translated execution. Full per-step reuse may be reconsidered only with a genuine decoded executor or a separately proved O(1) guest-cache identity generation covering refill, invalidation, rollback, checkpoint restore, explicit cache restore, and noncoherent host mutation. Runtime host timing, lane width, and helper readiness must never select the path. |
+| P4-D7 | Calling every registered Python device on every system-clock transition preserves order mechanically, but inherited no-op hooks waste host time and native-owned timer/display/RTC proxies must not be advanced twice. Dynamic hook mutation would make a cached active list stale. | Classify effective clock ownership at registration. Preserve the complete MMIO registration list, maintain a second ordered list only for devices whose class overrides `Device.tick`, and exclude proxies explicitly marked as externally clocked by the native clock. Late registered extensions join the ordered active list normally. | Classification is intentionally registration-time and recognizes a class-level `Device.tick` override. An instance-level monkeypatch is not recognized even before registration; later class mutation and direct mutation of `bus.devices` are also unsupported. Revisit with an explicit re-registration API if dynamic device mutation becomes a public requirement. This decision does not authorize bulk DMA fusion, beat reordering, or skipped native clock transitions. |
 | P4-D8 | Releasing and reacquiring the GIL for every core's ordinary coordinator boundary is measurable overhead, but a pass-wide memory lease or GIL-free Python settlement would transfer native permission, weaken callback liveness, or mishandle Python exception state. | Coalesce only the host GIL transition for a complete all-full-core ordinary cyclic pass. Retain a fresh logical memory and CPU execution scope per core, keep each scope alive through its own continuation/error settlement, and restore the GIL before any Python continuation, dispatch-error inspection, Python settlement validation, or Python object destruction. Leave all other pass shapes on the established loop. | This is a host-scope optimization, not guest-operation or subfrontier fusion. The gate excludes partial/closed passes, micro and mixed topology, cluster requests/winners, private trap/reset results, nested mapping ownership, strict-cycle execution, round settlement, and cross-round work. Reopen a broader pass only with exact mapping-ownership, callback-order, exception-prefix, live-ingress, and one/two/four-lane evidence. |
 
 Changes to these decisions must update this ledger and the corresponding
@@ -1102,3 +1108,34 @@ does not broaden the architectural claim.
   sequential sanitizer and resource-safe regression gates, refreshed
   benchmarks, design-contention review, and versioned Phase 4 handoff are
   committed.
+
+## Element 6 completion record
+
+Element 6 closes Phase 4 from clean evidence revision
+`ec7f37f63954cc45266251ea5d7b31172e582df8`. The five Phase 4-owned test
+files pass 24 tests in 0.56 test seconds; the complete command takes
+1.14 seconds and peaks at 75,008 KiB. The bounded
+cross-contract regression matrix passes 40 tests in 1.50 seconds at a
+69,988 KiB peak. The final isolated 20-test ASan/UBSan gate takes
+77.01 seconds and peaks at 2,314,656 KiB; the matching 20-test TSan gate
+takes 39.01 seconds and peaks at 1,841,288 KiB. All four commands are
+foreground, sequential, and report no process swap; neither sanitizer reports
+a finding.
+
+The clean comprehensive report is
+`build/phase4-concurrency-final.json`, schema 11, 43,178,477 bytes, SHA-256
+`5108677cd5d01d6f984ef48cad110e71606cce878df22c2029ba3eb45cb481a5`.
+It validates all five workloads, strict NIC/disk DMA, host-profile probes, and
+one/two/four-lane equivalence. The clean final microcore report is
+245,581 bytes with SHA-256
+`6962f76a7f29269422b2f60fc97736033692e86e6a75bb9ea60cd0a92e1d7813`;
+the clean final instruction-cache report is 64,170 bytes with SHA-256
+`0b6673ae9df6a934584a1cfa3bcdfdb44921b7b72a30ec30ad5b790ee28a0a45`.
+
+The contention review found no missing Phase 4 decision and confirmed that
+P3-D1's retained callback-failure prefix remains an explicit inherited
+contract rather than an accidental optimization artifact. Exact commands,
+artifact identities, final rates and hashes, exclusions, resource warnings,
+and the next-phase resume boundary are versioned in
+`docs/megapad-concurrency-phase4-handoff.md`. The commit containing that file
+is the Phase 4 completion snapshot.
