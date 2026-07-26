@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 9
 
@@ -2549,9 +2549,315 @@ def _strict_nic_disk_dma_report(
     }
 
 
+_CONCURRENCY_PROFILE_COUNT_FIELDS = (
+    "batches",
+    "prepare_batch_calls",
+    "scheduler_rounds",
+    "logical_subfrontiers",
+    "round_absorptions",
+    "worker_waves",
+    "worker_commands",
+    "private_steps",
+    "private_classification_calls",
+    "zero_step_commands",
+    "checkpoint_captures",
+    "checkpoint_restores",
+    "coordinator_boundaries",
+    "settle_round_calls",
+)
+
+_CONCURRENCY_PROFILE_COUNT_MAP_FIELDS = (
+    "private_stop_reasons",
+    "coordinator_boundary_origins",
+)
+
+_CONCURRENCY_PROFILE_COUNT_LIST_FIELDS = (
+    "lane_commands",
+    "lane_steps",
+)
+
+_CONCURRENCY_PROFILE_WALL_FIELDS = (
+    "batch_total",
+    "prepare_batch",
+    "scheduler_round",
+    "logical_subfrontier",
+    "round_absorption",
+    "worker_wave",
+    "worker_wave_prepare",
+    "worker_wave_wait",
+    "worker_wave_gather",
+    "private_command_sum",
+    "private_command_max",
+    "private_scope_setup",
+    "checkpoint_capture",
+    "checkpoint_restore",
+    "coordinator_boundary",
+    "settle_round",
+)
+
+
+def _normalized_concurrency_profile_snapshot(owner) -> dict:
+    """Copy the fixed native host-profile schema into JSON-native values."""
+    raw = dict(owner._concurrency_profile_snapshot())
+    raw_counts = dict(raw["counts"])
+    raw_wall = dict(raw["wall_ns"])
+    counts = {
+        name: int(raw_counts[name])
+        for name in _CONCURRENCY_PROFILE_COUNT_FIELDS
+    }
+    counts.update({
+        name: {
+            str(key): int(value)
+            for key, value in sorted(dict(raw_counts[name]).items())
+        }
+        for name in _CONCURRENCY_PROFILE_COUNT_MAP_FIELDS
+    })
+    counts.update({
+        name: [int(value) for value in raw_counts[name]]
+        for name in _CONCURRENCY_PROFILE_COUNT_LIST_FIELDS
+    })
+    wall_ns = {
+        name: int(raw_wall[name])
+        for name in _CONCURRENCY_PROFILE_WALL_FIELDS
+    }
+    wall_ns["coordinator_boundary_origins"] = {
+        str(key): int(value)
+        for key, value in sorted(
+            dict(raw_wall["coordinator_boundary_origins"]).items()
+        )
+    }
+    return {
+        "schema_version": int(raw["schema_version"]),
+        "enabled": bool(raw["enabled"]),
+        "generation": int(raw["generation"]),
+        "architectural_hash_scope": str(raw["architectural_hash_scope"]),
+        "measurement_scope": str(raw["measurement_scope"]),
+        "timing_semantics": str(raw["timing_semantics"]),
+        "counts": counts,
+        "wall_ns": wall_ns,
+        "lane_active_ns": [
+            int(value) for value in raw["lane_active_ns"]
+        ],
+    }
+
+
+def _freeze_python_callback_profile(profile: dict) -> dict:
+    """Freeze accounting wrappers before canonical state observation."""
+    per_core = [
+        {
+            "core_id": int(entry["core_id"]),
+            "mmio_read_calls": int(entry["mmio_read_calls"]),
+            "mmio_read_ns": int(entry["mmio_read_ns"]),
+            "mmio_write_calls": int(entry["mmio_write_calls"]),
+            "mmio_write_ns": int(entry["mmio_write_ns"]),
+        }
+        for entry in profile["per_core"]
+    ]
+    tick = profile["device_tick"]
+    return {
+        "per_core": per_core,
+        "mmio_read_calls": sum(
+            entry["mmio_read_calls"] for entry in per_core
+        ),
+        "mmio_read_ns": sum(entry["mmio_read_ns"] for entry in per_core),
+        "mmio_write_calls": sum(
+            entry["mmio_write_calls"] for entry in per_core
+        ),
+        "mmio_write_ns": sum(entry["mmio_write_ns"] for entry in per_core),
+        "device_tick_calls": int(tick["calls"]),
+        "device_tick_ns": int(tick["wall_ns"]),
+        "device_tick_argument_units": int(tick["argument_units"]),
+    }
+
+
+def _optional_ratio(numerator: int, denominator: int) -> float | None:
+    return None if denominator == 0 else numerator / denominator
+
+
+def _host_profile_probe(
+    *,
+    native_snapshot: dict,
+    python_callbacks: dict,
+    accounting: dict,
+) -> dict:
+    """Build compact structural attribution and cross-layer reconciliations."""
+    native_counts = native_snapshot["counts"]
+    native_wall = native_snapshot["wall_ns"]
+    scheduler = accounting["scheduler_provenance"]
+    worker = accounting["host_worker_diagnostics"]["deltas"]
+    worker_lanes = worker["lanes"]
+    worker_lane_commands = [
+        int(lane["completed_commands"]) for lane in worker_lanes
+    ]
+    worker_lane_steps = [
+        int(lane["completed_steps"]) for lane in worker_lanes
+    ]
+    accounting_mmio_reads = sum(
+        int(core["python_mmio_reads"])
+        for core in accounting["per_core"]
+    )
+    accounting_mmio_writes = sum(
+        int(core["python_mmio_writes"])
+        for core in accounting["per_core"]
+    )
+    returned_instructions = int(
+        accounting["aggregate_instructions_from_per_core"]
+    )
+    stop_reason_total = sum(
+        native_counts["private_stop_reasons"].values()
+    )
+    boundary_origin_total = sum(
+        native_counts["coordinator_boundary_origins"].values()
+    )
+    worker_count = int(accounting["worker_count"])
+
+    validation = {
+        "native_profile_schema_supported":
+            native_snapshot["schema_version"] == 1,
+        "native_profile_frozen": not native_snapshot["enabled"],
+        "native_profile_generation_positive":
+            native_snapshot["generation"] > 0,
+        "native_profile_excluded_from_architectural_hash":
+            native_snapshot["architectural_hash_scope"]
+            == "excluded_host_only",
+        "native_profile_scope_is_unbounded_batch_only":
+            native_snapshot["measurement_scope"]
+            == "unbounded_native_system_batch_only",
+        "native_profile_timers_are_inclusive_nested_wall_time":
+            native_snapshot["timing_semantics"]
+            == "inclusive_nested_host_wall_nanoseconds",
+        "native_batches_match_accounting": (
+            native_counts["batches"]
+            == scheduler["native_system_batch_calls"]
+            == scheduler["native_batch_runs_counter_delta"]
+        ),
+        "prepare_batch_calls_match_batches":
+            native_counts["prepare_batch_calls"]
+            == native_counts["batches"],
+        "scheduler_rounds_match_accounting":
+            native_counts["scheduler_rounds"]
+            == scheduler["native_rounds"],
+        "round_absorptions_match_logical_subfrontiers":
+            native_counts["round_absorptions"]
+            == native_counts["logical_subfrontiers"],
+        "worker_waves_match_worker_diagnostics":
+            native_counts["worker_waves"] == worker["wave_epochs"],
+        "worker_commands_match_worker_diagnostics":
+            native_counts["worker_commands"] == worker["command_sequences"],
+        "private_steps_match_worker_diagnostics":
+            native_counts["private_steps"] == sum(worker_lane_steps),
+        "native_lane_arrays_match_worker_count": (
+            len(native_counts["lane_commands"]) == worker_count
+            and len(native_counts["lane_steps"]) == worker_count
+            and len(native_snapshot["lane_active_ns"]) == worker_count
+        ),
+        "lane_commands_match_worker_diagnostics":
+            native_counts["lane_commands"] == worker_lane_commands,
+        "lane_steps_match_worker_diagnostics":
+            native_counts["lane_steps"] == worker_lane_steps,
+        "native_lane_totals_match_native_totals": (
+            sum(native_counts["lane_commands"])
+            == native_counts["worker_commands"]
+            and sum(native_counts["lane_steps"])
+            == native_counts["private_steps"]
+        ),
+        "private_stop_reasons_match_worker_commands":
+            stop_reason_total == native_counts["worker_commands"],
+        "coordinator_boundary_origins_match_boundary_count":
+            boundary_origin_total == native_counts["coordinator_boundaries"],
+        "settle_round_calls_match_rounds_plus_batches": (
+            native_counts["settle_round_calls"]
+            == native_counts["scheduler_rounds"]
+            + native_counts["batches"]
+        ),
+        "classification_covers_private_steps":
+            native_counts["private_classification_calls"]
+            >= native_counts["private_steps"],
+        "zero_step_commands_within_worker_commands": (
+            0 <= native_counts["zero_step_commands"]
+            <= native_counts["worker_commands"]
+        ),
+        "python_mmio_reads_match_accounting":
+            python_callbacks["mmio_read_calls"] == accounting_mmio_reads,
+        "python_mmio_writes_match_accounting":
+            python_callbacks["mmio_write_calls"] == accounting_mmio_writes,
+        "device_tick_calls_match_accounting":
+            python_callbacks["device_tick_calls"]
+            == accounting["device_bus_tick_calls"],
+        "device_tick_units_match_accounting":
+            python_callbacks["device_tick_argument_units"]
+            == accounting["device_bus_tick_argument_units"],
+        "device_tick_calls_match_scheduler_rounds":
+            python_callbacks["device_tick_calls"]
+            == native_counts["scheduler_rounds"],
+        "native_wall_times_nonnegative": (
+            all(value >= 0 for value in native_wall.values()
+                if not isinstance(value, dict))
+            and all(
+                value >= 0
+                for value in native_wall[
+                    "coordinator_boundary_origins"
+                ].values()
+            )
+            and all(value >= 0 for value in native_snapshot["lane_active_ns"])
+        ),
+        "python_callback_wall_times_nonnegative": all(
+            python_callbacks[name] >= 0
+            for name in (
+                "mmio_read_ns",
+                "mmio_write_ns",
+                "device_tick_ns",
+            )
+        ),
+    }
+    return {
+        "schema": "megapad.phase4-concurrency-host-profile",
+        "schema_version": 1,
+        "architectural_hash_scope": "excluded_host_only",
+        "used_for_throughput": False,
+        "native_snapshot": native_snapshot,
+        "python_callbacks": python_callbacks,
+        "structural_ratios": {
+            "worker_commands_per_wave": _optional_ratio(
+                native_counts["worker_commands"],
+                native_counts["worker_waves"],
+            ),
+            "private_steps_per_worker_command": _optional_ratio(
+                native_counts["private_steps"],
+                native_counts["worker_commands"],
+            ),
+            "classification_calls_per_private_step": _optional_ratio(
+                native_counts["private_classification_calls"],
+                native_counts["private_steps"],
+            ),
+            "zero_step_command_fraction": _optional_ratio(
+                native_counts["zero_step_commands"],
+                native_counts["worker_commands"],
+            ),
+            "returned_instructions_per_logical_subfrontier": _optional_ratio(
+                returned_instructions,
+                native_counts["logical_subfrontiers"],
+            ),
+            "coordinator_boundaries_per_returned_instruction":
+                _optional_ratio(
+                    native_counts["coordinator_boundaries"],
+                    returned_instructions,
+                ),
+            "private_step_fraction_of_returned_instructions":
+                _optional_ratio(
+                    native_counts["private_steps"],
+                    returned_instructions,
+                ),
+        },
+        "validation": validation,
+    }
+
+
 def _install_accounting(
     workload: Workload,
-) -> tuple[list[dict], dict, dict]:
+    *,
+    host_profile: bool = False,
+) -> tuple[list[dict], dict, dict, dict]:
     """Install accounting-only wrappers; never used for timed throughput."""
     stop_reason_names = (
         "run_limit",
@@ -2563,6 +2869,14 @@ def _install_accounting(
         "reset",
     )
     core_stats = []
+    callback_profile = {
+        "per_core": [],
+        "device_tick": {
+            "calls": 0,
+            "wall_ns": 0,
+            "argument_units": 0,
+        },
+    }
     for cpu in workload.system.cores:
         stats = {
             "core_id": cpu.core_id,
@@ -2576,13 +2890,36 @@ def _install_accounting(
             "python_mmio_writes": 0,
         }
         core_stats.append(stats)
+        profile_stats = {
+            "core_id": cpu.core_id,
+            "mmio_read_calls": 0,
+            "mmio_read_ns": 0,
+            "mmio_write_calls": 0,
+            "mmio_write_ns": 0,
+        }
+        callback_profile["per_core"].append(profile_stats)
 
         original_read = cpu._mmio_read8
         original_write = cpu._mmio_write8
 
-        def counted_read(addr: int, *, _original=original_read, _stats=stats):
+        def counted_read(
+            addr: int,
+            *,
+            _original=original_read,
+            _stats=stats,
+            _profile=profile_stats,
+        ):
             _stats["python_mmio_reads"] += 1
-            return _original(addr)
+            if not host_profile:
+                return _original(addr)
+            _profile["mmio_read_calls"] += 1
+            started_ns = time.perf_counter_ns()
+            try:
+                return _original(addr)
+            finally:
+                _profile["mmio_read_ns"] += (
+                    time.perf_counter_ns() - started_ns
+                )
 
         def counted_write(
             addr: int,
@@ -2590,9 +2927,19 @@ def _install_accounting(
             *,
             _original=original_write,
             _stats=stats,
+            _profile=profile_stats,
         ):
             _stats["python_mmio_writes"] += 1
-            return _original(addr, value)
+            if not host_profile:
+                return _original(addr, value)
+            _profile["mmio_write_calls"] += 1
+            started_ns = time.perf_counter_ns()
+            try:
+                return _original(addr, value)
+            finally:
+                _profile["mmio_write_ns"] += (
+                    time.perf_counter_ns() - started_ns
+                )
 
         cpu._mmio_read8 = counted_read
         cpu._mmio_write8 = counted_write
@@ -2669,10 +3016,21 @@ def _install_accounting(
     def counted_tick(units: int):
         bus_stats["tick_calls"] += 1
         bus_stats["tick_argument_units"] += int(units)
-        return original_tick(units)
+        if not host_profile:
+            return original_tick(units)
+        tick_profile = callback_profile["device_tick"]
+        tick_profile["calls"] += 1
+        tick_profile["argument_units"] += int(units)
+        started_ns = time.perf_counter_ns()
+        try:
+            return original_tick(units)
+        finally:
+            tick_profile["wall_ns"] += (
+                time.perf_counter_ns() - started_ns
+            )
 
     workload.system.bus.tick = counted_tick
-    return core_stats, bus_stats, scheduler_stats
+    return core_stats, bus_stats, scheduler_stats, callback_profile
 
 
 def _accounting_probe(
@@ -2680,35 +3038,58 @@ def _accounting_probe(
     num_cores: int,
     target: int,
     worker_count: int = 1,
-) -> dict:
+    *,
+    host_profile: bool = False,
+) -> tuple[dict, dict | None]:
     workload = scenario.build(num_cores, worker_count)
-    core_stats, bus_stats, scheduler_stats = _install_accounting(workload)
+    owner = workload.system._native_system
+    (
+        core_stats,
+        bus_stats,
+        scheduler_stats,
+        callback_profile,
+    ) = _install_accounting(
+        workload,
+        host_profile=host_profile,
+    )
     workers_before = _host_worker_snapshot(workload.system)
     start_cycles = [int(cpu.cycle_count) for cpu in workload.system.cores]
-    start_system_cycles = int(workload.system._native_system.system_cycles)
-    start_native_batches = int(
-        workload.system._native_system.native_batch_runs
-    )
-    start_native_dispatches = int(
-        workload.system._native_system.native_dispatches
-    )
+    start_system_cycles = int(owner.system_cycles)
+    start_native_batches = int(owner.native_batch_runs)
+    start_native_dispatches = int(owner.native_dispatches)
+    profile_started = False
+    native_profile_snapshot = None
+    python_callback_snapshot = None
     try:
+        if host_profile:
+            owner._start_concurrency_profile()
+            profile_started = True
         execution = workload.execute(target)
-        observation = _state_observation(workload)
+
+        # Freeze every host-only timing/count source before canonical state
+        # observation. Profiling therefore covers only the existing untimed
+        # accounting replay and cannot accidentally include serialization.
+        if host_profile:
+            owner._stop_concurrency_profile()
+            profile_started = False
+            native_profile_snapshot = (
+                _normalized_concurrency_profile_snapshot(owner)
+            )
+            python_callback_snapshot = _freeze_python_callback_profile(
+                callback_profile
+            )
+
         end_cycles = [
             int(cpu.cycle_count) for cpu in workload.system.cores
         ]
-        end_system_cycles = int(
-            workload.system._native_system.system_cycles
-        )
-        end_native_batches = int(
-            workload.system._native_system.native_batch_runs
-        )
-        end_native_dispatches = int(
-            workload.system._native_system.native_dispatches
-        )
+        end_system_cycles = int(owner.system_cycles)
+        end_native_batches = int(owner.native_batch_runs)
+        end_native_dispatches = int(owner.native_dispatches)
         workers_after = _host_worker_snapshot(workload.system)
+        observation = _state_observation(workload)
     finally:
+        if profile_started:
+            owner._stop_concurrency_profile()
         workload.close()
 
     per_core_cycles = [
@@ -2759,7 +3140,11 @@ def _accounting_probe(
         ],
         "virtual_system_cycles": int(virtual_system_cycles),
     }
-    return {
+    worker_diagnostics = _host_worker_diagnostics(
+        workers_before,
+        workers_after,
+    )
+    accounting = {
         "instrumented": True,
         "used_for_throughput": False,
         "worker_count": worker_count,
@@ -2812,12 +3197,21 @@ def _accounting_probe(
         "public_accounting_oracle": public_accounting,
         "public_accounting_oracle_sha256":
             _json_sha256(public_accounting),
-        "host_worker_diagnostics": _host_worker_diagnostics(
-            workers_before,
-            workers_after,
-        ),
+        "host_worker_diagnostics": worker_diagnostics,
         "observation": observation,
     }
+    profile_probe = None
+    if host_profile:
+        if native_profile_snapshot is None or python_callback_snapshot is None:
+            raise RuntimeError(
+                "host profiling completed without frozen profile snapshots"
+            )
+        profile_probe = _host_profile_probe(
+            native_snapshot=native_profile_snapshot,
+            python_callbacks=python_callback_snapshot,
+            accounting=accounting,
+        )
+    return accounting, profile_probe
 
 
 def _summary(samples: list[dict], accounting: dict) -> dict:
@@ -3140,6 +3534,7 @@ def run_report(
     warmups: int,
     warmup_instructions: int,
     strict_dma_bytes: int = STRICT_DMA_DEFAULT_BYTES,
+    host_profile: bool = False,
 ) -> dict:
     core_counts = list(core_counts)
     worker_counts = list(worker_counts)
@@ -3165,11 +3560,12 @@ def run_report(
                     )
                     for _ in range(repeats)
                 ]
-                accounting = _accounting_probe(
+                accounting, host_profile_probe = _accounting_probe(
                     scenario,
                     num_cores,
                     instructions,
                     worker_count,
+                    host_profile=host_profile,
                 )
                 lane_participation_required = (
                     scenario.name == "private_compute"
@@ -3206,6 +3602,7 @@ def run_report(
                         },
                         "timed_samples": samples,
                         "accounting_probe": accounting,
+                        "host_profile_probe": host_profile_probe,
                         "summary": _summary(samples, accounting),
                     }
                 )
@@ -3224,6 +3621,15 @@ def run_report(
         strict_worker_reports
     )
     validation = {
+        "host_profile_presence_matches_request": all(
+            (result["host_profile_probe"] is not None) == host_profile
+            for result in results
+        ),
+        "all_host_profile_probes_valid": all(
+            result["host_profile_probe"] is None
+            or all(result["host_profile_probe"]["validation"].values())
+            for result in results
+        ),
         "all_instruction_accounting_matches": all(
             result["accounting_probe"][
                 "instruction_accounting_matches_runner"
@@ -3372,6 +3778,7 @@ def run_report(
             "timed_repeats": repeats,
             "warmup_runs_per_case": warmups,
             "warmup_instructions_per_run": warmup_instructions,
+            "host_profile": host_profile,
             "strict_dma_payload_bytes_per_endpoint":
                 strict_dma_bytes,
             "execution_order": {
@@ -3423,6 +3830,20 @@ def run_report(
             "host_worker_diagnostics":
                 "persistent pool identity and per-lane command/step deltas; "
                 "host-only and excluded from every architectural hash",
+            "host_profile_probe":
+                "optional fixed-size native and Python callback attribution "
+                "from the separate untimed accounting replay; explicitly "
+                "stopped before canonical observation, excluded from every "
+                "architectural hash, and never used for throughput",
+            "host_profile_timing_scope":
+                "timers are nested host wall observations; lane-active sums "
+                "may exceed worker-wave or batch wall time and derived ratios "
+                "are structural diagnostics rather than an additive causal "
+                "partition",
+            "python_callback_profile":
+                "per-core MMIO and DeviceBus.tick wall time measured after "
+                "entry into their Python accounting wrappers; native "
+                "coordinator timers retain the surrounding GIL transition",
             "derived_per_core_throughput":
                 "accounting-replay instruction share multiplied by the "
                 "uninstrumented median aggregate instruction rate; omitted "
@@ -3612,6 +4033,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--host-profile",
+        action="store_true",
+        default=False,
+        help=(
+            "enable host-only attribution during the separate untimed "
+            "accounting replay (default: disabled)"
+        ),
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="bounded smoke profile: 100k instructions, one repeat, no warmup",
@@ -3652,6 +4082,7 @@ def main(argv: list[str] | None = None) -> int:
         warmups=args.warmups,
         warmup_instructions=args.warmup_instructions,
         strict_dma_bytes=args.strict_dma_bytes,
+        host_profile=args.host_profile,
     )
     encoded = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cmath>
@@ -2202,7 +2203,166 @@ enum class PrivateCoreStopReason : uint8_t {
     INTERNAL_FAILURE = 8,
 };
 
+static constexpr std::size_t PRIVATE_CORE_STOP_REASON_COUNT = 9;
+static constexpr std::size_t HOST_PROFILE_MAX_LANES = 4;
+
+static void host_saturating_add(
+        uint64_t& destination,
+        uint64_t increment) noexcept {
+    if (
+        increment >
+        std::numeric_limits<uint64_t>::max() -
+            destination
+    ) {
+        destination =
+            std::numeric_limits<uint64_t>::max();
+        return;
+    }
+    destination += increment;
+}
+
+static void host_saturating_increment(
+        uint64_t& destination) noexcept {
+    host_saturating_add(destination, 1);
+}
+
+static uint64_t host_elapsed_ns(
+        std::chrono::steady_clock::time_point start)
+        noexcept {
+    const auto elapsed =
+        std::chrono::duration_cast<
+            std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() -
+                start)
+            .count();
+    if (elapsed <= 0)
+        return 0;
+    const auto unsigned_elapsed =
+        static_cast<unsigned long long>(elapsed);
+    return static_cast<uint64_t>(
+        std::min<unsigned long long>(
+            unsigned_elapsed,
+            std::numeric_limits<uint64_t>::max()));
+}
+
+class HostProfileWallTimer {
+public:
+    HostProfileWallTimer(
+            bool enabled,
+            uint64_t* destination) noexcept
+        : destination_(
+              enabled ? destination : nullptr) {
+        if (destination_ != nullptr)
+            start_ = std::chrono::steady_clock::now();
+    }
+
+    HostProfileWallTimer(
+        const HostProfileWallTimer&) = delete;
+    HostProfileWallTimer& operator=(
+        const HostProfileWallTimer&) = delete;
+
+    ~HostProfileWallTimer() {
+        if (destination_ != nullptr) {
+            host_saturating_add(
+                *destination_,
+                host_elapsed_ns(start_));
+        }
+    }
+
+private:
+    uint64_t* destination_ = nullptr;
+    std::chrono::steady_clock::time_point start_{};
+};
+
+struct WorkerWaveHostTiming {
+    uint64_t prepare_ns = 0;
+    uint64_t wait_ns = 0;
+    uint64_t gather_ns = 0;
+};
+
+struct ConcurrencyProfileCounters {
+    bool enabled = false;
+    uint64_t generation = 0;
+
+    uint64_t batches = 0;
+    uint64_t prepare_batch_calls = 0;
+    uint64_t scheduler_rounds = 0;
+    uint64_t logical_subfrontiers = 0;
+    uint64_t round_absorptions = 0;
+    uint64_t worker_waves = 0;
+    uint64_t worker_commands = 0;
+    uint64_t private_steps = 0;
+    uint64_t private_classification_calls = 0;
+    uint64_t zero_step_commands = 0;
+    uint64_t checkpoint_captures = 0;
+    uint64_t checkpoint_restores = 0;
+    uint64_t coordinator_boundaries = 0;
+    uint64_t settle_round_calls = 0;
+    std::array<
+        uint64_t,
+        PRIVATE_CORE_STOP_REASON_COUNT>
+        private_stop_reasons{};
+    std::array<
+        uint64_t,
+        PRIVATE_CORE_STOP_REASON_COUNT>
+        coordinator_boundary_origins{};
+    std::array<
+        uint64_t,
+        HOST_PROFILE_MAX_LANES>
+        lane_commands{};
+    std::array<
+        uint64_t,
+        HOST_PROFILE_MAX_LANES>
+        lane_steps{};
+
+    uint64_t batch_total_ns = 0;
+    uint64_t prepare_batch_ns = 0;
+    uint64_t scheduler_round_ns = 0;
+    uint64_t logical_subfrontier_ns = 0;
+    uint64_t round_absorption_ns = 0;
+    uint64_t worker_wave_ns = 0;
+    uint64_t worker_wave_prepare_ns = 0;
+    uint64_t worker_wave_wait_ns = 0;
+    uint64_t worker_wave_gather_ns = 0;
+    uint64_t private_command_sum_ns = 0;
+    uint64_t private_command_max_ns = 0;
+    uint64_t private_scope_setup_ns = 0;
+    uint64_t checkpoint_capture_ns = 0;
+    uint64_t checkpoint_restore_ns = 0;
+    uint64_t coordinator_boundary_ns = 0;
+    uint64_t settle_round_ns = 0;
+    std::array<
+        uint64_t,
+        PRIVATE_CORE_STOP_REASON_COUNT>
+        coordinator_boundary_origin_ns{};
+    std::array<
+        uint64_t,
+        HOST_PROFILE_MAX_LANES>
+        lane_active_ns{};
+
+    void start_session() noexcept {
+        const uint64_t next_generation =
+            generation ==
+                std::numeric_limits<uint64_t>::max()
+            ? generation
+            : generation + 1;
+        *this = ConcurrencyProfileCounters{};
+        generation = next_generation;
+        enabled = true;
+    }
+};
+
 class SharedMemoryExecutionAdmission;
+
+struct PrivateCoreHostTelemetry {
+    uint64_t execution_ns = 0;
+    uint64_t scope_setup_ns = 0;
+    uint64_t checkpoint_capture_ns = 0;
+    uint64_t checkpoint_restore_ns = 0;
+    uint64_t classification_calls = 0;
+    uint64_t checkpoint_captures = 0;
+    uint64_t checkpoint_restores = 0;
+};
 
 struct PrivateCoreCommand {
     uint64_t command_sequence = 0;
@@ -2219,6 +2379,9 @@ struct PrivateCoreCommand {
     bool strict_cycle_one_instruction = false;
     CPUState* core = nullptr;
     std::shared_ptr<SharedMemoryExecutionAdmission> admission;
+    // Non-owning per-command sidecar. It is non-null only during an opt-in
+    // unbounded profile wave and outlives every mailbox copy of this command.
+    PrivateCoreHostTelemetry* host_telemetry = nullptr;
 };
 
 struct PrivateCoreResult {
@@ -2430,9 +2593,16 @@ public:
     }
 
     std::vector<PrivateCoreResult> execute_wave(
-            std::vector<PrivateCoreCommand> commands) {
+            std::vector<PrivateCoreCommand> commands,
+            WorkerWaveHostTiming* host_timing = nullptr) {
         if (commands.empty())
             return {};
+        const bool host_profile_enabled =
+            host_timing != nullptr;
+        const auto prepare_started =
+            host_profile_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         if (commands.size() >
             static_cast<std::size_t>(worker_count_)) {
             throw std::invalid_argument(
@@ -2556,6 +2726,10 @@ public:
         wave_active_ = true;
         work_ready_.notify_all();
         lock.unlock();
+        if (host_profile_enabled) {
+            host_timing->prepare_ns =
+                host_elapsed_ns(prepare_started);
+        }
 
         std::optional<PrivateCoreResult> inline_result;
         if (inline_command.has_value()) {
@@ -2564,6 +2738,10 @@ public:
                     *inline_command);
         }
 
+        const auto wait_started =
+            host_profile_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         lock.lock();
         completion_ready_.wait(
             lock,
@@ -2585,7 +2763,15 @@ public:
                 }
                 return true;
             });
+        if (host_profile_enabled) {
+            host_timing->wait_ns =
+                host_elapsed_ns(wait_started);
+        }
 
+        const auto gather_started =
+            host_profile_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         for (const PrivateCoreCommand& command : commands) {
             PrivateCoreResult result;
             if (command.lane_index == 0) {
@@ -2621,6 +2807,10 @@ public:
         wave_active_ = false;
         lock.unlock();
         work_ready_.notify_all();
+        if (host_profile_enabled) {
+            host_timing->gather_ns =
+                host_elapsed_ns(gather_started);
+        }
         return results;
     }
 
@@ -3003,6 +3193,11 @@ struct SystemState {
     int scheduler_cursor = 0;
     uint64_t native_batch_runs = 0;
     uint64_t native_dispatches = 0;
+    // Phase 4 host-only diagnostics. These counters are opt-in, never enter
+    // architectural snapshots or scheduler decisions, and are mutated only
+    // while the coordinator owns scheduler_mutex.
+    ConcurrencyProfileCounters concurrency_profile{};
+    bool concurrency_profile_batch_active = false;
     std::atomic<bool> native_batch_active{false};
     std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
@@ -9207,7 +9402,8 @@ public:
 
 static int trap_id_from_runtime_error(const std::string& what);
 
-static PrivateCoreResult execute_private_core_command(
+template <bool HOST_PROFILE>
+static PrivateCoreResult execute_private_core_command_body(
         const PrivateCoreCommand& command) noexcept {
     PrivateCoreResult result;
     result.command_sequence = command.command_sequence;
@@ -9232,11 +9428,54 @@ static PrivateCoreResult execute_private_core_command(
     result.end_pc = result.start_pc;
     std::optional<CPUExecutionCheckpoint>
         command_checkpoint;
+    auto restore_checkpoint = [&]() {
+        if (!command_checkpoint.has_value())
+            return;
+        std::chrono::steady_clock::time_point
+            restore_started{};
+        if constexpr (HOST_PROFILE) {
+            restore_started =
+                std::chrono::steady_clock::now();
+        }
+        command_checkpoint->restore(core);
+        if constexpr (HOST_PROFILE) {
+            host_saturating_increment(
+                command.host_telemetry->
+                    checkpoint_restores);
+            host_saturating_add(
+                command.host_telemetry->
+                    checkpoint_restore_ns,
+                host_elapsed_ns(restore_started));
+        }
+    };
 
     try {
+        std::chrono::steady_clock::time_point
+            scope_started{};
+        if constexpr (HOST_PROFILE) {
+            scope_started =
+                std::chrono::steady_clock::now();
+        }
         PrivateCoreExecutionScope execution_scope(
             core, command.admission);
+        if constexpr (HOST_PROFILE) {
+            command.host_telemetry->scope_setup_ns =
+                host_elapsed_ns(scope_started);
+        }
+        std::chrono::steady_clock::time_point
+            checkpoint_started{};
+        if constexpr (HOST_PROFILE) {
+            checkpoint_started =
+                std::chrono::steady_clock::now();
+        }
         command_checkpoint.emplace(core);
+        if constexpr (HOST_PROFILE) {
+            command.host_telemetry->
+                checkpoint_captures = 1;
+            command.host_telemetry->
+                checkpoint_capture_ns =
+                host_elapsed_ns(checkpoint_started);
+        }
 
         if (
             core.profile != CoreProfile::FULL &&
@@ -9295,6 +9534,11 @@ static PrivateCoreResult execute_private_core_command(
                 break;
             }
 
+            if constexpr (HOST_PROFILE) {
+                host_saturating_increment(
+                    command.host_telemetry->
+                        classification_calls);
+            }
             const PrivateInstructionDisposition
                 disposition =
                     classify_private_core_instruction(
@@ -9373,8 +9617,7 @@ static PrivateCoreResult execute_private_core_command(
                 "from one-cycle execution");
         }
     } catch (const std::exception& error) {
-        if (command_checkpoint.has_value())
-            command_checkpoint->restore(core);
+        restore_checkpoint();
         result.steps_executed = 0;
         result.total_cycles = 0;
         result.stop_reason =
@@ -9383,8 +9626,7 @@ static PrivateCoreResult execute_private_core_command(
         result.interrupt_vector = -1;
         result.internal_error = error.what();
     } catch (...) {
-        if (command_checkpoint.has_value())
-            command_checkpoint->restore(core);
+        restore_checkpoint();
         result.steps_executed = 0;
         result.total_cycles = 0;
         result.stop_reason =
@@ -9396,6 +9638,23 @@ static PrivateCoreResult execute_private_core_command(
     }
 
     result.end_pc = pc(core);
+    return result;
+}
+
+static PrivateCoreResult execute_private_core_command(
+        const PrivateCoreCommand& command) noexcept {
+    if (command.host_telemetry == nullptr) {
+        return execute_private_core_command_body<
+            false>(
+            command);
+    }
+    const auto started =
+        std::chrono::steady_clock::now();
+    PrivateCoreResult result =
+        execute_private_core_command_body<true>(
+            command);
+    command.host_telemetry->execution_ns =
+        host_elapsed_ns(started);
     return result;
 }
 
@@ -9840,6 +10099,32 @@ struct NativeBatchActiveGuard {
     }
 };
 
+struct ConcurrencyProfileBatchGuard {
+    SystemState& system;
+
+    explicit ConcurrencyProfileBatchGuard(
+            SystemState& system_value,
+            bool enabled)
+        : system(system_value) {
+        if (system.concurrency_profile_batch_active) {
+            throw std::logic_error(
+                "native concurrency profile batch is already active");
+        }
+        system.concurrency_profile_batch_active =
+            enabled;
+    }
+
+    ConcurrencyProfileBatchGuard(
+        const ConcurrencyProfileBatchGuard&) = delete;
+    ConcurrencyProfileBatchGuard& operator=(
+        const ConcurrencyProfileBatchGuard&) = delete;
+
+    ~ConcurrencyProfileBatchGuard() {
+        system.concurrency_profile_batch_active =
+            false;
+    }
+};
+
 static int64_t checked_scheduler_add(
         int64_t current,
         int64_t increment,
@@ -9970,10 +10255,52 @@ static SystemBatchResult run_native_system_batch(
     checked_scheduler_increment(
         system.native_batch_runs,
         "batch counter");
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    ConcurrencyProfileBatchGuard
+        profile_batch_guard(
+            system,
+            host_profile_enabled);
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.batches);
+    }
+    HostProfileWallTimer batch_timer(
+        host_profile_enabled,
+        &profile.batch_total_ns);
+    auto profiled_settle_round = [&](
+            int64_t cycles,
+            bool deliver_interrupts,
+            bool batch_end,
+            bool record_boundary) {
+        if (host_profile_enabled) {
+            host_saturating_increment(
+                profile.settle_round_calls);
+        }
+        HostProfileWallTimer settle_timer(
+            host_profile_enabled,
+            &profile.settle_round_ns);
+        settle_round(
+            cycles,
+            deliver_interrupts,
+            batch_end,
+            record_boundary);
+    };
 
     // Wake checks are a Python compatibility boundary, but execute while the
     // native scheduler mutex excludes deadline and clock mutation.
-    prepare_batch();
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.prepare_batch_calls);
+    }
+    {
+        HostProfileWallTimer prepare_timer(
+            host_profile_enabled,
+            &profile.prepare_batch_ns);
+        prepare_batch();
+    }
 
     const bool any_active = std::any_of(
         system.execution_cores.begin(),
@@ -10074,7 +10401,7 @@ static SystemBatchResult run_native_system_batch(
             // the same private boundary before ordered settlement began.
             // Settle those prefixes, all earlier successful boundaries,
             // and all prior sub-frontiers in this scheduler round.
-            settle_round(
+            profiled_settle_round(
                 outcome.cycles,
                 true,
                 true,
@@ -10091,7 +10418,7 @@ static SystemBatchResult run_native_system_batch(
         // A complete equal-credit scheduler round, rather than a
         // physical cohort or cache/shared sub-frontier, is the unbounded
         // scheduler's clock, device, and interrupt boundary.
-        settle_round(
+        profiled_settle_round(
             outcome.cycles,
             true,
             false,
@@ -10121,7 +10448,8 @@ static SystemBatchResult run_native_system_batch(
             break;
     }
 
-    settle_round(0, false, true, false);
+    profiled_settle_round(
+        0, false, true, false);
     result.system_cycles_advanced =
         system.shared_clock.cycles() -
         clock_start;
@@ -12142,6 +12470,115 @@ acquire_system_scheduler_lock(SystemState& system) {
         system.scheduler_mutex);
 }
 
+static void record_private_wave_profile(
+        SystemState& system,
+        const std::vector<PrivateCoreResult>& results,
+        const std::vector<
+            PrivateCoreHostTelemetry>& telemetry,
+        const WorkerWaveHostTiming& wave_timing,
+        uint64_t wave_ns) noexcept {
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    if (!profile.enabled)
+        return;
+    if (results.size() != telemetry.size())
+        return;
+
+    host_saturating_increment(profile.worker_waves);
+    host_saturating_add(
+        profile.worker_wave_ns, wave_ns);
+    host_saturating_add(
+        profile.worker_wave_prepare_ns,
+        wave_timing.prepare_ns);
+    host_saturating_add(
+        profile.worker_wave_wait_ns,
+        wave_timing.wait_ns);
+    host_saturating_add(
+        profile.worker_wave_gather_ns,
+        wave_timing.gather_ns);
+
+    for (
+        std::size_t index = 0;
+        index < results.size();
+        index++
+    ) {
+        const PrivateCoreResult& result =
+            results[index];
+        const PrivateCoreHostTelemetry&
+            host = telemetry[index];
+        host_saturating_increment(
+            profile.worker_commands);
+        if (result.steps_executed == 0) {
+            host_saturating_increment(
+                profile.zero_step_commands);
+        } else if (result.steps_executed > 0) {
+            host_saturating_add(
+                profile.private_steps,
+                static_cast<uint64_t>(
+                    result.steps_executed));
+        }
+        host_saturating_add(
+            profile.private_classification_calls,
+            host.classification_calls);
+        host_saturating_add(
+            profile.checkpoint_captures,
+            host.checkpoint_captures);
+        host_saturating_add(
+            profile.checkpoint_restores,
+            host.checkpoint_restores);
+        host_saturating_add(
+            profile.private_command_sum_ns,
+            host.execution_ns);
+        profile.private_command_max_ns =
+            std::max(
+                profile.private_command_max_ns,
+                host.execution_ns);
+        host_saturating_add(
+            profile.private_scope_setup_ns,
+            host.scope_setup_ns);
+        host_saturating_add(
+            profile.checkpoint_capture_ns,
+            host.checkpoint_capture_ns);
+        host_saturating_add(
+            profile.checkpoint_restore_ns,
+            host.checkpoint_restore_ns);
+
+        const std::size_t reason =
+            static_cast<std::size_t>(
+                result.stop_reason);
+        if (
+            reason <
+            profile.private_stop_reasons.size()
+        ) {
+            host_saturating_increment(
+                profile.private_stop_reasons[
+                    reason]);
+        }
+
+        if (
+            result.lane_index >= 0 &&
+            static_cast<std::size_t>(
+                result.lane_index) <
+                HOST_PROFILE_MAX_LANES
+        ) {
+            const std::size_t lane =
+                static_cast<std::size_t>(
+                    result.lane_index);
+            host_saturating_increment(
+                profile.lane_commands[lane]);
+            if (result.steps_executed > 0) {
+                host_saturating_add(
+                    profile.lane_steps[lane],
+                    static_cast<uint64_t>(
+                        result.steps_executed));
+            }
+            host_saturating_add(
+                profile.lane_active_ns[lane],
+                host.execution_ns);
+        }
+    }
+}
+
 static std::vector<PrivateCoreResult>
 execute_private_core_wave_under_active_batch(
         SystemState& system,
@@ -12180,8 +12617,22 @@ execute_private_core_wave_under_active_batch(
             "event horizon");
     }
 
+    const bool host_profile_enabled =
+        system.concurrency_profile_batch_active;
+    std::vector<PrivateCoreHostTelemetry>
+        command_telemetry;
+    if (host_profile_enabled) {
+        command_telemetry.resize(commands.size());
+    }
+
     CPUState* inline_core = nullptr;
-    for (PrivateCoreCommand& command : commands) {
+    for (
+        std::size_t command_index = 0;
+        command_index < commands.size();
+        command_index++
+    ) {
+        PrivateCoreCommand& command =
+            commands[command_index];
         if (
             command.core_index < 0 ||
             command.core_index >=
@@ -12197,6 +12648,10 @@ execute_private_core_wave_under_active_batch(
         command.pending_interrupt_vector =
             pending_enabled_core_interrupt(
                 system, *command.core);
+        command.host_telemetry =
+            host_profile_enabled
+            ? &command_telemetry[command_index]
+            : nullptr;
         if (command.lane_index == 0)
             inline_core = command.core;
     }
@@ -12236,11 +12691,30 @@ execute_private_core_wave_under_active_batch(
 
     system.mappings_sealed = true;
 
+    WorkerWaveHostTiming wave_timing;
+    const auto wave_started =
+        host_profile_enabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
+    std::vector<PrivateCoreResult> results;
     {
         py::gil_scoped_release release;
-        return system.worker_pool->execute_wave(
-            std::move(commands));
+        results =
+            system.worker_pool->execute_wave(
+                std::move(commands),
+                host_profile_enabled
+                ? &wave_timing
+                : nullptr);
     }
+    if (host_profile_enabled) {
+        record_private_wave_profile(
+            system,
+            results,
+            command_telemetry,
+            wave_timing,
+            host_elapsed_ns(wave_started));
+    }
+    return results;
 }
 
 static std::vector<PrivateCoreResult>
@@ -12408,6 +12882,42 @@ settle_private_core_terminal(
         const PrivateCoreResult& private_result,
         int64_t max_steps,
         const py::function& settle_continuation) {
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    const std::size_t profile_origin =
+        static_cast<std::size_t>(
+            private_result.stop_reason);
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.coordinator_boundaries);
+        if (
+            profile_origin <
+            profile.coordinator_boundary_origins.size()
+        ) {
+            host_saturating_increment(
+                profile.coordinator_boundary_origins[
+                    profile_origin]);
+        }
+    }
+    HostProfileWallTimer boundary_timer(
+        host_profile_enabled,
+        &profile.coordinator_boundary_ns);
+    HostProfileWallTimer origin_timer(
+        host_profile_enabled &&
+            profile_origin <
+                profile
+                    .coordinator_boundary_origin_ns
+                    .size(),
+        profile_origin <
+                profile
+                    .coordinator_boundary_origin_ns
+                    .size()
+            ? &profile
+                .coordinator_boundary_origin_ns[
+                    profile_origin]
+            : nullptr);
     CPUState& core =
         *system.execution_cores[
             static_cast<std::size_t>(core_index)];
@@ -12447,6 +12957,42 @@ settle_private_core_coordinator_instruction(
         const StepCallbacks& callbacks,
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error) {
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    const std::size_t profile_origin =
+        static_cast<std::size_t>(
+            private_result.stop_reason);
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.coordinator_boundaries);
+        if (
+            profile_origin <
+            profile.coordinator_boundary_origins.size()
+        ) {
+            host_saturating_increment(
+                profile.coordinator_boundary_origins[
+                    profile_origin]);
+        }
+    }
+    HostProfileWallTimer boundary_timer(
+        host_profile_enabled,
+        &profile.coordinator_boundary_ns);
+    HostProfileWallTimer origin_timer(
+        host_profile_enabled &&
+            profile_origin <
+                profile
+                    .coordinator_boundary_origin_ns
+                    .size(),
+        profile_origin <
+                profile
+                    .coordinator_boundary_origin_ns
+                    .size()
+            ? &profile
+                .coordinator_boundary_origin_ns[
+                    profile_origin]
+            : nullptr);
     CPUState& core =
         *system.execution_cores[
             static_cast<std::size_t>(core_index)];
@@ -12580,6 +13126,17 @@ static void run_parallel_core_subfrontier(
         CoreFrontierOutcome& outcome) {
     if (reservations.empty())
         return;
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.logical_subfrontiers);
+    }
+    HostProfileWallTimer subfrontier_timer(
+        host_profile_enabled,
+        &profile.logical_subfrontier_ns);
     if (
         callbacks.size() !=
         system.execution_cores.size()
@@ -13686,6 +14243,17 @@ static void run_parallel_core_round(
         CoreFrontierOutcome& outcome) {
     if (reservations.empty())
         return;
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.scheduler_rounds);
+    }
+    HostProfileWallTimer round_timer(
+        host_profile_enabled,
+        &profile.scheduler_round_ns);
     if (!system.worker_pool)
         throw std::logic_error(
             "native worker pool is unavailable");
@@ -14093,6 +14661,13 @@ static void run_parallel_core_round(
                 bool execution_stopped) {
             if (absorbed)
                 return;
+            if (host_profile_enabled) {
+                host_saturating_increment(
+                    profile.round_absorptions);
+            }
+            HostProfileWallTimer absorption_timer(
+                host_profile_enabled,
+                &profile.round_absorption_ns);
 
             std::vector<int64_t> next_remaining_steps =
                 remaining_steps;
@@ -14544,6 +15119,142 @@ static const char* private_full_core_stop_reason_name(
             return "internal_failure";
     }
     return "unknown";
+}
+
+static py::dict concurrency_profile_snapshot_dict(
+        const SystemState& system) {
+    const ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    py::dict private_stop_reasons;
+    py::dict coordinator_boundary_origins;
+    py::dict coordinator_boundary_origin_ns;
+    for (
+        std::size_t index = 0;
+        index < PRIVATE_CORE_STOP_REASON_COUNT;
+        index++
+    ) {
+        const char* name =
+            private_full_core_stop_reason_name(
+                static_cast<PrivateCoreStopReason>(
+                    index));
+        private_stop_reasons[name] =
+            profile.private_stop_reasons[index];
+        coordinator_boundary_origins[name] =
+            profile.coordinator_boundary_origins[
+                index];
+        coordinator_boundary_origin_ns[name] =
+            profile.coordinator_boundary_origin_ns[
+                index];
+    }
+
+    py::list lane_commands;
+    py::list lane_steps;
+    py::list lane_active_ns;
+    for (
+        int lane = 0;
+        lane < system.configured_worker_count;
+        lane++
+    ) {
+        const std::size_t index =
+            static_cast<std::size_t>(lane);
+        lane_commands.append(
+            profile.lane_commands[index]);
+        lane_steps.append(
+            profile.lane_steps[index]);
+        lane_active_ns.append(
+            profile.lane_active_ns[index]);
+    }
+
+    py::dict counts;
+    counts["batches"] = profile.batches;
+    counts["prepare_batch_calls"] =
+        profile.prepare_batch_calls;
+    counts["scheduler_rounds"] =
+        profile.scheduler_rounds;
+    counts["logical_subfrontiers"] =
+        profile.logical_subfrontiers;
+    counts["round_absorptions"] =
+        profile.round_absorptions;
+    counts["worker_waves"] =
+        profile.worker_waves;
+    counts["worker_commands"] =
+        profile.worker_commands;
+    counts["private_steps"] =
+        profile.private_steps;
+    counts["private_classification_calls"] =
+        profile.private_classification_calls;
+    counts["zero_step_commands"] =
+        profile.zero_step_commands;
+    counts["checkpoint_captures"] =
+        profile.checkpoint_captures;
+    counts["checkpoint_restores"] =
+        profile.checkpoint_restores;
+    counts["coordinator_boundaries"] =
+        profile.coordinator_boundaries;
+    counts["settle_round_calls"] =
+        profile.settle_round_calls;
+    counts["private_stop_reasons"] =
+        std::move(private_stop_reasons);
+    counts["coordinator_boundary_origins"] =
+        std::move(
+            coordinator_boundary_origins);
+    counts["lane_commands"] =
+        std::move(lane_commands);
+    counts["lane_steps"] =
+        std::move(lane_steps);
+
+    py::dict wall_ns;
+    wall_ns["batch_total"] =
+        profile.batch_total_ns;
+    wall_ns["prepare_batch"] =
+        profile.prepare_batch_ns;
+    wall_ns["scheduler_round"] =
+        profile.scheduler_round_ns;
+    wall_ns["logical_subfrontier"] =
+        profile.logical_subfrontier_ns;
+    wall_ns["round_absorption"] =
+        profile.round_absorption_ns;
+    wall_ns["worker_wave"] =
+        profile.worker_wave_ns;
+    wall_ns["worker_wave_prepare"] =
+        profile.worker_wave_prepare_ns;
+    wall_ns["worker_wave_wait"] =
+        profile.worker_wave_wait_ns;
+    wall_ns["worker_wave_gather"] =
+        profile.worker_wave_gather_ns;
+    wall_ns["private_command_sum"] =
+        profile.private_command_sum_ns;
+    wall_ns["private_command_max"] =
+        profile.private_command_max_ns;
+    wall_ns["private_scope_setup"] =
+        profile.private_scope_setup_ns;
+    wall_ns["checkpoint_capture"] =
+        profile.checkpoint_capture_ns;
+    wall_ns["checkpoint_restore"] =
+        profile.checkpoint_restore_ns;
+    wall_ns["coordinator_boundary"] =
+        profile.coordinator_boundary_ns;
+    wall_ns["settle_round"] =
+        profile.settle_round_ns;
+    wall_ns["coordinator_boundary_origins"] =
+        std::move(
+            coordinator_boundary_origin_ns);
+
+    py::dict result;
+    result["schema_version"] = 1;
+    result["enabled"] = profile.enabled;
+    result["generation"] = profile.generation;
+    result["architectural_hash_scope"] =
+        "excluded_host_only";
+    result["measurement_scope"] =
+        "unbounded_native_system_batch_only";
+    result["timing_semantics"] =
+        "inclusive_nested_host_wall_nanoseconds";
+    result["counts"] = std::move(counts);
+    result["wall_ns"] = std::move(wall_ns);
+    result["lane_active_ns"] =
+        std::move(lane_active_ns);
+    return result;
 }
 
 static ClusterState& checked_cluster_state(
@@ -16543,6 +17254,52 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
                 result["lanes"] = std::move(lanes);
                 return result;
+            })
+        .def(
+            "_start_concurrency_profile",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "concurrency profiling cannot start "
+                        "during an active native batch");
+                }
+                system.concurrency_profile
+                    .start_session();
+                return
+                    concurrency_profile_snapshot_dict(
+                        system);
+            })
+        .def(
+            "_stop_concurrency_profile",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "concurrency profiling cannot stop "
+                        "during an active native batch");
+                }
+                system.concurrency_profile.enabled =
+                    false;
+                return
+                    concurrency_profile_snapshot_dict(
+                        system);
+            })
+        .def(
+            "_concurrency_profile_snapshot",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(
+                        system);
+                return
+                    concurrency_profile_snapshot_dict(
+                        system);
             })
         .def(
             "_run_private_full_core_commands",

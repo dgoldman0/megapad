@@ -4,7 +4,9 @@ import bench_phase0_concurrency as phase0
 
 
 def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
-    assert phase0.build_parser().parse_args([]).worker_counts == [1, 2, 4]
+    default_args = phase0.build_parser().parse_args([])
+    assert default_args.worker_counts == [1, 2, 4]
+    assert not default_args.host_profile
 
     report = phase0.run_report(
         core_counts=[4],
@@ -18,9 +20,10 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
     )
 
     assert report["schema"] == phase0.SCHEMA
-    assert report["schema_version"] == 8
+    assert report["schema_version"] == 9
     assert report["configuration"]["full_core_counts"] == [4]
     assert report["configuration"]["worker_counts"] == [1, 2, 4]
+    assert not report["configuration"]["host_profile"]
     assert report["configuration"]["execution_order"][
         "worker_count_order"
     ] == [1, 2, 4]
@@ -44,6 +47,7 @@ def test_phase3_benchmark_compares_one_two_and_four_lanes_exactly():
         4,
     ]
     for result in report["results"]:
+        assert result["host_profile_probe"] is None
         assert result["lane_participation"] == {
             "required": True,
             "observed": True,
