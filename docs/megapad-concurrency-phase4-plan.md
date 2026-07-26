@@ -2,8 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Element 1 of 6 complete; Element 2 implementation complete,
-validation and clean evidence in progress
+**Status:** Elements 1 and 2 of 6 complete; Element 3 not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -35,7 +34,7 @@ current milestone, but it does not create a new element or sub-element.
 | Element | Scope | Status |
 |---|---|---|
 | 1 | Measurement and attribution | Complete |
-| 2 | Scheduler/frontier fast path | In progress |
+| 2 | Scheduler/frontier fast path | Complete |
 | 3 | Longer proven-private execution | Pending |
 | 4 | Host decode/JIT-style cache | Pending |
 | 5 | Shared/MMIO/DMA optimization | Pending |
@@ -295,9 +294,9 @@ to Git.
 ## Element 2 implementation record
 
 Element 2 targets the measured per-wave posting, sleeping, collection, and
-unnecessary rollback-copy costs without changing a logical frontier. The
-implementation is complete; its sanitizer close and clean before/after
-benchmark remain acceptance work at this snapshot.
+unnecessary rollback-copy costs without changing a logical frontier. Its
+implementation milestone is
+`e4918e99c314ac1984885e1360a4bc3c75769ba8`.
 
 The worker protocol now publishes `POSTED` mailboxes before unlocking and
 wakes helpers only after the mutex is released. The coordinator no longer
@@ -361,7 +360,102 @@ the Element 1 counts of 40,100 / 20,050 / 10,025 to
 0.901 / 80.972 / 74.368 to approximately
 0.455 / 43.371 / 28.320 milliseconds.
 
-The preliminary sequential oracle selection has 117 passing tests. It covers
+### Clean acceptance comparison
+
+The acceptance comparison built a detached clean worktree at the Element 1
+snapshot and ran the same command there and at the clean Element 2
+implementation:
+
+```text
+python3 bench_phase0_concurrency.py \
+  --cores 4 \
+  --worker-counts 1,2,4 \
+  --scenarios private_compute,shared_memory,mmio_poll \
+  --instructions 500k \
+  --repeats 5 \
+  --warmups 1 \
+  --warmup-instructions 100k \
+  --strict-dma-bytes 1024 \
+  --host-profile
+```
+
+The before invocation ran from
+`/tmp/megapad-p4e2-baseline.fMZeaG` and appended
+`--output /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-concurrency/build/phase4-e2-before.json`.
+The after invocation ran from the isolated concurrency worktree and appended
+`--output build/phase4-e2-after.json`. Timed samples remained unprofiled.
+Profiling was enabled only for each separate accounting replay.
+
+| Field | Element 1 before | Element 2 after |
+|---|---|---|
+| Repository revision | `c5553d46e643ed60d21e06fb67d2bbfda15b6000` | `e4918e99c314ac1984885e1360a4bc3c75769ba8` |
+| Repository dirty flag | `false` | `false` |
+| Report schema | version 9 | version 10 |
+| Canonical-state schema | version 9 | version 9 |
+| Native/profile-probe schema | version 1 / version 1 | version 2 / version 2 |
+| Generated | `2026-07-26T20:25:31.238307+00:00` | `2026-07-26T20:25:58.395249+00:00` |
+| JSON size | 21,226,783 bytes | 21,238,647 bytes |
+| JSON SHA-256 | `e7cf1f6cc33e8b5d2cf04c61e31f9348e5b209fd5fc1a2aa4ae985b1e68ddd8b` | `9791eadc2018fe0e0eeb30087e58732659749f18adc5f18366bb792f2c72531d` |
+| Fixture-manifest SHA-256 | `b3867065c27ffd638315552453de988003d7b9e77b2f5801262fd4ce87c6436f` | `b3867065c27ffd638315552453de988003d7b9e77b2f5801262fd4ce87c6436f` |
+| Native artifact size | 2,187,488 bytes | 2,195,768 bytes |
+| Native artifact SHA-256 | `ee41c3af45e2842fc64d0b8b7345c93e28ed38ca9e5d74b4d7471e8e6a66511e` | `5c6987c997d976938344caffb305ded753ac3614cb0dfbe656572e33ae8b3ccf` |
+| Native ELF build ID | `0328d64e2fe07bacc40970e0b91520f10f73e66f` | `5f9012e30b0f0855377e245aa88007589497d79b` |
+| Benchmark resource use | 29.15 seconds; 140,644 KiB peak; no swap | 20.68 seconds; 150,128 KiB peak; no swap |
+
+Both reports have all 24 report-level validations true. Every one of the nine
+Element 1 probes has all 29 schema-1 reconciliations true; every Element 2
+probe has all 37 schema-2 reconciliations true. Before/after canonical state,
+behavior, and ordered public-accounting hashes match for every corresponding
+workload and lane width. Strict NIC/disk DMA behavior and state also remain
+cross-width and before/after exact.
+
+Median uninstrumented aggregate throughput is:
+
+| Workload | Lanes | Before MIPS | After MIPS | Change |
+|---|---:|---:|---:|---:|
+| Private compute | 1 | 41.800 | 44.103 | +5.5% |
+| Private compute | 2 | 63.243 | 63.026 | -0.3% |
+| Private compute | 4 | 95.696 | 103.250 | +7.9% |
+| Shared memory | 1 | 1.629 | 1.767 | +8.5% |
+| Shared memory | 2 | 0.652 | 1.018 | +56.1% |
+| Shared memory | 4 | 0.640 | 1.243 | +94.3% |
+| MMIO poll | 1 | 1.051 | 1.116 | +6.2% |
+| MMIO poll | 2 | 0.525 | 0.723 | +37.8% |
+| MMIO poll | 4 | 0.518 | 0.885 | +70.9% |
+
+The private two-lane control moved by -0.3%, while the other private controls
+moved positively; this does not indicate a systematic private-compute
+regression. The short strict-DMA throughput medians moved by
++3.2% / +1.9% / -5.2% at one/two/four lanes. Element 2 does not claim a DMA
+speedup, and the strict path retains exact state, behavior, service trace,
+virtual-cycle cost, and focused strict-cycle oracles.
+
+The profiled shared and MMIO replays each route 200,500 logical commands.
+Element 1 sent all 200,500 to workers and captured 200,500 checkpoints.
+Element 2 bypasses 100,500 proven zero-progress commands, posts 100,000
+commands, and captures 100,000 checkpoints. Planned/actual pool waves change
+from 200,500/200,500 to 200,500/100,000 at one lane, from
+100,250/100,250 to 100,250/50,000 at two lanes, and from 50,125/50,125 to
+50,125/25,000 at four lanes.
+
+| Workload | Lanes | Before worker wait | After worker wait | Change |
+|---|---:|---:|---:|---:|
+| Shared memory | 1 | 4.502 ms | 2.242 ms | -50.2% |
+| Shared memory | 2 | 385.292 ms | 217.125 ms | -43.6% |
+| Shared memory | 4 | 415.957 ms | 167.197 ms | -59.8% |
+| MMIO poll | 1 | 4.532 ms | 2.543 ms | -43.9% |
+| MMIO poll | 2 | 382.623 ms | 224.696 ms | -41.3% |
+| MMIO poll | 4 | 367.483 ms | 162.399 ms | -55.8% |
+
+These nested profile timings include instrumentation and are diagnostic, but
+the independent uninstrumented medians confirm the retained optimization.
+The detached baseline worktree was clean, copied no generated artifacts into
+Git, and was removed after the two reports and their identities were captured.
+
+### Regression and sanitizer close
+
+The clean implementation revision passes a 117-test sequential affected
+selection in 1.67 seconds at 81,500 KiB peak with no swap. It covers
 the complete logical frontier, equal QoS, cyclic commits, callback-failure
 prefixes, reduced-core arbitration, direct private execution, worker
 lifecycle, profile reconciliation, and report schema. New fixtures preserve a
@@ -377,6 +471,11 @@ tests; all passed in 68.90 seconds at 2,307,656 KiB peak with no sanitizer
 finding or swap. The same 13 tests passed under TSan in 36.73 seconds at
 1,837,472 KiB peak with no race report or swap. The affected ordinary
 selection and both sanitizer runs were foreground and sequential.
+
+Element 2 is complete. The generated before/after JSON reports remain ignored;
+their exact source and artifact identities, hashes, sizes, parameters, and
+resource measurements are recorded above. Element 3 begins from the
+`e4918e9` implementation and this evidence snapshot.
 
 ## Design-contention ledger
 
