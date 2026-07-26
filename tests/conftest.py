@@ -1,13 +1,14 @@
 """
 Pytest configuration for Megapad-64 test suite.
 
-ALWAYS use the Makefile targets — they build the C++ accelerator,
-run tests in the background, and provide a live dashboard:
+ALWAYS use the Makefile targets — they build the C++ accelerator and
+provide either a foreground sequential run or a monitored background run:
 
-    make test               # background + live dashboard (DEFAULT)
-    make test-one K=X       # single test/class + monitoring
-    make test-quick         # quick BIOS+CPU smoke test
-    make test-status        # show progress
+    make test                  # sequential background + dashboard (DEFAULT)
+    make test-one K=X          # sequential single test/class + monitoring
+    make test-sequential K=X   # sequential foreground subset
+    make test-quick            # quick BIOS+CPU smoke test
+    make test-status           # show progress
 
 Running `python -m pytest` directly will fail.  No exceptions.
 """
@@ -58,14 +59,16 @@ def pytest_configure(config):
             "\n"
             "  Use the Makefile targets instead:\n"
             "\n"
-            "    make test               # background + dashboard (~1 min)\n"
-            "    make test-one K=TestFoo  # single test/class + monitoring\n"
-            "    make test-quick          # quick BIOS+CPU smoke test\n"
+            "    make test                  # sequential background + dashboard\n"
+            "    make test-one K=TestFoo     # sequential subset + monitoring\n"
+            "    make test-sequential K=Foo  # sequential foreground subset\n"
+            "    make test-quick             # quick BIOS+CPU smoke test\n"
             "═══════════════════════════════════════════════════════\n"
         )
         pytest.exit(msg, returncode=1)
 
-    # Register live monitor plugin — but NOT on xdist workers.
+    # Register live monitor plugin — but NOT on xdist workers if an
+    # explicitly authorized parallel run invokes pytest-xdist.
     # With xdist (-n N), each worker gets its own pytest session.
     # If a worker writes status, it clobbers the controller's status
     # (e.g. marking "finished" when only that worker is done).
@@ -241,4 +244,3 @@ def _fmt_duration(seconds):
         return f"{m}m{s:02d}s"
     else:
         return f"{s}s"
-

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -78,6 +79,24 @@ def _stop_if_owned(state_path: Path) -> None:
             "--grace-seconds",
             "0.1",
         )
+
+
+def _assert_pytest_commands_are_sequential(output: str) -> None:
+    logical_output = output.replace("\\\n", " ")
+    commands = re.findall(
+        r"env MP64_VIA_MAKE=1\b[^;]*",
+        logical_output,
+    )
+    for command in commands:
+        if "pytest" in command:
+            assert not re.search(
+                r"(?:^|\s)-n(?:\s+|=)?\S+",
+                command,
+            )
+            assert "--dist" not in command
+            assert "--numprocesses" not in command
+            assert "PYTEST_ADDOPTS=" in command
+            assert "-o addopts=" in command
 
 
 def test_start_uses_private_session_and_cleans_state_on_natural_exit(tmp_path):
@@ -319,8 +338,151 @@ def test_second_start_refuses_live_owner_and_preserves_original_state(tmp_path):
         assert "tests already running" in second.stderr
         assert state_path.read_bytes() == original_state
         assert not second_output_path.exists()
+
+        foreground = _run_cli(
+            "foreground",
+            "--state",
+            str(state_path),
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        )
+
+        assert foreground.returncode == 1
+        assert "tests already running" in foreground.stderr
+        assert state_path.read_bytes() == original_state
     finally:
         _stop_if_owned(state_path)
+
+
+def test_foreground_claim_blocks_background_start_until_completion(tmp_path):
+    state_path = tmp_path / "test.pid"
+    status_path = tmp_path / "test-status.json"
+    output_path = tmp_path / "background-output.txt"
+    ready_path = tmp_path / "foreground-ready"
+    release_path = tmp_path / "foreground-release"
+    status_path.write_text("stale status")
+    foreground_code = """
+import pathlib
+import sys
+import time
+ready = pathlib.Path(sys.argv[1])
+release = pathlib.Path(sys.argv[2])
+ready.write_text("ready")
+while not release.exists():
+    time.sleep(0.01)
+"""
+    foreground_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(SUPERVISOR),
+            "foreground",
+            "--state",
+            str(state_path),
+            "--status",
+            str(status_path),
+            "--",
+            sys.executable,
+            "-c",
+            foreground_code,
+            str(ready_path),
+            str(release_path),
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        _wait_until(ready_path.exists)
+        assert not state_path.exists()
+        assert not status_path.exists()
+
+        background = _run_cli(
+            "start",
+            "--state",
+            str(state_path),
+            "--output",
+            str(output_path),
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        )
+
+        assert background.returncode == 1
+        assert "tests already running" in background.stderr
+        assert not output_path.exists()
+
+        release_path.write_text("release")
+        _, stderr = foreground_process.communicate(timeout=3)
+        assert foreground_process.returncode == 0, stderr
+        assert not state_path.exists()
+    finally:
+        _stop_if_owned(state_path)
+        if foreground_process.poll() is None:
+            release_path.write_text("release")
+            try:
+                foreground_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                foreground_process.terminate()
+                foreground_process.wait(timeout=2)
+
+
+def test_foreground_exec_preserves_status_and_releases_lock_on_signal(
+    tmp_path,
+):
+    state_path = tmp_path / "test.pid"
+    ready_path = tmp_path / "foreground-ready"
+    foreground_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(SUPERVISOR),
+            "foreground",
+            "--state",
+            str(state_path),
+            "--",
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, sys, time; "
+                "pathlib.Path(sys.argv[1]).write_text('ready'); "
+                "time.sleep(60)"
+            ),
+            str(ready_path),
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        _wait_until(ready_path.exists)
+        assert not state_path.exists()
+
+        foreground_process.terminate()
+        foreground_process.wait(timeout=2)
+        assert foreground_process.returncode == -signal.SIGTERM
+
+        followup = _run_cli(
+            "foreground",
+            "--state",
+            str(state_path),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(7)",
+        )
+
+        assert followup.returncode == 7
+        assert not state_path.exists()
+    finally:
+        if foreground_process.poll() is None:
+            foreground_process.kill()
+            foreground_process.wait(timeout=2)
 
 
 @pytest.mark.parametrize(
@@ -348,6 +510,7 @@ def test_make_background_targets_delegate_ownership(target, verb):
         assert "--status \"$status_file\"" in result.stdout
         assert "--output \"$output_file\"" in result.stdout
         assert "nohup " not in result.stdout
+    _assert_pytest_commands_are_sequential(result.stdout)
 
 
 def test_plain_make_keeps_background_test_as_the_default_goal():
@@ -366,3 +529,29 @@ def test_plain_make_keeps_background_test_as_the_default_goal():
 
     assert "Starting tests in background (C++ accel)" in result.stdout
     assert "test_process_supervisor.py start" in result.stdout
+    _assert_pytest_commands_are_sequential(result.stdout)
+
+
+def test_make_sequential_target_uses_owned_foreground_pytest_process():
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-n",
+            "test-sequential",
+            "TEST_PATH=tests/test_test_process_supervisor.py",
+            "VENV_PY=python3",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "MP64_VIA_MAKE=1 PYTEST_ADDOPTS=" in result.stdout
+    assert "python3 -m pytest" in result.stdout
+    assert "tests/test_test_process_supervisor.py" in result.stdout
+    assert "exec python3 test_process_supervisor.py foreground" in result.stdout
+    assert "--state \"$pid_file\"" in result.stdout
+    assert "--status \"$status_file\"" in result.stdout
+    _assert_pytest_commands_are_sequential(result.stdout)

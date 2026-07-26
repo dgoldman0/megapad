@@ -4,14 +4,16 @@
 # The C++ accelerator (~50x faster than CPython, ~10x faster than PyPy)
 # is the DEFAULT test backend.  All targets auto-build it.
 #
-#   make test           Background + live dashboard   (DEFAULT, ~1 min)
-#   make test K=X       Background subset
-#   make test-one K=X   Background single test/class + monitoring
-#   make test-status    One-shot progress dashboard
-#   make test-watch     Auto-refresh dashboard every 5s
-#   make test-failures  Show only failures
-#   make test-kill      Kill stuck background run
-#   make test-quick     Quick BIOS+CPU smoke test     (~3 sec)
+#   make test                  Sequential background + dashboard (DEFAULT)
+#   make test K=X              Sequential background subset
+#   make test-one K=X          Sequential single test/class + monitoring
+#   make test-sequential       Sequential foreground suite
+#   make test-sequential K=X   Sequential foreground subset
+#   make test-status           One-shot progress dashboard
+#   make test-watch            Auto-refresh dashboard every 5s
+#   make test-failures         Show only failures
+#   make test-kill             Kill stuck background run
+#   make test-quick            Quick BIOS+CPU smoke test     (~3 sec)
 #
 # Real-network tests (requires TAP — see tests/test_live_net.py):
 #   make test-net       All live-net tests against TAP device
@@ -26,10 +28,11 @@
 
 .DEFAULT_GOAL := test
 
-VENV_PY  := .venv/bin/python
+VENV_PY  ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTEST   := -m pytest tests/
-WORKERS  := 8
-PYTEST_ARGS := -n $(WORKERS) --dist loadgroup --tb=long
+PYTEST_CONFIG_ARGS := -o addopts=
+PYTEST_ARGS := $(PYTEST_CONFIG_ARGS) --tb=long
+TEST_PATH ?= tests/
 
 export MP64_RUNTIME_NAMESPACE
 RUNTIME_PATHS := python3 runtime_paths.py
@@ -62,6 +65,20 @@ bench: accel
 .PHONY: test
 test: test-bg
 
+# --- Foreground sequential test run ---
+# Usage: make test-sequential
+#        make test-sequential TEST_PATH=tests/test_system.py
+#        make test-sequential K=TestFoo
+.PHONY: test-sequential
+test-sequential: accel
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	exec $(TEST_SUPERVISOR) foreground \
+		--state "$$pid_file" --status "$$status_file" -- \
+		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= \
+			$(VENV_PY) -m pytest $(TEST_PATH) \
+			$(PYTEST_CONFIG_ARGS) --tb=long $(if $(K),-k "$(K)",)
+
 # --- Quick smoke test: BIOS + CPU only ---
 .PHONY: test-quick
 test-quick: accel
@@ -70,12 +87,10 @@ test-quick: accel
 	echo "Starting quick smoke test in background..."; \
 	$(TEST_SUPERVISOR) start \
 		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
-		env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short; \
+		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= $(VENV_PY) $(PYTEST) $(PYTEST_CONFIG_ARGS) -k "TestBIOS and not test_autoboot or TestMulticore" --tb=short; \
 	echo "Monitor: make test-status  |  make test-watch"
 
-# --- Single test (usage: make test-one K=TestFoo) ---
-# Runs sequentially (-n 1) to avoid spawning 8 workers that each
-# independently rebuild the KDOS snapshot for a small test subset.
+# --- Single sequential test (usage: make test-one K=TestFoo) ---
 .PHONY: test-one
 test-one: accel
 	@set -eu; \
@@ -84,10 +99,10 @@ test-one: accel
 	echo "Starting tests in background (K=$(K))..."; \
 	$(TEST_SUPERVISOR) start \
 		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
-		env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) -n 1 --dist loadgroup --tb=long -v -k "$(K)"; \
+		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= $(VENV_PY) $(PYTEST) $(PYTEST_CONFIG_ARGS) --tb=long -v -k "$(K)"; \
 	echo "Monitor: make test-status  |  make test-watch"
 
-# --- Background test run with live monitoring ---
+# --- Sequential background test run with live monitoring ---
 # Usage: make test-bg          (full suite)
 #        make test-bg K=TestFoo (subset)
 # Then:  make test-status  or  make test-watch
@@ -99,11 +114,11 @@ test-bg: accel
 	if [ -n "$(K)" ]; then \
 		$(TEST_SUPERVISOR) start \
 			--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
-			env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) -k "$(K)"; \
+			env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= $(VENV_PY) $(PYTEST) $(PYTEST_ARGS) -k "$(K)"; \
 	else \
 		$(TEST_SUPERVISOR) start \
 			--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
-			env MP64_VIA_MAKE=1 $(VENV_PY) $(PYTEST) $(PYTEST_ARGS); \
+			env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= $(VENV_PY) $(PYTEST) $(PYTEST_ARGS); \
 	fi; \
 	echo "Monitor: make test-status  |  make test-watch"
 
@@ -117,7 +132,7 @@ test-net: accel
 	echo "Starting live-network tests in background (TAP: $${MP64_TAP:-mp64tap0})..."; \
 	$(TEST_SUPERVISOR) start \
 		--state "$$pid_file" --status "$$status_file" --output "$$output_file" -- \
-		env MP64_VIA_MAKE=1 $(VENV_PY) -m pytest tests/test_live_net.py tests/test_networking.py -v --tb=long $(if $(K),-k "$(K)",); \
+		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= $(VENV_PY) -m pytest tests/test_live_net.py tests/test_networking.py $(PYTEST_CONFIG_ARGS) -v --tb=long $(if $(K),-k "$(K)",); \
 	echo "Monitor: make test-status  |  make test-watch"
 
 # --- Show live test status ---

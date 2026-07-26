@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Launch and stop background tests with identity-checked ownership.
+"""Launch foreground/background tests with exclusive execution ownership.
 
 The public ``start`` command launches a small supervisor as the leader of a
 new session and process group.  The supervisor owns the test command until it
 finishes and removes its state record on natural completion.  The public
-``stop`` command signals that private session only after the recorded process
-identity and unguessable owner token both match the live supervisor.
+``foreground`` command holds the same execution interlock and replaces itself
+with the test command, preserving normal terminal signals and exit status.
+The public ``stop`` command signals a private background session only after
+the recorded process identity and unguessable owner token both match the live
+supervisor.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 
 _STATE_VERSION = 1
@@ -283,6 +286,55 @@ def _state_lock(state_path: str) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _acquire_execution_lock(state_path: str) -> int:
+    lock_path = f"{state_path}.run.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise SupervisorError(
+            f"cannot open test execution lock {lock_path}: {exc}"
+        ) from exc
+    try:
+        info = os.fstat(descriptor)
+        _validate_owned_regular(info, lock_path)
+        if info.st_nlink != 1:
+            raise SupervisorError(
+                f"unsafe test execution lock has {info.st_nlink} hard links: "
+                f"{lock_path}"
+            )
+        try:
+            fcntl.flock(
+                descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError as exc:
+            raise AlreadyRunningError(
+                "tests already running (foreground execution lock is held)"
+            ) from exc
+        current = os.stat(lock_path, follow_symlinks=False)
+        if (
+            current.st_dev != info.st_dev or
+            current.st_ino != info.st_ino
+        ):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            raise SupervisorError(
+                f"test execution lock changed during acquisition: {lock_path}"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _release_execution_lock(descriptor: int) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def _read_state(
     state_path: str,
 ) -> tuple[OwnershipRecord | None, FileIdentity | None]:
@@ -423,54 +475,62 @@ def _normalize_command(command: Sequence[str]) -> list[str]:
     return normalized
 
 
-def start(
+def _reject_live_owner_or_discard_stale(state_path: str) -> None:
+    try:
+        existing, existing_file = _read_state(state_path)
+    except StateFormatError as exc:
+        raise SupervisorError(
+            f"refusing to replace malformed ownership state: {exc}; "
+            "run 'make test-kill' once to clear it safely"
+        ) from exc
+
+    if existing is None:
+        return
+    matches, reason = _record_matches_live_process(existing)
+    if matches:
+        raise AlreadyRunningError(
+            f"tests already running (PID {existing.pid}); "
+            "use 'make test-kill' first"
+        )
+    _unlink_if_same(state_path, existing_file)
+    print(f"Discarded stale test ownership state: {reason}.", file=sys.stderr)
+
+
+def _launch_supervisor(
     *,
     state_path: str,
     output_path: str,
     status_path: str | None,
     command: Sequence[str],
-) -> int:
-    """Start a detached supervisor and return its positive session-leader PID."""
+) -> tuple[subprocess.Popen[bytes], OwnershipRecord]:
+    """Claim the test slot and launch its private session leader."""
     normalized_command = _normalize_command(command)
     with _state_lock(state_path):
-        try:
-            existing, existing_file = _read_state(state_path)
-        except StateFormatError as exc:
-            raise SupervisorError(
-                f"refusing to replace malformed ownership state: {exc}; "
-                "run 'make test-kill' once to clear it safely"
-            ) from exc
-
-        if existing is not None:
-            matches, reason = _record_matches_live_process(existing)
-            if matches:
-                raise AlreadyRunningError(
-                    f"tests already running (PID {existing.pid}); "
-                    "use 'make test-kill' first"
-                )
-            _unlink_if_same(state_path, existing_file)
-            print(f"Discarded stale test ownership state: {reason}.", file=sys.stderr)
-
-        _remove_status_file(status_path)
-        output_descriptor = _open_output(output_path)
-        gate_read, gate_write = os.pipe()
-        owner_token = secrets.token_hex(16)
-        runner_args = [
-            sys.executable,
-            _SCRIPT_PATH,
-            "_run",
-            "--state",
-            state_path,
-            "--token",
-            owner_token,
-            "--gate-fd",
-            str(gate_read),
-            "--",
-            *normalized_command,
-        ]
+        _reject_live_owner_or_discard_stale(state_path)
+        execution_lock = _acquire_execution_lock(state_path)
+        output_descriptor = -1
+        gate_read = -1
+        gate_write = -1
         process: subprocess.Popen[bytes] | None = None
         record: OwnershipRecord | None = None
         try:
+            _remove_status_file(status_path)
+            output_descriptor = _open_output(output_path)
+            gate_read, gate_write = os.pipe()
+            owner_token = secrets.token_hex(16)
+            runner_args = [
+                sys.executable,
+                _SCRIPT_PATH,
+                "_run",
+                "--state",
+                state_path,
+                "--token",
+                owner_token,
+                "--gate-fd",
+                str(gate_read),
+                "--",
+                *normalized_command,
+            ]
             process = subprocess.Popen(
                 runner_args,
                 stdin=subprocess.DEVNULL,
@@ -504,10 +564,21 @@ def start(
             os.write(gate_write, b"1")
         except BaseException:
             if process is not None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
+                terminated_session = False
+                if record is not None:
+                    try:
+                        _terminate_owned_session(
+                            record,
+                            grace_seconds=0.2,
+                        )
+                        terminated_session = True
+                    except SupervisorError:
+                        pass
+                if not terminated_session:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 try:
                     process.wait(timeout=1)
                 except (subprocess.TimeoutExpired, ChildProcessError):
@@ -524,11 +595,62 @@ def start(
         finally:
             if gate_read >= 0:
                 os.close(gate_read)
-            os.close(gate_write)
-            os.close(output_descriptor)
+            if gate_write >= 0:
+                os.close(gate_write)
+            if output_descriptor >= 0:
+                os.close(output_descriptor)
+            _release_execution_lock(execution_lock)
 
+    assert process is not None
+    assert record is not None
+    return process, record
+
+
+def start(
+    *,
+    state_path: str,
+    output_path: str,
+    status_path: str | None,
+    command: Sequence[str],
+) -> int:
+    """Start a detached supervisor and return its positive session-leader PID."""
+    _, record = _launch_supervisor(
+        state_path=state_path,
+        output_path=output_path,
+        status_path=status_path,
+        command=command,
+    )
     print(f"PID: {record.pid}")
     return record.pid
+
+
+def foreground(
+    *,
+    state_path: str,
+    status_path: str | None,
+    command: Sequence[str],
+) -> NoReturn:
+    """Replace this process with one foreground command under the run lock."""
+    normalized_command = _normalize_command(command)
+    execution_lock = -1
+    try:
+        with _state_lock(state_path):
+            _reject_live_owner_or_discard_stale(state_path)
+            execution_lock = _acquire_execution_lock(state_path)
+            _remove_status_file(status_path)
+        os.set_inheritable(execution_lock, True)
+        os.execvpe(
+            normalized_command[0],
+            normalized_command,
+            os.environ,
+        )
+    except OSError as exc:
+        raise SupervisorError(
+            f"cannot execute foreground test command: {exc}"
+        ) from exc
+    finally:
+        if execution_lock >= 0:
+            _release_execution_lock(execution_lock)
 
 
 def _session_members(sid: int) -> list[ProcessIdentity]:
@@ -749,7 +871,7 @@ def stop(*, state_path: str, grace_seconds: float) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Own one detached MegaPad background test process tree."
+        description="Own one MegaPad test execution at a time."
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
 
@@ -758,6 +880,11 @@ def _parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--output", required=True)
     start_parser.add_argument("--status")
     start_parser.add_argument("command", nargs=argparse.REMAINDER)
+
+    foreground_parser = subparsers.add_parser("foreground")
+    foreground_parser.add_argument("--state", required=True)
+    foreground_parser.add_argument("--status")
+    foreground_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     stop_parser = subparsers.add_parser("stop")
     stop_parser.add_argument("--state", required=True)
@@ -782,6 +909,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command=args.command,
             )
             return 0
+        if args.action == "foreground":
+            foreground(
+                state_path=args.state,
+                status_path=args.status,
+                command=args.command,
+            )
         if args.action == "stop":
             if args.grace_seconds < 0:
                 raise SupervisorError("--grace-seconds must be non-negative")
