@@ -215,7 +215,7 @@ def _crc_snapshot(system: MegapadSystem, cluster_index: int) -> dict:
     }
 
 
-def _all_core_trace() -> dict:
+def _all_core_trace(*, worker_count: int = 1) -> dict:
     system = MegapadSystem(
         ram_size=4096,
         num_cores=4,
@@ -223,6 +223,7 @@ def _all_core_trace() -> dict:
         hbw_size=0,
         ext_mem_size=0,
         vram_size=0,
+        worker_count=worker_count,
     )
     system.load_binary(ALL_CORE_CODE_BASE, ALL_CORE_PROGRAM)
     for cpu in system.cores:
@@ -306,7 +307,7 @@ def _crc_round_state(system: MegapadSystem, stats, active) -> dict:
     }
 
 
-def _cluster_crc_trace() -> dict:
+def _cluster_crc_trace(*, worker_count: int = 1) -> dict:
     system = MegapadSystem(
         ram_size=4096,
         num_cores=1,
@@ -314,6 +315,7 @@ def _cluster_crc_trace() -> dict:
         hbw_size=0,
         ext_mem_size=0,
         vram_size=0,
+        worker_count=worker_count,
     )
     for cpu in system.cores:
         cpu.halted = True

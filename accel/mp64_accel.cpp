@@ -1787,7 +1787,7 @@ struct PersistentWorkerPoolSnapshot {
     bool inline_reference = true;
 };
 
-enum class PrivateFullCoreStopReason : uint8_t {
+enum class PrivateCoreStopReason : uint8_t {
     INSTRUCTION_LIMIT = 0,
     ICACHE_BOUNDARY = 1,
     SHARED_INSTRUCTION = 2,
@@ -1801,7 +1801,7 @@ enum class PrivateFullCoreStopReason : uint8_t {
 
 class SharedMemoryExecutionAdmission;
 
-struct PrivateFullCoreCommand {
+struct PrivateCoreCommand {
     uint64_t command_sequence = 0;
     uint64_t wave_epoch = 0;
     std::size_t submission_index = 0;
@@ -1813,7 +1813,7 @@ struct PrivateFullCoreCommand {
     std::shared_ptr<SharedMemoryExecutionAdmission> admission;
 };
 
-struct PrivateFullCoreResult {
+struct PrivateCoreResult {
     uint64_t command_sequence = 0;
     uint64_t wave_epoch = 0;
     std::size_t submission_index = 0;
@@ -1824,8 +1824,8 @@ struct PrivateFullCoreResult {
     uint64_t end_pc = 0;
     int64_t steps_executed = 0;
     int64_t total_cycles = 0;
-    PrivateFullCoreStopReason stop_reason =
-        PrivateFullCoreStopReason::INSTRUCTION_LIMIT;
+    PrivateCoreStopReason stop_reason =
+        PrivateCoreStopReason::INSTRUCTION_LIMIT;
     int trap_id = -1;
     int interrupt_vector = -1;
     std::string internal_error;
@@ -1846,8 +1846,8 @@ struct PersistentWorkerPrivateSnapshot {
     std::vector<PersistentWorkerLaneSnapshot> lanes;
 };
 
-static PrivateFullCoreResult execute_private_full_core_command(
-    const PrivateFullCoreCommand& command) noexcept;
+static PrivateCoreResult execute_private_core_command(
+    const PrivateCoreCommand& command) noexcept;
 
 static std::atomic<uint64_t> next_private_thread_token{1};
 
@@ -2021,8 +2021,8 @@ public:
         }
     }
 
-    std::vector<PrivateFullCoreResult> execute_wave(
-            std::vector<PrivateFullCoreCommand> commands) {
+    std::vector<PrivateCoreResult> execute_wave(
+            std::vector<PrivateCoreCommand> commands) {
         if (commands.empty())
             return {};
         if (commands.size() >
@@ -2036,7 +2036,7 @@ public:
             false);
         std::vector<CPUState*> seen_cores;
         seen_cores.reserve(commands.size());
-        for (const PrivateFullCoreCommand& command : commands) {
+        for (const PrivateCoreCommand& command : commands) {
             if (
                 command.lane_index < 0 ||
                 command.lane_index >= worker_count_
@@ -2072,9 +2072,9 @@ public:
             seen_cores.push_back(command.core);
         }
 
-        std::vector<PrivateFullCoreResult> results(
+        std::vector<PrivateCoreResult> results(
             commands.size());
-        std::optional<PrivateFullCoreCommand> inline_command;
+        std::optional<PrivateCoreCommand> inline_command;
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_)
             throw std::runtime_error(
@@ -2085,7 +2085,7 @@ public:
         if (wave_epoch_ == std::numeric_limits<uint64_t>::max())
             throw std::overflow_error(
                 "native worker wave epoch overflow");
-        for (const PrivateFullCoreCommand& command : commands) {
+        for (const PrivateCoreCommand& command : commands) {
             const std::size_t lane =
                 static_cast<std::size_t>(
                     command.lane_index);
@@ -2115,7 +2115,7 @@ public:
         for (std::size_t index = 0;
              index < commands.size();
              index++) {
-            PrivateFullCoreCommand& command = commands[index];
+            PrivateCoreCommand& command = commands[index];
             if (
                 next_command_sequence_ ==
                 std::numeric_limits<uint64_t>::max()
@@ -2129,7 +2129,7 @@ public:
             command.submission_index = index;
         }
 
-        for (const PrivateFullCoreCommand& command : commands) {
+        for (const PrivateCoreCommand& command : commands) {
             if (command.lane_index == 0) {
                 inline_command = command;
                 continue;
@@ -2149,10 +2149,10 @@ public:
         work_ready_.notify_all();
         lock.unlock();
 
-        std::optional<PrivateFullCoreResult> inline_result;
+        std::optional<PrivateCoreResult> inline_result;
         if (inline_command.has_value()) {
             inline_result =
-                execute_private_full_core_command(
+                execute_private_core_command(
                     *inline_command);
         }
 
@@ -2160,7 +2160,7 @@ public:
         completion_ready_.wait(
             lock,
             [this, &commands]() {
-                for (const PrivateFullCoreCommand& command :
+                for (const PrivateCoreCommand& command :
                      commands) {
                     if (command.lane_index == 0)
                         continue;
@@ -2178,8 +2178,8 @@ public:
                 return true;
             });
 
-        for (const PrivateFullCoreCommand& command : commands) {
-            PrivateFullCoreResult result;
+        for (const PrivateCoreCommand& command : commands) {
+            PrivateCoreResult result;
             if (command.lane_index == 0) {
                 if (!inline_result.has_value())
                     throw std::logic_error(
@@ -2227,8 +2227,8 @@ private:
     struct HelperSlot {
         HelperSlotState state = HelperSlotState::IDLE;
         uint64_t epoch = 0;
-        std::optional<PrivateFullCoreCommand> command;
-        std::optional<PrivateFullCoreResult> result;
+        std::optional<PrivateCoreCommand> command;
+        std::optional<PrivateCoreResult> result;
     };
 
     static int validated_worker_count(int worker_count) {
@@ -2262,12 +2262,12 @@ private:
                 break;
             }
 
-            PrivateFullCoreCommand command =
+            PrivateCoreCommand command =
                 *slot.command;
             slot.state = HelperSlotState::RUNNING;
             lock.unlock();
-            PrivateFullCoreResult result =
-                execute_private_full_core_command(command);
+            PrivateCoreResult result =
+                execute_private_core_command(command);
             lock.lock();
 
             slot.result = std::move(result);
@@ -3093,9 +3093,9 @@ static std::atomic<bool>& checked_system_batch_active(
 // while retaining thread-local mutex and CPU execution ownership. Lane zero
 // consumes the permission on the coordinator's root scope; auxiliary lanes
 // create a per-thread shared lock from the same admission token.
-class PrivateFullCoreExecutionScope {
+class PrivateCoreExecutionScope {
 public:
-    PrivateFullCoreExecutionScope(
+    PrivateCoreExecutionScope(
             CPUState& state,
             std::shared_ptr<SharedMemoryExecutionAdmission>
                 admission)
@@ -3153,7 +3153,7 @@ public:
         }
     }
 
-    ~PrivateFullCoreExecutionScope() {
+    ~PrivateCoreExecutionScope() {
         execution_guard_.reset();
         if (registered_thread_owner_) {
             unlink_thread_owner(
@@ -3163,10 +3163,10 @@ public:
         thread_owner_.lease.reset();
     }
 
-    PrivateFullCoreExecutionScope(
-        const PrivateFullCoreExecutionScope&) = delete;
-    PrivateFullCoreExecutionScope& operator=(
-        const PrivateFullCoreExecutionScope&) = delete;
+    PrivateCoreExecutionScope(
+        const PrivateCoreExecutionScope&) = delete;
+    PrivateCoreExecutionScope& operator=(
+        const PrivateCoreExecutionScope&) = delete;
 
 private:
     SystemBatchExecutionPermissionGuard permission_;
@@ -7415,6 +7415,68 @@ static SystemInstructionTraits classify_system_instruction(
     return {};
 }
 
+static bool micro_instruction_fetch_uses_python_route(
+        uint64_t address) {
+    // The Python reduced-core oracle routes instruction fetches through the
+    // cluster scratchpad sentinel and the MMIO aperture. Native MemoryMappings
+    // deliberately does not own either route, so conservatively keep any
+    // instruction whose maximum decode window can touch one of them on the
+    // Python path instead of aliasing raw bank-zero bytes.
+    constexpr uint64_t MAX_INSTRUCTION_BYTES = 16;
+    constexpr uint64_t MMIO_START =
+        0xFFFF'FF00'0000'0000ULL;
+    constexpr uint64_t MMIO_END =
+        0xFFFF'FF80'0000'0000ULL;
+    for (
+        uint64_t offset = 0;
+        offset < MAX_INSTRUCTION_BYTES;
+        offset++
+    ) {
+        if (
+            address >
+            std::numeric_limits<uint64_t>::max() -
+                offset
+        ) {
+            return true;
+        }
+        const uint64_t candidate = address + offset;
+        if (
+            static_cast<uint32_t>(candidate >> 32) ==
+                0xFFFF'FE00U ||
+            (
+                candidate >= MMIO_START &&
+                candidate < MMIO_END
+            )
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool micro_instruction_fetch_window_touches_mmio(
+        uint64_t address) {
+    constexpr uint64_t MAX_INSTRUCTION_BYTES = 16;
+    constexpr uint64_t MMIO_START =
+        0xFFFF'FF00'0000'0000ULL;
+    constexpr uint64_t MMIO_END =
+        0xFFFF'FF80'0000'0000ULL;
+    for (
+        uint64_t offset = 0;
+        offset < MAX_INSTRUCTION_BYTES;
+        offset++
+    ) {
+        const uint64_t candidate = address + offset;
+        if (
+            candidate >= MMIO_START &&
+            candidate < MMIO_END
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool micro_instruction_requires_python_oracle(CPUState& state) {
     if (state.profile != CoreProfile::MICRO)
         return false;
@@ -7427,9 +7489,12 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
         return true;
 
     uint64_t address = pc(state);
+    if (micro_instruction_fetch_uses_python_route(address))
+        return true;
     uint8_t opcode = mem_read8(state, address);
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
+    int modifier = -1;
 
     // F0-F8 are modifiers (including REX).  Classify the instruction they
     // prefix without consuming either byte.  The self-contained extended
@@ -7437,6 +7502,7 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
     if (family == 0xF) {
         if (subop == 0x9 || subop == 0xA || subop == 0xB)
             return true;
+        modifier = subop;
         opcode = mem_read8(state, address + 1);
         family = (opcode >> 4) & 0xF;
         subop = opcode & 0xF;
@@ -7446,6 +7512,12 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
         ) {
             return true;
         }
+    }
+    if (modifier == 0x6 && family == 0x3) {
+        // Native next_instruction_size() intentionally remains a shallow
+        // compatibility estimate. The Python oracle owns recursive target
+        // sizing for EXT.SKIP, including a prefixed skipped instruction.
+        return true;
     }
 
     switch (family) {
@@ -8325,7 +8397,7 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
 }
 
 // ---------------------------------------------------------------------------
-//  Phase 3 private full-core command runner
+//  Phase 3 private core command runner
 // ---------------------------------------------------------------------------
 
 enum class PrivateInstructionDisposition : uint8_t {
@@ -8538,6 +8610,114 @@ classify_private_full_core_instruction(
         EXECUTE_PRIVATE;
 }
 
+static PrivateInstructionDisposition
+classify_private_micro_core_instruction(
+        CPUState& state) {
+    if (
+        state.profile != CoreProfile::MICRO ||
+        state.ext_modifier != -1 ||
+        state.priv_level != 0
+    ) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+    }
+
+    uint64_t instruction_address =
+        state.regs[state.psel];
+    if (
+        micro_instruction_fetch_uses_python_route(
+            instruction_address)
+    ) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+    }
+    uint8_t opcode =
+        mem_read8(state, instruction_address);
+    int family = (opcode >> 4) & 0xF;
+    int subop = opcode & 0xF;
+    int modifier = -1;
+
+    if (family == 0xF) {
+        // The reduced core accepts the same single ordinary modifier set as
+        // the full core. Extended engines, the reserved F7 encoding, and a
+        // second prefix remain coordinator/oracle boundaries.
+        if (subop == 0x7 || subop >= 0x9) {
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        }
+        modifier = subop;
+        instruction_address++;
+        opcode = mem_read8(
+            state, instruction_address);
+        family = (opcode >> 4) & 0xF;
+        subop = opcode & 0xF;
+        if (family == 0xF) {
+            return PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        }
+    }
+
+    bool private_instruction = false;
+    switch (family) {
+        case 0x0:
+            // IDL, NOP, HALT, and DI are local. EI remains a coordinator
+            // boundary so an already asserted line is observed before the
+            // following instruction, exactly as on a full core.
+            private_instruction =
+                subop == 0x0 ||
+                subop == 0x1 ||
+                subop == 0x2 ||
+                subop == 0xC;
+            break;
+        case 0x1:
+        case 0x2:
+            private_instruction = true;
+            break;
+        case 0x3:
+            // Native and Python disagree today about the size of a prefixed
+            // target skipped by EXT.SKIP. Keep that exact encoding on the
+            // coordinator/oracle until the architectural size rule is fixed.
+            private_instruction = modifier != 0x6;
+            break;
+        case 0x4:
+        case 0x7:
+        case 0xA:
+        case 0xB:
+            private_instruction = true;
+            break;
+        case 0x6:
+            // GLO/GHI/PLO/PHI depend on the stripped D register and stay on
+            // the reduced-core Python oracle.
+            private_instruction = subop < 0xC;
+            break;
+        case 0xC:
+            // MUL/DIV is cluster-shared and Tier-2 bitfield operations are
+            // absent. POPCNT/CLZ/CTZ/BITREV are core-local.
+            private_instruction =
+                subop >= 0x8 && subop <= 0xB;
+            break;
+        default:
+            break;
+    }
+
+    return private_instruction
+        ? PrivateInstructionDisposition::
+            EXECUTE_PRIVATE
+        : PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+}
+
+static PrivateInstructionDisposition
+classify_private_core_instruction(
+        CPUState& state) {
+    if (state.profile == CoreProfile::FULL) {
+        return classify_private_full_core_instruction(
+            state);
+    }
+    return classify_private_micro_core_instruction(
+        state);
+}
+
 struct PrivateSharedAccessSignal {};
 
 class PrivateSharedAccessSentinel final
@@ -8555,9 +8735,9 @@ public:
 
 static int trap_id_from_runtime_error(const std::string& what);
 
-static PrivateFullCoreResult execute_private_full_core_command(
-        const PrivateFullCoreCommand& command) noexcept {
-    PrivateFullCoreResult result;
+static PrivateCoreResult execute_private_core_command(
+        const PrivateCoreCommand& command) noexcept {
+    PrivateCoreResult result;
     result.command_sequence = command.command_sequence;
     result.wave_epoch = command.wave_epoch;
     result.submission_index =
@@ -8569,7 +8749,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
 
     if (command.core == nullptr) {
         result.stop_reason =
-            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+            PrivateCoreStopReason::INTERNAL_FAILURE;
         result.internal_error =
             "private command core is missing";
         return result;
@@ -8582,13 +8762,16 @@ static PrivateFullCoreResult execute_private_full_core_command(
         command_checkpoint;
 
     try {
-        PrivateFullCoreExecutionScope execution_scope(
+        PrivateCoreExecutionScope execution_scope(
             core, command.admission);
         command_checkpoint.emplace(core);
 
-        if (core.profile != CoreProfile::FULL) {
+        if (
+            core.profile != CoreProfile::FULL &&
+            core.profile != CoreProfile::MICRO
+        ) {
             throw std::invalid_argument(
-                "private execution requires a full core");
+                "private execution requires a supported core profile");
         }
         if (
             core.system_cycle_execution_pending != nullptr &&
@@ -8607,7 +8790,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
 
         if (command.pending_interrupt_vector >= 0) {
             result.stop_reason =
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INTERRUPT_BOUNDARY;
             result.interrupt_vector =
                 command.pending_interrupt_vector;
@@ -8616,24 +8799,24 @@ static PrivateFullCoreResult execute_private_full_core_command(
         }
 
         result.stop_reason =
-            PrivateFullCoreStopReason::INSTRUCTION_LIMIT;
+            PrivateCoreStopReason::INSTRUCTION_LIMIT;
         for (int step_index = 0;
              step_index < command.max_steps;
              step_index++) {
             if (core.halted) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::HALTED;
+                    PrivateCoreStopReason::HALTED;
                 break;
             }
             if (core.idle) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::IDLE;
+                    PrivateCoreStopReason::IDLE;
                 break;
             }
 
             const PrivateInstructionDisposition
                 disposition =
-                    classify_private_full_core_instruction(
+                    classify_private_core_instruction(
                         core);
             if (
                 disposition ==
@@ -8641,7 +8824,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
                     ICACHE_BOUNDARY
             ) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::
+                    PrivateCoreStopReason::
                         ICACHE_BOUNDARY;
                 break;
             }
@@ -8651,7 +8834,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
                     SHARED_INSTRUCTION
             ) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::
+                    PrivateCoreStopReason::
                         SHARED_INSTRUCTION;
                 break;
             }
@@ -8670,7 +8853,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
                 const std::string what = error.what();
                 if (what == "TRAP:RESET") {
                     result.stop_reason =
-                        PrivateFullCoreStopReason::RESET;
+                        PrivateCoreStopReason::RESET;
                     break;
                 }
                 if (
@@ -8678,7 +8861,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
                     what.compare(0, 5, "TRAP:") == 0
                 ) {
                     result.stop_reason =
-                        PrivateFullCoreStopReason::TRAP;
+                        PrivateCoreStopReason::TRAP;
                     result.trap_id =
                         trap_id_from_runtime_error(what);
                     break;
@@ -8688,12 +8871,12 @@ static PrivateFullCoreResult execute_private_full_core_command(
 
             if (core.halted) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::HALTED;
+                    PrivateCoreStopReason::HALTED;
                 break;
             }
             if (core.idle) {
                 result.stop_reason =
-                    PrivateFullCoreStopReason::IDLE;
+                    PrivateCoreStopReason::IDLE;
                 break;
             }
         }
@@ -8703,7 +8886,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
         result.steps_executed = 0;
         result.total_cycles = 0;
         result.stop_reason =
-            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+            PrivateCoreStopReason::INTERNAL_FAILURE;
         result.trap_id = -1;
         result.interrupt_vector = -1;
         result.internal_error = error.what();
@@ -8713,7 +8896,7 @@ static PrivateFullCoreResult execute_private_full_core_command(
         result.steps_executed = 0;
         result.total_cycles = 0;
         result.stop_reason =
-            PrivateFullCoreStopReason::INTERNAL_FAILURE;
+            PrivateCoreStopReason::INTERNAL_FAILURE;
         result.trap_id = -1;
         result.interrupt_vector = -1;
         result.internal_error =
@@ -8846,6 +9029,8 @@ struct PendingClusterRequest {
         ClusterResourceKind::NONE;
     int operation = -1;
     int continuation_reason = RUN_EXT_FALLBACK;
+    uint8_t encoding_length = 0;
+    std::array<uint8_t, 16> encoding{};
 };
 
 struct CoreDispatchResult {
@@ -8854,38 +9039,50 @@ struct CoreDispatchResult {
     uint64_t dispatches = 0;
     uint64_t continuations = 0;
     std::array<uint64_t, 7> stop_reasons{};
-    std::optional<PendingClusterRequest> pending_cluster_request;
 };
 
-struct FullCoreFrontierReservation {
+struct CoreFrontierReservation {
     int core_index = -1;
     int64_t max_steps = 0;
 };
 
-struct FullCoreFrontierOutcome {
+struct FrontierCreditTransfer {
+    int donor_core = -1;
+    int recipient_core = -1;
+    int64_t amount = 0;
+};
+
+struct CoreFrontierOutcome {
     int64_t steps = 0;
     int64_t cycles = 0;
     bool interrupt_boundary = false;
+    bool coordinator_state_changed = false;
     std::vector<int> interrupt_cores;
+    std::vector<int> cluster_deferred_cores;
+    std::vector<int> cluster_lost_cores;
+    std::vector<FrontierCreditTransfer>
+        cluster_credit_transfers;
     std::vector<int> dispatch_boundary_cores;
     std::vector<int> terminal_cores;
 };
 
-static std::vector<PrivateFullCoreResult>
-execute_private_full_core_wave_under_active_batch(
+static std::vector<PrivateCoreResult>
+execute_private_core_wave_under_active_batch(
     SystemState& system,
-    std::vector<PrivateFullCoreCommand> commands);
+    std::vector<PrivateCoreCommand> commands,
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        frontier_admission = nullptr);
 
-static void run_parallel_full_core_round(
+static void run_parallel_core_round(
     SystemState& system,
-    const std::vector<FullCoreFrontierReservation>& reservations,
+    const std::vector<CoreFrontierReservation>& reservations,
     const std::vector<StepCallbacks>& callbacks,
     const py::function& settle_continuation,
     const py::function& settle_dispatch_error,
     SystemBatchResult& result,
-    FullCoreFrontierOutcome& outcome);
+    CoreFrontierOutcome& outcome);
 
-static int pending_enabled_full_core_interrupt(
+static int pending_enabled_core_interrupt(
         const SystemState& system,
         const CPUState& core) {
     if (core.halted || !core.flag_i)
@@ -8898,6 +9095,7 @@ static int pending_enabled_full_core_interrupt(
 }
 
 static PendingClusterRequest classify_pending_cluster_request(
+        SystemState& system,
         CPUState& core,
         int continuation_reason) {
     PendingClusterRequest request;
@@ -8913,15 +9111,91 @@ static PendingClusterRequest classify_pending_cluster_request(
     }
 
     uint64_t address = pc(core);
-    uint8_t opcode = mem_read8(core, address);
+    const uint64_t instruction_address = address;
+    if (
+        micro_instruction_fetch_window_touches_mmio(
+            address)
+    ) {
+        // Reject the complete possible decode window before reading even an
+        // ordinary-looking first byte. A later operand fetch could otherwise
+        // reach side-effecting MMIO after cluster classification returned.
+        throw std::runtime_error(
+            "native system batch does not support "
+            "reduced-core MMIO instruction fetch");
+    }
+    const int micro_index =
+        static_cast<int>(core.core_id) -
+        system.full_core_count();
+    const int cluster_index =
+        micro_index /
+        SystemState::MICRO_CORES_PER_CLUSTER;
+    if (
+        micro_index < 0 ||
+        cluster_index < 0 ||
+        cluster_index >=
+            static_cast<int>(
+                system.cluster_states.size())
+    ) {
+        throw std::logic_error(
+            "reduced-core instruction fetch has no "
+            "owning cluster");
+    }
+    ClusterState& scratchpad_cluster =
+        system.cluster_states[
+            static_cast<std::size_t>(
+                cluster_index)];
+    auto read_instruction_byte =
+        [&](uint64_t byte_address) {
+            if (
+                static_cast<uint32_t>(
+                    byte_address >> 32) ==
+                0xFFFF'FE00U
+            ) {
+                return scratchpad_cluster.scratchpad[
+                    static_cast<std::size_t>(
+                        static_cast<uint32_t>(
+                            byte_address) %
+                        scratchpad_cluster
+                            .scratchpad.size())];
+            }
+            constexpr uint64_t MMIO_START =
+                0xFFFF'FF00'0000'0000ULL;
+            constexpr uint64_t MMIO_END =
+                0xFFFF'FF80'0000'0000ULL;
+            if (
+                byte_address >= MMIO_START &&
+                byte_address < MMIO_END
+            ) {
+                // An MMIO classification read can have side effects. Fail
+                // before touching that byte rather than changing the stream
+                // or silently bypassing cluster arbitration.
+                throw std::runtime_error(
+                    "native system batch does not support "
+                    "reduced-core MMIO instruction fetch");
+            }
+            return mem_read8(core, byte_address);
+        };
+    uint8_t opcode =
+        read_instruction_byte(address);
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
+    int modifier = -1;
+    int prefix_length = 0;
+    int decoded_length = 0;
 
-    // F0-F8 are instruction modifiers. Preserve the original PC while
-    // classifying the following reduced-core instruction.
-    if (family == 0xF && subop <= 0x8) {
+    // Every F-family opcode other than the three self-contained engines is a
+    // modifier in the Python reduced-core oracle. Preserve it as part of the
+    // exact request identity while classifying the following instruction.
+    if (
+        family == 0xF &&
+        subop != 0x9 &&
+        subop != 0xA &&
+        subop != 0xB
+    ) {
+        modifier = subop;
+        prefix_length = 1;
         address++;
-        opcode = mem_read8(core, address);
+        opcode = read_instruction_byte(address);
         family = (opcode >> 4) & 0xF;
         subop = opcode & 0xF;
     }
@@ -8935,39 +9209,111 @@ static PendingClusterRequest classify_pending_cluster_request(
                 subop == 0xF
             ) {
                 request.resource = ClusterResourceKind::BUS;
+                request.operation = opcode;
+                decoded_length =
+                    subop == 0xD ? 2 : 1;
             }
             break;
         case 0x5:
             request.resource = ClusterResourceKind::BUS;
+            request.operation = opcode;
+            decoded_length =
+                subop == 0xF ? 3 : 2;
             break;
         case 0xC:
             if (subop <= 0x7) {
                 request.resource =
                     ClusterResourceKind::MUL_DIV;
                 request.operation = subop;
+                decoded_length = 2;
             }
             break;
-        case 0xE:
+        case 0xE: {
             request.resource = ClusterResourceKind::MEX;
             request.operation = subop;
+            const uint8_t function =
+                read_instruction_byte(address + 1);
+            const int source_selector =
+                (subop >> 2) & 0x3;
+            const int mex_operation = subop & 0x3;
+            const int effective_function =
+                source_selector == 0x2
+                ? 0
+                : function & 0x7;
+            decoded_length =
+                2 +
+                (source_selector == 0x1 ? 1 : 0) +
+                (
+                    mex_operation == 0x3 &&
+                    effective_function == 0x7 &&
+                    modifier != 0x8
+                    ? 1
+                    : 0
+                );
             break;
+        }
         case 0xF:
             if (subop == 0xB) {
                 const uint8_t crypto_subop =
-                    mem_read8(core, address + 1);
+                    read_instruction_byte(address + 1);
                 const int unit = (crypto_subop >> 4) & 0xF;
                 request.operation = crypto_subop & 0xF;
-                if (unit == 0x0) {
+                if (
+                    unit == 0x0 &&
+                    request.operation <= 0x5
+                ) {
                     request.resource =
                         ClusterResourceKind::CRC;
-                } else if (unit == 0x1) {
+                    decoded_length =
+                        request.operation == 0x0
+                        ? 2
+                        : 3;
+                } else if (
+                    unit == 0x1 &&
+                    request.operation <= 0x5
+                ) {
                     request.resource =
                         ClusterResourceKind::SHA;
+                    decoded_length =
+                        (
+                            request.operation == 0x1 ||
+                            request.operation == 0x2 ||
+                            request.operation == 0x5
+                        )
+                        ? 2
+                        : 3;
                 }
             }
             break;
         default:
             break;
+    }
+    if (request.resource != ClusterResourceKind::NONE) {
+        const int encoding_length =
+            prefix_length + decoded_length;
+        if (
+            encoding_length <= 0 ||
+            encoding_length >
+                static_cast<int>(
+                    request.encoding.size())
+        ) {
+            throw std::logic_error(
+                "cluster request encoding length is invalid");
+        }
+        request.encoding_length =
+            static_cast<uint8_t>(encoding_length);
+        for (
+            int offset = 0;
+            offset < encoding_length;
+            offset++
+        ) {
+            request.encoding[
+                static_cast<std::size_t>(offset)] =
+                    read_instruction_byte(
+                        instruction_address +
+                            static_cast<uint64_t>(
+                                offset));
+        }
     }
     return request;
 }
@@ -9018,204 +9364,6 @@ static void checked_scheduler_increment(
     counter++;
 }
 
-static CoreDispatchResult run_system_core_dispatch(
-        SystemState& system,
-        int core_index,
-        int64_t max_steps,
-        const StepCallbacks& callbacks,
-        const py::function& settle_continuation,
-        const py::function& settle_dispatch_error,
-        bool yield_after_micro_continuation) {
-    CoreDispatchResult dispatch;
-    CPUState& core =
-        *system.execution_cores[static_cast<std::size_t>(core_index)];
-
-    while (dispatch.steps < max_steps) {
-        if (core.halted) {
-            dispatch.stop_reasons[RUN_HALT]++;
-            break;
-        }
-        if (core.idle) {
-            dispatch.stop_reasons[RUN_IDLE]++;
-            break;
-        }
-
-        const int64_t remaining = max_steps - dispatch.steps;
-        const int request = static_cast<int>(std::min<int64_t>(
-            remaining,
-            static_cast<int64_t>(std::numeric_limits<int>::max())));
-
-        // Retain one logical mapping lease across the raw native segment and
-        // its optional Python continuation. CPUExecutionGuard consumes the
-        // one native-dispatch permission, so continuation code cannot re-enter
-        // guest execution while it borrows this root scope.
-        auto logical_guard =
-            acquire_shared_memory_use(core, true);
-        RunResult raw{};
-        checked_scheduler_increment(
-            system.native_dispatches,
-            "dispatch counter");
-        dispatch.dispatches++;
-        try {
-            py::gil_scoped_release release;
-            SystemBatchExecutionPermissionGuard execution_permission(
-                system.native_batch_active);
-            CPUExecutionGuard execution_guard(core);
-            raw = run_steps(core, callbacks, request);
-        } catch (py::error_already_set& error) {
-            py::object settled_object = settle_dispatch_error(
-                core_index,
-                error.value());
-            if (settled_object.is_none())
-                throw;
-            py::tuple settled = settled_object.cast<py::tuple>();
-            if (settled.size() != 3) {
-                throw std::runtime_error(
-                    "native dispatch error settlement must return "
-                    "(invocation_steps, invocation_cycles, terminal)");
-            }
-            const int64_t invocation_steps =
-                settled[0].cast<int64_t>();
-            const int64_t invocation_cycles =
-                settled[1].cast<int64_t>();
-            const bool terminal = settled[2].cast<bool>();
-            if (invocation_steps < 0 ||
-                invocation_steps > remaining ||
-                invocation_cycles < 0) {
-                throw std::runtime_error(
-                    "native dispatch error settlement returned "
-                    "invalid progress");
-            }
-            if (!terminal && invocation_steps == 0) {
-                throw std::runtime_error(
-                    "nonterminal native dispatch error settlement "
-                    "made no progress");
-            }
-            dispatch.steps = checked_scheduler_add(
-                dispatch.steps,
-                invocation_steps,
-                "instruction accounting");
-            dispatch.cycles = checked_scheduler_add(
-                dispatch.cycles,
-                invocation_cycles,
-                "cycle accounting");
-            if (terminal)
-                break;
-            continue;
-        }
-
-        if (raw.steps_executed < 0 ||
-            raw.steps_executed > request ||
-            raw.total_cycles < 0) {
-            throw std::runtime_error(
-                "native core dispatch returned invalid progress");
-        }
-        if (raw.stop_reason >= RUN_LIMIT &&
-            raw.stop_reason <= RUN_RESET) {
-            dispatch.stop_reasons[
-                static_cast<std::size_t>(raw.stop_reason)]++;
-        }
-
-        if (raw.stop_reason >= RUN_MEX_FALLBACK &&
-            raw.stop_reason <= RUN_RESET) {
-            const PendingClusterRequest cluster_request =
-                classify_pending_cluster_request(
-                    core,
-                    raw.stop_reason);
-            if (
-                yield_after_micro_continuation &&
-                cluster_request.resource !=
-                    ClusterResourceKind::NONE
-            ) {
-                // The native prefix retired before this immutable shared
-                // request was raised. Publish only that prefix now; the outer
-                // scheduler snapshots all peer requests before selecting one
-                // cluster-local winner. A losing request remains at its
-                // original PC and consumes neither instruction budget nor
-                // resource credit.
-                dispatch.steps = checked_scheduler_add(
-                    dispatch.steps,
-                    raw.steps_executed,
-                    "instruction accounting");
-                dispatch.cycles = checked_scheduler_add(
-                    dispatch.cycles,
-                    raw.total_cycles,
-                    "cycle accounting");
-                dispatch.pending_cluster_request =
-                    cluster_request;
-                break;
-            }
-
-            py::object settled_object = settle_continuation(
-                core_index,
-                raw.stop_reason,
-                raw.trap_id,
-                raw.steps_executed,
-                raw.total_cycles);
-            py::tuple settled = settled_object.cast<py::tuple>();
-            if (settled.size() != 3) {
-                throw std::runtime_error(
-                    "native continuation must return "
-                    "(invocation_steps, invocation_cycles, terminal)");
-            }
-            const int64_t invocation_steps =
-                settled[0].cast<int64_t>();
-            const int64_t invocation_cycles =
-                settled[1].cast<int64_t>();
-            const bool terminal = settled[2].cast<bool>();
-            if (invocation_steps < 0 ||
-                invocation_steps > remaining ||
-                invocation_cycles < 0) {
-                throw std::runtime_error(
-                    "native continuation returned invalid progress");
-            }
-            if (!terminal && invocation_steps == 0) {
-                throw std::runtime_error(
-                    "nonterminal native continuation made no progress");
-            }
-            dispatch.steps = checked_scheduler_add(
-                dispatch.steps,
-                invocation_steps,
-                "instruction accounting");
-            dispatch.cycles = checked_scheduler_add(
-                dispatch.cycles,
-                invocation_cycles,
-                "cycle accounting");
-            dispatch.continuations++;
-            if (terminal)
-                break;
-            // A reduced core reaches Python only at a memory, CSR, or
-            // cluster-shared instruction boundary. With eligible peers, end
-            // this core's private segment here so the outer equal cyclic
-            // order—not a 1,000-instruction compatibility quantum—chooses the
-            // next contender. A single active microcore may continue in the
-            // same dispatch because there is no peer whose order can change.
-            if (
-                yield_after_micro_continuation &&
-                core.profile == CoreProfile::MICRO
-            ) {
-                break;
-            }
-            continue;
-        }
-
-        dispatch.steps = checked_scheduler_add(
-            dispatch.steps,
-            raw.steps_executed,
-            "instruction accounting");
-        dispatch.cycles = checked_scheduler_add(
-            dispatch.cycles,
-            raw.total_cycles,
-            "cycle accounting");
-        if (raw.stop_reason != RUN_LIMIT ||
-            raw.steps_executed == 0) {
-            break;
-        }
-    }
-
-    return dispatch;
-}
-
 static bool system_all_halted(const SystemState& system) {
     return std::all_of(
         system.execution_cores.begin(),
@@ -9261,47 +9409,11 @@ struct DeferredClusterRequest {
     int core_index = -1;
     int cluster_index = -1;
     int local_core = -1;
+    uint64_t instruction_pc = 0;
     PendingClusterRequest request{};
 };
 
-static CoreDispatchResult settle_deferred_cluster_request(
-        int core_index,
-        const PendingClusterRequest& request,
-        const py::function& settle_continuation) {
-    py::object settled_object = settle_continuation(
-        core_index,
-        request.continuation_reason,
-        -1,
-        0,
-        0);
-    py::tuple settled = settled_object.cast<py::tuple>();
-    if (settled.size() != 3) {
-        throw std::runtime_error(
-            "deferred cluster continuation must return "
-            "(invocation_steps, invocation_cycles, terminal)");
-    }
-
-    CoreDispatchResult dispatch;
-    dispatch.steps = settled[0].cast<int64_t>();
-    dispatch.cycles = settled[1].cast<int64_t>();
-    const bool terminal = settled[2].cast<bool>();
-    if (
-        dispatch.steps < 0 ||
-        dispatch.steps > 1 ||
-        dispatch.cycles < 0
-    ) {
-        throw std::runtime_error(
-            "deferred cluster continuation returned invalid progress");
-    }
-    if (!terminal && dispatch.steps == 0) {
-        throw std::runtime_error(
-            "granted cluster continuation made no progress");
-    }
-    dispatch.continuations = 1;
-    return dispatch;
-}
-
-static SystemBatchResult run_full_core_system_batch(
+static SystemBatchResult run_native_system_batch(
         SystemState& system,
         int64_t max_steps,
         const std::vector<StepCallbacks>& callbacks,
@@ -9359,191 +9471,16 @@ static SystemBatchResult run_full_core_system_batch(
     // native scheduler mutex excludes deadline and clock mutation.
     prepare_batch();
 
-    std::vector<int> active_indices;
-    active_indices.reserve(core_count);
-    for (std::size_t index = 0; index < core_count; index++) {
-        const CPUState& core = *system.execution_cores[index];
-        if (!core.halted && !core.idle)
-            active_indices.push_back(static_cast<int>(index));
-    }
-    if (active_indices.empty()) {
+    const bool any_active = std::any_of(
+        system.execution_cores.begin(),
+        system.execution_cores.end(),
+        [](const CPUState* core) {
+            return !core->halted && !core->idle;
+        });
+    if (!any_active) {
         result.system_cycles_advanced =
             system.shared_clock.cycles() - clock_start;
         result.scheduler_cursor = system.scheduler_cursor;
-        return result;
-    }
-
-    if (
-        active_indices.size() == 1 &&
-        system.execution_cores.size() !=
-            system.cores.size() &&
-        system.execution_cores[
-            static_cast<std::size_t>(
-                active_indices.front())]->profile ==
-            CoreProfile::FULL
-    ) {
-        const int core_index = active_indices.front();
-        CoreDispatchResult dispatch = run_system_core_dispatch(
-            system,
-            core_index,
-            max_steps,
-            callbacks[static_cast<std::size_t>(core_index)],
-            settle_continuation,
-            settle_dispatch_error,
-            false);
-        merge_core_dispatch(result, core_index, dispatch);
-        result.instructions_executed = dispatch.steps;
-        if (dispatch.steps > 0) {
-            system.scheduler_cursor =
-                (core_index + 1) % static_cast<int>(core_count);
-        }
-        // advance=true, drain=true, deliver_interrupts=true
-        settle_round(dispatch.cycles, true, true, true);
-        result.rounds = 1;
-        result.system_cycles_advanced =
-            system.shared_clock.cycles() - clock_start;
-        result.scheduler_cursor = system.scheduler_cursor;
-        return result;
-    }
-
-    // Element 3 integrates only homogeneous full-core topologies. Reduced
-    // cores and cluster-local resources retain the established serial native
-    // coordinator until Element 4 can include them in the same logical
-    // frontier.
-    if (system.execution_cores.size() == system.cores.size()) {
-        int64_t remaining = max_steps;
-        while (remaining > 0 && !system_all_halted(system)) {
-            if (system_all_idle_or_halted(system))
-                break;
-
-            const int round_start =
-                system.scheduler_cursor %
-                static_cast<int>(core_count);
-            const int64_t active_count =
-                static_cast<int64_t>(
-                    std::count_if(
-                        system.execution_cores.begin(),
-                        system.execution_cores.end(),
-                        [](const CPUState* core) {
-                            return
-                                !core->halted &&
-                                !core->idle;
-                        }));
-            if (active_count == 0)
-                break;
-
-            const int64_t equal_round_quantum =
-                std::min<int64_t>(
-                    max_dispatch_steps,
-                    remaining / active_count +
-                        (
-                            remaining % active_count != 0
-                                ? 1
-                                : 0
-                        ));
-            int64_t unreserved = remaining;
-            std::vector<FullCoreFrontierReservation>
-                reservations;
-            reservations.reserve(
-                static_cast<std::size_t>(
-                    active_count));
-            for (
-                std::size_t offset = 0;
-                offset < core_count;
-                offset++
-            ) {
-                const int core_index = (
-                    round_start +
-                    static_cast<int>(offset)
-                ) % static_cast<int>(core_count);
-                const CPUState& core =
-                    *system.execution_cores[
-                        static_cast<std::size_t>(
-                            core_index)];
-                if (core.halted || core.idle)
-                    continue;
-                const int64_t reservation =
-                    std::min<int64_t>(
-                        equal_round_quantum,
-                        unreserved);
-                reservations.push_back(
-                    FullCoreFrontierReservation{
-                        core_index,
-                        reservation,
-                    });
-                unreserved -= reservation;
-            }
-            if (reservations.empty())
-                break;
-
-            FullCoreFrontierOutcome outcome;
-            try {
-                run_parallel_full_core_round(
-                    system,
-                    reservations,
-                    callbacks,
-                    settle_continuation,
-                    settle_dispatch_error,
-                    result,
-                    outcome);
-            } catch (...) {
-                // Every physical cohort in the failing sub-frontier reached
-                // the same private boundary before ordered settlement began.
-                // Settle those prefixes, all earlier successful boundaries,
-                // and all prior sub-frontiers in this scheduler round.
-                settle_round(
-                    outcome.cycles,
-                    true,
-                    true,
-                    false);
-                throw;
-            }
-
-            result.instructions_executed =
-                checked_scheduler_add(
-                    result.instructions_executed,
-                    outcome.steps,
-                    "aggregate instruction accounting");
-            remaining -= outcome.steps;
-            // A complete equal-credit scheduler round, rather than a
-            // physical cohort or cache/shared sub-frontier, is the unbounded
-            // scheduler's clock, device, and interrupt boundary.
-            settle_round(
-                outcome.cycles,
-                true,
-                false,
-                true);
-            result.rounds++;
-
-            if (outcome.steps != 0)
-                continue;
-            if (!outcome.interrupt_boundary)
-                break;
-
-            bool interrupt_still_eligible = false;
-            for (int core_index : outcome.interrupt_cores) {
-                const CPUState& core =
-                    *system.execution_cores[
-                        static_cast<std::size_t>(
-                            core_index)];
-                if (
-                    pending_enabled_full_core_interrupt(
-                        system, core) >= 0
-                ) {
-                    interrupt_still_eligible = true;
-                    break;
-                }
-            }
-            if (interrupt_still_eligible)
-                break;
-        }
-
-        settle_round(0, false, true, false);
-        result.system_cycles_advanced =
-            system.shared_clock.cycles() -
-            clock_start;
-        result.scheduler_cursor =
-            system.scheduler_cursor;
         return result;
     }
 
@@ -9552,237 +9489,134 @@ static SystemBatchResult run_full_core_system_batch(
         if (system_all_idle_or_halted(system))
             break;
 
-        int64_t round_steps = 0;
-        int64_t round_cycles = 0;
         const int round_start =
-            system.scheduler_cursor % static_cast<int>(core_count);
-        const int64_t active_count = static_cast<int64_t>(
-            std::count_if(
-                system.execution_cores.begin(),
-                system.execution_cores.end(),
-                [](const CPUState* core) {
-                    return !core->halted && !core->idle;
-                }));
+            system.scheduler_cursor %
+            static_cast<int>(core_count);
+        const int64_t active_count =
+            static_cast<int64_t>(
+                std::count_if(
+                    system.execution_cores.begin(),
+                    system.execution_cores.end(),
+                    [](const CPUState* core) {
+                        return
+                            !core->halted &&
+                            !core->idle;
+                    }));
         if (active_count == 0)
             break;
+
         const int64_t equal_round_quantum =
             std::min<int64_t>(
                 max_dispatch_steps,
                 remaining / active_count +
-                    (remaining % active_count != 0 ? 1 : 0));
-        std::vector<DeferredClusterRequest>
-            deferred_cluster_requests;
-
-        for (std::size_t offset = 0; offset < core_count; offset++) {
+                    (
+                        remaining % active_count != 0
+                            ? 1
+                            : 0
+                    ));
+        int64_t unreserved = remaining;
+        std::vector<CoreFrontierReservation>
+            reservations;
+        reservations.reserve(
+            static_cast<std::size_t>(
+                active_count));
+        for (
+            std::size_t offset = 0;
+            offset < core_count;
+            offset++
+        ) {
             const int core_index = (
-                round_start + static_cast<int>(offset)
+                round_start +
+                static_cast<int>(offset)
             ) % static_cast<int>(core_count);
-            CPUState& core =
+            const CPUState& core =
                 *system.execution_cores[
-                    static_cast<std::size_t>(core_index)];
+                    static_cast<std::size_t>(
+                        core_index)];
             if (core.halted || core.idle)
                 continue;
-
-            const int64_t dispatch_steps = std::min<int64_t>(
-                equal_round_quantum,
-                remaining - round_steps);
-            if (dispatch_steps <= 0)
-                break;
-
-            try {
-                CoreDispatchResult dispatch = run_system_core_dispatch(
-                    system,
+            const int64_t reservation =
+                std::min<int64_t>(
+                    equal_round_quantum,
+                    unreserved);
+            reservations.push_back(
+                CoreFrontierReservation{
                     core_index,
-                    dispatch_steps,
-                    callbacks[static_cast<std::size_t>(core_index)],
-                    settle_continuation,
-                    settle_dispatch_error,
-                    true);
-                merge_core_dispatch(result, core_index, dispatch);
-                if (dispatch.pending_cluster_request.has_value()) {
-                    const int first_micro_index =
-                        static_cast<int>(system.cores.size());
-                    if (core_index < first_micro_index) {
-                        throw std::logic_error(
-                            "full core published a cluster request");
-                    }
-                    const int micro_index =
-                        core_index - first_micro_index;
-                    DeferredClusterRequest deferred;
-                    deferred.core_index = core_index;
-                    deferred.cluster_index =
-                        micro_index /
-                        SystemState::MICRO_CORES_PER_CLUSTER;
-                    deferred.local_core =
-                        micro_index %
-                        SystemState::MICRO_CORES_PER_CLUSTER;
-                    deferred.request =
-                        *dispatch.pending_cluster_request;
-                    deferred_cluster_requests.push_back(
-                        deferred);
-                }
-                round_steps = checked_scheduler_add(
-                    round_steps,
-                    dispatch.steps,
-                    "round instruction accounting");
-                round_cycles = std::max(
-                    round_cycles,
-                    dispatch.cycles);
-                if (dispatch.steps > 0) {
-                    system.scheduler_cursor =
-                        (core_index + 1) %
-                        static_cast<int>(core_count);
-                }
-            } catch (...) {
-                // Match the compatibility scheduler: settle only earlier
-                // successful cores in this round, drain output, skip IRQ
-                // delivery, and then preserve the original exception.
-                settle_round(round_cycles, true, true, false);
-                throw;
-            }
+                    reservation,
+                });
+            unreserved -= reservation;
+        }
+        if (reservations.empty())
+            break;
+
+        CoreFrontierOutcome outcome;
+        try {
+            run_parallel_core_round(
+                system,
+                reservations,
+                callbacks,
+                settle_continuation,
+                settle_dispatch_error,
+                result,
+                outcome);
+        } catch (...) {
+            // Every physical cohort in the failing sub-frontier reached
+            // the same private boundary before ordered settlement began.
+            // Settle those prefixes, all earlier successful boundaries,
+            // and all prior sub-frontiers in this scheduler round.
+            settle_round(
+                outcome.cycles,
+                true,
+                true,
+                false);
+            throw;
         }
 
-        // Every reduced core has now reached the same abstract scheduling
-        // boundary. Select at most one request per independent cluster
-        // resource from this immutable set, then settle winners in the global
-        // cyclic order so an aggregate host budget cannot introduce a hidden
-        // resource-class priority.
-        std::vector<DeferredClusterRequest>
-            cluster_winners;
-        for (
-            std::size_t cluster_index = 0;
-            cluster_index < system.cluster_states.size();
-            cluster_index++
-        ) {
-            ClusterState& cluster =
-                system.cluster_states[cluster_index];
-            for (
-                std::size_t resource_index = 1;
-                resource_index <
-                    CLUSTER_RESOURCE_KIND_COUNT;
-                resource_index++
-            ) {
-                const ClusterResourceKind resource =
-                    static_cast<ClusterResourceKind>(
-                        resource_index);
-                std::vector<int> candidates;
-                for (
-                    const DeferredClusterRequest& deferred :
-                    deferred_cluster_requests
-                ) {
-                    if (
-                        deferred.cluster_index ==
-                            static_cast<int>(cluster_index) &&
-                        deferred.request.resource == resource
-                    ) {
-                        candidates.push_back(
-                            deferred.local_core);
-                    }
-                }
-                const std::optional<int> winner =
-                    cluster.choose(resource, candidates);
-                if (!winner.has_value())
-                    continue;
-                const auto selected = std::find_if(
-                    deferred_cluster_requests.begin(),
-                    deferred_cluster_requests.end(),
-                    [&](const DeferredClusterRequest& deferred) {
-                        return (
-                            deferred.cluster_index ==
-                                static_cast<int>(cluster_index) &&
-                            deferred.request.resource ==
-                                resource &&
-                            deferred.local_core == *winner
-                        );
-                    });
-                if (selected ==
-                    deferred_cluster_requests.end()) {
-                    throw std::logic_error(
-                        "cluster winner has no immutable request");
-                }
-                cluster_winners.push_back(*selected);
-            }
-        }
-        std::sort(
-            cluster_winners.begin(),
-            cluster_winners.end(),
-            [&](const DeferredClusterRequest& left,
-                const DeferredClusterRequest& right) {
-                const int left_distance =
-                    (
-                        left.core_index -
-                        round_start +
-                        static_cast<int>(core_count)
-                    ) % static_cast<int>(core_count);
-                const int right_distance =
-                    (
-                        right.core_index -
-                        round_start +
-                        static_cast<int>(core_count)
-                    ) % static_cast<int>(core_count);
-                return left_distance < right_distance;
-            });
-
-        for (const DeferredClusterRequest& winner :
-             cluster_winners) {
-            if (round_steps >= remaining)
-                break;
-            try {
-                CoreDispatchResult settled =
-                    settle_deferred_cluster_request(
-                        winner.core_index,
-                        winner.request,
-                        settle_continuation);
-                system.cluster_states[
-                    static_cast<std::size_t>(
-                        winner.cluster_index)].commit(
-                            winner.request.resource,
-                            winner.local_core,
-                            winner.request.operation);
-                merge_core_dispatch(
-                    result,
-                    winner.core_index,
-                    settled);
-                round_steps = checked_scheduler_add(
-                    round_steps,
-                    settled.steps,
-                    "round cluster instruction accounting");
-                round_cycles = std::max(
-                    round_cycles,
-                    settled.cycles);
-                if (settled.steps > 0) {
-                    system.scheduler_cursor =
-                        (winner.core_index + 1) %
-                        static_cast<int>(core_count);
-                }
-            } catch (...) {
-                settle_round(
-                    round_cycles,
-                    true,
-                    true,
-                    false);
-                throw;
-            }
-        }
-
-        result.instructions_executed = checked_scheduler_add(
-            result.instructions_executed,
-            round_steps,
-            "aggregate instruction accounting");
-        remaining -= round_steps;
-        // advance=true, drain=false, deliver_interrupts=true
-        settle_round(round_cycles, true, false, true);
+        result.instructions_executed =
+            checked_scheduler_add(
+                result.instructions_executed,
+                outcome.steps,
+                "aggregate instruction accounting");
+        remaining -= outcome.steps;
+        // A complete equal-credit scheduler round, rather than a
+        // physical cohort or cache/shared sub-frontier, is the unbounded
+        // scheduler's clock, device, and interrupt boundary.
+        settle_round(
+            outcome.cycles,
+            true,
+            false,
+            true);
         result.rounds++;
-        if (round_steps == 0)
+
+        if (outcome.steps != 0)
+            continue;
+        if (!outcome.interrupt_boundary)
+            break;
+
+        bool interrupt_still_eligible = false;
+        for (int core_index : outcome.interrupt_cores) {
+            const CPUState& core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        core_index)];
+            if (
+                pending_enabled_core_interrupt(
+                    system, core) >= 0
+            ) {
+                interrupt_still_eligible = true;
+                break;
+            }
+        }
+        if (interrupt_still_eligible)
             break;
     }
 
-    // Multicore execution batches native UART observation once after all
-    // successful rounds.
     settle_round(0, false, true, false);
     result.system_cycles_advanced =
-        system.shared_clock.cycles() - clock_start;
-    result.scheduler_cursor = system.scheduler_cursor;
+        system.shared_clock.cycles() -
+        clock_start;
+    result.scheduler_cursor =
+        system.scheduler_cursor;
     return result;
 }
 
@@ -11418,10 +11252,13 @@ acquire_system_scheduler_lock(SystemState& system) {
         system.scheduler_mutex);
 }
 
-static std::vector<PrivateFullCoreResult>
-execute_private_full_core_wave_under_active_batch(
+static std::vector<PrivateCoreResult>
+execute_private_core_wave_under_active_batch(
         SystemState& system,
-        std::vector<PrivateFullCoreCommand> commands) {
+        std::vector<PrivateCoreCommand> commands,
+        std::shared_ptr<
+            SharedMemoryExecutionAdmission>
+            frontier_admission) {
     if (commands.empty())
         return {};
     if (!system.native_batch_active.load(
@@ -11454,41 +11291,57 @@ execute_private_full_core_wave_under_active_batch(
     }
 
     CPUState* inline_core = nullptr;
-    for (PrivateFullCoreCommand& command : commands) {
+    for (PrivateCoreCommand& command : commands) {
         if (
             command.core_index < 0 ||
             command.core_index >=
-                system.full_core_count()
+                static_cast<int>(
+                    system.execution_cores.size())
         ) {
             throw std::out_of_range(
-                "private command full-core index is out of range");
+                "private command execution-core index is out of range");
         }
-        command.core = system.cores[
+        command.core = system.execution_cores[
             static_cast<std::size_t>(
-                command.core_index)].get();
+                command.core_index)];
         command.pending_interrupt_vector =
-            pending_enabled_full_core_interrupt(
+            pending_enabled_core_interrupt(
                 system, *command.core);
         if (command.lane_index == 0)
             inline_core = command.core;
     }
 
-    std::unique_ptr<SharedMemoryUseGuard> wave_memory;
-    if (inline_core != nullptr) {
-        wave_memory =
-            acquire_shared_memory_use(
-                *inline_core,
-                /*permit_native_execution=*/true);
+    std::unique_ptr<SharedMemoryUseGuard>
+        wave_memory;
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        admission = std::move(
+            frontier_admission);
+    if (admission) {
+        if (
+            &admission->memory() !=
+                &system.shared_memory
+        ) {
+            throw std::invalid_argument(
+                "private frontier admission does not "
+                "match system memory");
+        }
     } else {
-        py::gil_scoped_release release;
-        wave_memory =
-            std::make_unique<SharedMemoryUseGuard>(
-                system.shared_memory);
-    }
-    const std::shared_ptr<SharedMemoryExecutionAdmission>
+        if (inline_core != nullptr) {
+            wave_memory =
+                acquire_shared_memory_use(
+                    *inline_core,
+                    /*permit_native_execution=*/true);
+        } else {
+            py::gil_scoped_release release;
+            wave_memory =
+                std::make_unique<
+                    SharedMemoryUseGuard>(
+                        system.shared_memory);
+        }
         admission =
             wave_memory->execution_admission();
-    for (PrivateFullCoreCommand& command : commands)
+    }
+    for (PrivateCoreCommand& command : commands)
         command.admission = admission;
 
     system.mappings_sealed = true;
@@ -11501,11 +11354,11 @@ execute_private_full_core_wave_under_active_batch(
 }
 
 static void throw_private_full_core_internal_failure(
-        const std::vector<PrivateFullCoreResult>& results) {
-    for (const PrivateFullCoreResult& result : results) {
+        const std::vector<PrivateCoreResult>& results) {
+    for (const PrivateCoreResult& result : results) {
         if (
             result.stop_reason ==
-            PrivateFullCoreStopReason::INTERNAL_FAILURE
+            PrivateCoreStopReason::INTERNAL_FAILURE
         ) {
             throw std::runtime_error(
                 "private command failed on lane " +
@@ -11518,16 +11371,16 @@ static void throw_private_full_core_internal_failure(
     }
 }
 
-static std::vector<PrivateFullCoreResult>
+static std::vector<PrivateCoreResult>
 run_private_full_core_wave(
         SystemState& system,
-        std::vector<PrivateFullCoreCommand> commands) {
+        std::vector<PrivateCoreCommand> commands) {
     if (commands.empty())
         return {};
 
     NativeBatchActiveGuard active_guard(system);
-    std::vector<PrivateFullCoreResult> results =
-        execute_private_full_core_wave_under_active_batch(
+    std::vector<PrivateCoreResult> results =
+        execute_private_core_wave_under_active_batch(
             system,
             std::move(commands));
     throw_private_full_core_internal_failure(results);
@@ -11596,10 +11449,10 @@ validated_coordinator_settlement(
 }
 
 static CoordinatorBoundarySettlement
-settle_private_full_core_terminal(
+settle_private_core_terminal(
         SystemState& system,
         int core_index,
-        const PrivateFullCoreResult& private_result,
+        const PrivateCoreResult& private_result,
         int64_t max_steps,
         const py::function& settle_continuation) {
     CPUState& core =
@@ -11611,7 +11464,7 @@ settle_private_full_core_terminal(
             /*permit_native_execution=*/true);
     const int continuation_reason =
         private_result.stop_reason ==
-            PrivateFullCoreStopReason::TRAP
+            PrivateCoreStopReason::TRAP
         ? RUN_TRAP
         : RUN_RESET;
     CoordinatorBoundarySettlement result =
@@ -11633,10 +11486,10 @@ settle_private_full_core_terminal(
 }
 
 static CoordinatorBoundarySettlement
-settle_private_full_core_coordinator_instruction(
+settle_private_core_coordinator_instruction(
         SystemState& system,
         int core_index,
-        const PrivateFullCoreResult& private_result,
+        const PrivateCoreResult& private_result,
         int64_t max_steps,
         const StepCallbacks& callbacks,
         const py::function& settle_continuation,
@@ -11763,49 +11616,42 @@ settle_private_full_core_coordinator_instruction(
     return result;
 }
 
-static void run_parallel_full_core_subfrontier(
+static void run_parallel_core_subfrontier(
         SystemState& system,
         const std::vector<
-            FullCoreFrontierReservation>& reservations,
+            CoreFrontierReservation>& reservations,
         const std::vector<StepCallbacks>& callbacks,
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error,
         SystemBatchResult& result,
-        FullCoreFrontierOutcome& outcome) {
+        CoreFrontierOutcome& outcome) {
     if (reservations.empty())
         return;
-    if (
-        system.execution_cores.size() !=
-        system.cores.size()
-    ) {
-        throw std::logic_error(
-            "parallel full-core frontiers require a "
-            "homogeneous full-core topology");
-    }
     if (
         callbacks.size() !=
         system.execution_cores.size()
     ) {
         throw std::invalid_argument(
-            "parallel full-core frontier callback "
+            "parallel core frontier callback "
             "topology is incomplete");
     }
 
     int64_t total_reserved = 0;
     for (
-        const FullCoreFrontierReservation& reservation :
+        const CoreFrontierReservation& reservation :
         reservations
     ) {
         if (
             reservation.core_index < 0 ||
             reservation.core_index >=
-                system.full_core_count() ||
-            reservation.max_steps <= 0 ||
+                static_cast<int>(
+                    system.execution_cores.size()) ||
+            reservation.max_steps < 0 ||
             reservation.max_steps >
                 std::numeric_limits<int>::max()
         ) {
             throw std::logic_error(
-                "parallel full-core frontier reservation "
+                "parallel core frontier reservation "
                 "is invalid");
         }
         total_reserved = checked_scheduler_add(
@@ -11817,34 +11663,83 @@ static void run_parallel_full_core_subfrontier(
     // Physical cohorts are an implementation detail. Even the one-lane
     // reference gathers every cohort before the first shared commit so lane
     // width cannot change exception-visible peer-private progress.
-    std::vector<PrivateFullCoreResult> private_results;
-    private_results.reserve(reservations.size());
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        frontier_admission;
+    std::unique_ptr<SharedMemoryLease>
+        frontier_memory_lease;
+    {
+        py::gil_scoped_release release;
+        frontier_admission =
+            std::make_shared<
+                SharedMemoryExecutionAdmission>(
+                    system.shared_memory,
+                    "CPUState memory is already in use");
+    }
+    system.mappings_sealed = true;
+
+    std::vector<PrivateCoreResult> private_results(
+        reservations.size());
+    std::vector<bool> zero_cluster_probe(
+        reservations.size(), false);
+    std::vector<std::size_t> executable_indices;
+    executable_indices.reserve(
+        reservations.size());
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        const CoreFrontierReservation&
+            reservation = reservations[index];
+        if (reservation.max_steps > 0) {
+            executable_indices.push_back(index);
+            continue;
+        }
+
+        CPUState& core =
+            *system.execution_cores[
+                static_cast<std::size_t>(
+                    reservation.core_index)];
+        PrivateCoreResult probe;
+        probe.submission_index = index;
+        probe.core_index =
+            reservation.core_index;
+        probe.start_pc = pc(core);
+        probe.end_pc = probe.start_pc;
+        probe.stop_reason =
+            PrivateCoreStopReason::
+                INSTRUCTION_LIMIT;
+        private_results[index] =
+            std::move(probe);
+    }
+
     const std::size_t physical_width =
         static_cast<std::size_t>(
             system.worker_count());
     for (
         std::size_t cohort_start = 0;
-        cohort_start < reservations.size();
+        cohort_start < executable_indices.size();
         cohort_start += physical_width
     ) {
         const std::size_t cohort_size =
             std::min<std::size_t>(
                 physical_width,
-                reservations.size() -
+                executable_indices.size() -
                     cohort_start);
-        std::vector<PrivateFullCoreCommand> commands;
+        std::vector<PrivateCoreCommand> commands;
         commands.reserve(cohort_size);
         for (
             std::size_t cohort_index = 0;
             cohort_index < cohort_size;
             cohort_index++
         ) {
-            const FullCoreFrontierReservation&
+            const CoreFrontierReservation&
                 reservation =
                     reservations[
-                        cohort_start +
-                        cohort_index];
-            PrivateFullCoreCommand command;
+                        executable_indices[
+                            cohort_start +
+                            cohort_index]];
+            PrivateCoreCommand command;
             command.lane_index =
                 static_cast<int>(cohort_index);
             command.core_index =
@@ -11854,27 +11749,69 @@ static void run_parallel_full_core_subfrontier(
                     reservation.max_steps);
             commands.push_back(std::move(command));
         }
-        std::vector<PrivateFullCoreResult>
+        std::vector<PrivateCoreResult>
             cohort_results =
-                execute_private_full_core_wave_under_active_batch(
+                execute_private_core_wave_under_active_batch(
                     system,
-                    std::move(commands));
+                    std::move(commands),
+                    frontier_admission);
         if (cohort_results.size() != cohort_size) {
             throw std::logic_error(
                 "private worker cohort returned an "
                 "incomplete frontier");
         }
         for (
-            PrivateFullCoreResult& private_result :
-            cohort_results
+            std::size_t cohort_index = 0;
+            cohort_index < cohort_results.size();
+            cohort_index++
         ) {
-            private_results.push_back(
-                std::move(private_result));
+            private_results[
+                executable_indices[
+                    cohort_start +
+                    cohort_index]] =
+                std::move(
+                    cohort_results[
+                        cohort_index]);
         }
     }
-    if (private_results.size() != reservations.size()) {
-        throw std::logic_error(
-            "private worker frontier result count mismatch");
+    {
+        py::gil_scoped_release release;
+        frontier_memory_lease =
+            std::make_unique<SharedMemoryLease>(
+                frontier_admission);
+    }
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        if (reservations[index].max_steps != 0)
+            continue;
+        CPUState& core =
+            *system.execution_cores[
+                static_cast<std::size_t>(
+                    reservations[index].core_index)];
+        if (
+            core.profile != CoreProfile::MICRO ||
+            core.halted ||
+            core.idle
+        ) {
+            continue;
+        }
+        const PendingClusterRequest request =
+            classify_pending_cluster_request(
+                system,
+                core,
+                RUN_EXT_FALLBACK);
+        if (
+            request.resource !=
+                ClusterResourceKind::NONE
+        ) {
+            private_results[index].stop_reason =
+                PrivateCoreStopReason::
+                    SHARED_INSTRUCTION;
+            zero_cluster_probe[index] = true;
+        }
     }
 
     std::vector<int64_t> per_core_frontier_cycles(
@@ -11885,7 +11822,7 @@ static void run_parallel_full_core_subfrontier(
             CoreDispatchResult fragment) {
         if (fragment.steps < 0 || fragment.cycles < 0) {
             throw std::logic_error(
-                "parallel full-core frontier produced "
+                "parallel core frontier produced "
                 "negative progress");
         }
         outcome.steps = checked_scheduler_add(
@@ -11894,7 +11831,7 @@ static void run_parallel_full_core_subfrontier(
             "frontier aggregate instruction accounting");
         if (outcome.steps > total_reserved) {
             throw std::logic_error(
-                "parallel full-core frontier exceeded "
+                "parallel core frontier exceeded "
                 "its aggregate reservation");
         }
         const std::size_t index =
@@ -11911,7 +11848,7 @@ static void run_parallel_full_core_subfrontier(
             result, core_index, fragment);
     };
 
-    const PrivateFullCoreResult*
+    const PrivateCoreResult*
         first_internal_failure = nullptr;
     std::vector<bool> dispatch_open(
         reservations.size(), false);
@@ -11920,9 +11857,9 @@ static void run_parallel_full_core_subfrontier(
         index < reservations.size();
         index++
     ) {
-        const FullCoreFrontierReservation& reservation =
+        const CoreFrontierReservation& reservation =
             reservations[index];
-        const PrivateFullCoreResult& private_result =
+        const PrivateCoreResult& private_result =
             private_results[index];
         if (
             private_result.core_index !=
@@ -11939,17 +11876,18 @@ static void run_parallel_full_core_subfrontier(
 
         const bool boundary_requires_room =
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     ICACHE_BOUNDARY ||
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     SHARED_INSTRUCTION ||
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::TRAP ||
+                PrivateCoreStopReason::TRAP ||
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::RESET;
+                PrivateCoreStopReason::RESET;
         if (
             boundary_requires_room &&
+            !zero_cluster_probe[index] &&
             private_result.steps_executed >=
                 reservation.max_steps
         ) {
@@ -11959,7 +11897,7 @@ static void run_parallel_full_core_subfrontier(
         }
         if (
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INSTRUCTION_LIMIT &&
             private_result.steps_executed !=
                 reservation.max_steps
@@ -11970,7 +11908,7 @@ static void run_parallel_full_core_subfrontier(
         }
         if (
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INTERRUPT_BOUNDARY &&
             (
                 private_result.steps_executed != 0 ||
@@ -11983,7 +11921,7 @@ static void run_parallel_full_core_subfrontier(
 
         if (
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INTERNAL_FAILURE
         ) {
             if (first_internal_failure == nullptr)
@@ -12008,7 +11946,7 @@ static void run_parallel_full_core_subfrontier(
 
         if (
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INTERRUPT_BOUNDARY
         ) {
             outcome.interrupt_boundary = true;
@@ -12020,12 +11958,12 @@ static void run_parallel_full_core_subfrontier(
         dispatch_open[index] = true;
         if (
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::
+                PrivateCoreStopReason::
                     INSTRUCTION_LIMIT ||
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::HALTED ||
+                PrivateCoreStopReason::HALTED ||
             private_result.stop_reason ==
-                PrivateFullCoreStopReason::IDLE
+                PrivateCoreStopReason::IDLE
         ) {
             int reason = RUN_LIMIT;
             if (
@@ -12034,12 +11972,12 @@ static void run_parallel_full_core_subfrontier(
             ) {
                 if (
                     private_result.stop_reason ==
-                    PrivateFullCoreStopReason::HALTED
+                    PrivateCoreStopReason::HALTED
                 ) {
                     reason = RUN_HALT;
                 } else if (
                     private_result.stop_reason ==
-                    PrivateFullCoreStopReason::IDLE
+                    PrivateCoreStopReason::IDLE
                 ) {
                     reason = RUN_IDLE;
                 }
@@ -12053,9 +11991,9 @@ static void run_parallel_full_core_subfrontier(
                 std::move(terminal));
             if (
                 private_result.stop_reason ==
-                    PrivateFullCoreStopReason::HALTED ||
+                    PrivateCoreStopReason::HALTED ||
                 private_result.stop_reason ==
-                    PrivateFullCoreStopReason::IDLE
+                    PrivateCoreStopReason::IDLE
             ) {
                 outcome.terminal_cores.push_back(
                     reservation.core_index);
@@ -12073,60 +12011,101 @@ static void run_parallel_full_core_subfrontier(
             first_internal_failure->internal_error);
     }
 
-    // Every private cohort is complete and its mapping admission is gone.
-    // Shared/cache/trap/reset boundaries now commit only on the coordinator
-    // and only in the frozen cyclic reservation order.
+    const int first_micro_index =
+        static_cast<int>(system.cores.size());
+    auto capture_cluster_request = [&](
+            std::size_t index)
+            -> std::optional<
+                DeferredClusterRequest> {
+        const int core_index =
+            reservations[index].core_index;
+        CPUState& core =
+            *system.execution_cores[
+                static_cast<std::size_t>(
+                    core_index)];
+        if (
+            core.profile != CoreProfile::MICRO ||
+            core.halted ||
+            core.idle
+        ) {
+            return std::nullopt;
+        }
+        const PendingClusterRequest request =
+            classify_pending_cluster_request(
+                system,
+                core,
+                RUN_EXT_FALLBACK);
+        if (
+            request.resource ==
+                ClusterResourceKind::NONE
+        ) {
+            return std::nullopt;
+        }
+        if (core_index < first_micro_index) {
+            throw std::logic_error(
+                "reduced core has an invalid global "
+                "execution index");
+        }
+        const int micro_index =
+            core_index - first_micro_index;
+        DeferredClusterRequest deferred;
+        deferred.core_index = core_index;
+        deferred.cluster_index =
+            micro_index /
+            SystemState::MICRO_CORES_PER_CLUSTER;
+        deferred.local_core =
+            micro_index %
+            SystemState::MICRO_CORES_PER_CLUSTER;
+        deferred.instruction_pc = pc(core);
+        deferred.request = request;
+        if (
+            deferred.cluster_index < 0 ||
+            deferred.cluster_index >=
+                static_cast<int>(
+                    system.cluster_states.size())
+        ) {
+            throw std::logic_error(
+                "reduced core cluster index is out of range");
+        }
+        return deferred;
+    };
+
+    // Classify the worker-published boundaries while one admission still
+    // freezes every mapping across every physical cohort. The admission is
+    // deliberately released before any Python/coordinator continuation.
+    std::vector<std::optional<DeferredClusterRequest>>
+        initial_cluster_requests(
+            reservations.size());
     for (
         std::size_t index = 0;
         index < reservations.size();
         index++
     ) {
-        if (!dispatch_open[index])
-            continue;
-        const FullCoreFrontierReservation& reservation =
-            reservations[index];
-        const PrivateFullCoreResult& private_result =
-            private_results[index];
-
-        CoordinatorBoundarySettlement settlement;
         if (
-            private_result.stop_reason ==
-                PrivateFullCoreStopReason::TRAP ||
-            private_result.stop_reason ==
-                PrivateFullCoreStopReason::RESET
+            dispatch_open[index] &&
+            (
+                private_results[index].stop_reason ==
+                    PrivateCoreStopReason::
+                        SHARED_INSTRUCTION ||
+                zero_cluster_probe[index]
+            )
         ) {
-            settlement =
-                settle_private_full_core_terminal(
-                    system,
-                    reservation.core_index,
-                    private_result,
-                    reservation.max_steps,
-                    settle_continuation);
-        } else if (
-            private_result.stop_reason ==
-                PrivateFullCoreStopReason::
-                    ICACHE_BOUNDARY ||
-            private_result.stop_reason ==
-                PrivateFullCoreStopReason::
-                    SHARED_INSTRUCTION
-        ) {
-            settlement =
-                settle_private_full_core_coordinator_instruction(
-                    system,
-                    reservation.core_index,
-                    private_result,
-                    reservation.max_steps,
-                    callbacks[
-                        static_cast<std::size_t>(
-                            reservation.core_index)],
-                    settle_continuation,
-                    settle_dispatch_error);
-        } else {
-            throw std::logic_error(
-                "private frontier left an unsupported "
-                "coordinator boundary");
+            initial_cluster_requests[index] =
+                capture_cluster_request(index);
         }
+    }
+    frontier_memory_lease.reset();
+    frontier_admission.reset();
 
+    auto publish_settlement = [&](
+            std::size_t index,
+            const CoordinatorBoundarySettlement&
+                settlement) {
+        outcome.coordinator_state_changed = true;
+        const CoreFrontierReservation&
+            reservation = reservations[index];
+        const PrivateCoreResult& private_result =
+            private_results[index];
         if (
             settlement.total_steps <
                 private_result.steps_executed ||
@@ -12147,8 +12126,10 @@ static void run_parallel_full_core_subfrontier(
         suffix.dispatches = 1;
         suffix.continuations =
             settlement.continuations;
-        if (settlement.stop_reason >= RUN_LIMIT &&
-            settlement.stop_reason <= RUN_RESET) {
+        if (
+            settlement.stop_reason >= RUN_LIMIT &&
+            settlement.stop_reason <= RUN_RESET
+        ) {
             suffix.stop_reasons[
                 static_cast<std::size_t>(
                     settlement.stop_reason)] = 1;
@@ -12165,28 +12146,593 @@ static void run_parallel_full_core_subfrontier(
                 reservation.core_index);
         }
         dispatch_open[index] = false;
+    };
+
+    // Preserve the established mixed-topology phase barrier: ordinary
+    // boundaries settle first in cyclic order. A later live boundary that
+    // has become a cluster request is left for the post-commit snapshot
+    // instead of bypassing arbitration with stale metadata.
+    for (
+        std::size_t index = 0;
+        index < reservations.size();
+        index++
+    ) {
+        if (
+            !dispatch_open[index] ||
+            initial_cluster_requests[index].has_value()
+        ) {
+            continue;
+        }
+        const CoreFrontierReservation&
+            reservation = reservations[index];
+        const PrivateCoreResult& private_result =
+            private_results[index];
+        CPUState& core =
+            *system.execution_cores[
+                static_cast<std::size_t>(
+                    reservation.core_index)];
+
+        if (
+            core.profile == CoreProfile::MICRO &&
+            private_result.stop_reason ==
+                PrivateCoreStopReason::
+                    SHARED_INSTRUCTION
+        ) {
+            std::optional<DeferredClusterRequest>
+                live_request;
+            {
+                auto memory_guard =
+                    acquire_shared_memory_use(core);
+                live_request =
+                    capture_cluster_request(index);
+            }
+            if (live_request.has_value()) {
+                initial_cluster_requests[index] =
+                    std::move(live_request);
+                continue;
+            }
+        }
+
+        if (core.halted || core.idle) {
+            outcome.terminal_cores.push_back(
+                reservation.core_index);
+            dispatch_open[index] = false;
+            continue;
+        }
+
+        CoordinatorBoundarySettlement settlement;
+        if (
+            private_result.stop_reason ==
+                PrivateCoreStopReason::TRAP ||
+            private_result.stop_reason ==
+                PrivateCoreStopReason::RESET
+        ) {
+            settlement =
+                settle_private_core_terminal(
+                    system,
+                    reservation.core_index,
+                    private_result,
+                    reservation.max_steps,
+                    settle_continuation);
+        } else if (
+            private_result.stop_reason ==
+                PrivateCoreStopReason::
+                    ICACHE_BOUNDARY ||
+            private_result.stop_reason ==
+                PrivateCoreStopReason::
+                    SHARED_INSTRUCTION
+        ) {
+            settlement =
+                settle_private_core_coordinator_instruction(
+                    system,
+                    reservation.core_index,
+                    private_result,
+                    reservation.max_steps,
+                    callbacks[
+                        static_cast<std::size_t>(
+                            reservation.core_index)],
+                    settle_continuation,
+                    settle_dispatch_error);
+        } else {
+            throw std::logic_error(
+                "private frontier left an unsupported "
+                "coordinator boundary");
+        }
+        publish_settlement(index, settlement);
+    }
+
+    // Re-snapshot cluster requests from live PCs and live cluster state only
+    // after every earlier ordinary effect is committed.
+    std::vector<std::optional<DeferredClusterRequest>>
+        cluster_requests(reservations.size());
+    {
+        CPUState& guard_core =
+            *system.execution_cores[
+                static_cast<std::size_t>(
+                    reservations.front().core_index)];
+        auto memory_guard =
+            acquire_shared_memory_use(guard_core);
+        for (
+            std::size_t index = 0;
+            index < reservations.size();
+            index++
+        ) {
+            if (!dispatch_open[index])
+                continue;
+            cluster_requests[index] =
+                capture_cluster_request(index);
+            if (!cluster_requests[index].has_value()) {
+                outcome.cluster_deferred_cores.push_back(
+                    reservations[index].core_index);
+                dispatch_open[index] = false;
+            }
+        }
+    }
+
+    struct ClusterGrantGroup {
+        int cluster_index = -1;
+        ClusterResourceKind resource =
+            ClusterResourceKind::NONE;
+        std::vector<std::size_t> candidates;
+        std::optional<std::size_t> winner;
+    };
+    std::vector<ClusterGrantGroup> groups;
+    for (
+        std::size_t cluster_index = 0;
+        cluster_index <
+            system.cluster_states.size();
+        cluster_index++
+    ) {
+        ClusterState& cluster =
+            system.cluster_states[cluster_index];
+        for (
+            std::size_t resource_index = 1;
+            resource_index <
+                CLUSTER_RESOURCE_KIND_COUNT;
+            resource_index++
+        ) {
+            ClusterGrantGroup group;
+            group.cluster_index =
+                static_cast<int>(cluster_index);
+            group.resource =
+                static_cast<ClusterResourceKind>(
+                    resource_index);
+            std::vector<int> local_candidates;
+            for (
+                std::size_t index = 0;
+                index < cluster_requests.size();
+                index++
+            ) {
+                const auto& request =
+                    cluster_requests[index];
+                if (
+                    request.has_value() &&
+                    request->cluster_index ==
+                        group.cluster_index &&
+                    request->request.resource ==
+                        group.resource
+                ) {
+                    group.candidates.push_back(index);
+                    local_candidates.push_back(
+                        request->local_core);
+                }
+            }
+            if (group.candidates.empty())
+                continue;
+            const std::optional<int> local_winner =
+                cluster.choose(
+                    group.resource,
+                    local_candidates);
+            if (local_winner.has_value()) {
+                const auto selected =
+                    std::find_if(
+                        group.candidates.begin(),
+                        group.candidates.end(),
+                        [&](std::size_t index) {
+                            return cluster_requests[index]
+                                ->local_core ==
+                                *local_winner;
+                        });
+                if (selected ==
+                    group.candidates.end()) {
+                    throw std::logic_error(
+                        "cluster winner has no immutable "
+                        "request");
+                }
+                group.winner = *selected;
+            }
+            groups.push_back(std::move(group));
+        }
+    }
+
+    std::sort(
+        groups.begin(),
+        groups.end(),
+        [](const ClusterGrantGroup& left,
+           const ClusterGrantGroup& right) {
+            const std::size_t left_index =
+                left.winner.value_or(
+                    left.candidates.front());
+            const std::size_t right_index =
+                right.winner.value_or(
+                    right.candidates.front());
+            return left_index < right_index;
+        });
+
+    // Arbitration choices are frozen together, not discovered in winner
+    // commit order. Every nonselected request is a loser, including requests
+    // that hard eligibility left without a winner. A cyclic-earlier loser can
+    // therefore fund a later zero-credit winner even when the loser's own
+    // resource group appears later in the commit sequence.
+    std::vector<bool> frozen_cluster_losers(
+        reservations.size(), false);
+    std::vector<int64_t> frozen_transferable_credit(
+        reservations.size(), 0);
+    for (const ClusterGrantGroup& group : groups) {
+        for (std::size_t index :
+             group.candidates) {
+            if (
+                group.winner.has_value() &&
+                index == *group.winner
+            )
+                continue;
+            frozen_cluster_losers[index] = true;
+            frozen_transferable_credit[index] =
+                reservations[index].max_steps -
+                private_results[index]
+                    .steps_executed;
+        }
+    }
+
+    // Capacity failure must precede the first guest cluster mutation. Plan
+    // the exact initially fundable winners in commit order: later live
+    // revalidation may remove one of these grants, but can never add one.
+    // This avoids rejecting an unfundable zero-credit request merely because
+    // its dormant counter has already reached the representation limit.
+    const int64_t initial_cluster_commit_slots =
+        total_reserved - outcome.steps;
+    if (initial_cluster_commit_slots < 0) {
+        throw std::logic_error(
+            "cluster frontier exceeded its aggregate credit");
+    }
+    std::vector<int64_t> planned_transferable_credit =
+        frozen_transferable_credit;
+    std::vector<bool> planned_winners(
+        groups.size(), false);
+    int64_t planned_commit_slots =
+        initial_cluster_commit_slots;
+    for (
+        std::size_t group_index = 0;
+        group_index < groups.size();
+        group_index++
+    ) {
+        const ClusterGrantGroup& group =
+            groups[group_index];
+        if (!group.winner.has_value())
+            continue;
+
+        const std::size_t winner = *group.winner;
+        const PrivateCoreResult& private_result =
+            private_results[winner];
+        const CoreFrontierReservation& reservation =
+            reservations[winner];
+        if (
+            private_result.steps_executed >=
+                reservation.max_steps
+        ) {
+            const auto donor =
+                std::find_if(
+                    planned_transferable_credit.begin(),
+                    planned_transferable_credit.begin() +
+                        static_cast<std::ptrdiff_t>(winner),
+                    [](int64_t credit) {
+                        return credit > 0;
+                    });
+            if (
+                donor ==
+                planned_transferable_credit.begin() +
+                    static_cast<std::ptrdiff_t>(winner)
+            ) {
+                continue;
+            }
+            (*donor)--;
+        }
+        if (planned_commit_slots == 0)
+            continue;
+        planned_winners[group_index] = true;
+        planned_commit_slots--;
+    }
+
+    std::vector<uint64_t> funded_winners_per_cluster(
+        system.cluster_states.size(), 0);
+    for (
+        std::size_t group_index = 0;
+        group_index < groups.size();
+        group_index++
+    ) {
+        if (!planned_winners[group_index])
+            continue;
+        const ClusterGrantGroup& group =
+            groups[group_index];
+        ClusterState& cluster =
+            system.cluster_states[
+                static_cast<std::size_t>(
+                    group.cluster_index)];
+        const std::size_t resource_index =
+            static_cast<std::size_t>(
+                group.resource);
+        if (
+            cluster.grant_counts[resource_index] ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "native cluster grant accounting overflow");
+        }
+        funded_winners_per_cluster[
+            static_cast<std::size_t>(
+                group.cluster_index)]++;
+    }
+    for (
+        std::size_t cluster_index = 0;
+        cluster_index <
+            system.cluster_states.size();
+        cluster_index++
+    ) {
+        const uint64_t required =
+            funded_winners_per_cluster[
+                cluster_index];
+        if (
+            required >
+            std::numeric_limits<uint64_t>::max() -
+                system.cluster_states[
+                    cluster_index].grant_sequence
+        ) {
+            throw std::overflow_error(
+                "native cluster grant accounting overflow");
+        }
+    }
+
+    int64_t cluster_commit_slots =
+        initial_cluster_commit_slots;
+    std::vector<int64_t> transferable_credit =
+        frozen_transferable_credit;
+    for (
+        std::size_t group_index = 0;
+        group_index < groups.size();
+        group_index++
+    ) {
+        const ClusterGrantGroup& group =
+            groups[group_index];
+        if (!group.winner.has_value()) {
+            for (std::size_t index :
+                 group.candidates) {
+                outcome.cluster_lost_cores.push_back(
+                    reservations[index].core_index);
+                dispatch_open[index] = false;
+            }
+            continue;
+        }
+
+        const std::size_t winner = *group.winner;
+        const DeferredClusterRequest& frozen_winner =
+            *cluster_requests[winner];
+        bool stable = false;
+        {
+            CPUState& guard_core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        reservations[winner].core_index)];
+            auto memory_guard =
+                acquire_shared_memory_use(guard_core);
+            const std::optional<
+                DeferredClusterRequest> live =
+                    capture_cluster_request(
+                        winner);
+            stable =
+                live.has_value() &&
+                live->cluster_index ==
+                    frozen_winner.cluster_index &&
+                live->local_core ==
+                    frozen_winner.local_core &&
+                live->instruction_pc ==
+                    frozen_winner.instruction_pc &&
+                live->request.resource ==
+                    frozen_winner.request.resource &&
+                live->request.operation ==
+                    frozen_winner.request.operation &&
+                live->request.continuation_reason ==
+                    frozen_winner.request
+                        .continuation_reason &&
+                live->request.encoding_length ==
+                    frozen_winner.request
+                        .encoding_length &&
+                live->request.encoding ==
+                    frozen_winner.request.encoding &&
+                system.cluster_states[
+                    static_cast<std::size_t>(
+                        group.cluster_index)]
+                    .local_core_is_eligible(
+                        group.resource,
+                        frozen_winner.local_core);
+        }
+
+        if (!stable) {
+            for (std::size_t index :
+                 group.candidates) {
+                if (frozen_cluster_losers[index]) {
+                    outcome.cluster_lost_cores.push_back(
+                        reservations[index].core_index);
+                } else {
+                    outcome.cluster_deferred_cores.push_back(
+                        reservations[index].core_index);
+                }
+                dispatch_open[index] = false;
+            }
+            continue;
+        }
+
+        for (std::size_t index :
+             group.candidates) {
+            if (index == winner)
+                continue;
+            outcome.cluster_lost_cores.push_back(
+                reservations[index].core_index);
+            dispatch_open[index] = false;
+        }
+
+        if (!planned_winners[group_index]) {
+            outcome.cluster_deferred_cores.push_back(
+                reservations[winner].core_index);
+            dispatch_open[winner] = false;
+            continue;
+        }
+
+        const PrivateCoreResult& private_result =
+            private_results[winner];
+        const CoreFrontierReservation& reservation =
+            reservations[winner];
+        int64_t effective_max_steps =
+            reservation.max_steps;
+        if (
+            private_result.steps_executed >=
+                effective_max_steps
+        ) {
+            std::optional<std::size_t> donor;
+            for (
+                std::size_t donor_index = 0;
+                donor_index < winner;
+                donor_index++
+            ) {
+                if (
+                    transferable_credit[
+                        donor_index] > 0
+                ) {
+                    donor = donor_index;
+                    break;
+                }
+            }
+            if (
+                !donor.has_value() ||
+                cluster_commit_slots == 0
+            ) {
+                outcome.cluster_deferred_cores
+                    .push_back(
+                        reservation.core_index);
+                dispatch_open[winner] = false;
+                continue;
+            }
+            transferable_credit[*donor]--;
+            effective_max_steps =
+                checked_scheduler_add(
+                    private_result.steps_executed,
+                    1,
+                    "cluster forward-credit accounting");
+            outcome.cluster_credit_transfers
+                .push_back(
+                    FrontierCreditTransfer{
+                        reservations[*donor]
+                            .core_index,
+                        reservation.core_index,
+                        1,
+                    });
+        }
+        if (cluster_commit_slots == 0) {
+            outcome.cluster_deferred_cores.push_back(
+                reservation.core_index);
+            dispatch_open[winner] = false;
+            continue;
+        }
+
+        const DeferredClusterRequest& granted =
+            *cluster_requests[winner];
+        ClusterState& granted_cluster =
+            system.cluster_states[
+                static_cast<std::size_t>(
+                    granted.cluster_index)];
+        const ClusterState cluster_checkpoint =
+            granted_cluster;
+        CoordinatorBoundarySettlement settlement;
+        try {
+            settlement =
+                settle_private_core_coordinator_instruction(
+                    system,
+                    reservation.core_index,
+                    private_result,
+                    effective_max_steps,
+                    callbacks[
+                        static_cast<std::size_t>(
+                            reservation.core_index)],
+                    settle_continuation,
+                    settle_dispatch_error);
+            if (
+                settlement.total_steps !=
+                checked_scheduler_add(
+                    private_result.steps_executed,
+                    1,
+                    "cluster grant retirement accounting")
+            ) {
+                throw std::runtime_error(
+                    "granted cluster continuation must "
+                    "retire exactly one instruction");
+            }
+            if (
+                settlement.stop_reason !=
+                    granted.request.continuation_reason
+            ) {
+                throw std::logic_error(
+                    "cluster settlement crossed an unexpected "
+                    "coordinator boundary");
+            }
+
+            // Validate and publish every potentially failing scheduler
+            // mutation before advancing arbitration. Python cluster
+            // continuations can acquire a CRC/SHA lock before raising; the
+            // checkpoint prevents a failed winner from orphaning that lock
+            // or partially publishing shared-engine state.
+            publish_settlement(winner, settlement);
+            granted_cluster.commit(
+                granted.request.resource,
+                granted.local_core,
+                granted.request.operation);
+        } catch (...) {
+            granted_cluster = cluster_checkpoint;
+            throw;
+        }
+        const int64_t committed_steps =
+            settlement.total_steps -
+            private_result.steps_executed;
+        if (committed_steps > cluster_commit_slots) {
+            throw std::logic_error(
+                "cluster settlement exceeded aggregate "
+                "frontier credit");
+        }
+        cluster_commit_slots -= committed_steps;
+    }
+
+    for (
+        std::size_t index = 0;
+        index < dispatch_open.size();
+        index++
+    ) {
+        if (dispatch_open[index]) {
+            outcome.cluster_deferred_cores.push_back(
+                reservations[index].core_index);
+            dispatch_open[index] = false;
+        }
     }
 }
 
-static void run_parallel_full_core_round(
+static void run_parallel_core_round(
         SystemState& system,
         const std::vector<
-            FullCoreFrontierReservation>& reservations,
+            CoreFrontierReservation>& reservations,
         const std::vector<StepCallbacks>& callbacks,
         const py::function& settle_continuation,
         const py::function& settle_dispatch_error,
         SystemBatchResult& result,
-        FullCoreFrontierOutcome& outcome) {
+        CoreFrontierOutcome& outcome) {
     if (reservations.empty())
         return;
-    if (
-        system.execution_cores.size() !=
-        system.cores.size()
-    ) {
-        throw std::logic_error(
-            "parallel full-core rounds require a "
-            "homogeneous full-core topology");
-    }
     if (!system.worker_pool)
         throw std::logic_error(
             "native worker pool is unavailable");
@@ -12195,26 +12741,26 @@ static void run_parallel_full_core_round(
         system.execution_cores.size();
     if (callbacks.size() != core_count) {
         throw std::invalid_argument(
-            "parallel full-core round callback "
+            "parallel core round callback "
             "topology is incomplete");
     }
 
     int64_t total_reserved = 0;
     std::vector<bool> seen_cores(core_count, false);
     for (
-        const FullCoreFrontierReservation& reservation :
+        const CoreFrontierReservation& reservation :
         reservations
     ) {
         if (
             reservation.core_index < 0 ||
             reservation.core_index >=
-                system.full_core_count() ||
+                static_cast<int>(core_count) ||
             reservation.max_steps < 0 ||
             reservation.max_steps >
                 std::numeric_limits<int>::max()
         ) {
             throw std::logic_error(
-                "parallel full-core round reservation "
+                "parallel core round reservation "
                 "is invalid");
         }
         const std::size_t core_index =
@@ -12222,7 +12768,7 @@ static void run_parallel_full_core_round(
                 reservation.core_index);
         if (seen_cores[core_index]) {
             throw std::logic_error(
-                "parallel full-core round reserved one "
+                "parallel core round reserved one "
                 "core twice");
         }
         seen_cores[core_index] = true;
@@ -12232,27 +12778,35 @@ static void run_parallel_full_core_round(
             "round reservation accounting");
     }
 
-    // One command must either retire an instruction, terminate, interrupt,
-    // or fail. This is therefore a conservative upper bound for both
-    // physical waves and logical raw-dispatch openings in the round. Check
-    // every monotonic counter before any helper can mutate a core.
-    uint64_t capacity_bound =
-        static_cast<uint64_t>(total_reserved);
-    if (
-        reservations.size() >
-            std::numeric_limits<uint64_t>::max() -
-                capacity_bound
-    ) {
-        throw std::overflow_error(
-            "native full-core round capacity overflow");
-    }
-    capacity_bound +=
+    // A cluster loser may retry after every progressing instruction frontier,
+    // so command/dispatch capacity is bounded by every reservation position
+    // participating at every retired step, plus one terminal attempt each.
+    // Retired helper steps themselves remain bounded by total_reserved.
+    const uint64_t reservation_count =
         static_cast<uint64_t>(
             reservations.size());
+    const uint64_t retired_capacity =
+        static_cast<uint64_t>(
+            total_reserved);
+    if (
+        retired_capacity != 0 &&
+        reservation_count >
+            (
+                std::numeric_limits<uint64_t>::max() -
+                reservation_count
+            ) / retired_capacity
+    ) {
+        throw std::overflow_error(
+            "native core round capacity overflow");
+    }
+    const uint64_t capacity_bound =
+        reservation_count *
+            retired_capacity +
+        reservation_count;
     system.worker_pool->validate_private_capacity(
         capacity_bound,
         capacity_bound,
-        static_cast<uint64_t>(total_reserved));
+        retired_capacity);
     if (
         capacity_bound >
             std::numeric_limits<uint64_t>::max() -
@@ -12268,7 +12822,7 @@ static void run_parallel_full_core_round(
     round_credit.reserve(reservations.size());
     int64_t round_quantum = 0;
     for (
-        const FullCoreFrontierReservation& reservation :
+        const CoreFrontierReservation& reservation :
         reservations
     ) {
         remaining_steps.push_back(
@@ -12347,7 +12901,7 @@ static void run_parallel_full_core_round(
             available > round_credit[donor_index]
         ) {
             throw std::logic_error(
-                "parallel full-core round has invalid "
+                "parallel core round has invalid "
                 "unused credit");
         }
         remaining_steps[donor_index] = 0;
@@ -12406,6 +12960,45 @@ static void run_parallel_full_core_round(
     };
 
     while (true) {
+        std::vector<bool> immediate_cluster_request(
+            reservations.size(), false);
+        {
+            CPUState& guard_core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(
+                        reservations.front().core_index)];
+            auto memory_guard =
+                acquire_shared_memory_use(guard_core);
+            for (
+                std::size_t index = 0;
+                index < reservations.size();
+                index++
+            ) {
+                if (done[index])
+                    continue;
+                CPUState& core =
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            reservations[index]
+                                .core_index)];
+                if (
+                    core.profile !=
+                        CoreProfile::MICRO ||
+                    core.halted ||
+                    core.idle
+                ) {
+                    continue;
+                }
+                immediate_cluster_request[index] =
+                    classify_pending_cluster_request(
+                        system,
+                        core,
+                        RUN_EXT_FALLBACK)
+                        .resource !=
+                    ClusterResourceKind::NONE;
+            }
+        }
+
         std::vector<std::size_t>
             participating_reservations;
         participating_reservations.reserve(
@@ -12419,8 +13012,39 @@ static void run_parallel_full_core_round(
             if (done[index])
                 continue;
             if (remaining_steps[index] == 0) {
-                if (earlier_reservation_unfinished(index))
+                if (
+                    earlier_reservation_unfinished(
+                        index)
+                ) {
+                    bool prefix_is_pending_cluster =
+                        immediate_cluster_request[index];
+                    for (
+                        std::size_t earlier_index = 0;
+                        earlier_index < index &&
+                            prefix_is_pending_cluster;
+                        earlier_index++
+                    ) {
+                        if (
+                            !done[earlier_index] &&
+                            !immediate_cluster_request[
+                                earlier_index]
+                        ) {
+                            prefix_is_pending_cluster =
+                                false;
+                        }
+                    }
+                    if (prefix_is_pending_cluster) {
+                        if (!dispatch_open[index]) {
+                            checked_scheduler_increment(
+                                system.native_dispatches,
+                                "dispatch counter");
+                            dispatch_open[index] = true;
+                        }
+                        participating_reservations
+                            .push_back(index);
+                    }
                     continue;
+                }
                 close_dispatch(index, RUN_LIMIT);
                 done[index] = true;
                 continue;
@@ -12443,7 +13067,7 @@ static void run_parallel_full_core_round(
                 continue;
             }
             if (
-                pending_enabled_full_core_interrupt(
+                pending_enabled_core_interrupt(
                     system, core) >= 0
             ) {
                 close_dispatch(index, RUN_LIMIT);
@@ -12468,7 +13092,7 @@ static void run_parallel_full_core_round(
         if (participating_reservations.empty())
             break;
 
-        std::vector<FullCoreFrontierReservation>
+        std::vector<CoreFrontierReservation>
             subfrontier_reservations;
         subfrontier_reservations.reserve(
             participating_reservations.size());
@@ -12476,18 +13100,32 @@ static void run_parallel_full_core_round(
             std::size_t reservation_index :
             participating_reservations
         ) {
+            int64_t subfrontier_steps =
+                remaining_steps[
+                    reservation_index];
+            if (
+                system.execution_cores.size() !=
+                    system.cores.size()
+            ) {
+                // Microcores fetch coherently from shared RAM. One logical
+                // instruction frontier prevents any helper from running an
+                // unbounded stale-code segment across an ordered shared
+                // commit; equal round credit persists across these frontiers.
+                subfrontier_steps =
+                    std::min<int64_t>(
+                        subfrontier_steps, 1);
+            }
             subfrontier_reservations.push_back(
-                FullCoreFrontierReservation{
+                CoreFrontierReservation{
                     reservations[
                         reservation_index].core_index,
-                    remaining_steps[
-                        reservation_index],
+                    subfrontier_steps,
                 });
         }
 
         SystemBatchResult subfrontier_result =
             initialize_subfrontier_result();
-        FullCoreFrontierOutcome
+        CoreFrontierOutcome
             subfrontier_outcome;
         auto contains_core = [](
                 const std::vector<int>& values,
@@ -12505,16 +13143,98 @@ static void run_parallel_full_core_round(
 
             std::vector<int64_t> next_remaining_steps =
                 remaining_steps;
+            std::vector<int64_t> next_round_credit =
+                round_credit;
             std::vector<int64_t>
                 next_per_reservation_cycles =
                     per_reservation_cycles;
             std::vector<bool> next_reservation_progress =
                 reservation_progress;
             SystemBatchResult next_result = result;
-            FullCoreFrontierOutcome next_outcome =
+            CoreFrontierOutcome next_outcome =
                 outcome;
             int64_t absorbed_steps = 0;
             int64_t absorbed_max_cycles = 0;
+
+            for (
+                const FrontierCreditTransfer& transfer :
+                subfrontier_outcome
+                    .cluster_credit_transfers
+            ) {
+                const auto donor =
+                    std::find_if(
+                        reservations.begin(),
+                        reservations.end(),
+                        [&](const CoreFrontierReservation&
+                                reservation) {
+                            return reservation.core_index ==
+                                transfer.donor_core;
+                        });
+                const auto recipient =
+                    std::find_if(
+                        reservations.begin(),
+                        reservations.end(),
+                        [&](const CoreFrontierReservation&
+                                reservation) {
+                            return reservation.core_index ==
+                                transfer.recipient_core;
+                        });
+                if (
+                    donor == reservations.end() ||
+                    recipient == reservations.end() ||
+                    transfer.amount <= 0
+                ) {
+                    throw std::logic_error(
+                        "cluster frontier published an "
+                        "invalid credit transfer");
+                }
+                const std::size_t donor_index =
+                    static_cast<std::size_t>(
+                        donor -
+                        reservations.begin());
+                const std::size_t recipient_index =
+                    static_cast<std::size_t>(
+                        recipient -
+                        reservations.begin());
+                if (
+                    donor_index >= recipient_index ||
+                    next_remaining_steps[
+                        donor_index] <
+                        transfer.amount ||
+                    next_round_credit[
+                        donor_index] <
+                        transfer.amount ||
+                    next_round_credit[
+                        recipient_index] >
+                        round_quantum -
+                            transfer.amount
+                ) {
+                    throw std::logic_error(
+                        "cluster forward-credit transfer "
+                        "violated cyclic round credit");
+                }
+                next_remaining_steps[donor_index] -=
+                    transfer.amount;
+                next_round_credit[donor_index] -=
+                    transfer.amount;
+                next_remaining_steps[
+                    recipient_index] =
+                        checked_scheduler_add(
+                            next_remaining_steps[
+                                recipient_index],
+                            transfer.amount,
+                            "cluster forward-credit "
+                            "accounting");
+                next_round_credit[
+                    recipient_index] =
+                        checked_scheduler_add(
+                            next_round_credit[
+                                recipient_index],
+                            transfer.amount,
+                            "cluster forward-credit "
+                            "accounting");
+            }
+
             for (
                 std::size_t reservation_index :
                 participating_reservations
@@ -12536,12 +13256,12 @@ static void run_parallel_full_core_round(
                 if (
                     steps < 0 ||
                     steps >
-                        remaining_steps[
+                        next_remaining_steps[
                             reservation_index] ||
                     cycles < 0
                 ) {
                     throw std::logic_error(
-                        "parallel full-core "
+                        "parallel core "
                         "subfrontier returned invalid "
                         "round progress");
                 }
@@ -12587,7 +13307,7 @@ static void run_parallel_full_core_round(
                         "accounting");
                 if (next_outcome.steps > total_reserved) {
                     throw std::logic_error(
-                        "parallel full-core round "
+                        "parallel core round "
                         "exceeded its reservation");
                 }
                 next_outcome.cycles = std::max(
@@ -12624,7 +13344,7 @@ static void run_parallel_full_core_round(
                     subfrontier_outcome.cycles
             ) {
                 throw std::logic_error(
-                    "parallel full-core subfrontier "
+                    "parallel core subfrontier "
                     "aggregate accounting mismatch");
             }
             if (
@@ -12650,6 +13370,8 @@ static void run_parallel_full_core_round(
 
             remaining_steps =
                 std::move(next_remaining_steps);
+            round_credit =
+                std::move(next_round_credit);
             per_reservation_cycles =
                 std::move(
                     next_per_reservation_cycles);
@@ -12663,7 +13385,7 @@ static void run_parallel_full_core_round(
         };
 
         try {
-            run_parallel_full_core_subfrontier(
+            run_parallel_core_subfrontier(
                 system,
                 subfrontier_reservations,
                 callbacks,
@@ -12716,7 +13438,7 @@ static void run_parallel_full_core_round(
                         core_offset] > 1
             ) {
                 throw std::logic_error(
-                    "parallel full-core subfrontier "
+                    "parallel core subfrontier "
                     "closed one dispatch more than once");
             }
 
@@ -12735,6 +13457,16 @@ static void run_parallel_full_core_round(
                     subfrontier_outcome
                         .terminal_cores,
                     core_index);
+            const bool cluster_lost =
+                contains_core(
+                    subfrontier_outcome
+                        .cluster_lost_cores,
+                    core_index);
+            const bool cluster_deferred =
+                contains_core(
+                    subfrontier_outcome
+                        .cluster_deferred_cores,
+                    core_index);
 
             if (interrupted) {
                 close_dispatch(
@@ -12743,6 +13475,25 @@ static void run_parallel_full_core_round(
                 release_unused_credit(
                     reservation_index);
                 done[reservation_index] = true;
+                continue;
+            }
+            if (cluster_lost) {
+                close_dispatch(
+                    reservation_index,
+                    RUN_EXT_FALLBACK);
+                if (
+                    subfrontier_outcome.steps == 0 &&
+                    !subfrontier_outcome
+                        .coordinator_state_changed
+                ) {
+                    // An unchanged all-zero request set cannot become
+                    // eligible by immediate retry. End only this frozen
+                    // round position and release its otherwise stranded
+                    // credit forward.
+                    release_unused_credit(
+                        reservation_index);
+                    done[reservation_index] = true;
+                }
                 continue;
             }
             if (dispatch_boundary) {
@@ -12759,6 +13510,20 @@ static void run_parallel_full_core_round(
                 release_unused_credit(
                     reservation_index);
                 done[reservation_index] = true;
+                continue;
+            }
+            if (cluster_deferred) {
+                if (
+                    remaining_steps[
+                        reservation_index] == 0 &&
+                    !earlier_reservation_unfinished(
+                        reservation_index)
+                ) {
+                    close_dispatch(
+                        reservation_index,
+                        RUN_LIMIT);
+                    done[reservation_index] = true;
+                }
                 continue;
             }
             if (
@@ -12784,7 +13549,7 @@ static void run_parallel_full_core_round(
                 public_stop_reason != RUN_LIMIT
             ) {
                 throw std::logic_error(
-                    "parallel full-core subfrontier "
+                    "parallel core subfrontier "
                     "left an unexplained open dispatch");
             }
         }
@@ -12797,32 +13562,32 @@ static void run_parallel_full_core_round(
     ) {
         if (dispatch_open[index]) {
             throw std::logic_error(
-                "parallel full-core round returned "
+                "parallel core round returned "
                 "with an open dispatch");
         }
     }
 }
 
 static const char* private_full_core_stop_reason_name(
-        PrivateFullCoreStopReason reason) {
+        PrivateCoreStopReason reason) {
     switch (reason) {
-        case PrivateFullCoreStopReason::INSTRUCTION_LIMIT:
+        case PrivateCoreStopReason::INSTRUCTION_LIMIT:
             return "instruction_limit";
-        case PrivateFullCoreStopReason::ICACHE_BOUNDARY:
+        case PrivateCoreStopReason::ICACHE_BOUNDARY:
             return "icache_boundary";
-        case PrivateFullCoreStopReason::SHARED_INSTRUCTION:
+        case PrivateCoreStopReason::SHARED_INSTRUCTION:
             return "shared_instruction";
-        case PrivateFullCoreStopReason::INTERRUPT_BOUNDARY:
+        case PrivateCoreStopReason::INTERRUPT_BOUNDARY:
             return "interrupt_boundary";
-        case PrivateFullCoreStopReason::HALTED:
+        case PrivateCoreStopReason::HALTED:
             return "halted";
-        case PrivateFullCoreStopReason::IDLE:
+        case PrivateCoreStopReason::IDLE:
             return "idle";
-        case PrivateFullCoreStopReason::TRAP:
+        case PrivateCoreStopReason::TRAP:
             return "trap";
-        case PrivateFullCoreStopReason::RESET:
+        case PrivateCoreStopReason::RESET:
             return "reset";
-        case PrivateFullCoreStopReason::INTERNAL_FAILURE:
+        case PrivateCoreStopReason::INTERNAL_FAILURE:
             return "internal_failure";
     }
     return "unknown";
@@ -14817,7 +15582,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     }
                 };
 
-                std::vector<PrivateFullCoreCommand>
+                std::vector<PrivateCoreCommand>
                     commands;
                 commands.reserve(
                     static_cast<std::size_t>(
@@ -14903,7 +15668,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     seen_lanes[lane_index] = true;
                     seen_cores[core_index] = true;
 
-                    PrivateFullCoreCommand command;
+                    PrivateCoreCommand command;
                     command.lane_index =
                         static_cast<int>(lane_value);
                     command.core_index =
@@ -14917,13 +15682,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 const std::vector<
-                    PrivateFullCoreResult> native_results =
+                    PrivateCoreResult> native_results =
                         run_private_full_core_wave(
                             system,
                             std::move(commands));
                 py::list results;
                 for (
-                    const PrivateFullCoreResult& native :
+                    const PrivateCoreResult& native :
                     native_results
                 ) {
                     py::dict result;
@@ -16147,7 +16912,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
 
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
-                return run_full_core_system_batch(
+                return run_native_system_batch(
                     system,
                     max_steps,
                     callbacks,

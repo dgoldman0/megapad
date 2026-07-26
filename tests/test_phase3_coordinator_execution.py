@@ -1,4 +1,4 @@
-"""Phase 3 element-3 full-core coordinator and ordered-commit oracles."""
+"""Phase 3 all-core coordinator and ordered-commit oracles."""
 
 from __future__ import annotations
 
@@ -787,11 +787,13 @@ def test_hot_private_trap_reset_prefix_is_settled_once(
     assert stats.native_continuations == 1
 
 
-def test_mixed_topology_keeps_private_workers_dormant() -> None:
+def _micro_private_frontier_signature(
+    worker_count: int,
+) -> tuple[tuple, tuple]:
     system = _system(
         num_cores=1,
         num_clusters=1,
-        worker_count=2,
+        worker_count=worker_count,
     )
     address = 0x100
     system.load_binary(
@@ -804,22 +806,79 @@ loop:
 """
         ),
     )
-    for cpu in system.cores:
+    system.cores[0].halted = True
+    system.cores[0].idle = False
+    for cpu in system.cores[1:]:
         cpu.pc = address
         cpu.halted = False
         cpu.idle = False
-    before = dict(
-        system._native_system._private_worker_diagnostics()
-    )
+    owner = system._native_system
+    dispatches_before = owner.native_dispatches
+    before = _lane_diagnostics(system)
 
-    stats = system.run_batch_stats(
-        system.num_cores * 2
-    )
+    stats = system.run_batch_stats(8)
+    after = _lane_diagnostics(system)
 
-    assert stats.native_scheduler
-    assert stats.per_core_instructions == (
-        2,
-    ) * system.num_cores
-    assert dict(
-        system._native_system._private_worker_diagnostics()
-    ) == before
+    architectural = (
+        stats.instructions_executed,
+        stats.system_cycles_advanced,
+        stats.per_core_instructions,
+        stats.per_core_cycles,
+        stats.per_core_dispatches,
+        stats.per_core_stop_reasons,
+        stats.native_continuations,
+        stats.native_rounds,
+        system._scheduler_cursor,
+        tuple(cpu.regs[1] for cpu in system.cores),
+        owner.native_dispatches - dispatches_before,
+    )
+    physical = tuple(
+        (
+            after_lane["completed_commands"] -
+                before_lane["completed_commands"],
+            after_lane["completed_steps"] -
+                before_lane["completed_steps"],
+        )
+        for before_lane, after_lane in zip(
+            before, after, strict=True
+        )
+    )
+    return architectural, physical
+
+
+def test_reduced_private_frontier_uses_configured_workers() -> None:
+    observed = {
+        worker_count:
+            _micro_private_frontier_signature(
+                worker_count
+            )
+        for worker_count in (1, 2, 4)
+    }
+
+    assert observed[2][0] == observed[1][0]
+    assert observed[4][0] == observed[1][0]
+    assert observed[1][0] == (
+        8,
+        3,
+        (0, 2, 2, 2, 2),
+        (0, 3, 3, 3, 3),
+        (0, 1, 1, 1, 1),
+        (
+            (0, 0, 0, 0, 0, 0, 0),
+            (1, 0, 0, 0, 0, 0, 0),
+            (1, 0, 0, 0, 0, 0, 0),
+            (1, 0, 0, 0, 0, 0, 0),
+            (1, 0, 0, 0, 0, 0, 0),
+        ),
+        0,
+        1,
+        0,
+        (0, 1, 1, 1, 1),
+        4,
+    )
+    for worker_count in (2, 4):
+        auxiliary = observed[worker_count][1][1:]
+        assert all(
+            commands > 0 and steps > 0
+            for commands, steps in auxiliary
+        )

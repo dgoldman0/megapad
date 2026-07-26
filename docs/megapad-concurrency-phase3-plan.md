@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1–3 of 6 complete; Element 4 has not started
+**Status:** Elements 1–4 of 6 complete; Element 5 has not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -18,7 +18,7 @@ may produce corrective commits, but they do not create new phase elements.
 | 1 | Persistent worker-pool lifecycle and fixed 1/2/4-lane configuration | Complete |
 | 2 | Private full-core execution commands, results, and deterministic yield boundaries | Complete |
 | 3 | Full-core coordinator integration and ordered shared-effect commit | Complete |
-| 4 | Reduced-core and cluster integration | Not started |
+| 4 | Reduced-core and cluster integration | Complete |
 | 5 | DMA, external events, record/replay, and deterministic stop handling | Not started |
 | 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | Not started |
 
@@ -34,12 +34,17 @@ present claim boundary, and the condition for reopening it.
 | P3-D1 | An ordered shared callback can fail after peers have already executed private prefixes. The old sequential chunk scheduler left later peers untouched; exact preservation would require whole-frontier rollback or provably boundary-free predecode. | Gather the same complete logical private frontier for one, two, and four lanes before beginning any shared commit. On an ordered callback failure, every gathered peer-private prefix remains committed and its elapsed private time is settled. | This intentionally replaces a host-exception partial-progress artifact; it does not claim transactional callback failure. Reopen before release if callback atomicity becomes architectural, or if a non-speculative predecode proof or explicitly approved rollback design becomes available. |
 | P3-D2 | A logical sub-frontier can contain more cores than physical host lanes. Committing after each lane-sized cohort would make worker count guest-visible. | Buffer every physical cohort, then merge and commit the complete logical sub-frontier in global cyclic order. Advance virtual time once per completed scheduler round by the maximum complete per-core round cycles, never by a sum of cohort or core totals. Production failures identify the logical core, not its incidental physical lane. | Physical lane width and helper completion order are host diagnostics only. This is a fixed determinism invariant, not an optimization choice. |
 | P3-D3 | Unbounded `run_batch` uses a coarse architectural scheduler, while `run_cycle_batch` owns strict ready-cycle and main-bus arbitration. Mixing the two models during worker integration would create a new timing contract. | Element 3 keeps unbounded batches in cyclic coordinator order and leaves strict ready-time/bus ordering to the existing cycle API. | Element 3 claims deterministic architectural batching, not new cycle accuracy. Revisit their convergence with the event/DMA work in Element 5 and the equivalence evidence in Element 6. |
-| P3-D4 | Full cores can use private workers before reduced cores and cluster resources can. | A topology containing any microcores remains on the established serial native coordinator through Element 3. | This is explicitly incomplete machine concurrency, not a claim that the advertised 16-core topology is parallel. Element 4 removes this gate. |
+| P3-D4 | Full cores can use private workers before reduced cores and cluster resources can. | A topology containing any microcores remains on the established serial native coordinator through Element 3. Element 4 removes that temporary gate and uses the one generalized frontier coordinator for every advertised execution core. | This was explicitly incomplete machine concurrency through Element 3, not a claim that the advertised 16-core topology was parallel. The serial mixed production path is deleted rather than retained as legacy. |
 | P3-D5 | A pending enabled interrupt can either force a private zero-progress boundary or be ignored until the old serial chunk ends. An asserted line can also become eligible when an instruction enables interrupts. | Helpers retire no instruction past that boundary. `EI` remains a coordinator instruction, so an already-asserted line is observed before another private command. The coordinator performs end-of-round interrupt settlement and then recomputes runnable work; strict event-time acceptance is not invented here. | This improves the honesty of the private boundary without claiming exact asynchronous timing. Timer, IPI, external-event, and deterministic stop integration is revisited in Element 5. |
 | P3-D6 | Longer private lookahead could use speculative writes and rollback, while the approved first design calls for safe bounded segments. | Element 3 mutates only callback-free, cache-resident private state in place and stops at the first classified shared or uncertain boundary. It adds no speculative write log or rollback path. | Performance is secondary to deterministic state in this milestone. Reopen only as a separately reviewed optimization with one/two/four-lane differential evidence. |
-| P3-D7 | Treating each cache/shared yield as a fresh scheduler credit would make boundary density a secondary QoS weight and would expose helper-wave count through public dispatch statistics. Up-front reservations can also strand budget when an earlier core stops before using its provisional share. | Each core retains its equal round credit across as many deterministic sub-frontiers as needed. Cache refill and ordinary shared instructions keep the logical raw dispatch open; true fallback/trap/reset boundaries close it. Unused terminal or interrupt-shortened credit flows only forward to later peers in the same frozen cyclic round, including a peer whose initial reservation was zero, and no peer exceeds the common quantum. Residual credit never wraps backward. | This is the direct implementation of equal-weight, work-conserving QoS and preserves the established serial scheduler: cache residency, callback density, and host lane count cannot buy extra guest service. Reopen only with an architectural scheduling change, not as a performance shortcut. |
+| P3-D7 | Treating each cache/shared yield as a fresh scheduler credit would make boundary density a secondary QoS weight and would expose helper-wave count through public dispatch statistics. Up-front reservations can also strand budget when an earlier core stops before using its provisional share. | Each core retains its equal round credit across as many deterministic sub-frontiers as needed. Cache refill and ordinary shared instructions keep the logical raw dispatch open; true fallback/trap/reset boundaries close it. Unused terminal or interrupt-shortened credit flows only forward to later peers in the same frozen cyclic round, including a peer whose initial reservation was zero, and no peer exceeds the common quantum. Residual credit never wraps backward. | This is the direct implementation of the established serial scheduler's equal-weight, work-conserving QoS accounting: cache residency, callback density, and host lane count cannot buy extra guest service. It does not override the explicitly changed mixed code-observation interleaving in P3-D10. Reopen only with an architectural scheduling change, not as a performance shortcut. |
 | P3-D8 | Prefix-aware callback-error settlement could be implemented by changing the exposed native scheduler callback from two arguments to four, but that would turn an internal integration need into a low-level callable-contract break and could mask the original guest callback exception with `TypeError`. | Preserve the existing two-argument settlement callable. It returns boundary-local progress; the native coordinator validates that result and composes it with the retained private prefix. | `NativeSystemState.run_full_core_batch` remains an exposed internal seam, not a stable public API, but Element 3 does not gratuitously break it. Revisit only through an explicit versioned native API change. |
 | P3-D9 | A host settlement can report accounting so large that the completed sub-frontier cannot be represented. Rewinding the whole round's counters after cores or earlier shared boundaries have mutated is inconsistent, while exact guest rollback is outside the first design. | Validate each sub-frontier into temporary scheduler/result state and publish it only after every aggregate, per-core, continuation, and remaining-budget check succeeds. A failing callback still absorbs every exactly representable private prefix before rethrowing the original object, including progress that reaches the exact signed-cycle ceiling. If absorption is itself unrepresentable, the accounting error necessarily takes precedence. Never rewind the round cursor or outcome behind already published state. | This makes scheduler absorption transactional, not guest execution speculative. A truly atomic invalid-host-callback boundary would require the separately reviewed rollback design excluded by P3-D6. |
+| P3-D10 | A reduced core has no private instruction cache. If a cyclic-earlier core reaches a shared write to the reduced core's current opcode, the old serial scheduler commits the write before the later core runs; a complete parallel logical frontier can gather the old opcode first. | Mixed topologies use deterministic synchronous frontiers: every admitted core may retire at most one private instruction before any ordered shared commit. Thus a reduced core can retire the old current opcode once in the same gathered frontier, and must observe the write on the following frontier. The exact current-opcode and following-opcode cases are both versioned across one, two, and four lanes. | This is an explicit interim interleaving, not a claim that the old serial artifact or an RTL same-cycle rule has been preserved. Reopen after choosing among synchronous-frontier semantics, cyclic boundary preclassification, or a separately reviewed dependency/rollback design. |
+| P3-D11 | Element 3 described one global cyclic commit order, while the established mixed coordinator settled ordinary boundaries before selecting cluster winners. An earlier ordinary or cluster BUS effect can also invalidate a captured later request. | Preserve the mixed ordinary-before-cluster phase barrier. Settle ordinary boundaries cyclically, then recapture all live cluster requests and freeze hard eligibility, candidate membership, and equal round-robin choices together. Before executing each selected request, revalidate that selected core's runnable state, exact PC/encoding, and current hard eligibility. If it changed, defer only the selected core; frozen nonselected losses and donations stand. Later cluster commits do not retroactively rerun the frozen arbitration. | This retains the established mixed phase barrier, prevents execution of a stale selected instruction, and gives arbitration one synchronous snapshot independent of commit order. A unified cross-class cyclic order or commit-sensitive re-arbitration is an architectural change and requires its own oracle and review. |
+| P3-D12 | A cluster arbitration loser can either forfeit its whole round position or retain equal service credit; a later zero-reservation request may also be the selected peer. | Every frozen nonselected request is a loss, including a hard-ineligible group with no selected peer. A loss closes exactly that fallback dispatch with zero retirement, cycles, and grants. The loser retains residual equal round credit and retries after any frontier or coordinator progress. Only an unchanged all-zero frontier invokes the no-spin rule and releases stranded credit forward. A selected later zero-credit request borrows exactly one forward unit from a cyclic-earlier frozen loser, including across resources; larger residual credit remains with the donor. | This implements hard eligibility plus equal round-robin ordering and work conservation without adding secondary weights. Reopen only with an explicit QoS architecture change. |
+| P3-D13 | A Python CRC/SHA continuation can acquire a cluster lock or mutate shared-engine state and then raise before native grant publication. | Snapshot the complete cluster state immediately before every selected continuation. Publish validated scheduler accounting and then commit the preflighted grant; on any failure before commit completion, restore that cluster snapshot and rethrow the original exception. Earlier resource commits remain. | External guest-memory writes performed by a failing Python continuation remain subject to P3-D1's nontransactional callback boundary. The narrower guarantee here is that a failed winner cannot orphan cluster ownership, engine state, grant counts, or grant sequence. |
+| P3-D14 | Native reduced-core scalar fetch reads raw mapped memory, while the compatibility oracle routes scratchpad and MMIO instruction fetch through Python. Direct Python field access can also race a helper while the batch has released the GIL. | A routed decode window yields from the helper. The coordinator classifies each actually consumed byte through the same scratchpad-versus-mapped-RAM rule as the Python oracle, including instructions crossing either scratchpad boundary, then executes only through that oracle. Any possible 16-byte decode window touching MMIO is explicitly unsupported in a native system batch because classification could itself have read side effects; it fails before decoding or granting. Concurrent direct `CPUState`/wrapper property or register access, read or write, from another host thread during an active native system batch is unsupported; coordinator continuations remain the supported access path. | Routed-fetch handling is a correctness boundary, not a performance claim. Revisit side-effect-safe MMIO fetch and direct-access hardening before exposing concurrent host control as supported APIs; the latter requires ownership-aware bindings rather than blanket rejection that would also block coordinator fallback. |
 
 Changes to an interim decision must update this table and its tests in the same
 milestone. A green test suite alone is not permission to erase the contention
@@ -115,7 +120,7 @@ from the full-core coordinator and commit their ordered shared boundaries.
 
 - Homogeneous full-core batches, including a sole runnable full core, use one
   coordinator-owned equal-credit scheduler round. A topology containing any
-  microcore remains on the established serial path through Element 4.
+  microcore remains on the established serial path through Element 3.
 - Every runnable core receives one cyclic credit position under the existing
   1,000-instruction quantum. The aggregate budget can provision a later
   position with zero initial credit; unused credit from an earlier stopped
@@ -147,6 +152,61 @@ from the full-core coordinator and commit their ordered shared boundaries.
   conservatively coordinator-owned so a line asserted while masked is accepted
   before the next guest instruction. Exact event-time behavior remains Element
   5 work.
+
+## Element 4 contract
+
+- The production frontier coordinator ranges over the complete global
+  `execution_cores` topology. Full and reduced cores share one frozen cyclic
+  reservation order, one mapping admission across all physical cohorts, one
+  equal-credit round, and one coordinator settlement path. The old serial
+  mixed scheduler and its sole-full-core special case are removed.
+- The exposed `_run_private_full_core_commands` diagnostic remains deliberately
+  full-core-only. Its internal typed commands/results and the production worker
+  executor are profile-generic; reduced cores enter them only through the
+  system coordinator.
+- Reduced-core helpers admit only proven local supervisor instructions:
+  IDL/NOP/HALT/DI, INC/DEC, ordinary short and long branches, immediates,
+  scalar ALU, SEP/SEX, and Tier-1 bit operations, with one conservative
+  ordinary modifier. EI, memory/MEMALU/I/O, CSR, MEX, MUL/DIV, CRC/SHA,
+  reset/trap/return, stripped D-register operations, Tier-2 bits, extended
+  engines, nonzero privilege, double/reserved prefixes, and EXT.SKIP remain
+  coordinator or Python-oracle boundaries.
+- Scratchpad-routed reduced-core instruction fetch never uses a raw native
+  bank-zero alias. It yields from the helper, routes each actually decoded byte
+  between the owning scratchpad and mapped RAM exactly like the Python oracle,
+  and executes through that oracle. Any possible 16-byte decode window touching
+  MMIO fails explicitly before decode because a classification read could have
+  side effects. Reserved CRC/SHA operation codes likewise bypass cluster
+  arbitration and reach their architectural illegal-operation trap.
+- A mixed logical sub-frontier admits at most one instruction per reservation.
+  Every physical cohort completes under the same mapping admission before the
+  admission and its classification lease are released. Only then may the
+  coordinator invoke Python or commit shared state. The same-frontier code
+  observation rule is the explicit interim decision in P3-D10.
+- Ordinary noncluster boundaries commit first in frozen cyclic order. The
+  coordinator then recaptures live cluster requests, groups them by
+  cluster/resource, freezes the equal round-robin choices, preflights the exact
+  initially fundable grant set and aggregate grant sequence, and revalidates
+  each selected request immediately before settlement. A changed opcode, PC,
+  runnable state, or hard eligibility defers that selected core. Frozen
+  membership, nonselected losses, and their credit donations do not change in
+  later commit order.
+- Cluster losers retire no instruction and consume no resource grant. They
+  close one logical fallback dispatch, retain residual credit, and retry after
+  progress. This includes a hard-ineligible request from a group with no
+  selected peer. An unchanged all-zero request set closes without spinning;
+  any released credit flows only forward. Funding a selected zero-credit
+  request transfers exactly one unit from a cyclic-earlier frozen loser,
+  including across cluster resources.
+- A selected continuation commits the arbiter only after successful
+  coordinator settlement and scheduler validation. The cluster checkpoint is
+  restored on failure, so CRC/SHA ownership and engine state cannot be orphaned
+  by a failing winner. Earlier commits and every gathered private prefix retain
+  the failure semantics recorded by P3-D1 and P3-D9.
+- Direct concurrent host-thread access, read or write, to exposed core fields
+  or registers during an active native batch is not supported. Strict cycle
+  execution, event-time acceptance, DMA/event integration, and record/replay
+  closure remain Element 5 work.
 
 ## Evidence discipline
 
@@ -232,3 +292,37 @@ Element 3 establishes deterministic homogeneous full-core integration and
 ordered coordinator commit. It does not yet claim parallel reduced cores,
 strict event/DMA integration, record/replay closure, sanitizer completion, or
 the final performance/equivalence results assigned to Elements 4–6.
+
+## Element 4 evidence
+
+The generalized production coordinator rebuilt successfully with the same
+C++17/pthread configuration. The measured final build peak was approximately
+1.17 GiB RSS with no swap activity; its only compiler diagnostic was the
+pre-existing unused `exec_field` warning. The final foreground evidence ran
+sequentially in two owned pytest processes:
+
+- 33 reduced-core and cluster integration oracles covering retained Phase 2
+  traces, mixed-frontier code observation, coordinator-only settlement, MEX,
+  MUL/DIV, CRC/SHA ownership, hard eligibility, equal round-robin contention,
+  cross-resource forward credit, exact prefix/MEX request identity,
+  scratchpad-boundary routing, MMIO-window rejection, reserved operations,
+  callback failure, and one/two/four-lane equality; and
+- 168 coordinator, private executor, worker-pool, native microcore, cluster
+  oracle, and native system-state regression tests.
+
+The 201 tests passed. Their measured peaks were approximately 49 MiB and
+55.4 MiB RSS, respectively, with no swap activity. Two independent final
+read-only audits reviewed the frozen-arbitration, hard-eligibility,
+work-conservation, failure-accounting, routed-fetch, and decision-ledger
+boundaries after the discovered blockers were corrected.
+
+A supplemental 34-test concurrency-handoff gate also passed during Element 4,
+but unexpectedly peaked at approximately 7.54 GiB RSS. It was not repeated
+after the final narrow arbitration corrections; those paths are covered by the
+focused reduced-core and native-system gates above. Repeating that handoff gate
+requires explicit resource approval.
+
+Element 4 establishes deterministic mixed full/reduced-core execution and
+cluster-resource arbitration. It does not yet claim strict event-time/DMA
+integration, record/replay closure, sanitizer completion, or final application
+throughput; those remain Elements 5 and 6.
