@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1 through 3 of 6 complete; Element 4 not started
+**Status:** Elements 1 through 4 of 6 complete; Element 5 not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -36,7 +36,7 @@ current milestone, but it does not create a new element or sub-element.
 | 1 | Measurement and attribution | Complete |
 | 2 | Scheduler/frontier fast path | Complete |
 | 3 | Longer proven-private execution | Complete |
-| 4 | Host decode/JIT-style cache | Pending |
+| 4 | Host decode/JIT-style cache | Complete |
 | 5 | Shared/MMIO/DMA optimization | Pending |
 | 6 | System closure/final validation/handoff | Pending |
 
@@ -634,7 +634,229 @@ protocol penalty. The generated before/after reports remain ignored, while
 their source revisions, artifact identities, report hashes, parameters, and
 resource measurements are durable above.
 
-Element 3 is complete. Element 4 begins from this evidence snapshot.
+Element 3 is complete. Element 4 began from this evidence snapshot.
+
+## Element 4 implementation record
+
+Element 4 adds a host-only private decode/admission cache. It does not add
+translated execution, a guest-visible JIT, or a second instruction executor.
+The authoritative native fetch, decode, and `step_one` paths remain in place.
+The implementation was preserved at
+`7fb777c2daeb775ecc3ba64a31fa14ded790d7c8`; its clean benchmark exposed a
+full-core regression, so the bounded correction was committed separately at
+`11d59b9334cb1a1f992d7d47f9bfda6d5c0f0543`.
+
+Each core owns a fixed 128-entry direct-mapped host table. A valid entry
+records that private admission was proved for its instruction address and
+exact complete encoding, with a 16-byte identity capacity larger than the
+current maximum instruction. A hit must match the address and every recorded
+byte before it can authorize private execution. Full cores validate against
+the bytes and tags currently resident in that core's guest instruction cache,
+preserving intentional stale backing-memory behavior. Microcores validate
+through their current mapped-memory observation path.
+
+Privilege, routed-fetch, pending modifier, guest-cache enable, and other live
+admission gates remain outside the cached result. Dynamic `EXT.SKIP` is not
+cached because flags and skipped-target residency can change independently of
+its encoding. Strict-cycle execution uses the direct classifier. A successful
+microcore classification carries a single-use proof to the immediately
+following `step_one`; the proof checks the same core, micro profile, and
+unchanged program counter, and a shared structural predicate prevents any
+Python-oracle-owned encoding from producing it.
+
+The cache is per-core, host-only, and outside architectural snapshots,
+execution checkpoints, replay, hashes, and public accounting. Reset, complete
+guest-cache invalidation, and explicit guest-cache restore clear it. A
+completed full-core store clears host entries only if the existing
+tag-aware invalidation actually removes a resident matching guest line; a
+nonresident or same-index/different-tag store preserves them. Every later hit
+still revalidates the current guest-cache tags and complete bytes.
+
+The first implementation used the cache for both frontier admission and every
+full-core worker instruction. Exact validation was sound, but a full core then
+paid one complete host identity check and performed the ordinary decode
+anyway. The correction retains full-core reuse at unbounded coordinator
+frontiers and restores the cheaper resident-byte classifier inside full-core
+worker spans. Microcores retain per-step reuse because their proof removes the
+otherwise duplicated Python-oracle eligibility decode. This selection is
+static by core profile and execution contract; it does not depend on lane
+count, helper completion, or measured host timing.
+
+Native host-profile schema 3 adds private and frontier cache
+lookup/hit/miss counts plus micro proof reuse. The Phase 0 report advances from
+schema 10 to 11, the single-active-microcore report from 5 to 6, and the
+instruction-cache report from 2 to 3. Architectural state schemas do not
+change.
+
+### Element 4 oracle and sanitizer close
+
+The focused three-test Element 4 file covers variable-length ordinary and
+prefixed instructions against the Python full- and microcore oracles, full
+guest-cache noncoherence and explicit restore, cross-line final-byte mutation,
+direct-map tag eviction/refill, disabled-cache behavior, and same-index
+different-tag store invalidation. Every case is exact across one, two, and
+four configured host lanes. The variable-length micro fixture rejects any
+Python fallback.
+
+The final candidate passes 130 affected tests sequentially. The main
+108-test selection passes in 1.38 test seconds; its complete command takes
+1.90 seconds, peaks at 86,696 KiB, and uses no swap. The 22-test architectural
+guest-cache selection passes in 0.08 test seconds; its command takes
+0.60 seconds, peaks at 43,716 KiB, and uses no swap. The final focused
+same-index/different-tag selection passes in 0.06 test seconds with a
+0.55-second command peak of 44,144 KiB and no swap.
+
+The isolated six-test cache/profile ASan/UBSan gate passes in 1.57 test
+seconds with no finding; build and execution take 70.01 seconds, peak at
+2,311,280 KiB, and use no swap. The same six tests pass under TSan in
+2.64 test seconds with no race report; build and execution take 37.92 seconds,
+peak at 1,838,804 KiB, and use no swap. The optimized native rebuild takes
+32.12 seconds, peaks at 1,254,472 KiB, and uses no swap. All ordinary and
+sanitizer tests ran foreground and sequentially.
+
+Two independent read-only audits found no cache-identity, instruction-length,
+proof-lifetime, Python-oracle-subset, guest-cache noncoherence, checkpoint,
+snapshot, race, or compile blocker. The final correction audit additionally
+confirmed that the host table follows all established `CPUState` fields,
+cross-line validation checks the exact guest tags and bytes, full reuse is
+frontier-only, micro proof reuse remains immediate, and tag-aware store
+invalidation is sound.
+
+### Element 4 clean comparison
+
+The full-core comparison uses:
+
+```text
+python3 bench_phase0_concurrency.py \
+  --cores 4 \
+  --worker-counts 1,2,4 \
+  --scenarios private_compute \
+  --instructions 2m \
+  --repeats 5 \
+  --warmups 1 \
+  --warmup-instructions 100k \
+  --strict-dma-bytes 512 \
+  --host-profile \
+  --output build/phase4-e4-final.json
+```
+
+The clean baseline at
+`e1b8052993e266d85f7bdd725cb9673aa3aaf134` is
+`build/phase4-e4-before.json`, report schema 10, 10,500,453 bytes, SHA-256
+`82d981abd3ebb17b3a53af6a3eab42e7709e6c36ff9fbba233528e27e2a5454f`.
+It was generated at `2026-07-26T21:21:52.907013+00:00`. Its native artifact
+is 2,195,768 bytes, SHA-256
+`a7ec7abd68cdb13b985503c041a0bcde808827d3fdccdc656e8f900782d1bb20`,
+with ELF build ID `3ba3c7b629a26f93b460bf0f34f61de84276cfb8`.
+
+The clean final report at
+`11d59b9334cb1a1f992d7d47f9bfda6d5c0f0543` is report schema 11,
+10,502,916 bytes, SHA-256
+`cb5a8fa8a48652fed40a117f47a824561a24bd90e5bd71c7dd07995424d55b73`.
+It was generated at `2026-07-26T22:13:57.734580+00:00`. Its native artifact
+is 2,200,000 bytes, SHA-256
+`4740c6fdbe45fa33a188428383a6f7fb6873622015bf02fd15483620eceb133c`,
+with ELF build ID `03210a2c96b77ff303927d48fb20c7099a640daf`.
+The command takes 1.56 seconds, peaks at 91,896 KiB, and uses no swap.
+
+Median unprofiled aggregate throughput is:
+
+| Host lanes | Before MIPS | First implementation MIPS | Final MIPS | Final change |
+|---:|---:|---:|---:|---:|
+| 1 | 41.228 | 35.058 | 41.078 | -0.4% |
+| 2 | 56.925 | 53.379 | 64.916 | +14.0% |
+| 4 | 72.575 | 76.079 | 106.723 | +47.1% |
+
+The first clean implementation report is retained as rejected performance
+evidence: revision `7fb777c`, schema 11, 10,502,972 bytes, SHA-256
+`2680b538d6513112395ae57838c1a577434fc5a773574c50e0be239f1f005783`.
+Its artifact is 2,200,208 bytes, SHA-256
+`0791c3ab8393e171c0c16168bac060540c61264f46d9c6fd35cf70942357dba0`,
+with build ID `3dae68243335806aa68487075b26e63c1f60a700`. The command took
+1.97 seconds, peaked at 92,024 KiB, and used no swap. The one- and two-lane
+regressions caused the per-worker full-cache design to be corrected rather
+than rationalized away.
+
+The final one-lane control is effectively baseline-neutral. The positive
+two- and four-lane observations are recorded, but Element 4 does not infer a
+general full-core scaling gain from them. Every width retains 500 scheduler
+rounds, 501 logical subfrontiers, 2,000 worker commands and checkpoints, and
+1,999,996 private steps. Each profiled replay has 2,004 full-frontier cache
+lookups, 1,992 hits, and 12 misses; full workers perform zero cache lookups and
+retain 1,997,996 direct per-instruction classifications.
+
+The independent single-active-microcore comparison uses:
+
+```text
+python3 bench_phase2_microcore.py \
+  --instructions 500000 \
+  --worker-counts 1,2,4 \
+  --repeats 5 \
+  --warmups 1 \
+  --warmup-instructions 100000 \
+  --host-profile \
+  --output build/phase4-e4-micro-final.json
+```
+
+The clean Element 3 baseline is report schema 5, 243,549 bytes, SHA-256
+`fe69655ef1aaf975b05ab565318e71cdc5a225d289fcfc2e4fbcdf1ba73edfda`.
+The clean final is report schema 6, 245,563 bytes, SHA-256
+`0d4afebe431464e76ab49e45e458af740241b7111ce9874275b2d08dfb6a9dad`;
+it was generated at `2026-07-26T22:14:03.672438+00:00` from revision
+`11d59b9` and the same final native artifact identified above. The complete
+command takes 0.52 seconds, peaks at 30,088 KiB, and uses no swap.
+
+| Host lanes | Before MIPS | First implementation MIPS | Final MIPS | Final change |
+|---:|---:|---:|---:|---:|
+| 1 | 20.711 | 23.572 | 25.284 | +22.1% |
+| 2 | 20.058 | 22.912 | 24.206 | +20.7% |
+| 4 | 19.565 | 22.320 | 23.950 | +22.4% |
+
+The first implementation micro report at `7fb777c` is 245,588 bytes with
+SHA-256
+`d6130af0842eac4377a0d59eb39c1b170c744e6816c851e6e1740e9935f52a1d`.
+Its gains were valid, but the implementation was not accepted until the
+independent full-core regression was removed. In the final micro profiled
+replay, every width records 500,000 private classifications and cache
+lookups, 499,998 hits, two misses, 500,000 proof reuses, 500,000 private
+steps, and only 500 commands and checkpoints.
+
+All full and micro report-level, timed-sample, profile-reconciliation, and
+cross-lane validations are true. Full widths share canonical-state hash
+`f8e787ebfcf846f3e3f53f9261ca95bdb77069b1460eda167e41eacd7bce195a`,
+behavior hash
+`00654569ab49f6b6c22cef69f9924e14f37453b953841ec618727333ce2a6e3b`,
+and ordered public-accounting hash
+`40ad99de3434614bbf53d868b356eec88365398c48c05e039d2871229aca37d4`.
+Micro widths retain the Element 3 canonical, behavior, and public-accounting
+hashes recorded above.
+
+The dedicated guest instruction-cache oracle was also refreshed from clean
+revision `11d59b9`:
+
+```text
+python3 bench_phase2_icache.py \
+  --instructions 200000 \
+  --repeats 3 \
+  --warmups 1 \
+  --output build/phase4-e4-icache-final.json
+```
+
+The schema-3 report is 64,181 bytes, SHA-256
+`ffb96c1b57644492254b49576c2600031f7ab1c5e280f4ede83bb54dd85a32cc`.
+All backend, hot/disabled architectural, hook-identity, suspended-load, and
+timing-hygiene validations pass. Canonical state remains
+`b0bb4266f1fd36a73722cbadad17e2f109eac3f77579b4cc3e44f74de35ccffe`
+and benchmark architectural state remains
+`ae14e15754764700096c4305e88b433888518040d5dc1aa291cf7a93700502fd`.
+Hot and disabled medians are 89.185 and 44.026 MIPS, a diagnostic 1.957x
+ratio. The command takes 0.11 seconds, peaks at 32,760 KiB, and uses no swap.
+
+Generated reports remain ignored. Their clean source revisions, native
+artifacts, schemas, exact commands, hashes, sizes, validation outcomes, and
+resource measurements are durable above. Element 4 is complete. Element 5's
+implementation baseline is `11d59b9`; this versioned evidence snapshot is its
+orientation record.
 
 ## Design-contention ledger
 
@@ -649,6 +871,7 @@ speculatively.
 | P4-D3 | Skipping a worker for an immediate boundary can save the dominant protocol cost, but an early coordinator commit or failure could expose an incomplete peer-private frontier. Runtime-adaptive routing could also let host timing influence behavior. | Preclassify only unbounded full-core commands under the retained logical-frontier admission. Synthesize only proven zero-progress results, gather every remaining worker result, preserve original cohort position and global cyclic settlement, and keep the choice independent of timing, helper readiness, or completion order. Report bypasses separately from physical worker work. | The claim covers the existing read-only full-core classifier and zero-progress interrupt, halted/idle, I-cache, and shared boundaries only. Strict-cycle, microcore, speculative execution, cross-frontier fusion, and callback settlement remain unchanged. Revisit complete-frontier lane queues only if later measurements show this bounded fast path insufficient. |
 | P4-D4 | Copying a complete CPU checkpoint for a command that exits before its first private instruction is wasted work, but moving capture past guest mutation would weaken whole-command failure containment. | Perform validation and read-only first-instruction classification before capture, then take the unchanged full checkpoint immediately before the first admitted guest `step_one` and retain it until command completion. | This removes checkpoints only from zero-mutation exits. It does not authorize partial checkpoints, checkpoint deletion for progressing commands, or mutation followed by speculative rollback. Reopen only with an injectable failure oracle that proves an equally strong containment boundary. |
 | P4-D5 | The Phase 3 mixed-topology clamp serializes even a sole logical participant, but independently widening one member of a true mixed frontier can reverse callback order, change exception-visible peer prefixes, or cross a peer-asserted interrupt. A longer command also enlarges the prefix restored by an unexpected internal worker failure. | Permit the existing bounded private command to consume remaining round credit only when the current mixed-topology subfrontier has exactly one executable or coordinator participant. Keep every multi-participant mixed subfrontier at one instruction and retain the unchanged whole-command checkpoint. | The proof is structural and unbounded-only: no other reservation can act in that subfrontier, every instruction is classified before mutation, and all existing own-command boundaries remain. Supported coordinator callback failures retain the completed prefix; only an unexpected internal helper failure restores a longer command instead of one former subfrontier. Reopen multi-participant fusion only with a non-mutating common-span proof covering every participant, callback and interrupt ordering, and exact one/two/four-lane failure evidence. Reopen rollback granularity only if internal-failure partial progress becomes a public contract or gains an injectable oracle. |
+| P4-D6 | Exact-byte host admission plans are safest, but a full core that validates an entire identity and then performs the unchanged native decode pays two protocols per instruction. A weaker identity, speculative translated execution, or timing-adaptive selection would either weaken the cache-observation contract or expand Element 4 materially. | Keep complete byte-validated plans. Use them at unbounded full-core frontier admission and on every eligible microcore worker step, where the single-use proof removes a duplicated Python-oracle eligibility decode. Use the established direct classifier inside full-core worker spans and all strict-cycle work. Clear full-core plans on reset, complete invalidation, restore, or an actual resident matching-line invalidation, but not on unrelated stores. | This is an admission cache, not translated execution. Full per-step reuse may be reconsidered only with a genuine decoded executor or a separately proved O(1) guest-cache identity generation covering refill, invalidation, rollback, checkpoint restore, explicit cache restore, and noncoherent host mutation. Runtime host timing, lane width, and helper readiness must never select the path. |
 
 Changes to these decisions must update this ledger and the corresponding
 evidence in the same milestone. A green test suite or faster benchmark alone
