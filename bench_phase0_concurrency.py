@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 9
 
@@ -2564,6 +2564,13 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "worker_bypassed_commands",
     "private_steps",
     "private_classification_calls",
+    "private_decode_cache_lookups",
+    "private_decode_cache_hits",
+    "private_decode_cache_misses",
+    "micro_oracle_proof_reuses",
+    "frontier_decode_cache_lookups",
+    "frontier_decode_cache_hits",
+    "frontier_decode_cache_misses",
     "zero_step_commands",
     "checkpoint_captures",
     "checkpoint_restores",
@@ -2735,7 +2742,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 2,
+            native_snapshot["schema_version"] == 3,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2812,6 +2819,28 @@ def _host_profile_probe(
         "classification_covers_private_steps":
             total_classification_calls
             >= native_counts["private_steps"],
+        "private_decode_cache_counts_reconcile": (
+            native_counts["private_decode_cache_lookups"]
+            == native_counts["private_decode_cache_hits"]
+            + native_counts["private_decode_cache_misses"]
+        ),
+        "private_decode_cache_lookups_within_classification": (
+            native_counts["private_decode_cache_lookups"]
+            <= native_counts["private_classification_calls"]
+        ),
+        "frontier_decode_cache_counts_reconcile": (
+            native_counts["frontier_decode_cache_lookups"]
+            == native_counts["frontier_decode_cache_hits"]
+            + native_counts["frontier_decode_cache_misses"]
+        ),
+        "frontier_decode_cache_lookups_within_classification": (
+            native_counts["frontier_decode_cache_lookups"]
+            <= native_counts["frontier_preclassification_calls"]
+        ),
+        "micro_oracle_proof_reuses_within_private_steps": (
+            native_counts["micro_oracle_proof_reuses"]
+            <= native_counts["private_steps"]
+        ),
         "frontier_classifications_within_preclassification": (
             0
             <= native_counts["frontier_preclassification_calls"]
@@ -2870,7 +2899,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 2,
+        "schema_version": 3,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
@@ -2895,6 +2924,18 @@ def _host_profile_probe(
             ),
             "classification_calls_per_private_step": _optional_ratio(
                 total_classification_calls,
+                native_counts["private_steps"],
+            ),
+            "private_decode_cache_hit_fraction": _optional_ratio(
+                native_counts["private_decode_cache_hits"],
+                native_counts["private_decode_cache_lookups"],
+            ),
+            "frontier_decode_cache_hit_fraction": _optional_ratio(
+                native_counts["frontier_decode_cache_hits"],
+                native_counts["frontier_decode_cache_lookups"],
+            ),
+            "micro_oracle_proof_reuse_fraction": _optional_ratio(
+                native_counts["micro_oracle_proof_reuses"],
                 native_counts["private_steps"],
             ),
             "zero_step_command_fraction": _optional_ratio(

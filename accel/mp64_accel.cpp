@@ -1540,6 +1540,41 @@ struct CPUState {
     uint64_t icache_undo_hits = 0;
     uint64_t icache_undo_misses = 0;
 
+    // Host-only private decode/admission plans. Entries are never
+    // architectural state: every hit is validated against the complete
+    // encoding bytes visible through this core's instruction-observation
+    // path before it can authorize private execution.
+    static constexpr std::size_t
+        PRIVATE_DECODE_CACHE_ENTRIES = 128;
+    static constexpr std::size_t
+        PRIVATE_DECODE_IDENTITY_BYTES = 16;
+    static_assert(
+        (
+            PRIVATE_DECODE_CACHE_ENTRIES &
+            (PRIVATE_DECODE_CACHE_ENTRIES - 1)
+        ) == 0,
+        "private decode cache must have power-of-two geometry");
+    struct PrivateDecodeCacheEntry {
+        bool valid = false;
+        uint64_t address = 0;
+        uint8_t identity_size = 0;
+        std::array<
+            uint8_t,
+            PRIVATE_DECODE_IDENTITY_BYTES>
+            identity{};
+    };
+    std::array<
+        PrivateDecodeCacheEntry,
+        PRIVATE_DECODE_CACHE_ENTRIES>
+        private_decode_cache{};
+
+    void clear_private_decode_cache() noexcept {
+        for (PrivateDecodeCacheEntry& entry :
+             private_decode_cache) {
+            entry.valid = false;
+        }
+    }
+
     // Privilege level (0=supervisor, 1=user)
     uint8_t  priv_level;
 
@@ -2301,6 +2336,13 @@ struct ConcurrencyProfileCounters {
     uint64_t worker_bypassed_commands = 0;
     uint64_t private_steps = 0;
     uint64_t private_classification_calls = 0;
+    uint64_t private_decode_cache_lookups = 0;
+    uint64_t private_decode_cache_hits = 0;
+    uint64_t private_decode_cache_misses = 0;
+    uint64_t micro_oracle_proof_reuses = 0;
+    uint64_t frontier_decode_cache_lookups = 0;
+    uint64_t frontier_decode_cache_hits = 0;
+    uint64_t frontier_decode_cache_misses = 0;
     uint64_t zero_step_commands = 0;
     uint64_t checkpoint_captures = 0;
     uint64_t checkpoint_restores = 0;
@@ -2373,6 +2415,10 @@ struct PrivateCoreHostTelemetry {
     uint64_t checkpoint_capture_ns = 0;
     uint64_t checkpoint_restore_ns = 0;
     uint64_t classification_calls = 0;
+    uint64_t decode_cache_lookups = 0;
+    uint64_t decode_cache_hits = 0;
+    uint64_t decode_cache_misses = 0;
+    uint64_t micro_oracle_proof_reuses = 0;
     uint64_t checkpoint_captures = 0;
     uint64_t checkpoint_restores = 0;
 };
@@ -4154,6 +4200,7 @@ static inline void icache_invalidate_span(
         uint64_t size) {
     if (s.profile != CoreProfile::FULL || size == 0)
         return;
+    s.clear_private_decode_cache();
     const uint64_t first =
         address & ~(CPUState::ICACHE_LINE_BYTES - 1);
     const uint64_t line_count =
@@ -4172,6 +4219,7 @@ static inline void icache_invalidate_span(
 static inline void icache_invalidate_all(
         CPUState& s,
         bool reset_statistics) {
+    s.clear_private_decode_cache();
     s.icache_valid.fill(0);
     s.ifetch_window_valid = false;
     if (reset_statistics) {
@@ -8051,7 +8099,8 @@ static bool micro_instruction_fetch_uses_python_route(
     // deliberately does not own either route, so conservatively keep any
     // instruction whose maximum decode window can touch one of them on the
     // Python path instead of aliasing raw bank-zero bytes.
-    constexpr uint64_t MAX_INSTRUCTION_BYTES = 16;
+    constexpr uint64_t MAX_INSTRUCTION_BYTES =
+        CPUState::PRIVATE_DECODE_IDENTITY_BYTES;
     constexpr uint64_t MMIO_START =
         0xFFFF'FF00'0000'0000ULL;
     constexpr uint64_t MMIO_END =
@@ -8085,7 +8134,8 @@ static bool micro_instruction_fetch_uses_python_route(
 
 static bool micro_instruction_fetch_window_touches_mmio(
         uint64_t address) {
-    constexpr uint64_t MAX_INSTRUCTION_BYTES = 16;
+    constexpr uint64_t MAX_INSTRUCTION_BYTES =
+        CPUState::PRIVATE_DECODE_IDENTITY_BYTES;
     constexpr uint64_t MMIO_START =
         0xFFFF'FF00'0000'0000ULL;
     constexpr uint64_t MMIO_END =
@@ -8104,6 +8154,56 @@ static bool micro_instruction_fetch_window_touches_mmio(
         }
     }
     return false;
+}
+
+static bool
+micro_decoded_instruction_requires_python_oracle(
+        int family,
+        int subop,
+        int modifier) {
+    if (modifier == 0x6 && family == 0x3) {
+        // Native next_instruction_size() intentionally remains a shallow
+        // compatibility estimate. The Python oracle owns recursive target
+        // sizing for EXT.SKIP, including a prefixed skipped instruction.
+        return true;
+    }
+
+    switch (family) {
+        case 0x0:
+            // Retain only IDL, NOP, HALT, EI, and DI. Reset, trap/return,
+            // stack traffic, and stripped 1802 heritage use the micro oracle.
+            return !(
+                subop == 0x0 ||
+                subop == 0x1 ||
+                subop == 0x2 ||
+                subop == 0xB ||
+                subop == 0xC
+            );
+        case 0x5:
+            // Native scalar memory does not yet recognize cluster scratchpad
+            // ownership and would bypass the compatibility MMIO route.
+            return true;
+        case 0x6:
+            // GLO/GHI/PLO/PHI use the stripped D register.
+            return subop >= 0xC;
+        case 0x8:
+        case 0x9:
+            // MEMALU and port I/O are not implemented by the reduced core.
+            return true;
+        case 0xC:
+            // MUL/DIV is cluster-shared; Tier-2 bitfield is gated out.
+            // Tier-1 POPCNT/CLZ/CTZ/BITREV remains core-local.
+            return subop <= 0x7 || subop >= 0xC;
+        case 0xD:
+            // Restricted and cluster-shared CSR semantics remain authoritative
+            // in Megapad64Micro for this element.
+            return true;
+        case 0xE:
+            // The tile engine is a cluster-shared resource.
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool micro_instruction_requires_python_oracle(CPUState& state) {
@@ -8142,52 +8242,21 @@ static bool micro_instruction_requires_python_oracle(CPUState& state) {
             return true;
         }
     }
-    if (modifier == 0x6 && family == 0x3) {
-        // Native next_instruction_size() intentionally remains a shallow
-        // compatibility estimate. The Python oracle owns recursive target
-        // sizing for EXT.SKIP, including a prefixed skipped instruction.
-        return true;
-    }
-
-    switch (family) {
-        case 0x0:
-            // Retain only IDL, NOP, HALT, EI, and DI.  Reset, trap/return,
-            // stack traffic, and stripped 1802 heritage use the micro oracle.
-            return !(
-                subop == 0x0 ||
-                subop == 0x1 ||
-                subop == 0x2 ||
-                subop == 0xB ||
-                subop == 0xC
-            );
-        case 0x5:
-            // Native scalar memory does not yet recognize cluster scratchpad
-            // ownership and would bypass the compatibility MMIO route.
-            return true;
-        case 0x6:
-            // GLO/GHI/PLO/PHI use the stripped D register.
-            return subop >= 0xC;
-        case 0x8:
-        case 0x9:
-            // MEMALU and port I/O are not implemented by the reduced core.
-            return true;
-        case 0xC:
-            // MUL/DIV is cluster-shared; Tier-2 bitfield is gated out.
-            // Tier-1 POPCNT/CLZ/CTZ/BITREV remains core-local.
-            return subop <= 0x7 || subop >= 0xC;
-        case 0xD:
-            // Restricted and cluster-shared CSR semantics remain authoritative
-            // in Megapad64Micro for this element.
-            return true;
-        case 0xE:
-            // The tile engine is a cluster-shared resource.
-            return true;
-        default:
-            return false;
-    }
+    return micro_decoded_instruction_requires_python_oracle(
+        family, subop, modifier);
 }
 
-static int step_one(CPUState& s, const StepCallbacks& cb) {
+struct PrivateInstructionProof {
+    const CPUState* core = nullptr;
+    uint64_t address = 0;
+    bool micro_native_private = false;
+};
+
+static int step_one(
+        CPUState& s,
+        const StepCallbacks& cb,
+        const PrivateInstructionProof*
+            private_instruction_proof = nullptr) {
     if (s.halted)
         throw std::runtime_error("HALT");
     if (s.idle) {
@@ -8210,10 +8279,29 @@ static int step_one(CPUState& s, const StepCallbacks& cb) {
         }
     } instruction_bus_scope(s, cb.bus_access);
 
+    bool proven_micro_native_private = false;
+    if (private_instruction_proof != nullptr) {
+        if (
+            private_instruction_proof->core != &s ||
+            private_instruction_proof->address != pc(s) ||
+            !private_instruction_proof->
+                micro_native_private ||
+            s.profile != CoreProfile::MICRO
+        ) {
+            throw std::logic_error(
+                "private instruction proof does not match execution");
+        }
+        proven_micro_native_private = true;
+    }
+
     // This is a transactional boundary: the Python microcore must see the
-    // exact original PC and prefix state.  The classifier only peeks through
-    // central mappings and runs before fetch or any architectural mutation.
-    if (micro_instruction_requires_python_oracle(s))
+    // exact original PC and prefix state. The private worker can consume a
+    // proof only at the unchanged instruction boundary classified directly
+    // above; all other callers retain the authoritative oracle check.
+    if (
+        !proven_micro_native_private &&
+        micro_instruction_requires_python_oracle(s)
+    )
         throw std::runtime_error("EXT_ISA_FALLBACK");
 
     icache_begin_instruction(s);
@@ -9035,6 +9123,14 @@ enum class PrivateInstructionDisposition : uint8_t {
     SHARED_INSTRUCTION = 2,
 };
 
+struct PrivateInstructionClassification {
+    PrivateInstructionDisposition disposition =
+        PrivateInstructionDisposition::SHARED_INSTRUCTION;
+    bool decode_cache_lookup = false;
+    bool decode_cache_hit = false;
+    PrivateInstructionProof proof;
+};
+
 static std::optional<uint8_t> private_icache_peek(
         const CPUState& state,
         uint64_t address) {
@@ -9072,9 +9168,109 @@ static bool private_icache_span_is_resident(
     return true;
 }
 
+static std::size_t private_decode_cache_index(
+        uint64_t address) {
+    return static_cast<std::size_t>(
+        (address ^ (address >> 7)) &
+        (CPUState::PRIVATE_DECODE_CACHE_ENTRIES - 1));
+}
+
+static std::optional<uint8_t>
+private_decode_identity_byte(
+        CPUState& state,
+        uint64_t address) {
+    if (state.profile == CoreProfile::FULL)
+        return private_icache_peek(state, address);
+    if (state.profile == CoreProfile::MICRO)
+        return mem_read8(state, address);
+    return std::nullopt;
+}
+
+static bool private_decode_cache_hit(
+        CPUState& state,
+        uint64_t address) {
+    const CPUState::PrivateDecodeCacheEntry& entry =
+        state.private_decode_cache[
+            private_decode_cache_index(address)];
+    if (
+        !entry.valid ||
+        entry.address != address ||
+        entry.identity_size == 0 ||
+        entry.identity_size >
+            CPUState::PRIVATE_DECODE_IDENTITY_BYTES
+    ) {
+        return false;
+    }
+    for (
+        uint8_t offset = 0;
+        offset < entry.identity_size;
+        offset++
+    ) {
+        const std::optional<uint8_t> observed =
+            private_decode_identity_byte(
+                state,
+                address +
+                    static_cast<uint64_t>(offset));
+        if (
+            !observed.has_value() ||
+            *observed != entry.identity[offset]
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool private_decode_cache_store(
+        CPUState& state,
+        uint64_t address,
+        int identity_size) {
+    if (
+        identity_size <= 0 ||
+        identity_size >
+            static_cast<int>(
+                CPUState::
+                    PRIVATE_DECODE_IDENTITY_BYTES)
+    ) {
+        return false;
+    }
+
+    CPUState::PrivateDecodeCacheEntry candidate;
+    candidate.address = address;
+    candidate.identity_size =
+        static_cast<uint8_t>(identity_size);
+    for (
+        int offset = 0;
+        offset < identity_size;
+        offset++
+    ) {
+        const std::optional<uint8_t> observed =
+            private_decode_identity_byte(
+                state,
+                address +
+                    static_cast<uint64_t>(offset));
+        if (!observed.has_value())
+            return false;
+        candidate.identity[
+            static_cast<std::size_t>(offset)] =
+                *observed;
+    }
+    candidate.valid = true;
+    state.private_decode_cache[
+        private_decode_cache_index(address)] =
+            candidate;
+    return true;
+}
+
 static PrivateInstructionDisposition
 classify_private_full_core_instruction(
-        const CPUState& state) {
+        const CPUState& state,
+        int* cache_identity_size = nullptr,
+        bool* cacheable = nullptr) {
+    if (cache_identity_size != nullptr)
+        *cache_identity_size = 0;
+    if (cacheable != nullptr)
+        *cacheable = false;
     if (
         state.profile != CoreProfile::FULL ||
         state.ext_modifier != -1
@@ -9235,13 +9431,28 @@ classify_private_full_core_instruction(
             ICACHE_BOUNDARY;
     }
 
+    // EXT.SKIP depends on current flags and may require a target-byte
+    // residency check that changes independently of its encoding. Keep that
+    // dynamic instruction out of the host plan cache.
+    if (!(family == 0x3 && modifier == 6)) {
+        if (cache_identity_size != nullptr)
+            *cache_identity_size = total_length;
+        if (cacheable != nullptr)
+            *cacheable = true;
+    }
     return PrivateInstructionDisposition::
         EXECUTE_PRIVATE;
 }
 
 static PrivateInstructionDisposition
 classify_private_micro_core_instruction(
-        CPUState& state) {
+        CPUState& state,
+        int* cache_identity_size = nullptr,
+        bool* cacheable = nullptr) {
+    if (cache_identity_size != nullptr)
+        *cache_identity_size = 0;
+    if (cacheable != nullptr)
+        *cacheable = false;
     if (
         state.profile != CoreProfile::MICRO ||
         state.ext_modifier != -1 ||
@@ -9265,6 +9476,7 @@ classify_private_micro_core_instruction(
     int family = (opcode >> 4) & 0xF;
     int subop = opcode & 0xF;
     int modifier = -1;
+    int prefix_length = 0;
 
     if (family == 0xF) {
         // The reduced core accepts the same single ordinary modifier set as
@@ -9275,6 +9487,7 @@ classify_private_micro_core_instruction(
                 SHARED_INSTRUCTION;
         }
         modifier = subop;
+        prefix_length = 1;
         instruction_address++;
         opcode = mem_read8(
             state, instruction_address);
@@ -9286,7 +9499,18 @@ classify_private_micro_core_instruction(
         }
     }
 
+    // Proof reuse may bypass the second oracle decode in step_one. Make the
+    // private-admission subset structural: an encoding still owned by the
+    // Python oracle cannot produce a proof, even if the narrower switch below
+    // is accidentally broadened later.
+    if (micro_decoded_instruction_requires_python_oracle(
+            family, subop, modifier)) {
+        return PrivateInstructionDisposition::
+            SHARED_INSTRUCTION;
+    }
+
     bool private_instruction = false;
+    int instruction_length = 0;
     switch (family) {
         case 0x0:
             // IDL, NOP, HALT, and DI are local. EI remains a coordinator
@@ -9297,54 +9521,154 @@ classify_private_micro_core_instruction(
                 subop == 0x1 ||
                 subop == 0x2 ||
                 subop == 0xC;
+            instruction_length = 1;
             break;
         case 0x1:
         case 0x2:
             private_instruction = true;
+            instruction_length = 1;
             break;
         case 0x3:
             // Native and Python disagree today about the size of a prefixed
             // target skipped by EXT.SKIP. Keep that exact encoding on the
             // coordinator/oracle until the architectural size rule is fixed.
             private_instruction = modifier != 0x6;
+            instruction_length = 2;
             break;
         case 0x4:
+            private_instruction = true;
+            instruction_length = 3;
+            break;
         case 0x7:
+            private_instruction = true;
+            instruction_length = 2;
+            break;
         case 0xA:
         case 0xB:
             private_instruction = true;
+            instruction_length = 1;
             break;
         case 0x6:
             // GLO/GHI/PLO/PHI depend on the stripped D register and stay on
             // the reduced-core Python oracle.
             private_instruction = subop < 0xC;
+            if (subop == 0x0) {
+                instruction_length =
+                    modifier == 0 ? 10 : 3;
+            } else if (subop == 0x1) {
+                instruction_length = 4;
+            } else if (subop <= 0x7) {
+                instruction_length = 3;
+            } else {
+                instruction_length = 2;
+            }
             break;
         case 0xC:
             // MUL/DIV is cluster-shared and Tier-2 bitfield operations are
             // absent. POPCNT/CLZ/CTZ/BITREV are core-local.
             private_instruction =
                 subop >= 0x8 && subop <= 0xB;
+            instruction_length =
+                subop == 0xE ? 3 : 2;
             break;
         default:
             break;
     }
 
-    return private_instruction
-        ? PrivateInstructionDisposition::
-            EXECUTE_PRIVATE
-        : PrivateInstructionDisposition::
+    if (!private_instruction) {
+        return PrivateInstructionDisposition::
             SHARED_INSTRUCTION;
+    }
+    if (cache_identity_size != nullptr) {
+        *cache_identity_size =
+            prefix_length + instruction_length;
+    }
+    if (cacheable != nullptr)
+        *cacheable = true;
+    return PrivateInstructionDisposition::
+        EXECUTE_PRIVATE;
 }
 
-static PrivateInstructionDisposition
+static PrivateInstructionClassification
 classify_private_core_instruction(
         CPUState& state) {
+    PrivateInstructionClassification result;
+    const uint64_t address = state.regs[state.psel];
+
     if (state.profile == CoreProfile::FULL) {
-        return classify_private_full_core_instruction(
-            state);
+        if (
+            state.ext_modifier != -1 ||
+            !state.icache_enabled
+        ) {
+            result.disposition =
+                classify_private_full_core_instruction(
+                    state);
+            return result;
+        }
+    } else if (state.profile == CoreProfile::MICRO) {
+        if (
+            state.ext_modifier != -1 ||
+            state.priv_level != 0 ||
+            micro_instruction_fetch_uses_python_route(
+                address)
+        ) {
+            result.disposition =
+                classify_private_micro_core_instruction(
+                    state);
+            return result;
+        }
+    } else {
+        result.disposition =
+            PrivateInstructionDisposition::
+                SHARED_INSTRUCTION;
+        return result;
     }
-    return classify_private_micro_core_instruction(
-        state);
+
+    result.decode_cache_lookup = true;
+    result.decode_cache_hit =
+        private_decode_cache_hit(
+            state, address);
+    if (result.decode_cache_hit) {
+        result.disposition =
+            PrivateInstructionDisposition::
+                EXECUTE_PRIVATE;
+    } else {
+        int identity_size = 0;
+        bool cacheable = false;
+        result.disposition =
+            state.profile == CoreProfile::FULL
+            ? classify_private_full_core_instruction(
+                state,
+                &identity_size,
+                &cacheable)
+            : classify_private_micro_core_instruction(
+                state,
+                &identity_size,
+                &cacheable);
+        if (
+            result.disposition ==
+                PrivateInstructionDisposition::
+                    EXECUTE_PRIVATE &&
+            cacheable
+        ) {
+            private_decode_cache_store(
+                state,
+                address,
+                identity_size);
+        }
+    }
+
+    if (
+        result.disposition ==
+            PrivateInstructionDisposition::
+                EXECUTE_PRIVATE &&
+        state.profile == CoreProfile::MICRO
+    ) {
+        result.proof.core = &state;
+        result.proof.address = address;
+        result.proof.micro_native_private = true;
+    }
+    return result;
 }
 
 static bool classify_strict_cycle_private_one_cycle(
@@ -9431,6 +9755,8 @@ static int trap_id_from_runtime_error(const std::string& what);
 struct FrontierPrivatePreclassification {
     bool execute_private = false;
     bool classified_instruction = false;
+    bool decode_cache_lookup = false;
+    bool decode_cache_hit = false;
     PrivateCoreResult result;
 };
 
@@ -9513,10 +9839,17 @@ preclassify_frontier_private_command(
                 PrivateCoreStopReason::IDLE;
         } else {
             probe.classified_instruction = true;
-            const PrivateInstructionDisposition
-                disposition =
+            const PrivateInstructionClassification
+                classification =
                     classify_private_core_instruction(
                         core);
+            probe.decode_cache_lookup =
+                classification.decode_cache_lookup;
+            probe.decode_cache_hit =
+                classification.decode_cache_hit;
+            const PrivateInstructionDisposition
+                disposition =
+                    classification.disposition;
             if (
                 disposition ==
                 PrivateInstructionDisposition::
@@ -9690,7 +10023,9 @@ static PrivateCoreResult execute_private_core_command_body(
                 break;
             }
 
-            PrivateInstructionDisposition disposition =
+            PrivateInstructionClassification
+                classification;
+            classification.disposition =
                 PrivateInstructionDisposition::
                     EXECUTE_PRIVATE;
             if (
@@ -9703,12 +10038,40 @@ static PrivateCoreResult execute_private_core_command_body(
                         command.host_telemetry->
                             classification_calls);
                 }
-                disposition =
-                    classify_private_core_instruction(
-                        core);
+                if (command.strict_cycle_one_instruction) {
+                    classification.disposition =
+                        classify_private_full_core_instruction(
+                            core);
+                } else {
+                    classification =
+                        classify_private_core_instruction(
+                            core);
+                }
+                if constexpr (HOST_PROFILE) {
+                    if (
+                        classification
+                            .decode_cache_lookup
+                    ) {
+                        host_saturating_increment(
+                            command.host_telemetry->
+                                decode_cache_lookups);
+                        if (
+                            classification
+                                .decode_cache_hit
+                        ) {
+                            host_saturating_increment(
+                                command.host_telemetry->
+                                    decode_cache_hits);
+                        } else {
+                            host_saturating_increment(
+                                command.host_telemetry->
+                                    decode_cache_misses);
+                        }
+                    }
+                }
             }
             if (
-                disposition ==
+                classification.disposition ==
                 PrivateInstructionDisposition::
                     ICACHE_BOUNDARY
             ) {
@@ -9718,7 +10081,7 @@ static PrivateCoreResult execute_private_core_command_body(
                 break;
             }
             if (
-                disposition ==
+                classification.disposition ==
                 PrivateInstructionDisposition::
                     SHARED_INSTRUCTION
             ) {
@@ -9733,8 +10096,20 @@ static PrivateCoreResult execute_private_core_command_body(
             // immediately before the first admitted guest mutation.
             capture_checkpoint();
             try {
+                const PrivateInstructionProof* proof =
+                    classification.proof
+                        .micro_native_private
+                    ? &classification.proof
+                    : nullptr;
+                if constexpr (HOST_PROFILE) {
+                    if (proof != nullptr) {
+                        host_saturating_increment(
+                            command.host_telemetry->
+                                micro_oracle_proof_reuses);
+                    }
+                }
                 const int cycles =
-                    step_one(core, callbacks);
+                    step_one(core, callbacks, proof);
                 result.total_cycles += cycles;
                 result.steps_executed++;
             } catch (
@@ -12690,6 +13065,18 @@ static void record_private_wave_profile(
             profile.private_classification_calls,
             host.classification_calls);
         host_saturating_add(
+            profile.private_decode_cache_lookups,
+            host.decode_cache_lookups);
+        host_saturating_add(
+            profile.private_decode_cache_hits,
+            host.decode_cache_hits);
+        host_saturating_add(
+            profile.private_decode_cache_misses,
+            host.decode_cache_misses);
+        host_saturating_add(
+            profile.micro_oracle_proof_reuses,
+            host.micro_oracle_proof_reuses);
+        host_saturating_add(
             profile.checkpoint_captures,
             host.checkpoint_captures);
         host_saturating_add(
@@ -12915,6 +13302,9 @@ execute_private_core_wave_under_active_batch(
 
     if (frontier_fast_path_enabled) {
         uint64_t classification_calls = 0;
+        uint64_t decode_cache_lookups = 0;
+        uint64_t decode_cache_hits = 0;
+        uint64_t decode_cache_misses = 0;
         uint64_t preclassification_commands = 0;
         uint64_t bypassed_commands = 0;
         std::array<
@@ -12949,6 +13339,13 @@ execute_private_core_wave_under_active_batch(
                             commands[index]);
                 if (probe.classified_instruction)
                     classification_calls++;
+                if (probe.decode_cache_lookup) {
+                    decode_cache_lookups++;
+                    if (probe.decode_cache_hit)
+                        decode_cache_hits++;
+                    else
+                        decode_cache_misses++;
+                }
                 if (probe.execute_private) {
                     commands[index]
                         .first_instruction_preclassified_private =
@@ -12985,6 +13382,15 @@ execute_private_core_wave_under_active_batch(
             host_saturating_add(
                 profile.frontier_preclassification_calls,
                 classification_calls);
+            host_saturating_add(
+                profile.frontier_decode_cache_lookups,
+                decode_cache_lookups);
+            host_saturating_add(
+                profile.frontier_decode_cache_hits,
+                decode_cache_hits);
+            host_saturating_add(
+                profile.frontier_decode_cache_misses,
+                decode_cache_misses);
             host_saturating_add(
                 profile.worker_bypassed_commands,
                 bypassed_commands);
@@ -15566,6 +15972,20 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.private_steps;
     counts["private_classification_calls"] =
         profile.private_classification_calls;
+    counts["private_decode_cache_lookups"] =
+        profile.private_decode_cache_lookups;
+    counts["private_decode_cache_hits"] =
+        profile.private_decode_cache_hits;
+    counts["private_decode_cache_misses"] =
+        profile.private_decode_cache_misses;
+    counts["micro_oracle_proof_reuses"] =
+        profile.micro_oracle_proof_reuses;
+    counts["frontier_decode_cache_lookups"] =
+        profile.frontier_decode_cache_lookups;
+    counts["frontier_decode_cache_hits"] =
+        profile.frontier_decode_cache_hits;
+    counts["frontier_decode_cache_misses"] =
+        profile.frontier_decode_cache_misses;
     counts["zero_step_commands"] =
         profile.zero_step_commands;
     counts["checkpoint_captures"] =
@@ -15629,7 +16049,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 2;
+    result["schema_version"] = 3;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -16021,6 +16441,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     data.data(),
                     data.size());
                 s.ifetch_window_valid = false;
+                s.clear_private_decode_cache();
             })
         .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("mpu_base", &CPUState::mpu_base)

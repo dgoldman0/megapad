@@ -37,9 +37,9 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-instruction-cache-baseline"
-# Version 2 updates only the versioned evidence command to the supervised,
-# worker-free test policy. The canonical machine-state schema remains 1.
-REPORT_SCHEMA_VERSION = 2
+# Version 3 refreshes the host-code-safety contract for the Phase 4 private
+# decode/admission cache. The canonical guest machine-state schema remains 1.
+REPORT_SCHEMA_VERSION = 3
 STATE_SCHEMA = "megapad.phase2-instruction-cache-state"
 STATE_SCHEMA_VERSION = 1
 ROOT = Path(__file__).resolve().parent
@@ -95,7 +95,22 @@ CACHE_CONTRACT = {
 }
 
 HOST_CODE_SAFETY_CONTRACT = {
-    "general_decoded_or_jit_cache": "absent_deferred_to_phase_4",
+    "general_decoded_or_jit_cache": (
+        "private_admission_plans_only_no_translated_execution"
+    ),
+    "private_decode_admission_cache": {
+        "ownership": "per_core_host_only_nonarchitectural",
+        "full_core_identity": (
+            "exact_complete_bytes_visible_through_guest_instruction_cache"
+        ),
+        "microcore_identity": (
+            "exact_complete_bytes_visible_through_current_mapped_memory"
+        ),
+        "dynamic_policy": (
+            "live_privilege_route_and_uncached_ext_skip_checks"
+        ),
+        "execution": "authoritative_native_fetch_and_step_remain_unchanged",
+    },
     "accelerator_hook_registration": "snapshot_exact_guest_code_span",
     "accelerator_hook_mismatch": "decline_to_ordinary_call",
     "official_load_while_strict_instruction_suspended": "rejected",
@@ -198,6 +213,16 @@ EVIDENCE_MATRIX = {
 }
 
 EXPLICIT_EXCLUSIONS = [
+    {
+        "state_or_behavior": (
+            "Phase 4 private decode/admission cache throughput and hit counts"
+        ),
+        "reason": (
+            "this retained Phase 2 report measures the architectural guest "
+            "I-cache; Phase 4 host-profile benchmarks own admission-cache "
+            "performance evidence"
+        ),
+    },
     {
         "state_or_behavior": (
             "generic weighted RTL modes and programmable best-effort weights"

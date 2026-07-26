@@ -12,6 +12,13 @@ Version 4 retains the Phase 2 architectural state schema and adds the Phase 4
 measurement surface: one/two/four-lane reports, ordered public-accounting
 hashes, clean source/artifact provenance, and an optional separate host-profile
 replay. Timed samples remain unprofiled.
+
+Version 5 makes the complete one/two/four-lane set mandatory and isolates
+timed samples from cyclic-GC and persistent-pool teardown.
+
+Version 6 adds host-only private decode/admission-cache counters and the
+single-use micro-oracle proof-reuse count. Architectural state schema 3 and
+the timed-workload semantics remain unchanged.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 5
+REPORT_SCHEMA_VERSION = 6
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -329,8 +336,8 @@ def _profile_probe(
         counts["coordinator_boundary_origins"].values()
     )
     validation = {
-        "schema_is_version_2":
-            normalized["schema_version"] == 2,
+        "schema_is_version_3":
+            normalized["schema_version"] == 3,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -371,6 +378,27 @@ def _profile_probe(
         "private_steps_match_public_execution":
             counts["private_steps"]
             == int(stats.instructions_executed),
+        "private_decode_cache_counts_reconcile": (
+            counts["private_decode_cache_lookups"]
+            == counts["private_decode_cache_hits"]
+            + counts["private_decode_cache_misses"]
+        ),
+        "all_private_classifications_use_decode_cache": (
+            counts["private_decode_cache_lookups"]
+            == counts["private_classification_calls"]
+        ),
+        "frontier_decode_cache_counts_reconcile": (
+            counts["frontier_decode_cache_lookups"]
+            == counts["frontier_decode_cache_hits"]
+            + counts["frontier_decode_cache_misses"]
+        ),
+        "micro_workload_has_no_frontier_decode_cache": (
+            counts["frontier_decode_cache_lookups"] == 0
+        ),
+        "micro_oracle_proof_reused_for_every_private_step": (
+            counts["micro_oracle_proof_reuses"]
+            == counts["private_steps"]
+        ),
         "one_command_per_sole_participant_wave":
             counts["worker_waves"] == counts["worker_commands"],
         "all_progressing_commands_have_checkpoints": (
@@ -409,7 +437,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 2,
+        "schema_version": 3,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,
