@@ -2,7 +2,8 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1 and 2 of 6 complete; Element 3 not started
+**Status:** Elements 1 and 2 of 6 complete; Element 3 implementation and
+validation in progress
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -35,7 +36,7 @@ current milestone, but it does not create a new element or sub-element.
 |---|---|---|
 | 1 | Measurement and attribution | Complete |
 | 2 | Scheduler/frontier fast path | Complete |
-| 3 | Longer proven-private execution | Pending |
+| 3 | Longer proven-private execution | In progress |
 | 4 | Host decode/JIT-style cache | Pending |
 | 5 | Shared/MMIO/DMA optimization | Pending |
 | 6 | System closure/final validation/handoff | Pending |
@@ -477,6 +478,113 @@ their exact source and artifact identities, hashes, sizes, parameters, and
 resource measurements are recorded above. Element 3 begins from the
 `e4918e9` implementation and this evidence snapshot.
 
+## Element 3 implementation record
+
+Element 3 begins with the mixed-topology one-instruction clamp established by
+Phase 3 decision P3-D10. The initial implementation applied that clamp whenever
+the machine contained any microcore, even when one logical participant was the
+only executable or coordinator reservation in the gathered subfrontier. Other
+configured or zero-credit peers cannot act in that subfrontier, so there is no
+peer instruction fetch, shared callback, code write, arbitration result, or
+interrupt assertion to cross. The existing private runner can therefore
+consume the participant's remaining bounded round credit while continuing to
+classify every instruction immediately before mutation and stopping at its own
+first shared, routed, cache, trap, reset, halt, idle, or uncertain boundary.
+
+The optimization is deliberately narrower than an all-full participant test.
+Even if every current participant is a full core, a configured mixed topology
+has versioned one-instruction callback and exception-prefix ordering under
+P3-D10. Widening one full prefix independently could discover a cyclic-earlier
+later boundary in the same gathered frontier as a cyclic-later immediate
+boundary, reversing their previous callback order. A peer callback could also
+assert an interrupt after a widened command had already run past the prior
+subfrontier boundary. Every multi-participant mixed subfrontier therefore
+remains capped to one instruction, including zero-credit cluster probes.
+Strict-cycle execution is unchanged.
+
+The retained single-active-microcore benchmark was prepared independently at
+`ba778f5dde7bef030ec4ba611c643b53f1d1d825`. A read-only audit then found that
+its per-sample systems contain Python callback cycles and persistent native
+worker pools, while schema 4 neither controlled cyclic collection around the
+timed interval nor forced teardown after each sample. Its first timing report
+is therefore discarded; its architectural hashes remain valid but are not
+used as the Element 3 baseline.
+
+The correction at `0cb0f25764635b256e230fa9a9eac4d8b7b54c1c` advances the
+report to schema 5 without changing Phase 2 state schema 3. Every sample now
+collects before timing, disables cyclic GC during timing, restores the caller's
+GC state, and collects after releasing all system references so helper-pool
+joins cannot contaminate a later sample. The report requires the complete
+one/two/four-lane comparison, strengthens schema-2 host-profile
+reconciliations, and tests source/artifact provenance and native-owner
+teardown. Timed samples remain unprofiled.
+
+New focused oracles cover sole full-core and sole microcore 2,000-instruction
+spans across one, two, and four lanes; a multi-participant frontier shrinking
+to one survivor that consumes its longer remaining credit; coherent
+self-modifying code after a private microcore prefix; retained prefix and
+original exception identity at a failing microcore coordinator callback; and
+negative active-mixed fixtures that preserve the versioned callback order and
+stop before a peer-asserted interrupt. The focused gate has seven passing
+tests. Broader regression, sanitizer, and clean after-evidence remain before
+Element 3 completion.
+
+### Element 3 clean baseline
+
+The replacement clean baseline uses detached revision
+`0cb0f25764635b256e230fa9a9eac4d8b7b54c1c`, report schema 5, state schema 3,
+500,000 instructions, five timed repeats, one 100,000-instruction warmup, a
+separate host-profile replay, and one/two/four lanes. It was generated at
+`2026-07-26T21:07:09.922518+00:00`. The repository dirty flag is `false`.
+
+The 243,506-byte JSON has SHA-256
+`4df63ea43df20189eb069c5525c2783c4e330da11453c00d9bdbf81ebf6cfb3f`.
+The 2,195,768-byte native artifact has SHA-256
+`5c6987c997d976938344caffb305ded753ac3614cb0dfbe656572e33ae8b3ccf`
+and ELF build ID `5f9012e30b0f0855377e245aa88007589497d79b`. The run took
+30.25 seconds, peaked at 30,020 KiB, and used no swap.
+
+Every report, worker, host-profile, timing-hygiene, and cross-lane validation
+is true. Canonical state, behavior, and ordered public accounting are exact
+across lane widths, with hashes
+`acefb4be60d898244b47d2a9254fd8a7405593e6c6014843d1ea2f8f1c036e5a`,
+`4882f2009791627b60bf1039bb9a53de2c2512931a97fa0b31599f6723e70501`,
+and `2bc0689dd18e20a33870e568d5661133f8ea14a22d39971c880e4c5bc4a8d807`.
+Median throughput is 498,192 / 316,922 / 231,306 instructions per second at
+one/two/four lanes. Each profiled width reports exactly 500,000 logical
+subfrontiers, worker commands, and checkpoint captures for 500,000 private
+steps; this is the structural cost Element 3 is intended to remove.
+
+### Element 3 regression and sanitizer gate
+
+Two independent read-only audits found no correctness blocker in the
+sole-participant widening. They confirmed that every successive instruction is
+still classified before mutation, the unchanged whole-command checkpoint is
+captured immediately before the first mutation, pending interrupts are checked
+before participation and command formation, and returned progress remains
+bounded by admitted credit. Their two actionable findings were the dynamic
+multi-participant-to-sole coverage gap and the benchmark lifecycle flaw; both
+are closed above.
+
+The seven-test focused Element 3 file passes in 0.08 seconds. Its complete
+foreground command takes 0.60 seconds at 44,280 KiB peak with no swap. A
+123-test affected selection passes in 1.60 seconds; the full command,
+including one native rebuild, takes 35.91 seconds at 1,254,072 KiB peak with
+no swap. Two focused strict-cycle separation oracles pass in 0.08 seconds,
+with a 0.61-second command peak of 43,840 KiB and no swap.
+
+The focused sanitizer close is also green. ASan/UBSan passes ten
+sole-span, shrinking-frontier, self-modification, callback-prefix,
+active-peer, code-observation, and ordered-shared-commit tests in 0.22 seconds
+with no sanitizer finding. Its isolated build-and-test command takes 67.07
+seconds at 2,308,036 KiB peak with no swap. The identical ten tests pass under
+TSan in 0.24 seconds with no race report; its command takes 39.28 seconds at
+1,837,660 KiB peak with no swap. All ordinary and sanitizer tests ran
+foreground and sequentially.
+
+The implementation is ready to commit. A clean post-change benchmark and
+before/after evidence commit remain before Element 3 is complete.
+
 ## Design-contention ledger
 
 This ledger contains only decisions already required by Phase 4 work. New
@@ -489,6 +597,7 @@ speculatively.
 | P4-D2 | A single universal speedup threshold would reward only favorable workloads and could conceal regressions or equivalence failures elsewhere. | Require exact architectural equivalence, then judge benefit with workload-specific before/after measurements. No universal performance threshold is imposed. | A change may be retained only with an honestly stated, reproducible benefit and disclosed tradeoffs across affected workloads. Exact equivalence is mandatory regardless of speed; changing an architectural oracle requires a separately approved architecture decision, not a performance exemption. |
 | P4-D3 | Skipping a worker for an immediate boundary can save the dominant protocol cost, but an early coordinator commit or failure could expose an incomplete peer-private frontier. Runtime-adaptive routing could also let host timing influence behavior. | Preclassify only unbounded full-core commands under the retained logical-frontier admission. Synthesize only proven zero-progress results, gather every remaining worker result, preserve original cohort position and global cyclic settlement, and keep the choice independent of timing, helper readiness, or completion order. Report bypasses separately from physical worker work. | The claim covers the existing read-only full-core classifier and zero-progress interrupt, halted/idle, I-cache, and shared boundaries only. Strict-cycle, microcore, speculative execution, cross-frontier fusion, and callback settlement remain unchanged. Revisit complete-frontier lane queues only if later measurements show this bounded fast path insufficient. |
 | P4-D4 | Copying a complete CPU checkpoint for a command that exits before its first private instruction is wasted work, but moving capture past guest mutation would weaken whole-command failure containment. | Perform validation and read-only first-instruction classification before capture, then take the unchanged full checkpoint immediately before the first admitted guest `step_one` and retain it until command completion. | This removes checkpoints only from zero-mutation exits. It does not authorize partial checkpoints, checkpoint deletion for progressing commands, or mutation followed by speculative rollback. Reopen only with an injectable failure oracle that proves an equally strong containment boundary. |
+| P4-D5 | The Phase 3 mixed-topology clamp serializes even a sole logical participant, but independently widening one member of a true mixed frontier can reverse callback order, change exception-visible peer prefixes, or cross a peer-asserted interrupt. A longer command also enlarges the prefix restored by an unexpected internal worker failure. | Permit the existing bounded private command to consume remaining round credit only when the current mixed-topology subfrontier has exactly one executable or coordinator participant. Keep every multi-participant mixed subfrontier at one instruction and retain the unchanged whole-command checkpoint. | The proof is structural and unbounded-only: no other reservation can act in that subfrontier, every instruction is classified before mutation, and all existing own-command boundaries remain. Supported coordinator callback failures retain the completed prefix; only an unexpected internal helper failure restores a longer command instead of one former subfrontier. Reopen multi-participant fusion only with a non-mutating common-span proof covering every participant, callback and interrupt ordering, and exact one/two/four-lane failure evidence. Reopen rollback granularity only if internal-failure partial progress becomes a public contract or gains an injectable oracle. |
 
 Changes to these decisions must update this ledger and the corresponding
 evidence in the same milestone. A green test suite or faster benchmark alone

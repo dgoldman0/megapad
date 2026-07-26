@@ -14977,6 +14977,10 @@ static void run_parallel_core_round(
             subfrontier_reservations;
         subfrontier_reservations.reserve(
             participating_reservations.size());
+        const bool multi_participant_mixed_frontier =
+            participating_reservations.size() > 1 &&
+            system.execution_cores.size() !=
+                system.cores.size();
         for (
             std::size_t reservation_index :
             participating_reservations
@@ -14984,14 +14988,19 @@ static void run_parallel_core_round(
             int64_t subfrontier_steps =
                 remaining_steps[
                     reservation_index];
-            if (
-                system.execution_cores.size() !=
-                    system.cores.size()
-            ) {
-                // Microcores fetch coherently from shared RAM. One logical
-                // instruction frontier prevents any helper from running an
-                // unbounded stale-code segment across an ordered shared
-                // commit; equal round credit persists across these frontiers.
+            if (multi_participant_mixed_frontier) {
+                // Mixed topologies retain their versioned synchronous
+                // frontier whenever more than one logical participant is
+                // present. Keep every peer at one instruction so no private
+                // prefix can cross an ordered write, callback, or interrupt
+                // boundary or change exception-visible callback order.
+                //
+                // With one executable/coordinator participant, no other
+                // reservation can act in this subfrontier. It may consume
+                // the existing remaining credit because every instruction
+                // is still classified as private immediately before
+                // mutation and its command stops at the first uncertain
+                // boundary.
                 subfrontier_steps =
                     std::min<int64_t>(
                         subfrontier_steps, 1);
