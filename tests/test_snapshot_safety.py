@@ -23,6 +23,8 @@ def _event_signature(events) -> tuple:
             bytes(event.payload),
             int(event.argument0),
             int(event.argument1),
+            int(event.release_boundary),
+            str(event.release_phase),
         )
         for event in events
     )
@@ -86,6 +88,8 @@ def _machine_signature(system: MegapadSystem) -> tuple:
         _event_signature(native.external_event_pending),
         _event_signature(native.external_event_history),
         int(native.external_event_next_sequence),
+        int(native.external_event_batch_boundaries),
+        bool(native.external_event_replay_sealed),
         _bus_signature(system),
         bool(native.cycle_execution_pending),
         bool(system._booted),

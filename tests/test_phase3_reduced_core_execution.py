@@ -545,6 +545,8 @@ def _locked_crc_stall_signature(worker_count: int) -> tuple:
         arbiter["grant_counts"]["crc"],
         arbiter["last_grants"]["crc"],
         arbiter["grant_sequence"],
+        stats.system_stop_reason,
+        stats.stop_cycle,
     )
 
 
@@ -570,9 +572,10 @@ def test_unchanged_locked_contender_closes_without_spinning() -> None:
         0, 0, 0, 0, 1, 0, 0
     )
     assert reference[6:11] == (0, 1, 0, 0, 0x100)
-    assert reference[11:] == (
+    assert reference[11:16] == (
         True, 0, 0, 0, 0
     )
+    assert reference[16:] == ("no_progress", 0)
 
 
 def _hard_ineligible_credit_signature(

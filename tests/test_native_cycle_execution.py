@@ -1201,9 +1201,26 @@ def test_live_ingress_gate_linearizes_arrivals_on_both_sides_of_close():
             event.sequence,
             event.cycle,
             bytes(event.payload),
+            event.release_boundary,
+            event.release_phase,
         )
         for event in owner.external_event_history
-    ] == [(1, 0, b"A"), (2, 0, b"B")]
+    ] == [
+        (
+            1,
+            0,
+            b"A",
+            1,
+            _mp64_accel.ExternalEventReleasePhase.AFTER_BATCH,
+        ),
+        (
+            2,
+            0,
+            b"B",
+            2,
+            _mp64_accel.ExternalEventReleasePhase.BEFORE_BATCH,
+        ),
+    ]
     assert system.uart.read8(0x01) == ord("A")
     assert system.uart.read8(0x01) == ord("B")
 
@@ -1248,13 +1265,24 @@ def test_nic_transport_starts_only_after_journal_route_is_installed():
     assert bytes(history[0].payload) == frame
 
 
-def test_system_nic_invalid_ingress_preserves_false_and_sticky_error():
+def test_system_nic_invalid_ingress_journals_false_and_sticky_error():
     system = _system(assemble("nop"))
 
     assert not system.nic.inject_frame(b"")
     assert system.cpu._cs.nic_rx_queue_size() == 0
     assert system.cpu._cs.nic_read8(NIC_BASE + 0x01) & 0x08
-    assert system._native_system.external_event_history == []
+    history = system._native_system.external_event_history
+    assert len(history) == 1
+    assert (
+        history[0].kind ==
+        _mp64_accel.ExternalEventKind.NIC_RX_REJECTED
+    )
+    assert bytes(history[0].payload) == b""
+    assert history[0].release_boundary == 1
+    assert (
+        history[0].release_phase ==
+        _mp64_accel.ExternalEventReleasePhase.BEFORE_BATCH
+    )
 
 
 def test_timestamped_external_events_apply_at_cycle_then_wake_without_vector():

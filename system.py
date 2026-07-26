@@ -28,6 +28,7 @@ from _mp64_accel import (
     DmaBeat,
     DmaEndpointView,
     ExternalEventKind,
+    ExternalEventReleasePhase,
 )
 from accel_wrapper import (
     HaltError,
@@ -149,6 +150,37 @@ class SystemRunStats:
     external_events_applied: int = 0
     pending_interrupt_core: int = -1
     pending_interrupt_vector: int = -1
+
+
+EXTERNAL_INGRESS_RECORDING_SCHEMA = "megapad.external-ingress"
+EXTERNAL_INGRESS_RECORDING_VERSION = 1
+
+_EXTERNAL_EVENT_KIND_NAMES = {
+    ExternalEventKind.UART_RX: "uart_rx",
+    ExternalEventKind.NIC_RX: "nic_rx",
+    ExternalEventKind.UART_GEOMETRY: "uart_geometry",
+    ExternalEventKind.UART_GEOMETRY_ACCEPT: "uart_geometry_accept",
+    ExternalEventKind.UART_GEOMETRY_DENY: "uart_geometry_deny",
+    ExternalEventKind.NIC_RX_REJECTED: "nic_rx_rejected",
+    ExternalEventKind.UART_GEOMETRY_ACCEPT_UNCONDITIONAL: (
+        "uart_geometry_accept_unconditional"
+    ),
+    ExternalEventKind.UART_GEOMETRY_DENY_UNCONDITIONAL: (
+        "uart_geometry_deny_unconditional"
+    ),
+}
+_EXTERNAL_EVENT_KINDS_BY_NAME = {
+    name: kind for kind, name in _EXTERNAL_EVENT_KIND_NAMES.items()
+}
+_EXTERNAL_EVENT_RELEASE_PHASE_NAMES = {
+    ExternalEventReleasePhase.SCHEDULER: "scheduler",
+    ExternalEventReleasePhase.BEFORE_BATCH: "before_batch",
+    ExternalEventReleasePhase.AFTER_BATCH: "after_batch",
+}
+_EXTERNAL_EVENT_RELEASE_PHASES_BY_NAME = {
+    name: phase
+    for phase, name in _EXTERNAL_EVENT_RELEASE_PHASE_NAMES.items()
+}
 
 
 # ---------------------------------------------------------------------------
@@ -976,9 +1008,14 @@ class MegapadSystem:
                 if cs is None:
                     return False
                 if not payload or len(payload) > NIC_MAX_FRAME:
-                    # Preserve inject_frame()'s compatibility contract while
-                    # letting the authoritative native NIC latch the error.
-                    return bool(cs.nic_inject_frame(payload))
+                    # Invalid host frames still latch a guest-visible sticky
+                    # error, so record the rejected attempt without retaining
+                    # arbitrary oversized bytes.
+                    system._schedule_external_event(
+                        ExternalEventKind.NIC_RX_REJECTED,
+                        at_cycle=None,
+                    )
+                    return False
                 rx_count = cs.nic_get_rx_count()
                 _, staged = system._schedule_external_event(
                     ExternalEventKind.NIC_RX,
@@ -1018,6 +1055,105 @@ class MegapadSystem:
         # Existing display/session callers keep their façade while every
         # spontaneous host geometry update enters the same timestamped log.
         self.uart_geom.host_set_size = _scheduled_geometry_update
+
+        def _scheduled_geometry_accept(
+            cols: int,
+            rows: int,
+            _system_ref=system_ref,
+            _geometry_ref=geometry_ref,
+        ) -> None:
+            system = _system_ref()
+            geometry = _geometry_ref()
+            if system is not None and geometry is not None:
+                system._schedule_external_event(
+                    ExternalEventKind.UART_GEOMETRY_ACCEPT_UNCONDITIONAL,
+                    at_cycle=None,
+                    argument0=cols,
+                    argument1=rows,
+                )
+                return
+            if geometry is not None:
+                CppUartGeomProxy.host_accept_resize(
+                    geometry,
+                    cols,
+                    rows,
+                )
+
+        def _scheduled_geometry_deny(
+            _system_ref=system_ref,
+            _geometry_ref=geometry_ref,
+        ) -> None:
+            system = _system_ref()
+            geometry = _geometry_ref()
+            if system is not None and geometry is not None:
+                system._schedule_external_event(
+                    ExternalEventKind.UART_GEOMETRY_DENY_UNCONDITIONAL,
+                    at_cycle=None,
+                )
+                return
+            if geometry is not None:
+                CppUartGeomProxy.host_deny_resize(geometry)
+
+        def _scheduled_geometry_accept_if_pending(
+            generation: int,
+            cols: int,
+            rows: int,
+            _system_ref=system_ref,
+            _geometry_ref=geometry_ref,
+        ) -> bool:
+            system = _system_ref()
+            geometry = _geometry_ref()
+            if system is not None and geometry is not None:
+                request = geometry.snapshot_resize_request()
+                if request is None or request[0] != generation:
+                    return False
+                system.schedule_terminal_resize_response(
+                    generation,
+                    accepted=True,
+                    cols=cols,
+                    rows=rows,
+                )
+                return True
+            if geometry is None:
+                return False
+            return CppUartGeomProxy.host_accept_resize_if_pending(
+                geometry,
+                generation,
+                cols,
+                rows,
+            )
+
+        def _scheduled_geometry_deny_if_pending(
+            generation: int,
+            _system_ref=system_ref,
+            _geometry_ref=geometry_ref,
+        ) -> bool:
+            system = _system_ref()
+            geometry = _geometry_ref()
+            if system is not None and geometry is not None:
+                request = geometry.snapshot_resize_request()
+                if request is None or request[0] != generation:
+                    return False
+                system.schedule_terminal_resize_response(
+                    generation,
+                    accepted=False,
+                )
+                return True
+            if geometry is None:
+                return False
+            return CppUartGeomProxy.host_deny_resize_if_pending(
+                geometry,
+                generation,
+            )
+
+        self.uart_geom.host_accept_resize = _scheduled_geometry_accept
+        self.uart_geom.host_deny_resize = _scheduled_geometry_deny
+        self.uart_geom.host_accept_resize_if_pending = (
+            _scheduled_geometry_accept_if_pending
+        )
+        self.uart_geom.host_deny_resize_if_pending = (
+            _scheduled_geometry_deny_if_pending
+        )
 
         if nic_backend is not None:
             def _native_rx(frame: bytes, _inject=_dual_inject) -> None:
@@ -1141,6 +1277,34 @@ class MegapadSystem:
             self._native_system._close_external_event_staging()
         )
 
+    def _release_external_events_before_batch_locked(self) -> int:
+        """Apply replayed ingress observed between execution boundaries."""
+        return int(
+            self._native_system._release_external_events_before_batch()
+        )
+
+    def _finalize_staged_ingress_result(
+        self,
+        result: SystemRunStats,
+        applied: int,
+    ) -> SystemRunStats:
+        """Merge the post-call ingress handoff into one public result."""
+        if not applied:
+            return result
+        stop_reason = result.system_stop_reason
+        if (
+            stop_reason == "all_idle"
+            and not self.all_idle_or_halted
+        ):
+            stop_reason = "external_ingress"
+        return replace(
+            result,
+            external_events_applied=(
+                result.external_events_applied + applied
+            ),
+            system_stop_reason=stop_reason,
+        )
+
     def schedule_uart_input(
         self,
         data: bytes | bytearray | memoryview | str,
@@ -1220,6 +1384,173 @@ class MegapadSystem:
             argument1=packed_dimensions,
         )
         return sequence
+
+    def export_external_ingress_recording(self) -> dict:
+        """Return the versioned timestamped host-ingress journal.
+
+        This records UART RX, NIC RX, and terminal-geometry ingress only. It
+        preserves scheduler, pre-batch, and post-batch visibility. It is not
+        a complete machine snapshot or a transcript of entropy and NIC egress
+        outcomes.
+        """
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            events = tuple(
+                {
+                    "cycle": int(event.cycle),
+                    "sequence": int(event.sequence),
+                    "kind": _EXTERNAL_EVENT_KIND_NAMES[event.kind],
+                    "payload": bytes(event.payload),
+                    "argument0": int(event.argument0),
+                    "argument1": int(event.argument1),
+                    "release_boundary": int(
+                        event.release_boundary
+                    ),
+                    "release_phase": (
+                        _EXTERNAL_EVENT_RELEASE_PHASE_NAMES[
+                            event.release_phase
+                        ]
+                    ),
+                }
+                for event in self._native_system.external_event_history
+            )
+            return {
+                "schema": EXTERNAL_INGRESS_RECORDING_SCHEMA,
+                "schema_version": EXTERNAL_INGRESS_RECORDING_VERSION,
+                "events": events,
+            }
+
+    def install_external_ingress_replay(self, recording: dict) -> int:
+        """Install one validated ingress recording into a fresh journal.
+
+        Installation is all-or-nothing. Once installed, live ingress remains
+        sealed for the lifetime of this system so host thread timing cannot
+        append nondeterministic events to the replay. Reproduction uses the
+        same explicit clock progression and positive execution boundaries as
+        the recorded run.
+        """
+        if not isinstance(recording, dict):
+            raise TypeError("external ingress recording must be a dict")
+        if set(recording) != {
+            "schema",
+            "schema_version",
+            "events",
+        }:
+            raise ValueError(
+                "external ingress recording fields are invalid"
+            )
+        if recording.get("schema") != EXTERNAL_INGRESS_RECORDING_SCHEMA:
+            raise ValueError("external ingress recording schema is invalid")
+        schema_version = recording.get("schema_version")
+        if (
+            isinstance(schema_version, bool) or
+            not isinstance(schema_version, int)
+        ):
+            raise TypeError(
+                "external ingress recording version must be an integer"
+            )
+        if schema_version != EXTERNAL_INGRESS_RECORDING_VERSION:
+            raise ValueError(
+                "external ingress recording version is unsupported"
+            )
+        events = recording.get("events")
+        if not isinstance(events, (tuple, list)):
+            raise TypeError("external ingress recording events must be a list")
+
+        native_records = []
+        expected_sequence = 1
+        required_keys = {
+            "cycle",
+            "sequence",
+            "kind",
+            "payload",
+            "argument0",
+            "argument1",
+            "release_boundary",
+            "release_phase",
+        }
+        for event in events:
+            if not isinstance(event, dict):
+                raise TypeError("external ingress event must be a dict")
+            if set(event) != required_keys:
+                raise ValueError("external ingress event fields are invalid")
+            cycle = event["cycle"]
+            sequence = event["sequence"]
+            argument0 = event["argument0"]
+            argument1 = event["argument1"]
+            release_boundary = event["release_boundary"]
+            for field_name, value in (
+                ("cycle", cycle),
+                ("sequence", sequence),
+                ("argument0", argument0),
+                ("argument1", argument1),
+                ("release_boundary", release_boundary),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(
+                        f"external ingress {field_name} must be an integer"
+                    )
+                if not 0 <= value < (1 << 64):
+                    raise ValueError(
+                        f"external ingress {field_name} must fit uint64"
+                    )
+            if sequence != expected_sequence:
+                raise ValueError(
+                    "external ingress sequences must be contiguous from one"
+                )
+            expected_sequence += 1
+            kind_name = event["kind"]
+            if not isinstance(kind_name, str):
+                raise TypeError("external ingress kind must be a string")
+            try:
+                kind = _EXTERNAL_EVENT_KINDS_BY_NAME[kind_name]
+            except KeyError as error:
+                raise ValueError(
+                    "external ingress event kind is invalid"
+                ) from error
+            payload_value = event["payload"]
+            if not isinstance(
+                payload_value,
+                (bytes, bytearray, memoryview),
+            ):
+                raise TypeError(
+                    "external ingress payload must be bytes-like"
+                )
+            release_phase_name = event["release_phase"]
+            if not isinstance(release_phase_name, str):
+                raise TypeError(
+                    "external ingress release_phase must be a string"
+                )
+            try:
+                release_phase = (
+                    _EXTERNAL_EVENT_RELEASE_PHASES_BY_NAME[
+                        release_phase_name
+                    ]
+                )
+            except KeyError as error:
+                raise ValueError(
+                    "external ingress release_phase is invalid"
+                ) from error
+            native_records.append(
+                (
+                    cycle,
+                    sequence,
+                    kind,
+                    bytes(payload_value),
+                    argument0,
+                    argument1,
+                    release_boundary,
+                    release_phase,
+                )
+            )
+
+        with self._scheduler_lock:
+            self._reject_native_batch_reentry()
+            return int(
+                self._native_system._install_external_event_replay(
+                    native_records
+                )
+            )
 
     # -----------------------------------------------------------------
     #  IPI wiring
@@ -1650,6 +1981,11 @@ class MegapadSystem:
         """Advance time while the scheduler transaction lock is held."""
         if cycles < 0:
             raise ValueError("system cycles cannot advance by a negative value")
+        current_cycle = int(self._native_system.system_cycles)
+        if cycles > (1 << 64) - 1 - current_cycle:
+            raise OverflowError("system cycle counter overflow")
+        if not self._native_system.native_batch_active:
+            self._release_external_events_before_batch_locked()
         if cycles and not self._native_system.native_batch_active:
             current = int(self._native_system.system_cycles)
             external_cycle = self._next_external_event_cycle()
@@ -1659,6 +1995,16 @@ class MegapadSystem:
             ):
                 raise RuntimeError(
                     "system time cannot cross a pending external event"
+                )
+            before_cycle = (
+                self._native_system.external_event_next_before_cycle
+            )
+            if (
+                before_cycle is not None
+                and int(before_cycle) < current + cycles
+            ):
+                raise RuntimeError(
+                    "system time cannot cross replayed pre-batch ingress"
                 )
         if (
             self._native_system.cycle_execution_pending
@@ -1673,8 +2019,6 @@ class MegapadSystem:
             raise ValueError(
                 "system clock advance cannot cross the event horizon"
             )
-        if cycles > (1 << 64) - 1 - current:
-            raise OverflowError("system cycle counter overflow")
         bus_timeout = self._native_system.main_bus_timeout_cycle
         if bus_timeout is not None and cycles > bus_timeout - current:
             raise ValueError(
@@ -1893,19 +2237,31 @@ class MegapadSystem:
             self._settle_native_system_round,
             1000,
         )
+        stop_reason = str(result.system_stop_reason)
+        if "." in stop_reason:
+            stop_reason = stop_reason.rsplit(".", 1)[-1]
+        stop_reason = stop_reason.lower()
         return SystemRunStats(
-            int(result.instructions_executed),
-            int(result.system_cycles_advanced),
-            tuple(int(value) for value in result.per_core_instructions),
-            tuple(int(value) for value in result.per_core_cycles),
-            tuple(int(value) for value in result.per_core_dispatches),
-            tuple(
+            instructions_executed=int(result.instructions_executed),
+            system_cycles_advanced=int(result.system_cycles_advanced),
+            per_core_instructions=tuple(
+                int(value) for value in result.per_core_instructions
+            ),
+            per_core_cycles=tuple(
+                int(value) for value in result.per_core_cycles
+            ),
+            per_core_dispatches=tuple(
+                int(value) for value in result.per_core_dispatches
+            ),
+            per_core_stop_reasons=tuple(
                 tuple(int(value) for value in reasons)
                 for reasons in result.per_core_stop_reasons
             ),
-            True,
-            int(result.rounds),
-            int(result.continuations),
+            native_scheduler=True,
+            native_rounds=int(result.rounds),
+            native_continuations=int(result.continuations),
+            system_stop_reason=stop_reason,
+            stop_cycle=int(result.stop_cycle),
         )
 
     def _run_native_full_core_cycle_batch(
@@ -2126,6 +2482,8 @@ class MegapadSystem:
         self._require_cycle_unbounded_execution()
         total = 0
         for _ in range(max_steps):
+            with self._scheduler_lock:
+                self._release_external_events_before_batch_locked()
             if self.all_halted:
                 break
             if self.all_idle_or_halted and not self.uart.has_rx_data:
@@ -2151,7 +2509,7 @@ class MegapadSystem:
         return self.run_batch_stats(n).instructions_executed
 
     def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
-        """Execute a deterministic one-worker batch with exact cycle totals."""
+        """Execute one deterministic worker-backed batch."""
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
             if n <= 0:
@@ -2162,14 +2520,10 @@ class MegapadSystem:
                 result = self._run_batch_stats_locked(n)
             finally:
                 applied = self._close_external_event_staging_locked()
-            if applied:
-                result = replace(
-                    result,
-                    external_events_applied=(
-                        result.external_events_applied + applied
-                    ),
-                )
-            return result
+            return self._finalize_staged_ingress_result(
+                result,
+                applied,
+            )
 
     def run_cycle_batch(
         self,
@@ -2233,20 +2587,25 @@ class MegapadSystem:
                 )
             finally:
                 applied = self._close_external_event_staging_locked()
-            if applied:
-                result = replace(
-                    result,
-                    external_events_applied=(
-                        result.external_events_applied + applied
-                    ),
-                )
-            return result
+            return self._finalize_staged_ingress_result(
+                result,
+                applied,
+            )
 
     def _run_batch_stats_locked(self, n: int) -> SystemRunStats:
         """Execute one system batch under the scheduler transaction lock."""
         if n <= 0:
             zeros = (0,) * self.num_cores
-            return SystemRunStats(0, 0, zeros, zeros)
+            return SystemRunStats(
+                0,
+                0,
+                zeros,
+                zeros,
+                system_stop_reason="instruction_limit",
+                stop_cycle=int(
+                    self._native_system.system_cycles
+                ),
+            )
 
         self._reject_native_batch_reentry()
         self._require_cycle_unbounded_execution()

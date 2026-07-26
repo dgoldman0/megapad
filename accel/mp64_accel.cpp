@@ -127,11 +127,11 @@ struct MemoryMappings {
     std::unique_ptr<py::buffer_info> vram_lease;
     py::object vram_exporter;
 
-    // Execution reads mappings under shared ownership.  Attachment/metadata
-    // replacement and framebuffer rendering are exclusive users; serializing
-    // rendering also avoids races with guest framebuffer writes.  A single
-    // execution flag deliberately enforces one-worker access for every core
-    // that shares this mapping.
+    // Execution reads mappings under one shared admission. Attachment and
+    // metadata replacement plus framebuffer rendering are exclusive users;
+    // serializing rendering also avoids races with guest framebuffer writes.
+    // The execution flag enforces one logical execution owner while that
+    // owner may dispatch a physical worker cohort.
     std::shared_mutex mutex;
     std::atomic<bool> execution_active{false};
     std::atomic<bool> exclusive_active{false};
@@ -412,6 +412,15 @@ enum class ExternalEventKind : uint8_t {
     UART_GEOMETRY = 2,
     UART_GEOMETRY_ACCEPT = 3,
     UART_GEOMETRY_DENY = 4,
+    NIC_RX_REJECTED = 5,
+    UART_GEOMETRY_ACCEPT_UNCONDITIONAL = 6,
+    UART_GEOMETRY_DENY_UNCONDITIONAL = 7,
+};
+
+enum class ExternalEventReleasePhase : uint8_t {
+    SCHEDULER = 0,
+    BEFORE_BATCH = 1,
+    AFTER_BATCH = 2,
 };
 
 struct ExternalEventRecord {
@@ -421,6 +430,12 @@ struct ExternalEventRecord {
     std::vector<uint8_t> payload;
     uint64_t argument0 = 0;
     uint64_t argument1 = 0;
+    // Zero means the event is visible directly on the strict scheduler
+    // timeline. A positive value identifies the positive batch whose open
+    // or close boundary makes host-timed ingress visible.
+    uint64_t release_boundary = 0;
+    ExternalEventReleasePhase release_phase =
+        ExternalEventReleasePhase::SCHEDULER;
 };
 
 class ExternalEventInbox {
@@ -433,9 +448,23 @@ public:
             uint64_t argument0,
             uint64_t argument1) {
         std::lock_guard<std::mutex> guard(mutex_);
+        if (replay_sealed_) {
+            throw std::runtime_error(
+                "live external ingress is disabled during replay");
+        }
         if (event_cycle < current_cycle) {
             throw std::invalid_argument(
                 "external event cycle cannot precede current system time");
+        }
+        const bool visible_before_next_batch =
+            event_cycle == current_cycle;
+        if (
+            visible_before_next_batch &&
+            completed_staging_boundaries_ ==
+                std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external event batch boundary counter overflow");
         }
 
         ExternalEventRecord record{
@@ -445,6 +474,12 @@ public:
             std::move(payload),
             argument0,
             argument1,
+            visible_before_next_batch
+                ? completed_staging_boundaries_ + 1
+                : 0,
+            visible_before_next_batch
+                ? ExternalEventReleasePhase::BEFORE_BATCH
+                : ExternalEventReleasePhase::SCHEDULER,
         };
         const uint64_t sequence = record.sequence;
         history_.push_back(record);
@@ -462,13 +497,33 @@ public:
         return sequence;
     }
 
-    void begin_staging() {
+    uint64_t begin_staging(uint64_t cycle) {
         std::lock_guard<std::mutex> guard(mutex_);
         if (staging_open_) {
             throw std::logic_error(
                 "external event staging is already open");
         }
+        if (
+            completed_staging_boundaries_ ==
+            std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external event batch boundary counter overflow");
+        }
+        const uint64_t boundary =
+            completed_staging_boundaries_ + 1;
+        uint64_t released = 0;
+        if (replay_sealed_) {
+            released = release_replay_boundary_unlocked(
+                replay_before_,
+                boundary,
+                cycle,
+                "before",
+                true);
+        }
         staging_open_ = true;
+        active_staging_boundary_ = boundary;
+        return released;
     }
 
     std::optional<uint64_t> try_stage(
@@ -477,6 +532,10 @@ public:
             uint64_t argument0,
             uint64_t argument1) {
         std::lock_guard<std::mutex> guard(mutex_);
+        if (replay_sealed_) {
+            throw std::runtime_error(
+                "live external ingress is disabled during replay");
+        }
         if (!staging_open_)
             return std::nullopt;
         const uint64_t sequence =
@@ -489,6 +548,8 @@ public:
                 std::move(payload),
                 argument0,
                 argument1,
+                active_staging_boundary_,
+                ExternalEventReleasePhase::AFTER_BATCH,
             });
         return std::optional<uint64_t>{sequence};
     }
@@ -499,27 +560,59 @@ public:
             throw std::logic_error(
                 "external event staging is not open");
         }
+        const uint64_t release_boundary =
+            active_staging_boundary_;
+        if (
+            release_boundary == 0 ||
+            release_boundary !=
+                completed_staging_boundaries_ + 1
+        ) {
+            throw std::logic_error(
+                "external event batch boundary ownership diverged");
+        }
+
+        if (replay_sealed_) {
+            const uint64_t released =
+                release_replay_boundary_unlocked(
+                    replay_after_,
+                    release_boundary,
+                    cycle,
+                    "after",
+                    true);
+            staging_open_ = false;
+            completed_staging_boundaries_ = release_boundary;
+            active_staging_boundary_ = 0;
+            return released;
+        }
+
         // Closing under the inbox mutex is the handoff linearization point.
         // An arrival either joins staged_ before this transition or observes
         // the closed gate and serializes through the scheduler afterward.
-        staging_open_ = false;
         const uint64_t count =
             static_cast<uint64_t>(staged_.size());
-        for (ExternalEventRecord& record : staged_) {
+        std::vector<ExternalEventRecord> published_history =
+            history_;
+        std::vector<ExternalEventRecord> published_pending =
+            pending_;
+        for (ExternalEventRecord record : staged_) {
             record.cycle = cycle;
-            history_.push_back(record);
-            pending_.push_back(std::move(record));
+            record.release_boundary = release_boundary;
+            record.release_phase =
+                ExternalEventReleasePhase::AFTER_BATCH;
+            published_history.push_back(record);
+            published_pending.push_back(std::move(record));
         }
-        staged_.clear();
         std::stable_sort(
-            pending_.begin(),
-            pending_.end(),
-            [](const ExternalEventRecord& lhs,
-               const ExternalEventRecord& rhs) {
-                if (lhs.cycle != rhs.cycle)
-                    return lhs.cycle < rhs.cycle;
-                return lhs.sequence < rhs.sequence;
-            });
+            published_pending.begin(),
+            published_pending.end(),
+            cycle_sequence_less);
+
+        staging_open_ = false;
+        completed_staging_boundaries_ = release_boundary;
+        active_staging_boundary_ = 0;
+        history_.swap(published_history);
+        pending_.swap(published_pending);
+        staged_.clear();
         return count;
     }
 
@@ -557,7 +650,312 @@ public:
         return next_sequence_;
     }
 
+    uint64_t completed_staging_boundaries() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return completed_staging_boundaries_;
+    }
+
+    std::optional<uint64_t> next_before_cycle() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (replay_before_.empty())
+            return std::nullopt;
+        if (
+            completed_staging_boundaries_ ==
+            std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external event batch boundary counter overflow");
+        }
+        const uint64_t next_boundary =
+            completed_staging_boundaries_ + 1;
+        if (
+            replay_before_.front().release_boundary <
+            next_boundary
+        ) {
+            throw std::logic_error(
+                "external event replay missed a pre-batch boundary");
+        }
+        // The absolute ingress cycle remains a scheduler horizon even when
+        // an intervening positive batch must complete before the recorded
+        // BEFORE_BATCH boundary can release it.  Hiding a later-boundary
+        // record here would let explicit clock progression cross its cycle
+        // and mutate devices before replay divergence was detected.
+        return replay_before_.front().cycle;
+    }
+
+    uint64_t release_before_next_batch(uint64_t cycle) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!replay_sealed_)
+            return 0;
+        if (staging_open_)
+            return 0;
+        if (
+            completed_staging_boundaries_ ==
+            std::numeric_limits<uint64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "external event batch boundary counter overflow");
+        }
+        return release_replay_boundary_unlocked(
+            replay_before_,
+            completed_staging_boundaries_ + 1,
+            cycle,
+            "before",
+            false);
+    }
+
+    bool replay_sealed() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return replay_sealed_;
+    }
+
+    void install_replay(
+            uint64_t current_cycle,
+            const std::vector<ExternalEventRecord>& records) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (
+            staging_open_ ||
+            !staged_.empty() ||
+            !pending_.empty() ||
+            !history_.empty() ||
+            !replay_before_.empty() ||
+            !replay_after_.empty() ||
+            active_staging_boundary_ != 0 ||
+            completed_staging_boundaries_ != 0 ||
+            next_sequence_ != 1 ||
+            replay_sealed_
+        ) {
+            throw std::runtime_error(
+                "external event replay requires a fresh journal and "
+                "batch-boundary timeline");
+        }
+
+        uint64_t expected_sequence = 1;
+        uint64_t last_release_boundary = 0;
+        uint64_t last_release_cycle = 0;
+        ExternalEventReleasePhase last_release_phase =
+            ExternalEventReleasePhase::SCHEDULER;
+        for (const ExternalEventRecord& record : records) {
+            if (record.cycle < current_cycle) {
+                throw std::invalid_argument(
+                    "external event replay precedes current system time");
+            }
+            if (record.sequence != expected_sequence) {
+                throw std::invalid_argument(
+                    "external event replay sequences must be contiguous "
+                    "from one");
+            }
+            switch (record.release_phase) {
+                case ExternalEventReleasePhase::SCHEDULER:
+                    if (record.release_boundary != 0) {
+                        throw std::invalid_argument(
+                            "scheduler external replay events cannot "
+                            "name a batch boundary");
+                    }
+                    break;
+                case ExternalEventReleasePhase::BEFORE_BATCH:
+                case ExternalEventReleasePhase::AFTER_BATCH:
+                    if (record.release_boundary == 0) {
+                        throw std::invalid_argument(
+                            "host-timed external replay events require "
+                            "a positive batch boundary");
+                    }
+                    break;
+                default:
+                    throw std::invalid_argument(
+                        "external event replay release phase is invalid");
+            }
+            if (
+                record.release_phase !=
+                ExternalEventReleasePhase::SCHEDULER
+            ) {
+                if (
+                    record.release_boundary <
+                    last_release_boundary
+                ) {
+                    throw std::invalid_argument(
+                        "external event replay batch boundaries must "
+                        "be monotonic");
+                }
+                if (
+                    record.release_boundary ==
+                        last_release_boundary &&
+                    static_cast<uint8_t>(record.release_phase) <
+                        static_cast<uint8_t>(last_release_phase)
+                ) {
+                    throw std::invalid_argument(
+                        "external event replay batch phases must be "
+                        "monotonic");
+                }
+                if (
+                    record.release_boundary ==
+                        last_release_boundary &&
+                    record.release_phase ==
+                        ExternalEventReleasePhase::AFTER_BATCH &&
+                    record.release_phase ==
+                        last_release_phase &&
+                    record.cycle != last_release_cycle
+                ) {
+                    throw std::invalid_argument(
+                        "one post-batch external replay phase must "
+                        "have one cycle");
+                }
+                if (
+                    last_release_boundary != 0 &&
+                    record.cycle < last_release_cycle
+                ) {
+                    throw std::invalid_argument(
+                        "external event replay batch cycles must be "
+                        "monotonic");
+                }
+                last_release_boundary =
+                    record.release_boundary;
+                last_release_cycle = record.cycle;
+                last_release_phase = record.release_phase;
+            }
+            if (
+                expected_sequence ==
+                std::numeric_limits<uint64_t>::max()
+            ) {
+                throw std::overflow_error(
+                    "external event replay sequence counter overflow");
+            }
+            expected_sequence++;
+        }
+
+        // Build every owning copy before publishing any one, so allocation
+        // failure also leaves the fresh journal untouched. Scheduler-visible
+        // records sort by (cycle, sequence); staged live records remain
+        // withheld until their recorded positive batch boundary closes.
+        std::vector<ExternalEventRecord> replay_history =
+            records;
+        std::vector<ExternalEventRecord> replay_pending;
+        std::vector<ExternalEventRecord> replay_before;
+        std::vector<ExternalEventRecord> replay_after;
+        replay_pending.reserve(records.size());
+        replay_before.reserve(records.size());
+        replay_after.reserve(records.size());
+        for (const ExternalEventRecord& record : records) {
+            switch (record.release_phase) {
+                case ExternalEventReleasePhase::SCHEDULER:
+                    replay_pending.push_back(record);
+                    break;
+                case ExternalEventReleasePhase::BEFORE_BATCH:
+                    replay_before.push_back(record);
+                    break;
+                case ExternalEventReleasePhase::AFTER_BATCH:
+                    replay_after.push_back(record);
+                    break;
+                default:
+                    throw std::logic_error(
+                        "validated external replay phase diverged");
+            }
+        }
+        std::stable_sort(
+            replay_pending.begin(),
+            replay_pending.end(),
+            cycle_sequence_less);
+        const auto boundary_sequence_less =
+            [](const ExternalEventRecord& lhs,
+               const ExternalEventRecord& rhs) {
+                if (
+                    lhs.release_boundary !=
+                    rhs.release_boundary
+                ) {
+                    return lhs.release_boundary <
+                        rhs.release_boundary;
+                }
+                return lhs.sequence < rhs.sequence;
+            };
+        std::stable_sort(
+            replay_before.begin(),
+            replay_before.end(),
+            boundary_sequence_less);
+        std::stable_sort(
+            replay_after.begin(),
+            replay_after.end(),
+            boundary_sequence_less);
+
+        // Publish only after the complete replay has passed validation.
+        // History retains ingress sequence order. Vector swap is non-throwing
+        // for these standard-allocator vectors.
+        history_.swap(replay_history);
+        pending_.swap(replay_pending);
+        replay_before_.swap(replay_before);
+        replay_after_.swap(replay_after);
+        next_sequence_ = expected_sequence;
+        replay_sealed_ = true;
+    }
+
 private:
+    static bool cycle_sequence_less(
+            const ExternalEventRecord& lhs,
+            const ExternalEventRecord& rhs) {
+        if (lhs.cycle != rhs.cycle)
+            return lhs.cycle < rhs.cycle;
+        return lhs.sequence < rhs.sequence;
+    }
+
+    uint64_t release_replay_boundary_unlocked(
+            std::vector<ExternalEventRecord>& deferred,
+            uint64_t boundary,
+            uint64_t cycle,
+            const char* phase_name,
+            bool require_complete) {
+        auto end = deferred.begin();
+        while (
+            end != deferred.end() &&
+            end->release_boundary <= boundary
+        ) {
+            if (end->release_boundary < boundary) {
+                throw std::logic_error(
+                    std::string("external event replay missed a ") +
+                    phase_name + " batch boundary");
+            }
+            if (end->cycle > cycle)
+                break;
+            if (end->cycle != cycle) {
+                throw std::runtime_error(
+                    std::string("external event replay ") +
+                    phase_name +
+                    " batch boundary cycle diverged");
+            }
+            ++end;
+        }
+        if (
+            require_complete &&
+            end != deferred.end() &&
+            end->release_boundary == boundary
+        ) {
+            throw std::runtime_error(
+                std::string("external event replay ") +
+                phase_name +
+                " batch boundary cycle diverged");
+        }
+
+        const std::size_t released =
+            static_cast<std::size_t>(
+                end - deferred.begin());
+        if (released == 0)
+            return 0;
+
+        // Build the published queue first so allocation failure leaves this
+        // boundary retryable.
+        std::vector<ExternalEventRecord> published_pending =
+            pending_;
+        published_pending.insert(
+            published_pending.end(),
+            deferred.begin(),
+            end);
+        std::stable_sort(
+            published_pending.begin(),
+            published_pending.end(),
+            cycle_sequence_less);
+        pending_.swap(published_pending);
+        deferred.erase(deferred.begin(), end);
+        return static_cast<uint64_t>(released);
+    }
+
     uint64_t allocate_sequence_unlocked() {
         if (next_sequence_ ==
             std::numeric_limits<uint64_t>::max()) {
@@ -571,7 +969,12 @@ private:
     std::vector<ExternalEventRecord> pending_;
     std::vector<ExternalEventRecord> history_;
     std::vector<ExternalEventRecord> staged_;
+    std::vector<ExternalEventRecord> replay_before_;
+    std::vector<ExternalEventRecord> replay_after_;
     bool staging_open_ = false;
+    bool replay_sealed_ = false;
+    uint64_t active_staging_boundary_ = 0;
+    uint64_t completed_staging_boundaries_ = 0;
     uint64_t next_sequence_ = 1;
 };
 
@@ -1809,6 +2212,11 @@ struct PrivateCoreCommand {
     int core_index = 0;
     int max_steps = 0;
     int pending_interrupt_vector = -1;
+    // Strict cycle execution may submit only one preclassified, exactly
+    // one-cycle private instruction. This internal ownership bit permits that
+    // command to coexist with the strict scheduler's suspended timeline while
+    // preserving the public/private-wave rejection contract.
+    bool strict_cycle_one_instruction = false;
     CPUState* core = nullptr;
     std::shared_ptr<SharedMemoryExecutionAdmission> admission;
 };
@@ -3178,8 +3586,8 @@ private:
     std::unique_ptr<CPUExecutionGuard> execution_guard_;
 };
 
-// Direct DMA-capable device bindings participate in the same one-worker
-// mapping scope as instruction execution.  A secondary-core Python MMIO
+// Direct DMA-capable device bindings participate in the same logical-owner
+// mapping scope as instruction execution. A secondary-core Python MMIO
 // fallback may re-enter a core-0 proxy on the same thread; that path borrows
 // the outer scope instead of recursively locking std::shared_mutex.
 class SharedMemoryUseGuard {
@@ -8718,6 +9126,70 @@ classify_private_core_instruction(
         state);
 }
 
+static bool classify_strict_cycle_private_one_cycle(
+        const CPUState& state) {
+    if (
+        classify_private_full_core_instruction(state) !=
+        PrivateInstructionDisposition::EXECUTE_PRIVATE
+    ) {
+        return false;
+    }
+
+    const std::optional<uint8_t> first =
+        private_icache_peek(
+            state, state.regs[state.psel]);
+    if (!first.has_value())
+        return false;
+    const int family = (*first >> 4) & 0xF;
+    const int subop = *first & 0xF;
+
+    // Prefix decode itself costs a cycle. Taken short/long branches likewise
+    // cost two cycles and remain on the resumable coordinator path. The list
+    // below contains only encodings whose established native executor has an
+    // exact one-cycle cost and cannot enter a callback or shared-memory path
+    // under the stated privilege checks.
+    switch (family) {
+        case 0x0:
+            if (
+                subop == 0x0 ||
+                subop == 0x1 ||
+                subop == 0x2 ||
+                subop == 0xC
+            ) {
+                return true;
+            }
+            return (
+                (subop == 0x9 || subop == 0xA) &&
+                state.priv_level == 0
+            );
+        case 0x1:
+        case 0x2:
+            return true;
+        case 0x3:
+        case 0x4:
+            return !eval_cond(state, subop);
+        case 0x6:
+            return subop <= 0xB || state.priv_level == 0;
+        case 0x7:
+            return true;
+        case 0x8:
+            return state.priv_level == 0 && (
+                subop == 0x6 ||
+                subop == 0xA ||
+                subop == 0xC ||
+                subop == 0xD ||
+                subop == 0xE
+            );
+        case 0xA:
+        case 0xB:
+            return state.priv_level == 0;
+        case 0xC:
+            return subop >= 0x8;
+        default:
+            return false;
+    }
+}
+
 struct PrivateSharedAccessSignal {};
 
 class PrivateSharedAccessSentinel final
@@ -8776,11 +9248,20 @@ static PrivateCoreResult execute_private_core_command(
         if (
             core.system_cycle_execution_pending != nullptr &&
             core.system_cycle_execution_pending->load(
-                std::memory_order_acquire)
+                std::memory_order_acquire) &&
+            !command.strict_cycle_one_instruction
         ) {
             throw std::runtime_error(
                 "private execution cannot enter a suspended "
                 "cycle operation");
+        }
+        if (
+            command.strict_cycle_one_instruction &&
+            command.max_steps != 1
+        ) {
+            throw std::invalid_argument(
+                "strict-cycle private execution requires exactly "
+                "one instruction");
         }
 
         StepCallbacks callbacks{};
@@ -8879,6 +9360,17 @@ static PrivateCoreResult execute_private_core_command(
                     PrivateCoreStopReason::IDLE;
                 break;
             }
+        }
+        if (
+            command.strict_cycle_one_instruction &&
+            (
+                result.steps_executed != 1 ||
+                result.total_cycles != 1
+            )
+        ) {
+            throw std::logic_error(
+                "strict-cycle private preclassification diverged "
+                "from one-cycle execution");
         }
     } catch (const std::exception& error) {
         if (command_checkpoint.has_value())
@@ -8991,7 +9483,7 @@ static RunResult run_steps(CPUState& s, const StepCallbacks& cb, int max_steps) 
 }
 
 // ---------------------------------------------------------------------------
-//  Native SystemState one-worker scheduler
+//  Native SystemState deterministic scheduler
 // ---------------------------------------------------------------------------
 
 enum class SystemStopReason : uint8_t {
@@ -9001,6 +9493,7 @@ enum class SystemStopReason : uint8_t {
     ALL_HALTED = 3,
     ALL_IDLE = 4,
     UNHANDLED_INTERRUPT = 5,
+    NO_PROGRESS = 6,
 };
 
 struct SystemBatchResult {
@@ -9072,6 +9565,13 @@ execute_private_core_wave_under_active_batch(
     std::vector<PrivateCoreCommand> commands,
     std::shared_ptr<SharedMemoryExecutionAdmission>
         frontier_admission = nullptr);
+
+static std::vector<PrivateCoreResult>
+execute_strict_cycle_private_wave_under_active_batch(
+    SystemState& system,
+    std::vector<PrivateCoreCommand> commands,
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        frontier_admission);
 
 static void run_parallel_core_round(
     SystemState& system,
@@ -9432,8 +9932,12 @@ static SystemBatchResult run_native_system_batch(
     result.per_core_stop_reasons.assign(core_count, {});
     result.scheduler_cursor = system.scheduler_cursor;
 
-    if (max_steps <= 0)
+    if (max_steps <= 0) {
+        result.system_stop_reason =
+            SystemStopReason::INSTRUCTION_LIMIT;
+        result.stop_cycle = system.shared_clock.cycles();
         return result;
+    }
     if (callbacks.size() != core_count)
         throw std::invalid_argument(
             "one callback set is required for every execution core");
@@ -9478,8 +9982,14 @@ static SystemBatchResult run_native_system_batch(
             return !core->halted && !core->idle;
         });
     if (!any_active) {
+        result.system_stop_reason =
+            system_all_halted(system)
+            ? SystemStopReason::ALL_HALTED
+            : SystemStopReason::ALL_IDLE;
         result.system_cycles_advanced =
             system.shared_clock.cycles() - clock_start;
+        result.stop_cycle =
+            system.shared_clock.cycles();
         result.scheduler_cursor = system.scheduler_cursor;
         return result;
     }
@@ -9615,6 +10125,21 @@ static SystemBatchResult run_native_system_batch(
     result.system_cycles_advanced =
         system.shared_clock.cycles() -
         clock_start;
+    if (remaining == 0) {
+        result.system_stop_reason =
+            SystemStopReason::INSTRUCTION_LIMIT;
+    } else if (system_all_halted(system)) {
+        result.system_stop_reason =
+            SystemStopReason::ALL_HALTED;
+    } else if (system_all_idle_or_halted(system)) {
+        result.system_stop_reason =
+            SystemStopReason::ALL_IDLE;
+    } else {
+        result.system_stop_reason =
+            SystemStopReason::NO_PROGRESS;
+    }
+    result.stop_cycle =
+        system.shared_clock.cycles();
     result.scheduler_cursor =
         system.scheduler_cursor;
     return result;
@@ -10544,6 +11069,14 @@ static void validate_external_event(
                     "NIC input events do not accept arguments");
             }
             break;
+        case ExternalEventKind::NIC_RX_REJECTED:
+            if (!payload.empty() ||
+                argument0 != 0 ||
+                argument1 != 0) {
+                throw std::invalid_argument(
+                    "rejected NIC input events do not accept data");
+            }
+            break;
         case ExternalEventKind::UART_GEOMETRY:
             if (!payload.empty()) {
                 throw std::invalid_argument(
@@ -10574,13 +11107,41 @@ static void validate_external_event(
                     "terminal resize denial contains invalid data");
             }
             break;
+        case ExternalEventKind::
+                UART_GEOMETRY_ACCEPT_UNCONDITIONAL:
+            if (
+                !payload.empty() ||
+                argument0 >
+                    std::numeric_limits<uint16_t>::max() ||
+                argument1 >
+                    std::numeric_limits<uint16_t>::max()
+            ) {
+                throw std::invalid_argument(
+                    "unconditional terminal resize acceptance "
+                    "contains invalid data");
+            }
+            break;
+        case ExternalEventKind::
+                UART_GEOMETRY_DENY_UNCONDITIONAL:
+            if (
+                !payload.empty() ||
+                argument0 != 0 ||
+                argument1 != 0
+            ) {
+                throw std::invalid_argument(
+                    "unconditional terminal resize denial "
+                    "contains invalid data");
+            }
+            break;
         default:
             throw std::invalid_argument(
                 "unknown external event kind");
     }
 }
 
-static void wake_cycle_input_core(SystemState& system) {
+static void wake_cycle_input_core(
+        SystemState& system,
+        uint64_t cycle) {
     if (system.cores.empty())
         return;
     CPUState& core = *system.cores.front();
@@ -10588,6 +11149,12 @@ static void wake_cycle_input_core(SystemState& system) {
         (system.shared_uart.has_rx_data() ||
          system.shared_nic.has_rx())) {
         core.idle = false;
+        FullCoreCycleState& state =
+            system.full_core_cycle_states.front();
+        if (!state.instruction &&
+            state.ready_cycle < cycle) {
+            state.ready_cycle = cycle;
+        }
     }
 }
 
@@ -10609,6 +11176,11 @@ static uint64_t apply_due_external_events(
                 system.shared_nic.inject_frame(
                     event.payload.data(),
                     event.payload.size());
+                break;
+            case ExternalEventKind::NIC_RX_REJECTED:
+                // Invalid host frames are rejected before journaling their
+                // contents, but their guest-visible sticky error is replayed.
+                system.shared_nic.inject_frame(nullptr, 0);
                 break;
             case ExternalEventKind::UART_GEOMETRY:
                 system.shared_uart_geom.host_set_size(
@@ -10639,12 +11211,22 @@ static uint64_t apply_due_external_events(
                     .host_deny_resize_if_pending(
                         event.argument0);
                 break;
+            case ExternalEventKind::
+                    UART_GEOMETRY_ACCEPT_UNCONDITIONAL:
+                system.shared_uart_geom.host_accept_resize(
+                    static_cast<uint16_t>(event.argument0),
+                    static_cast<uint16_t>(event.argument1));
+                break;
+            case ExternalEventKind::
+                    UART_GEOMETRY_DENY_UNCONDITIONAL:
+                system.shared_uart_geom.host_deny_resize();
+                break;
             default:
                 throw std::logic_error(
                     "external event inbox contains an unknown kind");
         }
     }
-    wake_cycle_input_core(system);
+    wake_cycle_input_core(system, cycle);
     return static_cast<uint64_t>(due.size());
 }
 
@@ -10763,6 +11345,272 @@ static bool cycle_system_all_idle_or_halted(
         });
 }
 
+static uint64_t run_strict_cycle_private_prefix(
+        SystemState& system,
+        int round_start,
+        uint64_t scheduler_cycle,
+        uint64_t effective_deadline,
+        int64_t max_instructions,
+        SystemBatchResult& result) {
+    if (
+        scheduler_cycle >= effective_deadline ||
+        result.instructions_executed >= max_instructions
+    ) {
+        return 0;
+    }
+
+    const std::size_t core_count = system.cores.size();
+    const uint64_t suspended_guest_count =
+        pending_guest_instruction_count(system);
+    if (
+        suspended_guest_count >
+        static_cast<uint64_t>(
+            max_instructions -
+            result.instructions_executed)
+    ) {
+        throw std::logic_error(
+            "strict-cycle suspended instruction reservation "
+            "exceeds the instruction budget");
+    }
+    uint64_t available =
+        static_cast<uint64_t>(
+            max_instructions -
+            result.instructions_executed) -
+        suspended_guest_count;
+    if (available == 0)
+        return 0;
+
+    std::vector<int> candidates;
+    candidates.reserve(
+        std::min<std::size_t>(
+            core_count,
+            static_cast<std::size_t>(available)));
+    for (std::size_t offset = 0;
+         offset < core_count;
+         offset++) {
+        const int core_index = (
+            round_start +
+            static_cast<int>(offset)
+        ) % static_cast<int>(core_count);
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        const CPUState& core = *system.cores[index];
+        const FullCoreCycleState& state =
+            system.full_core_cycle_states[index];
+
+        if (
+            core.halted ||
+            (
+                core.idle &&
+                !has_cycle_interrupt_operation(state)
+            ) ||
+            state.ready_cycle > scheduler_cycle ||
+            (
+                state.instruction &&
+                state.instruction->pending_request.has_value()
+            )
+        ) {
+            continue;
+        }
+
+        // Preserve the serial failure/commit boundary: parallelize only the
+        // cyclic prefix before the first actionable instruction that needs
+        // the resumable coordinator.
+        if (
+            state.instruction ||
+            !classify_strict_cycle_private_one_cycle(core)
+        ) {
+            break;
+        }
+
+        candidates.push_back(core_index);
+        available--;
+        if (available == 0)
+            break;
+    }
+    if (candidates.empty())
+        return 0;
+
+    const uint64_t completion_cycle =
+        checked_cycle_add(
+            scheduler_cycle,
+            1,
+            "strict private completion");
+    if (completion_cycle > effective_deadline) {
+        throw std::logic_error(
+            "strict private wave crossed its cycle deadline");
+    }
+    if (
+        static_cast<uint64_t>(candidates.size()) >
+        std::numeric_limits<uint64_t>::max() -
+            system.native_dispatches
+    ) {
+        throw std::overflow_error(
+            "native scheduler dispatch counter overflow");
+    }
+    if (
+        static_cast<int64_t>(candidates.size()) >
+        std::numeric_limits<int64_t>::max() -
+            result.instructions_executed
+    ) {
+        throw std::overflow_error(
+            "aggregate instruction accounting overflow");
+    }
+    for (int core_index : candidates) {
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        if (
+            result.per_core_dispatches[index] ==
+                std::numeric_limits<uint64_t>::max() ||
+            result.per_core_stop_reasons[index][RUN_LIMIT] ==
+                std::numeric_limits<uint64_t>::max() ||
+            result.per_core_instructions[index] ==
+                std::numeric_limits<int64_t>::max() ||
+            result.per_core_cycles[index] ==
+                std::numeric_limits<int64_t>::max()
+        ) {
+            throw std::overflow_error(
+                "strict private accounting overflow");
+        }
+    }
+
+    const std::size_t lane_count =
+        static_cast<std::size_t>(
+            system.configured_worker_count);
+    const uint64_t cohort_count =
+        (
+            static_cast<uint64_t>(candidates.size()) +
+            static_cast<uint64_t>(lane_count) -
+            1
+        ) / static_cast<uint64_t>(lane_count);
+    system.worker_pool->validate_private_capacity(
+        cohort_count,
+        static_cast<uint64_t>(candidates.size()),
+        static_cast<uint64_t>(candidates.size()));
+
+    std::shared_ptr<SharedMemoryExecutionAdmission>
+        frontier_admission;
+    {
+        py::gil_scoped_release release;
+        frontier_admission =
+            std::make_shared<
+                SharedMemoryExecutionAdmission>(
+                    system.shared_memory,
+                    "CPUState memory is already in use");
+    }
+    system.mappings_sealed = true;
+
+    // These commands are private and callback-free. A complete candidate-set
+    // checkpoint therefore makes an unexpected helper failure atomic without
+    // rolling back any bus or host effect. Publish only after every physical
+    // cohort has validated.
+    std::vector<CPUExecutionCheckpoint> candidate_checkpoints;
+    candidate_checkpoints.reserve(candidates.size());
+    for (int core_index : candidates) {
+        candidate_checkpoints.emplace_back(
+            *system.cores[
+                static_cast<std::size_t>(core_index)]);
+    }
+
+    try {
+        std::size_t candidate_offset = 0;
+        while (candidate_offset < candidates.size()) {
+            const std::size_t cohort_size =
+                std::min(
+                    lane_count,
+                    candidates.size() - candidate_offset);
+            std::vector<PrivateCoreCommand> commands;
+            commands.reserve(cohort_size);
+            for (std::size_t lane = 0;
+                 lane < cohort_size;
+                 lane++) {
+                commands.push_back(
+                    PrivateCoreCommand{
+                        0,
+                        0,
+                        0,
+                        static_cast<int>(lane),
+                        candidates[candidate_offset + lane],
+                        1,
+                        -1,
+                        true,
+                        nullptr,
+                        nullptr,
+                    });
+            }
+            const std::vector<PrivateCoreResult> private_results =
+                execute_strict_cycle_private_wave_under_active_batch(
+                    system,
+                    std::move(commands),
+                    frontier_admission);
+            if (private_results.size() != cohort_size) {
+                throw std::logic_error(
+                    "strict private wave returned an incomplete cohort");
+            }
+            for (std::size_t lane = 0;
+                 lane < cohort_size;
+                 lane++) {
+                const PrivateCoreResult& private_result =
+                    private_results[lane];
+                const int expected_core =
+                    candidates[candidate_offset + lane];
+                if (
+                    private_result.core_index != expected_core ||
+                    private_result.steps_executed != 1 ||
+                    private_result.total_cycles != 1 ||
+                    private_result.stop_reason ==
+                        PrivateCoreStopReason::INTERNAL_FAILURE
+                ) {
+                    const std::string detail =
+                        private_result.internal_error.empty()
+                        ? "result identity or progress diverged"
+                        : private_result.internal_error;
+                    throw std::runtime_error(
+                        "strict private command failed on lane " +
+                        std::to_string(
+                            private_result.lane_index) +
+                        ", core " +
+                        std::to_string(
+                            private_result.core_index) +
+                        ": " + detail);
+                }
+            }
+            candidate_offset += cohort_size;
+        }
+    } catch (...) {
+        for (std::size_t index = 0;
+             index < candidates.size();
+             index++) {
+            candidate_checkpoints[index].restore(
+                *system.cores[
+                    static_cast<std::size_t>(
+                        candidates[index])]);
+        }
+        throw;
+    }
+
+    // Every potentially failing capacity check and helper command completed.
+    // Publish architectural scheduler accounting in the frozen cyclic order.
+    for (int core_index : candidates) {
+        const std::size_t index =
+            static_cast<std::size_t>(core_index);
+        FullCoreCycleState& state =
+            system.full_core_cycle_states[index];
+        state.ready_cycle = completion_cycle;
+        system.native_dispatches++;
+        result.instructions_executed++;
+        result.per_core_instructions[index]++;
+        result.per_core_cycles[index]++;
+        result.per_core_dispatches[index]++;
+        result.per_core_stop_reasons[index][RUN_LIMIT]++;
+        system.scheduler_cursor =
+            (core_index + 1) %
+            static_cast<int>(core_count);
+    }
+    return static_cast<uint64_t>(
+        candidates.size());
+}
+
 static SystemBatchResult run_full_core_cycle_batch(
         SystemState& system,
         uint64_t max_system_cycles,
@@ -10862,7 +11710,7 @@ static SystemBatchResult run_full_core_cycle_batch(
 
     result.external_events_applied =
         apply_due_external_events(system, clock_start);
-    wake_cycle_input_core(system);
+    wake_cycle_input_core(system, clock_start);
     if (!accept_cycle_interrupts(
             system,
             clock_start,
@@ -11066,9 +11914,49 @@ static SystemBatchResult run_full_core_cycle_batch(
             break;
         }
 
+        // A core awakened by an in-call event or device frontier cannot issue
+        // from its pre-idle ready timestamp. Unsuspended work starts at the
+        // frontier that made it runnable, never retroactively in the past.
+        for (std::size_t index = 0;
+             index < core_count;
+             index++) {
+            FullCoreCycleState& state =
+                system.full_core_cycle_states[index];
+            if (
+                !state.instruction &&
+                state.ready_cycle < scheduler_cycle
+            ) {
+                state.ready_cycle = scheduler_cycle;
+            }
+        }
+
         const int round_start =
             system.scheduler_cursor %
             static_cast<int>(core_count);
+        const uint64_t strict_private_retired =
+            run_strict_cycle_private_prefix(
+                system,
+                round_start,
+                scheduler_cycle,
+                effective_deadline,
+                max_instructions,
+                result);
+        if (strict_private_retired != 0) {
+            last_retirement_cycle = std::max(
+                last_retirement_cycle,
+                checked_cycle_add(
+                    scheduler_cycle,
+                    1,
+                    "strict private retirement"));
+            if (
+                result.instructions_executed >=
+                    max_instructions &&
+                !instruction_stop_cycle.has_value()
+            ) {
+                instruction_stop_cycle =
+                    last_retirement_cycle;
+            }
+        }
         for (std::size_t offset = 0;
              offset < core_count;
              offset++) {
@@ -11185,6 +12073,7 @@ static SystemBatchResult run_full_core_cycle_batch(
         if (!has_suspended_instruction &&
             !system.cycle_target_completion_cycle.has_value() &&
             !has_cycle_dma_work(system) &&
+            !instruction_stop_cycle.has_value() &&
             cycle_system_all_halted(system) &&
             !has_future_virtual_work) {
             result.system_stop_reason =
@@ -11194,6 +12083,7 @@ static SystemBatchResult run_full_core_cycle_batch(
         if (!has_suspended_instruction &&
             !system.cycle_target_completion_cycle.has_value() &&
             !has_cycle_dma_work(system) &&
+            !instruction_stop_cycle.has_value() &&
             cycle_system_all_idle_or_halted(system) &&
             !has_future_virtual_work) {
             result.system_stop_reason =
@@ -11351,6 +12241,69 @@ execute_private_core_wave_under_active_batch(
         return system.worker_pool->execute_wave(
             std::move(commands));
     }
+}
+
+static std::vector<PrivateCoreResult>
+execute_strict_cycle_private_wave_under_active_batch(
+        SystemState& system,
+        std::vector<PrivateCoreCommand> commands,
+        std::shared_ptr<SharedMemoryExecutionAdmission>
+            frontier_admission) {
+    if (commands.empty())
+        return {};
+    if (!system.native_batch_active.load(
+            std::memory_order_acquire)) {
+        throw std::logic_error(
+            "strict-cycle private execution requires an active "
+            "native system batch");
+    }
+    if (!system.worker_pool) {
+        throw std::logic_error(
+            "native worker pool is unavailable");
+    }
+    if (
+        commands.size() >
+        static_cast<std::size_t>(
+            system.configured_worker_count)
+    ) {
+        throw std::invalid_argument(
+            "strict-cycle private wave exceeds worker capacity");
+    }
+    if (
+        !frontier_admission ||
+        &frontier_admission->memory() !=
+            &system.shared_memory
+    ) {
+        throw std::invalid_argument(
+            "strict-cycle private frontier admission is invalid");
+    }
+
+    for (PrivateCoreCommand& command : commands) {
+        if (
+            !command.strict_cycle_one_instruction ||
+            command.max_steps != 1
+        ) {
+            throw std::invalid_argument(
+                "strict-cycle private wave contains an invalid command");
+        }
+        if (
+            command.core_index < 0 ||
+            command.core_index >=
+                static_cast<int>(system.cores.size())
+        ) {
+            throw std::out_of_range(
+                "strict-cycle private core index is out of range");
+        }
+        command.core = system.cores[
+            static_cast<std::size_t>(
+                command.core_index)].get();
+        command.pending_interrupt_vector = -1;
+        command.admission = frontier_admission;
+    }
+
+    py::gil_scoped_release release;
+    return system.worker_pool->execute_wave(
+        std::move(commands));
 }
 
 static void throw_private_full_core_internal_failure(
@@ -15361,7 +16314,31 @@ PYBIND11_MODULE(_mp64_accel, m) {
             ExternalEventKind::UART_GEOMETRY_ACCEPT)
         .value(
             "UART_GEOMETRY_DENY",
-            ExternalEventKind::UART_GEOMETRY_DENY);
+            ExternalEventKind::UART_GEOMETRY_DENY)
+        .value(
+            "NIC_RX_REJECTED",
+            ExternalEventKind::NIC_RX_REJECTED)
+        .value(
+            "UART_GEOMETRY_ACCEPT_UNCONDITIONAL",
+            ExternalEventKind::
+                UART_GEOMETRY_ACCEPT_UNCONDITIONAL)
+        .value(
+            "UART_GEOMETRY_DENY_UNCONDITIONAL",
+            ExternalEventKind::
+                UART_GEOMETRY_DENY_UNCONDITIONAL);
+
+    py::enum_<ExternalEventReleasePhase>(
+            m,
+            "ExternalEventReleasePhase")
+        .value(
+            "SCHEDULER",
+            ExternalEventReleasePhase::SCHEDULER)
+        .value(
+            "BEFORE_BATCH",
+            ExternalEventReleasePhase::BEFORE_BATCH)
+        .value(
+            "AFTER_BATCH",
+            ExternalEventReleasePhase::AFTER_BATCH);
 
     py::class_<ExternalEventRecord>(m, "ExternalEventRecord")
         .def_readonly("cycle", &ExternalEventRecord::cycle)
@@ -15381,6 +16358,12 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly(
             "argument1",
             &ExternalEventRecord::argument1)
+        .def_readonly(
+            "release_boundary",
+            &ExternalEventRecord::release_boundary)
+        .def_readonly(
+            "release_phase",
+            &ExternalEventRecord::release_phase)
         ;
 
     py::enum_<SystemStopReason>(m, "SystemStopReason")
@@ -15395,7 +16378,10 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .value("ALL_IDLE", SystemStopReason::ALL_IDLE)
         .value(
             "UNHANDLED_INTERRUPT",
-            SystemStopReason::UNHANDLED_INTERRUPT);
+            SystemStopReason::UNHANDLED_INTERRUPT)
+        .value(
+            "NO_PROGRESS",
+            SystemStopReason::NO_PROGRESS);
 
     py::class_<SystemBatchResult>(m, "SystemBatchResult")
         .def_readonly(
@@ -16621,6 +17607,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 const uint64_t target = current + delta;
                 const std::optional<uint64_t> external_cycle =
                     system.external_events.next_cycle();
+                const std::optional<uint64_t> before_cycle =
+                    system.external_events.next_before_cycle();
                 if (!system.native_batch_active.load(
                         std::memory_order_acquire) &&
                     delta != 0 &&
@@ -16629,6 +17617,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     throw std::runtime_error(
                         "system time cannot cross a pending external "
                         "event");
+                }
+                if (!system.native_batch_active.load(
+                        std::memory_order_acquire) &&
+                    delta != 0 &&
+                    before_cycle.has_value() &&
+                    *before_cycle < target) {
+                    throw std::runtime_error(
+                        "system time cannot cross replayed pre-batch "
+                        "ingress");
                 }
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
@@ -16657,6 +17654,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     system.shared_clock.cycles();
                 const std::optional<uint64_t> external_cycle =
                     system.external_events.next_cycle();
+                const std::optional<uint64_t> before_cycle =
+                    system.external_events.next_before_cycle();
                 if (!system.native_batch_active.load(
                         std::memory_order_acquire) &&
                     target > current &&
@@ -16665,6 +17664,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     throw std::runtime_error(
                         "system time cannot cross a pending external "
                         "event");
+                }
+                if (!system.native_batch_active.load(
+                        std::memory_order_acquire) &&
+                    target > current &&
+                    before_cycle.has_value() &&
+                    *before_cycle < target) {
+                    throw std::runtime_error(
+                        "system time cannot cross replayed pre-batch "
+                        "ingress");
                 }
                 auto memory_guard =
                     acquire_system_clock_advance_use(system);
@@ -16788,6 +17796,109 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::arg("argument0") = 0,
             py::arg("argument1") = 0)
         .def(
+            "_install_external_event_replay",
+            [](SystemState& system,
+               py::list replay_records) {
+                std::vector<ExternalEventRecord> records;
+                records.reserve(
+                    static_cast<std::size_t>(
+                        replay_records.size()));
+                for (py::handle item : replay_records) {
+                    py::tuple fields =
+                        py::cast<py::tuple>(item);
+                    if (fields.size() != 8) {
+                        throw std::invalid_argument(
+                            "each external replay record must contain "
+                            "cycle, sequence, kind, payload, argument0, "
+                            "argument1, release_boundary, and "
+                            "release_phase");
+                    }
+                    const uint64_t cycle =
+                        fields[0].cast<uint64_t>();
+                    const uint64_t sequence =
+                        fields[1].cast<uint64_t>();
+                    const ExternalEventKind kind =
+                        fields[2].cast<ExternalEventKind>();
+                    const std::string bytes =
+                        fields[3].cast<py::bytes>();
+                    std::vector<uint8_t> payload(
+                        bytes.begin(),
+                        bytes.end());
+                    const uint64_t argument0 =
+                        fields[4].cast<uint64_t>();
+                    const uint64_t argument1 =
+                        fields[5].cast<uint64_t>();
+                    const uint64_t release_boundary =
+                        fields[6].cast<uint64_t>();
+                    const ExternalEventReleasePhase
+                        release_phase =
+                            fields[7].cast<
+                                ExternalEventReleasePhase>();
+                    validate_external_event(
+                        kind,
+                        payload,
+                        argument0,
+                        argument1);
+                    records.push_back(
+                        ExternalEventRecord{
+                            cycle,
+                            sequence,
+                            kind,
+                            std::move(payload),
+                            argument0,
+                            argument1,
+                            release_boundary,
+                            release_phase,
+                        });
+                }
+
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "external event replay cannot install during "
+                        "an active native system batch");
+                }
+                if (
+                    system.has_cycle_execution_pending() ||
+                    system.main_bus.snapshot()
+                        .active_grant.has_value()
+                ) {
+                    throw std::runtime_error(
+                        "external event replay requires a clean "
+                        "cycle timeline");
+                }
+                system.external_events.install_replay(
+                    system.shared_clock.cycles(),
+                    records);
+                return static_cast<uint64_t>(
+                    records.size());
+            },
+            py::arg("replay_records"))
+        .def(
+            "_release_external_events_before_batch",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                if (system.native_batch_active.load(
+                        std::memory_order_acquire)) {
+                    throw std::runtime_error(
+                        "pre-batch external input cannot release during "
+                        "an active native system batch");
+                }
+                const uint64_t cycle =
+                    system.shared_clock.cycles();
+                const uint64_t released =
+                    system.external_events
+                        .release_before_next_batch(cycle);
+                if (released == 0)
+                    return uint64_t{0};
+                return apply_due_external_events(
+                    system,
+                    cycle);
+            })
+        .def(
             "_begin_external_event_staging",
             [](SystemState& system) {
                 auto scheduler_guard =
@@ -16798,7 +17909,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "external input staging cannot open during an "
                         "active native system batch");
                 }
-                system.external_events.begin_staging();
+                const uint64_t cycle =
+                    system.shared_clock.cycles();
+                const uint64_t released =
+                    system.external_events.begin_staging(cycle);
+                if (released == 0)
+                    return uint64_t{0};
+                return apply_due_external_events(
+                    system,
+                    cycle);
             })
         .def(
             "_try_stage_external_event",
@@ -16892,6 +18011,29 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 return system.external_events.next_sequence();
+            })
+        .def_property_readonly(
+            "external_event_batch_boundaries",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.external_events
+                    .completed_staging_boundaries();
+            })
+        .def_property_readonly(
+            "external_event_next_before_cycle",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.external_events
+                    .next_before_cycle();
+            })
+        .def_property_readonly(
+            "external_event_replay_sealed",
+            [](SystemState& system) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                return system.external_events.replay_sealed();
             })
         .def(
             "run_full_core_batch",

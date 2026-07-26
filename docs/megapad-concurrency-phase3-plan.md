@@ -2,7 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1–4 of 6 complete; Element 5 has not started
+**Status:** Elements 1–5 of 6 complete; Element 6 not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -19,7 +19,7 @@ may produce corrective commits, but they do not create new phase elements.
 | 2 | Private full-core execution commands, results, and deterministic yield boundaries | Complete |
 | 3 | Full-core coordinator integration and ordered shared-effect commit | Complete |
 | 4 | Reduced-core and cluster integration | Complete |
-| 5 | DMA, external events, record/replay, and deterministic stop handling | Not started |
+| 5 | DMA, external events, record/replay, and deterministic stop handling | Complete |
 | 6 | One/two/four-lane equivalence, sanitizer stress, refreshed benchmarks, and final handoff | Not started |
 
 ## Design-contention ledger
@@ -45,6 +45,11 @@ present claim boundary, and the condition for reopening it.
 | P3-D12 | A cluster arbitration loser can either forfeit its whole round position or retain equal service credit; a later zero-reservation request may also be the selected peer. | Every frozen nonselected request is a loss, including a hard-ineligible group with no selected peer. A loss closes exactly that fallback dispatch with zero retirement, cycles, and grants. The loser retains residual equal round credit and retries after any frontier or coordinator progress. Only an unchanged all-zero frontier invokes the no-spin rule and releases stranded credit forward. A selected later zero-credit request borrows exactly one forward unit from a cyclic-earlier frozen loser, including across resources; larger residual credit remains with the donor. | This implements hard eligibility plus equal round-robin ordering and work conservation without adding secondary weights. Reopen only with an explicit QoS architecture change. |
 | P3-D13 | A Python CRC/SHA continuation can acquire a cluster lock or mutate shared-engine state and then raise before native grant publication. | Snapshot the complete cluster state immediately before every selected continuation. Publish validated scheduler accounting and then commit the preflighted grant; on any failure before commit completion, restore that cluster snapshot and rethrow the original exception. Earlier resource commits remain. | External guest-memory writes performed by a failing Python continuation remain subject to P3-D1's nontransactional callback boundary. The narrower guarantee here is that a failed winner cannot orphan cluster ownership, engine state, grant counts, or grant sequence. |
 | P3-D14 | Native reduced-core scalar fetch reads raw mapped memory, while the compatibility oracle routes scratchpad and MMIO instruction fetch through Python. Direct Python field access can also race a helper while the batch has released the GIL. | A routed decode window yields from the helper. The coordinator classifies each actually consumed byte through the same scratchpad-versus-mapped-RAM rule as the Python oracle, including instructions crossing either scratchpad boundary, then executes only through that oracle. Any possible 16-byte decode window touching MMIO is explicitly unsupported in a native system batch because classification could itself have read side effects; it fails before decoding or granting. Concurrent direct `CPUState`/wrapper property or register access, read or write, from another host thread during an active native system batch is unsupported; coordinator continuations remain the supported access path. | Routed-fetch handling is a correctness boundary, not a performance claim. Revisit side-effect-safe MMIO fetch and direct-access hardening before exposing concurrent host control as supported APIs; the latter requires ownership-aware bindings rather than blanket rejection that would also block coordinator fallback. |
+| P3-D15 | Strict cycle execution can remain a serial island, workerize complete multicycle instructions speculatively, or parallelize only work whose complete commit window is already one cycle. | The strict scheduler submits only preclassified, cache-resident, callback-free full-core instructions with a proven exact one-cycle cost. It gathers only the cyclic prefix before the first actionable resumable/coordinator instruction, executes physical cohorts through the same persistent pool, and publishes accounting in frozen cyclic order. A candidate-set checkpoint restores only private core state if an unexpected helper failure occurs before publication. DMA, bus targets, events, interrupts, journals, stop choices, multicycle work, traps, and fallbacks remain coordinator-only. | This preserves the existing one-cycle visibility window and serial failure boundary; the exceptional checkpoint cannot undo shared state because admitted commands cannot create any. It is real helper execution but not a claim that every strict-cycle instruction is parallel. Widen only with a reviewed latency proof and event/DMA differential oracles, not architectural speculation and rollback. |
+| P3-D16 | Extending strict ready-cycle execution to reduced cores requires choosing cluster-resource latencies, same-cycle scratchpad visibility, and arbitration between multiple microcores sharing one physical main-bus port. | Element 5 retains the explicit full-core-only strict API and its pre-mutation rejection for any micro-core cluster. Mixed full/reduced execution remains available through the deterministic unbounded frontier coordinator established in Element 4. | Rejecting an unselected timing contract is more honest than deriving one from Python fallback costs. Reopen when the reduced cluster has an approved ready-cycle/latency contract and RTL-backed same-cycle oracles. |
+| P3-D17 | “Record/replay” can mean the internal exactly-once bus journal, timestamped host-ingress replay, or unrestricted whole-machine replay. Entropy refills and NIC backend send outcomes are not presently journaled. | Version and transactionally install the UART/NIC/geometry ingress history into a fresh journal, preserve ingress sequence and delivery order, include rejected NIC attempts and both conditional and unconditional geometry responses, and seal every supported live façade. Keep the resumable bus-effect journal internal and describe it separately. Whole-run equality additionally requires identical deterministic entropy and backend behavior. | Element 5 claims external-ingress replay plus exactly-once suspended-instruction replay, not a complete machine transcript or snapshot. Reopen unrestricted replay only when every guest-visible nondeterministic source and egress outcome is recorded. |
+| P3-D18 | An instruction can reach its retirement frontier at the same time as an instruction cap, caller cycle limit, event horizon, or terminal machine state. An early terminal shortcut can otherwise expose a pre-retirement clock or throw after committed core state; a core awakened at an in-call event can likewise retain a stale pre-idle ready timestamp. | Rebase unsuspended newly runnable work to the frontier that woke it. An armed instruction-stop frontier must then be reached before terminal classification. Event horizons retain precedence over tied caller cycle limits; a caller cycle limit retains the existing tie over an instruction cap; otherwise the instruction cap precedes all-halted/all-idle. A post-call event that invalidates `all_idle` reports `external_ingress`; an active unbounded machine that cannot retire reports `no_progress`, never an instruction cap it did not reach. | Ready-cycle and stop precedence are architectural and versioned across one, two, and four lanes. Reopen only through an explicit public timing/stop-contract change. |
+| P3-D19 | A cycle stamp alone cannot distinguish input seen by the scheduler, input staged while a call was running, and input arriving after that call returned. Treating all three as scheduler-visible lets replay run past a live `all_idle` boundary. | Every record names `scheduler`, `before_batch`, or `after_batch` release phase plus a positive batch ordinal where applicable. Future exact events enter the scheduler at `(cycle, sequence)`. Immediate between-call events release before the next positive execution boundary and do not inflate that call's applied count. Concurrent staged events release after the current boundary, do count there, and can replace a now-stale `all_idle` with `external_ingress`. Explicit out-of-call clock progression exposes the earliest deferred pre-boundary cycle and cannot cross it; positive calls enforce release at the recorded boundary cycle. | Replay requires the same initial state, explicit clock progression, and sequence and arguments of positive `step`, unbounded-batch, or strict-cycle calls. It does not promise to contain a deliberately divergent execution call before that call mutates otherwise valid guest state. The phase is host-handoff metadata, not guest hardware state. Reopen only with a different public host-arrival linearization contract or a full call-transcript format. |
 
 Changes to an interim decision must update this table and its tests in the same
 milestone. A green test suite alone is not permission to erase the contention
@@ -208,6 +213,56 @@ from the full-core coordinator and commit their ordered shared boundaries.
   execution, event-time acceptance, DMA/event integration, and record/replay
   closure remain Element 5 work.
 
+## Element 5 contract
+
+- Exact cycle execution retains one scheduler and one boundary order: advance
+  cycle-driven devices, complete the already sampled bus target, apply
+  timestamped external ingress, snapshot interrupt eligibility, then dispatch
+  cores. NIC and disk DMA remain byte-wide equal peers on their physical
+  ports; helper width cannot affect grant, token, completion, or fault order.
+- At one strict scheduler cycle, the worker pool may execute only a cyclic
+  prefix of full-core instructions proven cache-resident, callback-free, and
+  exactly one cycle. Every physical cohort completes before scheduler
+  accounting is published in cyclic order; an unexpected prepublication
+  failure restores the complete private candidate set. Any prefix, shared
+  access, multicycle cost, suspended operation, trap, or fallback stays on
+  the established resumable coordinator path.
+- The public diagnostic private-wave API and unbounded scheduler still reject
+  active grants, suspended cycle work, pending timestamped events, and event
+  horizons. Scheduler-owned strict commands are the sole internal exception;
+  they cannot invoke Python or shared effects.
+- The external-ingress recording format has an explicit schema version and
+  records absolute cycle, contiguous ingress sequence, event kind, immutable
+  payload, arguments, release phase, and positive batch boundary where
+  applicable. Future exact events are scheduler-visible; immediate
+  between-call input releases before the next positive boundary; input staged
+  during a call releases after that boundary. Replay validates the complete
+  recording before mutation, requires a fresh journal, batch-boundary history,
+  and clean strict timeline, installs every owning queue atomically, enforces
+  recorded boundary cycles when the same positive call sequence and arguments
+  are replayed, prevents explicit clock progression across a deferred
+  pre-boundary cycle, and permanently rejects later live ingress for that
+  machine.
+- The ingress recording is not a complete machine snapshot. Reproducing an
+  entire run also requires the same image, initial state, deterministic
+  entropy, and deterministic NIC backend outcomes. The internal bus journal
+  separately guarantees exactly-once target effects while one instruction is
+  suspended and replayed.
+- Stop results name the authoritative stop cycle. An instruction-cap frontier
+  is drained before all-halted/all-idle is considered, already owned bus
+  targets finish without admitting new guest work, event-horizon ties retain
+  precedence, and unhandled interrupts identify the first invalid core/vector
+  without mutating it. A core awakened at an in-call frontier begins at that
+  frontier rather than its stale pre-idle ready cycle. A post-call ingress
+  handoff that wakes an otherwise all-idle machine reports
+  `external_ingress`. Unbounded native results publish their actual
+  instruction-limit, all-halted, all-idle, or no-progress reason and stop
+  cycle.
+- Strict reduced-core timing remains unsupported as recorded by P3-D16. This
+  is not a regression in mixed architectural execution: the Element 4
+  unbounded coordinator remains the production path for the advertised
+  full/reduced topology.
+
 ## Evidence discipline
 
 Test suites remain sequential and resource-monitored. Standard Makefile test
@@ -326,3 +381,39 @@ Element 4 establishes deterministic mixed full/reduced-core execution and
 cluster-resource arbitration. It does not yet claim strict event-time/DMA
 integration, record/replay closure, sanitizer completion, or final application
 throughput; those remain Elements 5 and 6.
+
+## Element 5 evidence
+
+The strict-cycle helper integration and versioned ingress replay rebuilt
+successfully with the established C++17/pthread configuration. The final build
+peaked at approximately 1.18 GiB RSS with no swap activity; its only compiler
+diagnostic was the pre-existing unused `exec_field` warning. The dedicated
+Element 5 file contributed 25 event, DMA, stop-boundary, replay-validation,
+release-phase, clock-horizon, façade-sealing, counter-wrap, and
+one/two/four-lane oracles.
+
+The final owned foreground gate covered:
+
+- all 25 Element 5 event-execution oracles;
+- all 54 native strict-cycle execution tests;
+- all 110 private, coordinator, reduced-core, and persistent worker-pool tests;
+- all 94 native system-state and bus-transaction tests; and
+- all 41 snapshot, display-concurrency, native-microcore, and cluster-oracle
+  regressions.
+
+The 324 tests passed sequentially in one pytest process at approximately
+72.1 MiB peak RSS with no swap activity. Three independent read-only audits
+reviewed the strict one-cycle classifier and rollback boundary, stop
+precedence, replay queues and validation, clock horizons, geometry transition
+coverage, façade sealing, and the decision-ledger claims. Their concrete
+findings were corrected before this evidence run, and the final audits found no
+remaining blocker.
+
+Element 5 establishes deterministic strict-cycle helper participation for the
+proven one-cycle private subset, coordinator-owned event/DMA ordering,
+exactly-once suspended target effects, scoped external-ingress replay, and
+authoritative stop reasons and cycles. Replay remains deliberately bounded by
+P3-D17 and P3-D19; strict reduced-core timing remains deliberately unsupported
+by P3-D16. Sanitizer stress, the final one/two/four-lane equivalence package,
+refreshed performance measurements, and the versioned completion handoff
+remain Element 6 work.
