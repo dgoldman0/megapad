@@ -4327,14 +4327,35 @@ class DeviceBus:
 
     def __init__(self):
         self.devices: list[Device] = []
+        self._clocked_devices: list[Device] = []
         self._tick_driver = None
 
-    def register(self, device: Device):
+    def register(
+        self,
+        device: Device,
+        *,
+        externally_clocked: bool = False,
+    ) -> None:
+        """Register MMIO routing and its concrete bus-owned clock hook.
+
+        Clock ownership is fixed at registration. Devices whose time is
+        advanced by another authoritative clock must opt out explicitly.
+        """
         self.devices.append(device)
+        if (
+            not externally_clocked
+            and type(device).tick is not Device.tick
+        ):
+            self._clocked_devices.append(device)
 
     def set_tick_driver(self, driver):
         """Install one authoritative system-time driver."""
         self._tick_driver = driver
+
+    def tick_registered_devices(self, cycles: int) -> None:
+        """Advance only devices with a concrete bus-driven clock hook."""
+        for device in self._clocked_devices:
+            device.tick(cycles)
 
     def find_device(self, mmio_offset: int) -> tuple[Optional[Device], int]:
         """Given an offset within the MMIO aperture, find the device and
@@ -4378,5 +4399,4 @@ class DeviceBus:
         if self._tick_driver is not None:
             self._tick_driver(cycles)
             return
-        for dev in self.devices:
-            dev.tick(cycles)
+        self.tick_registered_devices(cycles)

@@ -908,8 +908,8 @@ class MegapadSystem:
         self.bus.register(self.uart)
         # UART geometry: C++ handles all MMIO; proxy for Python access.
         self.bus.register(self.uart_geom)
-        # Timer: C++ handles all MMIO; proxy tick is called via bus.
-        self.bus.register(self.timer)
+        # Timer time is advanced by the authoritative native system clock.
+        self.bus.register(self.timer, externally_clocked=True)
         self.bus.register(self.storage)
         self.bus.register(self.audio)
         self.bus.register(self.sysinfo)
@@ -921,10 +921,9 @@ class MegapadSystem:
         self.bus.register(self.spinlock)
         self.bus.register(self.ntt)
         self.bus.register(self.kem)
-        # FB: NOT registered — C++ handles all MMIO; proxy tick is
-        # called explicitly via bus since it's still a Device subclass.
-        self.bus.register(self.fb)
-        self.bus.register(self.rtc)
+        # FB and RTC time are also owned by the native system clock.
+        self.bus.register(self.fb, externally_clocked=True)
+        self.bus.register(self.rtc, externally_clocked=True)
 
         # Port I/O bridge CSR — remap table for OUT/INP → MMIO routing
         self.port_bridge = PortBridgeCSR()
@@ -2026,9 +2025,7 @@ class MegapadSystem:
             )
 
         self._native_system.advance_system_cycles(cycles)
-        for device in self.bus.devices:
-            if device not in (self.timer, self.fb, self.rtc):
-                device.tick(cycles)
+        self.bus.tick_registered_devices(cycles)
 
     def _deliver_pending_interrupts(self) -> None:
         """Deliver timer and IPI lines at a completed execution boundary."""
