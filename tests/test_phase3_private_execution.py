@@ -471,6 +471,50 @@ def test_helper_mailboxes_survive_rapid_back_to_back_reposts() -> None:
     ) == (0, 0, 0, 0)
 
 
+def test_partial_helper_sets_survive_alternating_reposts() -> None:
+    code = assemble("nop")
+    owner, memory, cores = _make_owner(
+        code,
+        worker_count=4,
+        full_core_count=4,
+    )
+    _prime_instruction_cache(
+        cores, memory, 0, len(code))
+
+    lane_tokens = {}
+    for wave in range(500):
+        commands = (
+            [(1, 1, 0), (3, 3, 0)]
+            if wave % 2 == 0
+            else [(2, 2, 0)]
+        )
+        results = _run(owner, commands)
+        for result in results:
+            lane = result["lane_index"]
+            token = result["thread_token"]
+            if lane in lane_tokens:
+                assert token == lane_tokens[lane]
+            else:
+                lane_tokens[lane] = token
+        assert all(
+            result["steps_executed"] == 0
+            for result in results
+        )
+
+    diagnostics = dict(
+        owner._private_worker_diagnostics())
+    assert diagnostics["wave_epoch"] == 500
+    assert tuple(
+        dict(lane)["completed_commands"]
+        for lane in diagnostics["lanes"]
+    ) == (0, 250, 250, 250)
+    assert tuple(
+        dict(lane)["completed_steps"]
+        for lane in diagnostics["lanes"]
+    ) == (0, 0, 0, 0)
+    assert set(lane_tokens) == {1, 2, 3}
+
+
 def test_results_preserve_submission_order_for_different_job_sizes() -> None:
     code = assemble(
         """

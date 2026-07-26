@@ -637,7 +637,7 @@ def test_phase0_oracle_captures_bus_state_and_requires_quiescence():
 
     bus_state = phase0._main_bus_state(system)
 
-    assert phase0.SCHEMA_VERSION == 9
+    assert phase0.SCHEMA_VERSION == 10
     assert phase0.STATE_SCHEMA_VERSION == 9
     assert bus_state["arbitration_contract"] == {
         "hard_qos_role": (

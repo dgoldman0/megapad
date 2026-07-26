@@ -21,7 +21,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         host_profile=True,
     )
 
-    assert report["schema_version"] == 9
+    assert report["schema_version"] == 10
     assert report["configuration"]["host_profile"]
     assert report["validation"]["host_profile_presence_matches_request"]
     assert report["validation"]["all_host_profile_probes_valid"]
@@ -32,7 +32,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 1
+        assert probe["schema_version"] == 2
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -46,10 +46,51 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         assert counts["logical_subfrontiers"] > 0
         assert counts["worker_waves"] > 0
         assert counts["worker_commands"] > 0
+        assert counts["worker_bypassed_commands"] > 0
+        assert (
+            counts["frontier_routing_commands"]
+            == counts["worker_commands"]
+            + counts["worker_bypassed_commands"]
+        )
+        assert (
+            counts["frontier_preclassification_commands"]
+            == counts["frontier_routing_commands"]
+        )
+        assert (
+            counts["frontier_preclassification_calls"]
+            == counts["frontier_routing_commands"]
+        )
+        assert (
+            counts["frontier_routing_waves"]
+            > counts["worker_waves"]
+        )
+        assert (
+            sum(counts["worker_bypass_stop_reasons"].values())
+            == counts["worker_bypassed_commands"]
+        )
+        assert counts["worker_bypass_stop_reasons"] == {
+            "halted": 0,
+            "icache_boundary": 4,
+            "idle": 0,
+            "instruction_limit": 0,
+            "internal_failure": 0,
+            "interrupt_boundary": 0,
+            "reset": 0,
+            "shared_instruction":
+                counts["worker_bypassed_commands"] - 4,
+            "trap": 0,
+        }
         assert counts["private_steps"] > 0
+        assert (
+            counts["checkpoint_captures"]
+            == counts["worker_commands"]
+            - counts["zero_step_commands"]
+        )
+        assert counts["checkpoint_restores"] == 0
         assert len(counts["lane_commands"]) == result["worker_count"]
         assert len(counts["lane_steps"]) == result["worker_count"]
         assert len(native["lane_active_ns"]) == result["worker_count"]
+        assert native["wall_ns"]["frontier_fast_path"] > 0
 
         callbacks = probe["python_callbacks"]
         assert callbacks["mmio_read_calls"] > 0
@@ -66,7 +107,10 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
 
         ratios = probe["structural_ratios"]
         assert ratios["worker_commands_per_wave"] is not None
+        assert ratios["worker_wave_bypass_fraction"] > 0
         assert ratios["private_steps_per_worker_command"] is not None
+        assert ratios["private_steps_per_logical_command"] is not None
+        assert ratios["worker_bypass_fraction"] > 0
         assert (
             ratios["returned_instructions_per_logical_subfrontier"]
             is not None
@@ -128,16 +172,39 @@ def test_profile_scope_excludes_direct_private_diagnostics():
         owner._run_private_full_core_commands([(0, 0, 1)])
         frozen = dict(owner._stop_concurrency_profile())
         assert not frozen["enabled"]
+        counts = dict(frozen["counts"])
         assert all(
-            int(frozen["counts"][field]) == 0
-            for field in (
-                "batches",
-                "scheduler_rounds",
-                "logical_subfrontiers",
-                "worker_waves",
-                "worker_commands",
-                "private_steps",
-            )
+            int(value) == 0
+            for value in counts.values()
+            if not isinstance(value, (dict, list))
+        )
+        assert all(
+            int(value) == 0
+            for field in counts.values()
+            if isinstance(field, dict)
+            for value in field.values()
+        )
+        assert all(
+            int(value) == 0
+            for field in counts.values()
+            if isinstance(field, list)
+            for value in field
+        )
+        wall_ns = dict(frozen["wall_ns"])
+        assert all(
+            int(value) == 0
+            for value in wall_ns.values()
+            if not isinstance(value, dict)
+        )
+        assert all(
+            int(value) == 0
+            for field in wall_ns.values()
+            if isinstance(field, dict)
+            for value in field.values()
+        )
+        assert all(
+            int(value) == 0
+            for value in frozen["lane_active_ns"]
         )
     finally:
         if dict(owner._concurrency_profile_snapshot())["enabled"]:

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -2204,7 +2205,9 @@ enum class PrivateCoreStopReason : uint8_t {
 };
 
 static constexpr std::size_t PRIVATE_CORE_STOP_REASON_COUNT = 9;
-static constexpr std::size_t HOST_PROFILE_MAX_LANES = 4;
+static constexpr std::size_t PRIVATE_WORKER_MAX_LANES = 4;
+static constexpr std::size_t HOST_PROFILE_MAX_LANES =
+    PRIVATE_WORKER_MAX_LANES;
 
 static void host_saturating_add(
         uint64_t& destination,
@@ -2291,6 +2294,11 @@ struct ConcurrencyProfileCounters {
     uint64_t round_absorptions = 0;
     uint64_t worker_waves = 0;
     uint64_t worker_commands = 0;
+    uint64_t frontier_routing_waves = 0;
+    uint64_t frontier_routing_commands = 0;
+    uint64_t frontier_preclassification_commands = 0;
+    uint64_t frontier_preclassification_calls = 0;
+    uint64_t worker_bypassed_commands = 0;
     uint64_t private_steps = 0;
     uint64_t private_classification_calls = 0;
     uint64_t zero_step_commands = 0;
@@ -2302,6 +2310,10 @@ struct ConcurrencyProfileCounters {
         uint64_t,
         PRIVATE_CORE_STOP_REASON_COUNT>
         private_stop_reasons{};
+    std::array<
+        uint64_t,
+        PRIVATE_CORE_STOP_REASON_COUNT>
+        worker_bypass_stop_reasons{};
     std::array<
         uint64_t,
         PRIVATE_CORE_STOP_REASON_COUNT>
@@ -2324,6 +2336,7 @@ struct ConcurrencyProfileCounters {
     uint64_t worker_wave_prepare_ns = 0;
     uint64_t worker_wave_wait_ns = 0;
     uint64_t worker_wave_gather_ns = 0;
+    uint64_t frontier_fast_path_ns = 0;
     uint64_t private_command_sum_ns = 0;
     uint64_t private_command_max_ns = 0;
     uint64_t private_scope_setup_ns = 0;
@@ -2377,6 +2390,11 @@ struct PrivateCoreCommand {
     // command to coexist with the strict scheduler's suspended timeline while
     // preserving the public/private-wave rejection contract.
     bool strict_cycle_one_instruction = false;
+    // The unbounded scheduler may classify the first instruction under the
+    // same frontier admission before posting the command. No core or mapping
+    // mutation can intervene, so the worker can consume that proof once
+    // instead of repeating the read-only classification.
+    bool first_instruction_preclassified_private = false;
     CPUState* core = nullptr;
     std::shared_ptr<SharedMemoryExecutionAdmission> admission;
     // Non-owning per-command sidecar. It is non-null only during an opt-in
@@ -2707,6 +2725,10 @@ public:
             command.submission_index = index;
         }
 
+        if (remaining_helper_commands_ != 0) {
+            throw std::logic_error(
+                "native helper completion accounting is not idle");
+        }
         for (const PrivateCoreCommand& command : commands) {
             if (command.lane_index == 0) {
                 inline_command = command;
@@ -2722,10 +2744,11 @@ public:
             slot.command = command;
             slot.result.reset();
             slot.state = HelperSlotState::POSTED;
+            remaining_helper_commands_++;
         }
         wave_active_ = true;
-        work_ready_.notify_all();
         lock.unlock();
+        work_ready_.notify_all();
         if (host_profile_enabled) {
             host_timing->prepare_ns =
                 host_elapsed_ns(prepare_started);
@@ -2806,7 +2829,6 @@ public:
         }
         wave_active_ = false;
         lock.unlock();
-        work_ready_.notify_all();
         if (host_profile_enabled) {
             host_timing->gather_ns =
                 host_elapsed_ns(gather_started);
@@ -2870,7 +2892,10 @@ private:
 
             slot.result = std::move(result);
             slot.state = HelperSlotState::COMPLETED;
-            completion_ready_.notify_all();
+            assert(remaining_helper_commands_ > 0);
+            remaining_helper_commands_--;
+            if (remaining_helper_commands_ == 0)
+                completion_ready_.notify_one();
             // Return directly to the outer POSTED wait. The coordinator may
             // move COMPLETED -> IDLE -> POSTED before this helper next runs;
             // waiting specifically to observe the transient IDLE state would
@@ -2910,6 +2935,7 @@ private:
     uint64_t launch_count_ = 0;
     uint64_t wave_epoch_ = 0;
     uint64_t next_command_sequence_ = 1;
+    int remaining_helper_commands_ = 0;
     bool wave_active_ = false;
     bool stopping_ = false;
 };
@@ -9402,6 +9428,132 @@ public:
 
 static int trap_id_from_runtime_error(const std::string& what);
 
+struct FrontierPrivatePreclassification {
+    bool execute_private = false;
+    bool classified_instruction = false;
+    PrivateCoreResult result;
+};
+
+// Probe one unbounded-scheduler command under the same execution admission
+// that protects its logical frontier. The probe performs no architectural
+// mutation. A proven zero-progress boundary can therefore stay on the
+// coordinator, while a proven-private first instruction is handed to the
+// worker with a single-use classification proof.
+static FrontierPrivatePreclassification
+preclassify_frontier_private_command(
+        const PrivateCoreCommand& command) noexcept {
+    FrontierPrivatePreclassification probe;
+    PrivateCoreResult& result = probe.result;
+    result.command_sequence = 0;
+    result.wave_epoch = 0;
+    result.submission_index =
+        command.submission_index;
+    result.lane_index = command.lane_index;
+    result.core_index = command.core_index;
+    // A bypass is not a physical pool command. Sequence, wave, and thread
+    // identity therefore remain zero; submission_index preserves the
+    // coordinator's position within the planned physical cohort.
+
+    if (command.core == nullptr) {
+        result.stop_reason =
+            PrivateCoreStopReason::INTERNAL_FAILURE;
+        result.internal_error =
+            "private command core is missing";
+        return probe;
+    }
+
+    CPUState& core = *command.core;
+    result.start_pc = pc(core);
+    result.end_pc = result.start_pc;
+
+    try {
+        PrivateCoreExecutionScope execution_scope(
+            core, command.admission);
+        if (
+            core.profile != CoreProfile::FULL &&
+            core.profile != CoreProfile::MICRO
+        ) {
+            throw std::invalid_argument(
+                "private execution requires a supported core profile");
+        }
+        if (
+            core.system_cycle_execution_pending != nullptr &&
+            core.system_cycle_execution_pending->load(
+                std::memory_order_acquire) &&
+            !command.strict_cycle_one_instruction
+        ) {
+            throw std::runtime_error(
+                "private execution cannot enter a suspended "
+                "cycle operation");
+        }
+        if (
+            command.strict_cycle_one_instruction &&
+            command.max_steps != 1
+        ) {
+            throw std::invalid_argument(
+                "strict-cycle private execution requires exactly "
+                "one instruction");
+        }
+
+        if (command.pending_interrupt_vector >= 0) {
+            result.stop_reason =
+                PrivateCoreStopReason::
+                    INTERRUPT_BOUNDARY;
+            result.interrupt_vector =
+                command.pending_interrupt_vector;
+        } else if (command.max_steps == 0) {
+            result.stop_reason =
+                PrivateCoreStopReason::
+                    INSTRUCTION_LIMIT;
+        } else if (core.halted) {
+            result.stop_reason =
+                PrivateCoreStopReason::HALTED;
+        } else if (core.idle) {
+            result.stop_reason =
+                PrivateCoreStopReason::IDLE;
+        } else {
+            probe.classified_instruction = true;
+            const PrivateInstructionDisposition
+                disposition =
+                    classify_private_core_instruction(
+                        core);
+            if (
+                disposition ==
+                PrivateInstructionDisposition::
+                    EXECUTE_PRIVATE
+            ) {
+                probe.execute_private = true;
+            } else if (
+                disposition ==
+                PrivateInstructionDisposition::
+                    ICACHE_BOUNDARY
+            ) {
+                result.stop_reason =
+                    PrivateCoreStopReason::
+                        ICACHE_BOUNDARY;
+            } else {
+                result.stop_reason =
+                    PrivateCoreStopReason::
+                        SHARED_INSTRUCTION;
+            }
+        }
+    } catch (const std::exception& error) {
+        result.stop_reason =
+            PrivateCoreStopReason::INTERNAL_FAILURE;
+        result.interrupt_vector = -1;
+        result.internal_error = error.what();
+    } catch (...) {
+        result.stop_reason =
+            PrivateCoreStopReason::INTERNAL_FAILURE;
+        result.interrupt_vector = -1;
+        result.internal_error =
+            "unknown private execution failure";
+    }
+
+    result.end_pc = pc(core);
+    return probe;
+}
+
 template <bool HOST_PROFILE>
 static PrivateCoreResult execute_private_core_command_body(
         const PrivateCoreCommand& command) noexcept {
@@ -9448,20 +9600,9 @@ static PrivateCoreResult execute_private_core_command_body(
                 host_elapsed_ns(restore_started));
         }
     };
-
-    try {
-        std::chrono::steady_clock::time_point
-            scope_started{};
-        if constexpr (HOST_PROFILE) {
-            scope_started =
-                std::chrono::steady_clock::now();
-        }
-        PrivateCoreExecutionScope execution_scope(
-            core, command.admission);
-        if constexpr (HOST_PROFILE) {
-            command.host_telemetry->scope_setup_ns =
-                host_elapsed_ns(scope_started);
-        }
+    auto capture_checkpoint = [&]() {
+        if (command_checkpoint.has_value())
+            return;
         std::chrono::steady_clock::time_point
             checkpoint_started{};
         if constexpr (HOST_PROFILE) {
@@ -9475,6 +9616,21 @@ static PrivateCoreResult execute_private_core_command_body(
             command.host_telemetry->
                 checkpoint_capture_ns =
                 host_elapsed_ns(checkpoint_started);
+        }
+    };
+
+    try {
+        std::chrono::steady_clock::time_point
+            scope_started{};
+        if constexpr (HOST_PROFILE) {
+            scope_started =
+                std::chrono::steady_clock::now();
+        }
+        PrivateCoreExecutionScope execution_scope(
+            core, command.admission);
+        if constexpr (HOST_PROFILE) {
+            command.host_telemetry->scope_setup_ns =
+                host_elapsed_ns(scope_started);
         }
 
         if (
@@ -9534,15 +9690,23 @@ static PrivateCoreResult execute_private_core_command_body(
                 break;
             }
 
-            if constexpr (HOST_PROFILE) {
-                host_saturating_increment(
-                    command.host_telemetry->
-                        classification_calls);
-            }
-            const PrivateInstructionDisposition
+            PrivateInstructionDisposition disposition =
+                PrivateInstructionDisposition::
+                    EXECUTE_PRIVATE;
+            if (
+                step_index != 0 ||
+                !command
+                    .first_instruction_preclassified_private
+            ) {
+                if constexpr (HOST_PROFILE) {
+                    host_saturating_increment(
+                        command.host_telemetry->
+                            classification_calls);
+                }
                 disposition =
                     classify_private_core_instruction(
                         core);
+            }
             if (
                 disposition ==
                 PrivateInstructionDisposition::
@@ -9564,6 +9728,10 @@ static PrivateCoreResult execute_private_core_command_body(
                 break;
             }
 
+            // Everything above is validation or read-only classification.
+            // Preserve whole-command rollback by taking the full checkpoint
+            // immediately before the first admitted guest mutation.
+            capture_checkpoint();
             try {
                 const int cycles =
                     step_one(core, callbacks);
@@ -11862,6 +12030,7 @@ static uint64_t run_strict_cycle_private_prefix(
                         1,
                         -1,
                         true,
+                        false,
                         nullptr,
                         nullptr,
                     });
@@ -12619,13 +12788,23 @@ execute_private_core_wave_under_active_batch(
 
     const bool host_profile_enabled =
         system.concurrency_profile_batch_active;
-    std::vector<PrivateCoreHostTelemetry>
-        command_telemetry;
-    if (host_profile_enabled) {
-        command_telemetry.resize(commands.size());
-    }
+    const bool frontier_fast_path_enabled =
+        frontier_admission != nullptr;
 
     CPUState* inline_core = nullptr;
+    std::array<bool, PRIVATE_WORKER_MAX_LANES>
+        seen_lanes{};
+    std::vector<int> seen_cores;
+    seen_cores.reserve(commands.size());
+    if (
+        frontier_fast_path_enabled &&
+        commands.size() >
+            static_cast<std::size_t>(
+                system.configured_worker_count)
+    ) {
+        throw std::invalid_argument(
+            "a private wave cannot contain more commands than lanes");
+    }
     for (
         std::size_t command_index = 0;
         command_index < commands.size();
@@ -12642,16 +12821,49 @@ execute_private_core_wave_under_active_batch(
             throw std::out_of_range(
                 "private command execution-core index is out of range");
         }
+        if (frontier_fast_path_enabled) {
+            if (
+                command.lane_index < 0 ||
+                command.lane_index >=
+                    system.configured_worker_count
+            ) {
+                throw std::out_of_range(
+                    "private command lane index is out of range");
+            }
+            const std::size_t lane =
+                static_cast<std::size_t>(
+                    command.lane_index);
+            if (seen_lanes[lane]) {
+                throw std::invalid_argument(
+                    "a private wave cannot submit two commands "
+                    "to one lane");
+            }
+            if (command.max_steps < 0) {
+                throw std::invalid_argument(
+                    "private command step budget cannot be negative");
+            }
+            if (
+                std::find(
+                    seen_cores.begin(),
+                    seen_cores.end(),
+                    command.core_index) !=
+                seen_cores.end()
+            ) {
+                throw std::invalid_argument(
+                    "a private wave cannot execute one core twice");
+            }
+            seen_lanes[lane] = true;
+            seen_cores.push_back(
+                command.core_index);
+        }
         command.core = system.execution_cores[
             static_cast<std::size_t>(
                 command.core_index)];
+        command.submission_index =
+            command_index;
         command.pending_interrupt_vector =
             pending_enabled_core_interrupt(
                 system, *command.core);
-        command.host_telemetry =
-            host_profile_enabled
-            ? &command_telemetry[command_index]
-            : nullptr;
         if (command.lane_index == 0)
             inline_core = command.core;
     }
@@ -12691,17 +12903,149 @@ execute_private_core_wave_under_active_batch(
 
     system.mappings_sealed = true;
 
+    std::vector<PrivateCoreResult> results(
+        commands.size());
+    std::vector<std::size_t>
+        worker_result_positions;
+    worker_result_positions.reserve(
+        commands.size());
+    std::vector<PrivateCoreCommand>
+        worker_commands;
+    worker_commands.reserve(commands.size());
+
+    if (frontier_fast_path_enabled) {
+        uint64_t classification_calls = 0;
+        uint64_t preclassification_commands = 0;
+        uint64_t bypassed_commands = 0;
+        std::array<
+            uint64_t,
+            PRIVATE_CORE_STOP_REASON_COUNT>
+            bypass_stop_reasons{};
+        const auto preclassification_started =
+            host_profile_enabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
+        {
+            py::gil_scoped_release release;
+            for (
+                std::size_t index = 0;
+                index < commands.size();
+                index++
+            ) {
+                if (
+                    commands[index].core->profile !=
+                        CoreProfile::FULL
+                ) {
+                    worker_result_positions.push_back(
+                        index);
+                    worker_commands.push_back(
+                        std::move(commands[index]));
+                    continue;
+                }
+                preclassification_commands++;
+                FrontierPrivatePreclassification
+                    probe =
+                        preclassify_frontier_private_command(
+                            commands[index]);
+                if (probe.classified_instruction)
+                    classification_calls++;
+                if (probe.execute_private) {
+                    commands[index]
+                        .first_instruction_preclassified_private =
+                            true;
+                    worker_result_positions.push_back(
+                        index);
+                    worker_commands.push_back(
+                        std::move(commands[index]));
+                    continue;
+                }
+
+                bypassed_commands++;
+                const std::size_t reason =
+                    static_cast<std::size_t>(
+                        probe.result.stop_reason);
+                if (reason < bypass_stop_reasons.size())
+                    bypass_stop_reasons[reason]++;
+                results[index] =
+                    std::move(probe.result);
+            }
+        }
+        if (host_profile_enabled) {
+            ConcurrencyProfileCounters& profile =
+                system.concurrency_profile;
+            host_saturating_increment(
+                profile.frontier_routing_waves);
+            host_saturating_add(
+                profile.frontier_routing_commands,
+                static_cast<uint64_t>(
+                    commands.size()));
+            host_saturating_add(
+                profile.frontier_preclassification_commands,
+                preclassification_commands);
+            host_saturating_add(
+                profile.frontier_preclassification_calls,
+                classification_calls);
+            host_saturating_add(
+                profile.worker_bypassed_commands,
+                bypassed_commands);
+            for (
+                std::size_t reason = 0;
+                reason < bypass_stop_reasons.size();
+                reason++
+            ) {
+                host_saturating_add(
+                    profile
+                        .worker_bypass_stop_reasons[
+                            reason],
+                    bypass_stop_reasons[reason]);
+            }
+            host_saturating_add(
+                profile.frontier_fast_path_ns,
+                host_elapsed_ns(
+                    preclassification_started));
+        }
+    } else {
+        for (
+            std::size_t index = 0;
+            index < commands.size();
+            index++
+        ) {
+            worker_result_positions.push_back(
+                index);
+            worker_commands.push_back(
+                std::move(commands[index]));
+        }
+    }
+
+    if (worker_commands.empty())
+        return results;
+
+    std::vector<PrivateCoreHostTelemetry>
+        command_telemetry;
+    if (host_profile_enabled) {
+        command_telemetry.resize(
+            worker_commands.size());
+        for (
+            std::size_t index = 0;
+            index < worker_commands.size();
+            index++
+        ) {
+            worker_commands[index].host_telemetry =
+                &command_telemetry[index];
+        }
+    }
+
     WorkerWaveHostTiming wave_timing;
     const auto wave_started =
         host_profile_enabled
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    std::vector<PrivateCoreResult> results;
+    std::vector<PrivateCoreResult> worker_results;
     {
         py::gil_scoped_release release;
-        results =
+        worker_results =
             system.worker_pool->execute_wave(
-                std::move(commands),
+                std::move(worker_commands),
                 host_profile_enabled
                 ? &wave_timing
                 : nullptr);
@@ -12709,10 +13053,26 @@ execute_private_core_wave_under_active_batch(
     if (host_profile_enabled) {
         record_private_wave_profile(
             system,
-            results,
+            worker_results,
             command_telemetry,
             wave_timing,
             host_elapsed_ns(wave_started));
+    }
+    if (
+        worker_results.size() !=
+            worker_result_positions.size()
+    ) {
+        throw std::logic_error(
+            "private worker returned an incomplete fast-path wave");
+    }
+    for (
+        std::size_t index = 0;
+        index < worker_results.size();
+        index++
+    ) {
+        results[
+            worker_result_positions[index]] =
+                std::move(worker_results[index]);
     }
     return results;
 }
@@ -15126,6 +15486,7 @@ static py::dict concurrency_profile_snapshot_dict(
     const ConcurrencyProfileCounters& profile =
         system.concurrency_profile;
     py::dict private_stop_reasons;
+    py::dict worker_bypass_stop_reasons;
     py::dict coordinator_boundary_origins;
     py::dict coordinator_boundary_origin_ns;
     for (
@@ -15139,6 +15500,9 @@ static py::dict concurrency_profile_snapshot_dict(
                     index));
         private_stop_reasons[name] =
             profile.private_stop_reasons[index];
+        worker_bypass_stop_reasons[name] =
+            profile.worker_bypass_stop_reasons[
+                index];
         coordinator_boundary_origins[name] =
             profile.coordinator_boundary_origins[
                 index];
@@ -15179,6 +15543,16 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.worker_waves;
     counts["worker_commands"] =
         profile.worker_commands;
+    counts["frontier_routing_waves"] =
+        profile.frontier_routing_waves;
+    counts["frontier_routing_commands"] =
+        profile.frontier_routing_commands;
+    counts["frontier_preclassification_commands"] =
+        profile.frontier_preclassification_commands;
+    counts["frontier_preclassification_calls"] =
+        profile.frontier_preclassification_calls;
+    counts["worker_bypassed_commands"] =
+        profile.worker_bypassed_commands;
     counts["private_steps"] =
         profile.private_steps;
     counts["private_classification_calls"] =
@@ -15195,6 +15569,9 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.settle_round_calls;
     counts["private_stop_reasons"] =
         std::move(private_stop_reasons);
+    counts["worker_bypass_stop_reasons"] =
+        std::move(
+            worker_bypass_stop_reasons);
     counts["coordinator_boundary_origins"] =
         std::move(
             coordinator_boundary_origins);
@@ -15222,6 +15599,8 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.worker_wave_wait_ns;
     wall_ns["worker_wave_gather"] =
         profile.worker_wave_gather_ns;
+    wall_ns["frontier_fast_path"] =
+        profile.frontier_fast_path_ns;
     wall_ns["private_command_sum"] =
         profile.private_command_sum_ns;
     wall_ns["private_command_max"] =
@@ -15241,7 +15620,7 @@ static py::dict concurrency_profile_snapshot_dict(
             coordinator_boundary_origin_ns);
 
     py::dict result;
-    result["schema_version"] = 1;
+    result["schema_version"] = 2;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =

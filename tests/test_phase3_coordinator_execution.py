@@ -205,11 +205,11 @@ def test_complete_logical_frontier_is_lane_width_independent() -> None:
             (2, SYSINFO_SINK, 0x42),
         ),
     )
-    assert observed[1][1] == (8, (8,), (4,))
-    assert observed[2][1] == (4, (4, 4), (2, 2))
+    assert observed[1][1] == (4, (4,), (4,))
+    assert observed[2][1] == (2, (2, 2), (2, 2))
     assert observed[4][1] == (
-        2,
-        (2, 2, 2, 2),
+        1,
+        (1, 1, 1, 1),
         (1, 1, 1, 1),
     )
 
@@ -493,6 +493,121 @@ def test_callback_failure_preserves_the_complete_private_frontier() -> None:
         0,
         (0, 1),
     )
+
+
+def _immediate_boundary_failure_signature(
+    worker_count: int,
+) -> tuple:
+    system = _system(
+        num_cores=3,
+        worker_count=worker_count,
+    )
+    addresses = (0, 0x40, 0x80)
+    immediate = assemble("out1")
+    private_prefix = assemble(
+        "inc r4\nmul r5, r6\nmul r7, r8"
+    )
+    programs = (
+        immediate,
+        immediate,
+        private_prefix + immediate,
+    )
+    for address, program in zip(
+        addresses, programs, strict=True
+    ):
+        system.load_binary(address, program)
+    system.boot(entry=0)
+    for cpu, address, program in zip(
+        system.cores,
+        addresses,
+        programs,
+        strict=True,
+    ):
+        cpu.pc = address
+        cpu.regs[2] = 0x300
+        cpu.regs[4] = 0
+        cpu.regs[5] = 2
+        cpu.regs[6] = 3
+        cpu.regs[7] = 4
+        cpu.regs[8] = 5
+        _prime_instruction_cache(
+            (cpu._cs,),
+            system.cpu.mem,
+            address,
+            len(program),
+        )
+    system.cpu.mem[0x300] = 0xA5
+
+    callback_trace = []
+    failure = RuntimeError(
+        "immediate boundary callback failure oracle"
+    )
+
+    system.cores[0].on_output = (
+        lambda _port, _value:
+        callback_trace.append(0)
+    )
+
+    def fail_second(_port, _value):
+        callback_trace.append(1)
+        raise failure
+
+    system.cores[1].on_output = fail_second
+    system.cores[2].on_output = (
+        lambda _port, _value:
+        callback_trace.append(2)
+    )
+
+    diagnostics_before = dict(
+        system._native_system._private_worker_diagnostics()
+    )
+    with pytest.raises(RuntimeError) as raised:
+        system.run_batch_stats(12)
+    diagnostics_after = dict(
+        system._native_system._private_worker_diagnostics()
+    )
+
+    assert raised.value is failure
+    return (
+        tuple(cpu.regs[4] for cpu in system.cores),
+        tuple(cpu.regs[5] for cpu in system.cores),
+        tuple(cpu.regs[7] for cpu in system.cores),
+        tuple(cpu.pc for cpu in system.cores),
+        tuple(cpu.cycle_count for cpu in system.cores),
+        system._native_system.system_cycles,
+        system._scheduler_cursor,
+        tuple(callback_trace),
+        addresses[2] + len(private_prefix),
+        (
+            diagnostics_after["wave_epoch"]
+            - diagnostics_before["wave_epoch"]
+        ),
+        (
+            diagnostics_after["next_command_sequence"]
+            - diagnostics_before["next_command_sequence"]
+        ),
+    )
+
+
+def test_immediate_boundary_bypass_retains_every_peer_private_prefix() -> None:
+    signatures = {
+        worker_count:
+            _immediate_boundary_failure_signature(
+                worker_count)
+        for worker_count in (1, 2, 4)
+    }
+
+    assert signatures[2] == signatures[1]
+    assert signatures[4] == signatures[1]
+    reference = signatures[1]
+    assert reference[0:3] == (
+        (0, 0, 1),
+        (2, 2, 6),
+        (4, 4, 20),
+    )
+    assert reference[3][2] == reference[8]
+    assert reference[7] == (0, 1)
+    assert reference[9:] == (1, 1)
 
 
 def test_exact_cycle_ceiling_does_not_mask_callback_failure() -> None:

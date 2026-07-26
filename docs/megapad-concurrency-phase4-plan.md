@@ -2,7 +2,8 @@
 
 **Started:** 2026-07-26
 
-**Status:** Element 1 of 6 complete; Element 2 not started
+**Status:** Element 1 of 6 complete; Element 2 implementation complete,
+validation and clean evidence in progress
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -34,7 +35,7 @@ current milestone, but it does not create a new element or sub-element.
 | Element | Scope | Status |
 |---|---|---|
 | 1 | Measurement and attribution | Complete |
-| 2 | Scheduler/frontier fast path | Pending |
+| 2 | Scheduler/frontier fast path | In progress |
 | 3 | Longer proven-private execution | Pending |
 | 4 | Host decode/JIT-style cache | Pending |
 | 5 | Shared/MMIO/DMA optimization | Pending |
@@ -291,6 +292,92 @@ artifact identity, sizes, hashes, and resource measurements are preserved
 above so the evidence can be reproduced without adding large generated files
 to Git.
 
+## Element 2 implementation record
+
+Element 2 targets the measured per-wave posting, sleeping, collection, and
+unnecessary rollback-copy costs without changing a logical frontier. The
+implementation is complete; its sanitizer close and clean before/after
+benchmark remain acceptance work at this snapshot.
+
+The worker protocol now publishes `POSTED` mailboxes before unlocking and
+wakes helpers only after the mutex is released. The coordinator no longer
+broadcasts an impossible `IDLE` work notification after collection. A
+mutex-protected outstanding-helper count lets only the final posted helper
+wake the sole coordinator waiter. Mailbox state, the count, and the completion
+predicate remain under the same mutex; no lock-free slot reads, timing-driven
+spins, or adaptive scheduling choice was introduced.
+
+The unbounded full-core scheduler now performs one read-only preclassification
+under the existing sub-frontier admission. A command already at an I-cache or
+shared/coordinator boundary returns an equivalent zero-progress result without
+entering the worker pool. A command whose first instruction is proven private
+carries that single-use proof to its worker, where the full command continues
+under the existing private executor. Every actual worker result is remapped to
+its original cohort position, all peer-private work is still gathered before
+the first cyclic settlement or failure selection, and bypassed work is never
+credited to a physical lane, command sequence, wave epoch, or helper thread.
+
+This shortcut is deliberately limited to unbounded full cores. Strict-cycle
+waves retain their established simultaneous one-instruction contract.
+Microcores retain worker-side coherent shared-RAM classification and cluster
+revalidation. Direct private diagnostics retain their existing public worker
+API and accounting. No admission survives into a coordinator or Python
+callback.
+
+The whole-command rollback checkpoint remains intact. Its capture is delayed
+past validation, pending-interrupt and halted/idle exits, and read-only
+classification, but occurs immediately before the first admitted
+`step_one`. An unexpected failure after any private mutation therefore still
+restores the complete command prefix; no speculative guest execution or
+partial checkpoint was introduced.
+
+Native host-profile schema 2 and benchmark report schema 10 distinguish
+frontier routing waves and commands, actual full-core preclassification,
+worker-bypassed commands and reasons, actual worker waves and commands, and
+the fast-path wall scope. Worker counters continue to reconcile exactly with
+worker-pool diagnostics. The planned-minus-actual wave count reports whole
+physical cohorts that never entered the pool instead of pretending a bypass
+used a helper lane.
+
+A dirty-tree 100,000-instruction development probe, used only to decide
+whether a larger queued-frontier rewrite was justified, produced:
+
+| Workload | Element 1 quick, 1 / 2 / 4 lanes | Element 2 development, 1 / 2 / 4 lanes |
+|---|---:|---:|
+| Private compute | 49.741 / 66.200 / 73.862 | 47.66 / 59.07 / 94.09 |
+| Shared memory | 1.753 / 0.680 / 0.610 | 1.94 / 1.12 / 1.32 |
+| MMIO poll | 1.096 / 0.501 / 0.545 | 1.14 / 0.76 / 0.94 |
+
+These one-repeat rates are not milestone evidence. They do show a sufficiently
+large target-workload improvement to stop before the higher-risk queued
+frontier, generation/spin, or cross-frontier designs. In the profiled replay,
+shared and MMIO routing each contained 40,100 commands; 20,100 were
+coordinator-bypassed and 20,000 entered workers. Actual pool waves fell from
+the Element 1 counts of 40,100 / 20,050 / 10,025 to
+20,000 / 10,000 / 5,000 at one/two/four lanes. Checkpoint captures fell from
+40,100 to 20,000. Shared worker-wait time fell from
+0.856 / 80.143 / 70.255 milliseconds to approximately
+0.416 / 40.576 / 23.632 milliseconds; MMIO wait fell from
+0.901 / 80.972 / 74.368 to approximately
+0.455 / 43.371 / 28.320 milliseconds.
+
+The preliminary sequential oracle selection has 117 passing tests. It covers
+the complete logical frontier, equal QoS, cyclic commits, callback-failure
+prefixes, reduced-core arbitration, direct private execution, worker
+lifecycle, profile reconciliation, and report schema. New fixtures preserve a
+later peer's private prefix across an earlier immediate-boundary callback
+failure at every lane width and exercise 500 alternating partial-helper
+reposts. Two independent read-only audits found no race, lost wakeup,
+deadlock, checkpoint-containment, ordering, lifetime, capacity, schema, or
+reconciliation blocker.
+
+The focused sanitizer close is also complete. ASan/UBSan selected 13
+immediate-boundary, checkpoint, complete-frontier, partial-repost, and profile
+tests; all passed in 68.90 seconds at 2,307,656 KiB peak with no sanitizer
+finding or swap. The same 13 tests passed under TSan in 36.73 seconds at
+1,837,472 KiB peak with no race report or swap. The affected ordinary
+selection and both sanitizer runs were foreground and sequential.
+
 ## Design-contention ledger
 
 This ledger contains only decisions already required by Phase 4 work. New
@@ -301,6 +388,8 @@ speculatively.
 |---|---|---|---|
 | P4-D1 | Profiling can itself perturb host execution, and exposing its state through architectural serialization or scheduling would make diagnostics guest-visible. | Instrumentation is host-only, opt-in, disabled for timed samples, and excluded from architectural state, snapshots, canonical hashes, replay, public accounting, virtual time, stop selection, and scheduling decisions. A separate profiled replay supplies attribution evidence. | Profile timings are diagnostic host observations, not architecture or a causal proof. Reopen the counter set or measurement method when it cannot distinguish a demonstrated cost, but never silently broaden profiling into guest-visible state. |
 | P4-D2 | A single universal speedup threshold would reward only favorable workloads and could conceal regressions or equivalence failures elsewhere. | Require exact architectural equivalence, then judge benefit with workload-specific before/after measurements. No universal performance threshold is imposed. | A change may be retained only with an honestly stated, reproducible benefit and disclosed tradeoffs across affected workloads. Exact equivalence is mandatory regardless of speed; changing an architectural oracle requires a separately approved architecture decision, not a performance exemption. |
+| P4-D3 | Skipping a worker for an immediate boundary can save the dominant protocol cost, but an early coordinator commit or failure could expose an incomplete peer-private frontier. Runtime-adaptive routing could also let host timing influence behavior. | Preclassify only unbounded full-core commands under the retained logical-frontier admission. Synthesize only proven zero-progress results, gather every remaining worker result, preserve original cohort position and global cyclic settlement, and keep the choice independent of timing, helper readiness, or completion order. Report bypasses separately from physical worker work. | The claim covers the existing read-only full-core classifier and zero-progress interrupt, halted/idle, I-cache, and shared boundaries only. Strict-cycle, microcore, speculative execution, cross-frontier fusion, and callback settlement remain unchanged. Revisit complete-frontier lane queues only if later measurements show this bounded fast path insufficient. |
+| P4-D4 | Copying a complete CPU checkpoint for a command that exits before its first private instruction is wasted work, but moving capture past guest mutation would weaken whole-command failure containment. | Perform validation and read-only first-instruction classification before capture, then take the unchanged full checkpoint immediately before the first admitted guest `step_one` and retain it until command completion. | This removes checkpoints only from zero-mutation exits. It does not authorize partial checkpoints, checkpoint deletion for progressing commands, or mutation followed by speculative rollback. Reopen only with an injectable failure oracle that proves an equally strong containment boundary. |
 
 Changes to these decisions must update this ledger and the corresponding
 evidence in the same milestone. A green test suite or faster benchmark alone

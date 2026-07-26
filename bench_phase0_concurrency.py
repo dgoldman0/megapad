@@ -91,7 +91,7 @@ from system import MegapadSystem, VRAM_BASE
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.phase0-concurrency-baseline"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 STATE_SCHEMA = "megapad.phase0-canonical-state"
 STATE_SCHEMA_VERSION = 9
 
@@ -2557,6 +2557,11 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "round_absorptions",
     "worker_waves",
     "worker_commands",
+    "frontier_routing_waves",
+    "frontier_routing_commands",
+    "frontier_preclassification_commands",
+    "frontier_preclassification_calls",
+    "worker_bypassed_commands",
     "private_steps",
     "private_classification_calls",
     "zero_step_commands",
@@ -2568,6 +2573,7 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
 
 _CONCURRENCY_PROFILE_COUNT_MAP_FIELDS = (
     "private_stop_reasons",
+    "worker_bypass_stop_reasons",
     "coordinator_boundary_origins",
 )
 
@@ -2586,6 +2592,7 @@ _CONCURRENCY_PROFILE_WALL_FIELDS = (
     "worker_wave_prepare",
     "worker_wave_wait",
     "worker_wave_gather",
+    "frontier_fast_path",
     "private_command_sum",
     "private_command_max",
     "private_scope_setup",
@@ -2706,14 +2713,29 @@ def _host_profile_probe(
     stop_reason_total = sum(
         native_counts["private_stop_reasons"].values()
     )
+    bypass_stop_reason_total = sum(
+        native_counts["worker_bypass_stop_reasons"].values()
+    )
     boundary_origin_total = sum(
         native_counts["coordinator_boundary_origins"].values()
     )
     worker_count = int(accounting["worker_count"])
+    logical_private_commands = (
+        native_counts["worker_commands"]
+        + native_counts["worker_bypassed_commands"]
+    )
+    logical_zero_step_commands = (
+        native_counts["zero_step_commands"]
+        + native_counts["worker_bypassed_commands"]
+    )
+    total_classification_calls = (
+        native_counts["private_classification_calls"]
+        + native_counts["frontier_preclassification_calls"]
+    )
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 1,
+            native_snapshot["schema_version"] == 2,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -2744,6 +2766,23 @@ def _host_profile_probe(
             native_counts["worker_waves"] == worker["wave_epochs"],
         "worker_commands_match_worker_diagnostics":
             native_counts["worker_commands"] == worker["command_sequences"],
+        "frontier_routing_matches_logical_commands": (
+            native_counts["frontier_routing_commands"]
+            == logical_private_commands
+        ),
+        "worker_waves_within_frontier_routing": (
+            0 <= native_counts["worker_waves"]
+            <= native_counts["frontier_routing_waves"]
+        ),
+        "frontier_preclassification_within_routing": (
+            0
+            <= native_counts["frontier_preclassification_commands"]
+            <= native_counts["frontier_routing_commands"]
+        ),
+        "worker_bypass_reasons_match_bypassed_commands": (
+            bypass_stop_reason_total
+            == native_counts["worker_bypassed_commands"]
+        ),
         "private_steps_match_worker_diagnostics":
             native_counts["private_steps"] == sum(worker_lane_steps),
         "native_lane_arrays_match_worker_count": (
@@ -2771,11 +2810,30 @@ def _host_profile_probe(
             + native_counts["batches"]
         ),
         "classification_covers_private_steps":
-            native_counts["private_classification_calls"]
+            total_classification_calls
             >= native_counts["private_steps"],
+        "frontier_classifications_within_preclassification": (
+            0
+            <= native_counts["frontier_preclassification_calls"]
+            <= native_counts["frontier_preclassification_commands"]
+        ),
         "zero_step_commands_within_worker_commands": (
             0 <= native_counts["zero_step_commands"]
             <= native_counts["worker_commands"]
+        ),
+        "checkpoints_cover_progressing_worker_commands": (
+            native_counts["worker_commands"]
+            - native_counts["zero_step_commands"]
+            <= native_counts["checkpoint_captures"]
+            <= native_counts["worker_commands"]
+        ),
+        "checkpoint_restores_within_captures": (
+            0 <= native_counts["checkpoint_restores"]
+            <= native_counts["checkpoint_captures"]
+        ),
+        "bypassed_commands_within_preclassification": (
+            0 <= native_counts["worker_bypassed_commands"]
+            <= native_counts["frontier_preclassification_commands"]
         ),
         "python_mmio_reads_match_accounting":
             python_callbacks["mmio_read_calls"] == accounting_mmio_reads,
@@ -2812,7 +2870,7 @@ def _host_profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 1,
+        "schema_version": 2,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,
@@ -2822,17 +2880,30 @@ def _host_profile_probe(
                 native_counts["worker_commands"],
                 native_counts["worker_waves"],
             ),
+            "worker_wave_bypass_fraction": _optional_ratio(
+                native_counts["frontier_routing_waves"]
+                - native_counts["worker_waves"],
+                native_counts["frontier_routing_waves"],
+            ),
             "private_steps_per_worker_command": _optional_ratio(
                 native_counts["private_steps"],
                 native_counts["worker_commands"],
             ),
+            "private_steps_per_logical_command": _optional_ratio(
+                native_counts["private_steps"],
+                logical_private_commands,
+            ),
             "classification_calls_per_private_step": _optional_ratio(
-                native_counts["private_classification_calls"],
+                total_classification_calls,
                 native_counts["private_steps"],
             ),
             "zero_step_command_fraction": _optional_ratio(
-                native_counts["zero_step_commands"],
-                native_counts["worker_commands"],
+                logical_zero_step_commands,
+                logical_private_commands,
+            ),
+            "worker_bypass_fraction": _optional_ratio(
+                native_counts["worker_bypassed_commands"],
+                logical_private_commands,
             ),
             "returned_instructions_per_logical_subfrontier": _optional_ratio(
                 returned_instructions,
