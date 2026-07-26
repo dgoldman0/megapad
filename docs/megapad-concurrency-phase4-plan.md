@@ -2,8 +2,7 @@
 
 **Started:** 2026-07-26
 
-**Status:** Elements 1 and 2 of 6 complete; Element 3 implementation and
-validation in progress
+**Status:** Elements 1 through 3 of 6 complete; Element 4 not started
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
@@ -36,7 +35,7 @@ current milestone, but it does not create a new element or sub-element.
 |---|---|---|
 | 1 | Measurement and attribution | Complete |
 | 2 | Scheduler/frontier fast path | Complete |
-| 3 | Longer proven-private execution | In progress |
+| 3 | Longer proven-private execution | Complete |
 | 4 | Host decode/JIT-style cache | Pending |
 | 5 | Shared/MMIO/DMA optimization | Pending |
 | 6 | System closure/final validation/handoff | Pending |
@@ -582,8 +581,60 @@ TSan in 0.24 seconds with no race report; its command takes 39.28 seconds at
 1,837,660 KiB peak with no swap. All ordinary and sanitizer tests ran
 foreground and sequentially.
 
-The implementation is ready to commit. A clean post-change benchmark and
-before/after evidence commit remain before Element 3 is complete.
+The implementation is committed at
+`42c2d1f20cd66c2e573217ee67a3aa6fb40453e5`. The worktree and repository
+provenance were clean before the matched after-report was captured.
+
+### Element 3 clean comparison
+
+The after-report uses the exact schema-5 harness and parameters recorded for
+the corrected baseline. It was generated at
+`2026-07-26T21:15:38.157511+00:00` from clean implementation revision
+`42c2d1f20cd66c2e573217ee67a3aa6fb40453e5`.
+
+The 243,549-byte after JSON has SHA-256
+`fe69655ef1aaf975b05ab565318e71cdc5a225d289fcfc2e4fbcdf1ba73edfda`.
+Its 2,195,768-byte native artifact has SHA-256
+`a7ec7abd68cdb13b985503c041a0bcde808827d3fdccdc656e8f900782d1bb20`
+and ELF build ID `3ba3c7b629a26f93b460bf0f34f61de84276cfb8`. The complete
+after-report command takes 0.63 seconds, peaks at 29,732 KiB, and uses no
+swap.
+
+Every before and after report-level, worker-level, host-profile,
+timing-hygiene, and cross-lane validation is true. Canonical state, behavior,
+and ordered public-accounting hashes match before/after and across all lane
+widths:
+
+- canonical state:
+  `acefb4be60d898244b47d2a9254fd8a7405593e6c6014843d1ea2f8f1c036e5a`
+- behavior oracle:
+  `4882f2009791627b60bf1039bb9a53de2c2512931a97fa0b31599f6723e70501`
+- ordered public accounting:
+  `2bc0689dd18e20a33870e568d5661133f8ea14a22d39971c880e4c5bc4a8d807`
+
+Median unprofiled throughput is:
+
+| Host lanes | Before MIPS | After MIPS | Factor | Change |
+|---:|---:|---:|---:|---:|
+| 1 | 0.498 | 20.711 | 41.6x | +4,057% |
+| 2 | 0.317 | 20.058 | 63.3x | +6,229% |
+| 4 | 0.231 | 19.565 | 84.6x | +8,358% |
+
+Every width still performs 500 scheduler rounds and 500,000 per-instruction
+private classifications. Logical subfrontiers, worker commands, worker waves,
+and checkpoint captures each fall from 500,000 to 500: one bounded
+1,000-instruction command per round. The optimization therefore removes
+99.9% of the synchronous handoffs and full checkpoints without weakening
+per-instruction boundary classification.
+
+This is a narrow single-runnable-microcore result, not a multicore scaling
+claim. The higher configured lane counts have idle helpers on this workload;
+their much larger factors reflect removal of the old per-instruction pool
+protocol penalty. The generated before/after reports remain ignored, while
+their source revisions, artifact identities, report hashes, parameters, and
+resource measurements are durable above.
+
+Element 3 is complete. Element 4 begins from this evidence snapshot.
 
 ## Design-contention ledger
 
