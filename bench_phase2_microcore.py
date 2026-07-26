@@ -17,6 +17,7 @@ replay. Timed samples remain unprofiled.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import platform
@@ -35,7 +36,7 @@ from system import MegapadSystem
 
 
 REPORT_SCHEMA = "megapad.phase2-single-active-microcore-baseline"
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 STATE_SCHEMA = "megapad.phase2-single-active-microcore-state"
 STATE_SCHEMA_VERSION = 3
 
@@ -318,15 +319,36 @@ def _profile_probe(
     counts = normalized["counts"]
     lane_commands = counts["lane_commands"]
     lane_steps = counts["lane_steps"]
+    private_stop_reason_total = sum(
+        counts["private_stop_reasons"].values()
+    )
+    bypass_stop_reason_total = sum(
+        counts["worker_bypass_stop_reasons"].values()
+    )
+    coordinator_origin_total = sum(
+        counts["coordinator_boundary_origins"].values()
+    )
     validation = {
         "schema_is_version_2":
             normalized["schema_version"] == 2,
         "profile_is_frozen": not normalized["enabled"],
+        "profile_generation_is_positive":
+            normalized["generation"] > 0,
         "architectural_hash_scope_is_host_only":
             normalized["architectural_hash_scope"]
             == "excluded_host_only",
+        "measurement_scope_is_unbounded_batch_only": (
+            normalized["measurement_scope"]
+            == "unbounded_native_system_batch_only"
+        ),
+        "timers_are_inclusive_nested_wall_time": (
+            normalized["timing_semantics"]
+            == "inclusive_nested_host_wall_nanoseconds"
+        ),
         "one_native_batch":
             counts["batches"] == 1,
+        "prepare_batch_calls_match_batches":
+            counts["prepare_batch_calls"] == counts["batches"],
         "rounds_match_public_accounting":
             counts["scheduler_rounds"]
             == int(stats.native_rounds),
@@ -337,6 +359,10 @@ def _profile_probe(
             counts["frontier_routing_commands"]
             == counts["worker_commands"]
             + counts["worker_bypassed_commands"]
+        ),
+        "worker_waves_within_routing_waves": (
+            0 <= counts["worker_waves"]
+            <= counts["frontier_routing_waves"]
         ),
         "worker_commands_match_lanes":
             counts["worker_commands"] == sum(lane_commands),
@@ -352,8 +378,23 @@ def _profile_probe(
             == counts["worker_commands"]
             - counts["zero_step_commands"]
         ),
+        "checkpoint_restores_within_captures": (
+            0 <= counts["checkpoint_restores"]
+            <= counts["checkpoint_captures"]
+        ),
         "no_checkpoint_restore":
             counts["checkpoint_restores"] == 0,
+        "private_stop_reasons_match_worker_commands": (
+            private_stop_reason_total == counts["worker_commands"]
+        ),
+        "bypass_stop_reasons_match_bypassed_commands": (
+            bypass_stop_reason_total
+            == counts["worker_bypassed_commands"]
+        ),
+        "coordinator_origins_match_boundaries": (
+            coordinator_origin_total
+            == counts["coordinator_boundaries"]
+        ),
         "no_coordinator_boundary":
             counts["coordinator_boundaries"] == 0,
         "lane_arrays_match_worker_count": (
@@ -532,65 +573,113 @@ def run_sample(
             "a profiled replay cannot be used for throughput"
         )
 
-    system, micro = _build_workload(
-        worker_count=worker_count,
-    )
-    owner = system._native_system
-    native_batch_runs_before = int(owner.native_batch_runs)
-    native_dispatches_before = int(owner.native_dispatches)
-
-    if host_profile:
-        owner._start_concurrency_profile()
-    wall_start = time.perf_counter()
-    process_start = time.process_time()
+    system = None
+    micro = None
+    owner = None
+    stats = None
+    profile_snapshot = None
+    sample = None
+    gc_enabled_before = gc.isenabled()
     try:
-        stats = system.run_batch_stats(instruction_budget)
-    except BaseException:
-        if (
-            host_profile and
-            dict(owner._concurrency_profile_snapshot())["enabled"]
-        ):
-            owner._stop_concurrency_profile()
-        raise
-    process_time_s = time.process_time() - process_start
-    wall_time_s = time.perf_counter() - wall_start
-    profile_snapshot = (
-        dict(owner._stop_concurrency_profile())
-        if host_profile
-        else None
-    )
-
-    observation = _observe(
-        system,
-        micro,
-        stats,
-        instruction_budget=instruction_budget,
-        native_batch_runs_before=native_batch_runs_before,
-        native_dispatches_before=native_dispatches_before,
-    )
-    sample = {
-        "worker_count": worker_count,
-        "host_execution_lanes": worker_count,
-        "auxiliary_worker_count": worker_count - 1,
-        "used_for_throughput": used_for_throughput,
-        "wall_time_s": wall_time_s,
-        "process_cpu_time_s": process_time_s,
-        "selected_microcore_instructions_per_s": (
-            stats.instructions_executed / wall_time_s
-            if wall_time_s
-            else None
-        ),
-        "observation": observation,
-    }
-    sample["host_profile_probe"] = (
-        None
-        if profile_snapshot is None
-        else _profile_probe(
-            profile_snapshot,
-            stats=stats,
+        system, micro = _build_workload(
             worker_count=worker_count,
         )
-    )
+        owner = system._native_system
+        collected_before_timing = gc.collect()
+        native_batch_runs_before = int(owner.native_batch_runs)
+        native_dispatches_before = int(owner.native_dispatches)
+
+        if host_profile:
+            owner._start_concurrency_profile()
+        if gc_enabled_before:
+            gc.disable()
+        gc_enabled_during_timing = gc.isenabled()
+        try:
+            wall_start = time.perf_counter()
+            process_start = time.process_time()
+            stats = system.run_batch_stats(instruction_budget)
+            process_time_s = time.process_time() - process_start
+            wall_time_s = time.perf_counter() - wall_start
+        except BaseException:
+            if (
+                host_profile and
+                dict(owner._concurrency_profile_snapshot())["enabled"]
+            ):
+                owner._stop_concurrency_profile()
+            raise
+        finally:
+            if gc.isenabled() != gc_enabled_before:
+                if gc_enabled_before:
+                    gc.enable()
+                else:
+                    gc.disable()
+        gc_restored_to_prior_state = (
+            gc.isenabled() == gc_enabled_before
+        )
+        profile_snapshot = (
+            dict(owner._stop_concurrency_profile())
+            if host_profile
+            else None
+        )
+
+        observation = _observe(
+            system,
+            micro,
+            stats=stats,
+            instruction_budget=instruction_budget,
+            native_batch_runs_before=native_batch_runs_before,
+            native_dispatches_before=native_dispatches_before,
+        )
+        sample = {
+            "worker_count": worker_count,
+            "host_execution_lanes": worker_count,
+            "auxiliary_worker_count": worker_count - 1,
+            "used_for_throughput": used_for_throughput,
+            "wall_time_s": wall_time_s,
+            "process_cpu_time_s": process_time_s,
+            "selected_microcore_instructions_per_s": (
+                stats.instructions_executed / wall_time_s
+                if wall_time_s
+                else None
+            ),
+            "timing_hygiene": {
+                "collected_objects_before_timing":
+                    collected_before_timing,
+                "gc_enabled_before_timing_setup":
+                    gc_enabled_before,
+                "gc_enabled_during_timing":
+                    gc_enabled_during_timing,
+                "gc_restored_to_prior_state":
+                    gc_restored_to_prior_state,
+                "collected_objects_after_sample": None,
+            },
+            "observation": observation,
+        }
+        sample["host_profile_probe"] = (
+            None
+            if profile_snapshot is None
+            else _profile_probe(
+                profile_snapshot,
+                stats=stats,
+                worker_count=worker_count,
+            )
+        )
+    finally:
+        if gc.isenabled() != gc_enabled_before:
+            if gc_enabled_before:
+                gc.enable()
+            else:
+                gc.disable()
+        system = None
+        micro = None
+        owner = None
+        stats = None
+        profile_snapshot = None
+        collected_after_sample = gc.collect()
+        if sample is not None:
+            sample["timing_hygiene"][
+                "collected_objects_after_sample"
+            ] = collected_after_sample
     return sample
 
 
@@ -647,6 +736,25 @@ def _worker_report(
             sample["host_profile_probe"] is None
             and sample["used_for_throughput"]
             for sample in samples
+        ),
+        "timed_samples_disable_gc_and_restore_state": all(
+            not sample["timing_hygiene"]["gc_enabled_during_timing"]
+            and sample["timing_hygiene"]["gc_restored_to_prior_state"]
+            and sample["timing_hygiene"][
+                "collected_objects_after_sample"
+            ] is not None
+            for sample in samples
+        ),
+        "accounting_probe_disables_gc_and_restores_state": (
+            not accounting["timing_hygiene"][
+                "gc_enabled_during_timing"
+            ]
+            and accounting["timing_hygiene"][
+                "gc_restored_to_prior_state"
+            ]
+            and accounting["timing_hygiene"][
+                "collected_objects_after_sample"
+            ] is not None
         ),
         "timed_canonical_state_deterministic":
             len(set(state_hashes)) == 1,
@@ -729,16 +837,11 @@ def run_report(
     normalized_worker_counts = list(
         dict.fromkeys(int(value) for value in worker_counts)
     )
-    if (
-        not normalized_worker_counts or
-        any(
-            value not in (1, 2, 4)
-            for value in normalized_worker_counts
-        )
-    ):
+    if set(normalized_worker_counts) != {1, 2, 4}:
         raise ValueError(
-            "worker_counts must be a nonempty subset of 1, 2, 4"
+            "worker_counts must contain exactly 1, 2, and 4"
         )
+    normalized_worker_counts = [1, 2, 4]
 
     worker_reports = [
         _worker_report(
@@ -886,17 +989,14 @@ def _worker_counts(text: str) -> list[int]:
         ]
     except ValueError as error:
         raise argparse.ArgumentTypeError(
-            "worker counts must be a comma-separated subset of 1,2,4"
+            "worker counts must contain exactly 1,2,4"
         ) from error
     values = list(dict.fromkeys(values))
-    if (
-        not values or
-        any(value not in (1, 2, 4) for value in values)
-    ):
+    if set(values) != {1, 2, 4}:
         raise argparse.ArgumentTypeError(
-            "worker counts must be a comma-separated subset of 1,2,4"
+            "worker counts must contain exactly 1,2,4"
         )
-    return values
+    return [1, 2, 4]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -914,7 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-counts",
         type=_worker_counts,
         default=[1, 2, 4],
-        help="comma-separated host lane counts (subset of 1,2,4)",
+        help="host lane counts; must contain exactly 1,2,4",
     )
     parser.add_argument("--repeats", type=_positive_int, default=3)
     parser.add_argument("--warmups", type=_nonnegative_int, default=1)

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import weakref
+from pathlib import Path
+
 import pytest
 
+import bench_phase2_microcore as microcore_benchmark
 from accel_wrapper import Megapad64Micro
 from asm import assemble
 from bench_phase2_microcore import (
@@ -183,8 +187,23 @@ def test_reduced_illegal_instruction_traps_match_python_oracle(instruction):
     assert _local_state(native) == _local_state(oracle)
 
 
-def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
+def test_single_active_microcore_benchmark_is_versioned_and_deterministic(
+    monkeypatch,
+):
     """The versioned baseline records native scheduling without peer claims."""
+    owner_refs = []
+    original_build = microcore_benchmark._build_workload
+
+    def tracked_build(*, worker_count: int):
+        system, micro = original_build(worker_count=worker_count)
+        owner_refs.append(weakref.ref(system._native_system))
+        return system, micro
+
+    monkeypatch.setattr(
+        microcore_benchmark,
+        "_build_workload",
+        tracked_build,
+    )
     report = run_report(
         instructions=9,
         worker_counts=(1, 2, 4),
@@ -197,6 +216,19 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
     assert report["schema"] == REPORT_SCHEMA
     assert report["schema_version"] == REPORT_SCHEMA_VERSION
     assert all(report["validation"].values())
+    repository = report["repository"]
+    assert Path(repository["root"]).is_dir()
+    assert len(repository["commit"]) == 40
+    int(repository["commit"], 16)
+    assert isinstance(repository["branch"], str)
+    assert isinstance(repository["dirty"], bool)
+    accelerator = report["accelerator"]
+    artifact = Path(accelerator["loaded_artifact_path"])
+    assert artifact.is_file()
+    assert accelerator["loaded_artifact_size_bytes"] == artifact.stat().st_size
+    assert len(accelerator["loaded_artifact_sha256"]) == 64
+    int(accelerator["loaded_artifact_sha256"], 16)
+    assert accelerator["elf_build_id"]
     assert report["semantics"]["native_scheduler_expected"] is True
     scope = report["semantics"]["qos_and_fairness_scope"]
     assert scope["contention_exercised"] is False
@@ -214,6 +246,13 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
             worker_report["accounting_probe"],
         ]
         for sample in samples:
+            timing_hygiene = sample["timing_hygiene"]
+            assert timing_hygiene["gc_enabled_during_timing"] is False
+            assert timing_hygiene["gc_restored_to_prior_state"] is True
+            assert (
+                timing_hygiene["collected_objects_after_sample"]
+                is not None
+            )
             observation = sample["observation"]
             assert observation["state_schema"] == STATE_SCHEMA
             assert (
@@ -289,6 +328,28 @@ def test_single_active_microcore_benchmark_is_versioned_and_deterministic():
         )
 
     assert len(hashes) == 1
+    assert owner_refs
+    assert all(owner_ref() is None for owner_ref in owner_refs)
+
+
+@pytest.mark.parametrize(
+    "worker_counts",
+    ((1,), (2, 4), (1, 2)),
+)
+def test_single_active_microcore_report_requires_all_lane_widths(
+    worker_counts: tuple[int, ...],
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="exactly 1, 2, and 4",
+    ):
+        run_report(
+            instructions=1,
+            worker_counts=worker_counts,
+            repeats=1,
+            warmups=0,
+            warmup_instructions=1,
+        )
 
 
 def test_all_advertised_cores_share_the_native_scheduler_budget():
